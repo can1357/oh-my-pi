@@ -177,6 +177,7 @@ export const mnemopiBackend: MemoryBackend = {
 		return {
 			context: preparation.context,
 			notice: preparation.notice,
+			isCurrent: () => getMnemopiSessionState(session) === state && preparation.isCurrent?.() !== false,
 			commit: () => getMnemopiSessionState(session) === state && preparation.commit(),
 		};
 	},

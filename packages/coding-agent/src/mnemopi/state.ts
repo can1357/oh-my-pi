@@ -756,13 +756,18 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 			// The note carries what it reports, so a turn that never delivers it leaves the
 			// change for the next resume to report.
 			const changes = this.#recallChanges(persisted.memories);
+			const changesKey = JSON.stringify(changes);
+			const isCurrent = () =>
+				this.#recallGeneration === generation &&
+				JSON.stringify(this.#recallChanges(persisted.memories)) === changesKey;
 			return {
 				context: persisted.text || undefined,
 				notice: changes && {
 					content: changes.content,
 					details: { scope, memories: changes.memories } satisfies MemoryRecallChangesDetails,
 				},
-				commit: () => this.#commitRecall(generation, persisted.text, undefined),
+				isCurrent,
+				commit: () => isCurrent() && this.#commitRecall(generation, persisted.text, undefined),
 			};
 		}
 		const truncated = withLoopPhase("mnemopi.recall", () => {
@@ -773,11 +778,14 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 		});
 		const recall = await this.#recallBlock(truncated, signal);
 		const record = recall && this.#deliveredRecall(recall, budget);
+		const isCurrent = () =>
+			this.#recallGeneration === generation && (!record || this.#recallChanges(record.memories) === undefined);
 		// The staged block and the transcript carry it as delivered; the session caches the
 		// full one, which every later prompt render cuts to the current budget.
 		return {
 			context: record?.text || undefined,
-			commit: () => this.#commitRecall(generation, recall?.text ?? "", record),
+			isCurrent,
+			commit: () => isCurrent() && this.#commitRecall(generation, recall?.text ?? "", record),
 		};
 	}
 

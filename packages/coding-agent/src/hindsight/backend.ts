@@ -106,6 +106,7 @@ export const hindsightBackend: MemoryBackend = {
 		if (!preparation) return undefined;
 		return {
 			context: preparation.context,
+			isCurrent: () => session.getHindsightSessionState() === state && preparation.isCurrent?.() !== false,
 			commit: () => session.getHindsightSessionState() === state && preparation.commit(),
 		};
 	},

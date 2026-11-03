@@ -51,10 +51,13 @@ async function setup(responses: MockResponseSource, ttsrManager?: TtsrManager, w
 	const manager = SessionManager.create(dir.path(), dir.join("sessions"));
 	const runtime = new ExtensionRuntime();
 	let hook: (() => Promise<void>) | undefined;
+	let policy: string[] | undefined;
 	const extension = await loadExtensionFromFactory(
 		pi => {
 			pi.on("before_agent_start", async () => {
+				const systemPrompt = policy;
 				await hook?.();
+				return systemPrompt ? { systemPrompt } : undefined;
 			});
 		},
 		dir.path(),
@@ -140,17 +143,23 @@ async function setup(responses: MockResponseSource, ttsrManager?: TtsrManager, w
 	function cancel() {
 		session.buildAskReanswerContext({} as never).abort();
 	}
-	return { session, agent, mock, manager, registry, dir, settings, gate, holdKey, holdHook, saved, cancel };
+	function setPolicy(value: string[]) {
+		policy = value;
+	}
+	return { session, agent, mock, manager, registry, dir, settings, gate, holdKey, holdHook, saved, cancel, setPolicy };
 }
 
 const payload = (content: string) => ({ customType: "review-context", content, display: false });
-async function plan(h: Awaited<ReturnType<typeof setup>>) {
-	const url = "local://review-plan.md";
+async function plan(
+	h: { manager: SessionManager; session: AgentSession },
+	url = "local://review-plan.md",
+	content = "REVIEW-APPROVED-PLAN-CONTENT",
+) {
 	const path = resolveLocalUrlToPath(url, {
 		getArtifactsDir: () => h.manager.getArtifactsDir(),
 		getSessionId: () => h.manager.getSessionId(),
 	});
-	await Bun.write(path, "# Approved plan\n\nREVIEW-APPROVED-PLAN-CONTENT\n");
+	await Bun.write(path, `# Approved plan\n\n${content}\n`);
 	h.session.setPlanReferencePath(url);
 }
 
@@ -187,6 +196,104 @@ it("does not duplicate an approved plan when hidden work claims before a prepare
 
 	expect(deliveredCopies).toBe(1);
 	expect(refs).toHaveLength(1);
+});
+
+it("delivers the current plan only after interrupt cleanup when preparation is replaced during the wait", async () => {
+	const h = await setup([]);
+	const cleanup = h.gate();
+	const onTaskAborted = h.session.goalRuntime.onTaskAborted.bind(h.session.goalRuntime);
+	h.session.goalRuntime.onTaskAborted = async options => {
+		await cleanup.wait();
+		return onTaskAborted(options);
+	};
+	try {
+		const stopping = h.session.abort({ reason: USER_INTERRUPT_LABEL });
+		await cleanup.entered;
+		await plan(h);
+		const hook = h.holdHook();
+		const client = h.session.prompt("execute the current plan after cleanup");
+		await hook.entered;
+		await plan(h, "local://replacement-plan.md", "CURRENT-PLAN-AFTER-INTERRUPT");
+		hook.release();
+		for (let tick = 0; tick < 20; tick++) {
+			const next = Promise.withResolvers<void>();
+			setImmediate(next.resolve);
+			await next.promise;
+		}
+		const requestsDuringCleanup = h.mock.calls.length;
+		cleanup.release();
+		await Promise.all([stopping, client]);
+		await h.session.waitForIdle();
+
+		expect(requestsDuringCleanup).toBe(0);
+		expect(h.mock.calls).toHaveLength(1);
+		const request = JSON.stringify(h.mock.calls[0]!.context);
+		expect(request).toContain("CURRENT-PLAN-AFTER-INTERRUPT");
+		expect(request).not.toContain("REVIEW-APPROVED-PLAN-CONTENT");
+		expect(JSON.stringify(await h.saved())).toContain("CURRENT-PLAN-AFTER-INTERRUPT");
+	} finally {
+		h.session.goalRuntime.onTaskAborted = onTaskAborted;
+		cleanup.release();
+	}
+});
+
+it("delivers the replacement approved plan at a waiting prompt's claim and persists it for later prompts", async () => {
+	const started = Promise.withResolvers<void>();
+	const h = await setup([
+		async () => {
+			started.resolve();
+			await hidden.wait();
+			return { content: ["hidden done"] };
+		},
+	]);
+	const hidden = h.gate();
+	await plan(h);
+	const hook = h.holdHook();
+	const client = h.session.prompt("execute the approved plan");
+	await hook.entered;
+	h.session.queueDeferredMessage({ ...payload("autonomous event"), role: "custom", timestamp: Date.now() });
+	await started.promise;
+	const waiting = Promise.withResolvers<void>();
+	const originalWait = h.agent.waitForIdle.bind(h.agent);
+	h.agent.waitForIdle = () => {
+		waiting.resolve();
+		return originalWait();
+	};
+	hook.release();
+	await waiting.promise;
+	const replacement = "local://replacement-plan.md";
+	await plan(h, replacement, "REPLACEMENT-APPROVED-PLAN-CONTENT");
+	h.session.setPlanModeState({ enabled: true, planFilePath: replacement });
+	h.session.setPlanModeState(undefined);
+	hidden.release();
+	await client;
+	await h.session.waitForIdle();
+	const request = JSON.stringify(h.mock.calls.at(-1)!.context);
+	await h.session.prompt("continue executing");
+	const nextRequest = JSON.stringify(h.mock.calls.at(-1)!.context);
+	const saved = JSON.stringify(await h.saved());
+	expect(request.split("REPLACEMENT-APPROVED-PLAN-CONTENT")).toHaveLength(2);
+	expect(request.split("REVIEW-APPROVED-PLAN-CONTENT")).toHaveLength(2);
+	expect(nextRequest).toContain("REPLACEMENT-APPROVED-PLAN-CONTENT");
+	expect(saved.split("REPLACEMENT-APPROVED-PLAN-CONTENT")).toHaveLength(2);
+	expect(saved.split("REVIEW-APPROVED-PLAN-CONTENT")).toHaveLength(2);
+});
+
+it("does not publish an obsolete inline plan when a replacement reuses the same path during preparation", async () => {
+	const h = await setup([]);
+	await plan(h);
+	const hook = h.holdHook();
+	const client = h.session.prompt("execute the approved plan");
+	await hook.entered;
+	const path = "local://review-plan.md";
+	await plan(h, path, "REPLACEMENT-AT-SAME-PATH");
+	h.session.setPlanModeState({ enabled: true, planFilePath: path });
+	h.session.setPlanModeState(undefined);
+	hook.release();
+	await client;
+	const request = JSON.stringify(h.mock.calls.at(-1)!.context);
+	expect(request).toContain("REPLACEMENT-AT-SAME-PATH");
+	expect(request).not.toContain("REVIEW-APPROVED-PLAN-CONTENT");
 });
 
 it("delivers an actual Mnemopi changed-memory notice after cancelling a waiting prompt", async () => {
@@ -250,4 +357,57 @@ it("delivers an actual Mnemopi changed-memory notice after cancelling a waiting 
 
 	expect(final).toContain("beta-9");
 	expect(notes).toHaveLength(1);
+});
+
+it("restages changed memory and extension policy instead of publishing a waiting prompt's obsolete preparation", async () => {
+	const h = await setup(
+		[
+			{ content: ["first done"] },
+			async () => {
+				await hidden.wait();
+				return { content: ["hidden done"] };
+			},
+		],
+		undefined,
+		true,
+		true,
+	);
+	const hidden = h.gate();
+	const config = loadMnemopiConfig(h.settings, h.dir.path());
+	const first = new MnemopiSessionState({ sessionId: h.session.sessionId, config, session: h.session });
+	setMnemopiSessionState(h.session, first);
+	const id = first.rememberScoped("The deploy host is alpha-7.");
+	await h.session.prompt("Where is the deploy host?");
+	setMnemopiSessionState(h.session, undefined);
+	await first.dispose({ consolidate: false });
+	const resumed = new MnemopiSessionState({ sessionId: h.session.sessionId, config, session: h.session });
+	setMnemopiSessionState(h.session, resumed);
+	expect(resumed.editScopedMemory("update", id, { content: "The deploy host is beta-9." }).status).toBe("updated");
+	h.setPolicy(["OBSOLETE-EXTENSION-POLICY"]);
+	const hook = h.holdHook();
+	const client = h.session.prompt("Use the current deploy host");
+	await hook.entered;
+	const autonomous = h.agent.prompt("older autonomous work");
+	await hidden.entered;
+	const waiting = Promise.withResolvers<void>();
+	const originalWait = h.agent.waitForIdle.bind(h.agent);
+	h.agent.waitForIdle = () => {
+		waiting.resolve();
+		return originalWait();
+	};
+	hook.release();
+	await waiting.promise;
+	expect(resumed.editScopedMemory("update", id, { content: "The deploy host is gamma-11." }).status).toBe("updated");
+	h.setPolicy(["CURRENT-EXTENSION-POLICY"]);
+	hidden.release();
+	await Promise.all([client, autonomous]);
+	await h.session.waitForIdle();
+	const final = JSON.stringify(h.mock.calls.at(-1)!.context);
+	expect(final).toContain("CURRENT-EXTENSION-POLICY");
+	expect(final).not.toContain("OBSOLETE-EXTENSION-POLICY");
+	expect(final).toContain("gamma-11");
+	expect(final).not.toContain("beta-9");
+	const saved = JSON.stringify(await h.saved());
+	expect(saved).toContain("gamma-11");
+	expect(saved).not.toContain("beta-9");
 });

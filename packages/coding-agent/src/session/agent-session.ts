@@ -1136,6 +1136,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#advisorCostRestore: Promise<void> = Promise.resolve();
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
+	#planReferenceRevision = 0;
 	#planReferencePath = "local://PLAN.md";
 	#clientBridge: ClientBridge | undefined;
 	#allowAcpAgentInitiatedTurns = false;
@@ -3007,7 +3008,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			closeCodexProviderSessionsForHistoryRewrite: () => this.#closeCodexProviderSessionsForHistoryRewrite(),
 			resetCodexProviderAfterCompaction: compaction => this.#resetCodexProviderAfterCompaction(compaction),
 			resetPlanReference: () => {
-				this.#planReferenceSent = false;
+				this.#resetPlanReference();
 			},
 			syncTodoPhasesFromBranch: () => {
 				this.#todo.syncFromBranch();
@@ -7035,7 +7036,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// #buildPlanReferenceMessage re-read and re-inject it on the next turn.
 		// Mirrors the sent-flag reset newSession() and compaction perform after a
 		// history rewrite (issue #1246).
-		this.#planReferenceSent = false;
+		this.#resetPlanReference();
 
 		// Re-prime the advisors across the conversation boundary and undo any
 		// memory promotion so the next turn rebuilds from the base system prompt.
@@ -7949,8 +7950,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	setPlanModeState(state: PlanModeState | undefined): void {
 		this.#planModeState = state;
+		this.#planReferenceRevision++;
 		if (state?.enabled) {
-			this.#planReferenceSent = false;
+			this.#resetPlanReference();
 			this.#planReferencePath = state.planFilePath;
 		} else {
 			this.#planModeReminderCount = 0;
@@ -8028,12 +8030,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#goalRuntime;
 	}
 
+	#resetPlanReference(): void {
+		this.#planReferenceRevision++;
+		this.#planReferenceSent = false;
+	}
+
 	markPlanReferenceSent(): void {
 		this.#planReferenceSent = true;
+		this.#planReferenceRevision++;
 	}
 
 	setPlanReferencePath(path: string): void {
 		this.#planReferencePath = path;
+		this.#resetPlanReference();
 	}
 
 	getPlanReferencePath(): string {
@@ -9098,6 +9107,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			baseXdevCatalogDelivered: boolean;
 			/** The messages `commit` publishes, for sizing before the claim; undefined when setup was superseded. */
 			staged: readonly AgentMessage[] | undefined;
+			systemPrompt: string[];
+			isCurrent(): boolean;
 		}
 	> {
 		const sessionGeneration = this.#sessionGeneration;
@@ -9107,7 +9118,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#sessionGeneration === sessionGeneration &&
 			(!this.#isDisposed || alreadyDisposing) &&
 			!signal?.aborted;
-		const cancelled = { baseXdevCatalogDelivered: false, staged: undefined, commit: () => undefined };
+		const cancelled = {
+			baseXdevCatalogDelivered: false,
+			staged: undefined,
+			systemPrompt: [],
+			isCurrent: () => false,
+			commit: () => undefined,
+		};
 		if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
 		const pendingMCPDiscovery = this.#pendingMCPDiscovery;
 		if (pendingMCPDiscovery) {
@@ -9125,14 +9142,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			await this.#memory.transition;
 			if (!isCurrent()) return cancelled;
 			const sourceBase = this.#tools.baseSystemPrompt;
+			const sourceRevision = this.settings.revision;
 			const basePreparation = await this.#tools.buildSystemPromptForAgentStart(prompt, isCurrent, signal);
 			if (!isCurrent()) return cancelled;
 			const result = await this.#extensionRunner?.emitBeforeAgentStart(prompt, images, basePreparation.systemPrompt);
 			if (!isCurrent()) return cancelled;
-			// Overrides are opaque replacements, not string patches. Re-run only policy preparation
-			// against the winning base; discard this attempt's returned context and staged memory.
-			const overrideIsCurrent = () => {
-				if (result?.systemPrompt === undefined) return true;
+			// Re-run policy against the winning base and recall revision; discard stale
+			// extension results together with the memory and prompt they were built for.
+			const sourcesAreCurrent = () => {
+				if (this.settings.revision !== sourceRevision || basePreparation.isCurrent?.() === false) return false;
 				const currentBase = this.#tools.baseSystemPrompt;
 				// Refreshing an unchanged tool set may replace the array without changing policy.
 				return (
@@ -9141,7 +9159,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						sourceBase.every((part, index) => part === currentBase[index]))
 				);
 			};
-			if (!overrideIsCurrent()) continue;
+			if (!sourcesAreCurrent()) continue;
 			const messages: AgentMessage[] = [];
 			if (basePreparation.memoryNotice) {
 				messages.push({
@@ -9177,13 +9195,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				);
 				if (!isCurrent()) return cancelled;
 			}
-			if (!overrideIsCurrent()) continue;
+			if (!sourcesAreCurrent()) continue;
 			return {
 				baseXdevCatalogDelivered: result?.systemPrompt === undefined,
 				staged: messages,
+				systemPrompt: result?.systemPrompt ?? basePreparation.systemPrompt,
+				isCurrent: () => isCurrent() && sourcesAreCurrent(),
 				commit: () => {
 					// No await may separate ownership validation from publishing memory and policy.
-					if (!isCurrent() || !overrideIsCurrent()) return undefined;
+					if (!isCurrent() || !sourcesAreCurrent()) return undefined;
 					if (basePreparation.commit?.() === false) return undefined;
 					if (result?.systemPrompt !== undefined) {
 						this.#tools.setTurnSystemPromptOverride(result.systemPrompt, basePreparation.systemPrompt);
@@ -9292,26 +9312,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 			await this.#prewalk.armPlanYoloIfNeeded();
 
-			// Build messages array (session context, eager todo prelude, then active prompt message)
-			const messages: AgentMessage[] = [];
-			const planReferenceMessage = await this.#buildPlanReferenceMessage?.();
-			if (planReferenceMessage) {
-				messages.push(planReferenceMessage);
-			}
-			const planModeMessage = await this.#buildPlanModeMessage();
-			if (planModeMessage) {
-				messages.push(planModeMessage);
-			}
-			const goalModeMessage = this.#buildGoalModeMessage();
-			if (goalModeMessage) {
-				messages.push(goalModeMessage);
-			}
-			const vibeModeMessage = this.#buildVibeModeMessage();
-			if (vibeModeMessage) {
-				messages.push(vibeModeMessage);
-			}
+			// Attachments and accepted messages survive a policy re-preparation unchanged.
+			const promptMessages: AgentMessage[] = [];
 			if (options?.prependMessages) {
-				messages.push(...options.prependMessages);
+				promptMessages.push(...options.prependMessages);
 			}
 
 			// Early bail-out: if a newer abort/prompt cycle started during setup,
@@ -9320,19 +9324,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				return false;
 			}
 
-			// Pending tool-roster and xd:// deltas accompany the next user-authored
-			// prompt, never an agent-initiated continuation. Reserve their pre-user
-			// position now. Non-consuming previews count toward pre-prompt context
-			// maintenance, while the live deltas are consumed only after maintenance:
-			// promotion/summary can rebuild the base prompt and clear a roster delta
-			// it subsumes, avoiding a contradictory materialized notice.
-			const xdevMountNoticeIndex = messages.length;
-			messages.push(message);
+			promptMessages.push(message);
 			// Inject any pending "nextTurn" messages as context alongside the user message
 			// Messages it drains here go back to the queue if this prompt never reaches the agent.
 			drainedNextTurnMessages = this.#pendingNextTurnMessages;
 			this.#pendingNextTurnMessages = [];
-			messages.push(...drainedNextTurnMessages);
+			promptMessages.push(...drainedNextTurnMessages);
 
 			// Auto-read @filepath mentions
 			const fileMentions = extractFileMentions(expandedText);
@@ -9344,26 +9341,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					signal: setupAbort.signal,
 				});
 				for (const fileMentionMessage of fileMentionMessages) {
-					messages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
+					promptMessages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
 					// `@image.png` mentions are attachments too: a text-only model gets the
 					// same vision-description companion as `options.images`.
 					const mentionImages = fileMentionMessage.files.flatMap(file => (file.image ? [file.image] : []));
 					const descriptionNotice = mentionImages.length
 						? await this.#buildImageDescriptionNotice(mentionImages)
 						: undefined;
-					if (descriptionNotice) messages.push(descriptionNotice);
+					if (descriptionNotice) promptMessages.push(descriptionNotice);
 				}
 			}
-
-			const preparation = await logger.time("prompt:prepareAgentStart", () =>
-				this.#prepareAgentStart(message, expandedText, options?.images, generation, setupAbort.signal, "direct"),
-			);
-			// Memory and policy are published at the claim (`commitDelivery`), so a prompt cancelled while it
-			// waits behind another run publishes nothing; until then the staged messages only count toward
-			// context maintenance, in the place they are delivered.
-			if (!preparation.staged) return false;
-			messages.push(...preparation.staged);
-			const baseXdevCatalogDelivered = preparation.baseXdevCatalogDelivered;
 
 			// Auto thinking: classify this real user turn and set the effective level
 			// before the model request. A user-invoked `/skill:<name>` arrives as a
@@ -9381,144 +9368,199 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return false;
 				}
 			}
-
-			// Only the xd:// mount notice can carry substantial inline docs (up to
-			// XDEV_DOCS_TOTAL_BUDGET), so preview it in a copy and let context
-			// maintenance see the request's true size without consuming a delta a
-			// rebuild may supersede. The tool-roster notice is a tiny name list with
-			// no budget impact, so it is not previewed here — it must always ship
-			// alongside the schema change it describes (see below).
-			const previewXdevMountNotice = isUserQueuedMessage(message)
-				? this.#tools.peekPendingXdevMountNotice({ baseCatalogDelivered: baseXdevCatalogDelivered })
-				: undefined;
-			const maintenanceMessages = previewXdevMountNotice?.notice ? [...messages] : messages;
-			if (maintenanceMessages !== messages && previewXdevMountNotice?.notice) {
-				maintenanceMessages.splice(xdevMountNoticeIndex, 0, previewXdevMountNotice.notice);
-			}
-			await logger.time("prompt:prePromptCompaction", () =>
-				this.#maintenance.runPrePromptCompactionIfNeeded(maintenanceMessages),
-			);
-			if (this.#promptGeneration !== generation) {
-				return false;
-			}
-			const prewalkDecision = autoPrewalk ? await autoPrewalk : undefined;
-			if (autoPrewalk && this.#promptGeneration !== generation) {
-				return false;
-			}
-			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
-			// Everything this prompt delivers with its request is committed here, at the claim: the
-			// staged memory and system-prompt policy, the prewalk arm and its plan nudge, the consumed
-			// notices, and the plan-reference flag. It runs only once the agent is free to take the
-			// prompt, synchronously before the claim, so a prompt that waits behind another run and is
-			// then cancelled commits none of it. Undefined means the preparation was superseded.
-			const commitDelivery = (): AgentMessage[] | undefined => {
-				if (!preparation.commit()) return undefined;
-				// Another run may have delivered the approved plan while this prompt waited.
-				if (planReferenceMessage && this.#planReferenceSent) {
-					messages.splice(messages.indexOf(planReferenceMessage), 1);
+			for (let attempt = 0; attempt < AGENT_START_POLICY_MAX_ATTEMPTS; attempt++) {
+				if (
+					this.#promptGeneration !== generation ||
+					this.#sessionGeneration !== sessionGeneration ||
+					(this.#isDisposed && !disposingAtStart)
+				)
+					return false;
+				const sourceRunEpoch = this.#runEpoch;
+				const sourceMessages = this.agent.state.messages;
+				const sourceMessageCount = sourceMessages.length;
+				const sourcePlanRevision = this.#planReferenceRevision;
+				const sourceGoalMode = this.#goalModeState;
+				const sourceVibeMode = this.#vibeModeState;
+				const sourcesAreCurrent = () =>
+					this.#runEpoch === sourceRunEpoch &&
+					this.agent.state.messages === sourceMessages &&
+					sourceMessages.length === sourceMessageCount &&
+					this.#planReferenceRevision === sourcePlanRevision &&
+					this.#goalModeState === sourceGoalMode &&
+					this.#vibeModeState === sourceVibeMode;
+				const messages: AgentMessage[] = [];
+				const planReferenceMessage = await this.#buildPlanReferenceMessage?.();
+				if (planReferenceMessage) {
+					messages.push(planReferenceMessage);
 				}
-				if (prewalkDecision !== undefined) {
-					const planMessage = this.#prewalk.applyAuto(prewalkDecision);
-					if (planMessage) {
-						messages.push(planMessage);
-						// The first-turn eager todo reminder was built before this task armed. Like a configured
-						// prewalk (#10510), the plan nudge owns todo creation, so the reminder would contradict it.
-						this.#toolChoiceQueue.removeByLabel("eager-todo");
-						const eager = messages.findIndex(
-							candidate =>
-								candidate.role === "custom" && candidate.customType === EAGER_TODO_PRELUDE_MESSAGE_TYPE,
-						);
-						if (eager >= 0) messages.splice(eager, 1);
-					}
+				const planModeMessage = await this.#buildPlanModeMessage();
+				if (planModeMessage) {
+					messages.push(planModeMessage);
 				}
-				// Consume the xd:// notice only when its previewed revision still holds.
-				// A mount delta or catalog rebuild during the await invalidates it: any
-				// additions carried by the delivered base are recorded as announced,
-				// while remaining notice content waits for the next context check.
-				// The roster notice is re-derived from the live delta here and always
-				// delivered, keeping the model's stated availability in lockstep with
-				// the wire tool list even when a roster change landed during maintenance.
-				const xdevMountNotice = previewXdevMountNotice
-					? this.#tools.takePendingXdevMountNotice({
-							baseCatalogDelivered: baseXdevCatalogDelivered,
-							expectedContentKey: previewXdevMountNotice.contentKey,
-						})
-					: undefined;
-				const toolRosterNotice = isUserQueuedMessage(message)
-					? this.#tools.takePendingToolRosterNotice({ baseDelivered: baseXdevCatalogDelivered })
-					: undefined;
-				const evalPreludeNotice = isUserQueuedMessage(message) ? this.#tools.takeEvalPreludeNotice() : undefined;
-				const sessionAgentNotice = isUserQueuedMessage(message) ? this.#tools.takeSessionAgentNotice() : undefined;
-				if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice) {
-					messages.splice(
-						xdevMountNoticeIndex,
-						0,
-						...(xdevMountNotice ? [xdevMountNotice] : []),
-						...(toolRosterNotice ? [toolRosterNotice] : []),
-						...(evalPreludeNotice ? [evalPreludeNotice] : []),
-						...(sessionAgentNotice ? [sessionAgentNotice] : []),
-					);
+				const goalModeMessage = this.#buildGoalModeMessage();
+				if (goalModeMessage) {
+					messages.push(goalModeMessage);
 				}
-				const nonMessageTokens = computeNonMessageTokens(this, this.agent.tokenizer, this.settings.revision);
-				const contextWindow = this.model?.contextWindow ?? 0;
-				const breakdown = this.getContextBreakdown({ contextWindow, pendingMessages: messages });
-				const promptTokens =
-					breakdown?.usedTokens ??
-					nonMessageTokens +
-						this.agent.tokenizer.countMessages(this.messages) +
-						this.agent.tokenizer.countMessages(messages);
-				this.#stats.setPendingSnapshot({
-					promptTokens,
-					nonMessageTokens,
-					cutoffCount: this.messages.length + messages.length,
-				});
-				// Commit the plan-reference delivery flag only now that the message is
-				// actually handed to agent.prompt. Every pre-send setup step above can
-				// return (generation-bail) or throw (@-mention reads, before_agent_start
-				// hooks, pre-prompt compaction) before this point; setting the flag at
-				// construction time (#buildPlanReferenceMessage) stranded it `true` with
-				// nothing delivered, so the retry skipped re-injection and the executor
-				// lost the approved plan (issue #4094). The compaction-success resets
-				// (issue #1246) still clear it for re-injection on the next turn.
-				if (planReferenceMessage && messages.includes(planReferenceMessage)) {
-					this.#planReferenceSent = true;
+				const vibeModeMessage = this.#buildVibeModeMessage();
+				if (vibeModeMessage) {
+					messages.push(vibeModeMessage);
 				}
-				return messages;
-			};
-			let dispatched: boolean;
-			try {
-				const run = this.#recovery.promptAgentWithIdleRetry(
-					commitDelivery,
-					agentPromptOptions,
-					() => {
-						handedToAgent = true;
-						// `agent.prompt` claims streaming synchronously before its
-						// first await: this callback fires exactly when THIS
-						// client-owned run goes live (never on a busy-retry that
-						// waits behind an autonomous run) — wake steers parked on
-						// the dispatch so they admit into the run they targeted.
-						this.#wakeDispatchLiveWaiters();
-					},
-					// A prompt parked behind another run must not start once an interrupt,
-					// a session switch or disposal has superseded it, and a prompt begun during
-					// an interrupt's cleanup claims the agent only once that cleanup is done.
-					() =>
-						this.#admitAfterInterrupts(
-							() =>
-								this.#promptGeneration !== generation ||
-								this.#sessionGeneration !== sessionGeneration ||
-								(this.#isDisposed && !disposingAtStart),
-						),
+				const xdevMountNoticeIndex = messages.length + (options?.prependMessages?.length ?? 0);
+				messages.push(...promptMessages);
+				const preparation = await logger.time("prompt:prepareAgentStart", () =>
+					this.#prepareAgentStart(message, expandedText, options?.images, generation, setupAbort.signal, "direct"),
 				);
-				dispatched = await run;
-			} finally {
-				this.#stats.setPendingSnapshot(undefined);
+				// Memory and policy are published at the claim (`commitDelivery`), so a prompt cancelled while it
+				// waits behind another run publishes nothing; until then the staged messages only count toward
+				// context maintenance, in the place they are delivered.
+				if (!preparation.staged) return false;
+				messages.push(...preparation.staged);
+				const baseXdevCatalogDelivered = preparation.baseXdevCatalogDelivered;
+
+				// Only the xd:// mount notice can carry substantial inline docs (up to
+				// XDEV_DOCS_TOTAL_BUDGET), so preview it in a copy and let context
+				// maintenance see the request's true size without consuming a delta a
+				// rebuild may supersede. The tool-roster notice is a tiny name list with
+				// no budget impact, so it is not previewed here — it must always ship
+				// alongside the schema change it describes (see below).
+				const previewXdevMountNotice = isUserQueuedMessage(message)
+					? this.#tools.peekPendingXdevMountNotice({ baseCatalogDelivered: baseXdevCatalogDelivered })
+					: undefined;
+				const maintenanceMessages = previewXdevMountNotice?.notice ? [...messages] : messages;
+				if (maintenanceMessages !== messages && previewXdevMountNotice?.notice) {
+					maintenanceMessages.splice(xdevMountNoticeIndex, 0, previewXdevMountNotice.notice);
+				}
+				await logger.time("prompt:prePromptCompaction", () =>
+					this.#maintenance.runPrePromptCompactionIfNeeded(maintenanceMessages, preparation.systemPrompt),
+				);
+				if (this.#promptGeneration !== generation) {
+					return false;
+				}
+				const prewalkDecision = autoPrewalk ? await autoPrewalk : undefined;
+				if (autoPrewalk && this.#promptGeneration !== generation) {
+					return false;
+				}
+				const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
+				let superseded = false;
+				// Everything this prompt delivers with its request is committed here, at the claim: the
+				// staged memory and system-prompt policy, the prewalk arm and its plan nudge, the consumed
+				// notices, and the plan-reference flag. It runs only once the agent is free to take the
+				// prompt, synchronously before the claim, so a prompt that waits behind another run and is
+				// then cancelled commits none of it. Undefined means the preparation was superseded.
+				const commitDelivery = (): AgentMessage[] | undefined => {
+					// A wait or maintenance pass can replace any staged source. Rebuild the whole
+					// prospective request before publishing anything, then size that request again.
+					if (!sourcesAreCurrent() || !preparation.isCurrent() || !preparation.commit()) {
+						superseded = true;
+						return undefined;
+					}
+					if (prewalkDecision !== undefined) {
+						const planMessage = this.#prewalk.applyAuto(prewalkDecision);
+						if (planMessage) {
+							messages.push(planMessage);
+							// The first-turn eager todo reminder was built before this task armed. Like a configured
+							// prewalk (#10510), the plan nudge owns todo creation, so the reminder would contradict it.
+							this.#toolChoiceQueue.removeByLabel("eager-todo");
+							const eager = messages.findIndex(
+								candidate =>
+									candidate.role === "custom" && candidate.customType === EAGER_TODO_PRELUDE_MESSAGE_TYPE,
+							);
+							if (eager >= 0) messages.splice(eager, 1);
+						}
+					}
+					// Consume the xd:// notice only when its previewed revision still holds.
+					// A mount delta or catalog rebuild during the await invalidates it: any
+					// additions carried by the delivered base are recorded as announced,
+					// while remaining notice content waits for the next context check.
+					// The roster notice is re-derived from the live delta here and always
+					// delivered, keeping the model's stated availability in lockstep with
+					// the wire tool list even when a roster change landed during maintenance.
+					const xdevMountNotice = previewXdevMountNotice
+						? this.#tools.takePendingXdevMountNotice({
+								baseCatalogDelivered: baseXdevCatalogDelivered,
+								expectedContentKey: previewXdevMountNotice.contentKey,
+							})
+						: undefined;
+					const toolRosterNotice = isUserQueuedMessage(message)
+						? this.#tools.takePendingToolRosterNotice({ baseDelivered: baseXdevCatalogDelivered })
+						: undefined;
+					const evalPreludeNotice = isUserQueuedMessage(message) ? this.#tools.takeEvalPreludeNotice() : undefined;
+					const sessionAgentNotice = isUserQueuedMessage(message)
+						? this.#tools.takeSessionAgentNotice()
+						: undefined;
+					if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice) {
+						messages.splice(
+							xdevMountNoticeIndex,
+							0,
+							...(xdevMountNotice ? [xdevMountNotice] : []),
+							...(toolRosterNotice ? [toolRosterNotice] : []),
+							...(evalPreludeNotice ? [evalPreludeNotice] : []),
+							...(sessionAgentNotice ? [sessionAgentNotice] : []),
+						);
+					}
+					const nonMessageTokens = computeNonMessageTokens(this, this.agent.tokenizer, this.settings.revision);
+					const contextWindow = this.model?.contextWindow ?? 0;
+					const breakdown = this.getContextBreakdown({ contextWindow, pendingMessages: messages });
+					const promptTokens =
+						breakdown?.usedTokens ??
+						nonMessageTokens +
+							this.agent.tokenizer.countMessages(this.messages) +
+							this.agent.tokenizer.countMessages(messages);
+					this.#stats.setPendingSnapshot({
+						promptTokens,
+						nonMessageTokens,
+						cutoffCount: this.messages.length + messages.length,
+					});
+					// Commit the plan-reference delivery flag only now that the message is
+					// actually handed to agent.prompt. Every pre-send setup step above can
+					// return (generation-bail) or throw (@-mention reads, before_agent_start
+					// hooks, pre-prompt compaction) before this point; setting the flag at
+					// construction time (#buildPlanReferenceMessage) stranded it `true` with
+					// nothing delivered, so the retry skipped re-injection and the executor
+					// lost the approved plan (issue #4094). The compaction-success resets
+					// (issue #1246) still clear it for re-injection on the next turn.
+					if (planReferenceMessage && messages.includes(planReferenceMessage)) {
+						this.markPlanReferenceSent();
+					}
+					return messages;
+				};
+				let dispatched: boolean;
+				try {
+					const run = this.#recovery.promptAgentWithIdleRetry(
+						commitDelivery,
+						agentPromptOptions,
+						() => {
+							handedToAgent = true;
+							// `agent.prompt` claims streaming synchronously before its
+							// first await: this callback fires exactly when THIS
+							// client-owned run goes live (never on a busy-retry that
+							// waits behind an autonomous run) — wake steers parked on
+							// the dispatch so they admit into the run they targeted.
+							this.#wakeDispatchLiveWaiters();
+						},
+						// A prompt parked behind another run must not start once an interrupt,
+						// a session switch or disposal has superseded it, and every re-prepared
+						// attempt claims only once the interrupt's state cleanup is done.
+						() =>
+							this.#admitAfterInterrupts(
+								() =>
+									this.#promptGeneration !== generation ||
+									this.#sessionGeneration !== sessionGeneration ||
+									(this.#isDisposed && !disposingAtStart),
+							),
+					);
+					dispatched = await run;
+				} finally {
+					this.#stats.setPendingSnapshot(undefined);
+				}
+				if (!dispatched && superseded) continue;
+				if (!dispatched) return false;
+				if (!options?.skipPostPromptRecoveryWait) {
+					await this.#waitForPostPromptRecovery(generation);
+				}
+				return true;
 			}
-			if (!dispatched) return false;
-			if (!options?.skipPostPromptRecoveryWait) {
-				await this.#waitForPostPromptRecovery(generation);
-			}
-			return true;
+			throw new AgentStartPolicyChangedError();
 		} finally {
 			// A bail before dispatch (an interrupt's generation bump, disposal, a usage denial or a setup
 			// error) must not lose the accepted next-turn messages this prompt drained.
@@ -12055,7 +12097,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry());
 
 			this.#todo.resetCycle();
-			this.#planReferenceSent = false;
+			this.#resetPlanReference();
 			this.#planReferencePath = "local://PLAN.md";
 			this.#advisors.resetSessionState();
 			advisorRecordersDetached = false;

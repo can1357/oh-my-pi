@@ -193,6 +193,8 @@ interface SystemPromptPreparation {
 	systemPrompt: string[];
 	/** Memory backend note to deliver with the turn ({@link MemoryPromptPreparation.notice}). */
 	memoryNotice?: MemoryPromptPreparation["notice"];
+	/** Validate sources without committing, so a direct prompt can re-stage before sizing. */
+	isCurrent?(): boolean;
 	/** Publish staged state at validated delivery; false declines the prepared turn without mutation. */
 	commit?(): boolean;
 }
@@ -2367,6 +2369,7 @@ export class SessionTools {
 				return {
 					systemPrompt: this.#baseSystemPrompt,
 					memoryNotice: memory.notice,
+					isCurrent: () => memory.isCurrent?.() !== false,
 					commit: () => isCurrent() && memory.commit(),
 				};
 			}
@@ -2387,6 +2390,7 @@ export class SessionTools {
 			return {
 				systemPrompt: stablePrompt,
 				memoryNotice: memory.notice,
+				isCurrent: () => memory.isCurrent?.() !== false,
 				commit: () => {
 					if (!isCurrent() || !memory.commit()) return false;
 					refreshed?.commit?.();

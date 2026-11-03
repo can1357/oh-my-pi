@@ -547,6 +547,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		if (persisted !== undefined) {
 			return {
 				context: persisted.text || undefined,
+				isCurrent: () => this.#recallGeneration === generation,
 				commit: () => this.#commitRecall(generation, persisted.text, false),
 			};
 		}
@@ -560,6 +561,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 
 		return {
 			context: context ?? undefined,
+			isCurrent: () => this.#recallGeneration === generation,
 			commit: () => this.#commitRecall(generation, context ?? "", true),
 		};
 	}
