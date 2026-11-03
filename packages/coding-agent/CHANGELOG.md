@@ -196,7 +196,7 @@
 
 ### Fixed
 
-- Browser `role/` selectors now find named sections and other implicit landmark and structural roles in Chrome and Tern, so scoped snapshots and observations can target them.
+- Browser `role/` selectors now find named sections and other implicit landmark and structural roles in Chrome and Tern, so scoped snapshots and observations can target them ([#17895](https://github.com/can1357/oh-my-pi/pull/17895) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.16.0] - 2026-11-02
 
