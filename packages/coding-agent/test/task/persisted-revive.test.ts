@@ -335,8 +335,12 @@ describe("persisted subagent revival", () => {
 
 	// This revival and the restricted one below run the real createAgentSession with a real model
 	// registry and loaded extensions: context, skill, rule and command discovery, extension loading
-	// and the system prompt. The work itself took 1.0 to 4.6 s here, so bun's 5 s default fails it;
-	// on a machine running a hundred agents the same revival has taken 49.9 s, so both carry 60 s.
+	// and the system prompt. The work itself is 1.0 to 4.6 s, and about 6.5 s of processor time, so
+	// bun's 5 s default fails it on any busy machine. Wall-clock is what bun measures: on a machine
+	// running a hundred agents the same two revivals have taken 85.4 s and 73.4 s, and a cheaper
+	// fixture still reached 55.5 s, so the cost is contention, not the fixture. Both carry 180 s,
+	// matching the longest budget already in this repository: it is a ceiling that only a real hang
+	// reaches, not a wait any passing run pays.
 	it("loads only extensions allowed by the live owner's root policy", async () => {
 		const cwd = makeTempDir("@pi-revive-owner-roots-");
 		const sessionFile = await createPersistedSession(cwd, false, "default");
@@ -393,7 +397,7 @@ describe("persisted subagent revival", () => {
 			await revived?.dispose();
 			authStorage.close();
 		}
-	}, 60_000);
+	}, 180_000);
 
 	it("rebinds owner policy hooks for restricted revival without widening its tools", async () => {
 		const cwd = makeTempDir("@pi-revive-restricted-policy-");
@@ -453,7 +457,7 @@ describe("persisted subagent revival", () => {
 			await revived?.dispose();
 			authStorage.close();
 		}
-	}, 60_000);
+	}, 180_000);
 
 	it("anchors wake-turn artifacts to the revived ref's own dir, not the root session's (#11563)", async () => {
 		AgentRegistry.resetGlobalForTests();
