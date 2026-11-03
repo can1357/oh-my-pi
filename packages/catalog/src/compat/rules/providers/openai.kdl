@@ -5,7 +5,7 @@ provider "openai" {
 	env "OPENAI_API_KEY"
 	image-count-budget 200
 	on-api "openai-responses" {
-		prefer-websockets #true
+		supports-websockets #true
 	}
 	kind-apis {
 		embedding "openai-embeddings"

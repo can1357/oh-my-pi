@@ -129,14 +129,14 @@ import {
 	resetOpenAIResponsesChainState,
 	storesResponsesServerSide,
 } from "./openai-responses-state";
-import { ResponsesWebSocketTransportError } from "./responses-websocket-connection";
+import { isResponsesWebSocketProgressEvent, ResponsesWebSocketTransportError } from "./responses-websocket-connection";
 
 // OpenAI Responses-specific options
 export interface OpenAIResponsesOptions extends StreamOptions {
 	/**
 	 * Prefer WebSocket response.create on the standard /responses endpoint.
-	 * Precedence: this option, model.preferWebsockets, custom fetch's SSE default,
-	 * then the endpoint default. WebSockets always require catalog compatibility.
+	 * Disabled unless this option or model.preferWebsockets is true; either
+	 * explicit false vetoes true. WebSockets always require catalog compatibility.
 	 * Reuses socket-local previous_response_id anchors when history is append-only.
 	 * Pre-send transport failures may fall back to HTTP; sent generations never replay.
 	 */
@@ -781,11 +781,7 @@ const streamOpenAIResponsesOnce = (
 			const resolvedBaseUrl = (baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
 			const requestUrl = `${resolvedBaseUrl}/responses`;
 			let transportSessions = providerSessionState?.transports;
-			// A custom HTTP transport must not be bypassed by the implicit WS default.
-			attemptContext.mode ??= resolveResponsesWebSocketPreference(
-				model,
-				options?.preferWebsockets ?? model.preferWebsockets ?? (options?.fetch ? false : undefined),
-			)
+			attemptContext.mode ??= resolveResponsesWebSocketPreference(model, options?.preferWebsockets)
 				? "websocket"
 				: "sse";
 			const idleTimeoutMs =
@@ -814,35 +810,9 @@ const streamOpenAIResponsesOnce = (
 						connectTimeoutMs: Math.min(30_000, requestTimeoutMs ?? 30_000),
 						retainConnection: routingSessionId !== undefined,
 					});
-					try {
-						await webSocketLease.session.connection.connect(requestSignal);
-					} catch (error) {
-						const upgrade = error instanceof ResponsesWebSocketTransportError ? error : undefined;
-						try {
-							if (!isPreSendTransportFallback(error, requestSignal)) {
-								if (upgrade?.status !== undefined && !requestSignal.aborted) {
-									throw new AIError.ProviderHttpError(upgrade.message, upgrade.status, {
-										headers: upgrade.headers,
-										cause: upgrade,
-									});
-								}
-								throw error;
-							}
-							webSocketLease.markSseOnly();
-							attemptContext.mode = "sse";
-							if (providerSessionState && routingSessionId) {
-								resetOpenAIResponsesChainState(
-									getOpenAIResponsesChainState(providerSessionState, model, baseUrl, routingSessionId),
-								);
-							}
-						} finally {
-							webSocketLease.release();
-							webSocketLease = undefined;
-						}
-					}
 				}
 			}
-			const useWebSocket = attemptContext.mode === "websocket";
+			let useWebSocket = attemptContext.mode === "websocket";
 			const closeCountAtStart = providerSessionState?.closeCount;
 			const strictToolsScope = getOpenAIStrictToolsScope(model, baseUrl);
 			const promptCacheBreakpointPolicy =
@@ -860,18 +830,6 @@ const streamOpenAIResponsesOnce = (
 					resetOpenAIResponsesChainState(chainState);
 				}
 			}
-			const builtParams = buildParams(
-				model,
-				context,
-				options,
-				providerSessionState,
-				strictToolsScope,
-				false,
-				chainState?.canAppend ? chainState.lastParams?.input : undefined,
-			);
-			const { params, trailingScaffoldingItems } = builtParams;
-			let activeParams = params;
-			let activeTrailingScaffoldingItems = trailingScaffoldingItems;
 			const requestReasoningEffortFallbacks = new Map<string, OpenAIReasoningEffortFallback>();
 			const attemptedReasoningEffortFallbacks = new Set<string>();
 			let pendingReasoningEffortFallback: { key: string; fallback: OpenAIReasoningEffortFallback } | undefined;
@@ -891,16 +849,6 @@ const streamOpenAIResponsesOnce = (
 				}
 				return fallbackKey;
 			};
-			if (chainState && !chainState.disabled) {
-				// Platform `previous_response_id` chaining only resolves stored responses.
-				params.store = true;
-			}
-			applyReasoningEffortFallbackForRequest(params);
-			let chained: OpenAIResponsesChainedParams =
-				chainState && !chainState.disabled
-					? buildOpenAIResponsesChainedParams(params, trailingScaffoldingItems, chainState)
-					: { params };
-			sentPreviousResponseId = chained.previousResponseId;
 			const applyPayloadReplacement = async (requestParams: OpenAIResponsesSamplingParams) => {
 				const replacementPayload = await options?.onPayload?.(requestParams, model);
 				const payload =
@@ -908,7 +856,75 @@ const streamOpenAIResponsesOnce = (
 				applyReasoningEffortFallbackForRequest(payload);
 				return payload;
 			};
-			chained = { ...chained, params: await applyPayloadReplacement(chained.params) };
+			const prepareRequest = async (disableStrictTools = false) => {
+				const builtParams = buildParams(
+					model,
+					context,
+					options,
+					providerSessionState,
+					strictToolsScope,
+					disableStrictTools,
+					chainState?.canAppend ? chainState.lastParams?.input : undefined,
+				);
+				const { params, trailingScaffoldingItems } = builtParams;
+				if (chainState && !chainState.disabled) params.store = true;
+				applyReasoningEffortFallbackForRequest(params);
+				const chained: OpenAIResponsesChainedParams =
+					chainState && !chainState.disabled
+						? buildOpenAIResponsesChainedParams(params, trailingScaffoldingItems, chainState)
+						: { params };
+				sentPreviousResponseId = chained.previousResponseId;
+				return { builtParams, chained: { ...chained, params: await applyPayloadReplacement(chained.params) } };
+			};
+			let { builtParams, chained } = await prepareRequest();
+			let activeParams = builtParams.params;
+			let activeTrailingScaffoldingItems = builtParams.trailingScaffoldingItems;
+			if (webSocketLease) {
+				const connection = webSocketLease.session.connection;
+				const freshHandshake = !connection.isOpen();
+				try {
+					await connection.connect(requestSignal);
+					if (freshHandshake && connection.handshakeHeaders) {
+						await options?.onResponse?.(
+							{
+								status: 101,
+								headers: Object.fromEntries(connection.handshakeHeaders),
+								metadata: { transport: "websocket", phase: "handshake" },
+							},
+							model,
+						);
+					}
+				} catch (error) {
+					const upgrade = error instanceof ResponsesWebSocketTransportError ? error : undefined;
+					try {
+						if (!isPreSendTransportFallback(error, requestSignal)) {
+							if (upgrade?.status !== undefined && !requestSignal.aborted) {
+								throw new AIError.ProviderHttpError(upgrade.message, upgrade.status, {
+									headers: upgrade.headers,
+									cause: upgrade,
+								});
+							}
+							throw error;
+						}
+						webSocketLease.markSseOnly();
+						attemptContext.mode = "sse";
+						useWebSocket = false;
+						if (providerSessionState && routingSessionId) {
+							const state = getOpenAIResponsesChainState(providerSessionState, model, baseUrl, routingSessionId);
+							resetOpenAIResponsesChainState(state);
+							if (isOpenAIResponsesStatefulEnabled(options, model)) chainState = state;
+						}
+					} finally {
+						webSocketLease.release();
+						webSocketLease = undefined;
+					}
+					// A different transport is a different candidate: rebuild HTTP
+					// storage/chaining controls, then let the hook replace that body.
+					({ builtParams, chained } = await prepareRequest());
+					activeParams = builtParams.params;
+					activeTrailingScaffoldingItems = builtParams.trailingScaffoldingItems;
+				}
+			}
 			const activeRawRequestDump: RawHttpRequestDump = {
 				provider: model.provider,
 				api: output.api,
@@ -946,17 +962,6 @@ const streamOpenAIResponsesOnce = (
 							throw new Error("OpenAI responses WebSocket requests do not support background: true");
 						}
 						const session = webSocketLease!.session;
-						const connection = session.connection;
-						if (options?.onResponse) {
-							await options.onResponse(
-								{
-									status: 101,
-									headers: Object.fromEntries(connection.handshakeHeaders ?? []),
-									metadata: { transport: "websocket" },
-								},
-								model,
-							);
-						}
 						return session.events(requestParams, {
 							signal: requestSignal,
 							chain: options?.statefulResponses !== false,
@@ -1000,13 +1005,16 @@ const streamOpenAIResponsesOnce = (
 			let webSocketFirstEventDeadline: number | undefined;
 			const timeResponsesStream = (
 				events: AsyncIterable<ResponseStreamEvent>,
-			): AsyncGenerator<ResponseStreamEvent> =>
-				iterateWithIdleTimeout(events, {
+			): AsyncGenerator<ResponseStreamEvent> => {
+				let firstItemTimeoutMs = firstEventTimeoutMs;
+				if (useWebSocket && requestTimeoutMs !== undefined) {
+					webSocketFirstEventDeadline ??= Date.now() + requestTimeoutMs;
+					firstItemTimeoutMs = webSocketFirstEventDeadline - Date.now();
+					if (firstItemTimeoutMs <= 0) throw abortTracker.abortLocally(firstEventTimeoutAbortError);
+				}
+				return iterateWithIdleTimeout(events, {
 					idleTimeoutMs,
-					firstItemTimeoutMs:
-						useWebSocket && webSocketFirstEventDeadline !== undefined
-							? Math.max(1, webSocketFirstEventDeadline - Date.now())
-							: firstEventTimeoutMs,
+					firstItemTimeoutMs,
 					firstItemErrorMessage: OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE,
 					errorMessage: "OpenAI responses stream stalled while waiting for the next event",
 					onFirstItemTimeout: () => abortTracker.abortLocally(firstEventTimeoutAbortError),
@@ -1019,8 +1027,9 @@ const streamOpenAIResponsesOnce = (
 								)
 							: requestAbortController.abort(),
 					abortSignal: options?.signal,
-					isProgressItem: isOpenAIResponsesProgressEvent,
+					isProgressItem: useWebSocket ? isResponsesWebSocketProgressEvent : isOpenAIResponsesProgressEvent,
 				});
+			};
 			let strictRetryAvailable = true;
 			let activeStrictToolsApplied = builtParams.strictToolsApplied;
 			let forceDisableStrictTools = false;
@@ -1031,11 +1040,6 @@ const streamOpenAIResponsesOnce = (
 						try {
 							openaiStream = await openResponsesStream(chained.params);
 							if (useWebSocket) {
-								if (requestTimeoutMs !== undefined) {
-									webSocketFirstEventDeadline ??= Date.now() + requestTimeoutMs;
-									if (Date.now() >= webSocketFirstEventDeadline)
-										throw abortTracker.abortLocally(firstEventTimeoutAbortError);
-								}
 								openaiStream = await primeResponsesWebSocketStream(timeResponsesStream(openaiStream));
 							}
 							if (pendingReasoningEffortFallback) {
@@ -1096,34 +1100,11 @@ const streamOpenAIResponsesOnce = (
 								strictRetryAvailable = false;
 								forceDisableStrictTools = true;
 								disableStrictToolsForScope(providerSessionState, strictToolsScope);
-								const fallbackBuilt = buildParams(
-									model,
-									context,
-									options,
-									providerSessionState,
-									strictToolsScope,
-									true,
-									chainState?.canAppend ? chainState.lastParams?.input : undefined,
-								);
-								const fallbackParams = fallbackBuilt.params;
-								if (chainState && !chainState.disabled) fallbackParams.store = true;
-								let fallbackChained: OpenAIResponsesChainedParams =
-									chainState && !chainState.disabled
-										? buildOpenAIResponsesChainedParams(
-												fallbackParams,
-												fallbackBuilt.trailingScaffoldingItems,
-												chainState,
-											)
-										: { params: fallbackParams };
-								sentPreviousResponseId = fallbackChained.previousResponseId;
-								fallbackChained = {
-									...fallbackChained,
-									params: await applyPayloadReplacement(fallbackChained.params),
-								};
-								chained = fallbackChained;
+								const fallback = await prepareRequest(true);
+								chained = fallback.chained;
 								activeRawRequestDump.body = chained.params;
-								activeParams = fallbackParams;
-								activeTrailingScaffoldingItems = fallbackBuilt.trailingScaffoldingItems;
+								activeParams = fallback.builtParams.params;
+								activeTrailingScaffoldingItems = fallback.builtParams.trailingScaffoldingItems;
 								continue;
 							}
 							if (!chainState || !sentPreviousResponseId || requestSignal.aborted) {

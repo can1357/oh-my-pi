@@ -53,11 +53,7 @@ async function captureRequestBody(
 		return createSseResponse();
 	});
 
-	const stream = streamOpenAIResponses(model, context, {
-		apiKey: "test-key",
-		fetch: fetchMock,
-		preferWebsockets: false,
-	});
+	const stream = streamOpenAIResponses(model, context, { apiKey: "test-key", fetch: fetchMock });
 	for await (const event of stream) {
 		if (event.type === "done" || event.type === "error") break;
 	}

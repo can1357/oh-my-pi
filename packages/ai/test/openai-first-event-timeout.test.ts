@@ -8,10 +8,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { waitForDelayOrAbort } from "./helpers";
 
-const openAIResponsesModel: Model<"openai-responses"> = {
-	...(getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">),
-	preferWebsockets: false,
-};
+const openAIResponsesModel = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
 const openAICompletionsModel = {
 	...(getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">),
 	api: "openai-completions",

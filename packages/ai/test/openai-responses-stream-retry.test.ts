@@ -11,10 +11,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
-const model: Model<"openai-responses"> = {
-	...(getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">),
-	preferWebsockets: false,
-};
+const model = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
 const firstUser = { role: "user" as const, content: "Read the file", timestamp: 1_000 };
 const context: Context = { messages: [firstUser] };
 

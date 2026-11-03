@@ -283,7 +283,6 @@ function captureResponsesPayload(
 	const { promise, resolve } = Promise.withResolvers<unknown>();
 	streamOpenAIResponses(model, context, {
 		apiKey: "test-key",
-		preferWebsockets: false,
 		signal: createAbortedSignal(),
 		providerSessionState,
 		...options,
@@ -902,7 +901,6 @@ describe("OpenAI responses history payload", () => {
 		];
 		const inFlight = streamOpenAIResponses(model, context, {
 			apiKey: "test-key",
-			preferWebsockets: false,
 			providerSessionState,
 			fetch: async () => {
 				requested.resolve();

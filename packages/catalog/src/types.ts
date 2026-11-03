@@ -1768,7 +1768,7 @@ export interface Model<TApi extends Api = Api> {
 	 * dispatch is redirected.
 	 */
 	transport?: "pi-native";
-	/** WebSocket preference; standard Responses is gated by catalog policy and defaults to official endpoints only. */
+	/** Standard Responses is opt-in and catalog-gated; either model/request false vetoes true. Codex keeps its independent policy. */
 	preferWebsockets?: boolean;
 	/** Codex Responses Lite transport: send the lite marker and carry instructions/tools as input items (mirrors codex-rs `use_responses_lite`). */
 	useResponsesLite?: boolean;

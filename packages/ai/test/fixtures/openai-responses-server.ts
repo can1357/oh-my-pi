@@ -80,6 +80,7 @@ export function endpoint(
 	setup?: {
 		port?: number;
 		rejectUpgrade?: (request: Request) => Response | undefined | Promise<Response | undefined>;
+		upgradeHeaders?: Record<string, string>;
 		httpResponse?: (body: Record<string, unknown>, index: number) => Response | undefined;
 	},
 ) {
@@ -124,7 +125,7 @@ export function endpoint(
 					const rejection = await setup.rejectUpgrade(request);
 					if (rejection) return rejection;
 				}
-				if (server.upgrade(request, { data: { id: ++opened } })) return undefined;
+				if (server.upgrade(request, { data: { id: ++opened }, headers: setup?.upgradeHeaders })) return undefined;
 				return new Response("Upgrade failed", { status: 400 });
 			}
 			const body = (await request.json()) as Record<string, unknown>;

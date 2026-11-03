@@ -14,10 +14,12 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { type BenchSummary, runBenchCommand } from "@oh-my-pi/pi-coding-agent/cli/bench-cli";
 import { type BenchModelRegistry, resolveBenchTargets } from "@oh-my-pi/pi-coding-agent/cli/bench-runtime";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getModelDbPath, TempDir } from "@oh-my-pi/pi-utils";
+import { endpoint as responsesEndpoint } from "../../ai/test/fixtures/openai-responses-server";
 
 function fakeModel(provider: string, id: string): Model<Api> {
 	return buildModel({
@@ -437,7 +439,7 @@ async function captureServiceTier(opts: {
 }
 
 describe("bench Codex provider state", () => {
-	it("retains the Codex opt-in and closes request-owned state after each run", async () => {
+	it("closes request-owned Codex state after each run", async () => {
 		const model = { ...fakeModel("openai-codex", "gpt-5.5"), api: "openai-codex-responses" } as Model;
 		const registry = fakeRegistry({ models: [model], authedProviders: ["openai-codex"] });
 		const captured: SimpleStreamOptions[] = [];
@@ -462,7 +464,6 @@ describe("bench Codex provider state", () => {
 		);
 		expect(summary.failures).toBe(0);
 		expect(captured).toHaveLength(2);
-		expect(captured.every(options => options.preferWebsockets === true)).toBe(true);
 		expect(captured[0]?.providerSessionState).not.toBe(captured[1]?.providerSessionState);
 		expect(captured.every(options => options.providerSessionState?.size === 0)).toBe(true);
 		expect(closed).toBe(2);
@@ -470,9 +471,9 @@ describe("bench Codex provider state", () => {
 });
 
 describe("bench standard Responses transport", () => {
-	it.each([undefined, true])(
-		"benchmarks an OpenAI gateway with preference %s through the normal HTTP path",
-		async preferWebsockets => {
+	it.each([false, true])(
+		"uses the standard Responses setting %s before falling back to HTTP on an HTTP-only gateway",
+		async enabled => {
 			let posts = 0;
 			let upgrades = 0;
 			const item = {
@@ -518,7 +519,7 @@ describe("bench standard Responses transport", () => {
 					name: "OpenAI gateway",
 					api: "openai-responses",
 					baseUrl: `http://127.0.0.1:${server.port}/v1`,
-					preferWebsockets,
+					preferWebsockets: true,
 					reasoning: false,
 					input: ["text"],
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -529,7 +530,10 @@ describe("bench standard Responses transport", () => {
 				const summary = await runBenchCommand(
 					{ models: ["openai/gpt-5.4"], flags: { runs: 1, maxTokens: 8, json: true } },
 					{
-						createRuntime: async () => ({ modelRegistry: registry, settings: Settings.isolated() }),
+						createRuntime: async () => ({
+							modelRegistry: registry,
+							settings: Settings.isolated({ "providers.openaiResponsesWebsockets": enabled }),
+						}),
 						writeStdout: () => {},
 						writeStderr: () => {},
 						setExitCode: () => {},
@@ -539,12 +543,47 @@ describe("bench standard Responses transport", () => {
 				expect(summary.failures).toBe(0);
 				expect(summary.models[0]?.stats?.outputTokens).toBe(2);
 				expect(posts).toBe(1);
-				expect(upgrades).toBe(preferWebsockets ? 1 : 0);
+				expect(upgrades).toBe(enabled ? 1 : 0);
 			} finally {
 				await server.stop(true);
 			}
 		},
 	);
+
+	it("does not report a WebSocket handshake as per-generation response-cache evidence", async () => {
+		const fixture = responsesEndpoint(undefined, {
+			upgradeHeaders: { "cf-aig-cache-status": "HIT", "x-request-id": "handshake-not-generation" },
+		});
+		try {
+			const model = {
+				...getBundledModel("openai", "gpt-5-mini"),
+				baseUrl: `${fixture.server.url.origin}/v1`,
+			};
+			const registry = fakeRegistry({ models: [model], authedProviders: ["openai"] });
+			const summary = await runBenchCommand(
+				{ models: ["openai/gpt-5-mini"], flags: { cache: true, json: true } },
+				{
+					createRuntime: async () => ({
+						modelRegistry: registry,
+						settings: Settings.isolated({ "providers.openaiResponsesWebsockets": true }),
+					}),
+					writeStdout: () => {},
+					writeStderr: () => {},
+					setExitCode: () => {},
+					stdoutIsTTY: false,
+				},
+			);
+			expect(summary.failures).toBe(0);
+			expect(summary.models[0]?.stats?.outputTokens).toBe(3);
+			const pair = summary.models[0]?.cachePairs?.[0];
+			expect(pair?.cold.result).toMatchObject({ ok: true, transport: "websocket" });
+			expect(pair?.cold.requestIdObserved).toBe(false);
+			expect(pair?.cold.observations).not.toContain("response_cache_hit_observed");
+			expect(fixture.requests).toHaveLength(2);
+		} finally {
+			await fixture.server.stop(true);
+		}
+	});
 });
 
 describe("bench service tier", () => {

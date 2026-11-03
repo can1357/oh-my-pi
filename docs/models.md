@@ -9,7 +9,7 @@ Primary implementation files:
 - `packages/coding-agent/src/config/model-registry.ts` — loads built-in + custom models, provider overrides, runtime discovery, auth integration
 - `packages/coding-agent/src/config/model-resolver.ts` — parses model patterns and selects initial/smol/slow models
 - `packages/coding-agent/src/config/model-settings.ts` — model selection settings (`modelRoles`, `enabledModels`, `enabledProviders`/`disabledProviders`, `modelProviderOrder`, `cycleOrder`)
-- `packages/coding-agent/src/session/settings.ts` — provider timeouts and Codex transport preferences (`providers.*`)
+- `packages/coding-agent/src/session/settings.ts` — provider transport preferences (`providers.*`)
 - `packages/coding-agent/src/config/models-config.ts` and `models-config-schema-bundle.ts` — custom provider/model validation
 - `packages/coding-agent/src/session/auth-storage.ts` — re-exports `AuthStorage` from `@oh-my-pi/pi-ai`; credential precedence is implemented in `packages/ai/src/auth/cascade.ts`
 - `packages/catalog/src/compat/resolve.ts` and `compat/rules/` — compatibility and model policy resolution
@@ -114,26 +114,31 @@ An unscoped OpenRouter `baseUrl` names the `/api/v1` chat root, so OpenRouter De
 models use its `/api/alpha` sibling on the same host, e.g. a `.../api/v1` relay serves judges at
 `.../api/alpha/decisions`.
 
-Standard Responses WebSocket eligibility is catalog-owned. The built-in KDL rule
-enables it only for the OpenAI provider's `openai-responses` API. Eligible models
-prefer WS at the official catalog endpoint by default; custom gateway URLs default
-to HTTP/SSE. Providers outside that catalog scope, including GitHub Copilot and
-OpenRouter, use standard HTTP/SSE even with request/model `preferWebsockets: true`.
+`omitMaxOutputTokens` omits the model-derived output cap.
 
-Within that eligible scope, an SDK request `preferWebsockets` takes precedence over
-the model value. If neither is set, a custom SDK `fetch` selects HTTP/SSE;
-otherwise the official-endpoint default applies. Explicit `false` disables WS;
-explicit `true` opts an eligible gateway in. Neither value bypasses catalog
-eligibility. There is no standard Responses global or provider-level transport
-setting. The independent Codex setting `providers.openaiWebsockets: auto|on|off`
-and `PI_CODEX_WEBSOCKET` remain Codex-only.
+### Standard Responses WebSockets
 
-SDK `fetch` overrides apply to HTTP/SSE, not WebSocket connections. Explicit WS
-preferences allow a socket attempt without using the override; an HTTP/SSE
-fallback still uses the supplied `fetch`.
+Standard Responses uses HTTP/SSE by default, including at the official OpenAI
+endpoint. To opt in from OMP, set this in `config.yml`:
 
-For a gateway with uneven upstream support, configure individual models in
-`models.yml`, for example:
+```yaml
+providers:
+  openaiResponsesWebsockets: true
+```
+
+The catalog's `supports-websockets` KDL rule marks capability, not enablement.
+It covers OpenAI `openai-responses`, including custom providers that inherit that
+provider type. Copilot, OpenRouter and other unmarked provider/API combinations
+remain on HTTP/SSE. The independent `providers.openaiWebsockets: auto|off|on` setting
+and `PI_CODEX_WEBSOCKET` continue to govern Codex only.
+
+Model and request `preferWebsockets` can only narrow OMP's setting: **either explicit
+`false` disables WS**, even if the other is `true`. Turning the setting off cannot
+be overridden. Standalone pi-ai SDK callers have no OMP settings dependency: they
+must explicitly opt in with a request or model `true`; either `false` still vetoes it.
+
+For a gateway with uneven support, keep the existing provider entry in `models.yml`
+and disable WS for the affected model:
 
 ```yaml
 providers:
@@ -141,60 +146,55 @@ providers:
     api: openai-responses
     baseUrl: https://gateway.example.com/v1
     modelOverrides:
-      gpt-5-mini:
-        preferWebsockets: true
       gpt-5:
         preferWebsockets: false
 ```
 
-Merge these fields into the existing provider entry. Custom `models` entries accept
-the same model-level boolean. Keep the existing API root, authentication and
-discovery: WS upgrades the same `/responses` endpoint without adding `/codex`.
-The gateway must implement Responses WS `response.create`; HTTP Responses
-compatibility alone does not establish WS support. CLI, SDK, advisor/side requests
-and `omp bench` leave the standard provider to make the same catalog-based choice,
-rather than predicting the actual transport in each caller.
+Custom `models` entries accept the same boolean. WS uses the existing `/responses`
+endpoint and authentication; the gateway must implement `response.create`.
+SDK `fetch` overrides affect HTTP/SSE, not sockets. Explicit WS opt-in bypasses that
+HTTP override for the socket; an HTTP fallback still uses it.
 
-Before a generation is sent, a handshake network failure or HTTP upgrade status
-404, 405, 426 or 501 switches that call to the original full HTTP/SSE pipeline,
-including its authentication, HTTP retries, tools, usage and payload hooks. Upgrade
-400, 401, 403, 422, 429 and other 5xx statuses keep their normal error/retry
-classification, not protocol fallback. Rejected-upgrade diagnostics preserve the
-actual status and available headers; response-body messages are not read.
+Payload construction and `onPayload` precede connecting, including for cancelled
+requests. A pre-send handshake network failure, connect timeout, or upgrade
+404/405/426/501 rebuilds the full HTTP candidate with its normal storage/chaining
+rules and calls `onPayload` again. The hook may replace each candidate; it does not
+see the final socket-local delta. Other upgrade statuses retain normal error
+classification. Diagnostics preserve status and available headers, not a buffered
+rejected-upgrade body.
 
-After sending has begun, a network failure or first-event/idle timeout fails the
-current WS call and preserves any partial output; it never silently replays that
-generation over HTTP. Existing Agent/TurnRecovery may issue a new SSE request,
-retaining displayed text or completed tool results under its normal recovery
-rules. Incomplete tool arguments are not executed. Caller cancellation does not
-trigger protocol fallback or mark the session as SSE-only.
+When handshake headers are available, `onResponse` reports the physical WS
+handshake once, marked with `metadata.transport="websocket"` and
+`metadata.phase="handshake"`. Reusing the socket does not emit another handshake.
+These are not per-generation headers; no generation request ID is invented.
+`omp bench --json` includes the transport when response metadata makes it
+observable. Standard WS cache benchmarks still measure generation usage, but
+cannot claim per-generation request IDs or HTTP response-cache headers.
 
-A transport failure that selects SSE makes it sticky for the logical session,
-normalized endpoint and model. SSE success, another prompt, a token change or an
-explicit preference does not clear it. A new session/scope or the existing
-`releaseSession`/provider-state `close` lifecycle can try WS again; CLI session
-creation, model changes and stale-replay state resets use those existing boundaries.
-There is no cooldown, periodic probe or extra reset setting.
+A healthy retained socket can send incremental `previous_response_id` turns,
+including with `store: false`. Changed history/options, credentials, concurrent
+temporary sockets, or a replacement after the **30-second idle limit** require
+full input without an old socket's anchor. `statefulResponses: false` disables
+continuation. Official HTTP can already use stored stateful chaining independently
+of that socket lifetime; WS is not guaranteed to save traffic or latency there.
 
-Standard WS uses connection-local `previous_response_id` continuation on a healthy,
-idle socket when history and request options (including tools) still match. It
-works with `store: false` without forcing server-side storage; SDK
-`statefulResponses: false` disables WS continuation. HTTP's existing stored-stateful
-settings and precedence are unchanged. Changed history/options require full input.
-A socket closed after successful completion or retired while idle is replaced
-normally with a new WS connection and full history, without an old anchor or SSE
-downgrade. Credential changes and concurrent independent sockets cannot borrow
-another connection's baseline.
+Injected `previous_response_id` and `background: true` are rejected. A definite
+first-frame stale-anchor rejection permits one full-history resend on the same
+healthy socket before generation evidence. WS does not inherit HTTP transient,
+resume, or empty-completion retries; a successful empty WS response submits once.
 
-Injected `previous_response_id` (including through `onPayload`) and
-`background: true` are rejected: WS anchors are connection-owned. An explicit
-first-frame stale-anchor rejection permits at most one full-history resend on the
-same healthy socket, before `response.created` or output. A successful empty WS
-completion submits one generation per provider call; actual SSE retains its
-existing empty-completion retries. Agent-level recovery remains separate. Codex
-chaining, steering, attach, timers and recovery policies are unchanged.
+After an uncertain send, a transport failure or stream timeout fails the call
+without hidden HTTP replay. Partial output remains available; existing Agent
+recovery may start an SSE continuation under its own rules, retaining completed
+tool results and never executing incomplete arguments. Caller abort and protocol/
+queue errors do not mark transport incompatibility.
 
-`omitMaxOutputTokens` omits the model-derived output cap.
+Network downgrade is sticky for the logical session, endpoint and model until
+`releaseSession`/provider-state `close` or a new scope. Embedders retaining provider
+state must release finished sessions. Calls without a logical session ID do not
+share sticky state; without `providerSessionState`, it lasts only for that call.
+Normal idle retirement is not a downgrade. Codex's protocol and recovery remain
+independent.
 
 ### Bedrock request options
 
@@ -833,6 +833,7 @@ Related settings:
 - `modelProviderOrder` (provider precedence when equivalent concrete choices share an id)
 - `providers.kimiApiFormat` (`auto|openai|anthropic`; `auto` follows server-declared model metadata)
 - `providers.openaiWebsockets` (`auto|off|on` websocket preference for OpenAI Codex transport)
+- `providers.openaiResponsesWebsockets` (opt-in standard Responses transport; see [Standard Responses WebSockets](#standard-responses-websockets))
 - `providers.openaiLiveSteering` (deliver mid-response user messages into GPT-6 responses over the Codex WebSocket)
 
 `modelRoles` stores model selectors such as `provider/modelId`; `enabledModels` and CLI `--models`

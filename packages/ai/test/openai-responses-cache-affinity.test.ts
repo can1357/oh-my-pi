@@ -40,10 +40,7 @@ function buildOpenAIResponsesCompat(spec: ResponsesCompatTestSpec) {
 	}).compat;
 }
 
-const model: Model<"openai-responses"> = {
-	...(getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">),
-	preferWebsockets: false,
-};
+const model = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
 const openRouterResponsesModel: Model<"openai-responses"> = {
 	...model,
 	id: "openai/gpt-5.5",

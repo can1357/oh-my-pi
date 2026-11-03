@@ -340,7 +340,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"thinking-unverified": { key: "unverified", set: "thinking", shape: "scalar" },
 
 	// ── catalog metadata ──
-	"prefer-websockets": { key: "preferWebsockets", set: "catalog", shape: "scalar", values: [true, false] },
+	"supports-websockets": { key: "supportsWebsockets", set: "catalog", shape: "scalar", values: [true, false] },
 	"apply-patch-tool-type": {
 		key: "applyPatchToolType",
 		set: "catalog",

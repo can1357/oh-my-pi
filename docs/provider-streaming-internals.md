@@ -105,16 +105,10 @@ Tool-call argument streaming:
 
 ### Standard Responses transport ownership
 
-`streamSimple` forwards genuine request overrides; the standard provider alone calls
-`resolveResponsesWebSocketPreference` in
-`packages/catalog/src/compat/responses-websocket.ts`. The catalog's
-`prefer-websockets` rule enables only OpenAI `openai-responses`. Within that scope,
-request `preferWebsockets` overrides the model value. If neither is set, the
-provider preserves an injected SDK `fetch` by selecting HTTP/SSE; otherwise only
-the official catalog endpoint defaults to WS. Gateways default to SSE and require
-an explicit model/request `true`. A false/missing catalog rule cannot be bypassed by
-`true`: Copilot and OpenRouter standard Responses stay on HTTP/SSE. There is no
-standard global/provider transport setting or caller-side prediction of the mode.
+The user-facing contract lives in [Standard Responses WebSockets](./models.md#standard-responses-websockets).
+`settings-stream-fn.ts` adapts the independent API settings at the application
+boundary; `resolveResponsesWebSocketPreference` applies final catalog capability
+and model/request vetoes in the standard provider, without a Settings dependency.
 
 `providers/responses-websocket-connection.ts` contains the single physical channel
 implementation, extracted from Codex. `ResponsesWebSocketConnection` owns connect
@@ -136,90 +130,24 @@ heartbeat. A normally closed or health-retired socket after successful completio
 is replaced by a new WS connection with full input and no previous socket's anchor;
 that replacement is not an SSE downgrade.
 
-#### Mode selection and fallback
+#### Request preparation and lifetime
 
-The provider chooses the actual mode before `buildParams`, including history and
-HTTP stored-state preparation. One public call owns its attempt context; only
-pre-send handshake failure can change that context from WS to SSE. A handshake
-network failure, connect timeout, or upgrade status 404/405/426/501 releases the
-failed lease and enters the existing `postOpenAIStream` branch, provided the caller
-has not cancelled or exhausted its deadline. There is one WS access attempt, not
-a reconnect/replay loop.
+`prepareRequest` builds and hooks each candidate before the socket connects.
+A pre-send HTTP fallback rebuilds through the same preparation path; strict-tool
+corrections reuse it too. The physical handshake callback runs only for a newly
+connected channel, not for each exchange on a retained socket.
 
-Fallback is the original full HTTP/SSE pipeline: request compression/fetch,
-authentication and HTTP retries, response/SSE observers, tools, reasoning, usage
-and publication keep their existing behavior. Payload hooks run after actual mode
-selection. The first fallback SSE request has full history and no WS anchor; later
-HTTP chaining can use only its own successful baseline. Fallback does not force
-storage, and explicit `statefulResponses: false` remains effective.
+`timeResponsesStream` owns standard stream deadlines. HTTP keeps its headers
+watchdog and existing first-event semantics; WS preserves one first-event budget
+across bounded parameter corrections. Priming exposes a definite first-frame
+rejection to those corrections; it is not a second timeout owner. Connect retains
+its separate bounded deadline, while Codex keeps its own channel deadlines.
 
-Upgrade 400/401/403/422/429 and other 5xx statuses retain normal parameter/auth/rate/
-server classification rather than protocol fallback. The channel retains actual
-rejected-upgrade HTTP status and available headers only. It does not capture,
-buffer or parse the rejected response body, so diagnostics and classification
-cannot rely on a provider's body-only message/code. In-band Responses errors still
-carry their wire error metadata through the existing processor.
-
-Once send has been attempted, a network close/socket/send failure or provider
-first-event/idle timeout marks that scope SSE-only and fails the current WS call.
-It does not issue a hidden HTTP generation. Partial output remains available to the
-SDK and persistence; existing Agent/TurnRecovery may make a new SSE continuation or
-retry under its normal budgets. Displayed text is retained with its existing
-continuation reminder, completed tool results remain in history, and partial tool
-arguments are not executed. Caller abort takes precedence and never marks sticky
-SSE or triggers protocol fallback. Protocol/JSON/sequence errors, busy and queue
-overflow are not classified as network incompatibility.
-
-The existing provider iterator is the sole owner of standard first-event/idle
-stream deadlines; the channel receives no stream deadlines for standard requests.
-Its connect deadline is at most 30 seconds, shortened by a configured positive
-first-event timeout. Local timeout reasons are recorded before aborting, so they
-remain timeout failures rather than user cancellation. Codex retains its own
-existing channel deadlines and heartbeat behavior.
-
-#### Logical scope and socket-local history
-
-`OpenAIResponsesTransportSessions` uses one entry per logical session, normalized
-request endpoint and model in the provider-state bucket. An entry contains sticky
-SSE state and an optional WS session, rather than separate transport managers.
-SSE success, a later prompt, changed credentials or another `true` preference does
-not clear sticky SSE. Idle eviction and lease release do not clear it either.
-`releaseSession`/`close` clear their owned state; a new session or endpoint/model
-scope may try WS again. CLI `newSession`, model changes and stale-replay recovery
-use those existing provider-state lifecycle boundaries. There is no cooldown,
-probe timer or new reset setting. Calls without a logical session ID do not write
-a shared sticky entry; without provider session state, transport state lives only
-for that public call.
-
-A standard physical session records its complete post-`onPayload` request,
-response ID and replayable output only after successful completion and one-to-one
-output sanitization. `buildResponsesDeltaInput` and
-`sanitizeOpenAIResponsesAssistantHistoryItemsForReplay` in `openai-shared.ts`
-compare history and normalize replay items. A matching prefix and unchanged
-options/tools permit connection-local `previous_response_id` continuation;
-otherwise the request carries full history. It works with `store: false` without
-forcing storage, and request `statefulResponses: false` disables it.
-Reconnection, credential changes and concurrent temporary sockets cannot borrow
-another socket's baseline. Injected anchors, including through `onPayload`, and
-background execution remain rejected.
-
-An explicit first-frame stale-anchor rejection permits one full-history resend on
-the same healthy socket before `response.created` or generation evidence. Eligible
-first-frame strict/reasoning validation corrections also reuse that healthy lease.
-They do not authorize reconnecting or HTTP replay after send if the socket dies.
-Failure/cancellation clears the baseline; a successful terminal is registered
-before it is yielded, so a subsequent close cannot turn a completed response into
-a failed one.
-
-The existing `withReplaySafeStreamRetry` reads empty-completion policy from the
-actual mode. A successful empty WS completion submits one generation per provider
-call. Actual SSE, including pre-send fallback, retains its existing empty retry
-budget. Agent-level empty-turn recovery remains separate.
-
-Copilot has no standard WS route. Its HTTP native-history behavior remains
-independent of WS selection; `openAIResponsesReplaysNativeHistory` has no
-transport argument. CLI, advisor, maintenance and budget callers use the actual
-request model and genuine options, not a predicted transport.
+Logical entries count active leases independently of the retained connection.
+Idle retirement or release removes an entry only when it has no connection, no
+active lease and no sticky downgrade. Sticky entries remain until their existing
+session/provider owner releases them, so a temporary sibling cannot erase a later
+network downgrade or change the identity of an outstanding lease.
 
 ### OpenRouter native finish reasons
 

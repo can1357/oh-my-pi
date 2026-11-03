@@ -664,6 +664,8 @@ export interface StreamOptions {
 	/**
 	 * Optional callback for inspecting or replacing provider payloads before sending.
 	 * Return undefined to keep the payload unchanged.
+	 * A pre-send standard Responses WS fallback rebuilds the HTTP candidate and
+	 * invokes this hook again. WS connection-local delta shaping follows it.
 	 */
 	onPayload?: (
 		payload: unknown,
@@ -672,6 +674,9 @@ export interface StreamOptions {
 	) => unknown | undefined | Promise<unknown | undefined>;
 	/**
 	 * Optional callback for provider response metadata after headers are received.
+	 * Standard Responses WS reports each physical handshake once with
+	 * metadata.transport="websocket" and metadata.phase="handshake", not each
+	 * generation. Its headers are not per-generation cache/request metadata.
 	 */
 	onResponse?: (response: ProviderResponseMetadata, model?: Model<Api>, signal?: AbortSignal) => void | Promise<void>;
 	/**
@@ -852,7 +857,7 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	kimiApiFormat?: "openai" | "anthropic";
 	/** API format for Synthetic provider: "openai" or "anthropic" (default: "openai") */
 	syntheticApiFormat?: "openai" | "anthropic";
-	/** Override WebSocket preference within catalog eligibility; explicit false disables WS. Codex keeps its independent policy. */
+	/** Standard Responses is opt-in and catalog-gated; either model/request false vetoes true. Codex keeps its independent policy. */
 	preferWebsockets?: boolean;
 	/**
 	 * OpenRouter routing-variant suffix automatically appended to model IDs when

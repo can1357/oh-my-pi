@@ -3,7 +3,13 @@ import type { ServerWebSocket } from "bun";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { type as schemaType } from "@oh-my-pi/omptype";
 import { streamOpenAIResponses, type OpenAIResponsesOptions } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import type { Context, Model, ProviderSessionState, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
+import type {
+	Context,
+	Model,
+	ProviderResponseMetadata,
+	ProviderSessionState,
+	SimpleStreamOptions,
+} from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { endpoint as createEndpoint, send, sse, textEvents } from "./fixtures/openai-responses-server";
 
@@ -51,6 +57,104 @@ describe("standard OpenAI Responses WebSocket opt-in", () => {
 		expect(result.content).toMatchObject([{ type: "text", text: "HTTP" }]);
 		expect(fixture.httpRequests).toHaveLength(1);
 		expect(fixture.upgrades).toHaveLength(0);
+	});
+
+	it("runs an explicit WS payload hook for an already-aborted request without connecting", async () => {
+		const fixture = endpoint();
+		let payloadCalls = 0;
+		const result = await streamOpenAIResponses(fixture.model, fixture.context, {
+			...fixture.options,
+			preferWebsockets: true,
+			signal: AbortSignal.abort(),
+			onPayload: () => {
+				payloadCalls++;
+			},
+		}).result();
+		expect(result.stopReason).toBe("aborted");
+		expect(payloadCalls).toBe(1);
+		expect(fixture.upgrades).toHaveLength(0);
+		expect(fixture.httpRequests).toHaveLength(0);
+	});
+
+	it("does not connect when a payload hook rejects the candidate", async () => {
+		const fixture = endpoint();
+		const result = await streamOpenAIResponses(fixture.model, fixture.context, {
+			...fixture.options,
+			preferWebsockets: true,
+			onPayload: () => {
+				throw new Error("payload denied by caller");
+			},
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("payload denied by caller");
+		expect(fixture.upgrades).toHaveLength(0);
+		expect(fixture.requests).toHaveLength(0);
+	});
+
+	it("rebuilds HTTP storage controls and reapplies payload replacement after a rejected upgrade", async () => {
+		const fixture = endpoint(undefined, { rejectUpgrade: () => new Response("SSE only", { status: 404 }) });
+		const stores: unknown[] = [];
+		const result = await streamOpenAIResponses(fixture.model, fixture.context, {
+			...fixture.options,
+			preferWebsockets: true,
+			statefulResponses: true,
+			onPayload: payload => {
+				const body = payload as Record<string, unknown>;
+				stores.push(body.store);
+				return { ...body, metadata: { candidate: body.store ? "http" : "ws" } };
+			},
+		}).result();
+		expect(result.content).toMatchObject([{ type: "text", text: "HTTP" }]);
+		expect(stores).toEqual([false, true]);
+		expect(fixture.httpRequests[0]).toMatchObject({ store: true, metadata: { candidate: "http" } });
+		expect(fixture.httpRequests[0]?.previous_response_id).toBeUndefined();
+		expect(fixture.requests).toHaveLength(0);
+	});
+
+	it("reports the physical handshake once instead of stale headers for each reused-socket generation", async () => {
+		const fixture = endpoint();
+		const responses: ProviderResponseMetadata[] = [];
+		const options = {
+			...fixture.options,
+			preferWebsockets: true,
+			onResponse: (response: ProviderResponseMetadata) => {
+				responses.push(response);
+			},
+		};
+		for (let turn = 0; turn < 2; turn++) {
+			expect((await streamOpenAIResponses(fixture.model, fixture.context, options).result()).stopReason).toBe(
+				"stop",
+			);
+		}
+		expect(fixture.requests).toHaveLength(2);
+		expect(fixture.upgrades).toHaveLength(1);
+		expect(responses).toHaveLength(1);
+		expect(responses[0]?.metadata).toEqual({ transport: "websocket", phase: "handshake" });
+		expect(responses[0]?.requestId).toBeUndefined();
+	});
+
+	it("finishes response.done even when local handling crosses the first-event deadline", async () => {
+		let now = Date.now();
+		const clock = spyOn(Date, "now").mockImplementation(() => now);
+		try {
+			const fixture = endpoint(socket => {
+				send(socket, [{ ...textEvents("WS", "resp_done").at(-1)!, type: "response.done" }]);
+			});
+			const result = await streamOpenAIResponses(fixture.model, fixture.context, {
+				...fixture.options,
+				preferWebsockets: true,
+				streamIdleTimeoutMs: 5000,
+				onSseEvent: event => {
+					if (event.event === "response.done") now += 2000;
+				},
+			}).result();
+			expect(result.stopReason).toBe("stop");
+			expect(result.responseId).toBe("resp_done");
+			expect(result.usage.input).toBe(5);
+			expect(fixture.requests).toHaveLength(1);
+		} finally {
+			clock.mockRestore();
+		}
 	});
 
 	it("uses response.create on the standard path with unchanged auth and custom headers", async () => {
@@ -103,14 +207,14 @@ describe("standard OpenAI Responses WebSocket opt-in", () => {
 		expect(requestOptOut.content).toMatchObject([{ type: "text", text: "HTTP" }]);
 		expect(fetchCalls).toBe(1);
 
-		const requestOptIn = await streamOpenAIResponses({ ...model, preferWebsockets: false }, fixture.context, {
+		const modelOptOut = await streamOpenAIResponses({ ...model, preferWebsockets: false }, fixture.context, {
 			...options,
 			preferWebsockets: true,
 		}).result();
-		expect(requestOptIn.content).toMatchObject([{ type: "text", text: "WS" }]);
-		expect(fetchCalls).toBe(1);
-		expect(fixture.requests).toHaveLength(2);
-		expect(fixture.httpRequests).toHaveLength(1);
+		expect(modelOptOut.content).toMatchObject([{ type: "text", text: "HTTP" }]);
+		expect(fetchCalls).toBe(2);
+		expect(fixture.requests).toHaveLength(1);
+		expect(fixture.httpRequests).toHaveLength(2);
 	});
 
 	it("omits SSE-only WS options while preserving HTTP and payload hooks", async () => {
@@ -1210,13 +1314,12 @@ describe("standard OpenAI Responses WebSocket opt-in", () => {
 		const options = { ...fixture.options, preferWebsockets: true };
 		const failed = await streamOpenAIResponses(fixture.model, fixture.context, {
 			...options,
-			onPayload: async payload => {
+			onResponse: async () => {
 				const socket = fixture.sockets.get(1)!;
 				const frame = JSON.stringify({ type: "response.created", response: { id: "overflow" } });
 				// Fill the actual 4096-frame channel before a reader owns the exchange.
 				for (let index = 0; index <= 4096; index++) socket.send(frame);
 				await fixture.waitForClosed(1);
-				return payload;
 			},
 		}).result();
 		const next = await streamOpenAIResponses(fixture.model, fixture.context, options).result();

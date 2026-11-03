@@ -29,7 +29,7 @@ async function withCli(
 		events: AgentEvent[];
 		sessionEvents: AgentSessionEvent[];
 	}) => Promise<void>,
-	timeouts: { first?: number; idle?: number } = {},
+	options: { first?: number; idle?: number; websockets?: boolean | "default"; modelPreference?: boolean } = {},
 ): Promise<void> {
 	using tempDir = TempDir.createSync("@omp-responses-rpc-");
 	const home = tempDir.join("home");
@@ -50,7 +50,7 @@ async function withCli(
 						{
 							id: "gpt-5-mini",
 							name: "Loopback GPT-5 mini",
-							preferWebsockets: true,
+							preferWebsockets: options.modelPreference ?? true,
 							reasoning: false,
 							input: ["text"],
 							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -69,8 +69,9 @@ async function withCli(
 			defaultThinkingLevel: "off",
 			retry: { enabled: true, maxRetries: 1, baseDelayMs: 1, maxDelayMs: 1000, modelFallback: false },
 			providers: {
-				streamFirstEventTimeoutSeconds: timeouts.first ?? 1,
-				streamIdleTimeoutSeconds: timeouts.idle ?? 1,
+				openaiResponsesWebsockets: options.websockets === "default" ? undefined : (options.websockets ?? true),
+				streamFirstEventTimeoutSeconds: options.first ?? 1,
+				streamIdleTimeoutSeconds: options.idle ?? 1,
 				cacheWarming: "off",
 			},
 			compaction: { enabled: false },
@@ -92,6 +93,7 @@ async function withCli(
 		SHELL: "/bin/sh",
 		NO_COLOR: "1",
 		TERM: "dumb",
+		...(process.env.PI_NATIVES_DIR ? { PI_NATIVES_DIR: process.env.PI_NATIVES_DIR } : {}),
 	};
 	const client = new RpcClient({
 		provider: "openai",
@@ -162,6 +164,32 @@ function hasTextDelta(event: AgentEvent, text: string): boolean {
 }
 
 describe("real CLI Responses WebSocket recovery", () => {
+	test.each([
+		{ name: "default-off setting", websockets: "default" as const, modelPreference: true },
+		{ name: "explicitly disabled setting", websockets: false, modelPreference: true },
+		{ name: "model veto under an enabled setting", websockets: true, modelPreference: false },
+	])(
+		"keeps $name on HTTP through the real CLI",
+		async options => {
+			const fixture = endpoint();
+			try {
+				await withCli(
+					`${fixture.server.url.origin}/v1`,
+					async ({ client }) => {
+						await client.promptAndWait("USE_CONFIGURED_TRANSPORT", undefined, promptTimeout);
+						expect(assistantText(await client.getMessages())).toBe("HTTP");
+						expect(fixture.httpRequests).toHaveLength(1);
+						expect(fixture.upgrades).toHaveLength(0);
+					},
+					options,
+				);
+			} finally {
+				await fixture.server.stop(true);
+			}
+		},
+		testTimeout,
+	);
+
 	test(
 		"round-trips text, actual bash and another user turn using socket-local incremental history",
 		async () => {

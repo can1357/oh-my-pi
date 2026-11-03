@@ -1,14 +1,12 @@
 import type { Model } from "../types";
-import { isCatalogEndpointUrl } from "./catalog-endpoint";
 import { resolveCatalogPolicy } from "./catalog-policy";
 
 /**
- * Standard Responses transport preference within the rule-owned provider/API
- * scope. Explicit request and model preferences can opt a gateway in, but never
- * enable a provider without a true catalog rule. Unspecified preferences use
- * WebSockets only at the provider's own catalog endpoint.
+ * Capability is rule-owned; callers must opt in. Either explicit false vetoes
+ * the other preference, including a per-request true for a disabled model.
  */
 export function resolveResponsesWebSocketPreference(model: Model, requestPreference?: boolean): boolean {
-	if (resolveCatalogPolicy(model).preferWebsockets !== true) return false;
-	return requestPreference ?? model.preferWebsockets ?? isCatalogEndpointUrl(model, model.baseUrl);
+	if (resolveCatalogPolicy(model).supportsWebsockets !== true) return false;
+	if (requestPreference === false || model.preferWebsockets === false) return false;
+	return requestPreference === true || model.preferWebsockets === true;
 }

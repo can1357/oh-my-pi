@@ -8,7 +8,7 @@
  * `streamFn` wrapper (so `providers.openrouterVariant` and `loopGuard` never
  * landed on advisor requests), its `promptCacheKey` (so OpenAI Responses
  * fell back to a different cache shard), its shared `providerSessionState`,
- * and its Codex-only setting without overriding standard model preferences.
+ * and its independent transport settings without bypassing model-level vetoes.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
@@ -25,8 +25,12 @@ import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { endpoint as responsesEndpoint } from "../../ai/test/fixtures/openai-responses-server";
 
-import { cfgProvidersOpenaiWebsockets } from "@oh-my-pi/pi-coding-agent/session/settings";
+import {
+	cfgProvidersOpenaiResponsesWebsockets,
+	cfgProvidersOpenaiWebsockets,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
 
 /** Provider-facing advisor session ids must be UUIDv7 (issue #5040): Codex writes
  *  them verbatim onto `conversation_id`/`session_id` headers, so `-advisor`
@@ -199,48 +203,45 @@ describe("AgentSession advisor provider-options parity", () => {
 		expect(advisorRequests[1]).toHaveLength(0);
 		expect(mainRequests).toHaveLength(0);
 	});
-	it.each([true, false])(
-		"preserves a standard advisor model preference of %s without a Codex request override",
-		async preferWebsockets => {
-			const provider = `standard-advisor-${preferWebsockets}`;
-			const advisorModel = getBundledModel("openai", "gpt-5.4");
-			authStorage.keys.setRuntime(provider, "test-key");
-			modelRegistry.registerProvider(provider, {
-				api: "openai-responses",
-				apiKey: "test-key",
-				baseUrl: "https://gateway.example/v1",
-				models: [{ ...advisorModel, contextWindow: 128_000, maxTokens: 16_000, preferWebsockets }],
+	it.each([true, false])("uses the model's WS veto %s on a real advisor request", async preferWebsockets => {
+		const fixture = responsesEndpoint();
+		const advisorModel = getBundledModel("openai", "gpt-5.4");
+		authStorage.keys.setRuntime("openai", "test-key");
+		modelRegistry.registerProvider("openai", {
+			api: "openai-responses",
+			apiKey: "test-key",
+			baseUrl: `${fixture.server.url.origin}/v1`,
+			models: [
+				{
+					...advisorModel,
+					baseUrl: `${fixture.server.url.origin}/v1`,
+					contextWindow: 128_000,
+					maxTokens: 16_000,
+					preferWebsockets,
+				},
+			],
+		});
+		try {
+			session = new AgentSession({
+				agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+				sessionManager,
+				settings: settings(),
+				modelRegistry,
+				advisorTools: [],
 			});
-			const captured: Array<{ model: Model; options: SimpleStreamOptions | undefined }> = [];
-			try {
-				session = new AgentSession({
-					agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
-					sessionManager,
-					settings: settings(),
-					modelRegistry,
-					advisorTools: [],
-					advisorStreamFn: (requestModel, _context, options) => {
-						captured.push({ model: requestModel, options });
-						throw new Error("capture-stop");
-					},
-				});
-				cfgProvidersOpenaiWebsockets.set(session.settings, "on");
-				session.settings.setModelRole("advisor", `${provider}/${advisorModel.id}`);
-				expect(session.setAdvisorEnabled(true)).toBe(true);
-				const advisor = session.getAdvisorAgent();
-				if (!advisor) throw new Error("Expected standard Responses advisor");
-				await advisor.prompt("ping").catch(() => {});
-				expect(captured[0]?.model.provider).toBe(provider);
-				expect(captured[0]?.model.preferWebsockets).toBe(preferWebsockets);
-				expect(captured[0]?.options?.preferWebsockets).toBeUndefined();
-				expect(captured[0]?.options?.providerSessionState).toBe(session.providerSessionState);
-				expect(captured[0]?.options?.sessionId).toBe(advisor.sessionId);
-				expect(captured[0]?.options?.sessionId).not.toBe(session.sessionId);
-			} finally {
-				modelRegistry.unregisterProvider(provider);
-			}
-		},
-	);
+			cfgProvidersOpenaiResponsesWebsockets.set(session.settings, true);
+			session.settings.setModelRole("advisor", `openai/${advisorModel.id}`);
+			expect(session.setAdvisorEnabled(true)).toBe(true);
+			const advisor = session.getAdvisorAgent();
+			if (!advisor) throw new Error("Expected standard Responses advisor");
+			await advisor.prompt("ping");
+			expect(fixture.requests).toHaveLength(preferWebsockets ? 1 : 0);
+			expect(fixture.httpRequests).toHaveLength(preferWebsockets ? 0 : 1);
+		} finally {
+			modelRegistry.unregisterProvider("openai");
+			await fixture.server.stop(true);
+		}
+	});
 
 	it("caps Codex SSE attempts inside each advisor-level retry", async () => {
 		authStorage.keys.setRuntime("openai-codex", "test-key");

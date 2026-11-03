@@ -19,7 +19,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgProvidersMuseCodeStoreResponses } from "@oh-my-pi/pi-coding-agent/session/settings";
 import {
 	createSettingsAwareStreamFn,
-	resolveCodexWebsocketPreference,
+	resolveWebsocketPreference,
 } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
 
 function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOptions }> } {
@@ -92,14 +92,24 @@ describe("createSettingsAwareStreamFn", () => {
 	it("keeps the WebSocket setting exclusive to Codex", () => {
 		for (const setting of ["auto", "on", "off"] as const) {
 			const settings = Settings.isolated({ "providers.openaiWebsockets": setting });
-			expect(resolveCodexWebsocketPreference(settings, stubCodexModel)).toBe(
+			expect(resolveWebsocketPreference(settings, stubCodexModel)).toBe(
 				setting === "on" ? true : setting === "off" ? false : undefined,
 			);
-			for (const api of ["openai-responses", "openrouter", "anthropic-messages"] as const) {
-				expect(resolveCodexWebsocketPreference(settings, { api } as Model)).toBeUndefined();
+			for (const api of ["openrouter", "anthropic-messages"] as const) {
+				expect(resolveWebsocketPreference(settings, { api } as Model)).toBeUndefined();
 			}
-			expect(resolveCodexWebsocketPreference(settings, undefined)).toBeUndefined();
+			expect(resolveWebsocketPreference(settings, stubResponsesModel)).toBe(false);
+			expect(resolveWebsocketPreference(settings, undefined)).toBeUndefined();
 		}
+	});
+
+	it("treats standard Responses settings, model and request false as independent vetoes", () => {
+		const enabled = Settings.isolated({ "providers.openaiResponsesWebsockets": true });
+		const disabled = Settings.isolated({ "providers.openaiResponsesWebsockets": false });
+		expect(resolveWebsocketPreference(disabled, { ...stubResponsesModel, preferWebsockets: true }, true)).toBe(false);
+		expect(resolveWebsocketPreference(enabled, { ...stubResponsesModel, preferWebsockets: false }, true)).toBe(false);
+		expect(resolveWebsocketPreference(enabled, { ...stubResponsesModel, preferWebsockets: true }, false)).toBe(false);
+		expect(resolveWebsocketPreference(enabled, stubResponsesModel)).toBe(true);
 	});
 
 	it("applies provider settings to the forwarded options when caller omits them", () => {
@@ -325,25 +335,6 @@ describe("createSettingsAwareStreamFn", () => {
 
 		expect(calls[0]?.options?.maxTokens).toBeUndefined();
 		expect(calls[1]?.options?.maxTokens).toBeLessThan(9_000);
-	});
-
-	it("forwards raw standard Responses preferences without deriving them from model or Codex settings", () => {
-		const { fn: base, calls } = captureBase();
-		const wrapped = createSettingsAwareStreamFn(Settings.isolated({ "providers.openaiWebsockets": "on" }), base);
-		for (const api of ["openai-responses", "openrouter"] as const) {
-			const model = { ...stubResponsesModel, api, preferWebsockets: true };
-			wrapped(model, stubContext);
-			wrapped(model, stubContext, { preferWebsockets: false });
-			wrapped(model, stubContext, { preferWebsockets: true });
-		}
-		expect(calls.map(call => call.options?.preferWebsockets)).toEqual([
-			undefined,
-			false,
-			true,
-			undefined,
-			false,
-			true,
-		]);
 	});
 
 	it("fits a cold request that may wait for a provider slot as replaying", () => {

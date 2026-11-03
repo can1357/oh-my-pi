@@ -38,13 +38,7 @@ async function drain(
 	options: { forceReasoningOff?: boolean } = {},
 ): Promise<Record<string, unknown>> {
 	const { fetchMock, captured } = mockSseFetch();
-	const stream = streamSimple(model, ctx, {
-		apiKey: "k",
-		fetch: fetchMock,
-		preferWebsockets: false,
-		temperature: 0,
-		...options,
-	});
+	const stream = streamSimple(model, ctx, { apiKey: "k", fetch: fetchMock, temperature: 0, ...options });
 	for await (const event of stream) {
 		if (event.type === "done" || event.type === "error") break;
 	}

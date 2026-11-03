@@ -185,6 +185,7 @@ interface SessionConnection {
 interface TransportSession {
 	sessionId: string;
 	sseOnly: boolean;
+	activeLeases: number;
 	connection?: SessionConnection;
 }
 
@@ -209,6 +210,12 @@ export class OpenAIResponsesTransportSessions {
 		return key !== undefined && this.#sessions.get(key)?.sseOnly === true;
 	}
 
+	#discardUnused(key: string, entry: TransportSession): void {
+		if (!entry.sseOnly && entry.activeLeases === 0 && !entry.connection && this.#sessions.get(key) === entry) {
+			this.#sessions.delete(key);
+		}
+	}
+
 	acquire(args: {
 		scope: ResponsesTransportScope;
 		headers: Record<string, string>;
@@ -219,7 +226,7 @@ export class OpenAIResponsesTransportSessions {
 		const key = this.#key(args.scope);
 		let entry = key ? this.#sessions.get(key) : undefined;
 		if (key && !entry) {
-			entry = { sessionId: args.scope.sessionId!, sseOnly: false };
+			entry = { sessionId: args.scope.sessionId!, sseOnly: false, activeLeases: 0 };
 			this.#sessions.set(key, entry);
 		}
 		let cached = entry?.connection;
@@ -251,6 +258,7 @@ export class OpenAIResponsesTransportSessions {
 						busy: false,
 					};
 		if (retained) entry!.connection = leased;
+		if (entry) entry.activeLeases++;
 		leased.busy = true;
 		this.#active.add(leased);
 		let released = false;
@@ -271,6 +279,7 @@ export class OpenAIResponsesTransportSessions {
 				released = true;
 				leased.busy = false;
 				this.#active.delete(leased);
+				if (entry) entry.activeLeases--;
 				if (
 					retained &&
 					key &&
@@ -284,6 +293,7 @@ export class OpenAIResponsesTransportSessions {
 							entry.connection = undefined;
 						}
 						leased.session.close();
+						this.#discardUnused(key, entry!);
 					}, IDLE_REUSE_MS);
 					leased.timer.unref();
 				} else {
@@ -291,6 +301,7 @@ export class OpenAIResponsesTransportSessions {
 					if (key && this.#sessions.get(key) === entry && entry?.connection === leased)
 						entry.connection = undefined;
 				}
+				if (key && entry) this.#discardUnused(key, entry);
 			},
 		};
 	}

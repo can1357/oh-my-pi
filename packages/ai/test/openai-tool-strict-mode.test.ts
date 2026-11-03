@@ -160,7 +160,6 @@ function captureCompletionsPayload(
 function captureResponsesPayload(model: Model<"openai-responses">, context: Context = testContext): Promise<unknown> {
 	const { promise, resolve } = Promise.withResolvers<unknown>();
 	streamOpenAIResponses(model, context, {
-		preferWebsockets: false,
 		apiKey: "test-key",
 		signal: createAbortedSignal(),
 		onPayload: payload => resolve(payload),
@@ -570,7 +569,11 @@ describe("OpenAI tool strict mode", () => {
 				...testContext,
 				tools: [testTool, looseYieldTool],
 			},
-			{ preferWebsockets: false, apiKey: "test-key", providerSessionState, fetch: fetchMock },
+			{
+				apiKey: "test-key",
+				providerSessionState,
+				fetch: fetchMock,
+			},
 		).result();
 
 		const text = result.content
@@ -770,7 +773,6 @@ describe("OpenAI tool strict mode", () => {
 		const context: Context = { ...testContext, tools: [testTool] };
 
 		const result = await streamOpenAIResponses(model, context, {
-			preferWebsockets: false,
 			apiKey: "test-key",
 			providerSessionState,
 			fetch: fetchMock,
@@ -779,7 +781,6 @@ describe("OpenAI tool strict mode", () => {
 		expect(result.errorMessage).toBeUndefined();
 
 		const nextResult = await streamOpenAIResponses(model, context, {
-			preferWebsockets: false,
 			apiKey: "test-key",
 			providerSessionState,
 			fetch: fetchMock,
