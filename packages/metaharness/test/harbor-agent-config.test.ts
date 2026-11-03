@@ -580,6 +580,47 @@ describe("runner", () => {
 		},
 		CASE_TIMEOUT_MS,
 	);
+
+	it(
+		"refuses a generated job name that holds the token before it writes the launch snapshot",
+		async () => {
+			const { root } = await scratch("runner-token-slug-");
+			const bin = path.join(root, "bin");
+			for (const tool of ["harbor", "docker"]) await stubTool(path.join(bin, tool));
+			// The model `openrouter/slugtok.bearer` never holds the token, but its slug does.
+			const child = Bun.spawn(
+				[
+					process.execPath,
+					path.join(import.meta.dir, "..", "src", "runner.ts"),
+					"--model",
+					"openrouter/slugtok.bearer",
+					"--gateway-token",
+					"slugtok-bearer",
+					"--gateway-url",
+					"http://127.0.0.1:1",
+					"--jobs-dir",
+					path.join(root, "jobs"),
+					"--install",
+					"local",
+					"--no-build",
+				],
+				{
+					env: { PATH: `${bin}:${Bun.env.PATH ?? "/usr/bin:/bin"}`, TMPDIR: os.tmpdir() },
+					stdout: "pipe",
+					stderr: "pipe",
+				},
+			);
+			const [stdout, stderr] = await Promise.all([
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+				child.exited,
+			]);
+
+			expect(stdout + stderr).toContain("the job name holds the gateway token");
+			expect(await fs.readdir(path.join(root, "jobs")).catch(() => [])).toEqual([]);
+		},
+		CASE_TIMEOUT_MS,
+	);
 });
 
 describe("manager", () => {
@@ -764,6 +805,43 @@ describe("manager", () => {
 						],
 					}),
 				).toBe(400);
+				const launchOnly = (extra: Record<string, unknown>) =>
+					send("/api/runs", {
+						model: "openrouter/test-model",
+						environment: "docker",
+						extraArgs: [
+							"--dry-run",
+							"--binary",
+							path.join(root, "omp-linux-x64"),
+							"--gateway-url",
+							"http://127.0.0.1:1",
+						],
+						...extra,
+					});
+				// A generated job name comes from the model slug: `slugtok.bearer` is not the token, its slug is.
+				expect(await launchOnly({ model: "openrouter/slugtok.bearer", gatewayToken: "slugtok-bearer" })).toBe(400);
+				// The jobs dir is on the command line: a token inside its path must not reach the process list.
+				expect(await launchOnly({ jobName: "token-dir", gatewayToken: path.basename(root) })).toBe(400);
+				// A forwarded host variable holding an earlier launch's token must not reach a later run's omp.
+				process.env.REVIEW_RETAINED_ALIAS = token;
+				try {
+					const forwarded = await launchOnly({
+						jobName: "token-forward",
+						gatewayToken: otherToken,
+						extraArgs: [
+							"--env",
+							"REVIEW_RETAINED_ALIAS",
+							"--dry-run",
+							"--binary",
+							path.join(root, "omp-linux-x64"),
+							"--gateway-url",
+							"http://127.0.0.1:1",
+						],
+					});
+					expect(forwarded).toBe(400);
+				} finally {
+					delete process.env.REVIEW_RETAINED_ALIAS;
+				}
 				const armToken = "review-arm-bearer";
 				expect(
 					await send("/api/experiments/token/arms", {
@@ -780,11 +858,17 @@ describe("manager", () => {
 							"_manager/metaharness.sqlite-wal",
 							"token-b/manager.json",
 							"token-other/manager.json",
+							"token-forward/manager.json",
 						].map(file => fs.readFile(path.join(root, file)).catch(() => Buffer.alloc(0))),
 					),
 				);
 				expect(stored.includes(Buffer.from(token))).toBe(false);
 				expect(stored.includes(Buffer.from(armToken))).toBe(false);
+				expect(stored.includes(Buffer.from("slugtok-bearer"))).toBe(false);
+				// Refused before the job directory is made.
+				expect((await fs.readdir(root)).filter(name => name.includes("slugtok") || name === "token-dir")).toEqual(
+					[],
+				);
 			} finally {
 				await manager.stop();
 			}

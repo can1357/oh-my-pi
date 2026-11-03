@@ -414,6 +414,9 @@ export class ManagerServer {
 			request.dataset ??
 			(benchmark === "harbor" ? "terminal-bench@2.0" : benchmark === "edit" ? "typescript-edit" : "squad-dev");
 		const jobName = request.jobName ?? defaultJobName(request.model);
+		// A generated job name comes from the model slug, and the name and the jobs dir reach
+		// the command line, the stored record and the job directory's path.
+		this.#refuseKnownGatewayTokens({ jobName, jobsDir: this.jobsDir }, "the run's name and directory", token);
 		if (this.#children.has(jobName) || this.#store.getRun(jobName)?.status === "running") {
 			throw new Error(`run ${jobName} is already running`);
 		}
@@ -440,26 +443,31 @@ export class ManagerServer {
 			const runnerArgs = harborRunnerArgs(request, { jobsDir: this.jobsDir, jobName, dataset });
 			// The runner's own parser decides what each extra argument means: it refuses an
 			// `--env` entry naming the token variable, and a host value it forwards is checked
-			// here, before the request is stored.
-			refuseGatewayTokenInEnv(parseArgs(runnerArgs).env, token);
+			// here against every token the manager knows, before the request is stored.
+			const forwarded = parseArgs(runnerArgs).env;
+			for (const known of this.#knownGatewayTokens(token)) refuseGatewayTokenInEnv(forwarded, known);
 			argv = ["bun", "src/runner.ts", ...runnerArgs];
 		}
 		if (benchmark !== "harbor") argv.push(...(request.extraArgs ?? []));
+		const record: Omit<LaunchRecord, "pid"> = {
+			benchmark,
+			jobName,
+			dataset,
+			agent: request.agent ?? "omp",
+			models: [request.model],
+			prewalk: request.prewalk,
+			config: { ...request },
+			role: request.role,
+			note: request.note,
+		};
+		// The command line is visible in the process list and the record is stored: check
+		// both as built, not only the request they came from.
+		this.#refuseKnownGatewayTokens({ argv, record }, "the launch's command line and record", token);
 
 		const pid = this.#spawnRunner(
 			argv,
 			cwd,
-			{
-				benchmark,
-				jobName,
-				dataset,
-				agent: request.agent ?? "omp",
-				models: [request.model],
-				prewalk: request.prewalk,
-				config: { ...request },
-				role: request.role,
-				note: request.note,
-			},
+			record,
 			gatewayToken === undefined ? {} : { [GATEWAY_TOKEN_INPUT_ENV]: gatewayToken },
 		);
 		// A reused job name must not resume with an earlier launch's token.
@@ -670,10 +678,13 @@ export class ManagerServer {
 	 * of the request at hand), its own, and those of the runs it launched.
 	 */
 	#refuseKnownGatewayTokens(value: unknown, where: string, extra?: string): void {
+		for (const token of this.#knownGatewayTokens(extra)) refuseGatewayTokenIn(value, token, where);
+	}
+
+	/** `extra` (the token of the request at hand), the manager's own, and those of the runs it launched. */
+	#knownGatewayTokens(extra?: string): string[] {
 		const known = [this.#hostGatewayToken(), ...this.#gatewayTokens.values()];
-		for (const token of extra === undefined ? known : [extra, ...known]) {
-			refuseGatewayTokenIn(value, token, where);
-		}
+		return extra === undefined ? known : [extra, ...known];
 	}
 
 	/** Cancel a managed run. SIGTERM first so the runner forwards the signal to

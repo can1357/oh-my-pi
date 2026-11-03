@@ -1761,6 +1761,8 @@ async function runBenchmark(cfg: Config): Promise<BenchmarkRun> {
 	}
 
 	const jobName = cfg.jobName ?? defaultJobName(cfg.models[0] ?? "model");
+	// A generated name comes from the model slug; it names directories and the snapshot.
+	refuseGatewayTokenIn(jobName, cfg.gatewayToken, "the job name");
 	const jobDir = path.join(cfg.jobsDir, jobName);
 	const benchDir = path.join(cfg.jobsDir, "_bench", jobName);
 	fs.mkdirSync(benchDir, { recursive: true });
