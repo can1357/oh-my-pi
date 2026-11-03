@@ -38,7 +38,7 @@ import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" 
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createReleaseHold, type ReleaseHold } from "../utils/release-hold";
 import { leaseIsolationWorkspace } from "./isolation-lease";
-import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
@@ -241,6 +241,8 @@ export interface EffectiveSubagentPolicy {
 	applyChanges: boolean;
 	enableLsp: boolean;
 	enableIrc: boolean;
+	/** Caller `effort` hint to apply; dropped when the agent's level comes from the user's `^model:level` tag. */
+	effort?: TaskEffort;
 }
 
 /** Settled child execution plus data needed by the frontends' own rendering. */
@@ -396,6 +398,7 @@ function preflightPerCallModel(
 	selector: unknown,
 	agent: AgentDefinition,
 	hasModelOverride: boolean,
+	userTaggedEffort: boolean,
 	parentModelPattern: string | undefined,
 ): PerCallModelGrants {
 	const { settings, modelRegistry } = request.session;
@@ -409,6 +412,11 @@ function preflightPerCallModel(
 	if (hasModelOverride) {
 		fail(
 			`Per-call model conflicts with task.agentModelOverrides for agent "${agent.name}". Omit model to use the configured override.`,
+		);
+	}
+	if (userTaggedEffort) {
+		fail(
+			`Per-call model conflicts with the user's \`^model:level\` tag for agent "${agent.name}". Omit model to use the tagged model and effort.`,
 		);
 	}
 	const selectorProblem = invalidModelSelectorReason(selector, "The call", {
@@ -502,7 +510,8 @@ export async function resolveEffectiveSubagentPolicy(
 	assertDepthAndSpawnAllowed(request, agentName);
 
 	const discovery = await discoverAgentsShared(request.session.cwd, request.session.effectiveExtensionRoots?.());
-	const agents = [...discovery.agents, ...(request.session.getSessionAgents?.() ?? [])];
+	const sessionAgents = request.session.getSessionAgents?.() ?? [];
+	const agents = [...discovery.agents, ...sessionAgents];
 	const agent = getAgent(agents, agentName);
 	if (!agent) {
 		const available = agents.map(candidate => candidate.name).join(", ") || "none";
@@ -576,6 +585,11 @@ export async function resolveEffectiveSubagentPolicy(
 	// A `seance` name that resolved to anything but the bundled agent is an ordinary agent: its `model` is per-call.
 	const perCallSelector: unknown = request.perCallModel ?? (isBundledSeance(agent) ? undefined : request.seanceModel);
 	const parentActiveModel = request.session.getActiveModel?.();
+	const userTaggedEffort =
+		sessionAgents.includes(agent) &&
+		agent.thinkingLevel !== undefined &&
+		agent.thinkingLevel !== AUTO_THINKING &&
+		agent.model?.[0]?.endsWith(`:${agent.thinkingLevel}`) === true;
 	const perCallModelGrants =
 		perCallSelector === undefined
 			? undefined
@@ -584,6 +598,7 @@ export async function resolveEffectiveSubagentPolicy(
 					perCallSelector,
 					agent,
 					Object.hasOwn(agentModelOverrides, agentName),
+					userTaggedEffort,
 					// A multi-upstream or otherwise richer parent route cannot grant a simpler selector.
 					parentActiveModel
 						? parentModelGrantPattern(parentActiveModel)
@@ -645,6 +660,7 @@ export async function resolveEffectiveSubagentPolicy(
 			(request.enableIrc ??
 				(request.session.enableIrc !== false &&
 					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
+		effort: userTaggedEffort ? undefined : request.effort,
 	};
 }
 
@@ -806,7 +822,7 @@ function buildExecutorOptions(
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		perCallModelGrants: policy.perCallModelGrants,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
-		effort: request.effort,
+		effort: policy.effort,
 		solutionSpace: request.solutionSpace?.trim() || undefined,
 		structured: policy.structured,
 		...(policy.schema.source === "none"
