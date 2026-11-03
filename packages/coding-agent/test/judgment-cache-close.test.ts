@@ -10,7 +10,8 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { assertNotHeldOpen } from "@oh-my-pi/pi-utils/held-file";
 
 describe("JudgmentCache.close", () => {
-	it("releases the database and its WAL index", () => {
+	// `assertNotHeldOpen` only detects held files on Linux; elsewhere it always passes.
+	it.skipIf(process.platform !== "linux")("releases the database and its WAL index", () => {
 		using dir = TempDir.createSync("@omp-judgment-cache-close-");
 		const dbPath = path.join(dir.path(), "judgment-cache.db");
 		const cache = JudgmentCache.open(dbPath);
