@@ -299,9 +299,9 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					callOrder.call(block.id);
 					// Gemini 3 requires a thought signature on function calls it makes. The
 					// public API requires the bypass sentinel on every unsigned call. Cloud
-					// Code Assist requires it only when the first call itself is unsigned;
-					// signed-first parallel turns must leave unsigned secondary calls bare.
-					// Vertex rejects the sentinel and receives neither fallback. (#9638, #10602)
+					// Code Assist and Vertex AI require it only when the first call itself is
+					// unsigned; signed-first parallel turns must leave unsigned secondary calls
+					// bare. (#9638, #10602)
 					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thoughtSignature);
 					const requiresFallback =
 						model.compat.requiresSkipThoughtSignature ||

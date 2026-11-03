@@ -142,6 +142,11 @@ class "gemini" {
 			supports-function-part-id #true
 		}
 	}
+	on-api "google-vertex" {
+		revision ">=3" {
+			requires-skip-thought-signature-on-first-function-call #true
+		}
+	}
 	on "google-antigravity" "google-gemini-cli" {
 		family "flash" {
 			stream-first-event-timeout-ms 60000
