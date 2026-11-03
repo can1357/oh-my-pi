@@ -810,8 +810,10 @@ export class StdioTransport implements MCPTransport {
 		return this.#connection?.open ?? false;
 	}
 
-	get outputEnded(): boolean {
-		return this.#connection?.outputDone ?? false;
+	/** See {@link MCPTransport.reportingExit}: set by the first sign of the exit, stdout ending or a failed write. */
+	get reportingExit(): boolean {
+		const connection = this.#connection;
+		return connection !== null && (connection.outputDone || connection.closeDeadline !== undefined);
 	}
 
 	/**

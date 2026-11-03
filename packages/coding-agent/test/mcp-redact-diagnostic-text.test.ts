@@ -70,6 +70,18 @@ describe("stripTrailingFetchAdvice", () => {
 		expect(stripTrailingFetchAdvice(`REASON ${complete}\nF\n${complete}`)).toBe("REASON");
 	});
 
+	// Round 12: cut-off pieces may follow one another (a stopped write, then a
+	// hint still being written). They count while they are shorter than one hint
+	// in all, measured where they end, so the whitespace a strip removes cannot
+	// let a second strip take more.
+	it("strips cut-off pieces just under one hint's length in one pass", () => {
+		const complete = HINT.slice(0, -1);
+		// `F` and 74 characters: 75, one under the hint's 76; two spaces after them.
+		const value = `REASON ${complete}F${complete.slice(0, 74)}  ${complete}`;
+		expect(stripTrailingFetchAdvice(value)).toBe("REASON");
+		expect(stripTrailingFetchAdvice(stripTrailingFetchAdvice(value))).toBe("REASON");
+	});
+
 	// Round 10: the stderr tail redacts every word with its context, so stderr
 	// pays this per word. 1 MiB of "noise " cost about 4 s of CPU before; round
 	// 11: 1 MiB of "ff " still did, because each word also searched for a hint.

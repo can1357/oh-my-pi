@@ -5,7 +5,7 @@
  * pipe chunking, process reaping and the transport's close deadline are the subject,
  * so fake timers cannot stand in for them.
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -334,9 +334,37 @@ describe.skipIf(process.platform === "win32" || !PYTHON)("StdioTransport exit re
 		);
 	}
 
+	// Round 12: past the 32 KiB buffer, the kept text ended in a hint, a cut-off
+	// piece and a hint still being written; the trim saw no hint run there and cut
+	// the reason away.
+	for (const [count, between] of [
+		[420, "F"],
+		[1_100, "F"],
+		[520, "\nF\n"],
+		[420, "\nFor more information, pass `ver\n"],
+	] as const) {
+		it(
+			`keeps the reason before ${count} hints each followed by ${JSON.stringify(between)}`,
+			async () => {
+				const advice = "For more information, pass `verbose: true` in the second argument to fetch()";
+				const reason = `REFUSED: ${"word ".repeat(175)}FINAL_REASON_CANARY`;
+				const args = server(
+					`${stderrWrites([`${reason}\n${`${advice}${between}`.repeat(count)}${advice}`])}\nsys.exit(77)`,
+				);
+				const error = await withTransport({ command: python, args }, transport =>
+					transportRejection(transport.request("tools/call")),
+				);
+
+				expect(error.code).toBe(77);
+				expect(error.message).toEndWith("FINAL_REASON_CANARY");
+			},
+			TEST_TIMEOUT_MS,
+		);
+	}
+
 	// Round 11: 1 MiB of "ff " on stderr cost a healthy server's request about
 	// 3 s of this process's CPU (each word searched for a hint), past a 1 s deadline.
-	for (const word of ["noise", "ff", "ffff)"]) {
+	for (const word of ["noise", "ff", "ffff)", "F", "For"]) {
 		it(
 			`spends little CPU on a MiB of stderr words like ${JSON.stringify(word)}`,
 			async () => {
@@ -581,6 +609,49 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'ok':True}}),flush=True
 				expect(outcome.code).toBe(77);
 				expect(outcome.message).toEndWith("CLIENT_REFUSAL");
 			} finally {
+				await removeWithRetries(root);
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	// Round 12: a failed handshake write had started the wait for the exit report, but
+	// the client's handshake deadline waited only once stdout had ended, so it
+	// replaced the report with a bare timeout.
+	it(
+		"reports the exit of a server whose stdin closed before the handshake was written",
+		async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-stdio-epipe-"));
+			const ready = path.join(root, "stdin-closed");
+			// The server must close stdin before omp writes `initialize`, an order a real
+			// spawn cannot guarantee: start it here, wait for it, and hand it to the transport.
+			const child = Bun.spawn(
+				[
+					python,
+					"-u",
+					"-c",
+					`import os,sys,time\nos.close(0);open(${JSON.stringify(ready)},'w').close();os.write(2,b'FAILED_WRITE_REFUSAL\\n');time.sleep(1.0);sys.exit(77)`,
+				],
+				{ stdin: "pipe", stdout: "pipe", stderr: "pipe", detached: true },
+			);
+			try {
+				await waitForFile(ready);
+				const spawn = vi.spyOn(Bun, "spawn").mockReturnValueOnce(child);
+				try {
+					const outcome = await connectToServer("wrapper", { type: "stdio", command: python, timeout: 200 }).then(
+						() => new Error("Expected the handshake to fail"),
+						(error: unknown) => error,
+					);
+					if (!(outcome instanceof MCPTransportError)) throw outcome;
+
+					expect(outcome.code).toBe(77);
+					expect(outcome.message).toEndWith("FAILED_WRITE_REFUSAL");
+				} finally {
+					spawn.mockRestore();
+				}
+			} finally {
+				if (child.exitCode === null) child.kill("SIGKILL");
+				await child.exited;
 				await removeWithRetries(root);
 			}
 		},

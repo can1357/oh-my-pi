@@ -50,28 +50,43 @@ export interface TrailingFetchAdvice {
 }
 
 /**
- * The run of Bun's fetch hints at the end of `value`: the hint once or
- * repeated, with or without whitespace or a final period between copies. A
- * hint cut off at the end of a piece (a process stopped while writing it)
- * counts too, when a complete hint comes right before it. The run is taken
- * whole, as many passes as it takes, so the text before it ends in no hint and
- * no cut-off hint after a complete one: removing the run again removes nothing
- * (redaction is idempotent). Linear: each pass compares fixed suffixes
- * character by character and removes at least one complete hint.
+ * The run of Bun's fetch hints at the end of `value`: complete hints, with or
+ * without whitespace or a final period between copies, and pieces of a hint
+ * cut off (a process stopped while writing one, or the stream is still
+ * writing it). Cut-off pieces count only when a complete hint comes before
+ * them, so text that merely starts like a hint ("REFUSED for") is kept, and
+ * only while the pieces since that hint are shorter than one hint. The
+ * walk goes back over complete hints and cut-off pieces alike and ends the
+ * run at the earliest complete hint it reaches, so the text before the run
+ * ends in nothing the walk would take: removing the run again removes nothing
+ * (redaction is idempotent). Each step goes back at least one character and
+ * compares at most one hint's length of candidates, character by character.
  */
 export function trailingFetchAdvice(value: string): TrailingFetchAdvice {
 	const hints: number[] = [];
 	let start = value.length;
+	let cursor = value.length;
+	/** Where the cut-off pieces since the last complete hint end, whitespace excluded. */
+	let piecesEnd: number | undefined;
 	for (;;) {
-		let end = start;
+		let end = cursor;
 		while (end > 0 && /\s/.test(value[end - 1]!)) end--;
-		const partial = fetchAdvicePrefixLength(value, end);
 		const before = hints.length;
-		// A cut-off hint counts only after a complete one. (Text that ends in a
-		// cut-off hint ends in no complete one: the hint's end, ")", is not its start.)
-		completeFetchAdviceStarts(value, end - partial, hints);
-		if (hints.length === before) break;
-		start = hints[hints.length - 1]!;
+		completeFetchAdviceStarts(value, end, hints);
+		if (hints.length > before) {
+			start = cursor = hints[hints.length - 1]!;
+			piecesEnd = undefined;
+			continue;
+		}
+		// A cut-off piece joins the run only if a complete hint is reached before it,
+		// and the pieces since the last complete hint are shorter than one hint: a
+		// process stopped mid-write leaves no more than that, and the walk stays short.
+		// Measured from where the pieces end, so a second strip, which starts there,
+		// measures the same.
+		const partial = fetchAdvicePrefixLength(value, end);
+		piecesEnd ??= end;
+		if (partial === 0 || piecesEnd - (end - partial) > FETCH_VERBOSE_ADVICE.length) break;
+		cursor = end - partial;
 	}
 	return { start, hints };
 }
