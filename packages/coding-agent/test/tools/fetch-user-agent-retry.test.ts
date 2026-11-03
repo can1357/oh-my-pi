@@ -78,6 +78,29 @@ describe("read URL refused for one user agent", () => {
 		expect(text).toContain("Revenue grew in the quarter");
 	});
 
+	it("keeps the recognized wall when later user agents fail to connect", async () => {
+		const server = Bun.serve({
+			port: 0,
+			fetch: request => {
+				if (request.headers.get("user-agent")?.startsWith("curl/")) {
+					return new Response('<html><body><input name="js_challenge"/></body></html>', {
+						headers: { "content-type": "text/html" },
+					});
+				}
+				server.stop(true);
+				return Promise.withResolvers<Response>().promise;
+			},
+		});
+		servers.push(server);
+		const url = `http://127.0.0.1:${server.port}/canonical`;
+
+		const result = await loadPage(url);
+
+		expect(result.blockedBy).toBe("JavaScript challenge");
+		expect(result.finalUrl).toBe(url);
+		expect(result.status).toBe(200);
+	});
+
 	it("reads the page from the next user agent before waiting out a 429's Retry-After", async () => {
 		const server = serveRefusingCurl(
 			() => new Response("Too Many Requests", { status: 429, headers: { "retry-after": "10" } }),
