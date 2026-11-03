@@ -976,10 +976,31 @@ describe("dedicated tool capability", () => {
 		"rg --unrestricted --unrestricted --unrestricted needle .",
 		"rg -u -uu needle .",
 		"fd -- 'A(?:[0-9]{2})+B' --glob",
+		// Round 11: options are counted where rg reads them (`--` here is `--regexp`'s value), and a
+		// word the shell expands can become any pattern, script or option, in any stage.
+		"rg --regexp -- -uuu data",
+		"rg --regexp -- --unrestricted --unrestricted --unrestricted data",
+		"cat text | sed -e s*foo*bar*",
+		"sed -i s*foo*bar* text",
+		"grep *.pattern text",
+		"grep -e *.pattern text",
+		"grep --regexp *.pattern text",
+		"rg *.pattern text",
+		"cat $f",
+		"find . -name *.ts",
 		// An empty name is no file.
 		'echo hi > ""',
 	])("does not refuse %s (round 8)", command => {
 		expect(decide(command)).toBeUndefined();
+	});
+
+	it.each([
+		["rg --regexp -- data", "grep"],
+		["rg -uu needle .", "grep"],
+		["cat text | sed -e 's*foo*bar*'", "read"],
+		["grep '*.pattern' text", "grep"],
+	])("still refuses %s as %s (round 11)", (command, tool) => {
+		expect(decide(command)).toBe(tool);
 	});
 
 	it("renders a repeated printf only up to a bound", () => {
