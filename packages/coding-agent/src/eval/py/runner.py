@@ -8,6 +8,7 @@ Host -> wrapper:
   {"id": str, "code": str, "silent": bool?, "storeHistory": bool?, "cwd": str?, "filename": str?, "env": dict?}
   {"type": "tool", "id": str, "op": "describe", "names": [str]}
   {"type": "tool", "id": str, "op": "call", "name": str, "args": dict}
+  {"type": "tool_cancel", "id": str}              # caller gave up: cancel an async tool call
   {"type": "exit"}                                # graceful shutdown
 
 Wrapper -> host:
@@ -2699,6 +2700,77 @@ def _start_parent_watchdog() -> None:
 # ---------------------------------------------------------------------------
 
 
+_TOOL_LOOP: asyncio.AbstractEventLoop | None = None
+_TOOL_LOOP_LOCK = threading.Lock()
+
+
+def _tool_loop() -> asyncio.AbstractEventLoop:
+    """The event loop every async kernel-defined tool runs on, started on first use.
+
+    Concurrent calls share kernel-global asyncio primitives (a cell's
+    ``asyncio.Lock()`` serializing a tool across subagents, say), so they must
+    share one loop: with a private loop per call, a release from another
+    call's thread never wakes the waiter's selector and the waiting call hangs
+    forever. It is not the cell loop, which a cell blocked in ``wait()`` on
+    this tool's caller would deadlock.
+    """
+    global _TOOL_LOOP
+    with _TOOL_LOOP_LOCK:
+        if _TOOL_LOOP is None:
+            loop = asyncio.new_event_loop()
+            threading.Thread(target=loop.run_forever, name="omp-tool-loop", daemon=True).start()
+            _TOOL_LOOP = loop
+        return _TOOL_LOOP
+
+
+async def _await_tool_result(awaitable: Any) -> Any:
+    return await awaitable
+
+
+# In-flight tool requests by id: ``None`` until an async call is on the tool
+# loop, then its future. A cancel drops the entry, so a call that has not
+# reached the loop yet sees itself cancelled when it gets there.
+_TOOL_CALLS: dict[str, Any] = {}
+_TOOL_CALLS_LOCK = threading.Lock()
+
+
+def _start_tool_request(req: dict) -> None:
+    """Register a tool request, then serve it on its own thread.
+
+    Registration happens on the reader thread, before any later
+    ``tool_cancel`` line for the same id is read.
+    """
+    rid = str(req.get("id"))
+    with _TOOL_CALLS_LOCK:
+        _TOOL_CALLS[rid] = None
+    threading.Thread(
+        target=_handle_tool_request,
+        args=(req,),
+        name=f"omp-tool-{rid}",
+        daemon=True,
+    ).start()
+
+
+def _cancel_tool_request(rid: str) -> None:
+    """Cancel an async tool call whose caller gave up; a finished or sync call is left alone."""
+    with _TOOL_CALLS_LOCK:
+        future = _TOOL_CALLS.pop(rid, None)
+    if future is not None:
+        future.cancel()
+
+
+def _run_async_tool(rid: str, awaitable: Any) -> Any:
+    """Await ``awaitable`` on the shared tool loop, honouring a cancel of request ``rid``."""
+    with _TOOL_CALLS_LOCK:
+        if rid not in _TOOL_CALLS:
+            if inspect.iscoroutine(awaitable):
+                awaitable.close()
+            raise asyncio.CancelledError()
+        future = asyncio.run_coroutine_threadsafe(_await_tool_result(awaitable), _tool_loop())
+        _TOOL_CALLS[rid] = future
+    return future.result()
+
+
 def _jsonable(value: Any) -> Any:
     """Convert a tool result into a JSON-safe value without failing the request."""
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -2733,7 +2805,7 @@ def _handle_tool_request(req: dict) -> None:
                 raise KeyError(f"tool {name!r} is not defined")
             result = spec.fn(**(req.get("args") or {}))
             if inspect.isawaitable(result):
-                result = asyncio.run(result)
+                result = _run_async_tool(rid, result)
             envelope = {"ok": True, "value": _jsonable(result)}
         else:
             raise ValueError(f"unknown tool operation {op!r}")
@@ -2742,6 +2814,8 @@ def _handle_tool_request(req: dict) -> None:
         status = "error"
         _emit_error(rid, exc)
     finally:
+        with _TOOL_CALLS_LOCK:
+            _TOOL_CALLS.pop(rid, None)
         _flush_stream_proxies(rid)
         _emit(
             {
@@ -2957,12 +3031,10 @@ def _read_stdin(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, stdin) ->
         if req is None:
             continue
         if req.get("type") == "tool":
-            threading.Thread(
-                target=_handle_tool_request,
-                args=(req,),
-                name=f"omp-tool-{req.get('id')}",
-                daemon=True,
-            ).start()
+            _start_tool_request(req)
+            continue
+        if req.get("type") == "tool_cancel":
+            _cancel_tool_request(str(req.get("id")))
             continue
         loop.call_soon_threadsafe(queue.put_nowait, req)
     loop.call_soon_threadsafe(queue.put_nowait, {"type": "exit"})
@@ -3055,12 +3127,10 @@ async def _serve_windows(loop: asyncio.AbstractEventLoop, stdin) -> None:
             _emit_shadow_plan(req)
             continue
         if req.get("type") == "tool":
-            threading.Thread(
-                target=_handle_tool_request,
-                args=(req,),
-                name=f"omp-tool-{req.get('id')}",
-                daemon=True,
-            ).start()
+            _start_tool_request(req)
+            continue
+        if req.get("type") == "tool_cancel":
+            _cancel_tool_request(str(req.get("id")))
             continue
         if not _admit_shadow_run(req):
             continue

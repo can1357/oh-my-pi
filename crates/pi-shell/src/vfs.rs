@@ -171,7 +171,7 @@ impl Fs for VfsFs {
 		let rt = self.rt.clone();
 		self.route(
 			path,
-			|| match StdFs.open(path, flags, mode) {
+			|| match StdFs::default().open(path, flags, mode) {
 				FsPoll::Ready(Err(err)) => FsPoll::Ready(Err(name_the_limit(err))),
 				opened => opened,
 			},
@@ -188,7 +188,7 @@ impl Fs for VfsFs {
 	fn stat(&mut self, path: &BStr, follow: bool) -> FsPoll<Stat> {
 		self.route(
 			path,
-			|| StdFs.stat(path, follow),
+			|| StdFs::default().stat(path, follow),
 			move |fs, path| async move {
 				let meta = if follow {
 					fs.metadata(&path).await?
@@ -203,7 +203,7 @@ impl Fs for VfsFs {
 	fn access(&mut self, path: &BStr, mode: Access) -> FsPoll<()> {
 		self.route(
 			path,
-			|| StdFs.access(path, mode),
+			|| StdFs::default().access(path, mode),
 			move |fs, path| async move {
 				fs.access(
 					&path,
@@ -219,7 +219,7 @@ impl Fs for VfsFs {
 	fn read_dir(&mut self, path: &BStr) -> FsPoll<Box<dyn DirIter>> {
 		self.route(
 			path,
-			|| StdFs.read_dir(path),
+			|| StdFs::default().read_dir(path),
 			|fs, path| async move {
 				// A provider listing is in memory once `read_dir` answers; only
 				// the types it listed are used, since asking for the others
@@ -242,7 +242,7 @@ impl Fs for VfsFs {
 	fn readlink(&mut self, path: &BStr) -> FsPoll<BString> {
 		self.route(
 			path,
-			|| StdFs.readlink(path),
+			|| StdFs::default().readlink(path),
 			|fs, path| async move { Ok(os_bytes(fs.read_link(&path).await?.as_os_str())) },
 		)
 	}
@@ -250,19 +250,19 @@ impl Fs for VfsFs {
 	fn realpath(&mut self, path: &BStr) -> FsPoll<BString> {
 		self.route(
 			path,
-			|| StdFs.realpath(path),
+			|| StdFs::default().realpath(path),
 			|fs, path| async move { Ok(os_bytes(fs.canonicalize(&path).await?.as_os_str())) },
 		)
 	}
 
 	fn mkfifo_or_temp(&mut self, purpose: TempPurpose) -> FsPoll<TempNode> {
-		StdFs.mkfifo_or_temp(purpose)
+		StdFs::default().mkfifo_or_temp(purpose)
 	}
 
 	fn chdir_check(&mut self, path: &BStr) -> FsPoll<()> {
 		self.route(
 			path,
-			|| StdFs.chdir_check(path),
+			|| StdFs::default().chdir_check(path),
 			|fs, path| async move {
 				if !fs.metadata(&path).await?.is_dir() {
 					return Err(io::ErrorKind::NotADirectory.into());
