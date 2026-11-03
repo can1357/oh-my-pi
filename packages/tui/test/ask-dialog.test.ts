@@ -613,6 +613,39 @@ describe("AskDialogComponent", () => {
 			expect(first.note).toBeUndefined();
 			expect(second).toMatchObject({ selectedOptions: ["Delta"], note: "why Delta", noteOption: "Delta" });
 		});
+		for (const surface of ["tern", "tui"] as const) {
+			it(`starts a new note on the next question after annotating the previous answer (${surface})`, async () => {
+				const onPrompt = vi.fn().mockResolvedValueOnce("why Beta").mockResolvedValueOnce("why Gamma");
+				const onSubmit = vi.fn();
+				const component = new AskDialogComponent(twoQuestions, { onSubmit, onCancel: vi.fn(), onPrompt });
+
+				if (surface === "tern") {
+					component.describe(cx);
+					component.handleNativeEvent({ type: "activate", key: "q0", item: "option:1" });
+					component.handleNativeEvent(action("note"));
+				} else {
+					component.handleInput(DOWN);
+					component.handleInput(ENTER);
+					component.handleInput("n");
+				}
+				await flush();
+				if (surface === "tern") component.handleNativeEvent(action("note"));
+				else component.handleInput("n");
+				await flush();
+
+				expect(onPrompt.mock.calls[1]).toEqual([{ title: "Note for Gamma", question: "Q2?" }, undefined]);
+				if (surface === "tern") {
+					component.handleNativeEvent({ type: "activate", key: "q1", item: "option:0" });
+					component.handleNativeEvent(action("submit"));
+				} else {
+					component.handleInput(ENTER);
+					component.handleInput(ENTER);
+				}
+				const [first, second] = onSubmit.mock.calls[0][0].results;
+				expect(first).toMatchObject({ selectedOptions: ["Beta"], note: "why Beta", noteOption: "Beta" });
+				expect(second).toMatchObject({ selectedOptions: ["Gamma"], note: "why Gamma", noteOption: "Gamma" });
+			});
+		}
 	});
 
 	it("note prefill is empty when editing a different row after noting another option", async () => {
