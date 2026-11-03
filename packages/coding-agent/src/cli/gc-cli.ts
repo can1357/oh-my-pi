@@ -74,6 +74,7 @@ import {
 	describeOpenFileHolder,
 	type OpenFileHolders,
 	openFileHolders,
+	ownDescriptorCount,
 	type SoleOpenLease,
 	soleOpenLeaseStands,
 	takeSoleOpenLease,
@@ -2012,39 +2013,62 @@ async function archivedAliasesRefusal(proven: ProvenTree): Promise<string | unde
 }
 
 /**
- * Who else holds `file` open as the process list shows it, for a refusal to
- * name, reported under `named`. Asked only once the kernel has refused a
- * lease — see {@link takeSoleOpenLease} — since the list proves nothing and
- * costs a look at every descriptor of every process: 0.7 to 1.4 seconds a
- * read on a machine running 3,300 processes, which, read on every reclaim
- * and preview, was most of the time several tests took. This run's own
- * descriptors are left out.
+ * Who else holds `file` open — the file open at `handle`, this run's one
+ * descriptor on it — as the process list shows it, for a refusal to name.
+ * Asked only once the kernel has refused a lease — see
+ * {@link takeSoleOpenLease} — since the list proves nothing and costs a look
+ * at every descriptor of every process: 0.7 to 1.4 seconds a read on a
+ * machine running 3,300 processes, which, read on every reclaim and preview,
+ * was most of the time several tests took. Other processes are listed; this
+ * process is counted apart, by the descriptors it holds on the file besides
+ * `handle`: the kernel refuses a lease to an open of its own as to anyone's.
  */
-async function otherHolders(file: string, named: string): Promise<OpenFileHolders> {
+async function holdersOf(
+	handle: fs.FileHandle,
+	file: string,
+): Promise<{ listed: OpenFileHolders; ownOthers: number | undefined }> {
 	const listed: OpenFileHolders = await openFileHolders([file]).catch((error: unknown) => ({
 		unknown: errorMessage(error),
 	}));
-	if (!("holders" in listed)) return listed;
+	const own = await ownDescriptorCount(await handle.stat()).catch(() => undefined);
+	const ownOthers = own === undefined ? undefined : Math.max(0, own - 1);
+	if (!("holders" in listed)) return { listed, ownOthers };
 	return {
-		holders: listed.holders.filter(holder => holder.pid !== process.pid).map(holder => ({ ...holder, file: named })),
+		listed: {
+			holders: listed.holders.filter(holder => holder.pid !== process.pid).map(holder => ({ ...holder, file })),
+		},
+		ownOthers,
 	};
 }
 
 /**
  * Why a file was kept when the kernel would not lease it — see
  * {@link takeSoleOpenLease} — said so a reader can act on it: which file, what
- * the kernel answered, who the process list found, and what to do.
+ * the kernel answered, who holds it as far as can be seen, and what to do.
+ * The kernel refuses while any other open of the file exists, in another
+ * process or in this one, so another process is named only when one is seen.
  */
 function leaseRefusal(
 	file: string,
 	lease: Exclude<SoleOpenLease, { outcome: "held" }>,
-	listed: OpenFileHolders,
+	{ listed, ownOthers }: { listed: OpenFileHolders; ownOthers: number | undefined },
 ): string {
+	const own =
+		ownOthers !== undefined && ownOthers > 0
+			? `this omp process (${process.pid}) itself holds ${file} open through ${ownOthers} other ` +
+				`${ownOthers === 1 ? "descriptor" : "descriptors"}`
+			: undefined;
 	if ("holders" in listed && listed.holders.length > 0) {
 		return (
-			`${listed.holders.map(describeOpenFileHolder).join("; ")} open (${lease.evidence}): it is using the session, ` +
-			`and what it writes through that descriptor once the file moved would land in the archive beside a copy that ` +
-			`does not hold it, so nothing was moved — let it finish, or close it, and reclaim again`
+			`${listed.holders.map(describeOpenFileHolder).join("; ")}${own ? `; and ${own}` : ""} open (${lease.evidence}): ` +
+			`it is using the session, and what it writes through that descriptor once the file moved would land in the ` +
+			`archive beside a copy that does not hold it, so nothing was moved — let it finish, or close it, and reclaim again`
+		);
+	}
+	if (own) {
+		return (
+			`${own}, so the kernel would not lease it (${lease.evidence}), and no other process this run can list holds ` +
+			`it; nothing was moved. Close what has it open in this process and reclaim again`
 		);
 	}
 	const list =
@@ -2053,12 +2077,13 @@ function leaseRefusal(
 			: "no process this run can list holds it";
 	if (lease.outcome === "open-elsewhere") {
 		return (
-			`${file} is open in another process: the kernel refused this run a lease on it (${lease.evidence}), which it ` +
-			`does only while another process holds the file open or maps it, and ${list} — so the holder is one a ` +
-			`process list does not show: a child that inherited the descriptor, a process it was handed to, one that ` +
-			`maps the file, or another user's or another container's. It is using the session, so nothing was moved. ` +
-			`Find it with \`fuser -v ${shellQuote(file)}\` or \`lsof ${shellQuote(file)}\` (as root for another ` +
-			`user's), let it finish or close it, and reclaim again`
+			`${file} is open elsewhere: the kernel refused this run a lease on it (${lease.evidence}), which it does ` +
+			`only while another open of the file exists or it is mapped, and ${list}` +
+			`${ownOthers === 0 ? ", nor does this process through another descriptor" : ""} — so the holder is one a ` +
+			`process list does not show: a child that inherited the ` +
+			`descriptor, a process it was handed to, one that maps the file, or another user's or another container's. ` +
+			`It is using the session, so nothing was moved. Find it with \`fuser -v ${shellQuote(file)}\` or ` +
+			`\`lsof ${shellQuote(file)}\` (as root for another user's), let it finish or close it, and reclaim again`
 		);
 	}
 	return (
@@ -2112,7 +2137,7 @@ async function leaseLiveFiles(
 		if (!handle) return `${file.path} is no longer the file this run proved`;
 		leased.push({ ...file, handle });
 		const lease = takeSoleOpenLease(handle.fd);
-		if (lease.outcome !== "held") return leaseRefusal(file.path, lease, await otherHolders(file.path, file.path));
+		if (lease.outcome !== "held") return leaseRefusal(file.path, lease, await holdersOf(handle, file.path));
 		const now = await handle.stat();
 		if (!now.isFile() || !sameIdentity(identityFrom(now), file.proved)) {
 			return `${file.path} is no longer the file this run proved`;
@@ -2624,7 +2649,14 @@ async function freeArchivedCopies(
 					if (!handle) return `${copy} could not be read where it was moved`;
 					const lease = takeSoleOpenLease(handle.fd);
 					if (lease.outcome === "open-elsewhere") {
-						return `another process holds ${copy} open (${lease.evidence}), and could write to it after it went`;
+						// The kernel refuses for any other open, this process's own
+						// included, so another process is not named unless shown.
+						const own = await ownDescriptorCount(moved).catch(() => undefined);
+						return own !== undefined && own > 1
+							? `this omp process (${process.pid}) itself holds ${copy} open through ${own - 1} other ` +
+									`${own === 2 ? "descriptor" : "descriptors"} (${lease.evidence}), and could write to it after it went`
+							: `another open of ${copy} exists (${lease.evidence})${own === 1 ? ", not in this process" : ""}, ` +
+									`and whoever holds it could write to it after it went`;
 					}
 					if (lease.outcome === "unproved") {
 						return `whether another process holds ${copy} open could not be told (${lease.evidence}: ${lease.meaning})`;
@@ -3622,7 +3654,7 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			handle = await openRegularFile(file).catch(notRegularAsAbsent);
 			if (!handle) return undefined;
 			const lease = takeSoleOpenLease(handle.fd);
-			return lease.outcome === "held" ? undefined : leaseRefusal(file, lease, await otherHolders(file, file));
+			return lease.outcome === "held" ? undefined : leaseRefusal(file, lease, await holdersOf(handle, file));
 		} catch (error) {
 			return `whether another process holds ${file} open could not be asked (${errorMessage(error)})`;
 		} finally {

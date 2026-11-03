@@ -7292,7 +7292,8 @@ test("a reclaim keeps a file only a forked child holds open, and what the child 
 	expect(result.reclaim?.reclaimed).toBe(0);
 	expect(result.reclaim?.moved).toBeUndefined();
 	const said = result.reclaim?.errors.join("\n") ?? "";
-	expect(said).toContain(`${artifact} is open in another process`);
+	expect(said).toContain(`${artifact} is open elsewhere`);
+	expect(said).toContain("nor does this process through another descriptor");
 	expect(said).toContain("EAGAIN");
 	expect(said).toContain("fuser -v");
 	expect(await Bun.file(artifact).text()).toBe("FIRST LATE CHILD OUTPUT");
@@ -8312,10 +8313,15 @@ const fileSizeLimit = (() => {
 // back. Each write here runs under a limit the kernel enforces, set just
 // before it and put back after: half of what it is given, or a fixed limit
 // the write-back cannot get past.
-for (const writes of ["whole", "cut short by the kernel each time", "stopped by the kernel part-way"] as const) {
+for (const writes of [
+	"whole",
+	"whole, though the unlinked copy's size cannot be read",
+	"cut short by the kernel each time",
+	"stopped by the kernel part-way",
+] as const) {
 	test(`a reclaim writes a freed copy back when the original is truncated in the call before the copy's unlink, writes ${writes}`, async () => {
 		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
-		const bytes = writes === "whole" ? Buffer.from("ORIGINAL") : Buffer.alloc(1024 * 1024, 65);
+		const bytes = writes.startsWith("whole") ? Buffer.from("ORIGINAL") : Buffer.alloc(1024 * 1024, 65);
 		await Bun.write(path.join(liveArtifacts, "a.log"), bytes);
 		expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
 		const copyDir = archiveFile.slice(0, -".jsonl.gz".length);
@@ -8323,6 +8329,7 @@ for (const writes of ["whole", "cut short by the kernel each time", "stopped by 
 		const original = path.join(reclaimedNames().artifacts, "a.log");
 		let truncator: Bun.Subprocess | undefined;
 		let cutShort = 0;
+		let copyUnlinked = false;
 		const stoppedAt = 77_881;
 		const realUnlink = fs.unlink;
 		spyOn(fs, "unlink").mockImplementation(async file => {
@@ -8341,9 +8348,26 @@ for (const writes of ["whole", "cut short by the kernel each time", "stopped by 
 					await Bun.sleep(25);
 				}
 			}
-			return await realUnlink(file);
+			const removed = await realUnlink(file);
+			if (path.dirname(name) === copyDir && path.basename(name).startsWith(".a.log.")) copyUnlinked = true;
+			return removed;
 		});
-		if (writes !== "whole") {
+		// A review made `fstat` fail on the unlinked copy, and the write-back
+		// threw before it wrote anything back; its size is for the report only.
+		if (writes === "whole, though the unlinked copy's size cannot be read") {
+			const realOpen = regularFile.openRegularFile;
+			spyOn(regularFile, "openRegularFile").mockImplementation(async (file, options) => {
+				const handle = await realOpen(file, options);
+				if (!handle || path.dirname(file) !== copyDir || !path.basename(file).startsWith(".a.log.")) return handle;
+				const realStat = handle.stat.bind(handle);
+				spyOn(handle, "stat").mockImplementation((async (...args: unknown[]) => {
+					if (copyUnlinked) throw Object.assign(new Error("EIO: i/o error, fstat"), { code: "EIO" });
+					return await (realStat as (...a: unknown[]) => Promise<Stats>)(...args);
+				}) as typeof handle.stat);
+				return handle;
+			});
+		}
+		if (!writes.startsWith("whole")) {
 			const realCreate = regularFile.createExclusive;
 			spyOn(regularFile, "createExclusive").mockImplementation(async (file, mode, readable) => {
 				const handle = await realCreate(file, mode, readable);
@@ -8384,7 +8408,7 @@ for (const writes of ["whole", "cut short by the kernel each time", "stopped by 
 			expect(lost).toContain(`holds ${stoppedAt} of its ${bytes.length} bytes, and the rest was lost`);
 			expect((await fs.stat(copy)).size).toBe(stoppedAt);
 		} else {
-			if (writes !== "whole") expect(cutShort).toBeGreaterThan(0);
+			if (!writes.startsWith("whole")) expect(cutShort).toBeGreaterThan(0);
 			expect(lost).toBe("");
 			expect(kept).toContain("written back");
 			expect(await fs.readFile(copy)).toEqual(bytes);

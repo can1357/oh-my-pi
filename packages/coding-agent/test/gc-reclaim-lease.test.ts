@@ -238,6 +238,41 @@ for (const point of ["after the moves", "while judging a copy", "after a copy's 
 	});
 }
 
+// The kernel refuses a lease while any other open of the file exists, this
+// process's own included. A review held a read-only descriptor on a live
+// artifact, and in turn on its archived copy, in the omp process itself, and
+// each report named an invisible "another process". The report now names
+// this process when it is the holder.
+for (const held of ["the live artifact", "its archived copy"] as const) {
+	test.skipIf(!leasesGranted || process.platform !== "linux")(
+		`a reclaim says this process holds ${held} when it does, not another process`,
+		async () => {
+			const target =
+				held === "the live artifact" ? artifact : path.join(archiveFile.slice(0, -".jsonl.gz".length), "a.log");
+			const own = await fs.open(target, "r");
+			try {
+				const result = await reclaim(true);
+				const said = result.reclaim?.errors.join("\n") ?? "";
+
+				expect(said).toContain(`this omp process (${process.pid}) itself holds`);
+				expect(said).toContain("1 other descriptor");
+				expect(said).not.toContain("is open elsewhere");
+				expect(said).not.toMatch(/another open of \S+ exists/);
+				if (held === "the live artifact") {
+					expect(result.reclaim?.reclaimed).toBe(0);
+					expect(await Bun.file(artifact).text()).toBe("FIRST");
+				} else {
+					expect(result.reclaim?.reclaimed).toBe(1);
+					expect(result.reclaim?.keptCopies?.join("\n")).toContain(target);
+					expect(await Bun.file(target).text()).toBe("FIRST");
+				}
+			} finally {
+				await own.close();
+			}
+		},
+	);
+}
+
 /** Whether this user may run a command as root without a password: setting a `security.*` attribute needs root. */
 const sudoWorks = Bun.spawnSync(["sudo", "-n", "true"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
 

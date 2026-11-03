@@ -181,6 +181,29 @@ export function describeOpenFileHolder(holder: OpenFileHolder): string {
 	return `process ${holder.pid}${holder.command ? ` (${holder.command})` : ""}, holding ${holder.file}`;
 }
 
+/**
+ * How many descriptors this process holds on the file `identity` names, by
+ * `/proc/self/fd`; undefined where that cannot be read. A lease is refused
+ * while any other open of the file exists — this process's own included —
+ * so a caller holding one descriptor of its own, and asking why the kernel
+ * refused, reads more than one as this process holding the file elsewhere.
+ */
+export async function ownDescriptorCount(identity: { dev: number; ino: number }): Promise<number | undefined> {
+	if (process.platform !== "linux") return undefined;
+	let descriptors: string[];
+	try {
+		descriptors = await fs.readdir("/proc/self/fd");
+	} catch {
+		return undefined;
+	}
+	let count = 0;
+	for (const descriptor of descriptors) {
+		const held = await fs.stat(`/proc/self/fd/${descriptor}`).catch(() => undefined);
+		if (held && held.dev === identity.dev && held.ino === identity.ino) count++;
+	}
+	return count;
+}
+
 async function linuxHolders(files: readonly string[]): Promise<OpenFileHolders> {
 	const wanted = new Map<string, string>();
 	for (const file of files) {

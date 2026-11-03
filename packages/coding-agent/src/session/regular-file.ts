@@ -717,7 +717,14 @@ async function writeBack(
 	was: Stats,
 	why: string,
 ): Promise<{ note: string; lost?: true }> {
-	const total = (await handle.stat()).size;
+	// Its size, for the report only: a failure to read it must not stop the
+	// write-back, which copies until a read finds the end.
+	let its: string;
+	try {
+		its = `its ${(await handle.stat()).size} bytes`;
+	} catch (error) {
+		its = `its bytes (its size could not be read: ${errorText(error)})`;
+	}
 	for (const target of [file, aside]) {
 		let written: fs.FileHandle;
 		try {
@@ -725,10 +732,11 @@ async function writeBack(
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
 			return {
-				note: `${why}; none of its ${total} bytes could be written back to ${target} (${errorText(error)}), and they were lost with the unlinked file`,
+				note: `${why}; none of ${its} could be written back to ${target} (${errorText(error)}), and they were lost with the unlinked file`,
 				lost: true,
 			};
 		}
+		let whole = false;
 		try {
 			const window = Buffer.allocUnsafe(64 * 1024);
 			for (let at = 0; ;) {
@@ -737,21 +745,21 @@ async function writeBack(
 				await writeAllAt(written, window.subarray(0, bytesRead), at);
 				at += bytesRead;
 			}
+			whole = true;
 			await written.chmod(was.mode & 0o7777);
 			await written.sync();
 		} catch (error) {
-			const holds = await written
-				.stat()
-				.then(stat => stat.size)
-				.catch(() => undefined);
-			if (holds === total) {
+			if (whole) {
 				return { note: `${why}, so its bytes were written back to ${target}, though ${errorText(error)}` };
 			}
+			const holds = await written
+				.stat()
+				.then(stat => `${stat.size}`)
+				.catch(() => "an unknown number");
 			return {
 				note:
 					`${why}; writing its bytes back to ${target} stopped (${errorText(error)}): ${target} holds ` +
-					`${holds === undefined ? "an unknown number" : holds} of its ${total} bytes, and the rest was lost ` +
-					`with the unlinked file`,
+					`${holds} of ${its}, and the rest was lost with the unlinked file`,
 				lost: true,
 			};
 		} finally {
@@ -760,7 +768,7 @@ async function writeBack(
 		return { note: `${why}, so its bytes were written back to ${target}` };
 	}
 	return {
-		note: `${why}; ${file} and ${aside} are both taken, so its ${total} bytes could not be written back and were lost with the unlinked file`,
+		note: `${why}; ${file} and ${aside} are both taken, so ${its} could not be written back and were lost with the unlinked file`,
 		lost: true,
 	};
 }
