@@ -53,6 +53,23 @@ const USER_AGENTS = [
 const BLOCKED_STATUSES = new Set([403, 429, 503, 999]);
 
 /**
+ * Name the bot protection whose challenge or block page an HTML response is. A 2xx page counts
+ * only from Cloudflare's header or a live challenge form, since an article can quote any marker
+ * as text; vendor markers in the body count on an error status.
+ */
+function botWallOf(response: Response, contentType: string, content: string): string | undefined {
+	if (!contentType.includes("html")) return undefined;
+	if (response.headers.get("cf-mitigated") === "challenge") return "Cloudflare";
+	if (/<input[^>]*\bname="js_challenge"/.test(content)) return "JavaScript challenge";
+	if (response.ok) return undefined;
+	if (content.includes("_cf_chl_opt")) return "Cloudflare";
+	if (content.includes("captcha-delivery.com")) return "DataDome";
+	if (content.includes("px-captcha")) return "PerimeterX";
+	if (content.includes("blocked by network security")) return "network security block";
+	return undefined;
+}
+
+/**
  * Collapse blank-line runs and trim. Never shortens content: URL reads page the preview
  * themselves, and selectors, artifacts, and URL search must see the whole body.
  */
@@ -87,6 +104,8 @@ export interface LoadPageResult {
 	error?: string;
 	/** True when the body read was skipped via skipBodyForContentType. */
 	bodySkipped?: boolean;
+	/** Bot protection that answered with its challenge or block page instead of the page. */
+	blockedBy?: string;
 }
 
 const RETRY_AFTER_MAX_MS = 10_000;
@@ -184,6 +203,7 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 			}
 
 			const content = decodeBody(responseBody.bytes, rawContentType);
+			const blockedBy = botWallOf(response, contentType, content);
 
 			if (!response.ok) {
 				return {
@@ -193,6 +213,7 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 					ok: false,
 					status: response.status,
 					truncated: responseBody.truncated,
+					blockedBy,
 				};
 			}
 
@@ -203,6 +224,7 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 				ok: true,
 				status: response.status,
 				truncated: responseBody.truncated,
+				blockedBy,
 			};
 		} catch (error) {
 			if (signal?.aborted) {

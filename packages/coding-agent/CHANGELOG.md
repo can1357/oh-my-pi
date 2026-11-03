@@ -194,6 +194,10 @@
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
 
+### Fixed
+
+- `read` on a URL that answers with a bot challenge (Reddit posts, Cloudflare, DataDome, PerimeterX) no longer returns the site's block page, or a reader's copy of it, as the page: the read ends `blocked` or `failed` and names the protection
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
