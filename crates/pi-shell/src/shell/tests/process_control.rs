@@ -1453,3 +1453,117 @@ async fn pkill_builtin_excludes_own_pid() {
 	assert_eq!(result.exit_code, Some(0), "the shell must survive an explicit pkill");
 	assert!(output.contains("survived"), "{output:?}");
 }
+
+/// A background subshell, group or function with an EXIT trap runs it when
+/// a terminating signal ends it, then ends with the signal's status, as in
+/// Bash 5.2 and 5.3; a signal it traps does not end it. Regression: the job
+/// ended at once, its EXIT trap never ran, and `( … ) &` was killed around
+/// the subshell that held the trap.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subshell_runs_its_exit_trap_when_a_signal_ends_it() {
+	let (result, output) = execute_captured(
+		[
+			"{ trap 'echo X' EXIT; /bin/sleep 30; } & p=$!; /bin/sleep 0.3; kill \"$p\"; wait \
+			 \"$p\"; echo \"group=$?\"",
+			"( trap 'echo X' EXIT; /bin/sleep 30 ) & p=$!; /bin/sleep 0.3; kill \"$p\"; wait \"$p\"; \
+			 echo \"subshell=$?\"",
+			"f() { trap 'echo X' EXIT; /bin/sleep 30; }; f & p=$!; /bin/sleep 0.3; kill \"$p\"; wait \
+			 \"$p\"; echo \"function=$?\"",
+			"( trap 'echo X' EXIT; kill -TERM $BASHPID; echo no ) & wait $!; echo \"self=$?\"",
+			"( trap 'echo X' EXIT; kill -PIPE $BASHPID; echo no ) & wait $!; echo \"pipe=$?\"",
+			"( trap 'echo T' TERM; trap 'echo X' EXIT; kill -TERM $BASHPID; echo after ) & wait $!; \
+			 echo \"trapped=$?\"",
+			"( /bin/sleep 30 ) & p=$!; /bin/sleep 0.3; kill \"$p\"; wait \"$p\"; echo \
+			 \"untrapped=$?\"",
+		]
+		.join("\n"),
+	)
+	.await;
+	assert_eq!(result.exit_code, Some(0), "{output:?}");
+	let expected = [
+		"X",
+		"group=143",
+		"X",
+		"subshell=143",
+		"X",
+		"function=143",
+		"X",
+		"self=143",
+		"X",
+		"pipe=141",
+		"T",
+		"after",
+		"X",
+		"trapped=0",
+		"untrapped=143",
+		"",
+	]
+	.join("\n");
+	assert_eq!(output, expected);
+}
+
+/// A redirection to a descriptor at or past `ulimit -n` fails with `N: Bad
+/// file descriptor` (the source's number for a duplication) and status 1,
+/// after a file it names is made, as in Bash 5.2 and 5.3; closing one does
+/// not fail. Regression: each succeeded, and a later redirection's word ran.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_redirection_past_the_open_file_limit_fails() {
+	let dir = tempfile::tempdir().expect("temporary directory");
+	let first = format!("cd '{}'; ulimit -n 9", dir.path().display());
+	let script = [
+		first.as_str(),
+		"/bin/true 12>g; echo \"file=$? $([ -e g ] && echo made)\"; rm -f g",
+		": 12>g; echo \"builtin=$? $([ -e g ] && echo made)\"; rm -f g",
+		"/bin/true 12>&1; echo \"dup=$?\"",
+		"/bin/true 12<&0; echo \"dupin=$?\"",
+		"/bin/true 12<<<x; echo \"herestring=$?\"",
+		"cat 12<<E",
+		"x",
+		"E",
+		"echo \"heredoc=$?\"",
+		"/bin/true 12>&-; echo \"close=$?\"",
+		"/bin/true 8>&1; echo \"below=$?\"",
+		"/bin/true 9>&1; echo \"at=$?\"",
+		"{ echo in; } 12>g; echo \"group=$?\"; rm -f g",
+		"f() { :; }; f 12>&1; echo \"function=$?\"",
+		"/bin/true 12>&1 & wait $!; echo \"background=$?\"",
+		"( exec 12>&1 ); echo \"exec=$?\"",
+		"/bin/true 2>/dev/null 12>g <<<\"$(touch marker)\" & wait $!; [ -e marker ] && echo made || \
+		 echo notmade",
+	]
+	.join("\n");
+	let (result, output) = execute_captured(script).await;
+	assert_eq!(result.exit_code, Some(0), "{output:?}");
+	let expected = [
+		"bash: line 2: 12: Bad file descriptor",
+		"file=1 made",
+		"bash: line 3: 12: Bad file descriptor",
+		"builtin=1 made",
+		"bash: line 4: 1: Bad file descriptor",
+		"dup=1",
+		"bash: line 5: 0: Bad file descriptor",
+		"dupin=1",
+		"bash: line 6: 12: Bad file descriptor",
+		"herestring=1",
+		"bash: line 7: 12: Bad file descriptor",
+		"heredoc=1",
+		"close=0",
+		"below=0",
+		"bash: line 13: 1: Bad file descriptor",
+		"at=1",
+		"bash: line 14: 12: Bad file descriptor",
+		"group=1",
+		"bash: line 15: 1: Bad file descriptor",
+		"function=1",
+		"bash: line 16: 1: Bad file descriptor",
+		"background=1",
+		"bash: line 17: 1: Bad file descriptor",
+		"exec=1",
+		"notmade",
+		"",
+	]
+	.join("\n");
+	assert_eq!(output, expected);
+}

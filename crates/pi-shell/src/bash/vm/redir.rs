@@ -440,6 +440,9 @@ fn install(
 	match r.op {
 		RedirKind::HereDoc | RedirKind::HereString => {
 			let fd = target_fd(k, vp, cx, r, false, line).map_err(|d| fail(k, vp, cx, line, d))?;
+			if past_limit(vp, cx, fd) {
+				return Err(bad_fd(k, vp, cx, line, BString::from(fd.to_string())));
+			}
 			let h = FdRef::mem(MemBuf::new(target.to_vec()));
 			set_fd(vp, fd, Some(h));
 			Ok(())
@@ -471,6 +474,14 @@ fn install(
 					return Err(fail(k, vp, cx, line, Diag::Io { path, err }));
 				};
 				let fd = target_fd(k, vp, cx, r, false, line).map_err(|d| fail(k, vp, cx, line, d))?;
+				if past_limit(vp, cx, fd) {
+					// bash's `dup2` fails; it names the source word.
+					let word = match r.target {
+						RedirTargetIr::Word(w) => word_text(unit, w),
+						RedirTargetIr::HereDoc { .. } => target.clone(),
+					};
+					return Err(bad_fd(k, vp, cx, line, word));
+				}
 				set_fd(vp, fd, Some(h));
 				if moving && src != fd {
 					set_fd(vp, src, None);
@@ -535,6 +546,12 @@ fn install(
 				return Err(fail(k, vp, cx, line, Diag::Io { path: target.clone(), err }));
 			}
 			open_into(k, vp, cx, &[fd], target, flags, line)?;
+			// bash opens the file, then fails to move it to a number past the
+			// limit: the file is made, the fd is not.
+			if !matches!(r.fd, RedirFdIr::Var(_)) && past_limit(vp, cx, fd) {
+				set_fd(vp, fd, None);
+				return Err(bad_fd(k, vp, cx, line, BString::from(fd.to_string())));
+			}
 			if let RedirFdIr::Var(name) = &r.fd
 				&& let Err(d) = assign_fd_var(k, vp, cx, name, fd, line)
 			{
@@ -544,6 +561,30 @@ fn install(
 			Ok(())
 		},
 	}
+}
+
+/// Whether `fd` is at or past the open-file limit (the vproc's `ulimit -n`,
+/// else the host's), where bash's `dup2` to it fails with `EBADF`.
+fn past_limit(vp: &Vproc, cx: &Cx<'_>, fd: i32) -> bool {
+	let limit = match vp
+		.rlimits
+		.iter()
+		.find(|(res, ..)| *res == crate::bash::host::Rlimit::Nofile)
+	{
+		Some(&(_, soft, _)) => soft,
+		None => cx
+			.host
+			.rlimit(crate::bash::host::Rlimit::Nofile)
+			.ok()
+			.and_then(|(soft, _)| soft),
+	};
+	limit.is_some_and(|lim| u64::try_from(fd).is_ok_and(|fd| fd >= lim))
+}
+
+/// The redirection error `name: Bad file descriptor`.
+fn bad_fd(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, path: BString) -> Halt {
+	let err = std::io::Error::other(crate::bash::fd::BadFd);
+	fail(k, vp, cx, line, Diag::Io { path, err })
 }
 
 /// How a file redirection `op` to `target` opens it (`set -o noclobber`
