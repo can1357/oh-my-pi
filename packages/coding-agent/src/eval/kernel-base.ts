@@ -220,9 +220,9 @@ export function createAbortError(name: "AbortError" | "TimeoutError", message: s
 export function throwIfAborted(signal: AbortSignal | undefined, fallbackReason: string): void {
 	if (!signal?.aborted) return;
 	const reason = signal.reason;
-	if (isErrorValue(reason)) throw reason;
-	// Replaced by an AbortError: a rejected promise passed as the reason must still be observed.
+	// A rejected promise passed as the reason (even one made to look like an error) must be observed.
 	observeRejection(reason);
+	if (isErrorValue(reason)) throw reason;
 	throw createAbortError("AbortError", typeof reason === "string" ? reason : fallbackReason);
 }
 

@@ -53,13 +53,31 @@ function observe(value: unknown, onRejected: (reason: unknown) => void, onSettle
 		}
 		settle();
 	};
+	// A native promise whose own `then` was removed is not adopted, so a promise can fulfil with
+	// one. Such a value is followed like the promise itself, so its rejection is reported too;
+	// each is followed once, which ends a cycle of promises fulfilled with one another.
+	const followed = new Set<object>();
+	const fulfil = (result: unknown): void => {
+		if (!types.isPromise(result) || followed.has(result)) {
+			settle();
+			return;
+		}
+		followed.add(result);
+		try {
+			reflectApply(promiseThen, result, [fulfil, reject]);
+		} catch (error) {
+			// Its `constructor` or species refused: reported, as below.
+			reject(error);
+		}
+	};
 	if (value === null || (typeof value !== "object" && typeof value !== "function")) {
 		settle();
 		return;
 	}
 	if (types.isPromise(value)) {
+		followed.add(value);
 		try {
-			reflectApply(promiseThen, value, [settle, reject]);
+			reflectApply(promiseThen, value, [fulfil, reject]);
 		} catch (error) {
 			// Its `constructor` getter, or the species constructor it names, threw before the
 			// built-in `then` attached the callbacks. That is reported; the promise itself
@@ -78,7 +96,7 @@ function observe(value: unknown, onRejected: (reason: unknown) => void, onSettle
 			settle();
 			return;
 		}
-		returned = reflectApply(then, value, [settle, reject]);
+		returned = reflectApply(then, value, [fulfil, reject]);
 	} catch (error) {
 		reject(error);
 		return;
@@ -86,17 +104,15 @@ function observe(value: unknown, onRejected: (reason: unknown) => void, onSettle
 	// The built-in `then` returns a promise that rejects only when a callback throws, and these do not.
 	if (then === promiseThen || !types.isPromise(returned)) return;
 	try {
-		// Only a native promise reports an unhandled rejection. The built-in `then` observes
-		// one without calling any `then` it overrides; its fulfilment value is ignored, so
-		// nothing is forwarded into a child promise.
-		reflectApply(promiseThen, returned, [ignoreFulfilment, reject]);
+		// Only a native promise reports an unhandled rejection. The built-in `then` observes one
+		// without calling any `then` it overrides; what it fulfils with is observed in turn, and
+		// its callbacks return nothing, so nothing is forwarded into a child promise.
+		reflectApply(promiseThen, returned, [observeRejection, reject]);
 	} catch (error) {
 		// The returned promise's `constructor` or species refused: reported, as above.
 		reject(error);
 	}
 }
-
-function ignoreFulfilment(): void {}
 
 /** Hands every rejection `value` can produce to `onRejected` (see {@link observe}). Never throws. */
 export function catchRejection(value: unknown, onRejected: (reason: unknown) => void): void {

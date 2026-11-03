@@ -1798,30 +1798,71 @@ describe("cancellation checks and descriptions read a thrown value or abort reas
 		}
 	});
 
-	it("observes a rejected promise passed as an abort reason when the context manager or the kernel replaces it", async () => {
-		const session = makeSession(`abort-promise-reason-${crypto.randomUUID()}`);
-		const sessionId = session.getEvalSessionId?.() ?? "missing";
-		const interrupt = new AbortController();
-		const runState: VmRunState = {
-			signal: interrupt.signal,
-			onText: text => {
-				if (printsLine(text, "started")) interrupt.abort(Promise.reject(new Error("abort reason rejection")));
-			},
+	/** A rejected promise; `errorShaped` gives it Error.prototype, so it passes as an error. */
+	const rejectedReason = (label: string, errorShaped: boolean): Promise<never> => {
+		const reason = Promise.reject(new Error(label));
+		if (errorShaped) Object.setPrototypeOf(reason, Error.prototype);
+		return reason;
+	};
+
+	for (const errorShaped of [false, true]) {
+		it(`observes a rejected promise${errorShaped ? " made to look like an error" : ""} passed as an abort reason to the context manager or the kernel`, async () => {
+			const session = makeSession(`abort-promise-reason-${crypto.randomUUID()}`);
+			const sessionId = session.getEvalSessionId?.() ?? "missing";
+			const interrupt = new AbortController();
+			const runState: VmRunState = {
+				signal: interrupt.signal,
+				onText: text => {
+					if (printsLine(text, "started")) interrupt.abort(rejectedReason("abort reason rejection", errorShaped));
+				},
+			};
+			const unhandled = await unhandledRejectionsDuring(async () => {
+				// The direct context-manager path: its own reasonToError() turns the reason into an error.
+				await executeInVmContext({
+					sessionKey: sessionId,
+					sessionId,
+					cwd: session.cwd,
+					session,
+					code: "print('started');\nawait new Promise(resolve => setTimeout(resolve, 30_000));\nprint('after');",
+					filename: "abort-promise-reason.js",
+					timeoutMs: 60_000,
+					runState,
+				}).catch(() => {});
+				try {
+					throwIfAborted(aborted(rejectedReason("kernel reason rejection", errorShaped)), "x");
+				} catch {
+					// It throws by design; this row checks only that the reason was observed.
+				}
+			});
+			expect(unhandled).toEqual([]);
+		}, 120_000);
+	}
+
+	it("follows a promise fulfilled with a then-less rejected promise, through a consumer and a description", async () => {
+		const fulfilledWithRejected = (label: string): Promise<unknown> => {
+			const inner = Promise.reject(new Error(label));
+			Object.defineProperty(inner, "then", { value: null });
+			const outer = Promise.withResolvers<unknown>();
+			outer.resolve(inner);
+			return outer.promise;
 		};
+		const reported: unknown[] = [];
 		const unhandled = await unhandledRejectionsDuring(async () => {
-			// The direct context-manager path: its own reasonToError() replaces the reason.
-			await executeInVmContext({
-				sessionKey: sessionId,
-				sessionId,
-				cwd: session.cwd,
-				session,
-				code: "print('started');\nawait new Promise(resolve => setTimeout(resolve, 30_000));\nprint('after');",
-				filename: "abort-promise-reason.js",
-				timeoutMs: 60_000,
-				runState,
-			}).catch(() => {});
-			expect(() => throwIfAborted(aborted(Promise.reject(new Error("kernel reason rejection"))), "x")).toThrow();
+			catchRejection(fulfilledWithRejected("consumer inner"), reason => reported.push(reason));
+			// A thenable that resolves with a rejected promise.
+			catchRejection(
+				{ then: (resolve: (value: unknown) => void) => resolve(Promise.reject(new Error("thenable inner"))) },
+				reason => reported.push(reason),
+			);
+			const error = new Error("unused");
+			Object.defineProperty(error, "message", { get: () => fulfilledWithRejected("message inner") });
+			describeError(error);
+			await Bun.sleep(50);
 		});
 		expect(unhandled).toEqual([]);
-	}, 120_000);
+		expect(reported.map(reason => describeError(reason).message).sort()).toEqual([
+			"consumer inner",
+			"thenable inner",
+		]);
+	});
 });

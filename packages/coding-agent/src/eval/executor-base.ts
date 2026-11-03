@@ -262,7 +262,8 @@ export function isTimedOutCancellation(
 	let reason: unknown;
 	try {
 		reason = signal?.reason;
-	} catch {
+	} catch (thrown) {
+		observeRejection(thrown);
 		return false;
 	}
 	return describeError(reason).name === "TimeoutError";

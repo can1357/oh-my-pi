@@ -989,10 +989,10 @@ function safeSend(session: JsSession, msg: WorkerInbound): void {
 
 /** The caller's abort reason as an error; it can be a Proxy whose traps throw, so only isErrorValue() inspects it. */
 function reasonToError(reason: unknown, fallback: string): Error {
+	// A rejected promise passed as the reason (even one made to look like an error) must be observed.
+	observeRejection(reason);
 	if (isErrorValue(reason)) return reason;
 	if (typeof reason === "string") return new ToolAbortError(reason);
-	// Replaced by a fallback error: a rejected promise passed as the reason must still be observed.
-	observeRejection(reason);
 	return new ToolAbortError(fallback);
 }
 

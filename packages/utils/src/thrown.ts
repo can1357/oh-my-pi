@@ -182,20 +182,22 @@ function readField(object: object, key: string): unknown {
 /**
  * Marks a native promise's rejection as handled, through the built-in `then`
  * captured at load. Applied to everything a description reads or catches: the
- * described value, each field read, each throw. Both callbacks ignore their
- * value, so observing a fulfilled promise forwards nothing into a child, and a
- * rejection whose reason is itself a rejected promise has that reason observed
- * too. A promise whose `constructor` or species refuses even that stays
- * unobserved; such a promise is outside what a description can handle. Each
- * promise is observed once: a rejection whose reason leads back to a promise
- * already observed (a promise rejected with itself, or a cycle of them) stops
- * there instead of queuing callbacks forever. Never throws.
+ * described value, each field read, each throw. Whatever a promise settles
+ * with is observed in turn: a fulfilment value that is itself a promise (one
+ * whose own `then` was removed, so it was not adopted), and a rejection reason
+ * that is a rejected promise. Both callbacks return nothing, so observing
+ * forwards no value into a child promise. A promise whose `constructor` or
+ * species refuses even that stays unobserved; such a promise is outside what a
+ * description can handle. Each promise is observed once: a value or reason
+ * that leads back to a promise already observed (a promise rejected with
+ * itself, or a cycle of them) stops there instead of queuing callbacks
+ * forever. Never throws.
  */
 export function observeRejection(value: unknown): void {
 	if (!isPromise(value) || observedPromises.has(value)) return;
 	observedPromises.add(value);
 	try {
-		reflectApply(promiseThen, value, [ignoreFulfilment, observeRejection]);
+		reflectApply(promiseThen, value, [observeRejection, observeRejection]);
 	} catch {
 		// The promise's `constructor` getter or species constructor threw.
 	}
@@ -203,8 +205,6 @@ export function observeRejection(value: unknown): void {
 
 /** Promises already handed to {@link observeRejection}; weak, so it holds none of them alive. */
 const observedPromises = new WeakSet<object>();
-
-function ignoreFulfilment(): void {}
 
 /** `object[key]` when it is text, read once; `undefined` when it is not text or reading it throws. */
 function textProperty(object: object, key: string, limit: number): string | undefined {
