@@ -53,7 +53,6 @@ export function parsePluginId(id: string): { name: string; marketplace: string }
 	return { name, marketplace };
 }
 
-/** A bare plugin source name: one directory name with no separator, resolved under `metadata.pluginRoot`. */
 export function isBarePluginSourceName(source: string): boolean {
 	return source.length > 0 && source !== "." && source !== ".." && !/[/\\]/.test(source);
 }
@@ -68,10 +67,7 @@ export interface MarketplaceCatalogOwner {
 export interface MarketplaceCatalogMetadata {
 	description?: string;
 	version?: string;
-	/**
-	 * Directory that bare-name plugin sources (`"formatter"`) resolve under.
-	 * Has no effect on sources that start with `./`.
-	 */
+	/** Directory that bare-name sources resolve under; `./` sources ignore it. */
 	pluginRoot?: string;
 }
 

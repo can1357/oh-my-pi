@@ -191,9 +191,13 @@ export function resolveEquivalentPath(inputPath: string, options?: EquivalentPat
 	}
 }
 
-export function normalizePathForComparison(inputPath: string): string {
-	const resolvedPath = resolveEquivalentPath(inputPath);
+function comparablePath(inputPath: string, options?: EquivalentPathOptions): string {
+	const resolvedPath = resolveEquivalentPath(inputPath, options);
 	return process.platform === "win32" ? resolvedPath.toLowerCase() : resolvedPath;
+}
+
+export function normalizePathForComparison(inputPath: string): string {
+	return comparablePath(inputPath);
 }
 
 /**
@@ -211,9 +215,10 @@ export function relativePathWithinNormalizedRoot(normalizedRoot: string, normali
 	return relative;
 }
 
-export function pathIsWithin(root: string, candidate: string): boolean {
+/** `options` apply to `candidate` only. */
+export function pathIsWithin(root: string, candidate: string, options?: EquivalentPathOptions): boolean {
 	const normalizedRoot = normalizePathForComparison(root);
-	const normalizedCandidate = normalizePathForComparison(candidate);
+	const normalizedCandidate = comparablePath(candidate, options);
 	return relativePathWithinNormalizedRoot(normalizedRoot, normalizedCandidate) !== null;
 }
 

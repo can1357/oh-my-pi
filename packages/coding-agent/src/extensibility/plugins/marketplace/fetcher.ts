@@ -169,7 +169,6 @@ export function parseMarketplaceCatalog(content: string, filePath: string): Mark
 				`plugins[${i}].source`,
 				filePath,
 			);
-			// String sources start with "./", or are bare names resolved under metadata.pluginRoot
 			if (typeof p.source === "string") {
 				assertField(
 					p.source.startsWith("./") || (hasPluginRoot && isBarePluginSourceName(p.source)),

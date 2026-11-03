@@ -91,7 +91,6 @@ describe("resolvePluginSource", () => {
 			});
 		expect((await resolve("hello-plugin", "./plugins")).dir).toBe(expected);
 		expect((await resolve("./plugins/hello-plugin", "./plugins")).dir).toBe(expected);
-		// omp's earlier rule (pluginRoot "plugins" + "./hello-plugin") still resolves when the root has no such path.
 		const legacy = await resolve("./hello-plugin", "plugins");
 		expect(legacy.dir).toBe(expected);
 		expect(legacy.tempCloneRoot).toBeUndefined();
@@ -106,6 +105,29 @@ describe("resolvePluginSource", () => {
 			catalogMetadata: { pluginRoot: "./plugins" },
 		});
 		expect(resolved).toBe(path.join(root, "tools"));
+	});
+
+	it("falls back to pluginRoot when a file shadows the ./ path's first segment", async () => {
+		const root = path.join(tmpDir, "marketplace");
+		fs.mkdirSync(path.join(root, "plugins", "team", "plugin"), { recursive: true });
+		fs.writeFileSync(path.join(root, "team"), "");
+		const resolved = await validatePluginSource(makeEntry("./team/plugin"), {
+			marketplaceClonePath: root,
+			catalogMetadata: { pluginRoot: "plugins" },
+		});
+		expect(resolved).toBe(path.join(root, "plugins", "team", "plugin"));
+	});
+
+	it("falls back to pluginRoot when the marketplace is reached through a symlink", async () => {
+		const real = path.join(tmpDir, "real");
+		fs.mkdirSync(path.join(real, "plugins", "foo"), { recursive: true });
+		const link = path.join(tmpDir, "link");
+		fs.symlinkSync(real, link, "dir");
+		const resolved = await validatePluginSource(makeEntry("./foo"), {
+			marketplaceClonePath: link,
+			catalogMetadata: { pluginRoot: "plugins" },
+		});
+		expect(resolved).toBe(path.join(link, "plugins", "foo"));
 	});
 
 	it("throws when resolved directory does not exist", async () => {

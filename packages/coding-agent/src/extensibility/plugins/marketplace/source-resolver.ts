@@ -14,7 +14,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { isEnoent, pathIsWithin } from "@oh-my-pi/pi-utils";
+import { directoryIsMissing, pathIsWithin } from "@oh-my-pi/pi-utils";
 
 import {
 	isBarePluginSourceName,
@@ -28,7 +28,6 @@ const GIT_CLONE_TIMEOUT_MS = 30 * 60 * 1000;
 export interface ResolveContext {
 	/** Absolute path to the cloned/local marketplace directory. Required for relative sources. */
 	marketplaceClonePath?: string;
-	/** Catalog metadata — `pluginRoot` resolves bare-name sources. */
 	catalogMetadata?: MarketplaceCatalogMetadata;
 	/** Scratch directory for sources that require cloning or extraction. */
 	tmpDir: string;
@@ -93,13 +92,12 @@ export async function validatePluginSource(
 	}
 }
 
-// ── Relative string source ("./plugins/foo" or bare "foo") ──────────
+// ── Relative string source ("./plugins/foo") ────────────────────────
 
 function resolveRelativeSourcePath(
 	source: string,
 	context: Pick<ResolveContext, "marketplaceClonePath" | "catalogMetadata">,
 ): string {
-	// pluginRoot applies only to bare names; a "./" source already names its path from the marketplace root.
 	const pluginRoot = context.catalogMetadata?.pluginRoot;
 	let relativePath: string;
 	if (source.startsWith("./")) {
@@ -124,7 +122,8 @@ function resolveInsideMarketplace(
 	}
 
 	const resolved = path.resolve(context.marketplaceClonePath, relativePath);
-	if (!pathIsWithin(context.marketplaceClonePath, resolved)) {
+	// The path may not exist yet, and the marketplace root may sit behind a symlink.
+	if (!pathIsWithin(context.marketplaceClonePath, resolved, { throughMissing: true })) {
 		throw new Error(
 			`Plugin source "${source}" resolves outside marketplace root ("${context.marketplaceClonePath}")`,
 		);
@@ -132,20 +131,17 @@ function resolveInsideMarketplace(
 	return resolved;
 }
 
-/** Resolve a string source to an existing directory inside the marketplace. */
 async function resolveRelativeSourceDir(
 	source: string,
 	context: Pick<ResolveContext, "marketplaceClonePath" | "catalogMetadata">,
 ): Promise<string> {
 	const resolved = resolveRelativeSourcePath(source, context);
-	if (await isDirectory(resolved)) return resolved;
-	// Catalogs written for omp's earlier rule (`"pluginRoot": "plugins"` with `"./foo"` for `plugins/foo`) keep
-	// installing: a "./" path missing from the marketplace root is tried under pluginRoot. A path that exists from
-	// the root always wins, so a catalog that installs in Claude Code resolves the same way here.
+	if (!(await directoryIsMissing(resolved))) return resolved;
+	// Catalogs written for omp's earlier rule (`./foo` meaning `<pluginRoot>/foo`) keep installing.
 	const pluginRoot = context.catalogMetadata?.pluginRoot;
 	if (pluginRoot && source.startsWith("./")) {
 		const legacy = resolveInsideMarketplace(path.join(pluginRoot, source), source, context);
-		if (await isDirectory(legacy)) return legacy;
+		if (!(await directoryIsMissing(legacy))) return legacy;
 	}
 	throw new Error(`Plugin source directory does not exist: "${resolved}"`);
 }
@@ -202,7 +198,7 @@ async function resolveObjectSource(
 			});
 
 			const subdirPath = path.resolve(cloneDir, source.path);
-			if (!pathIsWithin(cloneDir, subdirPath)) {
+			if (!pathIsWithin(cloneDir, subdirPath, { throughMissing: true })) {
 				await fs.rm(cloneDir, { recursive: true, force: true });
 				throw new Error(`git-subdir path "${source.path}" escapes the cloned repository`);
 			}
@@ -225,15 +221,6 @@ async function resolveObjectSource(
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-async function isDirectory(dirPath: string): Promise<boolean> {
-	try {
-		return (await fs.stat(dirPath)).isDirectory();
-	} catch (err) {
-		if (isEnoent(err)) return false;
-		throw err;
-	}
-}
-
 async function verifyDirExists(dirPath: string, errorMessage: string): Promise<void> {
-	if (!(await isDirectory(dirPath))) throw new Error(errorMessage);
+	if (await directoryIsMissing(dirPath)) throw new Error(errorMessage);
 }
