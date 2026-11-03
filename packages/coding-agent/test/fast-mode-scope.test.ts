@@ -1,11 +1,12 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import type { Api, Model, ProviderSessionState, ServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -44,7 +45,10 @@ describe("/fast targets the current model's service-tier family", () => {
 		return createSessionForModel(model);
 	}
 
-	async function createSessionForModel(model: Model<Api>): Promise<AgentSession> {
+	async function createSessionForModel(
+		model: Model<Api>,
+		serviceTierByFamily?: ServiceTierByFamily,
+	): Promise<AgentSession> {
 		const agent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 		});
@@ -54,6 +58,7 @@ describe("/fast targets the current model's service-tier family", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated(),
 			modelRegistry,
+			serviceTierByFamily,
 		});
 		session.subscribe(() => {});
 		return session;
@@ -167,6 +172,27 @@ describe("/fast targets the current model's service-tier family", () => {
 			maxTokens: 128_000,
 			serviceTiers,
 		});
+
+	for (const { label, tier, supported, active } of [
+		{ label: "priority", tier: "priority", supported: ["priority"], active: true },
+		{ label: "ultrafast", tier: "ultrafast", supported: ["priority", "ultrafast"], active: true },
+		{ label: "standard", tier: "default", supported: ["priority"], active: false },
+		{ label: "unsupported priority", tier: "priority", supported: ["ultrafast"], active: false },
+	] as const) {
+		it(`retains its resolved ${label} policy when its live session detaches`, async () => {
+			// The runtime already resolved any inherited selection before the Hub
+			// observes it; neither parent nor current global settings are evidence.
+			const session = await createSessionForModel(codexModel([...supported]), { openai: tier });
+			const registry = new AgentRegistry();
+			const ref = registry.register({ id: "Worker", displayName: "Worker", kind: "sub", session });
+			const servingModel = session.servingModel?.selector;
+			expect(session.isFastModeActive()).toBe(active);
+			expect(registry.detachSession(ref.id, session)).toBe(true);
+			expect(ref.session).toBeNull();
+			expect(ref.history?.resolvedModel).toBe(servingModel);
+			expect(ref.history?.fastMode).toBe(active);
+		});
+	}
 
 	it("refuses Ultrafast on a Codex model that does not advertise it", async () => {
 		const session = await createSessionForModel(codexModel(["priority"]));

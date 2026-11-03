@@ -137,6 +137,42 @@ describe("AgentLifecycleManager", () => {
 		expect(lifecycle.has("1-Sub")).toBe(true);
 	});
 
+	it.each([undefined, false, true])(
+		"never replaces serving-model tier evidence (%s) with an unproven candidate's policy on park",
+		async fastMode => {
+			const stub = makeSessionStub();
+			Object.assign(stub.session, {
+				model: { provider: "candidate", id: "unproven" },
+				servingModel: { selector: "primary/served:high", modelIdentity: "primary/served", isFallback: false },
+				isFastModeActive: () => fastMode !== true,
+			});
+			const ref = registerIdleSub("Fallback-Sub", stub.session);
+			registry.setHistory(ref.id, { resolvedModel: "primary/served", fastMode });
+			lifecycle.adopt(ref.id, { idleTtlMs: 0 }, ref);
+			await lifecycle.park(ref.id);
+			expect(stub.disposeCalls()).toBe(1);
+			expect(ref.session).toBeNull();
+			expect(ref.history?.resolvedModel).toBe("primary/served");
+			expect(ref.history?.fastMode).toBe(fastMode);
+		},
+	);
+
+	it("clears response tier evidence when parking replaces the serving route", async () => {
+		const stub = makeSessionStub();
+		Object.assign(stub.session, {
+			model: { provider: "candidate", id: "unproven" },
+			servingModel: { selector: "provider/shared@new", modelIdentity: "provider/shared@new", isFallback: true },
+			isFastModeActive: () => true,
+		});
+		const ref = registerIdleSub("Changed-Serving-Route", stub.session);
+		registry.setHistory(ref.id, { resolvedModel: "provider/shared@old", fastMode: true, responseFastMode: true });
+		lifecycle.adopt(ref.id, { idleTtlMs: 0 }, ref);
+		await lifecycle.park(ref.id);
+		expect(ref.history?.resolvedModel).toBe("provider/shared@new");
+		expect(ref.history?.fastMode).toBeUndefined();
+		expect(ref.history?.responseFastMode).toBeUndefined();
+	});
+
 	it("running disarms the timer; returning to idle re-arms a fresh TTL", async () => {
 		vi.useFakeTimers();
 		const stub = makeSessionStub();

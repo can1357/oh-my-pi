@@ -11,6 +11,7 @@
 
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
+import { formatModelStringWithRouting } from "../config/model-resolver";
 import { AgentAwaits } from "./agent-awaits";
 import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
 
@@ -49,6 +50,10 @@ export interface AgentHistorySummary {
 	resolvedModel?: string;
 	/** Whether the last resolved model was selected by retry fallback routing. */
 	resolvedModelIsFallback?: boolean;
+	/** Applied fast-tier policy for resolvedModel; absent when no aligned runtime snapshot is known. */
+	fastMode?: boolean;
+	/** Last serving response's tier; lower precedence than a runtime snapshot. */
+	responseFastMode?: boolean;
 	metrics?: AgentMetricsSummary;
 	/** Cumulative own-session assistant and model_usage cost, excluding nested task results. */
 	directCost?: number;
@@ -83,6 +88,13 @@ export interface AgentRef {
 }
 
 export type AgentRefExpectation = AgentRef | AgentSession;
+
+export interface AgentHistoryOptions {
+	sessionFile?: string;
+	ref?: AgentRefExpectation;
+	attributionRevision?: number;
+	owner?: symbol;
+}
 
 /**
  * Whether messaging `ref` resumes it: a live `idle` agent, or a `parked` or
@@ -139,6 +151,10 @@ export class AgentRegistry {
 
 	readonly #refs = new Map<string, AgentRef>();
 	readonly #listeners = new Set<RegistryListener>();
+	/** Runtime attribution writes fence transcript scans without blocking unrelated metadata. */
+	readonly #attributionRevisions = new WeakMap<AgentRef, number>();
+	/** Latest turn owner; unlike scan revisions, parking does not supersede it. */
+	readonly #attributionOwners = new WeakMap<AgentRef, symbol>();
 	/** Which of these agents are blocked until others finish. */
 	readonly awaits = new AgentAwaits();
 
@@ -207,20 +223,74 @@ export class AgentRegistry {
 		});
 	}
 
-	/** Attach transcript-derived identity and telemetry without changing lifecycle state. */
-	setHistory(id: string, history: AgentHistorySummary, expectedSessionFile?: string): boolean {
+	/** Revision of model/tier attribution, independent of cost and other metadata. */
+	getAttributionRevision(ref: AgentRef): number {
+		return this.#attributionRevisions.get(ref) ?? 0;
+	}
+
+	claimAttributionOwner(ref: AgentRef, owner: symbol): boolean {
+		if (this.#refs.get(ref.id) !== ref) return false;
+		this.#attributionOwners.set(ref, owner);
+		return true;
+	}
+
+	isAttributionOwner(ref: AgentRef, owner: symbol): boolean {
+		return this.#refs.get(ref.id) === ref && this.#attributionOwners.get(ref) === owner;
+	}
+
+	/** Attach identity and telemetry, optionally fencing a scan against newer runtime attribution. */
+	setHistory(
+		id: string,
+		history: AgentHistorySummary,
+		{ sessionFile, ref: expected, attributionRevision, owner }: AgentHistoryOptions = {},
+	): boolean {
 		const ref = this.#refs.get(id);
-		if (!ref || (expectedSessionFile !== undefined && ref.sessionFile !== expectedSessionFile)) return false;
+		if (
+			!ref ||
+			!this.#matchesExpected(ref, expected) ||
+			(sessionFile !== undefined && ref.sessionFile !== sessionFile) ||
+			(owner !== undefined && !this.isAttributionOwner(ref, owner))
+		) {
+			return false;
+		}
 		const definedHistory = Object.fromEntries(
 			Object.entries(history).filter(([, value]) => value !== undefined),
 		) as AgentHistorySummary;
+		if (attributionRevision !== undefined && attributionRevision !== this.getAttributionRevision(ref)) {
+			delete definedHistory.resolvedModel;
+			delete definedHistory.resolvedModelIsFallback;
+			delete definedHistory.fastMode;
+			delete definedHistory.responseFastMode;
+		} else {
+			if (
+				"responseFastMode" in history ||
+				(history.resolvedModel !== undefined && history.resolvedModel !== ref.history?.resolvedModel)
+			) {
+				definedHistory.responseFastMode = history.responseFastMode;
+			}
+			// Runtime snapshots outrank response evidence and remain model-aligned.
+			if ("fastMode" in history) {
+				definedHistory.fastMode = history.fastMode;
+			} else if (history.resolvedModel !== undefined && history.resolvedModel !== ref.history?.resolvedModel) {
+				definedHistory.fastMode = undefined;
+			}
+			if (
+				attributionRevision === undefined &&
+				("resolvedModel" in history ||
+					"resolvedModelIsFallback" in history ||
+					"fastMode" in history ||
+					"responseFastMode" in history)
+			) {
+				this.#attributionRevisions.set(ref, this.getAttributionRevision(ref) + 1);
+			}
+		}
 		const previousDirectCost = ref.history?.directCost;
 		const incomingDirectCost = definedHistory.directCost;
 		// Both writes are cumulative snapshots of this exact transcript. A delayed
 		// scan must not replace a newer park-time snapshot; unscoped updates retain
 		// their normal last-write semantics.
 		if (
-			expectedSessionFile !== undefined &&
+			sessionFile !== undefined &&
 			typeof previousDirectCost === "number" &&
 			Number.isFinite(previousDirectCost) &&
 			previousDirectCost >= 0 &&
@@ -348,9 +418,17 @@ export class AgentRegistry {
 		if (!ref || ref.status === "aborted" || !this.#matchesExpected(ref, expected)) return false;
 		ref.session = session;
 		if (sessionFile !== undefined) {
-			// A replacement transcript starts a new cumulative-cost identity.
-			if (ref.sessionFile !== sessionFile && ref.history?.directCost !== undefined) {
-				ref.history = { ...ref.history, directCost: undefined };
+			// A replacement transcript starts a new cost and tier-provenance identity.
+			if (ref.sessionFile !== sessionFile && ref.history) {
+				ref.history = {
+					...ref.history,
+					resolvedModel: undefined,
+					resolvedModelIsFallback: undefined,
+					directCost: undefined,
+					fastMode: undefined,
+					responseFastMode: undefined,
+				};
+				this.#attributionRevisions.set(ref, this.getAttributionRevision(ref) + 1);
 			}
 			ref.sessionFile = sessionFile;
 		}
@@ -361,6 +439,33 @@ export class AgentRegistry {
 	detachSession(id: string, expected?: AgentRefExpectation): boolean {
 		const ref = this.#refs.get(id);
 		if (!ref || !this.#matchesExpected(ref, expected)) return false;
+		const session = ref.session;
+		const serving = session?.servingModel;
+		// Cold revival may select the spawn primary before this runtime serves.
+		// That bootstrap choice cannot replace the transcript's serving evidence.
+		if (
+			session &&
+			serving &&
+			(serving.served !== false ||
+				!ref.history?.resolvedModel ||
+				ref.history.resolvedModel === (serving.modelIdentity ?? serving.selector))
+		) {
+			const modelIdentity = session.model ? formatModelStringWithRouting(session.model) : undefined;
+			const resolvedModel = serving.modelIdentity ?? serving.selector;
+			ref.history = {
+				...ref.history,
+				resolvedModel,
+				resolvedModelIsFallback: serving.isFallback,
+				responseFastMode: resolvedModel === ref.history?.resolvedModel ? ref.history?.responseFastMode : undefined,
+				fastMode:
+					resolvedModel === modelIdentity
+						? session.isFastModeActive?.()
+						: resolvedModel === ref.history?.resolvedModel
+							? ref.history.fastMode
+							: undefined,
+			};
+			this.#attributionRevisions.set(ref, this.getAttributionRevision(ref) + 1);
+		}
 		ref.session = null;
 		return true;
 	}

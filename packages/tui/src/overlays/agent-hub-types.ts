@@ -20,12 +20,14 @@ export interface AgentMetricsSummary {
 export interface AgentHubSession {
 	readonly thinkingLevel: ThinkingLevel | undefined;
 	readonly model: Model | undefined;
-	readonly servingModel?: { selector: string; isFallback: boolean };
+	readonly servingModel?: { selector: string; modelIdentity?: string; isFallback: boolean; served?: boolean };
 	readonly agent?: { state: { messages: AgentMessage[] } };
 	/** Existing session ledger includes off-transcript model usage and nested-task attribution. */
 	readonly sessionManager?: {
 		getUsageStatistics(): { cost: number; subagentCost: number };
 	};
+	/** This session's applied fast-tier policy for its currently selected model. */
+	isFastModeActive?(): boolean;
 	getSessionStats(): {
 		tokens: { input: number; output: number; cacheWrite: number };
 		assistantMessages: number;
@@ -52,6 +54,10 @@ export interface AgentRecordLike {
 		modelRole?: string;
 		resolvedModel?: string;
 		resolvedModelIsFallback?: boolean;
+		/** Applied fast-tier policy for resolvedModel; absent when historical evidence is unavailable. */
+		fastMode?: boolean;
+		/** Last serving response's tier, used when no runtime snapshot exists. */
+		responseFastMode?: boolean;
 		metrics?: AgentMetricsSummary;
 		/** Cumulative own-session assistant and model_usage cost, excluding nested task results. */
 		directCost?: number;

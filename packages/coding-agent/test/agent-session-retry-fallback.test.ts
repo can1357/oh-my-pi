@@ -2159,6 +2159,7 @@ describe("AgentSession retry fallback", () => {
 			selector: `${firstFallback.provider}/${firstFallback.id}`,
 			modelIdentity: `${firstFallback.provider}/${firstFallback.id}`,
 			thinkingLevel: undefined,
+			served: false,
 			isFallback: true,
 			contextWindow: firstFallback.contextWindow,
 		});
@@ -2198,6 +2199,7 @@ describe("AgentSession retry fallback", () => {
 				selector: `${secondFallback.provider}/${secondFallback.id}`,
 				modelIdentity: `${secondFallback.provider}/${secondFallback.id}`,
 				thinkingLevel: undefined,
+				served: false,
 				isFallback: true,
 				contextWindow: secondFallback.contextWindow,
 			},
@@ -2206,6 +2208,7 @@ describe("AgentSession retry fallback", () => {
 			selector: `${secondFallback.provider}/${secondFallback.id}`,
 			modelIdentity: `${secondFallback.provider}/${secondFallback.id}`,
 			thinkingLevel: undefined,
+			served: true,
 			isFallback: true,
 			contextWindow: secondFallback.contextWindow,
 		});
@@ -6582,6 +6585,7 @@ describe("AgentSession retry fallback", () => {
 			selector: `${primaryModel.provider}/${primaryModel.id}`,
 			modelIdentity: `${primaryModel.provider}/${primaryModel.id}`,
 			thinkingLevel: undefined,
+			served: true,
 			isFallback: false,
 			contextWindow: primaryModel.contextWindow,
 		});
@@ -6638,6 +6642,7 @@ describe("AgentSession retry fallback", () => {
 			selector: `${fallbackModel.provider}/${fallbackModel.id}`,
 			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
 			thinkingLevel: undefined,
+			served: true,
 			isFallback: true,
 			contextWindow: fallbackModel.contextWindow,
 		});
@@ -6706,6 +6711,7 @@ describe("AgentSession retry fallback", () => {
 			selector: `fireworks/${baseId}`,
 			modelIdentity: `fireworks/${baseId}`,
 			thinkingLevel: undefined,
+			served: true,
 			isFallback: true,
 			contextWindow: baseModel.contextWindow,
 		});
@@ -6718,6 +6724,7 @@ describe("AgentSession retry fallback", () => {
 			selector: `fireworks/${baseId}`,
 			modelIdentity: `fireworks/${baseId}`,
 			thinkingLevel: undefined,
+			served: false,
 			isFallback: false,
 			contextWindow: baseModel.contextWindow,
 		});
@@ -8671,6 +8678,7 @@ describe("AgentSession retry fallback", () => {
 			selector: `${primaryModel.provider}/${primaryModel.id}`,
 			modelIdentity: `${primaryModel.provider}/${primaryModel.id}`,
 			thinkingLevel: undefined,
+			served: true,
 			isFallback: false,
 			contextWindow: primaryModel.contextWindow,
 		});
@@ -8686,6 +8694,7 @@ describe("AgentSession retry fallback", () => {
 			selector: `${primaryModel.provider}/${primaryModel.id}`,
 			modelIdentity: `${primaryModel.provider}/${primaryModel.id}`,
 			thinkingLevel: undefined,
+			served: true,
 			isFallback: false,
 			contextWindow: primaryModel.contextWindow,
 		});
@@ -8699,6 +8708,7 @@ describe("AgentSession retry fallback", () => {
 			selector: `${fallbackModel.provider}/${fallbackModel.id}`,
 			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
 			thinkingLevel: undefined,
+			served: false,
 			isFallback: false,
 			contextWindow: fallbackModel.contextWindow,
 		});
@@ -8740,6 +8750,7 @@ describe("AgentSession retry fallback", () => {
 			selector: `${fallbackModel.provider}/${fallbackModel.id}`,
 			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
 			thinkingLevel: undefined,
+			served: true,
 			isFallback: true,
 			contextWindow: fallbackModel.contextWindow,
 		});
@@ -8771,6 +8782,7 @@ describe("AgentSession retry fallback", () => {
 			selector: `${fallbackModel.provider}/${fallbackModel.id}`,
 			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
 			thinkingLevel: undefined,
+			served: true,
 			isFallback: true,
 			contextWindow: fallbackModel.contextWindow,
 		};
@@ -8838,6 +8850,7 @@ describe("AgentSession retry fallback", () => {
 			selector: `${firstFallback.provider}/${firstFallback.id}`,
 			modelIdentity: `${firstFallback.provider}/${firstFallback.id}`,
 			thinkingLevel: undefined,
+			served: true,
 			isFallback: true,
 			contextWindow: firstFallback.contextWindow,
 		});
@@ -8859,6 +8872,7 @@ describe("AgentSession retry fallback", () => {
 			selector: `${firstFallback.provider}/${firstFallback.id}`,
 			modelIdentity: `${firstFallback.provider}/${firstFallback.id}`,
 			thinkingLevel: undefined,
+			served: true,
 			isFallback: true,
 			contextWindow: firstFallback.contextWindow,
 		});
@@ -8935,6 +8949,7 @@ describe("AgentSession retry fallback", () => {
 			selector: `${fallbackModel.provider}/${fallbackModel.id}`,
 			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
 			thinkingLevel: undefined,
+			served: true,
 			isFallback: true,
 			contextWindow: fallbackModel.contextWindow,
 		});
