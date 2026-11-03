@@ -420,7 +420,7 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 	});
 
 	/** Ways the user ends a provider's credentials; each must end a turn at once, never retry it. */
-	const USER_REMOVALS: Record<string, (authStorage: AuthStorage) => Promise<unknown>> = {
+	const USER_REMOVALS: Record<string, (authStorage: AuthStorage) => Promise<void>> = {
 		"removed the credential": authStorage => authStorage.credentials.remove("anthropic"),
 		"logged out on the auth broker": async authStorage => {
 			for (const account of authStorage.oauth.accounts("anthropic")) {
