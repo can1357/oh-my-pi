@@ -218,6 +218,12 @@ async fn lastpipe_defers_a_signal_report_until_the_next_notify_point() {
 const STARTED: &str = "started() { local c; while read -r c 2>/dev/null < /proc/$1/comm; do [[ $c \
                        == sleep ]] && return 0; done; }; ";
 
+/// Waits, without starting a child, until the process `$1` names is gone or
+/// a zombie (at most 30 s), so a signal has landed before the next step.
+const DEAD: &str = "dead() { local s t=$((SECONDS+30)); while ((SECONDS < t)); do read -r s \
+                    2>/dev/null < /proc/$1/stat || return 0; [[ $s == *\") Z \"* ]] && return 0; \
+                    done; return 1; }; ";
+
 /// A script that leaves early (`exit`, `set -e`, a fatal expansion error)
 /// reads no more input, so the read at its end that would report a job never
 /// happens.
@@ -329,5 +335,62 @@ async fn a_signal_killed_subshell_reports_its_own_text() {
 		("redirected-last", "( echo a; /bin/sh -c 'kill -KILL $$' 2>/dev/null ); echo st=$?"),
 		("term", "( echo a; /bin/sh -c 'kill -TERM $$' ); echo st=$?"),
 	]))
+	.await;
+}
+
+/// A here-document whose body Bash expands with text it reads (a `$(...)`,
+/// or one in a `${...}` operand) reports the jobs that ended there, as each
+/// line Bash reads does. The document feeds a builtin: for an external
+/// command Bash expands it in the child it forks, whose copy of the job
+/// table reports once more, which this shell does not (see the PR's
+/// "Found and not fixed").
+#[tokio::test(flavor = "multi_thread")]
+async fn a_here_document_that_reads_text_reports_as_bash_does() {
+	let killed =
+		format!("{STARTED}{DEAD}/bin/sleep 30 & p=$!; started $p; kill -s HUP $p; dead $p; x=ab");
+	let rows = [
+		("substitution", "$(echo b)"),
+		("pattern-operand", "${x%$(echo b)}"),
+		("offset-operand", "${x:$(echo 1)}"),
+		("no-text", "${x%b}"),
+	]
+	.map(|(name, body)| {
+		(name.to_owned(), format!("{killed}; read -r y <<EOF\n{body}\nEOF\necho \"after=$y\""))
+	});
+	assert_all_bash(rows.into()).await;
+}
+
+/// `kill -0` on a background process a signal killed fails once the process
+/// has ended, as Bash's `SIGCHLD` handler has collected it, also in a loop
+/// that reaches no point that reports jobs; the job is reported at the next
+/// such point (here the end of the script). The shell collected a child only
+/// at such a point, so the loop ran out its 500 rounds.
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_zero_sees_a_killed_process_gone() {
+	assert_all_bash(vec![(
+		"builtin-loop".to_owned(),
+		format!(
+			"{STARTED}/bin/sleep 30 & p=$!; started $p; kill -s HUP $p; n=0; while kill -0 $p \
+			 2>/dev/null && ((n++ < 500)); do read -t 0.01 -u 9 9< <(:); done; echo \"ended=$((n < \
+			 500))\"; echo next"
+		),
+	)])
+	.await;
+}
+
+/// A foreground pipeline one of whose processes a signal stopped is a
+/// stopped job: a shell reading a script reports nothing for it, and its
+/// status is 128 plus its first stage's (here `set -m`: without job control
+/// Bash does not see the stop and waits on).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_foreground_pipeline_is_not_reported() {
+	const TAIL: &str = "echo st=$?; kill -CONT %1; wait %1; echo final=$?";
+	assert_all_bash(vec![
+		(
+			"stop-last".to_owned(),
+			format!("set -m; /bin/true | /bin/sh -c 'sleep .05; kill -STOP $$; exit 7'; {TAIL}"),
+		),
+		("stop-only".to_owned(), format!("set -m; /bin/sh -c 'kill -STOP $$; exit 7'; {TAIL}")),
+	])
 	.await;
 }

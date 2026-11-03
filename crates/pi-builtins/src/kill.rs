@@ -134,6 +134,12 @@ impl builtins::Command for KillCommand {
 			return Ok(ExecutionExitCode::InvalidUsage.into());
 		}
 
+		// Bash's `SIGCHLD` handler has collected every child that ended by the
+		// time `kill` runs, so `kill -0 $!` fails once the job's process is
+		// gone, also in a loop with no point that reports jobs.
+		context.shell.jobs_mut().settle_ended().await;
+		context.shell.jobs_mut().poll_preserving_completed()?;
+
 		// One process-table walk for the whole invocation, and only when a signal
 		// will actually be delivered: `-l` and the signal-0 probe touch nothing.
 		// Every guard below reads this same resolved chain.
