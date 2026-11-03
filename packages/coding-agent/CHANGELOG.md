@@ -46,6 +46,10 @@
 
 - A subagent that spawned subagents of its own stayed in memory after it parked, whole transcript included, for as long as the session ran: each child's revive record held the parent through its extension-root provider (bound to the parent) and through any eval-defined tools the parent handed it. A lead that runs lanes with reviewers no longer grows by every finished lane; a child calling a parent's eval-defined tool after that parent has gone gets a tool error ([#17916](https://github.com/can1357/oh-my-pi/pull/17916) by [@sjawhar](https://github.com/sjawhar))
 
+### Fixed
+
+- `omp models` (`ls`, `find`, `refresh`) prints a stderr warning naming an extension provider whose `fetchDynamicModels` discovery failed, with its error, instead of silently omitting the provider; the failure is also logged ([#17925](https://github.com/can1357/oh-my-pi/issues/17925))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
