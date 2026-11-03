@@ -142,7 +142,7 @@ describe("verifyExpectedFiles", () => {
 		}
 	});
 
-	it("preserves expected whitespace on non-formatted files when differences are whitespace-only", async () => {
+	it("keeps whitespace significant in files without a formatter", async () => {
 		const { expectedDir, actualDir, cleanup } = await createTempDirs();
 		try {
 			await Bun.write(path.join(expectedDir, "notes.txt"), "alpha  beta\ngamma\n");
@@ -150,51 +150,58 @@ describe("verifyExpectedFiles", () => {
 
 			const result = await verifyExpectedFiles(expectedDir, actualDir);
 
-			expect(result.success).toBe(true);
+			expect(result.success).toBe(false);
 		} finally {
 			await cleanup();
 		}
 	});
 
-	it("normalizes indent-only diffs even when earlier insertions shift line indices", async () => {
+	it.each([
+		{
+			name: "quoted string whitespace",
+			expected: 'export const value = "a b";\n',
+			actual: 'export const value = "ab";\n',
+		},
+		{
+			name: "template literal whitespace",
+			expected: "export const value = `a b`;\n",
+			actual: "export const value = `ab`;\n",
+		},
+		{
+			name: "template literal blank lines",
+			expected: "export const value = `a\n\n\nb`;\n",
+			actual: "export const value = `a\n\nb`;\n",
+		},
+		{
+			name: "template literal whitespace-only lines",
+			expected: "export const value = `a\n  \nb`;\n",
+			actual: "export const value = `a\nb`;\n",
+		},
+		{
+			name: "operator token boundaries",
+			expected: "let a = 1, b = 2;\nexport const value = a + ++b;\n",
+			actual: "let a = 1, b = 2;\nexport const value = a++ + b;\n",
+		},
+		{
+			name: "automatic semicolon insertion",
+			expected: "export function value() { return 1; }\n",
+			actual: "export function value() { return\n1; }\n",
+		},
+		{
+			name: "unparseable source whitespace",
+			expected: 'export const value = "a b";\nfunction broken(\n',
+			actual: 'export const value = "ab";\nfunction broken(\n',
+		},
+	])("rejects changes to $name", async ({ expected, actual }) => {
 		const { expectedDir, actualDir, cleanup } = await createTempDirs();
 		try {
-			// Force prettier to bail (intentional syntax error: unbalanced brace) so the
-			// verifier falls back to the whitespace-restore pass on raw content.
-			const expected = [
-				"function broken(",
-				"  // missing close paren on purpose",
-				"  return {",
-				"      a: 1,",
-				"      b: 2,",
-				"  };",
-				"}",
-				"",
-			].join("\n");
-			const actual = [
-				"function broken(",
-				"  // missing close paren on purpose",
-				"  const inserted = true;",
-				"  return {",
-				"    a: 1,",
-				"    b: 2,",
-				"  };",
-				"}",
-				"",
-			].join("\n");
 			await Bun.write(path.join(expectedDir, "index.ts"), expected);
 			await Bun.write(path.join(actualDir, "index.ts"), actual);
 
 			const result = await verifyExpectedFiles(expectedDir, actualDir);
 
-			// The only real change should be the inserted const; the body's indent
-			// drift must not be reported as added/removed lines.
 			expect(result.success).toBe(false);
-			const diff = result.diff ?? "";
-			const changeLines = diff.split("\n").filter(line => line.startsWith("+") || line.startsWith("-"));
-			expect(changeLines.some(line => line.includes("const inserted"))).toBe(true);
-			expect(changeLines.some(line => line.includes("a:"))).toBe(false);
-			expect(changeLines.some(line => line.includes("b:"))).toBe(false);
+			expect(result.formattedEquivalent).toBe(false);
 		} finally {
 			await cleanup();
 		}
