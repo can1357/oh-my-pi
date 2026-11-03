@@ -537,6 +537,52 @@ process.exit(0);
 		expect(Date.now() - abortedAt).toBeLessThan(10_000);
 		expect(await aliveAfter(pid)).toBe(false);
 	}, 40_000);
+
+	/** A launcher that starts a SIGTERM-ignoring child on its own output, then kills itself with SIGTERM. */
+	function selfSignallingLauncher(pidFile: string): string {
+		return writeFakeExecutable(
+			root,
+			"signalled-launcher",
+			`const child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(
+				`process.on("SIGTERM", () => {}); require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1 << 30);`,
+			)}], { stdout: "inherit", stderr: "inherit" });
+child.unref();
+setTimeout(() => process.kill(process.pid, "SIGTERM"), 50);
+setInterval(() => {}, 1 << 30);
+`,
+		);
+	}
+
+	it("kills the group on abort after its launcher died from a signal", async () => {
+		const pidFile = path.join(root, "grandchild.pid");
+		const command = selfSignallingLauncher(pidFile);
+		const controller = new AbortController();
+		const outcome = runLinterCli(command, ["lint"], root, controller.signal).then(
+			() => new Error("run finished without the abort"),
+			(error: unknown) => error,
+		);
+		const pid = await waitForPid(pidFile);
+		const abortedAt = Date.now();
+
+		controller.abort(new Error("user abort"));
+
+		expect(String(await outcome)).toContain("user abort");
+		expect(Date.now() - abortedAt).toBeLessThan(10_000);
+		expect(await aliveAfter(pid)).toBe(false);
+	}, 40_000);
+
+	it("kills the group at its deadline after its launcher died from a signal", async () => {
+		const pidFile = path.join(root, "grandchild.pid");
+		const command = selfSignallingLauncher(pidFile);
+		const outcome = runLinterCli(command, ["lint"], root, undefined, 15_000).then(
+			() => new Error("run finished before its deadline"),
+			(error: unknown) => error,
+		);
+		const pid = await waitForPid(pidFile);
+
+		expect(String(await outcome)).toContain("Timed out");
+		expect(await aliveAfter(pid)).toBe(false);
+	}, 60_000);
 });
 
 describe("deferred diagnostics on session dispose", () => {
