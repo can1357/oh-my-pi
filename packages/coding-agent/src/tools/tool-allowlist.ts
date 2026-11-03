@@ -63,6 +63,15 @@ export class ToolAllowList {
 		return new ToolAllowList(new Set([...this.#names, ...names]), new Set(this.#mcpServers), this.#allDevices);
 	}
 
+	/** The `--tools` entries this list parses from, selectors included ({@link ToolAllowList.parse}). */
+	get entries(): string[] {
+		return [
+			...this.#names,
+			...[...this.#mcpServers].map(server => `${MCP_SELECTOR_PREFIX}${server}`),
+			...(this.#allDevices ? [ALL_DEVICES_SELECTOR] : []),
+		];
+	}
+
 	/** The entries that name one tool (selectors excluded). */
 	get toolNames(): string[] {
 		return [...this.#names];

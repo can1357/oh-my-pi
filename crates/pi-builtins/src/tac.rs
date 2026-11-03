@@ -7,13 +7,12 @@ use std::{
 	io::{BufWriter, Read, Seek, SeekFrom, Write},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use memchr::memmem;
 use thiserror::Error;
 use uucore::display::Quotable;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno};
 
 mod options {
 	pub static BEFORE: &str = "before";
@@ -403,11 +402,6 @@ fn tac(
 		}
 	}
 	Ok(())
-}
-
-/// Creates the `tac` builtin registration.
-pub(crate) fn tac_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Tac, SE>()
 }
 
 #[cfg(test)]

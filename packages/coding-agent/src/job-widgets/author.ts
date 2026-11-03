@@ -16,7 +16,7 @@ import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit
 import systemPrompt from "../prompts/system/job-widget-system.md" with { type: "text" };
 import userPrompt from "../prompts/system/job-widget-user.md" with { type: "text" };
 import { CREDENTIAL_PATTERNS } from "../secrets/patterns";
-import type { CostGate } from "../session/cost-gate";
+import type { CostGateApi } from "../session/cost-gate";
 import type { JobWidgetSourceSample } from "./runtime";
 import { JOB_WIDGET_SPEC_SCHEMA, type JobWidgetSpec } from "./spec";
 import type { JobWidgetBrief } from "./types";
@@ -169,7 +169,7 @@ export interface ModelJobWidgetAuthorOptions {
 	/** Each completed request's assistant message, for usage accounting (purpose `job-widget`). */
 	onUsage?: (message: AssistantMessage) => void;
 	/** The session tree's current cost gate: refuses the request at the cap and adds its cost. */
-	costGate?: () => CostGate | undefined;
+	costGate?: () => CostGateApi | undefined;
 }
 
 /**
