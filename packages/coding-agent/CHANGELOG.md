@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- ACP: a `session/prompt` that arrives while omp runs a turn no client prompt owns (a background-job completion, an IRC message, or a scheduled continuation) now waits for that turn to end and then runs as its own turn, instead of failing at once with `session_busy` (`-32003`). The client sees a "Queued" thought while it waits, and Stop or closing the session releases the waiting prompt ([#10707](https://github.com/can1357/oh-my-pi/issues/10707))
+- ACP: a `session/prompt` that arrives while omp runs a turn no client prompt owns (a background-job completion, an IRC message, or a scheduled continuation) now waits for that turn to end and then runs as its own turn, instead of failing at once with `session_busy` (`-32003`). The client sees a "Queued" thought while it waits, and Stop or closing the session releases the waiting prompt ([#10707](https://github.com/can1357/oh-my-pi/issues/10707), [#17906](https://github.com/can1357/oh-my-pi/pull/17906) by [@skellywix](https://github.com/skellywix))
 
 ## [18.16.0] - 2026-11-02
 
