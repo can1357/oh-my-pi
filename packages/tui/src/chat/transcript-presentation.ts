@@ -4,13 +4,28 @@
  * {@link TranscriptPresentationState}.
  */
 import type { TspProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
-import type { Component } from "../tui";
+import { type Component, Container } from "../tui";
 import { theme } from "../theme";
 import { truncateToWidth } from "../render";
-import { card, span, text, withHidden } from "../native/describe";
-import type { NativeNode } from "../native/node";
+import { card, col, node, span, text, withHidden } from "../native/describe";
+import { type DescribeContext, type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
+import { Memo } from "../native/memo";
 import { plainLine, plainText, spansLine } from "../native/spans";
+import type { AnimationFrame } from "../chrome/transcript-container";
+import type { DaemonSnapshot } from "../tools/daemon";
 import type { TranscriptBlock, TranscriptPresentation, TranscriptPresenter } from "./extension-types";
+import type { LateDiagnosticsFile } from "./late-diagnostics-message";
+import {
+	type AdvisorMessageDetails,
+	type BashExecutionMessage,
+	type CustomMessage,
+	type HookMessage,
+	LAUNCH_COMPLETION_MESSAGE_TYPE,
+	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
+	type PythonExecutionMessage,
+	SKILL_PROMPT_MESSAGE_TYPE,
+	type SkillPromptDetails,
+} from "./messages";
 
 /** A block's presentation once every presenter has answered. */
 export type ResolvedPresentation =
@@ -60,6 +75,17 @@ const redrawListeners = new Set<(owner: Component) => void>();
 export function onTranscriptPresentationRedrawn(listener: (owner: Component) => void): () => void {
 	redrawListeners.add(listener);
 	return () => redrawListeners.delete(listener);
+}
+
+const idChangeListeners = new Set<(from: string, to: string) => void>();
+
+/**
+ * Call `listener` when a {@link PresentedBlock} takes another id (a `!`/`$` run or a skill prompt
+ * was recorded), so a host tracking blocks by id follows it. Returns the unsubscribe.
+ */
+export function onTranscriptBlockIdChanged(listener: (from: string, to: string) => void): () => void {
+	idChangeListeners.add(listener);
+	return () => idChangeListeners.delete(listener);
 }
 
 function isTspText(value: unknown): value is TspText {
@@ -230,7 +256,8 @@ export class TranscriptPresentationState {
 	/** Tell the redraw listeners about a change, once the block is no longer partial. */
 	#report(changed: boolean): void {
 		if ((!changed && !this.#changedWhilePartial) || !this.#owner) return;
-		if (this.#snapshot()?.isPartial) {
+		const block = this.#snapshot();
+		if (block?.type === "toolCall" && block.isPartial) {
 			this.#changedWhilePartial = true;
 			return;
 		}
@@ -367,4 +394,264 @@ export function presentNative(
 		} satisfies TspProps<"tool">,
 		c: body,
 	};
+}
+
+type WrappedTranscriptBlock = Exclude<TranscriptBlock, { type: "toolCall" }>;
+
+/** The `message` block of a session message: its id is the decimal `timestamp`. */
+export function messageBlock(
+	message: CustomMessage | HookMessage | BashExecutionMessage | PythonExecutionMessage,
+): WrappedTranscriptBlock {
+	// A legacy `hookMessage` is a custom message under its old role name.
+	const shown = message.role === "hookMessage" ? { ...message, role: "custom" as const } : message;
+	return { type: "message", id: String(message.timestamp), message: shown };
+}
+
+let nextEventBlockId = 0;
+/** A process-unique id for an `event` block. */
+export function eventBlockId(kind: string): string {
+	return `${kind}:${++nextEventBlockId}`;
+}
+
+/** How a compact block names itself: the terminal row after its glyph, and the native row. */
+interface BlockHead extends CompactNativeHead {
+	readonly terminal: string;
+	readonly glyph?: string;
+	/** Kind name for the native row's icon and role styles. */
+	readonly name: string;
+	readonly target?: string;
+}
+
+function countOf(count: number, noun: string): string {
+	return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function plainHead(name: string, role: string, title: string, target?: string): BlockHead {
+	// The native head and the tool row it folds into show the target as is: sanitize it like `compactHead` does.
+	const shown = target === undefined ? undefined : plainLine(target);
+	return { terminal: compactHead(title, target), name, role, title: plainLine(title), target: shown };
+}
+
+/** omp's own one-row summary of a wrapped block, from the block presenters see. */
+function blockHead(block: WrappedTranscriptBlock): BlockHead {
+	if (block.type === "event") {
+		const { event } = block;
+		if (event.type === "ttsr_triggered") {
+			return plainHead("ttsr", "omp.notice.ttsr", "Rule", event.rules.map(rule => rule.name).join(", "));
+		}
+		const reminder = `${countOf(event.todos.length, "incomplete todo")} - reminder ${event.attempt}/${event.maxAttempts}`;
+		return plainHead("todo", "omp.notice.todo", "Todos", reminder);
+	}
+	const { message } = block;
+	if (message.role !== "custom") {
+		const bash = message.role === "bashExecution";
+		const source = plainLine((bash ? message.command : message.code).split("\n", 1)[0] ?? "");
+		const color = message.excludeFromContext ? "dim" : bash ? "bashMode" : "pythonMode";
+		let terminal = theme.fg(color, theme.bold(`${bash ? "$" : ">>>"} ${source}`));
+		if (message.cancelled) terminal += theme.fg("muted", " cancelled");
+		else if (message.exitCode !== undefined && message.exitCode !== 0) {
+			terminal += theme.fg("error", ` exit ${message.exitCode}`);
+		}
+		return bash
+			? { terminal, name: "bash", role: "omp.bash", title: "Bash", target: source }
+			: { terminal, name: "eval", role: "omp.eval", title: "Python", target: source };
+	}
+	switch (message.customType) {
+		case "advisor": {
+			const notes = (message.details as AdvisorMessageDetails | undefined)?.notes ?? [];
+			const blockers = notes.filter(note => note.severity === "blocker").length;
+			const tally = `${countOf(notes.length, "note")}${blockers > 0 ? ` · ${countOf(blockers, "blocker")}` : ""}`;
+			return plainHead("advisor", "omp.advisor", "Advisor", tally);
+		}
+		case SKILL_PROMPT_MESSAGE_TYPE: {
+			const name = (message.details as SkillPromptDetails | undefined)?.name?.trim() || "unknown";
+			return plainHead("skill", "omp.skill", "Skill", name);
+		}
+		case LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE: {
+			const files = (message.details as { files?: LateDiagnosticsFile[] } | undefined)?.files ?? [];
+			const count = files.reduce((sum, file) => sum + (file.messages?.length ?? 0), 0);
+			const summary = files.flatMap(file => (file.summary ? [file.summary] : [])).join(", ");
+			const errored = files.some(file => file.errored);
+			return {
+				...plainHead(
+					"diagnostics",
+					"omp.diagnostics.late",
+					"Late diagnostics",
+					`${countOf(count, "diagnostic")}${summary ? ` · ${summary}` : ""}`,
+				),
+				glyph: theme.fg(errored ? "error" : "warning", errored ? theme.status.error : theme.status.warning),
+			};
+		}
+		case "async-result": {
+			const details = message.details as { jobId?: string; jobs?: { jobId?: string }[] } | undefined;
+			const jobs = details?.jobs?.length ? details.jobs : [details ?? {}];
+			const ids = jobs.map(job => job.jobId ?? "unknown").join(", ");
+			const title = jobs.length === 1 ? "Background job completed" : `${jobs.length} background jobs completed`;
+			return { ...plainHead("job", "omp.activity", title, ids), glyph: theme.fg("success", theme.status.success) };
+		}
+		case LAUNCH_COMPLETION_MESSAGE_TYPE: {
+			const daemons = (message.details as { daemons?: DaemonSnapshot[] } | undefined)?.daemons ?? [];
+			const failed = daemons.some(
+				daemon => daemon.state === "failed" || (daemon.exitCode !== undefined && daemon.exitCode !== 0),
+			);
+			const names = daemons.map(daemon => daemon.name).join(", ");
+			const title = failed ? "Supervised process failed" : "Supervised process completed";
+			return {
+				...plainHead(
+					"process",
+					"omp.activity",
+					title,
+					names || (typeof message.content === "string" ? message.content : undefined),
+				),
+				glyph: failed ? theme.fg("error", theme.status.error) : theme.fg("success", theme.status.success),
+			};
+		}
+	}
+	return plainHead("message", "omp.custom", message.customType);
+}
+
+/** Transcript hooks a wrapped component may have; the wrapper forwards the ones it has. */
+interface WrappedComponent extends Component {
+	setExpanded?(expanded: boolean): void;
+	/**
+	 * Whether the user expanded it, including through a nested disclosure no root toggle reports
+	 * (the skill's `prompt`). True forces the block full, so it must default to false.
+	 */
+	isExpanded?(): boolean;
+	setToolActivityVisible?(visible: boolean): void;
+	isTranscriptBlockFinalized?(): boolean;
+	setTranscriptAllocation?(rows: number, frame: AnimationFrame): void;
+}
+
+/**
+ * A non-tool transcript block (advisor, skill, late diagnostics, `!`/`$` run, background job,
+ * supervised process, TTSR, todo reminder) with the presenters' answer applied around the
+ * component that draws it. In full it draws and describes as `inner` does; expansion, native
+ * events, tool-activity visibility and finalization reach `inner`.
+ */
+export class PresentedBlock<T extends WrappedComponent = WrappedComponent>
+	extends Container
+	implements TranscriptPresentable
+{
+	readonly inner: T;
+	#block: WrappedTranscriptBlock;
+	#head: BlockHead | undefined;
+	readonly #presentation: TranscriptPresentationState;
+	readonly #native = new Memo();
+	#expanded = false;
+	#toolActivityVisible = true;
+	#allocation = Number.POSITIVE_INFINITY;
+	/** Only where `inner` has it: the transcript container detects tool activity by its presence. */
+	readonly setToolActivityVisible?: (visible: boolean) => void;
+
+	constructor(inner: T, block: WrappedTranscriptBlock) {
+		super();
+		this.inner = inner;
+		this.#block = block;
+		this.#presentation = new TranscriptPresentationState(
+			() => this.#block,
+			() => this.#expanded || this.inner.isExpanded?.() === true,
+			this,
+		);
+		this.addChild(inner);
+		const setVisible = inner.setToolActivityVisible?.bind(inner);
+		if (setVisible) {
+			this.setToolActivityVisible = visible => {
+				this.#toolActivityVisible = visible;
+				setVisible(visible);
+			};
+		}
+	}
+
+	get block(): WrappedTranscriptBlock {
+		return this.#block;
+	}
+
+	/**
+	 * The block's data changed (a `!`/`$` run was recorded, TTSR rules merged in). A block already
+	 * in scrollback is not drawn again, so a changed answer is reported now for a one-time replay.
+	 */
+	setBlock(block: WrappedTranscriptBlock): void {
+		const from = this.#block.id;
+		this.#block = block;
+		this.#head = undefined;
+		if (block.id !== from) for (const listener of idChangeListeners) listener(from, block.id);
+		this.#presentation.markStale();
+		this.#presentation.recheck();
+	}
+
+	setExpanded(expanded: boolean): void {
+		this.#expanded = expanded;
+		this.inner.setExpanded?.(expanded);
+	}
+
+	/** The compact row's toggle, or `inner`'s own root toggle, expands the block. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		const expanded = rootToggleExpanded(event);
+		if (expanded !== undefined) this.#expanded = expanded;
+		this.inner.handleNativeEvent?.(event);
+	}
+
+	refreshTranscriptPresentation(ids?: ReadonlySet<string>): boolean {
+		return this.#presentation.refresh(ids);
+	}
+
+	transcriptBlockIds(): readonly string[] {
+		return [this.#block.id];
+	}
+
+	isTranscriptBlockFinalized(): boolean {
+		return this.inner.isTranscriptBlockFinalized?.() ?? true;
+	}
+
+	/** A squeezed compact block keeps its head and as many rows as fit; in full, `inner` decides. */
+	setTranscriptAllocation(rows: number, frame: AnimationFrame): void {
+		this.#allocation = Math.max(0, Math.trunc(rows));
+		this.inner.setTranscriptAllocation?.(rows, frame);
+	}
+
+	/** The cached head row carries theme colours and glyphs. */
+	override invalidate(): void {
+		this.#head = undefined;
+		super.invalidate();
+	}
+	override render(width: number): readonly string[] {
+		const shown = this.#presentation.draw();
+		if (shown.mode === "full") return super.render(width);
+		if (shown.mode === "hidden" || !this.#toolActivityVisible || this.#allocation === 0) return [];
+		const head = (this.#head ??= blockHead(this.#block));
+		return compactRows(head.terminal, shown, width, head.glyph).slice(0, this.#allocation);
+	}
+
+	override describe(cx: DescribeContext): NativeNode | null {
+		const shown = this.#presentation.draw();
+		if (shown.mode === "full") return this.inner.describe?.(cx) ?? super.describe(cx);
+		const dataFirst = cx.supports("tool");
+		const full = this.inner.describe?.(cx) ?? super.describe(cx) ?? col([]);
+		return this.#native.get([full, shown, dataFirst, this.#toolActivityVisible, this.#block], () => {
+			const head = (this.#head ??= blockHead(this.#block));
+			let own = full;
+			if (full.k === "tool" && full.p !== undefined) {
+				// Already a tool row (a `!`/`$` run): it keeps its status and exit code, and its
+				// compact row names the command its full card shows in the body.
+				if (full.p.target === undefined)
+					own = { ...full, p: { ...full.p, target: head.target, targetKind: "text" } };
+			} else if (dataFirst) {
+				// A terminal that draws `tool` nodes folds the block into an inline tool row.
+				own = node(
+					"tool",
+					{
+						role: head.role,
+						name: head.name,
+						title: head.title,
+						target: head.target,
+						targetKind: "text",
+						status: "done",
+					},
+					[full],
+				);
+			}
+			return withHidden(presentNative(own, shown, head), !this.#toolActivityVisible);
+		});
+	}
 }
