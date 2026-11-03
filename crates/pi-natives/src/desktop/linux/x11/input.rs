@@ -144,7 +144,7 @@ impl X11Input {
 	) -> CoreResult<()> {
 		if matches!(target, Target::Desktop | Target::Display(_)) || mode != DeliveryMode::Background
 		{
-			self.keymap = Keymap::core(&self.conn)?;
+			self.keymap = Keymap::xtest(&self.conn)?;
 		}
 		match (target, mode) {
 			(Target::Desktop | Target::Display(_), _) => self.pointer_xtest(&event),
@@ -238,7 +238,13 @@ impl X11Input {
 	}
 
 	fn keys(&mut self, target: &Target, keys: Keys<'_>, mode: DeliveryMode) -> CoreResult<()> {
-		self.keymap = Keymap::core(&self.conn)?;
+		// `XSendEvent` keys are read in the core map, `XTest` keys in its
+		// device's.
+		self.keymap = if matches!(target, Target::Window(_)) && mode == DeliveryMode::Background {
+			Keymap::core(&self.conn)?
+		} else {
+			Keymap::xtest(&self.conn)?
+		};
 		match (target, mode) {
 			(Target::Desktop | Target::Display(_), _) => {
 				let steps = keys.plan(&self.keymap)?;
