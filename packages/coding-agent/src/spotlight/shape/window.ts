@@ -89,6 +89,8 @@ export function densityScores(lines: readonly string[], spot: readonly number[])
 
 /** One gap marker's cost, roughly. */
 const FRAME_MARKER = 40;
+/** A line of brackets and separators alone (`{`, `};`, `)`), after any read prefix (`12|`, `12:`): no context. */
+const BARE = /^\s*(?:\d+(?:#\w+)?[|:])?\s*[{}()[\];,]+\s*$/;
 
 /**
  * The valve's frame within `budget`. `width[i]` is line i's shown size; lines with `skip` set (already seen) are never
@@ -123,7 +125,14 @@ export function frameLines(
 		if (show[i]) continue;
 		const span: number[] = [];
 		let add = 0;
-		for (let j = Math.max(0, i - k.ctx); j <= Math.min(n - 1, i + k.ctx); j++) {
+		// A lone `{` or `}` says nothing: the neighbour is the line past it (a C signature above its brace).
+		let lo = Math.max(0, i - k.ctx);
+		let hi = Math.min(n - 1, i + k.ctx);
+		if (k.ctx) {
+			while (lo > 0 && BARE.test(lines[lo])) lo--;
+			while (hi < n - 1 && BARE.test(lines[hi])) hi++;
+		}
+		for (let j = lo; j <= hi; j++) {
 			if (show[j] || skip[j]) continue;
 			span.push(j);
 			add += width[j] + 1;
@@ -290,6 +299,11 @@ export function uniformShape(
 		differs: lines.map((_, i) => counted(i) && !shaped[i] && i > from && i < to),
 		edges: lines.map((_, i) => counted(i) && (i < from || i > to)),
 	};
+}
+
+/** Unified diff text (`git diff`, a `.patch` read back): a hunk header and a file header. */
+export function isDiff(lines: readonly string[]): boolean {
+	return lines.some(l => /^@@ -\d/.test(l)) && lines.some(l => /^(?:diff --git |\+\+\+ |--- a\/)/.test(l));
 }
 
 /**

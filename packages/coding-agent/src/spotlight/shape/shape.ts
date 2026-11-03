@@ -30,7 +30,16 @@ import {
 } from "../types";
 import { lineIndex, matchLine } from "./align";
 import { EDIT_TOOLS } from "../edit-gate";
-import { isPageBack, isTestRun, namesSource, printsFiles, runsAgent, runsProgram, SOURCE_PATH } from "./command";
+import {
+	isPageBack,
+	isTestRun,
+	namesSource,
+	narrowsOutput,
+	printsFiles,
+	runsAgent,
+	runsProgram,
+	SOURCE_PATH,
+} from "./command";
 import { foldBashDocs, foldReadDoc } from "./docs";
 import { shapeDumpOutput, shapeDumpRead } from "./dumps";
 import { AGAIN_CHARS, indentOfFirst, MARKER, norm, words } from "./lines";
@@ -49,6 +58,7 @@ import {
 	DENSITY_PARTS,
 	densityScores,
 	frameLines,
+	isDiff,
 	isGrid,
 	keepHeadings,
 	type Window,
@@ -499,14 +509,23 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 	const sourceRead = input.read
 		? SOURCE_PATH.test(input.read.path)
 		: input.tool === "bash" && printsFiles(command) && namesSource(command) && !program;
-	// A sub-agent's report and an edit's result are read in full: cut, they came back as reads of the cut's copy
-	// (8 of 9 reports, 5 of 13 edit results), each costing more than the cut saved.
+	// A sub-agent's report is read in full: cut, it came back as a read of the cut's copy (8 of 9), costing more than
+	// the cut saved. An edit's result came back 5 of 13 times for ~600 tokens saved: even, so it stays whole too.
 	const report =
 		input.tool === "task" ||
 		input.tool === "wait" ||
 		Object.hasOwn(EDIT_TOOLS, input.tool) ||
 		(input.tool === "bash" && runsAgent(command));
-	const exempt = ((folded || sourceRead || report) && shown <= EXEMPT_MAX) || isGrid(lines);
+	// A diff is reviewed whole: each cut one a review needed its hidden lines (4 of 4).
+	const diff = isDiff(input.read?.lines ?? lines);
+	// Lines the agent already picked (a search, a filtered command): a cut one needed its hidden lines 6 of 8 times
+	// and maybe the other 2, so a cut pays only past ~15k chars.
+	const narrowed =
+		input.tool === "grep" ||
+		input.tool === "find" ||
+		input.tool === "glob" ||
+		(input.tool === "bash" && narrowsOutput(command));
+	const exempt = ((folded || sourceRead || report || diff || narrowed) && shown <= EXEMPT_MAX) || isGrid(lines);
 	const cut = !again && !exempt && shown > VALVE_OVER * scale * (program ? PROGRAM_SCALE : 1);
 	// Scalars unwrapped above no longer equal their base lines; the view's own lines still do.
 	const origin = viewOrigin(run, b.view) ?? alignedTo(run, b.view.lines);

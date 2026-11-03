@@ -36,9 +36,31 @@ const PRINT_SEGMENT = /^(?:cat|nl|sed\s+-n|head|tail|grep|rg|git\s+(?:diff|show)
 /** A whole-file read: `cat|nl|bat|more|less [-flags] F…` with no pipe or redirect. */
 const WHOLE_READ = /^(?:cat|nl|bat|more|less)(?:\s+-[A-Za-z]+)*\s+[^|<>]+$/;
 
-/** Segments of a shell command: split on `;`, `&&`, `||` and newlines; pipes stay inside a segment. */
+/**
+ * Segments of a shell command: split on `;`, `&&`, `||` and newlines outside quotes (`sed -n '1,9p;20,30p'` is one
+ * segment); pipes stay inside a segment.
+ */
 export function segments(command: string): string[] {
-	return command.split(/;|&&|\|\||\n/).map(s => s.trim());
+	const out: string[] = [];
+	let quote = "";
+	let start = 0;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (quote) {
+			if (ch === quote) quote = "";
+			else if (ch === "\\" && quote === '"') i++;
+			continue;
+		}
+		if (ch === "'" || ch === '"') quote = ch;
+		else if (ch === "\\") i++;
+		else if (ch === ";" || ch === "\n" || ((ch === "&" || ch === "|") && command[i + 1] === ch)) {
+			out.push(command.slice(start, i).trim());
+			if (ch === "&" || ch === "|") i++;
+			start = i + 1;
+		}
+	}
+	out.push(command.slice(start).trim());
+	return out;
 }
 
 /** Some segment prints file contents (`cd x; ls; cat a.py`). */
@@ -85,6 +107,18 @@ export function runsProgram(command: string): boolean {
 /** The command runs a coding agent whose printed report is its whole answer. */
 export function runsAgent(command: string): boolean {
 	return segments(command).some(s => AGENT_SEGMENT.test(s));
+}
+
+/** A pipeline stage that keeps only the lines it was told to (`grep`, `rg`, `sed -n 10,40p`, `awk '/x/'`). */
+const FILTER_STAGE = /^(?:\w+=\S*\s+)*(?:grep|egrep|rg|ag|sed\s+-n|awk)\b/;
+
+/**
+ * The command's output is lines the agent already picked: its last segment searches or selects (`grep -n f x.c`,
+ * `git show m:x.c | grep -A12 y`, `sed -n '99,130p' doc.md`).
+ */
+export function narrowsOutput(command: string): boolean {
+	const last = segments(command).filter(Boolean).at(-1) ?? "";
+	return last.split("|").some(stage => FILTER_STAGE.test(stage.trim()));
 }
 
 /** The command or read path reads text a shaped result saved (`artifact://N`): the agent paging hidden lines back in. */

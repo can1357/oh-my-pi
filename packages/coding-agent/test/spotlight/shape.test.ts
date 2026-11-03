@@ -697,6 +697,80 @@ describe("spotlight shaping", () => {
 		expect((await shape(bash(agentRun, report(200)))).text).not.toBe(report(200));
 	});
 
+	it("keeps lines the agent already picked and a diff whole up to 12k characters, and cuts them past it", async () => {
+		const matches = (n: number) =>
+			Array.from(
+				{ length: n },
+				(_, i) =>
+					`src/temporal/${["instant", "duration", "zoned"][i % 3]}.c:${100 + i * 37}:    tz = ti_tz_find_id(ctx, name_${i});`,
+			).join("\n");
+		const diff = (n: number) =>
+			[
+				"diff --git a/quickjs.c b/quickjs.c",
+				"--- a/quickjs.c",
+				"+++ b/quickjs.c",
+				...Array.from({ length: n }, (_, i) =>
+					i % 10 === 0
+						? `@@ -${i * 9},7 +${i * 9},8 @@ static int two_way_${i}(void)`
+						: `${["+", "-", " "][i % 3]}    shift[${i}] = needle_len - ${i};`,
+				),
+			].join("\n");
+		const shape = (command: string, text: string) =>
+			shapeResult(
+				bash(command, text),
+				context(),
+				scorer(() => 0.2),
+				newShapeState(),
+				sink(),
+			);
+
+		// ~10k chars: whole when the command picked the lines (a `;` inside quotes separates nothing), cut when it did not.
+		expect(matches(160).length).toBeGreaterThan(9_000);
+		for (const command of [
+			'rg -n "ti_tz_find_id\\(" temporal',
+			"git show m:x.c | grep -n ti_tz_find_id",
+			'grep -nE "^(static )?[a-z_]+\\(" x.c | grep -v ";$"',
+			"cd /c/repo && sed -n '99,130p;228,256p' notes.md",
+		]) {
+			expect((await shape(command, matches(160))).text).toBe(matches(160));
+		}
+		expect((await shape("./list-calls.sh", matches(160))).text).not.toBe(matches(160));
+		expect((await shape('rg -n "ti_tz_find_id\\(" temporal', matches(250))).text).not.toBe(matches(250));
+
+		expect(diff(260).length).toBeGreaterThan(8_000);
+		expect((await shape("git diff master -- quickjs.c", diff(260))).text).toBe(diff(260));
+		expect((await shape("git diff master -- quickjs.c", diff(500))).text).not.toBe(diff(500));
+	});
+
+	it("shows the signature above a C function's lone opening brace when a cut keeps the brace", async () => {
+		const lines: string[] = [];
+		for (let k = 0; k < 120; k++) {
+			lines.push(`static int tz_rule_${k}(int a, int b)`, "{");
+			for (let j = 0; j < 19; j++) lines.push(`    int v${j} = a * ${j} + ${k};`);
+			lines.push("    return a;", "}", "");
+		}
+		const shown = lines.map((l, i) => `${i + 1}|${l}`);
+
+		const out = await shapeResult(
+			{
+				tool: "read",
+				text: `[temporal/timezone.c#ab12]\n${shown.join("\n")}`,
+				read: { path: "temporal/timezone.c", lines, shown, firstLine: 1, selected: false },
+				cwd: "/nonexistent",
+			},
+			context(),
+			scorer(() => 0.2),
+			newShapeState(),
+			sink(),
+		);
+
+		expect(out.steps).toContain("window");
+		const text = out.text.split("\n").map(l => l.replace(/^\d+\|/, ""));
+		const braces = text.flatMap((l, i) => (l === "{" ? [i] : []));
+		expect(braces.length).toBeGreaterThan(2);
+		for (const i of braces) expect(text[i - 1]).toMatch(/^static int tz_rule_\d+\(int a, int b\)$/);
+	});
+
 	it("leads a changed command output with its exit status, and leaves an unchanged one as it is", async () => {
 		const lines = Array.from({ length: 2000 }, (_, i) => `info: step ${i + 1} ok`);
 
