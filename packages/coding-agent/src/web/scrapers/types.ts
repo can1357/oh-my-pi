@@ -74,13 +74,13 @@ const RAW_TEXT_TAGS = [
 
 /**
  * True when a page small enough to be an interstitial holds a `js_challenge` `<input>` tag outside
- * comments and raw-text elements. The size cap bounds every search below.
+ * comments, raw-text elements and other tags' attributes. The size cap bounds every search below.
  */
 function hasChallengeForm(content: string): boolean {
 	if (content.length > CHALLENGE_PAGE_MAX_CHARS) return false;
-	let at = content.indexOf(CHALLENGE_INPUT_ATTR);
-	if (at < 0) return false;
+	// Tag and attribute names are ASCII case-insensitive; the value is matched as written.
 	const lower = content.toLowerCase();
+	let at = lower.indexOf(CHALLENGE_INPUT_ATTR);
 	for (let seen = 0; at >= 0 && seen < MAX_CHALLENGE_CANDIDATES; seen++) {
 		const open = lower.lastIndexOf("<", at);
 		const inInputTag =
@@ -88,13 +88,16 @@ function hasChallengeForm(content: string): boolean {
 			lower.startsWith("<input", open) &&
 			/[\s/>]/.test(lower.charAt(open + 6)) &&
 			/\s/.test(lower.charAt(at - 1)) &&
+			content.startsWith('"js_challenge"', at + 5) &&
 			lower.indexOf(">", open) > at;
+		// The `<input` opens in text only if the tag before it closed, not inside one of its attributes.
+		const inText = open === 0 || lower.lastIndexOf(">", open - 1) > lower.lastIndexOf("<", open - 1);
 		const inComment = lower.lastIndexOf("<!--", open) > lower.lastIndexOf("-->", open);
 		const inRawText = RAW_TEXT_TAGS.some(
 			tag => lower.lastIndexOf(`<${tag}`, open) > lower.lastIndexOf(`</${tag}`, open),
 		);
-		if (inInputTag && !inComment && !inRawText) return true;
-		at = content.indexOf(CHALLENGE_INPUT_ATTR, at + 1);
+		if (inInputTag && inText && !inComment && !inRawText) return true;
+		at = lower.indexOf(CHALLENGE_INPUT_ATTR, at + 1);
 	}
 	return false;
 }
