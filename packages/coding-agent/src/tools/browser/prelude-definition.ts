@@ -34,7 +34,10 @@ export function createBrowserPreludeDefinition(
 	const fallback = host.relayFallback;
 	return {
 		name: "browser",
-		documentation: browserDocumentation(session.settings),
+		// Read per use: the definition is built once per session, while the browser settings it follows can change.
+		get documentation() {
+			return browserDocumentation(session.settings);
+		},
 		guidance: fallback
 			? prompt.render(relayGuidance, {
 					// The block reaches the model provider: never echo userinfo or token params.
