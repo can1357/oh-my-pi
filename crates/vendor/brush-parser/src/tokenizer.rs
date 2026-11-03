@@ -240,9 +240,10 @@ struct CrossTokenParseState {
     /// Are we scanning the word of a `${...}` parameter expansion? A `((` there is text: it does
     /// not start arithmetic text, and `<<` there does not start a here-document.
     in_parameter_word: bool,
-    /// The parentheses opened minus those closed so far in the outermost `${...}` word being
-    /// scanned, nested words included and command substitutions excluded.
-    parameter_word_parens: i32,
+    /// While an arithmetic `for` header is read: the parentheses opened minus those closed so
+    /// far in its `${...}` words. The parser sees each word as one token, so the header's end
+    /// agrees with Bash's only when this is zero once the header closes.
+    header_word_parens: i32,
     /// Was the last word `for` (so a `((` right after it opens an arithmetic `for` header)?
     after_for_word: bool,
 }
@@ -627,7 +628,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 arithmetic_for_header: false,
                 outer_arithmetic_depth: None,
                 in_parameter_word: false,
-                parameter_word_parens: 0,
+                header_word_parens: 0,
                 after_for_word: false,
             },
         }
@@ -675,46 +676,59 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
 
     /// Notes a `)` read while the tokenizer may be inside the arithmetic text of a bare `((`.
     /// The text ends when the parenthesis that matches the second `(` closes.
-    fn note_arithmetic_command_close(&mut self) {
+    fn note_arithmetic_command_close(&mut self) -> Result<(), TokenizerError> {
         match self.cross_state.arithmetic_command_depth {
             Some(depth) if depth > 1 => {
                 self.cross_state.arithmetic_command_depth = Some(depth - 1);
             }
             Some(_) => {
+                let was_header = self.cross_state.arithmetic_for_header;
                 self.cross_state.arithmetic_for_header = false;
                 // A header read inside bare `((` text returns to that text.
                 self.cross_state.arithmetic_command_depth =
                     self.cross_state.outer_arithmetic_depth.take();
                 self.cross_state.arithmetic_expansion =
                     self.cross_state.arithmetic_command_depth.is_some();
+                // Bash counts the parentheses of the header's `${...}` words toward the header,
+                // but the parser sees each word as one token. When they do not cancel out, Bash
+                // ends the header elsewhere than the parser does, and reports a syntax error or
+                // reads text the parser cannot.
+                if was_header && std::mem::take(&mut self.cross_state.header_word_parens) != 0 {
+                    return Err(TokenizerError::UnbalancedParameterWordInArithmetic);
+                }
             }
             None => (),
         }
+        Ok(())
     }
 
     /// Counts a `(` or `)` operator token toward the arithmetic text of a bare `((`, if any.
-    /// A `${...}` word's parentheses are counted on the word instead: the parser sees the whole
+    /// A `${...}` word's parentheses are counted on the header instead: the parser sees the whole
     /// word as one token, so applying them here would end the text where the parser does not.
-    fn note_arithmetic_command_paren(&mut self, token: &TokenParseState) {
+    fn note_arithmetic_command_paren(
+        &mut self,
+        token: &TokenParseState,
+    ) -> Result<(), TokenizerError> {
         if self.cross_state.in_parameter_word {
-            return;
+            return Ok(());
         }
         if let Some(depth) = self.cross_state.arithmetic_command_depth {
             if token.is_specific_operator("(") {
                 self.cross_state.arithmetic_command_depth = Some(depth + 1);
             } else if token.is_specific_operator(")") {
-                self.note_arithmetic_command_close();
+                self.note_arithmetic_command_close()?;
             }
         }
+        Ok(())
     }
 
-    /// Counts a `(` or `)` operator token toward the `${...}` word being scanned, if any.
+    /// Counts a `(` or `)` operator token of a `${...}` word toward the header around it, if any.
     fn note_parameter_word_paren(&mut self, token: &TokenParseState) {
-        if self.cross_state.in_parameter_word {
+        if self.cross_state.in_parameter_word && self.cross_state.arithmetic_for_header {
             if token.is_specific_operator("(") {
-                self.cross_state.parameter_word_parens += 1;
+                self.cross_state.header_word_parens += 1;
             } else if token.is_specific_operator(")") {
-                self.cross_state.parameter_word_parens -= 1;
+                self.cross_state.header_word_parens -= 1;
             }
         }
     }
@@ -793,7 +807,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                     // This `)` closes a parenthesis inside the construct without passing through
                     // operator handling, which tracks a bare `((` there as well.
                     if terminating_char == ')' {
-                        self.note_arithmetic_command_close();
+                        self.note_arithmetic_command_close()?;
                     }
                     state.append_char(self.next_char()?.unwrap());
                 }
@@ -934,7 +948,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 // A `(` or `)` ended by the terminating char is still a parenthesis of any
                 // arithmetic `for` header or parameter word around it.
                 if state.in_operator() {
-                    self.note_arithmetic_command_paren(&state);
+                    self.note_arithmetic_command_paren(&state)?;
                     self.note_parameter_word_paren(&state);
                 }
                 result = state.delimit_current_token(reason, &mut self.cross_state)?;
@@ -985,7 +999,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                     .map(|depth| depth + 1);
                                 self.cross_state.arithmetic_for_header = true;
                             } else {
-                                self.note_arithmetic_command_paren(&state);
+                                self.note_arithmetic_command_paren(&state)?;
                             }
                         } else if state.is_specific_operator(")") && c == ')' {
                             self.cross_state.arithmetic_expansion = false;
@@ -1108,31 +1122,42 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 };
 
                             // A command substitution is shell text even inside an arithmetic
-                            // `for` header or a parameter word. An arithmetic expansion is not
-                            // shell text, but it is not a `for` header either. Both restore the
-                            // outer state afterward.
+                            // `for` header or a parameter word, so it starts fresh there and
+                            // restores the outer state afterward. An arithmetic expansion is
+                            // part of the word around it: its `${...}` words keep counting
+                            // toward the header, as Bash counts them.
                             let outer_state = (
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth.take(),
-                                std::mem::take(&mut self.cross_state.arithmetic_for_header),
                                 self.cross_state.outer_arithmetic_depth.take(),
-                                std::mem::take(&mut self.cross_state.in_parameter_word),
-                                std::mem::take(&mut self.cross_state.parameter_word_parens),
-                                std::mem::take(&mut self.cross_state.after_for_word),
+                                (!is_arithmetic).then(|| {
+                                    (
+                                        std::mem::take(&mut self.cross_state.arithmetic_for_header),
+                                        std::mem::take(&mut self.cross_state.in_parameter_word),
+                                        std::mem::take(&mut self.cross_state.header_word_parens),
+                                        std::mem::take(&mut self.cross_state.after_for_word),
+                                    )
+                                }),
                             );
                             self.cross_state.arithmetic_expansion = is_arithmetic;
 
                             self.consume_nested_construct(&mut state, ')', "(", initial_nesting)?;
 
+                            let outer_word_state;
                             (
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth,
-                                self.cross_state.arithmetic_for_header,
                                 self.cross_state.outer_arithmetic_depth,
-                                self.cross_state.in_parameter_word,
-                                self.cross_state.parameter_word_parens,
-                                self.cross_state.after_for_word,
+                                outer_word_state,
                             ) = outer_state;
+                            if let Some((header, in_word, word_parens, after_for)) =
+                                outer_word_state
+                            {
+                                self.cross_state.arithmetic_for_header = header;
+                                self.cross_state.in_parameter_word = in_word;
+                                self.cross_state.header_word_parens = word_parens;
+                                self.cross_state.after_for_word = after_for;
+                            }
                         }
 
                         Some('[') => {
@@ -1171,9 +1196,6 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
 
                             let outer_parameter_word =
                                 std::mem::replace(&mut self.cross_state.in_parameter_word, true);
-                            // An outermost word starts its own count; a nested one adds to it.
-                            let outer_word_parens = (!outer_parameter_word)
-                                .then(|| std::mem::take(&mut self.cross_state.parameter_word_parens));
                             let mut pending_here_doc_tokens = vec![];
                             let mut drain_here_doc_tokens = false;
                             loop {
@@ -1237,22 +1259,6 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 }
                             }
                             self.cross_state.in_parameter_word = outer_parameter_word;
-                            // Bash counts the parentheses of a `${...}` word toward the header
-                            // of an arithmetic `for` loop around it, but the parser balances the
-                            // header by its parenthesis tokens and sees the whole word as one.
-                            // A word whose parentheses do not balance moves the header's end
-                            // away from the token the parser stops at, so Bash reports a syntax
-                            // error or reads text the parser cannot. Nested words count as part
-                            // of the outermost one.
-                            if let Some(saved) = outer_word_parens {
-                                let net = std::mem::replace(
-                                    &mut self.cross_state.parameter_word_parens,
-                                    saved,
-                                );
-                                if net != 0 && self.cross_state.arithmetic_for_header {
-                                    return Err(TokenizerError::UnbalancedParameterWordInArithmetic);
-                                }
-                            }
                         }
                         _ => {
                             // This is either a different character, or else the end of the string.

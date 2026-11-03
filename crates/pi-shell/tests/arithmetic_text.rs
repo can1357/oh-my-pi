@@ -179,11 +179,11 @@ async fn arithmetic_for_header_rules_hold_after_here_tags_and_in_spaced_subshell
 	assert!(out.stderr.contains("for"), "the expression must be reported: {}", out.stderr);
 }
 
-/// Bash counts the parentheses of a `${...}` word toward the header of an
-/// arithmetic `for` loop around it, so a word whose parentheses do not
-/// balance is a syntax error there. A `${...}` word is text everywhere: a `((`
-/// in it keeps the rest of the line's comments, and a `<<` in it is not a
-/// here-document.
+/// Bash counts the parentheses of the `${...}` words of an arithmetic `for`
+/// header toward the header, so the header parses when they cancel out across
+/// its words and is a syntax error when they do not, in either direction. A
+/// `${...}` word is text everywhere: a `((` in it keeps the rest of the
+/// line's comments, and a `<<` in it is not a here-document.
 #[tokio::test]
 async fn parameter_word_parentheses_follow_bash() {
 	let out = run(concat!(
@@ -209,12 +209,28 @@ async fn parameter_word_parentheses_follow_bash() {
 	assert_eq!(out.stderr, "");
 	assert_eq!(out.stdout, "x=1\ni=0\ny=1 1\n");
 
+	// Words that cancel out leave the header where the parser ends it, as in
+	// Bash. The expressions they make are then evaluated, and these fail at
+	// run time in Bash too.
+	let out = run(concat!(
+		"v=\n",
+		"w=0\n",
+		"for ((j=${v:-(}${w:-)};j<1;j++)); do echo \"j=$j\"; done\n",
+		"echo \"rc=$?\"\n",
+		"for ((k=${v:-(};${w:-)};)); do echo never; done\n",
+		"echo \"rc=$?\"\n",
+	))
+	.await;
+	assert_eq!(out.stdout, "rc=1\nrc=1\n", "stderr: {}", out.stderr);
+	assert!(out.stderr.contains("j=(0"), "the expression must be reported: {}", out.stderr);
+
 	for script in [
 		"v=1\nfor ((x=${v:?(};0;)); do :; done\necho after\n",
 		"v=1\nfor ((x=${v:-(};0;)); do :; done\necho after\n",
 		"v=0\nfor ((i=${v:-)};0;)); do :; done\necho after\n",
 		"v=0\nfor ((i=${v:-${w:-)}};0;)); do :; done\necho after\n",
 		"v=0\n(((( for ((i=${v:-)};0;)) << 2 )) ))\necho after\n",
+		"v=0; w=0\n(( for ((i=${v-$(( ${w:-)} ))};0;)) << 2 ))\necho after\n",
 	] {
 		let out = run(script).await;
 		assert_eq!(out.stdout, "", "{script:?} ran; stderr: {}", out.stderr);
