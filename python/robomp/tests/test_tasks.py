@@ -3,10 +3,11 @@ import logging
 import threading
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
-from robomp import tasks
-from robomp.github_client import IssueInfo, RepoInfo
+from robomp import pr_status, tasks
+from robomp.github_client import GitHubError, IssueInfo, PullRequestInfo, RepoInfo
 
 
 async def test_triage_issue_keeps_event_loop_live_while_workspace_setup_blocks(db, settings, monkeypatch, tmp_path):
@@ -235,3 +236,323 @@ async def test_triage_issue_reopen_tears_down_finalized_workspace(db, settings, 
     row = db.get_issue("octo/widget#1")
     assert row is not None
     assert row.state == "reproducing"
+
+
+# ---------- review_pr commit-status publication ----------
+
+
+@pytest.fixture(autouse=True)
+def _reset_pr_status_guard():
+    # `pr_status` keeps a process-wide monotonic ladder keyed by (repo, sha)
+    # guarded by a module-level asyncio.Lock. Every review_pr test below reuses
+    # ("octo/widget", "deadbeef"), so clear the ladder and hand out a fresh,
+    # unbound lock (pytest-asyncio gives each test a new loop) before and after
+    # each test to keep them independent.
+    pr_status._last_rank.clear()
+    pr_status._locks.clear()
+    pr_status._guard = asyncio.Lock()
+    yield
+    pr_status._last_rank.clear()
+    pr_status._locks.clear()
+
+
+def _phase_of(description: str) -> str:
+    """Recover the phase a recorded status description came from.
+
+    A detail suffix, when present, is appended as `base — detail`, so each
+    base is a distinct prefix and `startswith` alone disambiguates.
+    """
+    for phase, (_state, base) in pr_status.PHASE_STATUS.items():
+        if description.startswith(base):
+            return phase
+    raise AssertionError(f"no phase matches description: {description!r}")
+
+
+def _noop_run_task(**_kw):
+    async def _c():
+        return None
+
+    return _c()
+
+
+def _never_run_task(**_kw):
+    async def _c():
+        raise AssertionError("run_task must not be reached")
+
+    return _c()
+
+
+def _pr_payload(pr_number: int = 7, sha: str = "deadbeef") -> dict:
+    return {
+        "pull_request": {"number": pr_number, "head": {"sha": sha}},
+        "repository": {"full_name": "octo/widget"},
+    }
+
+
+def _pr_github(record: list, *, fail_fetch: bool = False, fail_exc: Exception | None = None) -> SimpleNamespace:
+    repo = RepoInfo(
+        full_name="octo/widget",
+        default_branch="main",
+        clone_url="https://x/octo/widget.git",
+        private=False,
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=7,
+        title="pr",
+        body="b",
+        state="open",
+        author="alice",
+        labels=(),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=7,
+        html_url="https://example/7",
+        head_ref="feat",
+        base_ref="main",
+        state="open",
+        head_sha="deadbeef",
+    )
+
+    async def _get_repo(_full):
+        return repo
+
+    async def _get_issue(_full, _n):
+        return issue
+
+    async def _get_pr(_full, _n):
+        if fail_exc is not None:
+            raise fail_exc
+        if fail_fetch:
+            raise GitHubError(500, "upstream 500")
+        return pr
+
+    async def _create_commit_status(_repo, sha, *, state, context, description="", target_url=None):
+        record.append((sha, state, context, description))
+
+    return SimpleNamespace(
+        get_repo=_get_repo,
+        get_issue=_get_issue,
+        get_pull_request=_get_pr,
+        create_commit_status=_create_commit_status,
+    )
+
+
+async def test_review_pr_publishes_preparing_then_terminal_status(db, settings, monkeypatch, tmp_path):
+    record: list[tuple] = []
+    monkeypatch.setattr(tasks, "run_task", _noop_run_task)
+
+    sandbox = SimpleNamespace(
+        natives_cache=None,
+        ensure_workspace=lambda **_kw: SimpleNamespace(branch="farm/x/y", session_dir=str(tmp_path / "s")),
+    )
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=_pr_github(record),
+        sandbox=sandbox,
+        git_transport=SimpleNamespace(),
+        payload=_pr_payload(),
+        delivery_id="d1",
+        attempts=1,
+    )
+    assert [_phase_of(d) for (_sha, _state, _ctx, d) in record] == ["preparing", "failure"]
+
+
+async def test_review_pr_success_variants(db, settings, monkeypatch, tmp_path):
+    record: list[tuple] = []
+
+    async def _fake_run_task(**_kw):
+        # The agent posted the review during the turn.
+        db.log_tool_call(issue_key="octo/widget#7", tool="submit_pr_review", args={})
+
+    monkeypatch.setattr(tasks, "run_task", _fake_run_task)
+    sandbox = SimpleNamespace(
+        natives_cache=None,
+        ensure_workspace=lambda **_kw: SimpleNamespace(branch="farm/x/y", session_dir=str(tmp_path / "s")),
+    )
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=_pr_github(record),
+        sandbox=sandbox,
+        git_transport=SimpleNamespace(),
+        payload=_pr_payload(),
+        delivery_id="d1",
+        attempts=1,
+    )
+    assert [_phase_of(d) for (_sha, _state, _ctx, d) in record] == ["preparing", "success"]
+
+
+async def test_review_pr_workspace_failure_is_retrying_and_propagates(db, settings, monkeypatch, tmp_path):
+    record: list[tuple] = []
+    monkeypatch.setattr(tasks, "run_task", _never_run_task)
+
+    def _boom(**_kw):
+        raise OSError("clone failed")
+
+    sandbox = SimpleNamespace(natives_cache=None, ensure_workspace=_boom)
+    with pytest.raises(OSError):
+        await tasks.review_pr(
+            settings=settings,
+            db=db,
+            github=_pr_github(record),
+            sandbox=sandbox,
+            git_transport=SimpleNamespace(),
+            payload=_pr_payload(),
+            delivery_id="d1",
+            attempts=1,
+        )
+    assert [_phase_of(d) for (_sha, _state, _ctx, d) in record] == ["preparing", "retrying"]
+
+
+async def test_review_pr_exhausted_retries_are_terminal_error(db, settings, monkeypatch, tmp_path):
+    record: list[tuple] = []
+    monkeypatch.setattr(tasks, "run_task", _never_run_task)
+
+    def _boom(**_kw):
+        raise OSError("clone failed")
+
+    sandbox = SimpleNamespace(natives_cache=None, ensure_workspace=_boom)
+    with pytest.raises(OSError):
+        await tasks.review_pr(
+            settings=settings,
+            db=db,
+            github=_pr_github(record),
+            sandbox=sandbox,
+            git_transport=SimpleNamespace(),
+            payload=_pr_payload(),
+            delivery_id="d1",
+            attempts=4,  # > event_max_retries (3)
+        )
+    assert [_phase_of(d) for (_sha, _state, _ctx, d) in record] == ["preparing", "error"]
+
+
+async def test_review_pr_already_reviewed_posts_only_success(db, settings, monkeypatch, tmp_path):
+    record: list[tuple] = []
+    # Pre-seed a successful submit so the idempotency check short-circuits.
+    db.log_tool_call(issue_key="octo/widget#7", tool="submit_pr_review", args={})
+    monkeypatch.setattr(tasks, "run_task", _never_run_task)
+
+    sandbox = SimpleNamespace(
+        natives_cache=None,
+        ensure_workspace=lambda **_kw: SimpleNamespace(branch="b", session_dir=str(tmp_path / "s")),
+    )
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=_pr_github(record),
+        sandbox=sandbox,
+        git_transport=SimpleNamespace(),
+        payload=_pr_payload(),
+        delivery_id="d1",
+        attempts=1,
+    )
+    assert [_phase_of(d) for (_sha, _state, _ctx, d) in record] == ["success"]
+
+
+async def test_review_pr_fetch_failure_posts_terminal_from_payload_sha(db, settings, monkeypatch, tmp_path):
+    record: list[tuple] = []
+    github = _pr_github(record, fail_fetch=True)
+    sandbox = SimpleNamespace(
+        natives_cache=None,
+        ensure_workspace=lambda **_kw: SimpleNamespace(branch="b", session_dir=str(tmp_path / "s")),
+    )
+    # Must NOT raise — the fetch-failure path returns early.
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=github,
+        sandbox=sandbox,
+        git_transport=SimpleNamespace(),
+        payload=_pr_payload(sha="deadbeef"),
+        delivery_id="d1",
+        attempts=4,  # exhausted -> terminal `error`
+    )
+    assert len(record) == 1
+    sha, state, context, description = record[0]
+    assert sha == "deadbeef"
+    assert state == "error"
+    assert context == "robomp/pr-review"
+
+
+async def test_review_pr_fetch_github_error_is_terminal_even_on_first_attempt(db, settings, monkeypatch, tmp_path):
+    # The fetch-failure path returns without re-raising, so the queue never
+    # retries — "will retry" would be a lie that sticks at pending forever.
+    record: list[tuple] = []
+    github = _pr_github(record, fail_fetch=True)
+    sandbox = SimpleNamespace(
+        natives_cache=None,
+        ensure_workspace=lambda **_kw: SimpleNamespace(branch="b", session_dir=str(tmp_path / "s")),
+    )
+    await tasks.review_pr(
+        settings=settings,
+        db=db,
+        github=github,
+        sandbox=sandbox,
+        git_transport=SimpleNamespace(),
+        payload=_pr_payload(),
+        delivery_id="d1",
+        attempts=1,
+    )
+    assert [(_sha, _state) for (_sha, _state, _ctx, _d) in record] == [("deadbeef", "error")]
+
+
+async def test_review_pr_fetch_transport_error_posts_per_retry_predicate(db, settings, monkeypatch, tmp_path):
+    # httpx transport failures re-raise, so the queue DOES retry: the ladder
+    # must mirror the queue's predicate instead of staying stuck at `queued`.
+    record: list[tuple] = []
+    github = _pr_github(record, fail_exc=httpx.ConnectError("boom"))
+    sandbox = SimpleNamespace(
+        natives_cache=None,
+        ensure_workspace=lambda **_kw: SimpleNamespace(branch="b", session_dir=str(tmp_path / "s")),
+    )
+    with pytest.raises(httpx.ConnectError):
+        await tasks.review_pr(
+            settings=settings,
+            db=db,
+            github=github,
+            sandbox=sandbox,
+            git_transport=SimpleNamespace(),
+            payload=_pr_payload(),
+            delivery_id="d1",
+            attempts=1,
+        )
+    assert [_phase_of(d) for (_sha, _state, _ctx, d) in record] == ["retrying"]
+
+    record.clear()
+    with pytest.raises(httpx.TimeoutException):
+        await tasks.review_pr(
+            settings=settings,
+            db=db,
+            github=_pr_github(record, fail_exc=httpx.ReadTimeout("slow")),
+            sandbox=sandbox,
+            git_transport=SimpleNamespace(),
+            payload=_pr_payload(),
+            delivery_id="d2",
+            attempts=4,  # exhausted -> terminal
+        )
+    assert [_phase_of(d) for (_sha, _state, _ctx, d) in record] == ["error"]
+
+
+async def test_review_pr_fetch_cancellation_posts_retrying(db, settings, monkeypatch, tmp_path):
+    record: list[tuple] = []
+    github = _pr_github(record, fail_exc=asyncio.CancelledError())
+    sandbox = SimpleNamespace(
+        natives_cache=None,
+        ensure_workspace=lambda **_kw: SimpleNamespace(branch="b", session_dir=str(tmp_path / "s")),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await tasks.review_pr(
+            settings=settings,
+            db=db,
+            github=github,
+            sandbox=sandbox,
+            git_transport=SimpleNamespace(),
+            payload=_pr_payload(),
+            delivery_id="d1",
+            attempts=1,
+        )
+    assert [_phase_of(d) for (_sha, _state, _ctx, d) in record] == ["retrying"]

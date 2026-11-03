@@ -30,9 +30,10 @@ from omp_rpc import (
     RpcError,
     RpcProcessExitError,
     ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
 )
 
-from robomp import host_tools, persona, pragmas
+from robomp import host_tools, persona, pr_status, pragmas
 from robomp.cancellation import register_cancel_hook, unregister_cancel_hook
 from robomp.config import Settings
 from robomp.db import Database, issue_key
@@ -77,6 +78,7 @@ class TaskInputs:
     natives_cache: NativesCache | None = None
     issue: IssueInfo | None = None
     release: ReleaseTaskContext | None = None
+    pr_head_sha: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -588,6 +590,23 @@ def _run_rpc_blocking(
             extra={"issue": bindings.issue_key, "tool": event.tool_name},
         )
 
+    def _on_tool_start(event: ToolExecutionStartEvent) -> None:
+        # `publishing` marks the one host tool that writes the review to GitHub.
+        # Fire-and-forget: this runs on the RPC reader thread, and blocking it on
+        # an HTTP round-trip would delay the submit itself.
+        if task_kind != "review_pr" or event.tool_name != "submit_pr_review":
+            return
+        asyncio.run_coroutine_threadsafe(
+            pr_status.publish_pr_status(
+                bindings.github,
+                settings=settings,
+                repo=inputs.repo.full_name,
+                sha=inputs.pr_head_sha,
+                phase="publishing",
+            ),
+            loop,
+        )
+
     def _on_msg(event: MessageUpdateEvent) -> None:
         ev = event.assistant_message_event
         if isinstance(ev, dict) and ev.get("type") == "text_delta":
@@ -703,7 +722,20 @@ def _run_rpc_blocking(
             client.install_headless_ui()
             client.on_tool_execution_end(_on_tool_end)
             client.on_host_tool_completed(_on_host_tool_completed)
+            client.on_tool_execution_start(_on_tool_start)
             client.on_message_update(_on_msg)
+
+            if task_kind == "review_pr":
+                asyncio.run_coroutine_threadsafe(
+                    pr_status.publish_pr_status(
+                        bindings.github,
+                        settings=settings,
+                        repo=inputs.repo.full_name,
+                        sha=inputs.pr_head_sha,
+                        phase="reviewing",
+                    ),
+                    loop,
+                )
 
             phases = persona.seed_phases(task_kind)
             if phases:

@@ -15,7 +15,7 @@ from fastapi import Body, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from robomp import github_events, issue_index
+from robomp import github_events, issue_index, pr_status
 from robomp.autoclose import AutocloseScheduler
 from robomp.config import Settings, get_settings
 from robomp.dashboard import render_index, static_dir, tail_jsonl
@@ -531,6 +531,19 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         )
         if inserted:
             pool: _AppPool = bag["pool"]
+            if decision.task == "review_pr":
+                # Await the status BEFORE waking the dispatcher so a fast worker
+                # cannot publish `preparing` first and then be overwritten by
+                # this `queued` post. `reset=True` restarts the ladder for a new
+                # delivery aimed at a SHA whose previous review already ended.
+                await pr_status.publish_pr_status(
+                    bag["github"],
+                    settings=cfg,
+                    repo=decision.repo or "",
+                    sha=pr_status.head_sha_from_payload(payload),
+                    phase="queued",
+                    reset=True,
+                )
             pool.wake()
             log.info(
                 "queued", extra={"event": x_github_event, "delivery": x_github_delivery, "key": decision.issue_key}
