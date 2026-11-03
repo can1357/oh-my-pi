@@ -567,6 +567,28 @@ impl Mpx {
 		))
 	}
 
+	/// Takes the virtual keyboard's focus off the window a background call
+	/// gave it. Xorg sends a window core `FocusIn` only for the first keyboard
+	/// to focus it, so a virtual focus left there hides a takeover's
+	/// activation of that window from the window manager. A never-focused
+	/// keyboard (`PointerRoot`) is left alone.
+	pub(super) fn release_focus(&self) {
+		let focused = self
+			.conn
+			.xinput_xi_get_focus(self.master_keyboard)
+			.ok()
+			.and_then(|cookie| cookie.reply().ok())
+			.map(|reply| reply.focus);
+		// None and PointerRoot (0 and 1) are no window.
+		if focused.is_some_and(|window| window > 1)
+			&& let Ok(cookie) = self
+				.conn
+				.xinput_xi_set_focus(NONE, CURRENT_TIME, self.master_keyboard)
+		{
+			let _ = cookie.check();
+		}
+	}
+
 	pub(super) const fn inhibit(&mut self) {
 		self.uncertain = true;
 	}
