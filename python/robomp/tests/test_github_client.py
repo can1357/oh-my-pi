@@ -377,6 +377,41 @@ def test_list_closing_pull_requests_filters_disconnected_and_closed() -> None:
     assert captured["per_page"] == "100"
 
 
+def test_list_closing_pull_requests_forgejo_timeline_actions() -> None:
+    def reference(number: int, *, action: str = "closes", **changes) -> dict:
+        issue = {
+            "number": number,
+            "state": "open",
+            "pull_request": {"url": f"https://forgejo/api/v1/repos/octo/widget/pulls/{number}"},
+            "body": "Fixes #42",
+        }
+        issue.update(changes)
+        return {"type": "pull_ref", "ref_action": action, "ref_issue": issue}
+
+    timeline = [
+        reference(100),
+        reference(101, body="Closes octo/widget#42"),
+        reference(200, action="none"),
+        reference(201, action="reopens"),
+        reference(202, action="neutered"),
+        reference(203, action="cross-referenced"),
+        reference(300, pull_request=None),
+        reference(400, body="Mentions #42 without closing it"),
+        reference(401, body="Fixes #420"),
+        reference(402, body="Fixes other/repo#42"),
+        reference(500, state="closed"),
+        {"type": "comment", "body": "Fixes #42", "ref_action": "closes"},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/octo/widget/issues/42/timeline"
+        assert dict(request.url.params) == {"limit": "100"}
+        return httpx.Response(200, json=timeline)
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    assert _run_async(client.list_closing_pull_requests("octo/widget", 42)) == (100, 101)
+
+
 def test_list_closing_pull_requests_empty_timeline() -> None:
     transport = httpx.MockTransport(lambda r: httpx.Response(200, json=[]))
     client = GitHubClient("tok", transport=transport)
@@ -574,8 +609,9 @@ def test_search_issues_forgejo_uses_scoped_list_issues_endpoint() -> None:
     assert captured["params"] == {
         "q": "parser",
         "state": "all",
-        # API max per page; the branch fetches a full page for headroom.
+        # API max per page; pagination starts at page 1.
         "limit": "50",
+        "page": "1",
         # no `type` -> returns both issues AND pull requests
     }
     assert len(results) == 1
@@ -643,6 +679,63 @@ def _forgejo_issue(number: int, *, title: str = "", body: str = "", **extra) -> 
     return item
 
 
+def test_search_issues_forgejo_filters_merged_payload_shapes() -> None:
+    items = [
+        _forgejo_issue(1, pull_request={"merged_at": "2026-02-01T00:00:00Z"}),
+        _forgejo_issue(2, pull_request={"merged_at": None}, state="closed"),
+        _forgejo_issue(3, pull_request={}, merged_at="2026-02-02T00:00:00Z"),
+        _forgejo_issue(4, pull_request={}),
+        _forgejo_issue(5),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["type"] == "pulls"
+        assert "merged" not in request.url.params
+        return httpx.Response(200, json=items)
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    results = _run_async(client.search_issues("octo/widget", "is:pr is:merged"))
+    assert [item.number for item in results] == [1, 3]
+    assert all(item.is_pull_request for item in results)
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_params", "expected_numbers"),
+    [
+        ("is:closed", {"state": "closed"}, [2, 3]),
+        ("is:open", {"state": "open"}, [1]),
+        ("label:bug", {"state": "all", "labels": "bug"}, [1, 3]),
+        ("author:@alice", {"state": "all", "created_by": "alice"}, [1, 2]),
+        (
+            "is:closed label:bug author:@alice",
+            {"state": "closed", "labels": "bug", "created_by": "alice"},
+            [],
+        ),
+    ],
+)
+def test_search_issues_forgejo_supported_qualifiers(query, expected_params, expected_numbers) -> None:
+    items = [
+        _forgejo_issue(1, labels=[{"name": "bug"}], user={"login": "alice"}),
+        _forgejo_issue(2, state="closed", user={"login": "alice"}),
+        _forgejo_issue(3, state="closed", labels=[{"name": "bug"}]),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        assert params == {**expected_params, "limit": "50", "page": "1"}
+        matching = [
+            item
+            for item in items
+            if (params["state"] == "all" or item["state"] == params["state"])
+            and ("labels" not in params or params["labels"] in [label["name"] for label in item["labels"]])
+            and ("created_by" not in params or item["user"]["login"] == params["created_by"])
+        ]
+        return httpx.Response(200, json=matching)
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    assert [item.number for item in _run_async(client.search_issues("octo/widget", query))] == expected_numbers
+
+
 def test_search_issues_forgejo_and_filters_multi_word() -> None:
     """Only items whose title AND body together contain ALL keywords survive
     the client-side AND filter; the API `q` carries just the first keyword."""
@@ -678,12 +771,13 @@ def test_search_issues_forgejo_zero_keyword_query_sends_no_q() -> None:
     assert [r.number for r in results] == [7]
 
 
-def test_search_issues_forgejo_fetch_headroom_and_truncation() -> None:
-    """Page 2 is fetched only when page 1 returned the API max (50) AND the
-    caller's limit is large enough to need headroom (limit > 25); matches
-    beyond `limit` are truncated; a non-full first page stops at one request."""
+def test_search_issues_forgejo_paginates_until_limit_satisfied() -> None:
+    """Pages are fetched only until `limit` post-filter matches accumulate:
+    a full page 1 that already satisfies the limit stops at one request;
+    matches spread across pages accumulate across them; a non-full page
+    terminates early."""
     full_page = [_forgejo_issue(1000 + i, title="crash everywhere") for i in range(50)]
-    page_two = [_forgejo_issue(2000 + i, title="crash again") for i in range(10)]
+    page_two = [_forgejo_issue(2000 + i, title="crash again") for i in range(50)]
 
     def run(page1: list, page2: list, limit: int):
         calls: list[str] = []
@@ -697,15 +791,15 @@ def test_search_issues_forgejo_fetch_headroom_and_truncation() -> None:
         results = _run_async(client.search_issues("my_org/widget", "crash", limit=limit))
         return calls, results
 
-    # Full first page + small limit -> no headroom fetch, truncated to limit.
+    # Full first page + small limit -> satisfied inside page 1, one request.
     calls, results = run(full_page, page_two, limit=10)
     assert calls == ["1"]
     assert len(results) == 10
 
-    # Full first page + large limit -> second page fetched, truncated to limit.
-    calls, results = run(full_page, page_two, limit=30)
+    # Full first page + limit beyond page 1 -> page 2 fetched, truncated to limit.
+    calls, results = run(full_page, page_two, limit=60)
     assert calls == ["1", "2"]
-    assert len(results) == 30
+    assert len(results) == 60
 
     # Non-full first page -> exactly one request even with a large limit.
     calls, results = run(full_page[:5], page_two, limit=30)
@@ -869,6 +963,35 @@ def test_get_review_comment_fetches_canonical_endpoint() -> None:
     assert rc.line == 5
 
 
+@pytest.mark.parametrize("platform", ["github", "forgejo"])
+@pytest.mark.parametrize("exhausted", [False, True])
+def test_list_issues_skips_full_pr_page_until_limit_or_exhaustion(platform: str, exhausted: bool) -> None:
+    pages: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        page = int(params["page"])
+        pages.append(page)
+        assert params["state"] == "open"
+        assert params["limit" if platform == "forgejo" else "per_page"] == "2"
+        if page == 1:
+            items = [_forgejo_issue(10, pull_request={}), _forgejo_issue(11, pull_request={})]
+        elif page == 2:
+            items = [_forgejo_issue(1)]
+            if not exhausted:
+                items.append(_forgejo_issue(12, pull_request={}))
+        else:
+            assert page == 3 and not exhausted
+            items = [_forgejo_issue(2), _forgejo_issue(3)]
+        return httpx.Response(200, json=items)
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform=platform)
+    issues = _run_async(client.list_issues("octo/widget", limit=2))
+    assert [item.number for item in issues] == ([1] if exhausted else [1, 2])
+    assert pages == ([1, 2] if exhausted else [1, 2, 3])
+    assert all(not item.is_pull_request for item in issues)
+
+
 def test_list_issues_treats_pull_request_null_as_plain_issue() -> None:
     """An item whose `pull_request` is explicitly `null` is a plain issue and
     must NOT be skipped as a pull request."""
@@ -894,6 +1017,35 @@ def test_list_issues_treats_pull_request_null_as_plain_issue() -> None:
     assert len(issues) == 1
     assert issues[0].number == 9
     assert issues[0].is_pull_request is False
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_remove_issue_label_forgejo_resolves_numeric_id_or_skips_delete(exists: bool) -> None:
+    calls: list[tuple[str, str, dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path, dict(request.url.params)))
+        if request.method == "GET":
+            assert request.url.path == "/repos/octo/widget/labels"
+            page = int(request.url.params["page"])
+            if page == 1:
+                return httpx.Response(200, json=[{"id": n, "name": f"other-{n}"} for n in range(1, 51)])
+            assert page == 2
+            return httpx.Response(200, json=[{"id": 75, "name": "needs review" if exists else "other"}])
+        assert exists
+        assert request.method == "DELETE"
+        assert request.url.path == "/repos/octo/widget/issues/9/labels/75"
+        return httpx.Response(204)
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    assert _run_async(client.remove_issue_label("octo/widget", 9, "needs review")) is None
+    expected = [
+        ("GET", "/repos/octo/widget/labels", {"limit": "50", "page": "1"}),
+        ("GET", "/repos/octo/widget/labels", {"limit": "50", "page": "2"}),
+    ]
+    if exists:
+        expected.append(("DELETE", "/repos/octo/widget/issues/9/labels/75", {}))
+    assert calls == expected
 
 
 def test_add_issue_labels_forgejo_creates_missing_labels_first() -> None:
@@ -1124,6 +1276,37 @@ def test_forgejo_list_review_comments_flattens_reviews() -> None:
     assert [(c.id, c.body, c.author) for c in comments] == [(1, "a", "mira"), (2, "b", "bob")]
 
 
+@pytest.mark.parametrize("capped", [False, True])
+def test_forgejo_review_comments_walks_outer_pages_and_stops(capped: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("robomp.github_client._MAX_REVIEW_PAGES", 2)
+    review_pages: list[int] = []
+    comment_reviews: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["limit"] == "50"
+        page = int(request.url.params["page"])
+        if request.url.path == "/repos/o/r/pulls/9/reviews":
+            review_pages.append(page)
+            count = 50 if capped or page == 1 else 1
+            return httpx.Response(200, json=[{"id": (page - 1) * 50 + n} for n in range(1, count + 1)])
+        assert request.url.path.endswith("/comments")
+        assert page == 1
+        review = int(request.url.path.split("/")[-2])
+        comment_reviews.append(review)
+        if review == 51:
+            return httpx.Response(
+                200,
+                json=[{"id": 901, "body": "later review finding", "path": "x.py", "position": 7}],
+            )
+        return httpx.Response(200, json=[])
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    comments = _run_async(client.list_review_comments("o/r", 9))
+    assert [(item.id, item.body, item.line) for item in comments] == [(901, "later review finding", 7)]
+    assert review_pages == [1, 2]
+    assert comment_reviews == list(range(1, 101 if capped else 52))
+
+
 def test_forgejo_list_review_comments_paginates() -> None:
     """A review with more than 50 inline comments must paginate with
     `limit=50` (Forgejo's MaxResponseItems clamp) until a short page."""
@@ -1175,15 +1358,15 @@ def test_forgejo_list_review_comments_paginates() -> None:
     assert seen_params[1] == {"limit": "50", "page": "2"}
 
 
-def test_forgejo_get_review_comment_found() -> None:
-    """With `pr_number`, a Forgejo comment resolves via the reviews walk and
-    returns the mapped item (no flat `/pulls/comments/{id}` fetch)."""
+def test_forgejo_get_review_comment_finds_inline_comment_via_review_id() -> None:
+    """The webhook `id` is the REVIEW id: Forgejo resolution fetches that
+    review's comments directly (`/pulls/{pr}/reviews/{id}/comments`) and
+    returns the first inline comment. A failed summary lookup must not discard
+    that usable inline finding."""
     requested: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requested.append(request.url.path)
-        if request.url.path == "/repos/o/r/pulls/1664/reviews":
-            return httpx.Response(200, json=[{"id": 535, "user": {"login": "mira"}, "body": "review"}])
         if request.url.path == "/repos/o/r/pulls/1664/reviews/535/comments":
             return httpx.Response(
                 200,
@@ -1201,36 +1384,172 @@ def test_forgejo_get_review_comment_found() -> None:
         return httpx.Response(404, json={"message": "unexpected " + request.url.path})
 
     client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
-    rc = _run_async(client.get_review_comment("o/r", 10925, pr_number=1664))
+    rc = _run_async(client.get_review_comment("o/r", 535, pr_number=1664))
 
     assert rc.id == 10925
     assert rc.line == 655
     assert rc.path == ".forgejo/workflows/ci.yml"
     assert rc.author == "miracodeai-bot"
-    assert "/repos/o/r/pulls/comments/10925" not in requested
+    assert requested == [
+        "/repos/o/r/pulls/1664/reviews/535/comments",
+        "/repos/o/r/pulls/1664/reviews/535",
+    ]
+    assert "/repos/o/r/pulls/comments/535" not in requested
 
 
-def test_forgejo_get_review_comment_not_found() -> None:
-    """A Forgejo id the reviews walk never yields raises `GitHubError(404)` —
-    the caller's except path already falls back to the webhook body."""
+def test_forgejo_get_review_comment_prefers_summary_and_keeps_inline_location() -> None:
+    """The webhook id names a review: its summary is canonical while the
+    first inline comment still supplies useful path/line metadata."""
+    requested: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/repos/o/r/pulls/1664/reviews":
-            return httpx.Response(200, json=[{"id": 535, "user": {"login": "mira"}, "body": "review"}])
+        requested.append(request.url.path)
         if request.url.path == "/repos/o/r/pulls/1664/reviews/535/comments":
             return httpx.Response(
                 200,
                 json=[
                     {
                         "id": 10925,
-                        "user": {"login": "miracodeai-bot"},
-                        "body": "**Bug**",
-                        "path": ".forgejo/workflows/ci.yml",
-                        "position": 655,
+                        "user": {"login": "mira"},
+                        "body": "inline finding",
+                        "path": "src/app.py",
+                        "position": 17,
                         "created_at": "2026-09-01T00:00:00Z",
                     }
                 ],
             )
+        if request.url.path == "/repos/o/r/pulls/1664/reviews/535":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 535,
+                    "user": {"login": "mira"},
+                    "body": "review summary with the full findings",
+                    "state": "CHANGES_REQUESTED",
+                    "submitted_at": "2026-09-01T00:00:00Z",
+                },
+            )
+        return httpx.Response(404, json={"message": "unexpected " + request.url.path})
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    rc = _run_async(client.get_review_comment("o/r", 535, pr_number=1664))
+
+    assert rc.id == 535
+    assert rc.body == "review summary with the full findings"
+    assert rc.author == "mira"
+    assert rc.path == "src/app.py"
+    assert rc.line == 17
+    assert requested == [
+        "/repos/o/r/pulls/1664/reviews/535/comments",
+        "/repos/o/r/pulls/1664/reviews/535",
+    ]
+
+
+def test_forgejo_get_review_comment_fetches_summary_when_comments_endpoint_fails() -> None:
+    """The summary remains useful even when the inline-comment endpoint
+    returns an error."""
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        if request.url.path.endswith("/comments"):
+            return httpx.Response(404, json={"message": "comments unavailable"})
+        return httpx.Response(
+            200,
+            json={
+                "id": 535,
+                "user": {"login": "mira"},
+                "body": "summary survived missing comments",
+                "submitted_at": "2026-09-01T00:00:00Z",
+            },
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    rc = _run_async(client.get_review_comment("o/r", 535, pr_number=1664))
+
+    assert rc.body == "summary survived missing comments"
+    assert rc.author == "mira"
+    assert rc.path == ""
+    assert rc.line is None
+    assert requested == [
+        "/repos/o/r/pulls/1664/reviews/535/comments",
+        "/repos/o/r/pulls/1664/reviews/535",
+    ]
+
+
+def test_forgejo_get_review_comment_returns_inline_when_summary_transport_fails() -> None:
+    """An inline finding already fetched remains available if the review
+    summary request encounters a transport error."""
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        if request.url.path.endswith("/comments"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 10925,
+                        "user": {"login": "mira"},
+                        "body": "inline finding",
+                        "path": "src/app.py",
+                        "position": 17,
+                    }
+                ],
+            )
+        raise httpx.ReadError("summary transport failed", request=request)
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    rc = _run_async(client.get_review_comment("o/r", 535, pr_number=1664))
+
+    assert rc.id == 10925
+    assert rc.body == "inline finding"
+    assert rc.author == "mira"
+    assert rc.path == "src/app.py"
+    assert rc.line == 17
+    assert requested == [
+        "/repos/o/r/pulls/1664/reviews/535/comments",
+        "/repos/o/r/pulls/1664/reviews/535",
+    ]
+
+
+def test_forgejo_get_review_comment_falls_back_to_review_summary() -> None:
+    """A review with no inline comments (approve / request-changes verdict)
+    returns the review summary itself as the comment content."""
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        if request.url.path == "/repos/o/r/pulls/1664/reviews/535/comments":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/repos/o/r/pulls/1664/reviews/535":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 535,
+                    "user": {"login": "mira"},
+                    "body": "Request changes",
+                    "state": "CHANGES_REQUESTED",
+                    "submitted_at": "2026-09-01T00:00:00Z",
+                },
+            )
+        return httpx.Response(404, json={"message": "unexpected " + request.url.path})
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    rc = _run_async(client.get_review_comment("o/r", 535, pr_number=1664))
+
+    assert rc.id == 535
+    assert rc.body == "Request changes"
+    assert rc.author == "mira"
+    assert rc.line is None
+    assert requested == ["/repos/o/r/pulls/1664/reviews/535/comments", "/repos/o/r/pulls/1664/reviews/535"]
+
+
+def test_forgejo_get_review_comment_unknown_review_raises_404() -> None:
+    """A review id with no comments AND an unknown summary 404s — the caller's
+    except path already falls back to the webhook body."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"message": "unexpected " + request.url.path})
 
     client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")

@@ -31,6 +31,16 @@ from robomp.github_client import (
 class GitHubBackend(Protocol):
     """Methods every caller in roboomp uses against GitHub."""
 
+    @property
+    def max_page_size(self) -> int:
+        """Largest per-page size the upstream actually honors (100 GitHub, 50 Forgejo)."""
+        ...
+
+    @property
+    def platform(self) -> str:
+        """Upstream platform name: ``github`` or ``forgejo``."""
+        ...
+
     # ---- reads ----
     async def get_repo(self, repo: str) -> RepoInfo: ...
 

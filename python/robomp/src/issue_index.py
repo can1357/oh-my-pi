@@ -38,7 +38,6 @@ log = logging.getLogger(__name__)
 # Overlap subtracted from the watermark on every reconcile so a sync that
 # raced a concurrent update can never permanently skip it.
 _SYNC_OVERLAP = timedelta(minutes=2)
-_PAGE_SIZE = 100
 _MAX_PAGES_PER_TICK = 30
 
 
@@ -95,6 +94,10 @@ class IssueIndexSync:
         self._forgejo_github = forgejo_github
         self._task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
+        # Keep the query window fixed while resuming created-desc pages.
+        # A process restart safely repeats the sweep: its watermark is not
+        # advanced until every page has been ingested.
+        self._forgejo_sweeps: dict[str, tuple[str | None, int, str]] = {}
 
     @property
     def enabled(self) -> bool:
@@ -165,23 +168,35 @@ class IssueIndexSync:
         ingested = 0
         exhausted = False
         last_seen = ""
-        for page in range(1, _MAX_PAGES_PER_TICK + 1):
-            batch = await gh.list_issue_index_entries(repo, since=since, page=page, per_page=_PAGE_SIZE)
+        is_forgejo = gh.platform == "forgejo"
+        first_page = 1
+        if is_forgejo and repo in self._forgejo_sweeps:
+            since, first_page, started_at = self._forgejo_sweeps[repo]
+        page_size = gh.max_page_size
+        for page in range(first_page, first_page + _MAX_PAGES_PER_TICK):
+            batch = await gh.list_issue_index_entries(repo, since=since, page=page, per_page=page_size)
             for entry in batch:
                 self._db.upsert_issue_index(entry)
                 if entry.updated_at > last_seen:
                     last_seen = entry.updated_at
             ingested += len(batch)
-            if len(batch) < _PAGE_SIZE:
+            if len(batch) < page_size:
                 exhausted = True
                 break
         if exhausted:
             # Everything up to tick start is ingested; later updates are the
             # next tick's problem (or a webhook's).
             self._db.set_issue_index_watermark(repo, started_at)
+            self._forgejo_sweeps.pop(repo, None)
+        elif is_forgejo:
+            # ListIssues is created-desc, not updated-at ordered. A since
+            # watermark cannot represent a partial page traversal. Resume
+            # the same window next tick and commit its start only at EOF.
+            self._forgejo_sweeps[repo] = (since, page + 1, started_at)
         elif last_seen:
-            # Page budget hit mid-backfill: advance the watermark only to the
-            # newest updated_at actually ingested, so the next tick resumes there.
+            # Page budget hit mid-backfill (GitHub ascending pages): advance
+            # the watermark only to the newest updated_at actually ingested,
+            # so the next tick resumes there.
             self._db.set_issue_index_watermark(repo, last_seen)
         log.info(
             "issue index synced",

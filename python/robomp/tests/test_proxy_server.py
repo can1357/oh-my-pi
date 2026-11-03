@@ -1040,6 +1040,65 @@ async def test_git_push_workspace_key_mismatch(proxy_settings: Settings) -> None
     assert "workspace_key" in resp.text
 
 
+@pytest.mark.parametrize("origin_host", ["git.example.com:3000", "github.com", "attacker.invalid"])
+async def test_forgejo_release_push_enforces_configured_origin_host(
+    proxy_settings: Settings,
+    upstream_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    origin_host: str,
+) -> None:
+    from robomp.git_ops import PushResult
+    from robomp.proxy import server as proxy_server
+
+    proxy_settings.forgejo_token = SecretStr("forgejo-release-pat")
+    proxy_settings.forgejo_repos_raw = "octo/widget"
+    proxy_settings.api_base = "https://git.example.com:3000/api/v1"
+    proxy_settings.git_host = "git.example.com:3000"
+    branch = "release/test"
+    repo_dir, head = _stage_workspace(proxy_settings, upstream_repo, "octo/widget", 1, branch)
+    origin = f"https://{origin_host}/octo/widget.git"
+    _git(["remote", "set-url", "origin", origin], repo_dir)
+    pushes: list[tuple[Path, dict[str, object]]] = []
+
+    def push_release(path: Path, **kwargs: object) -> PushResult:
+        pushes.append((path, kwargs))
+        return PushResult(head=head, branch=branch)
+
+    monkeypatch.setattr(proxy_server, "git_push_release", push_release)
+    app = _build_app(proxy_settings)
+    endpoint = "/gh/v1/git/push_release"
+    params = {"platform": "forgejo"}
+    body = json.dumps(
+        {
+            "repo": "octo/widget",
+            "workspace_key": "octo__widget__1",
+            "branch": branch,
+            "tag": "v1.2.3",
+            "expected_head": head,
+        }
+    ).encode()
+    async with await _async_client(app) as client:
+        response = await client.post(
+            endpoint,
+            params=params,
+            content=body,
+            headers={**_signed("POST", endpoint, body, params=params), "Content-Type": "application/json"},
+        )
+    if origin_host == proxy_settings.git_host:
+        assert response.status_code == 200, response.text
+        assert response.json() == {"head": head, "branch": branch, "tag": "v1.2.3"}
+        assert len(pushes) == 1
+        path, kwargs = pushes[0]
+        assert path == repo_dir
+        assert kwargs["remote_url"] == origin
+        assert kwargs["auth_url"] == origin
+        assert kwargs["token"] == "forgejo-release-pat"
+        assert kwargs["git_auth_username"] == "git"
+    else:
+        assert response.status_code == 400, response.text
+        assert pushes == []
+
+
 async def test_git_push_release_requires_hmac(proxy_settings: Settings) -> None:
     app = _build_app(proxy_settings)
     body = json.dumps(
@@ -1548,8 +1607,8 @@ def test_split_git_host_parses_host_and_port() -> None:
 
     from robomp.proxy import server as proxy_server
 
-    assert proxy_server._split_git_host("github.com") == ("github.com", None)
-    assert proxy_server._split_git_host("git.example.com:3000") == ("git.example.com", 3000)
+    assert proxy_server._split_git_host("github.com") == ("github.com", None, "")
+    assert proxy_server._split_git_host("git.example.com:3000") == ("git.example.com", 3000, "")
     with pytest.raises(HTTPException) as exc:
         proxy_server._split_git_host("git.example.com:abc")
     assert exc.value.status_code == 400
@@ -1559,14 +1618,22 @@ def test_split_git_host_bracketed_ipv6_with_port() -> None:
     from robomp.proxy import server as proxy_server
 
     # Bracketed IPv6 literal with a port: host is the literal, port is parsed.
-    assert proxy_server._split_git_host("[fec0::1]:3000") == ("fec0::1", 3000)
+    assert proxy_server._split_git_host("[fec0::1]:3000") == ("fec0::1", 3000, "")
 
 
 def test_split_git_host_bare_ipv6_without_port() -> None:
     from robomp.proxy import server as proxy_server
 
     # Bare IPv6 literal (no brackets, no port) must be treated as the whole host.
-    assert proxy_server._split_git_host("2001:db8::1") == ("2001:db8::1", None)
+    assert proxy_server._split_git_host("2001:db8::1") == ("2001:db8::1", None, "")
+
+
+def test_split_git_host_parses_base_path_prefix() -> None:
+    """A configured git host may carry a URL prefix (Forgejo under /forgejo)."""
+    from robomp.proxy import server as proxy_server
+
+    assert proxy_server._split_git_host("git.example.com/forgejo") == ("git.example.com", None, "/forgejo")
+    assert proxy_server._split_git_host("git.example.com:3000/forgejo/") == ("git.example.com", 3000, "/forgejo")
 
 
 def test_validate_repo_name_forgejo_accepts_underscore_owner() -> None:
@@ -1605,4 +1672,74 @@ def test_normalized_github_https_url_rejects_wrong_port() -> None:
             git_host="git.example.com:3000",
             platform="forgejo",
         )
+    assert exc.value.status_code == 400
+
+
+def test_github_url_for_repo_brackets_ipv6_literal() -> None:
+    """A bare IPv6 git host must be bracketed when formatted into a URL; a
+    bracketed literal with a port keeps its port; non-IPv6 hosts stay as-is."""
+    from robomp.proxy import server as proxy_server
+
+    assert proxy_server._github_url_for_repo("my_org/widget", git_host="2001:db8::1", platform="forgejo") == (
+        "https://[2001:db8::1]/my_org/widget.git"
+    )
+    assert proxy_server._github_url_for_repo("my_org/widget", git_host="[2001:db8::1]:3000", platform="forgejo") == (
+        "https://[2001:db8::1]:3000/my_org/widget.git"
+    )
+    assert proxy_server._github_url_for_repo("my_org/widget", git_host="git.example.com:3000", platform="forgejo") == (
+        "https://git.example.com:3000/my_org/widget.git"
+    )
+
+
+def test_normalized_github_https_url_accepts_ipv6_host() -> None:
+    from robomp.proxy import server as proxy_server
+
+    normalized = proxy_server._normalized_github_https_url(
+        "https://[2001:db8::1]/my_org/widget.git",
+        "my_org/widget",
+        git_host="2001:db8::1",
+        platform="forgejo",
+    )
+    assert normalized == "https://[2001:db8::1]/my_org/widget.git"
+
+
+def test_normalized_github_https_url_preserves_base_path_prefix() -> None:
+    """A URL-prefix git host (git.example.com/forgejo) accepts clone URLs
+    under the prefix and reconstructs with it."""
+    from robomp.proxy import server as proxy_server
+
+    normalized = proxy_server._normalized_github_https_url(
+        "https://git.example.com/forgejo/my_org/widget.git",
+        "my_org/widget",
+        git_host="git.example.com/forgejo",
+        platform="forgejo",
+    )
+    assert normalized == "https://git.example.com/forgejo/my_org/widget.git"
+
+
+def test_normalized_github_https_url_rejects_prefix_mismatch() -> None:
+    from fastapi import HTTPException
+
+    from robomp.proxy import server as proxy_server
+
+    with pytest.raises(HTTPException) as exc:
+        proxy_server._normalized_github_https_url(
+            "https://git.example.com/other/my_org/widget.git",
+            "my_org/widget",
+            git_host="git.example.com/forgejo",
+            platform="forgejo",
+        )
+    assert exc.value.status_code == 400
+
+
+def test_validate_repo_name_forgejo_accepts_40_char_owner() -> None:
+    """Forgejo owner names may be 40 characters; GitHub stays at 39."""
+    from fastapi import HTTPException
+
+    from robomp.proxy import server as proxy_server
+
+    owner = "o" * 40
+    proxy_server._validate_repo_name(f"{owner}/widget", platform="forgejo")
+    with pytest.raises(HTTPException) as exc:
+        proxy_server._validate_repo_name(f"{owner}/widget")
     assert exc.value.status_code == 400
