@@ -74,7 +74,7 @@ function createHost(
 		sessionManager: {
 			getLastModelChangeRole: () => options.lastModelChangeRole,
 			getLeafId: () => null,
-			rewindLeafTo: () => {},
+			discardEntryDurably: async () => {},
 			getBranch: () => [],
 			getBranchView: () => [],
 			getSessionId: () => "test-session",
@@ -151,7 +151,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		host.sessionManager = {
 			appendModelChange: (selector: string) => modelChanges.push(selector),
 			getLeafId: () => null,
-			rewindLeafTo: () => {},
+			discardEntryDurably: async () => {},
 			getSessionId: () => "replay-unsafe-session",
 		} as never;
 		host.setModelWithProviderSessionReset = async nextModel => {
@@ -204,7 +204,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		host.sessionManager = {
 			appendModelChange: (selector: string) => modelChanges.push(selector),
 			getLeafId: () => null,
-			rewindLeafTo: () => {},
+			discardEntryDurably: async () => {},
 			getSessionId: () => "replay-unsafe-session",
 		} as never;
 		host.setThinkingLevel = level => thinkingChanges.push(level);
@@ -249,16 +249,19 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		const fallbackApplied = Promise.withResolvers<void>();
 		const releaseSync = Promise.withResolvers<void>();
 		const modelChanges: string[] = [];
-		const retractedLeaf = { value: null as string | null };
+		const discardedEntry = { value: null as string | null };
 		const emittedEvents: string[] = [];
 		const thinkingChanges: unknown[] = [];
 		const host = createHost(model, modelRegistry);
 		host.model = () => activeModel;
 		host.sessionManager = {
-			appendModelChange: (selector: string) => modelChanges.push(selector),
-			getLeafId: () => (modelChanges.length > 0 ? "leaf-after-append" : "leaf-before-append"),
-			rewindLeafTo: (id: string | null) => {
-				retractedLeaf.value = id;
+			appendModelChange: (selector: string) => {
+				modelChanges.push(selector);
+				return `model-change-${modelChanges.length}`;
+			},
+			getLeafId: () => (modelChanges.length > 0 ? "model-change-1" : "leaf-before-append"),
+			discardEntryDurably: async (id: string) => {
+				discardedEntry.value = id;
 			},
 			getSessionId: () => "replay-unsafe-session",
 		} as never;
@@ -297,10 +300,70 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(committed).toBe(false);
 		expect(activeModel).toBe(model);
 		expect(modelChanges).toEqual([`${fallback.provider}/${fallback.id}`]);
-		expect(retractedLeaf.value).toBe("leaf-before-append");
+		expect(discardedEntry.value).toBe("model-change-1");
 		// The apply set the fallback level, the rollback restored the original.
 		expect(thinkingChanges.length).toBe(2);
 		expect(emittedEvents).toEqual([]);
+	});
+
+	it("restores the fallback effort when cancellation lands during a primary restore", async () => {
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallback) throw new Error("Expected bundled fallback model");
+		let activeModel = model;
+		let thinking: string | undefined = "high";
+		let syncCalls = 0;
+		const restoreSyncStarted = Promise.withResolvers<void>();
+		const releaseRestoreSync = Promise.withResolvers<void>();
+		const host = createHost(model, modelRegistry);
+		host.model = () => activeModel;
+		host.thinkingLevel = () => thinking as never;
+		host.configuredThinkingLevel = () => thinking as never;
+		host.setThinkingLevel = level => {
+			thinking = level as string | undefined;
+		};
+		host.sessionManager = {
+			appendModelChange: () => "model-change",
+			getLeafId: () => null,
+			discardEntryDurably: async () => {},
+			getSessionId: () => "replay-unsafe-session",
+		} as never;
+		host.setModelWithProviderSessionReset = async nextModel => {
+			activeModel = nextModel;
+		};
+		host.syncAfterModelChange = async () => {
+			syncCalls++;
+			if (syncCalls === 2) {
+				restoreSyncStarted.resolve();
+				await releaseRestoreSync.promise;
+			}
+		};
+		const recovery = new TurnRecovery(host);
+		const applied = await recovery.applyRetryFallbackCandidate(
+			"default",
+			{
+				raw: `${fallback.provider}/${fallback.id}:low`,
+				provider: fallback.provider,
+				id: fallback.id,
+				thinkingLevel: "low" as never,
+			},
+			`${model.provider}/${model.id}:high`,
+			{ apiKey: "***" },
+		);
+		expect(applied).toBe(true);
+		expect(activeModel).toBe(fallback);
+		expect(thinking).toBe("low");
+
+		const controller = new AbortController();
+		const restoring = recovery.maybeRestoreRetryFallbackPrimary(controller.signal);
+		await restoreSyncStarted.promise;
+		expect(activeModel).toBe(model);
+		expect(thinking).toBe("high");
+		controller.abort();
+		releaseRestoreSync.resolve();
+
+		expect(await restoring).toBe(false);
+		expect(activeModel).toBe(fallback);
+		expect(thinking).toBe("low");
 	});
 
 	it("does not clobber a newer explicit model when cancellation lands during post-swap synchronization", async () => {
@@ -311,15 +374,18 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		const fallbackApplied = Promise.withResolvers<void>();
 		const releaseSync = Promise.withResolvers<void>();
 		const modelChanges: string[] = [];
-		const retractedLeaf = { value: null as string | null };
+		const discardedEntry = { value: null as string | null };
 		const emittedEvents: string[] = [];
 		const host = createHost(model, modelRegistry);
 		host.model = () => activeModel;
 		host.sessionManager = {
-			appendModelChange: (selector: string) => modelChanges.push(selector),
-			getLeafId: () => (modelChanges.length > 0 ? "leaf-after-append" : "leaf-before-append"),
-			rewindLeafTo: (id: string | null) => {
-				retractedLeaf.value = id;
+			appendModelChange: (selector: string) => {
+				modelChanges.push(selector);
+				return `model-change-${modelChanges.length}`;
+			},
+			getLeafId: () => (modelChanges.length > 0 ? "model-change-1" : "leaf-before-append"),
+			discardEntryDurably: async (id: string) => {
+				discardedEntry.value = id;
 			},
 			getSessionId: () => "replay-unsafe-session",
 		} as never;
@@ -360,7 +426,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 
 		expect(committed).toBe(false);
 		expect(activeModel).toBe(selectedModel);
-		expect(retractedLeaf.value).toBeNull();
+		expect(discardedEntry.value).toBeNull();
 		expect(emittedEvents).toEqual([]);
 	});
 
@@ -376,7 +442,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		host.sessionManager = {
 			appendModelChange: (selector: string) => modelChanges.push(selector),
 			getLeafId: () => null,
-			rewindLeafTo: () => {},
+			discardEntryDurably: async () => {},
 			getSessionId: () => "replay-unsafe-session",
 		} as never;
 		host.setModelWithProviderSessionReset = async nextModel => {

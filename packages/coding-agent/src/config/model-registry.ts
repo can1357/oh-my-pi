@@ -3913,7 +3913,13 @@ export class ModelRegistry {
 			if (health.state !== "healthy") {
 				// A short cooldown can expire while the probe is in flight; revalidate
 				// (also covering a concurrent replacement) before keeping the suppression.
-				return this.#activeSuppressedRecord(normalizedSelector) !== undefined;
+				const current = this.#activeSuppressedRecord(normalizedSelector);
+				if (current === undefined) return false;
+				// The session's own deadline can also lapse during the probe while a
+				// sibling session's longer cooldown keeps the selector-wide record alive.
+				const currentSessionUntilMs =
+					options.sessionId !== undefined ? current.record.untilMsBySession?.get(options.sessionId) : undefined;
+				return currentSessionUntilMs === undefined || currentSessionUntilMs > Date.now();
 			}
 			const replacement = this.#activeSuppressedRecord(normalizedSelector);
 			if (replacement !== undefined && replacement.record !== record) return true;

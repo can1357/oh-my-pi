@@ -697,6 +697,42 @@ describe("early quota reset recovery", () => {
 		).toBe(true);
 	});
 
+	it("releases a session whose own cooldown expires while its unhealthy probe is in flight", async () => {
+		env = await createEnv();
+		const { registry } = env;
+		const clock = useMockClock();
+		registry.suppressSelector(PRIMARY_SELECTOR, clock.now() + 30 * 60_000, clock.now(), "session-a");
+		clock.advance(60_000);
+		registry.suppressSelector(PRIMARY_SELECTOR, clock.now() + 2 * 60_000, clock.now(), "session-b");
+		scriptedReports.anthropic = { status: "exhausted" };
+		const released = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<void>();
+		fetchGate = {
+			promise: released.promise,
+			open: () => released.resolve(),
+			started: () => started.resolve(),
+		};
+		const gate = fetchGate;
+
+		const probe = registry.isSelectorSuppressedWithRecovery(PRIMARY_SELECTOR, {
+			sessionId: "session-b",
+			reserveFraction: 0.1,
+		});
+		await started.promise;
+		// B's own short deadline lapses during the probe; A's longer cooldown keeps
+		// the selector-wide record alive, but must not keep B on the fallback.
+		clock.advance(3 * 60_000);
+		gate.open();
+
+		expect(await probe).toBe(false);
+		expect(
+			await registry.isSelectorSuppressedWithRecovery(PRIMARY_SELECTOR, {
+				sessionId: "session-a",
+				reserveFraction: 0.1,
+			}),
+		).toBe(true);
+	});
+
 	it("preserves the quota suppression when the recovery probe aborts", async () => {
 		env = await createEnv();
 		const { registry } = env;

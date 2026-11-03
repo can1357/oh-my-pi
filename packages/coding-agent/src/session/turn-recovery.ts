@@ -2300,8 +2300,11 @@ export class TurnRecovery {
 			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
 			return false;
 		}
-		const leafBeforeAppend = this.#host.sessionManager.getLeafId();
-		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
+		const appendedModelChangeId = this.#host.sessionManager.appendModelChange(
+			candidateSelector,
+			EPHEMERAL_MODEL_CHANGE_ROLE,
+			true,
+		);
 		this.#host.settings.getStorage()?.recordModelUsage(candidateSelector);
 		this.#host.setThinkingLevel(nextThinkingLevel);
 		if (!this.#activeRetryFallback) {
@@ -2340,12 +2343,10 @@ export class TurnRecovery {
 						this.#activeRetryFallback = undefined;
 					}
 				}
-				if (this.#host.sessionManager.getLeafId() !== leafBeforeAppend) {
-					// Compare against the captured leaf even when it was null: a fresh
-					// session has no leaf before the apply, and the appended fallback
-					// `model_change` must not remain on the active branch.
-					this.#host.sessionManager.rewindLeafTo(leafBeforeAppend);
-				}
+				// Durably discard the cancelled fallback `model_change`: moving only the
+				// in-memory leaf is lost on reload, because the loader selects the last
+				// physical journal entry and would resurrect the cancelled selection.
+				await this.#host.sessionManager.discardEntryDurably(appendedModelChangeId);
 				// Restore the model before its thinking level: `setThinkingLevel` clamps
 				// against the active model, so restoring `currentThinkingLevel` while the
 				// candidate is still active silently drops a reasoning-capable primary's
@@ -2742,6 +2743,11 @@ export class TurnRecovery {
 			this.#activeRetryFallback = activeFallback;
 			this.#fallbackRoutedFor = routedBeforeSwap;
 			await this.#host.setModelWithProviderSessionReset(currentModel);
+			// `setThinkingLevel(thinkingToApply)` already installed the primary's
+			// effort; reapply the fallback's after reinstating the fallback model
+			// (the model restore never reapplies thinking, and the level clamps
+			// against the active model).
+			this.#host.setThinkingLevel(currentThinkingLevel);
 			return false;
 		}
 		return true;
