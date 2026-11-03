@@ -14,7 +14,13 @@ import {
 	splitPathAndSel,
 	splitReadQuery,
 } from "../tools/read";
-import { FILE_NAME_COLOR, formatStyledPath, PREVIEW_LIMITS, shortenPath } from "../render/render-utils";
+import {
+	FILE_NAME_COLOR,
+	formatStatusIcon,
+	formatStyledPath,
+	PREVIEW_LIMITS,
+	shortenPath,
+} from "../render/render-utils";
 import { fileHyperlink, renderCodeCell, renderMarkdownCell } from "../render";
 import { wrapTreeLine } from "../render/hanging-wrap";
 import { wrapTextWithAnsi } from "../utils";
@@ -35,7 +41,7 @@ import {
 } from "../native/node";
 import { plainText } from "../native/spans";
 import { Memo } from "../native/memo";
-import { fileHref, fileRow, inlineErrorView } from "../tools/native-view";
+import { fileHref, fileRow, inlineErrorView, urlHref } from "../tools/native-view";
 
 /**
  * Extract the read call's target path. `path` is the canonical arg; `file_path`
@@ -711,7 +717,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		return {
 			target: filePath ? `${filePath}${split.sel ? `:${split.sel}` : ""}` : "…",
 			targetKind: "path",
-			href: fileHref(linkPathForTargets(row.targets)),
+			href: fileHref(linkPathForTargets(row.targets)) ?? urlHref(split.path),
 			meta: correctedFrom ? [`corrected from ${shortenPath(correctedFrom)}`] : undefined,
 			badges: conflicts
 				? [{ text: `${conflicts} conflict${conflicts === 1 ? "" : "s"}`, tone: "warning" }]
@@ -734,7 +740,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 					: undefined;
 		return fileRow(shortenPath(split.sel ? split.path : row.targetPath), {
 			range: split.sel ? `:${split.sel}` : undefined,
-			href: fileHref(linkPathForTargets(row.targets)),
+			href: fileHref(linkPathForTargets(row.targets)) ?? urlHref(split.path),
 			icon: status === "error" ? "x-circle" : undefined,
 			tone: READ_STATUS_TONE[status],
 			chip: conflicts ? { text: `${conflicts} conflict${conflicts === 1 ? "" : "s"}` } : undefined,
@@ -930,7 +936,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (displayRows.length === 1) {
 			const row = displayRows[0]!;
 			if (!this.#shouldRenderPreviewRow(row)) {
-				const statusSymbol = this.#formatStatus(this.#statusForTargets(row.targets));
+				const statusSymbol = formatStatusIcon(this.#statusForTargets(row.targets), theme);
 				const pathDisplay = this.#formatRowPath(row, HEADER_PATH_PAINT);
 				const lines = [` ${statusSymbol} ${theme.fg("toolTitle", theme.bold("Read"))} ${pathDisplay}`.trimEnd()];
 				const usageRows = this.#usageRowsBySummaryRow(displayRows).get(0) ?? [];
@@ -1096,7 +1102,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#formatRow(row: ReadSummaryRow): string {
 		const status = this.#statusForTargets(row.targets);
-		const statusPrefix = status === "success" ? "" : `${this.#formatStatus(status)} `;
+		const statusPrefix = status === "success" ? "" : `${formatStatusIcon(status, theme)} `;
 		return `${statusPrefix}${this.#formatRowPath(row)}`;
 	}
 
@@ -1278,18 +1284,5 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#shouldRenderPreview(entry: ReadEntry): boolean {
 		return this.#showContentPreview && entry.contentText !== undefined;
-	}
-
-	#formatStatus(status: ReadEntry["status"]): string {
-		if (status === "success") {
-			return theme.fg("text", theme.status.enabled);
-		}
-		if (status === "warning") {
-			return theme.fg("warning", theme.status.warning);
-		}
-		if (status === "error") {
-			return theme.fg("error", theme.status.error);
-		}
-		return theme.fg("dim", theme.status.pending);
 	}
 }
