@@ -1362,9 +1362,7 @@ export function normalizeSchemaForGoogleCCA(value: unknown): unknown {
 	if (typeof value === "object" && value !== null) {
 		const source = googleCloneToSource.get(value) ?? value;
 		return structuredClone(
-			stamp(source, kGoogleCcaSchema, s =>
-				normalizeSchema(normalizeGoogleSchemaCached(s), CCA_SCHEMA_OPTIONS),
-			),
+			stamp(source, kGoogleCcaSchema, s => normalizeSchema(normalizeGoogleSchemaCached(s), CCA_SCHEMA_OPTIONS)),
 		);
 	}
 	return normalizeSchema(normalizeSchema(value, GOOGLE_SCHEMA_OPTIONS), CCA_SCHEMA_OPTIONS);

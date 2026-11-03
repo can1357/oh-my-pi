@@ -3,8 +3,8 @@ import type { MemoryWriteScope } from "../memory-backend/global-scope";
 import { findPersistedRecall, persistRecall } from "../memory-backend/recall-entry";
 import type { MemoryPromptPreparation } from "../memory-backend/types";
 import type { AgentSession } from "../session/agent-session";
-import { type BankScope, ensureBankExists } from "./bank";
-import type { HindsightApi, MemoryItemInput } from "./client";
+import { type BankScope, ensureBankExists, type HindsightBankSet } from "./bank";
+import type { HindsightClientApi, MemoryItemInput } from "./client";
 import type { HindsightConfig } from "./config";
 import {
 	composeRecallQuery,
@@ -52,11 +52,27 @@ interface RecallOutcome {
 	context: string | null;
 	ok: boolean;
 }
+/**
+ * What a subagent alias reads from its parent state: the routing it copies and the
+ * snippets the developer prompt shows. A subagent worker holds a remote implementation
+ * whose client and bank set are main's live ones.
+ */
+export interface HindsightSessionStateApi {
+	readonly client: HindsightClientApi;
+	readonly bankId: string;
+	readonly retainTags?: string[];
+	readonly recallTags?: string[];
+	readonly recallTagsMatch?: "any" | "all" | "any_strict" | "all_strict";
+	readonly config: HindsightConfig;
+	readonly banksSet: HindsightBankSet;
+	readonly lastRecallSnippet?: string;
+	readonly mentalModelsSnippet?: string;
+}
 
 export interface HindsightSessionStateOptions {
 	/** Session id used for retain-queue metadata. */
 	sessionId: string;
-	client: HindsightApi;
+	client: HindsightClientApi;
 	bankId: string;
 	/** Tags on project-scoped retains (transcripts and tool writes) — non-empty in per-project-tagged mode. Global tool writes omit them. */
 	retainTags?: string[];
@@ -65,7 +81,7 @@ export interface HindsightSessionStateOptions {
 	recallTagsMatch?: "any" | "all" | "any_strict" | "all_strict";
 	config: HindsightConfig;
 	session: AgentSession;
-	banksSet: Set<string>;
+	banksSet: HindsightBankSet;
 	lastRetainedTurn?: number;
 	hasRecalledForFirstTurn?: boolean;
 	/**
@@ -74,7 +90,7 @@ export interface HindsightSessionStateOptions {
 	 * auto-retain — those run on the parent only — but the recall/retain/reflect
 	 * tools resolve via the alias so they persist to the same bank as the parent.
 	 */
-	aliasOf?: HindsightSessionState;
+	aliasOf?: HindsightSessionStateApi;
 }
 
 /**
@@ -252,10 +268,10 @@ function extendRetentionPrefixKey(key: string, messages: HindsightMessage[], fro
 }
 
 /** Per-session Hindsight runtime state owned by its AgentSession. */
-export class HindsightSessionState {
+export class HindsightSessionState implements HindsightSessionStateApi {
 	/** Session id used for retain-queue metadata. */
 	sessionId: string;
-	client: HindsightApi;
+	client: HindsightClientApi;
 	bankId: string;
 	/** Tags on project-scoped retains (transcripts and tool writes) — non-empty in per-project-tagged mode. Global tool writes omit them. */
 	retainTags?: string[];
@@ -264,7 +280,7 @@ export class HindsightSessionState {
 	recallTagsMatch?: "any" | "all" | "any_strict" | "all_strict";
 	config: HindsightConfig;
 	session: AgentSession;
-	banksSet: Set<string>;
+	banksSet: HindsightBankSet;
 	lastRetainedTurn: number;
 	#lastRetainedMessageIndex: number = 0;
 	#cachedTranscript: string = "";
@@ -293,7 +309,7 @@ export class HindsightSessionState {
 	#mentalModelsLoadGeneration = 0;
 	unsubscribe?: () => void;
 	/** Alias states delegate persistence config to a primary parent state. */
-	aliasOf?: HindsightSessionState;
+	aliasOf?: HindsightSessionStateApi;
 	readonly retainQueue: HindsightRetainQueue;
 
 	constructor(options: HindsightSessionStateOptions) {

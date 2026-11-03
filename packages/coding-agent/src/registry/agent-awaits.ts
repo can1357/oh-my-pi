@@ -12,7 +12,17 @@ interface AwaitHold {
 	interruptible: boolean;
 }
 
-export class AgentAwaits {
+/** Public surface of {@link AgentAwaits}, implemented locally on main and by a proxy in workers. */
+export interface AgentAwaitsApi {
+	/** Record `waiter` blocked until the first of `awaited` finishes; returns the release function. */
+	hold(waiter: string, awaited: readonly string[], options: { interruptible: boolean }): () => void;
+	/** Whether `agent` cannot act on a message `target` sent it at `sentAt` until `target` finishes. */
+	blocksOn(agent: string, target: string, sentAt: number): boolean;
+	/** Subscribe to hold changes; returns the unsubscribe function. */
+	onChange(listener: () => void): () => void;
+}
+
+export class AgentAwaits implements AgentAwaitsApi {
 	readonly #holds = new Map<string, Set<AwaitHold>>();
 	readonly #listeners = new Set<() => void>();
 
