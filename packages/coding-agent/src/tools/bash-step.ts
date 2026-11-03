@@ -1088,7 +1088,10 @@ function findCanPerform(command: SimpleCommand, filesystem: StepFilesystem | und
 		rootList.push(value);
 	}
 	if (rootList.length === 0) rootList.push(".");
-	if (!rootList.every(toolsTakeLiterally)) return false;
+	// glob refuses `/` (or reads it as the session directory); find lists a file below two
+	// overlapping roots twice, glob once.
+	if (!rootList.every(root => toolsTakeLiterally(root) && root.replace(/\/+$/u, "") !== "")) return false;
+	if (!rootsDisjoint(rootList)) return false;
 	// find does not descend a symlinked root without `-H`; glob always does.
 	if (filesystem && rootList.some(root => filesystem.kind(root, followRoots) !== "directory")) return false;
 	const expression = parseFindExpression(words.slice(i));
@@ -1096,13 +1099,37 @@ function findCanPerform(command: SimpleCommand, filesystem: StepFilesystem | und
 	// find tests its roots too and lists one the expression prints (`find . -name .`,
 	// `find . -print -name x`, `find src`); glob never lists its roots. Each distinct root is
 	// checked against each test, so a step with more pairs than FIND_ROOT_CHECKS runs unchecked.
-	const roots = [...new Set(rootList)];
-	if (roots.length * Math.max(expression.tests, 1) > FIND_ROOT_CHECKS) return false;
-	return roots.every(root => !findMayPrintRoot(expression, root));
+	if (rootList.length * Math.max(expression.tests, 1) > FIND_ROOT_CHECKS) return false;
+	return rootList.every(root => !findMayPrintRoot(expression, root));
 }
 
 /** The most root × test pairs a find step is checked over before it runs unchecked. */
 const FIND_ROOT_CHECKS = 4096;
+
+/** The longest find expression, and its deepest nesting of `(` and `!`, that is parsed. */
+const FIND_EXPRESSION_TOKENS = 4096;
+const FIND_EXPRESSION_DEPTH = 64;
+
+/**
+ * Whether no root lies inside another (`a a`, `a a/b`, `. a`): find walks each root and lists a
+ * file below two of them twice, where glob lists it once. Several roots must be relative, so two
+ * spellings of one directory (`/abs/cwd` and `.`) cannot hide. Sorted by segments, a root sorts
+ * just before the roots inside it, so comparing neighbours suffices.
+ */
+function rootsDisjoint(roots: readonly string[]): boolean {
+	if (roots.length < 2) return true;
+	if (roots.some(root => root.startsWith("/"))) return false;
+	const keys = roots
+		.map(root =>
+			root
+				.split("/")
+				.filter(segment => segment !== "" && segment !== ".")
+				.join("\0"),
+		)
+		.sort();
+	if (keys[0] === "") return false;
+	return keys.every((key, i) => i === 0 || (key !== keys[i - 1] && !key.startsWith(`${keys[i - 1]}\0`)));
+}
 
 type FindNode =
 	| { kind: "test"; test: string; pattern: string }
@@ -1126,9 +1153,12 @@ interface FindExpression {
  * already leaves out (`.git`, `node_modules`). Undefined for anything else.
  */
 function parseFindExpression(tokens: string[]): FindExpression | undefined {
+	// Bounded, so the recursive parse and evaluation stay within the stack.
+	if (tokens.length > FIND_EXPRESSION_TOKENS) return undefined;
 	let pos = 0;
-	let prints = false;
+	let prints = 0;
 	let tests = 0;
+	let depth = 0;
 	const isOr = (token: string | undefined): boolean => token === "-o" || token === "-or";
 	const parseOr = (): FindNode | undefined => {
 		let left = parseAnd();
@@ -1152,17 +1182,21 @@ function parseFindExpression(tokens: string[]): FindExpression | undefined {
 		const token = tokens[pos++];
 		if (token === undefined) return undefined;
 		if (token === "!" || token === "-not") {
+			if (negated) return undefined;
 			const operand = parseUnary(true);
 			return operand && { kind: "not", operand };
 		}
 		if (negated && token !== "-name" && token !== "-path" && token !== "-wholename") return undefined;
 		if (token === "(") {
+			if (++depth > FIND_EXPRESSION_DEPTH) return undefined;
 			const inner = parseOr();
+			depth--;
 			if (!inner || tokens[pos++] !== ")") return undefined;
 			return inner;
 		}
 		if (token === "-print") {
-			prints = true;
+			// A second `-print` can print a file twice; glob lists each file once.
+			if (++prints > 1) return undefined;
 			return { kind: "print" };
 		}
 		if (token !== "-name" && token !== "-path" && token !== "-wholename") return undefined;
@@ -1186,7 +1220,7 @@ function parseFindExpression(tokens: string[]): FindExpression | undefined {
 	if (tokens.length === 0) return { root: undefined, prints: false, tests: 0 };
 	const root = parseOr();
 	if (!root || pos !== tokens.length) return undefined;
-	return { root, prints, tests };
+	return { root, prints: prints > 0, tests };
 }
 
 /** Three-valued truth: false, true, or either. */

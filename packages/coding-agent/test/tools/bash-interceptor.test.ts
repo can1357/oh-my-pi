@@ -1065,13 +1065,25 @@ describe("dedicated tool capability", () => {
 		expect(decide(`find ${root} -name '${"*a".repeat(15)}'`)).toBeUndefined();
 		expect(decide("find abc -name '*b*'")).toBeUndefined();
 		expect(decide("find abc -name 'b*'")).toBe("glob");
-		// Round 15: a long near-matching suffix and repeated root/test pairs stay linear.
+		// Round 15: a long near-matching suffix over many tests, and many roots, stay linear.
 		const long = "b".repeat(240);
 		const near = `*${"b".repeat(239)}c`;
-		const many = `find ${Array.from({ length: 640 }, () => long).join(" ")} -name NEVER -a ${Array.from({ length: 640 }, () => `-name '${near}'`).join(" -a ")}`;
+		const manyTests = `find ${long} -name '${near}'${` -o -name '${near}'`.repeat(1_299)}`;
+		const manyRoots = `find ${Array.from({ length: 4_000 }, (_, i) => `${long}${i}`).join(" ")} -name '${near}'`;
+		const repeatedRoots = `find ${Array.from({ length: 640 }, () => long).join(" ")} -name '${near}'`;
 		const manyStart = performance.now();
-		expect(decide(many)).toBe("glob");
-		expect(performance.now() - manyStart).toBeLessThan(250);
+		expect(decide(manyTests)).toBe("glob");
+		expect(decide(manyRoots)).toBe("glob");
+		expect(decide(repeatedRoots)).toBeUndefined();
+		expect(performance.now() - manyStart).toBeLessThan(500);
+	});
+
+	it("lets a deeply nested or very long find expression run without exhausting the stack", () => {
+		const nested = `find . ${"\\( ".repeat(30_000)}-name x${" \\)".repeat(30_000)}`;
+		expect(decide(nested)).toBeUndefined();
+		const long = `find . -name x${" -o -name y".repeat(30_000)}`;
+		expect(decide(long)).toBeUndefined();
+		expect(decide(`find . ${"\\( ".repeat(8)}-name x${" \\)".repeat(8)}`)).toBe("glob");
 	});
 
 	it.each([
@@ -1081,6 +1093,11 @@ describe("dedicated tool capability", () => {
 		"find src \\( -name '*.ts' -o -print \\)",
 		"find my-name",
 		"find src",
+		// Round 16: a file printed twice (two `-print`s, overlapping roots), and `/`, which glob refuses.
+		"find . -name x -print -print",
+		"find . . -name x",
+		"find src src/lib -name x",
+		"find / -name '*o*'",
 		// glob reads `?`, brackets and backslashes differently from find.
 		"find abc -name 'a?d'",
 		"find src -name '[ab]*'",
