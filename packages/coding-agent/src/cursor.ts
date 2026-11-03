@@ -51,6 +51,7 @@ import {
 	splitPathAndSelPreferringLiteral,
 } from "./tools/path-utils";
 import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TodoCommitOptions, TodoPhasesUpdate } from "./tools/todo-backend";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
 const CURSOR_TODO_PHASE = "Tasks";
@@ -120,10 +121,7 @@ interface CursorExecBridgeOptions {
 	 * emits no local `todo` toolResult, so without this bridge the provider's
 	 * list and the local `todo` state diverge silently and reloads lose it.
 	 */
-	commitTodoPhases?: (
-		update: TodoPhase[] | ((current: TodoPhase[]) => TodoPhase[] | undefined),
-		options?: { mirrored?: boolean },
-	) => Promise<TodoPhase[] | undefined>;
+	commitTodoPhases?: (update: TodoPhasesUpdate, options?: TodoCommitOptions) => Promise<TodoPhase[] | undefined>;
 	/** Called with the backend's message when {@link commitTodoPhases} rejects a mirrored list. */
 	reportTodoRefusal?: (message: string) => void;
 	getTodoPhases?: () => TodoPhase[];

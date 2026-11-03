@@ -8,6 +8,8 @@ import {
 	type ActiveTodoBackend,
 	NATIVE_TODO_BACKEND_ID,
 	TODO_BACKEND_NOTICE_SOURCE,
+	type TodoCommitOptions,
+	type TodoPhasesUpdate,
 	type TodoWriteGuard,
 	todoBackendText,
 } from "../tools/todo-backend";
@@ -124,10 +126,7 @@ export class TodoWrites {
 	 * records the entry: the bridged `todo` call already updated the list and reached `apply`.
 	 * Resolves with the committed list.
 	 */
-	commit(
-		update: TodoPhase[] | ((current: TodoPhase[]) => TodoPhase[] | undefined),
-		options?: { mirrored?: boolean },
-	): Promise<TodoPhase[] | undefined> {
+	commit(update: TodoPhasesUpdate, options?: TodoCommitOptions): Promise<TodoPhase[] | undefined> {
 		const todo = this.#host.todo;
 		return this.run(async (active, guard) => {
 			const phases = typeof update === "function" ? update(todo.phases) : update;

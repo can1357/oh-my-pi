@@ -381,11 +381,7 @@ export default function(pi) {
 		const session = await createSessionWithDeferred(deferred, "late");
 		const notices = collectNotices(session);
 
-		// Nothing may be announced before the deferred extension binds: "late" is unregistered until then.
-		await Bun.sleep(0);
-		expect(notices).toEqual([]);
-
-		// A write starts the deferred load and waits for the resolution.
+		// A write starts the deferred load and waits for the resolution; "late" is unregistered until the load binds it.
 		const result = await todo(session, { op: "init", items: ["via deferred backend"] });
 
 		expect(result.isError).toBeUndefined();

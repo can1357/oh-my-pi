@@ -14,6 +14,7 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TodoCommitOptions, TodoPhasesUpdate } from "../tools/todo-backend";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
@@ -366,10 +367,7 @@ export interface AgentViewSession extends AgentSessionHandle {
 	 * reloads keep it. A function `update` runs against the committed list; `undefined` declines. Resolves with
 	 * the committed list. See `AgentSession.commitTodoPhases` for the todo backend and queue semantics.
 	 */
-	commitTodoPhases(
-		update: TodoPhase[] | ((current: TodoPhase[]) => TodoPhase[] | undefined),
-		options?: { mirrored?: boolean },
-	): Promise<TodoPhase[] | undefined>;
+	commitTodoPhases(update: TodoPhasesUpdate, options?: TodoCommitOptions): Promise<TodoPhase[] | undefined>;
 	/** Whether the user approved approval scope `key` for the rest of this session, so its prompt is skipped. */
 	hasSessionApproval(key: string): boolean;
 	/** Remembered `always-ask-cached` grants this session's tool calls are checked against. */

@@ -82,6 +82,14 @@ export interface ActiveTodoBackend {
 	replace(phases: TodoPhase[], signal?: AbortSignal): Promise<void>;
 }
 
+/** What a commit sets the list to: a list, or an updater run on the committed list (`undefined` declines). */
+export type TodoPhasesUpdate = TodoPhase[] | ((current: TodoPhase[]) => TodoPhase[] | undefined);
+
+export interface TodoCommitOptions {
+	/** Record the entry only: the bridged `todo` call already updated the list and reached `apply` (eval bridge). */
+	mirrored?: boolean;
+}
+
 /**
  * Handed to a queued todo write. Call {@link assertCurrent} after any backend call and before
  * committing: it throws when the write's abort signal fired or the session's todo list was reset

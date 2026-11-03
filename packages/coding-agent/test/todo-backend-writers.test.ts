@@ -619,16 +619,15 @@ describe("interactive mode with a backend", () => {
 	it("a Cursor mirror the backend refuses leaves the HUD on the committed list", async () => {
 		const h = await createHarness();
 		const started = await startMode(h);
-		const error = vi.spyOn(started, "showError").mockImplementation(() => {});
+		const errorShown = Promise.withResolvers<string>();
+		vi.spyOn(started, "showError").mockImplementation(message => errorShown.resolve(message));
 		const committed = structuredClone(h.session.getTodoPhases());
 		h.recorder.replaceError = new Error(REFUSAL);
 		const cursor = createCursor(h, "session");
 
 		cursor.handlers.todoSync({ merged: false, todos: [{ content: "refused step", status: "pending" }] }, "refused");
-		await cursor.refusalSettled();
-		await Bun.sleep(0);
-
-		expect(error).toHaveBeenCalledWith(expect.stringContaining(REFUSAL));
+		// The notice handler reloads the HUD right after showing the error.
+		expect(await errorShown.promise).toContain(REFUSAL);
 		expect(started.todoPhases).toEqual(committed);
 	});
 });
