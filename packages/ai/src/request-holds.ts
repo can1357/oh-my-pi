@@ -60,7 +60,13 @@ function startLifetime(): { lifetime: Lifetime; end(): void } {
 	};
 }
 
-/** Ends `end` once `fn`'s result settles: when it returns, or when the thenable it returns settles. */
+/**
+ * Ends `end` once `fn`'s result settles: when it returns, throws, or — for a
+ * thenable result — when it settles. A result is assimilated as `await` would:
+ * its `then` read once, and called with the settle callbacks, so a promise
+ * from another realm or library, or a callable thenable, lasts as long as a
+ * native one. A `then` that cannot be read or called ends it at once.
+ */
 function endWhenSettled<T>(fn: () => T, end: () => void): T {
 	let result: T;
 	try {
@@ -69,12 +75,25 @@ function endWhenSettled<T>(fn: () => T, end: () => void): T {
 		end();
 		throw error;
 	}
-	// Any thenable: a promise from another realm or library lasts as long as a native one.
-	if (result !== null && typeof result === "object" && "then" in result && typeof result.then === "function") {
-		Promise.resolve(result).then(end, end);
-	} else {
-		end();
+	let settling = false;
+	try {
+		if (result !== null && (typeof result === "object" || typeof result === "function")) {
+			const then = (result as { then?: unknown }).then;
+			if (typeof then === "function") {
+				let settled = false;
+				const settle = () => {
+					if (settled) return;
+					settled = true;
+					end();
+				};
+				then.call(result, settle, settle);
+				settling = true;
+			}
+		}
+	} catch {
+		// The thenable cannot be followed: the work counts as settled.
 	}
+	if (!settling) end();
 	return result;
 }
 
@@ -162,10 +181,19 @@ export function runOutsideRequestHolds<T>(holds: RequestHolds, fn: () => T): T {
  */
 export class RequestHoldsAlias implements RequestHolds {
 	#target: RequestHoldContext | undefined;
+	#changed = Promise.withResolvers<void>();
 
-	/** From now on, these holds stand for `context`'s. */
+	/** From now on, these holds stand for `context`'s. A send waiting on the holds this alias stood for asks again. */
 	bind(context: RequestHoldContext): void {
 		this.#target = context;
+		const changed = this.#changed;
+		this.#changed = Promise.withResolvers<void>();
+		changed.resolve();
+	}
+
+	/** Settles at the next {@link bind}. */
+	get changed(): Promise<void> {
+		return this.#changed.promise;
 	}
 
 	/** The holds bound with {@link bind}, or none. */
@@ -208,12 +236,17 @@ export class RequestHoldsAlias implements RequestHolds {
  * holds any scope of the chain is exempt from, for as long as that exemption
  * lasts, does not apply however near a scope names it. Asked afresh at every
  * check: an exemption ends, an alias is bound, a carried view's request ends.
+ * `aliases` are the aliases expanded, whose rebinding changes the answer.
  */
-function applicableScopes(scope: Scope | undefined): { applicable: Scope[]; exempt: RequestHolds[] } {
+function applicableScopes(scope: Scope | undefined): {
+	applicable: Scope[];
+	exempt: RequestHolds[];
+	aliases: RequestHoldsAlias[];
+} {
 	const exempt = new Set<RequestHolds>();
 	for (let next = scope; next; next = next.parent) if (next.exemption?.open) exempt.add(next.holds);
 	const chosen = new Map<RequestHolds, Scope>();
-	const expanded = new Set<RequestHolds>();
+	const expanded = new Set<RequestHoldsAlias>();
 	const carries = (candidate: Scope) => candidate.view !== undefined && live(candidate.lifetimes);
 	const add = (candidate: Scope) => {
 		if (exempt.has(candidate.holds)) return;
@@ -234,7 +267,7 @@ function applicableScopes(scope: Scope | undefined): { applicable: Scope[]; exem
 		if (next.exemption) continue;
 		add(next);
 	}
-	return { applicable: [...chosen.values()], exempt: [...exempt] };
+	return { applicable: [...chosen.values()], exempt: [...exempt], aliases: [...expanded] };
 }
 
 /** The holds of a context, taken with {@link captureRequestHolds}. */
@@ -334,61 +367,76 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 	const entries = new Map<RequestHolds, HoldEntry>();
 	const opened: RequestHoldView[] = [];
 	const carriedBy = (scope: Scope) => (scope.view && live(scope.lifetimes) ? scope.view : undefined);
-	/** The entries that apply now, each with its view, every view opened before any is checked. */
+	/** The aliases the last refresh expanded: a rebinding of any of them changes which holds apply. */
+	let aliases: RequestHoldsAlias[] = [];
+	/**
+	 * The entries that apply now, each with its view, every view opened before
+	 * any is checked. Opening runs host code, which can change which holds apply
+	 * (bind an alias, say), so it asks again after opening until the answer
+	 * stops changing; each pass opens at least one view, so it ends.
+	 */
 	const refresh = (): HoldEntry[] => {
-		const { applicable, exempt } = applicableScopes(current);
-		if (own && !exempt.includes(own.holds) && !applicable.some(scope => scope.holds === own.holds)) {
-			applicable.unshift({
-				holds: own.holds,
-				view: undefined,
-				lifetimes: [],
-				exemption: undefined,
-				parent: current,
-			});
+		for (;;) {
+			const resolved = applicableScopes(current);
+			const { applicable, exempt } = resolved;
+			aliases = resolved.aliases;
+			if (own && !exempt.includes(own.holds) && !applicable.some(scope => scope.holds === own.holds)) {
+				applicable.unshift({
+					holds: own.holds,
+					view: undefined,
+					lifetimes: [],
+					exemption: undefined,
+					parent: current,
+				});
+			}
+			const active: HoldEntry[] = [];
+			for (const scope of applicable) {
+				let entry = entries.get(scope.holds);
+				if (!entry) {
+					entry = { scope, view: undefined, carried: false };
+					entries.set(scope.holds, entry);
+				}
+				entry.scope = scope;
+				active.push(entry);
+			}
+			let openedNow = false;
+			for (const entry of active) {
+				if (own && entry.scope.holds === own.holds) {
+					entry.view = own.view;
+					continue;
+				}
+				const carried = carriedBy(entry.scope);
+				if (carried) {
+					// The request's own view of these holds serves while its request lasts.
+					entry.view = carried;
+					entry.carried = true;
+					continue;
+				}
+				// A carried view whose request ended no longer serves; a view of its own does.
+				if (entry.carried) {
+					entry.view = undefined;
+					entry.carried = false;
+				}
+				if (entry.view) continue;
+				const view = entry.scope.holds.open();
+				opened.push(view);
+				entry.view = view;
+				openedNow = true;
+			}
+			if (!openedNow) return active;
 		}
-		const active: HoldEntry[] = [];
-		for (const scope of applicable) {
-			let entry = entries.get(scope.holds);
-			if (!entry) {
-				entry = { scope, view: undefined, carried: false };
-				entries.set(scope.holds, entry);
-			}
-			entry.scope = scope;
-			active.push(entry);
-		}
-		for (const entry of active) {
-			if (own && entry.scope.holds === own.holds) {
-				entry.view = own.view;
-				continue;
-			}
-			const carried = carriedBy(entry.scope);
-			if (carried) {
-				// The request's own view of these holds serves while its request lasts.
-				entry.view = carried;
-				entry.carried = true;
-				continue;
-			}
-			// A carried view whose request ended no longer serves; a view of its own does.
-			if (entry.carried) {
-				entry.view = undefined;
-				entry.carried = false;
-			}
-			if (entry.view) continue;
-			const view = entry.scope.holds.open();
-			opened.push(view);
-			entry.view = view;
-		}
-		return active;
 	};
 	return {
 		check() {
 			for (const entry of refresh()) {
 				const held = entry.view?.check();
 				if (!held) continue;
-				// A wait on a carried view also ends when its request does, so the
-				// check runs again with a view of its own.
+				// The wait also ends when its answer may change: a carried view's
+				// request ends, or an alias is rebound. The check then runs again.
+				const wakes: Promise<void>[] = [held, ...aliases.map(alias => alias.changed)];
 				const ended = entry.carried ? firstEnd(entry.scope.lifetimes) : undefined;
-				return ended ? Promise.race([held, ended]) : held;
+				if (ended) wakes.push(ended);
+				return wakes.length === 1 ? held : Promise.race(wakes);
 			}
 			return undefined;
 		},

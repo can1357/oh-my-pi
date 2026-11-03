@@ -370,6 +370,104 @@ describe("what the last check covers", () => {
 		carried.release();
 	});
 
+	it("asks again after opening views, so holds an alias bound while a view opened also hold the send", async () => {
+		const owner = new TestHolds();
+		const alias = new RequestHoldsAlias();
+		const ownerContext = runWithRequestHolds(owner, captureRequestHolds);
+		// Opening this view binds the alias: host code run inside the gate's own preparation.
+		const binding: RequestHolds = {
+			open: () => {
+				alias.bind(ownerContext);
+				return { check: () => undefined, release: () => {} };
+			},
+		};
+		const sent = runWithRequestHolds(alias, () => runWithRequestHolds(binding, () => request()));
+		await turns();
+		expect(sent.sent).toBe(false);
+		owner.let();
+		await sent.result;
+		expect(sent.sent).toBe(true);
+	});
+
+	it("wakes a send waiting on holds an alias stood for when the alias is rebound to holds that let it go", async () => {
+		const old = new TestHolds();
+		const alias = new RequestHoldsAlias();
+		alias.bind(runWithRequestHolds(old, captureRequestHolds));
+		const sent = runWithRequestHolds(alias, () => request());
+		await turns();
+		expect(sent.sent).toBe(false);
+		// Rebound to a context with no holds; `old` still holds.
+		alias.bind(captureRequestHolds());
+		await sent.result;
+		expect(sent.sent).toBe(true);
+		old.let();
+	});
+
+	for (const [shape, make] of [
+		[
+			"a callable thenable",
+			(done: Promise<void>) =>
+				Object.assign(() => {}, {
+					// oxlint-disable-next-line unicorn/no-thenable
+					then: (onFulfilled: () => void, onRejected: () => void) => done.then(onFulfilled, onRejected),
+				}),
+		],
+		[
+			"a thenable whose `then` may be read only once",
+			(done: Promise<void>) => {
+				let reads = 0;
+				return {
+					// oxlint-disable-next-line unicorn/no-thenable
+					get then() {
+						reads++;
+						return reads === 1
+							? (onFulfilled: () => void, onRejected: () => void) => done.then(onFulfilled, onRejected)
+							: undefined;
+					},
+				};
+			},
+		],
+	] as const) {
+		it(`keeps an exemption while ${shape} the exempt work returns is pending`, async () => {
+			const holds = new TestHolds();
+			const done = Promise.withResolvers<void>();
+			const started = Promise.withResolvers<SentRequest>();
+			runWithRequestHolds(holds, () =>
+				runOutsideRequestHolds(holds, () => {
+					// Started a turn later, once a wrongly ended exemption would already be over.
+					setImmediate(() => started.resolve(request()));
+					return make(done.promise);
+				}),
+			);
+			const during = await started.promise;
+			await during.result;
+			expect(during.sent).toBe(true);
+			done.resolve();
+		});
+	}
+
+	it("ends an exemption at once when the thenable the exempt work returns cannot be followed", async () => {
+		const holds = new TestHolds();
+		const started = Promise.withResolvers<SentRequest>();
+		runWithRequestHolds(holds, () =>
+			runOutsideRequestHolds(holds, () => {
+				void Promise.resolve().then(() => started.resolve(request()));
+				return {
+					// oxlint-disable-next-line unicorn/no-thenable
+					get then(): never {
+						throw new Error("unreadable");
+					},
+				};
+			}),
+		);
+		const sent = await started.promise;
+		await turns();
+		expect(sent.sent).toBe(false);
+		holds.let();
+		await sent.result;
+		expect(sent.sent).toBe(true);
+	});
+
 	it("keeps an exemption for as long as a thenable the exempt work returns", async () => {
 		const holds = new TestHolds();
 		const done = Promise.withResolvers<void>();

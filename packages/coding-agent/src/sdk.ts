@@ -1925,21 +1925,30 @@ export function createAutoLearnCaptureRunner(
  * });
  * ```
  */
+/** The live session each start-up alias was bound for, so a second live session cannot take it over. */
+const startupHoldsOwners = new WeakMap<RequestHoldsAlias, AgentSession>();
+
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
-	registerLocalInferenceApi();
-	await loadRuntimeIdentity();
-	const extensionRoots = options.extensionRoots?.();
-	const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
-	const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
 	// Everything built here is the session's work, though the session's agent
-	// does not exist yet: an extension factory's timer, a backend's first
-	// request. It runs in holds that stand for the agent's context and are
-	// bound to it once the agent is built (see `RequestHoldsAlias`); a host
-	// that prepared session work before this call passes the holds it ran in.
+	// does not exist yet: a host callback's continuation, an extension factory's
+	// timer, a backend's first request. It runs in holds that stand for the
+	// agent's context and are bound to it once the agent is built (see
+	// `RequestHoldsAlias`); a host that prepared session work before this call
+	// passes the holds it ran in. They stand for one live session: a retry after
+	// a start-up that failed, or after its session was disposed, may reuse them.
 	const sessionHolds = options.startupHolds ?? new RequestHoldsAlias();
-	return await runWithRequestHolds(sessionHolds, () =>
-		withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options, sessionHolds)),
-	);
+	const owner = startupHoldsOwners.get(sessionHolds);
+	if (owner && !owner.isDisposed) throw new Error("These start-up holds already belong to another live session");
+	const result = await runWithRequestHolds(sessionHolds, async () => {
+		registerLocalInferenceApi();
+		await loadRuntimeIdentity();
+		const extensionRoots = options.extensionRoots?.();
+		const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
+		const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
+		return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options, sessionHolds));
+	});
+	startupHoldsOwners.set(sessionHolds, result.session);
+	return result;
 }
 
 async function createAgentSessionScoped(
