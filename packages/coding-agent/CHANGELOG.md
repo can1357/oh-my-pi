@@ -26,6 +26,7 @@
 - In the bash tool, `xargs` reports a command killed by a signal as GNU xargs does: `xargs: CMD: terminated by signal N`, no further commands, status 125
 - On macOS, starting a bash tool session no longer briefly sets pi's umask to 022, which could give files created at that moment the wrong permissions
 - In the bash tool, an executable script without a `#!` line started in the background with its input from a FIFO (`./script < fifo &`) runs as a bash script instead of failing with `Exec format error`
+- Fixed repeated completion notifications during active runs on OSC 7501 terminals, while preserving prompt navigation where OSC 7501 support is unconfirmed ([#17307](https://github.com/can1357/oh-my-pi/issues/17307))
 
 ## [18.16.0] - 2026-11-02
 
