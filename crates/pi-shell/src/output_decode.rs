@@ -380,10 +380,18 @@ impl LineDecoder {
 		!self.held.is_empty() && !self.tail_kept
 	}
 
-	/// Judges the held bytes as if the line ended here, keeping an incomplete
-	/// UTF-8 character at their end for its next bytes.
+	/// Judges the held bytes as if the line ended here, keeping back a
+	/// character still incomplete in their encoding for its next bytes: an
+	/// incomplete UTF-8 sequence when they are UTF-8 so far, otherwise a DBCS
+	/// lead byte (`81` in CP936, which is no UTF-8 prefix).
 	fn flush_complete(&mut self) -> String {
-		let end = self.held.len() - incomplete_utf8_tail(&self.held);
+		let utf8_tail = incomplete_utf8_tail(&self.held);
+		let keep = if str::from_utf8(&self.held[..self.held.len() - utf8_tail]).is_ok() {
+			utf8_tail
+		} else {
+			self.held.len() - complete_acp_len(self.codepage, &self.held, false)
+		};
+		let end = self.held.len() - keep;
 		let text = self.judge(&self.held[..end]);
 		self.held.drain(..end);
 		self.tail_kept = !self.held.is_empty();
@@ -760,6 +768,19 @@ mod tests {
 		assert_eq!(decoder.flush_line(), "");
 		assert!(!decoder.holds_line(), "a kept partial character must not re-arm the idle flush");
 		assert_eq!(decoder.push(b"\xb8\xad\n"), "中\n");
+
+		// `D6 D0` is 中; `81` begins 丂 (`81 40`) and is no UTF-8 prefix.
+		let mut decoder = CaptureDecoder::with_codepage(936);
+		assert_eq!(decoder.push(b"\xd6\xd0\x81"), "");
+		assert_eq!(decoder.flush_line(), "中");
+		assert!(!decoder.holds_line());
+		assert_eq!(decoder.push(b"\x40\n"), "丂\n");
+
+		// Valid UTF-8 is cut at UTF-8 boundaries: `AD` closes 中, though as
+		// GBK it would begin a character.
+		let mut decoder = CaptureDecoder::with_codepage(936);
+		assert_eq!(decoder.push(b"\xe4\xb8\xad"), "");
+		assert_eq!(decoder.flush_line(), "中");
 
 		let mut line = "é".as_bytes().to_vec();
 		line.resize(MAX_HELD_LINE - 1, b'a');
