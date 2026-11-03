@@ -6,6 +6,7 @@
 
 - Added the `supports-message-threads` compat axis (`supportsMessageThreads`), enabled for Claude 4.5 and newer on the first-party Anthropic provider
 - Added a standard Responses WebSocket capability rule for explicit opt-in through OMP settings or SDK preferences, disabled by default ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
+- Added `mistral-vibe-cli-latest`, the Mistral Vibe CLI's default model (reasoning, images, 256k window), to the `mistral` provider so a `/login mistral` Vibe sign-in can select the model its plan quota covers
 
 ## [18.16.0] - 2026-11-02
 

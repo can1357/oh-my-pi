@@ -22,6 +22,17 @@ provider "mistral" {
 			cost input=0.68 output=2.09 cache-read=0.07 cache-write=0
 			limits context=1000000
 		}
+		// The Mistral Vibe CLI's default model (mistralai/mistral-vibe,
+		// vibe/core/config/vibe_schema.py: alias "mistral-medium-3.5", 256k window,
+		// images, reasoning). A key from the `/login mistral` browser sign-in bills it
+		// against the plan's Vibe quota. List USD / 1M tokens: input $1.50, output $7.50,
+		// cached input $0.15.
+		model "mistral-vibe-cli-latest" name="Mistral Vibe CLI" {
+			reasoning #true
+			input "text" "image"
+			cost input=1.5 output=7.5 cache-read=0.15 cache-write=0
+			limits context=262144 max-tokens=262144
+		}
 	}
 
 	// Mistral's chat-completions endpoint derives cache affinity from the
