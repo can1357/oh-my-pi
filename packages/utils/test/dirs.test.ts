@@ -9,6 +9,7 @@ import {
 	getLogPath,
 	getProjectDir,
 	localDay,
+	relativePathWithinRoot,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils/dirs";
 
@@ -58,6 +59,21 @@ describe("project directory state", () => {
 			expect(await directoryIsMissing(path.join(os.tmpdir(), "blocked"))).toBe(false);
 		} finally {
 			stat.mockRestore();
+		}
+	});
+
+	// `isOmpOwnedPath` reads this relative path to decide whether a destination
+	// sits in a tree omp filled from elsewhere, so the empty and outside cases
+	// are the difference between following a symlink and refusing to.
+	it("reports containment as the path below the root, and nothing for a path outside it", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-dirs-containment-"));
+		try {
+			fs.mkdirSync(path.join(root, "child", "leaf"), { recursive: true });
+			expect(relativePathWithinRoot(root, path.join(root, "child", "leaf"))).toBe(path.join("child", "leaf"));
+			expect(relativePathWithinRoot(root, root)).toBeNull();
+			expect(relativePathWithinRoot(root, path.dirname(root))).toBeNull();
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 

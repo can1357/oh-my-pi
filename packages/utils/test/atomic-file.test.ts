@@ -353,4 +353,24 @@ describe("classification does not depend on where omp happens to be pointed", ()
 		// The config root itself is not a nested project directory.
 		expect(isOmpOwnedPath(path.join(getBaseConfigRoot(), "agent"))).toBe(true);
 	});
+
+	test("a project config directory is found by its own name, which PI_CONFIG_DIR does not move", () => {
+		const previous = process.env.PI_CONFIG_DIR;
+		process.env.PI_CONFIG_DIR = ".myomp";
+		try {
+			setAgentDir(owned);
+			expect(isOmpOwnedPath(path.join(getBaseConfigRoot(), "trees-b", "pr-1", ".omp", "mcp.json"))).toBe(false);
+		} finally {
+			if (previous === undefined) delete process.env.PI_CONFIG_DIR;
+			else process.env.PI_CONFIG_DIR = previous;
+			setAgentDir(owned);
+		}
+	});
+
+	test("a checkout under an agent directory outside the config root is foreign too", () => {
+		// `owned` is this test's agent dir, outside the config root; the final
+		// containment check used to reach it without the shape rule.
+		expect(isOmpOwnedPath(path.join(owned, "trees-b", "pr-1", ".omp", "mcp.json"))).toBe(false);
+		expect(isOmpOwnedPath(path.join(owned, "agent", "config.yml"))).toBe(true);
+	});
 });

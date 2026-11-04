@@ -618,30 +618,33 @@ export function isOmpOwnedPath(candidate: string): boolean {
 		const value = process.env[envVar];
 		if (value) configRoots.push(path.join(value, APP_NAME));
 	}
-	const owningRoot = configRoots.find(root => pathIsWithin(root, target));
-	if (owningRoot !== undefined) {
-		const segments = (relativePathWithinRoot(owningRoot, target) ?? "").split(path.sep);
-		// A nested `.omp` is some project's config directory, and the project tree
-		// around it came from a checkout. Which directory holds that checkout is
-		// not knowable from here — `worktree.base` is per project while
-		// `getWorktreesDir()` answers for whichever project this process last set
-		// — so the shape is what decides, not the location.
-		if (segments.includes(getConfigDirName())) return false;
-		// The producers above answer for the ACTIVE profile. Another profile keeps
-		// the same trees under its own root, which no producer names, so the names
-		// are matched one level into a config root too — anchored, and only here,
-		// because an agent directory moved outside the config root holds none of
-		// them and a directory the user named `plugins/cache` there is theirs.
-		const offset = segments[0] === "profiles" && segments.length > 2 ? 2 : 0;
-		const head = segments[offset];
-		if (head === "wt" || head === "remote" || head === "skillshare") return false;
-		if (head === "puppeteer" || head === "webcache") return false;
-		if (head === "plugins" && (segments[offset + 1] === "cache" || segments[offset + 1] === "node_modules")) {
-			return false;
-		}
-		if (head === "cache" && segments[offset + 1] === "fastembed-runtime") return false;
+	const owningConfigRoot = configRoots.find(root => pathIsWithin(root, target));
+	const owningRoot = owningConfigRoot ?? (pathIsWithin(dirs.agentDir, target) ? dirs.agentDir : undefined);
+	if (owningRoot === undefined) return false;
+	const segments = (relativePathWithinRoot(owningRoot, target) ?? "").split(path.sep);
+	// A nested project config directory means the tree around it came from a
+	// checkout. Which directory holds that checkout is not knowable from here —
+	// `worktree.base` is per project while `getWorktreesDir()` answers for
+	// whichever project this process last set — so the shape decides, not the
+	// location, and it decides under an agent directory moved out of the config
+	// root too. The name is the constant one a project uses, which `PI_CONFIG_DIR`
+	// renames the config root by but does not move.
+	if (segments.includes(CONFIG_DIR_NAME)) return false;
+	// The producers above answer for the ACTIVE profile. Another profile keeps the
+	// same trees under its own root, which no producer names, so the names are
+	// matched one level into a config root too — anchored, and only there, because
+	// an agent directory moved outside the config root holds none of them and a
+	// directory the user named `plugins/cache` there is theirs.
+	if (owningConfigRoot === undefined) return true;
+	const offset = segments[0] === "profiles" && segments.length > 2 ? 2 : 0;
+	const head = segments[offset];
+	if (head === "wt" || head === "remote" || head === "skillshare") return false;
+	if (head === "puppeteer" || head === "webcache") return false;
+	if (head === "plugins" && (segments[offset + 1] === "cache" || segments[offset + 1] === "node_modules")) {
+		return false;
 	}
-	return configRoots.some(root => pathIsWithin(root, target)) || pathIsWithin(dirs.agentDir, target);
+	if (head === "cache" && segments[offset + 1] === "fastembed-runtime") return false;
+	return true;
 }
 
 /** Set the coding agent directory. Creates a fresh resolver, invalidating all cached paths. */

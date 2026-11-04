@@ -1,10 +1,10 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { hasFsCode, isEnoent, toError, untilAborted } from "@oh-my-pi/pi-utils";
+import { isEnoent, toError, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Browser, CDPSession, Page } from "puppeteer-core";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { replaceFileAcrossDevices, replaceFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
+import { replaceFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import { devtoolsFrameId } from "./frames";
 
 /** Completed download metadata returned by tab download helpers. */
@@ -246,13 +246,12 @@ async function entryKind(file: string): Promise<"file" | "missing" | "other"> {
 	}
 }
 
-/** Move a completed download into a tab's folder, replacing a same-named file as Chromium's own saves do. */
+/**
+ * Move a completed download into a tab's folder, replacing a same-named file as
+ * Chromium's own saves do. `replaceFileAtomically` handles the cross-device case
+ * itself, so there is nothing left for this caller to catch.
+ */
 async function moveDownload(source: string, target: string): Promise<void> {
 	await fs.mkdir(path.dirname(target), { recursive: true });
-	try {
-		await replaceFileAtomically(source, target);
-	} catch (error) {
-		if (!hasFsCode(error, "EXDEV")) throw error;
-		await replaceFileAcrossDevices(source, target);
-	}
+	await replaceFileAtomically(source, target);
 }
