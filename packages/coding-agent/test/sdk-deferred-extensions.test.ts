@@ -62,10 +62,11 @@ describe("startup-deferred extensions", () => {
 			withShortcut,
 			`export default function(pi) { pi.registerShortcut("ctrl+shift+y", { handler: () => {} }); }`,
 		);
-		// The first frame replays the transcript with reply renderers, and link schemes reach the
-		// markdown renderer at UI init: each alone keeps an extension eager.
+		// The first frame replays the transcript with message and reply renderers, and link schemes
+		// reach the markdown renderer at UI init: each alone keeps an extension eager.
 		const drawing = {
 			"link-scheme.ts": `pi.registerLinkScheme("demo-link");`,
+			"message-renderer.ts": `pi.registerMessageRenderer("demo-message", () => undefined);`,
 			"text-renderer.ts": `pi.registerAssistantTextRenderer(() => undefined);`,
 			"thinking-renderer.ts": `pi.registerAssistantThinkingRenderer(() => undefined);`,
 		};
