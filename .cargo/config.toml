@@ -5,6 +5,10 @@
 # Ninja; macOS dev hosts need `brew install ninja`.
 [env]
 CMAKE_GENERATOR = "Ninja"
+# PCRE2 compiled in, as the shipped addon builds it
+# (`packages/natives/scripts/build-bindings.ts`): a system libpcre2 would make
+# `obash` load a Homebrew dylib at every start and depend on it.
+PCRE2_SYS_STATIC = "1"
 # Store each crate's metadata only in its .rmeta instead of duplicating it into
 # every rlib. Measured on a reqwest-sized graph: 196 MB -> 130 MB target dir at
 # identical build times. Requires the pinned nightly (rust-toolchain.toml).

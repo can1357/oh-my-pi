@@ -962,7 +962,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 			settings: Settings.isolated({ "startup.quiet": true }),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, eventBus);
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, eventBus);
 	});
 
 	afterEach(async () => {

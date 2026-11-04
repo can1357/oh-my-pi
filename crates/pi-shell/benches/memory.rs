@@ -1,5 +1,5 @@
 //! Memory rows and allocation counts, with a counting global
-//! allocator (mimalloc underneath, as `obash`):
+//! allocator (system allocator underneath, as `obash`):
 //!
 //! - **shell**: live bytes the `Shell` owns after `Shell::create` + `:`,
 //!   measured as the bytes its drop frees (the shared engine's unit cache and
@@ -35,7 +35,7 @@ mod common;
 mod workloads;
 
 use std::{
-	alloc::{GlobalAlloc, Layout},
+	alloc::{GlobalAlloc, Layout, System},
 	fmt::Write as _,
 	sync::{
 		Arc,
@@ -81,10 +81,10 @@ fn sizes() -> [usize; CLASSES] {
 	std::array::from_fn(|c| SIZES[c].load(Ordering::Relaxed))
 }
 
-/// mimalloc with counters.
-struct Counting(mimalloc::MiMalloc);
+/// System allocator with counters.
+struct Counting(System);
 
-// SAFETY: every method forwards to mimalloc with its arguments unchanged and
+// SAFETY: every method forwards to System with its arguments unchanged and
 // returns its result; the counter updates never allocate.
 unsafe impl GlobalAlloc for Counting {
 	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -141,7 +141,7 @@ unsafe impl GlobalAlloc for Counting {
 }
 
 #[global_allocator]
-static GLOBAL: Counting = Counting(mimalloc::MiMalloc);
+static GLOBAL: Counting = Counting(System);
 
 /// The counters at one point.
 #[derive(Clone, Copy)]

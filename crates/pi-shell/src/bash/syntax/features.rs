@@ -66,6 +66,10 @@ impl Features {
 	pub const ZSH_SHORT_REPEAT: Self = Self(1 << 8);
 	/// zsh `shglob`.
 	pub const ZSH_SH_GLOB: Self = Self(1 << 6);
+	/// zsh `multibyte` in a UTF-8 locale without `posixidentifiers`:
+	/// identifiers (assignment words, `for` names) admit alphanumeric
+	/// non-ASCII characters.
+	pub const ZSH_WIDE_IDENT: Self = Self(1 << 21);
 
 	/// Raw bits, for serialization.
 	pub const fn bits(self) -> u32 {
@@ -74,7 +78,7 @@ impl Features {
 
 	/// Features from raw bits; unknown bits are dropped.
 	pub const fn from_bits(bits: u32) -> Self {
-		Self(bits & 0x1f_ffff)
+		Self(bits & 0x3f_ffff)
 	}
 
 	/// Whether every switch in `other` is on.
@@ -144,6 +148,12 @@ pub trait AliasLookup {
 	/// zsh grammar: whether reserved word `word` was disabled (`disable
 	/// -r`), so it parses as a plain word.
 	fn reserved_disabled(&self, _word: &[u8]) -> bool {
+		false
+	}
+
+	/// zsh grammar: whether a loaded module added reserved word `word`
+	/// (zsh/param/private's `private`, read like `typeset`).
+	fn module_reserved(&self, _word: &[u8]) -> bool {
 		false
 	}
 }

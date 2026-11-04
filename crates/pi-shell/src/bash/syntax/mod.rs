@@ -53,6 +53,7 @@ pub use crate::bash::syntax::{
 	print::{PrintStyle, command_string, print, print_list},
 	span::{NodeId, Pos, Span},
 };
+pub(crate) use crate::bash::syntax::util::ansi_decode_all;
 
 /// Parse a whole source without aliases (tools, visualizers, tests).
 ///

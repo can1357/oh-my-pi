@@ -14,7 +14,7 @@ use crate::bash::{
 
 /// What `kill` sends.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Send {
+pub(super) enum Send {
 	/// Signal 0: check that the target exists, deliver nothing.
 	Probe,
 	/// A signal.
@@ -22,7 +22,7 @@ enum Send {
 }
 
 impl Send {
-	const fn signal(self) -> Option<Signal> {
+	pub(super) const fn signal(self) -> Option<Signal> {
 		match self {
 			Self::Probe => None,
 			Self::Signal(sig) => Some(sig),
@@ -39,9 +39,11 @@ fn parse_signal(spec: &[u8], platform: Platform) -> Option<Send> {
 }
 
 /// Why a target could not be signalled.
-enum TargetError {
+pub(super) enum TargetError {
 	/// `%n` names no live job.
 	NoSuchJob,
+	/// zsh `getjob` already reported the bad spec.
+	Reported,
 	/// Neither a number nor a job spec.
 	NotAnId,
 	/// A vpid that is not a child of this shell.
@@ -107,7 +109,7 @@ pub fn kill(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	}
 	let mut status = 0;
 	for arg in &args[i..] {
-		match target(ctx, arg, send) {
+		match target(ctx, arg, send, None) {
 			Ok(Some(target)) => {
 				if let Some(sig) = send.signal() {
 					ControlHandle(ctx.k.ctl.clone()).signal(target, sig);
@@ -116,6 +118,10 @@ pub fn kill(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			Ok(None) => {},
 			Err(err) => {
 				let msg = match err {
+					TargetError::Reported => {
+						status = 1;
+						continue;
+					},
 					TargetError::NoSuchJob => format!("{}: no such job", arg.as_bstr()),
 					TargetError::NotAnId => {
 						// bash `sh_badpid`.
@@ -136,10 +142,18 @@ pub fn kill(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 
 /// Resolve one operand: a virtual process to signal on the bus
 /// (`Ok(Some)`), an OS process the host signalled itself (`Ok(None)`), or
-/// an error.
-fn target(ctx: &mut Ctx<'_, '_>, arg: &[u8], send: Send) -> Result<Option<SigTarget>, TargetError> {
+/// an error. `zsh`: zsh dialect, with `POSIX_BUILTINS`.
+pub(super) fn target(
+	ctx: &mut Ctx<'_, '_>,
+	arg: &[u8],
+	send: Send,
+	zsh: Option<bool>,
+) -> Result<Option<SigTarget>, TargetError> {
 	if arg.starts_with(b"%") {
-		let number = super::jobs::spec(ctx, arg).map_err(|_| TargetError::NoSuchJob)?;
+		let number = match zsh {
+			Some(posix) => super::zsh_jobs::getjob(ctx, arg, posix).ok_or(TargetError::Reported)?,
+			None => super::jobs::spec(ctx, arg).map_err(|_| TargetError::NoSuchJob)?,
+		};
 		let job = ctx.vp.jobs.get_mut(number).ok_or(TargetError::NoSuchJob)?;
 		if matches!(job.state, JobState::Done(_))
 			|| matches!(
@@ -169,7 +183,11 @@ fn target(ctx: &mut Ctx<'_, '_>, arg: &[u8], send: Send) -> Result<Option<SigTar
 		.map(|p| ctx.vp.vpid_of(p));
 	let live = named.filter(|&v| {
 		let st = ctx.k.proc_state(ctx.cx.store, v);
-		(ctx.vp.jobs.by_vpid(v).is_some() || st == Some(crate::bash::vm::ProcState::Running))
+		// `$!` of a job disowned before the scheduler adopted it is known
+		// only by `$!` (as `wait`'s `is_child`).
+		(ctx.vp.jobs.by_vpid(v).is_some()
+			|| st == Some(crate::bash::vm::ProcState::Running)
+			|| (st.is_none() && ctx.vp.last_bg.is(v)))
 			&& !matches!(st, Some(crate::bash::vm::ProcState::Exited(_)))
 	});
 	match u32::try_from(pid) {

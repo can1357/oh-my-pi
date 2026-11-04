@@ -4,29 +4,64 @@
 
 ### Added
 
+- Added opt-in auto-update (`update.auto`, offered by a new setup wizard step): a launch that finds a newer release installs it in the background through whatever installed omp (standalone binary, Homebrew, mise, bun, npm), shows the version and download progress beside the welcome banner's version, and the next launch runs it. Quitting mid-update does not interrupt it. Skipped under Tern, which updates its omp itself, and on Nix and source checkouts
+- `omp update` now refuses to start while another update (including a background auto-update) is installing, instead of running two installers at once
+- Added `none` to `edit.mode` (and `PI_EDIT_VARIANT`): it removes the `edit` tool and keeps `bash` available even when `bash.enabled` is off
 - Added the default-off `providers.openaiResponsesWebsockets` setting for catalog-supported standard Responses models, independently of Codex; model/request `false` always disables it ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
 - Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 - Added a `cache` status-line segment (in the `full` and `nerd` presets) showing before you send whether the next message reads the prompt cache; hover it in Tern or open `/session` for why not and how much it re-sends ([#12677](https://github.com/can1357/oh-my-pi/issues/12677)) ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
 - Added a `:level` suffix to `^` model tags, such as `^openai-codex/gpt-6-astra:high`, that sets the tagged subagent's initial effort. Typing `:` after a mention lists the model's supported levels. The task tool's `effort` hint and `task.maxEffort` do not override the tagged level, and a per-call `model` for that agent fails as a conflict ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
+- Added `omp zsh`, `omp bash` and `omp sh`: run omp's built-in shell engine as that shell in your terminal. Every argument goes to the shell unchanged (`omp zsh -c 'echo $ZSH_NAME'`, `omp zsh ./script.zsh a b`, `printf 'echo hi\n' | omp zsh`, `omp bash --help`), and `omp` exits with the shell's status. Ctrl-C, `kill` and descriptors you pass (`3>file`) work as with the real shells
+- `omp zsh` keeps zsh's history: it reads and writes your `$HISTFILE` in zsh's own format and locking (shared with real zsh, `extendedhistory`, `sharehistory`, `incappendhistory` and the other history options), expands `!!`, `!$`, `^old^new` and the rest of zsh's history syntax, runs `zshaddhistory`, and has full `fc`, `history`, `r`, `print -s`, `$history` and `HISTCMD`; `omp bash` gets `history -a -n -r -w -p`, `HISTTIMEFORMAT`, `HISTIGNORE`, `fc` editing and `!` expansion
+- `omp zsh` runs interactively like zsh: zsh's line editor (emacs and vi keymaps, `bindkey`, `zle -N` widgets, `vared`), completion (`compinit`, `compdef`, `menu select`), job control (Ctrl-Z, `fg`, `bg`, `jobs`), prompts with `precmd`/`preexec` hooks, and the zsh modules plugins load (`zsh/zpty`, `zsh/system`, `zsh/terminfo`, `zsh/pcre`, `zsh/datetime`, …), so oh-my-zsh and powerlevel10k configs start
 - RPC `bash` results now say when the output was cut: `elidedBytes`/`elidedLines` for a dropped middle, and `columnTruncatedLines`, `columnTruncatedRange`, `columnDroppedBytes` and `columnMax` for lines cut to the column cap. The Go, Python and Rust SDKs decode them ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
 
 - JSON query truncation notices now report the 50KB read budget instead of the bytes shown ([#18022](https://github.com/can1357/oh-my-pi/pull/18022) by [@eggpeat](https://github.com/eggpeat))
+- `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
+- Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset
+- The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm
+- A running session no longer falls back to a setting's default when `config.yml` gains a value its omp version doesn't know (such as an `edit.mode` a newer omp added); it keeps the value it had, so the edit doesn't change its tools and throw away every open session's prompt cache
+- Forcing a queued message with Enter now resumes the agent even when interruption races tool completion or model preparation
+- `.`/`c` continue no longer fails with "Nothing to resume" in a session started by a `/skill:` command
 - Long bash output cut in the middle no longer splits a line at the `[…N ln elided…]` marker, and its "Showing lines …" notice now names the lines actually shown, ending at the output's real last line ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
 - A bash command that prints nothing and succeeds now returns `(no output, exit code 0)` instead of a bare `(no output)`, so an empty diff or search no longer reads like a failed command ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
+- The first frame of a new session always shows your configured default model and the thinking level a new session starts at; a session launched with `--model`, a model switched mid-session, or a project-only default no longer leaks into other folders' first frame
 - Added `tui.motion` (`full` / `reduced` / `none`, also `--motion` and `PI_MOTION`), one switch over spinners, the thinking pulse, shimmer and the status-line blink/fade for many-pane or reduced-motion use; a `tui.spinnerInterval` you set still wins over the preset ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - Added `tui.spinnerInterval` (also `--spinner-interval` and `PI_SPINNER_INTERVAL`) to slow every spinner, the terminal title included, or pin them static with `0` ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Skills listed in the system prompt get their compressed routing hint instead of a cut-off description when the hint runs past 12 words but fits 160 characters; skills an earlier version gave up on are compressed again
+- Uncached skill descriptions no longer send background model requests after the session-tree cost cap is reached, and their completed spend counts toward the cap ([#18016](https://github.com/can1357/oh-my-pi/issues/18016))
 - Added `tui.maxFps` (also `--max-fps` and `PI_MAX_FPS`) to cap how often the TUI repaints; keystroke echo keeps 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ### Changed
 
+- Local Whisper speech-to-text and the local tiny model install their Transformers.js runtime on first use instead of with omp, so installs are smaller; first use needs network access
+- Local Parakeet and Nemotron speech runtimes now install on first use in source and npm installs too, reducing initial install size; first use needs network access
+- `wait` with nothing new now returns after 5s instead of blocking up to 30 minutes, the window growing 5s → 10s → 30s → 1m → 5m across back-to-back waits (5s again after news or a minute away); from the second idle wait on it tells the agent to get on with work that does not need the result instead of waiting
+- In a Tern that types streamed text out itself, omp sends assistant text and thinking as they arrive instead of pacing them, so streaming costs omp less CPU; other terminals keep omp's smooth reveal
+- Source-checkout sessions start faster and record the commit and branch without hashing uncommitted changes; existing build stamps remain readable.
+- The agent's `bash` tool never touches your shell history or completion: it records no history, `fc -R/-W` and `history -r/-w` fail, it has no line editor, `compinit`/`zle`/`bindkey` modules and bash's `complete`/`compgen`/`bind` are unavailable, and a `zsh -i` or `bash -i` it starts skips `.zshrc`/`.bashrc`
+
 - A CLI flag, session-only settings write or SDK override now outranks the setting's environment variable, so `PI_MOTION=none omp --motion full` runs with full motion; env vars still outrank every settings file
 - Updated abort error handling for JS and Python tools to propagate original abort reasons
+- Shaped tool results cut by Spotlight end with a short `[cut: artifact://N]` line instead of a sentence explaining the gaps, and cut reads, outlined code and folded docs end with no such line; the system prompt explains the gaps and folds once
 - Subagents now move into worker threads when many run at once, so their model streaming and tool work no longer competes with the TUI: up to 3 concurrent subagents run on the main thread, 4 add a worker, and each doubling (8, 16, 32) adds one more, up to the new `task.workerThreads` (default 4; `0` keeps every subagent on the main thread). Each subagent goes where the fewest are running; a needed worker starts while the model is still streaming the spawning call and exits a minute after its last subagent finishes or parks. IRC, the Agent Hub and focus view, `agent://`/`history://`/`proc://`, parking and revival, async jobs, cost caps, account pools and OAuth refresh, runtime model providers, MCP, memory, telemetry, `PI_PROXY` and logs keep working across the thread boundary. If omp's own files change while it runs (a source checkout or an in-place update), new subagents run on the main thread until omp restarts
+- Interactive startup reaches the first frame ~75ms sooner with skills listed in the system prompt: background skill-description compression now starts after the first frame, and resolves its model once per batch of uncached skills instead of once per skill
+- Startup release notes ("What's New") now appear just after the first interactive frame instead of being resolved before the session starts; a launch quit before that frame keeps them for the next start
+- `wait` reports jobs that finish within 1.5 s of each other in one result instead of one wait call per job
+- Broadcasts and progress notes from other agents no longer cut short a `wait` (or interrupt running bash/eval); they arrive after the wait returns. A direct message still ends the wait, and the result now carries every message queued by then instead of one per call
+- A `wait` for a reply to a message you sent gives up after 5 minutes instead of 30, and returns at once when the agent asked is waiting on the user (`ask`, an approval)
+- Subagent and task prompts no longer tell agents to message or broadcast before editing shared files; subagents message only to get unblocked and wait only on their own jobs
+- Subagents can no longer broadcast: `write agent://all` from a subagent fails and points it at a direct `agent://<id>` message, and subagent prompts no longer advertise `agent://all`. The main agent can still broadcast
+
+### Removed
+
+- Removed the Spotlight experiment's edit gate (`spotlight.experiment.editGate`, `PI_SPOTLIGHT_EDIT_GATE`): reads of code files are cut like any other read instead of half of them being kept whole ("spotlight: kept whole for editing")
 
 ### Fixed
+- Spotlight cuts `grep`, `find` and `glob` results and filtered bash output (`| grep`, `sed -n`, `awk`) past ~3.9k chars like any other result instead of showing them whole up to ~12k, and collapses lines already shown even when the call's intent names them
 - Fixed a second `ask` note on a later single-select question reopening and replacing the previous question's note ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
 
 - Retrying an aborted turn keeps the unsent composer draft instead of clearing it ([#17977](https://github.com/can1357/oh-my-pi/pull/17977) by [@Shadorain](https://github.com/Shadorain))
