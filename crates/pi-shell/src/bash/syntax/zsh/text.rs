@@ -667,15 +667,21 @@ impl Text {
 					matches!(x, CondExpr::Not(_) | CondExpr::And(..) | CondExpr::Or(..))
 				});
 			},
-			CondExpr::And(a, b) => {
-				self.cond_paren(a, |x| matches!(x, CondExpr::Or(..)));
-				self.s(b" && ");
-				self.cond_paren(b, |x| matches!(x, CondExpr::Or(..)));
+			CondExpr::And(terms) => {
+				for (i, term) in terms.iter().enumerate() {
+					if i > 0 {
+						self.s(b" && ");
+					}
+					self.cond_paren(term, |x| matches!(x, CondExpr::Or(..)));
+				}
 			},
-			CondExpr::Or(a, b) => {
-				self.cond_paren(a, |x| matches!(x, CondExpr::And(..)));
-				self.s(b" || ");
-				self.cond_paren(b, |x| matches!(x, CondExpr::And(..)));
+			CondExpr::Or(terms) => {
+				for (i, term) in terms.iter().enumerate() {
+					if i > 0 {
+						self.s(b" || ");
+					}
+					self.cond_paren(term, |x| matches!(x, CondExpr::And(..)));
+				}
 			},
 			CondExpr::Unary { op, arg } => {
 				self.s(op);

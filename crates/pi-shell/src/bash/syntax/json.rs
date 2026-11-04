@@ -55,7 +55,16 @@ fn write_num(out: &mut String, n: u64) {
 	out.push_str(n.format_into(&mut core::fmt::NumBuffer::new()));
 }
 
-fn write(out: &mut String, v: &V, pretty: bool, depth: usize) {
+// Consume the value tree as we write it. Logical conditions retain the
+// external binary JSON shape, so both writing and dropping that shape must
+// use an explicit stack rather than the Rust call stack.
+fn write(out: &mut String, v: V, pretty: bool, depth: usize) {
+	enum Step {
+		Value(V, usize),
+		Entry(usize, bool),
+		Key(&'static str),
+		End(char, usize, bool),
+	}
 	let nl = |out: &mut String, d: usize| {
 		if pretty {
 			out.push('\n');
@@ -64,44 +73,52 @@ fn write(out: &mut String, v: &V, pretty: bool, depth: usize) {
 			}
 		}
 	};
-	match v {
-		V::Null => out.push_str("null"),
-		V::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-		V::Num(n) => write_num(out, *n),
-		V::Str(b) => write_str(out, b),
-		V::Arr(items) => {
-			out.push('[');
-			for (i, it) in items.iter().enumerate() {
-				if i > 0 {
+	let mut pending = vec![Step::Value(v, depth)];
+	while let Some(step) = pending.pop() {
+		match step {
+			Step::Entry(depth, comma) => {
+				if comma {
 					out.push(',');
 				}
-				nl(out, depth + 1);
-				write(out, it, pretty, depth + 1);
-			}
-			if !items.is_empty() {
 				nl(out, depth);
-			}
-			out.push(']');
-		},
-		V::Obj(fields) => {
-			out.push('{');
-			for (i, (k, it)) in fields.iter().enumerate() {
-				if i > 0 {
-					out.push(',');
-				}
-				nl(out, depth + 1);
-				write_str(out, k.as_bytes());
+			},
+			Step::Key(key) => {
+				write_str(out, key.as_bytes());
 				out.push(':');
 				if pretty {
 					out.push(' ');
 				}
-				write(out, it, pretty, depth + 1);
-			}
-			if !fields.is_empty() {
-				nl(out, depth);
-			}
-			out.push('}');
-		},
+			},
+			Step::End(close, depth, nonempty) => {
+				if nonempty {
+					nl(out, depth);
+				}
+				out.push(close);
+			},
+			Step::Value(value, depth) => match value {
+				V::Null => out.push_str("null"),
+				V::Bool(b) => out.push_str(if b { "true" } else { "false" }),
+				V::Num(n) => write_num(out, n),
+				V::Str(b) => write_str(out, &b),
+				V::Arr(items) => {
+					out.push('[');
+					pending.push(Step::End(']', depth, !items.is_empty()));
+					for (i, item) in items.into_iter().enumerate().rev() {
+						pending.push(Step::Value(item, depth + 1));
+						pending.push(Step::Entry(depth + 1, i > 0));
+					}
+				},
+				V::Obj(fields) => {
+					out.push('{');
+					pending.push(Step::End('}', depth, !fields.is_empty()));
+					for (i, (key, item)) in fields.into_iter().enumerate().rev() {
+						pending.push(Step::Value(item, depth + 1));
+						pending.push(Step::Key(key));
+						pending.push(Step::Entry(depth + 1, i > 0));
+					}
+				},
+			},
+		}
 	}
 }
 
@@ -166,11 +183,11 @@ pub fn to_json(src: &[u8], program: &Program, dialect: JsonDialect, offsets: Off
 	match dialect {
 		JsonDialect::Native => {
 			let v = native::program(&map, program);
-			write(&mut out, &v, false, 0);
+			write(&mut out, v, false, 0);
 		},
 		JsonDialect::Shfmt => {
 			let v = shfmt::program(&map, src, program);
-			write(&mut out, &v, true, 0);
+			write(&mut out, v, true, 0);
 			out.push('\n');
 		},
 	}
@@ -546,11 +563,18 @@ mod native {
 			CondExpr::Word(w) => V::Obj(vec![("type", s(b"word")), ("word", word(m, w))]),
 			CondExpr::Not(x) => V::Obj(vec![("type", s(b"not")), ("expr", cond(m, x))]),
 			CondExpr::Group(x) => V::Obj(vec![("type", s(b"group")), ("expr", cond(m, x))]),
-			CondExpr::And(a, b) => {
-				V::Obj(vec![("type", s(b"and")), ("lhs", cond(m, a)), ("rhs", cond(m, b))])
-			},
-			CondExpr::Or(a, b) => {
-				V::Obj(vec![("type", s(b"or")), ("lhs", cond(m, a)), ("rhs", cond(m, b))])
+			CondExpr::And(terms) | CondExpr::Or(terms) => {
+				let kind: &[u8] = if matches!(e, CondExpr::And(_)) {
+					b"and"
+				} else {
+					b"or"
+				};
+				let (last, rest) = terms.split_last().expect("logical chain has operands");
+				let mut rhs = cond(m, last);
+				for lhs in rest.iter().rev() {
+					rhs = V::Obj(vec![("type", s(kind)), ("lhs", cond(m, lhs)), ("rhs", rhs)]);
+				}
+				rhs
 			},
 		}
 	}
@@ -1684,23 +1708,28 @@ mod shfmt {
 						("X", self.test(x)),
 					])
 				},
-				CondExpr::And(a, b) | CondExpr::Or(a, b) => {
-					let op: &[u8] = if matches!(e, CondExpr::And(..)) {
+				CondExpr::And(terms) | CondExpr::Or(terms) => {
+					let op: &[u8] = if matches!(e, CondExpr::And(_)) {
 						b"&&"
 					} else {
 						b"||"
 					};
-					let (alo, ahi) = test_span(a);
-					let (_, bhi) = test_span(b);
-					V::Obj(vec![
-						("Type", s(b"BinaryTest")),
-						("Pos", p(alo)),
-						("End", p(bhi)),
-						("OpPos", p(self.find(ahi, op))),
-						("Op", s(op)),
-						("X", self.test(a)),
-						("Y", self.test(b)),
-					])
+					let (last, rest) = terms.split_last().expect("logical chain has operands");
+					let (_, end) = test_span(last);
+					let mut rhs = self.test(last);
+					for lhs in rest.iter().rev() {
+						let (lo, hi) = test_span(lhs);
+						rhs = V::Obj(vec![
+							("Type", s(b"BinaryTest")),
+							("Pos", p(lo)),
+							("End", p(end)),
+							("OpPos", p(self.find(hi, op))),
+							("Op", s(op)),
+							("X", self.test(lhs)),
+							("Y", rhs),
+						]);
+					}
+					rhs
 				},
 			}
 		}
@@ -2288,7 +2317,10 @@ mod shfmt {
 				let (a, b) = test_span(x);
 				(a.saturating_sub(2), b + 2)
 			},
-			CondExpr::And(a, b) | CondExpr::Or(a, b) => (test_span(a).0, test_span(b).1),
+			CondExpr::And(terms) | CondExpr::Or(terms) => (
+				test_span(terms.first().expect("logical chain has operands")).0,
+				test_span(terms.last().expect("logical chain has operands")).1,
+			),
 		}
 	}
 }

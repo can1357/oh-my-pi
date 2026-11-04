@@ -42,6 +42,19 @@ fn first_cmd(src: &[u8]) -> Command {
 		.cmd
 }
 
+#[test]
+fn long_conditional_chains_preserve_zsh_function_text() {
+	for op in [" && ", " || "] {
+		let src = format!("f() {{ [[ {} ]] }}", vec!["a"; 100_000].join(op));
+		let CommandKind::FuncDef(function) = first_cmd(src.as_bytes()).kind else {
+			panic!("function expected")
+		};
+		let text = function_text(b"f", &function);
+		let expected = format!("f () {{\n\t[[ {} ]]\n}}", vec!["-n a"; 100_000].join(op));
+		assert_eq!(text, expected.as_bytes());
+	}
+}
+
 fn simple(src: &[u8]) -> Simple {
 	match first_cmd(src).kind {
 		CommandKind::Simple(s) => s,
@@ -320,11 +333,8 @@ fn conditions_arith_time_coproc_and_separators() {
 	let CommandKind::Cond(cond) = first_cmd(b"[[ -o opt && $a == b* || ! -f x ]]").kind else {
 		panic!()
 	};
-	let CondExpr::Or(lhs, rhs) = cond else {
-		panic!()
-	};
-	assert!(matches!(*lhs, CondExpr::And(..)));
-	assert!(matches!(*rhs, CondExpr::Not(_)));
+	let CondExpr::Or(terms) = cond else { panic!() };
+	assert!(matches!(terms.as_slice(), [CondExpr::And(_), CondExpr::Not(_)]));
 	let CommandKind::Cond(CondExpr::Unary { op, .. }) = first_cmd(b"[[ a ]]").kind else {
 		panic!()
 	};

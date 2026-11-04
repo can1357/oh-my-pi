@@ -394,21 +394,21 @@ impl<'x, P: Primaries + ?Sized> Test<'x, P> {
 	}
 
 	fn or(&mut self) -> T<bool> {
-		let v = self.and()?;
-		if self.pos < self.argc && self.arg(self.pos) == b"-o" {
+		let mut v = self.and()?;
+		while self.pos < self.argc && self.arg(self.pos) == b"-o" {
 			self.advance(false)?;
-			let r = self.or()?;
-			return Ok(v || r);
+			let r = self.and()?;
+			v |= r;
 		}
 		Ok(v)
 	}
 
 	fn and(&mut self) -> T<bool> {
-		let v = self.term()?;
-		if self.pos < self.argc && self.arg(self.pos) == b"-a" {
+		let mut v = self.term()?;
+		while self.pos < self.argc && self.arg(self.pos) == b"-a" {
 			self.advance(false)?;
-			let r = self.and()?;
-			return Ok(v && r);
+			let r = self.term()?;
+			v &= r;
 		}
 		Ok(v)
 	}

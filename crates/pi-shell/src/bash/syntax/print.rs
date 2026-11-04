@@ -717,15 +717,18 @@ impl<'a> Bp<'a> {
 				self.cond(inner);
 				self.put(b" )");
 			},
-			CondExpr::And(a, b) => {
-				self.cond(a);
-				self.put(b" && ");
-				self.cond(b);
-			},
-			CondExpr::Or(a, b) => {
-				self.cond(a);
-				self.put(b" || ");
-				self.cond(b);
+			CondExpr::And(terms) | CondExpr::Or(terms) => {
+				let op: &[u8] = if matches!(e, CondExpr::And(_)) {
+					b" && "
+				} else {
+					b" || "
+				};
+				for (i, term) in terms.iter().enumerate() {
+					if i > 0 {
+						self.put(op);
+					}
+					self.cond(term);
+				}
 			},
 			CondExpr::Unary { op, arg } => {
 				self.put(op);

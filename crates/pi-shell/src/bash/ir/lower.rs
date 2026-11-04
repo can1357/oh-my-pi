@@ -922,19 +922,30 @@ impl Lower {
 				}
 				self.emit(Opcode::Not, 0, 0, id);
 			},
-			syn::CondExpr::And(a, b) | syn::CondExpr::Or(a, b) => {
-				let (code, c) = if matches!(e, syn::CondExpr::And(..)) {
+			syn::CondExpr::And(terms) | syn::CondExpr::Or(terms) => {
+				let (code, c) = if matches!(e, syn::CondExpr::And(_)) {
 					(Opcode::BrFail, construct::AND)
 				} else {
 					(Opcode::BrOk, construct::OR)
 				};
-				self.cond += 1;
-				self.cond_expr(a, id)?;
-				self.cond -= 1;
-				let br = self.emit(code, 0, c, id);
-				self.cond_expr(b, id)?;
+				// Thread the pending branches through their target fields. They
+				// all jump to the chain's end, without a separate patch vector.
+				let mut branch = u32::MAX;
+				for (i, term) in terms.iter().enumerate() {
+					let last = i + 1 == terms.len();
+					self.cond += u32::from(!last);
+					self.cond_expr(term, id)?;
+					self.cond -= u32::from(!last);
+					if !last {
+						branch = self.emit(code, branch, c, id);
+					}
+				}
 				let end = self.here();
-				self.patch_a(br, end);
+				while branch != u32::MAX {
+					let next = self.unit.ops[branch as usize].a;
+					self.patch_a(branch, end);
+					branch = next;
+				}
 			},
 			syn::CondExpr::Group(inner) => self.cond_expr(inner, id)?,
 		}
@@ -1627,6 +1638,7 @@ mod tests {
 			b"f() { local x=${1:-default}; echo \"$x\"; }\n".as_slice(),
 			b"f() { emit \"${1:-default}\"; }\n".as_slice(),
 			b"f() { echo \"${x+'$(echo x'}\"; }\n".as_slice(),
+			b"f() { emit; [[ a && b && c || '' || d ]]; }\n".as_slice(),
 		] {
 			let mut parser = syn::Parser::new(src, syn::Features::NONE, &Aliases)
 				.with_pos(syn::Pos { offset: 0, line: 17 });

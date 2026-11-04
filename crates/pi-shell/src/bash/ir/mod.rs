@@ -82,8 +82,9 @@ use crate::bash::{
 	ids::{AstNodeId, ModeId, UnitId},
 };
 
-/// IR version; part of the frames header.
-pub const IR_VERSION: u32 = 14;
+/// IR version; part of the frames header. Version 15 flattens conditional
+/// chains in the serialized syntax of alias-expanded deferred functions.
+pub const IR_VERSION: u32 = 15;
 
 /// Opcodes.
 #[derive(

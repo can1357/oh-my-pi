@@ -1434,38 +1434,50 @@ impl Ctx<'_> {
 		self.yyerr()
 	}
 
-	/// zsh `par_cond`: `cond_1 { SEPER } [ DBAR { SEPER } cond ]`.
+	/// zsh `par_cond`: `cond_1 { SEPER } { DBAR { SEPER } cond_1 }`.
 	fn par_cond(&mut self) -> Option<CondExpr> {
-		let a = self.par_cond_1()?;
+		let first = self.par_cond_1()?;
 		while self.cond_sep() {
 			self.zshlex();
 		}
-		if self.lx.tok == T::Dbar {
+		if self.lx.tok != T::Dbar {
+			return Some(first);
+		}
+		let mut terms = vec![first];
+		while self.lx.tok == T::Dbar {
 			self.zshlex();
 			while self.cond_sep() {
 				self.zshlex();
 			}
-			let b = self.par_cond()?;
-			return Some(CondExpr::Or(Box::new(a), Box::new(b)));
+			terms.push(self.par_cond_1()?);
+			while self.cond_sep() {
+				self.zshlex();
+			}
 		}
-		Some(a)
+		Some(CondExpr::Or(terms))
 	}
 
-	/// zsh `par_cond_1`: `cond_2 { SEPER } [ DAMPER { SEPER } cond_1 ]`.
+	/// zsh `par_cond_1`: `cond_2 { SEPER } { DAMPER { SEPER } cond_2 }`.
 	fn par_cond_1(&mut self) -> Option<CondExpr> {
-		let a = self.par_cond_2()?;
+		let first = self.par_cond_2()?;
 		while self.cond_sep() {
 			self.zshlex();
 		}
-		if self.lx.tok == T::Damper {
+		if self.lx.tok != T::Damper {
+			return Some(first);
+		}
+		let mut terms = vec![first];
+		while self.lx.tok == T::Damper {
 			self.zshlex();
 			while self.cond_sep() {
 				self.zshlex();
 			}
-			let b = self.par_cond_1()?;
-			return Some(CondExpr::And(Box::new(a), Box::new(b)));
+			terms.push(self.par_cond_2()?);
+			while self.cond_sep() {
+				self.zshlex();
+			}
 		}
-		Some(a)
+		Some(CondExpr::And(terms))
 	}
 
 	/// zsh `par_cond_2`: `BANG cond_2 | INPAR cond OUTPAR | STRING STRING

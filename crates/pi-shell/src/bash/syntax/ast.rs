@@ -358,10 +358,10 @@ pub enum CondExpr {
 	Word(Word),
 	/// `! expr`
 	Not(Box<Self>),
-	/// `a && b`
-	And(Box<Self>, Box<Self>),
-	/// `a || b`
-	Or(Box<Self>, Box<Self>),
+	/// `a && b && …`: at least two operands, in source order.
+	And(Vec<Self>),
+	/// `a || b || …`: at least two operands, in source order.
+	Or(Vec<Self>),
 	/// `( expr )`
 	Group(Box<Self>),
 }

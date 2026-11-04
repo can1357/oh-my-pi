@@ -935,21 +935,27 @@ impl Parser<'_> {
 	}
 
 	fn cond_or(&mut self, tok: &mut T) -> CResult<CondExpr> {
-		let l = self.cond_and(tok)?;
-		if *tok == T::OrOr {
-			let r = self.cond_or(tok)?;
-			return Ok(CondExpr::Or(Box::new(l), Box::new(r)));
+		let first = self.cond_and(tok)?;
+		if *tok != T::OrOr {
+			return Ok(first);
 		}
-		Ok(l)
+		let mut terms = vec![first];
+		while *tok == T::OrOr {
+			terms.push(self.cond_and(tok)?);
+		}
+		Ok(CondExpr::Or(terms))
 	}
 
 	fn cond_and(&mut self, tok: &mut T) -> CResult<CondExpr> {
-		let l = self.cond_term(tok)?;
-		if *tok == T::AndAnd {
-			let r = self.cond_and(tok)?;
-			return Ok(CondExpr::And(Box::new(l), Box::new(r)));
+		let first = self.cond_term(tok)?;
+		if *tok != T::AndAnd {
+			return Ok(first);
 		}
-		Ok(l)
+		let mut terms = vec![first];
+		while *tok == T::AndAnd {
+			terms.push(self.cond_term(tok)?);
+		}
+		Ok(CondExpr::And(terms))
 	}
 
 	fn cond_msg(&self, text: &[u8], pre: &[u8], post: &[u8]) -> CondFail {

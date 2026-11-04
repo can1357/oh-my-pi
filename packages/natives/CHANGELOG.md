@@ -4,7 +4,8 @@
 
 ### Fixed
 
-- Fixed the bash tool killing the whole process, with no message, on a long chain of one operator: `$(( 1+1+… ))` past about 6,000 terms, `[[ a && a && … ]]` past about 1,500, `[ x -a x -a … ]` past about 1,400; chains of a million terms now run ([#17872](https://github.com/can1357/oh-my-pi/pull/17872) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool crashing on long `[[ … && … ]]`, `[[ … || … ]]`, `[` and `test` chains, including conditions in uncalled functions and skipped commands; 100,000-term chains now run without overflowing the stack ([#17872](https://github.com/can1357/oh-my-pi/pull/17872) by [@sjawhar](https://github.com/sjawhar))
+
 ### Changed
 
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections
