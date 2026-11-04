@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- A model discovery that was resolving a provider's key when that key changed in AuthStorage (`--api-key`, another thread, an SDK `keys.setRuntime`/`setConfig` call) no longer sends the replaced key or publishes the roster it returned; the next discovery uses the current key
 - `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
 - Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset
 - The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm

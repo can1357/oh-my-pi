@@ -203,6 +203,44 @@ describe("auth thread service", () => {
 		expect(await storage.keys.get("unit-mirror")).toBe("mirror-config-key");
 	});
 
+	for (const [entry, change] of [
+		["keys.setRuntime", (provider: string) => probe.setRuntimeKey(provider, "fake-worker-runtime-key")],
+		["keys.setConfig", (provider: string) => probe.setConfigKey(provider, "fake-worker-config-key")],
+	] as const) {
+		it(`refuses a main discovery whose key a worker replaced through ${entry} while it resolved`, async () => {
+			const gate = path.join(tempDir, "held.gate");
+			const started = path.join(tempDir, "held.started");
+			const heldKey = `!sh -c 'touch ${started}; while [ ! -f ${gate} ]; do sleep 0.02; done; echo fake-original-key'`;
+			const heldPath = path.join(tempDir, "held-models.yml");
+			await Bun.write(
+				heldPath,
+				`providers:\n  anthropic:\n    baseUrl: http://held-key.invalid\n    apiKey: "${heldKey}"\n`,
+			);
+			const sent: Array<string | null> = [];
+			const held = new ModelRegistry(storage, heldPath, {
+				cacheDbPath: path.join(tempDir, "held-models.db"),
+				fetch: async (input, init) => {
+					if (String(input) !== "http://held-key.invalid/v1/models") throw new Error(`offline: ${String(input)}`);
+					sent.push(new Headers(init?.headers).get("x-api-key"));
+					return Response.json({ data: [{ id: "held-model", type: "model" }] });
+				},
+			});
+			try {
+				const inFlight = held.refreshProvider("anthropic", "online");
+				// The key command runs in a child process; its marker file is its only signal.
+				while (!(await fs.exists(started))) await Bun.sleep(10);
+				// The worker's change is a notify; frames are ordered, so main applied it before this resolves.
+				await change("anthropic");
+				await Bun.write(gate, "");
+				await inFlight;
+				expect(sent).not.toContain("fake-original-key");
+				expect(held.find("anthropic", "held-model")).toBeUndefined();
+			} finally {
+				await Bun.write(gate, "");
+			}
+		});
+	}
+
 	it("shares the main thread's slow-mode lane state", async () => {
 		const observed = await probe.observeWrapUp(LANE);
 		expect(observed).toEqual({ remoteLane: true, stage: "wrap_up" });

@@ -1047,6 +1047,27 @@ export interface KeysApi {
 	 */
 	setResolver(resolver: (config: string) => Promise<string | undefined>): void;
 	/**
+	 * Number of changes to the key overrides that decide `provider`'s key: its
+	 * runtime key, config key or config fallback, plus every config-value
+	 * resolver swap. Monotonic: a change and a change back are two. A write
+	 * that leaves the provider's overrides as they were does not count.
+	 *
+	 * A caller that resolved the provider's key at one generation and sees
+	 * another before it sends knows the key it holds may have been replaced.
+	 * Stored credentials and environment variables are not part of it.
+	 */
+	generation(provider: string): number;
+	/**
+	 * Apply `change` as one change: each provider's generation moves at most
+	 * once, and only if its overrides differ at the end of `change` from the
+	 * start. `change` is synchronous, so no reader sees the state in between.
+	 * `ModelRegistry` reloads `models.yml` (`clearConfig`, then reinstalling
+	 * every key) inside one. A worker thread's storage cannot hold main's
+	 * batch open across the thread boundary: it runs `change` directly, so
+	 * there each write counts on its own.
+	 */
+	batch(change: () => void): void;
+	/**
 	 * Build an {@link ApiKeyResolver} backed by this storage, implementing the
 	 * central a/b/c auth-retry policy:
 	 *

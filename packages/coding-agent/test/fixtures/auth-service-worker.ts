@@ -21,6 +21,10 @@ export interface AuthProbe {
 	unwatchGenerations(): Promise<void>;
 	/** `keys.source(provider)?.kind` of each provider, read through the worker's storage. */
 	sourceKinds(providers: string[]): Promise<Array<string | undefined>>;
+	/** `keys.setRuntime` through the worker's storage (the `keys.*` thread service). */
+	setRuntimeKey(provider: string, apiKey: string): Promise<void>;
+	/** `keys.setConfig` through the worker's storage (the `keys.*` thread service). */
+	setConfigKey(provider: string, apiKeyConfig: string): Promise<void>;
 	registry(registry: ModelRegistry): Promise<{
 		local: boolean;
 		canonical: boolean;
@@ -80,6 +84,8 @@ function buildProbe(storage: AuthStorage): AuthProbe {
 		},
 		generations: async () => [...seen],
 		sourceKinds: async providers => providers.map(provider => storage.keys.source(provider)?.kind),
+		setRuntimeKey: async (provider, apiKey) => storage.keys.setRuntime(provider, apiKey),
+		setConfigKey: async (provider, apiKeyConfig) => storage.keys.setConfig(provider, apiKeyConfig),
 		unwatchGenerations: async () => {
 			unwatch?.();
 			unwatch = undefined;

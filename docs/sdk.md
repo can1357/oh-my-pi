@@ -197,6 +197,8 @@ If restore fails, `modelFallbackMessage` explains fallback.
 
 Configured values are resolved asynchronously through the registry-installed resolver; catalog construction does not execute credential commands. `ModelRegistry.getProviderHeaders(provider)` and `resolveModelHeaders(model, signal?)` return promises. For direct provider requests, await the latter instead of reading config-backed values from `model.headers`. The AI client's `stream()` and `streamSimple()` materialize `model.resolveHeaders` automatically for each request attempt, including authentication retries.
 
+`AuthStorage.keys.generation(provider)` counts changes to the overrides in tiers 1–2 and to the config fallback, so a caller that resolved a key can tell whether it was replaced before it sends it; `ModelRegistry` refuses a discovery request assembled across such a change. A write that leaves a provider's overrides as they were does not count, and `keys.batch(change)` counts a group of writes once per provider they changed. Stored credentials and environment variables are not part of the count.
+
 ## Event subscription model
 
 Subscribe with `session.subscribe(listener)`; it returns an unsubscribe function.
