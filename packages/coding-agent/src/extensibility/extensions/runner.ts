@@ -23,6 +23,7 @@ import {
 	clearContextHistoryIndex,
 	getContextHistoryIndex,
 	markPerCallContextMessage,
+	markRepeatedPerCallContextMessage,
 	setContextHistoryIndex,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import type { KeyId } from "@oh-my-pi/pi-tui";
@@ -515,6 +516,18 @@ export const UNAVAILABLE_ANNOTATIONS: ExtensionAnnotationsAPI = Object.freeze({
 	open: () => Promise.reject(new Error("ctx.annotations is not available in this host.")),
 });
 
+/**
+ * Identity of a per-call message's bytes across requests. A message that does
+ * not serialize gets a fresh value, so it never counts as repeated.
+ */
+function perCallMessageDigest(message: AgentMessage): string {
+	try {
+		return Bun.hash(JSON.stringify(message)).toString(16);
+	} catch {
+		return crypto.randomUUID();
+	}
+}
+
 export class ExtensionRunner {
 	#uiContext: ExtensionUIContext;
 	#mode: ExtensionMode = "print";
@@ -627,6 +640,13 @@ export class ExtensionRunner {
 	 */
 	#emittedToolCalls = new Set<string>();
 	#loopToolCalls = new Set<string>();
+	/**
+	 * Digests of the per-call messages the last request sent in each place,
+	 * keyed by the history message the place follows (or, for messages ahead of
+	 * all history, precedes). See {@link #markRepeatedPerCallMessages}.
+	 */
+	#perCallAfter = new WeakMap<AgentMessage, string[]>();
+	#perCallBefore = new WeakMap<AgentMessage, string[]>();
 
 	/** Records that the loop already emitted `tool_call` for this dispatch. */
 	markToolCallEmitted(toolCallId: string, toolName: string): void {
@@ -2292,8 +2312,9 @@ export class ExtensionRunner {
 			}
 		}
 
-		for (const message of currentMessages) {
-			const historyIndex = getContextHistoryIndex(message);
+		const origins = currentMessages.map(message => getContextHistoryIndex(message));
+		for (const [index, message] of currentMessages.entries()) {
+			const historyIndex = origins[index];
 			const historyMessage = historyIndex === undefined ? undefined : messages[historyIndex];
 			if (historyMessage && historyIndex !== undefined) setContextHistoryIndex(historyMessage, historyIndex);
 			const unchanged = historyMessage !== undefined && Bun.deepEquals(message, historyMessage);
@@ -2302,10 +2323,63 @@ export class ExtensionRunner {
 			if (!unchanged) markPerCallContextMessage(message);
 		}
 		for (const message of messages) clearContextHistoryIndex(message);
+		this.#markRepeatedPerCallMessages(messages, currentMessages, origins);
 		// An aborted handler is skipped and its input kept unchanged. Never hand that
 		// untransformed (possibly unredacted) context back to a caller as if every hook ran.
 		signal?.throwIfAborted();
 		return currentMessages;
+	}
+
+	/**
+	 * Tells the prompt-cache placement which per-call messages repeat.
+	 *
+	 * A `context` hook may add a message between two history messages, or change
+	 * one, and do the same on every request. Prompt caches match a request by
+	 * its prefix, so a cache boundary behind such a message is reusable only
+	 * while that message's bytes repeat — which the provider cannot know and the
+	 * runner can: it remembers, per place (the history message the message
+	 * follows, or precedes when it is ahead of all history) and per ordinal
+	 * there, the digest the last request sent. A message whose digest matches is
+	 * marked as repeated, and placement then treats it as part of the reusable
+	 * prefix instead of truncating there. Nothing is reordered or rewritten: the
+	 * model reads exactly what the hooks built, in their order.
+	 *
+	 * Places are keyed by the caller's own history message objects, which a
+	 * session keeps between requests; a new history (a compaction, another
+	 * branch, a side request with a history of its own) simply has no record and
+	 * marks nothing, which costs a cache write and never a wrong hit.
+	 */
+	#markRepeatedPerCallMessages(
+		history: readonly AgentMessage[],
+		output: readonly AgentMessage[],
+		origins: ReadonlyArray<number | undefined>,
+	): void {
+		const firstOrigin = origins.find(origin => origin !== undefined);
+		if (firstOrigin === undefined) return;
+		const firstHistory = history[firstOrigin];
+		if (!firstHistory) return;
+		// Messages ahead of all history are recorded against the first history
+		// message they precede; everything else against the one it follows.
+		let records = this.#perCallBefore;
+		let anchor: AgentMessage = firstHistory;
+		let previous = records.get(anchor);
+		let sent: string[] = [];
+		for (const [index, message] of output.entries()) {
+			const origin = origins[index];
+			const historyMessage = origin === undefined ? undefined : history[origin];
+			if (historyMessage && Bun.deepEquals(message, historyMessage)) {
+				records.set(anchor, sent);
+				records = this.#perCallAfter;
+				anchor = historyMessage;
+				previous = records.get(anchor);
+				sent = [];
+				continue;
+			}
+			const digest = perCallMessageDigest(message);
+			if (previous?.[sent.length] === digest) markRepeatedPerCallContextMessage(message);
+			sent.push(digest);
+		}
+		records.set(anchor, sent);
 	}
 
 	/** Runs request payload hooks with the model used for that provider request. */

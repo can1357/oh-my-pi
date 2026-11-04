@@ -191,6 +191,39 @@ export function isPerCallContextMessage(message: PerCallContextMessageCarrier | 
 }
 
 /**
+ * Marks a per-call context message whose bytes are the ones the previous
+ * request sent in the same place, so a prefix spanning it matches that
+ * request's. The host sets it (it alone knows what the last request carried);
+ * prompt-cache placement reads it to decide whether the message truncates the
+ * reusable prefix. Never set without that evidence: a wrong mark costs the
+ * cache entry behind it on every later turn.
+ */
+export const kRepeatedPerCallContextMessage = Symbol("agent.message.perCallContext.repeated");
+
+/** Carries the repeated-bytes mark without exposing a string-keyed property. */
+export type RepeatedPerCallContextMessageCarrier = object & { [kRepeatedPerCallContextMessage]?: true };
+
+/** Marks a per-call message as carrying the bytes the previous request sent in its place. */
+export function markRepeatedPerCallContextMessage(message: RepeatedPerCallContextMessageCarrier): void {
+	message[kRepeatedPerCallContextMessage] = true;
+}
+
+/** Copies the repeated-bytes mark to a converted or projected message. */
+export function copyRepeatedPerCallContextMessage(
+	target: RepeatedPerCallContextMessageCarrier,
+	source: RepeatedPerCallContextMessageCarrier,
+): void {
+	if (source[kRepeatedPerCallContextMessage] === true) target[kRepeatedPerCallContextMessage] = true;
+}
+
+/** True when a per-call message carries the bytes the previous request sent in its place. */
+export function isRepeatedPerCallContextMessage(
+	message: RepeatedPerCallContextMessageCarrier | null | undefined,
+): boolean {
+	return message?.[kRepeatedPerCallContextMessage] === true;
+}
+
+/**
  * Original history position carried by a context message clone.
  *
  * Object-spread transforms retain this symbol, allowing the extension runner
