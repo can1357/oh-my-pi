@@ -135,6 +135,7 @@ export const readImageFromClipboard = nativeBindings.readImageFromClipboard ?? m
 export const readTextFromClipboard = nativeBindings.readTextFromClipboard ?? missingNativeExport("readTextFromClipboard");
 export const renderMermaidAscii = nativeBindings.renderMermaidAscii ?? missingNativeExport("renderMermaidAscii");
 export const renderSnapcompactPng = nativeBindings.renderSnapcompactPng ?? missingNativeExport("renderSnapcompactPng");
+export const runShellMain = nativeBindings.runShellMain ?? missingNativeExport("runShellMain");
 export const search = nativeBindings.search ?? missingNativeExport("search");
 export const setHangulCompatJamoWidthOverride = nativeBindings.setHangulCompatJamoWidthOverride ?? missingNativeExport("setHangulCompatJamoWidthOverride");
 export const sliceWithWidth = nativeBindings.sliceWithWidth ?? missingNativeExport("sliceWithWidth");

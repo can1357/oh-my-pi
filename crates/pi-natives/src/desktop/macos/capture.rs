@@ -14,12 +14,13 @@ use objc2_core_foundation::{
 	CGRect, CGSize,
 };
 use objc2_core_graphics::{
-	CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo, CGWindowListOption,
-	kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowName, kCGWindowNumber,
-	kCGWindowOwnerName, kCGWindowOwnerPID, kCGWindowSharingState,
+	CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayIsMain, CGDisplayMode, CGDisplayModelNumber,
+	CGError, CGGetActiveDisplayList, CGRectMakeWithDictionaryRepresentation,
+	CGWindowListCopyWindowInfo, CGWindowListOption, kCGWindowBounds, kCGWindowIsOnscreen,
+	kCGWindowLayer, kCGWindowName, kCGWindowNumber, kCGWindowOwnerName, kCGWindowOwnerPID,
+	kCGWindowSharingState,
 };
 use screen_capture_kit::{CaptureRequest, CaptureTarget};
-use xcap::Monitor;
 
 use super::{
 	super::{
@@ -75,7 +76,7 @@ static CREATE_DISPLAY_INFO: LazyLock<Option<CreateDisplayInfoFn>> = LazyLock::ne
 
 /// The product name the system records for a display, such as "Color LCD".
 ///
-/// xcap's `Monitor::friendly_name` reads `NSScreen.localizedName` instead. The
+/// `NSScreen.localizedName` could provide a friendly name instead, but the
 /// first `NSScreen` call initializes `AppKit`, and `AppKit` registers an
 /// unbundled process like omp as a regular application, so every session
 /// that listed displays gained a Dock icon until it exited. `CoreDisplay`
@@ -122,21 +123,38 @@ impl MacCapture {
 	#[allow(clippy::unused_self, reason = "keeps discovery on the backend capture object")]
 	pub(super) fn displays(&self) -> CoreResult<Vec<DesktopDisplay>> {
 		require_capture_permission()?;
-		let monitors = Monitor::all().map_err(|error| {
-			DesktopError::capture_failed(format!("Quartz monitor enumeration failed: {error}"))
-		})?;
-		let mut displays = Vec::with_capacity(monitors.len());
-		for monitor in monitors {
-			let display_id = monitor.id().map_err(metadata_error)?;
+		// Keep the existing 16-display snapshot limit. One call avoids a
+		// count/fill race when monitors are connected or disconnected.
+		let mut active_displays = [0; 16];
+		let mut display_count = 0;
+		// SAFETY: The output array holds `max_displays` display IDs and the
+		// count points to a live u32 for the duration of this synchronous call.
+		let error = unsafe {
+			CGGetActiveDisplayList(
+				active_displays.len() as u32,
+				active_displays.as_mut_ptr(),
+				&mut display_count,
+			)
+		};
+		if error != CGError::Success {
+			return Err(DesktopError::capture_failed(format!(
+				"Quartz monitor enumeration failed: CGGetActiveDisplayList failed: {error:?}"
+			)));
+		}
+		let mut displays = Vec::with_capacity(display_count as usize);
+		for &display_id in &active_displays[..display_count as usize] {
 			let id = display_id.to_string();
-			let x = monitor.x().map_err(metadata_error)?;
-			let y = monitor.y().map_err(metadata_error)?;
-			let width = monitor.width().map_err(metadata_error)?;
-			let height = monitor.height().map_err(metadata_error)?;
-			let scale = f64::from(monitor.scale_factor().map_err(metadata_error)?);
+			let bounds = CGDisplayBounds(display_id);
+			let x = bounds.origin.x as i32;
+			let y = bounds.origin.y as i32;
+			let width = bounds.size.width as u32;
+			let height = bounds.size.height as u32;
+			let mode = CGDisplayCopyDisplayMode(display_id);
+			// Preserve the previous f32 scale calculation and nullable mode
+			// handling if a display disappears after enumeration.
+			let scale = f64::from(CGDisplayMode::pixel_width(mode.as_deref()) as f32 / width as f32);
 			let name = display_product_name(display_id)
-				.or_else(|| monitor.name().ok())
-				.unwrap_or_else(|| format!("Display {id}"));
+				.unwrap_or_else(|| format!("Display #{}", CGDisplayModelNumber(display_id)));
 			displays.push(DesktopDisplay {
 				id,
 				name,
@@ -149,7 +167,7 @@ impl MacCapture {
 				pixel_y: 0,
 				pixel_width: scaled_edge(width, scale),
 				pixel_height: scaled_edge(height, scale),
-				is_primary: monitor.is_primary().map_err(metadata_error)?,
+				is_primary: CGDisplayIsMain(display_id),
 			});
 		}
 		if displays.is_empty() {
@@ -567,10 +585,6 @@ fn window_metadata(dictionary: &WindowDictionary) -> Option<(u32, DesktopWindow)
 			focused: false,
 		}))
 	}
-}
-
-fn metadata_error(error: impl std::fmt::Display) -> DesktopError {
-	DesktopError::capture_failed(format!("failed to read native display metadata: {error}"))
 }
 
 fn scaled_edge(value: u32, scale: f64) -> u32 {
