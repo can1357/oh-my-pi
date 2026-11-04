@@ -38,8 +38,20 @@ interface FileConfigSnapshot {
 }
 const fileConfigCache = new Map<string, FileConfigSnapshot>();
 
+/** Options of one header resolution (see `Model.resolveHeaders`). */
+export interface ConfigHeaderResolveOptions {
+	/**
+	 * Only re-check the configuration of a request that is not sent again: skip
+	 * `!command` values, so no process starts; `{ file }` values are still read.
+	 */
+	configurationCheck?: boolean;
+}
+
 /** Materialize request headers for models and discovery without property-access side effects. */
-export type ConfigHeaderResolver = (signal?: AbortSignal) => Promise<Record<string, string> | undefined>;
+export type ConfigHeaderResolver = (
+	signal?: AbortSignal,
+	options?: ConfigHeaderResolveOptions,
+) => Promise<Record<string, string> | undefined>;
 /** One raw header layer or previously composed request-time resolver. */
 export type ConfigHeaderSource = Record<string, string> | ConfigHeaderResolver | undefined;
 
@@ -308,13 +320,16 @@ export async function runShellCommand(
 export async function resolveConfigHeaders(
 	headers: Record<string, string> | undefined,
 	signal?: AbortSignal,
+	options?: ConfigHeaderResolveOptions,
 ): Promise<Record<string, string> | undefined> {
 	signal?.throwIfAborted();
 	if (!headers) return undefined;
 	const resolved: Record<string, string> = {};
 	let hasResolved = false;
 	for (const key in headers) {
-		const next = await untilAborted(signal, () => resolveConfigValue(headers[key]));
+		const valueConfig = headers[key];
+		if (options?.configurationCheck && isCommandConfigValue(valueConfig)) continue;
+		const next = await untilAborted(signal, () => resolveConfigValue(valueConfig));
 		if (!next) continue;
 		resolved[key] = next;
 		hasResolved = true;
@@ -333,15 +348,15 @@ export function createConfigHeaderResolver(
 ): ConfigHeaderResolver | undefined {
 	const active = sources.filter((source): source is Exclude<ConfigHeaderSource, undefined> => source !== undefined);
 	if (active.length === 0 && (!options?.authHeader || !options.apiKeyConfig)) return undefined;
-	return async signal => {
+	return async (signal, resolveOptions) => {
 		signal?.throwIfAborted();
 		const resolved: Record<string, string> = {};
 		let hasResolved = false;
 		for (const source of active) {
 			const next =
 				typeof source === "function"
-					? await untilAborted(signal, () => source(signal))
-					: await resolveConfigHeaders(source, signal);
+					? await untilAborted(signal, () => source(signal, resolveOptions))
+					: await resolveConfigHeaders(source, signal, resolveOptions);
 			signal?.throwIfAborted();
 			if (!next) continue;
 			for (const key in next) {
@@ -349,8 +364,8 @@ export function createConfigHeaderResolver(
 				hasResolved = true;
 			}
 		}
-		if (options?.authHeader && options.apiKeyConfig) {
-			const keyConfig = options.apiKeyConfig;
+		const keyConfig = options?.authHeader ? options.apiKeyConfig : undefined;
+		if (keyConfig && !(resolveOptions?.configurationCheck && isCommandConfigValue(keyConfig))) {
 			const apiKey = await untilAborted(signal, () => resolveConfigValue(keyConfig));
 			if (apiKey) {
 				resolved.Authorization = `Bearer ${apiKey}`;
