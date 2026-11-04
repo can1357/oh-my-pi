@@ -1345,6 +1345,34 @@ return await tab.evaluate(() => {
 		30_000,
 	);
 
+	test("lets go of a restored page whose paused fake timers replaced setTimeout before omp came, once omp has gone", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				// Paused fake timers: nothing scheduled through them ever runs.
+				await page.mainFrame().mainRealm().evaluate("setTimeout = () => 0");
+				const hold = await PrintHold.install(page, "calls");
+				await hold.endCall();
+				await hold.dispose();
+				// The user leaves and comes back; the restore holds 1.5 s on real time, then the page prints again.
+				await page.goto(`${baseUrl}/one`);
+				await page.goBack();
+				expect(await page.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual(["restored"]);
+				await page
+					.mainFrame()
+					.mainRealm()
+					.waitForFunction(
+						'log.length = 0, document.querySelector("#print").click(), log.join() === "print returned"',
+						{ timeout: 10_000, polling: 100 },
+					);
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
+
 	test("says a frame printed, without pointing at tab.pdf(), which prints the page", async () => {
 		await withUserBrowser(async cdpUrl => {
 			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });

@@ -34,15 +34,15 @@ function holdPrintInPage(
 	// whose own code replaced `Date.now` before omp arrived (fake timers that may never advance), a clock the browser
 	// still keeps native stands in: the performance timeline's, or else the time an event is stamped with. Only if the
 	// page replaced all of them does the hold go by its clock.
+	const isNative = (fn: unknown): boolean => {
+		try {
+			return /\{\s*\[native code\]\s*\}\s*$/.test(String(Reflect.apply(Function.prototype.toString, fn, [])));
+		} catch {
+			return false;
+		}
+	};
 	const clockKey = Symbol.for("omp.printHold.clock");
 	if (typeof Reflect.get(globalThis, clockKey) !== "function") {
-		const isNative = (fn: unknown): boolean => {
-			try {
-				return /\{\s*\[native code\]\s*\}\s*$/.test(String(Reflect.apply(Function.prototype.toString, fn, [])));
-			} catch {
-				return false;
-			}
-		};
 		const getter = (of: unknown, name: string): Function | undefined => {
 			const get = Reflect.getOwnPropertyDescriptor(Object(Reflect.get(Object(of), "prototype")), name)?.get;
 			return isNative(get) ? get : undefined;
@@ -74,7 +74,9 @@ function holdPrintInPage(
 	const deadline = Symbol.for(`${holdKey}.until`);
 	const wrapped = Symbol.for(`${holdKey}.wrapped`);
 	const settling = Symbol.for(`${holdKey}.settling`);
-	const timer: unknown = Reflect.get(globalThis, "setTimeout");
+	// A timer the page replaced (paused fake timers) may never fire; without a native one the tail starts at once.
+	const pageTimer: unknown = Reflect.get(globalThis, "setTimeout");
+	const timer = isNative(pageTimer) ? pageTimer : undefined;
 	// Script that runs in one task (the tab's document-start scripts, a restored page's `pageshow` handlers) can outlast
 	// any fixed tail, and nothing omp sends reaches the page before it ends: hold until then, and `ms` after, unless omp
 	// sets a deadline first.

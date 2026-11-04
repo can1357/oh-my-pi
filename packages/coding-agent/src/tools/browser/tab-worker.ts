@@ -1799,13 +1799,15 @@ export class WorkerCore {
 				if (!page)
 					throw new ToolError(`Target ${payload.page.targetId} is no longer available on the attached browser`);
 				this.#page = page;
+				// A page already loaded runs its own timers while omp sets up: the hold goes in before any other step.
+				this.#printHold = await PrintHold.install(page, printHoldScope(payload));
 				await this.#claimRelayTarget(page);
 				this.#observeDialogs();
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
 			}
 			// The hold comes first: it covers the setup below, and its script must reach new documents before any init
 			// script the tab adds.
-			this.#printHold = await PrintHold.install(this.#page, printHoldScope(payload));
+			this.#printHold ??= await PrintHold.install(this.#page, printHoldScope(payload));
 			const client = this.#page.mainFrame().client;
 			client.on("Page.frameNavigated", this.#onFrameNavigated);
 			client.on("Page.frameRequestedNavigation", this.#onFrameRequestedNavigation);
