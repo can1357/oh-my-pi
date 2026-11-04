@@ -1768,6 +1768,9 @@ export async function buildSessionOptions(
 	if (parsed.noContextFiles) {
 		options.noContextFiles = true;
 	}
+	if (parsed.noDateCwdReminder) {
+		options.noDateCwdReminder = true;
+	}
 
 	// Trusted extension paths are an exact allowlist for extension modules.
 	if (parsed.trustedExtensions && parsed.trustedExtensions.length > 0) {
@@ -2693,6 +2696,7 @@ export async function runRootCommand(
 					modelRegistry,
 					settings: settingsInstance,
 					enableLsp: sessionOptions.enableLsp ?? true,
+					noDateCwdReminder: sessionOptions.noDateCwdReminder,
 					eventBus,
 					subagentEventBus,
 				}),

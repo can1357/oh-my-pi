@@ -1314,6 +1314,7 @@ export class VibeSessionRegistry {
 			mcpManager: session.mcpManager ?? MCPManager.instance(),
 			contextFiles: session.contextFiles,
 			noContextFiles: session.noContextFiles,
+			noDateCwdReminder: session.noDateCwdReminder,
 			skills: [...(session.skills ?? [])],
 			workspaceTree: session.workspaceTree,
 			promptTemplates: session.promptTemplates,

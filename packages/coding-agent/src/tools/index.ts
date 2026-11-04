@@ -249,6 +249,8 @@ export interface ToolSession {
 	contextFiles?: ContextFileEntry[];
 	/** No context files beyond `contextFiles`, not even for additional workspace roots (forwarded to subagents) */
 	noContextFiles?: boolean;
+	/** Send no date/cwd reminder on any request (forwarded to subagents) */
+	noDateCwdReminder?: boolean;
 	/** Pre-loaded workspace tree (forwarded to subagents to skip re-scanning) */
 	workspaceTree?: WorkspaceTree;
 	/** Pre-loaded skills */

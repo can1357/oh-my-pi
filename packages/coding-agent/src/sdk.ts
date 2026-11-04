@@ -810,6 +810,8 @@ export interface CreateAgentSessionOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Discover no context files: not from cwd (on start or a cwd change), not for additional workspace roots, and no nested AGENTS.md list. Explicit `contextFiles` still load. Inherited by subagents. */
 	noContextFiles?: boolean;
+	/** Send no date/cwd reminder on any request: none injected, none journaled. Inherited by subagents. */
+	noDateCwdReminder?: boolean;
 	/** Drop every context file named `AGENTS.md`: from `contextFiles`, cwd discovery, and additional workspace roots. Set for task subagents. */
 	excludeAgentsMd?: boolean;
 	/** Pre-built workspace tree (skips re-scanning; passed by parents to subagents). */
@@ -2617,6 +2619,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			skipPythonPreflight: options.skipPythonPreflight,
 			contextFiles,
 			noContextFiles: options.noContextFiles,
+			noDateCwdReminder: options.noDateCwdReminder,
 			get workspaceTree() {
 				return lateWorkspaceTree ?? resolvedWorkspaceTree;
 			},
@@ -4686,7 +4689,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// conversation was sent, so the main loop and every advisor get their own.
 		// Only the main loop journals its reminders in the session.
 		const createTransformProviderContext = (journal?: DateCwdReminderJournal) => {
-			const dateCwdReminder = new DateCwdReminderInjector(journal);
+			const dateCwdReminder = options.noDateCwdReminder ? undefined : new DateCwdReminderInjector(journal);
 			return async (context: Context, transformModel: Model): Promise<Context> => {
 				let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 				// The archive was sized for the model active at the last context build; a model switch may have lowered the budget.
@@ -4704,6 +4707,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// Keep per-request volatility out of the system prompt: the date/cwd
 				// reminder rides on the first user turn so open-weight providers keep
 				// their tool-schema prefix cache (#7404).
+				if (!dateCwdReminder) return transformed;
 				return dateCwdReminder.transform(
 					transformed,
 					formatLocalCalendarDate(),
@@ -4712,7 +4716,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			};
 		};
 		const transformProviderContext = createTransformProviderContext(
-			createSessionDateCwdReminderJournal(sessionManager),
+			options.noDateCwdReminder ? undefined : createSessionDateCwdReminderJournal(sessionManager),
 		);
 		const onPayload = async (payload: unknown, model?: Model, signal?: AbortSignal) => {
 			return await extensionRunner.emitBeforeProviderRequest(payload, model, signal);
@@ -5719,7 +5723,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const captureModel = captureOptions.initialState?.model;
 				const captureSessionId = captureOptions.sessionId;
 				if (!captureModel || !captureSessionId) throw new Error("Auto-learn capture identity is incomplete");
-				const captureDateCwdReminder = new DateCwdReminderInjector();
+				const captureDateCwdReminder = options.noDateCwdReminder ? undefined : new DateCwdReminderInjector();
 				return new Agent({
 					...captureOptions,
 					cwd: sessionManager.getCwd(),
@@ -5734,6 +5738,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						transformed = await dropUnreadableContextImages(transformed, transformModel);
 						transformed = await blobBroker.decorateContext(transformed, transformModel);
 						transformed = clampProviderContextImageBytes(transformed, transformModel);
+						if (!captureDateCwdReminder) return transformed;
 						return captureDateCwdReminder.transform(
 							transformed,
 							formatLocalCalendarDate(),
