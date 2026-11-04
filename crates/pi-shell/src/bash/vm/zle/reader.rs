@@ -246,8 +246,7 @@ pub fn before_run(
 					&& let Ok(Some(text)) = r.expand(k, cx, vp, |ex| ex.prompt(&ps0))
 				{
 					let text: Vec<u8> = text.iter().copied().filter(|&c| c != 1 && c != 2).collect();
-					vp.out
-						.push_back(PendingWrite::new(2, BString::from(text)));
+					vp.out.push_back(PendingWrite::new(2, BString::from(text)));
 				}
 			}
 		}
@@ -854,8 +853,7 @@ impl Reader {
 		};
 		let text = crate::bash::vm::builtins::zsh_prompt::strip_markers(&p.lp.text);
 		if !text.is_empty() {
-			vp.out
-				.push_back(PendingWrite::new(2, BString::from(text)));
+			vp.out.push_back(PendingWrite::new(2, BString::from(text)));
 		}
 	}
 
@@ -1437,7 +1435,8 @@ fn put_tty(k: &mut Kernel, vp: &mut Vproc, bytes: &[u8]) {
 		return;
 	}
 	if !vp.out.is_empty() {
-		vp.out.push_back(PendingWrite::new(super::tty::FD, BString::from(bytes)));
+		vp.out
+			.push_back(PendingWrite::new(super::tty::FD, BString::from(bytes)));
 		return;
 	}
 	if let Some(t) = vp.zle.as_deref_mut().and_then(|z| z.tty.as_mut()) {
@@ -1445,8 +1444,7 @@ fn put_tty(k: &mut Kernel, vp: &mut Vproc, bytes: &[u8]) {
 		let _ = t.flush(k);
 		return;
 	}
-	vp.out
-		.push_back(PendingWrite::new(2, BString::from(bytes)));
+	vp.out.push_back(PendingWrite::new(2, BString::from(bytes)));
 }
 
 /// A bash prompt (readline's `\x01`…`\x02` invisible regions) as zsh's

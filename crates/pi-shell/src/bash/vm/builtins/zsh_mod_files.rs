@@ -144,13 +144,9 @@ impl<'a> Fsq<'a> {
 						Chunk::Out(fd, b) => (fd, b),
 						Chunk::Diag(d) => (2, ctx.k.render_diag(ctx.cx, ctx.vp, ctx.line, &d)),
 					};
-					ctx.vp
-						.out
-						.push_back(PendingWrite::new(fd, bytes.into()));
+					ctx.vp.out.push_back(PendingWrite::new(fd, bytes.into()));
 				}
-				ctx.vp
-					.out
-					.push_back(PendingWrite::new(2, prompt.into()));
+				ctx.vp.out.push_back(PendingWrite::new(2, prompt.into()));
 				Err(need)
 			},
 		}
