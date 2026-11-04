@@ -345,6 +345,87 @@ describe("generated model policies", () => {
 		}
 	});
 
+	it("prices GPT-6.1 Sol's whole request at the long tier once total input passes 272K, on every billing host", () => {
+		const card = { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 };
+		const billed: [label: string, model: Model<Api>, scale: number][] = [
+			[
+				"openai",
+				buildGenerated(createSpec({ id: "gpt-6.1-sol", api: "openai-responses", provider: "openai", cost: card })),
+				1,
+			],
+			[
+				"bedrock",
+				buildGenerated(
+					createSpec({
+						id: "global.openai.gpt-6.1-sol",
+						api: "openai-responses",
+						provider: "amazon-bedrock",
+						cost: card,
+					}),
+				),
+				1,
+			],
+			// A user-declared gateway is materialized by `buildModel` alone, with no generation pass.
+			[
+				"custom gateway",
+				buildModel(
+					createSpec({
+						id: "openai/gpt-6.1-sol",
+						api: "openai-responses",
+						provider: "example-gateway" as Provider,
+						cost: card,
+					}),
+				),
+				1,
+			],
+			// Batch bills half the card in both tiers, so the tier scales from the row's own rates.
+			[
+				"openrouter batch",
+				buildGenerated(
+					createSpec({
+						id: "openai/gpt-6.1-sol:batch",
+						api: "openai-completions",
+						provider: "openrouter",
+						cost: { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 },
+					}),
+				),
+				0.5,
+			],
+		];
+		for (const [label, model, scale] of billed) {
+			expect(model.cost.longContext, label).toMatchObject({ inputThreshold: 272_000 });
+			expect(model.cost.longContext?.cacheWrite, label).toBeCloseTo(5 * scale, 10);
+			// OpenAI's prompt size counts cache reads: 12K new + 260K read is exactly 272K, still standard.
+			const at = pricedUsage(model, 12_000, 260_000);
+			expect(at.input, label).toBeCloseTo((2 * scale * 12_000) / 1e6, 10);
+			expect(at.cacheRead, label).toBeCloseTo((0.1 * scale * 260_000) / 1e6, 10);
+			expect(at.output, label).toBeCloseTo((10 * scale * 10_000) / 1e6, 10);
+			// 20K new + 260K read is a 280K prompt: 2x input and cache reads, 1.5x output, whole request.
+			const over = pricedUsage(model, 20_000, 260_000);
+			expect(over.input, label).toBeCloseTo((4 * scale * 20_000) / 1e6, 10);
+			expect(over.cacheRead, label).toBeCloseTo((0.2 * scale * 260_000) / 1e6, 10);
+			expect(over.output, label).toBeCloseTo((15 * scale * 10_000) / 1e6, 10);
+		}
+
+		// Subscription Codex carries no surcharge, and Copilot's long tier is its own `-1m` sibling.
+		const exempt: [label: string, model: Model<Api>][] = [
+			[
+				"openai-codex",
+				buildGenerated(createSpec({ id: "gpt-6.1-sol", api: "openai-codex-responses", provider: "openai-codex" })),
+			],
+			[
+				"github-copilot",
+				buildGenerated(
+					createSpec({ id: "gpt-6.1-sol", api: "openai-responses", provider: "github-copilot", cost: card }),
+				),
+			],
+		];
+		for (const [label, model] of exempt) {
+			expect(model.cost.longContext, label).toBeUndefined();
+			expect(pricedUsage(model, 20_000, 260_000).input, label).toBeCloseTo((2 * 20_000) / 1e6, 10);
+		}
+	});
+
 	it("pins Claude Mythos 5 first-party Anthropic catalog metadata", () => {
 		const model = buildGenerated(
 			createSpec({

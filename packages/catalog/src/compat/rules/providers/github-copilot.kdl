@@ -129,4 +129,11 @@ provider "github-copilot" {
 		long-context-cost {
 		}
 	}
+	// GPT-6.1 Sol: Copilot's long tier comes from `billing.token_prices` as a
+	// `-1m` sibling (see above), never from the lineage's >272K multiplier
+	// band (classes/openai.kdl). Both rows opt out so the base row is not
+	// billed the band and the `-1m` row is not charged 2x twice.
+	models "gpt-6.1-sol" "gpt-6.1-sol-1m" {
+		long-context-cost {}
+	}
 }

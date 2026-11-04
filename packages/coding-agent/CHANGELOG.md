@@ -25,6 +25,7 @@
 
 ### Fixed
 
+- A `models.yml` model that sets its own `cost` keeps the catalog's long-context price tier when that tier is a multiple of the base price, scaled to your price, so requests to a gateway you declare are costed like the same model on a built-in provider; the tier used to be dropped
 - Extension shortcuts on a reserved chord spelled with a different modifier order (e.g. `ctrl+shift+p`) are now ignored like the reserved spelling ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
 - `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
 - Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset

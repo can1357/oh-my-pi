@@ -2177,6 +2177,45 @@ describe("ModelRegistry", () => {
 			});
 		});
 
+		test("a models.yml row with its own price keeps the catalog's multiplier long-context tier, scaled to that price", () => {
+			// A gateway serving GPT-6.1 Sol at half the list card, as a user declares it: no tier of its own.
+			writeRawModelsJson({
+				"example-gateway": {
+					baseUrl: "https://example.com/v1",
+					auth: "none",
+					api: "openai-responses",
+					models: [
+						{
+							id: "openai/gpt-6.1-sol",
+							contextWindow: 272_000,
+							maxContextWindow: 1_050_000,
+							maxTokens: 128_000,
+							cost: { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 },
+						},
+					],
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const sol = registry.find("example-gateway", "openai/gpt-6.1-sol");
+			if (!sol) throw new Error("Expected the gateway GPT-6.1 Sol row");
+			expect(sol.cost).toMatchObject({ input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 });
+			// 20K new + 260K cache-read is a 280K prompt: the whole request bills 2x input/cache, 1.5x output.
+			const usage = {
+				input: 20_000,
+				output: 10_000,
+				cacheRead: 260_000,
+				cacheWrite: 0,
+				totalTokens: 290_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+			const cost = calculateUsageCost(sol.cost, usage);
+			expect(cost.input).toBeCloseTo((2 * 20_000) / 1e6, 10);
+			expect(cost.cacheRead).toBeCloseTo((0.1 * 260_000) / 1e6, 10);
+			expect(cost.output).toBeCloseTo((7.5 * 10_000) / 1e6, 10);
+			// 12K new + 260K read is exactly 272K: still the declared card.
+			expect(calculateUsageCost(sol.cost, { ...usage, input: 12_000 }).input).toBeCloseTo((1 * 12_000) / 1e6, 10);
+		});
+
 		test("non-price overrides keep scheduled rates while user prices stay fixed across tariff changes", () => {
 			expect(scheduledPrices.getError()).toBeUndefined();
 			const renamed = scheduledPrices.find("deepseek", "deepseek-v4-flash");
@@ -2951,6 +2990,11 @@ describe("ModelRegistry", () => {
 			// GPT-5.6 bills 2x input above 272K on both the API and Codex.
 			expect(registry.find("openai", "gpt-5.6-sol")?.contextWindow).toBe(272_000);
 			expect(registry.find("openai-codex", "gpt-5.6-sol")?.contextWindow).toBe(272_000);
+			// GPT-6.1 Sol bills its >272K tier per token, but Codex subscription usage has no surcharge,
+			// so the subscription row keeps its 500K window.
+			expect(registry.find("openai", "gpt-6.1-sol")?.contextWindow).toBe(272_000);
+			expect(registry.find("openrouter", "openai/gpt-6.1-sol")?.contextWindow).toBe(272_000);
+			expect(registry.find("openai-codex", "gpt-6.1-sol")?.contextWindow).toBe(500_000);
 			// Standard-priced 1M models (no long-context tier) keep their window.
 			expect(registry.find("anthropic", "claude-opus-4-8")?.contextWindow).toBe(1_000_000);
 			// SuperGrok carries public xAI tiers (200K threshold) for stats estimates,

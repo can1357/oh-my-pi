@@ -24,11 +24,13 @@ import {
 	type AntigravityModelWireProfile,
 	type Api,
 	type EffectiveTokenCost,
+	type LongContextTokenCost,
 	MODEL_KINDS,
 	type Model,
 	type ModelAccountAccess,
 	type ModelCost,
 	type ModelSpec,
+	type TokenCost,
 } from "./types";
 import { cleanModelName } from "./utils";
 
@@ -164,6 +166,35 @@ interface DatedCostCards {
 }
 
 /**
+ * The tier a multiplier-form `long-context-cost` payload derives from `card`;
+ * undefined for an absolute or empty payload, or a card with no token price.
+ */
+function scaledLongContextTier(card: TokenCost, payload: object): LongContextTokenCost | undefined {
+	const inputThreshold = numberField(payload, "inputThreshold");
+	const multiplier = numberField(payload, "multiplier");
+	if (inputThreshold === undefined || multiplier === undefined) return undefined;
+	if (card.input === 0 && card.output === 0 && card.cacheRead === 0 && card.cacheWrite === 0) return undefined;
+	return {
+		inputThreshold,
+		...(Reflect.get(payload, "inputThresholdInclusive") === true && { inputThresholdInclusive: true }),
+		input: card.input * multiplier,
+		output: card.output * (numberField(payload, "outputMultiplier") ?? multiplier),
+		cacheRead: card.cacheRead * multiplier,
+		cacheWrite: card.cacheWrite * multiplier,
+	};
+}
+
+/**
+ * The long-context tier `spec`'s multiplier-form rule derives from `card`.
+ * For callers whose explicit price card replaces the built one (user-defined
+ * models): such a tier is a function of the card, so it applies to theirs too.
+ */
+export function ruleScaledLongContextTier(spec: ModelSpec<Api>, card: TokenCost): LongContextTokenCost | undefined {
+	const payload = objectPayload(resolveModelPolicy(spec).catalog.longContext);
+	return payload === undefined ? undefined : scaledLongContextTier(card, payload);
+}
+
+/**
  * The row's corrected price card at `now`: `cost-patch`, then `cost-fallback`
  * (each with its dated card due at `now`), then the long-context tier and
  * cache-rate derivations, all from the upstream card.
@@ -221,27 +252,15 @@ function correctedCost(
 	const longContext = objectPayload(catalog.longContext);
 	if (longContext !== undefined) {
 		const inputThreshold = numberField(longContext, "inputThreshold");
-		const inclusive = Reflect.get(longContext, "inputThresholdInclusive") === true;
-		const multiplier = numberField(longContext, "multiplier");
 		const input = numberField(longContext, "input");
 		const output = numberField(longContext, "output");
 		const cacheRead = numberField(longContext, "cacheRead");
 		const cacheWrite = numberField(longContext, "cacheWrite");
-		const hasTokenPrice = cost.input !== 0 || cost.output !== 0 || cost.cacheRead !== 0 || cost.cacheWrite !== 0;
-		if (inputThreshold !== undefined && multiplier !== undefined && hasTokenPrice) {
-			// Multiplier form: tier rates derive from the row's final base card,
-			// after `cost-patch`/`cost-fallback` corrected the live list price.
-			cost = {
-				...cost,
-				longContext: {
-					inputThreshold,
-					...(inclusive && { inputThresholdInclusive: true }),
-					input: cost.input * multiplier,
-					output: cost.output * (numberField(longContext, "outputMultiplier") ?? multiplier),
-					cacheRead: cost.cacheRead * multiplier,
-					cacheWrite: cost.cacheWrite * multiplier,
-				},
-			};
+		// Multiplier form: tier rates derive from the row's final base card,
+		// after `cost-patch`/`cost-fallback` corrected the live list price.
+		const scaled = scaledLongContextTier(cost, longContext);
+		if (scaled !== undefined) {
+			cost = { ...cost, longContext: scaled };
 		} else if (
 			inputThreshold !== undefined &&
 			input !== undefined &&

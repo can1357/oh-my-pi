@@ -65,6 +65,24 @@ class "openai" {
 	revision ">=6 <7" {
 		supports-configuration-update #true
 	}
+	// GPT-6.1 Sol's per-token card bills the whole request at 2x input and
+	// cache rates and 1.5x output once prompt input passes 272K tokens, in
+	// every processing mode (Standard, Batch, Flex, Fast, Ultrafast):
+	// https://developers.openai.com/api/docs/models/gpt-6.1-sol and
+	// https://developers.openai.com/api/docs/pricing. "Input" is the API's
+	// `input_tokens`, which includes cache reads and writes. The tier is the
+	// model's price card, not one host's, so resellers billing that card
+	// (OpenRouter publishes the same >272K override for every Sol row,
+	// `-pro` and `:batch` included) and custom gateways serving the id carry
+	// it too; the multiplier form scales from each row's own base card.
+	// Subscription and credit hosts opt out in their provider files.
+	models "*gpt-6.1-sol*" {
+		long-context-cost {
+			input-threshold 272000
+			multiplier 2.0
+			output-multiplier 1.5
+		}
+	}
 	// Codex SKUs: the advertised 400K figure includes the output budget; the
 	// true prompt window is 272K. Spark budgets are its own family's.
 	family "codex" {

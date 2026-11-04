@@ -115,7 +115,10 @@ provider "openai-codex" {
 	// https://x.com/thsottiaux/status/2109430343346581527). Codex reports an
 	// 872K maximum while OpenAI documents 922K max input (1.05M total); the
 	// curated maximum applies only with extended context on, and a higher live
-	// maximum still wins.
+	// maximum still wins. Subscription usage carries no long-context surcharge
+	// (https://developers.openai.com/api/docs/models/gpt-6.1-sol), so these
+	// rows opt out of the lineage's >272K tier (classes/openai.kdl), which
+	// would otherwise also cap the 500K window at 272K.
 	models "gpt-6.1-sol" "gpt-6.1-sol-wm" {
 		cost-patch {
 			input 2.0
@@ -127,6 +130,7 @@ provider "openai-codex" {
 			context-window 500000
 		}
 		max-context-window 922000
+		long-context-cost {}
 	}
 	// Codex Ultrafast ships on GPT-6 Astra and GPT-6.1 Sol. This table uses
 	// OpenAI's included-usage multipliers for Codex: Ultrafast 8x and Fast 2.5x
