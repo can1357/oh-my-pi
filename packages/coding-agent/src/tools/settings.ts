@@ -973,7 +973,6 @@ export const cfgAsyncEnabled = register({
 	},
 });
 
-// No UI options: the settings panel hides the number; `omp config` shows the description.
 export const cfgAsyncMaxJobs = register({
 	id: "async.maxJobs",
 	protocolDefault: ["rpc"],
