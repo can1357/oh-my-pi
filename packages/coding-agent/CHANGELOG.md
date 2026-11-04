@@ -6,6 +6,11 @@
 
 - `edit` rejections of an unknown tag now offer the file's current tag for the rows shown, instead of only sending the model back to output it already copied from ([#19332](https://github.com/can1357/oh-my-pi/pull/19332) by [@Xytronix](https://github.com/Xytronix))
 
+### Added
+
+- Added `pi.replies.expect(peerId)` for extensions that bridge to agents in other processes: `wait` blocks for that peer's reply instead of returning "Nothing to wait for" until the extension releases it; the expectation pauses while a live `disabledExtensions` edit suspends the extension and goes with it at teardown ([#18058](https://github.com/can1357/oh-my-pi/pull/18058) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added `pi.onSuspensionChange(listener)` so an extension can pause work it drives itself (a socket, a timer) while a live `disabledExtensions` edit suspends it, and resume it after ([#18058](https://github.com/can1357/oh-my-pi/pull/18058) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
