@@ -244,6 +244,15 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 }
 
 /**
+ * The endpoint identity a configured `baseUrl` stands for: trimmed, without
+ * trailing slashes; `undefined` for no endpoint. Two spellings of one endpoint
+ * share a cache namespace and count as the same configuration.
+ */
+export function normalizeModelCacheEndpoint(baseUrl: string | undefined): string | undefined {
+	return baseUrl?.trim().replace(/\/+$/, "") || undefined;
+}
+
+/**
  * Scope a provider's cache namespace to the endpoint its operator configured
  * (a models.yml provider `baseUrl` or a runtime provider override).
  *
@@ -264,7 +273,7 @@ export function scopeModelCacheProviderIdToEndpoint(
 	cacheProviderId: string,
 	configuredBaseUrl: string | undefined,
 ): string {
-	const endpoint = configuredBaseUrl?.trim().replace(/\/+$/, "");
+	const endpoint = normalizeModelCacheEndpoint(configuredBaseUrl);
 	if (!endpoint) return cacheProviderId;
 	return `${cacheProviderId}:endpoint-v1:${Bun.hash(endpoint).toString(36)}`;
 }

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type Api, complete, type Model } from "@oh-my-pi/pi-ai";
+import { getModelCacheWriteStats } from "@oh-my-pi/pi-catalog/model-cache";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
@@ -118,28 +119,14 @@ describe("model cache follows the configured endpoint", () => {
 	});
 
 	test("a discovery still running when the baseUrl is removed does not restore the gateway roster", async () => {
-		const started = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		const registry = new ModelRegistry(authStorage, modelsPath, {
-			fetch: async input => {
-				if (String(input) === `${GATEWAY}/v1/models`) {
-					started.resolve();
-					await release.promise;
-					return Response.json({ data: [{ id: "late-gateway-model", type: "model" }] });
-				}
-				throw new Error(`offline: ${String(input)}`);
-			},
-		});
-		try {
-			const inFlight = registry.refreshProvider("anthropic", "online");
-			await started.promise;
-			fs.writeFileSync(modelsPath, DIRECT_CONFIG);
-			await registry.refreshProvider("anthropic", "offline");
-			release.resolve();
-			await inFlight;
-		} finally {
-			release.resolve();
-		}
+		const gateway = deferredDiscovery(`${GATEWAY}/v1/models`, "late-gateway-model");
+		const registry = new ModelRegistry(authStorage, modelsPath, { fetch: gateway.fetch });
+		const inFlight = registry.refreshProvider("anthropic", "online");
+		await gateway.started;
+		fs.writeFileSync(modelsPath, DIRECT_CONFIG);
+		await registry.refreshProvider("anthropic", "offline");
+		gateway.release();
+		await inFlight;
 		expect(registry.find("anthropic", "late-gateway-model")).toBeUndefined();
 		expect(registry.find("anthropic", "gateway-only-model")).toBeUndefined();
 		const model = registry.find("anthropic", "claude-opus-5-5");
@@ -158,17 +145,7 @@ describe("model cache follows the configured endpoint", () => {
 			{
 				baseUrl: extensionHost,
 				api: "anthropic-messages",
-				fetchDynamicModels: async () => [
-					{
-						id: "extension-only-model",
-						name: "Extension Only",
-						reasoning: false,
-						input: ["text"],
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-						contextWindow: 200_000,
-						maxTokens: 8_192,
-					},
-				],
+				fetchDynamicModels: async () => [extensionModel("extension-only-model")],
 			},
 			"test-extension",
 		);
@@ -181,4 +158,195 @@ describe("model cache follows the configured endpoint", () => {
 		});
 		expect(restarted.find("anthropic", "extension-only-model")).toBeUndefined();
 	});
+
+	test("a discovery that finishes after an equivalent spelling of its endpoint was configured is kept", async () => {
+		const gateway = deferredDiscovery(`${GATEWAY}/v1/models`, "late-gateway-model");
+		const registry = new ModelRegistry(authStorage, modelsPath, { fetch: gateway.fetch });
+		const inFlight = registry.refreshProvider("anthropic", "online");
+		await gateway.started;
+		fs.writeFileSync(modelsPath, `providers:\n  anthropic:\n    baseUrl: ${GATEWAY}/\n`);
+		await registry.refreshProvider("anthropic", "offline");
+		gateway.release();
+		await inFlight;
+		expect(registry.find("anthropic", "late-gateway-model")).toBeDefined();
+	});
+
+	test("a discovery finished under another endpoint is published if its own is configured again by publication", async () => {
+		// Kimi Code's cache is credential-scoped, so no reload restores it on the
+		// side: only the discovery's own publication can list its model.
+		const kimiEndpoint = "http://kimi-a.invalid/v1";
+		fs.writeFileSync(modelsPath, `providers:\n  kimi-code:\n    baseUrl: ${kimiEndpoint}\n`);
+		await authStorage.credentials.set("kimi-code", { type: "api_key", key: "not-a-real-kimi-key" });
+		const kimi = deferredDiscovery(`${kimiEndpoint}/models`, "late-kimi-model");
+		const registry = new ModelRegistry(authStorage, modelsPath, { fetch: kimi.fetch });
+		// A second, slower discovery keeps the pass open after Kimi's finishes.
+		const slowStarted = Promise.withResolvers<void>();
+		const slowRelease = Promise.withResolvers<void>();
+		registry.registerProvider(
+			"slow-extension",
+			{
+				baseUrl: "http://slow-extension.invalid:4000",
+				api: "anthropic-messages",
+				fetchDynamicModels: async () => {
+					slowStarted.resolve();
+					await slowRelease.promise;
+					return [extensionModel("slow-model")];
+				},
+			},
+			"slow-extension-source",
+		);
+		try {
+			const inFlight = registry.refreshDiscoverableProviders(["kimi-code", "slow-extension"], "online");
+			await Promise.all([kimi.started, slowStarted.promise]);
+			registry.registerProvider("kimi-code", { baseUrl: "http://kimi-b.invalid/v1" }, "override-source");
+			const writesBefore = getModelCacheWriteStats().payloadWrites;
+			kimi.release();
+			// Kimi's manager has finished once it wrote its roster. No event marks
+			// that point, so the observable condition is polled.
+			while (getModelCacheWriteStats().payloadWrites === writesBefore) await Bun.sleep(10);
+			registry.unregisterProvider("kimi-code");
+			slowRelease.resolve();
+			await inFlight;
+		} finally {
+			kimi.release();
+			slowRelease.resolve();
+		}
+		expect(registry.find("kimi-code", "late-kimi-model")?.baseUrl).toBe(kimiEndpoint);
+	});
+
+	test("a built-in discovery finishing after an extension took over the provider id does not replace it", async () => {
+		const gateway = deferredDiscovery(`${GATEWAY}/v1/models`, "late-gateway-model");
+		const registry = new ModelRegistry(authStorage, modelsPath, { fetch: gateway.fetch });
+		const inFlight = registry.refreshProvider("anthropic", "online");
+		await gateway.started;
+		registry.registerProvider(
+			"anthropic",
+			{
+				baseUrl: GATEWAY,
+				api: "anthropic-messages",
+				fetchDynamicModels: async () => [extensionModel("extension-model")],
+			},
+			"test-extension",
+		);
+		await registry.refreshRuntimeProviders("online");
+		gateway.release();
+		await inFlight;
+		expect(registry.find("anthropic", "extension-model")).toBeDefined();
+		expect(registry.find("anthropic", "late-gateway-model")).toBeUndefined();
+	});
+
+	test("a replaced extension registration cannot write the roster the live one reads", async () => {
+		fs.writeFileSync(modelsPath, DIRECT_CONFIG);
+		const registry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: () => Promise.reject(new Error("offline")),
+		});
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		registry.registerProvider(
+			"anthropic",
+			{
+				api: "anthropic-messages",
+				fetchDynamicModels: async () => {
+					started.resolve();
+					await release.promise;
+					return [{ ...extensionModel("old-model"), baseUrl: "http://old-extension.invalid:4000" }];
+				},
+			},
+			"test-extension",
+		);
+		try {
+			const inFlight = registry.refreshRuntimeProviders("online");
+			await started.promise;
+			registry.registerProvider(
+				"anthropic",
+				{
+					api: "anthropic-messages",
+					fetchDynamicModels: async () => [
+						{ ...extensionModel("current-model"), baseUrl: "http://current-extension.invalid:4000" },
+					],
+				},
+				"test-extension",
+			);
+			await registry.refreshRuntimeProviders("online");
+			release.resolve();
+			await inFlight;
+		} finally {
+			release.resolve();
+		}
+		await registry.refreshRuntimeProviders("offline");
+		expect(registry.find("anthropic", "old-model")).toBeUndefined();
+		expect(registry.find("anthropic", "current-model")?.baseUrl).toBe("http://current-extension.invalid:4000");
+	});
+
+	test("a key resolved under the previous configuration is never sent to the newly configured endpoint", async () => {
+		const otherGateway = "http://gateway-b.invalid:4000";
+		const keyStarted = Promise.withResolvers<void>();
+		const keyRelease = Promise.withResolvers<void>();
+		const oauthStorage = await AuthStorage.create(path.join(tempDir, "oauth-agent.db"), {
+			refreshOAuthCredential: async (_provider, _id, credential) => {
+				keyStarted.resolve();
+				await keyRelease.promise;
+				return { ...credential, access: "sk-ant-oat01-previous-config", expires: Date.now() + 3_600_000 };
+			},
+		});
+		try {
+			await oauthStorage.credentials.set("anthropic", {
+				type: "oauth",
+				access: "sk-ant-oat01-expired",
+				refresh: "not-a-real-refresh-token",
+				expires: Date.now() - 60_000,
+			});
+			const sent: Array<{ url: string; key: string | null }> = [];
+			const registry = new ModelRegistry(oauthStorage, modelsPath, {
+				fetch: async (input, init) => {
+					const headers = new Headers(init?.headers);
+					sent.push({ url: String(input), key: headers.get("x-api-key") ?? headers.get("authorization") });
+					throw new Error("offline");
+				},
+			});
+			const inFlight = registry.refreshProvider("anthropic", "online");
+			await keyStarted.promise;
+			fs.writeFileSync(
+				modelsPath,
+				`providers:\n  anthropic:\n    baseUrl: ${otherGateway}\n    apiKey: ${FAKE_KEY}\n`,
+			);
+			await registry.refreshProvider("anthropic", "offline");
+			keyRelease.resolve();
+			await inFlight;
+			expect(sent.filter(request => request.key?.includes("previous-config"))).toEqual([]);
+		} finally {
+			keyRelease.resolve();
+			oauthStorage.close();
+		}
+	});
 });
+
+/** A discovery endpoint whose `/v1/models` answer is held until released. */
+function deferredDiscovery(modelsUrl: string, modelId: string) {
+	const started = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	return {
+		started: started.promise,
+		release: () => release.resolve(),
+		fetch: async (input: string | URL | Request) => {
+			if (String(input) === modelsUrl) {
+				started.resolve();
+				await release.promise;
+				return Response.json({ data: [{ id: modelId, type: "model" }] });
+			}
+			throw new Error(`offline: ${String(input)}`);
+		},
+	};
+}
+
+function extensionModel(id: string) {
+	return {
+		id,
+		name: id,
+		reasoning: false,
+		input: ["text" as const],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8_192,
+	};
+}

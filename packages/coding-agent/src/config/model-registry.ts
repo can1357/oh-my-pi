@@ -40,6 +40,7 @@ import {
 	isCredentialScopedModelCacheProvider,
 	MODELS_DEV_CATALOG_PROVIDER_IDS,
 	modelsDevCatalogFallback,
+	normalizeModelCacheEndpoint,
 	openaiCodexModelManagerOptions,
 	PROVIDER_DESCRIPTORS,
 	resolveModelCacheProviderId,
@@ -375,6 +376,9 @@ export class ModelRegistry {
 	#lastStaticLoadMtime: number | null = null;
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
+	/** Stable ids for discovery owners (a registration, a models.yml discovery config) in `#discoveryOwner`. */
+	#discoveryOwnerIds = new WeakMap<object, number>();
+	#nextDiscoveryOwnerId = 0;
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
@@ -1640,6 +1644,29 @@ export class ModelRegistry {
 		);
 	}
 
+	/**
+	 * Who discovers `providerId` under the current configuration: an extension
+	 * registration, a models.yml `discovery:` config, or the built-in manager at
+	 * its configured endpoint. A discovery is published only while this is the
+	 * same value it had when the discovery started, so a superseded owner or a
+	 * moved endpoint never answers for the current configuration, while an
+	 * equivalent spelling of the same endpoint, or a return to it, still does.
+	 */
+	#discoveryOwner(providerId: string): string {
+		const runtime = this.#runtimeModelManagers.get(providerId)?.options;
+		const configured = this.#discoverableProviders.find(provider => provider.provider === providerId);
+		const owner: object | undefined = runtime ?? configured;
+		if (owner) {
+			let id = this.#discoveryOwnerIds.get(owner);
+			if (id === undefined) {
+				id = this.#nextDiscoveryOwnerId++;
+				this.#discoveryOwnerIds.set(owner, id);
+			}
+			return `${runtime ? "extension" : "configured"}:${id}`;
+		}
+		return `built-in:${normalizeModelCacheEndpoint(this.#configuredBaseUrl(providerId)) ?? ""}`;
+	}
+
 	#descriptorBaseUrl(providerId: string): string | undefined {
 		return (
 			this.#configuredBaseUrl(providerId) ??
@@ -2229,8 +2256,9 @@ export class ModelRegistry {
 			authoritativeProviders: new Set(),
 			replaceRuntimeProviders: new Set(),
 		};
-		for (const { discovery, isCurrent } of builtInDiscoveries) {
+		for (const { discovery, state, isCurrent } of builtInDiscoveries) {
 			if (!isCurrent()) continue;
+			this.#providerDiscoveryStates.set(state.provider, state);
 			builtInDiscovery.models.push(...discovery.models);
 			for (const provider of discovery.authoritativeProviders) builtInDiscovery.authoritativeProviders.add(provider);
 			for (const provider of discovery.replaceRuntimeProviders)
@@ -2597,7 +2625,7 @@ export class ModelRegistry {
 	async #discoverBuiltInProviderModels(
 		strategy: ModelRefreshStrategy,
 		providerFilter?: ReadonlySet<string>,
-	): Promise<Array<{ discovery: BuiltInDiscoveryResult; isCurrent: () => boolean }>> {
+	): Promise<Array<{ discovery: BuiltInDiscoveryResult; state: ProviderDiscoveryState; isCurrent: () => boolean }>> {
 		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(p => p.provider));
 		const managers = await this.#collectBuiltInModelManagerOptions(
@@ -2609,7 +2637,7 @@ export class ModelRegistry {
 		const writesBefore = getModelCacheWriteStats();
 		const discoveries = await Promise.all(
 			managers.map(async ({ options, isCurrent }) => ({
-				discovery: await this.#discoverWithModelManager(options, strategy, isCurrent),
+				...(await this.#discoverWithModelManager(options, strategy)),
 				isCurrent,
 			})),
 		);
@@ -2791,6 +2819,12 @@ export class ModelRegistry {
 			if (configuredDiscoveryProviders.has(descriptor.providerId)) return false;
 			return providerFilter ? providerFilter.has(descriptor.providerId) : true;
 		});
+		// Captured before any credential await: a key resolved under one
+		// configuration is never sent to the endpoint of the next one.
+		const ownerAtStart = new Map<string, string>();
+		for (const { providerId } of [...standardProviderDescriptors, ...enabledSpecialProviderDescriptors]) {
+			ownerAtStart.set(providerId, this.#discoveryOwner(providerId));
+		}
 		const standardProviderKeys = await Promise.all(
 			standardProviderDescriptors.map(descriptor => {
 				const cacheProviderId = isCredentialScopedModelCacheProvider(descriptor.providerId)
@@ -2821,6 +2855,8 @@ export class ModelRegistry {
 		const options: ModelManagerOptions<Api>[] = [];
 		for (let i = 0; i < standardProviderDescriptors.length; i++) {
 			const descriptor = standardProviderDescriptors[i];
+			// The configuration moved while the key resolved: the next pass discovers it.
+			if (this.#discoveryOwner(descriptor.providerId) !== ownerAtStart.get(descriptor.providerId)) continue;
 			const apiKey = standardProviderKeys[i];
 			const hasExplicitVllmConfig =
 				descriptor.providerId === "vllm" &&
@@ -2861,6 +2897,7 @@ export class ModelRegistry {
 
 		for (let i = 0; i < enabledSpecialProviderDescriptors.length; i++) {
 			const descriptor = enabledSpecialProviderDescriptors[i];
+			if (this.#discoveryOwner(descriptor.providerId) !== ownerAtStart.get(descriptor.providerId)) continue;
 			const key = descriptor.resolveKey(specialKeys[i]);
 			if (!isAuthenticated(key)) {
 				continue;
@@ -2892,56 +2929,54 @@ export class ModelRegistry {
 		// Every built-in manager reads and writes a namespace scoped to the
 		// configured endpoint, as `#resolveStartupModelCacheProviderId` reads, so
 		// a roster discovered through one endpoint is never served for another
-		// (`scopeModelCacheProviderIdToEndpoint`). Its result is published only
-		// while that endpoint is still the configured one: a discovery started
-		// before the configuration moved must not restore the old roster.
+		// (`scopeModelCacheProviderIdToEndpoint`). Each result carries the check
+		// that its owner (`#discoveryOwner`) is unchanged; the caller applies it
+		// at publication, so a discovery started under another configuration
+		// never answers for this one.
 		const managers: Array<{ options: ModelManagerOptions<Api>; isCurrent: () => boolean }> = options.map(
 			managerOptions => {
 				const { providerId } = managerOptions;
-				const configuredBaseUrl = this.#configuredBaseUrl(providerId);
+				const owner = ownerAtStart.get(providerId) ?? this.#discoveryOwner(providerId);
 				return {
 					options: {
 						...managerOptions,
 						cacheProviderId: scopeModelCacheProviderIdToEndpoint(
 							managerOptions.cacheProviderId ?? providerId,
-							configuredBaseUrl,
+							this.#configuredBaseUrl(providerId),
 						),
 					},
-					isCurrent: () => this.#configuredBaseUrl(providerId) === configuredBaseUrl,
+					isCurrent: () => this.#discoveryOwner(providerId) === owner,
 				};
 			},
 		);
 
-		// Append runtime model managers registered by extensions via fetchDynamicModels;
-		// a result counts only while its registration is still the live one.
+		// Append runtime model managers registered by extensions via fetchDynamicModels.
 		for (const { options: managerOpts } of this.#runtimeModelManagers.values()) {
 			if (
 				!configuredDiscoveryProviders.has(managerOpts.providerId) &&
 				(!providerFilter || providerFilter.has(managerOpts.providerId))
 			) {
+				const owner = this.#discoveryOwner(managerOpts.providerId);
 				managers.push({
 					options: managerOpts,
-					isCurrent: () => this.#runtimeModelManagers.get(managerOpts.providerId)?.options === managerOpts,
+					isCurrent: () => this.#discoveryOwner(managerOpts.providerId) === owner,
 				});
 			}
 		}
 		return managers;
 	}
 
+	/** One manager's discovery and the state it reports; both are published only if its owner is still current. */
 	async #discoverWithModelManager(
 		options: ModelManagerOptions<Api>,
 		strategy: ModelRefreshStrategy,
-		isCurrent: () => boolean,
-	): Promise<BuiltInDiscoveryResult> {
+	): Promise<{ discovery: BuiltInDiscoveryResult; state: ProviderDiscoveryState }> {
 		let failure: string | undefined;
 		try {
 			const manager = createModelManager({ ...options, cacheDbPath: this.#cacheDbPath });
 			const result = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
 				manager.refresh(strategy),
 			);
-			if (!isCurrent()) {
-				return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
-			}
 			const models = result.models.map(model =>
 				model.provider === options.providerId ? model : { ...model, provider: options.providerId },
 			);
@@ -2957,16 +2992,6 @@ export class ModelRegistry {
 								: "empty";
 			// A throwing fetcher still resolves (cache or bundled), but the failure must reach the state and the log.
 			failure = result.fetchError;
-			this.#providerDiscoveryStates.set(options.providerId, {
-				provider: options.providerId,
-				status,
-				optional: false,
-				stale: result.stale,
-				fetchedAt: result.updatedAt,
-				source: result.source,
-				models: models.map(model => model.id),
-				...(failure !== undefined ? { error: failure } : {}),
-			});
 			const authoritativeProviders = new Set<string>();
 			if (options.dynamicModelsAuthoritative && !result.stale) {
 				authoritativeProviders.add(options.providerId);
@@ -2975,7 +3000,19 @@ export class ModelRegistry {
 			if (result.source === "provider") {
 				replaceRuntimeProviders.add(options.providerId);
 			}
-			return { models, authoritativeProviders, replaceRuntimeProviders };
+			return {
+				discovery: { models, authoritativeProviders, replaceRuntimeProviders },
+				state: {
+					provider: options.providerId,
+					status,
+					optional: false,
+					stale: result.stale,
+					fetchedAt: result.updatedAt,
+					source: result.source,
+					models: models.map(model => model.id),
+					...(failure !== undefined ? { error: failure } : {}),
+				},
+			};
 		} catch (error) {
 			failure = error instanceof Error ? error.message : String(error);
 			const previous = this.#providerDiscoveryStates.get(options.providerId);
@@ -2983,17 +3020,19 @@ export class ModelRegistry {
 			// 401/403 with nothing to serve is a credential problem, not an
 			// outage (issue #12281).
 			const authRejected = (previous?.models.length ?? 0) === 0 && isDiscoveryAuthRejection(error);
-			this.#providerDiscoveryStates.set(options.providerId, {
-				provider: options.providerId,
-				status: authRejected ? "unauthenticated" : "unavailable",
-				optional: previous?.optional ?? false,
-				stale: true,
-				...(previous?.fetchedAt !== undefined ? { fetchedAt: previous.fetchedAt } : {}),
-				...(previous?.source !== undefined ? { source: previous.source } : {}),
-				models: previous?.models ?? [],
-				error: failure,
-			});
-			return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
+			return {
+				discovery: { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() },
+				state: {
+					provider: options.providerId,
+					status: authRejected ? "unauthenticated" : "unavailable",
+					optional: previous?.optional ?? false,
+					stale: true,
+					...(previous?.fetchedAt !== undefined ? { fetchedAt: previous.fetchedAt } : {}),
+					...(previous?.source !== undefined ? { source: previous.source } : {}),
+					models: previous?.models ?? [],
+					error: failure,
+				},
+			};
 		} finally {
 			if (failure !== undefined) {
 				logger.warn("model discovery failed for provider", { provider: options.providerId, error: failure });
@@ -4136,10 +4175,14 @@ export class ModelRegistry {
 			const providerCompat = config.compat;
 			const managerOptions: ModelManagerOptions<Api> = {
 				providerId: providerName as Parameters<typeof createModelManager>[0]["providerId"],
-				// Never a built-in manager's namespace: the startup cache read of a
-				// built-in provider id would serve this extension's rows, and the
-				// endpoint baked into them, after the extension is gone.
-				cacheProviderId: scopeModelCacheProviderIdToEndpoint(`${providerName}:extension-v1`, config.baseUrl),
+				// Never a built-in manager's namespace, nor another extension's: the
+				// startup read of a built-in provider id, or another extension
+				// registering this id later, would otherwise serve these rows and the
+				// endpoints baked into them after this extension is gone.
+				cacheProviderId: scopeModelCacheProviderIdToEndpoint(
+					`${providerName}:extension-v1:${Bun.hash(sourceId ?? "").toString(36)}`,
+					config.baseUrl,
+				),
 				staticModels: [],
 				cacheDbPath: this.#cacheDbPath,
 				cacheTtlMs: 24 * 60 * 60 * 1000,
@@ -4150,6 +4193,12 @@ export class ModelRegistry {
 					const modelDefs = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
 						fetcher(resolvedKey),
 					);
+					// A superseded registration's roster must not reach the cache the
+					// live registration reads: failing here keeps the manager from
+					// writing it.
+					if (this.#runtimeModelManagers.get(providerName)?.options !== managerOptions) {
+						throw new Error(`Provider ${providerName}: registration was replaced during model discovery`);
+					}
 					// Dynamic rows can carry `!command` headers that are not on the
 					// registerProvider() config; track them so F5 / 401 can evict the cache.
 					this.#recordRuntimeModelHeaderCommands(providerName, modelDefs);
