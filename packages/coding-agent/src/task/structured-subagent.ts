@@ -926,6 +926,7 @@ async function isolationRecoveryHint(result: SingleResult, artifactsDir: string)
 		nestedPatchPaths: nested.paths,
 		nestedFailure: nested.failure,
 		branchName: result.branchName,
+		retainedWorkspace: result.retainedWorkspace,
 	});
 	return hint ? ` ${hint}` : "";
 }
@@ -1119,17 +1120,24 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				rootPatchPath: result.hasRootChanges === false ? undefined : result.patchPath,
 				nestedPatchPaths: result.nestedPatchPaths ?? [],
 			});
-		} else if (policy.isIsolated && isolationContext && !policy.applyChanges) {
-			mergeSummary = describeCapturedChanges(result);
-		} else if (policy.isIsolated && isolationContext && requiresRecoveryArtifacts) {
-			// The runner captured a failed run's changes instead of applying them;
-			// this is where the parent learns where they are.
+		} else if (
+			policy.isIsolated &&
+			isolationContext &&
+			(requiresRecoveryArtifacts || result.retainedWorkspace !== undefined)
+		) {
+			// The runner captured a failed run's changes instead of applying them,
+			// or kept its workspace when it could not; this is where the parent
+			// learns where they are, including for an aborted run whose
+			// `result.error` the task result does not print.
 			mergeSummary = renderIsolationSummary({
 				kind: "failed-run",
 				branchName: result.branchName,
 				rootPatchPath: result.hasRootChanges === false ? undefined : result.patchPath,
 				nestedPatchPaths: result.nestedPatchPaths ?? [],
+				retainedDir: result.retainedWorkspace,
 			});
+		} else if (policy.isIsolated && isolationContext && !policy.applyChanges) {
+			mergeSummary = describeCapturedChanges(result);
 		}
 
 		completedSuccessfully = result.exitCode === 0 && !result.error && !result.aborted;

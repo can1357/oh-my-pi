@@ -25,7 +25,11 @@ Captured branch preserved as {{branchName}}.
 {{#list nestedPatchPaths prefix="- nested repository patch: `" suffix="`"}}{{this}}{{/list}}
 {{/when}}
 {{#when kind "==" "failed-run"}}
+{{#if retainedDir}}
+Isolation: the failed run's changes could not be captured; its workspace is kept at `{{retainedDir}}`. Recover the changes from it; `omp worktree clear` reclaims it once this session has exited.
+{{else}}
 Isolation: the failed run's changes were captured, not applied.
+{{/if}}
 {{#if branchName}}
 - branch: `{{branchName}}`
 {{/if}}

@@ -40,6 +40,7 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
+import { formatTaskResultSummary } from "@oh-my-pi/pi-coding-agent/task/result-summary";
 import {
 	buildStructuredSubagentRecoveryHint,
 	resolveEffectiveSubagentPolicy,
@@ -1345,6 +1346,28 @@ describe("structured subagent primitive", () => {
 		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
 		// The task result is the parent's only pointer to the failed run's changes.
 		expect(settled.mergeSummary).toContain("/recovery/Worker.patch");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("shows the retained workspace of an aborted isolated run in the task result", async () => {
+		mockDiscovery();
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async () => ({
+			...result(),
+			exitCode: 1,
+			aborted: true,
+			abortReason: "Cancelled by caller",
+			error: "Capturing the failed run's changes failed: ENOSPC. Isolation workspace retained at /wt/kept/m.",
+			retainedWorkspace: "/wt/kept/m",
+		}));
+
+		const settled = await runStructuredSubagent(
+			request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
+		);
+
+		// The task result prints no `<error>` for an aborted run; the merge summary must carry the path.
+		const shown = formatTaskResultSummary(settled.result, { totalDurationMs: 1, mergeSummary: settled.mergeSummary });
+		expect(shown).toContain("/wt/kept/m");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 

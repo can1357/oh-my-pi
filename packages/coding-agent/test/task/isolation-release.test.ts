@@ -160,6 +160,8 @@ async function runFailedIsolated(
 		captureDir?: (root: string) => Promise<string>;
 		/** False: no session transcript, so an abort cannot park the agent and the lifecycle releases it in-run. */
 		resumable?: boolean;
+		/** The caller's result observer; a throw sends the runner down its catch path. */
+		onSubprocessResult?: (result: SingleResult) => void;
 	},
 ): Promise<FailedRun> {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-failed-run-"));
@@ -240,6 +242,7 @@ async function runFailedIsolated(
 		mergeMode: options.mergeMode,
 		artifactsDir: options.captureDir ? await options.captureDir(root) : artifactsDir,
 		buildFailureResult: error => ({ ...result(id), exitCode: 1, error: String(error) }),
+		onSubprocessResult: options.onSubprocessResult,
 	});
 	if (AgentLifecycleManager.global().has(id)) await AgentLifecycleManager.global().release(id);
 	return { result: runResult, repo, workspace, artifactsDir };
@@ -305,5 +308,33 @@ describe("failed isolated run", () => {
 		const retained = run.result.error?.match(/Isolation workspace retained at (\S+) —/)?.[1];
 		expect(retained).toBeDefined();
 		expect(await Bun.file(path.join(retained ?? "", "work.txt")).text()).toBe("child work\n");
+	});
+
+	it("captures the work when the runner fails by a throw after the child ran", async () => {
+		const run = await runFailedIsolated("ObserverThrows", "throw", {
+			keepAlive: false,
+			mergeMode: "patch",
+			onSubprocessResult: () => {
+				throw new Error("result observer failed");
+			},
+		});
+
+		expect(run.result.error).toContain("result observer failed");
+		expect(await Bun.file(run.result.patchPath ?? "").text()).toContain("+child work");
+		await expect(fs.stat(run.workspace)).rejects.toThrow();
+	});
+
+	it("names the retained workspace in the result of an aborted run whose capture throws", async () => {
+		const run = await runFailedIsolated("AbortCaptureThrows", "abort", {
+			keepAlive: false,
+			mergeMode: "patch",
+			captureDir: async root => {
+				await Bun.write(path.join(root, "not-a-dir"), "");
+				return path.join(root, "not-a-dir", "artifacts");
+			},
+		});
+
+		expect(run.result.aborted).toBe(true);
+		expect(await Bun.file(path.join(run.result.retainedWorkspace ?? "", "work.txt")).text()).toBe("child work\n");
 	});
 });

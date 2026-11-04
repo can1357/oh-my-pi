@@ -72,6 +72,8 @@ export interface IsolationSummaryContext {
 	rootPatchPath?: string;
 	nestedCount?: number;
 	nestedPatchPaths?: string[];
+	/** Workspace kept because a failed run's changes could not be captured. */
+	retainedDir?: string;
 	error?: string;
 	conflict?: string;
 }
@@ -397,6 +399,8 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	let releasedChanges:
 		| Pick<SingleResult, "patchPath" | "hasRootChanges" | "nestedPatchPaths" | "branchName">
 		| undefined;
+	/** Workspace a release during the run kept because it could not capture it. */
+	let releaseRetainedDir: string | undefined;
 	/** The run's IRC wake hold, released only once the run-end capture is done. */
 	let releaseIrcWakes: (() => void) | undefined;
 	const releaseBase = (): Promise<void> => {
@@ -423,6 +427,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				} catch (captureErr) {
 					retainWorkspace = true;
 					const retained = await retainIsolationWorkspace(handle.mergedDir, handle.backend);
+					releaseRetainedDir = retained.dir;
 					throw new Error(
 						renderIsolationError({
 							kind: "patch-capture-failed",
@@ -464,7 +469,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	 * successful run gets: the task branch in branch mode, the patch artifact
 	 * otherwise. The result carries the location; nothing is applied. A run that
 	 * changed nothing comes back unchanged. When the capture throws, the
-	 * workspace is retained and `result.error` names it.
+	 * workspace is retained and named in `result.error` and `retainedWorkspace`.
 	 */
 	const captureFailedRun = async (
 		result: SingleResult,
@@ -481,7 +486,11 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				retainedDir: retained.dir,
 				sidecarMissing: !retained.sidecarOk,
 			});
-			return { ...result, error: result.error ? `${result.error}\n\n${note}` : note };
+			return {
+				...result,
+				error: result.error ? `${result.error}\n\n${note}` : note,
+				retainedWorkspace: retained.dir,
+			};
 		};
 		if (releasePromise) {
 			// The agent lifecycle already captured and removed the workspace.
@@ -489,7 +498,11 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				await releasePromise;
 			} catch (releaseErr) {
 				const note = releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
-				return { ...result, error: result.error ? `${result.error}\n\n${note}` : note };
+				return {
+					...result,
+					error: result.error ? `${result.error}\n\n${note}` : note,
+					retainedWorkspace: releaseRetainedDir,
+				};
 			}
 			const changed =
 				releasedChanges &&
@@ -532,7 +545,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				return { ...branchResult, nestedPatchPaths };
 			} catch (persistErr) {
 				const kept = await keepWorkspace(persistErr);
-				return { ...branchResult, error: kept.error };
+				return { ...branchResult, error: kept.error, retainedWorkspace: kept.retainedWorkspace };
 			}
 		}
 		let capture: IsolationPatchCapture;
@@ -687,7 +700,11 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		}
 		return rememberAgentArtifacts(result);
 	} catch (err) {
-		return rememberAgentArtifacts(opts.buildFailureResult(err));
+		const failure = opts.buildFailureResult(err);
+		// A throw after the child ran (from `runSubprocess` or the caller's
+		// `onSubprocessResult`) leaves its work in the workspace like a failed run.
+		if (!handle || !taskBaseline) return rememberAgentArtifacts(failure);
+		return rememberAgentArtifacts(await captureFailedRun(failure, handle, taskBaseline));
 	} finally {
 		if (
 			handle &&
