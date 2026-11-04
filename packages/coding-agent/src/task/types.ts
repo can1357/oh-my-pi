@@ -42,6 +42,21 @@ export interface SubagentEventPayload {
 	event: AgentSessionEvent;
 }
 
+/**
+ * Root-bus channel for a warning the user must see that arises anywhere in a
+ * spawn tree — a subagent's isolated workspace kept because its changes could
+ * not be saved. The root session shows it as a notice; a subagent's own
+ * session has nobody watching it.
+ */
+export const TASK_SUBAGENT_NOTICE_CHANNEL = "task:subagent:notice";
+
+/** Payload emitted on TASK_SUBAGENT_NOTICE_CHANNEL */
+export interface SubagentNoticePayload {
+	level: "info" | "warning" | "error";
+	message: string;
+	source: string;
+}
+
 // Keep this explicit: ArkType serializes `unknown` as a boolean subschema, which llama.cpp grammars reject.
 const outputSchemaInputSchema = type("object | boolean | string | null");
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.

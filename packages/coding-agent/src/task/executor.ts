@@ -3698,6 +3698,8 @@ export async function finalizeSubagentLifecycle(args: {
 			idleTtlMs: args.agentIdleTtlMs,
 			revive: args.reviveSession ?? undefined,
 			onRelease: args.onRelease,
+			// An isolated agent's tree is released when it would park.
+			releaseOnPark: args.isolated,
 		},
 		ref,
 	);

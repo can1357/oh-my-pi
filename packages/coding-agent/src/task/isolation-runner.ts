@@ -41,6 +41,7 @@ import { armTeardown, hasLiveIsolationLease, hasUnfinishedWriter } from "./isola
 import {
 	readIsolationClaim,
 	readRetainedMountBackend,
+	recordIsolationKept,
 	requireSandboxLockHeld,
 	resolveSandboxIdentity,
 	withSandboxLock,
@@ -68,6 +69,13 @@ import {
 } from "./worktree";
 
 import { cfgTaskIsolationCommits } from "./settings";
+import { type SubagentNoticePayload, TASK_SUBAGENT_NOTICE_CHANNEL } from "./types";
+import type { EventBus } from "../utils/event-bus";
+
+/** Put a warning on the spawn tree's root bus, where the root session shows it to the user. */
+function emitSubagentNotice(bus: EventBus | undefined, notice: SubagentNoticePayload): void {
+	bus?.emit(TASK_SUBAGENT_NOTICE_CHANNEL, notice);
+}
 
 type IsoBackendKind = natives.IsoBackendKind;
 
@@ -616,6 +624,12 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		} catch (captureErr) {
 			retainWorkspace = true;
 			const retained = await retainIsolationWorkspace(sandbox.mergedDir, sandbox.backend, sandbox.generation);
+			if (retained.location === "here") {
+				retainedAtRelease = {
+					dir: retained.dir,
+					reason: captureErr instanceof Error ? captureErr.message : String(captureErr),
+				};
+			}
 			throw new Error(
 				renderIsolationError({
 					kind: "patch-capture-failed",
@@ -707,8 +721,40 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				generation: handle.generation,
 			});
 			await cleanupHandle();
+			// The teardown keeps the workspace when a capture or a delivery
+			// failed, and says so only to a log. A release nobody waits on —
+			// one at the idle TTL — then leaves the only copy of the work in a
+			// directory no person has heard of.
+			const failure = finalCaptureError ?? releaseCaptureError;
+			const kept =
+				retainedAtRelease ??
+				(finalCaptureError !== undefined && failure !== undefined
+					? { dir: sandbox.mergedDir, reason: failure instanceof Error ? failure.message : String(failure) }
+					: undefined);
+			if (kept) await reportKeptAtRelease(kept);
 		})();
 		return releasePromise;
+	};
+	/** Where a release kept the workspace because its changes could not be saved, when it did. */
+	let retainedAtRelease: { dir: string; reason: string } | undefined;
+	/**
+	 * Tell everyone who will ask that this release kept the workspace: the
+	 * workspace itself, for `omp worktree list`; the registry, for a later
+	 * message to the agent; and the user, through the root session.
+	 */
+	const reportKeptAtRelease = async (kept: { dir: string; reason: string }): Promise<void> => {
+		await recordIsolationKept(path.dirname(kept.dir), kept.reason).catch(error => {
+			logger.warn("isolation workspace kept at release, and its reason could not be recorded in it", {
+				dir: kept.dir,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+		AgentRegistry.global().setHistory(opts.agentId, { keptWorkspace: kept });
+		const message =
+			`Isolated agent ${opts.agentId} was released, but its changes could not be saved, so its workspace is ` +
+			`kept at ${kept.dir}: ${kept.reason}`;
+		logger.warn(message, { agentId: opts.agentId });
+		emitSubagentNotice(opts.baseOptions.subagentEventBus, { level: "warning", message, source: "isolation" });
 	};
 	/** Why the capture at release failed, when it did; the caller's result must carry it. */
 	let releaseCaptureError: unknown;

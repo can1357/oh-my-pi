@@ -41,6 +41,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import * as prompt from "@oh-my-pi/pi-utils/prompt";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
+import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { DEFAULT_FRAME_DATA_BYTES_BUDGET, frameDataBytesBudget } from "@oh-my-pi/snapcompact";
 import {
@@ -271,7 +272,7 @@ import {
 	projectSystemPromptToolMetadata,
 	withoutAgentsMd,
 } from "./system-prompt";
-import type { AgentDefinition } from "./task/types";
+import { type AgentDefinition, TASK_SUBAGENT_NOTICE_CHANNEL } from "./task/types";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { sessionDelegationBias } from "./task/prompt-policy";
@@ -6013,6 +6014,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					capture: content => session.runAutolearnCapture(signal => runAutoLearnCapture(content, signal)),
 				});
 			}
+		}
+
+		// A warning for the user that arises anywhere in the spawn tree — a
+		// subagent's isolated workspace kept because its changes could not be
+		// saved — travels the tree's root bus. The root session is the one
+		// somebody watches, so it, and only it, shows it.
+		if (!isSubagentSession) {
+			disposeCallbacks.add(
+				subagentEventBus.on(TASK_SUBAGENT_NOTICE_CHANNEL, data => {
+					if (
+						isRecord(data) &&
+						(data.level === "info" || data.level === "warning" || data.level === "error") &&
+						typeof data.message === "string"
+					) {
+						session.emitNotice(
+							data.level,
+							data.message,
+							typeof data.source === "string" ? data.source : undefined,
+						);
+					}
+				}),
+			);
 		}
 
 		// MCP manager wiring has two ownership models:

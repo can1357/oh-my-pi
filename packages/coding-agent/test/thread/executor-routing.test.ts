@@ -809,7 +809,7 @@ describe("subagent runs routed into pooled workers", () => {
 	);
 
 	it(
-		"holds a worker while main's lifecycle owns a release hook that lives there, and runs that hook on release",
+		"runs a worker-homed isolated child's release hook, which lives on the worker, when main's lifecycle releases it at park",
 		async () => {
 			const failures: unknown[] = [];
 			cleanups.push(
@@ -832,14 +832,14 @@ describe("subagent runs routed into pooled workers", () => {
 				.map(ref => ref.id);
 			expect(ids.length).toBe(2);
 			const lifecycle = AgentLifecycleManager.global();
-			for (const id of ids) await lifecycle.park(id);
 			const [worker] = pool.workers();
 			if (!worker) throw new Error("no pooled worker");
-			// Both sessions are parked: only the nested child's release hook, which
-			// lives on this worker, keeps it from going idle and taking the hook with it.
-			expect(worker.load).toBeGreaterThan(0);
-
-			for (const id of ids) await lifecycle.release(id);
+			// The nested child is isolated, so parking releases it: main's
+			// lifecycle runs its release hook, which lives on this worker, once,
+			// across the link, and the hook captures and removes its workspace.
+			for (const id of ids) await lifecycle.park(id);
+			const nested = ids.find(id => id !== "ParentInWorker");
+			expect(AgentRegistry.global().get(nested ?? "")?.status).toBe("aborted");
 			expect(failures).toEqual([]);
 			expect(await workspaces()).toEqual([]);
 			expect(worker.load).toBe(0);

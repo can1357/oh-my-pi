@@ -5,7 +5,8 @@
  * The task executor hands a finished agent over via {@link AgentLifecycleManager.adopt};
  * from then on the manager arms a TTL timer whenever the agent goes `idle`,
  * parks it on expiry (disposes the live session, keeps the AgentRef +
- * sessionFile), and revives it on demand through
+ * sessionFile) — or, for an adoption with `releaseOnPark`, releases it to a
+ * terminal row instead — and revives a parked one on demand through
  * {@link AgentLifecycleManager.ensureLive}. Only this manager flips
  * `parked` ↔ `idle`. A killed (`aborted`) agent is revived the same way: its
  * transcript is still on disk, so ensureLive reopens it as a fresh `parked`
@@ -78,6 +79,14 @@ export interface AdoptOptions {
 	/** Releases resources that must survive parking but end with the agent lifecycle. */
 	onRelease?: () => Promise<void>;
 	/**
+	 * Release the agent when its idle TTL expires instead of parking it: the
+	 * session is disposed, {@link onRelease} runs and a terminal row is kept.
+	 * For an isolated agent, whose release captures its workspace, delivers the
+	 * changes and removes the tree — a parked one kept a checkout's worth of disk
+	 * for as long as the parent lived, for a warm revive that rarely came.
+	 */
+	releaseOnPark?: boolean;
+	/**
 	 * Called once when this adoption stops holding `revive` — released, replaced by
 	 * a re-adopt, removed from the registry, or its reviver forgotten — so whoever
 	 * tracks the reviver can let go of it.
@@ -90,8 +99,30 @@ interface AdoptedAgent {
 	idleTtlMs: number;
 	revive?: AgentReviver;
 	onRelease?: () => Promise<void>;
+	releaseOnPark?: boolean;
 	onReviverDropped?: () => void;
 	timer?: NodeJS.Timeout;
+}
+
+/**
+ * What a message to an agent released at park is told: that it is gone, why,
+ * and where its work went.
+ */
+function describeReleasedAtPark(ref: AgentRef): string {
+	const history = ref.history;
+	const kept = history?.keptWorkspace;
+	const where = kept
+		? ` Its changes could not be saved, so its workspace was kept at ${kept.dir} (${kept.reason}); recover them from there.`
+		: history?.branchName
+			? ` Its changes are on branch ${history.branchName}${history.patchPath ? ` and in ${history.patchPath}` : ""}.`
+			: history?.patchPath
+				? ` Its changes are in ${history.patchPath}${history.nestedPatchPaths?.length ? ` and ${history.nestedPatchPaths.join(", ")}` : ""}.`
+				: " No patch was recorded for it.";
+	return (
+		`Agent "${ref.id}" was released when it went idle: an isolated agent is not kept parked, so its workspace ` +
+		`was captured and removed then.${where} Its transcript remains readable at history://${ref.id}; spawn a new ` +
+		"agent to continue its work."
+	);
 }
 
 /** Fire (at most once) the adoption's reviver-dropped hook. */
@@ -272,6 +303,8 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 	#persistedReviveTtlMs: () => number = () => 0;
 	/** Set once {@link dispose} runs; blocks late revivals from adopting into a torn-down manager. */
 	#disposed = false;
+	/** Terminal rows of agents released, rather than parked, at their idle TTL. */
+	readonly #releasedAtPark = new WeakSet<AgentRef>();
 
 	constructor(registry: AgentRegistryApi = AgentRegistry.global()) {
 		this.#registry = registry;
@@ -325,6 +358,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			idleTtlMs: opts.idleTtlMs,
 			revive: opts.revive,
 			onRelease: opts.onRelease,
+			releaseOnPark: opts.releaseOnPark,
 			onReviverDropped: opts.onReviverDropped,
 		};
 		dropReviver(existing);
@@ -460,6 +494,17 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		const session = ref.session;
 		if (!session) return;
 
+		if (adopted.releaseOnPark) {
+			// A run in progress is not ended by its idle timer.
+			if (ref.status === "running") return;
+			// Recorded before the release, which turns the row terminal before
+			// its first await: a message arriving from here on is told the agent
+			// was released and where its work went, not offered a revive.
+			this.#releasedAtPark.add(ref);
+			await this.release(id, ref, { tombstone: true });
+			return;
+		}
+
 		if (adopted.timer) {
 			clearTimeout(adopted.timer);
 			adopted.timer = undefined;
@@ -565,6 +610,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				`Unknown agent "${id}" — it was never registered or has been released. If a transcript exists, read history://${id}.`,
 			);
 		}
+		if (ref.status === "aborted" && this.#releasedAtPark.has(ref)) throw new Error(describeReleasedAtPark(ref));
 		if (ref.status === "aborted") ref = await this.#reopen(id, ref);
 		// A revive attaches its session before it finishes initializing it: join the revive rather
 		// than hand out a session whose extensions have not re-registered their tools yet.
@@ -669,6 +715,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 					idleTtlMs: prior?.idleTtlMs ?? this.#persistedReviveTtlMs(),
 					revive,
 					onRelease: prior?.onRelease,
+					releaseOnPark: prior?.releaseOnPark,
 				};
 				this.#adopted.set(id, adoption);
 				coldAdopted = true;
