@@ -164,8 +164,6 @@ describe("handleSkillList", () => {
 
 		let stdout = "";
 		let stderr = "";
-		const originalStdoutWrite = process.stdout.write;
-		const originalStderrWrite = process.stderr.write;
 		life.assertLive();
 		process.stdout.write = ((chunk: string | Uint8Array) => {
 			stdout += chunk.toString();
@@ -175,8 +173,8 @@ describe("handleSkillList", () => {
 			stderr += chunk.toString();
 			return true;
 		}) as typeof process.stderr.write;
-		// The streams stay replaced until `onTestFinished` puts them back: a put-back here would run
-		// after the await, so a body abandoned on timeout would undo a later test's replacement.
+		// The streams stay replaced until the synchronous `afterEach` puts them back: a put-back here
+		// would run after the await, so a body abandoned on timeout would undo a later test's replacement.
 		try {
 			expect(await handleSkillList([], directory, false)).toBe(0);
 		} finally {

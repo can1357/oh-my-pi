@@ -10,7 +10,7 @@ import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/to
 import { releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { installEnvRestores } from "../../../utils/test/helpers/mock-restores";
+import { installEnvRestores, testLifetime } from "../../../utils/test/helpers/mock-restores";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "./tern-fake-daemon";
 
 const PANE = 3;
@@ -41,7 +41,10 @@ afterEach(async () => {
 	relay = undefined;
 });
 
-/** A Tern window listing `blocks`, able to host an adoption of any of them. */
+/**
+ * A Tern window listing `blocks`, able to host an adoption of any of them. The test points omp at
+ * it with {@link enterWindow} once its lifetime is checked: this helper suspends first.
+ */
 async function startWindow(blocks: readonly Record<string, unknown>[]): Promise<FakeDaemon> {
 	daemon = await startFakeDaemon((op): FakeAnswer => {
 		switch (op.op) {
@@ -68,10 +71,14 @@ async function startWindow(blocks: readonly Record<string, unknown>[]): Promise<
 				return { ok: {} };
 		}
 	});
-	process.env.TERN_PANE_SOCKET = daemon.socketPath;
+	return daemon;
+}
+
+/** Point omp's Tern lookup at `window`, as a pane inside it. */
+function enterWindow(tern: FakeDaemon): void {
+	process.env.TERN_PANE_SOCKET = tern.socketPath;
 	process.env.TERN_PANE = String(PANE);
 	delete process.env.PI_BROWSER_TERN;
-	return daemon;
 }
 
 function session(settings: Record<string, unknown> = {}): ToolSession {
@@ -99,7 +106,10 @@ async function invoke(tool: ToolSession, parameters: Record<string, unknown>) {
 
 describe("browser targets in Tern", () => {
 	it("lists the window's browser blocks and names the omp tab holding an adopted one", async () => {
-		await startWindow(BLOCKS);
+		const life = testLifetime();
+		const tern = await startWindow(BLOCKS);
+		life.assertLive();
+		enterWindow(tern);
 		const tool = session();
 		opened.push("docs");
 		await invoke(tool, { action: "open", name: "docs", timeout: 5, app: { target: "Docs C" } });
@@ -123,7 +133,10 @@ describe("browser targets in Tern", () => {
 	});
 
 	it("omits shown and driven an older Tern does not report", async () => {
-		await startWindow([{ block: 6, url: "https://docs.example/b", title: "Docs B", owner: PANE }]);
+		const life = testLifetime();
+		const tern = await startWindow([{ block: 6, url: "https://docs.example/b", title: "Docs B", owner: PANE }]);
+		life.assertLive();
+		enterWindow(tern);
 		const { text, value } = await invoke(session(), { action: "targets", timeout: 5 });
 		expect(value).toStrictEqual([{ target: "6", title: "Docs B", url: "https://docs.example/b", docked: false }]);
 		expect(text).toContain("update Tern to adopt the user's own");

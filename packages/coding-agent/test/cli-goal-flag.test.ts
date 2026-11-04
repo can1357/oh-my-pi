@@ -46,14 +46,12 @@ class ProcessExitSignal extends Error {
  */
 async function launchInteractive(rawArgs: string[]): Promise<{ thrown: unknown; touched: string[] }> {
 	using authDir = TempDir.createSync("@omp-goal-auth-");
-	const authStorage = await AuthStorage.create(path.join(authDir.path(), "auth.db"));
 	const touched: string[] = [];
 	const parsed = parseArgs(rawArgs);
 	parsed.noExtensions = true;
 	parsed.noSkills = true;
 	parsed.noRules = true;
 	parsed.noLsp = true;
-	const previousHost = setInteractiveHost(false);
 	const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 	onTestFinished(() => {
 		if (originalIsTTY) Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
@@ -65,6 +63,8 @@ async function launchInteractive(rawArgs: string[]): Promise<{ thrown: unknown; 
 	}) as typeof process.exit);
 	vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 	vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+	const authStorage = await AuthStorage.create(path.join(authDir.path(), "auth.db"));
+	const previousHost = setInteractiveHost(false);
 	try {
 		await runRootCommand(parsed, rawArgs, {
 			settings: Settings.isolated({ "marketplace.autoUpdate": "off" }),

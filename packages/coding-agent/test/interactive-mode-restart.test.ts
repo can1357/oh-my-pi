@@ -12,6 +12,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import * as natives from "@oh-my-pi/pi-natives";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 describe("InteractiveMode restart", () => {
 	let tempDir: TempDir;
@@ -68,6 +69,7 @@ describe("InteractiveMode restart", () => {
 	}
 
 	it("resumes an explicitly opened persona journal without rediscovering its ID", async () => {
+		const life = testLifetime();
 		sessionManager.appendMessage({ role: "user", content: "initial request", timestamp: 1 });
 		sessionManager.appendMessage({
 			role: "assistant",
@@ -93,6 +95,7 @@ describe("InteractiveMode restart", () => {
 		const transcript = sessionManager.buildSessionContext().messages;
 		await sessionManager.close();
 		sessionManager = await SessionManager.open(file);
+		life.assertLive();
 		const command = await restart([
 			"--session",
 			file,
@@ -123,6 +126,7 @@ describe("InteractiveMode restart", () => {
 	});
 
 	it("resumes a journal created in a flag-looking relative directory", async () => {
+		const life = testLifetime();
 		using relativeDir = TempDir.createSync("-omp-restart-");
 		await sessionManager.close();
 		sessionManager = SessionManager.create(tempDir.path(), relativeDir.path());
@@ -131,6 +135,7 @@ describe("InteractiveMode restart", () => {
 		const file = sessionManager.getSessionFile();
 		if (!file) throw new Error("expected persisted journal");
 		const id = sessionManager.getSessionId();
+		life.assertLive();
 		const command = await restart(["--model", "anthropic/claude-sonnet-4-5", `--session-dir=${relativeDir.path()}`]);
 		const parsed = parseArgs(command.slice(command.indexOf("--model")));
 		const resumed = await createSessionManager(parsed, tempDir.path(), Settings.isolated());

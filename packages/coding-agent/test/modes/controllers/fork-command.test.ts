@@ -16,7 +16,7 @@ import {
 	type TerminalLaunchRequest,
 	type TerminalLaunchResult,
 } from "../../../src/subprocess/terminal-launch";
-import { installEnvRestores } from "../../../../utils/test/helpers/mock-restores";
+import { installEnvRestores, testLifetime } from "../../../../utils/test/helpers/mock-restores";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "../../tools/tern-fake-daemon";
 
 let tempDirectory: string;
@@ -434,15 +434,24 @@ describe("/fork inside Tern", () => {
 		daemon = undefined;
 	});
 
+	// The test points omp at the window with `enterTern` once its lifetime is checked: this helper
+	// suspends first.
 	async function startTern(fork: () => FakeAnswer): Promise<FakeDaemon> {
 		daemon = await startFakeDaemon(() => ({ ok: {} }), { welcome: { ops: ["browser", "fork"] }, fork });
-		process.env.TERN_PANE_SOCKET = daemon.socketPath;
-		process.env.TERN_PANE = "5";
 		return daemon;
 	}
 
+	/** Run omp as pane 5 of `tern`. */
+	function enterTern(tern: FakeDaemon): void {
+		process.env.TERN_PANE_SOCKET = tern.socketPath;
+		process.env.TERN_PANE = "5";
+	}
+
 	it("forks into a new pane while a turn is running, leaving the running session in place", async () => {
+		const life = testLifetime();
 		const tern = await startTern(() => ({ ok: { block: 9 } }));
+		life.assertLive();
+		enterTern(tern);
 		const { controller, ctx, session } = createContext({ streaming: true });
 		await controller.handleForkCommand();
 		expect(tern.forks).toEqual([{ id: 1, op: { block: 5 } }]);
@@ -453,7 +462,10 @@ describe("/fork inside Tern", () => {
 	});
 
 	it("refuses the in-place fallback mid-turn when Tern declines the fork", async () => {
+		const life = testLifetime();
 		const tern = await startTern(() => ({ error: { kind: "not_agent", message: "no session file" } }));
+		life.assertLive();
+		enterTern(tern);
 		const { controller, ctx, session } = createContext({ streaming: true });
 		await controller.handleForkCommand();
 		expect(tern.forks).toHaveLength(1);

@@ -27,7 +27,10 @@ const write = (url: string, content: string, settings: Settings, caller?: Partia
 const textOf = (result: InternalWriteResult) => (result.content[0]?.type === "text" ? result.content[0].text : "");
 
 describe("CfgProtocolHandler", () => {
-	afterEach(() => setCfgApprovalHost(null));
+	// A block body: an expression body reads as a hook that may return a promise and suspend.
+	afterEach(() => {
+		setCfgApprovalHost(null);
+	});
 
 	it("lists a namespace relative to its prefix and a setting with its source", async () => {
 		const settings = Settings.isolated({ "advisor.syncBacklog": "3" });

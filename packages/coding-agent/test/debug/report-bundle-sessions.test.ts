@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { collectMemoryStats } from "@oh-my-pi/pi-coding-agent/debug/profiler";
 import { createReportBundle } from "@oh-my-pi/pi-coding-agent/debug/report-bundle";
 import { getConfigRootDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalXdgStateHome = process.env.XDG_STATE_HOME;
@@ -36,18 +37,25 @@ async function archiveMembers(archivePath: string): Promise<string[]> {
 	return [...(await archive.files()).keys()].sort();
 }
 
+/** A temporary root with an empty `state/omp`; the test points omp at it with {@link useReportDirectory}. */
 async function setupReportDirectory(): Promise<string> {
 	cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-report-"));
-	const xdgStateHome = path.join(cleanupRoot, "state");
-	await fs.mkdir(path.join(xdgStateHome, "omp"), { recursive: true });
-	process.env.XDG_STATE_HOME = xdgStateHome;
-	setAgentDir(fallbackAgentDir);
+	await fs.mkdir(path.join(cleanupRoot, "state", "omp"), { recursive: true });
 	return cleanupRoot;
+}
+
+/** Point the state directory into `root` and the agent directory at the default. */
+function useReportDirectory(root: string): void {
+	process.env.XDG_STATE_HOME = path.join(root, "state");
+	setAgentDir(fallbackAgentDir);
 }
 
 describe("report bundle privacy", () => {
 	it("exports numeric memory diagnostics without live credentials or runtime type names", async () => {
-		await setupReportDirectory();
+		const life = testLifetime();
+		const root = await setupReportDirectory();
+		life.assertLive();
+		useReportDirectory(root);
 		const credential = `sk-ant-ort01-${crypto.randomUUID()}`;
 		const heap = jsc.heapStats();
 		vi.spyOn(jsc, "heapStats").mockReturnValue({
@@ -79,7 +87,10 @@ describe("report bundle privacy", () => {
 	});
 
 	it("bundles only the current session's subtree, not unrelated co-located sessions", async () => {
+		const life = testLifetime();
 		const root = await setupReportDirectory();
+		life.assertLive();
+		useReportDirectory(root);
 		const sessionsDir = path.join(root, "sessions");
 		await fs.mkdir(sessionsDir, { recursive: true });
 

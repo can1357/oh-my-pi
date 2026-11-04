@@ -653,11 +653,17 @@ function isAsyncTest(facts: FileFacts, flow: Flow): boolean {
 	return returnsValue(facts, flow.test);
 }
 
-/** Does `fn` itself (not a function nested in it) suspend at a node starting in `[after, before)`? */
+/**
+ * Does `fn` itself (not a function nested in it) suspend at a node starting in `[after, before)`?
+ * An `await` whose operand contains `before` does not count: it suspends only once that operand,
+ * `before` included, has run, so `await helper()` runs the helper's statements up to its own first
+ * `await` before the caller suspends.
+ */
 function awaitsIn(facts: FileFacts, fn: Node, after: number, before: number): boolean {
 	let found = false;
 	walk(facts.context, fn, n => {
 		if (found || n.range[0] < after || n.range[0] >= before) return;
+		if (n.type === "AwaitExpression" && n.range[1] > before) return;
 		if (
 			(n.type === "AwaitExpression" || (n.type === "ForOfStatement" && n.await === true)) &&
 			enclosingFunction(n) === fn

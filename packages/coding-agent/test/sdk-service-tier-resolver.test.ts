@@ -9,6 +9,7 @@ import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const runtimeProviderExtension: ExtensionFactory = pi => {
 	pi.registerProvider("runtime-provider", {
@@ -232,6 +233,7 @@ describe.serial("createAgentSession resolveServiceTierByFamily", () => {
 	});
 
 	it("keeps omitted and explicit default tiers distinct during Codex prewarm and the first turn", async () => {
+		const life = testLifetime();
 		using tempDir = TempDir.createSync("@omp-service-tier-prewarm-default-");
 		const createDeferredSession = async (
 			resolveServiceTierByFamily?: (model: Model | undefined) => ServiceTierByFamily,
@@ -268,6 +270,7 @@ describe.serial("createAgentSession resolveServiceTierByFamily", () => {
 			await omitted.dispose();
 		}
 
+		life.assertLive();
 		installCapturingWebSocket();
 		const { session: explicitDefault } = await createDeferredSession(model =>
 			resolveAgentServiceTierOverride("default", model, {}),

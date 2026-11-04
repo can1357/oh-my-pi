@@ -81,8 +81,9 @@ describe("getVertexAccessToken impersonated_service_account ADC", () => {
 	});
 
 	it("signs an RS256 JWT for a service_account source and reconstructs the IAM URL", async () => {
-		const pem = await generateServiceAccountPem();
 		const adcPath = path.join(tmpDir, "impersonated-sa.json");
+		Bun.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
+		const pem = await generateServiceAccountPem();
 		await Bun.write(
 			adcPath,
 			JSON.stringify({
@@ -99,7 +100,6 @@ describe("getVertexAccessToken impersonated_service_account ADC", () => {
 				// delegates intentionally omitted — the IAM body must default to [].
 			}),
 		);
-		Bun.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
 
 		const calls: { url: string; init?: RequestInit }[] = [];
 		const fetchImpl: FetchImpl = async (input, init) => {

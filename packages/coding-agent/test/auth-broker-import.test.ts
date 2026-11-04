@@ -57,6 +57,7 @@ describe("auth-broker import (CLIProxyAPI)", () => {
 	}
 
 	test("imports a directory of CLIProxyAPI JSONs and maps types to omp providers", async () => {
+		const life = testLifetime();
 		await writeCliProxyJson("claude-sample.json", {
 			type: "claude",
 			access_token: "claude-access-1",
@@ -84,6 +85,7 @@ describe("auth-broker import (CLIProxyAPI)", () => {
 			disabled: true,
 		});
 
+		life.assertLive();
 		const restore = silenceStdout();
 		await runAuthBrokerCommand({
 			action: "import",
@@ -121,6 +123,7 @@ describe("auth-broker import (CLIProxyAPI)", () => {
 	});
 
 	test("dry-run does not write any credentials", async () => {
+		const life = testLifetime();
 		await writeCliProxyJson("claude.json", {
 			type: "claude",
 			access_token: "a",
@@ -129,6 +132,7 @@ describe("auth-broker import (CLIProxyAPI)", () => {
 			email: "dryrun@example.com",
 		});
 
+		life.assertLive();
 		const restore = silenceStdout();
 		await runAuthBrokerCommand({
 			action: "import",
@@ -149,6 +153,7 @@ describe("auth-broker import (CLIProxyAPI)", () => {
 	});
 
 	test("--provider override forces a provider id when the JSON type is unrecognized", async () => {
+		const life = testLifetime();
 		await writeCliProxyJson("weird.json", {
 			type: "some-future-type",
 			access_token: "z",
@@ -157,6 +162,7 @@ describe("auth-broker import (CLIProxyAPI)", () => {
 			email: "future@example.com",
 		});
 
+		life.assertLive();
 		const restore = silenceStdout();
 		await runAuthBrokerCommand({
 			action: "import",
@@ -174,6 +180,7 @@ describe("auth-broker import (CLIProxyAPI)", () => {
 	});
 
 	test("--include-disabled imports rows marked disabled", async () => {
+		const life = testLifetime();
 		await writeCliProxyJson("disabled.json", {
 			type: "claude",
 			access_token: "d",
@@ -183,6 +190,7 @@ describe("auth-broker import (CLIProxyAPI)", () => {
 			disabled: true,
 		});
 
+		life.assertLive();
 		const restore = silenceStdout();
 		await runAuthBrokerCommand({
 			action: "import",

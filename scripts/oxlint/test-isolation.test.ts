@@ -502,9 +502,10 @@ it("t", async () => {
 });`,
 		expected: ["put-back-on-test-finished@15"],
 	},
-	// The write is reported first (one report per test and place); the put-back below is the same
-	// shape, and a lifetime a helper creates silences neither.
-	"lifetime-created-in-a-helper-guards-neither-its-write-nor-its-put-back": {
+	// The write runs before the test first suspends (`await capture()` enters the helper first), so
+	// the put-back after the helper's own `await` is the report; a lifetime a helper creates does not
+	// silence it.
+	"lifetime-created-in-a-helper-does-not-guard-its-put-back": {
 		body: `
 import { testLifetime } from "./helpers/mock-restores";
 async function capture(): Promise<void> {
@@ -525,7 +526,7 @@ async function capture(): Promise<void> {
 it("t", async () => {
 	await capture();
 });`,
-		expected: ["put-back-on-test-finished@12"],
+		expected: ["put-back-on-test-finished@17"],
 	},
 	"environment-owner-helper-covers-its-variables": {
 		body: `
@@ -618,6 +619,33 @@ it("t", async () => {
 	await useTemp("/tmp");
 });`,
 		expected: ["put-back-on-test-finished@8"],
+	},
+	"an-awaited-helper-call-runs-the-helper-s-write-before-the-caller-suspends": {
+		body: `
+import { installEnvRestores } from "./helpers/mock-restores";
+installEnvRestores(["HOME"]);
+async function useTemp(fn: () => Promise<void>): Promise<void> {
+	process.env.HOME = "/tmp";
+	await fn();
+}
+it("t", async () => {
+	await useTemp(async () => {});
+});`,
+		expected: [],
+	},
+	"an-awaited-helper-call-after-an-earlier-await-is-still-late": {
+		body: `
+import { installEnvRestores } from "./helpers/mock-restores";
+installEnvRestores(["HOME"]);
+async function useTemp(fn: () => Promise<void>): Promise<void> {
+	process.env.HOME = "/tmp";
+	await fn();
+}
+it("t", async () => {
+	await Promise.resolve();
+	await useTemp(async () => {});
+});`,
+		expected: ["put-back-on-test-finished@7"],
 	},
 	"environment-owner-helper-does-not-cover-other-variables": {
 		body: `

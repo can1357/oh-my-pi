@@ -48,6 +48,7 @@ import {
 	stripPendingSecretPlaceholderSuffix,
 } from "@oh-my-pi/pi-coding-agent/secrets/placeholder";
 import { compileSecretRegex } from "@oh-my-pi/pi-coding-agent/secrets/regex";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { __resetDirsFromEnvForTests, getAgentDir, setProfile } from "@oh-my-pi/pi-utils/dirs";
 import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
@@ -506,7 +507,9 @@ describe("getSecretPlaceholderKey", () => {
 		const originalOmpProfile = process.env.OMP_PROFILE;
 		const originalPiProfile = process.env.PI_PROFILE;
 		const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-		const life = testLifetime();
+		// Created synchronously, so the variables below are installed before the test first suspends:
+		// a body that resumes after its test ended has nothing left to install.
+		const tempHome = TempDir.createSync("@omp-secret-key-");
 		// Runs after afterEach restores the homedir spy, so the resolver rebuilds from the real home.
 		onTestFinished(() => {
 			if (originalHome === undefined) delete process.env.HOME;
@@ -519,16 +522,13 @@ describe("getSecretPlaceholderKey", () => {
 			else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
 			__resetDirsFromEnvForTests();
 		});
-		let tempHomeDir: string | undefined;
 		try {
-			tempHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-secret-key-"));
-			life.assertLive();
-			process.env.HOME = tempHomeDir;
-			spyOn(os, "homedir").mockReturnValue(tempHomeDir);
+			process.env.HOME = tempHome.path();
+			spyOn(os, "homedir").mockReturnValue(tempHome.path());
 			setProfile(undefined);
 			await run();
 		} finally {
-			if (tempHomeDir) await fs.rm(tempHomeDir, { recursive: true, force: true });
+			await tempHome.remove();
 		}
 	}
 

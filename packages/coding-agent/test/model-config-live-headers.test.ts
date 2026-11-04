@@ -3,6 +3,7 @@ import {
 	createConfigHeaderResolver,
 	invalidateAllCommandConfigs,
 } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const TEMP_ENV_KEYS: string[] = [];
 
@@ -63,10 +64,12 @@ describe("async config header materialization", () => {
 	});
 
 	it("reads environment-backed values for every request", async () => {
+		const life = testLifetime();
 		setEnv("OMP_TEST_LIVE_DYN", "v1");
 		const resolver = createConfigHeaderResolver([{ "X-Dyn": "OMP_TEST_LIVE_DYN" }]);
 
 		expect((await resolver?.())?.["X-Dyn"]).toBe("v1");
+		life.assertLive();
 		setEnv("OMP_TEST_LIVE_DYN", "v2");
 		expect((await resolver?.())?.["X-Dyn"]).toBe("v2");
 	});

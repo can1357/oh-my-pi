@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import {
 	Agent,
 	type AgentMessage,
@@ -50,6 +50,7 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 
 function createAgent(): Agent {
 	return new Agent({
@@ -84,18 +85,15 @@ function getConvertedUserText(message: Message | undefined): string {
 	return text.text;
 }
 
+/** Run `fn` with the native dialect; the file's `installEnvRestores` owner puts `PI_DIALECT` back. */
 async function withNativeDialectEnv<T>(fn: () => Promise<T>): Promise<T> {
-	const previous = Bun.env.PI_DIALECT;
-	onTestFinished(() => {
-		if (previous === undefined) {
-			delete Bun.env.PI_DIALECT;
-		} else {
-			Bun.env.PI_DIALECT = previous;
-		}
-	});
 	delete Bun.env.PI_DIALECT;
 	return await fn();
 }
+
+// The async afterEach below can time out, and Bun then skips the later hooks and `onTestFinished`;
+// this owner still puts the variable back at the next test and when the file ends.
+installEnvRestores(["PI_DIALECT"]);
 
 describe("AgentSession message pipeline", () => {
 	const sessions: AgentSession[] = [];

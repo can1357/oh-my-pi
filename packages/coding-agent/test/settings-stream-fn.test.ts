@@ -18,7 +18,7 @@ import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgProvidersMuseCodeStoreResponses } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { createSettingsAwareStreamFn } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
-import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
+import { installEnvRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
 
 function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOptions }> } {
 	const calls: Array<{ options?: SimpleStreamOptions }> = [];
@@ -516,6 +516,7 @@ describe("createSettingsAwareStreamFn", () => {
 		});
 
 		it("applies to direct side requests through the bound settings", async () => {
+			const life = testLifetime();
 			// Titles, commit messages, and memories call `completeSimple`/`streamSimple`
 			// without the settings-aware stream; the process-wide effect covers them.
 			const settings = Settings.isolated();
@@ -525,6 +526,7 @@ describe("createSettingsAwareStreamFn", () => {
 				expect(await wireStore(undefined, direct)).toBe(false);
 				// Turning the setting on mid-process reaches the next direct request.
 				cfgProvidersMuseCodeStoreResponses.set(settings, true);
+				life.assertLive();
 				expect(await wireStore(undefined, direct)).toBe(true);
 			} finally {
 				release();

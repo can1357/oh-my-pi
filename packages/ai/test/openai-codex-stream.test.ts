@@ -838,8 +838,11 @@ describe("openai-codex streaming", () => {
 							...(placement === "top" ? { headers } : {}),
 						};
 			if (outerHeaders) failure.headers = outerHeaders;
+			// The websocket helper installs its socket before it first suspends; no `await` may precede it.
 			const result =
-				transport === "sse" ? (await runCodexSseEvents([failure])).result : await runCodexWebSocketEvent(failure);
+				transport === "websocket"
+					? await runCodexWebSocketEvent(failure)
+					: (await runCodexSseEvents([failure])).result;
 			expect(result.stopReason).toBe("error");
 			expect(extractProviderRetryHint("openai-codex", result.errorMessage)).toBe(expectedDelay);
 		});

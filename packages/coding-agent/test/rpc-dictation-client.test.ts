@@ -1,5 +1,6 @@
 import { describe, expect, onTestFinished, test } from "bun:test";
 import { type RpcAgentProcess, RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 interface Request {
 	id: string;
@@ -62,11 +63,13 @@ function withScaledDeadline<T>(send: () => T): T {
 
 describe("RpcClient dictation start deadlines", () => {
 	test("cold start can finish after an ordinary request has timed out", async () => {
+		const life = testLifetime();
 		const agent = fakeAgent();
 		using client = new RpcClient({ spawn: () => agent.proc });
 		await client.start();
 
 		let startSettled = false;
+		life.assertLive();
 		const start = withScaledDeadline(() => client.dictationStart("cold-model"));
 		void start.then(
 			() => {
@@ -85,10 +88,12 @@ describe("RpcClient dictation start deadlines", () => {
 	});
 
 	test("caller deadline rejects explicitly and can be followed by a stop", async () => {
+		const life = testLifetime();
 		const agent = fakeAgent();
 		using client = new RpcClient({ spawn: () => agent.proc });
 		await client.start();
 
+		life.assertLive();
 		const start = withScaledDeadline(() => client.dictationStart("short-deadline", 6_000));
 		await expect(start).rejects.toThrow("Timeout waiting for response to dictation_start");
 		expect(agent.requests[0]).toMatchObject({ type: "dictation_start", captureId: "short-deadline" });
@@ -101,11 +106,13 @@ describe("RpcClient dictation start deadlines", () => {
 
 describe("RpcClient dictation stop deadlines", () => {
 	test("slow flush can finish after an ordinary request has timed out", async () => {
+		const life = testLifetime();
 		const agent = fakeAgent();
 		using client = new RpcClient({ spawn: () => agent.proc });
 		await client.start();
 
 		let stopSettled = false;
+		life.assertLive();
 		const stop = withScaledDeadline(() => client.dictationStop());
 		void stop.then(
 			() => {
@@ -124,6 +131,7 @@ describe("RpcClient dictation stop deadlines", () => {
 	});
 
 	test("caller timeout rejects without losing the later terminal transcript", async () => {
+		const life = testLifetime();
 		const agent = fakeAgent();
 		using client = new RpcClient({ spawn: () => agent.proc });
 		await client.start();
@@ -132,6 +140,7 @@ describe("RpcClient dictation stop deadlines", () => {
 			if (frame.type === "dictation_end") terminal.resolve(frame.text);
 		});
 
+		life.assertLive();
 		const stop = withScaledDeadline(() => client.dictationStop(6_000));
 		await expect(stop).rejects.toThrow("Timeout waiting for response to dictation_stop");
 		agent.emit({ type: "dictation_end", captureId: "slow-flush", text: "completed draft" });
