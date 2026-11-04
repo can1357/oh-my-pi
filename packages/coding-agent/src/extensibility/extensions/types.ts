@@ -369,10 +369,10 @@ export interface ExtensionUIContext {
 
 	/**
 	 * Ask the transcript presenters again for the blocks with these ids (`TranscriptBlock.id`)
-	 * and redraw those whose display changed. omp re-asks on its own whenever a block's data
-	 * changes and once every run has ended and all `agent_end` handlers have settled; call this
-	 * when the presenter's own state changes in between. A changed block with rows already in
-	 * terminal scrollback replays the transcript once. Interactive mode only; a no-op elsewhere.
+	 * and redraw those whose display changed. omp re-asks on its own only when a block's data
+	 * changes; call this when the presenter's own state changes (an `agent_end` handler marking a
+	 * run's calls done, say). A changed block with rows already in terminal scrollback replays the
+	 * transcript once. Interactive mode only; a no-op elsewhere.
 	 */
 	refreshTranscript(ids: readonly string[]): void;
 
@@ -2061,8 +2061,8 @@ export interface ExtensionAPI {
 	 * block the user expanded is always drawn in full, and `display.hideToolActivity` still hides
 	 * tool activity. A focused subagent, a collab guest and the transcript overlays draw stock
 	 * cards. Display only: the session, exports and model context are unchanged. Returns a
-	 * disposer that removes the presenter. Interactive mode only; elsewhere the presenter is
-	 * registered but never asked.
+	 * disposer that removes the presenter. Presenters run synchronously while the transcript draws,
+	 * so keep them cheap. Interactive mode only; elsewhere the presenter is registered but never asked.
 	 */
 	registerTranscriptPresenter(presenter: TranscriptPresenter): () => void;
 

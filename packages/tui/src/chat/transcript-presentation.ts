@@ -77,17 +77,6 @@ export function onTranscriptPresentationRedrawn(listener: (owner: Component) => 
 	return () => redrawListeners.delete(listener);
 }
 
-const idChangeListeners = new Set<(from: string, to: string) => void>();
-
-/**
- * Call `listener` when a {@link PresentedBlock} takes another id (a `!`/`$` run or a skill prompt
- * was recorded), so a host tracking blocks by id follows it. Returns the unsubscribe.
- */
-export function onTranscriptBlockIdChanged(listener: (from: string, to: string) => void): () => void {
-	idChangeListeners.add(listener);
-	return () => idChangeListeners.delete(listener);
-}
-
 function isTspText(value: unknown): value is TspText {
 	return (
 		typeof value === "string" ||
@@ -137,20 +126,14 @@ export function readTranscriptPresentation(answer: unknown): TranscriptPresentat
 	};
 }
 
-/** `undefined` when the presenter defers; unknown shapes draw in full. */
+/** `undefined` when the presenter defers. The answer is plain data (see {@link readTranscriptPresentation}). */
 function normalize(answer: TranscriptPresentation): ResolvedPresentation | undefined {
 	if (answer === undefined) return undefined;
+	if (answer === "full") return FULL;
 	if (answer === "hidden") return HIDDEN;
 	if (answer === "compact") return COMPACT;
-	if (typeof answer !== "object" || answer === null || typeof answer.compact !== "object" || !answer.compact) {
-		return FULL;
-	}
-	const { label, rows } = answer.compact;
-	return {
-		mode: "compact",
-		label: isTspText(label) ? singleLine(label) : undefined,
-		rows: Array.isArray(rows) ? rows.filter(isTspText).map(singleLine) : [],
-	};
+	const { label, rows = [] } = answer.compact;
+	return { mode: "compact", label: label === undefined ? undefined : singleLine(label), rows: rows.map(singleLine) };
 }
 
 /** The first answer other than `undefined` wins. */
@@ -294,8 +277,6 @@ export interface TranscriptPresentable {
 	 * the change is not reported again.
 	 */
 	refreshTranscriptPresentation(ids?: ReadonlySet<string>): boolean;
-	/** The `id` of each block presenters see here (a read group has one per read): what `ids` selects by. */
-	transcriptBlockIds(): readonly string[];
 }
 
 export function isTranscriptPresentable(component: Component): component is Component & TranscriptPresentable {
@@ -572,10 +553,8 @@ export class PresentedBlock<T extends WrappedComponent = WrappedComponent>
 	 * in scrollback is not drawn again, so a changed answer is reported now for a one-time replay.
 	 */
 	setBlock(block: WrappedTranscriptBlock): void {
-		const from = this.#block.id;
 		this.#block = block;
 		this.#head = undefined;
-		if (block.id !== from) for (const listener of idChangeListeners) listener(from, block.id);
 		this.#presentation.markStale();
 		this.#presentation.recheck();
 	}
@@ -594,10 +573,6 @@ export class PresentedBlock<T extends WrappedComponent = WrappedComponent>
 
 	refreshTranscriptPresentation(ids?: ReadonlySet<string>): boolean {
 		return this.#presentation.refresh(ids);
-	}
-
-	transcriptBlockIds(): readonly string[] {
-		return [this.#block.id];
 	}
 
 	isTranscriptBlockFinalized(): boolean {

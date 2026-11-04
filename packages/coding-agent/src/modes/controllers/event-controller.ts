@@ -2562,8 +2562,6 @@ export class EventController {
 		options?: { interrupted?: boolean },
 	): Promise<void> {
 		this.#asyncWaitEnd = undefined;
-		// The run (and any continuation chain) is over, however it ended: a cancelled retry or wait included.
-		this.ctx.endTranscriptRun();
 		this.#setTerminalProgress(false);
 		this.ctx.statusLine.markActivityEnd();
 		this.#lastAgentEndAt = Date.now();

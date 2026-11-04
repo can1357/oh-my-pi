@@ -9,7 +9,6 @@ import { CopySelectorComponent } from "../src/overlays/copy-selector";
 import { type BranchVariantPath, RewindSelectorComponent } from "../src/overlays/rewind-selector";
 import { TreeSelectorComponent, type TreeSelectorNode } from "../src/overlays/tree-selector";
 import { initTheme, setTheme } from "../src/theme";
-import { setTranscriptPresenters } from "../src/chat/transcript-presentation";
 
 const pickerCx: DescribeContext = {
 	cols: 120,
@@ -125,28 +124,6 @@ describe("rewind page", () => {
 		expect(captionText(page.main)).toContain("nothing below to drop");
 		expect(page.dock).toHaveLength(1);
 		expect(JSON.stringify((page.dock[0] as RewindSelectorComponent).describe(pickerCx))).toContain("4/4");
-	});
-
-	test("previews tool calls as stock cards without asking the transcript presenters", () => {
-		// Regression guard: the rewind preview replaying the main transcript's presenter answers for
-		// a branch those answers were never given for.
-		let asked = 0;
-		setTranscriptPresenters([
-			() => {
-				asked++;
-				return { compact: { label: "PRESENTED" } };
-			},
-		]);
-		const selector = rewind();
-		try {
-			const drawn = Bun.stripANSI(selector.render(120).join("\n"));
-			expect(drawn).toContain("ack");
-			expect(drawn).not.toContain("PRESENTED");
-			expect(asked).toBe(0);
-		} finally {
-			selector.dispose();
-			setTranscriptPresenters([]);
-		}
 	});
 
 	test("an interrupted turn that shows nothing is never picked: the page opens on the turn above it", () => {

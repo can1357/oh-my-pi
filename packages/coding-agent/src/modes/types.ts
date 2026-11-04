@@ -265,12 +265,6 @@ export interface InteractiveModeContext {
 	 * when given) and redraw those whose display changed.
 	 */
 	refreshTranscriptPresentation(ids?: ReadonlySet<string>): void;
-	/**
-	 * The transcript's run, with any continuation chain, is over (a cancelled retry or background
-	 * wait included): the main session's next `agent_start` begins a new run whose settle asks only
-	 * its own blocks.
-	 */
-	endTranscriptRun(): void;
 	/** Flip the pinned jump list between its collapsed few and the full list. */
 	togglePinnedHudExpanded(): void;
 	/** Point the inline hover band at a click-candidate id (or clear it). */

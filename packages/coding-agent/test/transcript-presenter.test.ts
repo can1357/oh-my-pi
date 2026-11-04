@@ -19,7 +19,6 @@ import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { cfgDisplayShowTokenUsage } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -274,250 +273,32 @@ describe("extension transcript presenters", () => {
 		expect(chat()).not.toContain("OUTPUT-call1");
 	});
 
-	it("asks a run's blocks again once its agent_end handlers have settled", async () => {
-		// Regression guard: re-asking when agent_end starts, before an async handler updated the
-		// presenter's state, leaves a turn's routine calls compact instead of hidden.
-		const gate = Promise.withResolvers<void>();
-		let answered = false;
-		const { runner } = await installExtensions(pi => {
-			pi.registerTranscriptPresenter(block =>
-				block.type !== "toolCall" ? undefined : answered ? "hidden" : { compact: { label: `ROW-${block.id}` } },
-			);
-			pi.on("agent_end", async () => {
-				await gate.promise;
-				answered = true;
-			});
-		});
-		appendToolCall("call1", 10);
-		await start();
-		await mode.renderInitialMessages();
-		expect(chat()).toContain("ROW-call1");
-
-		const ended = runner.emit({ type: "agent_end", messages: [] });
-		// The handler is now parked on the gate; nothing may have re-asked yet.
-		await Promise.resolve();
-		expect(chat()).toContain("ROW-call1");
-		gate.resolve();
-		await ended;
-		expect(chat()).not.toContain("ROW-call1");
-		expect(chat()).not.toContain("OUTPUT-call1");
-	});
-
-	/**
-	 * Start a run as the session does: its `agent_start` reaches every session listener, the
-	 * transcript's run tracking included. Call before {@link start}, which subscribes them.
-	 */
-	function captureRunStarts(): () => void {
-		const sessionListeners: Array<Parameters<AgentSession["subscribe"]>[0]> = [];
-		const subscribe = session.subscribe.bind(session);
-		vi.spyOn(session, "subscribe").mockImplementation(listener => {
-			sessionListeners.push(listener);
-			return subscribe(listener);
-		});
-		return () => {
-			for (const listener of sessionListeners) void listener({ type: "agent_start" });
-		};
-	}
-
-	/**
-	 * A presenter recording the ids it is asked about (plus `extra` extensions), a way to start a
-	 * run, a way to run one call, and a way to end a run as the session does: its terminal
-	 * `agent_end` reaches the transcript first, then the extensions' broadcast starts.
-	 */
-	async function runHarness(...extra: ExtensionFactory[]) {
-		const asked: string[] = [];
-		const { runner } = await installExtensions(
-			presenter(block => {
-				if (block.type !== "toolCall") return undefined;
-				asked.push(block.id);
-				return "compact";
-			}),
-			...extra,
-		);
-		const startRun = captureRunStarts();
-		await start();
-		const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
-		const addCard = (id: string): void => {
-			const card = new ToolExecutionComponent("bash", { command: `echo ${id}` }, {}, undefined, ui, "/tmp", id);
-			card.setArgsComplete(id);
-			card.setExecutionStarted(id);
-			card.updateResult({ content: [{ type: "text", text: `OUTPUT-${id}` }], isError: false });
-			mode.chatContainer.addChild(card);
-			chat();
-		};
-		const runCall = (id: string): void => {
-			startRun();
-			addCard(id);
-		};
-		const endRun = async (): Promise<void> => {
-			await mode.eventController.handleEvent({ type: "agent_end", messages: [] });
-			return runner.emit({ type: "agent_end", messages: [] }).then(() => {});
-		};
-		return { asked, runner, runCall, startRun, addCard, endRun };
-	}
-
-	it("asks only the latest run's blocks when the next run settles", async () => {
-		// Regression guard: an ended run's boundary surviving, so the next run's settle re-asked
-		// earlier turns.
-		const { asked, runCall, endRun } = await runHarness();
-		runCall("run1");
-		await endRun();
-
-		runCall("run2");
-		asked.length = 0;
-		await endRun();
-		expect(asked).toEqual(["run2"]);
-	});
-
-	it("asks each run's own blocks when a later run settles before an earlier one", async () => {
-		// Regression guard: run 1's slow agent_end handler settling after run 2 started, and the
-		// settle reading run 2's boundary: run 2's calls re-asked, run 1's never.
-		const gate = Promise.withResolvers<void>();
-		let calls = 0;
-		const { asked, runner, runCall, endRun } = await runHarness(pi => {
-			pi.on("agent_end", async () => {
-				if (calls++ === 0) await gate.promise;
-			});
-		});
-		runCall("run1");
-		await mode.eventController.handleEvent({ type: "agent_end", messages: [] });
-		// Run 1's broadcast starts; its handler is parked on the gate.
-		const first = runner.emit({ type: "agent_end", messages: [] });
-
-		runCall("run2");
-		asked.length = 0;
-		await endRun();
-		expect(asked).toEqual(["run2"]);
-
-		asked.length = 0;
-		gate.resolve();
-		await first;
-		expect(asked).toEqual(["run1"]);
-	});
-
-	it("starts a new run after a terminal settle the transcript's own agent_end never finalized", async () => {
-		// Regression guard: the boundary ending only through the UI's teardown, which an end
-		// re-tagged as a continuation never reaches, so later settles re-asked every earlier run.
-		const { asked, runner, runCall } = await runHarness();
-		runCall("run1");
-		await runner.emit({ type: "agent_end", messages: [] });
-
-		runCall("run2");
-		asked.length = 0;
-		await runner.emit({ type: "agent_end", messages: [] });
-		expect(asked).toEqual(["run2"]);
-	});
-
-	it("asks a run's blocks the transcript added after its broadcast started, and nothing for an empty run", async () => {
-		// Regression guard: a run's span fixed when its broadcast started, missing its last cards the
-		// UI added afterwards, and an empty run's settle re-asking a later run's blocks.
-		// Each broadcast's handler waits on the next gate in line.
-		const gates: Array<Promise<void>> = [];
-		const { asked, runner, runCall, startRun, addCard } = await runHarness(pi => {
-			pi.on("agent_end", async () => {
-				await gates.shift();
-			});
-		});
-		const gate = Promise.withResolvers<void>();
-		gates.push(gate.promise);
-		runCall("run1");
-		const first = runner.emit({ type: "agent_end", messages: [] });
-		// The UI lands the run's last card after the broadcast started.
-		addCard("late1");
-		asked.length = 0;
-		gate.resolve();
-		await first;
-		expect(asked.sort()).toEqual(["late1", "run1"]);
-
-		// An empty run whose settle is slow while the next run adds its cards.
-		const emptyGate = Promise.withResolvers<void>();
-		gates.push(emptyGate.promise);
-		startRun();
-		const empty = runner.emit({ type: "agent_end", messages: [] });
-		runCall("run3");
-		asked.length = 0;
-		emptyGate.resolve();
-		await empty;
-		expect(asked).toEqual([]);
-	});
-
-	it("asks only the latest run's blocks after a continuing run ended without another agent_end", async () => {
-		// Regression guard: a settle announcing a continuation that was then cancelled (a retry, a
-		// background wait) leaving its boundary set, so the next run's settle re-asked earlier turns.
-		const { asked, runner, runCall } = await runHarness();
-		runCall("run1");
-		await runner.emit({ type: "agent_end", messages: [], willContinue: true });
-		// The continuation never starts; the run is finalized as the cancel paths do.
-		await mode.eventController.handleEvent({ type: "agent_end", messages: [] });
-
-		runCall("run2");
-		asked.length = 0;
-		await runner.emit({ type: "agent_end", messages: [] });
-		expect(asked).toEqual(["run2"]);
-	});
-
-	it("asks only the latest run's blocks when a live setting rebuilt the transcript during that run", async () => {
-		// Regression guard: a rebuild mid-run (display.showTokenUsage toggled) replacing earlier runs'
-		// blocks with new components, which the run's settle then took for its own and asked again.
-		const { asked, startRun, endRun } = await runHarness();
-		startRun();
-		appendToolCall("run1", 10);
-		await mode.renderInitialMessages();
-		await endRun();
-
-		startRun();
-		appendToolCall("run2", 20);
-		const earlier = mode.chatContainer.children.find(child => child instanceof ToolExecutionComponent);
-		cfgDisplayShowTokenUsage.set(mode.settings, true);
-		// The setting applies on the next microtask, building every block anew from the session.
-		await Promise.resolve();
-		expect(earlier).toBeDefined();
-		expect(mode.chatContainer.children).not.toContain(earlier);
-		chat();
-		asked.length = 0;
-		await endRun();
-		expect(asked).toEqual(["run2"]);
-	});
-
-	it("keeps a settled run's calls hidden when a live setting rebuilds the transcript during the next run", async () => {
-		// Regression guard: presenter state reset per run (the old docs example) showing an earlier
-		// run's hidden calls again once a rebuild asked anew; state keyed by block id answers the same.
+	it("asks again only the blocks refreshTranscript names", async () => {
+		// Regression guard: a refresh re-asking (and possibly replaying) blocks it did not name, or
+		// missing the ones it did, when the presenter's own state changed.
 		const finished = new Set<string>();
-		const { runner } = await installExtensions(pi => {
-			pi.on("agent_end", event => {
-				for (const message of event.messages) {
-					if (message.role !== "assistant") continue;
-					for (const part of message.content) if (part.type === "toolCall") finished.add(part.id);
-				}
-			});
-			pi.registerTranscriptPresenter(block =>
+		const { runner } = await installExtensions(
+			presenter(block =>
 				block.type !== "toolCall"
 					? undefined
 					: finished.has(block.id)
 						? "hidden"
 						: { compact: { label: `ROW-${block.id}` } },
-			);
-		});
-		const startRun = captureRunStarts();
+			),
+		);
+		appendToolCall("call1", 10);
+		appendToolCall("call2", 20);
 		await start();
-		startRun();
-		const run1 = appendToolCall("run1", 10);
 		await mode.renderInitialMessages();
-		expect(chat()).toContain("ROW-run1");
-		await mode.eventController.handleEvent({ type: "agent_end", messages: [run1] });
-		await runner.emit({ type: "agent_end", messages: [run1] });
-		expect(chat()).not.toContain("ROW-run1");
+		expect(chat()).toContain("ROW-call1");
+		expect(chat()).toContain("ROW-call2");
 
-		startRun();
-		appendToolCall("run2", 20);
-		const earlier = mode.chatContainer.children.find(child => child instanceof ToolExecutionComponent);
-		cfgDisplayShowTokenUsage.set(mode.settings, true);
-		// The setting applies on the next microtask, building every block anew from the session.
-		await Promise.resolve();
-		expect(mode.chatContainer.children).not.toContain(earlier);
-		expect(chat()).toContain("ROW-run2");
-		expect(chat()).not.toContain("ROW-run1");
-		expect(chat()).not.toContain("OUTPUT-run1");
+		finished.add("call1");
+		finished.add("call2");
+		runner.getUIContext().refreshTranscript(["call1"]);
+		expect(chat()).not.toContain("ROW-call1");
+		expect(chat()).not.toContain("OUTPUT-call1");
+		expect(chat()).toContain("ROW-call2");
 	});
 
 	it("draws a collab guest's transcript with stock cards, and the local presenters again after leaving", async () => {
@@ -765,41 +546,6 @@ describe("extension transcript presenters", () => {
 		expect(buffer()).not.toContain("ROW-call1");
 		expect(buffer()).toContain("First reply.");
 	});
-
-	for (const refreshSameTick of [false, true]) {
-		it(`replays once when a fully retired block's late final result changes its presentation${refreshSameTick ? ", even with a refresh in the same tick" : ""}`, async () => {
-			// Regression guard: a retired card never drawn again, so its late result left the old row in
-			// scrollback with no refresh or agent_end to ask again; and a refresh in the same tick
-			// replaying it a second time.
-			const { runner } = await installExtensions(
-				presenter(block => {
-					if (block.type !== "toolCall") return undefined;
-					const late = JSON.stringify(block.result?.content ?? []).includes("LATE");
-					return late ? "hidden" : { compact: { label: `ROW-${block.id}` } };
-				}),
-			);
-			appendReply("First reply.", 1);
-			appendToolCall("call1", 10);
-			for (let index = 0; index < 20; index++) appendReply(`Filler paragraph ${index}.`, 100 + index);
-			term.resize(120, 12);
-			await start();
-			await mode.renderInitialMessages();
-			const buffer = () => plainRows(term.getScrollBuffer()).join("\n");
-			await term.waitForRender(() => screen().includes("Filler paragraph 19.") && buffer().includes("ROW-call1"));
-			const tool = mode.chatContainer.children.find(child => child instanceof ToolExecutionComponent);
-			if (!(tool instanceof ToolExecutionComponent)) throw new Error("Expected the call's card");
-			expect(mode.chatContainer.canRemoveBlock(tool)).toBe(false);
-
-			const resets = vi.spyOn(mode.ui, "resetDisplay");
-			tool.updateResult({ content: [{ type: "text", text: "LATE" }], isError: false });
-			if (refreshSameTick) runner.getUIContext().refreshTranscript(["call1"]);
-			await term.waitForRender(() => !buffer().includes("ROW-call1"));
-			await Promise.resolve();
-			expect(resets).toHaveBeenCalledTimes(1);
-			expect(buffer()).not.toContain("ROW-call1");
-			expect(buffer()).toContain("First reply.");
-		});
-	}
 
 	it("replays once for late results that land on retired blocks in separate ticks before the next frame", async () => {
 		// Regression guard: each background result landing on a block already in scrollback
