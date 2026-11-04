@@ -250,7 +250,9 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 				),
 			),
 		waitForOwnerJobs: (manager, ownerId, options) => manager.waitForOwnerJobs(ownerId, options),
-		cancelAndReapOwnerJobs: (manager, ownerId, deadlineAt) => manager.cancelAndReapOwnerJobs(ownerId, deadlineAt),
+		cancelAndReapOwnerJobs: (manager, ownerId, deadlineAt, agentLineage) =>
+			manager.cancelAndReapOwnerJobs(ownerId, deadlineAt, agentLineage),
+		bindOwnerAlias: (manager, alias, agentId) => manager.bindOwnerAlias(alias, agentId),
 		drainDeliveries: (manager, options) => manager.drainDeliveries(options),
 		isDeliverySuppressed: (manager, jobId) => manager.isDeliverySuppressed(jobId),
 		whenSettled: async (manager, jobId) => {

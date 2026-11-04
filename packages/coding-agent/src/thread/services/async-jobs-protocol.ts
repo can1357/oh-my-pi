@@ -154,7 +154,11 @@ export type AsyncJobManagerProtocol = {
 		[ownerId: string, options: { timeoutMs?: number; excludeSuppressed?: boolean } | undefined],
 		boolean
 	>;
-	cancelAndReapOwnerJobs: RpcMethod<[ownerId: string, deadlineAt: number], AsyncJobReapResult>;
+	cancelAndReapOwnerJobs: RpcMethod<
+		[ownerId: string, deadlineAt: number, agentLineage: number | undefined],
+		AsyncJobReapResult
+	>;
+	bindOwnerAlias: RpcMethod<[alias: string, agentId: string], void>;
 	drainDeliveries: RpcMethod<[options: { timeoutMs?: number; filter?: AsyncJobFilter } | undefined], boolean>;
 	isDeliverySuppressed: RpcMethod<[jobId: string], boolean>;
 	/** Resolves once the job's run promise settled (immediately for unknown ids). */

@@ -16,6 +16,7 @@ import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, un
 import {
 	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
 	AsyncJobError,
+	type AgentTreeNode,
 	type AsyncJobManagerApi,
 	type AsyncJobRunResult,
 } from "../async";
@@ -66,7 +67,7 @@ import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pendi
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { type AgentLifecycleApi, AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
-import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../registry/persisted-agents";
 import {
 	type CreateAgentSessionOptions,
@@ -81,7 +82,7 @@ import {
 	PromptDroppedError,
 	type PromptOptions,
 } from "../session/agent-session";
-import { isLocalAgentSession } from "../session/agent-session-handle";
+import { type AgentSessionHandle, isLocalAgentSession } from "../session/agent-session-handle";
 import { type ArtifactManagerApi, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
@@ -3586,10 +3587,10 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
  * agent: an explicit cancel of the run (its caller's signal aborted, or a kill
  * from the Agent Hub or RPC), a process shutdown, a one-shot or isolated agent
  * (its worktree is captured and removed right after the run), and an agent the
- * lifecycle does not keep. A cancel that lands after this decision is handled by
- * {@link cancelOwnerJobsOnCallerCancel} and by the job manager, which cancels an
- * agent's jobs with the job that runs it. Session disposal (park, release,
- * shutdown) cancels whatever the agent still owns.
+ * lifecycle does not keep. A caller's cancel that lands after this decision is
+ * handled by {@link cancelRunTreeOnCallerCancel}. Whatever ends the agent's ref
+ * later (a kill, a release, a teardown) ends the work through the registry's end
+ * hook, which the job manager owns.
  */
 export function ownerJobsOutliveRun(args: {
 	id: string;
@@ -3612,27 +3613,36 @@ export function ownerJobsOutliveRun(args: {
 }
 
 /**
- * From the moment a run or follow-up turn is entered until it returns to its
- * caller, a cancel by that caller ends the work of the agent's whole tree,
- * whenever it lands: already aborted on entry, during setup, before or after an
- * earlier timeout or budget stop won the run's abort reason, before or after
- * {@link ownerJobsOutliveRun} decided to keep the jobs, during the result's
- * publication. A cancel of the job that runs the agent is the job manager's.
- * Returns the detach the run or turn calls as it returns.
+ * A cancel by the caller of a run (after the run decided to keep its jobs) or of
+ * a follow-up turn cancels the work of the agent's whole tree, until the run or
+ * turn returns to that caller. This is a cancel of the run, not the agent's end:
+ * the agent stays as its run left it. The tree is the ref `agent()` returns when
+ * the cancel lands, the ref this run or turn runs as; a ref that was replaced
+ * since resolves to nothing and cancels nothing. Returns the detach.
  */
-function cancelOwnerJobsOnCallerCancel(
+function cancelRunTreeOnCallerCancel(
 	signal: AbortSignal | undefined,
 	manager: AsyncJobManagerApi | undefined,
-	id: string,
+	agent: () => AgentTreeNode | undefined,
 ): () => void {
 	if (!signal || !manager) return () => {};
-	const onAbort = (): void => manager.cancelAll({ ownerId: id, includeDescendants: true }, signal.reason);
+	const onAbort = (): void => {
+		const ref = agent();
+		if (ref)
+			manager.cancelAll({ ownerId: ref.id, includeDescendants: true, agentLineage: ref.lineage }, signal.reason);
+	};
 	if (signal.aborted) {
 		onAbort();
 		return () => {};
 	}
 	signal.addEventListener("abort", onAbort, { once: true });
 	return () => signal.removeEventListener("abort", onAbort);
+}
+
+/** The registry ref `id` runs as on `session`, or undefined once it was replaced or removed. */
+function refOfSession(id: string, session: AgentSessionHandle): AgentRef | undefined {
+	const ref = AgentRegistry.global().get(id);
+	return ref?.session === session ? ref : undefined;
 }
 
 /**
@@ -3856,7 +3866,9 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	if (!isLocalAgentSession(session)) return runFollowUpTurnOnHome(session, options);
 	// A turn of a main-homed session loads the main thread like a placed run.
 	const endMainRun = isMainThread() ? existingSubagentWorkerPool()?.beginMainRun() : undefined;
-	const detachCallerCancel = cancelOwnerJobsOnCallerCancel(options.signal, session.asyncJobManager, options.id);
+	const detachCallerCancel = cancelRunTreeOnCallerCancel(options.signal, session.asyncJobManager, () =>
+		refOfSession(options.id, session),
+	);
 	try {
 		return await driveFollowUpTurn(options, session, startTime);
 	} finally {
@@ -3872,7 +3884,9 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 export async function runFollowUpTurnOnThisThread(options: FollowUpTurnOptions): Promise<SingleResult> {
 	const startTime = Date.now();
 	const session = await ensureLocalLive(options.id);
-	const detachCallerCancel = cancelOwnerJobsOnCallerCancel(options.signal, session.asyncJobManager, options.id);
+	const detachCallerCancel = cancelRunTreeOnCallerCancel(options.signal, session.asyncJobManager, () =>
+		refOfSession(options.id, session),
+	);
 	try {
 		return await driveFollowUpTurn(options, session, startTime);
 	} finally {
@@ -4445,12 +4459,7 @@ export function runSubagentRunRequest(request: SubagentRunRequest): Promise<Sing
  * monitor it, and finalize its lifecycle. {@link runSubprocess} routes here.
  */
 async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<SingleResult> {
-	const detachCallerCancel = cancelOwnerJobsOnCallerCancel(options.signal, options.asyncJobManager, options.id);
-	try {
-		return await driveSubprocess(options, AgentLifecycleManager.global());
-	} finally {
-		detachCallerCancel();
-	}
+	return driveSubprocess(options, AgentLifecycleManager.global());
 }
 
 /** {@link runSubprocessOnThisThread}'s run, under the lifecycle that was current when it started. */
@@ -5372,6 +5381,10 @@ async function driveSubprocess(options: ExecutorOptions, lifecycle: AgentLifecyc
 			}
 			const jobManager = options.asyncJobManager;
 			const session = monitor.takeActiveSession();
+			// The ref this run ran as: its tree is the work the run's end reaps, and
+			// its generation tells a later discard whether the agent is still it.
+			const runRef = session ? refOfSession(id, session) : undefined;
+			runGeneration = runRef?.generation;
 			const keepAlive = options.keepAlive !== false && (!preparedSession || readyAt !== undefined);
 			const keepOwnerJobs =
 				session !== null &&
@@ -5385,8 +5398,13 @@ async function driveSubprocess(options: ExecutorOptions, lifecycle: AgentLifecyc
 					isolated: worktree !== undefined,
 					reviveSession,
 				});
+			if (keepOwnerJobs && runRef) {
+				detachCallerCancel = cancelRunTreeOnCallerCancel(signal, jobManager, () =>
+					AgentRegistry.global().get(id)?.generation === runRef.generation ? runRef : undefined,
+				);
+			}
 			if (jobManager && !keepOwnerJobs) {
-				const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt);
+				const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt, runRef?.lineage);
 				if (!reap.settled) {
 					deferCleanup(reap.completion);
 					logger.warn("Subagent async job cleanup exceeded its deadline", {
@@ -5419,12 +5437,12 @@ async function driveSubprocess(options: ExecutorOptions, lifecycle: AgentLifecyc
 			if (jobManager && !keepOwnerJobs) {
 				if (deferredSessionShutdown) {
 					const finalReap = Promise.allSettled([deferredSessionShutdown]).then(async () => {
-						const reap = await jobManager.cancelAndReapOwnerJobs(id, Date.now());
+						const reap = await jobManager.cancelAndReapOwnerJobs(id, Date.now(), runRef?.lineage);
 						await reap.completion;
 					});
 					lateCleanups.push(finalReap);
 				} else {
-					const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt);
+					const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt, runRef?.lineage);
 					if (!reap.settled) {
 						deferCleanup(reap.completion);
 						logger.warn("Subagent async job cleanup exceeded its deadline after session shutdown", {
@@ -5536,6 +5554,8 @@ async function driveSubprocess(options: ExecutorOptions, lifecycle: AgentLifecyc
 		};
 	};
 
+	let runGeneration: number | undefined;
+	let detachCallerCancel = (): void => {};
 	try {
 		const done = await runSubagent();
 		monitor.finish();
@@ -5564,8 +5584,10 @@ async function driveSubprocess(options: ExecutorOptions, lifecycle: AgentLifecyc
 			startTime,
 		});
 		AgentRegistry.global().setHistory(id, { outputPath: result.outputPath });
+		if (runGeneration !== undefined) result.agentGeneration = runGeneration;
 		return result;
 	} finally {
+		detachCallerCancel();
 		// The result is published: messages held during the run get their own
 		// turns, unless the caller still has work to finish first.
 		if (releaseIrcWakes && options.deferIrcWakeRelease) options.deferIrcWakeRelease(releaseIrcWakes);

@@ -9,6 +9,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { AsyncJob, AsyncJobDetails, AsyncJobManagerApi, AsyncJobType } from "./job-manager";
 
 import { renderStructuredJson, structuredStatusLabel, taskAgentHandles } from "../session/async-job-delivery";
+import { AgentEndHookError, type AgentRef } from "../registry/agent-registry";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -447,23 +448,53 @@ export async function executeCancel(
 			continue;
 		}
 		const cancelled = manager.cancel(id, { ownerId });
+		if (!cancelled) {
+			cancelOutcomes.push({
+				id,
+				status: "already_completed",
+				message: `Background job ${id} is already completed.`,
+			});
+			continue;
+		}
+		// A job that runs an agent is killed by ending that agent's ref: the
+		// registry's end hook is the one authority for its tree's work, and it
+		// reports a failure to this caller instead of only to the log. Without
+		// it the ref would end later, as the aborted run unwinds, and a hook
+		// failure would reach nobody. A job that runs no agent ends here.
+		const agentId = existing.agentId;
+		const regOutcome = agentId === undefined ? undefined : await cancelAgentRegistration(session, ownerId, agentId);
 		cancelOutcomes.push(
-			cancelled
-				? { id, status: "cancelled", message: `Cancelled background job ${id}.` }
-				: { id, status: "already_completed", message: `Background job ${id} is already completed.` },
+			regOutcome?.status === "cancelled" && regOutcome.message !== undefined
+				? { id, status: "cancelled", message: regOutcome.message }
+				: { id, status: "cancelled", message: `Cancelled background job ${id}.` },
 		);
 	}
 	return buildJobResult(session, manager, "cancel", visibleJobs(manager, ids, ownerId), cancelOutcomes);
 }
 
 /**
+ * The agent registration `id` the caller may kill: a subagent it spawned
+ * (whatever its status: running, idle, parked, or a kill tombstone), never
+ * Main, the caller itself, or an advisor transcript. An unowned caller (no
+ * owner id) reaches only parentless subs.
+ */
+export function ownedAgentRegistration(
+	session: ToolSession,
+	ownerId: string | undefined,
+	id: string,
+): AgentRef | undefined {
+	const ref = session.agentRegistry?.get(id);
+	return ref?.kind === "sub" && id !== ownerId && ref.parentId === ownerId ? ref : undefined;
+}
+
+/**
  * Kill a non-job-backed agent registration named by `id`: abort any in-flight
- * turn, then release it from the lifecycle (dispose session + unregister). This
- * is the only kill path for a keep-alive subagent that was budget-aborted, went
- * `idle`/`parked`, and outlived its job row — otherwise it is unstoppable short
- * of a broker restart (issue #6315). Scoped to the caller's own descendants so
- * cross-agent kills stay impossible; an unowned caller (no owner id) reaches
- * only parentless subs. Never touches Main, the caller, or advisor transcripts.
+ * turn, then release that ref from the lifecycle (dispose session + unregister).
+ * This is the only kill path for a keep-alive subagent that was budget-aborted,
+ * went `idle`/`parked`, and outlived its job row — otherwise it is unstoppable
+ * short of a broker restart (issue #6315). Ending the ref is all it does: the
+ * registry's end hook cancels the work of the agent's tree. Scoped to the
+ * caller's own descendants ({@link ownedAgentRegistration}).
  */
 export async function cancelAgentRegistration(
 	session: ToolSession,
@@ -471,32 +502,35 @@ export async function cancelAgentRegistration(
 	id: string,
 ): Promise<CancelOutcome> {
 	const registry = session.agentRegistry;
-	const ref = registry?.get(id);
-	if (ref?.kind !== "sub") {
-		return { id, status: "not_found", message: `Background job not found: ${id}` };
-	}
-	if (id === ownerId) {
-		return { id, status: "not_found", message: `Cannot cancel yourself (${id}).` };
-	}
-	if (ref.parentId !== ownerId) {
+	const ref = ownedAgentRegistration(session, ownerId, id);
+	if (!ref) {
+		const existing = registry?.get(id);
+		if (existing?.kind !== "sub") return { id, status: "not_found", message: `Background job not found: ${id}` };
+		if (id === ownerId) return { id, status: "not_found", message: `Cannot cancel yourself (${id}).` };
 		return { id, status: "not_found", message: `Agent ${id} was not spawned by you and cannot be cancelled.` };
 	}
 	const lifecycle = session.agentLifecycle?.();
 	try {
-		// The agent ends here, and with it the work of its whole tree: its kept
-		// background jobs and those of the agents it spawned, however they were
-		// spawned. A parked agent has no session whose disposal would do it.
-		session.asyncJobManager?.cancelAll({ ownerId: id, includeDescendants: true });
 		if (ref.status === "running" && ref.session) {
 			await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 		}
 		if (lifecycle) {
-			await lifecycle.release(id);
+			if (!(await lifecycle.release(id, ref))) {
+				return { id, status: "not_found", message: `Agent ${id} was replaced before it could be cancelled.` };
+			}
 		} else {
 			await ref.session?.dispose();
-			registry?.unregister(id);
+			registry?.unregister(id, ref);
 		}
 	} catch (error) {
+		if (error instanceof AgentEndHookError) {
+			// The agent ended; part of its tree's work could not be cancelled.
+			return {
+				id,
+				status: "cancelled",
+				message: `Cancelled agent ${id}, but not all of its tree's work: ${error.message}.`,
+			};
+		}
 		return {
 			id,
 			status: "already_completed",

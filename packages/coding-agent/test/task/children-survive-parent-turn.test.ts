@@ -6,9 +6,12 @@
  * call: at its request budget, or on a terminal model error (a context-limit
  * refusal). `Arm` must finish its work, and its result must reach `Lane` in a
  * later turn, the way a finished background job's result reaches the root. What
- * ends Lane still ends Arm: an explicit kill, a cancel of Lane's run or follow-up
- * turn by its caller, the lifecycle's teardown, a discarded speculative launch;
- * and ending Lane never touches another agent's tree.
+ * ends Lane still ends Arm: an explicit kill (also of an idle or parked Lane with
+ * no job row), a cancel of Lane's run or follow-up turn by its caller, a release,
+ * the lifecycle's teardown, a discarded speculative launch; that holds for work
+ * a descendant started after Lane parked and for work Lane's advisor started;
+ * and ending Lane never touches another agent's tree, nor a later agent that
+ * reuses Lane's id.
  */
 import { afterEach, beforeEach, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -19,7 +22,7 @@ import type { Context } from "@oh-my-pi/pi-ai";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, type MockResponse, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
-import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -38,7 +41,7 @@ import { WorkPoolRegistry } from "@oh-my-pi/pi-coding-agent/task/workpool";
 import { emptyMirrorState, RemoteAgentSession } from "@oh-my-pi/pi-coding-agent/thread/remote-agent-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, logger, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const MOCK_API_SOURCE = "test/children-survive-parent-turn";
@@ -46,15 +49,19 @@ const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as
 const ARM_RESULT = "ARM-RESULT-7f3a";
 const LANE_SAW_ARM = "LANE-SAW-ARM-7f3a";
 const KILL_LANE = "Kill Lane now.";
+const REVIVE_ARM = "Revive and spawn Grand.";
+const ADVISOR_PROBE = "ADVISOR-SPAWN-PROBE";
 
 /** How Lane's run ends while Arm runs: busy work past its request budget or wall-clock limit, or a model error. */
 type LaneEnd = "budget" | "timeout" | "error";
 /**
  * The agent tree the root builds. `lane`: Root → Lane → Arm. `blocking`: Root →
  * Lane → Arm spawned as a blocking task → Grand. `siblings`: Root → Lane → Arm,
- * and Root → Beta → BetaArm, an unrelated tree.
+ * and Root → Beta → BetaArm, an unrelated tree. `jobless`: Root → Lane spawned as
+ * a blocking task (no job row) → Arm. `twoArms`: Root → Lane → Arm and Arm2.
+ * `parked`: Root → Lane → Arm, where Arm can spawn Grand once revived.
  */
-type Shape = "lane" | "blocking" | "siblings";
+type Shape = "lane" | "blocking" | "siblings" | "jobless" | "twoArms" | "parked";
 
 const LEAD: AgentDefinition = {
 	name: "lead",
@@ -129,22 +136,44 @@ function toolCall(name: string, args: Record<string, unknown>): MockResponse {
 
 /**
  * Root: spawn Lane (and Beta, in `siblings`); on {@link KILL_LANE}, write
- * `proc://Lane/kill`. Lane and Beta: spawn their arm, then end their run (busy
- * work until the request budget or wall-clock limit stops it, or one terminal
- * model error); once Arm's result is in Lane's conversation, acknowledge it. A
- * blocking Arm spawns Grand, then works until its own budget stops it. Arm,
+ * `proc://Lane/kill`. Lane and Beta: spawn their arm (two in `twoArms`), then end
+ * their run (busy work until the request budget or wall-clock limit stops it, or
+ * one terminal model error); once Arm's result is in Lane's conversation,
+ * acknowledge it. A blocking Arm spawns Grand, then works until its own budget
+ * stops it; so does a revived Arm on {@link REVIVE_ARM}. An advisor sent
+ * {@link ADVISOR_PROBE} spawns AdvisorLane, which acts as Lane does. Arm, Arm2,
  * Grand and BetaArm: run a bash that waits for the test's gate, then report.
  */
 function handler(context: Context): MockResponse {
 	const first = context.messages.find(message => message.role === "user");
 	const task = first ? textOf(first.content) : "";
+	const lastUser = context.messages.findLastIndex(message => message.role === "user");
+	const last = lastUser >= 0 ? context.messages[lastUser] : undefined;
+	const taskSinceLastUser = context.messages
+		.slice(lastUser + 1)
+		.some(message => message.role === "toolResult" && message.toolName === "task");
+	if (task.includes(ADVISOR_PROBE)) {
+		if (hasToolResult(context, "task")) return { content: ["advisor done"] };
+		return toolCall("task", { agent: "lead", name: "AdvisorLane", task: "Do assignment Lane." });
+	}
+	if (task.includes("assignment Arm.") && last && textOf(last.content).includes(REVIVE_ARM)) {
+		if (!taskSinceLastUser) {
+			return toolCall("task", { agent: "worker", name: "Grand", task: "Do assignment Grand." });
+		}
+		return toolCall("bash", { command: "true", i: "Arm busy work" });
+	}
 	if (task.includes("assignment Arm.") && shape === "blocking") {
 		if (!hasToolResult(context, "task")) {
 			return toolCall("task", { agent: "worker", name: "Grand", task: "Do assignment Grand." });
 		}
 		return toolCall("bash", { command: "true", i: "Arm busy work" });
 	}
-	if (task.includes("assignment Arm.") || task.includes("assignment Grand.") || task.includes("assignment BetaArm.")) {
+	if (
+		task.includes("assignment Arm.") ||
+		task.includes("assignment Arm2.") ||
+		task.includes("assignment Grand.") ||
+		task.includes("assignment BetaArm.")
+	) {
 		if (hasToolResult(context, "bash")) return { content: [ARM_RESULT] };
 		return toolCall("bash", {
 			// Prints `arm-work-2`, a text only the command's output holds.
@@ -158,12 +187,16 @@ function handler(context: Context): MockResponse {
 		) {
 			return { content: [LANE_SAW_ARM] };
 		}
-		if (!hasToolResult(context, "task")) {
+		const spawnedArms = context.messages.filter(m => m.role === "toolResult" && m.toolName === "task").length;
+		if (spawnedArms === 0) {
 			if (task.includes("assignment Beta.")) {
 				return toolCall("task", { agent: "worker", name: "BetaArm", task: "Do assignment BetaArm." });
 			}
-			const armAgent = shape === "blocking" ? "blocker" : "worker";
+			const armAgent = shape === "blocking" ? "blocker" : shape === "parked" ? "spawner" : "worker";
 			return toolCall("task", { agent: armAgent, name: "Arm", task: "Do assignment Arm." });
+		}
+		if (shape === "twoArms" && spawnedArms === 1) {
+			return toolCall("task", { agent: "worker", name: "Arm2", task: "Do assignment Arm2." });
 		}
 		if (laneEnd === "error" && !laneErrored) {
 			laneErrored = true;
@@ -171,13 +204,15 @@ function handler(context: Context): MockResponse {
 		}
 		return toolCall("bash", { command: "true", i: "Lane busy work" });
 	}
-	const last = context.messages.findLast(message => message.role === "user");
 	if (last && textOf(last.content).includes(KILL_LANE)) {
 		const killed = context.messages.indexOf(last) < context.messages.findLastIndex(m => m.role === "toolResult");
 		return killed ? { content: ["killed"] } : toolCall("write", { path: "proc://Lane/kill", i: "Killing Lane" });
 	}
 	const spawned = context.messages.filter(message => message.role === "toolResult" && message.toolName === "task");
-	if (spawned.length === 0) return toolCall("task", { agent: "lead", name: "Lane", task: "Do assignment Lane." });
+	if (spawned.length === 0) {
+		const laneAgent = shape === "jobless" ? "blockinglead" : "lead";
+		return toolCall("task", { agent: laneAgent, name: "Lane", task: "Do assignment Lane." });
+	}
 	if (shape === "siblings" && spawned.length === 1) {
 		return toolCall("task", { agent: "lead", name: "Beta", task: "Do assignment Beta." });
 	}
@@ -205,6 +240,15 @@ async function harness(options: { idleTtlMs: number }) {
 				blocking: true,
 				source: "bundled",
 			},
+			{ ...LEAD, name: "blockinglead", description: "Blocking lead", blocking: true },
+			{
+				name: "spawner",
+				description: "Worker that can spawn",
+				systemPrompt: "Spawner",
+				tools: ["bash", "task"],
+				spawns: "*",
+				source: "bundled",
+			},
 		],
 		projectAgentsDir: null,
 	});
@@ -216,12 +260,13 @@ async function harness(options: { idleTtlMs: number }) {
 		"todo.enabled": false,
 		"todo.reminders": false,
 		"advisor.enabled": false,
-		// Lane's (and Beta's, and a blocking Arm's) run is force-stopped at 3
-		// requests in the "budget" case; no budget otherwise.
-		"task.agentSoftRequestBudget": laneEnd === "budget" ? { lead: 2, blocker: 2 } : { lead: 0 },
+		// Lane's (and Beta's, a blocking Lane's, and a blocking or revived Arm's)
+		// run is force-stopped at 3 requests in the "budget" case; no budget otherwise.
+		"task.agentSoftRequestBudget":
+			laneEnd === "budget" ? { lead: 2, blocker: 2, blockinglead: 2, spawner: 2 } : { lead: 0 },
 		"task.agentIdleTtlMs": options.idleTtlMs,
-		// Root → Lane → Arm → Grand: Arm, at depth 2, spawns.
-		"task.maxRecursionDepth": 3,
+		// Root → Lane → Arm → Grand, and Root → Lane → advisor → AdvisorLane → Arm.
+		"task.maxRecursionDepth": 4,
 		modelRoles: { default: "mock/mock-model" },
 	});
 	const { session } = await createAgentSession({
@@ -806,6 +851,261 @@ it("stops a workpool member's child when its settled batch is killed", async () 
 		expect(armJob.status).toBe("cancelled");
 	} finally {
 		WorkPoolRegistry.global().releaseOwner(MAIN_AGENT_ID);
+		await session.dispose();
+		authStorage.close();
+	}
+}, 120_000);
+
+/** Waits (bounded) until `job` settled, so work nothing cancels fails the test instead of hanging it. */
+async function settled(job: AsyncJob, what: string): Promise<void> {
+	await until(() => job.status !== "running", what, 5_000);
+	await job.promise;
+}
+
+const SPAWNER: AgentDefinition = {
+	name: "spawner",
+	description: "Worker that can spawn",
+	systemPrompt: "Spawner",
+	tools: ["bash", "task"],
+	spawns: "*",
+	source: "bundled",
+};
+
+it("kills an idle agent that has no job row through proc://, and its child with it", async () => {
+	laneEnd = "budget";
+	shape = "jobless";
+	const { authStorage, session } = await harness({ idleTtlMs: 0 });
+	try {
+		// Lane runs as a blocking task inside the root's turn: no job row ever records it.
+		await session.prompt("Fan out.");
+		const manager = session.asyncJobManager!;
+		await until(() => AgentRegistry.global().get("Lane")?.status === "idle", "the blocking Lane to go idle");
+		const armJob = manager.getJob("Lane.Arm")!;
+		expect({ laneJob: manager.getJob("Lane"), arm: armJob.status }).toEqual({ laneJob: undefined, arm: "running" });
+		await session.prompt(KILL_LANE);
+		await settled(armJob, "Arm's job to end with Lane");
+		expect({ arm: armJob.status, lane: AgentRegistry.global().get("Lane") }).toEqual({
+			arm: "cancelled",
+			lane: undefined,
+		});
+		expect(transcriptHas("Lane.Arm", "arm-work-2")).toBe(false);
+	} finally {
+		await session.dispose();
+		authStorage.close();
+	}
+}, 120_000);
+
+for (const end of ["release", "kill"] as const) {
+	it(`ending a parked Lane by ${end} stops the work a child revived by another agent started`, async () => {
+		laneEnd = "budget";
+		shape = "parked";
+		// Lane and Arm park 100 ms after their trees go quiet.
+		const { authStorage, session } = await harness({ idleTtlMs: 100 });
+		try {
+			await expectArmFinishesAndLaneHearsIt(session);
+			await until(
+				() => ["Lane", "Lane.Arm"].every(id => AgentRegistry.global().get(id)?.status === "parked"),
+				"Lane and Arm to park",
+			);
+			await fs.rm(gateFile);
+			// The root, not Lane, revives Arm; Arm spawns Grand and its turn stops at its budget.
+			await runSubagentFollowUpTurn({
+				id: "Lane.Arm",
+				agent: SPAWNER,
+				message: REVIVE_ARM,
+				structured: false,
+				softRequestBudget: 2,
+			});
+			const grandJob = session.asyncJobManager!.getJob("Lane.Arm.Grand")!;
+			expect({ grand: grandJob.status, lane: AgentRegistry.global().get("Lane")?.status }).toEqual({
+				grand: "running",
+				lane: "parked",
+			});
+			if (end === "release") {
+				await AgentLifecycleManager.global().release("Lane", AgentRegistry.global().get("Lane")!);
+			} else {
+				await session.prompt(KILL_LANE);
+			}
+			await settled(grandJob, "Grand's job to end with Lane");
+			expect(grandJob.status).toBe("cancelled");
+			expect(transcriptHas("Lane.Arm.Grand", "arm-work-2")).toBe(false);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	}, 120_000);
+}
+
+it("ending an agent stops the work of the agents its advisor spawned", async () => {
+	laneEnd = "budget";
+	const { authStorage, session } = await harness({ idleTtlMs: 0 });
+	try {
+		const armJob = await laneIdleWhileArmWorks(session);
+		const manager = session.asyncJobManager!;
+		// Lane's own child is another test's subject; only the advisor's tree runs here.
+		manager.cancel(armJob.id);
+		await armJob.promise;
+		const lane = AgentRegistry.global().get("Lane")!.session as AgentSession;
+		lane.settings.setModelRole("advisor", "mock/mock-model");
+		lane.applyAdvisorConfigs(
+			[{ name: "Ownership review", tools: ["task"], instructions: "Review ownership." }],
+			undefined,
+		);
+		expect(lane.setAdvisorEnabled(true)).toBe(true);
+		// The advisor spawns AdvisorLane through the real task tool; AdvisorLane spawns its own Arm.
+		await lane.getAdvisorAgent()!.prompt(ADVISOR_PROBE);
+		await until(
+			() => manager.getJob("Lane.AdvisorLane.Arm")?.status === "running",
+			"the advisor's agent's child to run",
+		);
+		const advisorArmJob = manager.getJob("Lane.AdvisorLane.Arm")!;
+		await AgentLifecycleManager.global().release("Lane", AgentRegistry.global().get("Lane")!);
+		await settled(advisorArmJob, "the advisor's agent's child to end with Lane");
+		expect(advisorArmJob.status).toBe("cancelled");
+	} finally {
+		await session.dispose();
+		authStorage.close();
+	}
+}, 120_000);
+
+it("a discarded speculative launch never ends a later agent that reuses its id under another parent", async () => {
+	laneEnd = "budget";
+	const { authStorage, session } = await harness({ idleTtlMs: 0 });
+	const batchSettings = Settings.isolated({
+		"async.enabled": true,
+		"task.batch": true,
+		"compaction.enabled": false,
+		"retry.enabled": false,
+		"todo.enabled": false,
+		"todo.reminders": false,
+		"advisor.enabled": false,
+		"task.agentSoftRequestBudget": { lead: 2 },
+		"task.agentIdleTtlMs": 0,
+		modelRoles: { default: "mock/mock-model" },
+	});
+	const manager = session.asyncJobManager!;
+	const childSession = async (id: string, parentId: string) =>
+		(
+			await createAgentSession({
+				cwd: session.sessionManager.getCwd(),
+				agentDir: path.join(root, "home", ".omp", "agent"),
+				authStorage,
+				modelRegistry: session.modelRegistry,
+				model: session.model!,
+				sessionManager: SessionManager.create(session.sessionManager.getCwd(), path.join(root, "reuse", id)),
+				settings: batchSettings,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				toolNames: ["bash"],
+				agentId: id,
+				parentAgentId: parentId,
+				parentTaskPrefix: id,
+				asyncJobManager: manager,
+			})
+		).session;
+	const tool = await TaskTool.create(rootToolSession(session, authStorage, batchSettings));
+	const call: AgentToolCall = { type: "toolCall", id: "streamed-task", name: "task", arguments: {} };
+	const coordinator: SpeculativeOperationSink = {
+		maxInFlight: 2,
+		admit: async () => undefined,
+		authorizeLaunch: async () => ({ allowed: true }),
+		close: () => {},
+	};
+	const stream = (await tool.speculation.stream?.open({ coordinator, parentToolCallId: call.id })) as
+		| TaskLaunchSession
+		| undefined;
+	if (!stream) throw new Error("expected a speculative task launch session");
+	let beta: AgentSession | undefined;
+	let replacement: AgentSession | undefined;
+	try {
+		stream.update(
+			call,
+			'{"context":"shared context","tasks":[{"name":"Lane","agent":"lead","task":"Do assignment Lane."},{"name":"Still',
+		);
+		await until(() => AgentRegistry.global().get("Lane")?.status === "idle", "the speculative Lane's run to return");
+		const oldArm = manager.getJob("Lane.Arm")!;
+		// The Agent Hub kills that Lane; its tree ends with it.
+		await AgentLifecycleManager.global().release("Lane", AgentRegistry.global().get("Lane")!, { tombstone: true });
+		await settled(oldArm, "the killed Lane's child to end");
+		// Beta, another agent, spawns a new Lane, which starts its own background work.
+		beta = await childSession("Beta", MAIN_AGENT_ID);
+		replacement = await childSession("Lane", "Beta");
+		await replacement.getToolByName("bash")!.execute("replacement-work", {
+			command: `while [ ! -e ${JSON.stringify(gateFile)} ]; do sleep 0.05; done; echo replacement-done`,
+			async: true,
+			i: "Replacement work",
+		});
+		const work = manager.getRunningJobs({ ownerId: "Lane" }).find(job => job.type === "bash")!;
+		expect({ parent: AgentRegistry.global().get("Lane")?.parentId, work: work.status }).toEqual({
+			parent: "Beta",
+			work: "running",
+		});
+		// The finished call turns out invalid: the old launch is discarded, after its run returned.
+		stream.discard("finished task call is invalid");
+		// An absence of effect has no event to await: the discard's release runs on
+		// a settled promise, so it lands well within this real wait (red at the
+		// previous head within it), and the processes it would stop are real.
+		await Bun.sleep(500);
+		expect({
+			parent: AgentRegistry.global().get("Lane")?.parentId,
+			work: work.status,
+			disposed: replacement.isDisposed,
+		}).toEqual({ parent: "Beta", work: "running", disposed: false });
+		await Bun.write(gateFile, "go");
+		await work.promise;
+		expect(work.status).toBe("completed");
+	} finally {
+		stream.discard("test cleanup");
+		await Bun.write(gateFile, "go");
+		await replacement?.dispose();
+		await beta?.dispose();
+		await session.dispose();
+		authStorage.close();
+	}
+}, 120_000);
+
+it("reports a failing end hook to the caller that ended the agent, and still ends the rest of its tree", async () => {
+	laneEnd = "budget";
+	shape = "twoArms";
+	const { authStorage, session } = await harness({ idleTtlMs: 0 });
+	const errors = vi.spyOn(logger, "error");
+	try {
+		await session.prompt("Fan out.");
+		const manager = session.asyncJobManager!;
+		await until(
+			() =>
+				AgentRegistry.global().get("Lane")?.status === "idle" && manager.getJob("Lane.Arm2")?.status === "running",
+			"Lane to go idle with both arms running",
+		);
+		const arm = manager.getJob("Lane.Arm")!;
+		const arm2 = manager.getJob("Lane.Arm2")!;
+		// Cancelling Arm's job throws: the end hook fails part-way through Lane's tree.
+		vi.spyOn(arm.abortController, "abort").mockImplementation(() => {
+			throw new Error("abort refused");
+		});
+		const killed = await session
+			.getToolByName("write")!
+			.execute("kill-lane", { path: "proc://Lane/kill", i: "Killing Lane" });
+		const text = killed.content.map(part => ("text" in part ? part.text : "")).join("\n");
+		expect(text).toContain("Cancelled agent Lane, but not all of its tree's work");
+		expect(text).toContain("Lane.Arm");
+		expect(text).toContain("abort refused");
+		expect(errors.mock.calls.some(([message]) => message === "Agent end hook failed")).toBe(true);
+		// The rest of the tree ended, and so did Lane.
+		await settled(arm2, "Arm2's job to end with Lane");
+		expect({ arm2: arm2.status, lane: AgentRegistry.global().get("Lane") }).toEqual({
+			arm2: "cancelled",
+			lane: undefined,
+		});
+	} finally {
+		vi.restoreAllMocks();
+		await Bun.write(gateFile, "go");
 		await session.dispose();
 		authStorage.close();
 	}

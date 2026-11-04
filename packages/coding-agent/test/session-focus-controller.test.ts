@@ -804,6 +804,7 @@ describe("pickRecentFocusableAgentId", () => {
 			session: null,
 			sessionFile: `${id}.jsonl`,
 			generation: 0,
+			lineage: 0,
 			createdAt: 1000,
 			lastActivity: 1000,
 			...overrides,

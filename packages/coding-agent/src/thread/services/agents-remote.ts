@@ -172,6 +172,11 @@ export class RemoteAgentRegistry implements AgentRegistryApi {
 	onChange(listener: RegistryListener): () => void {
 		return this.#listeners.add(listener);
 	}
+
+	/** End hooks run where the refs live: a root's job manager subscribes on main's registry. */
+	onEnd(_hook: (ref: AgentRef) => void): () => void {
+		throw new Error("Agent end hooks are owned by the main thread's registry");
+	}
 }
 
 /** Worker proxy of main's {@link AgentLifecycleApi}; the reviver factory and teardown are main-only. */

@@ -63,14 +63,52 @@ export function ownerAsyncWakePending(manager: AsyncJobManagerApi, ownerId: stri
  * Whether disposing the agent's session now would end work that is going on or
  * drop a result it is owed: {@link ownerAsyncWakePending}, or a running job of any
  * agent spawned under it (its children's own children run after their parents'
- * runs ended, and an agent's disposal ends its whole tree's work). The
- * lifecycle does not park such an agent; it parks it once its tree is quiet.
+ * runs ended, and the agent's end ends its whole tree's work). The lifecycle
+ * does not park such an agent; it parks it once its tree is quiet.
  */
 export function agentTreeWorkPending(manager: AsyncJobManagerApi, agentId: string): boolean {
 	return (
 		ownerAsyncWakePending(manager, agentId) ||
 		manager.getRunningJobs({ ownerId: agentId, includeDescendants: true }).length > 0
 	);
+}
+
+/**
+ * One agent ref as the job manager sees it: its identity is the ref
+ * (`generation`), and `lineage` is shared by every ref of one agent (a killed
+ * agent's reopened ref continues its lineage; a fresh spawn of the same id
+ * starts a new one). `parentLineage` is the lineage of the ref it was spawned
+ * under, so a re-spawned parent id never adopts an older ref's children.
+ */
+export interface AgentTreeNode {
+	readonly id: string;
+	readonly generation: number;
+	readonly lineage: number;
+	readonly parentId?: string;
+	readonly parentLineage?: number;
+}
+
+/** The registry the manager learns agents and their ends from (main's agent registry). */
+export interface AgentTreeSource {
+	/** The current ref of `id`. */
+	get(id: string): AgentTreeNode | undefined;
+	/** Calls `hook` once when a specific ref ends (unregistered or killed); returns the unsubscribe. */
+	onEnd(hook: (ref: AgentTreeNode) => void): () => void;
+}
+
+/** Thrown by the end hook when cancelling some of an ended agent's tree failed; the rest was cancelled. */
+export class AgentTreeCancelError extends AggregateError {
+	constructor(
+		readonly agentId: string,
+		readonly jobIds: string[],
+		errors: unknown[],
+	) {
+		super(
+			errors,
+			`Could not cancel ${jobIds.length === 1 ? "job" : "jobs"} ${jobIds.join(", ")} of ended agent ${agentId}: ${errors.map(error => (error instanceof Error ? error.message : String(error))).join("; ")}`,
+		);
+		this.name = "AgentTreeCancelError";
+	}
 }
 
 /** Kind of work a managed job runs; drives job-row badges and delivery labels. */
@@ -224,14 +262,14 @@ export interface AsyncJobManagerOptions {
 	 */
 	retainedArtifactsCleanupGraceMs?: number;
 	/**
-	 * The spawn edges of live agents as `[agentId, parentId]`: who spawned each
-	 * registered agent, however it was spawned (async or blocking task, workpool
-	 * member, eval agent). Read at each tree walk, so it reflects the current
-	 * registry; an edge here overrides one recorded from a job row for the same
-	 * agent id (a re-spawned id belongs to its new parent). Omitted, the tree
-	 * follows only the edges recorded from job rows ({@link AsyncJob.agentId}).
+	 * The agent registry. Each job records, when it registers, the lineages of
+	 * its owner and of every agent above it; when a specific agent ref ends
+	 * ({@link AgentTreeSource.onEnd}), the manager cancels every running job whose
+	 * owner chain holds that ref's lineage: the work of the agent and of every
+	 * agent spawned under it, however it was spawned, and never another agent's.
+	 * Omitted, jobs carry no chain and only an owner's own jobs are matched.
 	 */
-	agentParents?: () => Iterable<readonly [agentId: string, parentId: string]>;
+	agents?: AgentTreeSource;
 	/**
 	 * Upper bound on how long retained-artifacts cleanup waits for a job's
 	 * delivery to settle before giving up and running cleanup anyway (see
@@ -322,12 +360,15 @@ export interface AsyncJobFilter {
 	ownerId: string | undefined;
 	/**
 	 * Also match the jobs of every agent spawned under `ownerId`, down the agent
-	 * tree (see {@link AsyncJobManagerOptions.agentParents}). An agent's
-	 * background work outlives its runs, so the agents it spawned can be idle
-	 * while their own children still run; whatever ends the agent ends that
-	 * work too, and only that work: another agent's tree is never matched.
+	 * tree (see {@link AsyncJobManagerOptions.agents}): jobs whose owner chain
+	 * holds `agentLineage`, by default the lineage of `ownerId`'s current ref.
+	 * An agent's background work outlives its runs, so the agents it spawned can
+	 * be idle while their own children still run; another agent's tree is never
+	 * matched.
 	 */
 	includeDescendants?: boolean;
+	/** The lineage whose tree `includeDescendants` matches; a caller holding a specific ref passes its lineage. */
+	agentLineage?: number;
 }
 
 /** What a job body receives from {@link AsyncJobManagerApi.register}. */
@@ -396,8 +437,18 @@ export interface AsyncJobManagerApi {
 	registerDeliverySink(ownerId: string, sink: AsyncJobDeliverySink): () => void;
 	/** Wait until every job owned by `ownerId` settled; false when `timeoutMs` elapses first. */
 	waitForOwnerJobs(ownerId: string, options?: { timeoutMs?: number; excludeSuppressed?: boolean }): Promise<boolean>;
-	/** Cancel every job owned by `ownerId`, then wait until `deadlineAt`. */
-	cancelAndReapOwnerJobs(ownerId: string, deadlineAt: number): Promise<AsyncJobReapResult>;
+	/**
+	 * Cancel every job owned by `ownerId` and, with `agentLineage`, every job of
+	 * that lineage's tree, then wait until `deadlineAt`.
+	 */
+	cancelAndReapOwnerJobs(ownerId: string, deadlineAt: number, agentLineage?: number): Promise<AsyncJobReapResult>;
+	/**
+	 * Make `alias` an owner id of `agentId`: jobs owned by `alias`, and agents
+	 * registered with `alias` as their parent, belong to that agent's tree. A
+	 * session's advisor owns its work under such an alias. The alias lasts
+	 * until the agent ends.
+	 */
+	bindOwnerAlias(alias: string, agentId: string): void;
 	drainDeliveries(options?: { timeoutMs?: number; filter?: AsyncJobFilter }): Promise<boolean>;
 	isDeliverySuppressed(jobId: string): boolean;
 }
@@ -425,8 +476,10 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
 	readonly #suppressedDeliveries = new Set<string>();
 	readonly #watchedJobs = new Set<string>();
-	/** Owner of each agent a job ran, by agent id: the agent tree {@link cancelAll} follows. */
-	readonly #agentOwners = new Map<string, string>();
+	/** Lineages of each job's owner and of every agent above it, recorded when the job registered. */
+	readonly #ownerLineages = new WeakMap<AsyncJob, ReadonlySet<number>>();
+	/** Owner aliases ({@link bindOwnerAlias}) to the agent id they belong to. */
+	readonly #ownerAliases = new Map<string, string>();
 	readonly #consumedJobResults = new Set<string>();
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #releasedForegroundJobs = new Set<string>();
@@ -434,7 +487,8 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
 	readonly #maxRunningJobsOption: AsyncJobManagerOptions["maxRunningJobs"];
-	readonly #agentParents: AsyncJobManagerOptions["agentParents"];
+	readonly #agents: AgentTreeSource | undefined;
+	readonly #unsubscribeAgentEnd: (() => void) | undefined;
 	readonly #retentionMs: number;
 	readonly #retainedArtifactsCleanupGraceMs: number;
 	readonly #retainedArtifactsCleanupMaxWaitMs: number;
@@ -460,15 +514,21 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 
 	#filterJobs(jobs: Iterable<AsyncJob>, filter?: AsyncJobFilter): AsyncJob[] {
 		if (!filter) return Array.from(jobs);
-		const owners =
-			filter.includeDescendants && filter.ownerId !== undefined ? this.#ownerTree(filter.ownerId) : undefined;
+		const lineage =
+			filter.includeDescendants && filter.ownerId !== undefined
+				? (filter.agentLineage ?? this.#agents?.get(filter.ownerId)?.lineage)
+				: undefined;
 		const out: AsyncJob[] = [];
 		for (const job of jobs) {
-			if (owners ? job.ownerId !== undefined && owners.has(job.ownerId) : job.ownerId === filter.ownerId) {
+			if (job.ownerId === filter.ownerId || (lineage !== undefined && this.#inLineage(job, lineage))) {
 				out.push(job);
 			}
 		}
 		return out;
+	}
+
+	#inLineage(job: AsyncJob, lineage: number): boolean {
+		return this.#ownerLineages.get(job)?.has(lineage) === true;
 	}
 
 	#visibleJobs(filter?: AsyncJobFilter): AsyncJob[] {
@@ -478,7 +538,8 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	constructor(options: AsyncJobManagerOptions) {
 		this.#onJobComplete = options.onJobComplete;
 		this.#maxRunningJobsOption = options.maxRunningJobs;
-		this.#agentParents = options.agentParents;
+		this.#agents = options.agents;
+		this.#unsubscribeAgentEnd = options.agents?.onEnd(ref => this.#endAgentTree(ref));
 		this.#retentionMs = Math.max(0, Math.floor(options.retentionMs ?? DEFAULT_RETENTION_MS));
 		this.#retainedArtifactsCleanupGraceMs = Math.max(
 			0,
@@ -550,7 +611,8 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			queued: options?.queued === true,
 			...(options?.foreground ? { foreground: true } : {}),
 		};
-		this.#recordAgentOwner(job.agentId, job.ownerId);
+		const chain = this.#ownerChain(job.ownerId);
+		if (chain) this.#ownerLineages.set(job, chain);
 
 		const reportProgress = async (text: string, details?: AsyncJobDetails): Promise<void> => {
 			job.progressText = text;
@@ -648,7 +710,6 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			agentOutputPublished: result.agentOutputPublished,
 		};
 		this.#jobs.set(id, job);
-		this.#recordAgentOwner(job.agentId, job.ownerId);
 		this.#recordAgentReply(job);
 		this.#enqueueDelivery(id, result.text);
 		this.#scheduleEviction(id);
@@ -836,53 +897,72 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		}
 	}
 
-	/**
-	 * Cancel one running job. A job that runs a subagent ({@link AsyncJob.agentId})
-	 * takes that agent's tree's jobs with it: an explicit cancel of the agent ends
-	 * all of its work, however late in its run the cancel lands.
-	 */
 	#cancelJob(job: AsyncJob, reason?: unknown): void {
 		job.status = "cancelled";
 		job.abortController.abort(reason);
-		if (job.agentId === undefined || job.agentId === job.ownerId) return;
-		for (const owned of this.#filterJobs(this.#jobs.values(), { ownerId: job.agentId, includeDescendants: true })) {
-			if (owned.status !== "running") continue;
-			owned.status = "cancelled";
-			owned.abortController.abort(reason);
-		}
+	}
+
+	bindOwnerAlias(alias: string, agentId: string): void {
+		if (alias !== agentId) this.#ownerAliases.set(alias, agentId);
 	}
 
 	/**
-	 * `ownerId` and every agent spawned under it. A live agent's parent is the
-	 * registry's spawn edge ({@link AsyncJobManagerOptions.agentParents}); an
-	 * agent no longer registered keeps the edge recorded from its job row.
+	 * The end hook: `ref` ended (unregistered, or killed into its tombstone), so
+	 * the work of its tree ends. This is the one place an agent's end cancels
+	 * work; every caller that ends an agent just ends its ref. A ref that is no
+	 * longer its id's current ref was replaced, and cancels nothing. Calling it
+	 * again for the same ref cancels nothing new. Each job is cancelled on its
+	 * own: one that fails is reported, by id, after every other job of the tree
+	 * was cancelled.
 	 */
-	#ownerTree(ownerId: string): Set<string> {
-		const parents = new Map(this.#agentOwners);
-		for (const [agentId, parentId] of this.#agentParents?.() ?? []) parents.set(agentId, parentId);
-		const children = new Map<string, string[]>();
-		for (const [agentId, parentId] of parents) {
-			if (agentId === parentId) continue;
-			const list = children.get(parentId);
-			if (list) list.push(agentId);
-			else children.set(parentId, [agentId]);
-		}
-		const owners = new Set([ownerId]);
-		const pending = [ownerId];
-		for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
-			for (const child of children.get(next) ?? []) {
-				if (owners.has(child)) continue;
-				owners.add(child);
-				pending.push(child);
+	#endAgentTree(ref: AgentTreeNode): void {
+		const current = this.#agents?.get(ref.id);
+		if (current !== undefined && current.generation !== ref.generation) return;
+		const failedJobIds: string[] = [];
+		const errors: unknown[] = [];
+		for (const job of this.#jobs.values()) {
+			if (job.status !== "running") continue;
+			if (!this.#inLineage(job, ref.lineage) && !(job.ownerId === ref.id && !this.#ownerLineages.has(job))) continue;
+			try {
+				this.#cancelJob(job);
+			} catch (error) {
+				failedJobIds.push(job.id);
+				errors.push(error);
 			}
 		}
-		return owners;
+		for (const [alias, agentId] of this.#ownerAliases) {
+			if (agentId === ref.id) this.#ownerAliases.delete(alias);
+		}
+		if (errors.length > 0) throw new AgentTreeCancelError(ref.id, failedJobIds, errors);
 	}
 
-	/** Record that `agentId` runs as a job of `ownerId`; kept after the job row is evicted. */
-	#recordAgentOwner(agentId: string | undefined, ownerId: string | undefined): void {
-		if (agentId !== undefined && ownerId !== undefined && agentId !== ownerId)
-			this.#agentOwners.set(agentId, ownerId);
+	/**
+	 * The lineages of `ownerId`'s current ref and of every ref above it, through
+	 * owner aliases: the agents whose end ends a job `ownerId` registers now.
+	 * A parent id whose current ref is not the one the child was spawned under
+	 * (re-spawned since) ends the chain.
+	 */
+	#ownerChain(ownerId: string | undefined): ReadonlySet<number> | undefined {
+		const agents = this.#agents;
+		if (!agents || ownerId === undefined) return undefined;
+		const chain = new Set<number>();
+		let id: string | undefined = ownerId;
+		let expectedLineage: number | undefined;
+		const seen = new Set<string>();
+		while (id !== undefined && !seen.has(id)) {
+			seen.add(id);
+			const aliased = this.#ownerAliases.get(id);
+			if (aliased !== undefined) {
+				id = aliased;
+				continue;
+			}
+			const ref = agents.get(id);
+			if (!ref || (expectedLineage !== undefined && ref.lineage !== expectedLineage)) break;
+			chain.add(ref.lineage);
+			id = ref.parentId;
+			expectedLineage = ref.parentLineage;
+		}
+		return chain.size > 0 ? chain : undefined;
 	}
 
 	/**
@@ -965,16 +1045,23 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	}
 
 	/**
-	 * Cancel every job owned by `ownerId` or by an agent it spawned (down the
-	 * tree, see {@link AsyncJobFilter.includeDescendants}), then wait only until `deadlineAt` for them to
-	 * settle. The returned completion keeps waiting for actual process settlement
-	 * when the deadline expires, so callers can move that cleanup out of the
-	 * user-visible Task wait without losing ownership of the live work.
+	 * Cancel every job owned by `ownerId` and, given `agentLineage`, every job of
+	 * that lineage's tree (see {@link AsyncJobFilter.includeDescendants}), then
+	 * wait only until `deadlineAt` for them to settle. The returned completion
+	 * keeps waiting for actual process settlement when the deadline expires, so
+	 * callers can move that cleanup out of the user-visible Task wait without
+	 * losing ownership of the live work.
 	 */
-	async cancelAndReapOwnerJobs(ownerId: string, deadlineAt: number): Promise<AsyncJobReapResult> {
-		this.cancelAll({ ownerId, includeDescendants: true });
-		const owners = this.#ownerTree(ownerId);
-		const owned = (job: AsyncJob): boolean => job.ownerId !== undefined && owners.has(job.ownerId);
+	async cancelAndReapOwnerJobs(
+		ownerId: string,
+		deadlineAt: number,
+		agentLineage?: number,
+	): Promise<AsyncJobReapResult> {
+		const owned = (job: AsyncJob): boolean =>
+			job.ownerId === ownerId || (agentLineage !== undefined && this.#inLineage(job, agentLineage));
+		for (const job of this.#jobs.values()) {
+			if (job.status === "running" && owned(job)) this.#cancelJob(job);
+		}
 		const settled = await this.#waitForJobs(owned, deadlineAt);
 		if (settled) {
 			return { settled: true, pendingJobIds: [], completion: Promise.resolve() };
@@ -1053,6 +1140,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 
 	async dispose(options?: { timeoutMs?: number }): Promise<boolean> {
 		this.#disposed = true;
+		this.#unsubscribeAgentEnd?.();
 		this.#clearEvictionTimers();
 		this.cancelAll(undefined, ASYNC_JOB_MANAGER_SHUTDOWN_REASON);
 		const timeoutMs = Math.max(options?.timeoutMs ?? 3_000, 0);
@@ -1072,7 +1160,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		this.#inFlightDeliveries.length = 0;
 		this.#suppressedDeliveries.clear();
 		this.#watchedJobs.clear();
-		this.#agentOwners.clear();
+		this.#ownerAliases.clear();
 		this.#consumedJobResults.clear();
 		this.#releasedForegroundJobs.clear();
 		this.#deliverySinks.clear();

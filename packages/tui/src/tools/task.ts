@@ -2477,6 +2477,12 @@ export interface AgentProgress {
 export interface SingleResult {
 	index: number;
 	id: string;
+	/**
+	 * Registry generation of the agent ref this run ran as (process-local). A
+	 * caller that ends the agent later ends that ref only, never a newer agent
+	 * that reuses the id.
+	 */
+	agentGeneration?: number;
 	agent: string;
 	agentSource: AgentSource;
 	task: string;

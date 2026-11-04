@@ -95,9 +95,11 @@ const sessionCodec: RpcCodec<AgentSessionHandle> = {
 interface RefSnapshot {
 	readonly id: string;
 	readonly generation: number;
+	readonly lineage: number;
 	readonly displayName: string;
 	readonly kind: AgentRef["kind"];
 	readonly parentId: AgentRef["parentId"];
+	readonly parentLineage: AgentRef["parentLineage"];
 	readonly status: AgentRef["status"];
 	readonly session: AgentSessionHandle | null;
 	readonly sessionFile: string | null;
@@ -132,6 +134,7 @@ function refTombstone(identity: RefIdentity): AgentRef {
 	return {
 		id: identity.id,
 		generation: identity.generation,
+		lineage: identity.generation,
 		displayName: identity.id,
 		kind: "sub",
 		status: "aborted",
@@ -149,9 +152,11 @@ const mainRefCodec: RpcCodec<AgentRef> = {
 		({
 			id: ref.id,
 			generation: ref.generation,
+			lineage: ref.lineage,
 			displayName: ref.displayName,
 			kind: ref.kind,
 			parentId: ref.parentId,
+			parentLineage: ref.parentLineage,
 			status: ref.status,
 			session: ref.session,
 			sessionFile: ref.sessionFile,
@@ -183,6 +188,7 @@ function refresh(ref: AgentRef, snapshot: RefSnapshot): AgentRef {
 	ref.displayName = snapshot.displayName;
 	ref.kind = snapshot.kind;
 	ref.parentId = snapshot.parentId;
+	ref.parentLineage = snapshot.parentLineage;
 	ref.status = snapshot.status;
 	ref.session = snapshot.session;
 	ref.sessionFile = snapshot.sessionFile;

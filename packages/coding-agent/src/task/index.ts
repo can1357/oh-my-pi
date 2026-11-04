@@ -1034,15 +1034,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	/**
 	 * End the agents a discarded run spawned: an unadopted launch has no owner to
 	 * hear from them, and their background work (kept past the run's end) would
-	 * otherwise run on with nobody to take its results. The transcript stays on
-	 * disk, as for any released agent.
+	 * otherwise run on with nobody to take its results. Each ends by the ref its
+	 * run ran as: an id released and spawned again since (under any parent) is
+	 * another agent, and is left alone. Releasing the ref is all it does; the
+	 * registry's end hook cancels the tree's work. The transcript stays on disk,
+	 * as for any released agent.
 	 */
 	async #endDiscardedAgents(result: AgentToolResult<TaskToolDetails>): Promise<void> {
 		const lifecycle = this.session.agentLifecycle?.() ?? AgentLifecycleManager.global();
-		for (const { id } of result.details?.results ?? []) {
-			this.session.asyncJobManager?.cancelAll({ ownerId: id, includeDescendants: true });
+		const registry = this.session.agentRegistry ?? AgentRegistry.global();
+		for (const { id, agentGeneration } of result.details?.results ?? []) {
+			const ref = registry.get(id);
+			if (!ref || agentGeneration === undefined || ref.generation !== agentGeneration) continue;
 			try {
-				await lifecycle.release(id);
+				await lifecycle.release(id, ref);
 			} catch (error) {
 				logger.warn("Discarded speculative task: releasing its agent failed", { id, error: String(error) });
 			}

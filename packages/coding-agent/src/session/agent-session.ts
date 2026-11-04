@@ -3562,9 +3562,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		releaseJudgmentBatches(this.#agentId);
 		WorkPoolRegistry.global().releaseOwner(this.#agentId);
 		const manager = this.#asyncJobManager;
-		// The agent's conversation ends here, and with it the work of every agent
-		// spawned under it: their background jobs outlive their own runs.
-		manager?.cancelAll({ ownerId: this.#agentId, includeDescendants: true }, reason);
+		// Only this session's own jobs: the work of agents spawned under it ends
+		// with those agents, when the registry ends their refs (the job manager's
+		// end hook), not with this conversation.
+		manager?.cancelAll({ ownerId: this.#agentId }, reason);
 		manager?.evictCompletedJobs({ ownerId: this.#agentId });
 		// Invalidate this owner's in-flight/drained deliveries against the new
 		// generation, then drop any async-result follow-up already queued, so a

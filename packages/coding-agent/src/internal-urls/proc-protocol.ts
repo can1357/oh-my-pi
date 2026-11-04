@@ -6,6 +6,7 @@ import {
 	agentStaleNote,
 	cancelAgentRegistration,
 	executeCancel,
+	ownedAgentRegistration,
 	runningAgentsOutsideJobs,
 	runningTaskProgressSuffix,
 	snapshotJobs,
@@ -273,7 +274,12 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		const jobs = ownerJobs(session);
 		const exactJob = jobs.find(item => item.id === id);
 		const agentJob = exactJob ? undefined : runningJobOfAgent(jobs, id);
-		const agent = runningAgentsOutsideJobs(session).find(item => item.id === id);
+		// A running agent with no job row, or any agent the caller spawned whatever
+		// its status: an idle or parked one still owns its tree's background work,
+		// and its run's job row may be long gone (or never existed: a blocking spawn).
+		const agent =
+			runningAgentsOutsideJobs(session).some(item => item.id === id) ||
+			ownedAgentRegistration(session, ownerId, id) !== undefined;
 		let service: DaemonSnapshot | undefined;
 		if (cfgLaunchEnabled.get(session.settings)) {
 			try {

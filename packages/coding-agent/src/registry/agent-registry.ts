@@ -67,9 +67,17 @@ export interface AgentRef {
 	id: string;
 	/** Unique per ref object, minted by the owning registry; `register`/`reopen` mint a new one. */
 	readonly generation: number;
+	/**
+	 * Shared by every ref of one agent: minted with a fresh registration, kept by
+	 * {@link AgentRegistryApi.reopen}. A new spawn of the same id starts a new
+	 * lineage, so nothing tied to an older one reaches it.
+	 */
+	readonly lineage: number;
 	displayName: string;
 	kind: AgentKind;
 	parentId?: string;
+	/** Lineage of the parent's ref this agent was registered under; undefined when the parent had no ref then. */
+	parentLineage?: number;
 	status: AgentStatus;
 	/** Null exactly when parked/aborted. */
 	session: AgentSessionHandle | null;
@@ -104,16 +112,21 @@ export function isResumable(ref: AgentRef | undefined): boolean {
 }
 
 /**
- * `[agentId, parentId]` for every registered agent that has a parent: the agent
- * that spawned it, recorded at registration whatever the spawn mode. The job
- * manager walks these edges to find the work that ends with an agent.
+ * Thrown by {@link AgentRegistryApi.unregister} or `setStatus(…, "aborted")`
+ * when an end hook failed. The ref has ended all the same, and every other hook
+ * ran; `errors` holds each failure.
  */
-export function agentSpawnEdges(registry: Pick<AgentRegistryApi, "list">): [string, string][] {
-	const edges: [string, string][] = [];
-	for (const ref of registry.list()) {
-		if (ref.parentId !== undefined && ref.parentId !== ref.id) edges.push([ref.id, ref.parentId]);
+export class AgentEndHookError extends AggregateError {
+	constructor(
+		readonly agentId: string,
+		errors: unknown[],
+	) {
+		super(
+			errors,
+			`Agent ${agentId} ended, but ending its tree's work failed: ${errors.map(error => (error instanceof Error ? error.message : String(error))).join("; ")}`,
+		);
+		this.name = "AgentEndHookError";
 	}
-	return edges;
 }
 
 export type RegistryEvent =
@@ -130,6 +143,10 @@ export interface RegisterInput {
 	displayName: string;
 	kind: AgentKind;
 	parentId?: string;
+	/** Continue the lineage of an earlier ref of this agent ({@link AgentRegistryApi.reopen}). */
+	lineage?: number;
+	/** Lineage of the parent's ref, when it is not the parent's current ref (a reopened ref keeps its own). */
+	parentLineage?: number;
 	session: AgentSessionHandle | null;
 	sessionFile?: string | null;
 	status?: AgentStatus;
@@ -188,6 +205,12 @@ export interface AgentRegistryApi {
 	syncSessionStatus(id: string, session: AgentSessionHandle): () => void;
 	/** Subscribe to registry events; returns the unsubscribe function. */
 	onChange(listener: RegistryListener): () => void;
+	/**
+	 * Call `hook` once when a specific ref ends: it is unregistered, or turned into
+	 * its `aborted` tombstone. A ref replaced by a newer registration of its id
+	 * never ends, so its hook never fires. Returns the unsubscribe function.
+	 */
+	onEnd(hook: (ref: AgentRef) => void): () => void;
 }
 
 export class AgentRegistry implements AgentRegistryApi {
@@ -213,6 +236,9 @@ export class AgentRegistry implements AgentRegistryApi {
 
 	readonly #refs = new Map<string, AgentRef>();
 	readonly #listeners = new Set<RegistryListener>();
+	readonly #endHooks = new Set<(ref: AgentRef) => void>();
+	/** Refs that ended or were replaced: their end hook has fired, or must never fire. */
+	readonly #ended = new WeakSet<AgentRef>();
 	/** Last generation minted for a ref object of this registry. */
 	#generation = 0;
 	/** Which of these agents are blocked until others finish. */
@@ -229,12 +255,16 @@ export class AgentRegistry implements AgentRegistryApi {
 
 	register(input: RegisterInput): AgentRef {
 		const now = Date.now();
+		const generation = ++this.#generation;
 		const ref: AgentRef = {
 			id: input.id,
-			generation: ++this.#generation,
+			generation,
+			lineage: input.lineage ?? generation,
 			displayName: input.displayName,
 			kind: input.kind,
 			parentId: input.parentId,
+			parentLineage:
+				input.parentLineage ?? (input.parentId !== undefined ? this.#refs.get(input.parentId)?.lineage : undefined),
 			status: input.status ?? "running",
 			session: input.session,
 			sessionFile: input.sessionFile ?? null,
@@ -245,6 +275,10 @@ export class AgentRegistry implements AgentRegistryApi {
 			lifecycle: input.lifecycle,
 		};
 		Object.defineProperty(ref, kMintedRef, { value: true });
+		// A replaced ref is superseded, not ended: whatever later tries to end it
+		// fails the expected-ref check, and its end hook can never fire.
+		const replaced = this.#refs.get(ref.id);
+		if (replaced) this.#ended.add(replaced);
 		this.#refs.set(ref.id, ref);
 		this.#emit({ type: "registered", ref });
 		return ref;
@@ -277,6 +311,8 @@ export class AgentRegistry implements AgentRegistryApi {
 			displayName: current.displayName,
 			kind: current.kind,
 			parentId: current.parentId,
+			lineage: current.lineage,
+			parentLineage: current.parentLineage,
 			session: null,
 			sessionFile: current.sessionFile,
 			status: "parked",
@@ -341,6 +377,8 @@ export class AgentRegistry implements AgentRegistryApi {
 			ref.lifecycle = { ...ref.lifecycle, terminalAt: ref.lastActivity };
 		}
 		this.#emit({ type: "status_changed", ref });
+		// A kill keeps the ref as its terminal tombstone: the agent has ended.
+		if (status === "aborted") this.#end(ref);
 		return true;
 	}
 
@@ -448,6 +486,7 @@ export class AgentRegistry implements AgentRegistryApi {
 		if (!ref || !this.#matchesExpected(ref, expected)) return false;
 		this.#refs.delete(id);
 		this.#emit({ type: "removed", ref });
+		this.#end(ref);
 		return true;
 	}
 
@@ -487,6 +526,33 @@ export class AgentRegistry implements AgentRegistryApi {
 	onChange(listener: RegistryListener): () => void {
 		this.#listeners.add(listener);
 		return () => this.#listeners.delete(listener);
+	}
+
+	onEnd(hook: (ref: AgentRef) => void): () => void {
+		this.#endHooks.add(hook);
+		return () => this.#endHooks.delete(hook);
+	}
+
+	/**
+	 * Fire the end hooks for `ref`, once. Every hook runs even when one throws;
+	 * a failure is logged and thrown to the caller that ended the ref, after the
+	 * ref's end took effect.
+	 */
+	#end(ref: AgentRef): void {
+		if (this.#ended.has(ref)) return;
+		this.#ended.add(ref);
+		const errors: unknown[] = [];
+		for (const hook of this.#endHooks) {
+			try {
+				hook(ref);
+			} catch (error) {
+				errors.push(error);
+			}
+		}
+		if (errors.length === 0) return;
+		const failure = new AgentEndHookError(ref.id, errors);
+		logger.error("Agent end hook failed", { id: ref.id, generation: ref.generation, error: failure.message });
+		throw failure;
 	}
 
 	#emit(event: RegistryEvent): void {

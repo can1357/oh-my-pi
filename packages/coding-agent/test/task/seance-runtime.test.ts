@@ -464,6 +464,7 @@ describe("seance startup contracts", () => {
 			session: null,
 			sessionFile,
 			generation: 0,
+			lineage: 0,
 			createdAt: 0,
 			lastActivity: 0,
 		});

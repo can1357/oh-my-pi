@@ -64,6 +64,7 @@ function ref(id: string, overrides: Partial<AgentRef> & { cost?: number } = {}):
 		session: null,
 		sessionFile: path.join(artifacts, `${id}.jsonl`),
 		generation: 0,
+		lineage: 0,
 		createdAt: 0,
 		lastActivity: 0,
 		history: metrics ? { metrics } : undefined,

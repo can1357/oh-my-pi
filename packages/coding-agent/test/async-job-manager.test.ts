@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { AsyncJobError, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 
 async function waitForJobEviction(manager: AsyncJobManager, jobId: string): Promise<void> {
@@ -440,115 +441,75 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)?.resultText).toBe("late result");
 	});
 
-	test("cancelling a job that runs an agent cancels the jobs that agent owns, down its tree", async () => {
-		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
-		const runUntilAborted = async ({ signal }: { signal: AbortSignal }) => {
-			const aborted = Promise.withResolvers<void>();
-			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
-			await aborted.promise;
-			return "stopped";
-		};
-		const lane = manager.register("task", "Lane", runUntilAborted, { id: "Lane", ownerId: "Main", agentId: "Lane" });
-		const arm = manager.register("task", "Lane.Arm", runUntilAborted, {
-			id: "Lane.Arm",
-			ownerId: "Lane",
-			agentId: "Lane.Arm",
-		});
-		const armBash = manager.register("bash", "arm bash", runUntilAborted, { ownerId: "Lane.Arm" });
-		const sibling = manager.register("task", "Beta", runUntilAborted, {
-			id: "Beta",
-			ownerId: "Main",
-			agentId: "Beta",
-		});
+	const runUntilAborted = async ({ signal }: { signal: AbortSignal }) => {
+		const aborted = Promise.withResolvers<void>();
+		signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+		await aborted.promise;
+		return "stopped";
+	};
+	const agent = (registry: AgentRegistry, id: string, parentId?: string) =>
+		registry.register({ id, displayName: id, kind: "sub", parentId, session: null, status: "idle" });
 
-		expect(manager.cancel(lane, { ownerId: "Main" })).toBe(true);
+	test("ending an agent's ref cancels its whole tree's work, once, and nothing outside it", async () => {
+		const registry = new AgentRegistry();
+		const manager = new AsyncJobManager({ onJobComplete: async () => {}, agents: registry });
+		agent(registry, "Main");
+		const lane = agent(registry, "Lane", "Main");
+		// Arm ran as a blocking task of Lane: no job row records it, only the registry.
+		agent(registry, "Lane.Arm", "Lane");
+		agent(registry, "Beta", "Main");
+		const laneWork = manager.register("bash", "lane", runUntilAborted, { ownerId: "Lane" });
+		const armWork = manager.register("bash", "arm", runUntilAborted, { ownerId: "Lane.Arm" });
+		const betaWork = manager.register("bash", "beta", runUntilAborted, { ownerId: "Beta" });
+		const status = () => [laneWork, armWork, betaWork].map(id => manager.getJob(id)?.status);
 
-		expect([lane, arm, armBash, sibling].map(id => manager.getJob(id)?.status)).toEqual([
-			"cancelled",
-			"cancelled",
-			"cancelled",
-			"running",
-		]);
-		manager.cancel(sibling);
+		// Parking is not an end.
+		registry.setStatus("Lane", "parked", lane);
+		expect(status()).toEqual(["running", "running", "running"]);
+		expect(registry.unregister("Lane", lane)).toBe(true);
+		expect(status()).toEqual(["cancelled", "cancelled", "running"]);
+		expect(registry.unregister("Lane", lane)).toBe(false);
+		manager.cancel(betaWork);
 		await manager.waitForAll();
 	});
 
-	test("cancelling an owner's jobs reaches the jobs of agents it spawned whose runs already ended", async () => {
-		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
-		// Lane spawned Arm, Arm spawned a background bash; both runs then ended and
-		// their job rows settled and were evicted, while the bash still runs.
-		const lane = manager.register("task", "Lane", async () => "lane done", {
-			id: "Lane",
-			ownerId: "Main",
-			agentId: "Lane",
-		});
-		const arm = manager.register("task", "Lane.Arm", async () => "arm done", {
-			id: "Lane.Arm",
-			ownerId: "Lane",
-			agentId: "Lane.Arm",
-		});
-		const armBash = manager.register(
-			"bash",
-			"arm bash",
-			async ({ signal }) => {
-				const aborted = Promise.withResolvers<void>();
-				signal.addEventListener("abort", () => aborted.resolve(), { once: true });
-				await aborted.promise;
-				return "stopped";
-			},
-			{ ownerId: "Lane.Arm" },
-		);
-		await Promise.all([manager.getJob(lane)!.promise, manager.getJob(arm)!.promise]);
-		manager.evictCompletedJobs({ ownerId: "Main" });
-		manager.evictCompletedJobs({ ownerId: "Lane" });
-		expect([manager.getJob(lane), manager.getJob(arm)]).toEqual([undefined, undefined]);
+	test("a replaced ref never cancels, and its children never join the tree of the id's new agent", async () => {
+		const registry = new AgentRegistry();
+		const manager = new AsyncJobManager({ onJobComplete: async () => {}, agents: registry });
+		agent(registry, "Main");
+		agent(registry, "Beta", "Main");
+		const oldLane = agent(registry, "Lane", "Main");
+		agent(registry, "Lane.Arm", "Lane");
+		const oldArmWork = manager.register("bash", "old arm", runUntilAborted, { ownerId: "Lane.Arm" });
+		// Lane is spawned again, under Beta: a new agent with the same id.
+		const newLane = agent(registry, "Lane", "Beta");
+		const newLaneWork = manager.register("bash", "new lane", runUntilAborted, { ownerId: "Lane" });
 
-		// Without `includeDescendants` the filter matches Lane's own jobs only.
-		manager.cancelAll({ ownerId: "Lane" });
-		expect(manager.getJob(armBash)?.status).toBe("running");
-		manager.cancelAll({ ownerId: "Lane", includeDescendants: true });
-
-		expect(manager.getJob(armBash)?.status).toBe("cancelled");
+		// Ending the old ref by its identity reaches nothing: it was replaced.
+		expect(registry.unregister("Lane", oldLane)).toBe(false);
+		expect(registry.setStatus("Lane", "aborted", oldLane)).toBe(false);
+		expect([oldArmWork, newLaneWork].map(id => manager.getJob(id)?.status)).toEqual(["running", "running"]);
+		// Ending the new one ends its own work only, not the old Lane's child's.
+		expect(registry.unregister("Lane", newLane)).toBe(true);
+		expect([oldArmWork, newLaneWork].map(id => manager.getJob(id)?.status)).toEqual(["running", "cancelled"]);
+		manager.cancel(oldArmWork);
 		await manager.waitForAll();
 	});
 
-	test("an agent's tree follows registry spawn edges, and a re-spawned id belongs to its new parent", async () => {
-		const runUntilAborted = async ({ signal }: { signal: AbortSignal }) => {
-			const aborted = Promise.withResolvers<void>();
-			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
-			await aborted.promise;
-			return "stopped";
-		};
-		// Live spawn edges: Arm was spawned by Lane as a blocking task (no job row
-		// records it); X was first spawned by Old and is now registered under New.
-		const edges: [string, string][] = [
-			["Lane", "Main"],
-			["Lane.Arm", "Lane"],
-			["X", "New"],
-		];
-		const manager = new AsyncJobManager({ onJobComplete: async () => {}, agentParents: () => edges });
-		const grand = manager.register("task", "Grand", runUntilAborted, {
-			id: "Lane.Arm.Grand",
-			ownerId: "Lane.Arm",
-			agentId: "Lane.Arm.Grand",
-		});
-		// X's old run as a job of Old recorded the stale edge X → Old.
-		const oldX = manager.register("task", "X", async () => "old X done", {
-			id: "X-old",
-			ownerId: "Old",
-			agentId: "X",
-		});
-		await manager.getJob(oldX)!.promise;
-		const xWork = manager.register("bash", "X work", runUntilAborted, { ownerId: "X" });
-
-		manager.cancelAll({ ownerId: "Old", includeDescendants: true });
-		expect([manager.getJob(xWork)?.status, manager.getJob(grand)?.status]).toEqual(["running", "running"]);
-
-		manager.cancelAll({ ownerId: "Lane", includeDescendants: true });
-		expect([manager.getJob(grand)?.status, manager.getJob(xWork)?.status]).toEqual(["cancelled", "running"]);
-
-		manager.cancelAll({ ownerId: "New", includeDescendants: true });
-		expect(manager.getJob(xWork)?.status).toBe("cancelled");
+	test("a killed agent reopened from its transcript keeps its tree: ending it again ends the new work", async () => {
+		const registry = new AgentRegistry();
+		const manager = new AsyncJobManager({ onJobComplete: async () => {}, agents: registry });
+		agent(registry, "Main");
+		const killed = agent(registry, "Lane", "Main");
+		agent(registry, "Lane.Arm", "Lane");
+		const before = manager.register("bash", "before kill", runUntilAborted, { ownerId: "Lane.Arm" });
+		registry.setStatus("Lane", "aborted", killed);
+		expect(manager.getJob(before)?.status).toBe("cancelled");
+		const reopened = registry.reopen("Lane", killed)!;
+		// Arm, revived by someone else, starts work after Lane's reopen.
+		const after = manager.register("bash", "after reopen", runUntilAborted, { ownerId: "Lane.Arm" });
+		expect(registry.unregister("Lane", reopened)).toBe(true);
+		expect(manager.getJob(after)?.status).toBe("cancelled");
 		await manager.waitForAll();
 	});
 

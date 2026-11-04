@@ -176,7 +176,6 @@ import {
 	type AgentRef,
 	AgentRegistry,
 	type AgentRegistryApi,
-	agentSpawnEdges,
 	MAIN_AGENT_ID,
 } from "./registry/agent-registry";
 import {
@@ -2477,12 +2476,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Every root owns its jobs and delivery sinks, even when another root is live.
 	// Children use the exact manager passed by their parent; the singleton remains
 	// only a legacy pointer to whichever root first installed it, never a routing fallback.
+	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const asyncJobManager = !options.parentTaskPrefix
 		? new AsyncJobManager({
 				maxRunningJobs: () => Math.min(100, cfgAsyncMaxJobs.get(settings)),
-				// Every subagent registers with the agent that spawned it, in every
-				// spawn mode; those edges make an agent's tree for ending its work.
-				agentParents: () => agentSpawnEdges(AgentRegistry.global()),
+				// The single authority for an agent's end: when the registry ends a
+				// specific agent ref, the manager cancels that agent's tree's work.
+				agents: agentRegistry,
 			})
 		: undefined;
 	if (asyncJobManager) {
@@ -2522,7 +2522,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	}
 	const scopedAsyncJobManager = asyncJobManager ?? options.asyncJobManager;
 
-	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
 	const resolvedAgentDisplayName = options.agentDisplayName ?? agentKind;
 	let registeredAgentRef: AgentRef | undefined;
@@ -2541,7 +2540,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (!ref || agentRegistry.get(resolvedAgentId) !== ref) return;
 		if (ref.status === "parked" || (ref.status === "aborted" && !ref.session)) return;
 		if (AgentLifecycleManager.global().isParking(resolvedAgentId, ref)) return;
-		agentRegistry.unregister(resolvedAgentId, ref);
+		try {
+			agentRegistry.unregister(resolvedAgentId, ref);
+		} catch (error) {
+			// The ref ended; the registry logged the end hook's failure. The rest of
+			// this session's teardown still runs.
+			logger.warn("Session dispose: agent end hook failed", { id: resolvedAgentId, error: String(error) });
+		}
 	};
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
 
@@ -5009,6 +5014,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			depth: 0,
 			parentId: resolvedAgentId,
 		});
+		// The advisor's work (its background jobs, the agents it spawns) is owned
+		// under an id of its own, per session, that belongs to this session's
+		// agent: ending the agent ends it, and another agent's advisor is never
+		// touched. The shared `advisor` identity below is only what extensions see.
+		const advisorOwnerId = `${resolvedAgentId}/advisor#${Snowflake.next()}`;
+		scopedAsyncJobManager?.bindOwnerAlias(advisorOwnerId, resolvedAgentId);
 
 		// Full toolset for the advisor, built unconditionally so it can be toggled at
 		// runtime. Bound to a DISTINCT ToolSession (its own `-advisor` session id +
@@ -5042,7 +5053,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			queueLaunchCompletion: notification =>
 				session?.queueLaunchCompletion(notification) ??
 				Promise.reject(new Error("Session unavailable for launch completion delivery")),
-			getAgentId: () => advisorAgent.id,
+			getAgentId: () => advisorOwnerId,
 			// The primary's availability signals are wrong for advisors: their tool
 			// slate is filtered separately at runtime (default read/grep/glob, no
 			// write transport), so xd:// devices are unreachable. Images are inlined,
