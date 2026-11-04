@@ -375,6 +375,17 @@ export interface AgentOptions {
 
 export interface AgentPromptOptions {
 	toolChoice?: ToolChoice;
+	turnReservation?: AgentTurnReservation;
+}
+
+/** FIFO admission held across asynchronous preparation, until a run claims or setup is cancelled. */
+export interface AgentTurnReservation {
+	readonly ready: Promise<boolean>;
+	release(): void;
+}
+
+interface PendingTurnReservation extends AgentTurnReservation {
+	activate(): void;
 }
 
 /** Buffered Cursor exec-channel tool result waiting to be emitted after the assistant message. */
@@ -424,6 +435,7 @@ export class Agent {
 	#listeners = new Set<(e: AgentEvent) => void>();
 	#queueListeners = new Set<() => void>();
 	#abortController?: AbortController;
+	#turnReservations: PendingTurnReservation[] = [];
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
@@ -1658,6 +1670,44 @@ export class Agent {
 		return this.#runningPrompt ?? Promise.resolve();
 	}
 
+	reserveTurn(signal?: AbortSignal): AgentTurnReservation {
+		const ready = Promise.withResolvers<boolean>();
+		let released = false;
+		const reservation: PendingTurnReservation = {
+			ready: ready.promise,
+			release: () => {
+				if (released) return;
+				released = true;
+				signal?.removeEventListener("abort", reservation.release);
+				ready.resolve(false);
+				const index = this.#turnReservations.indexOf(reservation);
+				if (index < 0) return;
+				this.#turnReservations.splice(index, 1);
+				if (index === 0) this.#turnReservations[0]?.activate();
+			},
+			activate: () => {
+				void (async () => {
+					// agent_end can precede internal follow-ups and the run's final cleanup.
+					// Wait for the entire run, not just its transient isStreaming=false state.
+					while (!released && this.#runningPrompt) await this.waitForIdle();
+					if (!released) ready.resolve(true);
+				})();
+			},
+		};
+		this.#turnReservations.push(reservation);
+		signal?.addEventListener("abort", reservation.release, { once: true });
+		if (signal?.aborted) reservation.release();
+		else if (this.#turnReservations[0] === reservation) reservation.activate();
+		return reservation;
+	}
+
+	/** Cancel only tickets already admitted; later submissions get fresh places. */
+	cancelTurnReservations(): void {
+		const reservations = this.#turnReservations;
+		this.#turnReservations = [];
+		for (const reservation of reservations) reservation.release();
+	}
+
 	/**
 	 * Wait for a steering message without consuming the steering queue.
 	 *
@@ -1682,6 +1732,7 @@ export class Agent {
 	}
 
 	reset() {
+		this.cancelTurnReservations();
 		if (this.#queuedMessageClaims.steering || this.#queuedMessageClaims.followUp) {
 			this.#abortController?.abort();
 			this.#abortController = undefined;
@@ -1706,13 +1757,6 @@ export class Agent {
 		imagesOrOptions?: ImageContent[] | AgentPromptOptions,
 		options?: AgentPromptOptions,
 	) {
-		if (this.#state.isStreaming) {
-			throw new AgentBusyError();
-		}
-
-		const model = this.#state.model;
-		if (!model) throw new Error("No model configured");
-
 		let msgs: AgentMessage[];
 		let promptOptions: AgentPromptOptions | undefined;
 		let images: ImageContent[] | undefined;
@@ -1743,7 +1787,22 @@ export class Agent {
 			promptOptions = imagesOrOptions as AgentPromptOptions | undefined;
 		}
 
-		await this.#inLogContext(() => this.#runLoop(msgs, promptOptions));
+		let reservation = promptOptions?.turnReservation;
+		if (!reservation && this.#turnReservations.length > 0) {
+			reservation = this.reserveTurn();
+			if (!(await reservation.ready)) return;
+		}
+		if (reservation && this.#turnReservations[0] !== reservation) return;
+		try {
+			if (this.#state.isStreaming) throw new AgentBusyError();
+			if (!this.#state.model) throw new Error("No model configured");
+			const run = this.#inLogContext(() => this.#runLoop(msgs, promptOptions));
+			// The synchronous run prefix owns the agent before the next ticket wakes.
+			reservation?.release();
+			await run;
+		} finally {
+			reservation?.release();
+		}
 	}
 
 	/**
@@ -1767,9 +1826,31 @@ export class Agent {
 		return signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 	}
 
-	continue(signal?: AbortSignal): Promise<void> {
+	continue(signal?: AbortSignal, reservation?: AgentTurnReservation): Promise<void> {
+		if (reservation) {
+			try {
+				if (this.#turnReservations[0] !== reservation || signal?.aborted) return Promise.resolve();
+				return this.#inLogContext(() => this.#continue(signal));
+			} finally {
+				reservation.release();
+			}
+		}
+		if (this.#turnReservations.length > 0) return this.#continueAfterReservation(signal);
 		// Queued-message hooks run before the loop and are this agent's work too.
 		return this.#inLogContext(() => this.#continue(signal));
+	}
+
+	async #continueAfterReservation(signal?: AbortSignal): Promise<void> {
+		const reservation = this.reserveTurn(signal);
+		try {
+			if (!(await reservation.ready) || signal?.aborted) return;
+			if (this.#turnReservations[0] !== reservation) return;
+			const run = this.#inLogContext(() => this.#continue(signal));
+			reservation.release();
+			await run;
+		} finally {
+			reservation.release();
+		}
 	}
 
 	async #continue(signal?: AbortSignal) {

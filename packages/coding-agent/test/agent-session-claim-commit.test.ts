@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, expect, it } from "bun:test";
+import { afterEach, beforeAll, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -26,16 +26,14 @@ import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { type } from "@oh-my-pi/omptype";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-/**
- * Claim-time commits publish nothing for a cancelled waiting prompt. A busy
- * claim discards its preparation; the next attempt reads the current sources.
- */
+/** Claim-time commits publish nothing for a cancelled waiting prompt. */
 const resources: Array<{ session: AgentSession; auth: AuthStorage; dir: TempDir; releases: (() => void)[] }> = [];
 beforeAll(async () => {
 	setThemeInstance((await getThemeByName("dark"))!);
 	await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 });
 afterEach(async () => {
+	vi.restoreAllMocks();
 	for (const h of resources.splice(0)) {
 		h.releases.forEach(r => r());
 		await h.session.dispose();
@@ -175,7 +173,7 @@ it("does not duplicate an approved plan when hidden work claims before a prepare
 		},
 	]);
 	await plan(h);
-	const hook = h.holdHook();
+	const hook = h.holdKey();
 	const client = h.session.prompt("execute approved plan");
 	await hook.entered;
 	h.session.queueDeferredMessage({ ...payload("autonomous event"), role: "custom", timestamp: Date.now() });
@@ -210,7 +208,7 @@ it("delivers the replacement approved plan at a waiting prompt's claim and persi
 	]);
 	const hidden = h.gate();
 	await plan(h);
-	const hook = h.holdHook();
+	const hook = h.holdKey();
 	const client = h.session.prompt("execute the approved plan");
 	await hook.entered;
 	const autonomous = h.agent.prompt("older autonomous work");
@@ -286,7 +284,7 @@ it("delivers an actual Mnemopi changed-memory notice after cancelling a waiting 
 	const resumed = new MnemopiSessionState({ sessionId: h.session.sessionId, config, session: h.session });
 	setMnemopiSessionState(h.session, resumed);
 
-	const hook = h.holdHook();
+	const hook = h.holdKey();
 	const client = h.session.prompt("Use the current deploy host");
 	await hook.entered;
 
@@ -342,7 +340,7 @@ it("restages changed memory instead of publishing a waiting prompt's obsolete pr
 	const resumed = new MnemopiSessionState({ sessionId: h.session.sessionId, config, session: h.session });
 	setMnemopiSessionState(h.session, resumed);
 	expect(resumed.editScopedMemory("update", id, { content: "The deploy host is beta-9." }).status).toBe("updated");
-	const hook = h.holdHook();
+	const hook = h.holdKey();
 	const client = h.session.prompt("Use the current deploy host");
 	await hook.entered;
 	const autonomous = h.agent.prompt("older autonomous work");
@@ -420,7 +418,7 @@ it("delivers current extension policy after a prepared prompt waits for another 
 	]);
 	const hidden = h.gate();
 	h.setPolicy(["OBSOLETE-EXTENSION-POLICY"]);
-	const hook = h.holdHook();
+	const hook = h.holdKey();
 	const client = h.session.prompt("use current extension policy");
 	await hook.entered;
 	const autonomous = h.agent.prompt("older autonomous work");
@@ -446,43 +444,215 @@ it("delivers current extension policy after a prepared prompt waits for another 
 	).toHaveLength(1);
 });
 
-it("reprepares after every busy claim without a three-attempt limit", async () => {
-	const releases = Array.from({ length: 4 }, () => Promise.withResolvers<void>());
-	const h = await setup(
-		releases.map(release => async () => {
-			await release.promise;
-			return { content: ["older work done"] };
-		}),
-	);
+it("delivers a reserved prompt before work launched by its preparation hook", async () => {
+	const h = await setup([]);
 	const runs: Promise<void>[] = [];
 	let hooks = 0;
 	h.setPolicy(() => {
 		hooks++;
-		if (hooks <= releases.length) runs.push(h.agent.prompt(`intervening work ${hooks}`));
-		return [`ATTEMPT_POLICY_${hooks}`];
+		runs.push(h.agent.prompt("later work"));
+		return ["RESERVED_POLICY"];
 	});
-	let waits = 0;
+	await h.session.prompt("deliver reserved work");
+	await Promise.all(runs);
+	expect(hooks).toBe(1);
+	expect(h.mock.calls).toHaveLength(2);
+	expect(JSON.stringify(h.mock.calls[0]!.context)).toContain("deliver reserved work");
+	expect(JSON.stringify(h.mock.calls[0]!.context)).not.toContain("later work");
+});
+
+it("waits before fresh recall and records exactly one delivered recall", async () => {
+	const h = await setup(
+		[
+			async () => {
+				await held.wait();
+				return { content: ["older done"] };
+			},
+		],
+		undefined,
+		true,
+		true,
+	);
+	const state = new MnemopiSessionState({
+		sessionId: h.session.sessionId,
+		config: loadMnemopiConfig(h.settings, h.dir.path()),
+		session: h.session,
+	});
+	setMnemopiSessionState(h.session, state);
+	const id = state.rememberScoped("Deploy axolotl blue deployment host is alpha seven.");
+	const counts = () =>
+		state.memory!.beam.db.query("SELECT recall_count, last_recalled FROM working_memory WHERE id = ?").get(id) as {
+			recall_count: number;
+			last_recalled: string | null;
+		};
+	const before = counts();
+	const key = h.holdKey();
+	const client = h.session.prompt("Where is Deploy axolotl blue deployment host?");
+	await key.entered;
+	const held = h.gate();
+	const autonomous = h.agent.prompt("older work");
+	await held.entered;
+	const waiting = Promise.withResolvers<void>();
 	const originalWait = h.agent.waitForIdle.bind(h.agent);
 	h.agent.waitForIdle = () => {
-		releases[waits++]?.resolve();
+		waiting.resolve();
 		return originalWait();
 	};
+	key.release();
+	await waiting.promise;
+	expect(counts()).toEqual(before);
+	const hook = h.holdHook();
+	held.release();
+	await hook.entered;
+	const prepared = counts();
+	expect(prepared.recall_count).toBe(1);
+	hook.release();
+	await Promise.all([client, autonomous]);
+	expect(counts()).toEqual(prepared);
+	expect(prepared.last_recalled).not.toBeNull();
+	expect(JSON.stringify(h.mock.calls.at(-1)!.context)).toContain("alpha seven");
+});
+
+it("does not let a later producer claim between preparation and delivery", async () => {
+	const h = await setup([]);
+	const hook = h.holdHook();
+	let hooks = 0;
+	h.setPolicy(() => {
+		hooks++;
+		return ["RESERVED_POLICY"];
+	});
+	const client = h.session.prompt("reserved client");
+	await hook.entered;
+	const later = h.agent.prompt("later producer");
+	expect(h.agent.state.isStreaming).toBe(false);
+	hook.release();
+	await Promise.all([client, later]);
+	expect(hooks).toBe(1);
+	expect(JSON.stringify(h.mock.calls[0]!.context)).toContain("reserved client");
+	expect(JSON.stringify(h.mock.calls[0]!.context)).not.toContain("later producer");
+});
+
+it("does not recall memory for a prompt interrupted while waiting", async () => {
+	const h = await setup(
+		[
+			async () => {
+				await held.wait();
+				return { content: ["older done"] };
+			},
+		],
+		undefined,
+		true,
+		true,
+	);
+	const state = new MnemopiSessionState({
+		sessionId: h.session.sessionId,
+		config: loadMnemopiConfig(h.settings, h.dir.path()),
+		session: h.session,
+	});
+	setMnemopiSessionState(h.session, state);
+	const id = state.rememberScoped("Deploy axolotl blue deployment host is alpha seven.");
+	const sql = state.memory!.beam.db.query("SELECT recall_count, last_recalled FROM working_memory WHERE id = ?");
+	const before = sql.get(id);
+	const key = h.holdKey();
+	const client = h.session.prompt("Where is Deploy axolotl blue deployment host?");
+	await key.entered;
+	const held = h.gate();
+	const older = h.agent.prompt("older work");
+	await held.entered;
+	const waiting = Promise.withResolvers<void>();
+	const originalWait = h.agent.waitForIdle.bind(h.agent);
+	h.agent.waitForIdle = () => {
+		waiting.resolve();
+		return originalWait();
+	};
+	key.release();
+	await waiting.promise;
+	const stopping = h.session.abort({ reason: USER_INTERRUPT_LABEL });
+	held.release();
+	await Promise.all([client, older, stopping]);
+	expect(sql.get(id)).toEqual(before);
+	await h.session.prompt("Where is Deploy axolotl blue deployment host now?");
+	expect(sql.get(id)).toMatchObject({ recall_count: 1 });
+});
+
+for (const cancellation of ["interrupt", "dispose"] as const) {
+	it(`releases a preparation reservation immediately on ${cancellation}`, async () => {
+		const h = await setup([]);
+		const hook = h.holdHook();
+		const client = h.session.prompt("cancelled preparation");
+		await hook.entered;
+		if (cancellation === "interrupt") await h.session.abort({ reason: USER_INTERRUPT_LABEL });
+		else h.session.beginDispose();
+		// The old hook is still held: releasing only in its finally would deadlock this run.
+		await h.agent.prompt("later prompt");
+		expect(h.mock.calls).toHaveLength(1);
+		expect(JSON.stringify(h.mock.calls[0]!.context)).toContain("later prompt");
+		expect(JSON.stringify(h.mock.calls[0]!.context)).not.toContain("cancelled preparation");
+		hook.release();
+		await client;
+	});
+}
+
+it("releases admission when preparation sizing throws", async () => {
+	const h = await setup([]);
+	const hook = h.holdHook();
+	const client = h.session.prompt("failed preparation").then(
+		() => undefined,
+		error => error,
+	);
+	await hook.entered;
+	const later = h.agent.prompt("later prompt");
+	vi.spyOn(h.agent.tokenizer, "countMessages").mockImplementationOnce(() => {
+		throw new Error("preparation sizing failed");
+	});
+	hook.release();
+	expect(await client).toMatchObject({ message: "preparation sizing failed" });
+	await later;
+	expect(h.mock.calls).toHaveLength(1);
+	expect(JSON.stringify(h.mock.calls[0]!.context)).toContain("later prompt");
+	expect(JSON.stringify(h.mock.calls[0]!.context)).not.toContain("failed preparation");
+});
+
+it("dispatches a waiting prompt ahead of a producer that starts at every idle event", async () => {
+	const h = await setup([
+		async () => {
+			await held.wait();
+			return { content: ["older done"] };
+		},
+	]);
+	const held = h.gate();
+	const key = h.holdKey();
+	let hooks = 0;
+	h.setPolicy(() => {
+		hooks++;
+		return ["CURRENT_POLICY"];
+	});
+	const client = h.session.prompt("waiting original client");
+	await key.entered;
+	const older = h.agent.prompt("older run");
+	await held.entered;
+	const waiting = Promise.withResolvers<void>();
+	const originalWait = h.agent.waitForIdle.bind(h.agent);
+	h.agent.waitForIdle = () => {
+		waiting.resolve();
+		return originalWait();
+	};
+	key.release();
+	await waiting.promise;
+	const runs: Promise<void>[] = [];
+	const unsubscribe = h.agent.subscribe(event => {
+		if (event.type === "agent_end" && runs.length < 9) runs.push(h.agent.prompt(`later run ${runs.length}`));
+	});
 	try {
-		await h.session.prompt("deliver once after all intervening work");
-		await Promise.all(runs);
-		expect(hooks).toBe(5);
-		expect(waits).toBe(4);
-		const request = h.mock.calls.at(-1)!.context;
-		expect(request.systemPrompt).toEqual(["ATTEMPT_POLICY_5"]);
-		expect(
-			request.messages.filter(
-				message =>
-					message.role === "user" &&
-					JSON.stringify(message.content).includes("deliver once after all intervening work"),
-			),
-		).toHaveLength(1);
+		held.release();
+		await older;
+		await client;
+		for (let i = 0; i < runs.length; i++) await runs[i];
+		expect(hooks).toBe(1);
+		expect(JSON.stringify(h.mock.calls[1]!.context)).toContain("waiting original client");
+		expect(JSON.stringify(h.mock.calls[1]!.context)).not.toContain("later run");
 	} finally {
-		for (const release of releases) release.resolve();
+		unsubscribe();
 		await Promise.all(runs);
 	}
 });
