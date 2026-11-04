@@ -59,6 +59,11 @@ type AsyncResultJobDetails = {
 	meta?: OutputMeta;
 	/** Full structured payload (source/mode/status/data/error), when the job used an output schema. */
 	schema?: StructuredSubagentOutput;
+	/**
+	 * Images this job added to the delivery content, which lists every job's images in job
+	 * order after the text. Lets `attachment://N` find a backgrounded `ask` answer's own images.
+	 */
+	imageCount?: number;
 };
 
 export type AsyncResultDetails = {
@@ -149,24 +154,29 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			schemaValid: structured?.status === "valid",
 		};
 	});
+	const jobImages = entries.map(entry => entry.job?.latestDetails?.images ?? []);
 	const details: AsyncResultDetails = {
 		meta: { source: { type: "report", value: "background job delivery" } },
-		jobs: jobs.map(job => ({
-			jobId: job.jobId,
-			type: job.type,
-			status: job.status,
-			agentId: job.agentId,
-			label: job.label,
-			durationMs: job.durationMs,
-			...(job.meta ? { meta: job.meta } : {}),
-			...(job.structured ? { schema: job.structured } : {}),
-		})),
+		jobs: jobs.map((job, index) => {
+			const imageCount = jobImages[index]!.length;
+			return {
+				jobId: job.jobId,
+				type: job.type,
+				status: job.status,
+				agentId: job.agentId,
+				label: job.label,
+				durationMs: job.durationMs,
+				...(job.meta ? { meta: job.meta } : {}),
+				...(job.structured ? { schema: job.structured } : {}),
+				...(imageCount > 0 ? { imageCount } : {}),
+			};
+		}),
 	};
 	const text = prompt.render(asyncResultTemplate, {
 		multiple: jobs.length > 1,
 		jobs,
 	});
-	const images = entries.flatMap(entry => entry.job?.latestDetails?.images ?? []);
+	const images = jobImages.flat();
 	return {
 		role: "custom",
 		customType: ASYNC_RESULT_MESSAGE_TYPE,

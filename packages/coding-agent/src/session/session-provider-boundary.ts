@@ -17,6 +17,7 @@ import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
 import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { type CustomMessage, convertToLlm } from "./messages";
+import { ASYNC_RESULT_MESSAGE_TYPE, type AsyncResultDetails } from "./async-job-delivery";
 import { IMAGE_ATTACHMENT_DESCRIPTION_TYPE } from "./queued-messages";
 import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
 import type { CostGateApi } from "./cost-gate";
@@ -55,6 +56,29 @@ export interface SessionProviderBoundaryHost {
 	runToolCallIds(): ReadonlySet<string>;
 }
 
+/**
+ * Images a person attached to `message`, numbered as the model reads them (`[Image #1]` is the
+ * first). A backgrounded `ask` answer arrives inside an `async-result` delivery that lists every
+ * finished job's images in job order, and its text numbers only its own images, so only the newest
+ * answering `ask` job's slice counts. Images other jobs or tools produced are not attachments.
+ */
+function userImages(message: AgentMessage): ImageContent[] {
+	if (!("content" in message) || !Array.isArray(message.content)) return [];
+	const images = message.content.filter((part): part is ImageContent => part.type === "image");
+	if (message.role === "user" || message.role === "developer") return images;
+	if (message.role === "toolResult") return message.toolName === "ask" ? images : [];
+	if (message.role !== "custom" || message.customType !== ASYNC_RESULT_MESSAGE_TYPE) return [];
+	const jobs = (message.details as AsyncResultDetails | undefined)?.jobs ?? [];
+	let answer: ImageContent[] = [];
+	let offset = 0;
+	for (const job of jobs) {
+		const count = job.imageCount ?? 0;
+		if (job.type === "ask" && count > 0) answer = images.slice(offset, offset + count);
+		offset += count;
+	}
+	return answer;
+}
+
 /** Owns the transformations at the session/provider boundary. */
 export class SessionProviderBoundary {
 	readonly #host: SessionProviderBoundaryHost;
@@ -65,18 +89,14 @@ export class SessionProviderBoundary {
 
 	/**
 	 * Latest image attachments addressable by tools as `Image #N` or `attachment://N`: the newest
-	 * user/developer message with images, or `ask` result whose answers carry pasted images.
+	 * user/developer message with images, or `ask` answer that carries pasted images (inline as the
+	 * `ask` result, or backgrounded as an `async-result` delivery).
 	 */
 	getImageAttachments(): { label: string; uri: string; image: ImageContent; sourcePath: string }[] {
 		for (let i = this.#host.agent.state.messages.length - 1; i >= 0; i--) {
 			const message = this.#host.agent.state.messages[i];
 			if (!message) continue;
-			const carriesUserImages =
-				message.role === "user" ||
-				message.role === "developer" ||
-				(message.role === "toolResult" && message.toolName === "ask");
-			if (!carriesUserImages || !Array.isArray(message.content)) continue;
-			const images = message.content.filter((part): part is ImageContent => part.type === "image");
+			const images = userImages(message);
 			if (images.length === 0) continue;
 			return images.flatMap((image, index) => {
 				const label = `Image #${index + 1}`;

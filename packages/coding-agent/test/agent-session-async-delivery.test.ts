@@ -7,7 +7,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -18,9 +18,11 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { ExtensionAskDialogResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/launch/protocol";
 import { buildAsyncResultBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { ArtifactManager } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import {
@@ -34,6 +36,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { formatTaskResultSummary, INLINE_OUTPUT_CHARS } from "@oh-my-pi/pi-coding-agent/task/result-summary";
 
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { AskTool } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -133,6 +136,125 @@ describe("AgentSession owner-routed async delivery", () => {
 			),
 		);
 		expect(deliveredImages).toEqual([image]);
+	});
+
+	it("resolves attachment://N to the images of an ask answer delivered after the call yielded", async () => {
+		// The model reads the backgrounded answer's own numbering (`[Image #1]` is the
+		// answer's first image), so `attachment://1` must open that image: not an older
+		// pasted prompt image, and not an image another job put earlier in the delivery.
+		using tempDir = TempDir.createSync("@pi-async-ask-attachment-");
+		await initTheme(false);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Owner",
+			asyncJobManager: manager,
+		});
+
+		const promptImage: ImageContent = { type: "image", data: "prompt-image", mimeType: "image/png" };
+		session.agent.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "inspect [Image #1]" }, promptImage],
+			timestamp: Date.now(),
+		});
+
+		// A command job that finishes with the answer lands in the same delivery, its image first.
+		const plotImage: ImageContent = { type: "image", data: "plot-image", mimeType: "image/png" };
+		const plotGate = Promise.withResolvers<void>();
+		manager.register(
+			"bash",
+			"plot",
+			async ({ reportProgress }) => {
+				await plotGate.promise;
+				await reportProgress("plotted", { images: [plotImage] });
+				return "plotted";
+			},
+			{ id: "plot-job", ownerId: "Owner" },
+		);
+
+		const answerPath = path.join(tempDir.path(), "answer.png");
+		const answerImage = tagImageAttachmentSource(
+			{ type: "image", data: "answer-image", mimeType: "image/png" },
+			answerPath,
+			"image",
+		);
+		const answer = Promise.withResolvers<ExtensionAskDialogResult>();
+		const toolSession: ToolSession = {
+			cwd: tempDir.path(),
+			hasUI: true,
+			canPromptUser: true,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(),
+			asyncJobManager: manager,
+			getAgentId: () => "Owner",
+		};
+		const wake = new AbortController();
+		const context = {
+			hasUI: true,
+			ui: {
+				askDialog: async () => await answer.promise,
+				select: async () => undefined,
+				editor: async () => undefined,
+			},
+			abort: () => {},
+			toolCall: { wakeSignal: wake.signal },
+		} as unknown as AgentToolContext;
+		const pending = new AskTool(toolSession).execute(
+			"ask-yield",
+			{ questions: [{ id: "choice", question: "Which database?", options: [{ label: "SQLite" }] }] },
+			undefined,
+			undefined,
+			context,
+		);
+		// A peer message wakes the call: the question moves to the background.
+		wake.abort("aside");
+		const yielded = await pending;
+		expect(yielded.content[0]?.type === "text" && yielded.content[0].text).toContain("question stays open");
+
+		const delivered = observeAsyncResultEnqueue(session);
+		plotGate.resolve();
+		answer.resolve({
+			kind: "submit",
+			results: [
+				{
+					id: "choice",
+					question: "Which database?",
+					options: ["SQLite"],
+					multi: false,
+					selectedOptions: ["SQLite"],
+					note: "schema in [Image #1]",
+					noteImages: [answerImage],
+				},
+			],
+		});
+		await delivered;
+		await session.settleAsyncWork();
+
+		const deliveredImages = mock.calls.flatMap(call =>
+			call.context.messages.flatMap(message =>
+				typeof message.content === "string" ? [] : message.content.filter(part => part.type === "image"),
+			),
+		);
+		expect(deliveredImages.map(image => image.data)).toEqual(["prompt-image", "plot-image", "answer-image"]);
+		expect(session.getImageAttachments().map(entry => [entry.uri, entry.image.data, entry.sourcePath])).toEqual([
+			["attachment://1", "answer-image", answerPath],
+		]);
 	});
 
 	it("exposes a process job's full command in the async job snapshot", async () => {
