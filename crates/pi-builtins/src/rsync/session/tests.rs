@@ -641,6 +641,9 @@ fn release_fifo_after(path: PathBuf, after: Duration) -> impl Drop {
 /// three runs of each: exactly this line, exit 20. Before, the read or the
 /// open did not observe the cancellation: the bash tool gave up on the
 /// command with nothing printed, and `timeout` waited for it indefinitely.
+/// There is no peer here to report before this run, so it reports without
+/// waiting out rsync's 400 ms grace; sleeping it out put the line past the
+/// window of a host that stops collecting output when the command returns.
 #[cfg(unix)]
 #[test]
 fn cancelling_a_batch_on_a_fifo_reports_the_signal() {
@@ -663,17 +666,25 @@ fn cancelling_a_batch_on_a_fifo_reports_the_signal() {
 		let rescue = release_fifo_after(fifo.clone(), Duration::from_secs(10));
 		let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
 		let cancel = host.cancel_flag_for_test();
+		let (sent, cancelled_at) = std::sync::mpsc::channel();
 		let canceller = std::thread::spawn(move || {
 			std::thread::sleep(Duration::from_millis(300));
 			cancel.store(true, Ordering::Relaxed);
+			sent.send(Instant::now()).unwrap();
 		});
 		let parsed = Rsync::try_parse_from(["rsync", "--"].into_iter().chain(args.iter().copied())).unwrap();
 		let started = Instant::now();
 		let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
 		let took = started.elapsed();
+		let ended = Instant::now();
 		canceller.join().unwrap();
+		let after = ended.saturating_duration_since(cancelled_at.recv().unwrap());
 		drop((rescue, held));
 		assert!(took < Duration::from_secs(5), "{case}: {took:?}");
+		// Nothing here reports before this run, so it must not wait out
+		// rsync's grace: a host that stops collecting a cancelled command's
+		// output when the command returns never saw the line below.
+		assert!(after < super::SIGNAL_GRACE, "{case}: the report came {after:?} after the cancellation");
 		assert_eq!(code, RERR_SIGNAL, "{case}: {}", cap.err());
 		assert_eq!(
 			cap.err(),

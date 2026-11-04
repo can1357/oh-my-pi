@@ -1358,9 +1358,14 @@ impl PeerKind {
 					waited += slice;
 				}
 			},
-			// Nothing of this run's to wait for (a daemon socket, a batch
-			// file, a child already collected): the upstream grace stands.
-			Self::Child(None) | Self::None => thread::sleep(SIGNAL_GRACE),
+			// No peer at all: a daemon socket, a batch file, a child already
+			// collected. Upstream sleeps here too, because its handler cannot
+			// tell whether a child is still reporting; this run knows there is
+			// nobody to report before it, so it reports at once. Sleeping lost
+			// the trailer of a cancelled `--read-batch` from a FIFO, which a
+			// host that stops collecting a command's output when the command
+			// returns never saw.
+			Self::Child(None) | Self::None => {},
 		}
 	}
 }

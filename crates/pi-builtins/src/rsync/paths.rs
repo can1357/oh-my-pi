@@ -955,25 +955,6 @@ impl OperatorInput {
 		&self.file
 	}
 
-	/// Waits until the other end of a file whose reads can wait (a FIFO) is
-	/// there, as rsync's blocking open of one does; this open returned
-	/// without it. A caller that goes on to read need not call this, because
-	/// its first read waits the same way; `--early-input` must, because a
-	/// FIFO's metadata length is zero and it therefore reads nothing, and
-	/// without this its reader is closed again before a producer that opens
-	/// later finds it, leaving that producer's own open waiting for ever.
-	/// Anything else has no other end and returns at once. The wait ends at
-	/// the cancellation.
-	pub(crate) fn wait_for_other_end(&self) -> io::Result<()> {
-		#[cfg(unix)]
-		if self.poll
-			&& let Some(native) = self.file.native()
-		{
-			let cancel = &self.cancel;
-			return pi_vfs::wait_readable(native.as_fd(), || cancel.load(Ordering::Relaxed)).map_err(|err| self.mapped(err));
-		}
-		Ok(())
-	}
 
 	fn cancelled(&self) -> bool {
 		self.cancel.load(Ordering::Relaxed)
@@ -1354,13 +1335,54 @@ fn open_fifo(path: &Path, kind: OpenKind, opts: &OperatorOpts<'_>) -> io::Result
 	}
 }
 
+/// Waits until a FIFO has a writer, as rsync's blocking open of the file
+/// does; a read open here returns without one (Linux) so that a cancellation
+/// can end the wait.
+///
+/// `--early-input` needs this and is the only caller: a FIFO's metadata
+/// length is zero, so the send reads nothing of it and would close its reader
+/// again before a producer that opens later could find it, leaving that
+/// producer's own open waiting for ever. Every other caller reads, and its
+/// first read waits for the same thing.
+///
+/// The wait is a second blocking read open on a helper thread: it returns the
+/// moment a writer attaches, which is what rsync's open waits for, and not
+/// when the first byte arrives — a producer that opens and writes nothing
+/// until the daemon answers must be let through. Waiting for data instead
+/// held such a producer until the whole copy timed out. The second open takes
+/// the same trusted-owner walk as the first, and holds no descriptor after
+/// it: the reader already open is what the producer pairs with. Anything that
+/// is not a local FIFO has no other end and returns at once; the wait ends at
+/// the cancellation.
+#[cfg(unix)]
+pub(crate) fn wait_for_fifo_writer(fs: &BlockingFs, path: &Path, opts: &OperatorOpts<'_>) -> io::Result<()> {
+	if !(fs.is_native_local(path) && is_fifo(path)) {
+		return Ok(());
+	}
+	let (flags, _) = OpenKind::Read.flags();
+	match open_fifo_reader(path, flags, opts) {
+		Ok(fd) => {
+			drop(fd);
+			Ok(())
+		},
+		// A cancelled wait ends as the command does.
+		Err(_) if opts.cancel.load(Ordering::Relaxed) => Err(RsyncError::cancelled_io()),
+		Err(err) => Err(err),
+	}
+}
+
+#[cfg(not(unix))]
+pub(crate) fn wait_for_fifo_writer(_fs: &BlockingFs, _path: &Path, _opts: &OperatorOpts<'_>) -> io::Result<()> {
+	Ok(())
+}
+
 /// A FIFO's read open off Linux: a blocking `open` on a helper thread, whose
 /// wait observes `opts.cancel`, so the read starts only once a writer has
 /// come. A cancelled wait leaves the helper in `open` until a writer comes,
 /// which then pairs with it and finds its reader gone (its write fails);
 /// nothing opens the other end to release it, so no other process waiting
 /// on the FIFO is let through.
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(unix)]
 fn open_fifo_reader(path: &Path, flags: libc::c_int, opts: &OperatorOpts<'_>) -> io::Result<OwnedFd> {
 	use std::sync::mpsc::{self, RecvTimeoutError};
 	if opts.cancel.load(Ordering::Relaxed) {
@@ -2042,9 +2064,13 @@ mod tests {
 	/// `--early-input`'s FIFO: the builtin keeps its reader open until the
 	/// producer comes, as rsync 3.5.1's blocking open of the file does. The
 	/// send itself reads nothing of a FIFO (its metadata length is zero), so
-	/// once the open stopped waiting the reader was closed again at once,
-	/// and a producer that opened later found none and waited for ever.
-	/// A file with no other end does not wait.
+	/// without the wait the reader was closed again at once and a producer
+	/// that opened later found none and waited for ever.
+	///
+	/// The wait ends when the producer opens, not when it first writes: a
+	/// producer that opens and then stays silent until the daemon answers it
+	/// must be let through. Waiting for data held such a producer until the
+	/// whole copy timed out. A file with no other end does not wait.
 	#[cfg(unix)]
 	#[test]
 	fn an_early_input_fifo_waits_for_its_producer() {
@@ -2056,11 +2082,14 @@ mod tests {
 
 		let (_guard, base) = canonical_tempdir();
 		let vfs = BlockingFs::native();
+		let never = Arc::new(AtomicBool::new(false));
 		for insecure in [false, true] {
-			let case = format!("insecure={insecure}");
+			let opts = OperatorOpts { insecure, confine: None, cancel: &never };
+
+			// A producer that opens late and writes.
+			let case = format!("insecure={insecure} writing");
 			let fifo = base.join(format!("early-{insecure}"));
 			nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
-			let never = Arc::new(AtomicBool::new(false));
 			let input = open_operator_file(&vfs, &fifo, insecure, &never).unwrap();
 			let (done, produced) = mpsc::channel();
 			let path = fifo.clone();
@@ -2070,7 +2099,7 @@ mod tests {
 				let _ = done.send(wrote.is_ok());
 			});
 			let started = Instant::now();
-			input.wait_for_other_end().unwrap();
+			wait_for_fifo_writer(&vfs, &fifo, &opts).unwrap();
 			let waited = started.elapsed();
 			// The send ends here, as it does for a FIFO, whose length is zero.
 			drop(input);
@@ -2078,13 +2107,41 @@ mod tests {
 			assert_eq!(produced.recv_timeout(Duration::from_secs(5)), Ok(true), "{case}: the producer found no reader");
 			producer.join().unwrap();
 
+			// A producer that opens late and stays silent: the wait ends at
+			// its open, well before it closes.
+			let case = format!("insecure={insecure} silent");
+			let silent = base.join(format!("early-silent-{insecure}"));
+			nix::unistd::mkfifo(&silent, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+			let input = open_operator_file(&vfs, &silent, insecure, &never).unwrap();
+			let (opened, has_opened) = mpsc::channel();
+			let path = silent.clone();
+			let producer = std::thread::spawn(move || {
+				std::thread::sleep(Duration::from_millis(200));
+				let held = fs::OpenOptions::new().write(true).open(&path).unwrap();
+				let _ = opened.send(Instant::now());
+				// Silent, and open, for far longer than the wait may take.
+				std::thread::sleep(Duration::from_secs(3));
+				drop(held);
+			});
+			let started = Instant::now();
+			wait_for_fifo_writer(&vfs, &silent, &opts).unwrap();
+			let waited = started.elapsed();
+			drop(input);
+			let at = has_opened.recv_timeout(Duration::from_secs(5)).expect(&case);
+			assert!(waited >= Duration::from_millis(100), "{case}: the wait returned after {waited:?}, before the producer");
+			assert!(
+				at.elapsed() < Duration::from_secs(1),
+				"{case}: the wait ended {:?} after the producer opened, so it waited for bytes, not for the producer",
+				at.elapsed()
+			);
+			producer.join().unwrap();
+
 			// A regular file has no other end to wait for.
 			let plain = base.join(format!("plain-{insecure}"));
 			fs::write(&plain, b"data").unwrap();
-			let file = open_operator_file(&vfs, &plain, insecure, &never).unwrap();
 			let started = Instant::now();
-			file.wait_for_other_end().unwrap();
-			assert!(started.elapsed() < Duration::from_millis(100), "{case}: a regular file waited");
+			wait_for_fifo_writer(&vfs, &plain, &opts).unwrap();
+			assert!(started.elapsed() < Duration::from_millis(100), "insecure={insecure}: a regular file waited");
 		}
 	}
 
