@@ -197,23 +197,111 @@ describe("trackTestLifetime", () => {
 		expect(run.output).toContain(refusal("an afterAll hook"));
 	}, 60_000);
 
-	test("takes the default deadline from bun test --timeout, so a slow healthy test is not refused", async () => {
+	test("refuses a later file's test after a hook timed out and settled while the next file blocked this thread", async () => {
+		const run = await runFixtures({
+			"1-first.test.ts": `
+				import { trackTestLifetime } from HELPER;
+				const { test, afterAll } = trackTestLifetime();
+				const shared = globalThis as { blocked?: string };
+				shared.blocked = "initial";
+				afterAll(async () => {
+					await Bun.sleep(250);
+					shared.blocked = "stale";
+				}, 100);
+				test("first body", () => {});
+			`,
+			// This file holds the thread past the hook's deadline, so the hook's timer, and any wake
+			// armed for its deadline, are released together once the block ends.
+			"2-second.test.ts": `
+				import { expect } from "bun:test";
+				import { trackTestLifetime } from HELPER;
+				const until = Bun.nanoseconds() + 600e6;
+				while (Bun.nanoseconds() < until) {}
+				await Bun.sleep(100);
+				const { test } = trackTestLifetime();
+				test("passes only on the write of the blocked-out hook", () => {
+					expect((globalThis as { blocked?: string }).blocked).toBe("stale");
+				});
+			`,
+		});
+
+		expect(run.outcome("passes only on the write of the blocked-out hook")).toBe("fail");
+		expect(run.output).toContain(refusal("an afterAll hook"));
+	}, 60_000);
+
+	test("reads the run's default timeout without /proc, as a platform that has none", async () => {
 		const run = await runFixtures(
 			{
-				"slow.test.ts": `
+				// Loaded before the helper: every later read of /proc/self/cmdline fails, as on macOS.
+				"no-proc.ts": `
+					import fs from "node:fs";
+					const real = fs.readFileSync;
+					fs.readFileSync = ((p: string, ...rest: unknown[]) => {
+						if (String(p) === "/proc/self/cmdline") throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+						return (real as (...args: unknown[]) => unknown)(p, ...rest);
+					}) as typeof fs.readFileSync;
+				`,
+				"1-first.test.ts": `
 					import { trackTestLifetime } from HELPER;
+					const { test, afterAll } = trackTestLifetime();
+					const shared = globalThis as { lateHook?: string };
+					shared.lateHook = "initial";
+					afterAll(async () => {
+						await Bun.sleep(400);
+						shared.lateHook = "stale";
+					});
+					test("first body", () => {});
+				`,
+				"2-second.test.ts": `
+					import { expect } from "bun:test";
+					import { trackTestLifetime } from HELPER;
+					await Bun.sleep(800);
 					const { test } = trackTestLifetime();
-					// Past Bun's built-in 5000 ms, inside the run's --timeout.
-					test("runs for six seconds", () => Bun.sleep(6000));
-					test("healthy after it", () => {});
+					test("passes only on the late afterAll write", () => {
+						expect((globalThis as { lateHook?: string }).lateHook).toBe("stale");
+					});
 				`,
 			},
-			["--timeout", "20000"],
+			["--preload", "./no-proc.ts", "--timeout", "100"],
 		);
 
-		expect(run.outcome("runs for six seconds")).toBe("pass");
-		expect(run.outcome("healthy after it")).toBe("pass");
-		expect(run.exitCode).toBe(0);
+		expect(run.outcome("passes only on the late afterAll write")).toBe("fail");
+		expect(run.output).toContain(refusal("an afterAll hook"));
+	}, 60_000);
+
+	test("takes the deadline Bun takes: the last --timeout, and never bunfig's, which Bun does not apply", async () => {
+		const [lastFlag, bunfigIgnored] = await Promise.all([
+			runFixtures(
+				{
+					"slow.test.ts": `
+						import { trackTestLifetime } from HELPER;
+						const { test } = trackTestLifetime();
+						// Past Bun's built-in 5000 ms, inside the run's effective --timeout.
+						test("runs for six seconds", () => Bun.sleep(6000));
+						test("healthy after it", () => {});
+					`,
+				},
+				// Bun applies the last of repeated flags; so must the deadline.
+				["--timeout", "100", "--timeout=20000"],
+			),
+			runFixtures({
+				// Bun 1.4.4 does not apply bunfig's test timeout, so neither may the deadline.
+				"bunfig.toml": "[test]\ntimeout = 100\n",
+				"ignored.test.ts": `
+					import { trackTestLifetime } from HELPER;
+					const { test } = trackTestLifetime();
+					test("runs for four hundred ms", () => Bun.sleep(400));
+					test("healthy after it", () => {});
+				`,
+			}),
+		]);
+
+		for (const run of [lastFlag, bunfigIgnored]) {
+			expect(run.outcome("healthy after it")).toBe("pass");
+			expect(run.exitCode).toBe(0);
+		}
+		expect(lastFlag.outcome("runs for six seconds")).toBe("pass");
+		expect(bunfigIgnored.outcome("runs for four hundred ms")).toBe("pass");
 	}, 60_000);
 
 	test("times bodies by the file's setDefaultTimeout from the point Bun applies it, both ways", async () => {
@@ -262,25 +350,46 @@ describe("trackTestLifetime", () => {
 	}, 60_000);
 
 	test("keeps deadlines on real time when a healthy test drives fake timers past them", async () => {
-		const run = await runFixtures({
-			"fake-clock.test.ts": `
-				import { vi } from "bun:test";
-				import { trackTestLifetime } from HELPER;
-				const { test } = trackTestLifetime();
-				test("advances fake time past its own timeout", async () => {
-					vi.useFakeTimers();
-					await Promise.resolve();
-					vi.advanceTimersByTime(20_001);
-					await Promise.resolve();
-					vi.useRealTimers();
-				}, 20_000);
-				test("healthy after it", () => {});
-			`,
-		});
+		const [yielding, direct] = await Promise.all([
+			runFixtures({
+				"fake-clock.test.ts": `
+					import { vi } from "bun:test";
+					import { trackTestLifetime } from HELPER;
+					const { test } = trackTestLifetime();
+					test("advances fake time past its own timeout", async () => {
+						vi.useFakeTimers();
+						await Promise.resolve();
+						vi.advanceTimersByTime(20_001);
+						await Promise.resolve();
+						vi.useRealTimers();
+					}, 20_000);
+					test("healthy after it", () => {});
+				`,
+			}),
+			runFixtures({
+				// Ordinary use: a timer the test awaits, driven by advancing fake time.
+				"fake-sleep.test.ts": `
+					import { vi } from "bun:test";
+					import { trackTestLifetime } from HELPER;
+					const { test } = trackTestLifetime();
+					test("awaits a sleep it advances fake time past", async () => {
+						vi.useFakeTimers();
+						const sleeping = Bun.sleep(1000);
+						vi.advanceTimersByTime(10_000);
+						await sleeping;
+						vi.useRealTimers();
+					});
+					test("healthy after it", () => {});
+				`,
+			}),
+		]);
 
-		expect(run.outcome("advances fake time past its own timeout")).toBe("pass");
-		expect(run.outcome("healthy after it")).toBe("pass");
-		expect(run.exitCode).toBe(0);
+		expect(yielding.outcome("advances fake time past its own timeout")).toBe("pass");
+		expect(direct.outcome("awaits a sleep it advances fake time past")).toBe("pass");
+		for (const run of [yielding, direct]) {
+			expect(run.outcome("healthy after it")).toBe("pass");
+			expect(run.exitCode).toBe(0);
+		}
 	}, 60_000);
 
 	test("counts a body's synchronous work before its first await toward its deadline", async () => {

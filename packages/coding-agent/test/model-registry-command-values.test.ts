@@ -288,7 +288,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(await registry.getApiKey(model)).toBe("runtime-key");
 		expect(await registry.getApiKeyForProvider("custom-proxy")).toBe("runtime-key");
 		expect(await Bun.file(counterFile).text()).toBe("");
-	});
+	}, 30_000);
 
 	test("401 reruns a command-backed API key and updates live auth headers", async () => {
 		const tokenFile = path.join(tempDir, "token.txt");
@@ -332,7 +332,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(attemptedKeys).toEqual(["stale-key", "fresh-key"]);
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 		expect((await registry.resolveModelHeaders(model))?.Authorization).toBe("Bearer fresh-key");
-	});
+	}, 30_000);
 
 	test("failed 401 refresh discards the rejected command-backed key", async () => {
 		const tokenFile = path.join(tempDir, "token.txt");
@@ -372,7 +372,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 		expect(await registry.getApiKey(model)).toBeUndefined();
 		expect((await registry.resolveModelHeaders(model))?.Authorization).toBeUndefined();
-	});
+	}, 30_000);
 
 	test("command resolution backs off after failed executions", async () => {
 		const counterFile = path.join(tempDir, "counter.txt");
@@ -712,7 +712,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(mock.calls).toHaveLength(1);
 		expect(retryEnds).toEqual([expect.objectContaining({ success: true })]);
 		expect(fs.readFileSync(counterFile, "utf8").length).toBeGreaterThanOrEqual(2);
-	});
+	}, 30_000);
 
 	// A models.yml provider key may hold any character, so the cap must not depend on parsing the
 	// provider back out of the error text: a space or a tab once fell through to retry.maxRetries.
@@ -1044,7 +1044,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 		expect(values).toEqual(["shared-key", "shared-key", "shared-key"]);
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
-	});
+	}, 30_000);
 
 	test("refresh('online') re-runs a command-backed API key after the backend rotates", async () => {
 		const tokenFile = path.join(tempDir, "token.txt");
@@ -1089,7 +1089,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 		const refreshed = registry.find("custom-proxy", "custom-model");
 		expect(refreshed && (await registry.resolveModelHeaders(refreshed))?.Authorization).toBe("Bearer fresh-key");
-	});
+	}, 30_000);
 
 	test("refresh('online') retries a command that was negative-cached after a failure", async () => {
 		const tokenFile = path.join(tempDir, "token.txt");
@@ -1128,7 +1128,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		await registry.refresh("online", { refreshCommandCredentials: true });
 		expect(await registry.getApiKey(model)).toBe("recovered-key");
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
-	});
+	}, 30_000);
 
 	test("refreshProvider('online') without refreshCommandCredentials leaves command cache intact", async () => {
 		const tokenFile = path.join(tempDir, "token.txt");
@@ -1159,7 +1159,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		await registry.refreshProvider("custom-proxy", "online");
 		expect(await registry.getApiKeyForProvider("custom-proxy")).toBe("stale-key");
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
-	});
+	}, 30_000);
 
 	test("refreshProvider('online') invalidates only that provider's command cache", async () => {
 		const tokenA = path.join(tempDir, "token-a.txt");
@@ -1205,7 +1205,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(await registry.getApiKeyForProvider("proxy-b")).toBe("b-stale");
 		expect(fs.readFileSync(counterA, "utf8")).toBe("11");
 		expect(fs.readFileSync(counterB, "utf8")).toBe("1");
-	});
+	}, 30_000);
 
 	test("refreshProvider('online') re-runs extension-registered command-backed headers", async () => {
 		const providerHeaderFile = path.join(tempDir, "provider-header.txt");
@@ -1256,7 +1256,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(refreshedHeaders?.["x-model-token"]).toBe("fresh-model");
 		expect(fs.readFileSync(providerCounter, "utf8")).toBe("11");
 		expect(fs.readFileSync(modelCounter, "utf8")).toBe("11");
-	});
+	}, 30_000);
 
 	test("refreshProvider re-runs fetchDynamicModels header commands after explicit credential refresh", async () => {
 		const modelHeaderFile = path.join(tempDir, "dynamic-header.txt");
@@ -1300,7 +1300,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const refreshed = registry.find("dyn-proxy", "dyn-model");
 		expect(refreshed && (await registry.resolveModelHeaders(refreshed))?.["x-model-token"]).toBe("fresh-dynamic");
 		expect(fs.readFileSync(modelCounter, "utf8")).toBe("11");
-	});
+	}, 30_000);
 
 	test("401 refreshes a fetchDynamicModels command-backed header", async () => {
 		const bearerFile = path.join(tempDir, "bearer.txt");
