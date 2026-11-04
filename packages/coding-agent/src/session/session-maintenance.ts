@@ -499,6 +499,8 @@ export interface SessionMaintenanceHost {
 	 * post-settle readers (`AgentSession.getLastAssistantMessage`) until the next run.
 	 */
 	retainTerminalFailure(message: AssistantMessage): void;
+	/** Re-schedule a refusal report's wake that this pass's abort dropped (see `TurnRecovery.resumeOwedRefusalWake`). */
+	resumeOwedRefusalWake(): void;
 	runRecoveryCompactionWithRollback(
 		reason: "overflow" | "incomplete",
 		message: AssistantMessage,
@@ -1683,6 +1685,10 @@ export class SessionMaintenance {
 						this.#scheduleInterruptedTurnResume(interruptedTurnGeneration);
 					}
 				}
+				// The abort above dropped any scheduled refusal-report wake. It is owed
+				// whatever this pass's outcome (committed, no-op, vetoed by a hook);
+				// a resume or prompt that starts first takes it instead.
+				this.#host.resumeOwedRefusalWake();
 			}
 		}
 	}

@@ -132,6 +132,7 @@ describe("async speculative compaction", () => {
 			persistTurnMessagesForMidRunCompaction: options.persistTurnMessagesForMidRunCompaction ?? (async () => false),
 			findLastAssistantMessage: () => undefined,
 			disconnectFromAgent: () => {},
+			resumeOwedRefusalWake: () => {},
 			reconnectToAgent: () => {},
 			drainStrandedQueuedMessages: () => {},
 			buildDisplaySessionContext: () => sessionManager.buildSessionContext(),

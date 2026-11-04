@@ -1348,6 +1348,13 @@ export interface AssistantMessage {
 	requestBodyReadTimeoutFullReplay?: boolean;
 	/** Per-tool abort messages used when an aborted assistant turn needs different placeholder results per tool call. */
 	toolCallAbortMessages?: Record<string, string>;
+	/**
+	 * Tool calls the provider began streaming in this turn whose stream ended
+	 * (error or abort) before their arguments completed. The agent loop removes
+	 * them from `content` because partial arguments and ids are unsafe to replay,
+	 * so this is the only record that the model attempted them. None of them ran.
+	 */
+	unfinishedToolCalls?: Array<{ id: string; name: string }>;
 	/** HTTP status surfaced by the provider when the request failed. Populated by every provider's catch block alongside `errorMessage` so consumers (auth retry, telemetry, UI) can branch without regex-scraping the message. */
 	errorStatus?: number;
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */

@@ -1131,6 +1131,9 @@ describe("agentLoop with AgentMessage", () => {
 		expect(errorTurn.content.filter(block => block.type === "toolCall").map(block => block.id)).toEqual([
 			"tool-complete",
 		]);
+		// The cut-off call leaves `content` (its arguments are unsafe to replay)
+		// but stays on record so the session can tell the model it never ran.
+		expect(errorTurn.unfinishedToolCalls).toEqual([{ id: "tool-incomplete", name: "echo" }]);
 		expect(errorTurn.stopDetails).toEqual({
 			type: "stream_interrupted_after_content",
 			category: "refusal",

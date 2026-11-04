@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
@@ -1704,7 +1704,10 @@ export function isClassifierRefusal(message: AssistantMessage): boolean {
 	if (message.stopReason !== "error") return false;
 	const id = AIError.classifyMessage(message);
 	if (AIError.is(id, AIError.Flag.AccountPolicy)) return false;
-	const stopType = message.stopDetails?.type;
+	// A refusal that cut a tool call mid-arguments is relabeled by the agent loop
+	// (`stream_interrupted_after_content`), which keeps the provider's stop type as the category.
+	const details = message.stopDetails;
+	const stopType = details?.type === STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL ? details.category : details?.type;
 	if (stopType === "refusal" || stopType === "sensitive") return true;
 	return AIError.is(id, AIError.Flag.ContentBlocked);
 }

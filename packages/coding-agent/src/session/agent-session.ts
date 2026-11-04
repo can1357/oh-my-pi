@@ -38,6 +38,7 @@ import {
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
+	isSyntheticToolResultMessage,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
 	resolveTelemetry,
@@ -2936,6 +2937,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			retainTerminalFailure: message => {
 				this.#prunedTerminalFailure = message;
 			},
+			resumeOwedRefusalWake: () => this.#recovery.resumeOwedRefusalWake(),
 			runRecoveryCompactionWithRollback: (reason, message, options) =>
 				this.#recovery.runRecoveryCompactionWithRollback(reason, message, options),
 			parseRetryAfterMsFromError: errorMessage => this.#recovery.parseRetryAfterMsFromError(errorMessage),
@@ -3835,6 +3837,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#recordToolExecutionStart(event: Extract<AgentEvent, { type: "tool_execution_start" }>): void {
+		// The agent loop announces the never-run placeholder of a refused call with
+		// this event too. Its turn is not written, so a marker would read as a call
+		// left pending by a crashed process on the next resume.
+		if (this.#callOfRefusedTurnLeavingHistory(event.toolCallId)) return;
 		const data: ToolExecutionStartData = {
 			toolCallId: event.toolCallId,
 			toolName: event.toolName,
@@ -4067,12 +4073,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			event.type === "agent_end" ? revokeComputerControlForOwner(this.#eval.getKernelOwnerId()) : undefined;
 		// Only the user's own prompt, steer or follow-up lifts the computer-use stop their Escape set;
 		// synthetic continues and agent-sent messages (subagent budget steers) never do.
+		// The same message, reaching a refusal report's wake run, makes it the user's
+		// turn: a refusal of it gets its own wake (`settleTerminalRefusal`). Synthetic
+		// messages must not, or an injected reminder would let wakes chain.
 		if (
 			event.type === "message_start" &&
 			isUserAuthoredMessage(event.message) &&
 			!(event.message.role === "user" && (event.message.synthetic || event.message.attribution === "agent"))
 		) {
 			resumeComputerUseForOwner(this.#eval.getKernelOwnerId());
+			this.#recovery.noteRefusalWakeAnswered();
 		}
 		if (event.type === "tool_execution_end" && this.#isTerminalYieldToolResult(event)) {
 			const alreadyTerminated = this.#synchronouslyTerminatedYieldToolCallIds.delete(event.toolCallId);
@@ -4260,7 +4270,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (this.#sessionMessageAlreadyPersisted(message)) return;
 		if (message.role === "assistant") {
 			const assistantMsg = message as AssistantMessage;
-			if (this.#recovery.isClassifierRefusal(assistantMsg)) return;
+			if (this.#recovery.refusedTurnLeavesHistory(assistantMsg)) return;
 			if (isEmptyErrorTurn(assistantMsg)) return;
 			if (assistantMsg.stopReason !== "aborted" && assistantMsg.stopReason !== "error" && assistantMsg.usage) {
 				assistantMsg.contextSnapshot = {
@@ -4270,6 +4280,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				};
 			}
 		}
+		// A refused turn that leaves history is never written (above), so neither
+		// are the placeholder results the agent loop paired with its calls:
+		// persisted alone they would be orphans that a reload replays. A terminal
+		// refusal reports the calls in its own notice instead (`settleTerminalRefusal`).
+		if (isSyntheticToolResultMessage(message) && this.#callOfRefusedTurnLeavingHistory(message.toolCallId)) return;
 		const skipPersistedRewindResult =
 			message.role === "toolResult" &&
 			semanticToolResult(message.toolName, message)?.toolName === "rewind" &&
@@ -4277,6 +4292,22 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (!skipPersistedRewindResult) {
 			this.#appendSessionMessage(message);
 		}
+	}
+
+	/**
+	 * Whether `toolCallId` belongs to the latest assistant turn that emitted it,
+	 * and that turn is a refusal leaving history. None of its calls ran, so none
+	 * of their execution records (start marker, placeholder result) may be written.
+	 */
+	#callOfRefusedTurnLeavingHistory(toolCallId: string): boolean {
+		const messages = this.agent.state.messages;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const owner = messages[i];
+			if (owner.role !== "assistant") continue;
+			if (!owner.content.some(block => block.type === "toolCall" && block.id === toolCallId)) continue;
+			return this.#recovery.refusedTurnLeavesHistory(owner);
+		}
+		return false;
 	}
 
 	/**
@@ -4528,6 +4559,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// batch) executes that turn's calls without a new message_end.
 			this.#runToolCallIds = new Set(event.resumedToolCallIds);
 			this.#prunedTerminalFailure = undefined;
+			this.#recovery.noteAgentStarted();
 			this.#advisors.onPrimaryAgentStart();
 			this.#emitRunState("running");
 			this.#maintenance.noteTurnStarted();
@@ -4556,6 +4588,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// toolUse) assistant message and skipping settle-only work.
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			this.#lastAssistantMessage = event.message;
+			if (event.message.stopReason !== "error" && event.message.stopReason !== "aborted") {
+				this.#recovery.noteRefusalWakeAnswered();
+			}
 			for (const block of event.message.content) {
 				if (block.type === "toolCall") this.#runToolCallIds.add(block.id);
 			}
@@ -5214,17 +5249,26 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return;
 				}
 			}
-			// Classifier refusals are persisted-skipped above; also prune the trailing
-			// stub from active context so the next turn's prompt does not replay it.
-			// Keep a reference for post-settle readers (print mode, task executor via
+			// Classifier refusals are persisted-skipped above; settling one also prunes
+			// the refused turn (and its calls' placeholder results) from active
+			// context so the next prompt does not replay it. Keep a reference for
+			// post-settle readers (print mode, task executor via
 			// getLastAssistantMessage) — pruning made the terminal error invisible to
 			// anything inspecting agent state after prompt() resolved.
-			// Fall through to the standard error tail so `session_stop` hooks (block,
-			// continue, telemetry) still fire — matching the pre-fix flow for
-			// `stopReason === "error"`.
+			// A refused turn that was calling tools reports them and continues once
+			// (see `settleTerminalRefusal`); otherwise fall through to the standard
+			// error tail so `session_stop` hooks (block, continue, telemetry) still
+			// fire — matching the pre-fix flow for `stopReason === "error"`.
 			if (this.#recovery.isClassifierRefusal(msg)) {
 				this.#prunedTerminalFailure = msg;
-				this.#recovery.removeAssistantMessageFromActiveContext(msg);
+				const settled = this.#recovery.settleTerminalRefusal(msg);
+				if (settled.persisted) this.#trackPostPromptTask(settled.persisted);
+				if (settled.woke) {
+					maintenanceRoute("refusal-tool-call-reported");
+					this.#recovery.resolveRetry();
+					await emitAgentEndNotification({ willContinue: true });
+					return;
+				}
 			} else if (!AIError.isContextOverflow(msg, this.model?.contextWindow ?? 0)) {
 				// No retry, fallback, or compaction continuation fired: this errored
 				// turn ends the run. #persistSessionMessageIfMissing dropped it as an
@@ -11560,6 +11604,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
+		// Any abort but an internal one (the user's interrupt, an RPC or SDK abort,
+		// `newSession`) withdraws an owed refusal wake; the report stays for the
+		// next turn. An internal abort (a compaction) leaves it owed; a wake owed in
+		// another session is never taken by this one (`TurnRecovery`, session-scoped).
+		if (options?.goalReason !== "internal") this.#recovery.withdrawRefusalWake();
 		// Latch only when the interrupt stops something; an idle Esc would otherwise fold
 		// every later background completion for the rest of the session.
 		if (userInterrupt && (this.isStreaming || this.agent.hasQueuedMessages())) {
