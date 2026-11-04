@@ -2,10 +2,8 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-use brush_core::{ShellExtensions, builtins::Registration};
-
 use crate::{
-	host::{Host, Utility, format_usage, matches_parser, util},
+	host::{Host, Utility, format_usage, matches_parser},
 	locale::shell_locale,
 	time_zone::shell_time_zone,
 };
@@ -2566,10 +2564,4 @@ fn get_clock_resolution() -> Timestamp {
 	// and GetSystemTimePreciseAsFileTime has a resolution of 100ns.
 	// https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-filetime
 	Timestamp::constant(0, 100)
-}
-
-
-/// Creates the `date` builtin registration.
-pub(crate) fn date_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Date, SE>()
 }

@@ -218,6 +218,21 @@ describe("TernTab", () => {
 		]);
 	});
 
+	it("presses the requested button for a selector click", async () => {
+		const fake = await startPage({
+			eventBatches: [],
+			kit: { target: () => ({ ok: true, x: 40, y: 20, width: 30, height: 12, count: 1 }) },
+		});
+		const tab = await openTab(fake);
+		await tab.click("#menu", { button: "right" });
+		const input = fake.requests.find(request => request.op.op === "input")!.op;
+		expect(input.events).toEqual([
+			{ type: "mouse", action: "move", x: 40, y: 20, button: "right", clicks: 0, mods: [] },
+			{ type: "mouse", action: "down", x: 40, y: 20, button: "right", clicks: 1, mods: [] },
+			{ type: "mouse", action: "up", x: 40, y: 20, button: "right", clicks: 1, mods: [] },
+		]);
+	});
+
 	it("fills text controls with trusted text input after the kit selects their content", async () => {
 		const fake = await startPage({
 			eventBatches: [],

@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `compact()` dropping the imaged history of an archive saved before omp 16.1.0 without a word: the new summary now counts those characters as dropped history ([#17883](https://github.com/can1357/oh-my-pi/pull/17883) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- Added `archiveIncludesThinking()`, whether a compaction may replay reasoning from its summary's legend or its archive's text, and `viewSummary()`, which keeps a summary the template did not write in its own words, followed by the template's guide to the view's text ([#17745](https://github.com/can1357/oh-my-pi/pull/17745) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed `viewWithoutFrames` and `viewWithoutThinking` keeping an archive's reasoning for a reader without it when the summary (say, one an extension wrote) declares no `¶think:` scope, and replacing such a summary with the template's ([#17745](https://github.com/can1357/oh-my-pi/pull/17745) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.15.0] - 2026-11-01
+
+### Added
+
+- Added `viewWithoutFrames`: what a reader without image input reads for an archive, its kept text in place of its frames ([#17510](https://github.com/can1357/oh-my-pi/pull/17510) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed

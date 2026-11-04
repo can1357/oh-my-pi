@@ -7,6 +7,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { MissingApiKeyError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { DEFAULT_XAI_VOICE_ID, synthesizeSpeech, XAI_MAX_TEXT_LENGTH } from "@oh-my-pi/pi-ai/speech";
 import { prompt } from "@oh-my-pi/pi-utils";
+import { assertNotHeldOpen } from "@oh-my-pi/pi-utils/held-file";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleChain, type RoleChainCandidate } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
@@ -36,7 +37,7 @@ const ttsSchema = type({
 	// from an omitted voice: xAI applies its own default, DeepInfra forwards
 	// the voice only when the caller actually set one.
 	"voice_id?": "string",
-	language: "string = 'en'",
+	"language?": "string",
 	output_path: "string",
 	sample_rate: "number.integer?",
 	bit_rate: "number.integer?",
@@ -109,6 +110,7 @@ async function synthesizeCloud(
 			text: params.text,
 			format: codec,
 			...(params.voice_id !== undefined ? { voice: params.voice_id } : {}),
+			...(params.language !== undefined ? { language: params.language } : {}),
 			...(model.api === "xai-tts" && params.sample_rate !== undefined ? { sampleRate: params.sample_rate } : {}),
 			...(model.api === "xai-tts" && params.bit_rate !== undefined ? { bitRate: params.bit_rate } : {}),
 		},
@@ -118,6 +120,8 @@ async function synthesizeCloud(
 			signal,
 		},
 	);
+	// Overwriting a live SQLite database or `-shm` destroys it (issue #15586).
+	assertNotHeldOpen(outputPath);
 	await Bun.write(outputPath, result.audio);
 	const voiceId = params.voice_id ?? (model.api === "xai-tts" ? DEFAULT_XAI_VOICE_ID : "default");
 	const backend: Exclude<TtsBackend, "local-inference"> = model.api === "xai-tts" ? "xai-tts" : "openai-speech";
@@ -157,6 +161,7 @@ async function synthesizeLocal(
 
 	const { wavPath, substituted } = resolveLocalWavPath(outputPath);
 	const wav = encodeWav(audio.pcm, audio.sampleRate);
+	assertNotHeldOpen(wavPath);
 	await Bun.write(wavPath, wav);
 	const displayPath = formatPathRelativeToCwd(wavPath, cwd);
 	const note = substituted

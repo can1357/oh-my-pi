@@ -41,9 +41,9 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
-import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
@@ -446,6 +446,65 @@ describe("AgentSession retry fallback", () => {
 				role: "default",
 			},
 		]);
+	});
+
+	it("walks the fallback chain when the primary provider has no credential, then restores it once one returns", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+
+		let primaryCredential = false;
+		const getApiKey = modelRegistry.getApiKey.bind(modelRegistry);
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation((model, ...rest) =>
+			model.provider === primaryModel.provider && !primaryCredential
+				? Promise.resolve(undefined)
+				: getApiKey(model, ...rest),
+		);
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push({ content: [`ok:${model.provider}/${model.id}`] });
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackChains": { "anthropic/*": [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
+		});
+
+		await session.prompt("Work while the primary is logged out");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([fallbackSelector]);
+		expect(fallbackEvents).toEqual([
+			{
+				type: "retry_fallback_applied",
+				from: primarySelector,
+				to: fallbackSelector,
+				role: "anthropic/*",
+				reason: "no credential for anthropic",
+			},
+		]);
+
+		primaryCredential = true;
+		await session.prompt("Work after the primary logs back in");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([fallbackSelector, primarySelector]);
+		expect(session.model?.provider).toBe(primaryModel.provider);
 	});
 
 	it("re-syncs the edit-mode system prompt after a retry-fallback model swap", async () => {
@@ -1544,6 +1603,59 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
+	it("answers queued steering after its usage preflight is interrupted", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled model");
+		const streamStarted = Promise.withResolvers<void>();
+		const firstResponse = Promise.withResolvers<{ content: string[] }>();
+		const probeStarted = Promise.withResolvers<void>();
+		const releaseProbe = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			responses: [
+				async () => {
+					streamStarted.resolve();
+					return firstResponse.promise;
+				},
+				{ content: ["answered steering"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.usageAwareFallback": true });
+		let blockNextProbe = false;
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async () => {
+			if (blockNextProbe) {
+				blockNextProbe = false;
+				probeStarted.resolve();
+				await releaseProbe.promise;
+			}
+			return { state: "healthy", accounts: [] };
+		});
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const run = session.prompt("start");
+		try {
+			await withTimeout(streamStarted.promise, 2_000, "first stream did not start");
+			blockNextProbe = true;
+			await session.steer("change direction");
+			firstResponse.resolve({ content: ["first response"] });
+			await withTimeout(probeStarted.promise, 2_000, "queued usage preflight did not start");
+			const interrupt = session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
+			releaseProbe.resolve();
+			await withTimeout(interrupt, 2_000, "interrupt did not finish");
+			await withTimeout(session.waitForIdle(), 2_000, "steer did not finish");
+			await run;
+			expect(mock.calls).toHaveLength(2);
+			expect(JSON.stringify(mock.calls[1].context.messages)).toContain("change direction");
+			expect(getLastAssistantMessage(session).stopReason).toBe("stop");
+		} finally {
+			firstResponse.resolve({ content: ["first response"] });
+			releaseProbe.resolve();
+		}
+	});
+
 	it("cancels queued-turn usage confirmation when post-prompt work is disposed", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
@@ -2033,7 +2145,10 @@ describe("AgentSession retry fallback", () => {
 			modelRegistry,
 		});
 
+		const dropped: string[] = [];
+		session.setPromptDropped(prompt => dropped.push(prompt.text));
 		await expect(session.prompt("No model configured")).rejects.toThrow("No model selected");
+		expect(dropped).toEqual(["No model configured"]);
 		expect(agent.state.isStreaming).toBe(false);
 	});
 

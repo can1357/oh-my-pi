@@ -159,6 +159,17 @@ describe("detectTerminalId", () => {
 	});
 });
 
+it("selects Kitty graphics for Rex via TERM_PROGRAM or TERM=xterm-rex (over SSH)", () => {
+	for (const env of [
+		{ TERM_PROGRAM: "rex", TERM: "xterm-256color", COLORTERM: "truecolor" },
+		{ TERM: "xterm-rex", COLORTERM: "truecolor", SSH_CONNECTION: "client 1 server 22" },
+	]) {
+		const id = detectTerminalId(env);
+		expect(id).toBe("rex");
+		expect(resolveImageProtocol(id, env, true)).toBe(ImageProtocol.Kitty);
+	}
+});
+
 describe("iTerm2 over SSH", () => {
 	// Env as reported in #12419: an iTerm2 session reached over SSH keeps only
 	// LC_TERMINAL/LC_TERMINAL_VERSION — ITERM_SESSION_ID and TERM_PROGRAM are
@@ -310,6 +321,11 @@ console.log(JSON.stringify({ id: TERMINAL_ID, notifyProtocol: TERMINAL.notifyPro
 			expect(JSON.parse(stdout)).toMatchObject({ id: "kitty", imageProtocol: ImageProtocol.Kitty });
 		},
 	);
+
+	it.skipIf(process.platform === "win32")("recognizes a Rex client from tmux client_termname", async () => {
+		const stdout = await resolveInsideFakeTmux("tmux 3.4\txterm-rex");
+		expect(JSON.parse(stdout)).toMatchObject({ id: "rex", imageProtocol: ImageProtocol.Kitty });
+	});
 });
 
 describe("synchronizedOutputUserOverride", () => {

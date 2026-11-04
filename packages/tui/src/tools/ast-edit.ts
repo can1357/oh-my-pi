@@ -1,19 +1,24 @@
-import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
-import { replaceTabs } from "../utils";
 import type { Theme } from "../theme/theme";
-import { Ellipsis, fileHyperlink, renderStatusLine, truncateToWidth } from "../render";
+import { Ellipsis, renderStatusLine, truncateToWidth } from "../render";
 import { framedToolCard } from "../render/tool-card";
 import {
 	appendParseErrorsBulletList,
 	formatCount,
 	formatErrorDetail,
-	formatMoreItems,
 	formatParseErrorsCountLabel,
 	PREVIEW_LIMITS,
 } from "../render/render-utils";
-import { classifyGroupedLines, groupLineIndicesByBlank } from "./grouped-file-output";
+import {
+	classifyGroupedLines,
+	createGroupedRowStyler,
+	fitGroupsToBudget,
+	groupedLinkTargets,
+	groupLineIndicesByBlank,
+	groupsByFile,
+	walkGroupedOutput,
+} from "./grouped-file-output";
 import type { OutputMeta } from "./output-meta";
 import type {
 	NativeToolHead,
@@ -59,34 +64,24 @@ interface AstEditRenderArgs {
 const COLLAPSED_CHANGE_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2;
 
 /**
- * Flatten change groups (line indices, styled on demand) into frame body
- * lines. Groups are separated by a blank line and carry no tree guides — the
- * frame border is the container, so nested `├─ │` gutters would just be
- * noise. Collapsed mode always shows at least the first group, then fills up
- * to `budget` lines before summarizing the rest as `… N more changes`.
+ * Frame body lines for per-file change groups, styled on demand: files apart by
+ * a blank line and without tree guides (the frame border is the container), fit
+ * to `budget` with the rest summarized as `… N more files`.
  */
 function buildChangeBody(
 	groups: readonly (readonly number[])[],
 	styleLine: (index: number) => string,
-	expanded: boolean,
+	isFileRow: (index: number) => boolean,
 	budget: number,
 	theme: Theme,
 ): string[] {
+	const { shown, summary } = fitGroupsToBudget(groups, budget, { isUnit: isFileRow, unit: "file", gap: 1 });
 	const lines: string[] = [];
-	let shown = 0;
-	for (let i = 0; i < groups.length; i++) {
-		const group = groups[i]!;
-		const separator = shown > 0 ? 1 : 0;
-		const remainingAfter = groups.length - (i + 1);
-		const reserved = !expanded && remainingAfter > 0 ? 1 : 0;
-		// Always emit the first group; budget only gates subsequent ones.
-		if (!expanded && shown > 0 && lines.length + separator + group.length + reserved > budget) break;
-		if (separator) lines.push("");
+	for (const group of shown) {
+		if (lines.length > 0) lines.push("");
 		for (const index of group) lines.push(styleLine(index));
-		shown++;
 	}
-	const remaining = groups.length - shown;
-	if (!expanded && remaining > 0) lines.push(theme.fg("muted", formatMoreItems(remaining, "change")));
+	if (summary) lines.push(theme.fg("muted", summary));
 	return lines;
 }
 
@@ -98,9 +93,7 @@ function patternPreview(pat: string | undefined): string | undefined {
 	return collapsed || undefined;
 }
 
-const AST_EDIT_HEADER_RE = /^(#+)\s+(.*)$/;
 const AST_EDIT_CHANGE_LINE_RE = /^([+\- ])\s*(\d+)(?:│|[:|])(.*)$/;
-const AST_EDIT_HEADER_SUFFIX_RE = /\s+\([^)]*\)\s*$/;
 
 /** One file's proposed rewrite: its unified diff text and change counts. */
 interface AstEditFileDiff {
@@ -117,29 +110,15 @@ interface AstEditFileDiff {
  */
 function parseAstEditChanges(lines: readonly string[]): AstEditFileDiff[] {
 	const files: AstEditFileDiff[] = [];
-	const dirs: string[] = [];
 	let file: AstEditFileDiff | undefined;
-	const flush = () => {
-		if (file && file.lines.length > 0) files.push(file);
-		file = undefined;
-	};
-	for (const line of lines) {
-		const header = AST_EDIT_HEADER_RE.exec(line);
-		if (header) {
-			flush();
-			const depth = header[1]!.length;
-			const rest = header[2]!.trimEnd().replace(AST_EDIT_HEADER_SUFFIX_RE, "");
-			dirs.length = depth - 1;
-			if (rest.endsWith("/")) {
-				dirs[depth - 1] = rest.slice(0, -1);
-				continue;
-			}
-			const prefix = dirs.filter(Boolean).join("/");
-			file = { path: prefix ? `${prefix}/${rest}` : rest, lines: [], added: 0, removed: 0 };
+	for (const event of walkGroupedOutput(lines)) {
+		if (event.kind !== "line") {
+			if (file && file.lines.length > 0) files.push(file);
+			file = event.kind === "file" ? { path: event.path, lines: [], added: 0, removed: 0 } : undefined;
 			continue;
 		}
-		if (!file || line.trim().length === 0) continue;
-		const change = AST_EDIT_CHANGE_LINE_RE.exec(line);
+		if (!file) continue;
+		const change = AST_EDIT_CHANGE_LINE_RE.exec(event.text);
 		if (!change) continue;
 		const lineNumber = Number.parseInt(change[2]!, 10);
 		if (file.lastOld === undefined || lineNumber > file.lastOld + 1 || lineNumber < file.lastOld) {
@@ -150,7 +129,7 @@ function parseAstEditChanges(lines: readonly string[]): AstEditFileDiff[] {
 		else if (change[1] === "-") file.removed++;
 		file.lines.push(`${change[1]}${change[3]}`);
 	}
-	flush();
+	if (file && file.lines.length > 0) files.push(file);
 	return files;
 }
 
@@ -248,53 +227,23 @@ export const astEditToolRenderer = {
 
 		const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text ?? "";
 		const allLines = textContent.split("\n");
-		// Resolve hyperlinks over the whole output so nested directory headers
-		// reconstruct across the blank-line groups the tree list collapses by.
+		// Classify the whole output so nested directory headers resolve across blank-line groups.
 		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
-		// The display lines are sanitized; reconstruct link targets from the original
-		// grouped headers only when they still align with those display lines.
-		const rawDetails = options.renderContext?.rawDetails;
-		const rawContent =
-			isRecord(rawDetails) && typeof rawDetails.displayContent === "string" ? rawDetails.displayContent : undefined;
-		const rawLines = rawContent?.split("\n");
-		const rawCwd = isRecord(rawDetails) && typeof rawDetails.cwd === "string" ? rawDetails.cwd : undefined;
-		const rawSearchPath =
-			isRecord(rawDetails) && typeof rawDetails.searchPath === "string" ? rawDetails.searchPath : undefined;
-		const rawContexts =
-			rawContent !== undefined && rawLines?.length === allLines.length && sanitizeText(rawContent) === textContent
-				? classifyGroupedLines(rawLines, rawCwd ?? rawSearchPath, rawSearchPath)
-				: undefined;
-		// Style lazily: collapsed bodies show only the first groups.
-		const styledLines: (string | undefined)[] = Array.from({ length: allLines.length }, () => undefined);
-		const styleLine = (index: number): string => {
-			const cached = styledLines[index];
-			if (cached !== undefined) return cached;
-			const ctx = contexts[index]!;
-			// Swap the inner code-frame gutter `│` for a space so it does not nest a
-			// second vertical bar inside the frame border.
-			const display = replaceTabs(allLines[index]!.replace("│", " "));
-			let styled: string;
-			const linkPath =
-				ctx.headerPath && rawContexts?.[index]?.kind === ctx.kind && rawContexts[index]?.depth === ctx.depth
-					? (rawContexts[index]?.headerPath ?? ctx.headerPath)
-					: ctx.headerPath;
-			if (ctx.kind === "dir") {
-				const accent = uiTheme.fg("accent", display);
-				styled = linkPath ? fileHyperlink(linkPath, accent) : accent;
-			} else if (ctx.kind === "file") {
-				const tinted = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", display);
-				styled = linkPath ? fileHyperlink(linkPath, tinted) : tinted;
-			} else if (display.startsWith("+")) {
-				styled = uiTheme.fg("toolDiffAdded", display);
-			} else if (display.startsWith("-")) {
-				styled = uiTheme.fg("toolDiffRemoved", display);
-			} else {
-				styled = uiTheme.fg("toolOutput", display);
-			}
-			styledLines[index] = styled;
-			return styled;
-		};
-		const changeGroups = groupLineIndicesByBlank(allLines).filter(indices => {
+		const styleLine = createGroupedRowStyler(allLines, contexts, uiTheme, {
+			linkTarget: groupedLinkTargets(contexts, textContent, details, options.renderContext?.rawDetails),
+			styleBody: index => {
+				// Swap the code-frame gutter `│` for a space so it does not nest a
+				// second vertical bar inside the frame border.
+				const line = allLines[index]!.replace("│", " ");
+				const color = line.startsWith("+")
+					? "toolDiffAdded"
+					: line.startsWith("-")
+						? "toolDiffRemoved"
+						: "toolOutput";
+				return uiTheme.fg(color, line);
+			},
+		});
+		const changeGroups = groupsByFile(groupLineIndicesByBlank(allLines), contexts).filter(indices => {
 			const first = allLines[indices[0]!]!;
 			return !first.startsWith("Safety cap reached") && !first.startsWith("Parse issues:");
 		});
@@ -321,7 +270,13 @@ export const astEditToolRenderer = {
 			({ contentWidth }) => {
 				const expanded = Boolean(options.expanded);
 				if (bodyMemo === undefined || bodyMemo.expanded !== expanded || bodyMemo.width !== contentWidth) {
-					const changeLines = buildChangeBody(changeGroups, styleLine, expanded, COLLAPSED_CHANGE_LIMIT, uiTheme);
+					const changeLines = buildChangeBody(
+						changeGroups,
+						styleLine,
+						index => contexts[index]!.kind === "file",
+						expanded ? Number.POSITIVE_INFINITY : COLLAPSED_CHANGE_LIMIT,
+						uiTheme,
+					);
 					const lines = [...changeLines, ...extraLines].map(l => truncateToWidth(l, contentWidth, Ellipsis.Omit));
 					while (lines.length > 0 && lines[0].trim() === "") lines.shift();
 					bodyMemo = { expanded, width: contentWidth, lines };

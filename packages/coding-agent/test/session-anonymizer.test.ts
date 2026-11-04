@@ -192,6 +192,22 @@ describe("SessionAnonymizer", () => {
 		});
 	});
 
+	test("keeps a session_init's mounted-device list beside its tool list", () => {
+		const anonymizer = new SessionAnonymizer();
+		const result = anonymizer.entry({
+			type: "session_init",
+			tools: ["read", "ast_grep", "mcp__acme__search"],
+			mountedTools: ["ast_grep", "mcp__acme__search"],
+		});
+		const tools = at(result, "tools") as string[];
+		const mounted = at(result, "mountedTools") as string[];
+
+		expect(tools.slice(0, 2)).toEqual(["read", "ast_grep"]);
+		expect(mounted).toHaveLength(2);
+		expect(mounted[0]).toBe("ast_grep");
+		expect(mounted[1]).toBe(tools[2]);
+	});
+
 	test("rewrites shell commands keeping programs, flags, and operators", () => {
 		const anonymizer = new SessionAnonymizer();
 		const out = anonymizer.command(

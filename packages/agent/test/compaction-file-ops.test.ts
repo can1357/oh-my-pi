@@ -1,12 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import {
-	computeFileLists,
-	createFileOps,
-	extractFileOpsFromMessage,
-	formatFileOperations,
-	isUrlSchemePath,
-	stripReadSelector,
-} from "../src/compaction/utils";
+import * as snapcompact from "@oh-my-pi/snapcompact";
+import { extractFileOpsFromMessage, stripReadSelector } from "../src/compaction/utils";
 import { createAssistantMessage } from "./helpers";
 
 function readCall(id: string, path: string) {
@@ -47,7 +41,7 @@ describe("stripReadSelector", () => {
 
 describe("extractFileOpsFromMessage", () => {
 	it("dedupes the same file read through different selectors to one entry", () => {
-		const fileOps = createFileOps();
+		const fileOps = snapcompact.createFileOps();
 		const message = createAssistantMessage([
 			readCall("r1", "docs/compaction.md:100-170:raw"),
 			readCall("r2", "docs/compaction.md:8-16,128-139,384-388"),
@@ -59,19 +53,19 @@ describe("extractFileOpsFromMessage", () => {
 	});
 
 	it("matches selector-suffixed reads against modified paths", () => {
-		const fileOps = createFileOps();
+		const fileOps = snapcompact.createFileOps();
 		const message = createAssistantMessage([
 			readCall("r1", "src/login.ts:30-80"),
 			{ type: "toolCall" as const, id: "w1", name: "write", arguments: { path: "src/login.ts" } },
 		]);
 		extractFileOpsFromMessage(message, fileOps);
-		const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+		const { readFiles, modifiedFiles } = snapcompact.computeFileLists(fileOps);
 		expect(readFiles).toEqual([]);
 		expect(modifiedFiles).toEqual(["src/login.ts"]);
 	});
 
 	it("skips internal URLs and web URLs so they never enter <files>", () => {
-		const fileOps = createFileOps();
+		const fileOps = snapcompact.createFileOps();
 		const message = createAssistantMessage([
 			readCall("r1", "src/keep.ts"),
 			readCall("r2", "artifact://7"),
@@ -84,63 +78,8 @@ describe("extractFileOpsFromMessage", () => {
 			{ type: "toolCall" as const, id: "e1", name: "edit", arguments: { path: "agent://abc" } },
 		]);
 		extractFileOpsFromMessage(message, fileOps);
-		const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+		const { readFiles, modifiedFiles } = snapcompact.computeFileLists(fileOps);
 		expect(readFiles).toEqual(["src/keep.ts"]);
 		expect(modifiedFiles).toEqual([]);
-	});
-});
-
-describe("computeFileLists", () => {
-	it("drops scheme:// URLs rehydrated from legacy compaction details", () => {
-		const fileOps = createFileOps();
-		// Simulate a pre-fix summary's details.readFiles/modifiedFiles fed straight
-		// into fileOps without going through extractFileOpsFromMessage.
-		fileOps.read.add("src/read-only.ts");
-		fileOps.read.add("artifact://7");
-		fileOps.edited.add("src/edited.ts");
-		fileOps.edited.add("conflict://1");
-		fileOps.written.add("local://ctx.md");
-		const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-		expect(readFiles).toEqual(["src/read-only.ts"]);
-		expect(modifiedFiles).toEqual(["src/edited.ts"]);
-	});
-});
-
-describe("formatFileOperations", () => {
-	it("renders one grouped <files> tree with Read/Write/RW markers", () => {
-		const rendered = formatFileOperations(
-			["src/a.ts", "src/b.ts"],
-			["src/c.ts", "src/d.ts"],
-			new Set(["src/a.ts", "src/b.ts", "src/c.ts"]),
-		);
-		expect(rendered).toBe(
-			["<files>", "# src/", "a.ts (Read)", "b.ts (Read)", "c.ts (RW)", "d.ts (Write)", "</files>"].join("\n"),
-		);
-	});
-
-	it("marks modified files Write when no read set is provided", () => {
-		const rendered = formatFileOperations([], ["c.ts"]);
-		expect(rendered).toBe(["<files>", "c.ts (Write)", "</files>"].join("\n"));
-	});
-});
-
-describe("isUrlSchemePath", () => {
-	it("flags internal URIs and web URLs", () => {
-		expect(isUrlSchemePath("conflict://1")).toBe(true);
-		expect(isUrlSchemePath("conflict://*")).toBe(true);
-		expect(isUrlSchemePath("artifact://7")).toBe(true);
-		expect(isUrlSchemePath("local://ctx.md")).toBe(true);
-		expect(isUrlSchemePath("history://AuthLoader")).toBe(true);
-		expect(isUrlSchemePath("https://example.com/page")).toBe(true);
-		// Prefixed conflict typo form — scheme appears after a colon, not at start.
-		expect(isUrlSchemePath("src/login.ts:conflict://3")).toBe(true);
-	});
-
-	it("leaves real filesystem paths untouched", () => {
-		expect(isUrlSchemePath("src/foo.ts")).toBe(false);
-		expect(isUrlSchemePath("C:/Users/me/file.ts")).toBe(false);
-		expect(isUrlSchemePath("db.sqlite:users")).toBe(false);
-		expect(isUrlSchemePath("archive.zip:dir/file.ts")).toBe(false);
-		expect(isUrlSchemePath("docs/compaction.md:100-170:raw")).toBe(false);
 	});
 });

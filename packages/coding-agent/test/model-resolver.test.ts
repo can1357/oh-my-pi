@@ -835,6 +835,19 @@ describe("parseModelPattern", () => {
 				expect(result.model?.id).toBe("anthropic/claude-fable-5.1");
 			});
 		});
+
+		test("ids differing only by case on one provider each resolve their exact selector (#17580)", () => {
+			// A models.yml entry `MiMo-V2.6-Pro` beside the bundled `mimo-v2.6-pro`:
+			// the case-insensitive lookup sees two candidates, but an exact id is
+			// never ambiguous, so role assignments written by the hub must resolve.
+			const bundled = createOpusModel("xiaomi", "mimo-v2.6-pro", "MiMo-V2.6-Pro");
+			const custom = createOpusModel("xiaomi", "MiMo-V2.6-Pro", "MiMo V2.6 Pro");
+			const models = [bundled, custom];
+			expect(resolveModelRoleValue("xiaomi/MiMo-V2.6-Pro", models).model).toBe(custom);
+			expect(resolveModelRoleValue("xiaomi/mimo-v2.6-pro:high", models).model).toBe(bundled);
+			// A spelling matching neither id exactly stays ambiguous and fails closed.
+			expect(resolveModelRoleValue("xiaomi/MIMO-V2.6-PRO", models).model).toBeUndefined();
+		});
 	});
 
 	describe("edge cases", () => {
