@@ -81,9 +81,12 @@ function chunks(reply: Reply): string {
 }
 
 /**
- * Scripted model, by the conversation's last user message: `bg_job` → an async `bash`
- * call; `hang` → no answer until the request is aborted; anything else (including the
- * job's completion notice) → `pong`. A tool result is answered with `tool said: …`.
+ * Scripted model, by the conversation's last user message: exactly `bg_job` → an async
+ * `bash` call; exactly `hang` → no answer until the request is aborted; anything else
+ * (including the job's completion notice) → `pong`. A tool result is answered with
+ * `tool said: …`. The match is exact because a child session also sends side requests
+ * that quote other text, such as compressing each discovered skill's description; one
+ * quoting "change" must not be held as if it were the run's own turn.
  */
 class FakeModelServer {
 	readonly #server: Bun.Server<undefined>;
@@ -149,9 +152,9 @@ class FakeModelServer {
 		let reply: Reply = { text: "pong" };
 		if (last?.role === "tool") {
 			reply = { text: `tool said: ${messageText(last.content)}` };
-		} else if (userText.includes("bg_job")) {
+		} else if (userText === "bg_job") {
 			reply = { tool: "bash", args: { command: "echo bg-done", async: true } };
-		} else if (userText.includes("hang")) {
+		} else if (userText === "hang") {
 			const held = Promise.withResolvers<void>();
 			this.#hangs.push(held.resolve);
 			request.signal.addEventListener("abort", () => held.resolve(), { once: true });
