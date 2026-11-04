@@ -326,7 +326,7 @@ export async function handleApi(req: Request): Promise<Response> {
 			if (clientEtag) {
 				fingerprint = await traceFingerprintForEtag(file);
 				if (fingerprint !== undefined) {
-					const etag = `"${TRACE_ETAG_VERSION}:${fingerprint.rootMtimeMs}:${fingerprint.childFingerprint}"`;
+					const etag = `"${TRACE_ETAG_VERSION}:${fingerprint.rootMtimeMs}:${fingerprint.childFingerprint}:${fingerprint.correctionsDigest}"`;
 					if (clientEtag === etag) return new Response(null, { status: 304 });
 				}
 			}

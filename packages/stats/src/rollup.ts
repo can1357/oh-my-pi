@@ -26,7 +26,14 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { currentDb, unpricedRequestSql } from "./db";
+import {
+	CORRECTION_HOUR_TABLE,
+	CORRECTION_SESSION_TABLE,
+	CORRECTION_TABLE,
+	currentDb,
+	hasWithdrawnRateCorrections,
+	unpricedRequestSql,
+} from "./db";
 import type {
 	AgentType,
 	AgentTypeStats,
@@ -46,7 +53,7 @@ import type {
 	ToolUsageStats,
 } from "./types";
 
-const HOUR_MS = 60 * 60 * 1000;
+export const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 
 /**
@@ -133,6 +140,67 @@ const TOOL_ROLLUP_COLUMNS = `bucket, tool_name, model, provider, calls, errors, 
 	total_tokens_share, output_tokens_share, cost_share, unpriced_share, last_used`;
 
 const TOOL_JOIN = "LEFT JOIN messages m ON m.session_file = t.session_file AND m.entry_id = t.entry_id";
+
+/**
+ * Correction deltas shaped like {@link messageFacts}: cost only, so sums stay
+ * additive. A cost recorded at a withdrawn rate card is corrected where it is
+ * read, so each delta joins the stored row it belongs to and lands in that
+ * row's bucket, dimensions and window; every query that sums stored costs
+ * then reaches the corrected total.
+ */
+function messageCorrectionFacts(bucketExpr: string): string {
+	return `
+		${bucketExpr} AS bucket,
+		c.model AS model, c.provider AS provider, c.folder AS folder, c.agent_type AS agent_type,
+		0 AS requests, 0 AS failed, 0 AS input_tokens, 0 AS output_tokens, 0 AS cache_read_tokens,
+		0 AS cache_write_tokens, 0 AS total_tokens, 0 AS premium_requests,
+		TOTAL(c.c_total) AS cost_total,
+		TOTAL(c.c_input) AS cost_input,
+		TOTAL(c.c_output) AS cost_output,
+		TOTAL(c.c_cache_read) AS cost_cache_read,
+		TOTAL(c.c_cache_write) AS cost_cache_write,
+		0 AS unpriced,
+		TOTAL(CASE WHEN c.cached_prompt = 1
+			THEN c.c_input + c.c_cache_read + c.c_cache_write ELSE 0 END) AS cached_prompt_cost,
+		0 AS no_cache_input_cost, 0 AS duration_sum, 0 AS duration_n, 0 AS ttft_sum, 0 AS ttft_n,
+		0 AS tps_sum, 0 AS tps_n, NULL AS first_ts, NULL AS last_ts`;
+}
+
+/**
+ * The same facts from the per-hour aggregate, which the rolled part of a
+ * range reads: one row per hour and dimensions, already summed.
+ */
+function messageCorrectionHourFacts(): string {
+	return `
+		bucket, model, provider, folder, agent_type,
+		0 AS requests, 0 AS failed, 0 AS input_tokens, 0 AS output_tokens, 0 AS cache_read_tokens,
+		0 AS cache_write_tokens, 0 AS total_tokens, 0 AS premium_requests,
+		c_total AS cost_total, c_input AS cost_input, c_output AS cost_output,
+		c_cache_read AS cost_cache_read, c_cache_write AS cost_cache_write,
+		0 AS unpriced, cached_prompt_cost,
+		0 AS no_cache_input_cost, 0 AS duration_sum, 0 AS duration_n, 0 AS ttft_sum, 0 AS ttft_n,
+		0 AS tps_sum, 0 AS tps_n, NULL AS first_ts, NULL AS last_ts`;
+}
+
+/** Correction deltas shaped like {@link toolFacts}: the invoking turn's delta, split per call. */
+function toolCorrectionFacts(bucketExpr: string): string {
+	return `
+		${bucketExpr} AS bucket,
+		t.tool_name AS tool_name, t.model AS model, t.provider AS provider,
+		0 AS calls, 0 AS errors, 0 AS args_chars, 0 AS result_chars,
+		0 AS total_tokens_share, 0 AS output_tokens_share,
+		TOTAL(c.c_total / t.calls_in_turn) AS cost_share,
+		0 AS unpriced_share, NULL AS last_used`;
+}
+
+/**
+ * The corrected rows. A function, not a constant: this module and `./db`
+ * import each other, so the table name is not bound yet while this module
+ * initialises.
+ */
+function correctedRows(): string {
+	return `${CORRECTION_TABLE} c`;
+}
 
 function hourOf(column: string): string {
 	return `((${column}) / ${HOUR_MS}) * ${HOUR_MS}`;
@@ -412,7 +480,9 @@ export interface RangeWindow {
 
 interface Source {
 	sql: string;
-	params: number[];
+	params: (number | string)[];
+	/** Bound first: the correction CTE the fact parts join, when anything is corrected. */
+	cte?: string;
 }
 
 function dirtyIsSmall(database: Database): boolean {
@@ -430,10 +500,15 @@ function dirtyIsSmall(database: Database): boolean {
  */
 function messageSource(database: Database, cutoff: number | null, fine: boolean): Source {
 	const groupRaw = `GROUP BY 1, ${MESSAGE_DIMENSIONS}`;
+	const corrected = hasWithdrawnRateCorrections();
+	const groupCorrection = "GROUP BY 1, c.model, c.provider, c.folder, c.agent_type";
 	if (fine) {
+		const sql = `SELECT ${messageFacts("(timestamp / 300000) * 300000", "")} FROM messages WHERE timestamp >= ? ${groupRaw}`;
+		if (!corrected) return { sql, params: [cutoff ?? 0] };
 		return {
-			sql: `SELECT ${messageFacts("(timestamp / 300000) * 300000", "")} FROM messages WHERE timestamp >= ? ${groupRaw}`,
-			params: [cutoff ?? 0],
+			sql: `${sql} UNION ALL SELECT ${messageCorrectionFacts("(c.timestamp / 300000) * 300000")}
+				 FROM ${correctedRows()} WHERE c.timestamp >= ? ${groupCorrection}`,
+			params: [cutoff ?? 0, cutoff ?? 0],
 		};
 	}
 	const hi = cutoff === null ? null : Math.ceil(cutoff / HOUR_MS) * HOUR_MS;
@@ -461,17 +536,39 @@ function messageSource(database: Database, cutoff: number | null, fine: boolean)
 		);
 		if (hi !== null) params.push(hi);
 	}
+	if (corrected) {
+		// Same split as the parts above: the partial hour at the range start
+		// comes from the corrected rows themselves, every whole hour from the
+		// per-hour aggregate, so each delta lands in its own row's window.
+		if (cutoff !== null && hi !== null && cutoff < hi) {
+			parts.push(
+				`SELECT ${messageCorrectionFacts(hourOf("c.timestamp"))} FROM ${correctedRows()}
+				 WHERE c.timestamp >= ? AND c.timestamp < ? ${groupCorrection}`,
+			);
+			params.push(cutoff, hi);
+		}
+		parts.push(
+			`SELECT ${messageCorrectionHourFacts()} FROM ${CORRECTION_HOUR_TABLE}
+			 ${hi === null ? "" : "WHERE bucket >= ?"}`,
+		);
+		if (hi !== null) params.push(hi);
+	}
 	return { sql: parts.join(" UNION ALL "), params };
 }
 
-/** Tool facts covering `[cutoff, now]`; same union shape as {@link messageSource}. */
 function toolSource(database: Database, cutoff: number | null, fine: boolean): Source {
 	const groupRaw = "GROUP BY 1, t.tool_name, t.model, t.provider";
+	const corrected = hasWithdrawnRateCorrections();
+	const correctionJoin = `FROM ${correctedRows()}
+		 JOIN tool_calls t ON t.session_file = c.session_file AND t.entry_id = c.entry_id`;
 	if (fine) {
+		const sql = `SELECT ${toolFacts("(t.timestamp / 300000) * 300000")} FROM tool_calls t ${TOOL_JOIN}
+				  WHERE t.timestamp >= ? ${groupRaw}`;
+		if (!corrected) return { sql, params: [cutoff ?? 0] };
 		return {
-			sql: `SELECT ${toolFacts("(t.timestamp / 300000) * 300000")} FROM tool_calls t ${TOOL_JOIN}
-				  WHERE t.timestamp >= ? ${groupRaw}`,
-			params: [cutoff ?? 0],
+			sql: `${sql} UNION ALL SELECT ${toolCorrectionFacts("(t.timestamp / 300000) * 300000")}
+				 ${correctionJoin} WHERE t.timestamp >= ? ${groupRaw}`,
+			params: [cutoff ?? 0, cutoff ?? 0],
 		};
 	}
 	const hi = cutoff === null ? null : Math.ceil(cutoff / HOUR_MS) * HOUR_MS;
@@ -500,6 +597,13 @@ function toolSource(database: Database, cutoff: number | null, fine: boolean): S
 		);
 		if (hi !== null) params.push(hi);
 	}
+	if (corrected) {
+		parts.push(
+			`SELECT ${toolCorrectionFacts(hourOf("t.timestamp"))} ${correctionJoin}
+			 ${cutoff === null ? "" : "WHERE t.timestamp >= ? "}${groupRaw}`,
+		);
+		if (cutoff !== null) params.push(cutoff);
+	}
 	return { sql: parts.join(" UNION ALL "), params };
 }
 
@@ -510,7 +614,9 @@ function queryMessages<T>(window: Pick<RangeWindow, "cutoff"> & { bucketMs?: num
 	const fine = window.bucketMs !== undefined && window.bucketMs < HOUR_MS;
 	const source = messageSource(database, normalizeCutoff(window.cutoff), fine);
 	// `query` caches the compiled statement: the SQL varies only over a small set of shapes.
-	return database.query(`SELECT ${select} FROM (${source.sql}) f ${tail}`).all(...source.params) as T[];
+	return database
+		.query(`${source.cte ?? ""}SELECT ${select} FROM (${source.sql}) f ${tail}`)
+		.all(...source.params) as T[];
 }
 
 function queryTools<T>(window: Pick<RangeWindow, "cutoff"> & { bucketMs?: number }, select: string, tail = ""): T[] {
@@ -518,7 +624,9 @@ function queryTools<T>(window: Pick<RangeWindow, "cutoff"> & { bucketMs?: number
 	if (!database) return [];
 	const fine = window.bucketMs !== undefined && window.bucketMs < HOUR_MS;
 	const source = toolSource(database, normalizeCutoff(window.cutoff), fine);
-	return database.query(`SELECT ${select} FROM (${source.sql}) f ${tail}`).all(...source.params) as T[];
+	return database
+		.query(`${source.cte ?? ""}SELECT ${select} FROM (${source.sql}) f ${tail}`)
+		.all(...source.params) as T[];
 }
 
 function normalizeCutoff(cutoff: number | null | undefined): number | null {
@@ -889,12 +997,22 @@ export function getSessionRollups(): SessionRollupRow[] {
 			 GROUP BY m.session_file`,
 		);
 	}
+	if (hasWithdrawnRateCorrections()) {
+		// Cost only, so the outer aggregate below leaves every other fact alone.
+		parts.push(
+			`SELECT session_file, 0 AS requests, NULL AS started_at, NULL AS ended_at,
+			 0 AS total_tokens, c_total AS cost_total, 0 AS unpriced, NULL AS models, 0 AS tool_calls
+			 FROM ${CORRECTION_SESSION_TABLE}`,
+		);
+	}
 	return database
 		.query(
-			`SELECT session_file AS sessionFile, requests, started_at AS startedAt, ended_at AS endedAt,
-			 total_tokens AS totalTokens, cost_total AS costTotal, unpriced AS unpricedRequests, models,
-			 tool_calls AS toolCalls
-			 FROM (${parts.join(" UNION ALL ")})`,
+			`SELECT session_file AS sessionFile, SUM(requests) AS requests,
+			 MIN(started_at) AS startedAt, MAX(ended_at) AS endedAt, SUM(total_tokens) AS totalTokens,
+			 TOTAL(cost_total) AS costTotal, SUM(unpriced) AS unpricedRequests,
+			 GROUP_CONCAT(models) AS models, MAX(tool_calls) AS toolCalls
+			 FROM (${parts.join(" UNION ALL ")})
+			 GROUP BY session_file`,
 		)
 		.all() as SessionRollupRow[];
 }

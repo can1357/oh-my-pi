@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `omp stats` showing DeepSeek V4 Pro requests made from 2026-09-14 04:00 UTC at the Flash price that v18.1.17 through v18.12.6 recorded: a session whose costs show the catalog's peak/off-peak pricing now shows them at the Pro price, and every other recorded cost, including a `models.yml` price, is unchanged ([#16875](https://github.com/can1357/oh-my-pi/issues/16875))
+- Fixed `omp stats` showing DeepSeek V4 Pro requests made from 2026-09-14 04:00 UTC at the Flash price that v18.1.17 through v18.12.6 recorded: a history whose costs show the catalog's peak/off-peak pricing now reads at the Pro price in the summary, the dashboard and the trace alike, while the database keeps every cost the transcripts recorded ([#16875](https://github.com/can1357/oh-my-pi/issues/16875))
 
 ## [18.16.0] - 2026-11-02
 

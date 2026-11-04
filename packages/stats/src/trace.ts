@@ -14,14 +14,8 @@ import * as path from "node:path";
 import { pricingPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getBundledModel, type GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
-import {
-	initDb,
-	isScheduledCatalogModel,
-	type RecordedRequest,
-	recordedRequestCost,
-	repriceWithdrawnRateRequests,
-} from "./db";
-import { extractFolderFromPath, finiteTokenCount, parseAllSessionEntries, resolveUsageTotal } from "./parser";
+import { initDb, isScheduledCatalogModel, withdrawnRateCorrections, withdrawnRateTraceTotals } from "./db";
+import { extractFolderFromPath, parseAllSessionEntries, resolveUsageTotal } from "./parser";
 import { getSessionRollups } from "./rollup";
 import type {
 	SessionEntry,
@@ -101,11 +95,10 @@ interface MessageView {
 		cacheWrite?: unknown;
 		totalTokens?: unknown;
 		orchestration?: { input?: unknown; output?: unknown; cacheRead?: unknown } | null;
-		cost?: { input?: unknown; output?: unknown; cacheRead?: unknown; cacheWrite?: unknown; total?: unknown } | null;
+		cost?: { total?: unknown } | null;
 	} | null;
 	model?: string;
 	provider?: string;
-	api?: string;
 	stopReason?: string;
 	errorMessage?: string;
 }
@@ -282,52 +275,11 @@ function argsPreview(args: unknown): string | undefined {
 }
 
 /**
- * The totals stats.db stores for this transcript's requests that a withdrawn
- * rate card priced ({@link repriceWithdrawnRateRequests}), by entry id. Reads
- * what stats.db reads: every assistant entry of the file (not only the active
- * branch), its recorded cost only ({@link recordedRequestCost}; an estimated
- * cost is not evidence), and its conversation token buckets.
+ * The corrected totals for one transcript, by entry id, or undefined when a
+ * trace is built from snapshots: it reads no database, so it shows what each
+ * transcript recorded.
  */
-function withdrawnRateTotals(views: readonly EntryView[]): Map<string, number> {
-	const groups = new Map<string, { provider: string; model: string; ids: string[]; requests: RecordedRequest[] }>();
-	for (const entry of views) {
-		const msg = entry.message;
-		if (entry.type !== "message" || typeof entry.id !== "string" || msg?.role !== "assistant") continue;
-		if (typeof msg.provider !== "string" || typeof msg.model !== "string" || typeof msg.api !== "string") continue;
-		const usage = msg.usage;
-		if (!usage || typeof usage !== "object") continue;
-		const cost = recordedRequestCost(msg.provider, msg.model, usage.cost);
-		if (!cost) continue;
-		const key = `${msg.provider}\u0000${msg.model}`;
-		let group = groups.get(key);
-		if (!group) {
-			group = { provider: msg.provider, model: msg.model, ids: [], requests: [] };
-			groups.set(key, group);
-		}
-		group.ids.push(entry.id);
-		group.requests.push({
-			tokens: {
-				input: finiteTokenCount(usage.input),
-				output: finiteTokenCount(usage.output),
-				cacheRead: finiteTokenCount(usage.cacheRead),
-				cacheWrite: finiteTokenCount(usage.cacheWrite),
-			},
-			cost,
-			// The request timestamp stats.db stores: the message's, else the entry's.
-			timestamp:
-				typeof msg.timestamp === "number" && Number.isFinite(msg.timestamp) && msg.timestamp > 0
-					? msg.timestamp
-					: (toMs(entry.timestamp) ?? 0),
-		});
-	}
-	const totals = new Map<string, number>();
-	for (const { provider, model, ids, requests } of groups.values()) {
-		for (const [index, cost] of repriceWithdrawnRateRequests(provider, model, requests).entries()) {
-			if (cost) totals.set(ids[index]!, cost.total);
-		}
-	}
-	return totals;
-}
+type WithdrawnTotals = (file: string) => ReadonlyMap<string, number> | null;
 
 /**
  * Scan one transcript into a track: model/tool/turn/background spans plus
@@ -339,6 +291,7 @@ function scanTranscript(
 	parentTrackId: string | null,
 	file: string,
 	header?: TraceSnapshotHeader | null,
+	withdrawnTotalsOf?: WithdrawnTotals,
 ): TrackScan {
 	// Boundary cast: persisted JSONL entries are re-validated field-by-field below.
 	const views = entries as readonly EntryView[];
@@ -378,7 +331,10 @@ function scanTranscript(
 		}
 	}
 
-	const withdrawnTotals = withdrawnRateTotals(views);
+	// What stats.db reads for this transcript, so a trace and the database
+	// cannot disagree about one request: its own corrected rows, and the
+	// corrected row behind each entry it repeats from another transcript.
+	const withdrawnTotals = withdrawnTotalsOf?.(file);
 
 	for (const entry of chain) {
 		const envelopeTs = toMs(entry.timestamp);
@@ -499,8 +455,8 @@ function scanTranscript(
 
 			if (costTotal !== undefined) {
 				// A cost a withdrawn rate card recorded shows at the catalog price
-				// stats.db stores; the transcript keeps what it recorded.
-				span.cost = (entry.id === undefined ? undefined : withdrawnTotals.get(entry.id)) ?? costTotal;
+				// stats.db reads; the transcript keeps what it recorded.
+				span.cost = (entry.id === undefined ? undefined : withdrawnTotals?.get(entry.id)) ?? costTotal;
 			}
 			if (typeof msg.ttft === "number") span.ttft = msg.ttft;
 			if (msg.stopReason === "error" || msg.errorMessage) span.isError = true;
@@ -718,6 +674,7 @@ async function buildTrackTree(
 	visited: Set<string>,
 	out: TraceTrack[],
 	scans: TrackScan[],
+	withdrawnTotalsOf: WithdrawnTotals,
 ): Promise<TrackScan | null> {
 	if (visited.has(file)) return null;
 	visited.add(file);
@@ -730,7 +687,14 @@ async function buildTrackTree(
 		throw err;
 	}
 
-	const scan = scanTranscript(parseAllSessionEntries(bytes), trackId, parentTrackId, file);
+	const scan = scanTranscript(
+		parseAllSessionEntries(bytes),
+		trackId,
+		parentTrackId,
+		file,
+		undefined,
+		withdrawnTotalsOf,
+	);
 	out.push(scan.track);
 	scans.push(scan);
 
@@ -750,7 +714,16 @@ async function buildTrackTree(
 			const childFile = path.join(artifactsDir, name);
 			const stem = path.basename(transcriptStem(childFile));
 			const childTrackId = trackId === "main" ? stem : `${trackId}/${stem}`;
-			const childScan = await buildTrackTree(childFile, childTrackId, trackId, depth + 1, visited, out, scans);
+			const childScan = await buildTrackTree(
+				childFile,
+				childTrackId,
+				trackId,
+				depth + 1,
+				visited,
+				out,
+				scans,
+				withdrawnTotalsOf,
+			);
 			if (!childScan) continue;
 			const isAdvisor = stem === "__advisor" || stem.startsWith("__advisor.");
 			childScan.track.label = isAdvisor
@@ -832,6 +805,8 @@ function linkChildTracks(scan: TrackScan, childrenById: ReadonlyMap<string, Trac
 interface TraceMemoEntry {
 	mtimeMs: number;
 	childFingerprint: string;
+	/** The withdrawn-rate corrections the memoized spans' costs were read at. */
+	correctionsDigest: string;
 	trace: SessionTrace;
 }
 
@@ -872,27 +847,35 @@ async function childTranscriptsFingerprint(rootFile: string, depth = 0): Promise
 	return [`n=${transcriptNames.length}`, ...childParts].join(",");
 }
 
-/** Freshness of a root trace: root mtime plus the child-transcript set fingerprint. */
+/**
+ * Freshness of a root trace: root mtime, the child-transcript set
+ * fingerprint, and the withdrawn-rate corrections, since a span's cost is
+ * what stats.db reads for it and a request appended to a fork of this
+ * transcript can change that without touching a byte of it.
+ */
 export interface TraceFingerprint {
 	rootMtimeMs: number;
 	childFingerprint: string;
+	correctionsDigest: string;
 }
 
 /** Stat the root and walk its child transcripts (readdir+stat, no parse). */
 async function readTraceFingerprint(resolved: string): Promise<TraceFingerprint> {
 	const rootMtimeMs = (await fs.stat(resolved)).mtimeMs;
 	const childFingerprint = await childTranscriptsFingerprint(resolved);
-	return { rootMtimeMs, childFingerprint };
+	return { rootMtimeMs, childFingerprint, correctionsDigest: withdrawnRateCorrections()?.digest ?? "" };
 }
 
 /**
  * Freshness fingerprint for the trace ETag pre-check; `SessionTrace.etag` is
- * `${rootMtimeMs}:${childFingerprint}` for an unraced build. Returns undefined
+ * `${rootMtimeMs}:${childFingerprint}:${correctionsDigest}` for an unraced
+ * build. Returns undefined
  * when the path is rejected or missing (the caller falls through to the full
  * build, which maps those to 400/404).
  */
 export async function traceFingerprintForEtag(fileParam: string): Promise<TraceFingerprint | undefined> {
 	try {
+		await initDb();
 		return await readTraceFingerprint(resolveSessionPath(fileParam));
 	} catch {
 		return undefined;
@@ -913,13 +896,18 @@ export function traceMemoForTests(): { file: string; mtimeMs: number } | undefin
  */
 export async function buildSessionTrace(fileParam: string, fingerprint?: TraceFingerprint): Promise<SessionTrace> {
 	const resolved = resolveSessionPath(fileParam);
+	await initDb();
 	const memo = traceMemo?.file === resolved ? traceMemo.entry : undefined;
 	// Pre-build child fingerprint on EVERY path (hit check and rebuild
 	// alike): the post-build race guard compares against this, so a child
 	// append landing mid-parse is detected even on first builds and
 	// memo-less rebuilds, where no prior fingerprint exists to compare.
-	const { rootMtimeMs, childFingerprint: preChildFingerprint } = fingerprint ?? (await readTraceFingerprint(resolved));
-	if (memo && memo.mtimeMs === rootMtimeMs) {
+	const {
+		rootMtimeMs,
+		childFingerprint: preChildFingerprint,
+		correctionsDigest,
+	} = fingerprint ?? (await readTraceFingerprint(resolved));
+	if (memo && memo.mtimeMs === rootMtimeMs && memo.correctionsDigest === correctionsDigest) {
 		// Equality, not <=: a LOWER mark (delete/older-mtime replace) is
 		// also stale — only an identical child set may reuse the trace.
 		if (preChildFingerprint === memo.childFingerprint) return memo.trace;
@@ -927,7 +915,7 @@ export async function buildSessionTrace(fileParam: string, fingerprint?: TraceFi
 
 	const tracks: TraceTrack[] = [];
 	const scans: TrackScan[] = [];
-	const rootScan = await buildTrackTree(resolved, "main", null, 0, new Set(), tracks, scans);
+	const rootScan = await buildTrackTree(resolved, "main", null, 0, new Set(), tracks, scans, withdrawnRateTraceTotals);
 	if (!rootScan) {
 		throw Object.assign(new Error(`ENOENT: session not found: ${resolved}`), { code: "ENOENT" });
 	}
@@ -946,11 +934,17 @@ export async function buildSessionTrace(fileParam: string, fingerprint?: TraceFi
 	// indefinitely cached one. Unraced builds use the post-build key, which
 	// equals the pre-build key by construction.
 	const etagFingerprint = raced || rootChanged ? preChildFingerprint : childFingerprint;
-	const trace = assembleSessionTrace(rootScan, tracks, scans, rootMtimeMs, `${rootMtimeMs}:${etagFingerprint}`);
+	const trace = assembleSessionTrace(
+		rootScan,
+		tracks,
+		scans,
+		rootMtimeMs,
+		`${rootMtimeMs}:${etagFingerprint}:${correctionsDigest}`,
+	);
 	if (!raced && !rootChanged) {
 		traceMemo = {
 			file: resolved,
-			entry: { mtimeMs: rootMtimeMs, childFingerprint, trace },
+			entry: { mtimeMs: rootMtimeMs, childFingerprint, correctionsDigest, trace },
 		};
 	}
 	return trace;

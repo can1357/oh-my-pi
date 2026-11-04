@@ -9,14 +9,16 @@ import {
 	calculateWithdrawnRateCost,
 	type GeneratedProvider,
 	getBundledModel,
+	getBundledModels,
+	getBundledProviders,
 	getTimeBasedPricingPeriod,
 	hasRecurringTariff,
 } from "@oh-my-pi/pi-catalog/models";
 import type { EffectiveTokenCost, Model, ModelCost } from "@oh-my-pi/pi-catalog/types";
-import { getConfigRootDir, getStatsDbPath, isRecord, VERSION } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
 import { ChunkedInsert } from "./chunked-insert";
 import { classifyAgentType, type ParseSessionResult, type SessionParserState } from "./parser";
-import { ensureRollupSchema, getDailyActivityFromRollup } from "./rollup";
+import { ensureRollupSchema, getDailyActivityFromRollup, HOUR_MS } from "./rollup";
 import type {
 	AgentType,
 	DailyActivityPoint,
@@ -123,9 +125,11 @@ const NO_CACHE_INPUT_BACKFILL_KEY = "cost_no_cache_input_v1";
 // value stored is the version that ran it), since only a catalog update can
 // price a model it could not price before.
 const CATALOG_COST_BACKFILL_KEY = "catalog_cost_backfill";
-// Rows stored at a rate card the catalog later withdrew (`withdrawn-rates`)
-// are repriced once per release (the value stored is the version that ran
-// it), since only a catalog update can withdraw a card.
+// A database an earlier build of this branch corrected in place kept each
+// transcript's own cost beside the derived one in `recorded_cost`. It is put
+// back from there once, and nothing is derived into the database again.
+const WITHDRAWN_RATE_RESTORE_KEY = "withdrawn_rate_restore_v1";
+// The marker that build wrote, dropped with the derived costs it tracked.
 const WITHDRAWN_RATE_REPAIR_KEY = "withdrawn_rate_repair";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
@@ -191,7 +195,6 @@ export async function initDb(): Promise<Database> {
 			cost_unpriced INTEGER NOT NULL DEFAULT 0,
 			agent_type TEXT NOT NULL DEFAULT 'main',
 			service_tier TEXT,
-			recorded_cost TEXT,
 			UNIQUE(session_file, entry_id)
 		);
 
@@ -209,6 +212,20 @@ export async function initDb(): Promise<Database> {
 		CREATE INDEX IF NOT EXISTS idx_messages_timestamp_model_provider ON messages(timestamp, model, provider);
 		CREATE INDEX IF NOT EXISTS idx_messages_timestamp_folder ON messages(timestamp, folder);
 		CREATE INDEX IF NOT EXISTS idx_messages_stop_reason_timestamp ON messages(stop_reason, timestamp);
+
+		-- A transcript entry this file repeats from another transcript: a fork
+		-- copy the first-writer-wins guard in insertMessageStats skipped, under
+		-- the identity it repeats. Metadata, never a cost. It tells the
+		-- read-time withdrawn-rate correction that the two transcripts share one
+		-- request, so parent and child form one evidence group in either ingest
+		-- order (see computeWithdrawnRateCorrections).
+		CREATE TABLE IF NOT EXISTS message_copies (
+			session_file TEXT NOT NULL,
+			entry_id TEXT NOT NULL,
+			timestamp INTEGER NOT NULL,
+			PRIMARY KEY (session_file, entry_id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_message_copies_entry ON message_copies(entry_id, timestamp);
 
 		CREATE TABLE IF NOT EXISTS file_offsets (
 			session_file TEXT PRIMARY KEY,
@@ -304,12 +321,9 @@ export async function initDb(): Promise<Database> {
 	if (!messageColumns.some(column => column.name === "cost_unpriced")) {
 		db.run("ALTER TABLE messages ADD COLUMN cost_unpriced INTEGER NOT NULL DEFAULT 0");
 	}
-	// The cost the transcript recorded, kept apart from the stored cost a withdrawn
-	// rate card's repair derives (see `recordedCostColumn`). Rows ingested before
-	// this column existed are NULL: unknown until a re-parse records them.
-	if (!messageColumns.some(column => column.name === "recorded_cost")) {
-		db.run("ALTER TABLE messages ADD COLUMN recorded_cost TEXT");
-	}
+	// No `recorded_cost` column: a build of this branch wrote one beside a
+	// derived cost, and `restoreWithdrawnRateCosts` drops it again after putting
+	// the recorded cost back into `cost`.
 	// Token-usage-by-agent: each message is classified main / subagent / advisor
 	// from its transcript path. A brand-new table gets the column from CREATE
 	// TABLE and the parser labels rows at insert time; a pre-existing table gets
@@ -401,7 +415,7 @@ export async function initDb(): Promise<Database> {
 	backfillPriorityPremiumRequests(db);
 	backfillAgentType(db);
 	backfillMissingCatalogCosts(db);
-	repairWithdrawnRateCosts(db);
+	restoreWithdrawnRateCosts(db);
 	backfillNoCacheInputCosts(db);
 	backfillForkDuplicates(db);
 	ensureRollupSchema(db);
@@ -474,12 +488,46 @@ function calculateCatalogCost(
 	return calculateUsageCost(cost, pricingUsage(tokens), timestamp);
 }
 
+// ── Withdrawn rate cards ──────────────────────────────────────────────────
+//
+// `cost` is what the transcript recorded. A cost recorded at a rate card the
+// catalog has since withdrawn (`withdrawn-rates`) is corrected where it is
+// read, never in the database: an append, a re-ingest, an older writer, a
+// marker reset and a fork cannot disagree about a correction that nothing
+// remembers. {@link computeWithdrawnRateCorrections} decides every one of
+// them; the summary, every aggregate query and the trace read it.
+
 const NO_WITHDRAWN_RATES: readonly EffectiveTokenCost[] = [];
 
 /** Rate cards the catalog withdrew from this model (`withdrawn-rates`), ascending by date. */
 function getWithdrawnRates(provider: string, modelId: string): readonly EffectiveTokenCost[] {
 	const model: Model | undefined = getBundledModel(provider as GeneratedProvider, modelId);
 	return model ? resolveWithdrawnRates(model) : NO_WITHDRAWN_RATES;
+}
+
+/** A bundled catalog row a withdrawn rate card covers. */
+interface WithdrawnRateModel {
+	provider: string;
+	model: string;
+}
+
+let withdrawnRateModels: readonly WithdrawnRateModel[] | undefined;
+
+/**
+ * Every bundled (provider, model) a withdrawn rate card covers. The bundled
+ * roster is a build artifact, so one walk answers every read of the process.
+ */
+function getWithdrawnRateModels(): readonly WithdrawnRateModel[] {
+	if (!withdrawnRateModels) {
+		const covered: WithdrawnRateModel[] = [];
+		for (const provider of getBundledProviders()) {
+			for (const model of getBundledModels(provider)) {
+				if (resolveWithdrawnRates(model).length > 0) covered.push({ provider, model: model.id });
+			}
+		}
+		withdrawnRateModels = covered;
+	}
+	return withdrawnRateModels;
 }
 
 /**
@@ -504,8 +552,8 @@ function isSameCost(recorded: UsageCost, computed: UsageCost): boolean {
 	);
 }
 
-/** One request of one model in one transcript, with the cost it recorded ({@link recordedRequestCost}). */
-export interface RecordedRequest {
+/** One request of one model in one transcript, with the cost stats.db stores for it. */
+interface RecordedRequest {
 	tokens: CostTokens;
 	cost: UsageCost;
 	timestamp: number;
@@ -521,7 +569,7 @@ interface CatalogPriceMatch {
 }
 
 /**
- * Evidence, from the costs one transcript recorded for one model, that a
+ * Evidence, from the costs one evidence group recorded for one model, that a
  * withdrawn rate card (`withdrawn-rates`) priced them.
  *
  * Equal amounts alone do not show which price produced a cost: a flat
@@ -529,15 +577,15 @@ interface CatalogPriceMatch {
  * in one tariff period. A user's price is flat (an explicit `cost` drops the
  * catalog schedule), so it charges one rate per billed leg in every period,
  * while the withdrawn card charged a different rate in each. So a card is
- * proven only when the transcript recorded its price in both tariff periods
- * on one billed leg: no flat price records both of those rates. Then each
+ * proven only when the group recorded its price in both tariff periods on one
+ * billed leg: no flat price records both of those rates. Then each
  * request recorded at that card's price takes the current catalog price.
  *
  * A recorded price that is neither a withdrawn card's nor the current
  * catalog's, from the card's start, means another price was in use in the
- * transcript: nothing in it is re-priced. The current catalog's price is
- * neither evidence nor counter-evidence. An estimated cost is never a
- * {@link RecordedRequest}, so it counts for nothing.
+ * group: nothing in it is re-priced. The current catalog's price is neither
+ * evidence nor counter-evidence, which is also why a cost stats estimated
+ * (always the current catalog's price) counts for nothing.
  */
 class WithdrawnRateProof {
 	readonly #cost: ModelCost;
@@ -593,55 +641,34 @@ class WithdrawnRateProof {
 	}
 }
 
-/** A fresh proof for one transcript's requests of this model; null when no withdrawn card covers it. */
-function withdrawnRateProof(provider: string, modelId: string): WithdrawnRateProof | null {
-	const cards = getWithdrawnRates(provider, modelId);
-	if (cards.length === 0) return null;
-	const cost = getCatalogCost(provider, modelId);
-	return cost ? new WithdrawnRateProof(cost, cards) : null;
-}
-
 /**
- * The catalog price for each request of one transcript that a proven
- * withdrawn rate card priced ({@link WithdrawnRateProof}), or null where the
- * recorded cost stands. All requests must share one provider and model.
+ * Union-find over transcript paths: transcripts linked by a shared request
+ * (a fork copy) form one evidence group, in either ingest order.
  */
-export function repriceWithdrawnRateRequests(
-	provider: string,
-	modelId: string,
-	requests: readonly RecordedRequest[],
-): (UsageCost | null)[] {
-	const proof = withdrawnRateProof(provider, modelId);
-	for (const request of requests) proof?.add(request);
-	return requests.map(request => proof?.repriced(request) ?? null);
-}
+class EvidenceGroups {
+	readonly #parent = new Map<string, string>();
 
-function finiteLeg(value: unknown): number | undefined {
-	if (value === undefined || value === null) return 0;
-	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-/**
- * The cost a request recorded, when stats stores it as recorded rather than
- * estimating the request ({@link resolveStoredCost}) and every leg is a finite
- * number; undefined otherwise. Only such a cost is evidence of the price that
- * produced it. `raw` is the entry's `usage.cost` as read.
- */
-export function recordedRequestCost(provider: string, modelId: string, raw: unknown): UsageCost | undefined {
-	if (!isRecord(raw)) return undefined;
-	const input = finiteLeg(raw.input);
-	const output = finiteLeg(raw.output);
-	const cacheRead = finiteLeg(raw.cacheRead);
-	const cacheWrite = finiteLeg(raw.cacheWrite);
-	if (input === undefined || output === undefined || cacheRead === undefined || cacheWrite === undefined) {
-		return undefined;
+	find(file: string): string {
+		let root = this.#parent.get(file);
+		if (root === undefined) {
+			this.#parent.set(file, file);
+			return file;
+		}
+		while (root !== this.#parent.get(root)) root = this.#parent.get(root)!;
+		// Path compression: this lookup runs once per row of the group.
+		for (let node = file; node !== root;) {
+			const next = this.#parent.get(node)!;
+			this.#parent.set(node, root);
+			node = next;
+		}
+		return root;
 	}
-	const total =
-		raw.total === undefined || raw.total === null ? input + output + cacheRead + cacheWrite : finiteLeg(raw.total);
-	if (total === undefined) return undefined;
-	const catalogCost = getCatalogCost(provider, modelId);
-	const recurring = catalogCost?.timeBased !== undefined && hasRecurringTariff(catalogCost.timeBased);
-	return total !== 0 || recurring ? { input, output, cacheRead, cacheWrite, total } : undefined;
+
+	union(left: string, right: string): void {
+		const leftRoot = this.find(left);
+		const rightRoot = this.find(right);
+		if (leftRoot !== rightRoot) this.#parent.set(leftRoot, rightRoot);
+	}
 }
 
 function normalizeUsageCost(cost: Partial<UsageCost>): UsageCost {
@@ -778,9 +805,11 @@ function backfillMissingCatalogCosts(database: Database): void {
 	applyBackfill();
 }
 
-interface WithdrawnRateRow {
+/** One stored row of a model a withdrawn rate card covers, as the correction reads it. */
+interface WithdrawnRow {
 	id: number;
 	session_file: string;
+	entry_id: string;
 	timestamp: number;
 	input_tokens: number;
 	output_tokens: number;
@@ -791,29 +820,27 @@ interface WithdrawnRateRow {
 	cost_cache_read: number;
 	cost_cache_write: number;
 	cost_total: number;
-	recorded_cost: string;
+	cost_unpriced: number;
+	cost_no_cache_input: number | null;
+	folder: string;
+	agent_type: string;
 }
 
-/** A model with a withdrawn rate card whose stored costs to derive, in these transcripts; all when absent. */
-interface WithdrawnRateScope {
-	provider: string;
-	model: string;
-	sessionFiles?: ReadonlySet<string>;
-}
+const WITHDRAWN_ROW_COLUMNS = `id, session_file, entry_id, timestamp, input_tokens, output_tokens,
+	cache_read_tokens, cache_write_tokens, cost_input, cost_output, cost_cache_read, cost_cache_write,
+	cost_total, cost_unpriced, cost_no_cache_input, folder, agent_type`;
 
 /**
- * `recorded_cost` for a row: its {@link recordedRequestCost} as JSON, `null`
- * (JSON) when stats estimated the request, for models a withdrawn rate card
- * covers; SQL NULL otherwise, as for rows ingested before the column existed.
+ * The request a stored row stands for, with the cost it carries, or undefined
+ * when that cost is not a price: an unpriced row stores unknown spend
+ * ({@link resolveStoredCost}), and a zero on a model without a recurring
+ * tariff is the same absence. A row whose request stats estimated carries the
+ * current catalog's price, which the evidence rule treats as neutral, so the
+ * two need no telling apart.
  */
-function recordedCostColumn(stats: MessageStatsInput): string | null {
-	if (getWithdrawnRates(stats.provider, stats.model).length === 0) return null;
-	return JSON.stringify(recordedRequestCost(stats.provider, stats.model, stats.usage.cost) ?? null);
-}
-
-function recordedRowRequest(provider: string, model: string, row: WithdrawnRateRow): RecordedRequest | undefined {
-	const cost = recordedRequestCost(provider, model, JSON.parse(row.recorded_cost));
-	if (!cost) return undefined;
+function storedRequest(cost: ModelCost, row: WithdrawnRow): RecordedRequest | undefined {
+	const recurring = cost.timeBased !== undefined && hasRecurringTariff(cost.timeBased);
+	if (row.cost_unpriced === 1 || (row.cost_total === 0 && !recurring)) return undefined;
 	return {
 		tokens: {
 			input: row.input_tokens,
@@ -821,98 +848,292 @@ function recordedRowRequest(provider: string, model: string, row: WithdrawnRateR
 			cacheRead: row.cache_read_tokens,
 			cacheWrite: row.cache_write_tokens,
 		},
-		cost,
+		cost: {
+			input: row.cost_input,
+			output: row.cost_output,
+			cacheRead: row.cost_cache_read,
+			cacheWrite: row.cost_cache_write,
+			total: row.cost_total,
+		},
 		timestamp: row.timestamp,
 	};
 }
 
-/**
- * Derive the stored cost of every row with a recorded cost, for each scope's
- * model and transcripts, from the recorded costs alone: the current catalog
- * price where the transcript proves a withdrawn rate card priced the request
- * ({@link WithdrawnRateProof}), else the recorded cost. A repair whose proof no
- * longer holds (a request appended to the transcript contradicts it) is
- * withdrawn the same way. Rows whose cost was estimated, or that predate
- * `recorded_cost`, are not read. Two streaming passes per model hold one proof
- * per transcript, never rows; only rows whose stored cost changes are written.
- * The caller holds the transaction.
- */
-function deriveWithdrawnRateCosts(database: Database, scopes: Iterable<WithdrawnRateScope>): void {
-	const columns = `id, session_file, timestamp, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-		cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total, recorded_cost`;
-	const recorded = "recorded_cost IS NOT NULL AND recorded_cost <> 'null'";
-	const byModel = database.query(`SELECT ${columns} FROM messages WHERE model = ? AND provider = ? AND ${recorded}`);
-	const bySession = database.query(
-		`SELECT ${columns} FROM messages WHERE session_file = ? AND model = ? AND provider = ? AND ${recorded}`,
-	);
-	const update = database.query(
-		"UPDATE messages SET cost_input = ?, cost_output = ?, cost_cache_read = ?, cost_cache_write = ?, cost_total = ? WHERE id = ?",
-	);
-	for (const { provider, model, sessionFiles } of scopes) {
-		if (!withdrawnRateProof(provider, model)) continue;
-		const rows = function* (): Generator<WithdrawnRateRow> {
-			if (!sessionFiles) {
-				yield* byModel.iterate(model, provider) as IterableIterator<WithdrawnRateRow>;
-				return;
-			}
-			for (const sessionFile of sessionFiles) {
-				yield* bySession.iterate(sessionFile, model, provider) as IterableIterator<WithdrawnRateRow>;
-			}
-		};
-		const proofs = new Map<string, WithdrawnRateProof>();
-		for (const row of rows()) {
-			const request = recordedRowRequest(provider, model, row);
-			if (!request) continue;
-			let proof = proofs.get(row.session_file);
-			if (!proof) {
-				proof = withdrawnRateProof(provider, model)!;
-				proofs.set(row.session_file, proof);
-			}
-			proof.add(request);
-		}
-		for (const row of rows()) {
-			const request = recordedRowRequest(provider, model, row);
-			if (!request) continue;
-			const cost = proofs.get(row.session_file)!.repriced(request) ?? request.cost;
-			if (
-				cost.input !== row.cost_input ||
-				cost.output !== row.cost_output ||
-				cost.cacheRead !== row.cost_cache_read ||
-				cost.cacheWrite !== row.cost_cache_write ||
-				cost.total !== row.cost_total
-			) {
-				update.run(cost.input, cost.output, cost.cacheRead, cost.cacheWrite, cost.total, row.id);
-			}
-		}
-	}
+/** A stored cost a withdrawn rate card produced, with the catalog price that replaces it on read. */
+export interface WithdrawnRateCorrection {
+	/** `messages.id` of the row, for the row readers and the SQL aggregates. */
+	id: number;
+	sessionFile: string;
+	entryId: string;
+	timestamp: number;
+	/** The current catalog price for the request. */
+	cost: UsageCost;
+	/** `cost` minus the stored cost: what an aggregate over stored costs adds. */
+	delta: UsageCost;
+	/** The stored row's own dimensions, so an aggregate needs no second look at it. */
+	model: string;
+	provider: string;
+	folder: string;
+	agentType: string;
+	/** Whether the row counts toward cache savings (`cost_no_cache_input > 0`). */
+	cachedPrompt: boolean;
+}
+
+/** Every correction in force: by stored row, and by the request identity a fork copy repeats. */
+export interface WithdrawnRateCorrections {
+	byRow: ReadonlyMap<number, WithdrawnRateCorrection>;
+	byRequest: ReadonlyMap<string, WithdrawnRateCorrection>;
+	/** Corrected totals by entry id, per transcript, for the trace. */
+	bySession: ReadonlyMap<string, ReadonlyMap<string, number>>;
+	/** Number of corrected rows, which the SQL read paths take from {@link CORRECTION_TABLE}. */
+	rows: number;
+	/** Changes whenever any correction changes; folded into the trace ETag. */
+	digest: string;
+}
+
+function requestKey(entryId: string, timestamp: number): string {
+	return `${entryId}\u0000${timestamp}`;
 }
 
 /**
- * Once per release, for models a withdrawn rate card covers: schedule a
- * re-parse of each transcript with rows stored before `recorded_cost` existed,
- * so the next sync records what they recorded, and derive every stored cost
- * from the recorded ones again (a catalog update can change the cards). Rows
- * of a deleted transcript keep their stored cost.
+ * The current catalog price for every stored row a withdrawn rate card
+ * priced ({@link WithdrawnRateProof}), read from the stored costs alone.
+ *
+ * One evidence group is the transcripts a shared request links: the fork
+ * guard records the link when it skips a duplicate ({@link insertMessageStats}),
+ * so a parent and its fork prove each other's costs in either ingest order and
+ * their traces agree. Nothing is written, so an append, a re-ingest, an older
+ * writer and a marker reset all read the same answer.
  */
-function repairWithdrawnRateCosts(database: Database): void {
-	const ran = database.query("SELECT value FROM meta WHERE key = ?").get(WITHDRAWN_RATE_REPAIR_KEY) as
+function computeWithdrawnRateCorrections(database: Database): WithdrawnRateCorrections | null {
+	const byRow = new Map<number, WithdrawnRateCorrection>();
+	const byRequest = new Map<string, WithdrawnRateCorrection>();
+	const bySession = new Map<string, Map<string, number>>();
+	const rowsOf = database.query(`SELECT ${WITHDRAWN_ROW_COLUMNS} FROM messages WHERE model = ? AND provider = ?`);
+	const copiesOf = database.query(
+		`SELECT m.session_file AS owner, c.session_file AS copy FROM messages m
+		 JOIN message_copies c ON c.entry_id = m.entry_id AND c.timestamp = m.timestamp
+		 WHERE m.model = ? AND m.provider = ?`,
+	);
+	for (const { provider, model } of getWithdrawnRateModels()) {
+		const cards = getWithdrawnRates(provider, model);
+		const cost = getCatalogCost(provider, model);
+		if (!cost || cards.length === 0) continue;
+		const rows = rowsOf.all(model, provider) as WithdrawnRow[];
+		if (rows.length === 0) continue;
+		const groups = new EvidenceGroups();
+		for (const link of copiesOf.all(model, provider) as { owner: string; copy: string }[]) {
+			groups.union(link.owner, link.copy);
+		}
+		const requests = rows.map(row => storedRequest(cost, row));
+		const proofs = new Map<string, WithdrawnRateProof>();
+		for (const [index, row] of rows.entries()) {
+			const request = requests[index];
+			if (!request) continue;
+			const group = groups.find(row.session_file);
+			let proof = proofs.get(group);
+			if (!proof) {
+				proof = new WithdrawnRateProof(cost, cards);
+				proofs.set(group, proof);
+			}
+			proof.add(request);
+		}
+		for (const [index, row] of rows.entries()) {
+			const request = requests[index];
+			if (!request) continue;
+			const corrected = proofs.get(groups.find(row.session_file))?.repriced(request);
+			if (!corrected || isSameCost(request.cost, corrected)) continue;
+			const correction: WithdrawnRateCorrection = {
+				id: row.id,
+				sessionFile: row.session_file,
+				entryId: row.entry_id,
+				timestamp: row.timestamp,
+				cost: corrected,
+				delta: {
+					input: corrected.input - request.cost.input,
+					output: corrected.output - request.cost.output,
+					cacheRead: corrected.cacheRead - request.cost.cacheRead,
+					cacheWrite: corrected.cacheWrite - request.cost.cacheWrite,
+					total: corrected.total - request.cost.total,
+				},
+				model,
+				provider,
+				folder: row.folder,
+				agentType: row.agent_type,
+				cachedPrompt: (row.cost_no_cache_input ?? 0) > 0,
+			};
+			byRow.set(row.id, correction);
+			byRequest.set(requestKey(row.entry_id, row.timestamp), correction);
+			const session = bySession.get(row.session_file);
+			if (session) session.set(row.entry_id, corrected.total);
+			else bySession.set(row.session_file, new Map([[row.entry_id, corrected.total]]));
+		}
+	}
+	if (byRow.size === 0) return null;
+	const digest = Bun.hash(
+		[...byRow.values()].map(correction => `${correction.id}:${correction.cost.total}`).join(","),
+	).toString(36);
+	return { byRow, byRequest, bySession, rows: byRow.size, digest };
+}
+
+/**
+ * The corrections the SQL read paths read, with the dimensions of the stored
+ * rows they belong to, so an aggregate adds them without looking at
+ * `messages` again. A temp table lives in this connection's own temp schema,
+ * never in the database file, so the stored history still holds only recorded
+ * costs; both tables are rebuilt whenever the corrections are.
+ */
+export const CORRECTION_TABLE = "withdrawn_correction";
+/** The same corrections summed per transcript, for the session list. */
+export const CORRECTION_SESSION_TABLE = "withdrawn_correction_session";
+/**
+ * The same corrections summed per hour and dimensions, the shape the range
+ * queries read: a whole-history query then adds a few hundred rows instead of
+ * one per corrected request.
+ */
+export const CORRECTION_HOUR_TABLE = "withdrawn_correction_hour";
+
+function materializeCorrections(database: Database, corrections: WithdrawnRateCorrections | null): void {
+	database.run(`CREATE TEMP TABLE IF NOT EXISTS ${CORRECTION_TABLE} (
+		id INTEGER PRIMARY KEY, session_file TEXT NOT NULL, entry_id TEXT NOT NULL, timestamp INTEGER NOT NULL,
+		model TEXT NOT NULL, provider TEXT NOT NULL, folder TEXT NOT NULL, agent_type TEXT NOT NULL,
+		cached_prompt INTEGER NOT NULL, c_input REAL NOT NULL, c_output REAL NOT NULL,
+		c_cache_read REAL NOT NULL, c_cache_write REAL NOT NULL, c_total REAL NOT NULL)`);
+	database.run(`CREATE INDEX IF NOT EXISTS idx_${CORRECTION_TABLE}_timestamp ON ${CORRECTION_TABLE}(timestamp)`);
+	database.run(`CREATE TEMP TABLE IF NOT EXISTS ${CORRECTION_SESSION_TABLE} (
+		session_file TEXT PRIMARY KEY, c_total REAL NOT NULL)`);
+	database.run(`CREATE TEMP TABLE IF NOT EXISTS ${CORRECTION_HOUR_TABLE} (
+		bucket INTEGER NOT NULL, model TEXT NOT NULL, provider TEXT NOT NULL, folder TEXT NOT NULL,
+		agent_type TEXT NOT NULL, c_input REAL NOT NULL, c_output REAL NOT NULL, c_cache_read REAL NOT NULL,
+		c_cache_write REAL NOT NULL, c_total REAL NOT NULL, cached_prompt_cost REAL NOT NULL)`);
+	database.run(`CREATE INDEX IF NOT EXISTS idx_${CORRECTION_HOUR_TABLE}_bucket ON ${CORRECTION_HOUR_TABLE}(bucket)`);
+	const insert = database.query(`INSERT INTO ${CORRECTION_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+	database.transaction(() => {
+		database.run(`DELETE FROM ${CORRECTION_TABLE}`);
+		database.run(`DELETE FROM ${CORRECTION_SESSION_TABLE}`);
+		database.run(`DELETE FROM ${CORRECTION_HOUR_TABLE}`);
+		for (const correction of corrections?.byRow.values() ?? []) {
+			const { delta } = correction;
+			insert.run(
+				correction.id,
+				correction.sessionFile,
+				correction.entryId,
+				correction.timestamp,
+				correction.model,
+				correction.provider,
+				correction.folder,
+				correction.agentType,
+				correction.cachedPrompt ? 1 : 0,
+				delta.input,
+				delta.output,
+				delta.cacheRead,
+				delta.cacheWrite,
+				delta.total,
+			);
+		}
+		database.run(`INSERT INTO ${CORRECTION_SESSION_TABLE}
+			SELECT session_file, TOTAL(c_total) FROM ${CORRECTION_TABLE} GROUP BY session_file`);
+		database.run(`INSERT INTO ${CORRECTION_HOUR_TABLE}
+			SELECT (timestamp / ${HOUR_MS}) * ${HOUR_MS}, model, provider, folder, agent_type,
+				TOTAL(c_input), TOTAL(c_output), TOTAL(c_cache_read), TOTAL(c_cache_write), TOTAL(c_total),
+				TOTAL(CASE WHEN cached_prompt = 1 THEN c_input + c_cache_read + c_cache_write ELSE 0 END)
+			FROM ${CORRECTION_TABLE} GROUP BY 1, model, provider, folder, agent_type`);
+	})();
+}
+/**
+ * The corrections in force, recomputed when a row changed since the last
+ * call: `data_version` moves on another process's commit and
+ * `total_changes()` on this connection's own writes, so any change to a row
+ * of any evidence group invalidates them. One dashboard load reads them eight
+ * times, and over a 500,000-row database the whole-history query joins 50,000
+ * corrected rows, so they are computed and materialized once per change.
+ */
+let withdrawnRateCache: { key: string; corrections: WithdrawnRateCorrections | null } | undefined;
+
+function changeKey(database: Database): string {
+	const version = database.query<{ data_version: number }, []>("PRAGMA data_version").get()?.data_version ?? 0;
+	const changes = database.query<{ changed: number }, []>("SELECT total_changes() AS changed").get()?.changed ?? 0;
+	return `${version}:${changes}`;
+}
+
+export function withdrawnRateCorrections(): WithdrawnRateCorrections | null {
+	const database = db;
+	if (!database) return null;
+	if (withdrawnRateCache?.key !== changeKey(database)) {
+		const corrections = computeWithdrawnRateCorrections(database);
+		materializeCorrections(database, corrections);
+		// Keyed after the temp writes, which move `total_changes()` themselves.
+		withdrawnRateCache = { key: changeKey(database), corrections };
+	}
+	return withdrawnRateCache.corrections;
+}
+
+/** Whether any stored cost reads corrected, so a query joins {@link CORRECTION_TABLE}. */
+export function hasWithdrawnRateCorrections(): boolean {
+	return (withdrawnRateCorrections()?.rows ?? 0) > 0;
+}
+
+/**
+ * The totals stats.db reads for one transcript's requests that a withdrawn
+ * rate card priced, by entry id: its own corrected rows, plus the corrected
+ * row behind each entry it repeats from another transcript, so a fork and its
+ * parent show one cost for the one request they share.
+ */
+export function withdrawnRateTraceTotals(sessionFile: string): ReadonlyMap<string, number> | null {
+	const corrections = withdrawnRateCorrections();
+	if (!corrections || !db) return null;
+	const copies = db
+		.query<{ entry_id: string; timestamp: number }, [string]>(
+			"SELECT entry_id, timestamp FROM message_copies WHERE session_file = ?",
+		)
+		.all(sessionFile);
+	const own = corrections.bySession.get(sessionFile);
+	if (copies.length === 0) return own ?? null;
+	const totals = new Map<string, number>(own);
+	for (const copy of copies) {
+		const correction = corrections.byRequest.get(requestKey(copy.entry_id, copy.timestamp));
+		if (correction) totals.set(copy.entry_id, correction.cost.total);
+	}
+	return totals.size > 0 ? totals : null;
+}
+
+/**
+ * Put back the transcripts' own costs in a database an earlier build of this
+ * branch corrected in place, once. That build wrote the catalog price into
+ * `cost` and kept the recorded cost beside it in `recorded_cost`; this one
+ * stores nothing derived, so the recorded cost goes back and the column goes.
+ * The rows it corrected before that column existed cannot be told apart, so
+ * their transcripts are re-parsed, which also records the fork links
+ * ({@link insertMessageStats}) the correction groups evidence by. Only a
+ * database with a row of a covered model pays for either.
+ */
+function restoreWithdrawnRateCosts(database: Database): void {
+	const columns = database.query("PRAGMA table_info(messages)").all() as { name: string }[];
+	if (columns.some(column => column.name === "recorded_cost")) {
+		database.transaction(() => {
+			database.run(`
+				UPDATE messages SET
+					cost_input = json_extract(recorded_cost, '$.input'),
+					cost_output = json_extract(recorded_cost, '$.output'),
+					cost_cache_read = json_extract(recorded_cost, '$.cacheRead'),
+					cost_cache_write = json_extract(recorded_cost, '$.cacheWrite'),
+					cost_total = json_extract(recorded_cost, '$.total')
+				WHERE recorded_cost IS NOT NULL AND json_extract(recorded_cost, '$.total') IS NOT NULL
+			`);
+			database.run("ALTER TABLE messages DROP COLUMN recorded_cost");
+			database.query("DELETE FROM meta WHERE key = ?").run(WITHDRAWN_RATE_REPAIR_KEY);
+		})();
+	}
+	const marker = database.query("SELECT value FROM meta WHERE key = ?").get(WITHDRAWN_RATE_RESTORE_KEY) as
 		| { value: string }
 		| undefined;
-	if (ran?.value === VERSION) return;
-	const markRan = database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
-	const scopes = (
-		database.query("SELECT DISTINCT provider, model FROM messages").all() as WithdrawnRateScope[]
-	).filter(scope => getWithdrawnRates(scope.provider, scope.model).length > 0);
-	const reparse = database.query(`
-		DELETE FROM file_offsets WHERE session_file IN (
-			SELECT DISTINCT session_file FROM messages WHERE model = ? AND provider = ? AND recorded_cost IS NULL
-		)
-	`);
-	database.transaction(() => {
-		for (const { provider, model } of scopes) reparse.run(model, provider);
-		deriveWithdrawnRateCosts(database, scopes);
-		markRan.run(WITHDRAWN_RATE_REPAIR_KEY, VERSION);
-	})();
+	if (!shouldResetBackfill(marker?.value)) return;
+	const covered = database.query("SELECT 1 FROM messages WHERE model = ? AND provider = ? LIMIT 1");
+	const reparse = getWithdrawnRateModels().some(({ provider, model }) => Boolean(covered.get(model, provider)));
+	if (reparse) database.run("DELETE FROM file_offsets");
+	database
+		.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+		.run(WITHDRAWN_RATE_RESTORE_KEY, reparse ? BACKFILL_PENDING : BACKFILL_COMPLETE);
 }
 
 function backfillNoCacheInputCosts(database: Database): void {
@@ -1166,6 +1387,9 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 					}
 				}
 				if (replace) {
+					// The links this transcript's skipped copies recorded go with its
+					// rows; `insertMessageStats` records them again for what it keeps.
+					database.query("DELETE FROM message_copies WHERE session_file = ?").run(sessionFile);
 					if (messages.length > 0) {
 						changes += database.query("DELETE FROM messages WHERE session_file = ?").run(sessionFile).changes;
 					}
@@ -1269,7 +1493,6 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			"cost_unpriced",
 			"agent_type",
 			"service_tier",
-			"recorded_cost",
 		],
 		identity: ["entry_id", "timestamp"],
 		upsert: `ON CONFLICT(session_file, entry_id) DO UPDATE SET
@@ -1281,29 +1504,20 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			cost_total = excluded.cost_total,
 			cost_no_cache_input = excluded.cost_no_cache_input,
 			cost_unpriced = excluded.cost_unpriced,
-			service_tier = excluded.service_tier,
-			recorded_cost = excluded.recorded_cost`,
+			service_tier = excluded.service_tier`,
 	});
-	// Transcripts of models a withdrawn rate card covers: their stored costs are
-	// derived again over all their rows with the batch, so an appended request
-	// that contradicts a repair withdraws it, and a re-ingest ends where it began.
-	const withdrawn = new Map<string, (WithdrawnRateScope & { sessionFiles: Set<string> }) | null>();
 	const database = db;
+	// A row the fork guard skips is a request another transcript already owns.
+	// That link is what makes the two one evidence group for the read-time
+	// withdrawn-rate correction, in either ingest order.
+	const linkCopy = database.query(
+		"INSERT OR REPLACE INTO message_copies (session_file, entry_id, timestamp) VALUES (?, ?, ?)",
+	);
 	return atomically(database, () => {
 		for (const s of stats) {
-			const key = `${s.provider}\u0000${s.model}`;
-			let scope = withdrawn.get(key);
-			if (scope === undefined) {
-				scope =
-					getWithdrawnRates(s.provider, s.model).length > 0
-						? { provider: s.provider, model: s.model, sessionFiles: new Set() }
-						: null;
-				withdrawn.set(key, scope);
-			}
-			scope?.sessionFiles.add(s.sessionFile);
 			const { cost, unpriced } = resolveStoredCost(s);
 			const noCacheInputCost = calculateNoCacheInputCost(s.provider, s.model, s.usage, s.timestamp) ?? 0;
-			writer.add(
+			const stored = writer.add(
 				s.sessionFile,
 				[s.entryId, s.timestamp],
 				[
@@ -1333,16 +1547,11 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 					unpriced ? 1 : 0,
 					s.agentType,
 					s.serviceTier ?? null,
-					scope ? recordedCostColumn(s) : null,
 				],
 			);
+			if (!stored) linkCopy.run(s.sessionFile, s.entryId, s.timestamp);
 		}
-		const written = writer.finish();
-		deriveWithdrawnRateCosts(
-			database,
-			[...withdrawn.values()].filter(scope => scope !== null),
-		);
-		return written;
+		return writer.finish();
 	});
 }
 
@@ -1366,7 +1575,7 @@ export function closeDb(): void {
 	}
 }
 
-function rowToMessageStats(row: any): MessageStats {
+function rowToMessageStats(row: any, corrections?: WithdrawnRateCorrections | null): MessageStats {
 	return {
 		id: row.id,
 		sessionFile: row.session_file,
@@ -1386,8 +1595,9 @@ function rowToMessageStats(row: any): MessageStats {
 			cacheRead: row.cache_read_tokens,
 			cacheWrite: row.cache_write_tokens,
 			totalTokens: row.total_tokens,
-			premiumRequests: row.premium_requests ?? 0,
-			cost: {
+			// A cost a withdrawn rate card recorded reads at the current catalog
+			// price; the stored row keeps what the transcript recorded.
+			cost: corrections?.byRow.get(row.id)?.cost ?? {
 				input: row.cost_input,
 				output: row.cost_output,
 				cacheRead: row.cost_cache_read,
@@ -1408,7 +1618,8 @@ export function getRecentRequests(limit = 100): MessageStats[] {
 		ORDER BY timestamp DESC 
 		LIMIT ?
 	`);
-	return (stmt.all(limit) as any[]).map(rowToMessageStats);
+	const corrections = withdrawnRateCorrections();
+	return (stmt.all(limit) as any[]).map(row => rowToMessageStats(row, corrections));
 }
 
 export function getRecentErrors(limit = 100, cutoff?: number | null): MessageStats[] {
@@ -1422,14 +1633,15 @@ export function getRecentErrors(limit = 100, cutoff?: number | null): MessageSta
 		LIMIT ?
 	`);
 	const rows = hasCutoff ? stmt.all(cutoff, limit) : stmt.all(limit);
-	return rows.map(rowToMessageStats);
+	const corrections = withdrawnRateCorrections();
+	return rows.map(row => rowToMessageStats(row, corrections));
 }
 
 export function getMessageById(id: number): MessageStats | null {
 	if (!db) return null;
 	const stmt = db.query("SELECT * FROM messages WHERE id = ?");
 	const row = stmt.get(id);
-	return row ? rowToMessageStats(row) : null;
+	return row ? rowToMessageStats(row, withdrawnRateCorrections()) : null;
 }
 /**
  * Per-local-day activity aggregates for the last `days` days, oldest first.
@@ -1444,18 +1656,32 @@ export async function getDailyActivity(days = 371): Promise<DailyActivityPoint[]
 	const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
 	const rolled = getDailyActivityFromRollup(cutoff);
 	if (rolled) return rolled;
+	const corrected = hasWithdrawnRateCorrections();
 	const stmt = database.query(`
-		SELECT
-			date(timestamp / 1000, 'unixepoch', 'localtime') as day,
-			SUM(cost_total) as cost,
-			COUNT(*) as requests,
-			SUM(total_tokens) as total_tokens
-		FROM messages
-		WHERE timestamp >= ?
+		SELECT day, TOTAL(cost) AS cost, SUM(requests) AS requests, SUM(total_tokens) AS total_tokens FROM (
+			SELECT
+				date(timestamp / 1000, 'unixepoch', 'localtime') as day,
+				SUM(cost_total) as cost,
+				COUNT(*) as requests,
+				SUM(total_tokens) as total_tokens
+			FROM messages
+			WHERE timestamp >= ?
+			GROUP BY day
+			${
+				corrected
+					? `UNION ALL
+			SELECT date(c.timestamp / 1000, 'unixepoch', 'localtime') AS day, TOTAL(c.c_total) AS cost,
+				0 AS requests, 0 AS total_tokens
+			FROM ${CORRECTION_TABLE} c
+			WHERE c.timestamp >= ?
+			GROUP BY day`
+					: ""
+			}
+		)
 		GROUP BY day
 		ORDER BY day ASC
 	`);
-	const rows = stmt.all(cutoff) as Array<{
+	const rows = (corrected ? stmt.all(cutoff, cutoff) : stmt.all(cutoff)) as Array<{
 		day: string;
 		cost: number | null;
 		requests: number;
@@ -1716,6 +1942,7 @@ export function markSessionBackfillsComplete(): void {
 			PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY,
 			COST_REINGEST_BACKFILL_KEY,
 			COST_UNPRICED_BACKFILL_KEY,
+			WITHDRAWN_RATE_RESTORE_KEY,
 		]) {
 			markComplete.run(key, BACKFILL_COMPLETE);
 		}
