@@ -288,7 +288,11 @@ function managedWorktreeSessionDirs(
 	const name = new RegExp(`^[\\w.-]+-(?:${[...hashes].join("|")})(?:-\\d+)?$`);
 	let entries: string[];
 	try {
-		entries = storage.listDirsSync(sessionsRoot);
+		// Every name the sessions root holds, as the `readdirSync` this replaced
+		// returned: `listDirsSync` keeps only real directories, which drops a
+		// session bucket that is a symlink to one — and this listing matches
+		// names, it does not descend, so there is no loop to guard against.
+		entries = storage.listEntriesSync(sessionsRoot).map(entry => entry.name);
 	} catch {
 		return [];
 	}
@@ -539,7 +543,16 @@ export async function readTerminalBreadcrumbEntry(): Promise<TerminalBreadcrumb 
 
 		// Through the configured storage: under `session.storage: sql` the
 		// target is a row, and a filesystem check would drop every breadcrumb.
-		const exists = defaultSessionStorage().existsSync(sessionFile);
+		// A regular file, as the `statSync(...).isFile()` this replaced required:
+		// `existsSync` also accepts a directory named `*.jsonl`, and continuing
+		// one fails the launch with EISDIR instead of ignoring the breadcrumb.
+		const exists = ((): boolean => {
+			try {
+				return defaultSessionStorage().statSync(sessionFile).isFile;
+			} catch {
+				return false;
+			}
+		})();
 		// A materialized target resumes normally; a missing target is honored only
 		// for a never-written lazy fresh-session boundary.
 		if (exists || fresh) return { cwd: breadcrumbCwd, sessionFile, exists, fresh, cwdIdentity };

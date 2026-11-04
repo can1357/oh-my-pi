@@ -278,9 +278,18 @@ describe("which launches may fall back", () => {
 		const timestamp = new Date(Date.UTC(2026, 10, 4) + seq++ * 1000).toISOString();
 		const file = path.join(dir, `${timestamp.replace(/[:.]/g, "-")}_${id}.jsonl`);
 		const header = { type: "session", version: CURRENT_SESSION_VERSION, id, timestamp, cwd: path.resolve(cwd) };
+		// A turn, not just a header: `continueRecent` skips header-only empties,
+		// so a transcript without one is not continuable and the probe must say so.
+		const turn = {
+			type: "message",
+			id: `m-${id}`,
+			parentId: null,
+			timestamp,
+			message: { role: "user", content: "first prompt", timestamp: Date.parse(timestamp) },
+		};
 		new FileSessionStorage().writeTextSync(
 			file,
-			`${serializeTitleSlot({ updatedAt: timestamp })}${JSON.stringify(header)}\n`,
+			`${serializeTitleSlot({ title: `probe-${id.slice(0, 8)}`, source: "user", updatedAt: timestamp })}${JSON.stringify(header)}\n${JSON.stringify(turn)}\n`,
 		);
 		return id;
 	}

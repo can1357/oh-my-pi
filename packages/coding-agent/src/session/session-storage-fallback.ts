@@ -31,6 +31,7 @@
  * points the setting at that file.
  */
 import { getAgentDir, logger, toError } from "@oh-my-pi/pi-utils";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -142,6 +143,12 @@ export function pendingSessionStorageFallback(): { reason: SessionStorageFallbac
 }
 
 /**
+ * {@link commitSessionStorageFallback} for a signal handler, which cannot
+ * await: a default SIGTERM runs no `exit` handler and would otherwise leave
+ * the fallback uncounted.
+ */
+
+/**
  * Append the decided fallback's one ledger line, naming `sessionId` — the
  * session the launch actually opened, or {@link UNRESOLVED_SESSION} when the
  * launch ended before it opened one. Does nothing when no fallback was
@@ -151,6 +158,17 @@ export function pendingSessionStorageFallback(): { reason: SessionStorageFallbac
  * already proved the ledger writable, so a failure now is a disk that changed
  * under a running session, and halting it would lose more than the line does.
  */
+export function commitSessionStorageFallbackSync(sessionId: string): void {
+	if (!pending || committed) return;
+	committed = true;
+	const event = fallbackEvent(sessionId, pending.reason, pending.dsnPath);
+	try {
+		fsSync.appendFileSync(pending.ledgerFile, ledgerLine(event), "utf8");
+	} catch {
+		// A signal handler has nowhere to report to; the normal path logs.
+	}
+}
+
 export async function commitSessionStorageFallback(sessionId: string): Promise<void> {
 	if (!pending || committed) return;
 	committed = true;

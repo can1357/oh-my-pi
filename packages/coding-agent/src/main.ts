@@ -6,6 +6,7 @@
  */
 import * as fsSync from "node:fs";
 import * as os from "node:os";
+import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
@@ -120,8 +121,8 @@ import {
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import {
+	findMostRecentNonEmptySession,
 	findSessionContinuation,
-	listSessionsReadOnly,
 	type PickerListing,
 	readSessionInfo,
 	resolveResumableSession,
@@ -131,11 +132,12 @@ import {
 } from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
 import type { FileEntry } from "./session/session-entries";
-import { computeDefaultSessionDir } from "./session/session-paths";
+import { computeDefaultSessionDir, readTerminalBreadcrumbEntry } from "./session/session-paths";
 import { FileSessionStorage, setDefaultSessionStorage } from "./session/session-storage";
 import { resolveSessionStorage, SessionStorageConfigError } from "./session/session-storage-config";
 import {
 	commitSessionStorageFallback,
+	commitSessionStorageFallbackSync,
 	pendingSessionStorageFallback,
 	UNRESOLVED_SESSION,
 } from "./session/session-storage-fallback";
@@ -384,17 +386,20 @@ export async function resumableFileSessionId(
 		// choice is not known yet, so it refuses rather than record a fallback
 		// against a session the user may not pick.
 		if (!args.continue) return false;
-		// `continueRecent` picks the transcript, not this probe: it skips
-		// header-only empties and honours the terminal breadcrumb, and a launch
-		// that finds nothing to continue starts a new session. So ask only
-		// whether this project holds a transcript that could be continued, and
-		// let the launch name whichever one it opens.
+		// Ask the question `continueRecent` will answer, with its own helpers,
+		// not an easier one: "is there any continuable transcript" accepts a
+		// project whose only transcript is a header-only empty, or whose newest
+		// is departed, and the launch then starts a new session or forks.
+		const breadcrumb = await readTerminalBreadcrumbEntry();
+		// A fresh, never-materialized boundary makes `continueRecent` start a
+		// new session whatever else the directory holds.
+		if (breadcrumb?.fresh && !breadcrumb.exists) return false;
 		const dir = args.sessionDir ?? computeDefaultSessionDir(cwd, storage);
-		const sessions = await listSessionsReadOnly(dir, storage);
-		for (const session of sessions) {
-			if (await continuableFileSession(session.path, storage)) return true;
-		}
-		return false;
+		const chosen =
+			breadcrumb?.exists && path.resolve(breadcrumb.cwd) === path.resolve(cwd)
+				? breadcrumb.sessionFile
+				: await findMostRecentNonEmptySession(dir, storage);
+		return chosen !== null && chosen !== undefined && (await continuableFileSession(chosen, storage));
 	} catch (err) {
 		logger.warn("Could not tell whether this launch resumes a session file", { error: toError(err).message });
 		return false;
@@ -2105,10 +2110,18 @@ export async function runRootCommand(
 			);
 			// A launch that dies before it opens a session must still be counted:
 			// an uncounted fallback is the silent degradation the ledger exists
-			// to catch. The commit below is a no-op once the real one has run.
+			// to catch. Each of these is a no-op once the real commit has run.
+			// A default signal death runs no `exit` handler, so the signals get
+			// their own synchronous append rather than an awaited one.
 			process.once("exit", () => {
-				void commitSessionStorageFallback(UNRESOLVED_SESSION);
+				commitSessionStorageFallbackSync(UNRESOLVED_SESSION);
 			});
+			for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
+				process.once(signal, () => {
+					commitSessionStorageFallbackSync(UNRESOLVED_SESSION);
+					process.kill(process.pid, signal);
+				});
+			}
 		}
 		if (parsedArgs.approvalMode) {
 			// Runtime override (not persisted): every `tools.approvalMode` read downstream
