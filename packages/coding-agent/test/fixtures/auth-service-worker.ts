@@ -25,6 +25,8 @@ export interface AuthProbe {
 	setRuntimeKey(provider: string, apiKey: string): Promise<void>;
 	/** `keys.setConfig` through the worker's storage (the `keys.*` thread service). */
 	setConfigKey(provider: string, apiKeyConfig: string): Promise<void>;
+	/** `keys.generation` through the worker's storage (the `keys.*` thread service). */
+	keyGeneration(provider: string): Promise<number>;
 	registry(registry: ModelRegistry): Promise<{
 		local: boolean;
 		canonical: boolean;
@@ -86,6 +88,7 @@ function buildProbe(storage: AuthStorage): AuthProbe {
 		sourceKinds: async providers => providers.map(provider => storage.keys.source(provider)?.kind),
 		setRuntimeKey: async (provider, apiKey) => storage.keys.setRuntime(provider, apiKey),
 		setConfigKey: async (provider, apiKeyConfig) => storage.keys.setConfig(provider, apiKeyConfig),
+		keyGeneration: async provider => storage.keys.generation(provider),
 		unwatchGenerations: async () => {
 			unwatch?.();
 			unwatch = undefined;

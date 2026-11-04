@@ -203,6 +203,26 @@ describe("auth thread service", () => {
 		expect(await storage.keys.get("unit-mirror")).toBe("mirror-config-key");
 	});
 
+	it("reads main's key generation through the worker, a change and a change back included", async () => {
+		const provider = "unit-worker-generation";
+		const start = await probe.keyGeneration(provider);
+		expect(start).toBe(storage.keys.generation(provider));
+		// Written on main, read on the worker.
+		storage.keys.setRuntime(provider, "fake-main-key");
+		expect(await probe.keyGeneration(provider)).toBe(start + 1);
+		// Written on the worker: a worker holds no batch open across the thread
+		// boundary, so a change and a change back are two changes, not none.
+		await probe.setRuntimeKey(provider, "fake-worker-key");
+		expect(await probe.keyGeneration(provider)).toBe(start + 2);
+		await probe.setRuntimeKey(provider, "fake-main-key");
+		expect(await probe.keyGeneration(provider)).toBe(start + 3);
+		expect(storage.keys.generation(provider)).toBe(start + 3);
+		// A worker write that leaves the overrides as they were counts on neither side.
+		await probe.setRuntimeKey(provider, "fake-main-key");
+		expect(await probe.keyGeneration(provider)).toBe(start + 3);
+		expect(storage.keys.generation(provider)).toBe(start + 3);
+	});
+
 	for (const [entry, change] of [
 		["keys.setRuntime", (provider: string) => probe.setRuntimeKey(provider, "fake-worker-runtime-key")],
 		["keys.setConfig", (provider: string) => probe.setConfigKey(provider, "fake-worker-config-key")],

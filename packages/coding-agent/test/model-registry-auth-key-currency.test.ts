@@ -105,6 +105,30 @@ describe("a discovery does not send a key replaced in AuthStorage while it resol
 		expect(registry.find("anthropic", "held-model")).toBeDefined();
 	});
 
+	test("a discovery started inside a keys.batch that puts the key back is refused", async () => {
+		// A discovery resolves its key before its first await, so one started
+		// inside `change` reads the batch's half-written overrides. The key it
+		// reads here is gone by the time the batch closes, and the batch leaves
+		// the settled count where it was, so only the open batch itself can say
+		// the request is stale.
+		authStorage.keys.setRuntime("anthropic", "fake-current-key");
+		const before = authStorage.keys.generation("anthropic");
+		let inFlight: Promise<unknown> | undefined;
+		authStorage.keys.batch(() => {
+			authStorage.keys.setRuntime("anthropic", "fake-intermediate-key");
+			inFlight = registry.refreshProvider("anthropic", "online");
+			authStorage.keys.setRuntime("anthropic", "fake-current-key");
+		});
+		await inFlight;
+		expect(authStorage.keys.generation("anthropic")).toBe(before);
+		expect(sent.map(request => request.key)).not.toContain("fake-intermediate-key");
+		expect(registry.find("anthropic", "held-model")).toBeUndefined();
+		sent.length = 0;
+		await registry.refreshProvider("anthropic", "online");
+		expect(sent).toEqual([{ url: MODELS_URL, key: "fake-current-key" }]);
+		expect(registry.find("anthropic", "held-model")).toBeDefined();
+	});
+
 	test("rewriting a key with its current value does not refuse the discovery", async () => {
 		await changeDuringDiscovery(() => authStorage.keys.setConfig("anthropic", held.command));
 		expect(sent).toEqual([{ url: MODELS_URL, key: ORIGINAL_KEY }]);
