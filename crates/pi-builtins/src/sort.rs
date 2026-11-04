@@ -3481,7 +3481,7 @@ use std::{
 use std::sync::LazyLock;
 
 use bigdecimal::BigDecimal;
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use crate::openfile::OpenFile;
 use chunks::LineData;
 use clap::{Arg, ArgAction, ArgMatches, Command, CommandFactory, FromArgMatches, builder::ValueParser};
 use custom_str_cmp::{FILTERED_KEYS, custom_str_cmp, filtered_key};
@@ -3520,7 +3520,7 @@ use uucore::i18n::datetime::get_locale_months;
 #[cfg(unix)]
 use crate::locale::{ShellLocale, shell_locale_initialises};
 use crate::{
-	host::{Host, Utility, format_usage, rayon_global_pool_available, util},
+	host::{Host, Utility, format_usage, rayon_global_pool_available},
 	locale::{numeric_symbols, shell_locale},
 	sort::{
 		buffer_hint::automatic_buffer_size,
@@ -6416,11 +6416,6 @@ fn uu_app() -> Command {
 				.value_parser(ValueParser::os_string())
 				.value_hint(clap::ValueHint::FilePath),
 		)
-}
-
-/// Creates the `sort` builtin registration.
-pub(crate) fn sort_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Sort, SE>()
 }
 
 fn exec(

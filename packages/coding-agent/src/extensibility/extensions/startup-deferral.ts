@@ -13,7 +13,7 @@
  */
 import * as fs from "node:fs/promises";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
-import type { AgentStorage } from "../../session/agent-storage";
+import type { AgentStorageApi } from "../../session/agent-storage";
 import { resolvePath } from "../utils";
 import type { Extension } from "./types";
 
@@ -40,7 +40,7 @@ async function fingerprintSource(resolvedPath: string): Promise<string | undefin
 	}
 }
 
-function readVerdict(storage: AgentStorage, resolvedPath: string): StartupVerdict | undefined {
+function readVerdict(storage: AgentStorageApi, resolvedPath: string): StartupVerdict | undefined {
 	const raw = storage.getCache(`${CACHE_PREFIX}${resolvedPath}`);
 	if (!raw) return undefined;
 	try {
@@ -71,7 +71,7 @@ export function canBindAfterStartup(extension: Extension): boolean {
  * Order within each list follows `paths`.
  */
 export async function partitionStartupExtensions(
-	storage: AgentStorage,
+	storage: AgentStorageApi,
 	paths: readonly string[],
 	cwd: string,
 ): Promise<StartupExtensionPartition> {
@@ -94,7 +94,7 @@ export async function partitionStartupExtensions(
  * Record each freshly bound file-backed extension's startup verdict. Call right
  * after binding: registrations made later (session_start) never affect startup.
  */
-export async function recordStartupVerdicts(storage: AgentStorage, extensions: readonly Extension[]): Promise<void> {
+export async function recordStartupVerdicts(storage: AgentStorageApi, extensions: readonly Extension[]): Promise<void> {
 	const expiresAtSec = Math.floor((Date.now() + CACHE_TTL_MS) / 1000);
 	await Promise.all(
 		extensions.map(async extension => {

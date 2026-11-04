@@ -180,7 +180,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		});
 
 	const ModelTokenizerSchema = type(
-		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5" | "o200k"',
+		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5" | "cl100k" | "o200k"',
 	);
 
 	const RemoteCompactionSchema = type({

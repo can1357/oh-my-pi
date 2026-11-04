@@ -1,0 +1,2 @@
+bash: -c: line 2: syntax error near unexpected token `fi'
+bash: -c: line 2: `echo a; fi'
