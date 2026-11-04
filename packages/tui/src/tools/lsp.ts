@@ -952,9 +952,10 @@ function statusRow(message: string, tone: "error" | "warning", key: string): Nat
 }
 
 /**
- * Diagnostics view: a card when there are diagnostics, failures or unverified files
- * (rows of severity icon · `file:line:col` · source · message), an inline `No issues`
- * otherwise. A failed server or a missing report is a row, never "No issues".
+ * Diagnostics view: a card when there are diagnostics, failed or partly failed servers,
+ * or unverified files (rows of severity icon · `file:line:col` · source · message), inline otherwise.
+ * Only a response with nothing to show reads `No issues`; a failed server or a missing
+ * report is a row, never "No issues".
  */
 function describeLspDiagnostics(request: Partial<LspParams> | undefined, fallbackAction: string, lines: string[]) {
 	const parsed = parseLspDiagnostics(lines);
@@ -973,9 +974,11 @@ function describeLspDiagnostics(request: Partial<LspParams> | undefined, fallbac
 	];
 	if (parsed.other.length > 0) rows.push(keyed(code(parsed.other.join("\n"), { wrap: true }), "other"));
 	const hasErrors = parsed.failures.length > 0 || parsed.diagnostics.some(d => d.severity === "error");
-	const meta = compact<TspText>([counts, failed, unverified, !counts && !failed && !unverified && "No issues"]);
+	const meta = compact<TspText>([counts, failed, unverified, rows.length === 0 && "No issues"]);
 	const head = lspNativeHead(request, fallbackAction, meta);
-	if (parsed.diagnostics.length === 0 && parsed.failures.length === 0 && parsed.unreported.length === 0) {
+	const flagged =
+		parsed.diagnostics.length + parsed.failures.length + parsed.unreported.length + parsed.warnings.length;
+	if (flagged === 0) {
 		return { tool: head, inline: true, body: rows.length > 0 ? rows : undefined } satisfies NativeToolView;
 	}
 	return {

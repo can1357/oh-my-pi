@@ -301,6 +301,28 @@ describe("lsp native view", () => {
 		expect(collect(view?.body, n => role(n) === "omp.tool.diagnostic")).toHaveLength(1);
 	});
 
+	it("shows a partial server failure as a warning, never as no issues", () => {
+		const view = lspToolRenderer.describeResult(
+			{
+				content: [{ type: "text", text: "OK\n⚠ src/frame.rs: some servers failed (rust-analyzer)" }],
+				details: { action: "diagnostics", success: true },
+			},
+			collapsed,
+			args,
+		);
+		expect(view?.tone).toBe("warning");
+		expect((view?.tool?.meta ?? []).map(plain).join(" ")).not.toContain("No issues");
+		expect(collect(view?.body, n => role(n) === "omp.tool.diagnostic")).toHaveLength(1);
+
+		const clean = lspToolRenderer.describeResult(
+			{ content: [{ type: "text", text: "OK" }], details: { action: "diagnostics", success: true } },
+			collapsed,
+			args,
+		);
+		expect(clean?.tone).toBeUndefined();
+		expect((clean?.tool?.meta ?? []).map(plain)).toEqual(["No issues"]);
+	});
+
 	it("parses grouped diagnostics into file:line:col rows and frames them", () => {
 		const text = [
 			"2 error(s):",
