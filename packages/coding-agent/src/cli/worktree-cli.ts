@@ -59,9 +59,9 @@ export interface WorktreeEntry {
 	/** When set, the entry is unhealthy and `omp worktree clear` will remove it. */
 	orphanReason?: string;
 	/**
-	 * Why plain `omp worktree clear` leaves this entry, when it can say: a
-	 * live lease or writer, a teardown still stopping it, or why a teardown
-	 * kept it.
+	 * Why plain `omp worktree clear` leaves this entry, when it can say: for a
+	 * task-isolation sandbox that cannot prove it is finished, which only
+	 * `--all` removes.
 	 */
 	keptReason?: string;
 	/**
@@ -86,7 +86,7 @@ export interface ListWorktreesOptions {
 }
 
 export interface ClearWorktreesOptions {
-	/** Remove every entry, including live PR-checkout worktrees. */
+	/** Remove every entry, including live PR-checkout worktrees and sandboxes that cannot prove they are finished. */
 	all: boolean;
 	/** Print what would be removed without touching the filesystem. */
 	dryRun: boolean;
@@ -588,9 +588,9 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 		}
 	}
 	if (!isIsolation) return null;
-	// The same rule the owner's teardown follows, asked from the other side: a
-	// live lease or writer counts as much as a live owner. `--all` deletes
-	// regardless.
+	// The same rule the owner's teardown follows, asked from the other side: an
+	// unreadable marker is not proof that nobody is in there, and a live lease
+	// counts as much as a live owner. `--all` deletes regardless.
 	const decision = await decideIsolationReclaim(dir);
 	return {
 		path: dir,

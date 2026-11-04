@@ -105,15 +105,21 @@ describe("worktree clear task-isolation ownership", () => {
 		return proc.pid;
 	}
 
-	it("keeps live-owned sandboxes and reclaims dead/markerless/corrupt ones", async () => {
+	it("keeps live-owned, unreadable-marker and markerless sandboxes, reclaims dead-owner ones", async () => {
 		const live = await makeSandbox("tlive0001");
 		await writeIsolationOwner(live, "live0001"); // marker names this test process
 
 		const dead = await makeSandbox("tdead0002");
 		await Bun.write(path.join(dead, ISOLATION_OWNER_FILE), JSON.stringify({ pid: await deadPid(), id: "dead0002" }));
 
-		const orphan = await makeSandbox("tnone0003"); // no marker at all (crashed pre-marker run)
+		// No marker at all: a pre-marker leftover, or one whose marker something
+		// removed. Neither proves no task is working in there, and a crashed run
+		// now always leaves a marker naming its dead process.
+		const orphan = await makeSandbox("tnone0003");
 
+		// A marker nobody can parse says nothing about whether a task is
+		// running in there, and deletion needs proof. `--all` is the way to
+		// remove it anyway.
 		const corrupt = await makeSandbox("tbad00004");
 		await Bun.write(path.join(corrupt, ISOLATION_OWNER_FILE), "{ not json");
 
@@ -140,12 +146,27 @@ describe("worktree clear task-isolation ownership", () => {
 			);
 		expect(await Bun.file(path.join(live, "m", "work.txt")).exists()).toBe(true);
 		expect(await exists(dead)).toBe(false);
-		expect(await exists(orphan)).toBe(false);
-		expect(await exists(corrupt)).toBe(false);
+		expect(await exists(orphan)).toBe(true);
+		expect(await exists(corrupt)).toBe(true);
 		expect(await exists(pending)).toBe(true);
 		// Windows reports neither /proc start times nor `ps`, so pid-only liveness
 		// cannot spot the recycled pid and the sandbox is conservatively kept.
 		expect(await exists(recycled)).toBe(process.platform === "win32");
+	});
+
+	it("lists why plain clear keeps a sandbox that cannot prove it is finished, and what removes it", async () => {
+		// Nothing removes such a sandbox on its own, and the reason naming
+		// `--all` was computed and then dropped: the list called it `live`.
+		const orphan = await makeSandbox("tnone0012");
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await listWorktrees({ json: true });
+
+		const entries = JSON.parse(String(log.mock.calls.at(-1)?.[0])) as WorktreeEntry[];
+		expect(entries.find(entry => entry.path === orphan)).toMatchObject({
+			kind: "task-isolation",
+			keptReason: "no owner marker (use --all to remove)",
+		});
 	});
 
 	it("says a sandbox is kept for a teardown still stopping it, not for the run that built it", async () => {

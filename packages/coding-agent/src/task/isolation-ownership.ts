@@ -378,12 +378,12 @@ export interface IsolationReclaimDecision {
  * Whether the sandbox at `baseDir` may be reclaimed by a reclaimer — `omp
  * worktree clear` — that did not materialise it.
  *
- * A sandbox with no owner marker, or one whose marker names no owner, is a
- * leftover nobody is recorded as running in. One with an owner is the same
- * rule the owner's teardown follows, asked from the other side: a live owner,
- * a live lease or a live writer keeps it; a marker a teardown retired is
- * always reclaimable, because its owner has already decided it is finished
- * with it.
+ * This is the same rule the owner's teardown follows, asked from the other
+ * side: deletion needs proof, and an error is not proof. A marker that cannot
+ * be read says nothing about whether a task is running in there, so it keeps
+ * the directory (`--all` is the way to delete anyway); a live owner or a live
+ * lease keeps it; a marker a teardown retired is always reclaimable, because
+ * its owner has already decided it is finished with it.
  */
 export async function decideIsolationReclaim(baseDir: string): Promise<IsolationReclaimDecision> {
 	const decision = await decideReclaimByRecords(baseDir);
@@ -396,15 +396,21 @@ export async function decideIsolationReclaim(baseDir: string): Promise<Isolation
 async function decideReclaimByRecords(baseDir: string): Promise<IsolationReclaimDecision> {
 	const markerFile = path.join(baseDir, ISOLATION_OWNER_FILE);
 	const marker = await lookup.readJsonLookup(markerFile);
-	// No owner recorded, or none that can be read: nobody is recorded as
-	// running in it, so it is a leftover, as `clear` has always treated it.
-	const leftover: IsolationReclaimDecision = {
-		reclaimable: true,
-		reason: "task-isolation leftover (no live task owns it)",
-	};
-	if (marker.kind !== "found") return leftover;
+	if (marker.kind === "absent") {
+		// A sandbox with no marker at all: a pre-marker leftover, or one whose
+		// marker something removed. Neither is proof that no task is working
+		// in there, and the marker is written before the backend materialises
+		// anything, so a crashed run leaves one naming its dead process.
+		// `--all` is the way to remove what cannot prove itself.
+		return { reclaimable: false, reason: "no owner marker (use --all to remove)" };
+	}
+	if (marker.kind === "unknown") {
+		return { reclaimable: false, reason: `owner marker unreadable (${marker.reason})` };
+	}
 	const decoded = marker.value;
-	if (typeof decoded !== "object" || decoded === null) return leftover;
+	if (typeof decoded !== "object" || decoded === null) {
+		return { reclaimable: false, reason: "owner marker unreadable (not an object)" };
+	}
 	// Asked before the retired shortcut: a directory its owner finished with
 	// can still hold a writer that has not, and "retired" is a statement about
 	// the owner alone.
@@ -415,7 +421,9 @@ async function decideReclaimByRecords(baseDir: string): Promise<IsolationReclaim
 		return { reclaimable: true, reason: "task-isolation leftover (retired by its owner)" };
 	}
 	const identity = await readProcessIdentity(markerFile);
-	if (identity === "unreadable" || identity === undefined) return leftover;
+	if (identity === "unreadable" || identity === undefined) {
+		return { reclaimable: false, reason: "owner marker unreadable (no usable owner identity)" };
+	}
 	if (await isProcessStillLive(identity)) {
 		// A teardown whose backend stop outran its bound marks the sandbox as
 		// retiring under its own process. Read as an owner, that process was
