@@ -83,6 +83,8 @@ export interface AnthropicSearchHeaderOptions {
 	modelHeaders?: Record<string, string>;
 	/** The selected model's `compat.allowAnthropicHeaderOverrides`. */
 	allowAnthropicHeaderOverrides?: boolean;
+	/** Request-specific betas sent alongside the web search beta. */
+	extraBetas?: readonly string[];
 }
 
 /**
@@ -101,7 +103,7 @@ export function buildAnthropicSearchHeaders(
 		apiKey: auth.apiKey,
 		baseUrl: auth.baseUrl,
 		isOAuth: auth.isOAuth,
-		extraBetas: ["web-search-2025-03-05"],
+		extraBetas: ["web-search-2025-03-05", ...(options.extraBetas ?? [])],
 		stream: false,
 		modelHeaders: mergeHeaders(options.modelHeaders, resolveAnthropicCustomHeadersForBaseUrl(auth.baseUrl)),
 		allowAnthropicHeaderOverrides: options.allowAnthropicHeaderOverrides,

@@ -56,20 +56,41 @@ export interface AnthropicContentBlock {
 	name?: string;
 	/** Tool input (for type="server_tool_use") */
 	input?: { query: string };
-	/** Search results (for type="web_search_tool_result") */
-	content?: AnthropicSearchResult[];
+	/** Search results (for type="web_search_tool_result"); a single error object when the search failed. */
+	content?: AnthropicSearchResult[] | AnthropicSearchToolError;
+}
+
+/** `web_search_tool_result` content when a search failed (still an HTTP 200). */
+export interface AnthropicSearchToolError {
+	type: "web_search_tool_result_error";
+	error_code: string;
+}
+
+/** Present when `stop_reason` is `"refusal"` (safety classifier decline). */
+export interface AnthropicStopDetails {
+	type: "refusal";
+	category: string | null;
+	explanation: string | null;
 }
 
 export interface AnthropicApiResponse {
 	id: string;
 	model: string;
 	content: AnthropicContentBlock[];
+	stop_reason?: string | null;
+	stop_details?: AnthropicStopDetails | null;
 	usage: {
 		input_tokens: number;
 		output_tokens: number;
 		cache_read_input_tokens?: number;
 		cache_creation_input_tokens?: number;
 		server_tool_use?: { web_search_requests: number };
+		/**
+		 * One entry per sampling step of the turn, across every model that ran it.
+		 * Top-level counts cover only the model that served the turn, so a refusal
+		 * fallback's declined attempt is counted only here.
+		 */
+		iterations?: { input_tokens: number; output_tokens: number }[] | null;
 	};
 }
 
