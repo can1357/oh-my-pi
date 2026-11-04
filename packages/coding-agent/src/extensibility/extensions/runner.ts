@@ -816,9 +816,10 @@ export class ExtensionRunner {
 	 * suspended extension's backends are left out until it resumes, like its tools and commands.
 	 */
 	listTodoBackends(): TodoBackendDefinition[] {
-		return this.runtime.todoBackends.filter(
-			sourceId => !Array.from(this.#suspendedExtensions).some(extension => extension.path === sourceId),
-		);
+		return this.runtime.todoBackends
+			.list()
+			.filter(registration => !this.isExtensionSuspended(registration.sourceId))
+			.map(registration => registration.definition);
 	}
 
 	/** The backend `id` names, unless no extension registered it or its extension is suspended. */

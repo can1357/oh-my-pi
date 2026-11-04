@@ -41,6 +41,7 @@ import {
 	type SkillRediscoverySource,
 } from "../../extensibility/skills";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import {
 	type WordCompletionEngine,
@@ -477,7 +478,8 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 
 	// `bash` can run for a long time, and `prompt`'s response is held until
 	// admission (see PromptOptions.onPromptAdmitted), which can likewise span
-	// real wall-clock time; `steer_subagent` waits for the subagent to accept.
+	// real wall-clock time; `steer_subagent` waits for the subagent to accept,
+	// and `set_todos` for the todo backend's `replace`.
 	// Dispatch them in the background so a subsequent frame — `abort_bash` for
 	// a running `bash`, or `abort`/`steer`/`follow_up`/`get_state` for an
 	// admitting `prompt` — can be read and handled without waiting for the
@@ -580,7 +582,7 @@ export class RpcUserInputGate {
 	}
 }
 
-/** Starts prompts, steers, follow-ups and `steer_subagent` after earlier ordinary commands, without
+/** Starts prompts, steers, follow-ups, `steer_subagent` and `set_todos` after earlier ordinary commands, without
  * awaiting admission. Control frames, `bash` and `predict_word` dispatch immediately (see
  * dispatchRpcInputFrame). `acceptInput` runs synchronously in {@link dispatch}, before the
  * handler is queued, so an abort can invalidate a frame that has not started yet. */
@@ -2364,13 +2366,14 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			}
 
 			case "set_todos": {
+				let committed: TodoPhase[] | undefined;
 				try {
-					await session.commitTodoPhases(command.phases);
+					committed = await session.commitTodoPhases(command.phases);
 				} catch (err) {
 					return error(id, "set_todos", err instanceof Error ? err.message : String(err));
 				}
-				const phases = session.getTodoPhases();
-				return success(id, "set_todos", { todoPhases: phases });
+				// The committed list, not a later read: a write queued behind this one can land before this handler resumes.
+				return success(id, "set_todos", { todoPhases: committed ?? session.getTodoPhases() });
 			}
 
 			case "set_host_tools": {

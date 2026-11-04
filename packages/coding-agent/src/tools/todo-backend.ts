@@ -99,9 +99,15 @@ export interface TodoWriteGuard {
 	assertCurrent(): void;
 }
 
+/** One registration: the backend and the resolved path of the extension that registered it. */
+export interface TodoBackendRegistration {
+	readonly definition: TodoBackendDefinition;
+	readonly sourceId: string;
+}
+
 /** Todo backends registered by extensions, in registration order. */
 export class TodoBackendRegistry {
-	readonly #byId = new Map<string, { definition: TodoBackendDefinition; sourceId: string }>();
+	readonly #byId = new Map<string, TodoBackendRegistration>();
 
 	register(definition: TodoBackendDefinition, sourceId: string): void {
 		const id: unknown = definition.id;
@@ -124,19 +130,9 @@ export class TodoBackendRegistry {
 		this.#byId.set(id, { definition, sourceId });
 	}
 
-	get(id: string): TodoBackendDefinition | undefined {
-		return this.#byId.get(id)?.definition;
-	}
-
-	list(): readonly TodoBackendDefinition[] {
-		return Array.from(this.#byId.values(), entry => entry.definition);
-	}
-
-	/** Definitions whose registering extension path passes `keep`, in registration order. */
-	filter(keep: (sourceId: string) => boolean): TodoBackendDefinition[] {
-		const kept: TodoBackendDefinition[] = [];
-		for (const { definition, sourceId } of this.#byId.values()) if (keep(sourceId)) kept.push(definition);
-		return kept;
+	/** Every registration, in registration order. */
+	list(): readonly TodoBackendRegistration[] {
+		return Array.from(this.#byId.values());
 	}
 
 	/** Number of registrations; pass it to {@link rollback} to undo the ones made after it. */

@@ -37,8 +37,7 @@ describe("TodoBackendRegistry", () => {
 		registry.register(definition("b"), "ext");
 		registry.register(definition("a"), "ext");
 		registry.register(definition("c"), "ext");
-		expect(registry.list().map(entry => entry.id)).toEqual(["b", "a", "c"]);
-		expect(registry.get("missing")).toBeUndefined();
+		expect(registry.list().map(entry => entry.definition.id)).toEqual(["b", "a", "c"]);
 	});
 });
 
@@ -71,9 +70,10 @@ describe("pi.registerTodoBackend", () => {
 				throw new Error("factory failed");
 			}, "broken"),
 		).rejects.toThrow("factory failed");
-		expect(runtime.todoBackends.list().map(entry => entry.id)).toEqual(["earlier"]);
+		expect(runtime.todoBackends.list().map(entry => entry.definition.id)).toEqual(["earlier"]);
 
 		await load(pi => pi.registerTodoBackend({ id: "tracker", label: "Healthy", create: () => noopBackend }), "b");
-		expect(runtime.todoBackends.get("tracker")?.label).toBe("Healthy");
+		const tracker = runtime.todoBackends.list().find(entry => entry.definition.id === "tracker");
+		expect(tracker?.definition.label).toBe("Healthy");
 	});
 });

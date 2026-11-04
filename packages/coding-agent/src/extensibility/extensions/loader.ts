@@ -451,7 +451,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	registerTodoBackend(definition: TodoBackendDefinition): void {
-		this.runtime.todoBackends.register(definition, this.extension.path);
+		this.runtime.todoBackends.register(definition, this.extension.resolvedPath);
 	}
 }
 

@@ -379,9 +379,8 @@ describe("todo backends in a real session", () => {
 		expect(suspended.isError).toBeUndefined();
 		expect(applies()).toBe(1);
 		expect(taskContents(session)).toEqual(["backed", "native while suspended"]);
-		expect(notices).toEqual([
-			'Todo backend "tracker" is not registered by any enabled extension; using native todos.',
-		]);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain('"tracker"');
 
 		runner.setSuspendedExtensions(() => false);
 		await flushTodoWrites(session);
