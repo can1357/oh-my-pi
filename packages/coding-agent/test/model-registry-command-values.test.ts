@@ -6,7 +6,7 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
 import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { invalidateAllCommandConfigs, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
+import { invalidateAllConfigValues, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -483,7 +483,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		]);
 	});
 
-	test("invalidateAllCommandConfigs drops cached stdout so the next resolve re-runs", async () => {
+	test("invalidateAllConfigValues drops cached stdout so the next resolve re-runs", async () => {
 		const tokenFile = path.join(tempDir, "token.txt");
 		fs.writeFileSync(tokenFile, "initial");
 		const config = `!${stdoutFileCommand(tokenFile)}`;
@@ -492,7 +492,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		fs.writeFileSync(tokenFile, "rotated");
 		expect(await resolveConfigValue(config)).toBe("initial");
 
-		invalidateAllCommandConfigs();
+		invalidateAllConfigValues();
 		expect(await resolveConfigValue(config)).toBe("rotated");
 	});
 

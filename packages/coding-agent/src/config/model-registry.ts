@@ -7,7 +7,7 @@ import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oaut
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
-import { OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
+import { ConfigurationError, OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
 import type {
 	Api,
 	Context,
@@ -66,8 +66,9 @@ import {
 } from "./custom-models";
 import {
 	createConfigHeaderResolver,
-	invalidateAllCommandConfigs,
-	invalidateCommandConfig,
+	invalidateAllConfigValues,
+	invalidateConfigValue,
+	isCachedConfigValue,
 	isCommandConfigValue,
 	resolveConfigHeaders,
 	resolveConfigValue,
@@ -327,11 +328,11 @@ export class ModelRegistry {
 	#providerLookupSnapshots: Map<string, Model<Api>[]> = new Map();
 	#fullKindSnapshots = new WeakMap<Model<Api>[], Partial<Record<ModelKind, Model<Api>[]>>>();
 	#customProviderApiKeys: Map<string, string> = new Map();
-	// Every command-backed (`!cmd`) config value a provider carries — apiKey plus
-	// provider/model-override header values — keyed by provider. The 401 auth
-	// retry invalidates these command caches so the request-boundary resolver
+	// Every cached (`!cmd` or `{ file }`) config value a provider carries — apiKey
+	// plus provider/model-override header values — keyed by provider. The 401 auth
+	// retry invalidates these caches so the request-boundary resolver
 	// re-materializes refreshed headers, not just the apiKey (#9760).
-	#commandConfigsByProvider: Map<string, Set<string>> = new Map();
+	#cachedConfigsByProvider: Map<string, Set<string>> = new Map();
 	#keylessProviders: Set<string> = new Set();
 	#discoverableProviders: DiscoveryProviderConfig[] = [];
 	/**
@@ -402,7 +403,7 @@ export class ModelRegistry {
 	#runtimeProviderApiKeys: Map<string, { keyConfig: string; fallback: boolean }> = new Map();
 	#runtimeProviderOverrides: Map<string, ProviderOverride> = new Map();
 	// Command-backed values from registerProvider (apiKey + provider/model
-	// headers). Separate from #commandConfigsByProvider because static reload
+	// headers). Separate from #cachedConfigsByProvider because static reload
 	// rebuilds that map from models.yml only; runtime entries must survive.
 	#runtimeCommandConfigsByProvider: Map<string, Set<string>> = new Map();
 	// Credential-aware model projections registered via
@@ -490,53 +491,54 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Accumulate every command-backed (`!cmd`) config value from an apiKey and a
-	 * header record into `target`. Used at load time to record which commands a
-	 * provider depends on so the 401 refresh path can invalidate all of them.
+	 * Accumulate every cached (`!cmd` or `{ file }`) config value from an apiKey
+	 * and a header record into `target`. Used at load time to record which values
+	 * a provider depends on so the 401 refresh path can invalidate all of them.
 	 */
-	#collectCommandConfigValues(
+	#collectCachedConfigValues(
 		target: Set<string>,
 		apiKey: string | undefined,
 		headers: Record<string, string> | undefined,
 	): void {
-		if (isCommandConfigValue(apiKey)) target.add(apiKey);
+		if (isCachedConfigValue(apiKey)) target.add(apiKey);
 		if (!headers) return;
 		for (const key in headers) {
 			const value = headers[key];
-			if (isCommandConfigValue(value)) target.add(value);
+			if (isCachedConfigValue(value)) target.add(value);
 		}
 	}
 
 	/**
-	 * Drop the process-cached results of every command-backed config value a
-	 * provider carries (apiKey plus provider/model-override header commands) so
-	 * the next resolve re-runs them. Invoked on the 401 force-refresh path: the
-	 * apiKey alone was refreshed before, leaving command-backed header
-	 * credentials pinned to their stale value across the retry (#9760).
+	 * Drop the process-cached results of every cached config value a provider
+	 * carries (apiKey plus provider/model-override header commands and files) so
+	 * the next resolve re-runs or re-reads them, on this thread and every mirror.
+	 * Invoked on the 401 force-refresh path (the apiKey alone was refreshed before,
+	 * leaving command-backed header credentials pinned to their stale value across
+	 * the retry, #9760) and on an explicit user refresh.
 	 */
-	#invalidateProviderCommandConfigs(provider: string): void {
+	#invalidateProviderConfigValues(provider: string): void {
 		this.#owner?.invalidateCommandConfigs(provider);
-		this.#invalidateLocalProviderCommandConfigs(provider);
+		this.#invalidateLocalProviderConfigValues(provider);
 		this.#recordMirrorChange({ kind: "invalidateCommands", provider });
 	}
 
-	/** Drop only this process's cached results for `provider`'s command-backed values. */
-	#invalidateLocalProviderCommandConfigs(provider: string): void {
-		invalidateCommandConfig(this.#customProviderApiKeys.get(provider));
-		const configs = this.#commandConfigsByProvider.get(provider);
+	/** Drop only this process's cached results for `provider`'s command and file values. */
+	#invalidateLocalProviderConfigValues(provider: string): void {
+		invalidateConfigValue(this.#customProviderApiKeys.get(provider));
+		const configs = this.#cachedConfigsByProvider.get(provider);
 		if (configs) {
-			for (const config of configs) invalidateCommandConfig(config);
+			for (const config of configs) invalidateConfigValue(config);
 		}
 		const runtimeConfigs = this.#runtimeCommandConfigsByProvider.get(provider);
 		if (!runtimeConfigs) return;
-		for (const config of runtimeConfigs) invalidateCommandConfig(config);
+		for (const config of runtimeConfigs) invalidateConfigValue(config);
 	}
 
 	#recordRuntimeCommandConfigs(providerName: string, config: ProviderConfigInput): void {
 		const target = this.#runtimeCommandConfigsByProvider.get(providerName) ?? new Set<string>();
-		this.#collectCommandConfigValues(target, config.apiKey, config.headers);
+		this.#collectCachedConfigValues(target, config.apiKey, config.headers);
 		for (const modelDef of config.models ?? []) {
-			this.#collectCommandConfigValues(target, undefined, modelDef.headers);
+			this.#collectCachedConfigValues(target, undefined, modelDef.headers);
 		}
 		if (target.size > 0) this.#runtimeCommandConfigsByProvider.set(providerName, target);
 		else this.#runtimeCommandConfigsByProvider.delete(providerName);
@@ -550,15 +552,15 @@ export class ModelRegistry {
 		if (models.length === 0) return;
 		const target = this.#runtimeCommandConfigsByProvider.get(providerName) ?? new Set<string>();
 		for (const modelDef of models) {
-			this.#collectCommandConfigValues(target, undefined, modelDef.headers);
+			this.#collectCachedConfigValues(target, undefined, modelDef.headers);
 		}
 		if (target.size > 0) this.#runtimeCommandConfigsByProvider.set(providerName, target);
 	}
 
 	#reloadStaticModelsForRefresh(options?: ModelRegistryRefreshOptions, providerId?: string): void {
 		if (options?.refreshCommandCredentials) {
-			if (providerId) this.#invalidateProviderCommandConfigs(providerId);
-			else this.#invalidateAllCommandConfigs();
+			if (providerId) this.#invalidateProviderConfigValues(providerId);
+			else this.#invalidateAllConfigValues();
 			this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
 			return;
 		}
@@ -570,9 +572,9 @@ export class ModelRegistry {
 		if (!this.#owner) this.authStorage.keys.setConfig(provider, keyConfig, options);
 	}
 
-	#invalidateAllCommandConfigs(): void {
+	#invalidateAllConfigValues(): void {
 		this.#owner?.invalidateCommandConfigs();
-		invalidateAllCommandConfigs();
+		invalidateAllConfigValues();
 		this.#recordMirrorChange({ kind: "invalidateCommands", provider: undefined });
 	}
 
@@ -582,8 +584,8 @@ export class ModelRegistry {
 	 * this to its {@link ModelRegistryOwner}, whose resolver mints the keys.
 	 */
 	invalidateCommandConfigs(provider?: string): void {
-		if (provider === undefined) this.#invalidateAllCommandConfigs();
-		else this.#invalidateProviderCommandConfigs(provider);
+		if (provider === undefined) this.#invalidateAllConfigValues();
+		else this.#invalidateProviderConfigValues(provider);
 	}
 
 	/**
@@ -717,8 +719,8 @@ export class ModelRegistry {
 				return;
 			case "invalidateCommands":
 				// Local caches only: forwarding to the owner would echo the invalidation back.
-				if (change.provider === undefined) invalidateAllCommandConfigs();
-				else this.#invalidateLocalProviderCommandConfigs(change.provider);
+				if (change.provider === undefined) invalidateAllConfigValues();
+				else this.#invalidateLocalProviderConfigValues(change.provider);
 				return;
 		}
 	}
@@ -1354,7 +1356,7 @@ export class ModelRegistry {
 		this.#runtimeAuthoritativeProviders.clear();
 		this.#internedStaticModels.clear();
 		this.#providerLookupSnapshots.clear();
-		this.#commandConfigsByProvider.clear();
+		this.#cachedConfigsByProvider.clear();
 	}
 
 	#knownStaticProviders(): string[] {
@@ -2075,9 +2077,9 @@ export class ModelRegistry {
 		const configuredProviders = new Set(Object.keys(value.providers ?? {}));
 		for (const [providerName, providerConfig] of providerEntries) {
 			const commandConfigs = new Set<string>();
-			this.#collectCommandConfigValues(commandConfigs, providerConfig.apiKey, providerConfig.headers);
+			this.#collectCachedConfigValues(commandConfigs, providerConfig.apiKey, providerConfig.headers);
 			for (const modelDef of providerConfig.models ?? []) {
-				this.#collectCommandConfigValues(commandConfigs, undefined, modelDef.headers);
+				this.#collectCachedConfigValues(commandConfigs, undefined, modelDef.headers);
 			}
 			// Scope: effective APIs of models inheriting the provider URL; a
 			// provider-level api covers the override-only case; none is wide.
@@ -2163,12 +2165,12 @@ export class ModelRegistry {
 			if (providerConfig.modelOverrides) {
 				const perModel = new Map<string, ModelOverride>();
 				for (const [modelId, override] of Object.entries(providerConfig.modelOverrides)) {
-					this.#collectCommandConfigValues(commandConfigs, undefined, override.headers);
+					this.#collectCachedConfigValues(commandConfigs, undefined, override.headers);
 					perModel.set(modelId, override);
 				}
 				allModelOverrides.set(providerName, perModel);
 			}
-			if (commandConfigs.size > 0) this.#commandConfigsByProvider.set(providerName, commandConfigs);
+			if (commandConfigs.size > 0) this.#cachedConfigsByProvider.set(providerName, commandConfigs);
 		}
 
 		return {
@@ -3733,7 +3735,7 @@ export class ModelRegistry {
 		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		if (options?.forceRefresh) this.#invalidateProviderCommandConfigs(provider);
+		if (options?.forceRefresh) this.#invalidateProviderConfigValues(provider);
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
 		}
@@ -3770,11 +3772,23 @@ export class ModelRegistry {
 		});
 	}
 
+	/**
+	 * Offline credential probe for discovery and availability. An unusable
+	 * `{ file }` apiKey throws `ConfigurationError` at request time; here it
+	 * reads as "no key", so one bad file marks its provider unauthenticated
+	 * instead of failing every provider's discovery.
+	 */
 	async #peekApiKeyForProvider(provider: string, options?: AuthPeekOptions): Promise<string | undefined> {
 		if (this.#keylessProviders.has(provider) && this.authStorage.keys.source(provider) === undefined) {
 			return kNoAuth;
 		}
-		return this.authStorage.keys.peek(provider, options);
+		try {
+			return await this.authStorage.keys.peek(provider, options);
+		} catch (error) {
+			if (!(error instanceof ConfigurationError)) throw error;
+			logger.warn("model discovery: provider apiKey is unusable", { provider, error: error.message });
+			return undefined;
+		}
 	}
 
 	/**

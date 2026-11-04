@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { invalidateCommandConfig } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
+import { invalidateConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { mergeDiscoveredModel } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 
 /**
@@ -161,10 +161,10 @@ describe("mergeDiscoveredModel", () => {
 			expect((await merged.resolveHeaders?.())?.["X-Token"]).toBe("token-A");
 			// ...and a 401 auth-retry rotation (cache invalidation) reaches it.
 			await Bun.write(tokenFile, "token-B");
-			invalidateCommandConfig(command);
+			invalidateConfigValue(command);
 			expect((await merged.resolveHeaders?.())?.["X-Token"]).toBe("token-B");
 		} finally {
-			invalidateCommandConfig(command);
+			invalidateConfigValue(command);
 			await fs.rm(tokenFile, { force: true });
 		}
 	});
@@ -188,10 +188,10 @@ describe("mergeDiscoveredModel", () => {
 			expect((await merged.resolveHeaders?.())?.Authorization).toBe("Bearer token-A");
 			// ...and a 401 force-refresh (command-cache invalidation) reaches it.
 			await Bun.write(tokenFile, "token-B");
-			invalidateCommandConfig(apiKey);
+			invalidateConfigValue(apiKey);
 			expect((await merged.resolveHeaders?.())?.Authorization).toBe("Bearer token-B");
 		} finally {
-			invalidateCommandConfig(apiKey);
+			invalidateConfigValue(apiKey);
 			await fs.rm(tokenFile, { force: true });
 		}
 	});

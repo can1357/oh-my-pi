@@ -28,6 +28,7 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong, sleepUntil } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
+import { isFileConfigErrorMessage } from "../config/resolve-config-value";
 
 import type { Settings } from "../config/settings";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
@@ -1563,6 +1564,8 @@ export class TurnRecovery {
 		if (message.stopReason !== "error") return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;
 		if (AIError.isResponsesRequestBodyReadTimeout(message)) return false;
+		// An unusable `{ file }` key or header is local configuration; retrying cannot fix it.
+		if (isFileConfigErrorMessage(message.errorMessage)) return false;
 		const model = this.#host.model();
 		const immutableAnthropicThinkingError =
 			model?.api === "anthropic-messages" &&
@@ -2475,6 +2478,8 @@ export class TurnRecovery {
 		// A content refusal/sensitivity stop is the model's decision, not a route
 		// failure — switching to the base model would just re-trigger it.
 		if (this.isClassifierRefusal(message)) return false;
+		// An unusable `{ file }` key or header is local configuration; the base model hits it too.
+		if (isFileConfigErrorMessage(message.errorMessage)) return false;
 		const id = this.#classifyRetryMessage(message);
 		if (AIError.isContextOverflow(message, model.contextWindow ?? 0)) return false;
 		if (AIError.is(id, AIError.Flag.UsageLimit)) return false;
@@ -2500,6 +2505,9 @@ export class TurnRecovery {
 	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;
+		// An unusable `{ file }` key or header is local configuration to fix: sending the
+		// prompt to another provider instead would hide it and move the user's data elsewhere.
+		if (isFileConfigErrorMessage(message.errorMessage)) return false;
 		const model = this.#host.model();
 		if (!model) return false;
 		const immutableAnthropicThinkingError =

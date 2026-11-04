@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import {
 	createConfigHeaderResolver,
-	invalidateAllCommandConfigs,
+	invalidateAllConfigValues,
 } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 
 const TEMP_ENV_KEYS: string[] = [];
@@ -20,7 +20,7 @@ function delayedValueCommand(value: string): string {
 
 afterEach(() => {
 	for (const key of TEMP_ENV_KEYS.splice(0)) delete process.env[key];
-	invalidateAllCommandConfigs();
+	invalidateAllConfigValues();
 });
 
 describe("async config header materialization", () => {

@@ -368,9 +368,9 @@ Known record-level keys, at the top level of `compat` and inside its `whenThinki
 
 The runtime vocabulary is not filtered by the provider's `api`: a wire key that only another API family reads (for example an Anthropic-only key in an `openai-completions` provider) does not warn, even though it has no effect there.
 
-### Command-resolved secrets
+### Command- and file-resolved secrets
 
-Provider `apiKey` values and provider/model `headers` values may start with `!` to read a secret from command stdout. Commands run asynchronously with a 10 s timeout; stdout is trimmed, and empty/failing commands are omitted. Loading or inspecting the catalog does not execute them: credentials resolve when a request or online credential probe needs them.
+Provider `apiKey` values and provider/model `headers` values may start with `!` to read a secret from command stdout, or be `{ file: <path> }` to read it from a file. Loading or inspecting the catalog runs no command and reads no file: credentials resolve when a request or online credential probe needs them.
 
 ```yaml
 providers:
@@ -378,9 +378,15 @@ providers:
       apiKey: "!op read op://dev/openai/api-key"
       headers:
          X-Team-Key: "!bw get password omp-team-key"
+   my-gateway:
+      apiKey: { file: ~/.config/my-gateway/api-key }
+      headers:
+         X-Tenant: { file: /run/secrets/my-gateway-tenant }
 ```
 
-Successful command outputs are cached for the process lifetime, and concurrent requests share an in-flight execution. Failures back off for 30 seconds. Refresh callers that request `refreshCommandCredentials` (including the model hub's explicit refresh) and 401 credential recovery invalidate the relevant cached API keys and headers; an ordinary catalog refresh does not. Runtime API-key overrides, including `--api-key`, take precedence over configured credentials.
+**Commands** run asynchronously with a 10 s timeout; stdout is trimmed, and empty or failing commands are omitted. Successful command outputs are cached for the process lifetime, and concurrent requests share an in-flight execution. Failures back off for 30 seconds. Refresh callers that request `refreshCommandCredentials` (including the model hub's explicit refresh) and 401 credential recovery invalidate the relevant cached API keys and headers, file values included; an ordinary catalog refresh does not. Runtime API-key overrides, including `--api-key`, take precedence over configured credentials.
+
+**Files** are read in-process; no process starts. The path must be absolute or start with `~/`. The trimmed content is cached and re-read when the file's mtime, ctime, size or inode changes, so rotating the file (in place or by rename) takes effect on the next request. When an auth failure ends without another attempt, the failed request's own header values are resolved once more, so a header file that is gone ends the turn with its error instead of the auth failure; a key file is checked whenever the key is resolved. The auth retry itself is keyed on the bearer: when only a header file changed and the key did not, the request is not retried on the same provider. A missing, unreadable, empty or non-regular file fails the request with a configuration error (`ConfigurationError`, not a transient failure) that names the path; the turn ends with that error and is neither retried nor sent to a `retry.fallbackChains` model. Model discovery treats such a provider as unauthenticated. With `authHeader: true` the `Authorization` header is derived from the configured `apiKey` itself, so its file is read even when `--api-key` overrides the key.
 
 ## Merge and override order
 

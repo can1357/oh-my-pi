@@ -15,7 +15,13 @@ import {
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env, getProviderInFlightRoot, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
+import {
+	type ApiKeyResolver,
+	createAuthRetryKeyState,
+	isApiKeyResolver,
+	resolvedApiKeyBearer,
+	resolveNextAuthRetryKey,
+} from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
@@ -1202,6 +1208,33 @@ function forwardBedrockUserAgent(
 	return modelUserAgent === undefined ? callerHeaders : { ...callerHeaders, "User-Agent": modelUserAgent };
 }
 
+/**
+ * Re-check a failed request's own configuration once: its model headers and,
+ * when `apiKeyResolver` is given, its key through the resolver's plain step (no
+ * refresh, no rotation). Returns the first `ConfigurationError` either raises
+ * (an unreadable `{ file }` key or header); other failures and the resolved
+ * values are not this check's concern.
+ */
+async function requestConfigurationError(
+	model: Model<Api>,
+	apiKeyResolver: ApiKeyResolver | undefined,
+	signal: AbortSignal | undefined,
+): Promise<AIError.ConfigurationError | undefined> {
+	const checks: Array<() => unknown> = [];
+	if (apiKeyResolver) checks.push(() => apiKeyResolver({ lastChance: false, error: undefined, signal }));
+	const resolveHeaders = model.resolveHeaders;
+	if (resolveHeaders) checks.push(() => resolveHeaders(signal));
+	for (const check of checks) {
+		if (signal?.aborted) return undefined;
+		try {
+			await check();
+		} catch (error) {
+			if (error instanceof AIError.ConfigurationError) return error;
+		}
+	}
+	return undefined;
+}
+
 function streamSimpleRequest<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
@@ -1335,17 +1368,45 @@ function streamSimpleRequest<TApi extends Api>(
 				if (signal?.aborted) break;
 				let nextCredentialId: number | undefined;
 				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
-				const nextKey = await resolveNextAuthRetryKey(
-					retryState,
-					apiKeyResolver,
-					failure.error,
-					signal,
-					resolved => {
+				let nextKey: string | undefined;
+				// Whether a retry step for this failure resolved a key at all. Exits that
+				// read no key (the attempt limit, a rotation with no sibling) leave it false.
+				let keyResolved = false;
+				try {
+					nextKey = await resolveNextAuthRetryKey(retryState, apiKeyResolver, failure.error, signal, resolved => {
+						keyResolved ||= resolvedApiKeyBearer(resolved) !== undefined;
 						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
-					},
-				);
-				if (nextKey === undefined) break;
+					});
+				} catch (error) {
+					// A refreshed key that cannot be resolved (`ConfigurationError`, e.g. an
+					// unreadable key file) ends the stream with that cause, not the auth failure.
+					emitBufferedEvents(outer, failure.bufferedEvents);
+					outer.fail(error);
+					return;
+				}
+				if (nextKey === undefined) {
+					// No new key, so this request is not sent again (the retry is keyed on
+					// the bearer), and its header values were not re-resolved since the
+					// failure; when no retry step resolved a key, the key was not either.
+					// A value that became unusable (an unreadable `{ file }` key or header)
+					// ends the stream with that cause, not the auth error. An OAuth
+					// token-refresh failure is served by an OAuth credential, not a
+					// configured key, and must not trigger another refresh here.
+					const oauthTokenRefresh =
+						failure.error instanceof AIError.OAuthError && failure.error.kind === "token-refresh";
+					const configError = await requestConfigurationError(
+						model,
+						keyResolved || oauthTokenRefresh ? undefined : apiKeyResolver,
+						signal,
+					);
+					if (configError) {
+						emitBufferedEvents(outer, failure.bufferedEvents);
+						outer.fail(configError);
+						return;
+					}
+					break;
+				}
 				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
 				if (!next) return;
 				failure = next;

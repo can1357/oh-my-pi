@@ -1,3 +1,8 @@
+import type { Stats } from "node:fs";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { executeShell } from "@oh-my-pi/pi-natives";
 import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 
@@ -6,6 +11,24 @@ const commandResultCache = new Map<string, string>();
 const commandFailureRetryAt = new Map<string, number>();
 const commandInFlight = new Map<string, Promise<string | undefined>>();
 const commandGeneration = new Map<string, number>();
+
+/**
+ * Internal spelling of a `{ file: <path> }` config value. Config values travel
+ * as strings (auth storage, header records, invalidation sets). A NUL byte can
+ * begin no usable literal key, header value or environment variable name, so
+ * this prefix cannot collide with a literal, env-var or `!command` value.
+ */
+const FILE_CONFIG_PREFIX = "\u0000file:";
+
+/** File identity and content of the last successful read of a `{ file }` value. */
+interface FileConfigSnapshot {
+	mtimeMs: number;
+	ctimeMs: number;
+	size: number;
+	ino: number;
+	value: string;
+}
+const fileConfigCache = new Map<string, FileConfigSnapshot>();
 
 /** Materialize request headers for models and discovery without property-access side effects. */
 export type ConfigHeaderResolver = (signal?: AbortSignal) => Promise<Record<string, string> | undefined>;
@@ -18,17 +41,61 @@ export interface ConfigHeaderResolutionOptions {
 	apiKeyConfig?: string;
 }
 
-/** Identify command-backed values when collecting credentials that must be invalidated together. */
+/** Identify command-backed values. */
 export function isCommandConfigValue(valueConfig: string | undefined): valueConfig is string {
 	return valueConfig?.startsWith("!") === true;
+}
+
+/** Identify `{ file: <path> }` values (see {@link fileConfigValue}). */
+export function isFileConfigValue(valueConfig: string | undefined): valueConfig is string {
+	return valueConfig?.startsWith(FILE_CONFIG_PREFIX) === true;
+}
+
+/**
+ * Identify values whose resolved secret is cached, so that a 401 or an explicit
+ * refresh must invalidate them together: `!command` and `{ file }` values.
+ */
+export function isCachedConfigValue(valueConfig: string | undefined): valueConfig is string {
+	return isCommandConfigValue(valueConfig) || isFileConfigValue(valueConfig);
+}
+
+/**
+ * Normalize the path of a `{ file: <path> }` value: `~` and `~/…` expand to the
+ * home directory. Returns `undefined` for a relative path, which has no stable
+ * meaning across the directories omp runs in.
+ */
+export function normalizeFileConfigPath(filePath: string): string | undefined {
+	const expanded =
+		filePath === "~"
+			? os.homedir()
+			: filePath.startsWith("~/")
+				? path.join(os.homedir(), filePath.slice(2))
+				: filePath;
+	return path.isAbsolute(expanded) ? path.normalize(expanded) : undefined;
+}
+
+/** Internal config value that resolves to the trimmed content of the file at an absolute path. */
+export function fileConfigValue(absolutePath: string): string {
+	return FILE_CONFIG_PREFIX + absolutePath;
+}
+
+function fileConfigPath(valueConfig: string): string {
+	return valueConfig.slice(FILE_CONFIG_PREFIX.length);
 }
 
 function commandKey(valueConfig: string): string {
 	return valueConfig.slice(1).trim();
 }
 
-/** Invalidate one command-backed value, including its failure backoff and pending cache generation. */
-export function invalidateCommandConfig(valueConfig: string | undefined): void {
+/**
+ * Invalidate one cached value: a `{ file }` value is read again, and a command
+ * value loses its cached stdout, failure backoff and pending cache generation.
+ */
+export function invalidateConfigValue(valueConfig: string | undefined): void {
+	if (isFileConfigValue(valueConfig)) {
+		fileConfigCache.delete(fileConfigPath(valueConfig));
+		return;
+	}
 	if (!isCommandConfigValue(valueConfig)) return;
 	const command = commandKey(valueConfig);
 	commandResultCache.delete(command);
@@ -37,8 +104,9 @@ export function invalidateCommandConfig(valueConfig: string | undefined): void {
 	commandGeneration.set(command, (commandGeneration.get(command) ?? 0) + 1);
 }
 
-/** Invalidate every command-backed value without cancelling shared in-flight processes. */
-export function invalidateAllCommandConfigs(): void {
+/** Invalidate every cached value without cancelling shared in-flight processes. */
+export function invalidateAllConfigValues(): void {
+	fileConfigCache.clear();
 	for (const command of new Set([
 		...commandResultCache.keys(),
 		...commandFailureRetryAt.keys(),
@@ -97,12 +165,93 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
 	return await promise;
 }
 
+function errnoCode(error: unknown): string {
+	const code = (error as NodeJS.ErrnoException | null)?.code;
+	return typeof code === "string" ? code : "unknown";
+}
+
+/**
+ * Ending of every `{ file }` resolution error. The error reaches turn recovery only as
+ * assistant-message text, so recovery recognizes it by this suffix (see {@link isFileConfigErrorMessage}).
+ */
+const FILE_CONFIG_ERROR_SUFFIX = "Fix the file, or the { file: ... } value that names it in models.yml.";
+
+function fileConfigError(filePath: string, problem: string, cause?: unknown): AIError.ConfigurationError {
+	return new AIError.ConfigurationError(
+		`Config value file ${filePath} ${problem}. ${FILE_CONFIG_ERROR_SUFFIX}`,
+		cause === undefined ? undefined : { cause },
+	);
+}
+
+/**
+ * Whether an error message is an unusable `{ file }` key or header. Such a turn is a
+ * local configuration error: it is neither retried nor sent down the fallback chain.
+ */
+export function isFileConfigErrorMessage(message: string | undefined): boolean {
+	return message?.includes(FILE_CONFIG_ERROR_SUFFIX) === true;
+}
+
+/**
+ * Read a `{ file }` value in-process. The content is cached and re-read when the
+ * file's mtime, ctime, size or inode changes, or after an invalidation. A
+ * missing, unreadable, non-regular or empty file is a configuration error that
+ * names the path; retrying cannot fix it.
+ */
+async function resolveFileValue(valueConfig: string): Promise<string> {
+	const filePath = fileConfigPath(valueConfig);
+	let stats: Stats;
+	try {
+		stats = await fs.stat(filePath);
+	} catch (error) {
+		fileConfigCache.delete(filePath);
+		throw fileConfigError(filePath, `could not be read (${errnoCode(error)})`, error);
+	}
+	if (!stats.isFile()) {
+		fileConfigCache.delete(filePath);
+		throw fileConfigError(filePath, "is not a regular file");
+	}
+	const cached = fileConfigCache.get(filePath);
+	if (
+		cached !== undefined &&
+		cached.mtimeMs === stats.mtimeMs &&
+		cached.ctimeMs === stats.ctimeMs &&
+		cached.size === stats.size &&
+		cached.ino === stats.ino
+	) {
+		return cached.value;
+	}
+	// Stat before read: a write that lands between them changes the next stat, which re-reads.
+	let content: string;
+	try {
+		content = await fs.readFile(filePath, "utf8");
+	} catch (error) {
+		fileConfigCache.delete(filePath);
+		throw fileConfigError(filePath, `could not be read (${errnoCode(error)})`, error);
+	}
+	const value = content.trim();
+	if (value.length === 0) {
+		fileConfigCache.delete(filePath);
+		throw fileConfigError(filePath, "is empty");
+	}
+	fileConfigCache.set(filePath, {
+		mtimeMs: stats.mtimeMs,
+		ctimeMs: stats.ctimeMs,
+		size: stats.size,
+		ino: stats.ino,
+		value,
+	});
+	return value;
+}
+
 /**
  * Resolve a configuration value. Command values execute asynchronously and
- * successful stdout is cached; environment-backed and literal values stay live.
+ * successful stdout is cached. `{ file }` values are read in-process and re-read
+ * when the file changes; an unusable file throws `ConfigurationError`.
+ * Environment-backed and literal values stay live.
  */
 export async function resolveConfigValue(valueConfig: string): Promise<string | undefined> {
 	if (isCommandConfigValue(valueConfig)) return await executeCommand(valueConfig);
+	if (isFileConfigValue(valueConfig)) return await resolveFileValue(valueConfig);
 	const envValue = $envExact(valueConfig);
 	return envValue || valueConfig;
 }
@@ -202,8 +351,8 @@ export function createConfigHeaderResolver(
 	};
 }
 
-/** Clear all command state. Exported for focused resolver tests. */
+/** Clear all command and file state. Exported for focused resolver tests. */
 export function clearConfigValueCache(): void {
-	invalidateAllCommandConfigs();
+	invalidateAllConfigValues();
 	commandInFlight.clear();
 }

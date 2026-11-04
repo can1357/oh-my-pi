@@ -9112,7 +9112,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 
 			// Validate API key; a provider without one walks the retry fallback chain first.
-			const apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
+			// An unusable `{ file }` key is a configuration error to fix, not a missing key.
+			const apiKey = await logger
+				.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId))
+				.catch((error: unknown) => {
+					if (error instanceof AIError.ConfigurationError) throw new PromptPreflightError(error.message);
+					throw error;
+				});
 			if (!apiKey && !(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))) {
 				if (setupAbort.signal.aborted) return false;
 				throw new PromptPreflightError(
