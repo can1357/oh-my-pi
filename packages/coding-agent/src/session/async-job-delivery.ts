@@ -8,7 +8,9 @@
  * This replaces the old single hardwired `onJobComplete` closure that routed
  * every completion — regardless of owner — into the first top-level session.
  */
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
+import { shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { AsyncJob, AsyncJobType } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
@@ -59,16 +61,17 @@ type AsyncResultJobDetails = {
 	meta?: OutputMeta;
 	/** Full structured payload (source/mode/status/data/error), when the job used an output schema. */
 	schema?: StructuredSubagentOutput;
-	/**
-	 * Images this job added to the delivery content, which lists every job's images in job
-	 * order after the text. Lets `attachment://N` find a backgrounded `ask` answer's own images.
-	 */
-	imageCount?: number;
 };
 
 export type AsyncResultDetails = {
 	jobs: AsyncResultJobDetails[];
 	meta?: OutputMeta;
+	/**
+	 * How many leading content images are images a person pasted into backgrounded `ask`
+	 * answers. They are numbered across the delivery (`[Image #N]` is the Nth of them), so
+	 * `attachment://N` resolves to them; images other jobs produced follow and are not attachments.
+	 */
+	answerImageCount?: number;
 };
 
 /**
@@ -117,7 +120,22 @@ export function taskAgentHandles(
 
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
-	const jobs = entries.map(entry => {
+	// Each backgrounded `ask` answer numbers its pasted images from 1. In one delivery
+	// the answers share one message, so shift each answer's markers past the images of
+	// the answers before it: `[Image #N]` then names one image of the whole delivery.
+	const answerImages: ImageContent[] = [];
+	const otherImages: ImageContent[] = [];
+	const results = entries.map(entry => {
+		const images = entry.job?.latestDetails?.images ?? [];
+		if (entry.job?.type !== "ask") {
+			otherImages.push(...images);
+			return entry.result;
+		}
+		const shifted = shiftImageMarkers(entry.result, answerImages.length, images.length);
+		answerImages.push(...images);
+		return shifted;
+	});
+	const jobs = entries.map((entry, index) => {
 		const structured = entry.job?.structured;
 		const hasStructuredData = structured ? Object.hasOwn(structured, "data") : false;
 		const structuredJson = structured && structured.status !== "valid" ? renderStructuredJson(structured) : undefined;
@@ -138,7 +156,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			agentUrlId,
 			showAgentUrl: handles === "agent",
 			showHistoryUrl: handles === "history",
-			result: escapeHarnessTags(entry.result),
+			result: escapeHarnessTags(results[index]!),
 			type: entry.job?.type,
 			status: entry.job?.status,
 			agentId: entry.job?.agentId,
@@ -154,29 +172,26 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			schemaValid: structured?.status === "valid",
 		};
 	});
-	const jobImages = entries.map(entry => entry.job?.latestDetails?.images ?? []);
 	const details: AsyncResultDetails = {
 		meta: { source: { type: "report", value: "background job delivery" } },
-		jobs: jobs.map((job, index) => {
-			const imageCount = jobImages[index]!.length;
-			return {
-				jobId: job.jobId,
-				type: job.type,
-				status: job.status,
-				agentId: job.agentId,
-				label: job.label,
-				durationMs: job.durationMs,
-				...(job.meta ? { meta: job.meta } : {}),
-				...(job.structured ? { schema: job.structured } : {}),
-				...(imageCount > 0 ? { imageCount } : {}),
-			};
-		}),
+		jobs: jobs.map(job => ({
+			jobId: job.jobId,
+			type: job.type,
+			status: job.status,
+			agentId: job.agentId,
+			label: job.label,
+			durationMs: job.durationMs,
+			...(job.meta ? { meta: job.meta } : {}),
+			...(job.structured ? { schema: job.structured } : {}),
+		})),
+		...(answerImages.length > 0 ? { answerImageCount: answerImages.length } : {}),
 	};
 	const text = prompt.render(asyncResultTemplate, {
 		multiple: jobs.length > 1,
 		jobs,
 	});
-	const images = jobImages.flat();
+	// Answer images lead, in marker order, so `[Image #N]` is also the Nth image the model sees here.
+	const images = [...answerImages, ...otherImages];
 	return {
 		role: "custom",
 		customType: ASYNC_RESULT_MESSAGE_TYPE,

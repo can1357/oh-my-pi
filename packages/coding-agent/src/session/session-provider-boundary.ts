@@ -58,9 +58,9 @@ export interface SessionProviderBoundaryHost {
 
 /**
  * Images a person attached to `message`, numbered as the model reads them (`[Image #1]` is the
- * first). A backgrounded `ask` answer arrives inside an `async-result` delivery that lists every
- * finished job's images in job order, and its text numbers only its own images, so only the newest
- * answering `ask` job's slice counts. Images other jobs or tools produced are not attachments.
+ * first). Backgrounded `ask` answers arrive in an `async-result` delivery that numbers every
+ * answer's images across the delivery and puts them first; images other jobs or tools produced
+ * are not attachments.
  */
 function userImages(message: AgentMessage): ImageContent[] {
 	if (!("content" in message) || !Array.isArray(message.content)) return [];
@@ -69,15 +69,7 @@ function userImages(message: AgentMessage): ImageContent[] {
 	if (message.role === "user" || message.role === "developer") return images;
 	if (message.role === "toolResult") return message.toolName === "ask" ? images : [];
 	if (message.role !== "custom" || message.customType !== ASYNC_RESULT_MESSAGE_TYPE) return [];
-	const jobs = (message.details as AsyncResultDetails | undefined)?.jobs ?? [];
-	let answer: ImageContent[] = [];
-	let offset = 0;
-	for (const job of jobs) {
-		const count = job.imageCount ?? 0;
-		if (job.type === "ask" && count > 0) answer = images.slice(offset, offset + count);
-		offset += count;
-	}
-	return answer;
+	return images.slice(0, (message.details as AsyncResultDetails | undefined)?.answerImageCount ?? 0);
 }
 
 /** Owns the transformations at the session/provider boundary. */
