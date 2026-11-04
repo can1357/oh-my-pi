@@ -707,6 +707,62 @@ describe("wait", () => {
 			await handleWait;
 		});
 
+		test("a handle that settled before an untimed eval wait began holds nothing while a sibling job runs", async () => {
+			registerParentAndChild();
+			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			const childRun = registerChildJob(manager);
+			const otherRun = Promise.withResolvers<string>();
+			manager.register("bash", "other", async () => otherRun.promise, { id: "other", ownerId: "Main" });
+			childRun.resolve("done");
+			await manager.getJob("Child")?.promise;
+			const parentSession = { asyncJobManager: manager, getAgentId: () => "Main" } as unknown as ToolSession;
+			const handleWait = runEvalWait(
+				{
+					items: [
+						{ kind: "agent", id: "Child" },
+						{ kind: "agent", id: "other" },
+					],
+				},
+				{ session: parentSession },
+			);
+			await ask();
+			const waiting = childWait(manager);
+			expect(await stillPending(waiting)).toBe(true);
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
+			expect((await waiting).details?.waited).toMatchObject([{ from: "Main", body: "heliotrope" }]);
+			otherRun.resolve("done");
+			await handleWait;
+		});
+
+		test("a handle settling during an untimed eval wait releases its block before the sibling job ends", async () => {
+			registerParentAndChild();
+			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			const childRun = registerChildJob(manager);
+			const otherRun = Promise.withResolvers<string>();
+			manager.register("bash", "other", async () => otherRun.promise, { id: "other", ownerId: "Main" });
+			const parentSession = { asyncJobManager: manager, getAgentId: () => "Main" } as unknown as ToolSession;
+			const handleWait = runEvalWait(
+				{
+					items: [
+						{ kind: "agent", id: "Child" },
+						{ kind: "agent", id: "other" },
+					],
+				},
+				{ session: parentSession },
+			);
+			await ask();
+			// While the child's own job still runs, the parent does owe on it.
+			expect(await idleText(childWait(manager))).toContain("`Main` cannot reply before you finish");
+			childRun.resolve("done");
+			await manager.getJob("Child")?.promise;
+			const waiting = childWait(manager);
+			expect(await stillPending(waiting)).toBe(true);
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "heliotrope" });
+			expect((await waiting).details?.waited).toMatchObject([{ from: "Main", body: "heliotrope" }]);
+			otherRun.resolve("done");
+			await handleWait;
+		});
+
 		test("keeps waiting while the agent asked runs a timed eval handle wait on the caller", async () => {
 			registerParentAndChild();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
@@ -1070,6 +1126,27 @@ describe("wait", () => {
 				release.reject(new Error("broker gave up"));
 			});
 		}
+
+		test("bounds the whole call when the interrupt landed before the refresh began", async () => {
+			// An abort event does not replay. A signal already aborted when the
+			// refresh starts must still stop the wait waiting on a broker step
+			// that ignores the signal (the token read is a blocking FIFO read),
+			// instead of running to the broker's own completion.
+			registerMain();
+			const release = Promise.withResolvers<never>();
+			vi.spyOn(servicesModule, "listServicesTolerant").mockImplementation(async () => release.promise);
+			const controller = new AbortController();
+			controller.abort(TOOL_INTERRUPT_ABORT_REASON);
+			const started = Date.now();
+			const result = await new WaitTool(session(undefined, "Main", true)).execute(
+				"preaborted-refresh",
+				{ timeout: 1 },
+				controller.signal,
+			);
+			expect(Date.now() - started).toBeLessThan(10_000);
+			expect(result.content).toEqual([{ type: "text", text: "Wait interrupted by message." }]);
+			release.reject(new Error("broker gave up"));
+		});
 
 		test("a refresh the deadline abandoned does not subscribe the session once its broker client arrives", async () => {
 			// Client creation does not observe the signal, so the deadline can win

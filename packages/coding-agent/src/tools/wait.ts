@@ -319,7 +319,12 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		);
 		const stopped = Promise.withResolvers<undefined>();
 		const onStop = () => stopped.resolve(undefined);
-		refreshSignal.addEventListener("abort", onStop, { once: true });
+		// An abort event does not replay: a signal already aborted when the
+		// listener goes on (an interrupt that landed before the refresh began)
+		// would never resolve `stopped`, and the race would run to the broker's
+		// own completion instead of the caller's bound.
+		if (refreshSignal.aborted) onStop();
+		else refreshSignal.addEventListener("abort", onStop, { once: true });
 		// An agent may start blocking on the caller while the broker answers.
 		const unsubscribe = registry?.awaits.onChange(() => {
 			if (awaited().length > 0) awaitedStop.abort();
