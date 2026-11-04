@@ -26,6 +26,9 @@ import type { SourceMeta } from "../src/capability/types";
 import { readMCPConfigFile, updateMCPServer } from "../src/mcp/config-writer";
 import { MCPManager } from "../src/mcp/manager";
 import type { MCPHttpServerConfig, MCPStdioServerConfig } from "../src/mcp/types";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+allowMCPInTests();
 
 const NAMESPACED_NAME = "cloudflare:cloudflare-api";
 const BUN_EXEC = process.execPath;

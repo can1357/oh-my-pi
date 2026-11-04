@@ -191,7 +191,17 @@ export class LocalBlobBackend implements BlobBackend {
 	}
 
 	/** Ensure eager bytes have a stable publication. */
-	async ensureBlob(key: string, mimeType: string, getBytes: () => Uint8Array): Promise<BlobPublication | null> {
+	/**
+	 * `env` is the requesting session's environment overlay for an upload
+	 * command (see `EnsureBlobRequest.env`); in-process callers pass none.
+	 */
+	async ensureBlob(
+		key: string,
+		mimeType: string,
+		getBytes: () => Uint8Array,
+		_getBase64?: () => string,
+		env?: Readonly<Record<string, string>>,
+	): Promise<BlobPublication | null> {
 		if (this.#dead) return null;
 		if (this.#upload) {
 			const existing = this.#store.lookup(key);
@@ -207,6 +217,7 @@ export class LocalBlobBackend implements BlobBackend {
 				bytes,
 				mimeType,
 				extension: EXT_BY_MIME[mimeType] ?? "bin",
+				env,
 			});
 			if (publication) this.#store.recordPublication(key, mimeType, publication);
 			return publication;

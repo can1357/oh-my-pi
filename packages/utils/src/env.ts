@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseEnv } from "node:util";
+import { isMainThread } from "node:worker_threads";
 import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv } from "./dirs";
 import { isBunTestRuntime } from "./test-runtime";
 
@@ -135,6 +136,77 @@ function readLaunchEnv(): ReadonlyMap<string, string> | undefined {
 
 const launchEnvValues = readLaunchEnv();
 const projectEnvNamesLoadedByOmp = new Set<string>();
+/** Values this process set at runtime for every child to inherit; see {@link setInheritedEnv}. */
+const inheritedEnvValues = new Map<string, string>();
+
+/**
+ * Set an environment variable this process decided at runtime (the exported
+ * form of a CLI flag such as `--no-mcp`) so that every process it starts
+ * inherits it. A child shell keeps the value even when a project dotenv file
+ * names the same variable: it came from this process, not from that file.
+ */
+export function setInheritedEnv(name: string, value: string): void {
+	Bun.env[name] = value;
+	inheritedEnvValues.set(name, value);
+	installLiveSpawnEnvDefault();
+}
+
+let liveSpawnEnvDefaultInstalled = false;
+
+/**
+ * Bun starts a child process or a worker thread that is given no `env` with
+ * the environment this process was launched with, not `process.env`: a value
+ * set at runtime never reaches it. Once this process exports a value at
+ * runtime ({@link setInheritedEnv}), `Bun.spawn`, `Bun.spawnSync` and `Worker`
+ * default to the live environment, as Node's `child_process` already does, so
+ * every child and worker inherits the value (a worker then exports it to its
+ * own children in turn).
+ */
+function installLiveSpawnEnvDefault(): void {
+	if (liveSpawnEnvDefaultInstalled) return;
+	liveSpawnEnvDefaultInstalled = true;
+	const BaseWorker = globalThis.Worker;
+	if (BaseWorker) {
+		globalThis.Worker = class extends BaseWorker {
+			constructor(url: string | URL, options?: WorkerOptions) {
+				super(url, options?.env === undefined ? { ...options, env: liveEnvRecord() } : options);
+			}
+		};
+	}
+	const spawn = Bun.spawn;
+	const spawnSync = Bun.spawnSync;
+	Bun.spawn = ((...args: unknown[]) =>
+		(spawn as (...args: unknown[]) => unknown)(...withLiveEnv(args))) as typeof Bun.spawn;
+	Bun.spawnSync = ((...args: unknown[]) =>
+		(spawnSync as (...args: unknown[]) => unknown)(...withLiveEnv(args))) as typeof Bun.spawnSync;
+}
+
+/** The live environment as a worker's `env`: every variable that has a value. */
+function liveEnvRecord(): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const key in process.env) {
+		const value = process.env[key];
+		if (value !== undefined) env[key] = value;
+	}
+	return env;
+}
+
+/** `Bun.spawn` arguments, in either call form, with `env: process.env` when they set none. */
+function withLiveEnv(args: unknown[]): unknown[] {
+	const [first, second] = args;
+	if (Array.isArray(first)) {
+		const options = (second ?? {}) as { env?: unknown };
+		return options.env === undefined ? [first, { ...options, env: process.env }, ...args.slice(2)] : args;
+	}
+	if (first !== null && typeof first === "object" && (first as { env?: unknown }).env === undefined) {
+		return [{ ...first, env: process.env }, ...args.slice(1)];
+	}
+	return args;
+}
+
+// A worker thread's environment is the one its parent gave it, not the launch
+// environment Bun hands a child: the worker's children and workers get its own.
+if (!isMainThread) installLiveSpawnEnvDefault();
 
 function expandDotenvValues(values: Record<string, string>, env: Record<string, string>): Record<string, string> {
 	const expanded: Record<string, string> = {};
@@ -199,6 +271,9 @@ function filterChildShellEnvInternal(
 		for (const key in expandedLaunchEnv) onDotenvValue(expandedLaunchEnv[key]!);
 	}
 	for (const key in allLaunchEnv) {
+		const inheritedValue = inheritedEnvValues.get(key);
+		// Set by this process at runtime for its children: not dotenv-owned, even with the same name.
+		if (inheritedValue !== undefined && result[key] === inheritedValue) continue;
 		const launchValue = runtimeLaunchEnvValues?.get(key);
 		if (launchValue !== undefined) {
 			// Launcher-owned name: it keeps the launcher's own value. Bun overwrites

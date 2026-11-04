@@ -4,8 +4,9 @@
 
 import { Args, CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { parseArgs } from "../cli/args";
-import { setupHelp as commandHelp } from "../cli/command-help";
+import { noMcpFlagDescription, setupHelp as commandHelp } from "../cli/command-help";
 import { runSetupCommand, type SetupCommandArgs, type SetupComponent } from "../cli/setup-cli";
+import { disableMCP } from "../mcp/policy";
 import { runRootCommand } from "../main";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
@@ -43,10 +44,12 @@ export default class Setup extends Command {
 	static flags = {
 		check: Flags.boolean({ char: "c", description: "Check if dependencies are installed" }),
 		json: Flags.boolean({ description: "Output status as JSON" }),
+		"no-mcp": Flags.boolean({ description: noMcpFlagDescription }),
 	};
 
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Setup);
+		if (flags["no-mcp"]) disableMCP();
 		if (!args.component) {
 			if (flags.check || flags.json) {
 				// A check/JSON request with no COMPONENT has nothing to probe. Emit a

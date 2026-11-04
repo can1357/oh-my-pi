@@ -93,6 +93,7 @@ const PREPAINT_SAFE_FLAGS: Record<string, true> = {
 	"--no-context-files": true,
 	"--no-tools": true,
 	"--no-lsp": true,
+	"--no-mcp": true,
 	"--no-title": true,
 	"--no-prewalk": true,
 	"--no-pty": true,
@@ -571,9 +572,10 @@ export async function runCli(argv: string[]): Promise<void> {
 	}
 
 	try {
-		const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
+		const [{ run }, { commands, resolveCliArgv }, { disableMCP }] = await Promise.all([
 			import("@oh-my-pi/pi-utils/cli"),
 			import("./cli-commands"),
+			import("./mcp/policy"),
 		]);
 		// --help and --version are handled by run() directly; --license returned above.
 		// Everything else that isn't a known subcommand routes to "launch".
@@ -583,6 +585,8 @@ export async function runCli(argv: string[]): Promise<void> {
 			process.exitCode = 1;
 			return;
 		}
+		// A leading `--no-mcp` holds for every command, including ones whose parser never sees it.
+		if (resolved.noMcp) disableMCP();
 		runningCommand = resolved.argv[0];
 		await run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
 	} finally {

@@ -11,6 +11,9 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { deadlinesOnlyUnderDeadline } from "./helpers/mcp-deadline";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+allowMCPInTests();
 
 const TOOL_DEF = { name: "record_effect", inputSchema: { type: "object" as const } };
 const connections: MCPServerConnection[] = [];

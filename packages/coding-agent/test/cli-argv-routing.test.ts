@@ -92,3 +92,14 @@ describe("resolveCliArgv strips launch-global flags before non-launch subcommand
 		expect(resolveCliArgv(["--cwd", "/x", "acp"])).toEqual({ argv: ["acp", "--cwd", "/x"] });
 	});
 });
+
+describe("resolveCliArgv retains a leading --no-mcp policy across every subcommand", () => {
+	for (const command of ["read", "join", "setup"] as const) {
+		test(`reports --no-mcp before ${command} even though the command does not receive launch flags`, () => {
+			expect(resolveCliArgv(["--no-mcp", command])).toEqual({
+				argv: [command],
+				noMcp: true,
+			});
+		});
+	}
+});

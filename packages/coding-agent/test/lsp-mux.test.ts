@@ -1,9 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { MessageFramer } from "../src/jsonrpc/message-framing";
+import { sharedLspConnectParams } from "../src/lsp/mux/daemon";
+import * as mcpPolicy from "../src/mcp/policy";
 import {
 	MUX_CONNECT_METHOD,
 	MUX_PING_METHOD,
@@ -226,6 +228,31 @@ describe("LspMuxServer", () => {
 		expect(secondInfo.version).toBe(String(second.connected.pid));
 		expect((await state(first.client)).initializeCount).toBe(1);
 		expect((await state(second.client)).initializeCount).toBe(1);
+	}, 10_000);
+
+	// Round-2 review: a mux started by a session with MCP on spawned a disabled
+	// session's language server with the mux's environment, so an omp that
+	// server ran started the user's MCP servers.
+	it("spawns a shared server with the requesting session's MCP choice, not the mux's", async () => {
+		const previous = process.env.PI_NO_MCP;
+		// The in-process mux plays a broker started by a session with MCP on.
+		process.env.PI_NO_MCP = "";
+		try {
+			const disabled = vi.spyOn(mcpPolicy, "isMCPDisabled").mockReturnValue(true);
+			const offParams = sharedLspConnectParams({ ...connectParams, initializationOptions: {} });
+			disabled.mockReturnValue(false);
+			const onParams = sharedLspConnectParams({ ...connectParams, initializationOptions: {} });
+			disabled.mockRestore();
+
+			const off = await link(offParams);
+			const on = await link(onParams);
+			expect(on.connected.key).not.toBe(off.connected.key);
+			expect(await off.client.request<string | null>("test/env", { name: "PI_NO_MCP" })).toBe("1");
+			expect(await on.client.request<string | null>("test/env", { name: "PI_NO_MCP" })).toBe("");
+		} finally {
+			if (previous === undefined) delete process.env.PI_NO_MCP;
+			else process.env.PI_NO_MCP = previous;
+		}
 	}, 10_000);
 
 	it("rewrites initialize processId to the mux process", async () => {

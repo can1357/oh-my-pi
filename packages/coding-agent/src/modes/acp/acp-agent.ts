@@ -59,6 +59,7 @@ import { parseSkillInvocation } from "../../extensibility/skills";
 import { PYTHON_KERNEL_CANCEL_BUDGET_MS } from "../../eval/py/kernel";
 import { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
+import { refusesMCPServerStarts } from "../../mcp/policy";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { theme } from "@oh-my-pi/pi-tui/theme";
@@ -3154,7 +3155,14 @@ export class AcpAgent implements Agent {
 		// stale tool set after this reconfiguration installs the new one.
 		await record.mcpRefreshChain;
 		record.mcpRefreshChain = undefined;
-		if (servers.length === 0) {
+		// Client-declared servers are servers too: `--no-mcp` / `PI_NO_MCP=1` starts none of them.
+		const disabled = servers.length > 0 && refusesMCPServerStarts();
+		if (disabled) {
+			logger.warn("ACP client MCP servers not started: MCP is disabled (--no-mcp or PI_NO_MCP=1)", {
+				servers: servers.map(server => server.name),
+			});
+		}
+		if (servers.length === 0 || disabled) {
 			record.mcpManager = undefined;
 			await record.session.refreshMCPTools([]);
 			return;

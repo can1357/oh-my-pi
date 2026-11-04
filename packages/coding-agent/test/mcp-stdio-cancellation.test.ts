@@ -10,6 +10,9 @@ import type { JsonRpcNotification, JsonRpcRequest, MCPStdioServerConfig } from "
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { deadlinesOnlyUnderDeadline } from "./helpers/mcp-deadline";
 import { rejectionOf, trackUnhandled } from "./helpers/rejection";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+allowMCPInTests();
 
 type Frame = JsonRpcRequest | JsonRpcNotification;
 const FIXTURE = path.join(import.meta.dir, "fixtures", "cancellable-mcp.ts");

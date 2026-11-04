@@ -30,6 +30,7 @@ import { RequestIdAllocator } from "../request-id";
 import { routeProgressNotification, withProgressToken } from "../progress";
 import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
 import { isThenable } from "../../utils/ipc";
+import { assertMCPEnabled } from "../policy";
 
 /** Subprocess argv and platform-derived spawn flags for an MCP stdio server. */
 export interface StdioSpawnCommand {
@@ -587,6 +588,8 @@ export class StdioTransport implements MCPTransport {
 	 * Start the subprocess and begin reading.
 	 */
 	async connect(signal?: AbortSignal): Promise<void> {
+		// Exported for SDK hosts: refuse here too, not only in `connectToServer`.
+		assertMCPEnabled();
 		signal?.throwIfAborted();
 		if (this.#connected) return;
 

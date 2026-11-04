@@ -17,11 +17,12 @@ import {
 	type TerminalLaunchResult,
 } from "../../../src/subprocess/terminal-launch";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "../../tools/tern-fake-daemon";
-
+import { setNoMcpEnvForTest } from "../../helpers/no-mcp-env";
 let tempDirectory: string;
 let sourceSessionFile: string;
 
 beforeEach(async () => {
+	setNoMcpEnvForTest("");
 	tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-fork-command-"));
 	sourceSessionFile = path.join(tempDirectory, "current-session.jsonl");
 	await Bun.write(sourceSessionFile, '{"type":"session"}\n');
@@ -67,6 +68,7 @@ function createContext(
 		getHeader: vi.fn(() => undefined),
 		getCwd: vi.fn(() => options.cwd ?? "/workspace/project"),
 		getSessionFile: vi.fn(() => sessionFile),
+		getSessionId: vi.fn(() => "parent-session-id"),
 		isSessionOnDisk: vi.fn(() => sessionFile !== undefined),
 		flush,
 	};
@@ -189,6 +191,15 @@ describe("/fork terminal placement", () => {
 		]);
 		expect(ctx.showStatus).toHaveBeenCalledTimes(1);
 		expect(session.fork).not.toHaveBeenCalled();
+	});
+
+	it("turns an environment-only MCP disable into a leading child --no-mcp flag", async () => {
+		setNoMcpEnvForTest("1");
+		const { controller, launchTerminal } = createContext();
+		await controller.handleForkCommand("pane");
+		const command = launchTerminal.mock.calls[0]?.[0].command ?? [];
+		const appArgs = command.slice(command.indexOf("omp-entry") + 1);
+		expect(appArgs[0]).toBe("--no-mcp");
 	});
 
 	it("reports a launcher warning instead of claiming a visible placement", async () => {
@@ -456,6 +467,16 @@ describe("/fork inside Tern", () => {
 		expect(session.fork).not.toHaveBeenCalled();
 		expect(ctx.showWarning).not.toHaveBeenCalled();
 		expect(ctx.present).toHaveBeenCalledTimes(1);
+	});
+
+	it("forks in place, and says why, while MCP is disabled because Tern cannot forward the policy", async () => {
+		const tern = await startTern(() => ({ ok: { block: 9 } }));
+		setNoMcpEnvForTest("1");
+		const { controller, ctx, session } = createContext();
+		await controller.handleForkCommand();
+		expect(tern.forks).toHaveLength(0);
+		expect(session.fork).toHaveBeenCalledTimes(1);
+		expect(ctx.showWarning).toHaveBeenCalledWith(expect.stringContaining("--no-mcp or PI_NO_MCP=1"));
 	});
 
 	it("refuses the in-place fallback mid-turn when Tern declines the fork", async () => {

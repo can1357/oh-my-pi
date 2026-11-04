@@ -75,6 +75,12 @@ export interface EnsureBlobRequest {
 	mimeType: string;
 	/** Base64 blob bytes; omitted on the probe round. */
 	data?: string;
+	/**
+	 * The calling session's environment overlay (its MCP choice) for an upload
+	 * command this request runs: the daemon serves every omp process in the
+	 * project but keeps the environment of the one that started it.
+	 */
+	env?: Record<string, string>;
 }
 
 /** `POST /lazy` request body. */

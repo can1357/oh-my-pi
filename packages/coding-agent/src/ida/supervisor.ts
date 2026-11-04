@@ -55,6 +55,12 @@ export interface IdaDatabaseInfo {
 export interface IdaRequestOptions {
 	signal?: AbortSignal;
 	timeoutMs?: number;
+	/**
+	 * The caller's environment overlay (its MCP choice). The worker serves every omp process, and
+	 * work a request schedules can outlive it, so a caller's `PI_NO_MCP=1` stays in the worker's
+	 * environment from then on (see `worker.py`).
+	 */
+	env?: Record<string, string>;
 }
 
 interface IdaOpenResult extends IdaDatabaseInfo {
@@ -256,7 +262,7 @@ export class IdaWorker {
 		try {
 			await this.#waitTurn(previous, signal, timeoutMs);
 			const remaining = deadline === undefined ? undefined : Math.max(1, deadline - Date.now());
-			const value = await this.#send(method, params, { signal, timeoutMs: remaining });
+			const value = await this.#send(method, params, { signal, timeoutMs: remaining, env: options.env });
 			if (method === "exec") this.#execSinceSave = true;
 			else if (method === "save") this.#execSinceSave = false;
 			// The worker answers with the JSON shape documented for `method`.
@@ -322,15 +328,18 @@ export class IdaWorker {
 		this.#idleTimer = undefined;
 	}
 
-	/** Close the worker (saving first when `save`), wait for it to exit, then release the lock and unregister. */
-	close(options: { save: boolean }): Promise<void> {
-		this.#closing ??= this.#close(options.save);
+	/**
+	 * Close the worker (saving first when `save`), wait for it to exit, then release the lock and
+	 * unregister. `env` is the closing caller's overlay (see {@link IdaRequestOptions.env}).
+	 */
+	close(options: { save: boolean; env?: Record<string, string> }): Promise<void> {
+		this.#closing ??= this.#close(options.save, options.env);
 		return this.#closing;
 	}
 
-	async #close(save: boolean): Promise<void> {
+	async #close(save: boolean, env: Record<string, string> | undefined): Promise<void> {
 		try {
-			await this.request("close", { save }, { timeoutMs: CLOSE_TIMEOUT_MS });
+			await this.request("close", { save }, { timeoutMs: CLOSE_TIMEOUT_MS, env });
 			const grace = delay(EXIT_GRACE_MS);
 			const exited = await Promise.race([this.#proc.exited.then(() => true), grace.promise.then(() => false)]);
 			grace.cancel();
@@ -357,7 +366,7 @@ export class IdaWorker {
 		this.#current = { method, startedAt: Date.now() };
 		try {
 			// Serialize first: a non-serializable request is the caller's error and must not kill the worker.
-			const line = `${JSON.stringify({ id, method, params })}\n`;
+			const line = `${JSON.stringify({ id, method, params, env: options.env })}\n`;
 			try {
 				await this.#writeFrame(line);
 			} catch (error) {

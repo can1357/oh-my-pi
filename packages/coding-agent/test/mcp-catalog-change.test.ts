@@ -11,6 +11,9 @@ import { createExtensionDashboardRuntime } from "@oh-my-pi/pi-coding-agent/modes
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { PROMPT_NAME, RESOURCE_NAME, RESOURCE_URI, TOOL_NAME } from "./fixtures/delayed-catalog-mcp";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+allowMCPInTests();
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "delayed-catalog-mcp.ts");
 const SERVER = "catalog";

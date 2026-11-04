@@ -139,6 +139,7 @@ Environment variables are never written back to `config.yml`. Variables declared
 | `PI_SLOW_MODEL`                                     | `modelRoles.slow`                                 | Also exposed as `--slow`.                                                                         |
 | `PI_PLAN_MODEL`                                     | `modelRoles.plan`                                 | Also exposed as `--plan`.                                                                         |
 | `PI_NO_PTY=1`                                       | (disables PTY bash)                               | Equivalent to `--no-pty` for the process.                                                         |
+| `PI_NO_MCP=1`                                       | (starts no MCP servers)                           | Equivalent to `--no-mcp` for the process and every process it starts.                             |
 | `PI_PY`                                             | `eval.py`                                         | `PI_PY=0` disables the Python eval backend.                                                       |
 | `PI_JS`                                             | `eval.js`                                         | `PI_JS=0` disables the JavaScript eval backend.                                                   |
 | `PI_TINY_DEVICE`                                    | `providers.tinyModelDevice`                       | ONNX execution provider or `mlx` backend for local tiny models.                                   |

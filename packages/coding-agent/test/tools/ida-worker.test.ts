@@ -86,6 +86,8 @@ describe("IDA worker protocol", () => {
 		env.PYTHONPATH = stubs;
 		env.PYTHONUNBUFFERED = "1";
 		env.PYTHONIOENCODING = "utf-8";
+		// The worker's own environment: that of the omp session that started its host.
+		env.PI_NO_MCP = "";
 		const loc: IdbLocation = {
 			id: "stub",
 			dir,
@@ -129,5 +131,42 @@ describe("IDA worker protocol", () => {
 			expect(next).toMatchObject({ value: String(i + 1), error: null });
 		}
 		expect(worker.pid).toBe(pid);
+	});
+
+	// The host and its worker serve every omp process but keep the environment of
+	// the session that started them, and work a request schedules (a thread, an
+	// atexit callback) can start a process after that request ends: once a caller
+	// with MCP off has used the worker, every process it starts has MCP off (PR
+	// #17795 review, rounds 4 and 5). Runs last: it changes the shared worker.
+	it("keeps a caller's PI_NO_MCP=1 for every later process the worker starts", async () => {
+		const probe = `import os, subprocess, sys
+r = subprocess.run([sys.executable, "-c", "import os; print('<' + os.environ.get('PI_NO_MCP', 'unset') + '>')"], capture_output=True, text=True)
+r.stdout.strip()`;
+		expect(await worker.request<ExecResult>("exec", { code: probe }, { env: { PI_NO_MCP: "" } })).toMatchObject({
+			value: "'<>'",
+			error: null,
+		});
+		// A thread the first request leaves behind starts its process only after a
+		// caller with MCP off has run a request.
+		const marker = path.join(dir, "late-child.txt");
+		const late = `import os, subprocess, sys, threading
+LATE_GO = threading.Event()
+def _late():
+    LATE_GO.wait(10)
+    r = subprocess.run([sys.executable, "-c", "import os; print('<' + os.environ.get('PI_NO_MCP', 'unset') + '>')"], capture_output=True, text=True)
+    open(${JSON.stringify(marker)}, "w").write(r.stdout.strip())
+threading.Thread(target=_late, daemon=True).start()
+"armed"`;
+		expect(await worker.request<ExecResult>("exec", { code: late })).toMatchObject({ error: null });
+		expect(
+			await worker.request<ExecResult>("exec", { code: `LATE_GO.set()\n${probe}` }, { env: { PI_NO_MCP: "1" } }),
+		).toMatchObject({ value: "'<1>'", error: null });
+		for (let i = 0; i < 100 && !(await Bun.file(marker).exists()); i++) await Bun.sleep(50);
+		expect(await Bun.file(marker).text()).toBe("<1>");
+		// A later request from a caller with MCP on cannot turn it back on.
+		expect(await worker.request<ExecResult>("exec", { code: probe }, { env: { PI_NO_MCP: "" } })).toMatchObject({
+			value: "'<1>'",
+			error: null,
+		});
 	});
 });

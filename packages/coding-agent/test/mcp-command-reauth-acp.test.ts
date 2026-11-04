@@ -29,6 +29,9 @@ import {
 	setAgentDir,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+allowMCPInTests();
 
 const RAW_SERVER_URL = `https://\${MCP_HOST}/mcp`;
 const EXPANDED_SERVER_URL = "https://mcp.example.com/mcp";

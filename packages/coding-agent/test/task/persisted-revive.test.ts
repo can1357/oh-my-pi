@@ -257,6 +257,7 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 		modelRegistry: owner.modelRegistry ?? ({ authStorage: {} } as ModelRegistry),
 		settings: owner.settings ?? Settings.isolated(),
 		enableLsp: true,
+		enableMCP: true,
 		eventBus,
 	});
 }
@@ -1205,6 +1206,7 @@ describe("persisted subagent revival", () => {
 				modelRegistry: stubRegistry([parentModel, rootModel]),
 				settings: Settings.isolated(),
 				enableLsp: true,
+				enableMCP: true,
 			});
 			const reviver = await factory(ref);
 			if (!reviver) throw new Error("Expected a persisted reviver");

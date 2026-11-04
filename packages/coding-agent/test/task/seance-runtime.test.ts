@@ -408,6 +408,7 @@ describe("seance startup contracts", () => {
 				modelRegistry,
 				settings: seanceSettings,
 				enableLsp: true,
+				enableMCP: true,
 			});
 			const revive = await createReviver(ref);
 			if (!revive) throw new Error("Expected a cold seance reviver");
@@ -454,6 +455,7 @@ describe("seance startup contracts", () => {
 			modelRegistry: {} as ModelRegistry,
 			settings: Settings.isolated(),
 			enableLsp: false,
+			enableMCP: true,
 		});
 		const reviver = await createReviver({
 			id: "FailedSeance",

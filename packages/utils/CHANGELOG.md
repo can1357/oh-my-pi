@@ -11,6 +11,7 @@
 
 ### Added
 
+- Added `setInheritedEnv()`: sets an environment variable this process decided at runtime, which child shells keep even when a project dotenv file names it. Once it has run, `Bun.spawn`, `Bun.spawnSync` and `new Worker` calls that pass no `env` give the child or worker the live environment (as Node's `child_process` does) instead of the one this process was launched with, and a worker's own children get the worker's environment, so the value reaches every child and worker thread
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
 - Added `ensureSqliteLockShim()`, which `openSqliteDatabase`/`openSqliteDatabaseSync` call before opening a store, so on Linux the process's SQLite locks are open-file-description locks that other closes of the file cannot release ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
 - Added `assertNotHeldOpen(path)` (`@oh-my-pi/pi-utils/held-file`), which throws `EBUSY` for a SQLite database or `-shm` this process holds open ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))

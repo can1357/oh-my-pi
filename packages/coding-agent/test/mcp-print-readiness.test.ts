@@ -8,6 +8,9 @@ import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+allowMCPInTests();
 
 const FIXTURE = path.join(import.meta.dir, "fixtures", "readiness-mcp.ts");
 const SLOW_START_MS = 1_100;

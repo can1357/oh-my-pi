@@ -74,6 +74,12 @@ export interface PersistedSubagentReviveContext {
 	/** LSP policy of the top-level session; revived subagents inherit it rather than defaulting on. */
 	enableLsp: boolean;
 	/**
+	 * MCP policy of the top-level session (false for `--no-mcp`, an ACP-style
+	 * session or an SDK host that passed `enableMCP: false`); revived subagents
+	 * inherit it rather than discovering servers the parent never started.
+	 */
+	enableMCP: boolean;
+	/**
 	 * Shared event bus feeding RPC/collab subagent subscriptions. Passed through
 	 * to the wake-turn monitor so an IRC send to a cold-revived subagent emits
 	 * the same lifecycle/progress frames a live run does.
@@ -110,6 +116,7 @@ export interface PersistedReviveSpec {
 	readonly modelRegistry: ModelRegistry;
 	readonly settings: Settings;
 	readonly enableLsp: boolean;
+	readonly enableMCP: boolean;
 	readonly eventBus: EventBus | undefined;
 	readonly subagentEventBus: EventBus | undefined;
 }
@@ -215,6 +222,7 @@ export function createPersistedSubagentReviverFactory(
 				modelRegistry: ctx.modelRegistry,
 				settings: ctx.settings,
 				enableLsp: ctx.enableLsp,
+				enableMCP: ctx.enableMCP,
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
 			};
@@ -408,7 +416,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	const restrictToolNames = restoredSeance !== undefined || init.restrictToolNames === true;
 	// The spawn's result contract: a session persisted without `yield` returned its final message.
 	const structured = revivedToolNames.includes("yield");
-	const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
+	const mcpManager = restrictToolNames || !spec.enableMCP ? undefined : MCPManager.instance();
 	// Subscribe before minting proxies so a manager change during startup is replayed on bind.
 	const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
 	const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
@@ -492,7 +500,8 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 						preloadedCustomToolPaths: [],
 					}
 				: {
-						enableMCP: !mcpManager,
+						// With no shared manager, an MCP-enabled parent lets the child discover its own.
+						enableMCP: spec.enableMCP && !mcpManager,
 						mcpManager,
 						mcpTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 					}),

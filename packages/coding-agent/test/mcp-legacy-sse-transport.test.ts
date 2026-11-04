@@ -6,6 +6,9 @@ import { LegacySseTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/sse
 import type { JsonRpcMessage, JsonRpcRequest } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
 import { withTimeout } from "@oh-my-pi/pi-utils";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+allowMCPInTests();
 
 const encoder = new TextEncoder();
 let server: Bun.Server<undefined> | null = null;

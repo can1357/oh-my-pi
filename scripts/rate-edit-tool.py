@@ -1183,6 +1183,7 @@ def run_model_sync(
             no_skills=True,
             no_rules=True,
             no_session=True,
+            no_mcp=True,
             startup_timeout=30.0,
             request_timeout=30.0,
         ) as client:
@@ -1393,6 +1394,7 @@ def run_oracle_review_sync(
         no_skills=True,
         no_rules=True,
         no_session=True,
+        no_mcp=True,
         startup_timeout=30.0,
         request_timeout=30.0,
     ) as client:

@@ -114,6 +114,7 @@ import { copyLocalArtifacts, resolveLocalRoot } from "../internal-urls";
 import { hasNativeJudge } from "../judgment";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
+import { mcpPolicyArgs } from "../mcp/policy";
 import {
 	formatMCPConnectionStatusMessage,
 	isMcpConnectionStatusEvent,
@@ -8211,14 +8212,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		const sessionFile = this.sessionManager.isSessionOnDisk() ? this.sessionManager.getSessionFile() : undefined;
 		// Pass the profile explicitly: native exec does not inherit Bun's process.env updates.
 		const activeProfile = getActiveProfile();
-		const cmd = [
-			...resolveCliEntryCmd(),
-			...restartArgv(
-				process.argv.slice(2),
-				sessionFile ? path.resolve(sessionFile) : undefined,
-				activeProfile ? { "--profile": true } : undefined,
-			),
-		];
+		const relaunchArgs = restartArgv(
+			process.argv.slice(2),
+			sessionFile ? path.resolve(sessionFile) : undefined,
+			activeProfile ? { "--profile": true } : undefined,
+		);
+		// Same for `PI_NO_MCP=1` set at runtime: the relaunch gets it as `--no-mcp`.
+		const cmd = [...resolveCliEntryCmd(), ...mcpPolicyArgs(), ...relaunchArgs];
 		if (activeProfile) cmd.push("--profile", activeProfile);
 		await postmortem.cleanup();
 		await postmortem.drainStdout();

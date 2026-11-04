@@ -6,6 +6,9 @@ import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { McpConnectionStatusEvent } from "@oh-my-pi/pi-coding-agent/mcp/startup-events";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+allowMCPInTests();
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "many-tools-mcp.ts");
 const BUN_EXEC = process.execPath;

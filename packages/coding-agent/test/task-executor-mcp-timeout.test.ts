@@ -6,6 +6,10 @@ import { HttpTransport } from "../src/mcp/transports/http";
 import type { MCPRequestOptions, MCPServerConnection, MCPToolDefinition, MCPTransport } from "../src/mcp/types";
 import { createMCPProxyTools } from "../src/task/executor";
 import { ToolAbortError } from "../src/tools/tool-errors";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+// These tests start stub MCP servers they build; the test runner exports PI_NO_MCP=1.
+allowMCPInTests();
 
 function createFakeConnection() {
 	let capturedSignal: AbortSignal | undefined;

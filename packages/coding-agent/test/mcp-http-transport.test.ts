@@ -6,6 +6,9 @@ import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
 import type { JsonRpcRequest } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
 import { postmortem } from "@oh-my-pi/pi-utils";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+allowMCPInTests();
 
 const encoder = new TextEncoder();
 const REQUEST_TIMEOUT_MS = 50;

@@ -23,6 +23,9 @@ import {
 	createMcpManagerStub,
 	type McpManagerOverrides,
 } from "./helpers/interactive-mode-context";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+allowMCPInTests();
 
 const RAW_SERVER_URL = `https://\${MCP_HOST}/mcp`;
 const EXPANDED_SERVER_URL = "https://mcp.example.com/mcp";

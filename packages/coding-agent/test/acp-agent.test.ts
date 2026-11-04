@@ -54,6 +54,9 @@ import {
 import { TOOL_NAME as DELAYED_MCP_TOOL_NAME } from "./fixtures/delayed-tool-mcp";
 
 import { cfgPlanAutosave, cfgPlanAutosaveDir, cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+allowMCPInTests();
 
 /** Validates an ACP wire payload against the in-house protocol schemas. */
 function expectAcpStructure(schema: Validator<unknown>, value: unknown): void {

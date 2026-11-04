@@ -38,6 +38,7 @@ import {
 import { resolveIdaRuntime } from "./runtime";
 import { cfgIdaIdleCloseSec, cfgIdaMaxOpen } from "./settings";
 import { type FatSelection, type IdbLocation, idbRef, type LocateIdbOptions, locateIdb } from "./store";
+import { mcpPolicyEnv } from "../mcp/policy";
 import type { IdaDatabaseInfo, IdaRequestOptions } from "./supervisor";
 
 const HOST_LABEL = "IDA host";
@@ -220,7 +221,7 @@ export class IdaDatabase {
 		const { signal, timeoutMs } = options;
 		signal?.throwIfAborted();
 		const id = this.#conn.nextId();
-		const answer = this.#conn.call({ id, op: "call", method, params, timeoutMs });
+		const answer = this.#conn.call({ id, op: "call", method, params, timeoutMs, env: mcpPolicyEnv() });
 		const onAbort = () => this.#conn.notify({ id: this.#conn.nextId(), op: "cancel", target: id });
 		signal?.addEventListener("abort", onAbort, { once: true });
 		try {
@@ -233,12 +234,12 @@ export class IdaDatabase {
 
 	/** Save when the database has unsaved changes. */
 	async flush(): Promise<void> {
-		await this.#conn.call({ id: this.#conn.nextId(), op: "flush" });
+		await this.#conn.call({ id: this.#conn.nextId(), op: "flush", env: mcpPolicyEnv() });
 	}
 
 	/** Close the database (saving first when `save`); its host exits afterwards. */
 	async close(options: { save: boolean }): Promise<void> {
-		await this.#conn.call({ id: this.#conn.nextId(), op: "close", save: options.save });
+		await this.#conn.call({ id: this.#conn.nextId(), op: "close", save: options.save, env: mcpPolicyEnv() });
 	}
 
 	/** Drop this process's connection; the host keeps running. */

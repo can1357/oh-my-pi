@@ -86,12 +86,17 @@ export default class Token extends Command {
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Token);
 		const providerName = args.provider ?? "";
-		const managedMcpOAuth = isManagedMCPOAuthCredentialId(args.provider);
-		const provider = managedMcpOAuth ? providerName : providerName.toLowerCase();
+		// Classify the id this command looks up, not the spelling typed: a
+		// managed id is kept as typed, any other spelling is looked up lowercased
+		// (so `MCP_OAUTH:...` reads the `mcp_oauth:...` row and gets its checks).
+		const provider = isManagedMCPOAuthCredentialId(args.provider) ? providerName : providerName.toLowerCase();
+		const managedMcpOAuth = isManagedMCPOAuthCredentialId(provider);
 		// Profile-scoped managed ids stay isolated per profile: a shared broker
 		// snapshot carries `mcp_oauth:profile:*` rows for every profile, so refuse
 		// to read/refresh another profile's row from this one (mirrors
 		// removeManagedMcpOAuthCredential). Legacy unscoped ids have no profile.
+		// While MCP is off (`--no-mcp` / `PI_NO_MCP=1`) a stored, unexpired MCP
+		// token is printed as stored; a refresh refuses (`refreshMCPOAuthToken`).
 		if (managedMcpOAuth) {
 			const scopedProfile = mcpOAuthCredentialProfile(provider);
 			if (scopedProfile !== undefined && scopedProfile !== (getActiveProfile() ?? "default")) {

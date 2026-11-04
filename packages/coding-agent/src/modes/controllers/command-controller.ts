@@ -116,6 +116,7 @@ import { cfgTerminalShowImages } from "../settings";
 import { cfgProviderAppendOnlyContext } from "../../session/settings";
 import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../../commands/settings";
 import { flagConsumesValue, restartArgv } from "../../cli/flag-tables";
+import { isMCPDisabled, mcpPolicyArgs } from "../../mcp/policy";
 import {
 	createDefaultTerminalLaunchRequest,
 	getTerminalLaunchPlacement,
@@ -1508,7 +1509,10 @@ export class CommandController {
 			return;
 		}
 
-		const childArgs = restartArgv(dependencies.argv(), undefined, FORK_LAUNCH_OVERRIDES);
+		const relaunchArgs = restartArgv(dependencies.argv(), undefined, FORK_LAUNCH_OVERRIDES);
+		// The multiplexer server's environment, not this process's, reaches the fork: carry
+		// an environment-only `PI_NO_MCP=1` as the flag.
+		const childArgs = [...mcpPolicyArgs(), ...relaunchArgs];
 		if (hasForkApiKeyOverride(childArgs)) {
 			this.ctx.showError(
 				"Cannot open a fork in another terminal when --api-key was supplied at startup; the key cannot be forwarded without exposing it in the multiplexer command. Configure provider credentials in the auth store and retry.",
@@ -1616,12 +1620,19 @@ export class CommandController {
 	/**
 	 * `/fork` inside a Tern pane: ask Tern to run `omp --fork` of this session in a new pane beside
 	 * this one, which keeps the original session. False means fork in place instead: outside Tern,
-	 * an unsaved session, a Tern without `fork`, or Tern refusing it. Once the request is out, an
+	 * an unsaved session, MCP disabled (Tern starts the pane's omp itself and cannot carry
+	 * `--no-mcp`), a Tern without `fork`, or Tern refusing it. Once the request is out, an
 	 * unconfirmed one is reported rather than retried in place, since Tern may still open the pane.
 	 */
 	async #forkIntoTernPane(): Promise<boolean> {
 		const tern = resolveTernPane();
 		if (!tern || !this.ctx.sessionManager.isSessionOnDisk()) return false;
+		if (isMCPDisabled()) {
+			this.ctx.showWarning(
+				"Forking in place instead of a new Tern pane: MCP is disabled (--no-mcp or PI_NO_MCP=1), and the omp Tern starts would not inherit that.",
+			);
+			return false;
+		}
 		const client = new TernSocketClient({ socketPath: tern.socketPath });
 		try {
 			try {

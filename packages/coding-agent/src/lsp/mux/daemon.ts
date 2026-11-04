@@ -16,6 +16,7 @@ import { encodeMessageFrame, MessageFramer } from "../../jsonrpc/message-framing
 import { daemonClientForProject } from "../../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../../launch/ensure";
 import { daemonRuntimeDir } from "../../launch/paths";
+import { mcpPolicyEnv } from "../../mcp/policy";
 import { resolveWorkerSpawnCmd, SMOKE_TEST_TIMEOUT_MS, workerEnvFromParent } from "../../subprocess/worker-client";
 import type { LspJsonRpcRequest, LspJsonRpcResponse, LspTransport, LspWriteSink } from "../types";
 import {
@@ -292,6 +293,28 @@ async function ensureLspMuxDaemon(projectDir: string, signal?: AbortSignal): Pro
 }
 
 /**
+ * The connect request for a shared language server. The mux's own environment
+ * belongs to whichever session started it, so the requesting session's MCP
+ * choice travels in the request; the mux keys servers on `env`, so sessions
+ * with different choices never share one.
+ */
+export function sharedLspConnectParams(opts: {
+	command: string;
+	args: string[];
+	cwd: string;
+	env?: Record<string, string>;
+	initializationOptions: unknown;
+}): MuxConnectParams {
+	return {
+		command: opts.command,
+		args: opts.args,
+		cwd: opts.cwd,
+		env: mcpPolicyEnv(opts.env),
+		initializationOptions: opts.initializationOptions,
+	};
+}
+
+/**
  * Open a broker-shared transport for one language server, ensuring the mux
  * daemon first. Returns null (after a debug log) when the shared path is
  * unavailable so the caller falls back to a process-local spawn.
@@ -307,13 +330,7 @@ export async function connectSharedLspTransport(opts: {
 	try {
 		const endpoint = await ensureLspMuxDaemon(opts.cwd, opts.signal);
 		if (!endpoint) return null;
-		return await dialMuxServer(endpoint, {
-			command: opts.command,
-			args: opts.args,
-			cwd: opts.cwd,
-			env: opts.env,
-			initializationOptions: opts.initializationOptions,
-		});
+		return await dialMuxServer(endpoint, sharedLspConnectParams(opts));
 	} catch (error) {
 		if (opts.signal?.aborted) throw error;
 		logger.debug("Shared LSP transport unavailable; falling back to local spawn", {

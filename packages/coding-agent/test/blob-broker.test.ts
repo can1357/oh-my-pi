@@ -8,6 +8,8 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { LocalBlobBackend } from "../src/blob-broker/broker";
+import type { BlobBrokerWorkerConfig, EnsureBlobRequest, EnsureBlobResponse } from "../src/blob-broker/protocol";
+import { createControlHandler } from "../src/blob-broker/server";
 import { contextHasImageUrls, supportsRemoteImageUrls } from "../src/blob-broker/context-images";
 import { ImageUrlService } from "../src/blob-broker/service";
 import { type BlobPersistence, BlobRegistry } from "../src/blob-broker/store";
@@ -15,6 +17,7 @@ import { wrapStreamFnWithBlobUrlFallback } from "../src/blob-broker/stream-fallb
 import { createCommandUploader, extractUploadUrl, splitCommandTemplate } from "../src/blob-broker/uploaders";
 import { BlobStore as SessionBlobStore } from "../src/session/blob-store";
 import { writeFakeExecutable } from "./helpers/fake-executable";
+import { setNoMcpEnvForTest } from "./helpers/no-mcp-env";
 
 const PNG_B64 = Buffer.from("blob-broker-test-bytes-1").toString("base64");
 const OTHER_B64 = Buffer.from("blob-broker-test-bytes-2").toString("base64");
@@ -402,6 +405,44 @@ if (fs.statSync(file, { throwIfNoEntry: false })?.size) {
 			bytes: 7,
 		});
 	});
+
+	// The blob daemon serves every omp session in the project but keeps the
+	// environment of the one that started it; an upload command a request runs
+	// must carry the requesting session's MCP choice (PR #17795 review, round 3).
+	for (const { daemon, request } of [
+		{ daemon: "", request: "1" },
+		{ daemon: "1", request: "" },
+	]) {
+		it(`runs a daemon upload command with the request's PI_NO_MCP=${JSON.stringify(request)}, not the daemon's`, async () => {
+			setNoMcpEnvForTest(daemon);
+			const config: BlobBrokerWorkerConfig = {
+				kind: "command",
+				options: {
+					command: `${process.execPath} -e "console.log('https://files.example/<' + (process.env.PI_NO_MCP ?? 'unset') + '|' + (process.env.OMP_TEST_UPLOAD_OVERLAY ?? 'unset') + '>/' + process.argv.length)" {file}`,
+				},
+				credentials: {},
+				bindHost: "127.0.0.1",
+			};
+			const backend = new LocalBlobBackend(config);
+			try {
+				const handle = createControlHandler(backend, config, "http://127.0.0.1:0");
+				const body: EnsureBlobRequest = {
+					key: `mcp-policy-${daemon || "on"}`,
+					mimeType: "image/png",
+					data: Buffer.from("payload").toString("base64"),
+					// The marker cannot come from this process's launch environment.
+					env: { PI_NO_MCP: request, OMP_TEST_UPLOAD_OVERLAY: "request" },
+				};
+				const response = await handle(
+					new Request("http://blob/blob", { method: "POST", body: JSON.stringify(body) }),
+				);
+				const { publication } = (await response.json()) as EnsureBlobResponse;
+				expect(publication?.url).toContain(`/<${request}|request>/`);
+			} finally {
+				backend.stop();
+			}
+		});
+	}
 
 	it("rejects command uploads when the project directory becomes inaccessible", async () => {
 		const projectDir = getProjectDir();

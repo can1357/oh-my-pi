@@ -19,6 +19,10 @@ import { LegacySseTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/sse
 import type { MCPServerConnection, MCPToolCallResult, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { logger } from "@oh-my-pi/pi-utils";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+// These tests start stub MCP servers they build; the test runner exports PI_NO_MCP=1.
+allowMCPInTests();
 
 // ---------------------------------------------------------------------------
 // Helpers

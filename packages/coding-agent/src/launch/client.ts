@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { IpcConnection } from "@oh-my-pi/pi-natives";
 import { getGlobalDaemonRuntimeDir, isEexist, isEnoent, logger, postmortem, toError } from "@oh-my-pi/pi-utils";
+import { mcpPolicyEnv } from "../mcp/policy";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
 import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
 import {
@@ -178,6 +179,13 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			pending.removeAbort = () => signal.removeEventListener("abort", abort);
 		}
 		this.#pending.set(id, pending);
+		// The broker starts every daemon with the requester's environment overlay
+		// (`spec.env`) over its own, which belongs to whichever session started the
+		// broker; the MCP choice must be this session's.
+		const sent: DaemonOperation =
+			operation.op === "start"
+				? { ...operation, spec: { ...operation.spec, env: mcpPolicyEnv(operation.spec.env) } }
+				: operation;
 		socket.send(
 			JSON.stringify({
 				id,
@@ -188,7 +196,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionUnsubscribes,
 				completionReplays,
 				completionSubscriptionId: this.#completionSubscriptionId,
-				operation,
+				operation: sent,
 			}),
 		);
 		const result = await promise;

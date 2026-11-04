@@ -15,6 +15,7 @@ import { loadSkills } from "../extensibility/skills";
 import { closeDaemonClients } from "../launch/client";
 import { discoverAndLoadMCPTools } from "../mcp/loader";
 import { MCPManager } from "../mcp/manager";
+import { isMCPDisabled } from "../mcp/policy";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import type { AuthStorage } from "../session/auth-storage";
 import type { ToolSession } from "../tools";
@@ -78,20 +79,23 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 
 		// MCP servers start only when a read reaches an MCP resource — `mcp://`, a scheme with no
 		// registered handler, or a skill:// URL no loaded skill owns — in any list entry.
-		MCPManager.setDeferredInstance(async () => {
-			authStorage ??= await discoverAuthStorage(undefined, { settings });
-			const result = await discoverAndLoadMCPTools(cwd, {
-				enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
-				filterExa: true,
-				// `omp read` has no Eval prelude, so browser MCP remains available.
-				filterBrowser: false,
-				cacheStorage: settings.getStorage(),
-				authStorage,
+		// `--no-mcp` / `PI_NO_MCP=1` starts none.
+		if (!isMCPDisabled()) {
+			MCPManager.setDeferredInstance(async () => {
+				authStorage ??= await discoverAuthStorage(undefined, { settings });
+				const result = await discoverAndLoadMCPTools(cwd, {
+					enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
+					filterExa: true,
+					// `omp read` has no Eval prelude, so browser MCP remains available.
+					filterBrowser: false,
+					cacheStorage: settings.getStorage(),
+					authStorage,
+				});
+				mcpManager = result.manager;
+				session.mcpManager = mcpManager;
+				return mcpManager;
 			});
-			mcpManager = result.manager;
-			session.mcpManager = mcpManager;
-			return mcpManager;
-		});
+		}
 
 		// `read <image>?q=<question>` delegates to a vision model, and X URLs read
 		// through Grok's X tools; both need a model registry to resolve models and

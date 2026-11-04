@@ -6,6 +6,7 @@
 import * as path from "node:path";
 import * as url from "node:url";
 import { getProjectDir, logger, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
+import { assertMCPEnabled } from "./policy";
 import { describeMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "./timeout";
 import { createHttpTransport } from "./transports/http";
 import { LegacySseConnectionTimeoutError, createSseTransport } from "./transports/sse";
@@ -147,6 +148,7 @@ export class MCPConnectionTimeoutError extends Error {
  * Connect to an MCP server.
  * Has a 30 second timeout by default to prevent blocking startup.
  * Set OMP_MCP_TIMEOUT_MS=0 to disable MCP client-side timeouts.
+ * Every server start goes through here, so it refuses while MCP is disabled.
  */
 export async function connectToServer(
 	name: string,
@@ -157,6 +159,7 @@ export async function connectToServer(
 		onRequest?: (method: string, params: unknown) => Promise<unknown>;
 	},
 ): Promise<MCPServerConnection> {
+	assertMCPEnabled(name);
 	// `withTimeout` rejects a pre-aborted signal without observing `connect()`; never start one.
 	options?.signal?.throwIfAborted();
 	const timeoutMs = resolveMCPTimeoutMs(config.timeout);

@@ -7,6 +7,7 @@
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { withTimeoutSignal } from "../utils/fetch-timeout";
+import { assertMCPEnabled } from "./policy";
 
 /** Per-request abort deadline for each OAuth discovery metadata fetch. */
 const DISCOVERY_FETCH_TIMEOUT_MS = 10_000;
@@ -403,6 +404,8 @@ export async function fetchResourceMetadataScopes(
 	resourceMetadataUrl: string,
 	opts?: { fetch?: FetchImpl; signal?: AbortSignal },
 ): Promise<string | undefined> {
+	// Contacts the MCP server; refused while MCP is off.
+	assertMCPEnabled();
 	const fetchImpl: FetchImpl = opts?.fetch ?? fetch;
 	try {
 		const resp = await fetchImpl(resourceMetadataUrl, {
@@ -474,6 +477,8 @@ export async function discoverOAuthEndpoints(
 	resourceMetadataUrl?: string,
 	opts?: { fetch?: FetchImpl; protectedScopes?: string; signal?: AbortSignal },
 ): Promise<OAuthEndpoints | null> {
+	// Contacts the MCP server; refused while MCP is off.
+	assertMCPEnabled();
 	const fetchImpl: FetchImpl = opts?.fetch ?? fetch;
 	// Authorization servers are not protected resources: probing
 	// `oauth-protected-resource` here would follow another resource's

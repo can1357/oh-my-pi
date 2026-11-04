@@ -521,6 +521,7 @@ describe("subagent runs routed into pooled workers", () => {
 					modelRegistry,
 					settings,
 					enableLsp: false,
+					enableMCP: true,
 					eventBus,
 				}),
 				() => 0,

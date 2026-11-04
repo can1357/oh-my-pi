@@ -21,6 +21,9 @@ import {
 	SERVER_INSTRUCTIONS,
 	TOOL_RESULT,
 } from "./fixtures/instructions-mcp";
+import { allowMCPDiscoveryInTests } from "./helpers/mcp-policy";
+
+allowMCPDiscoveryInTests();
 
 // Contract: a deferred interactive (`hasUI`) session runs MCP discovery off the
 // first-paint path. Once the background connection completes, the resulting

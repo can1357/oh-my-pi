@@ -758,6 +758,23 @@ def _close_and_exit(save):
     sys.exit(code)
 
 
+# Environment variables whose "1" stays set for the worker's life once any
+# request carries it. The worker serves every omp process but keeps the
+# environment of the session that started it, and work a request schedules
+# (a thread, an atexit callback) can start a process after that request ends;
+# so once a session with MCP off (PI_NO_MCP=1) has used the worker, every
+# later process it starts has MCP off too. A request can never turn it back on.
+_STICKY_ON = ("PI_NO_MCP",)
+
+
+def _apply_caller_env(env):
+    if not isinstance(env, dict):
+        return
+    for key in _STICKY_ON:
+        if env.get(key) == "1":
+            os.environ[key] = "1"
+
+
 def _handle(line):
     _arm_sigint()
     req_id = None
@@ -768,6 +785,7 @@ def _handle(line):
         req_id = req.get("id")
         method = req.get("method")
         params = req.get("params") or {}
+        _apply_caller_env(req.get("env"))
         if method == "close":
             save = bool(params.get("save"))
             try:

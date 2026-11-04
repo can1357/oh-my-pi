@@ -451,10 +451,11 @@ async function runTestCommand(testCommand: TestCommand): Promise<void> {
 }
 
 // Child env shared by every spawned test process: the parent env with the
-// private test-runtime marker set, all CI credential / cloud-config variables
-// scrubbed (see SCRUBBED_ENV_* above), and GITHUB_ACTIONS cleared. Clearing it
-// would also clear run-rs-task.ts's "always run in GitHub Actions" rule for the
-// Rust child, so under GitHub Actions OMP_FORCE_RUST_TASKS carries it instead.
+// private test-runtime marker set, MCP server startup off (PI_NO_MCP), all CI
+// credential / cloud-config variables scrubbed (see SCRUBBED_ENV_* above), and
+// GITHUB_ACTIONS cleared. Clearing it would also clear run-rs-task.ts's
+// "always run in GitHub Actions" rule for the Rust child, so under GitHub
+// Actions OMP_FORCE_RUST_TASKS carries it instead.
 //
 // GC knobs (both needed — they gate different JSC mechanisms):
 // - `BUN_JSC_useConcurrentGC=0` stops the collector from marking concurrently
@@ -480,6 +481,8 @@ function buildChildEnv(): Record<string, string | undefined> {
 		GITHUB_ACTIONS: "",
 		...(Bun.env.GITHUB_ACTIONS === "true" ? { OMP_FORCE_RUST_TASKS: "1" } : {}),
 		PI_TEST_RUNTIME: "1",
+		// Test children never start the developer's MCP servers; a test that needs MCP sets PI_NO_MCP="".
+		PI_NO_MCP: "1",
 		BUN_JSC_useConcurrentGC: "0",
 		BUN_JSC_numberOfGCMarkers: "1",
 	};

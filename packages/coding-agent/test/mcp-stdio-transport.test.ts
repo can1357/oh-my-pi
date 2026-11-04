@@ -6,6 +6,10 @@ import { MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import { resolveStdioSpawnCommand, StdioTransport, writeFrame } from "@oh-my-pi/pi-coding-agent/mcp/transports/stdio";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { trackUnhandled } from "./helpers/rejection";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+// These tests start stub MCP servers they build; the test runner exports PI_NO_MCP=1.
+allowMCPInTests();
 
 describe("resolveStdioSpawnCommand", () => {
 	it("resolves bare Windows commands through PATHEXT and wraps .cmd shims with cmd.exe", async () => {

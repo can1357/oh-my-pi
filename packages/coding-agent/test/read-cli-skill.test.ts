@@ -47,6 +47,8 @@ describe("omp read skill resources", () => {
 				USERPROFILE: root,
 				NO_COLOR: "1",
 				PI_CODING_AGENT_DIR: agentDir,
+				// ci-test-ts children inherit PI_NO_MCP=1, which keeps `omp read` from starting any MCP server.
+				PI_NO_MCP: undefined,
 			},
 		});
 		const stdout = new Response(proc.stdout).text();

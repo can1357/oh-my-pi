@@ -68,7 +68,8 @@ func startServer(t *testing.T, root, agentDir string, args []string, options ...
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	cmd := exec.Command("bun", append([]string{"packages/coding-agent/src/cli.ts", "--mode", "rpc", "--no-session"}, args...)...)
+	// --no-mcp: the test runs as the developer, and must not start the developer's MCP servers.
+	cmd := exec.Command("bun", append([]string{"packages/coding-agent/src/cli.ts", "--mode", "rpc", "--no-session", "--no-mcp"}, args...)...)
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "PI_CODING_AGENT_DIR="+agentDir)
 	var stderr bytes.Buffer

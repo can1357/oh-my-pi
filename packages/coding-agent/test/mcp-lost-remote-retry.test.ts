@@ -27,6 +27,9 @@ import type { MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import type { MCPHttpServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { type FlakyHttpMcpServer, startFlakyHttpMcpServer } from "./fixtures/flaky-http-mcp";
+import { allowMCPDiscoveryInTests } from "./helpers/mcp-policy";
+
+allowMCPDiscoveryInTests();
 
 /** Short ladder, fast schedule: three attempts per reconnect, retries at 20/40/80/80… ms. */
 const FAST: MCPReconnectPolicy = { ladderMs: [10, 10], retryBaseMs: 20, retryMaxMs: 80 };

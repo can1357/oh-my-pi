@@ -17,6 +17,9 @@ import * as oauthFlow from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import { mcpOAuthCredentialId } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { getActiveProfile, setProfile } from "@oh-my-pi/pi-utils/dirs";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+allowMCPInTests();
 
 const SERVER_URL = "https://mcp.example.com/mcp";
 const URL_KEY_ID = mcpOAuthCredentialId(SERVER_URL);

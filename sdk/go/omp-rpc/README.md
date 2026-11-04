@@ -61,6 +61,7 @@ echo := omprpc.HostTool{
 	},
 }
 
+// Add "--no-mcp" so omp starts none of the MCP servers configured for the user it runs as.
 cmd := exec.Command("omp", "--mode", "rpc", "--no-session")
 cmd.Stderr = os.Stderr
 client, err := omprpc.Start(ctx, cmd, omprpc.WithHostTools(echo))

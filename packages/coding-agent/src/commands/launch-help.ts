@@ -2,6 +2,7 @@ import { Args, type CommandMetadata, Flags } from "@oh-my-pi/pi-utils/cli";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/key-hint-format";
 import { CLI_THINKING_LEVELS } from "@oh-my-pi/pi-tui/thinking";
+import { noMcpFlagDescription } from "../cli/command-help";
 import { SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 
 export const launchHelp = {
@@ -75,6 +76,7 @@ export const launchHelp = {
 		models: Flags.string({ description: `Comma-separated model patterns for ${formatKeyHint("ctrl+p")} cycling` }),
 		"no-tools": Flags.boolean({ description: "Disable all built-in tools" }),
 		"no-lsp": Flags.boolean({ description: "Disable LSP tools, formatting, and diagnostics" }),
+		"no-mcp": Flags.boolean({ description: noMcpFlagDescription }),
 		"no-pty": Flags.boolean({ description: "Disable PTY-based interactive bash execution" }),
 		tools: Flags.string({ description: "Comma-separated list of tools to enable (default: all)" }),
 		thinking: Flags.string({

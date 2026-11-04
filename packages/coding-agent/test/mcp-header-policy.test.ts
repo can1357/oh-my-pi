@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { setGeneratedHeader } from "@oh-my-pi/pi-coding-agent/mcp/transports/header-policy";
 import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+// These tests start stub MCP servers they build; the test runner exports PI_NO_MCP=1.
+allowMCPInTests();
 
 const REQUEST_TIMEOUT_MS = 1_000;
 

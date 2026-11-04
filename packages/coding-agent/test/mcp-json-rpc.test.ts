@@ -5,6 +5,10 @@ import { fetchExaTools } from "@oh-my-pi/pi-coding-agent/exa/mcp-client";
 import { callMCP, redactUrlForLog } from "@oh-my-pi/pi-coding-agent/mcp/json-rpc";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { asGlobalFetch } from "./helpers/fetch-mock";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+// These tests start stub MCP servers they build; the test runner exports PI_NO_MCP=1.
+allowMCPInTests();
 
 interface PostedJsonRpcRequest {
 	id: string | number;

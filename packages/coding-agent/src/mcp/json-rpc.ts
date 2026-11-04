@@ -7,6 +7,7 @@
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { isRecord, logger, readSseEvents } from "@oh-my-pi/pi-utils";
 import type { JsonRpcResponse } from "./types";
+import { assertMCPEnabled } from "./policy";
 
 /** Hard ceiling on a single MCP HTTP request when the caller provides no signal. */
 const MCP_DEFAULT_TIMEOUT_MS = 60_000;
@@ -156,7 +157,8 @@ export interface CallMcpOptions {
 }
 
 /**
- * Call an MCP server with JSON-RPC 2.0 over HTTPS.
+ * Call an MCP server with JSON-RPC 2.0 over HTTPS. Refused while MCP is off
+ * (`--no-mcp`, `PI_NO_MCP=1`), like every other way to reach a server.
  *
  * @param url - Full MCP server URL (including any query parameters)
  * @param method - JSON-RPC method name (e.g., "tools/list", "tools/call")
@@ -165,6 +167,45 @@ export interface CallMcpOptions {
  * @returns Parsed JSON-RPC response
  */
 export async function callMCP(
+	url: string,
+	method: string,
+	params?: Record<string, unknown>,
+	options?: CallMcpOptions,
+): Promise<JsonRpcResponse> {
+	assertMCPEnabled();
+	return await postMcpJsonRpc(url, method, params, options);
+}
+
+/** Origins of omp's own hosted web-search MCP endpoints (Exa, Exa Websets, Parallel). */
+const BUILTIN_SEARCH_MCP_ORIGINS: ReadonlySet<string> = new Set([
+	"https://mcp.exa.ai",
+	"https://websetsmcp.exa.ai",
+	"https://search.parallel.ai",
+]);
+
+/**
+ * {@link callMCP} for omp's own hosted web-search integrations (Exa, Parallel).
+ * They are built-in tools, not configured or caller-supplied MCP servers, so
+ * `--no-mcp` leaves them on. It reaches only those endpoints: any other URL is
+ * refused, so it is no way around `--no-mcp` to an arbitrary server.
+ */
+export async function callBuiltinSearchMCP(
+	url: string,
+	method: string,
+	params?: Record<string, unknown>,
+	options?: CallMcpOptions,
+): Promise<JsonRpcResponse> {
+	let origin: string | undefined;
+	try {
+		origin = new URL(url).origin;
+	} catch {}
+	if (!origin || !BUILTIN_SEARCH_MCP_ORIGINS.has(origin)) {
+		throw new Error(`callBuiltinSearchMCP reaches only omp's hosted search endpoints, not ${redactUrlForLog(url)}`);
+	}
+	return await postMcpJsonRpc(url, method, params, options);
+}
+
+async function postMcpJsonRpc(
 	url: string,
 	method: string,
 	params?: Record<string, unknown>,

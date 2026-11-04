@@ -7,6 +7,9 @@ import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controller
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 import { TOOL_NAME, TOOL_RESULT } from "./fixtures/delayed-tool-mcp";
+import { allowMCPDiscoveryInTests } from "./helpers/mcp-policy";
+
+allowMCPDiscoveryInTests();
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "delayed-tool-mcp.ts");
 

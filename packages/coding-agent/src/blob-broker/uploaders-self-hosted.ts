@@ -243,11 +243,14 @@ function createFtpUploader(config: DestinationRuntimeConfig): BlobUploader {
 			if (protocol === "ftps" && port !== 990) args.push("--ssl-reqd");
 			args.push(ftpUploadUrl(protocol, host, port, destinationPath));
 			try {
+				// The command binary is configurable; the daemon runs it for every session
+				// in the project, so it inherits the requesting session's MCP choice.
 				const process = Bun.spawn(args, {
 					stdin: request.bytes,
 					stdout: "ignore",
 					stderr: "pipe",
 					cwd: getSafeProjectCwd(),
+					env: { ...globalThis.process.env, ...request.env },
 				});
 				const stderr = await new Response(process.stderr as ReadableStream<Uint8Array>).text();
 				const exitCode = await process.exited;

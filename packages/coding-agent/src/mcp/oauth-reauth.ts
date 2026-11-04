@@ -32,6 +32,7 @@ import {
 	removeManagedMcpOAuthCredential,
 } from "./oauth-credentials";
 import { MCPOAuthFlow, type MCPStoredOAuthCredential, mcpOAuthCredentialId } from "./oauth-flow";
+import { assertMCPEnabled } from "./policy";
 import type { AuthStorage } from "../session/auth-storage";
 import type { MCPAuthChallenge, MCPAuthConfig, MCPServerConfig } from "./types";
 
@@ -380,6 +381,8 @@ export async function resolveMcpOAuthEndpointsFromServer(
 		cwd?: string;
 	},
 ): Promise<OAuthEndpoints> {
+	// The probe below would start the server, and discovery contacts it: neither runs while MCP is off.
+	assertMCPEnabled();
 	// Stdio servers manage credentials inside the child process; OMP's OAuth
 	// flow only applies to http/sse transports. Without this guard the
 	// unauthenticated preflight below spawns the child, which happily reuses
@@ -735,6 +738,7 @@ export async function reauthorizeMcpServer(
 	found: FoundMcpServer,
 	opts: McpReauthOptions,
 ): Promise<McpReauthOutcome> {
+	assertMCPEnabled(name);
 	const { authStorage } = opts;
 	if (found.config.enabled === false) {
 		throw new McpReauthRefusalError(`Server "${name}" is disabled. Run /mcp enable ${name} first.`);

@@ -14,6 +14,7 @@ import { logger, ptree } from "@oh-my-pi/pi-utils";
 import { daemonClientForProject } from "../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../launch/ensure";
 import { daemonRuntimeDir } from "../launch/paths";
+import { mcpPolicyEnv } from "../mcp/policy";
 import { resolveWorkerSpawnCmd, SMOKE_TEST_TIMEOUT_MS, workerEnvFromParent } from "../subprocess/worker-client";
 import type { BlobBackend } from "./broker";
 import {
@@ -32,6 +33,7 @@ import {
 	type BlobBrokerStatus,
 	type BlobBrokerWorkerConfig,
 	blobBrokerEndpoint,
+	type EnsureBlobRequest,
 	type EnsureBlobResponse,
 } from "./protocol";
 import type { BlobPublication } from "./publication";
@@ -227,7 +229,12 @@ class DaemonBlobBackend implements BlobBackend {
 			if (probe.publication) return probe.publication;
 			const { publication } = await fetchUnix<EnsureBlobResponse>(this.#socket, "/blob", {
 				method: "POST",
-				body: JSON.stringify({ key, mimeType, data: getBase64?.() ?? getBytes().toBase64() }),
+				body: JSON.stringify({
+					key,
+					mimeType,
+					data: getBase64?.() ?? getBytes().toBase64(),
+					env: mcpPolicyEnv(),
+				} satisfies EnsureBlobRequest),
 			});
 			return publication ?? null;
 		} catch (error) {

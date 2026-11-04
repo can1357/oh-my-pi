@@ -9,6 +9,9 @@ import { MCP_DISCOVERY_TURN_WAIT_MS } from "@oh-my-pi/pi-coding-agent/session/ag
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { allowMCPDiscoveryInTests } from "./helpers/mcp-policy";
+
+allowMCPDiscoveryInTests();
 
 // Contract: UI/RPC sessions (`hasUI`) defer MCP discovery off startup. A prompt that
 // arrives while MCP servers are still connecting must not send its first request without

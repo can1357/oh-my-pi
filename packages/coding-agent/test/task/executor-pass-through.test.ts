@@ -33,6 +33,9 @@ import { manyToolName } from "../fixtures/many-tools-mcp";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { allowMCPInTests } from "../helpers/mcp-policy";
+
+allowMCPInTests();
 
 function createMockSession(
 	onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void | Promise<void>,

@@ -57,6 +57,7 @@ import type {
 	RpcSubagentSnapshot,
 	RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
+import { isMCPDisabled, mcpPolicyEnv } from "../../mcp/policy";
 
 /** Distributive Omit that works with union types */
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
@@ -100,6 +101,11 @@ export interface RpcClientOptions {
 	model?: string;
 	/** Session directory for the agent */
 	sessionDir?: string;
+	/**
+	 * Pass `--no-mcp`: the agent starts none of the MCP servers configured for the
+	 * user it runs as, and every process it starts inherits `PI_NO_MCP=1`.
+	 */
+	noMcp?: boolean;
 	/** Additional CLI arguments */
 	args?: string[];
 	/** Grace period before escalating process termination (default: process utility default, 1000ms) */
@@ -400,8 +406,18 @@ export class RpcClient {
 		if (this.options.sessionDir) {
 			args.push("--session-dir", this.options.sessionDir);
 		}
+		// The host's own choice too, so a custom `spawn` transport carries it.
+		if (this.options.noMcp || isMCPDisabled()) {
+			args.push("--no-mcp");
+		}
 		if (this.options.args) {
 			args.push(...this.options.args);
+		}
+		// An explicit `env` can never turn MCP back on for the child while this
+		// process has it off (`--no-mcp`, `PI_NO_MCP=1`); an undefined value unsets.
+		const env: Record<string, string> = {};
+		for (const [name, value] of Object.entries({ ...Bun.env, ...this.options.env })) {
+			if (value !== undefined) env[name] = value;
 		}
 		const child = this.options.spawn
 			? await this.options.spawn(args)
@@ -411,7 +427,7 @@ export class RpcClient {
 						: [...(this.options.command ?? ["bun", cliPath]), ...args],
 					{
 						cwd: this.options.cwd,
-						env: { ...Bun.env, ...this.options.env },
+						env: mcpPolicyEnv(env),
 						stdin: "pipe",
 					},
 				);

@@ -6,6 +6,9 @@ import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { isRecord, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { CUSTOM_NOTIFICATION_METHOD, CUSTOM_NOTIFICATION_PAYLOAD } from "./fixtures/notifications-mcp";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+allowMCPInTests();
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "notifications-mcp.ts");
 /** Marks the post-connect frame the ordering test injects, apart from the fixture's own. */

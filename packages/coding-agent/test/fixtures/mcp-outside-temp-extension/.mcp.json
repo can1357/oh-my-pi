@@ -1,0 +1,5 @@
+{
+	"mcpServers": {
+		"outside": { "command": "omp-test-server-that-must-never-start" }
+	}
+}

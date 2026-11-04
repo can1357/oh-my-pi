@@ -76,7 +76,7 @@ If omitted, it resolves:
 - `sessionManager`: `SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir))` (file-backed)
 - skills/rules/context files/prompt templates/slash commands/extensions/custom TS commands
 - built-in tools via `createTools(...)`
-- MCP tools (enabled by default; Exa MCP servers are folded into native Exa integration, and browser automation MCP servers are filtered when the built-in Eval browser prelude is enabled)
+- MCP tools (enabled by default; Exa MCP servers are folded into native Exa integration, and browser automation MCP servers are filtered when the built-in Eval browser prelude is enabled). MCP servers come from the configuration of the user the host runs as; pass `enableMCP: false` or set `PI_NO_MCP=1` to start none of them. `PI_NO_MCP=1` also refuses explicitly supplied server connections and prevents MCP `!command` config values from running. A host that spawns omp as a subprocess (RPC, print mode) passes `--no-mcp` instead, or sets `PI_NO_MCP=1` in the child's environment. `RpcClient` also accepts `noMcp: true`. Set `PI_NO_MCP=1` before the host starts anything: the choice is read at startup, so shells, workers and connections that already exist keep the choice they were made with. While it is in effect, an `RpcClient` child keeps MCP off even if the client's `env` says otherwise, a custom `spawn` transport gets `--no-mcp` in its arguments, and a server the Python, Go or Rust client starts gets `PI_NO_MCP=1` whatever the command's own environment says.
 - LSP integration (enabled by default)
 - `eventBus`: new `EventBus()` unless supplied
 
