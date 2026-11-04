@@ -314,12 +314,12 @@ export interface AgentViewSession extends AgentSessionHandle {
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined;
 	/** Thinking level a temporary switch to `model` would use. */
 	resolveTemporaryModelThinkingLevel(model: Model): ConfiguredThinkingLevel | undefined;
-	/** Switch model without persisting it as the default. */
+	/** Switch model without persisting it as the default; returns whether this call still owns the selection. */
 	setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean },
-	): Promise<void>;
+	): Promise<boolean>;
 	/** Model-role cycle for the given role order. */
 	getRoleModelCycle(roleOrder: readonly string[]): RoleModelCycle | undefined;
 	/** Cycle through role models. */
@@ -327,8 +327,8 @@ export interface AgentViewSession extends AgentSessionHandle {
 		roleOrder: readonly string[],
 		direction?: "forward" | "backward",
 	): Promise<RoleModelCycleResult | undefined>;
-	/** Apply a resolved role model. */
-	applyRoleModel(entry: ResolvedRoleModel): Promise<void>;
+	/** Apply a resolved role model; returns whether this call still owns the selection. */
+	applyRoleModel(entry: ResolvedRoleModel): Promise<boolean>;
 	/** Service tier in effect for `model`. */
 	effectiveServiceTier(model: Model): ServiceTier | undefined;
 	/** Whether fast mode is active. */

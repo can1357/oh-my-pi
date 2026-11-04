@@ -591,7 +591,7 @@ export class RemoteAgentSession implements AgentViewSession {
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean },
-	): Promise<void> {
+	): Promise<boolean> {
 		return this.#command("setModelTemporary", toWireData(model), thinkingLevel, options);
 	}
 
@@ -612,7 +612,7 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#command("cycleRoleModels", roleOrder, direction);
 	}
 
-	applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
+	applyRoleModel(entry: ResolvedRoleModel): Promise<boolean> {
 		return this.#command("applyRoleModel", toWireData(entry));
 	}
 

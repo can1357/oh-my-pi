@@ -11722,11 +11722,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				} else {
 					await this.sessionManager.flush();
 				}
-				await this.sessionManager.newSession({
-					...options,
-					additionalDirectories: cfgWorkspaceAdditionalDirectories.get(this.settings),
-				});
-				this.#models.invalidatePendingModelSelections();
+				await this.sessionManager.newSession(
+					{
+						...options,
+						additionalDirectories: cfgWorkspaceAdditionalDirectories.get(this.settings),
+					},
+					() => this.#models.invalidatePendingModelSelections(),
+				);
 				this.#bash.markSessionTransition(bashTransition);
 				// The new session owns the transcript from here, so the previous
 				// conversation's advisor spend is retired with it. Clearing at the commit
@@ -12012,13 +12014,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#models.setModel(model, role, options);
 	}
 
-	/** Selects a model for this session without updating persisted model settings. */
+	/** Selects a session-only model; returns whether this call still owns the active selection. */
 	async setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean },
-	): Promise<void> {
-		await this.#models.setModelTemporary(model, thinkingLevel, options);
+	): Promise<boolean> {
+		return this.#models.setModelTemporary(model, thinkingLevel, options);
 	}
 
 	/** Cycles the scoped model set, or all available models when no scope exists. */
@@ -12031,9 +12033,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#models.getRoleModelCycle(roleOrder);
 	}
 
-	/** Applies a resolved role model without changing global settings. */
-	async applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
-		await this.#models.applyRoleModel(entry);
+	/** Applies a role model; returns whether this call still owns the active selection. */
+	async applyRoleModel(entry: ResolvedRoleModel): Promise<boolean> {
+		return this.#models.applyRoleModel(entry);
 	}
 
 	/** Cycles the configured role models in the supplied order. */

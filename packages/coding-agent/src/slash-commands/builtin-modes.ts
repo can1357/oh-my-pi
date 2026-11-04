@@ -480,7 +480,9 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const resolved = resolveSessionModelSelector(selector, runtime.session, runtime.settings);
 			if (!resolved.model) return usage(`Unknown model: ${selector}`, runtime);
 			try {
-				await runtime.session.setModelTemporary(resolved.model, resolved.thinkingLevel);
+				if (!(await runtime.session.setModelTemporary(resolved.model, resolved.thinkingLevel))) {
+					return commandConsumed();
+				}
 				await runtime.output(`Session-only model: ${formatModelString(resolved.model)}.`);
 				await runtime.notifyTitleChanged?.();
 				await runtime.notifyConfigChanged?.();

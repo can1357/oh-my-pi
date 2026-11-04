@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -81,7 +81,7 @@ interface FakeAcpBuiltinSession {
 	};
 	setModel(model: unknown): Promise<{ switched: boolean }>;
 	setThinkingLevel(level: string): void;
-	setModelTemporary(model: unknown, thinkingLevel?: string): Promise<void>;
+	setModelTemporary(model: unknown, thinkingLevel?: string): Promise<boolean>;
 	listResetCredits: () => Promise<ResetCreditAccountStatus[]>;
 	redeemResetCredit: (target: ResetCreditTarget) => Promise<ResetCreditRedeemOutcome>;
 }
@@ -194,7 +194,9 @@ function createRuntime() {
 			return { switched: true };
 		},
 		setThinkingLevel(_level: string) {},
-		async setModelTemporary(_model: unknown, _thinkingLevel?: string) {},
+		async setModelTemporary(_model: unknown, _thinkingLevel?: string) {
+			return true;
+		},
 	};
 	const typedSession = session as unknown as AgentSession & FakeAcpBuiltinSession;
 	const fakeSessionManager = {
@@ -836,7 +838,7 @@ describe("ACP builtin slash commands", () => {
 			{ provider: "anthropic", id: "claude-sonnet-4-5", contextWindow: 200_000 },
 		];
 		session.getAvailableModels = () => available;
-		const temporarySpy = spyOn(session, "setModelTemporary").mockResolvedValue(undefined);
+		const temporarySpy = spyOn(session, "setModelTemporary").mockResolvedValue(true);
 		const setModelSpy = spyOn(session, "setModel").mockResolvedValue({ switched: true });
 
 		const result = await executeAcpBuiltinSlashCommand("/switch opus:low", runtime);
@@ -847,6 +849,25 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("Session-only model: anthropic/claude-opus-4-5");
 	});
 
+	it("switch: suppresses success output and notifications after a superseded selection", async () => {
+		const { output, runtime, session } = createRuntime();
+		session.getAvailableModels = () => [{ provider: "anthropic", id: "claude-opus-4-5" }];
+		const notifyTitleChanged = vi.fn();
+		const notifyConfigChanged = vi.fn();
+		runtime.notifyTitleChanged = notifyTitleChanged;
+		runtime.notifyConfigChanged = notifyConfigChanged;
+		const selection = Promise.withResolvers<boolean>();
+		spyOn(session, "setModelTemporary").mockReturnValue(selection.promise);
+
+		const pending = executeAcpBuiltinSlashCommand("/switch opus:low", runtime);
+		selection.resolve(false);
+
+		expect(await pending).toEqual({ consumed: true });
+		expect(output).toEqual([]);
+		expect(notifyTitleChanged).not.toHaveBeenCalled();
+		expect(notifyConfigChanged).not.toHaveBeenCalled();
+	});
+
 	it("switch @smol: resolves the configured role alias", async () => {
 		const { runtime, session } = createRuntime();
 		const available = [
@@ -855,7 +876,7 @@ describe("ACP builtin slash commands", () => {
 		];
 		session.getAvailableModels = () => available;
 		runtime.settings.setModelRole("smol", "anthropic/claude-haiku-4-5");
-		const temporarySpy = spyOn(session, "setModelTemporary").mockResolvedValue(undefined);
+		const temporarySpy = spyOn(session, "setModelTemporary").mockResolvedValue(true);
 
 		await executeAcpBuiltinSlashCommand("/switch @smol", runtime);
 
@@ -865,7 +886,7 @@ describe("ACP builtin slash commands", () => {
 	it("switch unknown: reports the selector and leaves the model alone", async () => {
 		const { output, runtime, session } = createRuntime();
 		session.getAvailableModels = () => [{ provider: "anthropic", id: "claude-opus-4-5" }];
-		const temporarySpy = spyOn(session, "setModelTemporary").mockResolvedValue(undefined);
+		const temporarySpy = spyOn(session, "setModelTemporary").mockResolvedValue(true);
 
 		await executeAcpBuiltinSlashCommand("/switch gpt-fake-9000", runtime);
 

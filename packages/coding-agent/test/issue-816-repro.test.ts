@@ -77,7 +77,7 @@ describe("issue #816 — plan mode pendingModelSwitch leak", () => {
 		// Avoid kicking off real session work during plan mode entry.
 		vi.spyOn(session, "sendPlanModeContext").mockResolvedValue(undefined);
 
-		const setModelSpy = vi.spyOn(session, "setModelTemporary").mockResolvedValue(undefined);
+		const setModelSpy = vi.spyOn(session, "setModelTemporary").mockResolvedValue(true);
 
 		// Enter plan mode → snapshots default, queues pending switch to plan model.
 		await mode.handlePlanModeCommand();
@@ -115,7 +115,7 @@ describe("issue #816 — plan mode pendingModelSwitch leak", () => {
 		session.settings.setModelRole("plan", `${activePlanModel.provider}/${activePlanModel.id}`);
 		isStreaming = false;
 
-		const setModelSpy = vi.spyOn(session, "setModelTemporary").mockResolvedValue(undefined);
+		const setModelSpy = vi.spyOn(session, "setModelTemporary").mockResolvedValue(true);
 		await mode.flushPendingModelSwitch();
 
 		expect(setModelSpy).not.toHaveBeenCalled();
@@ -131,7 +131,7 @@ describe("issue #816 — plan mode pendingModelSwitch leak", () => {
 		const replacementPlanModel =
 			activePlanModel.provider === haiku.provider && activePlanModel.id === haiku.id ? opus : haiku;
 
-		const setModelSpy = vi.spyOn(session, "setModelTemporary").mockResolvedValue(undefined);
+		const setModelSpy = vi.spyOn(session, "setModelTemporary").mockResolvedValue(true);
 		session.settings.setModelRole("plan", `${replacementPlanModel.provider}/${replacementPlanModel.id}`);
 		await Promise.resolve();
 

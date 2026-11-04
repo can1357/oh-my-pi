@@ -1391,6 +1391,113 @@ describe("AgentSession model persistence", () => {
 		},
 	);
 
+	it.each(["setModel", "setModelTemporary", "role"] as const)(
+		"an unpublished %s preparation cannot publish while the new journal is being persisted",
+		async publication => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const target = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const created = await createSession({ initialModel: source, persist: true });
+			const manager = created.session.sessionManager;
+			await manager.ensureOnDisk();
+			const previousId = manager.getSessionId();
+			const previousFile = manager.getSessionFile()!;
+			const previousJournal = await Bun.file(previousFile).text();
+			const metadataEntered = Promise.withResolvers<void>();
+			const releaseMetadata = Promise.withResolvers<void>();
+			const resetEntered = Promise.withResolvers<void>();
+			const releasePersistence = Promise.withResolvers<void>();
+			const preparation = vi
+				.spyOn(sharedModelRegistry, "refreshSelectedModelMetadata")
+				.mockImplementation(async model => {
+					metadataEntered.resolve();
+					await releaseMetadata.promise;
+					return model;
+				});
+			const ensureOnDisk = manager.ensureOnDisk.bind(manager);
+			const persistence = vi.spyOn(manager, "ensureOnDisk").mockImplementation(async () => {
+				expect(manager.getSessionId()).not.toBe(previousId);
+				expect(manager.getSessionFile()).not.toBe(previousFile);
+				expect(manager.getEntries()).toHaveLength(0);
+				resetEntered.resolve();
+				await releasePersistence.promise;
+				return ensureOnDisk();
+			});
+			const pending =
+				publication === "role"
+					? created.session.applyRoleModel({
+							role: "slow",
+							model: target,
+							thinkingLevel: Effort.Low,
+							explicitThinkingLevel: true,
+						})
+					: publication === "setModelTemporary"
+						? created.session.setModelTemporary(target, Effort.Low)
+						: created.session.setModel(target);
+			let fresh: Promise<boolean> | undefined;
+			try {
+				await metadataEntered.promise;
+				fresh = created.session.newSession();
+				await resetEntered.promise;
+				releaseMetadata.resolve();
+				expect(await pending).toEqual(publication === "setModel" ? { switched: false } : false);
+				expect(created.session.model?.id).toBe(source.id);
+				expect(manager.getEntries()).toHaveLength(0);
+			} finally {
+				releaseMetadata.resolve();
+				releasePersistence.resolve();
+				await pending;
+				await fresh;
+				preparation.mockRestore();
+				persistence.mockRestore();
+			}
+			await manager.flush();
+			expect(await Bun.file(previousFile).text()).toBe(previousJournal);
+			const journal = await Bun.file(manager.getSessionFile()!).text();
+			expect(journal).not.toContain(modelValue(target));
+			expect(JSON.parse(journal.split("\n")[1]!).id).toBe(manager.getSessionId());
+			const newer = getAnthropicModelOrThrow("claude-haiku-4-5");
+			expect(await created.session.setModelTemporary(newer, Effort.High)).toBe(true);
+			expect(created.session.model?.id).toBe(newer.id);
+			expect(created.session.configuredThinkingLevel()).toBe(Effort.High);
+			expect(manager.getBranch().findLast(entry => entry.type === "model_change")).toMatchObject({
+				model: modelValue(newer),
+			});
+		},
+	);
+
+	it("a failed new journal reset does not invalidate outgoing metadata preparation", async () => {
+		const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const target = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const created = await createSession({ initialModel: source, persist: true });
+		const manager = created.session.sessionManager;
+		await manager.ensureOnDisk();
+		const previousId = manager.getSessionId();
+		const previousFile = manager.getSessionFile()!;
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const preparation = vi
+			.spyOn(sharedModelRegistry, "refreshSelectedModelMetadata")
+			.mockImplementation(async model => {
+				entered.resolve();
+				await release.promise;
+				return model;
+			});
+		const pending = created.session.setModel(target);
+		try {
+			await entered.promise;
+			await expect(
+				created.session.newSession({ sessionDir: path.join(previousFile, "not-a-directory") }),
+			).rejects.toThrow();
+			expect(manager.getSessionId()).toBe(previousId);
+			expect(manager.getSessionFile()).toBe(previousFile);
+		} finally {
+			release.resolve();
+			preparation.mockRestore();
+		}
+		expect(await pending).toEqual({ switched: true });
+		expect(created.session.model?.id).toBe(target.id);
+	});
+
 	it("an unpublished role cycle preparation cannot select its model or effort after newSession", async () => {
 		const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const target = getAnthropicModelOrThrow("claude-sonnet-4-6");
@@ -1858,6 +1965,7 @@ describe("AgentSession model persistence", () => {
 				).toBe(false);
 				expect(created.session.model?.id).toBe(source.id);
 				if (publication === "setModel") expect(result).toEqual({ switched: false });
+				else if (publication === "setModelTemporary") expect(result).toBe(false);
 				else expect(result).toBeUndefined();
 				const activeFile = manager.getSessionFile();
 				if (!activeFile) throw new Error("Expected an active session");
@@ -2120,7 +2228,7 @@ describe("AgentSession model persistence", () => {
 		const manager = created.session.sessionManager;
 		manager.appendMessage({ role: "user", content: "subscriber handoff", timestamp: Date.now() });
 		manager.appendMessage(createAssistantMessage("ready"));
-		let ephemeral: Promise<void> | undefined;
+		let ephemeral: Promise<boolean> | undefined;
 		const unsubscribe = created.session.subscribe(event => {
 			if (event.type === "model_changed" && created.session.model?.id === durable.id) {
 				ephemeral = created.session.setModelTemporary(source, undefined, { ephemeral: true });

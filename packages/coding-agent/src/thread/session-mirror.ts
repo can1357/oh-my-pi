@@ -274,13 +274,13 @@ export type SessionHostProtocol = {
 	abortHandoff: RpcMethod<[], void>;
 	setModelTemporary: RpcMethod<
 		[model: Model, thinkingLevel?: ConfiguredThinkingLevel, options?: { ephemeral?: boolean }],
-		void
+		boolean
 	>;
 	cycleRoleModels: RpcMethod<
 		[roleOrder: readonly string[], direction?: "forward" | "backward"],
 		RoleModelCycleResult | undefined
 	>;
-	applyRoleModel: RpcMethod<[entry: ResolvedRoleModel], void>;
+	applyRoleModel: RpcMethod<[entry: ResolvedRoleModel], boolean>;
 	fetchUsageReports: RpcMethod<[signal?: AbortSignal], UsageReport[] | null>;
 	runEphemeralTurn: RpcMethod<[args: EphemeralTurnOptions], EphemeralTurnResult>;
 	exportToHtml: RpcMethod<[outputPath?: string, useUserThemes?: boolean], string>;

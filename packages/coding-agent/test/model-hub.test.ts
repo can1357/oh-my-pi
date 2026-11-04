@@ -3,13 +3,14 @@ import { afterEach, beforeAll, describe, expect, type Mock, test, vi } from "bun
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { stripVTControlCharacters } from "node:util";
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
-import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	type ModelHubCallbacks,
@@ -23,6 +24,12 @@ import type { TUI } from "@oh-my-pi/pi-tui";
 
 import { cfgCycleOrder, cfgModelPresets } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionTools } from "@oh-my-pi/pi-coding-agent/session/session-tools";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 function normalize(lines: readonly string[]): string {
 	return stripVTControlCharacters(lines.join("\n")).replace(/\s+/g, " ").trim();
@@ -1860,4 +1867,140 @@ describe("ModelHub", () => {
 			expect(onLoginRequest).toHaveBeenCalledWith("anthropic");
 		});
 	});
+});
+
+describe("session-only model picker ownership", () => {
+	for (const selection of ["temporary", "role"] as const) {
+		for (const superseded of [false, true]) {
+			test(`${selection} selection ${superseded ? "keeps the picker open when superseded" : "confirms and closes when accepted"}`, async () => {
+				await Settings.init({ inMemory: true });
+				installTestTheme();
+				const dir = await fs.mkdtemp(path.join(os.tmpdir(), "model-picker-ownership-"));
+				const source = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+				const older = getBundledModel("anthropic", "claude-haiku-4-5")!;
+				const newer = getBundledModel("anthropic", "claude-opus-4-6")!;
+				const settings = Settings.isolated({});
+				settings.setModelRole("default", `anthropic/${source.id}`);
+				settings.setModelRole("slow", `anthropic/${older.id}:low`);
+				cfgCycleOrder.set(settings, ["default", "slow"]);
+				const auth = await AuthStorage.create(path.join(dir, "auth.db"));
+				auth.keys.setRuntime("anthropic", "test-key");
+				const registry = new ModelRegistry(auth, path.join(dir, "models.yml"));
+				registry.getAvailable = () => [source, older, newer];
+				const agent = new Agent({
+					initialState: {
+						model: source,
+						systemPrompt: ["Test"],
+						tools: [],
+						messages: [],
+						thinkingLevel: Effort.High,
+					},
+				});
+				const manager = SessionManager.inMemory(dir);
+				const session = new AgentSession({ agent, sessionManager: manager, settings, modelRegistry: registry });
+				session.setThinkingLevel(Effort.High);
+				const entered = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				const finished = Promise.withResolvers<void>();
+				const reconcile = SessionTools.prototype.reconcileThinkTool;
+				let held = false;
+				const reconcileSpy = vi
+					.spyOn(SessionTools.prototype, "reconcileThinkTool")
+					.mockImplementation(async function (this: SessionTools, ...args) {
+						if (!held && session.model?.id === older.id) {
+							held = true;
+							entered.resolve();
+							await release.promise;
+						}
+						return reconcile.apply(this, args);
+					});
+				const setModelTemporary = session.setModelTemporary.bind(session);
+				const applyRoleModel = session.applyRoleModel.bind(session);
+				const selectionSpy =
+					selection === "temporary"
+						? vi.spyOn(session, "setModelTemporary").mockImplementation(async (...args) => {
+								try {
+									return await setModelTemporary(...args);
+								} finally {
+									finished.resolve();
+								}
+							})
+						: vi.spyOn(session, "applyRoleModel").mockImplementation(async (...args) => {
+								try {
+									return await applyRoleModel(...args);
+								} finally {
+									finished.resolve();
+								}
+							});
+				const statuses: string[] = [];
+				const errors: string[] = [];
+				const hide = vi.fn();
+				const invalidate = vi.fn();
+				const updateEditorBorderColor = vi.fn();
+				const showModelCycleTrack = vi.fn();
+				let picker: { handleInput(data: string): void } | undefined;
+				const ctx = createInteractiveModeContext({
+					session,
+					settings,
+					showStatus: text => {
+						statuses.push(text);
+					},
+					showError: text => {
+						errors.push(text);
+					},
+					statusLine: { invalidate },
+					updateEditorBorderColor,
+					showModelCycleTrack,
+					ui: {
+						terminal: { rows: 30, columns: 120 },
+						showOverlay: component => {
+							picker = component as typeof picker;
+							return { hide, setHidden: () => {}, isHidden: () => false };
+						},
+					},
+				});
+				try {
+					new SelectorController(ctx).showModelSelector({ temporaryOnly: true });
+					expect(picker).toBeDefined();
+					picker!.handleInput(selection === "role" ? "@slow" : older.id);
+					picker!.handleInput("\r");
+					await entered.promise;
+					expect(session.model?.id).toBe(older.id);
+					expect(hide).not.toHaveBeenCalled();
+					if (superseded) await session.setModel(newer);
+					if (superseded) session.setThinkingLevel(Effort.Max);
+					const journal = manager.getEntries().filter(entry => entry.type === "model_change");
+					release.resolve();
+					await finished.promise;
+					await setImmediate();
+					expect(session.model?.id).toBe(superseded ? newer.id : older.id);
+					expect(session.configuredThinkingLevel()).toBe(superseded ? Effort.Max : Effort.Low);
+					if (superseded) {
+						expect(manager.getEntries().filter(entry => entry.type === "model_change")).toEqual(journal);
+						expect(statuses).toEqual([]);
+						expect(invalidate).not.toHaveBeenCalled();
+						expect(updateEditorBorderColor).not.toHaveBeenCalled();
+						expect(showModelCycleTrack).not.toHaveBeenCalled();
+						expect(hide).not.toHaveBeenCalled();
+						picker!.handleInput(ESC);
+						picker!.handleInput(ESC);
+					} else {
+						expect(invalidate).toHaveBeenCalledTimes(1);
+						expect(updateEditorBorderColor).toHaveBeenCalledTimes(1);
+						if (selection === "role") expect(showModelCycleTrack).toHaveBeenCalledTimes(1);
+						else expect(statuses[0]).toContain(`Session-only model: anthropic/${older.id}`);
+					}
+					expect(hide).toHaveBeenCalledTimes(1);
+					expect(errors).toEqual([]);
+				} finally {
+					release.resolve();
+					reconcileSpy.mockRestore();
+					selectionSpy.mockRestore();
+					await session.dispose();
+					auth.close();
+					await fs.rm(dir, { recursive: true, force: true });
+				}
+			});
+		}
+	}
 });

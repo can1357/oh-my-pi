@@ -151,7 +151,9 @@ Durable model settings have separate ownership from session receipts. Once publi
 
 The global thinking preference has its own latest-persisted-choice ownership: a newer saved effort prevents an older model selection from saving Auto, without canceling that selection's still-owned model-role save. A newer effort selected while a model switch or cycle finishes also keeps its live effort; the stale operation reports no current selection, so callers cannot apply stale Auto, scoped effort, or status. Same-session model changes still synchronize model-dependent prompt instructions.
 
-`/new` inherits the active model, so an already-published selection can finish recording its routed selector in the new session. Selections still loading metadata or credentials are canceled before publication.
+`/new` inherits the active model, so an already-published selection can finish recording its routed selector in the new session. Selections still loading metadata or credentials are canceled when the new journal is reset, before its header is persisted; a reset that fails before replacing the journal does not cancel them.
+
+Session-only and role selections report whether they still own the active selection after setup finishes. A superseded `/switch`, model-picker choice, or plan-approval role choice does not confirm the obsolete target or advance the UI as if it had won.
 
 Switching to a different saved session discards the outgoing task's automatic handoff without restoring its planning model into the opened session. A cancelled or failed switch keeps the outgoing task's restoration intact.
 
