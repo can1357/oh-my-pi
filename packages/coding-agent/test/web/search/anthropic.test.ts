@@ -4,6 +4,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { searchAnthropic } from "@oh-my-pi/pi-coding-agent/web/search/providers/anthropic";
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
+import { rejectionOf } from "../../helpers/rejection";
 
 const SELECTED_BASE_URL = "https://anthropic-grounding.example.test/v1";
 
@@ -139,12 +140,12 @@ describe("Anthropic search request body", () => {
 		}
 	});
 
-	it("maps site: to allowed_domains and strips the directive from the query", async () => {
+	it("maps site: to allowed_domains and keeps the query text intact for the model", async () => {
 		const fixture = createFixture();
 		try {
 			const cap = makeCaptureFetch();
 			await searchAnthropic({
-				query: "sdk docs site:docs.anthropic.com",
+				query: 'site:github.com/asmvik/yabai/blob/master/src/window.c "window_create"',
 				systemPrompt: "Use web search.",
 				sessionId: "session-2295",
 				authStorage: fixture.authStorage,
@@ -155,10 +156,10 @@ describe("Anthropic search request body", () => {
 
 			const body = cap.body();
 			const tool = (body?.tools as Record<string, unknown>[] | undefined)?.[0];
-			expect(tool?.allowed_domains).toEqual(["docs.anthropic.com"]);
+			expect(tool?.allowed_domains).toEqual(["github.com"]);
 			expect(tool).not.toHaveProperty("blocked_domains");
 			const messages = body?.messages as { content: string }[];
-			expect(messages[0]?.content).toBe("sdk docs");
+			expect(messages[0]?.content).toBe('site:github.com/asmvik/yabai/blob/master/src/window.c "window_create"');
 		} finally {
 			fixture.authStorage.close();
 		}
@@ -183,7 +184,7 @@ describe("Anthropic search request body", () => {
 			expect(tool?.blocked_domains).toEqual(["reddit.com"]);
 			expect(tool).not.toHaveProperty("allowed_domains");
 			const messages = body?.messages as { content: string }[];
-			expect(messages[0]?.content).toBe("rust async runtime");
+			expect(messages[0]?.content).toBe("rust async runtime -site:reddit.com");
 		} finally {
 			fixture.authStorage.close();
 		}
@@ -321,6 +322,35 @@ describe("Anthropic search request body", () => {
 			fixture.authStorage.close();
 		}
 	});
+
+	it("asks for server-side refusal fallback for classifier models on the official API only", async () => {
+		const cases = [
+			{ id: "claude-opus-5-5", baseUrl: "https://api.anthropic.com", expected: true },
+			{ id: "claude-haiku-5-5", baseUrl: "https://api.anthropic.com", expected: false },
+			{ id: "claude-opus-5-5", baseUrl: SELECTED_BASE_URL, expected: false },
+		];
+		for (const { id, baseUrl, expected } of cases) {
+			const fixture = createFixture(id, baseUrl);
+			try {
+				const cap = makeCaptureFetch();
+				await searchAnthropic({
+					query: "vizio uart root shell",
+					systemPrompt: "Use web search.",
+					authStorage: fixture.authStorage,
+					modelRegistry: fixture.modelRegistry,
+					model: fixture.model,
+					fetch: cap.fetch,
+				});
+
+				expect(cap.body()?.fallbacks).toBe(expected ? "default" : undefined);
+				expect(cap.headers()?.get("anthropic-beta")?.includes("server-side-fallback-2026-07-01") ?? false).toBe(
+					expected,
+				);
+			} finally {
+				fixture.authStorage.close();
+			}
+		}
+	});
 });
 
 describe("Anthropic search answer", () => {
@@ -363,5 +393,80 @@ describe("Anthropic search answer", () => {
 		} finally {
 			fixture.authStorage.close();
 		}
+	});
+
+	/** Run a search whose Messages response is `body` (over a minimal id/usage envelope). */
+	async function searchWithResponse(modelId: string, body: Record<string, unknown>) {
+		const fixture = createFixture(modelId);
+		try {
+			return await searchAnthropic({
+				query: "q",
+				systemPrompt: "Use web search.",
+				authStorage: fixture.authStorage,
+				modelRegistry: fixture.modelRegistry,
+				model: fixture.model,
+				fetch: async () => Response.json({ id: "msg_test", usage: { input_tokens: 1, output_tokens: 2 }, ...body }),
+			});
+		} finally {
+			fixture.authStorage.close();
+		}
+	}
+	const searchCall = { type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: { query: "q" } };
+
+	it("reports a classifier refusal instead of an empty answer", async () => {
+		const error = await rejectionOf(
+			searchWithResponse("claude-opus-5-5", {
+				model: "claude-opus-5-5",
+				content: [],
+				stop_reason: "refusal",
+				stop_details: { type: "refusal", category: "cyber", explanation: "Blocked under the Usage Policy." },
+			}),
+		);
+		expect(error).toHaveProperty(
+			"message",
+			"claude-opus-5-5 declined the query (cyber safety classifier): Blocked under the Usage Policy.",
+		);
+	});
+
+	it("keeps searched results but replaces the partial answer of a mid-output refusal with the refusal", async () => {
+		const citation = { type: "web_search_result_location", url: "https://example.com", title: "T", cited_text: "x" };
+		const response = await searchWithResponse("claude-opus-5-5", {
+			model: "claude-opus-4-8",
+			content: [
+				searchCall,
+				{
+					type: "web_search_tool_result",
+					tool_use_id: "srvtoolu_1",
+					content: [{ type: "web_search_result", title: "T", url: "https://example.com", page_age: null }],
+				},
+				{ type: "text", text: "Partial cited answer", citations: [citation] },
+			],
+			stop_reason: "refusal",
+			stop_details: { type: "refusal", category: "cyber", explanation: "Blocked." },
+		});
+
+		expect(response.answer).toStartWith("claude-opus-4-8 declined the query (cyber safety classifier): Blocked.");
+		expect(response.answer).not.toContain("Partial cited answer");
+		expect(response.citations).toBeUndefined();
+		expect(response.sources.map(source => source.url)).toEqual(["https://example.com"]);
+	});
+
+	it("reports search tool error codes instead of failing to iterate them", async () => {
+		const error = await rejectionOf(
+			searchWithResponse("claude-haiku-4-5", {
+				model: "claude-haiku-4-5",
+				content: [
+					searchCall,
+					{
+						type: "web_search_tool_result",
+						tool_use_id: "srvtoolu_1",
+						content: { type: "web_search_tool_result_error", error_code: "too_many_requests" },
+					},
+					{ type: "text", text: "The search failed." },
+				],
+				stop_reason: "end_turn",
+			}),
+		);
+		expect(error).toHaveProperty("message", "Anthropic web search failed: too_many_requests.");
 	});
 });
