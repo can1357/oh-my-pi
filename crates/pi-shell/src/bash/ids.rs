@@ -169,6 +169,11 @@ pub enum ModeId {
 	#[strum(serialize = "zsh-sh")]
 	#[serde(rename = "zsh-sh")]
 	ZshSh,
+	/// zsh's csh emulation (`emulate csh`, `zsh --emulate csh`): the zsh
+	/// dialect with zsh's csh option defaults.
+	#[strum(serialize = "zsh-csh")]
+	#[serde(rename = "zsh-csh")]
+	ZshCsh,
 }
 
 crate::bash::packed_names::packed_names!(ModeId, Display);
@@ -178,7 +183,7 @@ impl ModeId {
 	pub const fn dialect(self) -> Dialect {
 		match self {
 			Self::Bash | Self::Sh => Dialect::Bash,
-			Self::Zsh | Self::Ksh | Self::ZshSh => Dialect::Zsh,
+			Self::Zsh | Self::Ksh | Self::ZshSh | Self::ZshCsh => Dialect::Zsh,
 		}
 	}
 
@@ -189,17 +194,19 @@ impl ModeId {
 			Self::Zsh => "zsh",
 			Self::Sh | Self::ZshSh => "sh",
 			Self::Ksh => "ksh",
+			Self::ZshCsh => "csh",
 		}
 	}
 
 	/// The mode `emulate NAME` selects from code running in `self`'s
 	/// dialect (`sh` stays in the current dialect); `None` for an unknown
-	/// or unsupported emulation (`csh`).
+	/// emulation.
 	pub const fn for_emulate(self, name: &[u8]) -> Option<Self> {
 		Some(match name {
 			b"bash" => Self::Bash,
 			b"zsh" => Self::Zsh,
 			b"ksh" => Self::Ksh,
+			b"csh" => Self::ZshCsh,
 			b"sh" => match self.dialect() {
 				Dialect::Bash => Self::Sh,
 				Dialect::Zsh => Self::ZshSh,
@@ -370,6 +377,86 @@ pub enum IntrinsicId {
 	Comptags,
 	Comptry,
 	Compvalues,
+	Zstyle,
+	Zformat,
+	Zparseopts,
+	Zregexparse,
+	Strftime,
+	Echoti,
+	Echotc,
+	#[strum(serialize = "pcre_compile")]
+	PcreCompile,
+	#[strum(serialize = "pcre_study")]
+	PcreStudy,
+	#[strum(serialize = "pcre_match")]
+	PcreMatch,
+	Private,
+	Zpty,
+	Zcurses,
+	#[strum(serialize = "clone")]
+	ZshClone,
+	#[strum(serialize = "r")]
+	R,
+	Zcompile,
+	Limit,
+	Unlimit,
+	Sched,
+	Log,
+	Zprof,
+	Example,
+	Cap,
+	Getcap,
+	Setcap,
+	Chgrp,
+	Chmod,
+	Chown,
+	Ln,
+	Mkdir,
+	Mv,
+	Rm,
+	Rmdir,
+	Sync,
+	#[strum(serialize = "zf_chgrp")]
+	ZfChgrp,
+	#[strum(serialize = "zf_chmod")]
+	ZfChmod,
+	#[strum(serialize = "zf_chown")]
+	ZfChown,
+	#[strum(serialize = "zf_ln")]
+	ZfLn,
+	#[strum(serialize = "zf_mkdir")]
+	ZfMkdir,
+	#[strum(serialize = "zf_mv")]
+	ZfMv,
+	#[strum(serialize = "zf_rm")]
+	ZfRm,
+	#[strum(serialize = "zf_rmdir")]
+	ZfRmdir,
+	#[strum(serialize = "zf_sync")]
+	ZfSync,
+	Stat,
+	Zstat,
+	Zgetattr,
+	Zsetattr,
+	Zdelattr,
+	Zlistattr,
+	Syserror,
+	Sysread,
+	Syswrite,
+	Sysopen,
+	Sysseek,
+	Zsystem,
+	Zselect,
+	Zsocket,
+	Ztcp,
+	Zftp,
+	/// A zsh autoload stub (`zmodload -ab`/`-aF b:NAME`) naming a builtin
+	/// no module of the engine defines: running it loads the module, which
+	/// fails to define it. Never looked up by name (no command word has a
+	/// `/` and resolves as a builtin);
+	/// [`crate::bash::vm::builtins::misc::usable`] returns it.
+	#[strum(serialize = "zsh/module-stub")]
+	ModuleStub,
 }
 
 crate::bash::packed_names::packed_names!(IntrinsicId, Display);
@@ -403,6 +490,8 @@ impl IntrinsicId {
 			| Self::Caller
 			| Self::Help
 			| Self::Strmatch => matches!(dialect, Dialect::Bash),
+			// Not in any dialect's table: only `usable` produces it.
+			Self::ModuleStub => false,
 			Self::Setopt
 			| Self::Unsetopt
 			| Self::Print
@@ -435,7 +524,66 @@ impl IntrinsicId {
 			| Self::Compquote
 			| Self::Comptags
 			| Self::Comptry
-			| Self::Compvalues => matches!(dialect, Dialect::Zsh),
+			| Self::Compvalues
+			| Self::Zstyle
+			| Self::Zformat
+			| Self::Zparseopts
+			| Self::Zregexparse
+			| Self::Strftime
+			| Self::Echoti
+			| Self::Echotc
+			| Self::PcreCompile
+			| Self::PcreStudy
+			| Self::PcreMatch
+			| Self::Private
+			| Self::Zpty
+			| Self::Zcurses
+			| Self::ZshClone
+			| Self::R
+			| Self::Zcompile
+			| Self::Limit
+			| Self::Unlimit
+			| Self::Sched
+			| Self::Log
+			| Self::Zprof
+			| Self::Example
+			| Self::Cap
+			| Self::Getcap
+			| Self::Setcap
+			| Self::Chgrp
+			| Self::Chmod
+			| Self::Chown
+			| Self::Ln
+			| Self::Mkdir
+			| Self::Mv
+			| Self::Rm
+			| Self::Rmdir
+			| Self::Sync
+			| Self::ZfChgrp
+			| Self::ZfChmod
+			| Self::ZfChown
+			| Self::ZfLn
+			| Self::ZfMkdir
+			| Self::ZfMv
+			| Self::ZfRm
+			| Self::ZfRmdir
+			| Self::ZfSync
+			| Self::Stat
+			| Self::Zstat
+			| Self::Zgetattr
+			| Self::Zsetattr
+			| Self::Syserror
+			| Self::Sysread
+			| Self::Syswrite
+			| Self::Sysopen
+			| Self::Sysseek
+			| Self::Zsystem
+			| Self::Zselect
+			| Self::Zsocket
+			| Self::Ztcp
+			| Self::Zftp
+			| Self::Zdelattr
+			| Self::Zlistattr => matches!(dialect, Dialect::Zsh),
 			_ => true,
 		}
 	}

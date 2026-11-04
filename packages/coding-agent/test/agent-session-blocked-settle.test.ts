@@ -123,6 +123,6 @@ describe("AgentSession.settleAsyncWork and idle waits of the agents it waits on"
 		const settled = session.settleAsyncWork();
 		settling.resolve();
 		await settled;
-		expect(workerWaits).toEqual([expect.objectContaining({ from: "Peer", body: "the schema changed" })]);
+		expect(workerWaits).toEqual([[expect.objectContaining({ from: "Peer", body: "the schema changed" })]]);
 	});
 });

@@ -1,14 +1,22 @@
 /**
- * Which agents are blocked until other agents finish, so a `wait` for a
- * reply can tell when none can come (the agent it asked is itself blocked
- * on the asker), and an idle `wait` can tell that an agent is blocked on the
- * caller's result. Owned by the {@link AgentRegistry} whose ids it names.
+ * Which agents are blocked until other agents finish, or until the user
+ * answers, so a `wait` for a reply can tell when none can come soon (the
+ * agent it asked is itself blocked on the asker, or on the user), and an
+ * idle `wait` can tell that an agent is blocked on the caller's result.
+ * Owned by the {@link AgentRegistry} whose ids it names.
  *
  * A background job that is not one agent's run (a workpool's aggregate job,
  * a bash job) is a node of its own, named by {@link awaitNodeOfJob}: the
  * agents it waits on are recorded as its holds, so blocking on such a job
  * blocks on them too. Such nodes are never reported as waiters.
  */
+
+/**
+ * Stands in for the user among awaited ids: an agent with a dialog open that
+ * waits for the user's answer (`ask`, a tool approval) holds on it. No agent id
+ * can take this value.
+ */
+export const USER_AWAIT_ID = "@user";
 
 const JOB_NODE_PREFIX = "\0job\0";
 
@@ -29,7 +37,10 @@ interface AwaitHold {
 export interface AgentAwaitsApi {
 	/** Record `waiter` blocked until the first of `awaited` finishes; returns the release function. */
 	hold(waiter: string, awaited: readonly string[], options: { interruptible: boolean }): () => void;
-	/** Whether `agent` cannot act on a message `target` sent it at `sentAt` until `target` finishes. */
+	/**
+	 * Whether `agent` cannot act on a message `target` sent it at `sentAt` until `target` finishes;
+	 * with `target` {@link USER_AWAIT_ID}, whether it cannot act on a message sent at `sentAt` until the user answers.
+	 */
 	blocksOn(agent: string, target: string, sentAt: number): boolean;
 	/** Agents blocked until `target` finishes; only a message from `target` could end an interruptible block sooner. */
 	waitersOn(target: string): string[];

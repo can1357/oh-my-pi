@@ -12,6 +12,7 @@ use bstr::{BStr, BString};
 
 use super::{
 	Cx, Kernel,
+	builtins::history::io::{ErrKind, HistErr, HistOp},
 	glob::Walk,
 	proc::{Live, PathSearch, Probe, ProbeResult, Scratch, Vproc},
 };
@@ -45,7 +46,7 @@ pub fn dev_fd(path: &[u8]) -> Option<i32> {
 }
 
 /// A synthesized `stat` of an engine fd.
-fn fd_stat(vp: &Vproc, fd: i32) -> Option<Stat> {
+pub(super) fn fd_stat(vp: &Vproc, fd: i32) -> Option<Stat> {
 	let h = vp.fds.get(fd)?;
 	let kind = match h.kind()? {
 		FileKind::Regular => StatKind::File,
@@ -66,6 +67,8 @@ fn fd_stat(vp: &Vproc, fd: i32) -> Option<Stat> {
 		atime_ns: 0,
 		ctime_ns: 0,
 		blocks: 0,
+		rdev: 0,
+		blksize: 0,
 	})
 }
 
@@ -77,14 +80,7 @@ pub fn perform(
 	sc: &mut Scratch,
 	probe: &Probe,
 ) -> Result<ProbeResult, WaitKey> {
-	let io = sc.io();
-	if io.probing.as_ref() != Some(probe) {
-		io.probing = Some(probe.clone());
-		io.search = None;
-		io.walk = None;
-		io.input.clear();
-		sc.live = Live::None;
-	}
+	begin(sc, probe);
 	let mut tcx = Context::from_waker(&k.waker);
 	let res = match probe {
 		Probe::Stat { path, follow } => {
@@ -246,6 +242,31 @@ pub fn perform(
 				},
 			}
 		},
+		// fd-level probes change the fd table: only a builtin asks for them,
+		// and its probes go through `perform_mut`.
+		Probe::Fd(_) => ProbeResult::Fd(Box::new(super::fdprobe::FdAnswer::Err(
+			super::fsprobe::FsErr::of(&std::io::Error::from(std::io::ErrorKind::Unsupported)),
+		))),
+		Probe::Fs { req, .. } => ProbeResult::Fs(super::fsprobe::perform(&mut tcx, cx, vp, sc, req)?),
+		// Only the `zftp` builtin asks, through `perform_mut`.
+		Probe::Zftp { .. } => {
+			ProbeResult::Zftp(Box::new(super::builtins::zsh_mod_zftp::ZftpAns::Done))
+		},
+		// A program's shell has no history files ([`crate::bash::Profile::Tool`]):
+		// reads find none, writes fail; only the clock steps run.
+		Probe::Hist { op, .. }
+			if !matches!(**op, HistOp::Now | HistOp::Sleep { .. })
+				&& super::is_tool(cx.store, vp).unwrap_or(true) =>
+		{
+			ProbeResult::Hist(Box::new(Err(HistErr {
+				kind: ErrKind::Other,
+				msg:  BString::from("history files are not available in this shell"),
+			})))
+		},
+		Probe::Hist { op, .. } => match super::builtins::history::io::perform(&mut tcx, cx, sc, op) {
+			Poll::Ready(answer) => ProbeResult::Hist(Box::new(answer)),
+			Poll::Pending => return Err(WaitKey::Fs { op: FsOp::HistFile, path: op.path() }),
+		},
 		Probe::Ready { fd } => {
 			// `read -t 0`: is input available, without consuming it.
 			let handle = vp.fds.handle(*fd);
@@ -270,10 +291,24 @@ pub fn perform(
 						timed_out: false,
 					};
 				}
-				let mut buf = [0u8; 4096];
-				let want = if seekable { buf.len() } else { 1 };
+				// On seekable fds read ahead, then give back what follows
+				// the last delimiter wanted. A line mostly fits the first,
+				// short read: what is read past it is only given back.
+				let want = match (seekable, input.is_empty()) {
+					(false, _) => 1,
+					(true, true) => 256,
+					(true, false) => 4096,
+				};
 				let want = nchars.map_or(want, |n| want.min(n - input.len()));
-				match handle.poll_read(&mut tcx, &mut buf[..want]) {
+				let start = input.len();
+				input.resize(start + want, 0);
+				let polled = handle.poll_read(&mut tcx, &mut input[start..]);
+				let got = match &polled {
+					Poll::Ready(Ok(n)) => *n,
+					_ => 0,
+				};
+				input.truncate(start + got);
+				match polled {
 					Poll::Ready(Ok(0) | Err(_)) => {
 						break ProbeResult::Input {
 							data:      BString::from(std::mem::take(input)),
@@ -282,12 +317,9 @@ pub fn perform(
 						};
 					},
 					Poll::Ready(Ok(n)) => {
-						let got = &buf[..n];
-						// On seekable fds read ahead, then give back what
-						// follows the last delimiter wanted.
 						let mut cut = None;
 						if let Some(d) = *delim {
-							for (i, _) in got.iter().enumerate().filter(|&(_, &c)| c == d) {
+							for (i, _) in input[start..].iter().enumerate().filter(|&(_, &c)| c == d) {
 								seen += 1;
 								if seen == lines {
 									cut = Some(i + 1);
@@ -295,13 +327,11 @@ pub fn perform(
 								}
 							}
 						}
-						match cut {
-							Some(c) if c < n => {
-								input.extend_from_slice(&got[..c]);
-								let _ =
-									handle.seek(crate::bash::fs::SeekFrom::Current(c as i64 - n as i64));
-							},
-							_ => input.extend_from_slice(got),
+						if let Some(c) = cut
+							&& c < n
+						{
+							input.truncate(start + c);
+							let _ = handle.seek(crate::bash::fs::SeekFrom::Current(c as i64 - n as i64));
 						}
 					},
 					Poll::Pending => {
@@ -330,7 +360,44 @@ pub fn perform(
 	Ok(finish(sc, res))
 }
 
-fn finish(sc: &mut Scratch, r: ProbeResult) -> ProbeResult {
+/// [`perform`] for a builtin's probe ([`Need::Probe`](super::builtins::Need)):
+/// the fd-level probes ([`Probe::Fd`]) may install descriptors in `vp`'s
+/// fd table ([`super::fdprobe`]); everything else is [`perform`].
+pub fn perform_mut(
+	k: &Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+	sc: &mut Scratch,
+	probe: &Probe,
+) -> Result<ProbeResult, WaitKey> {
+	if let Probe::Zftp { op, .. } = probe {
+		begin(sc, probe);
+		let answer = super::builtins::zsh_mod_zftp::io::perform(k, cx, vp, sc, op)?;
+		return Ok(finish(sc, ProbeResult::Zftp(Box::new(answer))));
+	}
+	let Probe::Fd(fp) = probe else {
+		return perform(k, cx, vp, sc, probe);
+	};
+	begin(sc, probe);
+	let answer = super::fdprobe::perform(k, cx, vp, sc, fp)?;
+	Ok(finish(sc, ProbeResult::Fd(Box::new(answer))))
+}
+
+/// Start `probe` unless it is the one in flight: forget the progress of
+/// another.
+pub(super) fn begin(sc: &mut Scratch, probe: &Probe) {
+	let io = sc.io();
+	if io.probing.as_ref() != Some(probe) {
+		io.probing = Some(probe.clone());
+		io.search = None;
+		io.walk = None;
+		io.input.clear();
+		sc.live = Live::None;
+	}
+}
+
+/// Cache `r` as the answer of the probe in flight.
+pub(super) fn finish(sc: &mut Scratch, r: ProbeResult) -> ProbeResult {
 	sc.live = Live::None;
 	let io = sc.io();
 	io.search = None;
