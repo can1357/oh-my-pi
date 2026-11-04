@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -47,6 +48,39 @@ describe.skipIf(skip)("output delivery", () => {
 		);
 		await expect(run).rejects.toThrow("Command output was not all delivered: the output callback failed");
 	});
+
+	it("keeps failing a terminal run whose callback threw when a kill follows", async () => {
+		scratch = await fs.mkdtemp(path.join(os.tmpdir(), "pty-throw-kill-"));
+		const marker = path.join(scratch, "term");
+		const session = new PtySession();
+		// The callback's failure stops the command first: its TERM trap writes
+		// the marker, and only then does the kill arrive.
+		let watch: ReturnType<typeof setInterval> | undefined;
+		const killed = Promise.withResolvers<void>();
+		const run = session.start(
+			{
+				command: `trap '' HUP; trap 'touch "${marker}"; while :; do sleep 0.05; done' TERM; printf READY; sleep 120`,
+				shell: "/bin/sh",
+				timeoutMs: 30_000,
+			},
+			() => {
+				watch ??= setInterval(() => {
+					if (existsSync(marker)) {
+						clearInterval(watch);
+						session.kill();
+						killed.resolve();
+					}
+				}, 1);
+				throw new Error("callback failed");
+			},
+		);
+		try {
+			await expect(run).rejects.toThrow("Command output was not all delivered: the output callback failed");
+		} finally {
+			clearInterval(watch);
+		}
+		await killed.promise;
+	}, 20_000);
 
 	it("delivers a partial character the terminal holds when a daemon keeps the terminal open", async () => {
 		scratch = await fs.mkdtemp(path.join(os.tmpdir(), "pty-partial-char-"));

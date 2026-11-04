@@ -880,6 +880,30 @@ mod tests {
 		assert!(err.reason.contains("the output callback failed"), "{}", err.reason);
 	}
 
+	/// A callback that throws, then a cancellation (a timeout or an abort):
+	/// the pump had already stopped and dropped output, and the run resolved
+	/// as cancelled as if what arrived were all the command wrote before it.
+	/// It must fail.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn await_drain_fails_a_cancelled_run_whose_callback_failed_first() {
+		for end in [PumpEnd::ConsumerGone, PumpEnd::Stalled] {
+			let handle = napi::tokio::spawn(async move { end });
+			let result = Ok(ShellRunResult {
+				exit_code:   None,
+				cancelled:   true,
+				timed_out:   false,
+				minimized:   None,
+				working_dir: None,
+			});
+			let err = time::timeout(Duration::from_secs(5), await_drain(Some(handle), result))
+				.await
+				.expect("await_drain returns")
+				.err()
+				.unwrap_or_else(|| panic!("{end:?}: a run whose output was dropped must not resolve"));
+			assert!(err.reason.contains("not all delivered"), "{}", err.reason);
+		}
+	}
+
 	mod child_session_action_tests {
 		use pi_shell::{ChildSessionAction, child_session_action};
 
