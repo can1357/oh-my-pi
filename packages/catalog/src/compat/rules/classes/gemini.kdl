@@ -142,6 +142,20 @@ class "gemini" {
 			supports-function-part-id #true
 		}
 	}
+	// Gemini 3+ rejects a turn whose first function call has no thought
+	// signature (400 "Function call is missing a thought_signature"). A turn
+	// another model produced (a fallback hop or a /model switch inside a tool
+	// loop) replays with its signatures stripped, so on OpenAI-compatible
+	// wires its first call carries Google's documented bypass value in
+	// `extra_content`, the field Gemini's own signatures ride. The model's own
+	// turns keep the signatures they came with. Scoped by adapter so custom
+	// providers in front of Gemini (Vertex's OpenAI endpoint) inherit it.
+	// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures
+	on-api "openai-completions" {
+		revision ">=3" {
+			requires-skip-thought-signature-on-foreign-tool-call #true
+		}
+	}
 	on "google-antigravity" "google-gemini-cli" {
 		family "flash" {
 			stream-first-event-timeout-ms 60000

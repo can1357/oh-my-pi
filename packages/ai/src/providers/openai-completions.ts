@@ -121,6 +121,7 @@ import {
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
+import { SKIP_THOUGHT_SIGNATURE } from "./google-shared";
 import { completionsSendsOwnThinking, transformMessages } from "./transform-messages";
 import {
 	isOpenAICompletionsVisionSupported,
@@ -2518,6 +2519,17 @@ export function convertMessages(
 		}
 	}
 
+	// Gemini validates thought signatures only within the current turn, which begins at the most
+	// recent user message that is not a tool result; an unsigned call older than that is accepted
+	// as it is. Measured against Vertex's OpenAI-compatible endpoint: an unsigned foreign call
+	// before a newer user message answers 200, the same call after it answers 400. Google calls the
+	// bypass value a last resort because it costs the model the reasoning it would have replayed,
+	// so it goes no further back than the provider looks.
+	const currentTurnStart =
+		compat.requiresSkipThoughtSignatureOnForeignToolCall === true
+			? transformedMessages.findLastIndex(m => m.role === "user")
+			: -1;
+
 	let lastRole: string | null = null;
 
 	for (let i = 0; i < transformedMessages.length; i++) {
@@ -2793,6 +2805,20 @@ export function convertMessages(
 				hasReasoningField = true;
 			}
 			if (toolCalls.length > 0) {
+				// Gemini 3+ rejects a turn of the current exchange whose function calls carry no
+				// thought signature at all, and transformMessages clears another model's signatures
+				// on replay, so a turn produced by a fallback hop or a `/model` switch arrives
+				// stripped. Its first call then carries the bypass value Google documents for
+				// history transferred from another model; one marked call per turn satisfies the
+				// check (measured), and a turn that kept any signature of its own is left alone.
+				const needsBypassSignature =
+					compat.requiresSkipThoughtSignatureOnForeignToolCall === true &&
+					i > currentTurnStart &&
+					!toolCalls.some(tc =>
+						getGeminiThoughtSignatureExtraContent(
+							normalizeStoredGeminiSignature(parseStoredThoughtSignature(tc.thoughtSignature))?.perCall,
+						),
+					);
 				assistantMsg.tool_calls = toolCalls.map((tc, toolCallIndex) => {
 					const toolCallId = ensureToolCallId(tc.id, `${i}:${toolCallIndex}:${tc.name}`, msg);
 					rememberToolCallId(tc.id, toolCallId);
@@ -2806,7 +2832,11 @@ export function convertMessages(
 					};
 					const stored = normalizeStoredGeminiSignature(parseStoredThoughtSignature(tc.thoughtSignature));
 					const extraContent = getGeminiThoughtSignatureExtraContent(stored?.perCall);
-					if (extraContent) replayedToolCall.extra_content = extraContent;
+					if (extraContent) {
+						replayedToolCall.extra_content = extraContent;
+					} else if (needsBypassSignature && toolCallIndex === 0) {
+						replayedToolCall.extra_content = { google: { thought_signature: SKIP_THOUGHT_SIGNATURE } };
+					}
 					return replayedToolCall;
 				});
 				for (const toolCall of toolCalls) {
