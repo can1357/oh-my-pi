@@ -61,6 +61,8 @@ function restoreEnvValue(key: string, value: string | undefined): void {
 function resetProcessGlobals(): void {
 	AgentRegistry.resetGlobalForTests();
 	AgentLifecycleManager.resetGlobalForTests();
+	// The bus binds the registry it was built with; a relaunched process has a new one.
+	IrcBus.resetGlobalForTests();
 }
 
 beforeEach(async () => {
@@ -539,10 +541,11 @@ it("records an idle lane's IRC message that no turn has taken, and the relaunche
 			true,
 			["Alpha", "Beta", "Lane.Arm"],
 			async () => {
-				// A hold (as a running delivery takes) parks the message instead of waking a turn.
+				// A hold (as a running delivery takes) parks a peer's message instead of waking a turn; a parent's is never held.
 				const lane = AgentRegistry.global().get("Lane")!.session as AgentSession;
 				lane.holdIrcWakes();
-				await IrcBus.global().send({ from: MAIN_AGENT_ID, to: "Lane", body: "PEER-NOTE for Lane" });
+				const receipt = await IrcBus.global().send({ from: "Alpha", to: "Lane", body: "PEER-NOTE for Lane" });
+				expect(JSON.stringify(receipt)).toContain("woken");
 				expect(lane.peekPendingIrcMessages().length).toBe(1);
 			},
 			["Alpha", "Beta", "Lane", "Lane.Arm"],
