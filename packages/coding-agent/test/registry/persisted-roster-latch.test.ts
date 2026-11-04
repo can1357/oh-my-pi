@@ -89,19 +89,18 @@ function countScans(scans: string[], dir: string): number {
 
 /**
  * Record each roster scan by the directory it lists. A scan finds a root's
- * transcripts through the session storage's `*.jsonl` listing, once per scan
+ * transcripts through the session storage's entry listing, once per scan
  * whether or not the root has children: a latch that holds shows one listing,
  * a re-scan two or more.
  */
 function recordScans(scans: string[]): void {
-	const realListFilesSync = FileSessionStorage.prototype.listFilesSync;
-	vi.spyOn(FileSessionStorage.prototype, "listFilesSync").mockImplementation(function (
+	const realListEntriesSync = FileSessionStorage.prototype.listEntriesSync;
+	vi.spyOn(FileSessionStorage.prototype, "listEntriesSync").mockImplementation(function (
 		this: FileSessionStorage,
 		dir: string,
-		pattern: string,
 	) {
-		if (pattern === "*.jsonl") scans.push(dir);
-		return realListFilesSync.call(this, dir, pattern);
+		scans.push(dir);
+		return realListEntriesSync.call(this, dir);
 	});
 }
 
@@ -213,13 +212,15 @@ describe("persisted roster metadata fault settling", () => {
 			let faults = 0;
 			const eio = () => Object.assign(new Error("transient scan I/O"), { code: "EIO" });
 			if (listing === "transcripts") {
-				const realScanSync = Bun.Glob.prototype.scanSync;
-				vi.spyOn(Bun.Glob.prototype, "scanSync").mockImplementation(function (
-					this: Bun.Glob,
-					options?: Parameters<Bun.Glob["scanSync"]>[0],
+				// The scan lists transcripts through the storage's entry listing,
+				// which is where a transcript-listing fault reaches it.
+				const realListEntriesSync = FileSessionStorage.prototype.listEntriesSync;
+				vi.spyOn(FileSessionStorage.prototype, "listEntriesSync").mockImplementation(function (
+					this: FileSessionStorage,
+					dir: string,
 				) {
-					if (typeof options === "object" && options?.cwd === faultDir && faults++ === 0) throw eio();
-					return realScanSync.call(this, options);
+					if (dir === faultDir && faults++ === 0) throw eio();
+					return realListEntriesSync.call(this, dir);
 				});
 			} else {
 				const realReaddirSync = fs.readdirSync;

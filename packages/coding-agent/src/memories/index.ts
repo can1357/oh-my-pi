@@ -680,7 +680,13 @@ export async function collectThreads(session: AgentSession, currentThreadId?: st
 	const storage = session.sessionManager.getStorage();
 	await storage.refresh?.();
 	const threads: MemoryThread[] = [];
-	for (const fullPath of storage.listFilesSync(sessionDir, "*.jsonl")) {
+	// Every `*.jsonl` name the directory holds, as the `readdir` this replaced
+	// returned: a glob listing would hide a dot-named one.
+	const names = storage
+		.listEntriesSync(sessionDir)
+		.map(entry => entry.name)
+		.filter(name => name.endsWith(".jsonl"));
+	for (const fullPath of names.map(name => path.join(sessionDir, name))) {
 		let stat: SessionStorageStat;
 		try {
 			stat = storage.statSync(fullPath);

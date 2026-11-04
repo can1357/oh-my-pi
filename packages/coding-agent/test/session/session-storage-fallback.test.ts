@@ -386,6 +386,30 @@ describe("default file storage keeps main's listing behaviour", () => {
 		}
 	});
 
+	it("every enumerator of one session's subagent tree applies the same rule", async () => {
+		// `sessionFilesFromDisk`, `collectSubSessions` and the persisted roster
+		// each walk the same directory; on upstream main all three took regular
+		// files and showed dot-named ones. One of them reading through a glob
+		// instead would hide the dot-named one and follow the symlink.
+		const dir = makeTempDir("@pi-session-roster-");
+		const root = path.join(dir, "main.jsonl");
+		const children = path.join(dir, "main");
+		fs.mkdirSync(children);
+		fs.writeFileSync(root, "{}\n");
+		fs.writeFileSync(path.join(children, "Plain.jsonl"), "{}\n");
+		fs.writeFileSync(path.join(children, ".Hidden.jsonl"), "{}\n");
+		fs.writeFileSync(path.join(dir, "away.jsonl"), "{}\n");
+		fs.symlinkSync(path.join(dir, "away.jsonl"), path.join(children, "Linked.jsonl"));
+
+		const storage = new FileSessionStorage();
+		const roster = storage
+			.listEntriesSync(children)
+			.filter(entry => entry.isFile && entry.name.endsWith(".jsonl"))
+			.map(entry => entry.name)
+			.sort();
+		expect(roster).toEqual([".Hidden.jsonl", "Plain.jsonl"]);
+	});
+
 	it("the full transcript walk follows the directory's own order, as a readdir walk did", async () => {
 		const dir = makeTempDir("@pi-session-nested-");
 		fs.mkdirSync(path.join(dir, "Z"));

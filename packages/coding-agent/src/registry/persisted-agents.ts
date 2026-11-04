@@ -778,10 +778,15 @@ async function registerPersistedSubagentsFromDir(
 	// fault (EACCES, EMFILE, EIO) throws rather than listing as empty, so the
 	// roster latch drops and the next call retries instead of settling a
 	// roster that is missing transcripts.
+	// Regular files only, dot-named ones included: the `Dirent.isFile()` this
+	// replaced excluded a symlink, a FIFO or a device node named `*.jsonl`, and
+	// `readdir` showed a dot-named one. `listFilesSync` would do the opposite on
+	// both counts, and this tree already has one rule for it in
+	// `sessionFilesFromDisk` and `collectSubSessions`.
 	const names = storage
-		.listFilesSync(dir, "*.jsonl")
-		.map(file => path.basename(file))
-		.filter(name => !name.includes(".bak"))
+		.listEntriesSync(dir)
+		.filter(entry => entry.isFile && entry.name.endsWith(".jsonl") && !entry.name.includes(".bak"))
+		.map(entry => entry.name)
 		.sort();
 	// The local directory holds the sidecars (nested-repo patches) whatever the
 	// storage; a fault reading it propagates the same way.

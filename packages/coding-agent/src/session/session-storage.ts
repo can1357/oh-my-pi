@@ -237,6 +237,16 @@ export interface SessionStorage {
 	 * such as `"*\/*.jsonl"`, one directory below it) whose names match
 	 * `pattern`. A missing `dir` lists as empty; any other fault (EACCES, EIO,
 	 * EMFILE) throws, so a failed scan is never mistaken for an empty one.
+	 *
+	 * File storage answers this with `Bun.Glob`, so it hides dot-named entries
+	 * and follows symlinks. **Which enumerators may use it is a rule, stated
+	 * here once:** a listing of *sessions* by pattern may, because that is what
+	 * the glob scans it replaced did. An enumerator of one *session's subagent
+	 * tree* may not — those read a directory and took regular files only, so a
+	 * symlink, a FIFO or a device node named `*.jsonl` was never a transcript
+	 * and a dot-named one always was. Those use {@link listEntriesSync} with an
+	 * `isFile` filter: `sessionFilesFromDisk`, `collectSubSessions`, the
+	 * persisted-roster scan and the advisor transcript listing all do.
 	 */
 	listFilesSync(dir: string, pattern: string): string[];
 	/**

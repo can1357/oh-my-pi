@@ -94,15 +94,19 @@ export async function loadAdvisorTranscriptCosts(
 	if (sessionFile?.endsWith(JSONL_SUFFIX)) {
 		const directory = sessionFile.slice(0, -JSONL_SUFFIX.length);
 		await storage.refresh?.();
-		let files: string[] = [];
+		let names: string[] = [];
 		try {
-			files = storage.listFilesSync(directory, "*.jsonl");
+			// Regular files only, as the `Dirent.isFile()` this replaced required.
+			names = storage
+				.listEntriesSync(directory)
+				.filter(entry => entry.isFile)
+				.map(entry => entry.name);
 		} catch (err) {
 			logger.debug("advisor transcript listing failed", { err: String(err) });
 		}
-		for (const file of files) {
+		for (const name of names) {
 			if (options.shouldContinue?.() === false) break;
-			const name = path.basename(file);
+			const file = path.join(directory, name);
 			if (!isAdvisorTranscriptName(name)) continue;
 			try {
 				snapshots.push({
