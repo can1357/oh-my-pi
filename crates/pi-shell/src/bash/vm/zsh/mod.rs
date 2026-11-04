@@ -19,7 +19,7 @@ pub mod subst;
 pub mod terminfo_db;
 pub mod text;
 pub mod wcwidth;
-pub mod zglob;
 pub mod zexit;
+pub mod zglob;
 pub mod zpattern;
 pub mod zwc;

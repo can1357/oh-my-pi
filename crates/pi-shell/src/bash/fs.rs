@@ -262,6 +262,26 @@ pub trait File: Send {
 	fn stat(&self) -> io::Result<Stat> {
 		Err(io::ErrorKind::Unsupported.into())
 	}
+	/// Whether writes must pass through the engine to observe visible output.
+	fn observes_output(&self) -> bool {
+		false
+	}
+	/// Opaque run-generation/capture identity for sharing an external relay
+	/// when stdout and stderr lead to the same visible byte stream.
+	fn output_key(&self) -> Option<(usize, i32)> {
+		None
+	}
+	/// Write with an execution identity. Visible stream implementations
+	/// observe accepted bytes under the same lock that orders their writes;
+	/// ordinary files and pipeline buffers simply forward the operation.
+	fn poll_write_tagged(
+		&mut self,
+		cx: &mut Context<'_>,
+		bytes: &[u8],
+		_tag: Option<crate::bash::ids::CmdTag>,
+	) -> Poll<io::Result<usize>> {
+		self.poll_write(cx, bytes)
+	}
 	/// Duplicate (`n>&m` into an external, `exec 3>&1`).
 	fn dup(&self) -> io::Result<Box<dyn File>>;
 }
@@ -295,22 +315,22 @@ impl OpenFlags {
 	pub const CREATE: Self = Self(1 << 2);
 	/// Fail if it exists (`set -o noclobber`).
 	pub const EXCL: Self = Self(1 << 5);
+	/// Do not update the access time (`O_NOATIME`; Linux, ignored
+	/// elsewhere).
+	pub const NOATIME: Self = Self(1 << 8);
+	/// Fail on a symbolic link as last component (`O_NOFOLLOW`; zsh's
+	/// `sysopen -o nofollow`).
+	pub const NOFOLLOW: Self = Self(1 << 6);
+	/// Non-blocking open and I/O (`O_NONBLOCK`).
+	pub const NONBLOCK: Self = Self(1 << 9);
 	/// Open for reading.
 	pub const READ: Self = Self(1);
+	/// Synchronous writes (`O_SYNC`).
+	pub const SYNC: Self = Self(1 << 7);
 	/// Truncate to zero length.
 	pub const TRUNC: Self = Self(1 << 3);
 	/// Open for writing.
 	pub const WRITE: Self = Self(1 << 1);
-	/// Fail on a symbolic link as last component (`O_NOFOLLOW`; zsh's
-	/// `sysopen -o nofollow`).
-	pub const NOFOLLOW: Self = Self(1 << 6);
-	/// Synchronous writes (`O_SYNC`).
-	pub const SYNC: Self = Self(1 << 7);
-	/// Do not update the access time (`O_NOATIME`; Linux, ignored
-	/// elsewhere).
-	pub const NOATIME: Self = Self(1 << 8);
-	/// Non-blocking open and I/O (`O_NONBLOCK`).
-	pub const NONBLOCK: Self = Self(1 << 9);
 
 	/// Union of two flag sets.
 	pub const fn with(self, other: Self) -> Self {

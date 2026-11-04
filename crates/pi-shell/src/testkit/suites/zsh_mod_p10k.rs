@@ -24,8 +24,8 @@ fn zsh_mod_p10k_module_checks_load() {
 	let (out, err, st) = zsh(
 		"zmodload zsh/langinfo zsh/terminfo zsh/system || return; zmodload -F zsh/files b:zf_mv \
 		 b:zf_rm && zmodload zsh/mathfunc zsh/zselect && zmodload zsh/sched && zmodload -F \
-		 zsh/net/socket b:zsocket && echo ok; zmodload -LF zsh/files; whence -w zf_rm zf_ln \
-		 sysread zselect sched zsocket; print -l ${(o)${(f)\"$(zmodload)\"}}",
+		 zsh/net/socket b:zsocket && echo ok; zmodload -LF zsh/files; whence -w zf_rm zf_ln sysread \
+		 zselect sched zsocket; print -l ${(o)${(f)\"$(zmodload)\"}}",
 	);
 	assert_eq!(err, "");
 	// `zmodload -LF` ends its line with a space and no newline.
@@ -43,8 +43,8 @@ fn zsh_mod_p10k_module_checks_load() {
 fn zsh_mod_p10k_system_parameters() {
 	let (out, err, st) = zsh(
 		"zmodload zsh/system; zsystem supports flock; echo $?; zsystem supports nope; echo $?; [[ \
-		 $sysparams[pid] == $$ ]] && echo pid-ok; (( ${#errnos} > 30 )) && echo errnos-ok; print \
-		 -r -- ${(t)errnos} ${(t)sysparams}; zmodload -e zsh/system && echo loaded; zmodload -e \
+		 $sysparams[pid] == $$ ]] && echo pid-ok; (( ${#errnos} > 30 )) && echo errnos-ok; print -r \
+		 -- ${(t)errnos} ${(t)sysparams}; zmodload -e zsh/system && echo loaded; zmodload -e \
 		 zsh/zpty || echo notloaded",
 	);
 	assert_eq!(err, "");

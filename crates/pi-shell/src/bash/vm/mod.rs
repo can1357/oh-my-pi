@@ -7,7 +7,7 @@
 //! dispatch loop loads the control word before each op.
 
 mod api;
-mod arith;
+pub(crate) mod arith;
 mod builtins;
 mod callstack;
 mod command;
@@ -62,7 +62,7 @@ use self::{
 use crate::bash::{
 	diag::{Diag, DiagSite, render},
 	engine::Engine,
-	error::{RestoreError, ShellError},
+	error::ShellError,
 	event::{AssignScope, Event, EventData, EventMask, Origin, OriginChain, OriginLink},
 	fd::{FdOrigin, FdRef, FdTable},
 	fs::File,
@@ -70,9 +70,7 @@ use crate::bash::{
 	ids::{CallId, CmdTag, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
-	store::{
-		Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, Table, VarValue,
-	},
+	store::{Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, VarValue},
 };
 
 /// Ops a vproc runs per scheduler turn.
@@ -387,40 +385,43 @@ pub struct Shell {
 /// Shell-wide state shared by all vprocs (kept apart from `procs` so ops can
 /// borrow a vproc and the kernel at once).
 pub struct Kernel {
-	pub engine:          Arc<Engine>,
-	pub ctl:             Arc<Ctl>,
-	pub waker:           Waker,
+	pub engine:             Arc<Engine>,
+	pub ctl:                Arc<Ctl>,
+	pub waker:              Waker,
 	/// Facts derived from the root state in the store (the state itself
 	/// lives in the store).
-	pub root:            Root,
-	pub mask:            EventMask,
-	pub seq:             u64,
-	pub next_vpid:       u32,
-	pub next_run:        u64,
-	pub next_call:       u64,
-	pub next_cmd:        u64,
-	pub next_job:        u32,
-	pub done:            VecDeque<(RunId, i32)>,
-	pub calls_out:       VecDeque<(CallId, ToolCall)>,
-	pub results:         HashMap<CallId, CallOutcome>,
-	/// Units announced with `UnitCompiled` (not imaged: a restored shell
-	/// announces again what it can still run).
-	pub announced:       HashSet<UnitId>,
-	/// Every unit the shell can still run is to be announced before the
-	/// next step runs anything: set by `create` and `restore` (the host may
-	/// have seen none of them; see [`Shell::announce_live`]).
-	pub reannounce:      bool,
+	pub root:               Root,
+	pub mask:               EventMask,
+	pub seq:                u64,
+	pub next_vpid:          u32,
+	pub next_run:           u64,
+	pub next_call:          u64,
+	pub next_cmd:           u64,
+	pub next_job:           u32,
+	pub done:               VecDeque<(RunId, i32)>,
+	pub calls_out:          VecDeque<(CallId, ToolCall)>,
+	pub results:            HashMap<CallId, CallOutcome>,
+	/// Units announced by each vproc to the current observer. A prior
+	/// background vproc's rejected events must not suppress current units.
+	/// Not imaged: restored/cached frames announce lazily when executed.
+	pub announced:          HashSet<(Vpid, UnitId, Option<crate::bash::event::SourceOrigin>)>,
+	/// Observed script origins by actual activation depth. Empty without
+	/// tracing.
+	pub trace_sources:      HashMap<Vpid, HashMap<usize, crate::bash::event::SourceOrigin>>,
+	/// Origin of each currently executing source-context unit in its actual
+	/// vproc.
+	pub trace_unit_origins: HashMap<Vpid, Arc<HashMap<UnitId, crate::bash::event::SourceOrigin>>>,
 	/// Unit blobs known to be in the store ([`Kernel::persist_unit`],
 	/// `externalize`).
-	pub written:         HashSet<UnitId>,
+	pub written:            HashSet<UnitId>,
 	/// The `next_vpid` value last written as `MiscKey::NextVpid`
 	/// ([`Kernel::vpid`], [`Kernel::sync_root`]).
-	pub written_vpid:    u32,
-	pub paused:          bool,
-	pub argv0:           BString,
-	pub shell_pid:       u32,
+	pub written_vpid:       u32,
+	pub paused:             bool,
+	pub argv0:              BString,
+	pub shell_pid:          u32,
 	/// Idempotent fs ops dropped by the last suspend (re-issued on resume).
-	pub dropped_fs:      u32,
+	pub dropped_fs:         u32,
 	/// Child vprocs created during a turn, adopted by the scheduler after it.
 	/// Every child vproc has a `Record::Proc` from its adoption until its
 	/// exit status is collected ([`Kernel::proc_exited`],
@@ -429,24 +430,24 @@ pub struct Kernel {
 	/// bytes a slot, not a whole vproc (`cmd &` in a loop spawns ~200 per
 	/// slice: that kept ~600 bytes per idle vproc; the target is ≤ 2 KiB).
 	#[expect(clippy::vec_box, reason = "slack capacity of 8-byte slots, not of whole vprocs")]
-	pub spawned:         Vec<Box<Vproc>>,
+	pub spawned:            Vec<Box<Vproc>>,
 	/// `$RANDOM` generator state (written through as `MiscKey::Random` by
 	/// [`Kernel::next_random`] and [`Kernel::seed_random`]).
-	pub rand:            state::Random,
+	pub rand:               state::Random,
 	/// `now_ns` at shell creation (`$SECONDS`; `MiscKey::StartNs`).
-	pub start_ns:        u64,
+	pub start_ns:           u64,
 	/// Startup files (`path`, contents) the root vproc sources when its
 	/// first run starts ([`ShellInit::startup`]); not imaged (the first run
 	/// starts at the first step).
-	pub startup:         Vec<(BString, BString)>,
+	pub startup:            Vec<(BString, BString)>,
 	/// Which DEBUG/ERR/RETURN traps may be set: lets `exec::start_trap`
 	/// skip its checks before every command; not imaged.
-	pub pseudo_traps:    exec::PseudoTraps,
+	pub pseudo_traps:       exec::PseudoTraps,
 	/// Re-parsed `${ ;}` bodies ([`exec::NoforkUnits`]); not imaged.
-	pub nofork_units:    exec::NoforkUnits,
+	pub nofork_units:       exec::NoforkUnits,
 	/// The arithmetic this shell evaluated last ([`arith::Recent`]); not
 	/// imaged.
-	pub arith_recent:    arith::Recent,
+	pub arith_recent:       arith::Recent,
 	/// The last event clock reading while it is still current
 	/// ([`Kernel::stamp`]): set by a reading that ends a duration or starts a
 	/// command, cleared by [`Kernel::clock_stale`] before anything that can
@@ -455,41 +456,41 @@ pub struct Kernel {
 	/// `FuncEnter` events of a command (and a function's `FuncExit`) share
 	/// one `Host::now_ns` with the previous `CmdEnd` (xeon overhead profile:
 	/// `now_ns` a third of the default-mask event cost). Not imaged.
-	pub clock:           Option<u64>,
+	pub clock:              Option<u64>,
 	/// The empty document an async command without job control reads as
 	/// `/dev/null`, shared by all of them (it never yields a byte, so one
 	/// object serves every reader): an fd object and two buffers less per
 	/// background vproc (idle vproc ≤ 2 KiB). Not imaged (a restored
 	/// child keeps its own object).
-	pub null_input:      Option<FdRef>,
+	pub null_input:         Option<FdRef>,
 	/// `(label, caller)`: the labeled subshell trees host callouts started
 	/// ([`ShellApi::run_subshell_in`]) and the vproc that ran each callout;
 	/// virtual signals to the caller reach the tree (`Shell::deliver`).
 	/// Pruned there once no vproc carries the label; not imaged (callouts
 	/// do not survive a restore).
-	pub callout_labels:  Vec<(u32, Vpid)>,
+	pub callout_labels:     Vec<(u32, Vpid)>,
 	/// The last root run that `exit` or `set -e` ended
 	/// ([`Shell::ended_by_exit`]); not imaged.
-	pub exited:          Option<RunId>,
+	pub exited:             Option<RunId>,
 	/// Signal deaths of external programs replacing a submitted run, pending
 	/// its completion report; callouts do not survive frame restoration.
-	pub exec_signals:    HashMap<RunId, i32>,
+	pub exec_signals:       HashMap<RunId, i32>,
 	/// Signal death associated with the most recently reported run.
-	pub reported_signal: Option<(RunId, i32)>,
+	pub reported_signal:    Option<(RunId, i32)>,
 	/// Background jobs whose pid is still to be settled
 	/// ([`proc::Bang`]): imaged (a restored job still decides).
-	pub bangs:           Vec<proc::Bang>,
+	pub bangs:              Vec<proc::Bang>,
 	/// `(job, OS pid)`: jobs settled on their program's OS pid during the
 	/// turn, written into the job tables and `$!` of every vproc by the
 	/// scheduler after it (`Shell::adopt`); empty between turns, not
 	/// imaged.
-	pub settled:         Vec<(Vpid, u32)>,
+	pub settled:            Vec<(Vpid, u32)>,
 	/// Background jobs' lone commands whose redirections wait for their name
 	/// to resolve ([`proc::Deferral`]): imaged (a restored command goes on).
-	pub deferrals:       Vec<proc::Deferral>,
+	pub deferrals:          Vec<proc::Deferral>,
 	/// Job control of the interactive shell (process groups, the
 	/// terminal, stop events); not imaged.
-	pub jobctl:          jobctl::JobCtl,
+	pub jobctl:             jobctl::JobCtl,
 }
 
 /// A child vproc's entry in the process table ([`Kernel::proc_state`]).
@@ -530,7 +531,8 @@ impl Kernel {
 			calls_out: VecDeque::new(),
 			results: HashMap::new(),
 			announced: HashSet::new(),
-			reannounce: true,
+			trace_sources: HashMap::new(),
+			trace_unit_origins: HashMap::new(),
 			written: HashSet::new(),
 			written_vpid: engine.config().vpid_base,
 			paused: false,
@@ -788,6 +790,32 @@ impl Kernel {
 	#[inline]
 	pub fn emit_op(&mut self, cx: &mut Cx<'_>, vp: &Vproc, node: u32, data: EventData<'_>) {
 		if self.mask.contains(data.kind()) {
+			if self
+				.mask
+				.contains(crate::bash::event::EventKind::UnitCompiled)
+				&& matches!(
+					&data,
+					EventData::Subshell { .. }
+						| EventData::Background { .. }
+						| EventData::Pipeline { .. }
+				)
+				&& let Some(origins) = self.trace_unit_origins.get(&vp.vpid).cloned()
+			{
+				match &data {
+					EventData::Subshell { child } | EventData::Background { pid: child, .. } => {
+						self.trace_unit_origins.entry(*child).or_insert(origins);
+					},
+					EventData::Pipeline { stages } => {
+						for child in *stages {
+							self
+								.trace_unit_origins
+								.entry(*child)
+								.or_insert_with(|| Arc::clone(&origins));
+						}
+					},
+					_ => {},
+				}
+			}
 			let t_ns = cx.host.now_ns();
 			self.deliver_op(cx, vp, node, data, t_ns);
 		}
@@ -1708,62 +1736,9 @@ impl Shell {
 		// Subshells a host submitted since the last step.
 		self.adopt(cx);
 		self.settle_callouts();
-		if self.k.reannounce {
-			self.announce_live(cx);
-		}
 		let step = self.step_inner(cx, budget);
 		self.k.sync_root(cx.store, &self.procs[0]);
 		step
-	}
-
-	/// Announce (`UnitCompiled`, as shell-level events) every unit this
-	/// shell can still run: the bodies of the functions the store and the
-	/// subshell overlays define, and the units of every frame. Runs at the
-	/// first step after `create` (imported functions) and `restore` (the
-	/// host may be a new process that saw no event of the shell), with the
-	/// event mask the host set by then. A function whose body is neither
-	/// cached nor in the store is announced when a call recompiles it.
-	fn announce_live(&mut self, cx: &mut Cx<'_>) {
-		self.k.reannounce = false;
-		self.k.announced.clear();
-		let mut ids = Vec::new();
-		let scanned = cx.store.scan(Table::Func, &mut |_, rec| {
-			if let Record::Func { unit, .. } = rec {
-				ids.push(*unit);
-			}
-		});
-		if let Err(err) = scanned {
-			self.k.fail(err);
-			return;
-		}
-		for vp in &self.procs {
-			if let Some(ov) = &vp.overlay {
-				ids.extend(ov.records.values().filter_map(|rec| match rec {
-					Some(Record::Func { unit, .. }) => Some(*unit),
-					_ => None,
-				}));
-			}
-		}
-		let mut units = Vec::with_capacity(ids.len());
-		for id in ids {
-			match frames::load_unit(&self.k.engine, cx.store, id) {
-				Ok(unit) => units.push(unit),
-				Err(RestoreError::Store(err)) => {
-					self.k.fail(err);
-					return;
-				},
-				// Missing or unusable: the call recompiles the body from its
-				// source and announces it then.
-				Err(_) => {},
-			}
-		}
-		for vp in &self.procs {
-			units.extend(vp.frames.iter().filter_map(|f| f.unit.clone()));
-		}
-		let root = self.procs[0].vpid;
-		for unit in &units {
-			exec::announce(&mut self.k, cx, root, None, unit, unit.line);
-		}
 	}
 
 	fn step_inner(&mut self, cx: &mut Cx<'_>, budget: Budget) -> Step {
@@ -1844,6 +1819,8 @@ impl Shell {
 			// A subshell vproc exits once its frames and diagnostics are done.
 			if p.transient && !p.has_work() && p.out.is_empty() {
 				let p = self.procs.remove(i);
+				self.k.trace_sources.remove(&p.vpid);
+				self.k.trace_unit_origins.remove(&p.vpid);
 				jobctl::forget_vproc(&mut self.k, p.vpid);
 				// A job that ended undecided keeps its virtual pid.
 				self.k.settle_bang(p.vpid, None);
@@ -2135,6 +2112,8 @@ impl Shell {
 		}
 		if self.procs[i].transient {
 			let p = self.procs.remove(i);
+			self.k.trace_sources.remove(&p.vpid);
+			self.k.trace_unit_origins.remove(&p.vpid);
 			self.k.settle_bang(p.vpid, None);
 			self.k.forget_deferral(p.vpid);
 			self.k.proc_exited(cx.store, p.vpid, p.parent, status);
@@ -2444,9 +2423,12 @@ impl Shell {
 		ControlHandle(Arc::clone(&self.k.ctl))
 	}
 
-	/// Select the emitted event kinds.
-	pub const fn set_event_mask(&mut self, mask: EventMask) {
+	/// Select the emitted event kinds for a new observer generation.
+	/// Units are announced again only when parsed or executed, even when
+	/// the mask is unchanged; cached functions are never read ahead.
+	pub fn set_event_mask(&mut self, mask: EventMask) {
 		self.k.mask = mask;
+		self.k.announced.clear();
 	}
 
 	/// The current event mask.

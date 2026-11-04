@@ -157,7 +157,9 @@ fn median_cut(rgba: &[u8]) -> Vec<[u8; 3]> {
 				choice = Some((index, axis, count));
 			}
 		}
-		let Some((index, axis, count)) = choice else { break };
+		let Some((index, axis, count)) = choice else {
+			break;
+		};
 		let (start, end) = boxes[index];
 		bins[start..end].sort_unstable_by_key(|bin| bin.sums[axis] / bin.count);
 		let mut weight = 0;
@@ -428,7 +430,10 @@ pub(super) fn decode(bytes: &[u8]) -> Result<RgbaImage> {
 				if count >= 5 {
 					match values[1] {
 						1 => palette[index] = hls(values[2], values[3], values[4]),
-						2 => palette[index] = Rgba([percent(values[2]), percent(values[3]), percent(values[4]), 255]),
+						2 => {
+							palette[index] =
+								Rgba([percent(values[2]), percent(values[3]), percent(values[4]), 255])
+						},
 						_ => {},
 					}
 				}

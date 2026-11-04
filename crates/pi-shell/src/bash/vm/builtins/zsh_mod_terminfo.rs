@@ -65,7 +65,9 @@ fn env_num(s: &[u8]) -> i32 {
 		i += 1;
 	}
 	let (radix, start) = match (s.get(i), s.get(i + 1)) {
-		(Some(b'0'), Some(b'x' | b'X')) if s.get(i + 2).is_some_and(u8::is_ascii_hexdigit) => (16, i + 2),
+		(Some(b'0'), Some(b'x' | b'X')) if s.get(i + 2).is_some_and(u8::is_ascii_hexdigit) => {
+			(16, i + 2)
+		},
 		(Some(b'0'), _) => (8, i),
 		_ => (10, i),
 	};
@@ -299,7 +301,13 @@ pub fn echoti(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 	let pars: Vec<TParm<'_>> = rest
 		.iter()
 		.enumerate()
-		.map(|(i, a)| if strarg && i > 0 { TParm::Str(a) } else { TParm::Num(atoi(a)) })
+		.map(|(i, a)| {
+			if strarg && i > 0 {
+				TParm::Str(a)
+			} else {
+				TParm::Num(atoi(a))
+			}
+		})
 		.collect();
 	let out = terminfo_db::tputs(&terminfo_db::tparm(t, &pars));
 	ctx.out(&out);
