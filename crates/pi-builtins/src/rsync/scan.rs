@@ -280,6 +280,39 @@ fn sort_with_order<T>(entries: Vec<(FileEntry, T)>, proto: crate::rsync::wire::P
 // Sender
 // ---------------------------------------------------------------------------
 
+/// A top-level operand read as a link under `--fake-super`: `Some` with the
+/// target when it is a stored symlink (a regular file whose contents are the
+/// target, as upstream's `do_readlink` reads one when `am_root < 0`), `None`
+/// when it is a real symlink, which the caller reads as itself.
+///
+/// One open that does not follow a final symlink decides which, as upstream's
+/// `do_open_nofollow` and [`Tree::read_link_entry`] do. Asking for the type
+/// first and then opening normally left a window in which anyone who can
+/// write the operand's directory could put a symlink in the file's place, and
+/// the open followed it: a privileged sender then sent up to 4095 bytes of
+/// whatever the symlink pointed at as the link's target.
+fn read_operand_link(fs: &pi_vfs::BlockingFs, path: &Path) -> io::Result<Option<Vec<u8>>> {
+	#[cfg(unix)]
+	{
+		let mut options = pi_vfs::OpenOptions::new();
+		options.read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NOCTTY);
+		match fs.open_with(path, &options) {
+			Ok(mut file) => read_stored_link(&mut file).map(Some),
+			Err(err) if err.raw_os_error().is_some() && err.raw_os_error() == paths::loop_error().raw_os_error() => Ok(None),
+			Err(err) => Err(err),
+		}
+	}
+	// No `O_NOFOLLOW` to ask for here; the same check-then-open fallback as
+	// [`Tree::open_read`] off Unix.
+	#[cfg(not(unix))]
+	{
+		if fs.symlink_metadata(path)?.is_symlink() {
+			return Ok(None);
+		}
+		read_stored_link(&mut fs.open(path)?).map(Some)
+	}
+}
+
 /// How the sender resolves paths below its bases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Access {
@@ -767,11 +800,8 @@ impl Scanner {
 				} else {
 					let path = join_name(&self.base().abs, name)?;
 					let fake = FakeLinks::for_run(self.ctx.opts.am_root, true) != FakeLinks::Off;
-					if fake && !self.ctx.fs.symlink_metadata(&path)?.is_symlink() {
-						// A stored symlink: its contents are the target, as
-						// upstream's do_readlink with am_root < 0 reads them; a
-						// real one reads as itself.
-						return read_stored_link(&mut self.ctx.fs.open(&path)?);
+					if fake && let Some(target) = read_operand_link(&self.ctx.fs, &path)? {
+						return Ok(target);
 					}
 					self.ctx.fs.read_link(path)?
 				}
