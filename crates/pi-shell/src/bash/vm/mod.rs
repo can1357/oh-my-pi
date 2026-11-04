@@ -1919,6 +1919,32 @@ impl Shell {
 		hits.sort_unstable();
 	}
 
+	/// The processes of the job rooted at `root` as bash's job table lists
+	/// them: the root, and the children of a member that only waits for
+	/// them before it exits ([`transparent`]: the stages of `a | b &`).
+	fn job_members(&self, root: Vpid) -> Vec<Vpid> {
+		let mut members = vec![root];
+		let mut i = 0;
+		while let Some(&m) = members.get(i) {
+			i += 1;
+			let waits = self
+				.procs
+				.iter()
+				.find(|p| p.vpid == m)
+				.is_some_and(|p| transparent(p, true) == Some(false));
+			if waits {
+				members.extend(
+					self
+						.procs
+						.iter()
+						.filter(|p| p.parent == Some(m))
+						.map(|p| p.vpid),
+				);
+			}
+		}
+		members
+	}
+
 	/// Whether `vpid` belongs to the job rooted at `root`, excluding nested
 	/// jobs.
 	fn in_job(&self, mut vpid: Vpid, root: Vpid) -> bool {
@@ -1951,20 +1977,53 @@ impl Shell {
 			.k
 			.emit(cx, root, None, EventData::Signal { sig, target });
 		let platform = self.k.engine.config().platform;
-		let job_root = match target {
+		let job = match target {
 			SigTarget::Job(id) => self
 				.procs
 				.iter()
 				.flat_map(|p| p.jobs.iter())
 				.find(|job| job.id == id)
-				.map(|job| job.vpid),
+				.map(|job| (job.vpid, job.control)),
+			_ => None,
+		};
+		let job_root = job.map(|(v, _)| v);
+		// bash `kill_pid`: only a job with its own process group (job
+		// control) is signalled as a group; otherwise the signal reaches the
+		// job's subshell, not the command it is running.
+		let group = job.is_some_and(|(_, control)| control);
+		// Without its own process group a job whose subshell traps (or
+		// ignores) the signal gets it in that subshell alone, and in the
+		// processes that subshell is only waiting on to exit (the stages of
+		// `a | b &`): bash signals the job's pipeline, not what the subshell
+		// runs meanwhile.
+		let members = match job_root {
+			Some(v) if !group && !matches!(sig, Signal::Kill | Signal::Stop) => {
+				match self.procs.iter().position(|p| p.vpid == v) {
+					Some(i) => match state::record(
+						cx.store,
+						&self.procs[i],
+						crate::bash::store::Key::Trap(crate::bash::store::TrapKey::Signal(sig)),
+					) {
+						Ok(Some(Record::Trap { .. })) => Some(self.job_members(v)),
+						Ok(_) => None,
+						Err(err) => {
+							self.k.fail(err);
+							return;
+						},
+					},
+					None => None,
+				}
+			},
 			_ => None,
 		};
 		let mut hits: Vec<usize> = (0..self.procs.len())
 			.filter(|&i| match target {
 				SigTarget::Vpid(v) => self.procs[i].vpid == v,
 				SigTarget::All => true,
-				SigTarget::Job(_) => job_root.is_some_and(|v| self.in_job(self.procs[i].vpid, v)),
+				SigTarget::Job(_) => match &members {
+					Some(members) => members.contains(&self.procs[i].vpid),
+					None => job_root.is_some_and(|v| self.in_job(self.procs[i].vpid, v)),
+				},
 				SigTarget::Label(l) => l != 0 && self.procs[i].lineage.label == l,
 			})
 			.collect();
@@ -1988,7 +2047,12 @@ impl Shell {
 			let terminating = trap.is_none() && sig.default_action() == DefaultAction::Terminate;
 			// A signal to the shell PID does not also target its foreground child.
 			// A terminating child is signaled once by `kill`, not here and there.
-			if target != SigTarget::Vpid(root.0) && !terminating {
+			// A vproc that traps (or ignores) the signal gets it alone unless
+			// its job is signalled as a process group: its trap runs once the
+			// command returns (a trapped `TERM` in `f & kill %1`).
+			let alone =
+				trap.is_some() && !group && matches!(target, SigTarget::Vpid(_) | SigTarget::Job(_));
+			if target != SigTarget::Vpid(root.0) && !terminating && !alone {
 				for frame in &mut self.procs[i].frames {
 					if let Some(sc) = frame.scratch.as_mut() {
 						match &mut sc.live {
