@@ -4,14 +4,21 @@
  * words, and a reader dying at any step boundary.
  *
  * `claimExitIntent` asks for its filesystem and board work one step at a time,
- * so a model of both can answer those steps here. A scheduler walks every
- * sequence of moves (advance a reader, kill a reader, publish a word) from the
- * start state, replaying each prefix, and checks the protocol's invariants
- * after every move and again once the dust has settled. Killing a reader drops
- * it with its pending step unperformed, which is what a terminated thread
- * leaves behind; stalling one is the scheduler simply running other actors
- * first, so a reader that wakes long after a takeover would have fired is a
- * schedule like any other.
+ * so a model of both can answer those steps here. The board's steps are
+ * modelled at the granularity the real board has: `board-read` is its one
+ * `Atomics.load` and `board-publish` its one `Atomics.compareExchange`, so a
+ * death between the read a pass decides on and the publication it decides is a
+ * schedule the scheduler walks, and a publication is never half done. A
+ * publication can also answer `"full"`, which is the real board out of room;
+ * the protocol must then treat its word as unrecorded.
+ *
+ * A scheduler walks every sequence of moves (advance a reader, advance it onto
+ * a full board, kill a reader, publish a word) from the start state, replaying
+ * each prefix, and checks the protocol's invariants after every move and again
+ * once the dust has settled. Killing a reader drops it with its pending step
+ * unperformed, which is what a terminated thread leaves behind; stalling one is
+ * the scheduler simply running other actors first, so a reader that wakes long
+ * after another has recorded a word is a schedule like any other.
  */
 import { describe, expect, it } from "bun:test";
 import {
@@ -38,7 +45,11 @@ interface ModelFile {
 /** The intent directory and the board of one modelled process. */
 class World {
 	files = new Map<string, ModelFile>();
+	/** The board: the word it holds, and the publication that put it there. */
 	recorded: ExitContextWord | undefined;
+	version = 0;
+	/** Publications that may still answer "the board is out of room". */
+	fullBudget = 0;
 	/** Every word a sender published at the intent path, oldest first. */
 	published: ExitContextWord[] = [];
 	violations: string[] = [];
@@ -60,15 +71,45 @@ class World {
 		return [...this.files.keys()].filter(path => path.startsWith(COPY_PREFIX));
 	}
 
+	/** The word a file holds for this process, or `undefined` when it is blank or older than the process. */
+	wordIn(path: string): ExitContextWord | undefined {
+		const file = this.files.get(path);
+		if (!file || file.mtimeMs < PROCESS_START_MS) return undefined;
+		const word = file.text.trim();
+		return word ? { word, mtimeMs: file.mtimeMs } : undefined;
+	}
+
 	fail(invariant: string, detail: string): void {
 		this.violations.push(`${invariant}: ${detail}`);
 	}
 
-	perform(reader: Reader, effect: ExitContextClaimEffect): ExitContextClaimOutcome {
+	perform(reader: Reader, effect: ExitContextClaimEffect, full: boolean): ExitContextClaimOutcome {
 		switch (effect.kind) {
-			case "recorded":
+			case "board-read": {
 				if (effect.intentPath !== INTENT_PATH) this.fail("I1b", `read the board under ${effect.intentPath}`);
-				return { kind: "recorded", word: this.recorded };
+				return { kind: "board-read", entry: { word: this.recorded, version: this.version } };
+			}
+			case "board-publish": {
+				if (effect.intentPath !== INTENT_PATH) this.fail("I1b", `published under ${effect.intentPath}`);
+				// The real board reserves its record's bytes before the exchange; with
+				// no room left nothing is written and nothing is published.
+				if (full && this.fullBudget > 0) {
+					this.fullBudget--;
+					return { kind: "board-publish", result: "full" };
+				}
+				// One compare-exchange: it lands only on the state it was decided against.
+				if (effect.expected.version !== this.version) return { kind: "board-publish", result: "lost" };
+				if (effect.word.mtimeMs < PROCESS_START_MS) this.fail("I5", `recorded a stale word ${effect.word.word}`);
+				if (!this.published.some(word => word.mtimeMs === effect.word.mtimeMs && word.word === effect.word.word)) {
+					this.fail("I7", `recorded ${effect.word.word}, which no sender published`);
+				}
+				if (this.recorded && effect.word.mtimeMs <= this.recorded.mtimeMs) {
+					this.fail("I6", `published ${effect.word.word} over the no-older ${this.recorded.word}`);
+				}
+				this.recorded = effect.word;
+				this.version++;
+				return { kind: "board-publish", result: "published" };
+			}
 			case "take": {
 				if (effect.intentPath !== INTENT_PATH) this.fail("I1b", `renamed ${effect.intentPath}`);
 				if (effect.claimedPath !== reader.claimedPath) {
@@ -89,18 +130,18 @@ class World {
 				if (file) reader.read.add(effect.claimedPath);
 				return { kind: "read", file: file && { ...file } };
 			}
-			case "record": {
-				if (effect.word.mtimeMs < PROCESS_START_MS) this.fail("I5", `recorded a stale word ${effect.word.word}`);
-				if (!this.published.some(word => word.mtimeMs === effect.word.mtimeMs && word.word === effect.word.word)) {
-					this.fail("I7", `recorded ${effect.word.word}, which no sender published`);
-				}
-				if (!this.recorded || effect.word.mtimeMs > this.recorded.mtimeMs) this.recorded = effect.word;
-				return { kind: "record", word: this.recorded };
-			}
 			case "remove": {
 				if (!effect.claimedPath.startsWith(COPY_PREFIX)) this.fail("I1b", `deleted ${effect.claimedPath}`);
 				if (!reader.read.has(effect.claimedPath)) {
-					this.fail("I3", `${reader.id} deleted ${effect.claimedPath} without reading it`);
+					this.fail("I2", `${reader.id} deleted ${effect.claimedPath} without reading it`);
+				}
+				const word = this.wordIn(effect.claimedPath);
+				// The deletion rule: a copy goes only once the board holds its word or
+				// one its sender published no earlier. This is what a record that never
+				// happened — a full board, or the lock a dying thread used to leave
+				// held — must not be allowed to look like.
+				if (word && !(this.recorded && this.recorded.mtimeMs >= word.mtimeMs)) {
+					this.fail("I2", `${reader.id} deleted ${word.word} while the board holds ${this.recorded?.word}`);
 				}
 				this.files.delete(effect.claimedPath);
 				return { kind: "remove" };
@@ -154,10 +195,10 @@ class Reader {
 		this.answer = answer;
 	}
 
-	step(world: World): void {
+	step(world: World, full = false): void {
 		if (!this.pending) throw new Error(`${this.id} has nothing to do`);
 		const before = world.recorded;
-		const next = this.claim.next(world.perform(this, this.pending));
+		const next = this.claim.next(world.perform(this, this.pending, full));
 		if (next.done) this.finish(next.value);
 		else this.pending = next.value;
 		world.check(before);
@@ -168,7 +209,7 @@ class Reader {
 	}
 }
 
-type Move = { kind: "step" | "kill"; reader: number } | { kind: "publish" };
+type Move = { kind: "step" | "step-full" | "kill"; reader: number } | { kind: "publish" };
 
 interface Scenario {
 	/** Reader passes that run at the same time, all from the start of the schedule. */
@@ -177,6 +218,8 @@ interface Scenario {
 	words: string[];
 	/** Reader deaths one schedule may contain. */
 	kills: number;
+	/** Publications one schedule may answer with "the board is out of room". */
+	fullBoards?: number;
 	/** The directory and board before any pass runs. */
 	start: (world: World) => void;
 	/** What this scenario demands of the end state, beyond the invariants every schedule is held to. */
@@ -192,6 +235,7 @@ interface Run {
 
 function replay(scenario: Scenario, moves: Move[]): Run {
 	const world = new World();
+	world.fullBudget = scenario.fullBoards ?? 0;
 	scenario.start(world);
 	const run: Run = {
 		world,
@@ -203,6 +247,9 @@ function replay(scenario: Scenario, moves: Move[]): Run {
 		switch (move.kind) {
 			case "step":
 				run.readers[move.reader]!.step(world);
+				break;
+			case "step-full":
+				run.readers[move.reader]!.step(world, true);
 				break;
 			case "kill":
 				run.readers[move.reader]!.alive = false;
@@ -222,6 +269,9 @@ function legalMoves(run: Run): Move[] {
 	run.readers.forEach((reader, index) => {
 		if (!reader.alive || reader.done) return;
 		moves.push({ kind: "step", reader: index });
+		if (reader.pending?.kind === "board-publish" && run.world.fullBudget > 0) {
+			moves.push({ kind: "step-full", reader: index });
+		}
 		if (run.kills > 0) moves.push({ kind: "kill", reader: index });
 	});
 	if (run.words.length > 0) moves.push({ kind: "publish" });
@@ -231,10 +281,13 @@ function legalMoves(run: Run): Move[] {
 /**
  * What must hold once every actor has stopped and the next exits have read:
  * no copy is left, every published word is recorded, still on disk, or older
- * than one that is, and a process that was told a word knows one.
+ * than one that is, and a process that was told a word knows one. The recovery
+ * passes run against a board with room, which is what makes a full board a
+ * delay and never a loss.
  */
 function settle(run: Run, scenario: Scenario): void {
 	const { world } = run;
+	world.fullBudget = 0;
 	new Reader("recovery-1").runToEnd(world);
 	const second = new Reader("recovery-2");
 	second.runToEnd(world);
@@ -304,7 +357,7 @@ describe("exit-intent claim schedules", () => {
 		});
 		expect(result.violations).toEqual([]);
 		expect(result.schedules).toBeGreaterThan(500_000);
-	}, 120_000);
+	}, 300_000);
 
 	it("never records or keeps what an earlier process with this pid left", () => {
 		const stale = (world: World): void => {
@@ -333,7 +386,7 @@ describe("exit-intent claim schedules", () => {
 		});
 		expect(withFreshWords.violations).toEqual([]);
 		expect(withFreshWords.schedules).toBeGreaterThan(200);
-	}, 120_000);
+	}, 300_000);
 
 	it("leaves a word published after one is recorded on disk, for the next process", () => {
 		const result = explore({
@@ -343,9 +396,11 @@ describe("exit-intent claim schedules", () => {
 			start: world => {
 				world.publish("restart");
 				world.recorded = world.published[0];
+				world.version = 1;
 				world.files.delete(INTENT_PATH);
 			},
-			// The recorded word stands, and the later one is untouched for the next process to read.
+			// Neither pass ever sees an unrecorded board, so neither takes the file:
+			// the recorded word stands and the later one waits for the next process.
 			settled: world => {
 				if (world.recorded?.word !== "restart") world.fail("I3", `recorded ${world.recorded?.word}`);
 				if (world.files.get(INTENT_PATH)?.text !== "stop\n") world.fail("I3", "the later word was consumed");
@@ -354,6 +409,18 @@ describe("exit-intent claim schedules", () => {
 		expect(result.violations).toEqual([]);
 		expect(result.schedules).toBeGreaterThan(100);
 	});
+
+	it("keeps the copy it read when the board has no room, and a later pass records and clears it", () => {
+		const result = explore({
+			readers: 2,
+			words: [],
+			kills: 1,
+			fullBoards: 1,
+			start: world => world.publish("restart"),
+		});
+		expect(result.violations).toEqual([]);
+		expect(result.schedules).toBeGreaterThan(10_000);
+	}, 300_000);
 
 	it("recovers the word a reader took before it died, oldest copies and all", () => {
 		const world = new World();
@@ -380,7 +447,7 @@ describe("exit-intent claim schedules", () => {
 		expect(world.violations).toEqual([]);
 	});
 
-	it("takes the file once, records the word, and deletes only its own copy", () => {
+	it("takes the file once, publishes the word with one exchange, and deletes only its own copy", () => {
 		const world = new World();
 		world.publish("restart");
 		const reader = new Reader("plain");
@@ -390,15 +457,38 @@ describe("exit-intent claim schedules", () => {
 			reader.step(world);
 		}
 		expect(effects.map(effect => effect.kind)).toEqual([
-			"recorded",
+			"board-read",
 			"take",
 			"list",
 			"read",
-			"record",
+			"board-read",
+			"board-publish",
 			"remove",
-			"recorded",
+			"board-read",
 		]);
 		expect(reader.answer).toBe("restart");
+		expect(world.version).toBe(1);
+		expect([...world.files.keys()]).toEqual([]);
+		expect(world.violations).toEqual([]);
+	});
+
+	it("keeps the word it read and deletes nothing when every publication finds the board full", () => {
+		const world = new World();
+		world.fullBudget = 10;
+		world.publish("restart");
+		const reader = new Reader("no-room");
+		while (!reader.done) reader.step(world, true);
+		// Nothing was recorded, so the copy holding the word is still there for the
+		// next pass; the exit still reports what this thread read.
+		expect(world.recorded).toBeUndefined();
+		expect(reader.answer).toBe("restart");
+		expect(world.copies()).toEqual([reader.claimedPath]);
+
+		world.fullBudget = 0;
+		const recovery = new Reader("recovery");
+		recovery.runToEnd(world);
+		expect(recovery.answer).toBe("restart");
+		expect(world.recorded?.word).toBe("restart");
 		expect([...world.files.keys()]).toEqual([]);
 		expect(world.violations).toEqual([]);
 	});

@@ -25,12 +25,11 @@ import {
 	runExitIntentClaim,
 } from "./exit-context-claim";
 import {
-	EXIT_CONTEXT_IO_TIMEOUT_MS,
 	EXIT_CONTEXT_RESULT_OFFSET,
 	type ExitContextIoRequest,
 	type ExitContextIoResult,
-	recordExitIntent,
-	recordedExitIntent,
+	publishExitIntent,
+	readExitIntentEntry,
 } from "./exit-context-protocol";
 
 /** Most bytes read from any one source. */
@@ -111,28 +110,21 @@ function listClaimedCopies(intentDir: string, pid: number): string[] {
 }
 
 /** One step of the claim, against the real filesystem and the process's board. */
-function performClaimEffect(
-	request: ExitContextIoRequest,
-	boardDeadline: number,
-	effect: ExitContextClaimEffect,
-): ExitContextClaimOutcome {
-	// The board's lock is held only for memory work; a reader that waits past
-	// this answers for its own thread instead of holding up the exit.
-	const boardTimeout = boardDeadline - performance.now();
+function performClaimEffect(request: ExitContextIoRequest, effect: ExitContextClaimEffect): ExitContextClaimOutcome {
 	switch (effect.kind) {
-		case "recorded":
-			return { kind: "recorded", word: recordedExitIntent(request.board, boardTimeout, effect.intentPath) };
+		case "board-read":
+			return { kind: "board-read", entry: readExitIntentEntry(request.board, effect.intentPath) };
+		case "board-publish":
+			return {
+				kind: "board-publish",
+				result: publishExitIntent(request.board, effect.intentPath, effect.expected, effect.word),
+			};
 		case "take":
 			return { kind: "take", taken: takeIntentFile(effect.intentPath, effect.claimedPath) };
 		case "list":
 			return { kind: "list", claimedPaths: listClaimedCopies(request.intentDir, request.pid) };
 		case "read":
 			return { kind: "read", file: readSmallFile(effect.claimedPath) };
-		case "record":
-			return {
-				kind: "record",
-				word: recordExitIntent(request.board, boardTimeout, effect.intentPath, effect.word),
-			};
 		case "remove":
 			try {
 				fs.unlinkSync(effect.claimedPath);
@@ -145,14 +137,13 @@ function answer(request: ExitContextIoRequest): void {
 	const result: ExitContextIoResult = {};
 	const oomKills = readOomKills(request);
 	if (oomKills !== undefined) result.oomKills = oomKills;
-	const boardDeadline = performance.now() + EXIT_CONTEXT_IO_TIMEOUT_MS;
 	const intent = runExitIntentClaim(
 		{
 			intentPath: path.join(request.intentDir, String(request.pid)),
 			claimedPath: claimedCopyPath(request.intentDir, request.pid),
 			processStartMs: request.processStartMs,
 		},
-		effect => performClaimEffect(request, boardDeadline, effect),
+		effect => performClaimEffect(request, effect),
 	);
 	if (intent !== undefined) result.intent = intent;
 	const encoded = new TextEncoder().encode(JSON.stringify(result));

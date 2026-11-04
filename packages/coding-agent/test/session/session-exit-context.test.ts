@@ -689,6 +689,67 @@ describe.skipIf(!straceAvailable)("a reader held or killed in the middle of a cl
 	}, 120_000);
 });
 
+const BOARD_DEATH = path.join(import.meta.dir, "../fixtures/session-exit-context-board-death.ts");
+
+interface BoardDeathResult {
+	parked: "publish" | "reserve" | null;
+	duringPause: string[];
+	heldAnswered: boolean;
+	first: { intent?: string };
+	second: { intent?: string };
+	files: string[];
+}
+
+/** Run the board-death fixture, whose reader is terminated at one board instruction. */
+async function runBoardDeath(tempDir: TempDir, trigger: "publish" | "reserve"): Promise<BoardDeathResult> {
+	const child = Bun.spawn([process.execPath, BOARD_DEATH, tempDir.join("exit-intent"), trigger], {
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+		child.exited,
+	]);
+	expect(exitCode, stderr).toBe(0);
+	return JSON.parse(stdout.trim()) as BoardDeathResult;
+}
+
+describe("a reader terminated inside a board instruction", () => {
+	it("loses no word when it dies the instant after it publishes one", async () => {
+		using tempDir = TempDir.createSync("@omp-exit-context-board-published-");
+		const result = await runBoardDeath(tempDir, "publish");
+		// It had taken the file and not yet deleted its copy, so the word is on the
+		// board and the copy is a leftover a later pass has to clear.
+		expect(result.parked).toBe("publish");
+		expect(result.heldAnswered).toBe(false);
+		expect(result.duringPause.filter(name => name.includes(".claimed-"))).toHaveLength(1);
+		// Both exits agree. Behind a lock the dead thread never released, the first
+		// exit deleted the only copy on a record that timed out and the second found
+		// nothing at all.
+		expect({ first: result.first.intent, second: result.second.intent }).toEqual({
+			first: "restart",
+			second: "restart",
+		});
+		expect(result.files).toEqual([]);
+	}, 120_000);
+
+	it("loses no word when it dies between reserving its record and publishing it", async () => {
+		using tempDir = TempDir.createSync("@omp-exit-context-board-reserved-");
+		const result = await runBoardDeath(tempDir, "reserve");
+		expect(result.parked).toBe("reserve");
+		expect(result.heldAnswered).toBe(false);
+		// Nothing was published, so the word is still in the copy it came from, and
+		// the next exit records it from there.
+		expect(result.duringPause.filter(name => name.includes(".claimed-"))).toHaveLength(1);
+		expect({ first: result.first.intent, second: result.second.intent }).toEqual({
+			first: "restart",
+			second: "restart",
+		});
+		expect(result.files).toEqual([]);
+	}, 120_000);
+});
+
 const SLOW_FUSE = path.join(import.meta.dir, "../fixtures/slow-fuse.py");
 const fuseAvailable =
 	process.platform === "linux" &&

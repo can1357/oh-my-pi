@@ -164,7 +164,7 @@ export function readExitContext(
 	const deadline = performance.now() + timeoutMs;
 	const remaining = () => deadline - performance.now();
 	// The word the process has recorded: shared memory, never a file.
-	const known = recordedExitIntent(board, remaining(), intentPath)?.word;
+	const known = recordedExitIntent(board, intentPath)?.word;
 	if (lateRead) {
 		if (takeAnswer(lateRead.state) === undefined) {
 			// The reader is still stuck on an earlier request: record what needs no I/O.
@@ -200,7 +200,7 @@ export function readExitContext(
 		} catch {}
 	}
 	// A word another thread recorded while this one waited.
-	intent ??= recordedExitIntent(board, remaining(), intentPath)?.word;
+	intent ??= recordedExitIntent(board, intentPath)?.word;
 	if (intent !== undefined) context.intent = intent;
 	return context;
 }
