@@ -693,6 +693,13 @@ impl Vproc {
 		!self.runs.is_empty() || !self.frames.is_empty()
 	}
 
+	/// Whether the scheduler runs this vproc: it has work, or queued writes
+	/// still to deliver (a finished subshell's pinned diagnostic waiting on
+	/// a full pipe; it is reaped only once they are written or fail).
+	pub fn schedulable(&self) -> bool {
+		self.has_work() || !self.out.is_empty()
+	}
+
 	/// Bash defers trapped signals while waiting for a foreground command.
 	pub fn waiting_foreground(&self) -> bool {
 		self.frames.iter().any(|frame| {

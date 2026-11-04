@@ -855,13 +855,17 @@ fn errno() -> i32 {
 	io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
-/// One past the highest descriptor this process may have open: its
-/// open-file limit, up to 1,048,576. Read before a fork.
+/// One past the highest descriptor this process can hold, for the child's
+/// check of every descriptor when it cannot list them: the larger of its
+/// open-file limits (a descriptor opened before the soft limit was lowered
+/// stays open above it), up to 1,048,576, Linux's default `nr_open` and the
+/// highest number a process gets unless an administrator raises it. Read
+/// before a fork.
 fn descriptor_bound() -> i32 {
 	const MOST: u64 = 1 << 20;
 	let limit = match rlimit::get(Rlimit::Nofile) {
-		Ok((Some(soft), _)) => soft.min(MOST),
-		_ => MOST,
+		Ok((soft, hard)) => soft.unwrap_or(MOST).max(hard.unwrap_or(MOST)).min(MOST),
+		Err(_) => MOST,
 	};
 	i32::try_from(limit).unwrap_or(i32::MAX)
 }
@@ -1059,15 +1063,26 @@ fn fork_redirs(
 			for step in &steps {
 				match step {
 					ChildStep::Open { fds, path, flags, mode, diag } => {
-						let fd = libc::open(path.as_ptr(), *flags, libc::c_uint::from(*mode));
-						if fd < 0 {
-							let e = errno();
-							// `noclobber`'s exclusive create of an existing file:
-							// bash's own words (`Diag::NoClobber`).
-							if e == libc::EEXIST && *flags & libc::O_EXCL != 0 {
-								child_fail_with(diag, b"cannot overwrite existing file", 1);
+						let mut fd = libc::open(path.as_ptr(), *flags, libc::c_uint::from(*mode));
+						if fd < 0 && errno() == libc::EEXIST && *flags & libc::O_EXCL != 0 {
+							// `noclobber`'s exclusive create met an existing file:
+							// open it as it is and refuse a regular one, judged on
+							// the object opened (bash's `noclobber_open`), in bash's
+							// words (`Diag::NoClobber`).
+							let plain = *flags & !(libc::O_CREAT | libc::O_EXCL | libc::O_TRUNC);
+							fd = libc::open(path.as_ptr(), plain);
+							if fd >= 0 {
+								let mut st = std::mem::zeroed::<libc::stat>();
+								if libc::fstat(fd, &raw mut st) == 0
+									&& st.st_mode & libc::S_IFMT == libc::S_IFREG
+								{
+									libc::close(fd);
+									child_fail_with(diag, b"cannot overwrite existing file", 1);
+								}
 							}
-							child_fail(diag, e, 1, texts);
+						}
+						if fd < 0 {
+							child_fail(diag, errno(), 1, texts);
 						}
 						for &target in fds {
 							if target != fd && libc::dup2(fd, target) < 0 {
