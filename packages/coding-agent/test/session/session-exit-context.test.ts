@@ -572,6 +572,7 @@ describe("sessions on several threads of one process", () => {
 });
 
 const KILLED_READER = path.join(import.meta.dir, "../fixtures/session-exit-context-killed-reader.ts");
+const STALE_CLAIMER = path.join(import.meta.dir, "../fixtures/session-exit-context-stale-claimer.ts");
 // strace holds the reader thread in one real call of its claim, so the test can kill it exactly there.
 const straceAvailable =
 	process.platform === "linux" &&
@@ -584,13 +585,15 @@ interface KilledReaderResult {
 	files: string[];
 }
 
-/** Run the killed-reader fixture with strace holding the reader thread's first `syscalls` call for 6 s. */
-async function runKilledReader(
-	tempDir: TempDir,
+/** Run `fixture` under strace, holding the `when`th call of `syscalls` in each traced thread for 6 s. */
+async function runHeldReader(
+	fixture: string,
+	dir: string,
+	words: string[],
 	syscalls: string,
 	phase: "enter" | "exit",
-): Promise<KilledReaderResult> {
-	const dir = tempDir.join("exit-intent");
+	when = "1",
+): Promise<string> {
 	fs.mkdirSync(dir, { recursive: true });
 	const child = Bun.spawn(
 		[
@@ -602,10 +605,11 @@ async function runKilledReader(
 			"-e",
 			`trace=${syscalls}`,
 			"-e",
-			`inject=${syscalls}:delay_${phase}=6s:when=1`,
+			`inject=${syscalls}:delay_${phase}=6s:when=${when}`,
 			process.execPath,
-			KILLED_READER,
+			fixture,
 			dir,
+			...words,
 		],
 		{ stdout: "pipe", stderr: "pipe" },
 	);
@@ -615,10 +619,22 @@ async function runKilledReader(
 		child.exited,
 	]);
 	expect(exitCode, stderr).toBe(0);
-	return JSON.parse(stdout.trim()) as KilledReaderResult;
+	return stdout.trim();
 }
 
-describe.skipIf(!straceAvailable)("a reader that dies in the middle of a claim", () => {
+/** Run the killed-reader fixture, which dies inside its claim once for each word. */
+async function runKilledReader(
+	tempDir: TempDir,
+	syscalls: string,
+	phase: "enter" | "exit",
+	words: string[] = ["restart"],
+	when?: string,
+): Promise<KilledReaderResult> {
+	const output = await runHeldReader(KILLED_READER, tempDir.join("exit-intent"), words, syscalls, phase, when);
+	return JSON.parse(output) as KilledReaderResult;
+}
+
+describe.skipIf(!straceAvailable)("a reader held or killed in the middle of a claim", () => {
 	it("loses no word when it dies after taking the file and before publishing the word", async () => {
 		using tempDir = TempDir.createSync("@omp-exit-context-killed-renamed-");
 		// Held on the way out of the rename: the file is taken, nothing is read or published yet.
@@ -633,9 +649,44 @@ describe.skipIf(!straceAvailable)("a reader that dies in the middle of a claim",
 		const result = await runKilledReader(tempDir, "unlink,unlinkat", "enter");
 		expect(result.claimed).toHaveLength(1);
 		expect(result.afterDeath.intent).toBe("restart");
-		// The word is on the board before the copy is deleted; whether the held unlink finishes is the kernel's business.
-		expect(result.files.filter(name => !name.includes(".claimed-"))).toEqual([]);
+		// The word was recorded before the copy was deleted, and the next read clears what the death left.
+		expect(result.files).toEqual([]);
 	}, 90_000);
+
+	it("records the newest word and clears every copy after two readers die taking two words", async () => {
+		using tempDir = TempDir.createSync("@omp-exit-context-killed-twice-");
+		// Every rename is held on its way out, so each reader dies with the file it just took.
+		const result = await runKilledReader(tempDir, "rename,renameat,renameat2", "exit", ["restart", "stop"], "1+");
+		expect(result.claimed).toHaveLength(2);
+		// Neither dead reader recorded anything; the next exit recovers both copies and keeps the later word.
+		expect(result.afterDeath.intent).toBe("stop");
+		expect(result.files).toEqual([]);
+	}, 120_000);
+
+	it("never drops a word a sender published while a reader was held inside its claim", async () => {
+		using tempDir = TempDir.createSync("@omp-exit-context-stale-claimer-");
+		const dir = tempDir.join("exit-intent");
+		// Held on the way into the rename: a session on another thread takes the file first.
+		const output = await runHeldReader(STALE_CLAIMER, dir, [], "rename,renameat,renameat2", "enter");
+		const result = JSON.parse(output) as {
+			recovered: ExitContext;
+			fresh: string;
+			afterWake: ExitContext;
+			freshAfterWake: string | null;
+			files: string[];
+		};
+		expect(result.recovered.intent).toBe("restart");
+		expect(result.fresh).toBe("stop\n");
+		// The held reader woke six seconds later, with `restart` already recorded and `stop` published
+		// meanwhile. Whether it took that word or never reached it, the word is recorded or still on
+		// disk — round 6 found it deleted unrecorded, with the exit reporting `restart`.
+		expect({ recorded: result.afterWake.intent, onDisk: result.freshAfterWake }).toEqual(
+			result.freshAfterWake === null
+				? { recorded: "stop", onDisk: null }
+				: { recorded: "restart", onDisk: "stop\n" },
+		);
+		expect(result.files.filter(name => name.includes(".claimed-"))).toEqual([]);
+	}, 120_000);
 });
 
 const SLOW_FUSE = path.join(import.meta.dir, "../fixtures/slow-fuse.py");

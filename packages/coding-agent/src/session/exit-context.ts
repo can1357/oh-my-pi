@@ -20,11 +20,13 @@
  * again, and once it answers, the next exit records the intent it claimed.
  *
  * Sessions run on several threads of one process (worker-thread subagents),
- * each with its own copy of this module and its own reader thread. The claimed
- * word and the process start live on one board that every thread shares
- * (`createExitContextBoard`), so each session of the process records the same
- * word, and a thread started after a word was published still dates it
- * against the process's start.
+ * each with its own copy of this module and its own reader thread. The word a
+ * reader takes and the process start live on one board that every thread
+ * shares (`createExitContextBoard`), so each session of the process records the
+ * same word, and a thread started after a word was published still dates it
+ * against the process's start. How a reader takes a word without losing it when
+ * another reader dies, stalls or a sender publishes again is
+ * `./exit-context-claim`.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -41,7 +43,7 @@ import {
 	type ExitContextIoRequest,
 	type ExitContextIoResult,
 	exitContextBoardProcessStart,
-	updateExitContextBoard,
+	recordedExitIntent,
 } from "./exit-context-protocol";
 
 /** The intents `omp session exit-intent` writes. Readers record any word as given. */
@@ -57,7 +59,7 @@ export interface ExitContext {
 }
 
 /** Where {@link readExitContext} reads from; tests point these at fakes. */
-export interface ExitContextSources extends Omit<ExitContextIoRequest, "readIntent" | "state" | "board"> {
+export interface ExitContextSources extends Omit<ExitContextIoRequest, "state" | "board"> {
 	pane: string | undefined;
 }
 
@@ -147,11 +149,6 @@ function takeAnswer(state: SharedArrayBuffer): ExitContextIoResult | undefined {
 	}
 }
 
-/** The word some thread of the process already claimed from `intentPath`; only memory, never a file. */
-function claimedIntent(intentPath: string, timeoutMs: number): string | undefined {
-	return updateExitContextBoard(board, Math.max(0, timeoutMs), intentPath, state => state.words[intentPath])?.value;
-}
-
 /**
  * Read this process's exit context. Never throws, and never waits longer than
  * `timeoutMs` on the file reads; a source that is missing, unreadable or too
@@ -166,7 +163,8 @@ export function readExitContext(
 	const intentPath = path.join(sources.intentDir, String(sources.pid));
 	const deadline = performance.now() + timeoutMs;
 	const remaining = () => deadline - performance.now();
-	const known = claimedIntent(intentPath, remaining());
+	// The word the process has recorded: shared memory, never a file.
+	const known = recordedExitIntent(board, remaining(), intentPath)?.word;
 	if (lateRead) {
 		if (takeAnswer(lateRead.state) === undefined) {
 			// The reader is still stuck on an earlier request: record what needs no I/O.
@@ -185,7 +183,6 @@ export function readExitContext(
 			cgroupRoot: sources.cgroupRoot,
 			intentDir: sources.intentDir,
 			processStartMs: sources.processStartMs,
-			readIntent: known === undefined,
 			state,
 			board,
 		};
@@ -197,12 +194,13 @@ export function readExitContext(
 				lateRead = { worker, state };
 			} else {
 				if (result.oomKills !== undefined) context.oomKills = result.oomKills;
-				intent ??= result.intent;
+				// The reader answers with the board's word, which it read after `known` was read.
+				intent = result.intent ?? intent;
 			}
 		} catch {}
 	}
-	// A word another thread claimed while this one waited.
-	intent ??= claimedIntent(intentPath, remaining());
+	// A word another thread recorded while this one waited.
+	intent ??= recordedExitIntent(board, remaining(), intentPath)?.word;
 	if (intent !== undefined) context.intent = intent;
 	return context;
 }

@@ -5,9 +5,9 @@
  */
 
 /**
- * Longest the exiting thread waits for the reader thread's answer. A reader
- * also waits this long for an intent claim another thread started before it
- * takes the claim over, so a claimer that died does not hold the word forever.
+ * Longest the exiting thread waits for the reader thread's answer, and the
+ * longest a reader thread waits for the board's lock before it goes on without
+ * it and records what it read for its own thread alone.
  */
 export const EXIT_CONTEXT_IO_TIMEOUT_MS = 1_500;
 
@@ -28,8 +28,6 @@ export interface ExitContextIoRequest {
 	intentDir: string;
 	/** Epoch ms the process started; an older intent file was left for an earlier process with the same pid. */
 	processStartMs: number;
-	/** Whether to claim the intent file; false once the process already holds a word. */
-	readIntent: boolean;
 	/** Where the answer goes: the exiting thread is blocked in `Atomics.wait` and cannot receive a message. */
 	state: SharedArrayBuffer;
 	/** The process's {@link createExitContextBoard board}, where a claimed word is shared with every thread. */
@@ -43,27 +41,31 @@ export interface ExitContextIoResult {
 }
 
 /**
+ * A word taken from an intent file, dated with that file's mtime: the moment
+ * the sender published it. Readers merge words by that date and never by the
+ * order in which they happen to run, so what the process records does not
+ * depend on how its threads were scheduled.
+ */
+export interface ExitContextWord {
+	word: string;
+	mtimeMs: number;
+}
+
+/**
  * What the board holds. Sessions run on several threads of one process (worker
- * subagents), each with its own module state, so the word one thread claims
+ * subagents), each with its own module state, so the word one thread takes
  * lives here for the others.
  */
 export interface ExitContextBoardState {
-	/** The word claimed from each intent file path; the first word claimed for a path stays. */
-	words: Record<string, string>;
-	/**
-	 * Claims in progress, by intent file path: the claiming reader's token, when it
-	 * started (epoch ms), and the path it renames the file to, so a reader that
-	 * takes over the claim of one that died can read the word it took.
-	 */
-	claims: Record<string, { token: string; since: number; claimed?: string }>;
+	/** The word recorded for each intent file path; replaced only by a word the sender published later. */
+	words: Record<string, ExitContextWord>;
 }
 
 /** Board size: a production process uses one intent path; tests use a few hundred at most. */
 const BOARD_BYTES = 64 * 1024;
-/** Int32 words: a lock (0 free, 1 held), the state's JSON length, and a change count readers wait on. */
+/** Int32 words: a lock (0 free, 1 held) and the state's JSON length. */
 const BOARD_LOCK = 0;
 const BOARD_LENGTH = 1;
-const BOARD_CHANGE = 2;
 /** A Float64 at this byte: the epoch ms the process started, set once when the board is made. */
 const BOARD_START_OFFSET = 16;
 /** The state's JSON starts at this byte. */
@@ -86,19 +88,19 @@ export function exitContextBoardProcessStart(board: SharedArrayBuffer): number {
 }
 
 function readBoardState(board: SharedArrayBuffer, length: number): ExitContextBoardState {
-	if (length === 0) return { words: {}, claims: {} };
+	if (length === 0) return { words: {} };
 	try {
 		const parsed = JSON.parse(
 			new TextDecoder().decode(new Uint8Array(board, BOARD_DATA_OFFSET, length).slice()),
 		) as Partial<ExitContextBoardState>;
-		return { words: parsed.words ?? {}, claims: parsed.claims ?? {} };
+		return { words: parsed.words ?? {} };
 	} catch {
-		return { words: {}, claims: {} };
+		return { words: {} };
 	}
 }
 
 /** Encode `state`, dropping the oldest words until it fits; `undefined` when even that is not enough. */
-function encodeBoardState(state: ExitContextBoardState, keep: string | undefined): Uint8Array | undefined {
+function encodeBoardState(state: ExitContextBoardState, keep: string): Uint8Array | undefined {
 	const capacity = BOARD_BYTES - BOARD_DATA_OFFSET;
 	for (;;) {
 		const encoded = new TextEncoder().encode(JSON.stringify(state));
@@ -110,20 +112,18 @@ function encodeBoardState(state: ExitContextBoardState, keep: string | undefined
 }
 
 /**
- * Run `update` on the board's state under its lock and store what it leaves,
- * waking threads that wait for a change. The lock is held only for this memory
- * work, never across file I/O. `change` is the board's change count before
- * `update`, for {@link waitForExitContextBoardChange}. Returns `undefined`
- * when the lock does not come free within `timeoutMs`; `keep` names the path
- * whose word must survive trimming.
+ * Run `update` on the board's state under its lock and store what it leaves.
+ * The lock is held only for this memory work, never across file I/O. Returns
+ * `undefined` when the lock does not come free within `timeoutMs`; `keep` names
+ * the path whose word must survive trimming.
  */
-export function updateExitContextBoard<T>(
+function updateExitContextBoard<T>(
 	board: SharedArrayBuffer,
 	timeoutMs: number,
-	keep: string | undefined,
-	update: (state: ExitContextBoardState, change: number) => T,
+	keep: string,
+	update: (state: ExitContextBoardState) => T,
 ): { value: T } | undefined {
-	const words = new Int32Array(board, 0, 3);
+	const words = new Int32Array(board, 0, 2);
 	const deadline = performance.now() + timeoutMs;
 	while (Atomics.compareExchange(words, BOARD_LOCK, 0, 1) !== 0) {
 		const left = deadline - performance.now();
@@ -133,14 +133,12 @@ export function updateExitContextBoard<T>(
 	try {
 		const state = readBoardState(board, Atomics.load(words, BOARD_LENGTH));
 		const before = JSON.stringify(state);
-		const value = update(state, Atomics.load(words, BOARD_CHANGE));
+		const value = update(state);
 		if (JSON.stringify(state) !== before) {
 			const encoded = encodeBoardState(state, keep);
 			if (encoded) {
 				new Uint8Array(board, BOARD_DATA_OFFSET, encoded.length).set(encoded);
 				Atomics.store(words, BOARD_LENGTH, encoded.length);
-				Atomics.add(words, BOARD_CHANGE, 1);
-				Atomics.notify(words, BOARD_CHANGE);
 			}
 		}
 		return { value };
@@ -150,7 +148,31 @@ export function updateExitContextBoard<T>(
 	}
 }
 
-/** Wait until the board's change count moves past `change`, or `timeoutMs` passes. */
-export function waitForExitContextBoardChange(board: SharedArrayBuffer, change: number, timeoutMs: number): void {
-	Atomics.wait(new Int32Array(board, 0, 3), BOARD_CHANGE, change, Math.max(0, timeoutMs));
+/** The word recorded for `intentPath`; `undefined` when none is, or when the board stayed locked. */
+export function recordedExitIntent(
+	board: SharedArrayBuffer,
+	timeoutMs: number,
+	intentPath: string,
+): ExitContextWord | undefined {
+	return updateExitContextBoard(board, Math.max(0, timeoutMs), intentPath, state => state.words[intentPath])?.value;
+}
+
+/**
+ * Record `candidate` for `intentPath`, unless a word the sender published no
+ * earlier is already recorded, and answer with the word that stands afterwards.
+ * `undefined` when the board stayed locked, and the caller keeps the word for
+ * its own thread. A recorded word is only ever replaced by a later one, so no
+ * exit of the process forgets a word another exit already recorded.
+ */
+export function recordExitIntent(
+	board: SharedArrayBuffer,
+	timeoutMs: number,
+	intentPath: string,
+	candidate: ExitContextWord,
+): ExitContextWord | undefined {
+	return updateExitContextBoard(board, Math.max(0, timeoutMs), intentPath, state => {
+		const recorded = state.words[intentPath];
+		if (!recorded || candidate.mtimeMs > recorded.mtimeMs) state.words[intentPath] = candidate;
+		return state.words[intentPath]!;
+	})?.value;
 }
