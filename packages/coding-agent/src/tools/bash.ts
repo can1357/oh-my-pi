@@ -453,15 +453,6 @@ interface BashProgressDetails extends BashToolDetails {
 
 /** Pid probe of a background job with no command in flight. */
 const NO_PIDS = (): readonly number[] => [];
-
-/**
- * How long a cancelled async job waits for its shell to finish winding down
- * before it gives up its running-job slot. Long enough for a TERM handler to
- * run; short enough that a native run which never returns (#10308) cannot hold
- * a slot for the life of the process.
- */
-const CANCEL_WINDDOWN_MAX_MS = 10_000;
-
 /** Shown when a call overlapped another one (parallel or backgrounded) and could not use the session's shell. */
 const SESSION_SHELL_BUSY_NOTICE =
 	"Ran in a temporary shell while the session shell is busy with another command: session variables and functions were unavailable, and nothing set here persists.";
@@ -1042,8 +1033,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				};
 				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
 				const wallTimeStart = performance.now();
-				/** Set on cancel/timeout: the aborted shell's teardown, which this job stays charged for. */
-				let winddown: Promise<void> | undefined;
 				try {
 					const result = await executeBash(options.command, {
 						cwd: options.commandCwd,
@@ -1072,20 +1061,12 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						onStart: probe => {
 							pids = probe;
 						},
+						// No fastCancel: a cancelled job stays charged until its shell stops.
 						onSessionShellBusy: () => notices.push(SESSION_SHELL_BUSY_NOTICE),
-						onWinddown: promise => {
-							winddown = promise;
-						},
 					}).finally(() => {
 						pids = NO_PIDS;
 						outputTap.close();
 					});
-					// A cancelled or timed-out command answers at once while its shell is
-					// still winding down. The job keeps its running-job slot until that
-					// finishes, so the next queued job never starts beside a process this
-					// one is still killing. Bounded, because a native run that never
-					// returns (#10308) must not hold the slot for the process lifetime.
-					if (winddown) await Promise.race([winddown, Bun.sleep(CANCEL_WINDDOWN_MAX_MS)]);
 					if (result.artifactError) latestProgressDetails = { meta: { artifactError: result.artifactError } };
 					const wallTimeMs = performance.now() - wallTimeStart;
 					const finalResult = await this.#buildCompletedResult(result, options.timeoutSec, {
@@ -1810,6 +1791,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						: undefined,
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 					onSessionShellBusy: () => pendingNotices.push(SESSION_SHELL_BUSY_NOTICE),
+					// A person watching this call must see the cancellation at once, and
+					// nothing is accounting for it. Every other caller of this path — a
+					// subagent inside a task spawn that holds a running-job slot — waits
+					// for the shell to stop, so its slot is not freed around a live process.
+					fastCancel: this.session.hasUI === true,
 				});
 		const wallTimeMs = performance.now() - wallTimeStart;
 		if (result.cancelled) {

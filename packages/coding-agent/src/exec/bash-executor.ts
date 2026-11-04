@@ -86,12 +86,16 @@ export interface BashExecutorOptions {
 	 */
 	onSessionShellBusy?: () => void;
 	/**
-	 * Invoked on the cancel and timeout paths with a promise that settles once
-	 * the aborted shell has finished winding down. The result returns without
-	 * waiting for it; a caller whose accounting must outlive the command (an
-	 * async job holding a running-job slot) awaits it before it settles.
+	 * Return the cancelled result without waiting for the aborted shell to wind
+	 * down. Only an interactive foreground call sets this: a person pressing Esc
+	 * must see `[Command cancelled]` at once, and nothing is accounting for that
+	 * command. Every other caller — an async job holding a running-job slot, a
+	 * subagent's blocking call inside a task spawn that holds one — waits, so the
+	 * command is not reported finished while its shell is still being killed.
+	 * Defaulting to waiting is deliberate: a caller that forgets this option is
+	 * safe, and only an explicit opt-out can release work early.
 	 */
-	onWinddown?: (winddown: Promise<void>) => void;
+	fastCancel?: boolean;
 	/**
 	 * Asked once the run settles: `false` means the agent session that owns
 	 * `sessionKey` was left (new, fork, switch, branch) while the command ran,
@@ -149,6 +153,14 @@ export interface BashResult extends OutputSummary {
  *  command line, so a hostile `.envrc` can't smuggle shell syntax through
  *  `unset`. `.envrc` never produces non-identifier names in practice. */
 const SAFE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * How long a cancelled command waits for its shell to stop before it reports
+ * finished anyway. Long enough for a TERM handler; short enough that a native
+ * run which never returns (#10308) cannot pin its caller, or the running-job
+ * slot accounting for it, for the life of the process.
+ */
+const CANCEL_WINDDOWN_MAX_MS = 10_000;
 
 /** A `scheme://` working directory: it exists only in the embedded shell's injected filesystem. */
 const URL_CWD_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
@@ -797,10 +809,14 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			} else {
 				void Promise.allSettled([runPromise, cleanupPromise]);
 			}
-			// The shell is still winding down. A caller that must stay charged for
-			// this command (an async job holding a running-job slot) waits on this;
-			// the foreground path returns at once, as it always has.
-			options?.onWinddown?.(Promise.allSettled([runPromise, cleanupPromise]).then(() => undefined));
+			// Unless the caller asked for a fast answer, the command is not reported
+			// finished until its shell has stopped: whatever accounts for this run (a
+			// running-job slot) then cannot free while the process is still alive.
+			// Bounded, because a native run that never returns (#10308) must not hold
+			// its caller for the life of the process.
+			if (options?.fastCancel !== true) {
+				await Promise.race([Promise.allSettled([runPromise, cleanupPromise]), Bun.sleep(CANCEL_WINDDOWN_MAX_MS)]);
+			}
 			let notice = "Command cancelled";
 			if (winner.kind === "timeout" && deadlineTimeoutMs !== undefined) {
 				const seconds = Math.round(deadlineTimeoutMs / 1000);

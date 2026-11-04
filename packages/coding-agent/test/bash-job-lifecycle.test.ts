@@ -158,6 +158,10 @@ it.skipIf(process.platform === "win32")(
 
 		try {
 			expect(capped.cancel(holderJob)).toBe(true);
+			// A second cancellation while the first is still winding down is refused
+			// (the job is already cancelled) and must not shorten the hold.
+			expect(capped.cancel(holderJob)).toBe(false);
+			expect(capped.getJob(successor)?.waitingForSlot).toBe(true);
 			await capped.getJob(successor)!.promise;
 			expect(sawHolderAlive).toBe(false);
 		} finally {
