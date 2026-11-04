@@ -124,10 +124,10 @@ function failureReason(failure: SearchProviderFailure): string {
 	return truncate(reason, MAX_FALLBACK_REASON_CHARS);
 }
 
-/** Structured failure list for tool details, so transcripts record which providers failed; absent when none did. */
-function failureDetails(failures: readonly SearchProviderFailure[]): SearchFailureDetail[] | undefined {
-	if (failures.length === 0) return undefined;
-	return failures.map(failure => ({
+/** Structured failure list for tool details, so transcripts record which providers failed; no key when none did. */
+function failureDetails(failures: readonly SearchProviderFailure[]): Pick<SearchResultDetails, "failures"> {
+	if (failures.length === 0) return {};
+	const entries = failures.map((failure): SearchFailureDetail => ({
 		provider: failure.provider.id,
 		label: failure.provider.label,
 		reason: failureReason(failure),
@@ -135,6 +135,7 @@ function failureDetails(failures: readonly SearchProviderFailure[]): SearchFailu
 			? { status: failure.error.status }
 			: {}),
 	}));
+	return { failures: entries };
 }
 
 /**
@@ -334,7 +335,7 @@ async function executeSearch(
 
 			return {
 				content: [{ type: "text" as const, text }],
-				details: { response: finalResponse, failures: failureDetails(failures) },
+				details: { response: finalResponse, ...failureDetails(failures) },
 			};
 		} catch (error) {
 			// Surface user-initiated cancellation immediately so the session sees
@@ -370,7 +371,7 @@ async function executeSearch(
 		details: {
 			response: { provider: failedResponseProvider, sources: [] },
 			error: message,
-			failures: failureDetails(failures),
+			...failureDetails(failures),
 		},
 	};
 }

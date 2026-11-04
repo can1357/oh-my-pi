@@ -313,7 +313,7 @@ describe("executeSearch abort propagation", () => {
 		expect(context.getProvider).toHaveBeenCalledWith("exa");
 		expect(fallbackSearch).not.toHaveBeenCalled();
 		expect(result.content[0]?.text).not.toContain("Note: answered by");
-		expect(result.details.failures).toBeUndefined();
+		expect(Object.hasOwn(result.details, "failures")).toBe(false);
 	});
 
 	it("advances through retry.fallbackChains.web after the preferred candidate fails", async () => {
