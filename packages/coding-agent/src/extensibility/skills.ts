@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import {
+	getHomeDir,
 	getProjectDir,
 	isEnoent,
 	normalizePathForComparison,
@@ -260,7 +260,7 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 	const providerId = rawProviderId || CUSTOM_DIR_PROVIDER_ID;
 	const level: "user" | "project" = rawLevel === "project" ? "project" : "user";
 	const result = await scanSkillsFromDir(
-		{ cwd: getProjectDir(), home: os.homedir(), repoRoot: null },
+		{ cwd: getProjectDir(), home: getHomeDir(), repoRoot: null },
 		{
 			dir: options.dir,
 			providerId,
@@ -486,7 +486,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		customDirectories.map(async dir => {
 			const expandedDir = expandTilde(dir);
 			const scanResult = await scanSkillsFromDir(
-				{ cwd, home: os.homedir(), repoRoot: null },
+				{ cwd, home: getHomeDir(), repoRoot: null },
 				{
 					dir: expandedDir,
 					providerId: CUSTOM_DIR_PROVIDER_ID,
@@ -744,7 +744,7 @@ export async function isSkillSuperseded(
 	holder: SkillRediscoveryHost,
 ): Promise<boolean> {
 	return (
-		holder.refreshSkills !== undefined && (await isSupersededPluginPath(skill.filePath, os.homedir(), holder.cwd))
+		holder.refreshSkills !== undefined && (await isSupersededPluginPath(skill.filePath, getHomeDir(), holder.cwd))
 	);
 }
 

@@ -18,9 +18,8 @@
  * Agent files use markdown with YAML frontmatter.
  */
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { getHomeDir, logger } from "@oh-my-pi/pi-utils";
 import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
@@ -85,7 +84,7 @@ async function loadAgentsFromDir({ dir, source, ignoreModel }: AgentDirectory): 
  */
 export async function discoverAgents(
 	cwd: string,
-	home: string = os.homedir(),
+	home: string = getHomeDir(),
 	extensionRoots?: EffectiveExtensionRoots,
 ): Promise<DiscoveryResult> {
 	const resolvedCwd = path.resolve(cwd);
