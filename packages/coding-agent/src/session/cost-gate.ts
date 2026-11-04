@@ -28,6 +28,28 @@ function usd(amount: number): string {
 }
 
 /**
+ * The spend surface a session tree shares. {@link CostGate} implements it for the
+ * root; a subagent worker holds a remote implementation that charges the root's
+ * gate (`thread/services/runtime-remote.ts`).
+ */
+export interface CostGateApi {
+	/** Session-tree spend in USD. */
+	readonly spent: number;
+	/** Whether `session.maxCost` is set, so requests can be refused at all. */
+	readonly capped: boolean;
+	/** Calls `onChange` after `session.maxCost` changes; returns the unsubscribe. */
+	onCapChange(onChange: () => void): () => void;
+	/** The refusal for the next model request, or `undefined` to send it. */
+	check(): CostCapRefusal | undefined;
+	/** Throws {@link CostCapError} when the next model request must not be sent. */
+	admit(): void;
+	/** Adds a finished response's cost. */
+	record(cost: number): void;
+	/** Records the response's cost once the provider finishes producing it. */
+	meter(stream: AssistantMessageEventStream): AssistantMessageEventStream;
+}
+
+/**
  * Running spend of one session tree: the root session, its subagents, and
  * their side requests share one gate. The total starts from the root's
  * recorded spend (so a resumed session keeps its history) and adds every
@@ -35,7 +57,7 @@ function usd(amount: number): string {
  * settings on each check, so setting or changing `session.warnCost` /
  * `session.maxCost` applies to the next request.
  */
-export class CostGate {
+export class CostGate implements CostGateApi {
 	readonly #settings: Settings;
 	readonly #warn: (message: string) => void;
 	#spent: number;
@@ -109,7 +131,7 @@ export class CostGate {
  * provider attempt (inside concurrency slots and retry loops), so a request
  * that waited for a slot or retries is checked when it actually goes out.
  */
-export function guardStreamFn(streamFn: StreamFn, currentGate: () => CostGate | undefined): StreamFn {
+export function guardStreamFn(streamFn: StreamFn, currentGate: () => CostGateApi | undefined): StreamFn {
 	return (model, context, options) => {
 		const gate = currentGate();
 		if (!gate) return streamFn(model, context, options);
