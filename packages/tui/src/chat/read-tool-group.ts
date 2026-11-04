@@ -14,12 +14,19 @@ import {
 	splitPathAndSel,
 	splitReadQuery,
 } from "../tools/read";
-import { FILE_NAME_COLOR, formatStyledPath, PREVIEW_LIMITS, shortenPath } from "../render/render-utils";
-import { fileHyperlink, renderCodeCell, renderMarkdownCell } from "../render";
+import {
+	FILE_NAME_COLOR,
+	formatStatusIcon,
+	formatStyledPath,
+	PREVIEW_LIMITS,
+	shortenPath,
+} from "../render/render-utils";
+import { fileHyperlink, renderCodeCell, renderMarkdownCell, urlHyperlinkAlways } from "../render";
 import { wrapTreeLine } from "../render/hanging-wrap";
 import { wrapTextWithAnsi } from "../utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
+import { SpotlightNotices } from "./spotlight";
 import type { ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "../overlays/usage-row";
 import { formatCount, isUrlLikePath, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
@@ -35,7 +42,7 @@ import {
 } from "../native/node";
 import { plainText } from "../native/spans";
 import { Memo } from "../native/memo";
-import { fileHref, fileRow, inlineErrorView, urlHref } from "../tools/native-view";
+import { fileHref, fileRow, inlineErrorView, resultText, urlHref } from "../tools/native-view";
 
 /**
  * Extract the read call's target path. `path` is the canonical arg; `file_path`
@@ -399,6 +406,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#blockVersion = 0;
 	#displayVersion = 0;
 	readonly #native = new Memo();
+	// The reads' Spotlight notices, drawn after the group in a native transcript (see nativeTrailers).
+	readonly #spotlight = new SpotlightNotices();
 	/** Content previews toggled in the terminal, by tool call id. */
 	#previewCollapsed = new Map<string, boolean>();
 
@@ -490,6 +499,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	/** Remove one call without discarding successful siblings in the shared group. */
 	removeEntry(toolCallId: string): boolean {
 		if (!this.#entries.delete(toolCallId)) return this.#entries.size === 0;
+		this.#spotlight.set(toolCallId, undefined, "");
 		this.#updateDisplay();
 		return this.#entries.size === 0;
 	}
@@ -504,6 +514,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (!entry) return;
 		if (isPartial) return;
 		this.#blockVersion++;
+		this.#spotlight.set(toolCallId, result.details, resultText(result));
 		// `details` can contain raw file text and filesystem paths. Keep the
 		// latter for links while only the sanitized copy supplies display labels.
 		const rawDetails = result.details as ReadToolDetails | undefined;
@@ -588,7 +599,13 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	setToolActivityVisible(visible: boolean): void {
 		this.#toolActivityVisible = visible;
+		this.#spotlight.setHidden(!visible);
 		super.invalidate();
+	}
+
+	/** The reads' Spotlight notices, in order: blocks of their own right after the group's card. */
+	nativeTrailers(): readonly Component[] {
+		return this.#spotlight.list();
 	}
 
 	getComponent(): Component {
@@ -930,7 +947,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (displayRows.length === 1) {
 			const row = displayRows[0]!;
 			if (!this.#shouldRenderPreviewRow(row)) {
-				const statusSymbol = this.#formatStatus(this.#statusForTargets(row.targets));
+				const statusSymbol = formatStatusIcon(this.#statusForTargets(row.targets), theme);
 				const pathDisplay = this.#formatRowPath(row, HEADER_PATH_PAINT);
 				const lines = [` ${statusSymbol} ${theme.fg("toolTitle", theme.bold("Read"))} ${pathDisplay}`.trimEnd()];
 				const usageRows = this.#usageRowsBySummaryRow(displayRows).get(0) ?? [];
@@ -1096,7 +1113,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#formatRow(row: ReadSummaryRow): string {
 		const status = this.#statusForTargets(row.targets);
-		const statusPrefix = status === "success" ? "" : `${this.#formatStatus(status)} `;
+		const statusPrefix = status === "success" ? "" : `${formatStatusIcon(status, theme)} `;
 		return `${statusPrefix}${this.#formatRowPath(row)}`;
 	}
 
@@ -1177,6 +1194,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (filePath && options.linkPath) {
 			const linkOptions = options.line !== undefined ? { line: options.line } : undefined;
 			pathDisplay = fileHyperlink(options.linkPath, pathDisplay, linkOptions);
+		} else if (filePath && isUrlLikePath(target.path)) {
+			// Text mode needs the same URL fallback as the native head, or a
+			// transcript without native rendering keeps the URL unclickable.
+			pathDisplay = urlHyperlinkAlways(urlHref(target.path) ?? target.path, pathDisplay);
 		}
 		if (selectors) pathDisplay += theme.fg(paint.selectors, selectors);
 		if (options.correctedFrom) {
@@ -1278,18 +1299,5 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#shouldRenderPreview(entry: ReadEntry): boolean {
 		return this.#showContentPreview && entry.contentText !== undefined;
-	}
-
-	#formatStatus(status: ReadEntry["status"]): string {
-		if (status === "success") {
-			return theme.fg("text", theme.status.enabled);
-		}
-		if (status === "warning") {
-			return theme.fg("warning", theme.status.warning);
-		}
-		if (status === "error") {
-			return theme.fg("error", theme.status.error);
-		}
-		return theme.fg("dim", theme.status.pending);
 	}
 }

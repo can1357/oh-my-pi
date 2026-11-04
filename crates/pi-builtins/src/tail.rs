@@ -1565,7 +1565,7 @@ mod follow {
 		use notify::{RecommendedWatcher, RecursiveMode, Watcher, WatcherKind};
 		use uucore::display::Quotable;
 		
-		use brush_core::openfiles::OpenFile;
+		use crate::openfile::OpenFile;
 		use pi_vfs::{BlockingFs, File, parent_path};
 		
 		use crate::{
@@ -2272,52 +2272,10 @@ mod follow {
 			}
 		}
 		
-		/// Whether the command's stdout is a pipe whose reader has exited, as GNU
-		/// tail checks while idle. Utilities run inside the host process, so this
-		/// must poll the command's fd 1, not the process-wide `std::io::stdout()`.
-		#[cfg(unix)]
-		fn stdout_reader_gone(stdout: &OpenFile) -> bool {
-			use nix::{
-				poll::{PollFd, PollFlags, PollTimeout, poll},
-				sys::stat::{SFlag, fstat},
-			};
-		
-			let Ok(fd) = stdout.try_borrow_as_fd() else {
-				return false;
-			};
-			let is_fifo = fstat(fd).is_ok_and(|stat| {
-				SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT == SFlag::S_IFIFO
-			});
-			if !is_fifo {
-				return false;
-			}
-			// POLLRDBAND like GNU tail/tee: never ready on a pipe's write end, so
-			// only a missing reader wakes it.
-			let mut fds = [PollFd::new(fd, PollFlags::POLLRDBAND)];
-			matches!(poll(&mut fds, PollTimeout::ZERO), Ok(n) if n > 0) && reader_gone(fds[0].revents())
-		}
-		
-		/// Whether `poll` revents on a pipe's write end report that no reader is
-		/// left. Linux sets POLLERR; Darwin and most other Unices set POLLHUP
-		/// instead, so accept any of POLLERR | POLLHUP | POLLNVAL like GNU
-		/// `iopoll()`. Unrecognized bits (`None`) also count as broken.
-		#[cfg(unix)]
-		fn reader_gone(revents: Option<nix::poll::PollFlags>) -> bool {
-			use nix::poll::PollFlags;
-		
-			revents.is_none_or(|revents| {
-				revents.intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL)
-			})
-		}
-		
 		#[allow(clippy::cognitive_complexity, reason = "preserves upstream follow loop")]
 		pub fn follow(
 			mut observer: Observer,
 			settings: &Settings,
-			#[cfg_attr(
-				not(unix),
-				expect(unused_variables, reason = "only unix detects a closed stdout pipe while idle")
-			)]
 			stdout: &OpenFile,
 		) -> TailResult<()> {
 			if observer.files.no_files_remaining(settings) && !observer.files.only_stdin_remaining() {
@@ -2373,8 +2331,7 @@ mod follow {
 					// through the provider, sleeping only after an idle pass.
 					if !observer.poll_provider(settings)? {
 						// Stop once the reader of our stdout pipe has gone away.
-						#[cfg(unix)]
-						if stdout_reader_gone(stdout) {
+						if stdout.reader_gone() {
 							return Ok(());
 						}
 						if !sleep_interval(&observer.cancel, settings.sleep_sec) {
@@ -2453,8 +2410,7 @@ mod follow {
 					Err(mpsc::RecvTimeoutError::Timeout) => {
 						timeout_counter += 1;
 						// Stop once the reader of our stdout pipe has gone away.
-						#[cfg(unix)]
-						if stdout_reader_gone(stdout) {
+						if stdout.reader_gone() {
 							return Ok(());
 						}
 					},
@@ -2492,23 +2448,6 @@ mod follow {
 		
 			Ok(())
 		}
-		
-		#[cfg(all(test, unix))]
-		mod tests {
-			use nix::poll::PollFlags;
-		
-			use super::reader_gone;
-		
-			// Failure mode: Darwin reports a widowed pipe write end as
-			// POLLHUP|POLLRDBAND without POLLERR, so `tail -f log | head -n1`
-			// kept following on macOS after head exited.
-			#[test]
-			fn reader_gone_accepts_darwin_and_linux_revents() {
-				assert!(reader_gone(Some(PollFlags::POLLHUP | PollFlags::POLLRDBAND)));
-				assert!(reader_gone(Some(PollFlags::POLLERR)));
-				assert!(!reader_gone(Some(PollFlags::POLLRDBAND)));
-			}
-		}
 	}
 	
 	
@@ -2521,7 +2460,7 @@ mod follow {
 	mod wasi_stubs {
 		use std::{io::BufReader, path::Path};
 	
-		use brush_core::openfiles::OpenFile;
+		use crate::openfile::OpenFile;
 		use pi_vfs::File;
 	
 		use crate::tail::{TailError, TailResult, args::Settings};
@@ -2710,7 +2649,7 @@ mod paths {
 		path::{Path, PathBuf},
 	};
 	
-	use brush_core::openfiles::{DescriptorPath, OpenFiles};
+	use crate::openfile::{DescriptorPath, STDIN_FD};
 	use pi_vfs::{BlockingFs, File, Metadata};
 
 	use crate::{host::Host, tail::{TailResult, text}};
@@ -2772,7 +2711,7 @@ mod paths {
 				return;
 			};
 			let absolute = pi_vfs::absolute_path(host.cwd(), path);
-			*path = if DescriptorPath::parse(&absolute) == Some(DescriptorPath::Fd(OpenFiles::STDIN_FD)) {
+			*path = if DescriptorPath::parse(&absolute) == Some(DescriptorPath::Fd(STDIN_FD)) {
 				PathBuf::from(text::DEV_STDIN)
 			} else {
 				host.resolve(&*path)
@@ -3058,12 +2997,11 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::ArgMatches;
 use memchr::{memchr_iter, memrchr_iter};
 use uucore::display::Quotable;
 
-use crate::host::{Host, Utility, matches_parser, util};
+use crate::host::{Host, Utility, matches_parser};
 
 use args::{FilterMode, Settings, Signum};
 use chunks::ReverseChunks;
@@ -3244,11 +3182,6 @@ impl Utility for Tail {
 			},
 		}
 	}
-}
-
-/// Creates the `tail` builtin registration.
-pub(crate) fn tail_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Tail, SE>()
 }
 
 /// BSD `tail -r`: print lines in reverse order. With `-n N` the count selects
@@ -4116,7 +4049,7 @@ mod tests {
 		let parsed = Tail::try_parse_from(["tail", "-f", path.to_str().unwrap()]).unwrap();
 		let (mut host, _) = Host::for_test("tail", "", dir.path());
 		let (mut reader, writer) = std::io::pipe().unwrap();
-		host.stdout = brush_core::openfiles::OpenFile::from(writer);
+		host.stdout = crate::openfile::OpenFile::from(writer);
 		let cancel = host.cancel_flag();
 		let tail = std::thread::spawn(move || parsed.run(&mut host));
 		// Consume the initial output like `grep -m1 line`, then go away.
