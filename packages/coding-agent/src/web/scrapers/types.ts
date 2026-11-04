@@ -201,25 +201,19 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 
 			const lastAgent = !rotates || attempt === USER_AGENTS.length - 1;
 			if (!lastAgent && BLOCKED_STATUSES.has(response.status)) {
-				// A refusal that names its wall is kept in case later agents fare no better; a 2xx
-				// challenge kept later wins, since remote readers can still get past it.
-				if (!lastBlockedResponse && contentType.includes("html")) {
-					const refusal = await readBodyCapped(response, maxBytes);
-					const content = refusal ? decodeBody(refusal.bytes, rawContentType) : "";
-					const blockedBy = botWallOf(response, contentType, content);
-					if (blockedBy) {
-						lastBlockedResponse = {
-							content,
-							contentType,
-							finalUrl,
-							ok: false,
-							status: response.status,
-							truncated: refusal?.truncated,
-							blockedBy,
-						};
-					}
-				} else {
-					void response.body?.cancel().catch(() => {});
+				void response.body?.cancel().catch(() => {});
+				// A refusal whose header names its wall is kept in case later agents fare no better; its
+				// body is not read, so rotation costs what it did. A 2xx challenge kept later wins.
+				const headerWall = lastBlockedResponse ? undefined : botWallOf(response, contentType, "");
+				if (headerWall) {
+					lastBlockedResponse = {
+						content: "",
+						contentType,
+						finalUrl,
+						ok: false,
+						status: response.status,
+						blockedBy: headerWall,
+					};
 				}
 				continue;
 			}
@@ -247,8 +241,11 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 
 			const responseBody = await readBodyCapped(response, maxBytes);
 			if (!responseBody) {
-				// A refusal under a later agent says less than the wall an earlier one met.
-				if (!response.ok && lastBlockedResponse) return lastBlockedResponse;
+				// Once a wall is known, an error under another agent only means trying the next one.
+				if (!response.ok && lastBlockedResponse) {
+					if (!lastAgent) continue;
+					return lastBlockedResponse;
+				}
 				// A successful response can still be bodyless (HTTP 204, or a null
 				// body stream): keep the transport's own success verdict instead of
 				// rewriting it, so the caller's status handling (a 204 is a valid
@@ -268,10 +265,15 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 				blockedBy,
 			};
 			if (blockedBy && !lastAgent) {
-				lastBlockedResponse = result;
+				// A 2xx challenge outranks a refusal's wall: remote readers can still get past it.
+				if (!lastBlockedResponse || response.ok) lastBlockedResponse = result;
 				continue;
 			}
-			if (!response.ok && !blockedBy && lastBlockedResponse) return lastBlockedResponse;
+			// The last agent's error yields to a saved wall, unless both are walls and the saved one is a refusal.
+			if (!response.ok && lastBlockedResponse && (!blockedBy || (lastBlockedResponse.status ?? 0) < 300)) {
+				if (!lastAgent) continue;
+				return lastBlockedResponse;
+			}
 			return result;
 		} catch (error) {
 			if (signal?.aborted) {
