@@ -10005,15 +10005,17 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Whether a hidden next-turn trigger must wait: see the trigger in {@link #scheduleHiddenNextTurn}.
-	 * An abort still cleaning up counts too: a turn started now would miss its cancellation, and the
-	 * abort would wait for that turn. The abort's end resumes the trigger.
+	 * Every abort still cleaning up counts too, not only the latest (`#abortInProgress` is cleared by
+	 * whichever overlapping abort ends first): a turn started now would miss their cancellation, and
+	 * they would wait for that turn. The end of the last abort resumes the trigger.
 	 */
 	#hiddenNextTurnTriggerBlocked(): boolean {
 		return (
 			this.#awaitingAssignment ||
 			this.#promptInFlightCount > 0 ||
 			this.isSessionTransitioning ||
-			this.#abortInProgress
+			this.#abortInProgress ||
+			this.#abortUnwinds.size > 0
 		);
 	}
 
@@ -11491,10 +11493,10 @@ export class AgentSession implements SettingsScope {
 		} finally {
 			this.#abortInProgress = false;
 			this.#drainStrandedQueuedMessages();
-			// A held hidden next-turn trigger is a delivery, not the work the abort stopped: once the
-			// abort has settled it runs, unless a transition or a hold still blocks it.
-			this.#resumeHeldHiddenTrigger();
 			this.#abortUnwinds.delete(unwind.promise);
+			// A held hidden next-turn trigger is a delivery, not the work the abort stopped: once the
+			// last overlapping abort has settled it runs, unless a transition or a hold still blocks it.
+			this.#resumeHeldHiddenTrigger();
 			unwind.resolve();
 		}
 	}
