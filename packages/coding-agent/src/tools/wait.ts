@@ -26,7 +26,7 @@ const waitSchema = type({
 	"timeout?": type("number").describe(WAIT_TIMEOUT_DESCRIPTION),
 });
 /** Safety cap of a wait called without `timeout`. */
-const WAIT_MAX_MS = 30 * 60_000;
+const WAIT_MAX_MS = TOOL_TIMEOUTS.wait.default * 1000;
 const PROGRESS_INTERVAL_MS = 500;
 
 interface WaitMessaging {

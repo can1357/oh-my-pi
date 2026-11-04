@@ -17,8 +17,7 @@ export const TOOL_TIMEOUTS = {
 	lsp: { default: 20, min: 5, max: 300 },
 	debug: { default: 30, min: 5, max: 300 },
 	ida: { default: 120, min: 1, max: 3600 },
-	// `wait` clamps only an explicit `timeout`; `default` matches the 30-minute safety cap
-	// of a wait called without one (which never idles when nothing is owed).
+	// `default` is the safety cap of a `wait` called without `timeout`.
 	wait: { default: 1800, min: 1, max: 3600 },
 } as const satisfies Record<string, ToolTimeoutConfig>;
 
