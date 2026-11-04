@@ -368,6 +368,35 @@ describe("task live progress rendering", () => {
 		expect(visibleChildren).toHaveLength(4);
 	});
 
+	it("keeps a marked missing-yield child visible in a collapsed batch", () => {
+		setViewportRows(40);
+		const warning = "SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
+		// The marked child sorts last and exits 0; only its mark can win it a slot.
+		const details: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: Array.from({ length: 6 }, (_, index) =>
+				makeSingleResult(
+					index,
+					index === 5 ? { output: `${warning}\n\nreport`, missingYield: "initial" } : undefined,
+				),
+			),
+			totalDurationMs: 1,
+		};
+
+		const legacy = renderResultText(details, false, uiTheme);
+		const native = JSON.stringify(
+			taskToolRenderer.describeResult(
+				{ content: [{ type: "text", text: "" }], details },
+				{ expanded: false, isPartial: false },
+			),
+		);
+
+		for (const rendered of [legacy, native]) {
+			expect(rendered).toContain("Done6");
+			expect([1, 2, 3, 4, 5, 6].filter(index => rendered.includes(`Done${index}`))).toHaveLength(4);
+		}
+	});
+
 	it("shows every finalized nested task result when expanded", () => {
 		setViewportRows(40);
 		const text = renderResultText(makeParentWithNestedResults(6), true, uiTheme);

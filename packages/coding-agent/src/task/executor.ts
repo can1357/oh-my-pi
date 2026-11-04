@@ -13,6 +13,7 @@ import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-ag
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import type { MissingYield } from "@oh-my-pi/pi-wire";
 import {
 	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
 	AsyncJobError,
@@ -703,7 +704,7 @@ interface FinalizeSubprocessOutputArgs {
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	lastAssistantText?: string;
 	/** The structured result protocol was not submitted. */
-	missingYield?: "initial" | "wake";
+	missingYield?: MissingYield;
 	/** `false` = no `yield` tool: `rawOutput` is the final assistant message, returned verbatim. Default `true`. */
 	structured?: boolean;
 }
@@ -714,7 +715,7 @@ interface FinalizeSubprocessOutputResult {
 	stderr: string;
 	abortedViaYield: boolean;
 	hasYield: boolean;
-	missingYield?: "initial" | "wake";
+	missingYield?: MissingYield;
 	structuredOutput?: StructuredSubagentOutput;
 }
 export const SUBAGENT_WARNING_SCHEMA_OVERRIDDEN =
@@ -760,7 +761,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 	const includeStructuredOutput = source !== "none";
 	let structuredOutput: StructuredSubagentOutput | undefined;
 	let abortedViaYield = false;
-	let resultMissingYield: "initial" | "wake" | undefined;
+	let resultMissingYield: MissingYield | undefined;
 	const hasYield = Array.isArray(yieldItems) && yieldItems.length > 0;
 	const hadFailureBeforeYield = exitCode !== 0 && stderr.trim().length > 0;
 
@@ -2873,7 +2874,7 @@ interface FinalizeRunArgs {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	/** The structured result protocol was not submitted. */
-	missingYield?: "initial" | "wake";
+	missingYield?: MissingYield;
 	/**
 	 * Output to finalize in place of the monitor's accumulated text. A structured
 	 * wake passes its final report turn, so narration set aside before later
@@ -3217,18 +3218,23 @@ async function relayWakeTurnOutput(args: {
 	const failed = wakeTurnFailed(args);
 	for (const source of sources) {
 		if (source.from === args.jobOwnerId) continue;
-		const alreadyMessaged = bus.sentSince(args.id, source.from, args.turnStartTime);
-		// A completed turn's answer would duplicate what the agent already sent
-		// this waker, so dedup stays. A failed/cancelled turn is a distinct
-		// lifecycle fact: `sentSince` cannot tell "already answered you" from
-		// "pinged you 'on it'", and suppressing the failure notice on a mere ping
-		// strands the waker exactly as before — one message later. So the failure
-		// lane always notifies, flavoured to acknowledge the earlier message.
-		if (alreadyMessaged && !failed) continue;
-		const body =
-			source.from === args.markedWakeOwnerId && args.result && !failed
-				? formatTaskResultSummary(args.result, { totalDurationMs: args.result.durationMs })
-				: buildWakeRelayBody({ ...args, alreadyMessaged });
+		let body: string;
+		if (source.from === args.markedWakeOwnerId && args.result && !failed) {
+			// A marked owner wake always gets its finalized summary, even after an
+			// interim message this turn: that message was not the report, and the
+			// relay is the parent's only way to see the `missing-yield` warning.
+			body = formatTaskResultSummary(args.result, { totalDurationMs: args.result.durationMs });
+		} else {
+			const alreadyMessaged = bus.sentSince(args.id, source.from, args.turnStartTime);
+			// A completed turn's answer would duplicate what the agent already sent
+			// this waker, so dedup stays. A failed/cancelled turn is a distinct
+			// lifecycle fact: `sentSince` cannot tell "already answered you" from
+			// "pinged you 'on it'", and suppressing the failure notice on a mere ping
+			// strands the waker exactly as before — one message later. So the failure
+			// lane always notifies, flavoured to acknowledge the earlier message.
+			if (alreadyMessaged && !failed) continue;
+			body = buildWakeRelayBody({ ...args, alreadyMessaged });
+		}
 		if (!body) continue;
 		const receipt = await bus.send({
 			from: args.id,

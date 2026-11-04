@@ -15,6 +15,7 @@ import { Markdown } from "../components/markdown";
 import { Text } from "../components/text";
 import { visibleWidth, wrapTextWithAnsi } from "../utils";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { type MissingYield, splitMissingYieldWarning } from "@oh-my-pi/pi-wire";
 import type { RenderResultOptions } from "./renderer";
 import { formatAgentStatRun, renderAgentTreeRow } from "./agent-tree";
 import { getMarkdownTheme, type Theme } from "../theme/theme";
@@ -289,22 +290,6 @@ export function formatTaskId(id: string): string {
 	const sanitizedId = sanitizeText(id);
 	const segments = sanitizedId.split(".");
 	return segments.length < 2 ? sanitizedId : segments.join(">");
-}
-
-/**
- * Split a marked result's output into its missing-yield warning and report.
- * The executor writes the warning as the output's first paragraph whenever it
- * sets `missingYield`, so the mark, not a copy of the warning text, decides.
- */
-function extractMissingYieldWarning(
-	output: string,
-	missingYield: SingleResult["missingYield"],
-): { warning?: string; rest: string } {
-	if (!missingYield) return { rest: output };
-	const end = output.indexOf("\n\n");
-	const warning = (end < 0 ? output : output.slice(0, end)).trim();
-	if (!warning) return { rest: output };
-	return { warning, rest: end < 0 ? "" : output.slice(end + 2) };
 }
 
 const BASH_WALL_TIME_NOTICE_RE = /^Wall time: \d+(?:\.\d+)? seconds$/u;
@@ -1056,7 +1041,7 @@ function renderAgentResult(
 ): string[] {
 	const lines: string[] = [];
 
-	const { warning: missingCompleteWarning, rest: outputWithoutWarning } = extractMissingYieldWarning(
+	const { warning: missingCompleteWarning, rest: outputWithoutWarning } = splitMissingYieldWarning(
 		result.output,
 		result.missingYield,
 	);
@@ -1346,8 +1331,8 @@ function formatHiddenProgressLine(hidden: readonly AgentProgress[], theme: Theme
 
 /**
  * Pick the agent rows that stay visible when a finalized batch is collapsed:
- * problem rows (aborted/failed/merge-failed) claim slots first so they are
- * never folded away, then fastest finishers fill the remainder. The pick is
+ * problem rows (aborted/failed/merge-failed/missing-yield) claim slots first so
+ * they are never folded away, then fastest finishers fill the remainder. The pick is
  * filtered out of the display order, so visible rows keep the expanded layout.
  */
 function selectCollapsedResults(ordered: readonly SingleResult[]): readonly SingleResult[] {
@@ -1355,7 +1340,7 @@ function selectCollapsedResults(ordered: readonly SingleResult[]): readonly Sing
 	const picked = new Set<SingleResult>();
 	for (const result of ordered) {
 		if (picked.size >= COLLAPSED_AGENT_LIMIT) break;
-		if (result.aborted || result.exitCode !== 0 || result.error) picked.add(result);
+		if (result.aborted || result.exitCode !== 0 || result.error || result.missingYield) picked.add(result);
 	}
 	for (const result of ordered) {
 		if (picked.size >= COLLAPSED_AGENT_LIMIT) break;
@@ -1972,7 +1957,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 }
 
 function describeResultAgent(result: SingleResult, state: AgentDescribeState, depth: number): NativeNode {
-	const { warning, rest } = extractMissingYieldWarning(result.output, result.missingYield);
+	const { warning, rest } = splitMissingYieldWarning(result.output, result.missingYield);
 	const aborted = result.aborted ?? false;
 	const mergeFailed = !aborted && result.exitCode === 0 && !!result.error;
 	const success = !aborted && result.exitCode === 0 && !result.error;
@@ -2425,7 +2410,7 @@ export interface AgentProgress {
 	cost: number;
 	durationMs: number;
 	/** The settled run's structured result protocol was not submitted (see {@link SingleResult.missingYield}). */
-	missingYield?: "initial" | "wake";
+	missingYield?: MissingYield;
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
@@ -2508,7 +2493,7 @@ export interface SingleResult {
 	stderr: string;
 	truncated: boolean;
 	/** A structured child bypassed its required yield protocol. */
-	missingYield?: "initial" | "wake";
+	missingYield?: MissingYield;
 	/**
 	 * Parsed structured completion and validation metadata, when this invocation
 	 * selected an output schema or strict schema mode.

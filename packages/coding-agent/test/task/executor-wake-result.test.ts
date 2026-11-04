@@ -186,6 +186,57 @@ describe("parent-owned wake results", () => {
 			"SYSTEM WARNING: Structured subagent replied without calling yield.\n\nEverything verified; writing the report now.",
 		);
 	});
+	it("relays a marked wake's warning to the owner even after an interim message", async () => {
+		const harness = createHarness();
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "Parent",
+			displayName: "Parent",
+			kind: "main",
+			session: createHarness().session,
+			status: "running",
+		});
+		registry.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Parent",
+			session: harness.session,
+			status: "idle",
+		});
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent });
+		const observer = harness.wakeObserver();
+		if (!observer) throw new Error("wake-turn observer was not registered");
+		const bus = IrcBus.global();
+		const send = vi.spyOn(bus, "send");
+
+		const finish = observer([
+			{
+				role: "custom",
+				customType: "irc:incoming",
+				content: "report your findings",
+				display: false,
+				details: { id: "msg-interim", from: "Parent", message: "report your findings" },
+				attribution: "agent",
+				timestamp: Date.now(),
+			} as unknown as AgentMessage,
+		]);
+		// An interim ping is not the answer; the parent must still get the marked report.
+		const interim = bus.wait("Parent", { from: AGENT_ID }, 1000);
+		const receipt = await bus.send({ from: AGENT_ID, to: "Parent", body: "On it.", progress: true });
+		expect(receipt.outcome).not.toBe("failed");
+		expect((await interim)?.body).toBe("On it.");
+		harness.emitAssistantText("Everything verified; writing the report now.");
+		await finish?.(undefined);
+
+		const relays = send.mock.calls.map(([message]) => message).filter(message => message.wakeRelay);
+		expect(relays).toHaveLength(1);
+		expect(relays[0]?.to).toBe("Parent");
+		expect(relays[0]?.body).toContain('missing-yield="wake"');
+		expect(relays[0]?.body).toContain(
+			"SYSTEM WARNING: Structured subagent replied without calling yield.\n\nEverything verified; writing the report now.",
+		);
+	});
 	it.each(["", " \n "])("reports an empty structured owner wake as before, unmarked (%p)", async reply => {
 		const manager = new AsyncJobManager({});
 		const harness = createHarness({ asyncJobManager: manager });
