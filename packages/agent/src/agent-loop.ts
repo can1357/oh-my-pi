@@ -2671,17 +2671,18 @@ function retainCompletedToolCalls(
 	completedToolCallIds: ReadonlySet<string>,
 ): AssistantMessage {
 	if (message.stopReason !== "error" && message.stopReason !== "aborted") return message;
-	let droppedIncompleteToolCall = false;
+	const unfinishedToolCalls: Array<{ id: string; name: string }> = [];
 	const content = message.content.filter(block => {
 		if (block.type !== "toolCall") return true;
-		const keep = completedToolCallIds.has(block.id);
-		if (!keep) droppedIncompleteToolCall = true;
-		return keep;
+		if (completedToolCallIds.has(block.id)) return true;
+		unfinishedToolCalls.push({ id: block.id, name: block.name });
+		return false;
 	});
-	if (!droppedIncompleteToolCall) return message;
+	if (unfinishedToolCalls.length === 0) return message;
 	return {
 		...message,
 		content,
+		unfinishedToolCalls,
 		stopDetails:
 			message.stopDetails?.type === STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL
 				? message.stopDetails

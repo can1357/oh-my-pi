@@ -38,6 +38,7 @@ import {
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
+	isSyntheticToolResultMessage,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
 	resolveTelemetry,
@@ -4270,6 +4271,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				};
 			}
 		}
+		// A refused turn is never written (above), so neither are the placeholder
+		// results the agent loop paired with its calls: persisted alone they would
+		// be orphans that a reload replays. A terminal refusal reports the calls in
+		// its own notice instead (`settleTerminalRefusal`).
+		if (isSyntheticToolResultMessage(message)) {
+			const messages = this.agent.state.messages;
+			for (let i = messages.length - 1; i >= 0; i--) {
+				const owner = messages[i];
+				if (owner.role !== "assistant") continue;
+				if (!owner.content.some(block => block.type === "toolCall" && block.id === message.toolCallId)) continue;
+				if (this.#recovery.isClassifierRefusal(owner)) return;
+				break;
+			}
+		}
 		const skipPersistedRewindResult =
 			message.role === "toolResult" &&
 			semanticToolResult(message.toolName, message)?.toolName === "rewind" &&
@@ -5214,17 +5229,24 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return;
 				}
 			}
-			// Classifier refusals are persisted-skipped above; also prune the trailing
-			// stub from active context so the next turn's prompt does not replay it.
-			// Keep a reference for post-settle readers (print mode, task executor via
+			// Classifier refusals are persisted-skipped above; settling one also prunes
+			// the refused turn (and its calls' placeholder results) from active
+			// context so the next prompt does not replay it. Keep a reference for
+			// post-settle readers (print mode, task executor via
 			// getLastAssistantMessage) — pruning made the terminal error invisible to
 			// anything inspecting agent state after prompt() resolved.
-			// Fall through to the standard error tail so `session_stop` hooks (block,
-			// continue, telemetry) still fire — matching the pre-fix flow for
-			// `stopReason === "error"`.
+			// A refused turn that was calling tools reports them and continues once
+			// (see `settleTerminalRefusal`); otherwise fall through to the standard
+			// error tail so `session_stop` hooks (block, continue, telemetry) still
+			// fire — matching the pre-fix flow for `stopReason === "error"`.
 			if (this.#recovery.isClassifierRefusal(msg)) {
 				this.#prunedTerminalFailure = msg;
-				this.#recovery.removeAssistantMessageFromActiveContext(msg);
+				if (this.#recovery.settleTerminalRefusal(msg)) {
+					maintenanceRoute("refusal-tool-call-reported");
+					this.#recovery.resolveRetry();
+					await emitAgentEndNotification({ willContinue: true });
+					return;
+				}
 			} else if (!AIError.isContextOverflow(msg, this.model?.contextWindow ?? 0)) {
 				// No retry, fallback, or compaction continuation fired: this errored
 				// turn ends the run. #persistSessionMessageIfMissing dropped it as an

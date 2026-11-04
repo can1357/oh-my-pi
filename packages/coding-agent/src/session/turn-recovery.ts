@@ -3,6 +3,7 @@ import {
 	AgentBusyError,
 	type AgentMessage,
 	isSyntheticToolResultMessage,
+	STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
@@ -34,6 +35,7 @@ import type { RetryErrorUpdate } from "../extensibility/shared-events";
 import { isEvalStateContext } from "../eval/state";
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
 import malformedFunctionCallRetryTemplate from "../prompts/system/malformed-function-call-retry.md" with { type: "text" };
+import refusalToolCallReportTemplate from "../prompts/system/refusal-tool-call-report.md" with { type: "text" };
 import streamStallContinueTemplate from "../prompts/system/stream-stall-continue.md" with { type: "text" };
 import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
@@ -98,6 +100,8 @@ import {
 } from "./settings";
 
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
+/** Custom-message type of the notice that reports a refused turn's tool calls; see `settleTerminalRefusal`. */
+const REFUSAL_TOOL_CALL_REPORT_TYPE = "refusal-tool-call-report";
 const UNEXPECTED_STOP_MAX_RETRIES = 3;
 // Gateway-routed judges can take ~12s (observed: bifrost judge YES at 12.2s
 // while the client aborted at 4s, dropping the verdict and skipping the nudge).
@@ -706,6 +710,100 @@ export class TurnRecovery {
 		});
 		this.#host.scheduleAgentContinue({
 			source: "malformed-function-call-retry",
+			generation: this.#host.promptGeneration(),
+		});
+		return true;
+	}
+
+	/**
+	 * Settle a classifier refusal that no retry or fallback answered.
+	 *
+	 * The refused turn and the placeholder results of its calls leave active
+	 * context: Anthropic's guidance is to remove the refused turn before
+	 * continuing, since replaying it draws the same refusal. A turn that was
+	 * calling tools must not vanish silently with them, though: the model would
+	 * act as if the calls ran, and nothing would wake the session to correct
+	 * it. So every call the turn made — closed or cut off mid-arguments — is
+	 * reported with the provider's reason in a persisted notice, and the
+	 * session continues once so the model reads it. A woken turn that is
+	 * refused again gets its report but no second wake.
+	 *
+	 * @returns true when a continuation was scheduled.
+	 */
+	settleTerminalRefusal(message: AssistantMessage): boolean {
+		const messages = this.#host.agent.state.messages;
+		let assistantIndex = -1;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const candidate = messages[i];
+			if (candidate.role === "assistant" && this.#isSameAssistantMessage(candidate, message)) {
+				assistantIndex = i;
+				break;
+			}
+		}
+		const callIds = new Set<string>();
+		for (const block of message.content) if (block.type === "toolCall") callIds.add(block.id);
+		// The agent loop runs no call of an errored turn: each gets an
+		// `executed: false` placeholder. A result that is anything else means a
+		// call ran after all (e.g. a provider that executes calls server-side);
+		// then the turn stays whole, so no result of work that happened is lost.
+		const ranIds = new Set<string>();
+		const placeholderIndexes = new Set<number>();
+		for (let i = assistantIndex + 1; assistantIndex >= 0 && i < messages.length; i++) {
+			const candidate = messages[i];
+			if (candidate.role !== "toolResult" || !callIds.has(candidate.toolCallId)) continue;
+			if (isSyntheticToolResultMessage(candidate) && candidate.details?.executed === false) {
+				placeholderIndexes.add(i);
+			} else {
+				ranIds.add(candidate.toolCallId);
+			}
+		}
+		const calls: Array<{ name: string; unfinished: boolean }> = [];
+		for (const block of message.content) {
+			if (block.type === "toolCall" && !ranIds.has(block.id)) calls.push({ name: block.name, unfinished: false });
+		}
+		for (const call of message.unfinishedToolCalls ?? []) {
+			calls.push({ name: call.name || "unnamed tool", unfinished: true });
+		}
+
+		const previous = assistantIndex > 0 ? messages[assistantIndex - 1] : undefined;
+		if (assistantIndex >= 0 && ranIds.size === 0) {
+			this.#host.agent.replaceMessages(
+				messages.filter((_, index) => index !== assistantIndex && !placeholderIndexes.has(index)),
+			);
+		}
+		if (calls.length === 0) return false;
+
+		const wokenTurnRefusedAgain =
+			previous?.role === "custom" && previous.customType === REFUSAL_TOOL_CALL_REPORT_TYPE;
+		const report = prompt.render(refusalToolCallReportTemplate, {
+			reason: message.errorMessage ?? "none given",
+			calls,
+			final: wokenTurnRefusedAgain,
+		});
+		this.#host.agent.appendMessage({
+			role: "custom",
+			customType: REFUSAL_TOOL_CALL_REPORT_TYPE,
+			content: report,
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		this.#host.sessionManager.appendCustomMessageEntry(
+			REFUSAL_TOOL_CALL_REPORT_TYPE,
+			report,
+			false,
+			undefined,
+			"agent",
+		);
+
+		if (wokenTurnRefusedAgain || this.#host.abortInProgress() || this.#host.isDisposed()) return false;
+		logger.info("Classifier refusal ended a tool-call turn; reporting the calls and continuing", {
+			calls: calls.length,
+			model: message.model,
+			provider: message.provider,
+		});
+		this.#host.scheduleAgentContinue({
+			source: "refusal-tool-call-report",
 			generation: this.#host.promptGeneration(),
 		});
 		return true;
@@ -1793,7 +1891,12 @@ export class TurnRecovery {
 	/** Checks whether a provider error represents a classifier refusal. */
 	isClassifierRefusal(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
-		const stopType = message.stopDetails?.type;
+		// A refusal that cut a tool call mid-arguments is relabeled by the agent
+		// loop (`stream_interrupted_after_content`), which keeps the provider's
+		// stop type as the category.
+		const details = message.stopDetails;
+		const stopType =
+			details?.type === STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL ? details.category : details?.type;
 		return stopType === "refusal" || stopType === "sensitive";
 	}
 

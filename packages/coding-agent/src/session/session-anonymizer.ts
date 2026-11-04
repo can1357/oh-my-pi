@@ -354,6 +354,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"retryRecovery",
 		"supersededBy",
 		"stopDetails",
+		"unfinishedToolCalls",
 		"requestControls",
 		"providerPayload",
 		"items",
