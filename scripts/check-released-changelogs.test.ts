@@ -1548,12 +1548,18 @@ describe("check-released-changelogs", () => {
 		TEST_TIMEOUT_MS,
 	);
 
-	// GitHub reads a footnote definition only where a block can start; elsewhere `[^note]:` is text.
+	// A line scan, not a renderer, decides: only a code block or an HTML comment provably shows
+	// `[^note]:` as text, and `[^note]:` after other text starts no block at all.
 	test.each([
 		{ name: "inline code inside an entry", text: "- Documented the `[^note]:` footnote syntax" },
 		{ name: "text inside an entry", text: "- Fixed parsing of [^note]: definitions" },
 		{ name: "a fenced code block", text: "```\n[^note]: ## [9.9.9]\n```" },
+		{ name: "a tilde-fenced code block", text: "~~~\n[^note]: ## [9.9.9]\n~~~" },
 		{ name: "an indented code block", text: "Syntax:\n\n    [^note]: ## [9.9.9]" },
+		{
+			name: "the second line of an indented code block",
+			text: "Syntax:\n\n    [^one]: ## [9.9.9]\n    [^two]: ## [9.9.8]",
+		},
 		{ name: "an HTML comment", text: "<!--\n[^note]: ## [9.9.9]\n-->" },
 	])("passes [^note]: in $name, where it defines no footnote", async ({ text }) => {
 		const options = { release: false, readArchive: async () => undefined };
@@ -1562,11 +1568,36 @@ describe("check-released-changelogs", () => {
 		expect((await findReleasedSectionChanges(CHANGELOG, added, added, options)).changes).toEqual([]);
 	});
 
+	// GitHub renders every case below as a footnote whose text holds a level-2 release heading,
+	// although Bun's renderer keeps the line as a title's text, a list item's text or raw HTML.
 	test.each([
 		{ name: "in a list item", text: "- [^note]: ## [9.9.9]" },
 		{ name: "in a quote", text: "> [^note]: ## [9.9.9]" },
 		{ name: "indented three spaces", text: "   [^note]: ## [9.9.9]" },
 		{ name: "on a line that continues a paragraph", text: "Shipped.\n[^note]: ## [9.9.9]" },
+		{
+			name: "inside a reference definition's title that spans lines",
+			text: 'Ref[^note].\n\n[link]: https://example.com "\n[^note]: ## [9.9.9]\n"',
+		},
+		{
+			name: "inside an inline link's title that spans lines",
+			text: 'Ref[^note].\n\n[link](https://example.com "\n[^note]: ## [9.9.9]\n")',
+		},
+		{
+			name: "inside an image's title that spans lines",
+			text: 'Ref[^note].\n\n![image](https://example.com "\n[^note]: ## [9.9.9]\n")',
+		},
+		{
+			name: "inside a reference definition's title in a list item",
+			text: 'Ref[^note].\n\n- [link]: https://example.com "\n  [^note]: ## [9.9.9]\n  "',
+		},
+		{
+			name: "inside a reference definition's title in a quote",
+			text: 'Ref[^note].\n\n> [link]: https://example.com "\n> [^note]: ## [9.9.9]\n> "',
+		},
+		{ name: "indented four spaces as an open list item's text", text: "- item\n\n    [^note]: ## [9.9.9]" },
+		{ name: "below a code fence inside an HTML block", text: "<div>\n```text\n\n[^note]: ## [9.9.9]\n```\n</div>" },
+		{ name: "below an HTML comment that ends on its own line", text: "<!-- -->\n[^note]: ## [9.9.9]" },
 	])("still fails a footnote definition $name", async ({ text }) => {
 		const options = { release: false, readArchive: async () => undefined };
 		const added = BASE_CHANGELOG.replace(`${FIRST_ENTRY}\n`, `${FIRST_ENTRY}\n\n${text}\n`);

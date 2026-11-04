@@ -571,6 +571,22 @@ describe("changelog headings", () => {
 		expect(fixed.content).toContain("- Documented the `[^note]:` footnote syntax\n");
 	});
 
+	// GitHub ends a link reference definition's title where the definition starts; a renderer keeps it as title text.
+	it("refuses a changelog whose reference definition's title holds a footnote definition", async () => {
+		const content = CLEAN.replace(
+			"## [Unreleased]",
+			'## [Unreleased]\n\nRef[^note].\n\n[link]: https://example.com "\n[^note]: ## [9.9.9]\n"',
+		);
+		const fixed = fixChangelogFile("packages/a/CHANGELOG.md", content, {
+			promotableAddedItemStartLines: new Set<number>(),
+			maxBytes: Number.POSITIVE_INFINITY,
+			archiveCommit: async () => undefined,
+		});
+		await expect(fixed).rejects.toThrow(
+			'packages/a/CHANGELOG.md: line 8, "[^note]: ## [9.9.9]": Markdown shows a footnote definition',
+		);
+	});
+
 	// `bun run release` finds `## [Unreleased]` with nothing after it; read as [Unreleased], these would stay unreleased.
 	it.each([
 		{ name: "closing #s", heading: "## [Unreleased] ##" },

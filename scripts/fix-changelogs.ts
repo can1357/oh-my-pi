@@ -157,7 +157,7 @@ function createNumberedLine(text: string, lineNumber: number): NumberedLine {
 
 /** How the changelog tools may write each heading; anything else Markdown shows as a heading is refused. */
 export const HEADING_RULE =
-	"Write the title as `# Changelog`, once, above the first release, the unreleased section as `## [Unreleased]` with nothing after it, a release as `## [x.y.z] - YYYY-MM-DD` and a category as `### Added`, each at the start of its line with one space after the `#`s, and write no other heading and no footnote definition (`[^label]:`).";
+	"Write the title as `# Changelog`, once, above the first release, the unreleased section as `## [Unreleased]` with nothing after it, a release as `## [x.y.z] - YYYY-MM-DD` and a category as `### Added`, each at the start of its line with one space after the `#`s, write no other heading, and start no line with `[^label]:`, which GitHub reads as a footnote definition, unless a code block or an HTML comment holds it.";
 
 /** A heading as Markdown shows it. */
 interface ShownHeading {
@@ -202,41 +202,90 @@ const HTML_HEADING_TAG = /<h[1-6](?=[\s/>])/gi;
  */
 const FOOTNOTE_CANDIDATE = /^[ \t>*+\-\d.)]*\[\^[^\]\n]*\]:/;
 
+/** A code fence and the rest of its line: three or more backticks or tildes, at most three spaces in. */
+const CODE_FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
+/** Where an HTML block may start: `<` at the start of a line, at most three spaces in. */
+const HTML_BLOCK_START = /^ {0,3}</;
+
+/** A list item's marker; the lines indented below it are its text, not a code block. */
+const LIST_MARKER = /^ {0,3}([-*+]|\d{1,9}[.)])([ \t]|$)/;
+
+/** A line indented four spaces or a tab: a code block where no paragraph and no list item is open. */
+const INDENTED_LINE = /^(?: {4}|\t)/;
+
 /**
- * The first line (0-based) that holds a footnote definition, or -1. A
- * candidate defines one unless Markdown puts it in a code block, or in an HTML
- * block outside a list item, where GitHub shows it as code or hides it;
- * anywhere else (a paragraph, a list item, a quote, a line that continues a
- * paragraph) it counts, as GitHub may read it there. `[^label]:` after other
- * text, such as inline code in an entry, is never a definition.
+ * The first line (0-based) that may define a footnote, or -1. The scan refuses
+ * every candidate except one it proves GitHub shows as text: a line of a
+ * fenced code block, of an indented code block, or of an HTML comment, each
+ * opened and closed as CommonMark does. No renderer decides this. GitHub's
+ * block parser reads a definition where a renderer without footnotes shows
+ * none at all: inside a link, reference or image title that spans lines, the
+ * renderer keeps the line as title text while GitHub ends the title there and
+ * renders the definition. So a candidate counts wherever a block can start —
+ * a paragraph, a list item, a quote, a table, a line that continues a
+ * paragraph, an HTML block that is not a comment, a title — and `[^label]:`
+ * after other text, such as inline code in an entry, is no candidate at all.
  */
 function footnoteDefinitionLine(lines: readonly string[]): number {
-	const candidates = lines.flatMap((line, index) => (FOOTNOTE_CANDIDATE.test(line) ? [index] : []));
-	if (candidates.length === 0) return -1;
-	// A marker no changelog can forge, just before the `[^` of each candidate; it changes no block.
-	const nonce = crypto.randomUUID();
-	const marker = (index: number) => `\uE000${nonce}:${index}\uE001`;
-	const marked = [...lines];
-	for (const index of candidates) {
+	/** The open fenced code block's fence character and length. */
+	let fence: { char: string; length: number } | undefined;
+	/** Whether an HTML comment, whose lines GitHub hides, is open. */
+	let comment = false;
+	/** Whether an HTML block that is not a comment is open; it ends at a blank line. */
+	let html = false;
+	/** Whether the line before holds text, which a paragraph continues, so no code block starts below it. */
+	let paragraph = false;
+	/** Whether a list item is open, so an indented line is its text and not a code block. */
+	let list = false;
+	for (let index = 0; index < lines.length; index++) {
 		const line = lines[index] ?? "";
-		const at = line.indexOf("[^");
-		marked[index] = `${line.slice(0, at)}${marker(index)}${line.slice(at)}`;
+		const blank = line.trim() === "";
+		if (fence) {
+			const [, bar = "", rest = ""] = CODE_FENCE.exec(line) ?? [];
+			if (bar.startsWith(fence.char) && bar.length >= fence.length && rest.trim() === "") fence = undefined;
+			continue;
+		}
+		if (comment) {
+			// The line that holds `-->` ends the comment, and all of it is still the comment's.
+			comment = !line.includes("-->");
+			continue;
+		}
+		if (html && !blank) {
+			// GitHub reads no definition inside an HTML block, but only a comment provably hides one.
+			if (FOOTNOTE_CANDIDATE.test(line)) return index;
+			continue;
+		}
+		html = false;
+		if (blank) {
+			paragraph = false;
+			continue;
+		}
+		const [, bar, rest] = CODE_FENCE.exec(line) ?? [];
+		if (bar !== undefined && !(bar.startsWith("`") && rest?.includes("`"))) {
+			fence = { char: bar.slice(0, 1), length: bar.length };
+			paragraph = false;
+			continue;
+		}
+		if (HTML_BLOCK_START.test(line)) {
+			const at = line.indexOf("<");
+			if (line.startsWith("<!--", at)) comment = !line.slice(at + 4).includes("-->");
+			else html = true;
+			paragraph = false;
+			continue;
+		}
+		const indented = INDENTED_LINE.test(line);
+		const code = indented && !paragraph && !list;
+		if (!code && FOOTNOTE_CANDIDATE.test(line)) return index;
+		// A list item's marker opens the item even where it interrupts a paragraph; only a line that
+		// starts its own block, below a blank line, closes the list and lets a code block start again.
+		if (!indented) {
+			if (LIST_MARKER.test(line)) list = true;
+			else if (!paragraph) list = false;
+		}
+		paragraph = !code;
 	}
-	const shown = new Set<number>();
-	const collect = (children: string) => {
-		for (const index of candidates) if (children.includes(marker(index))) shown.add(index);
-		return children;
-	};
-	// A code block's text never reaches the blocks around it; an HTML block's reaches only a list item around it.
-	Bun.markdown.render(marked.join("\n"), {
-		code: () => "",
-		paragraph: collect,
-		heading: collect,
-		listItem: collect,
-		td: collect,
-		th: collect,
-	});
-	return candidates.find(index => shown.has(index)) ?? -1;
+	return -1;
 }
 
 /** A line marker between two private-use characters, which have no Markdown meaning. */
@@ -291,7 +340,8 @@ function describeHeading(heading: ShownHeading | undefined): string {
  * (indented, a tab or two spaces after the `#`s, underlined, in a list or a
  * quote, an HTML `<h2>`), is one the tools would not read, so a release written
  * that way would escape them, even with the same text as one they read. A
- * footnote definition is refused too: GitHub renders its text as Markdown. The
+ * line that may define a footnote is refused too, by the line scan above and
+ * not by the renderer: GitHub renders a definition's text as Markdown. The
  * title must be `# Changelog`, once, above the first release: `bun run release`
  * writes the next `## [Unreleased]` below it.
  */
