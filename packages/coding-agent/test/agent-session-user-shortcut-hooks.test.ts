@@ -5,6 +5,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as pythonExecutor from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
+import * as bashInteractive from "@oh-my-pi/pi-coding-agent/tools/bash-interactive";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -179,6 +180,37 @@ describe("AgentSession user shortcut hooks", () => {
 		expect(
 			session.messages.some(message => message.role === "pythonExecution" && message.excludeFromContext === false),
 		).toBe(true);
+	});
+
+	it("runs an interactive-PTY request on the overlay instead of the executor", async () => {
+		const interactive = {
+			output: "password accepted\n",
+			exitCode: 0,
+			cancelled: false,
+			timedOut: false,
+			truncated: false,
+			totalLines: 1,
+			totalBytes: 18,
+			outputLines: 1,
+			outputBytes: 18,
+		};
+		const interactiveSpy = vi.spyOn(bashInteractive, "runInteractiveBashPty").mockResolvedValue(interactive);
+		const executeBashSpy = vi.spyOn(bashExecutor, "executeBash");
+		const ui = { custom: vi.fn() } as unknown as bashInteractive.BashInteractiveUi;
+
+		createSession();
+		const result = await session.executeBash("doas true", undefined, { interactivePty: { ui } });
+
+		expect(executeBashSpy).not.toHaveBeenCalled();
+		expect(interactiveSpy).toHaveBeenCalledTimes(1);
+		const [passedUi, passedOptions] = interactiveSpy.mock.calls[0]!;
+		expect(passedUi).toBe(ui);
+		expect(passedOptions).toMatchObject({ command: "doas true", cwd: tempDir.path() });
+		expect(result).toEqual(interactive);
+		expect(session.messages.at(-1)).toMatchObject({
+			role: "bashExecution",
+			output: "password accepted\n",
+		});
 	});
 
 	it("shares Python state between eval and user shortcut execution", async () => {

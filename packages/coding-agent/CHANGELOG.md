@@ -168,6 +168,10 @@
 
 - Fixed composer prediction ghost text being dropped or never shown when a silent advisor card lands after the turn
 
+### Fixed
+
+- A `doas` or `sudo` command now runs on an interactive terminal, so it can ask for the password instead of dying with `doas: Authentication failed`, and the user shell's `!` commands get the same terminal. A command that a cached credential or a passwordless rule spares from prompting runs on the plain executor instead of opening a console for nothing, and a real password prompt opens a small card rather than the full-pane console ([#16103](https://github.com/can1357/oh-my-pi/pull/16103) by [@iacore](https://github.com/iacore)).
+
 ## [18.15.0] - 2026-11-01
 
 ### Added

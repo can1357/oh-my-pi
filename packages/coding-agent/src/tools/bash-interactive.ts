@@ -16,8 +16,11 @@ export interface BashInteractiveResult extends OutputSummary {
 	images?: ImageContent[];
 }
 
+/** The one UI capability the interactive PTY overlay needs: `custom`. */
+export type BashInteractiveUi = Pick<NonNullable<AgentToolContext["ui"]>, "custom">;
+
 export async function runInteractiveBashPty(
-	ui: Pick<NonNullable<AgentToolContext["ui"]>, "custom">,
+	ui: BashInteractiveUi,
 	options: {
 		command: string;
 		cwd: string;
@@ -26,6 +29,8 @@ export async function runInteractiveBashPty(
 		env?: Record<string, string>;
 		artifactPath?: string;
 		artifactId?: string;
+		/** A password prompt rather than a console: a small card, not the full pane. */
+		compact?: boolean;
 	},
 ): Promise<BashInteractiveResult> {
 	const settings = await Settings.init();
@@ -57,6 +62,7 @@ export async function runInteractiveBashPty(
 					() => tui.terminal.rows,
 					XtermTerminal,
 					{ resize: (columns, rows) => session.resize(columns, rows) },
+					options.compact === true,
 				);
 				let finished = false;
 				const finalize = (run: PtyRunResult) => {
