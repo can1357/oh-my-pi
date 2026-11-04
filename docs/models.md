@@ -407,9 +407,13 @@ and must be restored from trusted local metadata or configuration.
 
 Discovered rows keep the endpoint they were fetched from as their `baseUrl`, so each cache
 namespace is scoped to the provider's configured endpoint: a runtime provider override, then a
-models.yml `baseUrl` (built-in providers and models.yml `discovery:` providers alike). An
-extension's `fetchDynamicModels` roster has a namespace of its own, never a built-in provider's,
-and a discovery that finishes after the configured endpoint moved is dropped. Removing or
+models.yml `baseUrl` (built-in providers and models.yml `discovery:` providers alike, and a
+`discovery:` provider is discovered at that same endpoint). An extension's `fetchDynamicModels`
+roster has a namespace of its own, keyed by its extension source and its declared `api`, `apiKey`,
+`authHeader`, `headers` and `baseUrl`, never a built-in provider's. A discovery request is sent
+only while the provider's configuration (endpoint, key and header config, owning registration) is
+the one the discovery started under, and its result is published only while that still holds, so
+a key resolved under one configuration never reaches another configuration's endpoint. Removing or
 changing a models.yml `baseUrl` therefore reads a different namespace, and requests go to the newly
 configured endpoint (with no `baseUrl`, the built-in one) at once. A runtime override changes
 where requests go at once; the roster it lists follows at the next model refresh.

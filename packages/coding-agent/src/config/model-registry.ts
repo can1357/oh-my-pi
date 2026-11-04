@@ -207,6 +207,8 @@ interface CustomModelsResult {
 interface ConfiguredModelDiscoveryResult {
 	models: Model<Api>[];
 	replaceRuntimeModels: boolean;
+	/** `#providerConfigIdentity` when the discovery started; published only while it is still current. */
+	configIdentity: string;
 }
 
 /**
@@ -376,9 +378,9 @@ export class ModelRegistry {
 	#lastStaticLoadMtime: number | null = null;
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
-	/** Stable ids for discovery owners (a registration, a models.yml discovery config) in `#discoveryOwner`. */
-	#discoveryOwnerIds = new WeakMap<object, number>();
-	#nextDiscoveryOwnerId = 0;
+	/** Stable ids for extension registrations in `#providerConfigIdentity`; a replaced registration is a new configuration. */
+	#registrationIds = new WeakMap<object, number>();
+	#nextRegistrationId = 0;
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
@@ -1645,26 +1647,55 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Who discovers `providerId` under the current configuration: an extension
-	 * registration, a models.yml `discovery:` config, or the built-in manager at
-	 * its configured endpoint. A discovery is published only while this is the
-	 * same value it had when the discovery started, so a superseded owner or a
-	 * moved endpoint never answers for the current configuration, while an
-	 * equivalent spelling of the same endpoint, or a return to it, still does.
+	 * Everything that decides where a provider's discovery request goes and
+	 * which credential it carries: the extension registration that owns it, its
+	 * models.yml `discovery:` config, and the endpoint, key and header config of
+	 * its models.yml and runtime overrides. Compared by value, with endpoints
+	 * normalized, so an identical reload or an equivalent spelling of the same
+	 * endpoint keeps a discovery current, and a return to an earlier
+	 * configuration makes it current again.
+	 *
+	 * The single currency test for discovery: a request leaves only through
+	 * `#guardedFetch` while this value is the one captured before the
+	 * discovery's first await, and a result or discovery state is published
+	 * only while it still is. A credential resolved under one configuration is
+	 * therefore never sent to another configuration's endpoint, and a result
+	 * never answers for a configuration it was not discovered under.
 	 */
-	#discoveryOwner(providerId: string): string {
-		const runtime = this.#runtimeModelManagers.get(providerId)?.options;
-		const configured = this.#discoverableProviders.find(provider => provider.provider === providerId);
-		const owner: object | undefined = runtime ?? configured;
-		if (owner) {
-			let id = this.#discoveryOwnerIds.get(owner);
-			if (id === undefined) {
-				id = this.#nextDiscoveryOwnerId++;
-				this.#discoveryOwnerIds.set(owner, id);
-			}
-			return `${runtime ? "extension" : "configured"}:${id}`;
+	#providerConfigIdentity(providerId: string): string {
+		const registration = this.#runtimeModelManagers.get(providerId)?.options;
+		let registrationId: number | null = null;
+		if (registration) {
+			registrationId = this.#registrationIds.get(registration) ?? this.#nextRegistrationId++;
+			this.#registrationIds.set(registration, registrationId);
 		}
-		return `built-in:${normalizeModelCacheEndpoint(this.#configuredBaseUrl(providerId)) ?? ""}`;
+		const configured = this.#discoverableProviders.find(provider => provider.provider === providerId);
+		const route = (override: ProviderOverride | undefined) =>
+			override
+				? {
+						baseUrl: normalizeModelCacheEndpoint(override.baseUrl),
+						apiKey: override.apiKey,
+						authHeader: override.authHeader,
+						headers: override.headers,
+					}
+				: null;
+		return JSON.stringify([
+			registrationId,
+			configured ? { ...configured, baseUrl: normalizeModelCacheEndpoint(configured.baseUrl) } : null,
+			route(this.#providerOverrides.get(providerId)),
+			route(this.#runtimeProviderOverrides.get(providerId)),
+			this.#runtimeProviderApiKeys.get(providerId)?.keyConfig ?? null,
+		]);
+	}
+
+	/** `#fetch` that refuses to send once `providerId`'s configuration is no longer `identity`. */
+	#guardedFetch(providerId: string, identity: string): FetchImpl {
+		const fetchImpl = this.#fetch;
+		const guarded = (input: Parameters<FetchImpl>[0], init?: Parameters<FetchImpl>[1]) =>
+			this.#providerConfigIdentity(providerId) === identity
+				? fetchImpl(input, init)
+				: Promise.reject(new Error(`Provider ${providerId}: configuration changed during model discovery`));
+		return Object.assign(guarded, { preconnect: fetchImpl.preconnect }) as FetchImpl;
 	}
 
 	#descriptorBaseUrl(providerId: string): string | undefined {
@@ -2265,9 +2296,10 @@ export class ModelRegistry {
 				builtInDiscovery.replaceRuntimeProviders.add(provider);
 		}
 		this.#captureCatalogMetrics(builtInDiscovery.models, providerFilter === undefined);
-		const currentDiscoverableProviders = new Set(this.#discoverableProviders);
-		const currentConfiguredDiscoveryResults = configuredDiscoveryResults.filter(result =>
-			currentDiscoverableProviders.has(result.provider),
+		// By value, not by config object: an identical models.yml reload keeps a
+		// result current, any change to where or with what it was fetched does not.
+		const currentConfiguredDiscoveryResults = configuredDiscoveryResults.filter(
+			result => this.#providerConfigIdentity(result.provider.provider) === result.configIdentity,
 		);
 		const configuredDiscovered = currentConfiguredDiscoveryResults.flatMap(result => result.models);
 		const replacedConfiguredProviders = currentConfiguredDiscoveryResults.flatMap(result =>
@@ -2396,19 +2428,28 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Every non-Ollama namespace is scoped to the provider's `baseUrl` as the
-	 * built-in ones are (`scopeModelCacheProviderIdToEndpoint`): a roster
+	 * A models.yml `discovery:` provider as discovery must contact it: at the
+	 * endpoint its requests go to, a runtime provider override first, as for
+	 * every other provider (`#configuredBaseUrl`). Discovery otherwise sends the
+	 * runtime override's key to the models.yml endpoint.
+	 */
+	#effectiveDiscoveryConfig(providerConfig: DiscoveryProviderConfig): DiscoveryProviderConfig {
+		const runtimeBaseUrl = this.#runtimeProviderOverrides.get(providerConfig.provider)?.baseUrl;
+		return runtimeBaseUrl ? { ...providerConfig, baseUrl: runtimeBaseUrl } : providerConfig;
+	}
+
+	/**
+	 * Every non-Ollama namespace is scoped to the provider's effective `baseUrl`
+	 * as the built-in ones are (`scopeModelCacheProviderIdToEndpoint`): a roster
 	 * discovered from one endpoint never answers for another. Ollama's
 	 * namespace already hashes its normalized endpoint.
 	 */
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
-		if (providerConfig.discovery.type === "ollama") {
-			return resolveOllamaModelCacheProviderId(providerConfig.provider, providerConfig.baseUrl);
+		const effective = this.#effectiveDiscoveryConfig(providerConfig);
+		if (effective.discovery.type === "ollama") {
+			return resolveOllamaModelCacheProviderId(effective.provider, effective.baseUrl);
 		}
-		return scopeModelCacheProviderIdToEndpoint(
-			this.#configuredDiscoveryNamespace(providerConfig),
-			providerConfig.baseUrl,
-		);
+		return scopeModelCacheProviderIdToEndpoint(this.#configuredDiscoveryNamespace(effective), effective.baseUrl);
 	}
 
 	#configuredDiscoveryNamespace(providerConfig: DiscoveryProviderConfig): string {
@@ -2464,6 +2505,9 @@ export class ModelRegistry {
 		providerConfig: DiscoveryProviderConfig,
 		strategy: ModelRefreshStrategy,
 	): Promise<ConfiguredModelDiscoveryResult> {
+		// Captured before the first await; see `#providerConfigIdentity`.
+		const configIdentity = this.#providerConfigIdentity(providerConfig.provider);
+		const isCurrent = () => this.#providerConfigIdentity(providerConfig.provider) === configIdentity;
 		const cacheProviderId = this.#configuredDiscoveryCacheProviderId(providerConfig);
 		const cached = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
 		const cacheOlderThanConfig = cached !== null && this.#isDiscoveryCacheOlderThanModelsConfig(cached.updatedAt);
@@ -2476,18 +2520,21 @@ export class ModelRegistry {
 		if (requiresAuth && willFetch) {
 			const apiKey = await this.#peekApiKeyForProvider(providerConfig.provider);
 			if (!isAuthenticated(apiKey)) {
-				this.#providerDiscoveryStates.set(providerConfig.provider, {
-					provider: providerConfig.provider,
-					status: "unauthenticated",
-					optional: providerConfig.optional ?? false,
-					stale: cached !== null,
-					fetchedAt: cached?.updatedAt,
-					models: cached?.models.map(model => model.id) ?? [],
-				});
-				this.#lastDiscoveryWarnings.delete(providerConfig.provider);
+				if (isCurrent()) {
+					this.#providerDiscoveryStates.set(providerConfig.provider, {
+						provider: providerConfig.provider,
+						status: "unauthenticated",
+						optional: providerConfig.optional ?? false,
+						stale: cached !== null,
+						fetchedAt: cached?.updatedAt,
+						models: cached?.models.map(model => model.id) ?? [],
+					});
+					this.#lastDiscoveryWarnings.delete(providerConfig.provider);
+				}
 				return {
 					models: cached ? this.#normalizeDiscoverableModels(providerConfig, cached.models) : [],
 					replaceRuntimeModels: false,
+					configIdentity,
 				};
 			}
 		}
@@ -2498,10 +2545,13 @@ export class ModelRegistry {
 		const fetchDynamicModels = async (): Promise<readonly ModelSpec<Api>[] | null> => {
 			try {
 				const resolvedHeaders = await resolveConfigHeaders(providerConfig.headers);
-				const requestConfig = { ...providerConfig, headers: resolvedHeaders };
+				const requestConfig = { ...this.#effectiveDiscoveryConfig(providerConfig), headers: resolvedHeaders };
 				const models = this.#applyProviderModelOverrides(
 					providerId,
-					await discoverModelsByProviderType(requestConfig, this.#discoveryContext()),
+					await discoverModelsByProviderType(
+						requestConfig,
+						this.#discoveryContext(this.#guardedFetch(providerId, configIdentity)),
+					),
 				);
 				this.#lastDiscoveryWarnings.delete(providerId);
 				return models.map(toModelSpec);
@@ -2546,17 +2596,22 @@ export class ModelRegistry {
 				: result.models.length > 0
 					? "ok"
 					: "empty";
-		this.#providerDiscoveryStates.set(providerId, {
-			provider: providerId,
-			status,
-			optional: providerConfig.optional ?? false,
-			stale: result.stale || status === "cached" || ((cacheOlderThanConfig || bypassFreshCache) && status !== "ok"),
-			fetchedAt: discoveryError ? cached?.updatedAt : Date.now(),
-			models: result.models.map(model => model.id),
-			error: discoveryError,
-		});
-		if (discoveryError) {
-			this.#warnProviderDiscoveryFailure(providerConfig, discoveryError);
+		// A superseded discovery reports nothing: neither its state nor the
+		// refusal of its own guarded request.
+		if (isCurrent()) {
+			this.#providerDiscoveryStates.set(providerId, {
+				provider: providerId,
+				status,
+				optional: providerConfig.optional ?? false,
+				stale:
+					result.stale || status === "cached" || ((cacheOlderThanConfig || bypassFreshCache) && status !== "ok"),
+				fetchedAt: discoveryError ? cached?.updatedAt : Date.now(),
+				models: result.models.map(model => model.id),
+				error: discoveryError,
+			});
+			if (discoveryError) {
+				this.#warnProviderDiscoveryFailure(providerConfig, discoveryError);
+			}
 		}
 		return {
 			models: this.#applyProviderModelOverrides(
@@ -2567,12 +2622,13 @@ export class ModelRegistry {
 				),
 			),
 			replaceRuntimeModels: result.source === "provider",
+			configIdentity,
 		};
 	}
 
-	#discoveryContext(): DiscoveryContext {
+	#discoveryContext(fetch: FetchImpl = this.#fetch): DiscoveryContext {
 		return {
-			fetch: this.#fetch,
+			fetch,
 			getBearerApiKeyResolver: async provider => {
 				const apiKey = await this.getApiKeyForProvider(provider);
 				if (!isDiscoveryBearerApiKey(apiKey)) {
@@ -2739,12 +2795,12 @@ export class ModelRegistry {
 		const specialProviderDescriptors: Array<{
 			providerId: string;
 			resolveKey: (value: string | undefined) => string | undefined;
-			createOptions: (key: string, raw: string | undefined) => ModelManagerOptions<Api>;
+			createOptions: (key: string, raw: string | undefined, fetch: FetchImpl) => ModelManagerOptions<Api>;
 		}> = [
 			{
 				providerId: "google-antigravity",
 				resolveKey: extractGoogleOAuthToken,
-				createOptions: oauthToken =>
+				createOptions: (oauthToken, _raw, fetch) =>
 					googleAntigravityModelManagerOptions({
 						resolveAccounts: async () => {
 							const accounts = await resolveOAuthDiscoveryAccounts(
@@ -2761,24 +2817,24 @@ export class ModelRegistry {
 							);
 						},
 						endpoint: this.#descriptorBaseUrl("google-antigravity"),
-						fetch: this.#fetch,
+						fetch,
 					}),
 			},
 			{
 				providerId: "google-gemini-cli",
 				resolveKey: extractGoogleOAuthToken,
-				createOptions: (oauthToken, raw) =>
+				createOptions: (oauthToken, raw, fetch) =>
 					googleGeminiCliModelManagerOptions({
 						oauthToken,
 						projectId: extractGoogleOAuthProjectId(raw) ?? this.#resolveGeminiCliDiscoveryProjectId(oauthToken),
 						endpoint: this.#descriptorBaseUrl("google-gemini-cli"),
-						fetch: this.#fetch,
+						fetch,
 					}),
 			},
 			{
 				providerId: "openai-codex",
 				resolveKey: value => value,
-				createOptions: accessToken => {
+				createOptions: (accessToken, _raw, fetch) => {
 					// A custom endpoint (models.yml `baseUrl`) receives only a configured,
 					// runtime, or command key. Official credentials (stored ChatGPT OAuth or
 					// the provider env token) keep discovering against chatgpt.com, as on a
@@ -2796,13 +2852,13 @@ export class ModelRegistry {
 							baseUrl: officialCredential ? undefined : configuredBaseUrl,
 							resolveAccounts: () =>
 								resolveOAuthDiscoveryAccounts(this.authStorage, "openai-codex", accessToken),
-							fetch: this.#fetch,
+							fetch,
 						});
 					}
 					return openaiCodexModelManagerOptions({
 						baseUrl: configuredBaseUrl,
 						resolveAccounts: async () => [{ accessToken }],
-						fetch: this.#fetch,
+						fetch,
 					});
 				},
 			},
@@ -2819,12 +2875,15 @@ export class ModelRegistry {
 			if (configuredDiscoveryProviders.has(descriptor.providerId)) return false;
 			return providerFilter ? providerFilter.has(descriptor.providerId) : true;
 		});
-		// Captured before any credential await: a key resolved under one
-		// configuration is never sent to the endpoint of the next one.
-		const ownerAtStart = new Map<string, string>();
+		// Captured before any credential await: a request leaves only through a
+		// fetch guarded by this identity, so a key resolved under one
+		// configuration never reaches another configuration's endpoint.
+		const identityAtStart = new Map<string, string>();
 		for (const { providerId } of [...standardProviderDescriptors, ...enabledSpecialProviderDescriptors]) {
-			ownerAtStart.set(providerId, this.#discoveryOwner(providerId));
+			identityAtStart.set(providerId, this.#providerConfigIdentity(providerId));
 		}
+		const isUnchanged = (providerId: string) =>
+			this.#providerConfigIdentity(providerId) === identityAtStart.get(providerId);
 		const standardProviderKeys = await Promise.all(
 			standardProviderDescriptors.map(descriptor => {
 				const cacheProviderId = isCredentialScopedModelCacheProvider(descriptor.providerId)
@@ -2856,7 +2915,7 @@ export class ModelRegistry {
 		for (let i = 0; i < standardProviderDescriptors.length; i++) {
 			const descriptor = standardProviderDescriptors[i];
 			// The configuration moved while the key resolved: the next pass discovers it.
-			if (this.#discoveryOwner(descriptor.providerId) !== ownerAtStart.get(descriptor.providerId)) continue;
+			if (!isUnchanged(descriptor.providerId)) continue;
 			const apiKey = standardProviderKeys[i];
 			const hasExplicitVllmConfig =
 				descriptor.providerId === "vllm" &&
@@ -2879,7 +2938,7 @@ export class ModelRegistry {
 				const discoveryConfig = {
 					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
 					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
-					fetch: this.#fetch,
+					fetch: this.#guardedFetch(descriptor.providerId, identityAtStart.get(descriptor.providerId)!),
 					region: identity?.region,
 					inferenceRegion: identity?.inferenceRegion,
 					orgId: identity?.orgId,
@@ -2897,12 +2956,18 @@ export class ModelRegistry {
 
 		for (let i = 0; i < enabledSpecialProviderDescriptors.length; i++) {
 			const descriptor = enabledSpecialProviderDescriptors[i];
-			if (this.#discoveryOwner(descriptor.providerId) !== ownerAtStart.get(descriptor.providerId)) continue;
+			if (!isUnchanged(descriptor.providerId)) continue;
 			const key = descriptor.resolveKey(specialKeys[i]);
 			if (!isAuthenticated(key)) {
 				continue;
 			}
-			options.push(descriptor.createOptions(key, specialKeys[i]));
+			options.push(
+				descriptor.createOptions(
+					key,
+					specialKeys[i],
+					this.#guardedFetch(descriptor.providerId, identityAtStart.get(descriptor.providerId)!),
+				),
+			);
 		}
 
 		// Catalog-only providers have no endpoint manager. Give their bundled
@@ -2930,13 +2995,13 @@ export class ModelRegistry {
 		// configured endpoint, as `#resolveStartupModelCacheProviderId` reads, so
 		// a roster discovered through one endpoint is never served for another
 		// (`scopeModelCacheProviderIdToEndpoint`). Each result carries the check
-		// that its owner (`#discoveryOwner`) is unchanged; the caller applies it
-		// at publication, so a discovery started under another configuration
-		// never answers for this one.
+		// that its configuration (`#providerConfigIdentity`) is unchanged; the
+		// caller applies it at publication, so a discovery started under another
+		// configuration never answers for this one.
 		const managers: Array<{ options: ModelManagerOptions<Api>; isCurrent: () => boolean }> = options.map(
 			managerOptions => {
 				const { providerId } = managerOptions;
-				const owner = ownerAtStart.get(providerId) ?? this.#discoveryOwner(providerId);
+				const identity = identityAtStart.get(providerId) ?? this.#providerConfigIdentity(providerId);
 				return {
 					options: {
 						...managerOptions,
@@ -2945,7 +3010,7 @@ export class ModelRegistry {
 							this.#configuredBaseUrl(providerId),
 						),
 					},
-					isCurrent: () => this.#discoveryOwner(providerId) === owner,
+					isCurrent: () => this.#providerConfigIdentity(providerId) === identity,
 				};
 			},
 		);
@@ -2956,10 +3021,10 @@ export class ModelRegistry {
 				!configuredDiscoveryProviders.has(managerOpts.providerId) &&
 				(!providerFilter || providerFilter.has(managerOpts.providerId))
 			) {
-				const owner = this.#discoveryOwner(managerOpts.providerId);
+				const identity = this.#providerConfigIdentity(managerOpts.providerId);
 				managers.push({
 					options: managerOpts,
-					isCurrent: () => this.#discoveryOwner(managerOpts.providerId) === owner,
+					isCurrent: () => this.#providerConfigIdentity(managerOpts.providerId) === identity,
 				});
 			}
 		}
@@ -4175,12 +4240,17 @@ export class ModelRegistry {
 			const providerCompat = config.compat;
 			const managerOptions: ModelManagerOptions<Api> = {
 				providerId: providerName as Parameters<typeof createModelManager>[0]["providerId"],
-				// Never a built-in manager's namespace, nor another extension's: the
-				// startup read of a built-in provider id, or another extension
-				// registering this id later, would otherwise serve these rows and the
-				// endpoints baked into them after this extension is gone.
+				// Never a built-in manager's namespace, nor one written under another
+				// extension source or another declared key, API or header config: the
+				// startup read of a built-in provider id, or a later registration of
+				// this id, would otherwise serve these rows, and the endpoints baked
+				// into them, with a credential they were never discovered with. An
+				// identical re-registration (each session start re-registers every
+				// active source) keeps its cache.
 				cacheProviderId: scopeModelCacheProviderIdToEndpoint(
-					`${providerName}:extension-v1:${Bun.hash(sourceId ?? "").toString(36)}`,
+					`${providerName}:extension-v2:${Bun.hash(
+						JSON.stringify([sourceId ?? "", providerApi, providerApiKey, providerAuthHeader, providerHeaders]),
+					).toString(36)}`,
 					config.baseUrl,
 				),
 				staticModels: [],
@@ -4188,7 +4258,13 @@ export class ModelRegistry {
 				cacheTtlMs: 24 * 60 * 60 * 1000,
 				dynamicModelsAuthoritative: true,
 				fetchDynamicModels: async () => {
+					const isLive = () => this.#runtimeModelManagers.get(providerName)?.options === managerOptions;
 					const apiKey = await this.#peekApiKeyForProvider(providerName);
+					// A key resolved after this registration was replaced belongs to the
+					// replacement; it never goes to this registration's fetcher.
+					if (!isLive()) {
+						throw new Error(`Provider ${providerName}: registration was replaced during model discovery`);
+					}
 					const resolvedKey = isAuthenticated(apiKey) ? apiKey : undefined;
 					const modelDefs = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
 						fetcher(resolvedKey),
@@ -4196,7 +4272,7 @@ export class ModelRegistry {
 					// A superseded registration's roster must not reach the cache the
 					// live registration reads: failing here keeps the manager from
 					// writing it.
-					if (this.#runtimeModelManagers.get(providerName)?.options !== managerOptions) {
+					if (!isLive()) {
 						throw new Error(`Provider ${providerName}: registration was replaced during model discovery`);
 					}
 					// Dynamic rows can carry `!command` headers that are not on the

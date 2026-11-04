@@ -278,8 +278,10 @@ describe("model cache follows the configured endpoint", () => {
 		expect(registry.find("anthropic", "current-model")?.baseUrl).toBe("http://current-extension.invalid:4000");
 	});
 
-	test("a key resolved under the previous configuration is never sent to the newly configured endpoint", async () => {
-		const otherGateway = "http://gateway-b.invalid:4000";
+	test.each([
+		["another endpoint and key", "http://gateway-b.invalid:4000"],
+		["a new key at the same endpoint", GATEWAY],
+	])("a key resolved before models.yml moved to %s is never sent", async (_case, nextEndpoint) => {
 		const keyStarted = Promise.withResolvers<void>();
 		const keyRelease = Promise.withResolvers<void>();
 		const oauthStorage = await AuthStorage.create(path.join(tempDir, "oauth-agent.db"), {
@@ -308,7 +310,7 @@ describe("model cache follows the configured endpoint", () => {
 			await keyStarted.promise;
 			fs.writeFileSync(
 				modelsPath,
-				`providers:\n  anthropic:\n    baseUrl: ${otherGateway}\n    apiKey: ${FAKE_KEY}\n`,
+				`providers:\n  anthropic:\n    baseUrl: ${nextEndpoint}\n    apiKey: ${FAKE_KEY}\n`,
 			);
 			await registry.refreshProvider("anthropic", "offline");
 			keyRelease.resolve();
@@ -318,6 +320,78 @@ describe("model cache follows the configured endpoint", () => {
 			keyRelease.resolve();
 			oauthStorage.close();
 		}
+	});
+
+	test("a models.yml discovery provider never sends the new configuration's key to the endpoint it replaced", async () => {
+		const gate = path.join(tempDir, "header-gate");
+		const headerStarted = path.join(tempDir, "header-started");
+		// A command-backed header holds the discovery between its start and its request.
+		const header = `!sh -c 'touch ${headerStarted}; while [ ! -f ${gate} ]; do sleep 0.02; done; echo held'`;
+		const config = (baseUrl: string, apiKey: string, headers: string) =>
+			`providers:\n  probe:\n    baseUrl: ${baseUrl}\n    api: openai-completions\n    apiKey: ${apiKey}\n${headers}    discovery:\n      type: openai-models-list\n`;
+		fs.writeFileSync(
+			modelsPath,
+			config("http://previous-config.invalid/v1", "fake-previous-key", `    headers:\n      x-held: "${header}"\n`),
+		);
+		const sent: Array<{ url: string; authorization: string | null }> = [];
+		const registry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async (input, init) => {
+				sent.push({ url: String(input), authorization: new Headers(init?.headers).get("authorization") });
+				if (String(input).startsWith("http://current-config.invalid")) {
+					return Response.json({ data: [{ id: "current-model" }] });
+				}
+				return Response.json({ data: [{ id: "previous-model" }] });
+			},
+		});
+		const inFlight = registry.refreshProvider("probe", "online");
+		while (!fs.existsSync(headerStarted)) await Bun.sleep(10);
+		fs.writeFileSync(modelsPath, config("http://current-config.invalid/v1", "fake-current-key", ""));
+		await registry.refreshProvider("probe", "online");
+		fs.writeFileSync(gate, "");
+		await inFlight;
+		expect(sent.filter(request => request.url.startsWith("http://previous-config.invalid"))).toEqual([]);
+		expect(registry.find("probe", "previous-model")).toBeUndefined();
+		expect(registry.getProviderDiscoveryState("probe")?.models).toEqual(["current-model"]);
+	});
+
+	test("a runtime baseUrl override moves a models.yml discovery provider's discovery with its requests", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			`providers:\n  probe:\n    baseUrl: http://models-yml.invalid/v1\n    api: openai-completions\n    apiKey: ${FAKE_KEY}\n    discovery:\n      type: openai-models-list\n`,
+		);
+		const sent: string[] = [];
+		const registry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async input => {
+				sent.push(String(input));
+				return Response.json({ data: [{ id: "runtime-model" }] });
+			},
+		});
+		registry.registerProvider("probe", { baseUrl: "http://runtime-override.invalid/v1" }, "override-source");
+		await registry.refreshProvider("probe", "online");
+		expect(sent).toEqual(["http://runtime-override.invalid/v1/models"]);
+	});
+
+	test("an extension re-registered with another key never serves the roster discovered with the old one", async () => {
+		fs.writeFileSync(modelsPath, DIRECT_CONFIG);
+		const registry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: () => Promise.reject(new Error("offline")),
+		});
+		const register = (apiKey: string, model: string, host: string) =>
+			registry.registerProvider(
+				"anthropic",
+				{
+					api: "anthropic-messages",
+					apiKey,
+					fetchDynamicModels: async () => [{ ...extensionModel(model), baseUrl: host }],
+				},
+				"same-extension",
+			);
+		register("fake-old-extension-key", "old-model", "http://old-extension.invalid:4000");
+		await registry.refreshRuntimeProviders("online");
+		register("fake-current-extension-key", "current-model", "http://current-extension.invalid:4000");
+		await registry.refreshRuntimeProviders("online-if-uncached");
+		expect(registry.find("anthropic", "old-model")).toBeUndefined();
+		expect(registry.find("anthropic", "current-model")?.baseUrl).toBe("http://current-extension.invalid:4000");
 	});
 });
 
