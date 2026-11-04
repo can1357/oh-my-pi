@@ -26,6 +26,7 @@
 - Added a decorative-motion switch (`motion-effects`: `setMotionEffects`) gating the status-line blink and brand fade, the editor's magic-keyword sweep, and native `fx` spans; a static spinner clock also stills native `spinner` nodes ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ### Fixed
+- Tern's classic renderer draws inline images (table charts included) as Kitty Unicode placeholders, so text that replaces an image's cells removes the image instead of leaving a stale copy over the table while an answer streams or the pane resizes
 - The native composer's first frame shows the cached thinking level on the model chip (or effort chip) instead of the plain model icon until the session attaches
 - Clicking the popup of an enum setting with many values (Edit Mode, Session Tree Filter, Advisor Sync Backlog) on a native settings page opens its menu instead of doing nothing
 - Ask notes added on successive single-select questions now start with an empty editor and stay with their respective answers ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
