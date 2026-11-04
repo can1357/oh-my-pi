@@ -28,6 +28,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../extensibility/shared-events";
 
 export type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult };
@@ -181,42 +182,75 @@ export function getPromptCacheTtlMs(
 
 /**
  * Tier the request a provider is sending asks for, read from its payload (the
- * object `onPayload` receives): long when any cache marker in it asks for a
- * lifetime past the provider's default (`cache_control.ttl: "1h"`,
- * `cachePoint.ttl: "1h"`, `prompt_cache_options.ttl: "12h"`,
- * `prompt_cache_retention: "24h"`, `cache_ttl: "1h"`), short otherwise. The
- * payload is what the provider will write, so it settles the tier
- * {@link resolvePromptCacheTier} could only guess per provider; with no marker
- * the warmer errs toward refreshing early rather than letting an entry expire.
+ * object `onPayload` receives): long when a cache directive in it asks for a
+ * lifetime past the provider's default, short otherwise. The payload is what
+ * the provider will write, so it settles the tier {@link resolvePromptCacheTier}
+ * could only guess per provider; with no directive the warmer errs toward
+ * refreshing early rather than letting an entry expire.
+ *
+ * Only the places a provider puts a directive are read, never message text,
+ * tool arguments or tool schemas, which may carry the same key names as data:
+ * - request fields: `prompt_cache_retention: "24h"`, `prompt_cache_options.ttl: "12h"`,
+ *   `cache_ttl: "1h"` and `cache_control.ttl: "1h"` (OpenAI Responses, Factory, Vercel, OpenRouter);
+ * - on each entry of `system`, `messages`, `tools` and `toolConfig.tools`, and on each
+ *   block of a message's `content`: `cache_control.ttl: "1h"` (Anthropic Messages and
+ *   Anthropic-format Chat Completions) or `cachePoint.ttl: "1h"` (Bedrock Converse).
  */
 export function payloadCacheTier(payload: unknown): PromptCacheTier {
-	const pending: unknown[] = [payload];
-	const seen = new Set<object>();
-	while (pending.length > 0) {
-		const value = pending.pop();
-		if (value === null || typeof value !== "object" || seen.has(value)) continue;
-		seen.add(value);
-		if (Array.isArray(value)) {
-			for (const item of value) pending.push(item);
-			continue;
-		}
-		const record = value as Record<string, unknown>;
-		if (
-			markerTtl(record.cache_control) === "1h" ||
-			markerTtl(record.cachePoint) === "1h" ||
-			markerTtl(record.prompt_cache_options) === "12h" ||
-			record.prompt_cache_retention === "24h" ||
-			record.cache_ttl === "1h"
-		) {
+	if (!isRecord(payload)) return "short";
+	if (
+		payload.prompt_cache_retention === "24h" ||
+		markerTtl(payload.prompt_cache_options) === "12h" ||
+		payload.cache_ttl === "1h" ||
+		markerTtl(payload.cache_control) === "1h"
+	) {
+		return "long";
+	}
+	const toolConfig = payload.toolConfig;
+	const entries = [
+		payload.system,
+		payload.messages,
+		payload.tools,
+		isRecord(toolConfig) ? toolConfig.tools : undefined,
+	].flatMap(list => (Array.isArray(list) ? list : []));
+	for (const entry of entries) {
+		if (!isRecord(entry)) continue;
+		if (hasLongDirective(entry)) return "long";
+		if (Array.isArray(entry.content) && entry.content.some(block => isRecord(block) && hasLongDirective(block))) {
 			return "long";
 		}
-		for (const child of Object.values(record)) pending.push(child);
 	}
 	return "short";
 }
 
+function hasLongDirective(block: Record<string, unknown>): boolean {
+	return markerTtl(block.cache_control) === "1h" || markerTtl(block.cachePoint) === "1h";
+}
+
 function markerTtl(marker: unknown): unknown {
-	return marker !== null && typeof marker === "object" && "ttl" in marker ? marker.ttl : undefined;
+	return isRecord(marker) ? marker.ttl : undefined;
+}
+
+/**
+ * Wrap a request's `onPayload` so `sent` sees the payload the provider actually sends: the hook's replacement
+ * when it returns one, else the payload it was given. A hook may rewrite the cache directives, so the tier is
+ * read only after it ran. Stays synchronous when the hook is.
+ */
+export function observeSentPayload(
+	onPayload: SimpleStreamOptions["onPayload"],
+	sent: (payload: unknown) => void,
+): NonNullable<SimpleStreamOptions["onPayload"]> {
+	return (payload, model, signal) => {
+		const replaced = onPayload?.(payload, model, signal);
+		if (replaced instanceof Promise) {
+			return replaced.then(next => {
+				sent(next ?? payload);
+				return next;
+			});
+		}
+		sent(replaced ?? payload);
+		return replaced;
+	};
 }
 
 /**
@@ -591,16 +625,19 @@ export class CacheWarmer {
 			this.#stop("request disabled prompt caching");
 			return dispatched;
 		}
-		let delayMs = this.#delayFor(request.model, entry.tier);
+		// The payload settles the tier as the request goes out. Until then run on the shortest lifetime the model
+		// declares: a long estimate scheduled as is could pass a safety limit and stop the run before the payload
+		// shows a short entry, while an early refresh is corrected by the payload long before it fires.
+		let delayMs: number | undefined;
+		for (const candidate of [entry.tier, entry.tier === "long" ? "short" : "long"] as const) {
+			const candidateDelayMs = this.#delayFor(request.model, candidate);
+			if (candidateDelayMs === undefined || (delayMs !== undefined && candidateDelayMs >= delayMs)) continue;
+			delayMs = candidateDelayMs;
+			entry.tier = candidate;
+		}
 		if (delayMs === undefined) {
-			// The payload settles the tier as the request goes out; until then run on the other declared lifetime.
-			const other: PromptCacheTier = entry.tier === "long" ? "short" : "long";
-			delayMs = this.#delayFor(request.model, other);
-			if (delayMs === undefined) {
-				this.#stop("cache lifetime unavailable");
-				return dispatched;
-			}
-			entry.tier = other;
+			this.#stop("cache lifetime unavailable");
+			return dispatched;
 		}
 		this.#run = {
 			...request,
@@ -865,12 +902,11 @@ export class CacheWarmer {
 	async #replay(run: ActiveRun): Promise<AssistantMessage | undefined> {
 		const cutoff = new AbortController();
 		let stream: CacheWarmStream;
-		const onPayload = run.options.onPayload;
 		const replayOptions: SimpleStreamOptions = {
 			...run.options,
 			maxTokens: 1,
 			signal: AbortSignal.any([run.controller.signal, cutoff.signal]),
-			onPayload: (payload, model, signal) => {
+			onPayload: observeSentPayload(run.options.onPayload, payload => {
 				run.refreshSentAt = Date.now();
 				// A replay sends the armed request again; follow its payload's tier where the model declares that lifetime.
 				const tier = payloadCacheTier(payload);
@@ -880,8 +916,7 @@ export class CacheWarmer {
 					run.delayMs = delayMs;
 					if (run.entry) run.entry.tier = tier;
 				}
-				return onPayload?.(payload, model, signal);
-			},
+			}),
 		};
 		if (run.model.api === "bedrock-converse-stream" && run.model.thinking?.mode === "anthropic-adaptive") {
 			// Adaptive Converse ignores thinkingBudgets on the wire. Zero each

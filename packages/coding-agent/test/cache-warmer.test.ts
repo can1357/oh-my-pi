@@ -15,6 +15,7 @@ import {
 	getPromptCacheTtlMs,
 	payloadCacheTier,
 	isReplayable,
+	observeSentPayload,
 	type PromptCacheChange,
 } from "../src/session/cache-warmer";
 
@@ -171,9 +172,12 @@ function change(h: Harness): PromptCacheChange | undefined {
 	return h.current ? undefined : { kind: "history" };
 }
 
-function start(h: Harness, options: SimpleStreamOptions = {}): void {
-	h.warmer.start({ model: makeModel(), context: { messages: [] }, options }, () => change(h));
+function start(h: Harness, options: SimpleStreamOptions = {}): (payload?: unknown) => void {
+	return h.warmer.start({ model: makeModel(), context: { messages: [] }, options }, () => change(h));
 }
+
+/** An Anthropic request body whose system prompt carries a 1-hour cache directive. */
+const LONG_PAYLOAD = { system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }] };
 
 async function advance(ms: number): Promise<void> {
 	vi.advanceTimersByTime(ms);
@@ -360,6 +364,67 @@ describe("cache warming scheduling math", () => {
 		expect(payloadCacheTier(cyclic)).toBe("short");
 	});
 
+	test("never reads conversation or tool data that looks like a cache directive as one", () => {
+		const directive = { cache_ttl: "1h", cache_control: { type: "ephemeral", ttl: "1h" } };
+		const shortMarker = { type: "ephemeral" };
+		const payloads = [
+			// Tool arguments in an assistant turn.
+			{
+				messages: [
+					{ role: "user", content: [{ type: "text", text: "go", cache_control: shortMarker }] },
+					{ role: "assistant", content: [{ type: "tool_use", id: "t", name: "x", input: directive }] },
+				],
+			},
+			// A tool's JSON Schema default.
+			{
+				tools: [
+					{
+						name: "x",
+						input_schema: { type: "object", properties: { cache: { type: "object", default: directive } } },
+						cache_control: shortMarker,
+					},
+				],
+			},
+			// A tool result's content and a Bedrock tool spec.
+			{
+				messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: [directive] }] }],
+				toolConfig: { tools: [{ toolSpec: { name: "x", inputSchema: { json: directive } } }] },
+			},
+		];
+		for (const payload of payloads) expect(payloadCacheTier(payload)).toBe("short");
+		// The same directive where a provider puts one still counts.
+		expect(
+			payloadCacheTier({ messages: [{ role: "user", content: [{ type: "text", text: "go", ...directive }] }] }),
+		).toBe("long");
+		expect(payloadCacheTier({ toolConfig: { tools: [{ cachePoint: { type: "default", ttl: "1h" } }] } })).toBe(
+			"long",
+		);
+	});
+
+	test("hands the warmer the payload a caller's hook replaces it with, sync or async", async () => {
+		const original = LONG_PAYLOAD;
+		const replacement = { system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }] };
+		const seen: unknown[] = [];
+		const sync = observeSentPayload(
+			() => replacement,
+			payload => seen.push(payload),
+		);
+		expect(sync(original)).toBe(replacement);
+		const async = observeSentPayload(
+			() => Promise.resolve(replacement),
+			payload => seen.push(payload),
+		);
+		const pending = async(original);
+		expect(seen).toHaveLength(1);
+		expect(await pending).toBe(replacement);
+		const keeps = observeSentPayload(
+			() => undefined,
+			payload => seen.push(payload),
+		);
+		keeps(original);
+		expect(seen).toEqual([replacement, replacement, original]);
+	});
+
 	test("keeps Azure Responses and Codex on the default entry under long retention", () => {
 		for (const api of ["azure-openai-responses", "openai-codex-responses"] as const) {
 			const model = buildModel({
@@ -490,6 +555,43 @@ describe("cache warmer lifecycle", () => {
 		h.warmer.cancel();
 	});
 
+	test("keeps warming a short entry when the estimated long lifetime passes the warming window", async () => {
+		// A 24h long lifetime would schedule the first refresh past the one-hour limit; the payload shows 5 minutes.
+		const h = harness();
+		const sent = h.warmer.start(
+			{
+				model: { ...makeModel(), promptCache: { short: 300, long: 86_400 } },
+				context: { messages: [] },
+				options: { cacheRetention: "long" },
+			},
+			() => change(h),
+		);
+		sent({ system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }] });
+		await advance(SHORT_DELAY_MS);
+		expect(h.replays).toHaveLength(1);
+		h.warmer.cancel();
+	});
+
+	test("follows the payload a replay's hook replaces, not the one it was handed", async () => {
+		const h = harness({
+			stream: async (model, _context, options) => {
+				await options?.onPayload?.(LONG_PAYLOAD, model);
+				const record: ReplayRecord = { options, consumed: [], cutOff: false };
+				h.replays.push(record);
+				return scriptedStream({ kind: "generate", usage: makeUsage({ cacheRead: PROMPT_TOKENS }) }, record);
+			},
+		});
+		// The request's own hook drops the 1-hour directive, so each send writes a 5-minute entry.
+		const shortPayload = { system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }] };
+		const sent = start(h, { cacheRetention: "long", onPayload: () => shortPayload });
+		sent(LONG_PAYLOAD);
+		await advance(LONG_DELAY_MS);
+		expect(h.replays).toHaveLength(1);
+		await advance(SHORT_DELAY_MS);
+		expect(h.replays).toHaveLength(2);
+		h.warmer.cancel();
+	});
+
 	test("cuts the replay off at the first generated block and re-arms on a cache hit", async () => {
 		const h = harness();
 		start(h);
@@ -608,12 +710,12 @@ describe("cache warmer lifecycle", () => {
 
 	test("warms a 1h entry during an active run but not after it settles", async () => {
 		const running = harness();
-		start(running, { cacheRetention: "long" });
+		start(running, { cacheRetention: "long" })(LONG_PAYLOAD);
 		await advance(LONG_DELAY_MS);
 		expect(running.replays).toHaveLength(1);
 
 		const settled = harness({ decide: () => Promise.resolve("warm") });
-		start(settled, { cacheRetention: "long" });
+		start(settled, { cacheRetention: "long" })(LONG_PAYLOAD);
 		settled.warmer.onAgentSettled();
 		expect(settled.warmer.status).toMatchObject({
 			state: "inactive",
