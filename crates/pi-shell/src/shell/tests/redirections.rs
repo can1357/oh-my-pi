@@ -138,3 +138,120 @@ async fn noclobber_covers_every_output_redirection_that_truncates() {
 	])
 	.await;
 }
+
+/// A redirection naming a descriptor the shell already holds (`/dev/fd/N`,
+/// `/dev/stdout`, …) obeys `noclobber` by what that descriptor is: a
+/// regular file behind the alias is refused, a FIFO behind it is written.
+/// Bash 5.2.21 and 5.3.0 agree on every row.
+#[tokio::test(flavor = "multi_thread")]
+async fn noclobber_judges_a_descriptor_alias_by_the_object_behind_it() {
+	check(&[
+		Row {
+			script: "printf ORIGINAL >f; exec 3<>f; set -o noclobber; printf BAD >/dev/fd/3; echo \
+			         s=$?; cat f",
+			fifos:  &[],
+			output: "/dev/fd/3: cannot overwrite existing file\ns=1\nORIGINAL",
+			status: 0,
+			files:  &[("f", Some("ORIGINAL"))],
+		},
+		Row {
+			script: "printf ORIGINAL >f; exec 3<>f; set -o noclobber; printf BAD &>/dev/fd/3; echo \
+			         s=$?; cat f",
+			fifos:  &[],
+			output: "/dev/fd/3: cannot overwrite existing file\ns=1\nORIGINAL",
+			status: 0,
+			files:  &[("f", Some("ORIGINAL"))],
+		},
+		Row {
+			script: "printf ORIGINAL >f; exec 3<>f; set -o noclobber; printf BAD >&/dev/fd/3; echo \
+			         s=$?; cat f",
+			fifos:  &[],
+			output: "/dev/fd/3: cannot overwrite existing file\ns=1\nORIGINAL",
+			status: 0,
+			files:  &[("f", Some("ORIGINAL"))],
+		},
+		// A FIFO behind the alias is not clobbered by a write, so it passes.
+		Row {
+			script: "exec 3<>p; set -o noclobber; printf BAD >/dev/fd/3; echo s=$?; exec 3>&-",
+			fifos:  &["p"],
+			output: "s=0\n",
+			status: 0,
+			files:  &[],
+		},
+		// The same alias in the process a background command's own opens run
+		// in (its first redirection waits for the FIFO's other end).
+		Row {
+			script: r#"printf ORIGINAL >f; exec 3<>f; set -o noclobber; /bin/cat gate >/dev/null & /bin/echo BAD >gate >/dev/fd/3 & p=$!; wait "$p"; echo s=$?; wait; cat f"#,
+			fifos:  &["gate"],
+			output: "/dev/fd/3: cannot overwrite existing file\ns=1\nORIGINAL",
+			status: 0,
+			files:  &[("f", Some("ORIGINAL"))],
+		},
+	])
+	.await;
+}
+
+/// A file `noclobber`'s reopen cannot open at all is still refused when the
+/// path is a regular file, and when its metadata cannot be read (a dangling
+/// symlink, whose exclusive create reports that the file exists); a path
+/// that is readable and not regular keeps the open's own error. Bash
+/// 5.2.21 and 5.3.0 agree on every row.
+#[tokio::test(flavor = "multi_thread")]
+async fn noclobber_refuses_an_existing_file_it_cannot_open() {
+	check(&[
+		Row {
+			script: "printf ORIGINAL >f; /bin/chmod 444 f; set -o noclobber; printf BAD >f; echo \
+			         s=$?; cat f",
+			fifos:  &[],
+			output: "f: cannot overwrite existing file\ns=1\nORIGINAL",
+			status: 0,
+			files:  &[("f", Some("ORIGINAL"))],
+		},
+		Row {
+			script: "printf ORIGINAL >f; /bin/chmod 444 f; set -o noclobber; printf BAD &>f; echo \
+			         s=$?; cat f",
+			fifos:  &[],
+			output: "f: cannot overwrite existing file\ns=1\nORIGINAL",
+			status: 0,
+			files:  &[("f", Some("ORIGINAL"))],
+		},
+		Row {
+			script: "/bin/ln -s absent d; set -o noclobber; printf BAD >d; echo s=$?",
+			fifos:  &[],
+			output: "d: cannot overwrite existing file\ns=1",
+			status: 0,
+			files:  &[("absent", None)],
+		},
+		Row {
+			script: "/bin/ln -s absent d; set -o noclobber; printf BAD &>d; echo s=$?",
+			fifos:  &[],
+			output: "d: cannot overwrite existing file\ns=1",
+			status: 0,
+			files:  &[("absent", None)],
+		},
+		// The same two in the process a background command's own opens run in.
+		Row {
+			script: r#"printf ORIGINAL >f; /bin/chmod 444 f; set -o noclobber; /bin/echo BAD >gate >f & p=$!; /bin/cat gate >/dev/null & wait "$p"; echo s=$?; wait; cat f"#,
+			fifos:  &["gate"],
+			output: "f: cannot overwrite existing file\ns=1\nORIGINAL",
+			status: 0,
+			files:  &[("f", Some("ORIGINAL"))],
+		},
+		Row {
+			script: r#"/bin/ln -s absent d; set -o noclobber; /bin/echo BAD >gate >d & p=$!; /bin/cat gate >/dev/null & wait "$p"; echo s=$?; wait"#,
+			fifos:  &["gate"],
+			output: "d: cannot overwrite existing file\ns=1",
+			status: 0,
+			files:  &[("absent", None)],
+		},
+		// Readable and not regular: the open's own error stands.
+		Row {
+			script: "/bin/mkdir sub; set -o noclobber; printf BAD >sub; echo s=$?",
+			fifos:  &[],
+			output: "sub: Is a directory\ns=1",
+			status: 0,
+			files:  &[],
+		},
+	])
+	.await;
+}
