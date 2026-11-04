@@ -18,6 +18,7 @@
 ### Fixed
 
 - Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
+- Fixed native Windows shell commands not finding installed executables through PATH and PATHEXT, and absolute Windows paths being prefixed with the shell cwd.
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
 ### Fixed
 

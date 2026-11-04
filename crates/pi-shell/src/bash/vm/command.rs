@@ -1836,7 +1836,9 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 			// Borrowed (the resolution only reads `vp`): no copy of the
 			// name per command.
 			let name = &current_argv(vp)[0];
-			let has_slash = name.contains(&b'/');
+			let has_slash = name.contains(&b'/')
+				|| (k.engine.config().platform == crate::bash::ids::Platform::Windows
+					&& name.contains(&b'\\'));
 			// zsh's reserved `typeset`, `local`, …: their builtin even when
 			// disabled, before any function of the name (`execcmd_exec`
 			// with `WC_TYPESET`).
