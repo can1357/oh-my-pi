@@ -55,90 +55,30 @@ const BLOCKED_STATUSES = new Set([403, 429, 503, 999]);
 
 /** A challenge interstitial carries no content (Reddit's is about 8 KB); a larger page is no wall. */
 const CHALLENGE_PAGE_MAX_CHARS = 64 * 1024;
-/** Elements whose content an HTML tokenizer reads as text, so a tag inside one is quoted source. */
-const RAW_TEXT_TAGS: Record<string, true> = {
-	script: true,
-	style: true,
-	textarea: true,
-	title: true,
-	xmp: true,
-	iframe: true,
-	noembed: true,
-	noframes: true,
-	noscript: true,
-	plaintext: true,
-};
-// Markup whitespace is ASCII tab, LF, FF, CR and space only; a no-break space is attribute text.
-const TAG_NAME_RE = /[a-z][^\t\n\f\r />]*/iy;
-const ATTR_GAP_RE = /[\t\n\f\r /]*/y;
-const ATTR_NAME_RE = /[^\t\n\f\r />=]+/y;
-const ATTR_VALUE_RE = /[\t\n\f\r ]*=[\t\n\f\r ]*(?:"([^"]*)"?|'([^']*)'?|([^\t\n\f\r >]*))/y;
 
 /**
- * True when a page small enough to be an interstitial holds an `<input name="js_challenge">` field.
- * One forward pass reads the markup as an HTML tokenizer does (quoted attribute values, character
- * references, comments, raw-text elements, `<template>` contents), so a form quoted anywhere in an
- * article is not one.
+ * True when a page small enough to be an interstitial holds an `<input name="js_challenge">` field
+ * outside `<template>`. Bun's HTMLRewriter tokenizes the page as a browser does, so a form quoted in
+ * a comment, script, raw-text element or attribute is no field. A field gets an attribute named with
+ * a fresh nonce, which the page cannot already carry; a tag cut off by the end of the page is
+ * written back as text, so its mark never reaches the output.
  */
 function hasChallengeForm(html: string): boolean {
 	if (html.length > CHALLENGE_PAGE_MAX_CHARS) return false;
-	let templates = 0;
-	let at = 0;
-	for (;;) {
-		const open = html.indexOf("<", at);
-		if (open < 0) return false;
-		if (html.startsWith("<!--", open)) {
-			const end = html.indexOf("-->", open + 4);
-			if (end < 0) return false;
-			at = end + 3;
-			continue;
-		}
-		const closing = html[open + 1] === "/";
-		TAG_NAME_RE.lastIndex = open + (closing ? 2 : 1);
-		const tagName = TAG_NAME_RE.exec(html)?.[0].toLowerCase();
-		if (!tagName) {
-			at = open + 1;
-			continue;
-		}
-		// Attributes run to the first `>` outside a quoted value; the first `name` wins, as in HTML.
-		let pos = TAG_NAME_RE.lastIndex;
-		let fieldName: string | undefined;
-		while (pos < html.length && html[pos] !== ">") {
-			ATTR_GAP_RE.lastIndex = pos;
-			ATTR_GAP_RE.exec(html);
-			ATTR_NAME_RE.lastIndex = ATTR_GAP_RE.lastIndex;
-			const attr = ATTR_NAME_RE.exec(html);
-			if (!attr) {
-				// A `>` ends the tag; a stray `=` is skipped.
-				pos = html[ATTR_GAP_RE.lastIndex] === ">" ? ATTR_GAP_RE.lastIndex : ATTR_GAP_RE.lastIndex + 1;
-				continue;
-			}
-			pos = ATTR_NAME_RE.lastIndex;
-			ATTR_VALUE_RE.lastIndex = pos;
-			const value = ATTR_VALUE_RE.exec(html);
-			if (value) pos = ATTR_VALUE_RE.lastIndex;
-			if (fieldName === undefined && attr[0].toLowerCase() === "name") {
-				fieldName = value ? decodeEntities(value[1] ?? value[2] ?? value[3]) : "";
-			}
-		}
-		at = pos + 1;
-		if (closing) {
-			if (tagName === "template" && templates > 0) templates--;
-		} else if (tagName === "input") {
-			// A tag cut off by the end of the page before its `>` is no element.
-			if (templates === 0 && fieldName === "js_challenge" && pos < html.length) return true;
-		} else if (tagName === "template") {
-			templates++;
-		} else if (Object.hasOwn(RAW_TEXT_TAGS, tagName)) {
-			if (tagName === "plaintext") return false;
-			// Only `</tag` followed by whitespace, `/` or `>` ends raw text; `</scripture>` is text.
-			const end = new RegExp(`</${tagName}(?=[\\t\\n\\f\\r />])`, "gi");
-			end.lastIndex = at;
-			const match = end.exec(html);
-			if (!match) return false;
-			at = match.index;
-		}
-	}
+	const mark = `data-omp-challenge-${crypto.randomUUID()}`;
+	const output = new HTMLRewriter()
+		.on("input[name]", {
+			element(input) {
+				if (decodeEntities(input.getAttribute("name") ?? "") === "js_challenge") input.setAttribute(mark, "");
+			},
+		})
+		.on("template input[name]", {
+			element(input) {
+				input.removeAttribute(mark);
+			},
+		})
+		.transform(html);
+	return output.includes(mark);
 }
 
 /**
@@ -261,7 +201,26 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 
 			const lastAgent = !rotates || attempt === USER_AGENTS.length - 1;
 			if (!lastAgent && BLOCKED_STATUSES.has(response.status)) {
-				void response.body?.cancel().catch(() => {});
+				// A refusal that names its wall is kept in case later agents fare no better; a 2xx
+				// challenge kept later wins, since remote readers can still get past it.
+				if (!lastBlockedResponse && contentType.includes("html")) {
+					const refusal = await readBodyCapped(response, maxBytes);
+					const content = refusal ? decodeBody(refusal.bytes, rawContentType) : "";
+					const blockedBy = botWallOf(response, contentType, content);
+					if (blockedBy) {
+						lastBlockedResponse = {
+							content,
+							contentType,
+							finalUrl,
+							ok: false,
+							status: response.status,
+							truncated: refusal?.truncated,
+							blockedBy,
+						};
+					}
+				} else {
+					void response.body?.cancel().catch(() => {});
+				}
 				continue;
 			}
 
