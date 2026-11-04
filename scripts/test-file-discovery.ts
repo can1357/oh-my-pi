@@ -1,3 +1,4 @@
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
@@ -237,10 +238,6 @@ interface Pending {
 	ancestors: Ancestors | null;
 	/** The collision groups on the path to this directory, relative to `baseDir`. */
 	onPath: CaseCollision[];
-	/** The link this spelling has gone round a cycle through (its real parent and name), if any. */
-	cycleLink: string | null;
-	/** How many times it has gone round through that link. */
-	turns: number;
 }
 
 function turnsOf(ancestors: Ancestors | null, realDir: string): number {
@@ -250,11 +247,37 @@ function turnsOf(ancestors: Ancestors | null, realDir: string): number {
 }
 
 /**
- * How many times a spelling may go round a cycle through its link: the kernel resolves at most 40
- * links in one path and fails it with `ELOOP` past that, which is where `bun test` stops (measured:
- * through `loop -> .` it ran one file 40 times).
+ * Whether the kernel resolves `spelling`, a path that ends in a link. It follows at most 40 links in
+ * one path, counting those inside link targets, and fails it with `ELOOP` past that; `bun test` then
+ * cannot open the path (measured: a chain of 41 directory links reaches no test, 40 does). Asking the
+ * kernel counts the links exactly as it does. A path that ends in a plain entry resolves when its
+ * directory does, so only a link needs asking.
  */
-const maxCycleTurns = 40;
+function kernelResolves(spelling: string): boolean {
+	try {
+		fsSync.statSync(spelling);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ELOOP") return false;
+		throw error;
+	}
+}
+
+/**
+ * How many directory listings one walk may spend before it refuses. Only a walk through links with
+ * ignore patterns can approach it: there a real directory is listed once per path to it, and two
+ * links back into one directory give `2^t` paths of `t` turns, up to the kernel's 40 links. Chosen
+ * from measurement (the pull request's body gives the numbers).
+ */
+const maxListings = 250_000;
+
+/** The error a walk that spends {@link maxListings} without settling stops with. */
+function unsettledWalkError(start: string, skipped: Iterable<string>, pruned: Iterable<string>): Error {
+	const first = (items: Iterable<string>) => [...items].slice(0, 3).join(", ") || "none";
+	return new Error(
+		`Walking ${start} as \`bun test\` does, ${maxListings.toLocaleString("en-US")} directory listings did not settle which test files it runs: links reach the same directories by more paths than that, and a path no ignore pattern matches may still be among those not yet tried. Test files every path so far ignores: ${first(skipped)}. Directories every path so far prunes: ${first(pruned)}. \`bun test\` walks every one of those paths too, and on such a tree does not finish. Remove the links that close the cycle, or prune them with a \`pathIgnorePatterns\` entry.`,
+	);
+}
 
 /**
  * The test files below `start` by name, as `/`-separated paths relative to `baseDir`. Like
@@ -266,28 +289,21 @@ const maxCycleTurns = 40;
  * Bun's own matcher. The walk models no pattern; it only chooses which spellings to ask about.
  *
  * It goes in order of increasing *turns* — how often a spelling goes back into a real directory
- * already on its own path — so through a cycle of links each real file gets the spelling with the
- * fewest turns, and a later turn adds only a file no shorter spelling could take (one whose every
- * shorter spelling a pattern skips). A spelling goes round through one link only, as often as
- * {@link maxCycleTurns} allows; it does not combine turns through two links. `bun test` walks those
- * combinations too, and does not finish: with two self-links in one directory it passed a 4 GB memory
- * limit, since the spellings of `t` turns through `k` links number `k^t`. So a file a command reaches
- * unignored only by turning through two different links is reported as run by no command: the guard
- * refuses loudly where `bun test` itself does not complete, and never leaves a test out silently.
- *
- * It stops once every real directory it has seen is listed and every test file it has seen is taken
- * (free of collisions, where they are reported): a further spelling could then only re-spell files it
- * already has.
+ * already on its own path through a link — so through a cycle of links each real file gets the
+ * spelling with the fewest turns, and a later turn adds only a file no shorter spelling could take
+ * (one whose every shorter spelling a pattern skips). It follows a link only where the kernel
+ * resolves the path ({@link kernelResolves}), which also bounds every path through a cycle, whatever
+ * links it turns through. It stops once every real directory it has seen is listed and every test
+ * file it has seen is taken (free of collisions, where they are reported): a further spelling could
+ * then only re-spell files it already has. A walk that has not stopped after {@link maxListings}
+ * listings throws {@link unsettledWalkError}: it refuses rather than answer for paths it has not
+ * tried.
  *
  * With `D` real directories of at most `E` entries: without patterns at most `2 · D` listings and
  * `O(D · E · h)` time, `h` being the longest path in directories. With patterns, one listing per
  * spelling taken before that stop: `O(D · E)` listings where every file is taken by its first
- * spelling (measured: 1,111 listings for 1,111 directories and 3,330 links). While some test file
- * stays skipped by every spelling (the guard then reports it), one listing per spelling without
- * turns and per spelling that goes round one of the `L` links that close a cycle, up to 40 times,
- * before going on without turns: at most `S · (1 + 40 · L)` listings, `O(S · (1 + 40 · L) · E)` time.
- * `S`, the spellings without turns, is one per directory unless several links reach one directory,
- * and then the number of paths through them, which `bun test` walks one by one as well.
+ * spelling (measured: 1,111 listings for 1,111 directories and 3,330 links), and never more than
+ * {@link maxListings}: `O(maxListings · E)` time, whatever the links.
  */
 async function walkTestFiles(start: string, baseDir: string, rules: WalkRules): Promise<WalkResult> {
 	const listings = rules.listings ?? new Listings();
@@ -319,9 +335,8 @@ async function walkTestFiles(start: string, baseDir: string, rules: WalkRules): 
 		throw error;
 	});
 	if (!realStart) return { files, collisions: [] };
-	let queue: Pending[] = [
-		{ spelling: start, realDir: realStart, ancestors: null, onPath: [], cycleLink: null, turns: 0 },
-	];
+	let queue: Pending[] = [{ spelling: start, realDir: realStart, ancestors: null, onPath: [] }];
+	let listingCount = 0;
 
 	// One turn of the whole walk, then the spellings it deferred: entries in order, descending into
 	// a directory where it stands, as `bun test` walks, so the spelling a file is taken by is the
@@ -336,6 +351,7 @@ async function walkTestFiles(start: string, baseDir: string, rules: WalkRules): 
 		// seen is covered, so another turn would only re-spell files already taken.
 		if (listedDirs.has(pending.realDir) && unlistedDirs.size === 0 && pendingFiles.size === 0) return;
 		listed.set(key, clean);
+		if (++listingCount > maxListings) throw unsettledWalkError(start, pendingFiles, unlistedDirs);
 		listedDirs.add(pending.realDir);
 		unlistedDirs.delete(pending.realDir);
 		const listing = await listings.get(pending.realDir);
@@ -349,27 +365,24 @@ async function walkTestFiles(start: string, baseDir: string, rules: WalkRules): 
 				if (bunSkipsDirectory(entry.name)) continue;
 				const realDir = entry.realPath;
 				if (!realDir) continue;
+				// The entry's own place: a plain directory is there, a link points elsewhere.
+				const entryPath = path.join(pending.realDir, entry.name);
+				if (realDir !== entryPath && !kernelResolves(spelling)) continue;
 				// A pruned spelling counts as a directory still unlisted: another spelling of it,
 				// around the pattern, may yet have to be listed.
 				if (!listedDirs.has(realDir)) unlistedDirs.add(realDir);
 				if (rules.pruneDirectory?.(spelling)) continue;
-				const child: Pending = { ...pending, spelling, realDir, ancestors, onPath };
-				// The entry's own place: a plain directory is there, a link points elsewhere.
-				const entryPath = path.join(pending.realDir, entry.name);
-				// Back into a real directory already on this path through a link is a turn. It must go
-				// through this spelling's one cycle link, and belongs to the next round, so every
-				// spelling with fewer turns is taken before it. Through a plain directory it is the
-				// cycle this spelling already goes round.
-				if (turnsOf(ancestors, realDir) === 0 || realDir === entryPath) {
-					await visit(child);
-				} else if ((pending.cycleLink ?? entryPath) === entryPath && pending.turns < maxCycleTurns) {
-					deferred.push({ ...child, cycleLink: entryPath, turns: pending.turns + 1 });
-				}
+				const child: Pending = { spelling, realDir, ancestors, onPath };
+				// Back into a real directory already on this path through a link is a turn, which
+				// belongs to the next round, so every spelling with fewer turns is taken before it.
+				if (turnsOf(ancestors, realDir) === 0 || realDir === entryPath) await visit(child);
+				else deferred.push(child);
 				continue;
 			}
 			if (!entry.isFile || !testFilePattern.test(entry.name)) continue;
 			const realFile = entry.realPath;
 			if (!realFile || coveredFiles.has(realFile)) continue;
+			if (realFile !== path.join(pending.realDir, entry.name) && !kernelResolves(spelling)) continue;
 			if (rules.skipFile?.(spelling)) {
 				pendingFiles.add(realFile);
 				continue;

@@ -621,6 +621,57 @@ describe("the guard and the collector against `bun test`, per file", () => {
 
 			expect(await expectGuardToMatchBunTest(repo, "packages/run")).toEqual(["a/x.test.ts"]);
 		}));
+
+	it("follows paths that turn through different links where patterns keep the walk finite", () =>
+		withTempDir("test-file-two-links-", async repo => {
+			const pkg = path.join(repo, "packages/run");
+			await writeTests(pkg, ["x.test.ts"]);
+			for (const link of ["a", "b"]) await fs.symlink(".", path.join(pkg, link));
+			// Every branch but `a/b` is pruned, so `bun test` finishes, and runs the file as `a/b/x.test.ts`.
+			const ignores = ["x.test.ts", "a/x.test.ts", "b/x.test.ts", "a/a", "b/a", "b/b", "a/b/a", "a/b/b"];
+			await Bun.write(path.join(pkg, "bunfig.toml"), `[test]\npathIgnorePatterns = ${JSON.stringify(ignores)}\n`);
+
+			expect(await expectGuardToMatchBunTest(repo, "packages/run")).toEqual(["a/b/x.test.ts"]);
+		}));
+
+	it("stops where the kernel stops: no path through more than 40 links", () =>
+		withTempDir("test-file-link-chain-", async repo => {
+			// A chain of links out of the package, each to a directory holding the next link. The kernel
+			// fails a path through 41 links with ELOOP, and `bun test` reaches nothing through it. Close
+			// to 40 the kernel's answer varies from run to run (here a 40-link path failed 3 runs of 20),
+			// so the chain that must resolve has 20 links.
+			for (const count of [20, 41]) {
+				const pkg = path.join(repo, `packages/chain${count}`);
+				await writeTests(pkg, ["visible.test.ts"]);
+				for (let link = 1; link <= count; link++) {
+					const target = path.join(repo, `outside${count}`, String(link));
+					await fs.mkdir(target, { recursive: true });
+					const holder = link === 1 ? pkg : path.join(repo, `outside${count}`, String(link - 1));
+					await fs.symlink(target, path.join(holder, "link"));
+				}
+				await writeTests(path.join(repo, `outside${count}`, String(count)), ["x.test.ts"]);
+				const chained = [...Array(count).fill("link"), "x.test.ts"].join("/");
+
+				expect(await expectGuardToMatchBunTest(repo, `packages/chain${count}`)).toEqual(
+					count > 40 ? ["visible.test.ts"] : [chained, "visible.test.ts"],
+				);
+			}
+		}));
+
+	it(
+		"refuses a walk its listing budget does not settle, as `bun test` does not finish it",
+		() =>
+			withTempDir("test-file-unsettled-", async tree => {
+				// Two links back into the directory and a file every path ignores: no number of paths settles
+				// whether some path escapes the pattern, and `bun test` walks them until it runs out of memory.
+				await Bun.write(path.join(tree, "bunfig.toml"), '[test]\npathIgnorePatterns = ["**/never.test.ts"]\n');
+				await writeTests(tree, ["keep.test.ts", "never.test.ts"]);
+				for (const link of ["a", "b"]) await fs.symlink(".", path.join(tree, link));
+
+				await expect(collectTestsUnder(tree, tree)).rejects.toThrow("directory listings did not settle");
+			}),
+		120_000,
+	);
 });
 
 describe("workspacePackageDirs", () => {
