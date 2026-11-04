@@ -17,7 +17,7 @@
 
 ### Fixed
 
-- Fixed the bash tool's shell under a low open-file limit: a background command's own redirections no longer fail for want of descriptors the shell holds, a duplication of a descriptor the command lacks fails as in Bash, and process substitutions and coprocesses take descriptors the command can be given when the limit is 63 or less
+- Fixed the bash tool's shell under a low open-file limit: a background command's own redirections no longer fail for want of descriptors the shell holds, a duplication of a descriptor the command lacks fails as in Bash, and process substitutions and coprocesses take descriptors the command can be given when the limit is 63 or less ([#18086](https://github.com/can1357/oh-my-pi/pull/18086) by [@sjawhar](https://github.com/sjawhar))
 - Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
 ### Fixed
