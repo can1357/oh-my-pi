@@ -63,7 +63,9 @@ describe("--no-date-cwd-reminder", () => {
 			"compaction.enabled": false,
 			"retry.enabled": false,
 		});
-		const args = parseArgs(["--cwd", tempDir.join("project"), "--no-context-files", ...flags]);
+		// `--no-extensions`: the plugins root resolves from the real home directory read at module load, so the
+		// machine's own plugin extensions would otherwise join the requests this test reads.
+		const args = parseArgs(["--cwd", tempDir.join("project"), "--no-context-files", "--no-extensions", ...flags]);
 		const options = await buildSessionOptions(args, [], SessionManager.inMemory(args.cwd), modelRegistry, settings);
 		const { session } = await sdkModule.createAgentSession({
 			...options,
