@@ -92,10 +92,7 @@ export class OAuthAccounts implements OAuthApi {
 			if (!result) {
 				return undefined;
 			}
-			// The alias must apply here too: api-key login flows (e.g. adopting
-			// the Devin CLI credentials under a `devin-cli` auth id) exist so the
-			// key lands in the target provider's pool, where discovery and usage
-			// already look.
+			// `store-as` routes API-key logins too, not only OAuth credentials.
 			await this.#deps.pool.storeLoginApiKey(def.storeCredentialsAs ?? provider, result);
 			return { type: "api_key" };
 		}
