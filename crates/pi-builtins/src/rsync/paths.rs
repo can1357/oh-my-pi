@@ -955,6 +955,26 @@ impl OperatorInput {
 		&self.file
 	}
 
+	/// Waits until the other end of a file whose reads can wait (a FIFO) is
+	/// there, as rsync's blocking open of one does; this open returned
+	/// without it. A caller that goes on to read need not call this, because
+	/// its first read waits the same way; `--early-input` must, because a
+	/// FIFO's metadata length is zero and it therefore reads nothing, and
+	/// without this its reader is closed again before a producer that opens
+	/// later finds it, leaving that producer's own open waiting for ever.
+	/// Anything else has no other end and returns at once. The wait ends at
+	/// the cancellation.
+	pub(crate) fn wait_for_other_end(&self) -> io::Result<()> {
+		#[cfg(unix)]
+		if self.poll
+			&& let Some(native) = self.file.native()
+		{
+			let cancel = &self.cancel;
+			return pi_vfs::wait_readable(native.as_fd(), || cancel.load(Ordering::Relaxed)).map_err(|err| self.mapped(err));
+		}
+		Ok(())
+	}
+
 	fn cancelled(&self) -> bool {
 		self.cancel.load(Ordering::Relaxed)
 	}
@@ -1277,9 +1297,11 @@ fn is_fifo(path: &Path) -> bool {
 /// O_NONBLOCK`, which returns at once even with no writer, and `poll`
 /// reports nothing until a writer has come (a writer that writes nothing and
 /// leaves gives end of input, as rsync's blocking open plus first read
-/// does). Elsewhere `poll` on a FIFO that never had a writer may report a
-/// hang-up at once, so the read open waits in a blocking `open` on a helper
-/// thread for the first writer ([`open_fifo_reader`]), as rsync's does.
+/// does); a caller that reads nothing waits for the other end itself
+/// ([`OperatorInput::wait_for_other_end`]). Elsewhere `poll` on a FIFO that
+/// never had a writer may report a hang-up at once, so the read open waits
+/// in a blocking `open` on a helper thread for the first writer
+/// ([`open_fifo_reader`]), as rsync's does.
 ///
 /// A write opens `O_WRONLY | O_NONBLOCK`, which fails with `ENXIO` until a
 /// reader exists and is retried each poll slice, as rsync's blocking open
@@ -2014,6 +2036,55 @@ mod tests {
 			assert_eq!(ended.unwrap(), Err(true), "round {round}: the read did not end as cancelled");
 			reader.join().unwrap();
 			drop((competitor, writer));
+		}
+	}
+
+	/// `--early-input`'s FIFO: the builtin keeps its reader open until the
+	/// producer comes, as rsync 3.5.1's blocking open of the file does. The
+	/// send itself reads nothing of a FIFO (its metadata length is zero), so
+	/// once the open stopped waiting the reader was closed again at once,
+	/// and a producer that opened later found none and waited for ever.
+	/// A file with no other end does not wait.
+	#[cfg(unix)]
+	#[test]
+	fn an_early_input_fifo_waits_for_its_producer() {
+		use std::{
+			io::Write,
+			sync::mpsc,
+			time::{Duration, Instant},
+		};
+
+		let (_guard, base) = canonical_tempdir();
+		let vfs = BlockingFs::native();
+		for insecure in [false, true] {
+			let case = format!("insecure={insecure}");
+			let fifo = base.join(format!("early-{insecure}"));
+			nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+			let never = Arc::new(AtomicBool::new(false));
+			let input = open_operator_file(&vfs, &fifo, insecure, &never).unwrap();
+			let (done, produced) = mpsc::channel();
+			let path = fifo.clone();
+			let producer = std::thread::spawn(move || {
+				std::thread::sleep(Duration::from_millis(200));
+				let wrote = fs::OpenOptions::new().write(true).open(&path).and_then(|mut file| file.write_all(b"x"));
+				let _ = done.send(wrote.is_ok());
+			});
+			let started = Instant::now();
+			input.wait_for_other_end().unwrap();
+			let waited = started.elapsed();
+			// The send ends here, as it does for a FIFO, whose length is zero.
+			drop(input);
+			assert!(waited >= Duration::from_millis(100), "{case}: the wait returned after {waited:?}, before the producer");
+			assert_eq!(produced.recv_timeout(Duration::from_secs(5)), Ok(true), "{case}: the producer found no reader");
+			producer.join().unwrap();
+
+			// A regular file has no other end to wait for.
+			let plain = base.join(format!("plain-{insecure}"));
+			fs::write(&plain, b"data").unwrap();
+			let file = open_operator_file(&vfs, &plain, insecure, &never).unwrap();
+			let started = Instant::now();
+			file.wait_for_other_end().unwrap();
+			assert!(started.elapsed() < Duration::from_millis(100), "{case}: a regular file waited");
 		}
 	}
 

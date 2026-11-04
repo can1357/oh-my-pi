@@ -1245,7 +1245,7 @@ enum PeerKind {
 	/// The in-process server half; its exit status arrives on the join.
 	/// `kill` stops it (upstream's SIGUSR1 to the local child); `report`
 	/// holds its last report until the client's (see [`ReportGate`]).
-	Local { handle: Option<thread::JoinHandle<i32>>, kill: Arc<AtomicBool>, report: Arc<ReportGate> },
+	Local { handle: Option<thread::JoinHandle<i32>>, kill: Arc<AtomicBool>, report: Arc<ReportGate>, reported: Arc<ReportGate> },
 	/// A remote shell / connect program (reaped by `Connection::finish`).
 	Child(Option<Connection>),
 	/// TCP daemon or batch file: nothing to wait for.
@@ -1304,7 +1304,7 @@ impl PeerKind {
 	/// in-process half waiting to be stopped.
 	fn stop(&mut self) {
 		match self {
-			Self::Local { handle, kill, report } => {
+			Self::Local { handle, kill, report, .. } => {
 				kill.store(true, Ordering::Relaxed);
 				report.open();
 				if let Some(h) = handle.take() {
@@ -1324,7 +1324,7 @@ impl PeerKind {
 	/// protocol loop has reported already; one still in setup reports after
 	/// the client ([`ReportGate`]).
 	fn signal_exit(&mut self, report: impl FnOnce()) {
-		thread::sleep(SIGNAL_GRACE);
+		self.await_peer_report();
 		if let Self::Local { kill, .. } = self {
 			kill.store(true, Ordering::Relaxed);
 		}
@@ -1337,6 +1337,33 @@ impl PeerKind {
 /// cleanup signals the local child and reports; the child runs on meanwhile
 /// (a half waiting on its log FIFO may get past it).
 const SIGNAL_GRACE: Duration = Duration::from_millis(400);
+
+impl PeerKind {
+	/// Waits for the peer's own report, at most [`SIGNAL_GRACE`]. Upstream
+	/// sleeps that whole time because its peer is another process it cannot
+	/// see; this peer is a thread of this process, or a child whose exit is
+	/// visible, so the wait ends as soon as the peer has reported (or has
+	/// decided to report after the client). A host that stops collecting a
+	/// cancelled command's output when the command returns kept the client's
+	/// own report only if it came out promptly, and a peer that is stuck
+	/// still gets the full upstream grace.
+	fn await_peer_report(&self) {
+		match self {
+			Self::Local { reported, .. } => reported.wait(SIGNAL_GRACE),
+			Self::Child(Some(conn)) => {
+				let slice = Duration::from_millis(5);
+				let mut waited = Duration::ZERO;
+				while waited < SIGNAL_GRACE && conn.child_exit_code().is_none() {
+					thread::sleep(slice);
+					waited += slice;
+				}
+			},
+			// Nothing of this run's to wait for (a daemon socket, a batch
+			// file, a child already collected): the upstream grace stands.
+			Self::Child(None) | Self::None => thread::sleep(SIGNAL_GRACE),
+		}
+	}
+}
 
 impl Drop for PeerKind {
 	fn drop(&mut self) {
@@ -1430,14 +1457,20 @@ fn client_start(
 				let client_logs = opts.logfile_name.is_some();
 				let report = Arc::new(ReportGate::default());
 				let half_report = Arc::clone(&report);
+				let reported = Arc::new(ReportGate::default());
+				let half_reported = Arc::clone(&reported);
 				let handle = thread::Builder::new()
 					.name("rsync-local-server".into())
 					.spawn(move || {
-						let local = LocalServer { conn: server, client_info: info, filters: sfilters, client_logs, report: half_report };
-						server_main(&sio, sopts, Some(local))
+						let local =
+							LocalServer { conn: server, client_info: info, filters: sfilters, client_logs, report: half_report, reported: Arc::clone(&half_reported) };
+						let code = server_main(&sio, sopts, Some(local));
+						// However this half ended, its client waits no longer.
+						half_reported.open();
+						code
 					})
 					.map_err(|e| RsyncError::new(crate::rsync::exit::RERR_IPC, syserr_text(Role::Client, &e, "fork")).at("pipe.c", 112))?;
-				(client.reader, client.writer, client.probe, PeerKind::Local { handle: Some(handle), kill: Arc::clone(&kill), report })
+				(client.reader, client.writer, client.probe, PeerKind::Local { handle: Some(handle), kill: Arc::clone(&kill), report, reported })
 			}
 			(Some(remote), other) => {
 				if let Some(BatchFiles::Write { data, script }) = other {
@@ -2012,6 +2045,10 @@ struct LocalServer {
 	client_logs: bool,
 	/// Holds this half's last report until the client's ([`ReportGate`]).
 	report: Arc<ReportGate>,
+	/// Opened once this half has reported, or once it is waiting on `report`
+	/// and so reports after its client: either way its client need not wait
+	/// for it ([`PeerKind::await_peer_report`]).
+	reported: Arc<ReportGate>,
 }
 
 fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
@@ -2036,6 +2073,7 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 		local_server.then(|| Watch::start(Arc::clone(&io.host_cancel), vec![Arc::clone(&abort)], 0, Arc::default()));
 	let client_logs = local.as_ref().is_some_and(|local| local.client_logs);
 	let report_gate = local.as_ref().map(|local| Arc::clone(&local.report));
+	let reported_gate = local.as_ref().map(|local| Arc::clone(&local.reported));
 	let (conn_reader, conn_writer, probe, client_info, local_filters): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, Vec<u8>, Option<Filters>) =
 		match local {
 			Some(LocalServer { conn, client_info, filters, .. }) => (conn.reader, conn.writer, conn.probe, client_info, Some(filters)),
@@ -2145,7 +2183,7 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 				thread::sleep(Duration::from_millis(10));
 			}
 			let how = if io.host_cancel.load(Ordering::Relaxed) { HalfStop::InSetup } else { HalfStop::ByClient };
-			return half_stopped(&logger, logger.role(), &Stats::default(), report_gate.as_deref(), how);
+			return half_stopped(&logger, logger.role(), &Stats::default(), report_gate.as_deref(), reported_gate.as_deref(), how);
 		}
 		Err(err) => {
 			report(&logger, &err);
@@ -2310,12 +2348,12 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 		// upstream's child defers it to its next I/O step (`got_kill_signal`)
 		// and ends there, before its client, which sleeps 400 ms first.
 		*lock(&sink_writer) = None;
-		half_stopped(&logger, outcome.as_ref().map_or(role, |o| o.role), &stats, None, HalfStop::AtIo)
+		half_stopped(&logger, outcome.as_ref().map_or(role, |o| o.role), &stats, None, None, HalfStop::AtIo)
 	} else if local_server && io.cancel.load(Ordering::Relaxed) {
 		*lock(&sink_writer) = None;
 		// The process upstream signals is the half's generator (its "Receiver"
 		// before the split); the receiver child exits quietly.
-		half_stopped(&logger, outcome.as_ref().map_or(role, |o| o.role), &stats, report_gate.as_deref(), HalfStop::ByClient)
+		half_stopped(&logger, outcome.as_ref().map_or(role, |o| o.role), &stats, report_gate.as_deref(), reported_gate.as_deref(), HalfStop::ByClient)
 	} else if io.host_cancel.load(Ordering::Relaxed) {
 		let err = RsyncError::cancelled();
 		logger.with_role(end_role).finish(err.code, err.site, &stats, false);
@@ -2372,9 +2410,22 @@ enum HalfStop {
 }
 
 /// The local server half's last report. The connection is gone, so it goes
-/// to stderr; with `report_gate`, after its client's own (see [`ReportGate`]).
-fn half_stopped(logger: &Logger, role: Role, stats: &Stats, report_gate: Option<&ReportGate>, how: HalfStop) -> i32 {
+/// to stderr; with `report_gate`, after its client's own (see [`ReportGate`]),
+/// and `reported` then tells the client not to wait for this half first.
+fn half_stopped(
+	logger: &Logger,
+	role: Role,
+	stats: &Stats,
+	report_gate: Option<&ReportGate>,
+	reported: Option<&ReportGate>,
+	how: HalfStop,
+) -> i32 {
 	if let Some(gate) = report_gate {
+		// This half reports after its client, so the client must not hold
+		// its own report back for it ([`PeerKind::await_peer_report`]).
+		if let Some(reported) = reported {
+			reported.open();
+		}
 		gate.wait(Duration::from_secs(10));
 	}
 	let err = match how {

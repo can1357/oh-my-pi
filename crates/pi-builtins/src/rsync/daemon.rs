@@ -548,6 +548,11 @@ fn send_early_input(
 	};
 	let mut file = paths::open_operator_file(cfg.fs, path, cfg.insecure_operator_files, cfg.cancel)
 		.map_err(|e| open_failed(&e))?;
+	// rsync's open of the file waits for the other end of a FIFO; ours
+	// returns at once, and a FIFO's metadata length is zero, so without this
+	// the send is over and the reader closed before a producer that opens
+	// later finds it, and that producer waits for ever.
+	file.wait_for_other_end().map_err(|e| open_failed(&e))?;
 	let len = file.file().metadata().map_err(|e| open_failed(&e))?.len();
 	if len > BIGPATHBUFLEN as u64 {
 		return Err(startclient(format!("{shown} is > {BIGPATHBUFLEN} bytes.")));

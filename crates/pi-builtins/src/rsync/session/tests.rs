@@ -429,10 +429,17 @@ fn cancel_mid_connection_exits_20_with_trailer() {
 /// Cancelling a local copy mid-transfer. A cancellation of the command
 /// reaches the server half as well as the client, as a signal to the process
 /// group does: the half ends at its next I/O step with its own code-20 line,
-/// and the client follows after its 400 ms. rsync 3.5.1 (`rsync -a
-/// --bwlimit=500 bigsrc/ dst/`, SIGTERM to the process group, 10 runs)
-/// printed these two lines in 6; the client's line first then the half's in
-/// 2; the client's then the half's SIGUSR1 line in 2.
+/// and the client follows. rsync 3.5.1 (`rsync -a --bwlimit=500 bigsrc/
+/// dst/`, SIGTERM to the process group, 10 runs) printed these two lines in
+/// 6; the client's line first then the half's in 2; the client's then the
+/// half's SIGUSR1 line in 2.
+///
+/// Both lines are out well inside the 400 ms upstream sleeps before its own
+/// (it cannot see its child; this half is a thread of this process, so the
+/// client waits for the half's report instead and goes straight on). A host
+/// that stops collecting a cancelled command's output once the command
+/// returns keeps only what was written by then, and with the sleep the
+/// client's line came too late for it.
 #[test]
 fn cancel_local_copy_reports_like_upstream() {
 	use clap::Parser as _;
@@ -441,17 +448,22 @@ fn cancel_local_copy_reports_like_upstream() {
 	fs::write(dir.path().join("bigsrc/f"), vec![0u8; 8 << 20]).unwrap();
 	let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
 	let cancel = host.cancel_flag_for_test();
+	let (sent, cancelled_at) = std::sync::mpsc::channel();
 	let canceller = std::thread::spawn(move || {
 		std::thread::sleep(Duration::from_millis(500));
 		cancel.store(true, Ordering::Relaxed);
+		sent.send(Instant::now()).unwrap();
 	});
 	// --bwlimit keeps the copy running well past the cancellation.
 	let parsed = Rsync::try_parse_from(["rsync", "--", "-a", "--bwlimit=500", "bigsrc/", "dst/"]).unwrap();
 	let started = Instant::now();
 	let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
+	let ended = Instant::now();
 	canceller.join().unwrap();
+	let after = ended.saturating_duration_since(cancelled_at.recv().unwrap());
 	assert_eq!(code, RERR_SIGNAL);
 	assert!(started.elapsed() < Duration::from_secs(10), "cancellation was not prompt");
+	assert!(after < super::SIGNAL_GRACE, "the client's report came {after:?} after the cancellation");
 	assert_eq!(
 		cap.err(),
 		"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at io.c(604) [generator=3.5.1]\n\
