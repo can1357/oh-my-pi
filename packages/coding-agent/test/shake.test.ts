@@ -1153,7 +1153,7 @@ describe("AgentSession shake", () => {
 			}
 
 			/**
-			 * An old heavy tool result (~35K tokens), then three turns of recent
+			 * An old heavy tool result (~30K tokens), then three turns of recent
 			 * text whose requests grew by `growthPerRequest` tokens each, then a
 			 * turn billed over the 100K threshold. Shaking the old result leaves the
 			 * context inside the recovery band, and on Claude the next request
@@ -1182,7 +1182,8 @@ describe("AgentSession shake", () => {
 				for (let turn = 1; turn <= 3; turn++) {
 					sessionManager.appendMessage({
 						role: "user",
-						content: [{ type: "text", text: recentProtectedTail(`turn ${turn}`) }],
+						// Three of these put the heavy result outside auto-shake's 16K protected tail.
+						content: [{ type: "text", text: `turn ${turn}\n${"tail ".repeat(8_000)}` }],
 						timestamp: 2 + turn,
 					});
 					sessionManager.appendMessage(assistantAt(promptAt(turn), [{ type: "text", text: `done ${turn}` }]));
@@ -1210,8 +1211,8 @@ describe("AgentSession shake", () => {
 
 			it("declines a threshold shake whose cache rewrite costs more than the reads it saves", async () => {
 				const compactSpy = mockSoftCompaction();
-				// 10K tokens a request: the ~35K freed are back within ~4 requests,
-				// far short of what rewriting the ~65K post-shake prompt costs.
+				// 10K tokens a request: the ~30K freed are back within ~3 requests,
+				// far short of what rewriting the ~71K post-shake prompt costs.
 				const heavy = await driveThresholdShake(10_000);
 
 				expect(heavy.prunedAt).toBeUndefined();
@@ -1223,7 +1224,7 @@ describe("AgentSession shake", () => {
 
 			it("keeps a threshold shake whose freed tokens stay out long enough to repay the rewrite", async () => {
 				const compactSpy = mockSoftCompaction();
-				// 100 tokens a request: the freed tokens stay out for ~350 requests.
+				// 100 tokens a request: the freed tokens stay out for ~300 requests.
 				const heavy = await driveThresholdShake(100);
 
 				expect(heavy.prunedAt).toBeGreaterThan(0);
