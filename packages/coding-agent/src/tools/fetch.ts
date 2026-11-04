@@ -631,6 +631,7 @@ const REMOTE_FETCH_PROVIDERS: readonly FetchProvider[] = ["parallel", "firecrawl
 const JS_GATE_PHRASES = [
 	"enable javascript",
 	"javascript required",
+	"javascript is required",
 	"turn on javascript",
 	"please enable javascript",
 	"browser not supported",
