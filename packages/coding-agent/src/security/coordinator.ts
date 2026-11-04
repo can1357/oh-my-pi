@@ -111,7 +111,7 @@ export interface SecurityScanSession {
 	/** True while a background job owned by the session (e.g. a detached `task` worker) can still wake it. */
 	hasPendingAsyncWork(): boolean;
 	/** Waits for owned background jobs, delivers their results, and lets the woken turns finish. */
-	settleAsyncWork(): Promise<void>;
+	settleAsyncWork(options?: { blocked?: boolean }): Promise<void>;
 	getSessionStats?(): {
 		tokens: {
 			input: number;
@@ -646,7 +646,7 @@ export class SecurityCoordinator {
 				// With `async.enabled`, `task` workers run as background jobs and the coordinator
 				// may end its turn awaiting them; their delivered results wake it to publish.
 				while (!publishedBundle && session.hasPendingAsyncWork()) {
-					await untilAborted(signal, session.settleAsyncWork());
+					await untilAborted(signal, session.settleAsyncWork({ blocked: true }));
 				}
 				record.snapshot.sessionFile = session.sessionFile;
 				if (publishedBundle) {

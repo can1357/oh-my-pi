@@ -32,6 +32,7 @@ import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
 import vibeTurnResultTemplate from "../prompts/tools/vibe-turn-result.md" with { type: "text" };
+import { awaitNodeOfJob } from "../registry/agent-awaits";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { SessionManager, SessionPersistenceIndeterminateError } from "../session/session-manager";
@@ -999,9 +1000,17 @@ export class VibeSessionRegistry {
 				}
 				racePromises.push(abortPromise);
 			}
+			// The director is blocked until the first watched turn settles, as a
+			// `wait` on those jobs blocks it; a message still interrupts the call.
+			const releaseHold = (session.agentRegistry ?? AgentRegistry.global()).awaits.hold(
+				scope.ownerId,
+				runningJobs.map(awaitNodeOfJob),
+				{ interruptible: true },
+			);
 			try {
 				waitEndedByTimeout = (await Promise.race(racePromises)) === "timeout";
 			} finally {
+				releaseHold();
 				manager.unwatchJobs(watchedJobIds);
 				clearTimeout(timeoutHandle);
 				abortCleanup?.();

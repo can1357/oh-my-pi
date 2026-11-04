@@ -224,6 +224,7 @@ import {
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { holdOwnedJobs } from "../registry/agent-awaits";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
@@ -3648,11 +3649,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * follow-up turn(s) to go idle. Callers loop while
 	 * {@link hasPendingAsyncWork} still holds — a follow-up turn may start new
 	 * jobs.
+	 *
+	 * `blocked`: the caller's run cannot go on until these jobs finish (a
+	 * subagent past its turn, a print-mode run before exit), unlike a session
+	 * a user or host can still prompt. While the jobs run, this session is
+	 * recorded as blocked on each of them, so an agent among them gets "Nothing
+	 * to wait for" from an idle `wait` instead of idling for a message this
+	 * session will not send.
 	 */
-	async settleAsyncWork(): Promise<void> {
+	async settleAsyncWork(options?: { blocked?: boolean }): Promise<void> {
 		const manager = this.#asyncJobManager;
 		if (!manager || !this.#agentId) return;
-		await manager.waitForOwnerJobs(this.#agentId, { excludeSuppressed: true });
+		const release = options?.blocked ? holdOwnedJobs(AgentRegistry.global(), manager, this.#agentId) : undefined;
+		try {
+			await manager.waitForOwnerJobs(this.#agentId, { excludeSuppressed: true });
+		} finally {
+			release?.();
+		}
 		await manager.drainDeliveries({ filter: { ownerId: this.#agentId } });
 		await this.waitForIdle();
 	}

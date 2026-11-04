@@ -1,5 +1,6 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManagerApi } from "../async";
+import { awaitNodeOfJob } from "../registry/agent-awaits";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -224,15 +225,17 @@ export async function runEvalWait(
 			}, 1_000);
 			interval.unref?.();
 			let outcome: "settled" | "timeout" | "aborted";
-			// An untimed wait keeps the eval call open until every awaited agent
-			// finishes: no message to the caller lands before then.
+			// An untimed wait keeps the eval call open until every awaited job
+			// finishes: no message to the caller lands before then. A job that is
+			// not one agent's run (a workpool) is its own node, leading on to the
+			// agents it waits on.
 			const waiter = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
 			const awaits = (options.session.agentRegistry ?? AgentRegistry.global()).awaits;
 			const releaseHolds =
 				timeoutMs === undefined
 					? resolved.flatMap(handle =>
-							"job" in handle && handle.job.agentId
-								? [awaits.hold(waiter, [handle.job.agentId], { interruptible: false })]
+							"job" in handle
+								? [awaits.hold(waiter, [awaitNodeOfJob(handle.job)], { interruptible: false })]
 								: [],
 						)
 					: [];

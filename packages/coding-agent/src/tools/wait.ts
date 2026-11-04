@@ -14,6 +14,7 @@ import { buildJobResult, snapshotJobs, undeliveredJobs } from "../async/job-cont
 import { hasLiveOwnedService, listServicesTolerant, waitForOwnedServiceCompletion } from "../launch/services";
 import { drainPendingInbox, messageResult } from "../irc/messaging";
 import type { AgentRegistryApi } from "../registry/agent-registry";
+import { awaitNodeOfJob } from "../registry/agent-awaits";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { throwIfAborted } from "./tool-errors";
@@ -316,13 +317,15 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			// caller's check and this subscription sends no change event here.
 			checkWaiters();
 		}
-		// A wait that only these subagents' results can end blocks the caller on
-		// them, which their own reply waits read. A bash job or service is
-		// another way out, so such a wait blocks on no one.
-		const watchedAgents = jobs.flatMap(job => (job.agentId ? [job.agentId] : []));
+		// A wait on jobs blocks the caller until the first of them settles,
+		// which reply and idle waits of the agents they run read. A job that is
+		// not one agent's run is its own node: a workpool's aggregate job leads
+		// on to the workers its holds name, a bash job to no one, so a wait with
+		// a bash job in it blocks on no agent. A service is another way out, so
+		// a wait with one blocks on no one either.
 		const releaseHold =
-			messaging && !serviceRunning && watchedAgents.length === jobs.length
-				? messaging.registry.awaits.hold(messaging.senderId, watchedAgents, { interruptible: true })
+			messaging && !serviceRunning && jobs.length > 0
+				? messaging.registry.awaits.hold(messaging.senderId, jobs.map(awaitNodeOfJob), { interruptible: true })
 				: undefined;
 		const { promise: timeout, resolve: timedOut } = Promise.withResolvers<void>();
 		const timer = setTimeout(timedOut, capMs ?? WAIT_MAX_MS);

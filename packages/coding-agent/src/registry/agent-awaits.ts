@@ -3,7 +3,19 @@
  * reply can tell when none can come (the agent it asked is itself blocked
  * on the asker), and an idle `wait` can tell that an agent is blocked on the
  * caller's result. Owned by the {@link AgentRegistry} whose ids it names.
+ *
+ * A background job that is not one agent's run (a workpool's aggregate job,
+ * a bash job) is a node of its own, named by {@link awaitNodeOfJob}: the
+ * agents it waits on are recorded as its holds, so blocking on such a job
+ * blocks on them too. Such nodes are never reported as waiters.
  */
+
+const JOB_NODE_PREFIX = "\0job\0";
+
+/** The node a waiter blocks on for `job`: the agent it runs, or the job's own node. */
+export function awaitNodeOfJob(job: { id: string; ownerId?: string; agentId?: string }): string {
+	return job.agentId ?? `${JOB_NODE_PREFIX}${job.ownerId ?? ""}\0${job.id}`;
+}
 
 interface AwaitHold {
 	/** The block ends once any one of these finishes. */
@@ -79,7 +91,7 @@ export class AgentAwaits implements AgentAwaitsApi {
 	waitersOn(target: string): string[] {
 		const waiters: string[] = [];
 		for (const [agent, holds] of this.#holds) {
-			if (agent === target) continue;
+			if (agent === target || agent.startsWith(JOB_NODE_PREFIX)) continue;
 			for (const hold of holds) {
 				if (hold.awaited.every(id => this.#reaches(id, target, new Set([agent])))) {
 					waiters.push(agent);
@@ -115,4 +127,50 @@ export class AgentAwaits implements AgentAwaitsApi {
 			}
 		}
 	}
+}
+
+/** The job-manager surface {@link holdOwnedJobs} reads. */
+interface OwnedJobSource {
+	getRunningJobs(filter: { ownerId: string }): ReadonlyArray<{ id: string; ownerId?: string; agentId?: string }>;
+	isDeliverySuppressed(jobId: string): boolean;
+	onJobSettled(listener: () => void): () => void;
+}
+
+/** The registry surface {@link holdOwnedJobs} reads. */
+interface AwaitRegistry {
+	readonly awaits: AgentAwaitsApi;
+	onChange(listener: () => void): () => void;
+}
+
+/**
+ * Record agent `ownerId` blocked until each of its running background jobs
+ * settles, until the returned release runs: for a run that cannot go on
+ * before they do. One hold per job, kept current as jobs settle and as
+ * agents register (a spawned job's agent registers with it). Jobs whose
+ * delivery is suppressed are skipped, as `waitForOwnerJobs` skips them. The
+ * holds are interruptible: a message still reaches the owner.
+ */
+export function holdOwnedJobs(registry: AwaitRegistry, manager: OwnedJobSource, ownerId: string): () => void {
+	const holds = new Map<string, () => void>();
+	const sync = (): void => {
+		const running = new Set<string>();
+		for (const job of manager.getRunningJobs({ ownerId })) {
+			if (manager.isDeliverySuppressed(job.id)) continue;
+			running.add(job.id);
+			if (!holds.has(job.id))
+				holds.set(job.id, registry.awaits.hold(ownerId, [awaitNodeOfJob(job)], { interruptible: true }));
+		}
+		for (const [id, release] of holds) {
+			if (running.has(id)) continue;
+			release();
+			holds.delete(id);
+		}
+	};
+	sync();
+	const unsubscribers = [manager.onJobSettled(sync), registry.onChange(sync)];
+	return () => {
+		for (const unsubscribe of unsubscribers) unsubscribe();
+		for (const release of holds.values()) release();
+		holds.clear();
+	};
 }

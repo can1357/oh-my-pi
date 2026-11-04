@@ -304,7 +304,7 @@ export class TanCommandController {
 							await clone.waitForIdle();
 							while (clone.hasPendingAsyncWork()) {
 								if (signal.aborted) throw new Error("Aborted while settling descendant work");
-								await untilAborted(signal, clone.settleAsyncWork());
+								await untilAborted(signal, clone.settleAsyncWork({ blocked: true }));
 							}
 							return extractAssistantText(clone.getLastAssistantMessage()) || "(no output)";
 						} finally {

@@ -2,6 +2,7 @@ import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import workpoolBatchTemplate from "../prompts/tools/workpool-batch.md" with { type: "text" };
 import workpoolTurnResultTemplate from "../prompts/tools/workpool-turn-result.md" with { type: "text" };
+import { awaitNodeOfJob } from "../registry/agent-awaits";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { CustomMessage } from "../session/messages";
@@ -380,6 +381,14 @@ export class WorkPool {
 					};
 					void reportProgress(`Running agent ${agent.id}...`, { ...details });
 				};
+				// The aggregate job cannot settle before this turn ends: record it
+				// blocked on the worker, so an agent waiting on the pool is blocked
+				// on the worker too and the worker's idle `wait` returns at once.
+				const releasePoolHold = (this.session.agentRegistry ?? AgentRegistry.global()).awaits.hold(
+					awaitNodeOfJob({ id: this.name, ownerId: this.ownerId }),
+					[agent.id],
+					{ interruptible: false },
+				);
 				let result: SingleResult;
 				try {
 					if (agent.turns === 0) {
@@ -424,6 +433,8 @@ export class WorkPool {
 				} catch (error) {
 					const output = error instanceof Error ? error.message : String(error);
 					return this.#settleTurn(agent, batch, { exitCode: 1, output, error: output });
+				} finally {
+					releasePoolHold();
 				}
 				return this.#settleTurn(agent, batch, result);
 			},
