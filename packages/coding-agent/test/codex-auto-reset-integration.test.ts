@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
@@ -19,7 +19,10 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { AgentSideConnection, CreateElicitationRequest } from "@oh-my-pi/pi-utils/acp";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 import { getTestModel } from "./helpers/model-fixtures";
+
+const { it, beforeEach, afterEach, beforeAll, afterAll } = trackTestLifetime();
 
 const EMAIL = "user@example.com";
 const MINUTE = 60_000;
@@ -99,14 +102,17 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 	});
 
 	afterEach(async () => {
-		for (const session of sessions.splice(0).reverse()) {
+		vi.restoreAllMocks();
+		const ending = sessions.splice(0).reverse();
+		const closing = managers.splice(0).reverse();
+		const dir = tempDir;
+		for (const session of ending) {
 			await session.dispose();
 		}
-		for (const manager of managers.splice(0).reverse()) {
+		for (const manager of closing) {
 			await manager.close();
 		}
-		tempDir.removeSync();
-		vi.restoreAllMocks();
+		dir.removeSync();
 	});
 
 	afterAll(() => {

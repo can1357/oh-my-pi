@@ -15,6 +15,7 @@ import {
 	type OAuthAccountIdentity,
 	type OAuthAccountSummary,
 	type ResetCreditRedeemOutcome,
+	isAutoDisabledCredential,
 	isWithinUsageReserve,
 	resolveCredentialIdentityKey,
 	resolveUsedFraction,
@@ -209,6 +210,7 @@ function collectIdentityStrings(
 		add(account.enterpriseUrl);
 	}
 	for (const summary of disabled) {
+		add(summary.identityKey);
 		add(summary.email);
 		add(summary.accountId);
 		add(summary.orgId);
@@ -586,12 +588,12 @@ function formatReloginDeadline(
 
 /**
  * Tombstones worth a row in `omp usage`: OAuth credentials torn down
- * automatically (refresh failure, upstream invalidation). Rows the user
- * replaced or deleted deliberately are lifecycle noise, not lost capacity.
+ * automatically ({@link isAutoDisabledCredential}) whose account has no active
+ * credential. Rows the user replaced or deleted deliberately are lifecycle
+ * noise, not lost capacity.
  */
 function isActionableDisable(summary: DisabledCredentialSummary, activeAccounts: UsageAccountIdentity[] = []): boolean {
-	if (summary.type !== "oauth") return false;
-	if (/^(replaced by|deleted by user)/i.test(summary.cause)) return false;
+	if (!isAutoDisabledCredential(summary)) return false;
 
 	// Do not display tombstone if there is an active account for the same provider
 	// matching the same identity (email, accountId, or org).
@@ -601,6 +603,19 @@ function isActionableDisable(summary: DisabledCredentialSummary, activeAccounts:
 
 	const matchesActive = activeAccounts.some(account => {
 		if (account.provider !== summary.provider) return false;
+		if (summary.identityKey) {
+			return (
+				account.type === "oauth" &&
+				summary.identityKey ===
+					resolveCredentialIdentityKey(account.provider, {
+						...account,
+						type: "oauth",
+						access: "",
+						refresh: "",
+						expires: 0,
+					})
+			);
+		}
 
 		const accountEmail = account.email?.toLowerCase();
 		const accountAccountId = account.accountId?.toLowerCase();
@@ -1706,6 +1721,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			if (redaction) {
 				disabledForJson = disabledForJson.map(summary => ({
 					...summary,
+					identityKey: maskIdentity(redaction, summary.identityKey),
 					email: maskIdentity(redaction, summary.email),
 					accountId: maskIdentity(redaction, summary.accountId),
 					orgId: maskIdentity(redaction, summary.orgId),

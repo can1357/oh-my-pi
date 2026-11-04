@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type {
 	ResetCreditAccountStatus,
@@ -26,8 +26,11 @@ import {
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
 import { cfgClaudeResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
+
+const { it, beforeEach, afterEach, beforeAll, afterAll } = trackTestLifetime();
 
 const ACCOUNT_ID = "claude-account";
 const EMAIL = "claude@example.com";
@@ -120,14 +123,17 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	afterEach(async () => {
-		for (const session of sessions.splice(0).reverse()) {
+		vi.restoreAllMocks();
+		const ending = sessions.splice(0).reverse();
+		const closing = managers.splice(0).reverse();
+		const dir = tempDir;
+		for (const session of ending) {
 			await session.dispose();
 		}
-		for (const manager of managers.splice(0).reverse()) {
+		for (const manager of closing) {
 			await manager.close();
 		}
-		tempDir.removeSync();
-		vi.restoreAllMocks();
+		dir.removeSync();
 	});
 
 	afterAll(() => {

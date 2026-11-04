@@ -4,8 +4,9 @@
  * ({@link AgentSession.restoreInterruptedTurn}) and the subagents it was running.
  *
  * Every persisted subagent transcript under the session ({@link collectSubSessions})
- * that its process left mid-turn ({@link hasRestorableTurn}), was not killed (no
- * tombstone) and can be revived (a `session_init` contract, not isolated) runs one
+ * that its process left mid-turn, or whose turn ended because its provider key could
+ * not be resolved ({@link hasRestorableTurn}), was not killed (no tombstone) and can
+ * be revived (a `session_init` contract, not isolated) runs one
  * more monitored turn as a background job of its parent: the lifecycle reviver
  * rebuilds it from its transcript, {@link runSubagentFollowUpTurn} goes on with the
  * cut-off turn and drives it to `yield`, and the parent receives the result as the
@@ -19,6 +20,7 @@ import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import { hasRestorableTurn } from "../session/exit-diagnostics";
+import { activeBranch } from "../session/session-entries";
 import { extractSessionInit } from "../session/session-manager";
 import { collectSubSessions } from "../session/sub-sessions";
 import type { EventBus } from "../utils/event-bus";
@@ -72,7 +74,9 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 	const restored: string[] = [];
 	for (const key of keys) {
 		const sub = subSessions[key]!;
-		if (sub.aborted || !hasRestorableTurn(sub.entries)) continue;
+		// The selected branch, as the subagent's own session reopens it: entries on other branches
+		// (an abandoned turn, a `/clear` that was rolled back) are not its conversation.
+		if (sub.aborted || !hasRestorableTurn(activeBranch(sub.entries))) continue;
 		const id = sub.agentId;
 		const ref = registry.get(id);
 		const init = extractSessionInit(sub.entries);

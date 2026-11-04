@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
@@ -30,6 +30,9 @@ import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
+
+const { it, afterEach, beforeAll, afterAll } = trackTestLifetime();
 
 /**
  * Prewalk: one-way switch from the starting model to a fast/cheap target
@@ -54,10 +57,11 @@ describe("AgentSession prewalk", () => {
 	});
 
 	afterEach(async () => {
-		if (session) await session.dispose();
-		session = undefined;
 		vi.restoreAllMocks();
 		modelRegistry.clearSuppressedSelectors();
+		const s = session;
+		session = undefined;
+		if (s) await s.dispose();
 	});
 
 	afterAll(() => {

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A provider `apiKey: "!command"` that fails, times out, or prints nothing is now retried by turn auto-retry, which runs the command again up to 3 times, each after its 30-second failure backoff, instead of ending the turn (or subagent) with "No API key" ([#14031](https://github.com/can1357/oh-my-pi/pull/14031) by [@sjawhar](https://github.com/sjawhar)).
+- A turn whose permitted provider credentials cannot serve for a while is now retried, and prompts sent meanwhile start instead of failing with "No API key found". A removed or logged-out account fails at once, even when accounts outside the session's pool remain; removing another organization or workspace member does not cancel recovery of a failed login ([#17764](https://github.com/can1357/oh-my-pi/pull/17764) by [@sjawhar](https://github.com/sjawhar))
+- `omp --restore` now resumes a turn, or a subagent's turn, that ended because its provider key could not be resolved even after its retries, also when its process exited normally afterwards, but not one the user cleared with `/clear` ([#17764](https://github.com/can1357/oh-my-pi/pull/17764) by [@sjawhar](https://github.com/sjawhar))
+- A stored GitHub Copilot credential is no longer removed when a turn failed because its key lookup produced no key ([#17764](https://github.com/can1357/oh-my-pi/pull/17764) by [@sjawhar](https://github.com/sjawhar))
+- `/logout` and RPC logout account listings now offer failure-disabled logins as disabled accounts; removing one also ends its recoverability. `omp usage` keeps a failed subscription visible when the same email is active in another organization ([#17764](https://github.com/can1357/oh-my-pi/pull/17764) by [@sjawhar](https://github.com/sjawhar))
+
+- A provider `apiKey: "!command"` that fails, times out, or prints nothing is now retried by turn auto-retry, which runs the command again up to 3 times, each after its 30-second failure backoff, instead of ending the turn (or subagent) with "No API key", and on the same model before any `retry.fallbackChains` entry ([#14031](https://github.com/can1357/oh-my-pi/pull/14031) by [@sjawhar](https://github.com/sjawhar)).
 ### Added
 
 - Added opt-in auto-update (`update.auto`, offered by a new setup wizard step): a launch that finds a newer release installs it in the background through whatever installed omp (standalone binary, Homebrew, mise, bun, npm), shows the version and download progress beside the welcome banner's version, and the next launch runs it. Quitting mid-update does not interrupt it. Skipped under Tern, which updates its omp itself, and on Nix and source checkouts

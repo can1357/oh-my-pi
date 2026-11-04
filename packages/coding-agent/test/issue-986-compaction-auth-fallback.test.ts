@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
@@ -11,9 +11,12 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { getTestModel } from "./helpers/model-fixtures";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 import { assistantMsg, userMsg } from "./utilities";
 
 import { cfgRetryBaseDelayMs, cfgRetryEnabled, cfgRetryMaxRetries } from "@oh-my-pi/pi-coding-agent/session/settings";
+
+const { it, beforeEach, afterEach } = trackTestLifetime();
 
 describe("issue #986 compaction auth fallback", () => {
 	let tempDir: TempDir;
@@ -26,12 +29,15 @@ describe("issue #986 compaction auth fallback", () => {
 	});
 
 	afterEach(async () => {
+		// Take the shared bindings into locals before the only await, so a hook that resumes after
+		// its own timeout closes the storage and removes the dir it opened, not the next test's.
 		vi.restoreAllMocks();
-		if (session) {
-			await session.dispose();
-		}
-		authStorage?.close();
-		tempDir.removeSync();
+		const s = session as AgentSession | undefined;
+		const storage = authStorage as AuthStorage | undefined;
+		const dir = tempDir as TempDir | undefined;
+		if (s) await s.dispose();
+		storage?.close();
+		dir?.removeSync();
 	});
 
 	async function createSession(options?: { fallbackModelRole?: string; configureFallbackAuth?: boolean }) {

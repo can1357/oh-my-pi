@@ -345,6 +345,8 @@ export async function withAuth<T>(
 	try {
 		initialKey = await resolveApiKeyOnce(resolver, signal);
 	} catch (error) {
+		// An abort during the resolve is the caller's cancellation, not a resolver failure.
+		signal?.throwIfAborted();
 		// A resolver that deliberately reports a missing key keeps that type.
 		if (error instanceof AIError.MissingApiKeyError) throw error;
 		// A thrown resolver is a broker/OAuth/network failure, not a missing
@@ -354,7 +356,11 @@ export async function withAuth<T>(
 			{ cause: error },
 		);
 	}
-	if (initialKey === undefined) throw missingKey();
+	if (initialKey === undefined) {
+		// An abort during the resolve is the caller's cancellation, not a missing key.
+		signal?.throwIfAborted();
+		throw missingKey();
+	}
 
 	const state = createAuthRetryKeyState(initialKey);
 	let lastError: unknown;

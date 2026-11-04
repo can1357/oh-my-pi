@@ -138,6 +138,21 @@ describe("auth thread service", () => {
 		expect(storage.sessions.permits(PROVIDER, "child", b)).toBe(true);
 	});
 
+	it("answers a worker's identity-permission question from the main thread's restriction", async () => {
+		await storeAccounts();
+		const handle = await probe.restrict(PROVIDER, "child", ["account:acc-b"]);
+
+		// A recovery check inside a worker must see the restriction its own lease created.
+		expect(await probe.permitsIdentity(PROVIDER, "child", "account:acc-b")).toBe(true);
+		expect(await probe.permitsIdentity(PROVIDER, "child", "account:acc-a")).toBe(false);
+		// A tombstone whose identity the store could not name stays conservative.
+		expect(await probe.permitsIdentity(PROVIDER, "child", undefined)).toBe(false);
+		expect(await probe.permitsIdentity(PROVIDER, "unrestricted", "account:acc-a")).toBe(true);
+
+		await probe.unrestrict(PROVIDER, "child", handle);
+		expect(await probe.permitsIdentity(PROVIDER, "child", "account:acc-a")).toBe(true);
+	});
+
 	it("rebuilds main-thread auth errors by class in the worker", async () => {
 		await storeAccounts();
 		await probe.restrict(PROVIDER, "nowhere", ["account:acc-z"]);

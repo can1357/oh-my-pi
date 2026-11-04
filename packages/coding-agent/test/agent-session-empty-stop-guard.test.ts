@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -13,6 +13,9 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
+
+const { it, afterEach, afterAll } = trackTestLifetime();
 
 const recordToolSchema = type({ value: type("string") });
 
@@ -192,11 +195,12 @@ async function expectPromptCompletes(prompt: Promise<boolean>): Promise<void> {
 }
 
 afterEach(async () => {
-	for (const harness of activeHarnesses.splice(0)) {
+	const harnesses = activeHarnesses.splice(0);
+	vi.restoreAllMocks();
+	for (const harness of harnesses) {
 		await harness.session.dispose();
 		harness.tempDir.removeSync();
 	}
-	vi.restoreAllMocks();
 });
 
 describe("AgentSession empty stop guard", () => {

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -10,6 +10,9 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
+
+const { it, beforeEach, afterEach, beforeAll, afterAll } = trackTestLifetime();
 
 const COOLDOWN_MS = 5 * 60 * 1000; // matches UNKNOWN reason cooldown in noteRetryFallbackCooldown
 
@@ -45,11 +48,10 @@ describe("AgentSession infinite retry via cooldown-expiry revert", () => {
 	});
 
 	afterEach(async () => {
-		if (session) {
-			await session.dispose();
-			session = undefined;
-		}
 		vi.restoreAllMocks();
+		const ended = session;
+		session = undefined;
+		if (ended) await ended.dispose();
 	});
 
 	it("does not revert to the primary model while an automatic retry saga is in flight", async () => {

@@ -15,6 +15,7 @@ export interface AuthProbe {
 	accountId(provider: string, sessionId: string): Promise<string | undefined>;
 	restrict(provider: string, sessionId: string, identityKeys: string[]): Promise<number>;
 	unrestrict(provider: string, sessionId: string, handle: number): Promise<void>;
+	permitsIdentity(provider: string, sessionId: string, identityKey: string | undefined): Promise<boolean>;
 	sameStorage(storage: AuthStorage): Promise<boolean>;
 	watchGenerations(): Promise<void>;
 	generations(): Promise<number[]>;
@@ -72,6 +73,8 @@ function buildProbe(storage: AuthStorage): AuthProbe {
 			if (lease === undefined) throw new Error(`no lease ${handle}`);
 			storage.sessions.unrestrict(provider, sessionId, lease);
 		},
+		permitsIdentity: async (provider, sessionId, identityKey) =>
+			storage.sessions.permitsIdentity(provider, sessionId, identityKey),
 		sameStorage: async other => other === storage,
 		watchGenerations: async () => {
 			unwatch = storage.credentials.onGeneration(generation => {

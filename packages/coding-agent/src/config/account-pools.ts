@@ -119,11 +119,11 @@ export class SessionAccountPoolScope {
 
 	/**
 	 * `registry` with its key lookups (`getApiKey`, `getApiKeyForProvider`,
-	 * `getApiKeyWithCredentialForProvider`, `getApiKeyAndHeaders`, `resolver`)
-	 * routed through this scope. Every other member is the unscoped registry's,
-	 * so model state, discovery, and caches stay shared. A registry another
-	 * scope returned is unwrapped first: a nested agent with its own pools uses
-	 * them, not its parent's.
+	 * `getApiKeyWithCredentialForProvider`, `getApiKeyAndHeaders`, `resolver`,
+	 * `turnResolver`, `missingKeyMayRecover`) routed through this scope. Every other member is the
+	 * unscoped registry's, so model state, discovery, and caches stay shared. A
+	 * registry another scope returned is unwrapped first: a nested agent with its
+	 * own pools uses them, not its parent's.
 	 */
 	registry(registry: ModelRegistry): ModelRegistry {
 		const target = scopedRegistryTargets.get(registry) ?? registry;
@@ -131,11 +131,31 @@ export class SessionAccountPoolScope {
 			target.getApiKey(model, this.#sessionIdFor(model.provider, sessionId), options);
 		const getApiKeyWithCredentialForProvider = (provider: string, sessionId?: string, options?: AuthApiKeyOptions) =>
 			target.getApiKeyWithCredentialForProvider(provider, this.#sessionIdFor(provider, sessionId), options);
+		const resolver = ((
+			resolverTarget: string | ApiKeyResolverModel,
+			optionsOrSessionId?: ApiKeyResolverOptions | string,
+		) => {
+			const options =
+				typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : (optionsOrSessionId ?? {});
+			const provider = typeof resolverTarget === "string" ? resolverTarget : resolverTarget.provider;
+			return target.settleCommandKeyOnAbort(
+				provider,
+				createApiKeyResolver({ getApiKeyWithCredentialForProvider, authStorage: target.authStorage }, provider, {
+					...options,
+					...(typeof resolverTarget === "string"
+						? {}
+						: { baseUrl: resolverTarget.baseUrl, modelId: resolverTarget.id }),
+					sessionId: this.#sessionIdFor(provider, options.sessionId),
+				}),
+			);
+		}) as ModelRegistry["resolver"];
 		const scoped: Partial<ModelRegistry> = {
 			getApiKey,
 			getApiKeyWithCredentialForProvider,
 			getApiKeyForProvider: (provider, sessionId, options) =>
 				target.getApiKeyForProvider(provider, this.#sessionIdFor(provider, sessionId), options),
+			missingKeyMayRecover: (provider, sessionId, signal) =>
+				target.missingKeyMayRecover(provider, this.#sessionIdFor(provider, sessionId), signal),
 			getApiKeyAndHeaders: async model => {
 				try {
 					const apiKey = await getApiKey(model);
@@ -147,25 +167,13 @@ export class SessionAccountPoolScope {
 					return { ok: false, error: error instanceof Error ? error.message : String(error) };
 				}
 			},
-			resolver: ((
-				resolverTarget: string | ApiKeyResolverModel,
-				optionsOrSessionId?: ApiKeyResolverOptions | string,
-			) => {
-				const options =
-					typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : (optionsOrSessionId ?? {});
-				const provider = typeof resolverTarget === "string" ? resolverTarget : resolverTarget.provider;
-				return createApiKeyResolver(
-					{ getApiKeyWithCredentialForProvider, authStorage: target.authStorage },
-					provider,
-					{
-						...options,
-						...(typeof resolverTarget === "string"
-							? {}
-							: { baseUrl: resolverTarget.baseUrl, modelId: resolverTarget.id }),
-						sessionId: this.#sessionIdFor(provider, options.sessionId),
-					},
-				);
-			}) as ModelRegistry["resolver"],
+			resolver,
+			turnResolver: (model, sessionId) =>
+				target.failCommandKeyRetryably(
+					model.provider,
+					resolver(model, sessionId),
+					this.#sessionIdFor(model.provider, sessionId),
+				),
 		};
 		// ModelRegistry keeps its state in #private fields, so every other member
 		// runs against the target itself; bound methods are cached per name.

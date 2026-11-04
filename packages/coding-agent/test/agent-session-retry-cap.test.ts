@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
@@ -31,6 +31,9 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
+
+const { it, beforeEach, afterEach, beforeAll, afterAll } = trackTestLifetime();
 
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
@@ -111,12 +114,11 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	afterEach(async () => {
-		if (session) {
-			await session.dispose();
-			session = undefined;
-		}
 		unregisterCustomApis(RETRY_CAP_MOCK_API_SOURCE);
 		vi.restoreAllMocks();
+		const s = session;
+		session = undefined;
+		if (s) await s.dispose();
 	});
 
 	afterAll(() => {
@@ -1425,6 +1427,9 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled OpenCode Go test model to exist");
 		}
 
+		// Freeze the retry clock before establishing the report reset and the sibling block below, so
+		// the ~5-minute report window reads the same whether this machine is idle or loaded.
+		mockSchedulerWaitWithClock();
 		const localStorage = await createOpencodeStorageWithUsage(
 			{ status: "ok", percent: 12, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
 			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
@@ -1476,7 +1481,6 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -1809,6 +1813,9 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled OpenCode Go and fallback test models to exist");
 		}
 
+		// Freeze the retry clock before the sibling block below: the 2 s window must be measured from
+		// the same base the retry later reads, not shrunk by whatever real time the setup took.
+		const waitSpy = mockSchedulerWaitWithClock();
 		await authStorage.credentials.set("opencode-go", [
 			{ type: "api_key", key: "opencode-go-key-1" },
 			{ type: "api_key", key: "opencode-go-key-2" },
@@ -1858,7 +1865,6 @@ describe("AgentSession retry delay cap", () => {
 			settings,
 			modelRegistry,
 		});
-		const waitSpy = mockSchedulerWaitWithClock();
 		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
@@ -2740,6 +2746,9 @@ describe("AgentSession retry delay cap", () => {
 			throw new Error("Expected bundled Anthropic test model to exist");
 		}
 
+		// Freeze the retry clock before the sibling block below, so its 2 s window is measured from
+		// the base the retry reads and does not elapse during a slow setup.
+		const waitSpy = mockSchedulerWaitWithClock();
 		authStorage.keys.removeRuntime("anthropic");
 		await authStorage.credentials.set("anthropic", [
 			{ type: "api_key", key: "anthropic-key-1" },
@@ -2786,7 +2795,6 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		const waitSpy = mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {

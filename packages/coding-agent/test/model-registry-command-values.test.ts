@@ -1,16 +1,32 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { describe, expect, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { streamSimple } from "@oh-my-pi/pi-ai";
-import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { completeSimple, type OneshotRetryInfo, retryTransientCompletion, streamSimple } from "@oh-my-pi/pi-ai";
+import { resolveApiKeyOnce, resolvedApiKeyBearer, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import * as awsCredentials from "@oh-my-pi/pi-ai/providers/aws-credentials";
+import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { SessionAccountPoolScope } from "@oh-my-pi/pi-coding-agent/config/account-pools";
 import { invalidateAllCommandConfigs, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentRegistry, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as piUtils from "@oh-my-pi/pi-utils";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { ptree, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { TestCleanup } from "./helpers/test-cleanup";
+import { trackTestLifetime } from "./helpers/test-lifetime";
+
+const { test, beforeEach, afterEach } = trackTestLifetime();
 
 function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;
@@ -35,10 +51,23 @@ function failedTrackingCommand(counterFile: string): string {
 	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
 }
 
+/** Command that exits non-zero while carrying a credential-shaped argument. */
+function failingCommandWithSecret(secret: string): string {
+	if (process.platform !== "win32") return `false --token=${secret}`;
+	return `${JSON.stringify(process.execPath)} -e "process.exit(1)" --token=${secret}`;
+}
+
 /** Command that prints the *current* trimmed contents of `file` on each run. */
 function stdoutFileCommand(file: string): string {
 	if (process.platform !== "win32") return `IFS= read -r t < ${shellQuote(file)}; printf %s "$t"`;
 	const script = `const fs=require("node:fs");process.stdout.write(fs.readFileSync(${JSON.stringify(file)}, "utf8").trim());`;
+	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
+}
+
+/** Command that prints `value` after a one-second delay. */
+function slowStdoutCommand(value: string): string {
+	if (process.platform !== "win32") return `sleep 1; printf %s ${shellQuote(value)}`;
+	const script = `setTimeout(() => process.stdout.write(${JSON.stringify(value)}), 1000)`;
 	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
 }
 
@@ -84,35 +113,96 @@ function refreshGateFetch(seen: Array<{ auth?: string; tenant?: string }>): Fetc
 	};
 }
 
+function removeTempDir(dir: string): void {
+	if (!fs.existsSync(dir)) return;
+	try {
+		removeSyncWithRetries(dir);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+	}
+}
+
+/**
+ * Run each credential helper as long as this machine needs, and never past the test that started it.
+ *
+ * These tests assert on what a real `!command` prints, and the resolver abandons a helper
+ * after 10s. Under load the `/bin/sh` spawn alone can cross that, and an abandoned run
+ * resolves to the same `undefined` a helper that printed nothing does — the assertion then
+ * reports a machine stall as a wrong key (`Received: undefined` for a key the helper does
+ * print, and one counter file write short). No test here asserts the 10s cap, so helper execs
+ * run without it: a slow machine can then only make these tests slow.
+ *
+ * The test owns the helper's lifetime instead. The resolver runs a helper in a detached process
+ * group under a Linux subreaper, and when a test times out Bun kills only that subreaper ("killed
+ * 1 dangling process"): the helper's own process is reparented to init and keeps running into
+ * later tests. So each helper exec registers a release that kills its whole process group when
+ * the test ends, which reaches that orphan as well. Within one test that group id cannot belong
+ * to an unrelated process: Linux hands out pids cyclically, so a number comes back only after
+ * pid_max more processes (4,194,304 where systemd sets it). This mirrors `ptree.exec` (spawn,
+ * then wait), which does not expose the pid.
+ */
+function ownCredentialHelpers(owner: TestCleanup): void {
+	const exec = ptree.exec;
+	vi.spyOn(ptree, "exec").mockImplementation(async (command, options) => {
+		if (command[0] !== "/bin/sh" || command[1] !== "-c" || !options?.detached || options.input !== undefined) {
+			return await exec(command, options);
+		}
+		const { input: _input, stderr, allowAbort, allowNonZero, ...spawnOptions } = options;
+		using child = ptree.spawn(command, { ...spawnOptions, timeout: undefined });
+		// `ptree.exec` attaches its deadline, and with it a handler for the child's exit promise. This
+		// mock drops the deadline, so it attaches the handler itself: when the helper is still running
+		// as `using` disposes it (its owner already ended, or the wait threw), the disposal kills it
+		// with a reason that must not surface as an unhandled rejection.
+		child.exited.catch(() => {});
+		const group = child.pid;
+		owner.release(() => {
+			if (process.platform === "win32") return;
+			try {
+				process.kill(-group, "SIGKILL");
+			} catch {
+				// ESRCH: the helper and everything it started already exited.
+			}
+		});
+		return await child.wait({ stderr, allowAbort, allowNonZero });
+	});
+}
+
 describe("ModelRegistry command-resolved models.yml values", () => {
 	test("does not run a command-backed value outside an enterable project", async () => {
-		const enterable = spyOn(piUtils, "directoryIsEnterable").mockResolvedValue(false);
-		try {
-			expect(await resolveConfigValue("!printf %s home-secret")).toBeUndefined();
-		} finally {
-			enterable.mockRestore();
-		}
+		spyOn(piUtils, "directoryIsEnterable").mockResolvedValue(false);
+		expect(await resolveConfigValue("!printf %s home-secret")).toBeUndefined();
 	});
 
 	let tempDir = "";
 	let authStorage: AuthStorage;
 	let modelsPath = "";
+	let cleanup = new TestCleanup();
 
 	beforeEach(async () => {
-		tempDir = path.join(os.tmpdir(), `pi-test-model-command-values-${Snowflake.next()}`);
-		fs.mkdirSync(tempDir, { recursive: true });
-		modelsPath = path.join(tempDir, "models.json");
-		authStorage = await AuthStorage.create(":memory:");
+		cleanup = new TestCleanup();
+		const owner = cleanup;
+		ownCredentialHelpers(owner);
+		const dir = path.join(os.tmpdir(), `pi-test-model-command-values-${Snowflake.next()}`);
+		tempDir = dir;
+		fs.mkdirSync(dir, { recursive: true });
+		await owner.add(() => removeTempDir(dir));
+		modelsPath = path.join(dir, "models.json");
+		const storage = await AuthStorage.create(":memory:");
+		// Register the disposal before publishing the storage: `add` disposes and throws once
+		// its owner ended, so a hook that resumes after its own timeout closes what it opened
+		// and never hands the next test this storage.
+		await owner.add(() => storage.close());
+		authStorage = storage;
 	});
 
-	afterEach(() => {
-		authStorage.close();
-		if (!tempDir || !fs.existsSync(tempDir)) return;
-		try {
-			removeSyncWithRetries(tempDir);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
-		}
+	afterEach(async () => {
+		// Restore spies first, so a cleanup that throws or hangs cannot leave them installed. A
+		// performance.now spy left behind makes the next mockSchedulerWaitWithClock() throw.
+		// Nothing after the await touches shared state: a disposal can outlive this hook's timeout,
+		// and code after the await would then run during the next test.
+		vi.restoreAllMocks();
+		const failures = await cleanup.end();
+		if (failures.length > 0) throw new AggregateError(failures, "test cleanup failed");
 	});
 
 	test("provider apiKey and headers resolve from command stdout", async () => {
@@ -198,7 +288,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(await registry.getApiKey(model)).toBe("runtime-key");
 		expect(await registry.getApiKeyForProvider("custom-proxy")).toBe("runtime-key");
 		expect(await Bun.file(counterFile).text()).toBe("");
-	});
+	}, 30_000);
 
 	test("401 reruns a command-backed API key and updates live auth headers", async () => {
 		const tokenFile = path.join(tempDir, "token.txt");
@@ -242,7 +332,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(attemptedKeys).toEqual(["stale-key", "fresh-key"]);
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 		expect((await registry.resolveModelHeaders(model))?.Authorization).toBe("Bearer fresh-key");
-	});
+	}, 30_000);
 
 	test("failed 401 refresh discards the rejected command-backed key", async () => {
 		const tokenFile = path.join(tempDir, "token.txt");
@@ -282,7 +372,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 		expect(await registry.getApiKey(model)).toBeUndefined();
 		expect((await registry.resolveModelHeaders(model))?.Authorization).toBeUndefined();
-	});
+	}, 30_000);
 
 	test("command resolution backs off after failed executions", async () => {
 		const counterFile = path.join(tempDir, "counter.txt");
@@ -329,6 +419,449 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 		// The command should have only run once.
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+	});
+
+	test("a failing apiKey command fails a turn's request as retryable without naming the command", async () => {
+		const secret = "sk-synthetic-command-secret";
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${failingCommandWithSecret(secret)}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+
+		const context: Context = { systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] };
+		const error = await streamSimple(model, context, { apiKey: registry.turnResolver(model) })
+			.result()
+			.then(
+				() => undefined,
+				(failure: unknown) => failure,
+			);
+
+		expect(error).toBeInstanceOf(Error);
+		expect(error).not.toBeInstanceOf(AIError.MissingApiKeyError);
+		expect(AIError.retriable(AIError.classify(error))).toBe(true);
+		const message = (error as Error).message;
+		expect(message).toContain("custom-proxy");
+		expect(message).not.toContain(secret);
+		expect(message).not.toContain("--token");
+	});
+
+	test("a oneshot completion whose apiKey command failed fails fast instead of waiting out the failure backoff", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: "!false",
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+
+		// Title, commit-message, memory and auto-repair oneshots resolve keys through
+		// `registry.resolver()`; a retry here would sleep out the 30 s backoff.
+		const retries: OneshotRetryInfo[] = [];
+		const stopRetrying = new AbortController();
+		const context: Context = { systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] };
+		const outcome = await retryTransientCompletion(
+			() => completeSimple(model, context, { apiKey: registry.resolver(model) }),
+			{
+				signal: stopRetrying.signal,
+				onRetry: info => {
+					retries.push(info);
+					stopRetrying.abort();
+				},
+			},
+		).then(
+			message => message.errorMessage,
+			(failure: unknown) => (failure instanceof Error ? failure.message : String(failure)),
+		);
+
+		expect(retries).toEqual([]);
+		expect(outcome).toContain("No API key");
+	});
+
+	test("a provider with no apiKey configured still fails with the non-retryable missing-key error", async () => {
+		spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic model");
+
+		const context: Context = { systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] };
+		const error = await streamSimple(model, context, { apiKey: registry.resolver(model) })
+			.result()
+			.then(
+				() => undefined,
+				(failure: unknown) => failure,
+			);
+
+		expect(error).toBeInstanceOf(AIError.MissingApiKeyError);
+		expect(AIError.retriable(AIError.classify(error))).toBe(false);
+	});
+
+	/**
+	 * Prompt a real AgentSession whose provider key is a helper that fails on its
+	 * first run; with `manualRetry`, `/retry` the failed turn once it settles.
+	 */
+	async function runCommandKeyedTurn(
+		maxRetries: number,
+		helperRecovers: boolean,
+		manualRetry = false,
+		provider = "custom-proxy",
+	) {
+		const owner = cleanup;
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "FAIL");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					[provider]: {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${trackedTokenCommand(tokenFile, counterFile)}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find(provider, "custom-model");
+		if (!model) throw new Error("Expected custom model");
+
+		const mock = createMockModel({ responses: [{ content: ["answered with the command key"], stopReason: "stop" }] });
+		const sentKeys: Array<string | undefined> = [];
+		const agent = new Agent({
+			getApiKey: requestModel => registry.turnResolver(requestModel, agent.sessionId),
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestModel, streamContext, options) => {
+				const seeded =
+					typeof options?.apiKey === "function"
+						? options.apiKey({ lastChance: false, error: undefined })
+						: options?.apiKey;
+				if (seeded instanceof Promise) throw new Error("Expected the agent loop to seed its resolved key");
+				sentKeys.push(resolvedApiKeyBearer(seeded));
+				return mock.stream(requestModel, streamContext, options);
+			},
+		});
+		const sessionManager = SessionManager.create(tempDir, path.join(tempDir, "sessions"));
+		await owner.add(() => sessionManager.close());
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": true,
+				"retry.maxRetries": maxRetries,
+				"retry.baseDelayMs": 500,
+				"retry.modelFallback": false,
+				"features.unexpectedStopDetection": "none",
+			}),
+			modelRegistry: registry,
+		});
+		await owner.add(() => session.dispose());
+		// Backoff sleeps advance a virtual clock instead of waiting; the wall
+		// clock the command failure window reads follows that same clock.
+		mockSchedulerWaitWithClock();
+		const wallStart = Date.now();
+		const monotonicStart = performance.now();
+		vi.spyOn(Date, "now").mockImplementation(() => Math.floor(wallStart + performance.now() - monotonicStart));
+		let retries = 0;
+		const retryEnds: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") {
+				retries += 1;
+				// A recovering helper succeeds from here on; only its failure window delays the next run.
+				if (helperRecovers) fs.writeFileSync(tokenFile, "recovered-key");
+			}
+			if (event.type === "auto_retry_end") retryEnds.push(event);
+		});
+
+		await session.prompt("Use the command-keyed provider.");
+		await session.waitForIdle();
+		const firstRun = { retries, helperRuns: fs.readFileSync(counterFile, "utf8").length };
+		if (manualRetry) {
+			expect(await session.retry()).toBe(true);
+			await session.waitForIdle();
+		}
+		const helperRuns = fs.readFileSync(counterFile, "utf8").length;
+		return {
+			lastMessage: agent.state.messages.at(-1),
+			sentKeys,
+			retries,
+			retryEnds,
+			helperRuns,
+			elapsedMs: Date.now() - wallStart,
+			manualRetry: { retries: retries - firstRun.retries, helperRuns: helperRuns - firstRun.helperRuns },
+		};
+	}
+
+	test.each([1, 10])(
+		"a turn whose apiKey command failed retries once the failure window passes and completes (maxRetries %d)",
+		async maxRetries => {
+			const run = await runCommandKeyedTurn(maxRetries, true);
+
+			expect(run.lastMessage).toMatchObject({
+				role: "assistant",
+				stopReason: "stop",
+				content: [{ type: "text", text: "answered with the command key" }],
+			});
+			expect(run.sentKeys).toEqual(["recovered-key"]);
+			expect(run.retryEnds).toEqual([expect.objectContaining({ success: true })]);
+			// The retry waited out the helper's failure window, then re-ran it.
+			expect(run.helperRuns).toBe(2);
+			expect(run.helperRuns).toBe(run.retries + 1);
+			expect(run.elapsedMs).toBeGreaterThanOrEqual(30_000);
+		},
+	);
+
+	test("a createAgentSession turn whose apiKey command failed retries and completes once the command recovers", async () => {
+		const owner = cleanup;
+		// One source id per test run: unregistering by a shared id could remove a later test's live registration.
+		const mockSource = `test/model-registry-command-values/create-agent-session/${Snowflake.next()}`;
+		registerMockApi(mockSource);
+		owner.release(() => unregisterCustomApis(mockSource));
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "FAIL");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${trackedTokenCommand(tokenFile, counterFile)}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const mock = createMockModel({
+			provider: "custom-proxy",
+			id: "mock-turn-model",
+			responses: [{ content: ["answered with the command key"], stopReason: "stop" }],
+		});
+		// No `getApiKey`: the session's turns resolve keys through createAgentSession's default.
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry: registry,
+			// createAgentSession registers its agent before it returns. A private registry keeps that
+			// entry out of the next test even when this call never returns.
+			agentRegistry: new AgentRegistry(),
+			model: mock,
+			sessionManager: SessionManager.inMemory(tempDir),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": true,
+				"retry.maxRetries": 10,
+				"retry.baseDelayMs": 500,
+				"retry.modelFallback": false,
+				"features.unexpectedStopDetection": "none",
+				"todo.enabled": false,
+				"todo.reminders": false,
+			}),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			toolNames: [],
+		});
+		await owner.add(() => session.dispose());
+		mockSchedulerWaitWithClock();
+		const wallStart = Date.now();
+		const monotonicStart = performance.now();
+		vi.spyOn(Date, "now").mockImplementation(() => Math.floor(wallStart + performance.now() - monotonicStart));
+		const retryEnds: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") fs.writeFileSync(tokenFile, "recovered-key");
+			if (event.type === "auto_retry_end") retryEnds.push(event);
+		});
+
+		await session.prompt("Use the command-keyed provider.");
+		await session.waitForIdle();
+
+		const last = session.agent.state.messages.at(-1);
+		expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
+		expect(mock.calls).toHaveLength(1);
+		expect(retryEnds).toEqual([expect.objectContaining({ success: true })]);
+		expect(fs.readFileSync(counterFile, "utf8").length).toBeGreaterThanOrEqual(2);
+	}, 30_000);
+
+	// A models.yml provider key may hold any character, so the cap must not depend on parsing the
+	// provider back out of the error text: a space or a tab once fell through to retry.maxRetries.
+	test.each(["custom-proxy", "custom proxy", "custom\tproxy", "cüstom-prøxy"])(
+		"a turn whose apiKey command never produces a key stops after 3 command retries without a request (provider %p)",
+		async provider => {
+			// retry.maxRetries at its default of 10: the key-command cap ends the turn first.
+			const run = await runCommandKeyedTurn(10, false, false, provider);
+
+			expect(run.sentKeys).toEqual([]);
+			expect(run.retries).toBe(3);
+			// The prompt's key check plus one run per retry, each after the 30 s failure window.
+			expect(run.helperRuns).toBe(4);
+			expect(run.elapsedMs).toBeGreaterThanOrEqual(90_000);
+			expect(run.retryEnds).toEqual([expect.objectContaining({ success: false })]);
+			expect(run.lastMessage).toMatchObject({
+				role: "assistant",
+				stopReason: "error",
+				errorMessage: expect.stringContaining(`The apiKey command for provider ${provider} produced no key`),
+			});
+		},
+	);
+
+	test("/retry after a turn whose apiKey command used up retry.maxRetries gets a fresh key-command budget", async () => {
+		const run = await runCommandKeyedTurn(2, false, true);
+
+		expect(run.sentKeys).toEqual([]);
+		// The retried turn gets its own 2 retries, and each runs the helper again.
+		expect(run.manualRetry).toEqual({ retries: 2, helperRuns: 2 });
+		expect(run.retryEnds).toEqual([
+			expect.objectContaining({ success: false }),
+			expect.objectContaining({ success: false }),
+		]);
+	});
+
+	test("a provider that runs without a key still dispatches a turn keyless when its apiKey command fails", async () => {
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({ providers: { "bedrock-mantle": { apiKey: `!${failedTrackingCommand(counterFile)}` } } }),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.getAll().find(candidate => candidate.provider === "bedrock-mantle");
+		if (!model) throw new Error("Expected a bundled bedrock-mantle model");
+		// Keyless bedrock-mantle signs with the AWS credential chain.
+		spyOn(awsCredentials, "resolveAwsCredentials").mockResolvedValue({
+			accessKeyId: "AKIDSYNTHETIC",
+			secretAccessKey: "synthetic-secret",
+		});
+		const requests: string[] = [];
+		const captureFetch: FetchImpl = Object.assign(
+			async (input: string | URL | Request) => {
+				requests.push(String(input instanceof Request ? input.url : input));
+				return new Response("captured", { status: 418 });
+			},
+			{ preconnect: fetch.preconnect },
+		);
+
+		const context: Context = { systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] };
+		await streamSimple(model, context, { apiKey: registry.turnResolver(model), fetch: captureFetch, maxTokens: 16 })
+			.result()
+			.catch(() => undefined);
+
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+		expect(requests.length).toBeGreaterThan(0);
+	});
+
+	test("an abort while withAuth resolves a slow apiKey command reports the abort, not a missing key", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${slowStdoutCommand("slow-key")}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		const controller = new AbortController();
+		const reason = new Error("synthetic user abort");
+		let attempts = 0;
+
+		const pending = withAuth(
+			registry.resolver(model),
+			async () => {
+				attempts += 1;
+				return "sent";
+			},
+			{ signal: controller.signal },
+		);
+		controller.abort(reason);
+
+		await expect(pending).rejects.toBe(reason);
+		expect(attempts).toBe(0);
+	});
+
+	test("a registry restricted to OAuth account pools keeps the apiKey command turn retry and abort handling", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"failing-proxy": {
+						baseUrl: "https://failing-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${failingCommandWithSecret("sk-synthetic-command-secret")}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+					"slow-proxy": {
+						baseUrl: "https://slow-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${slowStdoutCommand("slow-key")}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new SessionAccountPoolScope(authStorage, { anthropic: [] }, "pooled-session").registry(
+			new ModelRegistry(authStorage, modelsPath),
+		);
+		const failing = registry.find("failing-proxy", "custom-model");
+		const slow = registry.find("slow-proxy", "custom-model");
+		if (!failing || !slow) throw new Error("Expected custom models");
+
+		await expect(resolveApiKeyOnce(registry.turnResolver(failing, "turn-session"))).rejects.toBeInstanceOf(
+			AIError.CredentialUnavailableError,
+		);
+
+		const controller = new AbortController();
+		const reason = new Error("synthetic user abort");
+		let attempts = 0;
+		const pending = withAuth(
+			registry.resolver(slow),
+			async () => {
+				attempts += 1;
+				return "sent";
+			},
+			{ signal: controller.signal },
+		);
+		controller.abort(reason);
+
+		await expect(pending).rejects.toBe(reason);
+		expect(attempts).toBe(0);
 	});
 
 	test("401 refreshes a command-backed provider header and retries with the fresh value", async () => {
@@ -511,7 +1044,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 		expect(values).toEqual(["shared-key", "shared-key", "shared-key"]);
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
-	});
+	}, 30_000);
 
 	test("refresh('online') re-runs a command-backed API key after the backend rotates", async () => {
 		const tokenFile = path.join(tempDir, "token.txt");
@@ -556,7 +1089,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 		const refreshed = registry.find("custom-proxy", "custom-model");
 		expect(refreshed && (await registry.resolveModelHeaders(refreshed))?.Authorization).toBe("Bearer fresh-key");
-	});
+	}, 30_000);
 
 	test("refresh('online') retries a command that was negative-cached after a failure", async () => {
 		const tokenFile = path.join(tempDir, "token.txt");
@@ -595,7 +1128,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		await registry.refresh("online", { refreshCommandCredentials: true });
 		expect(await registry.getApiKey(model)).toBe("recovered-key");
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
-	});
+	}, 30_000);
 
 	test("refreshProvider('online') without refreshCommandCredentials leaves command cache intact", async () => {
 		const tokenFile = path.join(tempDir, "token.txt");
@@ -626,7 +1159,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		await registry.refreshProvider("custom-proxy", "online");
 		expect(await registry.getApiKeyForProvider("custom-proxy")).toBe("stale-key");
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
-	});
+	}, 30_000);
 
 	test("refreshProvider('online') invalidates only that provider's command cache", async () => {
 		const tokenA = path.join(tempDir, "token-a.txt");
@@ -672,7 +1205,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(await registry.getApiKeyForProvider("proxy-b")).toBe("b-stale");
 		expect(fs.readFileSync(counterA, "utf8")).toBe("11");
 		expect(fs.readFileSync(counterB, "utf8")).toBe("1");
-	});
+	}, 30_000);
 
 	test("refreshProvider('online') re-runs extension-registered command-backed headers", async () => {
 		const providerHeaderFile = path.join(tempDir, "provider-header.txt");
@@ -723,7 +1256,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(refreshedHeaders?.["x-model-token"]).toBe("fresh-model");
 		expect(fs.readFileSync(providerCounter, "utf8")).toBe("11");
 		expect(fs.readFileSync(modelCounter, "utf8")).toBe("11");
-	});
+	}, 30_000);
 
 	test("refreshProvider re-runs fetchDynamicModels header commands after explicit credential refresh", async () => {
 		const modelHeaderFile = path.join(tempDir, "dynamic-header.txt");
@@ -767,7 +1300,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const refreshed = registry.find("dyn-proxy", "dyn-model");
 		expect(refreshed && (await registry.resolveModelHeaders(refreshed))?.["x-model-token"]).toBe("fresh-dynamic");
 		expect(fs.readFileSync(modelCounter, "utf8")).toBe("11");
-	});
+	}, 30_000);
 
 	test("401 refreshes a fetchDynamicModels command-backed header", async () => {
 		const bearerFile = path.join(tempDir, "bearer.txt");
@@ -822,4 +1355,41 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			{ auth: "Bearer fresh-bearer", tenant: "fresh-tenant" },
 		]);
 	});
+
+	// Real processes: there is no clock to drive, so this polls with short real sleeps.
+	test.skipIf(process.platform !== "linux")(
+		"kills a helper still running when its test ends, including one its supervisor no longer parents",
+		async () => {
+			const owner = cleanup;
+			const pidFile = path.join(tempDir, "helper.pid");
+			const pending = resolveConfigValue(`!echo $$ > ${shellQuote(pidFile)}; exec sleep 120`);
+			let helperPid = 0;
+			while (helperPid === 0) {
+				helperPid = Number(fs.existsSync(pidFile) ? fs.readFileSync(pidFile, "utf8").trim() || 0 : 0);
+				if (helperPid === 0) await Bun.sleep(10);
+			}
+			// The helper's group is its supervisor's pid. A test timeout makes Bun kill that supervisor
+			// and nothing else, which leaves the helper itself running under init.
+			const stat = fs.readFileSync(`/proc/${helperPid}/stat`, "utf8");
+			const group = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[2]);
+			expect(group).not.toBe(helperPid);
+			process.kill(group, "SIGKILL");
+			expect(await pending).toBeUndefined();
+			expect(processIsLive(helperPid)).toBe(true);
+
+			expect(await owner.end()).toEqual([]);
+			for (let attempt = 0; attempt < 200 && processIsLive(helperPid); attempt++) await Bun.sleep(10);
+			expect(processIsLive(helperPid)).toBe(false);
+		},
+	);
 });
+
+/** Whether `pid` is a process that has not exited; a zombie awaiting its reaper has exited. */
+function processIsLive(pid: number): boolean {
+	try {
+		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+		return stat.slice(stat.lastIndexOf(")") + 2)[0] !== "Z";
+	} catch {
+		return false;
+	}
+}

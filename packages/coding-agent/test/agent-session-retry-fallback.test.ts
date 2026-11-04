@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
@@ -46,8 +46,11 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
 import { cfgRetryUsageReservePolicy } from "@oh-my-pi/pi-coding-agent/session/settings";
+
+const { it, beforeEach, afterEach, beforeAll, afterAll } = trackTestLifetime();
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
@@ -328,11 +331,10 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	afterEach(async () => {
-		if (session) {
-			await session.dispose();
-			session = undefined;
-		}
 		vi.restoreAllMocks();
+		const s = session;
+		session = undefined;
+		if (s) await s.dispose();
 	});
 
 	it("advances through a role-keyed fallback chain across retries", async () => {
@@ -4418,19 +4420,15 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	describe("when a fallback candidate's provider is outside the session's account pool", () => {
-		// A session restricted to an OAuth account pool (`task.agentAccountPools`) gets a
-		// MissingApiKeyError, not `undefined`, for any provider whose pooled accounts are
-		// all unavailable. The fallback walk must treat that candidate as unavailable.
+		// A session restricted to an OAuth account pool (`task.agentAccountPools`) gets an
+		// AccountPoolUnavailableError (a MissingApiKeyError), not `undefined`, for any
+		// provider whose pooled accounts are all unavailable. The fallback walk must
+		// treat that candidate as unavailable.
 		function blockProvider(provider: string): void {
 			const originalGetApiKey = modelRegistry.getApiKey.bind(modelRegistry);
 			vi.spyOn(modelRegistry, "getApiKey").mockImplementation((model, sessionId, options) => {
 				if (model.provider === provider) {
-					return Promise.reject(
-						new AIError.MissingApiKeyError(
-							provider,
-							`No API key for provider: ${provider} (session ${sessionId} is restricted to its OAuth account pool and none of those accounts is available)`,
-						),
-					);
+					return Promise.reject(new AIError.AccountPoolUnavailableError(provider, sessionId));
 				}
 				return originalGetApiKey(model, sessionId, options);
 			});
@@ -9060,6 +9058,89 @@ describe("AgentSession retry fallback", () => {
 		const finalAssistant = getLastAssistantMessage(session);
 		expect(finalAssistant.content).toEqual([{ type: "text", text: "Recovered on the same model." }]);
 	});
+
+	// A request whose `!command` apiKey produced nothing sent nothing, and the same model serves once
+	// the command prints a key again. It retries that model when the retry will run (budget left, the
+	// command's backoff under `retry.maxDelayMs`), and walks the fallback chain otherwise.
+	const keyCommandCases = [
+		{
+			name: "retries the same model while its apiKey command produces no key",
+			keyBackAfter: 1,
+			retryAfterMs: 0,
+			maxDelayMs: 60_000,
+			resolves: ["primary", "primary"],
+			answeredBy: "anthropic",
+		},
+		{
+			name: "walks the fallback chain once the retries run out while its apiKey command produces no key",
+			keyBackAfter: Number.POSITIVE_INFINITY,
+			retryAfterMs: 0,
+			maxDelayMs: 60_000,
+			resolves: ["primary", "primary", "primary", "fallback"],
+			answeredBy: "openai",
+		},
+		{
+			name: "walks the fallback chain at once when the apiKey command's backoff exceeds retry.maxDelayMs",
+			keyBackAfter: 1,
+			retryAfterMs: 30_000,
+			maxDelayMs: 1000,
+			resolves: ["primary", "fallback"],
+			answeredBy: "openai",
+		},
+	];
+	for (const { name, keyBackAfter, retryAfterMs, maxDelayMs, resolves, answeredBy } of keyCommandCases) {
+		it(name, async () => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+			const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+			const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+			const selectorOf = { primary: primarySelector, fallback: fallbackSelector };
+
+			const keyResolves: string[] = [];
+			let primaryKeyFailures = 0;
+			const agent = new Agent({
+				getApiKey: model => {
+					const selector = `${model.provider}/${model.id}`;
+					keyResolves.push(selector);
+					if (selector === primarySelector && primaryKeyFailures < keyBackAfter) {
+						primaryKeyFailures++;
+						const hint = retryAfterMs > 0 ? ` retry-after-ms=${retryAfterMs}` : "";
+						throw new AIError.CredentialUnavailableError(
+							`The apiKey command for provider ${model.provider} produced no key${hint}`,
+						);
+					}
+					return `${model.provider}-test-key`;
+				},
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: model => recoveredTextStream(model, `Answered by ${model.provider}.`),
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 0,
+				"retry.maxRetries": 2,
+				"retry.maxDelayMs": maxDelayMs,
+				"retry.modelFallback": true,
+				"retry.fallbackChains": { default: [fallbackSelector] },
+			});
+			settings.setModelRole("default", primarySelector);
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+			const fallbackApplied: string[] = [];
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_applied") fallbackApplied.push(event.to);
+			});
+			mockSchedulerWaitWithClock();
+
+			await session.prompt("Answer");
+			await session.waitForIdle();
+
+			expect(keyResolves).toEqual(resolves.map(which => selectorOf[which as keyof typeof selectorOf]));
+			expect(fallbackApplied).toEqual(resolves.includes("fallback") ? [fallbackSelector] : []);
+			expect(getLastAssistantMessage(session).content).toEqual([
+				{ type: "text", text: `Answered by ${answeredBy}.` },
+			]);
+		});
+	}
 
 	it("does not reset the retry budget for a chain entry that resolves to the failing model", async () => {
 		const primaryModel = getBundledModel("openrouter", "z-ai/glm-5.2");

@@ -5030,11 +5030,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// a short backoff without touching the credential pool. Model-policy 403s
 			// (plan, model policy, org restriction) also preserve the credential: the
 			// token is valid, and wiping it hides the provider from `/model` (#11275).
+			// A lookup that produced no key sent nothing to reject: the turn retries
+			// it, and wiping the stored credential would make that retry fail.
 			if (msg.stopReason === "error" && msg.provider === "github-copilot") {
 				const errorId = AIError.classifyMessage(msg);
 				const isConcurrencyCap = AIError.parseRateLimitReason(msg.errorMessage ?? "") === "CONCURRENT_LIMIT";
 				if (
 					AIError.is(errorId, AIError.Flag.AuthFailed) &&
+					!AIError.is(errorId, AIError.Flag.CredentialUnavailable) &&
 					!AIError.is(errorId, AIError.Flag.UsageLimit) &&
 					!isConcurrencyCap &&
 					!AIError.isGitHubCopilotPolicyDenial(msg.provider, msg.errorStatus, msg.errorMessage)
@@ -9162,9 +9165,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				);
 			}
 
-			// Validate API key; a provider without one walks the retry fallback chain first.
-			const apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
-			if (!apiKey && !(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))) {
+			// Validate API key. A key that may come back without the user configuring
+			// one (a `!command` apiKey that produced nothing, stored credentials that
+			// cannot serve now, including an OAuth account pool none of whose accounts
+			// can) is left to the turn, whose resolver fails retryably so auto-retry
+			// covers it. Any other provider without a key, a pool whose credentials the
+			// user removed included, walks the retry fallback chain first.
+			let apiKey: string | undefined;
+			try {
+				apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
+			} catch (error) {
+				if (!(error instanceof AIError.AccountPoolUnavailableError)) throw error;
+			}
+			if (
+				!apiKey &&
+				!(await this.#modelRegistry.missingKeyMayRecover(model.provider, this.sessionId, setupAbort.signal)) &&
+				!(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))
+			) {
 				if (setupAbort.signal.aborted) return false;
 				throw new PromptPreflightError(
 					`No API key found for ${model.provider}.\n\n` +
@@ -12894,8 +12911,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * its unfinished tool calls get "outcome unknown" results and an interrupted-turn
 	 * abort ends it. That turn is then retried as `/retry` does: a batch whose every
 	 * call was cut off runs again, otherwise the model answers from where the
-	 * transcript stops. A turn that finished, failed, or the user interrupted stays
-	 * as it is.
+	 * transcript stops. A turn that failed because no request could resolve its
+	 * provider key is retried the same way, even after a normal exit: nothing was
+	 * sent, and a worker that exits on it has nothing else to resume it. A turn
+	 * that finished, failed otherwise, or the user interrupted stays as it is.
 	 *
 	 * @returns whether a continuation was scheduled; false while a turn runs, without
 	 * a model, or with nothing left unfinished.

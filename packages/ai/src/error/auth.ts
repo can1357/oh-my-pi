@@ -20,12 +20,43 @@ export class MissingApiKeyError extends Error {
 }
 
 /**
+ * A session restricted to its OAuth account pool found no account in it that
+ * can serve now (the pooled accounts are disabled, blocked or not logged in).
+ * It stays a {@link MissingApiKeyError} for availability checks and one-shot
+ * requests; an agent turn's resolver reports it retryably instead, since a
+ * later lookup can find an account again.
+ */
+export class AccountPoolUnavailableError extends MissingApiKeyError {
+	constructor(provider: string, sessionId: string | undefined) {
+		super(
+			provider,
+			`No API key for provider: ${provider} (session ${sessionId} is restricted to its OAuth account pool and none of those accounts is available)`,
+		);
+		this.name = "AccountPoolUnavailableError";
+	}
+}
+
+/**
+ * A configured credential source produced no key for this request (for example
+ * a key helper failed, or the stored credentials are disabled or refreshing).
+ * Unlike {@link MissingApiKeyError} it is transient: the same source may produce
+ * a key on retry. {@link Flag.CredentialUnavailable} marks that nothing was sent.
+ */
+export class CredentialUnavailableError extends Error {
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "CredentialUnavailableError";
+		attach(this, create(Flag.Transient, Flag.CredentialUnavailable));
+	}
+}
+
+/**
  * Every usable OAuth credential for a provider failed to refresh with a
  * retryable error (network blip, timeout, 5xx). The stored credentials are
  * intact, so this is classified transient: retrying the request can succeed,
  * unlike {@link MissingApiKeyError}. The refresh failure is kept as `cause`.
  */
-export class OAuthRefreshUnavailableError extends Error {
+export class OAuthRefreshUnavailableError extends CredentialUnavailableError {
 	readonly provider: string;
 
 	constructor(provider: string, cause: unknown) {
@@ -35,7 +66,6 @@ export class OAuthRefreshUnavailableError extends Error {
 		);
 		this.name = "OAuthRefreshUnavailableError";
 		this.provider = provider;
-		attach(this, create(Flag.Transient));
 	}
 }
 

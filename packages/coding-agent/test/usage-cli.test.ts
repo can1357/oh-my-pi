@@ -5,6 +5,7 @@ import { stripVTControlCharacters } from "node:util";
 import {
 	AuthStorage,
 	type OAuthCredential,
+	resolveCredentialIdentityKey,
 	SqliteAuthCredentialStore,
 	type UsageReport,
 	type UsageResetCredit,
@@ -1125,6 +1126,40 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("✗ truly-dead@example.test — disabled");
 	});
 
+	it("keeps a failed subscription visible when the same email is active in another organization", () => {
+		const active: UsageAccountIdentity = {
+			provider: "anthropic",
+			type: "oauth",
+			email: "shared@example.test",
+			orgId: "org-live",
+		};
+		const failed = {
+			type: "oauth" as const,
+			access: "unused",
+			refresh: "unused",
+			expires: 0,
+			email: "shared@example.test",
+			orgId: "org-dead",
+		};
+		const disabled = [
+			{
+				id: 32,
+				provider: "anthropic",
+				type: "oauth" as const,
+				email: failed.email,
+				orgId: failed.orgId,
+				identityKey: resolveCredentialIdentityKey("anthropic", failed)!,
+				cause: "oauth refresh failed: expired subscription",
+			},
+		];
+		const text = stripVTControlCharacters(formatUsageBreakdown([], [active], Date.now(), undefined, disabled));
+		expect(text).toContain("✗ shared@example.test · org-dead — disabled");
+		const restored = stripVTControlCharacters(
+			formatUsageBreakdown([], [{ ...active, orgId: "org-dead" }], Date.now(), undefined, disabled),
+		);
+		expect(restored).not.toContain("— disabled");
+	});
+
 	it("renders a tombstone-only provider section even when no active credential remains", () => {
 		const disabled = [
 			{
@@ -1879,6 +1914,49 @@ describe("omp usage --json account policy", () => {
 		expect(codex).not.toHaveProperty("policy");
 		expect(stdout.includes("main@example.test")).toBe(!redact);
 	});
+
+	it.each([false, true])(
+		"includes the disabled store identity without leaking it under redaction (redact: %p)",
+		async redact => {
+			const authStorage = createInMemoryAuthStorage();
+			try {
+				await authStorage.credentials.set("anthropic", {
+					type: "oauth",
+					access: "access",
+					refresh: "refresh",
+					expires: Date.now() + HOUR,
+					email: "disabled@example.test",
+					orgId: "private-org",
+				});
+				await authStorage.credentials.disable(
+					authStorage.credentials.list("anthropic")[0]!.id,
+					"oauth refresh failed: expired grant",
+				);
+				vi.spyOn(authStorage.usage, "reports").mockResolvedValue([]);
+				vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated());
+				vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+				let stdout = "";
+				vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+					stdout += String(chunk);
+					return true;
+				});
+				await runUsageCommand({ json: true, redact, noExtensions: true });
+				const { disabledCredentials: disabled } = JSON.parse(stdout) as {
+					disabledCredentials: Array<{ identityKey?: string }>;
+				};
+				expect(disabled).toHaveLength(1);
+				if (redact) {
+					expect(disabled[0].identityKey).toEqual(expect.any(String));
+					expect(stdout).not.toContain("disabled@example.test");
+					expect(stdout).not.toContain("private-org");
+				} else {
+					expect(disabled[0].identityKey).toBe("email:disabled@example.test|org:private-org");
+				}
+			} finally {
+				authStorage.close();
+			}
+		},
+	);
 });
 
 describe("omp usage reset", () => {

@@ -216,6 +216,10 @@ export type AuthStorageProtocol = {
 	"sessions.restrict": RpcMethod<[provider: string, sessionId: string, identityKeys: readonly string[]], number>;
 	"sessions.unrestrict": RpcMethod<[provider: string, sessionId: string, lease: number], void>;
 	"sessions.permits": RpcMethod<[provider: string, sessionId: string, credentialId: number], boolean>;
+	"sessions.permitsIdentity": RpcMethod<
+		[provider: string, sessionId: string | undefined, identityKey: string | undefined],
+		boolean
+	>;
 	"sessions.release": RpcMethod<[provider: string, sessionId: string], boolean>;
 
 	"usage.reports": RpcMethod<[options?: WireUsageReportsOptions], UsageReport[] | null>;

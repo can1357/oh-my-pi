@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import type { ApiKey, AssistantMessage, AssistantRetryRecovery, Model, Usage } from "@oh-my-pi/pi-ai";
@@ -15,6 +15,9 @@ import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/sess
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
+
+const { it, beforeEach, afterEach, beforeAll, afterAll } = trackTestLifetime();
 
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
 
@@ -138,22 +141,25 @@ describe("AgentSession retry recovery", () => {
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-retry-recovery-");
 		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
+		sessions = [];
+		managers = [];
 		await authStorage.credentials.remove("anthropic");
 		authStorage.keys.removeRuntime("anthropic");
 		modelRegistry.clearSuppressedSelectors();
-		sessions = [];
-		managers = [];
 	});
 
 	afterEach(async () => {
-		for (const activeSession of sessions.splice(0).reverse()) {
+		const endedSessions = sessions.splice(0).reverse();
+		const endedManagers = managers.splice(0).reverse();
+		const endedTempDir = tempDir;
+		vi.restoreAllMocks();
+		for (const activeSession of endedSessions) {
 			await activeSession.dispose();
 		}
-		for (const manager of managers.splice(0).reverse()) {
+		for (const manager of endedManagers) {
 			await manager.close();
 		}
-		tempDir.removeSync();
-		vi.restoreAllMocks();
+		endedTempDir.removeSync();
 	});
 
 	afterAll(() => {

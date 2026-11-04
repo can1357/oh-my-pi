@@ -51,6 +51,17 @@ export const Flag = {
 	 * status value, so no raw status id can set it.
 	 */
 	CacheControlUnsupported: 0x0000_0800,
+	/**
+	 * The request's credential lookup produced no key, though a configured
+	 * source may produce one later (a key command failed, stored credentials
+	 * were disabled or are refreshing). Nothing was sent, so the provider did
+	 * not refuse anything: the stored credentials stay, and a turn that ended on
+	 * it is unfinished (`omp --restore` goes on with it).
+	 *
+	 * A low bit for the same reason as {@link Flag.CacheControlUnsupported}:
+	 * 0x400 is 1024, above every raw status value.
+	 */
+	CredentialUnavailable: 0x0000_0400,
 	/** HTTP 413 byte/media rejection — token compaction cannot shrink bytes or media budgets (#9235). */
 	PayloadRejected: 0x8000_0000,
 } as const;
@@ -77,7 +88,8 @@ const KIND_MASK =
 	Flag.Grammar |
 	Flag.FastModeUnsupported |
 	Flag.CacheControlUnsupported |
-	Flag.OAuthExpiry;
+	Flag.OAuthExpiry |
+	Flag.CredentialUnavailable;
 
 const RETRIABLE_KINDS =
 	Flag.Transient |
@@ -476,6 +488,7 @@ const ERROR_KIND_LABELS: readonly [Flag, string][] = [
 	[Flag.ContextOverflow, "context-overflow"],
 	[Flag.PayloadRejected, "payload-rejected"],
 	[Flag.AuthFailed, "auth-failed"],
+	[Flag.CredentialUnavailable, "credential-unavailable"],
 	[Flag.SilentAbort, "silent-abort"],
 	[Flag.UserInterrupt, "user-interrupt"],
 	[Flag.Abort, "abort"],

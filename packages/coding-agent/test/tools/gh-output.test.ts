@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -14,6 +14,9 @@ import { githubToolRenderer } from "@oh-my-pi/pi-tui/tools/github";
 import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "../helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "../helpers/test-lifetime";
+
+const { it, afterEach } = trackTestLifetime();
 
 const tempDirs: string[] = [];
 

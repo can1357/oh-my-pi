@@ -23,6 +23,7 @@ import {
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -2215,6 +2216,13 @@ export class Agent {
 				: err instanceof Error
 					? err.message
 					: String(err);
+			// A credential source that produced no key (a failed key command, stored
+			// credentials that cannot serve now, a transient OAuth refresh failure)
+			// keeps its flags: Transient so turn recovery retries it, and
+			// CredentialUnavailable so the turn stays resumable if the retries run
+			// out. Other thrown errors stay classified by text.
+			const errorId =
+				!stoppedForAbort && err instanceof AIError.CredentialUnavailableError ? AIError.classify(err) : undefined;
 			const shouldEmitVisibleError = !stoppedForAbort;
 			const assistantPartial = partial?.role === "assistant" ? partial : undefined;
 			const hadAssistantStart = assistantPartial !== undefined;
@@ -2242,6 +2250,7 @@ export class Agent {
 							),
 							stopReason: "error",
 							errorMessage,
+							errorId,
 						}
 					: {
 							role: "assistant",
@@ -2259,6 +2268,7 @@ export class Agent {
 							},
 							stopReason: stoppedForAbort ? "aborted" : "error",
 							errorMessage,
+							errorId,
 							timestamp: Date.now(),
 						};
 

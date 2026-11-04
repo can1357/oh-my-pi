@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { Agent, AgentBusyError, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
@@ -22,6 +22,7 @@ import { MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { activateTodoTool, createAssistantMessage } from "./helpers/agent-session-setup";
 import { flush as flushEventLoop, until } from "./helpers/fake-clock";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
 
 import {
 	cfgCompactionAutoContinue,
@@ -43,6 +44,8 @@ import {
 	cfgRetryMaxRetries,
 	cfgRetryModelFallback,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
+
+const { it, beforeEach, afterEach, beforeAll, afterAll } = trackTestLifetime();
 
 const runtimeSignalStoreKey = "__ompRuntimeSignals";
 
@@ -192,25 +195,15 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	afterEach(async () => {
-		try {
-			await session?.dispose();
-		} finally {
-			try {
-				vi.useRealTimers();
-				await Bun.sleep(0);
-			} finally {
-				getRuntimeSignals().length = 0;
-				(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
-					undefined;
-				(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate =
-					undefined;
-				(globalThis as ParkCommandGlobals).__ompParkGate = undefined;
-				(globalThis as ParkCommandGlobals).__ompParkAction = undefined;
-				(globalThis as typeof globalThis & { __ompManualCompactCancel?: boolean }).__ompManualCompactCancel =
-					undefined;
-				vi.restoreAllMocks();
-			}
-		}
+		vi.useRealTimers();
+		getRuntimeSignals().length = 0;
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate = undefined;
+		(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate = undefined;
+		(globalThis as ParkCommandGlobals).__ompParkGate = undefined;
+		(globalThis as ParkCommandGlobals).__ompParkAction = undefined;
+		(globalThis as typeof globalThis & { __ompManualCompactCancel?: boolean }).__ompManualCompactCancel = undefined;
+		vi.restoreAllMocks();
+		await Promise.resolve(session?.dispose()).finally(() => Bun.sleep(0));
 	});
 	afterAll(() => {
 		authStorage.close();

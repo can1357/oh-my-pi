@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { Message } from "@oh-my-pi/pi-ai";
@@ -11,6 +11,9 @@ import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compact
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
+
+const { it, afterEach, beforeAll, afterAll } = trackTestLifetime();
 
 const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE006\uE007\uE008\uE009";
 
@@ -137,9 +140,10 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	});
 
 	afterEach(async () => {
-		await session?.dispose();
 		vi.restoreAllMocks();
+		const s = session;
 		session = undefined;
+		await s?.dispose();
 	});
 
 	afterAll(() => {

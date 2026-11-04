@@ -2462,7 +2462,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	let agent: Agent;
 	const effectiveGetApiKey =
-		options.getApiKey ?? (requestModel => modelRegistry.resolver(requestModel, agent.sessionId));
+		options.getApiKey ?? (requestModel => modelRegistry.turnResolver(requestModel, agent.sessionId));
 	let session!: AgentSession;
 	let hasSession = false;
 	let hasRegistered = false;
@@ -5523,18 +5523,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		{
 			const originalDispose = session.dispose.bind(session);
 			let tinyClientReleased = false;
+			// The process-global owners this session runs under, held from here. Disposal is
+			// async and can resume long after it began, and resolving these singletons then
+			// would tear down whichever instance replaced them meanwhile — in production
+			// nothing replaces them, so this is the same object either way.
+			const mainScopeOwners =
+				agentKind === "main"
+					? { lifecycle: AgentLifecycleManager.global(), vibe: VibeSessionRegistry.global() }
+					: undefined;
 			session.dispose = async () => {
 				try {
 					// Reject new session work (eval starts) the moment disposal
 					// begins — the lifecycle await below opens an async gap before
 					// AgentSession.dispose() would otherwise set its guards.
 					session.beginDispose();
-					if (agentKind === "main") {
+					if (mainScopeOwners) {
 						// Top-level teardown owns the global agent lifecycle: park timers,
 						// adopted subagent sessions, revivers. Tear it down while shared
 						// resources (kernels, MCP, LSP) are still live. Subagent disposal
 						// must NOT touch the global lifecycle.
-						const vibeRegistry = VibeSessionRegistry.global();
+						const vibeRegistry = mainScopeOwners.vibe;
 						const vibeParentSession = {
 							getAgentId: () => resolvedAgentId,
 							getSessionId: () => sessionManager.getSessionId(),
@@ -5545,7 +5553,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							getActiveModelString,
 						};
 						await vibeRegistry.suspendScope(vibeRegistry.ownerScope(vibeParentSession), scopedAsyncJobManager);
-						await AgentLifecycleManager.global().dispose();
+						await mainScopeOwners.lifecycle.dispose();
 					}
 					await originalDispose();
 				} finally {

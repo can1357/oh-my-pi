@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type {
 	Api,
@@ -20,6 +20,9 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { type CustomMessage, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { trackTestLifetime } from "./helpers/test-lifetime";
+
+const { it, afterEach, beforeAll, afterAll } = trackTestLifetime();
 
 const LOOP_PARAGRAPHS = [
 	"I am now verifying the test module to guarantee there are no compile errors and the code is completely safe.",
@@ -121,11 +124,10 @@ describe("AgentSession thinking-loop retry", () => {
 	});
 
 	afterEach(async () => {
-		if (session) {
-			await session.dispose();
-			session = undefined;
-		}
 		vi.restoreAllMocks();
+		const ended = session;
+		session = undefined;
+		if (ended) await ended.dispose();
 	});
 
 	afterAll(() => {

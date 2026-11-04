@@ -14,6 +14,8 @@ import {
 	type AuthCredential,
 	type AuthCredentialSnapshotEntry,
 	type DisabledCredentialSummary,
+	isAutoDisabledCredential,
+	isUserRemovalCause,
 	type OAuthCredential,
 	type OAuthRefreshReason,
 	REMOTE_REFRESH_SENTINEL,
@@ -918,7 +920,16 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	async deleteAuthCredential(id: number, disabledCause: string): Promise<boolean> {
 		this.#noteActivity();
 		const found = this.#snapshot.credentials.some(entry => entry.id === id);
-		if (!found) return false;
+		if (!found) {
+			// Not active here, but the broker may hold it as a login a failure disabled: a
+			// user's removal records itself on that tombstone (`isAutoDisabledCredential`).
+			if (!isUserRemovalCause(disabledCause)) return false;
+			try {
+				return (await this.#client.disableCredential(id, disabledCause)).ok;
+			} catch {
+				return false;
+			}
+		}
 		await this.#client.disableCredential(id, disabledCause);
 		this.#removeCredentialById(id);
 		this.#maybeRefreshSnapshot("delete credential");
@@ -1010,17 +1021,32 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	/**
 	 * Logout: disable every active credential for the provider on the broker,
 	 * then drop them from the local snapshot. Refresh fetches the authoritative
-	 * post-state in the background.
+	 * post-state in the background. A user's removal also reaches the provider's
+	 * logins a failure already disabled, so the broker records it even when no
+	 * active row is left (see `isAutoDisabledCredential`).
 	 */
 	async deleteAuthCredentials(provider: string, disabledCause: string): Promise<void> {
-		const existing = this.listAuthCredentials(provider);
-		for (const entry of existing) {
+		const ids = this.listAuthCredentials(provider).map(entry => entry.id);
+		if (isUserRemovalCause(disabledCause)) {
 			try {
-				await this.#client.disableCredential(entry.id, disabledCause);
+				const tombstones = await this.#client.listDisabledCredentials(provider);
+				for (const tombstone of tombstones) {
+					if (isAutoDisabledCredential(tombstone)) ids.push(tombstone.id);
+				}
+			} catch (error) {
+				logger.warn("auth-broker disabled credential lookup during delete failed", {
+					provider,
+					error: String(error),
+				});
+			}
+		}
+		for (const id of ids) {
+			try {
+				await this.#client.disableCredential(id, disabledCause);
 			} catch (error) {
 				logger.warn("auth-broker disable during delete failed", {
 					provider,
-					id: entry.id,
+					id,
 					error: String(error),
 				});
 			}
