@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Source installs no longer fail after dependency-catalog changes: the Bun lockfile and export-viewer metadata now match their canonical inputs
 - `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
 - Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset
 - The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm
