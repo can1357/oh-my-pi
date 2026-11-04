@@ -1191,6 +1191,71 @@ class RpcClientTests(unittest.TestCase):
                 finally:
                     client.stop()
 
+    @unittest.skipUnless(os.name == "posix", "the holder is started with start_new_session")
+    def test_child_exit_closes_the_client_while_an_outside_process_holds_stdout(self) -> None:
+        # The child starts a process in a session of its own that inherits its
+        # stdout, so the pipe stays open after the child exits and the stdout
+        # reader sees no EOF. A request makes the child send one dialog and exit.
+        temp_dir = Path(tempfile.mkdtemp(prefix="omp-rpc-exit-holder-"))
+        self.addCleanup(shutil.rmtree, temp_dir, True)
+        holder_file = temp_dir / "holder.pid"
+        server = textwrap.dedent(
+            f"""
+            import json, os, subprocess, sys
+            holder = subprocess.Popen(["sleep", "60"], stdin=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL, start_new_session=True)
+            with open({str(holder_file)!r} + ".tmp", "w") as f:
+                f.write(str(holder.pid))
+            os.rename({str(holder_file)!r} + ".tmp", {str(holder_file)!r})
+            print(json.dumps({{"type": "ready"}}), flush=True)
+            sys.stdin.readline()
+            print(json.dumps({{"type": "extension_ui_request", "id": "ui-last", "method": "confirm",
+                               "title": "Confirm", "message": "Continue?"}}), flush=True)
+            os._exit(23)
+            """
+        )
+        client = self.make_client(server, request_timeout=60.0)
+        client.start()
+
+        def kill_holder() -> None:
+            with contextlib.suppress(FileNotFoundError, ValueError, ProcessLookupError):
+                os.kill(int(holder_file.read_text()), signal.SIGKILL)
+
+        self.addCleanup(kill_holder)
+        self.addCleanup(client.stop)
+        outcome: dict[str, list[BaseException | object]] = {"ui": [], "request": []}
+
+        def wait_ui() -> None:
+            for _ in range(2):
+                try:
+                    outcome["ui"].append(client.next_ui_request())
+                except BaseException as exc:
+                    outcome["ui"].append(exc)
+                    return
+
+        def request() -> None:
+            try:
+                outcome["request"].append(client.get_state())
+            except BaseException as exc:
+                outcome["request"].append(exc)
+
+        ui_waiter = threading.Thread(target=wait_ui, daemon=True)
+        ui_waiter.start()
+        requester = threading.Thread(target=request, daemon=True)
+        requester.start()
+        ui_waiter.join(15.0)
+        requester.join(15.0)
+        self.assertTrue(holder_file.exists())
+        self.assertFalse(ui_waiter.is_alive(), "next_ui_request() stayed blocked after the child exited")
+        self.assertFalse(requester.is_alive(), "the pending request stayed blocked after the child exited")
+        # The dialog the child sent before it exited comes first, then the exit error.
+        first, second = outcome["ui"]
+        self.assertNotIsInstance(first, BaseException)
+        self.assertEqual(getattr(first, "id", None), "ui-last")
+        self.assertIsInstance(second, RpcProcessExitError)
+        self.assertIn("code 23", str(second))
+        self.assertIsInstance(outcome["request"][0], RpcProcessExitError)
+
     def test_ask_answers_reach_the_wire_in_question_order(self) -> None:
         with self.make_client() as client:
             client.prompt("needs ask")
