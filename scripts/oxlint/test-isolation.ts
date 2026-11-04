@@ -872,7 +872,9 @@ function callsRestoreHelper(facts: FileFacts, scope: Node | undefined): boolean 
 
 /**
  * Does a covering scope of `test` own the environment variable `path` names through
- * `installEnvRestores(["NAME", ...])`, called unconditionally at its top level with a literal list?
+ * `installEnvRestores(["NAME", ...])`, called unconditionally at its top level? The list and each
+ * name are read as literals or as `const`s bound to them (`installEnvRestores([KEY])`,
+ * `installEnvRestores(KEYS)`), so an owner the file names that way still counts as cleanup.
  */
 function envOwnerPutsBack(facts: FileFacts, test: Node, path: string): boolean {
 	const name = ENV_PATH.exec(path)?.[1];
@@ -881,8 +883,11 @@ function envOwnerPutsBack(facts: FileFacts, test: Node, path: string): boolean {
 		facts.calls.some(call => {
 			if (!isRestoreHelper(facts, unwrap(node(call.callee)), ENV_RESTORE_HELPER_NAME)) return false;
 			if (enclosingFunction(call) !== scope || !isTopLevelStatement(facts, call, scope)) return false;
-			const list = unwrap(nodes(call.arguments)[0]);
-			return list?.type === "ArrayExpression" && nodes(list.elements).some(e => stringValue(e) === name);
+			let list = unwrap(nodes(call.arguments)[0]);
+			if (list?.type === "Identifier") list = unwrap(declaredInit(facts.context, list, true));
+			return (
+				list?.type === "ArrayExpression" && nodes(list.elements).some(e => constantKey(facts.context, e) === name)
+			);
 		}),
 	);
 }

@@ -553,6 +553,28 @@ it("t", async () => {
 });`,
 		expected: ["put-back-on-test-finished@8"],
 	},
+	"first-install-after-an-await-is-reported-under-an-owner-named-by-a-const": {
+		body: `
+import { installEnvRestores } from "./helpers/mock-restores";
+const KEY = "HOME";
+installEnvRestores([KEY]);
+it("t", async () => {
+	const dir = await Promise.resolve("/tmp");
+	process.env[KEY] = dir;
+});`,
+		expected: ["put-back-on-test-finished@9"],
+	},
+	"first-install-after-an-await-is-reported-under-an-owner-list-held-in-a-const": {
+		body: `
+import { installEnvRestores } from "./helpers/mock-restores";
+const KEYS = ["HOME"] as const;
+installEnvRestores(KEYS);
+it("t", async () => {
+	const dir = await Promise.resolve("/tmp");
+	process.env.HOME = dir;
+});`,
+		expected: ["put-back-on-test-finished@9"],
+	},
 	"first-install-after-an-await-is-silent-when-a-lifetime-guards-it": {
 		body: `
 import { installEnvRestores, testLifetime } from "./helpers/mock-restores";
