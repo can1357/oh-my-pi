@@ -1,4 +1,4 @@
-import { findLinterRoot, resolveCommandForRoot } from "../../lsp/config";
+import { findLinterRoot, resolveLinterCommand } from "../../lsp/config";
 import type { LinterClient, ServerConfig } from "../../lsp/types";
 import { LspLinterClient } from "./lsp-linter-client";
 
@@ -21,9 +21,10 @@ const clientCache = new Map<string, LinterClient>();
  *
  * The client is bound to the file's own project root (`findLinterRoot`: the
  * nearest ancestor of the file's physical location holding one of the server's
- * root markers) and to the executable resolved from
- * that root, never to the session cwd's. Returns null when the file has no such
- * root or the root has no executable: the linter does not apply to the file.
+ * root markers) and to the executable `resolveLinterCommand` picks for that
+ * root: the session configuration's own for the session cwd, the root's own
+ * for any other root. Returns null when the file has no such root or the root
+ * has no executable: the linter does not apply to the file.
  * A server without root markers keeps `cwd` and its configured executable.
  */
 export function getLinterClient(
@@ -37,7 +38,7 @@ export function getLinterClient(
 	if (config.rootMarkers.length > 0) {
 		const fileRoot = findLinterRoot(filePath, config.rootMarkers);
 		if (fileRoot === null) return null;
-		const command = resolveCommandForRoot(config.command, fileRoot);
+		const command = resolveLinterCommand(config, fileRoot, cwd);
 		if (command === null) return null;
 		root = fileRoot;
 		if (command !== config.resolvedCommand) bound = { ...config, resolvedCommand: command };

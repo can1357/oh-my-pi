@@ -237,8 +237,8 @@ export function findLinterRoot(filePath: string, markers: string[]): string | nu
  * A linter applies only to a file whose own project root ({@link findLinterRoot},
  * found from the file, not from the cwd) selects it, so the cwd repository's
  * linter and config never judge a file of another repository. A CLI linter then
- * runs from that root with that root's binary ({@link resolveCommandForRoot}),
- * so it also needs one. An LSP linter is a single server started in the cwd
+ * runs from that root with the executable {@link resolveLinterCommand} picks
+ * for it, so it also needs one. An LSP linter is a single server started in the cwd
  * with the cwd's binary, so it serves only files whose root lies inside the
  * cwd. Type checkers, and servers without root markers, are not gated.
  */
@@ -247,7 +247,7 @@ export function linterAppliesToFile(config: ServerConfig, filePath: string, cwd:
 	if (config.rootMarkers.length === 0) return true;
 	const root = findLinterRoot(filePath, config.rootMarkers);
 	if (root === null) return false;
-	if (config.createClient) return resolveCommandForRoot(config.command, root) !== null;
+	if (config.createClient) return resolveLinterCommand(config, root, cwd) !== null;
 	return pathIsWithin(linterFilePath(cwd), root);
 }
 
@@ -382,6 +382,22 @@ export function resolveCommandForRoot(command: string, root: string): string | n
 		dir = parent;
 	}
 	return $which(command, { cwd: root, requireAbsolutePaths: !commandNamesPath(command) });
+}
+
+/**
+ * The executable a CLI linter runs for a file whose linter root is `root`, in a
+ * session at `cwd`. Both the decision whether the linter applies and the client
+ * that runs it use this, so they never disagree.
+ *
+ * The session's own root (the cwd itself) keeps the executable the session's
+ * configuration already resolved ({@link resolveCommand}, at load), under the
+ * session's rules: a relative `PATH` entry or command there is the session's
+ * own choice. Any other root is resolved under the foreign-root rules of
+ * {@link resolveCommandForRoot}.
+ */
+export function resolveLinterCommand(config: ServerConfig, root: string, cwd: string): string | null {
+	if (root === linterFilePath(cwd)) return config.resolvedCommand ?? resolveCommand(config.command, cwd);
+	return resolveCommandForRoot(config.command, root);
 }
 
 // =============================================================================

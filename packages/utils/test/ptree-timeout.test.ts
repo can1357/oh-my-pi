@@ -591,31 +591,89 @@ describe.skipIf(process.platform === "win32")("ptree group keeper", () => {
 		}
 	}, 30_000);
 
-	it("signals nothing once the keeper has exited, even with a member left that changed session", async () => {
-		// A member in a new session is out of the group, so the keeper exits; its
-		// group id is then no longer reserved for this run.
+	it("holds the run open while members fork and exit, then kills the whole chain at the deadline", async () => {
+		// Each link starts its replacement and exits at once, so at every instant
+		// the group has a member, but a member list assembled over time can miss
+		// all of them. Only the deadline's group kill may end the chain.
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-group-keeper-"));
+		const pidLog = path.join(dir, "pids");
+		const chain = path.join(dir, "chain.sh");
+		await Bun.write(
+			chain,
+			`trap "" TERM\necho $$ >> "$1"\nsleep 0.002\n/bin/sh "$0" "$1" </dev/null >/dev/null 2>&1 &\nexit 0\n`,
+		);
+		const links = async () =>
+			(
+				await Bun.file(pidLog)
+					.text()
+					.catch(() => "")
+			)
+				.split("\n")
+				.map(Number)
+				.filter(pid => pid > 0);
+		try {
+			const child = spawn(["/bin/sh", chain, pidLog], { groupKeeper: true, timeout: 2_000 });
+			const outcome = await child.wait().then(
+				() => new Error("run reported success while the chain was running"),
+				(error: unknown) => error,
+			);
+
+			expect(outcome).toBeInstanceOf(TimeoutError);
+			const alive: number[] = [];
+			for (const pid of await links()) if (await runningAfter(pid, 500)) alive.push(pid);
+			expect(alive).toEqual([]);
+		} finally {
+			// Only on failure is a link left: kill the logged links in a few rounds,
+			// since a link killed mid-fork may log its replacement just after.
+			for (let round = 0; round < 3; round++) {
+				for (const pid of await links()) Process.fromPid(pid)?.killTree(9);
+				await Bun.sleep(20);
+			}
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("still kills the group when the keeper was killed on its own with members left", async () => {
+		// A keeper killed from outside (as the OOM killer would) proved nothing
+		// about its group, so a later stop must reach the member it left.
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-group-keeper-"));
 		const pidFile = path.join(dir, "pid");
 		let memberPid: number | undefined;
+		try {
+			const child = spawn(
+				["/bin/sh", "-c", `trap "" TERM; sleep 3600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; exit 0`],
+				{ groupKeeper: true },
+			);
+			const outcome = child.wait().catch((error: unknown) => error);
+			memberPid = await readPid(pidFile);
+			process.kill(child.pid, "SIGKILL");
+			await child.proc.exited;
+
+			child.kill(new AbortError(new Error("late abort"), ""), -1);
+
+			await outcome;
+			expect(await runningAfter(memberPid, 2_000)).toBe(false);
+		} finally {
+			if (memberPid) Process.fromPid(memberPid)?.killTree(9);
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("signals nothing once the keeper has exited after its last member", async () => {
+		// The keeper outlives its member and then exits on its own: its group id
+		// is no longer reserved for this run, so a late stop must not signal it.
 		const killSpy = spyOn(process, "kill");
 		try {
-			const daemonize = `const member = Bun.spawn(["sleep", "30"], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(member.pid));
-member.unref();
-process.exit(0);`;
-			const child = spawn([process.execPath, "-e", daemonize], { groupKeeper: true });
-			await child.wait();
-			memberPid = await readPid(pidFile);
+			const child = spawn(["/bin/sh", "-c", "sleep 0.2 </dev/null >/dev/null 2>&1 & exit 0"], { groupKeeper: true });
+			const result = await child.wait();
 			killSpy.mockClear();
 
 			child.kill(new AbortError(new Error("late abort"), ""), -1);
 
+			expect(result.exitCode).toBe(0);
 			expect(killSpy).not.toHaveBeenCalled();
-			expect(await runningAfter(memberPid, 200)).toBe(true);
 		} finally {
 			killSpy.mockRestore();
-			if (memberPid) Process.fromPid(memberPid)?.killTree(9);
-			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
 });

@@ -484,6 +484,37 @@ process.stdout.write(JSON.stringify({ diagnostics: [] }));
 		expect(readLog(log)).toEqual([{ self: "B", cwd: otherRepo, argv: ["lint", "--reporter=json", target] }]);
 	}, 20_000);
 
+	it("runs the session's own CLI linter found through a relative PATH entry, and only for the session root", async () => {
+		const originalPath = process.env.PATH;
+		onTestFinished(() => {
+			process.env.PATH = originalPath;
+		});
+		const log = path.join(root, "runs.log");
+		// The session's Biome is reachable only through the relative entry `tools`.
+		const session = path.join(root, "session");
+		write(path.join(session, "biome.json"), "{}\n");
+		installRecordingBiome(session, "S", log);
+		fs.mkdirSync(path.join(session, "tools"));
+		fs.renameSync(path.join(session, "node_modules", ".bin", "biome"), path.join(session, "tools", "biome"));
+		// Another repository with its own `tools/biome`, the same relative entry away.
+		const otherRepo = path.join(root, "repo-b");
+		write(path.join(otherRepo, "biome.json"), "{}\n");
+		installRecordingBiome(otherRepo, "B", log);
+		fs.mkdirSync(path.join(otherRepo, "tools"));
+		fs.renameSync(path.join(otherRepo, "node_modules", ".bin", "biome"), path.join(otherRepo, "tools", "biome"));
+		process.env.PATH = `tools${path.delimiter}${path.join(root, "not-present")}`;
+		const biome = loadConfig(session).servers.biome;
+		const own = write(path.join(session, "x.ts"), "export const x = 1;\n");
+		const foreign = write(path.join(otherRepo, "y.ts"), "export const y = 1;\n");
+
+		const ownResult = await getDiagnosticsForFile(own, session, [["biome", biome as ServerConfig]]);
+		const foreignResult = await getDiagnosticsForFile(foreign, session, [["biome", biome as ServerConfig]]);
+
+		expect(ownResult?.messages.join("\n")).toContain("from S");
+		expect(foreignResult).toBeUndefined();
+		expect(readLog(log)).toEqual([{ self: "S", cwd: session, argv: ["lint", "--reporter=json", own] }]);
+	}, 20_000);
+
 	it("serves an LSP linter only files whose own root lies inside the session cwd", () => {
 		const cwd = path.join(root, "repo-a");
 		write(path.join(cwd, ".eslintrc.json"), "{}\n");
