@@ -1478,6 +1478,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
+	/** Suspend turn-scoped sleep prevention only once the agent has actually parked. */
+	#onAgentPauseChange(paused: boolean): void {
+		if (paused) {
+			this.#releasePowerAssertion();
+			this.#endComputerTurn();
+		} else if (this.#promptInFlightCount > 0) {
+			this.#acquirePowerAssertion();
+			this.#beginComputerTurn();
+		}
+	}
+
 	#beginInFlight(): number {
 		this.#promptInFlightCount++;
 		if (this.#promptInFlightCount === 1) {
@@ -2996,6 +3007,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// (session persistence, hooks, auto-compaction, retry logic)
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
 		this.#unsubscribeQueueChange = this.agent.onQueueChange(() => this.#emitQueueUpdateIfChanged());
+		this.addDisposer(this.agent.onPauseChange(paused => this.#onAgentPauseChange(paused)));
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		cfgProviderAppendOnlyContext.listen(this, () => this.#syncAppendOnlyContext(this.model));
 		cfgModelRoles.listen(this, () => this.#advisors.reconcileModelRoles());
