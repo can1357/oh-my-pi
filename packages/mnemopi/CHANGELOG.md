@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Retaining a memory commits its annotations in one transaction instead of one each, and file banks use `synchronous=NORMAL` (WAL synced at checkpoints, not on every commit), cutting the disk syncs each turn makes on memory banks shared by every omp process ([#17973](https://github.com/can1357/oh-my-pi/pull/17973))
+- File memory banks use `synchronous=NORMAL` (WAL synced at checkpoints, not on every commit), cutting the disk syncs each turn makes on banks shared by every omp process ([#17973](https://github.com/can1357/oh-my-pi/pull/17973))
 
 ## [18.14.2] - 2026-10-31
 

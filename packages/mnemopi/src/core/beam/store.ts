@@ -262,15 +262,10 @@ function trimWorkingMemory(beam: BeamMemoryState): void {
 
 function addTemporalAnnotations(beam: BeamMemoryState, memoryId: string, timestamp: string, source: string): void {
 	try {
-		// One commit for both annotations instead of one each. A failure, even one that makes SQLite
-		// end the transaction, drops only the annotations. An annotation store on another connection
-		// still writes: this deferred transaction takes no lock until it writes through `beam.db`.
-		transaction(beam.db, () => {
-			beam.annotations?.add?.(memoryId, "occurred_on", timestamp.slice(0, 10));
-			if (source && source !== "conversation" && source !== "user" && source !== "assistant") {
-				beam.annotations?.add?.(memoryId, "has_source", source);
-			}
-		});
+		beam.annotations?.add?.(memoryId, "occurred_on", timestamp.slice(0, 10));
+		if (source && source !== "conversation" && source !== "user" && source !== "assistant") {
+			beam.annotations?.add?.(memoryId, "has_source", source);
+		}
 	} catch {
 		// Annotation enrichment is best-effort, matching Python's non-blocking path.
 	}
@@ -500,7 +495,6 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 	}
 
 	const memoryId = options.memoryId ?? options.memory_id ?? generateId(content, new Date(timestamp));
-	// The row commits on its own before any best-effort step below, so none of them can lose it.
 	beam.db.run(
 		`
 			INSERT INTO working_memory
