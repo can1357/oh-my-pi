@@ -153,6 +153,23 @@ describe("read URL answered by a bot wall", () => {
 		expect(result.remoteCalls).toEqual([]);
 	});
 
+	it.each([
+		"<input type=hidden name='js_challenge'>",
+		'<input type="hidden" name = "js_challenge">',
+		"<INPUT TYPE=hidden NAME=js_challenge>",
+	])("treats %s as a challenge form", async form => {
+		const result = await read(
+			() =>
+				new Response(`<html><body><form>${form}</form></body></html>`, {
+					headers: { "content-type": "text/html" },
+				}),
+			`Markdown Content:\n${POST_MARKDOWN}`,
+		);
+
+		expect(result.method).toBe("jina");
+		expect(result.notes).toContain("JavaScript challenge, HTTP 200");
+	});
+
 	it("names the bot wall on a 403 challenge without sending the URL to a remote reader", async () => {
 		const result = await read(
 			() =>
@@ -172,6 +189,7 @@ describe("read URL answered by a bot wall", () => {
 	it("reads an article that quotes challenge markers in its text", async () => {
 		const article = `<html><head><title>Detecting bot walls</title></head><body><article><h1>Detecting bot walls</h1>
 <p>${"A challenge page carries markers that a scraper can recognise before it renders anything. ".repeat(4)}</p>
+<div data-example='> <input type="hidden" name="js_challenge">'></div>
 <pre>window._cf_chl_opt={cType:'managed'}; &lt;input type="hidden" name="js_challenge"&gt; id="px-captcha" geo.captcha-delivery.com</pre>
 <!-- <input type="hidden" name="js_challenge"> -->
 <script>const sample = '<input type="hidden" name="js_challenge">';</script>

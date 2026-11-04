@@ -52,54 +52,88 @@ const USER_AGENTS = [
  */
 const BLOCKED_STATUSES = new Set([403, 429, 503, 999]);
 
-const CHALLENGE_INPUT_ATTR = 'name="js_challenge"';
 /** A challenge interstitial carries no content (Reddit's is about 8 KB); a larger page is no wall. */
 const CHALLENGE_PAGE_MAX_CHARS = 64 * 1024;
-/** Occurrences of the attribute checked per page; a challenge page has one. */
-const MAX_CHALLENGE_CANDIDATES = 8;
-/** Elements whose content is text or inert, so an input inside one is quoted source, not a field. */
-const RAW_TEXT_TAGS = [
-	"script",
-	"style",
-	"textarea",
-	"title",
-	"xmp",
-	"iframe",
-	"noembed",
-	"noframes",
-	"noscript",
-	"plaintext",
-	"template",
-];
+/** Elements whose content an HTML tokenizer reads as text, so a tag inside one is quoted source. */
+const RAW_TEXT_TAGS: Record<string, true> = {
+	script: true,
+	style: true,
+	textarea: true,
+	title: true,
+	xmp: true,
+	iframe: true,
+	noembed: true,
+	noframes: true,
+	noscript: true,
+	plaintext: true,
+};
+const TAG_NAME_RE = /[a-z][^\s/>]*/iy;
+const ATTR_GAP_RE = /[\s/]*/y;
+const ATTR_NAME_RE = /[^\s/>=]+/y;
+const ATTR_VALUE_RE = /\s*=\s*(?:"([^"]*)"?|'([^']*)'?|([^\s>]*))/y;
 
 /**
- * True when a page small enough to be an interstitial holds a `js_challenge` `<input>` tag outside
- * comments, raw-text elements and other tags' attributes. The size cap bounds every search below.
+ * True when a page small enough to be an interstitial holds an `<input name="js_challenge">` field.
+ * One forward pass reads the markup as an HTML tokenizer does (quoted attribute values, comments,
+ * raw-text elements, `<template>` contents), so a form quoted anywhere in an article is not one.
  */
-function hasChallengeForm(content: string): boolean {
-	if (content.length > CHALLENGE_PAGE_MAX_CHARS) return false;
-	// Tag and attribute names are ASCII case-insensitive; the value is matched as written.
-	const lower = content.toLowerCase();
-	let at = lower.indexOf(CHALLENGE_INPUT_ATTR);
-	for (let seen = 0; at >= 0 && seen < MAX_CHALLENGE_CANDIDATES; seen++) {
-		const open = lower.lastIndexOf("<", at);
-		const inInputTag =
-			open >= 0 &&
-			lower.startsWith("<input", open) &&
-			/[\s/>]/.test(lower.charAt(open + 6)) &&
-			/\s/.test(lower.charAt(at - 1)) &&
-			content.startsWith('"js_challenge"', at + 5) &&
-			lower.indexOf(">", open) > at;
-		// The `<input` opens in text only if the tag before it closed, not inside one of its attributes.
-		const inText = open === 0 || lower.lastIndexOf(">", open - 1) > lower.lastIndexOf("<", open - 1);
-		const inComment = lower.lastIndexOf("<!--", open) > lower.lastIndexOf("-->", open);
-		const inRawText = RAW_TEXT_TAGS.some(
-			tag => lower.lastIndexOf(`<${tag}`, open) > lower.lastIndexOf(`</${tag}`, open),
-		);
-		if (inInputTag && inText && !inComment && !inRawText) return true;
-		at = lower.indexOf(CHALLENGE_INPUT_ATTR, at + 1);
+function hasChallengeForm(html: string): boolean {
+	if (html.length > CHALLENGE_PAGE_MAX_CHARS || !html.includes("js_challenge")) return false;
+	let templates = 0;
+	let at = 0;
+	for (;;) {
+		const open = html.indexOf("<", at);
+		if (open < 0) return false;
+		if (html.startsWith("<!--", open)) {
+			const end = html.indexOf("-->", open + 4);
+			if (end < 0) return false;
+			at = end + 3;
+			continue;
+		}
+		const closing = html[open + 1] === "/";
+		TAG_NAME_RE.lastIndex = open + (closing ? 2 : 1);
+		const tagName = TAG_NAME_RE.exec(html)?.[0].toLowerCase();
+		if (!tagName) {
+			at = open + 1;
+			continue;
+		}
+		// Attributes run to the first `>` outside a quoted value; the first `name` wins, as in HTML.
+		let pos = TAG_NAME_RE.lastIndex;
+		let fieldName: string | undefined;
+		while (pos < html.length && html[pos] !== ">") {
+			ATTR_GAP_RE.lastIndex = pos;
+			ATTR_GAP_RE.exec(html);
+			ATTR_NAME_RE.lastIndex = ATTR_GAP_RE.lastIndex;
+			const attr = ATTR_NAME_RE.exec(html);
+			if (!attr) {
+				// A `>` ends the tag; a stray `=` is skipped.
+				pos = html[ATTR_GAP_RE.lastIndex] === ">" ? ATTR_GAP_RE.lastIndex : ATTR_GAP_RE.lastIndex + 1;
+				continue;
+			}
+			pos = ATTR_NAME_RE.lastIndex;
+			ATTR_VALUE_RE.lastIndex = pos;
+			const value = ATTR_VALUE_RE.exec(html);
+			if (value) pos = ATTR_VALUE_RE.lastIndex;
+			if (fieldName === undefined && attr[0].toLowerCase() === "name") {
+				fieldName = value ? (value[1] ?? value[2] ?? value[3]) : "";
+			}
+		}
+		at = pos + 1;
+		if (closing) {
+			if (tagName === "template" && templates > 0) templates--;
+		} else if (tagName === "input") {
+			if (templates === 0 && fieldName === "js_challenge") return true;
+		} else if (tagName === "template") {
+			templates++;
+		} else if (Object.hasOwn(RAW_TEXT_TAGS, tagName)) {
+			if (tagName === "plaintext") return false;
+			const end = new RegExp(`</${tagName}`, "gi");
+			end.lastIndex = at;
+			const match = end.exec(html);
+			if (!match) return false;
+			at = match.index;
+		}
 	}
-	return false;
 }
 
 /**
@@ -154,7 +188,10 @@ export interface LoadPageResult {
 	error?: string;
 	/** True when the body read was skipped via skipBodyForContentType. */
 	bodySkipped?: boolean;
-	/** Bot protection that answered with its challenge or block page instead of the page. */
+	/**
+	 * Bot protection that answered with its challenge or block page instead of the page. Such a
+	 * response is never `ok`, whatever its status, so a caller checking `ok` does not take it as content.
+	 */
 	blockedBy?: string;
 }
 
@@ -246,6 +283,8 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 
 			const responseBody = await readBodyCapped(response, maxBytes);
 			if (!responseBody) {
+				// A refusal under a later agent says less than the wall an earlier one met.
+				if (!response.ok && lastBlockedResponse) return lastBlockedResponse;
 				// A successful response can still be bodyless (HTTP 204, or a null
 				// body stream): keep the transport's own success verdict instead of
 				// rewriting it, so the caller's status handling (a 204 is a valid
@@ -259,7 +298,7 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 				content,
 				contentType,
 				finalUrl,
-				ok: response.ok,
+				ok: response.ok && !blockedBy,
 				status: response.status,
 				truncated: responseBody.truncated,
 				blockedBy,
@@ -268,6 +307,7 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 				lastBlockedResponse = result;
 				continue;
 			}
+			if (!response.ok && !blockedBy && lastBlockedResponse) return lastBlockedResponse;
 			return result;
 		} catch (error) {
 			if (signal?.aborted) {

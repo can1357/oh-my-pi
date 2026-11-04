@@ -1207,7 +1207,9 @@ async function renderUrl(
 	if (signal?.aborted) {
 		throw new ToolAbortError();
 	}
-	if (response.ok && response.blockedBy && !raw) {
+	// A wall's response is never ok; one served with a 2xx status is a challenge interstitial.
+	const challenge = response.blockedBy !== undefined && response.status !== undefined && response.status < 300;
+	if (challenge && !raw) {
 		// The challenge page is not the content: only a reader fetching from elsewhere can still get it.
 		const wall = `bot protection (${response.blockedBy}, HTTP ${response.status})`;
 		const remote = await renderHtmlToText(
@@ -1246,7 +1248,8 @@ async function renderUrl(
 			],
 		};
 	}
-	if (!response.ok) {
+	// `:raw` returns a challenge page as fetched.
+	if (!response.ok && !(challenge && raw)) {
 		return {
 			url,
 			finalUrl: response.finalUrl || url,
