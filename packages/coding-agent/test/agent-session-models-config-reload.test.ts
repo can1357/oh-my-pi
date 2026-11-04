@@ -20,19 +20,30 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { anthropicChunks, type CapturedRequest, captureFetch } from "../../ai/test/helpers/factory-droid";
 import { asGlobalFetch } from "./helpers/fetch-mock";
 
-function modelsYaml(withLongRetentionFlag: boolean): string {
+interface GatewayConfig {
+	longRetentionFlag?: boolean;
+	maxTokens?: number;
+	/** Value of an `x-config-probe` header; a `!command` value resolves through the provider's header resolver. */
+	probeHeader?: string;
+}
+
+function modelsYaml(config: boolean | GatewayConfig): string {
+	const { longRetentionFlag, maxTokens, probeHeader } =
+		typeof config === "boolean" ? { longRetentionFlag: config } : config;
 	return [
 		"providers:",
 		"  claude-gateway:",
 		"    baseUrl: https://gateway.example.test",
 		"    apiKey: TEST_GATEWAY_KEY",
 		"    api: anthropic-messages",
-		...(withLongRetentionFlag ? ["    compat:", "      supportsLongCacheRetention: true"] : []),
+		...(longRetentionFlag ? ["    compat:", "      supportsLongCacheRetention: true"] : []),
+		...(probeHeader ? ["    headers:", `      x-config-probe: ${JSON.stringify(probeHeader)}`] : []),
 		"    models:",
 		"      - id: claude-gateway-model",
 		"        name: Claude Gateway Model",
 		"        reasoning: false",
 		"        input: [text]",
+		...(maxTokens ? ["        contextWindow: 200000", `        maxTokens: ${maxTokens}`] : []),
 		"",
 	].join("\n");
 }
@@ -59,13 +70,15 @@ interface Harness {
 	modelsPath: string;
 	registry: ModelRegistry;
 	requests: () => Array<Array<string | undefined>>;
+	/** The provider requests themselves, in order. */
+	messagesRequests: () => CapturedRequest[];
 	start: (model: Model) => Promise<AgentSession>;
 	close: () => Promise<void>;
 }
 
-async function harness(tempDir: TempDir): Promise<Harness> {
+async function harness(tempDir: TempDir, initial: boolean | GatewayConfig = false): Promise<Harness> {
 	const modelsPath = tempDir.join("models.yml");
-	fs.writeFileSync(modelsPath, modelsYaml(false));
+	fs.writeFileSync(modelsPath, modelsYaml(initial));
 	const captured: CapturedRequest[] = [];
 	vi.spyOn(globalThis, "fetch").mockImplementation(asGlobalFetch(captureFetch(captured, anthropicChunks("OK"))));
 	const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
@@ -78,6 +91,7 @@ async function harness(tempDir: TempDir): Promise<Harness> {
 			captured
 				.filter(request => new URL(request.url).pathname.endsWith("/v1/messages"))
 				.map(request => breakpointTtls(request.body)),
+		messagesRequests: () => captured.filter(request => new URL(request.url).pathname.endsWith("/v1/messages")),
 		start: async model => {
 			const { session } = await createAgentSession({
 				cwd: tempDir.path(),
@@ -112,10 +126,21 @@ function gatewayModel(registry: ModelRegistry): Model {
 	return model;
 }
 
+/** Both file times at a whole second, so a later write can restore them exactly. */
+const PINNED_TIME = new Date(1_700_000_000_000);
+function pinTimes(modelsPath: string): void {
+	fs.utimesSync(modelsPath, PINNED_TIME, PINNED_TIME);
+}
+
 function addFlagKeepingTimes(modelsPath: string): void {
-	const before = fs.statSync(modelsPath);
 	fs.writeFileSync(modelsPath, modelsYaml(true));
-	fs.utimesSync(modelsPath, before.atime, before.mtime);
+	pinTimes(modelsPath);
+}
+
+function rewrite(modelsPath: string, config: GatewayConfig): void {
+	const next = new Date(fs.statSync(modelsPath).mtimeMs + 1_000);
+	fs.writeFileSync(modelsPath, modelsYaml(config));
+	fs.utimesSync(modelsPath, next, next);
 }
 
 function addFlagWithNewMtime(modelsPath: string): void {
@@ -151,6 +176,7 @@ describe("a running session re-reads models.yml before its next request", () => 
 		using tempDir = TempDir.createSync("@pi-models-config-reload-side-");
 		const h = await harness(tempDir);
 		try {
+			pinTimes(h.modelsPath);
 			const session = await h.start(gatewayModel(h.registry));
 			await session.prompt("first");
 			addFlagKeepingTimes(h.modelsPath);
@@ -177,5 +203,34 @@ describe("a running session re-reads models.yml before its next request", () => 
 		}
 		const [first] = h.requests();
 		expect(allLong(first!)).toBe(true);
+	});
+
+	it("applies an edited output limit to the next request", async () => {
+		using tempDir = TempDir.createSync("@pi-models-config-reload-limits-");
+		const h = await harness(tempDir, { maxTokens: 16384 });
+		try {
+			const session = await h.start(gatewayModel(h.registry));
+			await session.prompt("first");
+			rewrite(h.modelsPath, { maxTokens: 8192 });
+			await session.prompt("second");
+		} finally {
+			await h.close();
+		}
+		expect(h.messagesRequests().map(request => request.body.max_tokens)).toEqual([16384, 8192]);
+	});
+
+	it("applies an edited `!command` header to the next main-loop and side request", async () => {
+		using tempDir = TempDir.createSync("@pi-models-config-reload-headers-");
+		const h = await harness(tempDir, { probeHeader: "!echo old" });
+		try {
+			const session = await h.start(gatewayModel(h.registry));
+			await session.prompt("first");
+			rewrite(h.modelsPath, { probeHeader: "!echo new" });
+			await session.prompt("second");
+			await session.runEphemeralTurn({ promptText: "side question", tools: false });
+		} finally {
+			await h.close();
+		}
+		expect(h.messagesRequests().map(request => request.headers["x-config-probe"])).toEqual(["old", "new", "new"]);
 	});
 });

@@ -378,6 +378,8 @@ export class ModelRegistry {
 	#rejectedConfigStamp: string | null = null;
 	#configReload?: Promise<boolean>;
 	#configGeneration = 0;
+	/** Per-provider digest of the models.yml entry the static catalog was last built from. */
+	#providerConfigFingerprints: Map<string, string> = new Map();
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
 	#cacheDbPath?: string;
@@ -719,7 +721,9 @@ export class ModelRegistry {
 				this.#syncExtensionSources(change.activeSourceIds);
 				return;
 			case "reload":
-				this.#reloadStaticModels({ force: true });
+				// Main's parse, not this thread's read: the file may have changed (or been truncated) since.
+				if (change.config !== undefined) this.#modelsConfigFile.adopt(change.config);
+				this.#reloadStaticModels({ force: true, configLoaded: change.config !== undefined });
 				return;
 			case "invalidateCommands":
 				// Local caches only: forwarding to the owner would echo the invalidation back.
@@ -1037,6 +1041,15 @@ export class ModelRegistry {
 		await this.#refreshRuntimeDiscoveries("offline");
 	}
 
+	/**
+	 * A digest of `provider`'s models.yml entry as last loaded (headers, limits, compat, models, …),
+	 * or undefined when models.yml does not configure it. A session compares it to tell an edit to
+	 * its provider apart from one to another provider, including edits a resolver function hides.
+	 */
+	providerConfigFingerprint(provider: string): string | undefined {
+		return this.#providerConfigFingerprints.get(provider);
+	}
+
 	/** Increments on every rebuild of the static catalog (models.yml load). */
 	get configGeneration(): number {
 		return this.#configGeneration;
@@ -1270,8 +1283,14 @@ export class ModelRegistry {
 			// Models config unchanged since last load; reloading would be redundant.
 			return;
 		}
-		// Inside a runtime-change entry point the mirror replays the reload with the change itself.
-		if (this.#mirrorChangeDepth === 0) this.#recordMirrorChange({ kind: "reload" });
+		// A live reload already parsed and validated the file; re-reading it could pick up a half-written edit.
+		if (!options?.configLoaded) this.#modelsConfigFile.invalidate();
+		// Inside a runtime-change entry point the mirror replays the reload with the change itself. The
+		// change carries the parse this reload uses, so a mirror never reads a later version of the file.
+		if (this.#mirrorChangeDepth === 0) {
+			const loaded = this.#modelsConfigFile.tryLoad();
+			this.#recordMirrorChange({ kind: "reload", ...(loaded.status === "ok" ? { config: loaded.value } : {}) });
+		}
 		let preservedRuntimeState:
 			| {
 					models: Model<Api>[];
@@ -1296,8 +1315,6 @@ export class ModelRegistry {
 				keylessProviders: new Set(this.#keylessProviders),
 			};
 		}
-		// A live reload already parsed and validated the file; re-reading it could pick up a half-written edit.
-		if (!options?.configLoaded) this.#modelsConfigFile.invalidate();
 		this.#customProviderApiKeys.clear();
 		this.#keylessProviders.clear();
 		this.#discoverableProviders = [];
@@ -1412,6 +1429,14 @@ export class ModelRegistry {
 		);
 		this.#lastStaticLoadMtime = this.#modelsConfigFile.getMtimeMs();
 		this.#loadedConfigStamp = configStamp;
+		// The parse #loadCustomModels used is still cached, so this reads nothing new.
+		const loaded = this.#ignoreLocalModelConfig ? undefined : this.#modelsConfigFile.tryLoad();
+		this.#providerConfigFingerprints = new Map(
+			Object.entries(loaded?.status === "ok" ? (loaded.value.providers ?? {}) : {}).map(([provider, entry]) => [
+				provider,
+				Bun.hash(JSON.stringify(entry)).toString(16),
+			]),
+		);
 		this.#configGeneration++;
 	}
 
@@ -4335,8 +4360,11 @@ type ModelRegistryMirrorChangeInput =
 	| { readonly kind: "unregister"; readonly name: string }
 	| { readonly kind: "clearSources"; readonly sourceIds: readonly string[] }
 	| { readonly kind: "syncSources"; readonly activeSourceIds: readonly string[] }
-	/** A static (models.yml + cache) reload outside the other changes. */
-	| { readonly kind: "reload" }
+	/**
+	 * A static (models.yml + cache) reload outside the other changes. `config` is the parse the owner
+	 * reloaded from, absent when the file was missing or invalid; a mirror reloads from it, not from disk.
+	 */
+	| { readonly kind: "reload"; readonly config?: ModelsConfig }
 	/** Owner dropped cached `!command` results (one provider's, or all when `provider` is undefined). */
 	| { readonly kind: "invalidateCommands"; readonly provider: string | undefined };
 

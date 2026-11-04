@@ -328,4 +328,9 @@ export class ConfigFile<T> implements IConfigFile<T> {
 	invalidate() {
 		this.#cache = undefined;
 	}
+
+	/** Serve `value` as this file's parsed contents until the next {@link invalidate}, without reading the file. */
+	adopt(value: T) {
+		this.#cache = { value, status: "ok" };
+	}
 }

@@ -1278,6 +1278,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Registry catalog generation and model object last checked against it (see {@link syncModelConfig}). */
 	#modelConfigGeneration: number | undefined;
 	#modelConfigCheckedModel: Model | undefined;
+	/** Per model object: the catalog configuration it was last validated against (see {@link #currentConfigFor}). */
+	#boundModelConfigs = new WeakMap<Model, { key: string; contextWindow: number | null; maxTokens: number | null }>();
 	/** Main thread only: spots streaming spawning tool calls so a subagent worker boots ahead of dispatch. */
 	readonly #spawnSignal = isMainThread() ? new SubagentSpawnSignal() : undefined;
 	/** Creation-time permission for switchSession to keep the current model when a target's saved model is unrestorable. */
@@ -7020,17 +7022,45 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * `model` as the current catalog configures it: the registry entry for the
-	 * same provider and id when its configuration differs, else `model` itself.
-	 * Only configuration counts, so an edit to another provider leaves the
-	 * object (and a context window probed at runtime) alone; a lazily probed
-	 * window survives a re-bind too.
+	 * same provider and id when its configuration changed, else `model` itself.
+	 *
+	 * A model object this session validated before is compared by what it was
+	 * validated against: its provider's models.yml digest (which sees header
+	 * resolvers and other functions that compare by identity) and the catalog
+	 * entry's configured fields and limits. An object the session has not seen
+	 * (handed in from an older catalog) is compared field by field, limits
+	 * aside, since the session may have fitted them. An edit to another provider
+	 * leaves the object alone. A context window probed at runtime survives a
+	 * re-bind, unless the edit changed the configured limits.
 	 */
 	#currentConfigFor(model: Model): Model {
 		const entry = this.#modelRegistry.find(model.provider, model.id);
-		if (!entry || Bun.deepEquals(modelConfigShape(entry), modelConfigShape(model))) return model;
+		if (!entry) return model;
+		const current = {
+			key: `${this.#modelRegistry.providerConfigFingerprint(model.provider) ?? ""}:${Bun.hash(
+				JSON.stringify([modelConfigShape(entry), entry.contextWindow, entry.maxTokens]),
+			).toString(16)}`,
+			contextWindow: entry.contextWindow,
+			maxTokens: entry.maxTokens,
+		};
+		const validated = this.#boundModelConfigs.get(model);
+		const changed = validated
+			? validated.key !== current.key
+			: !Bun.deepEquals(modelConfigShape(entry), modelConfigShape(model));
+		if (!changed) {
+			this.#boundModelConfigs.set(model, current);
+			return model;
+		}
+		const limitsEdited =
+			validated !== undefined &&
+			(validated.contextWindow !== entry.contextWindow || validated.maxTokens !== entry.maxTokens);
 		const fitted = this.#modelRegistry.fitContextWindow(entry, this.settings);
-		if (!this.#lazyContextRefreshed.has(`${model.provider}/${model.id}`)) return fitted;
-		return { ...fitted, contextWindow: model.contextWindow, maxTokens: model.maxTokens };
+		const rebound =
+			limitsEdited || !this.#lazyContextRefreshed.has(`${model.provider}/${model.id}`)
+				? fitted
+				: { ...fitted, contextWindow: model.contextWindow, maxTokens: model.maxTokens };
+		this.#boundModelConfigs.set(rebound, current);
+		return rebound;
 	}
 
 	/**

@@ -406,7 +406,15 @@ describe("ModelRegistry runtime discovery", () => {
 			reloadIfConfigChanged: () => owner.reloadIfConfigChanged(),
 		} as unknown as ModelRegistryOwner;
 		const mirror = new ModelRegistry(authStorage, modelsJsonPath, { owner: ownerSurface });
-		const subscription = owner.subscribeMirror(batch => mirror.applyMirrorBatch(batch));
+		// A writer truncates models.yml after main validated it and before the mirror replays the reload:
+		// the mirror must rebuild from main's parse, not from what the file now holds.
+		let truncateBeforeReplay = false;
+		const subscription = owner.subscribeMirror(batch => {
+			if (truncateBeforeReplay && batch.changes.some(change => change.kind === "reload")) {
+				fs.writeFileSync(modelsJsonPath, "providers:\n  gateway: [unterminated\n");
+			}
+			mirror.applyMirrorBatch(batch);
+		});
 		mirror.applyMirrorBatch(subscription.snapshot);
 		const longRetention = () =>
 			(mirror.find("gateway", "claude-gateway")?.compat as { supportsLongCacheRetention?: boolean } | undefined)
@@ -426,6 +434,7 @@ describe("ModelRegistry runtime discovery", () => {
 			});
 			const next = new Date(fs.statSync(modelsJsonPath).mtimeMs + 1_000);
 			fs.utimesSync(modelsJsonPath, next, next);
+			truncateBeforeReplay = true;
 			expect(await mirror.reloadIfConfigChanged()).toBe(true);
 			// The owner flushes its change batch on a microtask; the bridge delivers it before answering.
 			await Bun.sleep(0);
