@@ -68,13 +68,14 @@ import type {
 	AutocompleteProvider,
 	Component,
 	EditorTheme,
+	Keybinding,
 	KeyId,
 	OverlayHandle,
 	OverlayOptions,
 	TUI,
 } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
-import type { AppKeybinding, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type { CodeReviewAnnotation, TextReviewAnnotation } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 export type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
@@ -146,7 +147,7 @@ import type {
 import type { SlashCommandInfo } from "../slash-commands";
 import type { TerminalLaunchRequest, TerminalLaunchResult } from "../../subprocess/terminal-launch";
 
-export type { OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
+export type { Keybinding, OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
 export type { AppKeybinding, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 export type { ExecOptions, ExecResult } from "../../exec/exec";
 export type { AgentToolResult, AgentToolUpdateCallback };
@@ -1791,12 +1792,14 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
  * What holds a keyboard chord, as reported by {@link ExtensionAPI.getShortcutConflict}.
  *
  * - `reserved`: omp keeps the chord; a shortcut on it is never bound.
- * - `keybinding`: these `app.*` actions are bound to it; where they apply they usually take the key first.
+ * - `keybinding`: these keymap actions are bound to it in the main editor: `app.*` actions, which
+ *   usually take the key first where they apply, and `tui.editor.*` / `tui.input.*` editing keys,
+ *   which a shortcut on the chord would take over.
  * - `extension`: another extension's shortcut is on it; only one of them runs.
  */
 export type ShortcutConflict =
 	| { kind: "reserved" }
-	| { kind: "keybinding"; keybindings: AppKeybinding[] }
+	| { kind: "keybinding"; keybindings: Keybinding[] }
 	| { kind: "extension"; extensionPath: string };
 
 /**
