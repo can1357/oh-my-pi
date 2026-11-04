@@ -2625,6 +2625,47 @@ describe("agentLoop with AgentMessage", () => {
 		expect(transformed.sort()).toEqual(["read", "write"]);
 	});
 
+	it("counts a call as writing when its approval resolver takes a context", async () => {
+		const toolSchema = type({ value: "string" });
+		const settled: Record<string, Promise<void> | undefined> = {};
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "op",
+			label: "Op",
+			description: "Op tool",
+			parameters: toolSchema,
+			// Reads without a context, writes with one.
+			approval: (_args, context) => (context ? "write" : "read"),
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `ok:${params.value}` }], details: { value: params.value } };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-write", name: "op", arguments: { value: "write" } },
+						{ type: "toolCall", id: "tool-read", name: "op", arguments: { value: "read" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			getToolContext: toolCall => {
+				if (toolCall) settled[toolCall.toolCalls[toolCall.index].id] = toolCall.earlierEffectsSettled;
+				return {} as AgentToolContext;
+			},
+		};
+
+		await agentLoop([createUserMessage("start")], context, config, undefined, mock.stream).result();
+
+		expect(settled["tool-write"]).toBeUndefined();
+		expect(settled["tool-read"]).toBeInstanceOf(Promise);
+	});
+
 	it("drops incomplete tool calls when assistant aborts before toolcall_end", async () => {
 		const context: AgentContext = {
 			systemPrompt: ["You are helpful."],
