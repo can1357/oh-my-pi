@@ -649,6 +649,10 @@ fn is_child(ctx: &mut Ctx<'_, '_>, pid: Vpid) -> bool {
 	if ctx.vp.jobs.by_vpid(pid).is_some_and(|j| !j.inherited) {
 		return true;
 	}
+	// A subshell copies `$!`, not its parent's children.
+	if !ctx.k.started(ctx.cx.store, ctx.vp.vpid, pid) {
+		return false;
+	}
 	match ctx.k.proc_state(ctx.cx.store, pid) {
 		Some(crate::bash::vm::ProcState::Exited(_)) => true,
 		Some(crate::bash::vm::ProcState::Running) => ctx.vp.last_bg.is(pid),
@@ -691,6 +695,7 @@ fn wait_all(ctx: &mut Ctx<'_, '_>, force: bool) -> R {
 	if let Some(last) = ctx.vp.last_bg.vpid()
 		&& ctx.vp.jobs.by_vpid(last).is_none()
 		&& ctx.k.proc_state(ctx.cx.store, last) == Some(crate::bash::vm::ProcState::Running)
+		&& ctx.k.started(ctx.cx.store, ctx.vp.vpid, last)
 	{
 		list.push(last);
 	}
@@ -714,7 +719,8 @@ fn wait_any(ctx: &mut Ctx<'_, '_>, args: &[BString], into: Option<BString>) -> R
 				&& matches!(
 					ctx.k.proc_state(ctx.cx.store, pid),
 					Some(crate::bash::vm::ProcState::Exited(_))
-				))
+				)
+				&& ctx.k.started(ctx.cx.store, ctx.vp.vpid, pid))
 			.then_some(pid)
 		});
 		if let Some(pid) = kept {
@@ -735,7 +741,8 @@ fn wait_any(ctx: &mut Ctx<'_, '_>, args: &[BString], into: Option<BString>) -> R
 					.or_else(|| {
 						(ctx.vp.last_bg.is(p)
 							&& ctx.k.proc_state(ctx.cx.store, p)
-								== Some(crate::bash::vm::ProcState::Running))
+								== Some(crate::bash::vm::ProcState::Running)
+							&& ctx.k.started(ctx.cx.store, ctx.vp.vpid, p))
 						.then_some(p)
 					}),
 				None => super::jobs::spec(ctx, a)

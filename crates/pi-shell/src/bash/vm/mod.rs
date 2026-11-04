@@ -636,6 +636,19 @@ impl Kernel {
 		}
 	}
 
+	/// Whether `vp` started child vproc `vpid` (its record names `vp` as
+	/// parent): a subshell copies `$!`, not its parent's children.
+	pub fn started(&mut self, store: &mut dyn StateStore, vp: Vpid, vpid: Vpid) -> bool {
+		match store.get(Key::Proc(vpid)) {
+			Ok(Some(Record::Proc { parent, .. })) => *parent == Some(vp),
+			Ok(_) => false,
+			Err(err) => {
+				self.root.fail(err);
+				false
+			},
+		}
+	}
+
 	/// Take the exit status of finished child vproc `vpid` (its record goes);
 	/// `None` while it runs or when unknown.
 	pub fn proc_collect(&mut self, store: &mut dyn StateStore, vpid: Vpid) -> Option<i32> {
@@ -2470,6 +2483,9 @@ impl Vproc {
 		// Exact: `clone_from` into the empty vector reserves four slots.
 		vp.pipestatus.reserve_exact(self.pipestatus.len());
 		vp.pipestatus.extend_from_slice(&self.pipestatus);
+		// `$!` is a parameter every subshell copies; `wait` and `kill`
+		// still check that the child it names is this vproc's own.
+		vp.last_bg = self.last_bg;
 		vp.getopts.clone_from(&self.getopts);
 		vp.command.clone_from(&self.command);
 		vp.rlimits.clone_from(&self.rlimits);

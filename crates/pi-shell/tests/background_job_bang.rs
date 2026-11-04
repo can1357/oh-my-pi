@@ -44,7 +44,10 @@ async fn every_subshell_sees_the_parents_bang() {
 		(r#"/bin/sleep 0.1 & [ "$!" = "$(echo $!)" ] && echo same || echo differ; wait"#, "same\n"),
 		(r#"f(){ :; }; f & [ "$!" = "$(echo $!)" ] && echo same || echo differ; wait"#, "same\n"),
 		(r#"f(){ :; }; f & p=$!; ( [ "$!" = "$p" ] && echo same ); wait"#, "same\n"),
-		(r#"f(){ :; }; f & p=$!; echo x | { read -r _; [ "$!" = "$p" ] && echo same; }; wait"#, "same\n"),
+		(
+			r#"f(){ :; }; f & p=$!; echo x | { read -r _; [ "$!" = "$p" ] && echo same; }; wait"#,
+			"same\n",
+		),
 	])
 	.await;
 }
@@ -54,9 +57,15 @@ async fn every_subshell_sees_the_parents_bang() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_subshell_does_not_wait_for_its_parents_child() {
 	assert_bash_outputs(&[
-		(r#"f(){ sleep 0.2; }; f & p=$!; ( wait "$p" 2>/dev/null; echo "s=$?" ); wait "$!"; echo "t=$?""#, "s=127\nt=0\n"),
+		(
+			r#"f(){ sleep 0.2; }; f & p=$!; ( wait "$p" 2>/dev/null; echo "s=$?" ); wait "$!"; echo "t=$?""#,
+			"s=127\nt=0\n",
+		),
 		(r"f(){ sleep 0.2; }; f & ( wait 2>&1 ); echo done; wait", "done\n"),
-		(r#"f(){ sleep 0.2; }; f & p=$!; ( wait -n "$p" 2>/dev/null; echo "n=$?" ); wait"#, "n=127\n"),
+		(
+			r#"f(){ sleep 0.2; }; f & p=$!; ( wait -n "$p" 2>/dev/null; echo "n=$?" ); wait"#,
+			"n=127\n",
+		),
 	])
 	.await;
 }
