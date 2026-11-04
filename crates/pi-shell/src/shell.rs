@@ -431,6 +431,22 @@ const fn cancelled_result(reason: AbortReason) -> ShellRunResult {
 	}
 }
 
+/// Waits up to [`CANCEL_RUN_GRACE`] for a cancelled run's task, then aborts
+/// it (dropping the run stops the command with `KILL`). Returns the task's
+/// [`OutputNotDelivered`] failure: output the consumer did not take is lost
+/// whatever ended the command, so the cancellation must not hide it.
+async fn settle_cancelled_run<T>(task: &mut tokio::task::JoinHandle<Result<T>>) -> Option<Error> {
+	match time::timeout(CANCEL_RUN_GRACE, &mut *task).await {
+		Ok(Ok(Err(err))) if err.is::<OutputNotDelivered>() => Some(err),
+		Ok(_) => None,
+		Err(_) => {
+			task.abort();
+			let _ = task.await;
+			None
+		},
+	}
+}
+
 async fn run_shell_session(
 	session: Arc<TokioMutex<Option<ShellSessionCore>>>,
 	abort_state: ShellAbortState,
@@ -464,12 +480,7 @@ async fn run_shell_session(
 		res = &mut run_task => res,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut run_task).await;
-			if graceful.is_err() {
-				// Dropping the run stops the command with `KILL`.
-				run_task.abort();
-				let _ = run_task.await;
-			}
+			let undelivered = settle_cancelled_run(&mut run_task).await;
 			abort_state.clear().await;
 			// Use try_lock to avoid deadlocking if another task holds the session.
 			// If we can't acquire the lock, the session will be cleaned up when the
@@ -477,7 +488,7 @@ async fn run_shell_session(
 			if let Ok(mut guard) = session.try_lock() {
 				*guard = None;
 			}
-			return Ok(cancelled_result(reason));
+			return undelivered.map_or(Ok(cancelled_result(reason)), Err);
 		}
 	};
 	let res =
@@ -517,12 +528,8 @@ async fn run_shell_oneshot(
 		result = &mut task => result,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut task).await;
-			if graceful.is_err() {
-				task.abort();
-				let _ = task.await;
-			}
-			return Ok(cancelled_result(reason));
+			let undelivered = settle_cancelled_run(&mut task).await;
+			return undelivered.map_or(Ok(cancelled_result(reason)), Err);
 		},
 	};
 
@@ -550,12 +557,8 @@ async fn run_shell_oneshot_streams(
 		result = &mut task => result,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut task).await;
-			if graceful.is_err() {
-				task.abort();
-				let _ = task.await;
-			}
-			return Ok(cancelled_result(reason));
+			let undelivered = settle_cancelled_run(&mut task).await;
+			return undelivered.map_or(Ok(cancelled_result(reason)), Err);
 		},
 	};
 
@@ -950,6 +953,8 @@ enum CommandCaptureMode {
 struct CommandRunOutput {
 	outcome:        RunOutcome,
 	buffered:       Option<BufferedOutput>,
+	/// The command ran, but its output did not all reach the consumer.
+	undelivered:    Option<OutputNotDelivered>,
 	/// A command reported an error yet went on, so the exit status hides it.
 	reported_error: bool,
 }
@@ -1122,6 +1127,9 @@ async fn run_shell_command_single(
 	let command_run =
 		run_shell_command_once(session, scope, options.command.clone(), cwd, on_chunk, capture_mode)
 			.await?;
+	if let Some(undelivered) = command_run.undelivered {
+		return Err(undelivered.into());
+	}
 	let status = command_run.outcome.status;
 
 	let mut minimized_out = None;
@@ -1202,6 +1210,11 @@ async fn run_shell_command_segmented_chain(
 	};
 
 	let mut cwd = cwd;
+	let mut on_chunk = on_chunk;
+	// The first segment whose output did not reach the consumer. The chain
+	// still runs to its end, as the same command does without the minimizer;
+	// later segments' output is discarded, and the run fails once it is done.
+	let mut undelivered = None;
 	let mut aggregate = Some(ChainCapture::new());
 	let mut previous_succeeded = true;
 	let mut last_status = None;
@@ -1227,6 +1240,10 @@ async fn run_shell_command_segmented_chain(
 		let command_run =
 			run_shell_command_once(session, scope, source, cwd.take(), on_chunk.clone(), capture_mode)
 				.await?;
+		if let Some(lost) = command_run.undelivered {
+			undelivered.get_or_insert(lost);
+			on_chunk = None;
+		}
 
 		let exit = command_run.outcome.status;
 		previous_succeeded = exit == 0;
@@ -1267,6 +1284,9 @@ async fn run_shell_command_segmented_chain(
 		}
 	}
 
+	if let Some(undelivered) = undelivered {
+		return Err(undelivered.into());
+	}
 	let Some(status) = last_status else {
 		return Err(Error::msg("Segmented chain executed no segments"));
 	};
@@ -1385,12 +1405,13 @@ async fn run_shell_command_once(
 	let _ = cancel_bridge.await;
 
 	let outcome = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
-	let buffered = match output_reader_result("output", reader)? {
-		OutputRead::Buffered(output) => Some(output),
-		OutputRead::Streaming => None,
+	let (buffered, undelivered) = match output_reader_result("output", reader)? {
+		Ok(OutputRead::Buffered(output)) => (Some(output), None),
+		Ok(OutputRead::Streaming) => (None, None),
+		Err(undelivered) => (None, Some(undelivered)),
 	};
 	let reported_error = reported_error.is_some_and(|flag| flag.load(Ordering::Relaxed));
-	Ok(CommandRunOutput { outcome, buffered, reported_error })
+	Ok(CommandRunOutput { outcome, buffered, undelivered, reported_error })
 }
 
 /// Waits for a run's output readers once its foreground command is done.
@@ -1456,16 +1477,16 @@ impl std::fmt::Display for OutputNotDelivered {
 
 impl std::error::Error for OutputNotDelivered {}
 
-/// A reader task's outcome as the run's result: a reader that could not read
-/// its pipe or deliver what it read, or that panicked, fails the run rather
-/// than return it without the output.
+/// A reader task's outcome: its output, or [`OutputNotDelivered`] when it
+/// could not read its pipe or deliver what it read. A reader that panicked
+/// fails the run. Neither returns the run as if its output had all arrived.
 fn output_reader_result<T>(
 	stream: &'static str,
 	reader: std::result::Result<io::Result<T>, tokio::task::JoinError>,
-) -> Result<T> {
+) -> Result<std::result::Result<T, OutputNotDelivered>> {
 	match reader {
-		Ok(Ok(output)) => Ok(output),
-		Ok(Err(cause)) => Err(OutputNotDelivered { stream, cause }.into()),
+		Ok(Ok(output)) => Ok(Ok(output)),
+		Ok(Err(cause)) => Ok(Err(OutputNotDelivered { stream, cause })),
 		Err(err) => Err(Error::msg(format!("Command {stream} reader failed: {err}"))),
 	}
 }
@@ -1559,8 +1580,8 @@ async fn run_shell_command_streams_in_filesystem(
 	let _ = cancel_bridge.await;
 
 	let outcome = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
-	output_reader_result("stdout", stdout)?;
-	output_reader_result("stderr", stderr)?;
+	output_reader_result("stdout", stdout)??;
+	output_reader_result("stderr", stderr)??;
 	Ok(CommandResult {
 		status:      outcome.status,
 		minimized:   None,

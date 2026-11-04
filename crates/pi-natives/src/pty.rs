@@ -460,6 +460,14 @@ fn run_pty_sync(
 	let mut reader = master
 		.try_clone_reader()
 		.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?;
+	// A second handle on the master counts what the terminal holds once the
+	// master itself is dropped (see the drain). It is taken here, so a host
+	// out of descriptors fails the run rather than leave the drain a count of
+	// zero for a terminal that still holds output.
+	#[cfg(unix)]
+	let unread_probe = reader
+		.try_clone()
+		.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?;
 
 	// The reader→JS queue is bounded like the bash bridge (#4078): a full queue
 	// parks the reader's `send`, filling the OS PTY buffer and backpressuring
@@ -644,16 +652,8 @@ fn run_pty_sync(
 	// reached `on_chunk` (#7421). A reader parked on backpressure is not
 	// aborted. A descendant holding the slave open is the existing no-join
 	// case and is the only path that may skip an unbounded wait, once what the
-	// terminal held when the child had gone has reached `on_chunk`. A second
-	// handle on the master counts that output.
-	#[cfg(unix)]
-	let unread_probe = master.as_raw_fd().and_then(|fd| {
-		// SAFETY: `fd` is the master's descriptor, open while `master` lives;
-		// it is only duplicated here.
-		unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }
-			.try_clone_to_owned()
-			.ok()
-	});
+	// terminal held when the child had gone has reached `on_chunk`;
+	// `unread_probe` counts that output.
 	#[cfg(windows)]
 	{
 		let (drop_tx, drop_rx) = flume::unbounded::<()>();
@@ -668,7 +668,7 @@ fn run_pty_sync(
 		drop(master);
 	}
 	#[cfg(unix)]
-	let unread = || unread_probe.as_ref().map_or(0, pty_unread_bytes);
+	let unread = || pty_unread_bytes(&unread_probe);
 	// ConPTY gives no count of unread output, and the reader there reads
 	// blocking, so it cannot tell a read in flight from a wait either.
 	#[cfg(not(unix))]
@@ -692,13 +692,16 @@ fn run_pty_sync(
 }
 
 /// Queues what `decoder` holds at the end of the output (a partial character
-/// becomes U+FFFD); `false` once the pump is gone.
+/// becomes U+FFFD); `false` once the pump is gone. The decoder stays locked
+/// until that text is queued and counted, as for every chunk, so the drain
+/// never flushes an empty decoder and counts the handed text without it.
 fn hand_rest(
 	decoder: &Mutex<OutputDecoder>,
 	progress: &ReaderProgress,
 	queue: &flume::Sender<ReaderEvent>,
 ) -> bool {
-	let rest = decoder.lock().finish();
+	let mut decoder = decoder.lock();
+	let rest = decoder.finish();
 	rest.is_empty() || progress.hand(queue, rest)
 }
 

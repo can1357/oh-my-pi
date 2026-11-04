@@ -2150,7 +2150,9 @@ async fn segmented_chain_runs_to_its_end_after_its_consumer_is_gone() {
 	.await
 	.expect("the run ends");
 	assert_eq!(
-		fs::read_to_string(root.path().join("marker")).ok().as_deref(),
+		fs::read_to_string(root.path().join("marker"))
+			.ok()
+			.as_deref(),
 		Some("done"),
 		"the segment after the lost output ran"
 	);
