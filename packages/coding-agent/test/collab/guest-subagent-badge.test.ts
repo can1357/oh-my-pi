@@ -106,6 +106,9 @@ function makeGuestContext(): InteractiveModeContext {
 			const agentIds = getRunningSubagentBadgeAgentIds(registry);
 			ctx.statusLine.setRunningSubagents(agentIds);
 		},
+		setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
+			Object.assign(ctx, { collabGuest: guest });
+		},
 	} as unknown as InteractiveModeContext;
 	return ctx;
 }

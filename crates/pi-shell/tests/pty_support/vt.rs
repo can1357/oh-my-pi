@@ -256,7 +256,12 @@ impl Screen {
 		}
 		self.wrap = false;
 		match fin {
-			b'A' => self.row = self.row.saturating_sub(arg(0, 1)).max(self.top.min(self.row)),
+			b'A' => {
+				self.row = self
+					.row
+					.saturating_sub(arg(0, 1))
+					.max(self.top.min(self.row))
+			},
 			b'B' => self.row = (self.row + arg(0, 1)).min(self.bottom.max(self.row)),
 			b'C' => self.col = (self.col + arg(0, 1)).min(self.cols - 1),
 			b'D' => self.col = self.col.saturating_sub(arg(0, 1)),

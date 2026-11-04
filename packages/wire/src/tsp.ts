@@ -18,6 +18,8 @@
  * here is optional.
  */
 
+import type { ShellVizPresentation } from "./shell-viz";
+
 /** Protocol version this build speaks. */
 export const TSP_VERSION = 1;
 /** APC identifier: every TSP message body starts with `tsp;`. */
@@ -81,6 +83,7 @@ export const TSP_KINDS = [
 	"chart",
 	"meter",
 	"effort",
+	"shell",
 ] as const;
 
 export type TspKind = (typeof TSP_KINDS)[number];
@@ -936,6 +939,26 @@ export interface TspChartProps {
 	size?: "sm" | "md" | "lg";
 }
 
+/** Engine-produced shell presentation; hosts render rows and forward controls, never syntax or history. */
+export interface TspShellProps {
+	/** Canonical semantic presentation, shared with the ANSI inspector. */
+	presentation: ShellVizPresentation;
+	/** Show replay controls only in the explicitly opened inspector. */
+	inspector?: boolean;
+	/** Changed only by explicit seek/reset/live-mode transitions, clearing native highlight trails. */
+	replayEpoch?: number;
+	/** This mounted call received a real execution-start event, not a settled historical load. */
+	liveOrigin?: boolean;
+	/** Working directory shown ahead of the script when it differs from the project's. */
+	cwd?: string;
+	lang?: "bash" | "zsh";
+	/**
+	 * Clamp the command to its first `lines` drawn lines under a "N more lines" button; gives way inside an open
+	 * disclosure, and never applies in the inspector. The Raw/Pseudo switch and menu stay on the first line.
+	 */
+	preview?: { lines: number };
+}
+
 /** Kind-specific props, indexed by kind. */
 export interface TspPropsByKind {
 	col: TspColProps;
@@ -983,6 +1006,7 @@ export interface TspPropsByKind {
 	chart: TspChartProps;
 	meter: TspMeterProps;
 	effort: TspEffortProps;
+	shell: TspShellProps;
 }
 
 /**

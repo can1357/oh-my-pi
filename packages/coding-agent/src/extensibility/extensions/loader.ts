@@ -39,6 +39,7 @@ import { getAllPluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import { notifyTranscriptPresentersChanged } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import type {
 	AssistantTextRenderer,
 	AssistantThinkingRenderer,
@@ -52,9 +53,11 @@ import type {
 	PreparedExtension,
 	ProviderConfig,
 	RegisteredCommand,
+	ShortcutConflict,
 	SourceInfo,
 	ToolDefinition,
 	ToolInfo,
+	TranscriptPresenter,
 } from "./types";
 
 installLegacyPiSpecifierShim();
@@ -128,6 +131,10 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	unregisterProvider(name: string): void {
 		const remaining = this.pendingProviderRegistrations.filter(registration => registration.name !== name);
 		this.pendingProviderRegistrations.splice(0, this.pendingProviderRegistrations.length, ...remaining);
+	}
+
+	getShortcutConflict(): ShortcutConflict | undefined {
+		throw new ExtensionRuntimeNotInitializedError();
 	}
 
 	sendMessage(): void {
@@ -279,6 +286,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		this.extension.shortcuts.set(shortcut, { shortcut, extensionPath: this.extension.path, ...options });
 	}
 
+	getShortcutConflict(shortcut: KeyId): ShortcutConflict | undefined {
+		return this.runtime.getShortcutConflict(shortcut, this.extension.path);
+	}
+
 	registerFlag(
 		name: string,
 		options: { description?: string; type: "boolean" | "string"; default?: boolean | string },
@@ -304,6 +315,25 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			);
 		}
 		this.extension.assistantTextRenderers.push(renderer);
+	}
+
+	registerTranscriptPresenter(presenter: TranscriptPresenter): () => void {
+		if (typeof presenter !== "function") {
+			throw new TypeError(
+				`registerTranscriptPresenter expects a function, got ${typeof presenter} (extension ${this.extension.path})`,
+			);
+		}
+		const presenters = this.extension.transcriptPresenters;
+		presenters.push(presenter);
+		notifyTranscriptPresentersChanged();
+		let registered = true;
+		return () => {
+			if (!registered) return;
+			registered = false;
+			const index = presenters.indexOf(presenter);
+			if (index >= 0) presenters.splice(index, 1);
+			notifyTranscriptPresentersChanged();
+		};
 	}
 
 	registerLinkScheme(scheme: string): void {
@@ -427,6 +457,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		toolRegistrationListeners: new Set(),
 		assistantThinkingRenderers: [],
 		assistantTextRenderers: [],
+		transcriptPresenters: [],
 		linkSchemes: [],
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],

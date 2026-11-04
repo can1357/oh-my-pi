@@ -388,9 +388,11 @@ pub fn bin_fg(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: JobFunc)
 			JobFunc::Jobs => print_listed(ctx, job, lng)?,
 			JobFunc::Disown => {
 				if stopped {
-					let pid = ctx.vp.jobs.get(job).map_or(0, |j| {
-						jobctl::group(ctx.k, j.vpid).unwrap_or_else(|| j.pid())
-					});
+					let pid = ctx
+						.vp
+						.jobs
+						.get(job)
+						.map_or(0, |j| jobctl::group(ctx.k, j.vpid).unwrap_or_else(|| j.pid()));
 					ctx.usage(format!("warning: job is suspended, use `kill -CONT -{pid}' to resume"));
 				}
 				delete(ctx.vp, job);
@@ -440,14 +442,13 @@ pub fn job_params(
 						JobState::Running => ("running", String::from("running")),
 						JobState::Stopped(sig) => ("suspended", String::from(jobctl::sigmsg(sig))),
 						JobState::Done(0) => ("done", String::from("done")),
-						JobState::Done(status) => (
-							"done",
-							match jobctl::death_signal(status, platform) {
+						JobState::Done(status) => {
+							("done", match jobctl::death_signal(status, platform) {
 								Some(sig) => String::from(jobctl::sigmsg(sig)),
 								// zsh prints the raw wait status here.
 								None => format!("exit {}", status << 8),
-							},
-						),
+							})
+						},
 					};
 					BString::from(format!("{whole}{mark}:{}={one}", j.pid()))
 				},

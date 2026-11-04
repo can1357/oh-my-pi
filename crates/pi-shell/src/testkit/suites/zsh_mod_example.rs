@@ -36,8 +36,8 @@ fn zsh_mod_example_builtin_shows_and_sets_its_parameters() {
 	assert_eq!(
 		out,
 		format!(
-			"{SETUP}+b:example\n+C:ex\n+c:len\n+f:length\n+f:sum\n+p:exarr\n+p:exint\n+p:exstr\nOptions: \
-			 afgls\nArguments: a b\nName: example\n\nInteger Parameter: 42\nString Parameter: \
+			"{SETUP}+b:example\n+C:ex\n+c:len\n+f:length\n+f:sum\n+p:exarr\n+p:exint\n+p:exstr\\
+			 nOptions: afgls\nArguments: a b\nName: example\n\nInteger Parameter: 42\nString Parameter: \
 			 example\nArray Parameter: example array\n2 a a b\nOptions: \nArguments: q r\nName: \
 			 example\n\nInteger Parameter: 2\nString Parameter: a\nArray Parameter: a b\n2 q q r\n"
 		)
@@ -82,8 +82,8 @@ fn zsh_mod_example_messages_on_load_and_unload() {
 #[test]
 fn zsh_mod_example_conditions() {
 	let (out, err, st) = zsh(
-		"zmodload zsh/example; [[ -len \"\" ]] && echo e0; [[ -len abc 3 ]] && echo l3; [[ -len \
-		 abc 1+1 ]] || echo n2; [[ ex -ex ample ]] && echo ex; [[ e -ex xample ]] || echo no",
+		"zmodload zsh/example; [[ -len \"\" ]] && echo e0; [[ -len abc 3 ]] && echo l3; [[ -len abc \
+		 1+1 ]] || echo n2; [[ ex -ex ample ]] && echo ex; [[ e -ex xample ]] || echo no",
 	);
 	assert_eq!(err, "");
 	assert_eq!(out, format!("{SETUP}e0\nl3\nn2\nex\n"));
@@ -116,8 +116,8 @@ fn zsh_mod_example_wrapper_sets_globdots_for_example_functions() {
 	host.fs.add_file("/w/b", b"", 0o644);
 	let (out, err, st) = zsh_on(
 		host,
-		"zmodload zsh/example; f(){ echo /w/*; }; examplef(){ echo /w/*; }; f; examplef; f; [[ \
-		 -o globdots ]] || echo off",
+		"zmodload zsh/example; f(){ echo /w/*; }; examplef(){ echo /w/*; }; f; examplef; f; [[ -o \
+		 globdots ]] || echo off",
 	);
 	assert_eq!(err, "");
 	assert_eq!(out, format!("{SETUP}/w/b\n/w/.a /w/b\n/w/b\noff\n"));

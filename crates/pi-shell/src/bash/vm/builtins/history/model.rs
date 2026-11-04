@@ -386,8 +386,9 @@ impl Hist {
 		let cacheable = vp.overlay.is_none();
 		if !self.saved {
 			self.st.version = self.st.version.wrapping_add(1);
-			let events = (!self.entries.is_empty())
-				.then(|| Record::Misc(BString::from(postcard::to_allocvec(&*self.entries).unwrap_or_default())));
+			let events = (!self.entries.is_empty()).then(|| {
+				Record::Misc(BString::from(postcard::to_allocvec(&*self.entries).unwrap_or_default()))
+			});
 			state::store_record(root, store, vp, KeyBuf::Misc(MiscKey::ZshHistory), events);
 		}
 		if cacheable {

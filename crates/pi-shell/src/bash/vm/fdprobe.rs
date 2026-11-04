@@ -228,7 +228,9 @@ pub fn perform(
 	let mut tcx = Context::from_waker(&k.waker);
 	let tcx = &mut tcx;
 	match probe {
-		FdProbe::ReadOnce { fd, max, timeout_ns } => read_once(tcx, cx, vp, sc, *fd, *max, *timeout_ns),
+		FdProbe::ReadOnce { fd, max, timeout_ns } => {
+			read_once(tcx, cx, vp, sc, *fd, *max, *timeout_ns)
+		},
 		FdProbe::Write { fd, data } => write_all(tcx, vp, sc, *fd, data),
 		FdProbe::Select { sets, timeout_ns } => select(tcx, cx, vp, sc, sets, *timeout_ns),
 		FdProbe::Open { path, flags, mode, slot, fd_flags } => {

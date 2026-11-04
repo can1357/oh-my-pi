@@ -150,19 +150,33 @@ impl Engine {
 		*h.finalize().as_bytes()
 	}
 
-	/// Compile one parsed top-level command of `src`; constructs not
-	/// implemented yet become a unit that fails loudly.
+	/// Compile an owned command; only an observer retains its canonical tree.
 	pub(crate) fn compile(
 		&self,
-		cc: &CompleteCommand,
+		cc: CompleteCommand,
 		src: &[u8],
 		mode: ModeId,
 		features: Features,
+		observed: bool,
 	) -> Arc<Unit> {
-		let unit = ir::lower_deferred(cc, src, mode, features).unwrap_or_else(|what| {
+		let compiled = ir::lower_deferred(&cc, src, mode, features).unwrap_or_else(|what| {
 			ir::abort_unit(cc.span.slice(src), mode, features, cc.line, vec![what.into()], 0, 2)
 		});
-		self.intern(unit)
+		let unit = self.intern(compiled);
+		if observed && unit.trace_syntax.get().is_none() {
+			let syntax = Arc::new(
+				crate::bash::trace::syntax::UnitSyntax::list(cc).with_context(mode, features.bits()),
+			);
+			Self::share_syntax(&unit, &syntax);
+		}
+		unit
+	}
+
+	fn share_syntax(unit: &Unit, syntax: &Arc<crate::bash::trace::syntax::UnitSyntax>) {
+		let _ = unit.trace_syntax.set(Arc::clone(syntax));
+		for function in &unit.funcs {
+			Self::share_syntax(&function.body, syntax);
+		}
 	}
 
 	/// Share `unit` through the cache (an identical cached unit wins). The
@@ -197,9 +211,34 @@ impl Engine {
 		text: &[u8],
 		kind: TextKind,
 		mode: ModeId,
+		observed: bool,
 	) -> Result<Arc<Unit>, TextError> {
 		let key = (kind, mode, BString::from(text));
 		if let Some(u) = self.texts.lock().get(&key) {
+			if observed && u.trace_syntax.get().is_none() {
+				let syntax = match kind {
+					TextKind::Arith | TextKind::HereDoc => {
+						let mode = if kind == TextKind::Arith {
+							TextMode::Arith
+						} else {
+							TextMode::HereDoc
+						};
+						crate::bash::syntax::parse_text(text, Features::NONE, mode)
+							.ok()
+							.map(|word| {
+								crate::bash::trace::syntax::UnitSyntax::new(
+									0,
+									crate::bash::trace::syntax::SyntaxTree::Word(Arc::new(word)),
+								)
+								.with_context(u.mode, u.features)
+							})
+					},
+					TextKind::Compound => crate::bash::trace::syntax::UnitSyntax::restore(u),
+				};
+				if let Some(syntax) = syntax {
+					let _ = u.trace_syntax.set(Arc::new(syntax));
+				}
+			}
 			return Ok(Arc::clone(u));
 		}
 		let unsupported = |what: &str| TextError {
@@ -215,7 +254,16 @@ impl Engine {
 				};
 				let word = crate::bash::syntax::parse_text(text, Features::NONE, tmode)
 					.map_err(|e| TextError { line: e.line, msg: BString::from(e.bash_msg()) })?;
-				ir::lower_text(&word, text, mode, Features::NONE).map_err(unsupported)?
+				let unit = ir::lower_text(&word, text, mode, Features::NONE).map_err(unsupported)?;
+				if observed {
+					let syntax = crate::bash::trace::syntax::UnitSyntax::new(
+						0,
+						crate::bash::trace::syntax::SyntaxTree::Word(Arc::new(word)),
+					)
+					.with_context(mode, Features::NONE.bits());
+					let _ = unit.trace_syntax.set(Arc::new(syntax));
+				}
+				unit
 			},
 			TextKind::Compound => {
 				// bash parses the text as words with the shell parser
@@ -237,7 +285,14 @@ impl Engine {
 				if parser.next_command().is_some() {
 					return Err(unsupported("a compound array value that is not one word list"));
 				}
-				ir::lower_compound(&cc, &src, mode, Features::NONE).map_err(unsupported)?
+				let unit = ir::lower_compound(&cc, &src, mode, Features::NONE).map_err(unsupported)?;
+				if observed {
+					let _ = unit.trace_syntax.set(Arc::new(
+						crate::bash::trace::syntax::UnitSyntax::list(cc)
+							.with_context(mode, Features::NONE.bits()),
+					));
+				}
+				unit
 			},
 		};
 		let unit = Arc::new(unit);

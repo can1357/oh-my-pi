@@ -52,16 +52,20 @@ fn zsh_mod_mapfile_unset_special() {
 	let (out, err, st) = zsh(
 		fs.clone(),
 		"cd /tmp; zmodload zsh/mapfile
-unset mapfile; echo $?; print -r -- \"[${(t)mapfile}]\" ${#mapfile} ${+mapfile} ${+mapfile[f1]} \"[${mapfile[f1]}]\"
-mapfile[mfx]=hello; print -r -- $mapfile[mfx]; print -r -- \"[${(t)mapfile}]\" ${#mapfile} ${mapfile[f1]}
+unset mapfile; echo $?; print -r -- \"[${(t)mapfile}]\" ${#mapfile} ${+mapfile} ${+mapfile[f1]} \
+		 \"[${mapfile[f1]}]\"
+mapfile[mfx]=hello; print -r -- $mapfile[mfx]; print -r -- \"[${(t)mapfile}]\" ${#mapfile} \
+		 ${mapfile[f1]}
 unset mapfile; unset \"mapfile[f1]\"; echo $?; print -l $PWD/*(:t); print -r -- \"[${(t)mapfile}]\"
 mapfile=(a 1); print -r -- \"[${(t)mapfile}]\" $mapfile[a]
-unset mapfile; zmodload -u zsh/mapfile; zmodload zsh/mapfile; print -r -- \"[${(t)mapfile}]\" ${#mapfile}",
+unset mapfile; zmodload -u zsh/mapfile; zmodload zsh/mapfile; print -r -- \"[${(t)mapfile}]\" \
+		 ${#mapfile}",
 	);
 	assert_eq!(
 		out,
-		"0\n[] 0 0 0 []\nhello\n[association-hide-hideval-special] 2 abc\n0\nmfx\n[]\n\
-		 [association-hide-hideval-special] 1\n[association-hide-hideval-special] 2\n"
+		"0\n[] 0 0 0 []\nhello\n[association-hide-hideval-special] 2 \
+		 abc\n0\nmfx\n[]\n[association-hide-hideval-special] 1\n[association-hide-hideval-special] \
+		 2\n"
 	);
 	assert_eq!(err, "");
 	assert_eq!(st, 0);

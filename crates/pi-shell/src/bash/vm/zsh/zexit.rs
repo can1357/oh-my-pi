@@ -104,7 +104,12 @@ pub fn start(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> bool {
 /// the module hooks still run). The frame count to unwind to, `None` when
 /// no hooks run.
 pub fn exit_in_hooks(vp: &mut Vproc, status: i32) -> Option<usize> {
-	let z = vp.zsh.as_deref_mut()?.zexit.as_mut().filter(|z| z.step != Step::Done)?;
+	let z = vp
+		.zsh
+		.as_deref_mut()?
+		.zexit
+		.as_mut()
+		.filter(|z| z.step != Step::Done)?;
 	z.exit = status;
 	Some(z.depth as usize + 1)
 }
@@ -325,7 +330,10 @@ fn report(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, chunks: Vec<Chunk>) {
 	for chunk in chunks {
 		match chunk {
 			Chunk::Diag(d) => k.diag(cx, vp, 0, d),
-			Chunk::Out(fd, bytes) => vp.out.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 }),
+			Chunk::Out(fd, bytes) => {
+				vp.out
+					.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 })
+			},
 		}
 	}
 }

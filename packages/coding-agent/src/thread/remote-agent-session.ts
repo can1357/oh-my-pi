@@ -94,7 +94,7 @@ import {
 	type TranscriptSessionContextOptions,
 } from "../session/session-context";
 import type { CustomEntry, SessionEntry } from "../session/session-entries";
-import { lastModelChangeRole, SessionEntryIndex } from "../session/session-manager";
+import { conversationTip, lastModelChangeRole, SessionEntryIndex } from "../session/session-manager";
 import type { AgentDefinition } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import { type ApprovalGrantStore, getApprovalGrants } from "../tools/approval-cache";
@@ -341,6 +341,7 @@ export class RemoteAgentSession implements AgentViewSession {
 			getEntries: () => [...this.#entries],
 			getBranch: fromId => this.#entryIndex.pathTo(fromId),
 			getLeafId: () => this.#entryIndex.leafId(),
+			getConversationTip: () => conversationTip(this.#entries, this.#entryIndex.branchView()),
 			getSeanceSourceArtifactsDir: () => this.#view.seanceSourceArtifactsDir,
 			appendCustomEntry: (customType, data) => this.#appendCustomEntry(customType, data),
 			flush: () => this.#command("flushSession"),

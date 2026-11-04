@@ -230,7 +230,9 @@ pub fn param_get(ex: &mut Expander<'_, '_>, p: CursesParam) -> X<Option<PValue>>
 		CursesParam::Windows => {
 			PValue::Array(c.map_or_else(Vec::new, |c| c.wins.iter().map(|w| w.name.clone()).collect()))
 		},
-		CursesParam::ColorCount => PValue::Scalar(BString::from(c.map_or(0, |c| c.colors).to_string())),
+		CursesParam::ColorCount => {
+			PValue::Scalar(BString::from(c.map_or(0, |c| c.colors).to_string()))
+		},
 		CursesParam::PairCount => {
 			PValue::Scalar(BString::from(c.map_or(0, |c| c.color_pairs).to_string()))
 		},
@@ -518,7 +520,10 @@ fn with_win(
 /// (an unknown terminal ends the shell, as ncurses does), colors, `cbreak`
 /// and `noecho`.
 fn init(ctx: &mut Ctx<'_, '_>) -> R {
-	let term = ctx.scalar(b"TERM")?.filter(|t| !t.is_empty()).unwrap_or_else(|| "unknown".into());
+	let term = ctx
+		.scalar(b"TERM")?
+		.filter(|t| !t.is_empty())
+		.unwrap_or_else(|| "unknown".into());
 	let Some(ti) = terminfo(ctx, &term)? else {
 		ctx.out_fd(2, format!("Error opening terminal: {term}.\n").as_bytes());
 		return Ok(Outcome { status: 1, control: Control::Exit });
