@@ -158,6 +158,7 @@ export async function startAgentAttachService(options: AgentAttachServiceOptions
 	let ownerSessionId = options.session.sessionManager.getSessionId();
 	let closed = false;
 	let publishPromise: Promise<void> | undefined;
+	let ownerSwitchPromise = Promise.resolve();
 
 	const sameLiveMembership = (membership: Membership): boolean => {
 		const current = options.registry.get(membership.id);
@@ -574,7 +575,7 @@ export async function startAgentAttachService(options: AgentAttachServiceOptions
 		reconcileStartedMemberships();
 	});
 
-	const publish = async (): Promise<void> => {
+	const publish = async (publicationOwnerSessionId: string): Promise<void> => {
 		if (closed || publishPromise) return publishPromise;
 		publishPromise = (async () => {
 			await fs.mkdir(dir, { recursive: true, mode: 0o700 });
@@ -589,11 +590,17 @@ export async function startAgentAttachService(options: AgentAttachServiceOptions
 				{ framing: "lines", maxFrameBytes: MAX_RPC_FRAME_BYTES },
 				connection => {
 					liveConnections.add(connection);
-					handleConnection(connection, token, liveConnections, ownerSessionId);
+					handleConnection(connection, token, liveConnections, publicationOwnerSessionId);
 				},
 			);
 			try {
-				const metadata = { version: ATTACH_VERSION, ownerSessionId, pid: process.pid, endpoint, token };
+				const metadata = {
+					version: ATTACH_VERSION,
+					ownerSessionId: publicationOwnerSessionId,
+					pid: process.pid,
+					endpoint,
+					token,
+				};
 				const temporaryPath = `${metaPath}.tmp`;
 				const handle = await fs.open(temporaryPath, "wx", 0o600);
 				try {
@@ -636,16 +643,17 @@ export async function startAgentAttachService(options: AgentAttachServiceOptions
 		removeFilesSync(privateEndpointFiles(publication.endpoint));
 	};
 
-	const switchOwner = async (): Promise<void> => {
+	const switchOwner = async (nextOwnerSessionId: string): Promise<void> => {
+		await publishPromise;
 		if (closed) return;
 		const previous = currentPublication;
 		currentPublication = undefined;
 		for (const client of clients) failClient(client, "session_gone", "The owner session changed; attach again.");
 		memberships.clear();
 		pendingMemberships.clear();
-		ownerSessionId = options.session.sessionManager.getSessionId();
+		ownerSessionId = nextOwnerSessionId;
 		await withdraw(previous);
-		await publish();
+		await publish(nextOwnerSessionId);
 		reconcileStartedMemberships();
 	};
 
@@ -757,18 +765,21 @@ export async function startAgentAttachService(options: AgentAttachServiceOptions
 	}
 
 	const unregisterSessionChange = options.session.registerSessionChangeCallback(() => {
-		void switchOwner().catch(error => {
-			logger.warn("Agent attach publication could not follow the root session switch", { error: String(error) });
-			options.session.emitNotice(
-				"warning",
-				"Live task attachment is unavailable for the new session.",
-				"agent-attach",
-			);
-		});
+		const nextOwnerSessionId = options.session.sessionManager.getSessionId();
+		ownerSwitchPromise = ownerSwitchPromise
+			.then(() => switchOwner(nextOwnerSessionId))
+			.catch(error => {
+				logger.warn("Agent attach publication could not follow the root session switch", { error: String(error) });
+				options.session.emitNotice(
+					"warning",
+					"Live task attachment is unavailable for the new session.",
+					"agent-attach",
+				);
+			});
 	});
 
 	try {
-		await publish();
+		await publish(ownerSessionId);
 		reconcileStartedMemberships();
 	} catch (error) {
 		closed = true;
@@ -788,6 +799,7 @@ export async function startAgentAttachService(options: AgentAttachServiceOptions
 			unsubscribeProgress();
 			unsubscribeRegistry();
 			unregisterSessionChange();
+			await ownerSwitchPromise;
 			await publishPromise?.catch(() => {});
 			for (const client of clients) failClient(client, "session_gone", "The owner session has closed.");
 			memberships.clear();

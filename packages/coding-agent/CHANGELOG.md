@@ -22,6 +22,7 @@
 
 ### Fixed
 
+- Live task attachments remain unambiguous after rapid owner-session changes, and working-directory names no longer break the attached-view header ([#18099](https://github.com/can1357/oh-my-pi/pull/18099) by [@mark-major](https://github.com/mark-major))
 - `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
 - Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset
 - The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm

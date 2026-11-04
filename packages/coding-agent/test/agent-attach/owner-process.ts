@@ -24,7 +24,7 @@ const childSession = {
 	sessionManager: {
 		getSessionId: () => "child-session",
 		getSessionFile: () => sessionFile,
-		getCwd: () => process.cwd(),
+		getCwd: () => process.env.OMP_ATTACH_CWD ?? process.cwd(),
 	},
 	agent: {
 		state: { streamMessage: null },

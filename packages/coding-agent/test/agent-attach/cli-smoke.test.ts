@@ -57,10 +57,10 @@ async function nextMessage(lines: AsyncIterator<Uint8Array>, decoder: TextDecode
 	return message;
 }
 
-async function startOwner(home: string, ownerSessionId: string): Promise<OwnerProcess> {
+async function startOwner(home: string, ownerSessionId: string, cwd?: string): Promise<OwnerProcess> {
 	const child = Bun.spawn([process.execPath, OWNER_PATH], {
 		cwd: PACKAGE_ROOT,
-		env: { ...cliEnv(home), OMP_ATTACH_OWNER_ID: ownerSessionId, OMP_ATTACH_AGENT_ID: AGENT_ID },
+		env: { ...cliEnv(home), OMP_ATTACH_OWNER_ID: ownerSessionId, OMP_ATTACH_AGENT_ID: AGENT_ID, OMP_ATTACH_CWD: cwd },
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -179,7 +179,10 @@ afterEach(async () => {
 describe("agent attach (socket and real CLI PTY)", () => {
 	it("authenticates, scopes exact owners, steers and aborts the child, then detaches without ending it", async () => {
 		const home = await temporaryHome();
-		const owners = [await startOwner(home, "owner-one"), await startOwner(home, "owner-two")];
+		const owners = [
+			await startOwner(home, "owner-one"),
+			await startOwner(home, "owner-two", "/tmp/attach\tcwd\ninjected\x1b[31mred\x1b[0m"),
+		];
 		const readyTwo = owners[1]!.ready;
 		expect(readyTwo.available).toEqual({
 			id: AGENT_ID,
@@ -245,6 +248,7 @@ describe("agent attach (socket and real CLI PTY)", () => {
 		const attached = spawnPtyCli(home, ["agent", "attach", AGENT_ID, "--owner", "owner-two"]);
 		await attached.waitFor("Attached");
 		await attached.waitFor("attach transcript fixture");
+		await attached.waitFor("/tmp/attach cwd injectedred");
 		const steeringText = "steer from second process";
 		await attached.write(`${steeringText}\r`);
 		const steeredState = await waitForOwnerState(

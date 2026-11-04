@@ -119,6 +119,8 @@ Run `omp agent attach <agent-id>` in an interactive terminal to view a live nati
 
 If the same agent ID is live under multiple owner sessions, select one with `omp agent attach <agent-id> --owner <session-id>`.
 
+Changing the owner session disconnects existing attachments. Attach again to a live child of the new session.
+
 - Submit text to steer a running subagent or start a new turn when it is idle.
 - Press Ctrl+C to abort its current work.
 - Press Ctrl+D with an empty editor to detach without stopping the subagent.

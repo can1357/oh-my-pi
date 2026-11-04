@@ -420,7 +420,7 @@ class AgentAttachView implements Component, Focusable {
 		const details = [
 			identity.displayName && identity.displayName !== identity.agentId ? oneLine(identity.displayName) : "",
 			`owner ${oneLine(identity.ownerSessionId)}`,
-			shortenPath(identity.cwd),
+			oneLine(shortenPath(identity.cwd)),
 		].filter(Boolean);
 		return [truncateToWidth(title, width), truncateToWidth(theme.fg("dim", joinParts(details)), width)];
 	}
