@@ -197,6 +197,38 @@ describe("trackTestLifetime", () => {
 		expect(run.output).toContain(refusal("an afterAll hook"));
 	}, 60_000);
 
+	test("refuses a later file's test after a hook timed out and settled while the next file blocked this thread", async () => {
+		const run = await runFixtures({
+			"1-first.test.ts": `
+				import { trackTestLifetime } from HELPER;
+				const { test, afterAll } = trackTestLifetime();
+				const shared = globalThis as { blocked?: string };
+				shared.blocked = "initial";
+				afterAll(async () => {
+					await Bun.sleep(250);
+					shared.blocked = "stale";
+				}, 100);
+				test("first body", () => {});
+			`,
+			// This file holds the thread past the hook's deadline, so the hook's timer, and any wake
+			// armed for its deadline, are released together once the block ends.
+			"2-second.test.ts": `
+				import { expect } from "bun:test";
+				import { trackTestLifetime } from HELPER;
+				const until = Bun.nanoseconds() + 600e6;
+				while (Bun.nanoseconds() < until) {}
+				await Bun.sleep(100);
+				const { test } = trackTestLifetime();
+				test("passes only on the write of the blocked-out hook", () => {
+					expect((globalThis as { blocked?: string }).blocked).toBe("stale");
+				});
+			`,
+		});
+
+		expect(run.outcome("passes only on the write of the blocked-out hook")).toBe("fail");
+		expect(run.output).toContain(refusal("an afterAll hook"));
+	}, 60_000);
+
 	test("reads the run's default timeout without /proc, as a platform that has none", async () => {
 		const run = await runFixtures(
 			{
