@@ -160,7 +160,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		}
 		if (coverage === "partial") {
 			out.push(
-				`partial: ${stats.failed} of ${stats.requests} judge requests failed; unjudged files may still match`,
+				`partial: some files were not fully searched or judged; ${stats.failed} of ${stats.requests} judge requests failed`,
 			);
 		}
 		if (hits.length > 0) out.push("");

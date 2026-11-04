@@ -184,7 +184,7 @@ class Cascade {
 			grepIndex(root.path, keywords, { includeHidden, filesystem: native, signal, timeoutMs: SCAN_TIMEOUT_MS }),
 		]);
 		this.stats.listed = entries.length;
-		const lexicalTimedOut = index.timedOut;
+		const lexicalPartial = index.timedOut || index.partialFiles.length > 0;
 		const weights = idf(index);
 		const noCounts = Array.from({ length: keywords.length }, () => 0);
 		const ranked = entries
@@ -356,9 +356,8 @@ class Cascade {
 		this.stats.filesRead += files.length - results.size;
 		hits.sort((a, b) => b.contentScore - a.contentScore);
 		const { requests, failed } = this.stats;
-		// A lexical scan cut short by its timeout ranked only the files it reached.
 		const coverage: FindCoverage =
-			failed === requests && requests > 0 ? "unavailable" : failed > 0 || lexicalTimedOut ? "partial" : "complete";
+			failed === requests && requests > 0 ? "unavailable" : failed > 0 || lexicalPartial ? "partial" : "complete";
 		return { hits, coverage, threshold: THRESHOLD, keywords, stats: this.stats };
 	}
 }

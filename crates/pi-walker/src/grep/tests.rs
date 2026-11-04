@@ -1036,6 +1036,45 @@ async fn sink_receives_bounded_batches_and_the_result_only_counts() {
 	}
 }
 
+/// Backpressure on one small file prevents the worker from scanning its next
+/// sibling: the receiver can change that sibling before its scan begins.
+#[tokio::test(flavor = "multi_thread")]
+async fn sink_delivers_each_small_file_before_searching_its_next_sibling() {
+	let dense = 1024 * 2 + 5;
+	let body = "needle\n".repeat(dense);
+	let (mem, vfs) = crate::testing::MemFs::with_files(&[
+		("mem://root/a.txt", &body),
+		("mem://root/z.txt", "hay\n"),
+	]);
+	let root = Path::new("mem://root");
+	let fs = Fs::new(&vfs, root);
+	let engine = needle();
+	let (tx, mut rx) = mpsc::channel(1);
+	let opts = GrepOptions { sink: Some(tx), ..options(&engine) };
+	let drain = async {
+		let first = rx.recv().await.expect("the first file's first batch");
+		assert_eq!(first.len(), 1024);
+		assert!(first.iter().all(|m| m.path == "a.txt"));
+		mem.add_file("mem://root/z.txt", b"needle added before this file is searched\n");
+		let mut received = first.len() as u64;
+		let mut saw_sibling = false;
+		while let Some(batch) = rx.recv().await {
+			assert!(batch.len() <= 1024);
+			assert!(batch.iter().all(|m| m.path == batch[0].path));
+			saw_sibling |= batch.iter().any(|m| m.path == "z.txt");
+			received += batch.len() as u64;
+		}
+		(received, saw_sibling)
+	};
+	let (result, (received, saw_sibling)) = tokio::join!(grep(&fs, root, opts), drain);
+	let result = result.expect("grep succeeds");
+	assert!(saw_sibling, "the next sibling was not searched before the first file was delivered");
+	assert_eq!(received, dense as u64 + 1);
+	assert_eq!(result.total_matches, received);
+	assert_eq!((result.files_with_matches, result.files_searched), (2, 2));
+	assert!(result.matches.is_empty());
+}
+
 /// Contents over [`MAX_FILE_BYTES`] whose every line matches `needle`, and
 /// their line count.
 fn dense_oversized() -> (String, u64) {

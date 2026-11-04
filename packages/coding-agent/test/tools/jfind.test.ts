@@ -220,6 +220,35 @@ describe("jfind cascade", () => {
 		vi.restoreAllMocks();
 	});
 
+	it("reports partial coverage when a lexical file stops at an oversized line", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-partial-"));
+		try {
+			await Bun.write(path.join(dir, "partial.txt"), `needle kept\n${"a".repeat(65 * 1024 * 1024)}\nneedle lost\n`);
+			const filesystem = urlFs(dir);
+			const index = await grepIndex(dir, ["needle"], {
+				includeHidden: false,
+				filesystem: filesystem.shellFilesystem(),
+			});
+			const result = await runCascade({
+				root: { path: dir, type: "directory" },
+				filesystem,
+				query: "needle",
+				extraKeywords: [],
+				judge: new FakeJudge(() => 0.9),
+				includeHidden: false,
+			});
+			expect(index.perFileKw.get("partial.txt")).toEqual([1]);
+			expect(index.timedOut).toBe(false);
+			expect(result.stats.failed).toBe(0);
+			expect({ partialFiles: index.partialFiles, coverage: result.coverage }).toEqual({
+				partialFiles: ["partial.txt"],
+				coverage: "partial",
+			});
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
 	it("verifies only sketched passages, reports merged ranges, and runs waves in parallel", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-"));
 		try {

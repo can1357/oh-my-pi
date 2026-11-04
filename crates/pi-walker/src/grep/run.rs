@@ -141,27 +141,29 @@ fn file_entry(mode: Mode, path: String, count: u64) -> Match {
 	}
 }
 
-/// One file's results as sink batches: content matches in batches of at most
-/// [`SINK_BATCH`], otherwise one entry.
-fn batches(mode: Mode, path: &str, matches: Vec<Match>, count: u64) -> Vec<Vec<Match>> {
-	if mode != Mode::Content {
-		return vec![vec![file_entry(mode, path.to_owned(), count)]];
-	}
-	let mut out = Vec::new();
-	let mut rest = matches.into_iter().peekable();
-	while rest.peek().is_some() {
-		out.push(
-			rest
-				.by_ref()
-				.take(SINK_BATCH)
-				.map(|mut m| {
-					path.clone_into(&mut m.path);
-					m
-				})
-				.collect(),
-		);
-	}
-	out
+/// One file's results, forming only the next sink batch when requested.
+fn batches(
+	mode: Mode,
+	path: &str,
+	matches: Vec<Match>,
+	count: u64,
+) -> impl Iterator<Item = Vec<Match>> + '_ {
+	let mut entry = (mode != Mode::Content).then(|| file_entry(mode, path.to_owned(), count));
+	let mut matches = matches.into_iter();
+	std::iter::from_fn(move || {
+		if mode != Mode::Content {
+			return entry.take().map(|entry| vec![entry]);
+		}
+		let batch: Vec<_> = matches
+			.by_ref()
+			.take(SINK_BATCH)
+			.map(|mut m| {
+				path.clone_into(&mut m.path);
+				m
+			})
+			.collect();
+		(!batch.is_empty()).then_some(batch)
+	})
 }
 
 /// A search's sink, shared with its tasks: a streamed file sends its matches
@@ -1181,10 +1183,10 @@ impl walk::Sink for SearchSink {
 /// relative to `dir` while the walk holds the listed directory, otherwise by
 /// absolute path. Files over [`MAX_FILE_BYTES`] are streamed after the
 /// others, so a long stream cannot keep its smaller siblings from being
-/// searched before the deadline. With an outlet, a streamed file's content
-/// matches go there as they are found, not into its hit. The deadline cuts
-/// off an open or a read into memory; a stream stops on its own and keeps
-/// what it matched.
+/// searched before the deadline. With an outlet, each file's matches are
+/// sent before the worker scans its next sibling; streamed content matches
+/// go there as they are found. The deadline cuts off an open or a read into
+/// memory; a stream stops on its own and keeps what it matched.
 async fn search_directory<M: Matcher + Sync>(
 	search: &Search<'_, M>,
 	shared: &Shared,
@@ -1262,13 +1264,23 @@ async fn search_directory<M: Matcher + Sync>(
 				found.partial.push(path.clone());
 			}
 			if outcome.count > 0 && !sent {
-				found.hits.push(FileHit {
-					path,
-					matches,
-					count: outcome.count,
-					limit_reached: outcome.limit_reached,
-					oversized,
-				});
+				if let Some(outlet) = &shared.outlet {
+					if outlet
+						.deliver(shared.mode, &path, matches, outcome.count, outcome.limit_reached)
+						.await
+						.is_err()
+					{
+						return found;
+					}
+				} else {
+					found.hits.push(FileHit {
+						path,
+						matches,
+						count: outcome.count,
+						limit_reached: outcome.limit_reached,
+						oversized,
+					});
+				}
 			}
 		}
 		pending = std::mem::take(&mut large);
@@ -1322,10 +1334,10 @@ async fn next_before<S: Stream + Unpin>(
 
 /// Searches every candidate of one walk, each directory's files on the
 /// walker worker that listed it; results merge into path order, files over
-/// [`MAX_FILE_BYTES`] last. With an outlet, each file held in memory is sent
-/// as the directories' searches complete (a streamed file's matches as they
-/// are found, by its worker) and the outlet counts the totals. At the
-/// deadline the walk stops and the files searched so far are the result.
+/// [`MAX_FILE_BYTES`] last. With an outlet, workers send every file's matches
+/// directly and retain only the directory's counters and partial-file paths;
+/// the outlet counts what it sends. At the deadline the walk stops and the
+/// files searched so far are the result.
 async fn unbounded(shared: Arc<Shared>, wopts: walk::Options) -> Result<GrepResult, GrepError> {
 	let mut walked =
 		walk::walk_sink(&shared.fs, &shared.root, &wopts, SearchSink { shared: Arc::clone(&shared) })
@@ -1342,15 +1354,7 @@ async fn unbounded(shared: Arc<Shared>, wopts: walk::Options) -> Result<GrepResu
 			searched += found.searched;
 			oversized += found.oversized;
 			partial.extend(found.partial);
-			let Some(outlet) = &shared.outlet else {
-				hits.extend(found.hits);
-				continue;
-			};
-			for hit in found.hits {
-				outlet
-					.deliver(shared.mode, &hit.path, hit.matches, hit.count, hit.limit_reached)
-					.await?;
-			}
+			hits.extend(found.hits);
 		}
 	}
 	// Dropping the walk cancels the directories still being listed.

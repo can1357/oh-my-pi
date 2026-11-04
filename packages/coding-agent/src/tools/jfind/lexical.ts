@@ -15,6 +15,8 @@ export interface GrepIndex {
 	filesScanned: number;
 	/** The scan hit `timeoutMs`; the counts cover only the files scanned by then. */
 	timedOut: boolean;
+	/** Files whose counts cover only part of their contents. */
+	partialFiles: string[];
 }
 
 /** Regex-escape a literal keyword for the native grep alternation. */
@@ -44,7 +46,7 @@ export async function grepIndex(
 	options: GrepIndexOptions,
 ): Promise<GrepIndex> {
 	const keywords = rawKeywords.map(keyword => keyword.toLowerCase()).filter(keyword => keyword.length > 0);
-	const index: GrepIndex = { keywords, perFileKw: new Map(), filesScanned: 0, timedOut: false };
+	const index: GrepIndex = { keywords, perFileKw: new Map(), filesScanned: 0, timedOut: false, partialFiles: [] };
 	if (keywords.length === 0) return index;
 	const { perFileKw } = index;
 	let result: natives.GrepResult;
@@ -82,6 +84,7 @@ export async function grepIndex(
 	}
 	index.filesScanned = result.filesSearched + (result.skippedOversized ?? 0);
 	index.timedOut = Boolean(result.timedOut);
+	index.partialFiles = result.partialFiles ?? [];
 	return index;
 }
 
