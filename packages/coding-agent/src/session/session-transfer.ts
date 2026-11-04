@@ -36,7 +36,7 @@ import {
 import transferArrivedTemplate from "../prompts/session/transfer-arrived.md" with { type: "text" };
 import transferDepartedTemplate from "../prompts/session/transfer-departed.md" with { type: "text" };
 import transferStaleForkTemplate from "../prompts/session/transfer-stale-fork.md" with { type: "text" };
-import { replaceFileAtomically } from "../utils/atomic-file";
+import { replaceFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import { BLOB_HASH_RE, BlobStore } from "./blob-store";
 import type { FileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { findSessionFiles } from "./session-listing";

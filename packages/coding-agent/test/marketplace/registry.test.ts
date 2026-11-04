@@ -279,4 +279,26 @@ describe("registry file I/O", () => {
 		expect(entries).toBeDefined();
 		expect((entries![0] as unknown as Record<string, unknown>).someExtraField).toBe("preserved");
 	});
+
+	// A shared omp profile links the profile's registry at the default profile's copy. A write
+	// that replaced the link with a regular file silently stopped the profiles sharing state.
+	it("writes through a symlinked registry path and keeps the link", async () => {
+		const shared = path.join(tmpDir, "shared-marketplaces.json");
+		await writeMarketplacesRegistry(shared, { version: 1, marketplaces: [] });
+		fs.symlinkSync(shared, marketplacesPath);
+
+		const entry: MarketplaceRegistryEntry = {
+			name: "linked-market",
+			sourceType: "local",
+			sourceUri: "/tmp/linked",
+			catalogPath: path.join(tmpDir, "catalog.json"),
+			addedAt: "2025-01-01T00:00:00.000Z",
+			updatedAt: "2025-01-01T00:00:00.000Z",
+		};
+		await writeMarketplacesRegistry(marketplacesPath, { version: 1, marketplaces: [entry] });
+
+		expect(fs.lstatSync(marketplacesPath).isSymbolicLink()).toBe(true);
+		const viaTarget = await readMarketplacesRegistry(shared);
+		expect(viaTarget.marketplaces.map(m => m.name)).toEqual(["linked-market"]);
+	});
 });

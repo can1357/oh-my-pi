@@ -9,6 +9,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { asStrictBytes, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { writeFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import type { SnapshotResponse } from "./types";
 
 const MAGIC = new Uint8Array([0x4f, 0x4d, 0x50, 0x53]); // "OMPS"
@@ -20,7 +21,6 @@ const HEADER_LENGTH = IV_OFFSET + IV_LENGTH;
 const AES_ALGORITHM = "AES-GCM";
 const TEXT_ENCODER = new TextEncoder();
 const TEXT_DECODER = new TextDecoder();
-const HEX = "0123456789abcdef";
 /** Trailing window that collapses a burst of scheduled writes into one write of the newest snapshot. */
 const WRITE_COALESCE_MS = 2_000;
 /**
@@ -109,22 +109,7 @@ export async function readAuthBrokerSnapshotCache(
 export async function writeAuthBrokerSnapshotCache(opts: WriteAuthBrokerSnapshotCacheOptions): Promise<void> {
 	const payload = await encryptCachePayload(opts.snapshot, opts.token, opts.url);
 	await fs.mkdir(path.dirname(opts.path), { recursive: true });
-	const tmpPath = `${opts.path}.${process.pid}.${randomHex(8)}.tmp`;
-	let removeTemp = false;
-	try {
-		const handle = await fs.open(tmpPath, "wx", 0o600);
-		removeTemp = true;
-		try {
-			await handle.writeFile(payload);
-		} finally {
-			await handle.close();
-		}
-		await fs.chmod(tmpPath, 0o600);
-		await fs.rename(tmpPath, opts.path);
-		removeTemp = false;
-	} finally {
-		if (removeTemp) await fs.rm(tmpPath, { force: true }).catch(() => {});
-	}
+	await writeFileAtomically(opts.path, payload);
 	// Debris only comes from processes that died mid-write; one sweep per path
 	// per process catches it without a directory scan on every write.
 	if (sweptCachePaths.has(opts.path)) return;
@@ -348,12 +333,4 @@ function cacheAdditionalData(url: string): Uint8Array<ArrayBuffer> {
 async function deriveAesKey(token: string, usages: Array<"encrypt" | "decrypt">): Promise<CryptoKey> {
 	const digest = await globalThis.crypto.subtle.digest("SHA-256", TEXT_ENCODER.encode(token));
 	return globalThis.crypto.subtle.importKey("raw", digest, AES_ALGORITHM, false, usages);
-}
-
-function randomHex(byteLength: number): string {
-	const bytes = new Uint8Array(byteLength);
-	globalThis.crypto.getRandomValues(bytes);
-	let out = "";
-	for (const byte of bytes) out += HEX[byte >> 4] + HEX[byte & 15];
-	return out;
 }

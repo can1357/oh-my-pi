@@ -39,7 +39,7 @@ import type { ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
 import { AgentStorage, type AgentStorageApi } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
-import { writeFileAtomically } from "../utils/atomic-file";
+import { writeFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import { isRegisteredSearchEngine } from "../web/search/provider";
 import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
 import {

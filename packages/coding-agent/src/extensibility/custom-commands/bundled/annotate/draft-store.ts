@@ -4,7 +4,7 @@ import type { AnnotationOverlay } from "@oh-my-pi/pi-tui/overlays/annotation-ove
 import type { AnnotationOverlayDraft, TextReviewSource } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 import { isEnoent, logger, postmortem, toError } from "@oh-my-pi/pi-utils";
 import type { ReadonlySessionManager } from "../../../../session/session-manager";
-import { writeFileAtomically } from "../../../../utils/atomic-file";
+import { writeFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import { parseReviewDiffSnapshot } from "../review/diff";
 import type { ResolvedReviewTarget } from "../review/target";
 

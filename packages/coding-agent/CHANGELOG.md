@@ -30,6 +30,7 @@
 
 ### Fixed
 
+- A config file that is a symlink stays one: writing `marketplaces.json`, `installed_plugins.json`, `mcp.json`, `ssh.json`, `config.yml`, `skills.json`, session pins, plugin runtime config, sharpshooter memories, the auth-broker cache or the AWS SSO token cache now replaces the file the link points at instead of replacing the link with a regular file. A shared profile that links its config at another profile's keeps sharing it; a write whose target directory is unwritable now fails instead of silently diverting to a new file
 - Extension links stay clickable and extension-drawn replies and custom messages keep their renderers on every launch, not only the first after an edit; `ctx.ui.getLinkClicksAvailable()` no longer turns false on later launches ([#18116](https://github.com/can1357/oh-my-pi/pull/18116) by [@materemias](https://github.com/materemias))
 - An AST Grep capture spanning several lines shows on one `meta:` row of the result card instead of one row per line, so collapsed results no longer show its later lines and a blank line inside it no longer splits the match from its file ([#18105](https://github.com/can1357/oh-my-pi/pull/18105) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Extension shortcuts on a reserved chord spelled with a different modifier order (e.g. `ctrl+shift+p`) are now ignored like the reserved spelling ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))

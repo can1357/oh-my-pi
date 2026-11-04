@@ -10,14 +10,16 @@
  * Read/write functions accept explicit file paths so callers control the
  * location. Path helpers compute the default paths from the dir singleton.
  *
- * Both use atomic write (tmp + rename). On Windows, rename over existing file
- * can fail with EPERM — fallback: unlink target then rename.
+ * All three go through `writeFileAtomically`, the shared helper: a staged temp
+ * sibling published with one rename, a symlinked destination resolved first so
+ * the link survives, and the Windows replacement fallback.
  */
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import { getPluginsDir, isEnoent, logger, tryParseJson } from "@oh-my-pi/pi-utils";
+import { writeFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 
 export { getMarketplacesRegistryPath } from "@oh-my-pi/pi-utils";
 
@@ -43,33 +45,14 @@ export function getPluginsCacheDir(): string {
 
 // ── Atomic write ─────────────────────────────────────────────────────
 
+/** Registry files are world-readable config, not secrets, so they keep 0644 rather than the helper's 0600 default. */
+const REGISTRY_FILE_MODE = 0o644;
+
 async function atomicWriteJson(filePath: string, data: unknown): Promise<void> {
-	const content = `${JSON.stringify(data, null, 2)}\n`;
-	const tmpPath = `${filePath}.tmp`;
-
-	await Bun.write(tmpPath, content);
-
-	try {
-		await fs.rename(tmpPath, filePath);
-	} catch (err) {
-		// Windows EPERM fallback: unlink target, then rename
-		if ((err as NodeJS.ErrnoException).code === "EPERM") {
-			try {
-				await fs.unlink(filePath);
-			} catch {
-				// Target may not exist — that's fine
-			}
-			await fs.rename(tmpPath, filePath);
-		} else {
-			// Clean up tmp on unexpected errors
-			try {
-				await fs.unlink(tmpPath);
-			} catch {
-				// Best effort
-			}
-			throw err;
-		}
-	}
+	// The helper stages with `open(…, "wx")`, which does not create directories; a
+	// project registry's parent may not exist yet.
+	await fs.mkdir(path.dirname(filePath), { recursive: true });
+	await writeFileAtomically(filePath, `${JSON.stringify(data, null, 2)}\n`, REGISTRY_FILE_MODE);
 }
 
 // ── Marketplaces registry ────────────────────────────────────────────
