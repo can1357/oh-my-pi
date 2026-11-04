@@ -227,8 +227,14 @@ interface ReviveOwnerOptions {
 	sessionAgents?: readonly AgentDefinition[];
 }
 
+function parentRequestContext(model?: Model) {
+	const agent = new Agent({ initialState: { model } });
+	return { agent, runInRequestContext: <T>(fn: () => T) => agent.runInRequestContext(fn) };
+}
+
 function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptions = {}) {
 	const parentSession = {
+		...parentRequestContext(),
 		sessionManager: {
 			getCwd: () => cwd,
 			getArtifactManager: () => undefined,
@@ -250,8 +256,6 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 			return owner.preparedExtensions;
 		},
 		getSessionAgents: () => owner.sessionAgents ?? [],
-		// A revival runs as the parent's work; this parent has no holds.
-		runInRequestContext: <T>(fn: () => T) => fn(),
 	} as unknown as AgentSession;
 	return createPersistedSubagentReviverFactory({
 		session: parentSession,
@@ -961,6 +965,7 @@ describe("persisted subagent revival", () => {
 			status: "idle",
 			sessionFile: null,
 			session: {
+				...parentRequestContext(parentModel),
 				model: parentModel,
 				sessionManager: { getCwd: () => parentCwd },
 				effectiveExtensionRoots: parentRoots,
@@ -1071,6 +1076,7 @@ describe("persisted subagent revival", () => {
 					status: "idle",
 					sessionFile: null,
 					session: {
+						...parentRequestContext(parentModel),
 						model: parentModel,
 						sessionManager: { getCwd: () => cwd },
 						effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
@@ -1198,10 +1204,10 @@ describe("persisted subagent revival", () => {
 			const ref = { ...createRef(sessionFile), parentId: parent };
 			const factory = createPersistedSubagentReviverFactory({
 				session: {
+					...parentRequestContext(rootModel),
 					sessionManager: { getCwd: () => cwd, getArtifactManager: () => undefined },
 					effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
 					getSessionAgents: () => [],
-					runInRequestContext: <T>(fn: () => T) => fn(),
 					model: rootModel,
 				} as unknown as AgentSession,
 				authStorage: {} as never,
@@ -1223,6 +1229,7 @@ describe("persisted subagent revival", () => {
 			kind: "sub",
 			parentId: "Main",
 			session: {
+				...parentRequestContext(parentModel),
 				model: parentModel,
 				sessionManager: { getCwd: () => "/tmp" },
 				effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },

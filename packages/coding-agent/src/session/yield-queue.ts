@@ -1,6 +1,6 @@
 import { type AgentMessage, ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-core";
 import { logger, toError } from "@oh-my-pi/pi-utils";
-import { methodsAsSessionWork } from "./session-work";
+import { asSessionWork, methodsAsSessionWork } from "./session-work";
 
 export interface YieldDispatcher<P> {
 	/** Drop entries already delivered through another path. Called per-entry at flush time. */
@@ -63,6 +63,11 @@ export class YieldQueue {
 
 	constructor(options: YieldQueueOptions) {
 		this.#options = options;
+	}
+
+	#asWork<F extends (...args: never[]) => unknown>(fn: F): F {
+		const run = this.#options.runDispatcher;
+		return run ? asSessionWork(run, fn) : fn;
 	}
 
 	register<P>(kind: string, dispatcher: YieldDispatcher<P>): () => void {
@@ -206,12 +211,14 @@ export class YieldQueue {
 		for (const [kind, dispatcher] of this.#dispatchers) {
 			const entries = this.#drain(kind);
 			if (entries.length === 0) continue;
-			thunks.push(() => {
-				const built = this.#build(kind, dispatcher, entries);
-				if (!built) return null;
-				this.#attachEntrySettlement(built);
-				return built.message;
-			});
+			thunks.push(
+				this.#asWork(() => {
+					const built = this.#build(kind, dispatcher, entries);
+					if (!built) return null;
+					this.#attachEntrySettlement(built);
+					return built.message;
+				}),
+			);
 		}
 		return thunks;
 	}
@@ -239,11 +246,13 @@ export class YieldQueue {
 		if (this.#idleFlushPending) return;
 		this.#idleFlushPending = true;
 		try {
-			this.#options.scheduleIdleFlush(async () => {
-				this.#idleFlushPending = false;
-				if (this.#options.isStreaming()) return;
-				await this.flush("idle");
-			});
+			this.#options.scheduleIdleFlush(
+				this.#asWork(async () => {
+					this.#idleFlushPending = false;
+					if (this.#options.isStreaming()) return;
+					await this.flush("idle");
+				}),
+			);
 		} catch (error) {
 			this.#idleFlushPending = false;
 			logger.warn("Yield queue idle flush scheduling failed", { error: formatError(error) });
@@ -298,19 +307,19 @@ export class YieldQueue {
 		Object.defineProperties(built.message, {
 			[ASIDE_MESSAGE_COMMIT]: {
 				configurable: true,
-				value: () => {
+				value: this.#asWork(() => {
 					if (settled) return;
 					settled = true;
 					this.#resolveEntries(built.entries);
-				},
+				}),
 			},
 			[ASIDE_MESSAGE_DISCARD]: {
 				configurable: true,
-				value: (error: Error) => {
+				value: this.#asWork((error: Error) => {
 					if (settled) return;
 					settled = true;
 					this.#rejectEntries(built.entries, error);
-				},
+				}),
 			},
 		});
 	}

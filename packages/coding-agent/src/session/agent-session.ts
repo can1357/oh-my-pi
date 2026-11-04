@@ -85,9 +85,12 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import {
 	afterRequestHolds,
+	captureRequestHolds,
 	type Effort,
 	openRequestHolds,
+	RequestHoldsAlias,
 	runOutsideRequestHolds,
+	runWithRequestHolds,
 	serviceTierFamily,
 	streamSimple,
 } from "@oh-my-pi/pi-ai";
@@ -2245,8 +2248,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// a prompt rebuild, a later rediscovery: a model request it starts waits
 		// for the session's holds. Every member the host's config exposes reads
 		// through, inherited and non-enumerable ones included.
-		// The agent first, read as is: its context is the one the config's members enter.
-		this.agent = sessionConfig.agent;
+		// The agent getter may start requests before returning the agent whose holds own them.
+		// Bind their startup context as soon as that agent is known, before any send can run.
+		const startupHolds = new RequestHoldsAlias();
+		this.agent = runWithRequestHolds(startupHolds, () => sessionConfig.agent);
+		startupHolds.bind(this.agent.runInRequestContext(captureRequestHolds));
 		const config = membersAsSessionWork(this.#runAsHostWork, sessionConfig);
 		this.tokenRate = new TokenRateMeter(text => this.agent.tokenizer.countTokens(text));
 		this.#reseedTokenRate();
@@ -14001,6 +14007,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// for a process that is no longer in it.
 		const previousSessionState = this.sessionManager.captureState();
 		let cwdChangeTarget: string | undefined;
+		let rollbackFork: (() => Promise<void>) | undefined;
 		try {
 			if (switchingToDifferentSession) {
 				// Stop and settle in-flight advisors while the old-session feeds can
@@ -14014,9 +14021,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// holds a different session, is not ours to continue: take a fork of
 			// what was loaded instead of its id (same reasoning as the startup
 			// resume guard in session-transfer.ts).
-			const { forkedFrom } = await this.sessionManager.setSessionFile(sessionPath, { forkIfContested: true });
+			const { forkedFrom } = await this.sessionManager.setSessionFile(sessionPath, {
+				forkIfContested: true,
+			});
 			this.#bash.markSessionTransition(bashTransition);
 			if (forkedFrom) {
+				rollbackFork = this.sessionManager.resumedForkRollback();
 				await noteResumedSessionFork(this.sessionManager, forkedFrom);
 				this.#tellModelWhenArtifactsAreMissing();
 			}
@@ -14235,6 +14245,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.sessionManager.commitSessionSwitch(previousSessionState);
 			return true;
 		} catch (error) {
+			let forkCleanupError: unknown;
+			try {
+				await rollbackFork?.();
+			} catch (cleanupError) {
+				forkCleanupError = cleanupError;
+			}
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
@@ -14319,6 +14335,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 			}
 			this.#bash.finishSessionTransition(bashTransition, false);
+			if (forkCleanupError !== undefined) {
+				logger.warn("Could not remove a rolled-back session fork", { error: String(forkCleanupError) });
+				throw new Error(`Session switch rolled back but fork cleanup failed: ${String(forkCleanupError)}`, {
+					cause: error,
+				});
+			}
 			if (error === SESSION_CWD_CHANGE_REJECTED) return false;
 			throw error;
 		}

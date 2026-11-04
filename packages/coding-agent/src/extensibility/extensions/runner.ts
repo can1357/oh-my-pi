@@ -1489,7 +1489,9 @@ export class ExtensionRunner {
 	}
 
 	getAssistantThinkingRenderers(): AssistantThinkingRenderer[] {
-		return this.extensions.flatMap(ext => ext.assistantThinkingRenderers);
+		return this.extensions.flatMap(ext =>
+			ext.assistantThinkingRenderers.map(renderer => asSessionWork(this.#runAsSessionWork, renderer)),
+		);
 	}
 
 	/**
@@ -1517,7 +1519,9 @@ export class ExtensionRunner {
 	/** Registered assistant text renderers; none while `extensionRenderers.assistantText` is off. */
 	getAssistantTextRenderers(): AssistantTextRenderer[] {
 		if (!this.settings || !cfgExtensionAssistantTextRenderers.get(this.settings)) return [];
-		return this.#drawingExtensions().flatMap(ext => ext.assistantTextRenderers);
+		return this.#drawingExtensions().flatMap(ext =>
+			ext.assistantTextRenderers.map(renderer => asSessionWork(this.#runAsSessionWork, renderer)),
+		);
 	}
 
 	/** Link schemes claimed with `registerLinkScheme`; none while `extensionRenderers.assistantText` is off. */

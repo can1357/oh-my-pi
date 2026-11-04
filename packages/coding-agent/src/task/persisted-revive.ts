@@ -417,7 +417,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	try {
 		// The revived agent is the parent session's work, whoever revives it (a
 		// parent's tool, the collab host, a UI): its requests wait for the parent's holds.
-		({ session } = await spec.root.runInRequestContext(() =>
+		({ session } = await (parentSession ?? spec.root).runInRequestContext(() =>
 			createAgentSession({
 				cwd: restoredSeance?.cwd ?? spec.root.sessionManager.getCwd(),
 				costGate: spec.costGate,

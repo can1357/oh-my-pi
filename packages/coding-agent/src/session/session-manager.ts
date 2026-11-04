@@ -1557,6 +1557,12 @@ async function moveIntoHeldDirectory(
 	}
 }
 
+interface ArtifactCopyOptions {
+	stillTheSource?: () => Promise<boolean>;
+	onSettled?: (outcome: ArtifactCopyOutcome) => Promise<void>;
+	onPublished?: (directory: ObjectIdentity, created: Map<string, ObjectIdentity>) => void;
+	signal?: AbortSignal;
+}
 /**
  * Copy a session's artifact directory to another session, matching interactive
  * `/fork`. Failures are logged, never thrown.
@@ -1574,10 +1580,11 @@ async function moveIntoHeldDirectory(
  * until now neither the session nor its log said so, and the first report of
  * it was the free space. See {@link ArtifactCopyTally}.
  */
+
 export async function copySessionArtifacts(
 	sourceSessionFile: string,
 	destinationSessionFile: string,
-	options?: { stillTheSource?: () => Promise<boolean>; onSettled?: (outcome: ArtifactCopyOutcome) => Promise<void> },
+	options?: ArtifactCopyOptions,
 ): Promise<ArtifactCopyOutcome> {
 	const destinationDir = artifactsDirectoryFor(destinationSessionFile);
 	if (!destinationDir) return await copySessionArtifactsOnce(sourceSessionFile, destinationSessionFile, options);
@@ -1602,7 +1609,7 @@ export async function copySessionArtifacts(
 async function copySessionArtifactsOnce(
 	sourceSessionFile: string,
 	destinationSessionFile: string,
-	options?: { stillTheSource?: () => Promise<boolean>; onSettled?: (outcome: ArtifactCopyOutcome) => Promise<void> },
+	options?: ArtifactCopyOptions,
 ): Promise<ArtifactCopyOutcome> {
 	// Whatever the caller has to record about this copy is part of the copy:
 	// a reader that waited for the directory to settle has waited for that too,
@@ -1658,6 +1665,7 @@ async function copySessionArtifactsOnce(
 	}
 	try {
 		for (const entry of sourceEntries) {
+			options?.signal?.throwIfAborted();
 			const filesBefore = progress.entries;
 			const bytes = await reproduceArtifactEntry(entry, sourceArtifactsDir, root, "", progress);
 			perEntry.push({ name: entry.name, bytes, files: progress.entries - filesBefore });
@@ -1695,6 +1703,13 @@ async function copySessionArtifactsOnce(
 		return await settle({ ...empty, discarded: true, reason: "source-changed" });
 	}
 	const published = await publishArtifactStaging(staging, destinationArtifactsDir, progress.created);
+	if (published) {
+		try {
+			options?.onPublished?.(stagingIdentity(staging), progress.created);
+		} catch (error) {
+			logger.warn("Failed to record published session artifacts", { error: toError(error).message });
+		}
+	}
 	await discardArtifactStaging(staging, progress.created);
 	if (!published) return await settle({ ...empty, discarded: true, reason: "copy-failed" });
 	// Only what this copy placed. A name the destination already had kept its
@@ -2332,6 +2347,15 @@ export type ReadonlySessionManager = Pick<
 	| "putBlobSync"
 >;
 
+/** The copy and object identities a failed in-session resume may take back. */
+interface ResumedSessionForkCopy {
+	sessionFile: string;
+	sessionId: string;
+	active: boolean;
+	state: { controller: AbortController; directory?: ObjectIdentity; created: Map<string, ObjectIdentity> };
+	done: Promise<ArtifactCopyOutcome>;
+}
+
 interface SessionManagerStateSnapshot {
 	cwd: string;
 	sessionDir: string;
@@ -2350,6 +2374,13 @@ interface SessionManagerStateSnapshot {
 	taskSiblingCandidate: string | undefined;
 	header: SessionHeader;
 	entries: SessionEntry[];
+	resumedForkCopy?: ResumedSessionForkCopy;
+	pendingArtifactCopy?: { sessionFile: string; done: Promise<ArtifactCopyOutcome> };
+	artifactsReproduced?: Promise<boolean>;
+	artifactLossReason?: ArtifactCopyOutcome["reason"];
+	forkedFrom?: ResumedSessionFork;
+	inheritedOutputNames?: readonly string[];
+	reservedArtifactId?: number;
 	/**
 	 * A holder of its own on the session's ownership lease, taken when the
 	 * snapshot was made. A rollback adopts it, so the session it names stays
@@ -2369,9 +2400,11 @@ class SessionClaim {
 	readonly sessionId: string;
 	#release: (() => void) | undefined;
 
-	constructor(sessionId: string, release: (() => void) | undefined) {
+	readonly #run: SessionWorkRun;
+	constructor(sessionId: string, release: (() => void) | undefined, run: SessionWorkRun) {
 		this.sessionId = sessionId;
 		this.#release = release;
+		this.#run = run;
 	}
 
 	/** Whether this handle still holds the lease. */
@@ -2382,7 +2415,7 @@ class SessionClaim {
 	release(): void {
 		const release = this.#release;
 		this.#release = undefined;
-		release?.();
+		this.#run(() => release?.());
 	}
 }
 
@@ -2581,6 +2614,7 @@ export class SessionManager {
 	#fallbackRuntimeOnly = false;
 	#sessionDir: string;
 	readonly #persist: boolean;
+	#resumedForkCopy: ResumedSessionForkCopy | undefined;
 	readonly #storage: SessionStorage;
 	readonly #blobs: BlobStore;
 
@@ -2908,7 +2942,11 @@ export class SessionManager {
 		// The storage also checks that the path still holds this session: if
 		// another session was moved onto it, the claim fails and the next write
 		// moves this session to a sibling instead of appending into that journal.
-		this.#sessionClaim = new SessionClaim(sessionId, this.#storage.claimSession(sessionId, sessionFile) ?? undefined);
+		this.#sessionClaim = new SessionClaim(
+			sessionId,
+			this.#storage.claimSession(sessionId, sessionFile) ?? undefined,
+			this.#asOwnerWork,
+		);
 	}
 
 	/**
@@ -2922,7 +2960,7 @@ export class SessionManager {
 		if (!claim?.held || !this.#persist || !sessionFile || !this.#storage.claimSession) return undefined;
 		const release = this.#storage.claimSession(claim.sessionId, sessionFile);
 		if (!release) return undefined;
-		const retained = new SessionClaim(claim.sessionId, release);
+		const retained = new SessionClaim(claim.sessionId, release, this.#asOwnerWork);
 		this.#snapshotClaims.add(retained);
 		return retained;
 	}
@@ -3126,7 +3164,11 @@ export class SessionManager {
 	 * published the loaded id, so nothing outside ever sees this process answer
 	 * to the owner's session. Returns what was left behind.
 	 */
-	#adoptLoadedSessionAsFork(reason: ResumedSessionFork["reason"], sessionDir?: string): ResumedSessionFork {
+	#adoptLoadedSessionAsFork(
+		reason: ResumedSessionFork["reason"],
+		sessionDir?: string,
+		trackRollback = false,
+	): ResumedSessionFork {
 		const from = this.#sessionFile as string;
 		const previousSessionId = this.#sessionId;
 		const timestamp = nowIso();
@@ -3168,14 +3210,27 @@ export class SessionManager {
 		// the files, and nothing else in that directory can inflate them.
 		const inherited = highestArtifactReference(this.#entries);
 		const inheritedNames = inheritedOutputNames(this.#entries);
+		const copyState: ResumedSessionForkCopy["state"] | undefined = trackRollback
+			? { controller: new AbortController(), created: new Map() }
+			: undefined;
 		const done = copySessionArtifacts(from, to, {
-			stillTheSource: async () => (await readSessionHeaderId(from)) === previousSessionId,
-			// Part of the copy, not a follow-up to it: an allocator that waited
-			// for the directory must not start its scan before the names this
-			// transcript has already spent are recorded beside the files.
-			onSettled: () => this.#recordReservedClaims(to),
+			signal: copyState?.controller.signal,
+			stillTheSource: async () =>
+				!copyState?.controller.signal.aborted && (await readSessionHeaderId(from)) === previousSessionId,
+			onPublished: copyState
+				? (directory, created) => {
+						copyState.directory = directory;
+						copyState.created = created;
+					}
+				: undefined,
+			onSettled: async () => {
+				if (!copyState?.controller.signal.aborted) await this.#recordReservedClaims(to, copyState);
+			},
 		});
 		this.#pendingArtifactCopy = { sessionFile: to, done };
+		this.#resumedForkCopy = copyState
+			? { sessionFile: to, sessionId: this.#sessionId, state: copyState, done, active: true }
+			: undefined;
 		this.#inheritedOutputNames = inheritedNames;
 		// Taken at the fork, not when a copy reports a loss: a copy can arrive
 		// successfully and still be missing a file the transcript refers to —
@@ -3184,8 +3239,9 @@ export class SessionManager {
 		// is in the directory, where the scan finds it anyway.
 		this.#reserveInheritedArtifacts(inherited, inheritedNames);
 		this.#artifactsReproduced = done.then(outcome => {
-			this.#artifactLossReason = outcome.reason;
-			return !outcome.discarded;
+			if (this.#sessionFile === to && !copyState?.controller.signal.aborted)
+				this.#artifactLossReason = outcome.reason;
+			return copyState?.controller.signal.aborted || !outcome.discarded;
 		});
 		this.#rememberBreadcrumb(this.#cwd, to);
 		this.#claimSession();
@@ -3197,6 +3253,71 @@ export class SessionManager {
 		);
 		this.#forkedFrom = { reason, sessionId: previousSessionId, sessionFile: from };
 		return this.#forkedFrom;
+	}
+
+	/** A switch's own fork only: cancel and settle its copy, then remove only the objects it made. */
+	resumedForkRollback(): () => Promise<void> {
+		const fork = this.#resumedForkCopy;
+		if (!fork || fork.sessionFile !== this.#sessionFile || fork.sessionId !== this.#sessionId) {
+			throw new Error("No resumed fork belongs to this session switch");
+		}
+		return async () => {
+			if (!fork.active) return;
+			fork.active = false;
+			fork.state.controller.abort();
+			await fork.done;
+			if (this.#sessionFile === fork.sessionFile && this.#sessionId === fork.sessionId) {
+				await this.#drainAndCloseWriter();
+				await this.#storage.drain();
+			}
+			const parent = await pinDirectory(path.dirname(fork.sessionFile));
+			if (!parent) throw new Error(`Could not hold the rolled-back fork's directory: ${fork.sessionFile}`);
+			try {
+				const name = path.basename(fork.sessionFile);
+				let identity: ObjectIdentity | undefined;
+				let headerId: string | undefined;
+				try {
+					const file = await fs.promises.open(
+						`${parent.at}/${name}`,
+						fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+					);
+					try {
+						identity = identityOf(await file.stat({ bigint: true }));
+						headerId = await readSessionHeaderId(`${parent.at}/${name}`);
+						if (!thisCopysToRemove(identityOf(await file.stat({ bigint: true })), identity)) headerId = undefined;
+					} finally {
+						await file.close();
+					}
+				} catch (error) {
+					if (isFsError(error) && error.code === "ELOOP") {
+						logger.warn("Rolled-back fork file became a symlink; its journal and artifacts were left alone", {
+							sessionFile: fork.sessionFile,
+						});
+						return;
+					}
+					if (!isEnoent(error)) throw error;
+				}
+				if (identity && headerId !== fork.sessionId) {
+					logger.warn("Rolled-back fork file changed; its journal and artifacts were left alone", {
+						sessionFile: fork.sessionFile,
+					});
+					return;
+				}
+				if (identity) await removeIfStillOurs(parent, name, identity, fork.sessionFile);
+				const directory = artifactsDirectoryFor(fork.sessionFile);
+				if (directory && fork.state.directory) {
+					await removeDirectoryIfStillOurs(
+						parent,
+						path.basename(directory),
+						fork.state.directory,
+						"",
+						fork.state.created,
+					);
+				}
+			} finally {
+				await parent.close();
+			}
+		};
 	}
 
 	/**
@@ -3236,16 +3357,27 @@ export class SessionManager {
 	 * consult — and a name whose file never arrived is invisible to a scan of
 	 * what is there.
 	 */
-	async #recordReservedClaims(sessionFile?: string): Promise<void> {
+	async #recordReservedClaims(sessionFile?: string, track?: ResumedSessionForkCopy["state"]): Promise<void> {
 		const dir = sessionFile ? artifactsDirectoryFor(sessionFile) : this.getArtifactsDir();
 		const throughId = this.#reservedArtifactId ?? -1;
 		const names = this.#inheritedOutputNames;
 		if (!dir || (throughId < 0 && names.length === 0)) return;
 		try {
-			await fs.promises.mkdir(dir, { recursive: true });
-			await fs.promises.writeFile(path.join(dir, RESERVED_CLAIMS_FILE), JSON.stringify({ throughId, names }), {
-				mode: 0o600,
-			});
+			const made = await fs.promises.mkdir(dir, { recursive: true });
+			if (track && made === dir) track.directory = identityOf(await fs.promises.lstat(dir, { bigint: true }));
+			if (track) {
+				const file = await fs.promises.open(path.join(dir, RESERVED_CLAIMS_FILE), "w", 0o600);
+				try {
+					await file.writeFile(JSON.stringify({ throughId, names }));
+					track.created.set(RESERVED_CLAIMS_FILE, identityOf(await file.stat({ bigint: true })));
+				} finally {
+					await file.close();
+				}
+			} else {
+				await fs.promises.writeFile(path.join(dir, RESERVED_CLAIMS_FILE), JSON.stringify({ throughId, names }), {
+					mode: 0o600,
+				});
+			}
 		} catch (error) {
 			// A claim nothing can read is a claim that will be broken, so this
 			// is a persistence failure like any other: observers hear it now,
@@ -4483,6 +4615,13 @@ export class SessionManager {
 			// a rollback observe the move it is undoing.
 			header: structuredClone(this.#header),
 			entries: [...this.#entries],
+			resumedForkCopy: this.#resumedForkCopy,
+			pendingArtifactCopy: this.#pendingArtifactCopy,
+			artifactsReproduced: this.#artifactsReproduced,
+			artifactLossReason: this.#artifactLossReason,
+			forkedFrom: this.#forkedFrom,
+			inheritedOutputNames: this.#inheritedOutputNames,
+			reservedArtifactId: this.#reservedArtifactId,
 			// A holder of its own, so a rollback to this snapshot takes the
 			// session back without this manager ever letting go of it — and so a
 			// switch started inside another cannot end the outer one's claim.
@@ -4500,6 +4639,10 @@ export class SessionManager {
 	commitSessionSwitch(snapshot: SessionManagerStateSnapshot): void {
 		const retained = snapshot.sessionClaim;
 		if (retained && this.#snapshotClaims.delete(retained)) retained.release();
+		if (this.#resumedForkCopy && this.#resumedForkCopy !== snapshot.resumedForkCopy) {
+			this.#resumedForkCopy.active = false;
+			this.#resumedForkCopy = undefined;
+		}
 	}
 
 	/**
@@ -4528,6 +4671,13 @@ export class SessionManager {
 	}
 
 	restoreState(snapshot: SessionManagerStateSnapshot): void {
+		this.#resumedForkCopy = snapshot.resumedForkCopy;
+		this.#pendingArtifactCopy = snapshot.pendingArtifactCopy;
+		this.#artifactsReproduced = snapshot.artifactsReproduced;
+		this.#artifactLossReason = snapshot.artifactLossReason;
+		this.#forkedFrom = snapshot.forkedFrom;
+		this.#inheritedOutputNames = snapshot.inheritedOutputNames ?? [];
+		this.#reservedArtifactId = snapshot.reservedArtifactId;
 		this.#closeWriterEventually();
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
@@ -4625,7 +4775,11 @@ export class SessionManager {
 	async #setSessionFile(
 		sessionFile: string,
 		loadedSession?: SessionLoadResult,
-		options?: { throwIfMissing?: boolean; newSession?: NewSessionOptions; forkIfContested?: boolean },
+		options?: {
+			throwIfMissing?: boolean;
+			newSession?: NewSessionOptions;
+			forkIfContested?: boolean;
+		},
 	): Promise<{ forkedFrom?: ResumedSessionFork }> {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
@@ -4720,7 +4874,7 @@ export class SessionManager {
 		// this is where this process takes its ownership claim.
 		if (options?.forkIfContested && this.#persist) {
 			const reason = await this.#resumedSessionContention(false);
-			if (reason) return { forkedFrom: this.#adoptLoadedSessionAsFork(reason) };
+			if (reason) return { forkedFrom: this.#adoptLoadedSessionAsFork(reason, undefined, true) };
 		}
 		return {};
 	}

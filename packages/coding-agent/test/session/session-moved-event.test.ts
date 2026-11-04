@@ -307,6 +307,9 @@ describe("a session that had to leave its file", () => {
 			sessionManager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
 			await sessionManager.flush();
 			await announced.promise;
+			const movedSessionFile = sessionManager.getSessionFile();
+			expect(movedSessionFile).toBeDefined();
+			if (!movedSessionFile) throw new Error("Expected the moved session to have a file");
 
 			expect(events).toEqual([
 				{
@@ -315,7 +318,7 @@ describe("a session that had to leave its file", () => {
 					previousSessionId: sessionId,
 					sessionId: sessionManager.getSessionId(),
 					previousSessionFile: sessionFile,
-					sessionFile: sessionManager.getSessionFile() as string,
+					sessionFile: movedSessionFile,
 				},
 			]);
 			expect(sessionManager.getSessionId()).not.toBe(sessionId);

@@ -24,6 +24,13 @@ export function runAsSessionWork<T>(session: object | undefined, fn: () => T): T
 
 type Callable = (...args: unknown[]) => unknown;
 
+/** Stable wrappers for functions handed out again, without retaining a session after its functions are gone. */
+const sessionWorkFunctions = new WeakMap<SessionWorkRun, WeakMap<Callable, Callable>>();
+
+function resultAsSessionWork(run: SessionWorkRun, result: unknown): unknown {
+	return typeof result === "function" ? asSessionWork(run, result as Callable) : result;
+}
+
 /**
  * `fn` as session work: each call runs through `run`, with the `this` and the arguments it was
  * called with. For a host function a session (or its manager or runner) keeps and calls later,
@@ -32,9 +39,19 @@ type Callable = (...args: unknown[]) => unknown;
  */
 export function asSessionWork<F extends (...args: never[]) => unknown>(run: SessionWorkRun, fn: F): F {
 	const callable = fn as unknown as Callable;
-	return function (this: unknown, ...args: unknown[]): unknown {
-		return run(() => callable.apply(this, args));
-	} as unknown as F;
+	let functions = sessionWorkFunctions.get(run);
+	if (!functions) {
+		functions = new WeakMap();
+		sessionWorkFunctions.set(run, functions);
+	}
+	const cached = functions.get(callable);
+	if (cached) return cached as unknown as F;
+	const wrapper = function (this: unknown, ...args: unknown[]): unknown {
+		return run(() => resultAsSessionWork(run, callable.apply(this, args)));
+	};
+	functions.set(callable, wrapper);
+	functions.set(wrapper, wrapper);
+	return wrapper as unknown as F;
 }
 
 /**
@@ -45,14 +62,15 @@ export function asSessionWork<F extends (...args: never[]) => unknown>(run: Sess
  * in a `static` block, where `runOf` may read the instance's private fields. Where `runOf` answers
  * `undefined` — an instance no session owns yet, a `this` that is no instance — the member runs as
  * is. The constructor, and members a subclass defines or the class inherits, are left as they are.
- * A member called from within the same session's work adds no async-context frame (see
- * `runWithRequestHolds`).
+ * Functions returned by members stay session work too: releases, unsubscribes and deferred invokers
+ * enter the same context when a host calls them later. Repeated returns keep one wrapper.
+ * A member called within the same session's work adds no frame (see `runWithRequestHolds`).
  */
 export function methodsAsSessionWork(prototype: object, runOf: (instance: object) => SessionWorkRun | undefined): void {
 	const wrap = (member: Callable): Callable => {
 		const wrapper = function (this: unknown, ...args: unknown[]): unknown {
 			const run = typeof this === "object" && this !== null ? runOf(this) : undefined;
-			return run ? run(() => member.apply(this, args)) : member.apply(this, args);
+			return run ? run(() => resultAsSessionWork(run, member.apply(this, args))) : member.apply(this, args);
 		};
 		// Stack traces keep naming the member.
 		Object.defineProperty(wrapper, "name", { value: member.name });
@@ -113,7 +131,7 @@ export function membersAsSessionWork<T extends object>(run: SessionWorkRun, targ
 		const callable = value as Callable;
 		const wrapper = function (this: unknown, ...args: unknown[]): unknown {
 			const self = this === proxy ? target : this;
-			return run(() => callable.apply(self, args));
+			return run(() => resultAsSessionWork(run, callable.apply(self, args)));
 		};
 		wrappers.set(key, { value: callable, wrapper });
 		return wrapper;

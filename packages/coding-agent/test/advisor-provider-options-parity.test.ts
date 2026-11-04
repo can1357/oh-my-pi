@@ -105,7 +105,11 @@ describe("AgentSession advisor provider-options parity", () => {
 			// the options the advisor handed us before the call.
 			throw new Error("capture-stop");
 		};
-		const onPayload = async (payload: unknown) => payload;
+		const receivedPayloads: unknown[] = [];
+		const onPayload = async (payload: unknown) => {
+			receivedPayloads.push(payload);
+			return { transformed: payload };
+		};
 		const onResponse = async (_response: unknown, _model: unknown) => undefined;
 		const onSseEvent = (_event: { data: string }, _model: unknown) => {};
 		const transformProviderContext = async <T>(context: T): Promise<T> => context;
@@ -139,17 +143,14 @@ describe("AgentSession advisor provider-options parity", () => {
 		const opts = capturedStreamOptions[0];
 		if (!opts) throw new Error("Expected captured advisor stream options");
 
-		// Provider hooks forwarded by the Agent loop carry the session's wrappers
-		// (the session wraps `onResponse`/`onSseEvent` to also drive its
-		// `RawSseDebugBuffer` — what matters here is that *something* is wired,
-		// not the exact closure identity for those two).
+		// Session wrappers preserve the SDK hooks' behavior, not their closure identity.
 		expect(typeof opts.onPayload).toBe("function");
 		expect(typeof opts.onResponse).toBe("function");
 		expect(typeof opts.onSseEvent).toBe("function");
 
-		// Bare `onPayload` has no session-side wrapping so it reaches the stream
-		// call unchanged — proof the SDK-provided hook was installed.
-		expect(opts.onPayload).toBe(onPayload);
+		const payload = { messages: ["advisor payload"] };
+		expect(await opts.onPayload?.(payload, model)).toEqual({ transformed: payload });
+		expect(receivedPayloads).toEqual([payload]);
 
 		// Cache routing identity threaded through into the actual stream call.
 		// Without a parent `providerPromptCacheKey`, the advisor's effective key

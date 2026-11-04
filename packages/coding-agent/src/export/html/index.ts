@@ -263,16 +263,19 @@ export async function exportSessionToHtml(
 ): Promise<string> {
 	const opts: ExportOptions = typeof options === "string" ? { outputPath: options } : options || {};
 
-	const sessionFile = sm.getSessionFile();
-	if (!sessionFile) throw new Error("Cannot export in-memory session to HTML");
-
-	if (opts.includeSubSessions !== false) {
-		// A fork's inherited subagent transcripts arrive in the background. An
-		// export taken while that copy runs is not a smaller snapshot of the
-		// session, it is a wrong one: it omits children the transcript refers
-		// to and says nothing about it.
+	let sessionFile: string;
+	for (;;) {
+		const currentFile = sm.getSessionFile();
+		if (!currentFile) throw new Error("Cannot export in-memory session to HTML");
+		sessionFile = currentFile;
+		if (opts.includeSubSessions === false) break;
+		const sessionId = sm.getSessionId();
+		const artifactsDir = sm.getArtifactsDir();
+		// Inheritance may outlast a session switch. Wait for the tree this snapshot names,
+		// then retry if the manager now holds another one, including that tree's own copy.
 		await sm.whenArtifactsSettled(opts.signal);
-		await whenArtifactCopiesSettle(sm.getArtifactsDir(), opts.signal);
+		await whenArtifactCopiesSettle(artifactsDir, opts.signal);
+		if (sm.getSessionFile() === sessionFile && sm.getSessionId() === sessionId) break;
 	}
 	return exportSessionData(buildSessionData(sm, state), sessionFile, opts);
 }

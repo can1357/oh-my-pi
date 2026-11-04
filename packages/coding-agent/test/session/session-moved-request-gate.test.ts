@@ -25,11 +25,13 @@ import type { AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 
 /**
  * Every model request a session's tree starts waits for the session's move
@@ -1273,6 +1275,20 @@ describe("a host function the session, its manager or its runner keeps runs as t
 				return fired.promise;
 			},
 		],
+		[
+			"a thinking renderer the runner returns inside its renderer list",
+			async ({ runner, callback }) => {
+				const extension = runner.getLoadedExtensions()[0];
+				if (!extension) throw new Error("Expected a loaded extension");
+				extension.assistantThinkingRenderers.push(() => {
+					callback();
+					return undefined;
+				});
+				const renderer = runner.getAssistantThinkingRenderers()[0];
+				if (!renderer) throw new Error("Expected a registered thinking renderer");
+				renderer({ contentIndex: 0, thinkingIndex: 0, text: "thinking", requestRender: () => undefined }, theme);
+			},
+		],
 	];
 	for (const [registration, trigger] of registrations) {
 		it(`holds the model request of ${registration}`, async () => {
@@ -1281,6 +1297,43 @@ describe("a host function the session, its manager or its runner keeps runs as t
 			await expectHeldThenSentOnce(server, hold, work());
 		}, 60_000);
 	}
+
+	it("holds the request an IRC listener starts when the host invokes the returned release outside session work", async () => {
+		const { parts, server, hold, work } = await hostFunctionSession(tempDir("@gate-returned-release-"));
+		const release = parts.session.holdIrcWakes();
+		const unsubscribe = parts.session.subscribeIrcWakeHolds(parts.callback);
+		try {
+			release();
+			await expectHeldThenSentOnce(server, hold, work());
+			release();
+			expect(server.requests).toHaveLength(1);
+		} finally {
+			unsubscribe();
+		}
+	}, 60_000);
+
+	it("holds a host callback's request when a saved yield-queue flush runs outside session work", async () => {
+		const { parts, server, hold, work } = await hostFunctionSession(tempDir("@gate-deferred-queue-"));
+		let probe = false;
+		let flush: (() => Promise<void>) | undefined;
+		const queue = new YieldQueue({
+			runDispatcher: fn => parts.session.runInRequestContext(fn),
+			isStreaming: () => {
+				if (probe) parts.callback();
+				return probe;
+			},
+			injectIdle: async () => undefined,
+			scheduleIdleFlush: run => {
+				flush = run;
+			},
+		});
+		queue.register("probe", { build: () => null });
+		queue.enqueue("probe", "entry");
+		if (!flush) throw new Error("Expected a scheduled idle flush");
+		probe = true;
+		await flush();
+		await expectHeldThenSentOnce(server, hold, work());
+	}, 60_000);
 
 	// A message queued on an idle session starts the agent's own turn, which `streamFn` serves.
 	const queuedMessages: Array<[string, (session: AgentSession, callback: () => void) => Promise<unknown>]> = [
@@ -1457,6 +1510,28 @@ describe("a host function the session, its manager or its runner keeps runs as t
 			cleanups.push(() => session.dispose());
 			await expectHeldThenSentOnce(server, hold, work);
 		}
+	}, 60_000);
+
+	it("holds a request started by the agent config getter before the constructor discovers its agent", async () => {
+		const temp = tempDir("@gate-agent-getter-");
+		const server = localModelServer();
+		cleanups.push(server.stop);
+		const auth = await AuthStorage.create(":memory:");
+		cleanups.push(() => auth.close());
+		const agent = new Agent({ initialState: { model: server.model, tools: [] } });
+		const hold = holdUntilLetGo(agent);
+		let work: Promise<unknown> | undefined;
+		const session = new AgentSession({
+			get agent() {
+				work ??= requestFrom(server.model);
+				return agent;
+			},
+			sessionManager: SessionManager.inMemory(temp.path()),
+			modelRegistry: new ModelRegistry(auth, path.join(temp.path(), "models.yml")),
+			settings: settings(),
+		});
+		cleanups.push(() => session.dispose());
+		await expectHeldThenSentOnce(server, hold, work);
 	}, 60_000);
 
 	it("releases the runner and the manager a constructor that throws had claimed, so the host can build again", async () => {
