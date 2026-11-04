@@ -11,6 +11,7 @@ import type { OAuthController, OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/ty
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
 import type { OAuthCredential } from "../session/auth-storage";
+import { redactUrlForLog } from "./json-rpc";
 import { buildWellKnownUrls } from "./oauth-discovery";
 
 /** Credential-id prefix for OMP-managed MCP OAuth credentials keyed by profile and server URL. */
@@ -768,7 +769,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 					: "network error";
 		return new Error(
 			`OAuth provider requires client_id, and dynamic client registration was rejected ` +
-				`(POST ${failure.endpoint} → ${outcome}). The server likely restricts registration to pre-approved clients. ${manualHint}`,
+				`(POST ${redactUrlForLog(failure.endpoint)} → ${outcome}). The server likely restricts registration to pre-approved clients. ${manualHint}`,
 		);
 	}
 }

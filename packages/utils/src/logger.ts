@@ -26,6 +26,8 @@ import { isPidAlive } from "./pid";
 import { setStderrRedirectTarget } from "./stderr-guard";
 import { drainModuleLoadEvents } from "./timing-buffer";
 import { isRecord } from "./type-guards";
+import { redactUrlCredentials } from "./url-credentials";
+
 /** Severity names accepted by the centralized logger. */
 export type LogLevel = "error" | "warn" | "info" | "debug";
 
@@ -163,13 +165,40 @@ function emitToSinks(level: LogLevel, message: string, context: Record<string, u
 
 function dispatchToSinks(event: LogEvent): void {
 	if (logSinks.size === 0) return;
+	const redacted = withoutUrlCredentials(event);
 	for (const sink of logSinks) {
 		try {
-			sink(event);
+			sink(redacted);
 		} catch {
 			// Sinks are side channels; they must never break local logging.
 		}
 	}
+}
+
+/**
+ * `event` with URL userinfo and secret query values removed from its message and
+ * context, as the log file gets it; a sink such as the OTLP exporter ships records
+ * off the machine. The event is returned as is when nothing needed removing, so
+ * sinks keep the original context objects in the common case. A context that
+ * cannot be serialized (a cycle, a bigint) cannot be checked and reaches sinks
+ * as the caller's object, as before.
+ */
+function withoutUrlCredentials(event: LogEvent): LogEvent {
+	const message = redactUrlCredentials(event.message);
+	let context = event.context;
+	if (context !== undefined) {
+		try {
+			const json = mayContainError(context) ? JSON.stringify(context, jsonReplacer) : JSON.stringify(context);
+			const clean = redactUrlCredentials(json);
+			if (clean !== json) {
+				const parsed: unknown = JSON.parse(clean);
+				context = isRecord(parsed) ? parsed : undefined;
+			}
+		} catch {
+			// Not serializable, so nothing here can be checked; the sink gets the caller's object.
+		}
+	}
+	return message === event.message && context === event.context ? event : { ...event, message, context };
 }
 
 const PROCESS_LOG_PATTERN = /^omp\.(\d{4}-\d{2}-\d{2})\.(\d+)\.log(?:\.(\d+))?$/;
@@ -412,7 +441,9 @@ function formatLogRecord(
 		if (metadata.stack) entry.stack = metadata.stack;
 		if (metadata.cause) entry.cause = metadata.cause;
 	}
-	return mayContainError(entry) ? JSON.stringify(entry, jsonReplacer) : JSON.stringify(entry);
+	// A URL's userinfo or secret query value must not reach the log file, wherever it was
+	// embedded: a message, a context field, or a runtime error's own fields (Bun fetch `path`).
+	return redactUrlCredentials(mayContainError(entry) ? JSON.stringify(entry, jsonReplacer) : JSON.stringify(entry));
 }
 
 /** Longest a buffered file record waits before it is written. */
