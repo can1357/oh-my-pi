@@ -264,7 +264,15 @@ export interface SessionStorage {
 	 * cross-process conditional-delete primitive must skip opportunistic GC.
 	 */
 	deleteSessionWithArtifactsIf?(sessionPath: string, shouldDelete: (content: string) => boolean): Promise<boolean>;
-	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter;
+	/**
+	 * Open an appender (or, with `flags: "w"`, a truncating writer) on `path`.
+	 * `create: false` opens only a file that exists: a missing one throws ENOENT
+	 * instead of being created empty (through a symlink, at its referent).
+	 */
+	openWriter(
+		path: string,
+		options?: { flags?: "a" | "w"; create?: boolean; onError?: (err: Error) => void },
+	): SessionStorageWriter;
 	/**
 	 * Wait for every backing write scheduled by this storage to become durably
 	 * visible. Sync backends (file, memory) return immediately because their
@@ -324,6 +332,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		fpath: string,
 		options?: {
 			flags?: "a" | "w";
+			create?: boolean;
 			onError?: (err: Error) => void;
 			publishLock?: (append: () => void, landed: () => boolean) => void;
 		},
@@ -338,10 +347,8 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 			fs.mkdirSync(dir, { recursive: true });
 		}
 		// Open file once, keep fd for lifetime
-		this.#fd = fs.openSync(
-			fpath,
-			SESSION_WRITE_FLAGS | (flags === "w" ? fs.constants.O_TRUNC : fs.constants.O_APPEND),
-		);
+		const base = options?.create === false ? fs.constants.O_WRONLY : SESSION_WRITE_FLAGS;
+		this.#fd = fs.openSync(fpath, base | (flags === "w" ? fs.constants.O_TRUNC : fs.constants.O_APPEND));
 		// Register for cleanup if abandoned without close()
 		writerRegistry.register(this, this.#fd, this);
 	}
@@ -364,8 +371,9 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	 * path still names the held file, the one path identity read serves both the
 	 * identity check and the append rollback point.
 	 */
-	#reopenIfReplaced(live: fs.BigIntStats | undefined = statPathByHandle(this.#fpath)): number {
+	#reopenIfReplaced(): number {
 		const held = this.#heldFile();
+		const live = statPathByHandle(this.#fpath);
 		if (!live) return fs.fstatSync(this.#fd).size;
 		if (live.ino === held.ino && live.dev === held.dev) return Number(live.size);
 		const nextFd = fs.openSync(this.#fpath, SESSION_WRITE_FLAGS | fs.constants.O_APPEND);
@@ -384,19 +392,21 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	}
 
 	/**
-	 * {@link #reopenIfReplaced}, refusing a file that does not measure what the
-	 * caller last put there. A path renamed over by an older copy, truncated or
-	 * removed would otherwise take the line as if it held the caller's journal:
-	 * the entries it lacks stay lost and the new line's parent is missing, or the
-	 * line lands in an unlinked inode nobody will read.
+	 * Throw unless the session path still names the held file at exactly
+	 * `expectedSize` bytes. With a precondition the writer never follows a
+	 * replacement: a path renamed over (even by a copy of the same size),
+	 * truncated or removed would otherwise take the line as if it held the
+	 * caller's journal, so the entries it lacks stay lost and the line's parent
+	 * is missing, or the line lands in an unlinked inode nobody will read.
 	 */
-	#appendPoint(options: SessionAppendOptions | undefined): number {
-		if (!options) return this.#reopenIfReplaced();
+	#assertHoldsAt(expectedSize: number): number {
 		const live = statPathByHandle(this.#fpath);
-		if (!live) throw new SessionWriteConflictError(this.#fpath, options.expectedSize, null);
-		const size = this.#reopenIfReplaced(live);
-		if (size !== options.expectedSize) throw new SessionWriteConflictError(this.#fpath, options.expectedSize, size);
-		return size;
+		const held = this.#heldFile();
+		const size = live ? Number(live.size) : null;
+		if (!live || live.ino !== held.ino || live.dev !== held.dev || size !== expectedSize) {
+			throw new SessionWriteConflictError(this.#fpath, expectedSize, size);
+		}
+		return expectedSize;
 	}
 
 	/**
@@ -471,16 +481,21 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		// The publish lock serializes the append against a concurrent rewrite's
 		// check-then-rename, which would otherwise erase the appended turn.
 		try {
+			const appendPoint = () => (options ? this.#assertHoldsAt(options.expectedSize) : this.#reopenIfReplaced());
 			if (this.#publishLock) {
 				this.#publishLock(
-					() => this.#writeNow(line, this.#appendPoint(options)),
+					() => this.#writeNow(line, appendPoint()),
 					() => this.#holdsLivePath(),
 				);
 			} else {
-				this.#writeNow(line, options ? this.#appendPoint(options) : fs.fstatSync(this.#fd).size);
+				this.#writeNow(line, options ? appendPoint() : fs.fstatSync(this.#fd).size);
 			}
+			// A program outside the publish lock can still replace, truncate or
+			// remove the file between the check and the write; the line counts as
+			// appended only when the path names the held file at the size it made.
+			if (options) this.#assertHoldsAt(options.expectedSize + Buffer.byteLength(line, "utf-8"));
 		} catch (err) {
-			// A refused precondition wrote nothing and says nothing about this writer.
+			// A refused precondition says nothing about this writer's descriptor.
 			if (err instanceof SessionWriteConflictError) throw err;
 			throw this.#recordError(err);
 		}
@@ -1327,7 +1342,10 @@ export class FileSessionStorage implements SessionStorage {
 		return Promise.resolve();
 	}
 
-	openWriter(fpath: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {
+	openWriter(
+		fpath: string,
+		options?: { flags?: "a" | "w"; create?: boolean; onError?: (err: Error) => void },
+	): SessionStorageWriter {
 		const lockPath = this.#publishLockPath(fpath);
 		const gatePath = this.#osGatePath(lockPath);
 		return new FileSessionStorageWriter(fpath, {
@@ -1490,11 +1508,12 @@ class MemorySessionStorageWriter implements SessionStorageWriter {
 	constructor(
 		storage: MemorySessionStorage,
 		path: string,
-		options?: { flags?: "a" | "w"; onError?: (err: Error) => void },
+		options?: { flags?: "a" | "w"; create?: boolean; onError?: (err: Error) => void },
 	) {
 		this.#storage = storage;
 		this.#path = path;
 		this.#onError = options?.onError;
+		if (options?.create === false && !storage.existsSync(path)) throw memoryFileNotFound(path);
 		if ((options?.flags ?? "a") === "w") {
 			this.#storage.writeTextSync(path, "");
 		}
@@ -1812,7 +1831,10 @@ export class MemorySessionStorage implements SessionStorage {
 		return Promise.resolve();
 	}
 
-	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {
+	openWriter(
+		path: string,
+		options?: { flags?: "a" | "w"; create?: boolean; onError?: (err: Error) => void },
+	): SessionStorageWriter {
 		return new MemorySessionStorageWriter(this, path, options);
 	}
 }

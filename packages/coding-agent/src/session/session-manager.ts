@@ -1053,6 +1053,8 @@ export class SessionManager {
 	#persistenceNoticeCallbacks = new Set<(notice: SessionPersistenceNotice) => void>();
 	/** Every notice raised so far, replayed to each later subscriber. */
 	#persistenceNotices: SessionPersistenceNotice[] = [];
+	/** A `restored` notice owed once the full rewrite recovering the session file lands. */
+	#pendingRestore: SessionPersistenceNotice | undefined;
 	/**
 	 * This process's ownership claim on the session it last wrote (file storage
 	 * only), keyed by session id so every path to the journal meets it.
@@ -1209,32 +1211,27 @@ export class SessionManager {
 	}
 
 	/**
-	 * Say so when the conflict on `sessionFile`, which still is (or no longer
+	 * Remember that the conflict on `sessionFile`, which still is (or no longer
 	 * holds anything but) this session's journal, shows bytes this manager wrote
 	 * are gone: another program put a shorter copy at the path, truncated it or
-	 * removed it. The retry writes the whole journal back from memory. A file
-	 * that only grew (another writer appended) loses nothing and stays quiet.
+	 * removed it. The retry writes the whole journal back from memory, and the
+	 * `restored` notice goes out once that write lands ({@link #recordFullRewrite}),
+	 * never for a write that failed. A file that only grew loses nothing.
 	 */
-	#noticeIfJournalLost(error: SessionWriteConflictError, sessionFile: string, recoveries: number): void {
-		if (recoveries > 0 || error.expectedSize === null) return;
+	#noteJournalLost(error: SessionWriteConflictError, sessionFile: string): void {
+		if (this.#pendingRestore || error.expectedSize === null) return;
 		if (error.actualSize !== null && error.actualSize >= error.expectedSize) return;
-		this.#notifyPersistenceNotice({
+		this.#pendingRestore = {
 			reason: "restored",
 			from: sessionFile,
 			to: sessionFile,
 			expectedBytes: error.expectedSize,
 			foundBytes: error.actualSize,
-		});
+		};
 	}
 
-	/**
-	 * The entries `content` holds that this manager does not, or `undefined` when
-	 * it is not this session's journal. An empty file holds nothing to keep: an
-	 * append writer opening a path whose file is gone (through a symlink to it,
-	 * say) creates one, and the whole journal is written over it.
-	 */
+	/** The entries `content` holds that this manager does not, or `undefined` when it is not this session's journal. */
 	#foreignEntriesIn(content: string): SessionEntry[] | undefined {
-		if (content.length === 0) return [];
 		const { entries, invalidHeader } = parseSessionContent(content);
 		const header = entries[0];
 		if (invalidHeader || header?.type !== "session" || header.id !== this.#sessionId) return undefined;
@@ -1294,14 +1291,14 @@ export class SessionManager {
 			content = this.#storage.readTextSync(contested);
 		} catch (readError) {
 			if (!isEnoent(readError)) return this.#moveOffSessionFile("replaced");
-			this.#noticeIfJournalLost(conflict, contested, recoveries);
+			this.#noteJournalLost(conflict, contested);
 			this.#expectedDiskSize = null;
 			return contested;
 		}
 		const foreign = this.#foreignEntriesIn(content);
 		if (!foreign) return this.#moveOffSessionFile("replaced");
 		resolveBlobRefsInEntriesSync(foreign, this.#blobs);
-		this.#noticeIfJournalLost(conflict, contested, recoveries);
+		this.#noteJournalLost(conflict, contested);
 		this.#adoptForeignEntries(foreign, Buffer.byteLength(content, "utf8"));
 		return contested;
 	}
@@ -1320,7 +1317,7 @@ export class SessionManager {
 			// A synchronous rewrite during the read already recovered; retry against its result.
 			if (this.#diskEpoch !== epoch || this.#sessionFile !== contested) return this.#sessionFile;
 			if (!isEnoent(readError)) return this.#moveOffSessionFile("replaced");
-			this.#noticeIfJournalLost(conflict, contested, recoveries);
+			this.#noteJournalLost(conflict, contested);
 			this.#expectedDiskSize = null;
 			return contested;
 		}
@@ -1329,7 +1326,7 @@ export class SessionManager {
 		if (!foreign) return this.#moveOffSessionFile("replaced");
 		await resolveBlobRefsInEntries(foreign, this.#blobs);
 		if (this.#diskEpoch !== epoch || this.#sessionFile !== contested) return this.#sessionFile;
-		this.#noticeIfJournalLost(conflict, contested, recoveries);
+		this.#noteJournalLost(conflict, contested);
 		this.#adoptForeignEntries(foreign, Buffer.byteLength(content, "utf8"));
 		return contested;
 	}
@@ -1385,6 +1382,8 @@ export class SessionManager {
 		this.#pendingArtifactCopy = { sessionFile: to, done: copySessionArtifacts(from, to) };
 		this.#rememberBreadcrumb(this.#cwd, to);
 		this.#claimSession();
+		// The session left the file: the move's own notice says what happened to it.
+		this.#pendingRestore = undefined;
 		this.#notifyPersistenceNotice({ reason, from, to });
 		return to;
 	}
@@ -1598,14 +1597,26 @@ export class SessionManager {
 	}
 
 	#appendWriter(): SessionStorageWriter {
-		if (!this.#sessionFile) throw new Error("Cannot open a session writer before a session file exists");
+		const sessionFile = this.#sessionFile;
+		if (!sessionFile) throw new Error("Cannot open a session writer before a session file exists");
 
 		if (this.#writer?.isOpen()) return this.#writer;
 
-		this.#writer = this.#storage.openWriter(this.#sessionFile, {
-			flags: "a",
-			onError: err => this.#noteDiskFailure(err),
-		});
+		// A file this manager already wrote must still be there: opening with
+		// create would make an empty one (through a symlink whose referent is
+		// gone, at the referent) and hide that the journal disappeared.
+		const expectedSize = this.#expectedDiskSize;
+		try {
+			this.#writer = this.#storage.openWriter(sessionFile, {
+				flags: "a",
+				create: expectedSize === null,
+				onError: err => this.#noteDiskFailure(err),
+			});
+		} catch (err) {
+			if (expectedSize !== null && isEnoent(err))
+				throw new SessionWriteConflictError(sessionFile, expectedSize, null);
+			throw err;
+		}
 		return this.#writer;
 	}
 
@@ -1616,8 +1627,13 @@ export class SessionManager {
 		this.#expectedDiskSize = (this.#expectedDiskSize ?? 0) + Buffer.byteLength(line, "utf8");
 	}
 
+	/** A full body of this journal is now durable: announce a restore it completed. */
 	#recordFullRewrite(bytes: number): void {
 		this.#expectedDiskSize = bytes;
+		const restored = this.#pendingRestore;
+		if (!restored) return;
+		this.#pendingRestore = undefined;
+		if (restored.from === this.#sessionFile) this.#notifyPersistenceNotice(restored);
 	}
 
 	/**
@@ -2081,7 +2097,16 @@ export class SessionManager {
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return;
 				try {
-					await this.#appendWriter().append(line, this.#appendPrecondition());
+					// Record the line's bytes in the same tick as the write: an
+					// append racing an awaited write would see the file past the
+					// recorded size and republish, and this line would then be
+					// counted twice.
+					const writer = this.#appendWriter();
+					if (writer.appendSync && !this.#storage.defersSyncPublish) {
+						writer.appendSync(line, this.#appendPrecondition());
+					} else {
+						await writer.append(line);
+					}
 					this.#recordDurableAppend(line);
 					await this.#storage.updateSessionTitle(sessionFile, update);
 					if (this.#diskEpoch === epoch) this.#fileIsCurrent = true;
