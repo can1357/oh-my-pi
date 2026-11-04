@@ -1710,7 +1710,14 @@ impl PickLog {
 					return false;
 				}
 			},
-			Rearm::Replace(reroute) => self.reroute = reroute.map(|reroute| (now, reroute)),
+			Rearm::Replace(reroute) => {
+				if reroute.is_none()
+					&& let Some((_, previous)) = self.reroute.take()
+				{
+					previous.cancel();
+				}
+				self.reroute = reroute.map(|reroute| (now, reroute));
+			},
 		}
 		self.record(picks, now);
 		self.watch_until = Some(

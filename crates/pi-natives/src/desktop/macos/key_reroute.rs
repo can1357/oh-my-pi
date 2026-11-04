@@ -221,6 +221,15 @@ struct Registry {
 	held:   Vec<Held>,
 }
 
+impl Registry {
+	fn cancel(&mut self, armed: &Armed, generations: &AtomicU64) {
+		if self.latest == (armed.generation, armed.target) {
+			self.latest = (generations.fetch_add(1, Ordering::AcqRel) + 1, -1);
+			self.stolen = None;
+		}
+	}
+}
+
 static REGISTRY: Mutex<Registry> =
 	Mutex::new(Registry { latest: (0, -1), stolen: None, held: Vec::new() });
 
@@ -775,6 +784,11 @@ impl KeyReroute {
 		self.armed
 	}
 
+	/// Stop moving fresh keys immediately; held releases keep their owner.
+	pub(super) fn cancel(self) {
+		REGISTRY.lock().cancel(&self.armed, &GENERATION);
+	}
+
 	/// Starts watching for the target taking the user's keyboard. `None` when
 	/// the taps cannot be created (no Accessibility permission, or the target
 	/// exited): the action then runs as before, without key repair.
@@ -1039,6 +1053,24 @@ mod tests {
 		// The next keystroke is the target's again.
 		assert_eq!(rig.key(Q, Stroke::Press), KEPT);
 		assert_eq!(rig.key(Q, Stroke::Release), KEPT);
+	}
+
+	#[test]
+	fn cancelling_for_secure_input_stops_fresh_keys_but_keeps_held_releases() {
+		let mut rig = Rig::new();
+		rig.steal();
+		assert_eq!(rig.key(Q, Stroke::Press), MOVED);
+		let armed = Armed {
+			user:       USER,
+			target:     TARGET,
+			generation: 1,
+			buttons:    BUTTONS,
+			secure:     false,
+		};
+		rig.registry.cancel(&armed, &AtomicU64::new(1));
+		assert_eq!(rig.key(LEFT_SHIFT, Stroke::Press), KEPT);
+		assert_eq!(rig.key(Q, Stroke::Release), MOVED);
+		assert_eq!(rig.registry.stolen, None);
 	}
 
 	#[test]
