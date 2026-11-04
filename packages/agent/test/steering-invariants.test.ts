@@ -2954,3 +2954,156 @@ describe("steering invariants: the round-twenty reproductions", () => {
 		}
 	}
 });
+
+/**
+ * Round twenty-one: the abandon paths skip the records of input already in a request, one occurrence each
+ * and never a prompt's own occurrence of the same object; prepared context belongs to its own batch; an
+ * external cancellation of continue()'s opening take restores its input; a live wait parked behind deferred
+ * input wakes when the host takes that input back.
+ */
+describe("steering invariants: the round-twenty-one reproductions", () => {
+	for (const abandon of ["clear", "withdraw"] as const) {
+		for (const alias of [false, true]) {
+			it(`a ${abandon} after the request was built ${abandon === "clear" ? "leaves the delivered steer recorded" : "skips the queued records, not the prompt's"} (prompt aliases the steer: ${alias})`, async () => {
+				const { agent } = createAgent();
+				const [v, p, q] = [person("V"), person("P"), person("Q")];
+				agent.steer(v);
+				const ends: string[][] = [];
+				agent.subscribe(event => {
+					if (event.type === "agent_end") ends.push(texts(event.messages));
+				});
+				agent.setBeforeModelCall(() => {
+					if (abandon === "clear") agent.clearAllQueues();
+					else agent.withdrawUndeliveredQueuedMessages();
+					agent.abort();
+					return { stop: true };
+				});
+
+				await agent.prompt(alias ? [v, p] : [q, p]);
+
+				// The steer was in the request: a clear leaves it to be recorded, the withdrawal skips its record.
+				const prompt = alias ? ["V", "P"] : ["Q", "P"];
+				const expected = abandon === "clear" ? [...prompt, "V"] : prompt;
+				expect(transcriptTexts(agent)).toEqual(expected);
+				expect(ends).toEqual([expected]);
+				expect(agent.peekSteeringQueue()).toEqual([]);
+				expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
+			});
+		}
+	}
+
+	for (const alias of [false, true]) {
+		it(`a withdrawal skips the second accepted batch's own context (contexts are one object: ${alias})`, async () => {
+			const { agent, mock } = createAgent();
+			const [a, b, c] = [person("A"), person("B"), person("C")];
+			const d = alias ? c : person("D");
+			agent.prepareQueuedMessages = messages => ({ commit: () => (messages[0] === a ? [c] : [d]) });
+			let first = true;
+			let withdrawn: AgentMessage[] | undefined;
+			agent.subscribe(event => {
+				if (withdrawn || event.type !== "message_end" || event.message !== c) return;
+				withdrawn = agent.withdrawUndeliveredQueuedMessages().steering;
+				agent.abort();
+			});
+			agent.streamFn = async (model, context, options) => {
+				if (first && options?.liveSteering && options.signal) {
+					first = false;
+					for (const message of [a, b]) {
+						agent.steer(message);
+						(await options.liveSteering.claim(options.signal))?.accept();
+					}
+				}
+				return mock.stream(model, context, options);
+			};
+
+			await agent.prompt("start");
+
+			expect(withdrawn).toEqual([b]);
+			expect(transcriptTexts(agent)).toEqual(["start", "A", "C"]);
+		});
+	}
+
+	for (const queue of ["steering", "followUp"] as const) {
+		for (const withPreparer of [false, true]) {
+			it(`continue() cancelled by its caller's signal while taking its opening ${queue} restores it (preparer: ${withPreparer})`, async () => {
+				const { agent, mock } = createAgent();
+				let requests = 0;
+				agent.streamFn = async (model, context, options) => {
+					requests++;
+					return mock.stream(model, context, options);
+				};
+				if (withPreparer) agent.prepareQueuedMessages = () => ({ commit: () => [] });
+				const v = person("V");
+				const external = new AbortController();
+				if (queue === "steering") agent.steer(v);
+				else agent.followUp(v);
+				let cancelled = false;
+				agent.onQueueChange(() => {
+					if (cancelled || !agent.state.isStreaming || agent.peekUndeliveredQueuedMessages().length === 0) return;
+					cancelled = true;
+					external.abort();
+				});
+
+				await agent.continue(external.signal);
+
+				expect(cancelled).toBe(true);
+				expect(requests).toBe(0);
+				expect(agent.state.messages).toEqual([]);
+				expect(queue === "steering" ? agent.peekSteeringQueue() : agent.peekFollowUpQueue()).toEqual([v]);
+				expect(agent.state.isStreaming).toBe(false);
+			});
+		}
+	}
+
+	it("a live wait parked behind deferred input wakes once the host removes that input and new steering arrives", async () => {
+		const { agent, mock } = createAgent();
+		const [v, p] = [person("V"), person("P")];
+		let first = true;
+		let woke = false;
+		let wokeBeforeAbort = false;
+		agent.streamFn = async (model, context, options) => {
+			if (first && options?.liveSteering && options.signal) {
+				first = false;
+				const live = options.liveSteering;
+				agent.steer(v);
+				(await live.claim(options.signal))?.reject();
+				const waiting = live.wait(options.signal).then(() => {
+					woke = true;
+				});
+				agent.removeQueuedMessages(message => message === v);
+				agent.steer(p);
+				for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+				wokeBeforeAbort = woke;
+				agent.abort();
+				await waiting;
+			}
+			return mock.stream(model, context, options);
+		};
+
+		await agent.prompt("start");
+
+		expect(wokeBeforeAbort).toBe(true);
+	});
+
+	it("reset() takes back delivered input too, so the aborted run's end puts nothing back", async () => {
+		const { agent, mock } = createAgent();
+		const v = person("V");
+		let first = true;
+		agent.streamFn = async (model, context, options) => {
+			if (first && options?.liveSteering && options.signal) {
+				first = false;
+				agent.steer(v);
+				(await options.liveSteering.claim(options.signal))?.accept();
+				agent.reset();
+				agent.abort();
+			}
+			return mock.stream(model, context, options);
+		};
+
+		await agent.prompt("start");
+
+		expect(agent.peekSteeringQueue()).toEqual([]);
+		expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
+		expect(transcriptTexts(agent)).not.toContain("V");
+	});
+});

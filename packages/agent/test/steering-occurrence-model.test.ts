@@ -16,6 +16,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 type Queue = "steering" | "followUp";
 type Op = {
 	type:
+		| "before"
 		| "enqueue"
 		| "promote"
 		| "group"
@@ -398,6 +399,7 @@ async function execute(operations: readonly Op[]): Promise<Result> {
 			}
 			settleWait();
 		}
+		if (event.type === "message_end") check("message_end");
 		if (event.type === "agent_end") {
 			for (const queue of ["steering", "followUp"] as const) {
 				const restored = batches.flatMap(batch =>
@@ -463,6 +465,13 @@ async function execute(operations: readonly Op[]): Promise<Result> {
 					contextObject = object;
 					configurePreparer();
 					break;
+				case "before":
+					agent.setBeforeModelCall(() => {
+						agent.setBeforeModelCall(undefined);
+						for (const child of op.body ?? []) applySync(child);
+						return { stop: true };
+					});
+					break;
 				case "watch":
 					watch = op;
 					break;
@@ -482,18 +491,19 @@ async function execute(operations: readonly Op[]): Promise<Result> {
 				case "remove":
 				case "clear":
 				case "withdraw": {
-					// A removal leaves delivered input. The Esc withdrawal and a full clear are the abandon paths
-					// (an interrupt, a session switch or reset): they take back everything the run holds and has not
-					// recorded, delivered or not, and the abort that follows discards the response that read it.
-					const abandon = op.type === "withdraw" || op.type === "clear";
+					// A removal and a clear leave delivered input: the model read it, so the transcript records it or
+					// the run's end puts it back. The Esc withdrawal is the abandon path: it takes back everything the
+					// run holds and has not recorded, delivered or not, and the abort that follows discards the
+					// response that read it.
+					const abandon = op.type === "withdraw";
 					const removable = occurrences.filter(
 						o =>
 							(o.kind === "steering" || o.kind === "followUp") &&
 							(op.type === "withdraw"
 								? o.state === "held" && o.batch?.ready === true
-								: op.type === "clear"
-									? o.state === "queued" || o.state === "held"
-									: (o.state === "queued" || o.state === "held") && !o.delivered && o.object === object),
+								: (o.state === "queued" || o.state === "held") &&
+									!o.delivered &&
+									(op.type === "clear" || o.object === object)),
 					);
 					for (const o of removable) retire(o);
 					if (abandon) {
@@ -597,17 +607,24 @@ async function execute(operations: readonly Op[]): Promise<Result> {
 						)
 					)
 						coverage.add("prompt aliases queue");
+					if (op.mode === "prompt-first") boundary.push(make(op.object ?? 10, "prompt", "held"));
+					if (op.mode === "prompt-first") boundary.push(make(8, "prompt", "held"));
 					if (op.mode === "prompt-pair")
 						for (let i = 1; i < (op.count ?? 2); i++) boundary.push(make(8, "prompt", "held"));
-					boundary.push(make(op.object ?? 10, "prompt", "held"));
+					if (op.mode !== "prompt-first") boundary.push(make(op.object ?? 10, "prompt", "held"));
 				}
 				try {
 					if (op.mode === "continue") await agent.continue();
 					else
 						await agent.prompt(
-							op.mode === "prompt-pair"
-								? [...Array.from({ length: (op.count ?? 2) - 1 }, () => objects[8]), objects[op.object ?? 10]]
-								: objects[op.object ?? 10],
+							op.mode === "prompt-first"
+								? [objects[op.object ?? 10], objects[8]]
+								: op.mode === "prompt-pair"
+									? [
+											...Array.from({ length: (op.count ?? 2) - 1 }, () => objects[8]),
+											objects[op.object ?? 10],
+										]
+									: objects[op.object ?? 10],
 						);
 				} catch (error) {
 					if (
@@ -691,7 +708,7 @@ function generate(seed: number): Op[] {
 	const prepare: Op = { type: "prepare", mode: pick(["none", "plain", "context"]), object };
 	const action: Op = { type: pick(["remove", "clear", "withdraw"]), object };
 	const ops: Op[] = [];
-	switch (seed % 16) {
+	switch (seed % 18) {
 		case 0:
 			ops.push(
 				prepare,
@@ -857,6 +874,18 @@ function generate(seed: number): Op[] {
 				run(),
 			);
 			break;
+		case 16:
+			// An abandon or a removal after the request was built and before its records.
+			ops.push(
+				enqueue(object, pick([1, 2])),
+				{ type: "before", body: [{ type: pick(["clear", "withdraw", "remove"]), object }] },
+				run([], pick(["prompt", "prompt-first"]), object),
+			);
+			break;
+		case 17:
+			// Prompt input that is also a queued occurrence, first in the request.
+			ops.push(prepare, enqueue(object, pick([1, 2])), run([], "prompt-first", object));
+			break;
 	}
 	// Mix fresh and reused objects before another real run. Never mutate message identities for tagging.
 	for (let i = 0; i < 2 + Math.floor(random() * 4); i++) {
@@ -910,6 +939,19 @@ async function shrink(operations: Op[], rule: string): Promise<Op[]> {
 		if (!changed) return current;
 	}
 }
+
+it("checks every message_end when the first prompt occurrence is also queued", async () => {
+	const result = await execute([enqueue(0), run([], "prompt-first", 0)]);
+	expect(result.violations).toEqual([]);
+});
+it("a withdrawal between the request and its records leaves a different prompt occurrence recorded", async () => {
+	const result = await execute([
+		enqueue(0),
+		{ type: "before", body: [{ type: "withdraw" }] },
+		run([], "prompt-first", 0),
+	]);
+	expect(result.violations).toEqual([]);
+});
 
 it("records each fresh occurrence and returns rejected live input through the real boundary", async () => {
 	const result = await execute([

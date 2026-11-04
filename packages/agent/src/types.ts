@@ -352,6 +352,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	releaseQueuedInput?: (messages: readonly AgentMessage[]) => void;
 
+	/** Resolves when the host next takes back queued input the run was handed, or when `signal` aborts. */
+	waitForTakeBack?: (signal: AbortSignal) => Promise<void>;
+
 	/**
 	 * The provider accepted the live-steered `messages` (the same list passed to {@link commitQueuedInput})
 	 * into the response it is streaming; the next request carries them again.

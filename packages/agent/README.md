@@ -339,11 +339,12 @@ it, and the run's end does not put it back; a later occurrence of the same messa
 Input is delivered once the run puts it into a provider request or live steering hands it to the provider:
 the model reads it, so the transcript records it and removal leaves it. Use it when input must stop
 reaching the model, such as context for a mode that ended; it returns what it removed, by queue.
-`withdrawUndeliveredQueuedMessages()` and `clearAllQueues()` are the abandon paths, used ahead of an abort
-or when the conversation is replaced: they take back everything the run holds and has not recorded,
-delivered or not, since the abort discards the response that read it. The run neither sends nor records
-what they took back, and each steering unit they drop gives its place in the agent-steering wait back;
-`clearAllQueues()` also starts that wait afresh.
+`clearAllQueues()` empties both queues and takes back everything the run holds and has not delivered;
+delivered input stays the run's, as with `removeQueuedMessages`, and the agent-steering wait starts afresh.
+`withdrawUndeliveredQueuedMessages()` is the abandon path an interrupt takes ahead of an abort, and `reset()`
+discards the conversation: both take back everything the run holds and has not recorded, delivered or not,
+since the response that read it is discarded. The run neither sends nor records what they took back, and
+each steering unit the withdrawal drops gives its place in the agent-steering wait back.
 
 ## Custom Message Types
 

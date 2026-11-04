@@ -24,6 +24,8 @@ export interface LiveSteeringQueue {
 	toProvider(messages: AgentMessage[], signal: AbortSignal): Promise<UserMessage[] | undefined>;
 	/** `messages` without the input the host took back since it was taken (`AgentLoopConfig.keepQueuedInput`). */
 	keep?(messages: AgentMessage[]): AgentMessage[];
+	/** Resolves when the host next takes back input, or `signal` aborts (`AgentLoopConfig.waitForTakeBack`). */
+	takenBack?(signal: AbortSignal): Promise<void>;
 	/** The provider is handed `messages`, kept from the batch `taken` returned (`AgentLoopConfig.commitQueuedInput`). */
 	commit?(messages: readonly AgentMessage[], taken: readonly AgentMessage[]): void;
 	/**
@@ -54,15 +56,21 @@ export class LiveSteeringChannel implements LiveSteering {
 		if (kept.length !== this.deferred.length) this.deferred.splice(0, this.deferred.length, ...kept);
 	}
 
-	wait(signal: AbortSignal): Promise<void> {
-		// Once input is deferred, later input must follow it at the boundary;
-		// delivering it live would reorder the user's messages.
-		this.#pruneDeferred();
-		if (this.deferred.length === 0) return this.#queue.wait(signal);
-		if (signal.aborted) return Promise.resolve();
-		const { promise, resolve } = Promise.withResolvers<void>();
-		signal.addEventListener("abort", () => resolve(), { once: true });
-		return promise;
+	async wait(signal: AbortSignal): Promise<void> {
+		// Once input is deferred, later input must follow it at the boundary; delivering it live would reorder
+		// the user's messages. The wait stays parked until the host takes the deferred input back.
+		for (;;) {
+			this.#pruneDeferred();
+			if (this.deferred.length === 0) return this.#queue.wait(signal);
+			if (signal.aborted) return;
+			if (this.#queue.takenBack) {
+				await this.#queue.takenBack(signal);
+				continue;
+			}
+			const { promise, resolve } = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => resolve(), { once: true });
+			return promise;
+		}
 	}
 
 	async claim(signal: AbortSignal): Promise<LiveSteerClaim | undefined> {

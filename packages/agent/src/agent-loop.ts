@@ -1957,6 +1957,9 @@ function openLiveSteering(
 			return messages;
 		},
 		keep: config.keepQueuedInput ? messages => config.keepQueuedInput?.(messages, true) ?? messages : undefined,
+		takenBack: config.waitForTakeBack
+			? signal => config.waitForTakeBack?.(bound(signal)) ?? Promise.resolve()
+			: undefined,
 		commit: config.commitQueuedInput
 			? (messages, taken) => config.commitQueuedInput?.(messages, true, taken)
 			: undefined,
