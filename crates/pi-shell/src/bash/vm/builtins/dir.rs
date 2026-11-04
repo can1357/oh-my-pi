@@ -34,8 +34,7 @@ fn physical(ctx: &mut Ctx<'_, '_>, o: &Opts<'_>) -> Result<bool, Need> {
 /// `..` never climbs above.
 pub fn logical(cwd: &[u8], dir: &[u8]) -> BString {
 	#[cfg(windows)]
-	if url_root_len(cwd).is_none()
-		&& url_root_len(dir).is_none()
+	if url_root_len(dir).is_none()
 		&& let (Ok(cwd), Ok(dir)) = (cwd.to_path(), dir.to_path())
 		&& (matches!(cwd.components().next(), Some(std::path::Component::Prefix(_)))
 			|| matches!(dir.components().next(), Some(std::path::Component::Prefix(_))))
@@ -390,6 +389,9 @@ mod tests {
 			br"\\server\share\target".as_slice()
 		);
 		assert_eq!(logical(br"\\?\C:\work\a", br"..\target"), br"\\?\C:\work\target".as_slice());
+		assert_eq!(logical(b"virtual://dir", br"C:\work"), br"C:\work".as_slice());
+		assert_eq!(logical(b"virtual://dir", br"C:\work\..\target"), br"C:\target".as_slice());
+		assert_eq!(logical(b"virtual://dir", br"\\server\share\a"), br"\\server\share\a".as_slice());
 	}
 
 	#[test]
