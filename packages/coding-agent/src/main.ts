@@ -59,7 +59,7 @@ import {
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
-import { all, combine, type ProtocolHost, type SettingValueOf } from "./config/registry";
+import { all, combine, type ProtocolHost } from "./config/registry";
 import { Settings, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
 import {
@@ -144,12 +144,7 @@ import { registerLocalInferenceApi } from "./tiny/local-inference-api";
 import { automaticThinkingLevel, concreteThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "./tools";
 import { sanitizeDisplayWarnings } from "@oh-my-pi/pi-tui/render/render-utils";
-import {
-	getChangelogPath,
-	readLastChangelogVersion,
-	resolveStartupChangelogForDisplay,
-	type StartupChangelogSelection,
-} from "./utils/changelog";
+import { getChangelogPath, readLastChangelogVersion, resolveStartupChangelogForDisplay } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
 import { CliUsageError } from "./cli/usage-error";
@@ -644,7 +639,6 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 async function runInteractiveMode(
 	session: AgentSession,
 	version: string,
-	startupChangelog: StartupChangelogSelection | undefined,
 	notifs: (InteractiveModeNotify | null)[],
 	versionCheckPromise: Promise<string | undefined>,
 	initialMessages: string[],
@@ -659,7 +653,7 @@ async function runInteractiveMode(
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 	joinLink?: string,
-	startDeferredStartupWork?: () => void,
+	startDeferredStartupWork?: (mode: InteractiveMode) => void,
 	startupLease?: ComposerLease,
 	startupGoal?: string,
 	startupRestore?: () => Promise<RestoreOutcome>,
@@ -671,7 +665,6 @@ async function runInteractiveMode(
 		mode = new InteractiveModeConstructor(
 			session,
 			version,
-			startupChangelog,
 			setExtensionUIContext,
 			lspServers,
 			mcpManager,
@@ -717,7 +710,7 @@ async function runInteractiveMode(
 				autoStartCollab: joinLink === undefined,
 			}),
 		);
-		startDeferredStartupWork?.();
+		startDeferredStartupWork?.(mode);
 
 		if (setupWizard && playStartupSplash) {
 			await setupWizard.runStartupSplash(mode);
@@ -1199,21 +1192,6 @@ export function watchScopedModelSettings(
 		session.setScopedModels(mapped);
 	});
 	session.addDisposer(stop);
-}
-
-async function getChangelogForDisplay(
-	parsed: Args,
-	mode: SettingValueOf<typeof cfgStartupChangelogMode>,
-): Promise<StartupChangelogSelection | undefined> {
-	if (parsed.continue || parsed.resume || isForeignSessionImport(parsed)) {
-		return undefined;
-	}
-
-	return resolveStartupChangelogForDisplay({
-		mode,
-		currentVersion: VERSION,
-		changelogPath: getChangelogPath(),
-	});
 }
 
 const SESSION_ID_ARG_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -2586,11 +2564,15 @@ export async function runRootCommand(
 				stdoutIsTTY: process.stdout.isTTY,
 			});
 
-			// Read the changelog marker before the changelog resolution below writes it.
-			// The probe may spawn a detached interpreter; abort it on process exit so Ctrl-C
-			// during startup cannot orphan a hung configured python.interpreter.
+			// Read the changelog marker once, before the post-paint changelog step in
+			// `startDeferredStartupWork` advances it; the first-launch eval warning judges
+			// the marker as this launch found it. The probe may spawn a detached
+			// interpreter; abort it on process exit so Ctrl-C during startup cannot orphan
+			// a hung configured python.interpreter.
+			let lastChangelogVersion: string | undefined;
 			let pythonEvalWarningPromise: Promise<string | undefined> | undefined;
 			if (isInteractive) {
+				lastChangelogVersion = await readLastChangelogVersion();
 				const pythonEvalProbeAbort = new AbortController();
 				const unregisterPythonEvalProbe = postmortem.register(
 					"python-eval-startup-probe",
@@ -2599,24 +2581,15 @@ export async function runRootCommand(
 				);
 				pythonEvalWarningPromise = resolveFirstLaunchPythonEvalWarning({
 					args: parsedArgs,
-					lastChangelogVersion: await readLastChangelogVersion(),
+					lastChangelogVersion,
 					cwd: sessionOptions.cwd ?? getProjectDir(),
 					settings: settingsInstance,
 					signal: pythonEvalProbeAbort.signal,
 				}).finally(unregisterPythonEvalProbe);
 			}
-
-			// Startup changelog is only consumed by interactive mode below; kick the
-			// CHANGELOG.md parse off now so it overlaps session creation instead of
-			// serializing after it.
-			const startupChangelogPromise = isInteractive
-				? logger.time(
-						"main:getChangelogForDisplay",
-						getChangelogForDisplay,
-						parsedArgs,
-						cfgStartupChangelogMode.get(settingsInstance),
-					)
-				: undefined;
+			// Resumed and imported sessions neither show nor advance the startup changelog.
+			const showsStartupChangelog =
+				isInteractive && !(parsedArgs.continue || parsedArgs.resume || isForeignSessionImport(parsedArgs));
 
 			const preloadProviderRegistrations =
 				isInteractive && autoResumed ? extensionsResult.runtime.pendingProviderRegistrations.slice() : [];
@@ -2721,10 +2694,20 @@ export async function runRootCommand(
 			// empty (issue #9220). Fire-and-forget: the prompt must never block on the
 			// background pass.
 			// Interactive-only work that must not delay the first session-bound frame:
-			// runInteractiveMode calls it once init has painted. Neither feeds the first
-			// prompt: fallback-chain validation only produces header warnings, and the
-			// background refresh already raced the first prompt when it ran earlier.
-			const startDeferredStartupWork = (): void => {
+			// runInteractiveMode calls it once init has painted. None feeds the first
+			// prompt: fallback-chain validation and the startup changelog only add header
+			// rows, and the background refresh already raced the first prompt when it ran earlier.
+			const startDeferredStartupWork = (interactive: InteractiveMode): void => {
+				if (showsStartupChangelog) {
+					void resolveStartupChangelogForDisplay({
+						mode: cfgStartupChangelogMode.get(settingsInstance),
+						currentVersion: VERSION,
+						lastVersion: lastChangelogVersion,
+						changelogPath: getChangelogPath(),
+					})
+						.then(selection => selection && interactive.showStartupChangelog(selection))
+						.catch(error => logger.warn("Startup changelog failed", { error: String(error) }));
+				}
 				void session.loadDeferredExtensions();
 				session.startSkillDescriptionCompression();
 				modelRegistry.refreshInBackground();
@@ -2832,7 +2815,6 @@ export async function runRootCommand(
 				});
 			} else if (isInteractive) {
 				const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
-				const startupChangelog = await startupChangelogPromise;
 
 				const modelScopeNotification = buildModelScopeNotification(
 					scopedModels,
@@ -2863,7 +2845,6 @@ export async function runRootCommand(
 					await runInteractiveMode(
 						session,
 						VERSION,
-						startupChangelog,
 						notifs,
 						versionCheckPromise,
 						initialArgs.messages,

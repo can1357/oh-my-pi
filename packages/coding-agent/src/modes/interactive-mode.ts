@@ -1752,8 +1752,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#cleanupUnsubscribe?: () => void;
 	#signalTeardown?: SessionTeardown;
 	readonly #version: string;
-	readonly #startupChangelog: StartupChangelogSelection | undefined;
-	/** Header components below the config warnings + welcome, retained so a live config-warning change can rebuild the header (#10048). */
+	/** Header components below the config warnings + welcome (the startup changelog), retained so a live config-warning change can rebuild the header (#10048). */
 	#headerAfter: readonly Component[] = [];
 	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[]; registered: string[] } | undefined;
 	#goalModePreviousTools: string[] | undefined;
@@ -2048,7 +2047,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	constructor(
 		session: AgentSession,
 		version: string,
-		startupChangelog: StartupChangelogSelection | undefined = undefined,
 		setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void = () => {},
 		lspServers: LspStartupServerInfo[] | undefined = undefined,
 		mcpManager?: MCPManager,
@@ -2094,7 +2092,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.keybindings = KeybindingsManager.inMemory();
 		this.agent = session.agent;
 		this.#version = version;
-		this.#startupChangelog = startupChangelog;
 		this.#toolUiContextSetter = setToolUIContext;
 		this.lspServers = lspServers;
 		this.mcpManager = mcpManager;
@@ -2484,27 +2481,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const startupQuiet = cfgStartupQuiet.get(settings);
 		this.composer.setPreferences({ quiet: startupQuiet });
 		this.composer.updateWelcome({ version: this.#version });
-		const headerBefore = this.#buildConfigWarningComponents();
-		const headerAfter: Component[] = [];
-		if (!startupQuiet && this.#startupChangelog && cfgStartupChangelogMode.get(settings) !== "hidden") {
-			headerAfter.push(
-				new DynamicBorder(),
-				new Text("What's New", 1, 0).setStyleFn(t => theme.bold(theme.fg("accent", t))),
-				new Spacer(1),
-			);
-			if (cfgStartupChangelogMode.get(settings) === "summary") {
-				const summary = formatStartupChangelogSummary(this.#startupChangelog).replace(
-					/\/changelog(?: full)?/g,
-					command => theme.bold(command),
-				);
-				headerAfter.push(new Text(summary, 1, 0));
-			} else {
-				headerAfter.push(new Markdown(this.#startupChangelog.markdown?.trim() ?? "", 1, 0, getMarkdownTheme()));
-			}
-			headerAfter.push(new Spacer(1), new DynamicBorder());
-		}
-		this.#headerAfter = headerAfter;
-		this.composer.setHeaderExtras(headerBefore, headerAfter);
+		this.#syncHeaderExtras();
 		this.statusLine.watchBranch(() => this.ui.requestRender());
 		this.composer.setStatusComponent(this.statusLine);
 
@@ -2852,7 +2829,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.session.prewarmModelConnection();
 				}
 				if (event.type === "config_warnings_changed") {
-					this.#syncConfigWarningHeader();
+					this.#syncHeaderExtras();
 				}
 				// A turn the TUI did not submit (an extension message, a background job) leaves
 				// getUserInput pending, so arm the loop's next iteration here instead.
@@ -2868,7 +2845,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#scheduleComposerStatusPersist();
 		// Config warnings can change during the same pre-subscription window; the
 		// event is not replayed, so rebuild from the live array once here too.
-		this.#syncConfigWarningHeader();
+		this.#syncHeaderExtras();
 		this.#eventBusUnsubscribers.push(
 			cfgModelRoles.listen(this.settings, () => this.#reapplyPlanModeModelOnRoleChange()),
 		);
@@ -8698,7 +8675,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	#syncConfigWarningHeader(): void {
+	#syncHeaderExtras(): void {
 		this.composer.setHeaderExtras(this.#buildConfigWarningComponents(), this.#headerAfter);
 	}
 
@@ -8866,6 +8843,34 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showNewVersionNotification(newVersion: string): void {
 		this.#uiHelpers.showNewVersionNotification(newVersion);
+	}
+
+	/**
+	 * Add this launch's release notes below the welcome header. Startup calls it
+	 * after the first session-bound frame; quiet startup and hidden mode show nothing.
+	 */
+	showStartupChangelog(selection: StartupChangelogSelection): void {
+		const mode = cfgStartupChangelogMode.get(settings);
+		if (cfgStartupQuiet.get(settings) || mode === "hidden") return;
+		const notes =
+			mode === "summary"
+				? new Text(
+						formatStartupChangelogSummary(selection).replace(/\/changelog(?: full)?/g, command =>
+							theme.bold(command),
+						),
+						1,
+						0,
+					)
+				: new Markdown(selection.markdown?.trim() ?? "", 1, 0, getMarkdownTheme());
+		this.#headerAfter = [
+			new DynamicBorder(),
+			new Text("What's New", 1, 0).setStyleFn(t => theme.bold(theme.fg("accent", t))),
+			new Spacer(1),
+			notes,
+			new Spacer(1),
+			new DynamicBorder(),
+		];
+		this.#syncHeaderExtras();
 	}
 
 	clearEditor(): void {
