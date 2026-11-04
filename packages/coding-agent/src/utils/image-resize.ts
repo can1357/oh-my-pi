@@ -25,6 +25,8 @@ export interface ResizedImage {
 	height: number;
 	wasResized: boolean;
 	decodeFailed?: boolean;
+	/** Bounds of the source content when an extreme aspect ratio required padding. */
+	paddedContent?: BoxEdges;
 	get data(): string;
 }
 
@@ -382,10 +384,8 @@ export async function resizeImage(
 			targetHeight = opts.maxHeight;
 		}
 
-		// Lift undersized inputs toward the minimum with a uniform scale that never
-		// crosses a cap (icons, the 1x1 chart). A strip too wide or tall for both
-		// (a toolbar crop) keeps its aspect ratio and ends with its short edge below
-		// the floor; stretching it would distort what the model sees.
+		// Lift undersized inputs toward the minimum while keeping their aspect ratio.
+		// If a cap stops the short edge below the floor, fitImageBytes pads it instead.
 		if (targetWidth < minDimension || targetHeight < minDimension) {
 			const shortEdge = Math.min(targetWidth, targetHeight);
 			const upscale = Math.min(minDimension / shortEdge, opts.maxWidth / targetWidth, opts.maxHeight / targetHeight);
@@ -393,6 +393,23 @@ export async function resizeImage(
 				targetWidth = Math.min(opts.maxWidth, Math.round(targetWidth * upscale));
 				targetHeight = Math.min(opts.maxHeight, Math.round(targetHeight * upscale));
 			}
+		}
+		if (targetWidth < minDimension || targetHeight < minDimension) {
+			const fitted = await fitImageBytes(
+				inputBuffer,
+				{ width: originalWidth, height: originalHeight },
+				{ minSide: minDimension, maxSide: Math.min(opts.maxWidth, opts.maxHeight), maxBytes: opts.maxBytes },
+			);
+			return {
+				...encodedResult(
+					{ buffer: fitted.buffer, mimeType: fitted.mimeType },
+					originalWidth,
+					originalHeight,
+					fitted.width,
+					fitted.height,
+				),
+				paddedContent: fitted.content,
+			};
 		}
 
 		const premultiplied = mayHaveAlpha(inputBuffer) ? await premultipliedPng(inputBuffer) : undefined;
@@ -578,9 +595,21 @@ const FIT_JPEG_QUALITIES = [90, 80, 70, 60, 50, 40];
  * @throws when the image cannot be decoded or no encoding fits `maxBytes`.
  */
 export async function fitImage(img: ImageContent, bounds: ImageFitBounds): Promise<FittedImage> {
-	const { minSide = 1, maxSide = Infinity, minPixels = 1, maxPixels = Infinity, maxBytes = Infinity } = bounds;
 	const input = Buffer.from(img.data, "base64");
-	const { width, height } = await new Bun.Image(input).metadata();
+	const dimensions = await new Bun.Image(input).metadata();
+	const fitted = await fitImageBytes(input, dimensions, bounds);
+	return {
+		image: { ...img, data: fitted.buffer.toBase64(), mimeType: fitted.mimeType },
+		content: fitted.content,
+	};
+}
+
+async function fitImageBytes(
+	input: Uint8Array,
+	{ width, height }: { width: number; height: number },
+	bounds: ImageFitBounds,
+): Promise<{ buffer: Uint8Array; mimeType: string; width: number; height: number; content: BoxEdges }> {
+	const { minSide = 1, maxSide = Infinity, minPixels = 1, maxPixels = Infinity, maxBytes = Infinity } = bounds;
 	const area = width * height;
 	const ceiling = Math.min(maxSide / Math.max(width, height), Math.sqrt(maxPixels / area));
 	const floor = Math.max(minSide / Math.min(width, height), Math.sqrt(minPixels / area));
@@ -622,7 +651,10 @@ export async function fitImage(img: ImageContent, bounds: ImageFitBounds): Promi
 	}
 	if (encoded.length > maxBytes) throw new Error(`fitImage: no encoding fits ${maxBytes} bytes`);
 	return {
-		image: { ...img, data: encoded.toBase64(), mimeType },
+		buffer: encoded,
+		mimeType,
+		width: canvasWidth,
+		height: canvasHeight,
 		content: {
 			top: top / canvasHeight,
 			bottom: (top + scaledHeight) / canvasHeight,
@@ -644,6 +676,17 @@ function padRgba(source: RgbaPixels, width: number, height: number, left: number
 	return encodeRawPng(canvas, width, height, 4);
 }
 
+/** Map an image's content rectangle through its padding and capture scale. */
+function paddedCoordinateNote(result: ResizedImage, content: BoxEdges, scale: number, target: string): string {
+	const left = Math.round(content.left * result.width);
+	const top = Math.round(content.top * result.height);
+	const contentWidth = (content.right - content.left) * result.width;
+	const contentHeight = (content.bottom - content.top) * result.height;
+	const xFactor = (result.originalWidth / contentWidth / scale).toFixed(2);
+	const yFactor = (result.originalHeight / contentHeight / scale).toFixed(2);
+	return `[Image: original ${result.originalWidth}x${result.originalHeight}, displayed at ${result.width}x${result.height} with padding. Subtract padding offset (${left}, ${top}), then multiply x by ${xFactor} and y by ${yFactor} to map to ${target}.]`;
+}
+
 /**
  * Format a dimension note for resized images.
  * This helps the model understand the coordinate mapping.
@@ -657,6 +700,9 @@ export function formatDimensionNote(result: ResizedImage): string | undefined {
 	}
 	if (result.width === result.originalWidth && result.height === result.originalHeight) {
 		return undefined;
+	}
+	if (result.paddedContent) {
+		return paddedCoordinateNote(result, result.paddedContent, 1, "original image coordinates");
 	}
 	const scale = result.originalWidth / result.width;
 	return `[Image: original ${result.originalWidth}x${result.originalHeight}, displayed at ${result.width}x${result.height}. Multiply coordinates by ${scale.toFixed(2)} to map to original image.]`;
@@ -682,6 +728,9 @@ function formatScreenshotCoordinateNote(
 	if (!resized.originalWidth || !resized.width) return undefined;
 	if (capture.scale === undefined || !(capture.scale > 0)) {
 		return `[Image: original ${resized.originalWidth}x${resized.originalHeight}, displayed at ${resized.width}x${resized.height}. Its scale to CSS pixels could not be read; target elements by selector or id rather than tab.clickAt.]`;
+	}
+	if (resized.paddedContent) {
+		return paddedCoordinateNote(resized, resized.paddedContent, capture.scale, SCREENSHOT_AREA_TARGET[capture.area]);
 	}
 	const factor = (resized.originalWidth / resized.width / capture.scale).toFixed(2);
 	if (factor === "1.00") return undefined;
