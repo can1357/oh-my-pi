@@ -225,7 +225,12 @@ pub fn fill_docs(list: &mut List, docs: &[Vec<u8>]) {
 
 /// Assign preorder ids; returns the count.
 pub fn assign_ids(list: &mut List) -> u32 {
-	let mut w = Walk { next: 0, ids: true, docs: &[] };
+	assign_ids_with_docs(list, &[])
+}
+
+/// Finalize a bash command's ids and gathered documents in one tree walk.
+pub(super) fn assign_ids_with_docs(list: &mut List, docs: &[Vec<u8>]) -> u32 {
+	let mut w = Walk { next: 0, ids: true, docs };
 	w.list(list);
 	w.next
 }

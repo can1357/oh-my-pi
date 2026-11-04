@@ -236,6 +236,14 @@ impl ExtProc for CountedExt {
 		self.ext.poll_wait(cx)
 	}
 
+	fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<crate::bash::ProcEvent> {
+		self.ext.poll_event(cx)
+	}
+
+	fn pgid(&self) -> Option<u32> {
+		self.ext.pgid()
+	}
+
 	fn signal(&mut self, sig: Signal) -> io::Result<()> {
 		self.ext.signal(sig)
 	}
@@ -291,6 +299,9 @@ pub struct FakeHost {
 	pipe_tap:    Option<Arc<dyn PipeTap>>,
 	/// [`Host::child_opens`](crate::bash::Host::child_opens) answers this.
 	child_opens: bool,
+	/// The login database [`Host::logins`](crate::bash::Host::logins)
+	/// reports (`None`: none, `Unsupported`).
+	pub logins:  Option<crate::bash::Logins>,
 }
 
 impl Default for FakeHost {
@@ -321,6 +332,7 @@ impl FakeHost {
 			census:      Arc::new(Census::default()),
 			pipe_tap:    None,
 			child_opens: false,
+			logins:      None,
 		}
 	}
 
@@ -561,7 +573,7 @@ impl Drop for FakeTimer {
 }
 
 impl crate::bash::Host for FakeHost {
-	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx<'_>) -> Resolved {
+	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx) -> Resolved {
 		if let Some(i) = self.tools.iter().position(|(n, _)| n.as_bstr() == name) {
 			return Resolved::Tool(ToolRef(i as u64));
 		}
@@ -678,6 +690,13 @@ impl crate::bash::Host for FakeHost {
 	/// Every zone is UTC: goldens stay independent of the machine.
 	fn tz_offset(&self, _tz: Option<&BStr>, _unix_s: i64) -> (i32, BString) {
 		(0, "UTC".into())
+	}
+
+	fn logins(&self) -> io::Result<crate::bash::Logins> {
+		self
+			.logins
+			.clone()
+			.ok_or_else(|| io::ErrorKind::Unsupported.into())
 	}
 
 	fn event(&mut self, ev: &Event<'_>) -> Verdict {

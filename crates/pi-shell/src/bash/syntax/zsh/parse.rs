@@ -20,8 +20,10 @@ use alloc::{boxed::Box, vec, vec::Vec};
 
 use super::{
 	lex::{
-		Ctx, ParseFlags, PendingDoc, T, iblank, ident_end, isident, munge_terminator, plain,
-		skipparens,
+		CS_ALWAYS, CS_ARRAY, CS_CASE, CS_CMDAND, CS_CMDOR, CS_COND, CS_CURSH, CS_ELIF, CS_ELIFTHEN,
+		CS_ELSE, CS_ERRPIPE, CS_FOR, CS_FOREACH, CS_FUNCDEF, CS_IF, CS_IFTHEN, CS_PIPE, CS_REPEAT,
+		CS_SELECT, CS_SUBSH, CS_UNTIL, CS_WHILE, Ctx, ParseFlags, PendingDoc, T, iblank, ident_end,
+		isident, munge_terminator, plain, skipparens,
 	},
 	tok::{
 		BAR, DASH, EQUALS, INANG, INBRACE, INBRACK, INPAR, META, OUTANGPROC, OUTBRACE, OUTBRACK,
@@ -84,13 +86,8 @@ fn zword(s: Vec<u8>, span: Span) -> Word {
 }
 
 /// A command with no words (the empty pipeline of `!`, `coproc`, `time`).
-const fn empty_command(span: Span) -> Command {
-	Command {
-		id: NodeId(0),
-		span,
-		kind: CommandKind::Simple(Simple { assigns: Vec::new(), words: Vec::new() }),
-		redirs: Vec::new(),
-	}
+fn empty_command(span: Span) -> Command {
+	Command { id: NodeId(0), span, kind: CommandKind::Simple(Simple::default()), redirs: Vec::new() }
 }
 
 /// A pipeline as one command: its lone stage, or a group around it.
@@ -179,7 +176,7 @@ fn split_name(s: &[u8]) -> (Vec<u8>, Option<Vec<u8>>, usize) {
 /// zsh's pattern massage in `par_case` for a whole `(…)` pattern word:
 /// blanks around top-level `|` and the parentheses are removed, then the
 /// parentheses themselves. `false` when the word is not one balanced group.
-fn case_paren_pattern(s: &mut Vec<u8>) -> bool {
+pub(super) fn case_paren_pattern(s: &mut Vec<u8>) -> bool {
 	let mut i = 0;
 	let mut pct = 0;
 	while i < s.len() {
@@ -408,18 +405,25 @@ impl Ctx<'_> {
 		let lo = self.lx.lo;
 		let first = self.par_sublist2()?;
 		let mut rest = Vec::new();
+		// zsh recurses with each `&&`/`||` on the cmdstack until it returns.
+		let mut pushed = 0usize;
 		while matches!(self.lx.tok, T::Dbar | T::Damper) {
-			let op = if self.lx.tok == T::Dbar {
-				AndOrOp::Or
+			let (op, cs) = if self.lx.tok == T::Dbar {
+				(AndOrOp::Or, CS_CMDOR)
 			} else {
-				AndOrOp::And
+				(AndOrOp::And, CS_CMDAND)
 			};
+			self.cmdpush(cs);
+			pushed += 1;
 			self.zshlex();
 			self.skip_seps();
 			match self.par_sublist2() {
 				Some(p) => rest.push((op, p)),
 				None => break,
 			}
+		}
+		for _ in 0..pushed {
+			self.cmdpop();
 		}
 		Some(AndOr { id: NodeId(0), span: Span::new(lo, self.lx.last_hi), first, rest })
 	}
@@ -481,6 +485,8 @@ impl Ctx<'_> {
 	/// zsh `par_pline`: `cmd [ ( BAR | BARAMP ) { SEPER } pline ]`.
 	fn par_pline(&mut self) -> Option<Pline> {
 		let mut stages = Vec::new();
+		// zsh recurses with each `|`/`|&` on the cmdstack until it returns.
+		let mut pushed = 0usize;
 		loop {
 			let Some(c) = self.par_cmd(false) else {
 				if stages.is_empty() {
@@ -492,6 +498,8 @@ impl Ctx<'_> {
 			if matches!(self.lx.tok, T::Bar | T::Baramp) {
 				let pipe_stderr = self.lx.tok == T::Baramp;
 				stages.push(Stage { cmd: c.into_command(), pipe_stderr });
+				self.cmdpush(if pipe_stderr { CS_ERRPIPE } else { CS_PIPE });
+				pushed += 1;
 				self.zshlex();
 				self.skip_seps();
 				continue;
@@ -503,6 +511,9 @@ impl Ctx<'_> {
 			}
 			stages.push(Stage { cmd: c.into_command(), pipe_stderr: false });
 			break;
+		}
+		for _ in 0..pushed {
+			self.cmdpop();
 		}
 		Some(Pline::Stages(stages))
 	}
@@ -540,6 +551,23 @@ impl Ctx<'_> {
 			c.span = Span::new(lo, self.lx.last_hi);
 			return Some(Cmd::Plain(c));
 		}
+		let cs = match self.lx.tok {
+			T::For => Some(CS_FOR),
+			T::Foreach => Some(CS_FOREACH),
+			T::Select => Some(CS_SELECT),
+			T::Case => Some(CS_CASE),
+			T::While => Some(CS_WHILE),
+			T::Until => Some(CS_UNTIL),
+			T::Repeat => Some(CS_REPEAT),
+			T::Inpar => Some(CS_SUBSH),
+			T::Inbrace => Some(CS_CURSH),
+			T::Func => Some(CS_FUNCDEF),
+			T::Dinbrack => Some(CS_COND),
+			_ => None,
+		};
+		if let Some(cs) = cs {
+			self.cmdpush(cs);
+		}
 		let kind = match self.lx.tok {
 			T::For | T::Foreach | T::Select => self.par_for(),
 			T::Case => self.par_case(),
@@ -567,6 +595,9 @@ impl Ctx<'_> {
 				}
 			},
 		};
+		if cs.is_some() {
+			self.cmdpop();
+		}
 		let kind = kind.unwrap_or_else(failed);
 		self.trailing_redirs(&mut redirs);
 		self.end_cmd();
@@ -643,7 +674,7 @@ impl Ctx<'_> {
 			return Some(CommandKind::ArithFor(ArithFor { init, cond, step, body }));
 		}
 		self.ps.infor = 0;
-		if self.lx.tok != T::String || !isident(&self.lx.buf) {
+		if self.lx.tok != T::String || !isident(&self.lx.buf, self.opt(Features::ZSH_WIDE_IDENT)) {
 			return self.yyerr();
 		}
 		let var_span = self.tok_span();
@@ -657,7 +688,7 @@ impl Ctx<'_> {
 			if self.lx.tok != T::String || self.lx.buf == b"in" || sel {
 				break;
 			}
-			if !isident(&self.lx.buf) || self.errflag {
+			if !isident(&self.lx.buf, self.opt(Features::ZSH_WIDE_IDENT)) || self.errflag {
 				self.noaliases = ona;
 				return self.yyerr();
 			}
@@ -813,8 +844,12 @@ impl Ctx<'_> {
 		let mut arms = Vec::new();
 		let mut usebrace = false;
 		let mut xtok;
+		// Each pass pushes `if`/`elif` (zsh pushes `elif` for `fi` and
+		// `else` too); every `break` leaves one entry for the pop after the
+		// loop.
 		loop {
 			xtok = self.lx.tok;
+			self.cmdpush(if xtok == T::If { CS_IF } else { CS_ELIF });
 			if xtok == T::Fi {
 				self.ps.incmdpos = false;
 				self.zshlex();
@@ -826,26 +861,39 @@ impl Ctx<'_> {
 			}
 			self.skip_seps();
 			if !(xtok == T::If || xtok == T::Elif) {
+				self.cmdpop();
 				return self.yyerr();
 			}
 			let cond = self.par_list();
 			self.ps.incmdpos = true;
 			if self.lx.tok == T::Endinput {
+				self.cmdpop();
 				return self.yyerr();
 			}
 			self.skip_seps();
 			xtok = T::Fi;
+			let then = if self.cmdstack.last() == Some(&CS_IF) {
+				CS_IFTHEN
+			} else {
+				CS_ELIFTHEN
+			};
 			if self.lx.tok == T::Then {
 				usebrace = false;
+				self.cmdpop();
+				self.cmdpush(then);
 				self.zshlex();
 				let body = self.par_list();
 				self.ps.incmdpos = true;
+				self.cmdpop();
 				arms.push(IfArm { cond, body });
 			} else if self.lx.tok == T::Inbrace {
 				usebrace = true;
+				self.cmdpop();
+				self.cmdpush(then);
 				self.zshlex();
 				let body = self.par_list();
 				if self.lx.tok != T::Outbrace {
+					self.cmdpop();
 					return self.yyerr();
 				}
 				arms.push(IfArm { cond, body });
@@ -854,28 +902,36 @@ impl Ctx<'_> {
 				if self.lx.tok == T::Seper {
 					break;
 				}
+				self.cmdpop();
 			} else if !self.opt(Features::ZSH_SHORT_LOOPS) {
+				self.cmdpop();
 				return self.yyerr();
 			} else {
+				self.cmdpop();
+				self.cmdpush(then);
 				let body = self.par_list1();
 				arms.push(IfArm { cond, body });
 				self.ps.incmdpos = true;
 				break;
 			}
 		}
+		self.cmdpop();
 		let mut else_body = None;
 		if xtok == T::Else || self.lx.tok == T::Else {
+			self.cmdpush(CS_ELSE);
 			self.skip_seps();
 			let body = if self.lx.tok == T::Inbrace && usebrace {
 				self.zshlex();
 				let b = self.par_list();
 				if self.lx.tok != T::Outbrace {
+					self.cmdpop();
 					return self.yyerr();
 				}
 				b
 			} else {
 				let b = self.par_list();
 				if self.lx.tok != T::Fi {
+					self.cmdpop();
 					return self.yyerr();
 				}
 				b
@@ -883,6 +939,7 @@ impl Ctx<'_> {
 			self.ps.incmdpos = false;
 			else_body = Some(body);
 			self.zshlex();
+			self.cmdpop();
 		}
 		if arms.is_empty() {
 			return self.yyerr();
@@ -942,6 +999,8 @@ impl Ctx<'_> {
 			if self.lx.tok != T::Inbrace {
 				return self.yyerr();
 			}
+			self.cmdpop();
+			self.cmdpush(CS_ALWAYS);
 			self.zshlex();
 			let always = self.par_list();
 			self.skip_seps();
@@ -1003,8 +1062,10 @@ impl Ctx<'_> {
 	fn par_funcdef(&mut self) -> Option<CommandKind> {
 		self.ps.incmdpos = false;
 		self.zshlex();
+		let mut traced = false;
 		if self.lx.tok == T::String && self.lx.buf.first() == Some(&DASH) {
 			if self.lx.buf[..] == [DASH, b'T'] {
+				traced = true;
 				self.zshlex();
 			}
 			if self.lx.tok == T::String && self.lx.buf[..] == [DASH, DASH] {
@@ -1032,7 +1093,7 @@ impl Ctx<'_> {
 				args.push(self.tok_word());
 				self.zshlex();
 			}
-			return Some(CommandKind::AnonFunc(AnonFunc { body: Box::new(body), args }));
+			return Some(CommandKind::AnonFunc(AnonFunc { body: Box::new(body), args, traced }));
 		}
 		let mut names = names.into_iter();
 		let name = names.next().unwrap_or_default();
@@ -1040,6 +1101,7 @@ impl Ctx<'_> {
 			name,
 			extra_names: names.collect(),
 			keyword: true,
+			traced,
 			body: Box::new(body),
 		}))
 	}
@@ -1109,9 +1171,13 @@ impl Ctx<'_> {
 		}
 	}
 
-	/// The elements of an array assignment, up to its `)`.
+	/// The elements of an array assignment after its `name=(`, up to its
+	/// `)`.
 	fn array_elems(&mut self) -> Option<Vec<ArrayElem>> {
+		self.cmdpush(CS_ARRAY);
+		self.zshlex();
 		let words = self.par_nl_wordlist();
+		self.cmdpop();
 		if self.lx.tok != T::Outpar {
 			return self.yyerr();
 		}
@@ -1132,6 +1198,7 @@ impl Ctx<'_> {
 		let mut postassigns = 0usize;
 		let mut argc = 0usize;
 		let mut sr = 0usize;
+		let mut typeset = false;
 		loop {
 			match self.lx.tok {
 				T::Nocorrect => {},
@@ -1146,7 +1213,6 @@ impl Ctx<'_> {
 					let lo = self.lx.lo;
 					let (name, index, p) = split_name(&self.lx.buf);
 					let append = self.lx.buf.get(p) == Some(&b'+');
-					self.zshlex();
 					let elems = self.array_elems()?;
 					self.ps.incmdpos = oldcmdpos;
 					let index = index.map(|i| zword(i, Span::new(lo, lo)));
@@ -1186,13 +1252,14 @@ impl Ctx<'_> {
 					self.ps.incmdpos = false;
 					if self.lx.tok == T::Typeset {
 						self.ps.intypeset = true;
+						typeset = true;
 					}
 					let b = &self.lx.buf;
 					if !self.opt(Features::ZSH_IGNORE_BRACES)
 						&& b.len() > 2
 						&& at(b, 0) == INBRACE
 						&& b.last() == Some(&OUTBRACE)
-						&& ident_end(b, 1) >= b.len() - 1
+						&& ident_end(b, 1, self.opt(Features::ZSH_WIDE_IDENT)) >= b.len() - 1
 					{
 						let toksave = self.tok_word();
 						let idstring = plain(span(b, 1, b.len() - 1));
@@ -1247,9 +1314,11 @@ impl Ctx<'_> {
 					let lo = self.lx.lo;
 					let mut head = self.lx.buf.clone();
 					head.push(b'=');
+					self.cmdpush(CS_ARRAY);
 					self.ps.intypeset = false;
 					self.zshlex();
 					let words_n = self.par_nl_wordlist();
+					self.cmdpop();
 					self.ps.intypeset = true;
 					if self.lx.tok != T::Outpar {
 						return self.yyerr();
@@ -1281,10 +1350,13 @@ impl Ctx<'_> {
 						return self.yyerr();
 					}
 					self.ps.incmdpos = true;
+					self.cmdpush(CS_FUNCDEF);
 					self.zshlex();
 					self.skip_seps();
 					let anon = argc == 0;
-					let body = self.func_body(anon, false)?;
+					let body = self.func_body(anon, false);
+					self.cmdpop();
+					let body = body?;
 					if anon {
 						let mut args = Vec::new();
 						while self.lx.tok == T::String || self.lx.tok.is_redirop() {
@@ -1295,7 +1367,11 @@ impl Ctx<'_> {
 								redirs.push(r);
 							}
 						}
-						func = Some(CommandKind::AnonFunc(AnonFunc { body: Box::new(body), args }));
+						func = Some(CommandKind::AnonFunc(AnonFunc {
+							body: Box::new(body),
+							args,
+							traced: false,
+						}));
 					} else {
 						let mut names = words.iter().map(word_text);
 						let name = names.next().unwrap_or_default();
@@ -1304,6 +1380,7 @@ impl Ctx<'_> {
 							name,
 							extra_names,
 							keyword: false,
+							traced: false,
 							body: Box::new(body),
 						}));
 					}
@@ -1319,7 +1396,7 @@ impl Ctx<'_> {
 		}
 		self.ps.incmdpos = true;
 		self.ps.intypeset = false;
-		Some(func.unwrap_or(CommandKind::Simple(Simple { assigns, words })))
+		Some(func.unwrap_or(CommandKind::Simple(Simple { assigns, words, typeset })))
 	}
 
 	/// zsh `par_redir`: `( OUTANG | … | TRINANG ) STRING`; `idstring` is the
