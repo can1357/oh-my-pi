@@ -89,8 +89,8 @@ pub fn lex_words(s: &[u8], comments: bool) -> Vec<u32> {
 			b'(' | b')' => i + 1,
 			b'<' | b'>' if s.get(i + 1) == Some(&b'(') => word_end(s, i),
 			b'<' | b'>' => redir(s, i),
-			b'0'..=b'9' if matches!(s.get(i + 1), Some(b'<' | b'>'))
-				&& s.get(i + 2) != Some(&b'(') =>
+			b'0'..=b'9'
+				if matches!(s.get(i + 1), Some(b'<' | b'>')) && s.get(i + 2) != Some(&b'(') =>
 			{
 				redir(s, i + 1)
 			},
@@ -257,17 +257,23 @@ mod tests {
 			":", "a", ";", "b", "|", "c", ">", "d", "2>&", "1", "&&", "e", "\"x y\"", "'q'",
 			"$(ls -l)", "${x:-y}", "`pwd`", "x=1", "a\\[1]=2"
 		]);
-		assert_eq!(words("if true\nthen : x; fi"), [
-			"if", "true", "\n", "then", ":", "x", ";", "fi"
-		]);
+		assert_eq!(words("if true\nthen : x; fi"), ["if", "true", "\n", "then", ":", "x", ";", "fi"]);
 		assert_eq!(words(": a # comment"), [":", "a", "#", "comment"]);
-		assert_eq!(
-			words(": {a,b} <<<str >>/dev/null <(true) &>/dev/null >| /dev/null 3<&0"),
-			[
-				":", "{a,b}", "<<<", "str", ">>", "/dev/null", "<(true)", "&>", "/dev/null", ">|",
-				"/dev/null", "3<&", "0"
-			]
-		);
+		assert_eq!(words(": {a,b} <<<str >>/dev/null <(true) &>/dev/null >| /dev/null 3<&0"), [
+			":",
+			"{a,b}",
+			"<<<",
+			"str",
+			">>",
+			"/dev/null",
+			"<(true)",
+			"&>",
+			"/dev/null",
+			">|",
+			"/dev/null",
+			"3<&",
+			"0"
+		]);
 	}
 
 	#[test]

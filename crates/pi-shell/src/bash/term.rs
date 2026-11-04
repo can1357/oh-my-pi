@@ -344,7 +344,8 @@ impl Termios {
 	}
 }
 
-/// When [`Terminal::set_attrs`] takes effect (`tcsetattr`'s `optional_actions`).
+/// When [`Terminal::set_attrs`] takes effect (`tcsetattr`'s
+/// `optional_actions`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum SetWhen {
 	/// `TCSANOW`: at once.

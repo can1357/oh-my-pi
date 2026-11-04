@@ -35,7 +35,11 @@ const SUN_PATH_MAX: usize = 107;
 
 /// `soun.sun_path` as zsh fills it from `path`.
 fn sun_path(path: &[u8]) -> &[u8] {
-	let n = path.iter().position(|&c| c == 0).unwrap_or(path.len()).min(SUN_PATH_MAX);
+	let n = path
+		.iter()
+		.position(|&c| c == 0)
+		.unwrap_or(path.len())
+		.min(SUN_PATH_MAX);
 	&path[..n]
 }
 
@@ -178,7 +182,11 @@ pub(super) fn pending_connection(ctx: &mut Ctx<'_, '_>, lfd: i32) -> Result<bool
 }
 
 /// Put the socket `file` into `slot` of the builtin's vproc: its fd.
-pub(super) fn install(ctx: &mut Ctx<'_, '_>, slot: FdSlot, file: Box<dyn crate::bash::fs::File>) -> i32 {
+pub(super) fn install(
+	ctx: &mut Ctx<'_, '_>,
+	slot: FdSlot,
+	file: Box<dyn crate::bash::fs::File>,
+) -> i32 {
 	let fd = match slot {
 		FdSlot::At(fd) => fd,
 		FdSlot::Free(from) => (from.max(0)..i32::MAX)

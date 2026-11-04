@@ -24,7 +24,9 @@ fn zsh(src: &str) -> (String, String, i32) {
 	)
 }
 
-/// `echoti` prints numbers, `yes`/`no` and strings, instantiating parameters with `tparm` (`cup`, `setaf`, string parameters of `Ms`), padding stripped (`flash`), extended capabilities included.
+/// `echoti` prints numbers, `yes`/`no` and strings, instantiating parameters
+/// with `tparm` (`cup`, `setaf`, string parameters of `Ms`), padding stripped
+/// (`flash`), extended capabilities included.
 #[test]
 fn echoti_xterm_values() {
 	let (out, err, status) = zsh(
@@ -38,7 +40,9 @@ fn echoti_xterm_values() {
 	assert_eq!(status, 0);
 }
 
-/// Elements of `terminfo`/`termcap`: integers, booleans, raw strings, termcap `me` trimmed of the charset reset (`_nc_trim_sgr0`), extended names, unset for unknown names.
+/// Elements of `terminfo`/`termcap`: integers, booleans, raw strings, termcap
+/// `me` trimmed of the charset reset (`_nc_trim_sgr0`), extended names, unset
+/// for unknown names.
 #[test]
 fn terminfo_termcap_elements() {
 	let (out, err, status) = zsh(
@@ -52,16 +56,14 @@ fn terminfo_termcap_elements() {
 	assert_eq!(status, 0);
 }
 
-/// `echotc`: `cm` through `tgoto` (row, column), `me` trimmed, `bs` from `cub1`, two-letter extended names.
+/// `echotc`: `cm` through `tgoto` (row, column), `me` trimmed, `bs` from
+/// `cub1`, two-letter extended names.
 #[test]
 fn echotc_xterm_values() {
 	let (out, err, status) = zsh(
 		"TERM=xterm-256color; echotc cm 3 4; echotc me; echotc bs; echotc AX; echotc Co; echotc le; echotc Ms; echo $?",
 	);
-	assert_eq!(
-		out,
-		"\x1b[4;5H\x1b[0myes\nyes\n256\n\x08\x1b]52;%p1%s;%p2%s\x070\n"
-	);
+	assert_eq!(out, "\x1b[4;5H\x1b[0myes\nyes\n256\n\x08\x1b]52;%p1%s;%p2%s\x070\n");
 	assert_eq!(err, "");
 	assert_eq!(status, 0);
 }
@@ -80,21 +82,20 @@ fn capability_errors() {
 	assert_eq!(status, 0);
 }
 
-/// zsh/terminfo and zsh/termcap load when their builtin or parameter is first used.
+/// zsh/terminfo and zsh/termcap load when their builtin or parameter is first
+/// used.
 #[test]
 fn modules_autoload_on_use() {
 	let (out, err, status) = zsh(
 		"zmodload -e zsh/terminfo; echo $?; TERM=xterm-256color; echoti colors; zmodload -e zsh/terminfo; echo $?; zmodload -e zsh/termcap; echo $?; print $termcap[Co]; zmodload -e zsh/termcap; echo $?",
 	);
-	assert_eq!(
-		out,
-		"1\n256\n0\n1\n256\n0\n"
-	);
+	assert_eq!(out, "1\n256\n0\n1\n256\n0\n");
 	assert_eq!(err, "");
 	assert_eq!(status, 0);
 }
 
-/// `${(k)terminfo}` lists the terminal ncurses holds (none before `$TERM` was first set up; the old one after a bad `TERM`), in ncurses' order.
+/// `${(k)terminfo}` lists the terminal ncurses holds (none before `$TERM` was
+/// first set up; the old one after a bad `TERM`), in ncurses' order.
 #[test]
 fn scans_list_the_held_terminal() {
 	let (out, err, status) = zsh(
@@ -122,7 +123,8 @@ fn dumb_terminal() {
 	assert_eq!(status, 0);
 }
 
-/// No `TERM`, or one without a description: the builtins fail silently, `termcap` still lists every boolean code as unset.
+/// No `TERM`, or one without a description: the builtins fail silently,
+/// `termcap` still lists every boolean code as unset.
 #[test]
 fn unknown_or_unset_term() {
 	let (out, err, status) = zsh(
@@ -149,7 +151,9 @@ fn zsh_term(src: &str, term: &str) -> (String, String, i32) {
 	)
 }
 
-/// With `TERM` exported, the module's boot has ncurses `setupterm` it: listings show the raw `sgr0` as `me` until `tgetent` (here `echotc`) trims it; a failed `tgetent` clears the trim again.
+/// With `TERM` exported, the module's boot has ncurses `setupterm` it: listings
+/// show the raw `sgr0` as `me` until `tgetent` (here `echotc`) trims it; a
+/// failed `tgetent` clears the trim again.
 #[test]
 fn held_terminal_from_boot_is_set_up_without_tgetent() {
 	let (out, err, status) = zsh_term(
@@ -194,7 +198,8 @@ fn termcap_module_boots_first() {
 	assert_eq!(status, 0);
 }
 
-/// The exported `TERM` at boot is the one set up; a later `tgetent` of the same name adjusts it.
+/// The exported `TERM` at boot is the one set up; a later `tgetent` of the same
+/// name adjusts it.
 #[test]
 fn another_term_replaces_the_boot_one() {
 	let (out, err, status) = zsh_term(
@@ -209,17 +214,15 @@ fn another_term_replaces_the_boot_one() {
 	assert_eq!(status, 0);
 }
 
-/// `tgetent`'s obsolete defaults move `is3` to `OTi2` and a lone `rs2` to `OTrs`.
+/// `tgetent`'s obsolete defaults move `is3` to `OTi2` and a lone `rs2` to
+/// `OTrs`.
 #[test]
 fn tgetent_moves_obsolete_defaults() {
 	let (out, err, status) = zsh_term(
 		"print -r -- \"<\"${(M)${(k)terminfo}:#(is3|OTi2|rs2|OTrs)}\">\"; print -r -- ${(q)terminfo[is3]}; print -r -- \"<\"${(M)${(k)terminfo}:#(is3|OTi2|rs2|OTrs)}\">\"; print -r -- \"<\"${(M)${(k)termcap}:#(i3|i2|r2|rs)}\">\"",
 		"4410-w",
 	);
-	assert_eq!(
-		out,
-		"<is3 rs2>\n''\n<OTi2 OTrs>\n<i2 rs>\n"
-	);
+	assert_eq!(out, "<is3 rs2>\n''\n<OTi2 OTrs>\n<i2 rs>\n");
 	assert_eq!(err, "");
 	assert_eq!(status, 0);
 }

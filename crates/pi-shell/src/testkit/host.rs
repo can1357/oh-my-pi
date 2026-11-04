@@ -693,7 +693,8 @@ impl crate::bash::Host for FakeHost {
 	}
 
 	fn logins(&self) -> io::Result<crate::bash::Logins> {
-		self.logins
+		self
+			.logins
 			.clone()
 			.ok_or_else(|| io::ErrorKind::Unsupported.into())
 	}

@@ -50,7 +50,10 @@ fn service_listener() -> Option<(TcpListener, u16)> {
 		if line.starts_with('#') {
 			continue;
 		}
-		let Some(port) = spec.strip_suffix("/tcp").and_then(|p| p.parse::<u16>().ok()) else {
+		let Some(port) = spec
+			.strip_suffix("/tcp")
+			.and_then(|p| p.parse::<u16>().ok())
+		else {
 			continue;
 		};
 		if !(20000..=60000).contains(&port) {
@@ -326,7 +329,12 @@ fn zsh(port: u16, script: &str) -> (String, String, i32) {
 	let local = dir.path().join("local.txt");
 	std::fs::write(&local, "abc\n").unwrap();
 	let when = SystemTime::UNIX_EPOCH + Duration::from_secs(1_577_934_245);
-	std::fs::File::options().write(true).open(&local).unwrap().set_modified(when).unwrap();
+	std::fs::File::options()
+		.write(true)
+		.open(&local)
+		.unwrap()
+		.set_modified(when)
+		.unwrap();
 	let script = script.replace("@PORT@", &port.to_string());
 	let mut cmd = obash();
 	cmd.arg0("zsh");
@@ -344,7 +352,9 @@ fn zsh_mod_zftp_passive_session() {
 		eprintln!("no free /etc/services port: nothing to test");
 		return;
 	};
-	let (out, err, st) = zsh(server.port, r"zmodload zsh/net/tcp zsh/zftp
+	let (out, err, st) = zsh(
+		server.port,
+		r"zmodload zsh/net/tcp zsh/zftp
 zftp open 127.0.0.1:@PORT@ alice secret; echo open=$?
 typeset -p ZFTP_HOST ZFTP_IP ZFTP_SYSTEM ZFTP_TYPE ZFTP_USER ZFTP_PWD ZFTP_MODE ZFTP_CODE ZFTP_REPLY ZFTP_SESSION ZFTP_ACCOUNT ZFTP_PORT
 zftp ls; echo ls=$?
@@ -367,7 +377,8 @@ ZFTP_VERBOSE=0123456; zftp quote HELP; zftp pwd 2>&1; zftp quote NOOP; ZFTP_VERB
 zftp test; echo test=$?
 ztcp -L | while read fd type rest; do print $type; done
 zftp close; echo close=$?; typeset -p ZFTP_HOST ZFTP_CODE ZFTP_REPLY
-zftp ls; echo $?");
+zftp ls; echo $?",
+	);
 	let expected = r#"open=0
 typeset -r ZFTP_HOST=127.0.0.1
 typeset -r ZFTP_IP=127.0.0.1
@@ -461,7 +472,9 @@ fn zsh_mod_zftp_sendport_sessions_and_hooks() {
 		eprintln!("no free /etc/services port: nothing to test");
 		return;
 	};
-	let (out, err, st) = zsh(server.port, r#"zmodload zsh/net/tcp zsh/zftp
+	let (out, err, st) = zsh(
+		server.port,
+		r#"zmodload zsh/net/tcp zsh/zftp
 ZFTP_PREFS=S
 zftp_progress() { print -r -- "progress $ZFTP_TRANSFER ${ZFTP_COUNT-unset} ${ZFTP_SIZE-unset} $ZFTP_FILE" >&2 }
 zftp_chpwd() { print -r -- "chpwd ${ZFTP_PWD-unset}" >&2 }
@@ -479,7 +492,8 @@ zftp session second; zftp rmsession; zftp session; typeset -p ZFTP_SESSION ZFTP_
 ZFTP_VERBOSE=0; zftp quote HELP; ZFTP_VERBOSE=450
 ZFTP_PREFS=x; zftp quote NOOP; echo q=$?
 zftp quote BYE; echo bye=$?; typeset -p ZFTP_HOST
-zftp ls; echo $?"#);
+zftp ls; echo $?"#,
+	);
 	let expected = "127.0.0.1:@PORT@
 bob
 **
@@ -548,7 +562,9 @@ fn zsh_mod_zftp_block_mode_timeout_and_local_files() {
 		eprintln!("no free /etc/services port: nothing to test");
 		return;
 	};
-	let (out, err, st) = zsh(server.port, r"zmodload zsh/net/tcp zsh/zftp
+	let (out, err, st) = zsh(
+		server.port,
+		r"zmodload zsh/net/tcp zsh/zftp
 zftp open 127.0.0.1:@PORT@ dave pw
 zftp mode B; zftp get hello.txt; echo get=$?
 echo blockdata | zftp put b.txt; echo put=$?
@@ -560,7 +576,8 @@ zftp test; echo test=$?
 zftp; echo $?
 zftp cd; echo $?
 zftp foo
-zftp open 127.0.0.1:nosuchservice; echo $?");
+zftp open 127.0.0.1:nosuchservice; echo $?",
+	);
 	assert_eq!(
 		out,
 		"hello world
@@ -608,14 +625,20 @@ fn zsh_mod_zftp_session_quits_at_shell_exit() {
 		eprintln!("no free /etc/services port: nothing to test");
 		return;
 	};
-	let (out, err, st) = zsh(server.port, r"zmodload zsh/net/tcp zsh/zftp
+	let (out, err, st) = zsh(
+		server.port,
+		r"zmodload zsh/net/tcp zsh/zftp
 zftp open 127.0.0.1:@PORT@ erin secret; echo open=$?
 zshexit() { echo bye $?; }
-exit 3");
+exit 3",
+	);
 	assert_eq!((out.as_str(), err.as_str(), st), ("open=0\nbye 3\n", "", 3));
-	let (out, err, st) = zsh(server.port, r"zmodload zsh/net/tcp zsh/zftp
+	let (out, err, st) = zsh(
+		server.port,
+		r"zmodload zsh/net/tcp zsh/zftp
 zftp open 127.0.0.1:@PORT@ frank secret; echo open=$?
-false");
+false",
+	);
 	assert_eq!((out.as_str(), err.as_str(), st), ("open=0\n", "", 1));
 	assert_eq!(server.logs(2), [
 		"SESSION USER erin | PASS * | SYST | PWD | QUIT",
@@ -632,11 +655,14 @@ fn zsh_mod_zftp_exit_runs_zftp_chpwd() {
 		eprintln!("no free /etc/services port: nothing to test");
 		return;
 	};
-	let (out, err, st) = zsh(server.port, r"zmodload zsh/net/tcp zsh/zftp
+	let (out, err, st) = zsh(
+		server.port,
+		r"zmodload zsh/net/tcp zsh/zftp
 zftp_chpwd(){ print chpwd:$ZFTP_PWD }
 zftp open 127.0.0.1:@PORT@ gina secret; echo open=$?
 ZFTP_VERBOSE=2
-echo end; exit 4");
+echo end; exit 4",
+	);
 	assert_eq!(
 		(out.as_str(), err.as_str(), st),
 		("chpwd:/home/test\nopen=0\nend\nchpwd:\n", "221 Goodbye\n", 4)

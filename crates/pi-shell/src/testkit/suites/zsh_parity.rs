@@ -14,8 +14,12 @@ use crate::{
 fn zsh(src: &str) -> (String, String, i32) {
 	let host = FakeHost::new();
 	host.fs.add_dir("/tmp/pz");
-	host.fs.add_file("/tmp/pz/sf.zsh", b"echo $# $* / $0\nshift\n", 0o644);
-	host.fs.add_file("/tmp/pz/ec.zsh", b"echo $ZSH_EVAL_CONTEXT\n", 0o644);
+	host
+		.fs
+		.add_file("/tmp/pz/sf.zsh", b"echo $# $* / $0\nshift\n", 0o644);
+	host
+		.fs
+		.add_file("/tmp/pz/ec.zsh", b"echo $ZSH_EVAL_CONTEXT\n", 0o644);
 	let init = ShellInit { mode: ModeId::Zsh, argv0: "zsh".into(), ..skeleton_init(&[]) };
 	let mut rig = Rig::new(host, init);
 	let status = rig.run(Script::command(src.as_bytes().to_vec()), Fault::None);
@@ -67,7 +71,10 @@ fn eval_context_of_a_command_string_is_cmdarg() {
 	let (out, err, st) = zsh(
 		r#"echo $ZSH_EVAL_CONTEXT; echo $(echo $ZSH_EVAL_CONTEXT); f(){echo $ZSH_EVAL_CONTEXT}; f; eval "echo \$ZSH_EVAL_CONTEXT"; (echo $ZSH_EVAL_CONTEXT); source /tmp/pz/ec.zsh; echo $zsh_eval_context[1]"#,
 	);
-	assert_eq!(out, "cmdarg\ncmdarg:cmdsubst\ncmdarg:shfunc\ncmdarg:eval\ncmdarg\ncmdarg:file\ncmdarg\n");
+	assert_eq!(
+		out,
+		"cmdarg\ncmdarg:cmdsubst\ncmdarg:shfunc\ncmdarg:eval\ncmdarg\ncmdarg:file\ncmdarg\n"
+	);
 	assert_eq!((err.as_str(), st), ("", 0));
 }
 
@@ -80,7 +87,8 @@ fn zshexit_hooks_run_after_the_exit_trap_and_on_subshell_exit() {
 	// first one's body runs (zsh `doshfunc` sets `retflag` again).
 	assert_eq!(out, "sub\nbye 3\ng 3\n[bye 4\ng 4]\nnohook\ntrap\nbye 5\n");
 	assert_eq!((err.as_str(), st), ("", 5));
-	let (out, err, st) = zsh("zshexit_functions=(g h); g(){echo g $?}; h(){echo h}; f(){ exit 5 }; f");
+	let (out, err, st) =
+		zsh("zshexit_functions=(g h); g(){echo g $?}; h(){echo h}; f(){ exit 5 }; f");
 	assert_eq!((out.as_str(), err.as_str(), st), ("g 5\n", "", 5));
 	let (out, err, st) = zsh("zshexit_functions=(g h); g(){echo g $?}; h(){echo h}; false");
 	assert_eq!((out.as_str(), err.as_str(), st), ("g 1\nh\n", "", 1));
@@ -88,7 +96,8 @@ fn zshexit_hooks_run_after_the_exit_trap_and_on_subshell_exit() {
 
 #[test]
 fn exit_in_a_zshexit_hook_ends_only_that_hook() {
-	let (out, err, st) = zsh("zshexit(){echo bye $?; exit 7; echo no}; zshexit_functions=(g); g(){echo g $?}; true");
+	let (out, err, st) =
+		zsh("zshexit(){echo bye $?; exit 7; echo no}; zshexit_functions=(g); g(){echo g $?}; true");
 	assert_eq!((out.as_str(), err.as_str(), st), ("bye 0\ng 0\n", "", 7));
 	let (out, err, st) = zsh("zshexit(){echo bye $?}; false");
 	assert_eq!((out.as_str(), err.as_str(), st), ("bye 1\n", "", 1));
@@ -144,7 +153,10 @@ fn misc_prompt_names_share_one_value() {
 #[test]
 fn misc_printf_directive_ends_at_a_nul() {
 	let (out, err, st) = zsh("printf $'%\\0'; echo no");
-	assert_eq!((out.as_str(), err.as_str(), st), ("no\n", "zsh:printf:1: %: invalid directive\n", 0));
+	assert_eq!(
+		(out.as_str(), err.as_str(), st),
+		("no\n", "zsh:printf:1: %: invalid directive\n", 0)
+	);
 }
 
 #[test]
@@ -225,7 +237,11 @@ fn misc_started_as_sh_has_no_zsh_only_specials_and_no_ties() {
 			String::from_utf8_lossy(&rig.host.stderr.bytes()).into_owned(),
 			st
 		),
-		("export -r PATH=/bin\nscalar-readonly-export-special 0 0 0 .\narray\n".to_owned(), String::new(), 0)
+		(
+			"export -r PATH=/bin\nscalar-readonly-export-special 0 0 0 .\narray\n".to_owned(),
+			String::new(),
+			0
+		)
 	);
 }
 
@@ -237,7 +253,11 @@ fn misc_seconds_switches_between_integer_and_float() {
 	);
 	assert_eq!(
 		(out.as_str(), err.as_str(), st),
-		("float-special\n2.25\ntypeset -F SECONDS=2.25\ninteger-special\n2#101\nfloat-special\n", "", 0)
+		(
+			"float-special\n2.25\ntypeset -F SECONDS=2.25\ninteger-special\n2#101\nfloat-special\n",
+			"",
+			0
+		)
 	);
 }
 
@@ -279,7 +299,10 @@ fn redirkill_cd_hard_refuses_links_and_fixdir_stops_at_a_missing_dir() {
 #[test]
 fn redirkill_write_to_closed_stdout() {
 	let (out, err, st) = zsh("print foo >&-; echo $?; (exec >&-; print foo); echo $?");
-	assert_eq!((out.as_str(), err.as_str(), st), ("0\n0\n", "zsh:1: write error: bad file descriptor\n", 0));
+	assert_eq!(
+		(out.as_str(), err.as_str(), st),
+		("0\n0\n", "zsh:1: write error: bad file descriptor\n", 0)
+	);
 }
 
 #[test]
@@ -385,7 +408,10 @@ fn trace_of_sourced_and_eval_code_keeps_the_stderr_before_redirection() {
 fn trace_xtrace_comes_back_after_a_call_and_self_redefinition_keeps_tracing() {
 	let (out, err, st) =
 		zsh("f() { set -x; :; }; f; echo after; g() { g() { :; }; }; functions -T g; g; functions g");
-	assert_eq!((out.as_str(), err.as_str(), st), ("after\ng () {\n\t# traced\n\t:\n}\n", "+f:0> :\n", 0));
+	assert_eq!(
+		(out.as_str(), err.as_str(), st),
+		("after\ng () {\n\t# traced\n\t:\n}\n", "+f:0> :\n", 0)
+	);
 }
 
 /// [`zsh`] with autoloadable function files: `/tmp/pz/fn/af` (in
@@ -395,8 +421,12 @@ fn zsh_fn(src: &str) -> (String, String, i32) {
 	host.fs.add_dir("/tmp/pz");
 	host.fs.add_dir("/tmp/pz/fn");
 	host.fs.add_dir("/tmp/pz/ex");
-	host.fs.add_file("/tmp/pz/fn/af", b"print -r -- \"auto $0 $#\"\n", 0o644);
-	host.fs.add_file("/tmp/pz/ex/spec", b"print -r -- \"spec $0\"\n", 0o644);
+	host
+		.fs
+		.add_file("/tmp/pz/fn/af", b"print -r -- \"auto $0 $#\"\n", 0o644);
+	host
+		.fs
+		.add_file("/tmp/pz/ex/spec", b"print -r -- \"spec $0\"\n", 0o644);
 	let init = ShellInit { mode: ModeId::Zsh, argv0: "zsh".into(), ..skeleton_init(&[]) };
 	let mut rig = Rig::new(host, init);
 	let status = rig.run(Script::command(src.as_bytes().to_vec()), Fault::None);
@@ -454,8 +484,14 @@ fn funcs_expanded_names_handler_csh_and_funcnest() {
 fn funcs_autoload_runs_in_the_call_with_loadautofunc_context() {
 	let host = FakeHost::new();
 	host.fs.add_dir("/tmp/af");
-	host.fs.add_file("/tmp/af/f2", b"print -r -- \"ctx=$zsh_eval_context\"\n", 0o644);
-	host.fs.add_file("/tmp/af/f1", b"f1() { print inner \"$@\" }\nprint loading\nf1 \"$@\"\n", 0o644);
+	host
+		.fs
+		.add_file("/tmp/af/f2", b"print -r -- \"ctx=$zsh_eval_context\"\n", 0o644);
+	host.fs.add_file(
+		"/tmp/af/f1",
+		b"f1() { print inner \"$@\" }\nprint loading\nf1 \"$@\"\n",
+		0o644,
+	);
 	let init = ShellInit { mode: ModeId::Zsh, argv0: "zsh".into(), ..skeleton_init(&[]) };
 	let mut rig = Rig::new(host, init);
 	let src = "fpath=(/tmp/af); autoload -Uz f2; f2; f2; autoload -Uk f1; f1 z";
@@ -530,7 +566,9 @@ fn trace_debug_trap_setting_errexit_skips_the_list() {
 
 #[test]
 fn trace_debug_trap_without_debug_before_cmd_runs_after_each_list() {
-	let (out, err, st) = zsh("unsetopt debugbeforecmd; fn() { trap 'print after $LINENO' DEBUG; :; trap - DEBUG; }; fn");
+	let (out, err, st) = zsh(
+		"unsetopt debugbeforecmd; fn() { trap 'print after $LINENO' DEBUG; :; trap - DEBUG; }; fn",
+	);
 	assert_eq!((out.as_str(), err.as_str(), st), ("after 0\nafter 0\n", "", 0));
 }
 
@@ -580,7 +618,10 @@ fn expandmb_identifiers_admit_multibyte_letters_unless_posix_identifiers() {
 		"LANG=en_US.UTF-8; eval 'hähä=3; print $hähä'; eval 'for ß in x; do print $ß; done'; setopt \
 		 posixidentifiers; (eval 'hä=1')",
 	);
-	assert_eq!((out.as_str(), err.as_str(), st), ("3\nx\n", "(eval):1: command not found: hä=1\n", 127));
+	assert_eq!(
+		(out.as_str(), err.as_str(), st),
+		("3\nx\n", "(eval):1: command not found: hä=1\n", 127)
+	);
 }
 
 #[test]
@@ -661,7 +702,9 @@ fn funcs_commands_lists_every_entry_of_path() {
 	let host = FakeHost::new();
 	host.fs.add_dir("/tmp/ctst");
 	host.fs.add_dir("/tmp/ctst/sub");
-	host.fs.add_file("/tmp/ctst/ztst.zsh", b"#!/bin/sh\n", 0o755);
+	host
+		.fs
+		.add_file("/tmp/ctst/ztst.zsh", b"#!/bin/sh\n", 0o755);
 	host.fs.add_file("/tmp/ctst/plain", b"", 0o644);
 	let init = ShellInit { mode: ModeId::Zsh, argv0: "zsh".into(), ..skeleton_init(&[]) };
 	let mut rig = Rig::new(host, init);
@@ -684,7 +727,10 @@ fn expandmb_quoting_backslashes_the_history_character() {
 		"setopt banghist; x=$'\\x21foo'; print -r -- ${(q)x} ${(qq)x} ${(qqqq)x} ${(qqq)x}; histchars=@; \
 		 y=$'@a!b'; print -r -- ${(qqqq)y}; unsetopt banghist; print -r -- ${(qqqq)x}",
 	);
-	assert_eq!((out.as_str(), err.as_str(), st), ("!foo '!foo' $'\\!foo' \"!foo\"\n$'\\@a!b'\n$'!foo'\n", "", 0));
+	assert_eq!(
+		(out.as_str(), err.as_str(), st),
+		("!foo '!foo' $'\\!foo' \"!foo\"\n$'\\@a!b'\n$'!foo'\n", "", 0)
+	);
 }
 
 #[test]
@@ -730,7 +776,10 @@ fn trace_funcsourcetrace_and_funcfiletrace_for_autoloaded_and_sourced_functions(
 		 H: zsh:1 /tmp/fst/myf:0 zsh:5 / /tmp/fst/myf:2 zsh:7 zsh:9 / myf:2 g:2 zsh:9\n\
 		 S: /tmp/fst/src.zsh:3 /tmp/fst/src.zsh:0 / /tmp/fst/src.zsh:6 zsh:10 / /tmp/fst/src.zsh:6 zsh:10\n"
 	);
-	assert_eq!((String::from_utf8_lossy(&rig.host.stderr.bytes()).into_owned(), st), (String::new(), 0));
+	assert_eq!(
+		(String::from_utf8_lossy(&rig.host.stderr.bytes()).into_owned(), st),
+		(String::new(), 0)
+	);
 }
 
 #[test]

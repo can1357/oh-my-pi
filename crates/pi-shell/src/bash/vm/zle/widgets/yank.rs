@@ -31,7 +31,11 @@ pub fn do_yank(zle: &mut Zle, ed: &mut Editor) -> i32 {
 	if n < 0 {
 		return 1;
 	}
-	let k = if ed.zmod.flags & modflags::VIBUF != 0 { KctBuf::Vi(ed.zmod.vibuf as usize) } else { KctBuf::Cut };
+	let k = if ed.zmod.flags & modflags::VIBUF != 0 {
+		KctBuf::Vi(ed.zmod.vibuf as usize)
+	} else {
+		KctBuf::Cut
+	};
 	ed.ls.kctbuf = Some(k);
 	if utils::kctbuf_get(zle, k).is_none() {
 		return 1;
@@ -67,7 +71,10 @@ fn skipped(b: Option<&CutBuffer>) -> bool {
 /// first yanked again).
 pub fn yank_pop(zle: &mut Zle, ed: &mut Editor) -> i32 {
 	let kctstart = zle.kct;
-	let Some(kctbuf) = ed.ls.kctbuf.filter(|_| ed.lastcmd & wflags::YANK != 0 && !zle.kring.is_empty())
+	let Some(kctbuf) = ed
+		.ls
+		.kctbuf
+		.filter(|_| ed.lastcmd & wflags::YANK != 0 && !zle.kring.is_empty())
 	else {
 		ed.ls.kctbuf = None;
 		return 1;
@@ -177,7 +184,11 @@ pub fn copy_region_as_kill(zle: &mut Zle, ed: &mut Editor, arg: Option<&[u8]>) -
 	if ed.mark > ed.line.len() {
 		ed.mark = ed.line.len();
 	}
-	let (start, mut end) = if ed.mark > ed.cs { (ed.cs, ed.mark) } else { (ed.mark, ed.cs) };
+	let (start, mut end) = if ed.mark > ed.cs {
+		(ed.cs, ed.mark)
+	} else {
+		(ed.mark, ed.cs)
+	};
 	if utils::invicmdmode(ed) {
 		utils::incpos(ed, &mut end);
 	}
@@ -356,7 +367,12 @@ mod tests {
 		let mut e = ed("hello world", 2);
 		e.mark = 8;
 		assert_eq!(copy_region_as_kill(&mut zle, &mut e, None), 0);
-		assert_eq!(zle.cutbuf.as_ref().map(|c| c.buf.iter().collect::<String>()), Some("llo wo".into()));
+		assert_eq!(
+			zle.cutbuf
+				.as_ref()
+				.map(|c| c.buf.iter().collect::<String>()),
+			Some("llo wo".into())
+		);
 		assert_eq!(kill_region(&mut zle, &mut e), 0);
 		assert_eq!((line(&e).as_str(), e.cs), ("herld", 2));
 		let mut e = ed("one\ntwo\nthree", 5);
@@ -366,9 +382,19 @@ mod tests {
 		// on the first non-blank.
 		assert_eq!(kill_region(&mut zle, &mut e), 0);
 		assert_eq!((line(&e).as_str(), e.cs), ("one", 0));
-		assert_eq!(zle.cutbuf.as_ref().map(|c| c.buf.iter().collect::<String>()), Some("two\nthree".into()));
+		assert_eq!(
+			zle.cutbuf
+				.as_ref()
+				.map(|c| c.buf.iter().collect::<String>()),
+			Some("two\nthree".into())
+		);
 		assert_eq!(copy_region_as_kill(&mut zle, &mut e, Some(b"new")), 0);
-		assert_eq!(zle.cutbuf.as_ref().map(|c| c.buf.iter().collect::<String>()), Some("new".into()));
+		assert_eq!(
+			zle.cutbuf
+				.as_ref()
+				.map(|c| c.buf.iter().collect::<String>()),
+			Some("new".into())
+		);
 	}
 
 	#[test]

@@ -508,7 +508,8 @@ fn a_syntax_error_ends_the_parse() {
 	assert!(p.next_command().is_none());
 }
 
-// ---- cmdstack (PS2 `%_`) ------------------------------------------------------
+// ---- cmdstack (PS2 `%_`)
+// ------------------------------------------------------
 
 /// The `%_` names of the constructs open where `src` runs out: the stack
 /// of the first event that ran out inside a construct (a here-document
@@ -611,7 +612,11 @@ fn cmdnames_are_zshs() {
 	assert_eq!(zsh::cmdname(zsh::CS_BRACEPAR), "braceparam");
 	assert_eq!(zsh::cmdname(zsh::CS_ALWAYS), "always");
 	assert_eq!(zsh::cmdname(zsh::CS_COUNT - 1), "always");
-	assert!(Parser::new(b"if\n", Features::NONE, &NoAliases).zsh_cmdstack().is_none());
+	assert!(
+		Parser::new(b"if\n", Features::NONE, &NoAliases)
+			.zsh_cmdstack()
+			.is_none()
+	);
 }
 
 // ---- aliases ----------------------------------------------------------------

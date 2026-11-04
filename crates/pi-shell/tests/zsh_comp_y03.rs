@@ -1,6 +1,6 @@
-//! zsh 5.9 `Test/Y03arguments.ztst` (`_arguments`) through the port of its `comptest`
-//! harness (`comp_support::comptest`): obash runs as `zsh -f +Z` on a pty,
-//! with zsh 5.9's installed completion functions, and every `comptest`
+//! zsh 5.9 `Test/Y03arguments.ztst` (`_arguments`) through the port of its
+//! `comptest` harness (`comp_support::comptest`): obash runs as `zsh -f +Z` on
+//! a pty, with zsh 5.9's installed completion functions, and every `comptest`
 //! report must equal zsh's.
 //!
 //! The steps and reports below were recorded by running the `.ztst` file
@@ -23,9 +23,7 @@ use comp_support::comptest::{
 };
 
 /// The `%prep` steps (after `comptestinit`).
-const PREP: &[Step] = &[
-	Eval("compdef _tst tst"),
-];
+const PREP: &[Step] = &[Eval("compdef _tst tst")];
 
 /// The `%test` chunks in file order.
 const CASES: &[Case] = &[
@@ -192,10 +190,7 @@ const CASES: &[Case] = &[
 		name:  "mix of + and - and exclusion of stacked options",
 		steps: &[
 			Eval("_tst () { _arguments '-s' '-a' '-b' '-c' '+a' '+b' '+c' }"),
-			Test(
-				"tst -a +b +c\t",
-				"line: {tst -a +b +ca}{}",
-			),
+			Test("tst -a +b +c\t", "line: {tst -a +b +ca}{}"),
 		],
 	},
 	Case {
@@ -214,50 +209,32 @@ const CASES: &[Case] = &[
 		name:  "option argument to ignored option",
 		steps: &[
 			Eval("_tst () { _arguments '!-x:arg:(ok)' }"),
-			Test(
-				"tst -x \t",
-				"line: {tst -x ok }{}",
-			),
+			Test("tst -x \t", "line: {tst -x ok }{}"),
 		],
 	},
 	Case {
 		name:  "ignored option not completed",
-		steps: &[
-			Eval("_tst () { _arguments '!-a' '-b' }"),
-			Test(
-				"tst -\t",
-				"line: {tst -b }{}",
-			),
-		],
+		steps: &[Eval("_tst () { _arguments '!-a' '-b' }"), Test("tst -\t", "line: {tst -b }{}")],
 	},
 	Case {
 		name:  "ignored option is not taken to be the normal argument",
 		steps: &[
 			Eval("_tst () { _arguments '+x' '+y' '!+z' ':arg:(x)' }"),
-			Test(
-				"tst +z \t",
-				"line: {tst +z x }{}",
-			),
+			Test("tst +z \t", "line: {tst +z x }{}"),
 		],
 	},
 	Case {
 		name:  "unrecognised option has no effect on proceedings with no normal arguments",
 		steps: &[
 			Eval("_tst () { _arguments '--known' '--other' }"),
-			Test(
-				"tst --unknown -\t",
-				"line: {tst --unknown --}{}",
-			),
+			Test("tst --unknown -\t", "line: {tst --unknown --}{}"),
 		],
 	},
 	Case {
 		name:  "unrecognised option is taken to be the normal argument",
 		steps: &[
 			Eval("_tst () { _arguments '+x' '+y' ':arg:(x)' }"),
-			Test(
-				"tst +z \t",
-				"line: {tst +z +}{}",
-			),
+			Test("tst +z \t", "line: {tst +z +}{}"),
 		],
 	},
 	Case {
@@ -335,13 +312,7 @@ const CASES: &[Case] = &[
 	},
 	Case {
 		name:  "sticky option argument",
-		steps: &[
-			Eval("_tst () { _arguments '-x:arg:' }"),
-			Test(
-				"tst -x\t",
-				"line: {tst -x }{}",
-			),
-		],
+		steps: &[Eval("_tst () { _arguments '-x:arg:' }"), Test("tst -x\t", "line: {tst -x }{}")],
 	},
 	Case {
 		name:  "option argument with prefix that passes option prefix-needed test",
@@ -356,13 +327,7 @@ const CASES: &[Case] = &[
 	},
 	Case {
 		name:  "end of option sequence",
-		steps: &[
-			Eval("_tst () { _arguments '-x[desc]' }"),
-			Test(
-				"tst -x\t",
-				"line: {tst -x }{}",
-			),
-		],
+		steps: &[Eval("_tst () { _arguments '-x[desc]' }"), Test("tst -x\t", "line: {tst -x }{}")],
 	},
 	Case {
 		name:  "argument beginning with minus",
@@ -381,10 +346,7 @@ const CASES: &[Case] = &[
 		name:  "argument beginning with minus, guard on rest argument",
 		steps: &[
 			Eval("_tst () { _arguments '-x' ': :_guard '\\''[0-9]#'\\'' number' }"),
-			Test(
-				"tst -\t",
-				"line: {tst -x }{}",
-			),
+			Test("tst -\t", "line: {tst -x }{}"),
 		],
 	},
 	Case {
@@ -417,20 +379,14 @@ const CASES: &[Case] = &[
 		name:  "opt_args",
 		steps: &[
 			Eval("_tst () { _arguments '-s' '-a' '-b' ':descr:{compadd - $+opt_args[-a]}' }"),
-			Test(
-				"tst -ab \t",
-				"line: {tst -ab 1 }{}",
-			),
+			Test("tst -ab \t", "line: {tst -ab 1 }{}"),
 		],
 	},
 	Case {
 		name:  "opt_args with multiple arguments and quoting of colons and backslashes, part #1: default behaviour",
 		steps: &[
 			Eval("_tst () { _arguments '-a:one: :two' ':descr:{compadd -Q - $opt_args[-a]}' }"),
-			Test(
-				"tst -a 1:x \\2 \t",
-				"line: {tst -a 1:x \\2 1\\:x:\\\\2 }{}",
-			),
+			Test("tst -a 1:x \\2 \t", "line: {tst -a 1:x \\2 1\\:x:\\\\2 }{}"),
 		],
 	},
 	Case {
@@ -461,52 +417,22 @@ const CASES: &[Case] = &[
 		name:  "optarg completion following rest operand on line (workers/42141)",
 		steps: &[
 			Eval("_tst () { _arguments '*-x+:optarg:(1)' '*--xxx=:optarg:(1)' '*:operand:(a)' }"),
-			Test(
-				"tst \t",
-				"line: {tst a }{}",
-			),
-			Test(
-				"tst -x \t",
-				"line: {tst -x 1 }{}",
-			),
-			Test(
-				"tst -x\t",
-				"line: {tst -x1 }{}",
-			),
-			Test(
-				"tst --xxx=\t",
-				"line: {tst --xxx=1 }{}",
-			),
-			Test(
-				"tst --xxx \t",
-				"line: {tst --xxx 1 }{}",
-			),
-			Test(
-				"tst a -x\t",
-				"line: {tst a -x1 }{}",
-			),
-			Test(
-				"tst a -x \t",
-				"line: {tst a -x 1 }{}",
-			),
-			Test(
-				"tst a --xxx=\t",
-				"line: {tst a --xxx=1 }{}",
-			),
-			Test(
-				"tst a --xxx \t",
-				"line: {tst a --xxx 1 }{}",
-			),
+			Test("tst \t", "line: {tst a }{}"),
+			Test("tst -x \t", "line: {tst -x 1 }{}"),
+			Test("tst -x\t", "line: {tst -x1 }{}"),
+			Test("tst --xxx=\t", "line: {tst --xxx=1 }{}"),
+			Test("tst --xxx \t", "line: {tst --xxx 1 }{}"),
+			Test("tst a -x\t", "line: {tst a -x1 }{}"),
+			Test("tst a -x \t", "line: {tst a -x 1 }{}"),
+			Test("tst a --xxx=\t", "line: {tst a --xxx=1 }{}"),
+			Test("tst a --xxx \t", "line: {tst a --xxx 1 }{}"),
 		],
 	},
 	Case {
 		name:  "rest arguments",
 		steps: &[
 			Eval("_tst () { _arguments '-a' '*::rest:{compadd - -b}' }"),
-			Test(
-				"tst arg -\t",
-				"line: {tst arg -b }{}",
-			),
+			Test("tst arg -\t", "line: {tst arg -b }{}"),
 		],
 	},
 	Case {
@@ -552,20 +478,14 @@ const CASES: &[Case] = &[
 		name:  "rest arguments with three colons following optional argument",
 		steps: &[
 			Eval("_tst () { _arguments '-a' '::more' '*:::rest:{ compadd - $words }' }"),
-			Test(
-				"tst -a opt rest \t",
-				"line: {tst -a opt rest rest }{}",
-			),
+			Test("tst -a opt rest \t", "line: {tst -a opt rest rest }{}"),
 		],
 	},
 	Case {
 		name:  "rest arguments with three colons following optional argument to an option",
 		steps: &[
 			Eval("_tst () { _arguments '-a::arg' '*:::rest:{ compadd - $words }' }"),
-			Test(
-				"tst -a opt rest \t",
-				"line: {tst -a opt rest rest }{}",
-			),
+			Test("tst -a opt rest \t", "line: {tst -a opt rest rest }{}"),
 		],
 	},
 	Case {
@@ -624,40 +544,28 @@ const CASES: &[Case] = &[
 		name:  "matcher in combination with sets (implies separate cadef structure)",
 		steps: &[
 			Eval("_tst () { _arguments '-M' 'm:{j}={y}' '-y' '-n' '-' 'set1' '-i' '-' 'set2' '-k' }"),
-			Test(
-				"tst -k -j\t",
-				"line: {tst -k -y }{}",
-			),
+			Test("tst -k -j\t", "line: {tst -k -y }{}"),
 		],
 	},
 	Case {
 		name:  "option after --",
 		steps: &[
 			Eval("_tst () { _arguments '-x' ':word' }"),
-			Test(
-				"tst -- -\t",
-				"line: {tst -- -x }{}",
-			),
+			Test("tst -- -\t", "line: {tst -- -x }{}"),
 		],
 	},
 	Case {
 		name:  "disallowed option after --",
 		steps: &[
 			Eval("_tst () { _arguments '-S' '-x' ':word:()' }"),
-			Test(
-				"tst -- -\t",
-				"line: {tst -- -}{}",
-			),
+			Test("tst -- -\t", "line: {tst -- -}{}"),
 		],
 	},
 	Case {
 		name:  "allowed option before --",
 		steps: &[
 			Eval("_tst () { _arguments '-S' '-x' ':word:()' }"),
-			Test(
-				"tst - --\x1bB\x02\t",
-				"line: {tst -x }{ --}",
-			),
+			Test("tst - --\x1bB\x02\t", "line: {tst -x }{ --}"),
 		],
 	},
 	Case {
@@ -675,10 +583,7 @@ const CASES: &[Case] = &[
 		name:  "option after a word",
 		steps: &[
 			Eval("_tst () { _arguments '-x' ':word' }"),
-			Test(
-				"tst word -\t",
-				"line: {tst word -x }{}",
-			),
+			Test("tst word -\t", "line: {tst word -x }{}"),
 		],
 	},
 	Case {
@@ -721,10 +626,7 @@ const CASES: &[Case] = &[
 		name:  "continue completion after rest argument that looks like an option",
 		steps: &[
 			Eval("_tst () { _arguments '-A' '-*' '-h' '-V' '-a' '*: :(-x more)' }"),
-			Test(
-				"tst -a -x m\t",
-				"line: {tst -a -x more }{}",
-			),
+			Test("tst -a -x m\t", "line: {tst -a -x more }{}"),
 		],
 	},
 	Case {
@@ -744,10 +646,7 @@ const CASES: &[Case] = &[
 		name:  "unrecognised word matching -A pattern not treated as a rest argument",
 		steps: &[
 			Eval("_tst () { _arguments '-A' '-*' '-a' '-b' '1:word:(word)' }"),
-			Test(
-				"tst -x \t",
-				"line: {tst -x word }{}",
-			),
+			Test("tst -x \t", "line: {tst -x word }{}"),
 		],
 	},
 	Case {
@@ -763,13 +662,7 @@ const CASES: &[Case] = &[
 	},
 	Case {
 		name:  "repeatable options",
-		steps: &[
-			Eval("_tst () { _arguments '*-v' }"),
-			Test(
-				"tst -v -\t",
-				"line: {tst -v -v }{}",
-			),
-		],
+		steps: &[Eval("_tst () { _arguments '*-v' }"), Test("tst -v -\t", "line: {tst -v -v }{}")],
 	},
 	Case {
 		name:  "rest arguments from another set not completed after option from first set",
@@ -951,10 +844,7 @@ const CASES: &[Case] = &[
 		name:  "single option sets are still mutually exclusive",
 		steps: &[
 			Eval("_tst () { _arguments '-x' '-' '(set1)' '-a' '-b' '-' '(set2)' '-m' '-n' }"),
-			Test(
-				"tst -m -\t",
-				"line: {tst -m -x }{}",
-			),
+			Test("tst -m -\t", "line: {tst -m -x }{}"),
 		],
 	},
 	Case {
@@ -1043,10 +933,7 @@ const CASES: &[Case] = &[
 		name:  "don't prematurely exclude option that current word is a prefix of (with sets)",
 		steps: &[
 			Eval("_tst () { _arguments '-s' '(set)-c' '-' 'set' '-conf' '-f' }"),
-			Test(
-				"tst -c\t",
-				"line: {tst -conf }{}",
-			),
+			Test("tst -c\t", "line: {tst -conf }{}"),
 		],
 	},
 	Case {
@@ -1151,10 +1038,7 @@ const CASES: &[Case] = &[
 		name:  "normal argument excludes options in internally mutually exclusive group",
 		steps: &[
 			Eval("_tst () { _arguments '(grp--m)-x' '+' '(grp)' '-a' '-b' '-c' ':val:(1 2 3)' }"),
-			Test(
-				"tst 1 -\t",
-				"line: {tst 1 -x }{}",
-			),
+			Test("tst 1 -\t", "line: {tst 1 -x }{}"),
 		],
 	},
 	Case {
@@ -1496,13 +1380,15 @@ fn c032_opt_args() {
 	run_case(&SUITE, 31);
 }
 
-/// opt_args with multiple arguments and quoting of colons and backslashes, part #1: default behaviour
+/// opt_args with multiple arguments and quoting of colons and backslashes, part
+/// #1: default behaviour
 #[test]
 fn c033_opt_args_with_multiple_arguments_and_quoting_of_colons_and_b() {
 	run_case(&SUITE, 32);
 }
 
-/// opt_args with multiple arguments and quoting of colons and backslashes, part #2: NUL escaping
+/// opt_args with multiple arguments and quoting of colons and backslashes, part
+/// #2: NUL escaping
 #[test]
 fn c034_opt_args_with_multiple_arguments_and_quoting_of_colons_and_b() {
 	run_case(&SUITE, 33);
@@ -1670,7 +1556,8 @@ fn c061_rest_arguments_from_another_set_not_completed_after_option_f() {
 	run_case(&SUITE, 60);
 }
 
-/// continue completion after rest argument that looks like an option (with sets)
+/// continue completion after rest argument that looks like an option (with
+/// sets)
 #[test]
 fn c062_continue_completion_after_rest_argument_that_looks_like_an_o() {
 	run_case(&SUITE, 61);
@@ -1778,7 +1665,8 @@ fn c079_don_t_prematurely_exclude_option_that_current_word_is_a_pref() {
 	run_case(&SUITE, 78);
 }
 
-/// don't prematurely exclude option that current word is a prefix of (with sets)
+/// don't prematurely exclude option that current word is a prefix of (with
+/// sets)
 #[test]
 fn c080_don_t_prematurely_exclude_option_that_current_word_is_a_pref() {
 	run_case(&SUITE, 79);

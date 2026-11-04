@@ -166,10 +166,14 @@ impl Keymap {
 			match std::mem::replace(&mut self.first[f], First::Prefix) {
 				First::Prefix => {},
 				First::Undefined => {
-					self.multi.insert(BString::from(vec![c]), Key { bind: None, prefixct: 0 });
+					self
+						.multi
+						.insert(BString::from(vec![c]), Key { bind: None, prefixct: 0 });
 				},
 				First::Bound(b) => {
-					self.multi.insert(BString::from(vec![c]), Key { bind: Some(b), prefixct: 0 });
+					self
+						.multi
+						.insert(BString::from(vec![c]), Key { bind: Some(b), prefixct: 0 });
 				},
 			}
 		} else {
@@ -229,7 +233,9 @@ impl Keymap {
 			k.bind = Some(bind);
 			return;
 		}
-		self.multi.insert(BString::from(seq), Key { bind: Some(bind), prefixct: 0 });
+		self
+			.multi
+			.insert(BString::from(seq), Key { bind: Some(bind), prefixct: 0 });
 		loop {
 			buf.pop();
 			if buf.is_empty() {
@@ -239,7 +245,9 @@ impl Keymap {
 				k.prefixct += 1;
 				break;
 			}
-			self.multi.insert(BString::from(buf.as_slice()), Key { bind: None, prefixct: 1 });
+			self
+				.multi
+				.insert(BString::from(buf.as_slice()), Key { bind: None, prefixct: 1 });
 		}
 	}
 
@@ -273,8 +281,11 @@ impl Keymap {
 	/// bindings are interleaved by their byte before the multi entries
 	/// whose first byte is higher.
 	pub fn scan_entries(&self, f: &mut dyn FnMut(&[u8], Option<&Bind>)) {
-		let mut keys: Vec<(Vec<u8>, &BString, &Key)> =
-			self.multi.iter().map(|(s, k)| (tok::metafy(s), s, k)).collect();
+		let mut keys: Vec<(Vec<u8>, &BString, &Key)> = self
+			.multi
+			.iter()
+			.map(|(s, k)| (tok::metafy(s), s, k))
+			.collect();
 		keys.sort_by(|a, b| ztrcmp(&a.0, &b.0).then_with(|| a.0.len().cmp(&b.0.len())));
 		let mut last: i32 = -1;
 		for (_, seq, k) in keys {
@@ -365,7 +376,9 @@ impl NameTab {
 	}
 
 	fn get(&self, name: &[u8]) -> Option<&KmName> {
-		self.nodes[self.bucket(name)].iter().find(|n| n.name.as_slice() == name)
+		self.nodes[self.bucket(name)]
+			.iter()
+			.find(|n| n.name.as_slice() == name)
 	}
 
 	fn get_mut(&mut self, name: &[u8]) -> Option<&mut KmName> {
@@ -396,7 +409,9 @@ impl NameTab {
 	/// zsh `removehashnode`.
 	fn remove(&mut self, name: &[u8]) -> Option<KmName> {
 		let b = self.bucket(name);
-		let i = self.nodes[b].iter().position(|n| n.name.as_slice() == name)?;
+		let i = self.nodes[b]
+			.iter()
+			.position(|n| n.name.as_slice() == name)?;
 		self.ct -= 1;
 		Some(self.nodes[b].remove(i))
 	}
@@ -550,7 +565,12 @@ impl Keymaps {
 
 	/// The names sorted as `bindkey -l` lists them.
 	pub fn sorted_names(&self) -> Vec<BString> {
-		self.names.sorted().into_iter().map(|n| n.name.clone()).collect()
+		self
+			.names
+			.sorted()
+			.into_iter()
+			.map(|n| n.name.clone())
+			.collect()
 	}
 
 	/// zsh `scankeymap(km, 1, …)` over the bound sequences of the keymap
@@ -619,7 +639,10 @@ impl Keymaps {
 		if self.unref_keymap(KmId(id)) == 0 {
 			return;
 		}
-		if !self.km(id).is_some_and(|k| k.primary.as_ref().is_some_and(|p| p.as_slice() == name)) {
+		if !self
+			.km(id)
+			.is_some_and(|k| k.primary.as_ref().is_some_and(|p| p.as_slice() == name))
+		{
 			return;
 		}
 		let primary = self
@@ -650,7 +673,9 @@ impl Keymaps {
 				n.km = id.0;
 			}
 		} else {
-			self.names.add(KmName { name: BString::from(name), immortal, km: id.0 });
+			self
+				.names
+				.add(KmName { name: BString::from(name), immortal, km: id.0 });
 		}
 		self.ref_by_name(id.0, name);
 		Ok(())
@@ -900,7 +925,11 @@ mod tests {
 	use super::*;
 
 	fn names(k: &Keymaps) -> String {
-		k.names().iter().map(ToString::to_string).collect::<Vec<_>>().join(" ")
+		k.names()
+			.iter()
+			.map(ToString::to_string)
+			.collect::<Vec<_>>()
+			.join(" ")
 	}
 
 	#[test]
@@ -910,7 +939,10 @@ mod tests {
 		for n in [&b"a"[..], b"b", b"c", b"d", b"e", b"f"] {
 			assert!(k.create(n, None, false).is_ok());
 		}
-		assert_eq!(names(&k), "vicmd command viins visual emacs a b c d .safe e f isearch viopp main");
+		assert_eq!(
+			names(&k),
+			"vicmd command viins visual emacs a b c d .safe e f isearch viopp main"
+		);
 		// zsh: bindkey -D a b; bindkey -d; print -l $keymaps
 		assert_eq!(k.unlink(b"a", false), Ok(()));
 		assert_eq!(k.unlink(b"b", false), Ok(()));

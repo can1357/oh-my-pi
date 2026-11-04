@@ -634,7 +634,11 @@ fn addwin(ctx: &mut Ctx<'_, '_>, c: &mut Curses, args: &[BString]) -> R {
 	let (nl, nc, by, bx) = (atoi(&args[1]), atoi(&args[2]), atoi(&args[3]), atoi(&args[4]));
 	let made = if let Some(parent) = args.get(5) {
 		let Some(p) = c.find(parent).filter(|_| !parent.is_empty()) else {
-			let e = if parent.is_empty() { ZcErr::Invalid } else { ZcErr::Undefined };
+			let e = if parent.is_empty() {
+				ZcErr::Invalid
+			} else {
+				ZcErr::Undefined
+			};
 			// zsh names the new window here, not the parent.
 			ctx.usage(format!("{}: {name}", e.text()));
 			return done(1);
@@ -690,7 +694,11 @@ fn colorget(ctx: &mut Ctx<'_, '_>, c: &mut Curses, spec: &[u8]) -> Option<i16> {
 	if !c.color {
 		return None;
 	}
-	let known = c.pair_names.iter().find(|(n, _)| n.as_slice() == spec).map(|p| p.1);
+	let known = c
+		.pair_names
+		.iter()
+		.find(|(n, _)| n.as_slice() == spec)
+		.map(|p| p.1);
 	if c.color_phase != 1
 		&& let Some(p) = known
 	{
@@ -845,7 +853,10 @@ fn querychar(ctx: &mut Ctx<'_, '_>, c: &mut Curses, args: &[BString]) -> R {
 			list.push(BString::from(n));
 		}
 	}
-	let name = args.get(1).cloned().unwrap_or_else(|| BString::from("reply"));
+	let name = args
+		.get(1)
+		.cloned()
+		.unwrap_or_else(|| BString::from("reply"));
 	match zx(ctx, |ex| params::assignaparam(ex, &name, list, 0))? {
 		Ok(()) => done(0),
 		Err(d) => super::zsh_args::zerr(ctx, d),
@@ -913,8 +924,17 @@ impl Reader {
 		if !self.fifo.is_empty() {
 			return Ok(Some(self.fifo.remove(0)));
 		}
-		let timeout_ns = u64::try_from(timeout_ms).ok().map(|ms| ms.saturating_mul(1_000_000));
-		let p = Probe::Input { fd: 0, delim: None, lines: 1, nchars: Some(1), part: self.part, timeout_ns };
+		let timeout_ns = u64::try_from(timeout_ms)
+			.ok()
+			.map(|ms| ms.saturating_mul(1_000_000));
+		let p = Probe::Input {
+			fd: 0,
+			delim: None,
+			lines: 1,
+			nchars: Some(1),
+			part: self.part,
+			timeout_ns,
+		};
 		self.part += 1;
 		Ok(match ctx.probe(p)? {
 			ProbeResult::Input { data, .. } => data.first().copied(),
@@ -985,7 +1005,9 @@ fn read_key(
 		let mut seq = vec![b0];
 		loop {
 			let exact = keys.iter().find(|k| k.0 == seq).map(|k| k.1.clone());
-			let longer = keys.iter().any(|k| k.0.len() > seq.len() && k.0.starts_with(&seq));
+			let longer = keys
+				.iter()
+				.any(|k| k.0.len() > seq.len() && k.0.starts_with(&seq));
 			let next = if longer { r.byte(ctx, escdelay)? } else { None };
 			match next {
 				Some(b) => seq.push(b),
@@ -1054,7 +1076,8 @@ mod mouse {
 	/// `REPORT_MOUSE_POSITION`.
 	pub const POSITION: u32 = 1 << 23;
 	/// zsh's event names, in `zcurses_mouse_event_list` order.
-	pub const KINDS: [&str; 5] = ["PRESSED", "RELEASED", "CLICKED", "DOUBLE_CLICKED", "TRIPLE_CLICKED"];
+	pub const KINDS: [&str; 5] =
+		["PRESSED", "RELEASED", "CLICKED", "DOUBLE_CLICKED", "TRIPLE_CLICKED"];
 }
 
 /// One mouse event (ncurses `MEVENT`).
@@ -1116,7 +1139,11 @@ fn parse_mouse(events: &mut [MouseEvent]) {
 	for i in 1..events.len() {
 		let (ep, next) = (events[i - 1], events[i]);
 		let presses = (1..=4).fold(0, |m, b| m | mouse::bit(b, mouse::PRESSED));
-		if !ep.valid || ep.x != next.x || ep.y != next.y || ep.bstate & presses == 0 || next.bstate & presses != 0
+		if !ep.valid
+			|| ep.x != next.x
+			|| ep.y != next.y
+			|| ep.bstate & presses == 0
+			|| next.bstate & presses != 0
 		{
 			continue;
 		}
@@ -1344,7 +1371,10 @@ fn input(ctx: &mut Ctx<'_, '_>, c: &mut Curses, args: &[BString]) -> R {
 		Got::Char(b) => (BString::from(b), BString::default()),
 		Got::Key(k) => (BString::default(), BString::from(k)),
 	};
-	let var = args.get(1).cloned().unwrap_or_else(|| BString::from("REPLY"));
+	let var = args
+		.get(1)
+		.cloned()
+		.unwrap_or_else(|| BString::from("REPLY"));
 	if let Err(d) = zx(ctx, |ex| params::assignsparam(ex, &var, &text, 0))? {
 		return super::zsh_args::zerr(ctx, d);
 	}
@@ -1373,11 +1403,20 @@ mod tests {
 			.iter()
 			.map(|&(b, x, y)| {
 				let bstate = decode_x10([b, x, y], &mut pressed);
-				MouseEvent { x: i32::from(x) - 33, y: i32::from(y) - 33, bstate, valid: bstate & mouse::BUTTONS != 0 }
+				MouseEvent {
+					x: i32::from(x) - 33,
+					y: i32::from(y) - 33,
+					bstate,
+					valid: bstate & mouse::BUTTONS != 0,
+				}
 			})
 			.collect();
 		parse_mouse(&mut events);
-		events.iter().filter(|e| e.valid).map(|e| (e.x, e.y, e.bstate)).collect()
+		events
+			.iter()
+			.filter(|e| e.valid)
+			.map(|e| (e.x, e.y, e.bstate))
+			.collect()
 	}
 
 	#[test]

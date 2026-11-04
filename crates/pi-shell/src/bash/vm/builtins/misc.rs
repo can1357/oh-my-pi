@@ -73,8 +73,9 @@ pub fn usable(
 	if disabled {
 		return Ok(None);
 	}
-	// A program's shell is a bash without readline ([`crate::bash::Profile::Tool`]):
-	// no programmable completion, no key bindings.
+	// A program's shell is a bash without readline
+	// ([`crate::bash::Profile::Tool`]): no programmable completion, no key
+	// bindings.
 	if matches!(
 		resolved,
 		Some(IntrinsicId::Compgen | IntrinsicId::Complete | IntrinsicId::Compopt | IntrinsicId::Bind)

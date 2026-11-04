@@ -35,7 +35,10 @@ use crate::bash::{
 /// The terminal capabilities of `$TERM` (zsh `init_term`), cached until
 /// `$TERM` changes.
 fn caps(ex: &mut Expander<'_, '_>, cache: &mut Option<(BString, Arc<TermCaps>)>) -> Arc<TermCaps> {
-	let term = params::getsparam(ex, b"TERM").ok().flatten().unwrap_or_default();
+	let term = params::getsparam(ex, b"TERM")
+		.ok()
+		.flatten()
+		.unwrap_or_default();
 	if let Some((t, c)) = cache.as_ref()
 		&& *t == term
 	{
@@ -116,8 +119,20 @@ fn env(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, zle: &mut Zle, ed: &Edit
 			.flatten()
 			.map(|v| params::parse_int(&v))
 	};
-	let tcols = if tcols > 0 { tcols as i64 } else if caps.tccolumns > 0 { i64::from(caps.tccolumns) } else { 80 };
-	let tlines = if tlines > 0 { tlines as i64 } else if caps.tclines > 0 { i64::from(caps.tclines) } else { 24 };
+	let tcols = if tcols > 0 {
+		tcols as i64
+	} else if caps.tccolumns > 0 {
+		i64::from(caps.tccolumns)
+	} else {
+		80
+	};
+	let tlines = if tlines > 0 {
+		tlines as i64
+	} else if caps.tclines > 0 {
+		i64::from(caps.tclines)
+	} else {
+		24
+	};
 	let columns = num(&mut ex, b"COLUMNS").filter(|&c| c > 0).unwrap_or(tcols);
 	let lines = num(&mut ex, b"LINES").filter(|&c| c > 0).unwrap_or(tlines);
 	let rprompt_indent = num(&mut ex, b"ZLE_RPROMPT_INDENT").unwrap_or(1);
@@ -154,8 +169,13 @@ pub fn expand_prompt(
 	cmdstack: &[&'static str],
 ) -> X<Expansion> {
 	let mut opt = |o| state::zsh_option(&mut ex.k.root, ex.cx.store, ex.vp, o);
-	let (percent, bang, subst) = (opt(ZshOpt::Promptpercent)?, opt(ZshOpt::Promptbang)?, opt(ZshOpt::Promptsubst)?);
-	let text = if subst { prompt_subst(ex, raw)? } else { raw.to_vec() };
+	let (percent, bang, subst) =
+		(opt(ZshOpt::Promptpercent)?, opt(ZshOpt::Promptbang)?, opt(ZshOpt::Promptsubst)?);
+	let text = if subst {
+		prompt_subst(ex, raw)?
+	} else {
+		raw.to_vec()
+	};
 	let site = ex.k.zsh_site(ex.cx, ex.vp, ex.line);
 	let mut env = prompt_env_ex(ex, site, percent, bang)?;
 	env.lastval = lastval;
@@ -174,7 +194,10 @@ fn reexpandprompt(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, ed: &mut Edit
 	// assigned since the line started (a hook's `RPS1=…; zle
 	// reset-prompt`) is what is expanded.
 	if let Some((l, r)) = ed.prompt_params {
-		ed.raw_lp = params::getsparam(&mut ex, l).ok().flatten().unwrap_or_default();
+		ed.raw_lp = params::getsparam(&mut ex, l)
+			.ok()
+			.flatten()
+			.unwrap_or_default();
 		ed.raw_rp = r
 			.and_then(|r| params::getsparam(&mut ex, r).ok().flatten())
 			.unwrap_or_default();
@@ -237,7 +260,8 @@ fn with_display(
 	}
 	if let Some(tty) = zle.tty.as_mut() {
 		if r.is_some_and(|r| r.setterm) || !tty.raw {
-			let flow = state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Flowcontrol).unwrap_or(true);
+			let flow =
+				state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Flowcontrol).unwrap_or(true);
 			tty.zsetterm(k, cx, flow);
 		}
 		tty.put(&out);
@@ -430,7 +454,13 @@ fn on_editor(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, f: impl FnOnce(&mu
 
 /// `zle -R [-c] [status]` (zsh `bin_zle_refresh` without a list): show
 /// `status` in the status line for this refresh and redisplay.
-pub fn zle_refresh(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, status: Option<&[u8]>, clear: bool) {
+pub fn zle_refresh(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+	status: Option<&[u8]>,
+	clear: bool,
+) {
 	on_editor(k, cx, vp, |zw| {
 		let saved = zw.ed.statusline.take();
 		let ocl = zw.zle.display.clearlist;
@@ -459,7 +489,8 @@ pub fn zle_refresh(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, status: Opti
 /// line is being edited (or shell code runs for the editor), and the
 /// caller writes the bytes itself.
 pub fn print_above(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, bytes: &[u8]) -> bool {
-	let editing = super::editor(vp).is_some_and(|ed| ed.in_widget == 0 && ed.tasks.iter().any(|s| s.root.is_some()));
+	let editing = super::editor(vp)
+		.is_some_and(|ed| ed.in_widget == 0 && ed.tasks.iter().any(|s| s.root.is_some()));
 	if !editing || vp.zle.as_ref().is_none_or(|z| z.tty.is_none()) {
 		return false;
 	}
@@ -480,8 +511,14 @@ pub fn print_above(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, bytes: &[u8]
 /// active, its standard error a terminal, gives the display up first (the
 /// next refresh draws the line again).
 pub fn trash_for_message(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
-	let live = vp.zle.as_ref().is_some_and(|z| z.ed.is_some() && !z.display.trashedzle);
-	if !live || vp.fds.get(2).and_then(crate::bash::fd::FdRef::kind) != Some(crate::bash::fs::FileKind::Tty) {
+	let live = vp
+		.zle
+		.as_ref()
+		.is_some_and(|z| z.ed.is_some() && !z.display.trashedzle);
+	if !live
+		|| vp.fds.get(2).and_then(crate::bash::fd::FdRef::kind)
+			!= Some(crate::bash::fs::FileKind::Tty)
+	{
 		return;
 	}
 	on_editor(k, cx, vp, |zw| {

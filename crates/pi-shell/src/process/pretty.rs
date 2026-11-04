@@ -3,9 +3,7 @@
 
 use std::io::{self, Write};
 
-use crate::bash::syntax::{
-	Features, NO_ALIASES, ParseError, ParseWarning, Parser, command_string,
-};
+use crate::bash::syntax::{Features, NO_ALIASES, ParseError, ParseWarning, Parser, command_string};
 
 /// The diagnostic prefix bash uses: `NAME: line N: ` (`NAME: -c: line N: `
 /// for a command string).
@@ -127,4 +125,3 @@ pub fn pretty_print(src: &[u8], argv0: &[u8]) -> u8 {
 		line_done = from == 0 || src[from - 1] == b'\n';
 	}
 }
-

@@ -119,7 +119,8 @@ fn strftime_reverse() {
 	);
 	let (out, ..) = dt("strftime -s v -r '%H:%M' 10:30; print $v; typeset -p v");
 	assert_eq!(out, "-2208951000\ntypeset -i v=-2208951000\n");
-	let (_, err, _) = dt("strftime -r '%Y %U' '2020 0'; strftime -r %z +01; strftime -r '%Y %Z' '2020 EST'");
+	let (_, err, _) =
+		dt("strftime -r '%Y %U' '2020 0'; strftime -r %z +01; strftime -r '%Y %Z' '2020 EST'");
 	assert_eq!(err, "zsh:strftime:1: format not matched\n".repeat(3));
 }
 

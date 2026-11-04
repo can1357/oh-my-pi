@@ -181,7 +181,8 @@ pub fn getindex(
 					while p < so {
 						p += text::charlen(&t, p, mb);
 					}
-					start = -i64::try_from(text::strlen_chars(tail(&t, p.min(t.len())), mb)).unwrap_or(0);
+					start =
+						-i64::try_from(text::strlen_chars(tail(&t, p.min(t.len())), mb)).unwrap_or(0);
 				}
 			}
 		}
@@ -878,7 +879,11 @@ fn getarg(
 				if tries(&pprog, tail(&d, t)) {
 					left -= 1;
 					if left == 0 {
-						let cl = if t < slen { text::charlen(&d, t, mb) } else { 1 };
+						let cl = if t < slen {
+							text::charlen(&d, t, mb)
+						} else {
+							1
+						};
 						let after = t + cl;
 						arg.prevlen = i64::try_from(cl).unwrap_or(1);
 						arg.nextlen = if after < slen {

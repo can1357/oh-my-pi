@@ -294,7 +294,8 @@ const PLAIN_FLAGS: [PmFlags; 23] = [
 ];
 
 /// Prompt specials (scalar-special), space separated.
-const PROMPTS: &[u8] = b"PS1 PS2 PS3 PS4 RPS1 RPS2 prompt PROMPT PROMPT2 PROMPT3 PROMPT4 RPROMPT RPROMPT2";
+const PROMPTS: &[u8] =
+	b"PS1 PS2 PS3 PS4 RPS1 RPS2 prompt PROMPT PROMPT2 PROMPT3 PROMPT4 RPROMPT RPROMPT2";
 
 /// The specials zsh leaves out when it starts emulating sh or ksh
 /// (`params.c` `special_params` past its first terminator).
@@ -308,11 +309,16 @@ const ZSH_START_ONLY: &[u8] = b"ARGC HISTCHARS status prompt PROMPT PROMPT2 PROM
 ///
 /// # Errors
 /// [`Stop::Store`] when the store fails.
-pub fn as_started(ex: &mut Expander<'_, '_>, sp: Option<Special>, name: &[u8]) -> X<Option<Special>> {
+pub fn as_started(
+	ex: &mut Expander<'_, '_>,
+	sp: Option<Special>,
+	name: &[u8],
+) -> X<Option<Special>> {
 	let Some(s) = sp else {
 		return Ok(None);
 	};
-	let affected = matches!(s, Special::TiedScalar(_)) || word_list(ZSH_START_ONLY).any(|n| n == name);
+	let affected =
+		matches!(s, Special::TiedScalar(_)) || word_list(ZSH_START_ONLY).any(|n| n == name);
 	if !affected
 		|| !matches!(
 			state::record(ex.cx.store, ex.vp, Key::Misc(MiscKey::ZshStartedSh))?,
@@ -425,8 +431,12 @@ pub fn lookup(name: &[u8]) -> Option<Special> {
 		b"exint" => Special::Example(ExParam::Int),
 		b"exstr" => Special::Example(ExParam::Str),
 		b"exarr" => Special::Example(ExParam::Arr),
-		b"zcurses_colors" | b"zcurses_attrs" | b"zcurses_keycodes" | b"zcurses_windows"
-		| b"ZCURSES_COLORS" | b"ZCURSES_COLOR_PAIRS" => Special::Curses(CursesParam::lookup(name)?),
+		b"zcurses_colors"
+		| b"zcurses_attrs"
+		| b"zcurses_keycodes"
+		| b"zcurses_windows"
+		| b"ZCURSES_COLORS"
+		| b"ZCURSES_COLOR_PAIRS" => Special::Curses(CursesParam::lookup(name)?),
 		_ => {
 			if let Some(t) = Tie::ALL.iter().find(|t| t.array().as_bytes() == name) {
 				return Some(Special::TiedArray(*t));
@@ -700,8 +710,10 @@ pub fn param(ex: &mut Expander<'_, '_>, sp: Special, name: &[u8]) -> X<Param> {
 	if let Special::Comp(cp) = sp {
 		// zsh/complete's are locals of the completion function
 		// (`makecompparams` at its level); `CURRENT` has base 10.
-		let nested = crate::bash::vm::zle::comp::comp(ex.vp).map_or(0, |c| c.complete.wraps.len().saturating_sub(1));
-		p.scope = state::func_scope(&ex.k.root, ex.cx.store, ex.vp)?.map(|s| s.saturating_sub(nested));
+		let nested = crate::bash::vm::zle::comp::comp(ex.vp)
+			.map_or(0, |c| c.complete.wraps.len().saturating_sub(1));
+		p.scope =
+			state::func_scope(&ex.k.root, ex.cx.store, ex.vp)?.map(|s| s.saturating_sub(nested));
 		if cp == crate::bash::vm::zle::comp::complete::Cp::Current {
 			p.base = 10;
 		}
@@ -729,7 +741,8 @@ pub fn make_local(ex: &mut Expander<'_, '_>, sp: Special, name: &[u8], scope: us
 	}
 	let Some(mut z) = state::scope_zsh(ex.cx.store, ex.vp, scope)? else {
 		return Err(Stop::Fail(Diag::Unsupported {
-			what: format!("local zsh special `{}' outside a zsh function", bstr::BStr::new(name)).into(),
+			what: format!("local zsh special `{}' outside a zsh function", bstr::BStr::new(name))
+				.into(),
 		}));
 	};
 	let mut attrs = Attrs::ZSH_LOCAL_SPECIAL;
@@ -786,7 +799,9 @@ pub fn restore_locals(ex: &mut Expander<'_, '_>) -> X<()> {
 			let (start, ty) = text.split_once_str(":").unwrap_or((text, &b"i"[..]));
 			if let Some(start) = std::str::from_utf8(start).ok().and_then(|s| s.parse().ok()) {
 				ex.k.start_ns = start;
-				ex.k.root.set_misc(ex.cx.store, MiscKey::StartNs, num(start));
+				ex.k
+					.root
+					.set_misc(ex.cx.store, MiscKey::StartNs, num(start));
 			}
 			let flags = match ty.first() {
 				Some(b'E') => PmFlags::EFLOAT,
@@ -968,8 +983,12 @@ pub fn get(ex: &mut Expander<'_, '_>, sp: Special) -> X<Option<PValue>> {
 		},
 		Special::Histsize | Special::Savehist => {
 			let save = sp == Special::Savehist;
-			let v =
-				crate::bash::vm::builtins::history::zsh::size_param(&mut ex.k.root, ex.cx.store, ex.vp, save)?;
+			let v = crate::bash::vm::builtins::history::zsh::size_param(
+				&mut ex.k.root,
+				ex.cx.store,
+				ex.vp,
+				save,
+			)?;
 			Ok(v.map(|v| PValue::Scalar(num(v))))
 		},
 		Special::Histchars => {
@@ -1161,9 +1180,9 @@ pub fn get(ex: &mut Expander<'_, '_>, sp: Special) -> X<Option<PValue>> {
 		Special::Jobstates | Special::Jobtexts | Special::Jobdirs => {
 			let platform = ex.k.engine.config().platform;
 			let jobbing = crate::bash::vm::jobctl::jobbing(ex.k, ex.cx);
-			Ok(Some(PValue::Hash(
-				crate::bash::vm::builtins::zsh_jobs::job_params(ex.vp, sp, jobbing, platform),
-			)))
+			Ok(Some(PValue::Hash(crate::bash::vm::builtins::zsh_jobs::job_params(
+				ex.vp, sp, jobbing, platform,
+			))))
 		},
 		Special::Nameddirs | Special::Userdirs => {
 			let users = sp == Special::Userdirs;
@@ -1330,7 +1349,10 @@ pub fn eval_context(vp: &crate::bash::vm::proc::Vproc) -> Vec<BString> {
 /// # Errors
 /// A parked probe, a store failure.
 pub fn fill_cmdnamtab(ex: &mut Expander<'_, '_>) -> X<()> {
-	use crate::bash::vm::{fsprobe::FsReq, proc::{Atom, Probe}};
+	use crate::bash::vm::{
+		fsprobe::FsReq,
+		proc::{Atom, Probe},
+	};
 	let path = state::lookup(&ex.k.root, ex.cx.store, ex.vp, b"PATH")?
 		.and_then(|v| v.as_scalar().map(BString::from))
 		.unwrap_or_default();
@@ -1340,7 +1362,8 @@ pub fn fill_cmdnamtab(ex: &mut Expander<'_, '_>) -> X<()> {
 	) {
 		return Ok(());
 	}
-	let exec_only = state::zsh_option(&mut ex.k.root, ex.cx.store, ex.vp, ZshOpt::Hashexecutablesonly)?;
+	let exec_only =
+		state::zsh_option(&mut ex.k.root, ex.cx.store, ex.vp, ZshOpt::Hashexecutablesonly)?;
 	// The next logged answer, or the probe that gets it.
 	let ask = |ex: &mut Expander<'_, '_>, probe: Probe| -> X<Atom> {
 		if let Some(atom) = ex.log.get(ex.cursor).cloned() {
@@ -1390,7 +1413,13 @@ pub fn fill_cmdnamtab(ex: &mut Expander<'_, '_>) -> X<()> {
 		state::store_record(&mut ex.k.root, ex.cx.store, ex.vp, KeyBuf::CmdHash(name), Some(rec));
 	}
 	let mark = Some(Record::Misc(path));
-	state::store_record(&mut ex.k.root, ex.cx.store, ex.vp, KeyBuf::Misc(MiscKey::ZshPathChecked), mark);
+	state::store_record(
+		&mut ex.k.root,
+		ex.cx.store,
+		ex.vp,
+		KeyBuf::Misc(MiscKey::ZshPathChecked),
+		mark,
+	);
 	Ok(())
 }
 
@@ -1428,7 +1457,11 @@ fn funcstack_levels(ex: &Expander<'_, '_>) -> Vec<FuncLevel> {
 			.filter(|&l| l != u32::MAX)
 			.unwrap_or(0)
 	};
-	let calls = ex.vp.calls.iter().filter(|c| !matches!(c.kind, CallKind::Args(_)));
+	let calls = ex
+		.vp
+		.calls
+		.iter()
+		.filter(|c| !matches!(c.kind, CallKind::Args(_)));
 	let mut out: Vec<FuncLevel> = Vec::new();
 	for c in calls {
 		let (caller, base) = match out.last() {
@@ -1438,7 +1471,13 @@ fn funcstack_levels(ex: &Expander<'_, '_>) -> Vec<FuncLevel> {
 					// A `.` file at the top: the script's name (`zsh` for a
 					// `-c` string).
 					CallKind::Source { .. } => {
-						match ex.vp.runs.front().and_then(|r| r.chain.links.first()).map(|l| &l.origin) {
+						match ex
+							.vp
+							.runs
+							.front()
+							.and_then(|r| r.chain.links.first())
+							.map(|l| &l.origin)
+						{
 							Some(Origin::File(path)) => path.clone(),
 							_ => BString::from("zsh"),
 						}
@@ -1652,7 +1691,8 @@ pub fn set(ex: &mut Expander<'_, '_>, sp: Special, name: &[u8], value: PValue) -
 			let stale: Vec<BString> = t
 				.entries()
 				.filter(|e| {
-					e.flags & super::nameddir::ND_USERNAME == 0 && !pairs.iter().any(|(k, _)| k.as_slice() == e.name)
+					e.flags & super::nameddir::ND_USERNAME == 0
+						&& !pairs.iter().any(|(k, _)| k.as_slice() == e.name)
 				})
 				.map(|e| BString::from(e.name))
 				.collect();
@@ -1722,7 +1762,9 @@ fn set_functions(ex: &mut Expander<'_, '_>, value: PValue) -> X<()> {
 		src.extend_from_slice(&body);
 		src.extend_from_slice(b"\n}");
 		let Some(mut f) = crate::bash::ir::function_from_source(&src, ex.vp.mode, feat) else {
-			ex.k.diag(ex.cx, ex.vp, ex.line, Diag::Warning { msg: "invalid function definition".into() });
+			ex.k.diag(ex.cx, ex.vp, ex.line, Diag::Warning {
+				msg: "invalid function definition".into(),
+			});
 			continue;
 		};
 		f.name = name;

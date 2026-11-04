@@ -65,7 +65,11 @@ fn group_text(s: &[u8], g: Option<&Range<usize>>) -> BString {
 ///
 /// # Errors
 /// A probe or store access to run first.
-pub fn cond_regex_match(ctx: &mut Ctx<'_, '_>, l: &[u8], r: &[u8]) -> Result<Result<bool, Diag>, Need> {
+pub fn cond_regex_match(
+	ctx: &mut Ctx<'_, '_>,
+	l: &[u8],
+	r: &[u8],
+) -> Result<Result<bool, Diag>, Need> {
 	let icase = !ctx.zsh_option(ZshOpt::Casematch)?;
 	let utf8_locale = locale::is_utf8(ctx.k, ctx.cx.store, ctx.vp);
 	let groups = match ere_match(r, l, icase, utf8_locale) {

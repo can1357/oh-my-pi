@@ -29,7 +29,10 @@ fn ok(out: &str) -> (String, String, i32) {
 
 #[test]
 fn regex_match_sets_match_variables() {
-	assert_eq!(zsh(r#"zmodload zsh/regex; [[ hello -regex-match "l+" ]]; echo $? $MATCH $MBEGIN $MEND"#), ok("0 ll 3 4\n"));
+	assert_eq!(
+		zsh(r#"zmodload zsh/regex; [[ hello -regex-match "l+" ]]; echo $? $MATCH $MBEGIN $MEND"#),
+		ok("0 ll 3 4\n")
+	);
 	assert_eq!(
 		zsh(r#"[[ xyz =~ "(q)?y" ]]; echo $? $MATCH "[$match]" "[$mbegin]" "[$mend]""#),
 		ok("0 y [] [-1] [-1]\n")
@@ -52,10 +55,15 @@ fn regex_match_counts_characters_in_the_locale() {
 #[test]
 fn regex_match_options() {
 	assert_eq!(
-		zsh(r#"setopt bashrematch; [[ abc =~ "(b)(x)?" ]]; echo $? ${#BASH_REMATCH} "${(q)BASH_REMATCH[@]}""#),
+		zsh(
+			r#"setopt bashrematch; [[ abc =~ "(b)(x)?" ]]; echo $? ${#BASH_REMATCH} "${(q)BASH_REMATCH[@]}""#
+		),
 		ok("0 3 b b ''\n")
 	);
-	assert_eq!(zsh(r#"[[ ABC =~ b ]]; echo $?; setopt nocasematch; [[ ABC =~ b ]]; echo $? $MATCH"#), ok("1\n0 B\n"));
+	assert_eq!(
+		zsh(r#"[[ ABC =~ b ]]; echo $?; setopt nocasematch; [[ ABC =~ b ]]; echo $? $MATCH"#),
+		ok("1\n0 B\n")
+	);
 	assert_eq!(
 		zsh(r#"setopt ksharrays; [[ abc =~ "(b)" ]]; echo $? $MBEGIN $MEND ${mbegin[0]} ${mend[0]}"#),
 		ok("0 1 1 1 1\n")
@@ -66,7 +74,9 @@ fn regex_match_options() {
 #[test]
 fn regex_groups_and_errors_are_the_c_librarys() {
 	assert_eq!(
-		zsh(r#"[[ abcd =~ "(a|ab)(c|bcd)(d*)" ]]; echo $? $MATCH $MBEGIN $MEND "[$match]" "[$mbegin]" "[$mend]""#),
+		zsh(
+			r#"[[ abcd =~ "(a|ab)(c|bcd)(d*)" ]]; echo $? $MATCH $MBEGIN $MEND "[$match]" "[$mbegin]" "[$mend]""#
+		),
 		ok("0 abcd 1 4 [ab c d] [1 3 4] [2 3 4]\n")
 	);
 	assert_eq!(
@@ -95,7 +105,9 @@ fn module_conditions_need_their_module() {
 		(String::new(), "zsh:1: unknown condition: -regex-match\n".into(), 2)
 	);
 	assert_eq!(
-		zsh(r#"zmodload zsh/regex; test hello -regex-match "^h"; echo $?; [ -regex-match a ]; echo $?"#),
+		zsh(
+			r#"zmodload zsh/regex; test hello -regex-match "^h"; echo $?; [ -regex-match a ]; echo $?"#
+		),
 		("0\n2\n".into(), "zsh:[:1: unknown condition: -regex-match\n".into(), 0)
 	);
 }
@@ -108,7 +120,11 @@ fn unknown_conditions() {
 		("[[ a -foo b ]]; echo notreached", "-foo"),
 		("[[ -foo a b c ]]; echo notreached", "-foo"),
 	] {
-		assert_eq!(zsh(src), (String::new(), format!("zsh:1: unknown condition: {name}\n"), 2), "{src}");
+		assert_eq!(
+			zsh(src),
+			(String::new(), format!("zsh:1: unknown condition: {name}\n"), 2),
+			"{src}"
+		);
 	}
 	assert_eq!(zsh("[[ -foo ]]; echo $?"), ok("0\n"));
 	assert_eq!(

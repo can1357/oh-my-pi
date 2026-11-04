@@ -69,18 +69,18 @@ struct EvalFact {
 #[derive(Default)]
 pub struct Walk {
 	/// Answers so far.
-	facts:  HashMap<Ask, Fact>,
+	facts:        HashMap<Ask, Fact>,
 	/// Questions still to ask, the first one in flight.
-	asking: VecDeque<Ask>,
+	asking:       VecDeque<Ask>,
 	/// Names read so far for an in-flight listing.
-	names:  Vec<BString>,
+	names:        Vec<BString>,
 	/// The answers to the probes of the colon modifiers (`(:A)`, `(:P)`,
 	/// `(:c)`), in the order the expansion asks them.
-	probes: Vec<Atom>,
+	probes:       Vec<Atom>,
 	/// Answers of the shell-code qualifiers.
-	evals:  HashMap<EvalAsk, EvalFact>,
+	evals:        HashMap<EvalAsk, EvalFact>,
 	/// Shell-code questions still to run, in the order the walk met them.
-	eval_asking: VecDeque<EvalAsk>,
+	eval_asking:  VecDeque<EvalAsk>,
 	/// The question whose code runs above the op's frame, with the `$?` to
 	/// restore when it is done.
 	eval_running: Option<(EvalAsk, i32)>,
@@ -850,19 +850,19 @@ enum Got<T> {
 
 /// One run of the scanner over the answers known so far.
 struct Run<'a> {
-	facts:   &'a HashMap<Ask, Fact>,
-	missing: Vec<Ask>,
-	evals:   &'a HashMap<EvalAsk, EvalFact>,
+	facts:        &'a HashMap<Ask, Fact>,
+	missing:      Vec<Ask>,
+	evals:        &'a HashMap<EvalAsk, EvalFact>,
 	/// Shell-code questions without an answer.
 	eval_missing: Vec<EvalAsk>,
 	/// zsh `inserts`: the words of the last shell-code qualifier run for
 	/// the file being inserted.
-	inserts: Option<Vec<Vec<u8>>>,
-	spec:    &'a Spec,
-	env:     crate::bash::pattern::zsh::CharEnv<'a>,
-	now:     i64,
-	matches: Vec<Gmatch>,
-	approx:  Approx,
+	inserts:      Option<Vec<Vec<u8>>>,
+	spec:         &'a Spec,
+	env:          crate::bash::pattern::zsh::CharEnv<'a>,
+	now:          i64,
+	matches:      Vec<Gmatch>,
+	approx:       Approx,
 }
 
 impl Run<'_> {
@@ -1132,10 +1132,14 @@ impl Run<'_> {
 		match self.inserts.take() {
 			Some(words) => {
 				for w in words {
-					self.matches.push(Gmatch { name: w, st, st2, ckey: Vec::new() });
+					self
+						.matches
+						.push(Gmatch { name: w, st, st2, ckey: Vec::new() });
 				}
 			},
-			None => self.matches.push(Gmatch { name, st, st2, ckey: Vec::new() }),
+			None => self
+				.matches
+				.push(Gmatch { name, st, st2, ckey: Vec::new() }),
 		}
 	}
 
@@ -1145,7 +1149,9 @@ impl Run<'_> {
 		let mode = i64::from(st.mode & 0o7777);
 		Some(match q.func {
 			QFunc::Eval => {
-				let code = usize::try_from(q.data).ok().and_then(|i| self.spec.evals.get(i))?;
+				let code = usize::try_from(q.data)
+					.ok()
+					.and_then(|i| self.spec.evals.get(i))?;
 				let ask = (code.clone(), shown.to_vec());
 				match self.evals.get(&ask) {
 					Some(f) => {
@@ -1556,7 +1562,9 @@ fn glob_words(
 		let inserts = eval_inserts(&mut Expander::new(k, cx, vp, &mut log, false, line));
 		match inserts {
 			Ok(inserts) => {
-				walk.evals.insert(ask, EvalFact { ok: status == 0, inserts });
+				walk
+					.evals
+					.insert(ask, EvalFact { ok: status == 0, inserts });
 			},
 			Err(stop) => {
 				if let Some(f) = vp.frames.last_mut() {
@@ -1598,7 +1606,14 @@ fn glob_words(
 			let mut ex = Expander::new(k, cx, vp, &mut log, false, line);
 			let mut r = Ok(());
 			for (_, pattern) in globs {
-				match zglob_one(&mut ex, pattern, &walk.facts, &mut missing, &walk.evals, &mut eval_missing) {
+				match zglob_one(
+					&mut ex,
+					pattern,
+					&walk.facts,
+					&mut missing,
+					&walk.evals,
+					&mut eval_missing,
+				) {
 					Ok(Some(g)) => words.push(g),
 					Ok(None) => words.push(Globbed::CshFail),
 					Err(e) => {

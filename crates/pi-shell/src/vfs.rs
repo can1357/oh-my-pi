@@ -330,7 +330,8 @@ impl Fs for VfsFs {
 			path,
 			|| StdFs::default().mkdir(path, mode),
 			move |fs, path| async move {
-				fs.create_dir_with(&path, &pi_vfs::DirOptions::new().mode(mode)).await
+				fs.create_dir_with(&path, &pi_vfs::DirOptions::new().mode(mode))
+					.await
 			},
 		)
 	}
@@ -354,7 +355,13 @@ impl Fs for VfsFs {
 		)
 	}
 
-	fn chown(&mut self, path: &BStr, uid: Option<u32>, gid: Option<u32>, follow: bool) -> FsPoll<()> {
+	fn chown(
+		&mut self,
+		path: &BStr,
+		uid: Option<u32>,
+		gid: Option<u32>,
+		follow: bool,
+	) -> FsPoll<()> {
 		self.route(
 			path,
 			|| StdFs::default().chown(path, uid, gid, follow),
@@ -424,7 +431,10 @@ impl Fs for VfsFs {
 		)
 	}
 
-	fn user_db(&mut self, query: &crate::bash::fs::PwQuery) -> FsPoll<Vec<crate::bash::fs::PwEntry>> {
+	fn user_db(
+		&mut self,
+		query: &crate::bash::fs::PwQuery,
+	) -> FsPoll<Vec<crate::bash::fs::PwEntry>> {
 		// The account database is the host's whatever filesystem is mounted.
 		StdFs::default().user_db(query)
 	}

@@ -1,7 +1,7 @@
-//! zsh 5.9 `Test/Y01completion.ztst` (completion system) through the port of its `comptest`
-//! harness (`comp_support::comptest`): obash runs as `zsh -f +Z` on a pty,
-//! with zsh 5.9's installed completion functions, and every `comptest`
-//! report must equal zsh's.
+//! zsh 5.9 `Test/Y01completion.ztst` (completion system) through the port of
+//! its `comptest` harness (`comp_support::comptest`): obash runs as `zsh -f +Z`
+//! on a pty, with zsh 5.9's installed completion functions, and every
+//! `comptest` report must equal zsh's.
 //!
 //! The steps and reports below were recorded by running the `.ztst` file
 //! under `/bin/zsh` 5.9 with `comptest` wrapped to log each `comptesteval`,
@@ -35,8 +35,7 @@ const PREP: &[Step] = &[
 const CASES: &[Case] = &[
 	Case {
 		name:  "directories and files",
-		steps: &[
-			Test(
+		steps: &[Test(
 				": \t\t\t\t\t\t\t",
 				"line: {: }{}\n\
 				 DESCRIPTION:{file}\n\
@@ -55,8 +54,7 @@ const CASES: &[Case] = &[
 	},
 	Case {
 		name:  "_expand shows file types",
-		steps: &[
-			Test(
+		steps: &[Test(
 				": *\t\t\t\t\t\t",
 				"line: {: dir1/}{}\n\
 				 DESCRIPTION:{expansions}\n\
@@ -110,8 +108,7 @@ const CASES: &[Case] = &[
 	},
 	Case {
 		name:  "directories and files before separator",
-		steps: &[
-			Test(
+		steps: &[Test(
 				"echo ;:\x02\x02\t",
 				"line: {echo }{;:}\n\
 				 DESCRIPTION:{file}\n\
@@ -141,28 +138,15 @@ const CASES: &[Case] = &[
 	},
 	Case {
 		name:  "command",
-		steps: &[
-			Eval("path=( @SRCDIR@ )"),
-			Test(
-				"zt\t",
-				"line: {ztst.zsh }{}",
-			),
-		],
+		steps: &[Eval("path=( @SRCDIR@ )"), Test("zt\t", "line: {ztst.zsh }{}")],
 	},
 	Case {
 		name:  "command after separator",
-		steps: &[
-			Eval("path=( @SRCDIR@ )"),
-			Test(
-				":;zt\t",
-				"line: {:;ztst.zsh }{}",
-			),
-		],
+		steps: &[Eval("path=( @SRCDIR@ )"), Test(":;zt\t", "line: {:;ztst.zsh }{}")],
 	},
 	Case {
 		name:  "redirection after \"for ...; do\"",
-		steps: &[
-			Test(
+		steps: &[Test(
 				"for f in 1; do < x\x02\x02\t",
 				"line: {for f in 1; do <}{ x}\n\
 				 DESCRIPTION:{file}\n\
@@ -183,10 +167,7 @@ const CASES: &[Case] = &[
 				 line: {cd \"A(B)/C/}{}",
 			),
 			Eval("cd \"A(B)/C\""),
-			Test(
-				"cd ../\t",
-				"line: {cd ../C/}{}",
-			),
+			Test("cd ../\t", "line: {cd ../C/}{}"),
 			Eval("cd -"),
 			Outer(&["rmdir", "A(B)/C", "A(B)"]),
 		],
@@ -239,27 +220,30 @@ const CASES: &[Case] = &[
 		name:  "allow for suffixes when moving cursor to end of match (with ignored suffix)",
 		steps: &[
 			Eval("_tst() { compadd -U -s : -S / -I . word; compstate[to_end]= }"),
-			Test(
-				"tst .\x02\t",
-				"line: {tst word:/}{.}",
-			),
+			Test("tst .\x02\t", "line: {tst word:/}{.}"),
 		],
 	},
 	Case {
 		name:  "allow for suffixes when moving cursor to end of match (without ignored suffix)",
 		steps: &[
 			Eval("_tst() { compadd -s : -S / word; compstate[to_end]= }"),
-			Test(
-				"tst \t",
-				"line: {tst word:/}{}",
-			),
+			Test("tst \t", "line: {tst word:/}{}"),
 		],
 	},
 	Case {
 		name:  "ignore backslashes when sorting completion matches",
 		steps: &[
 			Outer(&["mkdir", "sortnobslash"]),
-			Outer(&["touch", "sortnobslash/!foo", "sortnobslash/#foo", "sortnobslash/\\foo", "sortnobslash/|foo", "sortnobslash/~foo", "sortnobslash/Afoo", "sortnobslash/bfoo"]),
+			Outer(&[
+				"touch",
+				"sortnobslash/!foo",
+				"sortnobslash/#foo",
+				"sortnobslash/\\foo",
+				"sortnobslash/|foo",
+				"sortnobslash/~foo",
+				"sortnobslash/Afoo",
+				"sortnobslash/bfoo",
+			]),
 			Eval("old_LC_ALL=$LC_ALL; LC_ALL=C"),
 			Test(
 				": sortnobslash/\t",
@@ -295,7 +279,9 @@ const CASES: &[Case] = &[
 	Case {
 		name:  "reverse numeric sorting of matches via a style",
 		steps: &[
-			Eval("_tst() { local expl; _wanted times expl time compadd -o match r1.10 r1.2 r2.3 r2.34 }"),
+			Eval(
+				"_tst() { local expl; _wanted times expl time compadd -o match r1.10 r1.2 r2.3 r2.34 }",
+			),
 			Eval("zstyle ':completion:*:tst:*' sort reverse numeric"),
 			Test(
 				"tst r\t",
@@ -354,8 +340,7 @@ const CASES: &[Case] = &[
 	},
 	Case {
 		name:  "multiple envarrays",
-		steps: &[
-			Test(
+		steps: &[Test(
 				"a=() b=(\t",
 				"line: {a=() b=(}{}\n\
 				 DESCRIPTION:{file}\n\
@@ -415,7 +400,9 @@ const CASES: &[Case] = &[
 	Case {
 		name:  " menu select=long-list starts menu selection for list widgets",
 		steps: &[
-			Eval("_tst() { local disp=( {a..z} ); compadd -ld disp $disp[@]; comppostfuncs=( _pst ) }"),
+			Eval(
+				"_tst() { local disp=( {a..z} ); compadd -ld disp $disp[@]; comppostfuncs=( _pst ) }",
+			),
 			Eval("_pst() { local disp=( \"<INSERT>$compstate[insert]</INSERT>\" ); compadd -Qld disp $disp }"),
 			Eval("zstyle ':completion:*' menu select=long-list"),
 			Eval("export LC_ALL=C"),
@@ -454,7 +441,8 @@ const CASES: &[Case] = &[
 	},
 ];
 
-const SUITE: Suite = Suite { file: "Y01completion.ztst", lang: "en_US.UTF-8", prep: PREP, cases: CASES };
+const SUITE: Suite =
+	Suite { file: "Y01completion.ztst", lang: "en_US.UTF-8", prep: PREP, cases: CASES };
 
 /// directories and files
 #[test]
@@ -546,7 +534,8 @@ fn c015_allow_for_suffixes_when_moving_cursor_to_end_of_match_with_i() {
 	run_case(&SUITE, 14);
 }
 
-/// allow for suffixes when moving cursor to end of match (without ignored suffix)
+/// allow for suffixes when moving cursor to end of match (without ignored
+/// suffix)
 #[test]
 fn c016_allow_for_suffixes_when_moving_cursor_to_end_of_match_withou() {
 	run_case(&SUITE, 15);
@@ -626,8 +615,10 @@ fn comptest_report_parser() {
 	let log = "junk<WIDGET><complete-word>\r\n<DESCRIPTION>file</DESCRIPTION>\r\n\
 	           <LC><DI><RC>dir1<EC>\n  <LC><FI><RC>a\x1b[K<EC>\n<LC><TC><RC>x<EC>\n<LC><NO><RC>  <EC>\n\
 	           <LBUFFER>: </LBUFFER>\r\n<RBUFFER></RBUFFER>\r\n<WIDGET><finish>\r\n";
-	assert_eq!(
-		comp_support::comptest::report(log),
-		["line: {: }{}", "DESCRIPTION:{file}", "DI:{dir1}", "FI:{a}"]
-	);
+	assert_eq!(comp_support::comptest::report(log), [
+		"line: {: }{}",
+		"DESCRIPTION:{file}",
+		"DI:{dir1}",
+		"FI:{a}"
+	]);
 }

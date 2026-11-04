@@ -101,7 +101,9 @@ impl Session {
 		fs::write(&file, format!("{}\n", text.replace(SRCDIR, &srcdir.display().to_string())))?;
 		let path = file.display().to_string();
 		assert!(
-			path.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b)),
+			path
+				.bytes()
+				.all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b)),
 			"temporary path needs quoting: {path}"
 		);
 		self.pty.write(format!(". {path}\n"))?;
@@ -304,12 +306,22 @@ fn outer(work: &Path, argv: &[&str]) -> io::Result<()> {
 	match argv {
 		["mkdir", dirs @ ..] => dirs.iter().try_for_each(|d| fs::create_dir(work.join(d))),
 		["touch", files @ ..] => files.iter().try_for_each(|f| {
-			fs::OpenOptions::new().create(true).append(true).open(work.join(f)).map(drop)
+			fs::OpenOptions::new()
+				.create(true)
+				.append(true)
+				.open(work.join(f))
+				.map(drop)
 		}),
 		["rmdir", dirs @ ..] => dirs.iter().try_for_each(|d| fs::remove_dir(work.join(d))),
 		["rm", "-rf", paths @ ..] => paths.iter().try_for_each(|p| {
 			let p = work.join(p);
-			if p.is_dir() { fs::remove_dir_all(p) } else if p.exists() { fs::remove_file(p) } else { Ok(()) }
+			if p.is_dir() {
+				fs::remove_dir_all(p)
+			} else if p.exists() {
+				fs::remove_file(p)
+			} else {
+				Ok(())
+			}
 		}),
 		_ => panic!("unsupported file operation {argv:?}"),
 	}
@@ -350,10 +362,19 @@ pub fn run_case(suite: &Suite, index: usize) {
 /// Start the session, replay the preparation and the earlier cases'
 /// evaluations and file operations (consecutive evaluations as one file),
 /// then run the case, appending each differing report to `failures`.
-fn drive(suite: &Suite, index: usize, root: &Path, fpath: &str, failures: &mut String) -> io::Result<()> {
+fn drive(
+	suite: &Suite,
+	index: usize,
+	root: &Path,
+	fpath: &str,
+	failures: &mut String,
+) -> io::Result<()> {
 	let work = root.join("comp.tmp");
 	let mut session = Session::start(suite, root, fpath)?;
-	let earlier = suite.prep.iter().chain(suite.cases[..index].iter().flat_map(|c| c.steps));
+	let earlier = suite
+		.prep
+		.iter()
+		.chain(suite.cases[..index].iter().flat_map(|c| c.steps));
 	let mut batch = String::new();
 	for step in earlier {
 		match step {

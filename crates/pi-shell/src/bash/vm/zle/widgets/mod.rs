@@ -30,7 +30,10 @@ use super::{
 	display,
 	exec::WidgetFn,
 	hist,
-	wflags::{ISCOMP, KEEPSUFFIX, KILL, LASTCOL, LINEMOVE, MENUCMP, NOLAST, NOTCOMMAND, VIOPER, YANKAFTER, YANKBEFORE},
+	wflags::{
+		ISCOMP, KEEPSUFFIX, KILL, LASTCOL, LINEMOVE, MENUCMP, NOLAST, NOTCOMMAND, VIOPER, YANKAFTER,
+		YANKBEFORE,
+	},
 };
 
 /// A builtin widget: an entry of zsh's `iwidgets.list`.
@@ -108,7 +111,11 @@ pub static BUILTINS: &[Builtin] = &[
 	b("expand-cmd-path", 0, Some(tricky::expandcmdpath)),
 	b("expand-history", 0, Some(edit::expandhistory)),
 	b("expand-or-complete", MENUCMP | KEEPSUFFIX | ISCOMP, Some(tricky::expandorcomplete)),
-	b("expand-or-complete-prefix", MENUCMP | KEEPSUFFIX | ISCOMP, Some(tricky::expandorcompleteprefix)),
+	b(
+		"expand-or-complete-prefix",
+		MENUCMP | KEEPSUFFIX | ISCOMP,
+		Some(tricky::expandorcompleteprefix),
+	),
 	b("expand-word", 0, Some(tricky::expandword)),
 	b("forward-char", 0, Some(motion::forwardchar)),
 	b("forward-word", 0, Some(word::forwardword)),
@@ -118,8 +125,16 @@ pub static BUILTINS: &[Builtin] = &[
 	b("history-beginning-search-forward", 0, Some(hist_search::historybeginningsearchforward)),
 	b("history-incremental-search-backward", 0, Some(isearch::historyincrementalsearchbackward)),
 	b("history-incremental-search-forward", 0, Some(isearch::historyincrementalsearchforward)),
-	b("history-incremental-pattern-search-backward", 0, Some(isearch::historyincrementalpatternsearchbackward)),
-	b("history-incremental-pattern-search-forward", 0, Some(isearch::historyincrementalpatternsearchforward)),
+	b(
+		"history-incremental-pattern-search-backward",
+		0,
+		Some(isearch::historyincrementalpatternsearchbackward),
+	),
+	b(
+		"history-incremental-pattern-search-forward",
+		0,
+		Some(isearch::historyincrementalpatternsearchforward),
+	),
 	b("history-search-backward", 0, Some(hist_search::historysearchbackward)),
 	b("history-search-forward", 0, Some(hist_search::historysearchforward)),
 	b("infer-next-history", 0, Some(hist_search::infernexthistory)),
@@ -148,7 +163,11 @@ pub static BUILTINS: &[Builtin] = &[
 	b("recursive-edit", MENUCMP | KEEPSUFFIX | LASTCOL, Some(display::recursive_edit)),
 	b("redisplay", MENUCMP | KEEPSUFFIX | LASTCOL, Some(display::redisplay)),
 	b("redo", KEEPSUFFIX, Some(misc::redo)),
-	b("reset-prompt", MENUCMP | KEEPSUFFIX | LASTCOL | NOTCOMMAND | NOLAST, Some(display::reset_prompt)),
+	b(
+		"reset-prompt",
+		MENUCMP | KEEPSUFFIX | LASTCOL | NOTCOMMAND | NOLAST,
+		Some(display::reset_prompt),
+	),
 	b("reverse-menu-complete", MENUCMP | KEEPSUFFIX | ISCOMP, Some(tricky::reversemenucomplete)),
 	b("run-help", MENUCMP | KEEPSUFFIX | LASTCOL, Some(edit::processcmd)),
 	b("select-a-word", KEEPSUFFIX, Some(textobjects::selectword)),
@@ -168,7 +187,11 @@ pub static BUILTINS: &[Builtin] = &[
 	b("transpose-words", 0, Some(word::transposewords)),
 	b("undefined-key", 0, Some(misc::undefinedkey)),
 	b("undo", KEEPSUFFIX, Some(misc::undo)),
-	b("universal-argument", MENUCMP | KEEPSUFFIX | LASTCOL | NOTCOMMAND, Some(args::universalargument)),
+	b(
+		"universal-argument",
+		MENUCMP | KEEPSUFFIX | LASTCOL | NOTCOMMAND,
+		Some(args::universalargument),
+	),
 	b("up-case-word", 0, Some(word::upcaseword)),
 	b("up-history", 0, Some(hist::up_history)),
 	b("up-line", LINEMOVE | LASTCOL, Some(motion::upline)),

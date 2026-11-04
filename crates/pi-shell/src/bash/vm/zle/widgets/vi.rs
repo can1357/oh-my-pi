@@ -402,7 +402,10 @@ fn range_after(zw: &mut Zw<'_, '_>, r: Range, next: RangeNext) -> WResult {
 		return next(zw, None);
 	}
 	// Nor is one that failed or did not move (an empty line has no range).
-	if ed.line.is_empty() || (ed.cs == r.pos && (ed.mark == NOMARK || ed.mark == ed.cs) && !r.lines) || r.failed {
+	if ed.line.is_empty()
+		|| (ed.cs == r.pos && (ed.mark == NOMARK || ed.mark == ed.cs) && !r.lines)
+		|| r.failed
+	{
 		ed.mark = r.mpos;
 		ed.ls.virangeflag = false;
 		return next(zw, None);
@@ -463,7 +466,8 @@ fn dovilinerange(ed: &mut Editor, r: &mut Range) -> bool {
 	if n > 0 {
 		while n > 0 && cs <= len {
 			n -= 1;
-			cs = i64::try_from(utils::findeol_at(&ed.line, pos_of(&ed.line, cs))).unwrap_or(i64::MAX) + 1;
+			cs = i64::try_from(utils::findeol_at(&ed.line, pos_of(&ed.line, cs))).unwrap_or(i64::MAX)
+				+ 1;
 		}
 		if n != 0 {
 			ed.cs = pos;
@@ -632,7 +636,9 @@ pub fn viyank(zw: &mut Zw<'_, '_>) -> WResult {
 		let ed = &mut *zw.ed;
 		if ed.ls.vilinerange && ed.ls.lastcol != -1 {
 			let x = utils::findeol(ed);
-			ed.cs = ed.cs.saturating_add(usize::try_from(ed.ls.lastcol).unwrap_or(0));
+			ed.cs = ed
+				.cs
+				.saturating_add(usize::try_from(ed.ls.lastcol).unwrap_or(0));
 			if ed.cs >= x {
 				ed.cs = x;
 				if ed.cs > utils::findbol(ed) && invicmdmode(ed) {
@@ -792,7 +798,8 @@ pub fn virepeatchange(zw: &mut Zw<'_, '_>) -> WResult {
 	}
 	if ed.zmod.flags & modflags::VIBUF != 0 {
 		last.zmod.vibuf = ed.zmod.vibuf;
-		last.zmod.flags = (last.zmod.flags & !modflags::VIAPP) | modflags::VIBUF | (ed.zmod.flags & modflags::VIAPP);
+		last.zmod.flags =
+			(last.zmod.flags & !modflags::VIAPP) | modflags::VIBUF | (ed.zmod.flags & modflags::VIAPP);
 	} else if last.zmod.flags & modflags::VIBUF != 0 && (27..=34).contains(&last.zmod.vibuf) {
 		last.zmod.vibuf += 1;
 	}
@@ -905,8 +912,15 @@ mod tests {
 	#[test]
 	fn line_counts() {
 		let mut e = ed("one\ntwo\nthree", 5);
-		let mut r =
-			Range { pos: 5, mpos: 0, visual: 0, mult1: 1, hist1: 0, failed: false, lines: false };
+		let mut r = Range {
+			pos:    5,
+			mpos:   0,
+			visual: 0,
+			mult1:  1,
+			hist1:  0,
+			failed: false,
+			lines:  false,
+		};
 		e.zmod.mult = 2;
 		assert!(!dovilinerange(&mut e, &mut r));
 		// The end of "three" (zsh's cursor one past it, moved back).

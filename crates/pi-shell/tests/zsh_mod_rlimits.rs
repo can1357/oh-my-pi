@@ -51,8 +51,12 @@ fn host_nofile() -> (libc::rlim_t, libc::rlim_t) {
 
 #[test]
 fn zsh_mod_rlimits_listings_match_zsh() {
-	same_as_zsh("limit; limit -h; ulimit -a; ulimit -Ha; ulimit; ulimit -n; ulimit -c -n; ulimit -tn");
-	same_as_zsh("limit descriptors; limit -h stacksize; limit 3; limit c; ulimit -N 3; ulimit -s -n");
+	same_as_zsh(
+		"limit; limit -h; ulimit -a; ulimit -Ha; ulimit; ulimit -n; ulimit -c -n; ulimit -tn",
+	);
+	same_as_zsh(
+		"limit descriptors; limit -h stacksize; limit 3; limit c; ulimit -N 3; ulimit -s -n",
+	);
 }
 
 #[test]
@@ -71,10 +75,12 @@ fn zsh_mod_rlimits_children_see_the_limits() {
 	let (out, err, st) =
 		obash_zsh("limit descriptors 100; limit descriptors; ulimit -n; sh -c 'ulimit -n'");
 	assert_eq!((out.as_str(), err.as_str(), st), ("descriptors     100\n100\n100\n", "", 0));
-	let (out, err, st) = obash_zsh("ulimit -n 64; ulimit -n; sh -c 'ulimit -n'; (sh -c 'ulimit -n')");
-	assert_eq!((out.as_str(), err.as_str(), st), ("64\n64\n64\n", "", 0));
 	let (out, err, st) =
-		obash_zsh("(limit descriptors 99; sh -c 'ulimit -n'); limit -s descriptors 98; sh -c 'ulimit -n'");
+		obash_zsh("ulimit -n 64; ulimit -n; sh -c 'ulimit -n'; (sh -c 'ulimit -n')");
+	assert_eq!((out.as_str(), err.as_str(), st), ("64\n64\n64\n", "", 0));
+	let (out, err, st) = obash_zsh(
+		"(limit descriptors 99; sh -c 'ulimit -n'); limit -s descriptors 98; sh -c 'ulimit -n'",
+	);
 	assert_eq!((out.as_str(), err.as_str(), st), ("99\n98\n", "", 0));
 	assert_eq!(host_nofile(), before, "the engine's own limits are untouched");
 }
@@ -86,7 +92,9 @@ fn zsh_mod_rlimits_shell_and_child_hard_limits_match_zsh() {
 	same_as_zsh("limit -h descriptors 100; limit -h descriptors 200; limit -h descriptors; echo $?");
 	same_as_zsh("ulimit -n 100; ulimit -Hn 50; ulimit -n; ulimit -Hn; echo $?");
 	same_as_zsh("ulimit -Sn 100 -Hn 200; echo $?; ulimit -n -Hn");
-	same_as_zsh("ulimit -n 64; ulimit -Sn hard; ulimit -n; ulimit -n 64; ulimit -n unlimited; echo $?");
+	same_as_zsh(
+		"ulimit -n 64; ulimit -Sn hard; ulimit -n; ulimit -n 64; ulimit -n unlimited; echo $?",
+	);
 	same_as_zsh("limit -s descriptors 100; limit -s -h descriptors 90; echo $?; limit descriptors");
 	same_as_zsh("limit -h descriptors 100; limit descriptors 200; echo $?; unlimit descriptors; limit descriptors");
 	same_as_zsh("limit -s; echo $?; unlimit; echo $?; unlimit -h; echo $?");

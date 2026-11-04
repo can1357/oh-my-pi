@@ -76,8 +76,8 @@ pub const LC_FOLLOW_SYMLINKS: i32 = 0x0001;
 
 /// zsh `colnames`.
 pub const COLNAMES: [&str; NUM_COLS] = [
-	"no", "fi", "di", "ln", "pi", "so", "bd", "cd", "or", "mi", "su", "sg", "tw", "ow", "st", "ex", "lc", "rc",
-	"ec", "tc", "sp", "ma", "hi", "du", "sa",
+	"no", "fi", "di", "ln", "pi", "so", "bd", "cd", "or", "mi", "su", "sg", "tw", "ow", "st", "ex",
+	"lc", "rc", "ec", "tc", "sp", "ma", "hi", "du", "sa",
 ];
 
 /// zsh `defcols`.
@@ -232,7 +232,9 @@ fn getcolval(s: &[u8], mut i: usize, multi: bool) -> (Vec<u8>, usize) {
 fn patcompile(raw: &[u8], opts: &Opts) -> Option<Arc<Pattern>> {
 	let mut t = metafy(raw);
 	tokenize(&mut t);
-	Pattern::compile(&t, PatFlags::NONE, opts).ok().map(Arc::new)
+	Pattern::compile(&t, PatFlags::NONE, opts)
+		.ok()
+		.map(Arc::new)
 }
 
 /// zsh `getcoldef(s)`: parse the definition at `s[i]` into `mc`; the
@@ -335,16 +337,18 @@ fn getcoldef(mc: &mut Listcols, s: &[u8], mut i: usize, opts: &Opts) -> usize {
 			let name = &s[n..i];
 			i += 1;
 			let idx = COLNAMES.iter().position(|c| c.as_bytes() == name);
-			if idx == Some(COL_LN)
-				&& s[i..].starts_with(b"target")
-				&& matches!(at(s, i + 6), b':' | 0)
+			if idx == Some(COL_LN) && s[i..].starts_with(b"target") && matches!(at(s, i + 6), b':' | 0)
 			{
 				mc.flags |= LC_FOLLOW_SYMLINKS;
 				return i + 6;
 			}
 			let (col, mut p) = getcolval(s, i, false);
 			if let Some(idx) = idx {
-				let prog = if matches!(idx, COL_EC | COL_LC | COL_RC) { None } else { gprog };
+				let prog = if matches!(idx, COL_EC | COL_LC | COL_RC) {
+					None
+				} else {
+					gprog
+				};
 				mc.files[idx].push(Filecol { prog, col: Some(col) });
 			}
 			if p < s.len() {
@@ -486,7 +490,13 @@ mod tests {
 		// A group pattern before `=`: the pattern `*.z`.
 		let mc = getcols_from(b"(x|y)=*.z=36", &opts());
 		assert_eq!(mc.pats.len(), 1);
-		assert!(mc.pats[0].prog.as_ref().expect("group").matches(b"y", &CharEnv::DEFAULT));
+		assert!(
+			mc.pats[0]
+				.prog
+				.as_ref()
+				.expect("group")
+				.matches(b"y", &CharEnv::DEFAULT)
+		);
 		assert!(mc.pats[0].pat.matches(b"a.z", &CharEnv::DEFAULT));
 		assert_eq!(mc.pats[0].cols, vec![b"36".to_vec()]);
 	}

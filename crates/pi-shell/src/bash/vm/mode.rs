@@ -425,16 +425,16 @@ pub fn save_for_emulate(
 	vp: &Vproc,
 ) -> Result<Box<ZshScope>, StoreError> {
 	Ok(Box::new(ZshScope {
-		mode:           vp.mode,
-		opts:           state::zsh_options(root, store, vp)?,
-		sticky:         vp.sticky().cloned(),
-		restore_sticky: true,
-		traps:          Vec::new(),
-		lossy:          0,
-		pat_disables:   pat_disables(store, vp)?,
+		mode:            vp.mode,
+		opts:            state::zsh_options(root, store, vp)?,
+		sticky:          vp.sticky().cloned(),
+		restore_sticky:  true,
+		traps:           Vec::new(),
+		lossy:           0,
+		pat_disables:    pat_disables(store, vp)?,
 		keep_underscore: false,
-		underscore:     None,
-		specials:       Vec::new(),
+		underscore:      None,
+		specials:        Vec::new(),
 	}))
 }
 

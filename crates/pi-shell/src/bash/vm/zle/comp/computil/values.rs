@@ -84,7 +84,11 @@ struct Record {
 fn parse_cvdef(args: &[BString]) -> Result<Cvdef, String> {
 	let mut i = 0;
 	let (mut sep, mut asep, mut hassep, mut words) = (0u8, b'=', false, false);
-	while i + 1 < args.len() && args[i].len() == 2 && args[i][0] == b'-' && matches!(args[i][1], b's' | b'S' | b'w') {
+	while i + 1 < args.len()
+		&& args[i].len() == 2
+		&& args[i][0] == b'-'
+		&& matches!(args[i][1], b's' | b'S' | b'w')
+	{
 		match args[i][1] {
 			b's' => {
 				hassep = true;
@@ -178,7 +182,8 @@ fn parse_cvdef(args: &[BString]) -> Result<Cvdef, String> {
 		if !multi {
 			xor.get_or_insert_with(Vec::new).push(name.into());
 		}
-		ret.vals.push(Cvval { name: name.into(), descr, xor, typ, arg, active: false });
+		ret.vals
+			.push(Cvval { name: name.into(), descr, xor, typ, arg, active: false });
 	}
 	Ok(ret)
 }
@@ -241,7 +246,11 @@ fn cv_next(d: &Cvdef, s: &[u8], from: usize) -> (Option<usize>, Option<usize>, O
 	let takes_arg = |r: Option<usize>| r.is_some_and(|r| d.vals[r].typ != CVV_NOARG);
 	if (d.hassep && d.sep == 0) || d.argsep == 0 {
 		// The shortest prefix that names a value, up to the separator.
-		let ec = if d.hassep && d.sep != 0 { d.sep } else { d.argsep };
+		let ec = if d.hassep && d.sep != 0 {
+			d.sep
+		} else {
+			d.argsep
+		};
 		let mut i = from;
 		let r = loop {
 			i += 1;
@@ -289,7 +298,10 @@ fn cv_next(d: &Cvdef, s: &[u8], from: usize) -> (Option<usize>, Option<usize>, O
 		};
 		(r, sp, ap)
 	} else {
-		let a = s[from..].iter().position(|&c| c == d.argsep).map(|k| from + k);
+		let a = s[from..]
+			.iter()
+			.position(|&c| c == d.argsep)
+			.map(|k| from + k);
 		let r = cv_quote_get_val(d, &s[from..a.unwrap_or(s.len())]);
 		(r, None, a.map(|a| a + 1))
 	}
@@ -370,7 +382,9 @@ fn cv_parse_word(ctx: &mut Ctx<'_, '_>, failed: &mut bool, mut d: Cvdef) -> Resu
 			}
 		}
 	}
-	let def = val.filter(|_| arg.is_some() && str.is_none()).filter(|&v| d.vals[v].arg.is_some());
+	let def = val
+		.filter(|_| arg.is_some() && str.is_none())
+		.filter(|&v| d.vals[v].arg.is_some());
 
 	if !nosfx && d.hassep {
 		ignore_prefix(ctx, failed, pign)?;
@@ -381,7 +395,11 @@ fn cv_parse_word(ctx: &mut Ctx<'_, '_>, failed: &mut bool, mut d: Cvdef) -> Resu
 			more = Some(suffix.as_slice());
 		} else if d.sep != 0 {
 			let ns = suffix.iter().position(|&c| c == d.sep);
-			let asp = if d.argsep != 0 { suffix.iter().position(|&c| c == d.argsep) } else { None };
+			let asp = if d.argsep != 0 {
+				suffix.iter().position(|&c| c == d.argsep)
+			} else {
+				None
+			};
 			ign = match asp {
 				Some(a) if ns.is_none_or(|n| a <= n) => suffix.len() - a,
 				_ => ns.map_or(0, |n| suffix.len() - n),
@@ -490,7 +508,12 @@ pub fn compvalues(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 		},
 		b'C' => match def {
 			Some(a) => {
-				setsparam(ctx, &mut failed, &args[1], a.opt.as_ref().map_or(&[][..], |o| o.as_slice()))?;
+				setsparam(
+					ctx,
+					&mut failed,
+					&args[1],
+					a.opt.as_ref().map_or(&[][..], |o| o.as_slice()),
+				)?;
 				0
 			},
 			None => 1,
@@ -513,7 +536,11 @@ pub fn compvalues(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 		},
 		b's' => {
 			if d.hassep {
-				let s: &[u8] = if d.sep == 0 { &[] } else { std::slice::from_ref(&d.sep) };
+				let s: &[u8] = if d.sep == 0 {
+					&[]
+				} else {
+					std::slice::from_ref(&d.sep)
+				};
 				setsparam(ctx, &mut failed, &args[1], s)?;
 				0
 			} else {
@@ -521,7 +548,11 @@ pub fn compvalues(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 			}
 		},
 		b'S' => {
-			let s: &[u8] = if d.argsep == 0 { &[] } else { std::slice::from_ref(&d.argsep) };
+			let s: &[u8] = if d.argsep == 0 {
+				&[]
+			} else {
+				std::slice::from_ref(&d.argsep)
+			};
 			setsparam(ctx, &mut failed, &args[1], s)?;
 			0
 		},
@@ -529,7 +560,9 @@ pub fn compvalues(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 			setsparam(ctx, &mut failed, &args[1], &d.descr)?;
 			0
 		},
-		b'L' => match cv_get_val(d, &args[1]).and_then(|v| Some((&d.vals[v].name, d.vals[v].arg.as_ref()?))) {
+		b'L' => match cv_get_val(d, &args[1])
+			.and_then(|v| Some((&d.vals[v].name, d.vals[v].arg.as_ref()?)))
+		{
 			Some((name, a)) => {
 				setsparam(ctx, &mut failed, &args[2], &a.descr)?;
 				setsparam(ctx, &mut failed, &args[3], &a.action)?;

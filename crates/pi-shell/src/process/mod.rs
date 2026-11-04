@@ -51,12 +51,11 @@ pub struct ProcessOptions {
 	/// The shell runs inside another runtime's process (Bun, for
 	/// `omp zsh`), which keeps running or exits after [`main`] returns:
 	///
-	/// - signals: of HUP, INT, QUIT, TERM, PIPE, ALRM, TSTP, TTIN, TTOU,
-	///   CHLD, WINCH and CONT, those the runtime caught with a handler (and
-	///   `SIGPIPE`, which it ignores) are reset to `SIG_DFL` for the run and
-	///   restored after it; no other disposition is touched. `SIGPIPE` is
-	///   therefore not reported as ignored on entry: externals start with the
-	///   default action;
+	/// - signals: of HUP, INT, QUIT, TERM, PIPE, ALRM, TSTP, TTIN, TTOU, CHLD,
+	///   WINCH and CONT, those the runtime caught with a handler (and `SIGPIPE`,
+	///   which it ignores) are reset to `SIG_DFL` for the run and restored after
+	///   it; no other disposition is touched. `SIGPIPE` is therefore not
+	///   reported as ignored on entry: externals start with the default action;
 	/// - descriptors: the inherited ones above 2 (`3>file`) are duplicated,
 	///   never taken over, and the runtime's own are left alone;
 	/// - exits of externals are observed by a waiter thread each, beside the
@@ -177,7 +176,8 @@ pub fn read_script(
 		return Err(ScriptError::new(dollar0, &path, "Is a directory", 126));
 	}
 	let mut text = Vec::new();
-	file.read_to_end(&mut text)
+	file
+		.read_to_end(&mut text)
 		.map_err(|err| ScriptError::new(dollar0, &path, &strerror(&err), 126))?;
 	let head = &text[..text.len().min(80)];
 	let first_line = head.split(|&c| c == b'\n').next().unwrap_or(head);
@@ -319,7 +319,10 @@ pub fn start(argv: &[BString], whole_stdin: bool) -> Start {
 	let args = match ShellArgs::parse_exe(argv, &exe) {
 		Ok(args) => args,
 		Err(err) => {
-			let name = argv.first().cloned().unwrap_or_else(|| BString::from("bash"));
+			let name = argv
+				.first()
+				.cloned()
+				.unwrap_or_else(|| BString::from("bash"));
 			let _ = io::stderr().write_all(&err.render(&name));
 			return Start::Exit(err.status());
 		},
@@ -334,7 +337,11 @@ pub fn start(argv: &[BString], whole_stdin: bool) -> Start {
 		return Start::Exit(i32::from(print_out(&text)));
 	}
 	if args.version {
-		let text = if zsh { zsh_version_text() } else { invocation::version_text() };
+		let text = if zsh {
+			zsh_version_text()
+		} else {
+			invocation::version_text()
+		};
 		return Start::Exit(i32::from(print_out(&text)));
 	}
 	// bash lists the options and goes on: a failed write does not stop it.
@@ -381,7 +388,9 @@ fn zsh_help_text(argzero: &[u8], args: &ShellArgs) -> Vec<u8> {
 fn zsh_version_text() -> Vec<u8> {
 	let arch = std::env::consts::ARCH;
 	let host = if cfg!(target_os = "macos") {
-		let release = crate::sys::uname::uname().map(|(_, release, _)| release).unwrap_or_default();
+		let release = crate::sys::uname::uname()
+			.map(|(_, release, _)| release)
+			.unwrap_or_default();
 		let major = release.split(|&c| c == b'.').next().unwrap_or_default();
 		let cpu = if arch == "aarch64" { "arm64" } else { arch };
 		format!("{cpu}-apple-darwin{}.0", String::from_utf8_lossy(major))
@@ -454,14 +463,14 @@ fn run(args: &ShellArgs, env: Vec<(BString, BString)>, input: Input, opts: Proce
 	let mut store = MemStore::new();
 	let Input { source, origin, argv0, args: params } = input;
 	let init = shell_init(args, argv0, params, env, current_dir());
-	let mut shell = match Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, init)
-	{
-		Ok(shell) => shell,
-		Err(err) => {
-			eprintln!("{}: {err}", args.shell_name);
-			return 2;
-		},
-	};
+	let mut shell =
+		match Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, init) {
+			Ok(shell) => shell,
+			Err(err) => {
+				eprintln!("{}: {err}", args.shell_name);
+				return 2;
+			},
+		};
 	let root = Vpid(cfg.vpid_base);
 	host.bind_signals(shell.control(), root);
 	// Nothing observes events: skip building them (each reads the clock).
@@ -575,12 +584,17 @@ pub fn shell_init(
 /// emulation with `RCS` on and `PRIVILEGED` off (it defaults on in a setuid
 /// or setgid process), the `newuser` scripts to try (the first that exists
 /// is sourced) when the user has no dotfiles in `$ZDOTDIR` (else `$HOME`).
-fn newuser_scripts(args: &ShellArgs, env: &[(BString, BString)], interactive: bool) -> Vec<BString> {
+fn newuser_scripts(
+	args: &ShellArgs,
+	env: &[(BString, BString)],
+	interactive: bool,
+) -> Vec<BString> {
 	if args.mode != ModeId::Zsh || !interactive {
 		return Vec::new();
 	}
 	let set = |opt: ZshOpt, default: bool| {
-		args.zsh_options
+		args
+			.zsh_options
 			.iter()
 			.rev()
 			.find(|(o, _)| *o == opt)
@@ -650,7 +664,10 @@ pub fn drive(
 
 /// A process shell has no host callouts: answer each with an error.
 pub fn no_callouts(shell: &mut Shell, id: crate::bash::CallId) {
-	shell.complete(id, CallOutcome::Error("host callouts are not available in a process shell".into()));
+	shell.complete(
+		id,
+		CallOutcome::Error("host callouts are not available in a process shell".into()),
+	);
 }
 
 /// Park until the shell may make progress, forwarding OS signals (a signal

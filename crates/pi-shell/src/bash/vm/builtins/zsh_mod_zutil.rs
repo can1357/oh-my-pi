@@ -50,7 +50,14 @@ use crate::bash::{
 /// zsh error (`errflag`) it reported.
 #[allow(clippy::unnecessary_wraps, reason = "a handler's result")]
 const fn fin(status: i32, failed: bool) -> R {
-	Ok(Outcome { status, control: if failed { Control::DiscardAll } else { Control::None } })
+	Ok(Outcome {
+		status,
+		control: if failed {
+			Control::DiscardAll
+		} else {
+			Control::None
+		},
+	})
 }
 
 /// Run parameter code; a zsh error is reported once (zsh's `zerr` is quiet
@@ -73,7 +80,12 @@ fn px<T>(
 }
 
 /// zsh `setsparam`.
-fn setsparam(ctx: &mut Ctx<'_, '_>, failed: &mut bool, name: &[u8], val: &[u8]) -> Result<(), Need> {
+fn setsparam(
+	ctx: &mut Ctx<'_, '_>,
+	failed: &mut bool,
+	name: &[u8],
+	val: &[u8],
+) -> Result<(), Need> {
 	px(ctx, failed, |ex| params::assignsparam(ex, name, val, 0))?;
 	Ok(())
 }
@@ -344,7 +356,9 @@ impl StyleTab {
 			.iter()
 			.position(|s| ztrcmp(&s.name, name) == Ordering::Greater)
 			.unwrap_or(self.styles.len());
-		self.styles.insert(at, Style { name: name.into(), pats: Vec::new() });
+		self
+			.styles
+			.insert(at, Style { name: name.into(), pats: Vec::new() });
 		at
 	}
 
@@ -477,7 +491,8 @@ fn lookupstyle(
 		let env = zpattern::char_env(ex)?;
 		let subj = tok::metafy(ctxt);
 		for (i, p) in s.pats.iter().enumerate() {
-			let Some(prog) = zpattern::compile_with(ex, &pat_text(&p.pat), PatFlags::NONE, &p.opts.opts())
+			let Some(prog) =
+				zpattern::compile_with(ex, &pat_text(&p.pat), PatFlags::NONE, &p.opts.opts())
 			else {
 				continue;
 			};
@@ -516,7 +531,10 @@ fn truthy(v: &[u8]) -> bool {
 
 /// zsh `parse_string` of `code` at set time (`zstyle -e`): the parse error,
 /// if any.
-fn parse_error(ctx: &mut Ctx<'_, '_>, code: &[u8]) -> Result<Option<crate::bash::syntax::ParseError>, Need> {
+fn parse_error(
+	ctx: &mut Ctx<'_, '_>,
+	code: &[u8],
+) -> Result<Option<crate::bash::syntax::ParseError>, Need> {
 	let feat = features(ctx.k, ctx.cx.store, ctx.vp)? | Features::ZSH_INTERACTIVE_COMMENTS;
 	let aliases = alias_table(ctx.k, ctx.cx, ctx.vp)?;
 	let mut p = match &aliases {
@@ -550,10 +568,18 @@ fn print_style(
 			continue;
 		}
 		if list == List::Basic {
-			out.extend_from_slice(if p.eval.is_some() { b"(eval)  " } else { b"        " });
+			out.extend_from_slice(if p.eval.is_some() {
+				b"(eval)  "
+			} else {
+				b"        "
+			});
 			out.extend_from_slice(&p.pat);
 		} else {
-			out.extend_from_slice(if p.eval.is_some() { &b"zstyle -e "[..] } else { b"zstyle " });
+			out.extend_from_slice(if p.eval.is_some() {
+				&b"zstyle -e "[..]
+			} else {
+				b"zstyle "
+			});
 			out.extend_from_slice(&q(p.pat.as_slice()));
 			out.push(b' ');
 			out.extend_from_slice(&q(s.name.as_slice()));
@@ -850,7 +876,8 @@ fn zstyle_list(ctx: &mut Ctx<'_, '_>, args: &[BString], list: List) -> R {
 	let test = filter
 		.as_ref()
 		.map(|(p, env)| move |s: &[u8]| p.matches(&tok::metafy(s), &env.env()));
-	let test_dyn: Option<&dyn Fn(&[u8]) -> bool> = test.as_ref().map(|f| f as &dyn Fn(&[u8]) -> bool);
+	let test_dyn: Option<&dyn Fn(&[u8]) -> bool> =
+		test.as_ref().map(|f| f as &dyn Fn(&[u8]) -> bool);
 	let mut out = Vec::new();
 	if let Some(name) = stylename {
 		let Some(si) = tab.find(name) else {
@@ -977,7 +1004,11 @@ impl<'s> Fmt<'s> {
 							};
 							i32::from(if right { testval < len } else { testval >= len })
 						} else {
-							let tv = if right { testval.wrapping_neg() } else { testval };
+							let tv = if right {
+								testval.wrapping_neg()
+							} else {
+								testval
+							};
 							c_int(self.math(ctx, spec)?).wrapping_sub(tv)
 						}
 					},
@@ -1211,7 +1242,11 @@ impl<'a> RParser<'a> {
 					return Ok(true);
 				}
 				let cutoff = s[l - 1];
-				let pattern = if cutoff == b'/' { &s[1..l - 1] } else { &s[1..l - 2] };
+				let pattern = if cutoff == b'/' {
+					&s[1..l - 1]
+				} else {
+					&s[1..l - 2]
+				};
 				self.pos += 1;
 				let lookahead = match self.cur() {
 					Some(t) if t.first() == Some(&b'%') && t.len() >= 2 && t[t.len() - 1] == b'%' => {
@@ -1245,7 +1280,9 @@ impl<'a> RParser<'a> {
 					},
 					_ => None,
 				};
-				self.states.push(RState { cutoff, pattern, guard, action, branches: Vec::new() });
+				self
+					.states
+					.push(RState { cutoff, pattern, guard, action, branches: Vec::new() });
 				let st = self.states.len() - 1;
 				res.nullacts = None;
 				res.inl = vec![self.branch(st, Vec::new())];
@@ -1431,12 +1468,12 @@ fn atoi(s: &[u8]) -> i64 {
 
 /// `rmatch` over the parsed regex.
 struct Rmatch<'p, 'a> {
-	p:     &'p RParser<'a>,
-	top:   &'p RResult,
-	subj:  &'p [u8],
-	var1:  &'p [u8],
-	var2:  &'p [u8],
-	comp:  bool,
+	p:    &'p RParser<'a>,
+	top:  &'p RResult,
+	subj: &'p [u8],
+	var1: &'p [u8],
+	var2: &'p [u8],
+	comp: bool,
 }
 
 impl Rmatch<'_, '_> {
@@ -1490,7 +1527,10 @@ impl Rmatch<'_, '_> {
 						continue;
 					}
 					let text = pat_text(pattern);
-					let rest = self.subj.get(usize::try_from(m.subj).unwrap_or(usize::MAX)..).unwrap_or_default();
+					let rest = self
+						.subj
+						.get(usize::try_from(m.subj).unwrap_or(usize::MAX)..)
+						.unwrap_or_default();
 					let r = px(ctx, &mut m.failed, |ex| {
 						let Some(prog) = zpattern::try_compile(ex, &text, PatFlags::NONE)? else {
 							return Ok(None);
@@ -1622,7 +1662,9 @@ pub fn zregexparse(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	let parsed = p.alt(&mut top).is_ok() && p.pos >= regex.len();
 	let mut m = if ctx.resumed > 0 {
 		let Some(Wait::Regex(mut m)) = pending_take(ctx)? else {
-			ctx.diag(Diag::Unsupported { what: "`zregexparse' lost its place after shell code".into() });
+			ctx.diag(Diag::Unsupported {
+				what: "`zregexparse' lost its place after shell code".into(),
+			});
 			return done(3);
 		};
 		if code_error(ctx)? {
@@ -1785,7 +1827,11 @@ impl ZOpts {
 		n.extend_from_slice(&self.descs[d0].name);
 		let d = self.map_desc(d0).unwrap_or(d0);
 		let flags = self.descs[d].flags;
-		let reuse = if flags & ZOF_MULT == 0 { self.descs[d].vals.first().copied() } else { None };
+		let reuse = if flags & ZOF_MULT == 0 {
+			self.descs[d].vals.first().copied()
+		} else {
+			None
+		};
 		let (v, new) = if let Some(v) = reuse {
 			(v, false)
 		} else {
@@ -1953,7 +1999,8 @@ pub fn zparseopts(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 			f |= flags;
 			let an = &o[p + 1..];
 			a = Some(z.get_arr(an).unwrap_or_else(|| {
-				z.arrs.push(ZArr { name: an.to_vec(), vals: Vec::new(), num: 0 });
+				z.arrs
+					.push(ZArr { name: an.to_vec(), vals: Vec::new(), num: 0 });
 				z.arrs.len() - 1
 			}));
 		} else if p < o.len() {
@@ -1980,7 +2027,8 @@ pub fn zparseopts(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 			return done(1);
 		}
 		let single = (name.len() == 1).then(|| name[0]);
-		z.descs.push(ZDesc { name, flags: f, arr: a, vals: Vec::new() });
+		z.descs
+			.push(ZDesc { name, flags: f, arr: a, vals: Vec::new() });
 		let d = z.descs.len() - 1;
 		if let Some(c) = single {
 			sopts[usize::from(c)] = Some(d);

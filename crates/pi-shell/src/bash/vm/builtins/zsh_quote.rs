@@ -22,12 +22,12 @@ const fn zisprint(c: u8) -> bool {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Charset {
 	/// Characters are UTF-8 sequences (`MULTIBYTE` in a UTF-8 locale).
-	pub utf8:        bool,
+	pub utf8:         bool,
 	/// `PRINT_EIGHT_BIT`: bytes and characters above 0x7f print as they
 	/// are.
-	pub print_eight: bool,
+	pub print_eight:  bool,
 	/// History expansion character (`0` when `BANG_HIST` is unset).
-	pub bang: u8,
+	pub bang:         u8,
 	/// The history character is special in an interactive shell reading stdin.
 	pub bang_special: bool,
 }
@@ -154,7 +154,10 @@ pub fn quotedzputs(s: &[u8], rcquotes: bool, cs: Charset) -> Vec<u8> {
 		out.push(b'\'');
 		return out;
 	}
-	if !s.iter().any(|&c| ispecial(c) || (cs.bang_special && c == cs.bang)) {
+	if !s
+		.iter()
+		.any(|&c| ispecial(c) || (cs.bang_special && c == cs.bang))
+	{
 		return s.to_vec();
 	}
 	let mut out = Vec::with_capacity(s.len() + 4);

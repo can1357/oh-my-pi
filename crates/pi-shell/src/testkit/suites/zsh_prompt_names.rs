@@ -48,7 +48,9 @@ fn zsh_term(src: &str, term: &str) -> (String, String, i32) {
 	] {
 		host.fs.add_dir(d);
 	}
-	host.fs.add_file("/tmp/pn/h/.dotfiles/zsh/22-bookmarks.zsh", BOOKMARKS.as_bytes(), 0o644);
+	host
+		.fs
+		.add_file("/tmp/pn/h/.dotfiles/zsh/22-bookmarks.zsh", BOOKMARKS.as_bytes(), 0o644);
 	let mut init = ShellInit { mode: ModeId::Zsh, argv0: "zsh".into(), ..skeleton_init(&[]) };
 	init.env.push(("HOME".into(), "/tmp/pn/h".into()));
 	init.env.push(("TERM".into(), term.into()));
@@ -81,8 +83,9 @@ fn hash_d_lists_adds_and_removes() {
 
 #[test]
 fn hash_d_errors() {
-	let (out, err, st) =
-		zsh(r#"hash -d "a b=/x"; echo $?; unhash -d nope; echo $?; hash -d nope; echo $?; hash -dv k=/l"#);
+	let (out, err, st) = zsh(
+		r#"hash -d "a b=/x"; echo $?; unhash -d nope; echo $?; hash -d nope; echo $?; hash -dv k=/l"#,
+	);
 	assert_eq!(out, "1\n1\n1\nk=/l\n");
 	assert_eq!(
 		err,
@@ -219,7 +222,8 @@ fn startup_parameters() {
 
 #[test]
 fn module_builtins_can_be_disabled() {
-	let (out, err, st) = zsh("disable log; echo $?; enable log; whence -w log; disable nosuch; echo $?");
+	let (out, err, st) =
+		zsh("disable log; echo $?; enable log; whence -w log; disable nosuch; echo $?");
 	assert_eq!(out, "0\nlog: builtin\n1\n");
 	assert_eq!(err, "zsh:disable:1: no such hash table element: nosuch\n");
 	assert_eq!(st, 0);

@@ -28,10 +28,13 @@ fn zsh(src: &str) -> (String, String, i32) {
 fn mask(s: &str) -> String {
 	let times = Regex::new(r"[0-9]+\.[0-9]+|nan|-?inf").unwrap();
 	let spaces = Regex::new(r" +").unwrap();
-	spaces.replace_all(&times.replace_all(s, "#"), " ").into_owned()
+	spaces
+		.replace_all(&times.replace_all(s, "#"), " ")
+		.into_owned()
 }
 
-const RULE: &str = "-----------------------------------------------------------------------------------";
+const RULE: &str =
+	"-----------------------------------------------------------------------------------";
 
 #[test]
 fn zsh_mod_zprof_header_and_errors() {
@@ -77,9 +80,20 @@ fn zsh_mod_zprof_lists_callers_and_callees() {
 		.collect();
 	lines.sort();
 	let mut want: Vec<String> = [
-		"", "", "", "", RULE, RULE, RULE, " 4/4 # # #% # # f [N]", " 4/4 # # #% # # g [N]",
-		"N) 2 # # #% # # #% f", "N) 2 # # #% # # #% f", "N) 4 # # #% # # #% g",
-		"N) 4 # # #% # # #% g", "num calls time self name",
+		"",
+		"",
+		"",
+		"",
+		RULE,
+		RULE,
+		RULE,
+		" 4/4 # # #% # # f [N]",
+		" 4/4 # # #% # # g [N]",
+		"N) 2 # # #% # # #% f",
+		"N) 2 # # #% # # #% f",
+		"N) 4 # # #% # # #% g",
+		"N) 4 # # #% # # #% g",
+		"num calls time self name",
 	]
 	.iter()
 	.map(|s| (*s).to_owned())
@@ -115,9 +129,18 @@ fn zsh_mod_zprof_names_anonymous_functions_by_file_and_line() {
 	assert_eq!(
 		masked_lines(&out),
 		sorted(&[
-			"", "", "", "", RULE, RULE, RULE, "N) 2 # # #% # # #% (anon) [zsh:1]",
-			"N) 2 # # #% # # #% (anon) [zsh:1]", "N) 1 # # #% # # #% (anon) [zsh:2]",
-			"N) 1 # # #% # # #% (anon) [zsh:2]", "num calls time self name",
+			"",
+			"",
+			"",
+			"",
+			RULE,
+			RULE,
+			RULE,
+			"N) 2 # # #% # # #% (anon) [zsh:1]",
+			"N) 2 # # #% # # #% (anon) [zsh:1]",
+			"N) 1 # # #% # # #% (anon) [zsh:2]",
+			"N) 1 # # #% # # #% (anon) [zsh:2]",
+			"num calls time self name",
 		])
 	);
 	// A `-c` string is `zsh`'s whatever `$0` is, functions defined in it
@@ -134,24 +157,37 @@ fn zsh_mod_zprof_names_anonymous_functions_by_file_and_line() {
 	// In a sourced file: the file as given, the definition's line.
 	let host = FakeHost::new();
 	host.fs.add_dir("/t");
-	host.fs.add_file("/t/anon.zsh", b"f() { () { :; } }\n\n() { :; }\nf\n", 0o644);
+	host
+		.fs
+		.add_file("/t/anon.zsh", b"f() { () { :; } }\n\n() { :; }\nf\n", 0o644);
 	let init = ShellInit { mode: ModeId::Zsh, argv0: "zsh".into(), ..skeleton_init(&[]) };
 	let mut rig = Rig::new(host, init);
-	let st = rig.run(
-		Script::command(b"zmodload zsh/zprof; source /t/anon.zsh; zprof".to_vec()),
-		Fault::None,
-	);
+	let st = rig
+		.run(Script::command(b"zmodload zsh/zprof; source /t/anon.zsh; zprof".to_vec()), Fault::None);
 	assert_eq!(String::from_utf8_lossy(&rig.host.stderr.bytes()), "");
 	assert_eq!(st, 0);
 	let out = String::from_utf8_lossy(&rig.host.stdout.bytes()).into_owned();
 	assert_eq!(
 		masked_lines(&out),
 		sorted(&[
-			"", "", "", "", "", "", RULE, RULE, RULE, RULE,
-			" 1/1 # # #% # # (anon) [/t/anon.zsh:1] [N]", " 1/1 # # #% # # f [N]",
-			"N) 1 # # #% # # #% f", "N) 1 # # #% # # #% f",
-			"N) 1 # # #% # # #% (anon) [/t/anon.zsh:3]", "N) 1 # # #% # # #% (anon) [/t/anon.zsh:3]",
-			"N) 1 # # #% # # #% (anon) [/t/anon.zsh:1]", "N) 1 # # #% # # #% (anon) [/t/anon.zsh:1]",
+			"",
+			"",
+			"",
+			"",
+			"",
+			"",
+			RULE,
+			RULE,
+			RULE,
+			RULE,
+			" 1/1 # # #% # # (anon) [/t/anon.zsh:1] [N]",
+			" 1/1 # # #% # # f [N]",
+			"N) 1 # # #% # # #% f",
+			"N) 1 # # #% # # #% f",
+			"N) 1 # # #% # # #% (anon) [/t/anon.zsh:3]",
+			"N) 1 # # #% # # #% (anon) [/t/anon.zsh:3]",
+			"N) 1 # # #% # # #% (anon) [/t/anon.zsh:1]",
+			"N) 1 # # #% # # #% (anon) [/t/anon.zsh:1]",
 			"num calls time self name",
 		])
 	);
@@ -164,7 +200,9 @@ fn zsh_mod_zprof_clear_and_unload() {
 		 zsh/zprof; zprof",
 	);
 	assert_eq!(err, "");
-	let header = format!("num  calls                time                       self            name\n{RULE}\n");
+	let header = format!(
+		"num  calls                time                       self            name\n{RULE}\n"
+	);
 	assert_eq!(out, format!("{header}{header}"));
 	assert_eq!(st, 0);
 }

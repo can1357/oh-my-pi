@@ -982,7 +982,10 @@ impl<'s> Ctx<'s> {
 			}
 			let rest = match self.meta_rest.get(f.pos) {
 				Some(&r) if i == 0 => r as usize,
-				_ => tail(&f.buf, f.pos).iter().map(|&c| 1 + usize::from(is_meta(c))).sum(),
+				_ => tail(&f.buf, f.pos)
+					.iter()
+					.map(|&c| 1 + usize::from(is_meta(c)))
+					.sum(),
 			};
 			n += rest.saturating_sub(usize::from(f.half));
 		}
@@ -2303,7 +2306,9 @@ impl<'s> Ctx<'s> {
 		let mut err: u32 = 0;
 		let math = endchar == b')' || endchar == b']' || self.ps.infor > 0;
 		let zlemath = math
-			&& self.zle.is_some_and(|z| z.zlemetacs > z.zlemetall + z.addedx - self.inbufct());
+			&& self
+				.zle
+				.is_some_and(|z| z.zlemetacs > z.zlemetall + z.addedx - self.inbufct());
 		let mut c;
 		loop {
 			c = self.hgetc();

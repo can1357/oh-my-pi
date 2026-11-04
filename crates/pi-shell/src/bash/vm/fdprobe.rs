@@ -76,14 +76,26 @@ pub enum FdProbe {
 	Select { sets: [Vec<i32>; 3], timeout_ns: Option<u64> },
 	/// Open absolute `path` into `slot` with `fd_flags` (zsh `sysopen`).
 	/// `/dev/fd/N` duplicates the shell's fd `N`.
-	Open { path: BString, flags: OpenFlags, mode: u32, slot: FdSlot, fd_flags: FdFlags },
+	Open {
+		path:     BString,
+		flags:    OpenFlags,
+		mode:     u32,
+		slot:     FdSlot,
+		fd_flags: FdFlags,
+	},
 	/// zsh `zsystem flock`: open absolute `path` (read-write for an
 	/// exclusive lock, read-only for a shared one), lock the whole file
 	/// and install it at the lowest free fd ≥ 10 with `fd_flags`. Without
 	/// `timeout_ns` it waits as long as it takes, retrying every
 	/// `interval_ns`; `Some(0)` tries once; otherwise it retries every
 	/// `interval_ns` until the timeout.
-	Lock { path: BString, write: bool, timeout_ns: Option<u64>, interval_ns: u64, fd_flags: FdFlags },
+	Lock {
+		path:        BString,
+		write:       bool,
+		timeout_ns:  Option<u64>,
+		interval_ns: u64,
+		fd_flags:    FdFlags,
+	},
 	/// Connect a stream socket to `addr` into `slot`.
 	Connect { addr: SockAddr, slot: FdSlot },
 	/// Accept a connection on the listening socket at fd `fd` into `slot`.
@@ -239,7 +251,8 @@ pub fn perform(
 		},
 		FdProbe::Lock { path, write, timeout_ns, interval_ns, fd_flags } => {
 			let owner = (Arc::as_ptr(&k.ctl).addr(), vp.vpid.0);
-			let how = LockHow { write: *write, timeout_ns: *timeout_ns, interval_ns: *interval_ns, owner };
+			let how =
+				LockHow { write: *write, timeout_ns: *timeout_ns, interval_ns: *interval_ns, owner };
 			lock(tcx, cx, vp, sc, path, how, *fd_flags)
 		},
 		FdProbe::Connect { addr, slot } => {
@@ -569,7 +582,11 @@ static LOCKS: Mutex<Vec<Holder>> = Mutex::new(Vec::new());
 /// Take the OS locks of the live holders of `key` again.
 fn reassert(fs: &mut dyn Fs, locks: &[Holder], key: (u64, u64)) {
 	for h in locks.iter().filter(|h| h.key == key) {
-		let kind = if h.exclusive { FdLock::Exclusive } else { FdLock::Shared };
+		let kind = if h.exclusive {
+			FdLock::Exclusive
+		} else {
+			FdLock::Shared
+		};
 		// The OS answers at once (a deferring filesystem has done it too).
 		let _ = fs.lock_fd(h.handle, kind);
 	}
@@ -694,7 +711,11 @@ fn lock(
 			.iter()
 			.any(|h| h.key == key && h.owner != owner && (h.exclusive || write))
 	});
-	let kind = if write { FdLock::Exclusive } else { FdLock::Shared };
+	let kind = if write {
+		FdLock::Exclusive
+	} else {
+		FdLock::Shared
+	};
 	let attempt = if busy {
 		Err(io::ErrorKind::WouldBlock.into())
 	} else {
@@ -718,7 +739,9 @@ fn lock(
 			let r = FdRef::open(file, FdOrigin::Host);
 			if let Some(key) = key {
 				let token = r.downgrade();
-				LOCKS.lock().push(Holder { key, owner, exclusive: write, token, handle });
+				LOCKS
+					.lock()
+					.push(Holder { key, owner, exclusive: write, token, handle });
 			}
 			Ok(FdAnswer::Locked(Some(install(vp, FdSlot::Free(10), r, fd_flags))))
 		},

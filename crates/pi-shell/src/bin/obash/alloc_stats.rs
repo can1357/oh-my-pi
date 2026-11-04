@@ -1,8 +1,8 @@
 //! Allocation counters for benchmarks (cargo feature `alloc-stats`,
 //! measurement only).
 //!
-//! With the feature, the global allocator is [`Counting`]: the system allocator plus
-//! relaxed process-wide counters. When `PI_SHELL_ALLOC_STATS=PATH` is set,
+//! With the feature, the global allocator is [`Counting`]: the system allocator
+//! plus relaxed process-wide counters. When `PI_SHELL_ALLOC_STATS=PATH` is set,
 //! [`Report`] appends one line of totals to PATH as `main` returns:
 //!
 //! ```text

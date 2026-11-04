@@ -33,7 +33,11 @@ fn run(mode: ModeId, profile: Profile, fs: &MemFs, interactive: bool, src: &str)
 			("HOME".into(), "/h".into()),
 			("PS1".into(), "".into()),
 		],
-		options: if zsh { vec![("promptsp".into(), false)] } else { Vec::new() },
+		options: if zsh {
+			vec![("promptsp".into(), false)]
+		} else {
+			Vec::new()
+		},
 		..skeleton_init(&[])
 	};
 	let mut host = FakeHost::new().with_fs(fs.clone());
@@ -79,7 +83,14 @@ fn zsh_history_files_and_recording() {
 	let ran = run(ModeId::Zsh, Profile::Tool, &tool, true, src);
 	assert_eq!(ran.out, "one\n0\n");
 	// Only `fc -W` complains: the exit save does not run.
-	assert_eq!(ran.err.matches("history files are not available in this shell").count(), 1, "{}", ran.err);
+	assert_eq!(
+		ran.err
+			.matches("history files are not available in this shell")
+			.count(),
+		1,
+		"{}",
+		ran.err
+	);
 	assert!(tool.read("/h/out").is_none());
 	assert!(tool.read("/h/out.LOCK").is_none());
 	assert_eq!(tool.read("/h/hist").unwrap(), b": 1600000000:5;echo old\n");

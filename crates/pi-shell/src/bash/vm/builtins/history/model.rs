@@ -88,7 +88,6 @@ impl Entry {
 			Cow::Borrowed(&self.words)
 		}
 	}
-
 }
 
 /// zsh's `lasthist`: where the history file stood when last read or
@@ -188,7 +187,7 @@ pub struct Hist {
 	/// Events, oldest first.
 	pub entries: Arc<Vec<Entry>>,
 	/// Whether the events still equal the authoritative record read.
-	saved:   bool,
+	saved:       bool,
 	/// The event being read (`chline` and its state, from `hbegin` to
 	/// `hend`); linked at the top of the ring while [`ZState::linked`].
 	pub curline: Option<LineState>,
@@ -258,7 +257,9 @@ impl EventsCache {
 fn uses_root_history(vp: &Vproc) -> bool {
 	vp.overlay.as_ref().is_none_or(|ov| {
 		!ov.records.contains_key(&KeyBuf::Misc(MiscKey::ZshHistory))
-			&& !ov.records.contains_key(&KeyBuf::Misc(MiscKey::ZshHistoryState))
+			&& !ov
+				.records
+				.contains_key(&KeyBuf::Misc(MiscKey::ZshHistoryState))
 	})
 }
 
@@ -294,18 +295,30 @@ impl Hist {
 		Self::load_events(root, store, vp, vp.overlay.is_none())
 	}
 
-	fn load_events(root: &Root, store: &mut dyn StateStore, vp: &Vproc, take: bool) -> Result<Self, StoreError> {
+	fn load_events(
+		root: &Root,
+		store: &mut dyn StateStore,
+		vp: &Vproc,
+		take: bool,
+	) -> Result<Self, StoreError> {
 		let st: ZState = match state::record(store, vp, Key::Misc(MiscKey::ZshHistoryState))? {
 			Some(Record::Misc(b)) => postcard::from_bytes(b).unwrap_or_default(),
 			_ => ZState::default(),
 		};
 		let cached = if uses_root_history(vp) {
 			let mut cache = root.hist_events.lock();
-			if cache.0.as_ref().is_some_and(|cached| cached.version == st.version) {
+			if cache
+				.0
+				.as_ref()
+				.is_some_and(|cached| cached.version == st.version)
+			{
 				if take {
 					cache.0.take().map(|cached| (cached.entries, cached.tab))
 				} else {
-					cache.0.as_ref().map(|cached| (Arc::clone(&cached.entries), None))
+					cache
+						.0
+						.as_ref()
+						.map(|cached| (Arc::clone(&cached.entries), None))
 				}
 			} else {
 				None
@@ -380,14 +393,19 @@ impl Hist {
 		if cacheable {
 			let mut cache = root.hist_events.lock();
 			// A read-only load need not clone the index, nor discard it on save.
-			if self.saved && self.tab.is_none()
+			if self.saved
+				&& self.tab.is_none()
 				&& let Some(cached) = &mut cache.0
 				&& cached.version == self.st.version
 				&& Arc::ptr_eq(&cached.entries, &self.entries)
 			{
 				self.tab = cached.tab.take();
 			}
-			cache.0 = Some(CachedEvents { version: self.st.version, entries: self.entries, tab: self.tab });
+			cache.0 = Some(CachedEvents {
+				version: self.st.version,
+				entries: self.entries,
+				tab:     self.tab,
+			});
 		}
 		Self::save_state(&self.st, root, store, vp);
 		let line = self
@@ -763,7 +781,10 @@ mod tests {
 		let fresh = Root::load(&mut restored).unwrap();
 		let h = Hist::load(&fresh, &mut restored, &vp).unwrap();
 		assert_eq!(
-			h.entries.iter().map(|e| e.text.as_slice()).collect::<Vec<_>>(),
+			h.entries
+				.iter()
+				.map(|e| e.text.as_slice())
+				.collect::<Vec<_>>(),
 			[b"first".as_slice(), b"second"]
 		);
 	}
@@ -804,14 +825,19 @@ mod tests {
 	fn history_duplicates_are_removed_after_readonly_save_and_stack_restore() {
 		let (mut store, mut root, mut vp) = shell();
 		hist(&["one", "two"]).save(&mut root, &mut store, &mut vp);
-		Hist::load(&root, &mut store, &vp).unwrap().save(&mut root, &mut store, &mut vp);
+		Hist::load(&root, &mut store, &vp)
+			.unwrap()
+			.save(&mut root, &mut store, &mut vp);
 		let mut h = Hist::take(&root, &mut store, &vp).unwrap();
 		h.st.ignore_all_dups = true;
 		let i = h.prepnext(false);
 		h.events_mut()[i].text = " one".into();
 		h.addhistnode(i);
 		assert_eq!(
-			h.entries.iter().map(|e| e.text.as_slice()).collect::<Vec<_>>(),
+			h.entries
+				.iter()
+				.map(|e| e.text.as_slice())
+				.collect::<Vec<_>>(),
 			[b"two".as_slice(), b" one"]
 		);
 		let restored = hist(&["restored"]).entries;
@@ -869,5 +895,4 @@ mod tests {
 		h.resize(false);
 		assert_eq!(h.entries.iter().map(|e| e.num).collect::<Vec<_>>(), [3, 4]);
 	}
-
 }

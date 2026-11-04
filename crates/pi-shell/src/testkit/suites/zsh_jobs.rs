@@ -40,7 +40,12 @@ fn job_specs_select_current_previous_numbered_and_named_jobs() {
 	));
 	let one = format!("[1]  - running    {LOOP_TEXT}\n");
 	let two = "[2]  + running    until false; do; :; done\n".to_string();
-	assert_eq!(out, [&one, &two, &one, &one, &two, &two, &one, &two].map(String::as_str).concat());
+	assert_eq!(
+		out,
+		[&one, &two, &one, &one, &two, &two, &one, &two]
+			.map(String::as_str)
+			.concat()
+	);
 	assert_eq!(err, "");
 }
 
@@ -73,14 +78,16 @@ fn bad_job_specs_are_reported_with_status_127() {
 
 #[test]
 fn a_bad_spec_ends_the_job_arguments() {
-	let (out, err, _) = zsh(&format!("{LOOP} & jobs 1; echo $?; jobs %1 %4 %1; echo $?; kill -9 %1"));
+	let (out, err, _) =
+		zsh(&format!("{LOOP} & jobs 1; echo $?; jobs %1 %4 %1; echo $?; kill -9 %1"));
 	assert_eq!(out, format!("127\n[1]  + running    {LOOP_TEXT}\n127\n"));
 	assert_eq!(err, "zsh:jobs:1: job not found: 1\nzsh:jobs:1: %4: no such job\n");
 }
 
 #[test]
 fn posixbuiltins_silences_job_spec_errors() {
-	let (out, err, _) = zsh("setopt posixbuiltins; jobs %3; echo $?; jobs %; echo $?; jobs %foo; echo $?");
+	let (out, err, _) =
+		zsh("setopt posixbuiltins; jobs %3; echo $?; jobs %; echo $?; jobs %foo; echo $?");
 	assert_eq!(out, "127\n127\n127\n");
 	assert_eq!(err, "");
 }
@@ -115,8 +122,9 @@ fn disown_of_a_stopped_job_warns_unless_autocontinue() {
 			&& err.ends_with("' to resume\n"),
 		"{err}"
 	);
-	let (out, err, _) =
-		zsh(&format!("setopt autocontinue; {LOOP} & kill -STOP %1; disown; echo $?; jobs; kill -9 $!"));
+	let (out, err, _) = zsh(&format!(
+		"setopt autocontinue; {LOOP} & kill -STOP %1; disown; echo $?; jobs; kill -9 $!"
+	));
 	assert_eq!((out.as_str(), err.as_str()), ("0\n", ""));
 }
 
@@ -129,9 +137,8 @@ fn stopped_jobs_and_the_running_and_stopped_filters() {
 	let stopped = format!("[1]  + suspended (signal)  {LOOP_TEXT}\n");
 	assert_eq!(out, format!("{stopped}suspended:+:PID=suspended (signal)\n{stopped}x\n"));
 	assert_eq!(err, "");
-	let (out, ..) = zsh(&format!(
-		"{LOOP} & {LOOP} & kill -STOP %1; jobs; jobs -r; jobs -s; kill -9 %1 %2"
-	));
+	let (out, ..) =
+		zsh(&format!("{LOOP} & {LOOP} & kill -STOP %1; jobs; jobs -r; jobs -s; kill -9 %1 %2"));
 	let one = format!("[1]  + suspended (signal)  {LOOP_TEXT}\n");
 	let two = format!("[2]  - running    {LOOP_TEXT}\n");
 	assert_eq!(out, format!("{one}{two}{two}{one}"));
@@ -180,7 +187,8 @@ fn job_texts_are_zsh_getjobtext() {
 
 #[test]
 fn kill_resolves_job_specs_with_getjob() {
-	let (out, err, _) = zsh("kill %3; echo $?; kill %; echo $?; kill %3 %4; echo $?; kill %foo; echo $?");
+	let (out, err, _) =
+		zsh("kill %3; echo $?; kill %; echo $?; kill %3 %4; echo $?; kill %foo; echo $?");
 	assert_eq!(out, "1\n1\n2\n1\n");
 	assert_eq!(
 		err,

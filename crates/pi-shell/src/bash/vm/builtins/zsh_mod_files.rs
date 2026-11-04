@@ -121,14 +121,22 @@ impl<'a> Fsq<'a> {
 	/// zsh `ask` after printing `prompt` on stderr: whether the line read
 	/// from fd 0 starts with `y` or `Y` (end of input: no).
 	fn confirm(&mut self, ctx: &mut Ctx<'_, '_>, prompt: &[u8]) -> Result<bool, Need> {
-		let probe =
-			Probe::Input { fd: 0, delim: Some(b'\n'), lines: 1, nchars: None, part: self.part, timeout_ns: None };
+		let probe = Probe::Input {
+			fd:         0,
+			delim:      Some(b'\n'),
+			lines:      1,
+			nchars:     None,
+			part:       self.part,
+			timeout_ns: None,
+		};
 		self.part += 1;
 		match ctx.probe(probe) {
 			Ok(answer) => {
 				// The run that asked wrote everything before the question.
 				ctx.chunks.clear();
-				Ok(matches!(answer, ProbeResult::Input { data, .. } if matches!(data.first(), Some(b'y' | b'Y'))))
+				Ok(
+					matches!(answer, ProbeResult::Input { data, .. } if matches!(data.first(), Some(b'y' | b'Y'))),
+				)
 			},
 			Err(need) => {
 				for c in std::mem::take(&mut ctx.chunks) {
@@ -136,9 +144,13 @@ impl<'a> Fsq<'a> {
 						Chunk::Out(fd, b) => (fd, b),
 						Chunk::Diag(d) => (2, ctx.k.render_diag(ctx.cx, ctx.vp, ctx.line, &d)),
 					};
-					ctx.vp.out.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 });
+					ctx.vp
+						.out
+						.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 });
 				}
-				ctx.vp.out.push_back(PendingWrite { fd: 2, bytes: prompt.into(), off: 0 });
+				ctx.vp
+					.out
+					.push_back(PendingWrite { fd: 2, bytes: prompt.into(), off: 0 });
 				Err(need)
 			},
 		}
@@ -254,7 +266,13 @@ pub fn run(ctx: &mut Ctx<'_, '_>, id: IntrinsicId, ops: &Ops, args: &[BString]) 
 }
 
 /// zsh `bin_mkdir`.
-fn mkdir(ctx: &mut Ctx<'_, '_>, q: &mut Fsq<'_>, cs: Charset, ops: &Ops, args: &[BString]) -> Result<i32, Need> {
+fn mkdir(
+	ctx: &mut Ctx<'_, '_>,
+	q: &mut Fsq<'_>,
+	cs: Charset,
+	ops: &Ops,
+	args: &[BString],
+) -> Result<i32, Need> {
 	let umask = state::umask(ctx.cx.store, ctx.vp)?;
 	let mut mode = 0o777 & !umask;
 	if ops.isset(b'm') {
@@ -360,7 +378,12 @@ const fn enoent() -> i32 {
 }
 
 /// zsh `bin_rmdir`.
-fn rmdir(ctx: &mut Ctx<'_, '_>, q: &mut Fsq<'_>, cs: Charset, args: &[BString]) -> Result<i32, Need> {
+fn rmdir(
+	ctx: &mut Ctx<'_, '_>,
+	q: &mut Fsq<'_>,
+	cs: Charset,
+	args: &[BString],
+) -> Result<i32, Need> {
 	let mut err = 0;
 	for arg in args {
 		let path = host_path(ctx, arg);
@@ -456,7 +479,13 @@ impl Recursive<'_, '_> {
 	}
 
 	/// zsh `recursivecmd_dorec`.
-	fn dorec(&mut self, ctx: &mut Ctx<'_, '_>, arg: &[u8], rp: &[u8], st: Stat) -> Result<i32, Need> {
+	fn dorec(
+		&mut self,
+		ctx: &mut Ctx<'_, '_>,
+		arg: &[u8],
+		rp: &[u8],
+		st: Stat,
+	) -> Result<i32, Need> {
 		let err1 = self.dirpre(ctx, arg, rp, st)?;
 		if err1 & 2 != 0 {
 			return Ok(2);
@@ -501,7 +530,13 @@ impl Recursive<'_, '_> {
 
 	/// The `dirpre_func`: `chmod`/`chown` act on the directory before
 	/// its contents.
-	fn dirpre(&mut self, ctx: &mut Ctx<'_, '_>, arg: &[u8], rp: &[u8], st: Stat) -> Result<i32, Need> {
+	fn dirpre(
+		&mut self,
+		ctx: &mut Ctx<'_, '_>,
+		arg: &[u8],
+		rp: &[u8],
+		st: Stat,
+	) -> Result<i32, Need> {
 		match self.rec {
 			Rec::Rm { .. } => Ok(0),
 			Rec::Chmod(_) | Rec::Chown { .. } => self.leaf(ctx, arg, rp, Some(st)),
@@ -530,7 +565,13 @@ impl Recursive<'_, '_> {
 
 	/// The `leaf_func`: zsh `rm_leaf`, `chmod_dochmod`, `chown_dochown` /
 	/// `chown_dolchown`.
-	fn leaf(&mut self, ctx: &mut Ctx<'_, '_>, arg: &[u8], rp: &[u8], sp: Option<Stat>) -> Result<i32, Need> {
+	fn leaf(
+		&mut self,
+		ctx: &mut Ctx<'_, '_>,
+		arg: &[u8],
+		rp: &[u8],
+		sp: Option<Stat>,
+	) -> Result<i32, Need> {
 		let cs = self.cs;
 		let res = match self.rec {
 			Rec::Chmod(mode) => self.q.op(FsReq::Chmod { path: rp.into(), mode })?,
@@ -611,17 +652,30 @@ fn safe_split(arg: &[u8]) -> Option<(BString, BString)> {
 		}
 	}
 	let leaf_start = s + 1;
-	let leaf_end = rp[leaf_start..].iter().position(|&c| c == 0).map_or(rp.len(), |n| leaf_start + n);
+	let leaf_end = rp[leaf_start..]
+		.iter()
+		.position(|&c| c == 0)
+		.map_or(rp.len(), |n| leaf_start + n);
 	if leaf_start >= leaf_end {
 		return None;
 	}
 	let leaf = BString::from(&rp[leaf_start..leaf_end]);
-	let dir = if s > 0 { BString::from(&rp[..s]) } else { BString::from("/") };
+	let dir = if s > 0 {
+		BString::from(&rp[..s])
+	} else {
+		BString::from("/")
+	};
 	Some((dir, leaf))
 }
 
 /// zsh `bin_rm`.
-fn rm(ctx: &mut Ctx<'_, '_>, q: &mut Fsq<'_>, cs: Charset, ops: &Ops, args: &[BString]) -> Result<i32, Need> {
+fn rm(
+	ctx: &mut Ctx<'_, '_>,
+	q: &mut Fsq<'_>,
+	cs: Charset,
+	ops: &Ops,
+	args: &[BString],
+) -> Result<i32, Need> {
 	let force = ops.isset(b'f');
 	let unlinkdir = ops.isset(b'd');
 	let mut r = Recursive {
@@ -636,7 +690,13 @@ fn rm(ctx: &mut Ctx<'_, '_>, q: &mut Fsq<'_>, cs: Charset, ops: &Ops, args: &[BS
 }
 
 /// zsh `bin_chmod` (octal modes only, as zsh's).
-fn chmod(ctx: &mut Ctx<'_, '_>, q: &mut Fsq<'_>, cs: Charset, ops: &Ops, args: &[BString]) -> Result<i32, Need> {
+fn chmod(
+	ctx: &mut Ctx<'_, '_>,
+	q: &mut Fsq<'_>,
+	cs: Charset,
+	ops: &Ops,
+	args: &[BString],
+) -> Result<i32, Need> {
 	let Some(mode) = octal(&args[0]) else {
 		ctx.usage(format!("invalid mode `{}'", nice(cs, &args[0])));
 		return Ok(1);
@@ -655,7 +715,9 @@ fn getnumeric(p: &[u8]) -> Option<u32> {
 		return None;
 	}
 	// `strtoul` into a `uid_t`: saturate, then truncate as C does.
-	let v = p.iter().fold(0u64, |v, &c| v.saturating_mul(10).saturating_add(u64::from(c - b'0')));
+	let v = p
+		.iter()
+		.fold(0u64, |v, &c| v.saturating_mul(10).saturating_add(u64::from(c - b'0')));
 	Some(v as u32)
 }
 
@@ -903,7 +965,11 @@ fn domove(
 	};
 	if let Err(e) = q.op(req)? {
 		// A missing file when `p` exists is `q`'s fault.
-		let errfile = if e.is(enoent()) && q.stat(&pbuf, false)?.is_ok() { qn } else { p };
+		let errfile = if e.is(enoent()) && q.stat(&pbuf, false)?.is_ok() {
+			qn
+		} else {
+			p
+		};
 		ctx.usage(format!("`{}': {}", nice(cs, errfile), errmsg(&e)));
 		return Ok(1);
 	}

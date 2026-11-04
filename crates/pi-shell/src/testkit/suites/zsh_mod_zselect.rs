@@ -69,9 +69,8 @@ fn zsh_mod_zselect_times_out_on_a_silent_pipe() {
 
 #[test]
 fn zsh_mod_zselect_waits_for_a_writer() {
-	let (out, _, st) = zsh(
-		"zmodload zsh/zselect; zselect -t 500 -r 0 < <(zselect -t 5; print x); echo $? $reply",
-	);
+	let (out, _, st) =
+		zsh("zmodload zsh/zselect; zselect -t 500 -r 0 < <(zselect -t 5; print x); echo $? $reply");
 	assert_eq!(out, "0 -r 0\n");
 	assert_eq!(st, 0);
 }

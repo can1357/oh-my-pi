@@ -127,7 +127,10 @@ pub fn take_due(
 ///
 /// # Errors
 /// A store failure.
-pub fn scheduled_events(store: &mut dyn StateStore, vp: &Vproc) -> Result<Vec<BString>, StoreError> {
+pub fn scheduled_events(
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+) -> Result<Vec<BString>, StoreError> {
 	Ok(events(store, vp)?
 		.into_iter()
 		.map(|e| {
@@ -277,7 +280,8 @@ fn parse_time(ctx: &mut Ctx<'_, '_>, s: &[u8]) -> Result<Option<i64>, super::Nee
 	Ok(Some(t))
 }
 
-/// `sched` without arguments: the list, `%3d %a %b %e %k:%M:%S [-o ][-- ]command`.
+/// `sched` without arguments: the list, `%3d %a %b %e %k:%M:%S [-o ][--
+/// ]command`.
 fn list(ctx: &mut Ctx<'_, '_>) -> R {
 	let ev = events(ctx.cx.store, ctx.vp)?;
 	let mut out = Vec::new();

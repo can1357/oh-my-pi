@@ -740,9 +740,7 @@ fn typeset_single(
 			&& s.tie_partner().is_none()
 			&& (pmf & PM_READONLY != 0 || s.flags().contains(PmFlags::HIDE))
 	};
-	if newspecial
-		&& let Some(p) = pm.as_ref().filter(|p| p.special.is_some_and(computed))
-	{
+	if newspecial && let Some(p) = pm.as_ref().filter(|p| p.special.is_some_and(computed)) {
 		let flags = PmFlags::from_bits((pmf | on) & !(off | PM_LOCAL));
 		let (width, base) = (p.width, p.base);
 		let name = pname.to_vec();

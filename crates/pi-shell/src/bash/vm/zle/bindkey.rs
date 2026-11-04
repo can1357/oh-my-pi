@@ -242,7 +242,13 @@ pub fn bindkey(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 }
 
 /// zsh `bin_bindkey` over `kms`: the operation's status.
-fn run(kms: &mut Arc<Keymaps>, ops: &Ops, args: &[BString], main_vi: bool, rep: &mut Report) -> i32 {
+fn run(
+	kms: &mut Arc<Keymaps>,
+	ops: &Ops,
+	args: &[BString],
+	main_vi: bool,
+	rep: &mut Report,
+) -> i32 {
 	let fmt = rep.fmt;
 	// Select the operation and ensure no clashing options.
 	let op = OPNS.iter().position(|o| ops.isset(o.0));
@@ -253,7 +259,10 @@ fn run(kms: &mut Arc<Keymaps>, ops: &Ops, args: &[BString], main_vi: bool, rep: 
 		}
 	}
 	let (o, selp, min, max) = op.map_or((0, true, 0, None), |i| OPNS[i]);
-	let n = [b'e', b'v', b'a', b'M'].iter().filter(|&&c| ops.isset(c)).count();
+	let n = [b'e', b'v', b'a', b'M']
+		.iter()
+		.filter(|&&c| ops.isset(c))
+		.count();
 	if !selp && n != 0 {
 		rep.warn(format!("keymap cannot be selected with -{}", char::from(o)));
 		return 1;
@@ -554,9 +563,17 @@ struct ListState<'a> {
 /// zsh `bin_bindkey_list`: one key's binding, the bindings a prefix
 /// starts (`-p`), or the whole keymap; `long` (`-L`) as `bindkey`
 /// commands.
-fn list(km: &Keymap, kmname: &[u8], args: &[BString], long: bool, pflag: bool, rep: &mut Report) -> i32 {
+fn list(
+	km: &Keymap,
+	kmname: &[u8],
+	args: &[BString],
+	long: bool,
+	pflag: bool,
+	rep: &mut Report,
+) -> i32 {
 	let fmt = rep.fmt;
-	let mut st = ListState { kmname, long, all: false, first: Vec::new(), last: Vec::new(), bind: None };
+	let mut st =
+		ListState { kmname, long, all: false, first: Vec::new(), last: Vec::new(), bind: None };
 	if let (Some(a), false) = (args.first(), pflag) {
 		let seq = getkeys(a);
 		st.all = true;
@@ -641,7 +658,11 @@ fn bindlistout(st: &ListState<'_>, fmt: Fmt) -> Vec<u8> {
 				Some(Bind::Widget(w)) => w.as_slice(),
 				_ => super::keymap::UNDEFINED_KEY,
 			};
-			out.extend_from_slice(&if st.long { fmt.quoted(name) } else { fmt.nice(name) });
+			out.extend_from_slice(&if st.long {
+				fmt.quoted(name)
+			} else {
+				fmt.nice(name)
+			});
 		},
 	}
 	out.push(b'\n');
@@ -653,7 +674,11 @@ mod tests {
 	use super::*;
 
 	fn fmt() -> Fmt {
-		Fmt { cs: Charset { utf8: true, print_eight: false, ..Charset::default() }, rc: false, csh: false }
+		Fmt {
+			cs:  Charset { utf8: true, print_eight: false, ..Charset::default() },
+			rc:  false,
+			csh: false,
+		}
 	}
 
 	fn listing(kms: &Keymaps, name: &[u8], long: bool) -> String {
@@ -733,7 +758,12 @@ mod tests {
 			(b"visual", include_str!("testdata/bindkey_L_visual.txt")),
 			(b"viopp", include_str!("testdata/bindkey_L_viopp.txt")),
 		] {
-			assert_eq!(listing(&kms, name, true), want, "bindkey -L -M {}", String::from_utf8_lossy(name));
+			assert_eq!(
+				listing(&kms, name, true),
+				want,
+				"bindkey -L -M {}",
+				String::from_utf8_lossy(name)
+			);
 		}
 		// zsh: bindkey -M vicmd
 		assert_eq!(listing(&kms, b"vicmd", false), include_str!("testdata/bindkey_vicmd.txt"));
@@ -744,7 +774,9 @@ mod tests {
 		let mut kms = Arc::new(Keymaps::new(false));
 		// zsh: print -l $keymaps
 		let names: Vec<String> = kms.names().iter().map(ToString::to_string).collect();
-		assert_eq!(names, ["visual", "viopp", "command", ".safe", "vicmd", "main", "isearch", "viins", "emacs"]);
+		assert_eq!(names, [
+			"visual", "viopp", "command", ".safe", "vicmd", "main", "isearch", "viins", "emacs"
+		]);
 		// zsh: bindkey -l; bindkey -lL
 		assert_eq!(bkrun(&mut kms, b"l", &[]), (
 			0,
@@ -757,16 +789,22 @@ mod tests {
 				.into()
 		));
 		// zsh: bindkey -l nope emacs
-		assert_eq!(bkrun(&mut kms, b"l", &[b"nope", b"emacs"]), (1, "W:no such keymap: `nope'\nemacs\n".into()));
+		assert_eq!(
+			bkrun(&mut kms, b"l", &[b"nope", b"emacs"]),
+			(1, "W:no such keymap: `nope'\nemacs\n".into())
+		);
 		// zsh: bindkey -D main; print -l $keymaps
 		assert_eq!(bkrun(&mut kms, b"D", &[b"main"]).0, 0);
 		let names: Vec<String> = kms.names().iter().map(ToString::to_string).collect();
-		assert_eq!(names, ["visual", "viopp", "command", ".safe", "vicmd", "isearch", "viins", "emacs"]);
+		assert_eq!(names, [
+			"visual", "viopp", "command", ".safe", "vicmd", "isearch", "viins", "emacs"
+		]);
 	}
 
 	#[test]
 	fn primary_names_follow_zsh() {
-		// zsh: bindkey -N -- -foo; bindkey -A -- -foo bar; bindkey -A emacs "a b"; bindkey -lL
+		// zsh: bindkey -N -- -foo; bindkey -A -- -foo bar; bindkey -A emacs "a
+		// b"; bindkey -lL
 		let mut kms = Arc::new(Keymaps::new(false));
 		bkrun(&mut kms, b"N", &[b"-foo"]);
 		bkrun(&mut kms, b"A", &[b"-foo", b"bar"]);
@@ -780,7 +818,8 @@ mod tests {
 		// zsh: bindkey -D -- -foo; bindkey -lL | grep bar
 		bkrun(&mut kms, b"D", &[b"-foo"]);
 		assert!(bkrun(&mut kms, b"lL", &[]).1.contains("bindkey -N bar\n"));
-		// zsh: bindkey -N foo; bindkey -A foo zzz; bindkey -A emacs foo; bindkey -lL
+		// zsh: bindkey -N foo; bindkey -A foo zzz; bindkey -A emacs foo; bindkey
+		// -lL
 		let mut kms = Arc::new(Keymaps::new(false));
 		bkrun(&mut kms, b"N", &[b"foo"]);
 		bkrun(&mut kms, b"A", &[b"foo", b"zzz"]);
@@ -808,7 +847,10 @@ mod tests {
 		assert_eq!(bkrun(&mut kms, b"R", &[b"ba", b"foo"]), w("malformed key range `ba'"));
 		assert_eq!(bkrun(&mut kms, b"p", &[]), w("option -p requires a prefix string"));
 		assert_eq!(bkrun(&mut kms, b"A", &[b"nope", b"x"]), w("no such keymap `nope'"));
-		assert_eq!(bkrun(&mut kms, b"A", &[b"emacs", b".safe"]), w("keymap name `.safe' is protected"));
+		assert_eq!(
+			bkrun(&mut kms, b"A", &[b"emacs", b".safe"]),
+			w("keymap name `.safe' is protected")
+		);
 		assert_eq!(bkrun(&mut kms, b"N", &[b".safe"]), w("keymap name `.safe' is protected"));
 		assert_eq!(bkrun(&mut kms, b"N", &[b"x", b"nope"]), w("no such keymap `nope'"));
 		assert_eq!(bkrun(&mut kms, b"D", &[b".safe"]), w("keymap name `.safe' is protected"));
@@ -862,9 +904,9 @@ mod tests {
 		}
 		assert_eq!(bk(&mut kms, b"t", b"", &[]).1, include_str!("testdata/bindkey_sorted.txt"));
 
-		// zsh: bindkey -N t; bindkey -M t -R "a-f" foo; bindkey -M t -s "^Xa" 'ab\$"c^A';
-		// bindkey -M t "\\" bs; bindkey -M t -- "-x" dash; bindkey -M t "^?" undefined-key;
-		// bindkey -M t -L
+		// zsh: bindkey -N t; bindkey -M t -R "a-f" foo; bindkey -M t -s "^Xa"
+		// 'ab\$"c^A'; bindkey -M t "\\" bs; bindkey -M t -- "-x" dash;
+		// bindkey -M t "^?" undefined-key; bindkey -M t -L
 		let mut kms = Arc::new(Keymaps::new(false));
 		bkrun(&mut kms, b"N", &[b"t"]);
 		bk(&mut kms, b"t", b"R", &[b"a-f", b"foo"]);
@@ -887,7 +929,11 @@ mod tests {
 		// zsh: bindkey -A t main; bindkey -- -x y; bindkey -L | head -1
 		bkrun(&mut kms, b"A", &[b"t", b"main"]);
 		bk(&mut kms, b"main", b"", &[b"-x", b"y"]);
-		assert!(bk(&mut kms, b"main", b"L", &[]).1.contains("bindkey -- \"-x\" y\n"));
+		assert!(
+			bk(&mut kms, b"main", b"L", &[])
+				.1
+				.contains("bindkey -- \"-x\" y\n")
+		);
 	}
 
 	#[test]
@@ -918,10 +964,10 @@ mod tests {
 	fn meta_bindings_like_zsh() {
 		// zsh: bindkey -m 2>/dev/null; bindkey -L
 		let mut kms = Arc::new(Keymaps::new(false));
-		assert_eq!(bk(&mut kms, b"main", b"m", &[]), (
-			0,
-			"W:warning: `bindkey -m' disables multibyte support\n".into()
-		));
+		assert_eq!(
+			bk(&mut kms, b"main", b"m", &[]),
+			(0, "W:warning: `bindkey -m' disables multibyte support\n".into())
+		);
 		assert_eq!(listing(&kms, b"main", true), include_str!("testdata/bindkey_m_emacs.txt"));
 	}
 
@@ -959,7 +1005,8 @@ mod tests {
 			// has removed the double quotes.
 			assert_eq!(getkeys(&dequote(shown)), raw, "{}", String::from_utf8_lossy(arg));
 		}
-		// CSH_JUNKIE_QUOTES: zsh -f -c 'setopt cshjunkiequotes; bindkey -s x "a\"b"; bindkey x'
+		// CSH_JUNKIE_QUOTES: zsh -f -c 'setopt cshjunkiequotes; bindkey -s x
+		// "a\"b"; bindkey x'
 		assert_eq!(bindztrdup(b"a\"b", true), b"\"a\"\\\"\"b\"");
 	}
 

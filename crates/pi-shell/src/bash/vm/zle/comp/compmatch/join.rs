@@ -6,9 +6,10 @@
 use bstr::BString;
 
 use super::{
-	CHR_INVALID, PP_LOWER, PP_UPPER, at, cline_setlens, cp_cline, free_cline, get_cline, mb_metacharlenconv,
-	pattern_match, pattern_match_equivalence_ind, pattern_match_full, pattern_match1_ind, revert_cline,
-	set_llen, strlen, strncmp_ne, tail, zc_tolower, zlelineasstring,
+	CHR_INVALID, PP_LOWER, PP_UPPER, at, cline_setlens, cp_cline, free_cline, get_cline,
+	mb_metacharlenconv, pattern_match, pattern_match_equivalence_ind, pattern_match_full,
+	pattern_match1_ind, revert_cline, set_llen, strlen, strncmp_ne, tail, zc_tolower,
+	zlelineasstring,
 };
 use crate::bash::{
 	syntax::zsh::tok::META,
@@ -174,7 +175,11 @@ fn bld_line(
 	for _ in 0..wlen.max(0) {
 		let (n, mut ch) = mb_metacharlenconv(tail(word, wp));
 		if ch == CHR_INVALID {
-			let b = if at(word, wp) == META { at(word, wp + 1) ^ 32 } else { at(word, wp) };
+			let b = if at(word, wp) == META {
+				at(word, wp + 1) ^ 32
+			} else {
+				at(word, wp)
+			};
 			ch = i32::from(b as i8) as u32;
 		}
 		wordchars.push(ch);
@@ -207,13 +212,22 @@ fn bld_line(
 	}
 	let mut llen = mp.llen;
 	let mut rl = 0;
-	let (mut wordcp, mut curgen, mut linep): (isize, isize, isize) =
-		if sfx { (wlen as isize, llen as isize, llen as isize) } else { (0, 0, 0) };
+	let (mut wordcp, mut curgen, mut linep): (isize, isize, isize) = if sfx {
+		(wlen as isize, llen as isize, llen as isize)
+	} else {
+		(0, 0, 0)
+	};
 	let gpat = |i: isize| usize::try_from(i).ok().and_then(|i| gp.get(i).copied());
 	while llen != 0 && wlen != 0 {
-		let (wpx, tg) = if sfx { (wordcp - 1, curgen - 1) } else { (wordcp, curgen) };
+		let (wpx, tg) = if sfx {
+			(wordcp - 1, curgen - 1)
+		} else {
+			(wordcp, curgen)
+		};
 		let mut wmtp = 0;
-		let wc = usize::try_from(wpx).ok().and_then(|i| wordchars.get(i).copied());
+		let wc = usize::try_from(wpx)
+			.ok()
+			.and_then(|i| wordchars.get(i).copied());
 		let g = gpat(tg);
 		if let (Some(wc), Some(g)) = (wc, g)
 			&& gp_match1(g, wc, &mut wmtp) != 0
@@ -291,7 +305,13 @@ fn bld_line(
 
 /// zsh `join_strs`: a string for the line that matches both the `la`
 /// bytes of `sa` and the `lb` of `sb`, or `None`.
-fn join_strs(bm: Option<&Cmlist>, mut la: i32, sa: &[u8], mut lb: i32, sb: &[u8]) -> Option<Vec<u8>> {
+fn join_strs(
+	bm: Option<&Cmlist>,
+	mut la: i32,
+	sa: &[u8],
+	mut lb: i32,
+	sb: &[u8],
+) -> Option<Vec<u8>> {
 	let (mut ia, mut ib) = (0isize, 0isize);
 	let mut rs = Vec::new();
 	while la != 0 && lb != 0 {
@@ -359,7 +379,11 @@ fn cmp_anchors(c: &mut Comp, o: Cl, n: Cl, join: bool) -> i32 {
 			|| (oc.llen == nc.llen
 				&& oc.line.is_some()
 				&& nc.line.is_some()
-				&& !strncmp_ne(oc.line.as_ref().map_or(&[][..], |s| s.as_slice()), nc.line.as_ref().map_or(&[][..], |s| s.as_slice()), oc.llen)));
+				&& !strncmp_ne(
+					oc.line.as_ref().map_or(&[][..], |s| s.as_slice()),
+					nc.line.as_ref().map_or(&[][..], |s| s.as_slice()),
+					oc.llen,
+				)));
 	if same_word || line {
 		if line {
 			let y = c.clines.get_mut(o);
@@ -426,10 +450,18 @@ fn check_cmdata(c: &Comp, md: &mut Cmdata, sfx: bool) -> bool {
 			md.len = x.wlen;
 			md.olen = x.wlen;
 			md.str = x.word.clone();
-			md.sp = if md.str.is_some() && sfx { md.len as isize } else { 0 };
+			md.sp = if md.str.is_some() && sfx {
+				md.len as isize
+			} else {
+				0
+			};
 			md.alen = x.llen;
 			md.astr = x.line.clone();
-			md.ap = if md.astr.is_some() && sfx { md.alen as isize } else { 0 };
+			md.ap = if md.astr.is_some() && sfx {
+				md.alen as isize
+			} else {
+				0
+			};
 		}
 		md.pcl = Some(cl);
 		md.cl = x.next;
@@ -463,7 +495,15 @@ fn undo_cmdata(c: &mut Comp, md: &Cmdata, sfx: bool) -> Option<Cl> {
 
 /// zsh `join_sub`: a cline for a string matching both the `len` bytes of
 /// `s` and the next part of `md`; `mlen` gets the length used of `s`.
-fn join_sub(c: &mut Comp, md: &mut Cmdata, s: &[u8], len: i32, mlen: &mut i32, sfx: bool, join: bool) -> Option<Cl> {
+fn join_sub(
+	c: &mut Comp,
+	md: &mut Cmdata,
+	s: &[u8],
+	len: i32,
+	mlen: &mut i32,
+	sfx: bool,
+	join: bool,
+) -> Option<Cl> {
 	if check_cmdata(c, md, sfx) {
 		return None;
 	}
@@ -479,7 +519,11 @@ fn join_sub(c: &mut Comp, md: &mut Cmdata, s: &[u8], len: i32, mlen: &mut i32, s
 		ms = m.next.as_deref();
 		let Some(mp) = m.matcher.as_deref() else { continue };
 		if mp.flags == 0 && mp.wlen > 0 && mp.llen > 0 {
-			let (lo, wo) = if sfx { (mp.llen as isize, mp.wlen as isize) } else { (0, 0) };
+			let (lo, wo) = if sfx {
+				(mp.llen as isize, mp.wlen as isize)
+			} else {
+				(0, 0)
+			};
 			if mp.llen <= ol
 				&& mp.wlen <= nl
 				&& pattern_match_full(&mp.line, tail(s, ow - lo), &mp.word, md.tail(nw - wo))
@@ -544,11 +588,17 @@ fn sub_match(c: &Comp, md: &mut Cmdata, s: &[u8], mut len: i32, sfx: bool) -> i3
 			if l != 0 && at(s, p - 1) == META {
 				l -= 1;
 			}
-		} else if l != 0 && ((l < len && at(s, p - 1) == META) || (l < md.len && md.at(q - 1) == META)) {
+		} else if l != 0
+			&& ((l < len && at(s, p - 1) == META) || (l < md.len && md.at(q - 1) == META))
+		{
 			l -= 1;
 		}
 		// Don't end in the middle of a multibyte character.
-		let qm = if sfx { str - l as isize } else { str + l as isize };
+		let qm = if sfx {
+			str - l as isize
+		} else {
+			str + l as isize
+		};
 		if qm != 0 {
 			let mut p = 0isize;
 			while p < fulllen {
@@ -726,12 +776,15 @@ fn join_psfx(
 			let (sstr, slen) = field(c, oc, sf);
 			let mut jlen = 0;
 			let nojoin = c.clines.get(oc).flags & clf::JOIN == 0;
-			if let Some(joinl) = join_sub(c, &mut md, tail(&sstr, len as isize), slen - len, &mut jlen, sfx, nojoin) {
+			if let Some(joinl) =
+				join_sub(c, &mut md, tail(&sstr, len as isize), slen - len, &mut jlen, sfx, nojoin)
+			{
 				c.clines.get_mut(joinl).flags |= clf::DIFF;
 				let onext = c.clines.get(oc).next;
 				if len + jlen != slen {
 					let off = if sfx { 0 } else { (len + jlen) as isize };
-					let rest = get_cline(c, None, 0, Some(tail(&sstr, off)), slen - len - jlen, None, 0, 0);
+					let rest =
+						get_cline(c, None, 0, Some(tail(&sstr, off)), slen - len - jlen, None, 0, 0);
 					c.clines.get_mut(rest).next = onext;
 					c.clines.get_mut(joinl).next = Some(rest);
 				} else {
@@ -942,7 +995,8 @@ pub fn join_clines(c: &mut Comp, o: Option<Cl>, n: Option<Cl>) -> Option<Cl> {
 	let sm = clf::SUF | clf::MID;
 	while let (Some(oc), Some(ncl)) = (o, n) {
 		if fl(c, oc) & clf::NEW != 0 && fl(c, ncl) & clf::NEW == 0 {
-			let (t, tn) = scan(c, oc, |c, tn| fl(c, tn) & clf::NEW != 0 || cmp_anchors(c, tn, ncl, false) == 0);
+			let (t, tn) =
+				scan(c, oc, |c, tn| fl(c, tn) & clf::NEW != 0 || cmp_anchors(c, tn, ncl, false) == 0);
 			if let Some(tn) = tn {
 				let diff = sub_join(c, ncl, oc, tn, true);
 				match po {
@@ -958,7 +1012,8 @@ pub fn join_clines(c: &mut Comp, o: Option<Cl>, n: Option<Cl>) -> Option<Cl> {
 			}
 		}
 		if fl(c, oc) & clf::NEW == 0 && fl(c, ncl) & clf::NEW != 0 {
-			let (_, tn) = scan(c, ncl, |c, tn| fl(c, tn) & clf::NEW != 0 || cmp_anchors(c, oc, tn, false) == 0);
+			let (_, tn) =
+				scan(c, ncl, |c, tn| fl(c, tn) & clf::NEW != 0 || cmp_anchors(c, oc, tn, false) == 0);
 			if let Some(tn) = tn {
 				let of = fl(c, oc) & clf::MISS;
 				let diff = sub_join(c, oc, ncl, tn, false);
@@ -1019,7 +1074,10 @@ pub fn join_clines(c: &mut Comp, o: Option<Cl>, n: Option<Cl>) -> Option<Cl> {
 					let mut tt = oc;
 					to = None;
 					while let Some(x) = c.clines.get(tt).next {
-						if fl(c, x) & clf::NEW == 0 && fl(c, x) & clf::SKIP != 0 && cmp_anchors(c, tn, x, true) != 0 {
+						if fl(c, x) & clf::NEW == 0
+							&& fl(c, x) & clf::SKIP != 0
+							&& cmp_anchors(c, tn, x, true) != 0
+						{
 							to = Some(x);
 							break;
 						}
@@ -1048,7 +1106,8 @@ pub fn join_clines(c: &mut Comp, o: Option<Cl>, n: Option<Cl>) -> Option<Cl> {
 				n = c.clines.get(tn).next;
 				continue;
 			}
-			let (_, to1) = scan(c, oc, |c, x| !(fl(c, x) & clf::SKIP != 0 && cmp_anchors(c, ncl, x, true) != 0));
+			let (_, to1) =
+				scan(c, oc, |c, x| !(fl(c, x) & clf::SKIP != 0 && cmp_anchors(c, ncl, x, true) != 0));
 			if let Some(to) = to1 {
 				let diff = sub_join(c, ncl, oc, to, true);
 				match po {

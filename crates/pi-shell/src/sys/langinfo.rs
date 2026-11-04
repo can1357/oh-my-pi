@@ -111,7 +111,12 @@ mod native {
 			tm: *const libc::tm,
 			loc: libc::locale_t,
 		) -> libc::size_t;
-		fn strxfrm_l(dst: *mut c_char, src: *const c_char, n: libc::size_t, loc: libc::locale_t) -> libc::size_t;
+		fn strxfrm_l(
+			dst: *mut c_char,
+			src: *const c_char,
+			n: libc::size_t,
+			loc: libc::locale_t,
+		) -> libc::size_t;
 	}
 
 	/// A locale object for `LC_COLLATE`.
@@ -125,7 +130,8 @@ mod native {
 			let c = CString::new(name).ok()?;
 			// SAFETY: `c` is a valid C string; a null base asks for a new
 			// object.
-			let loc = unsafe { libc::newlocale(libc::LC_COLLATE_MASK, c.as_ptr(), core::ptr::null_mut()) };
+			let loc =
+				unsafe { libc::newlocale(libc::LC_COLLATE_MASK, c.as_ptr(), core::ptr::null_mut()) };
 			(!loc.is_null()).then_some(Self(Loc(loc)))
 		}
 
@@ -152,7 +158,11 @@ mod native {
 	impl Loc {
 		/// `newlocale(mask, name)`, `C` when the name is empty or unknown.
 		fn new(mask: c_int, name: &[u8]) -> Option<Self> {
-			let name = if name.is_empty() || name.contains(&0) { &b"C"[..] } else { name };
+			let name = if name.is_empty() || name.contains(&0) {
+				&b"C"[..]
+			} else {
+				name
+			};
 			let c = CString::new(name).ok()?;
 			// SAFETY: `c` is a valid C string; a null base asks for a new
 			// object.

@@ -44,7 +44,11 @@ const BINDS: &str = "bindkey -e\n\
 /// `rc`), sourced with `.` as the first command since `-f` skips
 /// `.zshrc`.
 fn spawn(real: bool, rc: &str) -> Spawn {
-	let s = if real { Spawn::real_zsh() } else { Spawn::zsh() };
+	let s = if real {
+		Spawn::real_zsh()
+	} else {
+		Spawn::zsh()
+	};
 	s.args(["-f", "-i"])
 		.env("PS1", "%~ %# ")
 		.env("RPS1", "[%?]")
@@ -62,7 +66,10 @@ fn keys(pty: &mut Pty, text: &str) -> io::Result<()> {
 
 /// Run `drive` against both shells after sourcing the rc file; the final
 /// screens (`None` for zsh when it is not installed).
-fn screens(rc: &str, drive: impl Fn(&mut Pty) -> io::Result<()>) -> io::Result<(String, Option<String>)> {
+fn screens(
+	rc: &str,
+	drive: impl Fn(&mut Pty) -> io::Result<()>,
+) -> io::Result<(String, Option<String>)> {
 	let run = |pty: &mut Pty| -> io::Result<()> {
 		pty.settle(QUIET, TIMEOUT)?;
 		keys(pty, ". ~/.zshrc\r")?;
@@ -296,11 +303,7 @@ fn where_is_and_describe_key() {
 
 #[test]
 fn which_command_and_run_help() {
-	same("alias run-help=print\n", &[
-		"ls -l\x1b?",
-		"\x15echo a; print -r x\x1bh",
-		"\r",
-	]);
+	same("alias run-help=print\n", &["ls -l\x1b?", "\x15echo a; print -r x\x1bh", "\r"]);
 }
 
 #[test]
@@ -337,7 +340,8 @@ fn bracketed_paste_magic() {
 }
 
 /// Pastes with an active widget inside, then one undone.
-const BPM_KEYS: &[&str] = &["echo \x1b[200~pasted 'text' \x17ok\x1b[201~,\r", "echo x\x1b[200~ab\x1b[201~\x1f,\r"];
+const BPM_KEYS: &[&str] =
+	&["echo \x1b[200~pasted 'text' \x17ok\x1b[201~,\r", "echo x\x1b[200~ab\x1b[201~\x1f,\r"];
 
 #[test]
 fn bracketed_paste_magic_autoloaded() {
@@ -378,11 +382,7 @@ fn magic_space_and_expand_history() {
 
 #[test]
 fn pound_insert_and_unmeta() {
-	same("", &[
-		"echo commented\x18#",
-		"\x10\x18#",
-		"echo a\x1b\rb\r",
-	]);
+	same("", &["echo commented\x18#", "\x10\x18#", "echo a\x1b\rb\r"]);
 }
 
 #[test]

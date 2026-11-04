@@ -1,5 +1,5 @@
-//! One timer thread shared by every [`Timer`] a process host arms (B9: `read -t`,
-//! `TMOUT`).
+//! One timer thread shared by every [`Timer`] a process host arms (B9: `read
+//! -t`, `TMOUT`).
 
 use std::{
 	cmp::Reverse,
@@ -14,6 +14,7 @@ use std::{
 };
 
 use parking_lot::{Condvar, Mutex, MutexGuard};
+
 use crate::bash::Timer;
 
 /// State of one armed timer.

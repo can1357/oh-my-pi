@@ -361,7 +361,8 @@ pub fn tilde_form(f: &Found, s: &[u8]) -> BString {
 
 /// Whether shell function `f` is defined and enabled (zsh `getshfunc`).
 fn defined(ex: &mut Expander<'_, '_>, f: &[u8]) -> X<bool> {
-	if let Some(Record::Words(w)) = state::record(ex.cx.store, ex.vp, Key::Misc(MiscKey::ZshDisabledFuncs))?
+	if let Some(Record::Words(w)) =
+		state::record(ex.cx.store, ex.vp, Key::Misc(MiscKey::ZshDisabledFuncs))?
 		&& w.iter().any(|d| d.as_slice() == f)
 	{
 		return Ok(false);
@@ -394,7 +395,11 @@ fn squote(s: &[u8]) -> Vec<u8> {
 ///
 /// # Errors
 /// The call to run first; a store failure.
-pub fn dirname_hook(ex: &mut Expander<'_, '_>, arg1: &[u8], orig: &[u8]) -> X<Option<Vec<BString>>> {
+pub fn dirname_hook(
+	ex: &mut Expander<'_, '_>,
+	arg1: &[u8],
+	orig: &[u8],
+) -> X<Option<Vec<BString>>> {
 	if defined(ex, b"zsh_directory_name")?
 		&& let Some(reply) = dirname_call(ex, b"zsh_directory_name", arg1, orig)?
 	{
@@ -412,7 +417,12 @@ pub fn dirname_hook(ex: &mut Expander<'_, '_>, arg1: &[u8], orig: &[u8]) -> X<Op
 
 /// zsh `subst_string_by_func`: call `f arg1 orig`; `reply` (an array) if
 /// it returned 0.
-fn dirname_call(ex: &mut Expander<'_, '_>, f: &[u8], arg1: &[u8], orig: &[u8]) -> X<Option<Vec<BString>>> {
+fn dirname_call(
+	ex: &mut Expander<'_, '_>,
+	f: &[u8],
+	arg1: &[u8],
+	orig: &[u8],
+) -> X<Option<Vec<BString>>> {
 	let mut call = squote(f);
 	for a in [arg1, orig] {
 		call.push(b' ');

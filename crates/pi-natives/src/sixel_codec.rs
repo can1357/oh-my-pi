@@ -9,11 +9,17 @@ use super::{decimal, guard_dimensions};
 
 const TRANSPARENT: u16 = 256;
 
-/// Encode RGBA pixels using at most 256 registers and transparent background mode.
+/// Encode RGBA pixels using at most 256 registers and transparent background
+/// mode.
 pub(super) fn encode(rgba: &[u8], width: usize, height: usize) -> String {
 	let mut exact = HashMap::with_capacity(256);
 	let mut palette = Vec::with_capacity(256);
-	for pixel in rgba.as_chunks::<4>().0.iter().filter(|pixel| pixel[3] >= 128) {
+	for pixel in rgba
+		.as_chunks::<4>()
+		.0
+		.iter()
+		.filter(|pixel| pixel[3] >= 128)
+	{
 		let color = [pixel[0], pixel[1], pixel[2]];
 		if !exact.contains_key(&color) {
 			if palette.len() == 256 {
@@ -28,7 +34,8 @@ pub(super) fn encode(rgba: &[u8], width: usize, height: usize) -> String {
 	let indices = if exact.is_empty() && !palette.is_empty() {
 		dither(rgba, width, &palette)
 	} else {
-		rgba.as_chunks::<4>()
+		rgba
+			.as_chunks::<4>()
 			.0
 			.iter()
 			.map(|pixel| {
@@ -98,14 +105,19 @@ pub(super) fn encode(rgba: &[u8], width: usize, height: usize) -> String {
 
 #[derive(Clone, Copy, Default)]
 struct Bin {
-	sums: [u64; 3],
+	sums:  [u64; 3],
 	count: u64,
 }
 
 fn median_cut(rgba: &[u8]) -> Vec<[u8; 3]> {
 	// Five bits per channel bound histogram memory independently of image size.
 	let mut histogram = vec![Bin::default(); 32 * 32 * 32];
-	for pixel in rgba.as_chunks::<4>().0.iter().filter(|pixel| pixel[3] >= 128) {
+	for pixel in rgba
+		.as_chunks::<4>()
+		.0
+		.iter()
+		.filter(|pixel| pixel[3] >= 128)
+	{
 		let index = (usize::from(pixel[0] >> 3) << 10)
 			| (usize::from(pixel[1] >> 3) << 5)
 			| usize::from(pixel[2] >> 3);
@@ -160,22 +172,27 @@ fn median_cut(rgba: &[u8]) -> Vec<[u8; 3]> {
 		boxes[index] = (start, middle);
 		boxes.push((middle, end));
 	}
-	boxes.into_iter().map(|(start, end)| {
-		let mut total = Bin::default();
-		for bin in &bins[start..end] {
-			total.count += bin.count;
-			for (sum, value) in total.sums.iter_mut().zip(bin.sums) {
-				*sum += value;
+	boxes
+		.into_iter()
+		.map(|(start, end)| {
+			let mut total = Bin::default();
+			for bin in &bins[start..end] {
+				total.count += bin.count;
+				for (sum, value) in total.sums.iter_mut().zip(bin.sums) {
+					*sum += value;
+				}
 			}
-		}
-		total.sums.map(|sum| ((sum + total.count / 2) / total.count) as u8)
-	}).collect()
+			total
+				.sums
+				.map(|sum| ((sum + total.count / 2) / total.count) as u8)
+		})
+		.collect()
 }
 
 struct ColorNode {
 	color: usize,
-	axis: usize,
-	left: Option<usize>,
+	axis:  usize,
+	left:  Option<usize>,
 	right: Option<usize>,
 }
 
@@ -211,16 +228,26 @@ fn nearest_color(
 ) {
 	let node = &nodes[index];
 	let candidate = palette[node.color].map(f32::from);
-	let distance: f32 = color.iter().zip(candidate).map(|(a, b)| (a - b).powi(2)).sum();
+	let distance: f32 = color
+		.iter()
+		.zip(candidate)
+		.map(|(a, b)| (a - b).powi(2))
+		.sum();
 	if distance < best.1 {
 		*best = (node.color, distance);
 	}
 	let delta = color[node.axis] - candidate[node.axis];
-	let (near, far) = if delta < 0.0 { (node.left, node.right) } else { (node.right, node.left) };
+	let (near, far) = if delta < 0.0 {
+		(node.left, node.right)
+	} else {
+		(node.right, node.left)
+	};
 	if let Some(near) = near {
 		nearest_color(nodes, near, color, palette, best);
 	}
-	if delta * delta < best.1 && let Some(far) = far {
+	if delta * delta < best.1
+		&& let Some(far) = far
+	{
 		nearest_color(nodes, far, color, palette, best);
 	}
 }
@@ -237,11 +264,13 @@ fn dither(rgba: &[u8], width: usize, palette: &[[u8; 3]]) -> Vec<u16> {
 		for step in 0..width {
 			let x = if forward { step } else { width - step - 1 };
 			let pixel = &row[x * 4..x * 4 + 4];
-			// Transparent pixels discard incoming error and never train the palette.
+			// Transparent pixels discard incoming error and never train the
+			// palette.
 			if pixel[3] < 128 {
 				continue;
 			}
-			let color = std::array::from_fn(|channel| f32::from(pixel[channel]) + current[x + 1][channel]);
+			let color =
+				std::array::from_fn(|channel| f32::from(pixel[channel]) + current[x + 1][channel]);
 			let mut nearest = (0, f32::INFINITY);
 			nearest_color(&nodes, root, color, palette, &mut nearest);
 			indices[y * width + x] = nearest.0 as u16;
@@ -331,13 +360,20 @@ impl Iterator for Commands<'_> {
 
 /// Decode one bounded SIXEL control string, including RGB and HLS registers.
 pub(super) fn decode(bytes: &[u8]) -> Result<RgbaImage> {
-	let start = bytes.array_windows().position(|pair| pair == b"\x1bP").map(|i| i + 2)
+	let start = bytes
+		.array_windows()
+		.position(|pair| pair == b"\x1bP")
+		.map(|i| i + 2)
 		.or_else(|| bytes.iter().position(|&byte| byte == 0x90).map(|i| i + 1))
 		.ok_or_else(|| Error::from_reason("SIXEL data is missing a DCS introducer"))?;
-	let q = bytes[start..].iter().position(|&byte| byte == b'q').map(|i| start + i)
+	let q = bytes[start..]
+		.iter()
+		.position(|&byte| byte == b'q')
+		.map(|i| start + i)
 		.ok_or_else(|| Error::from_reason("SIXEL data is missing its q introducer"))?;
 	let header = &bytes[start..q];
-	let transparent = header.split(|&byte| byte == b';')
+	let transparent = header
+		.split(|&byte| byte == b';')
 		.nth(1)
 		.is_some_and(|parameter| decimal(parameter, 0).0 == 1);
 	let commands = Commands { bytes, index: q + 1 };
@@ -357,13 +393,20 @@ pub(super) fn decode(bytes: &[u8]) -> Result<RgbaImage> {
 				height = height.max(values[3]);
 			},
 			Command::CarriageReturn => x = 0,
-			Command::Newline => { x = 0; y = y.saturating_add(6); },
+			Command::Newline => {
+				x = 0;
+				y = y.saturating_add(6);
+			},
 			Command::Color(..) => {},
 		}
 		guard_dimensions(width, height)?;
 	}
 	let mut palette = default_palette();
-	let background = if transparent { Rgba([0; 4]) } else { palette[0] };
+	let background = if transparent {
+		Rgba([0; 4])
+	} else {
+		palette[0]
+	};
 	let mut image = RgbaImage::from_pixel(width as u32, height as u32, background);
 	let mut color = palette[0];
 	x = 0;
@@ -392,7 +435,10 @@ pub(super) fn decode(bytes: &[u8]) -> Result<RgbaImage> {
 				color = palette[index];
 			},
 			Command::CarriageReturn => x = 0,
-			Command::Newline => { x = 0; y += 6; },
+			Command::Newline => {
+				x = 0;
+				y += 6;
+			},
 			Command::Raster(_) => {},
 		}
 	}
@@ -406,10 +452,22 @@ fn percent(value: usize) -> u8 {
 fn default_palette() -> [Rgba<u8>; 256] {
 	let mut palette = [Rgba([255; 4]); 256];
 	let base = [
-		[0, 0, 0], [20, 20, 80], [80, 13, 13], [20, 80, 20],
-		[80, 20, 80], [20, 80, 80], [80, 80, 20], [53, 53, 53],
-		[26, 26, 26], [33, 33, 60], [60, 26, 26], [33, 60, 33],
-		[60, 33, 60], [33, 60, 60], [60, 60, 33], [80, 80, 80],
+		[0, 0, 0],
+		[20, 20, 80],
+		[80, 13, 13],
+		[20, 80, 20],
+		[80, 20, 80],
+		[20, 80, 80],
+		[80, 80, 20],
+		[53, 53, 53],
+		[26, 26, 26],
+		[33, 33, 60],
+		[60, 26, 26],
+		[33, 60, 33],
+		[60, 33, 60],
+		[33, 60, 60],
+		[60, 60, 33],
+		[80, 80, 80],
 	];
 	for (entry, color) in palette.iter_mut().zip(base) {
 		let [r, g, b] = color.map(percent);
@@ -417,7 +475,10 @@ fn default_palette() -> [Rgba<u8>; 256] {
 	}
 	for index in 0..216 {
 		palette[index + 16] = Rgba([
-			percent(index / 36 * 20), percent(index / 6 % 6 * 20), percent(index % 6 * 20), 255,
+			percent(index / 36 * 20),
+			percent(index / 6 % 6 * 20),
+			percent(index % 6 * 20),
+			255,
 		]);
 	}
 	for level in 0..24 {

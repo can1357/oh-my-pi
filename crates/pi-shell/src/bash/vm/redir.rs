@@ -415,10 +415,7 @@ fn var_fd(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, name: &[u8]) -> Optio
 	let index = index.as_deref().map(|i| i.as_slice());
 	// zsh `{1}>&-`: a positional parameter (a `zle -F` handler closing the
 	// fd it was given).
-	if index.is_none()
-		&& !base.is_empty()
-		&& base.iter().all(u8::is_ascii_digit)
-	{
+	if index.is_none() && !base.is_empty() && base.iter().all(u8::is_ascii_digit) {
 		let n: usize = std::str::from_utf8(&base).ok()?.parse().ok()?;
 		let args = state::positional_ref(&k.root, cx.store, vp).ok()?;
 		let text = args.get(n.checked_sub(1)?)?;
@@ -837,9 +834,8 @@ fn seed_pipeline(vp: &mut Vproc, unit: &Unit) {
 	let Some(f) = vp.frames.last() else {
 		return;
 	};
-	let base =
-		matches!(f.kind, FrameKind::Stage)
-			|| (vp.frames.len() == 1 && matches!(f.kind, FrameKind::Subshell | FrameKind::Job { .. }));
+	let base = matches!(f.kind, FrameKind::Stage)
+		|| (vp.frames.len() == 1 && matches!(f.kind, FrameKind::Subshell | FrameKind::Job { .. }));
 	if !base {
 		return;
 	}

@@ -866,13 +866,14 @@ fn is_key_press(event: &CGEvent) -> bool {
 	match CGEvent::r#type(Some(event)) {
 		CGEventType::KeyDown => true,
 		CGEventType::FlagsChanged => {
-			let flag = match CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode) {
-				56 | 60 => CGEventFlags::MaskShift,
-				58 | 61 => CGEventFlags::MaskAlternate,
-				59 | 62 => CGEventFlags::MaskControl,
-				54 | 55 => CGEventFlags::MaskCommand,
-				_ => return false,
-			};
+			let flag =
+				match CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode) {
+					56 | 60 => CGEventFlags::MaskShift,
+					58 | 61 => CGEventFlags::MaskAlternate,
+					59 | 62 => CGEventFlags::MaskControl,
+					54 | 55 => CGEventFlags::MaskCommand,
+					_ => return false,
+				};
 			CGEvent::flags(Some(event)).contains(flag)
 		},
 		_ => false,
@@ -1301,7 +1302,8 @@ const FIELD_WINDOW_UNDER_POINTER: u32 = 91;
 const FIELD_WINDOW_UNDER_POINTER_THAT_CAN_HANDLE: u32 = 92;
 /// `NSEventSubtypeTouch`.
 const SUBTYPE_TOUCH: i64 = 3;
-/// `NSEventTypeAppKitDefined`, an `AppKit` event type without a named Quartz constant.
+/// `NSEventTypeAppKitDefined`, an `AppKit` event type without a named Quartz
+/// constant.
 const APPKIT_DEFINED_EVENT: u32 = 13;
 /// `NSEventSubtypeApplicationActivated`.
 const APPLICATION_ACTIVATED: i64 = 1;
@@ -1731,8 +1733,10 @@ unsafe extern "C" {
 	fn get_local_events_suppression_interval(source: *mut CGEventSource) -> f64;
 	#[cfg(test)]
 	#[link_name = "CGEventSourceGetLocalEventsFilterDuringSuppressionState"]
-	fn get_local_events_filter_during_suppression_state(source: *mut CGEventSource, state: u32)
-	-> u32;
+	fn get_local_events_filter_during_suppression_state(
+		source: *mut CGEventSource,
+		state: u32,
+	) -> u32;
 	#[cfg(test)]
 	#[link_name = "CGEventKeyboardGetUnicodeString"]
 	fn keyboard_get_unicode_string(
@@ -1756,7 +1760,10 @@ fn event_source(state: CGEventSourceStateID) -> CoreResult<CFRetained<CGEventSou
 	// SAFETY: `source` is a live CGEventSource and both setters accept these
 	// documented masks/states.
 	unsafe {
-		set_local_events_suppression_interval(std::ptr::from_ref::<CGEventSource>(&source).cast_mut(), 0.0);
+		set_local_events_suppression_interval(
+			std::ptr::from_ref::<CGEventSource>(&source).cast_mut(),
+			0.0,
+		);
 		set_local_events_filter_during_suppression_state(
 			std::ptr::from_ref::<CGEventSource>(&source).cast_mut(),
 			LOCAL_EVENT_FILTER,
@@ -2858,7 +2865,9 @@ fn route_window_pointer(
 fn stamp_now(event: &CGEvent) {
 	// SAFETY: `event` is a live CGEvent. Quartz event timestamps count
 	// nanoseconds of system uptime.
-	unsafe { set_event_timestamp(std::ptr::from_ref::<CGEvent>(event).cast_mut(), control::uptime_ns()) };
+	unsafe {
+		set_event_timestamp(std::ptr::from_ref::<CGEvent>(event).cast_mut(), control::uptime_ns())
+	};
 }
 
 fn background_scroll(
@@ -2877,9 +2886,15 @@ fn background_scroll(
 	// the event reaches the process.
 	post_hover(source, pid, wid, window, x, y, click_group_id())?;
 	control::wait(Duration::from_millis(12))?;
-	let event =
-		CGEvent::new_scroll_wheel_event2(Some(source), CGScrollEventUnit::Pixel, 2, wheel_y, wheel_x, 0)
-			.ok_or_else(|| DesktopError::input_failed("failed to create a Quartz scroll event"))?;
+	let event = CGEvent::new_scroll_wheel_event2(
+		Some(source),
+		CGScrollEventUnit::Pixel,
+		2,
+		wheel_y,
+		wheel_x,
+		0,
+	)
+	.ok_or_else(|| DesktopError::input_failed("failed to create a Quartz scroll event"))?;
 	CGEvent::set_flags(Some(&event), CGEventFlags::empty());
 	CGEvent::set_location(Some(&event), CGPoint::new(x, y));
 	skylight::set_fields(&event, &[
@@ -3305,7 +3320,8 @@ fn post_bare(code: u16, down: bool, held: &mut BareModifiers) -> CoreResult<()> 
 	}
 	// SAFETY: `raw` is a non-null create-rule event whose ownership moves
 	// here.
-	let event = unsafe { CFRetained::from_raw(std::ptr::NonNull::new(raw).expect("non-null event")) };
+	let event =
+		unsafe { CFRetained::from_raw(std::ptr::NonNull::new(raw).expect("non-null event")) };
 	let flags = held.flags(code, down, CGEvent::flags(Some(&event)).bits());
 	CGEvent::set_flags(Some(&event), CGEventFlags::from_bits_retain(flags));
 	post_global(&event)
@@ -4161,9 +4177,15 @@ fn global_scroll(
 			control::wait(WHEEL_STEP_GAP)?;
 		}
 		before_wheel()?;
-		let event =
-			CGEvent::new_scroll_wheel_event2(Some(source), CGScrollEventUnit::Pixel, 2, wheel_y, wheel_x, 0)
-				.ok_or_else(|| DesktopError::input_failed("failed to create a Quartz scroll event"))?;
+		let event = CGEvent::new_scroll_wheel_event2(
+			Some(source),
+			CGScrollEventUnit::Pixel,
+			2,
+			wheel_y,
+			wheel_x,
+			0,
+		)
+		.ok_or_else(|| DesktopError::input_failed("failed to create a Quartz scroll event"))?;
 		CGEvent::set_location(Some(&event), point);
 		post_global(&event)?;
 	}
@@ -4252,10 +4274,22 @@ fn global_drag(
 	 -> CoreResult<()> {
 		let event = CGEvent::new_mouse_event(Some(&source), event_type, location, cg_button)
 			.ok_or_else(|| DesktopError::input_failed("failed to create a Quartz pointer event"))?;
-		CGEvent::set_integer_value_field(Some(&event), CGEventField::MouseEventClickState, i64::from(pressed));
-		CGEvent::set_double_value_field(Some(&event), CGEventField::MouseEventPressure, f64::from(u8::from(pressed)));
+		CGEvent::set_integer_value_field(
+			Some(&event),
+			CGEventField::MouseEventClickState,
+			i64::from(pressed),
+		);
+		CGEvent::set_double_value_field(
+			Some(&event),
+			CGEventField::MouseEventPressure,
+			f64::from(u8::from(pressed)),
+		);
 		if number != 0 {
-			CGEvent::set_integer_value_field(Some(&event), CGEventField::MouseEventButtonNumber, number);
+			CGEvent::set_integer_value_field(
+				Some(&event),
+				CGEventField::MouseEventButtonNumber,
+				number,
+			);
 		}
 		CGEvent::set_flags(Some(&event), flags);
 		post_global(&event)
@@ -4300,7 +4334,11 @@ fn post_global_mouse(
 		.ok_or_else(|| DesktopError::input_failed("failed to create a Quartz pointer event"))?;
 	CGEvent::set_integer_value_field(Some(&event), CGEventField::MouseEventClickState, click_state);
 	if button_number != 0 {
-		CGEvent::set_integer_value_field(Some(&event), CGEventField::MouseEventButtonNumber, button_number);
+		CGEvent::set_integer_value_field(
+			Some(&event),
+			CGEventField::MouseEventButtonNumber,
+			button_number,
+		);
 	}
 	CGEvent::set_flags(Some(&event), flags);
 	post_global(&event)
@@ -4322,7 +4360,11 @@ fn post_hid(event: &CGEvent, post: impl FnOnce(&CGEvent)) -> CoreResult<()> {
 	if is_key_press(event) || control::is_pointer_press(CGEvent::r#type(Some(event)).0) {
 		control::intervention::check_press()?;
 	}
-	CGEvent::set_integer_value_field(Some(event), CGEventField::EventSourceUserData, control::SYNTHETIC_EVENT_TAG);
+	CGEvent::set_integer_value_field(
+		Some(event),
+		CGEventField::EventSourceUserData,
+		control::SYNTHETIC_EVENT_TAG,
+	);
 	release_guard::post(Route::Hid, event, || {
 		post(event);
 		Ok(())
@@ -4400,7 +4442,8 @@ mod tests {
 			&[KeyName::Shift, KeyName::Space],
 			KEY_GAP,
 			|event| {
-				let code = CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
+				let code =
+					CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
 				events.push(shift_transition(event));
 				if code == 49 && matches!(CGEvent::r#type(Some(event)), CGEventType::KeyDown) {
 					Err(DesktopError::input_failed("delivery may be partial"))
@@ -4651,8 +4694,7 @@ mod tests {
 		let keys = us_keys("ab").unwrap();
 		// Caps Lock on: every letter would arrive capitalised, so nothing is
 		// pressed.
-		let mut check =
-			physical_modifier_check(&window, || CGEventFlags::MaskAlphaShift.bits());
+		let mut check = physical_modifier_check(&window, || CGEventFlags::MaskAlphaShift.bits());
 		let mut posted = 0;
 		let error = type_keys(&source, &keys, Duration::ZERO, &mut check, |_| {
 			posted += 1;
@@ -4687,8 +4729,7 @@ mod tests {
 		);
 		assert_eq!(typed, [(CGEventType::KeyDown.0, 0), (CGEventType::KeyUp.0, 0)]);
 		// Flags that change no key, such as the keypad's, do not stop it.
-		let mut check =
-			physical_modifier_check(&window, || CGEventFlags::MaskNumericPad.bits());
+		let mut check = physical_modifier_check(&window, || CGEventFlags::MaskNumericPad.bits());
 		type_keys(&source, &keys, Duration::ZERO, &mut check, |_| Ok(())).unwrap();
 	}
 
@@ -5581,7 +5622,8 @@ mod tests {
 				.expect("mouse event")
 		};
 		let mut posted = Vec::new();
-		let mut post = |kind| post_hid(&event(kind), |event| posted.push(CGEvent::r#type(Some(event)).0));
+		let mut post =
+			|kind| post_hid(&event(kind), |event| posted.push(CGEvent::r#type(Some(event)).0));
 		// The user clicks in TextEdit while takeover brings the target forward.
 		listener.record_for_test(7, Instant::now());
 		let press = post(CGEventType::LeftMouseDown);
@@ -5812,11 +5854,8 @@ mod tests {
 		assert_eq!(result.unwrap_err().code, ErrorCode::UserIntervened);
 		// The hover and the off-screen press and release went out; the real
 		// press did not.
-		let (moved, down, up) = (
-			CGEventType::MouseMoved.0,
-			CGEventType::LeftMouseDown.0,
-			CGEventType::LeftMouseUp.0,
-		);
+		let (moved, down, up) =
+			(CGEventType::MouseMoved.0, CGEventType::LeftMouseDown.0, CGEventType::LeftMouseUp.0);
 		assert_eq!(*posted.borrow(), [moved, down, up]);
 	}
 
@@ -5982,7 +6021,8 @@ mod tests {
 					Duration::ZERO,
 					|| Ok(()),
 					|event| {
-						pressed += usize::from(matches!(CGEvent::r#type(Some(event)), CGEventType::KeyDown));
+						pressed +=
+							usize::from(matches!(CGEvent::r#type(Some(event)), CGEventType::KeyDown));
 						Ok(())
 					},
 				)
@@ -6166,13 +6206,24 @@ mod tests {
 		let source = source().expect("Quartz event source");
 		// SAFETY: `source` remains live for both CoreGraphics getter calls.
 		unsafe {
-			assert_eq!(get_local_events_suppression_interval(std::ptr::from_ref::<CGEventSource>(&source).cast_mut()), 0.0);
 			assert_eq!(
-				get_local_events_filter_during_suppression_state(std::ptr::from_ref::<CGEventSource>(&source).cast_mut(), SUPPRESSION_INTERVAL,),
+				get_local_events_suppression_interval(
+					std::ptr::from_ref::<CGEventSource>(&source).cast_mut()
+				),
+				0.0
+			);
+			assert_eq!(
+				get_local_events_filter_during_suppression_state(
+					std::ptr::from_ref::<CGEventSource>(&source).cast_mut(),
+					SUPPRESSION_INTERVAL,
+				),
 				LOCAL_EVENT_FILTER,
 			);
 			assert_eq!(
-				get_local_events_filter_during_suppression_state(std::ptr::from_ref::<CGEventSource>(&source).cast_mut(), REMOTE_MOUSE_DRAG,),
+				get_local_events_filter_during_suppression_state(
+					std::ptr::from_ref::<CGEventSource>(&source).cast_mut(),
+					REMOTE_MOUSE_DRAG,
+				),
 				LOCAL_EVENT_FILTER,
 			);
 		}
@@ -6516,15 +6567,11 @@ mod tests {
 		let result =
 			key_chord(&source, &[KeyName::Ctrl, KeyName::Shift, KeyName::Enter], KEY_GAP, |event| {
 				let kind = CGEvent::r#type(Some(event));
-				let code = CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
+				let code =
+					CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
 				let flags = CGEvent::flags(Some(event));
 				let shift = flags.contains(CGEventFlags::MaskShift);
-				events.push((
-					kind.0,
-					code,
-					flags.contains(CGEventFlags::MaskControl),
-					shift,
-				));
+				events.push((kind.0, code, flags.contains(CGEventFlags::MaskControl), shift));
 				if code == 56 && shift {
 					Err(DesktopError::input_failed("focus changed"))
 				} else {
@@ -6810,7 +6857,8 @@ mod tests {
 		let before = control::uptime_ns();
 		route_window_pointer(7, 42, &window, &event, 10.0, 10.0, 1, 0, 1).expect("route");
 		// SAFETY: `event` is a live CGEvent.
-		let stamped = unsafe { get_event_timestamp(std::ptr::from_ref::<CGEvent>(&event).cast_mut()) };
+		let stamped =
+			unsafe { get_event_timestamp(std::ptr::from_ref::<CGEvent>(&event).cast_mut()) };
 		let after = control::uptime_ns();
 		assert!((before..=after).contains(&stamped), "{before} <= {stamped} <= {after}");
 	}

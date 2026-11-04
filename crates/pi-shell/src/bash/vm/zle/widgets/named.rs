@@ -45,8 +45,14 @@ pub type ListDone = Box<dyn FnOnce(&mut Zw<'_, '_>, i32) -> WResult + Send>;
 /// `$LINES`, kept in step with the terminal).
 fn term_size(zw: &mut Zw<'_, '_>) -> (i64, i64) {
 	let (tc, tl) = zw.zle.tty.as_ref().map_or((80, 24), |t| t.size);
-	let cols = zw.getsparam(b"COLUMNS").map(|v| zw_int(&v)).filter(|&c| c > 0);
-	let lines = zw.getsparam(b"LINES").map(|v| zw_int(&v)).filter(|&c| c > 0);
+	let cols = zw
+		.getsparam(b"COLUMNS")
+		.map(|v| zw_int(&v))
+		.filter(|&c| c > 0);
+	let lines = zw
+		.getsparam(b"LINES")
+		.map(|v| zw_int(&v))
+		.filter(|&c| c > 0);
 	let or = |v: Option<i64>, t: usize, d: i64| v.unwrap_or(if t > 0 { i64::try_from(t).unwrap_or(d) } else { d });
 	(or(cols, tc, 80), or(lines, tl, 24))
 }
@@ -57,19 +63,22 @@ fn zw_int(v: &[u8]) -> i64 {
 
 /// zsh `ZMB_nicewidth`: the columns `s` takes as `nicezputs` prints it.
 fn nicewidth(s: &[u8]) -> i64 {
-	utils::nicedup(s).chars().map(|c| i64::from(wcwidth(c).max(0))).sum()
+	utils::nicedup(s)
+		.chars()
+		.map(|c| i64::from(wcwidth(c).max(0)))
+		.sum()
 }
 
 /// The layout zsh `listlist` computes.
 struct Layout {
 	/// zsh `ncols` (0: one item per line, wrapped).
-	ncols:  usize,
+	ncols:   usize,
 	/// zsh `nlines`.
-	nlines: usize,
+	nlines:  usize,
 	/// zsh `pack`: the columns have their own widths.
-	pack:   bool,
+	pack:    bool,
 	/// zsh `widths`.
-	widths: Vec<i64>,
+	widths:  Vec<i64>,
 	/// zsh `longest`.
 	longest: i64,
 }
@@ -84,7 +93,10 @@ fn layout(data: &[Vec<u8>], lens: &[i64], cols: i64, packed: bool, rowsfirst: bo
 	let mut widths = vec![0i64; usize::try_from(cols).unwrap_or(0) + 1];
 	let ncols0 = if longest > 0 { (cols + 2) / longest } else { 0 };
 	if ncols0 <= 0 {
-		let nlines = data.iter().map(|p| 1 + p.len() / usize::try_from(cols.max(1)).unwrap_or(1)).sum();
+		let nlines = data
+			.iter()
+			.map(|p| 1 + p.len() / usize::try_from(cols.max(1)).unwrap_or(1))
+			.sum();
 		return Layout { ncols: 0, nlines, pack: false, widths, longest };
 	}
 	let mut ncols = usize::try_from(ncols0).unwrap_or(1);
@@ -103,8 +115,14 @@ fn layout(data: &[Vec<u8>], lens: &[i64], cols: i64, packed: bool, rowsfirst: bo
 			let mut maxlines: i64 = 0;
 			tcols = cols / shortest.max(1);
 			while tcols > ncols0 {
-				let (mut nth, mut first, mut maxlen, mut width, mut llines, mut tcol): (i64, i64, i64, i64, i64, i64) =
-					(0, 0, 0, 0, 0, 0);
+				let (mut nth, mut first, mut maxlen, mut width, mut llines, mut tcol): (
+					i64,
+					i64,
+					i64,
+					i64,
+					i64,
+					i64,
+				) = (0, 0, 0, 0, 0, 0);
 				maxlines = 0;
 				let mut count = num_i;
 				while count > 0 {
@@ -192,7 +210,11 @@ fn layout(data: &[Vec<u8>], lens: &[i64], cols: i64, packed: bool, rowsfirst: bo
 fn list_text(data: &[Vec<u8>], lens: &[i64], l: &Layout, rowsfirst: bool) -> Vec<u8> {
 	let mut out = Vec::new();
 	let pad = |out: &mut Vec<u8>, col: usize, len: i64| {
-		let w = if l.pack { l.widths.get(col - 1).copied().unwrap_or(0) } else { l.longest };
+		let w = if l.pack {
+			l.widths.get(col - 1).copied().unwrap_or(0)
+		} else {
+			l.longest
+		};
 		for _ in 0..(w - len + 2).max(0) {
 			out.push(b' ');
 		}
@@ -271,7 +293,8 @@ pub fn listlist(zw: &mut Zw<'_, '_>, items: Vec<BString>, next: ListDone) -> WRe
 	let max = zw.getiparam(b"LISTMAX");
 	let nlines = i64::try_from(l.nlines).unwrap_or(i64::MAX);
 	let p = Print { data, lens, l, rowsfirst, clearflag, lines, next };
-	let ask = (max > 0 && i64::try_from(num).unwrap_or(i64::MAX) > max) || (max == 0 && nlines > lines);
+	let ask =
+		(max > 0 && i64::try_from(num).unwrap_or(i64::MAX) > max) || (max == 0 && nlines > lines);
 	if !ask {
 		return print_list(zw, p);
 	}
@@ -338,7 +361,11 @@ struct Print {
 fn print_list(zw: &mut Zw<'_, '_>, p: Print) -> WResult {
 	let caps = display::term_caps(zw);
 	let nlines = i64::try_from(p.l.nlines).unwrap_or(i64::MAX);
-	zw.zle.display.lastlistlen = if p.clearflag { i32::try_from(p.l.nlines).unwrap_or(i32::MAX) } else { 0 };
+	zw.zle.display.lastlistlen = if p.clearflag {
+		i32::try_from(p.l.nlines).unwrap_or(i32::MAX)
+	} else {
+		0
+	};
 	let mut out = list_text(&p.data, &p.lens, &p.l, p.rowsfirst);
 	let mut clear = p.clearflag;
 	if clear {
@@ -605,7 +632,8 @@ fn on_other(zw: &mut Zw<'_, '_>, mut st: Named, mut cmd: BString) -> WResult {
 				| b"expand-or-complete"
 				| b"complete-word"
 				| b"expand-or-complete-prefix"
-		) || lastchar == i32::from(b' ')
+		)
+		|| lastchar == i32::from(b' ')
 		|| lastchar == i32::from(b'\t');
 	let mut feep = false;
 	if complete {
@@ -614,7 +642,11 @@ fn on_other(zw: &mut Zw<'_, '_>, mut st: Named, mut cmd: BString) -> WResult {
 		for (name, _) in zw.zle.widgets.iter() {
 			if name.starts_with(&st.typed) {
 				if let Some(first) = matches.first() {
-					let l = first.iter().zip(name.iter()).take_while(|(a, b)| a == b).count();
+					let l = first
+						.iter()
+						.zip(name.iter())
+						.take_while(|(a, b)| a == b)
+						.count();
 					ambig = ambig.min(l);
 				} else {
 					ambig = ambig.min(name.len());

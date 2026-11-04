@@ -273,7 +273,11 @@ pub fn select_argument(ed: &mut Editor, inner: bool, interactive_comments: bool)
 	// The text lexed: earlier lines of the command, then this one, all
 	// offsets in zsh's metafied bytes.
 	let line = from_line(&ed.line);
-	let prefix: &[u8] = if ed.isfirstln { b"" } else { ed.hline.as_ref().map_or(&b""[..], |h| h.as_slice()) };
+	let prefix: &[u8] = if ed.isfirstln {
+		b""
+	} else {
+		ed.hline.as_ref().map_or(&b""[..], |h| h.as_slice())
+	};
 	let mut text = Vec::with_capacity(prefix.len() + line.len());
 	text.extend_from_slice(prefix);
 	text.extend_from_slice(&line);

@@ -35,18 +35,19 @@ use crate::bash::{
 	},
 };
 
-/// A zsh `zexit` under way or done ([`crate::bash::vm::proc::VprocZsh::zexit`]).
+/// A zsh `zexit` under way or done
+/// ([`crate::bash::vm::proc::VprocZsh::zexit`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZExit {
 	/// `$?` at the start of each hook function (zsh `lastval` when the
 	/// hooks start).
-	pub status: i32,
+	pub status:  i32,
 	/// The status the shell leaves with (zsh `exit_val`).
-	pub exit:   i32,
+	pub exit:    i32,
 	/// The frame count below the hooks' base frame.
-	pub depth:  u32,
+	pub depth:   u32,
 	/// What runs next.
-	pub step:   Step,
+	pub step:    Step,
 	/// An `exit` inside a function started it (zsh `exit_pending`): the
 	/// first hook function's return sets `retflag` again, so the bodies of
 	/// the later ones do not run.
@@ -130,7 +131,11 @@ pub fn reset(vp: &mut Vproc) {
 /// the vproc on a probe in flight.
 pub fn advance(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> Option<WaitKey> {
 	loop {
-		let z = vp.zsh.as_deref_mut().and_then(|z| z.zexit.as_mut()).expect("zexit under way");
+		let z = vp
+			.zsh
+			.as_deref_mut()
+			.and_then(|z| z.zexit.as_mut())
+			.expect("zexit under way");
 		let status = z.status;
 		let call = match &mut z.step {
 			Step::Zshexit => {
@@ -139,7 +144,11 @@ pub fn advance(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> Option<WaitKe
 			},
 			Step::List => {
 				let list = hook_list(k, cx, vp);
-				let z = vp.zsh.as_deref_mut().and_then(|z| z.zexit.as_mut()).expect("zexit under way");
+				let z = vp
+					.zsh
+					.as_deref_mut()
+					.and_then(|z| z.zexit.as_mut())
+					.expect("zexit under way");
 				z.step = Step::Calls(list);
 				continue;
 			},
@@ -154,7 +163,11 @@ pub fn advance(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> Option<WaitKe
 			Some(name) => {
 				if function_exists(cx, vp, &name) {
 					if z_once(vp) {
-						let z = vp.zsh.as_deref_mut().and_then(|z| z.zexit.as_mut()).expect("zexit under way");
+						let z = vp
+							.zsh
+							.as_deref_mut()
+							.and_then(|z| z.zexit.as_mut())
+							.expect("zexit under way");
 						z.step = Step::Modules;
 					}
 					vp.status = status;
@@ -172,7 +185,10 @@ pub fn advance(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> Option<WaitKe
 
 /// Whether only the first hook function runs ([`ZExit::once`]).
 fn z_once(vp: &Vproc) -> bool {
-	vp.zsh.as_deref().and_then(|z| z.zexit.as_ref()).is_some_and(|z| z.once)
+	vp.zsh
+		.as_deref()
+		.and_then(|z| z.zexit.as_ref())
+		.is_some_and(|z| z.once)
 }
 
 /// Run the module exit hooks, then pop the base frame and set the leaving
@@ -181,7 +197,11 @@ fn z_once(vp: &Vproc) -> bool {
 /// (the base frame keeps the hooks' scratch and replay log).
 fn modules(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> Option<WaitKey> {
 	let (base, resumed) = {
-		let z = vp.zsh.as_deref().and_then(|z| z.zexit.as_ref()).expect("zexit under way");
+		let z = vp
+			.zsh
+			.as_deref()
+			.and_then(|z| z.zexit.as_ref())
+			.expect("zexit under way");
 		(z.depth as usize, z.resumed)
 	};
 	loop {
@@ -205,7 +225,11 @@ fn modules(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> Option<WaitKey> {
 			Ok(true) => {
 				keep(vp, sc);
 				report(k, cx, vp, chunks);
-				let z = vp.zsh.as_deref_mut().and_then(|z| z.zexit.as_mut()).expect("zexit under way");
+				let z = vp
+					.zsh
+					.as_deref_mut()
+					.and_then(|z| z.zexit.as_mut())
+					.expect("zexit under way");
 				z.resumed += 1;
 				return None;
 			},
@@ -227,13 +251,18 @@ fn modules(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> Option<WaitKey> {
 			},
 			Err(Need::Sub(_)) => {
 				keep(vp, sc);
-				let d = Diag::Unsupported { what: "a command substitution in a module exit hook".into() };
+				let d =
+					Diag::Unsupported { what: "a command substitution in a module exit hook".into() };
 				k.diag(cx, vp, 0, d);
 				break;
 			},
 		}
 	}
-	let z = vp.zsh.as_deref_mut().and_then(|z| z.zexit.as_mut()).expect("zexit under way");
+	let z = vp
+		.zsh
+		.as_deref_mut()
+		.and_then(|z| z.zexit.as_mut())
+		.expect("zexit under way");
 	z.step = Step::Done;
 	let (exit, depth) = (z.exit, z.depth as usize);
 	while vp.frames.len() > depth {
@@ -263,13 +292,19 @@ fn module_hooks(ctx: &mut Ctx<'_, '_>) -> Result<bool, Need> {
 fn hook_list(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> Vec<BString> {
 	let mut log = Vec::new();
 	let mut ex = Expander::new(k, cx, vp, &mut log, false, 0);
-	params::getaparam(&mut ex, b"zshexit_functions").ok().flatten().unwrap_or_default()
+	params::getaparam(&mut ex, b"zshexit_functions")
+		.ok()
+		.flatten()
+		.unwrap_or_default()
 }
 
 /// Whether shell function `name` is defined (zsh `getshfunc`).
 fn function_exists(cx: &mut Cx<'_>, vp: &Vproc, name: &[u8]) -> bool {
 	use crate::bash::store::{Key, Record};
-	matches!(state::record(cx.store, vp, Key::Func(bstr::BStr::new(name))), Ok(Some(Record::Func { .. })))
+	matches!(
+		state::record(cx.store, vp, Key::Func(bstr::BStr::new(name))),
+		Ok(Some(Record::Func { .. }))
+	)
 }
 
 /// `word` single-quoted for shell code.

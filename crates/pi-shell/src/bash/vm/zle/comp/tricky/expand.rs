@@ -51,9 +51,13 @@ where
 		if let Some(flow) = settle_sub(zw.k, zw.vp, zw.cx, &mut sc, Slot::Builtin) {
 			return match flow {
 				Flow::Block(key) => then(Await::Wait(key), move |zw, _| run(zw, sc, f, k)),
-				_ => k(zw, sc, Err(Stop::Fail(Diag::Unsupported {
-					what: "a command substitution flow in a ZLE expansion".into(),
-				}))),
+				_ => k(
+					zw,
+					sc,
+					Err(Stop::Fail(Diag::Unsupported {
+						what: "a command substitution flow in a ZLE expansion".into(),
+					})),
+				),
 			};
 		}
 		let mut log = std::mem::take(&mut sc.logs[Slot::Builtin as usize]);
@@ -73,9 +77,13 @@ where
 					Flow::Block(key) => return then(Await::Wait(key), move |zw, _| run(zw, sc, f, k)),
 					Flow::Call => return then(Await::Frame { depth }, move |zw, _| run(zw, sc, f, k)),
 					_ => {
-						return k(zw, sc, Err(Stop::Fail(Diag::Unsupported {
-							what: "a command substitution flow in a ZLE expansion".into(),
-						})));
+						return k(
+							zw,
+							sc,
+							Err(Stop::Fail(Diag::Unsupported {
+								what: "a command substitution flow in a ZLE expansion".into(),
+							})),
+						);
 					},
 				}
 			},
@@ -133,18 +141,26 @@ fn globlist(zw: &mut Zw<'_, '_>, mut sc: Box<Scratch>, nodes: Vec<Vec<u8>>, k: G
 		return k(zw, sc, Some(nodes));
 	}
 	let Some(fi) = zw.vp.frames.len().checked_sub(1) else {
-		zw.k.diag(zw.cx, zw.vp, 0, Diag::Unsupported { what: "filename generation in ZLE without a frame".into() });
+		zw.k.diag(zw.cx, zw.vp, 0, Diag::Unsupported {
+			what: "filename generation in ZLE without a frame".into(),
+		});
 		return k(zw, sc, None);
 	};
 	let ng = zw.isset(ZshOpt::Nullglob);
-	if let Err(e) = state::set_zsh_option(&mut zw.k.root, zw.cx.store, zw.vp, ZshOpt::Nullglob, true) {
+	if let Err(e) = state::set_zsh_option(&mut zw.k.root, zw.cx.store, zw.vp, ZshOpt::Nullglob, true)
+	{
 		zw.fail(e);
 		return k(zw, sc, None);
 	}
 	let theirs = zw.vp.frames[fi].scratch.take();
 	zw.vp.frames[fi].scratch = Some(sc);
 	let r = zglob::expand_globs(zw.k, zw.vp, zw.cx, &mut items, &globs, 0);
-	sc = zw.vp.frames.get_mut(fi).and_then(|f| f.scratch.take()).unwrap_or_default();
+	sc = zw
+		.vp
+		.frames
+		.get_mut(fi)
+		.and_then(|f| f.scratch.take())
+		.unwrap_or_default();
 	if let Some(f) = zw.vp.frames.get_mut(fi) {
 		f.scratch = theirs;
 	}
@@ -156,7 +172,10 @@ fn globlist(zw: &mut Zw<'_, '_>, mut sc: Box<Scratch>, nodes: Vec<Vec<u8>>, k: G
 		Err(Flow::Block(key)) => return then(Await::Wait(key), move |zw, _| globlist(zw, sc, nodes, k)),
 		Err(_) => return k(zw, sc, None),
 	}
-	let mut kept = nodes.into_iter().enumerate().filter(|(i, _)| !globs.iter().any(|(g, _)| *g as usize == *i));
+	let mut kept = nodes
+		.into_iter()
+		.enumerate()
+		.filter(|(i, _)| !globs.iter().any(|(g, _)| *g as usize == *i));
 	let mut out = Vec::with_capacity(items.len());
 	for it in items {
 		if it.is_empty() {
@@ -174,7 +193,14 @@ fn globlist(zw: &mut Zw<'_, '_>, mut sc: Box<Scratch>, nodes: Vec<Vec<u8>>, k: G
 /// quotes taken off) and put the expansions on the line in place of the
 /// word (`COMP_LIST_EXPAND`: list them, the line restored); `k` gets 1
 /// when nothing was expanded.
-pub fn doexpansion(zw: &mut Zw<'_, '_>, s: Vec<u8>, lst: i32, olst: i32, explincmd: i32, k: K<i32>) -> WResult {
+pub fn doexpansion(
+	zw: &mut Zw<'_, '_>,
+	s: Vec<u8>,
+	lst: i32,
+	olst: i32,
+	explincmd: i32,
+	k: K<i32>,
+) -> WResult {
 	let mut ss = s.clone();
 	for b in &mut ss {
 		if *b == b'"' {
@@ -242,7 +268,13 @@ fn expanded(
 	}
 	if unchanged {
 		if lst == COMP_EXPAND_COMPLETE {
-			return super::docompletion(zw, s, super::COMP_COMPLETE, explincmd, Box::new(move |zw, _| k(zw, 1)));
+			return super::docompletion(
+				zw,
+				s,
+				super::COMP_COMPLETE,
+				explincmd,
+				Box::new(move |zw, _| k(zw, 1)),
+			);
 		}
 		return k(zw, 1);
 	}
@@ -343,7 +375,9 @@ fn insert_expansions(zw: &mut Zw<'_, '_>, vl: Vec<Vec<u8>>, lst: i32, k: K<i32>)
 /// `name` (raw bytes) from the command hash table or a `$PATH` search.
 pub fn findcmd_path(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Vec<u8>>> {
 	use crate::bash::store::{Key, Record};
-	if let Some(Record::CmdHash { path, .. }) = state::record(ex.cx.store, ex.vp, Key::CmdHash(bstr::BStr::new(name)))? {
+	if let Some(Record::CmdHash { path, .. }) =
+		state::record(ex.cx.store, ex.vp, Key::CmdHash(bstr::BStr::new(name)))?
+	{
 		return Ok(Some(path.to_vec()));
 	}
 	let path = state::lookup(&ex.k.root, ex.cx.store, ex.vp, b"PATH")?

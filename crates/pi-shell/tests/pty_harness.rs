@@ -40,7 +40,10 @@ fn drives_the_real_zsh_interactively() -> io::Result<()> {
 	if !have_real_zsh() {
 		return Ok(());
 	}
-	let mut zsh = Spawn::real_zsh().args(["-f", "-i"]).env("PS1", "P> ").spawn()?;
+	let mut zsh = Spawn::real_zsh()
+		.args(["-f", "-i"])
+		.env("PS1", "P> ")
+		.spawn()?;
 	// Screen rows are compared without trailing blanks.
 	zsh.wait_screen_contains("P>", TIMEOUT)?;
 	zsh.write("print -r -- $((6*7))\r")?;

@@ -48,7 +48,7 @@ struct Ctags {
 /// zsh's `comptags[]` (by `locallevel`) and `lasttaglevel`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Tags {
-	levels:        BTreeMap<i64, Ctags>,
+	levels:       BTreeMap<i64, Ctags>,
 	lasttaglevel: i64,
 }
 
@@ -78,9 +78,7 @@ pub fn comptags(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 		return done(1);
 	}
 	let a0 = args[0].as_slice();
-	if a0.first() != Some(&b'-')
-		|| a0.len() < 2
-		|| (a0.len() > 2 && (a0[2] != b'-' || a0.len() > 3))
+	if a0.first() != Some(&b'-') || a0.len() < 2 || (a0.len() > 2 && (a0[2] != b'-' || a0.len() > 3))
 	{
 		return warn(ctx, format!("invalid argument: {}", BStr::new(a0)));
 	}
@@ -139,7 +137,11 @@ pub fn comptags(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 		},
 		b'R' => {
 			let ct = &t.levels[&level];
-			i32::from(!ct.sets.first().is_some_and(|s| arrcontains(&s.tags, &args[1], true)))
+			i32::from(
+				!ct.sets
+					.first()
+					.is_some_and(|s| arrcontains(&s.tags, &args[1], true)),
+			)
 		},
 		b'A' => {
 			let Some(s) = t.levels.get_mut(&level).and_then(|ct| ct.sets.first_mut()) else {
@@ -299,21 +301,29 @@ pub fn comptry(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 						}
 					}
 				} else if arrcontains(&all, name, false)
-					&& !t.levels[&ll].sets.iter().any(|set| arrcontains(&set.tags, name, false))
+					&& !t.levels[&ll]
+						.sets
+						.iter()
+						.any(|set| arrcontains(&set.tags, name, false))
 				{
 					list.push(word.clone().into());
 					num += 1;
 				}
 			}
 			if num > 0 {
-				t.levels.get_mut(&ll).expect("checked above").sets.push(Ctset {
-					tags: list.clone(),
-					..Ctset::default()
-				});
+				t.levels
+					.get_mut(&ll)
+					.expect("checked above")
+					.sets
+					.push(Ctset { tags: list.clone(), ..Ctset::default() });
 			}
 		}
 	} else {
-		let (sep, rest) = if first == "-s" { (true, &args[1..]) } else { (false, args) };
+		let (sep, rest) = if first == "-s" {
+			(true, &args[1..])
+		} else {
+			(false, args)
+		};
 		let ct = t.levels.get_mut(&ll).expect("checked above");
 		let keep: Vec<BString> = rest
 			.iter()
@@ -324,7 +334,11 @@ pub fn comptry(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 			.collect();
 		if !keep.is_empty() {
 			if sep {
-				ct.sets.extend(keep.into_iter().map(|tag| Ctset { tags: vec![tag], ..Ctset::default() }));
+				ct.sets.extend(
+					keep
+						.into_iter()
+						.map(|tag| Ctset { tags: vec![tag], ..Ctset::default() }),
+				);
 			} else {
 				ct.sets.push(Ctset { tags: keep, ..Ctset::default() });
 			}

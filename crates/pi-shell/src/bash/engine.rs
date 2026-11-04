@@ -120,12 +120,19 @@ impl Engine {
 
 	/// The `$functions` body of the function whose source is `source`,
 	/// made by `make` the first time.
-	pub(crate) fn function_body(&self, source: &[u8], make: impl FnOnce(&[u8]) -> BString) -> BString {
+	pub(crate) fn function_body(
+		&self,
+		source: &[u8],
+		make: impl FnOnce(&[u8]) -> BString,
+	) -> BString {
 		if let Some(body) = self.bodies.lock().get(source) {
 			return body.clone();
 		}
 		let body = make(source);
-		self.bodies.lock().insert(BString::from(source), body.clone());
+		self
+			.bodies
+			.lock()
+			.insert(BString::from(source), body.clone());
 		body
 	}
 

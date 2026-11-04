@@ -71,7 +71,9 @@ fn isanum(s: &[u8]) -> bool {
 /// C `atoi` (`strtol` saturating to `long`, then truncated to `int`).
 fn atoi(s: &[u8]) -> i32 {
 	let neg = s.first() == Some(&b'-');
-	let digits = s.get(usize::from(neg || s.first() == Some(&b'+'))..).unwrap_or_default();
+	let digits = s
+		.get(usize::from(neg || s.first() == Some(&b'+'))..)
+		.unwrap_or_default();
 	let mut v: i64 = 0;
 	for &c in digits.iter().take_while(|c| c.is_ascii_digit()) {
 		v = v.saturating_mul(10).saturating_add(i64::from(c - b'0'));
@@ -230,7 +232,11 @@ pub fn kill(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			status += 1;
 			continue;
 		};
-		let operand = if is_job { arg.clone() } else { BString::from(atoi(arg).to_string()) };
+		let operand = if is_job {
+			arg.clone()
+		} else {
+			BString::from(atoi(arg).to_string())
+		};
 		let failed = match target(ctx, &operand, send, Some(posix)) {
 			Ok(Some(t)) => {
 				if let Some(s) = send.signal() {
@@ -247,8 +253,11 @@ pub fn kill(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 						&& !matches!(
 							s,
 							Signal::Kill
-								| Signal::Cont | Signal::Tstp | Signal::Ttou
-								| Signal::Ttin | Signal::Stop
+								| Signal::Cont
+								| Signal::Tstp
+								| Signal::Ttou
+								| Signal::Ttin
+								| Signal::Stop
 						) {
 						ctl.signal(t, Signal::Cont);
 					}

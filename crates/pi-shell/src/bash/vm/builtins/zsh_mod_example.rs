@@ -86,7 +86,11 @@ impl Example {
 			.collect();
 		Self {
 			set: get(0).into(),
-			int: get(1).to_str().ok().and_then(|s| s.parse().ok()).unwrap_or(0),
+			int: get(1)
+				.to_str()
+				.ok()
+				.and_then(|s| s.parse().ok())
+				.unwrap_or(0),
 			str: get(2),
 			arr: w.get(4..).unwrap_or_default().to_vec(),
 			calls,
@@ -153,7 +157,9 @@ pub fn boot(ctx: &mut Ctx<'_, '_>) {
 /// [`boot`] for a load an expansion autoloaded (a parameter, `length`,
 /// `sum`, `-len` or `-ex`): the message goes to standard output directly.
 pub fn boot_ex(ex: &mut Expander<'_, '_>) {
-	ex.vp.out.push_back(PendingWrite { fd: 1, bytes: SETUP.into(), off: 0 });
+	ex.vp
+		.out
+		.push_back(PendingWrite { fd: 1, bytes: SETUP.into(), off: 0 });
 	save(ex.k, ex.cx.store, ex.vp, &booted());
 }
 
@@ -332,7 +338,11 @@ pub fn call_math(name: &[u8], args: FuncArgs<'_>) -> X<Number> {
 					},
 				}
 			}
-			Ok(if float { Number::Float(d) } else { Number::Int(l) })
+			Ok(if float {
+				Number::Float(d)
+			} else {
+				Number::Int(l)
+			})
 		},
 		_ => Err(Stop::Fail(Diag::BadMathExpr {
 			msg: format!("unknown function: {}", name.as_bstr()).into(),
@@ -399,7 +409,9 @@ mod tests {
 		let mut e = booted();
 		e.calls = vec![(3, false), (5, true)];
 		e.mark(ExParam::Str, false);
-		let Record::Words(w) = e.encode() else { unreachable!() };
+		let Record::Words(w) = e.encode() else {
+			unreachable!()
+		};
 		assert_eq!(Example::decode(&w), e);
 		assert!(!e.is_set(ExParam::Str) && e.is_set(ExParam::Arr));
 	}

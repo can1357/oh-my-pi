@@ -173,7 +173,10 @@ impl PmFlags {
 			}
 		}
 		if a.contains(Attrs::ZSH_PRIVATE) {
-			f = f.with(Self::HIDE).with(Self::SPECIAL).with(Self::RO_BY_DESIGN);
+			f = f
+				.with(Self::HIDE)
+				.with(Self::SPECIAL)
+				.with(Self::RO_BY_DESIGN);
 		}
 		f
 	}
@@ -595,10 +598,7 @@ pub fn isident(s: &[u8], wide: bool) -> bool {
 
 /// The stored variable named `name` as `vp` sees it (declared-but-unset
 /// ones included), borrowed, and the scope binding it.
-fn read_var<'a>(
-	ex: &'a mut Expander<'_, '_>,
-	name: &[u8],
-) -> X<(Option<&'a Var>, Option<usize>)> {
+fn read_var<'a>(ex: &'a mut Expander<'_, '_>, name: &[u8]) -> X<(Option<&'a Var>, Option<usize>)> {
 	let (var, scope) = state::lookup_declared_scoped(&ex.k.root, ex.cx.store, ex.vp, name)?;
 	let var = var.filter(|v| !bash_only(name, v));
 	Ok((var, scope.filter(|_| var.is_some())))
@@ -857,7 +857,9 @@ fn getparam_in(ex: &mut Expander<'_, '_>, name: &[u8], defer: Defer) -> X<Option
 					_ => PValue::Scalar(BString::default()),
 				};
 				Param::special(name, flags, value, sp)
-			} else if (defer == Defer::All && sp != Special::Seconds) || (defer == Defer::Keyed && sp.keyed()) {
+			} else if (defer == Defer::All && sp != Special::Seconds)
+				|| (defer == Defer::Keyed && sp.keyed())
+			{
 				Param::lazy_special(name, sp)
 			} else {
 				specials::param(ex, sp, name)?
@@ -895,7 +897,9 @@ fn getparam_in(ex: &mut Expander<'_, '_>, name: &[u8], defer: Defer) -> X<Option
 		&& let Some((partner, sep)) = sp.tie_partner()
 	{
 		// zsh/watch's `WATCH` is tied without `PM_TIED`.
-		p.flags = p.flags.with(PmFlags::from_bits(sp.flags().bits() & PmFlags::TIED.bits()));
+		p.flags = p
+			.flags
+			.with(PmFlags::from_bits(sp.flags().bits() & PmFlags::TIED.bits()));
 		p.tied = Some((BString::from(partner), sep));
 	}
 	Ok(Some(p))
@@ -1406,8 +1410,7 @@ pub fn wide_idents_in(
 	store: &mut dyn crate::bash::store::StateStore,
 	vp: &crate::bash::vm::proc::Vproc,
 ) -> Result<bool, crate::bash::store::StoreError> {
-	Ok(mb_in(k, store, vp)?
-		&& !state::zsh_option(&mut k.root, store, vp, ZshOpt::Posixidentifiers)?)
+	Ok(mb_in(k, store, vp)? && !state::zsh_option(&mut k.root, store, vp, ZshOpt::Posixidentifiers)?)
 }
 
 /// The collation zsh sorts with (`strcoll` in the `LC_COLLATE` locale:
@@ -1569,7 +1572,8 @@ pub fn fetchvalue(
 		};
 		// A read through a subscript of a keyed special looks up that key
 		// alone; an assignment rewrites the whole value, so it needs it.
-		let keyed = bracks > 0 && flags & SCANPM_ASSIGNING == 0 && matches!(s.get(i), Some(&(b'[' | INBRACK)));
+		let keyed =
+			bracks > 0 && flags & SCANPM_ASSIGNING == 0 && matches!(s.get(i), Some(&(b'[' | INBRACK)));
 		let pm = if keyed {
 			getparam_lazy(ex, lookup)?
 		} else {
@@ -1906,7 +1910,10 @@ fn unset_pm(ex: &mut Expander<'_, '_>, pm: &Param) -> X<()> {
 		&& let Some(var) = state::lookup_declared(&ex.k.root, ex.cx.store, ex.vp, &pm.name)?.cloned()
 	{
 		let var = Var {
-			attrs: var.attrs.with(Attrs::INVISIBLE).without(Attrs::ZSH_DEFAULTED),
+			attrs: var
+				.attrs
+				.with(Attrs::INVISIBLE)
+				.without(Attrs::ZSH_DEFAULTED),
 			value: VarValue::Str(BString::default()),
 		};
 		state::edit_var(
@@ -2424,7 +2431,10 @@ pub(super) fn assignsparam_meta(
 				// zsh `createparam`: an unset read-only parameter (`readonly
 				// x` under `POSIX_BUILTINS`) still refuses a value.
 				let old = getparam(ex, name)?;
-				if old.as_ref().is_some_and(|p| p.flags.contains(PmFlags::READONLY)) {
+				if old
+					.as_ref()
+					.is_some_and(|p| p.flags.contains(PmFlags::READONLY))
+				{
 					return Err(readonly(name));
 				}
 				// zsh `createparam`: an unset special (`NUMERIC` without a
@@ -2447,7 +2457,10 @@ pub(super) fn assignsparam_meta(
 					},
 				}
 			}
-		} else if existing.as_ref().is_some_and(|v| v.pm.special.is_none_or(Special::is_plain)) {
+		} else if existing
+			.as_ref()
+			.is_some_and(|v| v.pm.special.is_none_or(Special::is_plain))
+		{
 			// Ordinary targets have no computed getter to run again.
 			revived = existing;
 		}

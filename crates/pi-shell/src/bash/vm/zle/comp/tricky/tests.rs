@@ -24,7 +24,11 @@ fn opts() -> CompStrOpts {
 }
 
 fn gcs_with(line: &str, cs: usize, compfunc: bool, o: &CompStrOpts) -> Got {
-	let mut t = State { qipre: Some(BString::default()), qisuf: Some(BString::default()), ..State::default() };
+	let mut t = State {
+		qipre: Some(BString::default()),
+		qisuf: Some(BString::default()),
+		..State::default()
+	};
 	let mut ml = MetaLine { s: Some(line.as_bytes().to_vec()), cs, mark: 0, rh: Vec::new() };
 	let lex = LexEnv { feat: Features::ZSH | Features::ZSH_SHORT_LOOPS, aliases: NO_ALIASES };
 	let mut param = |n: &[u8]| -> Option<bool> {
@@ -43,11 +47,14 @@ fn gcs(line: &str, compfunc: bool) -> Got {
 }
 
 fn words(t: &State) -> Vec<String> {
-	t.clwords.iter().map(|w| {
-		let mut v = w.to_vec();
-		tok::untokenize(&mut v);
-		String::from_utf8_lossy(&v).into_owned()
-	}).collect()
+	t.clwords
+		.iter()
+		.map(|w| {
+			let mut v = w.to_vec();
+			tok::untokenize(&mut v);
+			String::from_utf8_lossy(&v).into_owned()
+		})
+		.collect()
 }
 
 fn plain(s: &Option<Vec<u8>>) -> String {

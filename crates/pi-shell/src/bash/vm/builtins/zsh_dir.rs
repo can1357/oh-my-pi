@@ -189,10 +189,16 @@ fn lchdir(ctx: &Ctx<'_, '_>, path: &[u8], hard: bool) -> Result<Result<BString, 
 		path.into()
 	} else {
 		let cwd = &ctx.vp.cwd;
-		[cwd.strip_suffix(b"/").unwrap_or(cwd), b"/", path].concat().into()
+		[cwd.strip_suffix(b"/").unwrap_or(cwd), b"/", path]
+			.concat()
+			.into()
 	};
 	if hard {
-		let base_len = if path.starts_with(b"/") { 1 } else { full.len() - path.len() };
+		let base_len = if path.starts_with(b"/") {
+			1
+		} else {
+			full.len() - path.len()
+		};
 		let mut walked: Vec<u8> = full[..base_len].to_vec();
 		for comp in path.split(|&c| c == b'/').filter(|c| !c.is_empty()) {
 			if walked.last() != Some(&b'/') {
@@ -203,9 +209,11 @@ fn lchdir(ctx: &Ctx<'_, '_>, path: &[u8], hard: bool) -> Result<Result<BString, 
 				Some(s) if s.kind == StatKind::Dir => {},
 				Some(_) => return Ok(Err(BString::from("Not a directory"))),
 				None => {
-					return Ok(Err(chdir_check(ctx, &walked)?
-						.err()
-						.unwrap_or_else(|| BString::from("No such file or directory"))));
+					return Ok(Err(
+						chdir_check(ctx, &walked)?
+							.err()
+							.unwrap_or_else(|| BString::from("No such file or directory")),
+					));
 				},
 			}
 		}
@@ -690,9 +698,8 @@ pub fn dirs(ctx: &mut Ctx<'_, '_>, ops: &Ops, argv: &[BString]) -> R {
 /// when that fails) with `-r`/`-P` or `CHASE_LINKS` without `-L`.
 pub fn pwd(ctx: &mut Ctx<'_, '_>, ops: &Ops) -> R {
 	let cwd = ctx.vp.cwd.clone();
-	let physical = ops.isset(b'r')
-		|| ops.isset(b'P')
-		|| (isset(ctx, ZshOpt::Chaselinks)? && !ops.isset(b'L'));
+	let physical =
+		ops.isset(b'r') || ops.isset(b'P') || (isset(ctx, ZshOpt::Chaselinks)? && !ops.isset(b'L'));
 	let mut line = if physical {
 		realpath(ctx, &cwd)?.unwrap_or(cwd).to_vec()
 	} else {

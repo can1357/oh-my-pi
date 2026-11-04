@@ -19,7 +19,9 @@ fn zsh_on(src: &str) -> (String, String, i32, Rig) {
 	host.fs.add_dir("/tmp/zt/fn");
 	host.fs.add_dir("/tmp/zcfix");
 	host.fs.add_file("/tmp/zt/one.zsh", b"echo one\n", 0o644);
-	host.fs.add_file("/tmp/zt/bad.zsh", b"echo hi\nif foo; then\n", 0o644);
+	host
+		.fs
+		.add_file("/tmp/zt/bad.zsh", b"echo hi\nif foo; then\n", 0o644);
 	host.fs.add_file("/tmp/zt/bad.zwc", b"x", 0o644);
 	host.fs.add_file("/tmp/zt/fn/g", b"echo g\n", 0o644);
 	host.fs.add_file("/tmp/zcfix/simple.zsh", SIMPLE_ZSH, 0o644);
@@ -71,7 +73,10 @@ fn zcompile_syntax_error_is_reported_at_the_files_line_and_writes_nothing() {
 		"zcompile /tmp/zt/bad.zsh; print $?; [[ -e /tmp/zt/bad.zsh.zwc ]] && print exists || print gone",
 	);
 	assert_eq!(out, "1\ngone\n");
-	assert_eq!(err, "zsh:3: parse error near `\\n'\nzsh:zcompile:1: can't read file: /tmp/zt/bad.zsh\n");
+	assert_eq!(
+		err,
+		"zsh:3: parse error near `\\n'\nzsh:zcompile:1: can't read file: /tmp/zt/bad.zsh\n"
+	);
 	assert_eq!(st, 0);
 }
 
@@ -121,7 +126,11 @@ fn zcompile_writes_zshs_dump() {
 	let (out, err, st, rig) =
 		zsh_on("zcompile -R /tmp/zcfix/simple.zsh.zwc /tmp/zcfix/simple.zsh; print $?");
 	assert_eq!((out.as_str(), err.as_str(), st), ("0\n", "", 0));
-	let got = rig.host.fs.read("/tmp/zcfix/simple.zsh.zwc").expect("the dump");
+	let got = rig
+		.host
+		.fs
+		.read("/tmp/zcfix/simple.zsh.zwc")
+		.expect("the dump");
 	assert!(got == SIMPLE_ZWC, "the dump differs from zsh's");
 }
 
@@ -129,8 +138,9 @@ fn zcompile_writes_zshs_dump() {
 /// keeps none, so `-c` fails loudly and writes nothing.
 #[test]
 fn zcompile_c_of_a_loaded_function_is_unsupported() {
-	let (out, err, st) =
-		zsh("f() { :; }; zcompile -c /tmp/zt/out f; print $?; [[ -e /tmp/zt/out.zwc ]] || print none");
+	let (out, err, st) = zsh(
+		"f() { :; }; zcompile -c /tmp/zt/out f; print $?; [[ -e /tmp/zt/out.zwc ]] || print none",
+	);
 	assert_eq!(out, "1\nnone\n");
 	assert!(err.contains("not supported by this engine yet"), "{err}");
 	assert_eq!(st, 0);

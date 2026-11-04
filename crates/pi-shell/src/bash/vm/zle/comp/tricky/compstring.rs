@@ -88,7 +88,11 @@ fn mb_metacharlen(s: &[u8], i: usize) -> usize {
 /// zsh `itype_end(s, IIDENT, 1)`: past the one identifier character at
 /// `i`, or `i`.
 fn ident_once(s: &[u8], i: usize) -> usize {
-	if crate::bash::syntax::zsh::iident(at(s, i)) { i + 1 } else { i }
+	if crate::bash::syntax::zsh::iident(at(s, i)) {
+		i + 1
+	} else {
+		i
+	}
 }
 
 /// zsh `has_real_token`: like `has_token`, but nulls (and `$'`) do not
@@ -148,7 +152,10 @@ pub fn parambeg(s: &[u8], offs: i32) -> Option<usize> {
 		while at(s, e) == DNULL {
 			e += 1;
 		}
-		if matches!(at(s, e), QUEST | STAR | STRING | QSTRING | b'?' | b'*' | b'$' | b'-' | b'!' | b'@') {
+		if matches!(
+			at(s, e),
+			QUEST | STAR | STRING | QSTRING | b'?' | b'*' | b'$' | b'-' | b'!' | b'@'
+		) {
 			e += 1;
 		} else if at(s, e).is_ascii_digit() {
 			while at(s, e).is_ascii_digit() {
@@ -211,7 +218,11 @@ fn ix(i: i64) -> usize {
 /// there is nothing completion can handle at the cursor. `param` looks a
 /// parameter up: `None` when there is none, else whether it is an
 /// association (`PM_HASHED`).
-#[allow(clippy::cognitive_complexity, clippy::too_many_lines, reason = "a direct port of zsh's get_comp_string")]
+#[allow(
+	clippy::cognitive_complexity,
+	clippy::too_many_lines,
+	reason = "a direct port of zsh's get_comp_string"
+)]
 pub fn get_comp_string_in(
 	t: &mut State,
 	line: &mut MetaLine,
@@ -399,9 +410,12 @@ pub fn get_comp_string_in(
 					&& matches!(
 						tok,
 						LexTok::String
-							| LexTok::For | LexTok::Foreach
-							| LexTok::Select | LexTok::Repeat
-							| LexTok::Case | LexTok::Typeset
+							| LexTok::For
+							| LexTok::Foreach
+							| LexTok::Select
+							| LexTok::Repeat
+							| LexTok::Case
+							| LexTok::Typeset
 					) {
 					ins = if tok == LexTok::Repeat {
 						2
@@ -502,7 +516,10 @@ pub fn get_comp_string_in(
 				}
 				let mut w = ts;
 				let mut sl = w.len();
-				while sl > 0 && w[sl - 1] == b' ' && (sl < 2 || (w[sl - 2] != BNULL && w[sl - 2] != META)) {
+				while sl > 0
+					&& w[sl - 1] == b' '
+					&& (sl < 2 || (w[sl - 2] != BNULL && w[sl - 2] != META))
+				{
 					sl -= 1;
 					w.truncate(sl);
 				}
@@ -530,7 +547,11 @@ pub fn get_comp_string_in(
 				break;
 			}
 		}
-		t.clwnum = if tt.is_some() || wordpos == 0 { wordpos } else { wordpos - 1 };
+		t.clwnum = if tt.is_some() || wordpos == 0 {
+			wordpos
+		} else {
+			wordpos - 1
+		};
 		let cn = ix(i64::from(t.clwnum));
 		if words.len() <= cn {
 			words.resize(cn + 1, None);
@@ -557,7 +578,11 @@ pub fn get_comp_string_in(
 				tmp = Some(zl.clone());
 			}
 			let lp = i64::from(ll) + i64::from(addedx) - i64::from(z.parbegin) + 1;
-			if lp < 3 || at(&zl, ix(lp)) != b'(' || at(&zl, ix(lp - 1)) != b'(' || at(&zl, ix(lp - 2)) != b'$' {
+			if lp < 3
+				|| at(&zl, ix(lp)) != b'('
+				|| at(&zl, ix(lp - 1)) != b'('
+				|| at(&zl, ix(lp - 2)) != b'$'
+			{
 				linptr = ix(lp);
 				if z.parend >= 0 {
 					ll -= z.parend;
@@ -578,7 +603,13 @@ pub fn get_comp_string_in(
 			t.clwpos = t.clwnum;
 			t0 = Some(LexTok::String);
 		} else if matches!(t0, Some(LexTok::String | LexTok::Typeset)) {
-			s = Some(words.get(ix(i64::from(t.clwpos))).cloned().flatten().unwrap_or_default());
+			s = Some(
+				words
+					.get(ix(i64::from(t.clwpos)))
+					.cloned()
+					.flatten()
+					.unwrap_or_default(),
+			);
 		} else if t0 == Some(LexTok::Envstring) {
 			if varq {
 				tt = words.get(ix(i64::from(t.clwpos))).cloned().flatten();
@@ -649,7 +680,11 @@ pub fn get_comp_string_in(
 		let sv = s.clone().unwrap_or_default();
 		let lim = i64::from(zlemetacs_qsub) - i64::from(wb);
 		let mut i = 0;
-		let mut nnb = if ident_once(&sv, 0) == 0 { mb_metacharlen(&sv, 0) } else { 0 };
+		let mut nnb = if ident_once(&sv, 0) == 0 {
+			mb_metacharlen(&sv, 0)
+		} else {
+			0
+		};
 		let (mut nb, mut ne): (Option<usize>, Option<usize>) = (None, None);
 		let mut tp = 0usize;
 		if t.lincmd != 0 {
@@ -995,11 +1030,19 @@ fn brace_str(t: &State, s: &[u8], o: &CompStrOpts) -> BString {
 /// The brace part of `get_comp_string` (`foo{xxx` etc.): the opening
 /// braces before the cursor (`brbeg`), the closing ones after it
 /// (`brend`), taken out of the word.
-#[allow(clippy::cognitive_complexity, clippy::too_many_lines, reason = "a direct port of zsh's get_comp_string")]
+#[allow(
+	clippy::cognitive_complexity,
+	clippy::too_many_lines,
+	reason = "a direct port of zsh's get_comp_string"
+)]
 fn braces(t: &mut State, word: &mut Vec<u8>, offs: &mut i32, o: &CompStrOpts) {
 	let owned = word.clone();
 	let s: &[u8] = &owned;
-	let curs: i64 = if o.completeinword { i64::from(*offs) } else { s.len() as i64 };
+	let curs: i64 = if o.completeinword {
+		i64::from(*offs)
+	} else {
+		s.len() as i64
+	};
 	let mut predup = s.to_vec();
 	let mut dp: i64 = 0;
 	let (mut bbeg, mut bend, mut dbeg, mut lastp, mut firsts): (
@@ -1018,29 +1061,24 @@ fn braces(t: &mut State, word: &mut Vec<u8>, offs: &mut i32, o: &CompStrOpts) {
 
 	// zsh's code to stack the text between `{` (or the last comma) and
 	// the cursor: `adjust` is whether `i` and `dp` follow the cut.
-	let push_beg = |t: &mut State,
-	                predup: &mut Vec<u8>,
-	                bb: i64,
-	                bend: i64,
-	                dbeg: i64,
-	                begi: i64|
-	 -> i64 {
-		let len = bend - bb;
-		let text = s_slice(s, bb, bb + len);
-		let str = brace_str(t, &text, o);
-		let qpos = quotename(t, &predup[..ix(dbeg).min(predup.len())], o.quote).len();
-		t.brbeg.push(super::super::types::Brinfo {
-			str,
-			pos: i32::try_from(begi).unwrap_or(0),
-			qpos: i32::try_from(qpos).unwrap_or(0),
-			curpos: 0,
-		});
-		t.nbrbeg += 1;
-		let a = ix(dbeg).min(predup.len());
-		let b = ix(dbeg + len).min(predup.len());
-		predup.drain(a..b);
-		len
-	};
+	let push_beg =
+		|t: &mut State, predup: &mut Vec<u8>, bb: i64, bend: i64, dbeg: i64, begi: i64| -> i64 {
+			let len = bend - bb;
+			let text = s_slice(s, bb, bb + len);
+			let str = brace_str(t, &text, o);
+			let qpos = quotename(t, &predup[..ix(dbeg).min(predup.len())], o.quote).len();
+			t.brbeg.push(super::super::types::Brinfo {
+				str,
+				pos: i32::try_from(begi).unwrap_or(0),
+				qpos: i32::try_from(qpos).unwrap_or(0),
+				curpos: 0,
+			});
+			t.nbrbeg += 1;
+			let a = ix(dbeg).min(predup.len());
+			let b = ix(dbeg + len).min(predup.len());
+			predup.drain(a..b);
+			len
+		};
 
 	'scan: while (p as usize) < s.len() {
 		let pu = p as usize;
@@ -1065,10 +1103,16 @@ fn braces(t: &mut State, word: &mut Vec<u8>, offs: &mut i32, o: &CompStrOpts) {
 					p = tp as i64;
 				} else if n1 != SNULL {
 					let mut tp = pu + 1;
-					while matches!(at(s, tp), b'^' | HAT | b'=' | EQUALS | b'~' | TILDE | b'#' | POUND | b'+') {
+					while matches!(
+						at(s, tp),
+						b'^' | HAT | b'=' | EQUALS | b'~' | TILDE | b'#' | POUND | b'+'
+					) {
 						tp += 1;
 					}
-					if matches!(at(s, tp), QUEST | STAR | STRING | QSTRING | b'?' | b'*' | b'$' | b'-' | b'!' | b'@') {
+					if matches!(
+						at(s, tp),
+						QUEST | STAR | STRING | QSTRING | b'?' | b'*' | b'$' | b'-' | b'!' | b'@'
+					) {
 						p += 1;
 						i += 1;
 					} else {

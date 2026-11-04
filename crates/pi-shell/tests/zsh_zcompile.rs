@@ -181,7 +181,12 @@ fn assert_none(diffs: &[String]) {
 		diffs.is_empty(),
 		"{} files differ:\n{}",
 		diffs.len(),
-		diffs.iter().take(40).cloned().collect::<Vec<_>>().join("\n")
+		diffs
+			.iter()
+			.take(40)
+			.cloned()
+			.collect::<Vec<_>>()
+			.join("\n")
 	);
 }
 
@@ -279,7 +284,15 @@ unfunction g; fpath=($1/fn.zwc); autoload g; g; print st=$?";
 	let _ = fs::remove_dir_all(&dir);
 	assert_eq!(outs[0].0, "from-g\nst=0\nfrom-g\nst=0\n");
 	assert_eq!(outs[1].0, "st=1\nst=1\n");
-	assert_eq!(outs[1].1.matches("not supported by this engine yet").count(), 2, "{}", outs[1].1);
+	assert_eq!(
+		outs[1]
+			.1
+			.matches("not supported by this engine yet")
+			.count(),
+		2,
+		"{}",
+		outs[1].1
+	);
 }
 
 /// `source ./x` when only `x.zwc` exists: zsh runs the word code, the

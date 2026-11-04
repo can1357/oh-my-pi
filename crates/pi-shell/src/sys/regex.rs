@@ -130,7 +130,12 @@ mod native {
 			pmatch: *mut RegMatch,
 			eflags: c_int,
 		) -> c_int;
-		fn regerror(errcode: c_int, preg: *const RegexT, errbuf: *mut c_char, errbuf_size: usize) -> usize;
+		fn regerror(
+			errcode: c_int,
+			preg: *const RegexT,
+			errbuf: *mut c_char,
+			errbuf_size: usize,
+		) -> usize;
 		fn regfree(preg: *mut RegexT);
 	}
 
@@ -149,7 +154,8 @@ mod native {
 		names.iter().find_map(|name| {
 			// SAFETY: `name` is a NUL-terminated string; a null base asks for
 			// a new object.
-			let loc = unsafe { libc::newlocale(libc::LC_CTYPE_MASK, name.as_ptr(), core::ptr::null_mut()) };
+			let loc =
+				unsafe { libc::newlocale(libc::LC_CTYPE_MASK, name.as_ptr(), core::ptr::null_mut()) };
 			(!loc.is_null()).then_some(Locale(loc))
 		})
 	}
@@ -267,7 +273,8 @@ mod native {
 		icase: bool,
 		utf8: bool,
 	) -> Result<Option<Vec<Option<Range<usize>>>>, RegexFail> {
-		let re = Regex::with_utf8(pattern, icase, utf8).map_err(|e| RegexFail::Compile(e.to_string()))?;
+		let re =
+			Regex::with_utf8(pattern, icase, utf8).map_err(|e| RegexFail::Compile(e.to_string()))?;
 		Ok(re.captures(subject))
 	}
 }

@@ -4,8 +4,9 @@
 //! `zle_hist.c`.
 //!
 //! Several motions stop one character further while an operator reads
-//! its range (zsh `virangeflag`, [`crate::bash::vm::zle::utils::LineState::virangeflag`]),
-//! so that the range includes the character they land on.
+//! its range (zsh `virangeflag`,
+//! [`crate::bash::vm::zle::utils::LineState::virangeflag`]), so that the range
+//! includes the character they land on.
 //!
 //! Ported from zsh 5.9 (MIT-style licence, Copyright (c) 1992-1997 Paul
 //! Falstad and the zsh development group).

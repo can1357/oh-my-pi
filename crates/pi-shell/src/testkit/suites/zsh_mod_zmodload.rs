@@ -21,7 +21,10 @@ fn zsh(src: &str) -> (String, String, i32) {
 
 #[test]
 fn zmodload_lists_loaded_modules() {
-	assert_eq!(zsh("zmodload; zmodload -L"), ("zsh/main\nzmodload zsh/main\n".into(), String::new(), 0));
+	assert_eq!(
+		zsh("zmodload; zmodload -L"),
+		("zsh/main\nzmodload zsh/main\n".into(), String::new(), 0)
+	);
 	let (out, err, st) = zsh(
 		"zmodload zsh/datetime zsh/regex; zmodload; zmodload -e zsh/datetime; echo $?; zmodload -e \
 		 zsh/datetime zsh/pcre; echo $?",
@@ -45,11 +48,15 @@ fn zmodload_unload_errors() {
 		zsh("zmodload zsh/zutil; zmodload; zmodload -u zsh/zle"),
 		(
 			"zsh/complete\nzsh/main\nzsh/zle\nzsh/zutil\n".into(),
-			"zsh:zmodload:1: module zsh/zle is in use by another module and cannot be unloaded\n".into(),
+			"zsh:zmodload:1: module zsh/zle is in use by another module and cannot be unloaded\n"
+				.into(),
 			1
 		)
 	);
-	assert_eq!(zsh("zmodload -u zsh/zutil; echo $?; zmodload"), ("0\nzsh/main\n".into(), String::new(), 0));
+	assert_eq!(
+		zsh("zmodload -u zsh/zutil; echo $?; zmodload"),
+		("0\nzsh/main\n".into(), String::new(), 0)
+	);
 }
 
 #[test]
@@ -61,7 +68,10 @@ fn zmodload_option_errors() {
 		("zmodload -A zsh/a=zsh/a", "zsh:zmodload:1: module alias would refer to itself: zsh/a\n"),
 		("zmodload -R zsh/nope", "zsh:zmodload:1: no such module alias: zsh/nope\n"),
 		("zmodload zsh/x-y", "zsh:1: invalid module name `zsh/x-y'\n"),
-		("zmodload -F zsh/datetime b:nope", "zsh:1: module `zsh/datetime' has no such feature: `b:nope'\n"),
+		(
+			"zmodload -F zsh/datetime b:nope",
+			"zsh:1: module `zsh/datetime' has no such feature: `b:nope'\n",
+		),
 		("zmodload -F zsh/datetime -u", "zsh:1: module `zsh/datetime' has no such feature: `u'\n"),
 		("zmodload -lF zsh/datetime", "zsh:zmodload:1: module `zsh/datetime' is not yet loaded\n"),
 	];
@@ -86,7 +96,10 @@ fn zmodload_features() {
 		"zmodload zsh/datetime; zmodload -F zsh/datetime -p:epochtime; zmodload -LF; zmodload -lF \
 		 zsh/datetime +b:strftime; zmodload -lF zsh/datetime b:strftime",
 	);
-	assert_eq!(out, "zmodload -F zsh/datetime b:strftime p:EPOCHSECONDS p:EPOCHREALTIME\n+b:strftime\n");
+	assert_eq!(
+		out,
+		"zmodload -F zsh/datetime b:strftime p:EPOCHSECONDS p:EPOCHREALTIME\n+b:strftime\n"
+	);
 	let (out, ..) = zsh(r#"zmodload -mF zsh/datetime "p:EPOCH*"; zmodload -lF zsh/datetime"#);
 	assert_eq!(out, "-b:strftime\n+p:EPOCHSECONDS\n+p:EPOCHREALTIME\n-p:epochtime\n");
 	let (out, err, _) = zsh(
@@ -190,7 +203,8 @@ fn modules_parameter_in_zsh_order() {
 		 zsh/compctl zsh/complete zsh/termcap zsh/terminfo zsh/watch zsh/param/private \
 		 zsh/zleparameter\n"
 	);
-	let (out, ..) = zsh("print ${modules[zsh/main]} ${modules[zsh/zutil]} ${+modules[zsh/datetime]}");
+	let (out, ..) =
+		zsh("print ${modules[zsh/main]} ${modules[zsh/zutil]} ${+modules[zsh/datetime]}");
 	assert_eq!(out, "loaded autoloaded 0\n");
 }
 
@@ -286,7 +300,9 @@ fn module_param_blocked_by_existing_param() {
 #[test]
 fn failed_autoload_of_unknown_features() {
 	assert_eq!(
-		zsh("zmodload -aF zsh/parameter b:fail; whence -v fail; whence -w fail; fail; print not here"),
+		zsh(
+			"zmodload -aF zsh/parameter b:fail; whence -v fail; whence -w fail; fail; print not here"
+		),
 		(
 			"fail is a shell builtin\nfail: builtin\n".into(),
 			"zsh:1: module `zsh/parameter' has no such feature: `b:fail': autoload cancelled\nzsh:1: autoloading \

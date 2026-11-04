@@ -327,7 +327,8 @@ pub fn processcmd(zw: &mut Zw<'_, '_>) -> WResult {
 	let Some(s) = zle_curcmd(&raw, cs, comments) else {
 		return WResult::Done(1);
 	};
-	let (bang, bang_special) = crate::bash::vm::zsh::params::bang_quoting(&mut zw.k.root, zw.cx.store, zw.vp);
+	let (bang, bang_special) =
+		crate::bash::vm::zsh::params::bang_quoting(&mut zw.k.root, zw.cx.store, zw.vp);
 	let o = QuoteOpts {
 		rcquotes: zw.isset(ZshOpt::Rcquotes),
 		magic_equal_subst: zw.isset(ZshOpt::Magicequalsubst),

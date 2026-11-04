@@ -125,7 +125,10 @@ fn check(name: &str, setup: Setup, rc: &str, steps: &[&str], what: Record) {
 	let want = fs::read_to_string(&path).unwrap_or_else(|e| {
 		panic!("{}: {e} (write it with PI_COMP_ORACLE=1 PI_COMP_BLESS=1)", path.display())
 	});
-	assert!(got == want, "{name}: the screens differ from zsh 5.9's\n--- zsh 5.9:\n{want}\n--- got:\n{got}");
+	assert!(
+		got == want,
+		"{name}: the screens differ from zsh 5.9's\n--- zsh 5.9:\n{want}\n--- got:\n{got}"
+	);
 }
 
 #[test]
@@ -135,7 +138,13 @@ fn command_unique() {
 
 #[test]
 fn command_ambiguous_lists_then_menu() {
-	check("command_ambiguous_lists_then_menu", Setup::Compsys, "", &["fx\t", "\t", "\t"], Record::Screen);
+	check(
+		"command_ambiguous_lists_then_menu",
+		Setup::Compsys,
+		"",
+		&["fx\t", "\t", "\t"],
+		Record::Screen,
+	);
 }
 
 #[test]
@@ -185,7 +194,13 @@ fn parameter_in_braces() {
 
 #[test]
 fn ambiguous_prefix_with_listambiguous() {
-	check("ambiguous_prefix_with_listambiguous", Setup::Compsys, "", &["echo fi\t", "\t", "\t"], Record::Screen);
+	check(
+		"ambiguous_prefix_with_listambiguous",
+		Setup::Compsys,
+		"",
+		&["echo fi\t", "\t", "\t"],
+		Record::Screen,
+	);
 }
 
 #[test]
@@ -262,7 +277,13 @@ fn menu_select_send_break_restores_the_line() {
 
 #[test]
 fn menu_select_undo() {
-	check("menu_select_undo", Setup::Compsys, MENU_SELECT, &[": \t", "\t", "\x1b[C", "\x1f", "\x1f"], Record::Screen);
+	check(
+		"menu_select_undo",
+		Setup::Compsys,
+		MENU_SELECT,
+		&[": \t", "\t", "\x1b[C", "\x1f", "\x1f"],
+		Record::Screen,
+	);
 }
 
 #[test]
@@ -323,7 +344,13 @@ fn listprompt_scrolls_a_long_list() {
 	let rc = "zmodload zsh/complist\nLISTPROMPT='%Smore? %l %p%s'\n\
 	          _m() { compadd -V v -- item-{001..400} }\n\
 	          zle -C lc list-choices _m\nbindkey '^T' lc";
-	check("listprompt_scrolls_a_long_list", Setup::Bare, rc, &[": \x14", " ", "\r", "q"], Record::Screen);
+	check(
+		"listprompt_scrolls_a_long_list",
+		Setup::Bare,
+		rc,
+		&[": \x14", " ", "\r", "q"],
+		Record::Screen,
+	);
 }
 
 /// `ZLS_COLORS` by file type (`di`, `ex`, `ln`), a `=(#b)` pattern colouring
@@ -385,7 +412,13 @@ fn compadd_groups_explanations_and_displays() {
 #[test]
 fn compadd_autoremovable_suffix() {
 	let rc = "_s() { compadd -S / -q dirx }\nzle -C s complete-word _s\nbindkey '^T' s";
-	check("compadd_autoremovable_suffix", Setup::Bare, rc, &[": di\x14", " ", "di\x14", "\r"], Record::Screen);
+	check(
+		"compadd_autoremovable_suffix",
+		Setup::Bare,
+		rc,
+		&[": di\x14", " ", "di\x14", "\r"],
+		Record::Screen,
+	);
 }
 
 #[test]
@@ -505,13 +538,25 @@ fn expand_or_complete_expands() {
 /// files.
 #[test]
 fn expand_or_complete_falls_back_to_files() {
-	check("expand_or_complete_falls_back_to_files", Setup::Bare, "", &["ls fi\t", "\t"], Record::Screen);
+	check(
+		"expand_or_complete_falls_back_to_files",
+		Setup::Bare,
+		"",
+		&["ls fi\t", "\t"],
+		Record::Screen,
+	);
 }
 
 /// `^Xg` (list-expand) then `^X*` (expand-word).
 #[test]
 fn list_expand_and_expand_word() {
-	check("list_expand_and_expand_word", Setup::Bare, "", &["echo f*\x18g", "\x18*"], Record::Screen);
+	check(
+		"list_expand_and_expand_word",
+		Setup::Bare,
+		"",
+		&["echo f*\x18g", "\x18*"],
+		Record::Screen,
+	);
 }
 
 #[test]
@@ -533,12 +578,24 @@ fn delete_char_or_list_lists() {
 /// `ESC $` (spell-word) corrects a command name against the path.
 #[test]
 fn spell_word_corrects_a_command() {
-	check("spell_word_corrects_a_command", Setup::Bare, "path=( ~/bin )", &["fxtoll\x1b$"], Record::Screen);
+	check(
+		"spell_word_corrects_a_command",
+		Setup::Bare,
+		"path=( ~/bin )",
+		&["fxtoll\x1b$"],
+		Record::Screen,
+	);
 }
 
 #[test]
 fn expand_cmd_path() {
-	check("expand_cmd_path", Setup::Bare, "bindkey '^Xp' expand-cmd-path", &["ls\x18p"], Record::Screen);
+	check(
+		"expand_cmd_path",
+		Setup::Bare,
+		"bindkey '^Xp' expand-cmd-path",
+		&["ls\x18p"],
+		Record::Screen,
+	);
 }
 
 #[test]
@@ -547,5 +604,11 @@ fn listmax_asks_before_listing() {
 	          _lm() { compadd word{01..60} }\n\
 	          zle -C lm complete-word _lm\nbindkey '^T' lm\n\
 	          zle -C lml list-choices _lm\nbindkey '^Xd' lml";
-	check("listmax_asks_before_listing", Setup::Bare, rc, &[": word\x14", "n", "\x18d", "y"], Record::Screen);
+	check(
+		"listmax_asks_before_listing",
+		Setup::Bare,
+		rc,
+		&[": word\x14", "n", "\x18d", "y"],
+		Record::Screen,
+	);
 }

@@ -19,8 +19,8 @@ use bstr::BString;
 use serde::{Deserialize, Serialize};
 
 use super::{
-	compcurrent, compwords, fin, gate, ignore_prefix, load, px, save, setaparam, sethparam, setsparam,
-	warn,
+	compcurrent, compwords, fin, gate, ignore_prefix, load, px, save, setaparam, sethparam,
+	setsparam, warn,
 };
 use crate::bash::{
 	pattern::zsh::{PatFlags, Pattern, tokenize},
@@ -304,12 +304,21 @@ fn pat_text(s: &[u8]) -> BString {
 }
 
 /// zsh `patcompile(text, 0, NULL)`: `None` for a malformed pattern.
-fn patcompile(ctx: &mut Ctx<'_, '_>, failed: &mut bool, text: &[u8]) -> Result<Option<Arc<Pattern>>, Need> {
+fn patcompile(
+	ctx: &mut Ctx<'_, '_>,
+	failed: &mut bool,
+	text: &[u8],
+) -> Result<Option<Arc<Pattern>>, Need> {
 	Ok(px(ctx, failed, |ex| zpattern::try_compile(ex, text, PatFlags::NONE))?.flatten())
 }
 
 /// zsh `pattry`; a pattern that did not compile matches nothing.
-fn pattry(ctx: &mut Ctx<'_, '_>, failed: &mut bool, pat: Option<&Pattern>, s: &[u8]) -> Result<bool, Need> {
+fn pattry(
+	ctx: &mut Ctx<'_, '_>,
+	failed: &mut bool,
+	pat: Option<&Pattern>,
+	s: &[u8],
+) -> Result<bool, Need> {
 	let Some(pat) = pat else { return Ok(false) };
 	Ok(px(ctx, failed, |ex| zpattern::matches(ex, pat, s))?.unwrap_or(false))
 }
@@ -437,7 +446,10 @@ fn set_name(p: &[u8]) -> (BString, bool) {
 #[expect(clippy::too_many_lines, reason = "a faithful port of one C function")]
 fn parse_cadef(args: &[BString]) -> Result<Vec<Cadef>, Option<String>> {
 	// The auto-description, `%d` replaced by the argument's description.
-	let ad = args[0].windows(2).position(|w| w == b"%d").map(|k| (&args[0][..k], &args[0][k + 2..]));
+	let ad = args[0]
+		.windows(2)
+		.position(|w| w == b"%d")
+		.map(|k| (&args[0][..k], &args[0][k + 2..]));
 
 	// `-s`, `-S`, `-A pat`, `-M spec`.
 	let mut i = 1;
@@ -604,7 +616,8 @@ fn parse_cadef(args: &[BString]) -> Result<Vec<Cadef>, Option<String>> {
 					k += 1;
 				}
 				let name_start;
-				if ((at(&w, k) == b'-' && at(&w, k + 1) == b'+') || (at(&w, k) == b'+' && at(&w, k + 1) == b'-'))
+				if ((at(&w, k) == b'-' && at(&w, k + 1) == b'+')
+					|| (at(&w, k) == b'+' && at(&w, k + 1) == b'-'))
 					&& !matches!(at(&w, k + 2), 0 | b':' | b'[' | b'=' | b'-' | b'+')
 				{
 					againp = Some(w[k..].to_vec());
@@ -627,7 +640,8 @@ fn parse_cadef(args: &[BString]) -> Result<Vec<Cadef>, Option<String>> {
 					let c = at(&w, k);
 					let n = at(&w, k + 1);
 					if c == 0
-						|| c == b':' || c == b'['
+						|| c == b':'
+						|| c == b'['
 						|| ((c == b'-' || c == b'+') && (n == b':' || n == b'['))
 						|| (c == b'=' && (n == b':' || n == b'[' || n == b'-'))
 					{
@@ -731,7 +745,8 @@ fn parse_cadef(args: &[BString]) -> Result<Vec<Cadef>, Option<String>> {
 						} else {
 							atype = CAA_NORMAL;
 						}
-						let mut a = parse_caarg(!rest, atype, oanum, onum, Some(name), &w, &mut k, doset.as_ref());
+						let mut a =
+							parse_caarg(!rest, atype, oanum, onum, Some(name), &w, &mut k, doset.as_ref());
 						oanum += 1;
 						if atype == CAA_OPT {
 							onum += 1;
@@ -754,7 +769,8 @@ fn parse_cadef(args: &[BString]) -> Result<Vec<Cadef>, Option<String>> {
 						d
 					})
 				});
-				let in_single = single && name.len() == 2 && name[1] != b'-' && name[1] > 0x20 && name[1] <= 0x7e;
+				let in_single =
+					single && name.len() == 2 && name[1] != b'-' && name[1] > 0x20 && name[1] <= 0x7e;
 				let opt = Caopt {
 					name: rembslashcolon(name),
 					descr,
@@ -829,7 +845,10 @@ fn parse_cadef(args: &[BString]) -> Result<Vec<Cadef>, Option<String>> {
 			a.xor = xor;
 			a.direct = direct;
 			let list = &mut sets[set].args;
-			let pos = list.iter().position(|t| t.num >= anum - 1).unwrap_or(list.len());
+			let pos = list
+				.iter()
+				.position(|t| t.num >= anum - 1)
+				.unwrap_or(list.len());
 			if list.get(pos).is_some_and(|t| t.num == anum - 1) {
 				return invalid("doubled argument definition");
 			}
@@ -856,7 +875,11 @@ fn ca_get_opt(d: &Cadef, line: &[u8], full: bool) -> Option<(usize, usize)> {
 			if !p.active {
 				continue;
 			}
-			let hit = if p.args.is_empty() || p.typ == CAO_NEXT { p.name == line } else { line.starts_with(&p.name) };
+			let hit = if p.args.is_empty() || p.typ == CAO_NEXT {
+				p.name == line
+			} else {
+				line.starts_with(&p.name)
+			};
 			if !hit {
 				continue;
 			}
@@ -905,7 +928,8 @@ fn ca_get_sopt(d: &Cadef, line: &[u8]) -> (Option<usize>, Option<usize>, Vec<usi
 /// zsh `ca_foreign_opt`: whether a set other than `cur` has an option
 /// named `option`.
 fn ca_foreign_opt(sets: &[Cadef], cur: usize, option: &[u8]) -> bool {
-	sets.iter()
+	sets
+		.iter()
 		.enumerate()
 		.any(|(i, d)| i != cur && d.opts.iter().any(|p| p.name == option))
 }
@@ -932,7 +956,10 @@ fn ca_get_arg(sets: &[Cadef], set: usize, mut n: i64) -> Option<ArgRef> {
 	{
 		return Some(ArgRef::Arg { set, i });
 	}
-	d.rest.as_ref().filter(|r| r.active).map(|_| ArgRef::Rest { set })
+	d.rest
+		.as_ref()
+		.filter(|r| r.active)
+		.map(|_| ArgRef::Rest { set })
 }
 
 /// Whether set/group name `gs` is `grp` (zsh's `strncmp` and the length
@@ -1123,7 +1150,13 @@ impl LineParser<'_> {
 	/// to the line (it has an option of another set); `self.last` is the
 	/// state.
 	#[expect(clippy::too_many_lines, reason = "a faithful port of one C function")]
-	fn parse_line(&mut self, ctx: &mut Ctx<'_, '_>, failed: &mut bool, d: usize, multi: bool) -> Result<bool, Need> {
+	fn parse_line(
+		&mut self,
+		ctx: &mut Ctx<'_, '_>,
+		failed: &mut bool,
+		d: usize,
+		multi: bool,
+	) -> Result<bool, Need> {
 		let words = self.words;
 		let cc = self.cc;
 		{
@@ -1191,7 +1224,11 @@ impl LineParser<'_> {
 					if let Some(a) = argxor.take() {
 						self.inactive_arg_xor(d, a, cur - 1);
 					}
-					if self.sets[d].flags & CDF_SEP != 0 && cur != cc && state.actopts != 0 && line == b"--" {
+					if self.sets[d].flags & CDF_SEP != 0
+						&& cur != cc
+						&& state.actopts != 0
+						&& line == b"--"
+					{
 						ca_inactive(&mut self.sets[d], None, cur, true, cc);
 						state.actopts = 0;
 						break 'word;
@@ -1306,7 +1343,11 @@ impl LineParser<'_> {
 								let e = pe.expect("option end");
 								let eq = line.get(e.wrapping_sub(1)) == Some(&b'=');
 								let typ = self.sets[d].opts[co].typ;
-								state.def = if typ != CAO_EQUAL || eq { first_oarg(&self.sets, d, co) } else { None };
+								state.def = if typ != CAO_EQUAL || eq {
+									first_oarg(&self.sets, d, co)
+								} else {
+									None
+								};
 								ddef = state.def;
 								if ddef.is_some() {
 									dopt = Some(co);
@@ -1318,7 +1359,10 @@ impl LineParser<'_> {
 								state.argend = argend;
 								let name = &self.sets[d].opts[co].name;
 								state.singles = i64::from(
-									self.sets[d].single && e >= line.len() && name.len() == 2 && name[1] != b'-',
+									self.sets[d].single
+										&& e >= line.len()
+										&& name.len() == 2
+										&& name[1] != b'-',
 								);
 								oargs[co].get_or_insert_with(Vec::new);
 								self.inactive_opt_xor(d, co, cur);
@@ -1349,7 +1393,11 @@ impl LineParser<'_> {
 								oargs[co].get_or_insert_with(Vec::new);
 								state.def = first_oarg(&self.sets, d, co);
 								let typ = self.sets[d].opts[co].typ;
-								ddef = if typ == CAO_NEXT && cur == cc { None } else { state.def };
+								ddef = if typ == CAO_NEXT && cur == cc {
+									None
+								} else {
+									state.def
+								};
 								dopt = Some(co);
 								doff = pe.map_or(0, |e| e as i64);
 								state.optbeg = cur;
@@ -1382,7 +1430,8 @@ impl LineParser<'_> {
 							Word::Arg => {
 								// The `-A` pattern: a match is an unknown option.
 								if let Some(np) = &napat
-									&& cur < cc && state.actopts != 0
+									&& cur < cc
+									&& state.actopts != 0
 								{
 									if pattry(ctx, failed, Some(&**np), line)? {
 										break 'word;
@@ -1414,7 +1463,9 @@ impl LineParser<'_> {
 									if last.def.is_some() {
 										break 'words;
 									}
-									state.opt = i64::from(cur == state.nargbeg + 1 && (!multi || line.is_empty() || pm));
+									state.opt = i64::from(
+										cur == state.nargbeg + 1 && (!multi || line.is_empty() || pm),
+									);
 									state.optbeg = state.nargbeg;
 									state.argbeg = cur - 1;
 									state.argend = argend;
@@ -1571,7 +1622,11 @@ fn ca_set_data(
 			if !opt && !lopt && oopt > 0 {
 				oopt = 0;
 			}
-			let known = data.descr.iter().zip(&data.act).any(|(d, ac)| *d == a.descr && *ac == a.action);
+			let known = data
+				.descr
+				.iter()
+				.zip(&data.act)
+				.any(|(d, ac)| *d == a.descr && *ac == a.action);
 			// With an ignored prefix, no normal arguments are completed.
 			if single && a.opt.is_none() {
 				return;
@@ -1736,7 +1791,15 @@ pub fn comparguments(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 				if let Some(def) = st.s.def {
 					ret = 0;
 					let opt = def.get(&rec.sets).opt.is_some();
-					ca_set_data(ctx, &rec, &mut data, opt, Some(def), st.s.curopt.map(|c| (st.s.d, c)), doff > 0);
+					ca_set_data(
+						ctx,
+						&rec,
+						&mut data,
+						opt,
+						Some(def),
+						st.s.curopt.map(|c| (st.s.d, c)),
+						doff > 0,
+					);
 				}
 			}
 			if ret == 0 {
@@ -1758,9 +1821,15 @@ pub fn comparguments(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 						|| (rec.doff != 0 && def.is_some())
 						|| def.is_some_and(|a| {
 							a.opt.is_some() && (a.typ == CAA_OPT || (a.typ >= CAA_RARGS && a.num < 0))
-						})) && def.is_none_or(|a| {
-					a.typ < CAA_RARGS || if a.typ == CAA_RARGS { s.curpos == s.argbeg + 1 } else { cc == 1 }
-				});
+						}))
+					&& def.is_none_or(|a| {
+						a.typ < CAA_RARGS
+							|| if a.typ == CAA_RARGS {
+								s.curpos == s.argbeg + 1
+							} else {
+								cc == 1
+							}
+					});
 				if !want {
 					continue;
 				}
@@ -1820,7 +1889,9 @@ pub fn comparguments(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 			ret
 		},
 		b's' => {
-			let hit = states.iter().find(|st| rec.sets[st.s.d].single && st.s.singles != 0 && st.s.actopts != 0);
+			let hit = states
+				.iter()
+				.find(|st| rec.sets[st.s.d].single && st.s.singles != 0 && st.s.actopts != 0);
 			match hit {
 				Some(st) => {
 					let v: &[u8] = match (st.s.ddef, st.s.dopt) {
@@ -1842,7 +1913,9 @@ pub fn comparguments(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 			0
 		},
 		b'a' => i32::from(
-			!states.iter().any(|st| !rec.sets[st.s.d].args.is_empty() || rec.sets[st.s.d].rest.is_some()),
+			!states
+				.iter()
+				.any(|st| !rec.sets[st.s.d].args.is_empty() || rec.sets[st.s.d].rest.is_some()),
 		),
 		b'W' => {
 			let nul = args[3].first() != Some(&b'0');

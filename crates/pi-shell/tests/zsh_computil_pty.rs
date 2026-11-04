@@ -26,7 +26,11 @@ const RC_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// `zsh -f -i` with a plain prompt and the rc file `rc`, in `cwd`.
 fn spawn(real: bool, rc: &str, cwd: &Path) -> Spawn {
-	let s = if real { Spawn::real_zsh() } else { Spawn::zsh() };
+	let s = if real {
+		Spawn::real_zsh()
+	} else {
+		Spawn::zsh()
+	};
 	s.args(["-f", "-i"])
 		.env("PS1", "%# ")
 		.rc_file(".zshrc", rc)

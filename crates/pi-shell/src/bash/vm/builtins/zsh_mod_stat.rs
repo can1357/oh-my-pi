@@ -342,7 +342,11 @@ fn statprint(
 				}
 			}
 			if flags & STF_STRING != 0 {
-				let query = if w == 4 { PwQuery::Uid(id) } else { PwQuery::Gid(id) };
+				let query = if w == 4 {
+					PwQuery::Uid(id)
+				} else {
+					PwQuery::Gid(id)
+				};
 				match q.user(query)? {
 					Some(e) => out.extend_from_slice(&e.name),
 					None => num(&mut out, u64::from(id)),
@@ -480,7 +484,14 @@ impl Tm {
 /// `%k`, `%H`, `%L`, `%l`, `%d`, `%m`, `%M`, `%S`, `%y` (with `-` to strip
 /// padding), the rest through `strftime`; output stops where zsh's buffer
 /// accounting runs out.
-pub fn ztrftime(fmt: &[u8], secs: i64, nsec: i64, offset: i32, abbr: &[u8], bufsize: i64) -> Vec<u8> {
+pub fn ztrftime(
+	fmt: &[u8],
+	secs: i64,
+	nsec: i64,
+	offset: i32,
+	abbr: &[u8],
+	bufsize: i64,
+) -> Vec<u8> {
 	let tm = Tm::of(secs, offset, abbr);
 	let mut left = bufsize;
 	let mut out = Vec::with_capacity(fmt.len() * 2);
@@ -683,6 +694,9 @@ mod tests {
 		let t = 1_767_323_045;
 		let got = ztrftime(b"%Y-%m-%d %N %3. %-d %f %K %L|%Z|%s", t, 0, 0, b"UTC", 40);
 		assert_eq!(got, b"2026-01-02 000000000 000 2 2 3 ");
-		assert_eq!(ztrftime(b"%a %b %e %k:%M:%S %Z %Y", t, 0, 0, b"UTC", 40), b"Fri Jan  2  3:04:05 UTC 2026");
+		assert_eq!(
+			ztrftime(b"%a %b %e %k:%M:%S %Z %Y", t, 0, 0, b"UTC", 40),
+			b"Fri Jan  2  3:04:05 UTC 2026"
+		);
 	}
 }

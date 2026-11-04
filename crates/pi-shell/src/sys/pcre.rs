@@ -107,7 +107,11 @@ impl Pcre {
 		// SAFETY: `code_ptr` is a compiled pattern; CAPTURECOUNT writes a
 		// `uint32_t`.
 		unsafe {
-			ffi::pcre2_pattern_info_8(code_ptr.as_ptr(), ffi::PCRE2_INFO_CAPTURECOUNT, (&raw mut count).cast());
+			ffi::pcre2_pattern_info_8(
+				code_ptr.as_ptr(),
+				ffi::PCRE2_INFO_CAPTURECOUNT,
+				(&raw mut count).cast(),
+			);
 		}
 		Ok(Self { code: code_ptr, captures: count as usize })
 	}
@@ -125,10 +129,16 @@ impl Pcre {
 	/// # Errors
 	/// PCRE1's negative `pcre_exec` code for any other failure
 	/// (`PCRE_ERROR_BADUTF8` -10, `PCRE_ERROR_BADUTF8_OFFSET` -11, …).
-	pub fn exec(&self, subject: &[u8], start: usize) -> Result<Option<Vec<Option<Range<usize>>>>, i32> {
+	pub fn exec(
+		&self,
+		subject: &[u8],
+		start: usize,
+	) -> Result<Option<Vec<Option<Range<usize>>>>, i32> {
 		// SAFETY: `code` is a compiled pattern; a null general context
 		// selects malloc.
-		let md = unsafe { ffi::pcre2_match_data_create_from_pattern_8(self.code.as_ptr(), core::ptr::null_mut()) };
+		let md = unsafe {
+			ffi::pcre2_match_data_create_from_pattern_8(self.code.as_ptr(), core::ptr::null_mut())
+		};
 		let Some(md) = NonNull::new(md) else {
 			return Err(PCRE_ERROR_NOMEMORY);
 		};

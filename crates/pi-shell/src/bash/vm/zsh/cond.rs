@@ -31,8 +31,8 @@ use crate::bash::{
 	vm::{
 		Cx, Kernel,
 		builtins::{
-			Chunk, Ctx, Need, Outcome, R, done, zsh_args::zx as with_ex, zsh_mod_example, zsh_mod_pcre,
-			zsh_mod_regex, zsh_module,
+			Chunk, Ctx, Need, Outcome, R, done, zsh_args::zx as with_ex, zsh_mod_example,
+			zsh_mod_pcre, zsh_mod_regex, zsh_module,
 		},
 		exec::{self, Flow, expanding},
 		probe::{self, absolute},
@@ -243,7 +243,11 @@ fn unknown(name: &[u8]) -> Diag {
 
 /// zsh `getconddef(infix, name, 1)`: the module providing condition
 /// `-name`, autoloaded if need be.
-fn conddef(ctx: &mut Ctx<'_, '_>, name: &[u8], infix: bool) -> Result<Result<Option<&'static str>, Diag>, Need> {
+fn conddef(
+	ctx: &mut Ctx<'_, '_>,
+	name: &[u8],
+	infix: bool,
+) -> Result<Result<Option<&'static str>, Diag>, Need> {
 	with_ex(ctx, |ex| zsh_module::cond_module(ex, name, infix))
 }
 
@@ -251,7 +255,12 @@ fn conddef(ctx: &mut Ctx<'_, '_>, name: &[u8], infix: bool) -> Result<Result<Opt
 /// module condition `which` names (`args` its operands) and run it; when
 /// no module provides it, retry with the first operand as a prefix
 /// condition's name (`[[ -name -cond x ]]`) before `unknown condition`.
-fn module_cond(ctx: &mut Ctx<'_, '_>, fromtest: bool, which: ModCond<'_>, args: &[BString]) -> Result<Res, Need> {
+fn module_cond(
+	ctx: &mut Ctx<'_, '_>,
+	fromtest: bool,
+	which: ModCond<'_>,
+	args: &[BString],
+) -> Result<Res, Need> {
 	let (name, infix, regex): (Vec<u8>, bool, bool) = match which {
 		ModCond::Regex => {
 			let (module, feature): (&[u8], &[u8]) = if ctx.zsh_option(ZshOpt::Rematchpcre)? {
@@ -261,7 +270,9 @@ fn module_cond(ctx: &mut Ctx<'_, '_>, fromtest: bool, which: ModCond<'_>, args: 
 			};
 			// zsh ignores what `ensurefeature` returns; a failed load has
 			// said why.
-			if let Err(d) = with_ex(ctx, |ex| zsh_module::ensure_feature_ex(ex, module, b'C', feature))? {
+			if let Err(d) =
+				with_ex(ctx, |ex| zsh_module::ensure_feature_ex(ex, module, b'C', feature))?
+			{
 				ctx.diag(d);
 			}
 			let mut name = b"-".to_vec();
@@ -585,7 +596,11 @@ pub fn cond_test(
 						let raw = matches!(*n, b"-prefix" | b"-suffix" | b"-after" | b"-between");
 						for p in &word.parts {
 							let one = Word { parts: vec![p.clone()], kind: word.kind, ..Word::default() };
-							vals.push(if raw { ex.pattern(unit, &one)? } else { ex.scalar(unit, &one)? });
+							vals.push(if raw {
+								ex.pattern(unit, &one)?
+							} else {
+								ex.scalar(unit, &one)?
+							});
 						}
 					} else {
 						vals.push(ex.scalar(unit, word)?);
@@ -672,7 +687,11 @@ pub fn cond_test(
 	}
 	let lhs: &[u8] = vals.first().map_or(b"", |v| v.as_slice());
 	let rhs: &[u8] = vals.get(1).map_or(b"", |v| v.as_slice());
-	let regex_name = if cop == CondOp::Regex { regex_cond_name(k, vp, cx) } else { b"" };
+	let regex_name = if cop == CondOp::Regex {
+		regex_cond_name(k, vp, cx)
+	} else {
+		b""
+	};
 	trace(k, vp, cx, unit, op, |q, out| match (cop, c) {
 		// `=~` is zsh/regex's (zsh/pcre's) module condition: traced as
 		// one (`tracemodcond`), the operands as written.
@@ -706,9 +725,13 @@ pub fn cond_test(
 /// The module condition `=~` is traced as (zsh `evalcond`'s
 /// `overridename`), with the blanks around it.
 fn regex_cond_name(k: &mut Kernel, vp: &Vproc, cx: &mut Cx<'_>) -> &'static [u8] {
-	let pcre =
-		crate::bash::vm::state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Rematchpcre).unwrap_or(false);
-	if pcre { b" -pcre-match " } else { b" -regex-match " }
+	let pcre = crate::bash::vm::state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Rematchpcre)
+		.unwrap_or(false);
+	if pcre {
+		b" -pcre-match "
+	} else {
+		b" -regex-match "
+	}
 }
 
 /// zsh `evalcond`'s trace of a primary of a traced `[[ ]]`
@@ -738,7 +761,9 @@ fn trace(
 		return;
 	}
 	let mut out = Vec::new();
-	let prev = (top.pc as usize).checked_sub(1).and_then(|p| unit.ops.get(p));
+	let prev = (top.pc as usize)
+		.checked_sub(1)
+		.and_then(|p| unit.ops.get(p));
 	if let Some(prev) = prev.filter(|p| p.node == op.node) {
 		match prev.code {
 			Opcode::BrOk => out.extend_from_slice(b" ||"),
@@ -823,8 +848,15 @@ fn eval_primary(
 			// then the primary replays.
 			Err(Need::Sub(crate::bash::vm::expand::Stop::MathCall(call))) => {
 				let fi = vp.frames.len() - 1;
-				let flow =
-					crate::bash::vm::command::start_math_call(k, vp, cx, &mut sc, Slot::Builtin, &call, line);
+				let flow = crate::bash::vm::command::start_math_call(
+					k,
+					vp,
+					cx,
+					&mut sc,
+					Slot::Builtin,
+					&call,
+					line,
+				);
 				vp.frames[fi].scratch = Some(sc);
 				return flow;
 			},

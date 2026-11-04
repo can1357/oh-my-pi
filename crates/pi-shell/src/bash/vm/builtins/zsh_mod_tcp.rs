@@ -384,7 +384,11 @@ fn list(ctx: &mut Ctx<'_, '_>, machine: bool) -> R {
 				SessionKind::Inbound => "<-",
 				SessionKind::Outbound | SessionKind::Zftp => "->",
 			};
-			let zftp = if s.kind == SessionKind::Zftp { " ZFTP" } else { "" };
+			let zftp = if s.kind == SessionKind::Zftp {
+				" ZFTP"
+			} else {
+				""
+			};
 			format!(
 				"{local}:{} {arrow} {remote}:{} is on fd {}{zftp}\n",
 				s.local.port(),

@@ -40,7 +40,10 @@ fn lastfullchar(ed: &mut Editor) -> Option<char> {
 	if let Some(c) = ed.lastchar_wide {
 		return Some(c);
 	}
-	let c = u8::try_from(ed.lastchar).ok().filter(u8::is_ascii).map(char::from);
+	let c = u8::try_from(ed.lastchar)
+		.ok()
+		.filter(u8::is_ascii)
+		.map(char::from);
 	ed.lastchar_wide = c;
 	c
 }
@@ -156,7 +159,11 @@ pub fn kill_whole_line(zle: &mut Zle, ed: &mut Editor) -> i32 {
 			i += 1;
 		}
 		let ct = i - ed.cs + usize::from(i != ed.line.len());
-		let flags = if fg { cutflags::FRONT | cutflags::RAW } else { cutflags::RAW };
+		let flags = if fg {
+			cutflags::FRONT | cutflags::RAW
+		} else {
+			cutflags::RAW
+		};
 		utils::forekill(zle, ed, ct, flags);
 	}
 	ed.clearlist = true;
@@ -425,7 +432,10 @@ pub fn magicspace_expands(line: &[char], bang: char, cs: usize) -> bool {
 /// result ignored).
 pub fn magicspace(zw: &mut Zw<'_, '_>) -> WResult {
 	fixmagicspace(zw.ed);
-	let bangchar = zw.getsparam(b"histchars").and_then(|h| h.first().copied()).unwrap_or(b'!');
+	let bangchar = zw
+		.getsparam(b"histchars")
+		.and_then(|h| h.first().copied())
+		.unwrap_or(b'!');
 	// zsh converts bangchar with mbrtowc: a byte that is no character
 	// alone just inserts the space.
 	if !bangchar.is_ascii() {
@@ -460,7 +470,9 @@ pub fn whatcursorposition_msg(ed: &Editor) -> Vec<u8> {
 	}
 	let ll = ed.line.len();
 	let pct = if ll == 0 { 0 } else { 100 * ed.cs / ll };
-	s.extend_from_slice(format!("  point {} of {}({pct}%)  column {}", ed.cs + 1, ll + 1, ed.cs - bol).as_bytes());
+	s.extend_from_slice(
+		format!("  point {} of {}({pct}%)  column {}", ed.cs + 1, ll + 1, ed.cs - bol).as_bytes(),
+	);
 	s
 }
 
@@ -490,7 +502,10 @@ mod tests {
 	}
 
 	fn cut(zle: &Zle) -> String {
-		zle.cutbuf.as_ref().map(|c| c.buf.iter().collect()).unwrap_or_default()
+		zle.cutbuf
+			.as_ref()
+			.map(|c| c.buf.iter().collect())
+			.unwrap_or_default()
 	}
 
 	#[test]
@@ -594,7 +609,10 @@ mod tests {
 		assert!(!magicspace_expands(&l, '!', 5));
 		assert!(magicspace_expands(&l, '!', 2));
 		let e = ed("a b", 1);
-		assert_eq!(whatcursorposition_msg(&e), b"Char: SPC (040, 32, 0x20)  point 2 of 4(33%)  column 1");
+		assert_eq!(
+			whatcursorposition_msg(&e),
+			b"Char: SPC (040, 32, 0x20)  point 2 of 4(33%)  column 1"
+		);
 		let e = ed("x", 1);
 		assert_eq!(whatcursorposition_msg(&e), b"EOF  point 2 of 2(100%)  column 1");
 	}

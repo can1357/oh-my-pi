@@ -54,7 +54,11 @@ pub fn digit_argument(ed: &mut Editor) -> i32 {
 		ed.zmod.tmult = sign * newdigit;
 		ed.zmod.flags &= !modflags::NEG;
 	} else {
-		ed.zmod.tmult = ed.zmod.tmult.wrapping_mul(i64::from(ed.zmod.base)).wrapping_add(sign * newdigit);
+		ed.zmod.tmult = ed
+			.zmod
+			.tmult
+			.wrapping_mul(i64::from(ed.zmod.base))
+			.wrapping_add(sign * newdigit);
 	}
 	ed.zmod.flags |= modflags::TMULT;
 	ed.prefixflag = true;
@@ -126,7 +130,11 @@ fn universal_step(digcnt: u32, pref: i32, minus: i32) -> WResult {
 		if c == '-' && digcnt == 0 {
 			return universal_step(digcnt + 1, pref, -1);
 		}
-		let key = if c.is_ascii() { i32::from(u8::try_from(c).unwrap_or(0)) } else { -1 };
+		let key = if c.is_ascii() {
+			i32::from(u8::try_from(c).unwrap_or(0))
+		} else {
+			-1
+		};
 		let newdigit = parsedigit(zw.ed.zmod.base, key);
 		if newdigit >= 0 {
 			let base = i32::try_from(zw.ed.zmod.base).unwrap_or(10);

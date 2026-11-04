@@ -45,7 +45,13 @@ pub fn is_unset(ex: &mut Expander<'_, '_>) -> X<bool> {
 /// Mark the special unset (`true`) or set again.
 pub fn mark_unset(ex: &mut Expander<'_, '_>, unset: bool) {
 	let rec = unset.then(|| Record::Misc(BString::from("1")));
-	state::store_record(&mut ex.k.root, ex.cx.store, ex.vp, KeyBuf::Misc(MiscKey::ZshMapfileUnset), rec);
+	state::store_record(
+		&mut ex.k.root,
+		ex.cx.store,
+		ex.vp,
+		KeyBuf::Misc(MiscKey::ZshMapfileUnset),
+		rec,
+	);
 }
 
 /// An assignment makes an unset special set again (zsh's `createparam`

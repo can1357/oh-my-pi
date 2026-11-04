@@ -100,7 +100,10 @@ fn zsh_mod_example_math_functions() {
 	assert_eq!(out, format!("{SETUP}4 6 3.5 3.5\n"));
 	assert_eq!(st, 0);
 	let (out, err, st) = zsh("zmodload zsh/example; echo $(( sum() ))");
-	assert_eq!((out, err.as_str(), st), (SETUP.to_owned(), "zsh:1: wrong number of arguments: sum()\n", 1));
+	assert_eq!(
+		(out, err.as_str(), st),
+		(SETUP.to_owned(), "zsh:1: wrong number of arguments: sum()\n", 1)
+	);
 	let (_, err, st) = zsh("echo $(( sum(2,3) ))");
 	assert_eq!((err.as_str(), st), ("zsh:1: unknown function: sum\n", 1));
 }

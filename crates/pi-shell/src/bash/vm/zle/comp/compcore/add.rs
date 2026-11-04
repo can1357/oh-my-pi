@@ -34,15 +34,13 @@ use super::{
 /// one of that name and sort/uniq flags, else a new one at the head of
 /// `amatches` (allocated on zsh's heap: freed when the completion ends).
 pub fn begcmgroup(c: &mut Comp, name: Option<&[u8]>, flags: u32) {
-	const SAME: u32 = cgf::NOSORT | cgf::UNIQALL | cgf::UNIQCON | cgf::MATSORT | cgf::NUMSORT | cgf::REVSORT;
+	const SAME: u32 =
+		cgf::NOSORT | cgf::UNIQALL | cgf::UNIQCON | cgf::MATSORT | cgf::NUMSORT | cgf::REVSORT;
 	if let Some(n) = name {
-		let found = c
-			.groups
-			.list(c.core.amatches)
-			.find(|&p| {
-				let g = c.groups.get(p);
-				g.name.as_ref().is_some_and(|gn| gn.as_slice() == n) && flags == g.flags & SAME
-			});
+		let found = c.groups.list(c.core.amatches).find(|&p| {
+			let g = c.groups.get(p);
+			g.name.as_ref().is_some_and(|gn| gn.as_slice() == n) && flags == g.flags & SAME
+		});
 		if let Some(p) = found {
 			c.core.mgroup = Some(p);
 			return;
@@ -140,7 +138,11 @@ pub struct Added {
 
 /// The `ainfo` (or with `alt` `fainfo`) of the completion.
 fn ai(c: &mut Comp, alt: bool) -> &mut Aminfo {
-	let a = if alt { &mut c.core.fainfo } else { &mut c.core.ainfo };
+	let a = if alt {
+		&mut c.core.fainfo
+	} else {
+		&mut c.core.ainfo
+	};
 	a.get_or_insert_with(Box::default)
 }
 
@@ -149,7 +151,11 @@ fn ai(c: &mut Comp, alt: bool) -> &mut Aminfo {
 /// pointers would see it.
 pub fn set_added(c: &mut Comp, a: Added, f: impl Fn(&mut Cmatch)) {
 	let gr = c.groups.get_mut(a.g);
-	let l = if a.alt { &mut gr.lfmatches } else { &mut gr.lmatches };
+	let l = if a.alt {
+		&mut gr.lfmatches
+	} else {
+		&mut gr.lmatches
+	};
 	if let Some(m) = l.get_mut(a.i) {
 		f(m);
 	}
@@ -190,12 +196,15 @@ fn disp_next(disp: &mut Disp) {
 
 /// The current display string.
 fn disp_cur(disp: &Disp) -> Option<BString> {
-	disp.as_ref().and_then(|(v, n)| v.get(n.wrapping_sub(1)).cloned())
+	disp
+		.as_ref()
+		.and_then(|(v, n)| v.get(n.wrapping_sub(1)).cloned())
 }
 
 /// zsh `addmatch`: a bare match (`<all>` of `compadd -C`, `-E` dummies).
 fn addmatch(c: &mut Comp, str: &[u8], flags: u32, disp: &mut Disp, line: bool) {
-	let mut cm = Cmatch { str: BString::from(str), flags: flags | listflags(c), ..Cmatch::default() };
+	let mut cm =
+		Cmatch { str: BString::from(str), flags: flags | listflags(c), ..Cmatch::default() };
 	if disp.is_some() {
 		disp_next(disp);
 		if disp.is_some() {
@@ -234,7 +243,12 @@ fn pfxlen(a: &[u8], b: &[u8]) -> usize {
 
 /// The `-a`/`-k` arrays' elements, one array after the other, skipping
 /// empty ones (zsh's `arrays` walk): the next non-empty one.
-fn next_array(ex: &mut Expander<'_, '_>, names: &[BString], ni: &mut usize, keys: bool) -> X<Vec<BString>> {
+fn next_array(
+	ex: &mut Expander<'_, '_>,
+	names: &[BString],
+	ni: &mut usize,
+	keys: bool,
+) -> X<Vec<BString>> {
 	while *ni < names.len() {
 		let a = get_data_arr(ex, &names[*ni], keys)?;
 		*ni += 1;
@@ -254,7 +268,12 @@ fn next_array(ex: &mut Expander<'_, '_>, names: &[BString], ni: &mut usize, keys
 ///
 /// # Errors
 /// As the parameter and `singsub` expansions.
-pub fn ztat_paths(ex: &mut Expander<'_, '_>, _c: &Comp, dat: &Cadata, argv: &[BString]) -> X<Vec<BString>> {
+pub fn ztat_paths(
+	ex: &mut Expander<'_, '_>,
+	_c: &Comp,
+	dat: &Cadata,
+	argv: &[BString],
+) -> X<Vec<BString>> {
 	if dat.flags & cmf::FILE == 0 {
 		return Ok(Vec::new());
 	}
@@ -283,7 +302,10 @@ pub fn ztat_paths(ex: &mut Expander<'_, '_>, _c: &Comp, dat: &Cadata, argv: &[BS
 		.into_iter()
 		.filter(|s| !s.is_empty() && s.last() != Some(&b'/'))
 		.map(|s| {
-			let mut pb = prpre.clone().filter(|p| !p.is_empty()).unwrap_or_else(|| b"./".to_vec());
+			let mut pb = prpre
+				.clone()
+				.filter(|p| !p.is_empty())
+				.unwrap_or_else(|| b"./".to_vec());
 			pb.extend_from_slice(&s);
 			BString::from(pb)
 		})
@@ -297,7 +319,12 @@ pub fn ztat_paths(ex: &mut Expander<'_, '_>, _c: &Comp, dat: &Cadata, argv: &[BS
 ///
 /// # Errors
 /// As parameter access and pattern matching.
-pub fn addmatches(ex: &mut Expander<'_, '_>, c: &mut Comp, dat: &mut Cadata, argv: &[BString]) -> X<i32> {
+pub fn addmatches(
+	ex: &mut Expander<'_, '_>,
+	c: &mut Comp,
+	dat: &mut Cadata,
+	argv: &[BString],
+) -> X<i32> {
 	let oaq = c.tricky.autoq.clone();
 	let (oqp, oqs) = (c.tricky.qipre.clone(), c.tricky.qisuf.clone());
 	let (ois, oib) = (c.tricky.instring, c.tricky.inbackt);
@@ -324,19 +351,47 @@ pub fn addmatches(ex: &mut Expander<'_, '_>, c: &mut Comp, dat: &mut Cadata, arg
 
 /// [`addmatches`] up to the restoring of the globals; `true`: nothing to
 /// add at all (zsh's early `return 1`).
-#[allow(clippy::too_many_lines, clippy::cognitive_complexity, reason = "a direct port of zsh's addmatches")]
-fn addmatches_body(ex: &mut Expander<'_, '_>, c: &mut Comp, dat: &mut Cadata, argv: &[BString]) -> X<bool> {
+#[allow(
+	clippy::too_many_lines,
+	clippy::cognitive_complexity,
+	reason = "a direct port of zsh's addmatches"
+)]
+fn addmatches_body(
+	ex: &mut Expander<'_, '_>,
+	c: &mut Comp,
+	dat: &mut Cadata,
+	argv: &[BString],
+) -> X<bool> {
 	let oppre = dat.ppre.clone();
 	if dat.dummies >= 0 {
 		dat.aflags = (dat.aflags | caf::NOSORT | caf::UNIQCON) & !caf::UNIQALL;
 	}
 	// Select the group in which to store the matches.
-	let gflags = (if dat.aflags & caf::NOSORT != 0 { cgf::NOSORT } else { 0 })
-		| (if dat.aflags & caf::MATSORT != 0 { cgf::MATSORT } else { 0 })
-		| (if dat.aflags & caf::NUMSORT != 0 { cgf::NUMSORT } else { 0 })
-		| (if dat.aflags & caf::REVSORT != 0 { cgf::REVSORT } else { 0 })
-		| (if dat.aflags & caf::UNIQALL != 0 { cgf::UNIQALL } else { 0 })
-		| (if dat.aflags & caf::UNIQCON != 0 { cgf::UNIQCON } else { 0 });
+	let gflags = (if dat.aflags & caf::NOSORT != 0 {
+		cgf::NOSORT
+	} else {
+		0
+	}) | (if dat.aflags & caf::MATSORT != 0 {
+		cgf::MATSORT
+	} else {
+		0
+	}) | (if dat.aflags & caf::NUMSORT != 0 {
+		cgf::NUMSORT
+	} else {
+		0
+	}) | (if dat.aflags & caf::REVSORT != 0 {
+		cgf::REVSORT
+	} else {
+		0
+	}) | (if dat.aflags & caf::UNIQALL != 0 {
+		cgf::UNIQALL
+	} else {
+		0
+	}) | (if dat.aflags & caf::UNIQCON != 0 {
+		cgf::UNIQCON
+	} else {
+		0
+	});
 	if let Some(g) = dat.group.clone() {
 		endcmgroup(c, None);
 		begcmgroup(c, Some(&g), gflags);
@@ -345,7 +400,11 @@ fn addmatches_body(ex: &mut Expander<'_, '_>, c: &mut Comp, dat: &mut Cadata, ar
 		begcmgroup(c, Some(b"default"), 0);
 	}
 	if dat.mesg.is_some() || dat.exp.is_some() {
-		let str = dat.mesg.clone().or_else(|| dat.exp.clone()).unwrap_or_default();
+		let str = dat
+			.mesg
+			.clone()
+			.or_else(|| dat.exp.clone())
+			.unwrap_or_default();
 		set_curexpl(c, Some(Cexpl { always: dat.mesg.is_some(), str, count: 0, fcount: 0 }));
 		if dat.mesg.is_some() && dat.dpar.is_empty() && dat.opar.is_none() && dat.apar.is_none() {
 			addexpl(c, true);
@@ -391,7 +450,12 @@ fn addmatches_body(ex: &mut Expander<'_, '_>, c: &mut Comp, dat: &mut Cadata, ar
 	}
 	c.tricky.qipre = Some(c.complete.compqiprefix.clone().unwrap_or_default());
 	c.tricky.qisuf = Some(c.complete.compqisuffix.clone().unwrap_or_default());
-	c.core.useexact = i32::from(c.complete.compexact.as_ref().is_some_and(|e| e.as_slice() == b"accept"));
+	c.core.useexact = i32::from(
+		c.complete
+			.compexact
+			.as_ref()
+			.is_some_and(|e| e.as_slice() == b"accept"),
+	);
 
 	let doadd = dat.apar.is_none() && dat.opar.is_none() && dat.dpar.is_empty();
 	if doadd {
@@ -439,7 +503,11 @@ fn addmatches_body(ex: &mut Expander<'_, '_>, c: &mut Comp, dat: &mut Cadata, ar
 	};
 	// Our matcher on the stack of matchers.
 	if let Some(m) = dat.matcher.clone() {
-		c.core.mstack = Some(Arc::new(Cmlist { next: c.core.mstack.clone(), matcher: Some(m.clone()), str: BString::default() }));
+		c.core.mstack = Some(Arc::new(Cmlist {
+			next:    c.core.mstack.clone(),
+			matcher: Some(m.clone()),
+			str:     BString::default(),
+		}));
 		add_bmatchers(c, Some(&m));
 		c.core.matchers.push(m);
 	}
@@ -458,7 +526,8 @@ fn addmatches_body(ex: &mut Expander<'_, '_>, c: &mut Comp, dat: &mut Cadata, ar
 			let mut tmp = t.to_vec();
 			tokenize(&mut tmp);
 			remnulargs(&mut tmp);
-			let star_q = (at(&tmp, 0) == QUEST && at(&tmp, 1) == STAR) || (at(&tmp, 1) == QUEST && at(&tmp, 0) == STAR);
+			let star_q = (at(&tmp, 0) == QUEST && at(&tmp, 1) == STAR)
+				|| (at(&tmp, 1) == QUEST && at(&tmp, 0) == STAR);
 			if star_q && at(&tmp, 2) != 0 && !haswilds(&mut tmp[2..], &opts) {
 				let mut s = tmp[2..].to_vec();
 				untokenize(&mut s);
@@ -486,8 +555,10 @@ fn addmatches_body(ex: &mut Expander<'_, '_>, c: &mut Comp, dat: &mut Cadata, ar
 		lsuf = get(&c.complete.compsuffix);
 		let qil = c.complete.compqiprefix.as_ref().map_or(0, |s| s.len());
 		let qisl = c.complete.compqisuffix.as_ref().map_or(0, |s| s.len());
-		if i32::try_from(lpre.len() + qil + lipre.as_ref().map_or(0, Vec::len)).unwrap_or(0) != c.core.origlpre
-			|| i32::try_from(lsuf.len() + qisl + lisuf.as_ref().map_or(0, Vec::len)).unwrap_or(0) != c.core.origlsuf
+		if i32::try_from(lpre.len() + qil + lipre.as_ref().map_or(0, Vec::len)).unwrap_or(0)
+			!= c.core.origlpre
+			|| i32::try_from(lsuf.len() + qisl + lisuf.as_ref().map_or(0, Vec::len)).unwrap_or(0)
+				!= c.core.origlsuf
 		{
 			c.core.lenchanged = 1;
 		}
@@ -514,7 +585,11 @@ fn addmatches_body(ex: &mut Expander<'_, '_>, c: &mut Comp, dat: &mut Cadata, ar
 	dat.ipre = cat(lipre, &dat.ipre);
 	dat.isuf = cat(lisuf, &dat.isuf);
 	let lpl = if let Some(p) = dat.ppre.clone() {
-		let q = if dat.flags & cmf::FILE != 0 { tildequote(ex, c, &p, quote) } else { multiquote(ex, c, &p, quote) };
+		let q = if dat.flags & cmf::FILE != 0 {
+			tildequote(ex, c, &p, quote)
+		} else {
+			multiquote(ex, c, &p, quote)
+		};
 		let l = q.len();
 		dat.ppre = Some(q);
 		l
@@ -702,7 +777,9 @@ fn addmatches_body(ex: &mut Expander<'_, '_>, c: &mut Comp, dat: &mut Cadata, ar
 					if pattern_env.is_none() {
 						pattern_env = Some(zpattern::char_env(ex)?);
 					}
-					let env = pattern_env.as_ref().expect("character-class environment initialized");
+					let env = pattern_env
+						.as_ref()
+						.expect("character-class environment initialized");
 					addit = !p.iter().any(|p| p.matches(&ibuf, &env.env()));
 				}
 				if !addit {
@@ -718,13 +795,27 @@ fn addmatches_body(ex: &mut Expander<'_, '_>, c: &mut Comp, dat: &mut Cadata, ar
 					if pattern_env.is_none() {
 						pattern_env = Some(zpattern::char_env(ex)?);
 					}
-					let env = pattern_env.as_ref().expect("character-class environment initialized");
+					let env = pattern_env
+						.as_ref()
+						.expect("character-class environment initialized");
 					Some((cp, env.env()))
 				} else {
 					None
 				};
 				match comp_match(
-					ex, c, &lpre, Some(&lsuf), &s, cp, &mut lc, qu, &mut bpl, bcp, &mut bsl, bcs, &mut isexact,
+					ex,
+					c,
+					&lpre,
+					Some(&lsuf),
+					&s,
+					cp,
+					&mut lc,
+					qu,
+					&mut bpl,
+					bcp,
+					&mut bsl,
+					bcs,
+					&mut isexact,
 				)? {
 					Some(ms) => ms,
 					None => {
@@ -733,7 +824,11 @@ fn addmatches_body(ex: &mut Expander<'_, '_>, c: &mut Comp, dat: &mut Cadata, ar
 					},
 				}
 			} else {
-				let ms = if quote { s.clone() } else { multiquote(ex, c, &s, false) };
+				let ms = if quote {
+					s.clone()
+				} else {
+					multiquote(ex, c, &s, false)
+				};
 				lc = bld_parts(c, &ms, i32::try_from(ms.len()).unwrap_or(0), -1, None, None);
 				ms
 			};
@@ -745,10 +840,22 @@ fn addmatches_body(ex: &mut Expander<'_, '_>, c: &mut Comp, dat: &mut Cadata, ar
 					bp.curpos += bsadd;
 				}
 				if let Some(a) = add_match_data(
-					c, false, &ms, s, lc, dat.ipre.as_deref().map(|s| s.as_slice()), None,
-					dat.isuf.as_deref().map(|s| s.as_slice()), dat.pre.as_deref().map(|s| s.as_slice()),
-					dat.prpre.as_deref().map(|s| s.as_slice()), dat.ppre.as_deref().map(|s| s.as_slice()), pline,
-					dat.psuf.as_deref().map(|s| s.as_slice()), sline, dat.suf.as_deref().map(|s| s.as_slice()), dat.flags,
+					c,
+					false,
+					&ms,
+					s,
+					lc,
+					dat.ipre.as_deref().map(|s| s.as_slice()),
+					None,
+					dat.isuf.as_deref().map(|s| s.as_slice()),
+					dat.pre.as_deref().map(|s| s.as_slice()),
+					dat.prpre.as_deref().map(|s| s.as_slice()),
+					dat.ppre.as_deref().map(|s| s.as_slice()),
+					pline,
+					dat.psuf.as_deref().map(|s| s.as_slice()),
+					sline,
+					dat.suf.as_deref().map(|s| s.as_slice()),
+					dat.flags,
 					isexact,
 				) {
 					let d = disp_cur(&disp);
@@ -894,7 +1001,11 @@ fn last(c: &Comp, mut l: Cl) -> Cl {
 ///
 /// # Panics
 /// Without a cline list or a current group (zsh dereferences `NULL`).
-#[allow(clippy::too_many_arguments, clippy::too_many_lines, reason = "a direct port of zsh's add_match_data")]
+#[allow(
+	clippy::too_many_arguments,
+	clippy::too_many_lines,
+	reason = "a direct port of zsh's add_match_data"
+)]
 pub fn add_match_data(
 	c: &mut Comp,
 	alt: bool,
@@ -945,8 +1056,9 @@ pub fn add_match_data(
 		}
 		let mut sl: Option<Cl> = None;
 		if psl > 0 {
-			let mut s = bld_parts(c, psuf.unwrap_or_default(), i32l(psl), i32l(psl), Some(&mut sl), None)
-				.expect("bld_parts of a non-empty string");
+			let mut s =
+				bld_parts(c, psuf.unwrap_or_default(), i32l(psl), i32l(psl), Some(&mut sl), None)
+					.expect("bld_parts of a non-empty string");
 			if let Some(sl0) = sline.take() {
 				let sl2 = cp_cline(c, Some(sl0), true).expect("copy of a cline list");
 				let sp = last(c, sl2);
@@ -989,7 +1101,8 @@ pub fn add_match_data(
 		}
 		if qisl > 0 {
 			let q = qisuf.as_ref().map_or(&[][..], |q| q.as_slice());
-			let qsl = bld_parts(c, q, i32l(qisl), i32l(qisl), None, None).expect("bld_parts of a non-empty string");
+			let qsl = bld_parts(c, q, i32l(qisl), i32l(qisl), None, None)
+				.expect("bld_parts of a non-empty string");
 			let n = c.clines.get_mut(qsl);
 			n.flags |= clf::SUF;
 			n.suffix = n.prefix.take();
@@ -1045,7 +1158,8 @@ pub fn add_match_data(
 	};
 	let parts = |c: &mut Comp, s: &[u8]| {
 		let mut lp = None;
-		let p = bld_parts(c, s, i32l(s.len()), i32l(s.len()), Some(&mut lp), None).expect("bld_parts of a non-empty string");
+		let p = bld_parts(c, s, i32l(s.len()), i32l(s.len()), Some(&mut lp), None)
+			.expect("bld_parts of a non-empty string");
 		(p, lp.unwrap_or(p))
 	};
 	if pl > 0 {
@@ -1103,7 +1217,11 @@ pub fn add_match_data(
 		orig: Some(BString::from(orig)),
 		ppre: nonempty(ppre),
 		psuf: nonempty(psuf),
-		prpre: if flags & cmf::FILE != 0 { nonempty(prpre) } else { None },
+		prpre: if flags & cmf::FILE != 0 {
+			nonempty(prpre)
+		} else {
+			None
+		},
 		ipre: match qipre_ne {
 			Some(q) => Some(match ipre.filter(|s| !s.is_empty()) {
 				Some(i) => cat(&q, i),
@@ -1125,7 +1243,10 @@ pub fn add_match_data(
 		..Cmatch::default()
 	};
 	if flags & cmf::FILE != 0 && !orig.is_empty() && orig.last() != Some(&b'/') {
-		let mut pb = cm.prpre.as_ref().map_or_else(|| b"./".to_vec(), |p| p.to_vec());
+		let mut pb = cm
+			.prpre
+			.as_ref()
+			.map_or_else(|| b"./".to_vec(), |p| p.to_vec());
 		pb.extend_from_slice(orig);
 		if let Some(&(l, s)) = c.core.ztat_cache.get(pb.as_slice()) {
 			if let Some(m) = l {
@@ -1138,7 +1259,11 @@ pub fn add_match_data(
 			}
 		}
 	}
-	let stack = c.complete.compqstack.as_ref().map_or(&[][..], |s| s.as_slice());
+	let stack = c
+		.complete
+		.compqstack
+		.as_ref()
+		.map_or(&[][..], |s| s.as_slice());
 	if (at(stack, 0) == qt::BACKSLASH && stack.len() > 1)
 		|| (c.tricky.autoq.is_some() && !stack.is_empty() && at(stack, 1) == qt::BACKSLASH)
 	{
@@ -1148,10 +1273,19 @@ pub fn add_match_data(
 	cm.brsl = (c.tricky.nbrend != 0).then(|| c.tricky.brend.iter().map(|b| b.curpos).collect());
 	cm.qipl = i32l(qipl);
 	cm.qisl = i32l(qisl);
-	cm.autoq = c.tricky.autoq.clone().or_else(|| (c.tricky.inbackt != 0).then(|| BString::from("`")));
+	cm.autoq = c
+		.tricky
+		.autoq
+		.clone()
+		.or_else(|| (c.tricky.inbackt != 0).then(|| BString::from("`")));
 	if c.tricky.lastprebr.is_some() || c.tricky.lastpostbr.is_some() {
 		let (pre, post) = (c.tricky.lastprebr.clone(), c.tricky.lastpostbr.clone());
-		if !hasbrpsfx(c, &cm, pre.as_deref().map(|s| s.as_slice()), post.as_deref().map(|s| s.as_slice())) {
+		if !hasbrpsfx(
+			c,
+			&cm,
+			pre.as_deref().map(|s| s.as_slice()),
+			post.as_deref().map(|s| s.as_slice()),
+		) {
 			return None;
 		}
 	}
@@ -1161,19 +1295,31 @@ pub fn add_match_data(
 	ai(c, alt).line = joined;
 	c.core.mnum += 1;
 	ai(c, alt).count += 1;
-	let g = c.core.mgroup.expect("add_match_data without a current group");
+	let g = c
+		.core
+		.mgroup
+		.expect("add_match_data without a current group");
 	let lpl = cm.ppre.as_ref().map_or(0, |s| s.len());
 	let lsl = cm.psuf.as_ref().map_or(0, |s| s.len());
 	let ml = i32l(stl + lpl + lsl);
 	let gr = c.groups.get_mut(g);
-	let list = if alt { &mut gr.lfmatches } else { &mut gr.lmatches };
+	let list = if alt {
+		&mut gr.lfmatches
+	} else {
+		&mut gr.lmatches
+	};
 	let i = list.len();
 	gr.new = true;
 	c.core.newmatches = 1;
 	if alt {
 		c.complete.compignored += 1;
 	}
-	if c.complete.complastprompt.as_ref().is_none_or(|s| s.is_empty()) {
+	if c
+		.complete
+		.complastprompt
+		.as_ref()
+		.is_none_or(|s| s.is_empty())
+	{
 		c.core.dolastprompt = 0;
 	}
 	if let Some(e) = curexpl_mut(c) {
@@ -1195,7 +1341,13 @@ pub fn add_match_data(
 		let useexact = c.core.useexact;
 		if ai(c, alt).exact == 0 {
 			ai(c, alt).exact = useexact;
-			if c.incompfunc != 0 && c.complete.compexactstr.as_ref().is_none_or(|s| s.is_empty()) {
+			if c.incompfunc != 0
+				&& c
+					.complete
+					.compexactstr
+					.as_ref()
+					.is_none_or(|s| s.is_empty())
+			{
 				let mut e = cm.ppre.as_ref().map(|s| s.to_vec()).unwrap_or_default();
 				e.extend_from_slice(&cm.str);
 				if let Some(p) = &cm.psuf {
@@ -1206,7 +1358,12 @@ pub fn add_match_data(
 			}
 			ai(c, alt).exactm = Some(Box::new(cm.clone()));
 			added.exactm = true;
-		} else if useexact != 0 && ai(c, alt).exactm.as_deref().is_none_or(|e| !matcheq(&cm, e)) {
+		} else if useexact != 0
+			&& ai(c, alt)
+				.exactm
+				.as_deref()
+				.is_none_or(|e| !matcheq(&cm, e))
+		{
 			let a = ai(c, alt);
 			a.exact = 2;
 			a.exactm = None;
@@ -1218,7 +1375,11 @@ pub fn add_match_data(
 	// Only firstm/exactm need independent copies. The group owns the
 	// original match, rather than cloning every candidate into its list.
 	let gr = c.groups.get_mut(g);
-	let list = if alt { &mut gr.lfmatches } else { &mut gr.lmatches };
+	let list = if alt {
+		&mut gr.lfmatches
+	} else {
+		&mut gr.lmatches
+	};
 	list.push(cm);
 	Some(added)
 }

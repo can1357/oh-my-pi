@@ -72,7 +72,11 @@ impl ListEnv {
 			listpacked: comp::isset(ex, ZshOpt::Listpacked),
 			listrowsfirst: comp::isset(ex, ZshOpt::Listrowsfirst),
 			listtypes: comp::isset(ex, ZshOpt::Listtypes),
-			cs: Charset { utf8, print_eight: comp::isset(ex, ZshOpt::Printeightbit), ..Charset::default() },
+			cs: Charset {
+				utf8,
+				print_eight: comp::isset(ex, ZshOpt::Printeightbit),
+				..Charset::default()
+			},
 		}
 	}
 

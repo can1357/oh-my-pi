@@ -140,48 +140,48 @@ pub struct VprocZsh {
 	/// zsh's current sticky emulation (zsh's global `sticky`): set while
 	/// `emulate MODE -c` runs and inside a sticky function; a function
 	/// defined meanwhile records it.
-	pub sticky:       Option<crate::bash::store::Sticky>,
+	pub sticky:             Option<crate::bash::store::Sticky>,
 	/// What frames restore when they end: `(frame count with the frame on
 	/// top, saved state)` for the `eval` frame of `emulate … -c` (zsh
 	/// `bin_emulate`) and a trap running in another mode; innermost last.
-	pub restores:     Vec<(u32, crate::bash::store::ZshScope)>,
+	pub restores:           Vec<(u32, crate::bash::store::ZshScope)>,
 	/// zsh `exit_pending`: `exit N` ran inside a function: `(N, the call
 	/// depth then)` (zsh `exit_val`, `exit_level`). The functions return one
 	/// by one down from that depth (their `always` lists and `EXIT` traps
 	/// run; a call those lists make runs to its end), then the shell exits
 	/// with N.
-	pub exit_pending: Option<(i32, u32)>,
+	pub exit_pending:       Option<(i32, u32)>,
 	/// The diagnostic site a subshell of zsh code inherits (zsh forks keep
 	/// `scriptname`): its parent's script name and the script line its
 	/// lines count from (a function's definition line); used when none of
 	/// its own frames names a site (`Kernel::zsh_site`).
-	pub site:         Option<(BString, u32)>,
+	pub site:               Option<(BString, u32)>,
 	/// The `zsh_eval_context` a subshell of zsh code starts with: its
 	/// parent's when it started (zsh forks keep the context stack); empty
 	/// for none.
-	pub context:      Vec<BString>,
+	pub context:            Vec<BString>,
 	/// The `zsh_eval_context` word of a subshell's first frame when it is
 	/// not a command substitution's (`zpty`, whose command zsh runs with
 	/// `execode(…, "zpty")`).
-	pub first_context: Option<BString>,
+	pub first_context:      Option<BString>,
 	/// zsh/zpty's commands (zsh `ptycmds`); a subshell starts with a copy,
 	/// as a zsh fork keeps the table.
-	pub ptys:         crate::bash::vm::builtins::zsh_mod_zpty::PtyTable,
+	pub ptys:               crate::bash::vm::builtins::zsh_mod_zpty::PtyTable,
 	/// The terminal of the session this vproc runs in (zsh's `SHTTY` of a
 	/// zpty child): the slave of the `zpty` that started it (or an
 	/// ancestor). Inherited by children, opened for `/dev/tty`, handed to
 	/// every external it spawns ([`crate::bash::SpawnSpec::ctty`]). Never
 	/// serialized: a pty is a host object, lost on restore like the host fds.
 	#[serde(skip)]
-	pub ctty:         Ctty,
+	pub ctty:               Ctty,
 	/// zsh/curses' state (ncurses' screen and zsh's window table) once
 	/// `zcurses init` ran; a subshell starts with a copy, as a zsh fork has
 	/// its own.
-	pub curses:       Option<Box<crate::bash::vm::builtins::zsh_mod_curses::screen::Curses>>,
+	pub curses:             Option<Box<crate::bash::vm::builtins::zsh_mod_curses::screen::Curses>>,
 	/// zsh `zexit`'s hooks under way or done ([`crate::bash::vm::zsh::zexit`]).
 	/// A subshell starts without.
 	#[serde(default)]
-	pub zexit:        Option<crate::bash::vm::zsh::zexit::ZExit>,
+	pub zexit:              Option<crate::bash::vm::zsh::zexit::ZExit>,
 	/// The shell is exiting because of an `exit` inside a function (zsh's
 	/// `exit_pending` when `zexit` runs; the engine clears
 	/// [`Self::exit_pending`] once the functions have returned).
@@ -190,18 +190,18 @@ pub struct VprocZsh {
 	/// zsh's `lastmathval`: the value of the last arithmetic evaluation,
 	/// which a user math function returns (zsh `callmathfunc`).
 	#[serde(default)]
-	pub last_math:    Option<LastMath>,
+	pub last_math:          Option<LastMath>,
 	/// Files of `=(…)` substitutions: `(frame depth, path)` as
 	/// [`Vproc::procsubs`]; removed when the command is over (zsh's job
 	/// `filelist`). A subshell starts without.
 	#[serde(default)]
-	pub tempfiles:    Vec<(u32, BString)>,
+	pub tempfiles:          Vec<(u32, BString)>,
 	/// The code (and line) of a glob's shell-code qualifier to run above
 	/// the op that returned [`Flow::Call`](super::exec::Flow::Call) for it
 	/// (zsh `qualsheval`); pushed by the run loop, which drops it when the
 	/// op returned anything else. Never imaged: it lives within one op step.
 	#[serde(skip)]
-	pub glob_hook:    Option<(BString, u32)>,
+	pub glob_hook:          Option<(BString, u32)>,
 }
 
 /// A number as zsh's `lastmathval` keeps it ([`VprocZsh::last_math`]); a
@@ -824,11 +824,11 @@ pub enum FrameKind {
 	/// A function call (a scope is pushed with it).
 	Function {
 		/// Name.
-		name: BString,
+		name:     BString,
 		/// Its scope holds a [`crate::bash::store::ZshScope`] (a zsh-dialect or
 		/// mode-switching call): the return restores from it
 		/// (`mode::leave_call`). False for a bash call within bash.
-		zsh:  bool,
+		zsh:      bool,
 		/// The call that loaded the function (zsh `execautofn`, which runs
 		/// the loaded body with `execode(…, "loadautofunc")`):
 		/// `zsh_eval_context` shows `loadautofunc` after its `shfunc`.
@@ -1280,15 +1280,15 @@ impl ScratchIo {
 pub struct ScratchZsh {
 	/// The zsh filename-generation walk of the `Glob` probe in flight (not
 	/// imaged, like [`ScratchIo::walk`]: a restored op restarts its walk).
-	pub zglob:  Option<Box<super::zsh::zglob::Walk>>,
+	pub zglob:     Option<Box<super::zsh::zglob::Walk>>,
 	/// zsh `multios`: per fd redirected by this list, whether it is an
 	/// output and the objects it was redirected to so far (zsh `mfds`).
-	pub multio: Vec<(i32, bool, Vec<FdRef>)>,
+	pub multio:    Vec<(i32, bool, Vec<FdRef>)>,
 	/// zsh `xpandredir`: a redirection whose target expanded to several
 	/// words becomes one redirection per word (index in the list, word),
 	/// applied after the list's own; [`RedirProgress::done`] counts on
 	/// through them.
-	pub more:   Vec<(u32, BString)>,
+	pub more:      Vec<(u32, BString)>,
 	/// The `fcntl` lock a history file operation holds (zsh `flock_fd`,
 	/// `histfcntllock`), released with the op (not imaged).
 	pub hist_lock: Option<Box<dyn crate::bash::fs::File>>,

@@ -52,7 +52,11 @@ impl Cell {
 
 	/// The character, if the cell starts one.
 	pub fn char(self) -> Option<char> {
-		if self.ch == 0 { None } else { char::from_u32(self.ch) }
+		if self.ch == 0 {
+			None
+		} else {
+			char::from_u32(self.ch)
+		}
 	}
 }
 
@@ -250,7 +254,9 @@ impl Curses {
 	fn make(&mut self, name: BString, rows: i32, cols: i32, begy: i32, begx: i32) -> Win {
 		let id = self.next_buf;
 		self.next_buf += 1;
-		self.bufs.push(Buf { id, rows, cols, cells: vec![Cell::BLANK; (rows * cols) as usize] });
+		self
+			.bufs
+			.push(Buf { id, rows, cols, cells: vec![Cell::BLANK; (rows * cols) as usize] });
 		Win {
 			name,
 			buf: id,
@@ -321,29 +327,29 @@ impl Curses {
 			return None;
 		}
 		let w = Win {
-			name: name.clone(),
-			buf: par.buf,
-			off_y: par.off_y + y,
-			off_x: par.off_x + x,
-			begy: by,
-			begx: bx,
-			rows: nl,
-			cols: nc,
-			cury: 0,
-			curx: 0,
-			attrs: par.attrs,
-			pair: par.pair,
-			bkgd: par.bkgd,
-			scrollok: false,
+			name:        name.clone(),
+			buf:         par.buf,
+			off_y:       par.off_y + y,
+			off_x:       par.off_x + x,
+			begy:        by,
+			begx:        bx,
+			rows:        nl,
+			cols:        nc,
+			cury:        0,
+			curx:        0,
+			attrs:       par.attrs,
+			pair:        par.pair,
+			bkgd:        par.bkgd,
+			scrollok:    false,
 			scroll_flag: false,
-			clearok: false,
-			moved: false,
-			timeout: -1,
-			keypad: false,
-			parent: Some(par.name.clone()),
-			children: Vec::new(),
-			permanent: false,
-			touched: vec![(0, nc - 1); nl as usize],
+			clearok:     false,
+			moved:       false,
+			timeout:     -1,
+			keypad:      false,
+			parent:      Some(par.name.clone()),
+			children:    Vec::new(),
+			permanent:   false,
+			touched:     vec![(0, nc - 1); nl as usize],
 		};
 		self.wins[p].children.push(name);
 		self.wins.push(w);
@@ -441,10 +447,18 @@ impl Curses {
 		let win = &self.wins[w];
 		let a = win.attrs | attrs;
 		if ch == u32::from(b' ') && attrs == 0 {
-			let pair = if win.pair != 0 { win.pair } else { win.bkgd.pair };
+			let pair = if win.pair != 0 {
+				win.pair
+			} else {
+				win.bkgd.pair
+			};
 			Cell { ch: win.bkgd.ch, attrs: a | win.bkgd.attrs, pair }
 		} else {
-			let pair = if win.pair != 0 { win.pair } else { win.bkgd.pair };
+			let pair = if win.pair != 0 {
+				win.pair
+			} else {
+				win.bkgd.pair
+			};
 			Cell { ch, attrs: a | win.bkgd.attrs, pair }
 		}
 	}
@@ -575,7 +589,11 @@ impl Curses {
 				}
 			},
 			c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-				let shown = if c as u32 == 0x7f { '?' } else { char::from(c as u8 + 0x40) };
+				let shown = if c as u32 == 0x7f {
+					'?'
+				} else {
+					char::from(c as u8 + 0x40)
+				};
 				let caret = self.render(w, u32::from(b'^'), attrs);
 				let ch = self.render(w, u32::from(shown), attrs);
 				self.add_literal(w, caret, false) && self.add_literal(w, ch, false)
@@ -855,17 +873,20 @@ impl Curses {
 		}
 		let on = |a: u16| i32::from(attrs & a != 0);
 		if caps.ti.str("sgr").is_some() {
-			emit(out, caps.p("sgr", &[
-				on(A_STANDOUT),
-				on(A_UNDERLINE),
-				on(A_REVERSE),
-				on(A_BLINK),
-				on(A_DIM),
-				on(A_BOLD),
-				0,
-				0,
-				on(A_ALTCHARSET),
-			]));
+			emit(
+				out,
+				caps.p("sgr", &[
+					on(A_STANDOUT),
+					on(A_UNDERLINE),
+					on(A_REVERSE),
+					on(A_BLINK),
+					on(A_DIM),
+					on(A_BOLD),
+					0,
+					0,
+					on(A_ALTCHARSET),
+				]),
+			);
 		} else {
 			emit(out, caps.s("sgr0"));
 			for (bit, cap) in [
@@ -888,10 +909,20 @@ impl Curses {
 		if pair != 0 && self.color {
 			let (fg, bg) = self.pairs.get(pair as usize).copied().unwrap_or((-1, -1));
 			if fg >= 0 {
-				emit(out, caps.p("setaf", &[i32::from(fg)]).or_else(|| caps.p("setf", &[i32::from(fg)])));
+				emit(
+					out,
+					caps
+						.p("setaf", &[i32::from(fg)])
+						.or_else(|| caps.p("setf", &[i32::from(fg)])),
+				);
 			}
 			if bg >= 0 {
-				emit(out, caps.p("setab", &[i32::from(bg)]).or_else(|| caps.p("setb", &[i32::from(bg)])));
+				emit(
+					out,
+					caps
+						.p("setab", &[i32::from(bg)])
+						.or_else(|| caps.p("setb", &[i32::from(bg)])),
+				);
 			}
 		}
 		self.vid = (attrs, pair);
@@ -1045,8 +1076,16 @@ impl Curses {
 				let win = &self.wins[w];
 				(win.begy, win.begx, win.rows, win.cols, win.permanent)
 			};
-			let nrows = if permanent { lines } else { rows.min((lines - begy).max(1)) };
-			let ncols = if permanent { cols } else { wcols.min((cols - begx).max(1)) };
+			let nrows = if permanent {
+				lines
+			} else {
+				rows.min((lines - begy).max(1))
+			};
+			let ncols = if permanent {
+				cols
+			} else {
+				wcols.min((cols - begx).max(1))
+			};
 			if (nrows, ncols) != (rows, wcols) {
 				self.resize_win(w, nrows, ncols);
 			}
@@ -1080,5 +1119,4 @@ impl Curses {
 		win.curx = win.curx.min(cols - 1);
 		win.touched = vec![(0, cols - 1); rows as usize];
 	}
-
 }

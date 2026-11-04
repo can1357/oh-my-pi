@@ -108,7 +108,11 @@ fn list(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 			return;
 		}
 		if mode > 0 {
-			out.extend_from_slice(if matches!(w.kind, Kind::Comp { .. }) { b"zle -C " } else { b"zle -N " });
+			out.extend_from_slice(if matches!(w.kind, Kind::Comp { .. }) {
+				b"zle -C "
+			} else {
+				b"zle -N "
+			});
 			if name.first() == Some(&b'-') {
 				out.extend_from_slice(b"-- ");
 			}
@@ -228,7 +232,9 @@ fn new(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 /// completion widget `args[1]`, running function `args[2]`.
 fn complete(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	// zsh `require_module("zsh/complete", …)`.
-	if let Err(e) = crate::bash::vm::builtins::zsh_module::ensure_loaded(ctx.k, ctx.cx, ctx.vp, b"zsh/complete") {
+	if let Err(e) =
+		crate::bash::vm::builtins::zsh_module::ensure_loaded(ctx.k, ctx.cx, ctx.vp, b"zsh/complete")
+	{
 		return Err(Need::Store(e));
 	}
 	let zle = zle_mut(ctx.k, ctx.cx, ctx.vp);
@@ -237,7 +243,10 @@ fn complete(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		base.push(b'.');
 	}
 	base.extend_from_slice(&args[1]);
-	let iscomp = zle.widgets.get(&base).is_some_and(|w| w.flags & wflags::ISCOMP != 0);
+	let iscomp = zle
+		.widgets
+		.get(&base)
+		.is_some_and(|w| w.flags & wflags::ISCOMP != 0);
 	if !iscomp {
 		let n = nice(ctx, &args[1])?;
 		ctx.usage(format!("invalid widget `{n}'"));
@@ -267,7 +276,13 @@ fn refresh(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		let items = args[1..].to_vec();
 		return drive_task(ctx, |_| exec::native_task(move |zw, _| refresh_list(zw, status, items)));
 	}
-	super::display::zle_refresh(ctx.k, ctx.cx, ctx.vp, args.first().map(|a| &a[..]), ops.isset(b'c'));
+	super::display::zle_refresh(
+		ctx.k,
+		ctx.cx,
+		ctx.vp,
+		args.first().map(|a| &a[..]),
+		ops.isset(b'c'),
+	);
 	done(0)
 }
 
@@ -347,7 +362,11 @@ pub enum ReadBytes {
 ///
 /// # Errors
 /// [`Need::Park`] while no byte is there.
-pub fn read_bytes(ctx: &mut Ctx<'_, '_>, timeout_cs: Option<i64>, enough: impl Fn(&[u8]) -> bool) -> Result<ReadBytes, Need> {
+pub fn read_bytes(
+	ctx: &mut Ctx<'_, '_>,
+	timeout_cs: Option<i64>,
+	enough: impl Fn(&[u8]) -> bool,
+) -> Result<ReadBytes, Need> {
 	let owner = ctx.vp.frames.len();
 	loop {
 		let Some(ed) = super::editor_mut(ctx.vp) else {
@@ -361,7 +380,11 @@ pub fn read_bytes(ctx: &mut Ctx<'_, '_>, timeout_cs: Option<i64>, enough: impl F
 					let acc = ed.read_acc.take().unwrap_or_default();
 					return Ok(ReadBytes::Got(acc, false));
 				}
-				exec::push_root(ed, Task::Key(exec::KeyTask::new(exec::KeyMode::Byte(timeout_cs))), owner)
+				exec::push_root(
+					ed,
+					Task::Key(exec::KeyTask::new(exec::KeyMode::Byte(timeout_cs))),
+					owner,
+				)
 			},
 		};
 		match exec::drive(ctx.k, ctx.cx, ctx.vp, base) {
@@ -371,7 +394,9 @@ pub fn read_bytes(ctx: &mut Ctx<'_, '_>, timeout_cs: Option<i64>, enough: impl F
 				}
 			},
 			Drive::Done(_) => {
-				let acc = super::editor_mut(ctx.vp).and_then(|ed| ed.read_acc.take()).unwrap_or_default();
+				let acc = super::editor_mut(ctx.vp)
+					.and_then(|ed| ed.read_acc.take())
+					.unwrap_or_default();
 				return Ok(ReadBytes::Got(acc, true));
 			},
 			Drive::Park(key) => return Err(Need::Park(key)),
@@ -418,7 +443,9 @@ fn keymap(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		return done(1);
 	}
 	let owner = ctx.vp.frames.len();
-	let resuming = super::editor(ctx.vp).and_then(|ed| exec::resume_base(ed, owner)).is_some();
+	let resuming = super::editor(ctx.vp)
+		.and_then(|ed| exec::resume_base(ed, owner))
+		.is_some();
 	if !resuming {
 		let Some(z) = ctx.vp.zle.as_deref_mut() else {
 			return done(1);
@@ -498,7 +525,12 @@ fn flags(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 fn fd(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	let mut fd = 0;
 	if let Some(a) = args.first() {
-		match a.to_str().ok().and_then(|s| s.parse::<i32>().ok()).filter(|&n| n >= 0) {
+		match a
+			.to_str()
+			.ok()
+			.and_then(|s| s.parse::<i32>().ok())
+			.filter(|&n| n >= 0)
+		{
 			Some(n) => fd = n,
 			None => {
 				let n = nice(ctx, a)?;
@@ -602,9 +634,12 @@ fn call(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	// zsh `zle_usable`: not inside a completion function (a call resumed
 	// after a completion widget's function ran is past that check).
 	let owner = ctx.vp.frames.len();
-	let resumed = super::editor(ctx.vp).and_then(|ed| exec::resume_base(ed, owner)).is_some();
+	let resumed = super::editor(ctx.vp)
+		.and_then(|ed| exec::resume_base(ed, owner))
+		.is_some();
 	let usable = active(ctx)
-		&& (resumed || super::comp::comp(ctx.vp).is_none_or(|c| c.incompfunc == 0 && !c.incompctlfunc));
+		&& (resumed
+			|| super::comp::comp(ctx.vp).is_none_or(|c| c.incompfunc == 0 && !c.incompctlfunc));
 	let Some(wname) = args.first() else {
 		return done(i32::from(!usable));
 	};

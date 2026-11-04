@@ -106,22 +106,63 @@ pub enum Zp {
 
 /// The names [`lookup`] knows.
 const NAMES: &[&[u8]] = &[
-	b"BUFFER", b"BUFFERLINES", b"CONTEXT", b"CURSOR", b"CUTBUFFER", b"HISTNO", b"KEYMAP", b"KEYS",
-	b"KEYS_QUEUED_COUNT", b"killring", b"LASTABORTEDSEARCH", b"LASTSEARCH", b"LASTWIDGET", b"LBUFFER",
-	b"MARK", b"NUMERIC", b"PENDING", b"POSTDISPLAY", b"PREBUFFER", b"PREDISPLAY", b"RBUFFER",
-	b"REGION_ACTIVE", b"region_highlight", b"registers", b"UNDO_CHANGE_NO", b"UNDO_LIMIT_NO", b"WIDGET",
-	b"WIDGETFUNC", b"WIDGETSTYLE", b"YANK_START", b"YANK_END", b"YANK_ACTIVE", b"ISEARCHMATCH_START",
-	b"ISEARCHMATCH_END", b"ISEARCHMATCH_ACTIVE", b"SUFFIX_START", b"SUFFIX_END", b"SUFFIX_ACTIVE",
-	b"ZLE_RECURSIVE", b"ZLE_STATE", b"widgets", b"keymaps",
+	b"BUFFER",
+	b"BUFFERLINES",
+	b"CONTEXT",
+	b"CURSOR",
+	b"CUTBUFFER",
+	b"HISTNO",
+	b"KEYMAP",
+	b"KEYS",
+	b"KEYS_QUEUED_COUNT",
+	b"killring",
+	b"LASTABORTEDSEARCH",
+	b"LASTSEARCH",
+	b"LASTWIDGET",
+	b"LBUFFER",
+	b"MARK",
+	b"NUMERIC",
+	b"PENDING",
+	b"POSTDISPLAY",
+	b"PREBUFFER",
+	b"PREDISPLAY",
+	b"RBUFFER",
+	b"REGION_ACTIVE",
+	b"region_highlight",
+	b"registers",
+	b"UNDO_CHANGE_NO",
+	b"UNDO_LIMIT_NO",
+	b"WIDGET",
+	b"WIDGETFUNC",
+	b"WIDGETSTYLE",
+	b"YANK_START",
+	b"YANK_END",
+	b"YANK_ACTIVE",
+	b"ISEARCHMATCH_START",
+	b"ISEARCHMATCH_END",
+	b"ISEARCHMATCH_ACTIVE",
+	b"SUFFIX_START",
+	b"SUFFIX_END",
+	b"SUFFIX_ACTIVE",
+	b"ZLE_RECURSIVE",
+	b"ZLE_STATE",
+	b"widgets",
+	b"keymaps",
 ];
 
 /// zsh `makezleparams(1)` (compcore.c `callcompfunc`): while a completion
 /// function runs the editor's parameters are read-only.
 fn in_compfunc_readonly(ex: &Expander<'_, '_>, zp: Zp) -> X<()> {
-	if matches!(zp, Zp::Widgets | Zp::Keymaps) || !ex.vp.zle.as_deref().is_some_and(|z| z.comp.incompfunc == 1) {
+	if matches!(zp, Zp::Widgets | Zp::Keymaps)
+		|| !ex.vp.zle.as_deref().is_some_and(|z| z.comp.incompfunc == 1)
+	{
 		return Ok(());
 	}
-	let name = NAMES.iter().find(|n| lookup(n) == Some(zp)).copied().unwrap_or(b"?");
+	let name = NAMES
+		.iter()
+		.find(|n| lookup(n) == Some(zp))
+		.copied()
+		.unwrap_or(b"?");
 	Err(crate::bash::vm::expand::Stop::Fail(crate::bash::diag::Diag::Readonly { name: name.into() }))
 }
 
@@ -258,11 +299,14 @@ fn text(s: impl Into<BString>) -> Option<PValue> {
 
 /// zsh `get_zle_state`.
 fn zle_state(ed: &Editor) -> BString {
-	let mut parts = [if ed.insmode { "insert" } else { "overwrite" }, if ed.ls.localhistory {
-		"localhistory"
-	} else {
-		"globalhistory"
-	}];
+	let mut parts = [
+		if ed.insmode { "insert" } else { "overwrite" },
+		if ed.ls.localhistory {
+			"localhistory"
+		} else {
+			"globalhistory"
+		},
+	];
 	parts.sort_unstable();
 	BString::from(parts.join(" "))
 }
@@ -304,14 +348,28 @@ pub fn get(ex: &mut Expander<'_, '_>, zp: Zp) -> X<Option<PValue>> {
 		Zp::Bufferlines => num(zle.display.nlnct),
 		Zp::Context => text(ed.context.name()),
 		Zp::Cursor => num(ed.cs),
-		Zp::Cutbuffer => text(zle.cutbuf.as_ref().map(|c| from_line(&c.buf)).unwrap_or_default()),
+		Zp::Cutbuffer => text(
+			zle.cutbuf
+				.as_ref()
+				.map(|c| from_line(&c.buf))
+				.unwrap_or_default(),
+		),
 		Zp::Histno => num(ed.histline),
 		Zp::Keymap => text(ed.keymap.clone()),
 		Zp::Keys => text(ed.keybuf.clone()),
 		Zp::KeysQueuedCount => num(ed.unget.len()),
 		Zp::Killring => {
-			let size = if zle.kring_size == 0 { 8 } else { zle.kring_size };
-			let mut out: Vec<BString> = zle.kring.iter().take(size).map(|c| from_line(&c.buf)).collect();
+			let size = if zle.kring_size == 0 {
+				8
+			} else {
+				zle.kring_size
+			};
+			let mut out: Vec<BString> = zle
+				.kring
+				.iter()
+				.take(size)
+				.map(|c| from_line(&c.buf))
+				.collect();
 			out.resize(size, BString::default());
 			Some(PValue::Array(out))
 		},
@@ -339,8 +397,15 @@ pub fn get(ex: &mut Expander<'_, '_>, zp: Zp) -> X<Option<PValue>> {
 		Zp::Registers => {
 			let mut out = Vec::with_capacity(36);
 			for (i, r) in zle.vibuf.iter().enumerate() {
-				let name = if i < 26 { b'a' + i as u8 } else { b'0' + (i - 26) as u8 };
-				out.push((BString::from(vec![name]), r.as_ref().map(|c| from_line(&c.buf)).unwrap_or_default()));
+				let name = if i < 26 {
+					b'a' + i as u8
+				} else {
+					b'0' + (i - 26) as u8
+				};
+				out.push((
+					BString::from(vec![name]),
+					r.as_ref().map(|c| from_line(&c.buf)).unwrap_or_default(),
+				));
 			}
 			Some(PValue::Hash(out))
 		},
@@ -447,8 +512,10 @@ pub fn set(ex: &mut Expander<'_, '_>, zp: Zp, value: PValue) -> X<()> {
 	let nearcolor = if zp == Zp::RegionHighlight
 		&& crate::bash::vm::builtins::zsh_module::loaded(ex.cx.store, ex.vp, b"zsh/nearcolor")?
 	{
-		Some(crate::bash::vm::builtins::zsh_mod_nearcolor::getnearestcolor
-			as crate::bash::vm::builtins::zsh_prompt::NearColour)
+		Some(
+			crate::bash::vm::builtins::zsh_mod_nearcolor::getnearestcolor
+				as crate::bash::vm::builtins::zsh_prompt::NearColour,
+		)
 	} else {
 		None
 	};
@@ -484,7 +551,10 @@ pub fn set(ex: &mut Expander<'_, '_>, zp: Zp, value: PValue) -> X<()> {
 		},
 		Zp::Killring => {
 			let v = as_array(value);
-			zle.kring = v.iter().map(|s| super::CutBuffer { buf: to_line(s), flags: 0 }).collect();
+			zle.kring = v
+				.iter()
+				.map(|s| super::CutBuffer { buf: to_line(s), flags: 0 })
+				.collect();
 			zle.kring_size = zle.kring.len();
 			zle.kct = None;
 		},
@@ -540,7 +610,8 @@ fn set_register(zle: &mut Zle, name: &[u8], value: &[u8]) -> X<()> {
 			return Err(Stop::Fail(crate::bash::diag::Diag::Usage { msg: msg.into() }));
 		},
 	};
-	zle.vibuf[idx] = (!value.is_empty()).then(|| super::CutBuffer { buf: to_line(value), flags: 0 });
+	zle.vibuf[idx] =
+		(!value.is_empty()).then(|| super::CutBuffer { buf: to_line(value), flags: 0 });
 	Ok(())
 }
 

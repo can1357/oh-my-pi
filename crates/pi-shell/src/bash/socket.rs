@@ -6,12 +6,12 @@
 //! without them (agent shells, the testkit) return `None`, and the socket
 //! builtins report the operation as unsupported.
 //!
-//! Sockets come back as [`File`]s of [`FileKind::Socket`](crate::bash::fs::FileKind)
-//! with an [`OsHandle`], so the engine puts them into a vproc's fd table
-//! like any other descriptor and externals inherit them directly. Closing
-//! a socket is dropping its file. Sockets are addressed by that handle
-//! ([`File::os_handle`]) for [`Sockets::accept`], [`Sockets::local_addr`]
-//! and [`Sockets::peer_addr`].
+//! Sockets come back as [`File`]s of
+//! [`FileKind::Socket`](crate::bash::fs::FileKind) with an [`OsHandle`], so the
+//! engine puts them into a vproc's fd table like any other descriptor and
+//! externals inherit them directly. Closing a socket is dropping its file.
+//! Sockets are addressed by that handle ([`File::os_handle`]) for
+//! [`Sockets::accept`], [`Sockets::local_addr`] and [`Sockets::peer_addr`].
 //!
 //! Operations that can wait (name resolution, connecting, accepting)
 //! return [`FsPoll`]: never block the engine thread.

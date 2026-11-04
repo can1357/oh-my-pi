@@ -13,7 +13,9 @@ use super::{
 	bang::{self, BangOpts, HISTFLAG_DONE, HISTFLAG_NOEXEC, HISTFLAG_RECALL, Lex, LineState},
 	file::{self, FileOpts, HFILE_FAST, HFILE_NO_REWRITE, HFILE_USE_OPTIONS, Locks, Report},
 	io::{Pending, Steps},
-	model::{HA_ACTIVE, HA_NOINC, HIST_FOREIGN, HIST_NOWRITE, HIST_OLD, HIST_TMPSTORE, Hist, ZState},
+	model::{
+		HA_ACTIVE, HA_NOINC, HIST_FOREIGN, HIST_NOWRITE, HIST_OLD, HIST_TMPSTORE, Hist, ZState,
+	},
 	words::lex_words,
 };
 use crate::bash::{
@@ -38,12 +40,22 @@ const BASE_FILE: u32 = 4 << 24;
 const BASE_ZLE: u32 = 5 << 24;
 
 /// An option as `vp` sees it.
-fn zopt(root: &mut Root, store: &mut dyn StateStore, vp: &Vproc, o: ZshOpt) -> Result<bool, StoreError> {
+fn zopt(
+	root: &mut Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	o: ZshOpt,
+) -> Result<bool, StoreError> {
 	state::zsh_option(root, store, vp, o)
 }
 
 /// A variable's scalar value.
-fn var(root: &Root, store: &mut dyn StateStore, vp: &Vproc, name: &[u8]) -> Result<Option<BString>, StoreError> {
+fn var(
+	root: &Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	name: &[u8],
+) -> Result<Option<BString>, StoreError> {
 	Ok(state::lookup(root, store, vp, name)?.and_then(|v| v.as_scalar().map(BString::from)))
 }
 
@@ -64,7 +76,12 @@ fn int_value(s: &[u8]) -> i64 {
 
 /// Initialise the state of a new shell: `HISTSIZE` and `SAVEHIST` imported
 /// from the environment (zsh's `IPDEF1` parameters), clamped.
-fn init_state(st: &mut ZState, root: &Root, store: &mut dyn StateStore, vp: &Vproc) -> Result<(), StoreError> {
+fn init_state(
+	st: &mut ZState,
+	root: &Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+) -> Result<(), StoreError> {
 	if st.init {
 		return Ok(());
 	}
@@ -92,7 +109,11 @@ pub fn load(root: &Root, store: &mut dyn StateStore, vp: &Vproc) -> Result<Hist,
 ///
 /// # Errors
 /// [`StoreError`] when a record cannot be read.
-pub fn load_state(root: &Root, store: &mut dyn StateStore, vp: &Vproc) -> Result<ZState, StoreError> {
+pub fn load_state(
+	root: &Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+) -> Result<ZState, StoreError> {
 	let mut st = Hist::load_state(store, vp)?;
 	init_state(&mut st, root, store, vp)?;
 	Ok(st)
@@ -112,7 +133,11 @@ pub fn curhist(root: &Root, store: &mut dyn StateStore, vp: &Vproc) -> Result<i6
 ///
 /// # Errors
 /// [`StoreError`] when the history cannot be read.
-pub fn history_param(root: &Root, store: &mut dyn StateStore, vp: &Vproc) -> Result<Vec<(BString, BString)>, StoreError> {
+pub fn history_param(
+	root: &Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+) -> Result<Vec<(BString, BString)>, StoreError> {
 	let h = load(root, store, vp)?;
 	let start = h.addhistnum(h.st.curhist, -1, HIST_FOREIGN);
 	let Some(top) = h.gethistent(start, -1) else {
@@ -129,13 +154,21 @@ pub fn history_param(root: &Root, store: &mut dyn StateStore, vp: &Vproc) -> Res
 ///
 /// # Errors
 /// [`StoreError`] when the history cannot be read.
-pub fn history_elem(root: &Root, store: &mut dyn StateStore, vp: &Vproc, key: &[u8]) -> Result<Option<BString>, StoreError> {
-	let ok = key == b"0" || (!key.is_empty() && key[0] != b'0' && key.iter().all(u8::is_ascii_digit));
+pub fn history_elem(
+	root: &Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	key: &[u8],
+) -> Result<Option<BString>, StoreError> {
+	let ok =
+		key == b"0" || (!key.is_empty() && key[0] != b'0' && key.iter().all(u8::is_ascii_digit));
 	if !ok {
 		return Ok(None);
 	}
 	let h = load(root, store, vp)?;
-	Ok(h.index_of(int_value(key)).map(|i| BString::from(h.text_at(i))))
+	Ok(h
+		.index_of(int_value(key))
+		.map(|i| BString::from(h.text_at(i))))
 }
 
 /// `$historywords` (zsh/parameter `histwgetfn`): every event's words,
@@ -143,7 +176,11 @@ pub fn history_elem(root: &Root, store: &mut dyn StateStore, vp: &Vproc, key: &[
 ///
 /// # Errors
 /// [`StoreError`] when the history cannot be read.
-pub fn historywords_param(root: &Root, store: &mut dyn StateStore, vp: &Vproc) -> Result<Vec<BString>, StoreError> {
+pub fn historywords_param(
+	root: &Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+) -> Result<Vec<BString>, StoreError> {
 	let h = load(root, store, vp)?;
 	let start = h.addhistnum(h.st.curhist, -1, HIST_FOREIGN);
 	let Some(top) = h.gethistent(start, -1) else {
@@ -167,9 +204,18 @@ pub fn historywords_param(root: &Root, store: &mut dyn StateStore, vp: &Vproc) -
 ///
 /// # Errors
 /// [`StoreError`] when the state cannot be read.
-pub fn size_param(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc, save: bool) -> Result<Option<i64>, StoreError> {
+pub fn size_param(
+	root: &mut Root,
+	store: &mut dyn StateStore,
+	vp: &mut Vproc,
+	save: bool,
+) -> Result<Option<i64>, StoreError> {
 	let st = load_state(root, store, vp)?;
-	let unset = if save { st.savehist_unset } else { st.histsiz_unset };
+	let unset = if save {
+		st.savehist_unset
+	} else {
+		st.histsiz_unset
+	};
 	let name: &[u8] = if save { b"SAVEHIST" } else { b"HISTSIZE" };
 	if unset && let Some(v) = var(root, store, vp, name)? {
 		state::unset_var(root, store, vp, name, true);
@@ -231,9 +277,19 @@ pub fn set_size_param(
 ///
 /// # Errors
 /// [`StoreError`] when the state cannot be read.
-pub fn histchars_param(root: &Root, store: &mut dyn StateStore, vp: &Vproc) -> Result<BString, StoreError> {
+pub fn histchars_param(
+	root: &Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+) -> Result<BString, StoreError> {
 	let st = load_state(root, store, vp)?;
-	Ok(BString::from(st.chars.iter().copied().take_while(|&c| c != 0).collect::<Vec<u8>>()))
+	Ok(BString::from(
+		st.chars
+			.iter()
+			.copied()
+			.take_while(|&c| c != 0)
+			.collect::<Vec<u8>>(),
+	))
 }
 
 /// Assign `histchars` (zsh `histcharssetfn`): up to three ASCII
@@ -252,7 +308,11 @@ pub fn set_histchars_param(
 		return Ok(Err(Diag::Warning { msg: "HISTCHARS can only contain ASCII characters".into() }));
 	}
 	let mut st = load_state(root, store, vp)?;
-	st.chars = [v.first().copied().unwrap_or(0), v.get(1).copied().unwrap_or(0), v.get(2).copied().unwrap_or(0)];
+	st.chars = [
+		v.first().copied().unwrap_or(0),
+		v.get(1).copied().unwrap_or(0),
+		v.get(2).copied().unwrap_or(0),
+	];
 	Hist::save_state(&st, root, store, vp);
 	Ok(Ok(()))
 }
@@ -385,7 +445,10 @@ fn drive_hist<T>(
 ///
 /// # Errors
 /// [`Need::Probe`] for the next unanswered step.
-pub fn in_builtin<T>(ctx: &Ctx<'_, '_>, op: impl FnOnce(&mut Steps<'_>) -> Result<T, Pending>) -> Result<T, Need> {
+pub fn in_builtin<T>(
+	ctx: &Ctx<'_, '_>,
+	op: impl FnOnce(&mut Steps<'_>) -> Result<T, Pending>,
+) -> Result<T, Need> {
 	let look = |p: &Probe| ctx.probe(p.clone()).ok();
 	let mut steps = Steps::new(&look, 0);
 	op(&mut steps).map_err(|Pending(p)| Need::Probe(p))
@@ -406,7 +469,12 @@ fn report_k(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, r: Report) {
 ///
 /// # Errors
 /// The [`WaitKey`] to park on (call again once woken).
-pub fn hbegin(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, sc: &mut Scratch) -> Result<(), WaitKey> {
+pub fn hbegin(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+	sc: &mut Scratch,
+) -> Result<(), WaitKey> {
 	let loaded = (|| -> Result<(FileOpts, bool, bool, bool), StoreError> {
 		let o = file_opts_k(k, cx, vp)?;
 		let bang = zopt(&mut k.root, cx.store, vp, ZshOpt::Banghist)?;
@@ -435,8 +503,17 @@ pub fn hbegin(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, sc: &mut Scratch)
 		// zsh `endparamscope`: levels `fc -a -p` pushed in functions that
 		// have returned are saved and popped.
 		let mut stack = stack0.clone();
-		let (_, set) =
-			super::zfc::save_and_pop(&mut h, &mut stack, steps, &o, 0, HFILE_USE_OPTIONS, ll, false, &mut r)?;
+		let (_, set) = super::zfc::save_and_pop(
+			&mut h,
+			&mut stack,
+			steps,
+			&o,
+			0,
+			HFILE_USE_OPTIONS,
+			ll,
+			false,
+			&mut r,
+		)?;
 		let mut o = o.clone();
 		if let Some(hf) = &set {
 			o.histfile = hf.clone().filter(|f| !f.is_empty());
@@ -468,7 +545,16 @@ pub fn hbegin(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, sc: &mut Scratch)
 		});
 		if o.incappendtime && !o.share && !o.incappend {
 			let mut l = Locks::default();
-			file::savehistfile(&mut h, steps, &o, &mut l, None, false, HFILE_USE_OPTIONS | HFILE_FAST, &mut r)?;
+			file::savehistfile(
+				&mut h,
+				steps,
+				&o,
+				&mut l,
+				None,
+				false,
+				HFILE_USE_OPTIONS | HFILE_FAST,
+				&mut r,
+			)?;
 		}
 		Ok(((h, r), stack, set))
 	})?;
@@ -505,13 +591,13 @@ pub enum Expanded {
 /// The options history expansion reads.
 fn bang_opts(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> Result<BangOpts, StoreError> {
 	Ok(BangOpts {
-		cshjunkie: zopt(&mut k.root, cx.store, vp, ZshOpt::Cshjunkiehistory)?,
-		verify: zopt(&mut k.root, cx.store, vp, ZshOpt::Histverify)?,
+		cshjunkie:    zopt(&mut k.root, cx.store, vp, ZshOpt::Cshjunkiehistory)?,
+		verify:       zopt(&mut k.root, cx.store, vp, ZshOpt::Histverify)?,
 		substpattern: zopt(&mut k.root, cx.store, vp, ZshOpt::Histsubstpattern)?,
-		cwd: vp.cwd.clone(),
-		path: var(&k.root, cx.store, vp, b"PATH")?.unwrap_or_default(),
-		bash: false,
-		multibyte: zopt(&mut k.root, cx.store, vp, ZshOpt::Multibyte)?
+		cwd:          vp.cwd.clone(),
+		path:         var(&k.root, cx.store, vp, b"PATH")?.unwrap_or_default(),
+		bash:         false,
+		multibyte:    zopt(&mut k.root, cx.store, vp, ZshOpt::Multibyte)?
 			&& crate::bash::vm::locale::is_utf8(k, cx.store, vp),
 	})
 }
@@ -609,7 +695,11 @@ pub fn expand_zle(
 ///
 /// # Errors
 /// [`StoreError`] when the history cannot be read.
-pub fn latest_text(root: &Root, store: &mut dyn StateStore, vp: &Vproc) -> Result<BString, StoreError> {
+pub fn latest_text(
+	root: &Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+) -> Result<BString, StoreError> {
 	let h = load(root, store, vp)?;
 	Ok(match h.entries.last() {
 		Some(e) if h.st.curline_num == h.st.curhist => e.text.clone(),
@@ -730,7 +820,11 @@ fn exit_op(
 
 /// Whether the shell saves its history when it exits (zsh: `RCS` and
 /// interactive, not a subshell).
-fn saves_at_exit(root: &mut Root, store: &mut dyn StateStore, vp: &Vproc) -> Result<bool, StoreError> {
+fn saves_at_exit(
+	root: &mut Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+) -> Result<bool, StoreError> {
 	Ok(vp.parent.is_none()
 		&& !crate::bash::vm::is_tool(store, vp)?
 		&& !crate::bash::vm::nested::in_subshell(store, vp)
@@ -743,16 +837,22 @@ fn saves_at_exit(root: &mut Root, store: &mut dyn StateStore, vp: &Vproc) -> Res
 ///
 /// # Errors
 /// The [`WaitKey`] to park on (call again once woken).
-pub fn exit_save(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, sc: &mut Scratch) -> Result<(), WaitKey> {
-	let loaded = (|| -> Result<Option<(Hist, Vec<super::zfc::StackLevel>, FileOpts)>, StoreError> {
-		if !saves_at_exit(&mut k.root, cx.store, vp)? {
-			return Ok(None);
-		}
-		let h = load(&k.root, cx.store, vp)?;
-		let stack = super::zfc::stack_load(cx.store, vp)?;
-		let o = file_opts_k(k, cx, vp)?;
-		Ok(Some((h, stack, o)))
-	})();
+pub fn exit_save(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+	sc: &mut Scratch,
+) -> Result<(), WaitKey> {
+	let loaded =
+		(|| -> Result<Option<(Hist, Vec<super::zfc::StackLevel>, FileOpts)>, StoreError> {
+			if !saves_at_exit(&mut k.root, cx.store, vp)? {
+				return Ok(None);
+			}
+			let h = load(&k.root, cx.store, vp)?;
+			let stack = super::zfc::stack_load(cx.store, vp)?;
+			let o = file_opts_k(k, cx, vp)?;
+			Ok(Some((h, stack, o)))
+		})();
 	let (h0, stack0, o) = match loaded {
 		Ok(Some(v)) => v,
 		Ok(None) => return Ok(()),
@@ -917,10 +1017,16 @@ fn should_ignore(
 		let func = |store: &mut dyn StateStore, name: &str| -> Result<bool, StoreError> {
 			Ok(state::record(store, vp, Key::Func(name.as_bytes().as_bstr()))?.is_some())
 		};
-		if b.starts_with(b"history") && matches!(b.get(7), None | Some(b' ')) && (saw_builtin || !func(store, "history")?) {
+		if b.starts_with(b"history")
+			&& matches!(b.get(7), None | Some(b' '))
+			&& (saw_builtin || !func(store, "history")?)
+		{
 			return Ok(true);
 		}
-		if b.first() == Some(&b'r') && matches!(b.get(1), None | Some(b' ')) && (saw_builtin || !func(store, "r")?) {
+		if b.first() == Some(&b'r')
+			&& matches!(b.get(1), None | Some(b' '))
+			&& (saw_builtin || !func(store, "r")?)
+		{
 			return Ok(true);
 		}
 		if b.starts_with(b"fc -") && (saw_builtin || !func(store, "fc")?) {
@@ -1028,7 +1134,8 @@ pub fn hend(
 					save = 0;
 				}
 			}
-			let nwords = lex_words(&ls.chline, ls.comments).len() / 2 + usize::from(ls.chline.ends_with(b"\n"));
+			let nwords =
+				lex_words(&ls.chline, ls.comments).len() / 2 + usize::from(ls.chline.ends_with(b"\n"));
 			if nwords <= 1 && !ls.lex.had_comment {
 				save = 0;
 			} else if f.ignore {
@@ -1050,7 +1157,9 @@ pub fn hend(
 		}
 		if save != 0 || chline.first() == Some(&b' ') {
 			// A temporary event (`histignorespace`, the hook's 1) goes now.
-			if let Some(i) = (0..h.entries.len()).rev().find(|&i| h.entries[i].flags & HIST_FOREIGN == 0)
+			if let Some(i) = (0..h.entries.len())
+				.rev()
+				.find(|&i| h.entries[i].flags & HIST_FOREIGN == 0)
 				&& h.entries[i].flags & HIST_TMPSTORE != 0
 			{
 				if i + 1 == h.entries.len() {
@@ -1072,7 +1181,10 @@ pub fn hend(
 			};
 			let same_top = (f.ignoredups || o.ignorealldups)
 				&& save > 0
-				&& h.entries.last().is_some_and(|top| super::model::same_text(&chline, &top.text));
+				&& h
+					.entries
+					.last()
+					.is_some_and(|top| super::model::same_text(&chline, &top.text));
 			let i = if same_top {
 				let i = h.entries.len() - 1;
 				newflags |= h.entries[i].flags & HIST_OLD;

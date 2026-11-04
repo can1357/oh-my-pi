@@ -138,17 +138,17 @@ pub struct XferSpec {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct XferOut {
 	/// Bytes added to the count (`sofar`).
-	pub n:        i64,
+	pub n:    i64,
 	/// zsh's `ret`: 0 fine, 1 failed, 2 local failure (abort), 3 local
 	/// failure, quietly.
-	pub ret:      u8,
+	pub ret:  u8,
 	/// The end of a block-mode file was seen (`zfread_eof`).
-	pub eof:      bool,
+	pub eof:  bool,
 	/// The loop ended.
-	pub done:     bool,
+	pub done: bool,
 	/// Warnings in order: under the subcommand's full name (`true`) or
 	/// under `zftp`, and the message.
-	pub msgs:     Vec<(bool, String)>,
+	pub msgs: Vec<(bool, String)>,
 }
 
 /// A failed socket operation.
@@ -278,7 +278,12 @@ fn live(sc: &mut Scratch) -> &mut ZftpLive {
 }
 
 /// Whether `deadline` (host clock ns) has passed, arming the timer once.
-fn expired(tcx: &mut Context<'_>, cx: &mut Cx<'_>, l: &mut ZftpLive, deadline: Option<u64>) -> bool {
+fn expired(
+	tcx: &mut Context<'_>,
+	cx: &mut Cx<'_>,
+	l: &mut ZftpLive,
+	deadline: Option<u64>,
+) -> bool {
 	let Some(at) = deadline else {
 		return false;
 	};
@@ -359,7 +364,8 @@ pub fn perform(
 		ZftpOp::Clock => ZftpAns::Num(cx.host.now_ns()),
 		ZftpOp::Tty(fd) => ZftpAns::Flag(vp.fds.get(*fd).and_then(FdRef::kind) == Some(FileKind::Tty)),
 		ZftpOp::Echo(on) => {
-			if let (Some(h), Some(term)) = (vp.fds.get(0).and_then(FdRef::os_handle), cx.host.terminal())
+			if let (Some(h), Some(term)) =
+				(vp.fds.get(0).and_then(FdRef::os_handle), cx.host.terminal())
 				&& let Ok(mut t) = term.attrs(h)
 			{
 				t.set(TermFlag::Echo, *on);
@@ -740,12 +746,20 @@ impl Xfer {
 		vp: &Vproc,
 		spec: &XferSpec,
 	) -> Result<XferOut, WaitKey> {
-		let (fdin, fdout) = if spec.recv { (spec.data_fd, 1) } else { (0, spec.data_fd) };
+		let (fdin, fdout) = if spec.recv {
+			(spec.data_fd, 1)
+		} else {
+			(0, spec.data_fd)
+		};
 		let hin = vp.fds.handle(fdin);
 		let hout = vp.fds.handle(fdout);
 		// zsh: the timeout applies to reads when receiving, writes when
 		// sending.
-		let (rtmout, wtmout) = if spec.recv { (spec.tmout, 0) } else { (0, spec.tmout) };
+		let (rtmout, wtmout) = if spec.recv {
+			(spec.tmout, 0)
+		} else {
+			(0, spec.tmout)
+		};
 		loop {
 			if self.out.done {
 				return Ok(std::mem::take(&mut self.out));
@@ -763,19 +777,28 @@ impl Xfer {
 					match r {
 						Ok(3) => {},
 						Ok(n) => {
-							self.out.msgs.push((false, "failure reading FTP block header".into()));
+							self
+								.out
+								.msgs
+								.push((false, "failure reading FTP block header".into()));
 							// zsh hands back the short count; the buffer holds
 							// what the last block left there.
 							self.got(spec, n as i64, None);
 							continue;
 						},
 						Err(None) => {
-							self.out.msgs.push((false, "timeout on network read".into()));
+							self
+								.out
+								.msgs
+								.push((false, "timeout on network read".into()));
 							self.got(spec, -1, None);
 							continue;
 						},
 						Err(Some(e)) => {
-							self.out.msgs.push((false, "failure reading FTP block header".into()));
+							self
+								.out
+								.msgs
+								.push((false, "failure reading FTP block header".into()));
 							self.got(spec, -1, Some(e));
 							continue;
 						},
@@ -785,7 +808,10 @@ impl Xfer {
 					}
 					let size = (usize::from(hdr[1]) << 8) | usize::from(hdr[2]);
 					if size > BUFSIZE {
-						self.out.msgs.push((false, "block too large to handle".into()));
+						self
+							.out
+							.msgs
+							.push((false, "block too large to handle".into()));
 						self.got(spec, -1, Some(io::Error::from_raw_os_error(libc::EIO)));
 						continue;
 					}
@@ -804,7 +830,10 @@ impl Xfer {
 					match r {
 						Ok(n) => self.got(spec, n as i64, None),
 						Err(None) => {
-							self.out.msgs.push((false, "timeout on network read".into()));
+							self
+								.out
+								.msgs
+								.push((false, "timeout on network read".into()));
 							self.got(spec, -1, None);
 						},
 						Err(Some(e)) => self.got(spec, -1, Some(e)),
@@ -824,7 +853,10 @@ impl Xfer {
 							},
 							Ok(n) => self.at = XferAt::Body { size, got: got + n, flags },
 							Err(None) => {
-								self.out.msgs.push((false, "timeout on network read".into()));
+								self
+									.out
+									.msgs
+									.push((false, "timeout on network read".into()));
 								self.got(spec, -1, None);
 							},
 							Err(Some(e)) => self.got(spec, -1, Some(e)),
@@ -857,14 +889,20 @@ impl Xfer {
 							// zsh returns the short count as the bytes written: the
 							// caller writes the rest as a new block.
 							Ok(n) => {
-								self.out.msgs.push((false, "failure writing FTP block header".into()));
+								self
+									.out
+									.msgs
+									.push((false, "failure writing FTP block header".into()));
 								self.at = XferAt::Write { off: (off + n).min(end), end, hdr: false };
 								if off + n >= end {
 									self.wrote_chunk(spec);
 								}
 							},
 							Err(None) => {
-								self.out.msgs.push((false, "timeout on network write".into()));
+								self
+									.out
+									.msgs
+									.push((false, "timeout on network write".into()));
 								self.wrote_fail(spec, None);
 							},
 							Err(Some(e)) => self.wrote_fail(spec, Some(e)),
@@ -880,7 +918,10 @@ impl Xfer {
 						Ok(n) if off + n >= end => self.wrote_chunk(spec),
 						Ok(n) => self.at = XferAt::Write { off: off + n, end, hdr: true },
 						Err(None) => {
-							self.out.msgs.push((false, "timeout on network write".into()));
+							self
+								.out
+								.msgs
+								.push((false, "timeout on network write".into()));
 							self.wrote_fail(spec, None);
 						},
 						Err(Some(e)) => self.wrote_fail(spec, Some(e)),
@@ -942,7 +983,10 @@ impl Xfer {
 			match err {
 				Some(e) if !spec.interact || !is_epipe(&e) => {
 					self.out.ret = if spec.recv { 1 } else { 2 };
-					self.out.msgs.push((true, format!("read failed: {}", zsh_errmsg(&e))));
+					self
+						.out
+						.msgs
+						.push((true, format!("read failed: {}", zsh_errmsg(&e))));
 				},
 				_ => self.out.ret = if spec.recv { 1 } else { 3 },
 			}
@@ -956,7 +1000,10 @@ impl Xfer {
 		match err {
 			Some(e) if !spec.interact || !is_epipe(&e) => {
 				self.out.ret = if spec.recv { 2 } else { 1 };
-				self.out.msgs.push((true, format!("write failed: {}", zsh_errmsg(&e))));
+				self
+					.out
+					.msgs
+					.push((true, format!("write failed: {}", zsh_errmsg(&e))));
 			},
 			_ => self.out.ret = if spec.recv { 3 } else { 1 },
 		}

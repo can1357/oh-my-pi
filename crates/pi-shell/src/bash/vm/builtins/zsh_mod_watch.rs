@@ -166,10 +166,24 @@ pub fn dowatch(ex: &mut Expander<'_, '_>) -> X<Vec<u8>> {
 	while u < utab.len() || w < wtab.len() {
 		let ord = (u < utab.len() && w < wtab.len()).then(|| ucmp(&utab[u], &wtab[w]));
 		if u >= utab.len() || ord == Some(Ordering::Greater) {
-			watchlog(ex, &mut out, Event { u: &wtab[w], on: false, now, term: &term }, &watch, &me, &fmt)?;
+			watchlog(
+				ex,
+				&mut out,
+				Event { u: &wtab[w], on: false, now, term: &term },
+				&watch,
+				&me,
+				&fmt,
+			)?;
 			w += 1;
 		} else if w >= wtab.len() || ord == Some(Ordering::Less) {
-			watchlog(ex, &mut out, Event { u: &utab[u], on: true, now, term: &term }, &watch, &me, &fmt)?;
+			watchlog(
+				ex,
+				&mut out,
+				Event { u: &utab[u], on: true, now, term: &term },
+				&watch,
+				&me,
+				&fmt,
+			)?;
 			u += 1;
 		} else {
 			u += 1;
@@ -252,8 +266,7 @@ pub fn boot(ex: &mut Expander<'_, '_>) -> X<()> {
 /// capabilities, `$TERM`'s, the prompt code loads), and nowhere in a
 /// non-interactive one. Colours are written in either case.
 fn term_caps(ex: &mut Expander<'_, '_>) -> X<TermCaps> {
-	let interactive =
-		state::zsh_option(&mut ex.k.root, ex.cx.store, ex.vp, ZshOpt::Interactive)?;
+	let interactive = state::zsh_option(&mut ex.k.root, ex.cx.store, ex.vp, ZshOpt::Interactive)?;
 	if !interactive {
 		return Ok(TermCaps::default());
 	}
@@ -281,7 +294,11 @@ fn watch_match(ex: &mut Expander<'_, '_>, test: &[u8], actual: &[u8], prefix: bo
 			let env = zpattern::char_env(ex)?;
 			Ok(pat.matches(&tok::metafy(actual), &env.env()))
 		},
-		Err(Stop::Fail(_)) => Ok(if prefix { actual.starts_with(test) } else { actual == test }),
+		Err(Stop::Fail(_)) => Ok(if prefix {
+			actual.starts_with(test)
+		} else {
+			actual == test
+		}),
 		Err(e) => Err(e),
 	}
 }
@@ -309,7 +326,10 @@ fn watchlog(
 		let mut bad = false;
 		let mut i = 0;
 		if !matches!(v.first(), Some(b'@' | b'%')) {
-			let end = v.iter().position(|&c| c == b'@' || c == b'%').unwrap_or(v.len());
+			let end = v
+				.iter()
+				.position(|&c| c == b'@' || c == b'%')
+				.unwrap_or(v.len());
 			if !watch_match(ex, &v[..end], &u.user, false)? {
 				bad = true;
 			}
@@ -438,7 +458,11 @@ fn watchlog2(
 			i += 1;
 			match esc {
 				b'n' => out.extend_from_slice(&u.user),
-				b'a' => out.extend_from_slice(if e.on { &b"logged on"[..] } else { b"logged off" }),
+				b'a' => out.extend_from_slice(if e.on {
+					&b"logged on"[..]
+				} else {
+					b"logged off"
+				}),
 				b'l' => {
 					let line = u.line.as_slice();
 					out.extend_from_slice(line.strip_prefix(b"tty").unwrap_or(line));

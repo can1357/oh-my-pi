@@ -66,7 +66,11 @@ const DEF_MENUPROMPT: &[u8] = b"%SScrolling active: current selection at %p%s";
 
 /// Chain a widget step's result into `k` (zsh calling a function and
 /// going on after it returns).
-fn seq(zw: &mut Zw<'_, '_>, r: WResult, k: impl FnOnce(&mut Zw<'_, '_>, i32) -> WResult + Send + 'static) -> WResult {
+fn seq(
+	zw: &mut Zw<'_, '_>,
+	r: WResult,
+	k: impl FnOnce(&mut Zw<'_, '_>, i32) -> WResult + Send + 'static,
+) -> WResult {
 	match r {
 		WResult::Done(s) => k(zw, s),
 		WResult::Await(a, c) => WResult::Await(
@@ -81,7 +85,10 @@ fn seq(zw: &mut Zw<'_, '_>, r: WResult, k: impl FnOnce(&mut Zw<'_, '_>, i32) -> 
 
 /// zsh `zrefresh()` from completion code: the line unmetafied for the
 /// redisplay, metafied again after it.
-fn zrefresh(zw: &mut Zw<'_, '_>, k: impl FnOnce(&mut Zw<'_, '_>) -> WResult + Send + 'static) -> WResult {
+fn zrefresh(
+	zw: &mut Zw<'_, '_>,
+	k: impl FnOnce(&mut Zw<'_, '_>) -> WResult + Send + 'static,
+) -> WResult {
 	let meta = zw.zle.comp.line.s.is_some();
 	if meta {
 		zw.zle.comp.line.unmetafy(zw.ed);
@@ -191,7 +198,9 @@ fn suffix_aliases(zw: &mut Zw<'_, '_>) -> Vec<BString> {
 /// zsh `getcols()`: the colours from `ZLS_COLORS`/`ZLS_COLOURS`, patterns
 /// compiled with `EXTENDED_GLOB` (which `complistmatches` forces).
 fn getcols(zw: &mut Zw<'_, '_>, caps: &TermCaps) -> Listcols {
-	let s = zw.getsparam(b"ZLS_COLORS").or_else(|| zw.getsparam(b"ZLS_COLOURS"));
+	let s = zw
+		.getsparam(b"ZLS_COLORS")
+		.or_else(|| zw.getsparam(b"ZLS_COLOURS"));
 	match s {
 		None => {
 			colors::getcols_unset(
@@ -252,7 +261,13 @@ fn emit(zw: &mut Zw<'_, '_>, pe: &mut Penv) {
 /// `compprintlist(showall)` with `LISTPROMPT` scrolling: run the
 /// listing; when it needs a key, show what it printed, read the key in
 /// the `listscroll` keymap (zsh `asklistscroll`) and run it again.
-fn print_list(zw: &mut Zw<'_, '_>, mut pe: Box<Penv>, snap: Option<Snap>, showall: bool, k: K<i32>) -> WResult {
+fn print_list(
+	zw: &mut Zw<'_, '_>,
+	mut pe: Box<Penv>,
+	snap: Option<Snap>,
+	showall: bool,
+	k: K<i32>,
+) -> WResult {
 	let snap = snap.unwrap_or_else(|| Snap::take(zw));
 	pe.rewind();
 	pe.errflag = zw.ed.aborted;
@@ -298,7 +313,10 @@ pub fn complistmatches(zw: &mut Zw<'_, '_>, dat: Chdata, k: K<i32>) -> WResult {
 	let (columns, lines) = comp::with_ex(zw, |ex, _| comp::zterm_size(ex));
 	{
 		let c = &zw.zle.comp;
-		if (c.core.minfo.asked == 2 && c.list.mselect < 0) || zw.zle.display.nlnct >= lines || zw.ed.aborted {
+		if (c.core.minfo.asked == 2 && c.list.mselect < 0)
+			|| zw.zle.display.nlnct >= lines
+			|| zw.ed.aborted
+		{
 			zw.zle.display.showinglist = 0;
 			zw.zle.comp.core.amatches = oamatches;
 			zw.zle.comp.list.noselect = 1;
@@ -313,11 +331,19 @@ pub fn complistmatches(zw: &mut Zw<'_, '_>, dat: Chdata, k: K<i32>) -> WResult {
 	{
 		let c = &mut *zw.zle.comp;
 		let nlines = c.core.listdat.nlines;
-		c.list.mnew =
-			i32::from((calc || c.list.mlastcols != columns || c.list.mlastlines != nlines) && c.list.mselect >= 0);
+		c.list.mnew = i32::from(
+			(calc || c.list.mlastcols != columns || c.list.mlastlines != nlines)
+				&& c.list.mselect >= 0,
+		);
 	}
 	let usezle = zw.isset(ZshOpt::Zle);
-	let lastprompt = zw.zle.comp.complete.complastprompt.as_ref().is_some_and(|p| !p.is_empty());
+	let lastprompt = zw
+		.zle
+		.comp
+		.complete
+		.complastprompt
+		.as_ref()
+		.is_some_and(|p| !p.is_empty());
 	if zw.zle.comp.core.listdat.nlines == 0
 		|| (zw.zle.comp.list.mselect >= 0 && !(usezle && caps.termflags == 0 && lastprompt))
 	{
@@ -346,7 +372,8 @@ pub fn complistmatches(zw: &mut Zw<'_, '_>, dat: Chdata, k: K<i32>) -> WResult {
 	let listprompt = if l.mselect >= 0 || l.mlbeg >= 0 {
 		None
 	} else {
-		zw.getsparam(b"LISTPROMPT").map(|s| BString::from(metafy(&s)))
+		zw.getsparam(b"LISTPROMPT")
+			.map(|s| BString::from(metafy(&s)))
 	};
 	if zw.zle.comp.list.mselect >= 0 || zw.zle.comp.list.mlbeg >= 0 || listprompt.is_some() {
 		let mlistp = listprompt.map(|p| if p.is_empty() { BString::from(DEF_LISTPROMPT) } else { p });
@@ -411,7 +438,8 @@ fn cl_rest(zw: &mut Zw<'_, '_>, pe: Box<Penv>, oamatches: Option<GId>, k: K<i32>
 		}
 	}
 	let l = &zw.zle.comp.list;
-	let single = l.mnew == 0 && l.inselect != 0 && l.onlnct == nlnct && l.mlbeg >= 0 && l.mlbeg == l.molbeg;
+	let single =
+		l.mnew == 0 && l.inselect != 0 && l.onlnct == nlnct && l.mlbeg >= 0 && l.mlbeg == l.molbeg;
 	let fin = move |zw: &mut Zw<'_, '_>| {
 		let nlnct = zw.zle.display.nlnct;
 		let c = &mut *zw.zle.comp;
@@ -491,12 +519,20 @@ fn adjust_mcol(l: &mut State, wish: i32, p: &mut isize, pg: Option<&mut isize>) 
 
 /// `mtab[i]` (a `NULL` slot outside the table).
 fn mt(l: &State, i: isize) -> Mt {
-	usize::try_from(i).ok().and_then(|i| l.mtab.get(i)).copied().unwrap_or_default()
+	usize::try_from(i)
+		.ok()
+		.and_then(|i| l.mtab.get(i))
+		.copied()
+		.unwrap_or_default()
 }
 
 /// `mgtab[i]` (a `NULL` slot outside the table).
 fn mg(l: &State, i: isize) -> Mg {
-	usize::try_from(i).ok().and_then(|i| l.mgtab.get(i)).copied().unwrap_or_default()
+	usize::try_from(i)
+		.ok()
+		.and_then(|i| l.mgtab.get(i))
+		.copied()
+		.unwrap_or_default()
 }
 
 /// zsh `struct menustack`: what undo in menu selection goes back to.
@@ -595,7 +631,11 @@ struct Ms {
 /// before it is restored, and the old line, cursor, length and
 /// `lastend - wb` are returned; else the prefix and suffix are
 /// `complastprefix`/`complastsuffix`.
-fn setmstatus(zw: &mut Zw<'_, '_>, status: &mut Vec<u8>, restore: Option<(Vec<u8>, i32)>) -> Option<(Vec<u8>, i32, i32, i32)> {
+fn setmstatus(
+	zw: &mut Zw<'_, '_>,
+	status: &mut Vec<u8>,
+	restore: Option<(Vec<u8>, i32)>,
+) -> Option<(Vec<u8>, i32, i32, i32)> {
 	let columns = comp::with_ex(zw, |ex, _| comp::zterm_size(ex)).0;
 	let c = &mut *zw.zle.comp;
 	let mut ret = None;
@@ -612,17 +652,36 @@ fn setmstatus(zw: &mut Zw<'_, '_>, status: &mut Vec<u8>, restore: Option<(Vec<u8
 				c.core.lastend - c.tricky.wb,
 			));
 			let p = line.get(wb..cs.max(wb)).unwrap_or_default().to_vec();
-			let s = if lastend < cs { Vec::new() } else { line.get(cs..lastend.min(line.len())).unwrap_or_default().to_vec() };
+			let s = if lastend < cs {
+				Vec::new()
+			} else {
+				line
+					.get(cs..lastend.min(line.len()))
+					.unwrap_or_default()
+					.to_vec()
+			};
 			set_metaline(zw, &sline, scs);
 			(p, s)
 		},
 		None => (
-			c.complete.complastprefix.clone().map(Vec::from).unwrap_or_default(),
-			c.complete.complastsuffix.clone().map(Vec::from).unwrap_or_default(),
+			c.complete
+				.complastprefix
+				.clone()
+				.map(Vec::from)
+				.unwrap_or_default(),
+			c.complete
+				.complastsuffix
+				.clone()
+				.map(Vec::from)
+				.unwrap_or_default(),
 		),
 	};
 	let (pl, sl) = (p.len() as i32, s.len() as i32);
-	let max = (if (columns as usize) < MAX_STATUS { columns } else { MAX_STATUS as i32 }) - 14;
+	let max = (if (columns as usize) < MAX_STATUS {
+		columns
+	} else {
+		MAX_STATUS as i32
+	}) - 14;
 	if max > 12 {
 		let h = (max - 2) >> 1;
 		status.clear();
@@ -675,7 +734,14 @@ fn msearchpop(l: &mut State, back: &mut bool) -> Option<isize> {
 
 /// zsh `msearch(ptr, ins, back, rep, wrapp)`: search the list for the
 /// search string (`ins` appended) from `ptr`.
-fn msearch(c: &mut Comp, ptr: Option<isize>, ins: Option<&[u8]>, back: bool, rep: bool, wrapp: &mut bool) -> Option<isize> {
+fn msearch(
+	c: &mut Comp,
+	ptr: Option<isize>,
+	ins: Option<&[u8]>,
+	back: bool,
+	rep: bool,
+	wrapp: &mut bool,
+) -> Option<isize> {
 	let nlines = c.core.listdat.nlines;
 	let l = &mut c.list;
 	let (mut x, mut y) = (l.mcol, l.mline);
@@ -790,12 +856,23 @@ pub fn domenuselect(zw: &mut Zw<'_, '_>, dat: Option<Chdata>, k: K<i32>) -> WRes
 	if let Some(s) = zw.getsparam(b"MENUMODE") {
 		if s.as_slice() == b"interactive" {
 			mode = MM_INTER;
-			let orig = zw.zle.comp.tricky.origline.clone().map(Vec::from).unwrap_or_default();
+			let orig = zw
+				.zle
+				.comp
+				.tricky
+				.origline
+				.clone()
+				.map(Vec::from)
+				.unwrap_or_default();
 			let ocs = zw.zle.comp.tricky.origcs;
 			set_metaline(zw, &orig, ocs);
 			setmstatus(zw, &mut status, None);
 		} else if s.starts_with(b"search") {
-			mode = if s.windows(4).any(|w| w == b"back") { MM_BSEARCH } else { MM_FSEARCH };
+			mode = if s.windows(4).any(|w| w == b"back") {
+				MM_BSEARCH
+			} else {
+				MM_FSEARCH
+			};
 		}
 	}
 	let mstatus = zw
@@ -852,7 +929,12 @@ fn ms_skip(zw: &mut Zw<'_, '_>, ms: Box<Ms>) -> WResult {
 			Some(m) => {
 				let (pre, post) = (c.core.minfo.prebr.clone(), c.core.minfo.postbr.clone());
 				(c.core.menuacc != 0
-					&& !compresult::hasbrpsfx(c, &m, pre.as_ref().map(|s| s.as_slice()), post.as_ref().map(|s| s.as_slice())))
+					&& !compresult::hasbrpsfx(
+						c,
+						&m,
+						pre.as_ref().map(|s| s.as_slice()),
+						post.as_ref().map(|s| s.as_slice()),
+					))
 					|| m.flags & cmf::DUMMY != 0
 					|| (m.flags & (cmf::NOLIST | cmf::MULT) != 0 && m.str.is_empty())
 			},
@@ -889,7 +971,8 @@ fn ms_top(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>) -> WResult {
 				for x in 0..mcols {
 					let e = l.mtab[y * mcols + x];
 					if e.is_set()
-						&& !e.mark && let Some(m) = e.m.and_then(|r| c.groups.try_mat(r))
+						&& !e.mark
+						&& let Some(m) = e.m.and_then(|r| c.groups.try_mat(r))
 						&& m.gnum == l.mselect
 					{
 						found = Some((y, x));
@@ -973,7 +1056,11 @@ fn ms_top(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>) -> WResult {
 			"{}{}isearch{}: ",
 			if st & MS_FAILED != 0 { "failed " } else { "" },
 			if st & MS_WRAPPED != 0 { "wrapped " } else { "" },
-			if ms.mode == MM_FSEARCH { "" } else { " backward" }
+			if ms.mode == MM_FSEARCH {
+				""
+			} else {
+				" backward"
+			}
 		)
 		.into_bytes();
 		let room = MAX_STATUS.saturating_sub(s.len() + 1);
@@ -1010,9 +1097,13 @@ fn ms_after(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>) -> WResult {
 		return ms_exit(zw, ms);
 	}
 	if ms.i == 0 {
-		let n = usize::try_from(l.mcols.max(0)).unwrap_or(0) * usize::try_from(l.mlines.max(0)).unwrap_or(0);
+		let n = usize::try_from(l.mcols.max(0)).unwrap_or(0)
+			* usize::try_from(l.mlines.max(0)).unwrap_or(0);
 		let n = n.min(l.mtab.len());
-		let i = (0..n).rev().find(|&i| l.mtab[i].is_set()).map_or(-1, |i| i as i32);
+		let i = (0..n)
+			.rev()
+			.find(|&i| l.mtab[i].is_set())
+			.map_or(-1, |i| i as i32);
 		if i == 0 {
 			return ms_exit(zw, ms);
 		}
@@ -1288,7 +1379,14 @@ fn ms_dispatch(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>) -> WResult {
 		}
 		// Entering interactive mode, as at the start.
 		ms.mode = MM_INTER;
-		let orig = zw.zle.comp.tricky.origline.clone().map(Vec::from).unwrap_or_default();
+		let orig = zw
+			.zle
+			.comp
+			.tricky
+			.origline
+			.clone()
+			.map(Vec::from)
+			.unwrap_or_default();
 		let ocs = zw.zle.comp.tricky.origcs;
 		set_metaline(zw, &orig, ocs);
 		let mut st = std::mem::take(&mut ms.status);
@@ -1296,7 +1394,9 @@ fn ms_dispatch(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>) -> WResult {
 		ms.status = st;
 		return ms_top(zw, ms);
 	}
-	if cmd == b"accept-and-infer-next-history" || (ms.mode == MM_INTER && is(cmd, &["self-insert", "self-insert-unmeta"])) {
+	if cmd == b"accept-and-infer-next-history"
+		|| (ms.mode == MM_INTER && is(cmd, &["self-insert", "self-insert-unmeta"]))
+	{
 		return ms_infer(zw, ms, cmd == b"accept-and-infer-next-history", cmd == b"self-insert");
 	}
 	if is(cmd, &["accept-and-hold", "accept-and-menu-complete"]) {
@@ -1322,9 +1422,19 @@ fn ms_dispatch(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>) -> WResult {
 	};
 	let mut wrap = 0;
 	let mut wishcol = ms.wishcol;
-	let motion = if is(cmd, &["down-history", "down-line-or-history", "down-line-or-search", "vi-down-line-or-history"]) {
+	let motion = if is(cmd, &[
+		"down-history",
+		"down-line-or-history",
+		"down-line-or-search",
+		"vi-down-line-or-history",
+	]) {
 		Some(Lab::Down)
-	} else if is(cmd, &["up-history", "up-line-or-history", "up-line-or-search", "vi-up-line-or-history"]) {
+	} else if is(cmd, &[
+		"up-history",
+		"up-line-or-history",
+		"up-line-or-search",
+		"vi-up-line-or-history",
+	]) {
 		Some(Lab::Up)
 	} else if cmd == b"beginning-of-history" {
 		Some(Lab::Top)
@@ -1420,7 +1530,12 @@ fn ms_dispatch(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>) -> WResult {
 		ms.p = Some(p);
 		return ms_bottom(zw, ms);
 	}
-	if is(cmd, &["beginning-of-buffer-or-history", "beginning-of-line", "beginning-of-line-hist", "vi-beginning-of-line"]) {
+	if is(cmd, &[
+		"beginning-of-buffer-or-history",
+		"beginning-of-line",
+		"beginning-of-line-hist",
+		"vi-beginning-of-line",
+	]) {
 		ms.mode = 0;
 		let l = &mut zw.zle.comp.list;
 		p -= l.mcol as isize;
@@ -1540,9 +1655,15 @@ fn ms_dispatch(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>) -> WResult {
 	}
 	let fsearch = cmd == b"history-incremental-search-forward";
 	let bsearch = cmd == b"history-incremental-search-backward";
-	if fsearch || bsearch || (search && is(cmd, &["self-insert", "self-insert-unmeta", "bracketed-paste"])) {
+	if fsearch
+		|| bsearch
+		|| (search && is(cmd, &["self-insert", "self-insert-unmeta", "bracketed-paste"]))
+	{
 		if cmd == b"bracketed-paste" {
-			return read_paste(Paste::default(), Box::new(move |zw, text| ms_isearch(zw, ms, p, Some(text))));
+			return read_paste(
+				Paste::default(),
+				Box::new(move |zw, text| ms_isearch(zw, ms, p, Some(text))),
+			);
 		}
 		let ins = if is(cmd, &["self-insert", "self-insert-unmeta"]) {
 			if cmd == b"self-insert-unmeta" {
@@ -1575,7 +1696,12 @@ fn ms_dispatch(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>) -> WResult {
 		return ms_top(zw, ms);
 	}
 	ungetkeycmd(zw);
-	if zw.zle.widgets.get(cmd).is_some_and(|w| w.flags & wflags::NCOMP != 0) {
+	if zw
+		.zle
+		.widgets
+		.get(cmd)
+		.is_some_and(|w| w.flags & wflags::NCOMP != 0)
+	{
 		ms.acc = 0;
 		ms.broken = 2;
 	} else {
@@ -1585,7 +1711,10 @@ fn ms_dispatch(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>) -> WResult {
 }
 
 /// zsh `bracketedstring()`: the text of a bracketed paste.
-fn read_paste(p: Paste, done: Box<dyn FnOnce(&mut Zw<'_, '_>, Vec<u8>) -> WResult + Send>) -> WResult {
+fn read_paste(
+	p: Paste,
+	done: Box<dyn FnOnce(&mut Zw<'_, '_>, Vec<u8>) -> WResult + Send>,
+) -> WResult {
 	then(Await::Char, move |zw, got| {
 		let mut p = p;
 		let Got::Char(Some(c)) = got else {
@@ -1684,10 +1813,21 @@ fn ms_infer(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>, infer: bool, selfins: bool) ->
 	}
 	// Interactive mode: the line as typed, the character added, that line
 	// remembered.
-	let orig = zw.zle.comp.tricky.origline.clone().map(Vec::from).unwrap_or_default();
+	let orig = zw
+		.zle
+		.comp
+		.tricky
+		.origline
+		.clone()
+		.map(Vec::from)
+		.unwrap_or_default();
 	let ocs = zw.zle.comp.tricky.origcs;
 	set_metaline(zw, &orig, ocs);
-	let f: fn(&mut Zw<'_, '_>) -> WResult = if selfins { misc::selfinsert } else { misc::selfinsertunmeta };
+	let f: fn(&mut Zw<'_, '_>) -> WResult = if selfins {
+		misc::selfinsert
+	} else {
+		misc::selfinsertunmeta
+	};
 	unmeta_call(zw, f, move |zw| {
 		let c = &mut *zw.zle.comp;
 		c.core.minfo.len += 1;
@@ -1954,7 +2094,11 @@ fn ms_exit(zw: &mut Zw<'_, '_>, ms: Box<Ms>) -> WResult {
 fn ms_exit2(zw: &mut Zw<'_, '_>, ms: Box<Ms>) -> WResult {
 	if ms.wasnext || ms.broken != 0 {
 		zw.zle.comp.tricky.menucmp = 1;
-		zw.zle.display.showinglist = if zw.zle.comp.tricky.validlist != 0 && !ms.nolist { -2 } else { 0 };
+		zw.zle.display.showinglist = if zw.zle.comp.tricky.validlist != 0 && !ms.nolist {
+			-2
+		} else {
+			0
+		};
 		zw.zle.comp.core.minfo.asked = 0;
 		if zw.zle.comp.list.noselect == 0 {
 			let nos = zw.zle.comp.list.noselect;

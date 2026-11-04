@@ -20,7 +20,11 @@ const QUIET: Duration = Duration::from_millis(300);
 /// `zsh -f -i` with a plain prompt and `~/tf`, an autoloadable function
 /// file that starts with a comment.
 fn spawn(real: bool) -> Spawn {
-	let s = if real { Spawn::real_zsh() } else { Spawn::zsh() };
+	let s = if real {
+		Spawn::real_zsh()
+	} else {
+		Spawn::zsh()
+	};
 	s.args(["-f", "-i"])
 		.env("PS1", "P> ")
 		.env("PS2", "%_> ")

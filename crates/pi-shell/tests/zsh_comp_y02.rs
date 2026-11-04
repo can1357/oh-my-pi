@@ -1,6 +1,6 @@
-//! zsh 5.9 `Test/Y02compmatch.ztst` (matching control) through the port of its `comptest`
-//! harness (`comp_support::comptest`): obash runs as `zsh -f +Z` on a pty,
-//! with zsh 5.9's installed completion functions, and every `comptest`
+//! zsh 5.9 `Test/Y02compmatch.ztst` (matching control) through the port of its
+//! `comptest` harness (`comp_support::comptest`): obash runs as `zsh -f +Z` on
+//! a pty, with zsh 5.9's installed completion functions, and every `comptest`
 //! report must equal zsh's.
 //!
 //! The steps and reports below were recorded by running the `.ztst` file
@@ -23,8 +23,7 @@ use comp_support::comptest::{
 };
 
 /// The `%prep` steps (after `comptestinit`).
-const PREP: &[Step] = &[
-];
+const PREP: &[Step] = &[];
 
 /// The `%test` chunks in file order.
 const CASES: &[Case] = &[
@@ -1131,7 +1130,8 @@ fn c028_r_should_complete_s_u() {
 	run_case(&SUITE, 27);
 }
 
-/// r:[^.]||.=* should not complete .s.u, but should complete c.s.u (zsh 5.9 itself fails upstream's expectation: `f` flag; pinned to its actual report)
+/// r:[^.]||.=* should not complete .s.u, but should complete c.s.u (zsh 5.9
+/// itself fails upstream's expectation: `f` flag; pinned to its actual report)
 #[test]
 fn c029_r_should_not_complete_s_u_but_should_complete_c_s_u() {
 	run_case(&SUITE, 28);
@@ -1143,7 +1143,8 @@ fn c030_r_should_complete_g() {
 	run_case(&SUITE, 29);
 }
 
-/// r:[^.]||.=* should not complete .g., but should complete c.g. (zsh 5.9 itself fails upstream's expectation: `f` flag; pinned to its actual report)
+/// r:[^.]||.=* should not complete .g., but should complete c.g. (zsh 5.9
+/// itself fails upstream's expectation: `f` flag; pinned to its actual report)
 #[test]
 fn c031_r_should_not_complete_g_but_should_complete_c_g() {
 	run_case(&SUITE, 30);
@@ -1155,7 +1156,9 @@ fn c032_r_should_complete_pag() {
 	run_case(&SUITE, 31);
 }
 
-/// r:[^.]||.=* should not complete ...pag or c...pag, but should complete c.g.a.p (zsh 5.9 itself fails upstream's expectation: `f` flag; pinned to its actual report)
+/// r:[^.]||.=* should not complete ...pag or c...pag, but should complete
+/// c.g.a.p (zsh 5.9 itself fails upstream's expectation: `f` flag; pinned to
+/// its actual report)
 #[test]
 fn c033_r_should_not_complete_pag_or_c_pag_but_should_complete_c_g_a() {
 	run_case(&SUITE, 32);
@@ -1173,7 +1176,9 @@ fn c035_r_should_complete_c_and_h() {
 	run_case(&SUITE, 34);
 }
 
-/// r:[^.,_-]||[.,_-]=* should not complete .c or .h, but should complete v.c and v.h (zsh 5.9 itself fails upstream's expectation: `f` flag; pinned to its actual report)
+/// r:[^.,_-]||[.,_-]=* should not complete .c or .h, but should complete v.c
+/// and v.h (zsh 5.9 itself fails upstream's expectation: `f` flag; pinned to
+/// its actual report)
 #[test]
 fn c036_r_should_not_complete_c_or_h_but_should_complete_v_c_and_v_h() {
 	run_case(&SUITE, 35);
@@ -1203,19 +1208,24 @@ fn c040_documentation_example_using_r_a_z0_9_r_input_2() {
 	run_case(&SUITE, 39);
 }
 
-/// r:[^A-Z0-9]||[A-Z0-9]=** should not complete H, FH, 2 or 52, but should complete FoH and 5b2. (zsh 5.9 itself fails upstream's expectation: `f` flag; pinned to its actual report)
+/// r:[^A-Z0-9]||[A-Z0-9]=** should not complete H, FH, 2 or 52, but should
+/// complete FoH and 5b2. (zsh 5.9 itself fails upstream's expectation: `f`
+/// flag; pinned to its actual report)
 #[test]
 fn c041_r_a_z0_9_a_z0_9_should_not_complete_h_fh_2_or_52_but_should() {
 	run_case(&SUITE, 40);
 }
 
-/// r:?||[A-Z0-9]=* r:|=* should not complete H or 2, but should complete FH and 52. (zsh 5.9 itself fails upstream's expectation: `f` flag; pinned to its actual report)
+/// r:?||[A-Z0-9]=* r:|=* should not complete H or 2, but should complete FH and
+/// 52. (zsh 5.9 itself fails upstream's expectation: `f` flag; pinned to its
+/// actual report)
 #[test]
 fn c042_r_a_z0_9_r_should_not_complete_h_or_2_but_should_complete_fh() {
 	run_case(&SUITE, 41);
 }
 
-/// r:[^.]||.=* and l:.||[^.]=* should work symmetrically. (zsh 5.9 itself fails upstream's expectation: `f` flag; pinned to its actual report)
+/// r:[^.]||.=* and l:.||[^.]=* should work symmetrically. (zsh 5.9 itself fails
+/// upstream's expectation: `f` flag; pinned to its actual report)
 #[test]
 fn c043_r_and_l_should_work_symmetrically() {
 	run_case(&SUITE, 42);
@@ -1239,7 +1249,8 @@ fn c046_bug_from_workers_10886() {
 	run_case(&SUITE, 45);
 }
 
-/// Erratic completion bug from workers 11081: bui > build.out[] > build[.]out > build.out[] > build.out1[] > build.out2[]
+/// Erratic completion bug from workers 11081: bui > build.out[] > build[.]out >
+/// build.out[] > build.out1[] > build.out2[]
 #[test]
 fn c047_erratic_completion_bug_from_workers_11081_bui_build_out_buil() {
 	run_case(&SUITE, 46);
@@ -1257,7 +1268,8 @@ fn c049_non_bug_from_workers_11388() {
 	run_case(&SUITE, 48);
 }
 
-/// Disappearing characters bug from workers 11586: c00\t -> c0[], c00\t -> c0.abc[], c00.\t -> c0.abc[]
+/// Disappearing characters bug from workers 11586: c00\t -> c0[], c00\t ->
+/// c0.abc[], c00.\t -> c0.abc[]
 #[test]
 fn c050_disappearing_characters_bug_from_workers_11586_c00_t_c0_c00() {
 	run_case(&SUITE, 49);
@@ -1275,7 +1287,8 @@ fn c052_second_test_from_workers_12995() {
 	run_case(&SUITE, 51);
 }
 
-/// Incorrect cursor position bug from workers 13320: glibc-2.1\t -> glibc-2[.]1.94-3.i386.rpm
+/// Incorrect cursor position bug from workers 13320: glibc-2.1\t ->
+/// glibc-2[.]1.94-3.i386.rpm
 #[test]
 fn c053_incorrect_cursor_position_bug_from_workers_13320_glibc_2_1_t() {
 	run_case(&SUITE, 52);

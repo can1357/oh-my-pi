@@ -22,7 +22,11 @@ const QUIET: Duration = Duration::from_millis(300);
 /// `zsh -f -i` with `PS1`/`RPS1` and the rc file `rc` (sourced with `.`
 /// as the first command, since `-f` skips `.zshrc`).
 fn spawn(real: bool, rc: &str) -> Spawn {
-	let s = if real { Spawn::real_zsh() } else { Spawn::zsh() };
+	let s = if real {
+		Spawn::real_zsh()
+	} else {
+		Spawn::zsh()
+	};
 	s.args(["-f", "-i"])
 		.env("PS1", "%~ %# ")
 		.env("RPS1", "[%?]")
@@ -38,7 +42,10 @@ fn keys(pty: &mut Pty, text: &str) -> io::Result<()> {
 
 /// Run `drive` against both shells after sourcing the rc file; the final
 /// screens (`None` for zsh when it is not installed).
-fn screens(rc: &str, drive: impl Fn(&mut Pty) -> io::Result<()>) -> io::Result<(String, Option<String>)> {
+fn screens(
+	rc: &str,
+	drive: impl Fn(&mut Pty) -> io::Result<()>,
+) -> io::Result<(String, Option<String>)> {
 	let run = |pty: &mut Pty| -> io::Result<()> {
 		pty.settle(QUIET, TIMEOUT)?;
 		if !rc.is_empty() {
@@ -177,7 +184,10 @@ fn print_z_stacks_the_next_line() {
 
 #[test]
 fn eof_on_an_empty_line_exits() {
-	let s = Spawn::zsh().args(["-f", "-i"]).env("PS1", "> ").size(24, 80);
+	let s = Spawn::zsh()
+		.args(["-f", "-i"])
+		.env("PS1", "> ")
+		.size(24, 80);
 	let mut pty = match s.spawn() {
 		Ok(p) => p,
 		Err(e) => panic!("spawn failed: {e}"),

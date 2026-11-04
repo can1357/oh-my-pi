@@ -17,7 +17,8 @@ use crate::bash::{
 	vm::zsh::{math::Number, params},
 };
 
-const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const DAYS: [&str; 7] =
+	["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const MONTHS: [&str; 12] = [
 	"January",
 	"February",
@@ -470,7 +471,10 @@ fn strtoul(s: &[u8]) -> Strtoul {
 	}
 	let mut v: u64 = 0;
 	for &c in &s[..n] {
-		match v.checked_mul(10).and_then(|v| v.checked_add(u64::from(c - b'0'))) {
+		match v
+			.checked_mul(10)
+			.and_then(|v| v.checked_add(u64::from(c - b'0')))
+		{
 			Some(x) => v = x,
 			None => return Strtoul::Range,
 		}
@@ -566,7 +570,10 @@ pub fn strftime(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 				let (v, rest, trunc) = zstrtol(n);
 				if let Some(d) = trunc {
 					let digits = n.trim_start_with(|c| c == ' ' || c == '\t');
-					let digits = digits.strip_prefix(b"-").or_else(|| digits.strip_prefix(b"+")).unwrap_or(digits);
+					let digits = digits
+						.strip_prefix(b"-")
+						.or_else(|| digits.strip_prefix(b"+"))
+						.unwrap_or(digits);
 					ctx.diag(Diag::Warning {
 						msg: format!("number truncated after {d} digits: {}", digits.as_bstr()).into(),
 					});
@@ -642,24 +649,25 @@ fn reverse(
 		match crate::sys::langinfo::strptime(&locale, fmt, input) {
 			None => {
 				ctx.diag(Diag::Unsupported {
-					what: format!("strftime -r in locale `{}' on this platform", locale.as_bstr()).into(),
+					what: format!("strftime -r in locale `{}' on this platform", locale.as_bstr())
+						.into(),
 				});
 				return done(1);
 			},
 			Some(None) => None,
 			Some(Some((t, used))) => {
 				let tm = Fields {
-					year: i64::from(t.year),
-					mon: i64::from(t.mon),
-					mday: Some(i64::from(t.mday)),
-					hour: i64::from(t.hour),
-					min: i64::from(t.min),
-					sec: i64::from(t.sec),
-					wday: Some(i64::from(t.wday)),
-					yday: Some(i64::from(t.yday)),
+					year:     i64::from(t.year),
+					mon:      i64::from(t.mon),
+					mday:     Some(i64::from(t.mday)),
+					hour:     i64::from(t.hour),
+					min:      i64::from(t.min),
+					sec:      i64::from(t.sec),
+					wday:     Some(i64::from(t.wday)),
+					yday:     Some(i64::from(t.yday)),
 					has_year: true,
-					has_mon: true,
-					week: None,
+					has_mon:  true,
+					week:     None,
 				};
 				Some((tm, false, used))
 			},
@@ -683,7 +691,8 @@ fn reverse(
 	let text = t.to_string();
 	if let Some(name) = scalar {
 		// zsh `setiparam`: a new parameter gets no explicit base.
-		let r = zx(ctx, |ex| params::setnparam(ex, name, Number::Int(t), text.as_bytes(), 0).map(|_| ()))?;
+		let r =
+			zx(ctx, |ex| params::setnparam(ex, name, Number::Int(t), text.as_bytes(), 0).map(|_| ()))?;
 		if let Err(d) = r {
 			return zerr(ctx, d);
 		}
@@ -719,13 +728,15 @@ impl Fields {
 	/// The final date fixups of `strptime` (the date of a week number, of
 	/// a day of the year); `false`: no such date (`strptime` fails).
 	fn fixup(&mut self) -> bool {
-		let start = |y: i64, m: i64| days_from_civil(y + 1900, m + 1, 1) - days_from_civil(y + 1900, 1, 1);
+		let start =
+			|y: i64, m: i64| days_from_civil(y + 1900, m + 1, 1) - days_from_civil(y + 1900, 1, 1);
 		if self.yday.is_none() && self.has_year && !(self.has_mon && self.mday.is_some()) {
 			if let Some((day_offset, week)) = self.week {
 				let y = self.year + 1900;
 				let fwo = (days_from_civil(y, 1, 1) + 4).rem_euclid(7);
 				let tmpwday = self.wday.unwrap_or(day_offset);
-				let tmpyday = (7 - fwo + day_offset) % 7 + (week - 1) * 7 + (tmpwday - day_offset + 7) % 7;
+				let tmpyday =
+					(7 - fwo + day_offset) % 7 + (week - 1) * 7 + (tmpwday - day_offset + 7) % 7;
 				if tmpyday < 0 {
 					return false;
 				}
@@ -788,7 +799,8 @@ fn digits(b: &[u8], i: &mut usize, len: usize) -> Option<i64> {
 
 /// Whether `b` at `i` starts with `name`, ignoring case.
 fn has_name(b: &[u8], i: usize, name: &[u8]) -> bool {
-	b.get(i..i + name.len()).is_some_and(|s| s.eq_ignore_ascii_case(name))
+	b.get(i..i + name.len())
+		.is_some_and(|s| s.eq_ignore_ascii_case(name))
 }
 
 impl Strptime<'_> {
@@ -933,7 +945,12 @@ impl Strptime<'_> {
 					let full = MONTHS.iter().position(|n| has_name(b, i, n.as_bytes()));
 					let (m, len) = match full {
 						Some(m) => (m, MONTHS[m].len()),
-						None => (MONTHS.iter().position(|n| has_name(b, i, &n.as_bytes()[..3]))?, 3),
+						None => (
+							MONTHS
+								.iter()
+								.position(|n| has_name(b, i, &n.as_bytes()[..3]))?,
+							3,
+						),
 					};
 					i += len;
 					self.tm.mon = m as i64;
@@ -952,7 +969,10 @@ impl Strptime<'_> {
 					let lead = rest.iter().take_while(|&&x| space(x)).count();
 					let body = &rest[lead..];
 					let sign = usize::from(matches!(body.first(), Some(b'-' | b'+')));
-					let n = body[sign..].iter().take_while(|x| x.is_ascii_digit()).count();
+					let n = body[sign..]
+						.iter()
+						.take_while(|x| x.is_ascii_digit())
+						.count();
 					let t: i64 = if n == 0 {
 						0
 					} else {
@@ -961,17 +981,17 @@ impl Strptime<'_> {
 					};
 					let tm = Tm::new(t, 0, BString::default())?;
 					self.tm = Fields {
-						year: tm.year,
-						mon: tm.mon,
-						mday: Some(tm.mday),
-						hour: tm.hour,
-						min: tm.min,
-						sec: tm.sec,
-						wday: Some(tm.wday),
-						yday: Some(tm.yday),
+						year:     tm.year,
+						mon:      tm.mon,
+						mday:     Some(tm.mday),
+						hour:     tm.hour,
+						min:      tm.min,
+						sec:      tm.sec,
+						wday:     Some(tm.wday),
+						yday:     Some(tm.yday),
 						has_year: true,
-						has_mon: true,
-						week: None,
+						has_mon:  true,
+						week:     None,
 					};
 					self.gmt = true;
 				},

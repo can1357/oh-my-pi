@@ -19,7 +19,11 @@ pub fn deltochar(_zw: &mut Zw<'_, '_>) -> WResult {
 		let Got::Char(c) = got else {
 			return WResult::Done(1);
 		};
-		let zap = zw.ed.bindk.as_deref().is_some_and(|b| b.as_slice() == b"zap-to-char");
+		let zap = zw
+			.ed
+			.bindk
+			.as_deref()
+			.is_some_and(|b| b.as_slice() == b"zap-to-char");
 		let ll = zw.ed.line.len();
 		let mut dest = zw.ed.cs;
 		let mut ok = false;
@@ -74,7 +78,10 @@ pub fn boot(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 	let zle = super::zle_mut(k, cx, vp);
 	let widgets = Arc::make_mut(&mut zle.widgets);
 	for name in ["delete-to-char", "zap-to-char"] {
-		let w = Widget { flags: wflags::INT | wflags::KILL | wflags::KEEPSUFFIX, kind: Kind::Native(deltochar) };
+		let w = Widget {
+			flags: wflags::INT | wflags::KILL | wflags::KEEPSUFFIX,
+			kind:  Kind::Native(deltochar),
+		};
 		widgets.add_internal(name.as_bytes(), w);
 	}
 }

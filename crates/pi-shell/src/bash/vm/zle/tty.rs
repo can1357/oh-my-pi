@@ -25,21 +25,22 @@ pub const FD: i32 = -1;
 /// The editing terminal of a vproc's editor.
 pub struct Tty {
 	/// SHTTY as an engine file (reads are non-blocking polls).
-	pub file:     FdRef,
+	pub file:    FdRef,
 	/// Display bytes not written yet (zsh's buffered `shout`).
-	pub out:      Vec<u8>,
+	pub out:     Vec<u8>,
 	/// zsh `eofchar`: the terminal's EOF character while editing.
-	pub eofchar:  Option<u8>,
+	pub eofchar: Option<u8>,
 	/// zsh `zsetterm` is in effect (the terminal is in ZLE's modes).
-	pub raw:      bool,
+	pub raw:     bool,
 	/// zsh `fetchttyinfo` (`zle -I`): read the normal modes from the
 	/// terminal again before the next `zsetterm`.
-	pub fetch:    bool,
+	pub fetch:   bool,
 	/// Columns, rows (zsh `zterm_columns`, `zterm_lines`).
-	pub size:     (usize, usize),
+	pub size:    (usize, usize),
 	/// zsh's terminal capabilities for `$TERM` (`init_term`), and the
 	/// `$TERM` they belong to.
-	pub caps:     Option<(bstr::BString, std::sync::Arc<crate::bash::vm::builtins::zsh_prompt::TermCaps>)>,
+	pub caps:
+		Option<(bstr::BString, std::sync::Arc<crate::bash::vm::builtins::zsh_prompt::TermCaps>)>,
 }
 
 impl Clone for Tty {
@@ -107,7 +108,14 @@ impl Tty {
 		ti.set(TermFlag::Echo, false);
 		ti.set(TermFlag::Flusho, false);
 		ti.set(TermFlag::Onlcr, true);
-		for c in [CtlChar::Quit, CtlChar::Discard, CtlChar::Susp, CtlChar::Dsusp, CtlChar::Swtc, CtlChar::Lnext] {
+		for c in [
+			CtlChar::Quit,
+			CtlChar::Discard,
+			CtlChar::Susp,
+			CtlChar::Dsusp,
+			CtlChar::Swtc,
+			CtlChar::Lnext,
+		] {
 			ti.set_char(c, None);
 		}
 		if !flowcontrol {

@@ -35,7 +35,11 @@ pub fn logins() -> io::Result<Logins> {
 	/// A NUL-padded utmpx field as bytes.
 	#[allow(clippy::cast_sign_loss, clippy::unnecessary_cast, reason = "c_char bytes")]
 	fn field(f: &[libc::c_char]) -> BString {
-		f.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect::<Vec<u8>>().into()
+		f.iter()
+			.take_while(|&&c| c != 0)
+			.map(|&c| c as u8)
+			.collect::<Vec<u8>>()
+			.into()
 	}
 
 	let modified = std::fs::metadata(UTMPX_FILE)?.modified()?;
@@ -44,7 +48,9 @@ pub fn logins() -> io::Result<Logins> {
 		Err(e) => -i64::try_from(e.duration().as_secs()).unwrap_or(i64::MAX),
 	};
 	let mut entries = Vec::new();
-	let _guard = CURSOR.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+	let _guard = CURSOR
+		.lock()
+		.unwrap_or_else(std::sync::PoisonError::into_inner);
 	// SAFETY: the cursor functions run under `CURSOR`; each entry is read
 	// before the next `getutxent` call replaces it.
 	unsafe {

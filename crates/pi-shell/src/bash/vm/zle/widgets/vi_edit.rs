@@ -166,7 +166,11 @@ pub fn vireplacechars(zw: &mut Zw<'_, '_>) -> WResult {
 	if n > 0 {
 		if ed.region_active != 0 {
 			let (mut a, mut b) = if ed.region_active == 1 {
-				let (a, mut b) = if ed.mark > ed.cs { (ed.cs, ed.mark) } else { (ed.mark, ed.cs) };
+				let (a, mut b) = if ed.mark > ed.cs {
+					(ed.cs, ed.mark)
+				} else {
+					(ed.mark, ed.cs)
+				};
 				utils::incpos(ed, &mut b);
 				(a, b)
 			} else {
@@ -361,7 +365,11 @@ pub fn set_buffer(ed: &mut Editor, ch: Option<char>) -> i32 {
 		ed.zmod.flags &= !modflags::VIAPP;
 	}
 	let c = c.to_ascii_lowercase() as u8;
-	ed.zmod.vibuf = u32::from(if c.is_ascii_digit() { c - b'0' + 26 } else { c - b'a' });
+	ed.zmod.vibuf = u32::from(if c.is_ascii_digit() {
+		c - b'0' + 26
+	} else {
+		c - b'a'
+	});
 	ed.zmod.flags |= modflags::VIBUF;
 	ed.prefixflag = true;
 	0

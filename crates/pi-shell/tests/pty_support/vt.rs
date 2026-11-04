@@ -8,21 +8,21 @@
 /// The terminal's character grid.
 #[derive(Clone, Debug)]
 pub struct Screen {
-	rows:     usize,
-	cols:     usize,
-	grid:     Vec<Vec<String>>,
+	rows:    usize,
+	cols:    usize,
+	grid:    Vec<Vec<String>>,
 	/// The main screen while the alternate one is shown.
-	saved:    Option<Vec<Vec<String>>>,
-	row:      usize,
-	col:      usize,
+	saved:   Option<Vec<Vec<String>>>,
+	row:     usize,
+	col:     usize,
 	/// The last column was written: the next printable wraps first.
-	wrap:     bool,
-	top:      usize,
-	bottom:   usize,
-	cursor:   Option<(usize, usize)>,
-	parser:   State,
-	utf8:     Vec<u8>,
-	replies:  Vec<u8>,
+	wrap:    bool,
+	top:     usize,
+	bottom:  usize,
+	cursor:  Option<(usize, usize)>,
+	parser:  State,
+	utf8:    Vec<u8>,
+	replies: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -31,9 +31,15 @@ enum State {
 	Escape,
 	/// `ESC (` and friends: one charset byte follows.
 	Charset,
-	Csi { private: Option<u8>, params: Vec<u8>, intermediate: Vec<u8> },
+	Csi {
+		private:      Option<u8>,
+		params:       Vec<u8>,
+		intermediate: Vec<u8>,
+	},
 	/// OSC, DCS, APC, PM, SOS: skipped up to BEL or ST.
-	Text { esc: bool },
+	Text {
+		esc: bool,
+	},
 }
 
 impl Screen {
@@ -86,7 +92,8 @@ impl Screen {
 	/// Row `i` without trailing blanks.
 	#[must_use]
 	pub fn row(&self, i: usize) -> String {
-		self.grid
+		self
+			.grid
 			.get(i)
 			.map(|line| line.concat().trim_end().to_owned())
 			.unwrap_or_default()
@@ -198,7 +205,11 @@ impl Screen {
 	fn escape(&mut self, b: u8) {
 		match b {
 			b'[' => {
-				self.parser = State::Csi { private: None, params: Vec::new(), intermediate: Vec::new() };
+				self.parser = State::Csi {
+					private:      None,
+					params:       Vec::new(),
+					intermediate: Vec::new(),
+				};
 			},
 			b']' | b'P' | b'_' | b'^' | b'X' => self.parser = State::Text { esc: false },
 			b'(' | b')' | b'*' | b'+' | b'#' | b'%' => self.parser = State::Charset,
@@ -308,14 +319,18 @@ impl Screen {
 			b'L' if (self.top..=self.bottom).contains(&self.row) => {
 				for _ in 0..arg(0, 1) {
 					self.grid.remove(self.bottom);
-					self.grid.insert(self.row, vec![String::from(" "); self.cols]);
+					self
+						.grid
+						.insert(self.row, vec![String::from(" "); self.cols]);
 				}
 				self.col = 0;
 			},
 			b'M' if (self.top..=self.bottom).contains(&self.row) => {
 				for _ in 0..arg(0, 1) {
 					self.grid.remove(self.row);
-					self.grid.insert(self.bottom, vec![String::from(" "); self.cols]);
+					self
+						.grid
+						.insert(self.bottom, vec![String::from(" "); self.cols]);
 				}
 				self.col = 0;
 			},
@@ -400,19 +415,27 @@ impl Screen {
 
 	fn scroll_up(&mut self) {
 		self.grid.remove(self.top);
-		self.grid.insert(self.bottom, vec![String::from(" "); self.cols]);
+		self
+			.grid
+			.insert(self.bottom, vec![String::from(" "); self.cols]);
 	}
 
 	fn scroll_down(&mut self) {
 		self.grid.remove(self.bottom);
-		self.grid.insert(self.top, vec![String::from(" "); self.cols]);
+		self
+			.grid
+			.insert(self.top, vec![String::from(" "); self.cols]);
 	}
 
 	fn print(&mut self, c: char) {
 		let width = char_width(c);
 		if width == 0 {
 			// A combining mark joins the cell before the cursor.
-			let col = if self.wrap { self.col } else { self.col.saturating_sub(1) };
+			let col = if self.wrap {
+				self.col
+			} else {
+				self.col.saturating_sub(1)
+			};
 			self.grid[self.row][col].push(c);
 			return;
 		}

@@ -33,8 +33,7 @@ use crate::bash::{
 		Cx, Kernel,
 		exec::{Flow, Sub, settle_sub, start_sub, start_zsh_sub},
 		expand::{Expander, Stop},
-		jobctl,
-		probe,
+		jobctl, probe,
 		proc::{FrameKind, PendingWrite, Probe, ProbeResult, Scratch, ScriptKind, Slot, Vproc},
 		state,
 		zsh::params,
@@ -45,56 +44,56 @@ use crate::bash::{
 /// The reader's state between its steps ([`super::Zle::reader`]).
 #[derive(Default)]
 pub struct Reader {
-	phase:         Phase,
+	phase:            Phase,
 	/// The terminal was resized (`SIGWINCH`).
-	pub winch:     bool,
+	pub winch:        bool,
 	/// `SIGINT` while reading a line without ZLE: the line is abandoned.
-	pub interrupted: bool,
+	pub interrupted:  bool,
 	/// Expansion replay and command substitutions of the prompts.
-	sc:            Box<Scratch>,
+	sc:               Box<Scratch>,
 	/// Hook calls still to make, in order.
-	queue:         VecDeque<(BString, Vec<BString>)>,
+	queue:            VecDeque<(BString, Vec<BString>)>,
 	/// The hook frame running: frame count before it, `$?` to restore.
-	running:       Option<(usize, i32)>,
+	running:          Option<(usize, i32)>,
 	/// A hook of the current batch existed (zsh `callhookfunc`'s
 	/// `stat == 0`).
-	hooked:        bool,
+	hooked:           bool,
 	/// zsh `lastperiodic` (seconds).
-	lastperiodic:  i64,
+	lastperiodic:     i64,
 	/// zsh `lastmailcheck` (seconds).
-	lastmailcheck: i64,
+	lastmailcheck:    i64,
 	/// `$?` when the prompt is shown (zsh `lastval` at `preprompt`).
-	status:        i32,
+	status:           i32,
 	/// The prompts of the line (raw and expanded).
-	prompts:       Option<Prompts>,
+	prompts:          Option<Prompts>,
 	/// The event position whose `preexec` has run (the command parsed
 	/// there runs now).
-	gate:          Option<u32>,
+	gate:             Option<u32>,
 	/// zsh `noexitct`: EOFs ignored under `ignoreeof`.
-	noexitct:      u32,
+	noexitct:         u32,
 	/// zsh `use_exit_printed` of the last line.
 	use_exit_printed: bool,
 	/// The line read is a continuation (`PS2`).
-	cont:          bool,
+	cont:             bool,
 	/// `%_` of the continuation prompt.
-	cmdstack:      Vec<&'static str>,
+	cmdstack:         Vec<&'static str>,
 	/// `TMOUT`'s timer while a line is read.
-	tmout:         Option<Box<dyn Timer>>,
+	tmout:            Option<Box<dyn Timer>>,
 	/// zsh `hist_skip_flags & HIST_FOREIGN`, kept across lines.
-	localhistory:  bool,
+	localhistory:     bool,
 	/// History's progress for the line (`before_line`, `expand`).
-	hsc:           Box<Scratch>,
+	hsc:              Box<Scratch>,
 	/// History's `before_line` ran for this line.
-	began:         bool,
+	began:            bool,
 	/// A line read, waiting for its history expansion.
-	pending:       Option<(BString, bool)>,
+	pending:          Option<(BString, bool)>,
 	/// The event position whose `zshaddhistory` hooks ran, and their
 	/// status.
-	added:         Option<u32>,
+	added:            Option<u32>,
 	/// The first non-zero `zshaddhistory` status of the batch running.
-	addret:        i32,
+	addret:           i32,
 	/// The logout files were sourced (zsh does it once).
-	logged_out:    bool,
+	logged_out:       bool,
 }
 
 /// The expanded prompts of a line.
@@ -161,7 +160,10 @@ enum Line {
 /// Whether the interactive reader reads `vp`'s standard input: the root
 /// vproc of an interactive shell running the script it reads from stdin.
 pub fn applies(cx: &mut Cx<'_>, vp: &Vproc) -> bool {
-	vp.frames.len().checked_sub(1).is_some_and(|i| input_frame(cx, vp, i))
+	vp.frames
+		.len()
+		.checked_sub(1)
+		.is_some_and(|i| input_frame(cx, vp, i))
 }
 
 /// Whether frame `i` of `vp` is the interactive shell's own input (the
@@ -172,7 +174,8 @@ pub fn input_frame(cx: &mut Cx<'_>, vp: &Vproc, i: usize) -> bool {
 		&& matches!(
 			vp.frames.get(i).map(|f| &f.kind),
 			Some(FrameKind::Script { what: ScriptKind::Run, stdin: true, .. })
-		) && matches!(
+		)
+		&& matches!(
 			state::record(cx.store, vp, Key::Misc(MiscKey::Interactive)),
 			Ok(Some(Record::Misc(v))) if v.as_slice() == b"1"
 		)
@@ -184,7 +187,12 @@ pub fn gate(vp: &Vproc) -> Option<u32> {
 }
 
 /// Run `f` with the reader taken out of `vp` (created on first use).
-fn with_reader<T>(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, f: impl FnOnce(&mut Reader, &mut Kernel, &mut Cx<'_>, &mut Vproc) -> T) -> T {
+fn with_reader<T>(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+	f: impl FnOnce(&mut Reader, &mut Kernel, &mut Cx<'_>, &mut Vproc) -> T,
+) -> T {
 	let z = zle_mut(k, cx, vp);
 	let mut r = z.reader.take().unwrap_or_default();
 	if z.tty.is_none() {
@@ -238,7 +246,8 @@ pub fn before_run(
 					&& let Ok(Some(text)) = r.expand(k, cx, vp, |ex| ex.prompt(&ps0))
 				{
 					let text: Vec<u8> = text.iter().copied().filter(|&c| c != 1 && c != 2).collect();
-					vp.out.push_back(PendingWrite { fd: 2, bytes: BString::from(text), off: 0 });
+					vp.out
+						.push_back(PendingWrite { fd: 2, bytes: BString::from(text), off: 0 });
 				}
 			}
 		}
@@ -250,10 +259,15 @@ pub fn before_run(
 		// bash `\#`: the next command number.
 		if vp.mode.dialect() != Dialect::Zsh {
 			let n = match state::record(cx.store, vp, Key::Misc(MiscKey::BashCommandNumber)) {
-				Ok(Some(Record::Misc(v))) => v.to_str().ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(1),
+				Ok(Some(Record::Misc(v))) => v
+					.to_str()
+					.ok()
+					.and_then(|s| s.parse::<u64>().ok())
+					.unwrap_or(1),
 				_ => 1,
 			};
-			k.root.set_misc(cx.store, MiscKey::BashCommandNumber, (n + 1).to_string());
+			k.root
+				.set_misc(cx.store, MiscKey::BashCommandNumber, (n + 1).to_string());
 		}
 		None
 	})
@@ -263,7 +277,12 @@ pub fn before_run(
 /// stdin frame, with the event's history text: `Ok` with the first
 /// non-zero status (0 when none, or no text), `Err` while a hook runs
 /// (`None`: its frame was pushed) — call again when the VM comes back.
-pub fn addhistory(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, pos: u32) -> Result<i32, Option<WaitKey>> {
+pub fn addhistory(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	pos: u32,
+) -> Result<i32, Option<WaitKey>> {
 	with_reader(k, cx, vp, |r, k, cx, vp| {
 		if r.added == Some(pos) {
 			return Ok(r.addret);
@@ -273,7 +292,9 @@ pub fn addhistory(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, pos: u32) -> 
 			r.queue.clear();
 			r.running = None;
 			r.addret = 0;
-			let text = crate::bash::vm::builtins::history::zsh::hook_text(cx.store, vp).ok().flatten();
+			let text = crate::bash::vm::builtins::history::zsh::hook_text(cx.store, vp)
+				.ok()
+				.flatten();
 			if let Some(text) = text {
 				hook_batch(r, k, cx, vp, b"zshaddhistory", &[text]);
 			}
@@ -297,7 +318,14 @@ pub fn addhistory(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, pos: u32) -> 
 /// Queue the calls of hook `name` (zsh `callhookfunc(name, args, 1)`):
 /// the function `name`, then each function `name_functions` lists, all
 /// with `args` after their name.
-fn hook_batch(r: &mut Reader, k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, name: &[u8], args: &[BString]) {
+fn hook_batch(
+	r: &mut Reader,
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+	name: &[u8],
+	args: &[BString],
+) {
 	r.hooked = false;
 	if exec::function_exists(cx, vp, name) {
 		r.queue.push_back((BString::from(name), args.to_vec()));
@@ -310,7 +338,10 @@ fn hook_batch(r: &mut Reader, k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, n
 	let listed: Vec<BString> = {
 		let mut log = Vec::new();
 		let mut ex = Expander::new(k, cx, vp, &mut log, false, 0);
-		params::getaparam(&mut ex, &arr).ok().flatten().unwrap_or_default()
+		params::getaparam(&mut ex, &arr)
+			.ok()
+			.flatten()
+			.unwrap_or_default()
 	};
 	for f in listed {
 		if exec::function_exists(cx, vp, &f) {
@@ -415,7 +446,12 @@ impl Reader {
 	/// Make the queued hook calls one at a time: `Some(None)` after
 	/// pushing a frame (come back when it has returned), `None` when the
 	/// queue is done.
-	fn run_queue(&mut self, k: &mut Kernel, _cx: &mut Cx<'_>, vp: &mut Vproc) -> Option<Option<WaitKey>> {
+	fn run_queue(
+		&mut self,
+		k: &mut Kernel,
+		_cx: &mut Cx<'_>,
+		vp: &mut Vproc,
+	) -> Option<Option<WaitKey>> {
 		if let Some((_, status)) = self.running.take() {
 			vp.status = status;
 		}
@@ -439,7 +475,12 @@ impl Reader {
 					// zsh history: the event begins (`hbegin`, so `%h` is the
 					// new line's number) before the prompt.
 					if !self.began && zhist(k, cx, vp) {
-						match crate::bash::vm::builtins::history::zsh::before_line(k, cx, vp, &mut self.hsc) {
+						match crate::bash::vm::builtins::history::zsh::before_line(
+							k,
+							cx,
+							vp,
+							&mut self.hsc,
+						) {
 							Err(key) => return Some(key),
 							Ok(Some(out)) => {
 								let failed = out.failed;
@@ -513,7 +554,11 @@ impl Reader {
 						if let Ok(out) = crate::bash::vm::builtins::zsh_mod_watch::check(&mut ex)
 							&& !out.is_empty()
 						{
-							vp.out.push_back(PendingWrite { fd: 1, bytes: BString::from(out), off: 0 });
+							vp.out.push_back(PendingWrite {
+								fd:    1,
+								bytes: BString::from(out),
+								off:   0,
+							});
 						}
 					}
 				},
@@ -609,7 +654,11 @@ impl Reader {
 			return Some(WaitKey::Write { fd });
 		}
 		let zsh = vp.mode.dialect() == Dialect::Zsh;
-		if zsh && isset(k, cx, vp, ZshOpt::Promptsp) && isset(k, cx, vp, ZshOpt::Promptcr) && !self.use_exit_printed {
+		if zsh
+			&& isset(k, cx, vp, ZshOpt::Promptsp)
+			&& isset(k, cx, vp, ZshOpt::Promptcr)
+			&& !self.use_exit_printed
+		{
 			self.prompt_sp(k, cx, vp);
 		}
 		None
@@ -617,21 +666,28 @@ impl Reader {
 
 	/// Whether the terminal size was read once.
 	fn size_known(&self, vp: &Vproc) -> bool {
-		vp.zle.as_ref().and_then(|z| z.tty.as_ref()).is_some_and(|t| t.caps.is_some())
+		vp.zle
+			.as_ref()
+			.and_then(|z| z.tty.as_ref())
+			.is_some_and(|t| t.caps.is_some())
 	}
 
 	/// zsh's `PROMPT_SP` heuristic: `PROMPT_EOL_MARK` (default
 	/// `%B%S%#%s%b`), padding to the last column, then back to column 0.
 	fn prompt_sp(&mut self, k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
-		let mark = scalar(k, cx, vp, b"PROMPT_EOL_MARK").unwrap_or_else(|| BString::from("%B%S%#%s%b"));
+		let mark =
+			scalar(k, cx, vp, b"PROMPT_EOL_MARK").unwrap_or_else(|| BString::from("%B%S%#%s%b"));
 		let mut log = Vec::new();
 		let mut ex = Expander::new(k, cx, vp, &mut log, false, 0);
-		let Ok(columns) = params::getsparam(&mut ex, b"COLUMNS").map(|c| c.map_or(80, |c| params::parse_int(&c)))
+		let Ok(columns) =
+			params::getsparam(&mut ex, b"COLUMNS").map(|c| c.map_or(80, |c| params::parse_int(&c)))
 		else {
 			return;
 		};
 		let site = ex.k.zsh_site(ex.cx, ex.vp, 0);
-		let Ok(mut env) = crate::bash::vm::builtins::zsh_print::prompt_env_ex(&mut ex, site, true, false) else {
+		let Ok(mut env) =
+			crate::bash::vm::builtins::zsh_print::prompt_env_ex(&mut ex, site, true, false)
+		else {
 			return;
 		};
 		env.lastval = self.status;
@@ -732,7 +788,11 @@ impl Reader {
 					},
 				}
 			}
-			if isset(k, cx, vp, ZshOpt::Mailwarning) && atime > mtime && atime > self.lastmailcheck && st.size > 0 {
+			if isset(k, cx, vp, ZshOpt::Mailwarning)
+				&& atime > mtime
+				&& atime > self.lastmailcheck
+				&& st.size > 0
+			{
 				out.extend_from_slice(b"The mail in ");
 				out.extend_from_slice(file);
 				out.extend_from_slice(b" has been read.\n");
@@ -746,16 +806,25 @@ impl Reader {
 	/// Expand the prompts of this line.
 	fn prompts(&mut self, k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> Result<(), Pause> {
 		let zsh = vp.mode.dialect() == Dialect::Zsh;
-		let (lname, rname): (&[u8], &[u8]) = if self.cont { (b"PS2", b"RPS2") } else { (b"PS1", b"RPS1") };
+		let (lname, rname): (&[u8], &[u8]) = if self.cont {
+			(b"PS2", b"RPS2")
+		} else {
+			(b"PS1", b"RPS1")
+		};
 		let raw_lp = scalar(k, cx, vp, lname).unwrap_or_default();
-		let raw_rp = if zsh { scalar(k, cx, vp, rname).unwrap_or_default() } else { BString::default() };
+		let raw_rp = if zsh {
+			scalar(k, cx, vp, rname).unwrap_or_default()
+		} else {
+			BString::default()
+		};
 		let status = self.status;
 		let stack = self.cmdstack.clone();
 		let (lp, rp) = if zsh {
 			// Both prompts share one replay transaction. If the right
 			// prompt parks, the left prompt must replay its own atoms too,
 			// rather than consuming the right prompt's substitution result.
-			self.expand(k, cx, vp, |ex| {
+			self
+				.expand(k, cx, vp, |ex| {
 				let mut prompt = |raw: &[u8]| {
 					match super::display::expand_prompt(ex, raw, status, &stack) {
 						Ok(p) => Ok(p),
@@ -789,7 +858,8 @@ impl Reader {
 		};
 		let text = crate::bash::vm::builtins::zsh_prompt::strip_markers(&p.lp.text);
 		if !text.is_empty() {
-			vp.out.push_back(PendingWrite { fd: 2, bytes: BString::from(text), off: 0 });
+			vp.out
+				.push_back(PendingWrite { fd: 2, bytes: BString::from(text), off: 0 });
 		}
 	}
 
@@ -812,8 +882,11 @@ impl Reader {
 		let hline = self.hline(vp);
 		// zsh `inputline`: the editor gets the prompt parameters (`raw_lp`,
 		// `raw_rp`); the right one only when it is set now.
-		let (lname, rname): (&'static [u8], &'static [u8]) =
-			if self.cont { (b"PS2", b"RPS2") } else { (b"PS1", b"RPS1") };
+		let (lname, rname): (&'static [u8], &'static [u8]) = if self.cont {
+			(b"PS2", b"RPS2")
+		} else {
+			(b"PS1", b"RPS1")
+		};
 		let rp_set = scalar(k, cx, vp, rname).is_some();
 		let Some(p) = self.prompts.take() else {
 			return false;
@@ -821,11 +894,16 @@ impl Reader {
 		let owner = vp.frames.len();
 		let localhistory = self.localhistory;
 		let status = self.status;
-		let ctx = if self.cont { Context::LineCont } else { Context::LineStart };
+		let ctx = if self.cont {
+			Context::LineCont
+		} else {
+			Context::LineStart
+		};
 		let Some(z) = vp.zle.as_deref_mut() else {
 			return false;
 		};
-		let mut ed = Editor::new(ctx, readflags::HISTORY | if ignoreeof { readflags::IGNOREEOF } else { 0 });
+		let mut ed =
+			Editor::new(ctx, readflags::HISTORY | if ignoreeof { readflags::IGNOREEOF } else { 0 });
 		ed.unget = std::mem::take(&mut z.kunget);
 		// zsh `zleread`: `fetchttyinfo = 0`.
 		if let Some(t) = z.tty.as_mut() {
@@ -871,10 +949,15 @@ impl Reader {
 		let read = Task::Read(ReadTask::new(b"zle-line-init", b"zle-line-finish"));
 		exec::push_root(&mut ed, read, owner);
 		z.ed = Some(Box::new(ed));
-		if let Ok(tmout) = u64::try_from(scalar(k, cx, vp, b"TMOUT").map_or(0, |v| params::parse_int(&v)))
+		if let Ok(tmout) =
+			u64::try_from(scalar(k, cx, vp, b"TMOUT").map_or(0, |v| params::parse_int(&v)))
 			&& tmout > 0
 		{
-			let at = Deadline(cx.host.now_ns().saturating_add(tmout.saturating_mul(1_000_000_000)));
+			let at = Deadline(
+				cx.host
+					.now_ns()
+					.saturating_add(tmout.saturating_mul(1_000_000_000)),
+			);
 			self.tmout = Some(cx.host.timer(at));
 		}
 		true
@@ -924,7 +1007,8 @@ impl Reader {
 		};
 		// zsh's `kungetbuf` outlives the line: bytes read past its end
 		// (a key sequence cut short by `KEYTIMEOUT`) start the next one,
-		// unless the line was interrupted (`trashzle`: `errflag` → `kungetct = 0`).
+		// unless the line was interrupted (`trashzle`: `errflag` → `kungetct =
+		// 0`).
 		if !ed.interrupted {
 			z.kunget = std::mem::take(&mut ed.unget);
 		}
@@ -963,14 +1047,26 @@ impl Reader {
 	}
 
 	/// Read a line without ZLE.
-	fn read_plain(&mut self, k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> Result<Line, WaitKey> {
+	fn read_plain(
+		&mut self,
+		k: &mut Kernel,
+		cx: &mut Cx<'_>,
+		vp: &mut Vproc,
+	) -> Result<Line, WaitKey> {
 		if std::mem::take(&mut self.interrupted) {
 			self.sc.recycle();
 			vp.status = 130;
 			put_tty(k, vp, b"\n");
 			return Ok(Line::Abort);
 		}
-		let input = Probe::Input { fd: 0, delim: Some(b'\n'), lines: 1, nchars: None, part: 0, timeout_ns: None };
+		let input = Probe::Input {
+			fd:         0,
+			delim:      Some(b'\n'),
+			lines:      1,
+			nchars:     None,
+			part:       0,
+			timeout_ns: None,
+		};
 		let answer = probe::perform(k, cx, vp, &mut self.sc, &input)?;
 		self.sc.recycle();
 		self.tmout = None;
@@ -982,7 +1078,13 @@ impl Reader {
 
 	/// Park on `key`, unless `TMOUT` ran out (zsh's `SIGALRM` handler:
 	/// `TRAPALRM`, else `zsh: timeout` and exit).
-	fn park_tmout(&mut self, k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, key: WaitKey) -> Option<WaitKey> {
+	fn park_tmout(
+		&mut self,
+		k: &mut Kernel,
+		cx: &mut Cx<'_>,
+		vp: &mut Vproc,
+		key: WaitKey,
+	) -> Option<WaitKey> {
 		let fired = self.tmout.as_mut().is_some_and(|t| {
 			let mut tcx = std::task::Context::from_waker(&k.waker);
 			t.poll(&mut tcx).is_ready()
@@ -992,7 +1094,11 @@ impl Reader {
 		}
 		self.tmout = None;
 		let trapped = matches!(
-			state::record(cx.store, vp, Key::Trap(crate::bash::store::TrapKey::Signal(crate::bash::signal::Signal::Alrm))),
+			state::record(
+				cx.store,
+				vp,
+				Key::Trap(crate::bash::store::TrapKey::Signal(crate::bash::signal::Signal::Alrm))
+			),
 			Ok(Some(Record::Trap { .. }))
 		) || exec::function_exists(cx, vp, b"TRAPALRM");
 		if trapped {
@@ -1001,7 +1107,11 @@ impl Reader {
 			if let Ok(t) = u64::try_from(tmout)
 				&& t > 0
 			{
-				let at = Deadline(cx.host.now_ns().saturating_add(t.saturating_mul(1_000_000_000)));
+				let at = Deadline(
+					cx.host
+						.now_ns()
+						.saturating_add(t.saturating_mul(1_000_000_000)),
+				);
 				self.tmout = Some(cx.host.timer(at));
 			}
 			return None;
@@ -1020,7 +1130,14 @@ impl Reader {
 		};
 		if let Some(mut ed) = z.ed.take() {
 			{
-				let mut zw = exec::Zw { k: &mut *k, cx: &mut *cx, vp: &mut *vp, zle: &mut z, ed: &mut ed, args: &[] };
+				let mut zw = exec::Zw {
+					k:    &mut *k,
+					cx:   &mut *cx,
+					vp:   &mut *vp,
+					zle:  &mut z,
+					ed:   &mut ed,
+					args: &[],
+				};
 				exec::trashzle(&mut zw);
 			}
 			if let Some(t) = z.tty.as_mut() {
@@ -1031,7 +1148,13 @@ impl Reader {
 	}
 
 	/// What to do with the line read.
-	fn got_line(&mut self, k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, line: Line) -> Option<WaitKey> {
+	fn got_line(
+		&mut self,
+		k: &mut Kernel,
+		cx: &mut Cx<'_>,
+		vp: &mut Vproc,
+		line: Line,
+	) -> Option<WaitKey> {
 		self.phase = Phase::Idle;
 		self.began = false;
 		match line {
@@ -1042,7 +1165,9 @@ impl Reader {
 			Line::Abort => {
 				// The command being continued goes with the line (zsh's
 				// `errflag` ends the event).
-				if let Some(FrameKind::Script { src, pos, aux, .. }) = vp.frames.last_mut().map(|f| &mut f.kind) {
+				if let Some(FrameKind::Script { src, pos, aux, .. }) =
+					vp.frames.last_mut().map(|f| &mut f.kind)
+				{
 					src.truncate(pos.0 as usize);
 					if let Some(a) = aux {
 						a.pending = None;
@@ -1088,7 +1213,9 @@ impl Reader {
 					}
 					text = BString::default();
 					// The event's earlier lines go with it.
-					if let Some(FrameKind::Script { src, pos, aux, .. }) = vp.frames.last_mut().map(|f| &mut f.kind) {
+					if let Some(FrameKind::Script { src, pos, aux, .. }) =
+						vp.frames.last_mut().map(|f| &mut f.kind)
+					{
 						let skipped = src[(pos.0 as usize).min(src.len())..]
 							.iter()
 							.filter(|&&c| c == b'\n')
@@ -1109,7 +1236,8 @@ impl Reader {
 			text = crate::bash::vm::builtins::history::bash::reader_line(k, cx, vp, text);
 		}
 		self.phase = Phase::Idle;
-		if let Some(FrameKind::Script { src, stdin, .. }) = vp.frames.last_mut().map(|f| &mut f.kind) {
+		if let Some(FrameKind::Script { src, stdin, .. }) = vp.frames.last_mut().map(|f| &mut f.kind)
+		{
 			src.extend_from_slice(&text);
 			if eof {
 				*stdin = false;
@@ -1124,7 +1252,8 @@ impl Reader {
 		let ignoreeof = if zsh {
 			isset(k, cx, vp, ZshOpt::Ignoreeof)
 		} else {
-			state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Ignoreeof).unwrap_or(false)
+			state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Ignoreeof)
+				.unwrap_or(false)
 		};
 		if ignoreeof {
 			let limit = if zsh {
@@ -1140,7 +1269,11 @@ impl Reader {
 				if !self.use_exit_printed {
 					let login = isset(k, cx, vp, ZshOpt::Login);
 					let msg = if zsh {
-						if login { "use 'logout' to logout." } else { "use 'exit' to exit." }
+						if login {
+							"use 'logout' to logout."
+						} else {
+							"use 'exit' to exit."
+						}
 					} else if login {
 						"Use \"logout\" to leave the shell."
 					} else {
@@ -1227,8 +1360,17 @@ pub fn logout_on_exit(
 	status: i32,
 ) -> Result<Option<crate::bash::vm::builtins::Outcome>, crate::bash::vm::builtins::Need> {
 	use crate::bash::vm::builtins::{Control, Outcome};
-	let done = ctx.vp.zle.as_ref().and_then(|z| z.reader.as_ref()).is_none_or(|r| r.logged_out);
-	let in_function = ctx.vp.frames.iter().any(|f| matches!(f.kind, FrameKind::Function { .. }));
+	let done = ctx
+		.vp
+		.zle
+		.as_ref()
+		.and_then(|z| z.reader.as_ref())
+		.is_none_or(|r| r.logged_out);
+	let in_function = ctx
+		.vp
+		.frames
+		.iter()
+		.any(|f| matches!(f.kind, FrameKind::Function { .. }));
 	if done
 		|| in_function
 		|| ctx.vp.parent.is_some()
@@ -1255,7 +1397,12 @@ pub fn logout_on_exit(
 			texts.push(text);
 		}
 	}
-	if let Some(r) = ctx.vp.zle.as_deref_mut().and_then(|z| z.reader.as_deref_mut()) {
+	if let Some(r) = ctx
+		.vp
+		.zle
+		.as_deref_mut()
+		.and_then(|z| z.reader.as_deref_mut())
+	{
 		r.logged_out = true;
 	}
 	if texts.is_empty() {
@@ -1263,7 +1410,12 @@ pub fn logout_on_exit(
 	}
 	ctx.vp.status = status;
 	let line = ctx.line;
-	crate::bash::vm::exec::push_script(ctx.vp, format!("builtin exit {status}\n").as_bytes(), line, ScriptKind::Eval);
+	crate::bash::vm::exec::push_script(
+		ctx.vp,
+		format!("builtin exit {status}\n").as_bytes(),
+		line,
+		ScriptKind::Eval,
+	);
 	for text in texts.iter().rev() {
 		crate::bash::vm::exec::push_script(ctx.vp, text, 1, ScriptKind::Source);
 	}
@@ -1272,7 +1424,9 @@ pub fn logout_on_exit(
 
 /// The stdin frame reads no more: the shell's script ends.
 fn end_input(vp: &mut Vproc) {
-	if let Some(FrameKind::Script { stdin, src, pos, .. }) = vp.frames.last_mut().map(|f| &mut f.kind) {
+	if let Some(FrameKind::Script { stdin, src, pos, .. }) =
+		vp.frames.last_mut().map(|f| &mut f.kind)
+	{
 		*stdin = false;
 		src.truncate(pos.0 as usize);
 	}
@@ -1287,7 +1441,11 @@ fn put_tty(k: &mut Kernel, vp: &mut Vproc, bytes: &[u8]) {
 		return;
 	}
 	if !vp.out.is_empty() {
-		vp.out.push_back(PendingWrite { fd: super::tty::FD, bytes: BString::from(bytes), off: 0 });
+		vp.out.push_back(PendingWrite {
+			fd:    super::tty::FD,
+			bytes: BString::from(bytes),
+			off:   0,
+		});
 		return;
 	}
 	if let Some(t) = vp.zle.as_deref_mut().and_then(|z| z.tty.as_mut()) {
@@ -1295,7 +1453,8 @@ fn put_tty(k: &mut Kernel, vp: &mut Vproc, bytes: &[u8]) {
 		let _ = t.flush(k);
 		return;
 	}
-	vp.out.push_back(PendingWrite { fd: 2, bytes: BString::from(bytes), off: 0 });
+	vp.out
+		.push_back(PendingWrite { fd: 2, bytes: BString::from(bytes), off: 0 });
 }
 
 /// A bash prompt (readline's `\x01`…`\x02` invisible regions) as zsh's
@@ -1325,11 +1484,15 @@ pub fn adjust_winsize(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, force: bo
 	else {
 		return;
 	};
-	let changed = vp.zle.as_deref_mut().and_then(|z| z.tty.as_mut()).is_some_and(|t| {
-		let changed = t.size != size;
-		t.size = size;
-		changed
-	});
+	let changed = vp
+		.zle
+		.as_deref_mut()
+		.and_then(|z| z.tty.as_mut())
+		.is_some_and(|t| {
+			let changed = t.size != size;
+			t.size = size;
+			changed
+		});
 	if !(changed || force) || size.0 == 0 {
 		return;
 	}

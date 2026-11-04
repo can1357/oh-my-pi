@@ -31,7 +31,10 @@ fn warned(out: &str, err: &str) -> (String, String, i32) {
 
 #[test]
 fn pcre_builtins_need_the_module_and_a_pattern() {
-	assert_eq!(zsh("pcre_compile a; echo $?"), warned("127\n", "zsh:1: command not found: pcre_compile\n"));
+	assert_eq!(
+		zsh("pcre_compile a; echo $?"),
+		warned("127\n", "zsh:1: command not found: pcre_compile\n")
+	);
 	assert_eq!(
 		zsh("zmodload zsh/pcre; pcre_match a; echo $?"),
 		warned("1\n", "zsh:pcre_match:1: no pattern has been compiled\n")
@@ -83,7 +86,9 @@ fn pcre_match_sets_match_and_captures() {
 		ok("0\n0 joe@ 1 joe\n")
 	);
 	assert_eq!(
-		zsh(r#"zmodload zsh/pcre; pcre_compile 'o(x)?'; pcre_match -v m -a arr foo; echo $? $m ${#arr} ${+MATCH} ${+match}"#),
+		zsh(
+			r#"zmodload zsh/pcre; pcre_compile 'o(x)?'; pcre_match -v m -a arr foo; echo $? $m ${#arr} ${+MATCH} ${+match}"#
+		),
 		ok("0 o 0 0 0\n")
 	);
 }
@@ -124,7 +129,10 @@ fn pcre_compile_options() {
 		),
 		ok("0\n0\n1\n")
 	);
-	assert_eq!(zsh("zmodload zsh/pcre; pcre_compile -x 'a b # c'; pcre_match ab; echo $? $MATCH"), ok("0 ab\n"));
+	assert_eq!(
+		zsh("zmodload zsh/pcre; pcre_compile -x 'a b # c'; pcre_match ab; echo $? $MATCH"),
+		ok("0 ab\n")
+	);
 }
 
 #[test]
@@ -159,7 +167,9 @@ fn pcre_match_condition() {
 		ok("0 123 2 4 [1 2  3] [2 3 1 4] [2 3 0 4]\n")
 	);
 	assert_eq!(
-		zsh(r#"zmodload zsh/pcre; [[ "x12y" -pcre-match '(\d)(z)?' ]]; echo $? "[$match]" "[$mbegin]" "[$mend]""#),
+		zsh(
+			r#"zmodload zsh/pcre; [[ "x12y" -pcre-match '(\d)(z)?' ]]; echo $? "[$match]" "[$mbegin]" "[$mend]""#
+		),
 		ok("0 [1] [2] [2]\n")
 	);
 	assert_eq!(
@@ -170,7 +180,10 @@ fn pcre_match_condition() {
 		zsh(r#"zmodload zsh/pcre; [[ abc -pcre-match "(" ]]; echo $?"#),
 		warned("1\n", "zsh:1: failed to compile regexp /(/: missing )\n")
 	);
-	assert_eq!(zsh(r#"zmodload zsh/pcre; [[ abc -pcre-match "x" ]]; echo $? ${+MATCH}"#), ok("1 0\n"));
+	assert_eq!(
+		zsh(r#"zmodload zsh/pcre; [[ abc -pcre-match "x" ]]; echo $? ${+MATCH}"#),
+		ok("1 0\n")
+	);
 	assert_eq!(
 		zsh("zmodload zsh/pcre; setopt nocasematch; [[ ABC -pcre-match 'b' ]]; echo $?"),
 		ok("1\n")
@@ -180,14 +193,21 @@ fn pcre_match_condition() {
 #[test]
 fn pcre_match_condition_in_utf8() {
 	assert_eq!(
-		zsh(r#"LANG=en_US.UTF-8; zmodload zsh/pcre; [[ "héllo" -pcre-match 'l+' ]]; echo $? $MATCH $MBEGIN $MEND"#),
+		zsh(
+			r#"LANG=en_US.UTF-8; zmodload zsh/pcre; [[ "héllo" -pcre-match 'l+' ]]; echo $? $MATCH $MBEGIN $MEND"#
+		),
 		ok("0 ll 3 4\n")
 	);
 	assert_eq!(
-		zsh(r#"LANG=en_US.UTF-8; zmodload zsh/pcre; [[ "héllo" -pcre-match 'h.l' ]]; echo $? $MATCH"#),
+		zsh(
+			r#"LANG=en_US.UTF-8; zmodload zsh/pcre; [[ "héllo" -pcre-match 'h.l' ]]; echo $? $MATCH"#
+		),
 		ok("0 hél\n")
 	);
-	assert_eq!(zsh(r#"zmodload zsh/pcre; [[ "héllo" -pcre-match 'h.l' ]]; echo $? $MATCH"#), ok("1\n"));
+	assert_eq!(
+		zsh(r#"zmodload zsh/pcre; [[ "héllo" -pcre-match 'h.l' ]]; echo $? $MATCH"#),
+		ok("1\n")
+	);
 }
 
 #[test]
@@ -201,11 +221,15 @@ fn rematchpcre_routes_eq_tilde_to_pcre() {
 		ok("1\n0 B\n")
 	);
 	assert_eq!(
-		zsh(r#"setopt rematchpcre bashrematch; [[ "ab12" =~ '([a-z]+)(\d+)' ]]; echo $? ${#BASH_REMATCH} "$BASH_REMATCH[*]" ${+MATCH}"#),
+		zsh(
+			r#"setopt rematchpcre bashrematch; [[ "ab12" =~ '([a-z]+)(\d+)' ]]; echo $? ${#BASH_REMATCH} "$BASH_REMATCH[*]" ${+MATCH}"#
+		),
 		ok("0 3 ab12 ab 12 0\n")
 	);
 	assert_eq!(
-		zsh(r"setopt rematchpcre ksharrays; [[ 'ab12' =~ '(\d)' ]]; echo $? $MBEGIN $MEND ${mbegin[0]} ${mend[0]}"),
+		zsh(
+			r"setopt rematchpcre ksharrays; [[ 'ab12' =~ '(\d)' ]]; echo $? $MBEGIN $MEND ${mbegin[0]} ${mend[0]}"
+		),
 		ok("0 2 2 2 2\n")
 	);
 }

@@ -211,7 +211,9 @@ impl Spawn {
 		if let Some(argv0) = &self.argv0 {
 			cmd.arg0(argv0);
 		}
-		cmd.args(&self.args).env_clear().envs(self.env.iter().map(|(k, v)| (k, v)));
+		cmd.args(&self.args)
+			.env_clear()
+			.envs(self.env.iter().map(|(k, v)| (k, v)));
 		if let Some(dir) = &self.cwd {
 			cmd.current_dir(dir);
 		}
@@ -384,18 +386,23 @@ impl Pty {
 	/// # Errors
 	///
 	/// `TimedOut` (with the output so far) when it does not appear in time.
-	pub fn read_until(&mut self, pattern: impl AsRef<[u8]>, timeout: Duration) -> io::Result<String> {
+	pub fn read_until(
+		&mut self,
+		pattern: impl AsRef<[u8]>,
+		timeout: Duration,
+	) -> io::Result<String> {
 		let pattern = pattern.as_ref();
 		let mark = self.mark;
 		let mut end = None;
-		self.wait_output(timeout, |out, _, _| {
-			end = out[mark.min(out.len())..]
-				.windows(pattern.len().max(1))
-				.position(|w| w == pattern)
-				.map(|i| mark + i + pattern.len());
-			end.is_some()
-		})
-		.map_err(|_| self.timeout(&format!("{:?}", String::from_utf8_lossy(pattern))))?;
+		self
+			.wait_output(timeout, |out, _, _| {
+				end = out[mark.min(out.len())..]
+					.windows(pattern.len().max(1))
+					.position(|w| w == pattern)
+					.map(|i| mark + i + pattern.len());
+				end.is_some()
+			})
+			.map_err(|_| self.timeout(&format!("{:?}", String::from_utf8_lossy(pattern))))?;
 		let end = end.unwrap_or(mark);
 		self.mark = end;
 		let state = self.shared.state.lock().unwrap();

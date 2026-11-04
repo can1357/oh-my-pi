@@ -10,7 +10,9 @@ use std::collections::VecDeque;
 use bstr::{BStr, BString, ByteSlice};
 use serde::{Deserialize, Serialize};
 
-use super::{atoi, fin, gate, get_user_var, getaparam, load, rembslash, save, setaparam, setsparam, warn};
+use super::{
+	atoi, fin, gate, get_user_var, getaparam, load, rembslash, save, setaparam, setsparam, warn,
+};
 use crate::bash::{
 	store::MiscKey,
 	vm::{
@@ -47,27 +49,27 @@ enum RunType {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Cdstr {
 	/// Next in its set.
-	next:  Option<usize>,
+	next:    Option<usize>,
 	/// The string to display.
-	str:   BString,
+	str:     BString,
 	/// The description.
-	desc:  Option<BString>,
+	desc:    Option<BString>,
 	/// The match to add.
-	mat:   BString,
+	mat:     BString,
 	/// `str`'s `LC_COLLATE` key, or its bytes in the C locale.
 	sortstr: BString,
 	/// Length of `str` when it was read.
-	len:   usize,
+	len:     usize,
 	/// Its screen width.
-	width: i64,
+	width:   i64,
 	/// Next string with the same description.
-	other: Option<usize>,
+	other:   Option<usize>,
 	/// 0: not in a group, 1: the first, 2: another.
-	kind:  u8,
+	kind:    u8,
 	/// The set it is in.
-	set:   usize,
+	set:     usize,
 	/// Next in its run.
-	run:   Option<usize>,
+	run:     Option<usize>,
 }
 
 /// zsh `struct cdset`.
@@ -117,10 +119,7 @@ struct CdState {
 pub(super) fn nicewidth(s: &[u8], cs: Charset) -> i64 {
 	let shown = niceformat(s, false, cs);
 	if cs.utf8 {
-		shown
-			.chars()
-			.map(|c| i64::from(wcwidth(c).max(0)))
-			.sum()
+		shown.chars().map(|c| i64::from(wcwidth(c).max(0))).sum()
 	} else {
 		shown.len() as i64
 	}
@@ -172,7 +171,9 @@ impl CdState {
 
 	/// All strings, set by set.
 	fn all_strs(&self) -> Vec<usize> {
-		(0..self.sets.len()).flat_map(|s| self.set_strs(s)).collect()
+		(0..self.sets.len())
+			.flat_map(|s| self.set_strs(s))
+			.collect()
 	}
 
 	/// zsh `cd_group`: group matches with the same description.
@@ -333,7 +334,9 @@ impl CdState {
 				}
 				let strs = &self.strs;
 				grps.sort_by(|a, b| {
-					strs[a.expect("set")].sortstr.cmp(&strs[b.expect("set")].sortstr)
+					strs[a.expect("set")]
+						.sortstr
+						.cmp(&strs[b.expect("set")].sortstr)
 				});
 			}
 			// Move entries with the same description next to each other.
@@ -407,21 +410,35 @@ impl CdState {
 					.collect();
 				if !plain.is_empty() {
 					self.chain(&plain);
-					runs.push_back(Cdrun { ty: RunType::Simple, strs: Some(plain[0]), count: plain.len() });
+					runs.push_back(Cdrun {
+						ty:    RunType::Simple,
+						strs:  Some(plain[0]),
+						count: plain.len(),
+					});
 				}
 			}
 		} else if self.showd {
 			for s in 0..self.sets.len() {
 				let strs = self.set_strs(s);
 				if self.sets[s].desc > 0 {
-					let with: Vec<usize> =
-						strs.iter().copied().filter(|&i| self.strs[i].desc.is_some()).collect();
+					let with: Vec<usize> = strs
+						.iter()
+						.copied()
+						.filter(|&i| self.strs[i].desc.is_some())
+						.collect();
 					self.chain(&with);
-					runs.push_back(Cdrun { ty: RunType::Desc, strs: with.first().copied(), count: self.sets[s].desc });
+					runs.push_back(Cdrun {
+						ty:    RunType::Desc,
+						strs:  with.first().copied(),
+						count: self.sets[s].desc,
+					});
 				}
 				if self.sets[s].desc != self.sets[s].count {
-					let without: Vec<usize> =
-						strs.iter().copied().filter(|&i| self.strs[i].desc.is_none()).collect();
+					let without: Vec<usize> = strs
+						.iter()
+						.copied()
+						.filter(|&i| self.strs[i].desc.is_none())
+						.collect();
 					self.chain(&without);
 					runs.push_back(Cdrun {
 						ty:    RunType::Simple,
@@ -435,7 +452,11 @@ impl CdState {
 				if self.sets[s].count > 0 {
 					let strs = self.set_strs(s);
 					self.chain(&strs);
-					runs.push_back(Cdrun { ty: RunType::Simple, strs: self.sets[s].strs, count: self.sets[s].count });
+					runs.push_back(Cdrun {
+						ty:    RunType::Simple,
+						strs:  self.sets[s].strs,
+						count: self.sets[s].count,
+					});
 				}
 			}
 		}
@@ -511,7 +532,8 @@ fn cd_init(
 	save::<CdState>(ctx, MiscKey::ZshCompDescribe, None);
 	while let Some(a) = args.first() {
 		let set = st.sets.len();
-		st.sets.push(Cdset { opts: Vec::new(), strs: None, count: 0, desc: 0 });
+		st.sets
+			.push(Cdset { opts: Vec::new(), strs: None, count: 0, desc: 0 });
 		let Some(ap) = get_user_var(ctx, failed, a)? else {
 			return warn(ctx, format!("invalid argument: {}", BStr::new(a)));
 		};
@@ -614,7 +636,8 @@ fn cd_get(ctx: &mut Ctx<'_, '_>, failed: &mut bool, mut st: CdState, params: &[B
 	let columns = columns(ctx, failed)?;
 	let strs = st.run_strs(run.strs);
 	let set_opts = |st: &CdState| -> Vec<BString> {
-		run.strs.map_or_else(Vec::new, |h| st.sets[st.strs[h].set].opts.clone())
+		run.strs
+			.map_or_else(Vec::new, |h| st.sets[st.strs[h].set].opts.clone())
 	};
 	let mut csl: &[u8] = b"";
 	let (opts, mats, dpys): (Vec<BString>, Vec<BString>, Vec<BString>) = match run.ty {
@@ -663,7 +686,10 @@ fn cd_get(ctx: &mut Ctx<'_, '_>, failed: &mut bool, mut st: CdState, params: &[B
 			let s = &st.strs[strs[0]];
 			let (m, d) = (s.mat.clone(), s.str.clone());
 			let mut opts = set_opts(&st);
-			if let Some(j) = opts.iter().position(|o| o.starts_with(b"-J") || o.starts_with(b"-V")) {
+			if let Some(j) = opts
+				.iter()
+				.position(|o| o.starts_with(b"-J") || o.starts_with(b"-V"))
+			{
 				opts[j] = [&b"-2V"[..], &opts[j][2..]].concat().into();
 			} else {
 				opts.insert(0, "-2V-default-".into());
@@ -728,12 +754,28 @@ pub fn compdescribe(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 			let Some(opts) = getaparam(ctx, &mut failed, &args[4])? else {
 				return warn(ctx, format!("unknown parameter: {}", BStr::new(&args[4])));
 			};
-			cd_init(ctx, &mut failed, &args[1], &args[2], &args[3], Some(opts.as_slice()), &args[5..], true)
+			cd_init(
+				ctx,
+				&mut failed,
+				&args[1],
+				&args[2],
+				&args[3],
+				Some(opts.as_slice()),
+				&args[5..],
+				true,
+			)
 		},
 		b'g' => match load::<CdState>(ctx, MiscKey::ZshCompDescribe)? {
 			Some(st) => {
 				if n != 5 {
-					return warn(ctx, if n < 5 { "not enough arguments" } else { "too many arguments" });
+					return warn(
+						ctx,
+						if n < 5 {
+							"not enough arguments"
+						} else {
+							"too many arguments"
+						},
+					);
 				}
 				cd_get(ctx, &mut failed, st, &args[1..])
 			},

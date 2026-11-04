@@ -220,7 +220,11 @@ fn redo(
 ) -> X<()> {
 	let fresh = ex.record && ex.cursor >= ex.log.len();
 	let name = unmetafy(name);
-	let old = if fresh && !name.contains(&b'[') { saved(ex, &name)? } else { None };
+	let old = if fresh && !name.contains(&b'[') {
+		saved(ex, &name)?
+	} else {
+		None
+	};
 	f(ex)?;
 	if !fresh {
 		match replay(ex) {
@@ -3699,9 +3703,10 @@ fn finish(
 						// (`is_mb_niceformat`, `hasspecial`).
 						let mut raw = s.to_vec();
 						untokenize(&mut raw);
-						let (bang, bang_special) = params::bang_quoting(&mut ex.k.root, ex.cx.store, ex.vp);
+						let (bang, bang_special) =
+							params::bang_quoting(&mut ex.k.root, ex.cx.store, ex.vp);
 						let cs = zsh_quote::Charset {
-							utf8:        opt(ex, ZshOpt::Multibyte)?
+							utf8: opt(ex, ZshOpt::Multibyte)?
 								&& crate::bash::vm::locale::is_utf8(ex.k, ex.cx.store, ex.vp),
 							print_eight: opt(ex, ZshOpt::Printeightbit)?,
 							bang,

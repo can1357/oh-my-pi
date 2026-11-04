@@ -65,7 +65,10 @@ pub struct Suffix {
 
 /// zsh `addsuffix(tp, flags, chars, lenstr, lensuf)`.
 pub fn addsuffix(c: &mut Comp, tp: Suftyp, flags: i32, chars: &[char], lensuf: i32) {
-	c.result.suffix.suffixlist.insert(0, Suffixset { tp, flags, chars: chars.to_vec(), lensuf });
+	c.result
+		.suffix
+		.suffixlist
+		.insert(0, Suffixset { tp, flags, chars: chars.to_vec(), lensuf });
 }
 
 /// zsh `addsuffixstring(tp, flags, chars, lensuf)`: [`addsuffix`] from a
@@ -147,7 +150,11 @@ pub fn makesuffixstr(zw: &mut Zw<'_, '_>, f: Option<&[u8]>, s: Option<&[u8]>, n:
 		// and the class was not negated, or vice versa.
 		c.result.suffix.suffixnoinsrem = z ^ inv;
 		zw.ed.ls.suffixlen = usize::try_from(n).unwrap_or(0);
-		let (strt, rngt) = if inv { (Suftyp::NegStr, Suftyp::NegRng) } else { (Suftyp::PosStr, Suftyp::PosRng) };
+		let (strt, rngt) = if inv {
+			(Suftyp::NegStr, Suftyp::NegRng)
+		} else {
+			(Suftyp::PosStr, Suftyp::PosRng)
+		};
 		let mut lasts = 0;
 		let mut w = 0;
 		let mut left = ws.len();
@@ -307,8 +314,8 @@ pub fn iremovesuffix(zw: &mut Zw<'_, '_>, ch: Option<char>, keep: bool, k: K<()>
 /// zsh `invalidatelist()`: the `invalidate_list` hook, which zsh/complete
 /// adds when it is loaded.
 pub fn invalidatelist(zw: &mut Zw<'_, '_>) {
-	let loaded =
-		crate::bash::vm::builtins::zsh_module::loaded(zw.cx.store, zw.vp, b"zsh/complete").unwrap_or(false);
+	let loaded = crate::bash::vm::builtins::zsh_module::loaded(zw.cx.store, zw.vp, b"zsh/complete")
+		.unwrap_or(false);
 	if loaded {
 		super::invalidate_list(zw);
 	}

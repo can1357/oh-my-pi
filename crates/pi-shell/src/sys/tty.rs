@@ -3,11 +3,11 @@
 //! - [`NativeTerminal`]: the process host's [`Terminal`] over the real
 //!   terminals of this process (Unix; every operation off Unix fails with
 //!   `Unsupported`).
-//! - [`TermiosGuard`]: saves a terminal's modes and puts them back when
-//!   dropped (optionally switching it to raw mode first).
-//! - Free functions over raw descriptors (`attrs`, `set_attrs`,
-//!   `window_size`, `set_foreground`, `open_controlling`, `open_pty`, …)
-//!   for code that holds descriptors itself (the pty test harness).
+//! - [`TermiosGuard`]: saves a terminal's modes and puts them back when dropped
+//!   (optionally switching it to raw mode first).
+//! - Free functions over raw descriptors (`attrs`, `set_attrs`, `window_size`,
+//!   `set_foreground`, `open_controlling`, `open_pty`, …) for code that holds
+//!   descriptors itself (the pty test harness).
 
 use std::io;
 
@@ -337,7 +337,8 @@ mod unix {
 
 	/// Set the window size of terminal `fd` (`TIOCSWINSZ`).
 	pub fn set_window_size(fd: RawFd, size: TtyInfo) -> io::Result<()> {
-		let ws = libc::winsize { ws_row: size.rows, ws_col: size.cols, ws_xpixel: 0, ws_ypixel: 0 };
+		let ws =
+			libc::winsize { ws_row: size.rows, ws_col: size.cols, ws_xpixel: 0, ws_ypixel: 0 };
 		// SAFETY: TIOCSWINSZ reads one `winsize` from the valid pointer.
 		check(unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &raw const ws) })
 	}
@@ -445,11 +446,16 @@ mod unix {
 			{
 				return Ok(Some((fd, n.clone())));
 			}
-			if rdwr(0) && let Ok(fd) = dup_high(0) {
+			if rdwr(0)
+				&& let Ok(fd) = dup_high(0)
+			{
 				return Ok(Some((fd, name.unwrap_or_else(|| BString::from("/dev/tty")))));
 			}
 		}
-		if is_terminal(1) && rdwr(1) && let Ok(fd) = dup_high(1) {
+		if is_terminal(1)
+			&& rdwr(1)
+			&& let Ok(fd) = dup_high(1)
+		{
 			let name = self::name(1).unwrap_or_else(|_| BString::from("/dev/tty"));
 			return Ok(Some((fd, name)));
 		}
@@ -533,7 +539,8 @@ mod unix {
 
 		/// Whether `other` is the same terminal device as this guard's.
 		pub fn same_device(&self, other: RawFd) -> bool {
-			self.fd
+			self
+				.fd
 				.as_ref()
 				.is_some_and(|fd| device(fd.as_raw_fd()).is_some_and(|d| device(other) == Some(d)))
 		}

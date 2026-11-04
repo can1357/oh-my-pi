@@ -76,12 +76,12 @@ pub fn math_options(ex: &mut Expander<'_, '_>) -> X<Options> {
 
 /// The evaluator's view of the shell during one top-level evaluation.
 struct ShellEnv<'x, 'e, 'c> {
-	ex:    &'x mut Expander<'e, 'c>,
-	opts:  Options,
-	state: MathState,
+	ex:       &'x mut Expander<'e, 'c>,
+	opts:     Options,
+	state:    MathState,
 	/// An error a method without a `Result` met (a store failure while
 	/// reading `$#`, `$$` or `#name`): reported once the evaluation ends.
-	held:  Option<Stop>,
+	held:     Option<Stop>,
 	/// The evaluation assigned a variable: a math function call after it
 	/// cannot park (the replay would assign again).
 	assigned: bool,
@@ -119,8 +119,13 @@ impl<'x, 'e, 'c> ShellEnv<'x, 'e, 'c> {
 	/// the shell function (`f.func`, else `name`) runs with `$0` `name` and
 	/// `args`; its value is the shell's `lastmathval` when it returns.
 	fn call_user(&mut self, name: &[u8], f: &UserMathFunc, args: &[BString]) -> X<Number> {
-		let func = if f.func.is_empty() { BString::from(name) } else { f.func.clone() };
-		let call = MathCall { func: func.clone(), argzero: BString::from(name), args: args.to_vec() };
+		let func = if f.func.is_empty() {
+			BString::from(name)
+		} else {
+			f.func.clone()
+		};
+		let call =
+			MathCall { func: func.clone(), argzero: BString::from(name), args: args.to_vec() };
 		// What the replay log holds next: the definition's loading (a hook
 		// status, empty text) or the call (its value's text); the
 		// replay follows the log whatever the function's state is now.
@@ -265,7 +270,11 @@ impl Env for ShellEnv<'_, '_, '_> {
 			Ok(fs) => {
 				if let Some(f) = fs.iter().find(|f| f.name == name) {
 					return Some(MathFunc {
-						kind:     if f.string { FuncKind::UserString } else { FuncKind::User },
+						kind:     if f.string {
+							FuncKind::UserString
+						} else {
+							FuncKind::User
+						},
 						min_args: usize::try_from(f.min).unwrap_or(0),
 						max_args: usize::try_from(f.max).ok(),
 					});
@@ -328,7 +337,10 @@ pub struct UserMathFunc {
 ///
 /// # Errors
 /// A store failure.
-pub fn user_math_funcs(store: &mut dyn StateStore, vp: &Vproc) -> Result<Vec<UserMathFunc>, StoreError> {
+pub fn user_math_funcs(
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+) -> Result<Vec<UserMathFunc>, StoreError> {
 	let Some(Record::Words(w)) = state::record(store, vp, Key::Misc(MiscKey::ZshMathFuncs))? else {
 		return Ok(Vec::new());
 	};

@@ -80,12 +80,20 @@ fn lower(c: char) -> char {
 /// zsh `zlinefind(haystack, pos, needle, dir, sens)`: the first position
 /// from `pos` (forwards when `dir` > 0, else backwards) where `needle`
 /// compares below `sens` ([`zlinecmp`]).
-pub(crate) fn zlinefind(haystack: &[char], pos: usize, needle: &[char], dir: i32, sens: i32) -> Option<usize> {
+pub(crate) fn zlinefind(
+	haystack: &[char],
+	pos: usize,
+	needle: &[char],
+	dir: i32,
+	sens: i32,
+) -> Option<usize> {
 	if dir > 0 {
 		(pos..haystack.len()).find(|&s| zlinecmp(&haystack[s..], needle) < sens)
 	} else {
 		let start = pos.min(haystack.len());
-		(0..=start).rev().find(|&s| zlinecmp(&haystack[s..], needle) < sens)
+		(0..=start)
+			.rev()
+			.find(|&s| zlinecmp(&haystack[s..], needle) < sens)
 	}
 }
 

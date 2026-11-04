@@ -173,7 +173,11 @@ fn get_substrings(
 	utf8: bool,
 ) -> X<()> {
 	let text = |g: &Option<Range<usize>>| {
-		BString::from(g.as_ref().and_then(|g| arg.get(g.clone())).unwrap_or_default())
+		BString::from(
+			g.as_ref()
+				.and_then(|g| arg.get(g.clone()))
+				.unwrap_or_default(),
+		)
 	};
 	let whole = groups.first().cloned().flatten().unwrap_or(0..0);
 	let nelem = groups.len().saturating_sub(1);
@@ -188,7 +192,12 @@ fn get_substrings(
 		&& (!s.want_begin_end || nelem > 0)
 	{
 		let from = usize::from(!s.matched_in_arr);
-		let arr = groups.get(from..).unwrap_or_default().iter().map(text).collect();
+		let arr = groups
+			.get(from..)
+			.unwrap_or_default()
+			.iter()
+			.map(text)
+			.collect();
 		params::assignaparam(ex, var, arr, params::ASSPM_WARN)?;
 	}
 	if s.want_begin_end {
@@ -269,8 +278,8 @@ pub fn pcre_match(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	let ksh = i64::from(!ctx.zsh_option(ZshOpt::Ksharrays)?);
 	let utf8 = utf8_enabled(ctx)?;
 	let s = Substrings {
-		matchvar:       Some(matched.as_slice()),
-		substravar:     Some(receptacle.as_slice()),
+		matchvar: Some(matched.as_slice()),
+		substravar: Some(receptacle.as_slice()),
 		want_offset,
 		matched_in_arr: false,
 		want_begin_end: false,
@@ -289,7 +298,11 @@ pub fn pcre_match(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 ///
 /// # Errors
 /// A probe or store access to run first.
-pub fn cond_pcre_match(ctx: &mut Ctx<'_, '_>, l: &[u8], r: &[u8]) -> Result<Result<bool, Diag>, Need> {
+pub fn cond_pcre_match(
+	ctx: &mut Ctx<'_, '_>,
+	l: &[u8],
+	r: &[u8],
+) -> Result<Result<bool, Diag>, Need> {
 	let utf8 = utf8_enabled(ctx)?;
 	let mut opts = 0;
 	if utf8 {
@@ -326,7 +339,11 @@ pub fn cond_pcre_match(ctx: &mut Ctx<'_, '_>, l: &[u8], r: &[u8]) -> Result<Resu
 	};
 	let s = Substrings {
 		matchvar:       (!bash).then_some(&b"MATCH"[..]),
-		substravar:     Some(if bash { &b"BASH_REMATCH"[..] } else { &b"match"[..] }),
+		substravar:     Some(if bash {
+			&b"BASH_REMATCH"[..]
+		} else {
+			&b"match"[..]
+		}),
 		want_offset:    false,
 		matched_in_arr: bash,
 		want_begin_end: !bash,

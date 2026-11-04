@@ -36,7 +36,8 @@ use super::{
 
 /// zsh `strstr(s, w) != NULL`.
 fn has(s: &Option<BString>, w: &[u8]) -> bool {
-	s.as_ref().is_some_and(|s| s.windows(w.len()).any(|x| x == w))
+	s.as_ref()
+		.is_some_and(|s| s.windows(w.len()).any(|x| x == w))
 }
 
 /// zsh `atoi`.
@@ -47,7 +48,10 @@ fn atoi(s: &[u8]) -> i32 {
 		Some(b'+') => (false, &s[1..]),
 		_ => (false, s),
 	};
-	let n = s.iter().take_while(|c| c.is_ascii_digit()).fold(0i64, |n, &d| (n * 10 + i64::from(d - b'0')) % (1 << 32));
+	let n = s
+		.iter()
+		.take_while(|c| c.is_ascii_digit())
+		.fold(0i64, |n, &d| (n * 10 + i64::from(d - b'0')) % (1 << 32));
 	let n = if neg { -n } else { n };
 	n as i32
 }
@@ -97,9 +101,17 @@ pub fn do_completion(zw: &mut Zw<'_, '_>, s: BString, incmd: i32, lst: i32, k: K
 	c.core.matchers.clear();
 	let instring = u8::try_from(c.tricky.instring).unwrap_or(0);
 	// Backslashes may need handling even when not in quotes.
-	c.complete.compqstack = Some(BString::from(vec![if instring == qt::NONE { qt::BACKSLASH } else { instring }]));
+	c.complete.compqstack = Some(BString::from(vec![if instring == qt::NONE {
+		qt::BACKSLASH
+	} else {
+		instring
+	}]));
 	c.core.hasunqu = 0;
-	c.core.useline = if c.tricky.wouldinstab != 0 { -1 } else { i32::from(lst != tricky::COMP_LIST_COMPLETE) };
+	c.core.useline = if c.tricky.wouldinstab != 0 {
+		-1
+	} else {
+		i32::from(lst != tricky::COMP_LIST_COMPLETE)
+	};
 	c.core.useexact = i32::from(recexact);
 	c.complete.compexactstr = Some(BString::default());
 	c.core.uselist = if c.core.useline != 0 {
@@ -126,7 +138,11 @@ pub fn do_completion(zw: &mut Zw<'_, '_>, s: BString, incmd: i32, lst: i32, k: K
 		(false, false) => "",
 	}));
 	c.core.startauto = i32::from(automenu);
-	c.core.movetoend = if i32::try_from(c.line.cs).ok() == Some(c.tricky.we) || alwaystoend { 2 } else { 1 };
+	c.core.movetoend = if i32::try_from(c.line.cs).ok() == Some(c.tricky.we) || alwaystoend {
+		2
+	} else {
+		1
+	};
 	c.core.hasmatched = 0;
 	c.core.hasunmatched = 0;
 	c.core.minmlen = 1_000_000;
@@ -135,11 +151,24 @@ pub fn do_completion(zw: &mut Zw<'_, '_>, s: BString, incmd: i32, lst: i32, k: K
 	c.core.nmessages = 0;
 	c.core.hasallmatch = 0;
 	zw.zle.display.showinglist = 0;
-	makecomplist(zw, s, incmd, lst, Box::new(move |zw, r| do_completion_result(zw, r, osl, opm, bashautolist, k)))
+	makecomplist(
+		zw,
+		s,
+		incmd,
+		lst,
+		Box::new(move |zw, r| do_completion_result(zw, r, osl, opm, bashautolist, k)),
+	)
 }
 
 /// The rest of [`do_completion`] once the matches are there.
-fn do_completion_result(zw: &mut Zw<'_, '_>, mk: i32, osl: i32, opm: u32, bashautolist: bool, k: K<i32>) -> WResult {
+fn do_completion_result(
+	zw: &mut Zw<'_, '_>,
+	mk: i32,
+	osl: i32,
+	opm: u32,
+	bashautolist: bool,
+	k: K<i32>,
+) -> WResult {
 	let c = &mut *zw.zle.comp;
 	if mk != 0 {
 		// Error condition: feeeeep().
@@ -154,13 +183,23 @@ fn do_completion_result(zw: &mut Zw<'_, '_>, mk: i32, osl: i32, opm: u32, bashau
 	}
 	c.tricky.lastprebr = None;
 	c.tricky.lastpostbr = None;
-	if c.complete.comppatmatch.as_ref().is_some_and(|p| !p.is_empty()) && c.complete.comppatmatch_gen != opm {
+	if c
+		.complete
+		.comppatmatch
+		.as_ref()
+		.is_some_and(|p| !p.is_empty())
+		&& c.complete.comppatmatch_gen != opm
+	{
 		c.core.haspattern = 1;
 	}
-	let (useline, uselist, nmatches, diffmatches) = (c.core.useline, c.core.uselist, c.core.nmatches, c.core.diffmatches);
+	let (useline, uselist, nmatches, diffmatches) =
+		(c.core.useline, c.core.uselist, c.core.nmatches, c.core.diffmatches);
 	if c.core.iforcemenu != 0 {
 		if nmatches != 0 {
-			return do_ambig_menu(zw, Box::new(move |zw, ()| explain(zw, i32::from(zw.zle.comp.core.nmatches == 0), k)));
+			return do_ambig_menu(
+				zw,
+				Box::new(move |zw, ()| explain(zw, i32::from(zw.zle.comp.core.nmatches == 0), k)),
+			);
 		}
 		return explain(zw, 1, k);
 	}
@@ -317,10 +356,13 @@ pub fn before_complete(zw: &mut Zw<'_, '_>, lst: i32, k: K<i32>) -> WResult {
 	}
 	// Back to the position after the string the last completion inserted.
 	if u32::try_from(c.core.fromcomp).unwrap_or(0) & fc::INWORD != 0 {
-		zw.ed.cs = usize::try_from(c.core.lastend).unwrap_or(0).min(zw.ed.line.len());
+		zw.ed.cs = usize::try_from(c.core.lastend)
+			.unwrap_or(0)
+			.min(zw.ed.line.len());
 	}
 	// Start a menu completion (automenu)?
-	if c.core.startauto != 0 && c.tricky.lastambig != 0 && (!bashautolist || c.tricky.lastambig == 2) {
+	if c.core.startauto != 0 && c.tricky.lastambig != 0 && (!bashautolist || c.tricky.lastambig == 2)
+	{
 		c.tricky.usemenu = 2;
 	}
 	k(zw, 0)
@@ -334,7 +376,12 @@ pub fn after_complete(zw: &mut Zw<'_, '_>, dat1: i32, k: K<i32>) -> WResult {
 	if !(c.tricky.menucmp != 0 && c.core.oldmenucmp == 0) {
 		return k(zw, dat1);
 	}
-	let cdat = Chdata { matches: c.core.amatches, num: c.core.nmatches, nmesg: c.core.nmessages, cur: None };
+	let cdat = Chdata {
+		matches: c.core.amatches,
+		num:     c.core.nmatches,
+		nmesg:   c.core.nmessages,
+		cur:     None,
+	};
 	let after = move |zw: &mut Zw<'_, '_>, ret: i32| {
 		if ret == 0 {
 			return k(zw, dat1);
@@ -378,7 +425,11 @@ pub fn callcompfunc(zw: &mut Zw<'_, '_>, s: BString, func: BString, k: K<()>) ->
 	let s = s.to_vec();
 	// Quoting and the prefix/suffix need the shell's options.
 	fn q(ex: &mut crate::bash::vm::expand::Expander<'_, '_>, c: &Comp, t: &[u8]) -> BString {
-		let mut t = if c.core.linwhat == tricky::IN_MATH { t.to_vec() } else { multiquote(ex, c, t, false).to_vec() };
+		let mut t = if c.core.linwhat == tricky::IN_MATH {
+			t.to_vec()
+		} else {
+			multiquote(ex, c, t, false).to_vec()
+		};
 		untokenize(&mut t);
 		BString::from(t)
 	}
@@ -403,7 +454,11 @@ pub fn callcompfunc(zw: &mut Zw<'_, '_>, s: BString, func: BString, k: K<()>) ->
 			| complete::CP_EXACTSTR
 			| complete::CP_OLDLIST
 			| complete::CP_OLDINS
-			| if c.tricky.useglob != 0 { 0 } else { complete::CP_PATMATCH });
+			| if c.tricky.useglob != 0 {
+				0
+			} else {
+				complete::CP_PATMATCH
+			});
 	match varedarg {
 		Some(v) => {
 			c.complete.compvared = Some(v);
@@ -411,7 +466,12 @@ pub fn callcompfunc(zw: &mut Zw<'_, '_>, s: BString, func: BString, k: K<()>) ->
 		},
 		None => c.complete.compvared = Some(BString::default()),
 	}
-	if c.complete.complastprompt.as_ref().is_none_or(|p| p.is_empty()) {
+	if c
+		.complete
+		.complastprompt
+		.as_ref()
+		.is_none_or(|p| p.is_empty())
+	{
 		kset &= !complete::CP_LASTPROMPT;
 	}
 	let mut aadd = 0usize;
@@ -419,7 +479,11 @@ pub fn callcompfunc(zw: &mut Zw<'_, '_>, s: BString, func: BString, k: K<()>) ->
 	let mut parameter: BString = BString::default();
 	let mut redirect: BString = BString::default();
 	let context: &str = if c.core.ispar != 0 {
-		if c.core.ispar == 2 { "brace_parameter" } else { "parameter" }
+		if c.core.ispar == 2 {
+			"brace_parameter"
+		} else {
+			"parameter"
+		}
 	} else if c.core.linwhat == tricky::IN_PAR {
 		"assign_parameter"
 	} else if c.core.linwhat == tricky::IN_MATH {
@@ -456,7 +520,11 @@ pub fn callcompfunc(zw: &mut Zw<'_, '_>, s: BString, func: BString, k: K<()>) ->
 			c.tricky.clwords[1] = BString::from(s.clone());
 		}
 		aadd = 1;
-		if c.tricky.linarr != 0 { "array_value" } else { "value" }
+		if c.tricky.linarr != 0 {
+			"array_value"
+		} else {
+			"value"
+		}
 	} else if c.core.linwhat == tricky::IN_COND {
 		"condition"
 	} else if c.tricky.cmdstr.is_some() {
@@ -529,13 +597,20 @@ pub fn callcompfunc(zw: &mut Zw<'_, '_>, s: BString, func: BString, k: K<()>) ->
 	c.complete.compqiprefix = Some(c.tricky.qipre.clone().unwrap_or_default());
 	c.complete.compqisuffix = Some(c.tricky.qisuf.clone().unwrap_or_default());
 	let l = |s: &Option<BString>| s.as_ref().map_or(0, |s| s.len());
-	c.core.origlpre = i32::try_from(l(&c.complete.compqiprefix) + l(&c.complete.compiprefix) + l(&c.complete.compprefix))
-		.unwrap_or(i32::MAX);
-	c.core.origlsuf = i32::try_from(l(&c.complete.compqisuffix) + l(&c.complete.compisuffix) + l(&c.complete.compsuffix))
-		.unwrap_or(i32::MAX);
+	c.core.origlpre = i32::try_from(
+		l(&c.complete.compqiprefix) + l(&c.complete.compiprefix) + l(&c.complete.compprefix),
+	)
+	.unwrap_or(i32::MAX);
+	c.core.origlsuf = i32::try_from(
+		l(&c.complete.compqisuffix) + l(&c.complete.compisuffix) + l(&c.complete.compsuffix),
+	)
+	.unwrap_or(i32::MAX);
 	c.core.lenchanged = 0;
-	c.complete.compcurrent =
-		if usea { i64::from(c.tricky.clwpos) + 1 - i64::try_from(aadd).unwrap_or(0) } else { 0 };
+	c.complete.compcurrent = if usea {
+		i64::from(c.tricky.clwpos) + 1 - i64::try_from(aadd).unwrap_or(0)
+	} else {
+		0
+	};
 	let mut complist: Vec<u8> = match c.core.uselist {
 		1 => b"list".to_vec(),
 		2 => b"autolist".to_vec(),
@@ -569,19 +644,35 @@ pub fn callcompfunc(zw: &mut Zw<'_, '_>, s: BString, func: BString, k: K<()>) ->
 		kset &= !complete::CP_INSERT;
 		""
 	};
-	c.complete.compinsert =
-		Some(if c.core.useline < 0 { BString::from(format!("tab {insert}")) } else { BString::from(insert) });
+	c.complete.compinsert = Some(if c.core.useline < 0 {
+		BString::from(format!("tab {insert}"))
+	} else {
+		BString::from(insert)
+	});
 	if c.core.useexact != 0 {
 		c.complete.compexact = Some("accept".into());
 	} else {
 		c.complete.compexact = Some(BString::default());
 		kset &= !complete::CP_EXACT;
 	}
-	c.complete.comptoend = Some(if c.core.movetoend == 1 { "single" } else { "match" }.into());
+	c.complete.comptoend = Some(
+		if c.core.movetoend == 1 {
+			"single"
+		} else {
+			"match"
+		}
+		.into(),
+	);
 	if c.core.hasoldlist != 0 && c.core.lastpermmnum != 0 {
 		c.complete.compoldlist = Some(if listshown != 0 { "shown" } else { "yes" }.into());
 		kset |= complete::CP_OLDLIST;
-		match c.core.minfo.cur.and_then(|r| c.groups.mat(r)).map(|m| m.gnum) {
+		match c
+			.core
+			.minfo
+			.cur
+			.and_then(|r| c.groups.mat(r))
+			.map(|m| m.gnum)
+		{
 			Some(gnum) if c.core.minfo.cur.is_some() => {
 				c.complete.compoldins = Some(gnum.to_string().into());
 				kset |= complete::CP_OLDINS;
@@ -594,7 +685,13 @@ pub fn callcompfunc(zw: &mut Zw<'_, '_>, s: BString, func: BString, k: K<()>) ->
 	}
 	c.incompfunc = 1;
 	complete::makecompparams(c);
-	complete::comp_setunset(c, rset, !rset & complete::CP_ALLREALS, kset, !kset & complete::CP_ALLKEYS);
+	complete::comp_setunset(
+		c,
+		rset,
+		!rset & complete::CP_ALLREALS,
+		kset,
+		!kset & complete::CP_ALLKEYS,
+	);
 	let args = c.tricky.cfargs.clone();
 	// makezleparams(1): the editor's parameters, read-only; no xtrace
 	// for the function.
@@ -630,7 +727,11 @@ fn readback(c: &mut Comp, automenu: bool) {
 		Some(_) => 0,
 	};
 	c.core.forcelist = i32::from(has(cl, b"force"));
-	c.core.onlyexpl = if cl.is_some() { i32::from(has(cl, b"expl")) | (i32::from(has(cl, b"messages")) << 1) } else { 0 };
+	c.core.onlyexpl = if cl.is_some() {
+		i32::from(has(cl, b"expl")) | (i32::from(has(cl, b"messages")) << 1)
+	} else {
+		0
+	};
 	match c.complete.compinsert.clone() {
 		None => c.core.useline = 0,
 		Some(ins) if has(&Some(ins.clone()), b"tab") => c.core.useline = -1,
@@ -684,8 +785,9 @@ fn readback(c: &mut Comp, automenu: bool) {
 		Some(t) if t == "always" => 3,
 		Some(_) => 2,
 	};
-	c.core.oldlist =
-		i32::from(c.core.hasoldlist != 0 && c.complete.compoldlist.as_ref().is_some_and(|o| o == "keep"));
+	c.core.oldlist = i32::from(
+		c.core.hasoldlist != 0 && c.complete.compoldlist.as_ref().is_some_and(|o| o == "keep"),
+	);
 	c.core.oldins = i32::from(
 		c.core.hasoldlist != 0
 			&& c.core.minfo.cur.is_some()

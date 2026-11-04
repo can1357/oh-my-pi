@@ -657,8 +657,11 @@ pub(super) fn trap(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		{
 			// The root shell's OS disposition follows its traps (signals
 			// ignored on entry stay ignored, as in a non-interactive bash).
-			let disposition =
-				crate::bash::vm::jobctl::trap_disposition(ctx.k, sig, effective.as_ref().map(BStr::new));
+			let disposition = crate::bash::vm::jobctl::trap_disposition(
+				ctx.k,
+				sig,
+				effective.as_ref().map(BStr::new),
+			);
 			match ctx.cx.host.set_signal_trap(sig, disposition) {
 				Ok(true) => {},
 				Ok(false) => effective = Some(BString::default()),

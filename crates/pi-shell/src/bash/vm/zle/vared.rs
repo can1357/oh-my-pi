@@ -205,7 +205,14 @@ pub fn vared(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		missing.push(n);
 		None
 	});
-	let mut ed = Editor::new(Context::Vared, if ops.isset(b'h') { readflags::HISTORY } else { 0 });
+	let mut ed = Editor::new(
+		Context::Vared,
+		if ops.isset(b'h') {
+			readflags::HISTORY
+		} else {
+			0
+		},
+	);
 	ed.unget = std::mem::take(&mut z.kunget);
 	if let Some(t) = z.tty.as_mut() {
 		t.fetch = false;

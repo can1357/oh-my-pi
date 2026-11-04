@@ -20,10 +20,10 @@ use alloc::{boxed::Box, vec, vec::Vec};
 
 use super::{
 	lex::{
-		CS_ALWAYS, CS_ARRAY, CS_CASE, CS_CMDAND, CS_CMDOR, CS_COND, CS_CURSH, CS_ELIF,
-		CS_ELIFTHEN, CS_ELSE, CS_ERRPIPE, CS_FOR, CS_FOREACH, CS_FUNCDEF, CS_IF, CS_IFTHEN,
-		CS_PIPE, CS_REPEAT, CS_SELECT, CS_SUBSH, CS_UNTIL, CS_WHILE, Ctx, ParseFlags, PendingDoc,
-		T, iblank, ident_end, isident, munge_terminator, plain, skipparens,
+		CS_ALWAYS, CS_ARRAY, CS_CASE, CS_CMDAND, CS_CMDOR, CS_COND, CS_CURSH, CS_ELIF, CS_ELIFTHEN,
+		CS_ELSE, CS_ERRPIPE, CS_FOR, CS_FOREACH, CS_FUNCDEF, CS_IF, CS_IFTHEN, CS_PIPE, CS_REPEAT,
+		CS_SELECT, CS_SUBSH, CS_UNTIL, CS_WHILE, Ctx, ParseFlags, PendingDoc, T, iblank, ident_end,
+		isident, munge_terminator, plain, skipparens,
 	},
 	tok::{
 		BAR, DASH, EQUALS, INANG, INBRACE, INBRACK, INPAR, META, OUTANGPROC, OUTBRACE, OUTBRACK,
@@ -87,12 +87,7 @@ fn zword(s: Vec<u8>, span: Span) -> Word {
 
 /// A command with no words (the empty pipeline of `!`, `coproc`, `time`).
 fn empty_command(span: Span) -> Command {
-	Command {
-		id: NodeId(0),
-		span,
-		kind: CommandKind::Simple(Simple::default()),
-		redirs: Vec::new(),
-	}
+	Command { id: NodeId(0), span, kind: CommandKind::Simple(Simple::default()), redirs: Vec::new() }
 }
 
 /// A pipeline as one command: its lone stage, or a group around it.

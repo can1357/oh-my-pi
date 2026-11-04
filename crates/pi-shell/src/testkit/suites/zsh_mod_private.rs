@@ -30,12 +30,7 @@ fn check(src: &str, out: &str, err: &str, status: i32) {
 
 #[test]
 fn unload_and_reload() {
-	check(
-		r#"(zmodload -u zsh/param/private && zmodload zsh/param/private)"#,
-		r#""#,
-		r#""#,
-		0,
-	);
+	check(r#"(zmodload -u zsh/param/private && zmodload zsh/param/private)"#, r#""#, r#""#, 0);
 }
 
 #[test]

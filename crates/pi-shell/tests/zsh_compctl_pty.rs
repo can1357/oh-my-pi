@@ -46,7 +46,11 @@ fn fixture(name: &str) -> PathBuf {
 
 /// `zsh -f -i` with a fixed prompt, started in `dir`, `$PATH` its `bin`.
 fn spawn(real: bool, dir: &Path, rc: &str) -> Spawn {
-	let s = if real { Spawn::real_zsh() } else { Spawn::zsh() };
+	let s = if real {
+		Spawn::real_zsh()
+	} else {
+		Spawn::zsh()
+	};
 	let rc = format!("PATH={}/bin\n{rc}", dir.display());
 	s.args(["-f", "-i"])
 		.env("PS1", "%# ")

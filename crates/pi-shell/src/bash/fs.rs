@@ -147,7 +147,13 @@ pub trait Fs {
 	}
 	/// `chown(2)` (`follow`) or `lchown(2)`: set the owner and/or group of
 	/// `path`; `None` leaves that id unchanged.
-	fn chown(&mut self, _path: &BStr, _uid: Option<u32>, _gid: Option<u32>, _follow: bool) -> FsPoll<()> {
+	fn chown(
+		&mut self,
+		_path: &BStr,
+		_uid: Option<u32>,
+		_gid: Option<u32>,
+		_follow: bool,
+	) -> FsPoll<()> {
 		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
 	}
 	/// `sync(2)`: schedule every buffered write to reach its device.

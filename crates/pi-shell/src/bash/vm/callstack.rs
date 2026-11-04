@@ -52,11 +52,11 @@ pub enum CallKind {
 	/// name (no arguments) or, under `extdebug`, its arguments.
 	Source {
 		/// `BASH_SOURCE` entry: the file name as given.
-		file: BString,
+		file:    BString,
 		/// `BASH_LINENO` entry: the line of the `.` command.
-		line: u32,
+		line:    u32,
 		/// What was pushed onto `BASH_ARGV`.
-		argv: Option<Vec<BString>>,
+		argv:    Option<Vec<BString>>,
 		/// What the end of the file puts back (`. file args`).
 		restore: Option<Box<SourceSave>>,
 		/// zsh FUNCTION_ARGZERO at the `.`: `$0` while the file runs (the

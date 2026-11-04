@@ -13,7 +13,9 @@ pub fn mkdir(path: &Path, mode: u32, process_umask: Option<u32>) -> io::Result<(
 	#[cfg(unix)]
 	{
 		use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-		std::fs::DirBuilder::new().mode(mode & 0o7777).create(path)?;
+		std::fs::DirBuilder::new()
+			.mode(mode & 0o7777)
+			.create(path)?;
 		if process_umask.is_none_or(|mask| mode & 0o777 & mask != 0) {
 			let have = std::fs::symlink_metadata(path)?.permissions().mode();
 			let want = (have & !0o777) | (mode & 0o777);
@@ -192,7 +194,11 @@ mod xattr {
 				libc::lsetxattr(p.as_ptr(), n.as_ptr(), v, value.len(), 0)
 			}
 		};
-		if r == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+		if r == 0 {
+			Ok(())
+		} else {
+			Err(io::Error::last_os_error())
+		}
 	}
 
 	pub fn remove(path: &Path, name: &[u8], follow: bool) -> io::Result<()> {
@@ -209,11 +215,20 @@ mod xattr {
 				libc::lremovexattr(p.as_ptr(), n.as_ptr())
 			}
 		};
-		if r == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+		if r == 0 {
+			Ok(())
+		} else {
+			Err(io::Error::last_os_error())
+		}
 	}
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android")))]
+#[cfg(not(any(
+	target_os = "macos",
+	target_os = "ios",
+	target_os = "linux",
+	target_os = "android"
+)))]
 mod xattr {
 	use std::{io, path::Path};
 

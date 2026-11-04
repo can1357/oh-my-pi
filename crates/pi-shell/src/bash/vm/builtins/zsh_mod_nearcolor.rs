@@ -48,7 +48,13 @@ fn rgb_to_lab(red: i32, green: i32, blue: i32) -> Cielab {
 /// holds the cube's `cube` levels followed by the greys. Returns the
 /// winning `(r, g, b)` component indices (a grey has all three equal and
 /// `>= cube`).
-fn nearest(component: &[i32], cube: usize, red: i32, green: i32, blue: i32) -> (usize, usize, usize) {
+fn nearest(
+	component: &[i32],
+	cube: usize,
+	red: i32,
+	green: i32,
+	blue: i32,
+) -> (usize, usize, usize) {
 	let orig = rgb_to_lab(red, green, blue);
 	let mut best = -1.0;
 	let mut win = (0, 0, 0);
@@ -89,8 +95,8 @@ fn map_rgb_to_88(red: i32, green: i32, blue: i32) -> i32 {
 /// zsh `mapRGBto256`.
 fn map_rgb_to_256(red: i32, green: i32, blue: i32) -> i32 {
 	const COMPONENT: [i32; 30] = [
-		0, 0x5f, 0x87, 0xaf, 0xd7, 0xff, 0x8, 0x12, 0x1c, 0x26, 0x30, 0x3a, 0x44, 0x4e, 0x58, 0x62, 0x6c,
-		0x76, 0x80, 0x8a, 0x94, 0x9e, 0xa8, 0xb2, 0xbc, 0xc6, 0xd0, 0xda, 0xe4, 0xee,
+		0, 0x5f, 0x87, 0xaf, 0xd7, 0xff, 0x8, 0x12, 0x1c, 0x26, 0x30, 0x3a, 0x44, 0x4e, 0x58, 0x62,
+		0x6c, 0x76, 0x80, 0x8a, 0x94, 0x9e, 0xa8, 0xb2, 0xbc, 0xc6, 0xd0, 0xda, 0xe4, 0xee,
 	];
 	let (r, g, b) = nearest(&COMPONENT, 6, red, green, blue);
 	if r > 5 {

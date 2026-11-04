@@ -176,7 +176,11 @@ fn history_search(zw: &mut Zw<'_, '_>, dir: i64) -> WResult {
 			continue;
 		}
 		let zt = zt_at(zw.ed, &h, i);
-		let limit = if dir < 0 { 0 } else { i32::from(h.num_at(i) == curhist) };
+		let limit = if dir < 0 {
+			0
+		} else {
+			i32::from(h.num_at(i) == curhist)
+		};
 		if zlinecmp(&zt, &needle) < limit && (has_arg || zt != zw.ed.line) {
 			n -= 1;
 			if n <= 0 {
@@ -235,7 +239,11 @@ fn history_beginning_search(zw: &mut Zw<'_, '_>, dir: i64) -> WResult {
 		}
 		let zt = zt_at(zw.ed, &h, i);
 		let prefix = &zw.ed.line[..cpos.min(zw.ed.line.len())];
-		let limit = if dir < 0 { 0 } else { i32::from(h.num_at(i) == curhist) };
+		let limit = if dir < 0 {
+			0
+		} else {
+			i32::from(h.num_at(i) == curhist)
+		};
 		if zlinecmp(&zt, prefix) < limit && zlinecmp(&zt, &zw.ed.line) != 0 {
 			n -= 1;
 			if n <= 0 {
@@ -269,7 +277,11 @@ pub fn historybeginningsearchforward(zw: &mut Zw<'_, '_>) -> WResult {
 /// the buffer, else `history-search-*` by the lines left.
 fn line_or_search(zw: &mut Zw<'_, '_>, up: bool) -> WResult {
 	let ocs = zw.ed.cs;
-	let n = if up { utils::upline(zw) } else { utils::downline(zw) };
+	let n = if up {
+		utils::upline(zw)
+	} else {
+		utils::downline(zw)
+	};
 	if n == 0 {
 		return WResult::Done(0);
 	}
@@ -356,7 +368,10 @@ pub fn setlocalhistory(zw: &mut Zw<'_, '_>) -> WResult {
 
 /// zsh `zstrtol(s, NULL, 10)`.
 fn strtol10(s: &[u8]) -> i64 {
-	let mut i = s.iter().take_while(|&&c| matches!(c, b' ' | b'\t' | b'\n')).count();
+	let mut i = s
+		.iter()
+		.take_while(|&&c| matches!(c, b' ' | b'\t' | b'\n'))
+		.count();
 	let neg = s.get(i) == Some(&b'-');
 	if neg || s.get(i) == Some(&b'+') {
 		i += 1;
@@ -379,7 +394,14 @@ fn line_words(ed: &Editor, h: &Hist) -> Vec<Vec<char>> {
 		text.extend_from_slice(&c.chline);
 	}
 	text.extend_from_slice(&from_line(&ed.line));
-	bufferwords(&metafy(&text), 0, crate::bash::syntax::Features::ZSH | crate::bash::syntax::Features::ZSH_SHORT_LOOPS).iter().map(|w| to_line(&unmetafy(w))).collect()
+	bufferwords(
+		&metafy(&text),
+		0,
+		crate::bash::syntax::Features::ZSH | crate::bash::syntax::Features::ZSH_SHORT_LOOPS,
+	)
+	.iter()
+	.map(|w| to_line(&unmetafy(w)))
+	.collect()
 }
 
 /// Widget `insert-last-word` (zsh `insertlastword`; `zle insert-last-word
@@ -418,7 +440,11 @@ pub fn insertlastword(zw: &mut Zw<'_, '_>) -> WResult {
 	if !deleteword {
 		st.lasthist = curhist;
 	}
-	let mut evhist = if histstep == 0 { st.lasthist } else { h.addhistnum(st.lasthist, histstep, HIST_FOREIGN) };
+	let mut evhist = if histstep == 0 {
+		st.lasthist
+	} else {
+		h.addhistnum(st.lasthist, histstep, HIST_FOREIGN)
+	};
 	let (words, he) = if evhist == curhist {
 		if deleteword {
 			let pos = ed.cs;
@@ -451,7 +477,11 @@ pub fn insertlastword(zw: &mut Zw<'_, '_>) -> WResult {
 	};
 	let zmult = ed.zmod.mult;
 	let n = if wordpos != 0 {
-		if wordpos > 0 { wordpos } else { nwords + wordpos + 1 }
+		if wordpos > 0 {
+			wordpos
+		} else {
+			nwords + wordpos + 1
+		}
 	} else if zmult > 0 {
 		nwords - (zmult - 1)
 	} else {
@@ -582,7 +612,11 @@ fn visrch_cmd(zw: &mut Zw<'_, '_>, mut r: ViRead, got: Got) -> WResult {
 		},
 		b"accept-line" | b"vi-cmd-mode" => {
 			let st = &mut zw.zle.hsearch;
-			st.visrchstr = if r.sbuf.is_empty() { st.vipenultsrchstr.clone() } else { Some(r.sbuf.clone()) };
+			st.visrchstr = if r.sbuf.is_empty() {
+				st.vipenultsrchstr.clone()
+			} else {
+				Some(r.sbuf.clone())
+			};
 			return visrch_end(zw, r, true);
 		},
 		b"backward-delete-char" | b"vi-backward-delete-char" => {

@@ -335,8 +335,7 @@ fn delete(ctx: &mut Ctx<'_, '_>, i: usize) {
 		ctx.vp.fds.set(cmd.fd, None);
 	}
 	ControlHandle(ctx.k.ctl.clone()).signal(SigTarget::Tree(cmd.vpid), Signal::Hup);
-	if cmd.owner == ctx.vp.vpid && !cmd.fin && ctx.k.proc_collect(ctx.cx.store, cmd.vpid).is_none()
-	{
+	if cmd.owner == ctx.vp.vpid && !cmd.fin && ctx.k.proc_collect(ctx.cx.store, cmd.vpid).is_none() {
 		table_mut(ctx.vp).reap.push(cmd.vpid);
 	}
 }
@@ -355,8 +354,7 @@ pub fn zpty(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	if (o(b'r') && o(b'w'))
 		|| ((o(b'r') || o(b'w')) && (o(b'd') || o(b'e') || o(b'b') || o(b'L')))
 		|| (o(b'w') && (o(b't') || o(b'm')))
-		|| (o(b'n')
-			&& (o(b'b') || o(b'e') || o(b'r') || o(b't') || o(b'd') || o(b'L') || o(b'm')))
+		|| (o(b'n') && (o(b'b') || o(b'e') || o(b'r') || o(b't') || o(b'd') || o(b'L') || o(b'm')))
 		|| (o(b'd') && (o(b'b') || o(b'e') || o(b'L') || o(b't') || o(b'm')))
 		|| (o(b'L') && (o(b'b') || o(b'e') || o(b'm')))
 	{
@@ -591,7 +589,8 @@ fn newptycmd(
 	);
 	state::set_zsh_option(&mut ctx.k.root, ctx.cx.store, &mut child, ZshOpt::Interactive, false)?;
 	let vpid = child.vpid;
-	ctx.k.emit_op(ctx.cx, ctx.vp, 0, EventData::Subshell { child: vpid });
+	ctx.k
+		.emit_op(ctx.cx, ctx.vp, 0, EventData::Subshell { child: vpid });
 	ctx.k.spawned.push(Box::new(child));
 	let fd = ctx.vp.fds.lowest_free(10);
 	ctx.vp.fds.set(fd, Some(master));
@@ -650,7 +649,14 @@ fn parse_error(ctx: &mut Ctx<'_, '_>, src: &[u8]) -> Result<Option<ParseError>, 
 /// stops there with status 1.
 fn ptywrite(ctx: &mut Ctx<'_, '_>, cmd: &PtyCmd, args: &[BString], nonl: bool) -> R {
 	if args.is_empty() {
-		let input = Probe::Input { fd: 0, delim: None, lines: 1, nchars: None, part: 0, timeout_ns: None };
+		let input = Probe::Input {
+			fd:         0,
+			delim:      None,
+			lines:      1,
+			nchars:     None,
+			part:       0,
+			timeout_ns: None,
+		};
 		if let ProbeResult::Input { data, .. } = ctx.probe(input)? {
 			ctx.out_fd(cmd.fd, &data);
 		}
@@ -776,11 +782,7 @@ fn read_loop(
 	let mut skip_checks = resume_at_read;
 	loop {
 		if !std::mem::take(&mut skip_checks) {
-			if noblock
-				&& cmd.read.is_none()
-				&& !cmd.eof
-				&& !ready(ctx, cmd.fd)
-				&& alive(ctx, cmd.vpid)
+			if noblock && cmd.read.is_none() && !cmd.eof && !ready(ctx, cmd.fd) && alive(ctx, cmd.vpid)
 			{
 				return Ok(false);
 			}

@@ -69,11 +69,17 @@ fn parse_anchored_forms() {
 	assert_eq!(m.flags, f::LEFT | f::LINE);
 	assert_eq!((m.left.clone(), m.line.clone(), m.wlen), (vec![ch('a')], vec![ch('b')], -2));
 	let m = one("l:a||b=c");
-	assert_eq!((m.left.clone(), m.right.clone(), m.ralen, m.llen), (vec![ch('a')], vec![ch('b')], 1, 0));
+	assert_eq!(
+		(m.left.clone(), m.right.clone(), m.ralen, m.llen),
+		(vec![ch('a')], vec![ch('b')], 1, 0)
+	);
 	assert_eq!(m.word, vec![ch('c')]);
 	let m = one("r:a|b=c");
 	assert_eq!(m.flags, f::RIGHT);
-	assert_eq!((m.line.clone(), m.right.clone(), m.word.clone()), (vec![ch('a')], vec![ch('b')], vec![ch('c')]));
+	assert_eq!(
+		(m.line.clone(), m.right.clone(), m.word.clone()),
+		(vec![ch('a')], vec![ch('b')], vec![ch('c')])
+	);
 	let m = one("R:|=*");
 	assert_eq!((m.flags, m.ralen, m.wlen), (f::RIGHT | f::LINE, 0, -1));
 	let m = one("r:a||b=*");
@@ -149,7 +155,8 @@ fn ranges() {
 fn comp(spec: &str) -> Comp {
 	let mut c = Comp::default();
 	let m = parse(spec).0.unwrap();
-	c.core.mstack = Some(Arc::new(Cmlist { next: None, matcher: m.clone(), str: spec.into() }));
+	c.core.mstack =
+		Some(Arc::new(Cmlist { next: None, matcher: m.clone(), str: spec.into() }));
 	add_bmatchers(&mut c, m.as_ref());
 	c
 }
@@ -192,19 +199,35 @@ fn comp_match_words() {
 	let (mut b, mut s, mut ex) = (0, 0, 0);
 	let mut clp = None;
 	let mut c = comp("r:|[._-]=* r:|=*");
-	let r = comp_match_word(&mut c, b"f.b", None, b"foo.bar", &mut clp, 1, &mut b, 0, &mut s, 0, &mut ex);
+	let r =
+		comp_match_word(&mut c, b"f.b", None, b"foo.bar", &mut clp, 1, &mut b, 0, &mut s, 0, &mut ex);
 	assert_eq!(r.as_ref().map(|s| s.as_slice()), Some(&b"foo.bar"[..]));
 	assert_eq!(ex, 0);
 	assert!(clp.is_some());
 	let mut c = comp("m:{a-z}={A-Z}");
 	let r = comp_match_word(&mut c, b"ab", None, b"ABc", &mut clp, 1, &mut b, 0, &mut s, 0, &mut ex);
 	assert_eq!(r.as_ref().map(|s| s.as_slice()), Some(&b"ABc"[..]));
-	let r = comp_match_word(&mut c, b"ab", Some(b"c"), b"abxc", &mut clp, 1, &mut b, 0, &mut s, 0, &mut ex);
+	let r = comp_match_word(
+		&mut c,
+		b"ab",
+		Some(b"c"),
+		b"abxc",
+		&mut clp,
+		1,
+		&mut b,
+		0,
+		&mut s,
+		0,
+		&mut ex,
+	);
 	assert_eq!(r.as_ref().map(|s| s.as_slice()), Some(&b"abxc"[..]));
 	assert_eq!(ex, 0);
 	let r = comp_match_word(&mut c, b"ab", None, b"ab", &mut clp, 1, &mut b, 0, &mut s, 0, &mut ex);
 	assert_eq!((r.as_ref().map(|s| s.as_slice()), ex), (Some(&b"ab"[..]), 1));
-	assert!(comp_match_word(&mut c, b"x", None, b"ab", &mut clp, 1, &mut b, 0, &mut s, 0, &mut ex).is_none());
+	assert!(
+		comp_match_word(&mut c, b"x", None, b"ab", &mut clp, 1, &mut b, 0, &mut s, 0, &mut ex)
+			.is_none()
+	);
 }
 
 #[test]
@@ -212,8 +235,10 @@ fn join_clines_keeps_common_prefix() {
 	let mut c = comp("r:|[._-]=* r:|=*");
 	let (mut b, mut s, mut ex) = (0, 0, 0);
 	let (mut l1, mut l2) = (None, None);
-	comp_match_word(&mut c, b"f", None, b"foo.bar", &mut l1, 1, &mut b, 0, &mut s, 0, &mut ex).unwrap();
-	comp_match_word(&mut c, b"f", None, b"foo.baz", &mut l2, 1, &mut b, 0, &mut s, 0, &mut ex).unwrap();
+	comp_match_word(&mut c, b"f", None, b"foo.bar", &mut l1, 1, &mut b, 0, &mut s, 0, &mut ex)
+		.unwrap();
+	comp_match_word(&mut c, b"f", None, b"foo.baz", &mut l2, 1, &mut b, 0, &mut s, 0, &mut ex)
+		.unwrap();
 	let j = join_clines(&mut c, None, l1);
 	assert_eq!(j, l1);
 	let j = join_clines(&mut c, j, l2).unwrap();

@@ -764,7 +764,7 @@ mod tests {
 		};
 		let (out, err) = (drain(out_r), drain(err_r));
 		let stdio = RunStdio {
-			stdin:  Some(std::fs::File::open("/dev/null").unwrap()),
+			stdin: Some(std::fs::File::open("/dev/null").unwrap()),
 			stdout: Some(std::fs::File::from(std::os::fd::OwnedFd::from(out_w))),
 			stderr: Some(std::fs::File::from(std::os::fd::OwnedFd::from(err_w))),
 		};

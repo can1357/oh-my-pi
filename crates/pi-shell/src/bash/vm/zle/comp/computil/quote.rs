@@ -47,7 +47,8 @@ pub fn compquote(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	for name in args {
 		let meta = metafy(name);
 		let mut pos = 0;
-		let Some(v) = px(ctx, &mut failed, |ex| params::fetchvalue(ex, &meta, &mut pos, 0, 0))? else {
+		let Some(v) = px(ctx, &mut failed, |ex| params::fetchvalue(ex, &meta, &mut pos, 0, 0))?
+		else {
 			continue;
 		};
 		let Some(mut v) = v else {
@@ -66,7 +67,10 @@ pub fn compquote(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 					params::PValue::Array(a) => a.clone(),
 					_ => Vec::new(),
 				};
-				let new = whole.iter().map(|e| comp_quote(&metafy(e), qt, prefix, o)).collect();
+				let new = whole
+					.iter()
+					.map(|e| comp_quote(&metafy(e), qt, prefix, o))
+					.collect();
 				let mut w = params::Value::of(v.pm.clone());
 				px(ctx, &mut failed, |ex| w.setarrvalue(ex, new))?;
 			},

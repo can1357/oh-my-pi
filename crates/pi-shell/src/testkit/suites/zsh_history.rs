@@ -60,9 +60,8 @@ fn command(src: &str, fs: MemFs, interactive: bool) -> (String, String, i32) {
 
 #[test]
 fn bang_events_words_and_modifiers() {
-	let (out, err, st) = interactive(
-		"echo a b c\n!!\necho !$ !^\n!-2:s/a/X/\necho !#\n^b^Q\n!e:p\n!!\n",
-	);
+	let (out, err, st) =
+		interactive("echo a b c\n!!\necho !$ !^\n!-2:s/a/X/\necho !#\n^b^Q\n!e:p\n!!\n");
 	assert_eq!(out, "a b c\na b c\nc a\nX b c\necho\necho\n");
 	assert_eq!(
 		err,
@@ -109,11 +108,8 @@ fn fc_r_print_s_and_the_history_stack() {
 
 #[test]
 fn fc_in_a_command_string() {
-	let (out, err, st) = command(
-		"print -s a b; print -S \"x  y|z\"; fc -l; history; fc -ln -1",
-		MemFs::new(),
-		false,
-	);
+	let (out, err, st) =
+		command("print -s a b; print -S \"x  y|z\"; fc -l; history; fc -ln -1", MemFs::new(), false);
 	assert_eq!(out, "    1  a b\n    2  x  y|z\n    1  a b\n    2  x  y|z\na b\nx  y|z\n");
 	assert_eq!(err, "");
 	assert_eq!(st, 0);
@@ -145,11 +141,8 @@ fn history_parameters() {
 fn history_file_round_trips() {
 	let fs = MemFs::new();
 	fs.add_file("/h/in", ZSH_FILE, 0o600);
-	let (_, err, st) = command(
-		"SAVEHIST=100; setopt extendedhistory; fc -R /h/in; fc -W /h/out",
-		fs.clone(),
-		true,
-	);
+	let (_, err, st) =
+		command("SAVEHIST=100; setopt extendedhistory; fc -R /h/in; fc -W /h/out", fs.clone(), true);
 	assert_eq!(err, "");
 	assert_eq!(st, 0);
 	assert_eq!(fs.read("/h/out").as_deref(), Some(ZSH_FILE));

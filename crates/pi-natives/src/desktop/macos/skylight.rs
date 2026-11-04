@@ -12,8 +12,12 @@ use std::{
 
 use libc::pid_t;
 use objc2_app_kit::NSRunningApplication;
-use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint};
-use objc2_core_graphics::{CGEvent, CGEventField, CGEventSource, CGEventSourceStateID, CGEventType};
+use objc2_core_foundation::{
+	CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint,
+};
+use objc2_core_graphics::{
+	CGEvent, CGEventField, CGEventSource, CGEventSourceStateID, CGEventType,
+};
 use parking_lot::Mutex;
 
 use super::{

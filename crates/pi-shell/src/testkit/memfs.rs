@@ -301,7 +301,10 @@ fn link_target(link: &[u8], target: &[u8]) -> BString {
 		return BString::from(trim(target));
 	}
 	let dir = parent(link);
-	let mut parts: Vec<&[u8]> = dir.split(|&c| c == b'/').filter(|p| !p.is_empty()).collect();
+	let mut parts: Vec<&[u8]> = dir
+		.split(|&c| c == b'/')
+		.filter(|p| !p.is_empty())
+		.collect();
 	for part in target.split(|&c| c == b'/') {
 		match part {
 			b"" | b"." => {},
@@ -539,7 +542,11 @@ impl Fs for MemFs {
 	}
 
 	fn stat(&mut self, path: &BStr, follow: bool) -> FsPoll<Stat> {
-		let node = if follow { self.node(path) } else { self.lnode(path) };
+		let node = if follow {
+			self.node(path)
+		} else {
+			self.lnode(path)
+		};
 		let res = node.map(|n| stat_of(&n));
 		self.answer(res)
 	}
@@ -777,11 +784,13 @@ impl Fs for MemFs {
 		let res = if self.locks.lock().contains(&resolved) {
 			Err(io::ErrorKind::WouldBlock.into())
 		} else {
-			self.open_now(&resolved, OpenFlags::READ.with(OpenFlags::WRITE), 0).map(|file| {
-				self.locks.lock().insert(resolved.clone());
-				Box::new(LockedFile { file, locks: Arc::clone(&self.locks), path: resolved })
-					as Box<dyn File>
-			})
+			self
+				.open_now(&resolved, OpenFlags::READ.with(OpenFlags::WRITE), 0)
+				.map(|file| {
+					self.locks.lock().insert(resolved.clone());
+					Box::new(LockedFile { file, locks: Arc::clone(&self.locks), path: resolved })
+						as Box<dyn File>
+				})
 		};
 		self.answer(res)
 	}

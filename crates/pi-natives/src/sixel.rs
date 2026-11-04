@@ -362,7 +362,12 @@ mod tests {
 	#[test]
 	fn quantizes_more_than_256_colors_and_preserves_transparent_holes() {
 		let source = RgbaImage::from_fn(64, 12, |x, y| {
-			Rgba([(x * 4) as u8, (y * 23) as u8, ((x * 13 + y * 7) % 256) as u8, if x == 0 { 0 } else { 255 }])
+			Rgba([
+				(x * 4) as u8,
+				(y * 23) as u8,
+				((x * 13 + y * 7) % 256) as u8,
+				if x == 0 { 0 } else { 255 },
+			])
 		});
 		let encoded = codec::encode(source.as_raw(), 64, 12);
 		assert_eq!(encoded.matches(";2;").count(), 256);
@@ -386,10 +391,7 @@ mod tests {
 
 	#[test]
 	fn decodes_c1_hls_palette_changes_repeats_and_transparency() {
-		let png = decode_sixel(
-			b"\x90;1q\"1;1;4;6#3;1;120;50;100!3~?-$#3;2;0;100;0!4~\x9c",
-		)
-		.unwrap();
+		let png = decode_sixel(b"\x90;1q\"1;1;4;6#3;1;120;50;100!3~?-$#3;2;0;100;0!4~\x9c").unwrap();
 		let decoded = image::load_from_memory(&png).unwrap().into_rgba8();
 		assert_eq!(decoded.dimensions(), (4, 12));
 		assert_eq!(decoded.get_pixel(0, 0), &Rgba([255, 0, 0, 255]));

@@ -161,7 +161,9 @@ pub fn herestring_word(source: &[u8]) -> Option<Vec<u8>> {
 	let RedirTarget::Word(w) = &r.target else {
 		return None;
 	};
-	source.get(w.span.lo as usize..w.span.hi as usize).map(<[u8]>::to_vec)
+	source
+		.get(w.span.lo as usize..w.span.hi as usize)
+		.map(<[u8]>::to_vec)
 }
 
 /// The command of zsh source that is one command alone (no list, `&&`,
@@ -304,7 +306,8 @@ impl Text {
 		if self.out.len() + s.len() >= JOB_LIMIT {
 			return;
 		}
-		self.out
+		self
+			.out
 			.extend(s.iter().map(|&c| if c == b'\n' { b' ' } else { c }));
 	}
 

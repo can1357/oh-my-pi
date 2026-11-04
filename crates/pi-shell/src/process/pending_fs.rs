@@ -8,6 +8,7 @@ use std::{
 };
 
 use bstr::{BStr, BString};
+
 use crate::bash::{
 	File, Fs, FsPending, FsPoll, OpenFlags, Stat,
 	fs::{Access, DirIter, PwEntry, PwQuery, TempNode, TempPurpose},
@@ -122,7 +123,13 @@ impl<F: Fs> Fs for PendingFs<F> {
 		defer(self.0.chmod(path, mode))
 	}
 
-	fn chown(&mut self, path: &BStr, uid: Option<u32>, gid: Option<u32>, follow: bool) -> FsPoll<()> {
+	fn chown(
+		&mut self,
+		path: &BStr,
+		uid: Option<u32>,
+		gid: Option<u32>,
+		follow: bool,
+	) -> FsPoll<()> {
 		defer(self.0.chown(path, uid, gid, follow))
 	}
 

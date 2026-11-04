@@ -22,10 +22,7 @@ use crate::bash::{
 	store::{Key, KeyBuf, MiscKey, Record},
 	syntax::zsh::tok::{metafy, unmetafy},
 	vm::{
-		builtins::{
-			Control, Ctx, Need, Outcome, R, done,
-			zsh_args::zx,
-		},
+		builtins::{Control, Ctx, Need, Outcome, R, done, zsh_args::zx},
 		expand::{Expander, X},
 		zsh::{params, text::QuoteOpts},
 	},
@@ -53,7 +50,14 @@ pub use values::compvalues;
 /// zsh error (`errflag`) it reported.
 #[allow(clippy::unnecessary_wraps, reason = "a handler's result")]
 pub(super) const fn fin(status: i32, failed: bool) -> R {
-	Ok(Outcome { status, control: if failed { Control::DiscardAll } else { Control::None } })
+	Ok(Outcome {
+		status,
+		control: if failed {
+			Control::DiscardAll
+		} else {
+			Control::None
+		},
+	})
 }
 
 /// zsh `zwarnnam(nam, msg)`: `NAME: msg` on stderr; the builtin's status
@@ -147,13 +151,21 @@ pub(super) fn compcurrent(ctx: &mut Ctx<'_, '_>, failed: &mut bool) -> Result<i6
 }
 
 /// A scalar completion special (`PREFIX`, `SUFFIX`, `IPREFIX`, …).
-pub(super) fn compstr(ctx: &mut Ctx<'_, '_>, failed: &mut bool, name: &[u8]) -> Result<BString, Need> {
+pub(super) fn compstr(
+	ctx: &mut Ctx<'_, '_>,
+	failed: &mut bool,
+	name: &[u8],
+) -> Result<BString, Need> {
 	Ok(getsparam(ctx, failed, name)?.unwrap_or_default())
 }
 
 /// zsh `ignore_prefix(l)`: move the first `l` bytes of `PREFIX` to the
 /// end of `IPREFIX`.
-pub(super) fn ignore_prefix(ctx: &mut Ctx<'_, '_>, failed: &mut bool, l: usize) -> Result<(), Need> {
+pub(super) fn ignore_prefix(
+	ctx: &mut Ctx<'_, '_>,
+	failed: &mut bool,
+	l: usize,
+) -> Result<(), Need> {
 	if l == 0 {
 		return Ok(());
 	}
@@ -167,7 +179,11 @@ pub(super) fn ignore_prefix(ctx: &mut Ctx<'_, '_>, failed: &mut bool, l: usize) 
 
 /// zsh `ignore_suffix(l)`: move the last `l` bytes of `SUFFIX` to the
 /// start of `ISUFFIX`.
-pub(super) fn ignore_suffix(ctx: &mut Ctx<'_, '_>, failed: &mut bool, l: usize) -> Result<(), Need> {
+pub(super) fn ignore_suffix(
+	ctx: &mut Ctx<'_, '_>,
+	failed: &mut bool,
+	l: usize,
+) -> Result<(), Need> {
 	if l == 0 {
 		return Ok(());
 	}

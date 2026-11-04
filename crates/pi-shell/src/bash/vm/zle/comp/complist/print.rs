@@ -32,8 +32,8 @@ use crate::bash::{
 	vm::{
 		builtins::{
 			zsh_prompt::{
-				Cap, ColourSeqs, NearColour, TXT_ERROR, TXTNOBGCOLOUR, TXTNOFGCOLOUR, TermCaps, Zattr, colour_sequence,
-				match_colour,
+				Cap, ColourSeqs, NearColour, TXT_ERROR, TXTNOBGCOLOUR, TXTNOFGCOLOUR, TermCaps, Zattr,
+				colour_sequence, match_colour,
 			},
 			zsh_quote::{Charset, nicechar_sel},
 		},
@@ -94,12 +94,19 @@ impl ScrollKey {
 		match cmd {
 			None | Some(b"send-break") => (Self::Stop, false),
 			Some(
-				b"accept-line" | b"down-history" | b"down-line-or-history" | b"down-line-or-search"
+				b"accept-line"
+				| b"down-history"
+				| b"down-line-or-history"
+				| b"down-line-or-search"
 				| b"vi-down-line-or-history",
 			) => (Self::Line, false),
 			Some(
-				b"complete-word" | b"expand-or-complete" | b"expand-or-complete-prefix" | b"menu-complete"
-				| b"menu-expand-or-complete" | b"menu-select",
+				b"complete-word"
+				| b"expand-or-complete"
+				| b"expand-or-complete-prefix"
+				| b"menu-complete"
+				| b"menu-expand-or-complete"
+				| b"menu-select",
 			) => (Self::Page, false),
 			Some(b"accept-search") => (Self::Stop, false),
 			Some(_) => (Self::Stop, true),
@@ -332,7 +339,13 @@ fn wcs_nicechar(c: char, print_eight: bool) -> (Vec<u8>, usize, usize) {
 /// `mbrtowc` loop in `clnicezputs`/`mb_niceformat` sees it: its visible
 /// form, width, where the wide part starts, and the bytes it used.
 /// `eol` is zsh's "incomplete character at the end" state.
-fn nice_next(u: &[u8], i: usize, utf8: bool, print_eight: bool, eol: &mut bool) -> (Vec<u8>, usize, usize, usize) {
+fn nice_next(
+	u: &[u8],
+	i: usize,
+	utf8: bool,
+	print_eight: bool,
+	eol: &mut bool,
+) -> (Vec<u8>, usize, usize, usize) {
 	let b = u[i];
 	let invalid = |b: u8| {
 		let mut v = Vec::new();
@@ -439,7 +452,9 @@ impl P<'_> {
 	/// zsh `tcmultout(cap, multcap, ct)`.
 	pub fn tcmultout(&mut self, cap: Cap, multcap: Cap, ct: i32) -> bool {
 		let t = Arc::clone(&self.e.caps);
-		if t.tccan(multcap) && (!t.tccan(cap) || (t.tclen(multcap) as i64) <= (t.tclen(cap) as i64) * i64::from(ct)) {
+		if t.tccan(multcap)
+			&& (!t.tccan(cap) || (t.tclen(multcap) as i64) <= (t.tclen(cap) as i64) * i64::from(ct))
+		{
 			self.tcoutarg(multcap, ct);
 			true
 		} else if t.tccan(cap) {
@@ -664,7 +679,8 @@ impl P<'_> {
 		let mut eol = false;
 		let mut at_ = 0;
 		while at_ < u.len() {
-			let (sp, mut width, wptr, cnt) = nice_next(&u, at_, self.e.utf8, self.e.print_eight, &mut eol);
+			let (sp, mut width, wptr, cnt) =
+				nice_next(&u, at_, self.e.utf8, self.e.print_eight, &mut eol);
 			at_ += cnt;
 			if do_colors {
 				for _ in 0..cnt {
@@ -721,7 +737,9 @@ impl P<'_> {
 				(Some(p), Some(g)) if !p.matches(g, &env) => None,
 				_ => {
 					let mut caps = Captures::default();
-					pc.pat.try_match(n, &env, Some(&mut caps)).map(|_| (pc.pat.npar(), caps.groups))
+					pc.pat
+						.try_match(n, &env, Some(&mut caps))
+						.map(|_| (pc.pat.npar(), caps.groups))
 				},
 			}
 		};
@@ -776,7 +794,13 @@ impl P<'_> {
 
 	/// zsh `putfilecol(group, filename, m, special)`: the colour of a
 	/// file by the patterns, its mode, its extension, a suffix alias.
-	fn putfilecol(&mut self, group: Option<&[u8]>, filename: &[u8], m: u32, special: Option<usize>) -> bool {
+	fn putfilecol(
+		&mut self,
+		group: Option<&[u8]>,
+		filename: &[u8],
+		m: u32,
+		special: Option<usize>,
+	) -> bool {
 		for pi in 0..self.e.mcolors.pats.len() {
 			if self.trypat(pi, group, filename) {
 				return self.usepat(pi);
@@ -840,7 +864,12 @@ impl P<'_> {
 			let mut suf = len - 1;
 			while suf > 1 {
 				if filename[suf - 1] == b'.' {
-					if self.e.sufaliases.iter().any(|a| a.as_slice() == &filename[suf..]) {
+					if self
+						.e
+						.sufaliases
+						.iter()
+						.any(|a| a.as_slice() == &filename[suf..])
+					{
 						self.zcputs(group, COL_SA);
 						return false;
 					}
@@ -924,7 +953,13 @@ impl P<'_> {
 					s.into()
 				},
 			},
-			None => self.c.list.mlistp.clone().map(Vec::from).unwrap_or_default(),
+			None => self
+				.c
+				.list
+				.mlistp
+				.clone()
+				.map(Vec::from)
+				.unwrap_or_default(),
 		};
 		let (mut l, mut b, mut s, mut u) = (0i32, false, false, false);
 		let mut nc: Vec<u8> = Vec::new();
@@ -932,7 +967,14 @@ impl P<'_> {
 		while p < fmt.len() {
 			let (mut len, ch) = metachar(&fmt, p, self.e.multibyte);
 			let (mut cchar, width) = match ch {
-				None => (u32::from(if fmt[p] == META { at(&fmt, p + 1) ^ 32 } else { fmt[p] }), 1),
+				None => (
+					u32::from(if fmt[p] == META {
+						at(&fmt, p + 1) ^ 32
+					} else {
+						fmt[p]
+					}),
+					1,
+				),
 				Some(c) => (c, zwcwidth(Some(c), self.e.multibyte, self.e.print_eight)),
 			};
 			if doesc && cchar == u32::from(b'%') {
@@ -946,7 +988,10 @@ impl P<'_> {
 					while p < fmt.len() && fmt[p].is_ascii_digit() {
 						p += 1;
 					}
-					arg = std::str::from_utf8(&fmt[st..p]).ok().and_then(|x| x.parse().ok()).unwrap_or(i32::MAX);
+					arg = std::str::from_utf8(&fmt[st..p])
+						.ok()
+						.and_then(|x| x.parse().ok())
+						.unwrap_or(i32::MAX);
 				}
 				let (l2, c2) = metachar(&fmt, p, self.e.multibyte);
 				len = l2;
@@ -1014,7 +1059,8 @@ impl P<'_> {
 							p += 1;
 							let mut rest: &[u8] = &fmt[p.min(fmt.len())..];
 							let before = rest.len();
-							let atr = match_colour(Some(&mut rest), is_fg, 0, &self.e.caps, self.e.nearcolor);
+							let atr =
+								match_colour(Some(&mut rest), is_fg, 0, &self.e.caps, self.e.nearcolor);
 							p += before - rest.len();
 							if at(&fmt, p) == b'}' {
 								p += 1;
@@ -1058,16 +1104,28 @@ impl P<'_> {
 					},
 					c @ ('m' | 'M') => {
 						if stat {
-							let v = if n != 0 { self.c.list.mlastm } else { self.c.list.mselect };
+							let v = if n != 0 {
+								self.c.list.mlastm
+							} else {
+								self.c.list.mselect
+							};
 							let t = format!("{v}/{}", self.c.core.listdat.nlist);
-							nc = if c == 'M' { format!("{t:<9}").into_bytes() } else { t.into_bytes() };
+							nc = if c == 'M' {
+								format!("{t:<9}").into_bytes()
+							} else {
+								t.into_bytes()
+							};
 							m = 2;
 						}
 					},
 					c @ ('l' | 'L') => {
 						if stat {
 							let t = format!("{}/{}", ml + 1, self.c.core.listdat.nlines);
-							nc = if c == 'L' { format!("{t:<9}").into_bytes() } else { t.into_bytes() };
+							nc = if c == 'L' {
+								format!("{t:<9}").into_bytes()
+							} else {
+								t.into_bytes()
+							};
 							m = 2;
 						}
 					},
@@ -1075,12 +1133,20 @@ impl P<'_> {
 						if stat {
 							let nlines = self.c.core.listdat.nlines;
 							let lst = &self.c.list;
-							let pct = if n != 0 { lst.mfirstl != 0 } else { lst.mlbeg > 0 || ml != lst.mfirstl };
+							let pct = if n != 0 {
+								lst.mfirstl != 0
+							} else {
+								lst.mlbeg > 0 || ml != lst.mfirstl
+							};
 							nc = if ml == nlines - 1 {
 								b"Bottom".to_vec()
 							} else if pct {
 								let v = ((ml + 1) * 100) / nlines.max(1);
-								if c == 'P' { format!("{v:2}%   ").into_bytes() } else { format!("{v}%").into_bytes() }
+								if c == 'P' {
+									format!("{v:2}%   ").into_bytes()
+								} else {
+									format!("{v}%").into_bytes()
+								}
 							} else if c == 'P' {
 								b"Top   ".to_vec()
 							} else {
@@ -1262,15 +1328,21 @@ impl P<'_> {
 			}
 		}
 		let mhasstat = self.c.list.mhasstat;
-		let mut cl = (if nlines > lines - nlnct - mhasstat { lines - nlnct - mhasstat } else { nlines })
-			- i32::from(self.c.list.lastnlnct > nlnct);
+		let mut cl = (if nlines > lines - nlnct - mhasstat {
+			lines - nlnct - mhasstat
+		} else {
+			nlines
+		}) - i32::from(self.c.list.lastnlnct > nlnct);
 		self.l().lastnlnct = nlnct;
 		self.l().mrestlines = lines - 1;
 		self.l().lastinvcount = self.c.result.invcount;
 
 		if cl < 2 {
 			self.clear_eod(&mut cl);
-		} else if self.c.list.mlbeg >= 0 && !self.e.caps.tccan(Cap::ClearEol) && self.e.caps.tccan(Cap::ClearEod) {
+		} else if self.c.list.mlbeg >= 0
+			&& !self.e.caps.tccan(Cap::ClearEol)
+			&& self.e.caps.tccan(Cap::ClearEod)
+		{
 			self.tcout(Cap::ClearEod);
 		}
 
@@ -1297,7 +1369,10 @@ impl P<'_> {
 				let next = gr.next;
 				let wid = |mc: i32| -> i32 {
 					match &widths {
-						Some(w) => w.get(usize::try_from(mc).unwrap_or(0)).copied().unwrap_or(0),
+						Some(w) => w
+							.get(usize::try_from(mc).unwrap_or(0))
+							.copied()
+							.unwrap_or(0),
 						None => gwidth,
 					}
 				};
@@ -1314,7 +1389,9 @@ impl P<'_> {
 						let x = &self.c.groups.get(gid).expls[e];
 						(x.count, x.always, x.str.clone())
 					};
-					if (count != 0 || always) && (onlyexpl == 0 || onlyexpl & (if always { 2 } else { 1 }) != 0) {
+					if (count != 0 || always)
+						&& (onlyexpl == 0 || onlyexpl & (if always { 2 } else { 1 }) != 0)
+					{
 						if pnl {
 							if self.dolistnl(ml) && self.compprintnl(ml)? != 0 {
 								break 'end;
@@ -1332,7 +1409,14 @@ impl P<'_> {
 							self.l().mfirstl = ml;
 						}
 						let dl = i32::from(self.dolist(ml));
-						self.compprintfmt(Some(text.as_slice()), if always { -1 } else { count }, dl, true, ml, Some(&mut stop))?;
+						self.compprintfmt(
+							Some(text.as_slice()),
+							if always { -1 } else { count },
+							dl,
+							true,
+							ml,
+							Some(&mut stop),
+						)?;
 						if self.c.list.mselect >= 0 {
 							let mcols = self.c.list.mcols;
 							let mm = mcols * ml;
@@ -1375,7 +1459,10 @@ impl P<'_> {
 					}
 				}
 
-				if onlyexpl == 0 && self.c.list.mlbeg < 0 && ylist.as_ref().is_some_and(|y| !y.is_empty()) {
+				if onlyexpl == 0
+					&& self.c.list.mlbeg < 0
+					&& ylist.as_ref().is_some_and(|y| !y.is_empty())
+				{
 					let ylist = ylist.unwrap_or_default();
 					if pnl {
 						if self.dolistnl(ml) && self.compprintnl(ml)? != 0 {
@@ -1410,20 +1497,24 @@ impl P<'_> {
 						let nc = glins;
 						let mut pp = 0usize;
 						let rows = gflags & cgf::ROWS != 0;
-						while n != 0 && {
-							let go = nl != 0;
-							nl -= 1;
-							go
-						} && !self.e.errflag
+						while n != 0
+							&& {
+								let go = nl != 0;
+								nl -= 1;
+								go
+							}
+							&& !self.e.errflag
 						{
 							let mut i = gcols;
 							let mut mc = 0;
 							let mut pq = pp;
-							while n != 0 && {
-								let go = i != 0;
-								i -= 1;
-								go
-							} && !self.e.errflag
+							while n != 0
+								&& {
+									let go = i != 0;
+									i -= 1;
+									go
+								}
+								&& !self.e.errflag
 							{
 								if i32::try_from(pq).unwrap_or(i32::MAX) >= lcount || pq >= ylist.len() {
 									break;
@@ -1438,7 +1529,11 @@ impl P<'_> {
 										self.e.out.push(b' ');
 									}
 								}
-								pq += if rows { 1 } else { usize::try_from(nc).unwrap_or(0) };
+								pq += if rows {
+									1
+								} else {
+									usize::try_from(nc).unwrap_or(0)
+								};
 								mc += 1;
 								n -= 1;
 							}
@@ -1454,7 +1549,11 @@ impl P<'_> {
 									self.clear_eod(&mut cl);
 								}
 							}
-							pp += if rows { usize::try_from(gcols).unwrap_or(0) } else { 1 };
+							pp += if rows {
+								usize::try_from(gcols).unwrap_or(0)
+							} else {
+								1
+							};
 						}
 					}
 				} else if onlyexpl == 0 && (lcount != 0 || (showall && mcount != 0)) {
@@ -1463,7 +1562,9 @@ impl P<'_> {
 					let nc = glins;
 					let rows = gflags & cgf::ROWS != 0;
 
-					if gflags & cgf::HASDL != 0 && (lastused || self.c.list.lasttype == 0 || self.c.list.lasttype == 2) {
+					if gflags & cgf::HASDL != 0
+						&& (lastused || self.c.list.lasttype == 0 || self.c.list.lasttype == 2)
+					{
 						let mut p = if !lastused && self.c.list.lasttype == 2 {
 							let l = &self.c.list;
 							let p = l.lastp;
@@ -1481,7 +1582,10 @@ impl P<'_> {
 								let m = &self.c.groups.get(gid).matches[p];
 								(m.disp.is_some(), m.flags)
 							};
-							if disp && flags & cmf::DISPLINE != 0 && (showall || flags & (cmf::HIDE | cmf::NOLIST) == 0) {
+							if disp
+								&& flags & cmf::DISPLINE != 0
+								&& (showall || flags & (cmf::HIDE | cmf::NOLIST) == 0)
+							{
 								if pnl {
 									if self.dolistnl(ml) && self.compprintnl(ml)? != 0 {
 										break 'end;
@@ -1554,11 +1658,13 @@ impl P<'_> {
 					} else {
 						compresult::skipnolist(self.c, gid, 0, showall)
 					};
-					while n != 0 && {
-						let go = nl != 0;
-						nl -= 1;
-						go
-					} && !self.e.errflag
+					while n != 0
+						&& {
+							let go = nl != 0;
+							nl -= 1;
+							go
+						}
+						&& !self.e.errflag
 					{
 						if self.c.list.lasttype == 0 && ml >= self.c.list.mlbeg {
 							let l = &mut self.c.list;
@@ -1574,11 +1680,13 @@ impl P<'_> {
 						let mut i = gcols;
 						let mut mc = 0;
 						let mut q = p;
-						while n != 0 && {
-							let go = i != 0;
-							i -= 1;
-							go
-						} && !self.e.errflag
+						while n != 0
+							&& {
+								let go = i != 0;
+								i -= 1;
+								go
+							}
+							&& !self.e.errflag
 						{
 							let w = wid(mc);
 							if q >= nmatches {
@@ -1699,7 +1807,15 @@ impl P<'_> {
 	/// zsh `clprintm(g, mp, mc, ml, lastc, width)`: print one match of
 	/// group `g` (`mp`: its index; `None` for the padding of an empty
 	/// slot) at list line `ml`, column `mc`.
-	pub fn clprintm(&mut self, g: GId, mp: Option<usize>, mc: i32, ml: i32, lastc: bool, width: i32) -> R<i32> {
+	pub fn clprintm(
+		&mut self,
+		g: GId,
+		mp: Option<usize>,
+		mc: i32,
+		ml: i32,
+		lastc: bool,
+		width: i32,
+	) -> R<i32> {
 		let cols = self.e.columns;
 		let mut subcols = false;
 		let mut ret = 0;
@@ -1748,7 +1864,8 @@ impl P<'_> {
 				}
 			}
 			if !self.dolist(ml) {
-				let cs = Charset { utf8: self.e.utf8, print_eight: self.e.print_eight, ..Charset::default() };
+				let cs =
+					Charset { utf8: self.e.utf8, print_eight: self.e.print_eight, ..Charset::default() };
 				let n = compresult::printfmt_in(disp, 0, None, false, cols, cs);
 				self.l().mlprinted = n;
 				return Ok(0);
@@ -1915,12 +2032,20 @@ impl P<'_> {
 	/// One entry for [`Self::singledraw`].
 	fn singleentry(&mut self, mc: i32, ml: i32, mcc: i32, lc: bool) -> R<()> {
 		let at = ml * self.e.columns + mc;
-		let g = usize::try_from(at).ok().and_then(|i| self.c.list.mgtab.get(i)).and_then(|m| m.g);
+		let g = usize::try_from(at)
+			.ok()
+			.and_then(|i| self.c.list.mgtab.get(i))
+			.and_then(|m| m.g);
 		let mp = self.mt(at).m;
-		let w = g.and_then(|g| self.c.groups.try_get(g)).map(|gr| match &gr.widths {
-			Some(w) => w.get(usize::try_from(mcc).unwrap_or(0)).copied().unwrap_or(0),
-			None => gr.width,
-		});
+		let w = g
+			.and_then(|g| self.c.groups.try_get(g))
+			.map(|gr| match &gr.widths {
+				Some(w) => w
+					.get(usize::try_from(mcc).unwrap_or(0))
+					.copied()
+					.unwrap_or(0),
+				None => gr.width,
+			});
 		if let (Some(g), Some(w)) = (g, w) {
 			let mp = mp.filter(|r| r.g == g).map(|r| r.i);
 			self.clprintm(g, mp, mcc, ml, lc, w)?;

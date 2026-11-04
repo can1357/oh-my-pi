@@ -51,7 +51,8 @@ pub fn dosetopt(ctx: &mut Ctx<'_, '_>, opt: ZshOpt, on: bool) -> Result<bool, Ne
 	let interactive = match opt {
 		ZshOpt::Exec => ctx.zsh_option(ZshOpt::Interactive)?,
 		ZshOpt::Zle => {
-			ctx.zsh_option(ZshOpt::Interactive)? && crate::bash::vm::jobctl::shtty_file(ctx.k).is_some()
+			ctx.zsh_option(ZshOpt::Interactive)?
+				&& crate::bash::vm::jobctl::shtty_file(ctx.k).is_some()
 		},
 		_ => false,
 	};

@@ -525,10 +525,7 @@ fn resource(ctx: &mut Ctx<'_, '_>, s: &[u8]) -> Option<usize> {
 }
 
 /// Run `f` over the limits, then store what changed.
-fn with_state(
-	ctx: &mut Ctx<'_, '_>,
-	f: impl FnOnce(&mut Ctx<'_, '_>, &mut State) -> i32,
-) -> R {
+fn with_state(ctx: &mut Ctx<'_, '_>, f: impl FnOnce(&mut Ctx<'_, '_>, &mut State) -> i32) -> R {
 	let mut st = State::load(ctx)?;
 	let before = st.snapshot();
 	let status = f(ctx, &mut st);
@@ -575,7 +572,11 @@ fn limit_value(ctx: &mut Ctx<'_, '_>, lim: usize, s: &[u8]) -> Option<u64> {
 	};
 	if lim >= NLIMITS {
 		let (val, rest) = zstrtorlimt(s);
-		return if rest.is_empty() { Some(val) } else { scaling(ctx, rest) };
+		return if rest.is_empty() {
+			Some(val)
+		} else {
+			scaling(ctx, rest)
+		};
 	}
 	match RESINFO[lim].kind {
 		// Seconds, `Nh`, `Nm` or `M:S`.
@@ -602,7 +603,11 @@ fn limit_value(ctx: &mut Ctx<'_, '_>, lim: usize, s: &[u8]) -> Option<u64> {
 		Kind::Memory => {
 			let (val, rest) = zstrtorlimt(s);
 			match rest {
-				[] | [b'k' | b'K'] => Some(if val == INF { val } else { val.wrapping_mul(1024) }),
+				[] | [b'k' | b'K'] => Some(if val == INF {
+					val
+				} else {
+					val.wrapping_mul(1024)
+				}),
 				[b'M' | b'm'] => Some(val.wrapping_mul(1024 * 1024)),
 				[b'G' | b'g'] => Some(val.wrapping_mul(1024 * 1024 * 1024)),
 				_ => scaling(ctx, rest),
@@ -672,7 +677,8 @@ fn bit(res: usize) -> u64 {
 
 #[allow(clippy::too_many_lines, reason = "one port of bin_ulimit's loop")]
 fn ulimit_in(ctx: &mut Ctx<'_, '_>, st: &mut State, args: &[BString]) -> i32 {
-	let (mut resmask, mut hard, mut soft, mut nres, mut all, mut ret) = (0u64, false, false, 0, false, 0);
+	let (mut resmask, mut hard, mut soft, mut nres, mut all, mut ret) =
+		(0u64, false, false, 0, false, 0);
 	let mut i = 0;
 	loop {
 		let options: Option<&[u8]> = args.get(i).map(|w| w.as_slice());

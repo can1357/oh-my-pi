@@ -185,18 +185,19 @@ fn printdir(ctx: &mut Ctx<'_, '_>, dir: &[u8]) -> Result<BString, Need> {
 /// with `lng & 4` its directory; a finished job is deleted once shown.
 fn print_listed(ctx: &mut Ctx<'_, '_>, number: u32, lng: u8) -> Result<(), Need> {
 	let platform = ctx.k.engine.config().platform;
-	let how = JobLine {
-		pid:     lng & 1 != 0,
-		leader:  lng & 2 != 0,
-		conted:  false,
-		thisfmt: false,
-	};
+	let how =
+		JobLine { pid: lng & 1 != 0, leader: lng & 2 != 0, conted: false, thisfmt: false };
 	let Some(line) = jobctl::format_job(ctx.vp, number, how, platform) else {
 		return Ok(());
 	};
 	ctx.out(&line);
 	if lng & 4 != 0 {
-		let wd = ctx.vp.jobs.get(number).map(|j| j.wd.clone()).unwrap_or_default();
+		let wd = ctx
+			.vp
+			.jobs
+			.get(number)
+			.map(|j| j.wd.clone())
+			.unwrap_or_default();
 		let mut out = b"(pwd : ".to_vec();
 		out.extend_from_slice(&printdir(ctx, &wd)?);
 		out.extend_from_slice(b")\n");
@@ -390,9 +391,7 @@ pub fn bin_fg(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: JobFunc)
 					let pid = ctx.vp.jobs.get(job).map_or(0, |j| {
 						jobctl::group(ctx.k, j.vpid).unwrap_or_else(|| j.pid())
 					});
-					ctx.usage(format!(
-						"warning: job is suspended, use `kill -CONT -{pid}' to resume"
-					));
+					ctx.usage(format!("warning: job is suspended, use `kill -CONT -{pid}' to resume"));
 				}
 				delete(ctx.vp, job);
 			},
@@ -404,7 +403,12 @@ pub fn bin_fg(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: JobFunc)
 /// The values of zsh/parameter's `jobstates`, `jobtexts` or `jobdirs`
 /// (`sp`) by job number (zsh `scanpmjobstates` and its siblings). Without
 /// job control a finished job is already gone from zsh's table.
-pub fn job_params(vp: &Vproc, sp: Special, jobbing: bool, platform: Platform) -> Vec<(BString, BString)> {
+pub fn job_params(
+	vp: &Vproc,
+	sp: Special,
+	jobbing: bool,
+	platform: Platform,
+) -> Vec<(BString, BString)> {
 	// zsh `selectjobtab`: a subshell reports the job table it copied from
 	// the shell (`oldjobtab`) when there was one, else its own jobs; a
 	// subshell never makes its own jobs current (`spawnjob` under `subsh`).

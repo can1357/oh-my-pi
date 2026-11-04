@@ -235,7 +235,11 @@ const fn wcb_redir(t: u32) -> u32 {
 const fn wc_redir_words(c: u32) -> usize {
 	let d = wc_data(c);
 	(if d & REDIR_VARID_MASK != 0 { 4 } else { 3 })
-		+ if d & REDIR_FROM_HEREDOC_MASK != 0 { 2 } else { 0 }
+		+ if d & REDIR_FROM_HEREDOC_MASK != 0 {
+			2
+		} else {
+			0
+		}
 }
 
 const fn wcb_assign(t: u32, a: u32, n: u32) -> u32 {
@@ -890,7 +894,9 @@ impl<'c, 's> Wc<'c, 's> {
 			ty = WC_FOR_COND;
 		} else {
 			self.cx.ps.infor = 0;
-			if self.cx.lx.tok != T::String || !isident(&self.tokstr(), self.cx.opt(Features::ZSH_WIDE_IDENT)) {
+			if self.cx.lx.tok != T::String
+				|| !isident(&self.tokstr(), self.cx.opt(Features::ZSH_WIDE_IDENT))
+			{
 				return self.yyerror_at(oecused);
 			}
 			let np = if sel { None } else { Some(self.ecadd(0)) };
@@ -951,7 +957,14 @@ impl<'c, 's> Wc<'c, 's> {
 			return;
 		}
 		let skip = (self.ec.len() - 1 - p) as u32;
-		self.set(p, if sel { wcb_select(ty, skip) } else { wcb_for(ty, skip) });
+		self.set(
+			p,
+			if sel {
+				wcb_select(ty, skip)
+			} else {
+				wcb_for(ty, skip)
+			},
+		);
 	}
 
 	/// zsh `par_case`.
@@ -1276,7 +1289,13 @@ impl<'c, 's> Wc<'c, 's> {
 	/// The tail of a function definition after its body: the body's
 	/// `WC_END`, string table bounds and pattern count at `p + num + 2…5`,
 	/// and the enclosing string table back (`ecnfunc++`).
-	fn leave_function(&mut self, p: usize, num: usize, (so, oecssub, onp): (u32, u32, u32), tracing: u32) {
+	fn leave_function(
+		&mut self,
+		p: usize,
+		num: usize,
+		(so, oecssub, onp): (u32, u32, u32),
+		tracing: u32,
+	) {
 		self.ecadd(wc_bld(WC_END, 0));
 		self.set(p + num + 2, so - oecssub);
 		let len = self.ecsoffs() - so;
@@ -1803,7 +1822,9 @@ impl<'c, 's> Wc<'c, 's> {
 					.ps
 					.hdocs
 					.push(PendingDoc { seq, delim, strip, quoted });
-				self.hdocs.push(Hdoc { pc: r, str: name, seq, qt: quoted, strip });
+				self
+					.hdocs
+					.push(Hdoc { pc: r, str: name, seq, qt: quoted, strip });
 				self.lex();
 				return ncodes;
 			},

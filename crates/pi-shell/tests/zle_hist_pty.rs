@@ -33,7 +33,11 @@ const HIST: &str = "echo café crème\n\
 /// `zsh -f -i` with the history file, `PS1`/`RPS1` and the rc file `rc`
 /// (sourced with `.` as the first command, since `-f` skips `.zshrc`).
 fn spawn(real: bool, rc: &str) -> Spawn {
-	let s = if real { Spawn::real_zsh() } else { Spawn::zsh() };
+	let s = if real {
+		Spawn::real_zsh()
+	} else {
+		Spawn::zsh()
+	};
 	// `^Xq` replaces the line with `cat ~/log` and runs it (see `same_log`).
 	let rc = format!(
 		"HISTSIZE=100\nfc -R ~/hist\nq() {{ BUFFER='cat ~/log'; zle .accept-line }}\nzle -N q\n\
@@ -56,7 +60,10 @@ fn keys(pty: &mut Pty, text: &str) -> io::Result<()> {
 
 /// The final screens of `drive` against both shells after sourcing the rc
 /// file (`None` for zsh when it is not installed).
-fn screens(rc: &str, drive: impl Fn(&mut Pty) -> io::Result<()>) -> io::Result<(String, Option<String>)> {
+fn screens(
+	rc: &str,
+	drive: impl Fn(&mut Pty) -> io::Result<()>,
+) -> io::Result<(String, Option<String>)> {
 	let run = |pty: &mut Pty| -> io::Result<()> {
 		pty.settle(QUIET, TIMEOUT)?;
 		keys(pty, ". ~/.zshrc\r")?;
@@ -122,7 +129,8 @@ fn beginning_and_end_of_buffer_or_history() {
 
 #[test]
 fn history_search_backward_and_forward_by_first_word() {
-	let rc = format!("{SHOW}bindkey '^T' history-search-backward\nbindkey '^Y' history-search-forward\n");
+	let rc =
+		format!("{SHOW}bindkey '^T' history-search-backward\nbindkey '^Y' history-search-forward\n");
 	same_log(&rc, "echo zz\x14\x18p\x14\x18p\x14\x18p\x19\x18p\x19\x19\x18p");
 }
 
@@ -145,7 +153,8 @@ fn history_beginning_search_keeps_the_cursor() {
 
 #[test]
 fn history_beginning_search_with_histfindnodups() {
-	let rc = format!("{SHOW}setopt histfindnodups\nbindkey '^T' history-beginning-search-backward\n");
+	let rc =
+		format!("{SHOW}setopt histfindnodups\nbindkey '^T' history-beginning-search-backward\n");
 	same_log(&rc, "echo t\x14\x18p\x14\x18p\x14\x18p");
 }
 

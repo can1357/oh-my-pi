@@ -285,7 +285,9 @@ fn fd_stat(vp: &Vproc, fd: i32) -> FsResult {
 	match handle.stat() {
 		Some(Ok(st)) => Ok(FsAns::Stat(st)),
 		Some(Err(e)) if e.kind() != io::ErrorKind::Unsupported => Err(FsErr::of(&e)),
-		_ => super::probe::fd_stat(vp, fd).map(FsAns::Stat).ok_or_else(ebadf),
+		_ => super::probe::fd_stat(vp, fd)
+			.map(FsAns::Stat)
+			.ok_or_else(ebadf),
 	}
 }
 
@@ -339,12 +341,19 @@ fn start(fs: &mut dyn Fs, req: &FsReq) -> FsPoll<FsAns> {
 			map(fs.listxattr(BStr::new(path), *follow), FsAns::Names)
 		},
 		FsReq::MapWrite { path, data, mode } => {
-			let mut flags = OpenFlags::READ.with(OpenFlags::WRITE).with(OpenFlags::CREATE);
+			let mut flags = OpenFlags::READ
+				.with(OpenFlags::WRITE)
+				.with(OpenFlags::CREATE);
 			if !data.is_empty() {
 				flags = flags.with(OpenFlags::TRUNC);
 			}
 			let open = fs.open(BStr::new(path), flags, *mode);
-			FsPoll::Pending(Box::new(WriteAll { open: Some(open), file: None, data: data.clone(), done: 0 }))
+			FsPoll::Pending(Box::new(WriteAll {
+				open: Some(open),
+				file: None,
+				data: data.clone(),
+				done: 0,
+			}))
 		},
 		FsReq::UserDb(q) => map(fs.user_db(q), FsAns::Users),
 	}
@@ -429,7 +438,9 @@ impl FsPending<FsAns> for ReadAll {
 				let mut buf = [0u8; 8192];
 				match file.poll_read(cx, &mut buf) {
 					Poll::Ready(Ok(0)) => {
-						return Poll::Ready(Ok(FsAns::Bytes(BString::from(std::mem::take(&mut self.data)))));
+						return Poll::Ready(Ok(FsAns::Bytes(BString::from(std::mem::take(
+							&mut self.data,
+						)))));
 					},
 					Poll::Ready(Ok(n)) => self.data.extend_from_slice(&buf[..n]),
 					Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),

@@ -34,9 +34,9 @@ use crate::bash::{
 		zsh::{
 			IN_MATH as LEX_IN_MATH, skipparens,
 			tok::{
-				BAR, EQUALS, HAT, INANG, INBRACE, INBRACK, INPAR, INPARMATH, OUTANG, OUTBRACE, OUTBRACK,
-				OUTPAR, POUND, QSTRING, QTICK, QUEST, STAR, STRING, TICK, TILDE, at, is_null, is_tok, metafy,
-				tok_char, unmetafy, untokenize,
+				BAR, EQUALS, HAT, INANG, INBRACE, INBRACK, INPAR, INPARMATH, OUTANG, OUTBRACE,
+				OUTBRACK, OUTPAR, POUND, QSTRING, QTICK, QUEST, STAR, STRING, TICK, TILDE, at, is_null,
+				is_tok, metafy, tok_char, unmetafy, untokenize,
 			},
 		},
 	},
@@ -199,7 +199,8 @@ pub struct State {
 
 /// What `quotestring` reads, from the options of the editing vproc.
 pub fn quote_opts(zw: &mut Zw<'_, '_>) -> QuoteOpts {
-	let (bang, bang_special) = crate::bash::vm::zsh::params::bang_quoting(&mut zw.k.root, zw.cx.store, zw.vp);
+	let (bang, bang_special) =
+		crate::bash::vm::zsh::params::bang_quoting(&mut zw.k.root, zw.cx.store, zw.vp);
 	QuoteOpts {
 		rcquotes: zw.isset(ZshOpt::Rcquotes),
 		magic_equal_subst: zw.isset(ZshOpt::Magicequalsubst),
@@ -236,7 +237,11 @@ pub fn dupstrspace(s: &[u8]) -> Vec<u8> {
 ///
 /// # Errors
 /// A store failure reading options or aliases.
-pub fn lexer_setup(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> Result<(Features, Option<Aliases>), StoreError> {
+pub fn lexer_setup(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+) -> Result<(Features, Option<Aliases>), StoreError> {
 	let feat = mode::features(&mut k.root, cx.store, vp, Features::NONE)?;
 	let aliases = alias_table(k, cx, vp)?;
 	Ok((feat, aliases))
@@ -267,7 +272,8 @@ pub fn get_comp_string(zw: &mut Zw<'_, '_>) -> Option<Vec<u8>> {
 	let (k, cx, vp) = (&mut *zw.k, &mut *zw.cx, &mut *zw.vp);
 	let mut param = |name: &[u8]| -> Option<bool> {
 		let mut log = Vec::new();
-		let mut ex = crate::bash::vm::expand::Expander::new(&mut *k, &mut *cx, &mut *vp, &mut log, false, 0);
+		let mut ex =
+			crate::bash::vm::expand::Expander::new(&mut *k, &mut *cx, &mut *vp, &mut log, false, 0);
 		match params::getparam(&mut ex, name) {
 			Ok(Some(p)) => Some(p.flags.0 & params::PmFlags::HASHED.0 != 0),
 			_ => None,
@@ -328,7 +334,9 @@ pub fn cmphaswilds(s: &[u8], extendedglob: bool, ignorebraces: bool) -> bool {
 	}
 	if at(s, i) == TILDE
 		&& at(s, i + 1) == INBRACK
-		&& let Some(p) = s.get(i + 2..).and_then(|r| r.iter().position(|&c| c == OUTBRACK))
+		&& let Some(p) = s
+			.get(i + 2..)
+			.and_then(|r| r.iter().position(|&c| c == OUTBRACK))
 	{
 		i = i + 2 + p + 1;
 	}
@@ -358,7 +366,9 @@ pub fn cmphaswilds(s: &[u8], extendedglob: bool, ignorebraces: bool) -> bool {
 			if skipparens(INBRACK, OUTBRACK, s, &mut i) == 0
 				|| skipparens(INANG, OUTANG, s, &mut i) == 0
 				|| (!ignorebraces && skipparens(INBRACE, OUTBRACE, s, &mut i) == 0)
-				|| (at(s, i) == INPAR && at(s, i + 1) == b':' && skipparens(INPAR, OUTPAR, s, &mut i) == 0)
+				|| (at(s, i) == INPAR
+					&& at(s, i + 1) == b':'
+					&& skipparens(INPAR, OUTPAR, s, &mut i) == 0)
 			{
 				return true;
 			}
@@ -405,7 +415,8 @@ fn hascompmod(zw: &mut Zw<'_, '_>) -> bool {
 /// standard error.
 fn zwarn(zw: &mut Zw<'_, '_>, msg: &str) {
 	crate::bash::vm::zle::exec::trashzle(zw);
-	zw.k.diag(zw.cx, zw.vp, 0, Diag::Usage { msg: msg.to_string().into() });
+	zw.k
+		.diag(zw.cx, zw.vp, 0, Diag::Usage { msg: msg.to_string().into() });
 }
 
 /// Run `r` (a widget step that may wait), then `k` with its status.
@@ -715,7 +726,11 @@ pub fn expandcmdpath(zw: &mut Zw<'_, '_>) -> WResult {
 			let (wbc, wec) = (to_chars(cmdwb), to_chars(cmdwe));
 			let ins = crate::bash::vm::zle::to_line(&str_);
 			zw.ed.cs = wbc;
-			crate::bash::vm::zle::utils::foredel(zw.ed, wec - wbc, crate::bash::vm::zle::utils::cutflags::RAW);
+			crate::bash::vm::zle::utils::foredel(
+				zw.ed,
+				wec - wbc,
+				crate::bash::vm::zle::utils::cutflags::RAW,
+			);
 			crate::bash::vm::zle::utils::spaceinline(zw.ed, ins.len());
 			zw.ed.line[wbc..wbc + ins.len()].copy_from_slice(&ins);
 			zw.ed.cs = oldcs;
@@ -743,19 +758,20 @@ fn getcurcmd_pos(zw: &mut Zw<'_, '_>) -> Option<Vec<u8>> {
 		},
 	};
 	let mline = metafy(&crate::bash::vm::zle::from_line(&zw.ed.line));
-	let mcs = metafy(&crate::bash::vm::zle::from_line(&zw.ed.line[..zw.ed.cs.min(zw.ed.line.len())])).len();
+	let mcs =
+		metafy(&crate::bash::vm::zle::from_line(&zw.ed.line[..zw.ed.cs.min(zw.ed.line.len())])).len();
 	let ll = i32::try_from(mline.len()).unwrap_or(i32::MAX);
 	let src = unmetafy(&dupstrspace(&mline));
 	let mut lx = ZleLex::new(&src, feat, NO_ALIASES, true, ZleWords {
 		zlemetacs: i32::try_from(mcs).unwrap_or(i32::MAX),
 		zlemetall: ll,
-		addedx: 0,
-		wb: 0,
-		we: 0,
-		wordbeg: 0,
-		parbegin: -1,
-		parend: -1,
-		inwhat: IN_NOTHING,
+		addedx:    0,
+		wb:        0,
+		we:        0,
+		wordbeg:   0,
+		parbegin:  -1,
+		parend:    -1,
+		inwhat:    IN_NOTHING,
 	});
 	let mut s = None;
 	loop {
@@ -782,7 +798,10 @@ fn getcurcmd_pos(zw: &mut Zw<'_, '_>) -> Option<Vec<u8>> {
 
 /// zsh `hascompwidgets`: a completion widget (`zle -C`) is defined.
 fn hascompwidgets(zw: &Zw<'_, '_>) -> bool {
-	zw.zle.widgets.iter().any(|(_, w)| matches!(w.kind, Kind::Comp { .. }))
+	zw.zle
+		.widgets
+		.iter()
+		.any(|(_, w)| matches!(w.kind, Kind::Comp { .. }))
 }
 
 /// The end of `docomplete`'s run, whatever happened: the line back from
@@ -842,7 +861,11 @@ pub fn docomplete(zw: &mut Zw<'_, '_>, lst: i32, k: K<i32>) -> WResult {
 /// to do with it.
 #[allow(clippy::too_many_lines, reason = "a direct port of zsh's docomplete")]
 fn docomplete_line(zw: &mut Zw<'_, '_>, lst: i32, k: K<i32>) -> WResult {
-	let hline = if zw.ed.isfirstln { None } else { zw.ed.hline.clone() };
+	let hline = if zw.ed.isfirstln {
+		None
+	} else {
+		zw.ed.hline.clone()
+	};
 	let c = &mut *zw.zle.comp;
 	c.line.metafy(zw.ed);
 	let mut ocs = c.line.cs;
@@ -933,19 +956,20 @@ fn docomplete_line(zw: &mut Zw<'_, '_>, lst: i32, k: K<i32>) -> WResult {
 /// The commands named `q…` zsh's `=cmd` test counts: the hashed ones
 /// (and `q` itself, which `hashcmd` has just found).
 fn hashed_with_prefix(zw: &mut Zw<'_, '_>, q: &[u8]) -> usize {
-	let mut names: Vec<Vec<u8>> = match crate::bash::vm::state::scan(&zw.k.root, zw.cx.store, zw.vp, Table::CmdHash) {
-		Ok(v) => v
-			.into_iter()
-			.filter_map(|(k, r)| match (k, r) {
-				(KeyBuf::CmdHash(n), Record::CmdHash { .. }) => Some(metafy(&n)),
-				_ => None,
-			})
-			.collect(),
-		Err(e) => {
-			zw.fail(e);
-			Vec::new()
-		},
-	};
+	let mut names: Vec<Vec<u8>> =
+		match crate::bash::vm::state::scan(&zw.k.root, zw.cx.store, zw.vp, Table::CmdHash) {
+			Ok(v) => v
+				.into_iter()
+				.filter_map(|(k, r)| match (k, r) {
+					(KeyBuf::CmdHash(n), Record::CmdHash { .. }) => Some(metafy(&n)),
+					_ => None,
+				})
+				.collect(),
+			Err(e) => {
+				zw.fail(e);
+				Vec::new()
+			},
+		};
 	if !names.iter().any(|n| n == q) {
 		names.push(q.to_vec());
 	}
@@ -1017,7 +1041,9 @@ fn decide(zw: &mut Zw<'_, '_>, mut s: Vec<u8>, mut lst: i32, olst: i32, k: K<i32
 		}
 		if lst == COMP_EXPAND_COMPLETE {
 			// A `$` or a backtick left: expansion.
-			let any = s.iter().any(|&c| c == TICK || c == QTICK || c == STRING || c == QSTRING);
+			let any = s
+				.iter()
+				.any(|&c| c == TICK || c == QTICK || c == STRING || c == QSTRING);
 			lst = if any { COMP_EXPAND } else { COMP_COMPLETE };
 		}
 		let globcomplete = zw.isset(ZshOpt::Globcomplete);
@@ -1096,7 +1122,13 @@ fn decide(zw: &mut Zw<'_, '_>, mut s: Vec<u8>, mut lst: i32, olst: i32, k: K<i32
 							p += 1;
 						}
 					}
-					return docompletion(zw, s, lst, lincmd, Box::new(move |zw, ret| finish(zw, lst, ret, k)));
+					return docompletion(
+						zw,
+						s,
+						lst,
+						lincmd,
+						Box::new(move |zw, ret| finish(zw, lst, ret, k)),
+					);
 				}
 				if ret != 0 {
 					zw.ed.clearlist = true;

@@ -17,7 +17,11 @@ const START: Duration = Duration::from_millis(600);
 
 /// An interactive `zsh -f` on a fresh pty: obash as `zsh`, or the real one.
 fn shell(real: bool) -> io::Result<Pty> {
-	let spawn = if real { Spawn::real_zsh() } else { Spawn::zsh() };
+	let spawn = if real {
+		Spawn::real_zsh()
+	} else {
+		Spawn::zsh()
+	};
 	spawn.args(["-f", "-i"]).env("PS1", "").spawn()
 }
 
@@ -46,7 +50,11 @@ fn job_lines(out: &str) -> Vec<String> {
 				.enumerate()
 				.map(|(i, w)| {
 					let pid = !w.is_empty() && w.bytes().all(|b| b.is_ascii_digit());
-					if pid && job && (i == 1 || i == 3) { "PID" } else { w }
+					if pid && job && (i == 1 || i == 3) {
+						"PID"
+					} else {
+						w
+					}
 				})
 				.collect();
 			words.join(" ")
@@ -56,7 +64,9 @@ fn job_lines(out: &str) -> Vec<String> {
 
 /// Run `drive` against obash and, when present, the real zsh; the job
 /// lines of each.
-fn both(drive: impl Fn(&mut Pty) -> io::Result<()>) -> io::Result<(Vec<String>, Option<Vec<String>>)> {
+fn both(
+	drive: impl Fn(&mut Pty) -> io::Result<()>,
+) -> io::Result<(Vec<String>, Option<Vec<String>>)> {
 	let mut ours = shell(false)?;
 	drive(&mut ours)?;
 	let ours = job_lines(&ours.output());

@@ -83,8 +83,7 @@ zsh:clone:4: /nonexistent/x: no such file or directory
 "
 	);
 	assert_eq!(st, 0);
-	let (out, err, st) =
-		zsh("zmodload zsh/clone; print -n > /tmp/tty; clone /tmp/tty; print s=$?");
+	let (out, err, st) = zsh("zmodload zsh/clone; print -n > /tmp/tty; clone /tmp/tty; print s=$?");
 	assert_eq!(out, "s=1\n");
 	assert!(err.contains("`clone' (forking the running shell onto another terminal)"), "{err}");
 	assert_eq!(st, 0);

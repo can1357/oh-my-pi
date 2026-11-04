@@ -60,7 +60,10 @@ pub fn startup_scripts(dotdir: Option<&[u8]>, exists: impl Fn(&[u8]) -> bool) ->
 	if SCRIPT_DIRS.is_empty() || DOTFILES.iter().any(|f| exists(&join(dotdir, f))) {
 		return Vec::new();
 	}
-	SCRIPT_DIRS.iter().map(|d| join(d.as_bytes(), "newuser")).collect()
+	SCRIPT_DIRS
+		.iter()
+		.map(|d| join(d.as_bytes(), "newuser"))
+		.collect()
 }
 
 /// zsh/newuser's `boot_` for `zmodload zsh/newuser`: the check of
@@ -116,7 +119,10 @@ mod tests {
 		assert!(none.is_empty());
 		assert!(startup_scripts(None, |_| false).is_empty());
 		let fresh = startup_scripts(Some(b"/home/u"), |_| false);
-		let want: Vec<BString> = SCRIPT_DIRS.iter().map(|d| join(d.as_bytes(), "newuser")).collect();
+		let want: Vec<BString> = SCRIPT_DIRS
+			.iter()
+			.map(|d| join(d.as_bytes(), "newuser"))
+			.collect();
 		assert_eq!(fresh, want);
 	}
 }

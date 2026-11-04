@@ -96,29 +96,45 @@ fn zstrcmp(a: &[u8], b: &[u8], numeric: bool, coll: Option<&Collator>) -> Orderi
 /// `matchorder` (`CGF_MATSORT`, `CGF_NUMSORT`, `CGF_REVSORT`);
 /// `numericglobsort` is the `NUMERIC_GLOB_SORT` option, `coll` the
 /// `LC_COLLATE` collation (`None`: the `C` locale).
-pub fn matchcmp(a: &Cmatch, b: &Cmatch, matchorder: u32, numericglobsort: bool, coll: Option<&Collator>) -> Ordering {
+pub fn matchcmp(
+	a: &Cmatch,
+	b: &Cmatch,
+	matchorder: u32,
+	numericglobsort: bool,
+	coll: Option<&Collator>,
+) -> Ordering {
 	let cmp = i32::from(b.disp.is_some()) - i32::from(a.disp.is_some());
-	let (as_, bs): (&[u8], &[u8]) = if matchorder & cgf::MATSORT != 0 || (cmp == 0 && a.disp.is_none()) {
-		(&a.str, &b.str)
-	} else {
-		if cmp != 0 {
-			// Matches with display strings come first.
-			return cmp.cmp(&0);
-		}
-		let cmp = i64::from(b.flags & cmf::DISPLINE) - i64::from(a.flags & cmf::DISPLINE);
-		if cmp != 0 {
-			// One-per-line display strings first.
-			return cmp.cmp(&0);
-		}
-		(a.disp.as_deref().map_or(&[][..], |s| s), b.disp.as_deref().map_or(&[][..], |s| s))
-	};
+	let (as_, bs): (&[u8], &[u8]) =
+		if matchorder & cgf::MATSORT != 0 || (cmp == 0 && a.disp.is_none()) {
+			(&a.str, &b.str)
+		} else {
+			if cmp != 0 {
+				// Matches with display strings come first.
+				return cmp.cmp(&0);
+			}
+			let cmp = i64::from(b.flags & cmf::DISPLINE) - i64::from(a.flags & cmf::DISPLINE);
+			if cmp != 0 {
+				// One-per-line display strings first.
+				return cmp.cmp(&0);
+			}
+			(a.disp.as_deref().map_or(&[][..], |s| s), b.disp.as_deref().map_or(&[][..], |s| s))
+		};
 	let o = zstrcmp(as_, bs, numericglobsort || matchorder & cgf::NUMSORT != 0, coll);
-	if matchorder & cgf::REVSORT != 0 { o.reverse() } else { o }
+	if matchorder & cgf::REVSORT != 0 {
+		o.reverse()
+	} else {
+		o
+	}
 }
 
 /// zsh `matcheq`: whether two matches put the same strings on the line.
 pub fn matcheq(a: &Cmatch, b: &Cmatch) -> bool {
-	a.ipre == b.ipre && a.pre == b.pre && a.ppre == b.ppre && a.psuf == b.psuf && a.suf == b.suf && a.str == b.str
+	a.ipre == b.ipre
+		&& a.pre == b.pre
+		&& a.ppre == b.ppre
+		&& a.psuf == b.psuf
+		&& a.suf == b.suf
+		&& a.str == b.str
 }
 
 /// What [`makearray`] made.
@@ -140,7 +156,12 @@ pub struct Made {
 /// `CMF_DELETE`), which later calls see. (`makearray(l, 0, 0, …)` for
 /// explanations is a plain copy: see [`permmatches`].)
 #[allow(clippy::too_many_lines, reason = "a direct port of zsh's makearray")]
-pub fn makearray(l: &mut [Cmatch], flags: u32, numericglobsort: bool, coll: Option<&Collator>) -> Made {
+pub fn makearray(
+	l: &mut [Cmatch],
+	flags: u32,
+	numericglobsort: bool,
+	coll: Option<&Collator>,
+) -> Made {
 	let mut rp: Vec<usize> = (0..l.len()).collect();
 	let mut n = l.len();
 	let (mut nl, mut ll) = (0, 0);
@@ -254,7 +275,12 @@ pub fn permmatches(ex: &mut Expander<'_, '_>, c: &mut Comp, last: i32) -> i32 {
 }
 
 /// [`permmatches`] with `NUMERIC_GLOB_SORT` and the collation given.
-pub fn permmatches_with(c: &mut Comp, last: i32, numericglobsort: bool, coll: Option<&Collator>) -> i32 {
+pub fn permmatches_with(
+	c: &mut Comp,
+	last: i32,
+	numericglobsort: bool,
+	coll: Option<&Collator>,
+) -> i32 {
 	let ofi = c.core.fi;
 	if c.core.pmatches.is_some() && c.core.newmatches == 0 {
 		if last != 0 && c.core.fi != 0 {
@@ -284,7 +310,11 @@ pub fn permmatches_with(c: &mut Comp, last: i32, numericglobsort: bool, coll: Op
 		if fi != ofi || gr.perm.is_none() || gr.new {
 			let gr = c.groups.get_mut(gid);
 			let flags = gr.flags;
-			let list = if fi != 0 { &mut gr.lfmatches } else { &mut gr.lmatches };
+			let list = if fi != 0 {
+				&mut gr.lfmatches
+			} else {
+				&mut gr.lmatches
+			};
 			let made = makearray(list, flags, numericglobsort, coll);
 			let arr: Vec<Cmatch> = made.idx.iter().map(|&i| list[i].clone()).collect();
 			gr.matches = arr;
@@ -314,7 +344,11 @@ pub fn permmatches_with(c: &mut Comp, last: i32, numericglobsort: bool, coll: Op
 				flags: gr.flags,
 				mcount: gr.mcount,
 				name: gr.name.clone(),
-				matches: gr.matches.iter().map(|m| dupmatch(m, nbrbeg, nbrend)).collect(),
+				matches: gr
+					.matches
+					.iter()
+					.map(|m| dupmatch(m, nbrbeg, nbrend))
+					.collect(),
 				lcount: gr.lcount,
 				llcount: gr.llcount,
 				ylist: gr.ylist.clone(),
@@ -453,7 +487,11 @@ mod tests {
 		assert_eq!(strs(&l, &made), ["a", "a", "b"]);
 		assert_eq!((made.n, made.nl, made.ll), (3, 1, 0));
 		// The first "a" is FMULT, the other (different prefix) MULT.
-		let fl: Vec<u32> = made.idx.iter().map(|&i| l[i].flags & (cmf::MULT | cmf::FMULT)).collect();
+		let fl: Vec<u32> = made
+			.idx
+			.iter()
+			.map(|&i| l[i].flags & (cmf::MULT | cmf::FMULT))
+			.collect();
 		assert_eq!(fl, [cmf::FMULT, cmf::MULT, 0]);
 	}
 
@@ -468,7 +506,10 @@ mod tests {
 		let made = makearray(&mut l, cgf::REVSORT | cgf::NUMSORT, false, None);
 		assert_eq!(strs(&l, &made), ["a100", "a10", "a9"]);
 		// Display strings sort first, by display string unless MATSORT.
-		let mut l = vec![m("a"), Cmatch { disp: Some("z".into()), ..m("c") }, Cmatch { disp: Some("y".into()), ..m("d") }];
+		let mut l = vec![m("a"), Cmatch { disp: Some("z".into()), ..m("c") }, Cmatch {
+			disp: Some("y".into()),
+			..m("d")
+		}];
 		let made = makearray(&mut l, 0, false, None);
 		assert_eq!(strs(&l, &made), ["d", "c", "a"]);
 		let made = makearray(&mut l, cgf::MATSORT, false, None);
@@ -514,13 +555,20 @@ mod tests {
 		group(&mut c, "g2", cgf::NOSORT, vec![m("q")], vec![]);
 		c.core.newmatches = 1;
 		assert_eq!(permmatches_with(&mut c, 1, false, None), 0);
-		assert_eq!((c.core.nmatches, c.core.diffmatches, c.core.permmnum, c.core.permgnum), (3, 1, 3, 2));
+		assert_eq!(
+			(c.core.nmatches, c.core.diffmatches, c.core.permmnum, c.core.permgnum),
+			(3, 1, 3, 2)
+		);
 		let groups: Vec<GId> = c.groups.list(c.core.pmatches).collect();
 		assert_eq!(groups.len(), 2);
 		// pmatches lists the groups in creation order (amatches is newest first).
 		let first = c.groups.get(groups[0]);
 		assert_eq!(first.name.as_ref().map(|s| s.as_slice()), Some(&b"g1"[..]));
-		let s: Vec<_> = first.matches.iter().map(|m| (m.str.to_string(), m.rnum, m.gnum)).collect();
+		let s: Vec<_> = first
+			.matches
+			.iter()
+			.map(|m| (m.str.to_string(), m.rnum, m.gnum))
+			.collect();
 		assert_eq!(s, [("x".into(), 1, 1), ("y".into(), 2, 2)]);
 		assert_eq!(c.groups.get(groups[1]).matches[0].gnum, 3);
 		// Unchanged: the same permanent groups are reused.

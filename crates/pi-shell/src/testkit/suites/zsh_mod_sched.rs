@@ -38,7 +38,8 @@ fn zsh_mod_sched_lists_in_time_order_and_deletes() {
 
 #[test]
 fn zsh_mod_sched_relative_times_count_from_now() {
-	let (out, err, st) = zsh("zmodload zsh/sched; sched +1:00:30 a; sched +5 b; print -l $zsh_scheduled_events");
+	let (out, err, st) =
+		zsh("zmodload zsh/sched; sched +1:00:30 a; sched +5 b; print -l $zsh_scheduled_events");
 	assert_eq!(err, "");
 	assert_eq!(out, "1700000005::b\n1700003630::a\n");
 	assert_eq!(st, 0);

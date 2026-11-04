@@ -251,8 +251,11 @@ impl Ledger {
 		deliver: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
 		let kind = CGEvent::r#type(Some(event)).0;
-		let code = u16::try_from(CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode))
-			.unwrap_or(u16::MAX);
+		let code = u16::try_from(CGEvent::integer_value_field(
+			Some(event),
+			CGEventField::KeyboardEventKeycode,
+		))
+		.unwrap_or(u16::MAX);
 		let button = CGEvent::integer_value_field(Some(event), CGEventField::MouseEventButtonNumber);
 		let flags = CGEvent::flags(Some(event)).bits();
 		match release::transition(kind, code, flags, button, |input| {
@@ -395,7 +398,8 @@ fn released(event: &CGEvent, kind: u32) -> Option<Vec<u8>> {
 		}
 	}
 	// SAFETY: `copy` is live; the data is a create-rule CFData released below.
-	let data = unsafe { CGEventCreateData(ptr::null(), std::ptr::from_ref::<CGEvent>(&copy).cast_mut()) };
+	let data =
+		unsafe { CGEventCreateData(ptr::null(), std::ptr::from_ref::<CGEvent>(&copy).cast_mut()) };
 	if data.is_null() {
 		return None;
 	}
@@ -762,7 +766,10 @@ mod tests {
 		// The helper posts a Shift release built from the press.
 		let release = reborn(&open[0]);
 		assert_eq!(CGEvent::r#type(Some(&release)).0, CGEventType::FlagsChanged.0);
-		assert_eq!(CGEvent::integer_value_field(Some(&release), CGEventField::KeyboardEventKeycode), 56);
+		assert_eq!(
+			CGEvent::integer_value_field(Some(&release), CGEventField::KeyboardEventKeycode),
+			56
+		);
 
 		// Negative control: a request that releases what it pressed leaves
 		// nothing open.
@@ -1106,7 +1113,11 @@ mod tests {
 		});
 		assert_eq!(CGEvent::r#type(Some(&release)).0, CGEventType::RightMouseUp.0);
 		for (field, value) in fields {
-			assert_eq!(CGEvent::integer_value_field(Some(&release), CGEventField(field)), value, "field {field}");
+			assert_eq!(
+				CGEvent::integer_value_field(Some(&release), CGEventField(field)),
+				value,
+				"field {field}"
+			);
 		}
 		let window_location: GetWindowLocation =
 			route::symbol(c"CGEventGetWindowLocation").expect("window location getter");
@@ -1115,11 +1126,23 @@ mod tests {
 		assert_eq!((local.x, local.y), (11.0, 13.0));
 		// Serialization drops the target process, which the helper stamps
 		// again from the press's route before posting.
-		assert_eq!(CGEvent::integer_value_field(Some(&release), CGEventField(route::TARGET_PID_FIELD)), 0);
+		assert_eq!(
+			CGEvent::integer_value_field(Some(&release), CGEventField(route::TARGET_PID_FIELD)),
+			0
+		);
 		let routes = route::routes().expect("SkyLight routes");
 		// SAFETY: `release` is live.
-		unsafe { routes.set_field(std::ptr::from_ref::<CGEvent>(&release).cast_mut().cast(), route::TARGET_PID_FIELD, 4242) };
-		assert_eq!(CGEvent::integer_value_field(Some(&release), CGEventField(route::TARGET_PID_FIELD)), 4242);
+		unsafe {
+			routes.set_field(
+				std::ptr::from_ref::<CGEvent>(&release).cast_mut().cast(),
+				route::TARGET_PID_FIELD,
+				4242,
+			)
+		};
+		assert_eq!(
+			CGEvent::integer_value_field(Some(&release), CGEventField(route::TARGET_PID_FIELD)),
+			4242
+		);
 	}
 
 	#[test]

@@ -200,24 +200,24 @@ impl Session {
 /// The module's globals (zftp.c's statics), kept between commands.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct State {
-	sessions: Vec<Session>,
+	sessions:    Vec<Session>,
 	/// `zfsessno`.
-	cur:      usize,
+	cur:         usize,
 	/// `zfnopen`.
-	nopen:    u32,
+	nopen:       u32,
 	/// `zfprefs`.
-	prefs:    u8,
+	prefs:       u8,
 	/// The status file (`zfstatfd`): its id in the shared record.
-	statfd:   Option<u64>,
-	lastmsg:  BString,
-	lastcode: i32,
+	statfd:      Option<u64>,
+	lastmsg:     BString,
+	lastcode:    i32,
 	lastcodestr: [u8; 3],
 	/// `zcfinish`.
-	cfinish:  u8,
+	cfinish:     u8,
 	/// `zfclosing`.
-	closing:  bool,
+	closing:     bool,
 	/// `zfdrrrring`: a timeout went off.
-	drrrring: bool,
+	drrrring:    bool,
 }
 
 impl State {
@@ -354,8 +354,14 @@ fn mdtm(secs: i64) -> BString {
 impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 	/// Read the module state as the command found it.
 	fn start(ctx: &'r mut Ctx<'a, 'c>) -> Z<Self> {
-		let mut z =
-			Self { ctx, seq: 0, hooks: 0, no_hooks: false, st: State::booted(), shared: Shared::default() };
+		let mut z = Self {
+			ctx,
+			seq: 0,
+			hooks: 0,
+			no_hooks: false,
+			st: State::booted(),
+			shared: Shared::default(),
+		};
 		if let ZftpAns::Start { state, shared } = z.ask(ZftpOp::Start)? {
 			if let Some(st) = state.and_then(|b| postcard::from_bytes::<State>(&b).ok()) {
 				z.st = st;
@@ -370,7 +376,8 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 	/// Store the module state.
 	fn commit(&mut self) {
 		if let Ok(bytes) = postcard::to_stdvec(&self.st) {
-			self.ctx
+			self
+				.ctx
 				.store_record(KeyBuf::Misc(MiscKey::Zftp), Some(Record::Misc(bytes.into())));
 		}
 	}
@@ -407,7 +414,10 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 	fn warn(&mut self, name: &str, msg: impl Into<String>) -> Z<()> {
 		let msg: String = msg.into();
 		let d = Diag::Usage { msg: msg.into() }.by(name.to_owned());
-		let bytes = self.ctx.k.render_quiet(self.ctx.cx, self.ctx.vp, self.ctx.line, &d);
+		let bytes = self
+			.ctx
+			.k
+			.render_quiet(self.ctx.cx, self.ctx.vp, self.ctx.line, &d);
 		self.out(2, bytes)
 	}
 
@@ -427,7 +437,10 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		match zx(self.ctx, |ex| arith::mathevali(ex, &metafy(&text)))? {
 			Ok(n) => Ok(n),
 			Err(d) => {
-				let bytes = self.ctx.k.render_quiet(self.ctx.cx, self.ctx.vp, self.ctx.line, &d);
+				let bytes = self
+					.ctx
+					.k
+					.render_quiet(self.ctx.cx, self.ctx.vp, self.ctx.line, &d);
 				self.out(2, bytes)?;
 				Ok(0)
 			},
@@ -453,9 +466,12 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		if self.no_hooks {
 			let what = format!("`{name}' called while unloading zsh/zftp");
 			let bytes =
-				self.ctx.k.render_quiet(self.ctx.cx, self.ctx.vp, self.ctx.line, &Diag::Unsupported {
-					what: what.into(),
-				});
+				self
+					.ctx
+					.k
+					.render_quiet(self.ctx.cx, self.ctx.vp, self.ctx.line, &Diag::Unsupported {
+						what: what.into(),
+					});
 			return self.out(2, bytes);
 		}
 		let k = self.hooks;
@@ -469,7 +485,10 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		src.extend_from_slice(name.as_bytes());
 		src.extend_from_slice(b"'\n");
 		push_script(self.ctx.vp, &src, self.ctx.line, ScriptKind::Eval);
-		self.ctx.k.emit_op(self.ctx.cx, self.ctx.vp, 0, EventData::EvalEnter);
+		self
+			.ctx
+			.k
+			.emit_op(self.ctx.cx, self.ctx.vp, 0, EventData::EvalEnter);
 		Err(Stop::Hook)
 	}
 
@@ -487,7 +506,8 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 					return Ok(());
 				}
 				let is_int = v.attrs.contains(Attrs::INTEGER);
-				let is_float = v.attrs.contains(Attrs::ZSH_FLOAT_E) || v.attrs.contains(Attrs::ZSH_FLOAT_F);
+				let is_float =
+					v.attrs.contains(Attrs::ZSH_FLOAT_E) || v.attrs.contains(Attrs::ZSH_FLOAT_F);
 				if !matches!(v.value, VarValue::Str(_)) || is_int != int || (!int && is_float) {
 					// zsh: "parameters are funny, you just never know".
 					return Ok(());
@@ -499,11 +519,17 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 				if ro {
 					attrs = attrs.with(Attrs::READONLY);
 				}
-				let level = if unset.is_some() { Level::Dynamic } else { Level::Global };
+				let level = if unset.is_some() {
+					Level::Dynamic
+				} else {
+					Level::Global
+				};
 				(attrs, level)
 			},
 		};
-		self.ctx.set_var(name.as_bytes(), Some(Var::scalar(val, attrs)), level);
+		self
+			.ctx
+			.set_var(name.as_bytes(), Some(Var::scalar(val, attrs)), level);
 		Ok(())
 	}
 
@@ -552,7 +578,12 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 	/// The status file's words.
 	fn statfile(&mut self) -> Option<&mut Vec<i32>> {
 		let id = self.st.statfd?;
-		self.shared.files.iter_mut().find(|f| f.0 == id).map(|f| &mut f.2)
+		self
+			.shared
+			.files
+			.iter_mut()
+			.find(|f| f.0 == id)
+			.map(|f| &mut f.2)
 	}
 
 	/// Write the current session's status word to the status file.
@@ -1005,7 +1036,11 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		if ty & ST_TMSK == (st >> ST_TBIT) & ST_TMSK {
 			return Ok(false);
 		}
-		let cmd: &[u8] = if ty & ST_TMSK == 0 { b"TYPE A\r\n" } else { b"TYPE I\r\n" };
+		let cmd: &[u8] = if ty & ST_TMSK == 0 {
+			b"TYPE A\r\n"
+		} else {
+			b"TYPE I\r\n"
+		};
 		if self.sendcmd(cmd)? > 2 {
 			return Ok(true);
 		}
@@ -1123,7 +1158,10 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		} else {
 			b' '
 		};
-		let end = msg[p..].iter().position(|&c| c == endc).map_or(msg.len(), |e| p + e);
+		let end = msg[p..]
+			.iter()
+			.position(|&c| c == endc)
+			.map_or(msg.len(), |e| p + e);
 		self.setsparam("ZFTP_PWD", &msg[p..end])?;
 		self.hook("zftp_chpwd")?;
 		Ok(0)
@@ -1170,7 +1208,8 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		Ok(())
 	}
 
-	// ---- sessions ---------------------------------------------------------------
+	// ---- sessions
+	// ---------------------------------------------------------------
 
 	/// zsh `newsession`: switch to session `nm`, creating it.
 	fn newsession(&mut self, nm: &[u8]) -> Z<()> {
@@ -1207,13 +1246,15 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		Ok(())
 	}
 
-	// ---- subcommands -------------------------------------------------------------
+	// ---- subcommands
+	// -------------------------------------------------------------
 
 	/// zsh `bin_zftp`.
 	fn bin_zftp(&mut self, args: &[BString]) -> Z<i32> {
 		let cnam = &args[0];
 		let args = &args[1..];
-		let Some(&(cname, fun, min, max, flags)) = CMDS.iter().find(|c| c.0.as_bytes() == cnam.as_slice())
+		let Some(&(cname, fun, min, max, flags)) =
+			CMDS.iter().find(|c| c.0.as_bytes() == cnam.as_slice())
 		else {
 			self.warn("zftp", format!("no such subcommand: {}", cnam.to_str_lossy()))?;
 			return Ok(1);
@@ -1358,7 +1399,10 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		if !matches!(self.ask(ZftpOp::Sockets)?, ZftpAns::Flag(true)) {
 			// This host's shells may not open sockets: fail loudly.
 			let d = Diag::Unsupported { what: "`zftp open' (no sockets on this host)".into() };
-			let bytes = self.ctx.k.render_quiet(self.ctx.cx, self.ctx.vp, self.ctx.line, &d);
+			let bytes = self
+				.ctx
+				.k
+				.render_quiet(self.ctx.cx, self.ctx.vp, self.ctx.line, &d);
 			self.out(2, bytes)?;
 			return Ok(1);
 		}
@@ -1565,7 +1609,11 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		let mut new = Vec::with_capacity(args.len());
 		for (i, a) in args.iter().enumerate() {
 			let s = if a.first() == Some(&b'?') {
-				let prompt = if a.len() > 1 { BString::from(&a[1..]) } else { BString::from(PROMPTS[i]) };
+				let prompt = if a.len() > 1 {
+					BString::from(&a[1..])
+				} else {
+					BString::from(PROMPTS[i])
+				};
 				self.getinfo(&prompt, i == 2)?
 			} else if a.first() == Some(&b'\\') {
 				BString::from(&a[1..])
@@ -1660,7 +1708,11 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 			let s = self.status() | ST_SYST;
 			self.set_status(s);
 		}
-		let t: &[u8] = if self.status() & ST_TMSK == 0 { b"A" } else { b"I" };
+		let t: &[u8] = if self.status() & ST_TMSK == 0 {
+			b"A"
+		} else {
+			b"I"
+		};
 		self.setsparam("ZFTP_TYPE", t)?;
 		self.getcwd()
 	}
@@ -1720,7 +1772,11 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 			}
 			if nt == b'B' { b'I' } else { nt }
 		} else {
-			let t = if self.status() & ST_TMSK == 0 { "A\n" } else { "I\n" };
+			let t = if self.status() & ST_TMSK == 0 {
+				"A\n"
+			} else {
+				"I\n"
+			};
 			self.out(1, t)?;
 			return Ok(0);
 		};
@@ -1733,7 +1789,11 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 	/// zsh `zftp_mode`.
 	fn mode(&mut self, name: &str, args: &[BString]) -> Z<i32> {
 		let Some(s) = args.first() else {
-			let m = if self.status() & ST_MMSK == 0 { "S\n" } else { "B\n" };
+			let m = if self.status() & ST_MMSK == 0 {
+				"S\n"
+			} else {
+				"B\n"
+			};
 			self.out(1, m)?;
 			return Ok(0);
 		};

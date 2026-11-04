@@ -101,7 +101,9 @@ pub(super) fn matchrange(set: &[SetItem], ch: u32, zmb: Zmb, mb: bool, env: &Cha
 /// zsh `colon_stuffs[pp - PP_FIRST]`: the name of the `[:name:]` class
 /// `pp` (`PP_ALPHA..=PP_INVALID`).
 pub(crate) fn pp_name(pp: u8) -> Option<&'static [u8]> {
-	COLON_STUFFS.split(|&c| c == b' ').nth(usize::from(pp).checked_sub(1)?)
+	COLON_STUFFS
+		.split(|&c| c == b' ')
+		.nth(usize::from(pp).checked_sub(1)?)
 }
 
 /// `mb_patmatchrange`'s test of the code point `ch` against the

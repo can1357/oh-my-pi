@@ -141,7 +141,11 @@ fn list(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	}
 	let mut out = Vec::new();
 	out.extend_from_slice(b"zwc file (");
-	out.extend_from_slice(if head.mapped() { &b"mapped"[..] } else { &b"read"[..] });
+	out.extend_from_slice(if head.mapped() {
+		&b"mapped"[..]
+	} else {
+		&b"read"[..]
+	});
 	out.extend_from_slice(b") for zsh-");
 	out.extend_from_slice(head.version());
 	out.push(b'\n');
@@ -313,8 +317,7 @@ fn build_cur_dump(
 			// zsh walks its function hash table: an order this engine
 			// does not keep.
 			ctx.diag(Diag::Unsupported {
-				what: "zcompile -c/-a of several functions chosen by pattern or by naming none"
-					.into(),
+				what: "zcompile -c/-a of several functions chosen by pattern or by naming none".into(),
 			});
 			return done(1);
 		}

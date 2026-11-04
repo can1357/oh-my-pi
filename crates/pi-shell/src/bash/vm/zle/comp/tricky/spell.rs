@@ -52,32 +52,60 @@ struct Tables {
 
 /// zsh's reserved words (`reswds`).
 const RESWDS: &[&str] = &[
-	"!", "[[", "{", "}", "case", "coproc", "declare", "do", "done", "elif", "else", "end", "esac", "export", "fi",
-	"float", "for", "foreach", "function", "if", "integer", "local", "nocorrect", "readonly", "repeat", "select",
-	"then", "time", "typeset", "until", "while",
+	"!",
+	"[[",
+	"{",
+	"}",
+	"case",
+	"coproc",
+	"declare",
+	"do",
+	"done",
+	"elif",
+	"else",
+	"end",
+	"esac",
+	"export",
+	"fi",
+	"float",
+	"for",
+	"foreach",
+	"function",
+	"if",
+	"integer",
+	"local",
+	"nocorrect",
+	"readonly",
+	"repeat",
+	"select",
+	"then",
+	"time",
+	"typeset",
+	"until",
+	"while",
 ];
 
 /// Everything the file-system part of `spckword` needs.
 struct Job {
-	s:          Vec<u8>,
-	cmd:        bool,
-	t:          usize,
-	guess:      Vec<u8>,
-	ic:         u8,
-	preflen:    usize,
-	tables:     Arc<Tables>,
-	spckpat:    Option<Arc<Pattern>>,
-	spnamepat:  Option<Arc<Pattern>>,
-	env:        zpattern::CharEnvBuf,
-	path:       Vec<BString>,
-	hashlist:   bool,
-	autocd:     bool,
-	cdable:     bool,
-	cdpath:     Vec<Vec<u8>>,
-	dvorak:     bool,
-	cwd:        BString,
+	s:         Vec<u8>,
+	cmd:       bool,
+	t:         usize,
+	guess:     Vec<u8>,
+	ic:        u8,
+	preflen:   usize,
+	tables:    Arc<Tables>,
+	spckpat:   Option<Arc<Pattern>>,
+	spnamepat: Option<Arc<Pattern>>,
+	env:       zpattern::CharEnvBuf,
+	path:      Vec<BString>,
+	hashlist:  bool,
+	autocd:    bool,
+	cdable:    bool,
+	cdpath:    Vec<Vec<u8>>,
+	dvorak:    bool,
+	cwd:       BString,
 	/// The `branch` of zsh's code: `$name`, `=cmd`, or a word.
-	kind:       Kind,
+	kind:      Kind,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -95,7 +123,11 @@ pub fn spckword(zw: &mut Zw<'_, '_>, mut s: Vec<u8>, cmd: bool, k: SpK) -> WResu
 	if s.len() < 2 {
 		return k(zw, s);
 	}
-	if if cmd { s[0] == b'%' } else { s[0] == b'-' || s[0] == DASH } {
+	if if cmd {
+		s[0] == b'%'
+	} else {
+		s[0] == b'-' || s[0] == DASH
+	} {
 		return k(zw, s);
 	}
 	if s == b"in" {
@@ -144,7 +176,12 @@ pub fn spckword(zw: &mut Zw<'_, '_>, mut s: Vec<u8>, cmd: bool, k: SpK) -> WResu
 		},
 	};
 	let path = zw.getaparam(b"path").unwrap_or_default();
-	let cdpath = zw.getaparam(b"cdpath").unwrap_or_default().into_iter().map(|d| d.to_vec()).collect();
+	let cdpath = zw
+		.getaparam(b"cdpath")
+		.unwrap_or_default()
+		.into_iter()
+		.map(|d| d.to_vec())
+		.collect();
 	let autocd = cmd && zw.isset(ZshOpt::Autocd) && s != b"." && s != b"..";
 	let mut job = Job {
 		s,
@@ -278,7 +315,8 @@ fn load_tables(zw: &mut Zw<'_, '_>) -> Result<Tables, crate::bash::store::StoreE
 	t.builtins.push(b"noglob".to_vec());
 	for id in IntrinsicId::iter().filter(|id| id.available_in(Dialect::Zsh)) {
 		if crate::bash::vm::builtins::zsh_module::builtin_state(store, vp, id)?.is_some() {
-			t.builtins.push(<&'static str>::from(id).as_bytes().to_vec());
+			t.builtins
+				.push(<&'static str>::from(id).as_bytes().to_vec());
 		}
 	}
 	let aliases = crate::bash::vm::builtins::alias_table(zw.k, zw.cx, zw.vp)?;
@@ -303,7 +341,9 @@ fn ignore_pattern(zw: &mut Zw<'_, '_>, name: &[u8]) -> Option<Arc<Pattern>> {
 	let mut text = zw.getsparam(name)?.to_vec();
 	tokenize(&mut text);
 	remnulargs(&mut text);
-	zw.params(|ex| zpattern::try_compile(ex, &text, PatFlags::default())).ok().flatten()
+	zw.params(|ex| zpattern::try_compile(ex, &text, PatFlags::default()))
+		.ok()
+		.flatten()
 }
 
 /// A file-system answer, or the probe to ask first.
@@ -329,7 +369,10 @@ impl Fs<'_> {
 	/// `opendir`+`readdir` (raw bytes): the names, `None` when it cannot
 	/// be read.
 	fn readdir(&mut self, path: &[u8]) -> Ans<Option<Vec<BString>>> {
-		let p = Probe::Fs { seq: 0, req: Box::new(FsReq::ReadDir { path: probe::absolute(self.cwd, path) }) };
+		let p = Probe::Fs {
+			seq: 0,
+			req: Box::new(FsReq::ReadDir { path: probe::absolute(self.cwd, path) }),
+		};
 		match (self.look)(&p) {
 			Some(ProbeResult::Fs(Ok(FsAns::Names(n)))) => Ok(Some(n)),
 			Some(_) => Ok(None),
@@ -383,7 +426,9 @@ fn correct(job: &Job, look: &mut dyn FnMut(&Probe) -> Option<ProbeResult>) -> An
 	match job.kind {
 		Kind::Param => spscan(&job.tables.params[..], &mut d, &mut best),
 		Kind::Equals => {
-			if job.tables.cmdnam.iter().any(|n| n == guess) || fs.pathsearch(&unmetafy(guess), &job.path)? {
+			if job.tables.cmdnam.iter().any(|n| n == guess)
+				|| fs.pathsearch(&unmetafy(guess), &job.path)?
+			{
 				return Ok(s.clone());
 			}
 			spscan(&job.tables.aliases[..], &mut d, &mut best);
@@ -395,7 +440,9 @@ fn correct(job: &Job, look: &mut dyn FnMut(&Probe) -> Option<ProbeResult>) -> An
 			}
 			best = spname(&mut fs, guess, job)?;
 			if job.ic == 0 && job.t == s.len() && job.cmd {
-				if job.tables.cmdnam.iter().any(|n| n == guess) || fs.pathsearch(&unmetafy(guess), &job.path)? {
+				if job.tables.cmdnam.iter().any(|n| n == guess)
+					|| fs.pathsearch(&unmetafy(guess), &job.path)?
+				{
 					return Ok(s.clone());
 				}
 				d = 100;
@@ -496,7 +543,13 @@ fn spname(fs: &mut Fs<'_>, oldname: &[u8], job: &Job) -> Ans<Option<Vec<u8>>> {
 
 /// zsh `mindist`: the entry of `dir` nearest to `guess` (metafied) and
 /// its distance (100: none near).
-fn mindist(fs: &mut Fs<'_>, dir: &[u8], guess: &[u8], wantdir: bool, job: &Job) -> Ans<(i32, Vec<u8>)> {
+fn mindist(
+	fs: &mut Fs<'_>,
+	dir: &[u8],
+	guess: &[u8],
+	wantdir: bool,
+	job: &Job,
+) -> Ans<(i32, Vec<u8>)> {
 	let dir: &[u8] = if dir.is_empty() { b"." } else { dir };
 	let join = |name: &[u8]| -> Vec<u8> {
 		let mut b = unmetafy(dir);
@@ -563,8 +616,12 @@ pub fn spdist(s: &[u8], t: &[u8], thresh: i32, dvorak: bool) -> i32 {
 			q += 1;
 			continue;
 		} else if at(s, p + 1) == tq && at(t, q + 1) == sp {
-			return spdist(s.get(p + 2..).unwrap_or_default(), t.get(q + 2..).unwrap_or_default(), thresh - 1, dvorak)
-				+ 1;
+			return spdist(
+				s.get(p + 2..).unwrap_or_default(),
+				t.get(q + 2..).unwrap_or_default(),
+				thresh - 1,
+				dvorak,
+			) + 1;
 		} else if at(s, p + 1) == tq {
 			return spdist(&s[p + 1..], &t[q..], thresh - 1, dvorak) + 2;
 		} else if sp == at(t, q + 1) {
@@ -572,7 +629,9 @@ pub fn spdist(s: &[u8], t: &[u8], thresh: i32, dvorak: bool) -> i32 {
 		}
 		break;
 	}
-	if (p >= s.len() && t.len() - q.min(t.len()) == 1) || (q >= t.len() && s.len() - p.min(s.len()) == 1) {
+	if (p >= s.len() && t.len() - q.min(t.len()) == 1)
+		|| (q >= t.len() && s.len() - p.min(s.len()) == 1)
+	{
 		return 2;
 	}
 	let (mut p, mut q) = (0, 0);
@@ -580,7 +639,10 @@ pub fn spdist(s: &[u8], t: &[u8], thresh: i32, dvorak: bool) -> i32 {
 		let (sp, tq) = (s[p], t[q]);
 		if sp != tq && at(s, p + 1) == at(t, q + 1) {
 			// A mistyped letter: a neighbouring key costs less.
-			let Some(t0) = keymap.iter().position(|&c| c == sp).filter(|&i| !matches!(keymap[i], b'\n' | b'\t'))
+			let Some(t0) = keymap
+				.iter()
+				.position(|&c| c == sp)
+				.filter(|&i| !matches!(keymap[i], b'\n' | b'\t'))
 			else {
 				return spdist(&s[p + 1..], &t[q + 1..], thresh - 1, dvorak) + 1;
 			};
@@ -588,7 +650,15 @@ pub fn spdist(s: &[u8], t: &[u8], thresh: i32, dvorak: bool) -> i32 {
 				let i = t0 as isize + off;
 				i >= 0 && keymap.get(i as usize) == Some(&tq)
 			};
-			if near(-15) || near(-14) || near(-13) || near(-1) || near(1) || near(13) || near(14) || near(15) {
+			if near(-15)
+				|| near(-14)
+				|| near(-13)
+				|| near(-1)
+				|| near(1)
+				|| near(13)
+				|| near(14)
+				|| near(15)
+			{
 				return spdist(&s[p + 1..], &t[q + 1..], thresh - 1, dvorak) + 2;
 			}
 			return 200;

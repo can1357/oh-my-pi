@@ -61,29 +61,29 @@ enum Quote {
 /// `ALLOWHIST` in `lex.c`), followed across the lines of one event.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lex {
-	stack:     Vec<Quote>,
+	stack:           Vec<Quote>,
 	/// The next character is escaped by a backslash.
-	esc:       bool,
+	esc:             bool,
 	/// The last character began no word yet (a `#` would start a comment).
-	at_word:   bool,
+	at_word:         bool,
 	/// In a comment (history off; it ends at the newline).
-	comment:   bool,
+	comment:         bool,
 	/// A comment was read (zsh `hist_keep_comment`: a comment-only event
 	/// is kept).
 	pub had_comment: bool,
 	/// The character before the last one fed.
-	prev:      u8,
+	prev:            u8,
 	/// Here-document terminators of the command line, waiting for its
 	/// newline: the word and whether leading tabs are stripped (`<<-`).
-	pending:   Vec<(BString, bool)>,
+	pending:         Vec<(BString, bool)>,
 	/// Here-document bodies being read, in order (history off).
-	bodies:    Vec<(BString, bool)>,
+	bodies:          Vec<(BString, bool)>,
 	/// The word after `<<` being read: its text so far and `<<-`; `None`
 	/// before its first character.
-	heredoc:   Option<(BString, bool, bool)>,
+	heredoc:         Option<(BString, bool, bool)>,
 	/// Characters since the last newline (to tell a here-document body's
 	/// terminator line).
-	line:      BString,
+	line:            BString,
 }
 
 impl Lex {
@@ -336,20 +336,20 @@ impl LineState {
 #[derive(Clone, Debug, Default)]
 pub struct BangOpts {
 	/// `cshjunkiehistory`: `!` alone is the previous event.
-	pub cshjunkie:     bool,
+	pub cshjunkie:    bool,
 	/// `histverify`.
-	pub verify:        bool,
+	pub verify:       bool,
 	/// `histsubstpattern`: `:s` takes patterns (not supported here).
-	pub substpattern:  bool,
+	pub substpattern: bool,
 	/// The shell's working directory (`:a`, `:A`, `:P`).
-	pub cwd:           BString,
+	pub cwd:          BString,
 	/// `$PATH` (`:c`).
-	pub path:          BString,
+	pub path:         BString,
 	/// bash's `history_expand` (`history -p`): `!#` on an empty line is
 	/// empty.
-	pub bash:          bool,
+	pub bash:         bool,
 	/// `multibyte` in a UTF-8 locale (`:l`, `:u` case whole characters).
-	pub multibyte:     bool,
+	pub multibyte:    bool,
 }
 
 /// A failed expansion: the message zsh prints (none for the silent
@@ -394,6 +394,7 @@ impl Input {
 	fn raw_pos(&self) -> usize {
 		self.raw_len - self.q.iter().filter(|&&(_, h)| !h).count()
 	}
+
 	fn get(&mut self) -> Option<u8> {
 		let (c, h) = self.q.pop_front()?;
 		self.from_hist = h;
@@ -417,25 +418,25 @@ impl Input {
 
 /// One line's expansion: zsh `ihgetc` over the line.
 struct Run<'a, 'b> {
-	h:        &'a mut Hist,
-	ls:       &'a mut LineState,
-	inp:      Input,
-	o:        &'a BangOpts,
-	steps:    &'a mut Steps<'b>,
+	h:       &'a mut Hist,
+	ls:      &'a mut LineState,
+	inp:     Input,
+	o:       &'a BangOpts,
+	steps:   &'a mut Steps<'b>,
 	/// `isfirstch`.
-	first:    bool,
+	first:   bool,
 	/// `qbang` of the character just read.
-	qbang:    bool,
+	qbang:   bool,
 	/// The lexer's text.
-	out:      BString,
+	out:     BString,
 	/// Where the reference being expanded stands in the line, for bash's
 	/// messages.
-	marks:    Marks,
+	marks:   Marks,
 	/// ZLE's cursor while it expands its line (`excs`, `exlast`).
-	cursor:   Option<(i64, i64)>,
+	cursor:  Option<(i64, i64)>,
 	/// How much of the line was read when the expansion failed (before
 	/// `herrflush` took the rest).
-	err_pos:  Option<usize>,
+	err_pos: Option<usize>,
 }
 
 /// Offsets in the line of the history reference being expanded: its start
@@ -463,11 +464,15 @@ fn fail_quietly<T>() -> Result<T, Stop> {
 /// bash's message (readline `hist_error`) for zsh's `msg` about the
 /// reference `marks` locate in `line`, read up to `pos`.
 fn bash_message(msg: &str, line: &[u8], marks: Marks, pos: usize) -> BString {
-	let span = |a: usize, b: usize| BString::from(line.get(a.min(b)..b.min(line.len())).unwrap_or_default());
+	let span =
+		|a: usize, b: usize| BString::from(line.get(a.min(b)..b.min(line.len())).unwrap_or_default());
 	let (spec, what) = if msg.starts_with("no such event") || msg.starts_with("event not found") {
 		(span(marks.b, marks.e), "event not found")
 	} else if msg.starts_with("illegal modifier: ") {
-		(BString::from(&msg.as_bytes()["illegal modifier: ".len()..]), "unrecognized history modifier")
+		(
+			BString::from(&msg.as_bytes()["illegal modifier: ".len()..]),
+			"unrecognized history modifier",
+		)
 	} else if msg == "substitution failed" {
 		let spec = if marks.hat {
 			let mut s = BString::from(":s");
@@ -556,8 +561,7 @@ impl Run<'_, '_> {
 	fn line(&mut self) -> Result<(), Stop> {
 		loop {
 			// A comment is read with `ingetc`: no expansion.
-			let comment_next =
-				self.ls.lex.comment_next(self.ls.comments) && self.peek() == Some(b'#');
+			let comment_next = self.ls.lex.comment_next(self.ls.comments) && self.peek() == Some(b'#');
 			if self.ls.lex.comment || comment_next {
 				let Some(c) = self.inp.get() else {
 					return Ok(());
@@ -774,7 +778,11 @@ impl Run<'_, '_> {
 		let (Some(l), Some(r)) = (self.h.st.hsubl.clone(), self.h.st.hsubr.clone()) else {
 			return Ok(false);
 		};
-		let (inp, gbal) = if l.is_empty() { (s.clone(), false) } else { (l, gbal) };
+		let (inp, gbal) = if l.is_empty() {
+			(s.clone(), false)
+		} else {
+			(l, gbal)
+		};
 		let Some(first) = s.find(&inp) else {
 			return Ok(false);
 		};
@@ -840,7 +848,9 @@ impl Run<'_, '_> {
 		let mut c = self.inp.get();
 		let mut count = 0usize;
 		while let Some(d) = c.filter(u8::is_ascii_digit) {
-			count = count.saturating_mul(10).saturating_add(usize::from(d - b'0'));
+			count = count
+				.saturating_mul(10)
+				.saturating_add(usize::from(d - b'0'));
 			c = self.inp.get();
 		}
 		self.inp.unget(c);
@@ -963,8 +973,10 @@ impl Run<'_, '_> {
 			} else {
 				loop {
 					let Some(ch) = c else { break };
-					let stops =
-						matches!(ch, b';' | b':' | b'^' | b'$' | b'*' | b'%' | b'}' | b'\'' | b'"' | b'`');
+					let stops = matches!(
+						ch,
+						b';' | b':' | b'^' | b'$' | b'*' | b'%' | b'}' | b'\'' | b'"' | b'`'
+					);
 					if inblank(ch) || stops {
 						break;
 					}
@@ -1230,14 +1242,25 @@ impl Run<'_, '_> {
 		if name.contains(&b'/') {
 			return Ok(None);
 		}
-		let dirs: Vec<BString> = self.o.path.split(|&c| c == b':').map(BString::from).collect();
+		let dirs: Vec<BString> = self
+			.o
+			.path
+			.split(|&c| c == b':')
+			.map(BString::from)
+			.collect();
 		for dir in dirs {
-			let mut p = if dir.is_empty() { self.o.cwd.clone() } else { dir };
+			let mut p = if dir.is_empty() {
+				self.o.cwd.clone()
+			} else {
+				dir
+			};
 			if !p.ends_with(b"/") {
 				p.push(b'/');
 			}
 			p.extend_from_slice(name);
-			if let Ok(HistOut::Stat(st)) = self.steps.ask(HistOp::Stat { path: p.clone(), follow: true })?
+			if let Ok(HistOut::Stat(st)) = self
+				.steps
+				.ask(HistOp::Stat { path: p.clone(), follow: true })?
 				&& st.kind == crate::bash::fs::StatKind::File
 				&& st.mode & 0o111 != 0
 			{
@@ -1401,7 +1424,10 @@ pub fn expand_for_zle(
 	o: &BangOpts,
 	steps: &mut Steps<'_>,
 ) -> Result<Option<(BString, usize)>, Stop> {
-	let defev = h.curline.as_ref().map_or_else(|| h.addhistnum(h.st.curhist, -1, HIST_FOREIGN), |l| l.defev);
+	let defev = h
+		.curline
+		.as_ref()
+		.map_or_else(|| h.addhistnum(h.st.curhist, -1, HIST_FOREIGN), |l| l.defev);
 	let comments = h.curline.as_ref().is_some_and(|l| l.comments);
 	let mut ls = LineState { defev, comments, lex: Lex::new(), ..LineState::default() };
 	let inp = Input {
@@ -1492,7 +1518,8 @@ pub fn unquote(s: &[u8]) -> BString {
 			b'"' => {
 				i += 1;
 				while i < s.len() && s[i] != b'"' {
-					if s[i] == b'\\' && matches!(s.get(i + 1), Some(b'$' | b'`' | b'"' | b'\\' | b'\n')) {
+					if s[i] == b'\\' && matches!(s.get(i + 1), Some(b'$' | b'`' | b'"' | b'\\' | b'\n'))
+					{
 						i += 1;
 					}
 					if let Some(&c) = s.get(i) {

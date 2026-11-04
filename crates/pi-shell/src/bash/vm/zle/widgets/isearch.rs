@@ -190,7 +190,8 @@ pub fn historyincrementalpatternsearchforward(zw: &mut Zw<'_, '_>) -> WResult {
 
 /// zsh `GETZLETEXT(he)` of history line `hl` (empty when there is none).
 fn zt_of(zw: &Zw<'_, '_>, h: &Hist, hl: i64) -> Vec<char> {
-	h.index_of(hl).map_or_else(Vec::new, |i| to_line(&hist::zle_text(zw.ed, h, i)))
+	h.index_of(hl)
+		.map_or_else(Vec::new, |i| to_line(&hist::zle_text(zw.ed, h, i)))
 }
 
 /// zsh `doisearch(args, dir, pattern)`.
@@ -281,7 +282,11 @@ fn char_index(chars: &[char], off: usize) -> usize {
 /// `PAT_NOANCH`, `PAT_SCAN` unless anchored, `PAT_LCMATCHUC` for `sens`
 /// 3); `None` when it is not a valid pattern.
 fn compile(zw: &mut Zw<'_, '_>, s: &Isearch) -> Option<Arc<Pattern>> {
-	let body = if s.anchored() { &s.sbuf[1..] } else { &s.sbuf[..] };
+	let body = if s.anchored() {
+		&s.sbuf[1..]
+	} else {
+		&s.sbuf[..]
+	};
 	let mut text = metafy(&from_line(body));
 	tokenize(&mut text);
 	remnulargs(&mut text);
@@ -577,7 +582,11 @@ fn on_key(zw: &mut Zw<'_, '_>, mut s: Box<Isearch>, got: Got) -> WResult {
 			chain(zw, r, after(move |zw| show(zw, s)))
 		},
 		b"vi-cmd-mode" => {
-			let to: &[u8] = if exec::invicmdmode(&zw.zle.keymaps, zw.ed) { b"main" } else { b"vicmd" };
+			let to: &[u8] = if exec::invicmdmode(&zw.zle.keymaps, zw.ed) {
+				b"main"
+			} else {
+				b"vicmd"
+			};
 			if exec::selectkeymap(&zw.zle.keymaps, zw.ed, to, false).is_err() {
 				s.feep = true;
 			}
@@ -588,7 +597,8 @@ fn on_key(zw: &mut Zw<'_, '_>, mut s: Box<Isearch>, got: Got) -> WResult {
 		| b"vi-backward-kill-word"
 		| b"backward-kill-word"
 		| b"backward-delete-word" => {
-			let only_one = matches!(cmd.as_slice(), b"vi-backward-delete-char" | b"backward-delete-char");
+			let only_one =
+				matches!(cmd.as_slice(), b"vi-backward-delete-char" | b"backward-delete-char");
 			let old_sbptr = s.sbuf.len();
 			if s.top_spot > 0 {
 				loop {
@@ -631,7 +641,10 @@ fn on_key(zw: &mut Zw<'_, '_>, mut s: Box<Isearch>, got: Got) -> WResult {
 			}
 			top(zw, s)
 		},
-		b"accept-and-hold" | b"accept-and-infer-next-history" | b"accept-line-and-down-history" | b"accept-line" => {
+		b"accept-and-hold"
+		| b"accept-and-infer-next-history"
+		| b"accept-line-and-down-history"
+		| b"accept-line" => {
 			s.exitfn = builtin(&String::from_utf8_lossy(&cmd)).map(|b| b.name);
 			finish(zw, s)
 		},

@@ -77,7 +77,11 @@ pub fn echotc(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 		u += 1;
 	}
 	if rest.len() != argct {
-		ctx.usage(if rest.len() < argct { "not enough arguments" } else { "too many arguments" });
+		ctx.usage(if rest.len() < argct {
+			"not enough arguments"
+		} else {
+			"too many arguments"
+		});
 		return done(1);
 	}
 	let out = if argct == 0 {

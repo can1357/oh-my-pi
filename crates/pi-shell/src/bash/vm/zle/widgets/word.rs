@@ -27,7 +27,11 @@ impl WordChars {
 	/// conversion to wide characters drops them.
 	pub fn new(wordchars: Option<&[u8]>) -> Self {
 		match wordchars {
-			Some(w) => Self(bstr::ByteSlice::chars(w).filter(|&c| c != '\u{fffd}').collect()),
+			Some(w) => Self(
+				bstr::ByteSlice::chars(w)
+					.filter(|&c| c != '\u{fffd}')
+					.collect(),
+			),
 			None => Self(DEFAULT_WORDCHARS.chars().collect()),
 		}
 	}
@@ -237,7 +241,11 @@ fn map_case(c: char, upper: bool) -> char {
 		let first = it.next()?;
 		it.next().is_none().then_some(first)
 	}
-	let m = if upper { one(c.to_uppercase()) } else { one(c.to_lowercase()) };
+	let m = if upper {
+		one(c.to_uppercase())
+	} else {
+		one(c.to_lowercase())
+	};
 	m.unwrap_or(c)
 }
 
@@ -510,7 +518,11 @@ mod tests {
 		e.lastcmd = wflags::KILL;
 		assert_eq!(backward_kill_word(&mut zle, &mut e, &wc), 0);
 		assert_eq!(line(&e), "one ");
-		let cut: String = zle.cutbuf.as_ref().map(|c| c.buf.iter().collect()).unwrap_or_default();
+		let cut: String = zle
+			.cutbuf
+			.as_ref()
+			.map(|c| c.buf.iter().collect())
+			.unwrap_or_default();
 		assert_eq!(cut, "two three");
 		e.cs = 0;
 		e.lastcmd = 0;

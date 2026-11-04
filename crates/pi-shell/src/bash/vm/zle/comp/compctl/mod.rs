@@ -51,7 +51,8 @@ use crate::bash::{
 	zshopt::ZshOpt,
 };
 
-// ---- the flags of a compctl (compctl.h) --------------------------------------
+// ---- the flags of a compctl (compctl.h)
+// --------------------------------------
 
 /// zsh `CC_*` (`compctl.mask`): what to complete.
 pub(crate) mod cc {
@@ -115,7 +116,8 @@ pub(crate) mod cct {
 	pub const QUOTE: u8 = 13;
 }
 
-// ---- definitions -------------------------------------------------------------
+// ---- definitions
+// -------------------------------------------------------------
 
 /// One `[…]` of a `compctl -x` condition (zsh `compcond.u`). Strings are
 /// metafied, as zsh keeps them.
@@ -292,7 +294,8 @@ pub fn finish(ctx: &mut Ctx<'_, '_>) -> Result<(), Need> {
 	Ok(())
 }
 
-// ---- parsing (get_compctl, get_xcompctl, cc_assign) --------------------------
+// ---- parsing (get_compctl, get_xcompctl, cc_assign)
+// --------------------------
 
 /// zsh `cclist` bits.
 mod cl {
@@ -344,12 +347,16 @@ impl Parser {
 
 	/// `argv[a]` from its pointer on.
 	fn rest(&self, a: usize) -> &[u8] {
-		self.words.get(a).map_or(&[][..], |w| tok::tail(&w.buf, w.off))
+		self
+			.words
+			.get(a)
+			.map_or(&[][..], |w| tok::tail(&w.buf, w.off))
 	}
 
 	/// `argv[a] + k` as a string.
 	fn from(&self, a: usize, k: usize) -> BString {
-		self.words
+		self
+			.words
 			.get(a)
 			.map_or_else(BString::default, |w| BString::from(tok::tail(&w.buf, w.off + k)))
 	}
@@ -404,7 +411,12 @@ impl State {
 /// What the argument after a flag letter is: the rest of the word, or
 /// the next word (zsh's repeated `if ((*argv)[1]) … else if (!argv[1])
 /// … else …`). `None` after the warning `expected`.
-fn flag_arg(ctx: &mut Ctx<'_, '_>, p: &mut Parser, a: &mut usize, expected: &str) -> Option<BString> {
+fn flag_arg(
+	ctx: &mut Ctx<'_, '_>,
+	p: &mut Parser,
+	a: &mut usize,
+	expected: &str,
+) -> Option<BString> {
 	if p.ch(*a, 1) != 0 {
 		let v = p.from(*a, 1);
 		p.set(*a, ARGV_END);
@@ -697,7 +709,13 @@ fn get_compctl<'s>(
 
 /// zsh `get_xcompctl`: the `-x pattern flags - pattern flags … --` part,
 /// at `*a`, into `cct.ext`. Ends at the word before the command names.
-fn get_xcompctl(ctx: &mut Ctx<'_, '_>, p: &mut Parser, a: &mut usize, cct: &mut Cct, isdef: bool) -> Result<(), ()> {
+fn get_xcompctl(
+	ctx: &mut Ctx<'_, '_>,
+	p: &mut Parser,
+	a: &mut usize,
+	cct: &mut Cct,
+	isdef: bool,
+) -> Result<(), ()> {
 	let mut ready = false;
 	let mut ext: Vec<Cc> = Vec::new();
 	let result = loop {
@@ -1028,18 +1046,22 @@ fn name_pat(ctx: &mut Ctx<'_, '_>, name: &[u8]) -> Result<Result<BString, BStrin
 			return Ok(Err(rembslash(name)));
 		},
 	};
-	if haswilds(&mut s, &opts) { Ok(Ok(s.into())) } else { Ok(Err(rembslash(name))) }
+	if haswilds(&mut s, &opts) {
+		Ok(Ok(s.into()))
+	} else {
+		Ok(Err(rembslash(name)))
+	}
 }
 
 // ---- printing --------------------------------------------------------------
 
 /// What printing needs from the shell: quoting options.
 struct Out {
-	rc: bool,
-	cs: Charset,
-	qo: QuoteOpts,
+	rc:       bool,
+	cs:       Charset,
+	qo:       QuoteOpts,
 	/// `-L`: print `compctl` commands.
-	list: bool,
+	list:     bool,
 	/// zsh `showmask`: print only compctls with one of these flags.
 	showmask: u32,
 }
@@ -1111,7 +1133,14 @@ enum Which {
 }
 
 /// zsh `printcompctl(s, cc, 0, ispat)`.
-fn printcompctl(o: &mut Out, out: &mut Vec<u8>, s: Option<&[u8]>, c: &Cc, ispat: bool, which: Which) {
+fn printcompctl(
+	o: &mut Out,
+	out: &mut Vec<u8>,
+	s: Option<&[u8]>,
+	c: &Cc,
+	ispat: bool,
+	which: Which,
+) {
 	const CSS: &[u8] = b"fcqovbAIFpEjrzBRGudeNOZUnQmw/";
 	const MSS: &[u8] = b" pcCwWsSnNmrRq";
 	let mut flags = c.mask;
@@ -1174,10 +1203,26 @@ fn printcompctl(o: &mut Out, out: &mut Vec<u8>, s: Option<&[u8]>, c: &Cc, ispat:
 		out.extend_from_slice(b" -tn");
 	}
 	o.printif(out, c.mstr.as_ref(), b'M');
-	o.printif(out, c.gname.as_ref(), if flags2 & cc2::NOSORT != 0 { b'V' } else { b'J' });
+	o.printif(
+		out,
+		c.gname.as_ref(),
+		if flags2 & cc2::NOSORT != 0 {
+			b'V'
+		} else {
+			b'J'
+		},
+	);
 	o.printif(out, c.keyvar.as_ref(), b'k');
 	o.printif(out, c.func.as_ref(), b'K');
-	o.printif(out, c.explain.as_ref(), if c.mask & cc::EXPANDEXPL != 0 { b'Y' } else { b'X' });
+	o.printif(
+		out,
+		c.explain.as_ref(),
+		if c.mask & cc::EXPANDEXPL != 0 {
+			b'Y'
+		} else {
+			b'X'
+		},
+	);
 	o.printif(out, c.ylist.as_ref(), b'y');
 	o.printif(out, c.prefix.as_ref(), b'P');
 	o.printif(out, c.suffix.as_ref(), b'S');
@@ -1294,7 +1339,10 @@ pub fn compctl(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 #[allow(clippy::too_many_lines, reason = "one function, as zsh's bin_compctl")]
 fn bin_compctl(ctx: &mut Ctx<'_, '_>, st: &mut State, args: &[BString]) -> R {
 	let mut p = Parser {
-		words:  args.iter().map(|a| Word { buf: metafy(a), off: 0 }).collect(),
+		words:  args
+			.iter()
+			.map(|a| Word { buf: metafy(a), off: 0 })
+			.collect(),
 		cclist: 0,
 	};
 	let mut showmask = 0;
@@ -1350,7 +1398,11 @@ fn bin_compctl(ctx: &mut Ctx<'_, '_>, st: &mut State, args: &[BString]) -> R {
 		let mut ret = 0;
 		for arg in &rest {
 			let found = match name_pat(ctx, arg)? {
-				Ok(pat) => st.pats.iter().find(|(p, _)| *p == pat).map(|(p, c)| (p.clone(), c.clone(), true)),
+				Ok(pat) => st
+					.pats
+					.iter()
+					.find(|(p, _)| *p == pat)
+					.map(|(p, c)| (p.clone(), c.clone(), true)),
 				Err(name) => st.tab.get(&name).map(|c| (name.clone(), c.clone(), false)),
 			};
 			if let Some((n, c, ispat)) = found {
@@ -1398,7 +1450,13 @@ fn bin_compctl(ctx: &mut Ctx<'_, '_>, st: &mut State, args: &[BString]) -> R {
 
 /// zsh `compctl_process_cc`: define `cc` for the commands and patterns
 /// `names`, or remove theirs (`compctl + names`).
-fn process_cc(ctx: &mut Ctx<'_, '_>, st: &mut State, names: &[BString], c: &Cc, remove: bool) -> Result<(), Need> {
+fn process_cc(
+	ctx: &mut Ctx<'_, '_>,
+	st: &mut State,
+	names: &[BString],
+	c: &Cc,
+	remove: bool,
+) -> Result<(), Need> {
 	for n in names {
 		match name_pat(ctx, n)? {
 			Ok(pat) => {

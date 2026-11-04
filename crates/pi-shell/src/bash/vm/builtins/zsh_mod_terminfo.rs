@@ -147,7 +147,11 @@ pub fn held_term(
 		return Ok(None);
 	};
 	let ti = setup(root, store, vp, &name, how != HELD_SETUPTERM)?;
-	Ok(if how == HELD_STALE { ti.map(|t| t.without_fix_sgr0()) } else { ti })
+	Ok(if how == HELD_STALE {
+		ti.map(|t| t.without_fix_sgr0())
+	} else {
+		ti
+	})
 }
 
 /// zsh/terminfo's and zsh/termcap's `boot_` (`zsetupterm`): the first of
@@ -206,7 +210,11 @@ fn setup(
 		terminfo_dirs: dirs.as_deref().map(|v| v.as_slice()),
 		home:          home.as_deref().map(|v| v.as_slice()),
 	};
-	let found = if tgetent { terminfo_db::load(term, &env) } else { terminfo_db::load_raw(term, &env) };
+	let found = if tgetent {
+		terminfo_db::load(term, &env)
+	} else {
+		terminfo_db::load_raw(term, &env)
+	};
 	let Some(ti) = found else {
 		return Ok(None);
 	};

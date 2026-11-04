@@ -71,7 +71,10 @@ struct Prof {
 
 /// A number of the record.
 fn num<T: std::str::FromStr + Default>(w: &BString) -> T {
-	w.to_str().ok().and_then(|s| s.parse().ok()).unwrap_or_default()
+	w.to_str()
+		.ok()
+		.and_then(|s| s.parse().ok())
+		.unwrap_or_default()
 }
 
 impl Prof {
@@ -89,7 +92,8 @@ impl Prof {
 			else {
 				return Self::default();
 			};
-			p.funcs.push(Pfunc { name: name.clone(), calls: num(c), time: num(t), self_: num(s) });
+			p.funcs
+				.push(Pfunc { name: name.clone(), calls: num(c), time: num(t), self_: num(s) });
 		}
 		for _ in 0..na {
 			let (Some(f), Some(t), Some(c), Some(tm), Some(s)) =
@@ -97,7 +101,13 @@ impl Prof {
 			else {
 				return Self::default();
 			};
-			p.arcs.push(Parc { from: num(f), to: num(t), calls: num(c), time: num(tm), self_: num(s) });
+			p.arcs.push(Parc {
+				from:  num(f),
+				to:    num(t),
+				calls: num(c),
+				time:  num(tm),
+				self_: num(s),
+			});
 		}
 		for _ in 0..ns {
 			let (Some(f), Some(b), Some(pv), Some(a), Some(d)) =
@@ -106,7 +116,8 @@ impl Prof {
 				return Self::default();
 			};
 			let arc = (a.as_slice() != b"-").then(|| num(a));
-			p.stack.push(Sfunc { f: num(f), beg: num(b), prev: num(pv), arc, depth: num(d) });
+			p.stack
+				.push(Sfunc { f: num(f), beg: num(b), prev: num(pv), arc, depth: num(d) });
 		}
 		p
 	}
@@ -195,7 +206,8 @@ pub fn enter(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, name: &[u8], line:
 	let f = if let Some(i) = p.funcs.iter().position(|f| f.name.as_slice() == name) {
 		i
 	} else {
-		p.funcs.push(Pfunc { name: BString::from(name), calls: 0, time: 0.0, self_: 0.0 });
+		p.funcs
+			.push(Pfunc { name: BString::from(name), calls: 0, time: 0.0, self_: 0.0 });
 		p.funcs.len() - 1
 	};
 	let arc = p.stack.last().map(|top| {
@@ -203,7 +215,8 @@ pub fn enter(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, name: &[u8], line:
 		if let Some(i) = p.arcs.iter().position(|a| a.from == from && a.to == f) {
 			i
 		} else {
-			p.arcs.push(Parc { from, to: f, calls: 0, time: 0.0, self_: 0.0 });
+			p.arcs
+				.push(Parc { from, to: f, calls: 0, time: 0.0, self_: 0.0 });
 			p.arcs.len() - 1
 		}
 	});
@@ -379,29 +392,37 @@ mod tests {
 	#[test]
 	fn records_round_trip() {
 		let p = Prof {
-			funcs: vec![
-				Pfunc { name: "f".into(), calls: 2, time: 1.5, self_: 0.25 },
-				Pfunc { name: "g h".into(), calls: 1, time: 0.125, self_: 0.125 },
-			],
+			funcs: vec![Pfunc { name: "f".into(), calls: 2, time: 1.5, self_: 0.25 }, Pfunc {
+				name:  "g h".into(),
+				calls: 1,
+				time:  0.125,
+				self_: 0.125,
+			}],
 			arcs:  vec![Parc { from: 0, to: 1, calls: 1, time: 0.125, self_: 0.125 }],
 			stack: vec![Sfunc { f: 0, beg: 3.0, prev: 2.0, arc: None, depth: 4 }],
 		};
-		let Record::Words(w) = p.encode() else { unreachable!() };
+		let Record::Words(w) = p.encode() else {
+			unreachable!()
+		};
 		assert_eq!(Prof::decode(&w), p);
 	}
 
 	#[test]
 	fn report_lists_callers_and_callees() {
 		let p = Prof {
-			funcs: vec![
-				Pfunc { name: "outer".into(), calls: 1, time: 4.0, self_: 1.0 },
-				Pfunc { name: "inner".into(), calls: 2, time: 3.0, self_: 3.0 },
-			],
+			funcs: vec![Pfunc { name: "outer".into(), calls: 1, time: 4.0, self_: 1.0 }, Pfunc {
+				name:  "inner".into(),
+				calls: 2,
+				time:  3.0,
+				self_: 3.0,
+			}],
 			arcs:  vec![Parc { from: 0, to: 1, calls: 2, time: 3.0, self_: 3.0 }],
 			stack: Vec::new(),
 		};
-		let rule = "-----------------------------------------------------------------------------------";
-		let want = format!(
+		let rule =
+			"-----------------------------------------------------------------------------------";
+		let want =
+			format!(
 			"num  calls                time                       self            name\n{rule}\n 1)    2           3.00     1.50   75.00%      3.00     1.50   75.00%  inner\n 2)    1           4.00     4.00  100.00%      1.00     1.00   25.00%  outer\n\n{rule}\n\n 2)    1           4.00     4.00  100.00%      1.00     1.00   25.00%  outer\n       2/2         3.00     1.50   75.00%      3.00     1.50             inner [1]\n\n{rule}\n\n       2/2         3.00     1.50   75.00%      3.00     1.50             outer [2]\n 1)    2           3.00     1.50   75.00%      3.00     1.50   75.00%  inner\n"
 		);
 		assert_eq!(report(&p), want);

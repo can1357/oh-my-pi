@@ -7,15 +7,20 @@ const MIN_SHARE: f64 = 0.001;
 
 #[derive(Default)]
 struct Frame<'a> {
-	samples: u64,
+	samples:  u64,
 	children: BTreeMap<&'a str, Self>,
 }
 
-/// Render folded microsecond counts as a static, bottom-up Work Profile flamegraph.
+/// Render folded microsecond counts as a static, bottom-up Work Profile
+/// flamegraph.
 pub(super) fn generate(folded: &str) -> Option<String> {
 	let mut root = Frame::default();
 	let mut max_depth = 0;
-	for line in folded.lines().map(str::trim).filter(|line| !line.is_empty()) {
+	for line in folded
+		.lines()
+		.map(str::trim)
+		.filter(|line| !line.is_empty())
+	{
 		let (stack, count) = line.rsplit_once(char::is_whitespace)?;
 		let stack = stack.trim_end();
 		if stack.is_empty() {
@@ -121,7 +126,9 @@ fn escape_xml(output: &mut String, value: &str) {
 			'"' => output.push_str("&quot;"),
 			'\'' => output.push_str("&apos;"),
 			// Replace characters that XML 1.0 cannot represent, even as entities.
-			ch if (ch < ' ' && !matches!(ch, '\t' | '\n' | '\r')) || matches!(ch, '\u{fffe}' | '\u{ffff}') => {
+			ch if (ch < ' ' && !matches!(ch, '\t' | '\n' | '\r'))
+				|| matches!(ch, '\u{fffe}' | '\u{ffff}') =>
+			{
 				output.push('\u{fffd}');
 			},
 			ch => output.push(ch),
@@ -135,9 +142,23 @@ mod tests {
 
 	fn frame_rect(svg: &str, title: &str) -> (f64, f64, f64) {
 		let frame = svg.split_once(&format!("<g><title>{title} (")).unwrap().1;
-		let rect = frame.split_once("<rect ").unwrap().1.split_once("/>").unwrap().0;
+		let rect = frame
+			.split_once("<rect ")
+			.unwrap()
+			.1
+			.split_once("/>")
+			.unwrap()
+			.0;
 		let attribute = |name| {
-			rect.split_once(&format!("{name}=\"")).unwrap().1.split_once('"').unwrap().0.parse::<f64>().unwrap()
+			rect
+				.split_once(&format!("{name}=\""))
+				.unwrap()
+				.1
+				.split_once('"')
+				.unwrap()
+				.0
+				.parse::<f64>()
+				.unwrap()
 		};
 		(attribute("x"), attribute("y"), attribute("width"))
 	}
@@ -182,7 +203,15 @@ mod tests {
 
 	#[test]
 	fn empty_zero_and_invalid_samples_have_no_graph() {
-		for folded in ["", "\n", "zero 0\n", "missing-count", "negative -1", "bad count", "a 18446744073709551615\na 1\n"] {
+		for folded in [
+			"",
+			"\n",
+			"zero 0\n",
+			"missing-count",
+			"negative -1",
+			"bad count",
+			"a 18446744073709551615\na 1\n",
+		] {
 			assert!(generate(folded).is_none(), "{folded}");
 		}
 	}

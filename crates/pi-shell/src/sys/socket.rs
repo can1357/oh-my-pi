@@ -203,12 +203,17 @@ fn so_error(fd: RawFd) -> io::Result<()> {
 	let mut e: libc::c_int = 0;
 	let mut len = size_of::<libc::c_int>() as libc::socklen_t;
 	// SAFETY: a valid out pointer and length.
-	if unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_ERROR, (&raw mut e).cast(), &raw mut len) }
-		< 0
+	if unsafe {
+		libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_ERROR, (&raw mut e).cast(), &raw mut len)
+	} < 0
 	{
 		return Err(last_error());
 	}
-	if e == 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(e)) }
+	if e == 0 {
+		Ok(())
+	} else {
+		Err(io::Error::from_raw_os_error(e))
+	}
 }
 
 /// A non-blocking connect waiting for writability.
@@ -350,7 +355,9 @@ impl<T: Send + 'static> FsPending<T> for Threaded<T> {
 /// in resolver order, without duplicates.
 fn lookup(host: &str, family: IpFamily) -> io::Result<Vec<IpAddr>> {
 	let mut out: Vec<IpAddr> = Vec::new();
-	let found = (host, 0).to_socket_addrs().map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
+	let found = (host, 0)
+		.to_socket_addrs()
+		.map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
 	for a in found {
 		let ip = a.ip();
 		let wanted = match family {
@@ -388,7 +395,11 @@ fn reverse(addr: IpAddr) -> Option<BString> {
 	if rc != 0 {
 		return None;
 	}
-	let name: Vec<u8> = host.iter().map(|&c| c as u8).take_while(|&c| c != 0).collect();
+	let name: Vec<u8> = host
+		.iter()
+		.map(|&c| c as u8)
+		.take_while(|&c| c != 0)
+		.collect();
 	Some(BString::from(name))
 }
 
@@ -403,7 +414,11 @@ impl Sockets for NativeSockets {
 				IpFamily::V6 => ip.is_ipv6(),
 				IpFamily::Any => true,
 			};
-			return FsPoll::Ready(if ok { Ok(vec![ip]) } else { Err(io::ErrorKind::NotFound.into()) });
+			return FsPoll::Ready(if ok {
+				Ok(vec![ip])
+			} else {
+				Err(io::ErrorKind::NotFound.into())
+			});
 		}
 		let text = text.to_owned();
 		Threaded::start("pi-shell-resolve", move || lookup(&text, family))
@@ -463,7 +478,8 @@ impl Sockets for NativeSockets {
 	}
 
 	fn listen(&mut self, addr: &SockAddr, backlog: u32) -> Result<Box<dyn File>, ListenError> {
-		let fd = socket(domain(addr)).map_err(|error| ListenError { stage: ListenStage::Socket, error })?;
+		let fd =
+			socket(domain(addr)).map_err(|error| ListenError { stage: ListenStage::Socket, error })?;
 		let raw = fd.as_raw_fd();
 		if matches!(addr, SockAddr::Inet(_)) {
 			oob_inline(raw);

@@ -47,16 +47,14 @@ use crate::bash::{
 		},
 		expand::{Expander, X},
 		fsprobe::{FsAns, FsReq},
-		mode,
-		probe,
+		mode, probe,
 		proc::{Probe, ProbeResult, Scratch},
 		state as vstate,
 		zle::exec::{Await, Got, WResult, Zw, push_call, then},
 		zsh::{
 			nameddir::{self, ND_USERNAME},
 			params::{self, PValue, PmFlags},
-			specials,
-			subst, text, zglob, zpattern,
+			specials, subst, text, zglob, zpattern,
 		},
 	},
 	zshopt::ZshOpt,
@@ -73,7 +71,8 @@ const IN_MATH: i32 = 2;
 const IN_COND: i32 = 3;
 const IN_ENV: i32 = 4;
 
-// ---- state kept in the completion state ---------------------------------------
+// ---- state kept in the completion state
+// ---------------------------------------
 
 /// zsh/compctl's part of the completion state ([`Comp::cc`]).
 #[derive(Clone, Debug, Default)]
@@ -126,7 +125,8 @@ impl From<Need> for Halt {
 
 type G<T> = Result<T, Halt>;
 
-// ---- the hooks ------------------------------------------------------------------
+// ---- the hooks
+// ------------------------------------------------------------------
 
 /// Whether zsh/compctl is loaded: its `compctl_make` hook is in place.
 pub fn loaded(zw: &mut Zw<'_, '_>) -> bool {
@@ -152,7 +152,8 @@ pub fn cleanup(c: &mut Comp) {
 	c.cc.runs.clear();
 }
 
-// ---- compcall ------------------------------------------------------------------
+// ---- compcall
+// ------------------------------------------------------------------
 
 /// The completion state of the vproc, taken out while the generation
 /// runs (shell code is not run meanwhile), put back by [`put`].
@@ -171,7 +172,9 @@ fn put(ctx: &mut Ctx<'_, '_>, c: Comp) {
 /// hook ([`make`]).
 pub fn compcall(ctx: &mut Ctx<'_, '_>, ops: &Ops, _args: &[BString]) -> R {
 	let depth = ctx.vp.frames.len();
-	let hook = comp(ctx.vp).and_then(|c| c.cc.make.as_ref()).is_some_and(|m| m.depth.is_none_or(|d| d == depth));
+	let hook = comp(ctx.vp)
+		.and_then(|c| c.cc.make.as_ref())
+		.is_some_and(|m| m.depth.is_none_or(|d| d == depth));
 	if !hook && comp(ctx.vp).map_or(0, |c| c.incompfunc) != 1 {
 		ctx.usage("can only be called from completion function");
 		return done(1);
@@ -229,7 +232,8 @@ pub fn compcall(ctx: &mut Ctx<'_, '_>, ops: &Ops, _args: &[BString]) -> R {
 			let m = g.c.cc.make.clone().expect("hook data");
 			g.ccmakehookfn(&m.s, m.incmd).map(|lst| (0, Some(lst)))
 		} else {
-			let flags = (if ops.isset(b'T') { 0 } else { CFN_FIRST }) | (if ops.isset(b'D') { 0 } else { CFN_DEFAULT });
+			let flags = (if ops.isset(b'T') { 0 } else { CFN_FIRST })
+				| (if ops.isset(b'D') { 0 } else { CFN_DEFAULT });
 			g.makecomplistctl(flags).map(|r| (r, None))
 		}
 	};
@@ -263,7 +267,8 @@ fn get_user_var(ctx: &mut Ctx<'_, '_>, nam: &[u8]) -> Result<Option<Vec<BString>
 	Ok(zx(ctx, |ex| compcore::get_user_var(ex, Some(nam)))?.ok().flatten())
 }
 
-// ---- read -c / -l ------------------------------------------------------------
+// ---- read -c / -l
+// ------------------------------------------------------------
 
 /// zsh `compctlread`: `read -l` and `read -c` in a function a compctl
 /// called (`args` are the names after `reply`). The `read` builtin calls
@@ -354,7 +359,8 @@ pub fn compctlread(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], reply: &[
 	done(0)
 }
 
-// ---- the compctls of a run ------------------------------------------------------
+// ---- the compctls of a run
+// ------------------------------------------------------
 
 /// A compctl of the run (zsh `Compctl` pointer): its position in
 /// [`Arena::nodes`].
@@ -389,7 +395,8 @@ impl Arena {
 		for c in [&st.compos, &st.default, &st.first] {
 			a.add(c);
 		}
-		a.nodes.push(Node { cc: Cc::zero(), ext: Vec::new(), xor: None, cond: Vec::new() });
+		a.nodes
+			.push(Node { cc: Cc::zero(), ext: Vec::new(), xor: None, cond: Vec::new() });
 		for (name, c) in &st.tab {
 			let id = a.add(c);
 			a.tab.insert(name.clone(), id);
@@ -407,7 +414,9 @@ impl Arena {
 		flat.ext = Vec::new();
 		flat.xor = None;
 		let cond = std::mem::take(&mut flat.cond);
-		self.nodes.push(Node { cc: flat, ext: Vec::new(), xor: None, cond });
+		self
+			.nodes
+			.push(Node { cc: flat, ext: Vec::new(), xor: None, cond });
 		let ext: Vec<Id> = c.ext.iter().map(|e| self.add(e)).collect();
 		let xor = match &c.xor {
 			None => None,
@@ -420,60 +429,61 @@ impl Arena {
 	}
 }
 
-// ---- the generation ---------------------------------------------------------------
+// ---- the generation
+// ---------------------------------------------------------------
 
 /// A pattern of the run (zsh `Patprog`).
 type Pat = Arc<Pattern>;
 
 /// compctl.c's statics during a run, and what the run works with.
 struct Gen<'r, 'a, 'c> {
-	ctx:     &'r mut Ctx<'a, 'c>,
-	c:       &'r mut Comp,
-	ar:      Arena,
-	calls:   &'r [Option<Vec<BString>>],
-	ncalls:  usize,
-	facts:   &'r mut Vec<Option<ProbeResult>>,
-	nfacts:  usize,
-	errflag: bool,
+	ctx:      &'r mut Ctx<'a, 'c>,
+	c:        &'r mut Comp,
+	ar:       Arena,
+	calls:    &'r [Option<Vec<BString>>],
+	ncalls:   usize,
+	facts:    &'r mut Vec<Option<ProbeResult>>,
+	nfacts:   usize,
+	errflag:  bool,
 	// compctl.c's statics.
-	curcc:   Id,
-	ccstack: Vec<Id>,
-	brange:  i32,
-	erange:  i32,
-	ccont:   u32,
-	patcomp: Option<Pat>,
+	curcc:    Id,
+	ccstack:  Vec<Id>,
+	brange:   i32,
+	erange:   i32,
+	ccont:    u32,
+	patcomp:  Option<Pat>,
 	filecomp: Option<Pat>,
-	lpre:    BString,
-	lsuf:    BString,
-	rpre:    BString,
-	rsuf:    BString,
-	ppre:    Option<BString>,
-	psuf:    Option<BString>,
-	lppre:   Option<BString>,
-	lpsuf:   Option<BString>,
-	prpre:   Option<BString>,
-	fpre:    BString,
-	fsuf:    BString,
-	qfpre:   BString,
-	qfsuf:   BString,
-	qrpre:   BString,
-	qrsuf:   BString,
-	qlpre:   BString,
-	qlsuf:   BString,
-	lpl:     i32,
-	lsl:     i32,
-	rpl:     i32,
-	rsl:     i32,
-	fpl:     i32,
-	fsl:     i32,
-	lppl:    i32,
-	lpsl:    i32,
-	noreal:  bool,
-	ic:      u8,
-	addwhat: i32,
+	lpre:     BString,
+	lsuf:     BString,
+	rpre:     BString,
+	rsuf:     BString,
+	ppre:     Option<BString>,
+	psuf:     Option<BString>,
+	lppre:    Option<BString>,
+	lpsuf:    Option<BString>,
+	prpre:    Option<BString>,
+	fpre:     BString,
+	fsuf:     BString,
+	qfpre:    BString,
+	qfsuf:    BString,
+	qrpre:    BString,
+	qrsuf:    BString,
+	qlpre:    BString,
+	qlsuf:    BString,
+	lpl:      i32,
+	lsl:      i32,
+	rpl:      i32,
+	rsl:      i32,
+	fpl:      i32,
+	fsl:      i32,
+	lppl:     i32,
+	lpsl:     i32,
+	noreal:   bool,
+	ic:       u8,
+	addwhat:  i32,
 	/// zsh `cmdstr` while the run changes it (`clwords` too live in the
 	/// completion state).
-	cmdstr:  Option<BString>,
+	cmdstr:   Option<BString>,
 }
 
 /// zsh `DISABLED`, `ALIAS_GLOBAL` of a hash node.
@@ -525,9 +535,37 @@ const OPTION_ALIASES: &[&str] = &[
 
 /// zsh's reserved words (`hashtable.c` `reswds`).
 const RESWDS: &[&str] = &[
-	"!", "[[", "{", "}", "case", "coproc", "declare", "do", "done", "elif", "else", "end", "esac",
-	"export", "fi", "float", "for", "foreach", "function", "if", "integer", "local", "nocorrect",
-	"readonly", "repeat", "select", "then", "time", "typeset", "until", "while",
+	"!",
+	"[[",
+	"{",
+	"}",
+	"case",
+	"coproc",
+	"declare",
+	"do",
+	"done",
+	"elif",
+	"else",
+	"end",
+	"esac",
+	"export",
+	"fi",
+	"float",
+	"for",
+	"foreach",
+	"function",
+	"if",
+	"integer",
+	"local",
+	"nocorrect",
+	"readonly",
+	"repeat",
+	"select",
+	"then",
+	"time",
+	"typeset",
+	"until",
+	"while",
 ];
 
 /// zsh's precommand modifiers in its builtin table.
@@ -754,8 +792,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 
 	/// zsh `quotename(s)` (`quotestring(s, instring or QT_BACKSLASH)`).
 	fn quotename(&mut self, s: &[u8]) -> G<BString> {
-		let (bang, bang_special) =
-			crate::bash::vm::zsh::params::bang_quoting(&mut self.ctx.k.root, self.ctx.cx.store, self.ctx.vp);
+		let (bang, bang_special) = crate::bash::vm::zsh::params::bang_quoting(
+			&mut self.ctx.k.root,
+			self.ctx.cx.store,
+			self.ctx.vp,
+		);
 		let o = text::QuoteOpts {
 			rcquotes: self.isset(ZshOpt::Rcquotes)?,
 			magic_equal_subst: self.isset(ZshOpt::Magicequalsubst)?,
@@ -798,7 +839,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			if self.iscom(arg0)? {
 				return Ok(Some(arg0.into()));
 			}
-			if s == 0 || !self.isset(ZshOpt::Pathdirs)? || arg0.starts_with(b"./") || arg0.starts_with(b"../") {
+			if s == 0
+				|| !self.isset(ZshOpt::Pathdirs)?
+				|| arg0.starts_with(b"./")
+				|| arg0.starts_with(b"../")
+			{
 				return Ok(None);
 			}
 		}
@@ -878,7 +923,10 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 					|| (self.access(&p, 4)?
 						&& self.stat(&p)?.is_some_and(|st| st.kind == StatKind::File && st.mode & 0o111 != 0));
 				if add {
-					self.ctx.store_record(KeyBuf::CmdHash(fname), Some(Record::CmdHash { path: p.into(), hits: 0 }));
+					self.ctx.store_record(
+						KeyBuf::CmdHash(fname),
+						Some(Record::CmdHash { path: p.into(), hits: 0 }),
+					);
 				}
 			}
 		}
@@ -909,14 +957,21 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			Ht::Alias => {
 				let d = words(ctx, MiscKey::ZshDisabledAliases)?;
 				let mut out = Vec::new();
-				for (k, r) in vstate::scan(&ctx.k.root, ctx.cx.store, ctx.vp, Table::Alias).map_err(Need::from)? {
+				for (k, r) in
+					vstate::scan(&ctx.k.root, ctx.cx.store, ctx.vp, Table::Alias).map_err(Need::from)?
+				{
 					if let (KeyBuf::Alias(n), Record::Alias(_)) = (k, r) {
 						out.push((m(&n), Hn { flags: dis(&d, &n), ..Hn::default() }));
 					}
 				}
-				for (k, r) in vstate::scan(&ctx.k.root, ctx.cx.store, ctx.vp, Table::ZshAlias).map_err(Need::from)? {
+				for (k, r) in vstate::scan(&ctx.k.root, ctx.cx.store, ctx.vp, Table::ZshAlias)
+					.map_err(Need::from)?
+				{
 					if let (KeyBuf::ZshAlias { suffix: false, name }, Record::Alias(_)) = (k, r) {
-						out.push((m(&name), Hn { flags: dis(&d, &name) | ALIAS_GLOBAL, ..Hn::default() }));
+						out.push((m(&name), Hn {
+							flags: dis(&d, &name) | ALIAS_GLOBAL,
+							..Hn::default()
+						}));
 					}
 				}
 				out
@@ -964,7 +1019,8 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 					if let Some(sp) = specials::lookup(&n)
 						&& sp.module().is_some()
 						&& !sp.is_plain()
-						&& zsh_module::param_listed(self.ctx.cx.store, self.ctx.vp, &n).map_err(Need::from)?
+						&& zsh_module::param_listed(self.ctx.cx.store, self.ctx.vp, &n)
+							.map_err(Need::from)?
 					{
 						out.push((m(&n), Hn { flags: sp.flags().bits(), global: true, scalar: None }));
 						continue;
@@ -1020,7 +1076,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		if let Err(d) = self.ex(nameddir::fill)? {
 			let _ = d;
 		}
-		let want = if self.addwhat == -1 { 0 } else { u32::from(ND_USERNAME) };
+		let want = if self.addwhat == -1 {
+			0
+		} else {
+			u32::from(ND_USERNAME)
+		};
 		for (name, hn) in self.nodes(Ht::Nameddir)? {
 			if hn.flags & want == want {
 				self.addmatch(&name, None)?;
@@ -1092,7 +1152,13 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 				self.c.core.matchers.push(Arc::clone(m));
 			}
 		}
-		let zmult = self.ctx.vp.zle.as_ref().and_then(|z| z.ed.as_ref()).map_or(1, |e| e.zmod.mult);
+		let zmult = self
+			.ctx
+			.vp
+			.zle
+			.as_ref()
+			.and_then(|z| z.ed.as_ref())
+			.map_or(1, |e| e.zmod.mult);
 		let mut mi = 0;
 		loop {
 			self.c.core.bmatchers = None;
@@ -1184,7 +1250,12 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		let oqs = c.tricky.qisuf.clone();
 		let oaq = c.tricky.autoq.clone();
 		let os = self.cmdstr.clone();
-		let qc = c.complete.compquote.as_ref().and_then(|q| q.first().copied()).unwrap_or(0);
+		let qc = c
+			.complete
+			.compquote
+			.as_ref()
+			.and_then(|q| q.first().copied())
+			.unwrap_or(0);
 		if qc != 0 {
 			if qc == b'`' {
 				c.tricky.instring = i32::from(qt::NONE);
@@ -1246,7 +1317,8 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		ret
 	}
 
-	// ---- which compctls ---------------------------------------------------------
+	// ---- which compctls
+	// ---------------------------------------------------------
 
 	/// zsh `makecomplistglobal`.
 	fn makecomplistglobal(&mut self, os: &[u8], incmd: i32, flags: i32) -> G<i32> {
@@ -1276,7 +1348,10 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			if flags & CFN_DEFAULT == 0 {
 				let t = &self.c.tricky;
 				let s: BString = if t.clwpos > 0 {
-					t.clwords.get(usize::try_from(t.clwpos - 1).unwrap_or(0)).cloned().unwrap_or_default()
+					t.clwords
+						.get(usize::try_from(t.clwpos - 1).unwrap_or(0))
+						.cloned()
+						.unwrap_or_default()
 				} else {
 					BString::default()
 				};
@@ -1344,7 +1419,9 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			self.cmdstr.as_ref().and_then(|cs| {
 				self.ar.tab.get(cs).copied().or_else(|| {
 					let mut s = cs.to_vec();
-					remlpaths(&mut s, 1).then(|| self.ar.tab.get(s.as_slice()).copied()).flatten()
+					remlpaths(&mut s, 1)
+						.then(|| self.ar.tab.get(s.as_slice()).copied())
+						.flatten()
 				})
 			})
 		};
@@ -1369,13 +1446,18 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		let raw = unmetafy(&cs);
 		let isfunc = self.ctx.function(&raw)?.is_some();
 		let isbuiltin = self.nodes(Ht::Builtin)?.iter().any(|(n, _)| *n == cs);
-		let s = if isfunc || isbuiltin { None } else { self.findcmd(&cs)? };
+		let s = if isfunc || isbuiltin {
+			None
+		} else {
+			self.findcmd(&cs)?
+		};
 		let mut ret = 0;
 		for (pat, id) in self.ar.pats.clone() {
 			let Some(p) = self.patcompile(&pat)? else {
 				continue;
 			};
-			let hit = self.pattry(&p, &cs)? || (s.is_some() && self.pattry(&p, s.as_deref().map_or(&[][..], |s| s.as_slice()))?);
+			let hit = self.pattry(&p, &cs)?
+				|| (s.is_some() && self.pattry(&p, s.as_deref().map_or(&[][..], |s| s.as_slice()))?);
 			if hit {
 				self.makecomplistcc(id, os, incmd)?;
 				ret |= 2;
@@ -1465,7 +1547,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 
 	/// `clwords[i]` (empty out of range).
 	fn clword(&self, i: i32) -> BString {
-		usize::try_from(i).ok().and_then(|i| self.c.tricky.clwords.get(i)).cloned().unwrap_or_default()
+		usize::try_from(i)
+			.ok()
+			.and_then(|i| self.c.tricky.clwords.get(i))
+			.cloned()
+			.unwrap_or_default()
 	}
 
 	/// zsh `makecomplistext`: the `-x` patterns of `occ`.
@@ -1521,10 +1607,18 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 								t = tt >= a && tt <= b;
 							},
 							(cct::CURSUF | cct::CURPRE, Arg::Str(sv)) => {
-								let s = if clwpos < clwnum { self.cond_word(os)? } else { Vec::new() };
+								let s = if clwpos < clwnum {
+									self.cond_word(os)?
+								} else {
+									Vec::new()
+								};
 								let sc = rembslash(sv);
 								if s.starts_with(&sc) {
-									compadd = if cond.ty == cct::CURSUF { i32::try_from(sc.len()).unwrap_or(0) } else { 0 };
+									compadd = if cond.ty == cct::CURSUF {
+										i32::try_from(sc.len()).unwrap_or(0)
+									} else {
+										0
+									};
 									t = true;
 								}
 							},
@@ -1541,12 +1635,20 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 								}
 							},
 							(cct::CURPAT | cct::CURSTR | cct::WORDPAT | cct::WORDSTR, Arg::Num(p, sv)) => {
-								let tt = if matches!(cond.ty, cct::CURPAT | cct::CURSTR) { clwpos } else { 0 };
+								let tt = if matches!(cond.ty, cct::CURPAT | cct::CURSTR) {
+									clwpos
+								} else {
+									0
+								};
 								let mut a = tt + p;
 								if a < 0 {
 									a += clwnum;
 								}
-								let mut s = if a < 0 || a >= clwnum { Vec::new() } else { self.clword(a).to_vec() };
+								let mut s = if a < 0 || a >= clwnum {
+									Vec::new()
+								} else {
+									self.clword(a).to_vec()
+								};
 								untokenize(&mut s);
 								if matches!(cond.ty, cct::CURPAT | cct::WORDPAT) {
 									let mut ss = sv.to_vec();
@@ -1651,8 +1753,13 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		if remq {
 			tmp = rembslash(&tmp).into();
 		}
-		let feat = mode::features(&mut self.ctx.k.root, self.ctx.cx.store, self.ctx.vp, crate::bash::syntax::Features::ZSH)
-			.map_err(Need::from)?;
+		let feat = mode::features(
+			&mut self.ctx.k.root,
+			self.ctx.cx.store,
+			self.ctx.vp,
+			crate::bash::syntax::Features::ZSH,
+		)
+		.map_err(Need::from)?;
 		let mut foo: Vec<BString> = Vec::new();
 		let mut got = false;
 		let mut cur: i32 = -1;
@@ -1666,14 +1773,14 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			src.push(b' ');
 			let z = ZleWords {
 				zlemetacs: scs_i,
-				zlemetall:  i32::try_from(tmp.len()).unwrap_or(0),
-				addedx:     1,
-				wb:         0,
-				we:         0,
-				wordbeg:    0,
-				parbegin:   -1,
-				parend:     -1,
-				inwhat:     0,
+				zlemetall: i32::try_from(tmp.len()).unwrap_or(0),
+				addedx:    1,
+				wb:        0,
+				we:        0,
+				wordbeg:   0,
+				parbegin:  -1,
+				parend:    -1,
+				inwhat:    0,
 			};
 			let mut lx = ZleLex::new(&src, feat, crate::bash::syntax::NO_ALIASES, true, z);
 			loop {
@@ -1739,7 +1846,10 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		self.c.tricky.offs = owb2;
 		let mut ts = ns.clone();
 		untokenize(&mut ts);
-		if at(&ns, 0) == SNULL || at(&ns, 0) == DNULL || ((at(&ns, 0) == STRING || at(&ns, 0) == QSTRING) && at(&ns, 1) == SNULL) {
+		if at(&ns, 0) == SNULL
+			|| at(&ns, 0) == DNULL
+			|| ((at(&ns, 0) == STRING || at(&ns, 0) == QSTRING) && at(&ns, 1) == SNULL)
+		{
 			let (nsoff, tsoff) = match at(&ns, 0) {
 				SNULL => {
 					self.c.tricky.instring = i32::from(qt::SINGLE);
@@ -1761,7 +1871,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 				swe -= 1;
 			}
 			let q = &ts[..(tsoff + 1).min(ts.len())];
-			self.c.tricky.autoq = Some(if qstack.len() > 1 { BString::default() } else { self.multiquote(q, true)? });
+			self.c.tricky.autoq = Some(if qstack.len() > 1 {
+				BString::default()
+			} else {
+				self.multiquote(q, true)?
+			});
 			ts = ts[(tsoff + 1).min(ts.len())..].to_vec();
 		} else {
 			self.c.tricky.instring = i32::from(qt::NONE);
@@ -1809,7 +1923,9 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 				swb -= i32::try_from(ql - rl).unwrap_or(0);
 			}
 		}
-		let cut = usize::try_from(swb - i32::try_from(sl).unwrap_or(0) - 1).unwrap_or(0).min(s.len());
+		let cut = usize::try_from(swb - i32::try_from(sl).unwrap_or(0) - 1)
+			.unwrap_or(0)
+			.min(s.len());
 		let mut qp = opt(&self.c.tricky.qipre).to_vec();
 		qp.extend_from_slice(&self.multiquote(&s[..cut], false)?);
 		if swe < swb {
@@ -1890,7 +2006,8 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		Ok(0)
 	}
 
-	// ---- makecomplistflags ---------------------------------------------------------
+	// ---- makecomplistflags
+	// ---------------------------------------------------------
 
 	/// zsh `makecomplistflags`: the matches of the flags of `cc`.
 	#[allow(clippy::too_many_lines, reason = "one function, as zsh's")]
@@ -1918,7 +2035,9 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			all.push(cc);
 		}
 		// Go to the end of the word unless completing inside it.
-		if !self.isset(ZshOpt::Completeinword)? && self.c.line.cs != usize::try_from(self.c.tricky.we).unwrap_or(0) {
+		if !self.isset(ZshOpt::Completeinword)?
+			&& self.c.line.cs != usize::try_from(self.c.tricky.we).unwrap_or(0)
+		{
 			self.c.line.cs = usize::try_from(self.c.tricky.we).unwrap_or(0);
 			self.c.tricky.offs = i32::try_from(s0.len()).unwrap_or(0);
 		}
@@ -1938,9 +2057,19 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		self.curcc = cc;
 		self.c.core.mflags = 0;
 		let n = self.ar.nodes[cc].cc.clone();
-		let gflags = (if n.mask2 & cc2::NOSORT != 0 { cgf::NOSORT } else { 0 })
-			| (if n.mask2 & cc2::UNIQALL != 0 { cgf::UNIQALL } else { 0 })
-			| (if n.mask2 & cc2::UNIQCON != 0 { cgf::UNIQCON } else { 0 });
+		let gflags = (if n.mask2 & cc2::NOSORT != 0 {
+			cgf::NOSORT
+		} else {
+			0
+		}) | (if n.mask2 & cc2::UNIQALL != 0 {
+			cgf::UNIQALL
+		} else {
+			0
+		}) | (if n.mask2 & cc2::UNIQCON != 0 {
+			cgf::UNIQCON
+		} else {
+			0
+		});
 		if let Some(gn) = &n.gname {
 			compcore::endcmgroup(self.c, None);
 			compcore::begcmgroup(self.c, Some(gn.as_slice()), gflags);
@@ -1980,7 +2109,8 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			}
 			self.c.core.matchers.push(Arc::clone(m));
 		}
-		if self.c.core.mnum != 0 && (self.c.core.mstack.is_some() || self.c.core.bmatchers.is_some()) {
+		if self.c.core.mnum != 0 && (self.c.core.mstack.is_some() || self.c.core.bmatchers.is_some())
+		{
 			compmatch::update_bmatchers(self.c);
 		}
 		let mut sd: Option<Vec<u8>> = None;
@@ -2011,7 +2141,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			});
 			let suffixll = d.len();
 			let offs = usize::try_from(self.c.tricky.offs).unwrap_or(0);
-			if !d.is_empty() && suffixll >= sl && offs <= suffixll - sl && d[suffixll - sl..] == sdup[..] {
+			if !d.is_empty()
+				&& suffixll >= sl
+				&& offs <= suffixll - sl
+				&& d[suffixll - sl..] == sdup[..]
+			{
 				s.truncate(suffixll - sl);
 			}
 		}
@@ -2043,7 +2177,9 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		}
 
 		// The prefix and suffix on the line.
-		let offs = usize::try_from(self.c.tricky.offs).unwrap_or(0).min(s.len());
+		let offs = usize::try_from(self.c.tricky.offs)
+			.unwrap_or(0)
+			.min(s.len());
 		self.lpl = i32::try_from(offs).unwrap_or(0);
 		let mut lpre = s[..offs].to_vec();
 		if self.c.complete.comppatmatch.is_some() {
@@ -2065,7 +2201,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		// The real (expanded) prefix and suffix.
 		self.noreal = !delit;
 		let has_exp = |x: &[u8]| x.iter().any(|&c| c == STRING || c == TICK);
-		let tt: Vec<u8> = if self.ic != 0 && self.c.core.ispar == 0 { lpre.get(1..).unwrap_or_default().to_vec() } else { lpre.clone() };
+		let tt: Vec<u8> = if self.ic != 0 && self.c.core.ispar == 0 {
+			lpre.get(1..).unwrap_or_default().to_vec()
+		} else {
+			lpre.clone()
+		};
 		let mut rpre: Vec<u8> = if has_exp(&lpre) || at(&lpre, 0) == TILDE || at(&lpre, 0) == EQUALS {
 			self.noreal = false;
 			self.getreal(&tt)?.into()
@@ -2161,7 +2301,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			let s1i = s1.unwrap_or(0);
 			let s1_is_rpre = s1.is_none();
 			let s2i = s2.unwrap_or(rsuf.len());
-			let ppre: Vec<u8> = if at(&rpre, s1i) != b'/' { Vec::new() } else { rpre[..=s1i].to_vec() };
+			let ppre: Vec<u8> = if at(&rpre, s1i) != b'/' {
+				Vec::new()
+			} else {
+				rpre[..=s1i].to_vec()
+			};
 			let psuf: Vec<u8> = rsuf[s2i..].to_vec();
 			self.ppre = Some(ppre.clone().into());
 			self.psuf = Some(psuf.clone().into());
@@ -2208,7 +2352,8 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 					let ql = qisuf.len();
 					end -= ql - usize::from(matches!(qisuf[ql - 1], b'\'' | b'"'));
 				}
-				let mut ls = line[cs.min(line.len())..end.min(line.len()).max(cs.min(line.len()))].to_vec();
+				let mut ls =
+					line[cs.min(line.len())..end.min(line.len()).max(cs.min(line.len()))].to_vec();
 				for bp in &self.c.tricky.brend {
 					let q = usize::try_from(bp.qpos).unwrap_or(0);
 					let l = bp.str.len();
@@ -2222,7 +2367,10 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 					None if sf2 != 0 => Some(psuf.clone().into()),
 					None => None,
 				};
-				self.lpsl = self.lpsuf.as_ref().map_or(0, |l| i32::try_from(l.len()).unwrap_or(0));
+				self.lpsl = self
+					.lpsuf
+					.as_ref()
+					.map_or(0, |l| i32::try_from(l.len()).unwrap_or(0));
 			} else {
 				self.lpsuf = None;
 				self.lpsl = 0;
@@ -2240,7 +2388,10 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			self.qfsuf = self.quotename(&fsuf)?;
 			if cpm.is_some() && ispattern & 2 != 0 {
 				let mut p = fpre.clone();
-				if (p.is_empty() || p.last() != Some(&STAR)) && at(&fsuf, 0) != STAR && cpm == Some(b'*') {
+				if (p.is_empty() || p.last() != Some(&STAR))
+					&& at(&fsuf, 0) != STAR
+					&& cpm == Some(b'*')
+				{
 					p.push(STAR);
 				}
 				p.extend_from_slice(&fsuf);
@@ -2367,7 +2518,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			q.extend_from_slice(&self.qrpre);
 			self.qrpre = q.into();
 		}
-		if self.ic == 0 && n.mask & cc::COMMPATH != 0 && opt(&self.ppre).is_empty() && opt(&self.psuf).is_empty() {
+		if self.ic == 0
+			&& n.mask & cc::COMMPATH != 0
+			&& opt(&self.ppre).is_empty()
+			&& opt(&self.psuf).is_empty()
+		{
 			// Command names: aliases, reserved words, functions, builtins,
 			// external commands.
 			self.dumphashtable(Ht::Alias, -3)?;
@@ -2382,7 +2537,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 				self.dumphashtable(Ht::Param, -4)?;
 			}
 		}
-		let oaw = if n.mask & cc::QUOTEFLAG != 0 { -2 } else { i32::try_from(cc::QUOTEFLAG).unwrap_or(0) };
+		let oaw = if n.mask & cc::QUOTEFLAG != 0 {
+			-2
+		} else {
+			i32::try_from(cc::QUOTEFLAG).unwrap_or(0)
+		};
 		self.addwhat = oaw;
 		if n.mask & cc::NAMED != 0 {
 			self.dumphashtable(Ht::Nameddir, self.addwhat)?;
@@ -2442,7 +2601,10 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 				.map(|j| (BString::from(metafy(&j.text)), matches!(j.state, crate::bash::store::JobState::Stopped(_))))
 				.collect();
 			for (j, stopped) in jobs {
-				if n.mask & cc::JOBS != 0 || (stopped && n.mask & cc::STOPPED != 0) || (!stopped && n.mask & cc::RUNNING != 0) {
+				if n.mask & cc::JOBS != 0
+					|| (stopped && n.mask & cc::STOPPED != 0)
+					|| (!stopped && n.mask & cc::RUNNING != 0)
+				{
 					self.addmatch(&j, None)?;
 				}
 			}
@@ -2453,7 +2615,14 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		if let Some(hpat) = &n.hpat {
 			self.hist_matches(hpat, n.hnum)?;
 		}
-		let t = n.mask & (cc::ARRAYS | cc::INTVARS | cc::ENVVARS | cc::SCALARS | cc::READONLYS | cc::SPECIALS | cc::PARAMS);
+		let t = n.mask
+			& (cc::ARRAYS
+				| cc::INTVARS
+				| cc::ENVVARS
+				| cc::SCALARS
+				| cc::READONLYS
+				| cc::SPECIALS
+				| cc::PARAMS);
 		if t != 0 {
 			self.dumphashtable(Ht::Param, i32::try_from(t).unwrap_or(0))?;
 		}
@@ -2585,7 +2754,15 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		r
 	}
 
-	fn glob_matches_in(&mut self, n: &Cc, glob: &[u8], sf1: i32, _ispattern: i32, prpre: &[u8], pl: usize) -> G<()> {
+	fn glob_matches_in(
+		&mut self,
+		n: &Cc,
+		glob: &[u8],
+		sf1: i32,
+		_ispattern: i32,
+		prpre: &[u8],
+		pl: usize,
+	) -> G<()> {
 		self.addwhat = -6;
 		let equals = self.isset(ZshOpt::Equals)?;
 		let blank = |c: u8| c == b' ' || c == b'\t';
@@ -2661,20 +2838,25 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 	/// globbed.
 	fn str_matches(&mut self, str: &[u8]) -> G<()> {
 		let mut foo: Vec<Vec<u8>> = Vec::new();
-		let feat = mode::features(&mut self.ctx.k.root, self.ctx.cx.store, self.ctx.vp, crate::bash::syntax::Features::ZSH)
-			.map_err(Need::from)?;
+		let feat = mode::features(
+			&mut self.ctx.k.root,
+			self.ctx.cx.store,
+			self.ctx.vp,
+			crate::bash::syntax::Features::ZSH,
+		)
+		.map_err(Need::from)?;
 		let mut src = b"foo ".to_vec();
 		src.extend_from_slice(&unmetafy(str));
 		let z = ZleWords {
 			zlemetacs: i32::try_from(self.c.line.cs).unwrap_or(0),
-			zlemetall:  i32::try_from(self.c.line.ll()).unwrap_or(0),
-			addedx:     0,
-			wb:         self.c.tricky.wb,
-			we:         self.c.tricky.we,
-			wordbeg:    0,
-			parbegin:   -1,
-			parend:     -1,
-			inwhat:     0,
+			zlemetall: i32::try_from(self.c.line.ll()).unwrap_or(0),
+			addedx:    0,
+			wb:        self.c.tricky.wb,
+			we:        self.c.tricky.we,
+			wordbeg:   0,
+			parbegin:  -1,
+			parend:    -1,
+			inwhat:    0,
 		};
 		{
 			let mut lx = ZleLex::new(&src, feat, crate::bash::syntax::NO_ALIASES, true, z);
@@ -2782,7 +2964,10 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			self.c.tricky.clwpos += 1;
 			self.c.tricky.clwnum += 1;
 			*incmd = 0;
-			let mut w = ow.get(br - 1..).map(<[BString]>::to_vec).unwrap_or_default();
+			let mut w = ow
+				.get(br - 1..)
+				.map(<[BString]>::to_vec)
+				.unwrap_or_default();
 			if let Some(first) = w.first_mut() {
 				*first = sub.into();
 			}
@@ -2798,7 +2983,8 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		r.map(|_| ())
 	}
 
-	// ---- gen_matches_files ------------------------------------------------------
+	// ---- gen_matches_files
+	// ------------------------------------------------------
 
 	/// zsh `gen_matches_files(dirs, execs, all)`: the files of directory
 	/// `prpre` (all, or directories and/or executables).
@@ -2813,7 +2999,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			all = false;
 			execs = false;
 		}
-		let pathpref = self.prpre.as_ref().filter(|p| !p.is_empty()).map(|p| unmetafy(p));
+		let pathpref = self
+			.prpre
+			.as_ref()
+			.filter(|p| !p.is_empty())
+			.map(|p| unmetafy(p));
 		if pathpref.as_ref().is_some_and(|p| p.len() > 4096) {
 			return Ok(());
 		}
@@ -2867,7 +3057,8 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			}
 			let ok = all
 				|| st.as_ref().is_some_and(|st| {
-					(dirs && st.kind == StatKind::Dir) || (execs && st.kind == StatKind::File && st.mode & 0o111 != 0)
+					(dirs && st.kind == StatKind::Dir)
+						|| (execs && st.kind == StatKind::File && st.mode & 0o111 != 0)
 				});
 			if !ok {
 				continue;
@@ -2907,7 +3098,13 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 	fn addmatch(&mut self, s: &[u8], hn: Option<&Hn>) -> G<()> {
 		let aw = self.addwhat;
 		let quoteflag = i32::try_from(cc::QUOTEFLAG).unwrap_or(0);
-		for bp in self.c.tricky.brbeg.iter_mut().chain(self.c.tricky.brend.iter_mut()) {
+		for bp in self
+			.c
+			.tricky
+			.brbeg
+			.iter_mut()
+			.chain(self.c.tricky.brend.iter_mut())
+		{
 			bp.curpos = if aw == quoteflag { bp.qpos } else { bp.pos };
 		}
 		let mut isfile = 0;
@@ -2918,7 +3115,12 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		// `NULL`).
 		let mut bpl: usize = 0;
 		let mut bsl: usize = 0;
-		let files_like = aw == -1 || aw == -5 || aw == -6 || aw == i32::try_from(cc::FILES).unwrap_or(0) || aw == -7 || aw == -8;
+		let files_like = aw == -1
+			|| aw == -5
+			|| aw == -6
+			|| aw == i32::try_from(cc::FILES).unwrap_or(0)
+			|| aw == -7
+			|| aw == -8;
 		let ms: Option<BString>;
 		if files_like {
 			let ppl = opt(&self.ppre).len();
@@ -2931,7 +3133,8 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			};
 			bpl = adv(&self.c.tricky.brbeg, bpl, ppl);
 			bsl = adv(&self.c.tricky.brend, bsl, psl);
-			if (aw == i32::try_from(cc::FILES).unwrap_or(0) || aw == -5) && opt(&self.psuf).is_empty() {
+			if (aw == i32::try_from(cc::FILES).unwrap_or(0) || aw == -5) && opt(&self.psuf).is_empty()
+			{
 				// The fignore check.
 				let fignore = self.ex(|ex| params::getaparam(ex, b"fignore"))?.ok().flatten().unwrap_or_default();
 				for f in fignore {
@@ -2942,11 +3145,16 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 					}
 				}
 			}
-			let filelike = aw == i32::try_from(cc::FILES).unwrap_or(0) || aw == -6 || aw == -5 || aw == -8;
+			let filelike =
+				aw == i32::try_from(cc::FILES).unwrap_or(0) || aw == -6 || aw == -5 || aw == -8;
 			let (p, sf, qu) = if filelike {
 				let qfpre = self.qfpre.clone();
 				let qfsuf = self.qfsuf.clone();
-				(self.tildequote(&qfpre, true)?, self.multiquote(&qfsuf, true)?, if opt(&self.ppre).is_empty() { 2 } else { 1 })
+				(
+					self.tildequote(&qfpre, true)?,
+					self.multiquote(&qfsuf, true)?,
+					if opt(&self.ppre).is_empty() { 2 } else { 1 },
+				)
 			} else {
 				let fpre = self.fpre.clone();
 				let fsuf = self.fsuf.clone();
@@ -2954,7 +3162,17 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			};
 			let fc = self.filecomp.clone();
 			let (bcp, bcs) = (i32::try_from(ppl).unwrap_or(0), i32::try_from(psl).unwrap_or(0));
-			ms = self.comp_match(&p, &sf, s, fc.as_deref(), &mut lc, qu, (&mut bpl, bcp), (&mut bsl, bcs), &mut isexact)?;
+			ms = self.comp_match(
+				&p,
+				&sf,
+				s,
+				fc.as_deref(),
+				&mut lc,
+				qu,
+				(&mut bpl, bcp),
+				(&mut bsl, bcs),
+				&mut isexact,
+			)?;
 			if ms.is_none() {
 				return Ok(());
 			}
@@ -3011,11 +3229,31 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			let pc = self.patcomp.clone();
 			let len = |x: &BString| i32::try_from(x.len()).unwrap_or(0);
 			let (l1, ls1, l2, ls2) = (len(&p1), len(&s1), len(&p2), len(&s2));
-			let mut r = self.comp_match(&p1, &s1, s, pc.as_deref(), &mut lc, qu, (&mut bpl, l1), (&mut bsl, ls1), &mut isexact)?;
+			let mut r = self.comp_match(
+				&p1,
+				&s1,
+				s,
+				pc.as_deref(),
+				&mut lc,
+				qu,
+				(&mut bpl, l1),
+				(&mut bsl, ls1),
+				&mut isexact,
+			)?;
 			if r.is_none() {
 				bpl = bpt;
 				bsl = bst;
-				r = self.comp_match(&p2, &s2, s, None, &mut lc, qu, (&mut bpl, l2), (&mut bsl, ls2), &mut isexact)?;
+				r = self.comp_match(
+					&p2,
+					&s2,
+					s,
+					None,
+					&mut lc,
+					qu,
+					(&mut bpl, l2),
+					(&mut bsl, ls2),
+					&mut isexact,
+				)?;
 				if r.is_none() {
 					return Ok(());
 				}
@@ -3036,7 +3274,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 			self.ztat(s)?;
 		}
 		let prpre = self.prpre.clone();
-		let (lppre, lpsuf) = if isfile != 0 { (self.lppre.clone(), self.lpsuf.clone()) } else { (None, None) };
+		let (lppre, lpsuf) = if isfile != 0 {
+			(self.lppre.clone(), self.lpsuf.clone())
+		} else {
+			(None, None)
+		};
 		compcore::add_match_data(
 			self.c,
 			isalt,
@@ -3078,7 +3320,11 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 		let (bpl, bcp) = bp;
 		let (bsl, bcs) = bs;
 		Ok(zx(self.ctx, |ex| {
-			let env = if cp.is_some() { Some(zpattern::char_env(ex)?) } else { None };
+			let env = if cp.is_some() {
+				Some(zpattern::char_env(ex)?)
+			} else {
+				None
+			};
 			let cp = cp.zip(env.as_ref()).map(|(p, env)| (p, env.env()));
 			compmatch::comp_match(ex, c, pfx, Some(sfx), w, cp, clp, qu, bpl, bcp, bsl, bcs, exact)
 		})?
@@ -3090,7 +3336,10 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 	/// the `lstat` and `stat` modes of `prpre`/`./` + `s`, put in the
 	/// completion state's cache.
 	fn ztat(&mut self, s: &[u8]) -> G<()> {
-		let mut key = self.prpre.as_ref().map_or_else(|| b"./".to_vec(), |p| p.to_vec());
+		let mut key = self
+			.prpre
+			.as_ref()
+			.map_or_else(|| b"./".to_vec(), |p| p.to_vec());
 		key.extend_from_slice(s);
 		if self.c.core.ztat_cache.contains_key(key.as_slice()) {
 			return Ok(());
@@ -3175,7 +3424,11 @@ fn getcpat(str: &[u8], cpatindex: i32, cpat: &[u8], class: bool) -> i32 {
 		idx = -idx;
 	}
 	let n = str.len();
-	let mut order: Box<dyn Iterator<Item = usize>> = if d { Box::new((0..n).rev()) } else { Box::new(0..n) };
+	let mut order: Box<dyn Iterator<Item = usize>> = if d {
+		Box::new((0..n).rev())
+	} else {
+		Box::new(0..n)
+	};
 	for s in &mut order {
 		let mut t = s;
 		let mut matched = true;

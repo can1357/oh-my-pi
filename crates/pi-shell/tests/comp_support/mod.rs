@@ -4,12 +4,12 @@
 //! the port of zsh's `Test/comptest` harness ([`comptest`]).
 //!
 //! Environment switches (both crates read them):
-//! - `PI_COMP_ORACLE=1` runs `/bin/zsh` instead of obash, checking the
-//!   stored expectations against zsh itself.
+//! - `PI_COMP_ORACLE=1` runs `/bin/zsh` instead of obash, checking the stored
+//!   expectations against zsh itself.
 //! - `PI_COMP_BLESS=1` (with `PI_COMP_ORACLE=1`) rewrites the stored screen
 //!   snapshots of `zsh_comp_pty` from `/bin/zsh`.
-//! - `PI_COMP_QUIET_MS` how long output must stay quiet before a screen is
-//!   read (default 400).
+//! - `PI_COMP_QUIET_MS` how long output must stay quiet before a screen is read
+//!   (default 400).
 
 #![allow(dead_code, reason = "each test crate uses a subset")]
 
@@ -42,7 +42,10 @@ fn flag(name: &str) -> bool {
 /// How long output must stay quiet before a screen is read.
 #[must_use]
 pub fn quiet() -> Duration {
-	let ms = env::var("PI_COMP_QUIET_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
+	let ms = env::var("PI_COMP_QUIET_MS")
+		.ok()
+		.and_then(|v| v.parse().ok())
+		.unwrap_or(400);
 	Duration::from_millis(ms)
 }
 

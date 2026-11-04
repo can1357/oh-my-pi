@@ -141,10 +141,10 @@ pub const fn iblank(c: u8) -> bool {
 /// (zsh's `ifs_wide`); they are never whitespace.
 #[derive(Clone, Debug)]
 pub struct Seps {
-	sep:  [u64; 4],
-	wsep: [u64; 4],
+	sep:    [u64; 4],
+	wsep:   [u64; 4],
 	/// The non-ASCII `IFS` characters (zsh `ifs_wide`), with `mb` only.
-	wide: Vec<u32>,
+	wide:   Vec<u32>,
 	/// Characters are UTF-8 sequences (zsh `isset(MULTIBYTE)`).
 	pub mb: bool,
 }
@@ -762,7 +762,9 @@ pub fn quotestring_comma(s: &[u8], how: Qt, o: QuoteOpts, comma: bool) -> Vec<u8
 				u += 1;
 			}
 			continue;
-		} else if (ispecial(c) || (comma && c == b',') || (o.bang_special && o.bang != 0 && c == o.bang))
+		} else if (ispecial(c)
+			|| (comma && c == b',')
+			|| (o.bang_special && o.bang != 0 && c == o.bang))
 			&& ((c != b'=' && c != b'~')
 				|| u == 0
 				|| (o.magic_equal_subst && matches!(s[u - 1], b'=' | b':'))
@@ -963,13 +965,13 @@ pub mod getkey {
 pub struct KeyString {
 	/// The decoded text: metafied with [`getkey::DOLLAR_QUOTE`], raw
 	/// bytes otherwise.
-	pub text:     Vec<u8>,
+	pub text:      Vec<u8>,
 	/// With [`getkey::DOLLAR_QUOTE`]: the input bytes consumed, up to and
 	/// including the closing quote.
-	pub consumed: usize,
+	pub consumed:  usize,
 	/// With [`getkey::BACKSLASH_C`]: a `\c` ended the text (`print` and
 	/// `echo` stop all output there).
-	pub cut:      bool,
+	pub cut:       bool,
 	/// With [`getkey::NARROW`]: a code point did not convert (zsh's
 	/// `character not in range` error).
 	pub range_err: bool,

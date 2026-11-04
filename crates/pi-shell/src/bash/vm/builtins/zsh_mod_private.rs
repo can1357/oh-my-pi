@@ -4,15 +4,15 @@
 //! A private parameter is a local of the declaring function's scope
 //! carrying [`Attrs::ZSH_PRIVATE`]. The engine applies the module's
 //! wrappers where zsh installs them:
-//! - `vm/state.rs` lookups skip a private while a function scope lies above
-//!   it (zsh `getprivatenode`/`scopeprivate`): functions the declaring one
-//!   calls see, assign and unset the next outer parameter of the name, and
-//!   listings show that one; the environment of external commands keeps
-//!   an exported private (zsh never takes it out of the environment).
+//! - `vm/state.rs` lookups skip a private while a function scope lies above it
+//!   (zsh `getprivatenode`/`scopeprivate`): functions the declaring one calls
+//!   see, assign and unset the next outer parameter of the name, and listings
+//!   show that one; the environment of external commands keeps an exported
+//!   private (zsh never takes it out of the environment).
 //! - `vm/zsh/params.rs` gives a private zsh's `makeprivate` flags
 //!   (`PM_HIDE|PM_SPECIAL|PM_REMOVABLE|PM_RO_BY_DESIGN`): its type cannot
-//!   change, `typeset -p` does not list it, and creating a global of its
-//!   name over it fails (`NAME: can't change parameter attribute`,
+//!   change, `typeset -p` does not list it, and creating a global of its name
+//!   over it fails (`NAME: can't change parameter attribute`,
 //!   `params::refuse_private`).
 //!
 //! While the module is loaded, `private` is also a `typeset`-like reserved
