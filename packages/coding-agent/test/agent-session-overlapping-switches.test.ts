@@ -33,7 +33,7 @@ function messageText(message: AgentMessage): string {
 describe("overlapping session switches", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
-	let session: AgentSession | undefined;
+	const sessions: AgentSession[] = [];
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-overlapping-switches-");
@@ -42,8 +42,7 @@ describe("overlapping session switches", () => {
 	});
 
 	afterEach(async () => {
-		await session?.dispose();
-		session = undefined;
+		for (const created of sessions.splice(0)) await created.dispose();
 		authStorage.close();
 		tempDir.removeSync();
 		AsyncJobManager.resetForTests();
@@ -63,14 +62,18 @@ describe("overlapping session switches", () => {
 		});
 		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
 		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
-		session = new AgentSession({
+		const created = new AgentSession({
 			agent,
-			sessionManager: SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions")),
+			sessionManager: SessionManager.create(
+				tempDir.path(),
+				path.join(tempDir.path(), `sessions-${sessions.length}`),
+			),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage),
 			toolRegistry: new Map(),
 		});
-		return session;
+		sessions.push(created);
+		return created;
 	}
 
 	interface RefusedSwitch {
@@ -234,6 +237,116 @@ describe("overlapping session switches", () => {
 		} finally {
 			pending?.refuse();
 			await Promise.allSettled([pending?.done, starting]);
+		}
+	}, 30_000);
+
+	it("reports a transition as in progress from the moment it is requested until it and the ones queued after it settle", async () => {
+		const target = createSession();
+		const first = await startRefusedSwitch(target, "first");
+		let second: RefusedSwitch | undefined;
+		try {
+			// A new session requested now is in progress at once, though it waits for the switch.
+			second = await startRefusedSwitch(target, "second");
+			expect(target.isSessionTransitioning).toBe(true);
+			let waitFinished = false;
+			const waiting = target.waitForSessionTransition().then(() => {
+				waitFinished = true;
+			});
+			first.refuse();
+			expect(await first.done).toBe(false);
+			// The second switch now runs and waits for its owner: the wait must still be pending.
+			await Bun.sleep(300);
+			expect(waitFinished).toBe(false);
+			expect(target.isSessionTransitioning).toBe(true);
+			second.refuse();
+			expect(await second.done).toBe(false);
+			await waiting;
+			expect(target.isSessionTransitioning).toBe(false);
+		} finally {
+			first.refuse();
+			second?.refuse();
+			await Promise.allSettled([first.done, second?.done]);
+		}
+	}, 30_000);
+
+	it("runs a transition that calls back into its session through another session's transition", async () => {
+		const outer = createSession();
+		const other = createSession();
+		const breakCycle = Promise.withResolvers<void>();
+		let resetFinished = false;
+		outer.setSessionSwitchReconciler(async () => {
+			await other.newSession();
+		});
+		other.setSessionSwitchReconciler(async () => {
+			// The other session's transition resets the outer session's context, from inside both transitions.
+			await Promise.race([
+				outer.resetSessionContext().then(() => {
+					resetFinished = true;
+				}),
+				breakCycle.promise,
+			]);
+		});
+		const targetCwd = path.join(tempDir.path(), "ancestor-cwd");
+		await fs.mkdir(targetCwd, { recursive: true });
+		const manager = SessionManager.create(targetCwd, path.join(tempDir.path(), "ancestor-sessions"));
+		manager.appendMessage({ role: "user", content: "ancestor session", timestamp: Date.now() });
+		await manager.ensureOnDisk();
+		const file = manager.getSessionFile();
+		await manager.close();
+		if (!file) throw new Error("Expected target session file");
+		const switching = outer.switchSession(file, { onCwdChange: async () => true });
+		try {
+			const finished = await Promise.race([switching.then(() => true), Bun.sleep(10_000).then(() => false)]);
+			expect(finished).toBe(true);
+			expect(resetFinished).toBe(true);
+		} finally {
+			breakCycle.resolve();
+			await Promise.allSettled([switching]);
+		}
+	}, 30_000);
+
+	it("keeps a new session requested after a transition whose unawaited nested switch is refused later", async () => {
+		const target = createSession();
+		let nested: RefusedSwitch | undefined;
+		const nestedStarted = Promise.withResolvers<void>();
+		let started = false;
+		target.setSessionSwitchReconciler(async () => {
+			if (started) return;
+			started = true;
+			// Started from the outer switch and not awaited: it outlives the outer switch's own work.
+			nested = await startRefusedSwitch(target, "nested");
+			nestedStarted.resolve();
+		});
+		const outerCwd = target.sessionManager.getCwd();
+		const manager = SessionManager.create(outerCwd, path.join(tempDir.path(), "outer-sessions"));
+		manager.appendMessage({ role: "user", content: "outer session", timestamp: Date.now() });
+		await manager.ensureOnDisk();
+		const file = manager.getSessionFile();
+		await manager.close();
+		if (!file) throw new Error("Expected target session file");
+		let starting: Promise<boolean> | undefined;
+		try {
+			const outer = target.switchSession(file);
+			await nestedStarted.promise;
+			expect(await outer).toBe(true);
+			// A new session requested now must wait for the nested switch, not run while it is pending.
+			let startFinished = false;
+			starting = target.newSession().then(value => {
+				startFinished = true;
+				return value;
+			});
+			await Bun.sleep(500);
+			expect(startFinished).toBe(false);
+			nested!.refuse();
+			expect(await nested!.done).toBe(false);
+			expect(await starting).toBe(true);
+			const newSessionId = target.sessionManager.getSessionId();
+			await target.waitForSessionTransition();
+			expect(target.sessionManager.getSessionId()).toBe(newSessionId);
+			expect(target.sessionManager.getSessionFile()).not.toBe(file);
+		} finally {
+			nested?.refuse();
+			await Promise.allSettled([nested?.done, starting]);
 		}
 	}, 30_000);
 });
