@@ -11,7 +11,7 @@ use crate::bash::{
 	diag::Diag,
 	pattern::zsh::SubFlags,
 	syntax::zsh::tok::{
-		BNULL, BNULLKEEP, META, POUND, head, is_null, metafy, span, tail, unmetafy, untokenize,
+		BNULL, BNULLKEEP, POUND, head, is_null, metafy, span, tail, unmetafy, untokenize,
 	},
 	vm::{
 		expand::{Expander, Stop, X},
@@ -183,7 +183,7 @@ fn realpath(ex: &mut Expander<'_, '_>, path: &[u8]) -> X<Option<Vec<u8>>> {
 }
 
 /// zsh `chabspath` (`:a`): absolute, `.` and `..` resolved lexically.
-fn chabspath(s: &[u8], cwd: &[u8]) -> Vec<u8> {
+pub(crate) fn chabspath(s: &[u8], cwd: &[u8]) -> Vec<u8> {
 	let mut path: Vec<u8> = if s.first() == Some(&b'/') {
 		s.to_vec()
 	} else {
@@ -219,7 +219,7 @@ fn chabspath(s: &[u8], cwd: &[u8]) -> Vec<u8> {
 }
 
 /// zsh `convamps`: `&` in `out` replaced by `in`, `\x` by `x`.
-fn convamps(out: &[u8], inp: &[u8]) -> Vec<u8> {
+pub(crate) fn convamps(out: &[u8], inp: &[u8]) -> Vec<u8> {
 	let mut r = Vec::with_capacity(out.len());
 	let mut i = 0;
 	while i < out.len() {
@@ -319,22 +319,26 @@ fn hist_subst(
 /// One part of `:s/l/r/` at `ptr[start..]`, up to the delimiter `del` or
 /// the end (zsh `modify`, case `s`): the text, a backslash that starts a
 /// pair turned into `Bnull` (in double quotes zsh leaves it untokenized)
-/// and the pair taken as is; and the index it stops at.
-fn s_part(ptr: &[u8], start: usize, del: u8) -> (Vec<u8>, usize) {
+/// and the pair taken as is; the index it stops at; and the length of the
+/// delimiter there (a character under `mb`; 0 at the end).
+fn s_part(ptr: &[u8], start: usize, del: u32, mb: bool) -> (Vec<u8>, usize, usize) {
 	let mut out = Vec::new();
 	let mut i = start;
-	while i < ptr.len() && ptr[i] != del {
-		let pair = matches!(ptr[i], BNULL | b'\\' | META) && i + 1 < ptr.len();
-		if pair {
-			out.push(if ptr[i] == b'\\' { BNULL } else { ptr[i] });
+	while i < ptr.len() {
+		if matches!(ptr[i], BNULL | b'\\') && i + 1 < ptr.len() {
+			out.push(BNULL);
 			out.push(ptr[i + 1]);
 			i += 2;
-		} else {
-			out.push(ptr[i]);
-			i += 1;
+			continue;
 		}
+		let (n, d) = text::delim_at(ptr, i, mb);
+		if d == del {
+			return (out, i, n);
+		}
+		out.extend_from_slice(span(ptr, i, i + n));
+		i += n;
 	}
-	(out, i)
+	(out, i, 0)
 }
 
 /// zsh `modify`: apply the colon modifiers at `ptr[*pos..]` (starting at
@@ -377,14 +381,16 @@ pub fn modify(
 				b's' => {
 					c = b's';
 					*pos += 1;
-					let Some(&del) = ptr.get(*pos) else {
+					if *pos >= ptr.len() {
 						return Err(Stop::Fail(Diag::BadSubst { text: Default::default() }));
-					};
-					let (l, p1) = s_part(ptr, *pos + 1, del);
+					}
+					let mb = params::mb(ex)?;
+					let (dl, del) = text::delim_at(ptr, *pos, mb);
+					let (l, p1, l1) = s_part(ptr, *pos + dl, del, mb);
 					if p1 >= ptr.len() {
 						return Err(Stop::Fail(Diag::BadSubst { text: Default::default() }));
 					}
-					let (r, p3) = s_part(ptr, p1 + 1, del);
+					let (r, p3, l3) = s_part(ptr, p1 + l1, del, mb);
 					if !l.is_empty() {
 						let mut l: Vec<u8> = l
 							.into_iter()
@@ -410,10 +416,9 @@ pub fn modify(
 						}
 					}
 					hist.r = Some(rr);
-					*pos = p3;
-					if p3 >= ptr.len() {
-						*pos = p3 - 1;
-					}
+					// zsh leaves the pointer on the last byte of the
+					// closing delimiter (optional at the end).
+					*pos = p3 + l3 - 1;
 				},
 				b'&' => c = b's',
 				b'g' => {
@@ -427,8 +432,9 @@ pub fn modify(
 				b'W' => {
 					wall = true;
 					*pos += 1;
-					let (t, dl) = subscript::get_strarg(ptr, *pos);
-					let start = (*pos + text::charlen(ptr, *pos)).min(t);
+					let mb = params::mb(ex)?;
+					let (t, dl) = subscript::get_strarg(ptr, *pos, mb);
+					let start = (*pos + text::charlen(ptr, *pos, mb)).min(t);
 					sep = Some(span(ptr, start, t).to_vec());
 					*pos = t + dl;
 					c = 0;
@@ -529,8 +535,8 @@ fn apply(
 		b'r' => remtext(&mut s),
 		b'e' => rembutext(&mut s),
 		b't' => remlpaths(&mut s, count),
-		b'l' => s = text::casemodify(&s, text::CaseMod::Lower),
-		b'u' => s = text::casemodify(&s, text::CaseMod::Upper),
+		b'l' => s = text::casemodify(&s, text::CaseMod::Lower, params::mb(ex)?),
+		b'u' => s = text::casemodify(&s, text::CaseMod::Upper, params::mb(ex)?),
 		b's' => {
 			if let (Some(l), Some(r)) = (hist.l.clone(), hist.r.clone()) {
 				hist_subst(ex, &mut s, &l, &r, gbal)?;

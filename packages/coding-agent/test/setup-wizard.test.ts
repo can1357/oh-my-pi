@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it, mock, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import * as updateCli from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 import { runOnboardingSetup } from "@oh-my-pi/pi-coding-agent/commands/setup";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -65,6 +66,15 @@ afterEach(async () => {
 });
 
 describe("setup wizard scene selection", () => {
+	// Tests run from a source checkout, which never updates itself; pin a self-updating install.
+	beforeEach(() => {
+		vi.spyOn(updateCli, "canSelfUpdate").mockResolvedValue(true);
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	it("runs all v1 scenes for a new user", async () => {
 		const scenes = await selectSetupScenes(0, ALL_SCENES, fakeContextWithConfiguredModel(), { isTTY: true });
 		expect(scenes.map(scene => scene.id)).toEqual(ALL_SCENES.map(scene => scene.id));
@@ -111,6 +121,14 @@ describe("setup wizard scene selection", () => {
 		});
 		expect(selected.map(scene => scene.id)).toEqual(ALL_SCENES.map(scene => scene.id));
 		expect(await selectSetupScenes(0, ALL_SCENES, ctx, { isTTY: false, force: true })).toEqual([]);
+	});
+
+	it("skips the auto-update question where omp cannot update itself (Tern, Nix, a source checkout)", async () => {
+		vi.spyOn(updateCli, "canSelfUpdate").mockResolvedValue(false);
+		const scenes = await selectSetupScenes(0, ALL_SCENES, fakeContextWithConfiguredModel(), { isTTY: true });
+		expect(scenes.map(scene => scene.id)).toEqual(
+			ALL_SCENES.map(scene => scene.id).filter(id => id !== "auto-update"),
+		);
 	});
 
 	it("drops the glyph scene once the terminal renders omp's bundled icons in-band", async () => {

@@ -41,7 +41,7 @@ import {
 	shouldDisableReasoning,
 	toReasoningEffort,
 } from "@oh-my-pi/pi-tui/thinking";
-import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import type { EditModeSetting } from "../edit/settings";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
@@ -157,8 +157,8 @@ export interface ModelControlsHost {
 	sessionId(): string;
 	promptGeneration(): number;
 	sessionGenerationSettled(): Promise<void> | undefined;
-	resolveActiveEditMode(): EditMode;
-	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
+	resolveActiveEditMode(): EditModeSetting;
+	syncAfterModelChange(previousEditMode: EditModeSetting): Promise<void>;
 	/** Calls onPublished synchronously after successful assignment, before subscribers or reconciliation. */
 	setModelWithProviderSessionReset(
 		model: Model,
