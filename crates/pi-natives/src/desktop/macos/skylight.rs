@@ -1543,9 +1543,9 @@ pub(in super::super) struct FrontApp {
 /// hears of the window it opens. The reroute is set up before the read, as
 /// setting up its taps can stall the sampler past what the watch tolerates.
 pub(in super::super) fn front_app(browser: Option<pid_t>) -> Option<FrontApp> {
-	with_reroute_setup(|| {
-		let spi = FOREGROUND.as_ref()?;
-		loop {
+	let spi = FOREGROUND.as_ref()?;
+	read_front_app(
+		|| {
 			let (read_at, picks, rearm) = if let Some(browser) = browser {
 				let ((read_at, picks), rearm) = rearm_for_front(
 					|| {
@@ -1561,8 +1561,31 @@ pub(in super::super) fn front_app(browser: Option<pid_t>) -> Option<FrontApp> {
 			} else {
 				(Instant::now(), Picks::read(spi), Rearm::Replace(None))
 			};
+			Some((read_at, picks, rearm))
+		},
+		|picks, read_at, rearm| watch_picks(spi, picks, read_at, rearm),
+		#[cfg(test)]
+		|| {},
+	)
+}
+
+/// One read's candidate must be published before another read can arm one.
+fn read_front_app(
+	mut prepare: impl FnMut() -> Option<(Instant, Picks, Rearm)>,
+	mut publish: impl FnMut(Picks, Instant, Rearm) -> bool,
+	#[cfg(test)] on_wait: impl FnOnce(),
+) -> Option<FrontApp> {
+	// Test-only wait notification lets concurrent reads release a paused
+	// publisher.
+	#[cfg(test)]
+	if REROUTE_SETUP.is_locked() {
+		on_wait();
+	}
+	with_reroute_setup(|| {
+		loop {
+			let (read_at, picks, rearm) = prepare()?;
 			let psn = picks.front?;
-			if watch_picks(spi, picks, read_at, rearm) {
+			if publish(picks, read_at, rearm) {
 				return Some(FrontApp { psn, read_at });
 			}
 		}
@@ -2793,20 +2816,64 @@ mod tests {
 	const CONTROL: u64 = 0x4_0101;
 
 	#[test]
-	fn a_read_serializes_setup_through_publication_without_owning_desktop_control() {
+	fn concurrent_front_reads_leave_the_newer_reroute_published() {
+		use std::sync::mpsc;
+
+		enum ReadPhase {
+			Waiting,
+			Published,
+		}
+
 		let _serial = control::OWNERSHIP_TEST.lock();
-		with_reroute_setup(|| {
-			let reroute = arm_reroute_with(|| {
-				let _owner = control::own_focus().expect("tap setup must not own desktop control");
-				assert!(REROUTE_SETUP.try_lock().is_none(), "tap setup stays serialized");
-				Some(())
+		let now = Instant::now();
+		let picks = Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_USER) };
+		let log = &Mutex::new(pick_log(None));
+		let (older, _) = KeyReroute::unwatched_for_test(1);
+		let (newer, _) = KeyReroute::unwatched_for_test(2);
+		let expected = newer.armed();
+		let (prepared, at_publish) = mpsc::channel();
+		let (resume, resumed) = mpsc::channel();
+		let (phase, phases) = mpsc::channel();
+		thread::scope(|scope| {
+			let first = scope.spawn(move || {
+				let mut older = Some(older);
+				read_front_app(
+					|| Some((now, picks, Rearm::Replace(older.take()))),
+					|picks, read_at, rearm| {
+						prepared.send(()).unwrap();
+						resumed.recv().unwrap();
+						log.lock().watch_read(picks, read_at, rearm)
+					},
+					|| {},
+				)
 			});
-			assert!(reroute.is_some(), "the read sets up its reroute");
-			assert!(
-				REROUTE_SETUP.try_lock().is_none(),
-				"another read cannot arm before this candidate is published"
-			);
+			at_publish.recv().unwrap();
+			let second = scope.spawn(|| {
+				let mut newer = Some(newer);
+				read_front_app(
+					|| Some((now, picks, Rearm::Replace(newer.take()))),
+					|picks, read_at, rearm| {
+						let published = log.lock().watch_read(picks, read_at, rearm);
+						phase.send(ReadPhase::Published).unwrap();
+						published
+					},
+					|| phase.send(ReadPhase::Waiting).unwrap(),
+				)
+			});
+			// With serialization the newer read waits. Without it, let that
+			// read finish publishing before the paused older read resumes.
+			let _phase = phases.recv().unwrap();
+			resume.send(()).unwrap();
+			assert!(first.join().unwrap().is_some());
+			assert!(second.join().unwrap().is_some());
 		});
+		assert_eq!(
+			log.lock()
+				.reroute
+				.as_ref()
+				.map(|(_, reroute)| reroute.armed()),
+			Some(expected)
+		);
 	}
 
 	#[test]
@@ -4595,7 +4662,7 @@ mod tests {
 		let mut reads = [(100, 0), (100, 1), (100, 2)].into_iter();
 		let setups = Cell::new(0);
 		let cancelled = Cell::new(false);
-		let (candidate, ended) = KeyReroute::unwatched_for_test();
+		let (candidate, ended) = KeyReroute::unwatched_for_test(0);
 		let mut candidate = Some(candidate);
 		let (snapshot, _) = rearm_for_front(
 			|| reads.next(),
@@ -4624,7 +4691,7 @@ mod tests {
 	fn a_no_reroute_read_drops_the_retained_tap_without_retrying() {
 		let now = Instant::now();
 		let mut log = pick_log(Some((now, now + PICK_WATCH)));
-		let (reroute, ended) = KeyReroute::unwatched_for_test();
+		let (reroute, ended) = KeyReroute::unwatched_for_test(0);
 		log.reroute = Some((now, reroute));
 		let mut reads = [(100, 0), (100, 1)].into_iter();
 		let (snapshot, rearm) = rearm_for_front(
@@ -4647,7 +4714,7 @@ mod tests {
 		let now = Instant::now();
 		let read_at = now.checked_sub(SWITCH_SAMPLE).unwrap();
 		let log = Mutex::new(pick_log(Some((read_at, now))));
-		let (reroute, ended) = KeyReroute::unwatched_for_test();
+		let (reroute, ended) = KeyReroute::unwatched_for_test(0);
 		log.lock().reroute = Some((now, reroute));
 		let older = FrontApp { psn: HOLD_THIRD, read_at };
 		let desktop = FakeHold { over_at: Some(0), ..FakeHold::new(&[]) };
@@ -4672,7 +4739,7 @@ mod tests {
 		for expired in [false, true] {
 			let mut log = pick_log(Some((start, boundary)));
 			log.sampled_at = Some(now);
-			let (reroute, _) = KeyReroute::unwatched_for_test();
+			let (reroute, _) = KeyReroute::unwatched_for_test(0);
 			let candidate = reroute.armed();
 			log.reroute = Some((start, reroute));
 			if expired {
