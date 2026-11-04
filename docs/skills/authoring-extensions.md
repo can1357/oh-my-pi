@@ -261,7 +261,7 @@ The derived name is the filename stem (or directory name for `index.ts`-style en
 - **`tool_call` errors are fail-closed.** If a `tool_call` handler throws, the tool is blocked.
 - **Self-scheduled callbacks run in-process with no isolation.** A raw `setInterval`/`setTimeout`/detached-promise callback that throws escapes the handler-dispatch try/catch and crashes the whole session (`uncaughtException`). Use `ctx.setInterval` / `ctx.setTimeout` for background work — they contain callback throws and auto-clear on `session_shutdown`. With raw timers you must add your own `try/catch` and cleanup.
 - **Command names must not clash with built-ins.** Conflicts are skipped with a diagnostic log.
-- **Reserved shortcuts are ignored** (`ctrl+c`, `ctrl+d`, `ctrl+z`, `ctrl+k`, `ctrl+p`, `ctrl+l`, `ctrl+o`, `ctrl+t`, `ctrl+g`, `ctrl+q`, `alt+m`, `shift+tab`, `shift+ctrl+p`, `alt+enter`, `escape`, `enter`).
+- **Reserved shortcuts are ignored** (`ctrl+c`, `ctrl+d`, `ctrl+z`, `ctrl+k`, `ctrl+p`, `ctrl+l`, `ctrl+o`, `ctrl+t`, `ctrl+g`, `ctrl+q`, `alt+m`, `shift+tab`, `shift+ctrl+p`, `alt+enter`, `escape`, `enter`). Check a chord with `pi.getShortcutConflict(chord)` from a handler.
 
 ## Further reading
 

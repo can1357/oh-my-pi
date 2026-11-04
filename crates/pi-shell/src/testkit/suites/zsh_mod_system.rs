@@ -32,15 +32,14 @@ fn zsh_mod_system_option_and_argument_errors() {
 	assert_eq!(out, "end\n");
 	assert_eq!(
 		err,
-		"zsh:sysread:1: integer expected: x\nzsh:sysread:1: not an identifier: \
-		 1a\nzsh:sysread:1: not an identifier: 1a\nzsh:sysread:1: integer expected: \
-		 -1\nzsh:sysread:1: integer expected: 1x\nzsh:syswrite:1: not enough \
-		 arguments\nzsh:syswrite:1: too many arguments\nzsh:syserror:1: too many \
-		 arguments\nzsh:sysopen:1: file descriptor not specified\nzsh:sysopen:1: not an \
-		 identifier: 1x\nzsh:sysopen:1: unsupported option: bogus\n\nzsh:sysopen:1: invalid mode \
-		 64\nzsh:sysopen:1: invalid mode 0x9\nzsh:sysopen:1: unsupported option: \
-		 NOATIME\n\nzsh:sysseek:1: unknown argument to -w: foo\nzsh:zsystem:1: not enough \
-		 arguments\nzsh:zsystem:1: unknown subcommand: foo\n"
+		"zsh:sysread:1: integer expected: x\nzsh:sysread:1: not an identifier: 1a\nzsh:sysread:1: \
+		 not an identifier: 1a\nzsh:sysread:1: integer expected: -1\nzsh:sysread:1: integer \
+		 expected: 1x\nzsh:syswrite:1: not enough arguments\nzsh:syswrite:1: too many \
+		 arguments\nzsh:syserror:1: too many arguments\nzsh:sysopen:1: file descriptor not \
+		 specified\nzsh:sysopen:1: not an identifier: 1x\nzsh:sysopen:1: unsupported option: \
+		 bogus\n\nzsh:sysopen:1: invalid mode 64\nzsh:sysopen:1: invalid mode 0x9\nzsh:sysopen:1: \
+		 unsupported option: NOATIME\n\nzsh:sysseek:1: unknown argument to -w: foo\nzsh:zsystem:1: \
+		 not enough arguments\nzsh:zsystem:1: unknown subcommand: foo\n"
 	);
 	assert_eq!(st, 0);
 }
@@ -64,8 +63,8 @@ fn zsh_mod_system_zsystem_supports() {
 fn zsh_mod_system_flock_argument_errors() {
 	let (out, err, st) = zsh(
 		"zmodload zsh/system; zsystem flock; zsystem flock a b; zsystem flock -x a; zsystem flock \
-		 -f; zsystem flock -f 1x a; zsystem flock -t; zsystem flock -t 2000000000 a; zsystem \
-		 flock -i; zsystem flock -i 0 a; zsystem flock -u 3; echo $?",
+		 -f; zsystem flock -f 1x a; zsystem flock -t; zsystem flock -t 2000000000 a; zsystem flock \
+		 -i; zsystem flock -i 0 a; zsystem flock -u 3; echo $?",
 	);
 	assert_eq!(out, "1\n");
 	assert_eq!(
@@ -75,8 +74,8 @@ fn zsh_mod_system_flock_argument_errors() {
 		 requires a variable name\nzsh:zsystem:1: flock: option f requires a variable \
 		 name\nzsh:zsystem:1: flock: option t requires a numeric timeout\nzsh:zsystem:1: flock: \
 		 invalid timeout value: '2000000000'\nzsh:zsystem:1: flock: option i requires a numeric \
-		 retry interval\nzsh:zsystem:1: flock: invalid interval value: '0'\nzsh:zsystem:1: \
-		 flock: file descriptor 3 not in use for locking\n"
+		 retry interval\nzsh:zsystem:1: flock: invalid interval value: '0'\nzsh:zsystem:1: flock: \
+		 file descriptor 3 not in use for locking\n"
 	);
 	assert_eq!(st, 0);
 }
@@ -84,8 +83,8 @@ fn zsh_mod_system_flock_argument_errors() {
 #[test]
 fn zsh_mod_system_syserror() {
 	let (out, err, st) = zsh(
-		"zmodload zsh/system; syserror ENOENT; syserror -p \"x: \" 2; syserror -e v EBADF; print \
-		 -r -- $v; syserror FOO; echo $?; syserror 999; syserror -e 1v 2; echo $?",
+		"zmodload zsh/system; syserror ENOENT; syserror -p \"x: \" 2; syserror -e v EBADF; print -r \
+		 -- $v; syserror FOO; echo $?; syserror 999; syserror -e 1v 2; echo $?",
 	);
 	assert_eq!(out, "Bad file descriptor\n2\n1\n");
 	assert_eq!(
@@ -120,8 +119,8 @@ fn zsh_mod_system_sysread_buffer_size_reads_in_parts() {
 #[test]
 fn zsh_mod_system_sysread_here_string_into_an_element() {
 	let (out, err, st) = zsh(
-		"zmodload zsh/system; sysread x <<< 'here doc'; print -r -- \"[$x]\"; sysread -c n \
-		 'arr[2]' <<< ab; typeset -p arr n",
+		"zmodload zsh/system; sysread x <<< 'here doc'; print -r -- \"[$x]\"; sysread -c n 'arr[2]' \
+		 <<< ab; typeset -p arr n",
 	);
 	assert_eq!(out, "[here doc\n]\ntypeset -a arr=( '' $'ab\\n' )\ntypeset -i n=3\n");
 	assert_eq!(err, "");
@@ -131,8 +130,8 @@ fn zsh_mod_system_sysread_here_string_into_an_element() {
 #[test]
 fn zsh_mod_system_bad_fds_set_errno() {
 	let (out, err, st) = zsh(
-		"zmodload zsh/system; sysread -i 7 x; echo $?; syswrite -o 7 x; echo $?; syserror; \
-		 syswrite -c n hello; echo \" $n\"",
+		"zmodload zsh/system; sysread -i 7 x; echo $?; syswrite -o 7 x; echo $?; syserror; syswrite \
+		 -c n hello; echo \" $n\"",
 	);
 	assert_eq!(out, "2\n2\nhello 5\n");
 	assert_eq!(err, "Bad file descriptor\n");
@@ -142,8 +141,8 @@ fn zsh_mod_system_bad_fds_set_errno() {
 #[test]
 fn zsh_mod_system_sysread_copies_to_an_fd() {
 	let (out, _, st) = zsh(
-		"zmodload zsh/system; echo abc | sysread -o 1 -c n; echo \" $n $?\"; : | sysread -o 1 -c \
-		 m; echo $? $m",
+		"zmodload zsh/system; echo abc | sysread -o 1 -c n; echo \" $n $?\"; : | sysread -o 1 -c m; \
+		 echo $? $m",
 	);
 	assert_eq!(out, "abc\n 4 0\n5 0\n");
 	assert_eq!(st, 0);
@@ -170,9 +169,9 @@ fn zsh_mod_system_bad_timeout_is_a_math_error() {
 #[test]
 fn zsh_mod_system_parameters() {
 	let (out, err, st) = zsh(
-		"zmodload zsh/system; print -r -- ${#errnos} $errnos[1] $errnos[9] $errnos[-1]; print -r \
-		 -- ${(t)errnos} ${(t)sysparams}; print -r -- ${(k)sysparams}; [[ $sysparams[pid] == $$ \
-		 ]] && echo same; print $sysparams[procsubstpid]; errnos=(a); echo $?",
+		"zmodload zsh/system; print -r -- ${#errnos} $errnos[1] $errnos[9] $errnos[-1]; print -r -- \
+		 ${(t)errnos} ${(t)sysparams}; print -r -- ${(k)sysparams}; [[ $sysparams[pid] == $$ ]] && \
+		 echo same; print $sysparams[procsubstpid]; errnos=(a); echo $?",
 	);
 	#[cfg(target_os = "macos")]
 	assert_eq!(
@@ -206,8 +205,8 @@ fn zsh_mod_system_parameters_need_the_module() {
 #[test]
 fn zsh_mod_system_seek_and_tell_on_bad_fds() {
 	let (out, err, st) = zsh(
-		"zmodload zsh/system; sysseek -u 9 0; echo $?; echo $(( systell(9) )); echo $(( \
-		 systell(-1) )); echo after",
+		"zmodload zsh/system; sysseek -u 9 0; echo $?; echo $(( systell(9) )); echo $(( systell(-1) \
+		 )); echo after",
 	);
 	assert_eq!(out, "2\n-1\n");
 	assert_eq!(err, "zsh:1: file descriptor out of range\n");
@@ -217,8 +216,8 @@ fn zsh_mod_system_seek_and_tell_on_bad_fds() {
 #[test]
 fn zsh_mod_system_pipes_do_not_seek() {
 	let (out, err, st) = zsh(
-		"zmodload zsh/system; exec 3< <(print abc); sysread -i 3 x; print -r -- $x; sysseek -u 3 \
-		 0; echo $?; syserror",
+		"zmodload zsh/system; exec 3< <(print abc); sysread -i 3 x; print -r -- $x; sysseek -u 3 0; \
+		 echo $?; syserror",
 	);
 	assert_eq!(out, "abc\n\n2\n");
 	assert_eq!(err, "Illegal seek\n");

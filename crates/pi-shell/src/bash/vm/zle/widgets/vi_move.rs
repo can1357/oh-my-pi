@@ -13,8 +13,9 @@
 
 use super::vi::{ViState, at, vigetkey};
 use crate::bash::vm::zle::{
-	Editor, hist, modflags,
+	Editor,
 	exec::{Await, Got, WResult, Zw, then},
+	hist, modflags,
 	utils::{self, iblank, invicmdmode},
 };
 

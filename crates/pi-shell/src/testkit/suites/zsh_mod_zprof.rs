@@ -43,7 +43,8 @@ fn zsh_mod_zprof_header_and_errors() {
 	assert_eq!(
 		out,
 		format!(
-			"+b:zprof\nnum  calls                time                       self            name\n{RULE}\n0\n"
+			"+b:zprof\nnum  calls                time                       self            \
+			 name\n{RULE}\n0\n"
 		)
 	);
 	assert_eq!(st, 0);
@@ -61,7 +62,8 @@ fn zsh_mod_zprof_counts_calls_of_one_function() {
 	assert_eq!(
 		mask(&out),
 		format!(
-			"num calls time self name\n{RULE}\n 1) 2 # # #% # # #% f\n\n{RULE}\n\n 1) 2 # # #% # # #% f\n"
+			"num calls time self name\n{RULE}\n 1) 2 # # #% # # #% f\n\n{RULE}\n\n 1) 2 # # #% # # \
+			 #% f\n"
 		)
 	);
 	assert_eq!(st, 0);
@@ -76,7 +78,10 @@ fn zsh_mod_zprof_lists_callers_and_callees() {
 	let idx = Regex::new(r"\[[0-9]+\]").unwrap();
 	let mut lines: Vec<String> = mask(&out)
 		.lines()
-		.map(|l| idx.replace_all(&num.replace_all(l, "N)"), "[N]").into_owned())
+		.map(|l| {
+			idx.replace_all(&num.replace_all(l, "N)"), "[N]")
+				.into_owned()
+		})
 		.collect();
 	lines.sort();
 	let mut want: Vec<String> = [
@@ -109,7 +114,10 @@ fn masked_lines(out: &str) -> Vec<String> {
 	let idx = Regex::new(r"\[[0-9]+\]$").unwrap();
 	let mut lines: Vec<String> = mask(out)
 		.lines()
-		.map(|l| idx.replace_all(&num.replace_all(l, "N)"), "[N]").into_owned())
+		.map(|l| {
+			idx.replace_all(&num.replace_all(l, "N)"), "[N]")
+				.into_owned()
+		})
 		.collect();
 	lines.sort();
 	lines

@@ -35,12 +35,13 @@ import type {
 } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { toolNamesByWire } from "../utils/tool-names";
 import { type AnthropicOptions, shouldStripThinkingHistory } from "./anthropic";
 import { mapStainlessArch, mapStainlessOs } from "./anthropic-headers";
 import { createProviderErrorMessage } from "./error-message";
 import droidIdentity from "./factory-droid/droid-identity.md" with { type: "text" };
 import { streamFactoryDroidGemini } from "./factory-droid/gemini";
-import { factoryDroidToolNamesByWire, encodeFactoryDroidCompletionsToolName } from "./factory-droid/tool-names";
+import { encodeFactoryDroidCompletionsToolName } from "./factory-droid/tool-names";
 import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from "./register-builtins";
 
 /**
@@ -598,7 +599,7 @@ function streamCompletionsWire(a: Attempt, inner: Model<"openai-completions">): 
 	const policyMaxLength = resolveCatalogPolicy(inner).toolCallNameMaxLength;
 	const maxLength = typeof policyMaxLength === "number" ? policyMaxLength : 64;
 	const encode = (name: string) => encodeFactoryDroidCompletionsToolName(name, maxLength);
-	const toolNamesByWire = factoryDroidToolNamesByWire(a.context.tools, encode);
+	const wireNames = toolNamesByWire(a.context.tools, encode);
 	// The selected dialect owns every reasoning field, so the shared encoder gets none.
 	const extraBody = buildCompletionsReasoningBody(a.route.policy, a.effort, a.disabled);
 	const source = streamOpenAICompletions(
@@ -631,7 +632,7 @@ function streamCompletionsWire(a: Attempt, inner: Model<"openai-completions">): 
 		},
 	);
 	const decodeCall = (block: ToolCall) => {
-		block.name = toolNamesByWire.get(block.name) ?? block.name;
+		block.name = wireNames.get(block.name) ?? block.name;
 	};
 	const decode = (message: AssistantMessage) => {
 		for (const block of message.content) if (block.type === "toolCall") decodeCall(block);

@@ -418,7 +418,12 @@ fn expand_ps4(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32) -> Opt
 	let mode = super::exec::mode_of(vp);
 	let tunit = k
 		.engine
-		.text_unit(b"${PS4@P}", TextKind::HereDoc, mode)
+		.text_unit(
+			b"${PS4@P}",
+			TextKind::HereDoc,
+			mode,
+			k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
+		)
 		.ok()?;
 	let w = tunit.words.last().cloned()?;
 	let mut log = Vec::new();

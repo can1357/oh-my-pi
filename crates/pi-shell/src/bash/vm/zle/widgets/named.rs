@@ -53,7 +53,13 @@ fn term_size(zw: &mut Zw<'_, '_>) -> (i64, i64) {
 		.getsparam(b"LINES")
 		.map(|v| zw_int(&v))
 		.filter(|&c| c > 0);
-	let or = |v: Option<i64>, t: usize, d: i64| v.unwrap_or(if t > 0 { i64::try_from(t).unwrap_or(d) } else { d });
+	let or = |v: Option<i64>, t: usize, d: i64| {
+		v.unwrap_or(if t > 0 {
+			i64::try_from(t).unwrap_or(d)
+		} else {
+			d
+		})
+	};
 	(or(cols, tc, 80), or(lines, tl, 24))
 }
 
@@ -687,7 +693,12 @@ fn on_other(zw: &mut Zw<'_, '_>, mut st: Named, mut cmd: BString) -> WResult {
 	} else if st.typed.len() == NAMLEN || cmd.as_slice() != b"self-insert" {
 		feep = true;
 	} else {
-		match zw.ed.lastchar_wide.or_else(|| u8::try_from(zw.ed.lastchar).ok().filter(u8::is_ascii).map(char::from)) {
+		match zw.ed.lastchar_wide.or_else(|| {
+			u8::try_from(zw.ed.lastchar)
+				.ok()
+				.filter(u8::is_ascii)
+				.map(char::from)
+		}) {
 			Some(c) if !c.is_control() => {
 				push_char(&mut st.typed, c);
 				if st.listed {

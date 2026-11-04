@@ -92,6 +92,7 @@ import {
 	listAllSessionsForPicker,
 	listSessions,
 	listSessionsForPicker,
+	movesConversation,
 	type PickerListing,
 	type SessionContinuation,
 	type SessionInfo,
@@ -540,6 +541,18 @@ export function lastModelChangeRole(
 		return role;
 	}
 	return undefined;
+}
+
+/**
+ * The newest of `entries` that {@link movesConversation}, when `branch` ends at it: where the
+ * conversation stands. `undefined` when there is none, or the branch sits on an older entry or another branch.
+ */
+export function conversationTip(
+	entries: readonly SessionEntry[],
+	branch: readonly SessionEntry[],
+): SessionEntry | undefined {
+	const branchTip = branch.findLast(movesConversation);
+	return branchTip && branchTip === entries.findLast(movesConversation) ? branchTip : undefined;
 }
 
 /**
@@ -4015,6 +4028,11 @@ export class SessionManager {
 	/** All session entries (excludes header). Returns a shallow copy. */
 	getEntries(): SessionEntry[] {
 		return [...this.#entries];
+	}
+
+	/** {@link conversationTip} of the session at its active leaf. */
+	getConversationTip(): SessionEntry | undefined {
+		return conversationTip(this.#entries, this.#index.branchView());
 	}
 
 	/**

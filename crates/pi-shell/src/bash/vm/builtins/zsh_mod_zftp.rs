@@ -27,8 +27,8 @@ use std::net::{IpAddr, SocketAddr};
 use bstr::{BString, ByteSlice};
 use serde::{Deserialize, Serialize};
 
-pub use self::io::{ZftpAns, ZftpLive, ZftpOp};
 use self::io::{Fail, SockInfo, XferSpec};
+pub use self::io::{ZftpAns, ZftpLive, ZftpOp};
 use super::{Control, Ctx, Need, Outcome, R, done, zsh_args::zx, zsh_mod_tcp as tcp};
 use crate::bash::{
 	diag::Diag,
