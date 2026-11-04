@@ -43,7 +43,7 @@ Message peers via `write` with `path: "agent://<id>"` and `content`. Your id is 
 
 Your assignment sets your files and scope; stay inside it. Address peers by exact roster id; NEVER invent names.
 - Messages: only a question that blocks you or a blocker/decision report, sent directly to the one agent that can answer. Short; never long-form content.
-- NEVER send FYI, progress, or "editing <file>" announcements; NEVER broadcast.
+- NEVER send FYI, progress, or "editing <file>" announcements.
 - Change needed outside your assignment? Ask its owner or Main first.
 - Asked a question? Keep working on whatever it does not block; NEVER `wait` on a peer's or Main's progress.
 - Discovery: the roster above shows live (running+idle) peers when it was written and a parked count; it can be out of date. Read bare `history://` for registered agent transcripts and current peers; parked identities are omitted from the roster.

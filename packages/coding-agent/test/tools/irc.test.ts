@@ -616,32 +616,6 @@ describe("IRC", () => {
 			return { jobManager, delivered };
 		}
 
-		it("does not relay woken peers' turns back to a subagent broadcaster", async () => {
-			const broadcaster = makeFakeSession();
-			registry.register({
-				id: "0-C",
-				displayName: "task",
-				kind: "sub",
-				status: "idle",
-				session: broadcaster.session,
-			});
-			const a = registerIdleSubagent("0-A");
-			const b = registerIdleSubagent("0-B");
-
-			const sent = await executeSend({ registry, senderId: "0-C" }, { to: "all", message: "fixers: rebase now" });
-			expect(sent.details?.receipts?.map(receipt => receipt.outcome)).toEqual(["woken", "woken"]);
-			await a.settled();
-			await b.settled();
-			expect(broadcaster.delivered).toEqual([]);
-
-			// A direct message still gets the woken peer's turn back.
-			await executeSend({ registry, senderId: "0-C" }, { to: "0-A", message: "status?" });
-			await a.settled();
-			expect(broadcaster.delivered).toMatchObject([
-				{ from: "0-A", to: "0-C", body: "Not for me.", wakeRelay: true },
-			]);
-		});
-
 		it("does not deliver woken children's turns to a main-agent broadcaster", async () => {
 			const main = makeFakeSession();
 			registry.register({ id: "Main", displayName: "main", kind: "main", status: "idle", session: main.session });

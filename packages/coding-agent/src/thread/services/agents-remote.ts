@@ -232,8 +232,8 @@ export class RemoteIrcBus implements IrcBusApi {
 		this.#remote = remote;
 	}
 
-	send(msg: Omit<IrcMessage, "id" | "ts">, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
-		return this.#remote.call("send", msg, opts);
+	send(msg: Omit<IrcMessage, "id" | "ts">): Promise<IrcDeliveryReceipt> {
+		return this.#remote.call("send", msg);
 	}
 
 	sentSince(from: string, to: string, sinceTs: number): boolean {
