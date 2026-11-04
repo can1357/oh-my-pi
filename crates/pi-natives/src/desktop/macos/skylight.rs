@@ -1717,10 +1717,8 @@ impl PickLog {
 				}
 			},
 			Rearm::Replace(reroute) => {
-				if reroute.is_none()
-					&& let Some((_, previous)) = self.reroute.take()
-				{
-					previous.cancel();
+				if reroute.is_none() {
+					self.cancel_reroute(KeyReroute::cancel);
 				}
 				self.reroute = reroute.map(|reroute| (now, reroute));
 			},
@@ -1792,13 +1790,18 @@ impl PickLog {
 		}
 	}
 
-	/// The sampler could not start: what follows the latest read goes unseen,
-	/// so the watch vouches for nothing ([`Self::since`]), and nothing would
-	/// end the read's reroute.
-	fn lose_sampler(&mut self) {
+	/// Sampling ended or could not start: the watch vouches for nothing,
+	/// and fresh routing must stop before the retained tap is dropped.
+	fn lose_sampler(&mut self, cancel: impl FnOnce(KeyReroute)) {
 		self.sampling = false;
 		self.watch_from = None;
-		self.reroute = None;
+		self.cancel_reroute(cancel);
+	}
+
+	fn cancel_reroute(&mut self, cancel: impl FnOnce(KeyReroute)) {
+		if let Some((_, reroute)) = self.reroute.take() {
+			cancel(reroute);
+		}
 	}
 }
 
@@ -1825,15 +1828,14 @@ fn watch_picks(spi: &'static ForegroundSpi, picks: Picks, now: Instant, rearm: R
 				let mut log = PICK_LOG.lock();
 				log.record(picks, now);
 				if log.watch_until.is_none_or(|until| now >= until) {
-					log.sampling = false;
-					log.reroute = None;
+					log.lose_sampler(KeyReroute::cancel);
 					return;
 				}
 			}
 		});
 	// Without a sampler nothing vouches for the time until the hold.
 	if sampler.is_err() {
-		PICK_LOG.lock().lose_sampler();
+		PICK_LOG.lock().lose_sampler(KeyReroute::cancel);
 	}
 	true
 }
@@ -4383,7 +4385,7 @@ mod tests {
 		assert!(ended.since(read, read + PICK_WATCH).is_some());
 		// The sampler could not start.
 		let mut lost = pick_log(Some((read, read + PICK_WATCH)));
-		lost.lose_sampler();
+		lost.lose_sampler(KeyReroute::cancel);
 		assert!(lost.since(read, read).is_none());
 	}
 
@@ -4694,7 +4696,12 @@ mod tests {
 		assert_eq!(older.hold_from_watch(&log, now, &desktop).unwrap(), 0);
 		assert!(log.lock().reroute.is_some(), "the hold never consumes another read's reroute");
 		assert!(!ended.load(Ordering::Acquire));
-		log.lock().lose_sampler();
+		let mut cancelled = false;
+		log.lock().lose_sampler(|reroute| {
+			cancelled = true;
+			reroute.cancel();
+		});
+		assert!(cancelled, "watch teardown must cancel fresh routing, not only drop its owner");
 		assert!(ended.load(Ordering::Acquire), "only the watch ends the retained reroute");
 	}
 
@@ -4712,7 +4719,7 @@ mod tests {
 			log.reroute = Some((start, reroute));
 			if expired {
 				// The sampler reached the old deadline after the reuse decision.
-				log.lose_sampler();
+				log.lose_sampler(KeyReroute::cancel);
 			}
 			assert_eq!(log.watch_read(picks, now, Rearm::Keep(candidate)), !expired);
 			if expired {
