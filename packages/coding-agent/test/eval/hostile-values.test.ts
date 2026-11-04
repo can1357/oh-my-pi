@@ -368,7 +368,9 @@ describe("eval runtimes survive hostile values", () => {
 						const tag = `consumer-${seed}-${index}`;
 						const source = jsValue(rng, 2, false);
 						const reads: Record<string, number> = {};
-						const shape = consumerResult(rng, () => hostValue(source, reads, tag), reads, tag);
+						// Some shapes make the value more than once; each value made counts its own reads.
+						let made = 0;
+						const shape = consumerResult(rng, () => hostValue(source, reads, `${tag}#${made++}`), reads, tag);
 						let cell: Cell | undefined;
 						const unhandled = await unhandledRejectionsDuring(async () => {
 							cell = await run(session, language, twoLines, chunk =>

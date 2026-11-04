@@ -111,13 +111,17 @@ const ERROR_CLASS_NAMES: readonly ErrorClassName[] = [
  * that throws means no.
  */
 export function inheritsFrom(value: unknown, prototype: object): boolean {
-	return walkPrototypes(value, proto => proto === prototype) !== undefined;
+	return walkPrototypes(value, rootReach(), proto => proto === prototype) !== undefined;
 }
 
 /** The nearest built-in error class on `value`'s prototype chain; bounded like {@link inheritsFrom}. Never throws. */
 export function errorClassOf(value: unknown): ErrorClassName | undefined {
+	return errorClassAt(value, rootReach());
+}
+
+function errorClassAt(value: unknown, reach: Reach): ErrorClassName | undefined {
 	let found: ErrorClassName | undefined;
-	walkPrototypes(value, proto => {
+	walkPrototypes(value, reach, proto => {
 		for (let index = 0; index < ERROR_PROTOTYPES.length; index++) {
 			if (proto === ERROR_PROTOTYPES[index]) {
 				found = ERROR_CLASS_NAMES[index];
@@ -137,24 +141,29 @@ export function errorClassOf(value: unknown): ErrorClassName | undefined {
  * {@link describeError}.
  */
 export function isErrorValue(value: unknown): value is Error {
-	return errorClassOf(value) !== undefined || isNativeError(value);
+	return isErrorAt(value, rootReach());
+}
+
+function isErrorAt(value: unknown, reach: Reach): boolean {
+	return errorClassAt(value, reach) !== undefined || isNativeError(value);
 }
 
 /** The first prototype on `value`'s chain that `matches`, within the depth limit. */
-function walkPrototypes(value: unknown, matches: (proto: object) => boolean): object | undefined {
+function walkPrototypes(value: unknown, reach: Reach, matches: (proto: object) => boolean): object | undefined {
 	if (value === null || (typeof value !== "object" && typeof value !== "function")) return undefined;
 	try {
-		// A Proxy's `getPrototypeOf` trap may return a rejected promise as the prototype.
+		// A Proxy's `getPrototypeOf` trap may return a rejected promise as the prototype. Only a promise is
+		// observed here: describing each prototype would walk its own chain in turn, without bound.
 		let proto = reflectGetPrototypeOf(value);
-		observeRejection(proto);
-		for (let depth = 0; proto !== null && depth < PROTOTYPE_DEPTH_LIMIT; depth++) {
+		if (isPromise(proto)) observeReached(proto, reach);
+		for (let level = 0; proto !== null && level < PROTOTYPE_DEPTH_LIMIT; level++) {
 			if (matches(proto)) return proto;
 			proto = reflectGetPrototypeOf(proto);
-			observeRejection(proto);
+			if (isPromise(proto)) observeReached(proto, reach);
 		}
 	} catch (thrown) {
-		// A Proxy's `getPrototypeOf` trap threw; what it threw may be a rejected promise.
-		observeRejection(thrown);
+		// A Proxy's `getPrototypeOf` trap threw; what it threw may be a rejected promise or an error holding one.
+		observeReached(thrown, reach);
 	}
 	return undefined;
 }
@@ -169,50 +178,96 @@ function bounded(text: string, limit: number): string {
 }
 
 /**
- * `object[key]`, read once. A read that yields a native promise has it observed
- * ({@link observeQuietly}), so a getter that returns a rejected promise cannot
- * leave a rejection unhandled because it was described.
+ * `object[key]`, read once. What the read yields is observed ({@link observeRejection}), so a getter
+ * that returns a rejected promise, or an error holding one, cannot leave a rejection unhandled because
+ * it was described.
  */
-function readField(object: object, key: string): unknown {
+function readField(object: object, key: string, reach: Reach): unknown {
 	const field: unknown = reflectGet(object, key);
-	observeRejection(field);
+	observeReached(field, reach);
 	return field;
 }
 
 /**
- * Marks a native promise's rejection as handled, through the built-in `then`
- * captured at load. Applied to everything a description reads or catches: the
- * described value, each field read, each throw. Whatever a promise settles
- * with is observed in turn: a fulfilment value that is itself a promise (one
- * whose own `then` was removed, so it was not adopted), and a rejection reason
- * that is a rejected promise. Both callbacks return nothing, so observing
- * forwards no value into a child promise. A promise whose `constructor` or
- * species refuses even that stays unobserved; such a promise is outside what a
- * description can handle. Each promise is observed once: a value or reason
- * that leads back to a promise already observed (a promise rejected with
- * itself, or a cycle of them) stops there instead of queuing callbacks
- * forever. Never throws.
+ * Observes a value a description reached, or a value given to it, so that nothing it holds is left
+ * unhandled: the described value, each field read, each throw, each prototype a trap returns, and
+ * whatever a promise among them settles with. A native promise is marked handled through the built-in
+ * `then` captured at load; what it fulfils or rejects with is observed in turn, and its callbacks return
+ * nothing, so no value is forwarded into a child promise. An error is described, so each of its fields
+ * is read once and observed in turn. Anything else is left alone: a plain object's fields are not read.
+ *
+ * Each promise and each error is observed once. From one value, a chain of them is followed to at most
+ * {@link OBSERVE_DEPTH_LIMIT} steps, counted across promise callbacks too, and at most
+ * {@link OBSERVE_STEP_BUDGET} promises and errors are followed in all: an error has five fields, so
+ * a getter that makes a new error on every read would otherwise grow the work five times per step. A
+ * promise reached past either bound is still marked handled; only what it settles with is no longer
+ * followed. An error past them is not described. A promise whose `constructor` or species refuses the
+ * built-in `then` stays unobserved; such a promise is outside what a description can handle. Never
+ * throws.
  */
 export function observeRejection(value: unknown): void {
-	if (!isPromise(value) || observedPromises.has(value)) return;
-	observedPromises.add(value);
-	try {
-		reflectApply(promiseThen, value, [observeRejection, observeRejection]);
-	} catch {
-		// The promise's `constructor` getter or species constructor threw.
-	}
+	observeReached(value, rootReach());
 }
 
-/** Promises already handed to {@link observeRejection}; weak, so it holds none of them alive. */
+/** How many promise and error steps {@link observeRejection} follows from a value before it stops. */
+const OBSERVE_DEPTH_LIMIT = 16;
+/** How many promises and errors {@link observeRejection} follows from one value in all. */
+const OBSERVE_STEP_BUDGET = 64;
+
+/** Where an observation is: its depth from the value first given, and the steps that value has left. */
+interface Reach {
+	depth: number;
+	budget: { steps: number };
+}
+
+function rootReach(): Reach {
+	return { depth: 0, budget: { steps: OBSERVE_STEP_BUDGET } };
+}
+
+/** One step further, sharing the budget; `undefined` when either bound is reached. */
+function nextReach(reach: Reach): Reach | undefined {
+	if (reach.depth + 1 >= OBSERVE_DEPTH_LIMIT || reach.budget.steps <= 0) return undefined;
+	reach.budget.steps -= 1;
+	return { depth: reach.depth + 1, budget: reach.budget };
+}
+
+/** Promises and errors already handed to {@link observeReached}; weak, so it holds none of them alive. */
 const observedPromises = new WeakSet<object>();
+const observedErrors = new WeakSet<object>();
+
+function observeReached(value: unknown, reach: Reach): void {
+	if (value === null || (typeof value !== "object" && typeof value !== "function")) return;
+	if (isPromise(value)) {
+		if (observedPromises.has(value)) return;
+		observedPromises.add(value);
+		const next = nextReach(reach);
+		// Past a bound the promise is still marked handled; only what it settles with is no longer followed.
+		const settled = next ? (result: unknown): void => observeReached(result, next) : ignoreSettled;
+		try {
+			reflectApply(promiseThen, value, [settled, settled]);
+		} catch {
+			// The promise's `constructor` getter or species constructor threw.
+		}
+		return;
+	}
+	if (observedErrors.has(value)) return;
+	// The step is spent before the error check: that check walks the value's prototypes, whose traps can
+	// throw new values to observe in turn, so every level of that recursion must pay.
+	const next = nextReach(reach);
+	if (!next || !isErrorAt(value, next)) return;
+	observedErrors.add(value);
+	describeAt(value, next);
+}
+
+function ignoreSettled(): void {}
 
 /** `object[key]` when it is text, read once; `undefined` when it is not text or reading it throws. */
-function textProperty(object: object, key: string, limit: number): string | undefined {
+function textProperty(object: object, key: string, limit: number, reach: Reach): string | undefined {
 	try {
-		const field = readField(object, key);
+		const field = readField(object, key, reach);
 		return typeof field === "string" ? bounded(field, limit) : undefined;
 	} catch (thrown) {
-		observeRejection(thrown);
+		observeReached(thrown, reach);
 		return undefined;
 	}
 }
@@ -255,12 +310,18 @@ function fallbackText(value: unknown, errorClass: ErrorClassName | undefined): s
  * one, is not converted at all: converting it runs its code without bound, as
  * `Error.prototype.toString` on a value whose `name` or `message` is the value
  * itself, which reads that getter again until the stack overflows. Each string
- * kept is at most {@link DESCRIBED_TEXT_LIMIT} characters.
+ * kept is at most {@link DESCRIBED_TEXT_LIMIT} characters. The value and
+ * everything describing it reaches is observed ({@link observeRejection}).
  */
 export function describeError(value: unknown): DescribedError {
+	return describeAt(value, rootReach());
+}
+
+/** {@link describeError} at `reach`: how far from the value first given, with the steps it has left. */
+function describeAt(value: unknown, reach: Reach): DescribedError {
 	// A thrown or rejected value can itself be a rejected promise; describing it observes it.
-	observeRejection(value);
-	let errorClass = errorClassOf(value);
+	if (isPromise(value)) observeReached(value, reach);
+	let errorClass = errorClassAt(value, reach);
 	// An error made in another realm (a `node:vm` context, say) has that realm's prototypes.
 	if (errorClass === undefined && isNativeError(value)) errorClass = "Error";
 	let message: string | undefined;
@@ -270,17 +331,19 @@ export function describeError(value: unknown): DescribedError {
 	let syscall: string | undefined;
 	if (errorClass !== undefined) {
 		const error = value as object;
+		// A field that leads back to this error (a getter that throws it, say) is not described again.
+		observedErrors.add(error);
 		try {
-			const field = readField(error, "message");
+			const field = readField(error, "message", reach);
 			message = typeof field === "string" ? bounded(field, DESCRIBED_TEXT_LIMIT) : primitiveText(field);
 		} catch (thrown) {
-			// The message getter or a Proxy trap threw; what it threw may be a rejected promise.
-			observeRejection(thrown);
+			// The message getter or a Proxy trap threw; what it threw may be a rejected promise or an error holding one.
+			observeReached(thrown, reach);
 		}
-		name = textProperty(error, "name", DESCRIBED_FIELD_LIMIT);
-		stack = textProperty(error, "stack", DESCRIBED_TEXT_LIMIT);
-		code = textProperty(error, "code", DESCRIBED_FIELD_LIMIT);
-		syscall = textProperty(error, "syscall", DESCRIBED_FIELD_LIMIT);
+		name = textProperty(error, "name", DESCRIBED_FIELD_LIMIT, reach);
+		stack = textProperty(error, "stack", DESCRIBED_TEXT_LIMIT, reach);
+		code = textProperty(error, "code", DESCRIBED_FIELD_LIMIT, reach);
+		syscall = textProperty(error, "syscall", DESCRIBED_FIELD_LIMIT, reach);
 	} else {
 		message = primitiveText(value);
 	}

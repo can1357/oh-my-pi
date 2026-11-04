@@ -231,7 +231,9 @@ export async function executeInVmContext(options: {
 		options.ownerId,
 	);
 	if (!options.reset && lostSessions.delete(sessionKey)) {
-		options.runState.onText?.(`${formatKernelRestartNotice("JS worker")}\n`);
+		// The caller's consumer gets the notice like any chunk: through the guard that records its failure.
+		const notice = `${formatKernelRestartNotice("JS worker")}\n`;
+		deliverRunOutput(options.runState, "onChunk", () => options.runState.onText?.(notice));
 	}
 	const result = await runOnce(session, options);
 	if (session.state === "alive" && path.isAbsolute(options.filename)) {

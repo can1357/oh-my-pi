@@ -14,6 +14,7 @@ import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
 import { type KernelExecuteResult, throwIfAborted } from "@oh-my-pi/pi-coding-agent/eval/kernel-base";
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { PythonKernel } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
+import { getEvalState } from "@oh-my-pi/pi-coding-agent/eval/state";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { JsStatusEvent } from "@oh-my-pi/pi-coding-agent/eval/js/shared/types";
 import { catchRejection, settled } from "@oh-my-pi/pi-coding-agent/utils/ipc";
@@ -473,6 +474,31 @@ const PROMISE_CARRYING_THROWS: ReadonlyArray<{ label: string; make: () => unknow
 					throw Promise.reject(new Error("the thrown message promise rejected"));
 				},
 			});
+			return error;
+		},
+	},
+	{
+		// The rejected promise sits one error deeper: the thrown error's getter throws an error that holds it.
+		label: "an error whose message getter throws an error that holds a rejected promise",
+		make: () => {
+			const inner = new Error("unused");
+			Object.defineProperty(inner, "message", { value: Promise.reject(new Error("the nested inner rejection")) });
+			const error = new Error("unused");
+			Object.defineProperty(error, "message", {
+				get() {
+					throw inner;
+				},
+			});
+			return error;
+		},
+	},
+	{
+		label: "an error whose message getter returns a promise rejected with an error that holds one",
+		make: () => {
+			const inner = new Error("unused");
+			Object.defineProperty(inner, "message", { value: Promise.reject(new Error("the nested inner rejection")) });
+			const error = new Error("unused");
+			Object.defineProperty(error, "message", { get: () => Promise.reject(inner) });
 			return error;
 		},
 	},
@@ -1824,22 +1850,34 @@ describe("cancellation checks and descriptions read a thrown value or abort reas
 		}
 	});
 
-	/** A rejected promise; `errorShaped` gives it Error.prototype, so it passes as an error. */
-	const rejectedReason = (label: string, errorShaped: boolean): Promise<never> => {
-		const reason = Promise.reject(new Error(label));
-		if (errorShaped) Object.setPrototypeOf(reason, Error.prototype);
-		return reason;
-	};
+	/** Abort reasons that carry a rejected promise one plain read reaches. */
+	const ABORT_REASONS: ReadonlyArray<{ label: string; make: (label: string) => unknown }> = [
+		{ label: "a rejected promise", make: label => Promise.reject(new Error(label)) },
+		{
+			// It passes isErrorValue(), so the reason is returned as the abort error unchanged.
+			label: "a rejected promise made to look like an error",
+			make: label => Object.setPrototypeOf(Promise.reject(new Error(label)), Error.prototype),
+		},
+		{
+			// An ordinary error, returned as the abort error; only its field holds the promise.
+			label: "an error whose message holds a rejected promise",
+			make: label => {
+				const error = new Error("unused");
+				Object.defineProperty(error, "message", { value: Promise.reject(new Error(label)) });
+				return error;
+			},
+		},
+	];
 
-	for (const errorShaped of [false, true]) {
-		it(`observes a rejected promise${errorShaped ? " made to look like an error" : ""} passed as an abort reason to the context manager or the kernel`, async () => {
+	for (const shape of ABORT_REASONS) {
+		it(`observes ${shape.label} passed as an abort reason to the context manager or the kernel`, async () => {
 			const session = makeSession(`abort-promise-reason-${crypto.randomUUID()}`);
 			const sessionId = session.getEvalSessionId?.() ?? "missing";
 			const interrupt = new AbortController();
 			const runState: VmRunState = {
 				signal: interrupt.signal,
 				onText: text => {
-					if (printsLine(text, "started")) interrupt.abort(rejectedReason("abort reason rejection", errorShaped));
+					if (printsLine(text, "started")) interrupt.abort(shape.make("abort reason rejection"));
 				},
 			};
 			const unhandled = await unhandledRejectionsDuring(async () => {
@@ -1855,7 +1893,7 @@ describe("cancellation checks and descriptions read a thrown value or abort reas
 					runState,
 				}).catch(() => {});
 				try {
-					throwIfAborted(aborted(rejectedReason("kernel reason rejection", errorShaped)), "x");
+					throwIfAborted(aborted(shape.make("kernel reason rejection")), "x");
 				} catch {
 					// It throws by design; this row checks only that the reason was observed.
 				}
@@ -1930,4 +1968,94 @@ describe("cancellation checks and descriptions read a thrown value or abort reas
 		},
 		120_000,
 	);
+
+	it("js: a consumer that rejects the restart notice after the worker died is reported, and the cell runs", async () => {
+		const session = makeSession(`restart-notice-consumer-${crypto.randomUUID()}`);
+		const sessionId = session.getEvalSessionId?.() ?? "missing";
+		const cell = (code: string, runState: VmRunState) =>
+			executeInVmContext({
+				sessionKey: sessionId,
+				sessionId,
+				cwd: session.cwd,
+				session,
+				code,
+				// An absolute filename makes the context manager record the worker in the eval state.
+				filename: path.join(session.cwd, "restart-notice-consumer.js"),
+				timeoutMs: 60_000,
+				runState,
+			});
+		let pidText = "";
+		await cell("print('pid', process.pid)", { onText: text => void (pidText += text) });
+		const pid = Number(/pid (\d+)/.exec(pidText)?.[1]);
+		if (!pid || pid === process.pid) throw new Error(`the JS worker has no pid of its own: ${pidText}`);
+		process.kill(pid, "SIGKILL");
+		// The death is a real OS event in a child the host owns; the host records it in the eval state.
+		const deadline = Date.now() + 15_000;
+		while (getEvalState(session)?.runtimes.find(entry => entry.language === "js")?.alive !== false) {
+			if (Date.now() > deadline) throw new Error("the host never saw the JS worker die");
+			await Bun.sleep(20);
+		}
+		let printed = "";
+		const runState: VmRunState = {
+			// The run state's callback type returns void; a callback that returns a promise must be accepted all the same.
+			onText: ((text: string) => {
+				printed += text;
+				if (text.includes("Kernel restarted:")) return Promise.reject(new Error("restart consumer rejected"));
+				return undefined;
+			}) as (text: string) => void,
+		};
+		const unhandled = await unhandledRejectionsDuring(async () => {
+			await cell("print('after restart')", runState);
+			await Bun.sleep(50);
+		});
+		expect(unhandled).toEqual([]);
+		expect(printed).toContain("after restart");
+		expect(runState.consumerFailure).toEqual({ callback: "onChunk", message: "restart consumer rejected" });
+	}, 120_000);
+
+	it("stops following a getter that makes a new error holding a new rejected promise on every read", async () => {
+		let made = 0;
+		const nextError = (): Error => {
+			made += 1;
+			const error = new Error("unused");
+			Object.defineProperty(error, "message", { get: () => Promise.reject(nextError()) });
+			return error;
+		};
+		const first = nextError();
+		const unhandled = await unhandledRejectionsDuring(async () => {
+			describeError(first);
+			// Each step waits for a promise to settle; give the chain far more turns than its bound.
+			for (let turn = 0; turn < 200; turn++) await Promise.resolve();
+			await Bun.sleep(20);
+		});
+		// Bounded: the chain stops long before 200 steps, and the promise at the bound is still marked handled.
+		expect(made).toBeLessThan(40);
+		expect(unhandled).toEqual([]);
+	});
+
+	it("bounds the work of describing an error whose fields are Proxies that return a new Proxy as each prototype", () => {
+		let traps = 0;
+		// Every prototype is a new Proxy of the same kind, and every one is itself an error-shaped candidate.
+		const endless = (): object =>
+			new Proxy(
+				{},
+				{
+					getPrototypeOf() {
+						traps += 1;
+						return endless();
+					},
+				},
+			);
+		const error = new Error("unused");
+		for (const key of ["message", "name", "stack", "code", "syscall"]) {
+			Object.defineProperty(error, key, {
+				get() {
+					throw endless();
+				},
+			});
+		}
+		describeError(error);
+		// One walk is at most the prototype bound per value reached; the budget bounds the values reached.
+		expect(traps).toBeLessThan(20_000);
+	});
 });
