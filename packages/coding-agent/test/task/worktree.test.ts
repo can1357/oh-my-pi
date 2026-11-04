@@ -794,6 +794,37 @@ describe("worktree isolation helpers", () => {
 			expect(handle.fallbackReason).toBe(unavailable.message);
 		});
 
+		// The resolver's reason is the first unavailable probe across every
+		// backend. With nothing fallen back at probe time it named a backend
+		// nobody was going to use, and the user was told "zfs CLI is
+		// unavailable" when overlay — the one they would have got — could not
+		// start for want of fuse-overlayfs.
+		it("reports why the backend it would have used failed, not an unrelated probe", async () => {
+			const overlayMissing = new Error(
+				"ISO_UNAVAILABLE: fuse-overlayfs not found on PATH; install it to enable overlay isolation",
+			);
+			vi.spyOn(natives, "isoResolve").mockResolvedValue({
+				kind: natives.IsoBackendKind.Overlayfs,
+				candidates: [natives.IsoBackendKind.Overlayfs, natives.IsoBackendKind.Rcopy],
+				fellBack: false,
+				reason: "zfs CLI is unavailable or cannot list datasets",
+			});
+			const isoStart = natives.isoStart;
+			vi.spyOn(natives, "isoStart").mockImplementation(async (kind, lower, merged) => {
+				if (kind === natives.IsoBackendKind.Overlayfs) throw overlayMissing;
+				return await isoStart(kind, lower, merged);
+			});
+
+			const handle = await ensureIsolation(repo, "fallback-reason");
+			try {
+				expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
+				expect(handle.fellBack).toBe(true);
+				expect(handle.fallbackReason).toBe(overlayMissing.message);
+			} finally {
+				await cleanupIsolation(handle);
+			}
+		});
+
 		it("uses compact isolation paths that do not embed long task ids", async () => {
 			const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
 			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-base-"));

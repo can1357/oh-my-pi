@@ -939,7 +939,15 @@ export async function ensureIsolation(
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 	const resolution = await natives.isoResolve(preferred ?? null);
 	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
-	let fallbackReason = resolution.reason ?? null;
+	// The reason a user can act on is the one for the backend they would have
+	// got. The resolver reports the first unavailable probe across *every*
+	// backend, so with nothing fallen back at probe time its reason names some
+	// later backend nobody was going to use ("zfs CLI is unavailable") and hid
+	// the start failure of the one that was ("fuse-overlayfs not found"). It
+	// counts only when the resolver itself fell back from the preferred (or
+	// first automatic) backend; otherwise the first candidate's own failure,
+	// below, is the reason.
+	let fallbackReason = resolution.fellBack ? (resolution.reason ?? null) : null;
 
 	for (const candidate of candidates) {
 		// The whole attempt runs under the sandbox lock, so a teardown cannot
