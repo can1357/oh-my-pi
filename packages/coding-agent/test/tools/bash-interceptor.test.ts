@@ -14,7 +14,7 @@ import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool, type BashToolInput } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { checkBashInterception } from "@oh-my-pi/pi-coding-agent/tools/bash-interceptor";
-import { dedicatedToolCanPerformStep } from "@oh-my-pi/pi-coding-agent/tools/bash-step";
+import { dedicatedToolCanPerformStep, globArgsForStep } from "@oh-my-pi/pi-coding-agent/tools/bash-step";
 
 function createBashTool(rules: BashInterceptorRule[]): BashTool {
 	const session = {
@@ -1203,6 +1203,38 @@ describe("dedicated tool capability", () => {
 		expect(decide(manyRoots)).toBe("glob");
 		expect(decide(repeatedRoots)).toBeUndefined();
 		expect(performance.now() - manyStart).toBeLessThan(500);
+	});
+
+	it("lets 12,000 distinct real find and fd roots run without synchronous root work", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "glob-many-roots-"));
+		try {
+			const roots = Array.from({ length: 12_000 }, (_, i) => `r${i}`);
+			await Promise.all(roots.map(root => fs.mkdir(path.join(cwd, root))));
+			for (const command of [`find ${roots.join(" ")} -name dune`, `fd -I -s --glob dune ${roots.join(" ")}`]) {
+				const start = performance.now();
+				const result = checkBashInterception(command, ["glob"], undefined, command, cwd);
+				expect(performance.now() - start).toBeLessThan(500);
+				expect(result.block).toBe(false);
+			}
+		} finally {
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("bounds root by pattern pairs before inspecting any root", () => {
+		const roots = Array.from({ length: 64 }, (_, i) => `r${i}`).join(" ");
+		const names = Array.from({ length: 64 }, (_, i) => `-name n${i}`).join(" -o ");
+		expect(globArgsForStep(`find ${roots} ${names}`)).toBeDefined();
+		let inspected = 0;
+		const result = globArgsForStep(`find ${roots} ${names} -o -name extra`, {
+			kind: () => {
+				inspected++;
+				return "directory";
+			},
+			facts: () => undefined,
+		});
+		expect(result).toBeUndefined();
+		expect(inspected).toBe(0);
 	});
 
 	it("lets a deeply nested or very long find expression run without exhausting the stack", () => {

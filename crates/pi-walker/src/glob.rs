@@ -177,8 +177,8 @@ pub struct GlobOptions {
 /// One [`glob`] match.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GlobMatch {
-	/// Walk-relative path, `/`-separated, invalid UTF-8 replaced.
-	pub path:      String,
+	/// Walk-relative path bytes, `/`-separated, without lossy decoding.
+	pub path:      Vec<u8>,
 	/// Entry type (a resolved symlink's target type under a type filter).
 	pub file_type: FileType,
 	/// Regular-file size, under `sort_by_mtime` or symlink resolution.
@@ -270,7 +270,7 @@ pub async fn glob(fs: &Fs, root: &Path, opts: &GlobOptions) -> Result<Vec<GlobMa
 		.map(|entry| {
 			let detailed = opts.sort_by_mtime || resolved;
 			GlobMatch {
-				path:      entry.path_lossy().into_owned(),
+				path:      entry.path.to_vec(),
 				file_type: entry.file_type,
 				size:      entry
 					.size
@@ -395,7 +395,10 @@ mod tests {
 	}
 
 	fn paths(found: &[GlobMatch]) -> Vec<&str> {
-		found.iter().map(|m| m.path.as_str()).collect()
+		found
+			.iter()
+			.map(|m| std::str::from_utf8(&m.path).expect("UTF-8 fixture"))
+			.collect()
 	}
 
 	#[test]
@@ -534,7 +537,7 @@ mod tests {
 				let mut found: Vec<String> = run(dir.path(), &opts)
 					.await
 					.into_iter()
-					.map(|m| m.path)
+					.map(|m| String::from_utf8(m.path).expect("UTF-8 fixture"))
 					.collect();
 				found.sort_unstable();
 				found
@@ -616,7 +619,7 @@ mod tests {
 				.await
 				.expect("glob")
 				.into_iter()
-				.map(|m| m.path)
+				.map(|m| String::from_utf8(m.path).expect("UTF-8 fixture"))
 				.collect()
 		};
 		assert_eq!(found(&options("*.rs")).await, ["a b.rs", "a.rs", "sub/b.rs"]);
@@ -646,7 +649,7 @@ mod tests {
 			};
 			let found = run(&dir.path().join("scope"), &opts).await;
 			assert_eq!(found, [GlobMatch {
-				path:      "source.ts".to_owned(),
+				path:      b"source.ts".to_vec(),
 				file_type: FileType::File,
 				size:      Some(7),
 				mtime:     Some(1_600_000_000_000_000_000),

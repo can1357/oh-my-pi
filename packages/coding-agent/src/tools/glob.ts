@@ -360,8 +360,8 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				if (limited.length === 0) {
 					// A scan cut short has not found the end: say how far it got, not that the page is past it.
 					const parts = [
-						opts?.timedOut
-							? `No files after skip=${skipCount} among the ${files.length} found before the scan stopped`
+						opts?.timedOut || forceTruncated
+							? `No files after skip=${skipCount} among the ${files.length} available matches; this listing is incomplete`
 							: `No more files (skip=${skipCount} is past the end of ${files.length})`,
 					];
 					if (notice) parts.push(notice);
@@ -379,14 +379,14 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				}
 				const baseOutput = formatGroupedPaths(limited);
 				const trailingNotes: string[] = [];
-				if (notice) trailingNotes.push(notice);
 				// A full page may have more after it.
 				if (limited.length === effectiveLimit && !opts?.timedOut) {
 					trailingNotes.push(`Next page: skip=${skipCount + limited.length}`);
 				}
 				if (clampNotice) trailingNotes.push(clampNotice);
 				if (missingPathsNote) trailingNotes.push(missingPathsNote);
-				const rawOutput = trailingNotes.length > 0 ? `${baseOutput}\n\n${trailingNotes.join("\n")}` : baseOutput;
+				const body = trailingNotes.length > 0 ? `${baseOutput}\n\n${trailingNotes.join("\n")}` : baseOutput;
+				const rawOutput = notice ? `${notice}\n\n${body}` : body;
 				const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
 
 				const details: GlobToolDetails = {
@@ -628,6 +628,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				};
 
 			let timedOut = false;
+			let unrepresentablePaths = 0;
 			const runTarget = async (prepared: NativePreparedTarget): Promise<Array<{ path: string; mtime: number }>> => {
 				if (prepared.result) return prepared.result;
 				const { target } = prepared;
@@ -672,6 +673,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						makeOnMatch(formatTargetMatch),
 					);
 					throwIfAborted(signal);
+					unrepresentablePaths += result.unrepresentablePaths;
 					const out: Array<{ path: string; mtime: number }> = [];
 					for (const match of result.matches) {
 						if (!match.path) continue;
@@ -702,6 +704,10 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				return result.value;
 			});
 
+			const encodingNotice =
+				unrepresentablePaths > 0
+					? `Omitted ${unrepresentablePaths} matching entries in the scanned result windows because their paths are not valid UTF-8 and cannot be shown exactly. This listing is partial; use bash with find -print0 for byte-exact names.`
+					: undefined;
 			if (timedOut) {
 				// Drain the partial matches accumulated during streaming and return them
 				// instead of throwing — empty results after a multi-second wait force the
@@ -710,7 +716,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				partial.sort((a, b) => b.m - a.m);
 				const sortedPaths = partial.map(entry => entry.p);
 				return buildResult(sortedPaths, {
-					notice: globTimeoutNotice(sortedPaths.length, timeoutMs),
+					notice: [globTimeoutNotice(sortedPaths.length, timeoutMs), encodingNotice].filter(Boolean).join("\n"),
 					forceTruncated: true,
 					timedOut: true,
 				});
@@ -729,7 +735,13 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				}
 			}
 			merged.sort((a, b) => b.mtime - a.mtime);
-			return buildResult(merged.map(entry => entry.path));
+			return buildResult(
+				merged.map(entry => entry.path),
+				{
+					notice: encodingNotice,
+					forceTruncated: unrepresentablePaths > 0,
+				},
+			);
 		});
 		return execution.finally(() => {
 			signal?.removeEventListener("abort", abortPreparation);

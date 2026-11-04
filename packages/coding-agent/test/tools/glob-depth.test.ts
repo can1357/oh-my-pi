@@ -103,6 +103,30 @@ describe("glob depth", () => {
 		expect(text).toContain("timed out");
 	});
 
+	it.skipIf(path.sep === "\\").each([false, true])(
+		"reports two byte-distinct non-UTF-8 paths as omitted (valid neighbour: %s)",
+		async valid => {
+			for (const byte of [0xff, 0xfe]) {
+				const rawDir = Buffer.concat([Buffer.from(path.join(dir, "raw/dir")), Buffer.from([byte])]);
+				await fs.mkdir(rawDir, { recursive: true });
+				await fs.writeFile(Buffer.concat([rawDir, Buffer.from("/dune")]), "x\n");
+			}
+			if (valid) await Bun.write(path.join(dir, "raw/dir\uFFFD/dune"), "valid\n");
+			const found = await Bun.$`find raw -name dune -print0`.cwd(dir).quiet();
+			expect(found.stdout.includes(Buffer.from([0xff]))).toBe(true);
+			expect(found.stdout.includes(Buffer.from([0xfe]))).toBe(true);
+			const args = globArgsForStep("find raw -name dune");
+			expect(args).toBeDefined();
+			const result = await new GlobTool(session).execute("glob-raw-names", args!);
+			expect(result.details?.truncated).toBe(true);
+			expect(result.details?.files).toEqual(valid ? ["raw/dir\uFFFD/dune"] : []);
+			for (const file of result.details?.files ?? []) await fs.stat(path.join(dir, file));
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
+			expect(text).toMatch(/2.*(?:non-UTF-8|UTF-8)/u);
+			expect(text).not.toContain("No files found");
+		},
+	);
+
 	it.skipIf(path.sep === "\\")("lists a file name holding a backslash as it is on disk", async () => {
 		await Bun.write(path.join(dir, "names", "a\\z"), "x\n");
 		const listed = await files({ path: "names/*" });
@@ -143,6 +167,20 @@ describe("glob depth", () => {
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
 		expect(result.details?.truncated).toBe(true);
 		expect(text).not.toContain("No files found");
+		expect(text).toContain("more matches may exist");
+	});
+
+	it("does not claim an empty page is past the end when depth filtering cut a backend's capped results", async () => {
+		const tool = new GlobTool(session, {
+			operations: {
+				exists: () => true,
+				glob: (_pattern, _cwd, options) => ["a/b/deep", "keep", "later"].slice(0, options.limit),
+			},
+		});
+		const result = await tool.execute("glob-depth-cut-page", { path: "r/**/*", depth: 1, limit: 1, skip: 1 });
+		const text = result.content.find(c => c.type === "text")?.text ?? "";
+		expect(result.details?.truncated).toBe(true);
+		expect(text).not.toContain("past the end");
 		expect(text).toContain("more matches may exist");
 	});
 

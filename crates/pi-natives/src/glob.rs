@@ -37,7 +37,7 @@ pub enum FileType {
 #[derive(Clone)]
 #[napi(object)]
 pub struct GlobMatch {
-	/// Relative path from the search root, using forward slashes.
+	/// Exact UTF-8 relative path from the search root, using forward slashes.
 	pub path:      String,
 	/// Resolved filesystem type for the match.
 	pub file_type: FileType,
@@ -113,19 +113,25 @@ pub struct GlobOptions<'env> {
 #[napi(object)]
 pub struct GlobResult {
 	/// Matched filesystem entries.
-	pub matches:       Vec<GlobMatch>,
+	pub matches:               Vec<GlobMatch>,
 	/// Number of returned matches (`matches.len()`), clamped to `u32::MAX`.
-	pub total_matches: u32,
+	pub total_matches:         u32,
+	/// Matching entries in the selected result window omitted because their path
+	/// is not UTF-8. Counted before conversion or deduplication; these
+	/// entries are not streamed either.
+	pub unrepresentable_paths: u32,
 }
 
-impl From<pi_walker::glob::GlobMatch> for GlobMatch {
-	fn from(entry: pi_walker::glob::GlobMatch) -> Self {
-		Self {
-			path:      entry.path,
+impl TryFrom<pi_walker::glob::GlobMatch> for GlobMatch {
+	type Error = std::string::FromUtf8Error;
+
+	fn try_from(entry: pi_walker::glob::GlobMatch) -> std::result::Result<Self, Self::Error> {
+		Ok(Self {
+			path:      String::from_utf8(entry.path)?,
 			file_type: entry.file_type.into(),
 			mtime:     entry.mtime.map(Self::millis),
 			size:      entry.size.map(|size| size as f64),
-		}
+		})
 	}
 }
 
@@ -196,6 +202,7 @@ pub fn glob<'env>(
 			.await
 			.map_err(task::walk_failure)?;
 		let fs = pi_walker::Fs::new(&filesystem, &root);
+		let mut unrepresentable_paths = 0;
 		let matches: Vec<GlobMatch> = pi_walker::glob::glob(&fs, &root, &opts)
 			.await
 			.map_err(|err| match err {
@@ -203,7 +210,14 @@ pub fn glob<'env>(
 				err @ pi_walker::glob::GlobError::Pattern(_) => Error::from_reason(err.to_string()),
 			})?
 			.into_iter()
-			.map(GlobMatch::from)
+			.filter_map(|entry| {
+				if let Ok(entry) = GlobMatch::try_from(entry) {
+					Some(entry)
+				} else {
+					unrepresentable_paths += 1;
+					None
+				}
+			})
 			.collect();
 		if let Some(callback) = &on_match {
 			for matched in &matches {
@@ -211,6 +225,6 @@ pub fn glob<'env>(
 			}
 		}
 		let total_matches = crate::utils::clamp_u32(matches.len() as u64);
-		Ok(GlobResult { matches, total_matches })
+		Ok(GlobResult { matches, total_matches, unrepresentable_paths })
 	})
 }

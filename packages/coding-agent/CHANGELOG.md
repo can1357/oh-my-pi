@@ -17,7 +17,7 @@
 
 ### Fixed
 
-- On Linux and macOS, glob and grep list a file name holding a backslash (`a\z`), a Unicode space or a colon (`local:/dune`) as it is on disk, instead of as another path that does not exist (`a/z`, an ASCII space, `local://dune`).
+- On Linux and macOS, glob and grep list a file name holding a backslash (`a\z`), a Unicode space or a colon (`local:/dune`) as it is on disk, instead of as another path that does not exist (`a/z`, an ASCII space, `local://dune`). Glob omits names that are not valid UTF-8, counts them in a notice and marks the listing partial instead of collapsing distinct names into a nonexistent path; an empty partial page no longer claims it reached the end.
 - `pr://<n>`, `issue://<n>`, and repo-less `github` tool calls in a checkout whose `upstream` remote is not the fork parent of `origin` now resolve to `origin` instead of the upstream project; `gh repo set-default` still wins
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 

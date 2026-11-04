@@ -63,7 +63,7 @@ describe("GlobTool.execute", () => {
 			},
 			nativeGlob: async () => {
 				nativeStarted = true;
-				return { matches: [], totalMatches: 0 };
+				return { matches: [], totalMatches: 0, unrepresentablePaths: 0 };
 			},
 		});
 		const execution = tool.execute("glob-preparation-abort", { path: "." }, controller.signal);
@@ -196,6 +196,7 @@ describe("GlobTool.execute", () => {
 				return {
 					matches: [{ path: "nested/target.ts", fileType: FileType.File }],
 					totalMatches: 1,
+					unrepresentablePaths: 0,
 				};
 			},
 		);
@@ -210,11 +211,12 @@ describe("GlobTool.execute", () => {
 describe("GlobTool hard-cap limit notice", () => {
 	const files230 = Array.from({ length: 230 }, (_, i) => `file-${String(i).padStart(3, "0")}.txt`);
 
-	function globToolWith(files: string[]): GlobTool {
+	function globToolWith(files: string[], unrepresentablePaths = 0): GlobTool {
 		return new GlobTool(createSession(), {
 			nativeGlob: async () => ({
 				matches: files.map(file => ({ path: file, mtime: 0, fileType: FileType.File })),
 				totalMatches: files.length,
+				unrepresentablePaths,
 			}),
 		});
 	}
@@ -254,6 +256,13 @@ describe("GlobTool hard-cap limit notice", () => {
 		const result = await globToolWith(files230).execute("glob-below-cap", { path: ".", limit: 50, gitignore: false });
 
 		expect(limitNotice(result)).toContain("[50 results limit reached. Use limit=100 for more]");
+	});
+
+	test("keeps the omitted-name count visible when a large listing reaches the output byte cap", async () => {
+		const files = Array.from({ length: 200 }, (_, i) => `${i}${"x".repeat(250)}/leaf.txt`);
+		const result = await globToolWith(files, 2).execute("glob-encoding-byte-cap", { path: "." });
+		expect(result.details?.truncation?.truncated).toBe(true);
+		expect(textOf(result)).toMatch(/2.*UTF-8/u);
 	});
 });
 

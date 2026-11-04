@@ -6,6 +6,10 @@
 
 - `glob()` takes `maxDepth` (the search root's children are depth 1) and stops its walk at that depth, and `includeGit` to list inside `.git` directories
 
+### Fixed
+
+- `glob()` omits matching paths that are not valid UTF-8 from results and callbacks and reports their count as `unrepresentablePaths`, rather than returning lossily decoded names that can collide.
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed

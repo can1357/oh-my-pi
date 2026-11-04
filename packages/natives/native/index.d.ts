@@ -2134,7 +2134,7 @@ export declare function glob(options: GlobOptions, onMatch?: ((error: Error | nu
 
 /** A single filesystem entry from a directory scan. */
 export interface GlobMatch {
-  /** Relative path from the search root, using forward slashes. */
+  /** Exact UTF-8 relative path from the search root, using forward slashes. */
   path: string
   /** Resolved filesystem type for the match. */
   fileType: FileType
@@ -2201,6 +2201,12 @@ export interface GlobResult {
   matches: Array<GlobMatch>
   /** Number of returned matches (`matches.len()`), clamped to `u32::MAX`. */
   totalMatches: number
+  /**
+   * Matching entries in the selected result window omitted because their path
+   * is not UTF-8. Counted before conversion or deduplication; these
+   * entries are not streamed either.
+   */
+  unrepresentablePaths: number
 }
 
 /**
