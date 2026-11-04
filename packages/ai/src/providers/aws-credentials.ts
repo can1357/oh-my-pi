@@ -414,10 +414,14 @@ interface SsoCachedToken {
 	registrationExpiresAt?: string;
 }
 
-/** A cache hit plus the filename it came from, so a refresh can be written back. */
+/**
+ * A cache hit plus the absolute path it was read from. A refresh writes back to
+ * exactly that path: the home directory may change while the refresh request is
+ * in flight, and recomputing it then would overwrite another home's token cache.
+ */
 interface SsoCacheEntry {
 	token: SsoCachedToken;
-	file: string;
+	filePath: string;
 }
 
 /** Refresh this long before `expiresAt` so a request in flight cannot age out. */
@@ -460,7 +464,7 @@ async function readSsoCredentials(
 	// profile that works under `aws` must not fail here; only a genuinely
 	// unrefreshable token warrants sending the user back to `aws sso login`.
 	if (Number.isFinite(expiresAt) && expiresAt - SSO_TOKEN_REFRESH_SKEW_MS <= Date.now()) {
-		const refreshed = await refreshSsoToken(cached.token, cached.file, ssoRegion, signal, fetchImpl);
+		const refreshed = await refreshSsoToken(cached.token, cached.filePath, ssoRegion, signal, fetchImpl);
 		if (refreshed?.accessToken) accessToken = refreshed.accessToken;
 		else if (expired) {
 			throw new AIError.AwsCredentialsError(
@@ -531,10 +535,11 @@ async function loadSsoCachedToken(
 	for (const file of candidates) {
 		if (!entries.includes(file)) continue;
 		try {
-			const text = await fs.promises.readFile(path.join(cacheDir, file), "utf8");
+			const filePath = path.join(cacheDir, file);
+			const text = await fs.promises.readFile(filePath, "utf8");
 			const parsed = JSON.parse(text) as SsoCachedToken;
 			if (parsed.startUrl === startUrl || (sessionName && file === `${hash}.json`)) {
-				return { token: parsed, file };
+				return { token: parsed, filePath };
 			}
 		} catch (err) {
 			logger.debug("aws-credentials: failed to read SSO cache", { file, err: String(err) });
@@ -554,7 +559,7 @@ async function loadSsoCachedToken(
  */
 async function refreshSsoToken(
 	token: SsoCachedToken,
-	file: string,
+	filePath: string,
 	ssoRegion: string,
 	signal: AbortSignal | undefined,
 	fetchImpl: FetchImpl,
@@ -609,7 +614,7 @@ async function refreshSsoToken(
 		// the following refresh working.
 		refreshToken: json.refreshToken ?? token.refreshToken,
 	};
-	await writeSsoCachedToken(file, updated);
+	await writeSsoCachedToken(filePath, updated);
 	return updated;
 }
 
@@ -617,16 +622,16 @@ async function refreshSsoToken(
  * Persist a refreshed token so the AWS CLI, other SDKs, and the next OMP process
  * all start from a live token. Written via temp file + rename so a concurrent
  * reader never observes a half-written cache entry; a failure here is logged and
- * ignored, since the in-memory token is still usable for this run.
+ * ignored, since the in-memory token is still usable for this run. `target` is
+ * the absolute path the token was read from (see {@link SsoCacheEntry}).
  */
-async function writeSsoCachedToken(file: string, token: SsoCachedToken): Promise<void> {
-	const target = path.join(getHomeDir(), ".aws", "sso", "cache", file);
+async function writeSsoCachedToken(target: string, token: SsoCachedToken): Promise<void> {
 	const tmp = `${target}.${process.pid}.tmp`;
 	try {
 		await fs.promises.writeFile(tmp, JSON.stringify(token), { mode: 0o600 });
 		await fs.promises.rename(tmp, target);
 	} catch (err) {
-		logger.debug("aws-credentials: failed to persist refreshed SSO token", { file, err: String(err) });
+		logger.debug("aws-credentials: failed to persist refreshed SSO token", { target, err: String(err) });
 		await fs.promises.rm(tmp, { force: true }).catch(() => {});
 	}
 }

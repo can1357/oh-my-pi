@@ -1446,9 +1446,9 @@ async function loadClaudePluginRoots({
 
 	// ── OMP installed plugins registry ───────────────────────────────────────
 	// OMP registry is authoritative: its entries replace Claude's entries for the same plugin ID.
-	// In production `home` is `getHomeDir()`, the start-up home, so `getPluginsDir(home)` resolves to
-	// the same XDG-aware path the marketplace writer uses (reads and writes always agree).
-	// Tests pass a temp dir or set HOME at runtime, which short-circuits the resolver for deterministic isolation.
+	// In production `home` is the live home (`getHomeDir()`), so `getPluginsDir(home)` resolves to the
+	// same XDG- and profile-aware path the marketplace writer uses (reads and writes always agree).
+	// Tests that pass a temp dir other than the live home get `<temp>/.omp/plugins` for isolation.
 	// Computed before the cache lookup because isolated SDK homes select distinct OMP registries.
 	const ompContent = await readFile(ompRegistryPath);
 	if (ompContent) {

@@ -57,29 +57,26 @@ export function isFullyQualifiedPath(filePath: string, platform: NodeJS.Platform
 }
 
 /**
- * `os.homedir()` as this module first saw it. Bun reads the home once per
- * process and keeps it, so a `HOME` set later (a test's temp home, a worker
- * started after a parent changed `HOME`) never reaches `os.homedir()`.
- */
-const STARTUP_HOME = os.homedir();
-
-/**
  * The user's home directory. Paths rooted at home MUST resolve it here, not via
  * `os.homedir()`.
  *
- * Bun's `os.homedir()` ignores a `HOME` (`USERPROFILE` on Windows) set after
- * start-up, so this reads the variable itself. Order:
- * 1. `os.homedir()` when it no longer returns the start-up home: something in
- *    this process redirected it (a test's `vi.spyOn(os, "homedir")`).
+ * Bun reads the home once per process and keeps it, so a `HOME` (`USERPROFILE`
+ * on Windows) set later (a test's temp home, a worker started after a parent
+ * changed `HOME`) never reaches `os.homedir()`; this reads the variable itself.
+ * Order:
+ * 1. `os.homedir()` while it is a test double (`spyOn` / `vi.spyOn` from
+ *    `bun:test`, which carry a `mock` record). The check is on the function
+ *    itself, so a spy installed before this module loaded stops winning once it
+ *    is restored.
  * 2. `HOME` when set and non-empty.
  * 3. `os.homedir()` (the start-up `HOME`, else the passwd entry). An unset or
  *    empty variable lands here, never on a path relative to the cwd.
- * With the start-up environment unchanged, every step returns what
+ * With the start-up environment unchanged and no spy, every step returns what
  * `os.homedir()` returns.
  */
 export function getHomeDir(): string {
 	const home = os.homedir();
-	if (home !== STARTUP_HOME) return home;
+	if (typeof Reflect.get(os.homedir, "mock") === "object") return home;
 	return (process.platform === "win32" ? process.env.USERPROFILE : process.env.HOME) || home;
 }
 

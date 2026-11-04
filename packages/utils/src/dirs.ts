@@ -118,8 +118,8 @@ export function getBaseConfigRoot(): string {
 	return path.join(getHomeDir(), getConfigDirName());
 }
 
-function getProfileConfigRoot(profile: string | undefined): string {
-	const root = getBaseConfigRoot();
+function getProfileConfigRoot(profile: string | undefined, home: string = getHomeDir()): string {
+	const root = path.join(home, getConfigDirName());
 	return profile ? path.join(root, "profiles", profile) : root;
 }
 
@@ -343,6 +343,11 @@ export function getConfigAgentDirName(): string {
 
 type XdgCategory = "data" | "state" | "cache";
 
+interface DirResolverOptions {
+	agentDirOverride?: string;
+	profile?: string;
+}
+
 /**
  * Resolves and caches all omp directory paths. On Linux, when XDG environment
  * variables are set, paths are redirected under $XDG_*_HOME/omp/. A new
@@ -350,6 +355,9 @@ type XdgCategory = "data" | "state" | "cache";
  * invalidates all cached paths.
  */
 class DirResolver {
+	/** The home this resolver was built for; {@link liveDirs} rebuilds when the live home differs. */
+	readonly home: string;
+	readonly options: DirResolverOptions;
 	readonly configRoot: string;
 	readonly agentDir: string;
 
@@ -357,14 +365,17 @@ class DirResolver {
 	// With XDG on Linux, they point to $XDG_*_HOME/omp/.
 	readonly #rootDirs: Record<XdgCategory, string>;
 	readonly #agentDirs: Record<XdgCategory, string>;
+	readonly #baseRoot: string;
 	readonly #baseRootDirs: Record<XdgCategory, string>;
 
 	readonly #rootCache = new Map<string, string>();
 	readonly #agentCache = new Map<string, string>();
 
-	constructor(options: { agentDirOverride?: string; profile?: string } = {}) {
+	constructor(options: DirResolverOptions = {}) {
+		this.options = options;
+		this.home = getHomeDir();
 		const profile = normalizeProfileName(options.profile);
-		this.configRoot = getProfileConfigRoot(profile);
+		this.configRoot = getProfileConfigRoot(profile, this.home);
 
 		const defaultAgent = path.join(this.configRoot, "agent");
 		const agentDirOverride = profile ? undefined : options.agentDirOverride;
@@ -434,17 +445,17 @@ class DirResolver {
 			state: xdgState ?? this.agentDir,
 			cache: xdgCache ?? this.agentDir,
 		};
-		const baseRoot = getBaseConfigRoot();
+		this.#baseRoot = getProfileConfigRoot(undefined, this.home);
 		this.#baseRootDirs = {
-			data: resolveBase("XDG_DATA_HOME") ?? baseRoot,
-			state: resolveBase("XDG_STATE_HOME") ?? baseRoot,
-			cache: resolveBase("XDG_CACHE_HOME") ?? baseRoot,
+			data: resolveBase("XDG_DATA_HOME") ?? this.#baseRoot,
+			state: resolveBase("XDG_STATE_HOME") ?? this.#baseRoot,
+			cache: resolveBase("XDG_CACHE_HOME") ?? this.#baseRoot,
 		};
 	}
 
 	/** Profile-independent config-root subdirectory, with optional XDG override. Shared across profiles. */
 	baseRootSubdir(subdir: string, xdg?: XdgCategory): string {
-		return path.join(xdg ? this.#baseRootDirs[xdg] : getBaseConfigRoot(), subdir);
+		return path.join(xdg ? this.#baseRootDirs[xdg] : this.#baseRoot, subdir);
 	}
 
 	/** Config-root subdirectory, with optional XDG override. */
@@ -504,10 +515,23 @@ function resolveActiveAgentDirOverride(): string | undefined {
 		: resolvePreProfileAgentDir(undefined, process.env.PI_CODING_AGENT_DIR, readPiProfileFromEnvSafe());
 }
 
-let dirs = new DirResolver({
+let currentDirs = new DirResolver({
 	agentDirOverride: resolveActiveAgentDirOverride(),
 	profile: activeProfile,
 });
+
+/**
+ * The resolver for the live home ({@link getHomeDir}). Every omp path reader and
+ * writer goes through it, so they always agree on XDG and profile placement.
+ * When the home changes (a `HOME` set after start-up, a test's `os.homedir`
+ * spy), the resolver is rebuilt with the same agent-dir/profile options; in an
+ * unchanged environment it is built once.
+ */
+function liveDirs(): DirResolver {
+	if (currentDirs.home !== getHomeDir()) currentDirs = new DirResolver(currentDirs.options);
+	return currentDirs;
+}
+
 /**
  * Snapshot of `PI_CODING_AGENT_DIR` from before the first named-profile
  * activation. Reset paths restore this value (or its absence) instead of
@@ -524,11 +548,6 @@ let preProfileAgentDirEnv: string | undefined = resolvePreProfileAgentDir(
 	process.env.PI_CODING_AGENT_DIR,
 	activeProfile ?? readPiProfileFromEnvSafe(),
 );
-// Anchor home for the resolver. Captured at module load to stay stable across
-// test mocks of `os.homedir()`. `getPluginsDir(home)` compares against this so
-// production callers (`home === RESOLVER_HOME`) hit the XDG-aware resolver while
-// tests passing a temp HOME short-circuit to a deterministic path.
-const RESOLVER_HOME = os.homedir();
 
 /**
  * Rebuild the dirs resolver from the current environment, reusing the profile
@@ -541,7 +560,7 @@ const RESOLVER_HOME = os.homedir();
  * `preProfileAgentDirEnv` snapshot is intentionally left untouched.
  */
 export function refreshDirsFromEnv(): void {
-	dirs = new DirResolver({
+	currentDirs = new DirResolver({
 		agentDirOverride: resolveActiveAgentDirOverride(),
 		profile: activeProfile,
 	});
@@ -553,13 +572,13 @@ export function refreshDirsFromEnv(): void {
 
 /** Get the config root directory (~/.omp). */
 export function getConfigRootDir(): string {
-	return dirs.configRoot;
+	return liveDirs().configRoot;
 }
 
 /** Set the coding agent directory. Creates a fresh resolver, invalidating all cached paths. */
 export function setAgentDir(dir: string): void {
 	activeProfile = undefined;
-	dirs = new DirResolver({ agentDirOverride: dir });
+	currentDirs = new DirResolver({ agentDirOverride: dir });
 	process.env.PI_CODING_AGENT_DIR = dir;
 	preProfileAgentDirEnv = dir;
 	for (const key of PROFILE_ENV_KEYS) {
@@ -612,10 +631,10 @@ export function setProfile(profile: string | undefined): void {
 	}
 	activeProfile = next;
 	if (activeProfile) {
-		dirs = new DirResolver({ profile: activeProfile });
+		currentDirs = new DirResolver({ profile: activeProfile });
 		process.env.OMP_PROFILE = activeProfile;
 		process.env.PI_PROFILE = activeProfile;
-		process.env.PI_CODING_AGENT_DIR = dirs.agentDir;
+		process.env.PI_CODING_AGENT_DIR = currentDirs.agentDir;
 	} else {
 		for (const key of PROFILE_ENV_KEYS) {
 			delete process.env[key];
@@ -625,7 +644,7 @@ export function setProfile(profile: string | undefined): void {
 		} else {
 			process.env.PI_CODING_AGENT_DIR = preProfileAgentDirEnv;
 		}
-		dirs = new DirResolver({ agentDirOverride: preProfileAgentDirEnv });
+		currentDirs = new DirResolver({ agentDirOverride: preProfileAgentDirEnv });
 	}
 }
 
@@ -640,7 +659,7 @@ export function getProfileRootDir(profile: string | undefined): string {
 }
 /** Get the agent config directory (~/.omp/agent). */
 export function getAgentDir(): string {
-	return dirs.agentDir;
+	return liveDirs().agentDir;
 }
 
 /** Get the project-local config directory (.omp). */
@@ -654,7 +673,7 @@ export function getProjectAgentDir(cwd: string = getProjectDir()): string {
 
 /** Get the reports directory (~/.omp/reports). */
 export function getReportsDir(): string {
-	return dirs.rootSubdir("reports", "state");
+	return liveDirs().rootSubdir("reports", "state");
 }
 
 /**
@@ -668,7 +687,7 @@ export function getLogsDir(): string {
 		const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
 		return path.join(os.tmpdir(), `omp-test-logs-${uid}`);
 	}
-	return dirs.rootSubdir("logs", "state");
+	return liveDirs().rootSubdir("logs", "state");
 }
 
 /**
@@ -691,19 +710,19 @@ export function getLogPath(date = new Date(), pid = process.pid): string {
 /**
  * Get the plugins directory (~/.omp/plugins or its XDG equivalent).
  *
- * No-arg form (production callers) goes through the XDG-aware DirResolver so
- * reads and writes always agree. The optional `home` parameter is for test
- * isolation: when it differs from the home the process started with it
- * short-circuits the resolver and returns `<home>/<configDir>/plugins`, so a
- * temp home (passed explicitly, or set as `HOME` at runtime and passed on by
- * {@link getHomeDir}) gets a deterministic path. Passing the start-up home is
- * identical to the no-arg form — XDG semantics are preserved.
+ * Reads and writes go through the XDG- and profile-aware resolver for the live
+ * home, so they always agree: the no-arg form, and any `home` equal to the live
+ * home ({@link getHomeDir}), return the same path. Only a different, explicitly
+ * passed home (a test's temp home that is not the live home) short-circuits to
+ * `<home>/<configDir>/plugins`; XDG and profile settings describe the live
+ * user, not that home.
  */
 export function getPluginsDir(home?: string): string {
-	if (home !== undefined && home !== RESOLVER_HOME) {
+	const resolver = liveDirs();
+	if (home !== undefined && home !== resolver.home) {
 		return path.join(home, getConfigDirName(), "plugins");
 	}
-	return dirs.rootSubdir("plugins", "data");
+	return resolver.rootSubdir("plugins", "data");
 }
 
 /** Where npm installs packages (~/.omp/plugins/node_modules). */
@@ -723,7 +742,7 @@ export function getPluginsLockfile(home?: string): string {
 
 /** Get the remote mount directory (~/.omp/remote). */
 export function getRemoteDir(): string {
-	return dirs.rootSubdir("remote", "data");
+	return liveDirs().rootSubdir("remote", "data");
 }
 
 /**
@@ -772,52 +791,54 @@ export function setWorktreesDir(dir: string | undefined): string | undefined {
  * ignored and resolution falls through.
  */
 export function getWorktreesDir(): string {
-	return resolveAbsoluteDir(process.env.OMP_WORKTREE_DIR) ?? worktreesDirOverride ?? dirs.rootSubdir("wt", "data");
+	return (
+		resolveAbsoluteDir(process.env.OMP_WORKTREE_DIR) ?? worktreesDirOverride ?? liveDirs().rootSubdir("wt", "data")
+	);
 }
 
 /** Get the SSH control socket directory (~/.omp/ssh-control). */
 export function getSshControlDir(): string {
-	return dirs.rootSubdir("ssh-control", "state");
+	return liveDirs().rootSubdir("ssh-control", "state");
 }
 
 /** Get the remote host info directory (~/.omp/remote-host). */
 export function getRemoteHostDir(): string {
-	return dirs.rootSubdir("remote-host", "data");
+	return liveDirs().rootSubdir("remote-host", "data");
 }
 
 /** Get the managed Python venv directory (~/.omp/python-env). */
 export function getPythonEnvDir(): string {
-	return dirs.rootSubdir("python-env", "data");
+	return liveDirs().rootSubdir("python-env", "data");
 }
 
 /** Get the shared Python gateway state directory (~/.omp/agent/python-gateway; XDG default: $XDG_STATE_HOME/omp/python-gateway). */
 export function getPythonGatewayDir(): string {
-	return dirs.agentSubdir(undefined, "python-gateway", "state");
+	return liveDirs().agentSubdir(undefined, "python-gateway", "state");
 }
 
 /** Get the puppeteer sandbox directory (~/.omp/puppeteer). */
 export function getPuppeteerDir(): string {
-	return dirs.rootSubdir("puppeteer", "cache");
+	return liveDirs().rootSubdir("puppeteer", "cache");
 }
 
 /** Get the browser relay extension install directory (~/.omp/browser-relay). */
 export function getBrowserRelayDir(): string {
-	return dirs.rootSubdir("browser-relay", "data");
+	return liveDirs().rootSubdir("browser-relay", "data");
 }
 
 /** Get the profile root for Chromium browsers the browser tool spawns via `app.path` (~/.omp/browser-profiles). */
 export function getBrowserProfilesDir(): string {
-	return dirs.rootSubdir("browser-profiles", "state");
+	return liveDirs().rootSubdir("browser-profiles", "state");
 }
 
 /** Get DOCS_RS cache directory () */
 export function getDocsRsCacheDir(): string {
-	return dirs.rootSubdir("webcache", "cache");
+	return liveDirs().rootSubdir("webcache", "cache");
 }
 
 /** Get the auto-QA grievances SQLite database path (~/.omp/autoqa.db; XDG: $XDG_DATA_HOME/omp/autoqa.db). */
 export function getAutoQaDbPath(): string {
-	return dirs.rootSubdir("autoqa.db", "data");
+	return liveDirs().rootSubdir("autoqa.db", "data");
 }
 /**
  * Stable 7-character hex digest of an absolute filesystem path.
@@ -845,7 +866,7 @@ export function getWorktreeDir(segment: string): string {
 export function getGithubCacheDbPath(): string {
 	const override = process.env.OMP_GITHUB_CACHE_DB;
 	if (override) return override;
-	return dirs.rootSubdir(path.join("cache", "github-cache.db"), "cache");
+	return liveDirs().rootSubdir(path.join("cache", "github-cache.db"), "cache");
 }
 /**
  * Get the conventional commit inference cache database path (~/.omp/cache/commit-inference.db).
@@ -854,7 +875,7 @@ export function getGithubCacheDbPath(): string {
 export function getCommitCacheDbPath(): string {
 	const override = process.env.OMP_COMMIT_CACHE_DB;
 	if (override) return override;
-	return dirs.rootSubdir(path.join("cache", "commit-inference.db"), "cache");
+	return liveDirs().rootSubdir(path.join("cache", "commit-inference.db"), "cache");
 }
 
 /**
@@ -864,12 +885,12 @@ export function getCommitCacheDbPath(): string {
 export function getJudgmentCacheDbPath(): string {
 	const override = process.env.OMP_JUDGMENT_CACHE_DB;
 	if (override) return override;
-	return dirs.rootSubdir(path.join("cache", "judgment-cache.db"), "cache");
+	return liveDirs().rootSubdir(path.join("cache", "judgment-cache.db"), "cache");
 }
 
 /** Get the legacy Pi extension parse cache database path. */
 export function getLegacyPiExtensionCacheDbPath(): string {
-	return dirs.rootSubdir(path.join("cache", "legacy-pi-extension-cache.db"), "cache");
+	return liveDirs().rootSubdir(path.join("cache", "legacy-pi-extension-cache.db"), "cache");
 }
 
 /**
@@ -880,22 +901,22 @@ export function getLegacyPiExtensionCacheDbPath(): string {
 export function getAuthBrokerSnapshotCachePath(): string {
 	const override = process.env.OMP_AUTH_BROKER_SNAPSHOT_CACHE;
 	if (override) return override;
-	return dirs.rootSubdir(path.join("cache", "auth-broker-snapshot.enc"), "cache");
+	return liveDirs().rootSubdir(path.join("cache", "auth-broker-snapshot.enc"), "cache");
 }
 
 /** Get the commit-author avatar cache directory (~/.omp/cache/avatars). */
 export function getAvatarCacheDir(): string {
-	return dirs.rootSubdir(path.join("cache", "avatars"), "cache");
+	return liveDirs().rootSubdir(path.join("cache", "avatars"), "cache");
 }
 
 /** Get the local FastEmbed model cache directory (~/.omp/cache/fastembed). */
 export function getFastembedCacheDir(): string {
-	return dirs.rootSubdir(path.join("cache", "fastembed"), "cache");
+	return liveDirs().rootSubdir(path.join("cache", "fastembed"), "cache");
 }
 
 /** Get the on-demand fastembed runtime install root (~/.omp/cache/fastembed-runtime). */
 export function getFastembedRuntimeDir(): string {
-	return dirs.rootSubdir(path.join("cache", "fastembed-runtime"), "cache");
+	return liveDirs().rootSubdir(path.join("cache", "fastembed-runtime"), "cache");
 }
 
 /**
@@ -909,17 +930,17 @@ export function getNativeGrammarsDir(): string {
 
 /** Get the natives directory. PI_NATIVES_DIR overrides the usual cache root; relative values are ignored. */
 export function getNativesDir(): string {
-	return resolveAbsoluteDir(process.env.PI_NATIVES_DIR) ?? dirs.rootSubdir("natives", "cache");
+	return resolveAbsoluteDir(process.env.PI_NATIVES_DIR) ?? liveDirs().rootSubdir("natives", "cache");
 }
 
 /** Get the stats database path (~/.omp/stats.db). */
 export function getStatsDbPath(): string {
-	return dirs.rootSubdir("stats.db", "data");
+	return liveDirs().rootSubdir("stats.db", "data");
 }
 
 /** Get the autoresearch state directory (~/.omp/autoresearch). */
 export function getAutoresearchDir(): string {
-	return dirs.rootSubdir("autoresearch", "state");
+	return liveDirs().rootSubdir("autoresearch", "state");
 }
 
 /** Get the per-project autoresearch state directory (~/.omp/autoresearch/<encoded-project>). */
@@ -939,7 +960,7 @@ export function getAutoresearchRunDir(encodedProject: string, runId: number): st
 
 /** Get the security-analysis state directory (~/.omp/security). */
 export function getSecurityDir(): string {
-	return dirs.rootSubdir("security", "state");
+	return liveDirs().rootSubdir("security", "state");
 }
 
 /** Get one project's security-analysis state directory (~/.omp/security/<project-key>). */
@@ -953,92 +974,93 @@ export function getSecurityProjectDir(projectKey: string): string {
 
 /** Get the path to agent.db (SQLite database for settings and auth storage). */
 export function getAgentDbPath(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "agent.db", "data");
+	return liveDirs().agentSubdir(agentDir, "agent.db", "data");
 }
 
 /** Get the last-seen-changelog-version marker file (~/.omp/agent/last-changelog-version). */
 export function getLastChangelogVersionPath(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "last-changelog-version", "state");
+	return liveDirs().agentSubdir(agentDir, "last-changelog-version", "state");
 }
 
 /** Get the path to history.db (SQLite database for session history). */
 export function getHistoryDbPath(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "history.db", "data");
+	return liveDirs().agentSubdir(agentDir, "history.db", "data");
 }
 
 /** Get the path to models.db (model cache database). */
 export function getModelDbPath(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "models.db", "data");
+	return liveDirs().agentSubdir(agentDir, "models.db", "data");
 }
 
 /** Get the tiny title model cache directory (~/.omp/agent/cache/tiny-models). */
 export function getTinyModelsCacheDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, path.join("cache", "tiny-models"), "cache");
+	return liveDirs().agentSubdir(agentDir, path.join("cache", "tiny-models"), "cache");
 }
 
 /** Get the document conversion cache directory (~/.omp/agent/cache/document-conversions; XDG default: $XDG_CACHE_HOME/omp/cache/document-conversions). */
 export function getDocumentConversionCacheDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, path.join("cache", "document-conversions"), "cache");
+	return liveDirs().agentSubdir(agentDir, path.join("cache", "document-conversions"), "cache");
 }
 /** Get the composer speculative cache database (~/.omp/agent/cache/composer.db; XDG default: $XDG_CACHE_HOME/omp/cache/composer.db). */
 export function getComposerCacheDbPath(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, path.join("cache", "composer.db"), "cache");
+	return liveDirs().agentSubdir(agentDir, path.join("cache", "composer.db"), "cache");
 }
 /** Get the skill descriptions database (~/.omp/agent/skill-descriptions.db; XDG default: $XDG_DATA_HOME/omp/skill-descriptions.db). */
 export function getSkillDescriptionsDbPath(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "skill-descriptions.db", "data");
+	return liveDirs().agentSubdir(agentDir, "skill-descriptions.db", "data");
 }
 /** Get the text-predict engine state directory (~/.omp/agent/predict/<method>; XDG default: $XDG_DATA_HOME/omp/predict/<method>). Adopts legacy engine state on first XDG resolution. */
 export function getPredictStateDir(agentDir: string | undefined, method: string): string {
 	const subdir = path.join("predict", method);
-	const stateDir = dirs.agentSubdir(agentDir, subdir, "data");
-	adoptLegacyDir(path.join(agentDir ?? dirs.agentDir, subdir), stateDir);
+	const resolver = liveDirs();
+	const stateDir = resolver.agentSubdir(agentDir, subdir, "data");
+	adoptLegacyDir(path.join(agentDir ?? resolver.agentDir, subdir), stateDir);
 	return stateDir;
 }
 
 /** Get the sessions directory (~/.omp/agent/sessions). */
 export function getSessionsDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "sessions", "data");
+	return liveDirs().agentSubdir(agentDir, "sessions", "data");
 }
 
 /** Get the content-addressed blob store directory (~/.omp/agent/blobs). */
 export function getBlobsDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "blobs", "data");
+	return liveDirs().agentSubdir(agentDir, "blobs", "data");
 }
 
 /** Get the custom themes directory (~/.omp/agent/themes). */
 export function getCustomThemesDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "themes");
+	return liveDirs().agentSubdir(agentDir, "themes");
 }
 
 /** Get the tools directory (~/.omp/agent/tools). */
 export function getToolsDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "tools");
+	return liveDirs().agentSubdir(agentDir, "tools");
 }
 
 /** Get the slash commands directory (~/.omp/agent/commands). */
 export function getCommandsDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "commands");
+	return liveDirs().agentSubdir(agentDir, "commands");
 }
 
 /** Get the prompts directory (~/.omp/agent/prompts). */
 export function getPromptsDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "prompts");
+	return liveDirs().agentSubdir(agentDir, "prompts");
 }
 
 /** Get the user-level Python modules directory (~/.omp/agent/modules). */
 export function getAgentModulesDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "modules");
+	return liveDirs().agentSubdir(agentDir, "modules");
 }
 
 /** Get the memories directory (~/.omp/agent/memories). */
 export function getMemoriesDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "memories", "state");
+	return liveDirs().agentSubdir(agentDir, "memories", "state");
 }
 
 /** Get the terminal sessions directory (~/.omp/agent/terminal-sessions). */
 export function getTerminalSessionsDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "terminal-sessions", "state");
+	return liveDirs().agentSubdir(agentDir, "terminal-sessions", "state");
 }
 
 /**
@@ -1048,17 +1070,17 @@ export function getTerminalSessionsDir(agentDir?: string): string {
  * exact path after its terminal breadcrumb is overwritten by a later session.
  */
 export function getCustomSessionFilesDir(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "custom-session-files", "state");
+	return liveDirs().agentSubdir(agentDir, "custom-session-files", "state");
 }
 
 /** Get the crash log path (~/.omp/agent/omp-crash.log). */
 export function getCrashLogPath(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, "omp-crash.log", "state");
+	return liveDirs().agentSubdir(agentDir, "omp-crash.log", "state");
 }
 
 /** Get the debug log path (~/.omp/agent/omp-debug.log). */
 export function getDebugLogPath(agentDir?: string): string {
-	return dirs.agentSubdir(agentDir, `${APP_NAME}-debug.log`, "state");
+	return liveDirs().agentSubdir(agentDir, `${APP_NAME}-debug.log`, "state");
 }
 
 /**
@@ -1105,24 +1127,25 @@ function adoptLegacyDir(legacyPath: string, targetPath: string): void {
 
 /** Get the secret placeholder key path (~/.omp/agent/secret-placeholder.key; XDG default: $XDG_STATE_HOME/omp/secret-placeholder.key). Adopts a legacy key on first XDG resolution. */
 export function getSecretPlaceholderKeyPath(): string {
-	const keyPath = dirs.agentSubdir(undefined, "secret-placeholder.key", "state");
-	adoptLegacyFile(path.join(dirs.agentDir, "secret-placeholder.key"), keyPath);
+	const resolver = liveDirs();
+	const keyPath = resolver.agentSubdir(undefined, "secret-placeholder.key", "state");
+	adoptLegacyFile(path.join(resolver.agentDir, "secret-placeholder.key"), keyPath);
 	return keyPath;
 }
 
 /** Directory holding the per-model tiny-worker sockets and logs (~/.omp/run/tiny; XDG default: $XDG_STATE_HOME/omp/run/tiny). */
 export function getTinyWorkerRuntimeDir(): string {
-	return dirs.rootSubdir(path.join("run", "tiny"), "state");
+	return liveDirs().rootSubdir(path.join("run", "tiny"), "state");
 }
 
 /** Directory holding the per-model mnemopi embedding server endpoints and logs (~/.omp/run/mnemopi; XDG default: $XDG_STATE_HOME/omp/run/mnemopi). */
 export function getMnemopiEmbedRuntimeDir(): string {
-	return dirs.rootSubdir(path.join("run", "mnemopi"), "state");
+	return liveDirs().rootSubdir(path.join("run", "mnemopi"), "state");
 }
 
 /** Root directory containing every per-project daemon runtime scope (~/.omp/run/daemons; XDG default: $XDG_STATE_HOME/omp/run/daemons). */
 export function getDaemonRuntimeRoot(): string {
-	return dirs.rootSubdir(path.join("run", "daemons"), "state");
+	return liveDirs().rootSubdir(path.join("run", "daemons"), "state");
 }
 
 /** Get the daemon runtime directory for a project (~/.omp/run/daemons/<hash>; XDG default: $XDG_STATE_HOME/omp/run/daemons/<hash>). */
@@ -1133,7 +1156,7 @@ export function getDaemonRuntimeDir(projectDir: string): string {
 
 /** Root directory containing every machine-global daemon service scope (~/.omp/run/daemons/global; XDG default: $XDG_STATE_HOME/omp/run/daemons/global). Shared across profiles. */
 export function getGlobalDaemonRuntimeRoot(): string {
-	return dirs.baseRootSubdir(path.join("run", "daemons", "global"), "state");
+	return liveDirs().baseRootSubdir(path.join("run", "daemons", "global"), "state");
 }
 
 /** Get a profile-independent runtime directory for a machine-global daemon service. */
@@ -1150,18 +1173,19 @@ export function getGlobalDaemonRuntimeDir(service: string): string {
  * every omp process that opens a session must meet the same lease.
  */
 export function getSessionOwnersDir(): string {
-	return dirs.baseRootSubdir(path.join("run", "session-owners"), "state");
+	return liveDirs().baseRootSubdir(path.join("run", "session-owners"), "state");
 }
 
 /** Get the provider in-flight root directory (~/.omp/run/provider-inflight; XDG default: $XDG_STATE_HOME/omp/run/provider-inflight). */
 export function getProviderInFlightRoot(): string {
-	return dirs.rootSubdir(path.join("run", "provider-inflight"), "state");
+	return liveDirs().rootSubdir(path.join("run", "provider-inflight"), "state");
 }
 
 /** Get the marketplaces registry path (~/.omp/marketplaces.json; XDG default: $XDG_DATA_HOME/omp/marketplaces.json). Adopts a legacy registry on first XDG resolution. */
 export function getMarketplacesRegistryPath(): string {
-	const registryPath = dirs.rootSubdir("marketplaces.json", "data");
-	adoptLegacyFile(path.join(dirs.configRoot, "marketplaces.json"), registryPath);
+	const resolver = liveDirs();
+	const registryPath = resolver.rootSubdir("marketplaces.json", "data");
+	adoptLegacyFile(path.join(resolver.configRoot, "marketplaces.json"), registryPath);
 	return registryPath;
 }
 
