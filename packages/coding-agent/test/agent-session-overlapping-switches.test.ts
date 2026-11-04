@@ -349,4 +349,60 @@ describe("overlapping session switches", () => {
 			await Promise.allSettled([nested?.done, starting]);
 		}
 	}, 30_000);
+
+	it("leaves the accepted switch's session live when two nested switches it started are refused in turn", async () => {
+		const target = createSession();
+		const nested: RefusedSwitch[] = [];
+		const nestedStarted = Promise.withResolvers<void>();
+		let started = false;
+		target.setSessionSwitchReconciler(async () => {
+			if (started) return;
+			started = true;
+			// Started from the outer switch and not awaited: two siblings, both pending at once.
+			nested.push(await startRefusedSwitch(target, "sibling-b"));
+			nested.push(await startRefusedSwitch(target, "sibling-c"));
+			nestedStarted.resolve();
+		});
+		const manager = SessionManager.create(
+			target.sessionManager.getCwd(),
+			path.join(tempDir.path(), "accepted-sessions"),
+		);
+		manager.appendMessage({ role: "user", content: "accepted session", timestamp: Date.now() });
+		await manager.ensureOnDisk();
+		const file = manager.getSessionFile();
+		await manager.close();
+		if (!file) throw new Error("Expected target session file");
+		try {
+			const outer = target.switchSession(file);
+			await nestedStarted.promise;
+			nested[0]!.refuse();
+			expect(await nested[0]!.done).toBe(false);
+			nested[1]!.refuse();
+			expect(await nested[1]!.done).toBe(false);
+			expect(await outer).toBe(true);
+			await target.waitForSessionTransition();
+
+			// Both nested switches were refused: the accepted switch's session is live and gets the next message.
+			expect(target.sessionManager.getSessionFile()).toBe(file);
+			await target.prompt("after the refusals");
+			await target.waitForIdle();
+			expect(target.messages.some(message => messageText(message).includes("after the refusals"))).toBe(true);
+			expect(target.sessionManager.getSessionFile()).toBe(file);
+		} finally {
+			for (const pending of nested) pending.refuse();
+			await Promise.allSettled(nested.map(pending => pending.done));
+		}
+	}, 30_000);
+
+	it("never runs a transition still queued when its session is disposed", async () => {
+		const target = createSession();
+		const sessionFile = target.sessionManager.getSessionFile();
+		const pending = await startRefusedSwitch(target, "held");
+		const starting = target.newSession();
+		const disposing = target.dispose();
+		pending.refuse();
+		await Promise.allSettled([pending.done, disposing]);
+		await expect(starting).rejects.toThrow("disposed before this session transition could run");
+		expect(target.sessionManager.getSessionFile()).toBe(sessionFile);
+	}, 30_000);
 });

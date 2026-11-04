@@ -623,18 +623,24 @@ export const MCP_DISCOVERY_TURN_WAIT_MS = 1500;
 const IMAGE_DESCRIPTION_ADMISSION_TIMEOUT_MS = 20_000;
 /** Marks work running inside the deferred extension load so it never waits on itself. */
 const deferredExtensionLoadScope = new AsyncLocalStorage<true>();
-/** One session's running transition: the queue moves on once it and every transition nested in it settled. */
+/**
+ * One session transition in its session's tree of transitions. Transitions it starts itself queue
+ * on its `childTail`; it hands its parent's queue on once it and every one in `nested` settled.
+ */
 interface SessionTransitionTurn {
+	readonly parent: SessionTransitionTurn | undefined;
 	readonly nested: Set<Promise<unknown>>;
+	childTail: Promise<void>;
+	released: boolean;
 }
 /**
- * Marks work running inside session transitions with their turns (one per session, so a transition
- * that goes through another session still counts as nested in its own), and the body a transition's
- * entry point is about to run, so a transition started from inside one runs nested instead of
- * queuing behind it.
+ * Marks work running inside session transitions with the innermost transition of each session on
+ * the path (so one that goes through another session still counts as nested in its own), and the
+ * body a transition's entry point is about to run, so a transition started from inside one queues
+ * among that one's own instead of behind it.
  */
 const sessionTransitionTurnScope = new AsyncLocalStorage<{
-	readonly turns: ReadonlySet<SessionTransitionTurn>;
+	readonly turns: ReadonlyMap<object, SessionTransitionTurn>;
 	readonly body?: { readonly session: object; entered: boolean };
 }>();
 
@@ -1409,10 +1415,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#sessionTransitionSettled: Promise<void> | undefined;
 	#resolveSessionTransition: (() => void) | undefined;
 	#sessionTransitionDepth = 0;
-	/** Settles when the last session transition to queue has finished: the next one waits for it. */
-	#sessionTransitionQueueTail: Promise<void> = Promise.resolve();
-	/** Turn of the session transition running now, which a transition nested in it shares. */
-	#activeSessionTransitionTurn: SessionTransitionTurn | undefined;
+	/** Root of this session's transition tree: transitions requested from outside any running one queue on it. */
+	readonly #sessionTransitionRoot: SessionTransitionTurn = {
+		parent: undefined,
+		nested: new Set(),
+		childTail: Promise.resolve(),
+		released: false,
+	};
 	/** Transitions requested from outside and not yet released (queued, running, or awaiting nested ones). */
 	#queuedSessionTransitions = 0;
 	/** Each using declaration disposes one depth, so nested transitions reuse this token. */
@@ -6257,7 +6266,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	async waitForSessionTransition(): Promise<void> {
 		while (this.#sessionTransitionSettled || this.#queuedSessionTransitions > 0) {
-			await (this.#sessionTransitionSettled ?? this.#sessionTransitionQueueTail);
+			await (this.#sessionTransitionSettled ?? this.#sessionTransitionRoot.childTail);
 		}
 	}
 
@@ -6278,11 +6287,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Each entry point calls this first with a call of itself, and runs its own body when this returns
 	 * `undefined`. A transition snapshots the session and restores that snapshot when it rolls back,
 	 * so one that overlapped another would either restore over the other's result or snapshot a
-	 * session the other was still changing: a transition requested from outside queues behind every
-	 * earlier one ({@link #runSessionTransition}). One that the running transition starts itself (from
-	 * its hooks or callbacks, through any session) runs at once, nested in it, as before, since
-	 * waiting for the outer one would wait for itself; the turn holds the queue until such nested
-	 * transitions have settled too, awaited or not.
+	 * session the other was still changing. So transitions run one after another at every level:
+	 * one requested from outside queues behind every earlier one, and one that a running transition
+	 * starts itself (from its hooks or callbacks, through any session) queues only behind the earlier
+	 * ones that same transition started, never behind the transition itself, since that would wait for
+	 * itself. A transition hands its queue on once those nested in it have settled too, awaited or not.
 	 */
 	#enterSessionTransition<T>(rerun: () => Promise<T>): Promise<T> | undefined {
 		const store = sessionTransitionTurnScope.getStore();
@@ -6292,48 +6301,58 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			body.entered = true;
 			return undefined;
 		}
-		const turn = this.#activeSessionTransitionTurn;
-		if (turn && store?.turns.has(turn)) {
-			const nested = sessionTransitionTurnScope.run(
-				{ turns: store.turns, body: { session: this, entered: false } },
-				rerun,
-			);
-			turn.nested.add(nested);
-			void nested.then(
-				() => turn.nested.delete(nested),
-				() => turn.nested.delete(nested),
-			);
-			return nested;
-		}
-		return this.#runSessionTransition(rerun);
+		// The innermost transition of this session on the caller's path, if it is still running.
+		let parent = store?.turns.get(this);
+		while (parent?.released) parent = parent.parent;
+		return this.#runSessionTransition(rerun, parent ?? this.#sessionTransitionRoot, store?.turns);
 	}
 
 	/**
-	 * Runs a session transition requested from outside any running one, once every transition
-	 * requested before it has finished, nested ones included.
+	 * Runs a session transition once every transition requested before it under the same parent has
+	 * finished, nested ones included. A transition still waiting when the session is disposed never
+	 * runs: its caller gets an error instead of a change to a session that is gone.
 	 */
-	async #runSessionTransition<T>(rerun: () => Promise<T>): Promise<T> {
-		const previous = this.#sessionTransitionQueueTail;
+	async #runSessionTransition<T>(
+		rerun: () => Promise<T>,
+		parent: SessionTransitionTurn,
+		outerTurns: ReadonlyMap<object, SessionTransitionTurn> | undefined,
+	): Promise<T> {
+		const previous = parent.childTail;
 		const done = Promise.withResolvers<void>();
-		this.#sessionTransitionQueueTail = done.promise;
-		this.#queuedSessionTransitions++;
-		const turn: SessionTransitionTurn = { nested: new Set() };
-		const turns = new Set(sessionTransitionTurnScope.getStore()?.turns);
-		turns.add(turn);
-		try {
-			await previous;
-			this.#activeSessionTransitionTurn = turn;
-			return await sessionTransitionTurnScope.run({ turns, body: { session: this, entered: false } }, rerun);
-		} finally {
-			void this.#releaseSessionTransitionTurn(turn, done);
+		parent.childTail = done.promise;
+		const fromOutside = parent === this.#sessionTransitionRoot;
+		if (fromOutside) this.#queuedSessionTransitions++;
+		const turn: SessionTransitionTurn = { parent, nested: new Set(), childTail: Promise.resolve(), released: false };
+		const turns = new Map(outerTurns);
+		turns.set(this, turn);
+		const run = (async () => {
+			try {
+				await previous;
+				if (this.#isDisposed) throw new Error("The session was disposed before this session transition could run.");
+				return await sessionTransitionTurnScope.run({ turns, body: { session: this, entered: false } }, rerun);
+			} finally {
+				void this.#releaseSessionTransitionTurn(turn, done, fromOutside);
+			}
+		})();
+		if (!fromOutside) {
+			parent.nested.add(run);
+			void run.then(
+				() => parent.nested.delete(run),
+				() => parent.nested.delete(run),
+			);
 		}
+		return run;
 	}
 
-	/** Hands the transition queue on once a turn's own transition and every one nested in it settled. */
-	async #releaseSessionTransitionTurn(turn: SessionTransitionTurn, done: PromiseWithResolvers<void>): Promise<void> {
+	/** Hands a parent's queue on once a transition and every one nested in it have settled. */
+	async #releaseSessionTransitionTurn(
+		turn: SessionTransitionTurn,
+		done: PromiseWithResolvers<void>,
+		fromOutside: boolean,
+	): Promise<void> {
 		while (turn.nested.size > 0) await Promise.allSettled([...turn.nested]);
-		if (this.#activeSessionTransitionTurn === turn) this.#activeSessionTransitionTurn = undefined;
-		this.#queuedSessionTransitions--;
+		turn.released = true;
+		if (fromOutside) this.#queuedSessionTransitions--;
 		done.resolve();
 	}
 
