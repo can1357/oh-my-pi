@@ -126,7 +126,7 @@ describe("read URL answered by a bot wall", () => {
 		{
 			// Over the 1024 characters the generic JavaScript-gate check looks at.
 			reader: "a long JavaScript gate",
-			body: `Title: Just a moment...\n\nMarkdown Content:\nJust a moment...\n\nEnable JavaScript and cookies to continue\n\n${"www.reddit.com needs to review the security of your connection before proceeding. ".repeat(14)}`,
+			body: `Title: Just a moment...\n\nMarkdown Content:\nJust a moment...\n\nTurn on JavaScript and cookies to continue\n\n${"www.reddit.com needs to review the security of your connection before proceeding. ".repeat(14)}`,
 			method: "blocked",
 			note: "JavaScript challenge, HTTP 200",
 		},
@@ -140,7 +140,7 @@ describe("read URL answered by a bot wall", () => {
 			expect(result.finalUrl).toEndWith("/canonical");
 			expect(result.remoteCalls[0]).toEndWith("/canonical");
 		} else {
-			expect(result.text).not.toMatch(/blocked by network security|Enable JavaScript/);
+			expect(result.text).not.toMatch(/blocked by network security|(Enable|Turn on) JavaScript/);
 			expect(result.notes).toContain("the browser tool");
 		}
 	});
