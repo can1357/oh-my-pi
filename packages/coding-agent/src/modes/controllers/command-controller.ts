@@ -21,10 +21,11 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
-import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, logger, procmgr, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { getActiveProfile, getConfigDirName } from "@oh-my-pi/pi-utils/dirs";
 import { classifyTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
+import { clearClaudePluginRootsCache } from "../../discovery/helpers";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
 import { parseExportArgs } from "../../export/html/args";
@@ -105,6 +106,11 @@ import { openPath } from "../../utils/open";
 import { resumeCommand } from "../../utils/resume-command";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import {
+	formatPostCheckoutHookWarning,
+	type PostCheckoutHookResult,
+	runPostCheckoutHook,
+} from "../../utils/worktree-hook";
+import {
 	collapseSharedUsageReports,
 	formatLimitTitle,
 	summarizeUsageResetCredits,
@@ -134,6 +140,9 @@ const TERN_FORK_UNCONFIRMED: Partial<Record<TernErrorKind, true>> = { closed: tr
 
 /** Rows `/session` spends on the builds that wrote the session, including the elision row. */
 const MAX_LISTED_BUILDS = 5;
+
+/** How long the `/wt` post-checkout hook runs before its Esc loader takes the editor slot, so a repo without a hook never flashes it. */
+const HOOK_LOADER_DELAY_MS = 200;
 
 function formatCreditValue(value: number): string {
 	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
@@ -1786,11 +1795,28 @@ export class CommandController {
 					error: worktree.cloneError,
 				});
 			}
-			if (!(await this.#relocateSession(worktree.path))) return false;
+			const relocated = await this.#relocateSession(worktree.path);
+			const hookEnv = procmgr.getChildShellEnv();
+			const cleanup =
+				relocated && worktree.keptChanges
+					? await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings)
+					: { cleaned: false, errorMessage: undefined };
+			const hook = await this.#runPostCheckoutHook(worktree, hookEnv);
+			const hookWarning = formatPostCheckoutHookWarning(hook);
+			if (hookWarning) this.ctx.showWarning(hookWarning);
+			if (!relocated) return false;
+			// The session moved before git's hook step: rescan so it sees the skills and slash commands the hook added.
+			if (hook.status === "ok" || hook.status === "failed") {
+				try {
+					clearClaudePluginRootsCache();
+					await this.ctx.session.refreshSkillsAndCommands();
+				} catch (err) {
+					this.ctx.showWarning(
+						`Worktree created, but rescanning it after the post-checkout hook failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+			}
 			created = worktree;
-			const cleanup = worktree.keptChanges
-				? await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings)
-				: { cleaned: false, errorMessage: undefined };
 			if (cleanup.errorMessage !== undefined) {
 				this.ctx.showWarning(`Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`);
 			}
@@ -1805,6 +1831,46 @@ export class CommandController {
 			return true;
 		});
 		return created;
+	}
+
+	/**
+	 * Runs the hook and returns its result. Past {@link HOOK_LOADER_DELAY_MS} a loader holds the editor slot and
+	 * Esc cancels the hook; the slot then gets back what it held, unless a dialog took it.
+	 */
+	async #runPostCheckoutHook(worktree: SessionWorktree, env: Record<string, string>): Promise<PostCheckoutHookResult> {
+		const abort = new AbortController();
+		let loader: BorderedLoader | undefined;
+		let previousChildren: Component[] = [];
+		let previousFocus: Component | null = null;
+		const timer = setTimeout(() => {
+			loader = new BorderedLoader(this.ctx.ui, theme, "Running post-checkout hook…");
+			loader.onAbort = () => abort.abort();
+			previousChildren = [...this.ctx.editorContainer.children];
+			previousFocus = this.ctx.ui.getFocused();
+			this.ctx.editorContainer.clear();
+			this.ctx.editorContainer.addChild(loader);
+			this.ctx.ui.setFocus(loader);
+			this.ctx.ui.requestRender();
+		}, HOOK_LOADER_DELAY_MS);
+		try {
+			return await runPostCheckoutHook(worktree.path, worktree.baseCommit, { signal: abort.signal, env });
+		} finally {
+			clearTimeout(timer);
+			if (loader) {
+				loader.dispose();
+				if (this.ctx.editorContainer.children.includes(loader)) {
+					this.ctx.editorContainer.clear();
+					for (const child of previousChildren) this.ctx.editorContainer.addChild(child);
+					this.ctx.ui.setFocus(
+						previousFocus && previousChildren.includes(previousFocus)
+							? previousFocus
+							: (previousChildren[0] ?? this.ctx.editor),
+					);
+					// The disposed loader no longer repaints, and the command may show nothing more after it.
+					this.ctx.ui.requestRender();
+				}
+			}
+		}
 	}
 
 	/** Save source settings before acquiring the gate for a complete relocation operation. */

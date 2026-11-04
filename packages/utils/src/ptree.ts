@@ -183,13 +183,17 @@ export class ChildProcess<In extends InMask = InMask> {
 	#stderrDone: Promise<void>;
 	#exited: Promise<number>;
 	#openPipeReaders = 1;
-	// Set by attachTimeout() at the command deadline; untimed commands keep
-	// complete EOF-based capture. Active pipe readers are cancelled at cutoff so
+	// Set at the command deadline by attachTimeout() or after the exit grace by attachExitGrace();
+	// other commands keep complete EOF-based capture. Active pipe readers are cancelled at cutoff so
 	// their pending read() settles as done and partial output is kept.
 	#cutoff = false;
-	/** Readers of piped stdio; the timeout cancels them so pending reads settle. */
+	/** Readers of piped stdio; the timeout or the exit grace cancels them so pending reads settle. */
 	#pipeReaders = new Set<{ cancel(reason?: unknown): Promise<void> }>();
 	#timeoutTimer?: NodeJS.Timeout;
+	#exitGraceMs = 0;
+	#exitGraceTimer?: NodeJS.Timeout;
+	/** Settles once the exit grace can no longer keep wait() reading: the grace ran out or wait() finished. */
+	#exitGraceEnded?: PromiseWithResolvers<void>;
 	#stderrStream?: ReadableStream<Uint8Array>;
 	// Termination in flight after kill(); aborted exits await it before reporting.
 	#terminating?: Promise<boolean | void>;
@@ -252,6 +256,7 @@ export class ChildProcess<In extends InMask = InMask> {
 		proc.exited
 			.catch(() => null)
 			.then(async exitCode => {
+				this.#startExitGrace();
 				if (this.#exitReasonPending) {
 					this.#exitReason = this.#exitReasonPending;
 					reject(this.#exitReasonPending);
@@ -567,7 +572,7 @@ export class ChildProcess<In extends InMask = InMask> {
 			if (err instanceof Exception) exitError = err;
 			else throw err;
 		}
-		this.#clearTimeout();
+		this.#clearTimers();
 		if (!exitError) exitError = this.exitReason;
 		if (!exitError && this.exitCode !== null && this.exitCode !== 0) {
 			exitError = new NonZeroExitError(this.exitCode, this.#stderrTail);
@@ -591,14 +596,19 @@ export class ChildProcess<In extends InMask = InMask> {
 	// ── Signal / timeout ─────────────────────────────────────────────────
 
 	attachSignal(signal: AbortSignal): void {
-		const cleanup = this.#exited.catch(() => {});
+		// With an exit grace the listener stays until the grace ends (see `exitGraceMs`).
+		const exited = this.#exited.catch(() => {});
+		const cleanup = this.#exitGraceEnded ? exited.then(() => this.#exitGraceEnded?.promise) : exited;
 		const onAbort = () => this.kill(new AbortError(signal.reason, "<cancelled>"));
 		if (signal.aborted) return void onAbort();
 		signal.addEventListener("abort", onAbort, { once: true });
 		cleanup.finally(() => signal.removeEventListener("abort", onAbort));
 	}
 
-	#clearTimeout(): void {
+	#clearTimers(): void {
+		clearTimeout(this.#exitGraceTimer);
+		this.#exitGraceTimer = undefined;
+		this.#exitGraceEnded?.resolve();
 		if (!this.#timeoutTimer) return;
 		clearTimeout(this.#timeoutTimer);
 		this.#timeoutTimer = undefined;
@@ -620,11 +630,31 @@ export class ChildProcess<In extends InMask = InMask> {
 			) {
 				this.kill(new TimeoutError(ms, this.#stderrTail), -1);
 			}
-			this.#cutoff = true;
-			for (const reader of this.#pipeReaders) reader.cancel().catch(() => {});
+			this.#cutOffPipes();
 		}, ms);
 		timer.unref?.();
 		this.#timeoutTimer = timer;
+	}
+
+	/** Applies `exitGraceMs`; call it before {@link attachSignal} so an abort during the grace still applies. */
+	attachExitGrace(ms: number): void {
+		if (ms <= 0) return;
+		this.#exitGraceMs = ms;
+		this.#exitGraceEnded = Promise.withResolvers<void>();
+	}
+
+	#startExitGrace(): void {
+		if (this.#exitGraceMs <= 0) return;
+		this.#exitGraceTimer = setTimeout(() => {
+			this.#cutOffPipes();
+			this.#exitGraceEnded?.resolve();
+		}, this.#exitGraceMs);
+		this.#exitGraceTimer.unref?.();
+	}
+
+	#cutOffPipes(): void {
+		this.#cutoff = true;
+		for (const reader of this.#pipeReaders) reader.cancel().catch(() => {});
 	}
 
 	[Symbol.dispose](): void {
@@ -651,6 +681,14 @@ type ChildSpawnOptions<In extends InMask = InMask> = Omit<
 	subreaper?: boolean;
 	/** Expose and retain complete stderr for a later `wait({ stderr: "full" })`. */
 	stderr?: "full" | null;
+	/**
+	 * Opt-in: once the root process exits, stop reading stdout/stderr after this
+	 * many milliseconds even if a descendant still holds the pipes open. The
+	 * descendant is not killed then, but its next write to them raises SIGPIPE.
+	 * `signal` stays attached until then: an abort still ends the wait, and kills a `detached` spawn's group
+	 * (its process tree on Windows).
+	 */
+	exitGraceMs?: number;
 };
 
 function spawnInternal<In extends InMask = InMask>(
@@ -658,7 +696,7 @@ function spawnInternal<In extends InMask = InMask>(
 	opts: ChildSpawnOptions<In> | undefined,
 	retainFullStderr: boolean,
 ): ChildProcess<In> {
-	const { timeout = -1, signal, stderr, detached, subreaper = false, ...rest } = opts ?? {};
+	const { timeout = -1, signal, stderr, detached, subreaper = false, exitGraceMs = 0, ...rest } = opts ?? {};
 	const useSubreaper = subreaper && process.platform === "linux";
 	const commandEnv = rest.env ?? Bun.env;
 	const child = Bun.spawn(useSubreaper ? [process.execPath, "-e", LINUX_SUBREAPER_SCRIPT] : cmd, {
@@ -678,6 +716,7 @@ function spawnInternal<In extends InMask = InMask>(
 			: rest.env,
 	});
 	const cp = new ChildProcess(child, stderr === "full", retainFullStderr, detached === true, useSubreaper);
+	cp.attachExitGrace(exitGraceMs);
 	if (signal) cp.attachSignal(signal);
 	if (timeout > 0) cp.attachTimeout(timeout);
 	return cp;

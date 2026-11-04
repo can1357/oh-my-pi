@@ -424,8 +424,25 @@ For `/move`, the same gate is acquired before confirming or creating a missing
 destination directory and remains held through relocation. A busy request or
 unsaved checkpoint therefore leaves neither a new directory nor a moved session.
 The `/wt` gate is acquired before creating a branch or checkout and remains held
-through session relocation and configured source cleanup, so a busy refusal does
-not leave an unused worktree.
+through session relocation, configured source cleanup and the post-checkout hook,
+so a busy refusal does not leave an unused worktree.
+After moving the session, `/wt` takes the hook's environment (the bash tool's, minus
+repository-location variables such as `GIT_DIR`), runs `worktree.cleanSource`, then
+runs the new worktree's hook as `git worktree add` does (`git hook run --ignore-missing
+post-checkout` with git's new-worktree arguments, in the worktree). Once git's hook step
+has finished, whether the hook succeeded, failed or doesn't exist, the moved session
+rescans the worktree's skills and slash commands, so it sees the ones the hook added;
+settings files it writes reach the TUI through its live settings reload, while ACP
+doesn't reload settings files. A checkout the session could
+not move into still gets its hook. In the TUI, a loader appears once the hook has run
+for 200 ms and Esc cancels the hook; over ACP the prompt's cancel does.
+Cancelling kills the hook's process group (its process tree on Windows, where commands
+started through Git's MSYS `sh` keep running). A failed or cancelled hook keeps the
+worktree and shows `Worktree created, but post-checkout hook exited with <N>: <last line>`
+(or `... cancelled`). Without a git that can run hooks (none, a failing `git version`, or
+git older than 2.36), nothing runs or is reported. 250 ms after git exits, `/wt` stops
+reading pipes a background process still holds; that process gets SIGPIPE on its next write.
+`omp worktree add` runs the hook with inherited stdio, as `git worktree add` does.
 The `!cd` guard runs before shell execution and remains held through cwd adoption
 or rollback, so a refused command cannot leave the shell in a different directory.
 Cancelled pickers, invalid destinations, and failed moves retain the BTW conversation.

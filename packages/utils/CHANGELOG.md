@@ -7,6 +7,14 @@
 - Added `getUpdateStateDir()` (`~/.omp/update`), holding the auto-update status file, its worker log, and the update install lock
 - Added `logger.setLogForwarder(forwarder)` (`LogForwarder { emit, flush }`), which routes a thread's records — `withContext` fields merged, context reduced to clone-safe JSON — to another thread instead of its own file and sinks, and `logger.emitForeign(event)`, which writes such a record with its original timestamp and runs the sinks without the caller's `withContext` fields
 - Added `expandTilde(path, home?)` (`@oh-my-pi/pi-utils/path`), which expands a leading `~` to the home directory; `@oh-my-pi/pi-coding-agent/tools/path-utils` re-exports it ([#17931](https://github.com/can1357/oh-my-pi/pull/17931) by [@will-bogusz](https://github.com/will-bogusz))
+- Added an opt-in `exitGraceMs` spawn option to `ptree`: `wait()` returns shortly after the root process exits even if a descendant still holds the pipes ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
+- Added `procmgr.getChildShellEnv()`, the launch-pinned child-shell environment the bash tool spawns with ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
+- Added `$envAnyCase(name, env)`, which reads an env object's variable whatever its key casing, as Windows does (a copied env keeps `Path`) ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
+- Added `procmgr.pinChildShellEnvProject()`, which fixes the project whose `.env` values child shells must not receive ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
+
+### Changed
+
+- `filterChildShellEnv()` keeps `$HOME`'s dotenv values, since `$HOME` is not a project ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
 
 ## [18.16.0] - 2026-11-02
 

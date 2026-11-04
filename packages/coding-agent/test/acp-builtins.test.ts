@@ -16,7 +16,13 @@ import type { AgentSession, AsyncJobTree } from "@oh-my-pi/pi-coding-agent/sessi
 import type { SessionDumpArchive } from "@oh-my-pi/pi-coding-agent/session/session-dump-format";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
-import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
+import {
+	__resetProjectDirCacheForTests,
+	getProjectDir,
+	procmgr,
+	removeWithRetries,
+	setProjectDir,
+} from "@oh-my-pi/pi-utils";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 import { cfgBrowserEnabled, cfgBrowserHeadless } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
@@ -1266,6 +1272,187 @@ describe("wave 3 commands", () => {
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
+
+	interface HookRepo {
+		root: string;
+		repoDir: string;
+		git: (...args: string[]) => Promise<string>;
+	}
+
+	/**
+	 * Temp git repo with one committed `tracked.txt` and an executable post-checkout hook, isolated from the
+	 * developer's git config. Restores every env/projectDir/procmgr change it makes, plus `envKeys` the caller sets.
+	 */
+	async function withHookRepo(
+		options: { hook: (root: string) => string; envKeys?: string[] },
+		body: (repo: HookRepo) => Promise<void>,
+	): Promise<void> {
+		const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-hook-")));
+		const repoDir = path.join(root, "repo");
+		const originalProjectDir = process.cwd();
+		const envKeys = [
+			"OMP_WORKTREE_DIR",
+			"GIT_CONFIG_GLOBAL",
+			"GIT_CONFIG_SYSTEM",
+			"GIT_CONFIG_NOSYSTEM",
+			"GIT_DIR",
+			...(options.envKeys ?? []),
+		];
+		const savedEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
+		const git = async (...args: string[]) => {
+			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			expect(code).toBe(0);
+			return stdout.trim();
+		};
+		try {
+			// Isolate from the developer's global git config (core.hooksPath).
+			await Bun.write(path.join(root, "gitconfig"), "");
+			process.env.GIT_CONFIG_GLOBAL = path.join(root, "gitconfig");
+			process.env.GIT_CONFIG_SYSTEM = path.join(root, "gitconfig");
+			process.env.GIT_CONFIG_NOSYSTEM = "1";
+			delete process.env.GIT_DIR;
+			process.env.OMP_WORKTREE_DIR = path.join(root, "wt");
+			await fs.mkdir(repoDir, { recursive: true });
+			await git("init", "-q", "-b", "main");
+			await git("config", "user.email", "t@example.com");
+			await git("config", "user.name", "t");
+			await git("config", "core.autocrlf", "false");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
+			await git("add", "-A");
+			await git("commit", "-qm", "init");
+			const hookPath = path.join(repoDir, ".git", "hooks", "post-checkout");
+			await Bun.write(hookPath, options.hook(root));
+			await fs.chmod(hookPath, 0o755);
+			await body({ root, repoDir, git });
+		} finally {
+			procmgr.__resetShellConfigCacheForTests();
+			__resetProjectDirCacheForTests();
+			setProjectDir(originalProjectDir);
+			for (const key of envKeys) {
+				if (savedEnv[key] === undefined) delete process.env[key];
+				else process.env[key] = savedEnv[key];
+			}
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	}
+
+	it.skipIf(process.platform === "win32")(
+		"/wt: with worktree.cleanSource=true, cleans before the hook, so its saves survive and the deleted .env's values don't reach it",
+		async () => {
+			const { output, runtime, fakeSessionManager } = createRuntime();
+			cfgWorktreeCleanSource.override(runtime.settings, true);
+			await withHookRepo(
+				{
+					// Saves into the source while it runs, as an editor open on the source would, and records
+					// the launch .env value it sees.
+					hook: root =>
+						`#!/bin/sh\nprintf 'saved during the hook\\n' > '${path.join(root, "repo", "late.txt")}'\nprintf '%s' "$OMP_WT_CLEAN_DOTENV_ONLY" > '${path.join(root, "hook-env.out")}'\n`,
+					envKeys: ["OMP_WT_CLEAN_DOTENV_ONLY"],
+				},
+				async ({ root, repoDir }) => {
+					await Bun.write(path.join(repoDir, "tracked.txt"), "edited\n");
+					// Untracked and not ignored, so the change carries it into the worktree and the cleanup deletes it.
+					await Bun.write(path.join(repoDir, ".env"), "OMP_WT_CLEAN_DOTENV_ONLY=from-launch-dotenv\n");
+					// omp was launched in the source, so Bun loaded its .env and startup pinned it.
+					procmgr.__resetShellConfigCacheForTests();
+					__resetProjectDirCacheForTests();
+					setProjectDir(repoDir);
+					procmgr.pinChildShellEnvProject();
+					process.env.OMP_WT_CLEAN_DOTENV_ONLY = "from-launch-dotenv";
+					fakeSessionManager._cwd = repoDir;
+
+					await executeAcpBuiltinSlashCommand("/wt feature/clean-hook", runtime);
+
+					const movedTo = fakeSessionManager._movedTo;
+					expect(movedTo).toBeDefined();
+					expect(output.join("\n")).toContain("uncommitted changes moved, source checkout cleaned");
+					expect(await Bun.file(path.join(movedTo!, "tracked.txt")).text()).toBe("edited\n");
+					expect(await Bun.file(path.join(repoDir, "tracked.txt")).text()).toBe("committed\n");
+					// The hook ran after the cleanup, so its save is not wiped.
+					expect(await Bun.file(path.join(repoDir, "late.txt")).text()).toBe("saved during the hook\n");
+					expect(await Bun.file(path.join(repoDir, ".env")).exists()).toBe(false);
+					// The hook env was read before the cleanup deleted .env.
+					expect(await Bun.file(path.join(root, "hook-env.out")).text()).toBe("");
+				},
+			);
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"/wt: a cancelled runtime signal stops the hanging post-checkout hook and keeps the worktree",
+		async () => {
+			const { output, runtime, fakeSessionManager } = createRuntime();
+			const controller = new AbortController();
+			let pending: Promise<unknown> | undefined;
+			await withHookRepo(
+				{ hook: root => `#!/bin/sh\n: > '${path.join(root, "hook-started")}'\nexec sleep 30\n` },
+				async ({ root, repoDir, git }) => {
+					fakeSessionManager._cwd = repoDir;
+					try {
+						pending = executeAcpBuiltinSlashCommand("/wt feature/cancel", {
+							...runtime,
+							signal: controller.signal,
+						});
+						// Real subprocess: bounded polling for the hook's start marker; no event to await.
+						const marker = path.join(root, "hook-started");
+						for (let i = 0; i < 200 && !(await Bun.file(marker).exists()); i++) await Bun.sleep(50);
+						if (!(await Bun.file(marker).exists())) throw new Error("hook never started");
+						controller.abort();
+						const result = await pending;
+
+						expect(result).toEqual({ consumed: true });
+						const movedTo = fakeSessionManager._movedTo;
+						expect(movedTo).toBeDefined();
+						expect(output.join("\n")).toContain("post-checkout hook cancelled");
+						expect(output.join("\n")).toContain(`Moved to worktree ${movedTo} on branch feature/cancel`);
+						expect(await git("worktree", "list", "--porcelain")).toContain("branch refs/heads/feature/cancel");
+					} finally {
+						controller.abort();
+						await pending?.catch(() => {});
+					}
+				},
+			);
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"/wt: rescans skills and commands after the hook, so the session sees what the hook added to the worktree",
+		async () => {
+			const { runtime, fakeSessionManager } = createRuntime();
+			// The hook runs in the new worktree, as a dispatcher copying gitignored skills into it would.
+			await withHookRepo({ hook: () => "#!/bin/sh\n: > made-by-hook\n" }, async ({ repoDir }) => {
+				const sawHookFile: boolean[] = [];
+				spyOn(runtime.session, "refreshSkillsAndCommands").mockImplementation(async () => {
+					sawHookFile.push(await Bun.file(path.join(getProjectDir(), "made-by-hook")).exists());
+				});
+				fakeSessionManager._cwd = repoDir;
+
+				await executeAcpBuiltinSlashCommand("/wt feature/reload", runtime);
+
+				expect(fakeSessionManager._movedTo).toBeDefined();
+				expect(sawHookFile.at(-1)).toBe(true);
+			});
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"/wt: still runs the hook and reports its warning when relocating the session fails",
+		async () => {
+			const { output, runtime, fakeSessionManager } = createRuntime();
+			spyOn(runtime.session, "moveSession").mockRejectedValue(new Error("session move denied"));
+			await withHookRepo({ hook: () => "#!/bin/sh\necho 'setup broke' >&2\nexit 5\n" }, async ({ repoDir, git }) => {
+				fakeSessionManager._cwd = repoDir;
+
+				await executeAcpBuiltinSlashCommand("/wt feature/reloc-fail", runtime);
+
+				const text = output.join("\n");
+				expect(text).toContain("post-checkout hook exited with 5: setup broke");
+				expect(text).toContain("Move failed: session move denied");
+				expect(await git("worktree", "list", "--porcelain")).toContain("branch refs/heads/feature/reloc-fail");
+			});
+		},
+	);
 
 	it("/wt: aborts and leaves source checkout untouched when settings flush fails", async () => {
 		const { output, runtime, fakeSessionManager } = createRuntime();

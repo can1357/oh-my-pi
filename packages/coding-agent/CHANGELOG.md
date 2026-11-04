@@ -34,6 +34,16 @@
 - Skills listed in the system prompt get their compressed routing hint instead of a cut-off description when the hint runs past 12 words but fits 160 characters; skills an earlier version gave up on are compressed again
 - Uncached skill descriptions no longer send background model requests after the session-tree cost cap is reached, and their completed spend counts toward the cap ([#18016](https://github.com/can1357/oh-my-pi/issues/18016))
 - Added `tui.maxFps` (also `--max-fps` and `PI_MAX_FPS`) to cap how often the TUI repaints; keystroke echo keeps 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- `/wt` (TUI, ACP and `worktree.onStart`) runs the new worktree's `post-checkout` hook like `git worktree add` and picks up the skills and slash commands it adds; Esc or an ACP cancel stops it, and a failing hook keeps the worktree and shows a warning ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
+
+### Changed
+
+- `omp worktree add` shows the `post-checkout` hook's output as it arrives and exits with the hook's failure status, or 1 when git can't run the hook ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
+
+### Fixed
+
+- Fixed bash commands and the `/wt` hook receiving another project's `.env` values after `--cwd`, `/move` or a resume ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
+- Fixed bash commands in a session started in `$HOME` with `--allow-home` not getting `~/.env` values ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Changed
 

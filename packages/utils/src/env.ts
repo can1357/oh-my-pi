@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseEnv } from "node:util";
-import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv } from "./dirs";
+import { getAgentDir, getConfigRootDir, getProjectDir, normalizePathForComparison, refreshDirsFromEnv } from "./dirs";
 import { isBunTestRuntime } from "./test-runtime";
 
 export * from "./test-runtime";
@@ -241,11 +241,20 @@ function filterChildShellEnvInternal(
 	return result;
 }
 
-/** Filters process env for child shells without launch-cwd dotenv values. */
+/**
+ * Filters process env for child shells without launch-cwd dotenv values. A `cwd` of `$HOME` is no project, so
+ * none of its dotenv values are removed: `~/.env` is user config this module also uses at every launch to fill
+ * unset variables.
+ */
 export function filterChildShellEnv(
 	env: Record<string, string | undefined>,
 	cwd: string = getProjectDir(),
 ): Record<string, string> {
+	if (normalizePathForComparison(cwd) === normalizePathForComparison(os.homedir())) {
+		const result = filterProcessEnv(env);
+		stripGitRepoLocationEnv(result);
+		return result;
+	}
 	return filterChildShellEnvInternal(env, cwd);
 }
 
@@ -364,6 +373,21 @@ export function $envExact(name: string, env: Record<string, string | undefined> 
 	// value is trusted only when an exact-case entry actually exists.
 	for (const key in env) {
 		if (key === name) return value;
+	}
+	return undefined;
+}
+
+/**
+ * Read `name` from an env object whatever the key's casing, as Windows does: its env keys are
+ * case-insensitive, but a copied env object keeps the original casing (`Path`). POSIX env names
+ * are case-sensitive, so callers that also run on POSIX use this only on Windows.
+ */
+export function $envAnyCase(name: string, env: Record<string, string | undefined>): string | undefined {
+	const direct = env[name];
+	if (direct !== undefined) return direct;
+	const normalized = name.toLowerCase();
+	for (const [key, value] of Object.entries(env)) {
+		if (key.toLowerCase() === normalized) return value;
 	}
 	return undefined;
 }

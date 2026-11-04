@@ -3,7 +3,7 @@ import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetached
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
-import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
+import { logger, procmgr, setProjectDir } from "@oh-my-pi/pi-utils";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
@@ -23,6 +23,7 @@ import {
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { resolveToCwd } from "../tools/path-utils";
+import { formatPostCheckoutHookWarning, runPostCheckoutHook } from "../utils/worktree-hook";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
 import type {
@@ -803,8 +804,29 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				return usage(`Worktree creation failed: ${errorMessage(err)}`, runtime);
 			}
 			const failure = await relocateHeadlessSession(runtime, worktree.path);
+			const hookEnv = procmgr.getChildShellEnv();
+			const cleanup = failure
+				? { cleaned: false, errorMessage: undefined }
+				: await cleanSourceCheckoutIfConfigured(sourceCwd, runtime.settings);
+			const hook = await runPostCheckoutHook(worktree.path, worktree.baseCommit, {
+				signal: runtime.signal,
+				env: hookEnv,
+			});
+			const hookWarning = formatPostCheckoutHookWarning(hook);
+			if (hookWarning) await runtime.output(`Warning: ${hookWarning}`);
 			if (failure) return failure;
-			const cleanup = await cleanSourceCheckoutIfConfigured(sourceCwd, runtime.settings);
+			// The session moved before git's hook step: rescan so it sees the skills and slash commands the hook added.
+			if (hook.status === "ok" || hook.status === "failed") {
+				try {
+					clearClaudePluginRootsCache();
+					await runtime.session.refreshSkillsAndCommands();
+					await runtime.refreshCommands();
+				} catch (err) {
+					await runtime.output(
+						`Warning: Worktree created, but rescanning it after the post-checkout hook failed: ${errorMessage(err)}`,
+					);
+				}
+			}
 			if (cleanup.errorMessage !== undefined) {
 				await runtime.output(
 					`Warning: Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`,

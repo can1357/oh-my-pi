@@ -1,6 +1,6 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import { directoryExists, getProjectDir, normalizePathForComparison, setProjectDir } from "@oh-my-pi/pi-utils";
+import { directoryExists, getProjectDir, normalizePathForComparison, procmgr, setProjectDir } from "@oh-my-pi/pi-utils";
 import type { Args } from "./args";
 
 async function maybeAutoChdir(parsed: Args): Promise<void> {
@@ -46,6 +46,9 @@ async function maybeAutoChdir(parsed: Args): Promise<void> {
 }
 
 export async function applyStartupCwd(parsed: Args): Promise<void> {
+	// Bun and omp loaded the launch directory's dotenv files, so pin it before `--cwd` moves away: child shells
+	// there must not get those values.
+	procmgr.pinChildShellEnvProject();
 	if (parsed.cwd) {
 		try {
 			setProjectDir(parsed.cwd);

@@ -6,7 +6,10 @@ import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/c
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import * as sessionWorktree from "@oh-my-pi/pi-coding-agent/session/session-worktree";
-import { Container } from "@oh-my-pi/pi-tui";
+import * as worktreeHook from "@oh-my-pi/pi-coding-agent/utils/worktree-hook";
+import { type Component, Container } from "@oh-my-pi/pi-tui";
+import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
+import { procmgr } from "@oh-my-pi/pi-utils";
 
 function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void>) {
 	const state = { cwd: sourceDir, movedTo: undefined as string | undefined, completedBtwVisible: true };
@@ -35,8 +38,11 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		if (moved) state.completedBtwVisible = false;
 		return moved;
 	});
+	const editor = new Container();
+	const editorContainer = new Container();
+	editorContainer.addChild(editor);
 	const ctx = {
-		session: { isStreaming: false, moveSession },
+		session: { isStreaming: false, moveSession, refreshSkillsAndCommands: vi.fn(async () => {}) },
 		sessionManager: {
 			getCwd: () => state.cwd,
 			captureState,
@@ -55,12 +61,28 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		withBtwSessionMove,
 		updateEditorBorderColor: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),
-		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
+		ui: {
+			requestRender: vi.fn(),
+			requestComponentRender: vi.fn(),
+			setFocus: vi.fn(),
+			getFocused: vi.fn(() => editor),
+		},
 		statusContainer: new Container(),
+		editor,
+		editorContainer,
 		present,
 		shutdown,
 	} as unknown as InteractiveModeContext;
 	return { ctx, state, present, captureState, restoreState, rollbackMove, shutdown, sessionDir, withBtwSessionMove };
+}
+
+/** A checkout into `target` that `/wt` can move into, with source cleanup stubbed out. */
+function stubCheckout(sourceDir: string, target: string): void {
+	vi.spyOn(sessionWorktree, "createSessionWorktree").mockImplementation(async () => {
+		await fs.mkdir(target);
+		return { path: target, branch: "feature", sourceCwd: sourceDir, baseCommit: "0", keptChanges: true };
+	});
+	vi.spyOn(sessionWorktree, "cleanSourceCheckoutIfConfigured").mockResolvedValue({ cleaned: false });
 }
 
 describe("CommandController /move", () => {
@@ -70,7 +92,10 @@ describe("CommandController /move", () => {
 		setThemeInstance(theme);
 	});
 
-	afterEach(() => vi.restoreAllMocks());
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
 
 	it("does not create a checkout when the BTW gate rejects a worktree command", async () => {
 		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-gate-"));
@@ -95,7 +120,7 @@ describe("CommandController /move", () => {
 		}
 	});
 
-	it("holds one migration gate through worktree creation, relocation and source cleanup", async () => {
+	it("holds one migration gate through worktree creation, relocation, source cleanup and the hook, in that order", async () => {
 		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-lifecycle-"));
 		const creating = Promise.withResolvers<void>();
 		const created = Promise.withResolvers<void>();
@@ -131,10 +156,30 @@ describe("CommandController /move", () => {
 				await relocated.promise;
 				state.cwd = cwd;
 			};
+			const order: string[] = [];
+			const applyCwdChange = ctx.applyCwdChange;
+			ctx.applyCwdChange = vi.fn(async (cwd: string) => {
+				order.push(`reload ${cwd}`);
+				return applyCwdChange(cwd);
+			});
+			ctx.session.refreshSkillsAndCommands = vi.fn(async () => {
+				order.push("rescan");
+			});
+			vi.spyOn(procmgr, "getChildShellEnv").mockImplementation(() => {
+				order.push("hook env");
+				return {};
+			});
 			const cleanup = vi.spyOn(sessionWorktree, "cleanSourceCheckoutIfConfigured").mockImplementation(async () => {
 				expect(held).toBe(true);
 				expect(state.cwd).toBe(target);
+				order.push("cleanup");
 				return { cleaned: false };
+			});
+			let hookSaw: { held: boolean; cwd: string } | undefined;
+			vi.spyOn(worktreeHook, "runPostCheckoutHook").mockImplementation(async root => {
+				hookSaw = { held, cwd: state.cwd };
+				order.push(`hook in ${root}`);
+				return { status: "ok" };
 			});
 			command = new CommandController(ctx).handleWorktreeCommand("feature");
 			await creating.promise;
@@ -151,11 +196,43 @@ describe("CommandController /move", () => {
 			expect(commits).toBe(1);
 			expect(state.cwd).toBe(target);
 			expect(ctx.present).toHaveBeenCalled();
+			// The dotenv filter reads the launch .env, which the cleanup may delete, so the hook's env comes first;
+			// the session rescans after the hook so it sees the skills and commands the hook added.
+			expect(order).toEqual([`reload ${target}`, "hook env", "cleanup", `hook in ${target}`, "rescan"]);
+			expect(hookSaw).toEqual({ held: true, cwd: target });
 			expect(ctx.statusContainer.children).toHaveLength(0);
 		} finally {
 			created.resolve();
 			relocated.resolve();
 			await command;
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("still reports the move and the source cleanup when the rescan after the hook fails", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-rescan-fails-"));
+		try {
+			const { ctx } = createMoveContext(sourceDir);
+			stubCheckout(sourceDir, path.join(sourceDir, "checkout"));
+			vi.spyOn(sessionWorktree, "cleanSourceCheckoutIfConfigured").mockResolvedValue({
+				cleaned: false,
+				errorMessage: "index.lock exists",
+			});
+			vi.spyOn(worktreeHook, "runPostCheckoutHook").mockResolvedValue({ status: "ok" });
+			ctx.session.refreshSkillsAndCommands = vi.fn(async () => {
+				throw new Error("bad skill file");
+			});
+			const created = await new CommandController(ctx).handleWorktreeCommand("feature");
+
+			expect(created).toBeDefined();
+			expect(ctx.showWarning).toHaveBeenCalledWith(
+				"Worktree created, but rescanning it after the post-checkout hook failed: bad skill file",
+			);
+			expect(ctx.showWarning).toHaveBeenCalledWith(
+				"Worktree created, but cleaning source checkout failed: index.lock exists",
+			);
+			expect(ctx.present).toHaveBeenCalled();
+		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}
 	});
@@ -173,6 +250,125 @@ describe("CommandController /move", () => {
 			expect(ctx.session.moveSession).not.toHaveBeenCalled();
 			expect(ctx.statusContainer.children).toHaveLength(0);
 			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("Branch already exists"));
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the editor during the checkout and lets Esc on the delayed hook loader abort only the hook's signal", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-hook-loader-"));
+		try {
+			const { ctx, state } = createMoveContext(sourceDir);
+			const target = path.join(sourceDir, "checkout");
+			const seen: {
+				slotDuringCheckout?: Component[];
+				slotAtHookStart?: Component[];
+				loader?: Component;
+				abortedBeforeEsc?: boolean;
+				abortedAfterEsc?: boolean;
+			} = {};
+			vi.useFakeTimers();
+			vi.spyOn(sessionWorktree, "cleanSourceCheckoutIfConfigured").mockResolvedValue({ cleaned: false });
+			vi.spyOn(sessionWorktree, "createSessionWorktree").mockImplementation(async () => {
+				seen.slotDuringCheckout = [...ctx.editorContainer.children];
+				await fs.mkdir(target);
+				return { path: target, branch: "feature", sourceCwd: sourceDir, baseCommit: "0", keptChanges: true };
+			});
+			vi.spyOn(worktreeHook, "runPostCheckoutHook").mockImplementation(async (_root, _head, options) => {
+				seen.slotAtHookStart = [...ctx.editorContainer.children];
+				vi.advanceTimersByTime(1_000);
+				seen.loader = ctx.editorContainer.children[0];
+				seen.abortedBeforeEsc = options?.signal?.aborted;
+				seen.loader?.handleInput?.("\x1b");
+				seen.abortedAfterEsc = options?.signal?.aborted;
+				return { status: "cancelled" };
+			});
+			await new CommandController(ctx).handleWorktreeCommand("feature");
+
+			expect(seen.slotDuringCheckout).toEqual([ctx.editor]);
+			expect(seen.slotAtHookStart).toEqual([ctx.editor]);
+			expect(seen.loader).toBeInstanceOf(BorderedLoader);
+			expect(ctx.ui.setFocus).toHaveBeenCalledWith(seen.loader);
+			expect(seen.abortedBeforeEsc).toBe(false);
+			expect(seen.abortedAfterEsc).toBe(true);
+			expect(ctx.showWarning).toHaveBeenCalledWith("Worktree created, but post-checkout hook cancelled");
+			expect(state.cwd).toBe(target);
+			expect(ctx.editorContainer.children).toEqual([ctx.editor]);
+			expect(ctx.ui.setFocus).toHaveBeenLastCalledWith(ctx.editor);
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("never shows the hook loader once the command has finished", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-fast-hook-"));
+		try {
+			const { ctx } = createMoveContext(sourceDir);
+			vi.useFakeTimers();
+			stubCheckout(sourceDir, path.join(sourceDir, "checkout"));
+			vi.spyOn(worktreeHook, "runPostCheckoutHook").mockResolvedValue({ status: "ok" });
+			await new CommandController(ctx).handleWorktreeCommand("feature");
+			vi.advanceTimersByTime(1_000);
+
+			expect(ctx.editorContainer.children).toEqual([ctx.editor]);
+			expect(ctx.ui.setFocus).not.toHaveBeenCalledWith(expect.any(BorderedLoader));
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("leaves a dialog that replaced the hook loader in place and focused", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-dialog-"));
+		try {
+			const { ctx } = createMoveContext(sourceDir);
+			const dialog = new Container();
+			vi.useFakeTimers();
+			stubCheckout(sourceDir, path.join(sourceDir, "checkout"));
+			vi.spyOn(worktreeHook, "runPostCheckoutHook").mockImplementation(async () => {
+				vi.advanceTimersByTime(1_000);
+				ctx.editorContainer.clear();
+				ctx.editorContainer.addChild(dialog);
+				ctx.ui.setFocus(dialog);
+				return { status: "ok" };
+			});
+			await new CommandController(ctx).handleWorktreeCommand("feature");
+
+			expect(ctx.editorContainer.children).toEqual([dialog]);
+			expect(ctx.ui.setFocus).toHaveBeenLastCalledWith(dialog);
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("still runs the hook, without cleaning the source, and repaints once its loader is gone when the session can't move", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-move-fails-"));
+		try {
+			const { ctx, state } = createMoveContext(sourceDir);
+			const target = path.join(sourceDir, "checkout");
+			vi.useFakeTimers();
+			stubCheckout(sourceDir, target);
+			ctx.session.moveSession = vi.fn(async () => {
+				throw new Error("session move denied");
+			});
+			const slotAtRender: Component[][] = [];
+			ctx.ui.requestRender = vi.fn(() => {
+				slotAtRender.push([...ctx.editorContainer.children]);
+			});
+			// A hook that outlives the loader delay; nothing renders after it when the move failed.
+			const hook = vi.spyOn(worktreeHook, "runPostCheckoutHook").mockImplementation(async () => {
+				vi.advanceTimersByTime(1_000);
+				return { status: "ok" };
+			});
+			const created = await new CommandController(ctx).handleWorktreeCommand("feature");
+
+			expect(created).toBeUndefined();
+			expect(state.cwd).toBe(sourceDir);
+			expect(ctx.showError).toHaveBeenCalledWith("Move failed: session move denied");
+			expect(hook).toHaveBeenCalledWith(target, "0", expect.anything());
+			expect(sessionWorktree.cleanSourceCheckoutIfConfigured).not.toHaveBeenCalled();
+			expect(ctx.session.refreshSkillsAndCommands).not.toHaveBeenCalled();
+			expect(slotAtRender.some(slot => slot[0] instanceof BorderedLoader)).toBe(true);
+			expect(slotAtRender.at(-1)).toEqual([ctx.editor]);
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}
