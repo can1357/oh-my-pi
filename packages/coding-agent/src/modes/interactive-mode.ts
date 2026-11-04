@@ -1431,7 +1431,7 @@ const TODO_HUD_CHROME_ROWS = 3;
  * Pick the open tasks the collapsed TODO HUD shows across every rendered stage.
  * When all of them fit in `budget` rows they all show. Otherwise one row is
  * reserved for the "n more todos" summary and the rest go to in-progress (or
- * subagent-matched) work, then blocked, then pending, each in plan order.
+ * subagent-matched) work, then pending, each in plan order.
  */
 function selectHudOpenTodos(
 	stages: readonly TodoPhase[],
@@ -1440,8 +1440,7 @@ function selectHudOpenTodos(
 ): { shown: Map<TodoItem, true>; hidden: number } {
 	const open = stages.flatMap(stage => stage.tasks.filter(task => !isClosedTodo(task)));
 	if (open.length <= budget) return { shown: new Map(open.map(task => [task, true])), hidden: 0 };
-	const rank = (task: TodoItem): number =>
-		task.status === "in_progress" || isMatched(task) ? 0 : task.status === "blocked" ? 1 : 2;
+	const rank = (task: TodoItem): number => (task.status === "in_progress" || isMatched(task) ? 0 : 1);
 	const kept = open
 		.map((task, order) => ({ task, order }))
 		.sort((a, b) => rank(a.task) - rank(b.task) || a.order - b.order)
@@ -5564,7 +5563,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			activeDescs.length > 0 && todoMatchesAnyDescription(todo.content, activeDescs);
 
 		// Collapsed stage window: the active stage, any earlier stage that still
-		// holds open (blocked) work, and a bounded number of following stages, with
+		// holds open work, and a bounded number of following stages, with
 		// a "… n more stages" row for anything past the cap. Expanded: every stage
 		// from the top. Roman numerals stay tied to the real phase index.
 		const firstOpenIdx = phases.findIndex(phase => phase.tasks.some(task => !isClosedTodo(task)));

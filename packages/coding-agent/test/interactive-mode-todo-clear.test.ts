@@ -689,7 +689,7 @@ describe("InteractiveMode todo HUD anchor", () => {
 			{
 				name: "Ship",
 				tasks: [
-					{ content: "ship blocked", status: "blocked" },
+					{ content: "ship active", status: "in_progress" },
 					{ content: "ship pending", status: "pending" },
 				],
 			},
@@ -700,7 +700,7 @@ describe("InteractiveMode todo HUD anchor", () => {
 			setTerminalRows(40);
 			mode.setTodos(stages);
 			const text = renderTodos(mode);
-			for (const content of ["build a", "build p5", "ship blocked", "ship pending"]) expect(text).toContain(content);
+			for (const content of ["build a", "build p5", "ship active", "ship pending"]) expect(text).toContain(content);
 			expect(text).not.toContain("more todo");
 		});
 
@@ -710,7 +710,7 @@ describe("InteractiveMode todo HUD anchor", () => {
 			expect(renderTodos(mode)).not.toContain("done one");
 		});
 
-		it("prioritises in-progress then blocked work and counts the hidden remainder exactly", () => {
+		it("prioritises in-progress work and counts the hidden remainder exactly", () => {
 			setTerminalRows(21);
 			mode.setTodos(stages);
 			const text = renderTodos(mode);
@@ -719,7 +719,7 @@ describe("InteractiveMode todo HUD anchor", () => {
 				.flatMap(stage => stage.tasks)
 				.filter(task => task.status !== "completed" && text.includes(task.content));
 			expect(text).toContain("build a");
-			expect(text).toContain("ship blocked");
+			expect(text).toContain("ship active");
 			expect(text).not.toContain("build p5");
 			expect(text).toContain(`${open - shown.length} more todos · /todo expand`);
 		});
@@ -741,7 +741,16 @@ describe("InteractiveMode todo HUD anchor", () => {
 
 		async function initCapturingAllocation(): Promise<AllocationApply> {
 			allocBus = new EventBus();
-			const m = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, allocBus);
+			const m = new InteractiveMode(
+				session,
+				"test",
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				allocBus,
+			);
 			allocMode = m;
 			vi.spyOn(m.statusLine, "watchBranch").mockImplementation(() => {});
 			let apply: AllocationApply | undefined;
