@@ -61,6 +61,7 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 				<section id="area-name-section" aria-labelledby="area"></section>
 				<label>Field <dfn id="label-dfn">required</dfn><input></label>
 				<section id="bare-image-section" aria-labelledby="bare-image-target"></section><input id="bare-image-target" type="image" src="data:,">
+				<div style="display:none"><span id="hidden-ancestor-target"><b style="display:none">Hidden</b> name</span></div><section id="hidden-ancestor-section" aria-labelledby="hidden-ancestor-target"></section>
 				<form id="form" aria-label="Named form"></form><form id="unnamed-form">Content</form>
 				<header id="header" aria-label="Header"></header><footer id="footer" aria-label="Footer"></footer>
 				${["article", "aside", "main", "nav", "section"].map(tag => `<${tag}><header id="${tag}-header" aria-label="${tag} header"></header><footer id="${tag}-footer" aria-label="${tag} footer"></footer></${tag}>`).join("")}
@@ -94,6 +95,8 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 				const id = attributes[attributes.indexOf("id") + 1];
 				const { nodes } = await cdp.send("Accessibility.getPartialAXTree", { nodeId, fetchRelatives: false });
 				const ax = nodes[0];
+				// A node that is not rendered is outside the accessibility tree; it only matters as a label source.
+				if (ax.ignoredReasons?.some(reason => reason.name === "notRendered")) continue;
 				const role = String(ax.role?.value).toLowerCase();
 				const name = String(ax.name?.value ?? "");
 				computed.push({ id, role, name });
@@ -200,7 +203,9 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 			const page = await browser.newPage();
 			await page.setContent(`<!doctype html>
 				<section title="Title section"><button>A</button></section>
-				<section aria-label="Fallback" aria-labelledby="primary"><h2 id="primary">Primary</h2><button>B</button></section>`);
+				<section aria-label="Fallback" aria-labelledby="primary"><h2 id="primary">Primary</h2><button>B</button></section>
+				<section aria-labelledby="svc"><span id="svc" aria-label="Billing"></span><button>C</button></section>
+				<select><optgroup label="Fruit"><option>Apple</option></optgroup></select>`);
 			await page.evaluate(`(function () {\n${TERN_KIT_SOURCE}\n})()`);
 			const observed = await page.evaluate(() => {
 				const kit = (
@@ -213,7 +218,7 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 				).__ompTernKit;
 				return kit
 					.observe({ includeAll: true })
-					.elements.filter(entry => (entry.role === "region" || entry.role === "generic") && entry.name)
+					.elements.filter(entry => ["region", "generic", "group"].includes(entry.role) && entry.name)
 					.map(entry => {
 						const query = `${entry.role}[name="${entry.name}" exact]`;
 						return [query, kit.count({ engine: "role", query })];
@@ -223,6 +228,8 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 				expect.arrayContaining([
 					['region[name="Title section" exact]', 1],
 					['region[name="Primary" exact]', 1],
+					['region[name="Billing" exact]', 1],
+					['group[name="Fruit" exact]', 1],
 				]),
 			);
 		} finally {
