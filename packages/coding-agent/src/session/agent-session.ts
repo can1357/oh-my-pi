@@ -1459,6 +1459,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#yieldTerminationPending = false;
 	}
 
+	/**
+	 * Why the model's configured credential source produced nothing, read from the
+	 * request-path resolution (which names a failed `!command` or empty variable),
+	 * or `undefined` when no configured source explains the missing key.
+	 */
+	async #describeCredentialSourceFailure(model: Model): Promise<string | undefined> {
+		try {
+			await this.#modelRegistry.getApiKeyWithCredentialForProvider(model.provider, this.sessionId, {
+				baseUrl: model.baseUrl,
+				modelId: model.id,
+			});
+		} catch (error) {
+			if (error instanceof AIError.CredentialSourceError) return error.message;
+		}
+		return undefined;
+	}
+
 	#acquirePowerAssertion(): void {
 		if (isBunTestRuntime()) return;
 		if (this.#powerAssertion) return;
@@ -9115,6 +9132,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
 			if (!apiKey && !(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))) {
 				if (setupAbort.signal.aborted) return false;
+				// A configured source that produced nothing (a failed `!command`, an empty
+				// variable) is named, instead of pointing the user at /login.
+				const sourceFailure = await this.#describeCredentialSourceFailure(model);
+				if (sourceFailure) throw new PromptPreflightError(sourceFailure);
 				throw new PromptPreflightError(
 					`No API key found for ${model.provider}.\n\n` +
 						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,

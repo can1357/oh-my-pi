@@ -1,3 +1,4 @@
+import { CredentialSourceError } from "@oh-my-pi/pi-ai/error";
 import { executeShell } from "@oh-my-pi/pi-natives";
 import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 import { effectsSettings } from "./registry";
@@ -17,6 +18,12 @@ const commandResultCache = new Map<string, string>();
  */
 const commandLastGood = new Map<string, string>();
 const commandFailureRetryAt = new Map<string, number>();
+/**
+ * Why each command's latest run produced no value, kept until a run succeeds or
+ * the value is invalidated. A credential that resolves to nothing is reported
+ * with it, instead of as a provider's 401 or a bare "No API key".
+ */
+const commandLastFailure = new Map<string, { outcome: CommandFailure; timeoutMs: number }>();
 const commandInFlight = new Map<string, Promise<string | undefined>>();
 const commandGeneration = new Map<string, number>();
 
@@ -28,14 +35,14 @@ const commandGeneration = new Map<string, number>();
  */
 export type ConfigValueInvalidation = "rejected" | "refresh";
 
-type CommandOutcome =
-	| { ok: true; value: string }
-	| {
-			ok: false;
-			reason: "timeout" | "killed" | "exit" | "empty" | "spawn" | "cwd-unavailable";
-			exitCode?: number | null;
-			code?: string;
-	  };
+type CommandFailure = {
+	ok: false;
+	reason: "timeout" | "killed" | "exit" | "empty" | "spawn" | "cwd-unavailable";
+	exitCode?: number | null;
+	code?: string;
+};
+
+type CommandOutcome = { ok: true; value: string } | CommandFailure;
 
 /** Materialize request headers for models and discovery without property-access side effects. */
 export type ConfigHeaderResolver = (signal?: AbortSignal) => Promise<Record<string, string> | undefined>;
@@ -98,6 +105,7 @@ export function invalidateCommandConfig(valueConfig: string | undefined, reason:
 	const command = commandKey(valueConfig);
 	commandResultCache.delete(command);
 	commandFailureRetryAt.delete(command);
+	commandLastFailure.delete(command);
 	commandInFlight.delete(command);
 	if (reason === "rejected") commandLastGood.delete(command);
 	bumpCommandGeneration(command);
@@ -115,6 +123,7 @@ export function invalidateAllCommandConfigs(reason: ConfigValueInvalidation): vo
 	}
 	commandResultCache.clear();
 	commandFailureRetryAt.clear();
+	commandLastFailure.clear();
 	commandInFlight.clear();
 	if (reason === "rejected") commandLastGood.clear();
 }
@@ -153,6 +162,7 @@ function startCommandRun(command: string): Promise<string | undefined> {
 			if (outcome.ok) {
 				if (current) {
 					commandFailureRetryAt.delete(command);
+					commandLastFailure.delete(command);
 					commandResultCache.set(command, outcome.value);
 					commandLastGood.set(command, outcome.value);
 				}
@@ -167,7 +177,10 @@ function startCommandRun(command: string): Promise<string | undefined> {
 				timeoutMs,
 				servingLastGoodValue: current && commandLastGood.has(command),
 			});
-			if (current) commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
+			if (current) {
+				commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
+				commandLastFailure.set(command, { outcome, timeoutMs });
+			}
 			return undefined;
 		})
 		.finally(() => {
@@ -190,12 +203,75 @@ async function runConfigCommand(command: string, timeoutMs: number): Promise<Com
 /**
  * Resolve a configuration value. Command values execute asynchronously; their
  * successful stdout is cached, and a failed re-run serves the last good stdout
- * until a 401 rejects it. Environment-backed and literal values stay live.
+ * until a 401 rejects it. Environment-backed and literal values stay live. A
+ * value naming an environment variable that is set but empty resolves to
+ * nothing, not to the variable's name.
  */
 export async function resolveConfigValue(valueConfig: string): Promise<string | undefined> {
 	if (isCommandConfigValue(valueConfig)) return await resolveCommandValue(valueConfig);
 	const envValue = $envExact(valueConfig);
-	return envValue || valueConfig;
+	if (envValue === undefined) return valueConfig;
+	return envValue.length > 0 ? envValue : undefined;
+}
+
+/**
+ * Resolve a configured credential. Same as {@link resolveConfigValue}, but a
+ * source that produced nothing rejects with {@link CredentialSourceError}
+ * naming the source and what it returned, so the failure is never sent on as a
+ * missing or rejected key.
+ */
+export async function resolveCredentialConfigValue(valueConfig: string): Promise<string | undefined> {
+	const value = await resolveConfigValue(valueConfig);
+	if (value !== undefined) return value;
+	const why = describeUnresolvedConfigValue(valueConfig);
+	if (why !== undefined) throw new CredentialSourceError(undefined, why);
+	return undefined;
+}
+
+/**
+ * The program a command runs, for messages. Only the first word is shown: the
+ * arguments of a credential command can carry secrets.
+ */
+function commandLabel(command: string): string {
+	const program = command.split(/\s+/, 1)[0] ?? command;
+	return program === command ? program : `${program} …`;
+}
+
+function formatSeconds(ms: number): string {
+	const seconds = ms / 1000;
+	return `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)} s`;
+}
+
+function describeCommandFailure(failure: CommandFailure, timeoutMs: number): string {
+	switch (failure.reason) {
+		case "timeout":
+			return `timed out after ${formatSeconds(timeoutMs)}, the providers.commandTimeoutSeconds limit`;
+		case "killed":
+			return "was killed before it finished";
+		case "exit":
+			return `exited with status ${failure.exitCode ?? "unknown"}`;
+		case "empty":
+			return "exited 0 but printed nothing";
+		case "spawn":
+			return `could not be started (${failure.code ?? "unknown error"})`;
+		case "cwd-unavailable":
+			return "was not run: the project directory is not accessible";
+	}
+}
+
+/**
+ * Why a config value currently resolves to nothing, or `undefined` when it
+ * does not (or the reason is unknown): a command's latest failed run, or an
+ * environment variable that is set but empty.
+ */
+export function describeUnresolvedConfigValue(valueConfig: string): string | undefined {
+	if (isCommandConfigValue(valueConfig)) {
+		const command = commandKey(valueConfig);
+		const failure = commandLastFailure.get(command);
+		if (!failure) return undefined;
+		return `the command \`${commandLabel(command)}\` ${describeCommandFailure(failure.outcome, failure.timeoutMs)}`;
+	}
+	return $envExact(valueConfig) === "" ? `environment variable ${valueConfig} is set but empty` : undefined;
 }
 
 function trimmedOutcome(output: string): CommandOutcome {

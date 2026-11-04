@@ -29,6 +29,7 @@ import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import {
 	ApiKeyRequiredError,
 	ConfigurationError,
+	CredentialSourceError,
 	LoginCancelledError,
 	MissingApiKeyError,
 	OAuthError,
@@ -409,6 +410,7 @@ function registerAuthErrors(): void {
 	if (authErrorsRegistered) return;
 	authErrorsRegistered = true;
 	registerRpcError("MissingApiKeyError", message => new MissingApiKeyError(undefined, message));
+	registerRpcError("CredentialSourceError", message => new CredentialSourceError(undefined, message));
 	registerRpcError("OAuthRefreshUnavailableError", message => {
 		const error = new OAuthRefreshUnavailableError("", undefined);
 		error.message = message;

@@ -7,7 +7,7 @@ import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oaut
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
-import { OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
+import { CredentialSourceError, OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
 import type {
 	Api,
 	Context,
@@ -71,7 +71,7 @@ import {
 	invalidateCommandConfig,
 	isCommandConfigValue,
 	resolveConfigHeaders,
-	resolveConfigValue,
+	resolveCredentialConfigValue,
 } from "./resolve-config-value";
 import {
 	DISCOVERY_DEFAULT_MAX_TOKENS,
@@ -646,7 +646,7 @@ export class ModelRegistry {
 		this.#modelsConfigFile = ModelsConfigFile.relocate(modelsPath ?? path.join(getAgentDir(), "models.yml"));
 		this.#cacheDbPath =
 			options?.cacheDbPath ?? (modelsPath ? path.join(path.dirname(modelsPath), "models.db") : undefined);
-		if (!this.#owner) this.authStorage.keys.setResolver(resolveConfigValue);
+		if (!this.#owner) this.authStorage.keys.setResolver(resolveCredentialConfigValue);
 		// Load config and cache-backed layers synchronously in the constructor.
 		this.#loadModels();
 	}
@@ -3704,9 +3704,10 @@ export class ModelRegistry {
 
 	/**
 	 * Resolve a provider's credential or the no-auth sentinel, for availability
-	 * checks. A transient OAuth refresh failure resolves `undefined` (like
+	 * checks. A transient OAuth refresh failure, and a configured credential
+	 * source that produced nothing, both resolve `undefined` (like
 	 * `authStorage.keys.get`); request paths use
-	 * {@link getApiKeyWithCredentialForProvider}, which surfaces it.
+	 * {@link getApiKeyWithCredentialForProvider}, which surfaces them.
 	 *
 	 * `options.forceRefresh` re-mints the session-sticky OAuth token even when
 	 * the cached copy still looks valid. `options.signal` is threaded into any
@@ -3720,7 +3721,7 @@ export class ModelRegistry {
 		try {
 			return (await this.getApiKeyWithCredentialForProvider(provider, sessionId, options))?.apiKey;
 		} catch (error) {
-			if (error instanceof OAuthRefreshUnavailableError) return undefined;
+			if (error instanceof OAuthRefreshUnavailableError || error instanceof CredentialSourceError) return undefined;
 			throw error;
 		}
 	}

@@ -382,6 +382,29 @@ providers:
 
 Successful command outputs are cached for the process lifetime, and concurrent requests share an in-flight execution. A command that fails, times out or prints nothing before it ever succeeded leaves its value omitted and backs off for 30 seconds. Once a command has succeeded, a later run that fails keeps serving its last good output: omp logs a warning with the failure reason and elapsed time (never the command text), waits out the 30 s backoff, then re-runs the command in the background while requests keep the last good value. Refresh callers that request `refreshCommandCredentials` (including the model hub's explicit refresh) re-run the relevant commands but keep the last good output if a re-run fails; 401 credential recovery re-runs them and drops the last good output, so a rejected key is never served again. An ordinary catalog refresh does neither. Runtime API-key overrides, including `--api-key`, take precedence over configured credentials.
 
+### When a credential source produces nothing
+
+A request never sends a credential that a configured source failed to produce, and it never reports that failure as a missing key or as the provider's rejection. It fails with a message naming the source and what it did:
+
+```
+No API key for provider openai: the command `op …` timed out after 10 s, the providers.commandTimeoutSeconds limit
+No API key for provider openai: the command `mint-token.sh` exited with status 1
+No API key for provider openai: the command `mint-token.sh` exited 0 but printed nothing
+No API key for provider openai: environment variable OPENAI_API_KEY is set but empty
+```
+
+Only the command's first word appears: the arguments of a credential command can carry secrets.
+
+When a 401 prompted the re-resolution, the message says so and keeps the provider's rejection, so a stale token whose re-mint is broken reads as the broken re-mint rather than as wrong credentials:
+
+```
+No API key for provider openai: the command `mint-token.sh` exited 0 but printed nothing.
+It was re-resolved because the provider rejected the previous key: 401 Request had invalid
+authentication credentials.
+```
+
+Availability probes keep their old behavior — `ModelRegistry.getApiKey`, `getApiKeyForProvider`, the model picker and `omp token` see no key rather than an error — so one broken source does not break listing models. Header and MCP config values also keep dropping an unresolved value; only credential resolution refuses.
+
 ## Merge and override order
 
 ModelRegistry composition order:
@@ -692,20 +715,24 @@ in `models.yml` belong to tier 2, not this fallback tier.
 `models.yml` `apiKey` behavior:
 
 - Value is first treated as an environment variable name.
-- If the env var is unset or empty, the literal string is used as the token.
+- If the env var is unset, the literal string is used as the token.
+- If the env var is set to the empty string, resolution produces no value: a variable that exists is meant as the credential, so its empty value is not replaced by the variable's own name.
 
 If `authHeader: true` and provider `apiKey` is set, models get:
 
 - `Authorization: Bearer <resolved-key>` header injected.
 
 Resolution does not fail for a missing variable: with `apiKey: MY_PROVIDER_API_KEY`
-and `authHeader: true`, an unset or empty `MY_PROVIDER_API_KEY` produces
+and `authHeader: true`, an unset `MY_PROVIDER_API_KEY` produces
 `Authorization: Bearer MY_PROVIDER_API_KEY`. Launchers using env-backed keys must
-check that the variable is set and non-empty before starting OMP.
+check that the variable is set before starting OMP.
 
 [Command-resolved secrets](#command-resolved-secrets) do not use this literal
 fallback: a failing command or empty trimmed stdout resolves to no value, so it
 does not add a derived bearer header.
+
+See [When a credential source produces nothing](#when-a-credential-source-produces-nothing)
+for what a request reports when a configured source yields no value.
 
 Keyless providers:
 

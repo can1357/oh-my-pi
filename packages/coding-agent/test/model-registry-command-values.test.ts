@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { streamSimple } from "@oh-my-pi/pi-ai";
+import { CredentialSourceError } from "@oh-my-pi/pi-ai/error";
 import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -284,13 +285,15 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(await registry.getApiKey(model)).toBe("stale-key");
 		fs.writeFileSync(tokenFile, "FAIL");
 
-		const refreshed = await registry.resolver(model)({
-			lastChance: false,
-			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
-			previousKey: "stale-key",
-		});
-
-		expect(refreshed).toBeUndefined();
+		// The request-path resolver reports the source's own failure; the driver
+		// records it and keeps retrying (see `resolveRetryKey`).
+		await expect(
+			registry.resolver(model)({
+				lastChance: false,
+				error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
+				previousKey: "stale-key",
+			}),
+		).rejects.toBeInstanceOf(CredentialSourceError);
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 		expect(await registry.getApiKey(model)).toBeUndefined();
 		expect((await registry.resolveModelHeaders(model))?.Authorization).toBeUndefined();
@@ -989,6 +992,126 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			// Re-apply the default (10 s) to the process-wide limit.
 			bindEffects(Settings.isolated({}))();
 		}
+	});
+
+	/**
+	 * A source that produced nothing must say which source and what it did. The
+	 * request path refuses with that message; availability probes still resolve
+	 * `undefined` so a model picker does not throw at a broken credential.
+	 */
+	describe.skipIf(process.platform === "win32")("a credential source that produced nothing", () => {
+		/** models.json with one openai-completions provider whose `apiKey` is `config`. */
+		function providerWithApiKey(config: string): ModelRegistry {
+			fs.writeFileSync(
+				modelsPath,
+				JSON.stringify({
+					providers: {
+						"custom-proxy": {
+							baseUrl: "https://custom-proxy.example.com/v1",
+							api: "openai-completions",
+							apiKey: config,
+							authHeader: true,
+							models: [{ id: "custom-model", name: "Custom Model" }],
+						},
+					},
+				}),
+			);
+			return new ModelRegistry(authStorage, modelsPath);
+		}
+
+		/** The error the request path rejects with, or a failure if it resolved. */
+		async function requestRefusal(registry: ModelRegistry): Promise<Error> {
+			try {
+				const resolved = await registry.getApiKeyWithCredentialForProvider("custom-proxy");
+				throw new Error(`Expected a refusal, resolved ${JSON.stringify(resolved)}`);
+			} catch (error) {
+				if (error instanceof CredentialSourceError) return error;
+				throw error;
+			}
+		}
+
+		test("a command that prints nothing refuses by name instead of reporting no key", async () => {
+			const registry = providerWithApiKey("!true");
+			expect((await requestRefusal(registry)).message).toBe(
+				"No API key for provider custom-proxy: the command `true` exited 0 but printed nothing",
+			);
+			// Probes keep their old contract: no key, no throw.
+			const model = registry.find("custom-proxy", "custom-model");
+			if (!model) throw new Error("Expected custom model");
+			expect(await registry.getApiKey(model)).toBeUndefined();
+			expect(await registry.getApiKeyForProvider("custom-proxy")).toBeUndefined();
+			expect((await registry.resolveModelHeaders(model))?.Authorization).toBeUndefined();
+		});
+
+		test("a non-zero exit reads differently from a run that printed nothing", async () => {
+			expect((await requestRefusal(providerWithApiKey("!false"))).message).toBe(
+				"No API key for provider custom-proxy: the command `false` exited with status 1",
+			);
+		});
+
+		test("a run past the time limit reads as a timeout, not as an empty run", async () => {
+			const unbind = bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 0.5 }));
+			try {
+				const started = performance.now();
+				expect((await requestRefusal(providerWithApiKey("!sleep 5; printf %s late"))).message).toBe(
+					"No API key for provider custom-proxy: the command `sleep …` timed out after 0.5 s, the providers.commandTimeoutSeconds limit",
+				);
+				expect(performance.now() - started).toBeLessThan(4_000);
+			} finally {
+				unbind();
+				bindEffects(Settings.isolated({}))();
+			}
+		});
+
+		test("an environment variable set to the empty string is refused, not sent as its own name", async () => {
+			const name = `OMP_TEST_EMPTY_KEY_${Snowflake.next()}`;
+			process.env[name] = "";
+			try {
+				// Without this, the literal fallback makes the variable's name the bearer.
+				expect(await resolveConfigValue(name)).toBeUndefined();
+				expect((await requestRefusal(providerWithApiKey(name))).message).toBe(
+					`No API key for provider custom-proxy: environment variable ${name} is set but empty`,
+				);
+			} finally {
+				delete process.env[name];
+			}
+			// An unset variable keeps the documented literal fallback.
+			expect(await resolveConfigValue(name)).toBe(name);
+		});
+
+		test("a 401 whose re-resolution yields nothing reports the source, not the rejection", async () => {
+			const tokenFile = path.join(tempDir, "remint-token.txt");
+			fs.writeFileSync(tokenFile, "stale-key");
+			const script = path.join(tempDir, "mint.sh");
+			fs.writeFileSync(
+				script,
+				`#!/bin/sh\nt=$(cat ${shellQuote(tokenFile)})\n[ "$t" = FAIL ] && exit 1\nprintf %s "$t"\n`,
+				{ mode: 0o755 },
+			);
+
+			const registry = providerWithApiKey(`!${script}`);
+			const model = registry.find("custom-proxy", "custom-model");
+			if (!model) throw new Error("Expected custom model");
+			expect(await registry.getApiKey(model)).toBe("stale-key");
+			fs.writeFileSync(tokenFile, "FAIL");
+
+			const attempted: string[] = [];
+			const failure = await withAuth(registry.resolver(model), async key => {
+				attempted.push(key);
+				throw Object.assign(new Error("401 authentication_error"), { status: 401 });
+			}).then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+
+			expect(attempted).toEqual(["stale-key"]);
+			expect(failure).toBeInstanceOf(CredentialSourceError);
+			expect((failure as Error).message).toBe(
+				`No API key for provider custom-proxy: the command \`${script}\` exited with status 1. ` +
+					"It was re-resolved because the provider rejected the previous key: 401 authentication_error",
+			);
+			expect((failure as Error).cause).toBeInstanceOf(Error);
+		});
 	});
 
 	/** Config dir whose config.yml sets `commandTimeoutSeconds` (and optionally more YAML). */
