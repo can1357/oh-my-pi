@@ -115,6 +115,24 @@ export interface PersistedReviveSpec {
 }
 
 /**
+ * Durable agent definition name (`scout`, `reviewer`, …) of a persisted subagent.
+ * Cold-revived refs register with `displayName: id` (`registry/persisted-agents.ts`),
+ * so a generated task id would silently drop agent-scoped rules and budgets.
+ * `init.agent` carries the real name; only files predating that field fall back to
+ * `displayName`. A parked transcript may also predate the `main`/`sub` definition-name
+ * reservation (`discovery/helpers.ts`): a persisted `init.agent` of either sentinel
+ * value from such a legacy custom agent must not masquerade as that sentinel, so it
+ * falls back to `displayName` too, keeping it scoped as an ordinary subagent under its
+ * generated id instead of `main` or the shared `sub` bucket.
+ */
+export function persistedAgentName(displayName: string, init: PersistedSessionInit): string {
+	const normalized = init.agent?.trim().toLowerCase();
+	return init.agent && normalized !== MAIN_AGENT_RULE_NAME && normalized !== SUB_AGENT_RULE_NAME
+		? init.agent
+		: displayName;
+}
+
+/**
  * The agent definition a cold-revived subagent's monitored turns report (IRC wakes,
  * `omp --restore`): persisted files predate an agent-source field, so frames carry
  * the runtime-neutral `user` source; the name is the registry ref's.
@@ -550,7 +568,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 		id: ref.id,
 		agent: persistedAgentDefinition(ref.displayName, init),
 		completionProbe: isCompletionProbeEnabled(spec.settings, taskDepth - 1),
-		...softRequestBudgetFor(ref.displayName, spec.settings),
+		...softRequestBudgetFor(persistedAgentName(ref.displayName, init), spec.settings),
 		eventBus: spec.eventBus,
 		subagentEventBus: spec.subagentEventBus,
 		sessionFile,
