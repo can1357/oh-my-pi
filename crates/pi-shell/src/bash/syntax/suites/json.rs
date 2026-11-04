@@ -217,3 +217,27 @@ fn a_conditional_chain_starts_where_its_operators_are_written_across_trivia() {
 		assert_eq!(expr["End"]["Offset"], end, "chain ends after its last operand in {text}");
 	}
 }
+
+#[test]
+fn an_exported_conditional_keeps_its_operators_whatever_stands_before_them() {
+	// The offset of an operator is the parser's, not a guess made by
+	// reading the source backwards: a quote closed on an earlier line, a
+	// comment right after `(`, and an operator split by `\newline` all
+	// defeat such a guess, and the exported range then selects a
+	// condition that answers differently from the one written.
+	for (src, stmt, pos, end) in [
+		(&b": 'start\nend'; [[ ! # c\n a && b ]]"[..], 1usize, 18u32, 31u32),
+		(&b"[[ (# c\n a ) && b ]]"[..], 0, 3, 17),
+		(&b"[[ -\\\nz a && b ]]"[..], 0, 3, 14),
+	] {
+		let program = parse_all(src, Features::NONE).unwrap();
+		let json = to_json(src, &program, JsonDialect::Shfmt, Offsets::Bytes);
+		let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
+		let expr = &shfmt["Stmts"][stmt]["Cmd"]["X"];
+		let text = String::from_utf8_lossy(src).into_owned();
+		assert_eq!(expr["Op"], "&&", "{text}");
+		assert_eq!(expr["Pos"]["Offset"], pos, "chain starts at its first operator in {text}");
+		assert_eq!(expr["X"]["Pos"]["Offset"], pos, "left operand starts there too in {text}");
+		assert_eq!(expr["End"]["Offset"], end, "chain ends after its last operand in {text}");
+	}
+}
