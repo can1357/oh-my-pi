@@ -209,7 +209,8 @@ pub struct Script {
 	/// back when it ends (`None`: the shell's current mode, which an
 	/// `emulate` in the script changes for later runs too).
 	pub mode:         Option<ModeId>,
-	/// Positional parameters for the script.
+	/// Positional parameters for the script, replacing the inherited current
+	/// positional scope in a new subshell without changing its caller.
 	pub args:         Option<Vec<BString>>,
 	/// Which virtual process runs it.
 	pub vproc:        VprocSel,
@@ -1650,9 +1651,6 @@ impl Shell {
 					.insert(name, Some(Var::scalar(value, Attrs::EXPORT)));
 			}
 		}
-		if let Some(args) = script.args {
-			overlay.positional = Some(args);
-		}
 		let mut fds = p.fds.clone();
 		if let Some(stdio) = stdio {
 			for (fd, s) in stdio.into_iter().enumerate() {
@@ -1665,7 +1663,7 @@ impl Shell {
 		}
 		let cwd = script.cwd.unwrap_or_else(|| p.cwd.clone());
 		let status = p.status;
-		let mut scopes = match store {
+		let mut scopes = match store.as_deref_mut() {
 			Some(store) => state::copy_scopes(&self.k.root, store, p).unwrap_or_else(|err| {
 				self.k.root.fail(err);
 				Vec::new()
@@ -1691,6 +1689,15 @@ impl Shell {
 		vp.lineage = lineage.unwrap_or(parent_lineage);
 		vp.status = status;
 		vp.scopes = scopes;
+		if let Some(args) = script.args {
+			// A copied function scope takes precedence over the overlay: install
+			// the script's arguments at that level, as `set --` does.
+			if let Some(store) = store {
+				state::set_positional(&mut self.k.root, store, &mut vp, args);
+			} else if let Some(overlay) = &mut vp.overlay {
+				overlay.positional = Some(args);
+			}
+		}
 		vp.mode = mode;
 		vp.runs.push_back(run);
 		self.k.spawned.push(Box::new(vp));
