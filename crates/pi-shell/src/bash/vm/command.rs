@@ -38,7 +38,6 @@ use crate::bash::{
 	},
 	ids::{CallId, CmdTag, IntrinsicId, RunId},
 	ir::{self, AssignVal, Op, Part, Unit},
-	signal::SigSet,
 	snapshot::Lost,
 	store::{Attrs, Key, KeyBuf, MiscKey, Record, StateStore, StoreError, VarValue},
 	zshopt::ZshOpt,
@@ -2355,7 +2354,9 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 					return Some(Flow::Discard(1));
 				},
 			};
-			let mut sigmask_ign = SigSet::EMPTY;
+			// An asynchronous list's `INT` and `QUIT` stay ignored across
+			// `exec` (bash `setup_async_signals`).
+			let mut sigmask_ign = vp.async_ign.signals();
 			for (key, record) in traps {
 				if let (
 					crate::bash::store::KeyBuf::Trap(crate::bash::store::TrapKey::Signal(sig)),

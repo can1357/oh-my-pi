@@ -2209,6 +2209,9 @@ impl Shell {
 				let key = crate::bash::store::TrapKey::Signal(sig);
 				match state::record(cx.store, &self.procs[i], crate::bash::store::Key::Trap(key)) {
 					Ok(Some(Record::Trap { action, .. })) => Some(action.is_empty()),
+					// No trap of its own: an asynchronous list ignores `INT`
+					// and `QUIT` (`Vproc::async_ign`).
+					Ok(_) if self.procs[i].async_ign.has(sig) => Some(true),
 					Ok(_) => None,
 					Err(err) => {
 						self.k.fail(err);
@@ -2223,7 +2226,10 @@ impl Shell {
 				for frame in &mut self.procs[i].frames {
 					if let Some(sc) = frame.scratch.as_mut() {
 						match &mut sc.live {
-							Live::Task(task) => task.signal(sig),
+							// An in-engine program stands for an external, which
+							// inherits the ignored disposition (`trap ''`, an
+							// asynchronous list's `INT`) and so never sees it.
+							Live::Task(task) if trap != Some(true) => task.signal(sig),
 							Live::Ext(ext) => {
 								let _ = ext.signal(sig);
 							},
@@ -2632,6 +2638,7 @@ impl Vproc {
 			spare: Vec::new(),
 			calls: Vec::new(),
 			own_traps: proc::OwnTraps::EMPTY,
+			async_ign: proc::AsyncIgnored::NONE,
 			trap_frames: 0,
 			mode: ModeId::Bash,
 			zsh: None,
@@ -2726,6 +2733,9 @@ impl Vproc {
 		jobctl::inherit(k, vp.vpid, self.vpid);
 		vp.mode = self.mode;
 		vp.zle.clone_from(&self.zle);
+		// bash 5.3: a subshell of an asynchronous list keeps ignoring its
+		// signals (`restore_original_signals` leaves `SIG_ASYNCSIG` ones).
+		vp.async_ign = self.async_ign;
 		vp.set_sticky(self.sticky().cloned());
 		// zsh forks keep `scriptname`: diagnostics of the child name the
 		// parent's function, `(eval)` or file.

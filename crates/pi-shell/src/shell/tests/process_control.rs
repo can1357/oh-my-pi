@@ -1453,3 +1453,85 @@ async fn pkill_builtin_excludes_own_pid() {
 	assert_eq!(result.exit_code, Some(0), "the shell must survive an explicit pkill");
 	assert!(output.contains("survived"), "{output:?}");
 }
+
+/// An asynchronous list started without job control (`&`, a coprocess, a
+/// process substitution) ignores `SIGINT` and `SIGQUIT`, and so do its
+/// subshells, command substitutions, externals and a script it runs, as in
+/// Bash 5.3; it may trap or reset them (`trap -`), and `trap` does not list
+/// the ignore. Regression: the signal ended the job with 130 (131).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_async_list_ignores_sigint_and_sigquit() {
+	let dir = tempfile::tempdir().expect("temporary directory");
+	let first = format!("cd '{}'", dir.path().display());
+	let script = [
+		first.as_str(),
+		"/bin/sleep 0.5 & p=$!; /bin/sleep 0.2; kill -INT \"$p\"; wait \"$p\"; echo \"external=$?\"",
+		"/bin/sleep 0.5 & p=$!; /bin/sleep 0.2; kill -QUIT \"$p\"; wait \"$p\"; echo \"quit=$?\"",
+		"sleep 0.5 & p=$!; /bin/sleep 0.2; kill -INT \"$p\"; wait \"$p\"; echo \"builtin=$?\"",
+		"( /bin/sleep 0.5; echo body ) & p=$!; /bin/sleep 0.2; kill -INT \"$p\"; wait \"$p\"; echo \
+		 \"subshell=$?\"",
+		"f() { /bin/sleep 0.5; echo body; }; f & p=$!; /bin/sleep 0.2; kill -INT \"$p\"; wait \
+		 \"$p\"; echo \"function=$?\"",
+		"/bin/sleep 0.5 | /bin/sleep 0.5 & p=$!; /bin/sleep 0.2; kill -INT \"$p\"; wait \"$p\"; \
+		 echo \"pipeline=$?\"",
+		"exec /bin/sleep 0.5 & p=$!; /bin/sleep 0.2; kill -INT \"$p\"; wait \"$p\"; echo \"exec=$?\"",
+		"{ /bin/sh -c 'kill -INT $$; echo sh'; } & wait $!; echo \"inherited=$?\"",
+		"( ( kill -INT $BASHPID; echo inner ); echo outer ) & wait $!; echo \"nested=$?\"",
+		"coproc { kill -INT $BASHPID; echo coproc; }; read -r l <&\"${COPROC[0]}\"; echo \"[$l]\"; \
+		 wait",
+		"cat <( kill -INT $BASHPID; echo procsub ); echo \"procsub=$?\"",
+		"( x=$( kill -INT $BASHPID; echo comsub ); echo \"[$x]\" ) & wait $!; echo \"comsub=$?\"",
+		"( trap -p INT QUIT ) & wait $!; echo \"listed=$?\"",
+		"( trap 'echo I' INT; kill -INT $BASHPID; echo after ) & wait $!; echo \"trapped=$?\"",
+		"( trap - INT; kill -INT $BASHPID; echo no ) & wait $!; echo \"reset=$?\"",
+		"( trap - INT; ( kill -INT $BASHPID; echo no ); echo \"reset inner=$?\" ) & wait $!",
+		"( trap 'echo I' INT; ( kill -INT $BASHPID; echo no ); echo \"trapped inner=$?\" ) & wait $!",
+		"( trap - INT; /bin/sh -c 'kill -INT $$; echo no'; echo \"reset external=$?\" ) & wait $!",
+		"printf 'trap -p INT; kill -INT $$; echo script\\n' >s; chmod +x s; ./s & wait $!; echo \
+		 \"script=$?\"; rm -f s",
+		"/bin/sleep 0.5 & p=$!; /bin/sleep 0.2; kill -TERM \"$p\"; wait \"$p\"; echo \"term=$?\"",
+		"set -m; /bin/sleep 0.5 & p=$!; /bin/sleep 0.2; kill -INT \"$p\"; wait \"$p\"; echo \
+		 \"monitor=$?\"",
+	]
+	.join("\n");
+	let (result, output) = execute_captured(script).await;
+	assert_eq!(result.exit_code, Some(0), "{output:?}");
+	let expected = [
+		"external=0",
+		"quit=0",
+		"builtin=0",
+		"body",
+		"subshell=0",
+		"body",
+		"function=0",
+		"pipeline=0",
+		"exec=0",
+		"sh",
+		"inherited=0",
+		"inner",
+		"outer",
+		"nested=0",
+		"[coproc]",
+		"procsub",
+		"procsub=0",
+		"[comsub]",
+		"comsub=0",
+		"listed=0",
+		"I",
+		"after",
+		"trapped=0",
+		"reset=130",
+		"reset inner=130",
+		"trapped inner=130",
+		"reset external=130",
+		"trap -- '' SIGINT",
+		"script",
+		"script=0",
+		"term=143",
+		"monitor=130",
+		"",
+	]
+	.join("\n");
+	assert_eq!(output, expected);
+}
