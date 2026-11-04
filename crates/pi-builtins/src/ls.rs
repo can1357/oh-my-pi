@@ -3630,12 +3630,50 @@ fn classify_file(path: &PathData) -> Option<char> {
 }
 
 fn create_hyperlink(name: &OsStr, path: &PathData) -> OsString {
-	// The `hostname` crate does not support WASI (no OS-level hostname API),
-	// so we use an empty string for hyperlinks on WASI.
-	#[cfg(not(target_os = "wasi"))]
-	static HOSTNAME: LazyLock<OsString> = LazyLock::new(|| hostname::get().unwrap_or_default());
-	#[cfg(target_os = "wasi")]
-	static HOSTNAME: LazyLock<OsString> = LazyLock::new(OsString::new);
+	static HOSTNAME: LazyLock<OsString> = LazyLock::new(|| {
+		#[cfg(unix)]
+		{
+			use std::os::unix::ffi::OsStringExt;
+
+			let limit = unsafe { uucore::libc::sysconf(uucore::libc::_SC_HOST_NAME_MAX) }.max(255);
+			let mut buffer = vec![0; limit as usize + 1];
+			if unsafe {
+				uucore::libc::gethostname(buffer.as_mut_ptr().cast(), limit as usize)
+			} != 0
+			{
+				return OsString::new();
+			}
+			buffer.truncate(buffer.iter().position(|&byte| byte == 0).unwrap_or(buffer.len()));
+			OsString::from_vec(buffer)
+		}
+		#[cfg(windows)]
+		{
+			use std::os::windows::ffi::OsStringExt;
+			use windows_sys::Win32::System::SystemInformation::{
+				ComputerNamePhysicalDnsHostname, GetComputerNameExW,
+			};
+
+			let mut size = 0;
+			unsafe {
+				GetComputerNameExW(ComputerNamePhysicalDnsHostname, std::ptr::null_mut(), &mut size);
+			}
+			if size == 0 {
+				return OsString::new();
+			}
+			let mut buffer = Vec::with_capacity(size as usize);
+			if unsafe {
+				GetComputerNameExW(ComputerNamePhysicalDnsHostname, buffer.as_mut_ptr(), &mut size)
+			} == 0
+			{
+				return OsString::new();
+			}
+			// Only the code units written by the API become initialized elements.
+			unsafe { buffer.set_len(size as usize) };
+			OsString::from_wide(&buffer)
+		}
+		#[cfg(not(any(unix, windows)))]
+		OsString::new()
+	});
 
 	// OSC 8 hyperlink format: \x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\
 	// \x1b = ESC, \x1b\\ = ESC backslash

@@ -6,6 +6,12 @@ use std::{
 };
 
 fn main() {
+	if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+		// A position-dependent obash skips the loader's relative relocations
+		// and the page faults they cost at every start (about a quarter of
+		// a short script's faults).
+		println!("cargo:rustc-link-arg-bin=obash=-no-pie");
+	}
 	generate_minimizer_builtin_filters();
 	if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
 		// Dependencies used by the embedded host also bring framework link

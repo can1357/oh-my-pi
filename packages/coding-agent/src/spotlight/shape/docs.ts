@@ -83,14 +83,14 @@ export async function foldReadDoc(run: Run): Promise<View | undefined> {
 }
 
 /** Docs a bash command printed whole (`cat README.md`), each folded in place; undefined when nothing folds. */
-export async function foldBashDocs(run: Run, output: string): Promise<{ text: string; paths: string[] } | undefined> {
+export async function foldBashDocs(run: Run, output: string): Promise<string | undefined> {
 	const targets = readTargets(run.input.command ?? "").filter(t => !t.ranges && DOC_FILE.test(t.arg));
 	let text = output;
 	let cursor = 0;
-	const paths: string[] = [];
+	let folded = false;
 	for (const t of targets) {
-		for (const file of await resolveTarget(t, run.cwd)) {
-			const lines = await fileLines(file.abs);
+		for (const abs of await resolveTarget(t, run.cwd)) {
+			const lines = await fileLines(abs);
 			if (!lines) continue;
 			const block = lines.join("\n");
 			const at = text.indexOf(block, cursor);
@@ -102,8 +102,8 @@ export async function foldBashDocs(run: Run, output: string): Promise<{ text: st
 			const view = renderFolds(lines, lines, 1, folds, false).lines.join("\n");
 			text = text.slice(0, at) + view + text.slice(at + block.length);
 			cursor = at + view.length;
-			paths.push(file.path);
+			folded = true;
 		}
 	}
-	return paths.length ? { text, paths } : undefined;
+	return folded ? text : undefined;
 }

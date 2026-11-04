@@ -931,8 +931,8 @@ async fn pids_reports_in_flight_children_until_run_returns() {
 	.await
 	.expect("in-flight run never reported a pid");
 	assert_eq!(pids.len(), 1, "exactly the sleep child: {pids:?}");
-	let child = process::Process::from_pid(pids[0]).expect("reported pid is alive");
-	assert_eq!(child.status(), process::ProcessStatus::Running);
+	let child = proctree::Process::from_pid(pids[0]).expect("reported pid is alive");
+	assert_eq!(child.status(), proctree::ProcessStatus::Running);
 
 	shell.abort().await;
 	let result = time::timeout(Duration::from_secs(5), run)

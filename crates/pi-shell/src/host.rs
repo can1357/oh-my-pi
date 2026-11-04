@@ -387,7 +387,7 @@ impl crate::bash::Host for PiHost {
 	/// withheld), the tools (`timeout`, `nohup`, `git`, the extras that run
 	/// command lines), the other extras, then `PATH`. A name with a slash is
 	/// only ever a path; `exec` searches `PATH` without asking.
-	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx<'_>) -> Resolved {
+	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx) -> Resolved {
 		if why.has_slash {
 			return Resolved::NotFound;
 		}
