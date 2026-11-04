@@ -1,12 +1,9 @@
 /**
  * Keenable Web Search Provider
  *
- * Calls Keenable's search API and maps results into the unified SearchResponse
- * shape. With a `KEENABLE_API_KEY` (or stored `keenable` credential) it uses
- * the keyed endpoint; without one, an explicit selection falls back to the
- * keyless public endpoint, which is rate limited per IP and needs no account.
- * Endpoints: POST https://api.keenable.ai/v1/search (X-API-Key) and
- * POST https://api.keenable.ai/v1/search/public (X-Keenable-Title).
+ * POST https://api.keenable.ai/v1/search with `X-API-Key` when a `keenable`
+ * credential resolves; otherwise (explicit selection only) the keyless,
+ * per-IP rate-limited https://api.keenable.ai/v1/search/public endpoint.
  * Docs: https://docs.keenable.ai/api-reference/search
  */
 import { type AuthStorage, type FetchImpl, resolveApiKeyOnce, seedApiKeyResolver, withAuth } from "@oh-my-pi/pi-ai";
@@ -35,7 +32,7 @@ const MAX_NUM_RESULTS = 50;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_ERROR_BYTES = 8 * 1024;
 
-/** Keenable accepts relative deltas (`7d`, `1mo`, `1y`) on its date filters. */
+/** Keenable accepts relative deltas on its date filters. */
 const RECENCY_DELTAS: Record<NonNullable<SearchParams["recency"]>, string> = {
 	day: "1d",
 	week: "7d",
@@ -45,7 +42,7 @@ const RECENCY_DELTAS: Record<NonNullable<SearchParams["recency"]>, string> = {
 
 type SearchParamsWithFetch = SearchParams & { fetch?: FetchImpl };
 
-export interface KeenableSearchBody {
+interface KeenableSearchBody {
 	query: string;
 	max_results: number;
 	site?: string;
@@ -57,7 +54,6 @@ interface KeenableSearchResult {
 	title?: unknown;
 	url?: unknown;
 	snippet?: unknown;
-	description?: unknown;
 	published_at?: unknown;
 }
 
@@ -66,29 +62,28 @@ interface KeenableSearchResponse {
 }
 
 /**
- * Build the request body. Keenable takes plain keywords and quoted phrases;
- * a single `site:` host maps to the native `site` filter, and date bounds map
- * to `published_after` / `published_before`. Everything else is left to the
- * pipeline's lenient post-filter.
+ * Keenable takes plain keywords and quoted phrases; a single `site:` host maps
+ * to the native `site` filter and date bounds to `published_after` /
+ * `published_before`. Everything else is left to the central post-filter.
  */
-export function buildKeenableBody(
+function buildKeenableBody(
 	parsed: StructuredQuery,
 	recency: SearchParams["recency"],
 	maxResults: number,
 ): KeenableSearchBody {
-	const query = parsed.hasDirectives
-		? // `raw` is blanked so a directives-only query does not fall back to the verbatim string.
-			formatQuery(
-				{ ...parsed, raw: "", sites: [], excludedSites: [], after: undefined, before: undefined },
-				{ phrases: true },
-			)
-		: parsed.raw.trim();
+	// Blanking `raw` makes a directives-only query fall back to its constraint
+	// values (site hosts, intitle: words, …) as keywords, never to the operators.
+	const query = parsed.hasDirectives ? formatQuery({ ...parsed, raw: "" }, { phrases: true }) : parsed.raw.trim();
+	if (!query) {
+		throw new SearchProviderError(
+			"keenable",
+			"Keenable needs search terms; date-only queries are not supported",
+			400,
+		);
+	}
+	const body: KeenableSearchBody = { query, max_results: maxResults };
 	const sites = siteHosts(parsed.sites);
-	const site = sites.length === 1 ? sites[0] : undefined;
-	// A site-only query has no keywords left once `site:` moves to the native
-	// filter; search the host name rather than echoing `site:` in the query.
-	const body: KeenableSearchBody = { query: query || site || parsed.raw.trim(), max_results: maxResults };
-	if (site) body.site = site;
+	if (sites.length === 1) body.site = sites[0];
 	const after = parsed.after ?? (recency ? RECENCY_DELTAS[recency] : undefined);
 	if (after) body.published_after = after;
 	if (parsed.before) body.published_before = parsed.before;
@@ -144,18 +139,17 @@ export async function searchKeenable(params: SearchParamsWithFetch): Promise<Sea
 	const apiKey = await resolveApiKeyOnce(keyResolver, params.signal);
 	let data: KeenableSearchResponse;
 	if (apiKey) {
-		// Reuse the preflight credential, then let withAuth force-refresh / rotate on 401/402.
+		// Reuse the preflight credential, then let withAuth refresh / rotate on 401/402.
 		data = await withAuth(seedApiKeyResolver(apiKey, keyResolver), key => callKeenableSearch(key, body, params), {
 			signal: params.signal,
 		});
+	} else if (params.authStorage.keys.source("keenable") !== undefined) {
+		// A configured credential that fails to resolve must not silently downgrade to anonymous search.
+		throw new SearchProviderError(
+			"keenable",
+			"Keenable credentials could not be resolved. Check your configured API key or credential helper.",
+		);
 	} else {
-		// A failed credential lookup must not silently downgrade to anonymous search.
-		if (params.authStorage.keys.source("keenable") !== undefined) {
-			throw new SearchProviderError(
-				"keenable",
-				"Keenable credentials could not be resolved. Check your configured API key or credential helper.",
-			);
-		}
 		data = await callKeenableSearch(undefined, body, params);
 	}
 
@@ -176,8 +170,7 @@ export async function searchKeenable(params: SearchParamsWithFetch): Promise<Sea
 		sources.push({
 			title: normalizeSearchText(result.title) ?? url,
 			url,
-			// `description` is deprecated and always empty; `snippet` carries the page excerpt.
-			snippet: normalizeSearchText(result.snippet) ?? normalizeSearchText(result.description),
+			snippet: normalizeSearchText(result.snippet),
 			publishedDate,
 			ageSeconds: dateToAgeSeconds(publishedDate),
 		});
