@@ -29,7 +29,7 @@
 
 - Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
-- Fixed glob, grep and `fd` searches of a large tree running past their timeout or cancel until the whole walk finished, holding a path for every entry they passed (omp grew by gigabytes a minute); they now stop at their deadline and hold paths only for what they return and the folders they enter
+- Fixed the glob tool, the edit tool's file search, fuzzy file finding and the shell's `grep` and `rg` builtins running past their timeout or cancel until the whole directory walk had finished, holding a path for every entry they passed (omp grew by hundreds of megabytes a minute on a large tree); they now stop at their deadline and hold paths only for what they return and the folders they enter
 ### Fixed
 
 - Fixed `el.type` and `el.press(keys)` on Wayland moving focus inside the element's app (GNOME showed "… is ready") before refusing the call: they are now refused before anything reaches the app ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))
