@@ -55,7 +55,7 @@ import {
 } from "./registry";
 // Registers every setting before any instance is read (definitions live next to their domains).
 import "./all-settings";
-import { cfgModelRoles, cfgModelRoleStorage } from "./model-settings";
+import { cfgDisabledProviders, cfgModelRoles, cfgModelRoleStorage } from "./model-settings";
 import { cfgShellPath } from "../exec/settings";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1523,7 +1523,9 @@ export class Settings {
 			});
 			cloned.#storage = this.#storage;
 			cloned.#configPath = this.#configPath;
-			cloned.#project = this.#persist ? await cloned.#loadProjectSettings() : structuredClone(this.#project);
+			cloned.#project = this.#persist
+				? await cloned.#loadProjectSettings(this.#ownLayers())
+				: structuredClone(this.#project);
 			if (!this.#persist) cloned.#projectShellPathSource = this.#projectShellPathSource;
 			cloned.#configFiles = [...this.#configFiles];
 			cloned.#overlayShellPathSource = this.#overlayShellPathSource;
@@ -1600,10 +1602,25 @@ export class Settings {
 			}
 			const mutationGeneration = this.#persistedMutationGeneration;
 
+			// A config this instance moved aside as malformed reads as missing until a save recreates
+			// it; keep the last good layer instead of rebuilding it from pending writes.
+			const globalRead = this.#readExistingMainYaml(false).then(({ settings, configPath }) => {
+				const quarantined = this.#configPath !== null && this.#quarantinedYamlTargets.has(this.#configPath);
+				const global = settings ?? (quarantined ? structuredClone(this.#global) : {});
+				this.#applyPendingGlobalWrites(global);
+				return { settings: global, configPath };
+			});
+			const overlayRead = this.#readConfigOverlays(false);
+			// The project layer honors the refreshed layers' `disabledProviders`; a failed read keeps its current layer.
+			const layersRead = Promise.allSettled([globalRead, overlayRead]).then(([global, overlay]): OwnLayers => ({
+				...this.#ownLayers(),
+				global: global.status === "fulfilled" ? global.value.settings : this.#global,
+				configOverlay: overlay.status === "fulfilled" ? overlay.value.settings : this.#configOverlay,
+			}));
 			const [globalResult, projectResult, overlayResult] = await Promise.allSettled([
-				this.#readExistingMainYaml(false),
-				this.#readProjectSettings(false, { rejectNewWarnings: keepLastGood }),
-				this.#readConfigOverlays(false),
+				globalRead,
+				this.#readProjectSettings(false, { rejectNewWarnings: keepLastGood, layers: layersRead }),
+				overlayRead,
 			]);
 			if (mutationGeneration !== this.#persistedMutationGeneration) continue;
 			for (const result of [globalResult, projectResult, overlayResult]) {
@@ -1616,12 +1633,7 @@ export class Settings {
 
 			const refreshed: LayerRefresh[] = [];
 			if (globalResult.status === "fulfilled") {
-				const { configPath } = globalResult.value;
-				// A config this instance moved aside as malformed reads as missing until a save
-				// recreates it; keep the last good layer instead of rebuilding it from pending writes.
-				const quarantined = this.#configPath !== null && this.#quarantinedYamlTargets.has(this.#configPath);
-				const settings = globalResult.value.settings ?? (quarantined ? structuredClone(this.#global) : {});
-				this.#applyPendingGlobalWrites(settings);
+				const { configPath, settings } = globalResult.value;
 				refreshed.push({
 					layer: "global",
 					settings,
@@ -2157,24 +2169,7 @@ export class Settings {
 	// ─────────────────────────────────────────────────────────────────────────
 
 	async #load(): Promise<Settings> {
-		// Project settings discovery is independent of the persist chain, while
-		// the persist steps themselves remain sequential. Wait for both branches
-		// to settle so simultaneous failures produce one catchable error without
-		// abandoning the other rejection.
-		const [globalResult, projectResult] = await Promise.allSettled([
-			this.#persist ? this.#loadGlobalSettings() : Promise.resolve(),
-			this.#loadProjectSettings(),
-		]);
-		if (globalResult.status === "rejected") throw globalResult.reason;
-		if (projectResult.status === "rejected") throw projectResult.reason;
-
-		this.#project = projectResult.value;
-		this.#configOverlay = await this.#loadConfigOverlays();
-
-		// Build merged view (global → project → overrides; project wins over global)
-		this.#rebuildMerged();
-		this.#validateAll();
-		return this;
+		return this.#loadLayers(this.#persist ? this.#loadGlobalSettings() : Promise.resolve());
 	}
 	async #loadGlobalSettings(): Promise<void> {
 		this.#storage = await AgentStorage.open(getAgentDbPath(this.#agentDir));
@@ -2189,18 +2184,33 @@ export class Settings {
 	}
 
 	async #loadReadOnly(): Promise<Settings> {
-		const [globalResult, projectResult] = await Promise.allSettled([
-			this.#loadExistingMainYaml(),
-			this.#loadProjectSettings(),
+		return this.#loadLayers(
+			this.#loadExistingMainYaml().then(global => {
+				if (global) this.#global = global;
+			}),
+		);
+	}
+
+	/**
+	 * Finishes a load once `globalLoad` (which sets `#global`) settles: the `--config` overlay
+	 * follows it, and project discovery runs alongside both but merges only once they are in,
+	 * since their `disabledProviders` decide which providers feed the project layer. Waits for
+	 * every branch to settle so simultaneous failures produce one catchable error.
+	 */
+	async #loadLayers(globalLoad: Promise<void>): Promise<Settings> {
+		const layersLoad = globalLoad.then(async () => {
+			this.#configOverlay = await this.#loadConfigOverlays();
+			return this.#ownLayers();
+		});
+		const [layersResult, projectResult] = await Promise.allSettled([
+			layersLoad,
+			this.#loadProjectSettings(layersLoad),
 		]);
-		if (globalResult.status === "rejected") throw globalResult.reason;
+		if (layersResult.status === "rejected") throw layersResult.reason;
 		if (projectResult.status === "rejected") throw projectResult.reason;
-		if (globalResult.value) {
-			this.#global = globalResult.value;
-		}
 
 		this.#project = projectResult.value;
-		this.#configOverlay = await this.#loadConfigOverlays();
+		// Build merged view (global → project → overrides; project wins over global)
 		this.#rebuildMerged();
 		this.#validateAll();
 		return this;
@@ -2631,13 +2641,17 @@ export class Settings {
 	 * `rejectNewWarnings` fails the read (without logging the warnings) when a
 	 * project settings file newly fails to parse, so a keep-last-good reload can
 	 * retain the previous project layer. `cwd` (default: the current scope)
-	 * selects the project to read. The read leaves the project fields untouched:
+	 * selects the project to read. `layers` (default: this instance's) are the
+	 * layers the project layer merges with: their `disabledProviders`, with the
+	 * native project config's, drops switched-off providers' items, so a
+	 * disabled provider contributes nothing even before discovery is bound to
+	 * these settings. The read leaves the project fields untouched:
 	 * the caller commits the result (`#commitProjectRead`, `warningsSeen`
 	 * included) only when it adopts the layer.
 	 */
 	async #readProjectSettings(
 		quarantineInvalid: boolean,
-		options: { rejectNewWarnings?: boolean; cwd?: string } = {},
+		options: { rejectNewWarnings?: boolean; cwd?: string; layers?: OwnLayers | Promise<OwnLayers> } = {},
 	): Promise<ProjectSettingsReadResult> {
 		const cwd = options.cwd ?? this.#cwd;
 		// Resolve once: capability discovery, fs-cache invalidation, and the
@@ -2653,6 +2667,7 @@ export class Settings {
 		let shellPathSource: string | undefined;
 		let merged: RawSettings = {};
 		const sourcePaths: string[] = [];
+		const projectItems: SettingsCapabilityItem[] = [];
 		let rejectedWarnings: string[] | undefined;
 		let warningsSeen = this.#projectSettingsWarningsSeen;
 		try {
@@ -2676,15 +2691,10 @@ export class Settings {
 				for (const warning of newWarnings) logger.warn(`Settings: ${warning}`);
 				warningsSeen = new Set(projectWarnings);
 				for (const item of result.items as SettingsCapabilityItem[]) {
-					if (item.level === "project") {
-						merged = this.#deepMerge(merged, dropSettingsGroupShadows(item.data as RawSettings, item.path));
-						sourcePaths.push(item.path);
-						if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
-					}
+					if (item.level === "project") projectItems.push(item);
 				}
 			}
 		} catch {
-			shellPathSource = undefined;
 			// Capability discovery is best-effort; the native project config below
 			// remains authoritative for its model-role layer and must not be hidden.
 		}
@@ -2697,6 +2707,15 @@ export class Settings {
 			? await this.#loadYaml(projectConfigPath)
 			: (this.#unwrapYamlLoadResult(projectConfigPath, await this.#loadYamlIfPresent(projectConfigPath, false)) ??
 				(this.#quarantinedYamlTargets.has(projectConfigPath) ? structuredClone(this.#projectFileSettings) : {}));
+		// `disabledProviders` resolved across every layer, the native project config standing in for the project layer.
+		const layers = { ...(await (options.layers ?? this.#ownLayers())), project: nativeProject };
+		const disabled = getByPath(this.#mergeOverParent(this.#mergeOwnLayers(layers)), cfgDisabledProviders.segments);
+		for (const item of projectItems) {
+			if (Array.isArray(disabled) && disabled.includes(item._source.provider)) continue;
+			merged = this.#deepMerge(merged, dropSettingsGroupShadows(item.data as RawSettings, item.path));
+			sourcePaths.push(item.path);
+			if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
+		}
 		const nativeModelRoles = getByPath(nativeProject, ["modelRoles"]);
 		if (nativeModelRoles !== undefined) {
 			merged = this.#deepMerge(merged, { modelRoles: nativeModelRoles });
@@ -2710,8 +2729,8 @@ export class Settings {
 		};
 	}
 
-	async #loadProjectSettings(): Promise<RawSettings> {
-		const result = await this.#readProjectSettings(true);
+	async #loadProjectSettings(layers?: OwnLayers | Promise<OwnLayers>): Promise<RawSettings> {
+		const result = await this.#readProjectSettings(true, { layers });
 		this.#commitProjectRead(result);
 		return result.settings;
 	}
