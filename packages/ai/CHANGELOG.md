@@ -9,6 +9,7 @@
 - Anthropic sessions on the official API now use message threads (`message-threads-2026-08-12`, as Claude Code does): after the first turn each request sends only the new messages, cutting time to first token in long conversations; a refused or expired thread replays the full conversation automatically. `statefulResponses: false` or `PI_ANTHROPIC_MESSAGE_THREADS=0` turns it off, `PI_ANTHROPIC_MESSAGE_THREADS=1` opts other endpoints in
 - Added the `devin-cli` login, which adopts the Devin CLI's `credentials.toml` seat key as a `devin` API key ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - Added the `devin-windsurf` login, which exchanges a Windsurf Enterprise sign-in for the seat's raw API key and stores it as a `devin` API key ([#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+- Factory Droid Gemini 4 Argon requests match droid's: no sampling parameters, the output cap at the model maximum, and its earlier turns replayed exactly as Gemini streamed them ([#17861](https://github.com/can1357/oh-my-pi/pull/17861) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -21,6 +22,7 @@
 ### Changed
 
 - Switching into or out of the Codex `ultrafast` service tier now opens a fresh WebSocket routed to the new tier instead of reusing the old one ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
+- Factory Droid requests now identify as droid 1.1.0: they no longer carry SDK telemetry (`X-Stainless-*`), a placeholder `x-api-key` or Claude Code's `x-app` and browser-access headers, and login asks whoami for its extended response ([#17885](https://github.com/can1357/oh-my-pi/pull/17885) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed
 
 - Fixed Gemini and Vertex `MALFORMED_RESPONSE` finishes showing as "Unhandled stop reason" and dropping that turn's token usage; RPC prompt errors now report them as retryable
