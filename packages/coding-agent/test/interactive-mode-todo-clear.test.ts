@@ -822,7 +822,16 @@ describe("InteractiveMode todo HUD anchor", () => {
 
 		async function initCapturingAllocation(): Promise<AllocationApply> {
 			allocBus = new EventBus();
-			const m = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, allocBus);
+			const m = new InteractiveMode(
+				session,
+				"test",
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				allocBus,
+			);
 			allocMode = m;
 			vi.spyOn(m.statusLine, "watchBranch").mockImplementation(() => {});
 			let apply: AllocationApply | undefined;
