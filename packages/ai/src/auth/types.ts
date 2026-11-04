@@ -1055,16 +1055,26 @@ export interface KeysApi {
 	 * A caller that resolved the provider's key at one generation and sees
 	 * another before it sends knows the key it holds may have been replaced.
 	 * Stored credentials and environment variables are not part of it.
+	 *
+	 * While a {@link KeysApi.batch} is open the value is negative and unique to
+	 * that batch, so it equals no value read outside one. A key resolved from
+	 * the batch's half-written overrides therefore always reads as replaced,
+	 * whether the batch goes on to change that provider or to restore it.
 	 */
 	generation(provider: string): number;
 	/**
 	 * Apply `change` as one change: each provider's generation moves at most
 	 * once, and only if its overrides differ at the end of `change` from the
-	 * start. `change` is synchronous, so no reader sees the state in between.
-	 * `ModelRegistry` reloads `models.yml` (`clearConfig`, then reinstalling
-	 * every key) inside one. A worker thread's storage cannot hold main's
-	 * batch open across the thread boundary: it runs `change` directly, so
-	 * there each write counts on its own.
+	 * start. `ModelRegistry` reloads `models.yml` (`clearConfig`, then
+	 * reinstalling every key) inside one. A worker thread's storage cannot
+	 * hold main's batch open across the thread boundary: it runs `change`
+	 * directly, so there each write counts on its own.
+	 *
+	 * `change` is synchronous, but it may still start work that reads a key —
+	 * a model discovery resolves its key before its first await. Such a reader
+	 * sees the overrides half written, so {@link KeysApi.generation} reports an
+	 * open batch rather than a settled count and the work is refused. A batch
+	 * opened inside another joins it and does not close it.
 	 */
 	batch(change: () => void): void;
 	/**

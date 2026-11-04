@@ -58,6 +58,57 @@ describe("AuthStorage key generation", () => {
 		expect(storage.keys.generation("beta")).toBe(beta + 1);
 	});
 
+	it("reports an open batch, so a key read inside one never matches the value its request is checked against", () => {
+		storage.keys.setConfig("alpha", "alpha-key");
+		storage.keys.setConfig("beta", "beta-key");
+		const alphaBefore = storage.keys.generation("alpha");
+		const betaBefore = storage.keys.generation("beta");
+		const inside: Array<{ alpha: number; beta: number }> = [];
+		storage.keys.batch(() => {
+			storage.keys.setConfig("alpha", "alpha-key-intermediate");
+			storage.keys.setConfig("beta", "beta-key-2");
+			// What a discovery started inside the batch resolves and counts against.
+			// It resolves `alpha-key-intermediate`, a key alpha does not keep.
+			inside.push({ alpha: storage.keys.generation("alpha"), beta: storage.keys.generation("beta") });
+			// alpha is put back; without the open-batch report its count would be
+			// unchanged and the request above would look current.
+			storage.keys.setConfig("alpha", "alpha-key");
+		});
+		const [seen] = inside;
+		expect(seen?.alpha).not.toBe(alphaBefore);
+		expect(seen?.alpha).not.toBe(storage.keys.generation("alpha"));
+		expect(seen?.beta).not.toBe(betaBefore);
+		expect(seen?.beta).not.toBe(storage.keys.generation("beta"));
+		// The restored provider's settled count is still unmoved: the reload
+		// optimisation this batch exists for is intact.
+		expect(storage.keys.generation("alpha")).toBe(alphaBefore);
+		expect(storage.keys.generation("beta")).toBe(betaBefore + 1);
+	});
+
+	it("gives two batches different open values, and a nested batch does not close the outer one", () => {
+		const openValues: number[] = [];
+		storage.keys.batch(() => openValues.push(storage.keys.generation("alpha")));
+		storage.keys.batch(() => openValues.push(storage.keys.generation("alpha")));
+		expect(new Set(openValues).size).toBe(2);
+
+		storage.keys.setConfig("alpha", "alpha-key");
+		const alpha = storage.keys.generation("alpha");
+		let insideNested = 0;
+		let afterNested = 0;
+		storage.keys.batch(() => {
+			storage.keys.setConfig("alpha", "alpha-key-intermediate");
+			storage.keys.batch(() => {
+				insideNested = storage.keys.generation("alpha");
+			});
+			// The inner batch must not have committed the outer one's accounting.
+			afterNested = storage.keys.generation("alpha");
+			storage.keys.setConfig("alpha", "alpha-key");
+		});
+		expect(insideNested).toBeLessThan(0);
+		expect(afterNested).toBe(insideNested);
+		expect(storage.keys.generation("alpha")).toBe(alpha);
+	});
+
 	it("counts a config-value resolver swap for every provider, and a reinstall of the same resolver for none", () => {
 		const resolver = async (config: string) => config;
 		storage.keys.setResolver(resolver);

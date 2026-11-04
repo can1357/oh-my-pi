@@ -56,6 +56,13 @@ export class KeyOverrides {
 	#resolverGeneration = 0;
 	/** Each provider's entry before the open batch first wrote it; `undefined` outside a batch. */
 	#batchStart: Map<string, OverrideEntry> | undefined;
+	/**
+	 * Batches opened so far. While one is open `generation` reports `-#batchSerial`,
+	 * which no settled generation can equal (those are never negative) and no other
+	 * batch repeats, so a key resolved against the half-written entries of batch N
+	 * never matches the value its request is checked against afterwards.
+	 */
+	#batchSerial = 0;
 	#configValueResolver: (config: string) => Promise<string | undefined>;
 
 	constructor(resolver?: (config: string) => Promise<string | undefined>) {
@@ -86,6 +93,12 @@ export class KeyOverrides {
 
 	/** See {@link KeysApi.generation}. */
 	generation(provider: string): number {
+		// Inside a batch the entries are half written: `#write` has already replaced
+		// them while the count is held back until the batch closes. A key read here
+		// may be one the batch goes on to replace or restore, so a settled value
+		// would wrongly say nothing changed. `-#batchSerial` is unique to this batch
+		// and never a settled value, so such a read can only ever compare unequal.
+		if (this.#batchStart) return -this.#batchSerial;
 		return this.#resolverGeneration + (this.#generations.get(provider) ?? 0);
 	}
 
@@ -97,6 +110,7 @@ export class KeyOverrides {
 		}
 		const start = new Map<string, OverrideEntry>();
 		this.#batchStart = start;
+		this.#batchSerial++;
 		try {
 			change();
 		} finally {
