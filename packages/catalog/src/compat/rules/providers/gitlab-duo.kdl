@@ -24,4 +24,9 @@ provider "gitlab-duo" {
 	models "duo-chat-gpt-5*" {
 		supports-sampling-params #false
 	}
+	// residue: taxonomy leaves the Duo Claude aliases unclassified, but the
+	// Claude behind them keeps its input classifier (`reasoning_extraction`).
+	models "duo-chat-opus-*" "duo-chat-sonnet-*" "duo-chat-haiku-*" {
+		classifier-cot-extraction #true
+	}
 }
