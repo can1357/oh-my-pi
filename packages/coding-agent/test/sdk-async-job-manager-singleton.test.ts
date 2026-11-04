@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -88,8 +89,17 @@ describe("AsyncJobManager ownership across concurrent top-level sessions", () =>
 		return session;
 	}
 
-	/** Registers `count` background jobs owned by `session`'s agent that run until `release` settles. */
-	function registerHeldJobs(session: AgentSession, ownerId: string, count: number, release: Promise<void>): string[] {
+	/**
+	 * Registers `count` background jobs owned by `session`'s agent that record their
+	 * start in `started` and run until `release` settles; returns their ids.
+	 */
+	function registerHeldJobs(
+		session: AgentSession,
+		ownerId: string,
+		count: number,
+		release: Promise<void>,
+		started?: string[],
+	): string[] {
 		const manager = session.asyncJobManager!;
 		const ids: string[] = [];
 		for (let i = 0; i < count; i++) {
@@ -97,7 +107,8 @@ describe("AsyncJobManager ownership across concurrent top-level sessions", () =>
 				manager.register(
 					"bash",
 					`sleep 300 (${ownerId} ${i})`,
-					async () => {
+					async ({ jobId }) => {
+						started?.push(jobId);
 						await release;
 						return "done";
 					},
@@ -108,16 +119,29 @@ describe("AsyncJobManager ownership across concurrent top-level sessions", () =>
 		return ids;
 	}
 
+	/** Resolves once `predicate` holds; throws after `timeoutMs`. */
+	async function until(predicate: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		while (!predicate()) {
+			if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+			await scheduler.yield();
+		}
+	}
+
 	it("runs 101 background jobs between a root session with async.maxJobs 0 and a subagent under it", async () => {
 		const root = await spawnTopLevelSession({ "async.maxJobs": 0 });
 		const subagent = await spawnSubagent(root);
 		const release = Promise.withResolvers<void>();
+		const started: string[] = [];
 		try {
 			expect(subagent.asyncJobManager).toBe(root.asyncJobManager!);
 			const ids = [
-				...registerHeldJobs(root, "Main", 50, release.promise),
-				...registerHeldJobs(subagent, "0-Sub", 51, release.promise),
+				...registerHeldJobs(root, "Main", 50, release.promise, started),
+				...registerHeldJobs(subagent, "0-Sub", 51, release.promise, started),
 			];
+			// Every body ran: with no cap, none of the 101 waits for a slot.
+			await until(() => started.length === ids.length, "all 101 jobs to start");
+			expect(started.sort()).toEqual([...ids].sort());
 			expect(root.asyncJobManager!.getRunningJobs().map(job => job.id)).toEqual(ids);
 		} finally {
 			release.resolve();
@@ -131,12 +155,15 @@ describe("AsyncJobManager ownership across concurrent top-level sessions", () =>
 		const root = await spawnTopLevelSession({ "async.maxJobs": 101 });
 		const subagent = await spawnSubagent(root);
 		const release = Promise.withResolvers<void>();
+		const started: string[] = [];
 		try {
-			registerHeldJobs(root, "Main", 50, release.promise);
-			registerHeldJobs(subagent, "0-Sub", 51, release.promise);
-			expect(root.asyncJobManager!.getRunningJobs()).toHaveLength(101);
-			const [overflowId] = registerHeldJobs(subagent, "0-Sub", 1, release.promise);
+			registerHeldJobs(root, "Main", 50, release.promise, started);
+			registerHeldJobs(subagent, "0-Sub", 51, release.promise, started);
+			// 101 is above the old fixed ceiling of 100: all of them run.
+			await until(() => started.length === 101, "all 101 jobs to start");
+			const [overflowId] = registerHeldJobs(subagent, "0-Sub", 1, release.promise, started);
 			expect(root.asyncJobManager!.getJob(overflowId!)?.waitingForSlot).toBe(true);
+			expect(started).not.toContain(overflowId);
 		} finally {
 			release.resolve();
 			await root.asyncJobManager!.waitForAll();
@@ -149,13 +176,23 @@ describe("AsyncJobManager ownership across concurrent top-level sessions", () =>
 		const root = await spawnTopLevelSession();
 		const subagent = await spawnSubagent(root);
 		const release = Promise.withResolvers<void>();
+		const finisher = Promise.withResolvers<void>();
+		const started: string[] = [];
 		try {
-			registerHeldJobs(root, "Main", 50, release.promise);
-			registerHeldJobs(subagent, "0-Sub", 50, release.promise);
-			const [overflowId] = registerHeldJobs(subagent, "0-Sub", 1, release.promise);
+			registerHeldJobs(root, "Main", 50, release.promise, started);
+			registerHeldJobs(subagent, "0-Sub", 49, release.promise, started);
+			const [finisherId] = registerHeldJobs(subagent, "0-Sub", 1, finisher.promise, started);
+			await until(() => started.length === 100, "the first 100 jobs to start");
+			const [overflowId] = registerHeldJobs(subagent, "0-Sub", 1, release.promise, started);
 			const manager = root.asyncJobManager!;
 			expect(manager.getJob(overflowId!)?.waitingForSlot).toBe(true);
-			expect(manager.getRunningJobs().filter(job => !job.queued)).toHaveLength(100);
+			expect(started).not.toContain(overflowId);
+
+			// It starts on its own as soon as one of the hundred ends.
+			finisher.resolve();
+			await manager.getJob(finisherId!)!.promise;
+			await until(() => started.includes(overflowId!), "the queued job to start once a slot frees");
+			expect(manager.getJob(overflowId!)?.waitingForSlot).toBe(false);
 		} finally {
 			release.resolve();
 			await root.asyncJobManager!.waitForAll();

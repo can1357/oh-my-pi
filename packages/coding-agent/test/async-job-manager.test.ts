@@ -807,6 +807,37 @@ describe("AsyncJobManager", () => {
 		await manager.dispose();
 	});
 
+	test("a raised cap starts waiting slot requests at the next registration or request", async () => {
+		// The documented remedy for a stalled tree is to raise async.maxJobs. A
+		// registration that does not itself wait (a caller-gated task job) and a
+		// later slot request must both start what is already waiting.
+		let cap = 1;
+		const manager = new AsyncJobManager({ maxRunningJobs: () => cap, onJobComplete: async () => {} });
+		const hold = Promise.withResolvers<void>();
+		manager.register("bash", "holder", async () => {
+			await hold.promise;
+			return "held";
+		});
+		const idle = new AbortController().signal;
+		const first = manager.acquireSlot(idle);
+		const granted: string[] = [];
+		void first.then(() => granted.push("first"));
+		expect(manager.atCapacity).toBe(true);
+
+		cap = 3;
+		// A caller-gated job never waits itself, so only the pump can start the request.
+		manager.register("task", "gated", async () => "gated done", { queued: true });
+		await waitForCondition(() => granted.length === 1);
+
+		const second = await manager.acquireSlot(idle);
+		expect(manager.atCapacity).toBe(true);
+		second();
+		(await first)();
+		hold.resolve();
+		await manager.waitForAll();
+		await manager.dispose();
+	});
+
 	test("dispose settles queued jobs without starting their work", async () => {
 		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
 		const liveStarts: string[] = [];

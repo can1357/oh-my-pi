@@ -618,6 +618,9 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		signal.addEventListener("abort", onAbort, { once: true });
 		this.#slotWaiters.add(waiter);
 		if (jobId !== undefined) this.#setWaitingForSlot(jobId, true);
+		// A live setting may have raised the cap since the last grant, and a request
+		// that only queued behind other waiters must not sit there while slots are free.
+		this.#grantSlots();
 		return promise;
 	}
 
@@ -741,8 +744,9 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			}
 		})();
 
-		// A live setting may have raised the cap since the last job settled.
-		if (waits) this.#grantSlots();
+		// Every registration re-reads the cap, so a live setting that raised it starts
+		// waiting requests here even when this job did not have to wait itself.
+		this.#grantSlots();
 		return id;
 	}
 

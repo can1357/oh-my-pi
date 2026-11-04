@@ -827,13 +827,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * under `async.maxJobs`, so the subagent starts only when both are held. The
 	 * slot is taken after the permit, so a spawn waiting on this session's own
 	 * `task.maxConcurrency` holds no slot other jobs could use.
+	 *
+	 * `jobId` is read when the slot is requested, not when the run is launched:
+	 * `register()` suffixes a colliding id, and a speculative launch has no job
+	 * row at all, so the requested agent id would label an unrelated job.
 	 */
-	#detachedPermit(manager: AsyncJobManagerApi, agentId: string | undefined): SpawnPermit {
+	#detachedPermit(manager: AsyncJobManagerApi, jobId: () => string | undefined): SpawnPermit {
 		return {
 			acquire: async signal => {
 				const releasePermit = await this.#permit.acquire(signal);
 				try {
-					const releaseSlot = await manager.acquireSlot(signal, agentId);
+					const releaseSlot = await manager.acquireSlot(signal, jobId());
 					return () => {
 						releaseSlot();
 						releasePermit();
@@ -1036,10 +1040,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		index: number;
 		agentId?: string;
 		detached: boolean;
+		/** The registered job this run belongs to, once it has one; see {@link TaskTool.#detachedPermit}. */
+		jobId?: () => string | undefined;
 	}): SpawnRun {
 		const manager = this.session.asyncJobManager;
 		return new SpawnRun(
-			spawn.detached && manager ? this.#detachedPermit(manager, spawn.agentId) : this.#permit,
+			spawn.detached && manager ? this.#detachedPermit(manager, spawn.jobId ?? (() => undefined)) : this.#permit,
 			run =>
 				this.#runSpawn(
 					spawn.toolCallId,
@@ -1675,6 +1681,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					index: progress.index,
 					agentId,
 					detached: true,
+					jobId: () => jobId,
 				}));
 				activeRun.attach({
 					signal: runSignal,
