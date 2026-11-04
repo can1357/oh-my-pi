@@ -18,6 +18,7 @@ import type { Settings } from "../config/settings";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 import { resolveAvailableWorktreePath } from "../tools/gh-pr-checkout";
 
+import { currentProcessOwner, isProcessOwnerLive } from "../task/isolation-ownership";
 import { cfgIsolationBackend, cfgWorktreeCleanSource, cfgWorktreeClone } from "../task/settings";
 
 export interface SessionWorktree {
@@ -31,10 +32,108 @@ export interface SessionWorktree {
 	cloneError?: string;
 	/** Checkout the worktree was forked from. */
 	sourceCwd: string;
+	/** Primary checkout of the repository; still opens git after `sourceCwd` is gone. */
+	repoRoot: string;
 	/** Source `HEAD` the worktree branch was created at. */
 	baseCommit: string;
 	/** Whether uncommitted source changes were carried into the worktree. */
 	keptChanges: boolean;
+}
+
+/** Owner record kept in the worktree's private git dir, so it never shows in `git status`. */
+export const SESSION_WORKTREE_RECORD = "omp-session-worktree.json";
+
+/** Which omp process owns a session worktree, persisted so resumed sessions and `omp worktree clear` can find it. */
+export interface SessionWorktreeRecord {
+	version: 1;
+	pid: number;
+	startToken?: string;
+	worktree: SessionWorktree;
+	/** The owner's `worktree.onExit`; only `remove` lets `omp worktree clear` reclaim the worktree after the owner exits. */
+	onExit?: "keep" | "ask" | "remove";
+	/** Absolute transcript path of the parent session that created this worktree for a placement fork. */
+	handoffFrom?: string;
+}
+
+/** Records the current process as owner of `wt`, replacing any earlier record. */
+export async function writeSessionWorktreeRecord(
+	wt: SessionWorktree,
+	options: { onExit: "keep" | "ask" | "remove"; handoffFrom?: string },
+): Promise<void> {
+	const record: SessionWorktreeRecord = {
+		version: 1,
+		...(await currentProcessOwner()),
+		worktree: wt,
+		onExit: options.onExit,
+		...(options.handoffFrom ? { handoffFrom: options.handoffFrom } : {}),
+	};
+	await Bun.write(path.join(vcs.requireGit(wt.path).info().gitDir, SESSION_WORKTREE_RECORD), JSON.stringify(record));
+}
+
+/**
+ * Owner record of the linked worktree containing `dir`, or undefined when there is none, it is
+ * malformed, or it names another path (the worktree was moved, so the record would remove the wrong one).
+ */
+export async function readSessionWorktreeRecord(dir: string): Promise<SessionWorktreeRecord | undefined> {
+	try {
+		const repository = vcs.git(dir);
+		if (!repository?.linkedWorktree()) return undefined;
+		const info = repository.info();
+		const decoded: unknown = await Bun.file(path.join(info.gitDir, SESSION_WORKTREE_RECORD)).json();
+		if (typeof decoded !== "object" || decoded === null) return undefined;
+		const record = decoded as Partial<SessionWorktreeRecord>;
+		const wt = record.worktree;
+		if (record.version !== 1 || typeof wt?.path !== "string" || typeof wt.repoRoot !== "string") return undefined;
+		if (typeof wt.branch !== "string" || wt.path !== (await fs.realpath(info.repoRoot))) return undefined;
+		return record as SessionWorktreeRecord;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Working directories of live processes, or null where they cannot be listed (no `/proc`). */
+export async function liveProcessCwds(): Promise<string[] | null> {
+	// shortcut: Linux-only (/proc); elsewhere nothing is reclaimed but by `clear --all`. Upgrade via lsof if needed.
+	let pids: string[];
+	try {
+		pids = await fs.readdir("/proc");
+	} catch {
+		return null;
+	}
+	const cwds = await Promise.all(
+		pids.filter(pid => /^\d+$/.test(pid)).map(pid => fs.readlink(`/proc/${pid}/cwd`).catch(() => undefined)),
+	);
+	return cwds.filter(cwd => cwd !== undefined);
+}
+
+/** How long a fork's child gets to adopt the worktree its parent created before an exited parent's record counts. */
+const HANDOFF_GRACE_MS = 10 * 60_000;
+
+/**
+ * Whether a session worktree can be removed without anyone losing anything: its owner chose
+ * `worktree.onExit: remove` and exited, no live process works in it (a restored terminal pane, a
+ * shell, a fork that has not adopted it yet), and it has no changes, no new commits, and `HEAD` on
+ * its branch. Ignored files are not checked, as on exit. Unknown process cwds (`null`) or any
+ * inspection error keep the worktree.
+ */
+export async function isReclaimableSessionWorktree(
+	record: SessionWorktreeRecord,
+	cwds: readonly string[] | null,
+): Promise<boolean> {
+	try {
+		const root = record.worktree.path;
+		if (record.onExit !== "remove" || cwds === null) return false;
+		if (cwds.some(cwd => cwd === root || cwd.startsWith(`${root}${path.sep}`))) return false;
+		if (await isProcessOwnerLive(record)) return false;
+		if (record.handoffFrom) {
+			const file = path.join(vcs.requireGit(root).info().gitDir, SESSION_WORKTREE_RECORD);
+			if (Date.now() - (await fs.stat(file)).mtimeMs < HANDOFF_GRACE_MS) return false;
+		}
+		const state = await inspectSessionWorktree(record.worktree);
+		return !state.dirty && !state.moved && !state.offBranch;
+	} catch {
+		return false;
+	}
 }
 
 /** State of a session-owned worktree at exit. */
@@ -60,11 +159,34 @@ export function decideWorktreeExit(policy: "keep" | "ask" | "remove", state: Ses
 	return "prompt";
 }
 
-/** Reports whether a fresh session in `cwd` may get a worktree: a primary git checkout with commits. */
-export async function canAutoCreateWorktree(cwd: string): Promise<boolean> {
+/** Kind of checkout `cwd` is in: none (no git repo or no commits), the primary checkout, or a linked worktree. */
+export async function classifyCheckout(cwd: string): Promise<"none" | "primary" | "linked"> {
 	const repository = vcs.git(cwd);
-	if (!repository || repository.linkedWorktree()) return false;
-	return Boolean(await repository.headSha());
+	if (!repository || !(await repository.headSha())) return "none";
+	return repository.linkedWorktree() ? "linked" : "primary";
+}
+
+/** What startup does about the session's checkout. */
+export type StartupWorktreeAction = "create" | "adopt" | "stay" | "shared";
+
+/**
+ * Map how the session launched, the `worktree.onStart` policy, the checkout, and the
+ * owner record of a linked worktree (`owner`, only when one exists) to a startup action.
+ * Unless policy is off, no fresh, forked or resumed session shares a worktree with another live session or works in a main checkout.
+ */
+export function decideStartupWorktree(input: {
+	launch: "fresh" | "resume" | "fork";
+	policy: "off" | "ask" | "create";
+	checkout: "none" | "primary" | "linked";
+	owner?: { live: boolean; self: boolean; handoff: boolean };
+}): StartupWorktreeAction {
+	const { launch, policy, checkout, owner } = input;
+	if (checkout === "none") return "stay";
+	if (owner?.handoff && launch === "fork") return "adopt";
+	if (owner && (owner.self || !owner.live)) return "adopt";
+	if (owner) return policy === "off" ? "shared" : "create";
+	if (checkout === "linked") return "stay";
+	return policy === "off" ? "stay" : "create";
 }
 
 /** Default `/wt` branch name: `wt/<yyyymmdd-hhmmss>`. */
@@ -141,6 +263,9 @@ export async function createSessionWorktree(
 		throw new Error(`Cannot create a worktree: ${cwd} has no commits.`);
 	}
 	const primaryRoot = repository.primaryRoot() ?? repository.info().repoRoot;
+	// A bare repository's primary root is its git dir, which git cannot open as a checkout; use the source then.
+	const repoRoot =
+		vcs.git(primaryRoot)?.info().commonDir === repository.info().commonDir ? primaryRoot : repository.info().repoRoot;
 	const slug = branch.replaceAll(/[^A-Za-z0-9._-]+/g, "-");
 	const basePath = getWorktreeDir(`${slug}-${hashPath(primaryRoot)}`);
 	const worktreePath = await resolveAvailableWorktreePath(basePath, await repository.worktrees());
@@ -159,6 +284,7 @@ export async function createSessionWorktree(
 		clonedWith: result.clonedWith ?? undefined,
 		cloneError: result.cloneError ?? undefined,
 		sourceCwd: cwd,
+		repoRoot,
 		baseCommit,
 		keptChanges: keepChanges,
 	};
@@ -173,7 +299,7 @@ interface WorktreeSnapshot {
 }
 
 async function snapshotSessionWorktree(wt: SessionWorktree): Promise<WorktreeSnapshot> {
-	const sourceRepo = vcs.git(wt.sourceCwd);
+	const sourceRepo = vcs.git(wt.repoRoot);
 	let moved = true;
 	let tip: string | null | undefined;
 	if (sourceRepo) {
@@ -286,7 +412,7 @@ export async function removeExitWorktrees(plan: readonly WorktreeExitPlan[]): Pr
 			// Git cannot open the source repo while our cwd is the deleted worktree.
 			const rel = path.relative(worktree.path, process.cwd());
 			const holdsCwd = !rel.startsWith("..") && !path.isAbsolute(rel);
-			if (holdsCwd) process.chdir(worktree.sourceCwd);
+			if (holdsCwd) process.chdir(worktree.repoRoot);
 			await removeSessionWorktree(worktree, state.moved);
 			if (holdsCwd) {
 				const commits = state.moved ? `; its commits are on branch ${worktree.branch}` : "";
@@ -306,7 +432,7 @@ export async function removeExitWorktrees(plan: readonly WorktreeExitPlan[]): Pr
  * Throws a user-facing error when git refuses either step.
  */
 export async function removeSessionWorktree(wt: SessionWorktree, moved: boolean): Promise<void> {
-	const repository = vcs.requireGit(wt.sourceCwd);
+	const repository = vcs.requireGit(wt.repoRoot);
 	if (!(await repository.worktreeRemove(wt.path, true))) {
 		throw new Error(`Failed to remove worktree ${wt.path}; branch '${wt.branch}' kept.`);
 	}

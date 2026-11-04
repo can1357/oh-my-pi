@@ -6,15 +6,19 @@ import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setWorktreesDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
 import {
-	canAutoCreateWorktree,
+	classifyCheckout,
 	createSessionWorktree,
+	decideStartupWorktree,
 	decideWorktreeExit,
 	inspectSessionWorktree,
 	planWorktreeExit,
 	removeExitWorktrees,
+	readSessionWorktreeRecord,
 	removeSessionWorktree,
 	type SessionWorktreeState,
+	type StartupWorktreeAction,
 	type WorktreeExitAction,
+	writeSessionWorktreeRecord,
 } from "../../src/session/session-worktree";
 
 const clean: SessionWorktreeState = { dirty: false, moved: false, offBranch: false };
@@ -36,6 +40,45 @@ const rows: [
 describe("decideWorktreeExit", () => {
 	it.each(rows)("%s", (_name, policy, state, action) => {
 		expect(decideWorktreeExit(policy, state)).toBe(action);
+	});
+});
+
+const liveOther = { live: true, self: false, handoff: false };
+const startupRows: [
+	name: string,
+	launch: "fresh" | "resume" | "fork",
+	policy: "off" | "ask" | "create",
+	checkout: "none" | "primary" | "linked",
+	owner: { live: boolean; self: boolean; handoff: boolean } | undefined,
+	expected: StartupWorktreeAction,
+][] = [
+	["outside a checkout stays", "fresh", "create", "none", undefined, "stay"],
+	[
+		"fork adopts the worktree its live parent handed over",
+		"fork",
+		"create",
+		"linked",
+		{ ...liveOther, handoff: true },
+		"adopt",
+	],
+	["resume does not take a handover", "resume", "create", "linked", { ...liveOther, handoff: true }, "create"],
+	["adopts its own worktree", "resume", "off", "linked", { live: true, self: true, handoff: false }, "adopt"],
+	["adopts a worktree whose owner exited", "fresh", "off", "linked", { ...liveOther, live: false }, "adopt"],
+	["fresh in a live session's worktree creates", "fresh", "create", "linked", liveOther, "create"],
+	["fork in a live session's worktree creates", "fork", "ask", "linked", liveOther, "create"],
+	["fresh in a live session's worktree shares when off", "fresh", "off", "linked", liveOther, "shared"],
+	["resume next to a live owner creates", "resume", "create", "linked", liveOther, "create"],
+	["resume next to a live owner shares when off", "resume", "off", "linked", liveOther, "shared"],
+	["linked worktree without a record stays", "fresh", "create", "linked", undefined, "stay"],
+	["resume in the primary checkout creates", "resume", "create", "primary", undefined, "create"],
+	["fresh in the primary checkout stays when off", "fresh", "off", "primary", undefined, "stay"],
+	["fresh in the primary checkout creates", "fresh", "create", "primary", undefined, "create"],
+	["fork in the primary checkout creates", "fork", "ask", "primary", undefined, "create"],
+];
+
+describe("decideStartupWorktree", () => {
+	it.each(startupRows)("%s", (_name, launch, policy, checkout, owner, action) => {
+		expect(decideStartupWorktree({ launch, policy, checkout, owner })).toBe(action);
 	});
 });
 
@@ -109,7 +152,7 @@ describe("session worktree helpers (real git)", () => {
 	const create = (keepChanges = true, name = branch) =>
 		createSessionWorktree(repo, Settings.isolated(), name, { keepChanges });
 
-	it("offers a worktree only in a primary checkout with commits", async () => {
+	it("classifies the checkout a session starts in", async () => {
 		const plain = path.join(root, "plain");
 		const unborn = path.join(root, "unborn");
 		await fs.mkdir(plain);
@@ -118,10 +161,49 @@ describe("session worktree helpers (real git)", () => {
 		await expect(createSessionWorktree(unborn, Settings.isolated(), branch)).rejects.toThrow("has no commits");
 		expect(await exists(path.join(root, "wt"))).toBe(false);
 		const wt = await create();
-		expect(await canAutoCreateWorktree(repo)).toBe(true);
-		expect(await canAutoCreateWorktree(plain)).toBe(false);
-		expect(await canAutoCreateWorktree(unborn)).toBe(false);
-		expect(await canAutoCreateWorktree(wt.path)).toBe(false);
+		expect(await classifyCheckout(repo)).toBe("primary");
+		expect(await classifyCheckout(wt.path)).toBe("linked");
+		expect(await classifyCheckout(plain)).toBe("none");
+		expect(await classifyCheckout(unborn)).toBe("none");
+	});
+
+	it("keeps the owner record in the worktree's git dir, out of git status", async () => {
+		const wt = await create();
+		await writeSessionWorktreeRecord(wt, { onExit: "remove" });
+		const record = await readSessionWorktreeRecord(wt.path);
+		expect(record?.pid).toBe(process.pid);
+		expect(record?.worktree.path).toBe(wt.path);
+		expect(git(wt.path, "status", "--porcelain")).toBe("");
+		expect(await readSessionWorktreeRecord(repo)).toBeUndefined();
+	});
+
+	it("ignores the record of a worktree that was moved", async () => {
+		const wt = await create();
+		await writeSessionWorktreeRecord(wt, { onExit: "remove" });
+		const moved = path.join(root, "moved");
+		git(repo, "worktree", "move", wt.path, moved);
+		expect(await readSessionWorktreeRecord(moved)).toBeUndefined();
+	});
+
+	it("removes a worktree of a bare repository's checkout and deletes its branch", async () => {
+		const bare = path.join(root, "bare.git");
+		const main = path.join(root, "main");
+		git(root, "clone", "-q", "--bare", repo, bare);
+		git(bare, "worktree", "add", "-q", main, "main");
+		const wt = await createSessionWorktree(main, Settings.isolated(), "wt/bare", { keepChanges: false });
+		expect(await inspectSessionWorktree(wt)).toEqual(clean);
+		await removeSessionWorktree(wt, false);
+		expect(await exists(wt.path)).toBe(false);
+		expect(git(bare, "branch", "--list", "wt/bare")).toBe("");
+	});
+
+	it("removes a worktree after the worktree it was forked from is gone", async () => {
+		const a = await create();
+		const b = await createSessionWorktree(a.path, Settings.isolated(), "wt/b", { keepChanges: true });
+		await removeSessionWorktree(a, false);
+		await removeSessionWorktree(b, false);
+		expect(await exists(b.path)).toBe(false);
+		expect(git(repo, "branch", "--list", "wt/b")).toBe("");
 	});
 
 	it("removes a clean worktree and deletes its branch", async () => {

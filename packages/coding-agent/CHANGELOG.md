@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- With `worktree.onStart` enabled, every interactive session works in its own worktree: forks (`/fork pane|tab|window`, `--fork`) get one carrying the parent's uncommitted changes, and fresh and resumed sessions started in another live session's worktree or in a main checkout get their own instead of sharing it (a resume next to a live session continues from that worktree's `HEAD`). With `worktree.onExit: remove`, a resumed session removes its worktree on exit, and `omp worktree clear` reclaims clean worktrees of exited sessions unless a process works in them (Linux) ([#17792](https://github.com/can1357/oh-my-pi/pull/17792) by [@almeidandres](https://github.com/almeidandres))
 - `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
 - Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset
 - The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm

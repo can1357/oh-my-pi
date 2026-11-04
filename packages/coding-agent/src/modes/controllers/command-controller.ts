@@ -72,11 +72,14 @@ import {
 } from "../../session/runtime-identity";
 import type { NewSessionOptions } from "../../session/session-entries";
 import {
+	classifyCheckout,
 	cleanSourceCheckoutIfConfigured,
 	createSessionWorktree,
 	defaultSessionWorktreeBranch,
 	formatSessionWorktreeSummary,
+	removeSessionWorktree,
 	type SessionWorktree,
+	writeSessionWorktreeRecord,
 } from "../../session/session-worktree";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import {
@@ -114,6 +117,7 @@ import type { UnavailableUsageAccount } from "@oh-my-pi/pi-tui/overlays/usage-da
 
 import { cfgTerminalShowImages } from "../settings";
 import { cfgProviderAppendOnlyContext } from "../../session/settings";
+import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../../task/settings";
 import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../../commands/settings";
 import { flagConsumesValue, restartArgv } from "../../cli/flag-tables";
 import {
@@ -1548,6 +1552,31 @@ export class CommandController {
 			return;
 		}
 
+		// The fork gets its own worktree carrying this checkout's changes, so its terminal opens
+		// there; the child adopts it at startup because the record names this session as `handoffFrom`.
+		let launchCwd = this.ctx.sessionManager.getCwd();
+		let handoff: SessionWorktree | undefined;
+		if (cfgWorktreeOnStart.get(this.ctx.settings) === "create") {
+			try {
+				if ((await classifyCheckout(launchCwd)) !== "none") {
+					handoff = await createSessionWorktree(launchCwd, this.ctx.settings, defaultSessionWorktreeBranch(), {
+						keepChanges: true,
+					});
+					await writeSessionWorktreeRecord(handoff, {
+						onExit: cfgWorktreeOnExit.get(this.ctx.settings),
+						handoffFrom: sourceSessionFile,
+					});
+					launchCwd = handoff.path;
+				}
+			} catch (error) {
+				if (handoff) await removeSessionWorktree(handoff, false).catch(() => {});
+				handoff = undefined;
+				this.ctx.showWarning(
+					`Worktree for the fork not created: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+
 		try {
 			const activeProfile = dependencies.getActiveProfile();
 			const activeModel = this.ctx.session.model;
@@ -1585,10 +1614,11 @@ export class CommandController {
 				multiplexer,
 				placement,
 				command,
-				this.ctx.sessionManager.getCwd(),
+				launchCwd,
 				shellGrammar,
 			);
 			if ("error" in launchPlan) {
+				if (handoff) await removeSessionWorktree(handoff, false).catch(() => {});
 				this.ctx.showError(launchPlan.error);
 				return;
 			}
@@ -1604,6 +1634,7 @@ export class CommandController {
 				`Opened a fork in ${placementInfo.displayName} (${placementInfo.placementLabel}); this session continues here.`,
 			);
 		} catch (error) {
+			if (handoff) await removeSessionWorktree(handoff, false).catch(() => {});
 			logger.error("Failed to open a terminal fork", { multiplexer, error });
 			this.ctx.showError(
 				error instanceof TerminalLaunchError
@@ -1746,11 +1777,13 @@ export class CommandController {
 	 * `/wt [<branch>]` — fork the checkout into a new linked git worktree on
 	 * `branch` (default `wt/<timestamp>`), carrying uncommitted changes along
 	 * unless `keepChanges` is false, then relocate the session there like `/move`.
-	 * Returns the worktree only when the session now lives in it.
+	 * `from` forks another checkout of the repository instead of the session's;
+	 * `cleanSource: false` never cleans the source. Returns the worktree only when
+	 * the session now lives in it.
 	 */
 	async handleWorktreeCommand(
 		branch?: string,
-		options: { keepChanges?: boolean } = {},
+		options: { keepChanges?: boolean; cleanSource?: boolean; from?: string } = {},
 	): Promise<SessionWorktree | undefined> {
 		if (this.ctx.session.isStreaming) {
 			this.ctx.showWarning("Wait for the current response to finish or abort it before creating a worktree.");
@@ -1759,7 +1792,7 @@ export class CommandController {
 		let created: SessionWorktree | undefined;
 		await this.#withSessionMove(async () => {
 			const branchName = branch?.trim() || defaultSessionWorktreeBranch();
-			const cwd = this.ctx.sessionManager.getCwd();
+			const cwd = options.from ?? this.ctx.sessionManager.getCwd();
 			this.ctx.statusContainer.disposeChildren();
 			const loader = new Loader(
 				this.ctx.ui,
@@ -1788,9 +1821,10 @@ export class CommandController {
 			}
 			if (!(await this.#relocateSession(worktree.path))) return false;
 			created = worktree;
-			const cleanup = worktree.keptChanges
-				? await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings)
-				: { cleaned: false, errorMessage: undefined };
+			const cleanup =
+				worktree.keptChanges && options.cleanSource !== false
+					? await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings)
+					: { cleaned: false, errorMessage: undefined };
 			if (cleanup.errorMessage !== undefined) {
 				this.ctx.showWarning(`Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`);
 			}

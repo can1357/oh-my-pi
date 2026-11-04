@@ -112,7 +112,8 @@ export const cfgWorktreeOnStart = register({
 		tab: "tasks",
 		group: "Isolation",
 		label: "Worktree on Start",
-		description: "Whether fresh interactive sessions start in a new linked worktree",
+		description:
+			"Whether fresh, forked and resumed interactive sessions work in their own linked worktree, also when started in another live session's worktree or a main checkout",
 		options: [
 			{ value: "off", label: "Off", description: "Start in the current checkout" },
 			{ value: "ask", label: "Ask", description: "Ask at session start" },
@@ -131,7 +132,8 @@ export const cfgWorktreeOnExit = register({
 		tab: "tasks",
 		group: "Isolation",
 		label: "Worktree on Exit",
-		description: "What to do on exit with worktrees created since omp started (on start or with `/wt`)",
+		description:
+			"What to do on exit with worktrees this session owns (created on start, with `/wt`, or adopted on resume)",
 		options: [
 			{ value: "keep", label: "Keep", description: "Leave worktrees in place" },
 			{ value: "ask", label: "Ask", description: "Ask on exit" },

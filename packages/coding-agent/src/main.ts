@@ -6,6 +6,7 @@
  */
 import * as fsSync from "node:fs";
 import * as os from "node:os";
+import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
@@ -648,6 +649,7 @@ async function runInteractiveMode(
 	lspServers: LspStartupServerInfo[] | undefined,
 	mcpManager: MCPManager | undefined,
 	resuming: boolean,
+	forkSource: string | undefined,
 	forceSetupWizard: boolean,
 	showStartupSplash: boolean,
 	eventBus?: EventBus,
@@ -779,8 +781,8 @@ async function runInteractiveMode(
 			}
 		}
 
-		if (!resuming && joinLink === undefined) {
-			await mode.maybeAutoCreateWorktree();
+		if (joinLink === undefined) {
+			await mode.applyStartupWorktree({ launch: forkSource ? "fork" : resuming ? "resume" : "fresh", forkSource });
 		}
 
 		// `omp join <link>`: dispatch through the same builtin path as a typed
@@ -2871,6 +2873,7 @@ export async function runRootCommand(
 						lspServers,
 						mcpManager,
 						Boolean(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || foreignSource),
+						parsedArgs.fork ? path.resolve(parsedArgs.fork) : undefined,
 						deps.forceSetupWizard === true,
 						showStartupSplash,
 						eventBus,

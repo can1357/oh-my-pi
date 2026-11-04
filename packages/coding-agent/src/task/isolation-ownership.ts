@@ -67,9 +67,14 @@ async function processStartToken(pid: number): Promise<string | null> {
  * `omp worktree clear` never sees an owner-less sandbox mid-creation.
  */
 export async function writeIsolationOwner(baseDir: string, id: string): Promise<void> {
-	const startToken = await processStartToken(process.pid);
-	const owner: IsolationOwner = { pid: process.pid, id, ...(startToken ? { startToken } : {}) };
+	const owner: IsolationOwner = { ...(await currentProcessOwner()), id };
 	await Bun.write(path.join(baseDir, ISOLATION_OWNER_FILE), JSON.stringify(owner));
+}
+
+/** The current process as a recorded owner: its pid plus start-time token when the OS reports one. */
+export async function currentProcessOwner(): Promise<{ pid: number; startToken?: string }> {
+	const startToken = await processStartToken(process.pid);
+	return { pid: process.pid, ...(startToken ? { startToken } : {}) };
 }
 
 /**
@@ -90,8 +95,16 @@ export async function hasLiveIsolationOwner(baseDir: string): Promise<boolean> {
 	} catch {
 		return false;
 	}
-	if (typeof decoded !== "object" || decoded === null || !("pid" in decoded)) return false;
-	const pid = decoded.pid;
+	return isProcessOwnerLive(decoded);
+}
+
+/**
+ * Whether `owner` (a decoded `{ pid, startToken? }` record) names a live process.
+ * Malformed records are dead; see {@link hasLiveIsolationOwner} for the rules.
+ */
+export async function isProcessOwnerLive(owner: unknown): Promise<boolean> {
+	if (typeof owner !== "object" || owner === null || !("pid" in owner)) return false;
+	const pid = owner.pid;
 	if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
 	try {
 		process.kill(pid, 0);
@@ -99,11 +112,11 @@ export async function hasLiveIsolationOwner(baseDir: string): Promise<boolean> {
 		if ((err as NodeJS.ErrnoException).code === "ESRCH") return false;
 	}
 	// The pid is live (or unknowable via EPERM). Reject a recycled pid: if the
-	// marker pinned the owner's start-time token, the process wearing that pid
+	// record pinned the owner's start-time token, the process wearing that pid
 	// now must still present the same token.
-	if ("startToken" in decoded && typeof decoded.startToken === "string" && decoded.startToken.length > 0) {
+	if ("startToken" in owner && typeof owner.startToken === "string" && owner.startToken.length > 0) {
 		const current = await processStartToken(pid);
-		if (current !== null && current !== decoded.startToken) return false;
+		if (current !== null && current !== owner.startToken) return false;
 	}
 	return true;
 }
