@@ -55,6 +55,7 @@ import {
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
 import { getProviderDefinition } from "./registry";
+import { hasRequestHoldScope, runWithRequestSendHooks } from "./request-holds";
 import type {
 	Api,
 	AssistantMessage,
@@ -641,16 +642,20 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 	// provider exits are covered by one wrap. Official first-party providers are
 	// exempt (see `healLeakedThinking`); healing is otherwise idempotent.
 	const limit = resolveProviderInFlightLimit(model.provider, options);
-	if (limit === undefined) return healLeakedThinking(model, dispatch(false));
+	if (limit === undefined) return runWithRequestSendHooks({}, () => healLeakedThinking(model, dispatch(false)), false);
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
 		let release: (() => Promise<void>) | undefined;
 		let releasePromise: Promise<void> | undefined;
+		let acquiring: Promise<void> | undefined;
 		const releaseOnce = () => {
-			if (!release) return Promise.resolve();
-			releasePromise ??= release();
-			return releasePromise;
+			if (release) {
+				const owned = release;
+				release = undefined;
+				releasePromise = owned();
+			}
+			return releasePromise ?? Promise.resolve();
 		};
 		const releaseBestEffort = async () => {
 			try {
@@ -667,16 +672,31 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 				});
 			}
 		};
+		const prepare = () => {
+			if (release) return undefined;
+			acquiring ??= (async () => {
+				const startedWaitingAt = Date.now();
+				release = await acquireProviderInFlightSlot(model.provider, limit, options?.signal);
+				releasePromise = undefined;
+				if (Date.now() - startedWaitingAt >= PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS) {
+					logger.debug("Provider in-flight limit wait completed", { provider: model.provider, limit });
+				}
+			})().finally(() => {
+				acquiring = undefined;
+			});
+			return acquiring;
+		};
 		try {
-			const startedWaitingAt = Date.now();
-			release = await acquireProviderInFlightSlot(model.provider, limit, options?.signal);
-			if (Date.now() - startedWaitingAt >= PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS) {
-				logger.debug("Provider in-flight limit wait completed", { provider: model.provider, limit });
+			// Without any hold scope, preserve eager acquisition and pre-dispatch errors.
+			if (!hasRequestHoldScope()) {
+				await prepare();
+				options?.signal?.throwIfAborted();
 			}
-			if (options?.signal?.aborted) {
-				throw options.signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
-			}
-			const inner = healLeakedThinking(model, dispatch(true));
+			const inner = runWithRequestSendHooks(
+				{ prepare, held: releaseBestEffort },
+				() => healLeakedThinking(model, dispatch(true)),
+				false,
+			);
 			let terminalEvent: AssistantMessageEvent | undefined;
 			for await (const event of inner) {
 				if (event.type === "done" || event.type === "error") {

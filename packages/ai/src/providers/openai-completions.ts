@@ -42,6 +42,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { heldFetch } from "../utils/held-fetch";
 import {
+	armRequestTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -965,50 +966,49 @@ const streamOpenAICompletionsOnce = (
 					headers: requestHeaders,
 					body: params,
 				};
-				let requestTimeout: NodeJS.Timeout | undefined;
-				if (requestTimeoutMs !== undefined) {
-					requestTimeout = setTimeout(
-						() => abortTracker.abortLocally(firstEventTimeoutAbortError),
-						requestTimeoutMs,
-					);
-				}
+				const requestTimeout = armRequestTimeout(
+					() => abortTracker.abortLocally(firstEventTimeoutAbortError),
+					requestTimeoutMs,
+				);
 				try {
 					const headersWithTimeout = { ...headers };
 					if (requestTimeoutMs !== undefined) {
 						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 					}
-					const { events, response, requestId } = await postOpenAIStream<ChatCompletionChunk>({
-						url: completionsUrl,
-						headers: headersWithTimeout,
-						body: params,
-						signal: requestSignal,
-						maxAttempts: options?.maxHttpAttempts,
-						fetch: wrapFetchForCopilotFallback(
-							wrapFetchForRequestCompression(heldFetch(options?.fetch ?? fetch), model),
-							model.provider === "github-copilot",
-							resolveCopilotRequestIdentity(options?.headers),
-							copilotCacheKey,
-							copilotCacheSnapshot,
-						),
-						// Transient 408/429/5xx get Retry-After-aware transport retries.
-						// The first-event watchdog above aborts `requestSignal`, which
-						// bounds every attempt and backoff sleep — retries cannot
-						// extend the deadline.
-						onSseEvent: rawSseObserver,
-						onDoneSentinel: () => {
-							sawDoneSentinel = true;
-						},
-					});
+					const { events, response, requestId } = await requestTimeout.run(() =>
+						postOpenAIStream<ChatCompletionChunk>({
+							url: completionsUrl,
+							headers: headersWithTimeout,
+							body: params,
+							signal: requestSignal,
+							maxAttempts: options?.maxHttpAttempts,
+							fetch: wrapFetchForCopilotFallback(
+								wrapFetchForRequestCompression(heldFetch(options?.fetch ?? fetch), model),
+								model.provider === "github-copilot",
+								resolveCopilotRequestIdentity(options?.headers),
+								copilotCacheKey,
+								copilotCacheSnapshot,
+							),
+							// Transient 408/429/5xx get Retry-After-aware transport retries.
+							// The first-event watchdog above aborts `requestSignal`, which
+							// bounds every attempt and backoff sleep — retries cannot
+							// extend the deadline.
+							onSseEvent: rawSseObserver,
+							onDoneSentinel: () => {
+								sawDoneSentinel = true;
+							},
+						}),
+					);
 					responseHeaders = response.headers;
 					// Disarm the first-event watchdog as soon as headers arrive — a slow
 					// onResponse callback must not abort an already-connected stream.
-					clearTimeout(requestTimeout);
+					requestTimeout.clear();
 					await notifyProviderResponse(options, response, model, requestId);
 					return events;
 				} finally {
 					// Headers arrived (or the request failed); from here the
 					// first-event deadline is enforced by `iterateWithIdleTimeout`.
-					clearTimeout(requestTimeout);
+					requestTimeout.clear();
 				}
 			};
 			// droid CLI parity: cache-read details can arrive on the

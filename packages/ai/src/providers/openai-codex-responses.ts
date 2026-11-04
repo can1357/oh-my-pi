@@ -68,6 +68,7 @@ import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { heldFetch } from "../utils/held-fetch";
 import {
 	armPreResponseTimeout,
+	type PreResponseTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -4079,10 +4080,11 @@ async function openCodexSseEventStream(
 	// the retry loop's base signal remains reserved for caller cancellation, so
 	// an internal timeout stays retryable while an explicit abort fails fast.
 	let clearPreResponseTimeout: (() => void) | undefined;
+	let watchdog: PreResponseTimeout | undefined;
 	const fetchAttempt: FetchImpl = async (input, init) => {
 		let response: Response | undefined;
 		try {
-			response = await (fetchOverride ?? fetch)(input, init);
+			response = await watchdog!.run(() => (fetchOverride ?? heldFetch(fetch))(input, init));
 			return response;
 		} finally {
 			// A successful streaming body is governed by the iterator-level idle
@@ -4118,7 +4120,7 @@ async function openCodexSseEventStream(
 				// A retried non-2xx attempt leaves its guard armed for the retry-status
 				// body read; disarm it before arming the next attempt's guard.
 				clearPreResponseTimeout?.();
-				const watchdog = armPreResponseTimeout(signal, firstEventTimeoutMs);
+				watchdog = armPreResponseTimeout(signal, firstEventTimeoutMs);
 				clearPreResponseTimeout = watchdog.clear;
 				return { signal: watchdog.signal };
 			},

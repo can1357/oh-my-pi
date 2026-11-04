@@ -211,7 +211,7 @@ export function streamPiNative<TApi extends Api>(
 				timeout: false,
 			};
 			try {
-				response = await fetchImpl(url, init);
+				response = await watchdog.run(() => fetchImpl(url, init));
 				if (!response.ok) {
 					stream.fail(await decodeGatewayError(response));
 					return;
