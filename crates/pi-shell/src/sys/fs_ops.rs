@@ -317,7 +317,9 @@ pub fn user_db(query: &PwQuery) -> io::Result<Vec<PwEntry>> {
 		}
 	}
 
-	let cname = |n: &BString| CString::new(n.as_slice()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput));
+	let cname = |n: &BString| {
+		CString::new(n.as_slice()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+	};
 	let one = match query {
 		PwQuery::UserName(n) => {
 			let n = cname(n)?;

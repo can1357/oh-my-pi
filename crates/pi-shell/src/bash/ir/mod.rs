@@ -244,50 +244,54 @@ impl Op {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Unit {
 	/// Content address.
-	pub id:              UnitId,
+	pub id:                  UnitId,
 	/// Mode it was parsed in.
-	pub mode:            ModeId,
+	pub mode:                ModeId,
 	/// [`crate::bash::syntax::Features`] bits it was parsed with.
-	pub features:        u32,
+	pub features:            u32,
 	/// Unit source bytes (node spans are relative to them).
-	pub source:          BString,
+	pub source:              BString,
 	/// Alias substitutions applied while parsing.
-	pub aliases:         Vec<(BString, BString)>,
+	pub aliases:             Vec<(BString, BString)>,
 	/// For a function body: the node id of the function definition in
 	/// `source` (function units share their defining unit's source and ids).
-	pub root:            Option<u32>,
+	pub root:                Option<u32>,
 	/// 1-based script line of the first byte of `source`.
-	pub line:            u32,
+	pub line:                u32,
 	/// Deferred function input, retained in snapshots. An empty string means
 	/// reparse `source`; otherwise this encodes `(source_offset, Command)` to
 	/// preserve alias-expanded syntax that the source alone cannot reproduce.
-	pub(crate) deferred: Option<BString>,
+	pub(crate) deferred:     Option<BString>,
+	/// Canonical syntax shared only when a compilation is observed. Not
+	/// executable state.
+	#[serde(skip)]
+	pub(crate) trace_syntax: std::sync::OnceLock<Arc<crate::bash::trace::syntax::UnitSyntax>>,
 	/// Code.
-	pub ops:             Vec<Op>,
+	pub ops:                 Vec<Op>,
 	/// Syntax nodes by [`AstNodeId`].
-	pub nodes:           Vec<NodeInfo>,
+	pub nodes:               Vec<NodeInfo>,
 	/// Word operands.
-	pub words:           Vec<Word>,
+	pub words:               Vec<Word>,
 	/// Word lists (indexes into `words`).
-	pub lists:           Vec<Vec<u32>>,
+	pub lists:               Vec<Vec<u32>>,
 	/// Simple commands.
-	pub cmds:            Vec<Cmd>,
+	pub cmds:                Vec<Cmd>,
 	/// Variable names.
-	pub names:           Vec<BString>,
+	pub names:               Vec<BString>,
 	/// Diagnostic texts.
-	pub strs:            Vec<BString>,
+	pub strs:                Vec<BString>,
 	/// Redirection lists.
-	pub redirs:          Vec<Vec<RedirIr>>,
+	pub redirs:              Vec<Vec<RedirIr>>,
 	/// Subshells, pipelines and background jobs.
-	pub spawns:          Vec<SpawnIr>,
+	pub spawns:              Vec<SpawnIr>,
 	/// `case` arm pattern lists (indexes into `words`).
-	pub pats:            Vec<Vec<u32>>,
+	pub pats:                Vec<Vec<u32>>,
 	/// Arithmetic texts (`(( ))`, `for (( ))`).
-	pub ariths:          Vec<BString>,
+	pub ariths:              Vec<BString>,
 	/// `[[ ]]` primaries.
-	pub conds:           Vec<CondIr>,
+	pub conds:               Vec<CondIr>,
 	/// Function definitions.
-	pub funcs:           Vec<FuncIr>,
+	pub funcs:               Vec<FuncIr>,
 }
 
 impl Unit {
@@ -302,6 +306,7 @@ impl Unit {
 			root: None,
 			line: 1,
 			deferred: None,
+			trace_syntax: std::sync::OnceLock::new(),
 			ops: Vec::new(),
 			nodes: Vec::new(),
 			words: Vec::new(),

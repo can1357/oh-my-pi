@@ -145,6 +145,21 @@ Concurrent calls never share one `Shell`: the native session runs one command at
 
 A call keeps the session ID it started with, even if the session changes before its shell starts. Leaving a session (new, fork, switch, branch) releases its shells, and a command still running or pending from a left session drops its shell when it settles (`isSessionCurrent`), so returning to a session starts a fresh shell.
 
+## Native shell visualization
+
+`pi-shell` owns Raw/Pseudo generation, static analysis, source mapping, replay reduction and last-setter annotations. It retains the actual parser's `List`, `Command` and `Word` nodes as units compile; arithmetic formatting uses the engine's existing arithmetic parser. There is no second TypeScript AST or shfmt conversion in this path.
+
+- **Incremental:** only engine-announced syntax is presented as Pseudo. Uncompiled source remains literal; creating or presenting a pending `RunTrace` does not parse ahead.
+- **Live:** the executor attaches each immutable snapshot to its actual native `RunTrace` before publishing it. `RunTrace.present(options)` borrows native syntax/history; the UI does not serialize and reload an AST on each update.
+- **Stored:** `ShellVisualization(snapshotJson)` restores a persisted trace once. Canonical syntax uses a versioned, cached base64 archive of the engine's own AST and parser context. Unsupported archive versions fail explicitly. Legacy traces without an archive restore only their announced units with the native parser.
+- **Renderers:** ANSI and Tern consume the same semantic rows. TypeScript owns preferences, input dispatch and playback clocks, not shell interpretation. Tern receives neither the syntax archive nor the execution journal.
+- **Identity:** source-token `node` keys and UTF-16 ranges drive selection/source links. `executionNode` identifies the actual command owning a token's outcome and completion, so arguments share one failure mark and 500ms trail. Keys preserve native unit/source/node identities; renderers treat them as opaque.
+- **Provenance:** values follow real setters and the replay cursor. Unproven local binding identity stays explicitly unknown; a function-entry event is not proof of a dynamically scoped variable's owner.
+
+In-engine children, including literal `eval`, use actual compiler origins. External OS shells and SSH remain external/untraced: literal bodies may be shown with that label, but never receive invented inner outcomes, variables or output. Visualization does not change executable resolution.
+
+The ordinary Bash card remains a neutral segmented command/output/footer box. Raw/Pseudo and the menu stay on its first code line; replay controls belong to the inspector. `original` rows are produced only for Pseudo split, and normal live output still comes from the existing output sink; an explicit replay cursor uses native captured output.
+
 ## Bundled `jq` compatibility
 
 Unless `PI_DISABLE_UUTILS_BUILTINS` is truthy, the non-PTY native shell registers a bundled `jq` command backed by [jaq](https://github.com/01mf02/jaq) 3.1.1, not the system `jq`; `jq --version` prints `jaq 3.1.1`. Setting that flag disables the in-process uutils command set and falls back to system binaries. `env jq …` runs the system `jq` for one command.

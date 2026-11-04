@@ -344,7 +344,12 @@ pub fn user_math_funcs(
 	let Some(Record::Words(w)) = state::record(store, vp, Key::Misc(MiscKey::ZshMathFuncs))? else {
 		return Ok(Vec::new());
 	};
-	let num = |s: &BString| std::str::from_utf8(s).ok().and_then(|s| s.parse().ok()).unwrap_or(-1);
+	let num = |s: &BString| {
+		std::str::from_utf8(s)
+			.ok()
+			.and_then(|s| s.parse().ok())
+			.unwrap_or(-1)
+	};
 	Ok(w
 		.chunks_exact(5)
 		.map(|c| UserMathFunc {

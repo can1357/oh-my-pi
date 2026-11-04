@@ -24,8 +24,8 @@ fn zsh_mod_stat_lists_every_element() {
 	let (out, err, st) = zsh("cd /tmp; zmodload zsh/stat; print -n hello > f; zstat f");
 	assert_eq!(
 		out,
-		"device  1\ninode   0\nmode    33188\nnlink   1\nuid     0\ngid     0\nrdev    0\nsize    5\n\
-		 atime   0\nmtime   0\nctime   0\nblksize 4096\nblocks  1\nlink    \n"
+		"device  1\ninode   0\nmode    33188\nnlink   1\nuid     0\ngid     0\nrdev    0\nsize    \
+		 5\natime   0\nmtime   0\nctime   0\nblksize 4096\nblocks  1\nlink    \n"
 	);
 	assert_eq!(err, "");
 	assert_eq!(st, 0);
@@ -46,8 +46,8 @@ ln -s f l; zstat +link l; zstat -L +mode l; zstat +mode l",
 	assert_eq!(
 		out,
 		"Thu Jan  1  0:00:00 UTC 1970\n0 (Thu Jan  1  0:00:00 UTC 1970)\n-rw-r--r--\n0100644 \
-		 (-rw-r--r--)\n0\nf\n5\nsize 5\nsize 5\n5\n5\nf 5\ng 0\ndevice inode mode nlink uid gid rdev \
-		 size atime mtime ctime blksize blocks link\nmode\nf\n41453\n33188\n"
+		 (-rw-r--r--)\n0\nf\n5\nsize 5\nsize 5\n5\n5\nf 5\ng 0\ndevice inode mode nlink uid gid \
+		 rdev size atime mtime ctime blksize blocks link\nmode\nf\n41453\n33188\n"
 	);
 	assert_eq!(err, "");
 }

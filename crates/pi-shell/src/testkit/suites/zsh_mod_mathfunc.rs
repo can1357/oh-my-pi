@@ -21,15 +21,15 @@ fn zsh(src: &str) -> (String, String, i32) {
 #[test]
 fn every_function_on_sample_arguments() {
 	let (out, err, st) = zsh(
-		"zmodload zsh/mathfunc; print $(( abs(-3) )) $(( abs(-2.5) )) $(( acos(0.5) )) $(( asin(0.5) )) \
-		 $(( atan(1) )) $(( atan(1,2) )) $(( cbrt(27) )) $(( ceil(1.2) )) $(( copysign(3,-1) )) \
-		 $(( cos(1) )) $(( cosh(1) )) $(( exp(1) )) $(( expm1(1e-10) )) $(( fabs(-4) )) \
-		 $(( float(3) )) $(( floor(-1.5) )) $(( fmod(7,3) )) $(( gamma(5) )) $(( hypot(3,4) )) \
-		 $(( ilogb(8) )) $(( int(-3.7) )) $(( ldexp(3,2) )) $(( log(1) )) $(( log10(1000) )) \
-		 $(( log1p(0) )) $(( log2(8) )) $(( logb(10) )) $(( nextafter(1,2) )) $(( rint(2.5) )) \
-		 $(( scalb(3,2) )) $(( sin(0) )) $(( sinh(0) )) $(( sqrt(16) )) $(( tan(0) )) \
-		 $(( tanh(0) )) $(( sqrt(-1) )) $(( log(0) )) $(( erf(0) )) $(( erfc(0) )) $(( j0(0) )) \
-		 $(( j1(0) )) $(( jn(2,0) )) $(( y0(0) )) $(( lgamma(1) )) $((signgam()))",
+		"zmodload zsh/mathfunc; print $(( abs(-3) )) $(( abs(-2.5) )) $(( acos(0.5) )) $(( \
+		 asin(0.5) )) $(( atan(1) )) $(( atan(1,2) )) $(( cbrt(27) )) $(( ceil(1.2) )) $(( \
+		 copysign(3,-1) )) $(( cos(1) )) $(( cosh(1) )) $(( exp(1) )) $(( expm1(1e-10) )) $(( \
+		 fabs(-4) )) $(( float(3) )) $(( floor(-1.5) )) $(( fmod(7,3) )) $(( gamma(5) )) $(( \
+		 hypot(3,4) )) $(( ilogb(8) )) $(( int(-3.7) )) $(( ldexp(3,2) )) $(( log(1) )) $(( \
+		 log10(1000) )) $(( log1p(0) )) $(( log2(8) )) $(( logb(10) )) $(( nextafter(1,2) )) $(( \
+		 rint(2.5) )) $(( scalb(3,2) )) $(( sin(0) )) $(( sinh(0) )) $(( sqrt(16) )) $(( tan(0) )) \
+		 $(( tanh(0) )) $(( sqrt(-1) )) $(( log(0) )) $(( erf(0) )) $(( erfc(0) )) $(( j0(0) )) $(( \
+		 j1(0) )) $(( jn(2,0) )) $(( y0(0) )) $(( lgamma(1) )) $((signgam()))",
 	);
 	assert_eq!(err, "");
 	assert_eq!(
@@ -45,13 +45,13 @@ fn every_function_on_sample_arguments() {
 #[test]
 fn lgamma_sets_signgam_and_common_values() {
 	let (out, ..) = zsh(
-		"zmodload zsh/mathfunc; print $(( lgamma(-0.5) )) $((signgam())); \
-		 print $(( sin(1) )) $(( exp(1) )) $(( sqrt(2) )); print $(( ilogb(0) )) $(( int(1e300) ))",
+		"zmodload zsh/mathfunc; print $(( lgamma(-0.5) )) $((signgam())); print $(( sin(1) )) $(( \
+		 exp(1) )) $(( sqrt(2) )); print $(( ilogb(0) )) $(( int(1e300) ))",
 	);
 	assert_eq!(
 		out,
-		"1.2655121234846454 -1\n0.8414709848078965 2.7182818284590451 1.4142135623730951\n\
-		 -2147483648 9223372036854775807\n"
+		"1.2655121234846454 -1\n0.8414709848078965 2.7182818284590451 \
+		 1.4142135623730951\n-2147483648 9223372036854775807\n"
 	);
 }
 
@@ -71,14 +71,14 @@ fn wrong_argument_counts() {
 #[test]
 fn rand48_with_a_seed_parameter_is_deterministic() {
 	let (out, err, _) = zsh(
-		"zmodload zsh/mathfunc; s=0123456789ab; print $(( rand48(s) )) $s; \
-		 s=000000000000; print $(( rand48(s) )) $s; print $(( rand48( s ) )) $s; \
-		 s=FFFFFFFFFFFF; print $(( rand48(s) )) $s; s=xyz; (( rand48(s) >= 0 )); print ${#s}",
+		"zmodload zsh/mathfunc; s=0123456789ab; print $(( rand48(s) )) $s; s=000000000000; print \
+		 $(( rand48(s) )) $s; print $(( rand48( s ) )) $s; s=FFFFFFFFFFFF; print $(( rand48(s) )) \
+		 $s; s=xyz; (( rand48(s) >= 0 )); print ${#s}",
 	);
 	assert_eq!(err, "");
 	assert_eq!(
 		out,
-		"0.81993854905699237 edf27e24d1e7\n3.907985046680551e-14 000b00000000\n\
-		 0.00098539467465030839 e6ba942d0040\n0.99991041866598351 199e2113fffa\n12\n"
+		"0.81993854905699237 edf27e24d1e7\n3.907985046680551e-14 \
+		 000b00000000\n0.00098539467465030839 e6ba942d0040\n0.99991041866598351 199e2113fffa\n12\n"
 	);
 }

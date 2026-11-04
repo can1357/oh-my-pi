@@ -696,7 +696,16 @@ impl<'e, 'c> Expander<'e, 'c> {
 		let unit = self
 			.k
 			.engine
-			.text_unit(text, super::TextKind::Arith, self.vp_mode(), feat)
+			.text_unit(
+				text,
+				super::TextKind::Arith,
+				self.vp_mode(),
+				feat,
+				self
+					.k
+					.mask
+					.contains(crate::bash::event::EventKind::UnitCompiled),
+			)
 			.map_err(|e| Stop::Fail(Diag::Syntax { msg: e.msg }))?;
 		match unit.words.last() {
 			Some(word) => self.scalar(&unit, word),
@@ -2183,7 +2192,16 @@ impl<'e, 'c> Expander<'e, 'c> {
 		let unit = self
 			.k
 			.engine
-			.text_unit(&out, super::TextKind::HereDoc, self.vp_mode(), feat)
+			.text_unit(
+				&out,
+				super::TextKind::HereDoc,
+				self.vp_mode(),
+				feat,
+				self
+					.k
+					.mask
+					.contains(crate::bash::event::EventKind::UnitCompiled),
+			)
 			.map_err(|err| Stop::Fail(Diag::Syntax { msg: err.msg }))?;
 		let word = unit.words.last().cloned().unwrap_or_default();
 		self.scalar(&unit, &word)
@@ -3850,7 +3868,13 @@ pub fn compound_string(
 	let feat = super::exec::features(k, cx.store, vp)?;
 	let unit = k
 		.engine
-		.text_unit(text, super::TextKind::Compound, mode, feat)
+		.text_unit(
+			text,
+			super::TextKind::Compound,
+			mode,
+			feat,
+			k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
+		)
 		.map_err(|e| Stop::Fail(Diag::Syntax { msg: e.msg }))?;
 	let Some(Part::Compound(elems)) = unit.words.last().and_then(|w| w.parts.first()) else {
 		return Ok(Vec::new());
@@ -4091,12 +4115,14 @@ impl arith::Env for Vars<'_, '_> {
 				),
 				Ok(true)
 			) {
+				super::builtins::emit_assignment(self.k, self.cx, self.vp, name, Level::Dynamic);
 				return Ok(());
 			}
 		}
 		let mut var = Var::scalar("", Attrs::NONE);
 		assign_number(&mut var, index, text);
 		state::store_var(&mut self.k.root, self.cx.store, self.vp, name, Some(var), Level::Dynamic);
+		super::builtins::emit_assignment(self.k, self.cx, self.vp, name, Level::Dynamic);
 		Ok(())
 	}
 

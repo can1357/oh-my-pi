@@ -446,7 +446,9 @@ fn scratch_image(
 				SubImage::NoFork { value: *value, capture: fds.capture(capture) }
 			},
 			PendingSub::Here { status } => SubImage::Here { status: *status },
-			PendingSub::Math { status, slot } => SubImage::Math { status: *status, slot: *slot as u8 },
+			PendingSub::Math { status, slot } => {
+				SubImage::Math { status: *status, slot: *slot as u8 }
+			},
 		}),
 		exec,
 		redir_done: io.map_or(0, |io| io.redir.done),
@@ -839,7 +841,12 @@ impl Shell {
 			vp.zsh = p.zsh;
 			vp.lineage = p.lineage;
 			if let Some((id, node)) = p.command {
-				let unit = load_unit(engine, cx.store, id)?;
+				let unit = load_unit(
+					engine,
+					cx.store,
+					id,
+					k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
+				)?;
 				k.written.insert(unit.id);
 				vp.command = Some((unit, node));
 			}
@@ -881,7 +888,12 @@ impl Shell {
 			for f in p.frames {
 				let unit = match f.unit {
 					Some(id) => {
-						let unit = load_unit(engine, cx.store, id)?;
+						let unit = load_unit(
+							engine,
+							cx.store,
+							id,
+							k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
+						)?;
 						k.written.insert(unit.id);
 						let in_range = |pc: u32| (pc as usize) < unit.ops.len();
 						if !in_range(f.pc)
@@ -1140,6 +1152,7 @@ pub fn load_unit(
 	engine: &Engine,
 	store: &mut dyn StateStore,
 	id: UnitId,
+	observed: bool,
 ) -> Result<Arc<Unit>, RestoreError> {
 	if let Some(unit) = engine.cached(&id) {
 		return Ok(unit);
@@ -1153,7 +1166,7 @@ pub fn load_unit(
 		return Err(RestoreError::InvalidUnit { unit: id });
 	}
 	let unit = if unit.deferred.is_some() {
-		materialize(&unit)
+		materialize(&unit, observed)
 			.filter(valid)
 			.ok_or(RestoreError::InvalidUnit { unit: id })?
 	} else {

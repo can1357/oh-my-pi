@@ -293,7 +293,11 @@ fn expired(
 
 /// The deadline `secs` seconds from now (0: none).
 fn after(cx: &Cx<'_>, secs: u32) -> Option<u64> {
-	(secs > 0).then(|| cx.host.now_ns().saturating_add(u64::from(secs) * 1_000_000_000))
+	(secs > 0).then(|| {
+		cx.host
+			.now_ns()
+			.saturating_add(u64::from(secs) * 1_000_000_000)
+	})
 }
 
 fn unsupported() -> io::Error {
@@ -311,10 +315,9 @@ fn inet(a: &SockAddr) -> Option<SocketAddr> {
 /// free fd from 10 (zsh `zfmovefd`), close-on-exec.
 fn install(cx: &mut Cx<'_>, vp: &mut Vproc, file: Box<dyn File>) -> SockInfo {
 	let (local, peer) = match (file.os_handle(), cx.host.sockets()) {
-		(Some(h), Some(s)) => (
-			s.local_addr(h).ok().as_ref().and_then(inet),
-			s.peer_addr(h).ok().as_ref().and_then(inet),
-		),
+		(Some(h), Some(s)) => {
+			(s.local_addr(h).ok().as_ref().and_then(inet), s.peer_addr(h).ok().as_ref().and_then(inet))
+		},
 		_ => (None, None),
 	};
 	let fd = vp.fds.lowest_free(10);
@@ -362,7 +365,9 @@ pub fn perform(
 			Ok(Some(Record::Func { .. }))
 		)),
 		ZftpOp::Clock => ZftpAns::Num(cx.host.now_ns()),
-		ZftpOp::Tty(fd) => ZftpAns::Flag(vp.fds.get(*fd).and_then(FdRef::kind) == Some(FileKind::Tty)),
+		ZftpOp::Tty(fd) => {
+			ZftpAns::Flag(vp.fds.get(*fd).and_then(FdRef::kind) == Some(FileKind::Tty))
+		},
 		ZftpOp::Echo(on) => {
 			if let (Some(h), Some(term)) =
 				(vp.fds.get(0).and_then(FdRef::os_handle), cx.host.terminal())
@@ -374,9 +379,11 @@ pub fn perform(
 			ZftpAns::Done
 		},
 		ZftpOp::Sockets => ZftpAns::Flag(cx.host.sockets().is_some()),
-		ZftpOp::Service(name) => {
-			ZftpAns::Port(cx.host.sockets().and_then(|s| s.service_port(BStr::new(name))))
-		},
+		ZftpOp::Service(name) => ZftpAns::Port(
+			cx.host
+				.sockets()
+				.and_then(|s| s.service_port(BStr::new(name))),
+		),
 		ZftpOp::ServicePort(port) => {
 			ZftpAns::Flag(cx.host.sockets().is_some_and(|s| s.service_by_port(*port)))
 		},

@@ -222,8 +222,6 @@ pub enum CtlChar {
 }
 
 impl CtlChar {
-	/// How many there are.
-	pub const COUNT: usize = 17;
 	/// Every control character, in declaration order.
 	pub const ALL: [Self; Self::COUNT] = [
 		Self::Intr,
@@ -244,6 +242,8 @@ impl CtlChar {
 		Self::Status,
 		Self::Swtc,
 	];
+	/// How many there are.
+	pub const COUNT: usize = 17;
 }
 
 /// A terminal's modes ([`Terminal::attrs`]).

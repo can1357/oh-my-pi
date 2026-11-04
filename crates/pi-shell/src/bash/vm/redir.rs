@@ -242,7 +242,13 @@ fn target_text(
 				k.fail(err);
 				Halt::Failed
 			})?;
-			let tunit = match k.engine.text_unit(text, TextKind::HereDoc, mode, feat) {
+			let tunit = match k.engine.text_unit(
+				text,
+				TextKind::HereDoc,
+				mode,
+				feat,
+				k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
+			) {
 				Ok(u) => u,
 				Err(e) => {
 					// bash reports the script line after the document.
