@@ -408,15 +408,16 @@ and must be restored from trusted local metadata or configuration.
 Discovered rows keep the endpoint they were fetched from as their `baseUrl`, so each cache
 namespace is scoped to the provider's configured endpoint: a runtime provider override, then a
 models.yml `baseUrl` (built-in providers and models.yml `discovery:` providers alike, and a
-`discovery:` provider is discovered at that same endpoint). An extension's `fetchDynamicModels`
-roster has a namespace of its own, keyed by its extension source and its declared `api`, `apiKey`,
-`authHeader`, `headers` and `baseUrl`, never a built-in provider's. A discovery request is sent
-only while the provider's configuration (endpoint, key and header config, owning registration) is
-the one the discovery started under, and its result is published only while that still holds, so
-a key resolved under one configuration never reaches another configuration's endpoint. Removing or
-changing a models.yml `baseUrl` therefore reads a different namespace, and requests go to the newly
-configured endpoint (with no `baseUrl`, the built-in one) at once. A runtime override changes
-where requests go at once; the roster it lists follows at the next model refresh.
+`discovery:` provider is discovered with that same endpoint and its headers). An extension's
+`fetchDynamicModels` roster has a namespace of its own, keyed by its extension source and its
+declared `api`, `apiKey`, `authHeader`, `headers` and `baseUrl`, never a built-in provider's. A
+built-in model manager's or `discovery:` provider's discovery request is sent only if the
+provider's configuration (endpoint, key and header config, owning registration) has not changed
+since the discovery started, even if it changed back, and its result is published only while the
+configuration is, by value, the one it was fetched under. Removing or changing a models.yml
+`baseUrl` therefore reads a different namespace, and requests go to the newly configured endpoint
+(with no `baseUrl`, the built-in one) at once. A runtime override changes where requests go at
+once; the roster it lists follows at the next model refresh.
 
 `static_fingerprint` hashes the current static slice and merge policy. It is recomputed from the
 array's current contents, not stored on the array. When a fresh authoritative cache matches and no

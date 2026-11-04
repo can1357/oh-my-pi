@@ -211,6 +211,11 @@ interface ConfiguredModelDiscoveryResult {
 	configIdentity: string;
 }
 
+/** A header map as configuration identity: entry order carries no meaning. */
+function canonicalHeaders(headers: Record<string, string> | undefined): Array<[string, string]> | undefined {
+	return headers && Object.entries(headers).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
 /**
  * Credential-aware model projection supplied by an extension provider. Receives
  * the fully composed catalog and returns the list the host should serve.
@@ -381,6 +386,8 @@ export class ModelRegistry {
 	/** Stable ids for extension registrations in `#providerConfigIdentity`; a replaced registration is a new configuration. */
 	#registrationIds = new WeakMap<object, number>();
 	#nextRegistrationId = 0;
+	/** `#configEpoch` state per provider. */
+	#configEpochs = new Map<string, { identity: string; epoch: number }>();
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
@@ -389,10 +396,9 @@ export class ModelRegistry {
 	/** Waiter armed before the initial background refresh starts (CLI kicks it off after the session is built, #10048). */
 	#initialRefreshWaiters = new Set<() => void>();
 	#credentialScopedCacheHydration?: Promise<void>;
-	#configuredDiscoveryInFlight: Map<
-		DiscoveryProviderConfig,
-		Map<ModelRefreshStrategy, Promise<ConfiguredModelDiscoveryResult>>
-	> = new Map();
+	/** In-flight configured discoveries by provider and configuration epoch, then strategy. */
+	#configuredDiscoveryInFlight: Map<string, Map<ModelRefreshStrategy, Promise<ConfiguredModelDiscoveryResult>>> =
+		new Map();
 	#policyReapply?: Promise<void>;
 	// Window tiers of models whose extended window is larger: per row as the
 	// hardcoded policies produced it (custom overlays replacing that row never
@@ -706,33 +712,38 @@ export class ModelRegistry {
 	}
 
 	#applyMirrorChange(change: ModelRegistryMirrorChange): void {
-		switch (change.kind) {
-			case "register":
-				this.#registerProvider(change.name, change.config, change.sourceId);
-				return;
-			case "unregister":
-				this.#unregisterProvider(change.name);
-				return;
-			case "clearSources":
-				this.#clearSourceRegistrations(change.sourceIds);
-				return;
-			case "syncSources":
-				this.#syncExtensionSources(change.activeSourceIds);
-				return;
-			case "reload":
-				this.#reloadStaticModels({ force: true });
-				return;
-			case "invalidateCommands":
-				// Local caches only: forwarding to the owner would echo the invalidation back.
-				if (change.provider === undefined) invalidateAllCommandConfigs();
-				else this.#invalidateLocalProviderCommandConfigs(change.provider);
-				return;
+		try {
+			switch (change.kind) {
+				case "register":
+					this.#registerProvider(change.name, change.config, change.sourceId);
+					return;
+				case "unregister":
+					this.#unregisterProvider(change.name);
+					return;
+				case "clearSources":
+					this.#clearSourceRegistrations(change.sourceIds);
+					return;
+				case "syncSources":
+					this.#syncExtensionSources(change.activeSourceIds);
+					return;
+				case "reload":
+					this.#reloadStaticModels({ force: true });
+					return;
+				case "invalidateCommands":
+					// Local caches only: forwarding to the owner would echo the invalidation back.
+					if (change.provider === undefined) invalidateAllCommandConfigs();
+					else this.#invalidateLocalProviderCommandConfigs(change.provider);
+					return;
+			}
+		} finally {
+			this.#syncConfigEpochs();
 		}
 	}
 
 	/**
 	 * Run one public runtime-change entry point; only the outermost one is
-	 * recorded for mirrors, and only when it completed.
+	 * recorded for mirrors, and only when it completed. Every one ends by
+	 * recording configuration changes (`#syncConfigEpochs`).
 	 */
 	#runtimeChange(change: ModelRegistryMirrorChangeInput, apply: () => void): void {
 		const outermost = this.#mirrorChangeDepth === 0;
@@ -741,6 +752,7 @@ export class ModelRegistry {
 			apply();
 		} finally {
 			this.#mirrorChangeDepth--;
+			this.#syncConfigEpochs();
 		}
 		if (outermost) this.#recordMirrorChange(change);
 	}
@@ -1335,6 +1347,7 @@ export class ModelRegistry {
 		this.#modelOverrides = modelOverrides;
 
 		this.#addImplicitDiscoverableProviders(configuredProviders);
+		this.#syncConfigEpochs();
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(provider => provider.provider));
 		this.#pendingStandardCacheProviders = new Set(
 			STARTUP_MODEL_CACHE_PROVIDER_IDS.filter(
@@ -1651,16 +1664,13 @@ export class ModelRegistry {
 	 * which credential it carries: the extension registration that owns it, its
 	 * models.yml `discovery:` config, and the endpoint, key and header config of
 	 * its models.yml and runtime overrides. Compared by value, with endpoints
-	 * normalized, so an identical reload or an equivalent spelling of the same
-	 * endpoint keeps a discovery current, and a return to an earlier
-	 * configuration makes it current again.
+	 * normalized and headers in a canonical order, so an identical reload or an
+	 * equivalent spelling keeps a result current, and a return to an earlier
+	 * configuration makes its result current again.
 	 *
-	 * The single currency test for discovery: a request leaves only through
-	 * `#guardedFetch` while this value is the one captured before the
-	 * discovery's first await, and a result or discovery state is published
-	 * only while it still is. A credential resolved under one configuration is
-	 * therefore never sent to another configuration's endpoint, and a result
-	 * never answers for a configuration it was not discovered under.
+	 * Publication test: a discovery result or discovery state is published
+	 * only while this value equals the one captured before the discovery's
+	 * first await. The request test is stricter, `#configEpoch`.
 	 */
 	#providerConfigIdentity(providerId: string): string {
 		const registration = this.#runtimeModelManagers.get(providerId)?.options;
@@ -1676,23 +1686,69 @@ export class ModelRegistry {
 						baseUrl: normalizeModelCacheEndpoint(override.baseUrl),
 						apiKey: override.apiKey,
 						authHeader: override.authHeader,
-						headers: override.headers,
+						headers: canonicalHeaders(override.headers),
 					}
 				: null;
 		return JSON.stringify([
 			registrationId,
-			configured ? { ...configured, baseUrl: normalizeModelCacheEndpoint(configured.baseUrl) } : null,
+			configured
+				? {
+						...configured,
+						baseUrl: normalizeModelCacheEndpoint(configured.baseUrl),
+						headers: canonicalHeaders(configured.headers),
+					}
+				: null,
 			route(this.#providerOverrides.get(providerId)),
 			route(this.#runtimeProviderOverrides.get(providerId)),
 			this.#runtimeProviderApiKeys.get(providerId)?.keyConfig ?? null,
 		]);
 	}
 
-	/** `#fetch` that refuses to send once `providerId`'s configuration is no longer `identity`. */
-	#guardedFetch(providerId: string, identity: string): FetchImpl {
+	/**
+	 * Number of times `providerId`'s `#providerConfigIdentity` has changed.
+	 * Every configuration mutation ends in `#syncConfigEpochs`, so a change
+	 * and a change back (A -> B -> A) are two increments even when nothing
+	 * read the identity in between.
+	 *
+	 * Request test: a discovery request leaves through `#guardedFetch` only
+	 * while the epoch is the one captured before the discovery's first await.
+	 * Its endpoint, headers and key were then all assembled under one
+	 * configuration, and a credential resolved under one configuration is
+	 * never sent to another configuration's endpoint, even one that returned
+	 * to the starting value.
+	 */
+	#configEpoch(providerId: string): number {
+		const identity = this.#providerConfigIdentity(providerId);
+		const record = this.#configEpochs.get(providerId);
+		if (!record) {
+			this.#configEpochs.set(providerId, { identity, epoch: 0 });
+			return 0;
+		}
+		if (record.identity !== identity) {
+			record.identity = identity;
+			record.epoch++;
+		}
+		return record.epoch;
+	}
+
+	/** Record every provider's configuration change; call at the end of each configuration mutation. */
+	#syncConfigEpochs(): void {
+		const providerIds = new Set<string>([
+			...this.#configEpochs.keys(),
+			...this.#providerOverrides.keys(),
+			...this.#runtimeProviderOverrides.keys(),
+			...this.#runtimeModelManagers.keys(),
+			...this.#runtimeProviderApiKeys.keys(),
+			...this.#discoverableProviders.map(provider => provider.provider),
+		]);
+		for (const providerId of providerIds) this.#configEpoch(providerId);
+	}
+
+	/** `#fetch` that refuses to send once `providerId`'s configuration epoch is no longer `epoch`. */
+	#guardedFetch(providerId: string, epoch: number): FetchImpl {
 		const fetchImpl = this.#fetch;
 		const guarded = (input: Parameters<FetchImpl>[0], init?: Parameters<FetchImpl>[1]) =>
-			this.#providerConfigIdentity(providerId) === identity
+			this.#configEpoch(providerId) === epoch
 				? fetchImpl(input, init)
 				: Promise.reject(new Error(`Provider ${providerId}: configuration changed during model discovery`));
 		return Object.assign(guarded, { preconnect: fetchImpl.preconnect }) as FetchImpl;
@@ -2394,13 +2450,16 @@ export class ModelRegistry {
 
 	/**
 	 * Share a configured provider's discovery request between concurrent full
-	 * and provider-scoped refreshes using the same cache/network strategy.
+	 * and provider-scoped refreshes using the same cache/network strategy and
+	 * the same configuration epoch: a refresh after the configuration changed
+	 * never joins a discovery started under the previous one.
 	 */
 	#discoverProviderModelsCoalesced(
 		providerConfig: DiscoveryProviderConfig,
 		strategy: ModelRefreshStrategy,
 	): Promise<ConfiguredModelDiscoveryResult> {
-		let providerInFlight = this.#configuredDiscoveryInFlight.get(providerConfig);
+		const key = `${providerConfig.provider}\u0000${this.#configEpoch(providerConfig.provider)}`;
+		let providerInFlight = this.#configuredDiscoveryInFlight.get(key);
 		const inFlight = providerInFlight?.get(strategy);
 		if (inFlight) return inFlight;
 
@@ -2409,12 +2468,12 @@ export class ModelRegistry {
 			if (providerInFlight.get(strategy) === discovery) {
 				providerInFlight.delete(strategy);
 				if (providerInFlight.size === 0) {
-					this.#configuredDiscoveryInFlight.delete(providerConfig);
+					this.#configuredDiscoveryInFlight.delete(key);
 				}
 			}
 		});
 		providerInFlight.set(strategy, discovery);
-		this.#configuredDiscoveryInFlight.set(providerConfig, providerInFlight);
+		this.#configuredDiscoveryInFlight.set(key, providerInFlight);
 		return discovery;
 	}
 
@@ -2428,14 +2487,20 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * A models.yml `discovery:` provider as discovery must contact it: at the
-	 * endpoint its requests go to, a runtime provider override first, as for
-	 * every other provider (`#configuredBaseUrl`). Discovery otherwise sends the
-	 * runtime override's key to the models.yml endpoint.
+	 * A models.yml `discovery:` provider as discovery must contact it: with the
+	 * endpoint and headers its requests use, a runtime provider override's
+	 * first, as for every other provider (`#configuredBaseUrl`). Taking only one
+	 * of the two would send one layer's credential header to the other layer's
+	 * endpoint.
 	 */
 	#effectiveDiscoveryConfig(providerConfig: DiscoveryProviderConfig): DiscoveryProviderConfig {
-		const runtimeBaseUrl = this.#runtimeProviderOverrides.get(providerConfig.provider)?.baseUrl;
-		return runtimeBaseUrl ? { ...providerConfig, baseUrl: runtimeBaseUrl } : providerConfig;
+		const runtime = this.#runtimeProviderOverrides.get(providerConfig.provider);
+		if (!runtime?.baseUrl && !runtime?.headers) return providerConfig;
+		return {
+			...providerConfig,
+			baseUrl: runtime.baseUrl ?? providerConfig.baseUrl,
+			headers: runtime.headers ? { ...providerConfig.headers, ...runtime.headers } : providerConfig.headers,
+		};
 	}
 
 	/**
@@ -2505,8 +2570,12 @@ export class ModelRegistry {
 		providerConfig: DiscoveryProviderConfig,
 		strategy: ModelRefreshStrategy,
 	): Promise<ConfiguredModelDiscoveryResult> {
-		// Captured before the first await; see `#providerConfigIdentity`.
+		// Captured before the first await: the publication identity, the request
+		// epoch, and the endpoint and headers the request uses, all under one
+		// configuration (see `#providerConfigIdentity` and `#configEpoch`).
 		const configIdentity = this.#providerConfigIdentity(providerConfig.provider);
+		const configEpoch = this.#configEpoch(providerConfig.provider);
+		const effectiveConfig = this.#effectiveDiscoveryConfig(providerConfig);
 		const isCurrent = () => this.#providerConfigIdentity(providerConfig.provider) === configIdentity;
 		const cacheProviderId = this.#configuredDiscoveryCacheProviderId(providerConfig);
 		const cached = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
@@ -2544,13 +2613,13 @@ export class ModelRegistry {
 		let discoveryAuthRejected = false;
 		const fetchDynamicModels = async (): Promise<readonly ModelSpec<Api>[] | null> => {
 			try {
-				const resolvedHeaders = await resolveConfigHeaders(providerConfig.headers);
-				const requestConfig = { ...this.#effectiveDiscoveryConfig(providerConfig), headers: resolvedHeaders };
+				const resolvedHeaders = await resolveConfigHeaders(effectiveConfig.headers);
+				const requestConfig = { ...effectiveConfig, headers: resolvedHeaders };
 				const models = this.#applyProviderModelOverrides(
 					providerId,
 					await discoverModelsByProviderType(
 						requestConfig,
-						this.#discoveryContext(this.#guardedFetch(providerId, configIdentity)),
+						this.#discoveryContext(this.#guardedFetch(providerId, configEpoch)),
 					),
 				);
 				this.#lastDiscoveryWarnings.delete(providerId);
@@ -2879,11 +2948,12 @@ export class ModelRegistry {
 		// fetch guarded by this identity, so a key resolved under one
 		// configuration never reaches another configuration's endpoint.
 		const identityAtStart = new Map<string, string>();
+		const epochAtStart = new Map<string, number>();
 		for (const { providerId } of [...standardProviderDescriptors, ...enabledSpecialProviderDescriptors]) {
 			identityAtStart.set(providerId, this.#providerConfigIdentity(providerId));
+			epochAtStart.set(providerId, this.#configEpoch(providerId));
 		}
-		const isUnchanged = (providerId: string) =>
-			this.#providerConfigIdentity(providerId) === identityAtStart.get(providerId);
+		const isUnchanged = (providerId: string) => this.#configEpoch(providerId) === epochAtStart.get(providerId);
 		const standardProviderKeys = await Promise.all(
 			standardProviderDescriptors.map(descriptor => {
 				const cacheProviderId = isCredentialScopedModelCacheProvider(descriptor.providerId)
@@ -2938,7 +3008,7 @@ export class ModelRegistry {
 				const discoveryConfig = {
 					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
 					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
-					fetch: this.#guardedFetch(descriptor.providerId, identityAtStart.get(descriptor.providerId)!),
+					fetch: this.#guardedFetch(descriptor.providerId, epochAtStart.get(descriptor.providerId)!),
 					region: identity?.region,
 					inferenceRegion: identity?.inferenceRegion,
 					orgId: identity?.orgId,
@@ -2965,7 +3035,7 @@ export class ModelRegistry {
 				descriptor.createOptions(
 					key,
 					specialKeys[i],
-					this.#guardedFetch(descriptor.providerId, identityAtStart.get(descriptor.providerId)!),
+					this.#guardedFetch(descriptor.providerId, epochAtStart.get(descriptor.providerId)!),
 				),
 			);
 		}
@@ -4249,7 +4319,13 @@ export class ModelRegistry {
 				// active source) keeps its cache.
 				cacheProviderId: scopeModelCacheProviderIdToEndpoint(
 					`${providerName}:extension-v2:${Bun.hash(
-						JSON.stringify([sourceId ?? "", providerApi, providerApiKey, providerAuthHeader, providerHeaders]),
+						JSON.stringify([
+							sourceId ?? "",
+							providerApi,
+							providerApiKey,
+							providerAuthHeader,
+							canonicalHeaders(providerHeaders),
+						]),
 					).toString(36)}`,
 					config.baseUrl,
 				),

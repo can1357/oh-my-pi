@@ -354,21 +354,87 @@ describe("model cache follows the configured endpoint", () => {
 		expect(registry.getProviderDiscoveryState("probe")?.models).toEqual(["current-model"]);
 	});
 
-	test("a runtime baseUrl override moves a models.yml discovery provider's discovery with its requests", async () => {
+	test("a runtime override moves a models.yml discovery provider's discovery endpoint and headers together", async () => {
 		fs.writeFileSync(
 			modelsPath,
-			`providers:\n  probe:\n    baseUrl: http://models-yml.invalid/v1\n    api: openai-completions\n    apiKey: ${FAKE_KEY}\n    discovery:\n      type: openai-models-list\n`,
+			`providers:\n  probe:\n    baseUrl: http://models-yml.invalid/v1\n    api: openai-completions\n    apiKey: ${FAKE_KEY}\n    headers:\n      x-api-key: fake-models-yml-header\n    discovery:\n      type: openai-models-list\n`,
+		);
+		const sent: Array<{ url: string; header: string | null }> = [];
+		const registry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async (input, init) => {
+				sent.push({ url: String(input), header: new Headers(init?.headers).get("x-api-key") });
+				return Response.json({ data: [{ id: "runtime-model" }] });
+			},
+		});
+		registry.registerProvider(
+			"probe",
+			{ baseUrl: "http://runtime-override.invalid/v1", headers: { "x-api-key": "fake-runtime-header" } },
+			"override-source",
+		);
+		await registry.refreshProvider("probe", "online");
+		expect(sent).toEqual([{ url: "http://runtime-override.invalid/v1/models", header: "fake-runtime-header" }]);
+	});
+
+	test("a discovery whose configuration changed and changed back before its request sends nothing", async () => {
+		const gate = path.join(tempDir, "header-gate");
+		const headerStarted = path.join(tempDir, "header-started");
+		const header = `!sh -c 'touch ${headerStarted}; while [ ! -f ${gate} ]; do sleep 0.02; done; echo held'`;
+		fs.writeFileSync(
+			modelsPath,
+			`providers:\n  probe:\n    baseUrl: http://initial-a.invalid/v1\n    api: openai-completions\n    apiKey: ${FAKE_KEY}\n    headers:\n      x-held: "${header}"\n    discovery:\n      type: openai-models-list\n`,
 		);
 		const sent: string[] = [];
 		const registry = new ModelRegistry(authStorage, modelsPath, {
 			fetch: async input => {
 				sent.push(String(input));
-				return Response.json({ data: [{ id: "runtime-model" }] });
+				return Response.json({ data: [{ id: "probe-model" }] });
 			},
 		});
-		registry.registerProvider("probe", { baseUrl: "http://runtime-override.invalid/v1" }, "override-source");
-		await registry.refreshProvider("probe", "online");
-		expect(sent).toEqual(["http://runtime-override.invalid/v1/models"]);
+		const inFlight = registry.refreshProvider("probe", "online");
+		while (!fs.existsSync(headerStarted)) await Bun.sleep(10);
+		// A -> B -> A while the request is still being assembled.
+		registry.registerProvider("probe", { baseUrl: "http://transient-b.invalid/v1" }, "override-source");
+		registry.unregisterProvider("probe");
+		fs.writeFileSync(gate, "");
+		await inFlight;
+		expect(sent).toEqual([]);
+	});
+
+	test("a discovery survives a reload that only reorders its headers", async () => {
+		const config = (headers: string) =>
+			`providers:\n  probe:\n    baseUrl: http://probe.invalid/v1\n    api: openai-completions\n    apiKey: ${FAKE_KEY}\n    headers:\n${headers}    discovery:\n      type: openai-models-list\n`;
+		fs.writeFileSync(modelsPath, config("      x-first: one\n      x-second: two\n"));
+		const probe = deferredDiscovery("http://probe.invalid/v1/models", "probe-model");
+		const registry = new ModelRegistry(authStorage, modelsPath, { fetch: probe.fetch });
+		const inFlight = registry.refreshProvider("probe", "online");
+		await probe.started;
+		fs.writeFileSync(modelsPath, config("      x-second: two\n      x-first: one\n"));
+		await registry.refreshProvider("probe", "offline");
+		probe.release();
+		await inFlight;
+		expect(registry.find("probe", "probe-model")).toBeDefined();
+	});
+
+	test("the refresh after a runtime override discovers the new endpoint instead of joining the old discovery", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			`providers:\n  probe:\n    baseUrl: http://endpoint-a.invalid/v1\n    api: openai-completions\n    apiKey: ${FAKE_KEY}\n    discovery:\n      type: openai-models-list\n`,
+		);
+		const endpointA = deferredDiscovery("http://endpoint-a.invalid/v1/models", "a-model");
+		const registry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async (input, init) =>
+				String(input) === "http://endpoint-b.invalid/v1/models"
+					? Response.json({ data: [{ id: "b-model" }] })
+					: endpointA.fetch(input),
+		});
+		const first = registry.refreshProvider("probe", "online");
+		await endpointA.started;
+		registry.registerProvider("probe", { baseUrl: "http://endpoint-b.invalid/v1" }, "override-source");
+		const next = registry.refreshProvider("probe", "online");
+		endpointA.release();
+		await Promise.all([first, next]);
+		expect(registry.find("probe", "b-model")).toBeDefined();
+		expect(registry.find("probe", "a-model")).toBeUndefined();
 	});
 
 	test("an extension re-registered with another key never serves the roster discovered with the old one", async () => {
