@@ -1254,6 +1254,36 @@ async function runLoopBody(
 	// `liveAccepted` reached the model inside it, `liveDeferred` did not.
 	let liveAccepted: AgentMessage[][] = [];
 	let liveDeferred: AgentMessage[][] = [];
+	// The turn's inputs a queue still owns, one flag per position (`undeliveredQueuedInput`), when the run is
+	// aborted before the model call: those are left out of the transcript and the run's end puts them back.
+	const undeliveredOf = (messages: readonly AgentMessage[]): readonly boolean[] =>
+		signal?.aborted && config.undeliveredQueuedInput
+			? config.undeliveredQueuedInput(messages)
+			: messages.map(() => false);
+	const endAbortedBeforeModel = async (messages: AgentMessage[], turnOpen: boolean): Promise<boolean> => {
+		if (!signal?.aborted || !config.undeliveredQueuedInput) return false;
+		const undelivered = undeliveredOf(messages);
+		// The turn's inputs are the newest entries of both lists, in order: remove exactly those positions.
+		for (const list of [currentContext.messages, newMessages]) {
+			let at = list.length - 1;
+			for (let i = messages.length - 1; i >= 0; i--) {
+				while (at >= 0 && list[at] !== messages[i]) at--;
+				if (at < 0) break;
+				if (undelivered[i]) list.splice(at, 1);
+				at--;
+			}
+		}
+		if (!turnOpen) stream.push({ type: "turn_start" });
+		emitInputMessages(
+			stream,
+			messages.filter((_, i) => !undelivered[i]),
+		);
+		const aborted = emitAbortedAssistantMessage(null, false, new Set(), currentContext, config, stream, signal);
+		newMessages.push(aborted);
+		await emitTurnEnd(stream, currentContext, aborted, [], config, signal, { willContinue: false });
+		endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+		return true;
+	};
 	try {
 		let messagesToEmit = [...initialMessages];
 		if (isDeadlineExceeded(config.deadline)) {
@@ -1267,6 +1297,7 @@ async function runLoopBody(
 		try {
 			setPending(signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || []);
 		} catch (error) {
+			if (signal?.aborted && (await endAbortedBeforeModel(messagesToEmit, false))) return;
 			stream.push({ type: "turn_start" });
 			emitInputMessages(stream, messagesToEmit);
 			throw error;
@@ -1375,10 +1406,18 @@ async function runLoopBody(
 
 				let preparedProviderCall: PreparedProviderCall;
 				let gateResult: AgentPreModelCallResult;
+				const emitTurnInputs = () => {
+					const undelivered = undeliveredOf(turnMessages);
+					emitInputMessages(
+						stream,
+						turnMessages.filter((_, i) => !undelivered[i]),
+					);
+				};
 				try {
 					if (config.syncContextBeforeModelCall) {
 						await config.syncContextBeforeModelCall(currentContext, signal);
 					}
+					if (signal?.aborted && (await endAbortedBeforeModel(turnMessages, turnOpen))) return;
 
 					if (!directiveResolvedForTurn) {
 						const directive = signal?.aborted ? undefined : config.getToolChoice?.();
@@ -1407,16 +1446,19 @@ async function runLoopBody(
 					}
 
 					preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
+					if (signal?.aborted && (await endAbortedBeforeModel(turnMessages, turnOpen))) return;
 					preparedProviderCall.liveSteering = openLiveSteering(config, signal, preparedProviderCall);
 					gateResult = (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
 				} catch (error) {
+					if (signal?.aborted && (await endAbortedBeforeModel(turnMessages, turnOpen))) return;
 					if (!turnOpen) {
 						stream.push({ type: "turn_start" });
-						emitInputMessages(stream, turnMessages);
+						emitTurnInputs();
 						turnOpen = true;
 					}
 					throw error;
 				}
+				if (signal?.aborted && (await endAbortedBeforeModel(turnMessages, turnOpen))) return;
 				if (config.beforeModelCall && signal?.aborted) {
 					gateResult = { stop: true };
 				}
@@ -1460,13 +1502,13 @@ async function runLoopBody(
 
 				if (!turnOpen) {
 					stream.push({ type: "turn_start" });
-					emitInputMessages(stream, turnMessages);
 					turnOpen = true;
 				}
 
 				// Stream assistant response
 				let recovered: HarmonyRecoveredToolCall | undefined;
 				let message: AssistantMessage;
+				let inputsEmitted = false;
 				try {
 					if (agentPauseGate.paused) await waitForProcessPause(config, signal);
 					message = await streamAssistantResponse(
@@ -1482,6 +1524,11 @@ async function runLoopBody(
 						hostToolChoice,
 						softRequirementState.forcedToolChoice,
 						preparedProviderCall,
+						() => {
+							if (config.undeliveredQueuedInput) signal?.throwIfAborted();
+							emitTurnInputs();
+							inputsEmitted = true;
+						},
 						message => {
 							const finalToolCalls = message.content.filter(
 								(content): content is Extract<AssistantMessage["content"][number], { type: "toolCall" }> =>
@@ -1508,6 +1555,10 @@ async function runLoopBody(
 					harmonyRetryAttempt = 0;
 					harmonyTruncateResumeCount = 0;
 				} catch (err) {
+					if (!inputsEmitted) {
+						if (signal?.aborted && (await endAbortedBeforeModel(turnMessages, turnOpen))) return;
+						emitTurnInputs();
+					}
 					if (!(err instanceof HarmonyLeakInterruption)) throw err;
 					if (err.recovered) {
 						if (harmonyTruncateResumeCount >= 2) {
@@ -2064,6 +2115,7 @@ async function streamAssistantResponse(
 	hostToolChoice?: ToolChoice,
 	forcedToolChoice?: ToolChoice,
 	prepared?: PreparedProviderCall,
+	onProviderStart?: () => void,
 	canDispatchFinalToolCalls?: (message: AssistantMessage) => boolean,
 ): Promise<AssistantMessage> {
 	const providerCall = prepared ?? (await prepareProviderCall(context, config, signal));
@@ -2208,6 +2260,7 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
+			onProviderStart?.();
 			let response = await streamFunction(model, llmContext, {
 				...config,
 				apiKey,

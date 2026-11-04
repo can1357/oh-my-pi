@@ -5,7 +5,7 @@
 //! builtins above stay platform-agnostic. The platform queries themselves —
 //! procfs parsing, pidfds, libproc, Toolhelp, process handles — live in
 //! [`sys`], which `pi-shell`'s identity-pinned process references
-//! (`pi_shell::process`) are built on too, so each query has one
+//! (`pi_shell::proctree`) are built on too, so each query has one
 //! implementation and a platform fix lands once.
 
 // Consumers (`ps`, `top`, `pgrep`, `pkill`, `pidwait`, `kill`) are each

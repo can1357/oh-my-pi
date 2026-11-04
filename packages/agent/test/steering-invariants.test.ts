@@ -2574,8 +2574,8 @@ describe("steering invariants: the round-eighteen reproductions", () => {
 
 				await agent.prompt("start");
 
-				// An abort while V is held for the next request still delivers it before the run ends.
-				expect(released).toEqual(path === "abort-delivery" ? [] : [["V"]]);
+				// An abort before the provider starts puts V back, so its claim is released once there too.
+				expect(released).toEqual([["V"]]);
 				expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
 			});
 		}
@@ -2964,13 +2964,14 @@ describe("steering invariants: the round-twenty reproductions", () => {
 describe("steering invariants: the round-twenty-one reproductions", () => {
 	for (const abandon of ["clear", "withdraw"] as const) {
 		for (const alias of [false, true]) {
-			it(`a ${abandon} after the request was built ${abandon === "clear" ? "leaves the delivered steer recorded" : "skips the queued records, not the prompt's"} (prompt aliases the steer: ${alias})`, async () => {
+			it(`a ${abandon} after the request was built, then an abort before the provider starts, ${abandon === "clear" ? "drops the steer" : "skips the queued records, not the prompt's"} (prompt aliases the steer: ${alias})`, async () => {
 				const { agent } = createAgent();
 				const [v, p, q] = [person("V"), person("P"), person("Q")];
 				agent.steer(v);
 				const ends: string[][] = [];
 				agent.subscribe(event => {
-					if (event.type === "agent_end") ends.push(texts(event.messages));
+					if (event.type === "agent_end")
+						ends.push(texts(event.messages.filter(message => message.role === "user")));
 				});
 				agent.setBeforeModelCall(() => {
 					if (abandon === "clear") agent.clearAllQueues();
@@ -2981,9 +2982,8 @@ describe("steering invariants: the round-twenty-one reproductions", () => {
 
 				await agent.prompt(alias ? [v, p] : [q, p]);
 
-				// The steer was in the request: a clear leaves it to be recorded, the withdrawal skips its record.
-				const prompt = alias ? ["V", "P"] : ["Q", "P"];
-				const expected = abandon === "clear" ? [...prompt, "V"] : prompt;
+				// The request never went out: neither the cleared nor the withdrawn steer is recorded or put back.
+				const expected = alias ? ["V", "P"] : ["Q", "P"];
 				expect(transcriptTexts(agent)).toEqual(expected);
 				expect(ends).toEqual([expected]);
 				expect(agent.peekSteeringQueue()).toEqual([]);
@@ -3211,5 +3211,104 @@ describe("steering invariants: the round-twenty-two reproductions", () => {
 			expect(withdrawn).toEqual([b]);
 			expect(transcriptTexts(agent)).toEqual(["start", messageText(aside)]);
 		});
+	}
+});
+
+/**
+ * An abort before the model call leaves out of the transcript exactly the occurrences a queue still owns, so
+ * the run's end puts them back; it never drops a prompt's own occurrence or an earlier recorded occurrence of
+ * the same message object.
+ */
+describe("steering invariants: an abort before the model call, by occurrence", () => {
+	for (const alias of [false, true]) {
+		it(`records the prompt's own input and puts the queued occurrence back (prompt input is the queued object: ${alias})`, async () => {
+			const { agent } = createAgent();
+			const v = person("V");
+			const p = person("P");
+			const first = alias ? v : person("Q");
+			agent.steer(v);
+			agent.setBeforeModelCall(() => {
+				agent.abort();
+				return { stop: true };
+			});
+
+			await agent.prompt([first, p]);
+
+			expect(transcriptTexts(agent)).toEqual([messageText(first), "P"]);
+			expect(agent.peekSteeringQueue()).toEqual([v]);
+			expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
+		});
+
+		it(`keeps an earlier recorded occurrence when a later one of ${alias ? "the same object" : "another message"} is put back`, async () => {
+			const { agent, mock } = createAgent();
+			const v = person("V");
+			const later = alias ? v : person("W");
+			const ends: string[][] = [];
+			agent.subscribe(event => {
+				if (event.type === "agent_end") ends.push(texts(event.messages.filter(message => message.role === "user")));
+			});
+			let calls = 0;
+			agent.streamFn = async (model, context, options) => {
+				calls++;
+				// Steering queued during the first response makes the run build a second request.
+				if (calls === 1) agent.steer(later);
+				return mock.stream(model, context, options);
+			};
+			let requests = 0;
+			agent.setBeforeModelCall(() => {
+				requests++;
+				if (requests === 2) {
+					agent.abort();
+					return { stop: true };
+				}
+				return undefined;
+			});
+			agent.steer(v);
+
+			await agent.prompt("start");
+
+			expect(ends).toEqual([["start", "V"]]);
+			expect(transcriptTexts(agent)).toEqual(["start", "V"]);
+			expect(agent.peekSteeringQueue()).toEqual([later]);
+		});
+	}
+
+	for (const action of ["clear", "remove"] as const) {
+		for (const abort of [false, true]) {
+			it(`a ${action} after the request was built ${abort ? "drops the steer when the run aborts before the provider starts" : "still delivers the steer when the request goes out"}`, async () => {
+				const { agent, mock } = createAgent();
+				const v = person("V");
+				const released: string[][] = [];
+				agent.queuedMessageGate = { claim: () => [], release: messages => released.push(texts(messages)) };
+				const requests: string[][] = [];
+				agent.streamFn = async (model, context, options) => {
+					requests.push(
+						context.messages
+							.filter(message => message.role === "user")
+							.map(message => messageText(message as AgentMessage)),
+					);
+					return mock.stream(model, context, options);
+				};
+				agent.steer(v);
+				let acted = false;
+				agent.setBeforeModelCall(() => {
+					if (acted) return undefined;
+					acted = true;
+					if (action === "clear") agent.clearAllQueues();
+					else agent.removeQueuedMessages(message => message === v);
+					if (!abort) return undefined;
+					agent.abort();
+					return { stop: true };
+				});
+
+				await agent.prompt("start");
+
+				expect(transcriptTexts(agent)).toEqual(abort ? ["start"] : ["start", "V"]);
+				expect(requests).toEqual(abort ? [] : [["start", "V"]]);
+				expect(agent.peekSteeringQueue()).toEqual([]);
+				expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
+				expect(released).toEqual(abort ? [["V"]] : []);
+			});
+		}
 	}
 });

@@ -51,7 +51,7 @@ import type { DescribeContext, NativeChild, NativeNode, NativeSurface, NativeUiE
 import { NARROW_SHEET_COLS } from "./overlay";
 import { resetQuietMotion } from "./quiet";
 import { nativeComponentId, Reconciler } from "./reconcile";
-import { setNativeButtons, setNativeRendering } from "./state";
+import { setNativeButtons, setNativePacing, setNativeRendering } from "./state";
 
 /** A visible TUI overlay, bottom to top. */
 export interface NativeOverlay {
@@ -403,6 +403,7 @@ export class NativeBackend {
 		this.#inline.doc?.close();
 		setNativeRendering(false);
 		setNativeButtons(false);
+		setNativePacing(false);
 		this.#unbindMotion?.();
 		this.#unbindMotion = undefined;
 		this.#useNerdSymbols(false);
@@ -567,6 +568,7 @@ export class NativeBackend {
 		this.#cx = new NativeContext(hello, hello.cols ?? this.#cx.cols);
 		// A changed vocabulary re-describes every component (`confirm`).
 		setNativeButtons(this.#cx.supports("button"));
+		setNativePacing(this.#cx.feature("pace"));
 		this.#sawResize = false;
 	}
 

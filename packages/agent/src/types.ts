@@ -295,6 +295,13 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	getSteeringMessages?: (signal?: AbortSignal) => Promise<AgentMessage[]>;
 
 	/**
+	 * For a turn's inputs, in order, whether each occurrence is still owned by a queue and must be restored if
+	 * the model call is aborted before it starts. One flag per position: the same message object can be both a
+	 * prompt's own input and a queued occurrence.
+	 */
+	undeliveredQueuedInput?: (messages: readonly AgentMessage[]) => readonly boolean[];
+
+	/**
 	 * Peeks whether steering messages are queued, without consuming them.
 	 *
 	 * Polled while a tool batch runs (in "wait" mode, only when the batch holds an

@@ -341,6 +341,8 @@ the model reads it, so the transcript records it and removal leaves it. Use it w
 reaching the model, such as context for a mode that ended; it returns what it removed, by queue.
 `clearAllQueues()` empties both queues and takes back everything the run holds and has not delivered;
 delivered input stays the run's, as with `removeQueuedMessages`, and the agent-steering wait starts afresh.
+Input already in a built request that has not reached the provider yet goes out only if that request goes
+out: if the run is aborted before the provider starts, both calls drop it rather than putting it back.
 `withdrawUndeliveredQueuedMessages()` is the abandon path an interrupt takes ahead of an abort, and `reset()`
 discards the conversation: both take back everything the run holds and has not recorded, delivered or not,
 since the response that read it is discarded. The run neither sends nor records what they took back, and

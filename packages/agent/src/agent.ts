@@ -450,6 +450,13 @@ interface LiveSteeredEntry {
 	accepted?: true;
 	/** The provider declined it, so the next request delivers it. */
 	declined?: true;
+	/** A boundary request carries it (it was declined, then put into that request). */
+	inRequest?: true;
+	/**
+	 * A clear or removal took it back while its request was built and not yet started: the request still carries
+	 * it if it goes out, but if the run is aborted first, the run's end drops it instead of putting it back.
+	 */
+	cancelled?: true;
 	/** The steering unit this occurrence was taken in, holding its place in the agent-steering wait. */
 	unit?: TakenSteeringUnit;
 }
@@ -659,6 +666,11 @@ interface QueuedMessageDelivery {
 	handed?: true;
 	/** The loop put the unit into a provider request: it is delivered, and only its record is still to come. */
 	committed?: true;
+	/**
+	 * Messages of this committed unit a clear or removal took back before the request started: the request
+	 * still carries them if it goes out, but if the run is aborted first, the run's end drops them.
+	 */
+	cancelled?: Set<AgentMessage>;
 	/** The steering unit these occurrences were taken in, holding its place in the agent-steering wait. */
 	unit?: TakenSteeringUnit;
 }
@@ -1550,9 +1562,16 @@ export class Agent {
 		const restored: Record<QueuedMessageQueue, AgentMessage[]> = { steering: [], followUp: [] };
 		// Whether each of `restored.steering` is a promoted occurrence.
 		const promoted: boolean[] = [];
+		// Input a clear or removal took back while its request had not started: that request never went out.
+		const dropped: AgentMessage[] = [];
 		// Live steering was taken before anything the run still holds undelivered.
 		this.#liveSteered = this.#liveSteered.filter(entry => {
 			if (entry.controller !== controller) return true;
+			if (entry.message.role === "user") delete entry.message.liveSteered;
+			if (entry.cancelled) {
+				dropped.push(entry.message);
+				return false;
+			}
 			restored.steering.push(entry.message);
 			promoted.push(entry.promoted === true);
 			return false;
@@ -1561,12 +1580,17 @@ export class Agent {
 			if (delivery.controller !== controller) continue;
 			this.#queuedMessageDeliveries.delete(delivery);
 			for (let i = delivery.next; i < delivery.messages.length; i++) {
-				restored[delivery.queue].push(delivery.messages[i]);
+				const message = delivery.messages[i];
+				if (delivery.cancelled?.has(message)) {
+					dropped.push(message);
+					continue;
+				}
+				restored[delivery.queue].push(message);
 				if (delivery.queue === "steering") promoted.push(delivery.promoted?.[i] === true);
 			}
 		}
-		if (restored.steering.length > 0 || restored.followUp.length > 0) {
-			this.queuedMessageGate?.release([...restored.steering, ...restored.followUp]);
+		if (restored.steering.length > 0 || restored.followUp.length > 0 || dropped.length > 0) {
+			this.queuedMessageGate?.release([...restored.steering, ...restored.followUp, ...dropped]);
 		}
 		if (restored.steering.length > 0) {
 			// What the run took is older than what remains of its own class, so the
@@ -1643,11 +1667,11 @@ export class Agent {
 
 	/**
 	 * Take back what the run holds and has not recorded. Input not yet delivered is taken back
-	 * ({@link #takeBack}): the run never sends it. Input already delivered (in a provider request, or handed to
-	 * the provider by live steering) stays the run's when `keepDelivered` (a clear: the model read it, so the
-	 * transcript records it or the run's end puts it back); otherwise it is taken back too (the withdrawal
-	 * ahead of an abort, a reset), and the request's own records of it are skipped, one occurrence each, by
-	 * the holder or batch they belong to.
+	 * ({@link #takeBack}): the run never sends it. With `keepDelivered` (a clear), input handed to the provider
+	 * by live steering stays the run's, and input in a built request goes out only if that request goes out
+	 * (marked cancelled: an abort first drops it). Otherwise (the withdrawal ahead of an abort, a reset) it is
+	 * taken back too, and the request's own records of it are skipped, one occurrence each, by the holder or
+	 * batch they belong to.
 	 */
 	#abandonHeldInput(keepDelivered = false): {
 		withdrawn: Record<QueuedMessageQueue, AgentMessage[]>;
@@ -1669,6 +1693,7 @@ export class Agent {
 		);
 		for (const entry of this.#liveSteered) {
 			if (keepDelivered && entry.committed) {
+				if (entry.inRequest) entry.cancelled = true;
 				keptLive.push(entry);
 				continue;
 			}
@@ -1683,7 +1708,10 @@ export class Agent {
 		}
 		this.#liveSteered = keptLive;
 		for (const delivery of this.#queuedMessageDeliveries) {
-			if (keepDelivered && delivery.committed) continue;
+			if (keepDelivered && delivery.committed) {
+				delivery.cancelled = new Set(delivery.messages.slice(delivery.next));
+				continue;
+			}
 			const pending = delivery.messages.slice(delivery.next);
 			withdrawn[delivery.queue].push(...pending);
 			if (delivery.committed) suppress(delivery.controller, delivery);
@@ -1729,6 +1757,8 @@ export class Agent {
 		const removedBatches = new Set<LiveSteeredBatch>();
 		for (const entry of this.#liveSteered) {
 			if (entry.committed || !shouldRemove(entry.message)) {
+				// In a built request: it goes out with that request, or not at all.
+				if (entry.inRequest && shouldRemove(entry.message)) entry.cancelled = true;
 				live.push(entry);
 				continue;
 			}
@@ -1745,7 +1775,13 @@ export class Agent {
 			}
 		}
 		for (const delivery of this.#queuedMessageDeliveries) {
-			if (delivery.committed) continue;
+			if (delivery.committed) {
+				// In a built request: it goes out with that request, or not at all.
+				for (const message of delivery.messages.slice(delivery.next)) {
+					if (shouldRemove(message)) (delivery.cancelled ??= new Set()).add(message);
+				}
+				continue;
+			}
 			const kept: AgentMessage[] = [];
 			const keptPromoted: boolean[] = [];
 			for (let i = delivery.next; i < delivery.messages.length; i++) {
@@ -1898,6 +1934,7 @@ export class Agent {
 					// Live steering the provider declined is delivered by this request.
 					delete holder.declined;
 					holder.committed = true;
+					holder.inRequest = true;
 				}
 				ledger.push({ message, holder, context });
 			});
@@ -2402,6 +2439,29 @@ export class Agent {
 		if (claim) return claim.messages;
 		const start = this.#nextSteeringUnitStart();
 		return this.#steering.messages.slice(start, this.#steeringUnitEnd(start));
+	}
+
+	/**
+	 * For a turn's inputs, in order, whether the Agent still holds each occurrence for delivery: the run's record
+	 * ledger lists the occurrences its requests carry and have not recorded, in the same order, with the holder
+	 * or batch context of each. Prompt input, asides and reminders are nobody's queued input.
+	 */
+	#undeliveredQueuedInput(controller: AbortController, messages: readonly AgentMessage[]): boolean[] {
+		const ledger = this.#recordLedger.get(controller) ?? [];
+		let next = 0;
+		return messages.map(message => {
+			let at = next;
+			while (at < ledger.length && ledger[at].message !== message) at++;
+			if (at >= ledger.length) return false;
+			next = at + 1;
+			const { holder, context } = ledger[at];
+			if (holder)
+				return "queue" in holder ? this.#queuedMessageDeliveries.has(holder) : this.#liveSteered.includes(holder);
+			if (!context || this.#contextTakenBack.has(context)) return false;
+			return "queue" in context
+				? this.#queuedMessageDeliveries.has(context)
+				: this.#liveSteered.some(entry => entry.batch === context);
+		});
 	}
 
 	/** Dequeued messages not yet in the transcript, e.g. steering a provider
@@ -3287,6 +3347,7 @@ export class Agent {
 				}
 				return this.#dequeueSteeringMessagesAfterHooks(signal ?? loopSignal);
 			},
+			undeliveredQueuedInput: messages => this.#undeliveredQueuedInput(loopAbortController, messages),
 			hasSteeringMessages: () => {
 				const start = this.#nextSteeringUnitStart();
 				return steeringRangeState(this.#steering.messages, start, this.#steeringUnitEnd(start));
