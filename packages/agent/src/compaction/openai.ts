@@ -1095,16 +1095,19 @@ export async function requestRemoteCompaction(
 		// Keep the raw endpoint for relative/custom fetch implementations.
 	}
 	const isChatCompletions = /\/chat\/completions\/?$/.test(endpointPath);
-	const headers: Record<string, string> = { "content-type": "application/json" };
+	const headers = new Headers({ "content-type": "application/json" });
 	if (isChatCompletions) {
-		if (opts?.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;
+		if (opts?.apiKey) headers.set("Authorization", `Bearer ${opts.apiKey}`);
 		const model = opts?.model;
 		const resolveHeaders = model?.resolveHeaders;
 		const configuredHeaders = resolveHeaders
 			? await untilAborted(signal, () => resolveHeaders(signal))
 			: model?.headers;
 		signal?.throwIfAborted();
-		if (configuredHeaders) Object.assign(headers, configuredHeaders);
+		// `set` replaces case-insensitively, so a configured `authorization` overrides the default bearer.
+		if (configuredHeaders) {
+			for (const name in configuredHeaders) headers.set(name, configuredHeaders[name]!);
+		}
 	}
 
 	let body: unknown = isChatCompletions

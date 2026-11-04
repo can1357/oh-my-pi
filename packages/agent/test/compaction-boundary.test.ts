@@ -117,6 +117,29 @@ describe("compaction summary boundaries", () => {
 		expect(sentBody).toMatchObject({ messages: [{ role: "system" }, { content: "extension-transformed summary" }] });
 	});
 
+	test("lets resolved headers replace the default bearer regardless of case", async () => {
+		const model = { ...getModel(), resolveHeaders: async () => ({ authorization: "Bearer gateway-token" }) };
+		let headers: Headers | undefined;
+		await generateSummary(
+			[{ role: "user", content: "conversation", timestamp: 1 }],
+			model,
+			10_000,
+			"test-key",
+			undefined,
+			undefined,
+			undefined,
+			{
+				remoteEndpoint: "https://gateway.example/v1/chat/completions",
+				fetch: async (_input, init) => {
+					headers = new Headers(init?.headers);
+					return new Response(JSON.stringify({ choices: [{ message: { content: "summary" } }] }));
+				},
+			},
+		);
+
+		expect(headers?.get("authorization")).toBe("Bearer gateway-token");
+	});
+
 	test("exposes custom endpoint payloads without sending model credentials to a separate service", async () => {
 		const model = { ...getModel(), headers: { "x-session-id": "private-session" } };
 		let headers: Headers | undefined;
