@@ -59,6 +59,8 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 				<section id="title-target-section" aria-labelledby="title-target"></section><span id="title-target" role="note" title="Titled target"></span>
 				<section id="text-input-section" aria-labelledby="text-input-label"></section><input id="text-input-label" value="Typed name">
 				<section id="area-name-section" aria-labelledby="area"></section>
+				<label>Field <dfn id="label-dfn">required</dfn><input></label>
+				<section id="bare-image-section" aria-labelledby="bare-image-target"></section><input id="bare-image-target" type="image" src="data:,">
 				<form id="form" aria-label="Named form"></form><form id="unnamed-form">Content</form>
 				<header id="header" aria-label="Header"></header><footer id="footer" aria-label="Footer"></footer>
 				${["article", "aside", "main", "nav", "section"].map(tag => `<${tag}><header id="${tag}-header" aria-label="${tag} header"></header><footer id="${tag}-footer" aria-label="${tag} footer"></footer></${tag}>`).join("")}
@@ -171,6 +173,58 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 				expect(String(ternError)).toContain("role/ selectors do not chain");
 			}
 			expect(await page.$$eval('role/region [name="billing-worker" exact] ', elements => elements.length)).toBe(1);
+		} finally {
+			await browser.close();
+		}
+	}, 60_000);
+
+	it("resolves roles under deeply nested asides without recomputing every ancestor", async () => {
+		registerSemanticQueryHandlers(puppeteer);
+		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });
+		try {
+			const page = await browser.newPage();
+			// Each unnamed aside's role depends on its ancestors' roles; recomputed per level, 40 levels never finish.
+			await page.setContent(`${"<aside>".repeat(40)}<header aria-label="Deep">x</header>${"</aside>".repeat(40)}`);
+			expect(await page.$$eval("role/complementary", elements => elements.length)).toBe(1);
+			expect(
+				await page.$$eval("role/generic", elements => elements.filter(e => e.localName === "aside").length),
+			).toBe(39);
+		} finally {
+			await browser.close();
+		}
+	}, 60_000);
+
+	it("reports the role and name a role/ selector takes back from the Tern kit's observe()", async () => {
+		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });
+		try {
+			const page = await browser.newPage();
+			await page.setContent(`<!doctype html>
+				<section title="Title section"><button>A</button></section>
+				<section aria-label="Fallback" aria-labelledby="primary"><h2 id="primary">Primary</h2><button>B</button></section>`);
+			await page.evaluate(`(function () {\n${TERN_KIT_SOURCE}\n})()`);
+			const observed = await page.evaluate(() => {
+				const kit = (
+					globalThis as unknown as {
+						__ompTernKit: {
+							observe(opts: unknown): { elements: { role: string; name: string }[] };
+							count(selector: unknown): number;
+						};
+					}
+				).__ompTernKit;
+				return kit
+					.observe({ includeAll: true })
+					.elements.filter(entry => (entry.role === "region" || entry.role === "generic") && entry.name)
+					.map(entry => {
+						const query = `${entry.role}[name="${entry.name}" exact]`;
+						return [query, kit.count({ engine: "role", query })];
+					});
+			});
+			expect(observed).toEqual(
+				expect.arrayContaining([
+					['region[name="Title section" exact]', 1],
+					['region[name="Primary" exact]', 1],
+				]),
+			);
 		} finally {
 			await browser.close();
 		}

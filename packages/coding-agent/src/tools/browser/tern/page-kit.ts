@@ -339,7 +339,13 @@ const textQueryAll = (root, query, cache, out) => {
 
 // ---- roles and names -----------------------------------------------------------------------
 
-const hasAccessibleLabel = el => !!(el.getAttribute("aria-label") || el.getAttribute("aria-labelledby"));
+// A section is a region only when it has a name, as the role/ handler decides: from its references, label or title.
+const hasAccessibleLabel = el =>
+	!!(
+		idrefText(el, "aria-labelledby") ||
+		normalizeSpace(el.getAttribute("aria-label")) ||
+		normalizeSpace(el.getAttribute("title"))
+	);
 const insideSectioning = el => {
 	for (let current = composedParent(el); current; current = composedParent(current)) {
 		if (["article", "aside", "main", "nav", "section"].includes(current.localName)) return true;
@@ -533,10 +539,11 @@ const contentText = (el, skip, visibility = "visible", followRefs = true) => {
 	return normalizeSpace(out);
 };
 const accessibleName = (el, role) => {
-	const label = normalizeSpace(el.getAttribute("aria-label"));
-	if (label) return label;
+	// aria-labelledby wins over aria-label, as in the role/ handler and Chrome's accessibility tree.
 	const labelledBy = idrefText(el, "aria-labelledby");
 	if (labelledBy) return labelledBy;
+	const label = normalizeSpace(el.getAttribute("aria-label"));
+	if (label) return label;
 	if (el.labels && el.labels.length) {
 		const text = normalizeSpace(Array.from(el.labels, labelEl => contentText(labelEl, el)).join(" "));
 		if (text) return text;
