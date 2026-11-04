@@ -253,6 +253,12 @@ describe("omp_local", () => {
 			argv: [],
 			hostEnv: { PYTHONPATH: "/opt/same-env-secret" },
 		},
+		{
+			name: "an inherited variable holding the value of an inherited OMP_BENCH_GATEWAY_TOKEN",
+			token: "same-env-secret",
+			argv: [],
+			hostEnv: { OMP_BENCH_GATEWAY_TOKEN: "legacy-runner-bearer", REVIEW_ALIAS: "legacy-runner-bearer" },
+		},
 	])("refuses a run with $name before anything prints or starts", ({ token, argv, hostEnv }) => {
 		const saved = { ...process.env };
 		Object.assign(process.env, { METAHARNESS_GATEWAY_TOKEN: token }, hostEnv);
@@ -261,6 +267,24 @@ describe("omp_local", () => {
 			const build = () =>
 				buildHarborEnv(parseArgs(["--model", "openrouter/test-model", ...argv]), "/dev/null", null, "test");
 			expect(build).toThrow(/gateway token/);
+		} finally {
+			for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+			Object.assign(process.env, saved);
+		}
+	});
+
+	it("passes no gateway token variable to Harbor, an inherited OMP_BENCH_GATEWAY_TOKEN included", () => {
+		const saved = { ...process.env };
+		Object.assign(process.env, {
+			METAHARNESS_GATEWAY_TOKEN: "same-env-secret",
+			OMP_BENCH_GATEWAY_TOKEN: "legacy-runner-bearer",
+		});
+		try {
+			// Harbor expands ${NAME} in task files from its own environment; the agent reads its token file.
+			const env = buildHarborEnv(parseArgs(["--model", "openrouter/test-model"]), "/dev/null", null, "test");
+			expect(env.OMP_BENCH_GATEWAY_TOKEN).toBeUndefined();
+			expect(env.METAHARNESS_GATEWAY_TOKEN).toBeUndefined();
+			expect(Object.values(env)).not.toContain("legacy-runner-bearer");
 		} finally {
 			for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
 			Object.assign(process.env, saved);
@@ -959,6 +983,7 @@ describe("manager", () => {
 				return realSpawn(["true"], options as Parameters<typeof realSpawn>[1]);
 			}) as unknown as typeof Bun.spawn);
 			process.env.METAHARNESS_GATEWAY_TOKEN = "review-host-bearer";
+			process.env.OMP_BENCH_GATEWAY_TOKEN = "review-legacy-bearer";
 			try {
 				for (const benchmark of ["edit", "snapcompact"]) {
 					const refused = await refusal(server.port ?? 0, "/api/runs", {
@@ -978,10 +1003,32 @@ describe("manager", () => {
 				expect(spawned).toHaveLength(2);
 				for (const env of spawned) {
 					expect(env.METAHARNESS_GATEWAY_TOKEN).toBeUndefined();
+					expect(env.OMP_BENCH_GATEWAY_TOKEN).toBeUndefined();
 					expect(Object.values(env)).not.toContain("review-host-bearer");
+					expect(Object.values(env)).not.toContain("review-legacy-bearer");
 				}
+				// A token given to a refused launch is still a bearer the manager was given, and the
+				// value of either host token variable is a token too: neither may be stored or copied.
+				for (const known of ["review-edit-bearer", "review-legacy-bearer"]) {
+					expect(await refusal(server.port ?? 0, "/api/experiments", { id: "edit-goal", goal: known })).toContain(
+						"holds the gateway token",
+					);
+					process.env.REVIEW_ALIAS = known;
+					try {
+						const aliased = await refusal(server.port ?? 0, "/api/runs", {
+							benchmark: "edit",
+							model: "openrouter/test-model",
+							jobName: "edit-aliased",
+						});
+						expect(aliased).toContain("the manager's environment.REVIEW_ALIAS holds the gateway token");
+					} finally {
+						delete process.env.REVIEW_ALIAS;
+					}
+				}
+				expect(spawned).toHaveLength(2);
 			} finally {
 				delete process.env.METAHARNESS_GATEWAY_TOKEN;
+				delete process.env.OMP_BENCH_GATEWAY_TOKEN;
 				spawn.mockRestore();
 				await manager.stop();
 			}

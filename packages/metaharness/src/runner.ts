@@ -1609,25 +1609,31 @@ export function buildHarborEnv(
 }
 
 /**
- * Harbor's environment without the token anywhere. Harbor expands `${NAME}` in agent env
- * (`--ae`) and in task files from its own environment, so an inherited variable whose value
- * holds the token is refused before Harbor starts. Harbor hands the agent, and a dry run
- * prints, every OMP_BENCH_* name, so such a name holding the token is refused too; no
- * refusal repeats a name that holds it. The agent reads the token from
- * `OMP_BENCH_GATEWAY_TOKEN_FILE`; Harbor never needs the input variable.
+ * Harbor's environment without a gateway token anywhere. Harbor expands `${NAME}` in agent
+ * env (`--ae`) and in task files from its own environment, so no gateway token variable is
+ * passed on (the agent reads its token from `OMP_BENCH_GATEWAY_TOKEN_FILE`), and an inherited
+ * variable whose value holds the run's token, or the value of an inherited
+ * `OMP_BENCH_GATEWAY_TOKEN`, is refused before Harbor starts. Harbor hands the agent, and a
+ * dry run prints, every OMP_BENCH_* name, so such a name holding a token is refused too; no
+ * refusal repeats a name that holds one.
  */
 function withoutGatewayTokenCopies(env: Record<string, string>, token: string): Record<string, string> {
-	delete env[GATEWAY_TOKEN_INPUT_ENV];
+	const tokens = [token, env.OMP_BENCH_GATEWAY_TOKEN].filter(
+		(value): value is string => value !== undefined && value.length > 0 && value !== NO_AUTH_TOKEN,
+	);
+	for (const name of Object.keys(env)) if (isGatewayTokenVar(name)) delete env[name];
 	for (const [name, value] of Object.entries(env)) {
-		const named = token !== NO_AUTH_TOKEN && token.length > 0 && name.includes(token);
+		const named = tokens.some(known => name.includes(known));
 		if (named && name.startsWith("OMP_BENCH_")) {
 			throw new Error("an OMP_BENCH_* variable in Harbor's environment has the gateway token in its name; unset it");
 		}
-		refuseGatewayTokenIn(
-			value,
-			token,
-			named ? "a variable in Harbor's environment" : `Harbor's environment variable ${name}`,
-		);
+		for (const known of tokens) {
+			refuseGatewayTokenIn(
+				value,
+				known,
+				named ? "a variable in Harbor's environment" : `Harbor's environment variable ${name}`,
+			);
+		}
 	}
 	return env;
 }
