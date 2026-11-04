@@ -75,7 +75,7 @@ describe("agent-loop wait wake delivery", () => {
 			kind: "main",
 			status: "running",
 			session: {
-				drainPendingIrcInboxMessages: () => inbox.splice(0, 1),
+				drainPendingIrcInboxMessages: () => inbox.splice(0),
 				deliverIrcMessage: async (message: IrcMessage) => {
 					inbox.push(message);
 					return "queued";
@@ -321,7 +321,7 @@ describe("agent-loop wait wake delivery", () => {
 				} else if (source === "parent") {
 					expect(result.result.details).toMatchObject({ interrupted: true });
 				} else {
-					expect(result.result.details).toMatchObject({ waited: { from: "Peer", body: payload } });
+					expect(result.result.details).toMatchObject({ waited: [{ from: "Peer", body: payload }] });
 				}
 			});
 		}

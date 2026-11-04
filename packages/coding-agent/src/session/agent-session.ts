@@ -223,7 +223,8 @@ import {
 	obfuscateProviderContext,
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { USER_AWAIT_ID } from "../registry/agent-awaits";
+import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
@@ -1218,6 +1219,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#openTurnObservation: TurnObservation | undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
+	/** Registry recording this agent blocked on the user while a {@link waitForUser} dialog is open. */
+	readonly #agentRegistry: AgentRegistryApi | undefined;
 	#agentKind: "main" | "sub" = "main";
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
@@ -1513,16 +1516,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Runs `dialog`, which waits for the user's answer (`ask`, a tool approval, an extension prompt), with the
 	 * computer turn ended, so an unattended Mac sleeps and locks on its own timer rather than showing the pending
 	 * question. Once the last open dialog settles, if a prompt is still in flight, the turn goes on: the run still active
-	 * in it (a dialog can be that run's control confirmation) and later runs hold the display again.
+	 * in it (a dialog can be that run's control confirmation) and later runs hold the display again. While it is open,
+	 * the agent counts as blocked on the user ({@link USER_AWAIT_ID}), so a peer's wait for its reply ends.
 	 */
 	async waitForUser<T>(dialog: () => Promise<T>): Promise<T> {
 		if (this.#userWaitCount++ === 0) {
 			this.#userWaitEndedTurn = this.#promptInFlightCount > 0;
 			this.#endComputerTurn();
 		}
+		const releaseUserHold = this.#agentId
+			? this.#agentRegistry?.awaits.hold(this.#agentId, [USER_AWAIT_ID], { interruptible: false })
+			: undefined;
 		try {
 			return await dialog();
 		} finally {
+			releaseUserHold?.();
 			if (--this.#userWaitCount === 0 && this.#promptInFlightCount > 0) {
 				if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
 				else if (this.#agentKind === "main") resumeComputerTurnForOwner(this.#eval.getKernelOwnerId());
@@ -2503,8 +2511,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
-		// injection boundary, but also expose a non-consuming interrupt peek so
-		// `wait` can return early before the boundary drains them.
+		// injection boundary; all but broadcasts and progress notes also expose a
+		// non-consuming interrupt peek so `wait` can return early before the boundary drains them.
 		this.agent.hasIrcInterrupts = () => this.#irc.hasInterrupts();
 		// Completion notices (finished background jobs, exited supervised
 		// processes) queue here for the same boundary; peeking them lets a
@@ -2657,6 +2665,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#streamingEditGuard = new StreamingEditGuard(streamGuardsHost);
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
+		this.#agentRegistry = config.agentRegistry;
 		this.#agentKind = config.agentKind ?? "main";
 		// A subagent's streamed text reaches no output sink until the run settles
 		// (the parent sees only the yield), so a failed turn's partial prose is
@@ -12960,8 +12969,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	// IRC Delivery
 	// =========================================================================
 
-	/** Surfaces and consumes pending IRC records before automatic injection. */
-	drainPendingIrcInboxMessages(agentId: string, opts?: { from?: string; limit?: number }): IrcMessage[] {
+	/** Surfaces and consumes every pending IRC record before automatic injection (see {@link IrcBridge.drainInboxMessages}). */
+	drainPendingIrcInboxMessages(agentId: string, opts?: { ifAny?: (msg: IrcMessage) => boolean }): IrcMessage[] {
 		return this.#irc.drainInboxMessages(agentId, opts);
 	}
 

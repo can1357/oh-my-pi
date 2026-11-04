@@ -3,6 +3,7 @@
  * worker's proxies to the main thread's instances (see `./agents`).
  */
 import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import type { IrcWaitFilter } from "../../irc/bus";
 import type { AdoptOptions } from "../../registry/agent-lifecycle";
 import type {
 	AgentHistorySummary,
@@ -82,7 +83,7 @@ export type IrcBusProtocol = {
 	wait: RpcMethod<
 		[
 			agentId: string,
-			filter: { from?: string },
+			filter: IrcWaitFilter,
 			timeoutMs: number,
 			signal?: AbortSignal,
 			options?: { drainPending?: boolean },

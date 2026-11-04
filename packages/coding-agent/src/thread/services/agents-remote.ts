@@ -23,7 +23,7 @@ import type {
 	RegistryEvent,
 	RegistryListener,
 } from "../../registry/agent-registry";
-import type { IrcBusApi } from "../../irc/bus";
+import type { IrcBusApi, IrcWaitFilter } from "../../irc/bus";
 import type { AgentSessionHandle } from "../../session/agent-session-handle";
 import type { RemoteObject } from "../rpc";
 import type { AgentLifecycleProtocol, AgentRegistryProtocol, IrcBusProtocol, UnansweredSend } from "./agents-protocol";
@@ -246,7 +246,7 @@ export class RemoteIrcBus implements IrcBusApi {
 
 	wait(
 		agentId: string,
-		filter: { from?: string },
+		filter: IrcWaitFilter,
 		timeoutMs: number,
 		signal?: AbortSignal,
 		options?: { drainPending?: boolean },

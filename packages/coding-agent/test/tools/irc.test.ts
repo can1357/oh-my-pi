@@ -803,6 +803,34 @@ describe("IRC", () => {
 			expect(await session.agent.hasIrcInterrupts?.()).toBe(true);
 		});
 
+		it("queues a mid-turn broadcast or progress note for the next boundary without interrupting a wait", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+
+			await session.deliverIrcMessage({
+				id: "msg-b",
+				from: "0-Peer",
+				to: "0-Me",
+				body: "editing auth.ts",
+				ts: Date.now(),
+				broadcast: true,
+			});
+			await session.deliverIrcMessage({
+				id: "msg-p",
+				from: "0-Peer",
+				to: "0-Me",
+				body: "halfway",
+				ts: Date.now(),
+				progress: true,
+			});
+			expect(promptSpy).not.toHaveBeenCalled();
+			expect(await session.agent.hasIrcInterrupts?.()).toBe(false);
+			expect(await session.agent.hasQueuedAsides?.()).toBe(false);
+			expect(session.drainPendingIrcInboxMessages("0-Me").map(msg => msg.id)).toEqual(["msg-b", "msg-p"]);
+		});
+
 		it("queues parent IRC as steering while a subagent turn is streaming", async () => {
 			const { session } = createRealSession();
 			sessions.push(session);
