@@ -17,7 +17,14 @@ import { SearchProviderError } from "../types";
 import { clampNumResults, dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, normalizeSearchText, readLimitedText, siteHosts, withHardTimeout } from "./utils";
+import {
+	classifyProviderHttpError,
+	normalizeHttpUrl,
+	normalizeSearchText,
+	readLimitedText,
+	siteHosts,
+	withHardTimeout,
+} from "./utils";
 
 const KEENABLE_SEARCH_URL = "https://api.keenable.ai/v1/search";
 const KEENABLE_PUBLIC_SEARCH_URL = "https://api.keenable.ai/v1/search/public";
@@ -70,7 +77,11 @@ export function buildKeenableBody(
 	maxResults: number,
 ): KeenableSearchBody {
 	const query = parsed.hasDirectives
-		? formatQuery({ ...parsed, sites: [], excludedSites: [], after: undefined, before: undefined }, { phrases: true })
+		? // `raw` is blanked so a directives-only query does not fall back to the verbatim string.
+			formatQuery(
+				{ ...parsed, raw: "", sites: [], excludedSites: [], after: undefined, before: undefined },
+				{ phrases: true },
+			)
 		: parsed.raw.trim();
 	const sites = siteHosts(parsed.sites);
 	const site = sites.length === 1 ? sites[0] : undefined;
@@ -82,16 +93,6 @@ export function buildKeenableBody(
 	if (after) body.published_after = after;
 	if (parsed.before) body.published_before = parsed.before;
 	return body;
-}
-
-function normalizeUrl(value: unknown): string | undefined {
-	if (typeof value !== "string") return undefined;
-	try {
-		const url = new URL(value);
-		return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : undefined;
-	} catch {
-		return undefined;
-	}
 }
 
 async function callKeenableSearch(
@@ -167,7 +168,7 @@ export async function searchKeenable(params: SearchParamsWithFetch): Promise<Sea
 	for (const entry of data.results as unknown[]) {
 		if (typeof entry !== "object" || entry === null) continue;
 		const result = entry as KeenableSearchResult;
-		const url = normalizeUrl(result.url);
+		const url = normalizeHttpUrl(result.url);
 		if (!url || seen.has(url)) continue;
 		seen.add(url);
 		const publishedDate =
