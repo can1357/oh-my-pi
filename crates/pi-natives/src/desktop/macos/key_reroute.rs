@@ -275,12 +275,12 @@ impl Chord {
 
 	/// The latest time ⌘ or ⌃ was down, as of `now`; `held_now` is the
 	/// system's current modifier state, in case a flags change was missed.
-	const fn last(&self, held_now: bool, now: Instant) -> Option<Instant> {
+	const fn last(&mut self, held_now: bool, now: Instant) -> Option<Instant> {
 		if held_now || self.held {
-			Some(now)
-		} else {
-			self.last
+			self.last = Some(now);
 		}
+		self.held = held_now;
+		self.last
 	}
 }
 
@@ -574,7 +574,7 @@ struct TapContext {
 }
 
 impl TapContext {
-	fn signals(&self, now: Instant) -> UserSignals {
+	fn signals(&mut self, now: Instant) -> UserSignals {
 		let held_now = modifier_flags() & SWITCH_MODIFIERS != 0;
 		UserSignals { buttons: mouse_buttons(), last_chord: self.chord.last(held_now, now) }
 	}
@@ -1283,6 +1283,16 @@ mod tests {
 		shift.flags_changed(SHIFT, t0);
 		shift.flags_changed(NONE, t0 + ms(5));
 		assert_eq!(shift.last(false, t0 + ms(10)), None);
+		// A release before the tap starts is absent from its flags events.
+		let mut missed_release = Chord::new(COMMAND, t0);
+		let released = t0 + ms(600);
+		assert_eq!(missed_release.last(false, released), Some(released));
+		let later = released + CHORD_WINDOW + ms(1);
+		let signals =
+			UserSignals { buttons: BUTTONS, last_chord: missed_release.last(false, later) };
+		let mut later_theft = self::theft();
+		later_theft.notify(NEW_FRONT, 1, TARGET, signals, later);
+		assert!(later_theft.reroutes(false, BUTTONS));
 	}
 
 	#[test]
