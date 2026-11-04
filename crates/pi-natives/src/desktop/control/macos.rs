@@ -503,10 +503,22 @@ unsafe extern "C" fn observe_user(_proxy: Ref, kind: u32, event: Ref, user: Ref)
 	event
 }
 
-/// What [`ButtonMonitor`] hands each mouse button press and release: whether
-/// it pressed a button rather than released one, and where the pointer was
-/// when it happened.
+/// What [`ButtonMonitor`] hands each of the user's mouse button presses and
+/// releases: whether it pressed a button rather than released one, and where
+/// the pointer was when it happened.
 pub(crate) type ButtonSeen = Box<dyn Fn(bool, CGPoint) + Send>;
+
+/// Whether a mouse button event of `kind` is the user's press (`Some(true)`)
+/// or release (`Some(false)`); `None` for one this process posted, as its
+/// background clicks reach the session tap too, though they leave the HID
+/// button counters as they were.
+const fn user_button(kind: u32, tag: i64, source_pid: i64, own_pid: i64) -> Option<bool> {
+	if foreign(tag, source_pid, own_pid) {
+		Some(is_pointer_press(kind))
+	} else {
+		None
+	}
+}
 
 unsafe extern "C" fn observe_button(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
 	// SAFETY: the monitor thread retains this stack context through
@@ -520,8 +532,18 @@ unsafe extern "C" fn observe_button(_proxy: Ref, kind: u32, event: Ref, user: Re
 		return event;
 	}
 	if !event.is_null() {
-		// SAFETY: a read-only query of a live event.
-		(context.inner)(is_pointer_press(kind), unsafe { CGEventGetLocation(event) });
+		// SAFETY: documented read-only CGEvent fields and location of a live
+		// event.
+		let (tag, source, point) = unsafe {
+			(
+				CGEventGetIntegerValueField(event, SOURCE_USER_DATA),
+				CGEventGetIntegerValueField(event, SOURCE_UNIX_PID),
+				CGEventGetLocation(event),
+			)
+		};
+		if let Some(press) = user_button(kind, tag, source, i64::from(std::process::id())) {
+			(context.inner)(press, point);
+		}
 	}
 	event
 }
@@ -690,10 +712,10 @@ impl UserInputMonitor {
 	}
 }
 
-/// Hands every mouse button press and release in the session, with where the
-/// pointer was, to a callback on the tap's own thread, which nothing else
-/// holds up, until drop. Without event-listening access the tap starts but
-/// sees nothing.
+/// Hands each of the user's mouse button presses and releases in the session,
+/// with where the pointer was, to a callback on the tap's own thread, which
+/// nothing else holds up, until drop; this process's own are left out.
+/// Without event-listening access the tap starts but sees nothing.
 pub(crate) struct ButtonMonitor {
 	_tap: TapThread,
 }
@@ -828,6 +850,20 @@ mod tests {
 		assert!(!foreign(SYNTHETIC_EVENT_TAG, 4242, own));
 		// An untagged event this process posted is still its own.
 		assert!(!foreign(0, own, own));
+	}
+
+	#[test]
+	fn the_button_tap_hands_on_only_the_users_presses_and_releases() {
+		const LEFT_MOUSE_UP: u32 = 2;
+		let own = 900;
+		assert_eq!(user_button(LEFT_MOUSE_DOWN, 0, 0, own), Some(true));
+		assert_eq!(user_button(LEFT_MOUSE_UP, 0, 0, own), Some(false));
+		assert_eq!(user_button(OTHER_MOUSE_DOWN, 0, 4242, own), Some(true));
+		// A background click of this process's, relayed through the session tap.
+		for kind in [LEFT_MOUSE_DOWN, LEFT_MOUSE_UP] {
+			assert_eq!(user_button(kind, SYNTHETIC_EVENT_TAG, 0, own), None);
+			assert_eq!(user_button(kind, 0, own, own), None);
+		}
 	}
 
 	#[test]
