@@ -443,12 +443,23 @@ describe("Anthropic search answer", () => {
 			],
 			stop_reason: "refusal",
 			stop_details: { type: "refusal", category: "cyber", explanation: "Blocked." },
+			// Top-level counts cover the serving attempt only; the declined one is in `iterations`.
+			usage: {
+				input_tokens: 634,
+				output_tokens: 2395,
+				iterations: [
+					{ type: "message", model: "claude-opus-5-5", input_tokens: 634, output_tokens: 0 },
+					{ type: "message", model: null, input_tokens: 632, output_tokens: 166 },
+					{ type: "fallback_message", model: "claude-opus-4-8", input_tokens: 2, output_tokens: 2229 },
+				],
+			},
 		});
 
 		expect(response.answer).toStartWith("claude-opus-4-8 declined the query (cyber safety classifier): Blocked.");
 		expect(response.answer).not.toContain("Partial cited answer");
 		expect(response.citations).toBeUndefined();
 		expect(response.sources.map(source => source.url)).toEqual(["https://example.com"]);
+		expect(response.usage).toMatchObject({ inputTokens: 1268, outputTokens: 2395 });
 	});
 
 	it("reports search tool error codes instead of failing to iterate them", async () => {
