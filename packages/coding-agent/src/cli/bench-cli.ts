@@ -25,6 +25,8 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { formatModelStringWithRouting } from "../config/model-resolver";
 import { buildServiceTierByFamily, serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
+import { Settings } from "../config/settings";
+import { resolveWebsocketPreference } from "../session/settings-stream-fn";
 import cachePrefixTemplate from "../prompts/bench/cache-prefix.md" with { type: "text" };
 import cachePrefixChunk from "../prompts/bench/cache-prefix-chunk.md" with { type: "text" };
 import cacheSuffixTemplate from "../prompts/bench/cache-suffix.md" with { type: "text" };
@@ -150,6 +152,8 @@ export interface BenchCommandArgs {
 
 export interface BenchRunSuccess {
 	ok: true;
+	/** Observed response transport; absent when the provider exposes no metadata. */
+	transport?: "http" | "websocket";
 	/** Challenge kind this run exercised; absent in `--cache` mode. */
 	challenge?: BenchChallengeKind;
 	/** `--detailed` phase this run belongs to. */
@@ -669,6 +673,7 @@ async function runBenchRequest(
 ): Promise<BenchRunResult> {
 	const startedAt = now();
 	let firstTokenAt: number | undefined;
+	let transport: "http" | "websocket" | undefined;
 	const providerSessionState = new Map<string, ProviderSessionState>();
 	try {
 		const context: Context = {
@@ -693,17 +698,21 @@ async function runBenchRequest(
 						return undefined;
 					}
 				: undefined,
-			onResponse: options.cacheCapture
-				? response => {
-						options.cacheCapture!.requestIdObserved = Boolean(response.requestId);
-						options.cacheCapture!.responseCacheHit = RESPONSE_CACHE_STATUS_HEADERS.some(
-							header => response.headers[header]?.trim().toLowerCase() === "hit",
-						);
-					}
-				: undefined,
+			onResponse: response => {
+				transport = response.metadata?.transport === "websocket" ? "websocket" : "http";
+				// A handshake can describe the connection, never this generation's
+				// request ID or response-cache hit. Usage remains measurable on WS.
+				if (transport === "websocket" || !options.cacheCapture) return;
+				options.cacheCapture.requestIdObserved = Boolean(response.requestId);
+				options.cacheCapture.responseCacheHit = RESPONSE_CACHE_STATUS_HEADERS.some(
+					header => response.headers[header]?.trim().toLowerCase() === "hit",
+				);
+			},
 			disableReasoning: options.disableReasoning,
 			serviceTier: options.serviceTier,
 			providerSessionState,
+			// Keep Codex bench runs on WS as before; the settings wrapper still
+			// gates standard Responses on `providers.openaiResponsesWebsockets`.
 			preferWebsockets: true,
 			// pi-ai opts every OpenRouter request into response caching (1h TTL).
 			// Bench sends a byte-identical request each run, so within the TTL
@@ -756,6 +765,7 @@ async function runBenchRequest(
 		const generationMs = Math.max(0, durationMs - ttftMs);
 		return {
 			ok: true,
+			transport,
 			ttftMs,
 			generationMs,
 			durationMs,
@@ -1111,7 +1121,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		((code: number) => {
 			process.exitCode = code;
 		});
-	const streamFn = deps.streamSimple ?? streamSimple;
+	const baseStreamFn = deps.streamSimple ?? streamSimple;
 	const now = deps.now ?? (() => performance.now());
 	const interactive = deps.stdoutIsTTY ?? process.stdout.isTTY === true;
 	if (command.models.length === 0) {
@@ -1150,6 +1160,12 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 	};
 
 	const runtime = await (deps.createRuntime ?? createDefaultBenchRuntime)();
+	const settings = runtime.settings ?? Settings.isolated({});
+	const streamFn: StreamSimpleFn = (model, context, options) =>
+		baseStreamFn(model, context, {
+			...options,
+			preferWebsockets: resolveWebsocketPreference(settings, model, options?.preferWebsockets),
+		});
 	try {
 		const targets = await resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
 		if (cacheMode) assertCacheModeSupported(targets);
