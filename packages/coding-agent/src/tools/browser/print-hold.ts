@@ -258,6 +258,13 @@ export class PrintHold {
 		const session = await page.createCDPSession();
 		const printHold = new PrintHold(page, session, scope);
 		try {
+			// The loaded document is armed with the first command, ahead of the setup round trips below, during which
+			// its own timers keep running; its frames and the current deadline follow once the setup is in.
+			void session
+				.send("Runtime.evaluate", {
+					expression: printHold.#source(scope === "tab" ? null : SETUP_HOLD_MS, null),
+				})
+				.catch(() => undefined);
 			await session.send("Page.enable");
 			await session.send("Runtime.enable");
 			await session.send("Runtime.addBinding", { name: printHold.#binding });
