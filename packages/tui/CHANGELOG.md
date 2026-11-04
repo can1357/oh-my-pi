@@ -34,7 +34,7 @@
 - Closing an overlay that others were opened over no longer leaves them returning focus to it once they close ([#16476](https://github.com/can1357/oh-my-pi/pull/16476))
 
 ### Changed
-- Setup splash, transition, and outro phases are skipped when `tui.motion` is `none` (`--motion none`), covering the startup splash and the `/setup` wizard ([#18066](https://github.com/can1357/oh-my-pi/issues/18066))
+- Setup splash, transition, and outro phases are skipped when `tui.motion` is `none` (`--motion none`), covering the startup splash and the `/setup` wizard ([#18066](https://github.com/can1357/oh-my-pi/issues/18066), [#18097](https://github.com/can1357/oh-my-pi/pull/18097) by [@Miruameli](https://github.com/Miruameli))
 
 - Tab in the `/usage` Details view now switches back to Overview ([#17962](https://github.com/can1357/oh-my-pi/pull/17962) by [@SuperUserA](https://github.com/SuperUserA))
 
