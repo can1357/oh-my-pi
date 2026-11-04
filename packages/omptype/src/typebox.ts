@@ -56,11 +56,10 @@ interface LegacyTypeBoxCompat<T> {
  * Erased schema surface accepted anywhere this facade takes a schema, native
  * omptype schemas included (those carry no legacy compat members).
  *
- * Members use method syntax so parameter positions stay bivariant: the typed
- * {@link TTyped} form is invariant in its static type (its `in`/`out`
- * validators are), so a concrete `TString` is not assignable to
- * `TTyped<unknown>`. Erasing here is what keeps `TString`, `TObject<…>` and
- * friends assignable to a plain schema annotation.
+ * Members use method syntax so parameter positions stay bivariant. Erasing
+ * here keeps `TString`, `TObject<…>` and friends, and native schemas with
+ * any static type, assignable to a plain schema annotation without relating
+ * their full typed surfaces.
  */
 export interface AnySchema extends EmbeddableSchema {
 	(data: unknown): unknown;
@@ -511,7 +510,8 @@ function tComposite<const E extends readonly TObject<Record<string, AnySchema>>[
 function tUnsafe<T = unknown>(_jsonSchema: Record<string, unknown> = {}): TUnsafe<T> {
 	// Raw JSON Schema is accepted for source compatibility but is not retained or validated:
 	// omptype cannot honestly implement that contract without importing a second validator.
-	return withLegacyCompat(type.unknown as OmpType<T>);
+	// `T` is the caller's claim, as TypeBox's `Unsafe` is: an unknown schema is not a schema of `T`.
+	return withLegacyCompat(type.unknown as unknown as OmpType<T>);
 }
 
 export const Type = {

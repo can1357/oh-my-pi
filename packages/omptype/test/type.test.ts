@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { OmpErrors, Type, type } from "../src";
 import { scope as arkScope } from "../src/ark";
+import type { FluentType } from "../src/type";
 
 /** Call count that guarantees the JIT has kicked in (threshold is 3). */
 const JIT = 5;
@@ -151,6 +152,90 @@ describe("morphs", () => {
 });
 
 describe("methods", () => {
+	it("widened views keep their original runtime validators and hidden object keys", () => {
+		const broad: FluentType<unknown> = type("string");
+		const object: FluentType<{ id: number }> = type({ id: "number", name: "string" });
+		const extracted = broad.extract("string");
+		expect(extracted.assert("ok")).toBe("ok");
+		expect(extracted(1)).toBeInstanceOf(OmpErrors);
+		expect(broad.extract(type("string")).assert("ok")).toBe("ok");
+		expect(object.keyof().assert("name")).toBe("name");
+		expect(object.describe("user").keyof().assert("name")).toBe("name");
+		expect(object.partial().keyof().assert("name")).toBe("name");
+		expect(object.required().keyof().assert("name")).toBe("name");
+		expect(object.omit("id").keyof().assert("name")).toBe("name");
+		expect(object.pick("id").assert({ id: 1 })).toEqual({ id: 1 });
+		expect(object.omit("id").assert({ name: "Ada" })).toEqual({ name: "Ada" });
+	});
+
+	it("widened schema operands do not erase retained values or hidden merge replacements", () => {
+		const target: FluentType<unknown> = type("string");
+		expect(type("string | number").exclude(target).assert(1)).toBe(1);
+		expect(target.exclude("number").assert("ok")).toBe("ok");
+		const replacement: FluentType<{}> = type({ id: "string" });
+		expect(type({ id: "number", name: "string" }).merge(replacement).assert({ id: "x", name: "Ada" })).toEqual({
+			id: "x",
+			name: "Ada",
+		});
+		const optional: FluentType<{ value?: string }> = type({ value: "undefined" });
+		expect(optional.required().assert({ value: undefined })).toEqual({ value: undefined });
+	});
+
+	it("detached key validators validate the bound receiver, including hidden keys after widening", () => {
+		const concrete = type({ id: "number", name: "string" });
+		const widened: FluentType<{ id: number }> = concrete;
+		for (const keys of [
+			concrete.keyof.bind(concrete)(),
+			concrete.keyof.call(concrete),
+			concrete.keyof.apply(concrete, []),
+			widened.keyof.bind(widened)(),
+			widened.keyof.call(widened),
+			widened.keyof.apply(widened, []),
+		]) {
+			expect(keys.from("name")).toBe("name");
+			expect(keys("missing")).toBeInstanceOf(OmpErrors);
+		}
+		const other = type({ email: "string" });
+		const extracted = concrete.keyof;
+		for (const keys of [extracted.bind(other)(), extracted.call(other), extracted.apply(other, [])]) {
+			expect(keys.from("email")).toBe("email");
+			expect(keys("id")).toBeInstanceOf(OmpErrors);
+		}
+	});
+
+	it("object-definition spreads replace hidden fields in every merge path and either property order", () => {
+		const hidden: FluentType<{}> = type({ id: "string" });
+		for (const schema of [
+			type({ id: "number" }).merge({ "...": hidden }),
+			type({ id: "number" }).merge({ "...": type({ "...": hidden }) }),
+			type.keywords.Merge({ id: "number" }, { "...": hidden }),
+			type.merge({ id: "number" }, { "...": hidden }),
+			type({ id: "number", "...": hidden }),
+			type("null").or({ id: "number", "...": hidden }),
+		]) {
+			expect(schema.assert({ id: "replacement" })).toEqual({ id: "replacement" });
+			expect(schema({ id: 1 })).toBeInstanceOf(OmpErrors);
+		}
+		expect(type({ "...": type({ id: "string" }), id: "number" }).assert({ id: 1 })).toEqual({ id: 1 });
+	});
+
+	it("concrete exclusion, required values, and output keys retain their runtime contracts", () => {
+		const excluded = type("string | number").exclude(type("string"));
+		expect(excluded.assert(42)).toBe(42);
+		expect(excluded("not retained")).toBeInstanceOf(OmpErrors);
+		const required = type({ "value?": "string" }).required();
+		expect(required.assert({ value: "ok" })).toEqual({ value: "ok" });
+		expect(required({ value: undefined })).toBeInstanceOf(OmpErrors);
+		expect(type({ "value?": "string | undefined" }).required().assert({ value: undefined })).toEqual({
+			value: undefined,
+		});
+		const schema = type({ id: "number", name: "string" });
+		const view: FluentType<{ id: number }> = schema;
+		expect(schema.out.keyof().from("name")).toBe("name");
+		expect(type(["keyof", view]).from("name")).toBe("name");
+		expect(type("keyof", view).from("name")).toBe("name");
+	});
+
 	it("supports ArkType-compatible Type checks", () => {
 		const schema = type({ kind: "'first'" }).or({ kind: "'second'", enabled: "boolean = false" });
 		expect(schema).toBeInstanceOf(Type);

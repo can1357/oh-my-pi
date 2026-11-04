@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Schemas are consistently assignable to schemas of their declared supertypes ([#17898](https://github.com/can1357/oh-my-pi/pull/17898) by [@sjawhar](https://github.com/sjawhar))
+- Exported schemas, schema factories, and fluent members can be included in consumers' generated TypeScript declarations ([#17898](https://github.com/can1357/oh-my-pi/pull/17898) by [@sjawhar](https://github.com/sjawhar))
 ### Breaking Changes
 
 - `fromJsonSchema` returns an opaque validator for the whole document: object-shape methods (`.pick()`, `.props`, …) no longer apply to imported schemas, `format` is an annotation unless `formats` supplies a check, and malformed or unresolvable `$ref`s throw `invalid $ref`/`unresolved $ref`

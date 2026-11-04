@@ -2,11 +2,13 @@ import { type OmpErrors, OmpTypeError } from "./errors";
 import { type EmbeddableSchema, embed, type IR, IR_BRAND, type PropIR } from "./ir";
 import { type NarrowContext, type Type, type } from "./type";
 
-interface OptionalSchemaMarker {
+/** Marks an optional Zod-compatible property during object-shape inference. */
+export interface OptionalSchemaMarker {
 	readonly _optional: true;
 }
 
-interface RefineOptions {
+/** Custom validation messages accepted by Zod-compatible refinements. */
+export interface RefineOptions {
 	message?: string;
 	error?: string;
 }

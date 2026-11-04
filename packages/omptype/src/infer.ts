@@ -1,4 +1,5 @@
 /** Type-level input and output inference for definitions accepted by omptype. */
+import type { SchemaAcceptance, SchemaFacts, schemaFacts, schemaKeys } from "./schema-inference";
 
 type Whitespace = " " | "\n" | "\r" | "\t";
 
@@ -266,10 +267,21 @@ type InputOptional<def extends object> = {
 interface DefBox<def> {
 	readonly out: InferDef<def>;
 	readonly in: InferDefIn<def>;
+	readonly keys: InferSchemaKeys<def>;
+	readonly requiredOut: InferRequiredDef<def>;
+	readonly requiredIn: InferRequiredDefIn<def>;
 }
 
 type OutputSpread<def extends object> = "..." extends keyof def ? DefBox<def["..."]>["out"] : unknown;
 type InputSpread<def extends object> = "..." extends keyof def ? DefBox<def["..."]>["in"] : unknown;
+type SpreadKeys<def extends object> = "..." extends keyof def ? DefBox<def["..."]>["keys"] : never;
+
+// Property order is not represented by an object type, so either side may replace a shared key.
+type SpreadObject<local, spread, keys extends PropertyKey> = [keys] extends [never]
+	? Simplify<local>
+	: [Extract<keyof local, keys>] extends [never]
+		? Simplify<local & spread>
+		: Simplify<Omit<spread, keyof local> & local> | Simplify<Omit<local, keys> & spread>;
 type OutputIndex<def extends object> = "[string]" extends keyof def
 	? Record<string, DefBox<def["[string]"]>["out"]>
 	: unknown;
@@ -280,14 +292,14 @@ type InputIndex<def extends object> = "[string]" extends keyof def
 type InferObject<def extends object> = "[string]" extends keyof def
 	? [DefinitionKeys<def>] extends [never]
 		? Record<string, DefBox<def["[string]"]>["out"]>
-		: Simplify<OutputRequired<def> & OutputOptional<def> & OutputSpread<def>> & OutputIndex<def>
-	: Simplify<OutputRequired<def> & OutputOptional<def> & OutputSpread<def>>;
+		: SpreadObject<OutputRequired<def> & OutputOptional<def>, OutputSpread<def>, SpreadKeys<def>> & OutputIndex<def>
+	: SpreadObject<OutputRequired<def> & OutputOptional<def>, OutputSpread<def>, SpreadKeys<def>>;
 
 type InferObjectIn<def extends object> = "[string]" extends keyof def
 	? [DefinitionKeys<def>] extends [never]
 		? Record<string, DefBox<def["[string]"]>["in"]>
-		: Simplify<InputRequired<def> & InputOptional<def> & InputSpread<def>> & InputIndex<def>
-	: Simplify<InputRequired<def> & InputOptional<def> & InputSpread<def>>;
+		: SpreadObject<InputRequired<def> & InputOptional<def>, InputSpread<def>, SpreadKeys<def>> & InputIndex<def>
+	: SpreadObject<InputRequired<def> & InputOptional<def>, InputSpread<def>, SpreadKeys<def>>;
 
 /** Object-literal inference used by fluent composition overloads. */
 export type InferObjectDef<def extends object> = InferObject<def>;
@@ -349,10 +361,18 @@ type LiteralOptionalIn<def extends object> = {
 };
 
 /** Object-literal inference that unwraps embedded schema values one level deep. */
-export type InferObjectLiteral<def extends object> = Simplify<LiteralRequired<def> & LiteralOptional<def>>;
+export type InferObjectLiteral<def extends object> = SpreadObject<
+	LiteralRequired<def> & LiteralOptional<def>,
+	OutputSpread<def>,
+	SpreadKeys<def>
+>;
 
 /** Input-side object-literal inference (embedded schemas contribute `inferIn`). */
-export type InferObjectLiteralIn<def extends object> = Simplify<LiteralRequiredIn<def> & LiteralOptionalIn<def>>;
+export type InferObjectLiteralIn<def extends object> = SpreadObject<
+	LiteralRequiredIn<def> & LiteralOptionalIn<def>,
+	InputSpread<def>,
+	SpreadKeys<def>
+>;
 
 type InstanceOf<ctor> = ctor extends abstract new (...args: never[]) => infer instance ? instance : never;
 type SpreadOutput<def> = InferDef<def> extends readonly (infer element)[] ? element[] : never[];
@@ -413,7 +433,7 @@ export type InferDef<def = unknown> =
 										: def extends readonly [infer base, ":", unknown] | readonly [infer base, "@", unknown]
 											? InferDef<base>
 											: def extends readonly ["keyof", infer base]
-												? keyof InferDef<base>
+												? InferSchemaKeys<base>
 												: def extends readonly ["instanceof", ...infer constructors]
 													? InstanceOf<constructors[number]>
 													: def extends readonly ["===", ...infer values]
@@ -445,7 +465,7 @@ export type InferDefIn<def = unknown> =
 									: def extends readonly [infer base, ":", unknown] | readonly [infer base, "@", unknown]
 										? InferDefIn<base>
 										: def extends readonly ["keyof", infer base]
-											? keyof InferDefIn<base>
+											? InferSchemaKeys<base>
 											: def extends readonly ["instanceof", ...infer constructors]
 												? InstanceOf<constructors[number]>
 												: def extends readonly ["===", ...infer values]
@@ -455,3 +475,140 @@ export type InferDefIn<def = unknown> =
 														: def extends object
 															? InferObjectIn<def>
 															: unknown;
+
+/** Required properties without discarding an explicitly accepted undefined value. */
+export type RequiredValues<value> = { [key in keyof Required<value>]: value[key] };
+
+type InferredSchema = { readonly infer: unknown; readonly inferIn: unknown };
+
+/** Possible structural keys, including keys hidden by a schema annotation. */
+export type InferSchemaKeys<def> =
+	IsAny<def> extends true
+		? PropertyKey
+		: def extends InferredSchema & { readonly [schemaKeys]?: infer keys extends PropertyKey }
+			? keys
+			: def extends readonly [infer left, "|", infer right]
+				? InferSchemaKeys<left> & InferSchemaKeys<right>
+				: def extends readonly [infer left, "&", infer right]
+					? InferSchemaKeys<left> | InferSchemaKeys<right>
+					: def extends readonly [infer base, "=>" | "|>" | ":" | "@", unknown]
+						? InferSchemaKeys<base>
+						: def extends { readonly "...": infer base }
+							? InferSchemaKeys<base> | keyof InferDefIn<def>
+							: unknown extends InferDefIn<def>
+								? PropertyKey
+								: keyof InferDefIn<def>;
+
+type RequiredProperties<def extends object> = {
+	-readonly [key in DefinitionKeys<def> as PropName<key>]-?: InferDef<UnwrapProperty<def[key]>>;
+};
+type RequiredPropertiesIn<def extends object> = {
+	-readonly [key in DefinitionKeys<def> as PropName<key>]-?: InferDefIn<UnwrapProperty<def[key]>>;
+};
+type RequiredSpread<def extends object> = "..." extends keyof def ? DefBox<def["..."]>["requiredOut"] : unknown;
+type RequiredSpreadIn<def extends object> = "..." extends keyof def ? DefBox<def["..."]>["requiredIn"] : unknown;
+
+/** Output of making a definition's structural properties required. */
+export type InferRequiredDef<def> =
+	IsAny<def> extends true
+		? unknown
+		: def extends InferredSchema & { readonly [schemaFacts]?: infer facts }
+			? facts extends SchemaFacts<infer required, unknown, PropertyKey, unknown, unknown>
+				? required
+				: RequiredValues<InferDef<def>>
+			: def extends readonly unknown[]
+				? RequiredValues<InferDef<def>>
+				: def extends object
+					? SpreadObject<RequiredProperties<def>, RequiredSpread<def>, SpreadKeys<def>> & OutputIndex<def>
+					: RequiredValues<InferDef<def>>;
+
+/** Input of making a definition's structural properties required. */
+export type InferRequiredDefIn<def> =
+	IsAny<def> extends true
+		? unknown
+		: def extends InferredSchema & { readonly [schemaFacts]?: infer facts }
+			? facts extends SchemaFacts<unknown, infer required, PropertyKey, unknown, unknown>
+				? required
+				: RequiredValues<InferDefIn<def>>
+			: def extends readonly unknown[]
+				? RequiredValues<InferDefIn<def>>
+				: def extends object
+					? SpreadObject<RequiredPropertiesIn<def>, RequiredSpreadIn<def>, SpreadKeys<def>> & InputIndex<def>
+					: RequiredValues<InferDefIn<def>>;
+
+type ExactString<text extends string> =
+	Trim<text> extends infer value extends string
+		? value extends `${infer left}|${infer right}`
+			? ExactString<left> extends true
+				? ExactString<right>
+				: false
+			: value extends
+						| "string"
+						| "number"
+						| "boolean"
+						| "bigint"
+						| "symbol"
+						| "null"
+						| "undefined"
+						| "unknown"
+						| "object"
+						| "true"
+						| "false"
+						| `'${string}'`
+						| `"${string}"`
+						| `${number}`
+				? true
+				: false
+		: false;
+type ExactDefinition<def> =
+	IsAny<def> extends true
+		? false
+		: def extends InferredSchema & { readonly [schemaFacts]?: infer facts }
+			? facts extends SchemaFacts<unknown, unknown, PropertyKey, SchemaAcceptance<infer _value>, unknown>
+				? true
+				: false
+			: def extends string
+				? ExactString<def>
+				: def extends readonly unknown[]
+					? false
+					: def extends object
+						? Extract<keyof def, "+" | "..." | "[string]" | `${string}?`> extends never
+							? false extends { [key in keyof def]: ExactDefinition<def[key]> }[keyof def]
+								? false
+								: true
+							: false
+						: false;
+type FactsOutputKeys<def> = def extends InferredSchema & { readonly [schemaFacts]?: infer facts }
+	? facts extends SchemaFacts<unknown, unknown, infer keys, unknown, unknown>
+		? keys
+		: PropertyKey
+	: def extends readonly [unknown, "=>", unknown]
+		? PropertyKey
+		: def extends readonly [unknown, "|>", infer target]
+			? FactsOutputKeys<target>
+			: def extends readonly [infer left, "|", infer right]
+				? FactsOutputKeys<left> & FactsOutputKeys<right>
+				: def extends readonly [infer left, "&", infer right]
+					? FactsOutputKeys<left> | FactsOutputKeys<right>
+					: InferSchemaKeys<def>;
+type FactsOutputRequired<def> = def extends readonly [unknown, "=>", unknown]
+	? unknown
+	: def extends readonly [unknown, "|>", infer target]
+		? InferRequiredDef<target>
+		: InferRequiredDef<def>;
+
+/** Concrete structural facts; annotations of a schema do not reconstruct erased knowledge. */
+export type InferSchemaFacts<def> =
+	IsAny<def> extends true
+		? unknown
+		: def extends InferredSchema & { readonly [schemaFacts]?: infer facts }
+			? facts
+			: SchemaFacts<
+					InferRequiredDef<def>,
+					InferRequiredDefIn<def>,
+					FactsOutputKeys<def>,
+					ExactDefinition<def> extends true
+						? SchemaAcceptance<def extends string ? InferDef<def> : InferDef<def> & object>
+						: unknown,
+					FactsOutputRequired<def>
+				>;
