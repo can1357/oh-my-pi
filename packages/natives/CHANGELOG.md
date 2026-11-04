@@ -28,6 +28,9 @@
 ### Fixed
 
 - Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
+- Fixed Wayland input hanging during libei device discovery ([#13210](https://github.com/can1357/oh-my-pi/pull/13210) by [@Komzpa](https://github.com/Komzpa))
+### Fixed
+
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
 ### Fixed
 
