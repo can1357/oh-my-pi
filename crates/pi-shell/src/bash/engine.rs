@@ -137,7 +137,9 @@ impl Engine {
 		mode: ModeId,
 		features: Features,
 	) -> Arc<Unit> {
-		let unit = ir::compile(cc, src, mode, features);
+		let unit = ir::lower_deferred(cc, src, mode, features).unwrap_or_else(|what| {
+			ir::abort_unit(cc.span.slice(src), mode, features, cc.line, vec![what.into()], 0, 2)
+		});
 		self.intern(unit)
 	}
 

@@ -1059,12 +1059,14 @@ export class Agent {
 		const runController = this.#abortController;
 		if (!prepare) {
 			this.#queuedMessageDeliveries.add({ queue, controller: runController, messages, next: 0, additional: [] });
+			this.#emitQueueChanged();
 			return messages;
 		}
 
 		const claim: QueuedMessageClaim = { messages, controller: new AbortController() };
 		this.#queuedMessageClaims[queue] = claim;
 		const preparationSignal = AbortSignal.any([signal, claim.controller.signal]);
+		this.#emitQueueChanged();
 		try {
 			const preparation = await prepare(messages, preparationSignal, queue);
 			signal.throwIfAborted();
@@ -1084,6 +1086,7 @@ export class Agent {
 				next: 0,
 				additional: additional ?? [],
 			});
+			this.#emitQueueChanged();
 			return additional?.length ? [...messages, ...additional] : messages;
 		} catch (error) {
 			if (signal.aborted) throw error;
@@ -1359,11 +1362,9 @@ export class Agent {
 		this.#state.messages = ms.slice();
 	}
 
-	/** Signal that the steering/follow-up queue contents may have changed. Every
-	 *  queue mutator below calls this once after mutating, so external layers
-	 *  (AgentSession's `queue_update` coalescing) have a single seam to observe
-	 *  enqueue, dequeue-on-delivery, clear, and restore without emits scattered
-	 *  across every call site that queues or dequeues a message. */
+	/** Signal after a queue transition has settled its pending, claim, and
+	 *  delivery state, so AgentSession's `queue_update` coalescing observes
+	 *  a consistent snapshot across enqueue, preparation, delivery, and restore. */
 	#emitQueueChanged(): void {
 		for (const listener of this.#queueListeners) {
 			try {
@@ -1614,14 +1615,12 @@ export class Agent {
 	#dequeueSteeringMessages(): AgentMessage[] {
 		const messages = this.#nextDeliveryBatch("steering");
 		this.#steeringQueue = this.#steeringQueue.slice(messages.length);
-		if (messages.length > 0) this.#emitQueueChanged();
 		return messages;
 	}
 
 	#dequeueFollowUpMessages(): AgentMessage[] {
 		const messages = this.#nextDeliveryBatch("followUp");
 		this.#followUpQueue = this.#followUpQueue.slice(messages.length);
-		if (messages.length > 0) this.#emitQueueChanged();
 		return messages;
 	}
 
