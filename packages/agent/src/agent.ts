@@ -1384,6 +1384,19 @@ export class Agent {
 		}
 	}
 
+	/** Report a safe-boundary park/resume transition; a throwing observer never disrupts the loop. */
+	#emitPauseChanged(paused: boolean): void {
+		for (const listener of this.#pauseListeners) {
+			try {
+				listener(paused);
+			} catch (err) {
+				logger.warn("Agent pause listener threw", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
+	}
+
 	replaceQueues(steering: AgentMessage[], followUp: AgentMessage[]) {
 		this.#steeringQueue = steering.slice();
 		this.#followUpQueue = followUp.slice();
@@ -2073,7 +2086,7 @@ export class Agent {
 			onPauseChange: paused => {
 				if (this.#isPaused === paused) return;
 				this.#isPaused = paused;
-				for (const listener of this.#pauseListeners) listener(paused);
+				this.#emitPauseChanged(paused);
 			},
 			getToolChoice,
 			softToolRequirementState: this.#softToolRequirementState,
