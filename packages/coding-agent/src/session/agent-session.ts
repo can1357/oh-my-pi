@@ -2731,9 +2731,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#modelMentions.syncFromBranch();
 		this.#goalRuntime = new GoalRuntime({
 			getState: () => this.#goalModeState,
-			setState: state => {
-				this.#goalModeState = state;
-			},
+			setState: state => this.setGoalModeState(state),
 			getCurrentUsage: () => this.#goalUsage(),
 			emit: event => {
 				if (event.type === "goal_updated") {

@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, expect, it } from "bun:test";
+import { afterEach, beforeAll, expect, it, spyOn } from "bun:test";
 import { Agent, type QueuedMessagePreparation } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -324,6 +324,30 @@ it("delivers current policy after a custom session entry changes during preparat
 	expect(request).toContain("CURRENT_READONLY_POLICY");
 	expect(request).not.toContain("OBSOLETE_ALLOWED_POLICY");
 	expect(JSON.stringify(await h.saved())).toContain('"enabled":false');
+});
+
+it("delivers current goal policy after wall-clock accounting changes without a journal entry", async () => {
+	const h = await setup([]);
+	await h.session.goalRuntime.createGoal({ objective: "account current work" });
+	h.setPolicy(() => [`GOAL_SECONDS_${h.session.getGoalModeState()!.goal.timeUsedSeconds}`]);
+	const hook = h.holdHook();
+	const turn = h.session.prompt("use current goal accounting");
+	await hook.entered;
+	const entries = h.manager.getEntries().length;
+	const now = h.session.goalRuntime.snapshot.wallClock.lastAccountedAt + 2000;
+	const clock = spyOn(Date, "now").mockReturnValue(now);
+	try {
+		await h.session.goalRuntime.flushUsage("suppressed");
+	} finally {
+		clock.mockRestore();
+	}
+	expect(h.session.getGoalModeState()!.goal.timeUsedSeconds).toBe(2);
+	expect(h.manager.getEntries()).toHaveLength(entries);
+	hook.release();
+	await turn;
+	const policy = JSON.stringify(h.mock.calls[0]!.context.systemPrompt);
+	expect(policy).toContain("GOAL_SECONDS_2");
+	expect(policy).not.toContain("GOAL_SECONDS_0");
 });
 
 it("delivers a preparation whose own hook appends a custom entry without repeating the hook", async () => {
