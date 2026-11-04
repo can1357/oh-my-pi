@@ -799,6 +799,51 @@ describe("date-cwd-reminder", () => {
 				expect(placements.length).toBe(sizeBeforeReopen);
 			});
 
+			it("keeps a moved control ahead of a newer control already at its new turn when the session reopens", () => {
+				const { placements, journal } = createJournal();
+				const first: Message = { role: "user", content: "task", timestamp: 1 };
+				const result: Message = {
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "read",
+					content: [{ type: "text", text: "notes" }],
+					isError: false,
+					timestamp: 3,
+				};
+				const history = [first, createAssistantMessage("calling a tool"), result];
+				const status = (): Message => ({ role: "user", content: "STATUS", timestamp: 0 });
+				// An earlier injector anchored the day-two control on the hook's status message...
+				const earlier = new DateCwdReminderInjector(journal);
+				earlier.transform({ systemPrompt: ["system"], messages: [...history, status()] }, "2026-08-14", "/work");
+				earlier.transform({ systemPrompt: ["system"], messages: [...history, status()] }, "2026-08-15", "/work");
+				// ...and the day-three control already sits after the tool result.
+				journal.record({
+					conversation: "user:1:",
+					turn: "toolResult:3",
+					reminder: renderDateCwdReminder("2026-08-16", "/work"),
+					placement: "control",
+				});
+				const datesOf = (injector: DateCwdReminderInjector) => {
+					const tail = status();
+					markPerCallContextMessage(tail);
+					const out = injector.transform(
+						{ systemPrompt: ["system"], messages: [...history, tail] },
+						"2026-08-16",
+						"/work",
+					);
+					return out.messages.flatMap(message => {
+						const match = JSON.stringify(message.content).match(/2026-08-1\d/);
+						return match ? [match[0]] : [];
+					});
+				};
+				// The resume moves day two after the tool result, ahead of day three, and journals the move.
+				expect(datesOf(new DateCwdReminderInjector(journal))).toEqual(["2026-08-14", "2026-08-15", "2026-08-16"]);
+				const sizeAfterMove = placements.length;
+				// A reopen replays the journal, the move last: day two keeps its place.
+				expect(datesOf(new DateCwdReminderInjector(journal))).toEqual(["2026-08-14", "2026-08-15", "2026-08-16"]);
+				expect(placements.length).toBe(sizeAfterMove);
+			});
+
 			it("dates the first turn today when the journal has no reminder for it", () => {
 				const { journal } = createJournal();
 				const out = new DateCwdReminderInjector(journal).transform(

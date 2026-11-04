@@ -472,14 +472,18 @@ export class DateCwdReminderInjector {
 			if (index === undefined) continue;
 			lastSent = Math.max(lastSent, index);
 			if (placement.placement === "control") {
+				const control = { anchor: turn, message: createReminderControl(placement.reminder) };
+				// A journaled move replaces the control at its old anchor where it stands, so it keeps its
+				// order ahead of any newer control later placed at the same turn.
+				let moved = -1;
 				if (placement.movedFrom !== undefined) {
 					const from = placement.movedFrom === conversation ? root : placement.movedFrom;
-					const moved = state.controls.findLastIndex(
-						control => control.anchor === from && control.message.content === placement.reminder,
+					moved = state.controls.findLastIndex(
+						existing => existing.anchor === from && existing.message.content === placement.reminder,
 					);
-					if (moved !== -1) state.controls.splice(moved, 1);
 				}
-				state.controls.push({ anchor: turn, message: createReminderControl(placement.reminder) });
+				if (moved === -1) state.controls.push(control);
+				else state.controls[moved] = control;
 				continue;
 			}
 			const source = messages[index]!;
