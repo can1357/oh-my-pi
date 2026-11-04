@@ -319,6 +319,21 @@ Run `omp <command> --help` for each command's own flags and examples.
 
 `__complete` is an internal, hidden subcommand used by shell completion scripts.
 
+### Isolated task trees
+
+`omp worktree list` shows the task-isolation sandboxes under the worktree root
+(`OMP_WORKTREE_DIR`, `worktree.base`, or `~/.omp/wt`) with the reason each is
+kept, and the patches start-up recovery saved under `<root>/.recovered/`.
+`omp worktree clear` removes sandboxes whose owner has exited; a sandbox kept
+because its changes could not be saved, and the saved patches, are never
+removed by it (`--all` removes the former, never the latter).
+
+An interactive or RPC session sweeps the root once it has started: a sandbox
+whose owner died is removed when it holds nothing beyond what its task started
+from, and otherwise its changes are saved first as a patch and a `.json` sidecar
+naming the source repository, base commit, owner session and task, and how to
+apply it. The session shows a notice saying what was saved and where.
+
 ### Worktree clones
 
 When `worktree.clone` is enabled, `omp worktree add` and other clone-first

@@ -1381,6 +1381,11 @@ export interface RpcModeOptions {
 	createDictationController?: RpcDictationControllerFactory;
 	/** The session's MCP manager, so `/mcp` builtins resolve and reconnect live servers. */
 	mcpManager?: MCPManager;
+	/**
+	 * Background start-up work whose notices must reach the client: run once the
+	 * session's events are forwarded, so a notice it emits is not emitted to nobody.
+	 */
+	startDeferredStartupWork?: () => void;
 }
 
 /**
@@ -1395,6 +1400,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		input = claimRpcInput(),
 		createLiveSession,
 		createDictationController,
+		startDeferredStartupWork,
 	} = options;
 	// Signal to RPC clients that the server is ready to accept commands
 	// Suppress terminal notifications: they write \x07 (BEL) or OSC sequences directly to
@@ -1801,6 +1807,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		promptResults.observe(event);
 		settleWatcher.observe(event);
 	});
+	startDeferredStartupWork?.();
 	await goalController.reconcile();
 	await goalController.settled();
 

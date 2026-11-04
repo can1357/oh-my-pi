@@ -1148,6 +1148,7 @@ async function runStructuredSubagentDispatch(
 					buildCommitMessage: makeIsolationCommitMessage(request.session),
 					buildFailureResult: buildFailureResult(request, policy, id, Date.now()),
 					onSubprocessResult,
+					ownerSessionId: request.session.getSessionId?.() ?? undefined,
 				});
 			}
 		} finally {

@@ -12,6 +12,9 @@
  *     marker naming the live omp process; a
  *     sandbox whose owner is still running is reported `live` and never
  *     removed without `--all`, so `clear` reclaims only crashed leftovers.
+ *   - **Recovered patches** (`task/isolation-recovery.ts`): `.recovered/`
+ *     holds what the start-up sweep saved from dead owners' sandboxes. Listed,
+ *     never removed.
  *
  * Legacy entries from before the encoding change keep working because git still
  * tracks them by branch name. This command exists to GC them on demand.
@@ -30,6 +33,7 @@ import {
 	requireSandboxLockHeld,
 	withSandboxLock,
 	ISOLATION_OWNER_FILE,
+	ISOLATION_RECOVERED_DIR,
 	readRetainedMountBackend,
 	resolveSandboxIdentity,
 } from "../task/isolation-ownership";
@@ -37,7 +41,7 @@ import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree"
 
 import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
 
-type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray";
+type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray" | "recovered-patch";
 
 const TASK_ISOLATION_MOUNT_DIRS = ["m", "merged"] as const;
 
@@ -66,6 +70,8 @@ export interface WorktreeEntry {
 	 * sees it, and never removed: a failure to look is not a licence to delete.
 	 */
 	keep?: boolean;
+	/** For a recovered patch: whose work it is and how to apply it, from its sidecar. */
+	recovery?: { taskId?: string; ownerSessionId?: string; apply?: string; nestedPatches?: number };
 }
 
 export interface AddWorktreeOptions {
@@ -242,15 +248,26 @@ export async function listWorktrees(options: ListWorktreesOptions): Promise<void
 	}
 	let live = 0;
 	let orphaned = 0;
+	let recovered = 0;
 	for (const entry of entries) {
-		const tag = entry.orphanReason ? chalk.yellow("orphaned") : chalk.green("live    ");
+		const tag =
+			entry.kind === "recovered-patch"
+				? chalk.cyan("recovered")
+				: entry.orphanReason
+					? chalk.yellow("orphaned")
+					: chalk.green("live    ");
 		const detail = formatEntryDetail(entry);
 		console.log(`${tag}  ${entry.path}`);
 		if (detail) console.log(`          ${chalk.dim(detail)}`);
-		if (entry.orphanReason) orphaned += 1;
+		if (entry.kind === "recovered-patch") recovered += 1;
+		else if (entry.orphanReason) orphaned += 1;
 		else live += 1;
 	}
-	console.log(chalk.dim(`\n${live} live · ${orphaned} orphaned · ${entries.length} total`));
+	console.log(
+		chalk.dim(
+			`\n${live} live · ${orphaned} orphaned${recovered > 0 ? ` · ${recovered} recovered` : ""} · ${entries.length} total`,
+		),
+	);
 }
 
 export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ removed: number; failed: number }> {
@@ -283,7 +300,12 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 	for (const target of targets) {
 		try {
 			if (target.keep) {
-				results.push({ path: target.path, ok: true, skipped: true, reason: target.orphanReason });
+				results.push({
+					path: target.path,
+					ok: true,
+					skipped: true,
+					reason: target.orphanReason ?? target.keptReason,
+				});
 				continue;
 			}
 			const removal = await removeEntry(target, options.all);
@@ -348,6 +370,13 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 	const entries: WorktreeEntry[] = [];
 	for (const name of topLevel) {
 		const dir = path.join(root, name);
+		// The start-up sweep's saved patches: listed so the user finds them,
+		// and never removed, `--all` included — they are the only copy of work
+		// whose tree is already gone.
+		if (name === ISOLATION_RECOVERED_DIR) {
+			entries.push(...(await listRecoveredPatches(dir)));
+			continue;
+		}
 		// Never followed: an entry that is a symlink names something outside
 		// what `omp` made here, and resolving it sent the removal to a directory
 		// outside the worktree directory. It is listed, and kept.
@@ -454,8 +483,59 @@ async function classifyContainer(dir: string): Promise<{ children: WorktreeEntry
 	};
 }
 
+/**
+ * The patches the start-up sweep saved from dead owners' sandboxes, one entry
+ * per task (its nested-repo patches are counted on it), each kept.
+ */
+async function listRecoveredPatches(dir: string): Promise<WorktreeEntry[]> {
+	const unreadable = (reason: string): WorktreeEntry[] => [
+		{ path: dir, kind: "recovered-patch", keptReason: `recovered patches; ${reason}`, keep: true },
+	];
+	const stat = await fs.lstatLookup(dir);
+	if (stat.kind === "absent") return [];
+	if (stat.kind === "unknown") return unreadable(`could not be read (${stat.reason})`);
+	if (!stat.value.isDirectory()) return unreadable("not a directory");
+	const listing = await fs.readdirLookup(dir);
+	if (listing.kind === "absent") return [];
+	if (listing.kind === "unknown") return unreadable(`could not be listed (${listing.reason})`);
+	const names = listing.value;
+	const entries: WorktreeEntry[] = [];
+	for (const name of names.filter(file => file.endsWith(".patch") && !file.includes(".nested-")).sort()) {
+		const stem = name.slice(0, -".patch".length);
+		const sidecar = await fs.readJsonLookup(path.join(dir, `${stem}.json`));
+		const value = sidecar.kind === "found" ? sidecar.value : undefined;
+		const field = (key: string): string | undefined => {
+			if (typeof value !== "object" || value === null || !(key in value)) return undefined;
+			const found: unknown = Reflect.get(value, key);
+			return typeof found === "string" ? found : undefined;
+		};
+		entries.push({
+			path: path.join(dir, name),
+			kind: "recovered-patch",
+			keep: true,
+			recovery: {
+				taskId: field("taskId"),
+				ownerSessionId: field("ownerSessionId"),
+				apply: field("apply"),
+				nestedPatches: names.filter(file => file.startsWith(`${stem}.nested-`) && file.endsWith(".patch")).length,
+			},
+		});
+	}
+	return entries;
+}
+
 /** What a removal found when it came to act. */
-type Removal = { removed: true } | { removed: false; reason: string };
+export type Removal = { removed: true } | { removed: false; reason: string };
+
+/**
+ * Remove the task-isolation sandbox at `dir` by the same removal `clear` runs:
+ * under its sandbox lock, classified again at the moment of removal, and only
+ * when it is still reclaimable. For the start-up sweep, which must not have a
+ * removal of its own.
+ */
+export async function removeIsolationSandbox(dir: string): Promise<Removal> {
+	return await removeEntry({ path: dir, kind: "task-isolation" }, false);
+}
 
 /**
  * Remove one scanned entry, deciding again at the moment of removal.
@@ -672,6 +752,14 @@ function formatEntryDetail(entry: WorktreeEntry): string {
 		parts.push("task-isolation sandbox");
 	} else if (entry.kind === "empty") {
 		parts.push("legacy project shell");
+	} else if (entry.kind === "recovered-patch") {
+		const recovery = entry.recovery;
+		if (recovery) {
+			parts.push(`changes saved from a dead owner's tree · task ${recovery.taskId ?? "unknown"}`);
+			if (recovery.ownerSessionId) parts.push(`session ${recovery.ownerSessionId}`);
+			if (recovery.nestedPatches) parts.push(`${recovery.nestedPatches} nested-repo patch(es) beside it`);
+			if (recovery.apply) parts.push(recovery.apply);
+		}
 	} else {
 		parts.push("unrecognized contents");
 	}

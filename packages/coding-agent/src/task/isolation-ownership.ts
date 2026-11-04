@@ -10,7 +10,14 @@ import * as fs from "./isolation-fs";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { acquireFileLock, getWorktreesDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import {
+	acquireFileLock,
+	type FileLockHandle,
+	getWorktreesDir,
+	logger,
+	Snowflake,
+	tryAcquireFileLock,
+} from "@oh-my-pi/pi-utils";
 import { hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
 
 /**
@@ -377,6 +384,16 @@ export async function decideIsolationReclaim(baseDir: string): Promise<Isolation
 	if (typeof decoded !== "object" || decoded === null) {
 		return { reclaimable: false, reason: "owner marker unreadable (not an object)" };
 	}
+	// A sandbox kept because its changes could not be saved holds what may be
+	// the only copy of them, whoever owns it now. Nothing that reclaims without
+	// being told to — the start-up sweep, a plain clear — removes it.
+	const kept = await readIsolationKeptReason(baseDir);
+	if (kept !== undefined) {
+		return {
+			reclaimable: false,
+			reason: `kept because its changes could not be saved: ${kept}; it may hold the only copy (use --all to remove)`,
+		};
+	}
 	// Asked before the retired shortcut: a directory its owner finished with
 	// can still hold a writer that has not, and "retired" is a statement about
 	// the owner alone.
@@ -426,6 +443,40 @@ export async function decideIsolationReclaim(baseDir: string): Promise<Isolation
 	}
 	return { reclaimable: true, reason: "task-isolation leftover (no live task owns it)" };
 }
+
+/**
+ * Record, inside a sandbox, of why it was kept when it was due to go: its
+ * changes could not be captured, delivered or saved. `omp worktree list` shows
+ * the reason, and only `--all` removes the sandbox while it is there.
+ */
+export const ISOLATION_KEPT_FILE = ".omp-isolation-kept.json";
+
+/** Say, in the sandbox itself, why it is being kept. */
+export async function recordIsolationKept(baseDir: string, reason: string): Promise<void> {
+	await writeFileAtomically(
+		path.join(baseDir, ISOLATION_KEPT_FILE),
+		JSON.stringify({ reason, keptAt: new Date().toISOString() }),
+	);
+}
+
+/** Why the sandbox at `baseDir` was kept, or `undefined` when nothing says it was. */
+export async function readIsolationKeptReason(baseDir: string): Promise<string | undefined> {
+	const found = await fs.readJsonLookup(path.join(baseDir, ISOLATION_KEPT_FILE));
+	if (found.kind === "absent") return undefined;
+	// A record that is there and cannot be read still says the sandbox was
+	// kept; reading it as absent would let it be reclaimed.
+	if (found.kind === "unknown") return `its keep record could not be read (${found.reason})`;
+	const decoded = found.value;
+	return typeof decoded === "object" && decoded !== null && "reason" in decoded && typeof decoded.reason === "string"
+		? decoded.reason
+		: "its keep record is malformed";
+}
+
+/**
+ * Directory, under the worktree root, where the start-up sweep saves the
+ * uncaptured changes of sandboxes whose owner died, as patches with a sidecar.
+ */
+export const ISOLATION_RECOVERED_DIR = ".recovered";
 
 /** Suffix of the name a reclaim moves a whole sandbox to before deleting it. */
 export const ISOLATION_REMOVING_SUFFIX = ".removing-";
@@ -736,47 +787,7 @@ export async function acquireSandboxLockWithNotice(baseDir: string, purpose: str
 	notice.unref?.();
 	reminder.unref?.();
 	try {
-		const lock = await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT);
-		// The handle carries its own state, so a hold recorded against it stops
-		// being a hold the moment it is released.
-		let released = false;
-		const handle: SandboxLockHandle = {
-			baseDir,
-			release: () => {
-				// Idempotent **after a release that worked**: a caller that
-				// hands this handle to a continuation and a `finally` that
-				// also releases must not unlock twice.
-				//
-				// Deliberately not idempotent after one that threw. The flag
-				// is set only once the unlock has succeeded, so a retry calls
-				// the native release again — which is the behaviour a caller
-				// needs, because a throw leaves it unknown whether the lock
-				// was dropped, and treating the attempt as done would strand
-				// it for the life of the process. The measured consequence is
-				// a second native call on that path, and that is the trade:
-				// one extra call against a lock nobody can release.
-				if (released) return;
-				// Marked released only once the lock really is: a native
-				// release that threw left the wrapper saying "not held" while
-				// the lock was still held, which is the same disagreement the
-				// boolean caused, with the sign reversed.
-				lock.release();
-				released = true;
-				heldByThisProcess.delete(handle);
-			},
-			// Asked of the lock, not of the boolean beside it: a handle released
-			// by another route, or one whose release threw, leaves the two
-			// disagreeing, and the hold is whatever the lock says it is.
-			isHeld: () => !released && lock.acquired,
-		};
-		// Reachable for as long as it is held. A teardown whose capture outran
-		// its deadline sits for ever in `await capturing`, and its frame was
-		// not enough to keep the native lock alive: the lock was dropped about
-		// a second after the deadline and the workspace this teardown was
-		// holding became free to take, which is the opposite of what the
-		// deadline promises.
-		heldByThisProcess.add(handle);
-		return handle;
+		return holdSandboxLock(baseDir, await acquireFileLock(baseDir, SANDBOX_LOCK_WAIT));
 	} catch (error) {
 		throw await describeSandboxLockFailure(baseDir, purpose, error, Date.now() - startedAt);
 	} finally {
@@ -784,4 +795,61 @@ export async function acquireSandboxLockWithNotice(baseDir: string, purpose: str
 		clearTimeout(notice);
 		clearInterval(reminder);
 	}
+}
+
+/**
+ * Take a sandbox lock only if nobody holds it, without waiting.
+ *
+ * For a caller that must not queue: the start-up sweep, which runs in every
+ * starting omp, leaves a sandbox somebody else is building, tearing down or
+ * recovering to that somebody — two starting processes then never both act
+ * on one dead tree, and neither blocks on the other.
+ */
+export function tryAcquireSandboxLock(baseDir: string): SandboxLockHandle | undefined {
+	const lock = tryAcquireFileLock(baseDir);
+	return lock ? holdSandboxLock(baseDir, lock) : undefined;
+}
+
+/** Wrap an acquired lock as the hold the rest of this module asks about. */
+function holdSandboxLock(baseDir: string, lock: FileLockHandle): SandboxLockHandle {
+	// The handle carries its own state, so a hold recorded against it stops
+	// being a hold the moment it is released.
+	let released = false;
+	const handle: SandboxLockHandle = {
+		baseDir,
+		release: () => {
+			// Idempotent **after a release that worked**: a caller that
+			// hands this handle to a continuation and a `finally` that
+			// also releases must not unlock twice.
+			//
+			// Deliberately not idempotent after one that threw. The flag
+			// is set only once the unlock has succeeded, so a retry calls
+			// the native release again — which is the behaviour a caller
+			// needs, because a throw leaves it unknown whether the lock
+			// was dropped, and treating the attempt as done would strand
+			// it for the life of the process. The measured consequence is
+			// a second native call on that path, and that is the trade:
+			// one extra call against a lock nobody can release.
+			if (released) return;
+			// Marked released only once the lock really is: a native
+			// release that threw left the wrapper saying "not held" while
+			// the lock was still held, which is the same disagreement the
+			// boolean caused, with the sign reversed.
+			lock.release();
+			released = true;
+			heldByThisProcess.delete(handle);
+		},
+		// Asked of the lock, not of the boolean beside it: a handle released
+		// by another route, or one whose release threw, leaves the two
+		// disagreeing, and the hold is whatever the lock says it is.
+		isHeld: () => !released && lock.acquired,
+	};
+	// Reachable for as long as it is held. A teardown whose capture outran
+	// its deadline sits for ever in `await capturing`, and its frame was
+	// not enough to keep the native lock alive: the lock was dropped about
+	// a second after the deadline and the workspace this teardown was
+	// holding became free to take, which is the opposite of what the
+	// deadline promises.
+	heldByThisProcess.add(handle);
+	return handle;
 }

@@ -124,6 +124,14 @@ export interface RepoBaseline {
 	 * baselines, which have nothing to say about it.
 	 */
 	unreadUntracked?: string[];
+	/**
+	 * The tree of the working state this baseline describes — `headCommit`
+	 * plus the three patches above — once it has been written into the source
+	 * repository's object store. A delta is measured against it; a baseline
+	 * read back from {@link ISOLATION_BASELINE_FILE} carries only this and
+	 * `headCommit`, with the patches empty.
+	 */
+	tree?: string;
 }
 
 /** Baseline state for the project, including any nested git repos. */
@@ -482,13 +490,188 @@ export async function captureIsolationBaseline(
 	isolationDir: string,
 	repoRoot: string,
 	budgetBytes: number = ISOLATION_BASELINE_MAX_CONTENT_BYTES,
+	owner?: IsolationBaselineOwner,
 ): Promise<WorktreeBaseline> {
 	const { root, nested } = await captureBaseline(isolationDir, budgetBytes, [isolationDir, repoRoot]);
-	return {
+	const baseline: WorktreeBaseline = {
 		root: { ...root, repoRoot },
 		nested: nested.map(({ relativePath, baseline }) => ({
 			relativePath,
 			baseline: { ...baseline, repoRoot: path.join(repoRoot, relativePath) },
+		})),
+	};
+	if (owner) await recordIsolationBaseline(path.dirname(isolationDir), baseline, owner);
+	return baseline;
+}
+
+/**
+ * File beside a sandbox's `m` that says what its delta is measured from and
+ * whose work it is.
+ *
+ * A baseline lives in the memory of the process that took it, so when that
+ * process dies — a crash, a kill, a host restart — nobody can tell the
+ * sandbox's own work from the parent's uncommitted changes it was copied with,
+ * and the tree could only be kept for ever or deleted blind. Recorded, the
+ * start-up sweep measures the same exact delta the owner would have, and saves
+ * it before it removes anything.
+ */
+export const ISOLATION_BASELINE_FILE = ".omp-isolation-baseline.json";
+
+/** Whose work a sandbox holds, recorded with its baseline. */
+export interface IsolationBaselineOwner {
+	/** Task (agent) id the sandbox was made for. */
+	taskId: string;
+	/** Session that spawned the task, when known. */
+	ownerSessionId?: string;
+	/** Task branch the work is committed to in branch mode. */
+	branch?: string;
+}
+
+/** What a later process needs to measure a sandbox's delta once its owner is gone. */
+export interface IsolationBaselineRecord extends IsolationBaselineOwner {
+	version: 1;
+	/** The checkout the sandbox was copied from, and whose object store holds the trees. */
+	sourceRepo: string;
+	root: { headCommit: string; tree: string };
+	nested: Array<{ relativePath: string; headCommit: string; tree: string }>;
+	/**
+	 * {@link deltaFingerprint} of the last delta its owner wrote out — the
+	 * run-end patch or branch, or a release's — as a string. A delta that still
+	 * matches it was captured by somebody, and the tree holds nothing more.
+	 */
+	deliveredFingerprint?: string;
+}
+
+/** Fingerprint of a captured delta, to tell a workspace unchanged since its last capture. */
+export function deltaFingerprint(rootPatch: string, nestedPatches: readonly NestedRepoPatch[]): string {
+	let key = rootPatch;
+	for (const { relativePath, patch } of nestedPatches) key += `\0${relativePath}\0${patch}`;
+	return String(fs.hash(key));
+}
+
+/**
+ * Write each repo's baseline tree into its source object store and record
+ * them, with the owner, in {@link ISOLATION_BASELINE_FILE}.
+ *
+ * The trees are kept on `baseline`, so the owner's own captures reuse them
+ * instead of building them a second time. Recording is what makes a crash
+ * recoverable, not what makes the run work, so a failure is logged and the
+ * run goes on: a sandbox without a record is one the sweep keeps.
+ */
+async function recordIsolationBaseline(
+	baseDir: string,
+	baseline: WorktreeBaseline,
+	owner: IsolationBaselineOwner,
+): Promise<void> {
+	try {
+		const treeOf = async (rb: RepoBaseline): Promise<string> => {
+			rb.tree ??= await writeSyntheticTree(rb.repoRoot, rb.headCommit, [rb.staged, rb.unstaged, rb.untrackedPatch]);
+			return rb.tree;
+		};
+		const record: IsolationBaselineRecord = {
+			version: 1,
+			...owner,
+			sourceRepo: baseline.root.repoRoot,
+			root: { headCommit: baseline.root.headCommit, tree: await treeOf(baseline.root) },
+			nested: [],
+		};
+		for (const { relativePath, baseline: nb } of baseline.nested) {
+			record.nested.push({ relativePath, headCommit: nb.headCommit, tree: await treeOf(nb) });
+		}
+		await writeBaselineRecord(baseDir, record);
+	} catch (error) {
+		logger.warn("isolation baseline could not be recorded; if this run dies, its workspace is kept for the user", {
+			baseDir,
+			error: errorMessage(error),
+		});
+	}
+}
+
+/** Replace the record in one step, synced, so a reader never sees half of one. */
+async function writeBaselineRecord(baseDir: string, record: IsolationBaselineRecord): Promise<void> {
+	const file = path.join(baseDir, ISOLATION_BASELINE_FILE);
+	const temporary = `${file}.${process.pid}.${Snowflake.next()}.tmp`;
+	try {
+		await fs.writeFileDurably(temporary, JSON.stringify(record));
+		await fs.rename(temporary, file);
+	} catch (error) {
+		await fs.rm(temporary, { force: true }).catch(() => undefined);
+		throw error;
+	}
+}
+
+/**
+ * Note on the record that the delta with `fingerprint` has been written out,
+ * so a sweep after a crash does not save, as uncaptured, work its owner
+ * already delivered. Best effort: a missing note costs a duplicate patch,
+ * never a lost one.
+ */
+export async function noteDeliveredIsolationDelta(mergedDir: string, fingerprint: string): Promise<void> {
+	const baseDir = path.dirname(mergedDir);
+	const record = await readIsolationBaselineRecord(baseDir);
+	if (record.kind !== "found") return;
+	try {
+		await writeBaselineRecord(baseDir, { ...record.value, deliveredFingerprint: fingerprint });
+	} catch (error) {
+		logger.debug("isolation delivered-delta note could not be written", { baseDir, error: errorMessage(error) });
+	}
+}
+
+/** The {@link ISOLATION_BASELINE_FILE} of the sandbox at `baseDir`, checked field by field. */
+export async function readIsolationBaselineRecord(baseDir: string): Promise<fs.Lookup<IsolationBaselineRecord>> {
+	const found = await fs.readJsonLookup(path.join(baseDir, ISOLATION_BASELINE_FILE));
+	if (found.kind !== "found") return found;
+	const value = found.value;
+	const isText = (candidate: unknown): candidate is string => typeof candidate === "string" && candidate.length > 0;
+	const isRepo = (candidate: unknown): candidate is { headCommit: string; tree: string } =>
+		typeof candidate === "object" &&
+		candidate !== null &&
+		"headCommit" in candidate &&
+		isText(candidate.headCommit) &&
+		"tree" in candidate &&
+		isText(candidate.tree);
+	if (
+		typeof value !== "object" ||
+		value === null ||
+		!("version" in value) ||
+		value.version !== 1 ||
+		!("taskId" in value) ||
+		!isText(value.taskId) ||
+		!("sourceRepo" in value) ||
+		!isText(value.sourceRepo) ||
+		!("root" in value) ||
+		!isRepo(value.root) ||
+		!("nested" in value) ||
+		!Array.isArray(value.nested) ||
+		!value.nested.every(
+			(entry: unknown) =>
+				isRepo(entry) &&
+				"relativePath" in entry &&
+				typeof entry.relativePath === "string" &&
+				entry.relativePath.length > 0,
+		)
+	) {
+		return fs.UNKNOWN("the baseline record is malformed");
+	}
+	return fs.FOUND(value as IsolationBaselineRecord);
+}
+
+/** The baseline a {@link IsolationBaselineRecord} stands for, ready for {@link captureDeltaPatch}. */
+export function baselineFromRecord(record: IsolationBaselineRecord): WorktreeBaseline {
+	const repo = (repoRoot: string, headCommit: string, tree: string): RepoBaseline => ({
+		repoRoot,
+		headCommit,
+		tree,
+		staged: "",
+		unstaged: "",
+		untracked: [],
+		untrackedPatch: "",
+	});
+	return {
+		root: repo(record.sourceRepo, record.root.headCommit, record.root.tree),
+		nested: record.nested.map(entry => ({
+			relativePath: entry.relativePath,
+			baseline: repo(path.join(record.sourceRepo, entry.relativePath), entry.headCommit, entry.tree),
 		})),
 	};
 }
@@ -542,11 +725,10 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 	const committedPatch =
 		currentHead && currentHead !== rb.headCommit ? await diffTree(repo, rb.headCommit, currentHead) : "";
 
-	const baselineTree = await writeSyntheticTree(objectRepoDir, rb.headCommit, [
-		rb.staged,
-		rb.unstaged,
-		rb.untrackedPatch,
-	]);
+	// Written once, when the baseline was recorded; built here only for a
+	// baseline that was not.
+	const baselineTree =
+		rb.tree ?? (await writeSyntheticTree(objectRepoDir, rb.headCommit, [rb.staged, rb.unstaged, rb.untrackedPatch]));
 	const currentTree = await writeSyntheticTree(objectRepoDir, rb.headCommit, [
 		committedPatch,
 		currentStaged,
@@ -831,9 +1013,10 @@ function errorMessage(err: unknown): string {
  * hook child still running after the owner died writes into a path nobody can
  * take, instead of into the workspace a successor has since built at the same
  * name — which is how a successor's data was read and overwritten. The cost is
- * a directory nothing removes on its own: the user's `omp worktree clear`
- * removes it once its owner has gone, and `--all` removes one that cannot
- * prove it is finished. The cost of reuse was a user's work.
+ * a directory its owner must remove: once the owner has gone, the next omp to
+ * start saves what it holds and removes it (`isolation-recovery`), the user's
+ * `omp worktree clear` removes it, and `--all` removes one that cannot prove
+ * it is finished. The cost of reuse was a user's work.
  */
 function getTaskIsolationSegment(repoRoot: string, id: string): string {
 	const key = `${path.resolve(repoRoot)}\0${id}`;

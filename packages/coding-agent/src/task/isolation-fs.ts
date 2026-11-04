@@ -89,6 +89,39 @@ export async function writeFileDeep(file: string, contents: string): Promise<voi
 }
 
 /**
+ * Create `file` with `contents` and flush it to the disk before returning.
+ *
+ * `wx`, so an existing file is never replaced, and synced, so a rename that
+ * publishes it afterwards publishes bytes that are on the disk: without the
+ * sync, a crash after the rename could leave an empty file under the final
+ * name while the tree it was saved from is already gone.
+ */
+export async function writeFileDurably(file: string, contents: string): Promise<void> {
+	const handle = await fs.open(file, "wx", 0o600);
+	try {
+		await handle.writeFile(contents);
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+}
+
+/**
+ * Flush a directory's entries — the renames into it — to the disk. Windows
+ * cannot open a directory for this and makes renames durable itself, so there
+ * it does nothing.
+ */
+export async function syncDirectory(dir: string): Promise<void> {
+	if (process.platform === "win32") return;
+	const handle = await fs.open(dir, constants.O_RDONLY | constants.O_DIRECTORY);
+	try {
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+}
+
+/**
  * A directory held by what it is, not by where it is.
  *
  * A path names whatever sits there when it is next resolved. A sandbox moved

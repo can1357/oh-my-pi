@@ -58,10 +58,12 @@ import {
 	cleanupTaskBranches,
 	type CommitToBranchResult,
 	commitToBranch,
+	deltaFingerprint,
 	ensureIsolation,
 	getRepoRoot,
 	type IsolationHandle,
 	mergeTaskBranches,
+	noteDeliveredIsolationDelta,
 	type WorktreeBaseline,
 } from "./worktree";
 
@@ -162,13 +164,6 @@ export async function prepareIsolationContext(cwd: string): Promise<IsolationCon
 	return { repoRoot: await getRepoRoot(cwd) };
 }
 
-/** Fingerprint of a captured delta, used to skip re-committing an unchanged workspace on release. */
-function deltaFingerprint(rootPatch: string, nestedPatches: readonly NestedRepoPatch[]): bigint | number {
-	let key = rootPatch;
-	for (const { relativePath, patch } of nestedPatches) key += `\0${relativePath}\0${patch}`;
-	return fs.hash(key);
-}
-
 /** Build a commit-message callback for branch/nested commits; `undefined` ⇒ fall back to generic message. */
 export type BuildCommitMessage = () => undefined | ((diff: string) => Promise<string | null>);
 
@@ -224,6 +219,8 @@ export interface IsolatedRunOptions {
 	buildFailureResult: (err: unknown) => SingleResult;
 	/** Observe the real child result before post-run isolation work. */
 	onSubprocessResult?: (result: SingleResult) => void;
+	/** Session that spawned the task; recorded with the sandbox so recovered work names its owner. */
+	ownerSessionId?: string;
 }
 
 /**
@@ -270,7 +267,7 @@ interface IsolationPatchArtifacts {
 interface IsolationPatchCapture {
 	artifacts: IsolationPatchArtifacts;
 	/** {@link deltaFingerprint} of the written delta. */
-	fingerprint: bigint | number;
+	fingerprint: string;
 }
 
 /**
@@ -550,7 +547,7 @@ function renderIsolationError(context: IsolationErrorContext): string {
 export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
 	let taskBaseline: WorktreeBaseline | undefined;
 	/** Fingerprint of the delta already handed to the caller at run end; release only re-captures on change. */
-	let handedOff: bigint | number | undefined;
+	let handedOff: string | undefined;
 	let handle: IsolationHandle | undefined;
 	let deferredCleanup: Promise<void> | undefined;
 	let retainWorkspace = false;
@@ -665,6 +662,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			branchName: commitResult?.branchName,
 			nestedPatchPaths: patchResult.nestedPatchPaths,
 		});
+		await noteDeliveredIsolationDelta(sandbox.mergedDir, capture.fingerprint);
 	};
 	const releaseIsolation = (): Promise<void> => {
 		releasePromise ??= (async () => {
@@ -721,7 +719,13 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
 		const isolationBackend = handle.backend;
-		const baseline = await captureIsolationBaseline(isolationDir, opts.context.repoRoot);
+		// Recorded beside the sandbox with whose work it is, so a start-up sweep
+		// after this process dies can save what nobody captured.
+		const baseline = await captureIsolationBaseline(isolationDir, opts.context.repoRoot, undefined, {
+			taskId: opts.agentId,
+			...(opts.ownerSessionId ? { ownerSessionId: opts.ownerSessionId } : {}),
+			...(opts.mergeMode === "branch" ? { branch: `omp/task/${opts.agentId}` } : {}),
+		});
 		taskBaseline = baseline;
 		/**
 		 * What this run hands the child, built only once there is a child to
@@ -883,6 +887,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				}
 			}
 			handedOff = deltaFingerprint(commitResult?.rootPatch ?? "", commitResult?.nestedPatches ?? []);
+			await noteDeliveredIsolationDelta(isolationDir, handedOff);
 			// The branch holds the root-repo work, but nested-repo patches exist
 			// only in memory until written; the workspace goes away in `finally`.
 			try {
@@ -923,6 +928,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			try {
 				const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
 				handedOff = capture.fingerprint;
+				await noteDeliveredIsolationDelta(isolationDir, handedOff);
 				return await reportingFinalCapture(rememberAgentArtifacts({ ...result, ...capture.artifacts }));
 			} catch (patchErr) {
 				retainWorkspace = true;

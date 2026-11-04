@@ -155,6 +155,7 @@ import { EventBus } from "./utils/event-bus";
 import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
 import { CliUsageError } from "./cli/usage-error";
 import { scheduleGcAutoCompress } from "./cli/gc-auto-compress";
+import { startIsolationRecovery } from "./task/isolation-recovery";
 import { cfgGcAutoCompress } from "./cli/gc-settings";
 import { cfgGoalEnabled } from "./goals/settings";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
@@ -2715,6 +2716,10 @@ export async function runRootCommand(
 			// runInteractiveMode calls it once init has painted. Neither feeds the first
 			// prompt: fallback-chain validation only produces header warnings, and the
 			// background refresh already raced the first prompt when it ran earlier.
+			// Isolated task trees a dead omp left behind are saved or removed in the
+			// background once the session is up; the user hears what was done.
+			const recoveryNotice = (level: "info" | "warning", message: string): void =>
+				session.emitNotice(level, message, "isolation-recovery");
 			const startDeferredStartupWork = (): void => {
 				void session.loadDeferredExtensions();
 				modelRegistry.refreshInBackground();
@@ -2731,6 +2736,7 @@ export async function runRootCommand(
 						logger.warn("Background session compression failed to start", { error: String(error) }),
 					);
 				}
+				startIsolationRecovery(recoveryNotice);
 			};
 			const refreshScopedModelsAfterLogin = async () => {
 				await rebuildScopedModels(session, parsedArgs, modelRegistry, settingsInstance);
@@ -2819,6 +2825,7 @@ export async function runRootCommand(
 					subagentEventBus,
 					mcpManager,
 					input: rpcInput,
+					startDeferredStartupWork: () => startIsolationRecovery(recoveryNotice),
 				});
 			} else if (isInteractive) {
 				const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);

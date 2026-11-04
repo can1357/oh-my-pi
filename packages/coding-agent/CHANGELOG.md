@@ -4,6 +4,7 @@
 
 ### Added
 
+- Starting an interactive or RPC session saves the uncaptured changes of isolated task trees left by an omp that exited as patches under `<worktree root>/.recovered/` (with a sidecar saying how to apply them), removes trees that hold nothing more, and shows a notice; `omp worktree list` lists the saved patches ([#PENDING](https://github.com/can1357/oh-my-pi/pull/PENDING) by [@sjawhar](https://github.com/sjawhar))
 - Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 - Added a `:level` suffix to `^` model tags, such as `^openai-codex/gpt-6-astra:high`, that sets the tagged subagent's initial effort. Typing `:` after a mention lists the model's supported levels. The task tool's `effort` hint and `task.maxEffort` do not override the tagged level, and a per-call `model` for that agent fails as a conflict ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
