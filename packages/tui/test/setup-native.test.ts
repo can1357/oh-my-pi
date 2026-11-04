@@ -79,6 +79,7 @@ function fakeUi(): { host: SetupUiHost; renders: () => number; shown: () => Comp
 	let renders = 0;
 	let shown: Component | undefined;
 	const host: SetupUiHost = {
+		motion: "full" as const,
 		ui: {
 			terminal: { rows: 40 },
 			showOverlay: component => {
@@ -96,6 +97,71 @@ function fakeUi(): { host: SetupUiHost; renders: () => number; shown: () => Comp
 }
 
 describe("setup surfaces under native rendering", () => {
+	it("startup splash resolves immediately when motion is none", async () => {
+		const ui = fakeUi();
+		const host = { ...ui.host, motion: "none" as const };
+		await runStartupSplash(host, { durationMs: 10_000, now: () => clock });
+		expect(ui.renders()).toBe(0);
+	});
+
+	it("wizard goes straight to scene when motion is none", async () => {
+		const ui = fakeUi();
+		const host = { ...ui.host, motion: "none" as const };
+		let mounted: SetupSceneController | undefined;
+		const scene: SetupScene = {
+			id: "probe",
+			title: "Probe scene",
+			step: "Probe",
+			minVersion: 1,
+			mount: () => {
+				mounted = { title: "Probe scene", render: () => [] };
+				return mounted;
+			},
+		};
+		const wizard = new SetupWizardComponent(fakeSetupHost(host), [scene]);
+		const done = wizard.run();
+		try {
+			await Promise.resolve();
+			expect(mounted).toBeDefined();
+			expect(nodes([wizard.describe(cx)]).some(n => n.c?.some(child => child === mounted))).toBe(true);
+			// No splash phase, no transition phase - only initial render
+			expect(ui.renders()).toBe(1);
+
+			// On exit, should skip outro and complete immediately
+			wizard.handleInput("\x03");
+			await done;
+		} finally {
+			wizard.dispose();
+		}
+	});
+
+	it("wizard completes immediately when motion is none and no scenes apply", async () => {
+		const ui = fakeUi();
+		const host = { ...ui.host, motion: "none" as const };
+		const scene = probeScene("ansi", true);
+		const wizard = new SetupWizardComponent(fakeSetupHost(host), [scene]);
+		await wizard.run();
+		expect(scene.hosts).toHaveLength(0);
+		expect(ui.renders()).toBe(0);
+	});
+
+	it("wizard skips outro when motion is none", async () => {
+		const ui = fakeUi();
+		const host = { ...ui.host, motion: "none" as const };
+		const scene = probeScene("first");
+		const wizard = new SetupWizardComponent(fakeSetupHost(host, "Opus 4.5"), [scene]);
+		const done = wizard.run();
+		try {
+			wizard.handleNativeEvent({ type: "action", key: "", act: "skip", mods: [] });
+			// Should go straight to scene, then on exit skip outro and complete
+			wizard.handleNativeEvent({ type: "action", key: "", act: "exit", mods: [] });
+			await done;
+			// No outro phase rendered
+			expect(ui.renders()).toBeLessThanOrEqual(2);
+		} finally {
+			wizard.dispose();
+		}
+	});
 	it("startup splash finishes on its deadline without repaint ticks", async () => {
 		const ui = fakeUi();
 		let finished = false;

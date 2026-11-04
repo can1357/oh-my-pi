@@ -22,6 +22,7 @@ import {
 	cfgSetupVersion,
 	cfgSymbolPreset,
 	cfgThemeDark,
+	cfgTuiMotion,
 	cfgThemeLight,
 	cfgUpdateAuto,
 } from "./settings";
@@ -53,6 +54,9 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		},
 		get autoUpdate() {
 			return cfgUpdateAuto.get(ctx.settings);
+		},
+		get motion() {
+			return cfgTuiMotion.get(ctx.settings);
 		},
 		get authStorage() {
 			return ctx.session.modelRegistry.authStorage;

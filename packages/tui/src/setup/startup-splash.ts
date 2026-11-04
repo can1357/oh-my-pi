@@ -33,6 +33,10 @@ class StartupSplashComponent implements Component, OverlayFocusOwner {
 	}
 
 	run(): Promise<void> {
+		if (this.ctx.motion === "none") {
+			this.#complete();
+			return this.#done.promise;
+		}
 		this.#phaseStartedAt = this.#now();
 		this.#startTimer();
 		this.ctx.ui.requestRender();
@@ -126,7 +130,8 @@ class StartupSplashComponent implements Component, OverlayFocusOwner {
 
 /** Show the startup animation and restore the previous overlay focus afterward. */
 export async function runStartupSplash(ctx: SetupUiHost, options: RunStartupSplashOptions = {}): Promise<void> {
-	const component = new StartupSplashComponent(ctx, options);
+	if (ctx.motion === "none") return;
+ 	const component = new StartupSplashComponent(ctx, options);
 	const overlay = ctx.ui.showOverlay(component, {
 		width: "100%",
 		maxHeight: "100%",
