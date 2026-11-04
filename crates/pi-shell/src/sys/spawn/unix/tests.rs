@@ -43,18 +43,39 @@ fn a_session_is_signalled_before_its_leader_ran_setsid() {
 	assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(libc::SIGTERM));
 }
 
-/// The child that cannot list its descriptors checks each one below
-/// `descriptor_bound`: that must reach a descriptor opened
-/// before the soft open-file limit was lowered under it, or a background
-/// command's redirection could duplicate a descriptor of the host. Runs in
-/// a forked child, since the limit is process-wide.
+/// A descriptor opened before **both** open-file limits were lowered under
+/// it stays open and valid above them, so neither limit can bound the
+/// child's closing of the host's descriptors: a background command's
+/// redirection could otherwise duplicate one and write into it. Each arm
+/// of [`close_descriptors_except`](super::close_descriptors_except) must
+/// reach it. Runs in a forked child, since the limits are process-wide.
 #[test]
-fn the_unlisted_descriptor_check_reaches_above_a_lowered_soft_limit() {
+fn the_descriptor_closer_reaches_above_both_lowered_limits() {
+	assert_eq!(
+		closer_reaches_600(false),
+		0,
+		"descriptor 600 stayed open (1) or setup failed (2, 3)"
+	);
+}
+
+/// The last arm, the check of each descriptor below
+/// [`descriptor_bound`](super::descriptor_bound), which runs where the
+/// kernel can neither close a range nor list `/proc/self/fd`.
+#[test]
+fn the_unlisted_descriptor_check_reaches_above_both_lowered_limits() {
+	assert_eq!(closer_reaches_600(true), 0, "descriptor 600 stayed open (1) or setup failed (2, 3)");
+}
+
+/// In a forked child: open a descriptor at 600, lower both open-file
+/// limits to 64, close the host's descriptors (`bounded_only`: through the
+/// bounded check alone, else through `close_descriptors_except`), and exit
+/// 0 when 600 is closed, 1 when it is not, 2 or 3 when the setup failed.
+fn closer_reaches_600(bounded_only: bool) -> i32 {
 	let file = std::fs::File::open("/dev/null").unwrap();
 	let source = std::os::fd::AsRawFd::as_raw_fd(&file);
 	// SAFETY: the forked child calls only async-signal-safe functions
-	// (fcntl, getrlimit, setrlimit, close, _exit) and the checks under test,
-	// which are written for a forked child, then exits.
+	// (fcntl, getrlimit, setrlimit, close, close_range, _exit) and the
+	// closing under test, which is written for a forked child, then exits.
 	let pid = unsafe { libc::fork() };
 	assert!(pid >= 0, "fork");
 	if pid == 0 {
@@ -66,12 +87,20 @@ fn the_unlisted_descriptor_check_reaches_above_a_lowered_soft_limit() {
 				libc::_exit(3);
 			}
 			let high = libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 600);
+			// Both limits, not the soft one alone: a lowered hard limit
+			// bounded the check and left 600 open.
 			lim.rlim_cur = 64;
+			lim.rlim_max = 64;
 			if high < 600 || libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lim) != 0 {
 				libc::_exit(2);
 			}
-			for fd in 0..super::descriptor_bound() {
-				super::close_unless_kept(fd, &[], -1);
+			let keep = [0, 1, 2];
+			if bounded_only {
+				for fd in 0..super::descriptor_bound() {
+					super::close_unless_kept(fd, &keep, -1);
+				}
+			} else {
+				super::close_descriptors_except(&keep, super::descriptor_bound());
 			}
 			libc::_exit(i32::from(libc::fcntl(high, libc::F_GETFD) >= 0));
 		}
@@ -80,11 +109,7 @@ fn the_unlisted_descriptor_check_reaches_above_a_lowered_soft_limit() {
 	// SAFETY: waits for the child forked above.
 	assert_eq!(unsafe { libc::waitpid(pid, &raw mut status, 0) }, pid);
 	assert!(libc::WIFEXITED(status), "child status {status}");
-	assert_eq!(
-		libc::WEXITSTATUS(status),
-		0,
-		"descriptor 600 stayed open (1) or setup failed (2, 3)"
-	);
+	libc::WEXITSTATUS(status)
 }
 
 struct Unpark(thread::Thread);

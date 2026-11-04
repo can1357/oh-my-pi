@@ -1005,15 +1005,16 @@ fn errno() -> i32 {
 }
 
 /// One past the highest descriptor this process can hold, for the child's
-/// check of every descriptor when it cannot list them: the larger of its
-/// open-file limits (a descriptor opened before the soft limit was lowered
-/// stays open above it), up to 1,048,576, Linux's default `nr_open` and the
-/// highest number a process gets unless an administrator raises it. Read
-/// before a fork.
+/// check of every descriptor when it can neither close whole ranges nor
+/// list them. Never below 1,048,576, Linux's default `nr_open` and the
+/// highest number a process gets unless an administrator raises it; above
+/// it when a limit is higher. The current limits cannot bound it on their
+/// own: both of them can be lowered under a descriptor already open, which
+/// stays open and valid above them. Read before a fork.
 fn descriptor_bound() -> i32 {
 	const MOST: u64 = 1 << 20;
 	let limit = match rlimit::get(Rlimit::Nofile) {
-		Ok((soft, hard)) => soft.unwrap_or(MOST).max(hard.unwrap_or(MOST)).min(MOST),
+		Ok((soft, hard)) => soft.unwrap_or(0).max(hard.unwrap_or(0)).max(MOST),
 		Err(_) => MOST,
 	};
 	i32::try_from(limit).unwrap_or(i32::MAX)
@@ -1022,9 +1023,17 @@ fn descriptor_bound() -> i32 {
 /// Close every descriptor that is not one of `keep` (the command's own,
 /// installed before), so the process holds only what the command will
 /// have: the host's descriptors go whether or not `exec` would close them.
-/// Lists the open ones in `/proc/self/fd` where it can, else checks each
-/// below `bound`. Async-signal-safe: for a forked child.
+/// `keep` is sorted and without repeats.
+///
+/// Closes the ranges between the kept descriptors where the kernel can
+/// (`close_range`, Linux 5.9); else closes the ones `/proc/self/fd` lists;
+/// else checks each descriptor below `bound`. Async-signal-safe: for a
+/// forked child.
 fn close_descriptors_except(keep: &[i32], bound: i32) {
+	#[cfg(target_os = "linux")]
+	if close_descriptor_ranges_except(keep) {
+		return;
+	}
 	#[cfg(target_os = "linux")]
 	if close_listed_descriptors_except(keep) {
 		return;
@@ -1032,6 +1041,38 @@ fn close_descriptors_except(keep: &[i32], bound: i32) {
 	for fd in 0..bound {
 		close_unless_kept(fd, keep, -1);
 	}
+}
+
+/// Close every descriptor outside the sorted `keep` with `close_range`,
+/// one call per gap between kept numbers and one for everything above the
+/// last; whether every call succeeded. A kernel without the call answers
+/// `ENOSYS` on the first one and nothing is closed. Unlike a bound taken
+/// from a limit, this reaches a descriptor opened before both limits were
+/// lowered under it.
+#[cfg(target_os = "linux")]
+fn close_descriptor_ranges_except(keep: &[i32]) -> bool {
+	let mut from: u32 = 0;
+	for &fd in keep {
+		let Ok(fd) = u32::try_from(fd) else {
+			continue;
+		};
+		if fd > from && !close_descriptor_range(from, fd - 1) {
+			return false;
+		}
+		let Some(next) = fd.checked_add(1) else {
+			return true;
+		};
+		from = next;
+	}
+	close_descriptor_range(from, u32::MAX)
+}
+
+/// `close_range(from, to, 0)`: whether it closed them.
+#[cfg(target_os = "linux")]
+fn close_descriptor_range(from: u32, to: u32) -> bool {
+	// SAFETY: a plain descriptor call; it closes descriptors and writes
+	// nothing through a pointer.
+	unsafe { libc::syscall(libc::SYS_close_range, from, to, 0) == 0 }
 }
 
 /// Close `fd` unless it is in `keep` or is `dir`. Closing a descriptor that
@@ -1133,7 +1174,14 @@ fn fork_redirs(
 	let limits = limits(prog);
 	let raw: Vec<(i32, RawFd)> = fds.iter().map(|(t, fd)| (*t, fd.as_raw_fd())).collect();
 	let fd_bound = descriptor_bound();
-	let own: Vec<i32> = raw.iter().map(|(t, _)| *t).collect();
+	// Sorted and without repeats before the fork: the child closes the
+	// ranges between these numbers and may not allocate or sort.
+	let own: Vec<i32> = {
+		let mut own: Vec<i32> = raw.iter().map(|(t, _)| *t).collect();
+		own.sort_unstable();
+		own.dedup();
+		own
+	};
 	// Every signal stays blocked across the fork: the child runs with the
 	// host's handlers until it resets them, and a signal delivered then (a
 	// `kill $!` right after the spawn) would run host code and be lost
