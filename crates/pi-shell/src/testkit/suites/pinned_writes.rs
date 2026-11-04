@@ -9,7 +9,7 @@
 use crate::{
 	bash::{
 		Budget, Cx, Engine, EngineConfig, FileKind, Lost, MemStore, RestoreOpts, Script, Shell,
-		ShellApi,
+		ShellApi, Step,
 	},
 	testkit::{
 		fault::skeleton_init,
@@ -31,6 +31,15 @@ fn a_snapshot_names_a_host_file_a_pending_diagnostic_is_bound_to_as_lost() {
 		shell.submit(Script::command(&br#"{ : "${missing:?BOOM}"; } 2>/tmp/p & echo started"#[..]));
 	assert_eq!(advance(&mut shell, &mut host, &mut store, id, Budget::default()), Stop::Done(0));
 	assert_eq!(host.stdout.bytes(), b"started\n");
+	// The run ends before the background job is scheduled: step until it
+	// waits on its write to the FIFO.
+	for _ in 0..1000 {
+		match shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()) {
+			Step::Blocked | Step::Idle => break,
+			Step::Yield | Step::Done { .. } => {},
+			_ => panic!("the background job stopped on something other than its write"),
+		}
+	}
 
 	let lost_pipe = |lost: &[Lost]| {
 		lost
