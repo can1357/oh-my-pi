@@ -850,10 +850,18 @@ describe("a message delivered before the task's turn starts", () => {
 			endHold();
 			endHold = undefined;
 			await pause.entered;
-			// A switch's internal abort drops that turn. The switch waits for the turn's setup to finish
-			// before it asks its owner, so the setup is let go while the switch is under way.
+			// A switch's internal abort drops that turn: let the turn's setup go only once that abort
+			// has run (its cancellation is synchronous), so the order does not depend on timing.
+			const internalAbort = Promise.withResolvers<void>();
+			const abort = session.abort.bind(session);
+			const abortSpy = vi.spyOn(session, "abort").mockImplementation(options => {
+				const aborting = abort(options);
+				if (options?.goalReason === "internal") internalAbort.resolve();
+				return aborting;
+			});
 			const asking = startRefusedSwitch(session, "other");
-			await Bun.sleep(200);
+			await internalAbort.promise;
+			abortSpy.mockRestore();
 			pause.release();
 			switching = await asking;
 			await Bun.sleep(500);
