@@ -65,7 +65,7 @@ import { initializeExtensions } from "../modes/runtime-init";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
-import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
+import { type AgentLifecycleApi, AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../registry/persisted-agents";
 import {
@@ -3578,6 +3578,61 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 }
 
 /**
+ * Whether the end of a run leaves the subagent's background jobs (its `task`
+ * children, its background bash) running. They belong to the agent, not to one
+ * run of it: when the run ends and the agent stays live (its request budget, its
+ * wall-clock limit, a terminal error or a loop guard ended the run, or the run
+ * finished), each job goes on and its result reaches the agent as a later turn,
+ * as a background job's result reaches the root session. The jobs stop with the
+ * agent: an explicit cancel of the run (its caller's signal aborted, or a kill
+ * from the Agent Hub or RPC), a process shutdown, a one-shot or isolated agent
+ * (its worktree is captured and removed right after the run), and an agent the
+ * lifecycle does not keep. A cancel that lands after this decision is handled by
+ * {@link cancelOwnerJobsOnCallerCancel} and by the job manager, which cancels an
+ * agent's jobs with the job that runs it. Session disposal (park, release,
+ * shutdown) cancels whatever the agent still owns.
+ */
+export function ownerJobsOutliveRun(args: {
+	id: string;
+	session: AgentSession;
+	aborted: boolean;
+	abortKind?: AbortReason;
+	/** The run's caller cancelled it (its signal aborted), whichever abort reason won the run. */
+	callerCancelled: boolean;
+	keepAlive: boolean;
+	isolated: boolean;
+	reviveSession: AgentReviver | null;
+}): boolean {
+	if (!args.keepAlive || args.isolated || args.callerCancelled) return false;
+	if (args.abortKind === "signal" || args.abortKind === "shutdown") return false;
+	const ref = AgentRegistry.global().get(args.id);
+	if (!ref || ref.session !== args.session || ref.status === "aborted") return false;
+	// The same rule finalizeSubagentLifecycle applies: an aborted run keeps the
+	// agent only when it can be revived from its transcript.
+	return !args.aborted || args.reviveSession !== null;
+}
+
+/**
+ * For as long as a run or follow-up turn has not returned to its caller, a
+ * cancel by that caller stops the background jobs the agent owns (and their
+ * own children's), whenever it lands: before or after an earlier timeout or
+ * budget stop won the run's abort reason, before or after
+ * {@link ownerJobsOutliveRun} decided to keep the jobs, during the result's
+ * publication. A cancel of the job that runs the agent is the job manager's.
+ * Returns the detach the run or turn calls as it returns.
+ */
+function cancelOwnerJobsOnCallerCancel(
+	signal: AbortSignal | undefined,
+	manager: AsyncJobManagerApi | undefined,
+	id: string,
+): () => void {
+	if (!signal || !manager) return () => {};
+	const onAbort = (): void => manager.cancelAll({ ownerId: id }, signal.reason);
+	signal.addEventListener("abort", onAbort, { once: true });
+	return () => signal.removeEventListener("abort", onAbort);
+}
+
+/**
  * Settle a subagent's registry lifecycle after a run: unregister for one-shot
  * helpers, idle + lifecycle adoption for kept-alive agents. An aborted run
  * (caller cancel, user interrupt, wall-clock timeout, soft budget) only stops
@@ -3598,7 +3653,13 @@ export async function finalizeSubagentLifecycle(args: {
 	cleanupDeadlineAt?: number;
 	onCleanupDeferred?: (completion: Promise<void>) => void;
 	onRelease?: () => Promise<void>;
+	/**
+	 * The lifecycle the run started under. A run that ends after that lifecycle
+	 * was disposed is released by it, not adopted by a newer one.
+	 */
+	lifecycle?: AgentLifecycleApi;
 }): Promise<void> {
+	const lifecycle = args.lifecycle ?? AgentLifecycleManager.global();
 	const registry = AgentRegistry.global();
 	const ref = registry.get(args.id);
 	const ownsRef = Boolean(ref && ref.session === args.session);
@@ -3648,7 +3709,7 @@ export async function finalizeSubagentLifecycle(args: {
 		if (ref && ownsRef) {
 			if (args.abortKind === "shutdown") {
 				try {
-					await AgentLifecycleManager.global().release(args.id, ref);
+					await lifecycle.release(args.id, ref);
 				} catch (error) {
 					logger.warn("runSubagent: failed to release session during manager shutdown", {
 						id: args.id,
@@ -3662,7 +3723,7 @@ export async function finalizeSubagentLifecycle(args: {
 				// decision is durable and a restart cannot rediscover the transcript
 				// as a revivable parked agent.
 				try {
-					await AgentLifecycleManager.global().release(args.id, ref, { tombstone: true });
+					await lifecycle.release(args.id, ref, { tombstone: true });
 				} catch (error) {
 					logger.warn("runSubagent: failed to persist kill tombstone", { id: args.id, error: String(error) });
 					registry.setStatus(args.id, "aborted", ref);
@@ -3692,7 +3753,7 @@ export async function finalizeSubagentLifecycle(args: {
 		await releaseOwnedResources();
 		return;
 	}
-	AgentLifecycleManager.global().adopt(
+	lifecycle.adopt(
 		args.id,
 		{
 			idleTtlMs: args.agentIdleTtlMs,
@@ -3917,6 +3978,7 @@ async function driveFollowUpTurn(
 	// As in a first run: this turn's monitor would take a wake turn's answer
 	// (or its `yield`) as this turn's result, so non-parent wakes wait for it.
 	const releaseIrcWakes = session.holdIrcWakes();
+	const detachCallerCancel = cancelOwnerJobsOnCallerCancel(signal, session.asyncJobManager, id);
 	try {
 		try {
 			outcome = await driveSessionToResult(session, monitor, message, {
@@ -3978,6 +4040,7 @@ async function driveFollowUpTurn(
 		});
 	} finally {
 		releaseIrcWakes();
+		detachCallerCancel();
 	}
 }
 
@@ -4372,6 +4435,16 @@ export function runSubagentRunRequest(request: SubagentRunRequest): Promise<Sing
  * monitor it, and finalize its lifecycle. {@link runSubprocess} routes here.
  */
 async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<SingleResult> {
+	const detachCallerCancel = cancelOwnerJobsOnCallerCancel(options.signal, options.asyncJobManager, options.id);
+	try {
+		return await driveSubprocess(options, AgentLifecycleManager.global());
+	} finally {
+		detachCallerCancel();
+	}
+}
+
+/** {@link runSubprocessOnThisThread}'s run, under the lifecycle that was current when it started. */
+async function driveSubprocess(options: ExecutorOptions, lifecycle: AgentLifecycleApi): Promise<SingleResult> {
 	const {
 		cwd,
 		agent,
@@ -5288,7 +5361,21 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				unsubscribe = null;
 			}
 			const jobManager = options.asyncJobManager;
-			if (jobManager) {
+			const session = monitor.takeActiveSession();
+			const keepAlive = options.keepAlive !== false && (!preparedSession || readyAt !== undefined);
+			const keepOwnerJobs =
+				session !== null &&
+				ownerJobsOutliveRun({
+					id,
+					session,
+					aborted,
+					abortKind: monitor.abortKind(),
+					callerCancelled: signal?.aborted === true,
+					keepAlive,
+					isolated: worktree !== undefined,
+					reviveSession,
+				});
+			if (jobManager && !keepOwnerJobs) {
 				const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt);
 				if (!reap.settled) {
 					deferCleanup(reap.completion);
@@ -5298,30 +5385,28 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					});
 				}
 			}
-			const session = monitor.takeActiveSession();
 			if (session) {
 				monitor.captureSalvage(session);
-				if (options.keepAlive !== false && (!preparedSession || readyAt !== undefined)) {
-					attachIrcWakeTurnMonitor(session, wakeOptions);
-				}
+				if (keepAlive) attachIrcWakeTurnMonitor(session, wakeOptions);
 				await finalizeSubagentLifecycle({
 					id,
 					session,
 					aborted,
 					abortKind: monitor.abortKind(),
-					keepAlive: options.keepAlive !== false && (!preparedSession || readyAt !== undefined),
+					keepAlive,
 					isolated: worktree !== undefined,
 					agentIdleTtlMs,
 					reviveSession,
 					cleanupDeadlineAt,
 					onRelease: options.onRelease,
+					lifecycle,
 					onCleanupDeferred: completion => {
 						deferredSessionShutdown = completion;
 						deferCleanup(completion);
 					},
 				});
 			}
-			if (jobManager) {
+			if (jobManager && !keepOwnerJobs) {
 				if (deferredSessionShutdown) {
 					const finalReap = Promise.allSettled([deferredSessionShutdown]).then(async () => {
 						const reap = await jobManager.cancelAndReapOwnerJobs(id, Date.now());

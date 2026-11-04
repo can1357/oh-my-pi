@@ -80,6 +80,7 @@ export function captureSessionState(session: AgentSession): SessionMirrorState {
 		isStreaming: read.isStreaming(session),
 		runStartedAt: read.runStartedAt(session),
 		ircWakesPending: read.ircWakesPending(session),
+		asyncWakePending: read.asyncWakePending(session),
 		ircQueuedFrom: session.queuedIrcSenders(),
 		isPaused: read.isPaused(session),
 		streamMessage: read.streamMessage(session),

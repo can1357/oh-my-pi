@@ -440,6 +440,75 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)?.resultText).toBe("late result");
 	});
 
+	test("cancelling a job that runs an agent cancels the jobs that agent owns, down its tree", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		const runUntilAborted = async ({ signal }: { signal: AbortSignal }) => {
+			const aborted = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+			await aborted.promise;
+			return "stopped";
+		};
+		const lane = manager.register("task", "Lane", runUntilAborted, { id: "Lane", ownerId: "Main", agentId: "Lane" });
+		const arm = manager.register("task", "Lane.Arm", runUntilAborted, {
+			id: "Lane.Arm",
+			ownerId: "Lane",
+			agentId: "Lane.Arm",
+		});
+		const armBash = manager.register("bash", "arm bash", runUntilAborted, { ownerId: "Lane.Arm" });
+		const sibling = manager.register("task", "Beta", runUntilAborted, {
+			id: "Beta",
+			ownerId: "Main",
+			agentId: "Beta",
+		});
+
+		expect(manager.cancel(lane, { ownerId: "Main" })).toBe(true);
+
+		expect([lane, arm, armBash, sibling].map(id => manager.getJob(id)?.status)).toEqual([
+			"cancelled",
+			"cancelled",
+			"cancelled",
+			"running",
+		]);
+		manager.cancel(sibling);
+		await manager.waitForAll();
+	});
+
+	test("cancelling an owner's jobs reaches the jobs of agents it spawned whose runs already ended", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		// Lane spawned Arm, Arm spawned a background bash; both runs then ended and
+		// their job rows settled and were evicted, while the bash still runs.
+		const lane = manager.register("task", "Lane", async () => "lane done", {
+			id: "Lane",
+			ownerId: "Main",
+			agentId: "Lane",
+		});
+		const arm = manager.register("task", "Lane.Arm", async () => "arm done", {
+			id: "Lane.Arm",
+			ownerId: "Lane",
+			agentId: "Lane.Arm",
+		});
+		const armBash = manager.register(
+			"bash",
+			"arm bash",
+			async ({ signal }) => {
+				const aborted = Promise.withResolvers<void>();
+				signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+				await aborted.promise;
+				return "stopped";
+			},
+			{ ownerId: "Lane.Arm" },
+		);
+		await Promise.all([manager.getJob(lane)!.promise, manager.getJob(arm)!.promise]);
+		manager.evictCompletedJobs({ ownerId: "Main" });
+		manager.evictCompletedJobs({ ownerId: "Lane" });
+		expect([manager.getJob(lane), manager.getJob(arm)]).toEqual([undefined, undefined]);
+
+		manager.cancelAll({ ownerId: "Lane" });
+
+		expect(manager.getJob(armBash)?.status).toBe("cancelled");
+		await manager.waitForAll();
+	});
+
 	test.each(["single", "bulk"] as const)("keeps %s cancelled work reapable past retention", async kind => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ retentionMs: 25 });

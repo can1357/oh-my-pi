@@ -107,6 +107,11 @@ export interface AgentSessionHandle {
 	readonly runStartedAt: number | undefined;
 	/** Whether the session still owes turns to IRC messages (held, queued, or awaiting compaction). */
 	readonly ircWakesPending: boolean;
+	/**
+	 * Whether the session still owes turns to background work it owns: a running job whose
+	 * result will wake it (a `task` child, a background bash), or a result not yet injected.
+	 */
+	readonly asyncWakePending: boolean;
 	/** Full message list, including custom message types. */
 	readonly messages: AgentMessage[];
 	/** Current transcript path, or undefined when sessions are disabled. */

@@ -225,6 +225,8 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 	#persistedReviveTtlMs: () => number = () => 0;
 	/** Set once {@link dispose} runs; blocks late revivals from adopting into a torn-down manager. */
 	#disposed = false;
+	/** Releases of agents whose run ended after {@link dispose} began; dispose waits for them. */
+	readonly #lateReleases = new Set<Promise<void>>();
 
 	constructor(registry: AgentRegistryApi = AgentRegistry.global()) {
 		this.#registry = registry;
@@ -260,6 +262,20 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			opts.onReviverDropped?.();
 			return;
 		}
+		if (this.#disposed) {
+			// The run ended after this lifecycle began tearing down (a released
+			// owner's disposal cancelled it, however long its unwind took: runs keep
+			// the lifecycle they started under). Release the agent rather than keep it
+			// alive past the teardown; its transcript stays on disk, as for any
+			// released agent. Detached now, so no caller sees its session as live.
+			opts.onReviverDropped?.();
+			const session = ref.session;
+			this.#registry.detachSession(id, ref);
+			const late = this.#releaseLate(id, ref, session, opts.onRelease);
+			this.#lateReleases.add(late);
+			void late.finally(() => this.#lateReleases.delete(late));
+			return;
+		}
 		const existing = this.#adopted.get(id);
 		clearTimeout(existing?.timer);
 		const adopted: AdoptedAgent = {
@@ -272,6 +288,25 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		dropReviver(existing);
 		this.#adopted.set(id, adopted);
 		this.#armTimer(id, adopted);
+	}
+
+	async #releaseLate(
+		id: string,
+		ref: AgentRef,
+		session: AgentSessionHandle | null,
+		onRelease: (() => Promise<void>) | undefined,
+	): Promise<void> {
+		try {
+			await session?.dispose();
+		} catch (error) {
+			logger.warn("AgentLifecycleManager: late session dispose failed", { id, error: String(error) });
+		}
+		try {
+			await onRelease?.();
+		} catch (error) {
+			logger.warn("AgentLifecycleManager: late resource cleanup failed", { id, error: String(error) });
+		}
+		this.#registry.unregister(id, ref);
 	}
 
 	/**
@@ -706,6 +741,18 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				}
 			}),
 		);
+		// A released owner's disposal waits for its running `task` children to
+		// settle; each one that ended its run during it was released through
+		// adopt(). Wait for those too (they can release children of their own).
+		while (this.#lateReleases.size > 0 && Date.now() < deadlineAt) {
+			const pending = Promise.all(this.#lateReleases).then(() => {});
+			try {
+				await untilAborted(AbortSignal.timeout(Math.max(0, deadlineAt - Date.now())), () => pending);
+			} catch {
+				break;
+			}
+		}
+		for (const late of this.#lateReleases) trackLateCleanup(late, { id: "late-release", resource: "adopted-agent" });
 		this.#revivals.clear();
 		this.#parks.clear();
 		this.#persistedReviverFactory = undefined;
@@ -759,10 +806,12 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		clearTimeout(adopted.timer);
 		const timer = setTimeout(() => {
 			adopted.timer = undefined;
-			// A session still owing turns to IRC messages (held by a run publishing
-			// its result, or queued) would drop them when parked. Try again once the
-			// TTL passes anew.
-			if (adopted.ref.session?.ircWakesPending) {
+			// A session still owing turns would lose them when parked: IRC messages
+			// (held by a run publishing its result, or queued) would be dropped, and
+			// the dispose would cancel the background jobs it owns (its `task`
+			// children) and drop their results. Try again once the TTL passes anew.
+			const session = adopted.ref.session;
+			if (session?.ircWakesPending || session?.asyncWakePending) {
 				this.#armTimer(id, adopted);
 				return;
 			}

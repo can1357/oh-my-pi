@@ -45,6 +45,20 @@ const DEFAULT_MAX_RUNNING_JOBS = 15;
 /** Abort reason used only when the owning session shuts down the entire manager. */
 export const ASYNC_JOB_MANAGER_SHUTDOWN_REASON = Symbol("AsyncJobManager shutdown");
 
+/**
+ * Whether background work still owes its owner a turn: a running job whose result
+ * will wake the owner, or a result queued or in delivery (a delivery stays in
+ * flight until the owner's session has injected or discarded it). `ownerId`
+ * undefined means every job of the manager.
+ */
+export function ownerAsyncWakePending(manager: AsyncJobManagerApi, ownerId: string | undefined): boolean {
+	const filter = ownerId ? { ownerId } : undefined;
+	return (
+		manager.getRunningJobs(filter).some(job => !manager.isDeliverySuppressed(job.id)) ||
+		manager.hasPendingDeliveries(filter)
+	);
+}
+
 /** Kind of work a managed job runs; drives job-row badges and delivery labels. */
 export type AsyncJobType = "bash" | "task" | "eval";
 
@@ -380,6 +394,8 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
 	readonly #suppressedDeliveries = new Set<string>();
 	readonly #watchedJobs = new Set<string>();
+	/** Owner of each agent a job ran, by agent id: the agent tree {@link cancelAll} follows. */
+	readonly #agentOwners = new Map<string, string>();
 	readonly #consumedJobResults = new Set<string>();
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #releasedForegroundJobs = new Set<string>();
@@ -497,6 +513,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			queued: options?.queued === true,
 			...(options?.foreground ? { foreground: true } : {}),
 		};
+		this.#recordAgentOwner(job.agentId, job.ownerId);
 
 		const reportProgress = async (text: string, details?: AsyncJobDetails): Promise<void> => {
 			job.progressText = text;
@@ -594,6 +611,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			agentOutputPublished: result.agentOutputPublished,
 		};
 		this.#jobs.set(id, job);
+		this.#recordAgentOwner(job.agentId, job.ownerId);
 		this.#recordAgentReply(job);
 		this.#enqueueDelivery(id, result.text);
 		this.#scheduleEviction(id);
@@ -619,8 +637,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		if (!job) return false;
 		if (filter && job.ownerId !== filter.ownerId) return false;
 		if (job.status !== "running") return false;
-		job.status = "cancelled";
-		job.abortController.abort();
+		this.#cancelJob(job);
 		return true;
 	}
 
@@ -767,9 +784,14 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	}
 
 	/**
-	 * Cancel running jobs. With a filter, cancels only jobs the matching owner
-	 * registered; with no filter, cancels every running job
-	 * (used by `dispose()` to nuke the manager's state).
+	 * Cancel running jobs. With an owner filter, cancels the jobs that owner
+	 * registered and the jobs of every agent it spawned, down the tree: an
+	 * agent's background work outlives the end of one of its runs, so the agents
+	 * it spawned can be idle while their own children still run, and whatever
+	 * ends the owner ends that work too. The tree comes from the jobs that ran the
+	 * agents ({@link AsyncJob.agentId}) and survives those rows' eviction. With no
+	 * filter, cancels every running job (used by `dispose()` to nuke the manager's
+	 * state).
 	 *
 	 * `reason` is forwarded to each job's `AbortController.abort`, so a session
 	 * teardown can tag its owned jobs with {@link ASYNC_JOB_MANAGER_SHUTDOWN_REASON}
@@ -781,11 +803,50 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	}
 
 	#cancelJobs(filter?: AsyncJobFilter, reason?: unknown): void {
+		if (filter?.ownerId !== undefined) {
+			this.#cancelOwnerTree(filter.ownerId, reason);
+			return;
+		}
 		for (const job of this.#filterJobs(this.#jobs.values(), filter)) {
-			if (job.status !== "running") continue;
+			if (job.status === "running") this.#cancelJob(job, reason);
+		}
+	}
+
+	/** Cancel one running job; a job that runs a subagent takes that agent's jobs with it, down the tree. */
+	#cancelJob(job: AsyncJob, reason?: unknown): void {
+		job.status = "cancelled";
+		job.abortController.abort(reason);
+		if (job.agentId !== undefined && job.agentId !== job.ownerId) this.#cancelOwnerTree(job.agentId, reason);
+	}
+
+	#cancelOwnerTree(ownerId: string, reason: unknown): void {
+		const owners = this.#ownerTree(ownerId);
+		for (const job of this.#jobs.values()) {
+			if (job.status !== "running" || job.ownerId === undefined || !owners.has(job.ownerId)) continue;
 			job.status = "cancelled";
 			job.abortController.abort(reason);
 		}
+	}
+
+	/** `ownerId` and every agent spawned under it, through {@link #agentOwners}. */
+	#ownerTree(ownerId: string): Set<string> {
+		const owners = new Set([ownerId]);
+		for (let grew = true; grew;) {
+			grew = false;
+			for (const [agentId, owner] of this.#agentOwners) {
+				if (owners.has(owner) && !owners.has(agentId)) {
+					owners.add(agentId);
+					grew = true;
+				}
+			}
+		}
+		return owners;
+	}
+
+	/** Record that `agentId` runs as a job of `ownerId`; kept after the job row is evicted. */
+	#recordAgentOwner(agentId: string | undefined, ownerId: string | undefined): void {
+		if (agentId !== undefined && ownerId !== undefined && agentId !== ownerId)
+			this.#agentOwners.set(agentId, ownerId);
 	}
 
 	/**
@@ -846,11 +907,17 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	): Promise<boolean> {
 		const deadline =
 			options?.timeoutMs === undefined ? Number.POSITIVE_INFINITY : Date.now() + Math.max(0, options.timeoutMs);
+		return this.#waitForJobs(
+			job => job.ownerId === ownerId && (options?.excludeSuppressed !== true || !this.isDeliverySuppressed(job.id)),
+			deadline,
+		);
+	}
+
+	/** Wait until every job `select` matches has settled, including ones registered while waiting. */
+	async #waitForJobs(select: (job: AsyncJob) => boolean, deadline: number): Promise<boolean> {
 		const awaited = new Set<string>();
 		for (;;) {
-			const pending = this.#filterJobs(this.#jobs.values(), { ownerId }).filter(
-				job => !awaited.has(job.id) && (options?.excludeSuppressed !== true || !this.isDeliverySuppressed(job.id)),
-			);
+			const pending = Array.from(this.#jobs.values()).filter(job => !awaited.has(job.id) && select(job));
 			if (pending.length === 0) return true;
 			for (const job of pending) awaited.add(job.id);
 			const settled = await this.#waitForDeliveryPromise(
@@ -862,22 +929,24 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	}
 
 	/**
-	 * Cancel every job owned by `ownerId`, then wait only until `deadlineAt`.
-	 * The returned completion keeps waiting for actual process settlement when
-	 * the deadline expires, so callers can move that cleanup out of the
+	 * Cancel every job owned by `ownerId` or by an agent it spawned (down the
+	 * tree, see {@link cancelAll}), then wait only until `deadlineAt` for them to
+	 * settle. The returned completion keeps waiting for actual process settlement
+	 * when the deadline expires, so callers can move that cleanup out of the
 	 * user-visible Task wait without losing ownership of the live work.
 	 */
 	async cancelAndReapOwnerJobs(ownerId: string, deadlineAt: number): Promise<AsyncJobReapResult> {
 		this.cancelAll({ ownerId });
-		const timeoutMs = Math.max(0, deadlineAt - Date.now());
-		const settled = await this.waitForOwnerJobs(ownerId, { timeoutMs });
+		const owners = this.#ownerTree(ownerId);
+		const owned = (job: AsyncJob): boolean => job.ownerId !== undefined && owners.has(job.ownerId);
+		const settled = await this.#waitForJobs(owned, deadlineAt);
 		if (settled) {
 			return { settled: true, pendingJobIds: [], completion: Promise.resolve() };
 		}
-		const pendingJobIds = this.#filterJobs(this.#jobs.values(), { ownerId })
-			.filter(job => job.status === "running" || job.status === "cancelled")
+		const pendingJobIds = Array.from(this.#jobs.values())
+			.filter(job => owned(job) && (job.status === "running" || job.status === "cancelled"))
 			.map(job => job.id);
-		const completion = this.waitForOwnerJobs(ownerId).then(() => {});
+		const completion = this.#waitForJobs(owned, Number.POSITIVE_INFINITY).then(() => {});
 		return { settled: false, pendingJobIds, completion };
 	}
 
@@ -967,6 +1036,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		this.#inFlightDeliveries.length = 0;
 		this.#suppressedDeliveries.clear();
 		this.#watchedJobs.clear();
+		this.#agentOwners.clear();
 		this.#consumedJobResults.clear();
 		this.#releasedForegroundJobs.clear();
 		this.#deliverySinks.clear();
