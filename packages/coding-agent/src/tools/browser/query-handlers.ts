@@ -370,13 +370,17 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 						const target = element.ownerDocument?.getElementById(id);
 						if (!target) return "";
 						// Hidden by visibility, `display: none` (its own or an ancestor's, which leaves its own computed display
-						// untouched), or a `hidden`/`aria-hidden` ancestor: read the whole subtree.
+						// untouched), or a `hidden`/`aria-hidden` ancestor: read the whole subtree. A `display: contents` target
+						// has no box of its own, so the nearest ancestor with one decides whether it is rendered.
 						const targetStyle = getComputedStyle(target);
-						const rendered = target as unknown as { checkVisibility?: () => boolean };
+						// Browser ancestors have the same element interface as the target.
+						let box = target as Element | null;
+						while (box && getComputedStyle(box).display === "contents") box = box.parentElement as Element | null;
+						const rendered = box as unknown as { checkVisibility?: () => boolean } | null;
 						const hidden =
 							targetStyle.visibility !== "visible" ||
 							targetStyle.display === "none" ||
-							(typeof rendered.checkVisibility === "function" && !rendered.checkVisibility()) ||
+							(typeof rendered?.checkVisibility === "function" && !rendered.checkVisibility()) ||
 							target.closest("[hidden], [aria-hidden='true']") !== null;
 						// A table, fieldset or optgroup target is named by its caption, legend or label, not its contents.
 						const native = normalizeSpace(target.getAttribute("aria-label") ?? "")
