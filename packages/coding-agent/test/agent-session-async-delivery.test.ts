@@ -1526,7 +1526,9 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 		expect(lastRequestImages(mock)).toEqual(inMarkerOrder);
 	});
 
-	it("resolves the newest delivery's markers once a later answer arrives after the first was read", async () => {
+	it("across deliveries the newest message owns attachment numbers; an older answer's path notice still names its file", async () => {
+		// Deliberate boundary: `attachment://N` numbers the newest message that carries attached
+		// images, as for prompt images. Per-message ids would change that URI contract.
 		using tempDir = TempDir.createSync("@pi-async-ask-attachment-");
 		const { session: owner, backgroundAsk } = await startSession(tempDir.path());
 		const answerOld = await backgroundAsk("ask-old", "Which database?");
@@ -1551,14 +1553,20 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 
 		const texts = deliveries(owner);
 		expect(texts).toHaveLength(2);
-		// The newest message with attached images owns `attachment://N`, as for prompt images
-		// and inline ask answers: the new answer's marker opens its own image.
+		// The new answer's marker opens its own image.
 		expect(noteMarkers(texts[1]!, "new schema").map(index => resolveAttachment(owner, index)?.data)).toEqual([
 			"new-image",
 		]);
 		expect(attachments(owner)).toEqual([["attachment://1", "new-image"]]);
-		// The earlier answer's image stays readable by the source path its notice gave.
-		expect(texts[0]).toMatch(/Source path: `[^`]*old-image\.png`/);
+		// The older answer's "[Image #1]" now opens the newer message's image...
+		expect(noteMarkers(texts[0]!, "old schema").map(index => resolveAttachment(owner, index)?.data)).toEqual([
+			"new-image",
+		]);
+		// ...while its own path notice still names its own file, under its own marker.
+		const oldNotices = [...texts[0]!.matchAll(/`\[Image #(\d+)\]` to their ask answer\.\s+Source path: `([^`]+)`/g)];
+		expect(oldNotices.map(([, index, file]) => [Number(index), path.basename(file!)])).toEqual([
+			[1, "old-image.png"],
+		]);
 	});
 
 	/** Resolves once the next async-result delivery is committed (its follow-up turn has taken it). */
