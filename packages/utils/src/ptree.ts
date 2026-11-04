@@ -7,6 +7,7 @@
  * - Convenience helpers: captureText / execText, AbortSignal, timeouts.
  */
 
+import * as os from "node:os";
 import { Process, type ProcessTerminateOptions } from "@oh-my-pi/pi-natives";
 import type { Spawn, Subprocess } from "bun";
 
@@ -440,26 +441,35 @@ export class ChildProcess<In extends InMask = InMask> {
 	 * orphaned in it is still the subreaper's child when the sweep runs.
 	 *
 	 * A subreaper with no child has not launched the command yet (or the
-	 * command has ended). It is checked while stopped with SIGSTOP and, when
-	 * childless, killed before it resumes, so a command cancelled before its
-	 * launch never starts. The grace timer is cleared as soon as the sequence
-	 * moves on, so a finished stop never keeps the caller's process alive.
+	 * command has ended). It is looked at again while frozen with SIGSTOP and,
+	 * when still childless, killed, so a command cancelled before its launch
+	 * never starts. Freeze, kill and resume all go through `root`, the native
+	 * handle pinned to the subreaper's identity, never through the numeric pid:
+	 * once the subreaper has been reaped and its pid reused, they signal
+	 * nothing. The resume runs on every way out of the frozen section,
+	 * including a throw; it is a no-op on a killed subreaper. The grace timer is
+	 * cleared as soon as the sequence moves on, so a finished stop never keeps
+	 * the caller's process alive.
 	 */
 	async #stopSubreaperTree(root: Process, gracefulMs: number, escalated: Promise<void>): Promise<void> {
-		process.kill(this.proc.pid, "SIGSTOP");
-		let killed = false;
-		try {
-			const children = root.children();
-			if (children.length === 0) {
-				root.killTree(9);
-				killed = true;
-				return;
+		let children = root.children();
+		if (children.length === 0) {
+			try {
+				root.killTree(os.constants.signals.SIGSTOP);
+				children = root.children();
+				if (children.length === 0) {
+					root.killTree(9);
+					return;
+				}
+				// It launched the command just before the freeze: the first wave
+				// goes to the snapshot taken while it cannot fork.
+				for (const child of children) child.killTree(gracefulMs < 0 ? 9 : 15);
+			} finally {
+				root.killTree(os.constants.signals.SIGCONT);
 			}
-			// The first wave (SIGTERM, or SIGKILL for a hard stop) goes to the
-			// snapshot taken while the subreaper is stopped.
+		} else {
+			// The subreaper launches one command; once it has a child, no later launch can escape the snapshot.
 			for (const child of children) child.killTree(gracefulMs < 0 ? 9 : 15);
-		} finally {
-			if (!killed) process.kill(this.proc.pid, "SIGCONT");
 		}
 		if (gracefulMs >= 0) {
 			const { promise: graceOver, resolve: endGrace } = Promise.withResolvers<void>();
