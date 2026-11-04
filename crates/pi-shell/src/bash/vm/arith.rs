@@ -67,6 +67,11 @@ pub trait Env {
 	fn is_assoc(&mut self, name: &[u8]) -> bool;
 	/// The compiled-expression cache to use.
 	fn cache(&self) -> &Cache;
+	/// The compiled form of `text` (leading blanks removed): [`Cache::get`]
+	/// of [`Env::cache`], unless the environment keeps a nearer memo.
+	fn compiled(&mut self, text: &[u8]) -> Arc<Expr> {
+		self.cache().get(text)
+	}
 	/// Report a diagnostic that does not stop evaluation (bash prints it
 	/// and goes on: `` `a[]': not a valid identifier ``), with the prefix
 	/// of the running command.
@@ -202,6 +207,46 @@ impl Gens {
 			self.old = std::mem::take(&mut self.young);
 		}
 		self.young.insert(text, expr);
+	}
+}
+
+/// Slots of a [`Recent`] memo.
+const RECENT_SLOTS: usize = 256;
+
+/// The expressions one shell evaluated last, direct-mapped by a hash of
+/// their text: a loop's arithmetic finds its compiled form here without
+/// the shared [`Cache`]'s lock and map.
+pub struct Recent([Option<(BString, Arc<Expr>)>; RECENT_SLOTS]);
+
+impl Default for Recent {
+	fn default() -> Self {
+		Self([const { None }; RECENT_SLOTS])
+	}
+}
+
+impl Recent {
+	/// The compiled form of `text`: from here, else from `shared` (and kept
+	/// here).
+	pub fn get(&mut self, text: &[u8], shared: &Cache) -> Arc<Expr> {
+		// Eight bytes per step: the text of a loop's expression is hashed
+		// on every evaluation.
+		let (words, tail) = text.as_chunks::<8>();
+		let mix = |h: u64, w: u64| (h.rotate_left(5) ^ w).wrapping_mul(0x517c_c1b7_2722_0a95);
+		let mut last = [0; 8];
+		last[..tail.len()].copy_from_slice(tail);
+		let h = words
+			.iter()
+			.fold(text.len() as u64, |h, w| mix(h, u64::from_le_bytes(*w)));
+		let h = mix(h, u64::from_le_bytes(last));
+		let slot = &mut self.0[(h >> (u64::BITS - RECENT_SLOTS.ilog2())) as usize];
+		if let Some((t, e)) = slot
+			&& t.as_slice() == text
+		{
+			return Arc::clone(e);
+		}
+		let expr = shared.get(text);
+		*slot = Some((BString::from(text), Arc::clone(&expr)));
+		expr
 	}
 }
 
@@ -357,7 +402,7 @@ fn eval_depth(text: &[u8], env: &mut dyn Env, depth: u32) -> Result<i64, Error> 
 	if let Some(v) = decimal_value(text, depth) {
 		return Ok(v);
 	}
-	let expr = env.cache().get(text);
+	let expr = env.compiled(text);
 	Walk { expr: &expr, env, depth, noeval: 0 }.eval(&expr.root)
 }
 
@@ -399,6 +444,143 @@ fn compile(text: &[u8]) -> Expr {
 		}
 	}
 	Expr { src: BString::from(text), root }
+}
+
+/// Format native arithmetic syntax for the trace's Python-like presentation.
+///
+/// This consumes the same compiled expression as evaluation, including native
+/// integer/base parsing and precedence. Indexed variables deliberately stay
+/// raw: deciding whether their subscript is arithmetic or an associative key
+/// needs runtime declarations, which a static presentation must not guess.
+pub(crate) fn pseudo(text: &[u8]) -> Option<String> {
+	if text.trim_ascii().is_empty() {
+		return Some("0".into());
+	}
+	fn lvalue(lv: &Lv) -> Option<String> {
+		if lv.index.is_some() {
+			return None;
+		}
+		core::str::from_utf8(&lv.name).ok().map(str::to_owned)
+	}
+	fn binary(op: Bin, a: String, b: String) -> String {
+		let symbol = match op {
+			Bin::Set => return format!("assign({a}, {b})"),
+			// Python / and % disagree with signed bash division/remainder.
+			Bin::Div => return format!("trunc_div({a}, {b})"),
+			Bin::Mod => return format!("trunc_mod({a}, {b})"),
+			Bin::Mul => "*",
+			Bin::Add => "+",
+			Bin::Sub => "-",
+			Bin::Shl => "<<",
+			Bin::Shr => ">>",
+			Bin::Lt => "<",
+			Bin::Le => "<=",
+			Bin::Gt => ">",
+			Bin::Ge => ">=",
+			Bin::Eq => "==",
+			Bin::Ne => "!=",
+			Bin::BitAnd => "&",
+			Bin::BitXor => "^",
+			Bin::BitOr => "|",
+		};
+		format!("({a} {symbol} {b})")
+	}
+	fn format_node(node: &Node) -> Option<String> {
+		Some(match node {
+			Node::Num(value) => value.to_string(),
+			Node::Fail(_) => return None,
+			Node::Var(lv) => lvalue(lv)?,
+			Node::Seq(nodes) => {
+				let values = nodes.iter().map(format_node).collect::<Option<Vec<_>>>()?;
+				format!("value_last({})", values.join(", "))
+			},
+			Node::PostInc(lv, delta) | Node::PreInc(lv, delta) => {
+				let position = if matches!(node, Node::PostInc(..)) {
+					"post"
+				} else {
+					"pre"
+				};
+				let operation = match delta {
+					1 => "inc",
+					-1 => "dec",
+					_ => return None,
+				};
+				format!("{position}_{operation}({})", lvalue(lv)?)
+			},
+			Node::Assign { lv, op, rhs, .. } => {
+				let target = lvalue(lv)?;
+				let rhs = format_node(rhs)?;
+				if *op == Bin::Set {
+					format!("assign({target}, {rhs})")
+				} else {
+					// Keep one lvalue evaluation and the assignment's returned
+					// value.
+					let name = match op {
+						Bin::Mul => "mul",
+						Bin::Div => "trunc_div",
+						Bin::Mod => "trunc_mod",
+						Bin::Add => "add",
+						Bin::Sub => "sub",
+						Bin::Shl => "shl",
+						Bin::Shr => "shr",
+						Bin::Lt => "lt",
+						Bin::Le => "le",
+						Bin::Gt => "gt",
+						Bin::Ge => "ge",
+						Bin::Eq => "eq",
+						Bin::Ne => "ne",
+						Bin::BitAnd => "bit_and",
+						Bin::BitXor => "bit_xor",
+						Bin::BitOr => "bit_or",
+						Bin::Set => unreachable!(),
+					};
+					format!("assign_{name}({target}, {rhs})")
+				}
+			},
+			Node::Nest { inner, .. } => format_node(inner)?,
+			Node::Unary(op, inner) => {
+				let value = format_node(inner)?;
+				match op {
+					Un::Not => format!("int(not ({value}))"),
+					Un::BitNot => format!("(~({value}))"),
+					Un::Neg => format!("(-({value}))"),
+				}
+			},
+			Node::Pow { base, exp, .. } => {
+				format!("({} ** {})", format_node(base)?, format_node(exp)?)
+			},
+			Node::Binary(first, rest) => {
+				let mut value = format_node(first)?;
+				for (op, _, rhs) in rest {
+					value = binary(*op, value, format_node(rhs)?);
+				}
+				value
+			},
+			Node::And(first, rest) | Node::Or(first, rest) => {
+				let connector = if matches!(node, Node::And(..)) {
+					" and "
+				} else {
+					" or "
+				};
+				let mut values = Vec::with_capacity(rest.len() + 1);
+				values.push(format!("bool({})", format_node(first)?));
+				for rhs in rest {
+					values.push(format!("bool({})", format_node(rhs)?));
+				}
+				format!("int({})", values.join(connector))
+			},
+			Node::Cond(parts) => {
+				let [condition, yes, no] = &**parts;
+				format!(
+					"({} if {} else {})",
+					format_node(yes)?,
+					format_node(condition)?,
+					format_node(no)?
+				)
+			},
+		})
+	}
+	format_node(&compile(text.trim_ascii()).root)
 }
 
 /// bash's `VALID_NUMCHAR`: a digit of some base up to 64.
@@ -1267,6 +1449,31 @@ impl Walk<'_> {
 #[cfg(test)]
 mod tests {
 	use std::collections::HashMap as StdMap;
+
+	#[test]
+	fn pseudo_uses_native_numbers_and_precedence() {
+		assert_eq!(pseudo(b"16#ff + 2 * 03").as_deref(), Some("(255 + (2 * 3))"));
+		assert_eq!(pseudo(b"(1+2)*3").as_deref(), Some("((1 + 2) * 3)"));
+		assert_eq!(pseudo(b"2**3**2").as_deref(), Some("(2 ** (3 ** 2))"));
+		assert_eq!(pseudo(b"-7/3").as_deref(), Some("trunc_div((-(7)), 3)"));
+	}
+	#[test]
+	fn pseudo_preserves_side_effect_values_and_short_circuiting() {
+		assert_eq!(pseudo(b"x++, ++x").as_deref(), Some("value_last(post_inc(x), pre_inc(x))"));
+		assert_eq!(pseudo(b"x += y--").as_deref(), Some("assign_add(x, post_dec(y))"));
+		assert_eq!(pseudo(b"x ? y++ : --z").as_deref(), Some("(post_inc(y) if x else pre_dec(z))"));
+		assert_eq!(
+			pseudo(b"x && y || !z").as_deref(),
+			Some("int(bool(int(bool(x) and bool(y))) or bool(int(not (z))))")
+		);
+	}
+	#[test]
+	fn pseudo_rejects_runtime_expansions_indices_and_deferred_errors() {
+		for input in [b"$x".as_slice(), b"a[$i]", b"a[1]", b"0 && (1 +)", b"08"] {
+			assert_eq!(pseudo(input), None, "{input:?}");
+		}
+		assert_eq!(pseudo(b"  ").as_deref(), Some("0"));
+	}
 
 	use super::*;
 

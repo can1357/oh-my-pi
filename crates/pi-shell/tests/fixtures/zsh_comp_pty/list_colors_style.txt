@@ -1,0 +1,7 @@
+### ": \t"
+% :
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,4
+--- sgr
+:: ^G
+{1;34}dir1{0}/  {1;34}dir2{0}/  file1  file2  {32}foo.c{0}  {33}foo.h{0}{0}{27}{24}:

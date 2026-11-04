@@ -29,7 +29,7 @@
  */
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { TSP_TEXT_KINDS, type TspKind, type TspNode, type TspOp, type TspScrollBy } from "@oh-my-pi/pi-wire";
-import { type Component, Container, CURSOR_MARKER } from "../tui";
+import { type Component, CURSOR_MARKER, ownDescription } from "../tui";
 import { getNativeBlob } from "./blobs";
 import { normalizeIconProps } from "./icons";
 import type { DescribeContext, NativeChild, NativeNode, NativeRevealAt } from "./node";
@@ -928,15 +928,8 @@ export class Reconciler {
 	/** The component's description, or a `rows` node rendered at `cx.cols`. */
 	#resolve(state: CompState): NativeNode {
 		const comp = state.comp;
-		const describe = comp.describe;
-		// A Container subclass that paints its own rows but inherits the plain
-		// column description would lose its rendering: fall back to rows.
-		// (Read lazily: this module and tui.ts import each other.)
-		const inherited = describe === Container.prototype.describe && comp.render !== Container.prototype.render;
-		if (describe && !inherited) {
-			const node = describe.call(comp, this.#cx!);
-			if (node) return quietMotion(node);
-		}
+		const node = ownDescription(comp, this.#cx!);
+		if (node) return quietMotion(node);
 		this.#rows++;
 		const cols = Math.max(1, this.#cx!.cols);
 		const lines = comp.render(cols);

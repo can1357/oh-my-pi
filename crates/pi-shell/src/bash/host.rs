@@ -57,7 +57,7 @@ pub type SpawnFuture = Pin<Box<dyn Future<Output = io::Result<Box<dyn ExtProc>>>
 pub trait Host {
 	/// Resolve a command name before PATH search (functions and aliases are
 	/// already handled by the engine).
-	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx<'_>) -> Resolved;
+	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx) -> Resolved;
 	/// Start a native command (Rust callout or device) as a [`Task`].
 	fn start(&mut self, cmd: &NativeRef, inv: Invocation<'_>) -> io::Result<Box<dyn Task>>;
 	/// Resume a task from the bytes its [`Task::checkpoint`] produced before a
@@ -111,6 +111,11 @@ pub trait Host {
 	fn set_signal_trap(&mut self, _signal: Signal, _action: Option<&BStr>) -> io::Result<bool> {
 		Ok(true)
 	}
+	/// zsh has no POSIX rule against trapping a signal ignored on entry:
+	/// later [`Self::set_signal_trap`] calls for `signal` change it, and
+	/// `None` restores the default disposition. Its current disposition
+	/// stays as it is. Hosts without OS signals keep the default: nothing.
+	fn forget_ignored(&mut self, _signal: Signal) {}
 	/// The filesystem (hookable: VFS, devices, `/dev/fd`, `/dev/tcp`).
 	fn fs(&mut self) -> &mut dyn Fs;
 	/// The shell's own standard stream `fd`; `None` leaves it closed.
@@ -166,9 +171,30 @@ pub trait Host {
 	}
 	/// `$HOSTNAME`.
 	fn hostname(&self) -> BString;
+	/// `uname`'s system name, release and machine (zsh's `CPUTYPE` and the
+	/// release in `OSTYPE`); `None` (the default) when the host has no OS
+	/// of its own to report.
+	fn uname(&self) -> Option<(BString, BString, BString)> {
+		None
+	}
 	/// Terminal information for `fd`; `None` when it is not a terminal (agent
 	/// shells).
 	fn tty(&mut self, fd: i32) -> Option<TtyInfo>;
+	/// Terminal control: modes, window size, the foreground process group,
+	/// the shell's own tty (zsh's `SHTTY`) and new ptys
+	/// ([`Terminal`](crate::bash::Terminal)). `None` (the default): this
+	/// host's shells have no terminals (agent shells, test hosts), and ZLE,
+	/// job control's terminal handoff and `zpty` report that.
+	fn terminal(&mut self) -> Option<&mut dyn crate::bash::Terminal> {
+		None
+	}
+	/// OS stream sockets ([`Sockets`](crate::bash::Sockets)): zsh's
+	/// `zsocket`, `ztcp` and `zftp`. `None` (the default): this host's
+	/// shells may not open sockets (agent shells, test hosts), and those
+	/// builtins report the operation as unsupported.
+	fn sockets(&mut self) -> Option<&mut dyn crate::bash::Sockets> {
+		None
+	}
 	/// UTC offset in seconds and zone abbreviation at `unix_s`, in the zone
 	/// the shell's `TZ` names (`None`: `TZ` unset, the host's zone). Used by
 	/// `printf '%(…)T'` and prompt time escapes.
@@ -191,6 +217,14 @@ pub trait Host {
 	/// the host process's limits. Hosts without resource limits (Windows)
 	/// return `Unsupported`.
 	fn rlimit(&self, _res: Rlimit) -> io::Result<(Option<u64>, Option<u64>)> {
+		Err(io::ErrorKind::Unsupported.into())
+	}
+	/// The system's login sessions (the utmpx `USER_PROCESS` entries zsh's
+	/// `zsh/watch` scans with `getutxent`) and the utmpx file's
+	/// modification time. Hosts without a login database refuse with
+	/// `Unsupported`: `log` and `$watch` then report nothing, as zsh does
+	/// when it cannot `stat` the utmpx file.
+	fn logins(&self) -> io::Result<Logins> {
 		Err(io::ErrorKind::Unsupported.into())
 	}
 	/// Mirror of the pipes pipelines create (`a | b`), asked once per
@@ -235,13 +269,11 @@ pub enum Resolved {
 
 /// Context of a [`Host::resolve`] call.
 #[derive(Clone, Copy, Debug)]
-pub struct ResolveCtx<'a> {
+pub struct ResolveCtx {
 	/// The name contains a `/` (no PATH search).
 	pub has_slash: bool,
 	/// Which construct asks.
 	pub via:       Via,
-	/// Current `$PATH`.
-	pub path_var:  &'a BStr,
 }
 
 /// Construct that triggered a resolution.
@@ -339,6 +371,16 @@ pub struct SpawnSpec<'a> {
 	/// engine asks only for paths [`Host::child_opens`] accepted; `None`
 	/// for every other spawn.
 	pub redirs:      Option<ChildRedirs>,
+	/// The terminal of the session the external belongs to (a `zpty`
+	/// slave, on its stdio) rather than the shell's: the child leads a new
+	/// session (`setsid`), so its `/dev/tty` cannot reach the shell's
+	/// terminal; `pgroup` is not applied. It does not claim the pty as its
+	/// controlling terminal: a session leader's exit hangs its controlling
+	/// terminal up for every holder, cutting the zpty off from the shell
+	/// (zsh's long-lived zpty child shell is the leader there; the engine
+	/// has no such process). `None` for every other spawn. Hosts that
+	/// cannot do this on their platform fail the spawn with `Unsupported`.
+	pub ctty:        Option<OsHandle>,
 }
 
 /// The redirections a spawned process applies itself ([`SpawnSpec::redirs`]).
@@ -438,6 +480,28 @@ pub struct CpuTimes {
 	pub child_sys_ns:  u64,
 }
 
+/// One login session of the system's utmpx database ([`Host::logins`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Login {
+	/// `ut_user`.
+	pub user: BString,
+	/// `ut_line`: the terminal (`console`, `ttys001`).
+	pub line: BString,
+	/// `ut_host`: where the session comes from (empty for a local one).
+	pub host: BString,
+	/// `ut_tv.tv_sec`: the login time, seconds since the epoch.
+	pub time: i64,
+}
+
+/// The utmpx database as `zsh/watch` reads it ([`Host::logins`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Logins {
+	/// Modification time of the utmpx file, seconds since the epoch.
+	pub mtime:   i64,
+	/// The `USER_PROCESS` entries, in the database's order.
+	pub entries: Vec<Login>,
+}
+
 /// A resource `ulimit` reads and sets ([`Host::rlimit`],
 /// [`SpawnSpec::rlimits`]); bash's option letter in brackets.
 #[derive(
@@ -523,6 +587,24 @@ pub trait ExtProc: Send {
 	/// child's end of file into its [`FdRef`]: the engine reads a command
 	/// substitution's capture as soon as the exit is observed.
 	fn poll_wait(&mut self, cx: &mut Context<'_>) -> Poll<ExitStatus>;
+	/// Poll for the next state change: a stop or continue the host observed
+	/// since the last poll (each reported once; a stop and continue both
+	/// unseen report the later one), else the exit as [`ExtProc::poll_wait`]
+	/// reports it. Must not block. Job control (`set -m`) waits with this:
+	/// a stopped foreground job hands the terminal back to the shell, zsh's
+	/// `waitpid(WUNTRACED)`. The default reports exits only (a host whose
+	/// processes never stop on their own).
+	fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<ProcEvent> {
+		self.poll_wait(cx).map(ProcEvent::Exited)
+	}
+	/// The OS process group the process was placed in when it leads or
+	/// joined one ([`PgroupSpec`]); `None` when it shares the shell's group
+	/// or the host has no process groups. A [`PgroupSpec::Job`] join the OS
+	/// refused (the group emptied) leaves the process leading its own: this
+	/// is the group job control signals and hands the terminal to.
+	fn pgid(&self) -> Option<u32> {
+		None
+	}
 	/// Signal the process group (Unix) or Job Object (Windows).
 	fn signal(&mut self, sig: Signal) -> io::Result<()>;
 	/// Stop the process group (job pause).
@@ -561,6 +643,17 @@ pub enum ExitStatus {
 	SignaledRaw(i32),
 }
 
+/// A state change of a running external ([`ExtProc::poll_event`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProcEvent {
+	/// It ended.
+	Exited(ExitStatus),
+	/// It stopped on this signal (`STOP`, `TSTP`, `TTIN`, `TTOU`).
+	Stopped(Signal),
+	/// It continued after a stop (`SIGCONT`).
+	Continued,
+}
+
 /// Process-group placement of a spawned external.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PgroupSpec {
@@ -568,6 +661,23 @@ pub enum PgroupSpec {
 	New(JobId),
 	/// Join the existing group `pgid` (later stages of a pipeline).
 	Join(u32),
+	/// Job control (zsh/bash `MONITOR` in the interactive shell): the
+	/// external belongs to a job whose process group the shell manages. It
+	/// leads a new group (`join: None`, the job's first process) or joins
+	/// the job's group `join` (leading its own when the OS refuses the join,
+	/// [`ExtProc::pgid`]). A foreground job (`terminal`) takes the shell's
+	/// terminal (`tcsetpgrp`) in the child before it execs and in the shell
+	/// after the spawn, so neither side races the other (zsh `entersubsh`
+	/// and `addproc`). The process host (`Sessions::Inherit`) honours it
+	/// while it keeps other externals in its own group; hosts without
+	/// terminal job control place it as [`PgroupSpec::New`].
+	Job {
+		/// The job's process group, once its first process leads one.
+		join:     Option<u32>,
+		/// A foreground job: the shell's terminal (zsh `SHTTY`, an
+		/// [`OsHandle`] of [`crate::bash::Terminal`]) the job's group takes.
+		terminal: Option<OsHandle>,
+	},
 }
 
 /// Current user.

@@ -18,6 +18,8 @@ export type AnthropicHeaderOptions = {
 	claudeCodeBetas?: readonly string[];
 	/** Allow explicit fingerprint headers to replace OAuth defaults on non-official endpoints. */
 	allowAnthropicHeaderOverrides?: boolean;
+	/** Leave Claude Code's `x-app` and browser-access headers off API-key requests. */
+	omitClaudeCodeAppHeaders?: boolean;
 };
 
 // Build deduplicated beta header string
@@ -132,10 +134,14 @@ function isClaudeCodeClientUserAgent(userAgent: string | undefined): userAgent i
 	return userAgent.toLowerCase().startsWith("claude-cli");
 }
 
-const sharedHeaders = {
+const transportHeaders = {
 	"Accept-Encoding": "gzip, deflate, br, zstd",
 	Connection: "keep-alive",
 	"Content-Type": "application/json",
+};
+
+const sharedHeaders = {
+	...transportHeaders,
 	"anthropic-dangerous-direct-browser-access": "true",
 	"x-app": "cli",
 };
@@ -144,6 +150,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 	const oauthToken = options.isOAuth ?? isAnthropicOAuthToken(options.apiKey);
 	const extraBetas = options.extraBetas ?? [];
 	const stream = options.stream ?? false;
+	const apiKeyHeaders = options.omitClaudeCodeAppHeaders ? transportHeaders : sharedHeaders;
 	// `enforcedHeaderKeys` strips User-Agent / X-Api-Key / Authorization out of
 	// modelHeaders so a case-insensitive spread can't produce duplicate keys; each
 	// branch re-adds the caller's value explicitly. User-Agent and X-Api-Key are
@@ -211,7 +218,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 		return {
 			...modelHeaders,
 			Accept: acceptHeader,
-			...sharedHeaders,
+			...apiKeyHeaders,
 			"anthropic-version": apiVersion,
 			...(incomingUserAgent ? { "User-Agent": incomingUserAgent } : {}),
 			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
@@ -250,7 +257,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			...modelHeaders,
 			Accept: acceptHeader,
 			...(bearer ? { Authorization: bearer } : {}),
-			...sharedHeaders,
+			...apiKeyHeaders,
 			"anthropic-version": apiVersion,
 			...(incomingUserAgent ? { "User-Agent": incomingUserAgent } : {}),
 			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
@@ -260,7 +267,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 		return {
 			...modelHeaders,
 			Accept: acceptHeader,
-			...sharedHeaders,
+			...apiKeyHeaders,
 			"anthropic-version": apiVersion,
 			...(incomingUserAgent ? { "User-Agent": incomingUserAgent } : {}),
 			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
@@ -321,8 +328,7 @@ export const claudeCodeHeaders = {
  * Cowork's fingerprint keys. Only the OAuth branch re-emits them, so only that
  * branch may enforce them: everywhere else nothing would fill the gap and
  * filtering would silently delete a client identity the caller built on
- * purpose (Factory Droid mirrors droid's Anthropic SDK fingerprint on this
- * wire, right down to the 600s client timeout).
+ * purpose.
  */
 const coworkHeaderKeys = new Set(Object.keys(claudeCodeHeaders).map(key => key.toLowerCase()));
 

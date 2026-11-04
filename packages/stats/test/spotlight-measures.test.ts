@@ -47,9 +47,12 @@ function shaped(b: SpotlightSessionBuilder, name: string, args: Record<string, u
 function shapedRead(
 	b: SpotlightSessionBuilder,
 	file: string,
-	opts: { lines?: number; kept?: [number, number][]; heat?: string; artifact?: number } & Partial<
-		Pick<ShapeSpec, "holdout" | "scoreFree" | "inTokens" | "outTokens" | "gated" | "editLikely">
-	> = {},
+	opts: {
+		lines?: number;
+		kept?: [number, number][];
+		heat?: string;
+		artifact?: number;
+	} & Partial<Pick<ShapeSpec, "holdout" | "scoreFree" | "inTokens" | "outTokens" | "gated">> = {},
 ): string {
 	return shaped(
 		b,
@@ -62,7 +65,6 @@ function shapedRead(
 			...(opts.holdout ? { holdout: opts.holdout } : {}),
 			...(opts.scoreFree ? { scoreFree: true } : {}),
 			...(opts.gated ? { gated: true } : {}),
-			...(opts.editLikely === undefined ? {} : { editLikely: opts.editLikely }),
 			original: {
 				url: `artifact://${opts.artifact ?? 0}`,
 				lines: opts.lines ?? 60,
@@ -254,69 +256,22 @@ describe("Spotlight holdout-adjusted net", () => {
 	});
 });
 
-describe("Spotlight edit-aware gate", () => {
-	it("classifies unmarked reads by pi's rule: code files of a main agent, or files the session already read or edited", async () => {
-		const main = new SpotlightSessionBuilder(T0).header("/repo").marker();
-		main.user("go");
-		shapedRead(main, "src/a.ts");
-		// Not a code file: never edit-likely.
-		shapedRead(main, "docs/readme.md");
-		await write("main.jsonl", main);
-
-		const sub = new SpotlightSessionBuilder(T0 + 60_000).header("/repo").marker();
-		sub.user("task");
-		// A subagent's first read of a file is not edit-likely; its second read is.
-		shapedRead(sub, "src/b.ts");
-		shapedRead(sub, "src/b.ts");
-		// Edited (an absolute path, resolved alike) before its first read.
-		edit(sub, "/repo/src/c.ts", ["line 1"]);
-		shapedRead(sub, "src/c.ts");
-		// Read before with a selector (selectors are stripped), by a call shaping left alone.
-		call(sub, "read", { path: "src/d.py:1-5" });
-		shapedRead(sub, "src/d.py");
-		call(sub, "read", { path: "notes.txt" });
-		shapedRead(sub, "notes.txt");
-		await write("main/Sub.jsonl", sub);
-
-		const mainStats = await dashboard("main");
-		expect(mainStats.editGate.reads?.cut).toBe(1);
-		expect(mainStats.editGate.editLikelyShare).toBe(1 / 2);
-		const subStats = await dashboard("subagent");
-		expect(subStats.editGate.reads?.cut).toBe(3);
-		expect(subStats.editGate.editLikelyShare).toBeCloseTo(3 / 5, 12);
-		const stats = await dashboard();
-		expect(stats.editGate.reads?.cut).toBe(4);
-		expect(stats.editGate.editLikelyShare).toBeCloseTo(4 / 7, 12);
-	});
-
-	it("prefers pi's mark over the rule", async () => {
-		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
-		b.user("go");
-		shapedRead(b, "src/x.ts", { editLikely: false });
-		shapedRead(b, "docs/plan.md", { editLikely: true });
-		await write("marked.jsonl", b);
-
-		const stats = await dashboard();
-		expect(stats.editGate.reads?.cut).toBe(1);
-		expect(stats.editGate.editLikelyShare).toBe(0.5);
-	});
-
-	it("never counts a gated read as a cut and compares edit-likely cuts with the reads shown whole", async () => {
+describe("Spotlight historical gated reads", () => {
+	it("never counts a gated read as a cut and fetches it back as a group of its own", async () => {
 		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
 		b.user("go");
 		// Gated (the model saw it whole): its would-be hidden lines are read again (100 tokens) in a request of its own.
-		const gated = shapedRead(b, "src/g.ts", { gated: true, editLikely: true });
+		const gated = shapedRead(b, "src/g.ts", { gated: true });
 		call(b, "read", { path: "src/g.ts:20-30" }, "x".repeat(400));
 		// Cut: one fetched back (200 tokens recovered), one not.
-		shapedRead(b, "src/c.ts", { editLikely: true });
+		shapedRead(b, "src/c.ts");
 		call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(800));
-		shapedRead(b, "src/d.ts", { editLikely: true });
+		shapedRead(b, "src/d.ts");
 		// Held out: shown whole, nothing fetched.
-		shapedRead(b, "src/h.ts", { editLikely: true, holdout: { shapedUrl: "artifact://9" } });
+		shapedRead(b, "src/h.ts", { holdout: { shapedUrl: "artifact://9" } });
 		await write("gate.jsonl", b);
 
 		const stats = await dashboard();
-		expect(stats.gated).toBe(1);
 		expect(stats.holdouts).toBe(1);
 		// Gated reads save nothing and show plain's page: not in the gross, steps, economics or the adjusted net.
 		expect(stats.gross).toMatchObject({ results: 4, shaped: 2, savedTokens: 4000, outTokens: 2000 + 3000 + 3000 });
@@ -329,68 +284,19 @@ describe("Spotlight edit-aware gate", () => {
 		});
 		expect(stats.recent.map(row => row.toolCallId)).not.toContain(gated);
 		const fetchBack = (group: string) => stats.fetchBack.find(c => c.tool === "read" && c.group === group);
-		expect(fetchBack("gated")).toMatchObject({ results: 1, sessions: 1, rate: { value: 1 } });
-		expect(fetchBack("applied")).toMatchObject({ results: 2, rate: { value: 0.5 } });
-		expect(fetchBack("holdout")).toMatchObject({ results: 1, rate: { value: 0 } });
-
-		const row = stats.editGate.reads;
-		expect(row).toMatchObject({
-			cut: 2,
-			gated: 1,
-			heldOut: 1,
-			cutFetchBack: { value: 0.5 },
-			wholeFetchBack: { value: 0.5 },
-			cutTurnsPer100: 50,
-			wholeTurnsPer100: 50,
+		expect(fetchBack("gated")).toMatchObject({
+			results: 1,
+			sessions: 1,
+			rate: { value: 1 },
 		});
-		// One held-out edit-likely read is under 30: the baseline falls back to all held-out reads, which fetched
-		// nothing back, so all 200 recovered tokens are excess (the gated read's re-read is not a holdout). Whole
-		// reads take half a fetch-back-only request each, as many as the two cuts took: no excess request cost.
-		const { savedUsd } = stats.compounding;
-		const carriedUsd = stats.clawback.usd;
-		expect(carriedUsd).toBeGreaterThan(0);
-		expect(row?.cutNetUsdPer100.value).toBeCloseTo(((savedUsd - carriedUsd - 0.002) * 100) / 2, 12);
-		expect(stats.editGate.editLikelyShare).toBe(1);
-	});
-
-	it("measures edit-likely read cuts against edit-likely holdouts and other read cuts against the rest", async () => {
-		// 30 edit-likely holdouts, each fetched back by 100 tokens anyway; 2 edit-likely cuts, one recovered 200.
-		const a = new SpotlightSessionBuilder(T0).header("/repo").marker();
-		a.user("go");
-		for (let i = 0; i < 30; i++) {
-			shapedRead(a, `src/h${i}.ts`, { holdout: { shapedUrl: "artifact://9" } });
-			call(a, "read", { path: `src/h${i}.ts:20-30` }, "x".repeat(400));
-		}
-		shapedRead(a, "src/c1.ts");
-		call(a, "read", { path: "src/c1.ts:20-30" }, "y".repeat(800));
-		shapedRead(a, "src/c2.ts");
-		await write("edit-likely.jsonl", a);
-		// 30 other holdouts, never fetched back; 1 other cut that recovered 200. A subagent's, so the main agent's
-		// economics price the edit-likely cuts alone.
-		const b = new SpotlightSessionBuilder(T0 + 60_000).header("/repo").marker();
-		b.user("go");
-		for (let i = 0; i < 30; i++) shapedRead(b, `docs/n${i}.md`, { holdout: { shapedUrl: "artifact://9" } });
-		shapedRead(b, "docs/x.md");
-		call(b, "read", { path: "docs/x.md:20-30" }, "z".repeat(800));
-		await write("edit-likely/Other.jsonl", b);
-
-		const stats = await dashboard();
-		// Pooled, every cut would be charged 3000 / 60 = 50 tokens of baseline: 400 − 150 = 250 excess. By stratum:
-		// edit-likely 200 − 100 × 2 → 0, other 200 − 0 × 1 = 200.
-		const read = stats.adjusted.byTool.find(t => t.tool === "read");
-		expect(read).toMatchObject({ cuts: 3, holdouts: 60, recoveredTokens: 400, baselinePerCut: { value: 50 } });
-		expect(read?.excessTokens.value).toBe(200);
-		expect(stats.steps.map(cell => [cell.tool, cell.cuts, cell.recoveredTokens, cell.excessTokens])).toEqual([
-			["read", 3, 400, 200],
-		]);
-		// The edit-likely cuts recovered no more than edit-likely holdouts fetch anyway, and took one fetch-back-only
-		// request where 2 whole reads take 2: only their saving and Spotlight's bill remain.
-		const row = stats.editGate.reads;
-		expect(row).toMatchObject({ cut: 2, heldOut: 30, gated: 0 });
-		const mainStats = await dashboard("main");
-		const savedUsd = mainStats.economics.find(c => c.tool === "read")?.savedUsd ?? 0;
-		expect(savedUsd).toBeGreaterThan(0);
-		expect(row?.cutNetUsdPer100.value).toBeCloseTo(((savedUsd - 0.002) * 100) / 2, 12);
+		expect(fetchBack("applied")).toMatchObject({
+			results: 2,
+			rate: { value: 0.5 },
+		});
+		expect(fetchBack("holdout")).toMatchObject({
+			results: 1,
+			rate: { value: 0 },
+		});
 	});
 });
 
