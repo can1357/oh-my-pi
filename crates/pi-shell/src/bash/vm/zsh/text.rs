@@ -1310,7 +1310,9 @@ mod tests {
 	fn casemodify_multibyte() {
 		use crate::bash::syntax::zsh::tok::{metafy, unmetafy};
 		// zsh strings are metafied (`É` is c3 89, and 0x89 is a meta byte).
-		let cm = |s: &str, how| String::from_utf8(unmetafy(&casemodify(&metafy(s.as_bytes()), how, true))).unwrap();
+		let cm = |s: &str, how| {
+			String::from_utf8(unmetafy(&casemodify(&metafy(s.as_bytes()), how, true))).unwrap()
+		};
 		assert_eq!(cm("l'état c'est moi", CaseMod::Caps), "L'État C'Est Moi");
 		assert_eq!(cm("ténébreux", CaseMod::Caps), "Ténébreux");
 		assert_eq!(cm("øpened", CaseMod::Upper), "ØPENED");

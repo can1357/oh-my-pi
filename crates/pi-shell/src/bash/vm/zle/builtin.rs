@@ -13,13 +13,15 @@ use super::{
 	thingy::{BindError, Kind, Widget},
 	wflags, zle_mut,
 };
-use crate::bash::vm::builtins::{
-	Control, Ctx, Need, Outcome, R, done,
-	zsh_args::{Ops, isset},
-	zsh_print::charset,
-	zsh_quote::{niceformat, quotedzputs},
+use crate::bash::{
+	vm::builtins::{
+		Control, Ctx, Need, Outcome, R, done,
+		zsh_args::{Ops, isset},
+		zsh_print::charset,
+		zsh_quote::{niceformat, quotedzputs},
+	},
+	zshopt::ZshOpt,
 };
-use crate::bash::zshopt::ZshOpt;
 
 /// `zle` (zsh `bin_zle`): the operation its option selects.
 pub fn zle(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
@@ -40,7 +42,7 @@ pub fn zle(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		(b'T', 0, Some(2)),
 	];
 	let mut sel = None;
-	for (i, &(o, _, _)) in OPNS.iter().enumerate() {
+	for (i, &(o, ..)) in OPNS.iter().enumerate() {
 		if ops.isset(o) {
 			if sel.is_some() {
 				ctx.usage("incompatible operation selection options");
@@ -400,7 +402,9 @@ pub fn read_bytes(
 				return Ok(ReadBytes::Got(acc, true));
 			},
 			Drive::Park(key) => return Err(Need::Park(key)),
-			Drive::Frame => return Ok(ReadBytes::Outcome(Outcome { status: 0, control: Control::Resume })),
+			Drive::Frame => {
+				return Ok(ReadBytes::Outcome(Outcome { status: 0, control: Control::Resume }));
+			},
 		}
 	}
 }

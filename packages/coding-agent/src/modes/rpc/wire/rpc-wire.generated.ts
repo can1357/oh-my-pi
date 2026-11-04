@@ -548,6 +548,8 @@ export interface BashResult {
 	minimized?: Record<string, unknown>;
 	workingDir?: string;
 	images?: ImageContent[];
+	/** The embedded shell's final `ShellTrace` of the run; only when the caller asked for one. */
+	trace?: Record<string, unknown>;
 }
 
 export interface LineRange {

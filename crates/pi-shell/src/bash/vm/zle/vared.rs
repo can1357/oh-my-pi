@@ -57,7 +57,10 @@ pub fn vared(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		ctx.usage("ZLE cannot be used recursively (yet)");
 		return done(1);
 	}
-	let term = zx(ctx, |ex| params::getsparam(ex, b"TERM"))?.ok().flatten().unwrap_or_default();
+	let term = zx(ctx, |ex| params::getsparam(ex, b"TERM"))?
+		.ok()
+		.flatten()
+		.unwrap_or_default();
 	let interactive = isset(ctx, ZshOpt::Interactive)?;
 	if (interactive && !isset(ctx, ZshOpt::Zle)?) || term.as_slice() == b"emacs" {
 		ctx.usage("ZLE not enabled");
@@ -115,7 +118,7 @@ pub fn vared(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 			ctx.usage(format!("no such variable: {}", name.as_bstr()));
 			return done(1);
 		},
-		Some((true, _, _)) => {
+		Some((true, ..)) => {
 			ctx.usage(format!("not an identifier: `{}'", name.as_bstr()));
 			return done(1);
 		},

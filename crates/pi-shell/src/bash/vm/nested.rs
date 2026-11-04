@@ -277,6 +277,16 @@ fn launch(
 		*s = stdin;
 	}
 	child.frames.push(Frame::new(None, 0, kind));
+	if k.mask.contains(crate::bash::event::EventKind::UnitCompiled)
+		&& !stdin
+		&& k.trace_sources.len() < crate::bash::trace::history::HISTORY_EVENTS
+		&& let Some(origin) = exec::literal_script_origin(vp, src, true)
+	{
+		k.trace_sources
+			.entry(child.vpid)
+			.or_default()
+			.insert(child.frames.len(), origin);
+	}
 	for text in startup.iter().rev() {
 		push_script(&mut child, text, 1, ScriptKind::Source);
 	}

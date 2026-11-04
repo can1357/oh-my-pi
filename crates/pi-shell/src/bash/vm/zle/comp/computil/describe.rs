@@ -13,19 +13,21 @@ use serde::{Deserialize, Serialize};
 use super::{
 	atoi, fin, gate, get_user_var, getaparam, load, rembslash, save, setaparam, setsparam, warn,
 };
-use crate::bash::{
-	store::MiscKey,
-	vm::{
-		builtins::{
-			Ctx, Need, R, done,
-			zsh_args::Ops,
-			zsh_print::charset,
-			zsh_quote::{Charset, niceformat},
+use crate::{
+	bash::{
+		store::MiscKey,
+		vm::{
+			builtins::{
+				Ctx, Need, R, done,
+				zsh_args::Ops,
+				zsh_print::charset,
+				zsh_quote::{Charset, niceformat},
+			},
+			zsh::{params::collator_in, wcwidth::wcwidth},
 		},
-		zsh::{params::collator_in, wcwidth::wcwidth},
 	},
+	sys::langinfo::Collator,
 };
-use crate::sys::langinfo::Collator;
 
 /// zsh `CM_SPACE`: columns between list entries.
 const CM_SPACE: i64 = 2;

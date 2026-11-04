@@ -171,8 +171,8 @@ fn options_of_ls_ask_then_list() {
 
 #[test]
 fn options_and_values_of_arguments() {
-	let rc = "_fx() { _arguments '-a[show all]' '-l[long listing]' '--color=[colourize]:when:(always never auto)' '*:file:_files' }\n\
-	          compdef _fx fxtool";
+	let rc = "_fx() { _arguments '-a[show all]' '-l[long listing]' \
+	          '--color=[colourize]:when:(always never auto)' '*:file:_files' }\ncompdef _fx fxtool";
 	check(
 		"options_and_values_of_arguments",
 		Setup::Compsys,
@@ -249,9 +249,8 @@ fn menu_select_navigation() {
 
 #[test]
 fn menu_select_widget_over_rows() {
-	let rc = "zmodload zsh/complist\n\
-	          _m() { compadd -J n -X '%Bnumbers%b' w{01..30} }\n\
-	          zle -C ms menu-select _m\nbindkey '^T' ms";
+	let rc = "zmodload zsh/complist\n_m() { compadd -J n -X '%Bnumbers%b' w{01..30} }\nzle -C ms \
+	          menu-select _m\nbindkey '^T' ms";
 	check(
 		"menu_select_widget_over_rows",
 		Setup::Bare,
@@ -325,9 +324,8 @@ fn menu_select_incremental_search() {
 /// from the top to the last column and back.
 #[test]
 fn menu_select_scrolls_with_menuprompt() {
-	let rc = "zmodload zsh/complist\nMENUSCROLL=3\nMENUPROMPT='%Sat %p of %m%s'\n\
-	          _m() { compadd -V v -- item-{001..400} }\n\
-	          zle -C ms menu-select _m\nbindkey '^T' ms";
+	let rc = "zmodload zsh/complist\nMENUSCROLL=3\nMENUPROMPT='%Sat %p of %m%s'\n_m() { compadd -V \
+	          v -- item-{001..400} }\nzle -C ms menu-select _m\nbindkey '^T' ms";
 	check(
 		"menu_select_scrolls_with_menuprompt",
 		Setup::Bare,
@@ -341,9 +339,8 @@ fn menu_select_scrolls_with_menuprompt() {
 /// return for a line, `q` to stop.
 #[test]
 fn listprompt_scrolls_a_long_list() {
-	let rc = "zmodload zsh/complist\nLISTPROMPT='%Smore? %l %p%s'\n\
-	          _m() { compadd -V v -- item-{001..400} }\n\
-	          zle -C lc list-choices _m\nbindkey '^T' lc";
+	let rc = "zmodload zsh/complist\nLISTPROMPT='%Smore? %l %p%s'\n_m() { compadd -V v -- \
+	          item-{001..400} }\nzle -C lc list-choices _m\nbindkey '^T' lc";
 	check(
 		"listprompt_scrolls_a_long_list",
 		Setup::Bare,
@@ -357,11 +354,10 @@ fn listprompt_scrolls_a_long_list() {
 /// its groups, and `ma` for the selected match.
 #[test]
 fn zls_colors_types_patterns_and_selection() {
-	let rc = "ln -s file1 ~/fx/link\nprint '#!/bin/sh' >~/fx/run.sh\nchmod +x ~/fx/run.sh\n\
-	          zmodload zsh/complist\n\
-	          ZLS_COLORS='ex=32:ln=36:di=01;34:ma=7;33:=(#b)(fo)(*)=0=1;31=35'\n\
-	          _f() { compadd -f -- * }\n\
-	          zle -C fs menu-select _f\nbindkey '^T' fs";
+	let rc = "ln -s file1 ~/fx/link\nprint '#!/bin/sh' >~/fx/run.sh\nchmod +x \
+	          ~/fx/run.sh\nzmodload \
+	          zsh/complist\nZLS_COLORS='ex=32:ln=36:di=01;34:ma=7;33:=(#b)(fo)(*)=0=1;31=35'\n_f() \
+	          { compadd -f -- * }\nzle -C fs menu-select _f\nbindkey '^T' fs";
 	check(
 		"zls_colors_types_patterns_and_selection",
 		Setup::Bare,
@@ -376,7 +372,8 @@ fn list_colors_style() {
 	check(
 		"list_colors_style",
 		Setup::Compsys,
-		"zmodload zsh/complist\nzstyle ':completion:*' list-colors 'di=1;34' 'fi=0' '*.c=32' '*.h=33'",
+		"zmodload zsh/complist\nzstyle ':completion:*' list-colors 'di=1;34' 'fi=0' '*.c=32' \
+		 '*.h=33'",
 		&[": \t"],
 		Record::Colours,
 	);
@@ -384,22 +381,17 @@ fn list_colors_style() {
 
 #[test]
 fn zls_colors_parameter() {
-	let rc = "zmodload zsh/complist\n\
-	          ZLS_COLORS='di=01;34:*.c=32:*.h=4'\n\
-	          _f() { compadd -f -- * }\n\
-	          zle -C fc complete-word _f\nbindkey '^T' fc";
+	let rc = "zmodload zsh/complist\nZLS_COLORS='di=01;34:*.c=32:*.h=4'\n_f() { compadd -f -- * \
+	          }\nzle -C fc complete-word _f\nbindkey '^T' fc";
 	check("zls_colors_parameter", Setup::Bare, rc, &[": \x14"], Record::Colours);
 }
 
 #[test]
 fn compadd_groups_explanations_and_displays() {
-	let rc = "_g() {\n\
-	          \x20 compadd -J one -X 'first group' alpha alpine\n\
-	          \x20 compadd -V two -X 'second %d group' zeta alto\n\
-	          \x20 local -a disp=('ant -- an insect' 'aardvark -- an animal')\n\
-	          \x20 compadd -J three -d disp ant aardvark\n\
-	          }\n\
-	          zle -C g complete-word _g\nbindkey '^T' g";
+	let rc = "_g() {\n\x20 compadd -J one -X 'first group' alpha alpine\n\x20 compadd -V two -X \
+	          'second %d group' zeta alto\n\x20 local -a disp=('ant -- an insect' 'aardvark -- an \
+	          animal')\n\x20 compadd -J three -d disp ant aardvark\n}\nzle -C g complete-word \
+	          _g\nbindkey '^T' g";
 	check(
 		"compadd_groups_explanations_and_displays",
 		Setup::Bare,
@@ -423,9 +415,8 @@ fn compadd_autoremovable_suffix() {
 
 #[test]
 fn compadd_prefixes_and_suffixes() {
-	let rc = "_p() { compadd -P pre- -p hid -s .x -i ign- alpha alps }\n\
-	          zle -C p complete-word _p\nbindkey '^T' p\n\
-	          zle -C pl list-choices _p\nbindkey '^Xl' pl";
+	let rc = "_p() { compadd -P pre- -p hid -s .x -i ign- alpha alps }\nzle -C p complete-word \
+	          _p\nbindkey '^T' p\nzle -C pl list-choices _p\nbindkey '^Xl' pl";
 	check(
 		"compadd_prefixes_and_suffixes",
 		Setup::Bare,
@@ -437,11 +428,9 @@ fn compadd_prefixes_and_suffixes() {
 
 #[test]
 fn compadd_matchers() {
-	let rc = "_m() {\n\
-	          \x20 compadd -M 'm:{a-z}={A-Z}' Foobar FooBaz Quux\n\
-	          \x20 compadd -M 'r:|.=* r:|=*' comp.sources.unix comp.graphics.misc\n\
-	          }\n\
-	          zle -C m complete-word _m\nbindkey '^T' m";
+	let rc = "_m() {\n\x20 compadd -M 'm:{a-z}={A-Z}' Foobar FooBaz Quux\n\x20 compadd -M 'r:|.=* \
+	          r:|=*' comp.sources.unix comp.graphics.misc\n}\nzle -C m complete-word _m\nbindkey \
+	          '^T' m";
 	check(
 		"compadd_matchers",
 		Setup::Bare,
@@ -453,13 +442,11 @@ fn compadd_matchers() {
 
 #[test]
 fn compstate_keys_in_a_widget() {
-	let rc = "_cs() {\n\
-	          \x20 local k\n\
-	          \x20 for k in ${(ok)compstate}; do print -r -- \"$k=${compstate[$k]}\"; done >~/cs.out\n\
-	          \x20 compadd foo foobar\n\
-	          \x20 print -r -- \"after: $compstate[nmatches] <$compstate[unambiguous]> $compstate[unambiguous_cursor] $compstate[list] $compstate[insert]\" >>~/cs.out\n\
-	          }\n\
-	          zle -C cs complete-word _cs\nbindkey '^T' cs";
+	let rc = "_cs() {\n\x20 local k\n\x20 for k in ${(ok)compstate}; do print -r -- \
+	          \"$k=${compstate[$k]}\"; done >~/cs.out\n\x20 compadd foo foobar\n\x20 print -r -- \
+	          \"after: $compstate[nmatches] <$compstate[unambiguous]> \
+	          $compstate[unambiguous_cursor] $compstate[list] $compstate[insert]\" \
+	          >>~/cs.out\n}\nzle -C cs complete-word _cs\nbindkey '^T' cs";
 	check(
 		"compstate_keys_in_a_widget",
 		Setup::Bare,
@@ -471,10 +458,9 @@ fn compstate_keys_in_a_widget() {
 
 #[test]
 fn compstate_insert_and_list_set_by_a_widget() {
-	let rc = "_w() { compadd aa ab ac; compstate[insert]=2; compstate[list]= }\n\
-	          zle -C w complete-word _w\nbindkey '^T' w\n\
-	          _w2() { compadd aa ab ac; compstate[list]='list force'; compstate[insert]=menu }\n\
-	          zle -C w2 complete-word _w2\nbindkey '^Xw' w2";
+	let rc = "_w() { compadd aa ab ac; compstate[insert]=2; compstate[list]= }\nzle -C w \
+	          complete-word _w\nbindkey '^T' w\n_w2() { compadd aa ab ac; compstate[list]='list \
+	          force'; compstate[insert]=menu }\nzle -C w2 complete-word _w2\nbindkey '^Xw' w2";
 	check(
 		"compstate_insert_and_list_set_by_a_widget",
 		Setup::Bare,
@@ -486,26 +472,18 @@ fn compstate_insert_and_list_set_by_a_widget() {
 
 #[test]
 fn compset_prefix_suffix_words_and_quotes() {
-	let rc = "setopt completeinword\n\
-	          _st() {\n\
-	          \x20 {\n\
-	          \x20   print -r -- \"0 [$IPREFIX|$PREFIX|$SUFFIX|$ISUFFIX] $CURRENT ${(j:,:)words}\"\n\
-	          \x20   compset -P '*=' && print -r -- \"P [$IPREFIX|$PREFIX|$SUFFIX|$ISUFFIX]\"\n\
-	          \x20   compset -S ',*' && print -r -- \"S [$IPREFIX|$PREFIX|$SUFFIX|$ISUFFIX]\"\n\
-	          \x20   compset -p 1 && print -r -- \"p [$IPREFIX|$PREFIX|$SUFFIX|$ISUFFIX]\"\n\
-	          \x20   compset -s 1 && print -r -- \"s [$IPREFIX|$PREFIX|$SUFFIX|$ISUFFIX]\"\n\
-	          \x20   compset -n 2 && print -r -- \"n $CURRENT ${(j:,:)words}\"\n\
-	          \x20   compset -N 'b*' && print -r -- \"N $CURRENT ${(j:,:)words}\"\n\
-	          \x20   compset -p 9 || print -r -- \"p9 fails\"\n\
-	          \x20 } >~/cs.out\n\
-	          \x20 compadd xyz\n\
-	          }\n\
-	          zle -C st complete-word _st\nbindkey '^T' st\n\
-	          _q() {\n\
-	          \x20 compset -q && print -r -- \"q $CURRENT ${(j:,:)words} [$IPREFIX|$PREFIX|$SUFFIX|$ISUFFIX] $compstate[quote]\" >~/q.out\n\
-	          \x20 compadd baz\n\
-	          }\n\
-	          zle -C q complete-word _q\nbindkey '^Xq' q";
+	let rc = "setopt completeinword\n_st() {\n\x20 {\n\x20   print -r -- \"0 \
+	          [$IPREFIX|$PREFIX|$SUFFIX|$ISUFFIX] $CURRENT ${(j:,:)words}\"\n\x20   compset -P \
+	          '*=' && print -r -- \"P [$IPREFIX|$PREFIX|$SUFFIX|$ISUFFIX]\"\n\x20   compset -S \
+	          ',*' && print -r -- \"S [$IPREFIX|$PREFIX|$SUFFIX|$ISUFFIX]\"\n\x20   compset -p 1 \
+	          && print -r -- \"p [$IPREFIX|$PREFIX|$SUFFIX|$ISUFFIX]\"\n\x20   compset -s 1 && \
+	          print -r -- \"s [$IPREFIX|$PREFIX|$SUFFIX|$ISUFFIX]\"\n\x20   compset -n 2 && print \
+	          -r -- \"n $CURRENT ${(j:,:)words}\"\n\x20   compset -N 'b*' && print -r -- \"N \
+	          $CURRENT ${(j:,:)words}\"\n\x20   compset -p 9 || print -r -- \"p9 fails\"\n\x20 } \
+	          >~/cs.out\n\x20 compadd xyz\n}\nzle -C st complete-word _st\nbindkey '^T' st\n_q() \
+	          {\n\x20 compset -q && print -r -- \"q $CURRENT ${(j:,:)words} \
+	          [$IPREFIX|$PREFIX|$SUFFIX|$ISUFFIX] $compstate[quote]\" >~/q.out\n\x20 compadd \
+	          baz\n}\nzle -C q complete-word _q\nbindkey '^Xq' q";
 	check(
 		"compset_prefix_suffix_words_and_quotes",
 		Setup::Bare,
@@ -600,10 +578,8 @@ fn expand_cmd_path() {
 
 #[test]
 fn listmax_asks_before_listing() {
-	let rc = "LISTMAX=5\n\
-	          _lm() { compadd word{01..60} }\n\
-	          zle -C lm complete-word _lm\nbindkey '^T' lm\n\
-	          zle -C lml list-choices _lm\nbindkey '^Xd' lml";
+	let rc = "LISTMAX=5\n_lm() { compadd word{01..60} }\nzle -C lm complete-word _lm\nbindkey '^T' \
+	          lm\nzle -C lml list-choices _lm\nbindkey '^Xd' lml";
 	check(
 		"listmax_asks_before_listing",
 		Setup::Bare,

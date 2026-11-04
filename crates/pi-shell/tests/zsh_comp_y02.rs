@@ -17,9 +17,9 @@ mod comp_support;
 mod pty_support;
 
 use comp_support::comptest::{
-	Case, Suite,
+	Case,
 	Step::{self, Eval, Test},
-	run_case,
+	Suite, run_case,
 };
 
 /// The `%prep` steps (after `comptestinit`).
@@ -30,932 +30,972 @@ const CASES: &[Case] = &[
 	Case {
 		name:  "Match Error for \"z:\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'z:'  - IndianRed IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'z:'  - IndianRed \
+				 IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst \t",
-				"line: {tst }{}\n\
-				 COMPADD:{_tst:compadd: unknown match specification character `z'}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst }{}\nCOMPADD:{_tst:compadd: unknown match specification character \
+				 `z'}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "Match Error for \"m:\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:'  - IndianRed IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:'  - IndianRed \
+				 IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst \t",
-				"line: {tst }{}\n\
-				 COMPADD:{_tst:compadd: missing patterns}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst }{}\nCOMPADD:{_tst:compadd: missing patterns}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "Match Error for \"M:\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'M:'  - IndianRed IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'M:'  - IndianRed \
+				 IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst \t",
-				"line: {tst }{}\n\
-				 COMPADD:{_tst:compadd: missing patterns}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst }{}\nCOMPADD:{_tst:compadd: missing patterns}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "Match Error \"r:\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:'  - IndianRed IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:'  - IndianRed \
+				 IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst \t",
-				"line: {tst }{}\n\
-				 COMPADD:{_tst:compadd: missing patterns}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst }{}\nCOMPADD:{_tst:compadd: missing patterns}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "Match Error \"R:\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'R:'  - IndianRed IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'R:'  - IndianRed \
+				 IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst \t",
-				"line: {tst }{}\n\
-				 COMPADD:{_tst:compadd: missing patterns}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst }{}\nCOMPADD:{_tst:compadd: missing patterns}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "Match Error for \"l:\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'l:'  - IndianRed IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'l:'  - IndianRed \
+				 IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst \t",
-				"line: {tst }{}\n\
-				 COMPADD:{_tst:compadd: missing patterns}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst }{}\nCOMPADD:{_tst:compadd: missing patterns}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "Match Error for \"L:\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:'  - IndianRed IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:'  - IndianRed \
+				 IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst \t",
-				"line: {tst }{}\n\
-				 COMPADD:{_tst:compadd: missing patterns}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst }{}\nCOMPADD:{_tst:compadd: missing patterns}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "Match Error for \"m:{0-9\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{0-9'  - IndianRed IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{0-9'  - IndianRed \
+				 IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst \t",
-				"line: {tst }{}\n\
-				 COMPADD:{_tst:compadd: unterminated character class}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst }{}\nCOMPADD:{_tst:compadd: unterminated character \
+				 class}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "Match Error for \"m:{0-9}\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{0-9}'  - IndianRed IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{0-9}'  - IndianRed \
+				 IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst \t",
-				"line: {tst }{}\n\
-				 COMPADD:{_tst:compadd: missing word pattern}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst }{}\nCOMPADD:{_tst:compadd: missing word pattern}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "Match Error for \"m:{0-9}={\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{0-9}={'  - IndianRed IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{0-9}={'  - IndianRed \
+				 IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst \t",
-				"line: {tst }{}\n\
-				 COMPADD:{_tst:compadd: unterminated character class}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst }{}\nCOMPADD:{_tst:compadd: unterminated character \
+				 class}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "Match Error for \"m:{0-9}={0-\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{0-9}={0-'  - IndianRed IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{0-9}={0-'  - \
+				 IndianRed IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst \t",
-				"line: {tst }{}\n\
-				 COMPADD:{_tst:compadd: unterminated character class}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst }{}\nCOMPADD:{_tst:compadd: unterminated character \
+				 class}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "Match Error for \"m:{0-9}={-\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{0-9}={-'  - IndianRed IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{0-9}={-'  - \
+				 IndianRed IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst \t",
-				"line: {tst }{}\n\
-				 COMPADD:{_tst:compadd: unterminated character class}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst }{}\nCOMPADD:{_tst:compadd: unterminated character \
+				 class}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "Match Error \"r:\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:'  - IndianRed IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:'  - IndianRed \
+				 IndianRed2 IndianRed3 IndianRed4 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst \t",
-				"line: {tst }{}\n\
-				 COMPADD:{_tst:compadd: missing patterns}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst }{}\nCOMPADD:{_tst:compadd: missing patterns}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "Documentation example for options, input \"nolistbee\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:|[nN][oO]= M:_= M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
-			Test(
-				"tst nolistbee\t",
-				"line: {tst nolistbeep }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{14}",
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:|[nN][oO]= M:_= \
+				 M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd \
+				 listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n \
+				 '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; \
+				 echo -n '</INSERT_POSITIONS>'}",
 			),
+			Test("tst nolistbee\t", "line: {tst nolistbeep }{}\nCOMPADD:{}\nINSERT_POSITIONS:{14}"),
 		],
 	},
 	Case {
 		name:  "Documentation example for options, input \"list_bee\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:|[nN][oO]= M:_= M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
-			Test(
-				"tst list_bee\t",
-				"line: {tst list_beep }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{13}",
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:|[nN][oO]= M:_= \
+				 M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd \
+				 listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n \
+				 '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; \
+				 echo -n '</INSERT_POSITIONS>'}",
 			),
+			Test("tst list_bee\t", "line: {tst list_beep }{}\nCOMPADD:{}\nINSERT_POSITIONS:{13}"),
 		],
 	},
 	Case {
 		name:  "Documentation example for options, input \"ListBee\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:|[nN][oO]= M:_= M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
-			Test(
-				"tst ListBee\t",
-				"line: {tst ListBeep }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{12}",
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:|[nN][oO]= M:_= \
+				 M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd \
+				 listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n \
+				 '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; \
+				 echo -n '</INSERT_POSITIONS>'}",
 			),
+			Test("tst ListBee\t", "line: {tst ListBeep }{}\nCOMPADD:{}\nINSERT_POSITIONS:{12}"),
 		],
 	},
 	Case {
 		name:  "Documentation example for options, input \"NOList\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:|[nN][oO]= M:_= M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:|[nN][oO]= M:_= \
+				 M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd \
+				 listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n \
+				 '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; \
+				 echo -n '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst NOList\tB\t",
-				"line: {tst NOList}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{10}\n\
-				 NO:{NOListambiguous}\n\
-				 NO:{NOListbeep}\n\
-				 NO:{NOListpacked}\n\
-				 NO:{NOListrowsfirst}\n\
-				 NO:{NOListtypes}\n\
-				 line: {tst NOListBeep }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{14}",
+				"line: {tst \
+				 NOList}{}\nCOMPADD:{}\nINSERT_POSITIONS:{10}\nNO:{NOListambiguous}\nNO:{NOListbeep}\\
+				 nNO:{NOListpacked}\nNO:{NOListrowsfirst}\nNO:{NOListtypes}\nline: {tst NOListBeep \
+				 }{}\nCOMPADD:{}\nINSERT_POSITIONS:{14}",
 			),
 		],
 	},
 	Case {
 		name:  "Documentation example for options, input \"NO_List\\t__\\tB\\t\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:|[nN][oO]= M:_= M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:|[nN][oO]= M:_= \
+				 M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd \
+				 listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n \
+				 '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; \
+				 echo -n '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst NO_List\t__\tB\t",
-				"line: {tst NO_List}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{11}\n\
-				 NO:{NO_Listambiguous}\n\
-				 NO:{NO_Listbeep}\n\
-				 NO:{NO_Listpacked}\n\
-				 NO:{NO_Listrowsfirst}\n\
-				 NO:{NO_Listtypes}\n\
-				 line: {tst NO_List__}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{13}\n\
-				 NO:{NO_List__ambiguous}\n\
-				 NO:{NO_List__beep}\n\
-				 NO:{NO_List__packed}\n\
-				 NO:{NO_List__rowsfirst}\n\
-				 NO:{NO_List__types}\n\
-				 line: {tst NO_List__Beep }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{17}",
+				"line: {tst \
+				 NO_List}{}\nCOMPADD:{}\nINSERT_POSITIONS:{11}\nNO:{NO_Listambiguous}\nNO:\
+				 {NO_Listbeep}\nNO:{NO_Listpacked}\nNO:{NO_Listrowsfirst}\nNO:{NO_Listtypes}\nline: \
+				 {tst NO_List__}{}\nCOMPADD:{}\nINSERT_POSITIONS:{13}\nNO:{NO_List__ambiguous}\nNO:\
+				 {NO_List__beep}\nNO:{NO_List__packed}\nNO:{NO_List__rowsfirst}\nNO:{NO_List__types}\\
+				 nline: {tst NO_List__Beep }{}\nCOMPADD:{}\nINSERT_POSITIONS:{17}",
 			),
 		],
 	},
 	Case {
 		name:  "Documentation example for options, input \"__\\tN\\t__o\\t___\\tlist_\\tbeep__\\t\" ",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:|[nN][oO]= M:_= M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:|[nN][oO]= M:_= \
+				 M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd \
+				 listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n \
+				 '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; \
+				 echo -n '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst __\tN\t__o\t___\tlist_\tbeep__\t",
-				"line: {tst __}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{6}\n\
-				 NO:{__kshoptionprint}\n\
-				 NO:{__listambiguous}\n\
-				 NO:{__listbeep}\n\
-				 NO:{__listpacked}\n\
-				 NO:{__listrowsfirst}\n\
-				 NO:{__listtypes}\n\
-				 NO:{__shglob}\n\
-				 NO:{__shinstdin}\n\
-				 NO:{__shnullcmd}\n\
-				 NO:{__shoptionletters}\n\
-				 NO:{__shortloops}\n\
-				 NO:{__shwordsplit}\n\
-				 line: {tst __N}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}\n\
-				 line: {tst __N__o}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}\n\
-				 line: {tst __N__o___}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}\n\
-				 line: {tst __N__o___list_}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}\n\
-				 line: {tst __N__o___list_beep__}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst \
+				 __}{}\nCOMPADD:{}\nINSERT_POSITIONS:{6}\nNO:{__kshoptionprint}\nNO:{__listambiguous}\\
+				 \
+				 nNO:{__listbeep}\nNO:{__listpacked}\nNO:{__listrowsfirst}\nNO:{__listtypes}\nNO:{__shglob}\\
+				 nNO:{__shinstdin}\nNO:{__shnullcmd}\nNO:{__shoptionletters}\nNO:{__shortloops}\nNO:\
+				 {__shwordsplit}\nline: {tst __N}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst \
+				 __N__o}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst \
+				 __N__o___}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst \
+				 __N__o___list_}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst \
+				 __N__o___list_beep__}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "Documentation example for options, input \"__\\tNo\\t___\\tlist_\\tbeep__\\t\" ",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:|[nN][oO]= M:_= M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:|[nN][oO]= M:_= \
+				 M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd \
+				 listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n \
+				 '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; \
+				 echo -n '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst __\tNo\t___\tlist_\tbeep__\t",
-				"line: {tst __}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{6}\n\
-				 NO:{__kshoptionprint}\n\
-				 NO:{__listambiguous}\n\
-				 NO:{__listbeep}\n\
-				 NO:{__listpacked}\n\
-				 NO:{__listrowsfirst}\n\
-				 NO:{__listtypes}\n\
-				 NO:{__shglob}\n\
-				 NO:{__shinstdin}\n\
-				 NO:{__shnullcmd}\n\
-				 NO:{__shoptionletters}\n\
-				 NO:{__shortloops}\n\
-				 NO:{__shwordsplit}\n\
-				 line: {tst __No}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}\n\
-				 line: {tst __No___}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}\n\
-				 line: {tst __No___list_}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}\n\
-				 line: {tst __No___list_beep__}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst \
+				 __}{}\nCOMPADD:{}\nINSERT_POSITIONS:{6}\nNO:{__kshoptionprint}\nNO:{__listambiguous}\\
+				 \
+				 nNO:{__listbeep}\nNO:{__listpacked}\nNO:{__listrowsfirst}\nNO:{__listtypes}\nNO:{__shglob}\\
+				 nNO:{__shinstdin}\nNO:{__shnullcmd}\nNO:{__shoptionletters}\nNO:{__shortloops}\nNO:\
+				 {__shwordsplit}\nline: {tst __No}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst \
+				 __No___}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst \
+				 __No___list_}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst \
+				 __No___list_beep__}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "Documentation example for options, input \"___\\tlist_\\tbeep__\\t\" ",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:|[nN][oO]= M:_= M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'L:|[nN][oO]= M:_= \
+				 M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd \
+				 listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n \
+				 '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; \
+				 echo -n '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst ___\tlist_\tbeep__\t",
-				"line: {tst ___}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{7}\n\
-				 NO:{___kshoptionprint}\n\
-				 NO:{___listambiguous}\n\
-				 NO:{___listbeep}\n\
-				 NO:{___listpacked}\n\
-				 NO:{___listrowsfirst}\n\
-				 NO:{___listtypes}\n\
-				 NO:{___shglob}\n\
-				 NO:{___shinstdin}\n\
-				 NO:{___shnullcmd}\n\
-				 NO:{___shoptionletters}\n\
-				 NO:{___shortloops}\n\
-				 NO:{___shwordsplit}\n\
-				 line: {tst ___list_}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{12}\n\
-				 NO:{___list_ambiguous}\n\
-				 NO:{___list_beep}\n\
-				 NO:{___list_packed}\n\
-				 NO:{___list_rowsfirst}\n\
-				 NO:{___list_types}\n\
-				 line: {tst ___list_beep__ }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{18}",
+				"line: {tst \
+				 ___}{}\nCOMPADD:{}\nINSERT_POSITIONS:{7}\nNO:{___kshoptionprint}\nNO:\
+				 {___listambiguous}\nNO:{___listbeep}\nNO:{___listpacked}\nNO:{___listrowsfirst}\nNO:\
+				 {___listtypes}\nNO:{___shglob}\nNO:{___shinstdin}\nNO:{___shnullcmd}\nNO:\
+				 {___shoptionletters}\nNO:{___shortloops}\nNO:{___shwordsplit}\nline: {tst \
+				 ___list_}{}\nCOMPADD:{}\nINSERT_POSITIONS:{12}\nNO:{___list_ambiguous}\nNO:\
+				 {___list_beep}\nNO:{___list_packed}\nNO:{___list_rowsfirst}\nNO:{___list_types}\\
+				 nline: {tst ___list_beep__ }{}\nCOMPADD:{}\nINSERT_POSITIONS:{18}",
 			),
 		],
 	},
 	Case {
 		name:  "Documentation example for options, input \"__no_listbe\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'B:[nN][oO]= M:_= M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'B:[nN][oO]= M:_= \
+				 M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd \
+				 listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n \
+				 '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; \
+				 echo -n '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst __no_listbe\t",
-				"line: {tst __no_listbeep }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{17}",
+				"line: {tst __no_listbeep }{}\nCOMPADD:{}\nINSERT_POSITIONS:{17}",
 			),
 		],
 	},
 	Case {
 		name:  "Documentation example for options, input \"nonono_listbe\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'B:[nN][oO]= M:_= M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'B:[nN][oO]= M:_= \
+				 M:{A-Z}={a-z}'  - kshoptionprint shglob listambiguous shinstdin listbeep shnullcmd \
+				 listpacked shoptionletters listrowsfirst shortloops listtypes shwordsplit ; echo  -n \
+				 '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; \
+				 echo -n '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst nonono_listbe\t",
-				"line: {tst nonono_listbeep }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{19}",
+				"line: {tst nonono_listbeep }{}\nCOMPADD:{}\nINSERT_POSITIONS:{19}",
 			),
 		],
 	},
 	Case {
 		name:  "Documentation example for lowercase insenitive M, input \"ab\\tC\\t\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'M:{a-z}={A-Z}'  - ABC Abc abc ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'M:{a-z}={A-Z}'  - ABC \
+				 Abc abc ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo \
+				 $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst ab\tC\t",
-				"line: {tst ab}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{6}\n\
-				 NO:{abC}\n\
-				 NO:{abc}\n\
-				 line: {tst abC }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{7}",
+				"line: {tst ab}{}\nCOMPADD:{}\nINSERT_POSITIONS:{6}\nNO:{abC}\nNO:{abc}\nline: {tst \
+				 abC }{}\nCOMPADD:{}\nINSERT_POSITIONS:{7}",
 			),
 		],
 	},
 	Case {
 		name:  "Documentation example for lowercase insenitive m, input \"A\\t\\t\" ",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{a-z}={A-Z}'  - ABC Abc abc ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{a-z}={A-Z}'  - ABC \
+				 Abc abc ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo \
+				 $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst A\t\t",
-				"line: {tst A}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{5}\n\
-				 NO:{ABC}\n\
-				 NO:{Abc}\n\
-				 line: {tst ABC}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{5}",
+				"line: {tst A}{}\nCOMPADD:{}\nINSERT_POSITIONS:{5}\nNO:{ABC}\nNO:{Abc}\nline: {tst \
+				 ABC}{}\nCOMPADD:{}\nINSERT_POSITIONS:{5}",
 			),
 		],
 	},
 	Case {
 		name:  "Documentation example for case insenitive M, input \"aB\\t\\t\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'M:{a-zA-Z}={A-Za-z}'  - ABC Abc abc ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'M:{a-zA-Z}={A-Za-z}'  - \
+				 ABC Abc abc ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo \
+				 $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst aB\t\t",
-				"line: {tst aB}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{6}\n\
-				 NO:{aBC}\n\
-				 NO:{aBc}\n\
-				 line: {tst aBC}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{6}",
+				"line: {tst aB}{}\nCOMPADD:{}\nINSERT_POSITIONS:{6}\nNO:{aBC}\nNO:{aBc}\nline: {tst \
+				 aBC}{}\nCOMPADD:{}\nINSERT_POSITIONS:{6}",
 			),
 		],
 	},
 	Case {
 		name:  "Documentation example for case insenitive m, input \"aB\\t\\t\"",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{a-zA-Z}={A-Za-z}'  - ABC Abc abc ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{a-zA-Z}={A-Za-z}'  - \
+				 ABC Abc abc ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo \
+				 $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst aB\t\t",
-				"line: {tst a}{BC}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{5:7}\n\
-				 line: {tst a}{BC}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{5:7}\n\
-				 NO:{ABC}\n\
-				 NO:{Abc}\n\
-				 NO:{abc}",
+				"line: {tst a}{BC}\nCOMPADD:{}\nINSERT_POSITIONS:{5:7}\nline: {tst \
+				 a}{BC}\nCOMPADD:{}\nINSERT_POSITIONS:{5:7}\nNO:{ABC}\nNO:{Abc}\nNO:{abc}",
 			),
 		],
 	},
 	Case {
 		name:  "r:|.=* should complete .s.u",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|.=* r:|=*'  - comp.sources.unix comp.sources.misc comp.graphics.algorithms comp.graphics.animation comp.graphics.api comp.graphics.apps comp.graphics.misc comp.graphics.packages comp.graphics.rendering comp.graphics.visualization comp.graphics.apps.alias comp.graphics.apps.gimp comp.graphics.apps.gnuplot comp.graphics.apps.lightwave comp.graphics.apps.pagemaker comp.graphics.apps.paint-shop-pro comp.graphics.apps.photoshop comp.graphics.apps.softimage comp.graphics.apps.ulead comp.graphics.rendering.misc comp.graphics.rendering.raytracing comp.graphics.rendering.renderman ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
-			Test(
-				"tst .s.u\t",
-				"line: {tst comp.sources.unix }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{21}",
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|.=* r:|=*'  - \
+				 comp.sources.unix comp.sources.misc comp.graphics.algorithms comp.graphics.animation \
+				 comp.graphics.api comp.graphics.apps comp.graphics.misc comp.graphics.packages \
+				 comp.graphics.rendering comp.graphics.visualization comp.graphics.apps.alias \
+				 comp.graphics.apps.gimp comp.graphics.apps.gnuplot comp.graphics.apps.lightwave \
+				 comp.graphics.apps.pagemaker comp.graphics.apps.paint-shop-pro \
+				 comp.graphics.apps.photoshop comp.graphics.apps.softimage comp.graphics.apps.ulead \
+				 comp.graphics.rendering.misc comp.graphics.rendering.raytracing \
+				 comp.graphics.rendering.renderman ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
 			),
+			Test("tst .s.u\t", "line: {tst comp.sources.unix }{}\nCOMPADD:{}\nINSERT_POSITIONS:{21}"),
 		],
 	},
 	Case {
 		name:  "r:[^.]||.=* should not complete .s.u, but should complete c.s.u",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:[^.]||.=* r:|=*'  - comp.sources.unix comp.sources.misc comp.graphics.algorithms comp.graphics.animation comp.graphics.api comp.graphics.apps comp.graphics.misc comp.graphics.packages comp.graphics.rendering comp.graphics.visualization comp.graphics.apps.alias comp.graphics.apps.gimp comp.graphics.apps.gnuplot comp.graphics.apps.lightwave comp.graphics.apps.pagemaker comp.graphics.apps.paint-shop-pro comp.graphics.apps.photoshop comp.graphics.apps.softimage comp.graphics.apps.ulead comp.graphics.rendering.misc comp.graphics.rendering.raytracing comp.graphics.rendering.renderman ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:[^.]||.=* r:|=*'  - \
+				 comp.sources.unix comp.sources.misc comp.graphics.algorithms comp.graphics.animation \
+				 comp.graphics.api comp.graphics.apps comp.graphics.misc comp.graphics.packages \
+				 comp.graphics.rendering comp.graphics.visualization comp.graphics.apps.alias \
+				 comp.graphics.apps.gimp comp.graphics.apps.gnuplot comp.graphics.apps.lightwave \
+				 comp.graphics.apps.pagemaker comp.graphics.apps.paint-shop-pro \
+				 comp.graphics.apps.photoshop comp.graphics.apps.softimage comp.graphics.apps.ulead \
+				 comp.graphics.rendering.misc comp.graphics.rendering.raytracing \
+				 comp.graphics.rendering.renderman ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst .s.u\t^[bc\t",
-				"line: {tst comp.sources.unix }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{21}\n\
-				 line: {tst comp.sources.unix ^[bc}{}",
+				"line: {tst comp.sources.unix }{}\nCOMPADD:{}\nINSERT_POSITIONS:{21}\nline: {tst \
+				 comp.sources.unix ^[bc}{}",
 			),
 		],
 	},
 	Case {
 		name:  "r:|.=* should complete .g.",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|.=* r:|=*'  - comp.sources.unix comp.sources.misc comp.graphics.algorithms comp.graphics.animation comp.graphics.api comp.graphics.apps comp.graphics.misc comp.graphics.packages comp.graphics.rendering comp.graphics.visualization comp.graphics.apps.alias comp.graphics.apps.gimp comp.graphics.apps.gnuplot comp.graphics.apps.lightwave comp.graphics.apps.pagemaker comp.graphics.apps.paint-shop-pro comp.graphics.apps.photoshop comp.graphics.apps.softimage comp.graphics.apps.ulead comp.graphics.rendering.misc comp.graphics.rendering.raytracing comp.graphics.rendering.renderman ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|.=* r:|=*'  - \
+				 comp.sources.unix comp.sources.misc comp.graphics.algorithms comp.graphics.animation \
+				 comp.graphics.api comp.graphics.apps comp.graphics.misc comp.graphics.packages \
+				 comp.graphics.rendering comp.graphics.visualization comp.graphics.apps.alias \
+				 comp.graphics.apps.gimp comp.graphics.apps.gnuplot comp.graphics.apps.lightwave \
+				 comp.graphics.apps.pagemaker comp.graphics.apps.paint-shop-pro \
+				 comp.graphics.apps.photoshop comp.graphics.apps.softimage comp.graphics.apps.ulead \
+				 comp.graphics.rendering.misc comp.graphics.rendering.raytracing \
+				 comp.graphics.rendering.renderman ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst .g.\ta\t.\tp\ta\tg\t",
-				"line: {tst comp.graphics.}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{18}\n\
-				 line: {tst comp.graphics.a}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{19}\n\
-				 NO:{comp.graphics.algorithms}\n\
-				 NO:{comp.graphics.animation}\n\
-				 NO:{comp.graphics.api}\n\
-				 NO:{comp.graphics.apps}\n\
-				 NO:{comp.graphics.apps.alias}\n\
-				 NO:{comp.graphics.apps.gimp}\n\
-				 NO:{comp.graphics.apps.gnuplot}\n\
-				 NO:{comp.graphics.apps.lightwave}\n\
-				 NO:{comp.graphics.apps.pagemaker}\n\
-				 NO:{comp.graphics.apps.paint-shop-pro}\n\
-				 NO:{comp.graphics.apps.photoshop}\n\
-				 NO:{comp.graphics.apps.softimage}\n\
-				 NO:{comp.graphics.apps.ulead}\n\
-				 line: {tst comp.graphics.apps.}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{23}\n\
-				 line: {tst comp.graphics.apps.p}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{24}\n\
-				 NO:{comp.graphics.apps.pagemaker}\n\
-				 NO:{comp.graphics.apps.paint-shop-pro}\n\
-				 NO:{comp.graphics.apps.photoshop}\n\
-				 line: {tst comp.graphics.apps.pa}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{25}\n\
-				 NO:{comp.graphics.apps.pagemaker}\n\
-				 NO:{comp.graphics.apps.paint-shop-pro}\n\
-				 line: {tst comp.graphics.apps.pagemaker }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{32}",
+				"line: {tst comp.graphics.}{}\nCOMPADD:{}\nINSERT_POSITIONS:{18}\nline: {tst \
+				 comp.graphics.a}{}\nCOMPADD:{}\nINSERT_POSITIONS:{19}\nNO:{comp.graphics.algorithms}\\
+				 \
+				 nNO:{comp.graphics.animation}\nNO:{comp.graphics.api}\nNO:{comp.graphics.apps}\nNO:{comp.\
+				 graphics.apps.alias}\nNO:{comp.graphics.apps.gimp}\nNO:{comp.graphics.apps.gnuplot}\\
+				 nNO:{comp.graphics.apps.lightwave}\nNO:{comp.graphics.apps.pagemaker}\nNO:{comp.graphics.apps.\
+				 paint-shop-pro}\nNO:{comp.graphics.apps.photoshop}\nNO:{comp.graphics.apps.\
+				 softimage}\nNO:{comp.graphics.apps.ulead}\nline: {tst \
+				 comp.graphics.apps.}{}\nCOMPADD:{}\nINSERT_POSITIONS:{23}\nline: {tst \
+				 comp.graphics.apps.p}{}\nCOMPADD:{}\nINSERT_POSITIONS:{24}\nNO:{comp.graphics.apps.\
+				 pagemaker}\nNO:{comp.graphics.apps.paint-shop-pro}\nNO:{comp.graphics.apps.\
+				 photoshop}\nline: {tst \
+				 comp.graphics.apps.pa}{}\nCOMPADD:{}\nINSERT_POSITIONS:{25}\nNO:{comp.graphics.apps.\
+				 pagemaker}\nNO:{comp.graphics.apps.paint-shop-pro}\nline: {tst \
+				 comp.graphics.apps.pagemaker }{}\nCOMPADD:{}\nINSERT_POSITIONS:{32}",
 			),
 		],
 	},
 	Case {
 		name:  "r:[^.]||.=* should not complete .g., but should complete c.g.",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:[^.]||.=* r:|=*'  - comp.sources.unix comp.sources.misc comp.graphics.algorithms comp.graphics.animation comp.graphics.api comp.graphics.apps comp.graphics.misc comp.graphics.packages comp.graphics.rendering comp.graphics.visualization comp.graphics.apps.alias comp.graphics.apps.gimp comp.graphics.apps.gnuplot comp.graphics.apps.lightwave comp.graphics.apps.pagemaker comp.graphics.apps.paint-shop-pro comp.graphics.apps.photoshop comp.graphics.apps.softimage comp.graphics.apps.ulead comp.graphics.rendering.misc comp.graphics.rendering.raytracing comp.graphics.rendering.renderman ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:[^.]||.=* r:|=*'  - \
+				 comp.sources.unix comp.sources.misc comp.graphics.algorithms comp.graphics.animation \
+				 comp.graphics.api comp.graphics.apps comp.graphics.misc comp.graphics.packages \
+				 comp.graphics.rendering comp.graphics.visualization comp.graphics.apps.alias \
+				 comp.graphics.apps.gimp comp.graphics.apps.gnuplot comp.graphics.apps.lightwave \
+				 comp.graphics.apps.pagemaker comp.graphics.apps.paint-shop-pro \
+				 comp.graphics.apps.photoshop comp.graphics.apps.softimage comp.graphics.apps.ulead \
+				 comp.graphics.rendering.misc comp.graphics.rendering.raytracing \
+				 comp.graphics.rendering.renderman ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst .g.\t^[bc\t",
-				"line: {tst comp.graphics.}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{18}\n\
-				 line: {tst comp.graphics.^[bc}{}",
+				"line: {tst comp.graphics.}{}\nCOMPADD:{}\nINSERT_POSITIONS:{18}\nline: {tst \
+				 comp.graphics.^[bc}{}",
 			),
 		],
 	},
 	Case {
 		name:  "r:|.=* should complete ...pag",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|.=* r:|=*'  - comp.sources.unix comp.sources.misc comp.graphics.algorithms comp.graphics.animation comp.graphics.api comp.graphics.apps comp.graphics.misc comp.graphics.packages comp.graphics.rendering comp.graphics.visualization comp.graphics.apps.alias comp.graphics.apps.gimp comp.graphics.apps.gnuplot comp.graphics.apps.lightwave comp.graphics.apps.pagemaker comp.graphics.apps.paint-shop-pro comp.graphics.apps.photoshop comp.graphics.apps.softimage comp.graphics.apps.ulead comp.graphics.rendering.misc comp.graphics.rendering.raytracing comp.graphics.rendering.renderman ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|.=* r:|=*'  - \
+				 comp.sources.unix comp.sources.misc comp.graphics.algorithms comp.graphics.animation \
+				 comp.graphics.api comp.graphics.apps comp.graphics.misc comp.graphics.packages \
+				 comp.graphics.rendering comp.graphics.visualization comp.graphics.apps.alias \
+				 comp.graphics.apps.gimp comp.graphics.apps.gnuplot comp.graphics.apps.lightwave \
+				 comp.graphics.apps.pagemaker comp.graphics.apps.paint-shop-pro \
+				 comp.graphics.apps.photoshop comp.graphics.apps.softimage comp.graphics.apps.ulead \
+				 comp.graphics.rendering.misc comp.graphics.rendering.raytracing \
+				 comp.graphics.rendering.renderman ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst ...pag\t",
-				"line: {tst comp.graphics.apps.pagemaker }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{32}",
+				"line: {tst comp.graphics.apps.pagemaker }{}\nCOMPADD:{}\nINSERT_POSITIONS:{32}",
 			),
 		],
 	},
 	Case {
 		name:  "r:[^.]||.=* should not complete ...pag or c...pag, but should complete c.g.a.p",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:[^.]||.=* r:|=*'  - comp.sources.unix comp.sources.misc comp.graphics.algorithms comp.graphics.animation comp.graphics.api comp.graphics.apps comp.graphics.misc comp.graphics.packages comp.graphics.rendering comp.graphics.visualization comp.graphics.apps.alias comp.graphics.apps.gimp comp.graphics.apps.gnuplot comp.graphics.apps.lightwave comp.graphics.apps.pagemaker comp.graphics.apps.paint-shop-pro comp.graphics.apps.photoshop comp.graphics.apps.softimage comp.graphics.apps.ulead comp.graphics.rendering.misc comp.graphics.rendering.raytracing comp.graphics.rendering.renderman ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:[^.]||.=* r:|=*'  - \
+				 comp.sources.unix comp.sources.misc comp.graphics.algorithms comp.graphics.animation \
+				 comp.graphics.api comp.graphics.apps comp.graphics.misc comp.graphics.packages \
+				 comp.graphics.rendering comp.graphics.visualization comp.graphics.apps.alias \
+				 comp.graphics.apps.gimp comp.graphics.apps.gnuplot comp.graphics.apps.lightwave \
+				 comp.graphics.apps.pagemaker comp.graphics.apps.paint-shop-pro \
+				 comp.graphics.apps.photoshop comp.graphics.apps.softimage comp.graphics.apps.ulead \
+				 comp.graphics.rendering.misc comp.graphics.rendering.raytracing \
+				 comp.graphics.rendering.renderman ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst ...pag\t^[bc\t^Fg^F^Fa\t",
-				"line: {tst comp.graphics.apps.pagemaker }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{32}\n\
-				 line: {tst comp.graphics.apps.pagemaker ^[bc}{}\n\
-				 line: {tst comp.graphics.apps.pagemaker ^[bc^Fg^F^Fa}{}",
+				"line: {tst comp.graphics.apps.pagemaker \
+				 }{}\nCOMPADD:{}\nINSERT_POSITIONS:{32}\nline: {tst comp.graphics.apps.pagemaker \
+				 ^[bc}{}\nline: {tst comp.graphics.apps.pagemaker ^[bc^Fg^F^Fa}{}",
 			),
 		],
 	},
 	Case {
 		name:  "Documentation example using input c...pa\\tg\\t",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|.=* r:|=*'  - comp.sources.unix comp.sources.misc comp.graphics.algorithms comp.graphics.animation comp.graphics.api comp.graphics.apps comp.graphics.misc comp.graphics.packages comp.graphics.rendering comp.graphics.visualization comp.graphics.apps.alias comp.graphics.apps.gimp comp.graphics.apps.gnuplot comp.graphics.apps.lightwave comp.graphics.apps.pagemaker comp.graphics.apps.paint-shop-pro comp.graphics.apps.photoshop comp.graphics.apps.softimage comp.graphics.apps.ulead comp.graphics.rendering.misc comp.graphics.rendering.raytracing comp.graphics.rendering.renderman ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|.=* r:|=*'  - \
+				 comp.sources.unix comp.sources.misc comp.graphics.algorithms comp.graphics.animation \
+				 comp.graphics.api comp.graphics.apps comp.graphics.misc comp.graphics.packages \
+				 comp.graphics.rendering comp.graphics.visualization comp.graphics.apps.alias \
+				 comp.graphics.apps.gimp comp.graphics.apps.gnuplot comp.graphics.apps.lightwave \
+				 comp.graphics.apps.pagemaker comp.graphics.apps.paint-shop-pro \
+				 comp.graphics.apps.photoshop comp.graphics.apps.softimage comp.graphics.apps.ulead \
+				 comp.graphics.rendering.misc comp.graphics.rendering.raytracing \
+				 comp.graphics.rendering.renderman ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst c...pa\tg\t",
-				"line: {tst comp.graphics.apps.pa}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{25}\n\
-				 line: {tst comp.graphics.apps.pagemaker }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{32}",
+				"line: {tst comp.graphics.apps.pa}{}\nCOMPADD:{}\nINSERT_POSITIONS:{25}\nline: {tst \
+				 comp.graphics.apps.pagemaker }{}\nCOMPADD:{}\nINSERT_POSITIONS:{32}",
 			),
 		],
 	},
 	Case {
 		name:  "r:|[.,_-]=* should complete .c and .h",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[.,_-]=* r:|=*'  - veryverylongfile.c veryverylongheader.h ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[.,_-]=* r:|=*'  - \
+				 veryverylongfile.c veryverylongheader.h ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst  .c\t.h\t",
-				"line: {tst  veryverylongfile.c }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{23}\n\
-				 line: {tst  veryverylongfile.c veryverylongheader.h }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{44}",
+				"line: {tst  veryverylongfile.c }{}\nCOMPADD:{}\nINSERT_POSITIONS:{23}\nline: {tst  \
+				 veryverylongfile.c veryverylongheader.h }{}\nCOMPADD:{}\nINSERT_POSITIONS:{44}",
 			),
 		],
 	},
 	Case {
 		name:  "r:[^.,_-]||[.,_-]=* should not complete .c or .h, but should complete v.c and v.h",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:[^.,_-]||[.,_-]=* r:|=*'  - veryverylongfile.c veryverylongheader.h ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:[^.,_-]||[.,_-]=* \
+				 r:|=*'  - veryverylongfile.c veryverylongheader.h ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst  .c\t^[bv\t.h\t^[bv\t",
-				"line: {tst  veryverylongfile.c }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{23}\n\
-				 line: {tst  veryverylongfile.c ^[bv}{}\n\
-				 line: {tst  veryverylongfile.c ^[bv.hist}{}\n\
-				 line: {tst  veryverylongfile.c ^[bv.hist^[bv}{}",
+				"line: {tst  veryverylongfile.c }{}\nCOMPADD:{}\nINSERT_POSITIONS:{23}\nline: {tst  \
+				 veryverylongfile.c ^[bv}{}\nline: {tst  veryverylongfile.c ^[bv.hist}{}\nline: {tst  \
+				 veryverylongfile.c ^[bv.hist^[bv}{}",
 			),
 		],
 	},
 	Case {
 		name:  "Documentation example using \"r:|[A-Z0-9]=* r:|=*\", input H",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[A-Z0-9]=* r:|=*'  - LikeTHIS FooHoo 5foo123 5bar234 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
-			Test(
-				"tst H\t",
-				"line: {tst H}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}",
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[A-Z0-9]=* r:|=*'  - \
+				 LikeTHIS FooHoo 5foo123 5bar234 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
 			),
+			Test("tst H\t", "line: {tst H}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}"),
 		],
 	},
 	Case {
 		name:  "Documentation example using \"r:|[A-Z0-9]=* r:|=*\", input 2",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[A-Z0-9]=* r:|=*'  - LikeTHIS FooHoo 5foo123 5bar234 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
-			Test(
-				"tst 2\t",
-				"line: {tst 2}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}",
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[A-Z0-9]=* r:|=*'  - \
+				 LikeTHIS FooHoo 5foo123 5bar234 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
 			),
+			Test("tst 2\t", "line: {tst 2}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}"),
 		],
 	},
 	Case {
 		name:  "Documentation example using \"r:|[A-Z0-9]=** r:|=*\", input H",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[A-Z0-9]=** r:|=*'  - LikeTHIS FooHoo 5foo123 5bar234 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[A-Z0-9]=** r:|=*'  \
+				 - LikeTHIS FooHoo 5foo123 5bar234 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst H\t",
-				"line: {tst H}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{4}\n\
-				 NO:{FooHoo}\n\
-				 NO:{LikeTHIS}",
+				"line: {tst H}{}\nCOMPADD:{}\nINSERT_POSITIONS:{4}\nNO:{FooHoo}\nNO:{LikeTHIS}",
 			),
 		],
 	},
 	Case {
 		name:  "Documentation example using \"r:|[A-Z0-9]=** r:|=*\", input 2",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[A-Z0-9]=** r:|=*'  - LikeTHIS FooHoo 5foo123 5bar234 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[A-Z0-9]=** r:|=*'  \
+				 - LikeTHIS FooHoo 5foo123 5bar234 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst 2\t\t",
-				"line: {tst 5}{23}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{5:7}\n\
-				 line: {tst 5}{23}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{5:7}\n\
-				 NO:{5bar234}\n\
-				 NO:{5foo123}",
+				"line: {tst 5}{23}\nCOMPADD:{}\nINSERT_POSITIONS:{5:7}\nline: {tst \
+				 5}{23}\nCOMPADD:{}\nINSERT_POSITIONS:{5:7}\nNO:{5bar234}\nNO:{5foo123}",
 			),
 		],
 	},
 	Case {
-		name:  "r:[^A-Z0-9]||[A-Z0-9]=** should not complete H, FH, 2 or 52, but should complete FoH and 5b2.",
+		name:  "r:[^A-Z0-9]||[A-Z0-9]=** should not complete H, FH, 2 or 52, but should complete \
+		        FoH and 5b2.",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:[^A-Z0-9]||[A-Z0-9]=** r:|=*'  - LikeTHIS FooHoo 5foo123 5bar234 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M \
+				 'r:[^A-Z0-9]||[A-Z0-9]=** r:|=*'  - LikeTHIS FooHoo 5foo123 5bar234 ; echo  -n \
+				 '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; \
+				 echo -n '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst H\t^BF\to\t2\t^B5\tb\t",
-				"line: {tst FooHoo }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{10}\n\
-				 line: {tst FooHoo ^BF}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}\n\
-				 line: {tst FooHoo ^BFo}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}\n\
-				 line: {tst FooHoo ^BFo2}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}\n\
-				 line: {tst FooHoo ^BFo2^B5}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}\n\
-				 line: {tst FooHoo ^BFo2^B5b}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst FooHoo }{}\nCOMPADD:{}\nINSERT_POSITIONS:{10}\nline: {tst FooHoo \
+				 ^BF}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst FooHoo \
+				 ^BFo}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst FooHoo \
+				 ^BFo2}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst FooHoo \
+				 ^BFo2^B5}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst FooHoo \
+				 ^BFo2^B5b}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "r:?||[A-Z0-9]=* r:|=* should not complete H or 2, but should complete FH and 52.",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:?||[A-Z0-9]=* r:|=*'  - LikeTHIS FooHoo 5foo123 5bar234 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:?||[A-Z0-9]=* r:|=*'  \
+				 - LikeTHIS FooHoo 5foo123 5bar234 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst H\t^BF2\t^B5\t",
-				"line: {tst FooHoo }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{10}\n\
-				 line: {tst FooHoo ^BF2}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}\n\
-				 line: {tst FooHoo ^BF2^B5}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst FooHoo }{}\nCOMPADD:{}\nINSERT_POSITIONS:{10}\nline: {tst FooHoo \
+				 ^BF2}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst FooHoo \
+				 ^BF2^B5}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "r:[^.]||.=* and l:.||[^.]=* should work symmetrically.",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:[^.]||.=* l:.||[^.]=*'  -  ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:[^.]||.=* \
+				 l:.||[^.]=*'  -  ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo \
+				 $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst .^B\tpass^Fname\t",
-				"line: {tst .^B}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}\n\
-				 line: {tst .^Bpass^Fname}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}",
+				"line: {tst .^B}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst \
+				 .^Bpass^Fname}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}",
 			),
 		],
 	},
 	Case {
 		name:  "Bug from workers 7311",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{a-z}={A-Z} r:|[.,_-]=* r:|=*'  - Abc-Def-Ghij.txt Abc-def.ghi.jkl_mno.pqr.txt Abc_def_ghi_jkl_mno_pqr.txt ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
-			Test(
-				"tst a-a\t",
-				"line: {tst a-a}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}",
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{a-z}={A-Z} \
+				 r:|[.,_-]=* r:|=*'  - Abc-Def-Ghij.txt Abc-def.ghi.jkl_mno.pqr.txt \
+				 Abc_def_ghi_jkl_mno_pqr.txt ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; \
+				 echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}",
 			),
+			Test("tst a-a\t", "line: {tst a-a}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}"),
 		],
 	},
 	Case {
 		name:  "Bug from workers_7311 ",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{a-z}={A-Z} r:|[.,_-]=* r:|=*'  - Abc-Def-Ghij.txt Abc-def.ghi.jkl_mno.pqr.txt Abc_def_ghi_jkl_mno_pqr.txt ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{a-z}={A-Z} \
+				 r:|[.,_-]=* r:|=*'  - Abc-Def-Ghij.txt Abc-def.ghi.jkl_mno.pqr.txt \
+				 Abc_def_ghi_jkl_mno_pqr.txt ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; \
+				 echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst a\t\t-d.\t",
-				"line: {tst Abc}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{7}\n\
-				 line: {tst Abc}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{7}\n\
-				 NO:{Abc-Def-Ghij.txt}\n\
-				 NO:{Abc-def.ghi.jkl_mno.pqr.txt}\n\
-				 NO:{Abc_def_ghi_jkl_mno_pqr.txt}\n\
-				 line: {tst Abc-def.ghi.jkl_mno.pqr.txt }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{31}",
+				"line: {tst Abc}{}\nCOMPADD:{}\nINSERT_POSITIONS:{7}\nline: {tst \
+				 Abc}{}\nCOMPADD:{}\nINSERT_POSITIONS:{7}\nNO:{Abc-Def-Ghij.txt}\nNO:{Abc-def.ghi.\
+				 jkl_mno.pqr.txt}\nNO:{Abc_def_ghi_jkl_mno_pqr.txt}\nline: {tst \
+				 Abc-def.ghi.jkl_mno.pqr.txt }{}\nCOMPADD:{}\nINSERT_POSITIONS:{31}",
 			),
 		],
 	},
 	Case {
 		name:  "Bug from workers 10886",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[A-Z0-9]=* r:|=*'  - BW UWB W ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
-			Test(
-				"tst W\t",
-				"line: {tst W }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{5}",
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[A-Z0-9]=* r:|=*'  - \
+				 BW UWB W ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo \
+				 $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}",
 			),
+			Test("tst W\t", "line: {tst W }{}\nCOMPADD:{}\nINSERT_POSITIONS:{5}"),
 		],
 	},
 	Case {
-		name:  "Erratic completion bug from workers 11081: bui > build.out[] > build[.]out > build.out[] > build.out1[] > build.out2[]",
+		name:  "Erratic completion bug from workers 11081: bui > build.out[] > build[.]out > \
+		        build.out[] > build.out1[] > build.out2[]",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{a-zA-Z}={A-Za-z} r:|[.,_-]=* r:|=*'  - build.out build.out1 build.out2 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{a-zA-Z}={A-Za-z} \
+				 r:|[.,_-]=* r:|=*'  - build.out build.out1 build.out2 ; echo  -n '</COMPADD>'; ; \
+				 echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst bui\t\t\t",
-				"line: {tst build.out}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{13}\n\
-				 line: {tst build.out}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{13}\n\
-				 NO:{build.out}\n\
-				 NO:{build.out1}\n\
-				 NO:{build.out2}\n\
-				 line: {tst build.out}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{13}",
+				"line: {tst build.out}{}\nCOMPADD:{}\nINSERT_POSITIONS:{13}\nline: {tst \
+				 build.out}{}\nCOMPADD:{}\nINSERT_POSITIONS:{13}\nNO:{build.out}\nNO:{build.out1}\nNO:\
+				 {build.out2}\nline: {tst build.out}{}\nCOMPADD:{}\nINSERT_POSITIONS:{13}",
 			),
 		],
 	},
 	Case {
 		name:  "Non-bug from workers 11388",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[:.]=* r:|=*'  - a.b:0 c.d:1 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
-			Test(
-				"tst :\t",
-				"line: {tst :}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{}",
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[:.]=* r:|=*'  - \
+				 a.b:0 c.d:1 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo \
+				 $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}",
 			),
+			Test("tst :\t", "line: {tst :}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}"),
 		],
 	},
 	Case {
 		name:  "Non-bug from workers 11388",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[:.]=** r:|=*'  - a.b:0 c.d:1 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
-			Test(
-				"tst :\t",
-				"line: {tst .:}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{4:5:6}",
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[:.]=** r:|=*'  - \
+				 a.b:0 c.d:1 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo \
+				 $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}",
 			),
+			Test("tst :\t", "line: {tst .:}{}\nCOMPADD:{}\nINSERT_POSITIONS:{4:5:6}"),
 		],
 	},
 	Case {
-		name:  "Disappearing characters bug from workers 11586: c00\\t -> c0[], c00\\t -> c0.abc[], c00.\\t -> c0.abc[]",
+		name:  "Disappearing characters bug from workers 11586: c00\\t -> c0[], c00\\t -> c0.abc[], \
+		        c00.\\t -> c0.abc[]",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|.=** r:[^0-9]||[0-9]=**'  - c00.abc c01.abc.def.00.0 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|.=** \
+				 r:[^0-9]||[0-9]=**'  - c00.abc c01.abc.def.00.0 ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst c00\t.\ta\t",
-				"line: {tst c00}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{6}\n\
-				 NO:{c00.abc}\n\
-				 NO:{c01.abc.def.00.0}\n\
-				 line: {tst c00.}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{7:8}\n\
-				 NO:{c00.abc}\n\
-				 NO:{c01.abc.def.00.0}\n\
-				 line: {tst c00.abc }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{11}",
+				"line: {tst \
+				 c00}{}\nCOMPADD:{}\nINSERT_POSITIONS:{6}\nNO:{c00.abc}\nNO:{c01.abc.def.00.0}\nline: \
+				 {tst c00.}{}\nCOMPADD:{}\nINSERT_POSITIONS:{7:8}\nNO:{c00.abc}\nNO:{c01.abc.def.00.\
+				 0}\nline: {tst c00.abc }{}\nCOMPADD:{}\nINSERT_POSITIONS:{11}",
 			),
 		],
 	},
 	Case {
 		name:  "First test from workers 12995",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|/=* r:|=*'  - u1 u1/q1 u1/q1/e1 u2 u2/q1 u2/q1/e2 u2/q1/e2/a1 u2/q1/e2/a2 u3 u3/q1 u4 u4/q u4/q/a1 u4/q/a2 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
-			Test(
-				"tst u/q/a\t",
-				"line: {tst u4/q/a}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{10}",
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|/=* r:|=*'  - u1 \
+				 u1/q1 u1/q1/e1 u2 u2/q1 u2/q1/e2 u2/q1/e2/a1 u2/q1/e2/a2 u3 u3/q1 u4 u4/q u4/q/a1 \
+				 u4/q/a2 ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo \
+				 $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}",
 			),
+			Test("tst u/q/a\t", "line: {tst u4/q/a}{}\nCOMPADD:{}\nINSERT_POSITIONS:{10}"),
 		],
 	},
 	Case {
 		name:  "Second test from workers 12995",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{a-z}={A-Z} r:|/=* r:|=*'  - ../Completion/Core ../Completion/Commands ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'm:{a-z}={A-Z} r:|/=* \
+				 r:|=*'  - ../Completion/Core ../Completion/Commands ; echo  -n '</COMPADD>'; ; echo \
+				 -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst ../com/cor\x02\x02\x02\x02\x02\x02\x02\t",
-				"line: {tst ../Completion/Core }{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{22}",
+				"line: {tst ../Completion/Core }{}\nCOMPADD:{}\nINSERT_POSITIONS:{22}",
 			),
 		],
 	},
 	Case {
-		name:  "Incorrect cursor position bug from workers 13320: glibc-2.1\\t -> glibc-2[.]1.94-3.i386.rpm",
+		name:  "Incorrect cursor position bug from workers 13320: glibc-2.1\\t -> \
+		        glibc-2[.]1.94-3.i386.rpm",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[.,_-]=**'  - glibc-2.1.94-3.i386.rpm glibc-devel-2.1.94-3.i386.rpm glibc-profile-2.1.94-3.i386.rpm ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[.,_-]=**'  - \
+				 glibc-2.1.94-3.i386.rpm glibc-devel-2.1.94-3.i386.rpm \
+				 glibc-profile-2.1.94-3.i386.rpm ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst glibc-2.1\t",
-				"line: {tst glibc}{-2.1.94-3.i386.rpm}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{9:27}",
+				"line: {tst glibc}{-2.1.94-3.i386.rpm}\nCOMPADD:{}\nINSERT_POSITIONS:{9:27}",
 			),
 		],
 	},
 	Case {
 		name:  "Test from workers 13320",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[.,_-]=**'  - glibc-2.1.94-3.i386.rpm glibc-devel-2.1.94-3.i386.rpm glibc-profile-2.1.94-3.i386.rpm ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[.,_-]=**'  - \
+				 glibc-2.1.94-3.i386.rpm glibc-devel-2.1.94-3.i386.rpm \
+				 glibc-profile-2.1.94-3.i386.rpm ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst g-2\t",
-				"line: {tst glibc}{-2.1.94-3.i386.rpm}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{9:27}",
+				"line: {tst glibc}{-2.1.94-3.i386.rpm}\nCOMPADD:{}\nINSERT_POSITIONS:{9:27}",
 			),
 		],
 	},
 	Case {
 		name:  "First test from workers 13345",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[.,_-]=**'  - A.B.C A.B.C.D A.C ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[.,_-]=**'  - A.B.C \
+				 A.B.C.D A.C ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo \
+				 $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst A.C\t",
-				"line: {tst A.C}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{5:7}\n\
-				 NO:{A.B.C}\n\
-				 NO:{A.B.C.D}\n\
-				 NO:{A.C}",
+				"line: {tst \
+				 A.C}{}\nCOMPADD:{}\nINSERT_POSITIONS:{5:7}\nNO:{A.B.C}\nNO:{A.B.C.D}\nNO:{A.C}",
 			),
 		],
 	},
 	Case {
 		name:  "Disappearing character bug from workers 13345: a-b_2\\t -> a-b__",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[.,_-]=** r:|[0-9]=**'  - a-b_1_2_2 a-b_2_0.gz a-b_2_0.zip ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
-			Test(
-				"tst a-b_2\t",
-				"line: {tst a-b_2_}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{8:10}",
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[.,_-]=** \
+				 r:|[0-9]=**'  - a-b_1_2_2 a-b_2_0.gz a-b_2_0.zip ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
 			),
+			Test("tst a-b_2\t", "line: {tst a-b_2_}{}\nCOMPADD:{}\nINSERT_POSITIONS:{8:10}"),
 		],
 	},
 	Case {
 		name:  "Test for insert positions",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|.=**'  - a.b.c a.b.c.d aA.bB.cB.dA aA.bB.cC.dD aD.bC.cB.dA aA.bC.cB.dA ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|.=**'  - a.b.c \
+				 a.b.c.d aA.bB.cB.dA aA.bB.cC.dD aD.bC.cB.dA aA.bC.cB.dA ; echo  -n '</COMPADD>'; ; \
+				 echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
+			),
 			Test(
 				"tst a...\tA\tC\t",
-				"line: {tst a.b.c.d}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{5:7:9:11}\n\
-				 line: {tst a.b}{.cB.dA}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{5:7:13}\n\
-				 line: {tst a}{.bC.cB.dA}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{5:14}\n\
-				 NO:{aA.bC.cB.dA}\n\
-				 NO:{aD.bC.cB.dA}",
+				"line: {tst a.b.c.d}{}\nCOMPADD:{}\nINSERT_POSITIONS:{5:7:9:11}\nline: {tst \
+				 a.b}{.cB.dA}\nCOMPADD:{}\nINSERT_POSITIONS:{5:7:13}\nline: {tst \
+				 a}{.bC.cB.dA}\nCOMPADD:{}\nINSERT_POSITIONS:{5:14}\nNO:{aA.bC.cB.dA}\nNO:{aD.bC.cB.\
+				 dA}",
 			),
 		],
 	},
 	Case {
 		name:  "Test for wildcard left anchor with partial word right anchors",
 		steps: &[
-			Eval("compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[-./_]=* r:|=* l:|=*'  - foo-bar-abc foo-bar-def foo-bar-ghi ; echo  -n '</COMPADD>'; ; echo -n '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n '</INSERT_POSITIONS>'}"),
-			Test(
-				"tst bar\t",
-				"line: {tst foo-bar-}{}\n\
-				 COMPADD:{}\n\
-				 INSERT_POSITIONS:{12}",
+			Eval(
+				"compdef _tst tst ; _tst () { echo -n '<COMPADD>';compadd -M 'r:|[-./_]=* r:|=* \
+				 l:|=*'  - foo-bar-abc foo-bar-def foo-bar-ghi ; echo  -n '</COMPADD>'; ; echo -n \
+				 '<INSERT_POSITIONS>'; echo $compstate[insert_positions]; echo -n \
+				 '</INSERT_POSITIONS>'}",
 			),
+			Test("tst bar\t", "line: {tst foo-bar-}{}\nCOMPADD:{}\nINSERT_POSITIONS:{12}"),
 		],
 	},
 ];
