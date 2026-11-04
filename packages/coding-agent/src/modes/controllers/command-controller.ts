@@ -5,6 +5,7 @@ import { CompactionCancelledError, type CompactionOutcome } from "@oh-my-pi/pi-a
 import {
 	getEnvApiKey,
 	getProviderDetails,
+	type Model,
 	type ProviderDetails,
 	resolveUsedFraction,
 	type UsageLimit,
@@ -2058,7 +2059,7 @@ export class CommandController {
 		customInstructions?: string,
 		mode?: CompactMode,
 		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
-		internalGuidance?: string,
+		options?: Pick<CompactOptions, "internalGuidance" | "readerModel">,
 	): Promise<CompactionOutcome> {
 		const entries = this.ctx.sessionManager.getEntries();
 		const messageCount = entries.filter(e => e.type === "message").length;
@@ -2076,15 +2077,16 @@ export class CommandController {
 		// through as a CompactOptions field instead. That caller also dispatches
 		// the execution turn itself, so the compaction must not resume the
 		// plan-approval turn it aborted.
-		if (internalGuidance) {
+		if (options?.internalGuidance) {
 			return this.executeCompaction(
-				{ internalGuidance, suppressContinuation: true, ...(mode ? { mode } : {}) },
+				{ internalGuidance: options.internalGuidance, suppressContinuation: true, ...(mode ? { mode } : {}) },
 				false,
 				beforeFlush,
 				mode,
+				options.readerModel,
 			);
 		}
-		return this.executeCompaction(customInstructions, false, beforeFlush, mode);
+		return this.executeCompaction(customInstructions, false, beforeFlush, mode, options?.readerModel);
 	}
 
 	/**
@@ -2196,6 +2198,7 @@ export class CommandController {
 		isAuto = false,
 		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
 		mode?: CompactMode,
+		readerModel?: Model,
 	): Promise<CompactionOutcome> {
 		if (this.ctx.loadingAnimation) {
 			this.ctx.loadingAnimation.stop();
@@ -2236,8 +2239,12 @@ export class CommandController {
 			// it inside the options object. Either source wins over no mode.
 			const effectiveMode = mode ?? baseOptions?.mode;
 			const options =
-				baseOptions || effectiveMode
-					? { ...baseOptions, ...(effectiveMode ? { mode: effectiveMode } : {}) }
+				baseOptions || effectiveMode || readerModel
+					? {
+							...baseOptions,
+							...(effectiveMode ? { mode: effectiveMode } : {}),
+							...(readerModel ? { readerModel } : {}),
+						}
 					: undefined;
 			await this.ctx.session.compact(instructions, options);
 
