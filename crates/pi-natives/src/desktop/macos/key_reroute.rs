@@ -41,7 +41,7 @@ use std::{
 use libc::pid_t;
 use parking_lot::Mutex;
 
-use super::skylight;
+use super::{permission, skylight};
 use crate::desktop::control::{self, SYNTHETIC_EVENT_TAG};
 
 type Ref = *mut c_void;
@@ -771,10 +771,18 @@ impl KeyReroute {
 	/// the taps cannot be created (no Accessibility permission, or the target
 	/// exited): the action then runs as before, without key repair.
 	pub(super) fn arm(user: pid_t, target: pid_t) -> Option<Self> {
+		Self::arm_with_access(user, target, permission::post_events)
+	}
+
+	fn arm_with_access(
+		user: pid_t,
+		target: pid_t,
+		post_events: impl FnOnce() -> bool,
+	) -> Option<Self> {
 		// The user is typing a password or into a secure terminal: their keys
 		// are never tapped, even after the target takes the keyboard and secure
 		// entry goes off with their app.
-		if user == target || secure_entry() {
+		if user == target || !post_events() || secure_entry() {
 			return None;
 		}
 		let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
@@ -925,6 +933,13 @@ mod tests {
 	const SPOTLIGHT: pid_t = 300;
 	const BUTTONS: [u32; 6] = [5, 5, 0, 0, 0, 0];
 	const CLICKED: [u32; 6] = [6, 5, 0, 0, 0, 0];
+
+	#[test]
+	fn missing_accessibility_never_starts_a_reroute_generation() {
+		let generation = GENERATION.load(Ordering::Acquire);
+		assert!(KeyReroute::arm_with_access(USER, pid_t::MAX, || false).is_none());
+		assert_eq!(GENERATION.load(Ordering::Acquire), generation);
+	}
 
 	fn quiet() -> UserSignals {
 		UserSignals { buttons: BUTTONS, last_chord: None }
