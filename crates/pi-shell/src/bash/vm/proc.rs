@@ -1097,6 +1097,9 @@ pub struct ScratchIo {
 	pub search:  Option<PathSearch>,
 	/// Bytes read so far by an `Input`/`Read` probe.
 	pub input:   Vec<u8>,
+	/// Of `input`, the bytes an `Input` probe counted delimiters in, and
+	/// how many it found: a probe that yields resumes the count.
+	pub counted: (usize, usize),
 	/// The pathname-expansion walk of the `Glob` probe in flight.
 	pub walk:    Option<Box<super::glob::Walk>>,
 	/// The zsh part ([`ScratchZsh`]), created by zsh code on first use
@@ -1107,13 +1110,14 @@ pub struct ScratchIo {
 impl ScratchIo {
 	/// Clear for the next op, keeping the vectors' allocations.
 	fn clear(&mut self) {
-		let Self { redir, saved, probes, probing, search, input, walk, zsh } = self;
+		let Self { redir, saved, probes, probing, search, input, counted, walk, zsh } = self;
 		*redir = RedirProgress::default();
 		saved.clear();
 		probes.clear();
 		*probing = None;
 		*search = None;
 		input.clear();
+		*counted = (0, 0);
 		*walk = None;
 		if let Some(z) = zsh {
 			z.clear();
@@ -1514,8 +1518,10 @@ const _: () = assert!(size_of::<Scratch>() <= 216, "Scratch grew (idle vproc ≤
 const _: () = assert!(size_of::<ExecState>() <= 376, "ExecState grew (idle vproc ≤ 2 KiB)");
 // An op that redirects or probes keeps a `ScratchIo` (cleared per op): its
 // zsh-only progress lives in the boxed `ScratchZsh` (zsh support grew it by one
-// pointer only; `RedirProgress` not at all).
-const _: () = assert!(size_of::<ScratchIo>() <= 248, "ScratchIo grew (zsh support is zero cost)");
+// pointer only; `RedirProgress` not at all). An idle vproc holds none. The
+// delimiter count an `Input` probe resumes after yielding (`counted`) added
+// 16 B (248 → 264).
+const _: () = assert!(size_of::<ScratchIo>() <= 264, "ScratchIo grew (zsh support is zero cost)");
 const _: () =
 	assert!(size_of::<RedirProgress>() <= 48, "RedirProgress grew (zsh support is zero cost)");
 

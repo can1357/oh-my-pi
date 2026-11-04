@@ -8,6 +8,7 @@
 //! from it.
 
 use std::{
+	cell::{Cell, RefCell},
 	io,
 	sync::{
 		Arc,
@@ -245,4 +246,74 @@ pub enum IoPoll<T> {
 /// The waker handed to everything the engine polls.
 pub fn engine_waker(ctl: &Arc<Ctl>) -> Waker {
 	Waker::from(Arc::clone(ctl))
+}
+
+// Work inside one op. The safepoint is between ops, so an op whose work
+// grows with its input (a brace expansion compiled from a few bytes, a
+// pattern search over a long value, a format reused over many arguments)
+// would keep a cancel waiting until it ends. Loops of such work call
+// [`tick`]; once it reports a pending cancel they stop early, and the op
+// discards what it computed ([`interrupted`]) and parks, so the cancel
+// applies at the next turn. A cancel ends every vproc it reaches, so the
+// op never runs again. Ops that read input yield instead: their progress
+// is kept and they resume (`probe::perform`, `glob::Walk::poll`).
+
+thread_local! {
+	/// The control word of the vproc running ops on this thread, when a
+	/// cancel reaches it (not a detached tree: `Shell::apply_requests`).
+	static ARMED: RefCell<Option<Arc<Ctl>>> = const { RefCell::new(None) };
+	/// [`tick`]s left before it loads the control word.
+	static COUNTDOWN: Cell<u32> = const { Cell::new(TICKS) };
+	/// A pending cancel was seen since [`arm`].
+	static SEEN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// [`tick`]s per load of the control word: well under a millisecond of the
+/// cheapest loop body, and a load per thousand steps of the hottest.
+const TICKS: u32 = 1024;
+
+/// Restores the previous [`arm`] state when dropped.
+pub(crate) struct Armed {
+	prev: Option<Arc<Ctl>>,
+	seen: bool,
+}
+
+/// Arm [`tick`] and [`interrupted`] with `ctl` (disarm when `!cancellable`)
+/// for the ops run while the guard lives.
+pub(crate) fn arm(ctl: &Arc<Ctl>, cancellable: bool) -> Armed {
+	let prev = ARMED.replace(cancellable.then(|| Arc::clone(ctl)));
+	Armed { prev, seen: SEEN.replace(false) }
+}
+
+impl Drop for Armed {
+	fn drop(&mut self) {
+		ARMED.set(self.prev.take());
+		SEEN.set(self.seen);
+	}
+}
+
+/// Whether a cancel is pending for the running vproc: the op must discard
+/// what it computed since its work may have stopped early ([`tick`]).
+pub(crate) fn interrupted() -> bool {
+	let hit = ARMED.with_borrow(|c| c.as_ref().is_some_and(|c| c.word() & CANCEL != 0));
+	if hit {
+		SEEN.set(true);
+	}
+	hit
+}
+
+/// One step of work inside an op; `true` (from then on) once a cancel is
+/// pending: stop the loop. Loads the control word every [`TICKS`] calls.
+#[inline]
+pub(crate) fn tick() -> bool {
+	if SEEN.get() {
+		return true;
+	}
+	let left = COUNTDOWN.get();
+	if left > 0 {
+		COUNTDOWN.set(left - 1);
+		return false;
+	}
+	COUNTDOWN.set(TICKS);
+	interrupted()
 }

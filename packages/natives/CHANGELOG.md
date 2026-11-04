@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
+- Fixed a bash tool timeout not stopping a command whose work is inside one step of the shell — a `read` of endless input, a brace expansion of millions of words, `${x//?/b}` on a long value, a `printf` field two gigabytes wide, `/usr/**` — which used to return only after a two-second grace while the work kept running
 ### Fixed
 
 - Fixed `el.type` and `el.press(keys)` on Wayland moving focus inside the element's app (GNOME showed "… is ready") before refusing the call: they are now refused before anything reaches the app ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))

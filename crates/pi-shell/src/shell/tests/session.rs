@@ -368,6 +368,68 @@ fn async_utility_waiting_on_stdin_is_cancelled_by_timeout() {
 	assert_eq!((result.exit_code, output.as_str()), (Some(124), ""));
 }
 
+/// Runs `command` with a `ms` timeout; its result, output, and how long it
+/// took once the test lock was held.
+#[cfg(unix)]
+async fn run_with_timeout(command: &str, ms: u32) -> (ShellExecuteResult, String, Duration) {
+	let _guard = shell_test_lock().lock().await;
+	let start = std::time::Instant::now();
+	let (result, output) = capture_unlocked(command, None, None, CancelToken::new(Some(ms))).await;
+	(result, output, start.elapsed())
+}
+
+/// A timeout stops a command whose work never reaches the point between
+/// two commands: one read of endless input, a brace expansion that
+/// compiles to millions of words, a pattern search that is quadratic in
+/// the value, an extglob match that is exponential in it. The run used to
+/// return only when the 2 s grace gave up on it, with the work still going.
+/// The bound is the deadline plus well under that grace.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn timeout_stops_work_inside_one_command() {
+	const DEADLINE_MS: u32 = 300;
+	for command in [
+		"read -r x < /dev/zero",
+		"mapfile -t a < <(yes)",
+		": {1..1000000} {1..1000000} {1..1000000}",
+		"x=$(printf 'a%.0s' {1..20000}); y=${x//?/b}",
+		"shopt -s extglob; x=$(printf 'a%.0s' {1..40}); [[ ${x}c == +(a|aa)b ]]",
+	] {
+		let (result, output, took) = run_with_timeout(command, DEADLINE_MS).await;
+		assert!(result.timed_out, "{command}: not timed out ({result:?}, output {output:?})");
+		assert!(took < Duration::from_millis(1500), "{command}: returned after {took:?}");
+	}
+}
+
+/// The run a timeout cancels still runs its EXIT trap, as bash does on the
+/// `TERM` it is sent, while the command was inside one long read.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn timeout_inside_one_read_runs_the_exit_trap() {
+	let (result, output, took) =
+		run_with_timeout("trap 'echo cleaned' EXIT; read -r x < /dev/zero", 300).await;
+	assert!(result.timed_out, "{result:?}");
+	assert_eq!(output, "cleaned\n");
+	assert!(took < Duration::from_millis(1500), "returned after {took:?}");
+}
+
+/// A background job reading endless input shares the engine with the
+/// foreground: the foreground must still run, so `kill` reaches the job.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn background_endless_read_leaves_the_foreground_running() {
+	let (result, output) = run_command_capture_within(
+		Duration::from_secs(10),
+		"( read -r x < /dev/zero ) & sleep 0.2; kill $!; wait $!; echo \"st=$?\"",
+		None,
+		None,
+		CancelToken::default(),
+	)
+	.await
+	.expect("the foreground runs while a background job reads endless input");
+	assert_eq!((result.exit_code, output.as_str()), (Some(0), "st=143\n"));
+}
+
 #[cfg(unix)]
 #[test]
 fn read_process_substitution_assigns_line() {

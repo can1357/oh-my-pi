@@ -11,7 +11,7 @@ mod arith;
 mod builtins;
 mod callstack;
 mod command;
-mod control;
+pub(crate) mod control;
 mod exec;
 mod expand;
 mod frames;

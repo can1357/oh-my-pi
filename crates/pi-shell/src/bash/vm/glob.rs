@@ -202,7 +202,8 @@ impl Walk {
 	}
 
 	/// Advance; `Ok(paths)` (in `GLOBSORT` order; empty: no match) when
-	/// done, `Err(key)` while an fs call is pending.
+	/// done, `Err(key)` while an fs call is pending or the walk yields its
+	/// turn (a large tree under `**` answers from cache for long).
 	pub fn poll(
 		&mut self,
 		tcx: &mut Context<'_>,
@@ -211,20 +212,43 @@ impl Walk {
 		cwd: &[u8],
 		opts: GlobOpts,
 	) -> Result<Vec<BString>, WaitKey> {
+		let mut asked = 0;
 		loop {
 			while let Some(ask) = self.asking.front() {
+				if asked == ASKS_PER_TURN {
+					return Err(yield_key(tcx, ask, cwd));
+				}
+				asked += 1;
 				let fact = answer(ask, &mut self.names, tcx, cx, sc, cwd)?;
 				let ask = self.asking.pop_front().expect("asked");
 				self.facts.insert(ask, fact);
 			}
 			let mut run = Run { facts: &self.facts, missing: Vec::new(), opts };
 			let found = run.filename(&self.pattern, if opts.globstar { GLOBSTAR } else { 0 });
+			// A cancel stopped the matching early ([`super::control::tick`]):
+			// the paths are incomplete. Park; the cancel applies next turn.
+			if super::control::interrupted() {
+				return Err(WaitKey::Signal);
+			}
 			let paths = found.map(|paths| run.sort(paths));
 			if run.missing.is_empty() {
 				return Ok(paths.unwrap_or_default());
 			}
 			self.asking.extend(run.missing);
 		}
+	}
+}
+
+/// File-system questions one walk answers before it yields its turn.
+pub(super) const ASKS_PER_TURN: u32 = 256;
+
+/// The wait key a walk yields its turn with before asking `ask`: the
+/// engine waker fires first, so the parked op is runnable again at once.
+pub(super) fn yield_key(tcx: &Context<'_>, ask: &Ask, cwd: &[u8]) -> WaitKey {
+	tcx.waker().wake_by_ref();
+	match ask {
+		Ask::List(dir) => WaitKey::Fs { op: FsOp::ReadDir, path: absolute(cwd, dir) },
+		Ask::Stat { path, .. } => WaitKey::Fs { op: FsOp::Stat, path: absolute(cwd, path) },
 	}
 }
 
@@ -858,6 +882,10 @@ fn expand_globs_with<T>(
 		};
 		if !ignore.is_empty() {
 			paths.retain(|p| acceptable(p, &ignore));
+			// A match cut short by a pending cancel (`control::tick`).
+			if super::control::interrupted() {
+				return Err(Flow::Block(WaitKey::Signal));
+			}
 		}
 		let i = *i as usize;
 		if paths.is_empty()

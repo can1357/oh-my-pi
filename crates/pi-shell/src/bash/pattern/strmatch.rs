@@ -205,7 +205,9 @@ impl<C: Unit> Matcher<'_, C> {
 		flags: u32,
 	) -> bool {
 		let depth = self.depth.get();
-		if depth >= MAX_DEPTH {
+		// A cancel ends the match as a failure (`control::tick`): extglob
+		// alternatives can make the search exponential in the subject.
+		if depth >= MAX_DEPTH || crate::bash::vm::control::tick() {
 			return false;
 		}
 		self.depth.set(depth + 1);

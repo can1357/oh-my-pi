@@ -47,7 +47,10 @@ pub mod zsh;
 use core::ops::Range;
 
 pub use crate::bash::pattern::ere::{Regex, RegexError, RegexErrorKind};
-use crate::bash::pattern::strmatch::{CASEFOLD, DOTDOT, EXTMATCH, PATHNAME, PERIOD, strmatch};
+use crate::bash::{
+	pattern::strmatch::{CASEFOLD, DOTDOT, EXTMATCH, PATHNAME, PERIOD, strmatch},
+	vm::control::tick,
+};
 
 /// Options that change how a pattern compiles or matches (bash's `FNM_*`
 /// flags plus the locale).
@@ -342,7 +345,9 @@ impl Pattern {
 			Shape::Any => Some(if longest { s.len() } else { 0 }),
 			Shape::General => {
 				let u = self.units(s);
-				let hit = |&end: &usize| self.run(&u, 0..end);
+				// A cancel ends the search with no match (`control::tick`);
+				// the caller discards the result (`control::interrupted`).
+				let hit = |&end: &usize| !tick() && self.run(&u, 0..end);
 				let end = if longest {
 					(0..=u.len()).rev().find(hit)
 				} else {
@@ -379,7 +384,7 @@ impl Pattern {
 			Shape::General => {
 				let u = self.units(s);
 				let n = u.len();
-				let hit = |&start: &usize| self.run(&u, start..n);
+				let hit = |&start: &usize| !tick() && self.run(&u, start..n);
 				let start = if longest {
 					(0..=n).find(hit)
 				} else {
@@ -404,12 +409,18 @@ impl Pattern {
 			Shape::General => {
 				let u = self.units(s);
 				let n = u.len();
-				(u.index(from)..=n).find_map(|start| {
-					(start..=n)
-						.rev()
-						.find(|&end| self.run(&u, start..end))
-						.map(|end| u.offset(start)..u.offset(end))
-				})
+				for start in u.index(from)..=n {
+					for end in (start..=n).rev() {
+						// A cancel ends the search with no match (`control::tick`).
+						if tick() {
+							return None;
+						}
+						if self.run(&u, start..end) {
+							return Some(u.offset(start)..u.offset(end));
+						}
+					}
+				}
+				None
 			},
 		}
 	}

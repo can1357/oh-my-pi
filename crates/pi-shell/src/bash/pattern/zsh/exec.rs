@@ -446,6 +446,11 @@ impl<'a> Run<'a> {
 	/// zsh `patmatch`: match the program from node `start_node` at the
 	/// input position, backtracking by recursion.
 	fn patmatch(&mut self, start_node: usize) -> bool {
+		// A cancel ends the match as a failure (`control::tick`); the
+		// backtracking can be exponential in the subject.
+		if crate::bash::vm::control::tick() {
+			return false;
+		}
 		let prog = self.prog;
 		let buf = self.buf;
 		let mut scan = start_node;

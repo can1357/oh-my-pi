@@ -415,6 +415,8 @@ pub fn prefork(
 			{
 				keep = true;
 				let words = brace::xpandbraces(list.node(node), braceccl);
+				// A range cut short by a pending cancel (`control::tick`).
+				crate::bash::vm::expand::uninterrupted()?;
 				let added = words.len();
 				list.nodes.splice(node..=node, words);
 				if let Some(s) = stop.as_mut() {
@@ -1560,6 +1562,8 @@ pub(super) fn do_getmatch(
 			return Err(e);
 		}
 		let r = r.map_err(|_| zpattern::bad_pattern(pat))?;
+		// A match cut short by a pending cancel (`control::tick`).
+		crate::bash::vm::expand::uninterrupted()?;
 		if caps.whole.is_some() || caps.groups.is_some() {
 			zpattern::set_match_vars(ex, &subject, &caps)?;
 		}

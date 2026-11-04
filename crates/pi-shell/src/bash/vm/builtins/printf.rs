@@ -102,6 +102,9 @@ pub fn printf(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		}
 	};
 	let Fmt { ctx, out, flushed, .. } = f;
+	// A fill or directive stopped early for a pending cancel: the output
+	// is incomplete, so none of it is written or assigned.
+	crate::bash::vm::expand::uninterrupted().map_err(Need::Sub)?;
 	if let Some(name) = vname {
 		let ok = bind(ctx, name, AssignValue::Scalar(out.into()));
 		done(if ok { status } else { 1 })
@@ -192,6 +195,10 @@ impl<'x> Fmt<'x, '_, '_> {
 				i += 1;
 				continue;
 			}
+			// Each directive may produce up to `INT_MAX` bytes and the format
+			// is reused while arguments remain: a pending cancel stops here
+			// and the output is dropped (`expand::uninterrupted`).
+			crate::bash::vm::expand::uninterrupted().map_err(Need::Sub)?;
 			let start = i;
 			i += 1;
 			if fmt.get(i) == Some(&b'%') {
@@ -463,7 +470,8 @@ impl<'x> Fmt<'x, '_, '_> {
 						("", body.as_str())
 					};
 					s.extend_from_slice(pre.as_bytes());
-					s.resize(width - digits.len(), b'0');
+					let zeros = (width - digits.len()).saturating_sub(s.len());
+					fill(&mut s, zeros, b'0');
 					s.extend_from_slice(digits.as_bytes());
 				} else {
 					s.extend_from_slice(body.as_bytes());
@@ -563,13 +571,13 @@ impl<'x> Fmt<'x, '_, '_> {
 			end += first_char(&s[end..]).len();
 			count += 1;
 		}
-		let fill = w.saturating_sub(count);
+		let n = w.saturating_sub(count);
 		if !left {
-			self.out.resize(self.out.len() + fill, b' ');
+			fill(&mut self.out, n, b' ');
 		}
 		self.out.extend_from_slice(&s[..end]);
 		if left {
-			self.out.resize(self.out.len() + fill, b' ');
+			fill(&mut self.out, n, b' ');
 		}
 	}
 
@@ -638,7 +646,7 @@ impl<'x> Fmt<'x, '_, '_> {
 			_ => None,
 		};
 		let zeros = zero_fill.unwrap_or_else(|| prec.map_or(0, |p| p.saturating_sub(digits.len())));
-		s.resize(s.len() + zeros, b'0');
+		fill(&mut s, zeros, b'0');
 		s.extend_from_slice(digits.as_bytes());
 		self.c_pad(&s, spec)
 	}
@@ -790,15 +798,34 @@ fn c_prec(spec: &Spec<'_>) -> Option<usize> {
 	}
 }
 
+/// Append `n` copies of `byte`. One directive may ask for `INT_MAX` of
+/// them, so the fill is written in pieces and stops for a pending cancel
+/// (`control::tick`); the caller discards the output
+/// (`expand::uninterrupted`).
+fn fill(out: &mut Vec<u8>, n: usize, byte: u8) {
+	/// Bytes per piece: one memset of this size is well under a
+	/// millisecond.
+	const PIECE: usize = 1 << 20;
+	let mut left = n;
+	while left > 0 {
+		if crate::bash::vm::control::tick() {
+			return;
+		}
+		let piece = left.min(PIECE);
+		out.resize(out.len() + piece, byte);
+		left -= piece;
+	}
+}
+
 /// Append `s` padded with spaces to `width` bytes.
 fn pad(out: &mut Vec<u8>, s: &[u8], width: usize, left: bool) {
-	let fill = width.saturating_sub(s.len());
+	let n = width.saturating_sub(s.len());
 	if !left {
-		out.resize(out.len() + fill, b' ');
+		fill(out, n, b' ');
 	}
 	out.extend_from_slice(s);
 	if left {
-		out.resize(out.len() + fill, b' ');
+		fill(out, n, b' ');
 	}
 }
 

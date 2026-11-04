@@ -71,6 +71,8 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 	let mut held: Option<Arc<Unit>> = None;
 	// Time passed since the last turn (`Kernel::clock`).
 	k.clock_stale();
+	// Work inside an op stops early for a cancel that ends this vproc.
+	let _armed = super::control::arm(&k.ctl, !vp.lineage.detached);
 	loop {
 		if k.root.has_fault() {
 			return;
@@ -1821,7 +1823,8 @@ fn nofork_unit(
 	.ok()?;
 	let unit = k.engine.compile(&cc, &src, key.4, feat);
 	announce(k, cx, vp.vpid, vp.runs.front(), &unit, line);
-	if aliases.is_none() {
+	// A unit cut short by a pending cancel is never cached (`Engine::intern`).
+	if aliases.is_none() && !super::control::interrupted() {
 		if k.nofork_units.len() >= NOFORK_UNITS {
 			k.nofork_units.clear();
 		}
@@ -2932,9 +2935,14 @@ fn bash_case_hit(
 			return Err(Flow::Discard(1));
 		},
 	};
-	Ok(patterns
+	let hit = patterns
 		.iter()
-		.any(|p| k.engine.patterns().get(p, opts).matches(subject)))
+		.any(|p| k.engine.patterns().get(p, opts).matches(subject));
+	// A cancel cut the match short (`control::tick`): no branch is taken.
+	if super::control::interrupted() {
+		return Err(Flow::Block(WaitKey::Signal));
+	}
+	Ok(hit)
 }
 
 /// bash's `subshell_level` step for a pipeline stage or (`background`) an

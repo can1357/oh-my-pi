@@ -143,8 +143,13 @@ impl Engine {
 		self.intern(unit)
 	}
 
-	/// Share `unit` through the cache (an identical cached unit wins).
+	/// Share `unit` through the cache (an identical cached unit wins). A
+	/// unit compiled while a cancel was pending may be cut short
+	/// (`control::tick`): it is returned for the op to discard, never cached.
 	pub(crate) fn intern(&self, unit: Unit) -> Arc<Unit> {
+		if crate::bash::vm::control::interrupted() {
+			return Arc::new(unit);
+		}
 		let mut cache = self.units.lock();
 		if let Some(hit) = cache.map.get(&unit.id) {
 			return Arc::clone(hit);
@@ -216,6 +221,10 @@ impl Engine {
 			},
 		};
 		let unit = Arc::new(unit);
+		// A compound value cut short by a cancel is not cached (`intern`).
+		if crate::bash::vm::control::interrupted() {
+			return Ok(unit);
+		}
 		let mut texts = self.texts.lock();
 		if texts.len() > 4096 {
 			texts.clear();
