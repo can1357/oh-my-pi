@@ -85,3 +85,20 @@ fn a_pending_exec_error_survives_the_exit_trap_snapshot() {
 		}
 	}
 }
+
+#[test]
+fn control_source_namespace_survives_snapshots_without_changing_user_eval() {
+	use crate::{
+		bash::{Script, ShellInit, VprocSel},
+		testkit::Rig,
+	};
+	let mut rig = Rig::new(FakeHost::new(), ShellInit::default());
+	rig.run(Script::command(b"command() { echo USER:$*; }".as_slice()), Fault::None);
+	let mut script = Script::command(b"command echo HOST; command eval 'command data'".as_slice());
+	script.vproc = VprocSel::NewSubshell;
+	script.control_source = true;
+	assert_eq!(rig.run(script, Fault::Snapshot { every: 1 }), 0);
+	assert!(rig.snapshots > 0);
+	rig.run(Script::command(b"command root".as_slice()), Fault::None);
+	assert_eq!(rig.host.stdout.bytes(), b"HOST\nUSER:data\nUSER:root\n");
+}

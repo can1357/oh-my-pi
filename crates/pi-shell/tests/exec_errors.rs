@@ -199,3 +199,39 @@ async fn path_search_continues_after_real_exec_refusals() {
 	}
 	assert!(wrong.is_empty(), "{wrong:#?}");
 }
+
+#[tokio::test]
+async fn inherited_functions_and_aliases_do_not_replace_the_utilitys_control_words() {
+	let dir = tempfile::tempdir().unwrap();
+	for definition in
+		["exec() { echo intercepted; };", "shopt -s expand_aliases; alias exec='echo intercepted'\n"]
+	{
+		let source = format!("{definition} env no-such-control-word-18004; echo st:$?");
+		assert_eq!(
+			run(dir.path(), &source).await,
+			(
+				"st:127\n".to_owned(),
+				"env: 'no-such-control-word-18004': No such file or directory\n".to_owned(),
+			)
+		);
+	}
+	let got = run(dir.path(), "command() { echo intercepted; }; env true; echo st:$?").await;
+	assert_eq!(got, ("st:0\n".to_owned(), String::new()));
+	let got = run(
+		dir.path(),
+		"compgen() { echo intercepted >marker; }; env -i /bin/true; if test -e marker; then echo \
+		 bad; else echo isolated; fi",
+	)
+	.await;
+	assert_eq!(got, ("isolated\n".to_owned(), String::new()));
+}
+
+#[tokio::test]
+async fn user_eval_keeps_its_own_function_and_alias_namespace() {
+	let dir = tempfile::tempdir().unwrap();
+	let got = run(dir.path(), "command() { printf 'USER:%s\\n' \"$*\"; }; env eval 'command'").await;
+	assert_eq!(got, ("USER:\n".to_owned(), String::new()));
+	let got =
+		run(dir.path(), "shopt -s expand_aliases; alias word='echo USER'\nenv eval word").await;
+	assert_eq!(got, ("USER\n".to_owned(), String::new()));
+}

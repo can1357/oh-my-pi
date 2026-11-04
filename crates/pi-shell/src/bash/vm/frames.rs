@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 30;
+pub const FRAMES_VERSION: u32 = 32;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -306,6 +306,7 @@ struct RunImage {
 	started:           bool,
 	exit_trap_started: bool,
 	report_exec_error: bool,
+	control_source:    bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -328,6 +329,7 @@ struct FrameImage {
 	ignore_errexit:    bool,
 	subshell_line:     Option<u32>,
 	getopts:           super::proc::GetoptsState,
+	control_source:    bool,
 }
 
 /// A saved fd: the fd object it held.
@@ -534,6 +536,7 @@ impl Shell {
 					ignore_errexit: f.ignore_errexit,
 					subshell_line: f.subshell_line,
 					getopts: f.getopts.as_deref().cloned().unwrap_or_default(),
+					control_source: f.control_source,
 				});
 			}
 			for (fd, h) in p.fds.iter() {
@@ -862,6 +865,7 @@ impl Shell {
 					started:           r.started,
 					exit_trap_started: r.exit_trap_started,
 					report_exec_error: r.report_exec_error,
+					control_source:    r.control_source,
 				});
 			}
 			report.runs += vp.runs.len() as u32;
@@ -970,6 +974,7 @@ impl Shell {
 					.map(|r| objs.saved(cx.host, r))
 					.collect();
 				let mut frame = Frame::new(unit, f.pc, f.kind);
+				frame.control_source = f.control_source;
 				frame.loops = f.loops;
 				frame.enters = f.enters;
 				frame.cases = f.cases;
@@ -1084,6 +1089,7 @@ fn run_image(r: &Run) -> RunImage {
 		started:           r.started,
 		exit_trap_started: r.exit_trap_started,
 		report_exec_error: r.report_exec_error,
+		control_source:    r.control_source,
 	}
 }
 

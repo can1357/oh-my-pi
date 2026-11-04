@@ -248,6 +248,7 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 	script.unexport_env = unexport_env;
 	script.args = Some(args);
 	script.report_exec_error = matches!(program, Program::Path(_));
+	script.control_source = true;
 	// The working directory is logical, as after `cd`: `-execdir` hands over
 	// `<root>/./sub`, and the command's `$PWD` is `<root>/sub`.
 	script.cwd = command

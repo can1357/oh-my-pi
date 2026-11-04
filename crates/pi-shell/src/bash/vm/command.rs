@@ -1315,13 +1315,6 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 		let target = loop {
 			// Borrowed (the resolution only reads `vp`): no copy of the
 			// name per command.
-			// A utility's exec uses the host's actual execvp search, not the
-			// shell's metadata lookup or hash table. Keep relative paths too.
-			if vp.runs.front().is_some_and(|run| run.report_exec_error)
-				&& current_exec(vp).is_some_and(|s| s.exec_as.is_some())
-			{
-				break Target::External(current_argv(vp)[0].clone());
-			}
 			let name = &current_argv(vp)[0];
 			let has_slash = name.contains(&b'/');
 			if external_only {
@@ -1344,8 +1337,9 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 			} else {
 				false
 			};
+			let control = via == Via::Plain && vp.frames.last().is_some_and(|f| f.control_source);
 			// Outside posix mode a function name may contain a slash.
-			if via == Via::Plain && (!has_slash || !posix) && !special {
+			if via == Via::Plain && !control && (!has_slash || !posix) && !special {
 				let found = match state::record(cx.store, vp, Key::Func(BStr::new(name))) {
 					Ok(Some(Record::Func { .. })) => true,
 					Ok(_) => false,
@@ -1359,11 +1353,19 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 				}
 			}
 			let rctx = ResolveCtx { has_slash, via, path_var: BStr::new(&path) };
-			let resolved = match resolve(k, cx, vp, name, mode, rctx) {
-				Ok(resolved) => resolved,
-				Err(err) => {
-					k.fail(err);
-					return Some(Flow::Discard(1));
+			let control_intrinsic = if control {
+				IntrinsicId::lookup(name, mode)
+			} else {
+				None
+			};
+			let resolved = match control_intrinsic {
+				Some(id) => Resolved::Intrinsic(id),
+				None => match resolve(k, cx, vp, name, mode, rctx) {
+					Ok(resolved) => resolved,
+					Err(err) => {
+						k.fail(err);
+						return Some(Flow::Discard(1));
+					},
 				},
 			};
 			let ExecState { argv, arrayref, .. } = st(vp);
@@ -1738,7 +1740,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 			None
 		},
 		Target::External(path) | Target::Interp(path) => {
-			// zsh: the interpreter run for a refused script fails as it is.
+			// An interpreter substituted for a refused script fails as it is.
 			let interp = matches!(st(vp).target, Some(Target::Interp(_)));
 			// A spawn the host has not finished (`Live::Spawn`) is polled again
 			// as it is: its redirections and job id were handed over with the
@@ -1938,7 +1940,11 @@ fn spawned_external(
 			let code = err.raw_os_error().unwrap_or_default();
 			st(vp).target = Some(Target::Refused { path, code });
 		},
-		Err(err) if is_enoexec(&err) && vp.runs.front().is_some_and(|run| run.report_exec_error) => {
+		Err(err)
+			if is_enoexec(&err)
+				&& !interp
+				&& vp.runs.front().is_some_and(|run| run.report_exec_error) =>
+		{
 			// execvp's fallback is the platform /bin/sh, not another run of
 			// this engine. Keep this exec's fds, environment and lineage.
 			let s = st(vp);
@@ -1948,7 +1954,7 @@ fn spawned_external(
 				how.argv0 = None;
 				how.login = false;
 			}
-			s.target = Some(Target::External(BString::from("/bin/sh")));
+			s.target = Some(Target::Interp(BString::from("/bin/sh")));
 		},
 		Err(err) if is_enoexec(&err) && !interp => {
 			// Retried as `Target::Script` (stage stays `Dispatch`).
@@ -2880,7 +2886,11 @@ fn exec_builtin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> O
 		s.stage = Stage::Output;
 		return None;
 	}
-	let target = if zsh
+	let target = if vp.runs.front().is_some_and(|run| run.report_exec_error) {
+		// exec already preselects its target, before `lookup` runs again.
+		// Preserve the requested name for the host's actual execvp search.
+		Some(Target::External(name.clone()))
+	} else if zsh
 		&& !state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Posixbuiltins).unwrap_or(false)
 	{
 		// zsh `exec` is a precommand modifier: a function or builtin runs

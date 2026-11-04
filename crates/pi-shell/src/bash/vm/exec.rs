@@ -609,7 +609,9 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 	if let FrameKind::Script { stdin, .. } = &mut kind {
 		*stdin = from_stdin;
 	}
-	vp.frames.push(Frame::new(None, 0, kind));
+	let mut frame = Frame::new(None, 0, kind);
+	frame.control_source = run.control_source;
+	vp.frames.push(frame);
 	// zsh `parseargs`: commands read from standard input set `shinstdin`.
 	if from_stdin
 		&& vp.overlay.is_none()
@@ -762,7 +764,11 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 				return None;
 			},
 		};
-		match builtins::alias_table(k, cx, vp) {
+		match if top_frame(vp).control_source {
+			Ok(None)
+		} else {
+			builtins::alias_table(k, cx, vp)
+		} {
 			Ok(a) => (feat, a),
 			Err(err) => {
 				k.fail(err);
@@ -1673,6 +1679,7 @@ pub fn start_sub(
 				None => (unit, entry, shift),
 			};
 			let mut frame = Frame::new(Some(unit), entry, FrameKind::NoFork);
+			frame.control_source = top_frame(vp).control_source;
 			frame.line_shift = shift;
 			// It shares the shell's options, so `-e` is ignored instead.
 			frame.ignore_errexit = !inherit;
@@ -3091,6 +3098,7 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 						sc.children = children.into_iter().map(|v| (v, None)).collect();
 						sc.inline = Some(InlineStage::Running);
 						let mut frame = Frame::new(Some(Arc::clone(unit)), stage.entry, FrameKind::Stage);
+						frame.control_source = top_frame(vp).control_source;
 						frame.line_shift = line_shift;
 						let prev = vp.fds.get(0).cloned();
 						vp.fds.set(0, stdin.take());

@@ -577,10 +577,18 @@ fn launch(
 	let mut candidate = Vec::new();
 	let mut denied = false;
 	let mut last = libc::ENOENT;
-	for dir in path.split(|&c| c == b':') {
-		// glibc skips a PATH component that cannot fit its PATH_MAX
-		// search buffer. A long file name itself is still tried.
-		if dir.len() >= libc::PATH_MAX as usize {
+	let path_bound = path.len().min(libc::PATH_MAX as usize - 1) + 1;
+	let mut rest = path;
+	loop {
+		let end = rest.iter().position(|&c| c == b':').unwrap_or(rest.len());
+		let dir = &rest[..end];
+		if dir.len() >= path_bound {
+			if end == rest.len() {
+				break;
+			}
+			// glibc retains this separator when it skips an oversized
+			// component. The next probe is therefore the empty component.
+			rest = &rest[end..];
 			continue;
 		}
 		candidate.clear();
@@ -617,6 +625,10 @@ fn launch(
 				}
 			},
 		}
+		if end == rest.len() {
+			break;
+		}
+		rest = &rest[end + 1..];
 	}
 	Err(io::Error::from_raw_os_error(if denied { libc::EACCES } else { last }))
 }

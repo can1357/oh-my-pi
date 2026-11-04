@@ -184,6 +184,9 @@ pub struct Script {
 	/// printing bash's diagnostic: a program that runs a command through
 	/// `execvp` (`env`, `xargs`) reports that error in its own words.
 	pub report_exec_error: bool,
+	/// Resolve this generated source's control words as builtins, without
+	/// aliases or functions. Newly parsed user eval/source text is unaffected.
+	pub control_source:    bool,
 }
 
 impl Script {
@@ -201,6 +204,7 @@ impl Script {
 			foreign_env:       Vec::new(),
 			unexport_env:      Vec::new(),
 			report_exec_error: false,
+			control_source:    false,
 		}
 	}
 }
@@ -1342,6 +1346,7 @@ impl Shell {
 			started: false,
 			exit_trap_started: false,
 			report_exec_error: script.report_exec_error,
+			control_source: script.control_source,
 		};
 		let stdio = match script.vproc {
 			VprocSel::Root => {
@@ -2443,6 +2448,7 @@ impl Vproc {
 			})
 			.map(|op| (unit.line + exec::end_line(&unit, op.node)).saturating_sub(line_shift));
 		let mut frame = Frame::new(Some(unit), entry, proc::FrameKind::Subshell);
+		frame.control_source = self.frames.last().is_some_and(|f| f.control_source);
 		// A subshell runs code of the same unit: it keeps the line numbering.
 		frame.line_shift = line_shift;
 		frame.subshell_line = subshell_line;
@@ -2464,7 +2470,9 @@ impl Vproc {
 			crate::bash::syntax::Pos { offset: 0, line },
 			proc::ScriptKind::Eval,
 		);
-		self.child_running(k, store, fds, Frame::new(None, 0, kind))
+		let mut frame = Frame::new(None, 0, kind);
+		frame.control_source = self.frames.last().is_some_and(|f| f.control_source);
+		self.child_running(k, store, fds, frame)
 	}
 
 	/// A subshell of `self` with `fds` whose first frame is `frame`; it
