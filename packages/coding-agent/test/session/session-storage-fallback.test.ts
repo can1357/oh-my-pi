@@ -9,9 +9,11 @@
  * agent id resolves to its canonical nested transcript.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { SQL } from "bun";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -176,6 +178,31 @@ describe("sql → file fallback", () => {
 		expect(fs.existsSync(path.dirname(sessionFile))).toBe(false);
 	});
 
+	it("a write committed while the ledger line is being appended also stops the fallback", async () => {
+		const { env, ledger } = brokenSqlEnv();
+		// The ledger directory does not exist yet, so recording awaits a mkdir
+		// and an append; land the write in that window.
+		const realAppend = fsp.appendFile;
+		const spy = vi.spyOn(fsp, "appendFile").mockImplementation(async (...args: Parameters<typeof fsp.appendFile>) => {
+			noteSqlWriteCommitted();
+			return realAppend(...args);
+		});
+		try {
+			const error = await rejection(
+				resolveSessionStorage({
+					settings: Settings.isolated(),
+					env,
+					resumableFileSession: async () => "01a1a000-0000-7000-8000-000000000005",
+				}),
+			);
+			expect(error.message).toContain("halts instead");
+		} finally {
+			spy.mockRestore();
+		}
+		// The line was already on disk when the write landed, and the refusal says so.
+		expect(ledgerLines(ledger)).toHaveLength(1);
+	});
+
 	it("a ledger line stays inside one page however large its caller-sized fields are", () => {
 		for (const [session, dsn] of [
 			["s".repeat(64), "/".repeat(9000)],
@@ -269,6 +296,16 @@ describe("which launches may fall back", () => {
 		expect(await resumableFileSessionId(args, ["--continue", wanted], dir)).toBe(wanted);
 	});
 
+	it("`--fork` creates a new session, so it may not fall back", async () => {
+		const dir = makeTempDir("@pi-session-fork-");
+		const sessions = path.join(dir, "sessions");
+		const existing = writeTranscript(sessions, dir);
+		const args: Args = { ...base, continue: true, fork: true, sessionDir: sessions };
+		expect(await resumableFileSessionId(args, ["--continue", "--fork"], dir)).toBeNull();
+		// The same launch without --fork does resolve, so the refusal is the flag.
+		expect(await resumableFileSessionId({ ...args, fork: false }, ["--continue"], dir)).toBe(existing);
+	});
+
 	it("a launch with no session may not fall back", async () => {
 		const dir = makeTempDir("@pi-session-nosession-");
 		const sessions = path.join(dir, "sessions");
@@ -288,6 +325,24 @@ describe("default file storage keeps main's listing behaviour", () => {
 		expect(listed).toEqual(["2026-11-04T00-00-00-000Z_abc.jsonl"]);
 	});
 
+	it("a transcript name that is not a regular file is not a transcript", async () => {
+		const dir = makeTempDir("@pi-session-kinds-");
+		fs.writeFileSync(path.join(dir, "Real.jsonl"), "{}\n");
+		fs.symlinkSync(path.join(dir, "Real.jsonl"), path.join(dir, "SymFile.jsonl"));
+		fs.symlinkSync(path.join(dir, "gone.jsonl"), path.join(dir, "Broken.jsonl"));
+		// A FIFO is the one that matters: reading it blocks until an EOF that
+		// never comes, so a walk must never hand its path to the reader.
+		execFileSync("mkfifo", [path.join(dir, "Fifo.jsonl")]);
+
+		const unregister = registerArtifactsDir(dir);
+		try {
+			const found = await sessionFilesFromDisk();
+			expect([...found.keys()].sort()).toEqual(["Real"]);
+		} finally {
+			unregister();
+		}
+	});
+
 	it("the full transcript walk follows the directory's own order, as a readdir walk did", async () => {
 		const dir = makeTempDir("@pi-session-nested-");
 		fs.mkdirSync(path.join(dir, "Z"));
@@ -296,13 +351,14 @@ describe("default file storage keeps main's listing behaviour", () => {
 		fs.writeFileSync(path.join(dir, ".Hidden.jsonl"), "{}\n");
 
 		// What a plain readdir walk — the one this replaced — would have chosen:
-		// entries in the directory's order, descending into each as it is met.
-		const storage = new FileSessionStorage();
-		const entries = storage.listEntriesSync(dir);
+		// the directory's own entries in their own order, descending into each
+		// as it is met. Read through `fs` directly, not through the storage, so
+		// the assertion cannot agree with the walk by construction.
+		const entries = fs.readdirSync(dir, { withFileTypes: true });
 		expect(entries.map(entry => entry.name).sort()).toEqual([".Hidden.jsonl", "Worker.jsonl", "Z"]);
 		let expected: string | undefined;
 		for (const entry of entries) {
-			if (entry.isDirectory) expected ??= path.join(dir, entry.name, "Worker.jsonl");
+			if (entry.isDirectory()) expected ??= path.join(dir, entry.name, "Worker.jsonl");
 			else if (entry.name === "Worker.jsonl") expected ??= path.join(dir, entry.name);
 		}
 

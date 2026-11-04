@@ -123,6 +123,17 @@ export async function resolveSessionStorage({
 				cause: ledgerError,
 			});
 		}
+		// Read the latch once more: recording the fallback awaits disk, and a
+		// write committed in that window makes the file store the wrong answer
+		// just as much as one committed during the probe. The ledger then holds
+		// a line for a fallback that did not happen, which the refusal says.
+		if (sqlStoreHasWritten()) {
+			throw new SessionStorageConfigError(
+				`${message} (a write reached the session database while this launch was deciding to ` +
+					`continue on file storage, so it halts instead; its fallback ledger line stands for a ` +
+					`fallback that did not happen)`,
+			);
+		}
 		return new FileSessionStorage();
 	};
 

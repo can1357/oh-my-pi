@@ -333,7 +333,10 @@ export async function resumableFileSessionId(
 	rawArgs: readonly string[] | undefined,
 	cwd: string,
 ): Promise<string | null> {
-	if (parsed.noSession) return null;
+	// `--fork` makes the launch create a new session whatever the resume flags
+	// say (see `normalizeContinueSessionArgs` and the fork branch below), and a
+	// new session never falls back.
+	if (parsed.noSession || parsed.fork) return null;
 	const storage = new FileSessionStorage();
 	try {
 		// `--continue <id>` is still spelled as `continue` plus a positional at

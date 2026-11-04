@@ -168,6 +168,13 @@ export interface WriteTextAtomicOptions extends SessionStorageWriteOptions {
 export interface SessionStorageEntry {
 	name: string;
 	isDirectory: boolean;
+	/**
+	 * A regular file. Not the complement of {@link isDirectory}: a directory
+	 * listing is three-valued, and a symlink, a dangling symlink, a FIFO, a
+	 * socket or a device node is neither. A transcript walk must skip those —
+	 * reading a FIFO blocks until EOF, which never comes.
+	 */
+	isFile: boolean;
 }
 
 export interface SessionStorage {
@@ -1179,7 +1186,11 @@ export class FileSessionStorage implements SessionStorage {
 		}
 		// The directory's own order, dotfiles included: a walk that reproduces
 		// what a plain readdir walk chose depends on both.
-		return entries.map(entry => ({ name: entry.name, isDirectory: entry.isDirectory() }));
+		return entries.map(entry => ({
+			name: entry.name,
+			isDirectory: entry.isDirectory(),
+			isFile: entry.isFile(),
+		}));
 	}
 
 	listDirsSync(dir: string): string[] {
@@ -1675,7 +1686,7 @@ export function childEntryNames(resolvedDir: string, keys: Iterable<string>): Se
 		}
 	}
 	return [...entries]
-		.map(([name, isDirectory]) => ({ name, isDirectory }))
+		.map(([name, isDirectory]) => ({ name, isDirectory, isFile: !isDirectory }))
 		.sort((a, b) => a.name.localeCompare(b.name));
 }
 

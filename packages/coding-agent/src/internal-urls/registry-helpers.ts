@@ -122,7 +122,7 @@ export async function sessionFilesFromDisk(
 		if (options?.onlyPreferred) {
 			// Prefer a direct transcript over a nested same-id copy.
 			for (const entry of entries) {
-				if (!entry.isDirectory) recordFile(path.join(dir, entry.name));
+				if (entry.isFile) recordFile(path.join(dir, entry.name));
 			}
 			for (const entry of entries) {
 				if (entry.isDirectory) scan(path.join(dir, entry.name), depth + 1);
@@ -131,7 +131,10 @@ export async function sessionFilesFromDisk(
 		}
 		for (const entry of entries) {
 			if (entry.isDirectory) scan(path.join(dir, entry.name), depth + 1);
-			else recordFile(path.join(dir, entry.name));
+			// Regular files only: a symlink, a FIFO or a device node named
+			// `*.jsonl` is not a transcript, and handing one to the reader can
+			// block forever.
+			else if (entry.isFile) recordFile(path.join(dir, entry.name));
 		}
 	};
 	for (const dir of dirs) scan(dir, 0);
@@ -151,6 +154,17 @@ export async function sessionFilesFromDisk(
  * artifacts subtree reads as unavailable instead of disturbing the caller's
  * delivery path.
  */
+/** Whether `file` is a regular file in `storage`; false for a directory, a missing path, or any fault. */
+function isStoredFile(file: string, storage: SessionStorage): boolean {
+	try {
+		if (!storage.existsSync(file)) return false;
+		const name = path.basename(file);
+		return storage.listEntriesSync(path.dirname(file)).some(entry => entry.name === name && entry.isFile);
+	} catch {
+		return false;
+	}
+}
+
 export async function hasResolvableTranscript(
 	agentId: string,
 	storage: SessionStorage = defaultSessionStorage(),
@@ -164,7 +178,10 @@ export async function hasResolvableTranscript(
 		if (ref?.session) return true;
 		// A running worker resolves to a "no transcript yet" note, not an error.
 		if (ref?.status === "running") return true;
-		if (ref?.sessionFile && storage.existsSync(ref.sessionFile)) return true;
+		// A regular file, not merely something at that path: a retained path that
+		// is now a directory resolves to no transcript, and promising one makes
+		// a hint surface advertise a `history://` link that cannot be served.
+		if (ref?.sessionFile && isStoredFile(ref.sessionFile, storage)) return true;
 		const files = await sessionFilesFromDisk(undefined, { storage });
 		for (const id of files.keys()) {
 			if (id.toLowerCase() === lower) return true;
