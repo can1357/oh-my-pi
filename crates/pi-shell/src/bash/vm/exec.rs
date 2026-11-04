@@ -3962,7 +3962,11 @@ fn runs_jobs(unit: &Unit, entry: u32) -> bool {
 fn high_fds_fit(cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 	let soft = match vp.rlimits.iter().find(|(r, ..)| *r == Rlimit::Nofile) {
 		Some(&(_, soft, _)) => soft,
-		None => cx.host.rlimit(Rlimit::Nofile).ok().and_then(|(soft, _)| soft),
+		None => cx
+			.host
+			.rlimit(Rlimit::Nofile)
+			.ok()
+			.and_then(|(soft, _)| soft),
 	};
 	soft.is_none_or(|soft| soft > 63)
 }
@@ -3972,7 +3976,11 @@ fn high_fds_fit(cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 /// else the lowest from 3 up.
 fn shell_fd(vp: &Vproc, high: bool, taken: &[i32]) -> i32 {
 	let free = |fd: &i32| !taken.contains(fd) && vp.fds.get(*fd).is_none_or(|h| !h.is_open());
-	let found = if high { (3..64).rev().find(free) } else { (3..).find(free) };
+	let found = if high {
+		(3..64).rev().find(free)
+	} else {
+		(3..).find(free)
+	};
 	found.unwrap_or_else(|| vp.fds.lowest_free(64) + taken.len() as i32)
 }
 
