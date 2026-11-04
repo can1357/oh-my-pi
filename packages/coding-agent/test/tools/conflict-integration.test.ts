@@ -828,6 +828,58 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(await Bun.file(filePath).text()).toBe("line 1\n\nline N\n");
 	});
 
+	// A chosen side is the side's real content, not pasted context: when it
+	// ends with the same statement and blank line that follow the region, all
+	// of it must still land, or the resolved code silently loses a statement.
+	const SIDE_ENDS_LIKE_CONTEXT = [
+		"globalThis.count=0;",
+		"<<<<<<< HEAD",
+		"globalThis.count++;",
+		"globalThis.count++;",
+		"",
+		"=======",
+		"globalThis.count+=2;",
+		">>>>>>> topic",
+		"globalThis.count++;",
+		"",
+		"console.log(globalThis.count);",
+		"",
+	];
+	const RESOLVED_WITH_OURS = [
+		"globalThis.count=0;",
+		"globalThis.count++;",
+		"globalThis.count++;",
+		"",
+		"globalThis.count++;",
+		"",
+		"console.log(globalThis.count);",
+		"",
+	];
+
+	it.each([
+		["conflict://1", "@ours", "\n"],
+		["conflict://*", "@ours", "\n"],
+		["conflict://*", "1: @ours\n", "\n"],
+		["conflict://1", "@ours", "\r\n"],
+		["conflict://*", "@ours", "\r\n"],
+		["conflict://*", "1: @ours\n", "\r\n"],
+	])(
+		"`%s` with %j keeps every line of a side that ends like the context below (EOL %j)",
+		async (uri, content, eol) => {
+			const filePath = path.join(tempDir, "side-echo.js");
+			await Bun.write(filePath, SIDE_ENDS_LIKE_CONTEXT.join(eol));
+			const session = createTestSession(tempDir);
+			const read = await getTool(session, "read");
+			const write = await getTool(session, "write");
+
+			await read.execute("read-side-echo", { path: "side-echo.js" });
+			const result = await write.execute("write-side-echo", { path: uri, content });
+
+			expect(getText(result)).not.toContain("dropped");
+			expect(await Bun.file(filePath).text()).toBe(RESOLVED_WITH_OURS.join(eol));
+		},
+	);
+
 	it("rejects `@base` for a 2-way conflict with a clear error", async () => {
 		const filePath = path.join(tempDir, "nobase.ts");
 		await Bun.write(filePath, TWO_WAY);

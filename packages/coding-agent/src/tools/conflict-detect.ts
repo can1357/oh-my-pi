@@ -465,10 +465,24 @@ export interface ConflictSplice {
 }
 
 /**
+ * Replacement for one conflict region, as {@link expandContentTokens} builds
+ * it from write content. Lines a token expanded to are the chosen side's
+ * recorded content; only the lines the caller typed before the first and
+ * after the last of them may be dropped as a boundary echo.
+ */
+export interface ConflictReplacement {
+	lines: string[];
+	/** Leading lines the caller typed, before the first token-expanded line. */
+	typedLeading: number;
+	/** Trailing lines the caller typed, after the last token-expanded line. */
+	typedTrailing: number;
+}
+
+/**
  * Splice the conflict region recorded in `entry` out of `originalText`
- * and replace it with `replacementLines` (markers and all sides included).
- * An empty `replacementLines` removes the region and leaves no line behind;
- * `[""]` leaves one empty line.
+ * and replace it with `replacement.lines` (markers and all sides included).
+ * Empty `lines` remove the region and leave no line behind; `[""]` leaves
+ * one empty line.
  *
  * Works like the edit tool's patch infra: locates the recorded marker
  * block by content (anchored to `entry.startLine` as the preferred
@@ -479,15 +493,16 @@ export interface ConflictSplice {
  * Boundary-echo repair (same philosophy as the edit tool's hashline
  * keeper repair): models frequently paste the "whole resolved function"
  * including the lines that live directly before/after the marker block,
- * which the verbatim splice would duplicate. Replacement lines that
+ * which the verbatim splice would duplicate. Typed replacement lines that
  * exactly echo the adjacent context are dropped when the echo is
  * unambiguous — two or more consecutive lines, or a single line whose
  * removal fixes a delimiter-balance mismatch against the recorded sides.
+ * Token-expanded lines are never dropped: a chosen side is not a paste.
  */
 export function spliceConflict(
 	originalText: string,
 	entry: ConflictEntry,
-	replacementLines: readonly string[],
+	replacement: ConflictReplacement,
 ): ConflictSplice {
 	const lines = originalText.split("\n");
 	const expected = buildRecordedRegion(entry);
@@ -498,7 +513,7 @@ export function spliceConflict(
 		);
 	}
 
-	const echo = trimBoundaryEcho(replacementLines, lines, match, entry);
+	const echo = trimBoundaryEcho(replacement, lines, match, entry);
 	let spliced = echo.lines;
 	// Round-trip fidelity for CRLF files: recorded sections are LF-normalized,
 	// so re-apply \r to spliced lines when the matched region used CRLF. The
@@ -536,16 +551,18 @@ function delimiterBalance(lines: readonly string[]): number {
 }
 
 /**
- * Drop replacement lines that exactly echo the file lines adjacent to the
- * located region. A multi-line echo is trimmed unconditionally (a correct
- * resolution ending with the exact lines that already follow the region
- * would mean intentionally duplicated code — vanishingly unlikely, and the
- * untrimmed splice produces exactly that duplication). A single-line echo
- * is trimmed only when the recorded sides agree on the region's delimiter
- * balance and dropping the echo is what restores it.
+ * Drop typed replacement lines that exactly echo the file lines adjacent to
+ * the located region. Only the typed lines before the first and after the
+ * last token-expanded line are candidates. A multi-line echo is trimmed
+ * unconditionally (a correct resolution ending with the exact lines that
+ * already follow the region would mean intentionally duplicated code —
+ * vanishingly unlikely, and the untrimmed splice produces exactly that
+ * duplication). A single-line echo is trimmed only when the recorded sides
+ * agree on the region's delimiter balance and dropping the echo is what
+ * restores it.
  */
 function trimBoundaryEcho(
-	replacement: readonly string[],
+	replacement: ConflictReplacement,
 	fileLines: readonly string[],
 	match: { startIdx: number; endIdx: number },
 	entry: ConflictBlock,
@@ -557,13 +574,13 @@ function trimBoundaryEcho(
 		delimiterBalance(lines) !== expectedBalance &&
 		delimiterBalance(without) === expectedBalance;
 
-	let lines = replacement;
+	let lines: readonly string[] = replacement.lines;
 	let trailing = 0;
 	const after: string[] = [];
 	for (let i = match.endIdx + 1; i < fileLines.length && after.length < MAX_ECHO_LINES; i++) {
 		after.push(stripTrailingCr(fileLines[i]!));
 	}
-	for (let k = Math.min(after.length, lines.length - 1); k >= 1; k--) {
+	for (let k = Math.min(after.length, lines.length - 1, replacement.typedTrailing); k >= 1; k--) {
 		if (!after.slice(0, k).every((line, i) => lines[lines.length - k + i] === line)) continue;
 		if (k >= 2 || singleEchoJustified(lines, lines.slice(0, -1))) {
 			trailing = k;
@@ -577,7 +594,7 @@ function trimBoundaryEcho(
 	for (let i = match.startIdx - 1; i >= 0 && before.length < MAX_ECHO_LINES; i--) {
 		before.unshift(stripTrailingCr(fileLines[i]!));
 	}
-	for (let k = Math.min(before.length, lines.length - 1); k >= 1; k--) {
+	for (let k = Math.min(before.length, lines.length - 1, replacement.typedLeading); k >= 1; k--) {
 		if (!before.slice(before.length - k).every((line, i) => lines[i] === line)) continue;
 		if (k >= 2 || singleEchoJustified(lines, lines.slice(1))) {
 			leading = k;
@@ -681,22 +698,31 @@ function normalizeTrailingNewline(replacement: string): string {
  * - `@both`    → expands to `oursLines` then `theirsLines`.
  *
  * One trailing newline ends the last line rather than adding an empty one.
- * The result is a line list, not joined text, because the two cases a
- * joined string cannot tell apart must splice differently: a token whose
+ * The result keeps lines as a list, not joined text, because the two cases
+ * a joined string cannot tell apart must splice differently: a token whose
  * section is empty contributes no lines (content made only of such tokens
  * yields `[]`), while an empty line the caller typed — including empty
- * content — stays one `""` line.
+ * content — stays one `""` line. It also records which edge lines the
+ * caller typed, the only lines boundary-echo repair may drop.
  */
-export function expandContentTokens(content: string, entry: ConflictEntry): string[] {
+export function expandContentTokens(content: string, entry: ConflictEntry): ConflictReplacement {
 	const out: string[] = [];
+	let firstExpanded = -1;
+	let lastExpandedEnd = 0;
+	const pushSection = (section: readonly string[]) => {
+		if (section.length === 0) return;
+		if (firstExpanded < 0) firstExpanded = out.length;
+		out.push(...section);
+		lastExpandedEnd = out.length;
+	};
 	for (const rawLine of normalizeTrailingNewline(content).split("\n")) {
 		const line = stripTrailingCr(rawLine);
 		switch (line) {
 			case "@ours":
-				out.push(...entry.oursLines);
+				pushSection(entry.oursLines);
 				break;
 			case "@theirs":
-				out.push(...entry.theirsLines);
+				pushSection(entry.theirsLines);
 				break;
 			case "@base":
 				if (!entry.baseLines) {
@@ -704,17 +730,22 @@ export function expandContentTokens(content: string, entry: ConflictEntry): stri
 						`Conflict #${entry.id} has no base section (2-way merge). \`@base\` is only valid for diff3 conflicts.`,
 					);
 				}
-				out.push(...entry.baseLines);
+				pushSection(entry.baseLines);
 				break;
 			case "@both":
-				out.push(...entry.oursLines, ...entry.theirsLines);
+				pushSection(entry.oursLines);
+				pushSection(entry.theirsLines);
 				break;
 			default:
 				out.push(line);
 				break;
 		}
 	}
-	return out;
+	return {
+		lines: out,
+		typedLeading: firstExpanded < 0 ? out.length : firstExpanded,
+		typedTrailing: out.length - lastExpandedEnd,
+	};
 }
 
 const PREVIEW_SIDE_LINES = 6;
