@@ -675,12 +675,11 @@ pub fn flush_out(k: &Kernel, vp: &mut Vproc) -> Option<i32> {
 	let mut cx = Context::from_waker(&k.waker);
 	while let Some(w) = vp.out.front_mut() {
 		let held;
-		let h = match &w.pin {
-			Some(pinned) => pinned,
-			None => {
-				held = vp.fds.handle(w.fd);
-				&held
-			},
+		let h = if let Some(pinned) = &w.pin {
+			pinned
+		} else {
+			held = vp.fds.handle(w.fd);
+			&held
 		};
 		match h.poll_write(&mut cx, &w.bytes[w.off..]) {
 			Poll::Ready(Ok(n)) if n > 0 => {

@@ -5,6 +5,8 @@
 
 #![cfg(unix)]
 
+use std::fmt::Write as _;
+
 use super::*;
 
 /// One script and what Bash leaves behind.
@@ -68,8 +70,8 @@ async fn check(rows: &[Row]) {
 		let mut want = format!("status {:?} timed_out false\n{}", Some(row.status), row.output);
 		for (name, contents) in row.files {
 			let read = std::fs::read_to_string(dir.path().join(name)).ok();
-			got.push_str(&format!("-- {name}: {:?}\n", read.as_deref().map(strip_prefixes)));
-			want.push_str(&format!("-- {name}: {:?}\n", contents.map(str::to_owned)));
+			let _ = writeln!(got, "-- {name}: {:?}", read.as_deref().map(strip_prefixes));
+			let _ = writeln!(want, "-- {name}: {:?}", contents.map(str::to_owned));
 		}
 		if got != want {
 			failures.push(format!("`{}`\n  want: {want:?}\n  got:  {got:?}", row.script));
@@ -124,7 +126,7 @@ async fn a_fatal_expansion_error_goes_through_the_redirection_in_force() {
 			"err",
 			Some("unset_var: unbound variable\n"),
 		)]),
-		row(r#"{ : $((1/0)); } 2>err; echo after"#, "", 1, &[(
+		row(r"{ : $((1/0)); } 2>err; echo after", "", 1, &[(
 			"err",
 			Some("1/0: division by 0 (error token is \"0\")\n"),
 		)]),
