@@ -27,6 +27,7 @@ import { isNativeRendering } from "../native/state";
 import { NativeImageCache, nativeMediaNode } from "../native/blobs";
 import { linkedImageText } from "../prompt/image-references";
 import { Memo } from "../native/memo";
+import { DEFAULT_SPINNER_INTERVAL_MS, spinnerAnimated, spinnerInterval } from "../spinner-clock";
 import { EMPTY_LINK_TARGETS, resolveImageOptions } from "../render/render-utils";
 import { WidthAwareText } from "../render";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
@@ -796,17 +797,18 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#startThinkingAnimation(): void {
-		// A native terminal clocks the described starburst itself.
-		if (this.#thinkingDotsTimer || isNativeRendering()) return;
+		// A native terminal clocks the described starburst itself; a static spinner holds frame 0.
+		if (this.#thinkingDotsTimer || isNativeRendering() || !spinnerAnimated()) return;
 		this.#scheduleThinkingFrame();
 	}
 
 	/** Eased dwell (ms) for the current pulse frame: a raised cosine over the
 	 *  8-frame cycle, continuous across the wrap, so the rotation breathes rather
-	 *  than advancing at a fixed interval. */
+	 *  than advancing at a fixed interval. Scaled with `tui.spinnerInterval`. */
 	#thinkingDotsFrameDelay(): number {
 		const phase = (1 - Math.cos((2 * Math.PI * this.#thinkingDotsFrame) / THINKING_DOTS_FRAMES.length)) / 2;
-		return THINKING_DOTS_FRAME_MS_MIN + (THINKING_DOTS_FRAME_MS_MAX - THINKING_DOTS_FRAME_MS_MIN) * phase;
+		const dwell = THINKING_DOTS_FRAME_MS_MIN + (THINKING_DOTS_FRAME_MS_MAX - THINKING_DOTS_FRAME_MS_MIN) * phase;
+		return (dwell * spinnerInterval()) / DEFAULT_SPINNER_INTERVAL_MS;
 	}
 
 	/** Self-rescheduling timeout (not a fixed interval) so each frame can pick its
@@ -822,11 +824,14 @@ export class AssistantMessageComponent extends Container {
 			this.#stopThinkingAnimation();
 			return;
 		}
-		this.#thinkingDotsFrame = (this.#thinkingDotsFrame + 1) % THINKING_DOTS_FRAMES.length;
+		const animated = spinnerAnimated();
+		// Spinners went static mid-pulse: settle on frame 0 and stop.
+		if (animated) this.#thinkingDotsFrame = (this.#thinkingDotsFrame + 1) % THINKING_DOTS_FRAMES.length;
+		else this.#thinkingDotsFrame = 0;
 		if (this.#thinkingDots.setText(this.#thinkingDotsLabel())) {
 			this.#onImageUpdate?.();
 		}
-		this.#scheduleThinkingFrame();
+		if (animated) this.#scheduleThinkingFrame();
 	}
 
 	#stopThinkingAnimation(): void {

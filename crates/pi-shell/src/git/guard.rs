@@ -35,13 +35,12 @@
 
 use std::path::{Path, PathBuf};
 
-use brush_core::{Error, ErrorKind, Shell, ShellExtensions};
 use pi_vcs::git::GitRepo;
 
-use crate::shell::is_git_repo_location_var;
+use super::is_git_repo_location_var;
 
 /// Exit status of a refused command; git's own for a refused operation.
-pub(super) const REFUSED_EXIT: u8 = 1;
+pub const REFUSED_EXIT: u8 = 1;
 
 /// Ref whose reflog records uncommitted changes before a command in a
 /// one-agent checkout discards them. Git expires entries other than the
@@ -53,11 +52,13 @@ const OWN_WORKTREE: &str = "In a worktree of your own (git worktree add <path> [
                             runs, and uncommitted changes it would discard are saved first.";
 
 /// A judged `git` invocation, detached from the shell so its repository reads
-/// can run off the async workers.
-pub(super) struct Review(Judgment);
+/// can run off the shell's thread.
+pub struct Review(Judgment);
 
 /// What the builtin does with a judged command.
-pub(super) enum Decision {
+#[derive(Debug, PartialEq, Eq)]
+pub enum Decision {
+	/// Run git.
 	Run,
 	/// Print this note to stderr, then run git.
 	RunNoted(String),
@@ -66,8 +67,13 @@ pub(super) enum Decision {
 }
 
 impl Review {
-	/// Judges `args` (git's arguments, without `git`) as `shell` would run them.
-	pub(super) fn of<SE: ShellExtensions>(shell: &Shell<SE>, args: &[String]) -> Self {
+	/// Judges `args` (git's arguments, without `git`) as git would run them
+	/// in `cwd` with the exported variables named by `exported`.
+	pub fn of<'a>(
+		cwd: &Path,
+		exported: impl Iterator<Item = &'a str> + Clone,
+		args: &[String],
+	) -> Self {
 		let Some(invocation) = Invocation::parse(args) else {
 			return Self(Judgment::Allow);
 		};
@@ -79,23 +85,18 @@ impl Review {
 			dir:        invocation
 				.dirs
 				.iter()
-				.fold(shell.working_dir().to_owned(), |dir, next| dir.join(next)),
+				.fold(cwd.to_owned(), |dir, next| dir.join(next)),
 			// GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, … retarget git as
 			// `--git-dir` does.
-			redirected: invocation.redirected
-				|| shell
-					.env()
-					.iter_exported()
-					.any(|(name, _)| is_git_repo_location_var(name)),
+			redirected: invocation.redirected || exported.clone().any(is_git_repo_location_var),
 			// Configuration passed through the environment (`GIT_CONFIG_COUNT`)
 			// may turn on `submodule.recurse`.
 			recurse:    recurse_option(invocation.sub, invocation.args)
 				.or(invocation.recurse)
 				.or_else(|| {
-					shell
-						.env()
-						.iter_exported()
-						.any(|(name, _)| name == "GIT_CONFIG_COUNT")
+					exported
+						.clone()
+						.any(|name| name == "GIT_CONFIG_COUNT")
 						.then_some(true)
 				}),
 			command:    args.join(" "),
@@ -103,21 +104,16 @@ impl Review {
 	}
 
 	/// Whether git runs, reading and saving repository state as the verdict
-	/// needs.
-	///
-	/// # Errors
-	/// [`ErrorKind::ThreadingError`] when the repository work cannot finish.
-	pub(super) async fn decide(self) -> Result<Decision, Error> {
+	/// needs. Blocks on repository I/O: run it off the shell's thread.
+	pub fn decide(self) -> Decision {
 		let Judgment::Check(sub, verdict, site) = self.0 else {
-			return Ok(Decision::Run);
+			return Decision::Run;
 		};
-		tokio::task::spawn_blocking(move || match Place::of(&site) {
+		match Place::of(&site) {
 			Place::Private(repo) => in_private(&repo, sub, verdict, &site),
 			place => in_shared(&place, sub, verdict, &site.dir)
 				.map_or(Decision::Run, |refusal| Decision::Refuse(refusal.message())),
-		})
-		.await
-		.map_err(|err| Error::from(ErrorKind::ThreadingError(err)))
+		}
 	}
 }
 

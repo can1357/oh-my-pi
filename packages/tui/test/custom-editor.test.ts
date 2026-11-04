@@ -10,6 +10,8 @@ import {
 	modelMentionChipLabel,
 	skillChipLabel,
 } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
+import { setMotionEffects } from "@oh-my-pi/pi-tui/motion-effects";
+import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import {
 	CustomEditor,
 	extractBracketedImagePastePaths,
@@ -404,9 +406,13 @@ describe("CustomEditor bracketed path paste", () => {
 	describe("model mention chips", () => {
 		function makeModelEditor() {
 			const { editor } = makeEditor();
-			editor.modelMentionLabel = selector => {
-				if (selector === "a/x" || selector === "b/y") return modelMentionChipLabel("X One");
-				if (selector === "c/z") return modelMentionChipLabel("Zed");
+			editor.resolveModelMention = selector => {
+				if (selector === "a/x" || selector === "b/y") return { label: modelMentionChipLabel("X One"), selector };
+				if (selector === "c/z") return { label: modelMentionChipLabel("Zed"), selector };
+				if (selector === "c/z:auto") return { label: modelMentionChipLabel("Zed"), selector: "c/z" };
+				if (selector === "c/z:hi" || selector === "c/z:high") {
+					return { label: modelMentionChipLabel("Zed · high"), selector: "c/z:high" };
+				}
 				return undefined;
 			};
 			editor.modelMentionSelector = agent => (agent === "m1" ? "a/x" : undefined);
@@ -488,6 +494,23 @@ describe("CustomEditor bracketed path paste", () => {
 			const chip = modelMentionChipLabel("Zed");
 			expect(editor.getText()).toBe(`paste ${chip} `);
 			expect(editor.getExpandedText()).toBe("paste ^c/z ");
+		});
+
+		it("shows the full effort name on the chip and expands to the canonical selector", () => {
+			const editor = makeModelEditor();
+			for (const ch of "ask ^c/z:hi ") editor.handleInput(ch);
+
+			expect(editor.getText()).toBe(`ask ${modelMentionChipLabel("Zed · high")} `);
+			expect(editor.getExpandedText()).toBe("ask ^c/z:high ");
+		});
+
+		it("collapses equivalent spellings of one mention into the same chip", () => {
+			const editor = makeModelEditor();
+			for (const ch of "^c/z then ^c/z:auto ") editor.handleInput(ch);
+
+			const chip = modelMentionChipLabel("Zed");
+			expect(editor.getText()).toBe(`${chip} then ${chip} `);
+			expect(editor.getExpandedText()).toBe("^c/z then ^c/z ");
 		});
 
 		it("self-heals the atomic token pattern after history restores mention atoms", () => {
@@ -1132,5 +1155,51 @@ describe("CustomEditor space-hold push-to-talk", () => {
 		expect(editor.getText()).toBe("ab cd");
 		expect(editor.getCursor()).toEqual({ line: 0, col: 2 });
 		expect(events).toEqual([]);
+	});
+});
+
+describe("magic-keyword shimmer honours tui.motion", () => {
+	beforeEach(() => {
+		setMagicKeywords([{ word: "ultrathink", hue: [0, 180] }]);
+	});
+	afterEach(() => {
+		setMagicKeywords([]);
+		setMotionEffects(true);
+		vi.useRealTimers();
+	});
+
+	function litKeyword() {
+		const editor = new CustomEditor(getEditorTheme());
+		editor.focused = true;
+		editor.setText("please ultrathink this");
+		return editor;
+	}
+	const decorate = (editor: CustomEditor) =>
+		editor.decorateText(editor.getText(), { line: 0, startCol: 0, endCol: editor.getText().length });
+
+	it("sweeps when motion effects are on", () => {
+		vi.useFakeTimers();
+		setMotionEffects(true);
+		const editor = litKeyword();
+		const repaint = vi.fn();
+		editor.setShimmerRepaintHandler(repaint);
+		const lit = decorate(editor);
+		expect(lit).not.toBe(editor.getText()); // keyword is styled
+		vi.advanceTimersByTime(CustomEditor.SHIMMER_FRAME_MS);
+		expect(repaint).toHaveBeenCalledTimes(1); // a sweep frame was armed
+		editor.setShimmerRepaintHandler(undefined);
+	});
+
+	it("does not arm a sweep when motion effects are off, but keeps the keyword highlighted", () => {
+		vi.useFakeTimers();
+		setMotionEffects(false);
+		const editor = litKeyword();
+		const repaint = vi.fn();
+		editor.setShimmerRepaintHandler(repaint);
+		const still = decorate(editor);
+		expect(still).not.toBe(editor.getText()); // still highlighted (static gradient)
+		vi.advanceTimersByTime(CustomEditor.SHIMMER_FRAME_MS * 4);
+		expect(repaint).toHaveBeenCalledTimes(0); // no sweep frames
+		editor.setShimmerRepaintHandler(undefined);
 	});
 });
