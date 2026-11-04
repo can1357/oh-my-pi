@@ -111,6 +111,7 @@ import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { isMainThread } from "../thread/identity";
 import { runFollowUpTurnOnHome, runSubprocessPlaced } from "../thread/executor-routing";
+import { rpcSync } from "../thread/rpc";
 import { existingSubagentWorkerPool, subagentWorkerPool } from "../thread/subagent-worker";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
@@ -4363,10 +4364,17 @@ export interface SubagentRunRequest {
 	readonly rootThresholds: RootCompactionThresholds | undefined;
 }
 
-/** Package `options` for a worker, carrying what the settings' symbol tag holds explicitly. */
+/**
+ * Package `options` for a worker, carrying what the settings' symbol tag holds explicitly.
+ * `parentWaits` is read synchronously each time a payload is built; an unmarked function
+ * would reach the worker as an async proxy whose pending promise reads as "still waited on",
+ * so a job the parent handed to the background would never report itself detached.
+ */
 export function subagentRunRequest(options: ExecutorOptions): SubagentRunRequest {
 	const settings: SubagentChainSettings | undefined = options.settings;
-	return { options, rootThresholds: settings?.[kRootCompactionThresholds] };
+	const parentWaits = options.parentWaits;
+	const routed = parentWaits ? { ...options, parentWaits: rpcSync(() => parentWaits()) } : options;
+	return { options: routed, rootThresholds: settings?.[kRootCompactionThresholds] };
 }
 
 /** Worker entry of a routed run: re-tag the settings mirror, then run here. */

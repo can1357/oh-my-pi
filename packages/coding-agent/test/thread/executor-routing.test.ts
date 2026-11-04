@@ -539,4 +539,45 @@ describe("subagent runs routed into pooled workers", () => {
 		},
 		TEST_TIMEOUT_MS,
 	);
+
+	// A blocking task item's job is detached, but its payloads report `detached: false` while
+	// the parent's call still waits on it; the worker must read the parent's live answer each
+	// time it builds one, not a value fixed when the run crossed over. One run per test: the
+	// fake server re-arms `hung()` only after a held request has ended.
+	async function finalDetachedOfAbortedRun(handOffFirst: boolean): Promise<boolean | undefined> {
+		let final: boolean | undefined;
+		cleanups.push(
+			eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, payload => {
+				if (typeof payload !== "object" || payload === null || Reflect.get(payload, "id") !== "Waited") return;
+				final = Reflect.get(payload, "detached") === true;
+			}),
+		);
+		let waiting = true;
+		const abort = new AbortController();
+		const running = runSubprocess(
+			runOptions("Waited", "hang", { detached: true, parentWaits: () => waiting, signal: abort.signal }),
+		);
+		await server.hung();
+		// A handed-off job is the parent's no longer; its payloads are detached from here on.
+		if (handOffFirst) waiting = false;
+		abort.abort();
+		await running;
+		return final;
+	}
+
+	it(
+		"reports a job-hosted run its parent still waits on as not detached, from a worker",
+		async () => {
+			expect(await finalDetachedOfAbortedRun(false)).toBe(false);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"reports a job-hosted run its parent handed to the background as detached, from a worker",
+		async () => {
+			expect(await finalDetachedOfAbortedRun(true)).toBe(true);
+		},
+		TEST_TIMEOUT_MS,
+	);
 });
