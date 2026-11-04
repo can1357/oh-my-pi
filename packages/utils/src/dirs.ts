@@ -614,7 +614,6 @@ export function isOmpOwnedPath(candidate: string): boolean {
 		getFastembedRuntimeDir(),
 		getDocsRsCacheDir(),
 		path.join(getPluginsDir(), "cache"),
-		path.join(getPluginsDir(), "node_modules"),
 	];
 	for (const tree of fetched) {
 		if (pathIsWithin(tree, target)) return false;
@@ -644,6 +643,13 @@ export function isOmpOwnedPath(candidate: string): boolean {
 	// root too. The name is the constant one a project uses, which `PI_CONFIG_DIR`
 	// renames the config root by but does not move.
 	if (segments.includes(CONFIG_DIR_NAME)) return false;
+	// A `node_modules` is a package manager's, not a person's. Every runtime omp
+	// installs on demand — speech, transcription, the tiny title model, the
+	// embedder — puts one under its own directory (`EnsureRuntimeInstalledOptions`
+	// owns a `package.json` plus a `node_modules`), and naming those directories
+	// one at a time is how the last three gaps here were found. One shape covers
+	// the ones that exist and the ones added later.
+	if (segments.includes("node_modules")) return false;
 	// The producers above answer for the ACTIVE profile. Another profile keeps the
 	// same trees under its own root, which no producer names, so the names are
 	// matched one level into a config root too — anchored, and only there, because
@@ -654,9 +660,7 @@ export function isOmpOwnedPath(candidate: string): boolean {
 	const head = segments[offset];
 	if (head === "wt" || head === "remote" || head === "skillshare") return false;
 	if (head === "puppeteer" || head === "webcache") return false;
-	if (head === "plugins" && (segments[offset + 1] === "cache" || segments[offset + 1] === "node_modules")) {
-		return false;
-	}
+	if (head === "plugins" && segments[offset + 1] === "cache") return false;
 	if (head === "cache" && segments[offset + 1] === "fastembed-runtime") return false;
 	return true;
 }

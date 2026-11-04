@@ -411,4 +411,19 @@ describe("classification does not depend on where omp happens to be pointed", ()
 			setAgentDir(owned);
 		}
 	});
+
+	test("an installed dependency tree is foreign under any runtime, named or not", () => {
+		// Speech, transcription, the tiny title model and the embedder all install
+		// through the same machinery, and naming their directories one at a time is
+		// how three gaps were found. The `node_modules` a package manager writes is
+		// the shape they share.
+		for (const runtime of ["tts-runtime", "stt-runtime", "tiny-runtime", "fastembed-runtime", "whatever-is-next"]) {
+			const installed = path.join(getBaseConfigRoot(), "agent", "cache", runtime, "node_modules");
+			expect(isOmpOwnedPath(path.join(installed, "pkg", "dist", "index.js"))).toBe(false);
+			expect(isOmpOwnedPath(path.join(installed, ".bin", "probe"))).toBe(false);
+		}
+		expect(isOmpOwnedPath(path.join(getPluginsDir(), "node_modules", "pkg"))).toBe(false);
+		// The runtime's own directory above `node_modules` is still omp's.
+		expect(isOmpOwnedPath(path.join(getBaseConfigRoot(), "agent", "cache", "tts-runtime"))).toBe(true);
+	});
 });
