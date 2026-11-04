@@ -218,15 +218,18 @@ const OBSERVE_STEP_BUDGET = 64;
 
 /**
  * Where an observation is: its depth from the value first given, and what that value's observation shares:
- * the steps it has left and the errors it has already described.
+ * the steps it has left, the promises it has followed, and the values it has already reached for describing.
  */
 interface Reach {
 	depth: number;
-	budget: { steps: number; described: WeakSet<object> };
+	budget: { steps: number; followed: WeakSet<object>; described: WeakSet<object> };
 }
 
 function rootReach(): Reach {
-	return { depth: 0, budget: { steps: OBSERVE_STEP_BUDGET, described: new WeakSet() } };
+	return {
+		depth: 0,
+		budget: { steps: OBSERVE_STEP_BUDGET, followed: new WeakSet(), described: new WeakSet() },
+	};
 }
 
 /** One step further, sharing the budget; `undefined` when either bound is reached. */
@@ -236,16 +239,12 @@ function nextReach(reach: Reach): Reach | undefined {
 	return { depth: reach.depth + 1, budget: reach.budget };
 }
 
-/**
- * Promises already marked handled. Marking is permanent and a promise settles once, so a promise needs
- * this only once in the process; weak, so it holds none of them alive.
- */
-const observedPromises = new WeakSet<object>();
-
 function observeReached(value: unknown, reach: Reach): void {
 	if (value === null || (typeof value !== "object" && typeof value !== "function")) return;
-	if (isPromise(value) && !observedPromises.has(value)) {
-		observedPromises.add(value);
+	// Promises, like errors, are recorded per observation: a later observation follows a reused promise
+	// again, so a reason that has since changed is observed as it is now.
+	if (isPromise(value) && !reach.budget.followed.has(value)) {
+		reach.budget.followed.add(value);
 		const next = nextReach(reach);
 		// Past a bound the promise is still marked handled; only what it settles with is no longer followed.
 		const settled = next ? (result: unknown): void => observeReached(result, next) : ignoreSettled;
@@ -257,8 +256,11 @@ function observeReached(value: unknown, reach: Reach): void {
 	}
 	// A promise can also be an error; it is then described too.
 	if (reach.budget.described.has(value) || reach.depth + 1 >= OBSERVE_DEPTH_LIMIT) return;
-	// The error check walks the value's prototypes, whose traps can throw new values to observe in turn;
-	// it runs one level deeper, so that recursion ends at the depth bound without spending a step.
+	// Marked before the error check: that check walks the value's prototypes, and a prototype or what a trap
+	// throws can lead back to this value, which must not be checked or described a second time.
+	reach.budget.described.add(value);
+	// The check runs one level deeper, so a chain of new values that traps throw ends at the depth bound
+	// without spending a step.
 	if (!isErrorAt(value, { depth: reach.depth + 1, budget: reach.budget })) return;
 	const next = nextReach(reach);
 	if (!next) return;

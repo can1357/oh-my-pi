@@ -2131,4 +2131,67 @@ describe("cancellation checks and descriptions read a thrown value or abort reas
 		});
 		expect(unhandled).toEqual([]);
 	});
+
+	it("follows a reused rejected promise again, observing its reason's newly held rejected promise", async () => {
+		const reason = new Error("first");
+		const reused = Promise.reject(reason);
+		const unhandled = await unhandledRejectionsDuring(async () => {
+			describeError(reused);
+			await Bun.sleep(20);
+			// The reason, already observed once, later holds a rejected promise; the same promise is thrown again.
+			Object.defineProperty(reason, "message", { value: Promise.reject(new Error("later reason field")) });
+			describeError(reused);
+			await Bun.sleep(40);
+		});
+		expect(unhandled).toEqual([]);
+	});
+
+	it("reads an error's fields once when its own prototype check leads back to it", () => {
+		let reads = 0;
+		let first = true;
+		// An error-shaped promise that holds the error is returned once as that error's prototype.
+		const prototype = Object.setPrototypeOf(Promise.resolve(), Error.prototype);
+		const target = new Error("inner");
+		Object.defineProperty(target, "message", {
+			get() {
+				reads += 1;
+				return "inner";
+			},
+		});
+		const inner = new Proxy(target, {
+			getPrototypeOf() {
+				if (first) {
+					first = false;
+					return prototype;
+				}
+				return Error.prototype;
+			},
+		});
+		Object.defineProperty(prototype, "message", { value: inner });
+		const root = new Error("root");
+		Object.defineProperty(root, "message", { value: inner });
+		describeError(root);
+		expect(reads).toBe(1);
+	});
+
+	it("ends promptly on a promise whose prototype is a Proxy that returns that promise as its prototype", () => {
+		let traps = 0;
+		const promise = Promise.resolve();
+		const proxy = new Proxy(
+			{},
+			{
+				getPrototypeOf() {
+					traps += 1;
+					// A ceiling so that a regression fails this row instead of hanging the run.
+					if (traps >= 100_000) throw new Error("trap ceiling reached");
+					return promise;
+				},
+			},
+		);
+		Object.setPrototypeOf(promise, proxy);
+		const root = new Error("root");
+		Object.defineProperty(root, "message", { value: promise });
+		describeError(root);
+		expect(traps).toBeLessThan(1_000);
+	});
 });
