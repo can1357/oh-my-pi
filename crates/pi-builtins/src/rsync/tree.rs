@@ -58,7 +58,7 @@ use std::{
 
 use pi_vfs::{BlockingFs, DirOptions, FileTime, Metadata, NodeKind, OpenOptions, Permissions};
 
-use crate::rsync::consts::MAXPATHLEN;
+use crate::rsync::consts::{MAXPATHLEN, mode_is_lnk};
 use crate::rsync::paths::{self, is_absolute_bytes, is_separator};
 use crate::rsync::time::split_time;
 
@@ -853,7 +853,7 @@ impl Tree {
 						}
 						let path = self.inner.root.join(OsStr::from_bytes(at.name.as_bytes()));
 						sys::bind_socket_at(at.dir.fd(), &at.name, &path)?;
-						chmod_nofollow(at.dir.fd(), &at.name, perm, false)?;
+						chmod_nofollow(at.dir.fd(), &at.name, perm, AtLink::Refuse)?;
 					}
 				},
 				NodeKind::CharDevice(rdev) => {
@@ -882,7 +882,7 @@ impl Tree {
 		let current = sys::st_mode(&st) & 0o7777;
 		let wanted = (current & 0o7000) | (mode & 0o777 & !mask);
 		if current != wanted {
-			let _ = chmod_nofollow(at.dir.fd(), &at.name, wanted, false);
+			let _ = chmod_nofollow(at.dir.fd(), &at.name, wanted, AtLink::Refuse);
 		}
 	}
 
@@ -947,17 +947,27 @@ impl Tree {
 	/// instead: upstream's resolver is off there, and `do_chmod` calls
 	/// chmod(2), which changes what the symlink points to.
 	pub(crate) fn chmod(&self, rel: &Path, mode: u32) -> io::Result<()> {
-		self.chmod_entry(rel, mode, false)
+		self.chmod_entry(rel, mode, AtLink::Refuse)
 	}
 
 	/// Sets the mode of the symlink at `rel` itself (lchmod semantics;
 	/// `EOPNOTSUPP` where the platform cannot), upstream's `do_chmod` for an
 	/// `S_ISLNK` mode.
 	pub(crate) fn chmod_link(&self, rel: &Path, mode: u32) -> io::Result<()> {
-		self.chmod_entry(rel, mode, true)
+		self.chmod_entry(rel, mode, AtLink::SetOwn)
 	}
 
-	fn chmod_entry(&self, rel: &Path, mode: u32, link: bool) -> io::Result<()> {
+	/// Sets the mode of the entry at `rel` as upstream's `set_file_attrs`
+	/// does for an entry of `mode` (its `S_IFMT` included): a symlink's own
+	/// mode ([`Tree::chmod_link`]) for a symlink, otherwise [`Tree::chmod`],
+	/// which refuses a symlink found there (`S_ISLNK(mode) ? do_chmod :
+	/// do_fchmodat_nofollow`). Only the permission bits of `mode` are set.
+	pub(crate) fn chmod_for(&self, rel: &Path, mode: u32) -> io::Result<()> {
+		if mode_is_lnk(mode) { self.chmod_link(rel, mode) } else { self.chmod(rel, mode) }
+	}
+
+	fn chmod_entry(&self, rel: &Path, mode: u32, at_link: AtLink) -> io::Result<()> {
+		let link = at_link == AtLink::SetOwn;
 		let follow = !link && self.insecure();
 		#[cfg(unix)]
 		if let Some(root) = self.native_root() {
@@ -965,7 +975,7 @@ impl Tree {
 			if follow {
 				return sys::fchmodat(at.dir.some(), &at.name, mode & 0o7777, false);
 			}
-			return chmod_nofollow(at.dir.fd(), &at.name, mode & 0o7777, link);
+			return chmod_nofollow(at.dir.fd(), &at.name, mode & 0o7777, at_link);
 		}
 		let path = self.path_of(rel)?;
 		if !follow && self.inner.fs.symlink_metadata(&path)?.is_symlink() {
@@ -1225,6 +1235,17 @@ impl Tree {
 	}
 }
 
+/// What a chmod does with a symlink found at the entry it changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtLink {
+	/// Refuses it with `ELOOP` and leaves it alone (upstream's
+	/// `do_fchmodat_nofollow`).
+	Refuse,
+	/// Sets the symlink's own mode (lchmod; upstream's `do_chmod` for an
+	/// `S_ISLNK` mode).
+	SetOwn,
+}
+
 /// chmod of `dir/name` that never follows a final symlink, upstream's
 /// `do_fchmodat_nofollow`: a symlink is refused with `ELOOP` unless `link`
 /// asks for the symlink's own mode, which gets
@@ -1234,13 +1255,13 @@ impl Tree {
 /// `fchmodat(AT_SYMLINK_NOFOLLOW)`. On macOS a FIFO is never opened (that
 /// would make us a reader); an ungrantable setgid is retried without it.
 #[cfg(unix)]
-fn chmod_nofollow(dir: BorrowedFd<'_>, name: &std::ffi::CStr, mode: u32, link: bool) -> io::Result<()> {
+fn chmod_nofollow(dir: BorrowedFd<'_>, name: &std::ffi::CStr, mode: u32, at_link: AtLink) -> io::Result<()> {
 	let st = sys::fstatat(Some(dir), name, true)?;
 	if sys::is_lnk(&st) {
-		if !link {
-			return Err(err::looped());
-		}
-		return sys::fchmodat(Some(dir), name, mode, true);
+		return match at_link {
+			AtLink::Refuse => Err(err::looped()),
+			AtLink::SetOwn => sys::fchmodat(Some(dir), name, mode, true),
+		};
 	}
 	let fifo = sys::is_fifo(&st);
 	if sys::is_reg(&st) || sys::is_dir(&st) || fifo {

@@ -509,10 +509,7 @@ pub(crate) fn set_file_attrs_with(
 			// Upstream set_file_attrs: a symlink entry's own mode through
 			// do_chmod (lchmod), anything else through do_fchmodat_nofollow,
 			// which refuses a symlink at the destination with ELOOP.
-			let result = match mode_is_lnk(new_mode) {
-				true => tree.chmod_link(rel, new_mode & CHMOD_BITS),
-				false => tree.chmod(rel, new_mode & CHMOD_BITS),
-			};
+			let result = tree.chmod_for(rel, new_mode);
 			match result {
 				Ok(()) => true,
 				// Symlink modes are best effort unless permissions are preserved.
@@ -778,10 +775,8 @@ fn sync_fake_stat(
 	let plain_mode = (disk_mode & S_IFMT) | (want_mode & ACCESSPERMS) | owner_bits;
 	if disk_mode != plain_mode {
 		// Best effort, like upstream: a failure shows up in the record instead.
-		let _ = match mode_is_lnk(disk_mode) {
-			true => tree.chmod_link(rel, plain_mode & CHMOD_BITS),
-			false => tree.chmod(rel, plain_mode & CHMOD_BITS),
-		};
+		// `plain_mode` carries the entry's own type (`disk_mode`'s `S_IFMT`).
+		let _ = tree.chmod_for(rel, plain_mode);
 	}
 	let disk_rdev = match real.rdev() {
 		Some(rdev) if mode_is_device(disk_mode) => dev_split(rdev),
