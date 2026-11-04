@@ -748,7 +748,7 @@ export const cfgRetryRefusalRetries = register({
 		group: "Retry & Fallback",
 		label: "Refusal Retries",
 		description:
-			"Same-model retries after a provider refuses the request's content with a refusal code whose verdict is not stable for a given input (an OpenAI cyber_policy refusal), once no fallback model took it. Counted apart from Retry Attempts; never rotates credentials. 0 surfaces the first refusal.",
+			"Same-model retries after a provider refuses the request's content with a refusal code whose verdict is not stable for a given input (an OpenAI cyber_policy refusal), once no fallback model took it. Neither these retries nor the refusal's fallback hops spend Retry Attempts; never rotates credentials. 0 surfaces the first refusal.",
 		options: [
 			{ value: "0", label: "No retry" },
 			{ value: "1", label: "1 retry" },

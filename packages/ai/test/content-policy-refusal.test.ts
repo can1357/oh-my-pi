@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import type { Api, Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 // The refusal exactly as an OpenAI Responses route sends it: HTTP 200, then
@@ -89,4 +89,67 @@ describe("provider content-policy refusals", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.stopDetails?.type).not.toBe("refusal");
 	});
+});
+
+type RefusalCarrier = "sse" | "http403" | "http400";
+
+/** The same `cyber_policy` refusal on the given carrier, in the wire format `api` streams. */
+function refusalOn(api: Api, carrier: RefusalCarrier): Response {
+	const error = { code: "cyber_policy", message: REFUSAL_MESSAGE };
+	if (carrier !== "sse") return Response.json({ error }, { status: carrier === "http403" ? 403 : 400 });
+	if (api !== "openai-completions") return failedResponse("cyber_policy", REFUSAL_MESSAGE);
+	// Chat Completions streams a failure as an in-band `error` chunk.
+	return new Response(
+		`data: ${JSON.stringify({ error: { ...error, type: "invalid_request_error" } })}\n\ndata: [DONE]\n\n`,
+		{
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		},
+	);
+}
+
+describe("content-policy refusals on every OpenAI-wire API and carrier", () => {
+	const apis = ["openai-completions", "openai-responses", "azure-openai-responses", "openai-codex-responses"] as const;
+	const carriers: RefusalCarrier[] = ["sse", "http403", "http400"];
+	it.each(apis.flatMap(api => carriers.map(carrier => ({ api, carrier }))))(
+		"$api $carrier: one attempt, no rotation, the refusal's stopDetails kept",
+		async ({ api, carrier }) => {
+			const credentials: string[] = [];
+			using server = Bun.serve({
+				port: 0,
+				fetch: async request => {
+					await request.text();
+					credentials.push(request.headers.get("authorization") ?? request.headers.get("api-key") ?? "");
+					return refusalOn(api, carrier);
+				},
+			});
+			const routeModel = buildModel({
+				api,
+				name: "Refusal Route",
+				id: "refusal-route",
+				provider: "refusal-proxy",
+				baseUrl: server.url.toString().replace(/\/$/, ""),
+				preferWebsockets: false,
+				contextWindow: 200_000,
+				maxTokens: 8192,
+				input: ["text"],
+				reasoning: false,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			} satisfies ModelSpec<Api>) as Model<Api>;
+			let sibling = 0;
+			const result = await streamSimple(routeModel, context, {
+				apiKey: async ctx => (ctx.error === undefined ? POOL[0] : POOL[++sibling]),
+			}).result();
+
+			expect(credentials).toHaveLength(1);
+			expect(credentials[0]).toContain(POOL[0]);
+			expect(result.stopReason).toBe("error");
+			expect(result.stopDetails).toEqual({
+				type: "refusal",
+				category: "cyber_policy",
+				explanation: REFUSAL_MESSAGE,
+			});
+			expect(result.errorMessage).toBe(`Refusal (cyber_policy): ${REFUSAL_MESSAGE}`);
+		},
+	);
 });

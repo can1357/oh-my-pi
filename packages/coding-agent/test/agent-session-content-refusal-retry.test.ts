@@ -63,45 +63,97 @@ function responsesModel(baseUrl: string): Model<"openai-responses"> {
 	} satisfies ModelSpec<"openai-responses">);
 }
 
+/** HTTP 503 with hidden transport retries off, so each one reaches the session's retry policy. */
+function transientResponse(): Response {
+	return Response.json(
+		{ error: { code: "server_error", message: "Transient upstream failure" } },
+		{ status: 503, headers: { "x-should-retry": "false" } },
+	);
+}
+
 type Harness = {
 	session: AgentSession;
 	requests: () => number;
+	/** The `model` of each request, in order. */
+	models: string[];
 	retryEvents: Extract<AgentSessionEvent, { type: "auto_retry_start" | "auto_retry_end" }>[];
 	cleanup: () => Promise<void>;
 };
 
-/** A real AgentSession on the real Responses provider; `respond` answers request N (1-based). */
-async function createHarness(respond: (request: number) => Response, settingsOverrides = {}): Promise<Harness> {
+const CHAIN_PROVIDER = "refusal-chain";
+
+/**
+ * A real AgentSession on the real Responses provider; `respond` answers request N (1-based).
+ * `chain` serves models `primary`, `middle` and `last` from models.yml, with the fallback chain
+ * primary -> middle -> last.
+ */
+async function createHarness(
+	respond: (request: number) => Response,
+	settingsOverrides = {},
+	options: { chain?: boolean } = {},
+): Promise<Harness> {
 	let requests = 0;
+	const models: string[] = [];
 	const server = Bun.serve({
 		port: 0,
 		fetch: async request => {
-			await request.text();
+			const body = (await request.json()) as { model?: string };
 			requests++;
+			models.push(body.model ?? "");
 			return respond(requests);
 		},
 	});
+	const baseUrl = server.url.toString().replace(/\/$/, "");
 	const tempDir = TempDir.createSync("@pi-content-refusal-");
 	const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
 	authStorage.keys.setRuntime("openai", "refusal-test-key");
 	const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
-	const settings = Settings.isolated({ "retry.baseDelayMs": 1, ...settingsOverrides });
+	const settings = Settings.isolated({
+		"retry.baseDelayMs": 1,
+		...(options.chain
+			? {
+					"retry.modelFallback": true,
+					"retry.fallbackChains": { default: [`${CHAIN_PROVIDER}/middle`, `${CHAIN_PROVIDER}/last`] },
+				}
+			: {}),
+		...settingsOverrides,
+	});
+	if (options.chain) {
+		await Bun.write(
+			tempDir.join("models.yml"),
+			[
+				"providers:",
+				`  ${CHAIN_PROVIDER}:`,
+				`    baseUrl: ${baseUrl}`,
+				"    apiKey: refusal-test-key",
+				"    api: openai-responses",
+				"    models:",
+				...["primary", "middle", "last"].flatMap(id => [
+					`      - id: ${id}`,
+					`        name: ${id}`,
+					"        reasoning: false",
+					"        input: [text]",
+					"        contextWindow: 200000",
+					"        maxTokens: 8192",
+				]),
+			].join("\n"),
+		);
+		settings.setModelRole("default", `${CHAIN_PROVIDER}/primary`);
+	}
+	const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"), { settings });
+	const model = options.chain ? modelRegistry.find(CHAIN_PROVIDER, "primary") : responsesModel(baseUrl);
+	if (!model) throw new Error("models.yml did not register the chain's primary model");
 	const agent = new Agent({
 		getApiKey: () => "refusal-test-key",
 		initialState: {
-			model: responsesModel(server.url.toString().replace(/\/$/, "")),
+			model,
 			systemPrompt: ["Test"],
 			tools: [],
 			messages: [],
 		},
 		streamFn: streamSimple,
 	});
-	const session = new AgentSession({
-		agent,
-		sessionManager,
-		settings,
-		modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml"), { settings }),
-	});
+	const session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 	const retryEvents: Harness["retryEvents"] = [];
 	session.subscribe(event => {
 		if (event.type === "auto_retry_start" || event.type === "auto_retry_end") retryEvents.push(event);
@@ -109,6 +161,7 @@ async function createHarness(respond: (request: number) => Response, settingsOve
 	return {
 		session,
 		requests: () => requests,
+		models,
 		retryEvents,
 		cleanup: async () => {
 			await session.dispose();
@@ -230,4 +283,79 @@ describe("AgentSession content-policy refusal retries", () => {
 			await harness.cleanup();
 		}
 	}, 30_000);
+
+	// A refusal retry is not a transient failure: the requests a refusal caused must
+	// leave `retry.maxRetries` whole for a 503 that follows them.
+	it.each([
+		{ name: "three refusals then a 503 at maxRetries 3", maxRetries: 3, steps: ["R", "R", "R", "503", "A"] },
+		{ name: "refusal, 503, refusal at maxRetries 1", maxRetries: 1, steps: ["R", "503", "R", "A"] },
+	])(
+		"keeps the transient budget whole across refusal retries: $name",
+		async ({ maxRetries, steps }) => {
+			const harness = await createHarness(
+				request => {
+					const step = steps[request - 1];
+					return step === "R" ? refusalResponse() : step === "503" ? transientResponse() : answerResponse();
+				},
+				{ "retry.maxRetries": maxRetries },
+			);
+			try {
+				await prompt(harness);
+
+				expect(harness.requests()).toBe(steps.length);
+				expect(harness.session.getLastAssistantMessage()).toMatchObject({
+					stopReason: "stop",
+					content: [{ type: "text", text: "Answer" }],
+				});
+			} finally {
+				await harness.cleanup();
+			}
+		},
+		30_000,
+	);
+
+	it("keeps the transient budget whole across the refusal walk of a fallback chain", async () => {
+		const steps = ["R", "R", "503", "A"];
+		const harness = await createHarness(
+			request => {
+				const step = steps[request - 1];
+				return step === "R" ? refusalResponse() : step === "503" ? transientResponse() : answerResponse();
+			},
+			{ "retry.maxRetries": 1 },
+			{ chain: true },
+		);
+		try {
+			await prompt(harness);
+
+			expect(harness.models).toEqual(["primary", "middle", "last", "last"]);
+			expect(harness.session.getLastAssistantMessage()?.stopReason).toBe("stop");
+		} finally {
+			await harness.cleanup();
+		}
+	}, 30_000);
+
+	// The worst-case request count when every model refuses: the refusal walk visits each
+	// of the chain's C models once, then the last one gets `retry.refusalRetries` (k) more:
+	// C + k requests. Here C = 3.
+	it.each([0, 1, 3, 5])(
+		"bounds an all-refusal turn on a three-model chain at 3 + refusalRetries requests (k = %i)",
+		async refusalRetries => {
+			const harness = await createHarness(
+				() => refusalResponse(),
+				{ "retry.refusalRetries": refusalRetries },
+				{
+					chain: true,
+				},
+			);
+			try {
+				await prompt(harness);
+
+				expect(harness.models).toEqual(["primary", "middle", "last", ...Array(refusalRetries).fill("last")]);
+				expect(harness.session.getLastAssistantMessage()?.errorMessage).toBe(REFUSAL_LINE);
+			} finally {
+				await harness.cleanup();
+			}
+		},
+		30_000,
+	);
 });

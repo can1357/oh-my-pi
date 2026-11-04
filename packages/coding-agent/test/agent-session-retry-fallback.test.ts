@@ -5709,14 +5709,21 @@ describe("AgentSession retry fallback", () => {
 		]);
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryStartEvents[0]?.attempt).toBe(1);
-		expect(retryEndEvents).toEqual([
-			{
-				type: "auto_retry_end",
-				success: false,
-				attempt: 1,
-				finalError: refusalMessage,
-			},
-		]);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({
+			type: "auto_retry_end",
+			success: false,
+			attempt: 1,
+			finalError: refusalMessage,
+		});
+		// The superseded 503 attempt is marked on the terminal event, as on every other
+		// terminal close, so the transcript renders one error instead of two.
+		expect(retryEndEvents[0]?.retryErrors).toHaveLength(1);
+		expect(retryEndEvents[0]?.retryErrors?.[0]?.retryRecovery).toMatchObject({
+			kind: "auto-retry",
+			recovery: "plain",
+			status: "superseded",
+		});
 	});
 
 	it("uses Google retry hints in quota errors before quota backoff", async () => {

@@ -821,6 +821,11 @@ function createOpenAICompletionsStreamError(chunk: unknown, provider: string): E
 	if (!structuredError) {
 		return new AIError.ProviderResponseError(detail, { provider, kind: "runtime" });
 	}
+	// A refusal code streamed in-band is the provider declining the content,
+	// exactly as the same code in a non-2xx body or a Responses `response.failed`.
+	if (parsed.code !== undefined && AIError.isContentPolicyRefusal(parsed.code, parsed.detail)) {
+		return new AIError.ProviderRefusalError(parsed.code, parsed.detail || "no message", { provider });
+	}
 
 	const typeValue = Reflect.get(error, "type");
 	const codeValue = Reflect.get(error, "code");
@@ -1886,6 +1891,7 @@ const streamOpenAICompletionsOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			if (result.stopDetails) output.stopDetails = result.stopDetails;
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;

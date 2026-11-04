@@ -396,8 +396,14 @@ export class TurnRecovery {
 	 * the exhausted budget, a cancelled wait, an abort), so no turn inherits another turn's walk.
 	 */
 	readonly #refusalWalkTried = new Set<string>();
-	/** Same-model refusal retries spent in the current retry saga (`retry.refusalRetries`); reset in `resolveRetry()`. */
+	/** Same-model refusal retries spent in the current retry saga (`retry.refusalRetries`); reset when a saga starts and in `resolveRetry()`. */
 	#refusalRetryCount = 0;
+	/**
+	 * Retries of the current saga a refusal caused (same-model refusal retries and refusal-walk
+	 * hops). They are not transient failures, so `retry.maxRetries` never counts them; reset with
+	 * `#refusalRetryCount`.
+	 */
+	#refusalExemptAttempts = 0;
 	/** Per-model account walk allowance, snapshotted once and cleared when the retry saga ends. */
 	readonly #accountPolicyRotationsRemaining = new Map<string, number>();
 	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
@@ -893,6 +899,7 @@ export class TurnRecovery {
 	resolveRetry(): void {
 		this.#refusalWalkTried.clear();
 		this.#refusalRetryCount = 0;
+		this.#refusalExemptAttempts = 0;
 		this.#accountPolicyRotationsRemaining.clear();
 		if (this.#retryResolve) {
 			this.#retryResolve();
@@ -1535,7 +1542,7 @@ export class TurnRecovery {
 		if (
 			this.#requestBodyReadTimeoutRecoveryPromptSequence === promptSequence ||
 			!retrySettings.enabled ||
-			retrySettings.maxRetries <= this.#retryAttempt ||
+			retrySettings.maxRetries <= this.#transientRetryAttempts() ||
 			this.#host.isDisposed() ||
 			this.#host.abortInProgress() ||
 			this.#host.isCompacting() ||
@@ -2671,9 +2678,17 @@ export class TurnRecovery {
 		// the model once and lets the base turn proceed.
 		if (!retrySettings.enabled && !options?.fireworksFastFallback) return false;
 		const classifierRefusal = this.isClassifierRefusal(message);
+		const unstableRefusalCandidate = classifierRefusal && AIError.isUnstableProviderRefusal(message);
 
 		const generation = this.#host.promptGeneration();
+		// `#retryAttempt` counts every retry of the saga (events, continuation
+		// guard); the transient budget counts only the attempts no refusal caused.
+		if (this.#retryAttempt === 0) {
+			this.#refusalRetryCount = 0;
+			this.#refusalExemptAttempts = 0;
+		}
 		this.#retryAttempt++;
+		const budgetAttempt = this.#transientRetryAttempts();
 
 		// Create retry promise on first attempt so waitForRetry() can await it
 		// Ensure only one promise exists (avoid orphaned promises from concurrent calls)
@@ -2692,7 +2707,7 @@ export class TurnRecovery {
 		const maxRetries = this.#isBoundedThinkingStreamClose(message)
 			? Math.min(retrySettings.maxRetries, 1)
 			: retrySettings.maxRetries;
-		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
+		const retryBudgetExhausted = budgetAttempt > maxRetries;
 
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
@@ -2715,7 +2730,10 @@ export class TurnRecovery {
 		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
-			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
+			: calculateRetryBackoffDelayMs(
+					retrySettings.baseDelayMs,
+					unstableRefusalCandidate ? this.#refusalRetryCount + 1 : budgetAttempt,
+				);
 		// Transient rate/concurrency caps stay on the same credential, but must
 		// honor their reason-specific windows. The default exponential base
 		// (≈500ms, capped at 8s) otherwise re-hits the cap and burns the retry
@@ -3056,13 +3074,12 @@ export class TurnRecovery {
 		// the account, was refused — and when the allowance is spent the refusal
 		// itself is the final error, never a "retry budget exhausted" rewrite.
 		// Other classifier refusals keep the walk-only policy above.
-		const unstableRefusal =
-			classifierRefusal && !switchedCredential && !switchedModel && AIError.isUnstableProviderRefusal(message);
+		const unstableRefusal = unstableRefusalCandidate && !switchedCredential && !switchedModel;
 		const refusalRetry = unstableRefusal && this.#refusalRetryCount < retrySettings.refusalRetries;
 		if (refusalRetry) this.#refusalRetryCount++;
 		if (retryBudgetExhausted && !unstableRefusal) {
 			if (!switchedModel && !switchedCredential) {
-				const attempt = this.#retryAttempt - 1;
+				const attempt = budgetAttempt - 1;
 				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
 				await this.#closeRetrySaga(
 					{ success: false, attempt, finalError: errorMessage },
@@ -3073,8 +3090,12 @@ export class TurnRecovery {
 			// A fallback model gets a fresh retry budget. Credential rotation
 			// instead keeps the cumulative attempt count while bypassing the
 			// same-route budget: every distinct account must be tried first.
-			if (switchedModel) this.#retryAttempt = 1;
+			if (switchedModel) this.#retryAttempt = this.#refusalExemptAttempts + 1;
 		}
+		// A refusal retry, on the same model or as a hop of the refusal walk, is
+		// not a transient failure: it never counts against `retry.maxRetries`.
+		const reportedAttempt = this.#transientRetryAttempts();
+		if (refusalRetry || (classifierRefusal && switchedModel)) this.#refusalExemptAttempts++;
 		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel && !refusalRetry) {
 			// A prior attempt in this saga already announced `auto_retry_start`
 			// (retryAttempt was incremented for each call to this method, so > 1
@@ -3084,9 +3105,11 @@ export class TurnRecovery {
 			// (e.g. suppressing a duplicate error toast) don't stay latched on
 			// an announcement that never resolves.
 			if (this.#retryAttempt > 1) {
+				// The attempts the walk superseded carry their own `retryRecovery`, so the
+				// transcript renders one terminal error rather than a row per model tried.
 				await this.#closeRetrySaga(
 					{ success: false, attempt: this.#retryAttempt - 1, finalError: errorMessage },
-					{ terminalTurn: message },
+					{ terminalTurn: message, retryErrors: { status: "superseded" } },
 				);
 			}
 			this.#retryAttempt = 0;
@@ -3140,7 +3163,7 @@ export class TurnRecovery {
 
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_start",
-			attempt: refusalRetry ? this.#refusalRetryCount : this.#retryAttempt,
+			attempt: refusalRetry ? this.#refusalRetryCount : reportedAttempt,
 			maxAttempts: refusalRetry ? retrySettings.refusalRetries : maxRetries,
 			delayMs,
 			errorMessage,
@@ -3215,6 +3238,14 @@ export class TurnRecovery {
 		});
 
 		return true;
+	}
+
+	/**
+	 * Retries of the current saga that count against `retry.maxRetries`: every
+	 * retry except those a refusal caused (same-model refusal retries, refusal-walk hops).
+	 */
+	#transientRetryAttempts(): number {
+		return this.#retryAttempt === 0 ? 0 : this.#retryAttempt - this.#refusalExemptAttempts;
 	}
 
 	/** Closes a retry saga whose credential wait or backoff sleep was aborted. */
@@ -3311,7 +3342,7 @@ export class TurnRecovery {
 		if (!AIError.is(id, AIError.Flag.MalformedFunctionCall)) return;
 		if (preserveFailedTurn || switchedModel) return;
 		const reminder = prompt.render(malformedFunctionCallRetryTemplate, {
-			retryCount: this.#retryAttempt,
+			retryCount: this.#transientRetryAttempts(),
 			maxRetries,
 		});
 		this.#host.agent.appendMessage({

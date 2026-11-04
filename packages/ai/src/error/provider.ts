@@ -80,8 +80,10 @@ export type RefusalStopDetails = StopDetails & { type: "refusal"; category: stri
 /**
  * The `stopDetails` a provider catch block records for a content-policy
  * refusal anywhere in `error`'s cause chain — a streamed
- * {@link ProviderRefusalError} or a non-2xx OpenAI-wire body whose code is a
- * refusal code — as `{ type: "refusal", category: <code>, explanation: <message> }`.
+ * {@link ProviderRefusalError}, a non-2xx OpenAI-wire body whose code is a
+ * refusal code, or any other provider error carrying such a code (Codex's
+ * HTTP error, an in-band stream error) — as
+ * `{ type: "refusal", category: <code>, explanation: <message> }`.
  */
 export function contentPolicyRefusalDetails(error: unknown): RefusalStopDetails | undefined {
 	const seen = new Set<Error>();
@@ -95,6 +97,11 @@ export function contentPolicyRefusalDetails(error: unknown): RefusalStopDetails 
 			const { detail, code } = OpenAIHttpError.parseEnvelope(link.captured.bodyJson, link.captured.bodyText);
 			if (code !== undefined && isContentPolicyRefusal(code, detail)) {
 				return { type: "refusal", category: code, explanation: detail ?? link.message };
+			}
+		} else {
+			const code: unknown = Reflect.get(link, "code");
+			if (typeof code === "string" && isContentPolicyRefusal(code, link.message)) {
+				return { type: "refusal", category: code, explanation: link.message };
 			}
 		}
 		link = link.cause;
