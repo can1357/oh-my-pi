@@ -19,7 +19,7 @@
 
 - Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
-- Fixed `kill -INT` and `kill -QUIT` ending a background job in the bash tool's shell: as in Bash, a `&` job, coprocess or process substitution started without job control (`set -m`) ignores them, and so do the commands it runs (PRNUM)
+- Fixed `kill -INT` and `kill -QUIT` ending a background job in the bash tool's shell: as in Bash, a `&` job, coprocess or process substitution started without job control (`set -m`) ignores them, and so do the commands it runs ([#18109](https://github.com/can1357/oh-my-pi/pull/18109) by [@sjawhar](https://github.com/sjawhar))
 ### Fixed
 
 - Fixed `el.type` and `el.press(keys)` on Wayland moving focus inside the element's app (GNOME showed "… is ready") before refusing the call: they are now refused before anything reaches the app ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))
