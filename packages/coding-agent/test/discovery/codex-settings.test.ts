@@ -74,42 +74,76 @@ describe("Codex config.toml settings", () => {
 		expect(cfgPersonality.get(settings)).toBe("friendly");
 	});
 
-	// Issue #18052: `Settings.init` reads the project layer before discovery is bound to the instance.
-	describe("disabledProviders", () => {
-		let agentDir = "";
+	test("ignores project config.toml when the codex provider is disabled globally", async () => {
+		const agentDir = path.join(root, "agent");
+		const projectConfig = path.join(project, ".codex", "config.toml");
+		await fs.mkdir(agentDir, { recursive: true });
+		await fs.mkdir(path.dirname(projectConfig), { recursive: true });
+		await fs.writeFile(path.join(agentDir, "config.yml"), "disabledProviders:\n  - codex\n");
+		await fs.writeFile(projectConfig, 'personality = "friendly"\n');
 
-		beforeEach(async () => {
-			agentDir = path.join(root, "agent");
-			await fs.mkdir(agentDir, { recursive: true });
-			const projectConfig = path.join(project, ".codex", "config.toml");
-			await fs.mkdir(path.dirname(projectConfig), { recursive: true });
-			await fs.writeFile(projectConfig, 'personality = "friendly"\n');
-		});
+		const settings = await Settings.init({ cwd: project, agentDir });
 
-		test("global switch drops a disabled provider's project config", async () => {
-			await Bun.write(path.join(agentDir, "config.yml"), "disabledProviders:\n  - codex\n");
+		expect(cfgPersonality.get(settings)).toBe("default");
+	});
 
-			const settings = await Settings.init({ cwd: project, agentDir });
+	test("drops project config.toml on reload once the codex provider is disabled", async () => {
+		const agentDir = path.join(root, "agent");
+		const projectConfig = path.join(project, ".codex", "config.toml");
+		await fs.mkdir(agentDir, { recursive: true });
+		await fs.mkdir(path.dirname(projectConfig), { recursive: true });
+		await fs.writeFile(projectConfig, 'personality = "friendly"\n');
+		const settings = await Settings.init({ cwd: project, agentDir });
+		expect(cfgPersonality.get(settings)).toBe("friendly");
 
-			expect(cfgPersonality.get(settings)).toBe("default");
-		});
+		await fs.writeFile(path.join(agentDir, "config.yml"), "disabledProviders:\n  - codex\n");
+		await settings.reloadFromDisk();
 
-		test("native project switch drops a disabled provider's project config", async () => {
-			await Bun.write(path.join(project, ".omp", "config.yml"), "disabledProviders:\n  - codex\n");
+		expect(cfgPersonality.get(settings)).toBe("default");
+	});
 
-			const settings = await Settings.init({ cwd: project, agentDir });
+	test("ignores a disabled provider's project config.toml after moving to that project", async () => {
+		const agentDir = path.join(root, "agent");
+		const elsewhere = path.join(root, "elsewhere");
+		const projectConfig = path.join(project, ".codex", "config.toml");
+		await fs.mkdir(agentDir, { recursive: true });
+		await fs.mkdir(path.join(elsewhere, ".git"), { recursive: true });
+		await fs.mkdir(path.dirname(projectConfig), { recursive: true });
+		await fs.writeFile(path.join(agentDir, "config.yml"), "disabledProviders:\n  - codex\n");
+		await fs.writeFile(projectConfig, 'personality = "friendly"\n');
+		const settings = await Settings.init({ cwd: elsewhere, agentDir });
 
-			expect(cfgPersonality.get(settings)).toBe("default");
-		});
+		const cloned = await settings.cloneForCwd(project);
+		await settings.reloadForCwd(project);
 
-		test("reload honors a switch written to the global config in the same pass", async () => {
-			const settings = await Settings.init({ cwd: project, agentDir });
-			expect(cfgPersonality.get(settings)).toBe("friendly");
+		expect(cfgPersonality.get(cloned)).toBe("default");
+		expect(cfgPersonality.get(settings)).toBe("default");
+	});
 
-			await Bun.write(path.join(agentDir, "config.yml"), "disabledProviders:\n  - codex\n");
-			await settings.reloadFromDisk();
+	test("ignores project config.toml when the project's own .omp/config.yml disables codex", async () => {
+		const agentDir = path.join(root, "agent");
+		await fs.mkdir(agentDir, { recursive: true });
+		await Bun.write(path.join(project, ".codex", "config.toml"), 'personality = "friendly"\n');
+		await Bun.write(path.join(project, ".omp", "config.yml"), "disabledProviders:\n  - codex\n");
 
-			expect(cfgPersonality.get(settings)).toBe("default");
-		});
+		const settings = await Settings.init({ cwd: project, agentDir });
+
+		expect(cfgPersonality.get(settings)).toBe("default");
+	});
+
+	test("honors a path-scoped disabledProviders entry only inside its path", async () => {
+		const agentDir = path.join(root, "agent");
+		const other = path.join(root, "other");
+		await fs.mkdir(path.join(other, ".git"), { recursive: true });
+		await Bun.write(path.join(project, ".codex", "config.toml"), 'personality = "friendly"\n');
+		await Bun.write(path.join(other, ".codex", "config.toml"), 'personality = "friendly"\n');
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			`disabledProviders:\n  - path: ${JSON.stringify(project)}\n    providers:\n      - codex\n`,
+		);
+
+		expect(cfgPersonality.get(await Settings.init({ cwd: project, agentDir }))).toBe("default");
+		resetSettingsForTest();
+		expect(cfgPersonality.get(await Settings.init({ cwd: other, agentDir }))).toBe("friendly");
 	});
 });

@@ -13,7 +13,7 @@
 
 ### Fixed
 
-- A provider in `disabledProviders` (global, `--config`, or the project's `.omp/config.yml`) no longer feeds the project settings layer, so a `.codex/config.toml` with `codex` disabled stops overriding settings such as `personality` ([#18052](https://github.com/can1357/oh-my-pi/issues/18052))
+- A provider in `disabledProviders` no longer feeds project settings: with `codex` disabled, a `.codex/config.toml` (including `~/.codex/config.toml` when omp starts in your home folder) no longer overrides settings such as `personality` ([#18052](https://github.com/can1357/oh-my-pi/issues/18052)) ([#18054](https://github.com/can1357/oh-my-pi/pull/18054) by [@clssck](https://github.com/clssck))
 - Long bash output cut in the middle no longer splits a line at the `[…N ln elided…]` marker, and its "Showing lines …" notice now names the lines actually shown, ending at the output's real last line ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
 - A bash command that prints nothing and succeeds now returns `(no output, exit code 0)` instead of a bare `(no output)`, so an empty diff or search no longer reads like a failed command ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
 - Added `tui.motion` (`full` / `reduced` / `none`, also `--motion` and `PI_MOTION`), one switch over spinners, the thinking pulse, shimmer and the status-line blink/fade for many-pane or reduced-motion use; a `tui.spinnerInterval` you set still wins over the preset ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
