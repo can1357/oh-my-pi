@@ -1,5 +1,6 @@
 import * as os from "node:os";
 import * as path from "node:path";
+import { glob } from "@oh-my-pi/pi-natives";
 import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
@@ -95,6 +96,7 @@ interface SharedLspHold {
 	enabled: boolean;
 }
 const sharedLspHolds: SharedLspHold[] = [];
+const sharedLspListeners = new Set<(enabled: boolean) => void>();
 
 /** Whether a client cold start attaches to a broker-shared language server. */
 export function isSharedLspEnabled(): boolean {
@@ -104,16 +106,50 @@ export function isSharedLspEnabled(): boolean {
 /** Hold the shared-LSP mode at `enabled` until released; `set` follows later setting changes. */
 export function holdSharedLsp(enabled: boolean): { set(enabled: boolean): void; release(): void } {
 	const hold: SharedLspHold = { enabled };
-	sharedLspHolds.push(hold);
+	updateSharedLspHolds(() => sharedLspHolds.push(hold));
 	return {
 		set(next) {
-			hold.enabled = next;
+			updateSharedLspHolds(() => {
+				hold.enabled = next;
+			});
 		},
 		release() {
-			const index = sharedLspHolds.indexOf(hold);
-			if (index !== -1) sharedLspHolds.splice(index, 1);
+			updateSharedLspHolds(() => {
+				const index = sharedLspHolds.indexOf(hold);
+				if (index !== -1) sharedLspHolds.splice(index, 1);
+			});
 		},
 	};
+}
+
+/**
+ * Call `listener` with the new value whenever {@link isSharedLspEnabled} changes
+ * (subagent worker threads follow the main thread's mode); returns the unsubscribe.
+ */
+export function onSharedLspChange(listener: (enabled: boolean) => void): () => void {
+	sharedLspListeners.add(listener);
+	return () => {
+		sharedLspListeners.delete(listener);
+	};
+}
+
+/** Apply `mutate` to the hold stack and notify change listeners when the effective mode flipped. */
+function updateSharedLspHolds(mutate: () => void): void {
+	if (sharedLspListeners.size === 0) {
+		mutate();
+		return;
+	}
+	const before = isSharedLspEnabled();
+	mutate();
+	const after = isSharedLspEnabled();
+	if (before === after) return;
+	for (const listener of sharedLspListeners) {
+		try {
+			listener(after);
+		} catch (error) {
+			logger.warn("Shared LSP mode listener threw", { error });
+		}
+	}
 }
 
 /**
@@ -1050,6 +1086,18 @@ function commandBasename(command: string): string {
  * binary. Callers use it to gate rust-analyzer-only requests such as
  * `rust-analyzer/reloadWorkspace` (see {@link reloadServer}).
  */
+/**
+ * The `Cargo.toml` files rust-analyzer can discover under `root`, sorted and joined, so a reload
+ * can tell whether the crate set changed since initialize (gitignored dirs such as `target/` skipped).
+ */
+export async function listCargoManifests(root: string, signal?: AbortSignal): Promise<string> {
+	const { matches } = await glob({ pattern: "**/Cargo.toml", path: root, gitignore: true, cache: false, signal });
+	return matches
+		.map(match => match.path)
+		.sort()
+		.join("\n");
+}
+
 export function isRustAnalyzerClient(client: LspClient): boolean {
 	return (
 		commandBasename(client.config.command) === "rust-analyzer" ||
@@ -1450,6 +1498,8 @@ export async function getOrCreateClient(
 			);
 
 			client.status = "ready";
+			if (isRustAnalyzerClient(client))
+				client.cargoManifests = listCargoManifests(client.cwd).catch(() => undefined);
 			// Publish only after init succeeds: pre-init clients are reachable
 			// solely through clientLocks, so concurrent callers (warmup vs first
 			// tool call) wait for init instead of using an unacknowledged client.

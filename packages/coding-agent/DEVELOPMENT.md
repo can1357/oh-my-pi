@@ -27,7 +27,9 @@ changing export HTML/CSS/JS, web themes, or the shared tool/trace renderers, run
 `bun run gen:export-viewer` and include `src/export/html/viewer.generated.json`
 with the change. The generated JS lives in ignored `export-assets/`; CI verifies
 the committed metadata (`--check`, also implied by `CI=true`) and publishes the
-exact asset from the Linux binary build alongside the release binaries.
+exact asset from the Linux binary build alongside the release binaries. In a
+shell that sets `CI=true`, such as omp's bash tool, use
+`bun run gen:export-viewer --write` to update the metadata.
 
 Exports from a source checkout inline the generated viewer, so `bun gen:export-viewer`
 followed by `/export` exercises local changes without publishing or a local

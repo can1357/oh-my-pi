@@ -9,7 +9,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, parser::ValuesRef};
 #[cfg(target_os = "linux")]
 use pi_vfs::BlockingFs;
@@ -18,7 +17,7 @@ use uucore::{display::Quotable, fs};
 #[cfg(not(windows))]
 use uucore::mode;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 const DEFAULT_PERM: u32 = 0o777;
 
@@ -400,11 +399,6 @@ fn create_single_dir(
 		},
 		Err(source) => Err(MkdirError::io(source)),
 	}
-}
-
-/// Creates the `mkdir` builtin registration.
-pub(crate) fn mkdir_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Mkdir, SE>()
 }
 
 #[cfg(test)]

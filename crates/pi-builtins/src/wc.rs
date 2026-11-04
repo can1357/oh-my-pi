@@ -567,7 +567,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use thiserror::Error;
 use utf8::{BufReadDecoder, BufReadDecoderError};
@@ -583,7 +582,7 @@ use self::{
 	countable::WordCountable,
 	word_count::WordCount,
 };
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy};
 
 /// The minimum character width for formatting counts when reading from stdin.
 const MINIMUM_WIDTH: usize = 7;
@@ -1603,11 +1602,6 @@ fn print_stats(
 	}
 	line.push(b'\n');
 	stdout.write_all(&line)
-}
-
-/// Creates the `wc` builtin registration.
-pub(crate) fn wc_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Wc, SE>()
 }
 
 #[cfg(test)]

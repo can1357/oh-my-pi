@@ -407,6 +407,12 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		else this.#editor.pasteText(text);
 	}
 
+	/** Replace the draft, as Ctrl+R history search does for the main composer. */
+	setText(text: string): void {
+		if (this.#disposed) return;
+		this.#editor.setText(text);
+	}
+
 	/**
 	 * Prompt-style: raw Enter submits; Editor owns newline-producing sequences.
 	 * The follow-up chord (`app.message.followUp` → Ctrl+Q / Ctrl+Enter) also

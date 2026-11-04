@@ -2,9 +2,57 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in standard Responses WebSockets for catalog-supported models, with incremental turns and session-scoped HTTP/SSE fallback; OMP enables them through settings ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
+- `AuthStorage` can be constructed over an `AuthStorageBackend` (its namespaces plus `setAccountPolicies`/`replaceStore`/`close`) instead of a credential store, so another thread's instance can serve every call
+- Anthropic sessions on the official API now use message threads (`message-threads-2026-08-12`, as Claude Code does): after the first turn each request sends only the new messages, cutting time to first token in long conversations; a refused or expired thread replays the full conversation automatically. `statefulResponses: false` or `PI_ANTHROPIC_MESSAGE_THREADS=0` turns it off, `PI_ANTHROPIC_MESSAGE_THREADS=1` opts other endpoints in
+
 ### Fixed
 
-- Fixed Codex conversation replay failing with an unknown `internal_chat_message_metadata_passthrough.content_token_count` parameter by omitting backend-internal response metadata from replayed input ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe)).
+- Fixed xAI speech requests failing with `422 missing field language`: `xai-tts` now sends `language`, which xAI's `/v1/tts` requires, defaulting to `auto` (automatic detection) when the caller passes none, as the auth gateway's `/v1/audio/speech` does ([#17992](https://github.com/can1357/oh-my-pi/pull/17992) by [@Mirceone](https://github.com/Mirceone))
+- Fixed Codex WebSocket turns sending a delta `input` after a pooled socket reconnected (closed, idle eviction, token refresh, or prewarm routing-hint change) or when `onPayload` deleted `previous_response_id` (including when it also rewrote the input), and skipped late prewarm while a socket is busy or holding accepted steering ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
+
+### Changed
+
+- Switching into or out of the Codex `ultrafast` service tier now opens a fresh WebSocket routed to the new tier instead of reusing the old one ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
+### Fixed
+
+- Fixed Gemini and Vertex `MALFORMED_RESPONSE` finishes showing as "Unhandled stop reason" and dropping that turn's token usage; RPC prompt errors now report them as retryable
+### Fixed
+
+- Fixed `rerank()` rejecting Cohere-style answers that carry no `model` field; the result then reports the requested model id ([#17975](https://github.com/can1357/oh-my-pi/pull/17975) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+### Fixed
+
+- Fixed `rerank()` requests leaving out the model's configured headers, including `models.yml` `headers`, so a rerank endpoint that needs its own header or `Authorization` rejected every call ([#17974](https://github.com/can1357/oh-my-pi/pull/17974) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+### Fixed
+
+- The OpenAI-wire transport and provider-level retry loops (OpenAI Responses, Anthropic) no longer replay a response marked `x-should-retry: false`, so a retrying gateway's terminal 5xx is no longer multiplied by in-provider retries ([#17920](https://github.com/can1357/oh-my-pi/issues/17920))
+
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- `/login mistral` signs in through the browser like the Mistral Vibe CLI and stores the minted API key, whose usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits; `MISTRAL_API_KEY` still works ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
+- Added `dropsForeignReasoningPayload(turn, model)`, which tells whether `transformMessages` certainly strips a turn's thinking signatures and redacted thinking on the way to `model`, and, for Factory Droid's Gemini wire, `isFactoryDroidGeminiWire(model)` and `keepsFactoryGeminiReasoning(turn)` ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+- Factory Droid Beam 1.0 requests accept tool-call turns that arrive without reasoning ([#17766](https://github.com/can1357/oh-my-pi/pull/17766) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- Deprecated `formatError` on the embeddings, images, rerank, speech, transcriptions, video, pi-native and SystemOne server modules (now aliases of `codedErrorResponse` / `noStoreErrorResponse` in `auth-gateway/http`) and `asStrict` in `providers/aws-sigv4` (now `asStrictBytes` from `@oh-my-pi/pi-utils`)
+
+### Fixed
+
+- Fixed Factory Droid Fable requests offering Opus 5 as the refusal fallback when your organization's model policy excludes Opus 5; Claude requests now offer only fallback models your account can use, and a request served by another organization's login than the one your model list came from offers none ([#17772](https://github.com/can1357/oh-my-pi/pull/17772) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.15.0] - 2026-11-01
+
+### Fixed
+
+- Fixed Codex conversation replay failing with an unknown `internal_chat_message_metadata_passthrough.content_token_count` parameter by omitting backend-internal response metadata from replayed input ([#17590](https://github.com/can1357/oh-my-pi/pull/17590), [#17597](https://github.com/can1357/oh-my-pi/pull/17597) by [@briankeefe](https://github.com/briankeefe)).
+- Fixed `service_tier: "ultrafast"` being dropped for OpenAI-family models on custom providers even when the model's `serviceTiers` lists it ([#17577](https://github.com/can1357/oh-my-pi/pull/17577) by [@jakehemmerle](https://github.com/jakehemmerle))
+- Fixed Google Vertex requests with Workforce Identity Federation ADC failing token refresh against the wrong endpoint ([#17447](https://github.com/can1357/oh-my-pi/issues/17447)).
+- Fixed Anthropic (and other rotating-token) OAuth accounts being signed out automatically when a background usage poll's token refresh got `invalid_grant`, including refreshes a client delegates to an auth broker; usage polling no longer disables credentials, so only a real request's refresh can do that ([#17468](https://github.com/can1357/oh-my-pi/issues/17468))
 
 ## [18.14.2] - 2026-10-31
 
@@ -2260,35 +2308,4 @@
 
 - Fixed streaming UI glitches and resolved an issue where invalid empty tool call IDs were persisted in the chat history.
 
-## [16.2.10] - 2026-06-30
-
-### Added
-
-- Added streaming support for keyed parameter argument deltas in XML-family in-band tool call scanners (Anthropic, DeepSeek, XML, Minimax)
-
-### Changed
-
-- Improved native tool-call passthrough in `wrapInbandToolStream` to accurately mirror live streaming IDs, arguments, and partial JSON states from the underlying provider
-
-### Fixed
-
-- Fixed a bug where tool calls with empty or missing IDs were not detected as malformed, causing API validation failures (e.g., 400 errors with Anthropic) on subsequent requests
-- Raised Gemini header runaway threshold to prevent premature interruption of complex reasoning loops
-- Fixed leaked ` ```thinking ` fences with nested language-tagged Markdown code blocks so inner fences remain inside structured thinking instead of leaking as visible reply text.
-
-## [16.2.9] - 2026-06-30
-
-### Added
-
-- Added `OAuthCallbackFlowOptions.allowPortFallback` to allow disabling random-port fallback, enabling strict port enforcement and early configuration errors for OAuth flows with static redirect URIs.
-
-### Changed
-
-- Improved `OAuthCallbackFlow` port conflict error messages to include the busy port, configured redirect URI, and actionable remediation steps.
-
-### Fixed
-
-- Fixed an issue where malformed tool-call JSON from local Ollama or llama.cpp models was incorrectly retried as generic 500 errors, now surfacing a clear recovery message.
-- Fixed a race condition in OAuth callback flows where abort signals triggered before the callback listener was registered were ignored.
-
-Older entries are archived in [packages/ai/CHANGELOG.md@7dc0d0325754](https://github.com/can1357/oh-my-pi/blob/7dc0d0325754955b01c15b64b220b2cf27e670db/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@9e9150960c24](https://github.com/can1357/oh-my-pi/blob/9e9150960c248708f8cc4bfdae0c8f2aaf3480b0/packages/ai/CHANGELOG.md).

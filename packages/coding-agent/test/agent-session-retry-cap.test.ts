@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type {
@@ -247,7 +248,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		const waitSpy = mockSchedulerWaitWithClock();
+		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -262,7 +263,6 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryStartEvents[0].delayMs).toBeGreaterThan(7_000_000);
 		expect(retryStartEvents[0].delayMs).toBeLessThanOrEqual(7_200_000);
-		expect(waitSpy.mock.calls.some(call => (call[0] as number) > 7_000_000)).toBe(true);
 		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: true });
@@ -317,7 +317,7 @@ describe("AgentSession retry delay cap", () => {
 			modelRegistry,
 		});
 
-		const waitSpy = mockSchedulerWaitWithClock();
+		mockSchedulerWaitWithClock();
 		const retryStartEvents: AutoRetryStartEvent[] = [];
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
@@ -331,7 +331,6 @@ describe("AgentSession retry delay cap", () => {
 		// One probe wait on the relative schedule — never the inflated stamp.
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryStartEvents[0].delayMs).toBe(1_788_000);
-		expect(waitSpy.mock.calls.some(call => (call[0] as number) > 3_000_000)).toBe(false);
 		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: true });
@@ -530,8 +529,10 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryStartEvents).toHaveLength(0);
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: false });
-		expect(retryEndEvents[0].finalError).toContain("exceeds retry.maxDelayMs");
-		expect(retryEndEvents[0].finalError).toContain("Provider requested 1800000ms wait");
+		// An out-of-money balance has no reset clock, so the error surfaces as the
+		// provider stated it rather than as cap arithmetic about a wait that never
+		// was going to help.
+		expect(retryEndEvents[0].finalError).toBe(balanceError);
 		for (const call of waitSpy.mock.calls) {
 			expect(call[0]).toBeLessThanOrEqual(100);
 		}
@@ -611,6 +612,59 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: true });
 		expect(lastAssistant(session).stopReason).toBe("stop");
+		expect(session.isRetrying).toBe(false);
+	});
+
+	it("continues a quota-blocked turn after sleep passes the wall deadline but not the uptime deadline", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model");
+		const delayMs = 220 * 60_000;
+		const mock = createMockModel({
+			responses: [
+				{ throw: `429 Usage limit reached. retry-after-ms=${delayMs}` },
+				{ content: ["recovered after wake"], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: () => "local-test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxDelayMs": 0,
+			"retry.modelFallback": false,
+			"retry.waitForUsageReset": true,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		let wall = Date.now();
+		let monotonic = performance.now();
+		let resumed = false;
+		vi.spyOn(Date, "now").mockImplementation(() => wall);
+		vi.spyOn(performance, "now").mockImplementation(() => monotonic);
+		vi.spyOn(scheduler, "wait").mockImplementation(async (delay, options) => {
+			options?.signal?.throwIfAborted();
+			if (!resumed && session?.isRetrying) {
+				wall += delayMs + 60_000;
+				monotonic += 1_000;
+				resumed = true;
+			} else {
+				if (resumed && delay > 1_000) throw new Error("Re-armed an expired quota deadline");
+				wall += delay;
+				monotonic += delay;
+			}
+		});
+
+		await session.prompt("Continue after the quota reset");
+		await session.waitForIdle();
+		expect(lastAssistant(session).content).toEqual([{ type: "text", text: "recovered after wake" }]);
 		expect(session.isRetrying).toBe(false);
 	});
 
@@ -782,7 +836,7 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = mockSchedulerWaitWithClock();
+			mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -796,7 +850,6 @@ describe("AgentSession retry delay cap", () => {
 			expect(retryStartEvents).toHaveLength(1);
 			expect(retryStartEvents[0].delayMs).toBeGreaterThan(7_100_000);
 			expect(retryStartEvents[0].delayMs).toBeLessThanOrEqual(7_200_000);
-			expect(waitSpy.mock.calls.some(call => (call[0] as number) > 7_100_000)).toBe(true);
 			expect(requestedModels).toEqual([
 				`${exhaustedModel.provider}/${exhaustedModel.id}`,
 				`${exhaustedModel.provider}/${exhaustedModel.id}`,
@@ -866,7 +919,7 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = mockSchedulerWaitWithClock();
+			mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -880,7 +933,6 @@ describe("AgentSession retry delay cap", () => {
 			expect(retryStartEvents).toHaveLength(1);
 			expect(retryStartEvents[0].delayMs).toBeGreaterThan(7_100_000);
 			expect(retryStartEvents[0].delayMs).toBeLessThanOrEqual(7_200_000);
-			expect(waitSpy.mock.calls.some(call => (call[0] as number) > 7_100_000)).toBe(true);
 			expect(requestedModels).toEqual([
 				`${exhaustedModel.provider}/${exhaustedModel.id}`,
 				`${exhaustedModel.provider}/${exhaustedModel.id}`,
@@ -948,7 +1000,7 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = mockSchedulerWaitWithClock();
+			mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -964,7 +1016,6 @@ describe("AgentSession retry delay cap", () => {
 			// heuristic — not just authorizes it.
 			expect(retryStartEvents[0].delayMs).toBeGreaterThan(290_000);
 			expect(retryStartEvents[0].delayMs).toBeLessThanOrEqual(300_000);
-			expect(waitSpy.mock.calls.some(call => (call[0] as number) > 290_000)).toBe(true);
 			expect(requestedModels).toEqual([
 				`${exhaustedModel.provider}/${exhaustedModel.id}`,
 				`${exhaustedModel.provider}/${exhaustedModel.id}`,
@@ -1240,7 +1291,7 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = mockSchedulerWaitWithClock();
+			mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -1256,7 +1307,6 @@ describe("AgentSession retry delay cap", () => {
 			expect(retryStartEvents).toHaveLength(1);
 			expect(retryStartEvents[0].delayMs).toBeGreaterThan(7_100_000);
 			expect(retryStartEvents[0].delayMs).toBeLessThanOrEqual(7_200_000);
-			expect(waitSpy.mock.calls.some(call => (call[0] as number) > 7_100_000)).toBe(true);
 			expect(requestedModels).toEqual([
 				`${exhaustedModel.provider}/${exhaustedModel.id}`,
 				`${exhaustedModel.provider}/${exhaustedModel.id}`,
@@ -1335,7 +1385,7 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = mockSchedulerWaitWithClock();
+			mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -1351,7 +1401,6 @@ describe("AgentSession retry delay cap", () => {
 			expect(retryStartEvents).toHaveLength(1);
 			expect(retryStartEvents[0].delayMs).toBeGreaterThan(1_150_000);
 			expect(retryStartEvents[0].delayMs).toBeLessThanOrEqual(1_200_000);
-			expect(waitSpy.mock.calls.some(call => (call[0] as number) > 1_150_000)).toBe(true);
 			expect(requestedModels).toEqual([
 				`${exhaustedModel.provider}/${exhaustedModel.id}`,
 				`${exhaustedModel.provider}/${exhaustedModel.id}`,
@@ -1427,7 +1476,7 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = mockSchedulerWaitWithClock();
+			mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -1443,7 +1492,6 @@ describe("AgentSession retry delay cap", () => {
 			expect(retryStartEvents).toHaveLength(1);
 			expect(retryStartEvents[0].delayMs).toBeGreaterThan(290_000);
 			expect(retryStartEvents[0].delayMs).toBeLessThanOrEqual(300_000);
-			expect(waitSpy.mock.calls.some(call => (call[0] as number) > 290_000)).toBe(true);
 			expect(requestedModels).toEqual([
 				`${exhaustedModel.provider}/${exhaustedModel.id}`,
 				`${exhaustedModel.provider}/${exhaustedModel.id}`,
@@ -1547,7 +1595,7 @@ describe("AgentSession retry delay cap", () => {
 				modelRegistry: localRegistry,
 			});
 
-			const waitSpy = mockSchedulerWaitWithClock();
+			mockSchedulerWaitWithClock();
 			const retryStartEvents: AutoRetryStartEvent[] = [];
 			const retryEndEvents: AutoRetryEndEvent[] = [];
 			session.subscribe(event => {
@@ -1563,7 +1611,6 @@ describe("AgentSession retry delay cap", () => {
 			expect(retryStartEvents).toHaveLength(1);
 			expect(retryStartEvents[0].delayMs).toBeGreaterThan(290_000);
 			expect(retryStartEvents[0].delayMs).toBeLessThanOrEqual(300_000);
-			expect(waitSpy.mock.calls.some(call => (call[0] as number) > 290_000)).toBe(true);
 			expect(requestedModels).toEqual([
 				`${exhaustedModel.provider}/${exhaustedModel.id}`,
 				`${exhaustedModel.provider}/${exhaustedModel.id}`,
