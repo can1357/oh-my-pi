@@ -73,6 +73,24 @@ describe("MemorySessionStorage indexed mirror", () => {
 		expect(await storage.readTextSlices(path, 0, 4)).toEqual(["", "本\n"]);
 	});
 
+	test("readTextRangeSync returns a UTF-8 byte range across chunks and stops at the end", async () => {
+		const storage = new MemorySessionStorage();
+		const path = "/virtual/range.jsonl";
+		const writer = storage.openWriter(path, { flags: "w" });
+		try {
+			await writer.append("alpha\n");
+			await writer.append("é\n");
+			await writer.append("charlie\n");
+		} finally {
+			void writer.close();
+		}
+
+		// Bytes 4..12 span the end of "alpha\n", all of "é\n" (3 bytes), and the start of "charlie\n".
+		expect(storage.readTextRangeSync(path, 4, 12)).toBe("a\né\ncha");
+		expect(storage.readTextRangeSync(path, 9, 100)).toBe("charlie\n");
+		expect(storage.readTextRangeSync(path, 17, 100)).toBe("");
+	});
+
 	test("subsequent append after readText appends after materialized content", async () => {
 		const storage = new MemorySessionStorage();
 		const path = "/virtual/cont.jsonl";

@@ -1,7 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import * as piUtils from "@oh-my-pi/pi-utils";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: TempDir[] = [];
@@ -47,6 +49,16 @@ async function writeSession(cwd: string, sessionDir: string): Promise<string> {
 	const file = manager.getSessionFile();
 	if (!file) throw new Error("expected a persisted session file");
 	return file;
+}
+
+/** Counts whole-file reads, the I/O a resume spends on a session below the streaming threshold. */
+class CountingFileSessionStorage extends FileSessionStorage {
+	fullReads = 0;
+
+	override readText(filePath: string): Promise<string> {
+		this.fullReads++;
+		return super.readText(filePath);
+	}
 }
 
 describe("SessionManager cwd adoption on resume", () => {
@@ -164,14 +176,6 @@ describe("SessionManager cwd adoption on resume", () => {
 		const goneProject = makeTempDir("@pi-cwd-gone-");
 		const file = await writeSession(goneProject, store);
 		await removeWithRetries(goneProject);
-		class CountingFileSessionStorage extends FileSessionStorage {
-			fullReads = 0;
-
-			override readText(filePath: string): Promise<string> {
-				this.fullReads++;
-				return super.readText(filePath);
-			}
-		}
 		const storage = new CountingFileSessionStorage();
 
 		const manager = await SessionManager.open(file, undefined, storage, { initialCwd: launch });
@@ -181,5 +185,48 @@ describe("SessionManager cwd adoption on resume", () => {
 		expect(manager.getSessionDir()).toBe(SessionManager.getDefaultSessionDir(launch));
 		expect(manager.getSessionDir()).not.toBe(path.resolve(store));
 		expect(storage.fullReads).toBe(1);
+	});
+	it("reads an unchanged fail-closed session once to parse and once to confirm it is unchanged", async () => {
+		const project = makeTempDir("@pi-cwd-fail-closed-");
+		const sessionDir = path.join(project, "sessions");
+		const file = await writeSession(project, sessionDir);
+		const storage = new CountingFileSessionStorage();
+
+		const manager = await SessionManager.open(file, undefined, storage, { throwIfMissing: true });
+
+		expect(manager.getSessionFile()).toBe(path.resolve(file));
+		// A second parse of the unchanged file would read it a third time.
+		expect(storage.fullReads).toBe(2);
+		await manager.close();
+	});
+
+	it("adopts a same-length in-place rewrite made during the cwd probe that kept size, mtime, and inode", async () => {
+		const project = makeTempDir("@pi-cwd-in-place-");
+		const file = await writeSession(project, path.join(project, "sessions"));
+		// Whole-millisecond timestamps survive utimes exactly, so the rewrite below
+		// leaves size, mtime, and inode all equal to what open() first parsed.
+		const stamp = new Date(Math.floor(Date.now() / 1000) * 1000);
+		fs.utimesSync(file, stamp, stamp);
+		const inode = fs.statSync(file).ino;
+		const probe = spyOn(piUtils, "directoryIsEnterable").mockImplementationOnce(async () => {
+			const original = fs.readFileSync(file, "utf8");
+			fs.writeFileSync(file, original.replace('"content":"hello"', '"content":"HELLO"'));
+			fs.utimesSync(file, stamp, stamp);
+			return true;
+		});
+		try {
+			const manager = await SessionManager.open(file, undefined, new FileSessionStorage(), { throwIfMissing: true });
+			expect(probe).toHaveBeenCalledTimes(1);
+			expect(fs.statSync(file).ino).toBe(inode);
+			const turns = manager
+				.getEntries()
+				.flatMap(entry =>
+					entry.type === "message" && entry.message.role === "user" ? [entry.message.content] : [],
+				);
+			expect(turns).toEqual(["HELLO"]);
+			await manager.close();
+		} finally {
+			probe.mockRestore();
+		}
 	});
 });
