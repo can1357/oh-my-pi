@@ -853,6 +853,33 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		expect(mock.calls.length).toBe(2);
 	});
 
+	it("keeps a follow-up the editor took back while parked behind an IRC wake turn out of the queue", async () => {
+		const { session, streamStarted } = await createParkedSession([{ content: ["replying to peer"] }]);
+		const running = session.prompt("do the thing");
+		await streamStarted;
+		await session.prompt("then add the test", { streamingBehavior: "followUp" });
+		const followUp = session.agent.peekFollowUpQueue().at(-1);
+		if (!followUp) throw new Error("follow-up not queued");
+		await session.deliverIrcMessage({ id: "m3", from: "peer", to: "me", body: "ping", ts: Date.now() } as IrcMessage);
+		// The wake turn starts with the blocked follow-up parked aside; the editor takes it back then.
+		const withdrawn: boolean[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "agent_start" && withdrawn.length === 0 && session.agent.peekFollowUpQueue().length === 0) {
+				withdrawn.push(session.withdrawQueuedMessage(followUp));
+			}
+		});
+		await session.abort({ reason: USER_INTERRUPT_LABEL });
+		await session.waitForIdle();
+		await running.catch(() => {});
+		unsubscribe();
+
+		expect(withdrawn).toEqual([true]);
+		expect(session.agent.peekFollowUpQueue()).not.toContain(followUp);
+		expect(userMessageText(session.agent.state.messages)).not.toContain("then add the test");
+		// Neither queued nor held any more: gone for good.
+		expect(session.withdrawQueuedMessage(followUp)).toBe(false);
+	});
+
 	it("folds a background completion into context after a user interrupt instead of restarting the run", async () => {
 		// Reported bug: Esc stopped the main agent, then the next background subagent
 		// completion (async-result via the yield queue's idle flush) started a fresh

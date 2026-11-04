@@ -43,6 +43,7 @@ import {
 	getToolTimeSeries,
 	type RangeWindow,
 } from "./rollup";
+import { spotlightRowCount } from "./spotlight-ingest";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so the compiled binary and npm bundle only need one
@@ -601,7 +602,8 @@ async function syncAllSessionsLocked(
 			result.userStats.length +
 			result.userLinks.length +
 			result.toolCalls.length +
-			result.toolResults.length
+			result.toolResults.length +
+			spotlightRowCount(result.spotlight)
 		);
 	};
 

@@ -26,6 +26,13 @@ import type {
 	UserMessageLink,
 	UserMessageStats,
 } from "./types";
+import {
+	emptySpotlightRows,
+	emptySpotlightState,
+	SpotlightCollector,
+	type SpotlightParseRows,
+	type SpotlightParserState,
+} from "./spotlight-ingest";
 import { computeUserMessageMetrics, judgeProse } from "./user-metrics";
 
 /** Basename of an advisor agent's transcript inside a session artifacts dir. */
@@ -490,10 +497,12 @@ export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
 	return entries;
 }
 
-function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined {
+/** Rebuild the cursor state of `bytes` (a transcript prefix): the last service tier and the Spotlight state. */
+function scanPrefixState(bytes: Uint8Array, spotlight: SpotlightCollector): ServiceTierByFamily | undefined {
 	let currentServiceTier: ServiceTierByFamily | undefined;
 	visitSessionEntriesLenient(bytes, entry => {
 		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
+		else spotlight.visit(entry);
 	});
 	return currentServiceTier;
 }
@@ -589,6 +598,8 @@ export interface SessionParserState {
 	mtimeMs: number;
 	checkpoint: string;
 	serviceTier: ServiceTierByFamily | null;
+	/** Absent in cursors persisted before the Spotlight tables; such a tail parse starts from an empty state. */
+	spotlight?: SpotlightParserState;
 }
 
 export interface ParseSessionResult {
@@ -597,6 +608,7 @@ export interface ParseSessionResult {
 	userLinks: UserMessageLink[];
 	toolCalls: ToolCallStats[];
 	toolResults: ToolResultLink[];
+	spotlight: SpotlightParseRows;
 	newOffset: number;
 	parserState?: SessionParserState;
 	reset?: boolean;
@@ -644,9 +656,11 @@ export async function parseSessionFile(
 	const toolResults: ToolResultLink[] = [];
 	// First call per id: the row `INSERT OR IGNORE` keeps, so it can be written with its result.
 	const callsById = new Map<string, ToolCallStats>();
+	let spotlight = new SpotlightCollector(sessionPath, folder, emptySpotlightState());
 
 	// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
 	const visit = (entry: SessionEntry): void => {
+		spotlight.visit(entry);
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
 			return;
@@ -715,9 +729,14 @@ export async function parseSessionFile(
 			start = reset || replay ? 0 : Math.max(0, fromOffset);
 			const readStart = resume ? start : 0;
 			bytes = await file.slice(readStart, info.size).bytes();
-			currentServiceTier = resume
-				? (state?.serviceTier ?? undefined)
-				: scanLastServiceTier(bytes.subarray(0, start));
+			if (resume) {
+				currentServiceTier = state?.serviceTier ?? undefined;
+				spotlight = new SpotlightCollector(sessionPath, folder, state?.spotlight ?? emptySpotlightState());
+			} else {
+				const prefix = new SpotlightCollector(sessionPath, folder, emptySpotlightState(), false);
+				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix);
+				spotlight = new SpotlightCollector(sessionPath, folder, prefix.state);
+			}
 			read = visitSessionEntriesLenient(bytes.subarray(start - readStart), visit);
 			const newOffset = start + read;
 			const checkpointStart = Math.max(0, newOffset - CHECKPOINT_BYTES);
@@ -731,10 +750,19 @@ export async function parseSessionFile(
 		}
 	} catch (err) {
 		if (isEnoent(err))
-			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
+			return {
+				stats: [],
+				userStats: [],
+				userLinks: [],
+				toolCalls: [],
+				toolResults: [],
+				spotlight: emptySpotlightRows(),
+				newOffset: fromOffset,
+			};
 		throw err;
 	}
 
+	await spotlight.finish();
 	const newOffset = start + read;
 	return {
 		stats,
@@ -742,6 +770,7 @@ export async function parseSessionFile(
 		userLinks,
 		toolCalls,
 		toolResults,
+		spotlight: spotlight.rows,
 		newOffset,
 		reset,
 		parserState: {
@@ -754,6 +783,7 @@ export async function parseSessionFile(
 			mtimeMs: info.mtimeMs,
 			checkpoint,
 			serviceTier: currentServiceTier ?? null,
+			spotlight: spotlight.state,
 		},
 	};
 }
