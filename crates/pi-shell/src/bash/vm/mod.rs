@@ -449,6 +449,10 @@ pub struct Kernel {
 	/// Background job vprocs that run one pipeline whose stages are the
 	/// job's processes: the shell, not the job, reports the pipeline.
 	pub pipeline_jobs:   std::collections::HashSet<Vpid>,
+	/// Vprocs of background jobs started without job control, and their
+	/// children: bash starts such a job with `SIGINT` and `SIGQUIT` ignored
+	/// (`setup_async_signals`); a trap with an action set in it still runs.
+	pub async_ignore:    std::collections::HashSet<Vpid>,
 	/// Background jobs whose pid is still to be settled
 	/// ([`proc::Bang`]): imaged (a restored job still decides).
 	pub bangs:           Vec<proc::Bang>,
@@ -524,6 +528,7 @@ impl Kernel {
 			fg_reports: HashMap::new(),
 			job_stages: Vec::new(),
 			pipeline_jobs: std::collections::HashSet::new(),
+			async_ignore: std::collections::HashSet::new(),
 			reported_signal: None,
 			bangs: Vec::new(),
 			settled: Vec::new(),
@@ -1673,6 +1678,7 @@ impl Shell {
 				self.k.forget_deferral(p.vpid);
 				let death = self.k.deaths.remove(&p.vpid);
 				self.k.pipeline_jobs.remove(&p.vpid);
+				self.k.async_ignore.remove(&p.vpid);
 				self.k.proc_exited(cx.store, p.vpid, p.parent, p.status, death);
 				self.k.ctl.notify();
 				self.rr = 0;
@@ -2019,6 +2025,7 @@ impl Shell {
 			self.k.forget_deferral(p.vpid);
 			let death = self.k.deaths.remove(&p.vpid);
 			self.k.pipeline_jobs.remove(&p.vpid);
+			self.k.async_ignore.remove(&p.vpid);
 			self.k.proc_exited(cx.store, p.vpid, p.parent, status, death);
 			self.rr = 0;
 			self.reaped(cx, p.parent, p.vpid, status, death);
@@ -2095,6 +2102,22 @@ impl Shell {
 			.and_then(|j| j.stages.as_deref())
 			.map(|s| s.iter().map(|s| s.vpid).collect())
 			.unwrap_or_default();
+		// A signal to a vproc that only runs a subshell reaches the subshell,
+		// which bash runs in that process.
+		let target = match target {
+			SigTarget::Vpid(mut v) if v != root.0 => {
+				while let Some(child) = self
+					.procs
+					.iter()
+					.find(|p| p.vpid == v)
+					.and_then(|p| sole_subshell(p))
+				{
+					v = child;
+				}
+				SigTarget::Vpid(v)
+			},
+			t => t,
+		};
 		let mut hits: Vec<usize> = (0..self.procs.len())
 			.filter(|&i| match target {
 				SigTarget::Vpid(v) => self.procs[i].vpid == v,
@@ -2110,6 +2133,14 @@ impl Shell {
 		// Vprocs this signal stopped or continued (job states follow).
 		let mut changed: Vec<(Vpid, Option<Signal>)> = Vec::new();
 		for &i in hits.iter().rev() {
+			// bash starts a background job without job control with `SIGINT`
+			// and `SIGQUIT` ignored; only a trap the job sets runs for them.
+			if matches!(sig, Signal::Int | Signal::Quit)
+				&& self.k.async_ignore.contains(&self.procs[i].vpid)
+				&& !own_action_trap(cx.store, &self.procs[i], sig)
+			{
+				continue;
+			}
 			let trap = if matches!(sig, Signal::Kill | Signal::Stop) {
 				None
 			} else {
@@ -2462,6 +2493,46 @@ fn transparent(p: &Vproc, children: bool) -> Option<bool> {
 	}
 }
 
+/// `p` set a trap with an action for `sig` itself (one it lists from its
+/// parent does not run in it).
+pub fn own_action_trap(store: &mut dyn StateStore, p: &Vproc, sig: Signal) -> bool {
+	let key = crate::bash::store::TrapKey::Signal(sig);
+	p.own_traps.has(key)
+		&& matches!(
+			state::record(store, p, crate::bash::store::Key::Trap(key)),
+			Ok(Some(Record::Trap { action, .. })) if !action.is_empty()
+		)
+}
+
+/// The subshell `p` waits for when that subshell is all `p` runs (`( … )
+/// &`, `( ( … ) )`): bash runs it in `p`'s process, unforked, so a signal
+/// to `p` reaches it.
+fn sole_subshell(p: &Vproc) -> Option<Vpid> {
+	if !p.transient {
+		return None;
+	}
+	let [frame] = p.frames.as_slice() else {
+		return None;
+	};
+	let unit = frame.unit.as_ref()?;
+	let op = unit.ops.get(frame.pc as usize)?;
+	if op.code != ir::Opcode::Spawn {
+		return None;
+	}
+	let spawn = unit.spawns.get(op.a as usize)?;
+	let code_at = |pc: u32| unit.ops.get(pc as usize).map(|op| op.code);
+	if spawn.kind != ir::SpawnKind::Subshell
+		|| code_at(spawn.end) != Some(ir::Opcode::Leave)
+		|| code_at(spawn.end + 1) != Some(ir::Opcode::SubExit)
+	{
+		return None;
+	}
+	match frame.scratch.as_ref()?.children.as_slice() {
+		[(child, None)] => Some(*child),
+		_ => None,
+	}
+}
+
 /// `p` is parked to settle ([`WaitKey::Settle`]).
 fn settling(p: &Box<Vproc>) -> bool {
 	p.blocked.as_ref().is_some_and(|b| b.key == WaitKey::Settle)
@@ -2603,6 +2674,9 @@ impl Vproc {
 		mut frame: Frame,
 	) -> Self {
 		let vpid = k.vpid(store);
+		if k.async_ignore.contains(&self.vpid) {
+			k.async_ignore.insert(vpid);
+		}
 		let mut vp = Self::new(
 			vpid,
 			Some(self.vpid),

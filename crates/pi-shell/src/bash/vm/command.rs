@@ -1805,6 +1805,16 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 					sigmask_ign = sigmask_ign.with(sig);
 				}
 			}
+			// bash starts a background job without job control with `SIGINT`
+			// and `SIGQUIT` ignored; its programs inherit that unless the job
+			// set a trap with an action for one (reset to default at `exec`).
+			if k.async_ignore.contains(&vp.vpid) {
+				for sig in [crate::bash::signal::Signal::Int, crate::bash::signal::Signal::Quit] {
+					if !super::own_action_trap(cx.store, vp, sig) {
+						sigmask_ign = sigmask_ign.with(sig);
+					}
+				}
+			}
 			let job = k.job_id(cx.store);
 			let argv = spawn_argv(&st(vp).argv, exec_as.as_deref());
 			let tag = st(vp).tag;

@@ -3108,6 +3108,9 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					fds.set(0, Some(null.clone()));
 				}
 				let mut child = vp.child(k, cx.store, Arc::clone(unit), info.stages[0].entry, fds);
+				if info.kind == SpawnKind::Background && !control {
+					k.async_ignore.insert(child.vpid);
+				}
 				if info.kind == SpawnKind::Background {
 					let level = stage_level(unit, info.stages[0].entry, true);
 					super::set_subshell_depth(&mut child, super::subshell_depth(vp) + level);
