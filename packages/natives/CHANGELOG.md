@@ -16,7 +16,7 @@
 - Made the bash tool's shell start with about half as many system calls on Linux
 
 ### Fixed
-- Fixed Windows `rmdir` accepting trailing-dot or trailing-space operands that can remove a different directory.
+- Fixed Windows `rmdir` accepting trailing-dot or trailing-space operands that can remove a different directory ([#18047](https://github.com/can1357/oh-my-pi/pull/18047) by [@jchanghong023](https://github.com/jchanghong023)).
 
 - Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
