@@ -25,7 +25,7 @@ use tokio::runtime::Runtime;
 
 use crate::{
 	bash::{
-		DirIter, File, FileKind, Fs, FsPoll, OpenFlags,
+		At, DirIter, File, FileKind, Fs, FsPoll, OpenFlags,
 		fs::{Access, StatKind},
 	},
 	vfs::VfsFs,
@@ -333,8 +333,8 @@ fn vfs(rt: &Runtime, provider: Arc<MemFs>) -> VfsFs {
 	VfsFs::new(pi_vfs::Fs::new(provider), rt.handle().clone())
 }
 
-fn p(path: &str) -> &BStr {
-	BStr::new(path)
+fn p(path: &str) -> At<'_> {
+	At::path(BStr::new(path))
 }
 
 fn host(path: &Path) -> BString {
@@ -417,8 +417,8 @@ fn provider_operations_pend_then_answer() {
 	assert_eq!(pending(fs.readlink(p("mem://d/link"))).unwrap(), "mem://d/hello");
 	assert_eq!(pending(fs.realpath(p("mem://d/link"))).unwrap(), "mem://d/hello");
 
-	pending(fs.chdir_check(p("mem://d/sub"))).unwrap();
-	let not_dir = pending(fs.chdir_check(p("mem://d/hello"))).unwrap_err();
+	pending(fs.open_dir(p("mem://d/sub"))).unwrap();
+	let not_dir = pending(fs.open_dir(p("mem://d/hello"))).unwrap_err();
 	assert_eq!(not_dir.kind(), io::ErrorKind::NotADirectory);
 
 	let mut file = pending(fs.open(p("mem://d/hello"), OpenFlags::READ, 0)).unwrap();
@@ -437,17 +437,17 @@ fn native_local_paths_answer_at_once() {
 	std::fs::create_dir(dir.path().join("sub")).unwrap();
 	let (dir_b, file_b) = (host(dir.path()), host(&file_path));
 
-	let stat = ready(fs.stat(file_b.as_ref(), true)).unwrap();
+	let stat = ready(fs.stat(At::path(file_b.as_ref()), true)).unwrap();
 	assert_eq!((stat.kind, stat.size), (StatKind::File, 3));
-	ready(fs.access(file_b.as_ref(), Access::READ)).unwrap();
-	ready(fs.chdir_check(dir_b.as_ref())).unwrap();
+	ready(fs.access(At::path(file_b.as_ref()), Access::READ)).unwrap();
+	ready(fs.open_dir(At::path(dir_b.as_ref()))).unwrap();
 	assert_eq!(
-		ready(fs.realpath(dir_b.as_ref())).unwrap(),
+		ready(fs.realpath(At::path(dir_b.as_ref()))).unwrap(),
 		host(&std::fs::canonicalize(dir.path()).unwrap())
 	);
 
 	let mut listing = Vec::new();
-	let mut entries = ready(fs.read_dir(dir_b.as_ref())).unwrap();
+	let mut entries = ready(fs.read_dir(At::path(dir_b.as_ref()))).unwrap();
 	while let Poll::Ready(Some(entry)) = entries.poll_next(&mut Context::from_waker(Waker::noop())) {
 		let entry = entry.unwrap();
 		listing.push((entry.name, entry.kind));
@@ -458,7 +458,7 @@ fn native_local_paths_answer_at_once() {
 		(BString::from("sub"), Some(StatKind::Dir)),
 	]);
 
-	let mut file = ready(fs.open(file_b.as_ref(), OpenFlags::READ, 0)).unwrap();
+	let mut file = ready(fs.open(At::path(file_b.as_ref()), OpenFlags::READ, 0)).unwrap();
 	assert_eq!(file.kind(), FileKind::Regular);
 	assert!(file.os_handle().is_some(), "host files keep their OS handle");
 	assert_eq!(read_to_end(file.as_mut()), b"abc");
@@ -467,7 +467,7 @@ fn native_local_paths_answer_at_once() {
 	{
 		let link = dir.path().join("link");
 		std::os::unix::fs::symlink(&file_path, &link).unwrap();
-		assert_eq!(ready(fs.readlink(host(&link).as_ref())).unwrap(), file_b);
+		assert_eq!(ready(fs.readlink(At::path(host(&link).as_ref()))).unwrap(), file_b);
 	}
 }
 

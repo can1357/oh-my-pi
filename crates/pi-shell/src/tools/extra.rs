@@ -39,11 +39,11 @@ use tokio_util::sync::CancellationToken;
 use super::{Child, ToolConfig, Turn};
 use crate::{
 	bash::{
-		CallOutcome, IntrinsicId, Lineage, ModeId, RunId, RunStdio, Script, ShellApi, ToolCall,
-		VprocSel,
+		At, CallOutcome, Fs, FsPoll, HeldDir, IntrinsicId, Lineage, ModeId, RunId, RunStdio, Script,
+		ShellApi, ToolCall, VprocSel,
 	},
 	extras::Done,
-	sys::StdFile,
+	sys::{StdFile, StdFs},
 };
 
 /// `execvp`'s search path when a command's environment has no `PATH`.
@@ -77,6 +77,18 @@ struct Running {
 	cancel:    CancellationToken,
 	requests:  flume::Receiver<Request>,
 	env_names: Vec<BString>,
+	wd:        WorkDir,
+}
+
+/// The caller's working directory, as the utility and its commands see it.
+struct WorkDir {
+	/// Its name (`$PWD` of the commands run there).
+	name: BString,
+	/// The path the utility reads names from: the kernel's path of the
+	/// directory held, or the name.
+	root: PathBuf,
+	/// The directory held, if any.
+	dir:  Option<HeldDir>,
 }
 
 /// A call of an extra that runs command lines.
@@ -111,6 +123,7 @@ impl Extra {
 				&call.argv,
 				&call.env,
 				call.cwd.as_bstr(),
+				call.dir.as_ref(),
 				&call.stdio,
 				&call.extra_fds,
 				call.umask,
@@ -122,6 +135,11 @@ impl Extra {
 				cwd:    invocation.cwd.clone(),
 				config: turn.config.clone(),
 			};
+			let wd = WorkDir {
+				name: call.cwd.clone(),
+				root: invocation.cwd.clone(),
+				dir:  call.dir.clone(),
+			};
 			invocation.commands =
 				Some(Box::new(Runner { requests, waker: turn.waker.clone(), lookup }));
 			let done = crate::extras::spawn(&runtime, invocation);
@@ -130,12 +148,13 @@ impl Extra {
 				.iter()
 				.map(|(name, _)| BString::from(name))
 				.collect();
-			self.running = Some(Running { done, cancel, requests: received, env_names });
+			self.running = Some(Running { done, cancel, requests: received, env_names, wd });
 		}
 		let running = self.running.as_ref()?;
 		while let Ok(Request { command, program, reply }) = running.requests.try_recv() {
 			let lineage = Lineage { label: self.child.label, detached: false };
-			let run = api.run_subshell_in(script(command, &program, &running.env_names), lineage);
+			let run = api
+				.run_subshell_in(script(command, &program, &running.env_names, &running.wd), lineage);
 			self.runs.push((run, reply));
 		}
 		match running.done.poll(&Context::from_waker(turn.waker)) {
@@ -178,8 +197,14 @@ impl Drop for Extra {
 }
 
 /// The script of one command: its environment changes, then the command,
-/// with the command line as the positional parameters.
-fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -> Script {
+/// with the command line as the positional parameters, in the caller's
+/// working directory `wd` or the one the utility named for it.
+fn script(
+	mut command: ShellCommand,
+	program: &Program,
+	env_names: &[BString],
+	wd: &WorkDir,
+) -> Script {
 	let stdin = child_stdin(command.take_stdin());
 	let mut source = Vec::new();
 	let mut foreign_env = Vec::new();
@@ -250,10 +275,24 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 	script.unexport_env = unexport_env;
 	script.args = Some(args);
 	// The working directory is logical, as after `cd`: `-execdir` hands over
-	// `<root>/./sub`, and the command's `$PWD` is `<root>/sub`.
-	script.cwd = command
-		.dir()
-		.map(|dir| os_bytes(pi_vfs::normalize_lexically(dir).as_os_str()));
+	// `<root>/./sub`, and the command's `$PWD` is `<root>/sub`. One the
+	// utility reached through the directory held is named under the caller's
+	// name and held as the utility reached it.
+	if let Some(dir) = command.dir() {
+		let dir = pi_vfs::normalize_lexically(dir);
+		match dir.strip_prefix(&wd.root) {
+			Ok(rest) if wd.dir.is_some() => {
+				let name = wd.name.to_path_lossy().join(rest);
+				script.cwd = Some(os_bytes(pi_vfs::normalize_lexically(&name).as_os_str()));
+				let reached = os_bytes(dir.as_os_str());
+				script.dir = match StdFs::default().open_dir(At::path(reached.as_bstr())) {
+					FsPoll::Ready(Ok(held)) => held,
+					_ => None,
+				};
+			},
+			_ => script.cwd = Some(os_bytes(dir.as_os_str())),
+		}
+	}
 	script.vproc = VprocSel::NewSubshellWithStdio([stdin, RunStdio::Inherit, RunStdio::Inherit]);
 	script
 }
@@ -346,6 +385,9 @@ struct Lookup {
 impl Lookup {
 	/// How `command` runs; `NotFound` when nothing has its name,
 	/// `PermissionDenied` when only files that cannot be executed have it.
+	/// A program found by a relative name keeps it: the command's subshell
+	/// starts in the directory that name is relative to, and the program
+	/// sees the name, never the path the utility read it through.
 	fn program(&self, command: &ShellCommand) -> io::Result<Program> {
 		let name = command
 			.args()
@@ -354,7 +396,7 @@ impl Lookup {
 		let cwd = command.dir().unwrap_or(&self.cwd);
 		if has_separator(name) {
 			return match executable(&cwd.join(name)) {
-				Some(true) => Ok(Program::Path(cwd.join(name))),
+				Some(true) => Ok(Program::Path(PathBuf::from(name))),
 				Some(false) => Err(io::ErrorKind::PermissionDenied.into()),
 				None => Err(io::ErrorKind::NotFound.into()),
 			};
@@ -374,9 +416,14 @@ impl Lookup {
 			.unwrap_or(DEFAULT_PATH);
 		let mut denied = false;
 		for dir in std::env::split_paths(OsStr::new(path)) {
-			let candidate = cwd.join(dir).join(name);
+			let candidate = cwd.join(&dir).join(name);
 			match executable(&candidate) {
-				Some(true) => return Ok(Program::Path(candidate)),
+				Some(true) if dir.is_absolute() => return Ok(Program::Path(candidate)),
+				// An empty entry is the working directory.
+				Some(true) if dir.as_os_str().is_empty() => {
+					return Ok(Program::Path(Path::new(".").join(name)));
+				},
+				Some(true) => return Ok(Program::Path(dir.join(name))),
 				Some(false) => denied = true,
 				None => {},
 			}

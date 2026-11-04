@@ -91,9 +91,10 @@ pub fn perform(
 			if let Some(fd) = dev_fd(path) {
 				return Ok(finish(sc, ProbeResult::Stat(fd_stat(vp, fd))));
 			}
+			let abs = absolute(&vp.cwd, path);
 			let polled = match &mut sc.live {
 				Live::Stat(fut) => fut.poll(&mut tcx),
-				_ => match cx.host.fs().stat(BStr::new(path), *follow) {
+				_ => match cx.host.fs().stat(vp.at(path, &abs), *follow) {
 					FsPoll::Ready(polled) => Poll::Ready(polled),
 					FsPoll::Pending(mut fut) => {
 						let polled = fut.poll(&mut tcx);
@@ -106,7 +107,7 @@ pub fn perform(
 			};
 			match polled {
 				Poll::Ready(polled) => ProbeResult::Stat(polled.ok()),
-				Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Stat, path: path.clone() }),
+				Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Stat, path: abs }),
 			}
 		},
 		Probe::Access { path, mode } => {
@@ -122,9 +123,10 @@ pub fn perform(
 					want = want.with(a);
 				}
 			}
+			let abs = absolute(&vp.cwd, path);
 			let polled = match &mut sc.live {
 				Live::Access(fut) => fut.poll(&mut tcx),
-				_ => match cx.host.fs().access(BStr::new(path), want) {
+				_ => match cx.host.fs().access(vp.at(path, &abs), want) {
 					FsPoll::Ready(polled) => Poll::Ready(polled),
 					FsPoll::Pending(mut fut) => {
 						let polled = fut.poll(&mut tcx);
@@ -137,30 +139,65 @@ pub fn perform(
 			};
 			match polled {
 				Poll::Ready(polled) => ProbeResult::Ok(polled.is_ok()),
-				Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Access, path: path.clone() }),
+				Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Access, path: abs }),
 			}
 		},
 		Probe::Chdir { path } => {
+			let abs = absolute(&vp.cwd, path);
 			let polled = match &mut sc.live {
-				Live::Access(fut) => fut.poll(&mut tcx),
-				_ => match cx.host.fs().chdir_check(BStr::new(path)) {
+				Live::Held(fut) => fut.poll(&mut tcx),
+				_ => match cx.host.fs().open_dir(vp.at(path, &abs)) {
 					FsPoll::Ready(polled) => Poll::Ready(polled),
 					FsPoll::Pending(mut fut) => {
 						let polled = fut.poll(&mut tcx);
 						if polled.is_pending() {
-							sc.live = Live::Access(fut);
+							sc.live = Live::Held(fut);
 						}
 						polled
 					},
 				},
 			};
 			match polled {
-				Poll::Ready(Ok(())) => ProbeResult::Bytes(Ok(BString::default())),
+				Poll::Ready(Ok(dir)) => ProbeResult::Entered(Ok(crate::bash::fs::Entered(dir))),
 				Poll::Ready(Err(e)) => {
-					ProbeResult::Bytes(Err(BString::from(diag::strerror(&e).as_bytes())))
+					ProbeResult::Entered(Err(BString::from(diag::strerror(&e).as_bytes())))
 				},
 				Poll::Pending => {
-					return Err(WaitKey::Fs { op: FsOp::ChdirCheck, path: path.clone() });
+					return Err(WaitKey::Fs { op: FsOp::ChdirCheck, path: abs });
+				},
+			}
+		},
+		Probe::Getcwd { entered } => {
+			// The directory asked about: the one a `Chdir` of this op
+			// entered, or the vproc's own; the name it was entered by where
+			// none is held.
+			let (dir, name) = match entered {
+				Some(path) => {
+					let dir = match cached(sc, &Probe::Chdir { path: path.clone() }) {
+						Some(ProbeResult::Entered(Ok(entered))) => entered.0.clone(),
+						_ => None,
+					};
+					(dir, absolute(&vp.cwd, path))
+				},
+				None => (vp.dir.clone(), vp.cwd.clone()),
+			};
+			let polled = match &mut sc.live {
+				Live::Path(fut) => fut.poll(&mut tcx),
+				_ => match getcwd(cx, dir.as_ref(), &name) {
+					FsPoll::Ready(polled) => Poll::Ready(polled),
+					FsPoll::Pending(mut fut) => {
+						let polled = fut.poll(&mut tcx);
+						if polled.is_pending() {
+							sc.live = Live::Path(fut);
+						}
+						polled
+					},
+				},
+			};
+			match polled {
+				Poll::Ready(polled) => ProbeResult::Path(polled.ok()),
+				Poll::Pending => {
+					return Err(WaitKey::Fs { op: FsOp::DirPath, path: name });
 				},
 			}
 		},
@@ -168,13 +205,13 @@ pub fn perform(
 			let io = sc.io();
 			if io.search.is_none() {
 				io.search = Some(PathSearch {
-					cands:         candidates(path, name, &vp.cwd),
+					cands:         candidates(path, name, vp.base()),
 					idx:           0,
 					checking_exec: false,
 					nonexec:       None,
 				});
 			}
-			match path_search(&mut tcx, cx, sc) {
+			match path_search(&mut tcx, cx, sc, vp) {
 				// bash shows `dir/name` as built (`./e` for an empty entry).
 				Search::Found(_) => {
 					let idx = sc
@@ -207,16 +244,19 @@ pub fn perform(
 					}
 				}
 			} else {
-				match read_file(&mut tcx, cx, sc, path) {
+				match read_file(&mut tcx, cx, sc, vp, path) {
 					Poll::Ready(polled) => ProbeResult::Bytes(polled),
-					Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Open, path: path.clone() }),
+					Poll::Pending => {
+						return Err(WaitKey::Fs { op: FsOp::Open, path: absolute(&vp.cwd, path) });
+					},
 				}
 			}
 		},
 		Probe::RealPath { path } => {
+			let abs = absolute(&vp.cwd, path);
 			let polled = match &mut sc.live {
 				Live::Path(fut) => fut.poll(&mut tcx),
-				_ => match cx.host.fs().realpath(BStr::new(path)) {
+				_ => match cx.host.fs().realpath(vp.at(path, &abs)) {
 					FsPoll::Ready(polled) => Poll::Ready(polled),
 					FsPoll::Pending(mut fut) => {
 						let polled = fut.poll(&mut tcx);
@@ -229,7 +269,7 @@ pub fn perform(
 			};
 			match polled {
 				Poll::Ready(polled) => ProbeResult::Path(polled.ok()),
-				Poll::Pending => return Err(WaitKey::Fs { op: FsOp::RealPath, path: path.clone() }),
+				Poll::Pending => return Err(WaitKey::Fs { op: FsOp::RealPath, path: abs }),
 			}
 		},
 		Probe::Glob { pattern, opts } => {
@@ -238,7 +278,7 @@ pub fn perform(
 				.walk
 				.take()
 				.unwrap_or_else(|| Box::new(Walk::new(pattern)));
-			match walk.poll(&mut tcx, cx, sc, &vp.cwd, *opts) {
+			match walk.poll(&mut tcx, cx, sc, vp, *opts) {
 				Ok(paths) => ProbeResult::Paths(paths),
 				Err(key) => {
 					sc.io().walk = Some(walk);
@@ -330,6 +370,18 @@ pub fn perform(
 	Ok(finish(sc, res))
 }
 
+/// `getcwd` of `dir`, the directory held; the physical name of `name` where
+/// none is.
+fn getcwd(cx: &mut Cx<'_>, dir: Option<&crate::bash::fs::HeldDir>, name: &[u8]) -> FsPoll<BString> {
+	match dir {
+		Some(dir) => cx.host.fs().dir_path(dir),
+		None => cx
+			.host
+			.fs()
+			.realpath(crate::bash::fs::At::path(BStr::new(name))),
+	}
+}
+
 fn finish(sc: &mut Scratch, r: ProbeResult) -> ProbeResult {
 	sc.live = Live::None;
 	let io = sc.io();
@@ -345,6 +397,7 @@ fn read_file(
 	tcx: &mut Context<'_>,
 	cx: &mut Cx<'_>,
 	sc: &mut Scratch,
+	vp: &Vproc,
 	path: &BString,
 ) -> Poll<Result<BString, BString>> {
 	let err = |e: &std::io::Error| BString::from(diag::strerror(e).as_bytes());
@@ -354,7 +407,8 @@ fn read_file(
 		match &mut sc.live {
 			Live::None => {
 				input.clear();
-				let opened = cx.host.fs().open(BStr::new(path), OpenFlags::READ, 0);
+				let abs = absolute(&vp.cwd, path);
+				let opened = cx.host.fs().open(vp.at(path, &abs), OpenFlags::READ, 0);
 				match opened {
 					FsPoll::Ready(Ok(f)) => sc.live = Live::File(f),
 					FsPoll::Ready(Err(e)) => return Poll::Ready(Err(err(&e))),
@@ -391,15 +445,20 @@ pub const fn standard_path(platform: crate::bash::ids::Platform) -> &'static str
 	}
 }
 
-/// `dir/name` for every `$PATH` entry (empty entries mean the cwd).
-pub fn candidates(path: &[u8], name: &[u8], cwd: &[u8]) -> Vec<BString> {
+/// `dir/name` for every `$PATH` entry (empty entries mean the cwd), as a
+/// vproc reads it: made absolute against `cwd`, its working directory's
+/// name, or with `cwd` `None` (the vproc holds its directory,
+/// [`Vproc::base`]) a relative entry stays relative (`./name` for an empty
+/// one), read from that directory.
+pub fn candidates(path: &[u8], name: &[u8], cwd: Option<&[u8]>) -> Vec<BString> {
 	path
 		.split(|&c| c == b':')
 		.map(|dir| {
-			let mut p = if dir.is_empty() {
-				BString::from(cwd)
-			} else {
-				absolute(cwd, dir)
+			let mut p = match cwd {
+				Some(cwd) if dir.is_empty() => BString::from(cwd),
+				Some(cwd) => absolute(cwd, dir),
+				None if dir.is_empty() => BString::from("."),
+				None => BString::from(dir),
 			};
 			if !p.ends_with(b"/") {
 				p.push(b'/');
@@ -447,8 +506,8 @@ pub enum Search {
 /// Probe PATH candidates through the pollable `Fs`: `stat` (regular file),
 /// then `access(X)`. Without an executable candidate, the first regular
 /// file is found (bash's `FS_EXEC_PREFERRED`; running it fails with
-/// `Permission denied`).
-pub fn path_search(tcx: &mut Context<'_>, cx: &mut Cx<'_>, sc: &mut Scratch) -> Search {
+/// `Permission denied`). A relative candidate is read as `vp` reads it.
+pub fn path_search(tcx: &mut Context<'_>, cx: &mut Cx<'_>, sc: &mut Scratch, vp: &Vproc) -> Search {
 	// The search, beside `sc.live` (its fs operation).
 	let Some(search) = sc.io.as_mut().and_then(|io| io.search.as_mut()) else {
 		return Search::NotFound;
@@ -461,10 +520,11 @@ pub fn path_search(tcx: &mut Context<'_>, cx: &mut Cx<'_>, sc: &mut Scratch) -> 
 			}
 			return Search::NotFound;
 		};
+		let abs = absolute(&vp.cwd, path);
 		if search.checking_exec {
 			let res = match &mut sc.live {
 				Live::Access(p) => p.poll(tcx),
-				_ => match cx.host.fs().access(BStr::new(path), Access::EXEC) {
+				_ => match cx.host.fs().access(vp.at(path, &abs), Access::EXEC) {
 					FsPoll::Ready(r) => Poll::Ready(r),
 					FsPoll::Pending(mut p) => {
 						let r = p.poll(tcx);
@@ -477,7 +537,7 @@ pub fn path_search(tcx: &mut Context<'_>, cx: &mut Cx<'_>, sc: &mut Scratch) -> 
 			};
 			match res {
 				Poll::Pending => {
-					return Search::Pending(WaitKey::Fs { op: FsOp::Access, path: path.clone() });
+					return Search::Pending(WaitKey::Fs { op: FsOp::Access, path: abs });
 				},
 				Poll::Ready(Ok(())) => {
 					sc.live = Live::None;
@@ -493,7 +553,7 @@ pub fn path_search(tcx: &mut Context<'_>, cx: &mut Cx<'_>, sc: &mut Scratch) -> 
 		} else {
 			let res = match &mut sc.live {
 				Live::Stat(p) => p.poll(tcx),
-				_ => match cx.host.fs().stat(BStr::new(path), true) {
+				_ => match cx.host.fs().stat(vp.at(path, &abs), true) {
 					FsPoll::Ready(r) => Poll::Ready(r),
 					FsPoll::Pending(mut p) => {
 						let r = p.poll(tcx);
@@ -506,7 +566,7 @@ pub fn path_search(tcx: &mut Context<'_>, cx: &mut Cx<'_>, sc: &mut Scratch) -> 
 			};
 			match res {
 				Poll::Pending => {
-					return Search::Pending(WaitKey::Fs { op: FsOp::Stat, path: path.clone() });
+					return Search::Pending(WaitKey::Fs { op: FsOp::Stat, path: abs });
 				},
 				Poll::Ready(r) => {
 					sc.live = Live::None;
@@ -527,12 +587,15 @@ mod tests {
 
 	#[test]
 	fn path_candidates_resolve_empty_and_relative_entries_against_cwd() {
-		let c = candidates(b"/bin::rel", b"ls", b"/home/u");
+		let c = candidates(b"/bin::rel", b"ls", Some(b"/home/u"));
 		assert_eq!(c, vec![
 			BString::from("/bin/ls"),
 			BString::from("/home/u/ls"),
 			BString::from("/home/u/rel/ls")
 		]);
+		// Held: a relative entry is read from the directory held.
+		let c = candidates(b"/bin::rel", b"ls", None);
+		assert_eq!(c, vec![BString::from("/bin/ls"), BString::from("./ls"), BString::from("rel/ls")]);
 	}
 
 	#[test]

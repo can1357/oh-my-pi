@@ -102,8 +102,8 @@ fn try_chdir(
 	};
 	let path = dir::logical(b"/", &buf);
 	Ok(match ctx.probe(Probe::Chdir { path: path.clone() })? {
-		ProbeResult::Bytes(Ok(_)) => Ok(path),
-		ProbeResult::Bytes(Err(msg)) => Err(msg),
+		ProbeResult::Entered(Ok(_)) => Ok(path),
+		ProbeResult::Entered(Err(msg)) => Err(msg),
 		_ => Err(BString::from("No such file or directory")),
 	})
 }
@@ -340,6 +340,12 @@ fn new_pwd(ctx: &mut Ctx<'_, '_>, cd: &mut Cd, dir: usize, quiet: bool) -> R {
 	{
 		cd.stack.remove(i);
 	}
+	// zsh enters `new` by its name: the shell works in, and holds, the
+	// directory that name reached (the answer `try_chdir` had).
+	let held = match ctx.probe(Probe::Chdir { path: new.clone() })? {
+		ProbeResult::Entered(Ok(entered)) => entered.0,
+		_ => None,
+	};
 	let oldpwd = std::mem::replace(&mut cd.pwd, new.clone());
 	// zsh `set_pwd_env`.
 	let (pwd, old) = (new.clone(), oldpwd);
@@ -364,6 +370,7 @@ fn new_pwd(ctx: &mut Ctx<'_, '_>, cd: &mut Cd, dir: usize, quiet: bool) -> R {
 		ctx.k.root.set_misc(ctx.cx.store, MiscKey::Cwd, new.clone());
 	}
 	ctx.vp.cwd = new.clone();
+	ctx.vp.dir = held;
 	let interactive = isset(ctx, ZshOpt::Interactive)?;
 	if interactive || isset(ctx, ZshOpt::Posixcd)? {
 		if func != Func::Cd && interactive {

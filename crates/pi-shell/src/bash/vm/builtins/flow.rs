@@ -77,8 +77,8 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			None => None,
 		};
 		if let Some(search) = search {
-			let cwd = ctx.vp.cwd.clone();
-			for cand in candidates(&search, file, &cwd) {
+			let base = ctx.vp.base().map(<[u8]>::to_vec);
+			for cand in candidates(&search, file, base.as_deref()) {
 				if let ProbeResult::Stat(Some(st)) =
 					ctx.probe(Probe::Stat { path: cand.clone(), follow: true })?
 					&& st.kind == StatKind::File
@@ -98,7 +98,7 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	}
 	// bash's `_evalfile` names the file it found.
 	let shown = path.clone().unwrap_or_else(|| file.clone());
-	let path = path.unwrap_or_else(|| absolute(&ctx.vp.cwd, file));
+	let path = path.unwrap_or_else(|| file.clone());
 	let text = match ctx.probe(Probe::Read { path: path.clone() })? {
 		ProbeResult::Bytes(Ok(text)) => text,
 		ProbeResult::Bytes(Err(msg)) if msg.as_slice() == b"Is a directory" => {
@@ -152,8 +152,9 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		ctx.line,
 		rest,
 	)?;
+	let shown_path = absolute(&ctx.vp.cwd, &path);
 	ctx.k
-		.emit_op(ctx.cx, ctx.vp, 0, EventData::SourceEnter { path: path.as_bstr() });
+		.emit_op(ctx.cx, ctx.vp, 0, EventData::SourceEnter { path: shown_path.as_bstr() });
 	Ok(Outcome { status: 0, control: Control::Frame })
 }
 
@@ -167,18 +168,17 @@ pub fn zsh_source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let Some((file, rest)) = args.split_first() else {
 		return done(0);
 	};
-	let cwd = ctx.vp.cwd.clone();
 	let regular =
 		|r: ProbeResult| matches!(r, ProbeResult::Stat(Some(st)) if st.kind != StatKind::Dir);
 	let mut path = None;
 	if ctx.name == "source" {
-		let here = absolute(&cwd, file);
+		let here = file.clone();
 		if regular(ctx.probe(Probe::Stat { path: here.clone(), follow: true })?) {
 			path = Some(here);
 		}
 	}
 	if path.is_none() && file.contains(&b'/') {
-		let here = absolute(&cwd, file);
+		let here = file.clone();
 		if regular(ctx.probe(Probe::Stat { path: here.clone(), follow: true })?) {
 			path = Some(here);
 		}
@@ -186,12 +186,12 @@ pub fn zsh_source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		let search = ctx.scalar(b"PATH")?.unwrap_or_default();
 		for dir in search.split(|&c| c == b':') {
 			let cand = if dir.is_empty() || dir == b"." {
-				absolute(&cwd, file)
+				file.clone()
 			} else {
 				let mut p = BString::from(dir);
 				p.push(b'/');
 				p.extend_from_slice(file);
-				absolute(&cwd, &p)
+				p
 			};
 			if regular(ctx.probe(Probe::Stat { path: cand.clone(), follow: true })?) {
 				path = Some(cand);
@@ -230,8 +230,9 @@ pub fn zsh_source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		ctx.line,
 		rest,
 	)?;
+	let shown_path = absolute(&ctx.vp.cwd, &path);
 	ctx.k
-		.emit_op(ctx.cx, ctx.vp, 0, EventData::SourceEnter { path: path.as_bstr() });
+		.emit_op(ctx.cx, ctx.vp, 0, EventData::SourceEnter { path: shown_path.as_bstr() });
 	Ok(Outcome { status: ctx.vp.status, control: Control::Frame })
 }
 
@@ -255,7 +256,6 @@ pub fn zsh_autoload_x(ctx: &mut Ctx<'_, '_>) -> R {
 		let mut path = BString::from(dir);
 		path.push(b'/');
 		path.extend_from_slice(&name);
-		let path = absolute(&cwd, &path);
 		let regular = matches!(
 			ctx.probe(Probe::Stat { path: path.clone(), follow: true })?,
 			ProbeResult::Stat(Some(st)) if st.kind != StatKind::Dir
@@ -263,7 +263,7 @@ pub fn zsh_autoload_x(ctx: &mut Ctx<'_, '_>) -> R {
 		if regular
 			&& let ProbeResult::Bytes(Ok(text)) = ctx.probe(Probe::Read { path: path.clone() })?
 		{
-			found = Some((path, text));
+			found = Some((absolute(&cwd, &path), text));
 			break;
 		}
 	}

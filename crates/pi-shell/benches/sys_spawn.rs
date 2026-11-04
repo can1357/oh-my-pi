@@ -92,6 +92,7 @@ mod unix {
 			argv,
 			env,
 			cwd: b"/".as_bstr(),
+			dir: None,
 			stdio: [StdioSpec::Null, out, StdioSpec::Null],
 			extra_fds: Vec::new(),
 			pgroup: PgroupSpec::New(JobId(1)),

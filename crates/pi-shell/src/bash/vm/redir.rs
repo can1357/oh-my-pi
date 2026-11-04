@@ -136,7 +136,7 @@ pub fn apply(
 			// opening the other end, which the FIFO's real peer observes (a
 			// writer then sees its reader vanish).
 			if !k.bangs.is_empty() && waits_on_fifo(cx, vp, r, &target) {
-				let path = absolute(&vp.cwd, &target);
+				let path = vp.reach(&target);
 				if deferrable(k, vp, cx, &redirs[done..], &path) {
 					start_deferral(vp, k);
 					return Ok(());
@@ -633,7 +633,7 @@ fn waits_on_fifo(cx: &mut Cx<'_>, vp: &Vproc, r: &RedirIr, target: &BString) -> 
 		return false;
 	}
 	let path = absolute(&vp.cwd, target);
-	matches!(cx.host.fs().stat(BStr::new(&path), true), FsPoll::Ready(Ok(st)) if st.kind == StatKind::Fifo)
+	matches!(cx.host.fs().stat(vp.at(target, &path), true), FsPoll::Ready(Ok(st)) if st.kind == StatKind::Fifo)
 }
 
 /// Whether the job's lone external may leave the open of `path` and the
@@ -791,7 +791,8 @@ fn child_open(
 		return ChildRedir::Dup { fd: *fd, src, diag };
 	}
 	let umask = state::umask(cx.store, vp).unwrap_or(0o022);
-	ChildRedir::Open { fds, path: absolute(&vp.cwd, target), flags, mode: 0o666 & !umask, diag }
+	// The process opens it after it starts in the vproc's directory.
+	ChildRedir::Open { fds, path: vp.reach(target), flags, mode: 0o666 & !umask, diag }
 }
 
 /// Print `d` and fail the redirection.
@@ -961,7 +962,7 @@ fn zsh_flags(
 		});
 	}
 	if output && !clobber {
-		let path = absolute(&vp.cwd, target);
+		let path = target.clone();
 		let st = match super::command::command_probe(k, cx, vp, &Probe::Stat { path, follow: true }) {
 			Err(key) => return Err(Halt::Flow(Flow::Block(key))),
 			Ok(ProbeResult::Stat(st)) => st,
@@ -1006,7 +1007,7 @@ fn zsh_open(
 	let mut tcx = Context::from_waker(&k.waker);
 	let res = match io(vp).redir.opening.as_mut() {
 		Some(p) => p.poll(&mut tcx),
-		None => match cx.host.fs().open(BStr::new(&abs), flags, 0o666 & !umask) {
+		None => match cx.host.fs().open(vp.at(path, &abs), flags, 0o666 & !umask) {
 			FsPoll::Ready(r) => Poll::Ready(r),
 			FsPoll::Pending(mut p) => {
 				let r = p.poll(&mut tcx);
@@ -1322,7 +1323,7 @@ fn open_into(
 	let mut tcx = Context::from_waker(&k.waker);
 	let res = match io(vp).redir.opening.as_mut() {
 		Some(p) => p.poll(&mut tcx),
-		None => match cx.host.fs().open(BStr::new(&abs), flags, 0o666 & !umask) {
+		None => match cx.host.fs().open(vp.at(path, &abs), flags, 0o666 & !umask) {
 			FsPoll::Ready(r) => Poll::Ready(r),
 			FsPoll::Pending(mut p) => {
 				let r = p.poll(&mut tcx);

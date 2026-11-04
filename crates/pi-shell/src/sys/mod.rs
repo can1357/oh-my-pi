@@ -41,6 +41,8 @@ pub mod rlimit;
 pub mod shebang;
 mod spawn;
 
+#[cfg(target_os = "linux")]
+pub use crate::sys::fs::{OsDir, os_dir};
 pub use crate::sys::{
 	fs::{StdFile, StdFs, std_stream},
 	park::Parker,

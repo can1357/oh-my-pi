@@ -419,6 +419,7 @@ impl crate::bash::Host for PiHost {
 			inv.argv,
 			inv.env,
 			inv.cwd,
+			inv.dir,
 			&inv.stdio,
 			inv.extra_fds,
 			inv.umask,

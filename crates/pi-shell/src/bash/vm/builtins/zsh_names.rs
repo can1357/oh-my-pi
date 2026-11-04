@@ -485,9 +485,9 @@ const DEFAULT_PATH: &[u8] = b"/bin:/usr/bin:/usr/ucb:/usr/local/bin";
 /// default path instead (`command -p`).
 fn findcmd(ctx: &mut Ctx<'_, '_>, name: &[u8], defpath: bool) -> Result<Option<BString>, Need> {
 	if name.contains(&b'/') {
-		let path = crate::bash::vm::probe::absolute(&ctx.vp.cwd, name);
-		return Ok((ctx.probe(Probe::Access { path, mode: 4 })? == ProbeResult::Ok(true))
-			.then(|| name.into()));
+		return Ok((ctx.probe(Probe::Access { path: name.into(), mode: 4 })?
+			== ProbeResult::Ok(true))
+		.then(|| name.into()));
 	}
 	let path = if defpath {
 		BString::from(DEFAULT_PATH)
@@ -981,8 +981,7 @@ fn whence_one(
 			} else {
 				[dir, b"/", name].concat().into()
 			};
-			let abs = crate::bash::vm::probe::absolute(&ctx.vp.cwd, &full);
-			if ctx.probe(Probe::Access { path: abs, mode: 4 })? == ProbeResult::Ok(true) {
+			if ctx.probe(Probe::Access { path: full.clone(), mode: 4 })? == ProbeResult::Ok(true) {
 				found.push(full);
 			}
 		}

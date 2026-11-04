@@ -16,7 +16,7 @@ use std::{
 	task::{Context, Poll},
 };
 
-use bstr::{BStr, BString};
+use bstr::BString;
 use hashbrown::HashMap;
 
 use super::{
@@ -208,12 +208,12 @@ impl Walk {
 		tcx: &mut Context<'_>,
 		cx: &mut Cx<'_>,
 		sc: &mut Scratch,
-		cwd: &[u8],
+		vp: &Vproc,
 		opts: GlobOpts,
 	) -> Result<Vec<BString>, WaitKey> {
 		loop {
 			while let Some(ask) = self.asking.front() {
-				let fact = answer(ask, &mut self.names, tcx, cx, sc, cwd)?;
+				let fact = answer(ask, &mut self.names, tcx, cx, sc, vp)?;
 				let ask = self.asking.pop_front().expect("asked");
 				self.facts.insert(ask, fact);
 			}
@@ -229,21 +229,22 @@ impl Walk {
 }
 
 /// Ask the file system `ask`; `Err` while the call is pending (its future or
-/// listing waits in `sc.live`, the names read so far in `names`).
+/// listing waits in `sc.live`, the names read so far in `names`). A relative
+/// name is read as `vp` reads it ([`Vproc::at`]).
 pub(super) fn answer(
 	ask: &Ask,
 	names: &mut Vec<BString>,
 	tcx: &mut Context<'_>,
 	cx: &mut Cx<'_>,
 	sc: &mut Scratch,
-	cwd: &[u8],
+	vp: &Vproc,
 ) -> Result<Fact, WaitKey> {
 	match ask {
 		Ask::Stat { path, follow } => {
-			let abs = absolute(cwd, path);
+			let abs = absolute(&vp.cwd, path);
 			let polled = match &mut sc.live {
 				Live::Stat(f) => f.poll(tcx),
-				_ => match cx.host.fs().stat(BStr::new(&abs), *follow) {
+				_ => match cx.host.fs().stat(vp.at(path, &abs), *follow) {
 					FsPoll::Ready(r) => Poll::Ready(r),
 					FsPoll::Pending(mut f) => {
 						let r = f.poll(tcx);
@@ -261,7 +262,9 @@ pub(super) fn answer(
 			Ok(Fact::Stat(r.ok()))
 		},
 		Ask::List(dir) => {
-			let abs = absolute(cwd, dir);
+			// The working directory itself is listed as `.`.
+			let dir: &[u8] = if dir.is_empty() { b"." } else { dir };
+			let abs = absolute(&vp.cwd, dir);
 			let pending = || WaitKey::Fs { op: FsOp::ReadDir, path: abs.clone() };
 			loop {
 				match &mut sc.live {
@@ -279,7 +282,7 @@ pub(super) fn answer(
 						},
 						Poll::Pending => return Err(pending()),
 					},
-					_ => match cx.host.fs().read_dir(BStr::new(&abs)) {
+					_ => match cx.host.fs().read_dir(vp.at(dir, &abs)) {
 						FsPoll::Ready(Ok(it)) => {
 							names.clear();
 							sc.live = Live::Dir(it);

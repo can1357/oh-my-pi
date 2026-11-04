@@ -69,33 +69,121 @@ pub trait FsPending<T>: Send {
 	}
 }
 
+/// The directory a vproc works in, held by its host as a process holds the
+/// one it `chdir`ed to.
+///
+/// The directory itself, not its name: moving, renaming or removing it, or
+/// making another directory at its old name, does not change which directory
+/// the vproc's relative names are read from. The engine only keeps it,
+/// passes it to subshells and hands it back ([`At::held`],
+/// [`crate::bash::SpawnSpec::dir`]); the host that made it
+/// ([`Fs::open_dir`]) reads names from it. It is never serialized: it
+/// serializes as nothing and comes back as `None` in an [`Entered`], so a
+/// restored shell holds its working directory again by name.
+#[derive(Clone)]
+pub struct HeldDir(std::sync::Arc<Box<dyn std::any::Any + Send + Sync>>);
+
+impl HeldDir {
+	/// Wraps the host's own handle.
+	pub fn new<T: std::any::Any + Send + Sync>(handle: T) -> Self {
+		Self(std::sync::Arc::new(Box::new(handle)))
+	}
+
+	/// The host's handle, when this host made it.
+	pub fn get<T: std::any::Any>(&self) -> Option<&T> {
+		(**self.0).downcast_ref()
+	}
+}
+
+impl PartialEq for HeldDir {
+	fn eq(&self, other: &Self) -> bool {
+		std::sync::Arc::ptr_eq(&self.0, &other.0)
+	}
+}
+
+impl Eq for HeldDir {}
+
+impl std::fmt::Debug for HeldDir {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str("HeldDir")
+	}
+}
+
+/// The answer to entering a directory ([`Fs::open_dir`]) a probe keeps: the
+/// directory held, if any. Serialized as nothing; a snapshot's answer comes
+/// back holding none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Entered(pub Option<HeldDir>);
+
+impl Serialize for Entered {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.serialize_unit()
+	}
+}
+
+impl<'de> Deserialize<'de> for Entered {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		<()>::deserialize(deserializer)?;
+		Ok(Self(None))
+	}
+}
+
+/// A name the engine asks its host about, and where it is read from.
+#[derive(Clone, Copy, Debug)]
+pub struct At<'a> {
+	/// The name made absolute with the working directory's name: what a host
+	/// that holds no directory reads, and what wait keys and reports show.
+	pub path: &'a BStr,
+	/// When the name is relative and the vproc holds its working directory:
+	/// that directory and the name as written, which the host reads from the
+	/// directory itself, as the kernel reads a relative name from a process's
+	/// working directory, whatever `path` reaches by then.
+	pub held: Option<(&'a HeldDir, &'a BStr)>,
+}
+
+impl<'a> At<'a> {
+	/// An absolute name, read as it is spelled.
+	pub const fn path(path: &'a BStr) -> Self {
+		Self { path, held: None }
+	}
+}
+
 /// Filesystem as the engine sees it.
 ///
-/// Paths are absolute and normalized (the engine applies its per-vproc cwd
-/// and resolves `..` logically unless `set -P`). A `scheme://` name (an RFC
-/// 3986 scheme of two or more characters) counts as absolute and reaches the
-/// filesystem as written, relative names under such a working directory join
-/// it with `/` ([`url_root_len`]).
+/// Names are absolute (the engine applies its per-vproc cwd and resolves
+/// `..` logically unless `set -P`), and a relative one also comes with the
+/// directory the vproc holds ([`At`]). A `scheme://` name (an RFC 3986 scheme
+/// of two or more characters) counts as absolute and reaches the filesystem
+/// as written, relative names under such a working directory join it with
+/// `/` ([`url_root_len`]).
 ///
 /// Device paths (`/dev/null`, `/dev/fd/N`, `/dev/tcp/…`, host devices) are
 /// ordinary [`Fs::open`] results with the matching [`FileKind`].
 pub trait Fs {
 	/// Open a file (redirections, `source`, here-document spill).
-	fn open(&mut self, path: &BStr, flags: OpenFlags, mode: u32) -> FsPoll<Box<dyn File>>;
+	fn open(&mut self, at: At<'_>, flags: OpenFlags, mode: u32) -> FsPoll<Box<dyn File>>;
 	/// `stat`/`lstat` (`test -f`, PATH search, glob).
-	fn stat(&mut self, path: &BStr, follow: bool) -> FsPoll<Stat>;
+	fn stat(&mut self, at: At<'_>, follow: bool) -> FsPoll<Stat>;
 	/// `access(2)` (`test -r/-w/-x`, PATH search).
-	fn access(&mut self, path: &BStr, mode: Access) -> FsPoll<()>;
+	fn access(&mut self, at: At<'_>, mode: Access) -> FsPoll<()>;
 	/// Open a directory for listing (glob, `cd -P`, completion of PATH hash).
-	fn read_dir(&mut self, path: &BStr) -> FsPoll<Box<dyn DirIter>>;
+	fn read_dir(&mut self, at: At<'_>) -> FsPoll<Box<dyn DirIter>>;
 	/// Read a symlink's target.
-	fn readlink(&mut self, path: &BStr) -> FsPoll<BString>;
+	fn readlink(&mut self, at: At<'_>) -> FsPoll<BString>;
 	/// Canonical physical path (`pwd -P`, `cd -P`).
-	fn realpath(&mut self, path: &BStr) -> FsPoll<BString>;
+	fn realpath(&mut self, at: At<'_>) -> FsPoll<BString>;
 	/// Create a FIFO or temp file (`<( )` on Windows, here-document spill).
 	fn mkfifo_or_temp(&mut self, purpose: TempPurpose) -> FsPoll<TempNode>;
-	/// Validate a `cd` target; the engine itself owns the cwd.
-	fn chdir_check(&mut self, path: &BStr) -> FsPoll<()>;
+	/// Enter a directory as `chdir` does (`cd`, a run's or subshell's
+	/// working directory): fails as `chdir` fails, for one the user may not
+	/// search too. `Some` holds the directory reached, where this host can
+	/// hold one; `None` leaves the vproc reading names from the name. The
+	/// engine itself owns the cwd's name.
+	fn open_dir(&mut self, at: At<'_>) -> FsPoll<Option<HeldDir>>;
+	/// The name `dir` has now, as `getcwd` answers for the directory a
+	/// process works in; fails (`ENOENT`) once it has been removed. Asked
+	/// only of a directory this host holds.
+	fn dir_path(&mut self, dir: &HeldDir) -> FsPoll<BString>;
 }
 
 /// Directory listing iterator.
@@ -314,8 +402,10 @@ pub enum FsOp {
 	RealPath,
 	/// [`Fs::mkfifo_or_temp`]
 	MkTemp,
-	/// [`Fs::chdir_check`]
+	/// [`Fs::open_dir`]
 	ChdirCheck,
+	/// [`Fs::dir_path`]
+	DirPath,
 }
 
 crate::bash::packed_names::packed_names!(FsOp);

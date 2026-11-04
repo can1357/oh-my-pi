@@ -17,7 +17,7 @@ use crate::bash::{
 		Cx, Kernel,
 		exec::{Flow, expanding},
 		expand::arith_value,
-		probe::{self, absolute},
+		probe,
 		proc::{PendingWrite, Probe, ProbeResult, Slot, Vproc},
 		state::{Level, Var},
 	},
@@ -93,7 +93,7 @@ fn stat(ctx: &Ctx<'_, '_>, arg: &[u8], follow: bool) -> T<Option<Stat>> {
 	if arg.is_empty() {
 		return Ok(None);
 	}
-	let path = absolute(&ctx.vp.cwd, arg);
+	let path = arg.into();
 	match ctx.probe(Probe::Stat { path, follow })? {
 		ProbeResult::Stat(s) => Ok(s),
 		_ => Ok(None),
@@ -185,7 +185,7 @@ fn unary(ctx: &mut Ctx<'_, '_>, op: u8, arg: &[u8], cond: bool) -> T<bool> {
 				b'w' => 2,
 				_ => 4,
 			};
-			let path = absolute(&ctx.vp.cwd, arg);
+			let path = arg.into();
 			ctx.probe(Probe::Access { path, mode })? == ProbeResult::Ok(true)
 		},
 		b'h' | b'L' => stat(ctx, arg, false)?.is_some_and(|s| s.kind == StatKind::Symlink),
