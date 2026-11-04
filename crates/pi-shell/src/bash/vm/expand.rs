@@ -1852,6 +1852,85 @@ impl<'e, 'c> Expander<'e, 'c> {
 		}
 	}
 
+	/// Where the prefix assignment to `name` goes
+	/// ([`super::command::prefix_target`]), found once: a replay of this
+	/// expansion gets the logged answer and warns of nothing again.
+	pub fn prefix_target(&mut self, name: &[u8]) -> X<super::command::PrefixTarget> {
+		// Logged as `[name, appends_to (empty: none), "r" when readonly]`.
+		let logged = self.read_atom(|ex| {
+			let t = super::command::prefix_target(ex.k, ex.vp, ex.cx, name, ex.line)?;
+			let readonly = BString::from(if t.readonly { "r" } else { "" });
+			Ok(Val::List {
+				items: vec![t.name, t.appends_to.unwrap_or_default(), readonly],
+				star:  false,
+			})
+		})?;
+		let Val::List { mut items, .. } = logged else {
+			unreachable!("a prefix target is logged as a list");
+		};
+		let readonly = items.pop().is_some_and(|r| !r.is_empty());
+		let appends_to = items.pop().filter(|n| !n.is_empty());
+		let name = items.pop().unwrap_or_default();
+		Ok(super::command::PrefixTarget { name, appends_to, readonly })
+	}
+
+	/// Queue the `set -x` line `body` once: a replay of this expansion does
+	/// not trace it again.
+	pub fn trace_once(&mut self, body: &[u8]) -> X<()> {
+		self.effect(|ex| {
+			super::xtrace::emit(ex.k, ex.cx, ex.vp, ex.line, body);
+			Ok(())
+		})
+	}
+
+	/// Whether output (a diagnostic, a trace) is queued on the vproc.
+	pub fn output_pending(&self) -> bool {
+		!self.vp.out.is_empty()
+	}
+
+	/// A compound value written before a command (`a=(x "y z") cmd`), as
+	/// bash gives it to the command: one string, `(`, each element's words
+	/// with its `[key]=`, single spaces between, `)`, expanded with no word
+	/// splitting and no tilde or pathname expansion (`(x y z)`).
+	pub fn compound_literal(
+		&mut self,
+		unit: &Arc<Unit>,
+		elems: &[crate::bash::ir::ElemIr],
+	) -> X<BString> {
+		let mut sink = Sink::Scalar(Vec::new());
+		sink.lit(b"(", false);
+		for (j, e) in elems.iter().enumerate() {
+			if j > 0 {
+				sink.lit(b" ", false);
+			}
+			if let Some(key) = e.key {
+				sink.lit(b"[", false);
+				self.word_tilde(
+					unit,
+					&unit.words[key as usize],
+					&mut sink,
+					false,
+					false,
+					Tilde::Off,
+				)?;
+				sink.lit(if e.append { b"]+=" } else { b"]=" }, false);
+			}
+			self.word_tilde(
+				unit,
+				&unit.words[e.value as usize],
+				&mut sink,
+				false,
+				false,
+				Tilde::Off,
+			)?;
+		}
+		sink.lit(b")", false);
+		match sink {
+			Sink::Scalar(b) => Ok(BString::from(b)),
+			_ => unreachable!(),
+		}
+	}
+
 	/// Expand the elements of a compound assignment `(…)`: a keyed element
 	/// to one value, an unkeyed one split into words like a command word
 	/// (`readonly a=($1)` with `$1` = `a b c` makes 3 elements). With

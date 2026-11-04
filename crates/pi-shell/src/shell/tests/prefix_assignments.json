@@ -1,0 +1,1166 @@
+[
+	{
+		"name": "an external command: the redirection word sees the old value",
+		"script": "x=foo; x=bar /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh >\"$x\"; ls; cat foo",
+		"bash": "foo\nx=<bar> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "an external command: a failing assignment makes no redirection",
+		"script": "( x=${missing:?BOOM} /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh >newfile ) 2>/dev/null; echo \"S=$?\"; ls",
+		"bash": "S=1\n",
+		"status": 0
+	},
+	{
+		"name": "an external command: the assignment reads the target first",
+		"script": "printf old >f2; x=$(cat f2) /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh >f2; cat f2",
+		"bash": "x=<old> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "an external command: an assignment's side effect comes first",
+		"script": "n=0; x=$((n+=1)) /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh >\"f$n\"; ls",
+		"bash": "f1\n",
+		"status": 0
+	},
+	{
+		"name": "an external command: the words come before the assignments",
+		"script": "n=0; x=$((n+=1)) /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh \"$n\"",
+		"bash": "x=<1> b=<> args=<0>\n",
+		"status": 0
+	},
+	{
+		"name": "an external command: a later assignment sees an earlier one",
+		"script": "a=0; x=$a a=1 b=$a /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh",
+		"bash": "x=<0> b=<1> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "an external command: substitutions run assignment first",
+		"script": "x=$(echo A >>log) /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh >\"$(echo R >>log; echo out)\"; cat log",
+		"bash": "A\nR\n",
+		"status": 0
+	},
+	{
+		"name": "an external command: a failing assignment reports on the shell's standard error",
+		"script": "( x=${missing:?BOOM} /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh 2>err ) 2>/dev/null; echo \"S=$?\"; [ -s err ] && echo IN-ERR || echo NOT-IN-ERR",
+		"bash": "S=1\nNOT-IN-ERR\n",
+		"status": 0
+	},
+	{
+		"name": "an external command: a failing redirection comes after the assignment",
+		"script": "x=$(echo A >>log) /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh 2>/dev/null >/nonexistent/dir/f; echo \"S=$?\"; cat log",
+		"bash": "S=1\nA\n",
+		"status": 0
+	},
+	{
+		"name": "an external command: in the background",
+		"script": "x=foo; x=bar /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh >\"$x\" & wait $!; ls; cat foo",
+		"bash": "foo\nx=<bar> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "a builtin: the redirection word sees the old value",
+		"script": "x=foo; x=bar printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >\"$x\"; ls; cat foo",
+		"bash": "foo\nx=<foo> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "a builtin: a failing assignment makes no redirection",
+		"script": "( x=${missing:?BOOM} printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >newfile ) 2>/dev/null; echo \"S=$?\"; ls",
+		"bash": "S=1\n",
+		"status": 0
+	},
+	{
+		"name": "a builtin: the assignment reads the target first",
+		"script": "printf old >f2; x=$(cat f2) printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >f2; cat f2",
+		"bash": "x=<> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "a builtin: an assignment's side effect comes first",
+		"script": "n=0; x=$((n+=1)) printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >\"f$n\"; ls",
+		"bash": "f1\n",
+		"status": 0
+	},
+	{
+		"name": "a builtin: the words come before the assignments",
+		"script": "n=0; x=$((n+=1)) printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$n\"",
+		"bash": "x=<> b=<> args=<0>\n",
+		"status": 0
+	},
+	{
+		"name": "a builtin: a later assignment sees an earlier one",
+		"script": "a=0; x=$a a=1 b=$a printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\"",
+		"bash": "x=<> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "a builtin: substitutions run assignment first",
+		"script": "x=$(echo A >>log) printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >\"$(echo R >>log; echo out)\"; cat log",
+		"bash": "A\nR\n",
+		"status": 0
+	},
+	{
+		"name": "a builtin: a failing assignment reports on the shell's standard error",
+		"script": "( x=${missing:?BOOM} printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" 2>err ) 2>/dev/null; echo \"S=$?\"; [ -s err ] && echo IN-ERR || echo NOT-IN-ERR",
+		"bash": "S=1\nNOT-IN-ERR\n",
+		"status": 0
+	},
+	{
+		"name": "a builtin: a failing redirection comes after the assignment",
+		"script": "x=$(echo A >>log) printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" 2>/dev/null >/nonexistent/dir/f; echo \"S=$?\"; cat log",
+		"bash": "S=1\nA\n",
+		"status": 0
+	},
+	{
+		"name": "a builtin: in the background",
+		"script": "x=foo; x=bar printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >\"$x\" & wait $!; ls; cat foo",
+		"bash": "foo\nx=<foo> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "a function: the redirection word sees the old value",
+		"script": "g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; x=foo; x=bar g >\"$x\"; ls; cat foo",
+		"bash": "foo\nx=<bar> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "a function: a failing assignment makes no redirection",
+		"script": "g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; ( x=${missing:?BOOM} g >newfile ) 2>/dev/null; echo \"S=$?\"; ls",
+		"bash": "S=1\n",
+		"status": 0
+	},
+	{
+		"name": "a function: the assignment reads the target first",
+		"script": "g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; printf old >f2; x=$(cat f2) g >f2; cat f2",
+		"bash": "x=<old> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "a function: an assignment's side effect comes first",
+		"script": "g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; n=0; x=$((n+=1)) g >\"f$n\"; ls",
+		"bash": "f1\n",
+		"status": 0
+	},
+	{
+		"name": "a function: the words come before the assignments",
+		"script": "g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; n=0; x=$((n+=1)) g \"$n\"",
+		"bash": "x=<1> b=<> args=<0>\n",
+		"status": 0
+	},
+	{
+		"name": "a function: a later assignment sees an earlier one",
+		"script": "g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; a=0; x=$a a=1 b=$a g",
+		"bash": "x=<0> b=<1> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "a function: substitutions run assignment first",
+		"script": "g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; x=$(echo A >>log) g >\"$(echo R >>log; echo out)\"; cat log",
+		"bash": "A\nR\n",
+		"status": 0
+	},
+	{
+		"name": "a function: a failing assignment reports on the shell's standard error",
+		"script": "g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; ( x=${missing:?BOOM} g 2>err ) 2>/dev/null; echo \"S=$?\"; [ -s err ] && echo IN-ERR || echo NOT-IN-ERR",
+		"bash": "S=1\nNOT-IN-ERR\n",
+		"status": 0
+	},
+	{
+		"name": "a function: a failing redirection comes after the assignment",
+		"script": "g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; x=$(echo A >>log) g 2>/dev/null >/nonexistent/dir/f; echo \"S=$?\"; cat log",
+		"bash": "S=1\nA\n",
+		"status": 0
+	},
+	{
+		"name": "a function: in the background",
+		"script": "g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; x=foo; x=bar g >\"$x\" & wait $!; ls; cat foo",
+		"bash": "foo\nx=<bar> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "command and an external command: the redirection word sees the old value",
+		"script": "x=foo; x=bar command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh >\"$x\"; ls; cat foo",
+		"bash": "foo\nx=<bar> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "command and an external command: a failing assignment makes no redirection",
+		"script": "( x=${missing:?BOOM} command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh >newfile ) 2>/dev/null; echo \"S=$?\"; ls",
+		"bash": "S=1\n",
+		"status": 0
+	},
+	{
+		"name": "command and an external command: the assignment reads the target first",
+		"script": "printf old >f2; x=$(cat f2) command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh >f2; cat f2",
+		"bash": "x=<old> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "command and an external command: an assignment's side effect comes first",
+		"script": "n=0; x=$((n+=1)) command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh >\"f$n\"; ls",
+		"bash": "f1\n",
+		"status": 0
+	},
+	{
+		"name": "command and an external command: the words come before the assignments",
+		"script": "n=0; x=$((n+=1)) command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh \"$n\"",
+		"bash": "x=<1> b=<> args=<0>\n",
+		"status": 0
+	},
+	{
+		"name": "command and an external command: a later assignment sees an earlier one",
+		"script": "a=0; x=$a a=1 b=$a command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh",
+		"bash": "x=<0> b=<1> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "command and an external command: substitutions run assignment first",
+		"script": "x=$(echo A >>log) command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh >\"$(echo R >>log; echo out)\"; cat log",
+		"bash": "A\nR\n",
+		"status": 0
+	},
+	{
+		"name": "command and an external command: a failing assignment reports on the shell's standard error",
+		"script": "( x=${missing:?BOOM} command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh 2>err ) 2>/dev/null; echo \"S=$?\"; [ -s err ] && echo IN-ERR || echo NOT-IN-ERR",
+		"bash": "S=1\nNOT-IN-ERR\n",
+		"status": 0
+	},
+	{
+		"name": "command and an external command: a failing redirection comes after the assignment",
+		"script": "x=$(echo A >>log) command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh 2>/dev/null >/nonexistent/dir/f; echo \"S=$?\"; cat log",
+		"bash": "S=1\nA\n",
+		"status": 0
+	},
+	{
+		"name": "command and an external command: in the background",
+		"script": "x=foo; x=bar command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh >\"$x\" & wait $!; ls; cat foo",
+		"bash": "foo\nx=<bar> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "command and a builtin: the redirection word sees the old value",
+		"script": "x=foo; x=bar command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >\"$x\"; ls; cat foo",
+		"bash": "foo\nx=<foo> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "command and a builtin: a failing assignment makes no redirection",
+		"script": "( x=${missing:?BOOM} command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >newfile ) 2>/dev/null; echo \"S=$?\"; ls",
+		"bash": "S=1\n",
+		"status": 0
+	},
+	{
+		"name": "command and a builtin: the assignment reads the target first",
+		"script": "printf old >f2; x=$(cat f2) command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >f2; cat f2",
+		"bash": "x=<> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "command and a builtin: an assignment's side effect comes first",
+		"script": "n=0; x=$((n+=1)) command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >\"f$n\"; ls",
+		"bash": "f1\n",
+		"status": 0
+	},
+	{
+		"name": "command and a builtin: the words come before the assignments",
+		"script": "n=0; x=$((n+=1)) command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$n\"",
+		"bash": "x=<> b=<> args=<0>\n",
+		"status": 0
+	},
+	{
+		"name": "command and a builtin: a later assignment sees an earlier one",
+		"script": "a=0; x=$a a=1 b=$a command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\"",
+		"bash": "x=<> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "command and a builtin: substitutions run assignment first",
+		"script": "x=$(echo A >>log) command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >\"$(echo R >>log; echo out)\"; cat log",
+		"bash": "A\nR\n",
+		"status": 0
+	},
+	{
+		"name": "command and a builtin: a failing assignment reports on the shell's standard error",
+		"script": "( x=${missing:?BOOM} command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" 2>err ) 2>/dev/null; echo \"S=$?\"; [ -s err ] && echo IN-ERR || echo NOT-IN-ERR",
+		"bash": "S=1\nNOT-IN-ERR\n",
+		"status": 0
+	},
+	{
+		"name": "command and a builtin: a failing redirection comes after the assignment",
+		"script": "x=$(echo A >>log) command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" 2>/dev/null >/nonexistent/dir/f; echo \"S=$?\"; cat log",
+		"bash": "S=1\nA\n",
+		"status": 0
+	},
+	{
+		"name": "command and a builtin: in the background",
+		"script": "x=foo; x=bar command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >\"$x\" & wait $!; ls; cat foo",
+		"bash": "foo\nx=<foo> b=<> args=<>\n",
+		"status": 0
+	},
+	{
+		"name": "no command: the assignments come first",
+		"script": "x=$(echo A >>log) >\"$(echo R >>log; echo out)\"; cat log; ls",
+		"bash": "A\nR\nlog\nout\n",
+		"status": 0
+	},
+	{
+		"name": "no command: a failing assignment makes no redirection",
+		"script": "( x=${missing:?BOOM} >newfile ) 2>/dev/null; echo \"S=$?\"; ls",
+		"bash": "S=1\n",
+		"status": 0
+	},
+	{
+		"name": "no command: the redirection word sees the assignment",
+		"script": "x=foo; x=bar >\"$x\"; ls; echo \"x=<$x>\"",
+		"bash": "bar\nx=<bar>\n",
+		"status": 0
+	},
+	{
+		"name": "no command: a failing redirection keeps the assignment",
+		"script": "x=1 2>/dev/null >/nonexistent/dir/f; echo \"S=$? x=<$x>\"",
+		"bash": "S=1 x=<1>\n",
+		"status": 0
+	},
+	{
+		"name": "no command: two assignments",
+		"script": "a=0; a=1 b=$a >\"f$a$b\"; ls; echo \"a=<$a> b=<$b>\"",
+		"bash": "f11\na=<1> b=<1>\n",
+		"status": 0
+	},
+	{
+		"name": "the words come before a redirection written first",
+		"script": ">\"$(echo R >>log; echo out)\" /bin/echo \"$(echo W >>log)\" >/dev/null; cat log",
+		"bash": "W\nR\n",
+		"status": 0
+	},
+	{
+		"name": "words, then assignments, then redirections",
+		"script": "x=$(echo A >>log) /bin/echo \"$(echo W >>log)\" >\"$(echo R >>log; echo out)\"; cat log",
+		"bash": "W\nA\nR\n",
+		"status": 0
+	},
+	{
+		"name": "an array element is not a valid identifier, and the command runs",
+		"script": "a[0]=x /bin/sh -c 'echo ran'; echo \"S=$? a=<${a[0]}>\"",
+		"bash": "`a[0]': not a valid identifier\nran\nS=0 a=<>\n",
+		"status": 0
+	},
+	{
+		"name": "an array element's index is not evaluated",
+		"script": "i=0; a[i++]=x /bin/true; echo \"S=$? i=<$i>\"",
+		"bash": "`a[i++]': not a valid identifier\nS=0 i=<0>\n",
+		"status": 0
+	},
+	{
+		"name": "an array element beside a scalar",
+		"script": "a[0]=x y=1 /bin/sh -c 'echo \"ran y=<$y>\"'; echo \"S=$?\"",
+		"bash": "`a[0]': not a valid identifier\nran y=<1>\nS=0\n",
+		"status": 0
+	},
+	{
+		"name": "an array element before a function",
+		"script": "g() { echo \"ran a=<${a[0]}>\"; }; a[0]=x g; echo \"S=$? a=<${a[0]}>\"",
+		"bash": "`a[0]': not a valid identifier\nran a=<>\nS=0 a=<>\n",
+		"status": 0
+	},
+	{
+		"name": "an array element's message is not redirected",
+		"script": "a[0]=x /bin/true 2>err; echo \"S=$?\"; [ -s err ] && echo IN-ERR || echo NOT-IN-ERR",
+		"bash": "`a[0]': not a valid identifier\nS=0\nNOT-IN-ERR\n",
+		"status": 0
+	},
+	{
+		"name": "an array element with no command is assigned",
+		"script": "a[0]=x; echo \"S=$? a=<${a[0]}>\"",
+		"bash": "S=0 a=<x>\n",
+		"status": 0
+	},
+	{
+		"name": "a later assignment changes an earlier one",
+		"script": "a=1 b=$((a+=1)) /bin/sh -c 'printf \"a=%s b=%s\\n\" \"$a\" \"$b\"'",
+		"bash": "a=2 b=2\n",
+		"status": 0
+	},
+	{
+		"name": "a later assignment sets an earlier empty one",
+		"script": "a= b=${a:=filled} /bin/sh -c 'printf \"a=%s b=%s\\n\" \"$a\" \"$b\"'",
+		"bash": "a=filled b=filled\n",
+		"status": 0
+	},
+	{
+		"name": "+= appends to the value the command would see",
+		"script": "x=hello; x+=world /bin/sh -c 'echo \"x=<$x>\"'; echo \"after=<$x>\"",
+		"bash": "x=<helloworld>\nafter=<hello>\n",
+		"status": 0
+	},
+	{
+		"name": "+= inside an enclosing command assignment",
+		"script": "g() { a+=b /bin/sh -c 'echo \"$a\"'; echo \"in=<$a>\"; }; a=a g; echo \"after=<$a>\"",
+		"bash": "ab\nin=<a>\nafter=<>\n",
+		"status": 0
+	},
+	{
+		"name": "+= on an unset variable",
+		"script": "unset x; x+=new /bin/sh -c 'echo \"x=<$x>\"'",
+		"bash": "x=<new>\n",
+		"status": 0
+	},
+	{
+		"name": "+= twice",
+		"script": "x=a; x+=b x+=c /bin/sh -c 'echo \"x=<$x>\"'",
+		"bash": "x=<abc>\n",
+		"status": 0
+	},
+	{
+		"name": "+= and a later assignment reading it",
+		"script": "x=a; x+=b y=$x /bin/sh -c 'echo \"y=<$y>\"'",
+		"bash": "y=<ab>\n",
+		"status": 0
+	},
+	{
+		"name": "an earlier assignment read by a later one",
+		"script": "a=1 b=$a /bin/sh -c 'echo \"b=<$b>\"'",
+		"bash": "b=<1>\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly name",
+		"script": "readonly a=old; a=new /bin/sh -c 'echo \"a=<$a>\"'; echo \"S=$? after=<$a>\"",
+		"bash": "a: readonly variable\na=<>\nS=0 after=<old>\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly name appended to",
+		"script": "readonly a=old; a+=new /bin/sh -c 'echo \"a=<$a>\"'; echo \"S=$? after=<$a>\"",
+		"bash": "a: readonly variable\na=<>\nS=0 after=<old>\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly name with another after it",
+		"script": "readonly a=old; a=new b=2 /bin/sh -c 'echo \"a=<$a> b=<$b>\"'; echo \"S=$?\"",
+		"bash": "a: readonly variable\na=<> b=<2>\nS=0\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly name with a redirection",
+		"script": "readonly a=old; a=new /bin/echo RAN >out 2>err; echo \"S=$?\"; cat out; [ -f err ] && echo HAS-ERR",
+		"bash": "a: readonly variable\nS=0\nRAN\nHAS-ERR\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds another",
+		"script": "x=original; declare -n ref=x; ref=changed /bin/sh -c 'echo \"x=<$x> ref=<$ref>\"'; echo \"after=<$x>\"",
+		"bash": "x=<changed> ref=<>\nafter=<original>\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds another, appended to",
+		"script": "x=orig; declare -n ref=x; ref+=more /bin/sh -c 'echo \"x=<$x>\"'; echo \"after=<$x>\"",
+		"bash": "x=<origmore>\nafter=<orig>\n",
+		"status": 0
+	},
+	{
+		"name": "a lowercase name appended to, seen by a command",
+		"script": "declare -l a=AbC; a+=NeW /usr/bin/env | /bin/grep '^a='",
+		"bash": "a=abcnew\n",
+		"status": 0
+	},
+	{
+		"name": "an uppercase name appended to, seen by a command",
+		"script": "declare -u a=AbC; a+=NeW /usr/bin/env | /bin/grep '^a='",
+		"bash": "a=ABCNEW\n",
+		"status": 0
+	},
+	{
+		"name": "a lowercase name appended to, seen by a function",
+		"script": "declare -l a=AbC; f() { echo \"in=<$a>\"; }; a+=NeW f",
+		"bash": "in=<abcnew>\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly name read by a later assignment",
+		"script": "readonly a=old; a=new b=$a /bin/sh -c 'printf \"a=<%s> b=<%s>\\n\" \"$a\" \"$b\"'; echo \"after=<$a>\"",
+		"bash": "a: readonly variable\na=<> b=<old>\nafter=<old>\n",
+		"status": 0
+	},
+	{
+		"name": "an exported readonly name",
+		"script": "declare -rx a=old; a=new /bin/sh -c 'echo \"a=<$a>\"'",
+		"bash": "a: readonly variable\na=<old>\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly name before a function",
+		"script": "readonly a=old; f() { echo \"in=<$a>\"; declare -p a; }; a=new f",
+		"bash": "a: readonly variable\nin=<old>\ndeclare -r a=\"old\"\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly name twice",
+		"script": "readonly a=old; a=one a=two /bin/echo RAN",
+		"bash": "a: readonly variable\na: readonly variable\nRAN\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly PATH",
+		"script": "readonly PATH; PATH=/invalid /usr/bin/env >out; /bin/grep -c '^PATH=/' out",
+		"bash": "PATH: readonly variable\n1\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly name's value is not expanded",
+		"script": "readonly a=old; n=0; a=${missing:?BOOM}$((n+=1)) /bin/echo RAN; echo \"status=$? after=<$a> n=$n\"",
+		"bash": "a: readonly variable\nRAN\nstatus=0 after=<old> n=0\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly name is not in a function's environment",
+		"script": "readonly a=old; f() { /usr/bin/env | /bin/grep '^a=' || echo no-a; echo \"in=<$a>\"; }; a=new f",
+		"bash": "a: readonly variable\nno-a\nin=<old>\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds a readonly one",
+		"script": "readonly x=old; declare -n ref=x; ref=new /bin/echo RAN",
+		"bash": "ref: readonly variable\nRAN\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds another, read by a later assignment",
+		"script": "x=original; declare -n ref=x; ref=3 b=$ref /usr/bin/env | /bin/grep -E '^(x|ref|b)=' | /usr/bin/sort",
+		"bash": "b=3\nx=3\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds another, appended to and read",
+		"script": "x=original; declare -n ref=x; ref+=3 b=$ref /usr/bin/env | /bin/grep -E '^(x|ref|b)=' | /usr/bin/sort",
+		"bash": "b=original3\nx=original3\n",
+		"status": 0
+	},
+	{
+		"name": "two names that hold others, read by a later assignment",
+		"script": "x=original; declare -n mid=x; declare -n ref=mid; ref=3 b=$ref /usr/bin/env | /bin/grep -E '^(x|ref|mid|b)=' | /usr/bin/sort",
+		"bash": "b=3\nx=3\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds another, read in a function",
+		"script": "x=original; declare -n ref=x; f() { echo \"in=<$ref> x=<$x>\"; }; ref=3 f",
+		"bash": "in=<3> x=<3>\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds an array element",
+		"script": "a=(zero one); declare -n ref='a[1]'; ref=new /usr/bin/env | /bin/grep -E '^(ref|a)'",
+		"bash": "ref=new\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds another, assigned twice",
+		"script": "printf KEEP >first; dest=old; declare -n ref=dest; ref=first ref=second /bin/sh -c 'printf NEW >\"$dest\"'; echo \"first=<$(cat first)> second=<$(cat second)>\"",
+		"bash": "first=<KEEP> second=<NEW>\n",
+		"status": 0
+	},
+	{
+		"name": "a ring of names that hold each other",
+		"script": "declare -n ref=second; declare -n second=third; declare -n third=ref; ref=new /bin/sh -c 'printf \"ref=<%s> second=<%s> third=<%s>\\n\" \"$ref\" \"$second\" \"$third\"'",
+		"bash": "warning: ref: circular name reference\nref=<new> second=<> third=<>\n",
+		"status": 0
+	},
+	{
+		"name": "an integer name",
+		"script": "declare -i a=0; a=3+4 /bin/sh -c 'echo \"a=<$a>\"'; echo \"after=<$a>\"",
+		"bash": "a=<3+4>\nafter=<0>\n",
+		"status": 0
+	},
+	{
+		"name": "an integer name appended to",
+		"script": "declare -i a=5; a+=3 /bin/sh -c 'echo \"a=<$a>\"'; echo \"after=<$a>\"",
+		"bash": "a=<8>\nafter=<5>\n",
+		"status": 0
+	},
+	{
+		"name": "an integer name in a function",
+		"script": "declare -i a=0; f() { a+=1; echo \"in=<$a>\"; }; a+=3 f; echo \"after=<$a>\"",
+		"bash": "in=<31>\nafter=<0>\n",
+		"status": 0
+	},
+	{
+		"name": "an array name appended to",
+		"script": "a=(\"\" 2); f() { printf \"in=<%s>\\n\" \"${a[@]}\"; }; a+=3 f; printf \"after=<%s>\\n\" \"${a[@]}\"",
+		"bash": "in=<3>\nafter=<>\nafter=<2>\n",
+		"status": 0
+	},
+	{
+		"name": "an array name appended to, seen by a command",
+		"script": "a=(x y); a+=3 /bin/sh -c 'echo \"a=<$a>\"'",
+		"bash": "a=<x3>\n",
+		"status": 0
+	},
+	{
+		"name": "a lowercase name appended to",
+		"script": "declare -l a=; f() { a=DEF; echo \"in=<$a>\"; }; a+=abc f; echo \"after=<$a>\"",
+		"bash": "in=<DEF>\nafter=<>\n",
+		"status": 0
+	},
+	{
+		"name": "an uppercase name",
+		"script": "declare -u a=; f() { echo \"in=<$a>\"; a=def; echo \"in2=<$a>\"; }; a=abc f",
+		"bash": "in=<abc>\nin2=<def>\n",
+		"status": 0
+	},
+	{
+		"name": "an exported name",
+		"script": "declare -x a=old; a=new /bin/sh -c 'echo \"a=<$a>\"'; echo \"after=<$a>\"",
+		"bash": "a=<new>\nafter=<old>\n",
+		"status": 0
+	},
+	{
+		"name": "a local name appended to",
+		"script": "f() { local a=in; a+=X /bin/sh -c 'echo \"a=<$a>\"'; echo \"in=<$a>\"; }; a=out; f; echo \"after=<$a>\"",
+		"bash": "a=<inX>\nin=<in>\nafter=<out>\n",
+		"status": 0
+	},
+	{
+		"name": "an associative name appended to",
+		"script": "declare -A a=([k]=v); a+=3 /bin/sh -c 'echo \"a=<$a>\"'",
+		"bash": "a=<3>\n",
+		"status": 0
+	},
+	{
+		"name": "a name reached again through a name that holds it",
+		"script": "printf KEEP >first; dest=old; declare -n mid=dest; declare -n ref=mid\nmid=first ref=second /bin/sh -c 'printf NEW >\"$dest\"'\necho \"first=<$(cat first)>\"; [ -f second ] && echo \"second=<$(cat second)>\"; echo \"after dest=<$dest>\"",
+		"bash": "first=<KEEP>\nsecond=<NEW>\nafter dest=<old>\n",
+		"status": 0
+	},
+	{
+		"name": "the first of two names that hold others, then the second",
+		"script": "dest=old; declare -n mid=dest; declare -n ref=mid\nref=first mid=second /bin/sh -c 'printf \"dest=<%s> mid=<%s> ref=<%s> a=<%s> b=<%s>\\n\" \"$dest\" \"$mid\" \"$ref\" \"$a\" \"$b\"'\necho \"after=<$dest>\"",
+		"bash": "dest=<second> mid=<> ref=<> a=<> b=<>\nafter=<old>\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds another, then that one",
+		"script": "dest=old; declare -n ref=dest\nref=first dest=second /bin/sh -c 'printf \"dest=<%s> mid=<%s> ref=<%s> a=<%s> b=<%s>\\n\" \"$dest\" \"$mid\" \"$ref\" \"$a\" \"$b\"'",
+		"bash": "dest=<second> mid=<> ref=<> a=<> b=<>\n",
+		"status": 0
+	},
+	{
+		"name": "a name, then a name that holds it",
+		"script": "dest=old; declare -n ref=dest\ndest=first ref=second /bin/sh -c 'printf \"dest=<%s> mid=<%s> ref=<%s> a=<%s> b=<%s>\\n\" \"$dest\" \"$mid\" \"$ref\" \"$a\" \"$b\"'",
+		"bash": "dest=<second> mid=<> ref=<> a=<> b=<>\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds another, declared before that one holds a third",
+		"script": "dest=old; declare -n ref=mid; declare -n mid=dest\nref=first /bin/sh -c 'printf \"dest=<%s> mid=<%s> ref=<%s> a=<%s> b=<%s>\\n\" \"$dest\" \"$mid\" \"$ref\" \"$a\" \"$b\"'",
+		"bash": "dest=<first> mid=<> ref=<> a=<> b=<>\n",
+		"status": 0
+	},
+	{
+		"name": "two names that hold the same one",
+		"script": "a=old; declare -n r1=a; declare -n r2=a\nr1=first r2=second /bin/sh -c 'echo \"a=<$a> r1=<$r1> r2=<$r2>\"'",
+		"bash": "a=<second> r1=<> r2=<>\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds another, read through a second such name",
+		"script": "a=old; declare -n r1=a; declare -n r2=a\nr1=first b=$r2 /bin/sh -c 'echo \"a=<$a> b=<$b>\"'",
+		"bash": "a=<first> b=<first>\n",
+		"status": 0
+	},
+	{
+		"name": "the middle of two names that hold others, read later",
+		"script": "dest=old; declare -n mid=dest; declare -n ref=mid\nref=first b=$mid /bin/sh -c 'echo \"dest=<$dest> b=<$b>\"'",
+		"bash": "dest=<first> b=<first>\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds another, then that one, then a read",
+		"script": "a=old; declare -n ref=a\nref=first a=direct b=$ref /bin/sh -c 'printf \"a=<%s> b=<%s>\\n\" \"$a\" \"$b\"'",
+		"bash": "a=<direct> b=<direct>\n",
+		"status": 0
+	},
+	{
+		"name": "two names that hold others, each assigned, then a read",
+		"script": "a=old; declare -n mid=a; declare -n ref=mid\nref=first mid=second a=direct b=$ref /bin/sh -c 'printf \"a=<%s> b=<%s>\\n\" \"$a\" \"$b\"'",
+		"bash": "a=<direct> b=<direct>\n",
+		"status": 0
+	},
+	{
+		"name": "a ring of names, then a name on it",
+		"script": "declare -n ref=second; declare -n second=third; declare -n third=ref\nref=new second=x /bin/sh -c 'printf \"ref=<%s> second=<%s> third=<%s>\\n\" \"$ref\" \"$second\" \"$third\"'",
+		"bash": "warning: ref: circular name reference\nref=<x> second=<> third=<>\n",
+		"status": 0
+	},
+	{
+		"name": "a name on a ring of names",
+		"script": "declare -n ref=second; declare -n second=third; declare -n third=ref\nsecond=x /bin/sh -c 'printf \"ref=<%s> second=<%s> third=<%s>\\n\" \"$ref\" \"$second\" \"$third\"'",
+		"bash": "warning: second: circular name reference\nref=<> second=<x> third=<>\n",
+		"status": 0
+	},
+	{
+		"name": "a name that leads into a ring of names",
+		"script": "declare -n a=b; declare -n b=c; declare -n c=b\na=x /bin/sh -c 'printf \"a=<%s> b=<%s> c=<%s>\\n\" \"$a\" \"$b\" \"$c\"'; echo S=$?",
+		"bash": "warning: a: maximum nameref depth (8) exceeded\na=<x> b=<> c=<>\nS=0\n",
+		"status": 0,
+		"bash_5_2": "a=<x> b=<> c=<>\nS=0\n",
+		"status_5_2": 0
+	},
+	{
+		"name": "eight names that hold others",
+		"script": "declare -n n1=n2; declare -n n2=n3; declare -n n3=n4; declare -n n4=n5; declare -n n5=n6; declare -n n6=n7; declare -n n7=n8; declare -n n8=t; t=old\nn1=new /usr/bin/env | /bin/grep -E '^(n[0-9]+|t)=' | /usr/bin/sort; echo \"after t=<$t>\"",
+		"bash": "t=new\nafter t=<old>\n",
+		"status": 0
+	},
+	{
+		"name": "nine names that hold others",
+		"script": "declare -n n1=n2; declare -n n2=n3; declare -n n3=n4; declare -n n4=n5; declare -n n5=n6; declare -n n6=n7; declare -n n7=n8; declare -n n8=n9; declare -n n9=t; t=old\nn1=new /usr/bin/env | /bin/grep -E '^(n[0-9]+|t)=' | /usr/bin/sort; echo \"after t=<$t>\"",
+		"bash": "warning: n1: maximum nameref depth (8) exceeded\nn1=new\nafter t=<old>\n",
+		"status": 0,
+		"bash_5_2": "n1=new\nafter t=<old>\n",
+		"status_5_2": 0
+	},
+	{
+		"name": "a name that holds nothing",
+		"script": "declare -n ref\nref=x /usr/bin/env | /bin/grep -E '^ref='; echo S=$?",
+		"bash": "ref=x\nS=0\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds an unset one",
+		"script": "declare -n ref=nosuch\nref=x /usr/bin/env | /bin/grep -E '^(ref|nosuch)='",
+		"bash": "nosuch=x\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds an array element, appended to",
+		"script": "a=(zero one); declare -n ref='a[1]'\nref+=new /usr/bin/env | /bin/grep -E '^(ref|a)='",
+		"bash": "ref=a[1]new\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds a declared, unset one",
+		"script": "declare dest; declare -n ref=dest\nref+=x /usr/bin/env | /bin/grep -E '^(ref|dest)='",
+		"bash": "dest=x\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds another, assigned and appended to",
+		"script": "dest=old; declare -n ref=dest\nref=first ref+=second /bin/sh -c 'printf \"dest=<%s> mid=<%s> ref=<%s> a=<%s> b=<%s>\\n\" \"$dest\" \"$mid\" \"$ref\" \"$a\" \"$b\"'",
+		"bash": "dest=<firstsecond> mid=<> ref=<> a=<> b=<>\n",
+		"status": 0
+	},
+	{
+		"name": "a name, then a name that holds it appended to",
+		"script": "dest=old; declare -n ref=dest\ndest=a ref+=b /bin/sh -c 'printf \"dest=<%s> mid=<%s> ref=<%s> a=<%s> b=<%s>\\n\" \"$dest\" \"$mid\" \"$ref\" \"$a\" \"$b\"'",
+		"bash": "dest=<ab> mid=<> ref=<> a=<> b=<>\n",
+		"status": 0
+	},
+	{
+		"name": "an integer name through a name that holds it, appended to",
+		"script": "declare -i x=5; declare -n ref=x\nref+=3+4 /bin/sh -c 'echo \"x=<$x>\"'; echo \"after=<$x>\"",
+		"bash": "x=<12>\nafter=<5>\n",
+		"status": 0
+	},
+	{
+		"name": "an integer name through a name that holds it",
+		"script": "declare -i x=5; declare -n ref=x\nref=3+4 /bin/sh -c 'echo \"x=<$x>\"'",
+		"bash": "x=<3+4>\n",
+		"status": 0
+	},
+	{
+		"name": "an integer name appended to twice",
+		"script": "declare -i x=5; declare -n ref=x\nref+=3+4 x+=1 /bin/sh -c 'echo \"x=<$x>\"'",
+		"bash": "x=<121>\n",
+		"status": 0
+	},
+	{
+		"name": "an integer name assigned, then appended to",
+		"script": "declare -i x=5\nx=1 x+=2+3 /bin/sh -c 'echo \"x=<$x>\"'",
+		"bash": "x=<12+3>\n",
+		"status": 0
+	},
+	{
+		"name": "an integer name appended to with a side effect",
+		"script": "declare -i x=5; n=2\nx+=n++ /bin/sh -c 'echo \"x=<$x>\"'; echo \"n=$n\"",
+		"bash": "x=<7>\nn=3\n",
+		"status": 0
+	},
+	{
+		"name": "an integer name appended to with a division by zero",
+		"script": "declare -i x=5\nx+=1/0 /bin/echo RAN >out; echo \"same-line S=$?\"\necho next-line S=$?",
+		"bash": "1/0: division by 0 (error token is \"0\")\nnext-line S=1\n",
+		"status": 0
+	},
+	{
+		"name": "an integer name appended to with a syntax error",
+		"script": "declare -i x=5\nx+='3+' /bin/echo RAN; echo \"same S=$?\"\necho next S=$?",
+		"bash": "3+: arithmetic syntax error: operand expected (error token is \"+\")\nnext S=1\n",
+		"status": 0,
+		"bash_5_2": "3+: syntax error: operand expected (error token is \"+\")\nnext S=1\n",
+		"status_5_2": 0
+	},
+	{
+		"name": "an integer name appended to with nothing",
+		"script": "declare -i x=5\nx+= /bin/sh -c 'echo \"x=<$x>\"'",
+		"bash": "x=<5>\n",
+		"status": 0
+	},
+	{
+		"name": "a lowercase name through a name that holds it, appended to",
+		"script": "declare -l x=AbC; declare -n ref=x\nref+=NeW /bin/sh -c 'echo \"x=<$x>\"'",
+		"bash": "x=<abcnew>\n",
+		"status": 0
+	},
+	{
+		"name": "an uppercase name through two names that hold others, appended to",
+		"script": "declare -u x=ab; declare -n mid=x; declare -n ref=mid\nref+=cd /bin/sh -c 'echo \"x=<$x>\"'",
+		"bash": "x=<ABCD>\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly name at the end of two names that hold others",
+		"script": "readonly dest=old; declare -n mid=dest; declare -n ref=mid\nref=x /bin/echo RAN",
+		"bash": "ref: readonly variable\nRAN\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly name through two names, each assigned",
+		"script": "readonly dest=old; declare -n mid=dest; declare -n ref=mid\nmid=x ref=y /bin/sh -c 'echo \"dest=<$dest>\"'",
+		"bash": "mid: readonly variable\nref: readonly variable\ndest=<>\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly name that holds an array element",
+		"script": "declare -rn ref='a[1]' 2>&1\nref=x /bin/echo RAN",
+		"bash": "ref: readonly variable\nRAN\n",
+		"status": 0
+	},
+	{
+		"name": "a function writing through a name that holds another",
+		"script": "printf KEEP >first; dest=old; declare -n ref=dest; f() { printf NEW >\"$ref\"; }\nref=first dest=second f\necho \"first=<$(cat first)>\"; [ -f second ] && echo \"second=<$(cat second)>\"",
+		"bash": "first=<KEEP>\nsecond=<NEW>\n",
+		"status": 0
+	},
+	{
+		"name": "a function reading a name that holds another, then changing that one",
+		"script": "dest=old; declare -n ref=dest; f() { echo \"in=<$ref>\"; dest=changed; echo \"in2=<$ref>\"; }\nref=first f; echo \"after=<$dest> ref=<$ref>\"",
+		"bash": "in=<first>\nin2=<changed>\nafter=<old> ref=<old>\n",
+		"status": 0
+	},
+	{
+		"name": "a nested function's local, read through a name that holds it",
+		"script": "dest=old; declare -n ref=dest; g() { local dest=local; echo \"g=<$ref>\"; }; f() { echo \"f=<$ref>\"; g; }\nref=new f",
+		"bash": "f=<new>\ng=<local>\n",
+		"status": 0
+	},
+	{
+		"name": "a prefix assignment in a function called with one",
+		"script": "dest=old; declare -n ref=dest; f() { ref=inner /bin/sh -c 'echo \"child dest=<$dest>\"'; echo \"f dest=<$dest> ref=<$ref>\"; }\nref=outer f; echo \"after=<$dest>\"",
+		"bash": "child dest=<inner>\nf dest=<outer> ref=<outer>\nafter=<old>\n",
+		"status": 0
+	},
+	{
+		"name": "a local name that holds a local one",
+		"script": "f() { local dest=old; local -n ref=dest; ref=new /bin/sh -c 'echo \"dest=<$dest> ref=<$ref>\"'; echo \"after=<$dest>\"; }\nf",
+		"bash": "dest=<new> ref=<>\nafter=<old>\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds a function's local",
+		"script": "declare -n ref=dest; dest=global; f() { local dest=local; ref=new /bin/sh -c 'echo \"dest=<$dest>\"'; echo \"after=<$dest>\"; }\nf; echo \"global=<$dest>\"",
+		"bash": "dest=<new>\nafter=<local>\nglobal=<global>\n",
+		"status": 0
+	},
+	{
+		"name": "an exported name that holds another",
+		"script": "dest=old; declare -nx ref=dest\nref=new /bin/sh -c 'echo \"ref=<$ref> dest=<$dest>\"'",
+		"bash": "ref=<dest> dest=<new>\n",
+		"status": 0
+	},
+	{
+		"name": "an exported name that holds a second, which holds a third",
+		"script": "dest=old; declare -nx ref=mid; declare -n mid=dest\nref=new /usr/bin/env | /bin/grep -E '^(ref|mid|dest)=' | /usr/bin/sort",
+		"bash": "dest=new\nref=mid\n",
+		"status": 0
+	},
+	{
+		"name": "a name that holds an exported one",
+		"script": "export dest=old; declare -n ref=dest\nref=new /bin/sh -c 'echo \"dest=<$dest>\"'; declare -p dest",
+		"bash": "dest=<new>\ndeclare -x dest=\"old\"\n",
+		"status": 0
+	},
+	{
+		"name": "a special builtin with a name that holds another",
+		"script": "dest=old; declare -n ref=dest\nref=new :; echo \"after=<$dest>\"",
+		"bash": "after=<old>\n",
+		"status": 0
+	},
+	{
+		"name": "eval with a name that holds another",
+		"script": "dest=old; declare -n ref=dest\nref=new eval 'echo \"dest=<$dest> ref=<$ref>\"'; echo \"after=<$dest>\"",
+		"bash": "dest=<new> ref=<new>\nafter=<old>\n",
+		"status": 0
+	},
+	{
+		"name": "source with a name that holds another",
+		"script": "dest=old; declare -n ref=dest; echo 'echo \"src dest=<$dest> ref=<$ref>\"' >s.sh\nref=new . ./s.sh; echo \"after=<$dest>\"",
+		"bash": "src dest=<new> ref=<new>\nafter=<old>\n",
+		"status": 0
+	},
+	{
+		"name": "a redirection's word and a name that holds another",
+		"script": "dest=old; declare -n ref=dest\nref=new /bin/echo hi >\"$ref\"; ls",
+		"bash": "old\n",
+		"status": 0
+	},
+	{
+		"name": "an arithmetic write through a name that holds another",
+		"script": "dest=1; declare -n ref=dest\nref=5 b=$((ref+=1)) /bin/sh -c 'echo \"dest=<$dest> b=<$b>\"'; echo \"after=<$dest>\"",
+		"bash": "dest=<6> b=<6>\nafter=<1>\n",
+		"status": 0
+	},
+	{
+		"name": "set -x with a name that holds another",
+		"script": "dest=old; declare -n ref=dest\nset -x\nref=new /bin/true\nset +x",
+		"bash": "+ ref=new\n+ /bin/true\n+ set +x\n",
+		"status": 0
+	},
+	{
+		"name": "set -x with an append",
+		"script": "x=hello; set -x\nx+=world /bin/true\nset +x",
+		"bash": "+ x=helloworld\n+ /bin/true\n+ set +x\n",
+		"status": 0
+	},
+	{
+		"name": "set -x with an integer append",
+		"script": "declare -i n=5; set -x\nn+=2*3 /bin/true\nset +x",
+		"bash": "+ n=11\n+ /bin/true\n+ set +x\n",
+		"status": 0
+	},
+	{
+		"name": "set -x with an append through a name that holds another",
+		"script": "dest=old; declare -n ref=dest; set -x\nref+=new /bin/true\nset +x",
+		"bash": "+ ref=oldnew\n+ /bin/true\n+ set +x\n",
+		"status": 0
+	},
+	{
+		"name": "set -x with a compound append",
+		"script": "a=zero; set -x\na+=(x y) /bin/true\nset +x",
+		"bash": "+ a='zero(x y)'\n+ /bin/true\n+ set +x\n",
+		"status": 0
+	},
+	{
+		"name": "set -x with two substitutions before a command",
+		"script": "set -x\nx=$(echo a) y=$(echo b) /bin/true\nset +x",
+		"bash": "++ echo a\n+ x=a\n++ echo b\n+ y=b\n+ /bin/true\n+ set +x\n",
+		"status": 0
+	},
+	{
+		"name": "set -x with two substitutions and no command",
+		"script": "set -x\nx=$(echo a) y=$(echo b)\nset +x",
+		"bash": "++ echo a\n+ x=a\n++ echo b\n+ y=b\n+ set +x\n",
+		"status": 0
+	},
+	{
+		"name": "set -x with a readonly name, then a substitution",
+		"script": "readonly r=1; set -x\nr=2 s=$(echo b) /bin/true\nset +x",
+		"bash": "r: readonly variable\n++ echo b\n+ s=b\n+ /bin/true\n+ set +x\n",
+		"status": 0
+	},
+	{
+		"name": "set -x with a compound assignment and no command",
+		"script": "set -x\na=(x $(echo y))\nset +x",
+		"bash": "+ a=(x $(echo y))\n++ echo y\n+ set +x\n",
+		"status": 0
+	},
+	{
+		"name": "a compound value appended to an array",
+		"script": "declare -a a=(zero one)\na+=(two three) /bin/sh -c 'echo \"a=<$a>\"'",
+		"bash": "a=<zero(two three)>\n",
+		"status": 0
+	},
+	{
+		"name": "a compound value appended to an associative array",
+		"script": "declare -A a=([k]=v [0]=zero)\na+=([k]=new [0]=end) /bin/sh -c 'echo \"a=<$a>\"'",
+		"bash": "a=<zero([k]=new [0]=end)>\n",
+		"status": 0
+	},
+	{
+		"name": "a compound value with quotes and an unset word",
+		"script": "a=(x \"y z\" $HOME_NOPE) /bin/sh -c 'echo \"a=<$a>\"'",
+		"bash": "a=<(x y z )>\n",
+		"status": 0
+	},
+	{
+		"name": "a compound value is not split, globbed or tilde-expanded",
+		"script": "touch f1 f2; a=(f*) /bin/sh -c 'echo \"a=<$a>\"'",
+		"bash": "a=<(f*)>\n",
+		"status": 0
+	},
+	{
+		"name": "a compound value's tildes",
+		"script": "HOME=/h; a=(~ x:~) /bin/sh -c 'echo \"a=<$a>\"'",
+		"bash": "a=<(~ x:~)>\n",
+		"status": 0
+	},
+	{
+		"name": "a compound value's keys",
+		"script": "k=K v=V; a=([$k]=$v) /bin/sh -c 'echo \"a=<$a>\"'",
+		"bash": "a=<([K]=V)>\n",
+		"status": 0
+	},
+	{
+		"name": "a compound value's expansions are not split",
+		"script": "sp='1  2'; a=(x $sp) /bin/sh -c 'echo \"a=<$a>\"'",
+		"bash": "a=<(x 1  2)>\n",
+		"status": 0
+	},
+	{
+		"name": "an empty compound value",
+		"script": "a=() /bin/sh -c 'echo \"a=<$a>\"'",
+		"bash": "a=<()>\n",
+		"status": 0
+	},
+	{
+		"name": "a compound value appended through a name that holds another",
+		"script": "a=zero; declare -n ref=a\nref+=(two three) /bin/sh -c 'echo \"a=<$a>\"'",
+		"bash": "a=<zero(two three)>\n",
+		"status": 0
+	},
+	{
+		"name": "set -x with a compound value",
+		"script": "set -x\na=(x y) /bin/true\nset +x",
+		"bash": "+ a='(x y)'\n+ /bin/true\n+ set +x\n",
+		"status": 0
+	},
+	{
+		"name": "a compound value seen by a function",
+		"script": "f() { declare -p a; echo \"<$a>\"; }\na=(x y) f",
+		"bash": "declare -x a=\"(x y)\"\n<(x y)>\n",
+		"status": 0
+	},
+	{
+		"name": "a ring of local names in a function",
+		"script": "f() { local -n r1=r2; local -n r2=r1; r1=v /bin/sh -c 'printf \"r1=<%s> r2=<%s>\\n\" \"$r1\" \"$r2\"'; }\nf; echo S=$?",
+		"bash": "warning: r1: circular name reference\nr1=<v> r2=<>\nS=0\n",
+		"status": 0
+	},
+	{
+		"name": "a function reading names on a ring",
+		"script": "declare -n ref=second; declare -n second=third; declare -n third=ref\nf() { printf 'ref=<%s> second=<%s> third=<%s>\\n' \"$ref\" \"$second\" \"$third\"; }\nref=new f 2>&1",
+		"bash": "warning: ref: circular name reference\nref=<new> second=<new> third=<new>\n",
+		"status": 0
+	},
+	{
+		"name": "a function reading a name that holds one assigned directly",
+		"script": "dest=old; declare -n ref=dest; f() { echo \"in=<$ref>\"; }\ndest=new f",
+		"bash": "in=<new>\n",
+		"status": 0
+	},
+	{
+		"name": "a nested function reading a name that holds another",
+		"script": "dest=old; declare -n ref=dest; g() { echo \"g=<$ref> dest=<$dest>\"; }; f() { x=1 g; }\nref=outer f",
+		"bash": "g=<outer> dest=<outer>\n",
+		"status": 0
+	},
+	{
+		"name": "an integer append's division by zero before a function",
+		"script": "declare -i x=5; f() { echo RAN; }\nx+=1/0 f; echo \"same S=$?\"\necho next S=$?",
+		"bash": "1/0: division by 0 (error token is \"0\")\nnext S=1\n",
+		"status": 0
+	},
+	{
+		"name": "an integer append's division by zero before a builtin",
+		"script": "declare -i x=5\nx+=1/0 echo RAN; echo \"same S=$?\"\necho next S=$?",
+		"bash": "1/0: division by 0 (error token is \"0\")\nnext S=1\n",
+		"status": 0
+	},
+	{
+		"name": "an integer append's division by zero after another assignment",
+		"script": "declare -i x=5; n=0\n( y=$((n+=1)) x+=1/0 /bin/echo RAN >out; echo same ) 2>/dev/null; echo \"S=$? n=$n\"; ls",
+		"bash": "S=1 n=0\n",
+		"status": 0
+	},
+	{
+		"name": "export lists no prefix assignment",
+		"script": "x=1 export | /bin/grep -c '^declare -x x=' ; :",
+		"bash": "0\n",
+		"status": 0
+	},
+	{
+		"name": "declare -x lists no prefix assignment",
+		"script": "x=1 declare -x | /bin/grep -c '^declare -x x=' ; :",
+		"bash": "0\n",
+		"status": 0
+	},
+	{
+		"name": "declare -p names a prefix assignment",
+		"script": "x=1 declare -p x",
+		"bash": "declare -x x=\"1\"\n",
+		"status": 0
+	},
+	{
+		"name": "set lists no prefix assignment",
+		"script": "x=1 set | /bin/grep -c '^x=' ; :",
+		"bash": "0\n",
+		"status": 0
+	},
+	{
+		"name": "eval's own commands list its prefix assignment",
+		"script": "x=1 eval 'declare -x' | /bin/grep -c '^declare -x x=' ; :",
+		"bash": "1\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly name's message before a builtin's redirection",
+		"script": "readonly a=1; a=2 echo hi 2>err; echo S=$?; cat err",
+		"bash": "a: readonly variable\nhi\nS=0\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly name's message before a function's redirection",
+		"script": "readonly a=1; f() { echo in-f; }; a=2 f 2>err; echo S=$?; cat err",
+		"bash": "a: readonly variable\nin-f\nS=0\n",
+		"status": 0
+	},
+	{
+		"name": "an array element's message before a function's redirection",
+		"script": "f() { echo in-f; }; a[0]=2 f 2>err; echo S=$?; cat err",
+		"bash": "`a[0]': not a valid identifier\nin-f\nS=0\n",
+		"status": 0
+	},
+	{
+		"name": "a ring's warning before a command's redirection",
+		"script": "declare -n r1=r2; declare -n r2=r1; r1=v /bin/true 2>err; echo S=$?; cat err",
+		"bash": "warning: r1: circular name reference\nS=0\n",
+		"status": 0
+	},
+	{
+		"name": "a ring's warning before its value's substitution",
+		"script": "declare -n r1=r2; declare -n r2=r1\nr1=$(echo sub >&2; echo v) /bin/sh -c 'echo \"r1=<$r1>\"' 2>&1",
+		"bash": "warning: r1: circular name reference\nsub\nr1=<v>\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly name's substitution does not run",
+		"script": "readonly a=1; n=0\na=$(echo ran >&2; echo v) /bin/echo cmd",
+		"bash": "a: readonly variable\ncmd\n",
+		"status": 0
+	},
+	{
+		"name": "a readonly name in posix mode",
+		"script": "set -o posix; readonly a=1\na=2 /bin/echo RAN; echo S=$?",
+		"bash": "a: readonly variable\n",
+		"status": 1
+	},
+	{
+		"name": "an integer name assigned through a name, then appended to through it",
+		"script": "declare -i x=5; declare -n ref=x\nref=2 ref+=3 /bin/sh -c 'echo \"x=<$x>\"'",
+		"bash": "x=<23>\n",
+		"status": 0
+	}
+]

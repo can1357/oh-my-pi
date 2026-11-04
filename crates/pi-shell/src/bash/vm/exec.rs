@@ -1471,7 +1471,7 @@ fn stopped(
 }
 
 /// Expansion errors end the shell: posix mode, not interactive.
-fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
+pub(super) fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 	state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false)
 		&& !matches!(
 			state::record(cx.store, vp, Key::Misc(MiscKey::Interactive)),

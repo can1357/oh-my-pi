@@ -925,10 +925,11 @@ fn declared(ctx: &mut Ctx<'_, '_>, name: &[u8]) -> Result<Option<Var>, Need> {
 }
 
 /// The value a prefix assignment `name=value cmd` / `name+=value cmd`
-/// puts in the command's environment (bash's `assign_in_env` through
-/// `make_variable_value`): the visible variable's attributes apply, so
-/// `-i` evaluates (and `+=` adds), otherwise `+=` concatenates, then case
-/// conversion.
+/// puts in the command's environment (bash's `assign_in_env`): `=` gives
+/// `value` as it is, whatever attributes `name` has (`declare -i a; a=3+4
+/// cmd` gives `3+4`); `+=` goes through `make_variable_value` with the
+/// visible variable's attributes, so `-i` adds `value` evaluated, otherwise
+/// it concatenates, then case conversion. zsh converts `=` too.
 pub fn prefix_value(
 	k: &mut Kernel,
 	cx: &mut Cx<'_>,
@@ -937,6 +938,10 @@ pub fn prefix_value(
 	value: &[u8],
 	append: bool,
 ) -> Result<BString, Diag> {
+	let zsh = vp.mode.dialect() == crate::bash::ids::Dialect::Zsh;
+	if !append && !zsh {
+		return Ok(BString::from(value));
+	}
 	let Some(var) = current(k, cx, vp, name, Level::Dynamic)? else {
 		return Ok(BString::from(value));
 	};
@@ -1195,13 +1200,26 @@ const ATTR_FLAGS: [(u8, Attrs); 9] = [
 
 /// Every variable visible to the vproc, sorted by name; `declared` keeps
 /// declared-but-unset ones (`declare -p` lists them, `set` does not).
+/// bash lists the shell's variables, which the listing command's own
+/// prefix assignments are not among (`x=1 export` does not list `x`;
+/// `x=1 declare -p x` shows it).
 fn all_vars(ctx: &mut Ctx<'_, '_>, declared: bool) -> Result<Vec<(BString, Var)>, Need> {
 	let scan = if declared {
 		state::scan_declared
 	} else {
 		state::scan
 	};
-	let mut vars: Vec<(BString, Var)> = scan(&ctx.k.root, ctx.cx.store, ctx.vp, Table::Var)?
+	let hidden = match temp_scope(ctx)? {
+		Some(top) if ctx.vp.mode.dialect() != crate::bash::ids::Dialect::Zsh => {
+			state::pop_scope(&mut ctx.k.root, ctx.cx.store, ctx.vp).map(|scope| (top, scope))
+		},
+		_ => None,
+	};
+	let scanned = scan(&ctx.k.root, ctx.cx.store, ctx.vp, Table::Var);
+	if let Some((at, scope)) = hidden {
+		state::insert_scope(&mut ctx.k.root, ctx.cx.store, ctx.vp, at, scope);
+	}
+	let mut vars: Vec<(BString, Var)> = scanned?
 		.into_iter()
 		.filter_map(|(k, r)| match (k, r) {
 			(KeyBuf::Var(n), Record::Var(v)) => Some((n, v)),

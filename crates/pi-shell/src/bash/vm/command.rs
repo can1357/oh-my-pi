@@ -536,7 +536,13 @@ fn expand(
 		};
 		state::push_scope(&mut k.root, cx.store, vp, scope);
 	}
+	let bash = unit.mode.dialect() != crate::bash::ids::Dialect::Zsh;
 	while st(vp).values.len() < cmd.assigns.len() + st(vp).keywords.len() {
+		// Each assignment's diagnostics and trace go out before the next one
+		// expands, as bash writes them.
+		if bash && let Some(fd) = exec::flush_out(k, vp) {
+			return Some(Flow::Block(WaitKey::Write { fd }));
+		}
 		let i = st(vp).values.len();
 		if assign_only
 			&& unit.mode.dialect() == crate::bash::ids::Dialect::Zsh
@@ -547,7 +553,8 @@ fn expand(
 			}
 			continue;
 		}
-		let (name, append, node, index, value) = if let Some(a) = cmd.assigns.get(i) {
+		let (name, append, node, index, value, target, written) = if let Some(a) = cmd.assigns.get(i)
+		{
 			if !assign_only && a.index.is_some() {
 				// `var[0]=X cmd`: bash reports the word as written, sets
 				// nothing (expands nothing) and runs the command.
@@ -583,14 +590,53 @@ fn expand(
 				}
 				return Some(Flow::Discard(1));
 			}
-			let record = assign_parks(unit, a);
+			// bash `assign_in_env`: the name is followed (and warned of) and a
+			// readonly one refused before the value expands, which it then
+			// does not; found once, whatever replays the expansion.
+			let prefix = bash && !assign_only;
+			// bash traces a compound assignment statement as written, before
+			// its elements expand (`+ a=(x $(echo y))`, then `++ echo y`).
+			let pre_trace = if bash
+				&& assign_only
+				&& matches!(a.value, AssignVal::Array(_))
+				&& xtrace::on(k, cx, vp)
+			{
+				let utf8 = xtrace::utf8(k, cx, vp);
+				let mut body = Vec::new();
+				let none = AssignValue::Array(Vec::new());
+				push_assignment_trace(&mut body, unit, Some(a), &a.name, None, &none, utf8);
+				Some(body)
+			} else {
+				None
+			};
+			// What is written before the value expands (a warning, that
+			// trace) goes out first, and the expansion replays: logged.
+			let record = assign_parks(unit, a)
+				|| pre_trace.is_some()
+				|| (prefix && state::may_be_nameref(&k.root, vp));
 			let res = expanding(k, vp, cx, Slot::Assigns, record, line, |ex| {
+				let target = if prefix {
+					Some(ex.prefix_target(&a.name)?)
+				} else {
+					None
+				};
+				if target.as_ref().is_some_and(|t| t.readonly) {
+					return Ok(AssignStep::Readonly(target));
+				}
+				if let Some(body) = &pre_trace {
+					ex.trace_once(body)?;
+				}
+				if record && ex.output_pending() {
+					return Ok(AssignStep::Flush);
+				}
 				let index = match a.index {
 					Some(w) => Some(ex.scalar(unit, &unit.words[w as usize])?),
 					None => None,
 				};
 				let value = match &a.value {
 					AssignVal::Scalar(w) => Ok(ex.scalar(unit, &unit.words[*w as usize])?),
+					// bash gives a command `a=(x y) cmd` the text, not an array.
+					AssignVal::Array(elems) if prefix => Ok(ex.compound_literal(unit, elems)?),
 					AssignVal::Array(elems) => {
 						let mut out = Vec::with_capacity(elems.len());
 						let mut globs = Vec::new();
@@ -598,10 +644,46 @@ fn expand(
 						Err((out, globs))
 					},
 				};
-				Ok((index, value))
+				Ok(AssignStep::Done(target, index, value))
 			});
-			let (index, value) = match res {
-				Ok(v) => v,
+			let (target, index, value) = match res {
+				Ok(AssignStep::Done(target, index, value)) => (target, index, value),
+				Ok(AssignStep::Flush) => {
+					if let Some(fd) = exec::flush_out(k, vp) {
+						return Some(Flow::Block(WaitKey::Write { fd }));
+					}
+					continue;
+				},
+				Ok(AssignStep::Readonly(target)) => {
+					scratch(vp).logs[Slot::Assigns as usize].clear();
+					// bash reports the name as written and runs the command
+					// without the assignment; a non-interactive posix shell
+					// exits, an interactive one does not run the command
+					// (unless it is a special builtin, whose assignment error
+					// ends it).
+					k.diag(cx, vp, line, Diag::Readonly { name: a.name.clone() });
+					if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
+						.unwrap_or(false)
+					{
+						if exec::posix_exits(k, cx, vp)
+							|| IntrinsicId::from_name(&st(vp).argv[0]).is_some_and(is_special)
+						{
+							return Some(Flow::Exit(1));
+						}
+						let s = st(vp);
+						s.status = 1;
+						s.stage = Stage::Finish;
+						return None;
+					}
+					// A skipped slot: an indexed entry, which neither the
+					// environment nor a function scope takes.
+					let s = st(vp);
+					s.assigns
+						.push((target.map_or_default(|t| t.name), BString::default()));
+					s.values
+						.push((Some(BString::default()), AssignValue::Scalar(BString::default())));
+					continue;
+				},
 				Err(flow) => return Some(flow),
 			};
 			let value = match value {
@@ -623,7 +705,7 @@ fn expand(
 					)
 				},
 			};
-			(a.name.clone(), a.append, a.node, index, value)
+			(a.name.clone(), a.append, a.node, index, value, target, a.name.clone())
 		} else {
 			// A `set -k` word: `name=value` (or `name+=value`), expanded as
 			// the word it is.
@@ -640,13 +722,15 @@ fn expand(
 				None => (BString::from(&text[..eq]), false),
 			};
 			let value = BString::from(text.get(eq + 1..).unwrap_or_default());
-			(name, append, word.node, None, AssignValue::Scalar(value))
+			(name.clone(), append, word.node, None, AssignValue::Scalar(value), None, name)
 		};
 		scratch(vp).logs[Slot::Assigns as usize].clear();
 		// A prefix assignment through a name reference binds the target in
 		// the temporary scope (bash `assign_in_env`, as ksh93 does); `+=`
 		// appends to the target's value.
-		let name = if !assign_only && index.is_none() {
+		let name = if let Some(t) = &target {
+			t.name.clone()
+		} else if !assign_only && index.is_none() {
 			match state::deref(&k.root, cx.store, vp, &name) {
 				Ok(state::Deref::To { name: target, index: None }) => target,
 				Ok(_) => name,
@@ -658,7 +742,7 @@ fn expand(
 		} else {
 			name
 		};
-		if !assign_only {
+		if !assign_only && target.is_none() {
 			let readonly = match state::lookup_declared(&k.root, cx.store, vp, &name) {
 				Ok(v) => v.is_some_and(|v| v.attrs.contains(Attrs::READONLY)),
 				Err(err) => {
@@ -696,14 +780,32 @@ fn expand(
 			}
 		}
 		// A prefix assignment's value takes the visible variable's attributes
-		// (`-i`, case conversion) and `+=`.
+		// (`-i`, case conversion) with `+=`.
 		let value = match (assign_only, &index, value) {
+			(false, None, AssignValue::Scalar(raw)) if bash => {
+				let base = target
+					.as_ref()
+					.and_then(|t| t.appends_to.as_deref())
+					.filter(|_| append);
+				match base {
+					Some(base) => match builtins::prefix_value(k, cx, vp, base, &raw, true) {
+						Ok(converted) => AssignValue::Scalar(converted),
+						Err(diag) => {
+							k.diag(cx, vp, line, diag);
+							// bash's `make_variable_value` abandons the line
+							// (`jump_to_top_level (DISCARD)`).
+							return Some(Flow::Discard(1));
+						},
+					},
+					None => AssignValue::Scalar(raw),
+				}
+			},
 			(false, None, AssignValue::Scalar(raw)) => {
 				match builtins::prefix_value(k, cx, vp, &name, &raw, append) {
 					Ok(converted) => AssignValue::Scalar(converted),
 					Err(diag) => {
 						k.diag(cx, vp, line, diag);
-						// bash does not run the command.
+						// zsh does not run the command.
 						let state = st(vp);
 						state.status = 1;
 						state.stage = Stage::Finish;
@@ -763,6 +865,26 @@ fn expand(
 		} else {
 			value
 		};
+		// bash traces each assignment as it is made, before the next one
+		// expands: a prefix one under the name as written, with the value it
+		// is given (`r+=x cmd` with `r` leading to `a=old`: `r=oldx`); a
+		// compound statement was traced before its elements expanded.
+		let compound_statement = assign_only
+			&& cmd
+				.assigns
+				.get(i)
+				.is_some_and(|a| matches!(a.value, AssignVal::Array(_)));
+		if bash && !compound_statement && xtrace::on(k, cx, vp) {
+			let utf8 = xtrace::utf8(k, cx, vp);
+			let mut body = Vec::new();
+			if assign_only {
+				let index = index.as_ref().map(|i| i.as_slice());
+				push_assignment_trace(&mut body, unit, cmd.assigns.get(i), &name, index, &value, utf8);
+			} else {
+				xtrace::push_assign(&mut body, &written, None, false, &value, utf8);
+			}
+			xtrace::emit(k, cx, vp, line, &body);
+		}
 		if !assign_only
 			&& index.is_none()
 			&& let Some(top) = state::scope_count(&k.root, vp).checked_sub(1)
@@ -780,6 +902,34 @@ fn expand(
 		let s = st(vp);
 		s.assigns.push((name.clone(), shown));
 		s.values.push((index, value));
+	}
+	// The command runs with what its temporary scope holds once every value
+	// is expanded: a later expansion's write to an earlier one (`a=1
+	// b=$((a+=1))`, `a= b=${a:=x}`) is in it, as in bash.
+	if bash
+		&& !assign_only
+		&& st(vp).scoped
+		&& let Some(top) = state::scope_count(&k.root, vp).checked_sub(1)
+	{
+		for i in 0..st(vp).values.len() {
+			let s = st(vp);
+			if s.values[i].0.is_some() {
+				continue;
+			}
+			let name = s.assigns[i].0.clone();
+			match state::scope_var(cx.store, vp, top, &name) {
+				Ok(Some(Some(var))) => {
+					if let Some(now) = var.as_scalar() {
+						st(vp).values[i].1 = AssignValue::Scalar(BString::from(now));
+					}
+				},
+				Ok(_) => {},
+				Err(err) => {
+					k.fail(err);
+					return Some(Flow::Discard(1));
+				},
+			}
+		}
 	}
 	let s = st(vp);
 	if assign_only {
@@ -808,13 +958,189 @@ fn expand(
 		);
 	}
 	if xtrace::on(k, cx, vp) {
-		trace(k, vp, cx, unit, &cmd.assigns, line);
-		// Out before the command's redirections move stderr.
-		if let Some(fd) = exec::flush_out(k, vp) {
-			return Some(Flow::Block(WaitKey::Write { fd }));
+		if bash {
+			// Each assignment was traced as it was made.
+			trace_words(k, vp, cx, line);
+		} else {
+			trace(k, vp, cx, unit, &cmd.assigns, line);
 		}
 	}
+	// The trace and the assignments' diagnostics go out before the command's
+	// redirections move stderr.
+	if let Some(fd) = exec::flush_out(k, vp) {
+		return Some(Flow::Block(WaitKey::Write { fd }));
+	}
 	None
+}
+
+/// How many name references bash follows from one name before it gives up
+/// (its `NAMEREF_MAX`).
+const NAMEREF_MAX: u32 = 8;
+
+/// A name as a prefix assignment looks it up (the command's temporary
+/// scope first, then outward, as [`state::lookup_declared`]).
+struct Hop {
+	/// The name it holds when it is a name reference (empty: none).
+	held:  Option<BString>,
+	/// Declared but unset.
+	unset: bool,
+}
+
+fn prefix_hop(
+	k: &Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	name: &[u8],
+) -> Result<Option<Hop>, StoreError> {
+	Ok(state::lookup_declared(&k.root, cx.store, vp, name)?.map(|v| Hop {
+		held:  v
+			.attrs
+			.contains(Attrs::NAMEREF)
+			.then(|| v.as_scalar().map_or_default(BString::from)),
+		unset: v.attrs.contains(Attrs::INVISIBLE),
+	}))
+}
+
+/// Where [`follow_prefix_names`] ends.
+enum Followed {
+	/// At this variable, which is no name reference.
+	Var(BString),
+	/// At no variable: a name on the way holds nothing or one not bound.
+	Nothing,
+	/// At a name that holds the first one or itself.
+	Ring,
+	/// Past [`NAMEREF_MAX`] references.
+	TooDeep,
+}
+
+/// Follow `name` and each name reference it leads to as bash's
+/// `find_variable` does for an assignment in the environment.
+fn follow_prefix_names(
+	k: &Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	name: &[u8],
+) -> Result<Followed, StoreError> {
+	let Some(mut hop) = prefix_hop(k, cx, vp, name)? else {
+		return Ok(Followed::Nothing);
+	};
+	let mut current = BString::from(name);
+	let mut followed = 0;
+	while let Some(held) = hop.held {
+		followed += 1;
+		if followed > NAMEREF_MAX {
+			return Ok(Followed::TooDeep);
+		}
+		if held.is_empty() {
+			return Ok(Followed::Nothing);
+		}
+		let Some(next) = prefix_hop(k, cx, vp, &held)? else {
+			return Ok(Followed::Nothing);
+		};
+		if held == name || held == current {
+			return Ok(Followed::Ring);
+		}
+		hop = next;
+		current = held;
+	}
+	Ok(Followed::Var(current))
+}
+
+/// The last name reference on the way from `name` (`name` itself when it
+/// is none), as bash's `find_variable_last_nameref` finds it: its name and
+/// the name it holds. `None` past [`NAMEREF_MAX`] references, and at one
+/// that holds nothing unless it is declared but unset.
+fn last_prefix_nameref(
+	k: &Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	name: &[u8],
+) -> Result<Option<(BString, Option<BString>)>, StoreError> {
+	let Some(mut hop) = prefix_hop(k, cx, vp, name)? else {
+		return Ok(None);
+	};
+	let mut current = BString::from(name);
+	let mut last = (current.clone(), hop.held.clone());
+	let mut followed = 0;
+	while let Some(held) = hop.held.take() {
+		followed += 1;
+		if followed > NAMEREF_MAX {
+			return Ok(None);
+		}
+		if held.is_empty() {
+			return Ok(hop.unset.then_some((current, Some(held))));
+		}
+		last = (current, Some(held.clone()));
+		let Some(next) = prefix_hop(k, cx, vp, &held)? else {
+			break;
+		};
+		hop = next;
+		current = held;
+	}
+	Ok(Some(last))
+}
+
+/// A compound value's elements, with the words among them still to
+/// pathname-expand (`(index, pattern)`).
+type CompoundParts = (Vec<CompoundElem>, Vec<(u32, BString)>);
+
+/// How the expansion of one assignment ended ([`expand`]).
+enum AssignStep {
+	/// Refused before its value expands: a readonly prefix assignment.
+	Readonly(Option<PrefixTarget>),
+	/// It wrote before its value expands (a warning, a statement's trace):
+	/// that goes out first, then the expansion replays.
+	Flush,
+	/// Expanded: where it goes (a prefix one), the element subscript, and
+	/// the value (a compound one as its parts).
+	Done(Option<PrefixTarget>, Option<BString>, Result<BString, CompoundParts>),
+}
+
+/// Where a prefix assignment goes, as bash's `assign_in_env` finds it.
+pub(super) struct PrefixTarget {
+	/// The name the command's variable is bound under.
+	pub name:       BString,
+	/// The variable `+=` appends to, if there is one.
+	pub appends_to: Option<BString>,
+	/// That variable is readonly: bash refuses the assignment.
+	pub readonly:   bool,
+}
+
+/// Where the prefix assignment `name=value cmd` goes, as bash 5.3's
+/// `assign_in_env` finds it against the variables as they stand: the
+/// variable at the end of `name`'s references. Where they end at none, the
+/// name the last reference holds, when it is a valid name, for a new
+/// variable; else `name` itself, and `+=` appends to that reference's own
+/// value (`declare -n r='a[1]'; r+=x cmd` gives the command `r=a[1]x`). A
+/// ring and too many references are warned of.
+pub(super) fn prefix_target(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	name: &[u8],
+	line: u32,
+) -> Result<PrefixTarget, StoreError> {
+	let (target, appends_to) = match follow_prefix_names(k, cx, vp, name)? {
+		Followed::Var(target) => (target.clone(), Some(target)),
+		followed => {
+			match followed {
+				Followed::Ring => k.diag(cx, vp, line, Diag::CircularNameref { name: name.into() }),
+				Followed::TooDeep => k.diag(cx, vp, line, Diag::NamerefDepth { name: name.into() }),
+				Followed::Var(_) | Followed::Nothing => {},
+			}
+			match last_prefix_nameref(k, cx, vp, name)? {
+				Some((_, Some(held))) if super::is_ident(&held) => (held, None),
+				Some((found, _)) => (BString::from(name), Some(found)),
+				None => (BString::from(name), None),
+			}
+		},
+	};
+	let readonly = match &appends_to {
+		Some(var) => state::lookup_declared(&k.root, cx.store, vp, var)?
+			.is_some_and(|v| v.attrs.contains(Attrs::READONLY)),
+		None => false,
+	};
+	Ok(PrefixTarget { name: target, appends_to, readonly })
 }
 
 /// `$(< file)`: read fd 0 (the redirected file) to its end and queue it
@@ -1101,7 +1427,7 @@ fn is_arrayref(word: &ir::Word) -> bool {
 	name > 0 && !first[0].is_ascii_digit() && first.get(name) == Some(&b'[') && last.ends_with(b"]")
 }
 
-/// `set -x`: one line per assignment, then the words.
+/// `set -x` (zsh): one line per assignment, then the words.
 fn trace(
 	k: &mut Kernel,
 	vp: &mut Vproc,
@@ -1120,40 +1446,61 @@ fn trace(
 			continue;
 		}
 		let mut body = Vec::new();
-		let append = assigns.get(i).is_some_and(|a| a.append);
-		// bash traces a compound value as the parser kept it: the
-		// elements as written, `$'…'` already single-quoted
-		// (`metas=(\| ' ' '<TAB>')`, `n=($@)`).
-		if let Some(AssignVal::Array(elems)) = assigns.get(i).map(|a| &a.value) {
-			body.extend_from_slice(name);
-			body.extend_from_slice(if append { b"+=(" } else { b"=(" });
-			for (j, e) in elems.iter().enumerate() {
-				if j > 0 {
-					body.push(b' ');
-				}
-				if let Some(key) = e.key {
-					body.push(b'[');
-					body.extend_from_slice(&parsed_source(exec::word_source(unit, key)));
-					body.extend_from_slice(if e.append { b"]+=" } else { b"]=" });
-				}
-				body.extend_from_slice(&parsed_source(exec::word_source(unit, e.value)));
-			}
-			body.push(b')');
-			lines.push(body);
-			continue;
-		}
 		let index = index.as_ref().map(|i| i.as_slice());
-		xtrace::push_assign(&mut body, name, index, append, value, utf8);
-		lines.push(body);
-	}
-	if !s.argv.is_empty() {
-		let mut body = Vec::new();
-		xtrace::push_words(&mut body, &s.argv, utf8);
+		push_assignment_trace(&mut body, unit, assigns.get(i), name, index, value, utf8);
 		lines.push(body);
 	}
 	for body in lines {
 		xtrace::emit(k, cx, vp, line, &body);
 	}
+	trace_words(k, vp, cx, line);
+}
+
+/// `set -x`: the command's words, after its assignments.
+fn trace_words(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) {
+	let utf8 = xtrace::utf8(k, cx, vp);
+	let s = st(vp);
+	if s.argv.is_empty() {
+		return;
+	}
+	let mut body = Vec::new();
+	xtrace::push_words(&mut body, &s.argv, utf8);
+	xtrace::emit(k, cx, vp, line, &body);
+}
+
+/// One assignment's `set -x` line (`op` its IR; a `set -k` word has
+/// none): `name[index]=value`, `+=` for an append.
+fn push_assignment_trace(
+	body: &mut Vec<u8>,
+	unit: &Unit,
+	op: Option<&ir::AssignOp>,
+	name: &[u8],
+	index: Option<&[u8]>,
+	value: &AssignValue,
+	utf8: bool,
+) {
+	let append = op.is_some_and(|a| a.append);
+	// bash traces a compound value as the parser kept it: the
+	// elements as written, `$'…'` already single-quoted
+	// (`metas=(\| ' ' '<TAB>')`, `n=($@)`).
+	if let Some(AssignVal::Array(elems)) = op.map(|a| &a.value) {
+		body.extend_from_slice(name);
+		body.extend_from_slice(if append { b"+=(" } else { b"=(" });
+		for (j, e) in elems.iter().enumerate() {
+			if j > 0 {
+				body.push(b' ');
+			}
+			if let Some(key) = e.key {
+				body.push(b'[');
+				body.extend_from_slice(&parsed_source(exec::word_source(unit, key)));
+				body.extend_from_slice(if e.append { b"]+=" } else { b"]=" });
+			}
+			body.extend_from_slice(&parsed_source(exec::word_source(unit, e.value)));
+		}
+		body.push(b')');
+		return;
+	}
+	xtrace::push_assign(body, name, index, append, value, utf8);
 }
 
 /// A compound element's source text as bash's parser keeps it: each

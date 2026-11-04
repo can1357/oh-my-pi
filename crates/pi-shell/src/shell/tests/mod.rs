@@ -10,6 +10,7 @@ use tokio::process::Command;
 use super::*;
 use crate::process;
 
+mod assignments;
 mod builtins;
 mod env_cwd;
 mod process_control;
