@@ -17,9 +17,9 @@ mod comp_support;
 mod pty_support;
 
 use comp_support::comptest::{
-	Case, Suite,
+	Case,
 	Step::{self, Eval, Outer, Test},
-	run_case,
+	Suite, run_case,
 };
 
 /// The `%prep` steps (after `comptestinit`).
@@ -36,43 +36,21 @@ const CASES: &[Case] = &[
 	Case {
 		name:  "directories and files",
 		steps: &[Test(
-				": \t\t\t\t\t\t\t",
-				"line: {: }{}\n\
-				 DESCRIPTION:{file}\n\
-				 DI:{dir1}\n\
-				 DI:{dir2}\n\
-				 FI:{file1}\n\
-				 FI:{file2}\n\
-				 line: {: dir1/}{}\n\
-				 line: {: dir2/}{}\n\
-				 line: {: file1}{}\n\
-				 line: {: file2}{}\n\
-				 line: {: dir1/}{}\n\
-				 line: {: dir2/}{}",
-			),
-		],
+			": \t\t\t\t\t\t\t",
+			"line: {: }{}\nDESCRIPTION:{file}\nDI:{dir1}\nDI:{dir2}\nFI:{file1}\nFI:{file2}\nline: \
+			 {: dir1/}{}\nline: {: dir2/}{}\nline: {: file1}{}\nline: {: file2}{}\nline: {: \
+			 dir1/}{}\nline: {: dir2/}{}",
+		)],
 	},
 	Case {
 		name:  "_expand shows file types",
 		steps: &[Test(
-				": *\t\t\t\t\t\t",
-				"line: {: dir1/}{}\n\
-				 DESCRIPTION:{expansions}\n\
-				 DI:{dir1}\n\
-				 DI:{dir2}\n\
-				 FI:{file1}\n\
-				 FI:{file2}\n\
-				 DESCRIPTION:{all expansions}\n\
-				 NO:{dir1 dir2 file1 file2}\n\
-				 DESCRIPTION:{original}\n\
-				 NO:{*}\n\
-				 line: {: dir2/}{}\n\
-				 line: {: file1 }{}\n\
-				 line: {: file2 }{}\n\
-				 line: {: dir1 dir2 file1 file2 }{}\n\
-				 line: {: *}{}",
-			),
-		],
+			": *\t\t\t\t\t\t",
+			"line: {: dir1/}{}\nDESCRIPTION:{expansions}\nDI:{dir1}\nDI:{dir2}\nFI:{file1}\nFI:\
+			 {file2}\nDESCRIPTION:{all expansions}\nNO:{dir1 dir2 file1 \
+			 file2}\nDESCRIPTION:{original}\nNO:{*}\nline: {: dir2/}{}\nline: {: file1 }{}\nline: {: \
+			 file2 }{}\nline: {: dir1 dir2 file1 file2 }{}\nline: {: *}{}",
+		)],
 	},
 	Case {
 		name:  "_expand preserves array form",
@@ -81,11 +59,7 @@ const CASES: &[Case] = &[
 			Eval("typeset -g tst=(*)"),
 			Test(
 				": $tst\x04",
-				"DESCRIPTION:{expansions}\n\
-				 NO:{dir1}\n\
-				 NO:{dir2}\n\
-				 NO:{file1}\n\
-				 NO:{file2}",
+				"DESCRIPTION:{expansions}\nNO:{dir1}\nNO:{dir2}\nNO:{file1}\nNO:{file2}",
 			),
 		],
 	},
@@ -96,42 +70,30 @@ const CASES: &[Case] = &[
 			Eval("_users () { compadd user1 user2 }"),
 			Test(
 				": ~\t\t\t\t\t",
-				"line: {: ~user}{}\n\
-				 line: {: ~user}{}\n\
-				 NO:{user1}\n\
-				 NO:{user2}\n\
-				 line: {: ~user1}{}\n\
-				 line: {: ~user2}{}\n\
-				 line: {: ~user1}{}",
+				"line: {: ~user}{}\nline: {: ~user}{}\nNO:{user1}\nNO:{user2}\nline: {: \
+				 ~user1}{}\nline: {: ~user2}{}\nline: {: ~user1}{}",
 			),
 		],
 	},
 	Case {
 		name:  "directories and files before separator",
 		steps: &[Test(
-				"echo ;:\x02\x02\t",
-				"line: {echo }{;:}\n\
-				 DESCRIPTION:{file}\n\
-				 DI:{dir1}\n\
-				 DI:{dir2}\n\
-				 FI:{file1}\n\
-				 FI:{file2}",
-			),
-		],
+			"echo ;:\x02\x02\t",
+			"line: {echo }{;:}\nDESCRIPTION:{file}\nDI:{dir1}\nDI:{dir2}\nFI:{file1}\nFI:{file2}",
+		)],
 	},
 	Case {
 		name:  "custom description with formatting sequences",
 		steps: &[
 			Eval("zstyle -s \":completion:*:descriptions\" format oldfmt"),
-			Eval("zstyle \":completion:*:descriptions\" format \\\n    ${oldfmt/>*</>%5F123abc%f %B123abc%b<}"),
+			Eval(
+				"zstyle \":completion:*:descriptions\" format \\\n    ${oldfmt/>*</>%5F123abc%f \
+				 %B123abc%b<}",
+			),
 			Test(
 				": \t",
-				"line: {: }{}\n\
-				 DESCRIPTION:{\x1b[35m123abc\x1b[39m \x1b[1m123abc\x1b[0m}\n\
-				 DI:{dir1}\n\
-				 DI:{dir2}\n\
-				 FI:{file1}\n\
-				 FI:{file2}",
+				"line: {: }{}\nDESCRIPTION:{\x1b[35m123abc\x1b[39m \
+				 \x1b[1m123abc\x1b[0m}\nDI:{dir1}\nDI:{dir2}\nFI:{file1}\nFI:{file2}",
 			),
 			Eval("zstyle \":completion:*:descriptions\" format $oldfmt"),
 		],
@@ -147,25 +109,16 @@ const CASES: &[Case] = &[
 	Case {
 		name:  "redirection after \"for ...; do\"",
 		steps: &[Test(
-				"for f in 1; do < x\x02\x02\t",
-				"line: {for f in 1; do <}{ x}\n\
-				 DESCRIPTION:{file}\n\
-				 DI:{dir1}\n\
-				 DI:{dir2}\n\
-				 FI:{file1}\n\
-				 FI:{file2}",
-			),
-		],
+			"for f in 1; do < x\x02\x02\t",
+			"line: {for f in 1; do <}{ \
+			 x}\nDESCRIPTION:{file}\nDI:{dir1}\nDI:{dir2}\nFI:{file1}\nFI:{file2}",
+		)],
 	},
 	Case {
 		name:  "directory name is not a glob qualifier",
 		steps: &[
 			Outer(&["mkdir", "A(B)", "A(B)/C"]),
-			Test(
-				"cd \"A(B)\t\t",
-				"line: {cd \"A(B)/}{}\n\
-				 line: {cd \"A(B)/C/}{}",
-			),
+			Test("cd \"A(B)\t\t", "line: {cd \"A(B)/}{}\nline: {cd \"A(B)/C/}{}"),
 			Eval("cd \"A(B)/C\""),
 			Test("cd ../\t", "line: {cd ../C/}{}"),
 			Eval("cd -"),
@@ -176,44 +129,31 @@ const CASES: &[Case] = &[
 		name:  "remove exact number of characters from a prefix",
 		steps: &[
 			Eval("_tst() { compset -p 1; _message \"${(qq)IPREFIX} ${(qq)PREFIX}\" }"),
-			Test(
-				"tst .\t",
-				"line: {tst .}{}\n\
-				 MESSAGE:{'.' ''}",
-			),
+			Test("tst .\t", "line: {tst .}{}\nMESSAGE:{'.' ''}"),
 		],
 	},
 	Case {
 		name:  "remove exact number of characters from a suffix",
 		steps: &[
 			Eval("_tst() { compset -s 3; _message \"${(qq)SUFFIX} ${(qq)ISUFFIX}\" }"),
-			Test(
-				"tst 123\x1bb\t",
-				"line: {tst }{123}\n\
-				 MESSAGE:{'' '123'}",
-			),
+			Test("tst 123\x1bb\t", "line: {tst }{123}\nMESSAGE:{'' '123'}"),
 		],
 	},
 	Case {
 		name:  "try to remove excess characters from prefix and suffix",
 		steps: &[
-			Eval("_tst() { compset -p 2; compset -p 3;compset -s 2;compset -s 3; _message \"${(qq)PREFIX} ${(qq)SUFFIX}\" }"),
-			Test(
-				"tst 12345678\x1b4\x02\t",
-				"line: {tst 1234}{5678}\n\
-				 MESSAGE:{'34' '56'}",
+			Eval(
+				"_tst() { compset -p 2; compset -p 3;compset -s 2;compset -s 3; _message \
+				 \"${(qq)PREFIX} ${(qq)SUFFIX}\" }",
 			),
+			Test("tst 12345678\x1b4\x02\t", "line: {tst 1234}{5678}\nMESSAGE:{'34' '56'}"),
 		],
 	},
 	Case {
 		name:  "remove multibyte character from a prefix",
 		steps: &[
 			Eval("_tst() { compset -p 1; _message \"${(qq)IPREFIX} ${(qq)PREFIX}\" }"),
-			Test(
-				"tst €100\t",
-				"line: {tst €100}{}\n\
-				 MESSAGE:{'€' '100'}",
-			),
+			Test("tst €100\t", "line: {tst €100}{}\nMESSAGE:{'€' '100'}"),
 		],
 	},
 	Case {
@@ -247,15 +187,8 @@ const CASES: &[Case] = &[
 			Eval("old_LC_ALL=$LC_ALL; LC_ALL=C"),
 			Test(
 				": sortnobslash/\t",
-				"line: {: sortnobslash/}{}\n\
-				 DESCRIPTION:{file}\n\
-				 FI:{\\!foo}\n\
-				 FI:{\\#foo}\n\
-				 FI:{Afoo}\n\
-				 FI:{\\\\foo}\n\
-				 FI:{bfoo}\n\
-				 FI:{\\|foo}\n\
-				 FI:{\\~foo}",
+				"line: {: sortnobslash/}{}\nDESCRIPTION:{file}\nFI:{\\!foo}\nFI:{\\#foo}\nFI:{Afoo}\\
+				 nFI:{\\\\foo}\nFI:{bfoo}\nFI:{\\|foo}\nFI:{\\~foo}",
 			),
 			Eval("LC_ALL=$old_LC_ALL"),
 			Outer(&["rm", "-rf", "sortnobslash"]),
@@ -267,12 +200,7 @@ const CASES: &[Case] = &[
 			Eval("_tst() { compadd -onum,rev -J versions r1.10 r1.1 r1.2 r2.3 r2.34 }"),
 			Test(
 				"tst r\t",
-				"line: {tst r}{}\n\
-				 NO:{r2.34}\n\
-				 NO:{r2.3}\n\
-				 NO:{r1.10}\n\
-				 NO:{r1.2}\n\
-				 NO:{r1.1}",
+				"line: {tst r}{}\nNO:{r2.34}\nNO:{r2.3}\nNO:{r1.10}\nNO:{r1.2}\nNO:{r1.1}",
 			),
 		],
 	},
@@ -285,12 +213,7 @@ const CASES: &[Case] = &[
 			Eval("zstyle ':completion:*:tst:*' sort reverse numeric"),
 			Test(
 				"tst r\t",
-				"line: {tst r}{}\n\
-				 DESCRIPTION:{time}\n\
-				 NO:{r2.34}\n\
-				 NO:{r2.3}\n\
-				 NO:{r1.10}\n\
-				 NO:{r1.2}",
+				"line: {tst r}{}\nDESCRIPTION:{time}\nNO:{r2.34}\nNO:{r2.3}\nNO:{r1.10}\nNO:{r1.2}",
 			),
 		],
 	},
@@ -298,13 +221,7 @@ const CASES: &[Case] = &[
 		name:  "sort in match rather than display name order",
 		steps: &[
 			Eval("_tst() { local disp=(a b c); compadd -o -J letters -d disp 3 2 1 }"),
-			Test(
-				"tst \t",
-				"line: {tst }{}\n\
-				 NO:{c}\n\
-				 NO:{b}\n\
-				 NO:{a}",
-			),
+			Test("tst \t", "line: {tst }{}\nNO:{c}\nNO:{b}\nNO:{a}"),
 		],
 	},
 	Case {
@@ -314,12 +231,7 @@ const CASES: &[Case] = &[
 			Eval("zstyle ':completion:*:tst:*' sort false"),
 			Test(
 				"tst \t",
-				"line: {tst }{}\n\
-				 DESCRIPTION:{time}\n\
-				 NO:{3am}\n\
-				 NO:{12pm}\n\
-				 NO:{3pm}\n\
-				 NO:{10pm}",
+				"line: {tst }{}\nDESCRIPTION:{time}\nNO:{3am}\nNO:{12pm}\nNO:{3pm}\nNO:{10pm}",
 			),
 		],
 	},
@@ -328,28 +240,16 @@ const CASES: &[Case] = &[
 		steps: &[
 			Eval("_tst() { _arguments ':desc:_sequence compadd - 1 2 3' }"),
 			Eval("zstyle ':completion:*:tst:*' ignored-patterns 2"),
-			Test(
-				"tst 1,\t",
-				"line: {tst 1,}{}\n\
-				 DESCRIPTION:{desc}\n\
-				 NO:{2}\n\
-				 NO:{3}",
-			),
+			Test("tst 1,\t", "line: {tst 1,}{}\nDESCRIPTION:{desc}\nNO:{2}\nNO:{3}"),
 			Eval("zstyle -d ':completion:*:tst:*' ignored-patterns"),
 		],
 	},
 	Case {
 		name:  "multiple envarrays",
 		steps: &[Test(
-				"a=() b=(\t",
-				"line: {a=() b=(}{}\n\
-				 DESCRIPTION:{file}\n\
-				 DI:{dir1}\n\
-				 DI:{dir2}\n\
-				 FI:{file1}\n\
-				 FI:{file2}",
-			),
-		],
+			"a=() b=(\t",
+			"line: {a=() b=(}{}\nDESCRIPTION:{file}\nDI:{dir1}\nDI:{dir2}\nFI:{file1}\nFI:{file2}",
+		)],
 	},
 	Case {
 		name:  "extra-verbose shows parameter values",
@@ -361,11 +261,10 @@ const CASES: &[Case] = &[
 			Eval("zstyle \":completion:*\" fake-parameters bar bat bay"),
 			Test(
 				": $ba\t",
-				"line: {: $ba}{}\n\
-				 DESCRIPTION:{parameter}\n\
-				 NO:{bar  -- ( '^@' '^A' '^B' '^C' '^D' '^E' '^F' '^G' '^H' '\\t' '\\n' '^K' '^L' '}\n\
-				 NO:{bat  -- ( [' ']='!' ['\"']='#' ['$']=% ['&']=\\' ['(']=')' ['*']=+ [,]=- [.]=/}\n\
-				 NO:{bay  -- '^@ ^A ^B ^C ^D ^E ^F ^G ^H \\t \\n ^K ^L ^M ^N ^O ^P ^Q ^R ^S ^T ^U ^}",
+				"line: {: $ba}{}\nDESCRIPTION:{parameter}\nNO:{bar  -- ( '^@' '^A' '^B' '^C' '^D' \
+				 '^E' '^F' '^G' '^H' '\\t' '\\n' '^K' '^L' '}\nNO:{bat  -- ( [' ']='!' ['\"']='#' \
+				 ['$']=% ['&']=\\' ['(']=')' ['*']=+ [,]=- [.]=/}\nNO:{bay  -- '^@ ^A ^B ^C ^D ^E ^F \
+				 ^G ^H \\t \\n ^K ^L ^M ^N ^O ^P ^Q ^R ^S ^T ^U ^}",
 			),
 		],
 	},
@@ -374,27 +273,14 @@ const CASES: &[Case] = &[
 		steps: &[
 			Eval("path=( @SRCDIR@ )"),
 			Eval("typeset -H paths=HIDDEN"),
-			Test(
-				": $path\t",
-				"line: {: $path}{}\n\
-				 DESCRIPTION:{parameter}\n\
-				 NO:{path}\n\
-				 NO:{paths}",
-			),
+			Test(": $path\t", "line: {: $path}{}\nDESCRIPTION:{parameter}\nNO:{path}\nNO:{paths}"),
 		],
 	},
 	Case {
 		name:  "parameter values not shown without extra-verbose",
 		steps: &[
 			Eval("zstyle -d \":completion:*:parameters\" extra-verbose"),
-			Test(
-				": $ba\t",
-				"line: {: $ba}{}\n\
-				 DESCRIPTION:{parameter}\n\
-				 NO:{bar}\n\
-				 NO:{bat}\n\
-				 NO:{bay}",
-			),
+			Test(": $ba\t", "line: {: $ba}{}\nDESCRIPTION:{parameter}\nNO:{bar}\nNO:{bat}\nNO:{bay}"),
 		],
 	},
 	Case {
@@ -403,38 +289,17 @@ const CASES: &[Case] = &[
 			Eval(
 				"_tst() { local disp=( {a..z} ); compadd -ld disp $disp[@]; comppostfuncs=( _pst ) }",
 			),
-			Eval("_pst() { local disp=( \"<INSERT>$compstate[insert]</INSERT>\" ); compadd -Qld disp $disp }"),
+			Eval(
+				"_pst() { local disp=( \"<INSERT>$compstate[insert]</INSERT>\" ); compadd -Qld disp \
+				 $disp }",
+			),
 			Eval("zstyle ':completion:*' menu select=long-list"),
 			Eval("export LC_ALL=C"),
 			Test(
 				"tst \x04",
-				"NO:{<INSERT>menu</INSERT>}\n\
-				 NO:{a}\n\
-				 NO:{b}\n\
-				 NO:{c}\n\
-				 NO:{d}\n\
-				 NO:{e}\n\
-				 NO:{f}\n\
-				 NO:{g}\n\
-				 NO:{h}\n\
-				 NO:{i}\n\
-				 NO:{j}\n\
-				 NO:{k}\n\
-				 NO:{l}\n\
-				 NO:{m}\n\
-				 NO:{n}\n\
-				 NO:{o}\n\
-				 NO:{p}\n\
-				 NO:{q}\n\
-				 NO:{r}\n\
-				 NO:{s}\n\
-				 NO:{t}\n\
-				 NO:{u}\n\
-				 NO:{v}\n\
-				 NO:{w}\n\
-				 NO:{x}\n\
-				 NO:{y}\n\
-				 NO:{z}",
+				"NO:{<INSERT>menu</INSERT>}\nNO:{a}\nNO:{b}\nNO:{c}\nNO:{d}\nNO:{e}\nNO:{f}\nNO:{g}\\
+				 nNO:{h}\nNO:{i}\nNO:{j}\nNO:{k}\nNO:{l}\nNO:{m}\nNO:{n}\nNO:{o}\nNO:{p}\nNO:{q}\nNO:{r}\nNO:\
+				 {s}\nNO:{t}\nNO:{u}\nNO:{v}\nNO:{w}\nNO:{x}\nNO:{y}\nNO:{z}",
 			),
 			Eval("export LC_ALL=en_US.UTF-8"),
 		],
@@ -612,9 +477,9 @@ fn c027_menu_select_long_list_starts_menu_selection_for_list_widgets() {
 /// without a trailing clear-to-end-of-line, `TC` and blank texts skipped.
 #[test]
 fn comptest_report_parser() {
-	let log = "junk<WIDGET><complete-word>\r\n<DESCRIPTION>file</DESCRIPTION>\r\n\
-	           <LC><DI><RC>dir1<EC>\n  <LC><FI><RC>a\x1b[K<EC>\n<LC><TC><RC>x<EC>\n<LC><NO><RC>  <EC>\n\
-	           <LBUFFER>: </LBUFFER>\r\n<RBUFFER></RBUFFER>\r\n<WIDGET><finish>\r\n";
+	let log = "junk<WIDGET><complete-word>\r\n<DESCRIPTION>file</DESCRIPTION>\r\\
+	           n<LC><DI><RC>dir1<EC>\n  <LC><FI><RC>a\x1b[K<EC>\n<LC><TC><RC>x<EC>\n<LC><NO><RC>  \
+	           <EC>\n<LBUFFER>: </LBUFFER>\r\n<RBUFFER></RBUFFER>\r\n<WIDGET><finish>\r\n";
 	assert_eq!(comp_support::comptest::report(log), [
 		"line: {: }{}",
 		"DESCRIPTION:{file}",

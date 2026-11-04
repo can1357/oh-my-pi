@@ -21,9 +21,9 @@ use bstr::BString;
 use super::{
 	State,
 	colors::{
-		COL_DU, COL_EC, COL_FI, COL_HI, COL_LC, COL_LN, COL_MA, COL_NO, COL_OR, COL_PI, COL_RC, COL_SA,
-		COL_SP, COL_ST, COL_SU, COL_SG, COL_SO, COL_BD, COL_CD, COL_DI, COL_EX, COL_OW, COL_TC, COL_TW,
-		LC_FOLLOW_SYMLINKS, Listcols, MAX_POS,
+		COL_BD, COL_CD, COL_DI, COL_DU, COL_EC, COL_EX, COL_FI, COL_HI, COL_LC, COL_LN, COL_MA,
+		COL_NO, COL_OR, COL_OW, COL_PI, COL_RC, COL_SA, COL_SG, COL_SO, COL_SP, COL_ST, COL_SU,
+		COL_TC, COL_TW, LC_FOLLOW_SYMLINKS, Listcols, MAX_POS,
 	},
 };
 use crate::bash::{
@@ -995,7 +995,13 @@ impl P<'_> {
 				}
 				let (l2, c2) = metachar(&fmt, p, self.e.multibyte);
 				len = l2;
-				cchar = c2.unwrap_or_else(|| u32::from(if at(&fmt, p) == META { at(&fmt, p + 1) ^ 32 } else { at(&fmt, p) }));
+				cchar = c2.unwrap_or_else(|| {
+					u32::from(if at(&fmt, p) == META {
+						at(&fmt, p + 1) ^ 32
+					} else {
+						at(&fmt, p)
+					})
+				});
 				p += len;
 				let mut m = 0;
 				match char::from_u32(cchar).unwrap_or('\0') {

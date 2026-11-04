@@ -96,7 +96,9 @@ mv -f d/k .; print -l $PWD/*(:t)",
 	);
 	assert_eq!(
 		out,
-		"a\nd/g\n1\n1\n1\n1\nd/g\na\n1\n0\na\n0100600\n1\n1\n0100755\n0100700\nd/g\nd/k\nd\nh\nk\nl\nr\n"
+		"a\nd/g\n1\n1\n1\n1\nd/g\na\n1\n0\na\n0100600\n1\n1\n0100755\n0100700\nd/g\nd/k\nd\nh\nk\nl\\
+		 \
+		 nr\n"
 	);
 	assert_eq!(
 		err,
@@ -117,13 +119,15 @@ zsh:chmod:14: nope: no such file or directory
 #[test]
 fn zsh_mod_files_interactive_questions() {
 	let (out, err, _) = zsh_in(
-		"cd /tmp; zmodload zsh/files; print > a; print > b; rm -i nope a b; echo $?; print -l $PWD/*(:t)",
+		"cd /tmp; zmodload zsh/files; print > a; print > b; rm -i nope a b; echo $?; print -l \
+		 $PWD/*(:t)",
 		b"y\nn\n",
 	);
 	assert_eq!(out, "1\nb\n");
 	assert_eq!(err, "zsh:rm:1: nope: no such file or directory\nrm: remove `a'? rm: remove `b'? ");
 	let (out, err, _) = zsh_in(
-		"cd /tmp; zmodload zsh/files; print > a; print > b; mv -i a b; echo $?; print -l $PWD/*(:t); ln -i a b; echo $?",
+		"cd /tmp; zmodload zsh/files; print > a; print > b; mv -i a b; echo $?; print -l \
+		 $PWD/*(:t); ln -i a b; echo $?",
 		b"n\n",
 	);
 	assert_eq!(out, "0\na\nb\n0\n");
@@ -136,7 +140,8 @@ fn zsh_mod_files_interactive_questions() {
 #[test]
 fn zsh_mod_files_feature_gating() {
 	let (out, err, st) = zsh(
-		"cd /tmp; zmodload -F zsh/files b:zf_rm b:zf_mv; print > a; zf_mv a b; zf_rm b; print -l $PWD/*(N:t); whence -w zf_rm zf_mv zf_mkdir rm",
+		"cd /tmp; zmodload -F zsh/files b:zf_rm b:zf_mv; print > a; zf_mv a b; zf_rm b; print -l \
+		 $PWD/*(N:t); whence -w zf_rm zf_mv zf_mkdir rm",
 	);
 	assert_eq!(out, "\nzf_rm: builtin\nzf_mv: builtin\nzf_mkdir: none\nrm: none\n");
 	assert_eq!(err, "");

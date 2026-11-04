@@ -778,16 +778,19 @@ mod tests {
 			"visual", "viopp", "command", ".safe", "vicmd", "main", "isearch", "viins", "emacs"
 		]);
 		// zsh: bindkey -l; bindkey -lL
-		assert_eq!(bkrun(&mut kms, b"l", &[]), (
-			0,
-			".safe\ncommand\nemacs\nisearch\nmain\nvicmd\nviins\nviopp\nvisual\n".into()
-		));
-		assert_eq!(bkrun(&mut kms, b"lL", &[]), (
-			0,
-			"bindkey -N command\nbindkey -N emacs\nbindkey -N isearch\nbindkey -A emacs main\nbindkey -N \
-			 vicmd\nbindkey -N viins\nbindkey -N viopp\nbindkey -N visual\n"
-				.into()
-		));
+		assert_eq!(
+			bkrun(&mut kms, b"l", &[]),
+			(0, ".safe\ncommand\nemacs\nisearch\nmain\nvicmd\nviins\nviopp\nvisual\n".into())
+		);
+		assert_eq!(
+			bkrun(&mut kms, b"lL", &[]),
+			(
+				0,
+				"bindkey -N command\nbindkey -N emacs\nbindkey -N isearch\nbindkey -A emacs \
+				 main\nbindkey -N vicmd\nbindkey -N viins\nbindkey -N viopp\nbindkey -N visual\n"
+					.into()
+			)
+		);
 		// zsh: bindkey -l nope emacs
 		assert_eq!(
 			bkrun(&mut kms, b"l", &[b"nope", b"emacs"]),
@@ -811,9 +814,9 @@ mod tests {
 		bkrun(&mut kms, b"A", &[b"emacs", b"a b"]);
 		assert_eq!(
 			bkrun(&mut kms, b"lL", &[]).1,
-			"bindkey -N -- -foo\nbindkey -A emacs 'a b'\nbindkey -A -- -foo bar\nbindkey -N command\nbindkey -N \
-			 emacs\nbindkey -N isearch\nbindkey -A emacs main\nbindkey -N vicmd\nbindkey -N viins\nbindkey -N \
-			 viopp\nbindkey -N visual\n"
+			"bindkey -N -- -foo\nbindkey -A emacs 'a b'\nbindkey -A -- -foo bar\nbindkey -N \
+			 command\nbindkey -N emacs\nbindkey -N isearch\nbindkey -A emacs main\nbindkey -N \
+			 vicmd\nbindkey -N viins\nbindkey -N viopp\nbindkey -N visual\n"
 		);
 		// zsh: bindkey -D -- -foo; bindkey -lL | grep bar
 		bkrun(&mut kms, b"D", &[b"-foo"]);
@@ -877,8 +880,8 @@ mod tests {
 		// zsh: bindkey -L -p "^[O"
 		assert_eq!(
 			bk(&mut kms, b"main", b"Lp", &[b"^[O"]).1,
-			"bindkey \"^[OA\" up-line-or-history\nbindkey \"^[OB\" down-line-or-history\nbindkey \"^[OC\" \
-			 forward-char\nbindkey \"^[OD\" backward-char\n"
+			"bindkey \"^[OA\" up-line-or-history\nbindkey \"^[OB\" down-line-or-history\nbindkey \
+			 \"^[OC\" forward-char\nbindkey \"^[OD\" backward-char\n"
 		);
 		// zsh: bindkey -p "" | wc -l
 		assert_eq!(bk(&mut kms, b"main", b"p", &[b""]).1.lines().count(), 117);
@@ -916,8 +919,8 @@ mod tests {
 		bk(&mut kms, b"t", b"", &[b"^?", b"undefined-key"]);
 		assert_eq!(
 			bk(&mut kms, b"t", b"L", &[]).1,
-			"bindkey -s -M t \"^Xa\" \"ab\\$\\\"c^A\"\nbindkey -M t \"-x\" dash\nbindkey -M t \"\\\\\\\\\" \
-			 bs\nbindkey -R -M t \"a\"-\"f\" foo\n"
+			"bindkey -s -M t \"^Xa\" \"ab\\$\\\"c^A\"\nbindkey -M t \"-x\" dash\nbindkey -M t \
+			 \"\\\\\\\\\" bs\nbindkey -R -M t \"a\"-\"f\" foo\n"
 		);
 		assert_eq!(
 			bk(&mut kms, b"t", b"", &[]).1,

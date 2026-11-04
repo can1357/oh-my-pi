@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `ShellTrace` model (`shell-trace.ts`: a shell run's compiled units, per-node state and reflowed layout, byte-offset based) and the TSP `shell` kind with `TspShellProps`
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

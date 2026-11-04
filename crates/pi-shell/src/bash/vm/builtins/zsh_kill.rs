@@ -32,7 +32,13 @@ fn sig_name(n: i64, platform: Platform) -> String {
 /// `alt_sigs` (`CLD` and `IO` where they alias `CHLD` and `POLL`; `ERR`
 /// names zsh's `SIGZERR`, past `SIGCOUNT`, so never a signal here).
 fn sig_number(name: &[u8], platform: Platform, nocase: bool) -> Option<i64> {
-	let eq = |a: &[u8], b: &[u8]| if nocase { a.eq_ignore_ascii_case(b) } else { a == b };
+	let eq = |a: &[u8], b: &[u8]| {
+		if nocase {
+			a.eq_ignore_ascii_case(b)
+		} else {
+			a == b
+		}
+	};
 	if let Some(n) = (1..=SIGCOUNT).find(|&n| eq(sig_name(n, platform).as_bytes(), name)) {
 		return Some(n);
 	}

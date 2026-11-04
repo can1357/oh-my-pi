@@ -48,11 +48,11 @@ pub(super) fn generate(folded: &str) -> Option<String> {
 	let mut svg = String::new();
 	write!(
 		svg,
-		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1200\" height=\"{height}\" viewBox=\"0 0 1200 {height}\">\n\
-		 <title>Work Profile</title>\n\
-		 <rect width=\"1200\" height=\"{height}\" fill=\"#fff\"/>\n\
-		 <text x=\"600\" y=\"24\" text-anchor=\"middle\" font-family=\"Verdana, sans-serif\" font-size=\"17\">Work Profile</text>\n\
-		 <g font-family=\"Verdana, sans-serif\" font-size=\"12\">\n"
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1200\" height=\"{height}\" viewBox=\"0 0 \
+		 1200 {height}\">\n<title>Work Profile</title>\n<rect width=\"1200\" height=\"{height}\" \
+		 fill=\"#fff\"/>\n<text x=\"600\" y=\"24\" text-anchor=\"middle\" font-family=\"Verdana, \
+		 sans-serif\" font-size=\"17\">Work Profile</text>\n<g font-family=\"Verdana, sans-serif\" \
+		 font-size=\"12\">\n"
 	)
 	.unwrap();
 	render_frame(&mut svg, "all", &root, 0, 0, max_depth, root.samples);
@@ -83,7 +83,8 @@ fn render_frame(
 	write!(svg, " ({} μs, {:.2}%)</title>", frame.samples, share * 100.0).unwrap();
 	writeln!(
 		svg,
-		"<rect x=\"{x:.3}\" y=\"{y}\" width=\"{width:.3}\" height=\"15\" fill=\"rgb({red},{green},{blue})\"/>"
+		"<rect x=\"{x:.3}\" y=\"{y}\" width=\"{width:.3}\" height=\"15\" \
+		 fill=\"rgb({red},{green},{blue})\"/>"
 	)
 	.unwrap();
 

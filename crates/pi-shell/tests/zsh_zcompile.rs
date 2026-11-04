@@ -92,7 +92,9 @@ fn masked(mut b: Vec<u8>) -> Vec<u8> {
 /// The corpus files that exist here.
 fn corpus() -> Vec<String> {
 	fn walk(dir: &Path, keep: &dyn Fn(&Path) -> bool, out: &mut Vec<String>) {
-		let Ok(entries) = fs::read_dir(dir) else { return };
+		let Ok(entries) = fs::read_dir(dir) else {
+			return;
+		};
 		let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
 		entries.sort();
 		for p in entries {
@@ -255,7 +257,10 @@ fn zcompile_lists_dumps_zsh_wrote() {
 	let d = dir.join("x.zwc").display().to_string();
 	let (_, err, st) = run(true, &format!("zcompile -M {d} \"$@\""), &files);
 	assert_eq!((err.as_str(), st), ("", 0));
-	let script = format!("zcompile -t {d}; print $?; zcompile -t {d} ${{1:t}}; print $?; zcompile -t {d} nope; print $?");
+	let script = format!(
+		"zcompile -t {d}; print $?; zcompile -t {d} ${{1:t}}; print $?; zcompile -t {d} nope; print \
+		 $?"
+	);
 	let real = run(true, &script, &files);
 	let ours = run(false, &script, &files);
 	let _ = fs::remove_dir_all(&dir);

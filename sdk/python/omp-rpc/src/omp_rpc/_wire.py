@@ -706,6 +706,8 @@ class BashResult:
     minimized: JsonObject | None = None
     working_dir: str | None = None
     images: tuple[ImageContent, ...] | None = None
+    trace: JsonObject | None = None
+    """The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -2074,6 +2076,7 @@ def parse_bash_result(value: object, path: str = "BashResult") -> BashResult:
         minimized=optional(payload, "minimized", decode_json_object, path),
         working_dir=optional(payload, "workingDir", decode_str, path),
         images=optional(payload, "images", array(parse_image_content), path),
+        trace=optional(payload, "trace", decode_json_object, path),
     )
 
 

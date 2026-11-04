@@ -17,9 +17,9 @@ use std::collections::VecDeque;
 use bstr::{BString, ByteSlice};
 
 use super::{
-	Context, Editor, from_line,
+	Context, Editor,
 	exec::{self, Drive, Got, ReadTask, Task, push_call},
-	readflags,
+	from_line, readflags,
 	tty::Tty,
 	utils, zle_mut,
 };
@@ -416,12 +416,23 @@ impl Reader {
 				self.sc.recycle();
 				Ok(Some(v))
 			},
-			Err(Stop::ZshSub { text, here }) => Err(start_zsh_sub(k, vp, cx, &mut self.sc, &text, here, 0).into()),
+			Err(Stop::ZshSub { text, here }) => {
+				Err(start_zsh_sub(k, vp, cx, &mut self.sc, &text, here, 0).into())
+			},
 			// A math function (`functions -M`) called from a prompt: its
 			// frame runs above, the expansion replays with its value.
-			Err(Stop::MathCall(call)) => {
-				Err(crate::bash::vm::command::start_math_call(k, vp, cx, &mut self.sc, Slot::Builtin, &call, 0).into())
-			},
+			Err(Stop::MathCall(call)) => Err(
+				crate::bash::vm::command::start_math_call(
+					k,
+					vp,
+					cx,
+					&mut self.sc,
+					Slot::Builtin,
+					&call,
+					0,
+				)
+				.into(),
+			),
 			Err(Stop::Sub { unit, entry, form, text }) => {
 				Err(start_sub(k, vp, cx, &mut self.sc, Sub { unit, entry, form, text, line: 0 }).into())
 			},
@@ -825,25 +836,32 @@ impl Reader {
 			// rather than consuming the right prompt's substitution result.
 			self
 				.expand(k, cx, vp, |ex| {
-				let mut prompt = |raw: &[u8]| {
-					match super::display::expand_prompt(ex, raw, status, &stack) {
-						Ok(p) => Ok(p),
-						Err(e @ (Stop::ZshSub { .. } | Stop::MathCall(_) | Stop::Sub { .. } | Stop::Wait(_))) => Err(e),
-						Err(Stop::Fail(d) | Stop::Fatal(d)) => {
-							ex.k.diag(ex.cx, ex.vp, 0, d);
-							Ok(Default::default())
-						},
-						Err(Stop::Store(e)) => {
-							ex.k.fail(e);
-							Ok(Default::default())
-						},
-						Err(_) => Ok(Default::default()),
-					}
-				};
-				Ok((prompt(&raw_lp)?, prompt(&raw_rp)?))
-			})?.unwrap_or_default()
+					let mut prompt =
+						|raw: &[u8]| match super::display::expand_prompt(ex, raw, status, &stack) {
+							Ok(p) => Ok(p),
+							Err(
+								e @ (Stop::ZshSub { .. }
+								| Stop::MathCall(_)
+								| Stop::Sub { .. }
+								| Stop::Wait(_)),
+							) => Err(e),
+							Err(Stop::Fail(d) | Stop::Fatal(d)) => {
+								ex.k.diag(ex.cx, ex.vp, 0, d);
+								Ok(Default::default())
+							},
+							Err(Stop::Store(e)) => {
+								ex.k.fail(e);
+								Ok(Default::default())
+							},
+							Err(_) => Ok(Default::default()),
+						};
+					Ok((prompt(&raw_lp)?, prompt(&raw_rp)?))
+				})?
+				.unwrap_or_default()
 		} else {
-			let lp = self.expand(k, cx, vp, |ex| ex.prompt(&raw_lp))?.unwrap_or_default();
+			let lp = self
+				.expand(k, cx, vp, |ex| ex.prompt(&raw_lp))?
+				.unwrap_or_default();
 			(bash_marked(&lp), zsh_prompt_expansion::Expansion::default())
 		};
 		self.prompts = Some(Prompts { raw_lp, raw_rp, lp, rp });

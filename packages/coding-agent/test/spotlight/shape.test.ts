@@ -546,6 +546,46 @@ describe("spotlight shaping", () => {
 		expect(trace.rank).toBeUndefined();
 	});
 
+	it("collapses seen lines only in the order the agent saw them: a dropped or changed line splits the marker", async () => {
+		const state = newShapeState();
+		const first = migrations(20);
+		await shapeResult(
+			bash("bin/migrate --dry-run", [...first.slice(0, 14), "took 41ms", ...first.slice(14)].join("\n")),
+			context(),
+			scorer(() => 0.5),
+			state,
+			sink(),
+		);
+		// Migration 6 is gone and the short timing line changed: every long line was seen, but not in this order.
+		const again = [
+			"Applying migrations to staging",
+			...first.slice(0, 6),
+			...first.slice(7, 14),
+			"took 52ms",
+			...first.slice(14),
+			"Done: 19 applied, 0 failed",
+		];
+
+		const out = await shapeResult(
+			bash("bin/migrate", again.join("\n")),
+			context(),
+			scorer(() => 0.5),
+			state,
+			sink(),
+		);
+
+		expect(out.text).toBe(
+			[
+				"Applying migrations to staging",
+				"… [6 lines as shown before: read artifact://1:2-7]",
+				"… [7 lines as shown before: read artifact://1:8-14]",
+				"took 52ms",
+				"… [6 lines as shown before: read artifact://1:16-21]",
+				"Done: 19 applied, 0 failed",
+			].join("\n"),
+		);
+	});
+
 	it("keeps the last line of output that repeats an earlier run but stops short of it", async () => {
 		const state = newShapeState();
 		const first = migrations(30);

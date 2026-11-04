@@ -62,10 +62,10 @@ fn zsh_mod_rlimits_listings_match_zsh() {
 #[test]
 fn zsh_mod_rlimits_units_match_zsh() {
 	same_as_zsh(
-		"limit cputime 1:30; limit cputime; limit cputime 2h; limit cputime; limit cputime 3m; limit \
-		 cputime; limit stacksize 1m; limit stacksize; ulimit -s; limit filesize 2g; limit filesize; \
-		 limit coredumpsize 10; limit coredumpsize; ulimit -c; ulimit -c 10; ulimit -c; limit \
-		 coredumpsize",
+		"limit cputime 1:30; limit cputime; limit cputime 2h; limit cputime; limit cputime 3m; \
+		 limit cputime; limit stacksize 1m; limit stacksize; ulimit -s; limit filesize 2g; limit \
+		 filesize; limit coredumpsize 10; limit coredumpsize; ulimit -c; ulimit -c 10; ulimit -c; \
+		 limit coredumpsize",
 	);
 }
 
@@ -96,6 +96,9 @@ fn zsh_mod_rlimits_shell_and_child_hard_limits_match_zsh() {
 		"ulimit -n 64; ulimit -Sn hard; ulimit -n; ulimit -n 64; ulimit -n unlimited; echo $?",
 	);
 	same_as_zsh("limit -s descriptors 100; limit -s -h descriptors 90; echo $?; limit descriptors");
-	same_as_zsh("limit -h descriptors 100; limit descriptors 200; echo $?; unlimit descriptors; limit descriptors");
+	same_as_zsh(
+		"limit -h descriptors 100; limit descriptors 200; echo $?; unlimit descriptors; limit \
+		 descriptors",
+	);
 	same_as_zsh("limit -s; echo $?; unlimit; echo $?; unlimit -h; echo $?");
 }
