@@ -276,9 +276,19 @@ describe("boundaries the resolver must keep", () => {
 		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
 	});
 
-	test("a plugin cache is foreign under every profile, not only the active one", () => {
-		expect(isOmpOwnedPath(path.join(owned, "plugins", "cache", "plugins", "x"))).toBe(false);
-		expect(isOmpOwnedPath(path.join(owned, "profiles", "other", "plugins", "cache", "marketplaces"))).toBe(false);
+	test("a tree omp fills from elsewhere is foreign, at the root and under a profile", () => {
+		for (const tree of [
+			["plugins", "cache", "plugins", "x"],
+			["wt", "pr-1-abcdef", ".omp", "mcp.json"],
+			["remote", "somehost", "etc", "config.yml"],
+			["skillshare", "pkg", "1.0.0", "skills.json"],
+		]) {
+			expect(isOmpOwnedPath(path.join(owned, ...tree))).toBe(false);
+			expect(isOmpOwnedPath(path.join(owned, "profiles", "other", ...tree))).toBe(false);
+		}
+		// The names are anchored, so the user's own directories keep their meaning.
 		expect(isOmpOwnedPath(path.join(owned, "plugins"))).toBe(true);
+		expect(isOmpOwnedPath(path.join(owned, "agent", "prompts", "wt"))).toBe(true);
+		expect(isOmpOwnedPath(path.join(owned, "agent", "plugins", "cache"))).toBe(true);
 	});
 });

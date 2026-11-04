@@ -564,11 +564,19 @@ export function getConfigRootDir(): string {
  * it), the active profile's root, an agent directory `--agent-dir` moved
  * outside it, and the XDG app roots.
  *
- * Not owned, even inside those: the project's own `.omp` directory, whose
- * contents git restores with their symlinks, and any profile's `plugins/cache`,
- * which holds cloned marketplaces and plugins. A write must not follow a link
- * it finds there, because the link is the repository's statement and not the
- * user's.
+ * Not owned, even inside those: every directory omp fills from somewhere other
+ * than the user. Those are named here rather than inferred, because the set
+ * grows whenever omp learns to fetch another kind of tree:
+ *
+ *   - the project's own `.omp` directory, whose contents git restores with
+ *     their symlinks;
+ *   - `wt/`, where omp checks out branches and isolated subagent trees;
+ *   - `remote/`, where another host's filesystem is mounted;
+ *   - `skillshare/`, holding unpacked downloaded skill packages;
+ *   - any profile's `plugins/cache`, holding cloned marketplaces and plugins.
+ *
+ * A write must not follow a link it finds in one of those, because the link is
+ * whatever produced the tree speaking, not the user.
  */
 export function isOmpOwnedPath(candidate: string): boolean {
 	// Canonicalize first, through a component that does not exist yet: a `..`
@@ -580,16 +588,19 @@ export function isOmpOwnedPath(candidate: string): boolean {
 		const value = process.env[envVar];
 		if (value) roots.push(path.join(value, APP_NAME));
 	}
+	// The project's `.omp` is the one foreign tree keyed on this process's own
+	// directory; the rest are omp's, wherever the process stands.
 	if (pathIsWithin(getProjectAgentDir(), target)) return false;
 	for (const root of roots) {
 		if (!pathIsWithin(root, target)) continue;
 		const relative = relativePathWithinRoot(root, target) ?? "";
-		// Every profile keeps its downloads under `<root>/plugins/cache`, and the
-		// active profile is not the only one a process can write into.
 		const segments = relative.split(path.sep);
-		for (let i = 0; i + 1 < segments.length; i++) {
-			if (segments[i] === "plugins" && segments[i + 1] === "cache") return false;
-		}
+		// Anchored at the root, and at a profile under it, so a directory a user
+		// made with one of these names deeper in their own tree stays theirs.
+		const offset = segments[0] === "profiles" && segments.length > 2 ? 2 : 0;
+		const head = segments[offset];
+		if (head === "wt" || head === "remote" || head === "skillshare") return false;
+		if (head === "plugins" && segments[offset + 1] === "cache") return false;
 		return true;
 	}
 	return false;
