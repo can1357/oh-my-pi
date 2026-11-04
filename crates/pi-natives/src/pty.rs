@@ -320,8 +320,8 @@ impl PtySession {
 	}
 }
 
-/// Under test, the terminal setup step to fail, to prove no setup step can
-/// fail once the child exists.
+// Under test, the terminal setup step to fail, to prove no setup step can
+// fail once the child exists.
 #[cfg(test)]
 thread_local! {
 	static FAIL_SETUP_STEP: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
