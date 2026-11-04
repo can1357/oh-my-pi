@@ -38,6 +38,8 @@
 - The shell's built-in `jq` no longer slows down quadratically on repeated updates such as `reduce range(n) as $i ([]; . + [$i])`
 - `/tan` completion notices now quote the user's request and mark the result as the user's tangent, so the main agent no longer mistakes it for its own work
 - `omp zsh` with zsh-autosuggestions' `completion` strategy no longer echoes each typed key onto new lines: `vared` inside a `zpty` command now edits on the pty instead of the shell's terminal
+- Anthropic web search now passes `site:`-scoped queries to Claude with the domain and path still in the text, and tells Claude to always search, so those lookups and queries it thought it could answer from memory no longer fail with "returned no sources" ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
+- Anthropic web search on models with a refusal fallback (Opus 5 and 5.5, Sonnet 5.5, Fable 5) has Anthropic retry a query the safety classifier declines on another Claude model, and reports a refusal or a failed search (`too_many_requests`, …) by name instead of "returned no sources" ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -45,27 +47,6 @@
 - With the Spotlight experiment on, a session now warns when Spotlight finds no Stencil credential, once each time the credential goes missing, and says how to sign in again; the `spotlight:shape` journal entry records failed Spotlight calls by cause (`failureCauses`) ([#18850](https://github.com/can1357/oh-my-pi/pull/18850) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.18.8] - 2026-11-11
-- Anthropic web search now passes `site:`-scoped queries to Claude with the domain and path still in the text, and tells Claude to always search, so those lookups and queries it thought it could answer from memory no longer fail with "returned no sources"
-- Anthropic web search on models with a refusal fallback (Opus 5 and 5.5, Sonnet 5.5, Fable 5) has Anthropic retry a query the safety classifier declines on another Claude model, and reports a refusal or a failed search (`too_many_requests`, …) by name instead of "returned no sources"
-- Extension links stay clickable and extension-drawn replies and custom messages keep their renderers on every launch, not only the first after an edit; `ctx.ui.getLinkClicksAvailable()` no longer turns false on later launches ([#18116](https://github.com/can1357/oh-my-pi/pull/18116) by [@materemias](https://github.com/materemias))
-- An AST Grep capture spanning several lines shows on one `meta:` row of the result card instead of one row per line, so collapsed results no longer show its later lines and a blank line inside it no longer splits the match from its file ([#18105](https://github.com/can1357/oh-my-pi/pull/18105) by [@JustasMasiulis](https://github.com/JustasMasiulis))
-- Extension shortcuts on a reserved chord spelled with a different modifier order (e.g. `ctrl+shift+p`) are now ignored like the reserved spelling ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
-- When extensions register one shortcut in different spellings (`alt+ctrl+x` and `ctrl+alt+x`, or `?` and `shift+?`), only the last one loaded is bound, as with identical spellings, instead of the first silently winning
-- `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
-- Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset
-- The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm
-- A running session no longer falls back to a setting's default when `config.yml` gains a value its omp version doesn't know (such as an `edit.mode` a newer omp added); it keeps the value it had, so the edit doesn't change its tools and throw away every open session's prompt cache
-- Forcing a queued message with Enter now resumes the agent even when interruption races tool completion or model preparation
-- `.`/`c` continue no longer fails with "Nothing to resume" in a session started by a `/skill:` command
-- Long bash output cut in the middle no longer splits a line at the `[…N ln elided…]` marker, and its "Showing lines …" notice now names the lines actually shown, ending at the output's real last line ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
-- A bash command that prints nothing and succeeds now returns `(no output, exit code 0)` instead of a bare `(no output)`, so an empty diff or search no longer reads like a failed command ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
-- The first frame of a new session always shows your configured default model and the thinking level a new session starts at; a session launched with `--model`, a model switched mid-session, or a project-only default no longer leaks into other folders' first frame
-- Added `tui.motion` (`full` / `reduced` / `none`, also `--motion` and `PI_MOTION`), one switch over spinners, the thinking pulse, shimmer and the status-line blink/fade for many-pane or reduced-motion use; a `tui.spinnerInterval` you set still wins over the preset ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
-- Added `tui.spinnerInterval` (also `--spinner-interval` and `PI_SPINNER_INTERVAL`) to slow every spinner, the terminal title included, or pin them static with `0` ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
-- Skills listed in the system prompt get their compressed routing hint instead of a cut-off description when the hint runs past 12 words but fits 160 characters; skills an earlier version gave up on are compressed again
-- Uncached skill descriptions no longer send background model requests after the session-tree cost cap is reached, and their completed spend counts toward the cap ([#18016](https://github.com/can1357/oh-my-pi/issues/18016))
-- Added `tui.maxFps` (also `--max-fps` and `PI_MAX_FPS`) to cap how often the TUI repaints; keystroke echo keeps 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
-- The idle recap no longer disappears when the session is resumed, restarted or its transcript is rebuilt; the latest recap stays at the end until the conversation moves on ([#18113](https://github.com/can1357/oh-my-pi/pull/18113) by [@materemias](https://github.com/materemias))
 
 ### Changed
 
