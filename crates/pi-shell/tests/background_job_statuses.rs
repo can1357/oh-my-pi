@@ -266,3 +266,25 @@ async fn zsh_disown_keeps_no_status() {
 	)])
 	.await;
 }
+
+/// Traps pending at once run in signal-number order, as bash's
+/// `run_pending_traps` does: `TERM` ran before `USR1`, `USR2` before
+/// `USR1`.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_traps_run_in_signal_order() {
+	assert_bash_outputs(&[
+		(r#"f(){ trap 'echo got-usr1' USR1; trap 'echo got-term' TERM; sleep 0.5; }; f & p=$!; /bin/sleep 0.1; kill -USR1 "$p"; kill -TERM "$p"; wait "$p"; echo status=$?"#, "got-usr1\ngot-term\nstatus=0\n"),
+		(r#"f(){ trap 'echo got-usr1' USR1; trap 'echo got-usr2' USR2; sleep 0.5; }; f & p=$!; /bin/sleep 0.1; kill -USR1 "$p"; kill -USR2 "$p"; wait "$p"; echo status=$?"#, "got-usr1\ngot-usr2\nstatus=0\n"),
+	])
+	.await;
+}
+
+/// `kill -s EXIT` is signal 0, a probe as `kill -0` is: it was refused as
+/// an invalid signal.
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_exit_probes() {
+	assert_bash_outputs(&[
+		(r#"f(){ trap 'echo exit-trap' EXIT; sleep 0.3; echo end; }; f & p=$!; /bin/sleep 0.1; kill -s EXIT "$p"; echo kill=$?; wait "$p"; echo status=$?"#, "kill=0\nend\nexit-trap\nstatus=0\n"),
+	])
+	.await;
+}
