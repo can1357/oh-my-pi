@@ -174,18 +174,21 @@ export function recordSessionLocation(
  * artifact directory (subagent sessions), by the id in each file's header. For
  * a `.jsonl.gz` transcript the id comes from its `<timestamp>_<id>` name. An
  * unreadable directory in the tree is skipped without losing the rest. When
- * the tree was just moved from `previousFile`, a transcript whose header
- * cannot be read keeps the id the index recorded for it at its old path.
+ * the tree was just moved or copied from `previousFile`, a transcript whose
+ * header cannot be read keeps the id the index recorded for it at its old
+ * path, and so does every transcript under a directory it cannot enter.
+ * `artifactsOnly` leaves `file` itself out (a fork's journal holds its own id).
  * Reads only that one session's tree.
  */
 export async function recordSessionTree(
 	file: string,
 	roots: readonly string[] = sessionLocatorRoots(),
 	previousFile?: string,
+	options: { artifactsOnly?: boolean } = {},
 ): Promise<void> {
 	const artifacts = artifactsOf(file);
 	if (artifacts === undefined) return;
-	const files = [file];
+	const files = options.artifactsOnly ? [] : [file];
 	const unreadable: SessionLocatorRebuild["unreadable"] = [];
 	try {
 		await scanNestedTranscripts(artifacts, files, unreadable);
@@ -223,8 +226,11 @@ function artifactsOf(file: string): string | undefined {
 }
 
 /**
- * Lines the index of `target`'s root records for exactly `target`, or with
- * `under`, for every path inside the directory `target`; in file order.
+ * Lines that name exactly `target`, or with `under`, every path inside the
+ * directory `target`, in the index of every root: a relative line names its
+ * path under each root, as {@link locateSessions} reads it, so a line another
+ * root keeps for the same relative path counts. Each row's `file` is where
+ * that line puts it beside `target`. In root order, then file order.
  */
 async function recordedRowsAt(
 	target: string,
@@ -233,26 +239,31 @@ async function recordedRowsAt(
 ): Promise<{ id: string; file: string }[]> {
 	const absolute = path.resolve(target);
 	const owner = owningRoot(absolute, roots);
-	const indexRoot = owner?.root ?? getSessionsDir();
-	const stored = owner?.relative ?? absolute;
+	const indexRoots = roots.includes(getSessionsDir()) ? roots : [...roots, getSessionsDir()];
 	const rows: { id: string; file: string }[] = [];
-	for (const name of [SESSION_LOCATOR_BASE_FILE, SESSION_LOCATOR_FILE]) {
-		let text: string;
-		try {
-			text = await Bun.file(path.join(indexRoot, name)).text();
-		} catch {
-			continue;
-		}
-		for (const line of text.split("\n")) {
-			const tab = line.indexOf("\t");
-			if (tab <= 0) continue;
-			const id = line.slice(0, tab);
-			if (!SESSION_ID_RE.test(id)) continue;
-			const recorded = decodeStoredPath(line.slice(tab + 1));
-			if (under ? recorded.startsWith(`${stored}/`) : recorded === stored) {
+	for (const indexRoot of indexRoots) {
+		for (const name of [SESSION_LOCATOR_BASE_FILE, SESSION_LOCATOR_FILE]) {
+			let text: string;
+			try {
+				text = await Bun.file(path.join(indexRoot, name)).text();
+			} catch {
+				continue;
+			}
+			for (const line of text.split("\n")) {
+				const tab = line.indexOf("\t");
+				if (tab <= 0) continue;
+				const id = line.slice(0, tab);
+				if (!SESSION_ID_RE.test(id)) continue;
+				const recorded = decodeStoredPath(line.slice(tab + 1));
+				// Absolute lines match by path; relative ones by their path under `target`'s own root.
+				const base = path.isAbsolute(recorded) ? absolute : owner?.relative;
+				if (base === undefined) continue;
+				const hit = under ? recorded.startsWith(`${base}/`) : recorded === base;
+				if (!hit) continue;
+				const ownerRoot = owner?.root ?? indexRoot;
 				rows.push({
 					id,
-					file: path.isAbsolute(recorded) ? recorded : path.join(indexRoot, ...recorded.split("/")),
+					file: path.isAbsolute(recorded) ? recorded : path.join(ownerRoot, ...recorded.split("/")),
 				});
 			}
 		}
@@ -570,69 +581,63 @@ async function scanRootTranscripts(
 }
 
 /**
- * Rewrite `root`'s snapshot from the session files under it, reading each
- * one's header. The snapshot is staged beside the log and renamed into place;
- * the log is never touched, so lines other processes append meanwhile, and
- * lines for files the walk cannot see (a `--session-dir` session, a symlinked
- * bucket, a bucket moved to another root), all stay. This is the one
- * operation that walks the tree.
+ * Rewrite `root`'s snapshot: every line the previous snapshot held, plus one
+ * for each session file the walk finds, by its header id. A reindex adds and
+ * never removes: a file it cannot read now (permissions, a directory it cannot
+ * enter, a header it cannot parse) keeps every line the index knew for it, and
+ * is reported in `unreadable`. Lines for files that are gone cost nothing, as
+ * lookups check each candidate's header. The snapshot is staged beside the
+ * log and renamed into place; the log is never touched, so lines other
+ * processes append meanwhile stay too. This is the one operation that walks
+ * the tree.
  */
 export async function rebuildSessionLocator(root: string): Promise<SessionLocatorRebuild> {
 	const resolvedRoot = path.resolve(root);
 	const result: SessionLocatorRebuild = { root: resolvedRoot, indexed: 0, unreadable: [] };
 	const files = await scanRootTranscripts(resolvedRoot, result.unreadable);
 	if (files === undefined) return result;
+	const snapshot = path.join(resolvedRoot, SESSION_LOCATOR_BASE_FILE);
+	const kept = new Set<string>();
 	const lines: string[] = [`${REBUILT_MARKER}${new Date().toISOString()}\n`];
-	// Walked files whose id this walk could not read (unreadable, or not a session now).
-	const unreadFiles = new Set<string>();
+	const keep = (line: string): void => {
+		if (kept.has(line)) return;
+		kept.add(line);
+		lines.push(`${line}\n`);
+	};
+	let previous = "";
+	try {
+		previous = await Bun.file(snapshot).text();
+	} catch (error) {
+		if (!isEnoent(error))
+			logger.debug("Previous session index snapshot unreadable", { snapshot, error: String(error) });
+	}
+	for (const line of previous.split("\n")) {
+		const tab = line.indexOf("\t");
+		if (tab > 0 && SESSION_ID_RE.test(line.slice(0, tab)) && line.length > tab + 1) keep(line);
+	}
 	for (let i = 0; i < files.length; i += HEADER_READ_CONCURRENCY) {
 		const batch = files.slice(i, i + HEADER_READ_CONCURRENCY);
-		// A generated `<timestamp>_<id>.jsonl` that no longer reads as a session
-		// (replaced with other bytes) is recorded under the id its name records:
-		// resume follows such a file to the copies that continue that session.
-		// Lookups that verify headers still never take it for that id.
-		const ids = await Promise.all(
-			batch.map(async file => (await sessionIdOfFile(file).catch(() => undefined)) ?? generatedNameId(file)),
-		);
+		const headerIds = await Promise.all(batch.map(file => sessionIdOfFile(file).catch(() => undefined)));
 		for (let j = 0; j < batch.length; j++) {
-			const id = ids[j];
 			const relative = relativeInside(resolvedRoot, batch[j]);
 			if (relative === undefined) continue;
-			if (!id) {
-				unreadFiles.add(relative);
+			if (!headerIds[j]) {
 				try {
 					await fs.promises.access(batch[j], fs.constants.R_OK);
 				} catch (error) {
 					result.unreadable.push({ bucket: batch[j], error: String(error) });
 				}
-				continue;
 			}
-			lines.push(`${id}\t${encodeStoredPath(relative)}\n`);
-			result.indexed++;
-		}
-	}
-	const snapshot = path.join(resolvedRoot, SESSION_LOCATOR_BASE_FILE);
-	// What this walk could not read, the previous snapshot may still know: keep
-	// its lines for paths under an unreadable directory and for walked files
-	// whose id could not be read. Lookups still check each such path's header.
-	const unreadablePrefixes = result.unreadable
-		.map(({ bucket }) => relativeInside(resolvedRoot, bucket))
-		.filter((relative): relative is string => relative !== undefined)
-		.map(relative => `${relative}/`);
-	if (unreadablePrefixes.length > 0 || unreadFiles.size > 0) {
-		let previous = "";
-		try {
-			previous = await Bun.file(snapshot).text();
-		} catch (error) {
-			if (!isEnoent(error))
-				logger.debug("Previous session index snapshot unreadable", { snapshot, error: String(error) });
-		}
-		for (const line of previous.split("\n")) {
-			const tab = line.indexOf("\t");
-			if (tab <= 0 || !SESSION_ID_RE.test(line.slice(0, tab))) continue;
-			const stored = decodeStoredPath(line.slice(tab + 1));
-			if (unreadFiles.has(stored) || unreadablePrefixes.some(prefix => stored.startsWith(prefix))) {
-				lines.push(`${line}\n`);
+			// A generated `<timestamp>_<id>.jsonl` that no longer reads as that
+			// session (replaced, or unreadable now) is also recorded under the id
+			// its name records: resume follows such a file to the copies that
+			// continue that session. Lookups that verify headers never take it
+			// for that id.
+			const nameId = generatedNameId(batch[j]);
+			for (const id of new Set([headerIds[j], nameId !== headerIds[j] ? nameId : undefined])) {
+				if (!id) continue;
+				keep(`${id}\t${encodeStoredPath(relative)}`);
+				if (id === headerIds[j]) result.indexed++;
 			}
 		}
 	}

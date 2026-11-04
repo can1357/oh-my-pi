@@ -1870,7 +1870,7 @@ async function runArchiveGc(
 			await moveSessionWithArtifacts(candidate);
 			// The archive keeps its own index, so a lookup by id (or a rebuilt
 			// sessions-root index) still finds the session and its subagents.
-			await recordSessionTree(candidate.destinationPath, [sessionsRoot, archiveRoot]);
+			await recordSessionTree(candidate.destinationPath, [sessionsRoot, archiveRoot], candidate.session.path);
 			result.archived += 1;
 			archivedSessionIds.push(candidate.session.id);
 			archivedSessions.push(candidate.session);

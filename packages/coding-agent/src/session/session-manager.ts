@@ -211,6 +211,11 @@ export async function copySessionArtifacts(sourceSessionFile: string, destinatio
 			});
 		}
 	}
+	// The copied subagent transcripts are new places for their sessions: index
+	// them, whatever part of the copy landed, so one copy that cannot be read
+	// never hides another that can. The destination journal records itself on
+	// its first write; it holds the fork's own id, not the source's.
+	await recordSessionTree(destinationSessionFile, undefined, realSource, { artifactsOnly: true });
 }
 
 /** The numeric id an artifact file name (`<id>.<tool>.log`) carries, if any. */

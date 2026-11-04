@@ -66,6 +66,19 @@ function writeTranscript(file: string, id: string, cwd: string): void {
 	fs.writeFileSync(file, `${JSON.stringify(header)}\n${JSON.stringify(message)}\n`);
 }
 
+/** A finished transcript (a user turn and its answer), as `omp gc --archive` takes it. */
+function writeFinishedTranscript(file: string, id: string, cwd: string): void {
+	writeTranscript(file, id, cwd);
+	const answer = {
+		type: "message",
+		id: "m2",
+		parentId: "m1",
+		timestamp: "2026-01-02T03:04:07.000Z",
+		message: makeAssistantMessage(),
+	};
+	fs.appendFileSync(file, `${JSON.stringify(answer)}\n`);
+}
+
 /** Counts every directory listing under `root` except `allowed`, through each API omp lists with. */
 function countListings(root: string, allowed: string): { count: () => number; listed: string[]; restore: () => void } {
 	const listed: string[] = [];
@@ -585,6 +598,127 @@ describe("session index: lookups by id", () => {
 			);
 		},
 	);
+
+	describe("an unreadable file or directory never costs a readable session (round 8)", () => {
+		const unlessRoot = process.platform === "win32" || process.getuid?.() === 0;
+
+		it.skipIf(unlessRoot)(
+			"keeps a header id across a reindex that cannot read the file, whatever its name says",
+			async () => {
+				const headerId = "019a000b-0000-7000-8000-00000000000a";
+				const nameId = "019a000b-0000-7000-8000-00000000000b";
+				const file = path.join(getSessionsDir(), "--named--", `2026-01-01T00-00-00-000Z_${nameId}.jsonl`);
+				writeTranscript(file, headerId, "/n");
+				await rebuildSessionLocator(getSessionsDir());
+				expect((await resolveResumableSession(headerId, cwdB))?.session.path).toBe(file);
+				fs.chmodSync(file, 0o000);
+				let rebuilt: SessionLocatorRebuild;
+				try {
+					rebuilt = await rebuildSessionLocator(getSessionsDir());
+				} finally {
+					fs.chmodSync(file, 0o600);
+				}
+				expect(rebuilt.unreadable.map(entry => entry.bucket)).toEqual([file]);
+				expect((await resolveResumableSession(headerId, cwdB))?.session.path).toBe(file);
+			},
+		);
+
+		it.skipIf(unlessRoot)(
+			"finds a fork's copy of a subagent transcript when the original cannot be read",
+			async () => {
+				const parent = await persistedSession(cwdA);
+				const child = await subagentSession(parent, cwdA, "Worker");
+				const childId = child.getSessionId();
+				const original = child.getSessionFile()!;
+				await child.close();
+				await parent.close();
+				const fork = await SessionManager.forkFrom(parent.getSessionFile()!, cwdB);
+				await fork.flush();
+				const copy = path.join(fork.getSessionFile()!.slice(0, -".jsonl".length), "Worker.jsonl");
+				await fork.close();
+				expect(fs.existsSync(copy)).toBe(true);
+				fs.chmodSync(original, 0o000);
+				try {
+					const cwdC = path.join(agentDir, "project-c");
+					fs.mkdirSync(cwdC);
+					expect((await resolveResumableSession(childId, cwdC))?.session.path).toBe(copy);
+				} finally {
+					fs.chmodSync(original, 0o600);
+				}
+			},
+		);
+
+		it.skipIf(unlessRoot)(
+			"keeps a subagent's id through gc archive and reindex while it cannot be read",
+			async () => {
+				const parentId = "019a000c-0000-7000-8000-000000000001";
+				const childId = "019a000c-0000-7000-8000-000000000002";
+				// A tree an older omp wrote: only a reindex records it, no log.
+				const parent = path.join(getSessionsDir(), "--old-tree--", `2026-01-01T00-00-00-000Z_${parentId}.jsonl`);
+				const child = path.join(parent.slice(0, -".jsonl".length), "Worker.jsonl");
+				writeFinishedTranscript(parent, parentId, "/old");
+				writeFinishedTranscript(child, childId, "/old");
+				const old = new Date(Date.now() - 90 * 86_400_000);
+				for (const file of [parent, child]) fs.utimesSync(file, old, old);
+				await rebuildSessionLocator(getSessionsDir());
+				fs.chmodSync(child, 0o000);
+				try {
+					const result = await runGcCommand({
+						flags: {
+							agentDir,
+							archive: true,
+							apply: true,
+							coldArchiveAfterDays: 30,
+							retainNewestGlobal: 0,
+							retainNewestPerCwd: 0,
+						},
+					});
+					expect(result.archive?.archived).toBe(1);
+					await rebuildSessionLocator(getSessionsDir());
+				} finally {
+					const archived = path.join(archiveRootFor(getSessionsDir()), path.relative(getSessionsDir(), child));
+					fs.chmodSync(fs.existsSync(archived) ? archived : child, 0o600);
+				}
+				expect((await resolveResumableSession(childId, cwdB))?.session.path).toBe(
+					path.join(archiveRootFor(getSessionsDir()), path.relative(getSessionsDir(), child)),
+				);
+			},
+			600_000,
+		);
+
+		it.skipIf(unlessRoot)("keeps a moved subagent's id when its rows live in another root's index", async () => {
+			const session = await persistedSession(cwdA);
+			const child = await subagentSession(session, cwdA, "Portable");
+			const childId = child.getSessionId();
+			await child.close();
+			const file = session.getSessionFile()!;
+			await session.close();
+			// Move the bucket into an extra root: its rows stay in the original root's index.
+			const extra = path.join(agentDir, "cold");
+			fs.mkdirSync(extra, { recursive: true });
+			const movedBucket = path.join(extra, path.basename(path.dirname(file)));
+			fs.renameSync(path.dirname(file), movedBucket);
+			configureSessionExtraRoots([extra]);
+			const portable = path.join(movedBucket, path.basename(file));
+			const portableChild = path.join(portable.slice(0, -".jsonl".length), "Portable.jsonl");
+			expect((await resolveResumableSession(childId, cwdB))?.session.path).toBe(portableChild);
+
+			const reopened = await SessionManager.open(portable, path.dirname(portable));
+			fs.chmodSync(portableChild, 0o000);
+			let movedChild: string;
+			try {
+				await reopened.moveTo(cwdB);
+				movedChild = path.join(reopened.getSessionFile()!.slice(0, -".jsonl".length), "Portable.jsonl");
+			} finally {
+				const next = path.join(reopened.getSessionFile()!.slice(0, -".jsonl".length), "Portable.jsonl");
+				fs.chmodSync(fs.existsSync(next) ? next : portableChild, 0o600);
+			}
+			await reopened.close();
+			const cwdC = path.join(agentDir, "project-c");
+			fs.mkdirSync(cwdC);
+			expect((await resolveResumableSession(childId, cwdC))?.session.path).toBe(movedChild);
+		});
+	});
 
 	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
 		"finds a readable copy of a session when an older indexed copy cannot be read",
