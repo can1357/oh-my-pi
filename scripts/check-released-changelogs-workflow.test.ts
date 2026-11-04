@@ -132,7 +132,7 @@ async function pullRequest(change: (work: string) => Promise<void>, baseChangelo
 	return { root, origin, work, bin, base, head, merge };
 }
 
-type Event = "pull_request" | "pull_request_target";
+type Event = "pull_request" | "pull_request_target" | "push";
 
 interface Context {
 	github: {
@@ -145,7 +145,9 @@ interface Context {
 		server_url: string;
 		token: string;
 		event: {
-			pull_request: { number: number; head: { sha: string; ref: string }; base: { sha: string; ref: string } };
+			pull_request?: { number: number; head: { sha: string; ref: string }; base: { sha: string; ref: string } };
+			/** A push's previous tip of the branch. */
+			before?: string;
 		};
 	};
 }
@@ -181,7 +183,10 @@ function condition(expression: string, context: Context): boolean {
 	});
 }
 
-/** Whether the workflow's `on:` starts it for this pull request into main, given the files it changes. */
+/**
+ * Whether the workflow's `on:` starts it for this event on main (a pull request into main, or a push
+ * to main), given the files it changes.
+ */
 function triggers(workflow: Yaml, event: Event, changed: readonly string[]): boolean {
 	// YAML 1.1 reads the `on` key as `true`.
 	const on = workflow.on ?? workflow.true;
@@ -191,13 +196,19 @@ function triggers(workflow: Yaml, event: Event, changed: readonly string[]): boo
 	const filter = on[event] ?? {};
 	if (!isRecord(filter)) throw new Error(`unsupported ${event} filter`);
 	for (const key of Object.keys(filter)) {
-		if (!["branches", "types", "paths", "paths-ignore"].includes(key)) throw new Error(`unsupported filter ${key}`);
+		const known = ["branches", "types", "paths", "paths-ignore"];
+		if (event === "push") known.push("branches-ignore", "tags", "tags-ignore");
+		if (!known.includes(key)) throw new Error(`unsupported filter ${key}`);
 	}
 	const matches = (patterns: unknown, file: string) =>
 		Array.isArray(patterns) && patterns.some(pattern => new Bun.Glob(String(pattern)).match(file));
 	if (Array.isArray(filter.branches) && !filter.branches.some(branch => new Bun.Glob(String(branch)).match("main"))) {
 		return false;
 	}
+	if (matches(filter["branches-ignore"], "main")) return false;
+	// A push filter that names only tags starts nothing for a branch.
+	const namesTags = filter.tags !== undefined || filter["tags-ignore"] !== undefined;
+	if (namesTags && filter.branches === undefined && filter["branches-ignore"] === undefined) return false;
 	if (Array.isArray(filter.types) && !filter.types.includes("opened")) return false;
 	if (filter.paths && !changed.some(file => matches(filter.paths, file))) return false;
 	if (filter["paths-ignore"] && changed.every(file => matches(filter["paths-ignore"], file))) return false;
@@ -282,6 +293,27 @@ async function runJob(fixture: Fixture, context: Context, workflow: Yaml, id: st
 	return { event, job: id, exitCode: 0, output };
 }
 
+/** Runs every job of the workflows at `context.github.sha` that `context`'s event starts and that runs the check. */
+async function runCheckJobs(fixture: Fixture, context: Context, changed: readonly string[]): Promise<JobRun[]> {
+	const runs: JobRun[] = [];
+	const sha = context.github.sha;
+	const listed = await git(fixture.origin, "ls-tree", "-z", "--name-only", sha, "--", ".github/workflows/");
+	for (const file of listed.split("\0").filter(name => /\.ya?ml$/.test(name))) {
+		const workflow = Bun.YAML.parse(await git(fixture.origin, "show", `${sha}:${file}`));
+		if (!isRecord(workflow) || !triggers(workflow, context.github.event_name, changed) || !isRecord(workflow.jobs)) {
+			continue;
+		}
+		for (const [id, job] of Object.entries(workflow.jobs)) {
+			if (!isRecord(job) || !Array.isArray(job.steps)) continue;
+			const checks = job.steps.some(step => isRecord(step) && String(step.run ?? "").includes(CHECKER));
+			if (!checks || (typeof job.if === "string" && !condition(job.if, context))) continue;
+			if (job.needs !== undefined) throw new Error(`unsupported needs in ${id}`);
+			runs.push(await runJob(fixture, context, workflow, id, job));
+		}
+	}
+	return runs;
+}
+
 /** Every job GitHub would start for the opened pull request that runs the released-changelog check. */
 async function runReleasedChangelogJobs(fixture: Fixture): Promise<JobRun[]> {
 	const changed = (await git(fixture.origin, "diff", "--name-only", "-z", `${fixture.base}...${fixture.head}`))
@@ -290,11 +322,10 @@ async function runReleasedChangelogJobs(fixture: Fixture): Promise<JobRun[]> {
 	const runs: JobRun[] = [];
 	for (const event of ["pull_request", "pull_request_target"] as const) {
 		// GITHUB_SHA and GITHUB_REF for each event, from "Events that trigger workflows".
-		const sha = event === "pull_request" ? fixture.merge : fixture.base;
 		const context: Context = {
 			github: {
 				event_name: event,
-				sha,
+				sha: event === "pull_request" ? fixture.merge : fixture.base,
 				ref: event === "pull_request" ? `refs/pull/${PULL_REQUEST.number}/merge` : "refs/heads/main",
 				base_ref: "main",
 				head_ref: PULL_REQUEST.branch,
@@ -310,20 +341,51 @@ async function runReleasedChangelogJobs(fixture: Fixture): Promise<JobRun[]> {
 				},
 			},
 		};
-		const listed = await git(fixture.origin, "ls-tree", "-z", "--name-only", sha, "--", ".github/workflows/");
-		for (const file of listed.split("\0").filter(name => /\.ya?ml$/.test(name))) {
-			const workflow = Bun.YAML.parse(await git(fixture.origin, "show", `${sha}:${file}`));
-			if (!isRecord(workflow) || !triggers(workflow, event, changed) || !isRecord(workflow.jobs)) continue;
-			for (const [id, job] of Object.entries(workflow.jobs)) {
-				if (!isRecord(job) || !Array.isArray(job.steps)) continue;
-				const checks = job.steps.some(step => isRecord(step) && String(step.run ?? "").includes(CHECKER));
-				if (!checks || (typeof job.if === "string" && !condition(job.if, context))) continue;
-				if (job.needs !== undefined) throw new Error(`unsupported needs in ${id}`);
-				runs.push(await runJob(fixture, context, workflow, id, job));
-			}
-		}
+		runs.push(...(await runCheckJobs(fixture, context, changed)));
 	}
 	return runs;
+}
+
+/** Every job GitHub would start for a push that moves main from `before` to `after` that runs the check. */
+async function runPushJobs(fixture: Fixture, before: string, after: string): Promise<JobRun[]> {
+	const changed = (await git(fixture.origin, "diff", "--name-only", "-z", before, after))
+		.split("\0")
+		.filter(file => file.length > 0);
+	const context: Context = {
+		github: {
+			event_name: "push",
+			sha: after,
+			ref: "refs/heads/main",
+			base_ref: "",
+			head_ref: "",
+			repository: PULL_REQUEST.repository,
+			server_url: "https://github.com",
+			token: "simulated-token",
+			event: { before },
+		},
+	};
+	return runCheckJobs(fixture, context, changed);
+}
+
+/**
+ * Stands in for `gh` in the fixture's jobs: `gh pr list` prints `listed`, as its `--jq` filter would,
+ * and every other call prints nothing. Returns the calls made, one argument list per line.
+ */
+async function fakeGh(fixture: Fixture, listed: string): Promise<() => Promise<string[]>> {
+	const log = path.join(fixture.root, "gh-calls");
+	const answer = path.join(fixture.root, "gh-pr-list");
+	await Bun.write(answer, listed);
+	await Bun.write(
+		path.join(fixture.bin, "gh"),
+		`#!/bin/sh\necho "$*" >> '${log}'\nif [ "$1 $2" = "pr list" ]; then cat '${answer}'; fi\n`,
+	);
+	await fs.chmod(path.join(fixture.bin, "gh"), 0o755);
+	return async () => {
+		const text = await Bun.file(log)
+			.text()
+			.catch(() => "");
+		return text.split("\n").filter(line => line.length > 0);
+	};
 }
 
 /** The defect the check exists for: an entry put into a released section. */
@@ -484,6 +546,76 @@ describe("released changelog check in CI", () => {
 			const failed = runs.filter(run => run.exitCode !== 0 && run.output.includes(`    ${MOVED_ENTRY}\n`));
 			expect(failed.map(run => run.event)).toEqual(["pull_request_target"]);
 			expect(await sleeps()).toEqual([10]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"re-checks each open pull request after a push to main releases, and fails for one whose merge now moves an entry into the release",
+		async () => {
+			const first = "- Added the first entry";
+			const withEntry = BASE_CHANGELOG.replace("## [Unreleased]\n", `## [Unreleased]\n\n### Added\n\n${first}\n`);
+			const fixture = await pullRequest(
+				work => rewrite(work, CHANGELOG, `${first}\n`, `${first}\n${MOVED_ENTRY}\n`),
+				withEntry,
+			);
+			// Merged on the base it was opened against, the pull request keeps every released section.
+			const opened = (await runReleasedChangelogJobs(fixture)).filter(run => run.event === "pull_request_target");
+			expect(opened.map(run => run.exitCode)).toEqual([0]);
+
+			// Then main releases 1.1.0. The pull request's head does not change, so GitHub runs nothing for it.
+			await git(fixture.work, "checkout", "-q", "--detach", fixture.base);
+			await rewrite(
+				fixture.work,
+				CHANGELOG,
+				"## [Unreleased]\n\n",
+				"## [Unreleased]\n\n## [1.1.0] - 2026-02-01\n\n",
+			);
+			await git(fixture.work, "commit", "-qam", "chore: release 1.1.0");
+			const released = (await git(fixture.work, "rev-parse", "HEAD")).trim();
+			await git(fixture.work, "merge", "-q", "--no-ff", "--no-edit", fixture.head);
+			const current = (await git(fixture.work, "rev-parse", "HEAD")).trim();
+			const pending = "refs/released-changelogs/pending";
+			await git(fixture.work, "push", "-q", fixture.origin, `${released}:refs/heads/main`, `${current}:${pending}`);
+			// GitHub rebuilds pull request 1's merge on the new tip while the job waits. Pull request 2
+			// conflicts with main, so GitHub builds no merge for it.
+			const ref = `refs/pull/${PULL_REQUEST.number}/merge`;
+			await fakeSleep(fixture, `git --git-dir='${fixture.origin}' update-ref ${ref} ${current}`);
+			const calls = await fakeGh(fixture, `${PULL_REQUEST.number} ${fixture.head}\n2 ${"b".repeat(40)}\n`);
+
+			const runs = await runPushJobs(fixture, fixture.base, released);
+			expect(runs.map(run => run.exitCode)).toEqual([1]);
+			const output = runs[0]?.output ?? "";
+			expect(output).toContain(`    ${MOVED_ENTRY}\n`);
+			expect(output).toContain(`::error title=Released changelogs, pull request #${PULL_REQUEST.number}::`);
+			expect(output).toContain("::warning title=Released changelogs, pull request #2::");
+			// Open pull requests into main are the ones a merge button can still merge.
+			const listed = (await calls()).filter(call => call.startsWith("pr list "));
+			expect(listed.map(call => call.includes("--base main --state open"))).toEqual([true]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"leaves open pull requests alone after a push to main that changes no released section",
+		async () => {
+			const fixture = await pullRequest(moveEntryIntoRelease);
+			await git(fixture.work, "checkout", "-q", "--detach", fixture.base);
+			await rewrite(
+				fixture.work,
+				CHANGELOG,
+				"## [Unreleased]\n",
+				`## [Unreleased]\n\n### Added\n\n${MOVED_ENTRY}\n`,
+			);
+			await git(fixture.work, "commit", "-qam", "feat: an unreleased entry");
+			const tip = (await git(fixture.work, "rev-parse", "HEAD")).trim();
+			await git(fixture.work, "push", "-q", fixture.origin, `${tip}:refs/heads/main`);
+			const calls = await fakeGh(fixture, `${PULL_REQUEST.number} ${fixture.head}\n`);
+
+			const runs = await runPushJobs(fixture, fixture.base, tip);
+			expect(runs.map(run => run.exitCode)).toEqual([0]);
+			expect(runs[0]?.output).toContain("No released changelog section changed");
+			expect(await calls()).toEqual([]);
 		},
 		TEST_TIMEOUT_MS,
 	);

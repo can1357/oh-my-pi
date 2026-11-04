@@ -36,15 +36,29 @@
 # branch that predates a release puts its `## [Unreleased]` entries under the
 # new release heading with no conflict. The pull request's merge commit must
 # keep every released section of its first parent, the main tip where releases
-# are cut. A push to main is not checked: that is how a release arrives, and
-# `bun run release` rewrites released sections on purpose; scripts/merge-pr.ts
-# runs the same check before it commits a maintainer merge. A pull request into
-# `omp2` is not checked: its released sections are its own, and merging main
-# into it replaces them legitimately.
+# are cut. A push to main is not itself checked: that is how a release arrives,
+# and `bun run release` rewrites released sections on purpose;
+# scripts/merge-pr.ts runs the same check before it commits a maintainer merge.
+# A pull request into `omp2` is not checked: its released sections are its own,
+# and merging main into it replaces them legitimately.
+#
+# A pull request's result holds for the merge it read. GitHub runs nothing for
+# a pull request when main moves under it, yet a release cut since can make
+# its merge move entries into the new release. So a push to main that changes
+# a released section (a release) checks the merge of every open pull request
+# into main again, in the `open_pull_requests` job. That job gets the same
+# boundary: it runs only main's code, reads each merge as git objects, and its
+# token can only read (`contents` and `pull-requests`). A read-only token
+# cannot change a pull request's own check, so that job fails on the push and
+# names each pull request and line; only a required check with "require
+# branches to be up to date before merging", or scripts/merge-pr.ts, binds the
+# result at merge time.
 name: Released changelogs
 
 on:
    pull_request_target:
+      branches: [main]
+   push:
       branches: [main]
 
 permissions:
@@ -53,6 +67,7 @@ permissions:
 jobs:
    released_changelog_sections:
       name: Check released changelog sections
+      if: github.event_name == 'pull_request_target'
       runs-on: ubuntu-22.04
       timeout-minutes: 10
       steps:
@@ -107,3 +122,91 @@ jobs:
                 echo "  git fetch $GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git refs/pull/$PR_NUMBER/merge && bun scripts/check-released-changelogs.ts --base 'FETCH_HEAD^1' --head FETCH_HEAD"
               fi
               exit "$status"
+
+   open_pull_requests:
+      name: Check open pull requests after a release
+      if: github.event_name == 'push'
+      runs-on: ubuntu-22.04
+      timeout-minutes: 30
+      permissions:
+         contents: read
+         pull-requests: read
+      steps:
+         # The commit pushed to main, with this check's own code.
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              ref: ${{ github.sha }}
+              persist-credentials: false
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: 1.4.4
+         - name: Check the merge of each open pull request into main
+           env:
+              BEFORE: ${{ github.event.before }}
+              GH_TOKEN: ${{ github.token }}
+           run: |
+              # Only a push that changes a released section can make an open pull
+              # request's merge move entries into one; without one, nothing that
+              # passed before can fail now. A push whose previous tip cannot be
+              # read (a new or rewritten branch) counts as one that does.
+              changed=0
+              if git fetch --quiet --no-tags --no-recurse-submodules --depth=1 origin "$BEFORE"; then
+                bun scripts/check-released-changelogs.ts --base "$BEFORE" --head "$GITHUB_SHA" > /dev/null || changed=$?
+              else
+                changed=2
+              fi
+              if [ "$changed" -eq 0 ]; then
+                echo "No released changelog section changed in this push; open pull requests keep their results."
+                exit 0
+              fi
+
+              # A failing `gh` stops the step: a list it could not read never passes.
+              listed=$(gh pr list --repo "$GITHUB_REPOSITORY" --base main --state open --limit 5000 \
+                         --json number,headRefOid --jq '.[] | "\(.number) \(.headRefOid)"')
+              declare -A heads=()
+              while read -r number head; do
+                if [ -n "$number" ]; then heads[$number]=$head; fi
+              done <<< "$listed"
+              echo "A released changelog section changed; checking ${#heads[@]} open pull requests."
+              # GitHub rebuilds a pull request's merge when asked for the pull request.
+              for number in "${!heads[@]}"; do
+                gh api "repos/$GITHUB_REPOSITORY/pulls/$number" --silent || true
+              done
+
+              # As in the pull request job: the merge's second parent must be the
+              # pull request's head and its first main's tip now, which holds the
+              # release this push brought. A pull request without one, as for a
+              # conflict, gets a warning: GitHub does not merge it as it is.
+              failed=()
+              for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+                base_tip=""
+                if git fetch --quiet --no-tags --no-recurse-submodules --depth=1 origin "+refs/heads/main:refs/released-changelogs/base"; then
+                  base_tip=$(git rev-parse --verify --quiet --end-of-options "refs/released-changelogs/base^{commit}" || true)
+                fi
+                for number in "${!heads[@]}"; do
+                  ref="refs/released-changelogs/pull/$number"
+                  git fetch --quiet --no-tags --no-recurse-submodules --depth=2 origin "+refs/pull/$number/merge:$ref" 2>/dev/null || continue
+                  first_parent=$(git rev-parse --verify --quiet --end-of-options "$ref^1" || true)
+                  second_parent=$(git rev-parse --verify --quiet --end-of-options "$ref^2" || true)
+                  [ -n "$base_tip" ] && [ "$first_parent" = "$base_tip" ] && [ "$second_parent" = "${heads[$number]}" ] || continue
+                  merge=$(git rev-parse --verify --end-of-options "$ref^{commit}")
+                  status=0
+                  echo "::group::Pull request #$number, merge $merge"
+                  bun scripts/check-released-changelogs.ts --base "$merge^1" --head "$merge" || status=$?
+                  echo "::endgroup::"
+                  if [ "$status" -ne 0 ]; then
+                    failed+=("$number")
+                    echo "::error title=Released changelogs, pull request #$number::Merged into main now, pull request #$number changes a released changelog section (exit $status). Merge main into its branch and run bun run fix:changelogs. Check it in a clone: git fetch $GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git refs/pull/$number/merge && bun scripts/check-released-changelogs.ts --base 'FETCH_HEAD^1' --head FETCH_HEAD"
+                  fi
+                  unset "heads[$number]"
+                done
+                if [ "${#heads[@]}" -eq 0 ]; then break; fi
+                if [ "$attempt" -lt 12 ]; then sleep 10; fi
+              done
+              for number in "${!heads[@]}"; do
+                echo "::warning title=Released changelogs, pull request #$number::GitHub has not built the merge of pull request #$number into the current tip of main, so it was not checked again. A pull request that conflicts with main has none."
+              done
+              if [ "${#failed[@]}" -gt 0 ]; then
+                echo "Open pull requests whose merge into main changes a released changelog section: ${failed[*]/#/#}"
+                exit 1
+              fi
