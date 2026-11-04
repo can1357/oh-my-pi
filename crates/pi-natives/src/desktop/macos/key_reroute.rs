@@ -222,8 +222,8 @@ struct Registry {
 }
 
 impl Registry {
-	fn cancel(&mut self, armed: &Armed, generations: &AtomicU64) {
-		if self.latest == (armed.generation, armed.target) {
+	fn cancel(&mut self, generation: u64, target: pid_t, generations: &AtomicU64) {
+		if self.latest == (generation, target) {
 			self.latest = (generations.fetch_add(1, Ordering::AcqRel) + 1, -1);
 			self.stolen = None;
 		}
@@ -506,6 +506,11 @@ impl Theft {
 		if !key.physical {
 			return None;
 		}
+		// Secure input ends this repair, not just the current key's routing.
+		if secure {
+			registry.cancel(self.generation, self.target, &GENERATION);
+			self.end();
+		}
 		// A physical ⌘/⌃ press chooses the target even when it already holds
 		// the keyboard, so no new focus notification announces the choice.
 		if self.stolen()
@@ -681,12 +686,14 @@ unsafe extern "C" fn route_key(_proxy: Ref, kind: u32, event: Ref, user: Ref) ->
 		return event;
 	}
 	let key = Key { physical, code, stroke };
-	let secure = secure_entry();
 	let buttons = mouse_buttons();
-	let Some(to) = context
-		.theft
-		.route(&mut REGISTRY.lock(), key, secure, buttons)
-	else {
+	let to = {
+		let mut registry = REGISTRY.lock();
+		context
+			.theft
+			.route(&mut registry, key, secure_entry(), buttons)
+	};
+	let Some(to) = to else {
 		return event;
 	};
 	// SAFETY: the event is live for this callback; posting copies it to the
@@ -786,7 +793,9 @@ impl KeyReroute {
 
 	/// Stop moving fresh keys immediately; held releases keep their owner.
 	pub(super) fn cancel(self) {
-		REGISTRY.lock().cancel(&self.armed, &GENERATION);
+		REGISTRY
+			.lock()
+			.cancel(self.armed.generation, self.armed.target, &GENERATION);
 	}
 
 	/// Starts watching for the target taking the user's keyboard. `None` when
@@ -958,6 +967,7 @@ mod tests {
 
 	#[test]
 	fn missing_accessibility_never_starts_a_reroute_generation() {
+		let _serial = control::OWNERSHIP_TEST.lock();
 		let generation = GENERATION.load(Ordering::Acquire);
 		assert!(KeyReroute::arm_with_access(USER, pid_t::MAX, || false).is_none());
 		assert_eq!(GENERATION.load(Ordering::Acquire), generation);
@@ -1067,7 +1077,8 @@ mod tests {
 			buttons:    BUTTONS,
 			secure:     false,
 		};
-		rig.registry.cancel(&armed, &AtomicU64::new(1));
+		rig.registry
+			.cancel(armed.generation, armed.target, &AtomicU64::new(1));
 		assert_eq!(rig.key(LEFT_SHIFT, Stroke::Press), KEPT);
 		assert_eq!(rig.key(Q, Stroke::Release), MOVED);
 		assert_eq!(rig.registry.stolen, None);
@@ -1272,14 +1283,17 @@ mod tests {
 	}
 
 	#[test]
-	fn no_key_pressed_during_secure_entry_moves_but_a_moved_press_keeps_its_release() {
+	fn secure_input_during_a_live_reroute_ends_fresh_routing_and_keeps_held_releases() {
+		let _serial = control::OWNERSHIP_TEST.lock();
 		let mut rig = Rig::new();
 		rig.steal();
+		assert_eq!(rig.key(LEFT_SHIFT, Stroke::Press), MOVED);
 		assert_eq!(rig.key_with(Q, Stroke::Press, true), KEPT);
 		assert_eq!(rig.key_with(Q, Stroke::Repeat, true), KEPT);
 		assert_eq!(rig.key_with(Q, Stroke::Release, true), KEPT);
-		assert_eq!(rig.key(LEFT_SHIFT, Stroke::Press), MOVED);
 		assert_eq!(rig.key_with(LEFT_SHIFT, Stroke::Release, true), MOVED);
+		assert_eq!(rig.key(Q, Stroke::Press), KEPT);
+		assert_eq!(rig.registry.stolen, None);
 	}
 
 	#[test]
