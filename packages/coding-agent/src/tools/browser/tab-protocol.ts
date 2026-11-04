@@ -1,4 +1,5 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { PrintHoldScope } from "./print-hold";
 
 export type Transferable = Bun.Transferable;
 
@@ -53,6 +54,15 @@ export type AttachPage = { kind: "create"; nearTargetId?: string } | { kind: "ow
 /** omp created the payload's page: closing the tab closes the page. */
 export function ownsPage(payload: WorkerInitPayload): boolean {
 	return payload.mode === "headless" || payload.page.kind !== "borrowed";
+}
+
+/**
+ * How long the tab holds `print()`: for its whole life only on a page omp created in a browser it launched, which
+ * nobody else drives and which closes with the tab; only around omp's calls in the user's own browser and on a page
+ * omp borrows (`app.target`), which outlives a worker killed before it can take the hold off.
+ */
+export function printHoldScope(payload: WorkerInitPayload): PrintHoldScope {
+	return payload.mode === "headless" || (payload.userDriven !== true && ownsPage(payload)) ? "tab" : "calls";
 }
 
 export type WorkerInitPayload =

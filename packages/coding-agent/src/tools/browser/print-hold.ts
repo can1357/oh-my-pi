@@ -30,9 +30,32 @@ function holdPrintInPage(
 	resyncMs: number,
 	afterTask: boolean,
 ): number {
-	// The clock as the document started, so a page that fakes or replaces `Date.now` cannot move a hold.
+	// The clock as the document started, so a page that fakes or replaces `Date.now` cannot move a hold. In a document
+	// whose own code replaced `Date.now` before omp arrived (fake timers that may never advance), the performance
+	// timeline's own methods, which such code leaves alone, keep real time instead.
 	const clockKey = Symbol.for("omp.printHold.clock");
-	if (typeof Reflect.get(globalThis, clockKey) !== "function") Reflect.set(globalThis, clockKey, Date.now);
+	if (typeof Reflect.get(globalThis, clockKey) !== "function") {
+		const isNative = (fn: unknown): boolean => {
+			try {
+				return /\{\s*\[native code\]\s*\}\s*$/.test(String(Reflect.apply(Function.prototype.toString, fn, [])));
+			} catch {
+				return false;
+			}
+		};
+		let clock: Function = Date.now;
+		const timeline: unknown = Reflect.get(globalThis, "performance");
+		const Timeline: unknown = Reflect.get(globalThis, "Performance");
+		if (!isNative(clock) && typeof Timeline === "function" && timeline instanceof Timeline) {
+			const methods: unknown = Reflect.get(Timeline, "prototype");
+			const perfNow: unknown = Reflect.get(Object(methods), "now");
+			const origin = Reflect.getOwnPropertyDescriptor(Object(methods), "timeOrigin")?.get;
+			if (typeof perfNow === "function" && origin) {
+				const start = Number(Reflect.apply(origin, timeline, []));
+				clock = () => start + Number(Reflect.apply(perfNow, timeline, []));
+			}
+		}
+		Reflect.set(globalThis, clockKey, clock);
+	}
 	const now = (): number => {
 		const clock: unknown = Reflect.get(globalThis, clockKey);
 		return Number(typeof clock === "function" ? Reflect.apply(clock, Date, []) : Date.now());
@@ -87,13 +110,15 @@ function holdPrintInPage(
 					held = typeof heldUntil === "number" && now() < heldUntil;
 				} catch {}
 				if (!held) return Reflect.apply(target, thisArg, args);
-				// The report says whether a window the tab opened printed, rather than the tab's own document.
+				// The report says where the print came from: the tab's top document, a frame in it, or a window the tab
+				// opened; `tab.pdf()` prints only the first.
 				try {
 					const local: unknown = Reflect.get(globalThis, binding);
 					const opener: unknown = typeof local === "function" ? undefined : Reflect.get(globalThis, "opener");
 					const report: unknown =
 						typeof local === "function" ? local : opener && Reflect.get(Object(opener), binding);
-					const where = view === globalThis && typeof local === "function" ? "tab" : "window";
+					const inTab = view === globalThis && typeof local === "function";
+					const where = !inTab ? "window" : Reflect.get(globalThis, "top") === globalThis ? "tab" : "frame";
 					if (typeof report === "function") Reflect.apply(report, undefined, [where]);
 				} catch {}
 				Reflect.apply(EventTarget.prototype.dispatchEvent, view, [new Event("beforeprint")]);
@@ -178,7 +203,8 @@ export class PrintHold {
 	/** The page's clock minus the worker's, as last measured: places a new document's deadline in the page's time. */
 	#clockOffset = 0;
 	#requests = 0;
-	/** Prints held in windows the tab opened, which `tab.pdf()` does not reach. */
+	/** Prints held in frames of the page and in windows the tab opened, which `tab.pdf()` does not reach. */
+	#frameRequests = 0;
 	#windowRequests = 0;
 	/** Hold changes apply in order, so a call's end never lands before its start. */
 	#applying: Promise<void> = Promise.resolve();
@@ -261,12 +287,17 @@ export class PrintHold {
 		return this.#apply(Date.now() + USER_DRIVEN_RELEASE_MS).catch(() => undefined);
 	}
 
-	/** The lines for the call's output when the page or a window it opened called `print()` since the last notice. */
+	/** The lines for the call's output when the page, a frame in it or a window it opened called `print()` since the last notice. */
 	takeNotice(): string | undefined {
 		const lines: string[] = [];
 		if (this.#requests > 0) {
 			lines.push(
 				"The page called window.print(). omp held it, so no print dialog opened and the page went on as after a finished print. Use tab.pdf() for what it would print.",
+			);
+		}
+		if (this.#frameRequests > 0) {
+			lines.push(
+				"A frame in the page called window.print(). omp held it, so no print dialog opened and the frame went on as after a finished print. tab.pdf() prints the page, not the frame.",
 			);
 		}
 		if (this.#windowRequests > 0) {
@@ -275,6 +306,7 @@ export class PrintHold {
 			);
 		}
 		this.#requests = 0;
+		this.#frameRequests = 0;
 		this.#windowRequests = 0;
 		return lines.length > 0 ? lines.join("\n") : undefined;
 	}
@@ -367,6 +399,7 @@ export class PrintHold {
 	readonly #onBindingCalled = (event: Protocol.Runtime.BindingCalledEvent): void => {
 		if (event.name !== this.#binding) return;
 		if (event.payload === "window") this.#windowRequests++;
+		else if (event.payload === "frame") this.#frameRequests++;
 		else this.#requests++;
 	};
 

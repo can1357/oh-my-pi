@@ -10,6 +10,7 @@ import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browse
 import { navigateMainFrame } from "@oh-my-pi/pi-coding-agent/tools/browser/navigation";
 import { PrintHold } from "@oh-my-pi/pi-coding-agent/tools/browser/print-hold";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { type AttachPage, printHoldScope } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import puppeteer, { type CDPSession, type Dialog, type Page, type WaitForOptions } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
@@ -313,6 +314,17 @@ test("stops waiting as soon as the page closes", async () => {
 		),
 	).rejects.toThrow("Navigating frame was detached");
 	expect(checks).toBe(2);
+});
+
+test("holds print() for a tab's life only on a page omp created in a browser it launched", () => {
+	const attach = (page: AttachPage, userDriven?: boolean) =>
+		printHoldScope({ mode: "attach", browserWSEndpoint: "", safeDir: "", uploadDir: "", page, userDriven });
+	expect(printHoldScope({ mode: "headless", browserWSEndpoint: "", safeDir: "", uploadDir: "" })).toBe("tab");
+	expect(attach({ kind: "create" })).toBe("tab");
+	expect(attach({ kind: "owned", targetId: "T" })).toBe("tab");
+	// A page a spawned app keeps after omp lets go (`app.target`), and the user's own browser.
+	expect(attach({ kind: "borrowed", targetId: "T" })).toBe("calls");
+	expect(attach({ kind: "create" }, true)).toBe("calls");
 });
 
 test("hands any waitUntil other than load/domcontentloaded to Puppeteer unchanged", async () => {
@@ -1250,6 +1262,58 @@ return await tab.evaluate(() => {
 		},
 		30_000,
 	);
+
+	test("lets go of print() after a call in a page whose own fake clock replaced Date.now before omp came", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				// Fake timers that never advance, installed by the page before omp attached.
+				await page.mainFrame().mainRealm().evaluate("Date.now = () => 1_000");
+				const hold = await PrintHold.install(page, "calls");
+				try {
+					await hold.endCall();
+					// The 1.5 s release runs out on real time; on the fake clock it never would.
+					await page
+						.mainFrame()
+						.mainRealm()
+						.waitForFunction(
+							'log.length = 0, document.querySelector("#print").click(), log.join() === "print returned"',
+							{ timeout: 10_000, polling: 100 },
+						);
+				} finally {
+					await hold.dispose();
+				}
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
+
+	test("says a frame printed, without pointing at tab.pdf(), which prints the page", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/one`);
+				const hold = await PrintHold.install(page, "calls");
+				try {
+					await hold.beginCall(30_000);
+					const frame = page.frames().find(candidate => candidate.name() === "payment");
+					if (!frame) throw new Error("Expected the payment frame");
+					await frame.mainRealm().evaluate("print()");
+					const notice = hold.takeNotice();
+					expect(notice).toContain("A frame in the page called window.print()");
+					expect(notice).not.toContain("Use tab.pdf()");
+				} finally {
+					await hold.dispose();
+				}
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
 
 	test("holds print() in the user's browser while omp sets up the tab, until setup ends", async () => {
 		await withUserBrowser(async cdpUrl => {
