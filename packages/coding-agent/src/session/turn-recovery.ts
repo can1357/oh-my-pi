@@ -396,6 +396,8 @@ export class TurnRecovery {
 	 * the exhausted budget, a cancelled wait, an abort), so no turn inherits another turn's walk.
 	 */
 	readonly #refusalWalkTried = new Set<string>();
+	/** Same-model refusal retries spent in the current retry saga (`retry.refusalRetries`); reset in `resolveRetry()`. */
+	#refusalRetryCount = 0;
 	/** Per-model account walk allowance, snapshotted once and cleared when the retry saga ends. */
 	readonly #accountPolicyRotationsRemaining = new Map<string, number>();
 	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
@@ -890,6 +892,7 @@ export class TurnRecovery {
 	/** Resolve the pending retry promise; the saga is over, and so is its refusal walk. */
 	resolveRetry(): void {
 		this.#refusalWalkTried.clear();
+		this.#refusalRetryCount = 0;
 		this.#accountPolicyRotationsRemaining.clear();
 		if (this.#retryResolve) {
 			this.#retryResolve();
@@ -1792,9 +1795,7 @@ export class TurnRecovery {
 
 	/** Checks whether a provider error represents a classifier refusal. */
 	isClassifierRefusal(message: AssistantMessage): boolean {
-		if (message.stopReason !== "error") return false;
-		const stopType = message.stopDetails?.type;
-		return stopType === "refusal" || stopType === "sensitive";
+		return AIError.isProviderRefusal(message);
 	}
 
 	#getRetryFallbackResolutionContext(): RetryFallbackResolutionContext {
@@ -3047,7 +3048,19 @@ export class TurnRecovery {
 			}
 		}
 
-		if (retryBudgetExhausted) {
+		// A content-policy refusal whose verdict is not stable for a given input
+		// (an OpenAI `cyber_policy` refusal: the same request is sometimes
+		// refused and sometimes answered) that no fallback model took is retried
+		// on the same model up to `retry.refusalRetries` times, outside the
+		// transient-error budget. It never rotates credentials — the content, not
+		// the account, was refused — and when the allowance is spent the refusal
+		// itself is the final error, never a "retry budget exhausted" rewrite.
+		// Other classifier refusals keep the walk-only policy above.
+		const unstableRefusal =
+			classifierRefusal && !switchedCredential && !switchedModel && AIError.isUnstableProviderRefusal(message);
+		const refusalRetry = unstableRefusal && this.#refusalRetryCount < retrySettings.refusalRetries;
+		if (refusalRetry) this.#refusalRetryCount++;
+		if (retryBudgetExhausted && !unstableRefusal) {
 			if (!switchedModel && !switchedCredential) {
 				const attempt = this.#retryAttempt - 1;
 				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
@@ -3062,7 +3075,7 @@ export class TurnRecovery {
 			// same-route budget: every distinct account must be tried first.
 			if (switchedModel) this.#retryAttempt = 1;
 		}
-		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel) {
+		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel && !refusalRetry) {
 			// A prior attempt in this saga already announced `auto_retry_start`
 			// (retryAttempt was incremented for each call to this method, so > 1
 			// means at least one earlier attempt started the loop) but this
@@ -3127,8 +3140,8 @@ export class TurnRecovery {
 
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_start",
-			attempt: this.#retryAttempt,
-			maxAttempts: maxRetries,
+			attempt: refusalRetry ? this.#refusalRetryCount : this.#retryAttempt,
+			maxAttempts: refusalRetry ? retrySettings.refusalRetries : maxRetries,
 			delayMs,
 			errorMessage,
 			errorId: message.errorId,

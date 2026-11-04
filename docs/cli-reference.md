@@ -240,6 +240,13 @@ messages arrive in `message_end`, and opaque provider replay payloads are omitte
 Terminal turn failures produce a nonzero exit status in both text and JSON modes.
 A run stopped by `--max-cost` exits with status `3`: the cap message goes to
 stderr (a `cost-gate` notice in JSON mode) and no answer is printed.
+A run whose last turn the provider refused (an Anthropic refusal, an OpenAI
+`cyber_policy` refusal once `retry.refusalRetries` is spent) exits with status `4`.
+Text mode writes `Retrying (N/M): Refusal (<code>): <provider message>` to stderr
+for each refused attempt it retries, then `Refusal (<code>): <provider message>`
+for the final one; JSON mode carries the same line in the final message's
+`errorMessage` and `{ type: "refusal", category: <code>, explanation: <provider message> }`
+in its `stopDetails`.
 
 `plan.defaultOnStartup` is ignored in print mode because there is no plan-review
 UI. Use `--plan-yolo` for unattended planning and implementation.

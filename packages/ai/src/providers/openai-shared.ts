@@ -4405,6 +4405,7 @@ export function throwOpenAIResponsesEventError(
 		const error = isRecord(envelope.error) ? envelope.error : envelope;
 		const inBand = AIError.createInBandProviderError(event);
 		if (inBand) throw inBand;
+		throwOpenAIResponsesRefusal(error, provider);
 		throw new AIError.ProviderResponseError(
 			`Error Code ${error.code ?? "unknown"}: ${error.message ?? "no message"}`,
 			{ provider, kind: "output" },
@@ -4421,6 +4422,7 @@ export function throwOpenAIResponsesEventError(
 	const details = isRecord(response?.incomplete_details) ? response.incomplete_details : undefined;
 	const inBand = details ? undefined : AIError.createInBandProviderError({ ...response, error });
 	if (inBand) throw inBand;
+	if (error) throwOpenAIResponsesRefusal(error, provider);
 	const message = error
 		? `${error.code || "unknown"}: ${error.message || "no message"}`
 		: details?.reason
@@ -4431,4 +4433,13 @@ export function throwOpenAIResponsesEventError(
 				? `status_details: ${statusDetails.reason}`
 				: "Unknown error (no error details in response)";
 	throw new AIError.ProviderResponseError(message, { provider, kind: "output" });
+}
+
+/** Throw a {@link AIError.ProviderRefusalError} when a Responses error object is a content-policy refusal. */
+function throwOpenAIResponsesRefusal(error: Record<string, unknown>, provider: string): void {
+	const code = typeof error.code === "string" ? error.code : undefined;
+	const message = typeof error.message === "string" ? error.message : undefined;
+	if (code !== undefined && AIError.isContentPolicyRefusal(code, message)) {
+		throw new AIError.ProviderRefusalError(code, message || "no message", { provider });
+	}
 }

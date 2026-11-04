@@ -2032,6 +2032,7 @@ async function handleCodexStreamFailure(context: CodexStreamFailureContext, erro
 	output.errorStatus = result.status;
 	output.errorId = result.id;
 	output.errorMessage = result.message;
+	if (result.stopDetails) output.stopDetails = result.stopDetails;
 	output.duration = performance.now() - context.startTime;
 	if (context.firstTokenTime) {
 		output.ttft = context.firstTokenTime - context.startTime;
@@ -2347,7 +2348,7 @@ class CodexStreamProcessor {
 		}
 
 		if (eventType === "error" || eventType === "response.failed") {
-			throw createCodexProviderStreamError(rawEvent);
+			throw createCodexRefusalError(rawEvent, this.model.provider) ?? createCodexProviderStreamError(rawEvent);
 		}
 
 		return firstTokenTime;
@@ -4658,6 +4659,20 @@ export function createCodexProviderStreamError(rawEvent: Record<string, unknown>
 		code || undefined,
 		headers,
 	);
+}
+
+/** The content-policy refusal a Codex failure event carries, as the provider's own code and message. */
+function createCodexRefusalError(
+	rawEvent: Record<string, unknown>,
+	provider: string,
+): AIError.ProviderRefusalError | undefined {
+	const event = codexFailureEventSchema(rawEvent);
+	if (event instanceof type.errors) return undefined;
+	const nestedError = event.error ?? event.response?.error;
+	const code = nestedError?.code ?? nestedError?.type ?? event.code;
+	const message = nestedError?.message ?? event.message ?? event.response?.message;
+	if (code === undefined || !AIError.isContentPolicyRefusal(code, message)) return undefined;
+	return new AIError.ProviderRefusalError(code, message || "no message", { provider });
 }
 
 function formatCodexFailure(rawEvent: Record<string, unknown>): string | null {
