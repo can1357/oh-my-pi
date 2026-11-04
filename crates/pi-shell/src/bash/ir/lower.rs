@@ -315,7 +315,7 @@ fn lone_definition(mut unit: Unit) -> Option<FuncIr> {
 }
 
 /// Lower an already-parsed function without changing its persistent identity.
-pub(crate) fn materialize(unit: &Unit) -> Option<Unit> {
+pub(crate) fn materialize(unit: &Unit, observed: bool) -> Option<Unit> {
 	let bytes = unit.deferred.as_ref()?;
 	if bytes.is_empty() {
 		let features = syn::Features::from_bits(unit.features);
@@ -325,6 +325,11 @@ pub(crate) fn materialize(unit: &Unit) -> Option<Unit> {
 		let compiled = lower(&cc, &unit.source, unit.mode, features).ok()?;
 		let mut body = take_body(compiled, unit.root?)?;
 		body.id = unit.id;
+		if observed && body.trace_syntax.get().is_none() {
+			let _ = body.trace_syntax.set(std::sync::Arc::new(
+				crate::bash::trace::syntax::UnitSyntax::list(cc).with_context(unit.mode, unit.features),
+			));
+		}
 		return Some(body);
 	}
 	let (base, cmd): (u32, syn::Command) = postcard::from_bytes(bytes).ok()?;
@@ -338,6 +343,15 @@ pub(crate) fn materialize(unit: &Unit) -> Option<Unit> {
 	lower.emit(Opcode::End, 0, 0, root);
 	for word in &mut lower.unit.words {
 		word.classify();
+	}
+	if observed && lower.unit.trace_syntax.get().is_none() {
+		let syntax = crate::bash::trace::syntax::UnitSyntax::new(
+			base,
+			crate::bash::trace::syntax::SyntaxTree::Command(std::sync::Arc::new(cmd)),
+		)
+		.with_context(unit.mode, unit.features)
+		.with_aliases(&unit.aliases);
+		let _ = lower.unit.trace_syntax.set(std::sync::Arc::new(syntax));
 	}
 	Some(lower.unit)
 }
@@ -1828,7 +1842,7 @@ mod tests {
 			assert_eq!(body.deferred.as_ref().unwrap().is_empty(), cc.aliases.is_empty());
 			let bytes = postcard::to_stdvec(body).unwrap();
 			let saved = postcard::from_bytes(&bytes).unwrap();
-			let compiled = materialize(&saved).unwrap();
+			let compiled = materialize(&saved, false).unwrap();
 			assert_eq!(compiled.id, body.id);
 			assert_eq!(compiled.ops, eager.funcs[0].body.ops);
 			assert_eq!(compiled.words, eager.funcs[0].body.words);
@@ -1844,14 +1858,14 @@ mod tests {
 		assert!(function.body.ops.is_empty());
 		let bytes = postcard::to_stdvec(&function.body).unwrap();
 		let saved = postcard::from_bytes(&bytes).unwrap();
-		let compiled = materialize(&saved).unwrap();
+		let compiled = materialize(&saved, false).unwrap();
 		assert_eq!(compiled.id, function.body.id);
 		assert_eq!(compiled.funcs.len(), 1);
 		let helper = &compiled.funcs[0];
 		assert_eq!(helper.name, "helper");
 		assert!(helper.body.ops.is_empty());
 		assert!(helper.body.deferred.is_some());
-		let helper_body = materialize(&helper.body).unwrap();
+		let helper_body = materialize(&helper.body, false).unwrap();
 		assert!(helper_body.nodes.iter().any(|n| n.line == 1));
 	}
 

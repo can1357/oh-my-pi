@@ -3208,10 +3208,12 @@ fn type_keys(
 			for character in text.chars() {
 				length += character.encode_utf16(&mut units[length..]).len();
 			}
-			let press = CGEvent::new_keyboard_event(Some(source), code, true)
-				.ok_or_else(|| DesktopError::input_failed("failed to create a Quartz keyboard event"))?;
-			let release = CGEvent::new_keyboard_event(Some(source), code, false)
-				.ok_or_else(|| DesktopError::input_failed("failed to create a Quartz keyboard event"))?;
+			let press = CGEvent::new_keyboard_event(Some(source), code, true).ok_or_else(|| {
+				DesktopError::input_failed("failed to create a Quartz keyboard event")
+			})?;
+			let release = CGEvent::new_keyboard_event(Some(source), code, false).ok_or_else(|| {
+				DesktopError::input_failed("failed to create a Quartz keyboard event")
+			})?;
 			for event in [&press, &release] {
 				// SAFETY: `units` contains `length` initialized UTF-16 code units.
 				unsafe {
@@ -3972,8 +3974,10 @@ fn preserving_cursor(
 	source: &CGEventSource,
 	action: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<()> {
-	let prior = CGEvent::location(Some(&*CGEvent::new(Some(source))
-		.ok_or_else(|| DesktopError::input_failed("failed to read the Quartz cursor location"))?));
+	let prior =
+		CGEvent::location(Some(&*CGEvent::new(Some(source)).ok_or_else(|| {
+			DesktopError::input_failed("failed to read the Quartz cursor location")
+		})?));
 	let result = action();
 	// Attempt both operations even if one fails, and distinguish restoration
 	// failure from non-delivery so callers do not blindly repeat the action.

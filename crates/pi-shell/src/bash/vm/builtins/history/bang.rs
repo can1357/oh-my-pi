@@ -1190,8 +1190,12 @@ impl Run<'_, '_> {
 				Some(b'q') => *sline = quote(sline),
 				Some(b'Q') => *sline = unquote(sline),
 				Some(b'x') => *sline = quotebreak(sline),
-				Some(b'l') => *sline = BString::from(casemodify(sline, CaseMod::Lower, self.o.multibyte)),
-				Some(b'u') => *sline = BString::from(casemodify(sline, CaseMod::Upper, self.o.multibyte)),
+				Some(b'l') => {
+					*sline = BString::from(casemodify(sline, CaseMod::Lower, self.o.multibyte))
+				},
+				Some(b'u') => {
+					*sline = BString::from(casemodify(sline, CaseMod::Upper, self.o.multibyte))
+				},
 				Some(b'P') => {
 					let abs = if sline.first() == Some(&b'/') {
 						sline.to_vec()

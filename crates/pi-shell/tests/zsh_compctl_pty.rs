@@ -123,7 +123,8 @@ fn cd_completes_directories() {
 fn keyword_list_and_function() {
 	same(
 		"keys",
-		"compctl -k '(alpha beta gamma)' zzk\nzzfn() { reply=(red green \"$1|$2\") }\ncompctl -K zzfn zzc",
+		"compctl -k '(alpha beta gamma)' zzk\nzzfn() { reply=(red green \"$1|$2\") }\ncompctl -K \
+		 zzfn zzc",
 		"zzk \t\x15zzk g\t\x15zzc gr\t\x15zzc \t",
 	);
 }
@@ -141,7 +142,8 @@ fn extended_conditions() {
 fn compcall_from_a_completion_widget() {
 	same(
 		"compcall",
-		"compctl -k '(aa ab ac)' zzw\nzzwf() { compcall }\nzle -C zzcomp complete-word zzwf\nbindkey '^X^T' zzcomp",
+		"compctl -k '(aa ab ac)' zzw\nzzwf() { compcall }\nzle -C zzcomp complete-word \
+		 zzwf\nbindkey '^X^T' zzcomp",
 		"zzw a\x18\x14",
 	);
 }

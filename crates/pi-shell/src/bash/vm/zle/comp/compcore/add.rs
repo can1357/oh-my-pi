@@ -6,21 +6,12 @@ use std::{borrow::Cow, sync::Arc};
 
 use bstr::BString;
 
-use crate::bash::{
-	pattern::zsh::{PatFlags, Pattern, haswilds, remnulargs, tokenize},
-	syntax::zsh::tok::{QUEST, STAR, at, metafy, unmetafy, untokenize},
-	vm::{
-		expand::{Expander, X},
-		zsh::{subst::singsub, zpattern},
-	},
-};
-
 use super::{
 	super::{
 		Comp, complete,
 		compmatch::{
-			add_bmatchers, bld_parts, cline_matched, comp_match, cp_cline, free_cline, get_cline, join_clines, match_str,
-			revert_cline, update_bmatchers,
+			add_bmatchers, bld_parts, cline_matched, comp_match, cp_cline, free_cline, get_cline,
+			join_clines, match_str, revert_cline, update_bmatchers,
 		},
 		compresult::hasbrpsfx,
 		qt,
@@ -28,6 +19,14 @@ use super::{
 	},
 	matcheq,
 	strings::{get_data_arr, get_user_var, multiquote, set_list_array, tildequote},
+};
+use crate::bash::{
+	pattern::zsh::{PatFlags, Pattern, haswilds, remnulargs, tokenize},
+	syntax::zsh::tok::{QUEST, STAR, at, metafy, unmetafy, untokenize},
+	vm::{
+		expand::{Expander, X},
+		zsh::{subst::singsub, zpattern},
+	},
 };
 
 /// zsh `begcmgroup`: make the group `name` with `flags` current, reusing

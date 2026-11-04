@@ -27,6 +27,7 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 blake3.workspace = true
 bstr.workspace = true
 bytes.workspace = true

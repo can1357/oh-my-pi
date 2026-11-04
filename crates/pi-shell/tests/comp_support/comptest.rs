@@ -218,7 +218,9 @@ pub fn report(log: &str) -> Vec<String> {
 				},
 				Marker::Description(text) => lines.push(format!("DESCRIPTION:{{{text}}}")),
 				Marker::Message(text) => lines.push(format!("MESSAGE:{{{text}}}")),
-				Marker::Compadd(text) => lines.push(format!("COMPADD:{{{}}}", text.replace(['\r', '\n'], ""))),
+				Marker::Compadd(text) => {
+					lines.push(format!("COMPADD:{{{}}}", text.replace(['\r', '\n'], "")))
+				},
 				Marker::InsertPositions(text) => {
 					lines.push(format!("INSERT_POSITIONS:{{{}}}", text.replace(['\r', '\n'], "")));
 				},
@@ -238,7 +240,9 @@ fn buffer_report(log: &str) -> Option<(&str, &str)> {
 	const CLOSE: &str = "</RBUFFER>";
 	for (at, _) in log.rmatch_indices(OPEN) {
 		let after = &log[at + OPEN.len()..];
-		let Some(close) = after.rfind(CLOSE) else { continue };
+		let Some(close) = after.rfind(CLOSE) else {
+			continue;
+		};
 		if let Some(sep) = after[..close].rfind(SEP) {
 			return Some((&after[..sep], &after[sep + SEP.len()..close]));
 		}
@@ -272,7 +276,10 @@ fn next_marker(log: &str) -> Option<(Marker<'_>, usize)> {
 	let mut ends: Vec<(usize, usize)> = TAGS
 		.iter()
 		.enumerate()
-		.flat_map(|(kind, (close, _))| log.match_indices(close).map(move |(at, _)| (at + close.len(), kind)))
+		.flat_map(|(kind, (close, _))| {
+			log.match_indices(close)
+				.map(move |(at, _)| (at + close.len(), kind))
+		})
 		.collect();
 	ends.sort_unstable();
 	for (end, kind) in ends {
@@ -283,10 +290,14 @@ fn next_marker(log: &str) -> Option<(Marker<'_>, usize)> {
 			if kind == 0 {
 				// `<LC><` two characters `><RC>`.
 				let mut chars = after.char_indices();
-				let Some((_, _)) = chars.next() else { continue };
-				let Some((second, c2)) = chars.next() else { continue };
+				let Some((..)) = chars.next() else { continue };
+				let Some((second, c2)) = chars.next() else {
+					continue;
+				};
 				let code_end = second + c2.len_utf8();
-				let Some(text) = after[code_end..].strip_prefix("><RC>") else { continue };
+				let Some(text) = after[code_end..].strip_prefix("><RC>") else {
+					continue;
+				};
 				return Some((Marker::Colour(&after[..code_end], text), end));
 			}
 			let marker = match kind {
@@ -406,7 +417,8 @@ fn drive(
 				if got != *expected {
 					let _ = write!(
 						failures,
-						"comptest {input:?}\n--- zsh 5.9:\n{expected}\n--- got:\n{got}\n--- raw log:\n{log:?}\n\n"
+						"comptest {input:?}\n--- zsh 5.9:\n{expected}\n--- got:\n{got}\n--- raw \
+						 log:\n{log:?}\n\n"
 					);
 				}
 			},

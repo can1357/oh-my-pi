@@ -575,7 +575,11 @@ impl Recursive<'_, '_> {
 		let cs = self.cs;
 		let res = match self.rec {
 			Rec::Chmod(mode) => self.q.op(FsReq::Chmod { path: rp.into(), mode })?,
-			Rec::Chown { uid, gid, follow } => self.q.op(FsReq::Chown { path: rp.into(), uid, gid, follow })?,
+			Rec::Chown { uid, gid, follow } => {
+				self
+					.q
+					.op(FsReq::Chown { path: rp.into(), uid, gid, follow })?
+			},
 			Rec::Rm { force, interact, unlinkdir } => {
 				if !unlinkdir || !force {
 					let sp = match sp {
@@ -598,7 +602,10 @@ impl Recursive<'_, '_> {
 							}
 						} else if !force
 							&& st.kind != StatKind::Symlink
-							&& self.q.op(FsReq::Access { path: rp.into(), mode: 2 })?.is_err()
+							&& self
+								.q
+								.op(FsReq::Access { path: rp.into(), mode: 2 })?
+								.is_err()
 						{
 							let prompt = remove_prompt(ctx, cs, arg, Some(st.mode));
 							if !self.q.confirm(ctx, &prompt)? {
@@ -945,7 +952,9 @@ fn domove(
 			doit = true;
 		} else if f.asknw
 			&& st.kind != StatKind::Symlink
-			&& q.op(FsReq::Access { path: qbuf.clone(), mode: 2 })?.is_err()
+			&& q
+				.op(FsReq::Access { path: qbuf.clone(), mode: 2 })?
+				.is_err()
 		{
 			let prompt = replace_prompt(ctx, cs, qn, Some(st.mode));
 			if !q.confirm(ctx, &prompt)? {

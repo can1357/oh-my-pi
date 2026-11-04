@@ -2883,7 +2883,9 @@ fn paramsubst(
 						untokenize(&mut val);
 						let mut name = idbeg;
 						untokenize(&mut name);
-						redo(ex, &name, |ex| params::assignsparam_meta(ex, &name, val, params::ASSPM_WARN))?;
+						redo(ex, &name, |ex| {
+							params::assignsparam_meta(ex, &name, val, params::ASSPM_WARN)
+						})?;
 					}
 					if ps.isarr != 0 {
 						if nojoin != 0 {

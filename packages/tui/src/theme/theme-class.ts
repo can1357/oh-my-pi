@@ -150,6 +150,7 @@ function wrapForeground(ansi: string, text: string): string {
 // Prebuilt stylers: each `chalk.<style>` access builds a fresh builder. Builders share the
 // root chalk context, so later `chalk.level` changes still apply.
 const boldStyler = chalk.bold;
+const faintStyler = chalk.dim;
 const italicStyler = chalk.italic;
 const underlineStyler = chalk.underline;
 const strikethroughStyler = chalk.strikethrough;
@@ -406,6 +407,11 @@ export class Theme {
 
 	bold(text: string): string {
 		return boldStyler(text);
+	}
+
+	/** Reduce terminal intensity without replacing the text's foreground colors. */
+	faint(text: string): string {
+		return faintStyler(text);
 	}
 
 	italic(text: string): string {
