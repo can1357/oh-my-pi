@@ -338,7 +338,9 @@ fn run_module_cond(
 		("zsh/regex", b"regex-match") => zsh_mod_regex::cond_regex_match(ctx, arg(0), arg(1))?,
 		("zsh/pcre", b"pcre-match") => zsh_mod_pcre::cond_pcre_match(ctx, arg(0), arg(1))?,
 		("zsh/example", _) => with_ex(ctx, |ex| zsh_mod_example::cond(ex, name, args))?,
-		("zsh/complete", _) => with_ex(ctx, |ex| crate::bash::vm::zle::comp::complete::cond(ex, name, args))?,
+		("zsh/complete", _) => {
+			with_ex(ctx, |ex| crate::bash::vm::zle::comp::complete::cond(ex, name, args))?
+		},
 		_ => {
 			warn(ctx, fromtest, Diag::Unsupported {
 				what: format!("condition `-{}' of module {module}", name.as_bstr()).into(),

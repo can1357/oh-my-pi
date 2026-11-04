@@ -29,9 +29,9 @@ fn zsh_mod_sched_lists_in_time_order_and_deletes() {
 	assert_eq!(err, "");
 	assert_eq!(
 		out,
-		"  1 Tue Nov 14 22:14:10 -- -o echo two\n  2 Tue Nov 14 22:15:00 echo one\n  3 Tue Nov \
-		 14 22:16:40 -o -- -- -x y\n1700000050::-o echo two\n1700000100::echo one\n1700000200:-o:-- \
-		 -x y\n  1 Tue Nov 14 22:14:10 -- -o echo two\n  2 Tue Nov 14 22:16:40 -o -- -- -x y\n"
+		"  1 Tue Nov 14 22:14:10 -- -o echo two\n  2 Tue Nov 14 22:15:00 echo one\n  3 Tue Nov 14 \
+		 22:16:40 -o -- -- -x y\n1700000050::-o echo two\n1700000100::echo one\n1700000200:-o:-- -x \
+		 y\n  1 Tue Nov 14 22:14:10 -- -o echo two\n  2 Tue Nov 14 22:16:40 -o -- -- -x y\n"
 	);
 	assert_eq!(st, 0);
 }

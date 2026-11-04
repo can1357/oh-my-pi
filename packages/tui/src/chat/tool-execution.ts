@@ -1,3 +1,8 @@
+import { RunTrace } from "@oh-my-pi/pi-natives";
+import { isShellTrace, type ShellTrace, type ShellVizPreferences, type ShellVizPresentation } from "@oh-my-pi/pi-wire";
+import { defaultShellVizPreferences, readShellPresentation, shellVisualization } from "../tools/shell-viz";
+import { changeShellVizPreferences, shellVizEventAction } from "../tools/shell-trace";
+import { ShellVisualizer } from "../apps/shell-visualizer";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Box } from "../components/box";
@@ -134,7 +139,7 @@ function cardPreview(preview: NativeToolView["preview"]): TspPreview | undefined
 type ToolDescriber = Pick<ToolRenderer, "describeCall" | "describeResult" | "mergeCallAndResult">;
 
 /** Optional kinds of the host's vocabulary the describe hooks branch on. */
-type NativeHostKinds = Required<Pick<RenderResultContextOptions, "media" | "json">>;
+type NativeHostKinds = Required<Pick<RenderResultContextOptions, "media" | "json" | "shell">>;
 
 class SafeToolRendererComponent implements Component {
 	#toolName: string;
@@ -221,6 +226,9 @@ export interface ToolExecutionUi {
 	requestComponentRender(component: Component): void;
 	resetDisplay(): void;
 	imageBudget?: TUI["imageBudget"];
+	showOverlay?: TUI["showOverlay"];
+	setFocus?: TUI["setFocus"];
+	terminal?: { readonly rows: number };
 }
 
 export interface ToolExecutionOptions {
@@ -380,6 +388,19 @@ let toolExecutionInstanceSeq = 0;
  * Component that renders a tool call with its result (updateable)
  */
 export class ToolExecutionComponent extends Container {
+	#shellPreferences: ShellVizPreferences = defaultShellVizPreferences();
+	#shellPendingTrace: RunTrace | undefined;
+	#shellPendingScript: string | undefined;
+	#shellPresentation: ShellVizPresentation | undefined;
+	#shellPresentationKey: string | undefined;
+	#shellTrace: ShellTrace | undefined;
+	#shellTraceDetails: unknown;
+	#shellReplayTimer: NodeJS.Timeout | undefined;
+	#shellReplayAt = 0;
+	#shellReplayNs = 0;
+	#shellReplayPositioned = false;
+	#shellReplayEpoch = 0;
+	#shellInspector: { hide(): void } | undefined;
 	#contentBox: Box; // Used for custom tools and bash visual truncation
 	#contentText: WidthAwareText; // Generic fallback (no custom/built-in renderer)
 	// Which container the constructor mounted: bespoke/built-in renderers use
@@ -499,6 +520,9 @@ export class ToolExecutionComponent extends Container {
 		argsComplete?: boolean;
 		executionStarted?: boolean;
 		renderContext?: Record<string, unknown>;
+		shellPresentation?: ShellVizPresentation;
+		shellTrace?: ShellTrace;
+		shellReplayEpoch?: number;
 		/** Live: read at render time, so a ticking spinner advances it. */
 		readonly elapsedMs?: number;
 	} = {
@@ -556,6 +580,147 @@ export class ToolExecutionComponent extends Container {
 
 		this.#updateSpinnerAnimation();
 		this.#updateDisplay();
+	}
+
+	#updateShellTrace(details: unknown): void {
+		if (this.#toolName !== "bash" || details === this.#shellTraceDetails) return;
+		this.#shellTraceDetails = details;
+		const candidate = isRecord(details) ? details.trace : undefined;
+		if (candidate === undefined || candidate === this.#shellTrace) return;
+		const next = isShellTrace(candidate) ? candidate : undefined;
+		const old = this.#shellTrace;
+		if (old === next) return;
+		if (this.#shellPreferences.cursor !== undefined) {
+			const applied = old?.history?.[this.#shellPreferences.cursor - 1]?.seq;
+			const records = next?.history ?? [];
+			this.#shellPreferences = {
+				...this.#shellPreferences,
+				cursor:
+					applied === undefined
+						? Math.min(this.#shellPreferences.cursor, records.length)
+						: records.filter(record => record.seq <= applied).length,
+			};
+		}
+		this.#shellTrace = next;
+		if (next?.historyTruncated && this.#shellPreferences.cursor === 0 && this.#shellReplayPositioned) {
+			this.#shellReplayNs = Math.max(this.#shellReplayNs, next.history?.[0]?.t_ns ?? 0);
+		}
+		this.#shellPresentationKey = undefined;
+	}
+
+	#getShellPresentation(): ShellVizPresentation | undefined {
+		if (this.#toolName !== "bash") return undefined;
+		const script =
+			this.#shellTrace?.script ??
+			(isRecord(this.#args) && typeof this.#args.command === "string" ? this.#args.command : undefined);
+		if (!script) return undefined;
+		if (script !== this.#shellPendingScript) {
+			this.#shellPendingTrace = undefined;
+			this.#shellPendingScript = script;
+			this.#shellPresentationKey = undefined;
+		}
+		const key = `${this.#resultVersion}|${this.#displayInputVersion}`;
+		if (this.#shellPresentation && key === this.#shellPresentationKey) return this.#shellPresentation;
+		const source = this.#shellTrace
+			? shellVisualization(this.#shellTrace)
+			: (this.#shellPendingTrace ??= new RunTrace(script));
+		this.#shellPresentation = readShellPresentation(
+			source,
+			this.#shellPreferences,
+			this.#shellTrace,
+			this.#result ? resultText(this.#result) : undefined,
+		);
+		this.#shellPresentationKey = key;
+		return this.#shellPresentation;
+	}
+
+	#shellChanged(): void {
+		this.#shellPresentationKey = undefined;
+		this.#displayInputVersion++;
+		this.#blockVersion++;
+		this.#updateDisplay();
+		this.#ui.requestRender();
+	}
+
+	#stopShellReplay(): void {
+		clearInterval(this.#shellReplayTimer);
+		this.#shellReplayTimer = undefined;
+		this.#shellPreferences = { ...this.#shellPreferences, playing: false };
+	}
+
+	/** Handle exactly the shared native action vocabulary; inspector uses this same controller. */
+	shellVizAction(action: string): void {
+		if (this.#toolName !== "bash") return;
+		if (action === "inspect") {
+			this.openShellVisualizer();
+			return;
+		}
+		const before = this.#shellPreferences;
+		const wasPlaying = before.playing;
+		const history = this.#shellTrace?.history ?? [];
+		const now = performance.now();
+		if (wasPlaying) this.#shellReplayNs += (now - this.#shellReplayAt) * 1_000_000 * before.speed;
+		this.#shellPreferences = changeShellVizPreferences(before, action, history.length);
+		const seeking = action === "reset" || action === "step" || /^seek:[0-9]+$/.test(action);
+		const restarting = action === "play" && (before.cursor === undefined || before.cursor >= history.length);
+		if (action === "reset" || action === "live" || /^seek:[0-9]+$/.test(action) || restarting)
+			this.#shellReplayEpoch++;
+		if (action === "live") this.#shellReplayPositioned = false;
+		else if (seeking || restarting || (!this.#shellReplayPositioned && this.#shellPreferences.playing)) {
+			const cursor = this.#shellPreferences.cursor ?? 0;
+			this.#shellReplayNs =
+				history[cursor - 1]?.t_ns ?? (this.#shellTrace?.historyTruncated ? (history[0]?.t_ns ?? 0) : 0);
+			this.#shellReplayPositioned = true;
+		}
+		if (this.#shellPreferences.playing) {
+			this.#shellReplayAt = now;
+			if (!this.#shellReplayTimer) {
+				this.#shellReplayTimer = setInterval(() => {
+					const history = this.#shellTrace?.history ?? [];
+					const now = performance.now();
+					this.#shellReplayNs += (now - this.#shellReplayAt) * 1_000_000 * this.#shellPreferences.speed;
+					this.#shellReplayAt = now;
+					let cursor = this.#shellPreferences.cursor ?? 0;
+					while (cursor < history.length && history[cursor].t_ns <= this.#shellReplayNs) cursor++;
+					if (cursor === history.length) this.#stopShellReplay();
+					if (cursor !== this.#shellPreferences.cursor || !this.#shellPreferences.playing) {
+						this.#shellPreferences = { ...this.#shellPreferences, cursor };
+						this.#shellChanged();
+					}
+				}, 80);
+				this.#shellReplayTimer.unref();
+			}
+		} else this.#stopShellReplay();
+		this.#shellChanged();
+	}
+
+	/** Open the focused inspector without intercepting composer input while it is closed. */
+	openShellVisualizer(): void {
+		if (this.#toolName !== "bash" || !this.#ui.showOverlay) return;
+		if (this.#shellInspector) return;
+		const inspector = new ShellVisualizer({
+			presentation: () => this.#getShellPresentation(),
+			replayEpoch: () => this.#shellReplayEpoch,
+			liveOrigin: () => this.#executionStarted,
+			action: action => this.shellVizAction(action),
+			close: () => {
+				this.#stopShellReplay();
+				this.#shellInspector?.hide();
+				this.#shellInspector = undefined;
+				this.#shellChanged();
+			},
+			requestRender: () => this.#ui.requestRender(),
+			height: () => this.#ui.terminal?.rows ?? 24,
+		});
+		this.#shellInspector = this.#ui.showOverlay(inspector, {
+			anchor: "top-left",
+			width: "100%",
+			maxHeight: "100%",
+			fullscreen: true,
+			margin: 0,
+		});
+		this.#ui.setFocus?.(inspector);
+		this.#ui.requestRender();
 	}
 
 	updateArgs(args: unknown, _toolCallId?: string): void {
@@ -666,6 +831,7 @@ export class ToolExecutionComponent extends Container {
 		this.#firstResultViewportRepaintShapePainted = false;
 		this.#partialResultShapePainted = false;
 		this.#rawDetails = result.details;
+		this.#updateShellTrace(result.details);
 		// Renderers receive sanitized details for display; raw paths are available
 		// separately for links and media through the built-in render context.
 		const details = sanitizeTextDeep(result.details);
@@ -966,6 +1132,9 @@ export class ToolExecutionComponent extends Container {
 	 * interval alive and keep being repainted.
 	 */
 	override dispose(): void {
+		this.#stopShellReplay();
+		this.#shellInspector?.hide();
+		this.#shellInspector = undefined;
 		this.stopAnimation();
 		super.dispose();
 	}
@@ -993,6 +1162,13 @@ export class ToolExecutionComponent extends Container {
 
 	/** Mirrors the card collapsed or expanded in the terminal, so `Ctrl+O` and native toggles share one state. */
 	handleNativeEvent(event: NativeUiEvent): void {
+		if (this.#toolName === "bash") {
+			const action = shellVizEventAction(event, this.#shellPreferences);
+			if (action) {
+				this.shellVizAction(action);
+				return;
+			}
+		}
 		const expanded = rootToggleExpanded(event);
 		if (expanded !== undefined) this.setExpanded(expanded);
 	}
@@ -1053,7 +1229,11 @@ export class ToolExecutionComponent extends Container {
 	override describe(cx?: DescribeContext): NativeNode {
 		if (this.#toolName === "wait" && this.#isBenignSkip()) return EMPTY_NODE;
 		const dataFirst = cx?.supports("tool") === true;
-		const host: NativeHostKinds = { media: cx?.supports("media") === true, json: cx?.supports("json") === true };
+		const host: NativeHostKinds = {
+			media: cx?.supports("media") === true,
+			json: cx?.supports("json") === true,
+			shell: cx?.supports("shell") === true,
+		};
 		const key = [
 			dataFirst,
 			this.#resultVersion,
@@ -1068,6 +1248,7 @@ export class ToolExecutionComponent extends Container {
 			this.#toolActivityVisible,
 			host.media,
 			host.json,
+			host.shell,
 			getThemeEpoch(),
 		];
 		return this.#native.get(key, () =>
@@ -1253,6 +1434,9 @@ export class ToolExecutionComponent extends Container {
 			elapsedMs: this.#elapsedMs(status),
 			cancelled: status === "cancelled",
 			renderContext: this.#buildRenderContext(),
+			shellPresentation: this.#getShellPresentation(),
+			shellTrace: this.#shellTrace,
+			shellReplayEpoch: this.#shellReplayEpoch,
 		};
 		// Custom tools (MCP, extensions) carry their own describe hooks, mirroring
 		// the ANSI path's preference for the tool's renderCall/renderResult.
@@ -1892,6 +2076,9 @@ export class ToolExecutionComponent extends Container {
 			context.rawDetails = this.#rawDetails;
 		}
 		if (this.#toolName === "bash") {
+			this.#renderState.shellPresentation = this.#getShellPresentation();
+			this.#renderState.shellTrace = this.#shellTrace;
+			this.#renderState.shellReplayEpoch = this.#shellReplayEpoch;
 			// Bash needs render context even before a result exists. The renderer uses the pending-call args
 			// plus this context to keep the inline command preview visible while tool-call JSON is still streaming.
 			if (this.#result) {

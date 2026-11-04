@@ -52,7 +52,8 @@ import {
 	isGrid,
 	keepHeadings,
 	type Window,
-	witnessedMask,
+	type Witnessed,
+	witnessedRuns,
 } from "./window";
 
 /** The probe Spotlight scores output lines under: each line's relevance to the agent's current call. */
@@ -361,17 +362,17 @@ function seenKeeps(run: Run, lines: readonly string[]): boolean[] {
 	return keep;
 }
 
-/** `mask` without the runs whose text (newlines included) is shorter than their marker plus {@link SEEN_MARGIN}. */
-function payingRuns(lines: readonly string[], mask: readonly boolean[]): boolean[] {
-	const out = [...mask];
+/** `seen.mask` without the runs whose text (newlines included) is shorter than their marker plus {@link SEEN_MARGIN}. */
+function payingRuns(lines: readonly string[], seen: Witnessed): boolean[] {
+	const out = [...seen.mask];
 	for (let i = 0; i < lines.length;) {
 		if (!out[i]) {
 			i++;
 			continue;
 		}
-		let j = i;
-		let chars = 0;
-		while (j < lines.length && out[j]) chars += lines[j++].length + 1;
+		let j = i + 1;
+		let chars = lines[i].length + 1;
+		while (j < lines.length && out[j] && !seen.starts[j]) chars += lines[j++].length + 1;
 		if (chars < seenMarker(j - i, COUNTED_COPY, [i + 1, j]).length + 1 + SEEN_MARGIN) out.fill(false, i, j);
 		i = j;
 	}
@@ -384,7 +385,8 @@ function payingRuns(lines: readonly string[], mask: readonly boolean[]): boolean
  */
 async function collapseSeen(run: Run, view: View, steps: string[]): Promise<View> {
 	const keep = seenKeeps(run, view.lines);
-	const mask = payingRuns(view.lines, witnessedMask(view.lines, run.state.seen, SHORT_SEEN_RUN, keep));
+	const seen = witnessedRuns(view.lines, run.state.seen, SHORT_SEEN_RUN, keep);
+	const mask = payingRuns(view.lines, seen);
 	if (!mask.includes(true)) return view;
 	noteWhy(
 		run,
@@ -402,8 +404,8 @@ async function collapseSeen(run: Run, view: View, steps: string[]): Promise<View
 			i++;
 			continue;
 		}
-		let j = i;
-		while (j < view.lines.length && mask[j]) j++;
+		let j = i + 1;
+		while (j < view.lines.length && mask[j] && !seen.starts[j]) j++;
 		lines.push(
 			`${run.input.read ? indentOfFirst(view.lines.slice(i, j)) : ""}${seenMarker(j - i, target.url, runLines(target.spans, i, j), commitNote(view.lines.slice(i, j)))}`,
 		);
@@ -463,7 +465,7 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 	if (again) bump(run, "reasks");
 
 	const keep = seenKeeps(run, lines);
-	const witnessed = witnessedMask(lines, state.seen, again ? Math.min(SEEN_RUN, 2) : SEEN_RUN, keep);
+	const { mask: witnessed, starts } = witnessedRuns(lines, state.seen, again ? Math.min(SEEN_RUN, 2) : SEEN_RUN, keep);
 	const width = lines.map(l => (!again && l.length > MAX_LINE ? LINE_KEEP + 36 : l.length));
 	let shown = 0;
 	lines.forEach((_, i) => {
@@ -594,8 +596,9 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 			i++;
 			continue;
 		}
-		let j = i;
-		while (j < lines.length && !show(j)) j++;
+		let j = i + 1;
+		// Back to back seen runs are two passages of the context: one marker would read as one.
+		while (j < lines.length && !show(j) && !(starts[j] && witnessed[j - 1])) j++;
 		// A run the window hid holds a line not seen before, short ones included: it is a gap, not "as shown before".
 		let fresh = false;
 		for (let k = i; k < j; k++) {

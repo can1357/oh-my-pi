@@ -541,7 +541,9 @@ impl Special {
 			Self::Historywords => PmFlags::ARRAY.0 | RO.0 | HH.0,
 			Self::Funcstack => PmFlags::ARRAY.0 | RO.0 | HH.0,
 			Self::FunctionsSource => PmFlags::HASHED.0 | RO.0 | HH.0,
-			Self::Functrace | Self::Funcsourcetrace | Self::Funcfiletrace => PmFlags::ARRAY.0 | RO.0 | HH.0,
+			Self::Functrace | Self::Funcsourcetrace | Self::Funcfiletrace => {
+				PmFlags::ARRAY.0 | RO.0 | HH.0
+			},
 			Self::Dirstack => PmFlags::ARRAY.0 | HH.0,
 			// zsh/watch does not flag its pair `PM_TIED` (`${(t)watch}` is
 			// `array-special`).
@@ -586,9 +588,7 @@ impl Special {
 			| Self::Jobstates
 			| Self::Jobtexts
 			| Self::Jobdirs
-			| Self::Userdirs => {
-				PmFlags::HASHED.0 | RO.0 | HH.0
-			},
+			| Self::Userdirs => PmFlags::HASHED.0 | RO.0 | HH.0,
 			Self::Plain(i) => {
 				if (i as usize) < PLAIN_FLAGS.len() {
 					PLAIN_FLAGS[i as usize].0
@@ -819,7 +819,9 @@ pub fn restore_locals(ex: &mut Expander<'_, '_>) -> X<()> {
 		} else {
 			let value = match var.value {
 				VarValue::Str(s) => PValue::Scalar(s),
-				VarValue::Indexed(items) => PValue::Array(items.iter().map(|(_, v)| v.clone()).collect()),
+				VarValue::Indexed(items) => {
+					PValue::Array(items.iter().map(|(_, v)| v.clone()).collect())
+				},
 				VarValue::Assoc(items) => PValue::Hash(items.to_vec()),
 			};
 			set(ex, sp, name, value)
@@ -991,15 +993,21 @@ pub fn get(ex: &mut Expander<'_, '_>, sp: Special) -> X<Option<PValue>> {
 			)?;
 			Ok(v.map(|v| PValue::Scalar(num(v))))
 		},
-		Special::Histchars => {
-			scalar(crate::bash::vm::builtins::history::zsh::histchars_param(&ex.k.root, ex.cx.store, ex.vp)?)
-		},
+		Special::Histchars => scalar(crate::bash::vm::builtins::history::zsh::histchars_param(
+			&ex.k.root,
+			ex.cx.store,
+			ex.vp,
+		)?),
 		Special::History => Ok(Some(PValue::Hash(
 			crate::bash::vm::builtins::history::zsh::history_param(&ex.k.root, ex.cx.store, ex.vp)?,
 		))),
-		Special::Historywords => Ok(Some(PValue::Array(
-			crate::bash::vm::builtins::history::zsh::historywords_param(&ex.k.root, ex.cx.store, ex.vp)?,
-		))),
+		Special::Historywords => {
+			Ok(Some(PValue::Array(crate::bash::vm::builtins::history::zsh::historywords_param(
+				&ex.k.root,
+				ex.cx.store,
+				ex.vp,
+			)?)))
+		},
 		Special::Uid => scalar(num(ex.cx.host.user().uid)),
 		Special::Euid => scalar(num(ex.cx.host.user().euid)),
 		Special::Gid | Special::Egid => scalar(num(ex.cx.host.user().gid)),
@@ -1201,8 +1209,12 @@ pub fn get(ex: &mut Expander<'_, '_>, sp: Special) -> X<Option<PValue>> {
 		Special::Langinfo => crate::bash::vm::builtins::zsh_mod_langinfo::scan(ex),
 		Special::Terminfo => crate::bash::vm::builtins::zsh_mod_terminfo::scan(ex),
 		Special::Termcap => crate::bash::vm::builtins::zsh_mod_termcap::scan(ex),
-		Special::Errnos => Ok(Some(PValue::Array(crate::bash::vm::builtins::zsh_mod_system::errnos()))),
-		Special::Sysparams => Ok(Some(PValue::Hash(crate::bash::vm::builtins::zsh_mod_system::sysparams(ex)?))),
+		Special::Errnos => {
+			Ok(Some(PValue::Array(crate::bash::vm::builtins::zsh_mod_system::errnos())))
+		},
+		Special::Sysparams => {
+			Ok(Some(PValue::Hash(crate::bash::vm::builtins::zsh_mod_system::sysparams(ex)?)))
+		},
 		Special::EpochSeconds => scalar(num(ex.cx.host.wall().secs)),
 		Special::EpochRealtime => {
 			let now = ex.cx.host.wall();
@@ -1226,12 +1238,18 @@ pub fn get(ex: &mut Expander<'_, '_>, sp: Special) -> X<Option<PValue>> {
 pub fn get_elem(ex: &mut Expander<'_, '_>, sp: Special, key: &[u8]) -> X<Option<BString>> {
 	match sp {
 		Special::Functions => match state::record(ex.cx.store, ex.vp, Key::Func(key.as_bstr()))? {
-			Some(Record::Func { source, .. }) => Ok(Some(ex.k.engine.function_body(source, func_body))),
+			Some(Record::Func { source, .. }) => {
+				Ok(Some(ex.k.engine.function_body(source, func_body)))
+			},
 			_ => Ok(None),
 		},
-		Special::FunctionsSource => match state::record(ex.cx.store, ex.vp, Key::Func(key.as_bstr()))? {
-			Some(Record::Func { file, attrs, .. }) => Ok(Some(function_source(key, file.clone(), *attrs))),
-			_ => Ok(None),
+		Special::FunctionsSource => {
+			match state::record(ex.cx.store, ex.vp, Key::Func(key.as_bstr()))? {
+				Some(Record::Func { file, attrs, .. }) => {
+					Ok(Some(function_source(key, file.clone(), *attrs)))
+				},
+				_ => Ok(None),
+			}
 		},
 		Special::Parameters => parameter_type(ex, key),
 		// zsh `getpmcommand`: an unhashed name fills the table first under
@@ -1253,9 +1271,12 @@ pub fn get_elem(ex: &mut Expander<'_, '_>, sp: Special, key: &[u8]) -> X<Option<
 			hashed(ex)
 		},
 		// zsh/parameter's `getpmhistory`: any event, the latest too.
-		Special::History => {
-			Ok(crate::bash::vm::builtins::history::zsh::history_elem(&ex.k.root, ex.cx.store, ex.vp, key)?)
-		},
+		Special::History => Ok(crate::bash::vm::builtins::history::zsh::history_elem(
+			&ex.k.root,
+			ex.cx.store,
+			ex.vp,
+			key,
+		)?),
 		// zsh/mapfile's `getpmmapfile` reads the file itself.
 		Special::Mapfile => crate::bash::vm::builtins::zsh_mod_mapfile::get(ex, key),
 		// `getterminfo` / `gettermcap` answer names the scan omits
@@ -1887,7 +1908,9 @@ pub fn unset(ex: &mut Expander<'_, '_>, sp: Special, name: &[u8]) -> X<()> {
 		_ if sp.readonly() => Err(Stop::Fail(Diag::Readonly { name: BString::from(name) })),
 		// zsh/parameter's unset functions change nothing (`unset dirstack`
 		// keeps the stack): `PM_UNSET` on the special that stays.
-		_ if sp.module().is_some() => crate::bash::vm::builtins::zsh_module::set_param_unset(ex, name, true),
+		_ if sp.module().is_some() => {
+			crate::bash::vm::builtins::zsh_module::set_param_unset(ex, name, true)
+		},
 		_ => Ok(()),
 	}
 }

@@ -6522,6 +6522,7 @@ version = "18.16.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.23.1",
  "blake3",
  "bstr",
  "bytes",

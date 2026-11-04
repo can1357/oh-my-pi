@@ -567,6 +567,45 @@ export declare class PtySession {
   kill(): void
 }
 
+/**
+ * Actual command state, source units and bounded history for one shell run,
+ * including observed assignments and producer-attributed output.
+ *
+ * Create one over the command text and
+ * pass it as [`ShellRunOptions::trace`]; poll [`RunTrace::version`] while the
+ * run is in flight and take [`RunTrace::snapshot`] when it changed.
+ */
+export declare class RunTrace {
+  /** A trace of `script`, the exact command text about to run. */
+  constructor(script: string)
+  /**
+   * Revision of semantic events, assignments and visible output; unchanged
+   * means `snapshot()` is unchanged, even when adjacent output coalesces.
+   */
+  version(): number
+  /**
+   * The `ShellTrace` JSON with byte-offset layout, current node states and
+   * ordered replay `history`. The newest 20,000 records retain at most
+   * 2 MiB visible output and 8 MiB payload; `historyTruncated` explicitly
+   * reports eviction. History timestamps are measured ns since `RunStart`;
+   * output identifies its real producer (`u`, `n`, `command`) when known.
+   * Semantic entries carry their actual `vpid`; `rootVpid` distinguishes
+   * root lifecycle from owned tool children even after journal trimming.
+   * A UTF-8 scalar spanning producers has exact byte `contributors`
+   * instead of an invented primary producer. Decoding ends at capture EOF.
+   * Segmented minimizer submissions share one epoch and final status;
+   * their history carries `segment`, with `logicalEnd`/`logicalStatus`
+   * finalizing the last actual root RunEnd after output draining.
+   * Serialization borrows the locked model rather than cloning its history.
+   */
+  snapshot(): string
+  /**
+   * Render directly over the borrowed native state; no snapshot or syntax
+   * roundtrip.
+   */
+  present(options: ShellVizOptions): string
+}
+
 /** Persistent embedded bash engine (pi-shell) shell session. */
 export declare class Shell {
   /**
@@ -605,6 +644,15 @@ export declare class Shell {
    * running command.
    */
   pids(): Array<number>
+}
+
+/**
+ * Persisted native visualization, restored once rather than reparsed on each
+ * frame.
+ */
+export declare class ShellVisualization {
+  constructor(snapshot: string)
+  present(options: ShellVizOptions): string
 }
 
 /** One word-completion engine running on its own thread. */
@@ -3799,6 +3847,8 @@ export interface ShellRunOptions {
   filesystem?: ShellFilesystem
   /** Receives a copy of every byte crossing the run's pipeline pipes. */
   streams?: PipeStreams
+  /** Folds the run's engine events into a live model of the command. */
+  trace?: RunTrace
 }
 
 /** Result of running a shell command. */
@@ -3818,6 +3868,28 @@ export interface ShellRunResult {
   minimized?: MinimizerResult
   /** Shell working directory after command completion. */
   workingDir?: string
+}
+
+/** Native non-executing visualization transformations. */
+export interface ShellVizLayers {
+  color: boolean
+  inline: boolean
+  idioms: boolean
+  effects: boolean
+  unwrap: boolean
+}
+
+/** Native presentation controls. Node identities are opaque engine keys. */
+export interface ShellVizOptions {
+  view: 'raw' | 'pseudo'
+  layers: ShellVizLayers
+  split: boolean
+  cursor?: number
+  cursorSeq?: number
+  playing: boolean
+  speed: number
+  selectedNode?: string
+  expandedNodes: Array<string>
 }
 
 /**

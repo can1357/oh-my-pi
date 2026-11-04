@@ -1632,10 +1632,21 @@ const fn level_for(_pm: &Param) -> Level {
 /// Store `pm` (its flags, width, base and value) where it is bound, the
 /// value converted to the store's shape; a tie partner is kept in step.
 fn store_param(ex: &mut Expander<'_, '_>, pm: &Param) -> X<()> {
+	store_param_assignment(ex, pm, false)
+}
+
+// Arithmetic opts in at the value setter, not after synchronization: a
+// committed value remains an assignment even when a later tie/prompt hook
+// fails.
+fn store_param_assignment(ex: &mut Expander<'_, '_>, pm: &Param, trace: bool) -> X<()> {
 	if let Some(sp) = pm.special
 		&& !sp.is_plain()
 	{
-		return specials::set(ex, sp, &pm.name, pm.value.clone());
+		specials::set(ex, sp, &pm.name, pm.value.clone())?;
+		if trace {
+			super::super::builtins::emit_assignment(ex.k, ex.cx, ex.vp, &pm.name, level_for(pm));
+		}
+		return Ok(());
 	}
 	// The scalar of a `typeset -UT` tie keeps its words unique (zsh's
 	// colon-array `setfn` with `PM_UNIQUE`).
@@ -1699,6 +1710,9 @@ fn store_param(ex: &mut Expander<'_, '_>, pm: &Param) -> X<()> {
 		Some(Var { attrs, value }),
 		level,
 	);
+	if trace {
+		super::super::builtins::emit_assignment(ex.k, ex.cx, ex.vp, &pm.name, level);
+	}
 	if pm.flags.contains(PmFlags::TIED) {
 		sync_tie(ex, pm)?;
 	}
@@ -1987,6 +2001,16 @@ impl Value {
 	/// # Errors
 	/// Read-only, slice-of-association and math errors.
 	pub fn assignstrvalue(&mut self, ex: &mut Expander<'_, '_>, val: &[u8], flags: u32) -> X<()> {
+		self.assignstrvalue_assignment(ex, val, flags, false)
+	}
+
+	fn assignstrvalue_assignment(
+		&mut self,
+		ex: &mut Expander<'_, '_>,
+		val: &[u8],
+		flags: u32,
+		trace: bool,
+	) -> X<()> {
 		if self.pm.flags.contains(PmFlags::READONLY) {
 			return Err(readonly(&self.pm.name));
 		}
@@ -2029,7 +2053,7 @@ impl Value {
 			self.pm.attrs = attrs;
 			self.pm.value = PValue::Hash(items);
 			self.pm.flags = self.pm.flags.without(PmFlags::UNSET);
-			return store_param(ex, &self.pm);
+			return store_param_assignment(ex, &self.pm, trace);
 		}
 		self.pm.flags = self.pm.flags.without(PmFlags::UNSET);
 		match self.pm.flags.type_bits() {
@@ -2116,12 +2140,12 @@ impl Value {
 					self.pm.width = u16::try_from(val.len()).unwrap_or(u16::MAX);
 				}
 			},
-			PmFlags::ARRAY => return self.setarrvalue(ex, vec![val.to_vec()]),
+			PmFlags::ARRAY => return self.setarrvalue_assignment(ex, vec![val.to_vec()], trace),
 			_ => {
 				return Err(bad_assign(&self.pm.name, "attempt to set associative array to scalar"));
 			},
 		}
-		store_param(ex, &self.pm)
+		store_param_assignment(ex, &self.pm, trace)
 	}
 
 	/// zsh `setarrvalue`: assign the elements `val` (metafied) to what this
@@ -2130,6 +2154,15 @@ impl Value {
 	/// # Errors
 	/// Read-only, type and slice errors.
 	pub fn setarrvalue(&mut self, ex: &mut Expander<'_, '_>, val: Vec<Vec<u8>>) -> X<()> {
+		self.setarrvalue_assignment(ex, val, false)
+	}
+
+	fn setarrvalue_assignment(
+		&mut self,
+		ex: &mut Expander<'_, '_>,
+		val: Vec<Vec<u8>>,
+		trace: bool,
+	) -> X<()> {
 		if self.pm.flags.contains(PmFlags::READONLY) {
 			return Err(readonly(&self.pm.name));
 		}
@@ -2151,7 +2184,7 @@ impl Value {
 			}
 			self.pm.value = PValue::Array(val.iter().map(|e| BString::from(unmetafy(e))).collect());
 			self.pm.flags = self.pm.flags.without(PmFlags::UNSET);
-			return store_param(ex, &self.pm);
+			return store_param_assignment(ex, &self.pm, trace);
 		}
 		if self.start == -1 && self.end == 0 && is_hash {
 			return arrhashsetfn(ex, &mut self.pm, val, ASSPM_AUGMENT);
@@ -2191,7 +2224,7 @@ impl Value {
 		}
 		self.pm.value = PValue::Array(new);
 		self.pm.flags = self.pm.flags.without(PmFlags::UNSET);
-		store_param(ex, &self.pm)
+		store_param_assignment(ex, &self.pm, trace)
 	}
 }
 
@@ -2561,12 +2594,12 @@ fn setnumvalue(
 			let t = int_text(ex, &v.pm, val.to_int())?;
 			v.pm.value = PValue::Scalar(t);
 			v.pm.flags = v.pm.flags.without(PmFlags::UNSET);
-			store_param(ex, &v.pm)
+			store_param_assignment(ex, &v.pm, true)
 		},
 		(false, PmFlags::EFLOAT | PmFlags::FFLOAT) => {
 			v.pm.value = PValue::Scalar(float_text(&v.pm, val.to_float()));
 			v.pm.flags = v.pm.flags.without(PmFlags::UNSET);
-			store_param(ex, &v.pm)
+			store_param_assignment(ex, &v.pm, true)
 		},
 		_ => {
 			let t = match text {
@@ -2576,7 +2609,7 @@ fn setnumvalue(
 					Number::Float(d) => math::format_float(d).into_bytes(),
 				},
 			};
-			v.assignstrvalue(ex, &t, 0)
+			v.assignstrvalue_assignment(ex, &t, 0, true)
 		},
 	}
 }

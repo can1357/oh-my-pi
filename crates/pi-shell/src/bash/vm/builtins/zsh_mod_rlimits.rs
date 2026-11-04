@@ -165,11 +165,9 @@ impl State {
 		let limits = RESINFO
 			.iter()
 			.zip(&host)
-			.map(|(r, h)| {
-				match ctx.vp.rlimits.iter().find(|(res, ..)| *res == r.res) {
-					Some(&(_, s, h)) => Ok(Lim { cur: raw(s), max: raw(h) }),
-					None => *h,
-				}
+			.map(|(r, h)| match ctx.vp.rlimits.iter().find(|(res, ..)| *res == r.res) {
+				Some(&(_, s, h)) => Ok(Lim { cur: raw(s), max: raw(h) }),
+				None => *h,
 			})
 			.collect();
 		let applied = match ctx.record(Key::Misc(MiscKey::ZshRlimits))? {
@@ -226,7 +224,13 @@ impl State {
 /// `resource:soft:hard` (`-` for unlimited), as [`MiscKey::ZshRlimits`]
 /// keeps an applied limit.
 fn encode(res: Rlimit, l: Lim) -> BString {
-	let n = |v: u64| if v == INF { String::from("-") } else { v.to_string() };
+	let n = |v: u64| {
+		if v == INF {
+			String::from("-")
+		} else {
+			v.to_string()
+		}
+	};
 	format!("{}:{}:{}", <&'static str>::from(res), n(l.cur), n(l.max)).into()
 }
 
@@ -841,7 +845,8 @@ mod tests {
 		show_value(&mut out, idx("descriptors"), INF);
 		assert_eq!(
 			out.to_str().unwrap(),
-			"cputime         0:01:30\nstacksize       7MB\ncoredumpsize    0kB\ndescriptors     unlimited\n"
+			"cputime         0:01:30\nstacksize       7MB\ncoredumpsize    0kB\ndescriptors     \
+			 unlimited\n"
 		);
 	}
 

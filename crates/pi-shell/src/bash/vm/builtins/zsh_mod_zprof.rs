@@ -326,8 +326,8 @@ fn report(p: &Prof) -> String {
 	let mut arcs: Vec<usize> = (0..p.arcs.len()).rev().collect();
 	arcs.sort_by(|&a, &b| desc(p.arcs[a].time, p.arcs[b].time));
 	let mut out = String::from(
-		"num  calls                time                       self            name\n\
-		 -----------------------------------------------------------------------------------\n",
+		"num  calls                time                       self            \
+		 name\n-----------------------------------------------------------------------------------\n",
 	);
 	let fline = |out: &mut String, i: usize| {
 		let f = &p.funcs[i];
@@ -366,7 +366,9 @@ fn report(p: &Prof) -> String {
 	fs.sort_by(|&a, &b| desc(p.funcs[a].time, p.funcs[b].time));
 	for &i in &fs {
 		out.push_str(
-			"\n-----------------------------------------------------------------------------------\n\n",
+			"\n-----------------------------------------------------------------------------------\n\\
+			 \
+			 n",
 		);
 		for &ai in &arcs {
 			let a = &p.arcs[ai];
@@ -421,10 +423,16 @@ mod tests {
 		};
 		let rule =
 			"-----------------------------------------------------------------------------------";
-		let want =
-			format!(
-			"num  calls                time                       self            name\n{rule}\n 1)    2           3.00     1.50   75.00%      3.00     1.50   75.00%  inner\n 2)    1           4.00     4.00  100.00%      1.00     1.00   25.00%  outer\n\n{rule}\n\n 2)    1           4.00     4.00  100.00%      1.00     1.00   25.00%  outer\n       2/2         3.00     1.50   75.00%      3.00     1.50             inner [1]\n\n{rule}\n\n       2/2         3.00     1.50   75.00%      3.00     1.50             outer [2]\n 1)    2           3.00     1.50   75.00%      3.00     1.50   75.00%  inner\n"
-		);
+		let want = format!(
+				"num  calls                time                       self            name\n{rule}\n \
+				 1)    2           3.00     1.50   75.00%      3.00     1.50   75.00%  inner\n 2)    \
+				 1           4.00     4.00  100.00%      1.00     1.00   25.00%  outer\n\n{rule}\n\n \
+				 2)    1           4.00     4.00  100.00%      1.00     1.00   25.00%  outer\n       \
+				 2/2         3.00     1.50   75.00%      3.00     1.50             inner \
+				 [1]\n\n{rule}\n\n       2/2         3.00     1.50   75.00%      3.00     1.50             \
+				 outer [2]\n 1)    2           3.00     1.50   75.00%      3.00     1.50   75.00%  \
+				 inner\n"
+			);
 		assert_eq!(report(&p), want);
 	}
 

@@ -238,7 +238,12 @@ fn target_text(
 		},
 		RedirTargetIr::HereDoc { text, quoted: false } => {
 			let mode = super::exec::mode_of(vp);
-			let tunit = match k.engine.text_unit(text, TextKind::HereDoc, mode) {
+			let tunit = match k.engine.text_unit(
+				text,
+				TextKind::HereDoc,
+				mode,
+				k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
+			) {
 				Ok(u) => u,
 				Err(e) => {
 					// bash reports the script line after the document.
