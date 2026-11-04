@@ -2051,8 +2051,12 @@ export class WorkerCore {
 		let failure: { error: unknown } | undefined;
 		let recoverTab = false;
 		let runPage: RunPageScope | undefined;
+		let holding: Promise<void> | undefined;
 		try {
 			throwIfAborted(signal);
+			// The hold starts with the run, ahead of the emulation round trips the page runs on through.
+			holding = this.#printHold?.beginCall(msg.timeoutMs);
+			holding?.catch(() => undefined);
 			await untilAborted(signal, () => this.#emulation?.reapply() ?? Promise.resolve());
 			runPage = createRunPageScope(this.#requirePage(), () => this.#requireNetwork().restoreInterception());
 			const browser = this.#requireBrowser();
@@ -2120,7 +2124,7 @@ export class WorkerCore {
 			else signal.addEventListener("abort", onCancel, { once: true });
 			try {
 				// A renderer already blocked in a print nobody held never answers; the run's timeout reports that.
-				await Promise.race([this.#printHold?.beginCall(msg.timeoutMs), cancelRejection]);
+				await Promise.race([holding, cancelRejection]);
 				const hooks = this.#hooksForActiveRun();
 				if (!hooks) throw new ToolError("Browser runtime started without an active run");
 				returnValue = await withBrowserPromiseCombinatorTracking(
