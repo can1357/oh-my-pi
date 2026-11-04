@@ -250,6 +250,8 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 			return owner.preparedExtensions;
 		},
 		getSessionAgents: () => owner.sessionAgents ?? [],
+		// A revival runs as the parent's work; this parent has no holds.
+		runInRequestContext: <T>(fn: () => T) => fn(),
 	} as unknown as AgentSession;
 	return createPersistedSubagentReviverFactory({
 		session: parentSession,
@@ -1199,6 +1201,7 @@ describe("persisted subagent revival", () => {
 					sessionManager: { getCwd: () => cwd, getArtifactManager: () => undefined },
 					effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
 					getSessionAgents: () => [],
+					runInRequestContext: <T>(fn: () => T) => fn(),
 					model: rootModel,
 				} as unknown as AgentSession,
 				authStorage: {} as never,

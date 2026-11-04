@@ -30,6 +30,7 @@ import { validateImageInput } from "../images/shared";
 import { withInferenceUserAgent } from "../providers/inference-headers";
 import { redactSensitiveInObject } from "../providers/transform-messages";
 import type { ImageContent, Model, Usage } from "../types";
+import { heldFetch } from "../utils/held-fetch";
 import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { openaiDecisionsWire } from "./openai-decisions";
 import { openrouterDecisionsWire, referencedImageAssets, typesafeWire, workersAiWire } from "./systemone";
@@ -343,7 +344,8 @@ export class NativeJudge implements Judge {
 		this.baseUrl = (options.baseUrl ?? typesafeBaseUrl()).replace(/\/+$/, "");
 		this.model = options.model ?? typesafeModel();
 		this.#headers = options.headers;
-		this.#fetch = options.fetch ?? fetch;
+		// Its only use is the judgment request, a model request: every attempt is held.
+		this.#fetch = heldFetch(options.fetch ?? fetch);
 		this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		if (options.maxQuestions !== undefined && !(Number.isInteger(options.maxQuestions) && options.maxQuestions > 0)) {
 			throw new RangeError(`NativeJudge maxQuestions must be a positive integer, got ${options.maxQuestions}`);

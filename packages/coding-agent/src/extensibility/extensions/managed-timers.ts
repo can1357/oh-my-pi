@@ -10,19 +10,30 @@
  * {@link ManagedTimers} backs the sanctioned `ctx.setInterval` /
  * `ctx.setTimeout` helpers. Each callback runs inside the same isolation the
  * runner already applies to handler dispatch — a synchronous throw or a
- * rejected promise is reported through `onError` and swallowed — and every
- * outstanding handle is `unref`'d (never keeps the process alive) and cleared
- * on session teardown via {@link clearAll}.
+ * rejected promise is reported through `onError` and swallowed — and in the
+ * context `run` enters (the owning session's work), whatever context
+ * scheduled it. Every outstanding handle is `unref`'d (never keeps the
+ * process alive) and cleared on session teardown via {@link clearAll}.
  */
 import { logger } from "@oh-my-pi/pi-utils";
+import { methodsAsSessionWork } from "../../session/session-work";
 
 /** Callback invoked when a managed timer's callback throws or rejects. */
 export type ManagedTimerErrorHandler = (event: string, error: string, stack?: string) => void;
 
 export class ManagedTimers {
+	// Scheduling is the owning session's work too, so converting the delay an extension passes (its
+	// `valueOf`) runs there (see `methodsAsSessionWork`). A firing has no call on its stack: it enters `run`.
+	static {
+		methodsAsSessionWork(ManagedTimers.prototype, timers => (#timers in timers ? timers.run : undefined));
+	}
 	readonly #timers = new Set<Timer>();
 
-	constructor(private readonly onError: ManagedTimerErrorHandler) {}
+	constructor(
+		private readonly onError: ManagedTimerErrorHandler,
+		/** Runs each firing; the owning session runs them as its work. */
+		private readonly run: <T>(fire: () => T) => T = fire => fire(),
+	) {}
 
 	/** Schedule a repeating callback whose throws are contained. */
 	setInterval(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer {
@@ -65,7 +76,7 @@ export class ManagedTimers {
 
 	#run(kind: "interval" | "timeout", callback: (...args: unknown[]) => void, args: unknown[]): void {
 		try {
-			const result = callback(...args) as unknown;
+			const result = this.run(() => callback(...args)) as unknown;
 			if (result instanceof Promise) {
 				result.catch((err: unknown) => this.#report(kind, err));
 			}

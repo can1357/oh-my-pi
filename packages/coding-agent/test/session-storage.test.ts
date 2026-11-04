@@ -490,6 +490,28 @@ describe("FileSessionStorage.writeTextSync", () => {
 		}
 	});
 
+	it("bounds the publish-lock wait on the monotonic clock, whatever the wall clock does", () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const lockPath = path.join(tempDir, ".session.jsonl.lock");
+		fs.writeFileSync(lockPath, `${process.pid}:${Date.now()}\n`);
+		// The wall clock steps back a second once the wait has begun. A wait
+		// measured on it would run for that second as well as its own budget.
+		const wall = Date.now;
+		let reads = 0;
+		const stepped = vi.spyOn(Date, "now").mockImplementation(() => wall() - (reads++ < 2 ? 0 : 1_000));
+		const start = performance.now();
+		try {
+			expect(() => storage.writeTextSync(sessionPath, "replacement\n")).toThrow(SessionLockError);
+		} finally {
+			stepped.mockRestore();
+			fs.unlinkSync(lockPath);
+		}
+		expect(performance.now() - start).toBeLessThan(1_000);
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("original\n");
+	});
+
 	it("steals a contentless publish lock orphaned by a crash instead of bricking the file", () => {
 		const storage = new FileSessionStorage();
 		const sessionPath = path.join(tempDir, "session.jsonl");

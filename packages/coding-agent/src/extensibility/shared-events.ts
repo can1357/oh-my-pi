@@ -50,6 +50,52 @@ export interface SessionSwitchEvent {
 }
 
 /**
+ * Fired when this session had to leave its file and carried on under a new
+ * id — nobody asked for it, which is what separates it from a
+ * {@link SessionSwitchEvent}: there is no `new`/`resume`/`fork` a user or an
+ * agent chose, only a file this process may no longer write. The conversation,
+ * the cwd and the context are unchanged; only the identity moved.
+ *
+ * A consumer that carries identity across sessions (a role claim, a scheduler,
+ * an address book) should treat `previousSessionId` as possibly **still live**:
+ * under `"open-elsewhere"` another omp process owns it and goes on using it.
+ * Handlers observe; they cannot refuse the move, which has already happened by
+ * the time it is announced — the session had nowhere else to save.
+ *
+ * Handlers run once the new file `sessionFile` has been written and the
+ * previous move's handlers are done, so moves are handled in order and a
+ * handler finds its file on disk. The session's next tool call and model
+ * request wait for them for up to 2 seconds from the move
+ * (`SESSION_MOVED_HANDLER_GRACE_MS`), and one wait never lasts longer than
+ * that however many moves happen during it — a move made while the request
+ * is being prepared included, by a `context` handler or by a context
+ * wrapper the host added. At 2 seconds the session stops waiting, logs a
+ * warning and goes on under the new id. If the new file is never written —
+ * the session is disposed first — no handler runs for that move.
+ * A handler's own code is never stopped: it gets no
+ * signal, so the session cannot tell it to stop. The extension runner's
+ * 30-second handler timeout and the session's disposal stop waiting for it
+ * and cancel its `ctx.ui` dialogs, and after disposal no further handler for
+ * this event starts. `session_shutdown` does not wait for these handlers.
+ * So rekey state to `sessionId` synchronously, and start slow work detached
+ * rather than awaiting it. Work already running when the move happened — a
+ * tool call in flight, a cell it started — is not held back either.
+ */
+export interface SessionMovedEvent {
+	type: "session_moved";
+	/** Why the session could not stay on its file; see `SessionPersistenceNotice`. */
+	reason: "open-elsewhere" | "replaced" | "contested";
+	/** The id this session answered to until now. Still another process's live session under `"open-elsewhere"`. */
+	previousSessionId: string;
+	/** The id it answers to from now on. */
+	sessionId: string;
+	/** The file it was saving to. */
+	previousSessionFile: string;
+	/** The sibling file it saves to from now on. */
+	sessionFile: string;
+}
+
+/**
  * What a branch transition does with {@link SessionBeforeBranchEvent.entryId}:
  * - `"branch"`: rewinds to a user message; `entryId` and everything after it are dropped.
  * - `"fork"`: forks at a transcript entry; `entryId` is the last entry kept.
@@ -166,6 +212,7 @@ export type SessionEvent =
 	| SessionStartEvent
 	| SessionBeforeSwitchEvent
 	| SessionSwitchEvent
+	| SessionMovedEvent
 	| SessionBeforeBranchEvent
 	| SessionBranchEvent
 	| SessionBeforeCompactEvent

@@ -65,6 +65,7 @@ import { hasVisibleAssistantContent } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { escapeHarmonyControlTokens, isHarmonyDialectModel } from "../utils/harmony-leak";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
+import { heldFetch } from "../utils/held-fetch";
 import {
 	armPreResponseTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
@@ -1911,7 +1912,7 @@ async function openCodexSseTransport(
 				requestSetup.firstEventTimeoutMs,
 				options?.codexSseMaxAttempts,
 				event => options?.onSseEvent?.(event, model),
-				wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+				wrapFetchForRequestCompression(heldFetch(options?.fetch ?? fetch), model),
 			),
 		);
 	};

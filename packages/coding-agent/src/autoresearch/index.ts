@@ -246,6 +246,8 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 
 	api.on("session_start", (_event, ctx) => rehydrate(ctx));
 	api.on("session_switch", (_event, ctx) => rehydrate(ctx));
+	// The session id can also change without anyone choosing it.
+	api.on("session_moved", (_event, ctx) => rehydrate(ctx));
 	api.on("session_branch", (_event, ctx) => rehydrate(ctx));
 	api.on("session_tree", (_event, ctx) => rehydrate(ctx));
 	api.on("session_shutdown", (_event, ctx) => {

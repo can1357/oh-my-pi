@@ -177,6 +177,8 @@ export function createWarpEventBridgeExtension(): ExtensionFactory {
 
 		api.on("session_start", rebuildEmitter);
 		api.on("session_switch", rebuildEmitter);
+		// The id can change without a switch: the session left its file.
+		api.on("session_moved", rebuildEmitter);
 		api.on("session_branch", rebuildEmitter);
 
 		api.on("message_start", event => {

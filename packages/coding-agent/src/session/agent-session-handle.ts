@@ -121,6 +121,8 @@ export interface AgentSessionHandle {
 	readonly effectiveExtensionRoots: EffectiveExtensionRoots;
 	/** Whether the hindsight memory backend is active for the session. */
 	readonly hindsightActive: boolean;
+	/** Runs `fn` as this session's work: whatever model request it starts waits for the session's holds. */
+	runInRequestContext<T>(fn: () => T): T;
 	/** Subscribe to every session event; returns the unsubscribe function. */
 	subscribe(listener: AgentSessionEventListener): () => void;
 	/** Subscribe to authoritative running/idle transitions; returns the unsubscribe function. */

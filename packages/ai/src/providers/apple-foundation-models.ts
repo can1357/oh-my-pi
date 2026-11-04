@@ -13,6 +13,7 @@ import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { appleFmAvailability, appleFmCancel, appleFmGenerate } from "@oh-my-pi/pi-natives";
 import { parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { afterRequestHolds } from "../request-holds";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	AssistantMessage,
@@ -210,12 +211,15 @@ function buildRequest(
 async function* generate(request: GenerateRequest, signal: AbortSignal | undefined): AsyncGenerator<BridgeEvent> {
 	const queue: BridgeEvent[] = [];
 	let wake: (() => void) | undefined;
-	const handle = appleFmGenerate(JSON.stringify(request), (error, event) => {
-		queue.push(
-			error ? { type: "error", code: "runtime", message: error.message } : (JSON.parse(event) as BridgeEvent),
-		);
-		wake?.();
-	});
+	// The bridge call starts the on-device generation: it is the request's send.
+	const handle = await afterRequestHolds(signal, () =>
+		appleFmGenerate(JSON.stringify(request), (error, event) => {
+			queue.push(
+				error ? { type: "error", code: "runtime", message: error.message } : (JSON.parse(event) as BridgeEvent),
+			);
+			wake?.();
+		}),
+	);
 	let finished = false;
 	const cancel = () => {
 		if (!finished) appleFmCancel(handle);

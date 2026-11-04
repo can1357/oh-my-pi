@@ -45,6 +45,12 @@
 
 - Fixed Factory Droid Fable requests offering Opus 5 as the refusal fallback when your organization's model policy excludes Opus 5; Claude requests now offer only fallback models your account can use, and a request served by another organization's login than the one your model list came from offers none ([#17772](https://github.com/can1357/oh-my-pi/pull/17772) by [@will-bogusz](https://github.com/will-bogusz))
 
+- `/login mistral` signs in through the browser like the Mistral Vibe CLI and stores the minted API key, whose usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits; `MISTRAL_API_KEY` still works ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
+
+### Fixed
+
+- Hosts can hold every model request a context starts; each transport waits for those holds immediately before sending ([#17842](https://github.com/can1357/oh-my-pi/pull/17842) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Fixed

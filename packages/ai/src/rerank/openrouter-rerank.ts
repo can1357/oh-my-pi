@@ -3,6 +3,7 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { Api, FetchImpl, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { type ApiKey, NO_AUTH_SENTINEL, withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { heldFetch } from "../utils/held-fetch";
 import { modelHeaders } from "../images/shared";
 import { mergeHeaders } from "../providers/anthropic-headers";
 import type { RerankRequest, RerankResult } from "./types";
@@ -96,7 +97,7 @@ export async function rerankOpenRouter(
 		...(request.topN !== undefined && { top_n: request.topN }),
 		...(request.returnDocuments !== undefined && { return_documents: request.returnDocuments }),
 	});
-	const fetchImpl = options.fetch ?? fetch;
+	const fetchImpl = heldFetch(options.fetch ?? fetch);
 	const response = await withAuth(
 		options.apiKey,
 		async key => {

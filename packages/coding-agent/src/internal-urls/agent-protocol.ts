@@ -30,6 +30,7 @@ import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "tex
 import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with { type: "text" };
 import agentSupersededTemplate from "../prompts/tools/agent-url-superseded.md" with { type: "text" };
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
+import { whenArtifactCopiesSettle } from "../session/session-manager";
 import { artifactsDirsFromRegistry } from "./registry-helpers";
 import type {
 	InternalResource,
@@ -363,11 +364,27 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	async #outputDirs(context: ResolveContext | undefined): Promise<string[]> {
 		// A seance reads the consulted source's agent outputs in place, nothing else.
 		const seanceDir = context?.session?.seanceSourceArtifactsDir;
-		if (seanceDir) return [seanceDir];
+		if (seanceDir) return await this.#settled([seanceDir], context);
 		const rootSessionFile = context?.sessionFile
 			? await ensurePersistedRoster(AgentRegistry.global(), context.sessionFile)
 			: undefined;
-		return artifactsDirsFromRegistry(rootSessionFile ? { preferredDir: rootSessionFile.slice(0, -6) } : undefined);
+		return await this.#settled(
+			artifactsDirsFromRegistry(rootSessionFile ? { preferredDir: rootSessionFile.slice(0, -6) } : undefined),
+			context,
+		);
+	}
+
+	/**
+	 * Wait for a fork's artifact copy to finish filling these directories.
+	 *
+	 * A subagent's output is an artifact like any other, and a fork inherits it
+	 * by copy. A read that does not wait is a read of a directory that is not
+	 * yet the session's — the same wait the `artifact://` handler makes, made
+	 * here because this handler reaches the filesystem on its own.
+	 */
+	async #settled(dirs: string[], context: ResolveContext | undefined): Promise<string[]> {
+		for (const dir of dirs) await whenArtifactCopiesSettle(dir, context?.signal);
+		return dirs;
 	}
 
 	/**

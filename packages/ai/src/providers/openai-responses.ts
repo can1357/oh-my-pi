@@ -33,6 +33,7 @@ import { createAbortSourceTracker } from "../utils/abort";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
+import { heldFetch } from "../utils/held-fetch";
 import {
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
@@ -997,7 +998,7 @@ const streamOpenAIResponsesOnce = (
 						body: requestParams,
 						signal: requestSignal,
 						fetch: wrapFetchForCopilotFallback(
-							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+							wrapFetchForRequestCompression(heldFetch(options?.fetch ?? fetch), model),
 							model.provider === "github-copilot",
 							resolveCopilotRequestIdentity(options?.headers),
 							copilotCacheKey,

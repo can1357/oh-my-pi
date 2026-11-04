@@ -7,9 +7,9 @@
 import * as fsSync from "node:fs";
 import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
-import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import { type ImageContent, type Model, RequestHoldsAlias, runWithRequestHolds } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
-import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
+import { ensureSqliteLockShim, isEnoent, isEnotdir, toError } from "@oh-my-pi/pi-utils";
 import {
 	APP_NAME,
 	directoryIsMissing,
@@ -128,8 +128,13 @@ import {
 	type SessionContinuation,
 	type SessionInfo,
 } from "./session/session-listing";
-import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
-import { forkIfMovedAway } from "./session/session-transfer";
+import {
+	ForkSourceNotFoundError,
+	SessionManager,
+	SessionMoveRefusedError,
+	SessionSourceReplacedError,
+} from "./session/session-manager";
+import { adoptResumedSession } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
 	discoverSystemPromptOverride,
@@ -580,9 +585,13 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
 		const titleSystemPrompt = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
 		const eventBus = new EventBus();
+		// Trusted extensions preloaded here are the new session's work before it exists.
+		const startupHolds = new RequestHoldsAlias();
 		const trustedExtensions =
 			args.parsedArgs.trustedExtensions && args.parsedArgs.trustedExtensions.length > 0
-				? await loadTrustedSessionExtensions(args.baseOptions, cwd, eventBus)
+				? await runWithRequestHolds(startupHolds, () =>
+						loadTrustedSessionExtensions(args.baseOptions, cwd, eventBus),
+					)
 				: undefined;
 		if (trustedExtensions && trustedExtensions.errors.length > 0) {
 			throw new Error(
@@ -596,6 +605,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			...args.baseOptions,
 			cwd,
 			sessionManager: nextSessionManager,
+			startupHolds,
 			settings: nextSettings,
 			authStorage: args.authStorage,
 			modelRegistry: args.modelRegistry,
@@ -1240,6 +1250,21 @@ export function normalizeContinueSessionArgs(parsed: Args, rawArgs?: readonly st
 const SESSION_NOT_FOUND_HINT =
 	"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.";
 
+/**
+ * {@link adoptResumedSession}, with the one resume it refuses — the file no
+ * longer holds the session that was loaded from it — reported as a clean
+ * session-resolution failure instead of an unhandled error.
+ */
+async function adoptResumedSessionOrExplain(manager: SessionManager, sessionDir?: string): Promise<SessionManager> {
+	try {
+		return await adoptResumedSession(manager, sessionDir);
+	} catch (error) {
+		if (error instanceof SessionSourceReplacedError)
+			throw new SessionResolutionError(error.message, SESSION_NOT_FOUND_HINT);
+		throw error;
+	}
+}
+
 function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSession" | "resume">): void {
 	if (!parsed.noSession) return;
 	if (parsed.resume !== undefined) {
@@ -1331,8 +1356,9 @@ export async function createSessionManager(
 				}
 				throw err;
 			}
-			// A copy whose conversation moved to another machine continues as a fork.
-			return await forkIfMovedAway(manager, parsed.sessionDir);
+			// A copy whose conversation moved to another machine, or whose session
+			// another live omp process owns, continues as a fork.
+			return await adoptResumedSessionOrExplain(manager, parsed.sessionDir);
 		}
 		const target = await resolveResumeTarget(sessionArg, cwd, parsed.sessionDir);
 		if (!target) {
@@ -1348,15 +1374,18 @@ export async function createSessionManager(
 			askToMoveSession,
 		);
 		if (moveResult.status === "moved") {
-			return await forkIfMovedAway(moveResult.manager, parsed.sessionDir);
+			return await adoptResumedSessionOrExplain(moveResult.manager, parsed.sessionDir);
 		}
 		if (moveResult.status === "declined") {
 			return undefined;
 		}
-		return await forkIfMovedAway(await SessionManager.open(session.path, parsed.sessionDir), parsed.sessionDir);
+		return await adoptResumedSessionOrExplain(
+			await SessionManager.open(session.path, parsed.sessionDir),
+			parsed.sessionDir,
+		);
 	}
 	if (parsed.continue) {
-		return await forkIfMovedAway(
+		return await adoptResumedSessionOrExplain(
 			await SessionManager.continueRecent(cwd, parsed.sessionDir, undefined, {
 				onSessionContinuation: options.onSessionContinuation,
 			}),
@@ -1374,7 +1403,7 @@ export async function createSessionManager(
 	// overriding them with CLI defaults.
 	// An explicit startup goal starts fresh even when implicit auto-resume is configured.
 	if (parsed.goal === undefined && cfgAutoResume.get(activeSettings)) {
-		const manager = await forkIfMovedAway(
+		const manager = await adoptResumedSessionOrExplain(
 			await SessionManager.continueRecent(cwd, parsed.sessionDir, undefined, {
 				onSessionContinuation: options.onSessionContinuation,
 			}),
@@ -1830,6 +1859,16 @@ export async function runRootCommand(
 ): Promise<void> {
 	logger.startTiming();
 	startStartupWatchdog();
+	// The session a resume adopted, and its ownership claim, until a live
+	// AgentSession takes it over. Startup can fail anywhere after the resume —
+	// rescoping settings into the resumed project, re-resolving models, a
+	// trusted extension that will not load, a session that cannot be built —
+	// and an embedder that keeps the process after this rejects would otherwise
+	// keep that session reserved for a process that is not using it. Declared
+	// out here so every assignment is covered the moment it happens, rather
+	// than at some later line a throw can get in front of.
+	let sessionManager: SessionManager | undefined;
+	let sessionManagerHandedOver = false;
 	try {
 		// Non-prepaint commands still need a default theme; an existing Composer
 		// already initialized its cached theme synchronously for the first frame.
@@ -2127,7 +2166,6 @@ export async function runRootCommand(
 			parsedArgs.restore ||
 			isForeignSessionImport(parsedArgs),
 		);
-		let sessionManager: SessionManager | undefined;
 		let foreignSource: ForeignSessionSource | undefined;
 		// A resumed session whose conversation went on in another file resumes that file; say so.
 		const resumedContinuations: SessionContinuation[] = [];
@@ -2301,7 +2339,7 @@ export async function runRootCommand(
 			if (continuation) resumedContinuations.push(continuation);
 			const chosen = continuation?.session ?? selected;
 			try {
-				sessionManager = await forkIfMovedAway(
+				sessionManager = await adoptResumedSessionOrExplain(
 					(await SessionManager.isFromRemovedWorktree(chosen, cwd, parsedArgs.sessionDir))
 						? await openRelocatedSession(chosen, cwd, parsedArgs.sessionDir)
 						: await SessionManager.open(chosen.path),
@@ -2440,6 +2478,9 @@ export async function runRootCommand(
 		const createAgentSessionImpl = deps.createAgentSession ?? createAgentSession;
 		const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 			const result = await logger.time("createAgentSession", createAgentSessionImpl, options);
+			// The session owns the manager it was handed, including closing it, so
+			// startup stops answering for it.
+			if (options.sessionManager === sessionManager) sessionManagerHandedOver = true;
 			// Kick off background model discovery only after createAgentSession finishes its parallel
 			// discovery arms; running these concurrently contends for the event loop and stretches
 			// every parallel arm by ~30ms. Interactive startup defers it further, behind the first
@@ -2472,6 +2513,15 @@ export async function runRootCommand(
 				rawArgs,
 				createSession,
 			});
+			// ACP builds its own manager per `session/new` and overrides
+			// `baseOptions.sessionManager` with it, so the session startup
+			// resumed here is never used — and the ownership claim the resume
+			// took would otherwise be held for the life of the server, keeping
+			// that session away from the process that does resume it.
+			if (sessionManager) {
+				await sessionManager.close();
+				sessionManager = undefined;
+			}
 			// Branch-only protocol runner: keep ACP server code out of normal interactive startup.
 			const runAcpMode = deps.runAcpMode ?? (await import("./modes/acp/acp-mode")).runAcpMode;
 			scheduleMarketplaceAutoUpdate(marketplaceAutoUpdateOptions);
@@ -2497,6 +2547,10 @@ export async function runRootCommand(
 
 			const eventBus = new EventBus();
 			const subagentEventBus = new EventBus();
+			// The extensions preloaded here are the session's work, though the session does not
+			// exist yet: their factories' timers run in holds bound to its agent once it is built.
+			const startupHolds = new RequestHoldsAlias();
+			sessionOptions.startupHolds = startupHolds;
 			// Interactive launches bind startup-safe extensions after the composer accepts
 			// input; the first request waits for them instead. Kept eager when argv may
 			// carry extension flags (they must parse now), `--tools` must validate
@@ -2506,11 +2560,13 @@ export async function runRootCommand(
 				parsedArgs.unrecognizedFlags.length === 0 &&
 				!parsedArgs.tools?.length &&
 				!(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || parsedArgs.restore || foreignSource);
-			const extensionsResult = parsedArgs.trustedExtensions?.length
-				? { ...(await loadTrustedSessionExtensions(sessionOptions, cwd, eventBus)), deferredPaths: [] }
-				: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus, {
-						deferStartupSafe: deferStartupSafeExtensions,
-					});
+			const extensionsResult = await runWithRequestHolds(startupHolds, async () =>
+				parsedArgs.trustedExtensions?.length
+					? { ...(await loadTrustedSessionExtensions(sessionOptions, cwd, eventBus)), deferredPaths: [] }
+					: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus, {
+							deferStartupSafe: deferStartupSafeExtensions,
+						}),
+			);
 			const extensionFlagSink: ExtensionFlagSink = {
 				getFlags: () => ExtensionRunner.aggregateFlags(extensionsResult.extensions),
 				setFlagValue: (name, value) => {
@@ -2636,6 +2692,9 @@ export async function runRootCommand(
 			try {
 				createdSession = await createSession({ ...sessionOptions, ...startupContext });
 			} catch (error) {
+				// Whatever happens next, this manager is not the one a live session
+				// will own; the outer handler gives its ownership back on the way
+				// out, and the retry below gives it back here.
 				if (!isInteractive || !autoResumed || !sessionManager || !(error instanceof SessionModelRestoreError)) {
 					throw error;
 				}
@@ -2648,6 +2707,7 @@ export async function runRootCommand(
 				const startupDeadline = sessionOptions.deadline;
 				sessionOptions = await buildStartupSessionOptions(undefined);
 				sessionOptions.deadline = startupDeadline;
+				sessionOptions.startupHolds = startupHolds;
 				createdSession = await createSession({ ...sessionOptions, ...startupContext });
 				notifs.push({
 					kind: "warn",
@@ -2918,6 +2978,20 @@ export async function runRootCommand(
 	} catch (error) {
 		stopPendingStartupComposer();
 		stopStartupWatchdog();
+		// Nothing will ever own the session this resume adopted, so its
+		// ownership goes back here: a host that keeps the process alive after
+		// this rejects must not hold a session it is not running.
+		if (sessionManager && !sessionManagerHandedOver) {
+			const abandoned = sessionManager;
+			sessionManager = undefined;
+			try {
+				await abandoned.close();
+			} catch (closeError) {
+				logger.warn("Failed to release the resumed session after a startup failure", {
+					error: toError(closeError).message,
+				});
+			}
+		}
 		throw error;
 	}
 }

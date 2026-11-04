@@ -1,0 +1,1 @@
+Session `{{sessionId}}` (`{{source}}`) is open in another live omp process, so this resume continues as a fork of it under a new session id. The original keeps its id, its file, and anything registered under that id elsewhere; what it does from here on is not part of this conversation.

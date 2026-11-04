@@ -43,6 +43,8 @@ export interface SessionHandoffHost {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	sideStreamFn: StreamFn;
+	/** Runs one side request, from its preparation to its send, so its waits for the move handlers share one deadline. */
+	asSideRequest<T>(request: () => Promise<T>): Promise<T>;
 	obfuscator(): SecretObfuscator | undefined;
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
@@ -150,44 +152,48 @@ export class SessionHandoff {
 					timestamp: Date.now(),
 				},
 			];
-			const handoffLlmMessages = await this.#host.convertMessagesToLlm(handoffSnapshot, handoffSignal, model);
-			// Base system prompt, not a per-turn `before_agent_start` hook override —
-			// the document seeds the post-compaction context and must not carry
-			// prompt-specific hook state.
-			const handoffContext = await this.#host.agent.buildSideRequestContext(
-				handoffLlmMessages,
-				this.#host.baseSystemPrompt(),
-			);
-			const handoffStreamOptions = this.#host.prepareSimpleStreamOptions(
-				{
-					apiKey: this.#host.modelRegistry.resolver(model, cacheSessionId),
-					sessionId: `${cacheSessionId}:side:${Snowflake.next()}`,
-					promptCacheKey: handoffPromptCacheKey,
-					preferWebsockets: false,
-					serviceTier: this.#host.effectiveServiceTier(model),
-					hideThinkingSummary: this.#host.agent.hideThinkingSummary,
-					initiatorOverride: "agent",
-					signal: handoffSignal,
-				},
-				model.provider,
-			);
-			const rawHandoffText = await generateHandoffFromContext(
-				obfuscateProviderContext(this.#host.obfuscator(), handoffContext),
-				model,
-				{
-					streamOptions: handoffStreamOptions,
-					completeImpl: async (requestModel, requestContext, requestOptions) => {
-						const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
-						return stream.result();
+			// One side request from its conversion to its send: its waits for the
+			// move handlers share one deadline.
+			const rawHandoffText = await this.#host.asSideRequest(async () => {
+				const handoffLlmMessages = await this.#host.convertMessagesToLlm(handoffSnapshot, handoffSignal, model);
+				// Base system prompt, not a per-turn `before_agent_start` hook override —
+				// the document seeds the post-compaction context and must not carry
+				// prompt-specific hook state.
+				const handoffContext = await this.#host.agent.buildSideRequestContext(
+					handoffLlmMessages,
+					this.#host.baseSystemPrompt(),
+				);
+				const handoffStreamOptions = this.#host.prepareSimpleStreamOptions(
+					{
+						apiKey: this.#host.modelRegistry.resolver(model, cacheSessionId),
+						sessionId: `${cacheSessionId}:side:${Snowflake.next()}`,
+						promptCacheKey: handoffPromptCacheKey,
+						preferWebsockets: false,
+						serviceTier: this.#host.effectiveServiceTier(model),
+						hideThinkingSummary: this.#host.agent.hideThinkingSummary,
+						initiatorOverride: "agent",
+						signal: handoffSignal,
 					},
-					telemetry: resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId()),
-					// Honor the user's /model thinking selection on the handoff path.
-					// Clamped per-model inside generateHandoffFromContext via
-					// resolveCompactionEffort so unsupported-effort models don't trip
-					// requireSupportedEffort.
-					thinkingLevel: this.#host.thinkingLevel(),
-				},
-			);
+					model.provider,
+				);
+				return generateHandoffFromContext(
+					obfuscateProviderContext(this.#host.obfuscator(), handoffContext),
+					model,
+					{
+						streamOptions: handoffStreamOptions,
+						completeImpl: async (requestModel, requestContext, requestOptions) => {
+							const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
+							return stream.result();
+						},
+						telemetry: resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId()),
+						// Honor the user's /model thinking selection on the handoff path.
+						// Clamped per-model inside generateHandoffFromContext via
+						// resolveCompactionEffort so unsupported-effort models don't trip
+						// requireSupportedEffort.
+						thinkingLevel: this.#host.thinkingLevel(),
+					},
+				);
+			});
 			const handoffText = this.#host.deobfuscateFromProvider(rawHandoffText);
 
 			throwIfHandoffAborted(handoffSignal);

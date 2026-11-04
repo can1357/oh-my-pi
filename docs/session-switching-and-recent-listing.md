@@ -100,6 +100,8 @@ Breadcrumb writes are best-effort and non-fatal.
 
 Both modes follow the session's continuations: when its conversation went on in a sibling file whose header names it in `continuationOf`, the copy with the newest turn opens instead (unless the named file has turns that copy lacks) and a notice names both files. A file that no longer holds the session its generated name records was replaced under that session; it is followed by that name's id when it no longer parses, or, for a resume key that matched only the file name, when it holds another session.
 
+A file another live omp process still owns is resumed as a fork of that session rather than continued under its id: the ownership lease is probed when the file is opened (startup `--resume`, `--continue`, the breadcrumb, the picker, and in-session `/resume`), and a live owner means this process starts on its own id with `parentSession` naming the owner and no `continuationOf`, so a later resume of the owner's file still opens the owner. A transcript notice records it.
+
 If a matched session's recorded cwd no longer exists, CLI prompts `Move (re-root) it into the current directory? [Y/n]`. Acceptance opens it and `moveTo(cwd)` relocates it; decline exits cleanly. A non-TTY cannot answer and raises `SessionResolutionError`.
 
 Otherwise the session is opened in its recorded project, including global matches; startup switches process cwd, reloads project-scoped settings/plugins, and re-resolves enabled models before constructing the agent. It does **not** fork merely because the match is cross-project.

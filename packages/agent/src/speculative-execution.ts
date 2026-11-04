@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { untilAborted } from "@oh-my-pi/pi-utils";
 import { validateAgentToolArguments } from "./tool-arguments";
 import type {
 	AgentContext,
@@ -912,6 +913,10 @@ export class SpeculativeOperationCoordinator {
 			args: candidate.executionArgs,
 			effect: candidate.effect,
 		};
+		// A speculative run is the call's effect, started early: it passes the
+		// holds a tool call passes before it executes. Cancelled while held, it
+		// fails or is discarded like a run that was cancelled.
+		const holds = this.environment?.loopConfig.requestHolds?.openInContext();
 		void (async () => {
 			try {
 				// Content evidence is captured here — immediately before execution —
@@ -924,6 +929,14 @@ export class SpeculativeOperationCoordinator {
 						await this.#discardCandidate(candidate, "discarded", "host declined speculative evidence capture");
 						return;
 					}
+				}
+				// No effect starts past a hold: evidence capture prepares the run,
+				// so the last await before the policy runs is the check of the
+				// holds registered now, and the check that lets it go and the
+				// policy run in the same turn.
+				if (holds) {
+					for (let held = holds.check(); held; held = holds.check()) await untilAborted(signal, held);
+					if (candidate.state === "discarded") return;
 				}
 				const outcome = await candidate.policy.execute(executionContext, signal);
 				if (candidate.state === "discarded") return;
@@ -959,6 +972,7 @@ export class SpeculativeOperationCoordinator {
 					);
 				}
 			} finally {
+				holds?.release();
 				this.#running--;
 				this.#drain();
 				if (this.#running === 0) this.onIdle?.();

@@ -415,89 +415,93 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 
 	let session: AgentSession;
 	try {
-		({ session } = await createAgentSession({
-			cwd: restoredSeance?.cwd ?? spec.root.sessionManager.getCwd(),
-			costGate: spec.costGate,
-			authStorage: spec.authStorage,
-			// Revived agents join the root session tree, so their observability
-			// frames ride the same bus the RPC/collab surfaces subscribed to.
-			subagentEventBus: spec.subagentEventBus,
-			modelRegistry: spec.modelRegistry,
-			...(perCallModel ? { model: perCallModel, thinkingLevel: init.perCallThinkingLevel ?? undefined } : {}),
-			...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
-			modelPatternAuthFallback: restoredSeance || init.perCallModel ? undefined : init.resolvedModel,
-			settings: subagentSettings,
-			sessionManager: reopened,
-			agentId: ref.id,
-			agentDisplayName: ref.displayName,
-			// `agents` rule scoping keys on the durable definition name (`scout`,
-			// `reviewer`, …), not the registry display label — cold-revived refs
-			// register with `displayName: id` (registry/persisted-agents.ts), so a
-			// generated task id would silently drop every agent-scoped rule.
-			// `init.agent` carries the real name; only files predating that field
-			// fall back to the display label. A parked transcript may also predate
-			// the `main`/`sub` definition-name reservation (discovery/helpers.ts): a
-			// persisted `init.agent` of either sentinel value from such a legacy
-			// custom agent must not masquerade as that sentinel here, so it falls
-			// back to the display label too, keeping it scoped as an ordinary
-			// subagent under its generated id instead of `main` or the shared `sub`
-			// bucket.
-			agentName:
-				init.agent &&
-				init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
-				init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
-					? init.agent
-					: ref.displayName,
-			parentTaskPrefix: ref.id,
-			asyncJobManager: spec.asyncJobManager,
-			parentAgentId: ref.parentId,
-			oauthAccountPools,
-			// A per-call model is held to the operator's current grants, not the transcript's,
-			// never switches models, and keeps the live task.maxEffort ceiling the spawn ran under.
-			...(assertApprovedModel
-				? {
-						thinkingLevelCeiling: cfgTaskMaxEffort.get(spec.settings),
-						disableModelFallback: true,
-						disableServerSideFallback: true,
-						assertDispatchModel: (model: Model) => {
-							assertApprovedModel(model);
-							assertModelSupportsEffortCeiling(model, cfgTaskMaxEffort.get(spec.settings));
-						},
-					}
-				: {}),
-			expectedAgentRef: expectedRef,
-			taskDepth,
-			toolNames: revivedToolNames,
-			// `revivedToolNames` is the enabled set, devices included: keep those devices,
-			// or they come back as top-level tools and change the replayed tool list.
-			mountedToolNames: restoredSeance ? undefined : init.mountedTools,
-			outputSchema: init.outputSchema,
-			outputSchemaMode: init.outputSchemaMode,
-			restrictToolNames: restrictToolNames || undefined,
-			requireYieldTool: structured,
-			systemPrompt: () => [...init.systemPrompt],
-			// Inherit current owner policy, never extension authority from a transcript.
-			extensionRoots: () => spec.root.effectiveExtensionRoots,
-			preloadedPreparedExtensions: spec.preparedExtensions,
-			// Old files predate persisted spawns: deny re-spawning rather than let
-			// createAgentSession default to wildcard ("*").
-			spawns: init.spawns ?? "",
-			hasUI: false,
-			enableLsp: restrictToolNames ? false : spec.enableLsp,
-			...(restrictToolNames
-				? {
-						enableIrc: false,
-						enableMCP: false,
-						preloadedExtensionPaths: [],
-						preloadedCustomToolPaths: [],
-					}
-				: {
-						enableMCP: !mcpManager,
-						mcpManager,
-						mcpTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
-					}),
-			...seanceOptions,
-		}));
+		// The revived agent is the parent session's work, whoever revives it (a
+		// parent's tool, the collab host, a UI): its requests wait for the parent's holds.
+		({ session } = await spec.root.runInRequestContext(() =>
+			createAgentSession({
+				cwd: restoredSeance?.cwd ?? spec.root.sessionManager.getCwd(),
+				costGate: spec.costGate,
+				authStorage: spec.authStorage,
+				// Revived agents join the root session tree, so their observability
+				// frames ride the same bus the RPC/collab surfaces subscribed to.
+				subagentEventBus: spec.subagentEventBus,
+				modelRegistry: spec.modelRegistry,
+				...(perCallModel ? { model: perCallModel, thinkingLevel: init.perCallThinkingLevel ?? undefined } : {}),
+				...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
+				modelPatternAuthFallback: restoredSeance || init.perCallModel ? undefined : init.resolvedModel,
+				settings: subagentSettings,
+				sessionManager: reopened,
+				agentId: ref.id,
+				agentDisplayName: ref.displayName,
+				// `agents` rule scoping keys on the durable definition name (`scout`,
+				// `reviewer`, …), not the registry display label — cold-revived refs
+				// register with `displayName: id` (registry/persisted-agents.ts), so a
+				// generated task id would silently drop every agent-scoped rule.
+				// `init.agent` carries the real name; only files predating that field
+				// fall back to the display label. A parked transcript may also predate
+				// the `main`/`sub` definition-name reservation (discovery/helpers.ts): a
+				// persisted `init.agent` of either sentinel value from such a legacy
+				// custom agent must not masquerade as that sentinel here, so it falls
+				// back to the display label too, keeping it scoped as an ordinary
+				// subagent under its generated id instead of `main` or the shared `sub`
+				// bucket.
+				agentName:
+					init.agent &&
+					init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
+					init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
+						? init.agent
+						: ref.displayName,
+				parentTaskPrefix: ref.id,
+				asyncJobManager: spec.asyncJobManager,
+				parentAgentId: ref.parentId,
+				oauthAccountPools,
+				// A per-call model is held to the operator's current grants, not the transcript's,
+				// never switches models, and keeps the live task.maxEffort ceiling the spawn ran under.
+				...(assertApprovedModel
+					? {
+							thinkingLevelCeiling: cfgTaskMaxEffort.get(spec.settings),
+							disableModelFallback: true,
+							disableServerSideFallback: true,
+							assertDispatchModel: (model: Model) => {
+								assertApprovedModel(model);
+								assertModelSupportsEffortCeiling(model, cfgTaskMaxEffort.get(spec.settings));
+							},
+						}
+					: {}),
+				expectedAgentRef: expectedRef,
+				taskDepth,
+				toolNames: revivedToolNames,
+				// `revivedToolNames` is the enabled set, devices included: keep those devices,
+				// or they come back as top-level tools and change the replayed tool list.
+				mountedToolNames: restoredSeance ? undefined : init.mountedTools,
+				outputSchema: init.outputSchema,
+				outputSchemaMode: init.outputSchemaMode,
+				restrictToolNames: restrictToolNames || undefined,
+				requireYieldTool: structured,
+				systemPrompt: () => [...init.systemPrompt],
+				// Inherit current owner policy, never extension authority from a transcript.
+				extensionRoots: () => spec.root.effectiveExtensionRoots,
+				preloadedPreparedExtensions: spec.preparedExtensions,
+				// Old files predate persisted spawns: deny re-spawning rather than let
+				// createAgentSession default to wildcard ("*").
+				spawns: init.spawns ?? "",
+				hasUI: false,
+				enableLsp: restrictToolNames ? false : spec.enableLsp,
+				...(restrictToolNames
+					? {
+							enableIrc: false,
+							enableMCP: false,
+							preloadedExtensionPaths: [],
+							preloadedCustomToolPaths: [],
+						}
+					: {
+							enableMCP: !mcpManager,
+							mcpManager,
+							mcpTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+						}),
+				...seanceOptions,
+			}),
+		));
 	} catch (error) {
 		mcpFollower?.dispose();
 		throw error;

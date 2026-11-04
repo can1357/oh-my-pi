@@ -201,6 +201,8 @@ async function spawnAndPark() {
 				sessionManager: { getCwd: () => cwd, getArtifactManager: () => undefined },
 				effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
 				preparedExtensions,
+				// A revival runs as the parent's work; this parent has no holds.
+				runInRequestContext: <T>(fn: () => T) => fn(),
 			} as unknown as AgentSession;
 			const ref = AgentRegistry.global().get(AGENT_ID);
 			if (!ref) throw new Error(`${AGENT_ID} is not registered`);

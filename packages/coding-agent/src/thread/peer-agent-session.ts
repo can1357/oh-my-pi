@@ -108,6 +108,16 @@ export class PeerAgentSession implements AgentSessionHandle {
 		};
 	}
 
+	/**
+	 * Runs `fn` here, not in the session's request context: that context, and
+	 * the holds it carries, live on the session's home thread, and an async
+	 * context does not cross a thread. Work that must wait for this session's
+	 * holds belongs on its home thread.
+	 */
+	runInRequestContext<T>(fn: () => T): T {
+		return fn();
+	}
+
 	get isStreaming(): boolean {
 		return this.#field("isStreaming");
 	}

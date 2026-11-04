@@ -27,6 +27,8 @@ import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { waitForRetry } from "../utils/retry-wait";
 import { getEnvApiKey } from "../env-api-key";
 import { OUTPUT_FALLBACK_BUFFER } from "../stream";
+import { afterRequestHolds } from "../request-holds";
+import { heldFetch } from "../utils/held-fetch";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import type {
 	AnthropicCompactionFiles,
@@ -2678,10 +2680,15 @@ const streamAnthropicOnce = (
 					maxRetries: 0,
 					...(requestHeaders ? { headers: requestHeaders } : {}),
 				};
-				const anthropicRequest: unknown =
+				const createRequest = (): unknown =>
 					isOAuthToken && client.beta
 						? client.beta.messages.create({ ...wireParams, stream: true }, requestOptions)
 						: client.messages.create({ ...wireParams, stream: true }, requestOptions);
+				// A caller-injected client's transport is opaque and may start its I/O in
+				// `create`, so it is created once the request holds let go. A built client
+				// and the Bedrock transport create lazily and hold at their fetch.
+				const holdsAtCreate = options?.client !== undefined && client === options.client;
+				let anthropicRequest: unknown = holdsAtCreate ? undefined : createRequest();
 				let streamedReplayUnsafeContent = false;
 
 				try {
@@ -2697,6 +2704,11 @@ const streamAnthropicOnce = (
 					let requestId: string | null;
 					let recordsRawSseEvents: boolean;
 					try {
+						if (holdsAtCreate) {
+							await afterRequestHolds(requestSignal, () => {
+								anthropicRequest = createRequest();
+							});
+						}
 						({
 							events: anthropicStream,
 							response,
@@ -4043,7 +4055,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	// Compression sits beneath the cch rewriter, which must hash the uncompressed
 	// body. Catalog rules scope it to verified hosts (official API, Copilot), so
 	// proxies pass through.
-	const baseFetch = wrapFetchForRequestCompression(args.fetch ?? fetch, model);
+	const baseFetch = wrapFetchForRequestCompression(heldFetch(args.fetch ?? fetch), model);
 	// Only OAuth requests inject the CC billing header; no API-key request can ever
 	// contain it, so there is no need to install the rewriter for those.
 	const cchFetch = oauthToken ? wrapFetchForCch(baseFetch) : baseFetch;

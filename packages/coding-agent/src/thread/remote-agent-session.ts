@@ -372,6 +372,16 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#closed !== undefined;
 	}
 
+	/**
+	 * Runs `fn` here, not in the session's request context: that context, and
+	 * the holds it carries, live on the worker the session is homed on, and an
+	 * async context does not cross a thread. Work that must wait for this
+	 * session's holds belongs on that worker.
+	 */
+	runInRequestContext<T>(fn: () => T): T {
+		return fn();
+	}
+
 	get isStreaming(): boolean {
 		return this.#state.isStreaming;
 	}

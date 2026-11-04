@@ -4174,7 +4174,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTableCharts("smart", request =>
 			mode === "auto" && !hasNativeJudge(this.settings, this.session.modelRegistry)
 				? undefined
-				: pickTableChart(request, this.session.tableChartJudge()),
+				: // The judge's model request is the session's: it waits for the session's holds.
+					this.session.runInRequestContext(() => pickTableChart(request, this.session.tableChartJudge())),
 		);
 	}
 

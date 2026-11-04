@@ -3192,6 +3192,7 @@ export class InputController {
 				if (!runner.isExtensionActive(shortcut.extensionPath)) return;
 				const ctx = runner.createCommandContext();
 				try {
+					// `runScoped` runs it as the session's work: its model requests wait for the session's holds.
 					runner.runScoped(() => shortcut.handler(ctx));
 				} catch (err) {
 					runner.emitError({

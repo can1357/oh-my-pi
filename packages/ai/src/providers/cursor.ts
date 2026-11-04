@@ -184,6 +184,7 @@ import {
 import { classifyJsonPrefix } from "@oh-my-pi/pi-utils/json-parse";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
+import { afterRequestHolds } from "../request-holds";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
@@ -226,6 +227,7 @@ import {
 } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { heldFetch } from "../utils/held-fetch";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { waitForRetry } from "../utils/retry-wait";
@@ -810,19 +812,33 @@ interface CursorRunTransport extends CursorMessageWriter {
 	onError(listener: (error: unknown) => void): void;
 }
 
-function wrapHttp2RunTransport(request: http2.ClientHttp2Stream): CursorRunTransport {
+/**
+ * The Connect frames written on the request stream carry the model request —
+ * the run request, exec replies, heartbeats — so each is held like any send
+ * ({@link afterRequestHolds}), in order, and the half-close follows the frames
+ * queued before it. A frame held until `signal` aborts is dropped.
+ */
+function wrapHttp2RunTransport(request: http2.ClientHttp2Stream, signal: AbortSignal | undefined): CursorRunTransport {
+	let tail: Promise<void> = Promise.resolve();
+	const afterQueued = (send: () => void): void => {
+		tail = tail.then(() => afterRequestHolds(signal, send)).catch(() => {});
+	};
 	return {
 		get closed() {
 			return request.closed;
 		},
 		write(frame) {
-			if (!request.writableEnded) request.write(frame);
+			afterQueued(() => {
+				if (!request.writableEnded) request.write(frame);
+			});
 		},
 		close() {
 			request.close();
 		},
 		end() {
-			if (!request.writableEnded) request.end();
+			afterQueued(() => {
+				if (!request.writableEnded) request.end();
+			});
 		},
 		onResponse(listener) {
 			request.on("response", listener);
@@ -876,7 +892,8 @@ function readConnectFrameMessage(frame: Uint8Array): Uint8Array {
 function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): CursorRunTransport {
 	const abortController = new AbortController();
 	const signal = options.signal ? AbortSignal.any([options.signal, abortController.signal]) : abortController.signal;
-	const fetchImpl = wrapFetchForProxy(globalThis.fetch, "cursor");
+	// RunSSE and every BidiAppend carry the request: each send is held.
+	const fetchImpl = wrapFetchForProxy(heldFetch(globalThis.fetch), "cursor");
 	const requestId = create(BidiRequestIdSchema, { requestId: options.requestId });
 	const pendingAppends: CursorPendingAppend[] = [];
 	let appendSeqno = 0n;
@@ -1498,7 +1515,11 @@ function streamCursorWithWireMode(
 				}
 				h2Client = client;
 				client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
-				runTransport = wrapHttp2RunTransport(client.request(requestHeaders));
+				// The connection carries no request until this stream opens.
+				runTransport = wrapHttp2RunTransport(
+					await afterRequestHolds(options?.signal, () => client.request(requestHeaders)),
+					options?.signal,
+				);
 			} else {
 				runTransport = createHttp1RunTransport({
 					baseUrl,

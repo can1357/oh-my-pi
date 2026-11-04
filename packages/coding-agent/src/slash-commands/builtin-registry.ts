@@ -18,6 +18,7 @@ import { BUILTIN_LIFECYCLE_SLASH_COMMANDS } from "./builtin-lifecycle";
 import { BUILTIN_MARKETPLACE_SLASH_COMMANDS, reloadTuiPluginState } from "./builtin-marketplace";
 import { BUILTIN_MODE_SLASH_COMMANDS } from "./builtin-modes";
 import { BUILTIN_SESSION_SLASH_COMMANDS } from "./builtin-session";
+import { runAsSessionWork } from "../session/session-work";
 import { BUILTIN_SKILLS_SLASH_COMMANDS } from "./builtin-skills";
 import { parseSlashCommand } from "./helpers/parse";
 import type {
@@ -166,12 +167,15 @@ export async function executeBuiltinSlashCommand(
 		}
 		return true;
 	}
-	if (command.handleTui) {
-		const result = await command.handleTui(parsed, runtime);
+	// A command is the session's work: every model request it starts waits for
+	// the session's holds.
+	const { handleTui, handle } = command;
+	if (handleTui) {
+		const result = await runAsSessionWork(runtime.ctx.session, () => handleTui(parsed, runtime));
 		if (result && typeof result === "object" && "prompt" in result) return result.prompt;
 		return true;
 	}
-	if (command.handle) {
+	if (handle) {
 		// No TUI-specific override → adapt the ACP/text-mode `handle` to the
 		// TUI by routing `runtime.output` through `ctx.showStatus`, clearing
 		// the editor after the call, and reusing the active session's plugin
@@ -191,7 +195,7 @@ export async function executeBuiltinSlashCommand(
 			reloadPlugins: () => reloadTuiPluginState(ctx),
 			notifySessionPinChanged: (sessionId: string, pinned: boolean) => ctx.applySessionPin(sessionId, pinned),
 		};
-		const result = await command.handle(parsed, adapted);
+		const result = await runAsSessionWork(ctx.session, () => handle(parsed, adapted));
 		clearSubmittedText(runtime);
 		if (result && typeof result === "object" && "prompt" in result) return result.prompt;
 		return true;

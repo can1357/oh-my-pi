@@ -224,6 +224,13 @@ class _RunnerState:
 _CURRENT_RID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "omp_current_rid", default=None
 )
+# The internal-URL roots the running cell was given, pinned to its context.
+# A cell suspended across a session re-adoption keeps reading the artifacts
+# directory it was started with; the process environment by then names the
+# directory of whichever cell ran last.
+_CURRENT_URL_ROOTS: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "omp_current_url_roots", default=None
+)
 _CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS: contextvars.ContextVar[set[int] | None] = (
     contextvars.ContextVar(
         "omp_displayed_matplotlib_figure_ids",
@@ -2390,6 +2397,7 @@ def _install_builtins(ns: dict) -> None:
     ns["__omp_magic_cell"] = __omp_magic_cell
     ns["__omp_shell"] = __omp_shell
     ns["__omp_current_run_id__"] = lambda: _CURRENT_RID.get()
+    ns["__omp_current_url_roots__"] = lambda: _CURRENT_URL_ROOTS.get()
 
 
 _install_builtins(_STATE.user_ns)
@@ -2645,6 +2653,24 @@ _MANAGED_ENV_KEYS = (
 )
 
 
+def _request_url_roots(req: dict) -> str | None:
+    """The internal-URL roots this request carries.
+
+    From the request, never from the process environment: the environment is
+    this kernel's, patched per request, and reading it before the patch is
+    applied gives the previous cell's roots — which is the artifacts directory
+    of whatever ran last rather than of the cell being started.
+    """
+    env = req.get("env")
+    if isinstance(env, dict):
+        # A request that carries an environment has said what its roots are,
+        # including when it says there are none: an empty or absent value there
+        # means this cell has no roots, not that an older cell's are still good.
+        roots = env.get("PI_EVAL_LOCAL_ROOTS")
+        return roots if isinstance(roots, str) else None
+    return os.environ.get("PI_EVAL_LOCAL_ROOTS")
+
+
 def _apply_request_runtime(req: dict) -> None:
     cwd = req.get("cwd")
     if isinstance(cwd, str) and cwd:
@@ -2786,6 +2812,7 @@ def _handle_tool_request(req: dict) -> None:
     """Describe or invoke a kernel-defined tool on a dedicated runner thread."""
     rid = str(req.get("id"))
     token = _CURRENT_RID.set(rid)
+    roots_token = _CURRENT_URL_ROOTS.set(_request_url_roots(req))
     status = "ok"
     _emit({"type": "started", "id": rid})
     try:
@@ -2827,6 +2854,7 @@ def _handle_tool_request(req: dict) -> None:
             }
         )
         _CURRENT_RID.reset(token)
+        _CURRENT_URL_ROOTS.reset(roots_token)
 
 
 async def _handle_request_async(req: dict) -> None:
@@ -2834,6 +2862,7 @@ async def _handle_request_async(req: dict) -> None:
     execution_reserved = bool(req.pop("_execution_reserved", False))
     execution_started = False
     token = _CURRENT_RID.set(rid)
+    roots_token = _CURRENT_URL_ROOTS.set(_request_url_roots(req))
     displayed_matplotlib_token = _CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.set(set())
     _STATE.capture_rid = rid
     reset_call_occurrences = _STATE.user_ns.get("__omp_reset_call_occurrences__")
@@ -2929,6 +2958,7 @@ async def _handle_request_async(req: dict) -> None:
             _STATE.capture_rid = None
         _flush_stream_proxies(rid)
         _CURRENT_RID.reset(token)
+        _CURRENT_URL_ROOTS.reset(roots_token)
         _CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.reset(displayed_matplotlib_token)
         if execution_reserved and not execution_started:
             _end_exec_sigint()

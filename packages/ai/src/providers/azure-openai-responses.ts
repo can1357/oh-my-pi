@@ -15,6 +15,7 @@ import { createAbortSourceTracker } from "../utils/abort";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
+import { heldFetch } from "../utils/held-fetch";
 import {
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
@@ -170,7 +171,7 @@ const streamAzureOpenAIResponsesOnce = (
 						headers: headersWithTimeout,
 						body: params,
 						signal: requestSignal,
-						fetch: options?.fetch,
+						fetch: heldFetch(options?.fetch ?? fetch),
 						// Transient 408/429/5xx get Retry-After-aware transport retries;
 						// the first-event watchdog aborts `requestSignal`, so retries
 						// cannot extend the caller's deadline.
