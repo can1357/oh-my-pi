@@ -1,4 +1,5 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import { logger } from "@oh-my-pi/pi-utils";
 import {
 	abandonToolExecution,
 	createToolExecution,
@@ -9,6 +10,10 @@ import {
 } from "../src/tool-context";
 
 describe("tool execution scope", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	it("retires a run whose preparation was abandoned", async () => {
 		// The executor prepares the run before it builds the call's context, so a
 		// context that throws — or a call cancelled before `execute` — leaves a
@@ -35,18 +40,52 @@ describe("tool execution scope", () => {
 		// A holder that fails is its own problem. If its throw stopped the rest,
 		// a run would stay counted as live and a stale claim would stay
 		// answerable — the run's own bookkeeping cannot depend on its audience.
+		// The failure goes to the log, never to stderr, which a TUI or an RPC
+		// host owns.
+		const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+		const logged = vi.spyOn(logger, "error").mockImplementation(() => {});
 		const owner = {};
 		const execution = createToolExecution(owner, "call-1");
 		const told: string[] = [];
+		const failure = new Error("holder failed");
 		onToolExecutionEnd(execution, () => {
 			told.push("first");
-			throw new Error("holder failed");
+			throw failure;
 		});
 		onToolExecutionEnd(execution, () => told.push("second"));
 
 		await runToolExecution(execution, async () => {});
 
 		expect(told).toEqual(["first", "second"]);
+		expect(execution.finished).toBe(true);
+		expect(isExecutingToolCall(owner, "call-1")).toBe(false);
+		expect(stderr).not.toHaveBeenCalled();
+		expect(logged).toHaveBeenCalledWith(expect.any(String), { error: failure });
+	});
+
+	it("refuses a second entry of a run that is still going, and keeps the first one live", async () => {
+		// Two entries of one handle would share its end: whichever returned first
+		// would mark the run over while the other still runs, and the dialogs it
+		// raised would stop naming their call.
+		const owner = {};
+		const execution = createToolExecution(owner, "call-1");
+		const release = Promise.withResolvers<void>();
+		const entered = Promise.withResolvers<void>();
+		let liveAfterRefusal: boolean | undefined;
+		const first = runToolExecution(execution, async () => {
+			entered.resolve();
+			await release.promise;
+			liveAfterRefusal = currentToolExecution(owner) === execution;
+		});
+		await entered.promise;
+
+		await expect(runToolExecution(execution, async () => {})).rejects.toThrow("cannot be entered again");
+		expect(execution.finished).toBe(false);
+		expect(isExecutingToolCall(owner, "call-1")).toBe(true);
+
+		release.resolve();
+		await first;
+		expect(liveAfterRefusal).toBe(true);
 		expect(execution.finished).toBe(true);
 		expect(isExecutingToolCall(owner, "call-1")).toBe(false);
 	});

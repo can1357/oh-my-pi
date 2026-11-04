@@ -1581,6 +1581,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		prompt?: string,
 		options?: { kind?: BlockedKind; toolCallId?: string; toolCallExecution?: ToolExecution; toolCallOwned?: boolean },
 	): Promise<T> {
+		// Disposal ended every wait and nobody is left to answer one: run the dialog unpublished.
+		if (this.#isDisposed) return dialog();
 		const waitId = ++this.#userWaitSeq;
 		if (this.#openUserWaits.size === 0) {
 			this.#userWaitEndedTurn = this.#promptInFlightCount > 0;
@@ -1602,19 +1604,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return await dialog();
 		} finally {
 			dropClaimWatch?.();
-			this.#openUserWaits.delete(waitId);
-			if (this.#openUserWaits.size === 0) {
-				this.#openUserWait = undefined;
-				this.#emit({ type: "user_wait_end" });
-				if (this.#promptInFlightCount > 0) {
-					if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
-					else if (this.#agentKind === "main") resumeComputerTurnForOwner(this.#eval.getKernelOwnerId());
+			// A wait disposal already ended has nothing left to close or republish.
+			if (this.#openUserWaits.delete(waitId)) {
+				if (this.#openUserWaits.size === 0) {
+					this.#openUserWait = undefined;
+					this.#emit({ type: "user_wait_end" });
+					if (this.#promptInFlightCount > 0) {
+						if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
+						else if (this.#agentKind === "main") resumeComputerTurnForOwner(this.#eval.getKernelOwnerId());
+					}
+				} else {
+					// The dialog that was named may be the one that just settled, and
+					// so may one that was never published: the oldest still open takes
+					// its place, and the published calls lose the one that went.
+					this.#publishOpenUserWait();
 				}
-			} else {
-				// The dialog that was named may be the one that just settled, and
-				// so may one that was never published: the oldest still open takes
-				// its place, and the published calls lose the one that went.
-				this.#publishOpenUserWait();
 			}
 		}
 	}
@@ -6688,6 +6692,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// surface reconciling what it parked would restore an approval nobody can
 		// answer. Ids this session never ran stay unmarked, disposed or not.
 		this.#settledEverything = true;
+		// A dialog has no disposal signal and may never settle: end its wait now, so no surface
+		// keeps reporting a person owed an answer by a session that is gone. Its own `finally`
+		// then finds nothing to close.
+		if (this.#openUserWaits.size > 0) {
+			this.#openUserWaits.clear();
+			this.#openUserWait = undefined;
+			this.#userWaitPublishPending = false;
+			this.#emit({ type: "user_wait_end" });
+		}
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;

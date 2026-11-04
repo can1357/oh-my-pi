@@ -541,6 +541,41 @@ describe("EventController run status while prompts wait on the user", () => {
 		expect(report).toHaveBeenLastCalledWith({ state: "working" });
 	});
 
+	it("keeps an answer across a focus change only while its call's start is still to come", async () => {
+		// The answer is parked beside the call's run mark. If no start happened
+		// while the view was away, the start that arrives after the return is the
+		// one the answer was kept for. If one did, the answer belongs to that
+		// unseen run, and the next start is a new run owed its own answer.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		cfgToolsApproval.override(settings, { bash: "prompt" });
+		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
+		const controller = new EventController(createInteractiveModeContext({ session: { getToolByName: () => bash } }));
+		const mine = {} as object;
+		const answerBeforeStart = async (): Promise<void> => {
+			await controller.handleEvent(AGENT_START);
+			await controller.handleEvent({
+				type: "user_wait_start",
+				prompt: "Allow tool: bash",
+				kind: "permission",
+				toolCalls: ["bash-1"],
+			});
+			await controller.handleEvent({ type: "user_wait_end" });
+		};
+
+		await answerBeforeStart();
+		controller.resetTranscriptAnchors(mine, () => undefined);
+		controller.adoptApprovalRecords(mine, () => undefined);
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "echo one" }));
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+		await controller.handleEvent(toolEnd("bash-1", "bash"));
+
+		await answerBeforeStart();
+		controller.resetTranscriptAnchors(mine, () => ({ mark: "settled:1", live: false }));
+		controller.adoptApprovalRecords(mine, () => ({ mark: "settled:2", live: false }));
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "echo two" }));
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "permission", msg: "Allow tool: bash" });
+	});
+
 	it("keeps a session's own approval record across a focus change, and lends it to no one", async () => {
 		// A host that drives its own approval UI raises no session dialog, so
 		// this record is the only evidence the call is owed an answer — and

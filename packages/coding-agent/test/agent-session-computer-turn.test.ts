@@ -326,6 +326,34 @@ describe("AgentSession computer display hold per turn", () => {
 		expect(target.activeUserWait()).toBeUndefined();
 	});
 
+	it("ends an open dialog's wait when disposal begins, and ignores the dialog settling afterwards", async () => {
+		// A dialog passed to `waitForUser` has no disposal signal and may never
+		// settle. Without an end at disposal the session reported a person still
+		// owed an answer for ever, and a listener never saw the bracket close.
+		const target = createSession([{ content: ["done"] }]);
+		const events: string[] = [];
+		const unsubscribe = target.subscribe(event => {
+			if (event.type === "user_wait_start") events.push(`start:${event.prompt}`);
+			if (event.type === "user_wait_end") events.push("end");
+		});
+		const open = Promise.withResolvers<void>();
+		const wait = target.waitForUser(() => open.promise, "a sign-in");
+
+		target.beginDispose();
+		expect(events).toEqual(["start:a sign-in", "end"]);
+		expect(target.activeUserWait()).toBeUndefined();
+
+		// A dialog opened after disposal began, and the late answer to the first,
+		// publish nothing: nobody is left to report to.
+		const late = target.waitForUser(async () => "late", "a dialog after disposal");
+		expect(await late).toBe("late");
+		open.resolve();
+		await wait;
+		unsubscribe();
+		expect(events).toEqual(["start:a sign-in", "end"]);
+		expect(target.activeUserWait()).toBeUndefined();
+	});
+
 	it("names the call a tool's own dialog belongs to, without the tool naming it", async () => {
 		// A host that opens its own dialog through the plain `waitForUser` — the
 		// existing API, no call named — still says which call owes the answer:

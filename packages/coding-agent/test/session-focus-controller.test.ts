@@ -1,5 +1,5 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from "bun:test";
+import { Agent, type AgentEvent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Container } from "@oh-my-pi/pi-tui";
@@ -10,7 +10,7 @@ import {
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID, type AgentRef } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -928,6 +928,73 @@ describe("SessionFocusController", () => {
 
 			answered.resolve("once");
 			await approval;
+		} finally {
+			focus.dispose();
+			report.mockRestore();
+			await live.dispose();
+		}
+	});
+
+	it("does not let an answer parked before its call started answer a later run of that call", async () => {
+		// A dialog can be published and answered before the loop's
+		// `tool_execution_start` for its call reaches the view; the view keeps
+		// that answer so the start records no prompt. If that start, and the
+		// call's end, happen while the view is on another session, the kept
+		// answer describes a run that is over. Brought back, it swallowed the
+		// next run of the same call id, which then read as working while it
+		// waited on a person.
+		// The transcript renders the retried call's card, which reads global settings.
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
+		onTestFinished(() => resetSettingsForTest());
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const live = createLiveSession();
+		const ctx = createInteractiveModeContext({ session: live });
+		const events = new EventController(ctx);
+		ctx.eventController = events;
+		const registry = new AgentRegistry();
+		const other = createInteractiveModeContext({
+			session: {
+				settleInFlightMessagePersistence: async () => {},
+				activeToolExecutionUpdates: () => [],
+				activeUserWait: () => undefined,
+			},
+		}).session;
+		registerSub(registry, "Other", other, MAIN_AGENT_ID);
+		const lifecycle = new AgentLifecycleManager(registry);
+		const focus = new SessionFocusController(ctx, registry, () => lifecycle);
+		Object.defineProperty(ctx, "viewSession", { get: () => focus.target ?? ctx.session, configurable: true });
+		const ask = (toolCallId: string): AgentSessionEvent => ({
+			type: "tool_execution_start",
+			toolCallId,
+			toolName: "ask",
+			args: { questions: [{ id: "db", question: "Use Postgres?", options: [{ label: "Yes" }] }] },
+		});
+
+		try {
+			await events.handleEvent({ type: "agent_start" });
+			const answer = Promise.withResolvers<void>();
+			const dialog = live.waitForUser(() => answer.promise, "Use Postgres?", { toolCallId: "ask-1" });
+			await events.handleEvent(live.activeUserWait()!);
+			answer.resolve();
+			await dialog;
+			await events.handleEvent({ type: "user_wait_end" });
+
+			await focus.focusAgent("Other");
+			// The answered run starts and ends while the view is elsewhere.
+			live.agent.emitExternalEvent(ask("ask-1") as AgentEvent);
+			live.agent.emitExternalEvent({
+				type: "tool_execution_end",
+				toolCallId: "ask-1",
+				toolName: "ask",
+				result: { content: [{ type: "text", text: "Yes" }] },
+				isError: false,
+			} as AgentEvent);
+			await focus.unfocus();
+
+			// A retry of the same call asks again, and nobody has answered it.
+			await events.handleEvent(ask("ask-1"));
+			expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "question", msg: "Use Postgres?" });
 		} finally {
 			focus.dispose();
 			report.mockRestore();

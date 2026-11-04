@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "./types";
 
 /**
@@ -68,12 +69,14 @@ export function createToolExecution(owner: object | undefined, toolCallId: strin
 
 /**
  * Run `execution`, which {@link createToolExecution} prepared, on the current async chain. A run
- * is entered once: re-entering one that is over would count a finished run as live, so it is
- * refused rather than silently counted.
+ * is entered once: a second entry, whether the first is still going or over, would let whichever
+ * returns first mark the run finished while the other still runs, so it is refused.
  */
 export async function runToolExecution<T>(execution: ToolExecution, run: () => Promise<T>): Promise<T> {
 	const scope = execution as MutableToolExecution;
-	if (scope.finished) throw new Error(`tool execution for ${scope.toolCallId} is over and cannot be entered again`);
+	if (scope.started || scope.finished) {
+		throw new Error(`tool execution for ${scope.toolCallId} was already entered and cannot be entered again`);
+	}
 	scope.parent = executingToolCall.getStore();
 	scope.started = true;
 	const owner = scope.owner;
@@ -85,8 +88,8 @@ export async function runToolExecution<T>(execution: ToolExecution, run: () => P
 	try {
 		return await executingToolCall.run(scope, run);
 	} finally {
-		// This entry's own count, released whether or not the run was already
-		// over when it was entered: an entry that incremented must decrement.
+		// This entry's own count: other runs of the same id (a retry, another
+		// handle) hold counts of their own, so only this one is released.
 		if (live) {
 			const remaining = (live.get(scope.toolCallId) ?? 1) - 1;
 			if (remaining > 0) live.set(scope.toolCallId, remaining);
@@ -131,11 +134,11 @@ function retireToolExecution(scope: MutableToolExecution): void {
 /** Report a holder's failure without letting the report become one. */
 function reportRetirementFailure(error: unknown): void {
 	try {
-		console.error("tool execution completion listener threw", error);
+		logger.error("Tool execution completion listener threw", { error });
 	} catch {
 		try {
 			// Describing the error threw too (a custom inspection can): say so without it.
-			console.error("tool execution completion listener threw, and reporting it threw as well");
+			logger.error("Tool execution completion listener threw, and reporting it threw as well");
 		} catch {
 			// Nothing left to report with.
 		}

@@ -1109,14 +1109,16 @@ export class EventController {
 	 * dialog, so these records are the only evidence those calls are owed an answer — and unlike a
 	 * dialog, nothing republishes them on attach. Each record is parked beside the mark of the run
 	 * it describes, because a call id is reused: the run that was waiting can end and another run
-	 * of that id can start while the view is elsewhere, and the record describes neither.
+	 * of that id can start while the view is elsewhere, and the record describes neither. An answer
+	 * kept for a start that had not reached the view yet is parked beside the mark the call had then
+	 * for the same reason: once that start happens unseen, the answer belongs to nothing.
 	 */
 	#parkedApprovalRecords = new WeakMap<
 		object,
 		{
 			prompts: Map<string, RunStatus>;
 			marks: Map<string, ToolCallRunMark | undefined>;
-			answered: Set<string>;
+			answered: Map<string, ToolCallRunMark | undefined>;
 		}
 	>();
 
@@ -1130,11 +1132,26 @@ export class EventController {
 	 * back only when that is the same run *and* it is still going — two equal terminal marks
 	 * describe a call that is over, which is a reason to drop the record, not to restore it. A
 	 * call the session never ran has no mark on either side and is nobody's to retire.
+	 *
+	 * An answer kept for a start still to come stays only while that start is still to come: the
+	 * call is on the run it was on when the view left, and that run was not under way (an under-way
+	 * run's start was already emitted, so the view will never see it). Any later start, or the end
+	 * of the session, changes the mark and drops the answer, which would otherwise swallow the
+	 * next run's prompt.
 	 */
 	adoptApprovalRecords(session: object, runMark?: (toolCallId: string) => ToolCallRunMark | undefined): void {
 		const parked = this.#parkedApprovalRecords.get(session);
 		if (!parked) return;
 		this.#parkedApprovalRecords.delete(session);
+		const answered = new Set<string>();
+		for (const [toolCallId, parkedRun] of parked.answered) {
+			if (!runMark) {
+				answered.add(toolCallId);
+				continue;
+			}
+			const current = runMark(toolCallId);
+			if (current?.mark === parkedRun?.mark && parkedRun?.live !== true) answered.add(toolCallId);
+		}
 		if (runMark) {
 			for (const [toolCallId, parkedRun] of parked.marks) {
 				const current = runMark(toolCallId);
@@ -1144,7 +1161,7 @@ export class EventController {
 		}
 		this.#blockingPrompts = parked.prompts;
 		// Which calls have a dialog open comes from the frame the attach replays, not from here.
-		this.#answeredBeforeStart = parked.answered;
+		this.#answeredBeforeStart = answered;
 		setRunStatus(this.#reportedStatus());
 	}
 
@@ -1161,10 +1178,12 @@ export class EventController {
 		if (parkFor && (this.#blockingPrompts.size > 0 || this.#answeredBeforeStart.size > 0)) {
 			const marks = new Map<string, ToolCallRunMark | undefined>();
 			for (const toolCallId of this.#blockingPrompts.keys()) marks.set(toolCallId, runMark?.(toolCallId));
+			const answered = new Map<string, ToolCallRunMark | undefined>();
+			for (const toolCallId of this.#answeredBeforeStart) answered.set(toolCallId, runMark?.(toolCallId));
 			this.#parkedApprovalRecords.set(parkFor, {
 				prompts: this.#blockingPrompts,
 				marks,
-				answered: this.#answeredBeforeStart,
+				answered,
 			});
 			this.#blockingPrompts = new Map();
 			this.#waitingToolCalls = new Set();

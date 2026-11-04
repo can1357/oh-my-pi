@@ -3638,7 +3638,7 @@ describe("ACP agent", () => {
 			const connection = {
 				unstable_createElicitationWithCancel: (_req: CreateElicitationRequest) => ({
 					// Nobody at the client answers; only the cancel can settle it.
-					promise: new Promise<CreateElicitationResponse>(() => {}),
+					promise: Promise.withResolvers<CreateElicitationResponse>().promise,
 					cancel: () => {
 						cancelled = true;
 					},
