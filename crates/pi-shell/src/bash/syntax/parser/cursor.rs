@@ -216,6 +216,15 @@ impl<'s> Parser<'s> {
 	/// Skip blanks and line continuations.
 	pub(super) fn skip_blanks(&mut self) {
 		loop {
+			while let Some(&c) = self.buf.get(self.pos) {
+				if !matches!(c, b' ' | b'\t') {
+					if c != b'\\' {
+						return;
+					}
+					break;
+				}
+				self.pos += 1;
+			}
 			match self.peek() {
 				Some(b' ' | b'\t') => self.bump(),
 				Some(b'\\') if self.peek_at(1) == Some(b'\n') => {

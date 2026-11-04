@@ -1,8 +1,16 @@
 /**
- * Which agents are blocked until other agents finish, so a `wait` for a
- * reply can tell when none can come: the agent it asked is itself blocked
- * on the asker. Owned by the {@link AgentRegistry} whose ids it names.
+ * Which agents are blocked until other agents finish, or until the user
+ * answers, so a `wait` for a reply can tell when none can come soon: the
+ * agent it asked is itself blocked on the asker, or on the user. Owned by the
+ * {@link AgentRegistry} whose ids it names.
  */
+
+/**
+ * Stands in for the user among awaited ids: an agent with a dialog open that
+ * waits for the user's answer (`ask`, a tool approval) holds on it. No agent id
+ * can take this value.
+ */
+export const USER_AWAIT_ID = "@user";
 
 interface AwaitHold {
 	/** The block ends once any one of these finishes. */
@@ -16,7 +24,10 @@ interface AwaitHold {
 export interface AgentAwaitsApi {
 	/** Record `waiter` blocked until the first of `awaited` finishes; returns the release function. */
 	hold(waiter: string, awaited: readonly string[], options: { interruptible: boolean }): () => void;
-	/** Whether `agent` cannot act on a message `target` sent it at `sentAt` until `target` finishes. */
+	/**
+	 * Whether `agent` cannot act on a message `target` sent it at `sentAt` until `target` finishes;
+	 * with `target` {@link USER_AWAIT_ID}, whether it cannot act on a message sent at `sentAt` until the user answers.
+	 */
 	blocksOn(agent: string, target: string, sentAt: number): boolean;
 	/** Subscribe to hold changes; returns the unsubscribe function. */
 	onChange(listener: () => void): () => void;

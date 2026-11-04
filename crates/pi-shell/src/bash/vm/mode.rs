@@ -179,25 +179,18 @@ fn zsh_features(
 			& (Features::DOUBLE_BYTE.bits() | Features::GB18030.bits() | Features::SHIFT_JIS.bits()),
 	);
 	let mut f = charset | Features::ZSH;
-	for (opt, on, bit) in [
-		(ZshOpt::Shglob, true, Features::ZSH_SH_GLOB),
-		(ZshOpt::Shortloops, true, Features::ZSH_SHORT_LOOPS),
-		(ZshOpt::Shortrepeat, true, Features::ZSH_SHORT_REPEAT),
-		(ZshOpt::Ignorebraces, true, Features::ZSH_IGNORE_BRACES),
-		(ZshOpt::Ignoreclosebraces, true, Features::ZSH_IGNORE_CLOSE_BRACES),
-		(ZshOpt::Cshjunkiequotes, true, Features::ZSH_CSH_JUNKIE_QUOTES),
-		(ZshOpt::Cshjunkieloops, true, Features::ZSH_CSH_JUNKIE_LOOPS),
-		(ZshOpt::Posixaliases, true, Features::ZSH_POSIX_ALIASES),
-		(ZshOpt::Kshglob, true, Features::ZSH_KSH_GLOB),
-		(ZshOpt::Rcquotes, true, Features::ZSH_RC_QUOTES),
-		(ZshOpt::Posixbuiltins, true, Features::ZSH_POSIX_BUILTINS),
-		(ZshOpt::Multifuncdef, true, Features::ZSH_MULTI_FUNC_DEF),
-		(ZshOpt::Aliases, false, Features::ZSH_NO_ALIASES),
-		(ZshOpt::Aliasfuncdef, true, Features::ZSH_ALIAS_FUNC_DEF),
-	] {
+	for (opt, on, bit) in FEATURE_OPTS {
 		if state::zsh_option(root, store, vp, opt)? == on {
 			f = f | bit;
 		}
+	}
+	// zsh `itype_end(…, IIDENT, …)`: `MULTIBYTE` in a UTF-8 locale without
+	// `POSIX_IDENTIFIERS` lets identifiers hold non-ASCII alphanumerics.
+	if state::zsh_option(root, store, vp, ZshOpt::Multibyte)?
+		&& !state::zsh_option(root, store, vp, ZshOpt::Posixidentifiers)?
+		&& super::locale::charset_root(root, store, vp)? == super::locale::Charset::Utf8
+	{
+		f = f | Features::ZSH_WIDE_IDENT;
 	}
 	// zsh reads comments in a non-interactive shell whatever
 	// `interactivecomments` says.
@@ -205,6 +198,56 @@ fn zsh_features(
 		|| state::zsh_option(root, store, vp, ZshOpt::Interactivecomments)?
 	{
 		f = f | Features::ZSH_INTERACTIVE_COMMENTS;
+	}
+	Ok(f)
+}
+
+/// The zsh options that change how code parses, with the value that sets
+/// their [`Features`] bit.
+const FEATURE_OPTS: [(ZshOpt, bool, Features); 14] = [
+	(ZshOpt::Shglob, true, Features::ZSH_SH_GLOB),
+	(ZshOpt::Shortloops, true, Features::ZSH_SHORT_LOOPS),
+	(ZshOpt::Shortrepeat, true, Features::ZSH_SHORT_REPEAT),
+	(ZshOpt::Ignorebraces, true, Features::ZSH_IGNORE_BRACES),
+	(ZshOpt::Ignoreclosebraces, true, Features::ZSH_IGNORE_CLOSE_BRACES),
+	(ZshOpt::Cshjunkiequotes, true, Features::ZSH_CSH_JUNKIE_QUOTES),
+	(ZshOpt::Cshjunkieloops, true, Features::ZSH_CSH_JUNKIE_LOOPS),
+	(ZshOpt::Posixaliases, true, Features::ZSH_POSIX_ALIASES),
+	(ZshOpt::Kshglob, true, Features::ZSH_KSH_GLOB),
+	(ZshOpt::Rcquotes, true, Features::ZSH_RC_QUOTES),
+	(ZshOpt::Posixbuiltins, true, Features::ZSH_POSIX_BUILTINS),
+	(ZshOpt::Multifuncdef, true, Features::ZSH_MULTI_FUNC_DEF),
+	(ZshOpt::Aliases, false, Features::ZSH_NO_ALIASES),
+	(ZshOpt::Aliasfuncdef, true, Features::ZSH_ALIAS_FUNC_DEF),
+];
+
+/// [`features`] of zsh code parsed under sticky emulation `sticky` (an
+/// autoloaded function's definition, which zsh loads after the call
+/// switched to its emulation): the options `sticky` sets, the others as
+/// they are.
+///
+/// # Errors
+/// [`StoreError`] when an option cannot be read.
+pub fn sticky_features(
+	root: &mut Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	sticky: &Sticky,
+) -> Result<Features, StoreError> {
+	let mut opts = emulated_options(&state::zsh_options(root, store, vp)?, sticky.mode, sticky.full);
+	for &opt in &sticky.on {
+		opts.set(opt, true);
+	}
+	for &opt in &sticky.off {
+		opts.set(opt, false);
+	}
+	let mut f = zsh_features(root, store, vp, Features::NONE)?;
+	for (opt, on, bit) in FEATURE_OPTS {
+		f = if opts.get(opt) == on {
+			f | bit
+		} else {
+			Features::from_bits(f.bits() & !bit.bits())
+		};
 	}
 	Ok(f)
 }
@@ -261,6 +304,16 @@ pub fn enter_call(
 	// zsh saves every option at every call (`LOCAL_OPTIONS` decides at the
 	// return whether they come back).
 	let opts = state::zsh_options(root, store, vp)?;
+	// zsh `runshfunc`: `$_` comes back when a zsh function returns.
+	let keep_underscore = func_mode.dialect() == Dialect::Zsh;
+	let underscore = if keep_underscore {
+		match state::record(store, vp, Key::Misc(MiscKey::LastArg))? {
+			Some(Record::Misc(v)) => Some(v.clone()),
+			_ => None,
+		}
+	} else {
+		None
+	};
 	let saved = Box::new(ZshScope {
 		mode: vp.mode,
 		opts,
@@ -269,6 +322,9 @@ pub fn enter_call(
 		traps: Vec::new(),
 		lossy: 0,
 		pat_disables: pat_disables(store, vp)?,
+		keep_underscore,
+		underscore,
+		specials: Vec::new(),
 	});
 	match sticky {
 		Some(s) if switch_sticky => apply_sticky(root, store, vp, s)?,
@@ -297,6 +353,10 @@ pub fn leave_call(
 	saved: ZshScope,
 	zsh_body: bool,
 ) -> Result<(), StoreError> {
+	if saved.keep_underscore {
+		let rec = saved.underscore.clone().map(Record::Misc);
+		state::store_record(root, store, vp, KeyBuf::Misc(MiscKey::LastArg), rec);
+	}
 	// zsh `endpatternscope`, before the options come back: the body's own
 	// `localpatterns` decides.
 	if zsh_body
@@ -322,14 +382,24 @@ pub fn leave_call(
 		vp.set_sticky(saved.sticky);
 		return Ok(());
 	}
-	if zsh_body {
-		// zsh `doshfunc`: the caller's `printexitvalue` and `warnnestedvar`
-		// (`functions -W`) always come back.
-		for opt in [ZshOpt::Printexitvalue, ZshOpt::Warnnestedvar] {
-			state::set_zsh_option(root, store, vp, opt, saved.opts.get(opt))?;
+	let local_options = zsh_body && state::zsh_option(root, store, vp, ZshOpt::Localoptions)?;
+	if zsh_body && !local_options {
+		// zsh `doshfunc`: the caller's `xtrace` (`functions -t`/`-T`),
+		// `printexitvalue`, `localoptions`, `localloops` and
+		// `warnnestedvar` (`functions -W`) always come back.
+		for opt in [
+			ZshOpt::Xtrace,
+			ZshOpt::Printexitvalue,
+			ZshOpt::Localoptions,
+			ZshOpt::Localloops,
+			ZshOpt::Warnnestedvar,
+		] {
+			if state::zsh_option(root, store, vp, opt)? != saved.opts.get(opt) {
+				state::set_zsh_option(root, store, vp, opt, saved.opts.get(opt))?;
+			}
 		}
 	}
-	if zsh_body && state::zsh_option(root, store, vp, ZshOpt::Localoptions)? {
+	if local_options {
 		let mut want = saved.opts;
 		for opt in [ZshOpt::Privileged, ZshOpt::Restricted] {
 			want.set(opt, state::zsh_option(root, store, vp, opt)?);
@@ -355,13 +425,16 @@ pub fn save_for_emulate(
 	vp: &Vproc,
 ) -> Result<Box<ZshScope>, StoreError> {
 	Ok(Box::new(ZshScope {
-		mode:           vp.mode,
-		opts:           state::zsh_options(root, store, vp)?,
-		sticky:         vp.sticky().cloned(),
-		restore_sticky: true,
-		traps:          Vec::new(),
-		lossy:          0,
-		pat_disables:   pat_disables(store, vp)?,
+		mode:            vp.mode,
+		opts:            state::zsh_options(root, store, vp)?,
+		sticky:          vp.sticky().cloned(),
+		restore_sticky:  true,
+		traps:           Vec::new(),
+		lossy:           0,
+		pat_disables:    pat_disables(store, vp)?,
+		keep_underscore: false,
+		underscore:      None,
+		specials:        Vec::new(),
 	}))
 }
 

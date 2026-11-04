@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 32;
+pub const FRAMES_VERSION: u32 = 33;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -325,6 +325,8 @@ struct FrameImage {
 	debug_trap_local:  bool,
 	err_trap_local:    bool,
 	return_trap_local: bool,
+	trace_local:       bool,
+	debug_errexit:     bool,
 	err_reported:      bool,
 	ignore_errexit:    bool,
 	subshell_line:     Option<u32>,
@@ -344,6 +346,8 @@ struct SavedImage {
 enum SubImage {
 	Fork { vpid: Vpid, capture: u32 },
 	NoFork { value: bool, capture: u32 },
+	Here { status: i32 },
+	Math { status: i32, slot: u8 },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -404,6 +408,9 @@ fn scratch_image(
 			| Live::Dir(_)
 			| Live::Spawn(_)
 			| Live::Timer(_)
+			| Live::Fd(_)
+			| Live::Fs(_)
+			| Live::Zftp(_)
 			| Live::None => {},
 		}
 		state
@@ -418,6 +425,18 @@ fn scratch_image(
 		Live::Open(_) => report
 			.lost
 			.push(Lost::Pending { vpid, kind: FileKind::Pipe }),
+		// An accept or a lock wait holds a socket or file of its own.
+		Live::Fd(_) => report
+			.lost
+			.push(Lost::Pending { vpid, kind: FileKind::Socket }),
+		// A mutation (`mkdir`, a mapfile write) is not asked twice.
+		Live::Fs(_) => report
+			.lost
+			.push(Lost::Pending { vpid, kind: FileKind::Regular }),
+		// zftp's traffic on its sockets.
+		Live::Zftp(_) => report
+			.lost
+			.push(Lost::Pending { vpid, kind: FileKind::Socket }),
 		_ => {},
 	}
 	let io = sc.io.as_deref();
@@ -430,6 +449,10 @@ fn scratch_image(
 			},
 			PendingSub::NoFork { value, capture } => {
 				SubImage::NoFork { value: *value, capture: fds.capture(capture) }
+			},
+			PendingSub::Here { status } => SubImage::Here { status: *status },
+			PendingSub::Math { status, slot } => {
+				SubImage::Math { status: *status, slot: *slot as u8 }
 			},
 		}),
 		exec,
@@ -532,6 +555,8 @@ impl Shell {
 					debug_trap_local: f.debug_trap_local,
 					err_trap_local: f.err_trap_local,
 					return_trap_local: f.return_trap_local,
+					trace_local: f.trace_local,
+					debug_errexit: f.debug_errexit,
 					err_reported: f.err_reported,
 					ignore_errexit: f.ignore_errexit,
 					subshell_line: f.subshell_line,
@@ -957,6 +982,16 @@ impl Shell {
 								SubImage::NoFork { value, capture } => {
 									PendingSub::NoFork { capture: objs.capture(capture), value }
 								},
+								SubImage::Here { status } => PendingSub::Here { status },
+								SubImage::Math { status, slot } => PendingSub::Math {
+									status,
+									slot: match slot {
+										1 => super::proc::Slot::Redirs,
+										2 => super::proc::Slot::Assigns,
+										3 => super::proc::Slot::Builtin,
+										_ => super::proc::Slot::Words,
+									},
+								},
 							}),
 							exec: exec.map(Box::new),
 							io,
@@ -986,6 +1021,8 @@ impl Shell {
 				frame.debug_trap_local = f.debug_trap_local;
 				frame.err_trap_local = f.err_trap_local;
 				frame.return_trap_local = f.return_trap_local;
+				frame.trace_local = f.trace_local;
+				frame.debug_errexit = f.debug_errexit;
 				frame.err_reported = f.err_reported;
 				frame.ignore_errexit = f.ignore_errexit;
 				frame.subshell_line = f.subshell_line;
@@ -1263,7 +1300,7 @@ fn valid(u: &Unit) -> bool {
 				Opcode::CaseArm => idx(u.pats.len()) && op.b < n,
 				Opcode::Arith => idx(u.ariths.len()),
 				Opcode::CondTest => idx(u.conds.len()),
-				Opcode::FuncDef => idx(u.funcs.len()),
+				Opcode::FuncDef => idx(u.funcs.len()) && (op.b as usize) <= u.lists.len(),
 				Opcode::Warn => idx(u.strs.len()),
 				Opcode::Abort => {
 					idx(u.strs.len())

@@ -221,9 +221,11 @@ pub struct Try {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnonFunc {
 	/// Body (a compound command).
-	pub body: Box<Command>,
+	pub body:   Box<Command>,
 	/// Arguments: its `$1`…
-	pub args: Vec<Word>,
+	pub args:   Vec<Word>,
+	/// zsh `function -T { … }`: traced (`PM_TAGGED_LOCAL`).
+	pub traced: bool,
 }
 
 /// A simple command: assignments, then words.
@@ -233,6 +235,11 @@ pub struct Simple {
 	pub assigns: Vec<Assign>,
 	/// Command name and arguments.
 	pub words:   Vec<Word>,
+	/// zsh: the command word is a reserved word of the `typeset` family
+	/// (the lexer's `TYPESET`), which runs its builtin whether or not the
+	/// builtin is disabled or a function has its name.
+	#[serde(default)]
+	pub typeset: bool,
 }
 
 /// `if` with its `elif` arms.
@@ -376,6 +383,8 @@ pub struct FuncDef {
 	pub extra_names: Vec<Vec<u8>>,
 	/// Defined with the `function` keyword.
 	pub keyword:     bool,
+	/// zsh `function -T name { … }`: defined traced (`PM_TAGGED_LOCAL`).
+	pub traced:      bool,
 	/// Body (a compound command).
 	pub body:        Box<Command>,
 }
