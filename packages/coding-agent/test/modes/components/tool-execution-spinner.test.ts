@@ -507,7 +507,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 					getToolByName: () => undefined,
 					hasBuiltInTool: () => true,
 					extensionRunner: undefined,
-					sessionManager: { getEntries: () => [], getCwd: () => "/local" },
+					sessionManager: { getEntries: () => [], getCwd: () => "/local", getConversationTip: () => undefined },
 				},
 				reloadTodos: () => Promise.resolve(),
 				showStatus: () => {},
