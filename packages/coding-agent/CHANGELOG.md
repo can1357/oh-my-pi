@@ -5,6 +5,8 @@
 ### Added
 
 - Added `/commit` to commit only changes written by the agent or a selected subagent, leaving other agents’ and the user’s staged or unstaged work untouched; the same flow is available through the eval `commit` namespace (`commit.draft(repo=…)` targets a repository outside the session cwd) and can be disabled with `commit.enabled`.
+- Added `pi.registerUrlScheme` so extensions can serve their own `<scheme>://` URLs to `read`, `write` and composer completion; the root session and each subagent keep their own handler, a suspended extension's scheme pauses until it resumes, and it is released with the extension ([#18059](https://github.com/can1357/oh-my-pi/pull/18059) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added `pi.onSuspensionChange(listener)` so an extension can pause work it drives itself (a socket, a timer) while a live `disabledExtensions` edit suspends it, and resume it after ([#18059](https://github.com/can1357/oh-my-pi/pull/18059) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - Added configurable long-turn todo reminders through `todo.midRunNudges`: disable them, cap them at two reminders, or continue with increasing backoff intervals.
 - Pasting styled content into the composer now preserves Markdown formatting and attaches embedded images at their original positions, while code copied from editors remains plain text.
 - Added the `session_clear` hook and extension event, emitted after `/clear` resets the current session context without changing its session ID.
