@@ -404,6 +404,7 @@ fn fresh_shell(
 	let mut child = Vproc::new(vpid, Some(vp.vpid), vp.fds.clone(), vp.cwd.clone(), Some(ov), true);
 	child.rlimits.clone_from(&vp.rlimits);
 	child.lineage = vp.lineage;
+	child.inherit_nesting(vp);
 	// A new shell's options, then the invocation's.
 	state::reset_options(&mut k.root, cx.store, &mut child);
 	for opt in [OptId::LoginShell, OptId::RestrictedShell] {

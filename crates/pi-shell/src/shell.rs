@@ -252,6 +252,7 @@ impl Shell {
 		on_chunk: Option<Sender<String>>,
 		mut cancel_token: CancelToken,
 	) -> Result<ShellRunResult> {
+		cancel_token.limit_timeout(options.timeout_ms);
 		let run_config = ShellRunConfig {
 			command:    options.command,
 			cwd:        options.cwd,
@@ -313,8 +314,9 @@ impl Shell {
 pub async fn execute_shell(
 	options: ShellExecuteOptions,
 	on_chunk: Option<Sender<String>>,
-	cancel_token: CancelToken,
+	mut cancel_token: CancelToken,
 ) -> Result<ShellExecuteResult> {
+	cancel_token.limit_timeout(options.timeout_ms);
 	let minimizer = options
 		.minimizer
 		.as_ref()
@@ -356,8 +358,9 @@ pub struct StreamSinks {
 pub async fn execute_shell_streams(
 	options: ShellExecuteOptions,
 	streams: StreamSinks,
-	cancel_token: CancelToken,
+	mut cancel_token: CancelToken,
 ) -> Result<ShellExecuteResult> {
+	cancel_token.limit_timeout(options.timeout_ms);
 	let config = ShellConfig {
 		session_env:   options.session_env,
 		snapshot_path: options.snapshot_path,
@@ -471,10 +474,12 @@ async fn run_shell_session(
 				let _ = run_task.await;
 			}
 			abort_state.clear().await;
-			// Use try_lock to avoid deadlocking if another task holds the session.
-			// If we can't acquire the lock, the session will be cleaned up when the
-			// holding task finishes.
-			if let Ok(mut guard) = session.try_lock() {
+			// Normal cancellation has already unwound the engine's frames
+			// and temporary scopes. Keep the persistent globals and functions;
+			// only a failed or forcibly aborted task leaves unknown state.
+			if !matches!(graceful, Ok(Ok(Ok(_))))
+				&& let Ok(mut guard) = session.try_lock()
+			{
 				*guard = None;
 			}
 			return Ok(cancelled_result(reason));

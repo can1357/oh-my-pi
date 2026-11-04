@@ -120,6 +120,16 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			}
 			continue;
 		};
+		// Bound the whole process lineage, not just function frames in this
+		// vproc: `f(){ x=$(f); }` otherwise copies an ever-growing set of
+		// scopes into children without approaching the function limit.
+		if u32::from(vp.fork_depth) > MAX_FORK_DEPTH
+			&& !matches!(top.kind, FrameKind::Script { what: ScriptKind::Trap { .. }, .. })
+		{
+			let line = current_line(vp);
+			nesting_error(k, vp, cx, line, "subshell", MAX_FORK_DEPTH);
+			continue;
+		}
 		if top.unit.is_none() {
 			// Reading and parsing the next command take time.
 			k.clock_stale();
@@ -730,10 +740,55 @@ fn features(
 	Ok(f)
 }
 
+// Script frames retain parser and staged-command state; subshells also copy
+// scopes and call stacks. Bound these independently of the 10,000-function
+// limit, so recursive eval/source and cross-process calls stay affordable.
+const MAX_SCRIPT_DEPTH: usize = 500;
+const MAX_FORK_DEPTH: u32 = 64;
+
+/// A refusal ends this shell, but an active EXIT trap preserves its
+/// interrupted status rather than replacing it with the refusal's 1.
+pub fn nesting_status(vp: &Vproc) -> i32 {
+	vp.frames
+		.iter()
+		.find_map(|f| match f.kind {
+			FrameKind::Script {
+				what: ScriptKind::Trap { key: TrapKey::Exit, status, .. }, ..
+			} => Some(status),
+			_ => None,
+		})
+		.unwrap_or(1)
+}
+
+fn nesting_error(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, kind: &str, max: u32) {
+	k.diag(cx, vp, line, Diag::Usage {
+		msg: format!("{kind}: maximum nesting level exceeded ({max})").into(),
+	});
+	exit_shell(k, vp, cx, nesting_status(vp));
+}
+
 /// Parse and compile the next command of the top script frame; pop the
 /// frame at end of input. A script read from stdin first reads lines until
 /// the command is complete; `Some` is the wait key while fd 0 has none.
 fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitKey> {
+	// Check on entry to any eval/source script, including those reached
+	// through aliases, `command`, `builtin`, callbacks or another function.
+	// Derive depth from the frames: return, refusal and cancellation all
+	// remove it through the same unwind path; no counter can be left behind.
+	if let Some(FrameKind::Script { pos: (0, line), what, .. }) = vp.frames.last().map(|f| &f.kind)
+		&& matches!(what, ScriptKind::Eval | ScriptKind::Source)
+	{
+		let depth = vp.script_depth();
+		if depth > MAX_SCRIPT_DEPTH {
+			let kind = if *what == ScriptKind::Source {
+				"source"
+			} else {
+				"eval"
+			};
+			nesting_error(k, vp, cx, *line, kind, MAX_SCRIPT_DEPTH as u32);
+			return None;
+		}
+	}
 	// zsh `parse_string`: a string (`eval`, a trap, `-c`) parses whole
 	// before it runs; its first command takes the snapshot the rest reuse.
 	let (snapped, snapshot) = match vp.frames.last().map(|f| &f.kind) {

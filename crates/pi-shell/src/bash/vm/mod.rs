@@ -1418,6 +1418,8 @@ impl Shell {
 		self.k.next_vpid += 1;
 		let parent_lineage = self.procs[parent].lineage;
 		let mut vp = Vproc::new(vpid, Some(parent_vpid), fds, cwd, Some(overlay), true);
+		vp.inherit_nesting(&self.procs[parent]);
+		vp.calls = callstack::inherited(&self.procs[parent]);
 		vp.lineage = lineage.unwrap_or(parent_lineage);
 		vp.status = status;
 		vp.scopes = scopes;
@@ -2380,6 +2382,8 @@ impl Vproc {
 			lineage: crate::bash::host::Lineage::default(),
 			trace_base: 0,
 			subshell: 0,
+			fork_depth: 0,
+			script_base: 0,
 			command: None,
 			spare: Vec::new(),
 			calls: Vec::new(),
@@ -2462,6 +2466,7 @@ impl Vproc {
 		// caught-signal traps stay in the overlay: the child lists them but
 		// does not run them (`state::inherited_trap`).
 		set_subshell_depth(&mut vp, subshell_depth(self).saturating_add(1));
+		vp.inherit_nesting(self);
 		vp.status = self.status;
 		vp.scopes = state::copy_scopes(&k.root, store, self).unwrap_or_else(|err| {
 			k.fail(err);

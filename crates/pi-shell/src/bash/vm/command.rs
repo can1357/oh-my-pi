@@ -36,7 +36,7 @@ use crate::bash::{
 		ChildRedirs, EnvView, ExitStatus, Invocation, PgroupSpec, ResolveCtx, Resolved, SpawnSpec,
 		StdioSpec, Via,
 	},
-	ids::{CallId, CmdTag, IntrinsicId, RunId},
+	ids::{CallId, CmdTag, Dialect, IntrinsicId, RunId},
 	ir::{self, AssignVal, Op, Part, Unit},
 	signal::SigSet,
 	snapshot::Lost,
@@ -2011,28 +2011,47 @@ fn call_function(
 	name: BString,
 ) -> Option<Flow> {
 	let depth = vp
-		.frames
+		.calls
 		.iter()
-		.filter(|f| matches!(f.kind, FrameKind::Function { .. }))
+		.filter(|c| matches!(c.kind, super::callstack::CallKind::Function { .. }))
 		.count() as u32;
-	// `FUNCNEST` > 0 lowers the engine's limit; exceeding it abandons the
-	// whole command, as bash's `jump_to_top_level (DISCARD)`.
+	// A positive FUNCNEST lowers the engine limit. Inherited calls count
+	// in subshells too; an EXIT trap keeps the status that started it.
 	let funcnest = match state::lookup(&k.root, cx.store, vp, b"FUNCNEST") {
 		Ok(v) => v
 			.and_then(|v| v.as_scalar())
-			.and_then(builtins::number)
-			.filter(|&n| n > 0),
+			.and_then(|v| {
+				if vp.mode.dialect() == Dialect::Bash {
+					// `legal_number` rejects intmax_t overflow. Only a parsed
+					// value is then narrowed to a signed C int. Bash 5.3 accepts
+					// all six C-locale whitespace bytes around the decimal.
+					let n = std::str::from_utf8(v)
+						.ok()?
+						.trim_matches(|c| matches!(c, '\t'..='\r' | ' '))
+						.parse::<i64>()
+						.ok()?;
+					Some(i64::from(n as i32))
+				} else {
+					builtins::number(v)
+				}
+			})
+			.filter(|&n| n > 0)
+			.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
 		Err(err) => {
 			k.fail(err);
 			return Some(Flow::Discard(1));
 		},
 	};
 	let limit = k.engine.config().max_call_depth;
-	let max = funcnest.map_or(limit, |n| u32::try_from(n).unwrap_or(u32::MAX).min(limit));
+	let max = funcnest.map_or(limit, |n| n.min(limit));
 	if depth >= max {
-		let max = funcnest.map_or(max, |n| u32::try_from(n).unwrap_or(u32::MAX));
+		let max = funcnest.unwrap_or(max);
 		k.diag(cx, vp, line, Diag::FuncNest { name, max });
-		return Some(Flow::Discard(1));
+		return Some(if vp.mode.dialect() == Dialect::Bash {
+			Flow::Exit(exec::nesting_status(vp))
+		} else {
+			Flow::Discard(1)
+		});
 	}
 	let (unit_id, mode, sticky, file, attrs) =
 		match state::record(cx.store, vp, Key::Func(BStr::new(&name))) {

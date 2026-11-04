@@ -83,6 +83,12 @@ pub struct Vproc {
 	/// nested shell). A field, not an overlay record: a record would cost
 	/// every subshell a ~530-byte map allocation (idle vproc ≤ 2 KiB).
 	pub subshell:      u32,
+	/// Engine process nesting, including nested shells that reset
+	/// `$BASH_SUBSHELL`. Never reset while descending into a child.
+	pub fork_depth:    u8,
+	/// Active eval/source frames retained in ancestors, including across
+	/// fresh nested shells. The child's own frames are counted separately.
+	pub script_base:   u16,
 	/// The command being run (`BASH_COMMAND`): its unit and syntax node.
 	/// Externalized by unit id (a trap action continuing after a restore
 	/// still names the trapped command).
@@ -100,8 +106,9 @@ pub struct Vproc {
 	/// the per-op checks (cancellation, `BASH_COMMAND`, a trap inside its
 	/// own action) skip their frame scans. Kept by
 	/// [`super::exec::push_script`], [`super::exec::pop_frame`] and the
-	/// frame restore; never serialized (recounted from the frames).
-	pub trap_frames:   u32,
+	/// frame restore; never serialized (recounted from the frames). Active
+	/// trap keys cannot recur, so this is bounded by the signal/key count.
+	pub trap_frames:   u16,
 	/// Current mode: the emulation its code runs under, set by
 	/// `emulate`, a mode-switching function call (restored on return) and
 	/// a run's explicit mode; inherited by children. The root's is written
@@ -657,6 +664,27 @@ pub struct Coproc {
 }
 
 impl Vproc {
+	/// Inherit resource bounds on every child-construction path.
+	pub fn inherit_nesting(&mut self, parent: &Self) {
+		self.fork_depth = parent.fork_depth.saturating_add(1);
+		self.script_base = u16::try_from(parent.script_depth()).unwrap_or(u16::MAX);
+	}
+
+	/// Active runtime script frames, including those retained by parents.
+	pub fn script_depth(&self) -> usize {
+		usize::from(self.script_base)
+			+ self
+				.frames
+				.iter()
+				.filter(|f| {
+					matches!(f.kind, FrameKind::Script {
+						what: ScriptKind::Eval | ScriptKind::Source,
+						..
+					})
+				})
+				.count()
+	}
+
 	/// `BASH_COMMAND`: the source text of the current command.
 	pub fn command_text(&self) -> &[u8] {
 		self.command.as_ref().map_or(&[][..], |(unit, node)| {
