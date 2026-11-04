@@ -373,86 +373,105 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		const windowMs = capMs ?? WAIT_LADDER_MS[rung];
 		const watchedIds = jobs.map(job => job.id);
 		manager?.watchJobs(watchedIds);
-		const serviceAbort = new AbortController();
-		const serviceLeg = serviceRunning ? waitForOwnedServiceCompletion(this.session, serviceAbort.signal) : undefined;
 		const replyWait = !idleWait && messaging !== undefined && jobs.length === 0 && !serviceRunning;
-		const asked = replyWait ? pendingReplies(messaging).from : [];
-		const busAbort = new AbortController();
-		// Only `busAbort` can reject this leg, and it fires once the wait has settled.
-		const busLeg = messaging
-			? IrcBus.global()
-					.wait(messaging.senderId, { directOnly: true, repliesFrom: asked }, 0, busAbort.signal)
-					.catch(() => null)
-			: undefined;
-		// A reply wait re-checks whether an agent asked can still answer on
-		// every block change (including an asked agent opening or closing a
-		// dialog that waits on the user), status change, and end of an asked
-		// agent's turn (after any automatic reply that turn owes has been sent).
 		let noReply: PendingReplies | undefined;
-		const replyGone = Promise.withResolvers<void>();
-		const unsubscribers: Array<() => void> = [];
-		if (replyWait) {
-			const checkReplies = () => {
-				const replies = pendingReplies(messaging);
-				if (replies.from.length > 0) return;
-				noReply = replies;
-				replyGone.resolve();
-			};
-			unsubscribers.push(messaging.registry.awaits.onChange(checkReplies));
-			unsubscribers.push(messaging.registry.onChange(checkReplies));
-			for (const id of asked) {
-				const session = messaging.registry.get(id)?.session;
-				if (!session) continue;
-				unsubscribers.push(
-					session.subscribe(event => {
-						if (event.type === "agent_end") void session.waitForIrcReplies().then(checkReplies);
-					}),
+		let awaitedBy: string[] = [];
+		let busLeg: Promise<IrcMessage | null> | undefined;
+		let wake: "job" | "message" | "service" | "unanswerable" | "awaited" | "timeout" | "abort";
+		// Everything the block acquires registers its release here, and the
+		// `finally` below runs them however the block ends. Setting the block
+		// up calls out to the caller (a progress update, a session
+		// subscription, a worker registry's proxy): one of those throwing must
+		// not strand a dependency, a listener or a timer, which would go on
+		// telling other agents that this ended call still owes them.
+		const cleanup: Array<() => void> = [];
+		try {
+			const serviceAbort = new AbortController();
+			cleanup.push(() => serviceAbort.abort());
+			const serviceLeg = serviceRunning
+				? waitForOwnedServiceCompletion(this.session, serviceAbort.signal)
+				: undefined;
+			const asked = replyWait ? pendingReplies(messaging).from : [];
+			const busAbort = new AbortController();
+			cleanup.push(() => busAbort.abort());
+			// Only `busAbort` can reject this leg, and it fires once the wait has settled.
+			busLeg = messaging
+				? IrcBus.global()
+						.wait(messaging.senderId, { directOnly: true, repliesFrom: asked }, 0, busAbort.signal)
+						.catch(() => null)
+				: undefined;
+			// A reply wait re-checks whether an agent asked can still answer on
+			// every block change (including an asked agent opening or closing a
+			// dialog that waits on the user), status change, and end of an asked
+			// agent's turn (after any automatic reply that turn owes has been sent).
+			const replyGone = Promise.withResolvers<void>();
+			if (replyWait) {
+				const checkReplies = () => {
+					const replies = pendingReplies(messaging);
+					if (replies.from.length > 0) return;
+					noReply = replies;
+					replyGone.resolve();
+				};
+				cleanup.push(messaging.registry.awaits.onChange(checkReplies));
+				cleanup.push(messaging.registry.onChange(checkReplies));
+				for (const id of asked) {
+					const session = messaging.registry.get(id)?.session;
+					if (!session) continue;
+					cleanup.push(
+						session.subscribe(event => {
+							if (event.type === "agent_end") void session.waitForIrcReplies().then(checkReplies);
+						}),
+					);
+				}
+			}
+			// An idle block ends once an agent starts blocking on the caller's
+			// result: no message can come from it before the caller finishes.
+			const awaited = Promise.withResolvers<void>();
+			if (idleWait && messaging) {
+				const checkWaiters = () => {
+					const waiters = messaging.registry.awaits.waitersOn(messaging.senderId);
+					if (waiters.length === 0) return;
+					awaitedBy = waiters;
+					awaited.resolve();
+				};
+				cleanup.push(messaging.registry.awaits.onChange(checkWaiters));
+				// A worker's registry is a proxy: a block that began between the
+				// caller's check and this subscription sends no change event here.
+				checkWaiters();
+			}
+			// A wait on jobs blocks the caller until the first of them settles,
+			// which reply and idle waits of the agents they run read. A job that is
+			// not one agent's run is its own node: a workpool's aggregate job leads
+			// on to the workers its holds name, a bash job to no one, so a wait with
+			// a bash job in it blocks on no agent. A service is another way out, so
+			// a wait with one blocks on no one either.
+			if (messaging && !serviceRunning && jobs.length > 0) {
+				cleanup.push(
+					messaging.registry.awaits.hold(messaging.senderId, jobs.map(awaitNodeOfJob), { interruptible: true }),
 				);
 			}
-		}
-		// An idle block ends once an agent starts blocking on the caller's
-		// result: no message can come from it before the caller finishes.
-		let awaitedBy: string[] = [];
-		const awaited = Promise.withResolvers<void>();
-		if (idleWait && messaging) {
-			const checkWaiters = () => {
-				const waiters = messaging.registry.awaits.waitersOn(messaging.senderId);
-				if (waiters.length === 0) return;
-				awaitedBy = waiters;
-				awaited.resolve();
-			};
-			unsubscribers.push(messaging.registry.awaits.onChange(checkWaiters));
-			// A worker's registry is a proxy: a block that began between the
-			// caller's check and this subscription sends no change event here.
-			checkWaiters();
-		}
-		// A wait on jobs blocks the caller until the first of them settles,
-		// which reply and idle waits of the agents they run read. A job that is
-		// not one agent's run is its own node: a workpool's aggregate job leads
-		// on to the workers its holds name, a bash job to no one, so a wait with
-		// a bash job in it blocks on no agent. A service is another way out, so
-		// a wait with one blocks on no one either.
-		const releaseHold =
-			messaging && !serviceRunning && jobs.length > 0
-				? messaging.registry.awaits.hold(messaging.senderId, jobs.map(awaitNodeOfJob), { interruptible: true })
-				: undefined;
-		const { promise: timeout, resolve: timedOut } = Promise.withResolvers<void>();
-		const timer = setTimeout(timedOut, windowMs);
-		const abort = Promise.withResolvers<void>();
-		const onAbort = () => abort.resolve();
-		if (signal) {
-			if (signal.aborted) onAbort();
-			else signal.addEventListener("abort", onAbort, { once: true });
-		}
-		const emitProgress = () =>
-			onUpdate?.({
-				content: [{ type: "text", text: "" }],
-				details: { op: "wait", jobs: snapshotJobs(this.session, jobs) },
-			});
-		const progressTimer = onUpdate && jobs.length > 0 ? setInterval(emitProgress, PROGRESS_INTERVAL_MS) : undefined;
-		if (jobs.length > 0) emitProgress();
-		let wake: "job" | "message" | "service" | "unanswerable" | "awaited" | "timeout" | "abort";
-		try {
+			const { promise: timeout, resolve: timedOut } = Promise.withResolvers<void>();
+			const timer = setTimeout(timedOut, windowMs);
+			cleanup.push(() => clearTimeout(timer));
+			const abort = Promise.withResolvers<void>();
+			const onAbort = () => abort.resolve();
+			if (signal) {
+				if (signal.aborted) onAbort();
+				else {
+					signal.addEventListener("abort", onAbort, { once: true });
+					cleanup.push(() => signal.removeEventListener("abort", onAbort));
+				}
+			}
+			const emitProgress = () =>
+				onUpdate?.({
+					content: [{ type: "text", text: "" }],
+					details: { op: "wait", jobs: snapshotJobs(this.session, jobs) },
+				});
+			if (onUpdate && jobs.length > 0) {
+				const progressTimer = setInterval(emitProgress, PROGRESS_INTERVAL_MS);
+				cleanup.push(() => clearInterval(progressTimer));
+			}
+			if (jobs.length > 0) emitProgress();
 			const otherLegs = [
 				...(busLeg ? [busLeg.then(() => "message" as const)] : []),
 				...(serviceLeg ? [serviceLeg.then(() => "service" as const)] : []),
@@ -476,13 +495,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				}
 			}
 		} finally {
-			clearTimeout(timer);
-			clearInterval(progressTimer);
-			busAbort.abort();
-			serviceAbort.abort();
-			for (const unsubscribe of unsubscribers) unsubscribe();
-			releaseHold?.();
-			signal?.removeEventListener("abort", onAbort);
+			for (const release of cleanup.reverse()) release();
 		}
 		// Unwatch only after the result is built: a job recovered below is
 		// consumed first, while one left unreported (message or interrupt won

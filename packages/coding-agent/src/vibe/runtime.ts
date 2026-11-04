@@ -981,39 +981,45 @@ export class VibeSessionRegistry {
 		if (runningJobs.length > 0 && collectSettled().length === 0) {
 			const timeoutMs = Math.max(1, Math.trunc(args.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS));
 			const watchedJobIds = runningJobs.map(job => job.id);
-			manager.watchJobs(watchedJobIds);
-			const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<"timeout">();
-			const timeoutHandle = setTimeout(() => timeoutResolve("timeout"), timeoutMs);
-			const racePromises: Array<Promise<"settled" | "timeout" | "aborted">> = [
-				...runningJobs.map(job => job.promise.then(() => "settled" as const)),
-				timeoutPromise,
-			];
-			let abortCleanup: (() => void) | undefined;
-			if (args.signal) {
-				const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<"aborted">();
-				const onAbort = () => abortResolve("aborted");
-				if (args.signal.aborted) {
-					onAbort();
-				} else {
-					args.signal.addEventListener("abort", onAbort, { once: true });
-					abortCleanup = () => args.signal?.removeEventListener("abort", onAbort);
-				}
-				racePromises.push(abortPromise);
-			}
-			// The director is blocked until the first watched turn settles, as a
-			// `wait` on those jobs blocks it; a message still interrupts the call.
-			const releaseHold = (session.agentRegistry ?? AgentRegistry.global()).awaits.hold(
-				scope.ownerId,
-				runningJobs.map(awaitNodeOfJob),
-				{ interruptible: true },
-			);
+			// Every acquisition below is released however the wait ends, a throw
+			// while setting it up included: a worker's registry answers the hold
+			// over a proxy, and a stranded block would go on telling the agents
+			// it names that this ended call still waits on them.
+			const cleanup: Array<() => void> = [];
 			try {
+				manager.watchJobs(watchedJobIds);
+				cleanup.push(() => manager.unwatchJobs(watchedJobIds));
+				const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<"timeout">();
+				const timeoutHandle = setTimeout(() => timeoutResolve("timeout"), timeoutMs);
+				cleanup.push(() => clearTimeout(timeoutHandle));
+				const racePromises: Array<Promise<"settled" | "timeout" | "aborted">> = [
+					...runningJobs.map(job => job.promise.then(() => "settled" as const)),
+					timeoutPromise,
+				];
+				if (args.signal) {
+					const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<"aborted">();
+					const onAbort = () => abortResolve("aborted");
+					if (args.signal.aborted) {
+						onAbort();
+					} else {
+						const signal = args.signal;
+						signal.addEventListener("abort", onAbort, { once: true });
+						cleanup.push(() => signal.removeEventListener("abort", onAbort));
+					}
+					racePromises.push(abortPromise);
+				}
+				// The director is blocked until the first watched turn settles, as a
+				// `wait` on those jobs blocks it; a message still interrupts the call.
+				cleanup.push(
+					(session.agentRegistry ?? AgentRegistry.global()).awaits.hold(
+						scope.ownerId,
+						runningJobs.map(awaitNodeOfJob),
+						{ interruptible: true },
+					),
+				);
 				waitEndedByTimeout = (await Promise.race(racePromises)) === "timeout";
 			} finally {
-				releaseHold();
-				manager.unwatchJobs(watchedJobIds);
-				clearTimeout(timeoutHandle);
-				abortCleanup?.();
+				for (const release of cleanup.reverse()) release();
 			}
 		}
 

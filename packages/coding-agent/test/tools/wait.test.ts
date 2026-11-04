@@ -999,6 +999,32 @@ describe("wait", () => {
 				expect(result.details?.waited).toMatchObject([{ from: "Peer", body: "the schema changed" }]);
 			});
 
+			test("a failed progress update leaves the child no longer blocked on the parent", async () => {
+				// The progress consumer throws while the parent's wait is being set
+				// up. The call rejects, so it waits on nothing: it must not go on
+				// telling the child that its parent cannot act, nor keep the
+				// progress interval alive.
+				vi.useFakeTimers();
+				const manager = new AsyncJobManager({ onJobComplete: () => {} });
+				const childRun = registerChild(manager);
+				let updates = 0;
+				const onUpdate = () => {
+					updates++;
+					throw new Error("consumer progress failed");
+				};
+				const parentWait = new WaitTool(session(manager, "Main")).execute("parent-wait", {}, undefined, onUpdate);
+				await expect(parentWait).rejects.toThrow("consumer progress failed");
+				expect(AgentRegistry.global().awaits.waitersOn("Child")).toEqual([]);
+				const childWait = new WaitTool(session(manager, "Child")).execute("child-idle", { timeout: 600 });
+				await flushMicrotasks();
+				await IrcBus.global().send({ from: "Main", to: "Child", body: "the schema changed" });
+				expect((await childWait).details?.waited).toMatchObject([{ from: "Main", body: "the schema changed" }]);
+				// The interval the ended call started fires no further update.
+				vi.advanceTimersByTime(5_000);
+				expect(updates).toBe(1);
+				childRun.resolve("done");
+			});
+
 			describe("with the service-broker refresh slow to answer", () => {
 				// The refresh does not observe its signal (client creation, token
 				// read): only the wait itself can stop waiting on it.

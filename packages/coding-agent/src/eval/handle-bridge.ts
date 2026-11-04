@@ -219,36 +219,40 @@ export async function runEvalWait(
 	return await withBridgeTimeoutPause(
 		options.emitStatus,
 		async () => {
-			for (const handle of resolved) emitLatestProgress(handle);
-			const interval = setInterval(() => {
-				for (const handle of resolved) emitLatestProgress(handle);
-			}, 1_000);
-			interval.unref?.();
 			let outcome: "settled" | "timeout" | "aborted";
-			// An untimed wait keeps the eval call open until every awaited job
-			// finishes: no message to the caller lands before then. A job that is
-			// not one agent's run (a workpool) is its own node, leading on to the
-			// agents it waits on. A block covers only work still running: a
-			// handle that already settled gets no hold, and each hold is released
-			// the moment its own job settles, not when the whole group does —
-			// otherwise a finished child is still reported as owing the caller a
-			// result while a sibling job runs, and its idle `wait` is refused.
-			const waiter = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
-			const awaits = (options.session.agentRegistry ?? AgentRegistry.global()).awaits;
-			const releaseHolds: Array<() => void> = [];
-			if (timeoutMs === undefined) {
-				for (const handle of resolved) {
-					if (!("job" in handle) || handle.job.status !== "running") continue;
-					const release = awaits.hold(waiter, [awaitNodeOfJob(handle.job)], { interruptible: false });
-					releaseHolds.push(release);
-					void handle.job.promise.then(release, release);
-				}
-			}
+			// The progress interval and the blocks below are released however
+			// this wait ends, a throw while setting it up included: emitting
+			// progress calls the eval runtime back, and a worker's registry
+			// answers over a proxy.
+			const cleanup: Array<() => void> = [];
 			try {
+				for (const handle of resolved) emitLatestProgress(handle);
+				const interval = setInterval(() => {
+					for (const handle of resolved) emitLatestProgress(handle);
+				}, 1_000);
+				interval.unref?.();
+				cleanup.push(() => clearInterval(interval));
+				// An untimed wait keeps the eval call open until every awaited job
+				// finishes: no message to the caller lands before then. A job that is
+				// not one agent's run (a workpool) is its own node, leading on to the
+				// agents it waits on. A block covers only work still running: a
+				// handle that already settled gets no hold, and each hold is released
+				// the moment its own job settles, not when the whole group does —
+				// otherwise a finished child is still reported as owing the caller a
+				// result while a sibling job runs, and its idle `wait` is refused.
+				const waiter = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
+				const awaits = (options.session.agentRegistry ?? AgentRegistry.global()).awaits;
+				if (timeoutMs === undefined) {
+					for (const handle of resolved) {
+						if (!("job" in handle) || handle.job.status !== "running") continue;
+						const release = awaits.hold(waiter, [awaitNodeOfJob(handle.job)], { interruptible: false });
+						cleanup.push(release);
+						void handle.job.promise.then(release, release);
+					}
+				}
 				outcome = await waitForSettlement(resolved, timeoutMs, options.signal);
 			} finally {
-				clearInterval(interval);
-				for (const release of releaseHolds) release();
+				for (const release of cleanup.reverse()) release();
 			}
 			for (const handle of resolved) emitLatestProgress(handle);
 			if (outcome === "aborted") {
