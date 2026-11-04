@@ -1747,12 +1747,52 @@ mod shfmt {
 			}
 		}
 
-		/// Position of `op` written before `i` (skipping blanks).
-		fn find_back_op(&self, i: u32, op: &[u8]) -> u32 {
-			let mut j = i;
-			while j > 0 && matches!(self.at(j - 1), b' ' | b'\t' | b'\n') {
-				j -= 1;
+		/// Start of the trivia written before `i`: blanks, newlines,
+		/// `\newline` and comments, the same trivia `skip_ws` passes
+		/// forward.
+		fn skip_ws_back(&self, mut i: u32) -> u32 {
+			loop {
+				while i > 0 && matches!(self.at(i - 1), b' ' | b'\t') {
+					i -= 1;
+				}
+				if i >= 2 && self.at(i - 1) == b'\n' && self.at(i - 2) == b'\\' {
+					i -= 2;
+				} else if i > 0 && self.at(i - 1) == b'\n' {
+					i = self.comment_start(i - 1).unwrap_or(i - 1);
+				} else {
+					return i;
+				}
 			}
+		}
+
+		/// Position of the comment the line ending at `nl` carries, if it
+		/// carries one: a `#` that opens a word outside quotes.
+		fn comment_start(&self, nl: u32) -> Option<u32> {
+			let mut lo = nl;
+			while lo > 0 && self.at(lo - 1) != b'\n' {
+				lo -= 1;
+			}
+			let mut quote = 0u8;
+			let mut i = lo;
+			while i < nl {
+				let c = self.at(i);
+				match c {
+					b'\\' if quote != b'\'' => i += 1,
+					b'\'' | b'"' if quote == 0 => quote = c,
+					_ if quote == c => quote = 0,
+					b'#' if quote == 0 && (i == lo || matches!(self.at(i - 1), b' ' | b'\t')) => {
+						return Some(i);
+					},
+					_ => {},
+				}
+				i += 1;
+			}
+			None
+		}
+
+		/// Position of `op` written before `i` (skipping trivia).
+		fn find_back_op(&self, i: u32, op: &[u8]) -> u32 {
+			let j = self.skip_ws_back(i);
 			let n = op.len() as u32;
 			if j >= n && self.src.get((j - n) as usize..j as usize) == Some(op) {
 				j - n
