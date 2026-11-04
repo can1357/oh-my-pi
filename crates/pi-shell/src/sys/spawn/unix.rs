@@ -1019,38 +1019,35 @@ fn descriptor_bound() -> i32 {
 	i32::try_from(limit).unwrap_or(i32::MAX)
 }
 
-/// Close every descriptor marked close-on-exec, which `exec` would close.
+/// Close every descriptor that is not one of `keep` (the command's own,
+/// installed before), so the process holds only what the command will
+/// have: the host's descriptors go whether or not `exec` would close them.
 /// Lists the open ones in `/proc/self/fd` where it can, else checks each
 /// below `bound`. Async-signal-safe: for a forked child.
-fn close_descriptors_exec_closes(bound: i32) {
+fn close_descriptors_except(keep: &[i32], bound: i32) {
 	#[cfg(target_os = "linux")]
-	if close_listed_descriptors_exec_closes() {
+	if close_listed_descriptors_except(keep) {
 		return;
 	}
 	for fd in 0..bound {
-		close_if_closed_on_exec(fd, -1);
+		close_unless_kept(fd, keep, -1);
 	}
 }
 
-/// Close `fd` if it is marked close-on-exec and is not `keep`.
-fn close_if_closed_on_exec(fd: i32, keep: i32) {
-	if fd == keep {
+/// Close `fd` unless it is in `keep` or is `dir`. Closing a descriptor that
+/// is not open fails with `EBADF`, which changes nothing.
+fn close_unless_kept(fd: i32, keep: &[i32], dir: i32) {
+	if fd == dir || keep.contains(&fd) {
 		return;
 	}
-	// SAFETY: plain descriptor calls; `fcntl` on a closed descriptor fails
-	// with `EBADF`.
-	unsafe {
-		let flags = libc::fcntl(fd, libc::F_GETFD);
-		if flags >= 0 && flags & libc::FD_CLOEXEC != 0 {
-			libc::close(fd);
-		}
-	}
+	// SAFETY: a plain descriptor call.
+	unsafe { libc::close(fd) };
 }
 
-/// [`close_descriptors_exec_closes`] over the descriptors `/proc/self/fd`
+/// [`close_descriptors_except`] over the descriptors `/proc/self/fd`
 /// lists; whether it listed them all.
 #[cfg(target_os = "linux")]
-fn close_listed_descriptors_exec_closes() -> bool {
+fn close_listed_descriptors_except(keep: &[i32]) -> bool {
 	// SAFETY: the path is NUL-terminated.
 	let dir = unsafe {
 		libc::open(c"/proc/self/fd".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC)
@@ -1058,19 +1055,19 @@ fn close_listed_descriptors_exec_closes() -> bool {
 	if dir < 0 {
 		return false;
 	}
-	let listed = close_descriptors_listed_in(dir);
+	let listed = close_descriptors_listed_in(dir, keep);
 	// SAFETY: `dir` is open and owned here.
 	unsafe { libc::close(dir) };
 	listed
 }
 
 /// Read the descriptor listing open at `dir` with `getdents64` into a
-/// buffer on the stack and close each descriptor it names that is marked
-/// close-on-exec, except `dir`. Whether it read the listing to its end: a
+/// buffer on the stack and close each descriptor it names that is not in
+/// `keep`, except `dir`. Whether it read the listing to its end: a
 /// failed read other than `EINTR`, or a record it cannot parse, leaves
 /// descriptors unchecked, and the caller checks them another way.
 #[cfg(target_os = "linux")]
-fn close_descriptors_listed_in(dir: i32) -> bool {
+fn close_descriptors_listed_in(dir: i32, keep: &[i32]) -> bool {
 	let mut buffer = [0u8; 4096];
 	loop {
 		// SAFETY: `buffer` is valid for its length; the kernel writes whole
@@ -1104,7 +1101,7 @@ fn close_descriptors_listed_in(dir: i32) -> bool {
 			if name.first().is_some_and(u8::is_ascii_digit)
 				&& let Some(fd) = fd
 			{
-				close_if_closed_on_exec(fd, dir);
+				close_unless_kept(fd, keep, dir);
 			}
 			at += length;
 		}
@@ -1136,6 +1133,7 @@ fn fork_redirs(
 	let limits = limits(prog);
 	let raw: Vec<(i32, RawFd)> = fds.iter().map(|(t, fd)| (*t, fd.as_raw_fd())).collect();
 	let fd_bound = descriptor_bound();
+	let own: Vec<i32> = raw.iter().map(|(t, _)| *t).collect();
 	// Every signal stays blocked across the fork: the child runs with the
 	// host's handlers until it resets them, and a signal delivered then (a
 	// `kill $!` right after the spawn) would run host code and be lost
@@ -1188,10 +1186,9 @@ fn fork_redirs(
 			}
 			// The redirections below run with only the command's own
 			// descriptors, as in the child bash forks: every host descriptor
-			// `exec` would close goes now, so a lowered open-file limit
-			// leaves room for their opens and a duplication of a descriptor
-			// the command lacks fails.
-			close_descriptors_exec_closes(fd_bound);
+			// goes now, so a lowered open-file limit leaves room for their
+			// opens and a duplication of a descriptor the command lacks fails.
+			close_descriptors_except(&own, fd_bound);
 			libc::umask(mask);
 			for (n, &ign) in ignore.iter().enumerate().skip(1) {
 				let n = n as i32;

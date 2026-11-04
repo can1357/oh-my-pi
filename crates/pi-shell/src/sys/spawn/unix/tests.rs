@@ -44,7 +44,7 @@ fn a_session_is_signalled_before_its_leader_ran_setsid() {
 }
 
 /// The child that cannot list its descriptors checks each one below
-/// `descriptor_bound`: that must reach a close-on-exec descriptor opened
+/// `descriptor_bound`: that must reach a descriptor opened
 /// before the soft open-file limit was lowered under it, or a background
 /// command's redirection could duplicate a descriptor of the host. Runs in
 /// a forked child, since the limit is process-wide.
@@ -71,7 +71,7 @@ fn the_unlisted_descriptor_check_reaches_above_a_lowered_soft_limit() {
 				libc::_exit(2);
 			}
 			for fd in 0..super::descriptor_bound() {
-				super::close_if_closed_on_exec(fd, -1);
+				super::close_unless_kept(fd, &[], -1);
 			}
 			libc::_exit(i32::from(libc::fcntl(high, libc::F_GETFD) >= 0));
 		}
