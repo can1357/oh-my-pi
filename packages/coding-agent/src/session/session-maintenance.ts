@@ -6413,8 +6413,9 @@ export class SessionMaintenance {
 		const model = this.#model;
 		if (!model) return { pays: true, rewriteTokens: 0 };
 		const postShakeTokens = Math.max(0, triggerContextTokens - plan.tokensFreed);
-		if (model.contextWindow > 0) {
-			const thresholdTokens = resolveThresholdTokens(model.contextWindow, this.#compactionSettings);
+		const contextWindow = model.contextWindow ?? 0;
+		if (contextWindow > 0) {
+			const thresholdTokens = resolveThresholdTokens(contextWindow, this.#compactionSettings);
 			if (postShakeTokens > Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND)) {
 				return { pays: true, rewriteTokens: 0 };
 			}
