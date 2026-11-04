@@ -163,44 +163,42 @@ The variables below supply credentials after runtime/config overrides and stored
 | `venice`                         | `VENICE_API_KEY`                                                                    |
 | `vercel-ai-gateway`              | `AI_GATEWAY_API_KEY` (also `VERCEL_AI_GATEWAY_API_KEY` for catalog discovery)       |
 | `cloudflare-ai-gateway`          | `CLOUDFLARE_AI_GATEWAY_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
-| `cloudflare-workers-ai`          | `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN`, + `CLOUDFLARE_ACCOUNT_ID`     |
-| `snowflake`                      | `SNOWFLAKE_PAT` + `SNOWFLAKE_ACCOUNT`                                               |
-| `litellm`                        | `LITELLM_API_KEY`; optional `LITELLM_BASE_URL` for the proxy endpoint               |
-| `kilo`                           | `KILO_API_KEY`                                                                      |
-| `zai`                            | `ZAI_API_KEY`                                                                       |
-| `zenmux`                         | `ZENMUX_API_KEY`                                                                    |
-| `zhipu-coding-plan`              | `ZHIPU_API_KEY`                                                                     |
-| `umans`                          | `UMANS_AI_CODING_PLAN_API_KEY`                                                      |
-| `qianfan`                        | `QIANFAN_API_KEY`                                                                   |
-| `qwen-portal`                    | `QWEN_OAUTH_TOKEN`, then `QWEN_PORTAL_API_KEY`                                      |
-| `synthetic`                      | `SYNTHETIC_API_KEY`                                                                 |
-| `minimax-code`                   | `MINIMAX_CODE_API_KEY`                                                              |
-| `minimax-code-cn`                | `MINIMAX_CODE_CN_API_KEY`                                                           |
-| `minimax`                        | `MINIMAX_API_KEY`                                                                   |
-| `alibaba-coding-plan`            | `ALIBABA_CODING_PLAN_API_KEY`                                                       |
-| `sakana`                         | `SAKANA_API_KEY`, then `FUGU_API_KEY`                                               |
-| `sambanova`                      | `SAMBANOVA_API_KEY`                                                                 |
-| `scaleway`                       | `SCW_SECRET_KEY`, then `SCW_API_KEY`                                                |
-| `aimlapi`                        | `AIMLAPI_API_KEY`                                                                   |
-| `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                      |
-| `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                                  |
-| `cline-pass`                     | `CLINE_API_KEY`                                                                     |
-| `factory-droid`                  | none — use `/login factory-droid`                                                   |
-| `firepass`                       | `FIREPASS_API_KEY`                                                                  |
-| `wafer-serverless`               | `WAFER_SERVERLESS_API_KEY`                                                          |
-| `xiaomi`                         | `XIAOMI_API_KEY`                                                                    |
-| `xiaomi-token-plan-ams`          | `XIAOMI_TOKEN_PLAN_AMS_API_KEY`                                                     |
-| `xiaomi-token-plan-cn`           | `XIAOMI_TOKEN_PLAN_CN_API_KEY`                                                      |
-| `xiaomi-token-plan-sgp`          | `XIAOMI_TOKEN_PLAN_SGP_API_KEY`                                                     |
-| `ollama-cloud`                   | `OLLAMA_CLOUD_API_KEY`                                                              |
-| `ollama`                         | `OLLAMA_API_KEY` (optional; local discovery is keyless by default)                  |
-| `lm-studio`                      | `LM_STUDIO_API_KEY` (optional; keyless by default)                                  |
-| `llama.cpp`                      | `LLAMA_CPP_API_KEY` (only when the server requires auth)                            |
-| `vllm`                           | `VLLM_API_KEY` (optional for an unauthenticated local server)                       |
-| `yolo-auto`                      | `YOLO_AUTO_API_KEY`                                                                 |
-| `charm-hyper`                    | `CHARM_HYPER_API_KEY`, then `HYPER_API_KEY`                                         |
-| `singularityapi-dev`             | `SINGULARITYAPI_DEV_API_KEY`                                                        |
-| `singularityapi-tech`            | `SINGULARITYAPI_TECH_API_KEY`                                                       |
+| `cloudflare-workers-ai`          | `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN`, + `CLOUDFLARE_ACCOUNT_ID` |
+| `snowflake`                      | `SNOWFLAKE_PAT` + `SNOWFLAKE_ACCOUNT`                                         |
+| `litellm`                        | `LITELLM_API_KEY`; optional `LITELLM_BASE_URL` for the proxy endpoint         |
+| `kilo`                           | `KILO_API_KEY`                                                                |
+| `zai`                            | `ZAI_API_KEY`                                                                 |
+| `zenmux`                         | `ZENMUX_API_KEY`                                                              |
+| `zhipu-coding-plan`              | `ZHIPU_API_KEY`                                                               |
+| `umans`                          | `UMANS_AI_CODING_PLAN_API_KEY`                                                |
+| `qianfan`                        | `QIANFAN_API_KEY`                                                             |
+| `qwen-portal`                    | `QWEN_OAUTH_TOKEN`, then `QWEN_PORTAL_API_KEY`                                |
+| `synthetic`                      | `SYNTHETIC_API_KEY`                                                           |
+| `minimax-code`                   | `MINIMAX_CODE_API_KEY`                                                        |
+| `minimax-code-cn`                | `MINIMAX_CODE_CN_API_KEY`                                                     |
+| `minimax`                        | `MINIMAX_API_KEY`                                                             |
+| `alibaba-coding-plan`            | `ALIBABA_CODING_PLAN_API_KEY`                                                 |
+| `sakana`                         | `SAKANA_API_KEY`, then `FUGU_API_KEY`                                         |
+| `aimlapi`                        | `AIMLAPI_API_KEY`                                                             |
+| `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                |
+| `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                            |
+| `cline-pass`                     | `CLINE_API_KEY`                                                               |
+| `factory-droid`                  | none — use `/login factory-droid`                                             |
+| `firepass`                       | `FIREPASS_API_KEY`                                                            |
+| `wafer-serverless`               | `WAFER_SERVERLESS_API_KEY`                                                    |
+| `xiaomi`                         | `XIAOMI_API_KEY`                                                              |
+| `xiaomi-token-plan-ams`          | `XIAOMI_TOKEN_PLAN_AMS_API_KEY`                                               |
+| `xiaomi-token-plan-cn`           | `XIAOMI_TOKEN_PLAN_CN_API_KEY`                                                |
+| `xiaomi-token-plan-sgp`          | `XIAOMI_TOKEN_PLAN_SGP_API_KEY`                                               |
+| `ollama-cloud`                   | `OLLAMA_CLOUD_API_KEY`                                                        |
+| `ollama`                         | `OLLAMA_API_KEY` (optional; local discovery is keyless by default)            |
+| `lm-studio`                      | `LM_STUDIO_API_KEY` (optional; keyless by default)                            |
+| `llama.cpp`                      | `LLAMA_CPP_API_KEY` (only when the server requires auth)                      |
+| `vllm`                           | `VLLM_API_KEY` (optional for no-auth servers); optional `VLLM_BASE_URL`       |
+| `yolo-auto`                      | `YOLO_AUTO_API_KEY`                                                            |
+| `charm-hyper`                    | `CHARM_HYPER_API_KEY`, then `HYPER_API_KEY`                                   |
+| `singularityapi-dev`             | `SINGULARITYAPI_DEV_API_KEY`                                                  |
+| `singularityapi-tech`            | `SINGULARITYAPI_TECH_API_KEY`                                                 |
 
 Vertex ADC availability accepts project aliases `GOOGLE_CLOUD_PROJECT`, `GCP_PROJECT`, or `GCLOUD_PROJECT`, and location aliases `GOOGLE_VERTEX_LOCATION`, `GOOGLE_CLOUD_LOCATION`, or `VERTEX_LOCATION`.
 
