@@ -158,7 +158,7 @@ async function lstatIfPresent(entry: string): Promise<Stats | undefined> {
 	try {
 		return await fs.lstat(entry);
 	} catch (error) {
-		if (isEnoent(error)) return undefined;
+		if (isEnoent(error) || codeOf(error) === "ENOTDIR") return undefined;
 		throw error;
 	}
 }
@@ -422,7 +422,7 @@ export async function scanArchivedSessionFiles(
 			for (const name of await fs.readdir(dir)) {
 				if (!name.endsWith(ARCHIVED_SESSION_SUFFIX)) continue;
 				const entry = path.join(dir, name);
-				if ((await statIfPresent(entry))?.isDirectory()) continue;
+				if ((await lstatIfPresent(entry))?.isDirectory()) continue;
 				found.push(entry);
 			}
 		} catch (error) {
@@ -589,7 +589,9 @@ export async function inflateArchivedTranscript(
 	// this run is killed before removing it. The transcript keeps the
 	// archive's mode, which is the live transcript's: a private session must
 	// not come back readable by more than it was.
-	const mode = (await fs.stat(source)).mode & 0o7777;
+	const sourceEntry = await fs.lstat(source);
+	if (!sourceEntry.isFile()) throw new NotARegularFile(source, kindOf(sourceEntry));
+	const mode = sourceEntry.mode & 0o7777;
 	const ground = await mintStagingGround(destination, ledger, mode);
 	try {
 		await ground.handle.chmod(mode);
@@ -909,7 +911,7 @@ export async function handleBeginsWith(whole: fs.FileHandle, prefix: fs.FileHand
  * `ENOENT`, as a read by name would.
  */
 export async function* bytesOfRegularFile(file: string): AsyncGenerator<Uint8Array> {
-	const handle = await openRegularFile(file);
+	const handle = await openRegularFile(file, { noFollow: true });
 	if (!handle) throw absentFile(file);
 	try {
 		yield* bytesOfHandle(handle);
@@ -968,9 +970,9 @@ export async function publishedIsStaged(
 	};
 	let published: fs.FileHandle | undefined;
 	try {
-		published = await openRegularFile(destination);
+		published = await openRegularFile(destination, { noFollow: true });
 	} catch (error) {
-		if (error instanceof NotARegularFile) return `${destination} is not a regular file`;
+		if (error instanceof NotARegularFile) return error.message;
 		return `${destination} could not be opened to be checked (${errorText(error)})`;
 	}
 	if (!published) return `nothing stands at ${destination}`;
@@ -1252,7 +1254,7 @@ async function assertLiveTreeHoldsArchive(
 	// its name: see {@link stagingLedgerDir}.
 	if (!stat || isResidue(source)) return;
 	if (stat.isDirectory()) {
-		const live = await statIfPresent(destination);
+		const live = await lstatIfPresent(destination);
 		if (!live?.isDirectory()) {
 			throw new Error(`${destination} is not a directory holding what ${source} holds`);
 		}
@@ -1271,7 +1273,7 @@ async function assertLiveTreeHoldsArchive(
 	}
 	// A link or a device: neither was carried home, and neither is an artifact.
 	if (!stat.isFile()) return;
-	const live = await openRegularFile(destination);
+	const live = await openRegularFile(destination, { noFollow: true });
 	try {
 		const liveStat = await live?.stat();
 		if (!live || !liveStat?.isFile()) {
@@ -1330,7 +1332,7 @@ export function directoryModeFor(mode: number): number {
  * an entry is one is the ledger's answer, not its name's — see
  * {@link stagingLedgerDir}.
  */
-async function copyEntryDereferenced(
+async function copyArchivedEntry(
 	source: string,
 	destination: string,
 	archiveRoot: string,
@@ -1342,11 +1344,8 @@ async function copyEntryDereferenced(
 	/** Called once per archived file the live tree holds once this returns. */
 	onFile?: () => void,
 ): Promise<void> {
-	const stat = await fs.stat(source).catch(error => {
-		// A link whose target is gone: nothing to carry, nothing to lose.
-		if (isEnoent(error)) return undefined;
-		throw error;
-	});
+	const stat = await lstatIfPresent(source);
+	if (stat?.isSymbolicLink()) throw new NotARegularFile(source, kindOf(stat));
 	if (!stat || isResidue(source)) return;
 	// Only absence is an empty slot: a look that fails says nothing about
 	// what is there, and a directory taken for new would be given the
@@ -1362,13 +1361,8 @@ async function copyEntryDereferenced(
 		throw unchecked(error);
 	});
 	if (stat.isDirectory()) {
-		// Through the link: a symlinked artifact directory is a directory the
-		// restore may merge into, the same way the archive phase walks one.
-		const live = existing
-			? await statIfPresent(destination).catch((error: unknown) => {
-					throw unchecked(error);
-				})
-			: undefined;
+		const live = existing;
+		if (live?.isSymbolicLink()) throw new NotARegularFile(destination, kindOf(live));
 		if (existing && !live?.isDirectory()) {
 			throw new Error(`${destination} is not a directory, so ${source} cannot be restored into it`);
 		}
@@ -1402,7 +1396,7 @@ async function copyEntryDereferenced(
 		try {
 			// Sorted, so a restore that stops part-way is reproducible from its report.
 			for (const entry of (await fs.readdir(source)).sort()) {
-				await copyEntryDereferenced(
+				await copyArchivedEntry(
 					path.join(source, entry),
 					path.join(destination, entry),
 					archiveRoot,
@@ -1451,7 +1445,7 @@ async function copyEntryDereferenced(
 		return;
 	}
 	if (existing) {
-		const live = await openRegularFile(destination);
+		const live = await openRegularFile(destination, { noFollow: true });
 		try {
 			if (live) {
 				const target = await live.stat();
@@ -1494,7 +1488,7 @@ async function copyEntryDereferenced(
 		// And the stage is a directory made by name, `0700`: under a umask that
 		// takes the owner's write bit, the file cannot go in it.
 		assertUmaskKeepsOwnerWrite(path.join(path.dirname(destination), stage), 0o700, source);
-		const archived = await openRegularFile(source);
+		const archived = await openRegularFile(source, { noFollow: true });
 		if (!archived) throw absentFile(source);
 		await archived.close().catch(() => undefined);
 		plan.notePromise(destination);
@@ -1507,7 +1501,7 @@ async function copyEntryDereferenced(
 	try {
 		// Through the regular-file check: an archived name that has become a
 		// FIFO, a socket or a device since the walk looked is refused unread.
-		const archived = await openRegularFile(source);
+		const archived = await openRegularFile(source, { noFollow: true });
 		if (!archived) throw absentFile(source);
 		let written: CopiedBytes;
 		try {
@@ -1549,7 +1543,7 @@ async function copyEntryDereferenced(
  * `omp gc --reclaim`, which an operator runs by name on one session and
  * acknowledges, is the only thing that takes the live copy away.
  */
-async function copyTreeDereferenced(
+async function copyArchivedTree(
 	source: string,
 	destination: string,
 	agentDir: string,
@@ -1557,6 +1551,11 @@ async function copyTreeDereferenced(
 	plan?: RestorePlan,
 	onFile?: () => void,
 ): Promise<{ leftOut: Array<[string, string]>; special: string[] }> {
+	const sourceEntry = await lstatIfPresent(source);
+	if (sourceEntry && !sourceEntry.isDirectory())
+		throw new Error(
+			`${source} is ${sourceEntry.isFile() ? "a regular file" : kindOf(sourceEntry)}, not an archived artifact directory`,
+		);
 	if (plan) await planWritableDirectory(path.dirname(destination), plan, source);
 	else await fs.mkdir(path.dirname(destination), { recursive: true });
 	const archiveRoot = await fs.realpath(source);
@@ -1572,7 +1571,7 @@ async function copyTreeDereferenced(
 	};
 	const special: string[] = [];
 	const ledger = stagingLedgerDir(agentDir);
-	await copyEntryDereferenced(source, destination, archiveRoot, ledger, notes, isResidue, special, plan, onFile);
+	await copyArchivedEntry(source, destination, archiveRoot, ledger, notes, isResidue, special, plan, onFile);
 	if (!plan) await assertLiveTreeHoldsArchive(source, destination, archiveRoot, isResidue);
 	return { leftOut: [...leftOut], special };
 }
@@ -2218,7 +2217,7 @@ async function readStagingRecords(
 		try {
 			// Non-blocking and regular files only: a FIFO among the records
 			// must refuse, not wait for a writer that never comes.
-			const handle = await openRegularFile(record);
+			const handle = await openRegularFile(record, { noFollow: true });
 			if (!handle) throw absentFile(record);
 			let text: string;
 			try {
@@ -3156,9 +3155,9 @@ export async function archivedPathsWithoutLiveCopies(archiveFile: string, sessio
 	// Directories as well as files: an empty directory the restore left out
 	// is still something the live tree does not hold.
 	const visit = async (name: string): Promise<void> => {
-		const archived = await statIfPresent(path.join(archiveArtifacts, name));
+		const archived = await lstatIfPresent(path.join(archiveArtifacts, name));
 		if (!archived) return;
-		const live = await statIfPresent(path.join(liveArtifacts, name));
+		const live = await lstatIfPresent(path.join(liveArtifacts, name));
 		if (!archived.isDirectory()) {
 			if (!live?.isFile()) outstanding.push(name);
 			return;
@@ -3193,7 +3192,7 @@ async function ownerSignature(owners: () => Promise<(string | undefined)[]>): Pr
  */
 export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: string): Promise<boolean> {
 	// Non-blocking, so a FIFO at the live name is a refusal rather than a hang.
-	const live = await openRegularFile(sessionPath);
+	const live = await openRegularFile(sessionPath, { noFollow: true });
 	if (!live) throw absentFile(sessionPath);
 	try {
 		let holds = false;
@@ -3228,7 +3227,7 @@ export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: st
  * fails throws, the same way.
  */
 export async function archivedHandleIsPrefixOfLive(archived: fs.FileHandle, livePath: string): Promise<boolean> {
-	const live = await openRegularFile(livePath);
+	const live = await openRegularFile(livePath, { noFollow: true });
 	if (!live) throw absentFile(livePath);
 	try {
 		let holds = false;
@@ -3262,7 +3261,7 @@ export async function archivedHandleIsHeldBy(
 	candidatePath: string,
 	transcript = false,
 ): Promise<boolean> {
-	const candidate = await openRegularFile(candidatePath);
+	const candidate = await openRegularFile(candidatePath, { noFollow: true });
 	if (!candidate) throw absentFile(candidatePath);
 	try {
 		const candidateStat = await candidate.stat();
@@ -3293,7 +3292,8 @@ const ARCHIVED_HEADER_READ_LIMIT = 1024 * 1024;
 
 /** Every file below `root`, links followed, the way the archive phase enumerates one. */
 async function treeFiles(root: string): Promise<string[]> {
-	if (!(await statIfPresent(root))) return [];
+	const standing = await lstatIfPresent(root);
+	if (!standing || !standing.isDirectory()) return [];
 	const files: string[] = [];
 	for await (const name of new Glob("**/*").scan({
 		cwd: root,
@@ -3648,11 +3648,17 @@ export async function restoreArchivedSessionLocked(
 	const liveArtifacts = sessionPath.slice(0, -SESSION_SUFFIX.length);
 	const stagingAgentDir = agentDir ?? getAgentDir();
 	const ledger = stagingLedgerDir(stagingAgentDir);
+	const container = reclaimedContainerPath(archiveFile);
+	const containerEntry = await lstatIfPresent(container);
+	if (containerEntry && !containerEntry.isDirectory())
+		throw new Error(
+			`${container} is ${containerEntry.isFile() ? "a regular file" : kindOf(containerEntry)}, not a reclaimed-originals directory`,
+		);
 	// Read through a non-blocking descriptor: a FIFO at the live transcript's
 	// name, or anywhere in either tree, owns nothing and must not hang this —
 	// the restore's walk names it, as the artifact it cannot carry.
 	const headerId = async (file: string): Promise<string | undefined> => {
-		const handle = await openRegularFile(file).catch(error => {
+		const handle = await openRegularFile(file, { noFollow: true }).catch(error => {
 			if (error instanceof NotARegularFile || codeOf(error) === "ENOTDIR") return undefined;
 			throw error;
 		});
@@ -3726,7 +3732,7 @@ export async function restoreArchivedSessionLocked(
 			// Set aside only where `rename(2)` would let applying move it: a
 			// record another user owns in a sticky bucket stays, as applying
 			// finds.
-			if (await statIfPresent(record)) {
+			if (await lstatIfPresent(record)) {
 				recordWouldStay = await renameRefusal(record, path.dirname(record));
 				if (recordWouldStay === undefined) setAsideRecord = record;
 			}
@@ -3774,14 +3780,16 @@ export async function restoreArchivedSessionLocked(
 		if (transcriptReclaimed) {
 			// The session's own transcript, moved home: nothing to compare it with.
 			bytes = (await fs.lstat(plan ? transcriptReclaimed.from : sessionPath)).size;
-		} else if (await statIfPresent(sessionPath)) {
+		} else if (await lstatIfPresent(sessionPath)) {
+			const standing = await fs.lstat(sessionPath);
+			if (!standing.isFile()) throw new NotARegularFile(sessionPath, kindOf(standing));
 			// The transcript is already live. Either another process restored it
 			// while this one waited for the lock, or an earlier attempt moved the
 			// transcript and failed on its artifact tree. Finishing that attempt is
 			// the only way the tree comes home, so a retry resumes rather than
 			// refusing — for this session, carried on or not, never another.
 			const carried =
-				!(await statIfPresent(archiveFile)) ||
+				!(await lstatIfPresent(archiveFile)) ||
 				(await archiveIsPrefixOfLive(archiveFile, sessionPath).catch((error: unknown) => {
 					throw new Error(
 						`Cannot restore "${archiveFile}": ${sessionPath} could not be compared with it, so whether it is ` +
@@ -3801,7 +3809,7 @@ export async function restoreArchivedSessionLocked(
 						`that no archived session matches. Nothing is removed until you choose.`,
 				);
 			}
-			bytes = (await fs.stat(sessionPath)).size;
+			bytes = (await fs.lstat(sessionPath)).size;
 		} else if (plan) {
 			// What inflating the transcript needs: its directory, a staging
 			// record, and an archive that reads whole.
@@ -3813,8 +3821,11 @@ export async function restoreArchivedSessionLocked(
 		}
 
 		const notRestored: string[] = [];
-		const hasArtifacts = (await statIfPresent(archiveArtifacts)) !== undefined;
-		let artifactsRestored = !hasArtifacts && (await statIfPresent(liveTree)) !== undefined;
+		const hasArtifacts = (await lstatIfPresent(archiveArtifacts)) !== undefined;
+		const liveTreeEntry = await lstatIfPresent(liveTree);
+		let artifactsRestored = !hasArtifacts && liveTreeEntry?.isDirectory() === true;
+		if (liveTreeEntry?.isSymbolicLink())
+			notRestored.push(`${liveTree} is a symbolic link, not a live artifact directory`);
 		// Neither copy goes. The restore publishes the session into the live
 		// tree and leaves the archive where it is, so `omp gc --reclaim`,
 		// which an operator runs by name and acknowledges, stays the only
@@ -3841,7 +3852,7 @@ export async function restoreArchivedSessionLocked(
 						}
 					};
 				}
-				const { leftOut, special } = await copyTreeDereferenced(
+				const { leftOut, special } = await copyArchivedTree(
 					archiveArtifacts,
 					liveTree,
 					stagingAgentDir,
@@ -3900,7 +3911,7 @@ export async function restoreArchivedSessionLocked(
 		// would leave: applying holds the gc lock, which proves its writer gone.
 		if (plan && recordWouldStay) notRestored.push(`${record} would be left: ${recordWouldStay}`);
 		if (!plan && own === undefined) {
-			if (await statIfPresent(record)) notRestored.push(restoreRecordLeftNote(record));
+			if (await lstatIfPresent(record)) notRestored.push(restoreRecordLeftNote(record));
 		} else if (!plan && own && notRestored.length === 0) {
 			const left = await dropOwnRestoreRecord(own);
 			if (left) notRestored.push(left);
@@ -3978,8 +3989,8 @@ export async function restoreArchivedSession(
  * entries in the archive until a restore moves them back.
  */
 async function liveSessionIsComplete(sessionFile: string, archiveFile: string): Promise<boolean> {
-	if (!(await statIfPresent(sessionFile))) return false;
-	if ((await statIfPresent(restoreRecordPath(archiveFile))) !== undefined) return false;
+	if (!(await lstatIfPresent(sessionFile))?.isFile()) return false;
+	if ((await lstatIfPresent(restoreRecordPath(archiveFile))) !== undefined) return false;
 	for (const original of [reclaimedTranscriptPath(archiveFile), reclaimedArtifactsPath(archiveFile)]) {
 		if (await lstatIfPresent(original)) return false;
 	}
@@ -4017,7 +4028,11 @@ export async function materializeSessionFile(
 		archived = sessionFile;
 	} else {
 		const candidate = archivedSessionPathForLive(sessionFile, agentDir);
-		if (candidate !== undefined && (await statIfPresent(candidate))) archived = candidate;
+		if (candidate !== undefined) {
+			const standing = await lstatIfPresent(candidate);
+			if (standing && !standing.isFile()) throw new NotARegularFile(candidate, kindOf(standing));
+			if (standing) archived = candidate;
+		}
 	}
 	if (archived === undefined) return sessionFile;
 	if (!isArchivedSessionPath(sessionFile) && (await liveSessionIsComplete(sessionFile, archived))) {

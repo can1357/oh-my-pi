@@ -12,6 +12,7 @@ import {
 	statSync,
 	watch,
 } from "node:fs";
+import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 
 import * as os from "node:os";
@@ -458,7 +459,7 @@ test("gc --restore leaves a .jsonl.gz outside the archive where its owner put it
 	expect(await Bun.file(path.join(root, "backups", "mine.jsonl")).exists()).toBe(false);
 });
 
-test("a symlinked transcript is archived by content, and a reclaim keeps the link and the file it points at", async () => {
+test("a symlinked transcript is reported and kept without reading the file it points at", async () => {
 	const store = path.join(root, "offload");
 	await fs.mkdir(store, { recursive: true });
 	const target = path.join(store, "offloaded.jsonl");
@@ -468,11 +469,9 @@ test("a symlinked transcript is archived by content, and a reclaim keeps the lin
 
 	const result = await archiveEverything();
 
-	expect(result.archive?.archived).toBe(1);
-	expect(Bun.gunzipSync(await fs.readFile(archiveFile))).toEqual(new Uint8Array(original));
-	// The reclaim keeps a transcript link, like any link: a turn appended to
-	// the file it leads to after the last comparison would be left behind.
-	expect(result.archive?.errors.join("\n")).toContain(`${sessionFile} is a symbolic link, to ${target}`);
+	expect(result.archive?.archived).toBe(0);
+	expect(result.archive?.errors.join("\n")).toContain(`${sessionFile} is a symbolic link`);
+	expect(await Bun.file(archiveFile).exists()).toBe(false);
 	expect((await fs.lstat(sessionFile)).isSymbolicLink()).toBe(true);
 	expect(await fs.readFile(target)).toEqual(original);
 });
@@ -514,7 +513,7 @@ test("gc --archive refuses an archive destination holding a different session", 
 	expect(await Bun.file(sessionFile).exists()).toBe(true);
 });
 
-test("gc --archive keeps the session's artifact tree readable from the archive", async () => {
+test("gc --archive reports a linked nested transcript and keeps the whole session", async () => {
 	const artifacts = sessionFile.slice(0, -".jsonl".length);
 	const nestedStore = path.join(root, "offload-nested");
 	await fs.mkdir(nestedStore, { recursive: true });
@@ -523,12 +522,11 @@ test("gc --archive keeps the session's artifact tree readable from the archive",
 	await fs.mkdir(artifacts, { recursive: true });
 	await fs.symlink(nestedTarget, path.join(artifacts, "sub.jsonl"));
 
-	await archiveEverything();
-
-	// The archive holds the bytes, not a pointer into a tree that may move.
-	const archivedNested = path.join(archiveFile.slice(0, -".jsonl.gz".length), "sub.jsonl");
-	expect((await fs.lstat(archivedNested)).isSymbolicLink()).toBe(false);
-	expect(await Bun.file(archivedNested).text()).toContain("sub-1");
+	const result = await archiveOnly();
+	expect(result.archive?.archived).toBe(0);
+	expect(result.archive?.errors.join("\n")).toContain(`${path.join(artifacts, "sub.jsonl")} is a symbolic link`);
+	expect(await Bun.file(nestedTarget).text()).toContain("sub-1");
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
 });
 
 test("restoring an archived session waits for a maintenance run instead of failing", async () => {
@@ -1314,7 +1312,7 @@ test("archiving refuses a conflict below a symlinked archive directory", async (
 	const result = await archiveEverything();
 
 	expect(result.archive?.archived).toBe(0);
-	expect(result.archive?.errors.join("\n")).toContain("the archive is left as it is");
+	expect(result.archive?.errors.join("\n")).toContain("is a symbolic link");
 	expect(await Bun.file(path.join(offloaded, "tool.log")).text()).toBe("PREFIX-ARCHIVED-ONLY-SUFFIX\n");
 });
 
@@ -4239,7 +4237,12 @@ for (const name of ["pipe", "notes.jsonl"]) {
 
 				expect(outcome).not.toBe("hung");
 				expect(await pipe.left()).toBe(PIPE_PAYLOAD);
-				if (outcome !== "hung") expect(outcome.archive?.errors.join("\n")).toContain(`${link} links to a FIFO`);
+				if (outcome !== "hung") {
+					expect(outcome.archive?.errors.join("\n")).toContain(
+						name === "notes.jsonl" ? `${link} is a symbolic link, not a regular file` : `${link} links to a FIFO`,
+					);
+					if (name === "notes.jsonl") expect(outcome.archive?.archived).toBe(0);
+				}
 				expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
 			} finally {
 				await pipe.close();
@@ -4416,7 +4419,9 @@ for (const form of ["a FIFO", "a link to a FIFO"] as const) {
 					expect(outcome).not.toBe("hung");
 					expect(await pipe.left()).toBe(PIPE_PAYLOAD);
 					if (outcome !== "hung")
-						expect(String(outcome.failure)).toContain(`${lock} is a FIFO, not a regular file`);
+						expect(String(outcome.failure)).toContain(
+							`${lock} is ${form === "a FIFO" ? "a FIFO" : "a symbolic link"}, not a regular file`,
+						);
 					expect((await fs.lstat(lock)).isFIFO() || (await fs.lstat(lock)).isSymbolicLink()).toBe(true);
 					// The breaker lock it took to look is given back: the review saw
 					// `gc.lock.break` held for as long as the read hung.
@@ -4464,7 +4469,9 @@ for (const form of ["a FIFO", "a link to a FIFO"] as const) {
 					expect(await pipe.left()).toBe(PIPE_PAYLOAD);
 					if (outcome !== "hung") {
 						expect(outcome.restore?.errors.join("\n")).toContain(
-							`${entry} ${form === "a FIFO" ? "is" : "links to"} a FIFO in the archive, which a restore cannot carry home`,
+							form === "a FIFO"
+								? `${entry} is a FIFO in the archive, which a restore cannot carry home`
+								: `${entry} is a symbolic link, not a regular file, so it was not read`,
 						);
 						expect(outcome.restore?.artifactsRestored).toBe(false);
 					}
@@ -4476,10 +4483,14 @@ for (const form of ["a FIFO", "a link to a FIFO"] as const) {
 					await fs.rename(entry, path.join(root, "moved-out-of-the-archive"));
 					if (apply) {
 						const record = `${archiveFile}.restoring`;
-						expect(told).toContain(`move this restore's record ${record} aside, then restore again`);
+						if (form === "a FIFO")
+							expect(told).toContain(`move this restore's record ${record} aside, then restore again`);
+						else expect(told).toContain("was not restored whole");
+						expect(await Bun.file(record).exists()).toBe(true);
 						await fs.rename(record, path.join(root, "restore-record-aside"));
 					} else {
-						expect(told).toContain("move it out of the archive, then restore");
+						if (form === "a FIFO") expect(told).toContain("move it out of the archive, then restore");
+						else expect(told).toContain("would not be restored whole");
 					}
 					const again = await runGcCommand({
 						flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true },
@@ -4717,15 +4728,15 @@ test("a restore that cannot check a live artifact directory leaves its mode alon
 	await fs.mkdir(artifacts, { recursive: true });
 	await fs.chmod(artifacts, 0o700);
 	const broken = failWithEio("lstat", artifacts);
-	let restored: RestoredSession;
+	let restored: GcResult;
 	try {
-		restored = await restoreArchivedSession(archiveFile, root);
+		restored = await runGcCommand({ flags: restoreApply() });
 	} finally {
 		broken.mockRestore();
 	}
 
 	expect((await fs.stat(artifacts)).mode & 0o777).toBe(0o700);
-	expect(restored.notRestored.join("\n")).toContain("EIO: injected");
+	expect(restored.restore?.errors.join("\n")).toContain("EIO: injected");
 });
 
 test("a restore that cannot resolve a live artifact says so, not that it is the archived file itself", async () => {
@@ -4783,7 +4794,7 @@ test("an archive run that cannot resolve the archive says so, not that a recorde
 // that failed, never read as an empty slot or as something else standing there.
 const unlookable: [string, "lstat" | "stat" | "open", "file" | "directory", string][] = [
 	["the name cannot be checked", "lstat", "file", "already holds something else"],
-	["the directory cannot be followed", "stat", "directory", "is not a directory"],
+	["the directory name cannot be checked", "lstat", "directory", "is not a directory"],
 	["the file cannot be opened", "open", "file", "already holds something else"],
 ];
 
@@ -5005,7 +5016,7 @@ test("an archive run that cannot read the live transcript says so, and does not 
 	const told = result.archive?.errors.join("\n") ?? "";
 	expect(told).not.toContain("holds a different session");
 	expect(told).toContain("EIO: injected");
-	expect(told).toContain(`${sessionFile} could not be read`);
+	expect(told).toContain(`${sessionFile}: EIO: injected, read ${sessionFile}`);
 	expect((await fs.readFile(archiveFile)).equals(before)).toBe(true);
 });
 
@@ -5183,7 +5194,8 @@ test.skipIf(process.getuid?.() === 0)(
 
 		const told = result.archive?.errors.join("\n") ?? "";
 		expect(result.archive?.skippedActive).toBe(0);
-		expect(told).toContain(`whether a running process owns ${nested} could not be checked`);
+		expect(told).toContain("its nested sessions could not be checked");
+		expect(told).toContain(nested);
 		expect(told).toContain("EACCES");
 		expect(result.archive?.archived).toBe(0);
 	},
@@ -5276,7 +5288,7 @@ test("a reclaim that cannot look at the archived transcript's mode keeps the liv
 	await fs.chmod(archiveFile, 0o644);
 	// Every look at the archived transcript's mode fails; the reclaim gives up
 	// nothing for a copy whose permissions it could not compare.
-	const broken = failWithEio("stat", archiveFile);
+	const broken = failWithEio("lstat", archiveFile);
 	let applied: GcResult;
 	try {
 		applied = await reclaimSession(true);
@@ -5516,7 +5528,7 @@ test.skipIf(process.getuid?.() === 0)(
 		}
 
 		const told = result.archive?.errors.join("\n") ?? "";
-		expect(told).toContain(`${sessionFile} could not be read`);
+		expect(told).toContain(`${sessionFile}: EACCES:`);
 		expect(told).toContain("EACCES");
 		expect(await Bun.file(archiveFile).exists()).toBe(false);
 	},
@@ -6423,7 +6435,7 @@ for (const shape of ["a dangling link stands at its name", "the directory it wou
 			expect(preview.restore?.missingArtifacts).toEqual([]);
 			expect(preview.restore?.errors.join("\n")).toContain(
 				shape === "a dangling link stands at its name"
-					? `${path.join(liveArtifacts, "b.log")} already holds something else`
+					? `${path.join(liveArtifacts, "b.log")} is a symbolic link`
 					: `${liveArtifacts} is not writable`,
 			);
 			// Applying agrees: it does not bring the file back, and says so.
@@ -8106,11 +8118,11 @@ for (const writer of ["with input waiting", "with nobody writing"] as const) {
 					expect(outcome).not.toBe("hung");
 					if (pipe) expect(await pipe.left()).toBe(PIPE_PAYLOAD);
 					expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
-					if (command === "archive --apply") {
-						expect(outcome).toContain(`${link} links to a FIFO, which the archive cannot hold`);
+					if (command.startsWith("archive")) {
+						expect(outcome).toContain(`${link} is a symbolic link`);
+						expect(outcome).toContain('"wouldArchive":0');
+						expect(await Bun.file(sessionFile).exists()).toBe(true);
 					}
-					// Not vacuous: the dry run did take the session up.
-					if (command === "archive (preview)") expect(outcome).toContain('"wouldArchive":1');
 					if (command.startsWith("reclaim")) {
 						expect(outcome).toContain(`${link} is a symbolic link, which a reclaim does not give up`);
 						expect(await Bun.file(sessionFile).exists()).toBe(true);
@@ -9950,7 +9962,7 @@ for (const via of ["a link to it", "a link to a descriptor held on it"] as const
 
 		expect(result.reclaim?.reclaimed).toBe(0);
 		expect(result.reclaim?.moved).toBeUndefined();
-		expect(result.reclaim?.errors.join("\n")).toContain(`${archived} is not a copy of ${live}`);
+		expect(result.reclaim?.errors.join("\n")).toContain(`${archived} is a symbolic link, not a copy of ${live}`);
 		expect((await fs.lstat(live)).isDirectory()).toBe(true);
 		expect(await Bun.file(sessionFile).exists()).toBe(true);
 	}, 60_000);
@@ -10969,7 +10981,8 @@ test("an archive run that cannot read a subagent transcript to find its owner sa
 		const result = await archiveOnly();
 		const said = result.archive?.errors.join("\n") ?? "";
 		expect(result.archive?.skippedActive).toBe(0);
-		expect(said).toContain(`whether a running process owns ${child} could not be checked`);
+		expect(said).toContain("its nested sessions could not be checked");
+		expect(said).toContain(child);
 		expect(said).toContain("EACCES");
 	} finally {
 		await fs.chmod(child, 0o600);
@@ -11256,11 +11269,11 @@ test("round54 stale restore record rename errors retain the failed operation", a
 
 test("round54 archive listing does not count entries whose stat failed", async () => {
 	await archiveOnly();
-	const stat = fs.stat;
-	spyOn(fs, "stat").mockImplementation((async (...args: Parameters<typeof fs.stat>) => {
+	const stat = fs.lstat;
+	spyOn(fs, "lstat").mockImplementation((async (...args: Parameters<typeof fs.lstat>) => {
 		if (String(args[0]) === archiveFile) throw round54Error("listing stat");
 		return await Reflect.apply(stat, fs, args);
-	}) as typeof fs.stat);
+	}) as typeof fs.lstat);
 	await expect(sessionArchive.listArchivedSessionFiles(root)).rejects.toThrow("EIO: round54 listing stat");
 	expect(await Bun.file(archiveFile).exists()).toBe(true);
 });
@@ -11298,7 +11311,12 @@ for (const operation of ["readlink", "realpath"] as const) {
 
 test("round54 failed inode flag probe does not promise a rename", async () => {
 	const real = libcModule.libc();
-	spyOn(libcModule, "libc").mockReturnValue({ ...real, ioctl: () => -1, errno: () => os.constants.errno.EIO });
+	spyOn(libcModule, "libc").mockReturnValue({
+		...real,
+		statx: () => -1,
+		ioctl: () => -1,
+		errno: () => os.constants.errno.EIO,
+	});
 	await expect(regularFile.renameRefusal(sessionFile, root)).rejects.toThrow("EIO");
 	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
 });
@@ -11402,14 +11420,33 @@ test("round54 failed write-back size check is unknown with its error, not silent
 test("round54 failed reclaim container cleanup is reported with its original intact", async () => {
 	await archiveOnly();
 	const container = path.dirname(reclaimedNames().transcript);
+	const rename = libcModule.renameNoReplace;
+	let moved = false;
+	spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+		const answer = await rename(from, to);
+		if (from === sessionFile && answer.outcome === "renamed") moved = true;
+		return answer;
+	});
+	const lstat = fs.lstat;
+	let refused = false;
+	spyOn(fs, "lstat").mockImplementation((async (...args: Parameters<typeof fs.lstat>) => {
+		if (moved && !refused && String(args[0]) === reclaimedNames().transcript) {
+			refused = true;
+			throw round54Error("moved transcript lookup");
+		}
+		return await Reflect.apply(lstat, fs, args);
+	}) as typeof fs.lstat);
 	const rmdir = fs.rmdir;
 	spyOn(fs, "rmdir").mockImplementation((async (...args: Parameters<typeof fs.rmdir>) => {
 		if (String(args[0]) === container) throw round54Error("container cleanup");
 		return await Reflect.apply(rmdir, fs, args);
 	}) as typeof fs.rmdir);
 	const result = await runGcCommand({ flags: reclaimApply() });
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(result.reclaim?.errors.join("\n")).toContain("EIO: round54 moved transcript lookup");
 	expect(result.reclaim?.errors.join("\n")).toContain("EIO: round54 container cleanup");
-	expect(await Bun.file(reclaimedNames().transcript).text()).toContain(PROMPT);
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+	expect(await fs.readdir(container)).toEqual([]);
 });
 
 test("round54 restore preview preserves the ownership probe's original error", async () => {
@@ -11437,3 +11474,459 @@ test("round54 unsupported attribute inspection is unknown, not an empty attribut
 	expect(result.archive?.archived).toBe(0);
 	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
 });
+
+for (const failure of ["bucket", "stat", "read", "FIFO", "symbolic link"] as const) {
+	test(`round55 archive reports an unreadable ${failure} instead of an empty listing`, async () => {
+		const original = await Bun.file(sessionFile).text();
+		if (failure === "bucket") {
+			const readdir = nodeFs.readdirSync;
+			spyOn(nodeFs, "readdirSync").mockImplementation(((...args: Parameters<typeof nodeFs.readdirSync>) => {
+				if (String(args[0]) === path.dirname(sessionFile)) throw round54Error("bucket listing");
+				return Reflect.apply(readdir, nodeFs, args);
+			}) as typeof nodeFs.readdirSync);
+		} else if (failure === "stat") {
+			const lstat = nodeFs.lstatSync;
+			const stat = nodeFs.statSync;
+			for (const [name, call] of [
+				["lstatSync", lstat],
+				["statSync", stat],
+			] as const) {
+				spyOn(nodeFs, name).mockImplementation(((...args: Parameters<typeof nodeFs.statSync>) => {
+					if (String(args[0]) === sessionFile) throw round54Error("transcript stat");
+					return Reflect.apply(call, nodeFs, args);
+				}) as typeof stat);
+			}
+		} else if (failure === "read") {
+			const open = fs.open;
+			spyOn(fs, "open").mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+				if (String(args[0]) === sessionFile) throw round54Error("transcript read");
+				return await Reflect.apply(open, fs, args);
+			}) as typeof fs.open);
+		} else {
+			await fs.unlink(sessionFile);
+			if (failure === "FIFO") {
+				const child = Bun.spawn(["mkfifo", sessionFile]);
+				expect(await child.exited).toBe(0);
+			} else {
+				await fs.symlink(path.join(root, "missing-transcript"), sessionFile);
+			}
+		}
+		const result = await archiveOnly();
+		const said = result.archive?.errors.join("\n") ?? "";
+		expect(said).toContain(failure === "bucket" ? path.dirname(sessionFile) : sessionFile);
+		expect(said).toContain(
+			failure === "FIFO" ? "a FIFO" : failure === "symbolic link" ? "a symbolic link" : "EIO: round54",
+		);
+		expect(result.archive?.archived).toBe(0);
+		expect(result.archive?.scanned).toBeUndefined();
+		mock.restore();
+		if (failure === "FIFO" || failure === "symbolic link") {
+			expect((await fs.lstat(sessionFile)).isFile()).toBe(false);
+		} else expect(await Bun.file(sessionFile).text()).toBe(original);
+	});
+}
+
+test("round55 an unreadable nested transcript keeps its parent with the read error", async () => {
+	const child = path.join(sessionFile.slice(0, -6), "sub", "child.jsonl");
+	await Bun.write(child, sessionBody(sessionId("000000000055"), "nested", root));
+	const open = fs.open;
+	let failed = false;
+	spyOn(fs, "open").mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+		if (String(args[0]) === child && !failed) {
+			failed = true;
+			throw round54Error("nested transcript read");
+		}
+		return await Reflect.apply(open, fs, args);
+	}) as typeof fs.open);
+	const result = await archiveOnly();
+	expect(result.archive?.errors.join("\n")).toContain("EIO: round54 nested transcript read");
+	expect(result.archive?.archived).toBe(0);
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+	mock.restore();
+	expect(await Bun.file(child).text()).toContain("nested");
+});
+
+test("round55 reclaim reports an unreadable transcript rather than a non-session", async () => {
+	await archiveOnly();
+	await fs.utimes(sessionFile, new Date(0), new Date(0));
+	const open = fs.open;
+	spyOn(fs, "open").mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+		if (String(args[0]) === sessionFile) throw round54Error("reclaim transcript read");
+		return await Reflect.apply(open, fs, args);
+	}) as typeof fs.open);
+	const result = await runGcCommand({ flags: reclaimApply() });
+	expect(result.reclaim?.errors.join("\n")).toContain("EIO: round54 reclaim transcript read");
+	expect(result.reclaim?.errors.join("\n")).not.toContain("is not a session file");
+	expect(result.reclaim?.reclaimed).toBe(0);
+	mock.restore();
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+});
+
+test("round55 successful reclaim never tries to remove its occupied container", async () => {
+	await archiveOnly();
+	const container = path.dirname(reclaimedNames().transcript);
+	const rename = libcModule.renameNoReplace;
+	let moved = false;
+	spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+		const answer = await rename(from, to);
+		if (from === sessionFile && answer.outcome === "renamed") moved = true;
+		return answer;
+	});
+	const lstat = fs.lstat;
+	spyOn(fs, "lstat").mockImplementation((async (...args: Parameters<typeof fs.lstat>) => {
+		if (moved && String(args[0]) === container) throw round54Error("occupied container lookup");
+		return await Reflect.apply(lstat, fs, args);
+	}) as typeof fs.lstat);
+	const rmdir = fs.rmdir;
+	let attempted = false;
+	spyOn(fs, "rmdir").mockImplementation((async (...args: Parameters<typeof fs.rmdir>) => {
+		if (String(args[0]) === container) {
+			attempted = true;
+			throw round54Error("occupied container removal");
+		}
+		return await Reflect.apply(rmdir, fs, args);
+	}) as typeof fs.rmdir);
+	const result = await runGcCommand({ flags: reclaimApply() });
+	expect(result.reclaim).toMatchObject({ reclaimed: 1, errors: [] });
+	expect(attempted).toBe(false);
+	expect(await Bun.file(reclaimedNames().transcript).text()).toContain(PROMPT);
+});
+
+for (const mode of [0o000, 0o200]) {
+	test(`round55 restore preview can set aside an unreadable ${mode.toString(8)} record just like apply`, async () => {
+		await archiveEverything();
+		const record = restoreRecordPath(archiveFile);
+		await Bun.write(record, "ORIGINAL RECORD");
+		await fs.chmod(record, mode);
+		const preview = await runGcCommand({ flags: restoreApply(false) });
+		expect(preview.restore).toMatchObject({ errors: [], setAsideRecord: record });
+		const applied = await runGcCommand({ flags: restoreApply() });
+		expect(applied.restore?.errors).toEqual([]);
+		const aside = applied.restore?.setAsideRecord;
+		expect(aside).toBeDefined();
+		await fs.chmod(aside!, 0o600);
+		expect(await Bun.file(aside!).text()).toBe("ORIGINAL RECORD");
+		expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+	});
+}
+
+test("round55 rename preview does not need read permission on a writable searchable directory", async () => {
+	const from = path.join(root, "unreadable-directory");
+	const into = path.join(root, "new-parent");
+	await fs.mkdir(from, { mode: 0o300 });
+	await fs.mkdir(into);
+	try {
+		expect(await regularFile.renameRefusal(from, into)).toBeUndefined();
+		await fs.rename(from, path.join(into, "moved"));
+		expect((await fs.lstat(path.join(into, "moved"))).isDirectory()).toBe(true);
+	} finally {
+		await fs.chmod(from, 0o700).catch(() => undefined);
+		await fs.chmod(path.join(into, "moved"), 0o700).catch(() => undefined);
+	}
+});
+
+for (const apply of [false, true]) {
+	test(`round55 reclaim reports a failed destination check and its kept tree with apply ${apply}`, async () => {
+		const tree = sessionFile.slice(0, -6);
+		await Bun.write(path.join(tree, "a.log"), "ORIGINAL");
+		await archiveOnly();
+		const container = path.dirname(reclaimedNames().transcript);
+		const stat = fs.stat;
+		const lstat = fs.lstat;
+		for (const [name, call] of [
+			["stat", stat],
+			["lstat", lstat],
+		] as const) {
+			spyOn(fs, name).mockImplementation((async (...args: Parameters<typeof fs.stat>) => {
+				if (String(args[0]) === container) throw round54Error("destination check");
+				return await Reflect.apply(call, fs, args);
+			}) as typeof stat);
+		}
+		const result = await runGcCommand({ flags: { ...reclaimApply(), apply } });
+		expect(result.reclaim?.errors.join("\n")).toContain("EIO: round54 destination check");
+		expect(result.reclaim?.keptArtifactTree).toBe(tree);
+		expect(result.reclaim?.reclaimed).toBe(0);
+		expect(await Bun.file(path.join(tree, "a.log")).text()).toBe("ORIGINAL");
+	});
+}
+
+test("round55 reclaim refuses an empty query and reports an unreadable id listing", async () => {
+	await archiveOnly();
+	const readdir = fs.readdir;
+	spyOn(fs, "readdir").mockImplementation((async (...args: Parameters<typeof fs.readdir>) => {
+		if (String(args[0]) === path.dirname(archiveFile)) throw round54Error("id-query listing");
+		return await Reflect.apply(readdir, fs, args);
+	}) as typeof fs.readdir);
+	await expect(runGcCommand({ flags: { ...reclaimApply(), reclaim: "", apply: false } })).rejects.toThrow(
+		"--reclaim needs a session id or the path of a file in the archive",
+	);
+	const result = await runGcCommand({ flags: { ...reclaimApply(), reclaim: SESSION_ID, apply: false } });
+	expect(result.reclaim?.errors.join("\n")).toContain("EIO: round54 id-query listing");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("round55 reclaim names a missing archive without claiming space was given back", async () => {
+	const result = await runGcCommand({ flags: reclaimApply() });
+	expect(result.reclaim?.errors.join("\n")).toContain("no such archive file");
+	expect(result.reclaim?.errors.join("\n")).not.toContain("already given back");
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+});
+
+for (const site of [
+	"live artifacts",
+	"live transcript",
+	"archive transcript",
+	"archive artifacts",
+	"reclaim container",
+] as const) {
+	test(`round55 reclaim reports a dangling symbolic link at ${site} in preview and apply`, async () => {
+		await archiveOnly();
+		const tree = sessionFile.slice(0, -6);
+		const entry =
+			site === "live artifacts"
+				? tree
+				: site === "live transcript"
+					? sessionFile
+					: site === "archive transcript"
+						? archiveFile
+						: site === "archive artifacts"
+							? archiveFile.slice(0, -9)
+							: path.dirname(reclaimedNames().transcript);
+		if (site === "archive artifacts") await fs.mkdir(tree);
+		await fs.rm(entry, { recursive: true, force: true });
+		await fs.mkdir(path.dirname(entry), { recursive: true });
+		await fs.symlink(path.join(root, "missing"), entry);
+		for (const apply of [false, true]) {
+			const result = await runGcCommand({ flags: { ...reclaimApply(), apply } });
+			expect(result.reclaim?.errors.join("\n")).toContain("a symbolic link");
+			expect(result.reclaim?.errors.join("\n")).not.toContain("was written to after");
+			expect(result.reclaim?.reclaimed).toBe(0);
+			if (site === "live artifacts") expect(result.reclaim?.keptArtifactTree).toBe(tree);
+		}
+		expect((await fs.lstat(entry)).isSymbolicLink()).toBe(true);
+		if (site !== "live transcript") expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+	});
+}
+
+test("round55 restore reports a dangling live transcript rather than a late collision", async () => {
+	await archiveEverything();
+	await fs.symlink(path.join(root, "missing"), sessionFile);
+	for (const apply of [false, true]) {
+		const result = await runGcCommand({ flags: restoreApply(apply) });
+		expect(result.restore?.errors.join("\n")).toContain("a symbolic link");
+		expect(result.restore?.errors.join("\n")).not.toContain("EEXIST");
+	}
+	expect((await fs.lstat(sessionFile)).isSymbolicLink()).toBe(true);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("round55 materialize reports a dangling unfinished-restore record", async () => {
+	await archiveOnly();
+	const record = restoreRecordPath(archiveFile);
+	await fs.symlink(path.join(root, "missing"), record);
+	await expect(materializeSessionFile(sessionFile, root)).rejects.toThrow("a symbolic link");
+	expect((await fs.lstat(record)).isSymbolicLink()).toBe(true);
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+});
+
+test("round55 archive names a symbolic link at its destination", async () => {
+	await fs.mkdir(path.dirname(archiveFile), { recursive: true });
+	await fs.symlink(path.join(root, "missing"), archiveFile);
+	const result = await archiveOnly();
+	expect(result.archive?.errors.join("\n")).toContain("a symbolic link");
+	expect(result.archive?.errors.join("\n")).not.toContain("a special file");
+	expect(result.archive?.archived).toBe(0);
+	expect((await fs.lstat(archiveFile)).isSymbolicLink()).toBe(true);
+});
+
+for (const target of ["missing", "stale"] as const) {
+	test(`round55 gc refuses a ${target} lock symbolic link in preview and apply`, async () => {
+		await archiveOnly();
+		const lock = path.join(root, "gc.lock");
+		const outside = path.join(root, "outside-lock");
+		if (target === "stale") await Bun.write(outside, `2147483647\n2026-01-01T00:00:00.000Z\n${"a".repeat(64)}\n`);
+		await fs.symlink(outside, lock);
+		for (const apply of [false, true]) {
+			await expect(runGcCommand({ flags: { ...reclaimApply(), apply } })).rejects.toThrow("a symbolic link");
+		}
+		expect((await fs.lstat(lock)).isSymbolicLink()).toBe(true);
+		if (target === "stale") expect(await Bun.file(outside).text()).toContain("2147483647");
+		expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+	});
+}
+
+for (const site of ["archive tree", "live tree"] as const) {
+	test(`round55 restore reports a dangling ${site} rather than treating it as absent`, async () => {
+		await archiveOnly();
+		const entry = site === "archive tree" ? archiveFile.slice(0, -9) : sessionFile.slice(0, -6);
+		await fs.symlink(path.join(root, "missing-tree"), entry);
+		for (const apply of [false, true]) {
+			const result = await runGcCommand({ flags: restoreApply(apply) });
+			expect(result.restore?.errors.join("\n")).toContain("a symbolic link");
+		}
+		expect((await fs.lstat(entry)).isSymbolicLink()).toBe(true);
+		expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+	});
+}
+
+test("round55 a dangling archive name cannot hide an unfinished restore from materialize", async () => {
+	await archiveOnly();
+	await fs.unlink(archiveFile);
+	await fs.symlink(path.join(root, "missing-archive"), archiveFile);
+	await fs.symlink(path.join(root, "missing-record"), restoreRecordPath(archiveFile));
+	await expect(materializeSessionFile(sessionFile, root)).rejects.toThrow("a symbolic link");
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+});
+
+test("round55 a dangling breaker lock is reported without an invented acquisition race", async () => {
+	await archiveOnly();
+	await leaveDeadGcLock(root);
+	const breaker = path.join(root, "gc.lock.break");
+	await fs.symlink(path.join(root, "missing-breaker"), breaker);
+	for (const apply of [false, true]) {
+		await expect(runGcCommand({ flags: { ...reclaimApply(), apply } })).rejects.toThrow("a symbolic link");
+	}
+	expect((await fs.lstat(breaker)).isSymbolicLink()).toBe(true);
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+});
+
+test("round55 a failed whole-transcript check cannot archive a partially scanned session", async () => {
+	await Bun.write(
+		sessionFile,
+		`${JSON.stringify({ type: "session", version: 3, id: SESSION_ID, timestamp: "2026-01-01T00:00:00.000Z", cwd: root })}\n`,
+	);
+	const open = fs.open;
+	let reads = 0;
+	spyOn(fs, "open").mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+		if (String(args[0]) === sessionFile && ++reads === 2) throw round54Error("whole-transcript check");
+		return await Reflect.apply(open, fs, args);
+	}) as typeof fs.open);
+	const result = await archiveOnly();
+	expect(result.archive?.errors.join("\n")).toContain("EIO: round54 whole-transcript check");
+	expect(result.archive?.archived).toBe(0);
+	expect(result.archive?.skippedActive).toBe(0);
+	expect(result.archive?.scanned).toBeUndefined();
+	expect(await Bun.file(sessionFile).text()).toContain(SESSION_ID);
+});
+
+test("round55 restore reports a failed archive-name lookup instead of rejecting its preview", async () => {
+	await archiveOnly();
+	const stat = fs.stat;
+	const lstat = fs.lstat;
+	for (const [name, call] of [
+		["stat", stat],
+		["lstat", lstat],
+	] as const) {
+		spyOn(fs, name).mockImplementation((async (...args: Parameters<typeof fs.stat>) => {
+			if (String(args[0]) === archiveFile) throw round54Error("restore archive lookup");
+			return await Reflect.apply(call, fs, args);
+		}) as typeof stat);
+	}
+	for (const apply of [false, true]) {
+		const result = await runGcCommand({ flags: { ...restoreApply(apply), restore: archiveFile } });
+		expect(result.restore?.errors.join("\n")).toContain("EIO: round54 restore archive lookup");
+	}
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+});
+
+test("round55 reclaim names a stranded tree symbolic link when its transcript is absent", async () => {
+	await archiveOnly();
+	await fs.unlink(sessionFile);
+	const tree = sessionFile.slice(0, -6);
+	await fs.symlink(path.join(root, "missing-tree"), tree);
+	for (const apply of [false, true]) {
+		const result = await runGcCommand({ flags: { ...reclaimApply(), apply } });
+		expect(result.reclaim?.errors.join("\n")).toContain("a symbolic link");
+		expect(result.reclaim?.keptArtifactTree).toBe(tree);
+		expect(result.reclaim?.errors.join("\n")).not.toContain("already given back");
+	}
+	expect((await fs.lstat(tree)).isSymbolicLink()).toBe(true);
+});
+
+test("round55 archive reports a symbolic link at the legacy transcript name in preview and apply", async () => {
+	const legacy = archiveFile.slice(0, -3);
+	await fs.mkdir(path.dirname(legacy), { recursive: true });
+	await fs.symlink(path.join(root, "missing-legacy"), legacy);
+	const old = new Date(0);
+	await fs.utimes(sessionFile, old, old);
+	for (const apply of [false, true]) {
+		const result = await runGcCommand({
+			flags: {
+				agentDir: root,
+				archive: true,
+				apply,
+				json: true,
+				coldArchiveAfterDays: 0,
+				retainNewestGlobal: 0,
+				retainNewestPerCwd: 0,
+			},
+		});
+		expect(result.archive?.errors.join("\n")).toContain("a symbolic link");
+		expect(result.archive?.archived).toBe(0);
+	}
+	expect((await fs.lstat(legacy)).isSymbolicLink()).toBe(true);
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+});
+
+test("round55 restore refuses a symbolic link at the reclaimed container before moving any original", async () => {
+	await archiveOnly();
+	expect((await runGcCommand({ flags: reclaimApply() })).reclaim?.reclaimed).toBe(1);
+	const container = path.dirname(reclaimedNames().transcript);
+	const moved = path.join(root, "originals-outside");
+	await fs.rename(container, moved);
+	await fs.symlink(moved, container);
+	for (const apply of [false, true]) {
+		const result = await runGcCommand({ flags: restoreApply(apply) });
+		expect(result.restore?.errors.join("\n")).toContain("a symbolic link");
+		expect(await Bun.file(sessionFile).exists()).toBe(false);
+		expect(await Bun.file(path.join(moved, path.basename(sessionFile))).text()).toContain(PROMPT);
+	}
+	expect((await fs.lstat(container)).isSymbolicLink()).toBe(true);
+});
+
+test("round55 reclaim names a symbolic link instead of accepting an archived artifact alias", async () => {
+	const artifact = path.join(sessionFile.slice(0, -6), "a.log");
+	const copy = path.join(archiveFile.slice(0, -9), "a.log");
+	await Bun.write(artifact, "ORIGINAL");
+	await archiveOnly();
+	await fs.unlink(copy);
+	await fs.symlink(artifact, copy);
+	for (const apply of [false, true]) {
+		const result = await runGcCommand({ flags: { ...reclaimApply(), apply } });
+		expect(result.reclaim?.errors.join("\n")).toContain("a symbolic link");
+		expect(result.reclaim?.reclaimed).toBe(0);
+	}
+	expect(await Bun.file(artifact).text()).toBe("ORIGINAL");
+	expect((await fs.lstat(copy)).isSymbolicLink()).toBe(true);
+});
+
+for (const site of ["transcript", "artifact"] as const) {
+	test(`round55 archive reports a symbolic link put at its ${site} destination during open`, async () => {
+		const artifact = path.join(sessionFile.slice(0, -6), "a.log");
+		await Bun.write(artifact, "ORIGINAL ARTIFACT");
+		const destination = site === "transcript" ? archiveFile : path.join(archiveFile.slice(0, -9), "a.log");
+		const foreign = path.join(root, "foreign");
+		const foreignBytes =
+			site === "transcript" ? gzipSync(Buffer.from("FOREIGN TRANSCRIPT")) : Buffer.from("FOREIGN ARTIFACT");
+		await Bun.write(foreign, foreignBytes);
+		const open = fs.open;
+		let replaced = false;
+		spyOn(fs, "open").mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+			if (!replaced && String(args[0]) === destination) {
+				replaced = true;
+				await fs.rename(destination, `${destination}.original`).catch(error => {
+					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+				});
+				await fs.symlink(foreign, destination);
+			}
+			return await Reflect.apply(open, fs, args);
+		}) as typeof fs.open);
+		const result = await archiveOnly();
+		expect(result.archive?.errors.join("\n")).toContain("a symbolic link");
+		expect(result.archive?.archived).toBe(0);
+		expect((await fs.lstat(destination)).isSymbolicLink()).toBe(true);
+		expect(await fs.readFile(foreign)).toEqual(foreignBytes);
+		expect(await Bun.file(artifact).text()).toBe("ORIGINAL ARTIFACT");
+		expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+	});
+}

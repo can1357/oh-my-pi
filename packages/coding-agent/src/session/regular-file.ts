@@ -27,6 +27,7 @@ import { errnoName, isErrno, type Libc, libc, type NoReplaceRename, renameNoRepl
 /** What a name stands for when it is not a regular file, in a reader's words: "a FIFO", "a socket", "a device". */
 export function kindOf(stat: Stats): string {
 	if (stat.isDirectory()) return "a directory";
+	if (stat.isSymbolicLink()) return "a symbolic link";
 	if (stat.isFIFO()) return "a FIFO";
 	if (stat.isSocket()) return "a socket";
 	if (stat.isCharacterDevice() || stat.isBlockDevice()) return "a device";
@@ -43,8 +44,8 @@ export class NotARegularFile extends Error {
 		readonly kind: string,
 	) {
 		super(
-			kind === "a directory"
-				? `${file} is a directory, not a regular file, so it was not read`
+			kind === "a directory" || kind === "a symbolic link"
+				? `${file} is ${kind}, not a regular file, so it was not read`
 				: `${file} is ${kind}, not a regular file, so it was not read: reading ${kind} takes what is written to it ` +
 						`away from whoever it was written for, and no copy of it would be kept`,
 		);
@@ -69,6 +70,15 @@ export async function openRegularFile(
 	file: string,
 	options: { write?: boolean; noFollow?: boolean } = {},
 ): Promise<fs.FileHandle | undefined> {
+	if (options.noFollow) {
+		try {
+			const named = await fs.lstat(file);
+			if (named.isSymbolicLink()) throw new NotARegularFile(file, kindOf(named));
+		} catch (error) {
+			if (isEnoent(error) || (error as NodeJS.ErrnoException).code === "ENOTDIR") return undefined;
+			throw error;
+		}
+	}
 	const flags =
 		(options.write ? fsConstants.O_WRONLY : fsConstants.O_RDONLY) |
 		fsConstants.O_NONBLOCK |
@@ -78,6 +88,9 @@ export async function openRegularFile(
 		handle = await fs.open(file, flags);
 	} catch (error) {
 		if (isEnoent(error)) return undefined;
+		if (options.noFollow && (error as NodeJS.ErrnoException).code === "ELOOP") {
+			throw new NotARegularFile(file, "a symbolic link");
+		}
 		// A FIFO with no reader, opened to write, or a socket or a device
 		// nobody drives: something is there, and it is no regular file.
 		if (error instanceof Error && "code" in error && error.code === "ENXIO") {
@@ -936,6 +949,22 @@ const RENAME_LOCKING_FLAGS = 0x10 | 0x20;
 /** Whether `entry` carries an immutable or append-only flag; a failed probe throws. */
 async function renameLocked(entry: string, directory: boolean): Promise<boolean> {
 	const lib = libc();
+	if (lib.statx) {
+		// Linux's fixed 256-byte statx ABI: attributes at 0x08 and their
+		// supported-bit mask at 0x38. Unlike open/ioctl this needs no read
+		// permission on the entry rename(2) would move.
+		const stat = Buffer.alloc(256);
+		if (lib.statx(entry, stat) === 0) {
+			const supported = stat.readUInt32LE(0x38);
+			if ((stat.readUInt32LE(0x08) & supported & RENAME_LOCKING_FLAGS) !== 0) return true;
+			if ((supported & RENAME_LOCKING_FLAGS) === RENAME_LOCKING_FLAGS) return false;
+		} else {
+			const errno = lib.errno();
+			if (!isErrno(errno, "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EINVAL")) {
+				throw new Error(`inode flags of ${entry} could not be checked (statx: ${errnoName(errno)})`);
+			}
+		}
+	}
 	const ioctl = lib.ioctl;
 	if (!ioctl) throw new Error(`inode flags of ${entry} could not be checked (no ioctl binding here)`);
 	const flags =
@@ -943,7 +972,9 @@ async function renameLocked(entry: string, directory: boolean): Promise<boolean>
 		fsConstants.O_NOFOLLOW |
 		fsConstants.O_NONBLOCK |
 		(directory ? fsConstants.O_DIRECTORY : 0);
-	const handle = await fs.open(entry, flags);
+	const handle = await fs.open(entry, flags).catch((error: unknown) => {
+		throw new Error(`inode flags of ${entry} could not be checked (${errorText(error)})`, { cause: error });
+	});
 	try {
 		const into = Buffer.alloc(8);
 		if (ioctl(handle.fd, FS_IOC_GETFLAGS, into) !== 0) {

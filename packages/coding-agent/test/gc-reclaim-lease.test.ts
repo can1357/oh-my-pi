@@ -480,16 +480,16 @@ for (const signal of ["SIGTERM", "SIGKILL"] as const) {
 	);
 }
 
-for (const scope of ["another process", "this process"] as const) {
+for (const scope of ["the process listing", "this process"] as const) {
 	test.skipIf(!leasesGranted || process.platform !== "linux")(
 		`round54 failed descriptor lookup for ${scope} is unknown, not an invisible holder`,
 		async () => {
 			const own = await fs.open(artifact, "r");
 			const readdir = fs.readdir;
 			const stat = fs.stat;
-			if (scope === "another process") {
+			if (scope === "the process listing") {
 				spyOn(fs, "readdir").mockImplementation((async (...args: Parameters<typeof fs.readdir>) => {
-					if (String(args[0]) === "/proc/1/fd") {
+					if (String(args[0]) === `/proc/${process.pid}/fd`) {
 						throw Object.assign(new Error("EIO: round54 other descriptors"), { code: "EIO" });
 					}
 					return await Reflect.apply(readdir, fs, args);
@@ -506,7 +506,7 @@ for (const scope of ["another process", "this process"] as const) {
 				const result = await reclaim(true);
 				const said = result.reclaim?.errors.join("\n") ?? "";
 				expect(said).toContain(
-					scope === "another process" ? "EIO: round54 other descriptors" : "EIO: round54 own descriptors",
+					scope === "the process listing" ? "EIO: round54 other descriptors" : "EIO: round54 own descriptors",
 				);
 				expect(said).not.toContain("holder is one this run cannot see");
 				expect(said).not.toContain("no other process this run can list holds");
@@ -518,3 +518,59 @@ for (const scope of ["another process", "this process"] as const) {
 		},
 	);
 }
+
+test.skipIf(!leasesGranted || process.platform !== "linux")(
+	"round55 inaccessible processes are counted compactly while the observed holder is named",
+	async () => {
+		const own = await fs.open(artifact, "r");
+		const readdir = fs.readdir;
+		spyOn(fs, "readdir").mockImplementation((async (...args: Parameters<typeof fs.readdir>) => {
+			const target = String(args[0]);
+			if (target === "/proc") return ["1", String(process.pid)];
+			if (target === "/proc/1/fd") throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+			return await Reflect.apply(readdir, fs, args);
+		}) as typeof fs.readdir);
+		try {
+			const result = await reclaim(true);
+			const said = result.reclaim?.errors.join("\n") ?? "";
+			expect(said).toContain("1 process");
+			expect(said).toContain("could not be listed (EACCES)");
+			expect(said).toContain(`this omp process (${process.pid}) itself holds`);
+			expect(said).not.toContain("/proc/1/fd");
+			expect(said.length).toBeLessThan(4000);
+			expect(result.reclaim?.reclaimed).toBe(0);
+			expect(await Bun.file(artifact).text()).toBe("FIRST");
+		} finally {
+			await own.close();
+		}
+	},
+);
+
+test.skipIf(!leasesGranted || process.platform !== "linux")(
+	"round55 many failed descriptor probes remain bounded and retain their observed EIO",
+	async () => {
+		const own = await fs.open(artifact, "r");
+		const readdir = fs.readdir;
+		spyOn(fs, "readdir").mockImplementation((async (...args: Parameters<typeof fs.readdir>) => {
+			const target = String(args[0]);
+			if (target === "/proc")
+				return [String(process.pid), ...Array.from({ length: 200 }, (_, i) => String(900000 + i))];
+			if (/^\/proc\/900\d+\/fd$/.test(target)) {
+				throw Object.assign(new Error("EIO: round55 descriptor probe"), { code: "EIO" });
+			}
+			return await Reflect.apply(readdir, fs, args);
+		}) as typeof fs.readdir);
+		try {
+			const result = await reclaim(true);
+			const said = result.reclaim?.errors.join("\n") ?? "";
+			expect(said).toContain("EIO: round55 descriptor probe");
+			expect(said).toContain(`this omp process (${process.pid}) itself holds`);
+			expect(said).toContain("more failed");
+			expect(said.length).toBeLessThan(6000);
+			expect(result.reclaim?.reclaimed).toBe(0);
+			expect(await Bun.file(artifact).text()).toBe("FIRST");
+		} finally {
+			await own.close();
+		}
+	},
+);

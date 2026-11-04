@@ -2316,16 +2316,18 @@ describe("runGcCommand session compression", () => {
 			test("a scratch copy opened by another process after its proof is kept, with what that process writes", async () => {
 				await metadataDitto(false);
 				const { candidate } = await privateZeros();
-				const lstat = fs.lstat;
+				const moveAside = regularFile.moveAside;
 				let copy: string | undefined;
 				let writer: DescriptorWriter | undefined;
-				spyOn(fs, "lstat").mockImplementation((async (target: string, ...rest: unknown[]) => {
-					if (copy === undefined && isScratchCopy(String(target))) {
-						copy = String(target);
+				// Cleanup reaches moveAside only after taking the lease and proving
+				// the copy. openRegularFile's no-follow lstat happens before that proof.
+				spyOn(regularFile, "moveAside").mockImplementation(async (file, rule) => {
+					if (copy === undefined && isScratchCopy(file)) {
+						copy = file;
 						writer = await descriptorWriter(copy, "ONLY WRITER BYTES");
 					}
-					return await (lstat as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
-				}) as typeof fs.lstat);
+					return await moveAside(file, rule);
+				});
 
 				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
 				const state = await writer!.append();
@@ -3174,7 +3176,7 @@ test("round54 failed lock takeover reports the breaker left by this process too"
 	expect(await Bun.file(breaker).text()).toContain(`${process.pid}\n`);
 });
 
-test("round54 a stale symlink lock kept by unlink is not a running gc", async () => {
+test("round54 a stale symlink lock is reported as a link, not a running gc", async () => {
 	await leaveDeadGcLock(root);
 	const lock = path.join(root, "gc.lock");
 	const target = path.join(root, "stale-target");
@@ -3182,7 +3184,7 @@ test("round54 a stale symlink lock kept by unlink is not a running gc", async ()
 	await fs.symlink(target, lock);
 	const run = runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
 	await expect(run).rejects.not.toThrow("GC already running");
-	await expect(run).rejects.toThrow("left");
+	await expect(run).rejects.toThrow("a symbolic link");
 	expect((await fs.lstat(lock)).isSymbolicLink()).toBe(true);
 	expect(await Bun.file(target).exists()).toBe(true);
 });
