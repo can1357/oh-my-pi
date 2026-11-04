@@ -32,6 +32,7 @@
 - Ask notes added on successive single-select questions now start with an empty editor and stay with their respective answers ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
 
 - Closing an overlay that others were opened over no longer leaves them returning focus to it once they close ([#16476](https://github.com/can1357/oh-my-pi/pull/16476))
+- Fixed tool-call echo cards corrupting payload bytes (`$` sigils dropped, identifiers subscripted, lines re-flowed): bash command, write file-content, and code echoes stay byte-verbatim with every byte recoverable (expanded soft-wraps across `↪`-marked rows, collapsed clips with a visible `…`), and task brief/context render as markdown with math spans and BRE groups kept literal ([#13736](https://github.com/can1357/oh-my-pi/pull/13736) by [@yingliang-zhang](https://github.com/yingliang-zhang)).
 
 ### Changed
 
