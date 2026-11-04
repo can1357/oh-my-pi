@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 30;
+pub const FRAMES_VERSION: u32 = 31;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -256,6 +256,8 @@ struct ProcImage {
 	subshell:      u32,
 	/// Engine process nesting (not reset by a nested shell).
 	fork_depth:    u8,
+	/// Runtime script depth retained in ancestor processes.
+	script_base:   u16,
 	/// `BASH_COMMAND`: the unit (written to the store) and syntax node; a
 	/// trap action that runs after the restore still names the trapped
 	/// command.
@@ -588,6 +590,7 @@ impl Shell {
 				trace_base: p.trace_base,
 				subshell: p.subshell,
 				fork_depth: p.fork_depth,
+				script_base: p.script_base,
 				command,
 				calls: p.calls.clone(),
 				own_traps: p.own_traps,
@@ -814,6 +817,7 @@ impl Shell {
 			vp.trace_base = p.trace_base;
 			vp.subshell = p.subshell;
 			vp.fork_depth = p.fork_depth;
+			vp.script_base = p.script_base;
 			vp.calls = p.calls;
 			vp.own_traps = p.own_traps;
 			vp.mode = p.mode;

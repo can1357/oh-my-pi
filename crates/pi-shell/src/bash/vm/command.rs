@@ -2011,12 +2011,12 @@ fn call_function(
 	name: BString,
 ) -> Option<Flow> {
 	let depth = vp
-		.frames
+		.calls
 		.iter()
-		.filter(|f| matches!(f.kind, FrameKind::Function { .. }))
+		.filter(|c| matches!(c.kind, super::callstack::CallKind::Function { .. }))
 		.count() as u32;
-	// A positive FUNCNEST lowers the engine limit. Bash 5.3 ends this
-	// shell on refusal, even through root eval/source and lastpipe.
+	// A positive FUNCNEST lowers the engine limit. Inherited calls count
+	// in subshells too; an EXIT trap keeps the status that started it.
 	let funcnest = match state::lookup(&k.root, cx.store, vp, b"FUNCNEST") {
 		Ok(v) => v
 			.and_then(|v| v.as_scalar())
@@ -2043,7 +2043,7 @@ fn call_function(
 		let max = funcnest.unwrap_or(max);
 		k.diag(cx, vp, line, Diag::FuncNest { name, max });
 		return Some(if vp.mode.dialect() == Dialect::Bash {
-			Flow::Exit(1)
+			Flow::Exit(exec::nesting_status(vp))
 		} else {
 			Flow::Discard(1)
 		});

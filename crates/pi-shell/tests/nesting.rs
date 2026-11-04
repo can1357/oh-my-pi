@@ -180,6 +180,212 @@ golden!(
 	1
 );
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trap_refusals_obey_bash53_exit_status() {
+	for action in ["f", "eval 'f; printf INNER'", ". ./leaf.sh"] {
+		for (key, trigger, out, status) in [
+			("EXIT", ":; printf AFTER", "AFTER", 0),
+			("ERR", "false; printf AFTER", "", 1),
+			("DEBUG", ":; printf AFTER", "", 1),
+			("RETURN", "g(){ :; }; g; printf AFTER", "", 1),
+			("USR1", "kill -USR1 $$; printf AFTER", "", 1),
+		] {
+			let action = action.replace('\'', "'\\''");
+			let script = format!(
+				"set -T; FUNCNEST=1; f(){{ f; }}; printf 'f; printf INNER' > leaf.sh; trap '{action}; \
+				 printf WRONG' {key}; {trigger}"
+			);
+			assert_eq!(capture(&script).await, (out.into(), true, status), "{key}: {action}");
+		}
+	}
+}
+golden!(
+	exit_trap_refusal_preserves_failure,
+	"FUNCNEST=1; f(){ f; }; trap 'f; printf WRONG' EXIT; exit 7",
+	"",
+	true,
+	7
+);
+golden!(
+	exit_trap_eval_refusal_preserves_status,
+	"FUNCNEST=1; f(){ f; }; trap \"eval 'f; printf INNER'; printf WRONG\" EXIT; exit 7",
+	"",
+	true,
+	7
+);
+golden!(
+	exit_trap_source_refusal_preserves_status,
+	"FUNCNEST=1; f(){ f; }; printf 'f; printf INNER' > leaf.sh; trap '. ./leaf.sh; printf WRONG' \
+	 EXIT; exit 7",
+	"",
+	true,
+	7
+);
+golden!(
+	funcnest_is_inherited_by_command_substitution,
+	"FUNCNEST=1; f(){ if (( $1 > 0 )); then printf '[%s]' \"$(f $(( $1 - 1 )))\"; else printf \
+	 BOTTOM; fi; }; f 2; printf AFTER",
+	"[]AFTER",
+	true,
+	0
+);
+golden!(
+	funcnest_is_inherited_by_subshell,
+	"FUNCNEST=1; f(){ if (( $1 > 0 )); then ( f $(( $1 - 1 )) ); printf OUT; else printf BOTTOM; \
+	 fi; }; f 2; printf AFTER",
+	"OUTAFTER",
+	true,
+	0
+);
+golden!(
+	funcnest_is_inherited_by_pipeline,
+	"FUNCNEST=1; f(){ if (( $1 > 0 )); then f $(( $1 - 1 )) | cat; printf OUT; else printf BOTTOM; \
+	 fi; }; f 2; printf AFTER",
+	"OUTAFTER",
+	true,
+	0
+);
+golden!(
+	funcnest_is_inherited_by_process_substitution,
+	"FUNCNEST=1; f(){ if (( $1 > 0 )); then cat <(f $(( $1 - 1 ))); wait; printf OUT; else printf \
+	 BOTTOM; fi; }; f 2; printf AFTER",
+	"OUTAFTER",
+	true,
+	0
+);
+golden!(
+	funcnest_is_inherited_by_coproc,
+	"FUNCNEST=1; f(){ if (( $1 > 0 )); then coproc C { f $(( $1 - 1 )); }; wait \"$C_PID\"; printf \
+	 OUT; else printf BOTTOM; fi; }; f 2; printf AFTER",
+	"OUTAFTER",
+	true,
+	0
+);
+golden!(
+	funcnest_is_inherited_by_background,
+	"FUNCNEST=1; f(){ if (( $1 > 0 )); then f $(( $1 - 1 )) & wait; printf OUT; else printf \
+	 BOTTOM; fi; }; f 2; printf AFTER",
+	"OUTAFTER",
+	true,
+	0
+);
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_callout_children_cannot_reset_nesting_bounds() {
+	if isolated("host_callout_children_cannot_reset_nesting_bounds").await {
+		return;
+	}
+	for child in [
+		"timeout 0 eval \"$x\"",
+		"nohup eval \"$x\"",
+		"env eval \"$x\"",
+		"command timeout 0 eval \"$x\"",
+		"command eval \"$x\"",
+		"builtin eval \"$x\"",
+		"find . -maxdepth 0 -exec eval \"$x\" \\;",
+		"xargs -I % eval \"$x\" < seed",
+	] {
+		for limit in [2, 100, 700] {
+			let script = format!(
+				"printf 'go\\n' > seed; n=0; x='if ((++n<{limit})); then {child}; else printf BOTTOM; \
+				 fi'; {child}"
+			);
+			let result = capture(&script).await;
+			if limit == 2
+				|| (matches!(child, "builtin eval \"$x\"" | "command eval \"$x\"") && limit == 100)
+			{
+				assert_eq!(result, ("BOTTOM".into(), false, 0), "{child}");
+			} else {
+				assert_eq!(result.0, "", "{child} at {limit}");
+				assert!(result.1, "{child} at {limit}: no diagnostic");
+			}
+		}
+	}
+	for child in [
+		"timeout 0 f 0",
+		"nohup f 0",
+		"env eval \"f 0\"",
+		"find . -maxdepth 0 -exec eval \"f 0\" \\;",
+		"xargs -I % eval \"f 0\" < seed",
+	] {
+		let script = format!(
+			"printf 'go\\n' > seed; FUNCNEST=1; f(){{ if (( $1 )); then {child}; else printf BOTTOM; \
+			 fi; }}; f 1; printf AFTER"
+		);
+		assert_eq!(capture(&script).await, ("AFTER".into(), true, 0), "{child}");
+	}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn script_depth_survives_children_without_resetting() {
+	if isolated("script_depth_survives_children_without_resetting").await {
+		return;
+	}
+	for (run, child, status) in [
+		("eval \"$x\"", "timeout 0 eval \"$x\"", 1),
+		("eval \"$x\"", "( eval \"$x\" )", 1),
+		("eval \"$x\"", ": \"$(eval \"$x\")\"", 0),
+		(". ./self.sh", "timeout 0 . ./self.sh", 1),
+		(". ./self.sh", "( . ./self.sh )", 1),
+		(". ./self.sh", ": \"$(. ./self.sh)\"", 0),
+	] {
+		let script = format!(
+			"n=0; x='if ((++n==300)); then {child}; elif ((n<600)); then {run}; else printf BOTTOM; \
+			 fi'; printf '%s' \"$x\" > self.sh; {run}"
+		);
+		assert_eq!(capture(&script).await, (String::new(), true, status), "{child}");
+	}
+	// A new shell resets Bash state, not the engine's retained-frame bound.
+	let script = br#"export n x; n=0; x='if ((++n==300)); then bash -c '\''eval "$x"'\''; elif ((n<600)); then eval "$x"; else printf BOTTOM; fi'; eval "$x""#;
+	for fault in [pi_shell::testkit::Fault::None, pi_shell::testkit::Fault::Snapshot { every: 100 }]
+	{
+		let result =
+			pi_shell::testkit::run_script(pi_shell::testkit::FakeHost::new(), script, &[], fault);
+		assert_eq!(result.stdout, b"");
+		assert!(!result.stderr.is_empty());
+		assert_eq!(result.status, 1);
+		if matches!(fault, pi_shell::testkit::Fault::Snapshot { .. }) {
+			assert!(result.snapshots > 0, "depth must survive an actual restore");
+		}
+	}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trap_script_caps_preserve_exit_status() {
+	if isolated("trap_script_caps_preserve_exit_status").await {
+		return;
+	}
+	for action in ["eval \"$x\"", ". ./self.sh"] {
+		for (key, trigger, status) in [
+			("EXIT", ":", 0),
+			("ERR", "false", 1),
+			("DEBUG", ":", 1),
+			("RETURN", "g(){ :; }; g", 1),
+			("USR1", "kill -USR1 $$", 1),
+		] {
+			let script = format!(
+				"set -T; x='eval \"$x\"'; printf '. ./self.sh' > self.sh; trap '{action}; printf \
+				 WRONG' {key}; {trigger}"
+			);
+			assert_eq!(capture(&script).await, (String::new(), true, status), "{key}: {action}");
+		}
+	}
+	// A child refusal does not abort its caller's trap action.
+	for (key, trigger, out) in [
+		("EXIT", ":; printf AFTER", "AFTEREND"),
+		("ERR", "false; printf AFTER", "ENDAFTER"),
+		("DEBUG", ":; printf AFTER", "ENDENDAFTER"),
+		("RETURN", "g(){ :; }; g; printf AFTER", "ENDAFTER"),
+		("USR1", "kill -USR1 $$; printf AFTER", "ENDAFTER"),
+	] {
+		let trace = if key == "RETURN" { "set -T;" } else { "" };
+		let script = format!(
+			"{trace} x=': \"$(eval \"$x\")\"'; trap 'eval \"$x\"; printf END' {key}; {trigger}"
+		);
+		assert_eq!(capture(&script).await, (out.into(), true, 0), "{key}");
+	}
+}
+
 macro_rules! bounded {
 	($name:ident, $script:expr) => {
 		#[tokio::test(flavor = "multi_thread", worker_threads = 2)]

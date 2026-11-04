@@ -746,11 +746,25 @@ fn features(
 const MAX_SCRIPT_DEPTH: usize = 500;
 const MAX_FORK_DEPTH: u32 = 64;
 
+/// A refusal ends this shell, but an active EXIT trap preserves its
+/// interrupted status rather than replacing it with the refusal's 1.
+pub fn nesting_status(vp: &Vproc) -> i32 {
+	vp.frames
+		.iter()
+		.find_map(|f| match f.kind {
+			FrameKind::Script {
+				what: ScriptKind::Trap { key: TrapKey::Exit, status, .. }, ..
+			} => Some(status),
+			_ => None,
+		})
+		.unwrap_or(1)
+}
+
 fn nesting_error(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, kind: &str, max: u32) {
 	k.diag(cx, vp, line, Diag::Usage {
 		msg: format!("{kind}: maximum nesting level exceeded ({max})").into(),
 	});
-	exit_shell(k, vp, cx, 1);
+	exit_shell(k, vp, cx, nesting_status(vp));
 }
 
 /// Parse and compile the next command of the top script frame; pop the
@@ -764,13 +778,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 	if let Some(FrameKind::Script { pos: (0, line), what, .. }) = vp.frames.last().map(|f| &f.kind)
 		&& matches!(what, ScriptKind::Eval | ScriptKind::Source)
 	{
-		let depth = vp
-			.frames
-			.iter()
-			.filter(|f| {
-				matches!(f.kind, FrameKind::Script { what: ScriptKind::Eval | ScriptKind::Source, .. })
-			})
-			.count();
+		let depth = vp.script_depth();
 		if depth > MAX_SCRIPT_DEPTH {
 			let kind = if *what == ScriptKind::Source {
 				"source"
