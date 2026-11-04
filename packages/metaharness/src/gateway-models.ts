@@ -54,17 +54,22 @@ export function refuseGatewayTokenInEnv(env: Record<string, string>, tokens: str
  * Refuse `value` when any string in it, key or value, holds any of `tokens`. Use it on
  * everything that is stored (a launch request, the runner's config snapshot) or reaches omp
  * as text (settings, agent arguments, environment): the token goes only to omp's private file.
+ * The refusal says where the token is but never repeats any of `tokens`: a key holding one is
+ * reported as a key, and a location that would still hold one (the caller's `where`, or keys
+ * that join into a token) gives way to a fixed text.
  */
 export function refuseGatewayTokenIn(value: unknown, tokens: string | readonly string[], where: string): void {
-	for (const token of typeof tokens === "string" ? [tokens] : tokens) {
-		if (token === NO_AUTH_TOKEN || token.length === 0) continue;
-		const at = findToken(value, token, where);
-		if (at !== undefined) {
-			throw new Error(
-				`${at} holds the gateway token, which must not be stored or reach omp except through its private file`,
-			);
-		}
-	}
+	const live = (typeof tokens === "string" ? [tokens] : tokens).filter(
+		token => token.length > 0 && token !== NO_AUTH_TOKEN,
+	);
+	if (live.length === 0) return;
+	const holds = (text: string): boolean => live.some(token => text.includes(token));
+	const at = findText(value, holds, where);
+	if (at === undefined) return;
+	const location = [at, where].find(text => !holds(text)) ?? "a value";
+	throw new Error(
+		`${location} holds the gateway token, which must not be stored or reach omp except through its private file`,
+	);
 }
 
 /**
@@ -74,30 +79,31 @@ export function refuseGatewayTokenIn(value: unknown, tokens: string | readonly s
  */
 export function refuseGatewayTokenReference(value: unknown, where: string): void {
 	for (const name of GATEWAY_TOKEN_VARS) {
-		const at = findToken(value, name, where);
+		const at = findText(value, text => text.includes(name), where);
 		if (at !== undefined) {
 			throw new Error(`${at} refers to ${name}, which would hand omp the gateway token`);
 		}
 	}
 }
 
-function findToken(value: unknown, token: string, at: string): string | undefined {
-	if (typeof value === "string") return value.includes(token) ? at : undefined;
+/** Where in `value` a string, key or value, `holds` text: the path below `at`, or undefined. */
+function findText(value: unknown, holds: (text: string) => boolean, at: string): string | undefined {
+	if (typeof value === "string") return holds(value) ? at : undefined;
 	// A number or boolean is written back out as its decimal or literal text.
 	if (typeof value === "number" || typeof value === "bigint" || typeof value === "boolean") {
-		return String(value).includes(token) ? at : undefined;
+		return holds(String(value)) ? at : undefined;
 	}
 	if (Array.isArray(value)) {
 		for (const [index, item] of value.entries()) {
-			const found = findToken(item, token, `${at}[${index}]`);
+			const found = findText(item, holds, `${at}[${index}]`);
 			if (found !== undefined) return found;
 		}
 		return undefined;
 	}
 	if (value !== null && typeof value === "object") {
 		for (const [key, item] of Object.entries(value)) {
-			if (key.includes(token)) return `a key of ${at}`;
-			const found = findToken(item, token, `${at}.${key}`);
+			if (holds(key)) return `a key of ${at}`;
+			const found = findText(item, holds, `${at}.${key}`);
 			if (found !== undefined) return found;
 		}
 	}

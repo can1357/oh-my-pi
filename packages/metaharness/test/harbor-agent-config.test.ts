@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $which } from "@oh-my-pi/pi-utils";
+import { refuseGatewayTokenIn } from "../src/gateway-models";
 import { buildHarborEnv, collectForwardEnv, parseArgs, writeGatewayTokenFile, writeModelsYaml } from "../src/runner";
 import { ManagerServer } from "../src/server";
 import type { ConsumerResult } from "./fixtures/omp-config-consumer";
@@ -588,6 +589,15 @@ describe("pi_upstream", () => {
 	);
 });
 
+describe("refuseGatewayTokenIn", () => {
+	it("names no known token in its refusal, even where the keys on the path join into one", () => {
+		// The value holds the first token under keys that hold none, but the path spells the second.
+		expect(() =>
+			refuseGatewayTokenIn({ outer: { inner: "first-bearer" } }, ["first-bearer", "outer.inner"], "the request"),
+		).toThrow(/^the request holds the gateway token/);
+	});
+});
+
 describe("runner", () => {
 	it(
 		"keeps the gateway token out of the dry-run output and the saved launch config",
@@ -641,9 +651,16 @@ describe("runner", () => {
 		CASE_TIMEOUT_MS,
 	);
 
-	it(
-		"refuses a generated job name that holds the token before it writes the launch snapshot",
-		async () => {
+	it.each([
+		{ name: "the selected token", env: {}, gatewayToken: "slugtok-bearer" },
+		{
+			name: "an inherited token that --gateway-token overrides",
+			env: { METAHARNESS_GATEWAY_TOKEN: "openrouter-slugtok-bearer" },
+			gatewayToken: "selected-safe-bearer",
+		},
+	])(
+		"refuses a generated job name that holds $name before it writes the launch snapshot",
+		async ({ env, gatewayToken }) => {
 			const { root } = await scratch("runner-token-slug-");
 			const bin = path.join(root, "bin");
 			for (const tool of ["harbor", "docker"]) await stubTool(path.join(bin, tool));
@@ -655,7 +672,7 @@ describe("runner", () => {
 					"--model",
 					"openrouter/slugtok.bearer",
 					"--gateway-token",
-					"slugtok-bearer",
+					gatewayToken,
 					"--gateway-url",
 					"http://127.0.0.1:1",
 					"--jobs-dir",
@@ -665,7 +682,7 @@ describe("runner", () => {
 					"--no-build",
 				],
 				{
-					env: { PATH: `${bin}:${Bun.env.PATH ?? "/usr/bin:/bin"}`, TMPDIR: os.tmpdir() },
+					env: { ...env, PATH: `${bin}:${Bun.env.PATH ?? "/usr/bin:/bin"}`, TMPDIR: os.tmpdir() },
 					stdout: "pipe",
 					stderr: "pipe",
 				},
@@ -982,6 +999,29 @@ describe("manager", () => {
 						delete process.env[variable];
 					}
 				}
+				// A refusal repeats no token the manager knows: a host variable whose name holds one
+				// token and whose value holds another is refused without being named.
+				const crossName = "REVIEW_review-second-bearer";
+				process.env[crossName] = token;
+				try {
+					const reason = await refusal(server.port ?? 0, "/api/runs", {
+						model: "openrouter/test-model",
+						environment: "docker",
+						jobName: "token-inherited",
+						gatewayToken: "review-other-bearer",
+						extraArgs: [
+							"--dry-run",
+							"--binary",
+							path.join(root, "omp-linux-x64"),
+							"--gateway-url",
+							"http://127.0.0.1:1",
+						],
+					});
+					expect(reason).toContain("a key of the manager's environment holds the gateway token");
+					expect(reason).not.toContain("review-second-bearer");
+				} finally {
+					delete process.env[crossName];
+				}
 				expect(await Bun.file(path.join(root, "token-inherited", "manager.json")).exists()).toBe(false);
 			} finally {
 				await manager.stop();
@@ -1014,6 +1054,17 @@ describe("manager", () => {
 				}
 				expect(await refusal(port, "/api/runs/token-probe/resume", { filterErrorTypes: [42] })).toContain(
 					"filterErrorTypes must be a list of strings",
+				);
+				// A valid token sent with a malformed filter is still a bearer the manager was given.
+				const filterToken = "review-filter-bearer";
+				expect(
+					await refusal(port, "/api/runs/token-probe/resume", {
+						filterErrorTypes: null,
+						gatewayToken: filterToken,
+					}),
+				).toContain("filterErrorTypes must be a list of strings");
+				expect(await refusal(port, "/api/experiments", { id: "filterexp", goal: filterToken })).toContain(
+					"holds the gateway token",
 				);
 
 				expect(await refusal(port, "/api/experiments", { id: "afterbad", goal: "ordinary goal" })).toBe(

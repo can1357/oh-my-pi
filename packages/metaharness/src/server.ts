@@ -507,11 +507,13 @@ export class ManagerServer {
 		jobName: string,
 		opts: { filterErrorTypes?: string[]; gatewayToken?: string } = {},
 	): { jobName: string; pid: number } {
+		// As for a launch: a token is learned as soon as it is known to be one, before any
+		// other field of the request can refuse it.
 		requireGatewayToken(opts.gatewayToken);
+		if (opts.gatewayToken !== undefined) this.#learnedGatewayTokens.add(opts.gatewayToken);
 		if (opts.filterErrorTypes !== undefined && !isStringList(opts.filterErrorTypes)) {
 			throw new Error("filterErrorTypes must be a list of strings");
 		}
-		if (opts.gatewayToken !== undefined) this.#learnedGatewayTokens.add(opts.gatewayToken);
 		const run = this.#store.getRun(jobName);
 		if (!run) throw new Error(`run ${jobName} not found`);
 		if (run.benchmark !== "harbor")
