@@ -1485,7 +1485,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#endComputerTurn();
 		} else if (this.#promptInFlightCount > 0) {
 			this.#acquirePowerAssertion();
-			this.#beginComputerTurn();
+			this.#resumeComputerTurn();
 		}
 	}
 
@@ -1536,7 +1536,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		} finally {
 			if (--this.#userWaitCount === 0 && this.#promptInFlightCount > 0) {
 				if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
-				else if (this.#agentKind === "main") resumeComputerTurnForOwner(this.#eval.getKernelOwnerId());
+				else this.#resumeComputerTurn();
 			}
 		}
 	}
@@ -1548,6 +1548,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#beginComputerTurn(): void {
 		if (this.#agentKind !== "main" || this.#userWaitCount > 0) return;
 		beginComputerTurnForOwner(this.#eval.getKernelOwnerId());
+	}
+
+	/** Continues a turn whose display hold a dialog or pause released, re-holding the display for its active run. */
+	#resumeComputerTurn(): void {
+		if (this.#agentKind !== "main" || this.#userWaitCount > 0) return;
+		resumeComputerTurnForOwner(this.#eval.getKernelOwnerId());
 	}
 
 	#endComputerTurn(): void {

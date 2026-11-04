@@ -174,7 +174,7 @@ describe("AgentSession computer display hold per turn", () => {
 		expect(computerTurnInFlight(owner)).toBeUndefined();
 	});
 
-	it("ends the display hold only after a paused agent parks, then resumes before its next tool", async () => {
+	it("releases the display hold once a paused agent parks, and resumes it before the next tool", async () => {
 		const target = createSession([{ ...step, delayMs: 50 }, { content: ["done"] }]);
 		let paused = false;
 		const parked = Promise.withResolvers<void>();
@@ -198,6 +198,7 @@ describe("AgentSession computer display hold per turn", () => {
 			agentPauseGate.resume();
 			await running;
 			expect(steps).toEqual([{ turn: 2, releases: 1 }]);
+			expect(resumes).toEqual(["1->2"]);
 			expect(releases).toEqual([1, 2]);
 		} finally {
 			agentPauseGate.resume();
