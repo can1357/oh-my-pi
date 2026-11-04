@@ -193,3 +193,16 @@ export const cfgExtensionAssistantTextRenderers = register({
 			"Let extensions change how assistant replies are drawn, redraw a reply in place, and receive clicks on their own links; the session, exports and model context keep the reply as written",
 	},
 });
+
+export const cfgExtensionTranscriptPresenters = register({
+	id: "extensionRenderers.transcriptPresenters",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Extensions",
+		label: "Extension Transcript Presenters",
+		description:
+			"Let extensions draw transcript blocks such as tool calls in full, as one compact row, or hidden; the session, exports and model context are unchanged",
+	},
+});
