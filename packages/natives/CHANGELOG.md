@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool's background functions that trap a signal: without job control `kill` no longer interrupts the command the job runs, so the trap runs and the job ends with its own status; pending traps run in signal order, and `kill -s EXIT` probes like `kill -0` ([#18108](https://github.com/can1357/oh-my-pi/pull/18108) by [@sjawhar](https://github.com/sjawhar))
+
 ### Changed
 
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections
