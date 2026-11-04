@@ -441,6 +441,23 @@ impl<'s> Parser<'s> {
 		self.feat
 	}
 
+	/// Under [`Features::ZSH`], the constructs left open where the input
+	/// ran out, outermost first, as zsh names them in `PS2`'s `%_` (`if`,
+	/// `then`, `dquote`, `cmdand`, `heredoc`, …); `None` for the bash
+	/// grammar. Describes the event the last [`Parser::next_command`] call
+	/// parsed: non-empty when the input ran out inside those constructs,
+	/// even if that call returned a command (a here-document cut short);
+	/// see [`crate::bash::syntax::zsh::ZshParser::cmdstack`].
+	pub fn zsh_cmdstack(&self) -> Option<Vec<&'static str>> {
+		let z = self.zsh.as_ref()?;
+		Some(
+			z.cmdstack()
+				.iter()
+				.map(|&cs| crate::bash::syntax::zsh::cmdname(cs))
+				.collect(),
+		)
+	}
+
 	/// Parse the next top-level command; `None` at end of input.
 	///
 	/// After an error the parser stays at end of input: a non-interactive

@@ -37,6 +37,7 @@ import type {
 	InternalUrl,
 	ProtocolHandler,
 	ResolveContext,
+	SchemeHost,
 	SchemeSpec,
 	UrlCompletion,
 	WriteContext,
@@ -149,8 +150,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		write: { via: "handler", payload: "verbatim", scope: "coordination", tier: () => "read" },
 	};
 
-	promptDoc(): string {
-		return agentPromptDoc.trim();
+	promptDoc(host: SchemeHost): string {
+		return prompt.render(agentPromptDoc, { subagent: host.subagent }).trim();
 	}
 
 	/**

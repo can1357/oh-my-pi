@@ -740,6 +740,12 @@ pub fn cond_test(
 				k.fail(e);
 				return Flow::Discard(1);
 			},
+			Err(Fail::Need(Need::Park(key))) => {
+				if let Some(f) = vp.frames.last_mut() {
+					f.scratch = Some(sc);
+				}
+				return Flow::Block(key);
+			},
 			// Only builtins expand subscripts through `Ctx`; a `[[ ]]`
 			// primary never parks.
 			Err(Fail::Need(Need::Sub(_))) => {

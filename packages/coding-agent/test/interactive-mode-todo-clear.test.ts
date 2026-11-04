@@ -49,7 +49,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, eventBus);
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, eventBus);
 	}
 
 	beforeAll(async () => {
