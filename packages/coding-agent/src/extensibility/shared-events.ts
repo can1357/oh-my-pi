@@ -185,8 +185,8 @@ export type SessionEvent =
  * Fired before each LLM call.
  *
  * Original session messages are NOT modified - only the messages sent to the
- * LLM are affected when a handler returns a replacement (the return shape
- * differs between extensions and hooks; see each subsystem's
+ * LLM are affected when a handler returns replacement `messages` (extensions
+ * and hooks both return the event's own message kind; see each subsystem's
  * `ContextEventResult`).
  */
 export interface ContextEvent {

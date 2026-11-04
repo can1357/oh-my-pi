@@ -27,7 +27,7 @@ export {
 	type AssistantTextRenderContext,
 	type AssistantTextRenderer,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
-import type { type as ArkType } from "@oh-my-pi/omptype";
+import type { type as ArkType, Type } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
 import type {
@@ -59,6 +59,7 @@ import type {
 	SimpleStreamOptions,
 	Static,
 	TextContent,
+	TJsonSchema,
 	TSchema,
 	UsageProvider,
 } from "@oh-my-pi/pi-ai";
@@ -966,9 +967,15 @@ export interface ToolShellEnvironmentContext {
 export type ToolShellEnvironmentHook = (context: ToolShellEnvironmentContext) => Record<string, string> | undefined;
 
 /**
+ * Parameter schemas accepted by extension tools. `any` admits omptype schemas with
+ * every input/output type: their fluent methods make `Type<unknown>` too narrow.
+ */
+export type ToolParamsSchema = Type<any, any> | TJsonSchema;
+
+/**
  * Tool definition for registerTool().
  */
-export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = unknown> {
+export interface ToolDefinition<TParams extends ToolParamsSchema = TSchema, TDetails = unknown> {
 	/** Tool name (used in LLM tool calls) */
 	name: string;
 	/** Human-readable label for UI */
@@ -1895,7 +1902,9 @@ export interface ExtensionAPI {
 	// =========================================================================
 
 	/** Register a tool that the LLM can call. */
-	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void;
+	registerTool<TParams extends ToolParamsSchema = TSchema, TDetails = unknown>(
+		tool: ToolDefinition<TParams, TDetails>,
+	): void;
 
 	/**
 	 * Register a fallback writer consulted when a native `write`/`edit` byte-write is

@@ -388,6 +388,8 @@ type ObjectOutput<S extends Shape> = {
 	-readonly [K in keyof S as S[K] extends OptionalSchemaMarker ? K : never]?: SchemaOutput<S[K]>;
 };
 type Simplify<T> = { [K in keyof T]: T[K] };
+/** An object schema for `S`; see {@link object}. */
+type ObjectSchema<S extends Shape> = ZodLikeSchema<Simplify<ObjectOutput<S>>>;
 type UnionOutput<Schemas extends readonly ZodLikeSchema<unknown>[]> = SchemaOutput<Schemas[number]>;
 
 function objectSchema<const S extends Shape>(shape: S): ZodLikeSchema<ObjectOutput<S>> {
@@ -428,7 +430,19 @@ export const union = <
 	decorate(schemaFromIR({ k: "union", members: schemas.map(schema => embed(schema)) }));
 export const array = <Element>(element: ZodLikeSchema<Element>): ZodLikeSchema<Element[]> =>
 	decorate(schemaFromIR({ k: "array", el: embed(element) }));
-export const object = <const S extends Shape>(shape: S): ZodLikeSchema<Simplify<ObjectOutput<S>>> =>
+/**
+ * The declared return type is `ObjectSchema<S> | Never`, where `Never` can only
+ * be `never`. omptype schemas are callable, and while TypeScript infers an
+ * enclosing generic call it skips any argument that calls a generic function
+ * whose declared return type is a plain callable object type. With that return
+ * type, `parameters: z.object({...})` written next to an untyped
+ * `execute(toolCallId, params)` callback was skipped, and `params` became
+ * `unknown`. A union with a type parameter is not such a type, so the call is
+ * no longer skipped. `Never` admits nothing but `never` (inferred from an
+ * expected type or written explicitly), so every call returns exactly
+ * `ObjectSchema<S>`.
+ */
+export const object = <const S extends Shape, Never extends never = never>(shape: S): ObjectSchema<S> | Never =>
 	objectSchema(shape);
 export function record<Key extends string, Value>(
 	keySchema: ZodLikeSchema<Key>,

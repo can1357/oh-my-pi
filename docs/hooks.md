@@ -128,7 +128,7 @@ Hook events are strongly typed in `types.ts`.
 
 ### Agent/context events
 
-- `context` → can return `{ messages?: Message[] }`
+- `context` → can return `{ messages?: AgentMessage[] }`
 - `before_agent_start` → can return `{ message?: { customType; content; display; details; attribution } }`
 - `agent_start`
 - `agent_end`
@@ -363,7 +363,7 @@ export default function (pi: HookAPI): void {
 
 ### Modify model context per LLM call
 
-```ts
+```ts check=hooks-context-filter
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI): void {

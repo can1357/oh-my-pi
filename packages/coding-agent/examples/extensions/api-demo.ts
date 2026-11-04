@@ -21,7 +21,7 @@ export default function (pi: ExtensionAPI) {
 			logLevel: z.enum(["error", "warn", "debug"]).default("debug").describe("Log level to use"),
 		}),
 
-		async execute(_toolCallId, params, _onUpdate, ctx, _signal) {
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const { message, logLevel } = params;
 
 			// Use logger at specified level

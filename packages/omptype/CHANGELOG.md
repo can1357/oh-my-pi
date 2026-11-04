@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `z.object({...})` written inline as an argument of a generic call (such as an extension's `registerTool({ parameters: z.object(...), execute })`) now infers its shape instead of leaving the call's type `unknown` ([#17803](https://github.com/can1357/oh-my-pi/pull/17803) by [@sjawhar](https://github.com/sjawhar))
 ### Breaking Changes
 
 - `fromJsonSchema` returns an opaque validator for the whole document: object-shape methods (`.pick()`, `.props`, …) no longer apply to imported schemas, `format` is an annotation unless `formats` supplies a check, and malformed or unresolvable `$ref`s throw `invalid $ref`/`unresolved $ref`

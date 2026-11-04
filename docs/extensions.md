@@ -68,7 +68,7 @@ Important constraint from `loader.ts`:
 
 ## Quick start
 
-```ts
+```ts check=extensions-quick-start
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
@@ -81,8 +81,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", async event => {
-		const command = event.input.command;
-		if (event.toolName === "bash" && typeof command === "string" && command.includes("rm -rf")) {
+		if (event.toolName !== "bash") return;
+		// Custom tools share this event, so `input` is not narrowed by the name; read fields defensively.
+		const command = String(event.input.command ?? "");
+		if (command.includes("rm -rf")) {
 			return { block: true, reason: "Blocked by extension policy" };
 		}
 	});
@@ -234,8 +236,8 @@ extension itself. The `api` value is an extension-owned string (built-in API
 names are reserved), and `streamSimple` returns the canonical
 `AssistantMessageEventStream`; it does not need to be an HTTP endpoint:
 
-```ts
-import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai";
+```ts check=extensions-command-provider
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
@@ -687,7 +689,7 @@ execute(
 
 A `tool_call` handler can return `additionalContext` without changing the tool result:
 
-```ts
+```ts check=extensions-tool-call-guard
 pi.on("tool_call", async event => {
 	if (event.toolName === "search") {
 		return { additionalContext: "Use this result before searching again." };
@@ -739,7 +741,9 @@ are already approved as, and delegation depth is guarded against accidental self
 
 Template:
 
-```ts
+```ts check=extensions-tool-template
+import { Text } from "@oh-my-pi/pi-tui";
+
 const z = pi.zod;
 
 pi.registerTool({
@@ -760,11 +764,13 @@ pi.registerTool({
 	onSession(event, ctx) {
 		// reason: start|switch|branch|tree|shutdown
 	},
-	renderCall(args, options, theme) {
-		// optional TUI render
+	// Optional TUI renderers; each returns a component.
+	renderCall(_args, _options, theme) {
+		return new Text(theme.fg("toolTitle", "my_tool"), 0, 0);
 	},
-	renderResult(result, options, theme, args) {
-		// optional TUI render
+	renderResult(result, _options, theme) {
+		const text = result.content.find(block => block.type === "text")?.text ?? "";
+		return new Text(theme.fg("muted", text), 0, 0);
 	},
 });
 ```

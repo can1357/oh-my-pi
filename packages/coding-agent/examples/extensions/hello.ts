@@ -16,7 +16,7 @@ export default function (pi: ExtensionAPI) {
 			name: z.string().describe("Name to greet"),
 		}),
 
-		async execute(_toolCallId, params, _onUpdate, _ctx, _signal) {
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 			const { name } = params;
 
 			// Use logger for debugging

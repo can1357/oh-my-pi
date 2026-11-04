@@ -4,20 +4,21 @@ Programmatic usage of omp-coding-agent via `createAgentSession()`.
 
 ## Examples
 
-| File                       | Description                                    |
-| -------------------------- | ---------------------------------------------- |
-| `01-minimal.ts`            | Simplest usage with all defaults               |
-| `02-custom-model.ts`       | Select model and thinking level                |
-| `03-custom-prompt.ts`      | Replace or modify system prompt                |
-| `04-skills.ts`             | Discover, filter, or replace skills            |
-| `05-tools.ts`              | Built-in tools, custom tools                   |
-| `06-hooks.ts`              | Logging, blocking, result modification         |
-| `07-context-files.ts`      | AGENTS.md context files                        |
-| `08-slash-commands.ts`     | File-based slash commands                      |
-| `09-api-keys-and-oauth.ts` | API key resolution, OAuth config               |
-| `10-settings.ts`           | Override compaction, retry, terminal settings  |
-| `11-sessions.ts`           | In-memory, persistent, continue, list sessions |
-| `12-full-control.ts`       | Replace everything, no discovery               |
+| File                       | Description                                         |
+| -------------------------- | --------------------------------------------------- |
+| `01-minimal.ts`            | Simplest usage with all defaults                    |
+| `02-custom-model.ts`       | Select model and thinking level                     |
+| `03-custom-prompt.ts`      | Replace or modify system prompt                     |
+| `04-skills.ts`             | Discover, filter, or replace skills                 |
+| `06-extensions.ts`         | Inline and file extensions, extension tools         |
+| `06-hooks.ts`              | Logging, blocking, result modification (extensions) |
+| `07-context-files.ts`      | AGENTS.md context files                             |
+| `08-prompt-templates.ts`   | File-based prompt templates                         |
+| `08-slash-commands.ts`     | File-based slash commands                           |
+| `09-api-keys-and-oauth.ts` | API key resolution, OAuth config                    |
+| `11-sessions.ts`           | In-memory, persistent, continue, list sessions      |
+| `12-redis-sessions.ts`     | Sessions stored in Redis or Valkey                  |
+| `13-sql-sessions.ts`       | Sessions stored in PostgreSQL, MySQL or SQLite      |
 
 ## Running
 
@@ -29,46 +30,45 @@ npx tsx examples/sdk/01-minimal.ts
 ## Quick Reference
 
 ```typescript
-import { getModel } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	AuthStorage,
 	createAgentSession,
 	discoverAuthStorage,
-	discoverModels,
 	discoverSkills,
-	discoverHooks,
-	discoverCustomTools,
+	discoverExtensions,
 	discoverContextFiles,
 	discoverSlashCommands,
-	loadSettings,
 	buildSystemPrompt,
 	ModelRegistry,
 	SessionManager,
+	Settings,
 	BUILTIN_TOOLS,
 	HIDDEN_TOOLS,
 	createTools,
 } from "@oh-my-pi/pi-coding-agent";
 
 // Auth and models setup
-const authStorage = discoverAuthStorage();
-const modelRegistry = discoverModels(authStorage);
+const authStorage = await discoverAuthStorage();
+const modelRegistry = new ModelRegistry(authStorage);
+await modelRegistry.refresh();
 
 // Minimal
 const { session } = await createAgentSession({ authStorage, modelRegistry });
 
 // Custom model
-const model = getModel("anthropic", "claude-opus-4-5");
+const model = getBundledModel("anthropic", "claude-opus-4-5");
 const { session } = await createAgentSession({ model, thinkingLevel: "high", authStorage, modelRegistry });
 
 // Modify prompt
 const { session } = await createAgentSession({
-	systemPrompt: defaultPrompt => defaultPrompt + "\n\nBe concise.",
+	systemPrompt: defaultPrompt => [...defaultPrompt, "Be concise."],
 	authStorage,
 	modelRegistry,
 });
 
 // Read-only tools
-const { session } = await createAgentSession({ toolNames: ["read", "search", "find"], authStorage, modelRegistry });
+const { session } = await createAgentSession({ toolNames: ["read", "grep", "find"], authStorage, modelRegistry });
 
 // In-memory
 const { session } = await createAgentSession({
@@ -88,8 +88,8 @@ const { session } = await createAgentSession({
 	modelRegistry: customRegistry,
 	systemPrompt: ["You are helpful."],
 	toolNames: ["read", "bash"],
-	customTools: [{ tool: myTool }],
-	hooks: [{ factory: myHook }],
+	customTools: [myTool],
+	extensions: [myExtension],
 	skills: [],
 	contextFiles: [],
 	slashCommands: [],
@@ -126,25 +126,24 @@ await writeTool.execute("call-1", {
 
 ## Options
 
-| Option                      | Default                       | Description                       |
-| --------------------------- | ----------------------------- | --------------------------------- |
-| `authStorage`               | `discoverAuthStorage()`       | Credential storage                |
-| `modelRegistry`             | `discoverModels(authStorage)` | Model registry                    |
-| `cwd`                       | `process.cwd()`               | Working directory                 |
-| `agentDir`                  | `~/.omp/agent`                | Config directory                  |
-| `model`                     | From settings/first available | Model to use                      |
-| `thinkingLevel`             | From settings/"off"           | off, low, medium, high            |
-| `systemPrompt`              | Discovered                    | String or `(default) => modified` |
-| `toolNames`                 | All built-in tools            | Filter which tools to include     |
-| `customTools`               | Discovered                    | Replaces discovery                |
-| `additionalCustomToolPaths` | `[]`                          | Merge with discovery              |
-| `hooks`                     | Discovered                    | Replaces discovery                |
-| `additionalHookPaths`       | `[]`                          | Merge with discovery              |
-| `skills`                    | Discovered                    | Skills for prompt                 |
-| `contextFiles`              | Discovered                    | AGENTS.md files                   |
-| `slashCommands`             | Discovered                    | File commands                     |
-| `sessionManager`            | `SessionManager.create(cwd)`  | Persistence                       |
-| `settingsManager`           | From agentDir                 | Settings overrides                |
+| Option                     | Default                          | Description                       |
+| -------------------------- | -------------------------------- | --------------------------------- |
+| `authStorage`              | `discoverAuthStorage()`          | Credential storage                |
+| `modelRegistry`            | `new ModelRegistry(authStorage)` | Model registry                    |
+| `cwd`                      | `process.cwd()`                  | Working directory                 |
+| `agentDir`                 | `~/.omp/agent`                   | Config directory                  |
+| `model`                    | From settings/first available    | Model to use                      |
+| `thinkingLevel`            | From settings/"off"              | off, low, medium, high            |
+| `systemPrompt`             | Discovered                       | String or `(default) => modified` |
+| `toolNames`                | All built-in tools               | Filter which tools to include     |
+| `customTools`              | `[]`                             | Extra tools for the session       |
+| `extensions`               | Discovered                       | Inline extension factories        |
+| `additionalExtensionPaths` | `[]`                             | Merge with discovery              |
+| `skills`                   | Discovered                       | Skills for prompt                 |
+| `contextFiles`             | Discovered                       | AGENTS.md files                   |
+| `slashCommands`            | Discovered                       | File commands                     |
+| `sessionManager`           | `SessionManager.create(cwd)`     | Persistence                       |
+| `settings`                 | From agentDir                    | Settings overrides                |
 
 ## Events
 

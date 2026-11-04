@@ -55,6 +55,7 @@ import type {
 	SourceInfo,
 	ToolDefinition,
 	ToolInfo,
+	ToolParamsSchema,
 } from "./types";
 
 installLegacyPiSpecifierShim();
@@ -196,7 +197,7 @@ export class ExtensionRuntime implements IExtensionRuntime {
  * Registration methods write to the extension object.
  * Action methods delegate to the shared runtime.
  */
-class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
+export class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	readonly logger = logger;
 	readonly typebox = TypeBox;
 	readonly arktype = type;
@@ -236,7 +237,9 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		this.extension.handlers.set(event, list);
 	}
 
-	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
+	registerTool<TParams extends ToolParamsSchema = TSchema, TDetails = unknown>(
+		tool: ToolDefinition<TParams, TDetails>,
+	): void {
 		const registered = {
 			definition: tool,
 			extensionPath: this.extension.path,

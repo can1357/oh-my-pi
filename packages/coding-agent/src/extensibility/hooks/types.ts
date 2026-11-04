@@ -3,7 +3,8 @@ export { type HookMessageRenderOptions, type HookMessageRenderer } from "@oh-my-
 import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
-import type { ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -414,11 +415,13 @@ export type HookEvent =
 
 /**
  * Return type for context event handlers.
- * Allows hooks to modify messages before they're sent to the LLM.
+ * Allows hooks to modify messages before they're sent to the LLM. The messages
+ * are the event's own kind, so a hook can filter or rewrite `event.messages` and
+ * return them; the hook runner passes them on as it does for extensions.
  */
 export interface ContextEventResult {
 	/** Modified messages to send instead of the original */
-	messages?: Message[];
+	messages?: AgentMessage[];
 }
 
 export type { ToolCallEventResult, ToolResultEventResult } from "../shared-events";
