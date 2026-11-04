@@ -4095,7 +4095,11 @@ describe("AgentSession retry delay cap", () => {
 				tools: [],
 				messages: [],
 			},
-			streamFn: mock.stream,
+			// Disposal begins while the empty abort is in flight: the turn was already running.
+			streamFn: (streamModel, context, options) => {
+				session?.beginDispose();
+				return mock.stream(streamModel, context, options);
+			},
 		});
 
 		const settings = Settings.isolated({
@@ -4119,9 +4123,8 @@ describe("AgentSession retry delay cap", () => {
 			if (event.type === "auto_retry_start") retryStartEvents.push(event);
 		});
 
-		// Enter the disposing window before the empty abort lands. Without the
-		// #isDisposed guard this prompt would hang on an orphaned retry promise.
-		session.beginDispose();
+		// The disposing window opens during the request that returns the empty abort. Without
+		// the #isDisposed guard this prompt would hang on an orphaned retry promise.
 		await session.prompt("Trigger empty aborted turn while disposing");
 		await session.waitForIdle();
 

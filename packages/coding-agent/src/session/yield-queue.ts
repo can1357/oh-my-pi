@@ -36,6 +36,13 @@ interface BuiltMessage {
 	entries: StoredEntry[];
 }
 
+/** Entries {@link YieldQueue.drainLazy} handed out as a thunk that has not been called yet. */
+interface LentEntries {
+	kind: string;
+	dispatcher: StoredDispatcher;
+	entries: StoredEntry[];
+}
+
 function formatError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
@@ -45,6 +52,8 @@ export class YieldQueue {
 	readonly #dispatchers = new Map<string, StoredDispatcher>();
 	readonly #entries = new Map<string, StoredEntry[]>();
 	#idleFlushPending = false;
+	/** Thunks {@link drainLazy} returned and nobody called yet, oldest first; {@link takeAll} takes them back. */
+	readonly #lent = new Set<LentEntries>();
 
 	constructor(options: YieldQueueOptions) {
 		this.#options = options;
@@ -183,13 +192,19 @@ export class YieldQueue {
 	 * moment it injects, whether the message is still worth delivering (a thunk may
 	 * return null to skip). Background-job completions and late diagnostics reach
 	 * the model between requests without the agent having to stop.
+	 *
+	 * Until a thunk is called its entries still belong to this queue: {@link takeAll}
+	 * takes them back, after which the thunk returns null.
 	 */
 	drainLazy(): Array<() => AgentMessage | null> {
 		const thunks: Array<() => AgentMessage | null> = [];
 		for (const [kind, dispatcher] of this.#dispatchers) {
 			const entries = this.#drain(kind);
 			if (entries.length === 0) continue;
+			const lent: LentEntries = { kind, dispatcher, entries };
+			this.#lent.add(lent);
 			thunks.push(() => {
+				if (!this.#lent.delete(lent)) return null;
 				const built = this.#build(kind, dispatcher, entries);
 				if (!built) return null;
 				this.#attachEntrySettlement(built);
@@ -199,10 +214,43 @@ export class YieldQueue {
 		return thunks;
 	}
 
-	/** Drop queued entries. With `kind`, drop only that kind's entries (leaving
-	 *  any pending idle-flush for other kinds intact); otherwise drop everything. */
+	/**
+	 * Remove every queued entry, of every kind, and build each kind's message now, for a
+	 * caller that records them instead of delivering them (a disposing session writes them to
+	 * its transcript). Entries {@link drainLazy} handed out in a thunk nobody has called yet
+	 * are taken back first, as they are older, and their thunks then return null, so each
+	 * entry is either delivered by the loop or returned here, never both. Stale entries are
+	 * dropped as a drain drops them. Each message carries the usual commit/discard hooks: the
+	 * caller commits it once written, which settles the receipts.
+	 */
+	takeAll(): AgentMessage[] {
+		const messages: AgentMessage[] = [];
+		const take = (kind: string, dispatcher: StoredDispatcher, entries: StoredEntry[]) => {
+			const built = this.#build(kind, dispatcher, entries);
+			if (!built) return;
+			this.#attachEntrySettlement(built);
+			messages.push(built.message);
+		};
+		for (const lent of this.#lent) take(lent.kind, lent.dispatcher, lent.entries);
+		this.#lent.clear();
+		for (const [kind, dispatcher] of this.#dispatchers) {
+			const entries = this.#drain(kind);
+			if (entries.length > 0) take(kind, dispatcher, entries);
+		}
+		this.#idleFlushPending = false;
+		return messages;
+	}
+
+	/** Drop queued entries, and those of thunks {@link drainLazy} lent that nobody called (the
+	 *  thunks then return null). With `kind`, drop only that kind's entries (leaving any
+	 *  pending idle-flush for other kinds intact); otherwise drop everything. */
 	clear(kind?: string): void {
 		const error = new Error("Yield queue entry cleared before dispatch");
+		for (const lent of this.#lent) {
+			if (kind !== undefined && lent.kind !== kind) continue;
+			this.#lent.delete(lent);
+			this.#rejectEntries(lent.entries, error);
+		}
 		if (kind !== undefined) {
 			this.#rejectEntries(this.#entries.get(kind) ?? [], error);
 			this.#entries.delete(kind);

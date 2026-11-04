@@ -435,6 +435,19 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	beforeModelCall?: AgentBeforeModelCall;
 
 	/**
+	 * Asked as the last step before each provider request is invoked: after every await that
+	 * prepares it (context sync, `beforeModelCall`, credential resolution) and after every
+	 * synchronous callback on the way (`metadataResolver`, `getCwd`, telemetry span start), so
+	 * neither an await nor a callback that begins disposal separates the answer from the send.
+	 * Returning a value refuses that request: the loop sends nothing and throws the returned
+	 * value. The loop asks again before every request of a run, including continuations after
+	 * tools, steering or follow-ups and Harmony re-samples, so a refusal that starts mid-run
+	 * stops the next request. The request already handed to the stream function (`streamFn`)
+	 * is not affected, including any wait inside it before it reaches the network.
+	 */
+	refuseModelCall?: () => unknown;
+
+	/**
 	 * Optional transform applied to tool call arguments before execution.
 	 * Use for deobfuscating secrets or rewriting arguments.
 	 */

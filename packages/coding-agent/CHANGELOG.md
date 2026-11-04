@@ -80,6 +80,10 @@
 
 - Browser: a headless Chrome launched in-process by an SDK embedding or a `bun test` run now exits when that process is killed, instead of running on with its temporary profile on Linux and macOS ([#17908](https://github.com/can1357/oh-my-pi/pull/17908) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- Fixed a session that is being closed (Ctrl+D, `/exit`, a relaunch, a signal, a cancelled subagent) still sending model requests, writing entries after its `session_exit`, or losing or duplicating input it had already accepted. From `AgentSession.beginDispose()` on the agent sends no request, a turn that was streaming stops at its next request, every queued, dequeued or live-steered message, background result and `nextTurn` message is written once before `session_exit`, and `session_exit` is the last entry of the session's own file, also while a session switch, new session, fork or context reset is in flight and when the process exits during the close. A prompt, steer, follow-up or extension message submitted after `beginDispose()` is now refused (`PromptDroppedError` with `sessionDisposed: true`, or `false`) instead of running once, and so is a side turn (`/btw`) ([#17956](https://github.com/can1357/oh-my-pi/pull/17956) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

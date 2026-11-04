@@ -2165,6 +2165,11 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
+			// The refusal is asked here, the last thing before the provider is invoked: after every
+			// await that prepares the request and after every synchronous callback on the way
+			// (metadata and cwd resolution, telemetry), any of which may begin disposal.
+			const refusal = config.refuseModelCall?.();
+			if (refusal !== undefined) throw refusal;
 			let response = await streamFunction(model, llmContext, {
 				...config,
 				apiKey,

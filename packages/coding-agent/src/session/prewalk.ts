@@ -80,7 +80,10 @@ export interface PrewalkCoordinatorHost {
 	/** Judges a new task for `prewalk.auto`; undefined when there is nothing to judge. */
 	classifyAutoPrewalk(request: string, signal: AbortSignal): Promise<AutoPrewalkDecision | undefined>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
+	/** Switches nothing once the session is disposing; callers check {@link isDisposed} before reporting a switch. */
 	setModelTemporary(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
+	/** Disposal began: a switch that resumes after it reports, steers and records nothing. */
+	isDisposed(): boolean;
 	setActiveToolsByName(names: string[]): Promise<void>;
 	restoreNonMCPToolPresentation(
 		nonMCPToolNames: string[],
@@ -118,9 +121,10 @@ interface PrewalkHandoff {
 	auto: boolean;
 }
 
-/** Coordinates one-way model prewalks and automatic plan-yolo handoffs. */
+/** `disposed`: the session began disposing while the planning model was restored; nothing was armed or reported. */
+export type PrewalkRestartResult = "armed" | "reset" | "rejected" | "disposed";
 
-export type PrewalkRestartResult = "armed" | "reset" | "rejected";
+/** Coordinates one-way model prewalks and automatic plan-yolo handoffs. */
 export class PrewalkCoordinator {
 	readonly #host: PrewalkCoordinatorHost;
 	#prewalk: Prewalk | undefined;
@@ -224,6 +228,7 @@ export class PrewalkCoordinator {
 	async #restoreSource(handoff: PrewalkHandoff): Promise<void> {
 		try {
 			await this.#host.setModelTemporary(handoff.source, handoff.sourceThinkingLevel);
+			if (this.#host.isDisposed()) return;
 			// Temporary selection treats undefined as "keep/default"; restoration must preserve
 			// the original selector, including auto or an explicitly inherited effort.
 			this.#host.restoreThinkingLevel(handoff.sourceThinkingLevel);
@@ -366,6 +371,7 @@ export class PrewalkCoordinator {
 		for (const toolResult of context.toolResults) {
 			await this.#host.waitForSessionMessagePersistence(toolResult);
 		}
+		if (this.#host.isDisposed()) return;
 		this.#scrubPlanNudge(liveMessages);
 		const target = prewalk.target;
 		if (this.#isNoop(prewalk)) {
@@ -376,6 +382,7 @@ export class PrewalkCoordinator {
 		const sourceThinkingLevel = this.#host.configuredThinkingLevel();
 		const auto = this.#autoArm === prewalk;
 		await this.#host.setModelTemporary(target, prewalk.thinkingLevel);
+		if (this.#host.isDisposed()) return;
 		this.#clearPrewalkState();
 		if (source) {
 			this.#handoff = {
@@ -484,6 +491,7 @@ export class PrewalkCoordinator {
 		}
 
 		await this.#host.setModelTemporary(source, sourceThinkingLevel);
+		if (this.#host.isDisposed()) return "disposed";
 		if (!active) return this.arm(target, targetThinkingLevel) ? "armed" : "reset";
 		if (this.#isNoop(active)) {
 			this.#scrubPlanNudge();
@@ -619,6 +627,12 @@ export class PrewalkCoordinator {
 		this.#planYolo = undefined;
 		this.#planYoloPreviousNonMCPPresentation = undefined;
 		await this.#host.setModelTemporary(planYolo.target, planYolo.thinkingLevel);
+		if (this.#host.isDisposed()) {
+			return {
+				content: [{ type: "text", text: "Plan approved; the session closed before implementation started." }],
+				details: { planFilePath, title: resolvedTitle, planExists: true },
+			};
+		}
 		this.#host.emitNotice(
 			"info",
 			`Plan-yolo: plan approved, switched to ${planYolo.target.provider}/${planYolo.target.id} to implement "${resolvedTitle}".`,
