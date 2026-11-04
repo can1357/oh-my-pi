@@ -295,6 +295,10 @@ pub struct Ended {
 	pub bang_seen: u32,
 }
 
+/// How many jobs a shell's table holds before it deletes finished ones
+/// nothing reported (bash `MAX_JOBS_IN_ARRAY`).
+pub const JOBS_MAX: usize = 4096;
+
 /// How many statuses of jobs that left the table a shell keeps (bash's
 /// `js.c_childmax` ceiling, `MAX_CHILD_MAX`); the oldest goes first.
 pub const KEPT_MAX: usize = 32_768;
@@ -481,6 +485,15 @@ impl JobTable {
 			.map(|k| k.vpid)
 	}
 
+	/// Job `job`, which left the table, runs the program with OS pid `pid`.
+	pub fn settle_kept(&mut self, job: Vpid, pid: u32) {
+		if let Some(entry) =
+			self.ended.as_mut().and_then(|e| e.kept.iter_mut().find(|k| k.vpid == job))
+		{
+			entry.os_pid = Some(pid);
+		}
+	}
+
 	/// [`Ended::bang_seen`].
 	pub fn bang_seen(&self) -> u32 {
 		self.ended.as_ref().map_or(0, |e| e.bang_seen)
@@ -623,12 +636,6 @@ impl LastBg {
 	/// `$!` names `vpid`, by its virtual pid until [`Self::set_os`].
 	pub const fn new(vpid: Vpid) -> Self {
 		Self { vpid: vpid.0, os: 0 }
-	}
-
-	/// `$!` still expands to `pid`, but names no child of this shell: its
-	/// job was deleted (`disown`, or waited for and cleaned up).
-	pub const fn detached(pid: u32) -> Self {
-		Self { vpid: 0, os: pid }
 	}
 
 	/// The child `$!` names.
@@ -1577,9 +1584,12 @@ pub enum Awaited {
 		keep: Option<u32>,
 	},
 	/// The first of the children to finish (`wait -n`); its status. `kept`:
-	/// an operand naming a kept status answers at once.
+	/// an operand naming a kept status answers at once. `woke`: it waited
+	/// for a child to change, so a finished job that was already reported
+	/// counts too (bash `wait_for_any_job` after `wait_for (ANY_PID)`).
 	AnyJob {
 		kept: Option<(u32, i32)>,
+		woke: bool,
 	},
 }
 

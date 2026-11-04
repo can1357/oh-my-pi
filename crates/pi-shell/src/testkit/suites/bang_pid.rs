@@ -208,6 +208,7 @@ fn wait_p_and_disown_take_the_os_pid() {
 		 \"disown=$? jobs=$(jobs -p)\"; kill \"$q\"; wait \"$q\"; echo $?",
 	);
 	assert_eq!(out, "5001 5001\ndisown=0 jobs=\n0\n");
+	assert_eq!(world.got(FIRST + 1), [Signal::Term], "kill reached the disowned program");
 }
 
 // Failure mode: a job whose program traps `TERM` is marked done (143) when

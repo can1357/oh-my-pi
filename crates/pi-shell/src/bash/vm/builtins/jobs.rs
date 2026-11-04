@@ -539,8 +539,9 @@ pub fn disown(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		};
 		if let Ok(number) = found {
 			// bash `delete_job`: the status stays for `wait PID` (0 while
-			// the job runs).
-			drop_job(ctx, number, nohup, true);
+			// the job runs); zsh keeps none.
+			let keep = ctx.vp.mode.dialect() != crate::bash::ids::Dialect::Zsh;
+			drop_job(ctx, number, nohup, keep);
 		} else {
 			no_such_job(ctx, word.map_or(&b"current"[..], |w| w.as_slice()));
 			status = 1;

@@ -460,6 +460,11 @@ impl ProcState {
 	}
 }
 
+/// The parent a running child's record names once its job was deleted
+/// (`disown`): no vproc has this vpid, so no `wait` reaches it, and its
+/// record goes when it ends ([`Kernel::proc_exited`]).
+pub const DISOWNED: Vpid = Vpid(0);
+
 impl Kernel {
 	fn new(engine: &Arc<Engine>, root: Root, argv0: BString, shell_pid: u32) -> Self {
 		let ctl = Ctl::new();
@@ -616,6 +621,11 @@ impl Kernel {
 		parent: Option<Vpid>,
 		status: i32,
 	) {
+		// A disowned child's status is collected by no one.
+		if let Ok(Some(Record::Proc { parent: Some(DISOWNED), .. })) = store.get(Key::Proc(vpid)) {
+			self.root.write(store, Change::Del(Key::Proc(vpid)));
+			return;
+		}
 		let rec = Record::Proc { parent, status: Some(status) };
 		self.root.write(store, Change::Put(Key::Proc(vpid), rec));
 	}
@@ -659,8 +669,8 @@ impl Kernel {
 
 	/// Delete job `number` of `vp` (bash `delete_job`): `keep` keeps its
 	/// status for `wait PID` ([`proc::JobTable::delete`]); its finished
-	/// vproc's record goes. `$!` keeps its value, but no longer names a
-	/// child that `wait` or `disown` reach through it.
+	/// vproc's record goes, a running one's is disowned ([`DISOWNED`]), so
+	/// `wait` no longer reaches it through `$!` or its pid.
 	pub fn delete_job(
 		&mut self,
 		store: &mut dyn StateStore,
@@ -669,11 +679,13 @@ impl Kernel {
 		keep: bool,
 	) -> Option<proc::Job> {
 		let job = vp.jobs.delete(number, keep)?;
-		if !job.inherited {
-			self.proc_collect(store, job.vpid);
-		}
-		if vp.last_bg.is(job.vpid) {
-			vp.last_bg = proc::LastBg::detached(job.pid());
+		if !job.inherited && self.proc_collect(store, job.vpid).is_none() {
+			// Still running (`disown`): no shell waits for it now, so its
+			// record names no parent and goes when it ends.
+			if let Ok(Some(Record::Proc { status: None, .. })) = store.get(Key::Proc(job.vpid)) {
+				let rec = Record::Proc { parent: Some(DISOWNED), status: None };
+				self.root.write(store, Change::Put(Key::Proc(job.vpid), rec));
+			}
 		}
 		Some(job)
 	}
@@ -689,6 +701,21 @@ impl Kernel {
 			.map(|j| j.number)
 			.collect();
 		for number in dead {
+			self.delete_job(store, vp, number, true);
+		}
+		// bash `compact_jobs_list` once the table is full: finished jobs
+		// nothing reported go too, oldest first, all but `$!`'s, their
+		// statuses kept.
+		while vp.jobs.len() > proc::JOBS_MAX {
+			let last = vp.last_bg;
+			let Some(number) = vp
+				.jobs
+				.iter()
+				.find(|j| matches!(j.state, proc::JobState::Done(_)) && !last.is(j.vpid))
+				.map(|j| j.number)
+			else {
+				break;
+			};
 			self.delete_job(store, vp, number, true);
 		}
 	}
@@ -1677,8 +1704,10 @@ impl Shell {
 					entry.os_pid = Some(pid);
 				}
 				// A kept status under that OS pid named an earlier child
-				// (bash `bgp_delete` in `make_child`).
+				// (bash `bgp_delete` in `make_child`); the job's own, kept
+				// when it was disowned before it settled, takes the pid.
 				p.jobs.retain_kept(|k| k.vpid == job || !k.named_by(pid));
+				p.jobs.settle_kept(job, pid);
 			}
 		}
 	}
@@ -1980,6 +2009,26 @@ impl Shell {
 		hits.sort_unstable();
 	}
 
+	/// The processes of the job rooted at `root` as bash's job table lists
+	/// them: the root, and the children of a member that only waits for
+	/// them before it exits ([`transparent`]: the stages of `a | b &`).
+	fn job_members(&self, root: Vpid) -> Vec<Vpid> {
+		let mut members = vec![root];
+		let mut i = 0;
+		while let Some(&m) = members.get(i) {
+			i += 1;
+			let waits = self
+				.procs
+				.iter()
+				.find(|p| p.vpid == m)
+				.is_some_and(|p| transparent(p, true) == Some(false));
+			if waits {
+				members.extend(self.procs.iter().filter(|p| p.parent == Some(m)).map(|p| p.vpid));
+			}
+		}
+		members
+	}
+
 	/// Whether `vpid` belongs to the job rooted at `root`, excluding nested
 	/// jobs.
 	fn in_job(&self, mut vpid: Vpid, root: Vpid) -> bool {
@@ -2026,11 +2075,39 @@ impl Shell {
 		// control) is signalled as a group; otherwise the signal reaches the
 		// job's subshell, not the command it is running.
 		let group = job.is_some_and(|(_, control)| control);
+		// Without its own process group a job whose subshell traps (or
+		// ignores) the signal gets it in that subshell alone, and in the
+		// processes that subshell is only waiting on to exit (the stages of
+		// `a | b &`): bash signals the job's pipeline, not what the subshell
+		// runs meanwhile.
+		let members = match job_root {
+			Some(v) if !group && !matches!(sig, Signal::Kill | Signal::Stop) => {
+				match self.procs.iter().position(|p| p.vpid == v) {
+					Some(i) => match state::record(
+						cx.store,
+						&self.procs[i],
+						crate::bash::store::Key::Trap(crate::bash::store::TrapKey::Signal(sig)),
+					) {
+						Ok(Some(Record::Trap { .. })) => Some(self.job_members(v)),
+						Ok(_) => None,
+						Err(err) => {
+							self.k.fail(err);
+							return;
+						},
+					},
+					None => None,
+				}
+			},
+			_ => None,
+		};
 		let mut hits: Vec<usize> = (0..self.procs.len())
 			.filter(|&i| match target {
 				SigTarget::Vpid(v) => self.procs[i].vpid == v,
 				SigTarget::All => true,
-				SigTarget::Job(_) => job_root.is_some_and(|v| self.in_job(self.procs[i].vpid, v)),
+				SigTarget::Job(_) => match &members {
+					Some(members) => members.contains(&self.procs[i].vpid),
+					None => job_root.is_some_and(|v| self.in_job(self.procs[i].vpid, v)),
+				},
 				SigTarget::Label(l) => l != 0 && self.procs[i].lineage.label == l,
 			})
 			.collect();

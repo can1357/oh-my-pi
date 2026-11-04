@@ -1635,6 +1635,8 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 			if let Some(flow) = not_found_hook(k, vp, cx, line) {
 				return Some(flow);
 			}
+			// bash forks to report it: the jobs already reported go first.
+			k.cleanup_dead_jobs(cx.store, vp);
 			let name = argv0(vp);
 			k.diag(cx, vp, line, Diag::CommandNotFound { name });
 			let s = st(vp);
@@ -1884,6 +1886,9 @@ fn spawned_external(
 	how: Spawned<'_>,
 ) -> Option<Flow> {
 	let Spawned { path, interp, child_redirs, argv } = how;
+	// bash forks for an external, a failing one too: the jobs already
+	// reported are deleted first (`stop_pipeline`).
+	k.cleanup_dead_jobs(cx.store, vp);
 	// A refused spawn (retried as a script, or reported) never makes the
 	// job a program: its `$!` readers need not wait for the rest.
 	if spawned.is_err() && !k.bangs.is_empty() {
@@ -1904,10 +1909,8 @@ fn spawned_external(
 		Ok(child) => {
 			k.forget_deferral(vp.vpid);
 			let pid = child.pid();
-			// bash forks for an external: its waited-for jobs are deleted
-			// first (`stop_pipeline`), and a status kept under the new
-			// child's pid named an earlier child (`make_child`).
-			k.cleanup_dead_jobs(cx.store, vp);
+			// A status kept under the new child's pid named an earlier
+			// child (bash `make_child`).
 			vp.jobs.retain_kept(|k| !k.named_by(pid));
 			// The job this vproc may still settle is known by its program
 			// (`bang_dispatch` let only its lone or `exec`'d external
@@ -2687,7 +2690,7 @@ fn run_builtin(
 						e.wait_for = w.children;
 						e.wait_into = w.into.map(Box::new);
 						e.waiting = Some(if w.any {
-							Awaited::AnyJob { kept: w.kept }
+							Awaited::AnyJob { kept: w.kept, woke: false }
 						} else if w.all {
 							Awaited::AllJobs { keep: w.kept.map(|(pid, _)| pid) }
 						} else {
@@ -3066,8 +3069,13 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 					last = s;
 					if foreground {
 						k.delete_job(cx.store, vp, number, false);
-					} else if let Some(j) = vp.jobs.get_mut(number) {
-						j.notified = true;
+					} else {
+						// bash `wait_for` cleans up the jobs already reported
+						// (this one too, if it was), then `wait` marks it.
+						k.cleanup_dead_jobs(cx.store, vp);
+						if let Some(j) = vp.jobs.get_mut(number) {
+							j.notified = true;
+						}
 					}
 					exec::reap_coproc(k, vp, cx, v);
 				} else if let Some(s) = k.proc_collect(cx.store, v) {
@@ -3106,36 +3114,57 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 				st(vp).wait_for.remove(0);
 			}
 			// bash `wait_for_background_pids`: every finished job goes and
-			// every kept status is forgotten (`bgp_clear`), except the job (or
-			// kept status) of the child `$!` named when it had finished before
-			// the wait: `jobs` still lists that job once.
+			// every kept status is forgotten (`bgp_clear`), except the job of
+			// the child `$!` names when it had finished unreported before the
+			// wait (`keep`): it stays, and `jobs` still lists it once.
 			let done: Vec<u32> = vp
 				.jobs
 				.iter()
 				.filter(|j| {
-					matches!(j.state, JobState::Done(_)) && keep.is_none_or(|pid| !j.named_by(pid))
+					matches!(j.state, JobState::Done(_)) && keep.is_none_or(|v| j.vpid.0 != v)
 				})
 				.map(|j| j.number)
 				.collect();
 			for number in done {
 				k.delete_job(cx.store, vp, number, true);
 			}
-			vp.jobs
-				.retain_kept(|e| keep.is_some_and(|pid| e.named_by(pid)));
+			vp.jobs.retain_kept(|_| false);
 			st(vp).status
 		},
-		Some(Awaited::AnyJob { kept: Some((pid, status)) }) => {
+		Some(Awaited::AnyJob { kept: Some((pid, status)), .. }) => {
 			waited_into(k, vp, cx, line, pid);
 			status
 		},
-		Some(Awaited::AnyJob { kept: None }) => {
-			let finished = st(vp).wait_for.iter().find_map(|v| {
-				k.proc_state(cx.store, *v)
-					.and_then(super::ProcState::exited)
-					.map(|s| (*v, s))
-			});
+		Some(Awaited::AnyJob { kept: None, woke }) => {
+			// bash `wait_for_any_job`: a finished job nothing reported yet,
+			// in job order, then a finished process substitution; else it
+			// waits for a child to change, then takes the first finished
+			// candidate, reported or not.
+			let done = |k: &mut Kernel, store: &mut dyn StateStore, vp: &Vproc, v: crate::bash::ids::Vpid, any: bool| {
+				match vp.jobs.by_vpid(v) {
+					Some(j) => match j.state {
+						JobState::Done(s) if any || !j.notified => Some(s),
+						_ => None,
+					},
+					None => k.proc_state(store, v).and_then(super::ProcState::exited),
+				}
+			};
+			let mut finished = None;
+			for &v in &st(vp).wait_for.clone() {
+				if let Some(s) = done(k, cx.store, vp, v, woke) {
+					finished = Some((v, s));
+					break;
+				}
+			}
 			let Some((v, status)) = finished else {
-				if let Some(&v) = st(vp).wait_for.first() {
+				let running = st(vp).wait_for.clone().into_iter().find(|&v| match vp.jobs.by_vpid(v) {
+					Some(j) => j.state == JobState::Running,
+					None => k.proc_state(cx.store, v) == Some(super::ProcState::Running),
+				});
+				if let Some(v) = running {
+					if let Some(Awaited::AnyJob { woke, .. }) = &mut st(vp).waiting {
+						*woke = true;
+					}
 					return Some(Flow::Block(WaitKey::Proc(v)));
 				}
 				let s = st(vp);

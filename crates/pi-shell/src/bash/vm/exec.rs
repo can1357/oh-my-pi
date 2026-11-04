@@ -1652,7 +1652,7 @@ pub fn start_sub(
 			// lists the parent's jobs, `fg` finds no current job. Forking
 			// cleans up the parent's waited-for jobs first.
 			k.cleanup_dead_jobs(cx.store, vp);
-			child.jobs = inherited_jobs(vp, vp.jobs.subshell);
+			child.jobs = comsub_jobs(vp);
 			let vpid = child.vpid;
 			k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
 			k.spawned.push(Box::new(child));
@@ -1714,7 +1714,7 @@ pub fn start_zsh_sub(
 	let mut fds = vp.fds.clone();
 	fds.set(1, Some(FdRef::mem(capture.clone())));
 	let mut child = vp.child_text(k, cx.store, text, line, fds);
-	child.jobs = inherited_jobs(vp, vp.jobs.subshell);
+	child.jobs = comsub_jobs(vp);
 	let vpid = child.vpid;
 	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
 	k.spawned.push(Box::new(child));
@@ -3221,6 +3221,17 @@ fn inherited_jobs(vp: &Vproc, subshell: bool) -> super::proc::JobTable {
 	for job in &mut jobs.list {
 		job.inherited = true;
 	}
+	jobs
+}
+
+/// A command substitution's copy of `vp`'s jobs: bash's `$( )` marks the
+/// finished ones reported, all but the one `$!` names, and drops them
+/// (`notify_of_job_status` with `SUBSHELL_COMSUB`); their kept statuses
+/// stay.
+fn comsub_jobs(vp: &Vproc) -> super::proc::JobTable {
+	let mut jobs = inherited_jobs(vp, vp.jobs.subshell);
+	let last = vp.last_bg;
+	jobs.remove_where(|j| matches!(j.state, super::proc::JobState::Done(_)) && !last.is(j.vpid));
 	jobs
 }
 
