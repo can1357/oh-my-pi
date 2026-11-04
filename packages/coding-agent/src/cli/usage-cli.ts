@@ -1514,7 +1514,8 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 	const settings = await Settings.loadReadOnly();
 	// This command never calls Settings.init, so nothing else applies the process-wide
 	// effects of the user's settings (such as the `!command` time limit) for this run.
-	const releaseEffects = bindEffects(settings);
+	// The hold ends with this scope on every path, a failed discovery included.
+	using _effects: Disposable = { [Symbol.dispose]: bindEffects(settings) };
 	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
 		if (cmd.action === "invalidate") {
@@ -1759,6 +1760,5 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		process.exitCode = 1;
 	} finally {
 		authStorage.close();
-		releaseEffects();
 	}
 }

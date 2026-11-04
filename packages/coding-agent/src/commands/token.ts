@@ -107,8 +107,9 @@ export default class Token extends Command {
 
 		// This command never calls Settings.init, so nothing else applies the process-wide
 		// effects of the user's settings (such as the `!command` time limit) for this run.
+		// The hold ends with this scope on every path, a failed discovery included.
 		const settings = await resolveEffectiveSettings();
-		const releaseEffects = bindEffects(settings);
+		using _effects: Disposable = { [Symbol.dispose]: bindEffects(settings) };
 		const authStorage = await discoverAuthStorage(undefined, { settings });
 		try {
 			if (flags.list || flags.account !== undefined) {
@@ -229,7 +230,6 @@ export default class Token extends Command {
 			process.stdout.write(`${apiKey}\n`);
 		} finally {
 			authStorage.close();
-			releaseEffects();
 		}
 	}
 }

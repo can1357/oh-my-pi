@@ -61,3 +61,54 @@ it.skipIf(process.platform === "win32")(
 	},
 	60_000,
 );
+
+// The settings a one-shot command binds must stop driving effects when the command
+// ends on any path, including a credential discovery that throws.
+it.skipIf(process.platform === "win32").each(["token", "usage"])(
+	"omp %s releases its settings when credential discovery fails",
+	async mode => {
+		tempDir = path.join(os.tmpdir(), `pi-test-effects-release-${Snowflake.next()}`);
+		const agentDir = path.join(tempDir, "agent");
+		const projectDir = path.join(tempDir, "project");
+		await fs.mkdir(projectDir, { recursive: true });
+		await Bun.write(path.join(agentDir, "config.yml"), "providers:\n  commandTimeoutSeconds: 0.2\n");
+		const requests: string[] = [];
+		using broker = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				requests.push(new URL(request.url).pathname);
+				return Response.json({ error: "rejected" }, { status: 401 });
+			},
+		});
+		const env: Record<string, string | undefined> = {
+			...process.env,
+			PI_CODING_AGENT_DIR: agentDir,
+			OMP_AUTH_BROKER_URL: `http://127.0.0.1:${broker.port}`,
+			OMP_AUTH_BROKER_TOKEN: "test-token",
+			OMP_AUTH_BROKER_SNAPSHOT_TTL_MS: "0",
+		};
+		delete env.PI_CONFIG_FILES;
+		delete env.PI_SHELL_PREFIX;
+		delete env.PI_PROFILE;
+		const proc = Bun.spawn(
+			[process.execPath, path.join(import.meta.dir, "fixtures/effects-hold-discovery-failure.ts"), mode],
+			{ cwd: projectDir, env, stdout: "pipe", stderr: "pipe" },
+		);
+		const [exitCode, stdout, stderr] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+		expect(exitCode, stderr).toBe(0);
+		const result = JSON.parse(stdout.trim().split("\n").at(-1) ?? "{}");
+
+		// Discovery really failed at the broker.
+		expect(requests.length).toBeGreaterThan(0);
+		expect(result.error).toContain("401");
+		// The outer 30 s settings drive effects again, so the 1 s helper is not cut at 0.2 s.
+		expect(result.restored).toBe(true);
+		expect(result.value).toBe("after-command");
+	},
+	60_000,
+);
