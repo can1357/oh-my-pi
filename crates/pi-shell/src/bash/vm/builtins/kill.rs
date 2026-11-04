@@ -35,9 +35,9 @@ fn parse_signal(spec: &[u8], platform: Platform) -> Option<Send> {
 	if !spec.is_empty() && spec.iter().all(u8::is_ascii_digit) && spec.iter().all(|&c| c == b'0') {
 		return Some(Send::Probe);
 	}
-	// bash `decode_signal`: `EXIT` (and `SIGEXIT`) is signal 0.
-	let name = spec.strip_prefix(b"SIG").unwrap_or(spec);
-	if name.eq_ignore_ascii_case(b"EXIT") {
+	// bash `decode_signal`: plain `EXIT` is signal 0, and only plain `EXIT`:
+	// `SIGEXIT` is an invalid signal specification in 5.2.21 and 5.3.0.
+	if spec.eq_ignore_ascii_case(b"EXIT") {
 		return Some(Send::Probe);
 	}
 	Signal::parse_spec(spec, platform).map(Send::Signal)

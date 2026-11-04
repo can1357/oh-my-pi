@@ -42,6 +42,12 @@ pub struct Vproc {
 	pub blocked:       Option<Blocked>,
 	/// Signal traps deferred until the foreground command completes.
 	pub pending_traps: SigSet,
+	/// A `return` left a trap action, so bash's `run_pending_traps` was
+	/// abandoned (its `sh_longjmp (return_catch, 1)`): the traps still
+	/// pending wait for the next command of the caller, and a vproc that
+	/// runs no further command never runs them. Cleared at that command;
+	/// never serialized (a restored vproc starts its next command).
+	pub trap_return:   bool,
 	/// Stopped by a virtual `STOP` (job control).
 	pub stopped:       bool,
 	/// Exit once its frames are done (subshell vprocs).
