@@ -1,10 +1,10 @@
 /**
  * The idle recap is journaled in history.db, never in the session file, so a
  * transcript replay (resume, /restart, rebuild) must re-show it from the
- * journal while no message has come after it, and only on the history it
- * describes.
+ * journal while the conversation has not moved since, and only on the history
+ * it describes.
  */
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, setSystemTime } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -41,14 +41,20 @@ afterEach(() => {
 });
 
 /**
- * A session with two prompts sent a minute ago in the same millisecond, followed by two journaled recaps.
- * Returns it with both prompts' entry ids.
+ * A session whose two prompts were appended a minute before two recaps were journaled (the journal stamps rows
+ * with SQLite's clock, so only the entries are backdated). Returns it with both prompts' entry ids.
  */
 function sessionWithRecaps(): { sessionManager: SessionManager; firstId: string; lastId: string } {
 	const sessionManager = SessionManager.inMemory();
-	const sentAt = Date.now() - 60_000;
-	const firstId = sessionManager.appendMessage({ role: "user", content: "first prompt", timestamp: sentAt });
-	const lastId = sessionManager.appendMessage({ role: "user", content: "check the PR", timestamp: sentAt });
+	setSystemTime(Date.now() - 60_000);
+	let firstId: string;
+	let lastId: string;
+	try {
+		firstId = sessionManager.appendMessage({ role: "user", content: "first prompt", timestamp: Date.now() });
+		lastId = sessionManager.appendMessage({ role: "user", content: "check the PR", timestamp: Date.now() });
+	} finally {
+		setSystemTime();
+	}
 	recordSessionRecap(sessionManager.getSessionId(), root, "first recap");
 	recordSessionRecap(sessionManager.getSessionId(), root, "latest recap");
 	return { sessionManager, firstId, lastId };
@@ -64,15 +70,18 @@ function replayRecaps(sessionManager: SessionManager): string[] {
 }
 
 describe("idle recap across a transcript replay", () => {
-	it("re-shows only the newest journaled recap when it follows the last message", () => {
+	it("re-shows only the newest journaled recap when it follows the conversation", () => {
 		const recaps = replayRecaps(sessionWithRecaps().sessionManager);
 		expect(recaps).toHaveLength(1);
 		expect(recaps[0]).toContain("latest recap");
 	});
 
-	it("drops the recap once a message has come after it", () => {
+	it.each([
+		["message", (sm: SessionManager) => sm.appendMessage({ role: "user", content: "next", timestamp: Date.now() })],
+		["notice", (sm: SessionManager) => sm.appendCustomMessageEntry("async-result", "job finished", true)],
+	])("drops the recap once a %s moves the conversation past it", (_kind, append) => {
 		const { sessionManager } = sessionWithRecaps();
-		sessionManager.appendMessage({ role: "user", content: "resolve the threads", timestamp: Date.now() });
+		append(sessionManager);
 		expect(replayRecaps(sessionManager)).toEqual([]);
 	});
 
@@ -82,7 +91,7 @@ describe("idle recap across a transcript replay", () => {
 		expect(replayRecaps(sessionManager)).toHaveLength(1);
 	});
 
-	it("does not show the recap on a view rewound to an earlier message, even one sent in the same millisecond", () => {
+	it("does not show the recap on a view rewound to an earlier entry", () => {
 		const { sessionManager, firstId } = sessionWithRecaps();
 		sessionManager.branch(firstId);
 		expect(replayRecaps(sessionManager)).toEqual([]);

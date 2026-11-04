@@ -75,7 +75,7 @@ function makeHarness(showTokenUsage: boolean): { ctx: InteractiveModeContext; he
 		session: {
 			retryAttempt: 0,
 			getToolByName: () => undefined,
-			sessionManager: { getCwd: () => process.cwd(), getEntries: () => [] },
+			sessionManager: { getCwd: () => process.cwd(), getConversationTip: () => undefined },
 		},
 		get viewSession() {
 			return (this as typeof ctx).session;
