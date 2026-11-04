@@ -1285,6 +1285,43 @@ describe("AgentSession shake", () => {
 				expect(plan!.unchangedPrefixTokens).toBe(expected);
 				expect(JSON.stringify(sent)).not.toContain("hidden plan");
 			});
+
+			it("frees only what the sent request loses, so an unsent region cannot buy a losing shake", async () => {
+				// A fenced block inside a prewalk plan entry is an eligible region but
+				// reaches no request, so it must not count toward the saving either.
+				const compactSpy = mockSoftCompaction();
+				sessionManager.appendCustomMessageEntry(
+					PREWALK_PLAN_MESSAGE_TYPE,
+					`plan\n\`\`\`\n${"hidden ".repeat(40_000)}\n\`\`\`\n`,
+					false,
+				);
+				const heavy = await driveThresholdShake(10_000);
+
+				expect(heavy.prunedAt).toBeUndefined();
+				const shakeEnd = events.find(event => event.type === "auto_compaction_end" && event.action === "shake");
+				expect(shakeEnd).toMatchObject({ skipped: true, errorMessage: expect.stringMatching(/prompt cache/) });
+				expect(compactSpy).toHaveBeenCalledTimes(1);
+			});
+
+			it("measures growth after a /clear, not across the history it hid", async () => {
+				// 200 slow requests before the reset: averaged into the live ones they
+				// make the conversation look slow enough to repay the rewrite, and the
+				// losing shake runs.
+				const compactSpy = mockSoftCompaction();
+				for (let turn = 0; turn < 200; turn++) {
+					sessionManager.appendMessage({
+						role: "user",
+						content: [{ type: "text", text: "old" }],
+						timestamp: turn,
+					});
+					sessionManager.appendMessage(assistantAt(1_000 + turn, [{ type: "text", text: "older" }]));
+				}
+				sessionManager.appendResetBoundary();
+				const heavy = await driveThresholdShake(10_000);
+
+				expect(heavy.prunedAt).toBeUndefined();
+				expect(compactSpy).toHaveBeenCalledTimes(1);
+			});
 		});
 	});
 

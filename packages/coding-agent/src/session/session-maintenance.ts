@@ -1043,7 +1043,7 @@ export class SessionMaintenance {
 		}
 		if (
 			opts.admit &&
-			!opts.admit(this.#shakeRequestPrefix(branchEntries, regions, replacements, replacementTokenCounts, savings))
+			!opts.admit(this.#shakeRequestPlan(branchEntries, regions, replacements, replacementTokenCounts))
 		) {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
@@ -6418,15 +6418,21 @@ export class SessionMaintenance {
 			postShakeTokens -
 				(resolvePromptCacheLookback(model) === undefined ? plan.unchangedPrefixTokens : plan.requestHeadTokens),
 		);
+		// A `/clear` hides everything before it from the request just as a
+		// compaction does, so growth is measured after whichever came last.
 		const branch = this.#host.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branch);
-		const sinceCompaction = latestCompaction ? branch.slice(branch.lastIndexOf(latestCompaction) + 1) : branch;
+		const boundary = Math.max(
+			latestCompaction ? branch.lastIndexOf(latestCompaction) : -1,
+			branch.findLastIndex(entry => entry.type === "reset_boundary"),
+		);
+		const sinceBoundary = branch.slice(boundary + 1);
 		const retention = cfgProvidersCacheRetention.get(this.#host.settings);
 		const cost = priceShakeCacheCost({
 			model,
 			tokensFreed: plan.tokensFreed,
 			rewriteTokens,
-			growthPerRequest: measurePromptGrowthPerRequest(sinceCompaction),
+			growthPerRequest: measurePromptGrowthPerRequest(sinceBoundary),
 			cacheTier: resolvePromptCacheTier(
 				model,
 				{ cacheRetention: retention === "auto" ? undefined : retention },
@@ -6445,20 +6451,20 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * What a planned shake leaves of the request the provider receives: the
-	 * tokens of the longest prefix the edit keeps byte-identical (request head
-	 * plus the context messages before the first changed one) and of the head
-	 * alone. Measured on the provider-facing context itself, built for the
-	 * branch as it is and as the edit would leave it (applied to copies of the
-	 * edited entries), so a compaction summary counts and an entry the context
-	 * leaves out does not.
+	 * What a planned shake would do to the request the provider receives: the
+	 * tokens it removes from it, the tokens of the longest prefix the edit keeps
+	 * byte-identical (request head plus the context messages before the first
+	 * changed one), and the head's own tokens. All three are measured on the
+	 * provider-facing context, built for the branch as it is and as the edit
+	 * would leave it (applied to copies of the edited entries), so a compaction
+	 * summary counts, an entry the context leaves out frees nothing, and the
+	 * saving is in the same domain as the rewrite it is weighed against.
 	 */
-	#shakeRequestPrefix(
+	#shakeRequestPlan(
 		branchEntries: SessionEntry[],
 		regions: readonly ShakeRegion[],
 		replacements: readonly string[],
 		replacementTokenCounts: readonly number[],
-		tokensFreed: number,
 	): ShakeAdmitPlan {
 		const copies = new Map<SessionEntry, SessionEntry>();
 		for (const region of regions) {
@@ -6471,13 +6477,9 @@ export class SessionMaintenance {
 				replacementTokens: replacementTokenCounts[index] ?? 0,
 			})),
 		);
+		const projected = branchEntries.map(entry => copies.get(entry) ?? entry);
 		const before = buildSessionContext(branchEntries, undefined, undefined, this.#contextBuildOptions).messages;
-		const after = buildSessionContext(
-			branchEntries.map(entry => copies.get(entry) ?? entry),
-			undefined,
-			undefined,
-			this.#contextBuildOptions,
-		).messages;
+		const after = buildSessionContext(projected, undefined, undefined, this.#contextBuildOptions).messages;
 		let shared = 0;
 		while (shared < before.length && shared < after.length && Bun.deepEquals(before[shared], after[shared])) shared++;
 		const requestHeadTokens = computeNonMessageTokens(
@@ -6486,7 +6488,10 @@ export class SessionMaintenance {
 			this.#host.settings.revision,
 		);
 		return {
-			tokensFreed,
+			tokensFreed: Math.max(
+				0,
+				this.#countProjectedMessages(before, branchEntries) - this.#countProjectedMessages(after, projected),
+			),
 			requestHeadTokens,
 			unchangedPrefixTokens:
 				requestHeadTokens + this.#countProjectedMessages(before.slice(0, shared), branchEntries),
