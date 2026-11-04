@@ -303,14 +303,16 @@ async function sendBedrockRequest(
 	let response: Response;
 	let responseBody: string | undefined;
 	try {
-		response = await fetchWithRetry(url, {
-			method: "POST",
-			headers: requestHeaders,
-			body,
-			signal: watchdog.signal,
-			fetch: heldFetch(options.fetch ?? fetch),
-			timeout: false,
-		});
+		response = await watchdog.run(() =>
+			fetchWithRetry(url, {
+				method: "POST",
+				headers: requestHeaders,
+				body,
+				signal: watchdog.signal,
+				fetch: heldFetch(options.fetch ?? fetch),
+				timeout: false,
+			}),
+		);
 		if (!response.ok && endpoint === "invoke-with-response-stream")
 			responseBody = await response.text().catch(() => "");
 	} finally {

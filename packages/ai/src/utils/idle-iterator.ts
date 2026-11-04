@@ -1,5 +1,6 @@
 import { $env } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { type RequestSendState, runWithRequestSendHooks } from "../request-holds";
 import type { LocalWorkSource } from "./event-stream";
 
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000;
@@ -91,6 +92,51 @@ export function getOpenAIStreamFirstEventTimeoutMs(
 	return Math.max(base, idleTimeoutMs);
 }
 
+export interface RequestTimeout {
+	/** Carries the clock to the actual send beneath transport preparation. */
+	run<T>(send: () => T): T;
+	clear(): void;
+	remainingMs(): number | undefined;
+}
+
+/** Counts network time only: a hold pauses the remaining budget, including between retry attempts. */
+export function armRequestTimeout(onTimeout: () => void, timeoutMs: number | undefined): RequestTimeout {
+	if (timeoutMs === undefined) return { run: send => send(), clear() {}, remainingMs: () => undefined };
+	let timer: NodeJS.Timeout | undefined;
+	let remaining = timeoutMs;
+	let startedAt = 0;
+	let cleared = false;
+	const hooks = {
+		held() {
+			if (timer === undefined) return;
+			remaining = Math.max(0, remaining - (Date.now() - startedAt));
+			clearTimeout(timer);
+			timer = undefined;
+		},
+		send() {
+			if (cleared || timer !== undefined) return;
+			startedAt = Date.now();
+			timer = setTimeout(onTimeout, remaining);
+			timer.unref?.();
+		},
+	};
+	return {
+		run: send => runWithRequestSendHooks(hooks, send),
+		clear() {
+			cleared = true;
+			clearTimeout(timer);
+			timer = undefined;
+		},
+		remainingMs: () => Math.max(0, remaining - (timer === undefined ? 0 : Date.now() - startedAt)),
+	};
+}
+
+export interface PreResponseTimeout {
+	signal: AbortSignal | undefined;
+	run<T>(send: () => Promise<T>): Promise<T>;
+	clear(): void;
+}
+
 /**
  * Arms a clearable pre-response (time-to-first-byte) abort guard for a streaming
  * fetch, combined with the caller's signal.
@@ -108,26 +154,38 @@ export function getOpenAIStreamFirstEventTimeoutMs(
  * the retry loop's base signal reserved for caller cancellation. Reusing the
  * guard as the loop signal makes its timeout indistinguishable from cancellation.
  *
- * Returns the caller signal unchanged (and a no-op `clear`) when no positive
- * timeout is configured.
+ * Its `run` must wrap the guarded transport attempt. The clock starts in the
+ * final send turn, pauses while held, and is cleared when the attempt settles.
  */
 export function armPreResponseTimeout(
 	callerSignal: AbortSignal | undefined,
 	timeoutMs: number | undefined,
-): { signal: AbortSignal | undefined; clear: () => void } {
-	if (timeoutMs === undefined || timeoutMs <= 0) return { signal: callerSignal, clear: () => {} };
+): PreResponseTimeout {
+	if (timeoutMs === undefined || timeoutMs <= 0) return { signal: callerSignal, run: send => send(), clear() {} };
 	const controller = new AbortController();
-	const timer = setTimeout(() => {
+	const watchdog = armRequestTimeout(() => {
 		controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
 	}, timeoutMs);
-	timer.unref?.();
 	const signal = callerSignal ? AbortSignal.any([callerSignal, controller.signal]) : controller.signal;
-	return { signal, clear: () => clearTimeout(timer) };
+	return {
+		signal,
+		clear: watchdog.clear,
+		async run(send) {
+			try {
+				return await watchdog.run(send);
+			} catch (error) {
+				if (!callerSignal?.aborted && controller.signal.aborted) throw controller.signal.reason;
+				throw error;
+			}
+		},
+	};
 }
 
 export interface IdleTimeoutIteratorOptions {
 	idleTimeoutMs?: number;
 	firstItemTimeoutMs?: number;
+	/** Pauses network deadlines until the producer sends, and during any later hold wait. */
+	requestSendState?: RequestSendState;
 	errorMessage: string;
 	firstItemErrorMessage?: string;
 	onIdle?: () => void;
@@ -172,8 +230,11 @@ export async function* iterateWithIdleTimeout<T>(
 	options: IdleTimeoutIteratorOptions,
 ): AsyncGenerator<T> {
 	const firstItemTimeoutMs = options.firstItemTimeoutMs ?? options.idleTimeoutMs;
+	const clockStartedAt = Date.now();
 	let firstItemDeadlineMs =
-		firstItemTimeoutMs !== undefined && firstItemTimeoutMs > 0 ? Date.now() + firstItemTimeoutMs : undefined;
+		firstItemTimeoutMs !== undefined && firstItemTimeoutMs > 0
+			? clockStartedAt + firstItemTimeoutMs - (options.requestSendState?.elapsedMs ?? 0)
+			: undefined;
 	const abortSignal = options.abortSignal;
 	const iterator = iterable[Symbol.asyncIterator]();
 	let iteratorClosed = false;
@@ -267,8 +328,27 @@ export async function* iterateWithIdleTimeout<T>(
 	let timeoutFired = false;
 	let timer: NodeJS.Timeout | undefined;
 	let timerFireAtMs = Infinity;
+	let pausedAt = options.requestSendState?.active === false ? clockStartedAt : undefined;
+	let timingChange = options.requestSendState ? Promise.withResolvers<{ kind: "timing" }>() : undefined;
+	const removeTimingListener = options.requestSendState?.onChange(() => {
+		if (options.requestSendState?.active) {
+			if (pausedAt !== undefined) {
+				const pausedMs = Date.now() - pausedAt;
+				if (firstItemDeadlineMs !== undefined) firstItemDeadlineMs += pausedMs;
+				lastProgressAt += pausedMs;
+				pausedAt = undefined;
+			}
+		} else {
+			pausedAt ??= Date.now();
+			clearTimeout(timer);
+			timer = undefined;
+			timerFireAtMs = Infinity;
+		}
+		timingChange?.resolve({ kind: "timing" });
+	});
 
 	const currentDeadlineMs = (): number | undefined => {
+		if (pausedAt !== undefined) return undefined;
 		if (awaitingFirstItem) return firstItemDeadline();
 		if (options.idleTimeoutMs !== undefined && options.idleTimeoutMs > 0) {
 			return Math.max(lastProgressAt, localWorkSettledAt()) + options.idleTimeoutMs;
@@ -319,6 +399,7 @@ export async function* iterateWithIdleTimeout<T>(
 		let raceCount = 0;
 		while (true) {
 			if (++raceCount % RACER_REMINT_INTERVAL === 0) {
+				if (timingChange) timingChange = Promise.withResolvers<{ kind: "timing" }>();
 				if (abortPromise !== undefined && !abortSignal!.aborted) {
 					const { promise, resolve } = Promise.withResolvers<{ kind: "abort" }>();
 					resolveAbort = resolve;
@@ -331,7 +412,7 @@ export async function* iterateWithIdleTimeout<T>(
 				}
 			}
 			let activeTimeoutMs: number | undefined;
-			if (awaitingFirstItem) {
+			if (pausedAt === undefined && awaitingFirstItem) {
 				const deadlineMs = firstItemDeadline();
 				if (deadlineMs !== undefined) {
 					activeTimeoutMs = deadlineMs - Date.now();
@@ -345,7 +426,7 @@ export async function* iterateWithIdleTimeout<T>(
 						activeTimeoutMs = firstItemDeadline()! - Date.now();
 					}
 				}
-			} else if (options.idleTimeoutMs !== undefined && options.idleTimeoutMs > 0) {
+			} else if (pausedAt === undefined && options.idleTimeoutMs !== undefined && options.idleTimeoutMs > 0) {
 				activeTimeoutMs = options.idleTimeoutMs - (Date.now() - Math.max(lastProgressAt, localWorkSettledAt()));
 				if (activeTimeoutMs <= 0) {
 					if (!hasPendingLocalWork()) {
@@ -366,8 +447,10 @@ export async function* iterateWithIdleTimeout<T>(
 					| { kind: "error"; error: unknown }
 					| { kind: "timeout" }
 					| { kind: "abort" }
+					| { kind: "timing" }
 				>
 			> = [pendingNext];
+			if (timingChange) racers.push(timingChange.promise);
 
 			const enforceTimeout = !noTimeoutEnforced && activeTimeoutMs !== undefined && activeTimeoutMs > 0;
 			if (enforceTimeout) {
@@ -386,6 +469,11 @@ export async function* iterateWithIdleTimeout<T>(
 			let continuing = false;
 			try {
 				const outcome = await Promise.race(racers);
+				if (outcome.kind === "timing") {
+					timingChange = Promise.withResolvers<{ kind: "timing" }>();
+					continuing = true;
+					continue;
+				}
 				if (outcome.kind === "next" || outcome.kind === "error") {
 					pendingNext = undefined;
 				}
@@ -435,6 +523,8 @@ export async function* iterateWithIdleTimeout<T>(
 			}
 		}
 	} finally {
+		removeTimingListener?.();
+		timingChange?.resolve({ kind: "timing" });
 		if (timer !== undefined) clearTimeout(timer);
 		// Settle the persistent racers so the final Promise.race releases them.
 		resolveTimeout?.({ kind: "timeout" });

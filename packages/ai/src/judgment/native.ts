@@ -30,7 +30,9 @@ import { validateImageInput } from "../images/shared";
 import { withInferenceUserAgent } from "../providers/inference-headers";
 import { redactSensitiveInObject } from "../providers/transform-messages";
 import type { ImageContent, Model, Usage } from "../types";
+import { createAbortSourceTracker } from "../utils/abort";
 import { heldFetch } from "../utils/held-fetch";
+import { armRequestTimeout } from "../utils/idle-iterator";
 import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { openaiDecisionsWire } from "./openai-decisions";
 import { openrouterDecisionsWire, referencedImageAssets, typesafeWire, workersAiWire } from "./systemone";
@@ -516,25 +518,41 @@ export class NativeJudge implements Judge {
 		};
 		for (let attempt = 0; ; attempt++) {
 			signal?.throwIfAborted();
-			const timeout = AbortSignal.timeout(this.#timeoutMs);
+			// Keep native timeout validation without creating its clock while a request is held.
+			if (!Number.isFinite(this.#timeoutMs) || this.#timeoutMs < 0 || this.#timeoutMs > Number.MAX_SAFE_INTEGER) {
+				AbortSignal.timeout(this.#timeoutMs);
+			}
+			const abortTracker = createAbortSourceTracker(signal);
+			const watchdog = armRequestTimeout(
+				() => abortTracker.abortLocally(new DOMException("The operation timed out.", "TimeoutError")),
+				this.#timeoutMs,
+			);
 			let response: Response;
 			try {
-				response = await this.#fetch(
-					target.url,
-					withInferenceUserAgent(target.url, {
-						method: "POST",
-						headers,
-						body,
-						signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-					}),
+				response = await watchdog.run(() =>
+					this.#fetch(
+						target.url,
+						withInferenceUserAgent(target.url, {
+							method: "POST",
+							headers,
+							body,
+							signal: abortTracker.requestSignal,
+						}),
+					),
 				);
 			} catch (error) {
-				if (signal?.aborted || attempt + 1 >= MAX_ATTEMPTS) throw error;
+				watchdog.clear();
+				if (signal?.aborted || attempt + 1 >= MAX_ATTEMPTS) throw abortTracker.getLocalAbortReason() ?? error;
 				await Bun.sleep(backoffMs(attempt, undefined));
 				continue;
 			}
-			if (response.ok) return await response.json();
-			const text = await response.text();
+			let text: string;
+			try {
+				if (response.ok) return await response.json();
+				text = await response.text();
+			} finally {
+				watchdog.clear();
+			}
 			const error = new JudgmentApiError(`${this.label} API error (${response.status}): ${text}`, response.status, {
 				headers: response.headers,
 			});

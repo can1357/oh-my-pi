@@ -968,17 +968,19 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					const watchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
 					let response: Response;
 					try {
-						response = await fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
-							method: "POST",
-							headers: requestHeaders,
-							body: requestBodyJson,
-							signal: watchdog.signal,
-							maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
-							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
-							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
-							fetch: sendFetch,
-							timeout: false,
-						});
+						response = await watchdog.run(() =>
+							fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+								method: "POST",
+								headers: requestHeaders,
+								body: requestBodyJson,
+								signal: watchdog.signal,
+								maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
+								defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
+								maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
+								fetch: sendFetch,
+								timeout: false,
+							}),
+						);
 					} finally {
 						watchdog.clear();
 					}

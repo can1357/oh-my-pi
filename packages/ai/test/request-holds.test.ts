@@ -76,6 +76,14 @@ describe("afterRequestHolds", () => {
 		expect(await sent.result).toBe("sent");
 	});
 
+	it("sends nothing outside any context once the signal has aborted", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const sent = request(controller.signal);
+		await expect(sent.result).rejects.toThrow();
+		expect(sent.sent).toBe(false);
+	});
+
 	it("holds a request started in the context until the hold lets go, then releases the view it opened", async () => {
 		const holds = new TestHolds();
 		const sent = runWithRequestHolds(holds, () => request());
@@ -752,6 +760,57 @@ describe("what the last check covers", () => {
 		expect(alive).toBeLessThan(50);
 		holds.let();
 	});
+
+	for (const ending of ["release", "abort"] as const) {
+		it(`keeps no released view on a pending hold after 1,000 aliased waits ${ending}`, async () => {
+			const held = Promise.withResolvers<void>();
+			const views: WeakRef<RequestHoldView>[] = [];
+			const signals: WeakRef<AbortSignal>[] = [];
+			let released = 0;
+			const holds: RequestHolds = {
+				open() {
+					const view: RequestHoldView = {
+						check: () => held.promise,
+						release: () => released++,
+					};
+					views.push(new WeakRef(view));
+					return view;
+				},
+			};
+			const alias = new RequestHoldsAlias();
+			alias.bind(runWithRequestHolds(holds, captureRequestHolds));
+			const finish = async () => {
+				if (ending === "release") {
+					runWithRequestHolds(alias, () => {
+						const gate = openRequestHolds();
+						void gate.check();
+						gate.release();
+					});
+				} else {
+					const controller = new AbortController();
+					signals.push(new WeakRef(controller.signal));
+					const sent = runWithRequestHolds(alias, () => request(controller.signal));
+					controller.abort();
+					await expect(sent.result!).rejects.toThrow();
+					expect(sent.sent).toBe(false);
+				}
+			};
+			try {
+				for (let i = 0; i < 1000; i++) await finish();
+				for (let i = 0; i < 6; i++) {
+					Bun.gc(true);
+					await turns(1);
+				}
+				expect(released).toBe(1000);
+				// Allow final-stack GC noise, never one retained view or signal per request.
+				expect(views.filter(ref => ref.deref() !== undefined).length).toBeLessThan(10);
+				expect(signals.filter(ref => ref.deref() !== undefined).length).toBeLessThan(10);
+			} finally {
+				held.resolve();
+				await turns(1);
+			}
+		});
+	}
 
 	it("leaves nothing on a carried request's lifetime for waits that are over", async () => {
 		const holds = new TestHolds();

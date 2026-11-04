@@ -28,7 +28,7 @@ import { waitForRetry } from "../utils/retry-wait";
 import { getEnvApiKey } from "../env-api-key";
 import { OUTPUT_FALLBACK_BUFFER } from "../stream";
 import { afterRequestHolds } from "../request-holds";
-import { heldFetch } from "../utils/held-fetch";
+import { heldFetch, withHeldForm } from "../utils/held-fetch";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import type {
 	AnthropicCompactionFiles,
@@ -92,6 +92,7 @@ import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import {
+	armRequestTimeout,
 	getStreamFirstEventTimeoutMs,
 	getStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -2692,36 +2693,35 @@ const streamAnthropicOnce = (
 				let streamedReplayUnsafeContent = false;
 
 				try {
-					let requestTimeout: NodeJS.Timeout | undefined;
-					if (requestTimeoutMs !== undefined) {
-						requestTimeout = setTimeout(
-							() => activeAbortTracker.abortLocally(firstEventTimeoutAbortError),
-							requestTimeoutMs,
-						);
-					}
+					const requestTimeout = armRequestTimeout(
+						() => activeAbortTracker.abortLocally(firstEventTimeoutAbortError),
+						requestTimeoutMs,
+					);
 					let anthropicStream: AsyncIterable<AnthropicStreamEvent>;
 					let response: Response;
 					let requestId: string | null;
 					let recordsRawSseEvents: boolean;
 					try {
-						if (holdsAtCreate) {
-							await afterRequestHolds(requestSignal, () => {
-								anthropicRequest = createRequest();
-							});
-						}
 						({
 							events: anthropicStream,
 							response,
 							requestId,
 							recordsRawSseEvents,
-						} = await getAnthropicStreamResponse(anthropicRequest, requestSignal, rawSseObserver));
+						} = await requestTimeout.run(async () => {
+							if (holdsAtCreate) {
+								await afterRequestHolds(requestSignal, () => {
+									anthropicRequest = createRequest();
+								});
+							}
+							return await getAnthropicStreamResponse(anthropicRequest, requestSignal, rawSseObserver);
+						}));
 					} catch (error) {
 						if (error instanceof AnthropicConnectionTimeoutError && !activeAbortTracker.wasCallerAbort()) {
 							throw firstEventTimeoutAbortError;
 						}
 						throw error;
 					} finally {
-						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
+						requestTimeout.clear();
 					}
 					await notifyProviderResponse(options, response, sourceModel, requestId);
 					if (slowMode) {
@@ -4228,6 +4228,7 @@ function createClient(
 	args: AnthropicClientOptionsArgs,
 ): { client: AnthropicMessagesClient; isOAuthToken: boolean; defaultHeaders?: Record<string, string> } {
 	const { isOAuthToken: oauthToken, ...clientOptions } = buildAnthropicClientOptions({ ...args, model });
+	if (clientOptions.fetch) withHeldForm(clientOptions.fetch, clientOptions.fetch);
 	const client = new AnthropicMessagesClient(clientOptions);
 	return { client, isOAuthToken: oauthToken, defaultHeaders: clientOptions.defaultHeaders };
 }

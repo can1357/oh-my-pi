@@ -17,6 +17,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { heldFetch } from "../utils/held-fetch";
 import {
+	armRequestTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -154,29 +155,28 @@ const streamAzureOpenAIResponsesOnce = (
 			const attemptedReasoningEffortFallbacks = new Set<string>();
 			let openaiStream: AsyncIterable<ResponseStreamEvent>;
 			while (true) {
-				let requestTimeout: NodeJS.Timeout | undefined;
-				if (requestTimeoutMs !== undefined) {
-					requestTimeout = setTimeout(
-						() => abortTracker.abortLocally(firstEventTimeoutAbortError),
-						requestTimeoutMs,
-					);
-				}
+				const requestTimeout = armRequestTimeout(
+					() => abortTracker.abortLocally(firstEventTimeoutAbortError),
+					requestTimeoutMs,
+				);
 				try {
 					const headersWithTimeout = { ...headers };
 					if (requestTimeoutMs !== undefined) {
 						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 					}
-					const handle = await postOpenAIStream<ResponseStreamEvent>({
-						url,
-						headers: headersWithTimeout,
-						body: params,
-						signal: requestSignal,
-						fetch: heldFetch(options?.fetch ?? fetch),
-						// Transient 408/429/5xx get Retry-After-aware transport retries;
-						// the first-event watchdog aborts `requestSignal`, so retries
-						// cannot extend the caller's deadline.
-						onSseEvent: rawSseObserver,
-					});
+					const handle = await requestTimeout.run(() =>
+						postOpenAIStream<ResponseStreamEvent>({
+							url,
+							headers: headersWithTimeout,
+							body: params,
+							signal: requestSignal,
+							fetch: heldFetch(options?.fetch ?? fetch),
+							// Transient 408/429/5xx get Retry-After-aware transport retries;
+							// the first-event watchdog aborts `requestSignal`, so retries
+							// cannot extend the caller's deadline.
+							onSseEvent: rawSseObserver,
+						}),
+					);
 					openaiStream = handle.events;
 					break;
 				} catch (error) {
@@ -191,7 +191,7 @@ const streamAzureOpenAIResponsesOnce = (
 					applyOpenAIReasoningEffortFallback(params, reasoningEffortFallback);
 					rawRequestDump.body = params;
 				} finally {
-					if (requestTimeout !== undefined) clearTimeout(requestTimeout);
+					requestTimeout.clear();
 				}
 			}
 			stream.push({ type: "start", partial: output });

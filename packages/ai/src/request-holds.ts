@@ -19,7 +19,7 @@
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isPromise } from "node:util/types";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { AbortError } from "@oh-my-pi/pi-utils/abortable";
 
 /** One request's view of a set of holds, opened once and kept for the rest of the request. */
 export interface RequestHoldView {
@@ -155,10 +155,12 @@ function runExempt<T>(scope: (fn: () => T, exemption: Exemption) => T, fn: () =>
 			follows = result as Promise<unknown>;
 			return result;
 		}
-		const followed = then;
-		const adopted = new Promise<unknown>((resolve, reject) => {
-			followed.call(result, resolve, reject);
-		});
+		const { promise: adopted, resolve, reject } = Promise.withResolvers<unknown>();
+		try {
+			then.call(result, resolve, reject);
+		} catch (error) {
+			reject(error);
+		}
 		// The exemption only asks whether it settled; a rejection is the work's to report.
 		adopted.catch(noop);
 		follows = adopted;
@@ -178,6 +180,67 @@ interface Scope {
 }
 
 const scopes = new AsyncLocalStorage<Scope>();
+
+/** Internal transport resources: preparation may await; clocks start only at the final send. */
+export interface RequestSendHooks {
+	prepare?(): Promise<void> | undefined;
+	held?(): Promise<void> | void;
+	send?(): void;
+}
+
+interface SendScope {
+	readonly hooks: RequestSendHooks;
+	readonly parent: SendScope | undefined;
+}
+
+const sends = new AsyncLocalStorage<SendScope>();
+
+/** Carries request capacity and watchdogs to the gate beneath all transport preparation. */
+export function runWithRequestSendHooks<T>(hooks: RequestSendHooks, fn: () => T, inherit = true): T {
+	return sends.run({ hooks, parent: inherit ? sends.getStore() : undefined }, fn);
+}
+
+/** Network activity for a shared watchdog whose producer runs separately from its consumer. */
+export interface RequestSendState {
+	readonly active: boolean;
+	readonly elapsedMs: number;
+	onChange(listener: () => void): () => void;
+}
+
+export function runWithRequestSendState<T>(fn: (state: RequestSendState) => T): T {
+	let active = false;
+	let elapsedMs = 0;
+	let activeAt = 0;
+	const listeners = new Set<() => void>();
+	const change = (next: boolean) => {
+		if (active === next) return;
+		if (active) elapsedMs += Date.now() - activeAt;
+		if (next) activeAt = Date.now();
+		active = next;
+		for (const listener of listeners) listener();
+	};
+	return runWithRequestSendHooks({ held: () => change(false), send: () => change(true) }, () =>
+		fn({
+			get active() {
+				return active;
+			},
+			get elapsedMs() {
+				return elapsedMs + (active ? Date.now() - activeAt : 0);
+			},
+			onChange(listener) {
+				listeners.add(listener);
+				return () => {
+					listeners.delete(listener);
+				};
+			},
+		}),
+	);
+}
+
+/** Whether this request carries a hold scope, including a currently exempt or unbound one. */
+export function hasRequestHoldScope(): boolean {
+	return scopes.getStore() !== undefined;
+}
 
 function live(lifetimes: readonly Lifetime[]): boolean {
 	return lifetimes.every(lifetime => lifetime.open);
@@ -415,6 +478,68 @@ interface HoldEntry {
 	carried: boolean;
 }
 
+interface HeldWait {
+	wake(): void;
+	fail(error: unknown): void;
+}
+
+/** One reaction per pending hold, shared by all requests; only their current waits stay registered. */
+const heldWaits = new WeakMap<Promise<void>, Set<HeldWait>>();
+
+function watchHeld(held: Promise<void>): Set<HeldWait> {
+	const watched = heldWaits.get(held);
+	if (watched) return watched;
+	const waits = new Set<HeldWait>();
+	heldWaits.set(held, waits);
+	// Neither the reaction's closure nor its async context may retain a request
+	// whose wait ended while the hold's promise is still pending.
+	scopes.exit(() =>
+		sends.exit(() => {
+			void held.then(
+				() => {
+					heldWaits.delete(held);
+					const ending = [...waits];
+					waits.clear();
+					for (const wait of ending) wait.wake();
+				},
+				error => {
+					heldWaits.delete(held);
+					const ending = [...waits];
+					waits.clear();
+					for (const wait of ending) wait.fail(error);
+				},
+			);
+		}),
+	);
+	return waits;
+}
+
+/** Unlike an await/race on the hold itself, an aborted wait leaves no reaction retaining its signal. */
+function waitForHeld(signal: AbortSignal | undefined, held: Promise<void>): Promise<void> {
+	if (!signal) return held;
+	const waits = watchHeld(held);
+	if (signal.aborted) return Promise.reject(new AbortError(signal));
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	const stop = () => {
+		waits.delete(wait);
+		signal.removeEventListener("abort", onAbort);
+	};
+	const wait: HeldWait = {
+		wake() {
+			stop();
+			resolve();
+		},
+		fail(error) {
+			stop();
+			reject(error);
+		},
+	};
+	const onAbort = () => wait.fail(new AbortError(signal));
+	waits.add(wait);
+	signal.addEventListener("abort", onAbort, { once: true });
+	return promise;
+}
+
 /**
  * One request's views of every hold of the current context, as one
  * {@link RequestHoldView}: each check asks every applicable holds — through
@@ -501,29 +626,7 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 	 * `release` supersedes it. Only it is woken: a wait that is over hears
 	 * nothing more, from its hold, an alias or a lifetime.
 	 */
-	let currentWait: { held: Promise<void>; wake(): void; fail(error: unknown): void; stop(): void } | undefined;
-	/**
-	 * The holds' promises this request reacts to, one reaction each however
-	 * many waits return them; each forwards to the current wait only if that
-	 * wait is waiting on it. Held weakly: a promise no wait is on any more,
-	 * which its hold dropped, is not kept alive by this request.
-	 */
-	const watchedHelds = new WeakSet<Promise<void>>();
-	const watchHeld = (held: Promise<void>) => {
-		if (watchedHelds.has(held)) return;
-		watchedHelds.add(held);
-		held.then(
-			() => {
-				watchedHelds.delete(held);
-				if (currentWait?.held === held) currentWait.wake();
-			},
-			error => {
-				watchedHelds.delete(held);
-				// A hold that fails fails the wait on it, as an `await` of it would.
-				if (currentWait?.held === held) currentWait.fail(error);
-			},
-		);
-	};
+	let currentWait: { stop(): void } | undefined;
 	return {
 		check() {
 			// A check supersedes the wait the previous one returned, whether that wait
@@ -541,7 +644,6 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 				const { promise, resolve, reject } = Promise.withResolvers<void>();
 				const removals: Array<() => void> = [];
 				const wait = {
-					held,
 					wake() {
 						wait.stop();
 						resolve();
@@ -559,7 +661,9 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 				currentWait = wait;
 				for (const alias of aliases) removals.push(alias.onRebind(wait.wake));
 				for (const lifetime of lifetimes) removals.push(lifetime.onEnd(wait.wake));
-				watchHeld(held);
+				const waits = watchHeld(held);
+				waits.add(wait);
+				removals.push(() => waits.delete(wait));
 				return promise;
 			}
 			return undefined;
@@ -589,6 +693,8 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 		release() {
 			currentWait?.stop();
 			const views = opened.splice(0);
+			for (const entry of entries.values()) entry.view = undefined;
+			entries.clear();
 			for (const view of views) view.release();
 		},
 	};
@@ -611,17 +717,43 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
  * and sends nothing once `signal` has aborted, however late before the send.
  */
 export async function afterRequestHolds<T>(signal: AbortSignal | undefined, send: () => T): Promise<Awaited<T>> {
-	if (!scopes.getStore()) return await send();
-	const holds = openRequestHolds();
-	try {
-		for (let held = holds.check(); held; held = holds.check()) await untilAborted(signal, held);
-		// An abort that landed between the wait's end and this turn stops the send too.
+	const resources = sends.getStore();
+	if (!scopes.getStore() && !resources) {
 		signal?.throwIfAborted();
-		const sent = send();
-		// The request is on its way: it no longer waits on the views this send opened.
-		holds.release();
-		return await sent;
+		return await send();
+	}
+	const holds = scopes.getStore() ? openRequestHolds() : undefined;
+	try {
+		for (;;) {
+			signal?.throwIfAborted();
+			const held = holds?.check();
+			if (held) {
+				// A retry may already own capacity and have a running clock. Stop both
+				// before waiting, including a hold added while permit acquisition awaited.
+				watchHeld(held);
+				for (let scope = resources; scope; scope = scope.parent) {
+					const releasing = scope.hooks.held?.();
+					if (releasing) await releasing;
+				}
+				await waitForHeld(signal, held);
+				continue;
+			}
+			let prepared = false;
+			for (let scope = resources; scope; scope = scope.parent) {
+				const preparing = scope.hooks.prepare?.();
+				if (!preparing) continue;
+				await preparing;
+				prepared = true;
+			}
+			// Acquiring capacity may await: all holds must be checked again afterwards.
+			if (prepared) continue;
+			signal?.throwIfAborted();
+			for (let scope = resources; scope; scope = scope.parent) scope.hooks.send?.();
+			const sent = send();
+			holds?.release();
+			return await sent;
+		}
 	} finally {
-		holds.release();
+		holds?.release();
 	}
 }

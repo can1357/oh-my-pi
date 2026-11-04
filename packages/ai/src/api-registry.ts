@@ -97,9 +97,9 @@ export function registerCustomApi(
  * a hold can stop the request. An abort while held ends the stream as
  * aborted without calling the host.
  */
-function afterRequestHoldsCall<O extends StreamOptions | SimpleStreamOptions>(
-	host: (model: Model<Api>, context: Context, options?: O) => AssistantMessageEventStream,
-): (model: Model<Api>, context: Context, options?: O) => AssistantMessageEventStream {
+export function afterRequestHoldsCall<TApi extends Api, O extends StreamOptions | SimpleStreamOptions>(
+	host: (model: Model<TApi>, context: Context, options?: O) => AssistantMessageEventStream,
+): (model: Model<TApi>, context: Context, options?: O) => AssistantMessageEventStream {
 	return (model, context, options) => {
 		const outer = new EventStream();
 		void (async () => {

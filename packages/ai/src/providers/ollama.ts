@@ -600,21 +600,23 @@ const streamOllamaOnce = (
 			const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
 			let response: Response;
 			try {
-				response = await fetchWithRetry(`${baseUrl}/api/chat`, {
-					method: "POST",
-					headers: {
-						...model.headers,
-						...options.headers,
-						Authorization: `Bearer ${apiKey}`,
-						"Content-Type": "application/json",
-					},
-					body: JSON.stringify(body),
-					signal: watchdog.signal,
-					defaultDelayMs: OLLAMA_RETRY_DELAYS_MS,
-					shouldRetryResponse: shouldRetryOllamaResponse,
-					fetch: heldFetch(options.fetch ?? fetch),
-					timeout: false,
-				});
+				response = await watchdog.run(() =>
+					fetchWithRetry(`${baseUrl}/api/chat`, {
+						method: "POST",
+						headers: {
+							...model.headers,
+							...options.headers,
+							Authorization: `Bearer ${apiKey}`,
+							"Content-Type": "application/json",
+						},
+						body: JSON.stringify(body),
+						signal: watchdog.signal,
+						defaultDelayMs: OLLAMA_RETRY_DELAYS_MS,
+						shouldRetryResponse: shouldRetryOllamaResponse,
+						fetch: heldFetch(options.fetch ?? fetch),
+						timeout: false,
+					}),
+				);
 			} finally {
 				watchdog.clear();
 			}

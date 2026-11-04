@@ -1091,7 +1091,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				};
 				let response: Response;
 				try {
-					response = await fetchImpl(requestUrl, init);
+					response = await watchdog.run(() => fetchImpl(requestUrl, init));
 					if (!response.ok) {
 						const errorText = await response.text().catch(() => "");
 						throw new AIError.GoogleApiError(

@@ -14,6 +14,11 @@ import { embed } from "@oh-my-pi/pi-ai/embeddings";
 import { generateImage } from "@oh-my-pi/pi-ai/images";
 import { NativeJudge } from "@oh-my-pi/pi-ai/judgment";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { type CursorOptions, streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
+import {
+	buildGitLabDuoWorkflowStartRequest,
+	runGitLabDuoWorkflowSocket,
+} from "@oh-my-pi/pi-ai/providers/gitlab-duo-workflow";
 import { rerank } from "@oh-my-pi/pi-ai/rerank";
 import { SPEECH_APIS, synthesizeSpeech } from "@oh-my-pi/pi-ai/speech";
 import { CodexSteerPump, type CodexSteerSocket } from "@oh-my-pi/pi-ai/providers/openai-codex/live-steering";
@@ -30,12 +35,35 @@ import type {
 	ModelSpec,
 	OptionsForApi,
 	SimpleStreamOptions,
+	ProviderSessionState,
 } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { submitVideo } from "@oh-my-pi/pi-ai/video";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import {
+	type AgentClientMessage,
+	AgentClientMessageSchema,
+	type AgentServerMessage,
+	AgentServerMessageSchema,
+	BidiAppendRequestSchema,
+	ConversationStateStructureSchema,
+	type ExecServerMessage,
+	ExecServerMessageSchema,
+	type InteractionUpdate,
+	InteractionUpdateSchema,
+	InteractionQuerySchema,
+	McpArgsSchema,
+	McpToolCallSchema,
+	RequestContextArgsSchema,
+	TextDeltaUpdateSchema,
+	ToolCallSchema,
+	ToolCallStartedUpdateSchema,
+	ToolRequestsListedUpdateSchema,
+	TurnEndedUpdateSchema,
+	WebSearchRequestQuerySchema,
+} from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
-import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
+import { create, encodeJsonValue, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { IMAGE_GENERATION_APIS } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
 import { withEnv } from "./helpers";
@@ -1040,4 +1068,543 @@ describe("frames sent on an open model connection wait for request holds", () =>
 			await done;
 		}
 	});
+});
+
+function cursorServerFrame(message: AgentServerMessage["message"]): Buffer {
+	const bytes = toBinary(AgentServerMessageSchema, create(AgentServerMessageSchema, { message }));
+	const frame = Buffer.alloc(bytes.length + 5);
+	frame.writeUInt32BE(bytes.length, 1);
+	frame.set(bytes, 5);
+	return frame;
+}
+
+function cursorInteraction(message: InteractionUpdate["message"]): Buffer {
+	return cursorServerFrame({ case: "interactionUpdate", value: create(InteractionUpdateSchema, { message }) });
+}
+
+function cursorExec(id: number, message: ExecServerMessage["message"]): Buffer {
+	return cursorServerFrame({
+		case: "execServerMessage",
+		value: create(ExecServerMessageSchema, { id, execId: `exec-${id}`, message }),
+	});
+}
+
+function cursorFinished(): Buffer {
+	return Buffer.concat([
+		cursorInteraction({ case: "textDelta", value: create(TextDeltaUpdateSchema, { text: "done" }) }),
+		cursorInteraction({ case: "turnEnded", value: create(TurnEndedUpdateSchema, {}) }),
+	]);
+}
+
+function cursorQuery(id: number): Buffer {
+	return cursorServerFrame({
+		case: "interactionQuery",
+		value: create(InteractionQuerySchema, {
+			id,
+			query: { case: "webSearchRequestQuery", value: create(WebSearchRequestQuerySchema, {}) },
+		}),
+	});
+}
+
+async function withCursorHttp2Server(
+	onMessage: (socket: http2.ServerHttp2Stream, message: AgentClientMessage) => void,
+	run: (baseUrl: string) => Promise<void>,
+): Promise<void> {
+	const server = http2.createServer();
+	const sessions = new Set<http2.ServerHttp2Session>();
+	server.on("session", session => {
+		sessions.add(session);
+		session.on("close", () => sessions.delete(session));
+	});
+	server.on("stream", (socket: http2.ServerHttp2Stream) => {
+		socket.on("error", () => {});
+		socket.respond({ ":status": 200, "content-type": "application/connect+proto" });
+		let buffered = Buffer.alloc(0);
+		socket.on("data", (chunk: Buffer) => {
+			buffered = Buffer.concat([buffered, chunk]);
+			while (buffered.length >= 5) {
+				const length = buffered.readUInt32BE(1);
+				if (buffered.length < length + 5) return;
+				const message = fromBinary(AgentClientMessageSchema, buffered.subarray(5, length + 5));
+				buffered = buffered.subarray(length + 5);
+				onMessage(socket, message);
+			}
+		});
+	});
+	const listening = Promise.withResolvers<void>();
+	server.listen(0, "127.0.0.1", listening.resolve);
+	await listening.promise;
+	const address = server.address();
+	if (!address || typeof address === "string") throw new Error("HTTP/2 server has no TCP address");
+	try {
+		await run(`http://127.0.0.1:${address.port}`);
+	} finally {
+		for (const session of sessions) session.destroy();
+		server.close();
+	}
+}
+
+function manualTimeouts(matches: (milliseconds: number) => boolean) {
+	const deadlines = new Set<{ timer?: NodeJS.Timeout; fire(): void }>();
+	const setTimer = globalThis.setTimeout;
+	const clearTimer = globalThis.clearTimeout;
+	const timeoutSignal = AbortSignal.timeout;
+	const schedule = (handler: (...args: unknown[]) => void, milliseconds?: number, ...args: unknown[]) => {
+		const timer = setTimer(handler, milliseconds, ...args);
+		if (milliseconds !== undefined && matches(milliseconds)) {
+			deadlines.add({ timer, fire: () => handler(...args) });
+		}
+		return timer;
+	};
+	vi.spyOn(globalThis, "setTimeout").mockImplementation(
+		Object.assign(schedule, {
+			__promisify__: setTimer.__promisify__,
+		}) as typeof setTimer,
+	);
+	vi.spyOn(globalThis, "clearTimeout").mockImplementation(timer => {
+		for (const deadline of deadlines) {
+			if (deadline.timer !== undefined && deadline.timer === timer) deadlines.delete(deadline);
+		}
+		Reflect.apply(clearTimer, globalThis, [timer]);
+	});
+	vi.spyOn(AbortSignal, "timeout").mockImplementation(milliseconds => {
+		if (!matches(milliseconds)) return timeoutSignal(milliseconds);
+		const controller = new AbortController();
+		deadlines.add({ fire: () => controller.abort(new DOMException("The operation timed out.", "TimeoutError")) });
+		return controller.signal;
+	});
+	return {
+		fire() {
+			const expiring = Array.from(deadlines);
+			deadlines.clear();
+			for (const deadline of expiring) {
+				if (deadline.timer !== undefined) clearTimer(deadline.timer);
+				deadline.fire();
+			}
+		},
+		clear() {
+			for (const deadline of deadlines) if (deadline.timer !== undefined) clearTimer(deadline.timer);
+			deadlines.clear();
+		},
+	};
+}
+
+describe("framed model requests stop at the first failed hold", () => {
+	it("Cursor HTTP/1: waiting at the gate does not consume an append's network timeout", async () => {
+		const clock = manualTimeouts(milliseconds => milliseconds >= 60_000 && milliseconds < 65_000);
+		const holds = new TestHolds();
+		const responseReady = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>();
+		let modelRequests = 0;
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				const bytes = new Uint8Array(await request.arrayBuffer());
+				if (new URL(request.url).pathname.endsWith("/RunSSE")) {
+					return new Response(new ReadableStream({ start: responseReady.resolve }), {
+						headers: { "content-type": "application/connect+proto" },
+					});
+				}
+				const message = fromBinary(AgentClientMessageSchema, fromBinary(BidiAppendRequestSchema, bytes).dataBinary);
+				if (message.message.case === "runRequest") {
+					modelRequests++;
+					const response = await responseReady.promise;
+					response.enqueue(cursorFinished());
+					response.close();
+				}
+				return new Response(null);
+			},
+		});
+		const controller = new AbortController();
+		const done = runWithRequestHolds(holds, () =>
+			streamCursor(heldModel("cursor-agent", "cursor", String(server.url)), context, {
+				apiKey: "test",
+				transport: "http1",
+				signal: controller.signal,
+			}).result(),
+		);
+		try {
+			await waitFor(() => holds.checks > 0, "the initial send to reach its hold");
+			clock.fire();
+			holds.let();
+			const result = await done;
+			expect(result.stopReason).toBe("stop");
+			expect(modelRequests).toBe(1);
+		} finally {
+			holds.let();
+			controller.abort();
+			await done;
+			clock.clear();
+			server.stop(true);
+		}
+	});
+
+	it("Cursor HTTP/1: a failed append prevents all later queued replies from reaching the server", async () => {
+		let armed = false;
+		let failed = false;
+		let appendChecks = 0;
+		const blocked = Promise.withResolvers<void>();
+		const received: string[] = [];
+		const responseReady = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>();
+		const holds: RequestHolds = {
+			open: () => ({
+				check: () => {
+					if (!armed) return;
+					appendChecks++;
+					if (failed) return;
+					failed = true;
+					return blocked.promise;
+				},
+				release: () => {},
+			}),
+		};
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				const body = new Uint8Array(await request.arrayBuffer());
+				if (new URL(request.url).pathname.endsWith("/RunSSE")) {
+					return new Response(new ReadableStream({ start: responseReady.resolve }), {
+						headers: { "content-type": "application/connect+proto" },
+					});
+				}
+				const append = fromBinary(BidiAppendRequestSchema, body);
+				const message = fromBinary(AgentClientMessageSchema, append.dataBinary).message;
+				received.push(message.case === "interactionResponse" ? `reply-${message.value.id}` : String(message.case));
+				if (message.case === "runRequest") {
+					const response = await responseReady.promise;
+					armed = true;
+					response.enqueue(Buffer.concat([cursorQuery(11), cursorQuery(12), cursorQuery(13)]));
+				}
+				return new Response(null);
+			},
+		});
+		const controller = new AbortController();
+		const done = runWithRequestHolds(holds, () =>
+			streamCursor(heldModel("cursor-agent", "cursor", String(server.url)), context, {
+				apiKey: "test",
+				transport: "http1",
+				signal: controller.signal,
+			}).result(),
+		);
+		try {
+			await waitFor(() => failed, "the first append to reach its hold");
+			blocked.reject(new Error("append-hold-failed"));
+			const result = await done;
+			expect(appendChecks).toBe(1);
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("append-hold-failed");
+			expect(received).toEqual(["runRequest"]);
+		} finally {
+			blocked.resolve();
+			controller.abort();
+			await done;
+			server.stop(true);
+		}
+	});
+
+	for (const terminalCheckpoint of [false, true]) {
+		it(`Cursor HTTP/2: a failed frame fails the returned run even after a terminal checkpoint (${terminalCheckpoint})`, async () => {
+			let armed = false;
+			let failed = false;
+			const received: string[] = [];
+			const holds: RequestHolds = {
+				open: () => ({
+					check: () => {
+						if (!armed || failed) return;
+						failed = true;
+						return Promise.reject(new Error("queued-frame-hold"));
+					},
+					release: () => {},
+				}),
+			};
+			await withCursorHttp2Server(
+				(socket, message) => {
+					received.push(String(message.message.case));
+					if (message.message.case !== "runRequest") return;
+					armed = true;
+					socket.write(
+						Buffer.concat([
+							...(terminalCheckpoint
+								? [
+										cursorFinished(),
+										cursorServerFrame({
+											case: "conversationCheckpointUpdate",
+											value: create(ConversationStateStructureSchema, {}),
+										}),
+									]
+								: []),
+							cursorQuery(11),
+							cursorQuery(12),
+							cursorQuery(13),
+						]),
+					);
+				},
+				async baseUrl => {
+					const result = await runWithRequestHolds(holds, () =>
+						streamCursor(heldModel("cursor-agent", "cursor", baseUrl), context, {
+							apiKey: "test",
+							transport: "http2",
+						}).result(),
+					);
+					expect(failed).toBe(true);
+					expect(received).toEqual(["runRequest"]);
+					expect(result.stopReason).toBe("error");
+					expect(result.errorMessage).toContain("queued-frame-hold");
+				},
+			);
+		});
+	}
+
+	it("Cursor HTTP/2: a completed response half-closes without waiting on a new model hold", async () => {
+		const holds = new TestHolds();
+		holds.armed = false;
+		let requestEnded = false;
+		const controller = new AbortController();
+		await withCursorHttp2Server(
+			(socket, message) => {
+				if (message.message.case !== "runRequest") return;
+				holds.armed = true;
+				socket.on("end", () => {
+					requestEnded = true;
+					socket.end();
+				});
+				socket.write(Buffer.concat([cursorFinished(), Buffer.from([2, 0, 0, 0, 2, 123, 125])]));
+			},
+			async baseUrl => {
+				let result: AssistantMessage | undefined;
+				const done = runWithRequestHolds(holds, () =>
+					streamCursor(heldModel("cursor-agent", "cursor", baseUrl), context, {
+						apiKey: "test",
+						transport: "http2",
+						signal: controller.signal,
+					}).result(),
+				).then(value => {
+					result = value;
+				});
+				try {
+					await waitFor(() => result !== undefined, "the response to finish while model requests remain held");
+					expect(requestEnded).toBe(true);
+					expect(holds.armed).toBe(true);
+					expect(result?.stopReason).toBe("stop");
+				} finally {
+					holds.let();
+					controller.abort();
+					await done;
+				}
+			},
+		);
+	});
+
+	it("Cursor HTTP/2: a resumed run uses its new holds and ignores the retired request's signal", async () => {
+		const states = new Map<string, ProviderSessionState>();
+		const firstController = new AbortController();
+		const nextController = new AbortController();
+		const holds = new TestHolds();
+		const retiredHolds = new TestHolds();
+		retiredHolds.armed = false;
+		let phase = 0;
+		const received: string[] = [];
+		const handleMessage = (send: (frame: Buffer) => void, message: AgentClientMessage): void => {
+			const outer = message.message;
+			received.push(outer.case === "execClientMessage" ? String(outer.value.message.case) : String(outer.case));
+			if (outer.case === "runRequest") {
+				send(cursorExec(1, { case: "requestContextArgs", value: create(RequestContextArgsSchema, {}) }));
+			} else if (
+				outer.case === "execClientMessage" &&
+				outer.value.message.case === "requestContextResult" &&
+				phase === 0
+			) {
+				phase = 1;
+				const args = create(McpArgsSchema, {
+					name: "read",
+					toolName: "read",
+					toolCallId: "call-read-1",
+					providerIdentifier: "pi-agent",
+					args: { path: encodeJsonValue("calc.py") },
+				});
+				send(
+					Buffer.concat([
+						cursorInteraction({
+							case: "toolCallStarted",
+							value: create(ToolCallStartedUpdateSchema, {
+								callId: "call-read-1",
+								toolCall: create(ToolCallSchema, {
+									tool: { case: "mcpToolCall", value: create(McpToolCallSchema, { args }) },
+								}),
+							}),
+						}),
+						cursorExec(2, { case: "mcpArgs", value: args }),
+						cursorInteraction({
+							case: "toolRequestsListed",
+							value: create(ToolRequestsListedUpdateSchema, { callCount: 1 }),
+						}),
+					]),
+				);
+			} else if (outer.case === "execClientMessage" && outer.value.message.case === "mcpResult" && phase === 1) {
+				phase = 2;
+				send(Buffer.concat([cursorFinished(), Buffer.from([2, 0, 0, 0, 2, 123, 125])]));
+			}
+		};
+		const run = async (baseUrl: string): Promise<void> => {
+			const model = heldModel("cursor-agent", "cursor", baseUrl);
+			const options: CursorOptions = {
+				apiKey: "test",
+				transport: "http2",
+				externalToolExecutor: true,
+				sessionId: "relay-holds",
+				providerSessionState: states,
+				signal: firstController.signal,
+			};
+			const tools: NonNullable<Context["tools"]> = [
+				{
+					name: "read",
+					description: "read",
+					parameters: { type: "object", properties: { path: { type: "string" } } },
+				},
+			];
+			const first = structuredClone(
+				await runWithRequestHolds(retiredHolds, () => streamCursor(model, { ...context, tools }, options).result()),
+			);
+			expect(first.stopReason).toBe("toolUse");
+			firstController.abort();
+			retiredHolds.armed = true;
+			let settled = false;
+			const next = runWithRequestHolds(holds, () =>
+				streamCursor(
+					model,
+					{
+						messages: [
+							...context.messages,
+							first,
+							{
+								role: "toolResult",
+								toolCallId: "call-read-1",
+								toolName: "read",
+								content: [{ type: "text", text: "file content" }],
+								isError: false,
+								timestamp: 3,
+							},
+						],
+						tools,
+					},
+					{ ...options, signal: nextController.signal },
+				).result(),
+			).then(value => {
+				settled = true;
+				return value;
+			});
+			try {
+				await waitFor(() => holds.checks > 0 || settled, "the resumed frame to reach the new request's hold");
+				expect(holds.checks).toBeGreaterThan(0);
+				expect(received).not.toContain("mcpResult");
+				holds.let();
+				await waitFor(() => settled, "the resumed response after its hold lets go");
+				const result = await next;
+				expect(result.stopReason).toBe("stop");
+				expect(received).toContain("mcpResult");
+			} finally {
+				holds.let();
+				retiredHolds.let();
+				nextController.abort();
+				for (const state of states.values()) state.close();
+				await next;
+			}
+		};
+		await withCursorHttp2Server((socket, message) => {
+			socket.once("end", () => socket.end());
+			handleMessage(frame => socket.write(frame), message);
+		}, run);
+	});
+
+	for (const mode of ["release", "reject", "abort"] as const) {
+		it(`GitLab: each resume frame is held independently, and ${mode} stops or releases the ordered batch`, async () => {
+			const clock = mode === "release" ? manualTimeouts(milliseconds => milliseconds === 60_000) : undefined;
+			const received: string[] = [];
+			const holds = new TestHolds();
+			holds.armed = false;
+			const controller = new AbortController();
+			const server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch(request, server) {
+					if (server.upgrade(request)) return;
+					return new Response(null, { status: 400 });
+				},
+				websocket: {
+					message(_socket, bytes) {
+						received.push(JSON.parse(String(bytes)).actionResponse.requestID);
+					},
+				},
+			});
+			const socket = new WebSocket(`ws://127.0.0.1:${server.port}`);
+			const opened = Promise.withResolvers<void>();
+			socket.addEventListener("open", () => opened.resolve(), { once: true });
+			await opened.promise;
+			const send = socket.send.bind(socket);
+			let sent = 0;
+			vi.spyOn(socket, "send").mockImplementation(payload => {
+				send(payload);
+				if (++sent === 1) holds.armed = true;
+			});
+			const model = heldModel("gitlab-duo-agent", "gitlab-duo-agent", "https://gitlab.held.test");
+			const output: AssistantMessage = {
+				role: "assistant",
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				content: [],
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: 1,
+			};
+			const done = runWithRequestHolds(holds, () =>
+				runGitLabDuoWorkflowSocket(
+					socket,
+					buildGitLabDuoWorkflowStartRequest("workflow", model, context),
+					{ stream: new AssistantMessageEventStream(), output, started: true },
+					{ apiKey: "test", signal: controller.signal, idleTimeoutMs: 60_000 },
+					["a", "b", "c"].map(requestID => ({
+						actionResponse: { requestID, plainTextResponse: { response: "ok" } },
+					})),
+				),
+			).then(
+				value => String(value),
+				error => String(error),
+			);
+			try {
+				await waitFor(
+					() => received.length > 0 && (holds.checks > 1 || sent === 3),
+					"the next frame's hold or the escaped batch",
+				);
+				expect(received).toEqual(["a"]);
+				expect(sent).toBe(1);
+				if (mode === "release") {
+					clock?.fire();
+					holds.let();
+					await waitFor(() => received.length === 3, "the released batch to reach the server");
+					expect(received).toEqual(["a", "b", "c"]);
+				} else {
+					if (mode === "abort") controller.abort();
+					else holds.release.reject(new Error("gitlab-frame-hold-failed"));
+					expect(await done).toContain(mode === "abort" ? "aborted" : "gitlab-frame-hold-failed");
+					expect(received).toEqual(["a"]);
+				}
+			} finally {
+				holds.let();
+				controller.abort();
+				await done;
+				clock?.clear();
+				socket.close();
+				server.stop(true);
+			}
+		});
+	}
 });
