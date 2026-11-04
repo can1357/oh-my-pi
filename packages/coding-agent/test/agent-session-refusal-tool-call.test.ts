@@ -553,21 +553,18 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 		expect(reports.at(-1)).not.toContain("the session will NOT continue on its own this time");
 	});
 
-	const agentDeliveries: Array<{ kind: string; deliver: (session: AgentSession) => Promise<unknown> }> = [
+	// Turns that something other than this code starts after a final report. Each
+	// gets one wake if refused, and that woken turn refused again stops: wakes never
+	// chain, so the bound holds whoever keeps starting turns.
+	const otherStarters: Array<{ kind: string; start: (session: AgentSession) => Promise<unknown> }> = [
 		{
 			kind: "a peer agent's message",
-			deliver: session =>
-				session.deliverIrcMessage({
-					id: "peer-message",
-					from: "peer",
-					to: "me",
-					body: "A peer agent's note, not new user work.",
-					ts: Date.now(),
-				}),
+			start: session =>
+				session.deliverIrcMessage({ id: "peer-message", from: "peer", to: "me", body: "A note.", ts: Date.now() }),
 		},
 		{
 			kind: "an extension notification",
-			deliver: session =>
+			start: session =>
 				session.sendCustomMessage(
 					{ customType: "extension-notice", content: "A notice.", display: false, attribution: "agent" },
 					{ triggerTurn: true },
@@ -575,30 +572,88 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 		},
 		{
 			kind: "an extension notification that accepts an empty stop",
-			deliver: session =>
+			start: session =>
 				session.sendCustomMessage(
 					{ customType: "extension-notice", content: "A notice.", display: false, attribution: "agent" },
 					{ triggerTurn: true, deliverAs: "nextTurn", acceptTerminalEmptyStop: true },
 				),
 		},
+		{
+			kind: "a parent's follow-up assignment",
+			start: session => session.prompt("A NEW ASSIGNMENT", { attribution: "agent" }),
+		},
+		{ kind: "the operator's resume", start: session => session.resume() },
 	];
-	for (const { kind, deliver } of agentDeliveries) {
-		it(`${kind} after a final report starts its turn, but a refusal of it buys no wake`, async () => {
+	for (const { kind, start } of otherStarters) {
+		it(`${kind} after a final report gets one wake when refused, and no more`, async () => {
 			const refused = (id: string) => (m: Model<Api>) =>
 				refusedToolCallStream(m, [{ call: { ...writeCall, id }, completed: true }]);
 			const { session, requests } = createSession(
-				[refused("toolu_a"), refused("toolu_b"), refused("toolu_c"), m => textStream(m, "unexpected extra wake")],
+				[
+					refused("toolu_a"),
+					refused("toolu_b"),
+					refused("toolu_c"),
+					refused("toolu_d"),
+					m => textStream(m, "unexpected extra wake"),
+				],
 				[recordingTool("write", [])],
 			);
 			await session.prompt("Write to the device");
 			await session.waitForIdle();
 			expect(requests).toHaveLength(2);
 
-			await deliver(session);
+			await start(session);
 			await session.waitForIdle();
 
-			expect(requests).toHaveLength(3);
+			// Its turn (request 3) is refused and woken (request 4); the woken turn's refusal is final.
+			expect(requests).toHaveLength(4);
+			const reports = (requests[3] ?? "").split("The provider ended your last response with a refusal");
+			expect(reports.at(-1)).not.toContain("the session will NOT continue on its own this time");
 			expect(session.getLastAssistantMessage()?.errorMessage).toBe(REFUSAL);
 		});
 	}
+
+	it("a compaction a hook vetoes between the report and the wake does not lose the wake", async () => {
+		const dir = path.join(tempDir.path(), `veto-${Date.now()}`);
+		const sessionManager = SessionManager.create(dir, dir);
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session_before_compact", async () => ({ cancel: true }));
+			},
+			dir,
+			new EventBus(),
+			runtime,
+			"refusal-veto-test",
+		);
+		const runner = new ExtensionRunner([extension], runtime, dir, sessionManager, modelRegistry);
+		const { session, agent, requests } = createSession(
+			[
+				m => textStream(m, "Done with the first task."),
+				m => refusedToolCallStream(m, [{ call: writeCall, completed: true }]),
+				m => textStream(m, "I will split the write."),
+			],
+			[recordingTool("write", [])],
+			sessionManager,
+			runner,
+		);
+		let compaction: Promise<unknown> | undefined;
+		session.subscribeRunState(state => {
+			if (state !== "idle" || compaction) return;
+			if (!agent.state.messages.some(m => m.role === "custom" && m.customType === "refusal-tool-call-report"))
+				return;
+			compaction = session.compact(undefined, { mode: "soft" }).catch(error => error);
+		});
+
+		await session.prompt(`First task. ${"old work ".repeat(10000)}`);
+		await session.waitForIdle();
+		await session.prompt("Write to the device");
+		const vetoed = await compaction;
+		await session.waitForIdle();
+
+		expect(vetoed).toBeInstanceOf(Error);
+		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+		expect(requests).toHaveLength(3);
+		expect(requests[2]).toContain(REFUSAL);
+	});
 });

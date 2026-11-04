@@ -499,8 +499,8 @@ export interface SessionMaintenanceHost {
 	 * post-settle readers (`AgentSession.getLastAssistantMessage`) until the next run.
 	 */
 	retainTerminalFailure(message: AssistantMessage): void;
-	/** A refusal report's wake is scheduled and has not started (see `TurnRecovery.settleTerminalRefusal`). */
-	refusalWakeOwed(): boolean;
+	/** Re-schedule a refusal report's wake that this pass's abort dropped (see `TurnRecovery.resumeOwedRefusalWake`). */
+	resumeOwedRefusalWake(): void;
 	runRecoveryCompactionWithRollback(
 		reason: "overflow" | "incomplete",
 		message: AssistantMessage,
@@ -1257,9 +1257,7 @@ export class SessionMaintenance {
 				// is also true while a prompt is still in async setup (before its message
 				// reaches the agent). The abort bump drops that prompt, so resuming on
 				// its behalf would nudge the model on the previous transcript instead.
-				// A refusal report whose wake has not started is the same kind of owed
-				// turn: the abort below cancels the wake, and the report would sit unread.
-				const interruptedActiveTurn = this.#host.agent.state.isStreaming || this.#host.refusalWakeOwed();
+				const interruptedActiveTurn = this.#host.agent.state.isStreaming;
 				this.#host.disconnectFromAgent();
 				await this.#host.abort({ goalReason: "internal", preserveCompaction: true });
 				resumeInterruptedTurn =
@@ -1687,6 +1685,10 @@ export class SessionMaintenance {
 						this.#scheduleInterruptedTurnResume(interruptedTurnGeneration);
 					}
 				}
+				// The abort above dropped any scheduled refusal-report wake. It is owed
+				// whatever this pass's outcome (committed, no-op, vetoed by a hook);
+				// a resume or prompt that starts first takes it instead.
+				this.#host.resumeOwedRefusalWake();
 			}
 		}
 	}

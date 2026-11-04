@@ -304,8 +304,6 @@ export interface TurnRecoveryHost {
 		delayMs?: number;
 		generation?: number;
 		shouldContinue?: () => boolean;
-		/** The continuation was dropped before its turn started (abort, stale generation, ...). */
-		onSkip?: () => void;
 		onError?: (error: unknown) => void;
 	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
@@ -420,10 +418,17 @@ export class TurnRecovery {
 	#unexpectedStopRetryCount = 0;
 	#malformedFunctionCallRetryCount = 0;
 	#streamStallContinueCount = 0;
-	/** Wakes `settleTerminalRefusal` scheduled that no new work (answer, user message, prompt) has ended. */
-	#refusalReportWakes = 0;
-	/** A scheduled refusal-report wake has neither started nor been skipped. */
-	#refusalWakeOwed = false;
+	/**
+	 * Session id a refusal report's wake is owed in: scheduled by
+	 * `settleTerminalRefusal`, not yet started, not withdrawn by a user abort.
+	 */
+	#refusalWakeOwedFor: string | undefined;
+	/**
+	 * The running agent run is a refusal report's wake, and no work has been
+	 * done in it yet (no completed assistant turn, no user message). A refusal
+	 * now is the woken turn refused again: final report, no further wake.
+	 */
+	#inRefusalWake = false;
 	#acceptTerminalEmptyStopForPrompt = false;
 	// Three fields sit near the word "serve" and are deliberately distinct:
 	// `#activeRetryFallback.served` gates the one-shot `retry_fallback_succeeded`
@@ -554,14 +559,12 @@ export class TurnRecovery {
 		if (this.#fallbackRoutedFor === previousSessionId) {
 			this.#fallbackRoutedFor = sessionId;
 		}
+		if (this.#refusalWakeOwedFor === previousSessionId) {
+			this.#refusalWakeOwedFor = sessionId;
+		}
 	}
 
-	/**
-	 * Resets per-prompt recovery counters and terminal-stop acceptance. The
-	 * refusal-report chain is not one of them: synthetic resumes and agent
-	 * messages also start prompts, and only new work ends a chain
-	 * ({@link endRefusalChain}).
-	 */
+	/** Resets per-prompt recovery counters and terminal-stop acceptance. */
 	resetForNewPrompt(): void {
 		this.#emptyStopRetryCount = 0;
 		this.#unexpectedStopRetryCount = 0;
@@ -739,16 +742,18 @@ export class TurnRecovery {
 	 * reported with the provider's reason in a persisted notice, and the
 	 * session continues once so the model reads it.
 	 *
-	 * The wake is bounded by a chain count, not by message order: a refusal
-	 * while a report's wake is still unanswered (no assistant turn completed
-	 * since, no new prompt) is the second in a row. It gets a final report,
-	 * even when it made no tool call, that says the session will not continue,
-	 * and no wake. {@link endRefusalChain} ends the chain: a completed assistant
-	 * turn, a new prompt, or a user message reaching the model.
+	 * The bound is on the wakes this code starts: they never chain. A refusal
+	 * of the woken run before it did any work ({@link noteRefusalWakeAnswered}) is
+	 * the woken turn refused again. It gets a final report, even when it made
+	 * no tool call, that says the session will not continue, and no wake. Any
+	 * other run's refusal, whoever started that run (the user, a task
+	 * follow-up, a peer message, a resume), gets one wake.
 	 *
-	 * Until the wake starts it is owed ({@link refusalWakeOwed}): a manual
-	 * compaction, which cancels scheduled continuations, resumes the session
-	 * for it instead of leaving the report unread. A user abort cancels it.
+	 * The wake is owed in this session until a run starts or a user abort
+	 * withdraws it ({@link withdrawRefusalWake}). An internal abort that drops
+	 * the scheduled continuation (a compaction, committed or vetoed) does not;
+	 * the compaction restarts it ({@link resumeOwedRefusalWake}). Whichever run
+	 * starts next while it is owed is the wake.
 	 *
 	 * Runs synchronously inside the refusal's agent_end, so the wake is queued
 	 * before anything (an abort, a new prompt) can run; the durable write it
@@ -797,7 +802,7 @@ export class TurnRecovery {
 				),
 			);
 		}
-		const refusedAgain = this.#refusalReportWakes > 0;
+		const refusedAgain = this.#inRefusalWake;
 		if (calls.length === 0 && !refusedAgain) return { woke: false };
 
 		const report = prompt.render(refusalToolCallReportTemplate, {
@@ -828,15 +833,8 @@ export class TurnRecovery {
 				model: message.model,
 				provider: message.provider,
 			});
-			this.#refusalReportWakes++;
-			this.#refusalWakeOwed = true;
-			this.#host.scheduleAgentContinue({
-				source: "refusal-tool-call-report",
-				generation: this.#host.promptGeneration(),
-				onSkip: () => {
-					this.#refusalWakeOwed = false;
-				},
-			});
+			this.#refusalWakeOwedFor = this.#host.sessionManager.getSessionId();
+			this.#scheduleRefusalWake();
 		}
 		// A session's file is written lazily, once it holds an assistant turn. A
 		// refused first turn is never persisted, so without this the report (and
@@ -849,19 +847,52 @@ export class TurnRecovery {
 		return { woke: wake, persisted };
 	}
 
-	/** New work reached the session (an answered turn or a user message): any refusal-report chain is over. */
-	endRefusalChain(): void {
-		this.#refusalReportWakes = 0;
+	#refusalWakeOwed(): boolean {
+		return (
+			this.#refusalWakeOwedFor !== undefined && this.#refusalWakeOwedFor === this.#host.sessionManager.getSessionId()
+		);
 	}
 
-	/** A refusal report's wake is scheduled and its turn has not started; see {@link settleTerminalRefusal}. */
-	refusalWakeOwed(): boolean {
-		return this.#refusalWakeOwed;
+	#scheduleRefusalWake(): void {
+		this.#host.scheduleAgentContinue({
+			source: "refusal-tool-call-report",
+			generation: this.#host.promptGeneration(),
+			// Another run may take the wake first (a compaction's resume, a prompt).
+			shouldContinue: () => this.#refusalWakeOwed(),
+		});
 	}
 
-	/** An agent turn started: an owed refusal wake (or whatever replaced it) is running. */
+	/**
+	 * An agent run started. If a refusal wake is owed in this session, this run
+	 * is it (whatever started it: the scheduled continuation, a compaction's
+	 * resume, a queued message); the obligation is met.
+	 */
 	noteAgentStarted(): void {
-		this.#refusalWakeOwed = false;
+		this.#inRefusalWake = this.#refusalWakeOwed();
+		this.#refusalWakeOwedFor = undefined;
+	}
+
+	/**
+	 * The run did work (an assistant turn completed) or took the user's own
+	 * message: a refusal from here on is a fresh one, not the woken turn's.
+	 */
+	noteRefusalWakeAnswered(): void {
+		this.#inRefusalWake = false;
+	}
+
+	/** A user abort withdraws an owed refusal wake; the report stays for the next turn. */
+	withdrawRefusalWake(): void {
+		this.#refusalWakeOwedFor = undefined;
+	}
+
+	/**
+	 * Re-schedule an owed refusal wake that an internal abort dropped (a
+	 * compaction cancels scheduled continuations). A no-op when nothing is owed
+	 * in this session.
+	 */
+	resumeOwedRefusalWake(): void {
+		if (!this.#refusalWakeOwed() || this.#host.isDisposed()) return;
+		this.#scheduleRefusalWake();
 	}
 
 	/**

@@ -2937,7 +2937,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			retainTerminalFailure: message => {
 				this.#prunedTerminalFailure = message;
 			},
-			refusalWakeOwed: () => this.#recovery.refusalWakeOwed(),
+			resumeOwedRefusalWake: () => this.#recovery.resumeOwedRefusalWake(),
 			runRecoveryCompactionWithRollback: (reason, message, options) =>
 				this.#recovery.runRecoveryCompactionWithRollback(reason, message, options),
 			parseRetryAfterMsFromError: errorMessage => this.#recovery.parseRetryAfterMsFromError(errorMessage),
@@ -4073,15 +4073,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			event.type === "agent_end" ? revokeComputerControlForOwner(this.#eval.getKernelOwnerId()) : undefined;
 		// Only the user's own prompt, steer or follow-up lifts the computer-use stop their Escape set;
 		// synthetic continues and agent-sent messages (subagent budget steers) never do.
-		// The same message is new user work, so it also ends a refusal-report chain:
-		// a first refusal of it gets its own wake (`settleTerminalRefusal`).
+		// The same message, reaching a refusal report's wake run, makes it the user's
+		// turn: a refusal of it gets its own wake (`settleTerminalRefusal`). Synthetic
+		// messages must not, or an injected reminder would let wakes chain.
 		if (
 			event.type === "message_start" &&
 			isUserAuthoredMessage(event.message) &&
 			!(event.message.role === "user" && (event.message.synthetic || event.message.attribution === "agent"))
 		) {
 			resumeComputerUseForOwner(this.#eval.getKernelOwnerId());
-			this.#recovery.endRefusalChain();
+			this.#recovery.noteRefusalWakeAnswered();
 		}
 		if (event.type === "tool_execution_end" && this.#isTerminalYieldToolResult(event)) {
 			const alreadyTerminated = this.#synchronouslyTerminatedYieldToolCallIds.delete(event.toolCallId);
@@ -4588,7 +4589,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			this.#lastAssistantMessage = event.message;
 			if (event.message.stopReason !== "error" && event.message.stopReason !== "aborted") {
-				this.#recovery.endRefusalChain();
+				this.#recovery.noteRefusalWakeAnswered();
 			}
 			for (const block of event.message.content) {
 				if (block.type === "toolCall") this.#runToolCallIds.add(block.id);
@@ -11603,6 +11604,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
+		// Any abort but an internal one (the user's interrupt, an RPC or SDK abort,
+		// `newSession`) withdraws an owed refusal wake; the report stays for the
+		// next turn. An internal abort (a compaction) leaves it owed; a wake owed in
+		// another session is never taken by this one (`TurnRecovery`, session-scoped).
+		if (options?.goalReason !== "internal") this.#recovery.withdrawRefusalWake();
 		// Latch only when the interrupt stops something; an idle Esc would otherwise fold
 		// every later background completion for the rest of the session.
 		if (userInterrupt && (this.isStreaming || this.agent.hasQueuedMessages())) {
