@@ -620,6 +620,77 @@ describe("wait", () => {
 				childRun.resolve("done");
 				expect(result.details?.waited).toMatchObject({ from: "Main", body: "the schema changed" });
 			});
+
+			test("keeps idling while its parent's wait can also end on a bash job", async () => {
+				const manager = new AsyncJobManager({ onJobComplete: () => {} });
+				const childRun = registerChild(manager);
+				const build = Promise.withResolvers<string>();
+				manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
+				const parentWait = new WaitTool(session(manager, "Main")).execute("parent-wait", {});
+				const childWait = new WaitTool(session(manager, "Child")).execute("child-idle", { timeout: 600 });
+				await Promise.resolve();
+				await IrcBus.global().send({ from: "Peer", to: "Child", body: "the schema changed" });
+				const result = await childWait;
+				build.resolve("built");
+				await parentWait;
+				childRun.resolve("done");
+				expect(result.details?.waited).toMatchObject({ from: "Peer", body: "the schema changed" });
+			});
+
+			describe("with the service-broker refresh slow to answer", () => {
+				// The refresh does not observe its signal (client creation, token
+				// read): only the wait itself can stop waiting on it.
+				const refreshStarted = () => {
+					const started = Promise.withResolvers<void>();
+					const answer = Promise.withResolvers<{ services: [] }>();
+					vi.spyOn(servicesModule, "listServicesTolerant").mockImplementation(async () => {
+						started.resolve();
+						return answer.promise;
+					});
+					return { started: started.promise, release: () => answer.resolve({ services: [] }) };
+				};
+				/** The wait's outcome once every pending callback ran, or "still waiting". */
+				const settledOrWaiting = <T>(waiting: Promise<T>) => {
+					const drained = Promise.withResolvers<"still waiting">();
+					setImmediate(() => drained.resolve("still waiting"));
+					return Promise.race([waiting, drained.promise]);
+				};
+				const textOf = (outcome: { content: Array<{ type: string; text?: string }> } | "still waiting") =>
+					outcome === "still waiting"
+						? outcome
+						: outcome.content[0]?.type === "text"
+							? outcome.content[0].text
+							: "";
+
+				test("returns at once while its parent already waits on its result", async () => {
+					const manager = new AsyncJobManager({ onJobComplete: () => {} });
+					const childRun = registerChild(manager);
+					const refresh = refreshStarted();
+					const parentWait = new WaitTool(session(manager, "Main")).execute("parent-wait", {});
+					const childWait = new WaitTool(session(manager, "Child", true)).execute("child-idle", { timeout: 3600 });
+					const outcome = await settledOrWaiting(childWait);
+					refresh.release();
+					await childWait;
+					childRun.resolve("done");
+					await parentWait;
+					expect(textOf(outcome)).toContain("Nothing to wait for: `Main` is waiting on your result");
+				});
+
+				test("returns once its parent starts waiting on its result during the refresh", async () => {
+					const manager = new AsyncJobManager({ onJobComplete: () => {} });
+					const childRun = registerChild(manager);
+					const refresh = refreshStarted();
+					const childWait = new WaitTool(session(manager, "Child", true)).execute("child-idle", { timeout: 3600 });
+					await refresh.started;
+					const parentWait = new WaitTool(session(manager, "Main")).execute("parent-wait", {});
+					const outcome = await settledOrWaiting(childWait);
+					refresh.release();
+					await childWait;
+					childRun.resolve("done");
+					await parentWait;
+					expect(textOf(outcome)).toContain("Nothing to wait for: `Main` is waiting on your result");
+				});
+			});
 		});
 
 		test("caps a job wait at the timeout instead of the 30-minute safety cap", async () => {

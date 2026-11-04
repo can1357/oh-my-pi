@@ -144,38 +144,23 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 
 		const pending = takeQueuedMessage(messaging);
 		if (pending && messaging) return messageResult(messaging.senderId, pending);
+		// Agents blocked on the caller's result when this call would idle: such
+		// a call returns at once (see the idle branch below), so nothing before
+		// that branch may spend its deadline. Owned work or a reply owed makes
+		// the call a real wait, which an agent blocked on the caller does not end.
+		const awaitedWhileIdle = (): string[] => {
+			if (capMs === undefined || !messaging) return [];
+			if (manager && manager.getRunningJobs({ ownerId: senderId }).length > 0) return [];
+			if (manager && undeliveredJobs(manager, senderId).length > 0) return [];
+			if (hasLiveOwnedService(this.session) || pendingReplies(messaging).from.length > 0) return [];
+			return messaging.registry.awaits.waitersOn(messaging.senderId);
+		};
 		// Refreshes owned-service tracking only; jobs are in-process, so a hung
 		// broker must not turn every wait into an error.
 		if (cfgLaunchEnabled.get(this.session.settings)) {
-			const refreshDeadline = deadline === undefined ? undefined : AbortSignal.timeout(remainingMs()!);
-			const refreshSignal =
-				refreshDeadline && signal ? AbortSignal.any([signal, refreshDeadline]) : (refreshDeadline ?? signal);
-			// The refresh is raced, not trusted: client creation and connection
-			// setup do not observe the signal, so the wait stops waiting on the
-			// refresh at the deadline or an abort. The abandoned refresh checks
-			// the aborted signal once each of those steps ends and stops there,
-			// before it subscribes the session or changes its service tracking.
-			const refresh = listServicesTolerant(this.session, refreshSignal).then(
-				() => undefined,
-				(error: unknown) => ({ error }),
-			);
-			const stopped = Promise.withResolvers<undefined>();
-			const onStop = () => stopped.resolve(undefined);
-			if (refreshSignal?.aborted) onStop();
-			else refreshSignal?.addEventListener("abort", onStop, { once: true });
-			let failure: { error: unknown } | undefined;
-			try {
-				failure = await Promise.race([refresh, stopped.promise]);
-			} finally {
-				refreshSignal?.removeEventListener("abort", onStop);
-			}
-			// An interrupt landing during the refresh (most often the notice
-			// of the job this wait is for) ends the wait as one landing just
-			// after it does: the checks below and the aborted wake path. A
-			// deadline passing during it does too: the block below finds no
-			// budget left and returns at once with what tracking it has. Any
-			// other failure is the caller's to see.
-			if (failure && !refreshSignal?.aborted) throw failure.error;
+			// A refresh while an agent is blocked on the caller would only delay
+			// the refusal below by however long the broker takes; skip it.
+			if (awaitedWhileIdle().length === 0) await this.#refreshServices(signal, remainingMs(), awaitedWhileIdle);
 			// A cancellation that is not a wake still cancels the call.
 			if (signal?.aborted && signal.reason !== TOOL_INTERRUPT_ABORT_REASON) throwIfAborted(signal);
 			const queued = takeQueuedMessage(messaging);
@@ -244,6 +229,56 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			capMs: remainingMs(),
 			idle: false,
 		});
+	}
+
+	/**
+	 * Refresh owned-service tracking within `budgetMs` (the rest of the
+	 * caller's `timeout`, unbounded when absent). The refresh is raced, not
+	 * trusted: client creation and connection setup do not observe the signal,
+	 * so the wait stops waiting on it at the deadline, an abort, or once
+	 * `awaited` reports an agent blocked on the caller of a call that would
+	 * idle. The abandoned refresh checks its aborted signal once each of those
+	 * steps ends and stops there, before it subscribes the session or changes
+	 * its service tracking.
+	 */
+	async #refreshServices(
+		signal: AbortSignal | undefined,
+		budgetMs: number | undefined,
+		awaited: () => string[],
+	): Promise<void> {
+		const registry = this.session.agentRegistry;
+		const awaitedStop = new AbortController();
+		const refreshSignal = AbortSignal.any([
+			awaitedStop.signal,
+			...(signal ? [signal] : []),
+			...(budgetMs === undefined ? [] : [AbortSignal.timeout(budgetMs)]),
+		]);
+		const refresh = listServicesTolerant(this.session, refreshSignal).then(
+			() => undefined,
+			(error: unknown) => ({ error }),
+		);
+		const stopped = Promise.withResolvers<undefined>();
+		const onStop = () => stopped.resolve(undefined);
+		refreshSignal.addEventListener("abort", onStop, { once: true });
+		// An agent may start blocking on the caller while the broker answers.
+		const unsubscribe = registry?.awaits.onChange(() => {
+			if (awaited().length > 0) awaitedStop.abort();
+		});
+		let failure: { error: unknown } | undefined;
+		try {
+			failure = await Promise.race([refresh, stopped.promise]);
+		} finally {
+			unsubscribe?.();
+			refreshSignal.removeEventListener("abort", onStop);
+		}
+		// An interrupt landing during the refresh (most often the notice of the
+		// job this wait is for) ends the wait as one landing just after it does:
+		// the checks after the refresh and the aborted wake path. A deadline
+		// passing during it does too: the block finds no budget left and returns
+		// at once with what tracking it has. So does an agent starting to block
+		// on the caller: the idle branch refuses. Any other failure is the
+		// caller's to see.
+		if (failure && !refreshSignal.aborted) throw failure.error;
 	}
 
 	/**
