@@ -53,6 +53,7 @@
 
 ### Fixed
 
+- A response that hits the output-token cap mid-reasoning now continues from its reasoning (up to 3 times) instead of restarting it; recovery pauses with a reason when the retained reasoning no longer fits the context, and goal mode pauses rather than looping ([#18064](https://github.com/can1357/oh-my-pi/pull/18064) by [@SergioHC95](https://github.com/SergioHC95))
 - Subagents loading MCP tools (such as Kata's `load_*`) no longer change the main session's tools or system prompt
 - Mounting an MCP tool mid-session on prefix-bound models no longer changes the eval tool description, and the mount notice now reaches the model
 - Worker-thread subagents are faster: switching views on long transcripts no longer lags, `wait` no longer streams full transcripts, and they stall less on a busy main thread

@@ -162,4 +162,37 @@ describe("openai-completions LiteLLM thinking_blocks", () => {
 
 		expect(replayed.thinking_blocks).toBeUndefined();
 	});
+
+	it("replays a redacted-only turn cut off by the output cap so its reasoning continues", async () => {
+		const model = liteLLMModel();
+		const cutOff: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "redactedThinking", data: "REDACTED_BLOB" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "length",
+			timestamp: 2,
+		};
+		const payloads: unknown[] = [];
+		await streamOpenAICompletions(
+			model,
+			{ messages: [userMessage, cutOff, { role: "user", content: "continue", timestamp: 3 }] },
+			{ apiKey: "k", fetch: createFetch([{ role: "assistant", content: "done" }], payloads) },
+		).result();
+
+		const messages = Reflect.get(payloads[0] as object, "messages");
+		if (!Array.isArray(messages)) throw new Error("request messages missing");
+		expect(messages.find(message => message.role === "assistant")?.thinking_blocks).toEqual([
+			{ type: "redacted_thinking", data: "REDACTED_BLOB" },
+		]);
+	});
 });

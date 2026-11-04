@@ -18,6 +18,9 @@
 
 ### Fixed
 
+- Reasoning cut off by the output-token cap (`max_tokens` / `length`) is now replayed so the next response continues it, instead of being dropped and regenerated from scratch; a thought whose signature the cap cut off replays as text ([#18064](https://github.com/can1357/oh-my-pi/pull/18064) by [@SergioHC95](https://github.com/SergioHC95))
+- Fixed LiteLLM streams that close with a signed full-text thinking snapshot repeating the reasoning already streamed ([#18064](https://github.com/can1357/oh-my-pi/pull/18064) by [@SergioHC95](https://github.com/SergioHC95))
+- Fixed redacted thinking from LiteLLM and other non-official endpoints disappearing from the reply when the stream carried it without per-block events ([#18064](https://github.com/can1357/oh-my-pi/pull/18064) by [@SergioHC95](https://github.com/SergioHC95))
 - Fixed account switching stopping at rate-limited accounts; other eligible stored accounts are now tried first
 - Fixed OpenRouter Decisions judges ignoring `compat.openRouterRouting` and `compat.extraBody`, including `@provider` pins ([#18140](https://github.com/can1357/oh-my-pi/issues/18140))
 - OAuth broker now validates residency, inference-region, and selected-organization metadata in uploaded credentials and remote snapshots

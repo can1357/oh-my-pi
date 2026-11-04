@@ -13,13 +13,14 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
  * message containing only a signed `thinking` block (no `text`, no `tool_use`). When the
  * next assistant turn lands without a real user message between them (the user typed an
  * empty submission to nudge the agent, which `convertContentBlocks` drops), two
- * consecutive assistant messages are sent to Anthropic, each with its own signed thinking
- * block. Anthropic rejects this with the 400 above.
+ * consecutive assistant messages must never reach Anthropic, each with its own signed
+ * thinking block. Anthropic rejects that with the 400 above.
  *
- * `transformMessages` must drop the thinking-only assistant turn so the conversation
- * keeps proper `user` / `assistant` alternation regardless of which provider is sending it.
+ * A `length` turn whose reasoning replays survives so the next response continues it; the
+ * encoder keeps `user` / `assistant` alternation. `error` / `aborted` thinking-only turns
+ * are dropped.
  */
-describe("transformMessages drops thinking-only assistant turns", () => {
+describe("transformMessages and thinking-only assistant turns", () => {
 	const model: Model<"anthropic-messages"> = buildModel({
 		api: "anthropic-messages",
 		provider: "anthropic",
@@ -77,7 +78,7 @@ describe("transformMessages drops thinking-only assistant turns", () => {
 		timestamp: Date.now(),
 	});
 
-	it("drops length-truncated thinking-only assistant turn so no consecutive assistants reach the API", () => {
+	it("keeps a length-truncated signed thinking-only turn without adjacent assistants on the wire", () => {
 		const user: UserMessage = { role: "user", content: "follow-up question", timestamp: 1 };
 		const truncated = makeThinkingOnlyAssistant("partial reasoning", "sig_truncated", "length");
 		// Empty user submission (e.g., user pressed Enter to retry). `convertContentBlocks`
@@ -94,21 +95,11 @@ describe("transformMessages drops thinking-only assistant turns", () => {
 
 		const transformed = transformMessages(messages, model);
 
-		// Thinking-only turn dropped → no surviving message carries the truncated signature.
-		const truncatedSurvivors = transformed.filter(
-			m =>
-				m.role === "assistant" &&
-				(m as AssistantMessage).content.some(b => b.type === "thinking" && b.thinkingSignature === "sig_truncated"),
-		);
-		expect(truncatedSurvivors.length).toBe(0);
-
-		// Fresh assistant turn must survive untouched.
-		const freshSurvivor = transformed.find(
-			m =>
-				m.role === "assistant" &&
-				(m as AssistantMessage).content.some(b => b.type === "thinking" && b.thinkingSignature === "sig_fresh"),
-		);
-		expect(freshSurvivor).toBeDefined();
+		// The interrupted reasoning survives with its signature, ahead of the fresh turn.
+		const signatures = transformed
+			.filter((m): m is AssistantMessage => m.role === "assistant")
+			.flatMap(m => m.content.flatMap(b => (b.type === "thinking" ? [b.thinkingSignature] : [])));
+		expect(signatures).toEqual(["sig_truncated", "sig_fresh"]);
 
 		// End-to-end: the wire-level Anthropic params must NOT have two adjacent
 		// `assistant` entries, which is the exact failure mode in the 400 dump.
@@ -120,16 +111,29 @@ describe("transformMessages drops thinking-only assistant turns", () => {
 			).toBe(false);
 		}
 
-		// And the only surviving signed thinking block on the wire must come from
-		// the fresh assistant — not the truncated stub.
+		// Each signed thinking block reaches the wire in its own assistant turn, unmodified.
 		const wireThinkingSignatures = params
 			.filter(p => p.role === "assistant")
-			.flatMap(p => (Array.isArray(p.content) ? p.content : []))
-			.filter((block): block is { type: "thinking"; thinking: string; signature: string } => {
-				return typeof block === "object" && block !== null && (block as { type?: string }).type === "thinking";
-			})
-			.map(block => block.signature);
-		expect(wireThinkingSignatures).toEqual(["sig_fresh"]);
+			.map(p =>
+				(Array.isArray(p.content) ? p.content : []).flatMap(block =>
+					block.type === "thinking" ? [block.signature] : [],
+				),
+			);
+		expect(wireThinkingSignatures).toEqual([["sig_truncated"], ["sig_fresh"]]);
+	});
+
+	it("demotes a length-truncated thinking-only turn whose signature the cap cut off", () => {
+		// An unterminated thinking block carries no verifiable signature. Unsigned thinking
+		// 400s on Anthropic, so the interrupted thought replays as demoted text instead.
+		const user: UserMessage = { role: "user", content: "follow-up question", timestamp: 1 };
+		const truncated = makeThinkingOnlyAssistant("partial reasoning", "", "length");
+
+		const params = convertAnthropicMessages([user, truncated], model, false);
+		const blocks = params
+			.filter(p => p.role === "assistant")
+			.flatMap(p => (Array.isArray(p.content) ? p.content : []));
+		expect(blocks.some(b => b.type === "thinking")).toBe(false);
+		expect(blocks.some(b => b.type === "text" && b.text.includes("partial reasoning"))).toBe(true);
 	});
 
 	it("drops error-stop thinking-only assistant turn without injecting any synthetic note", () => {
