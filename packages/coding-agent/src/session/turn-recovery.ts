@@ -556,13 +556,17 @@ export class TurnRecovery {
 		}
 	}
 
-	/** Resets per-prompt recovery counters and terminal-stop acceptance. */
+	/**
+	 * Resets per-prompt recovery counters and terminal-stop acceptance. The
+	 * refusal-report chain is not one of them: synthetic resumes and agent
+	 * messages also start prompts, and only new work ends a chain
+	 * ({@link endRefusalChain}).
+	 */
 	resetForNewPrompt(): void {
 		this.#emptyStopRetryCount = 0;
 		this.#unexpectedStopRetryCount = 0;
 		this.#malformedFunctionCallRetryCount = 0;
 		this.#streamStallContinueCount = 0;
-		this.#refusalReportWakes = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 		this.#activeFallbackCreditRedemption = undefined;
 	}

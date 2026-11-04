@@ -470,7 +470,7 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 		expect(pending).toEqual([]);
 	});
 
-	it("a manual compaction between the report and the wake still gives the model its turn", async () => {
+	it("a committed compaction between the report and the wake resumes the wake, and keeps the one-wake bound", async () => {
 		const dir = path.join(tempDir.path(), `compact-${Date.now()}`);
 		const sessionManager = SessionManager.create(dir, dir);
 		const runtime = new ExtensionRuntime();
@@ -495,7 +495,9 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 			[
 				m => textStream(m, "Done with the first task."),
 				m => refusedToolCallStream(m, [{ call: writeCall, completed: false }]),
-				m => textStream(m, "I will split the write."),
+				// The resumed wake is refused again, with no call: final report, no further wake.
+				m => refusedToolCallStream(m, []),
+				m => textStream(m, "unexpected extra wake"),
 			],
 			[recordingTool("write", [])],
 			sessionManager,
@@ -506,19 +508,22 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 			if (state !== "idle" || compaction) return;
 			if (!agent.state.messages.some(m => m.role === "custom" && m.customType === "refusal-tool-call-report"))
 				return;
-			// A small session makes this a no-op compaction; its abort still cancels the wake.
-			compaction = session.compact(undefined, { mode: "soft" }).catch(() => undefined);
+			compaction = session.compact(undefined, { mode: "soft" });
 		});
 
-		await session.prompt(`First task. ${"old work ".repeat(100)}`);
+		await session.prompt(`First task. ${"old work ".repeat(10000)}`);
 		await session.waitForIdle();
 		await session.prompt("Write to the device");
 		await compaction;
 		await session.waitForIdle();
 
-		expect(compaction).toBeDefined();
+		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
 		expect(requests).toHaveLength(3);
 		expect(requests[2]).toContain(REFUSAL);
+		const reports = sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom_message" && entry.customType === "refusal-tool-call-report");
+		expect(reports).toHaveLength(2);
 	});
 
 	it("a user prompt queued during a finished chain gets its own wake when it is refused", async () => {
@@ -547,4 +552,53 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 		const reports = (requests.at(-1) ?? "").split("The provider ended your last response with a refusal");
 		expect(reports.at(-1)).not.toContain("the session will NOT continue on its own this time");
 	});
+
+	const agentDeliveries: Array<{ kind: string; deliver: (session: AgentSession) => Promise<unknown> }> = [
+		{
+			kind: "a peer agent's message",
+			deliver: session =>
+				session.deliverIrcMessage({
+					id: "peer-message",
+					from: "peer",
+					to: "me",
+					body: "A peer agent's note, not new user work.",
+					ts: Date.now(),
+				}),
+		},
+		{
+			kind: "an extension notification",
+			deliver: session =>
+				session.sendCustomMessage(
+					{ customType: "extension-notice", content: "A notice.", display: false, attribution: "agent" },
+					{ triggerTurn: true },
+				),
+		},
+		{
+			kind: "an extension notification that accepts an empty stop",
+			deliver: session =>
+				session.sendCustomMessage(
+					{ customType: "extension-notice", content: "A notice.", display: false, attribution: "agent" },
+					{ triggerTurn: true, deliverAs: "nextTurn", acceptTerminalEmptyStop: true },
+				),
+		},
+	];
+	for (const { kind, deliver } of agentDeliveries) {
+		it(`${kind} after a final report starts its turn, but a refusal of it buys no wake`, async () => {
+			const refused = (id: string) => (m: Model<Api>) =>
+				refusedToolCallStream(m, [{ call: { ...writeCall, id }, completed: true }]);
+			const { session, requests } = createSession(
+				[refused("toolu_a"), refused("toolu_b"), refused("toolu_c"), m => textStream(m, "unexpected extra wake")],
+				[recordingTool("write", [])],
+			);
+			await session.prompt("Write to the device");
+			await session.waitForIdle();
+			expect(requests).toHaveLength(2);
+
+			await deliver(session);
+			await session.waitForIdle();
+
+			expect(requests).toHaveLength(3);
+			expect(session.getLastAssistantMessage()?.errorMessage).toBe(REFUSAL);
+		});
+	}
 });
