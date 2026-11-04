@@ -1320,9 +1320,11 @@ export interface UsageApi {
 	/**
 	 * Replace the providers the host has disabled. A disabled provider has no
 	 * usage concept: {@link providerFor} returns undefined, so it is neither
-	 * enumerated nor probed with any credential, reports no health, and its
-	 * accounts are not listed as lacking usage. Cached snapshots are kept for
-	 * re-enabling.
+	 * enumerated nor probed by this process with any credential (local probes,
+	 * per-credential reports, and a provider-scoped broker request are all
+	 * skipped), reports no health, and its accounts are not listed as lacking
+	 * usage. Rows a broker returns in an unscoped aggregate are dropped. Cached
+	 * snapshots are kept for re-enabling.
 	 */
 	replaceDisabledProviders(providers: ReadonlySet<Provider>): void;
 }

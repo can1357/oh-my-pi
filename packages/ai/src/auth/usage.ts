@@ -166,9 +166,12 @@ export class UsageService implements UsageApi {
 
 	/**
 	 * Replace the providers the host has disabled. A disabled provider has no
-	 * usage concept for every consumer: it is neither enumerated nor probed
-	 * (stored, env, or pinned keys), reports no health, and its accounts are
-	 * not listed as lacking usage. Snapshots stay cached for re-enabling.
+	 * usage concept for every consumer: it is neither enumerated nor probed by
+	 * this process (local probes with stored, env, or pinned keys, per-credential
+	 * `report()`, and a provider-scoped broker request are all skipped), reports
+	 * no health, and its accounts are not listed as lacking usage. Rows a broker
+	 * returns in an unscoped aggregate are dropped. Snapshots stay cached for
+	 * re-enabling.
 	 */
 	replaceDisabledProviders(providers: ReadonlySet<Provider>): void {
 		this.#disabledProviders = new Set(providers);
@@ -888,6 +891,8 @@ export class UsageService implements UsageApi {
 
 	/** Fetch all providers’ current usage reports, sharing concurrent polls. */
 	async reports(options?: UsageReportsOptions): Promise<UsageReport[] | null> {
+		// A poll scoped to a disabled provider asks nobody: not the broker, not local probes.
+		if (options?.provider !== undefined && this.#disabledProviders.has(options.provider)) return [];
 		// The broker owns its providers' reports; runtime providers registered
 		// only in this process still need local per-credential probes.
 		const storeOverride = this.#deps.store.fetchUsageReports?.bind(this.#deps.store);

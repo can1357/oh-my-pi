@@ -1860,6 +1860,26 @@ describe("AuthStorage usage cache: configured usage providers", () => {
 		expect(await storage.usage.reports({ provider: GATEWAY_PROVIDER })).toEqual([]);
 	});
 
+	it("answers a provider-scoped poll for a disabled provider without asking the broker", async () => {
+		const store = makeStore([gatewayRow()]);
+		const asked: Array<string | undefined> = [];
+		const brokerHook = vi.fn(async (_signal?: AbortSignal, provider?: string): Promise<UsageReport[] | null> => {
+			asked.push(provider);
+			return [gatewayReport(GATEWAY_PROVIDER, "broker", 50)];
+		});
+		store.fetchUsageReports = brokerHook;
+		const storage = await openStorage(store);
+		storage.usage.replaceDisabledProviders(new Set([GATEWAY_PROVIDER]));
+
+		expect(await storage.usage.reports({ provider: GATEWAY_PROVIDER })).toEqual([]);
+		expect(asked).toEqual([]);
+
+		// An unscoped poll still asks the broker, which cannot exclude providers; its row is dropped here.
+		expect(gatewayReading(await storage.usage.reports())).toBeUndefined();
+		expect(brokerHook).toHaveBeenCalledTimes(1);
+		expect(asked).toEqual([undefined]);
+	});
+
 	it("discards a probe that straddles disabling without caching or recording it", async () => {
 		const store = makeStore([gatewayRow()]);
 		const recorded: UsageHistoryEntry[] = [];
