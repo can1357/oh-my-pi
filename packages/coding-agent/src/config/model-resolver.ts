@@ -277,12 +277,44 @@ function getOpenRouterFallbackModelIds(modelId: string): string[] {
 	return orderedCandidates;
 }
 
+/** How a model was derived from another: its source, and how to derive the same variant again. */
+export interface ModelDerivation {
+	readonly source: Model<Api>;
+	readonly derive: (source: Model<Api>) => Model<Api>;
+}
+
+/**
+ * Models a selector derived from a catalog row (an `@upstream` pin, an OpenRouter requested id,
+ * a Bedrock inference profile, a refitted context window), so `ModelRegistry.currentConfigOf`
+ * can rebind the source to a models.yml edit and derive the same variant from the result.
+ */
+const modelDerivations = new WeakMap<Model<Api>, ModelDerivation>();
+
+/** Record that `derived` is `derive(source)`; returns `derived`. */
+export function recordModelDerivation<T extends Model<Api>>(
+	derived: T,
+	source: Model<Api>,
+	derive: (source: Model<Api>) => Model<Api>,
+): T {
+	if (derived !== source) modelDerivations.set(derived, { source, derive });
+	return derived;
+}
+
+/** How `model` was derived from another model, when a selector or the registry derived it. */
+export function modelDerivationOf(model: Model<Api>): ModelDerivation | undefined {
+	return modelDerivations.get(model);
+}
+
 function cloneModelWithRequestedId(model: Model<Api>, requestedId: string): Model<Api> {
-	return {
-		...model,
-		id: requestedId,
-		...(model.name === model.id ? { name: requestedId } : {}),
-	};
+	return recordModelDerivation(
+		{
+			...model,
+			id: requestedId,
+			...(model.name === model.id ? { name: requestedId } : {}),
+		},
+		model,
+		source => cloneModelWithRequestedId(source, requestedId),
+	);
 }
 
 const AMAZON_BEDROCK_PROVIDER = "amazon-bedrock";
@@ -306,7 +338,12 @@ function resolveBedrockInferenceProfileModelId(
 	const template = availableModels.find(model => model.provider.toLowerCase() === AMAZON_BEDROCK_PROVIDER);
 	if (!template) return undefined;
 
-	return buildModel({
+	return buildBedrockInferenceProfileModel(requestedId, template);
+}
+
+/** An inference-profile model on `template`'s endpoint, headers and guardrails. */
+function buildBedrockInferenceProfileModel(requestedId: string, template: Model<Api>): Model<Api> {
+	const model = buildModel({
 		id: requestedId,
 		name: "Bedrock inference profile",
 		api: "bedrock-converse-stream",
@@ -325,6 +362,7 @@ function resolveBedrockInferenceProfileModelId(
 		...(template.guardrailTrace !== undefined ? { guardrailTrace: template.guardrailTrace } : {}),
 		...(template.requestMetadata !== undefined ? { requestMetadata: template.requestMetadata } : {}),
 	});
+	return recordModelDerivation(model, template, source => buildBedrockInferenceProfileModel(requestedId, source));
 }
 
 function resolveBedrockInferenceProfileReference(
@@ -341,16 +379,20 @@ function supportsUpstreamRouting(model: Model<Api>): boolean {
 	return modelMatchesHost(model, "openrouter") || modelMatchesHost(model, "vercelAIGateway");
 }
 
-/** Pin a resolved aggregator model to a single upstream provider via its compat routing block. */
+/**
+ * Pin a resolved aggregator model to a single upstream provider via its compat routing block. The
+ * pinned model records its derivation, so a models.yml edit to the aggregator rebinds it with the pin kept.
+ */
 function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
 	const aggregatorModel = model as Model<"openai-completions">;
 	const routing = { only: [upstream] };
-	return buildModel({
+	const routed = buildModel({
 		...model,
 		compat: modelMatchesHost(model, "vercelAIGateway")
 			? { ...aggregatorModel.compatConfig, vercelGatewayRouting: routing }
 			: { ...aggregatorModel.compatConfig, openRouterRouting: routing },
 	} as ModelSpec<Api>);
+	return recordModelDerivation(routed, model, source => applyUpstreamRouting(source, upstream));
 }
 
 const kProviderModelIndex = Symbol("model-resolver.providerIndex");

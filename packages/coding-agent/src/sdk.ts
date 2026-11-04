@@ -4783,8 +4783,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// request, not the process-wide switch (the newest effect holder's): concurrent ACP/SDK
 		// sessions in one process each keep their own policy.
 		// Every request of this session (main loop, side requests, advisors, cache warming,
-		// fallbacks) first folds in a models.yml edit and sends the model as the catalog now
-		// configures it, whatever produced the object it holds.
+		// fallbacks) first folds in a models.yml edit, then goes out with its model rebound to the
+		// catalog's current configuration (`ModelRegistry.currentConfigOf`): every model the registry
+		// handed out, and every variant a selector derived from one (an `@upstream` pin keeps its pin).
+		// The credential is read from the registry's configuration as well, so after an edit the
+		// new key goes out only with the new URL and headers.
 		const settingsAwareStreamFn: StreamFn = async (streamModel, context, streamOptions) => {
 			await modelRegistry.reloadIfConfigChanged();
 			const requestModel = modelRegistry.currentConfigOf(streamModel, settings);

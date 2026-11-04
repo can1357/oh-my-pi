@@ -49,7 +49,7 @@ import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-refere
 import { apiServesKind, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-catalog/wire/codex";
 import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
-import { resolveProviderModelReference } from "../config/model-resolver";
+import { modelDerivationOf, recordModelDerivation, resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import { redactUrlForLog } from "../mcp/json-rpc";
 import type { AuthStorage } from "../session/auth-storage";
@@ -401,7 +401,10 @@ export class ModelRegistry {
 	/** Per model this registry handed out: how it was looked up and the configuration it reflected then. */
 	#handedOut = new WeakMap<Model<Api>, HandedOutModel>();
 	#handedOutArrays = new WeakSet<Model<Api>[]>();
-	/** Per held model: its rebinding to a catalog entry, for one settings scope (see {@link currentConfigOf}). */
+	/**
+	 * Per held model: its rebinding to a catalog entry (for a derived variant, to its rebound source),
+	 * for one settings scope (see {@link currentConfigOf}).
+	 */
 	#currentConfigs = new WeakMap<Model<Api>, { entry: Model<Api>; scope: Settings | undefined; result: Model<Api> }>();
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
@@ -3329,6 +3332,7 @@ export class ModelRegistry {
 		this.#refittedRows.set(model, refitted);
 		const source = this.#handedOut.get(model);
 		if (source) this.#handedOut.set(refitted, source);
+		else recordModelDerivation(refitted, model, rebound => this.fitContextWindow(rebound, scope));
 		return refitted;
 	}
 
@@ -3555,11 +3559,13 @@ export class ModelRegistry {
 		const requested = new Set([...providers].map(provider => provider.trim().toLowerCase()).filter(Boolean));
 		const isProviderAvailable = this.#createProviderAvailabilityCheck();
 		if (this.#hasFullSnapshot) {
-			return this.#models.filter(
-				model =>
-					requested.has(model.provider.toLowerCase()) &&
-					isProviderAvailable(model.provider) &&
-					(kind === "all" || modelKind(model) === kind),
+			return this.#handOutAll(
+				this.#models.filter(
+					model =>
+						requested.has(model.provider.toLowerCase()) &&
+						isProviderAvailable(model.provider) &&
+						(kind === "all" || modelKind(model) === kind),
+				),
 			);
 		}
 		const availableProviders = new Set(
@@ -3574,10 +3580,10 @@ export class ModelRegistry {
 		// those rather than extending the lifetime of their output.
 		if (availableProviders.size === 1 && this.#runtimeModelModifiers.size === 0) {
 			const models = this.#modelsForProviderLookup(availableProviders.values().next().value!);
-			return kind === "all" ? models.slice() : models.filter(model => modelKind(model) === kind);
+			return this.#handOutAll(kind === "all" ? models.slice() : models.filter(model => modelKind(model) === kind));
 		}
 		const models = this.#composeStaticModels(availableProviders);
-		return kind === "all" ? models : models.filter(model => modelKind(model) === kind);
+		return this.#handOutAll(kind === "all" ? models : models.filter(model => modelKind(model) === kind));
 	}
 
 	/**
@@ -3586,7 +3592,7 @@ export class ModelRegistry {
 	 * is chat-only; pass `"all"` to include authenticated and keyless runners.
 	 */
 	getAvailable(kind: ModelKind | "all" = "chat"): Model<Api>[] {
-		return this.#handOutAll(this.getAvailableForProviders(new Set(this.#knownStaticProviders()), kind));
+		return this.getAvailableForProviders(new Set(this.#knownStaticProviders()), kind);
 	}
 
 	/**
@@ -3740,17 +3746,20 @@ export class ModelRegistry {
 
 	/**
 	 * `model` as the catalog configures it now, for a request about to be sent. Only a model this
-	 * registry handed out (from `find`, `getAll`, `getAvailable`, `getProviderModels`, or derived by
-	 * `fitContextWindow` / `refreshSelectedModelMetadata`) is rebound, and only when its configuration
-	 * changed since: its provider's models.yml entry, or the catalog entry's fields other than limits.
-	 * The rebound model is the current entry, looked up the way the original was, keeping the held
+	 * registry handed out (from `find`, `getAll`, `getAvailable`, `getAvailableForProviders`,
+	 * `getProviderModels`, or derived by `fitContextWindow` / `refreshSelectedModelMetadata`), or a
+	 * variant a selector derived from one (an `@upstream` pin, an OpenRouter requested id, a Bedrock
+	 * inference profile: `modelDerivationOf`), is rebound, and only when its configuration changed
+	 * since: its provider's models.yml entry, or the catalog entry's fields other than limits. The
+	 * rebound model is the current entry, looked up the way the original was, keeping the held
 	 * object's context window and output cap except where models.yml now configures a different
-	 * value for one. Any other object (an SDK caller's model, a routed or modified variant a caller
-	 * built) is sent as given. Stable per (model, entry, scope), so identity-keyed caches hold.
+	 * value for one; a derived variant is derived again from its rebound source, so its pin stays.
+	 * Any other object (an SDK caller's model or a variant it built) is sent as given. Stable per
+	 * (model, entry, scope), so identity-keyed caches hold.
 	 */
 	currentConfigOf(model: Model<Api>, scope?: Settings): Model<Api> {
 		const then = this.#handedOut.get(model);
-		if (!then) return model;
+		if (!then) return this.#currentConfigOfDerived(model, scope);
 		const now = resolveProviderModelReference(
 			model.provider,
 			then.ref,
@@ -3761,6 +3770,32 @@ export class ModelRegistry {
 		if (cached?.entry === now && cached.scope === scope) return cached.result;
 		const result = this.#rebind(model, then, now, scope);
 		this.#currentConfigs.set(model, { entry: now, scope, result });
+		return result;
+	}
+
+	/**
+	 * A derived variant: rebind its source, then derive the same variant from the result. Its limits
+	 * follow its source's rebind: kept, except where the rebind took a value models.yml now configures.
+	 */
+	#currentConfigOfDerived(model: Model<Api>, scope: Settings | undefined): Model<Api> {
+		const derivation = modelDerivationOf(model);
+		if (!derivation) return model;
+		const source = this.currentConfigOf(derivation.source, scope);
+		if (source === derivation.source) return model;
+		const cached = this.#currentConfigs.get(model);
+		if (cached?.entry === source && cached.scope === scope) return cached.result;
+		const derived = derivation.derive(source);
+		const result = recordModelDerivation(
+			{
+				...derived,
+				contextWindow:
+					source.contextWindow === derivation.source.contextWindow ? model.contextWindow : derived.contextWindow,
+				maxTokens: source.maxTokens === derivation.source.maxTokens ? model.maxTokens : derived.maxTokens,
+			},
+			source,
+			derivation.derive,
+		);
+		this.#currentConfigs.set(model, { entry: source, scope, result });
 		return result;
 	}
 

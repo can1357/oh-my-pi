@@ -20,12 +20,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import {
-	anthropicChunks,
-	type CapturedRequest,
-	captureFetch,
-	completionsChunks,
-} from "../../ai/test/helpers/factory-droid";
+import { anthropicChunks, type CapturedRequest, captureFetch } from "../../ai/test/helpers/factory-droid";
 import { asGlobalFetch } from "./helpers/fetch-mock";
 
 interface GatewayConfig {
@@ -157,6 +152,88 @@ function addFlagWithNewMtime(modelsPath: string): void {
 	const next = new Date(fs.statSync(modelsPath).mtimeMs + 1_000);
 	fs.writeFileSync(modelsPath, modelsYaml(true));
 	fs.utimesSync(modelsPath, next, next);
+}
+
+/** What one request carried to the endpoint: where it went, the configured header, the credential and the upstream pin. */
+interface EndpointRequest {
+	path: string;
+	version: string | null;
+	authorization: string | null;
+	provider: unknown;
+}
+
+/** A local OpenAI-compatible endpoint recording every chat request it receives. */
+function completionsEndpoint(): { url: string; requests: EndpointRequest[]; [Symbol.dispose](): void } {
+	const requests: EndpointRequest[] = [];
+	const chunk = (delta: Record<string, unknown>, finish: string | null) =>
+		`data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", model: "review/model", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(request) {
+			const body = (await request.json()) as { provider?: unknown };
+			requests.push({
+				path: new URL(request.url).pathname,
+				version: request.headers.get("x-version"),
+				authorization: request.headers.get("authorization"),
+				provider: body.provider,
+			});
+			return new Response(
+				`${chunk({ role: "assistant", content: "OK" }, null)}${chunk({}, "stop")}data: [DONE]\n\n`,
+				{
+					headers: { "content-type": "text/event-stream" },
+				},
+			);
+		},
+	});
+	return { url: `http://127.0.0.1:${server.port}`, requests, [Symbol.dispose]: () => server.stop(true) };
+}
+
+/** One provider on `url` whose path, `x-version` header and key all name `version`. */
+function endpointConfig(provider: string, url: string, version: "old" | "new"): string {
+	return JSON.stringify({
+		providers: {
+			[provider]: {
+				baseUrl: `${url}/${version}/v1`,
+				api: "openai-completions",
+				apiKey: `${version.toUpperCase()}_KEY`,
+				headers: { "x-version": version },
+				models: [{ id: "review/model", reasoning: false, input: ["text"] }],
+			},
+		},
+	});
+}
+
+function writeNewVersion(modelsPath: string, content: string): void {
+	const next = new Date(fs.statSync(modelsPath).mtimeMs + 1_000);
+	fs.writeFileSync(modelsPath, content);
+	fs.utimesSync(modelsPath, next, next);
+}
+
+async function startSession(
+	tempDir: TempDir,
+	authStorage: AuthStorage,
+	registry: ModelRegistry,
+	model: Model,
+): Promise<AgentSession> {
+	const { session } = await createAgentSession({
+		cwd: tempDir.path(),
+		agentDir: tempDir.path(),
+		sessionManager: SessionManager.inMemory(tempDir.path()),
+		authStorage,
+		modelRegistry: registry,
+		settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+		model,
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		skipPythonPreflight: true,
+	});
+	return session;
 }
 
 const allLong = (ttls: Array<string | undefined>) => ttls.length > 0 && ttls.every(ttl => ttl === "1h");
@@ -299,62 +376,65 @@ describe("a running session re-reads models.yml before its next request", () => 
 		expect(h.messagesRequests().map(request => request.headers["x-config-probe"])).toEqual(["new"]);
 	});
 
-	it("keeps an upstream pin a caller selected across requests", async () => {
+	it("rebinds an `@upstream`-pinned selection to an edited URL, header and key, keeping its pin", async () => {
 		using tempDir = TempDir.createSync("@pi-models-config-reload-pin-");
+		using endpoint = completionsEndpoint();
 		const modelsPath = tempDir.join("models.yml");
-		fs.writeFileSync(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					openrouter: {
-						baseUrl: "https://openrouter.example.test/v1",
-						api: "openai-completions",
-						apiKey: "TEST_KEY",
-						models: [{ id: "review/model", reasoning: false, input: ["text"] }],
-					},
-				},
-			}),
-		);
-		const captured: CapturedRequest[] = [];
-		vi.spyOn(globalThis, "fetch").mockImplementation(
-			asGlobalFetch(captureFetch(captured, completionsChunks("OK", "review/model"))),
-		);
+		fs.writeFileSync(modelsPath, endpointConfig("openrouter", endpoint.url, "old"));
 		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
 		const registry = new ModelRegistry(authStorage, modelsPath);
+		// What a role, `--model`, a fallback or an advisor selector resolves to: a variant of the catalog row.
 		const pinned = parseModelPattern(
 			"openrouter/review/model@required-upstream",
 			registry.getProviderModels("openrouter"),
 		).model;
 		if (!pinned) throw new Error("pinned model did not resolve");
-		let session: AgentSession | undefined;
+		const session = await startSession(tempDir, authStorage, registry, pinned);
 		try {
-			({ session } = await createAgentSession({
-				cwd: tempDir.path(),
-				agentDir: tempDir.path(),
-				sessionManager: SessionManager.inMemory(tempDir.path()),
-				authStorage,
-				modelRegistry: registry,
-				settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
-				model: pinned,
-				disableExtensionDiscovery: true,
-				skills: [],
-				contextFiles: [],
-				promptTemplates: [],
-				slashCommands: [],
-				enableMCP: false,
-				enableLsp: false,
-				skipPythonPreflight: true,
-			}));
 			await session.prompt("first");
+			writeNewVersion(modelsPath, endpointConfig("openrouter", endpoint.url, "new"));
 			await session.prompt("second");
 		} finally {
-			await session?.dispose();
+			await session.dispose();
 			authStorage.close();
 		}
-		const requests = captured.filter(request => new URL(request.url).pathname.endsWith("/chat/completions"));
-		expect(requests.map(request => request.body.provider)).toEqual([
-			{ only: ["required-upstream"] },
-			{ only: ["required-upstream"] },
+		expect(endpoint.requests).toEqual([
+			{
+				path: "/old/v1/chat/completions",
+				version: "old",
+				authorization: "Bearer OLD_KEY",
+				provider: { only: ["required-upstream"] },
+			},
+			{
+				path: "/new/v1/chat/completions",
+				version: "new",
+				authorization: "Bearer NEW_KEY",
+				provider: { only: ["required-upstream"] },
+			},
+		]);
+	});
+
+	it("rebinds a provider-scoped catalog row held across a reload to the edited URL, header and key", async () => {
+		using tempDir = TempDir.createSync("@pi-models-config-reload-scoped-");
+		using endpoint = completionsEndpoint();
+		const modelsPath = tempDir.join("models.yml");
+		fs.writeFileSync(modelsPath, endpointConfig("gateway", endpoint.url, "old"));
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		// Provider-scoped start-up selection reads this collection.
+		const [held] = registry.getAvailableForProviders(new Set(["gateway"]));
+		if (!held) throw new Error("gateway model missing from the provider-scoped rows");
+		writeNewVersion(modelsPath, endpointConfig("gateway", endpoint.url, "new"));
+		expect(await registry.reloadIfConfigChanged()).toBe(true);
+		const session = await startSession(tempDir, authStorage, registry, held);
+		try {
+			await session.prompt("first");
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+		expect(endpoint.requests).toEqual([
+			{ path: "/new/v1/chat/completions", version: "new", authorization: "Bearer NEW_KEY", provider: undefined },
 		]);
 	});
 });
