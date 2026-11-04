@@ -2447,6 +2447,104 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		expect(ext.rpcs("send").filter(rpc => rpc.method === "Input.dispatchKeyEvent")).toEqual([]);
 	});
 
+	it.each([
+		{ origin: "page", removal: "session" },
+		{ origin: "child", removal: "session" },
+		{ origin: "child", removal: "ancestor" },
+		{ origin: "child", removal: "connection" },
+	])("rejects $origin input queued before $removal removal while the browser lookup is pending", async ({
+		origin,
+		removal,
+	}) => {
+		const lookup = Promise.withResolvers<number | null>();
+		const { readBrowsers, frontApp } = frontAppRecorder();
+		const bridge = new RelayBridge();
+		bridge.keepFrontAppWith(frontApp);
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], [], () => lookup.promise);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const page = await attachPage(bridge, ext, cdp, connId, 1);
+		const other = new FakeCdpSocket();
+		const otherConnId = bridge.cdpConnected(other);
+		await attachPage(bridge, ext, other, otherConnId, 1);
+		if (origin === "child") {
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: ++msgSeq,
+					sessionId: page,
+					method: "Target.setAutoAttach",
+					params: { autoAttach: true, flatten: true },
+				}),
+			);
+			for (const [sessionId, parent] of [["child", undefined], ["nested", "child"]]) {
+				bridge.extMessage(
+					ext,
+					JSON.stringify({
+						t: "cdpEvent",
+						tabId: 1,
+						sessionId: parent,
+						method: "Target.attachedToTarget",
+						params: {
+							sessionId,
+							targetInfo: { targetId: sessionId, type: "iframe", url: "https://frame.example/" },
+							waitingForDebugger: false,
+						},
+					}),
+				);
+			}
+			expect(cdp.attachedSessions()).toContain("nested");
+		}
+		const sessionId = origin === "page" ? page : "nested";
+		const inputId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: inputId,
+				sessionId,
+				method: "Input.dispatchKeyEvent",
+				params: { type: "keyDown", key: "Enter" },
+			}),
+		);
+		await flush();
+		expect(cdp.messages.find(msg => msg.id === inputId)).toBeUndefined();
+		expect(ext.rpcs("send").filter(rpc => rpc.method === "Input.dispatchKeyEvent")).toEqual([]);
+		if (removal === "connection") {
+			bridge.cdpClosed(connId);
+		} else if (origin === "child" && removal === "session") {
+			bridge.extMessage(
+				ext,
+				JSON.stringify({
+					t: "cdpEvent",
+					tabId: 1,
+					sessionId: "child",
+					method: "Target.detachedFromTarget",
+					params: { sessionId },
+				}),
+			);
+		} else {
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({ id: ++msgSeq, method: "Target.detachFromTarget", params: { sessionId: page } }),
+			);
+		}
+		expect(ext.rpcs("detach")).toEqual([]);
+		lookup.resolve(222);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+		expect(ext.rpcs("attach")).toHaveLength(1);
+		expect(ext.rpcs("detach")).toEqual([]);
+		expect(readBrowsers).toEqual([]);
+		expect(ext.rpcs("send").filter(rpc => rpc.method === "Input.dispatchKeyEvent")).toEqual([]);
+		if (removal !== "connection") {
+			expect(cdp.messages.find(msg => msg.id === inputId)?.error).toMatchObject({
+				message: expect.stringContaining("session closed"),
+			});
+		}
+	});
+
 	it("does not take the user's keys back from a browser found for a socket since replaced", async () => {
 		const { holds, readBrowsers, frontApp } = frontAppRecorder();
 		const bridge = new RelayBridge();

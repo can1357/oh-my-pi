@@ -1219,10 +1219,9 @@ pub(super) fn with_background_watch<T>(
 	));
 	// Sends the user's keys back to their app while the target holds the
 	// keyboard uninvited, until the guard below has put their app back.
-	let _reroute = previous.pid.and_then(|user| {
-		let _setup = REROUTE_SETUP.lock();
-		KeyReroute::arm(user, pid)
-	});
+	let _reroute = previous
+		.pid
+		.and_then(|user| with_reroute_setup(|| KeyReroute::arm(user, pid)));
 	let stopped = AtomicBool::new(false);
 	let visited = AtomicBool::new(false);
 	let start_failed = |error: std::io::Error| {
@@ -1544,31 +1543,33 @@ pub(in super::super) struct FrontApp {
 /// hears of the window it opens. The reroute is set up before the read, as
 /// setting up its taps can stall the sampler past what the watch tolerates.
 pub(in super::super) fn front_app(browser: Option<pid_t>) -> Option<FrontApp> {
-	let spi = FOREGROUND.as_ref()?;
-	loop {
-		let (read_at, picks, rearm) = if let Some(browser) = browser {
-			let ((read_at, picks), rearm) = rearm_for_front(
-				|| {
-					let read_at = Instant::now();
-					let picks = Picks::read(spi);
-					Some((psn_pid(&picks.front?)?, (read_at, picks)))
-				},
-				|user| rearm(browser, user, Instant::now()),
-				|user, armed| match armed {
-					Rearm::Keep(armed) => armed.covers_now(user, browser),
-					Rearm::Replace(Some(reroute)) => reroute.armed().covers_now(user, browser),
-					Rearm::Replace(None) => true,
-				},
-			)?;
-			(read_at, picks, rearm)
-		} else {
-			(Instant::now(), Picks::read(spi), Rearm::Replace(None))
-		};
-		let psn = picks.front?;
-		if watch_picks(spi, picks, read_at, rearm) {
-			return Some(FrontApp { psn, read_at });
+	with_reroute_setup(|| {
+		let spi = FOREGROUND.as_ref()?;
+		loop {
+			let (read_at, picks, rearm) = if let Some(browser) = browser {
+				let ((read_at, picks), rearm) = rearm_for_front(
+					|| {
+						let read_at = Instant::now();
+						let picks = Picks::read(spi);
+						Some((psn_pid(&picks.front?)?, (read_at, picks)))
+					},
+					|user| rearm(browser, user, Instant::now()),
+					|user, armed| match armed {
+						Rearm::Keep(armed) => armed.covers_now(user, browser),
+						Rearm::Replace(Some(reroute)) => reroute.armed().covers_now(user, browser),
+						Rearm::Replace(None) => true,
+					},
+				)?;
+				(read_at, picks, rearm)
+			} else {
+				(Instant::now(), Picks::read(spi), Rearm::Replace(None))
+			};
+			let psn = picks.front?;
+			if watch_picks(spi, picks, read_at, rearm) {
+				return Some(FrontApp { psn, read_at });
+			}
 		}
-	}
+	})
 }
 
 /// Tap setup may block while the user switches apps or clicks in the same
@@ -1868,10 +1869,14 @@ fn keeps_reroute(seen: Option<PickEvidence>) -> bool {
 	seen.is_some_and(|seen| seen.chord.is_none() && seen.panels.iter().all(Option::is_none))
 }
 
-/// Orders read and operation reroutes without owning cross-process input
-/// control during tap setup. An operation starting after the read's ownership
-/// check arms after the read, so its generation supersedes the read's.
+/// Orders a read's tap setup through watch publication against other reads
+/// and operations, without owning desktop input/focus control during setup.
 static REROUTE_SETUP: Mutex<()> = Mutex::new(());
+
+fn with_reroute_setup<T>(setup: impl FnOnce() -> T) -> T {
+	let _setup = REROUTE_SETUP.lock();
+	setup()
+}
 
 /// A [`KeyReroute`] from `browser` back to `user`, unless an operation owns
 /// desktop input/focus control: arming makes this the latest action, which
@@ -1881,7 +1886,6 @@ fn arm_reroute(user: pid_t, browser: pid_t) -> Option<KeyReroute> {
 }
 
 fn arm_reroute_with<T>(setup: impl FnOnce() -> Option<T>) -> Option<T> {
-	let _setup = REROUTE_SETUP.lock();
 	if control::own_focus().is_err() {
 		return None;
 	}
@@ -2762,14 +2766,20 @@ mod tests {
 	const CONTROL: u64 = 0x4_0101;
 
 	#[test]
-	fn a_read_releases_desktop_control_before_reroute_setup() {
+	fn a_read_serializes_setup_through_publication_without_owning_desktop_control() {
 		let _serial = control::OWNERSHIP_TEST.lock();
-		let reroute = arm_reroute_with(|| {
-			let _owner = control::own_focus().expect("tap setup must not own desktop control");
-			assert!(REROUTE_SETUP.try_lock().is_none(), "same-process setup stays serialized");
-			Some(())
+		with_reroute_setup(|| {
+			let reroute = arm_reroute_with(|| {
+				let _owner = control::own_focus().expect("tap setup must not own desktop control");
+				assert!(REROUTE_SETUP.try_lock().is_none(), "tap setup stays serialized");
+				Some(())
+			});
+			assert!(reroute.is_some(), "the read sets up its reroute");
+			assert!(
+				REROUTE_SETUP.try_lock().is_none(),
+				"another read cannot arm before this candidate is published"
+			);
 		});
-		assert!(reroute.is_some(), "the read sets up its reroute");
 	}
 
 	#[test]
