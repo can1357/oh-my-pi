@@ -134,11 +134,13 @@ async fn a_background_command_cannot_duplicate_a_descriptor_only_the_host_holds(
 	assert!(host >= 300, "dup host descriptor");
 	let script: &'static str = Box::leak(
 		format!(
-			"/bin/cat f >/dev/null & /bin/sh -c 'echo x' >f 1>&{host} 2>err & wait $!; echo s=$?; wait"
+			"/bin/cat f >/dev/null & /bin/sh -c 'echo x' >f 1>&{host} 2>err & wait $!; echo s=$?; \
+			 wait"
 		)
 		.into_boxed_str(),
 	);
-	let output: &'static str = Box::leak(format!("{host}: Bad file descriptor\ns=1\n").into_boxed_str());
+	let output: &'static str =
+		Box::leak(format!("{host}: Bad file descriptor\ns=1\n").into_boxed_str());
 	check(&[Row { script, fifos: &["f"], output, status: 0, files: &[("err", None)] }]).await;
 	// SAFETY: `host` was opened above and is closed once.
 	unsafe { libc::close(host) };
@@ -151,11 +153,41 @@ async fn a_background_command_cannot_duplicate_a_descriptor_only_the_host_holds(
 #[tokio::test(flavor = "multi_thread")]
 async fn process_substitutions_leave_room_under_the_shells_own_limit() {
 	check(&[Row {
-		script: "ulimit -n 10; /bin/cat <(echo 1) <(echo 2) <(echo 3) <(echo 4) <(echo 5) <(echo 6); echo s=$?",
+		script: "ulimit -n 10; /bin/cat <(echo 1) <(echo 2) <(echo 3) <(echo 4) <(echo 5) <(echo \
+		         6); echo s=$?",
 		fifos:  &[],
 		output: "1\n2\n3\n4\n5\n6\ns=0\n",
 		status: 0,
 		files:  &[],
 	}])
+	.await;
+}
+
+/// The descriptors the shell chooses for a process substitution and a
+/// coprocess follow the lower of its own `ulimit -n` and the host
+/// process's open-file limit, as Bash's follow its one limit: under
+/// `ulimit -n 48` it takes the lowest free descriptors, and under
+/// `ulimit -n 100` it takes 63 and below again. Regression: it read only
+/// the host process's limit, so a lowered `ulimit -n` still gave
+/// `/dev/fd/63`, which a command under that limit cannot open for itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn shell_chosen_descriptors_follow_a_lowered_ulimit() {
+	check(&[
+		Row {
+			script: "ulimit -n 48; /bin/cat <(echo hi); echo s=$?; echo <(true); coproc cat; echo \
+			         ${COPROC[@]}; /bin/echo x 5>/dev/null 7<&0; /bin/bash -c 'echo y >&40' 40>&1",
+			fifos:  &[],
+			output: "hi\ns=0\n/dev/fd/3\n3 6\nx\ny\n",
+			status: 0,
+			files:  &[],
+		},
+		Row {
+			script: "ulimit -n 100; echo <(true); coproc cat; echo ${COPROC[@]}",
+			fifos:  &[],
+			output: "/dev/fd/63\n63 60\n",
+			status: 0,
+			files:  &[],
+		},
+	])
 	.await;
 }

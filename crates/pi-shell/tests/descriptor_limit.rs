@@ -161,8 +161,8 @@ fn shell_chosen_descriptors_fit_a_low_process_limit() {
 
 	let (code, output) = run(
 		"/bin/cat <(echo hi); echo s=$?; echo <(true); coproc cat; echo ${COPROC[@]}; /bin/echo x \
-		 5>/dev/null 7<&0; /bin/bash -c 'echo y >&40' 40>&1; \
-		 /bin/bash -c 'echo z >&47' 47>&1; (ulimit -n 100; /bin/cat <(echo raised))",
+		 5>/dev/null 7<&0; /bin/bash -c 'echo y >&40' 40>&1; /bin/bash -c 'echo z >&47' 47>&1; \
+		 (ulimit -n 100; /bin/cat <(echo raised))",
 	);
 	assert_eq!((code, output.as_str()), (Some(0), "hi\ns=0\n/dev/fd/3\n3 6\nx\ny\nz\nraised\n"));
 }
