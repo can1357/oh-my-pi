@@ -1,0 +1,6 @@
+auth "devin-cli" {
+	name "Devin (adopt CLI credentials)"
+	login "custom" hook="devin-cli"
+	refresh "none"
+	store-as "devin"
+}
