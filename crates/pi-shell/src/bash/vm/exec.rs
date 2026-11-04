@@ -649,6 +649,15 @@ fn park(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, key: WaitKey, at: u64) 
 	if vp.blocked.as_ref().is_none_or(|b| b.key != key) {
 		k.emit(cx, (vp.vpid, vp.mode), vp.runs.front(), EventData::Blocked { key: &key });
 	}
+	// The shell notices the end of the child `$!` names while it waits for
+	// something else (waiting on that child itself, as `$!` settling or
+	// `wait` does, is not noticing it on the side).
+	if let Some(v) = vp.last_bg.vpid()
+		&& key != WaitKey::Proc(v)
+		&& matches!(vp.jobs.by_vpid(v).map(|j| j.state), Some(super::proc::JobState::Done(_)))
+	{
+		vp.jobs.see_bang(v);
+	}
 	vp.blocked = Some(super::proc::Blocked { key, at });
 }
 
@@ -1640,7 +1649,9 @@ pub fn start_sub(
 				}
 			}
 			// bash keeps job control and the job list in `$( )`: `jobs`
-			// lists the parent's jobs, `fg` finds no current job.
+			// lists the parent's jobs, `fg` finds no current job. Forking
+			// cleans up the parent's waited-for jobs first.
+			k.cleanup_dead_jobs(cx.store, vp);
 			child.jobs = inherited_jobs(vp, vp.jobs.subshell);
 			let vpid = child.vpid;
 			k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
@@ -3009,6 +3020,9 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 		.as_ref()
 		.is_some_and(|s| !s.children.is_empty());
 	if !started {
+		// bash `stop_pipeline`: every fork first deletes the jobs whose end
+		// was reported or waited for, keeping their statuses.
+		k.cleanup_dead_jobs(cx.store, vp);
 		// A job that forks (a subshell, pipeline, job or coprocess of its
 		// own) is not just one program: it keeps its virtual pid.
 		if !k.bangs.is_empty() {

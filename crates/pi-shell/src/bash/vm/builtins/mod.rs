@@ -120,16 +120,23 @@ pub enum Control {
 /// What `wait` waits for.
 pub struct Wait {
 	/// The children, in order.
-	pub children: Vec<Vpid>,
+	pub children:   Vec<Vpid>,
 	/// `wait` without operands: the status stays 0 rather than the last
 	/// child's.
-	pub all:      bool,
+	pub all:        bool,
 	/// `wait -n`: the first of them to finish; its status.
-	pub any:      bool,
+	pub any:        bool,
 	/// `wait -p var`: the variable that gets the waited child's pid.
-	pub into:     Option<BString>,
+	pub into:       Option<BString>,
 	/// `wait -f`: a stopped job does not end the wait.
-	pub force:    bool,
+	pub force:      bool,
+	/// `fg`: the job is deleted once it ends, its status not kept.
+	pub foreground: bool,
+	/// Operands only: the pid and status of the last operands when they
+	/// named only kept statuses (bash `bgpids`), which `wait` returns (and
+	/// `-p` gets) after `children`. Without operands: `$!`'s pid when that
+	/// child had finished before the `wait`, whose status stays kept.
+	pub kept:       Option<(u32, i32)>,
 }
 
 /// `name` and the subscript of a `name[subscript]` variable reference.

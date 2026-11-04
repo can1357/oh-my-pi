@@ -361,9 +361,10 @@ struct Synced {
 	/// compared with their store records (no copy of the table).
 	job_ids:    Vec<JobId>,
 	/// `%+`, `%-` and the owed `SIGCHLD` runs as written.
-	job_marks:  (Option<u32>, Option<u32>, u32),
+	job_marks:  (Option<u32>, Option<u32>, u32, u32),
 	getopts:    GetoptsState,
 	rlimits:    Vec<(Rlimit, Option<u64>, Option<u64>)>,
+	kept:       Vec<super::proc::KeptStatus>,
 }
 
 /// Root scopes the [`Root`] bitmasks track: `0..SCOPE_BITS`. Deeper ones
@@ -2818,6 +2819,38 @@ fn decode_rlimits(words: &[BString]) -> Vec<(Rlimit, Option<u64>, Option<u64>)> 
 		.collect()
 }
 
+/// [`MiscKey::BgPids`] words: `vpid:ospid:status`, `ospid` empty when none.
+fn encode_kept(kept: &[super::proc::KeptStatus]) -> Vec<BString> {
+	kept
+		.iter()
+		.map(|k| {
+			let os = k.os_pid.map_or_else(String::new, |p| p.to_string());
+			BString::from(format!("{}:{os}:{}", k.vpid.0, k.status))
+		})
+		.collect()
+}
+
+/// [`encode_kept`]'s words and the `$!` child seen finished back; a
+/// malformed word is skipped.
+fn decode_ended(words: &[BString], bang_seen: u32) -> Option<Box<super::proc::Ended>> {
+	let kept: Vec<_> = words
+		.iter()
+		.filter_map(|w| {
+			let mut parts = w.split(|&c| c == b':');
+			let vpid = parse(parts.next()?)?;
+			let os = parts.next()?;
+			let os_pid = if os.is_empty() {
+				None
+			} else {
+				Some(parse(os)?)
+			};
+			let status = parse(parts.next()?)?;
+			Some(super::proc::KeptStatus { vpid: Vpid(vpid), os_pid, status })
+		})
+		.collect();
+	(!kept.is_empty() || bang_seen != 0).then(|| Box::new(super::proc::Ended { kept, bang_seen }))
+}
+
 /// Write the root job table's changes since the last sync: each job is
 /// compared with its store record (the store holds what was written last,
 /// so the engine keeps no copy of the table), jobs gone from the table are
@@ -2849,17 +2882,18 @@ fn write_jobs(root: &mut Root, store: &mut dyn StateStore, jobs: &JobTable) {
 			root.write(store, Change::Put(Key::Job(job.id), Record::Job(job.clone())));
 		}
 	}
-	let (current, previous, chld) = root.synced.job_marks;
+	let (current, previous, chld, seen) = root.synced.job_marks;
 	for (key, new, was) in [
 		(MiscKey::JobCurrent, jobs.current, current),
 		(MiscKey::JobPrevious, jobs.previous, previous),
 		(MiscKey::ChldOwed, Some(jobs.chld).filter(|&n| n > 0), Some(chld).filter(|&n| n > 0)),
+		(MiscKey::BangSeen, Some(jobs.bang_seen()).filter(|&n| n > 0), Some(seen).filter(|&n| n > 0)),
 	] {
 		if new != was {
 			root.set_record(store, KeyBuf::Misc(key), new.map(|n| Record::Misc(decimal(n))));
 		}
 	}
-	root.synced.job_marks = (jobs.current, jobs.previous, jobs.chld);
+	root.synced.job_marks = (jobs.current, jobs.previous, jobs.chld, jobs.bang_seen());
 }
 
 /// Write the root vproc's in-place fields that changed since the last call
@@ -2890,7 +2924,7 @@ pub fn sync_root(root: &mut Root, store: &mut dyn StateStore, vp: &Vproc) {
 	}
 	// Jobs are compared with their records: only an empty table that was
 	// written empty is skipped without a read.
-	let marks = (vp.jobs.current, vp.jobs.previous, vp.jobs.chld);
+	let marks = (vp.jobs.current, vp.jobs.previous, vp.jobs.chld, vp.jobs.bang_seen());
 	if !vp.jobs.list.is_empty() || !root.synced.job_ids.is_empty() || marks != root.synced.job_marks
 	{
 		write_jobs(root, store, &vp.jobs);
@@ -2900,6 +2934,16 @@ pub fn sync_root(root: &mut Root, store: &mut dyn StateStore, vp: &Vproc) {
 		let rec = (vp.getopts != GetoptsState::default())
 			.then(|| Record::Words(encode_getopts(&vp.getopts)));
 		root.set_record(store, KeyBuf::Misc(MiscKey::Getopts), rec);
+	}
+	let kept = vp
+		.jobs
+		.ended
+		.as_ref()
+		.map_or(&[][..], |e| e.kept.as_slice());
+	if kept != root.synced.kept.as_slice() {
+		root.synced.kept = kept.to_vec();
+		let rec = (!kept.is_empty()).then(|| Record::Words(encode_kept(kept)));
+		root.set_record(store, KeyBuf::Misc(MiscKey::BgPids), rec);
 	}
 	if vp.rlimits != root.synced.rlimits {
 		root.synced.rlimits.clone_from(&vp.rlimits);
@@ -2963,6 +3007,12 @@ pub fn load_root(
 			.and_then(|s| parse(&s))
 			.unwrap_or(0),
 		subshell: false,
+		ended: decode_ended(
+			&words(store, MiscKey::BgPids)?,
+			misc(store, MiscKey::BangSeen)?
+				.and_then(|s| parse(&s))
+				.unwrap_or(0),
+		),
 	};
 	vp.getopts = decode_getopts(&words(store, MiscKey::Getopts)?);
 	vp.rlimits = decode_rlimits(&words(store, MiscKey::Rlimits)?);
@@ -2971,9 +3021,14 @@ pub fn load_root(
 		pipestatus: vp.pipestatus.clone(),
 		last_bg:    vp.last_bg,
 		job_ids:    vp.jobs.list.iter().map(|j| j.id).collect(),
-		job_marks:  (vp.jobs.current, vp.jobs.previous, vp.jobs.chld),
+		job_marks:  (vp.jobs.current, vp.jobs.previous, vp.jobs.chld, vp.jobs.bang_seen()),
 		getopts:    vp.getopts.clone(),
 		rlimits:    vp.rlimits.clone(),
+		kept:       vp
+			.jobs
+			.ended
+			.as_ref()
+			.map_or_else(Vec::new, |e| e.kept.clone()),
 	};
 	Ok(())
 }

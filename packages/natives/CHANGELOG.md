@@ -4,7 +4,8 @@
 
 ### Fixed
 
-- Fixed the bash tool's `wait "$!"` failing with `no such job` instead of waiting when the backgrounded command was a function, subshell or brace group: `$!` now holds an id for a job the shell runs itself, `jobs -p` and `jobs -l` in that shell show it, and `wait`, `kill` and the newly implemented `disown` accept it; it is not an operating-system process id, so `ps`, `/proc` and `kill` from another process will not find it ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's job control after a background job ends to match Bash 5.3: `wait PID` reports a finished job's status again, `wait %N` and `%%` still find a job `wait` reported until the shell next forks or runs `jobs`, `wait` without operands forgets kept statuses, `disown` keeps Bash's statuses, `$!` is the same inside `$( )`, and a background function that traps `TERM` runs its trap and ends with its own status ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
+
 ### Changed
 
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections

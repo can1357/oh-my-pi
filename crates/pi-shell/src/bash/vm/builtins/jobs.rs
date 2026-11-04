@@ -166,9 +166,7 @@ fn print_job(ctx: &mut Ctx<'_, '_>, number: u32, form: Form, show: &Show<'_>) {
 /// Forget finished jobs whose state was reported (bash
 /// `cleanup_dead_jobs`).
 fn cleanup(ctx: &mut Ctx<'_, '_>) {
-	ctx.vp
-		.jobs
-		.remove_where(|j| j.notified && matches!(j.state, JobState::Done(_)));
+	ctx.k.cleanup_dead_jobs(ctx.cx.store, ctx.vp);
 }
 
 /// `jobs [-lnprs] [jobspec …]`, `jobs -x command [args]`: list jobs as
@@ -437,11 +435,13 @@ fn foreground(ctx: &mut Ctx<'_, '_>, word: Option<&BString>) -> R {
 		job.notified = true;
 	}
 	let wait = Wait {
-		children: vec![vpid],
-		all:      false,
-		any:      false,
-		into:     None,
-		force:    false,
+		children:   vec![vpid],
+		all:        false,
+		any:        false,
+		into:       None,
+		force:      false,
+		foreground: true,
+		kept:       None,
 	};
 	Ok(Outcome { status: 0, control: Control::Wait(wait) })
 }
@@ -505,8 +505,13 @@ pub fn disown(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			.filter(|j| !running_only || j.state == JobState::Running)
 			.map(|j| j.number)
 			.collect();
+		// bash `delete_all_jobs` (`DEL_NOBGPID`): no status is kept for
+		// them, and `-a` forgets every kept status too (`bgp_clear`).
 		for number in picked {
-			drop_job(ctx, number, nohup);
+			drop_job(ctx, number, nohup, false);
+		}
+		if !nohup && !running_only {
+			ctx.vp.jobs.retain_kept(|_| false);
 		}
 		return done(0);
 	}
@@ -533,7 +538,9 @@ pub fn disown(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				.ok_or(Bad::Missing),
 		};
 		if let Ok(number) = found {
-			drop_job(ctx, number, nohup);
+			// bash `delete_job`: the status stays for `wait PID` (0 while
+			// the job runs).
+			drop_job(ctx, number, nohup, true);
 		} else {
 			no_such_job(ctx, word.map_or(&b"current"[..], |w| w.as_slice()));
 			status = 1;
@@ -542,16 +549,16 @@ pub fn disown(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	done(status)
 }
 
-/// `disown`'s effect on one job: `nohup` marks it, else it is deleted
-/// (bash warns when that drops a stopped job).
-fn drop_job(ctx: &mut Ctx<'_, '_>, number: u32, nohup: bool) {
+/// `disown`'s effect on one job: `nohup` marks it, else it is deleted,
+/// its status kept when `keep` (bash warns when that drops a stopped job).
+fn drop_job(ctx: &mut Ctx<'_, '_>, number: u32, nohup: bool, keep: bool) {
 	if nohup {
 		if let Some(job) = ctx.vp.jobs.get_mut(number) {
 			job.nohup = true;
 		}
 		return;
 	}
-	if let Some(job) = ctx.vp.jobs.remove(number)
+	if let Some(job) = ctx.k.delete_job(ctx.cx.store, ctx.vp, number, keep)
 		&& matches!(job.state, JobState::Stopped(_))
 		&& !ctx.vp.jobs.subshell
 	{

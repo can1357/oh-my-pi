@@ -144,7 +144,10 @@ async fn disown_keeps_bash_statuses() {
 			r#"f(){ sleep 0.2; return 3; }; f & p=$!; disown "$p"; sleep 0.4; wait "$p"; echo "status=$?""#,
 			"status=0\n",
 		),
-		(r#"f(){ return 3; }; f & p=$!; sleep 0.1; disown %1; wait "$p"; echo "status=$?""#, "status=3\n"),
+		(
+			r#"f(){ return 3; }; f & p=$!; sleep 0.1; disown %1; wait "$p"; echo "status=$?""#,
+			"status=3\n",
+		),
 		(
 			r#"f(){ sleep 0.3; return 3; }; f & p=$!; disown -a; wait "$p" 2>/dev/null; echo "status=$?""#,
 			"status=127\n",

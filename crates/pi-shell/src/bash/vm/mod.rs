@@ -636,12 +636,61 @@ impl Kernel {
 		}
 	}
 
+	/// Whether `vp` started child vproc `vpid` (its record names `vp` as
+	/// parent): a subshell copies `$!`, not its parent's children.
+	pub fn started(&mut self, store: &mut dyn StateStore, vp: Vpid, vpid: Vpid) -> bool {
+		match store.get(Key::Proc(vpid)) {
+			Ok(Some(Record::Proc { parent, .. })) => *parent == Some(vp),
+			Ok(_) => false,
+			Err(err) => {
+				self.root.fail(err);
+				false
+			},
+		}
+	}
+
 	/// Take the exit status of finished child vproc `vpid` (its record goes);
 	/// `None` while it runs or when unknown.
 	pub fn proc_collect(&mut self, store: &mut dyn StateStore, vpid: Vpid) -> Option<i32> {
 		let status = self.proc_state(store, vpid)?.exited()?;
 		self.root.write(store, Change::Del(Key::Proc(vpid)));
 		Some(status)
+	}
+
+	/// Delete job `number` of `vp` (bash `delete_job`): `keep` keeps its
+	/// status for `wait PID` ([`proc::JobTable::delete`]); its finished
+	/// vproc's record goes. `$!` keeps its value, but no longer names a
+	/// child that `wait` or `disown` reach through it.
+	pub fn delete_job(
+		&mut self,
+		store: &mut dyn StateStore,
+		vp: &mut Vproc,
+		number: u32,
+		keep: bool,
+	) -> Option<proc::Job> {
+		let job = vp.jobs.delete(number, keep)?;
+		if !job.inherited {
+			self.proc_collect(store, job.vpid);
+		}
+		if vp.last_bg.is(job.vpid) {
+			vp.last_bg = proc::LastBg::detached(job.pid());
+		}
+		Some(job)
+	}
+
+	/// Delete `vp`'s finished jobs whose state was reported or waited for,
+	/// keeping their statuses (bash `cleanup_dead_jobs`: `jobs`, and every
+	/// fork of the shell). zsh deletes a job when it reports it instead.
+	pub fn cleanup_dead_jobs(&mut self, store: &mut dyn StateStore, vp: &mut Vproc) {
+		let dead: Vec<u32> = vp
+			.jobs
+			.iter()
+			.filter(|j| j.notified && matches!(j.state, proc::JobState::Done(_)))
+			.map(|j| j.number)
+			.collect();
+		for number in dead {
+			self.delete_job(store, vp, number, true);
+		}
 	}
 
 	/// The clock for an event now: the last reading while it is still
@@ -1627,6 +1676,9 @@ impl Shell {
 				if let Some(entry) = p.jobs.by_vpid_mut(job) {
 					entry.os_pid = Some(pid);
 				}
+				// A kept status under that OS pid named an earlier child
+				// (bash `bgp_delete` in `make_child`).
+				p.jobs.retain_kept(|k| k.vpid == job || !k.named_by(pid));
 			}
 		}
 	}
@@ -1667,7 +1719,16 @@ impl Shell {
 		let Some(i) = parent.and_then(|v| self.procs.iter().position(|p| p.vpid == v)) else {
 			return;
 		};
-		let job = self.procs[i].jobs.by_vpid_mut(vpid);
+		let p = &mut self.procs[i];
+		if p.last_bg.is(vpid)
+			&& p
+				.blocked
+				.as_ref()
+				.is_some_and(|b| b.key != crate::bash::event::WaitKey::Proc(vpid))
+		{
+			p.jobs.see_bang(vpid);
+		}
+		let job = p.jobs.by_vpid_mut(vpid);
 		let background = job.is_some();
 		if let Some(job) = job {
 			job.state = proc::JobState::Done(status);
@@ -1951,15 +2012,20 @@ impl Shell {
 			.k
 			.emit(cx, root, None, EventData::Signal { sig, target });
 		let platform = self.k.engine.config().platform;
-		let job_root = match target {
+		let job = match target {
 			SigTarget::Job(id) => self
 				.procs
 				.iter()
 				.flat_map(|p| p.jobs.iter())
 				.find(|job| job.id == id)
-				.map(|job| job.vpid),
+				.map(|job| (job.vpid, job.control)),
 			_ => None,
 		};
+		let job_root = job.map(|(v, _)| v);
+		// bash `kill_pid`: only a job with its own process group (job
+		// control) is signalled as a group; otherwise the signal reaches the
+		// job's subshell, not the command it is running.
+		let group = job.is_some_and(|(_, control)| control);
 		let mut hits: Vec<usize> = (0..self.procs.len())
 			.filter(|&i| match target {
 				SigTarget::Vpid(v) => self.procs[i].vpid == v,
@@ -1988,7 +2054,12 @@ impl Shell {
 			let terminating = trap.is_none() && sig.default_action() == DefaultAction::Terminate;
 			// A signal to the shell PID does not also target its foreground child.
 			// A terminating child is signaled once by `kill`, not here and there.
-			if target != SigTarget::Vpid(root.0) && !terminating {
+			// A vproc that traps (or ignores) the signal gets it alone unless
+			// its job is signalled as a process group: its trap runs once the
+			// command returns (a trapped `TERM` in `f & kill %1`).
+			let alone =
+				trap.is_some() && !group && matches!(target, SigTarget::Vpid(_) | SigTarget::Job(_));
+			if target != SigTarget::Vpid(root.0) && !terminating && !alone {
 				for frame in &mut self.procs[i].frames {
 					if let Some(sc) = frame.scratch.as_mut() {
 						match &mut sc.live {
@@ -2272,10 +2343,15 @@ fn interrupt_wait(p: &mut Vproc, status: i32) {
 		};
 		let waiting = matches!(
 			e.waiting,
-			Some(proc::Awaited::Jobs { .. } | proc::Awaited::AllJobs | proc::Awaited::AnyJob)
+			Some(
+				proc::Awaited::Jobs { .. }
+					| proc::Awaited::AllJobs { .. }
+					| proc::Awaited::AnyJob { .. }
+			)
 		);
 		if waiting && e.target == Some(proc::Target::Intrinsic(crate::bash::ids::IntrinsicId::Wait)) {
-			e.waiting = Some(proc::Awaited::Jobs { force: true });
+			e.waiting =
+				Some(proc::Awaited::Jobs { force: true, foreground: false, kept: None });
 			e.wait_for.clear();
 			e.wait_into = None;
 			e.status = status;
@@ -2470,6 +2546,9 @@ impl Vproc {
 		// Exact: `clone_from` into the empty vector reserves four slots.
 		vp.pipestatus.reserve_exact(self.pipestatus.len());
 		vp.pipestatus.extend_from_slice(&self.pipestatus);
+		// `$!` is a parameter every subshell copies; `wait` and `kill`
+		// still check that the child it names is this vproc's own.
+		vp.last_bg = self.last_bg;
 		vp.getopts.clone_from(&self.getopts);
 		vp.command.clone_from(&self.command);
 		vp.rlimits.clone_from(&self.rlimits);
