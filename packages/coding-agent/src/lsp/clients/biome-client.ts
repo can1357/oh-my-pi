@@ -63,7 +63,7 @@ async function runBiome(
 	args: string[],
 	cwd: string,
 	resolvedCommand: string | undefined,
-	signal: AbortSignal,
+	signal?: AbortSignal,
 ): Promise<{ stdout: string; stderr: string; success: boolean }> {
 	const command = resolvedCommand ?? "biome";
 
@@ -71,7 +71,7 @@ async function runBiome(
 		const { stdout, stderr, exitCode } = await runLinterCli(command, args, cwd, signal);
 		return { stdout, stderr, success: exitCode === 0 };
 	} catch (err) {
-		if (signal.aborted || (err instanceof ptree.Exception && err.aborted)) throw err;
+		if (signal?.aborted || (err instanceof ptree.Exception && err.aborted)) throw err;
 		return { stdout: "", stderr: String(err), success: false };
 	}
 }
@@ -100,9 +100,6 @@ export class BiomeClient implements LinterClient {
 		return new BiomeClient(config, cwd);
 	}
 
-	/** Aborted by {@link dispose}: ends every run this client still has in flight. */
-	readonly #disposed = new AbortController();
-
 	/**
 	 * @param cwd - The Biome project root of the files this client serves; Biome
 	 *   runs there, so it reads that root's configuration and reports paths
@@ -113,10 +110,6 @@ export class BiomeClient implements LinterClient {
 		private readonly cwd: string,
 	) {}
 
-	#runSignal(signal: AbortSignal | undefined): AbortSignal {
-		return signal ? AbortSignal.any([signal, this.#disposed.signal]) : this.#disposed.signal;
-	}
-
 	async format(filePath: string, content: string, signal?: AbortSignal): Promise<string> {
 		// Keep the standalone LinterClient contract: callers supply the content to
 		// format, regardless of what is currently on disk.
@@ -125,12 +118,7 @@ export class BiomeClient implements LinterClient {
 		// resolves its config and ignore rules for a path inside that root.
 		const target = linterFilePath(filePath);
 
-		const result = await runBiome(
-			["format", "--write", target],
-			this.cwd,
-			this.config.resolvedCommand,
-			this.#runSignal(signal),
-		);
+		const result = await runBiome(["format", "--write", target], this.cwd, this.config.resolvedCommand, signal);
 
 		if (result.success) {
 			return await Bun.file(target).text();
@@ -143,12 +131,7 @@ export class BiomeClient implements LinterClient {
 	async lint(filePath: string, signal?: AbortSignal): Promise<Diagnostic[]> {
 		const target = linterFilePath(filePath);
 		// Run biome lint with JSON reporter
-		const result = await runBiome(
-			["lint", "--reporter=json", target],
-			this.cwd,
-			this.config.resolvedCommand,
-			this.#runSignal(signal),
-		);
+		const result = await runBiome(["lint", "--reporter=json", target], this.cwd, this.config.resolvedCommand, signal);
 
 		// Biome exits non-zero when diagnostics are found, so only an empty
 		// stdout signals an actual run failure (missing binary, CLI error).
@@ -234,6 +217,6 @@ export class BiomeClient implements LinterClient {
 	}
 
 	dispose(): void {
-		this.#disposed.abort(new Error("Biome client disposed"));
+		// Nothing to dispose: each run is bounded by its caller's signal, its deadline and process teardown.
 	}
 }

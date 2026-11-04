@@ -5,7 +5,7 @@
  * Node script that runs the native binary as its own child. Signalling only the
  * direct child orphans that grandchild, which then keeps scanning its project
  * after the edit returned. Every run's whole tree is therefore killed on abort,
- * on its deadline, on client dispose, and on process teardown.
+ * on its deadline, and on process teardown.
  */
 import { postmortem, ptree, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
 
@@ -63,7 +63,7 @@ async function killRunning(): Promise<void> {
  *
  * Windows: ptree's tree kill from the retained root handle.
  *
- * Rejects when `signal` aborts, the deadline passes, the client is disposed or
+ * Rejects when `signal` aborts, the deadline passes or
  * the process tears down: once a stop was asked for, the run never reports a
  * result, and its tree is killed before the promise settles.
  */

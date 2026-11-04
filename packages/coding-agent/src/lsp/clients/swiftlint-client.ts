@@ -36,7 +36,7 @@ async function runSwiftLint(
 	args: string[],
 	cwd: string,
 	resolvedCommand: string | undefined,
-	signal: AbortSignal,
+	signal?: AbortSignal,
 ): Promise<{ stdout: string; stderr: string; success: boolean }> {
 	const command = resolvedCommand ?? "swiftlint";
 
@@ -45,7 +45,7 @@ async function runSwiftLint(
 		// swiftlint exits non-zero when violations found — that's not a failure
 		return { stdout, stderr, success: stdout.length > 0 };
 	} catch (err) {
-		if (signal.aborted || (err instanceof ptree.Exception && err.aborted)) throw err;
+		if (signal?.aborted || (err instanceof ptree.Exception && err.aborted)) throw err;
 		return { stdout: "", stderr: String(err), success: false };
 	}
 }
@@ -59,9 +59,6 @@ export class SwiftLintClient implements LinterClient {
 	static create(config: ServerConfig, cwd: string): LinterClient {
 		return new SwiftLintClient(config, cwd);
 	}
-
-	/** Aborted by {@link dispose}: ends every run this client still has in flight. */
-	readonly #disposed = new AbortController();
 
 	/**
 	 * @param cwd - The SwiftLint project root of the files this client serves;
@@ -82,7 +79,7 @@ export class SwiftLintClient implements LinterClient {
 			["lint", "--quiet", "--reporter", "json", linterFilePath(filePath)],
 			this.cwd,
 			this.config.resolvedCommand,
-			signal ? AbortSignal.any([signal, this.#disposed.signal]) : this.#disposed.signal,
+			signal,
 		);
 
 		if (!result.success) {
@@ -122,6 +119,6 @@ export class SwiftLintClient implements LinterClient {
 	}
 
 	dispose(): void {
-		this.#disposed.abort(new Error("SwiftLint client disposed"));
+		// Nothing to dispose: each run is bounded by its caller's signal, its deadline and process teardown.
 	}
 }

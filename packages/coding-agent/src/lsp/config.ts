@@ -337,17 +337,14 @@ export interface ResolveCommandOptions extends Pick<WhichOptions, "cache" | "PAT
 }
 
 /**
- * `$which` for a lookup made from `dir`: a relative command (`./tools/biome`) or
- * relative PATH entry resolves against `dir`, an empty PATH entry included (a
- * shell reads it as the current directory), never against the process's
- * working directory.
+ * `$which` for a lookup made from `dir`: a relative command (`./tools/biome`)
+ * resolves against `dir`, never against the process's working directory. Only
+ * absolute PATH entries are searched: an empty or relative entry would turn
+ * `dir`, which may be the root of any repository the agent writes into, into a
+ * search directory, so a checkout could supply the executable that runs on it.
  */
 function whichFrom(command: string, dir: string, options?: Pick<WhichOptions, "cache" | "PATH">): string | null {
-	const searchPath = (options?.PATH ?? process.env.PATH)
-		?.split(path.delimiter)
-		.map(entry => (entry === "" ? "." : entry))
-		.join(path.delimiter);
-	return $which(command, { cache: options?.cache, PATH: searchPath, cwd: dir });
+	return $which(command, { cache: options?.cache, PATH: options?.PATH, cwd: dir, requireAbsolutePaths: true });
 }
 
 /**

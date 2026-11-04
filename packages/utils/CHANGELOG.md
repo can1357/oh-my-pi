@@ -12,8 +12,8 @@
 ### Added
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
-- Added `followDanglingLinks` to `resolveEquivalentPath` (with `throughMissing`): the path is walked like a writer that creates missing parents would reach it, following every symlink (dangling ones too) and applying `..` to the physical directory
-- Added the `groupKeeper` option to `ptree.spawn`/`exec` (POSIX without a child subreaper, such as macOS): the command runs under a supervisor that leads its process group until the command's output closes, so kills reach the group after the command's launcher died and never signal a group id after the supervisor exited
+- Added `followDanglingLinks` to `resolveEquivalentPath` (with `throughMissing`): resolves a path the way a writer that creates missing parents would reach it, following every symlink, dangling ones too ([#17818](https://github.com/can1357/oh-my-pi/pull/17818) by [@sjawhar](https://github.com/sjawhar))
+- Added the `groupKeeper` option to `ptree.spawn`/`exec` (POSIX without a child subreaper, such as macOS), so a kill reaches the command's process group after its launcher died ([#17818](https://github.com/can1357/oh-my-pi/pull/17818) by [@sjawhar](https://github.com/sjawhar))
 - Added `ensureSqliteLockShim()`, which `openSqliteDatabase`/`openSqliteDatabaseSync` call before opening a store, so on Linux the process's SQLite locks are open-file-description locks that other closes of the file cannot release ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
 - Added `assertNotHeldOpen(path)` (`@oh-my-pi/pi-utils/held-file`), which throws `EBUSY` for a SQLite database or `-shm` this process holds open ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
 

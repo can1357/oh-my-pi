@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { BiomeClient } from "@oh-my-pi/pi-coding-agent/lsp/clients/biome-client";
@@ -18,7 +18,7 @@ import { writeFakeExecutable } from "../helpers/fake-executable";
  * 1. A linter runs only for a file whose own project root (found from the file)
  *    selects it: the session cwd's Biome never lints another repository's file.
  * 2. It runs from that root, with that root's executable, on that file only.
- * 3. Its process tree dies on abort, on its deadline and on client dispose, even
+ * 3. Its process tree dies on abort and on its deadline, even
  *    when the executable is a launcher (npm's `.bin/biome` is a Node script that
  *    runs the native binary as a grandchild).
  */
@@ -401,13 +401,16 @@ process.stdout.write(JSON.stringify({ diagnostics: [] }));
 		expect(readLog(log)).toEqual([{ self: "B", cwd: otherRepo, argv: ["format", "--write", physical] }]);
 	}, 20_000);
 
-	it("reads an empty PATH entry as the file's root", async () => {
+	it("never takes another repository's executable from an empty or relative PATH entry", async () => {
 		const log = path.join(root, "runs.log");
 		const otherRepo = path.join(root, "repo-b");
 		write(path.join(otherRepo, "biome.json"), "{}\n");
 		installRecordingBiome(otherRepo, "B", log);
-		// Only reachable through PATH: move the launcher out of node_modules/.bin into the root.
+		// Reachable only through an empty entry (the root) or a relative one (`tools`).
 		fs.renameSync(path.join(otherRepo, "node_modules", ".bin", "biome"), path.join(otherRepo, "biome"));
+		fs.mkdirSync(path.join(otherRepo, "tools"));
+		fs.copyFileSync(path.join(otherRepo, "biome"), path.join(otherRepo, "tools", "biome"));
+		fs.chmodSync(path.join(otherRepo, "tools", "biome"), 0o755);
 		const target = write(path.join(otherRepo, "x.ts"), "export const x = 1;\n");
 		const biome: ServerConfig = {
 			command: "biome",
@@ -417,14 +420,20 @@ process.stdout.write(JSON.stringify({ diagnostics: [] }));
 			createClient: BiomeClient.create,
 		};
 		const originalPath = process.env.PATH;
-		process.env.PATH = `${path.delimiter}${path.join(root, "not-present")}`;
-		try {
-			await getDiagnosticsForFile(target, path.join(root, "session"), [["biome", biome]]);
-		} finally {
+		onTestFinished(() => {
 			process.env.PATH = originalPath;
+		});
+		const absent = path.join(root, "not-present");
+		for (const searchPath of [
+			`${path.delimiter}${absent}`,
+			`${absent}${path.delimiter}`,
+			`${absent}${path.delimiter}tools`,
+		]) {
+			process.env.PATH = searchPath;
+			expect(await getDiagnosticsForFile(target, path.join(root, "session"), [["biome", biome]])).toBeUndefined();
 		}
 
-		expect(readLog(log)).toEqual([{ self: "B", cwd: otherRepo, argv: ["lint", "--reporter=json", target] }]);
+		expect(readLog(log)).toEqual([]);
 	}, 20_000);
 
 	it("serves an LSP linter only files whose own root lies inside the session cwd", () => {
@@ -483,23 +492,13 @@ describe("lint-on-write process lifetime", () => {
 		expect(await aliveAfter(pid)).toBe(false);
 	}, 20_000);
 
-	it("kills the linter's grandchild when the client is disposed mid-run", async () => {
-		const { client, target, pidFile } = launcherBiome();
-		const linting = client.lint(target);
-		const pid = await waitForPid(pidFile);
-
-		client.dispose();
-
-		await expect(linting).rejects.toThrow();
-		expect(await aliveAfter(pid)).toBe(false);
-	}, 20_000);
-
 	it("kills the linter's grandchild at its deadline when nothing aborts it", async () => {
 		const pidFile = path.join(root, "grandchild.pid");
 		const command = installLauncherLinter(root, pidFile);
-		// Long enough for the grandchild to start on a loaded machine; the run's
-		// outcome is captured at once, since it may settle before the pid appears.
-		const outcome = runLinterCli(command, ["lint"], root, undefined, 15_000).then(
+		// 2 s is about 100 times what the grandchild needs to start at a load average
+		// of 200 (p90 17 ms); the run's outcome is captured at once, since it may
+		// settle before the pid appears.
+		const outcome = runLinterCli(command, ["lint"], root, undefined, 2_000).then(
 			() => new Error("run finished before its deadline"),
 			(error: unknown) => error,
 		);
@@ -507,7 +506,7 @@ describe("lint-on-write process lifetime", () => {
 
 		expect(String(await outcome)).toContain("Timed out");
 		expect(await aliveAfter(pid)).toBe(false);
-	}, 60_000);
+	}, 40_000);
 
 	it("kills the group on abort after its launcher exited while a child still holds the output", async () => {
 		const pidFile = path.join(root, "grandchild.pid");
@@ -598,7 +597,7 @@ setInterval(() => {}, 1 << 30);
 	it("kills the group at its deadline after its launcher died from a signal", async () => {
 		const pidFile = path.join(root, "grandchild.pid");
 		const command = selfSignallingLauncher(pidFile);
-		const outcome = runLinterCli(command, ["lint"], root, undefined, 15_000).then(
+		const outcome = runLinterCli(command, ["lint"], root, undefined, 2_000).then(
 			() => new Error("run finished before its deadline"),
 			(error: unknown) => error,
 		);
@@ -606,7 +605,7 @@ setInterval(() => {}, 1 << 30);
 
 		expect(String(await outcome)).toContain("Timed out");
 		expect(await aliveAfter(pid)).toBe(false);
-	}, 60_000);
+	}, 40_000);
 });
 
 describe("deferred diagnostics on session dispose", () => {

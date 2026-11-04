@@ -211,15 +211,18 @@ function resolveFollowingLinks(input: string): string {
 		// creates parent directories does); `..` may lead back to existing links, so each
 		// component is checked rather than stopping at the first missing one.
 		if (hops < MAX_LINK_HOPS) {
-			let isLink = false;
+			// One `readlink` both asks whether the component is a link and reads its target, so a
+			// link replaced or removed by another process cannot fail the walk between two calls:
+			// not a link (EINVAL), missing (ENOENT) or unreadable is a plain component.
+			let link: string | undefined;
 			try {
-				isLink = fs.lstatSync(next).isSymbolicLink();
+				link = fs.readlinkSync(next);
 			} catch {
-				// Missing: a plain component.
+				// A plain component.
 			}
-			if (isLink) {
+			if (link !== undefined) {
 				hops++;
-				const target = splitPathComponents(fs.readlinkSync(next));
+				const target = splitPathComponents(link);
 				if (target.root) current = target.root;
 				pending = [...target.parts, ...pending];
 				continue;
