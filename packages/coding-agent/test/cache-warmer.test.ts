@@ -172,8 +172,11 @@ function change(h: Harness): PromptCacheChange | undefined {
 	return h.current ? undefined : { kind: "history" };
 }
 
+/** Arms the warmer for a request the provider sent at once; returns the dispatch hook for its payload. */
 function start(h: Harness, options: SimpleStreamOptions = {}): (payload?: unknown) => void {
-	return h.warmer.start({ model: makeModel(), context: { messages: [] }, options }, () => change(h));
+	const dispatched = h.warmer.start({ model: makeModel(), context: { messages: [] }, options }, () => change(h));
+	dispatched();
+	return dispatched;
 }
 
 /** An Anthropic request body whose system prompt carries a 1-hour cache directive. */
@@ -356,6 +359,11 @@ describe("cache warming scheduling math", () => {
 			{ caching: "auto", cache_ttl: "5m" },
 			{ prompt_cache_key: "session" },
 			{},
+			// A 1-hour system breakpoint and a 5-minute message breakpoint: the 5-minute suffix must stay warm.
+			{
+				system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }],
+				messages: [{ role: "user", content: [{ type: "text", text: "go", cache_control: { type: "ephemeral" } }] }],
+			},
 		];
 		for (const payload of long) expect(payloadCacheTier(payload)).toBe("long");
 		for (const payload of short) expect(payloadCacheTier(payload)).toBe("short");
@@ -401,7 +409,7 @@ describe("cache warming scheduling math", () => {
 		);
 	});
 
-	test("hands the warmer the payload a caller's hook replaces it with, sync or async", async () => {
+	test("hands the warmer the payload a caller's hook replaces it with, sync, async or any thenable", async () => {
 		const original = LONG_PAYLOAD;
 		const replacement = { system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }] };
 		const seen: unknown[] = [];
@@ -417,12 +425,22 @@ describe("cache warming scheduling math", () => {
 		const pending = async(original);
 		expect(seen).toHaveLength(1);
 		expect(await pending).toBe(replacement);
+		// A thenable that is not a native Promise, which the provider awaits all the same.
+		const thenable: PromiseLike<unknown> = {
+			// oxlint-disable-next-line unicorn/no-thenable -- the case under test is a non-native thenable
+			then: (onFulfilled, onRejected) => Promise.resolve(replacement).then(onFulfilled, onRejected),
+		};
+		const foreign = observeSentPayload(
+			() => thenable,
+			payload => seen.push(payload),
+		);
+		expect(await foreign(original)).toBe(replacement);
 		const keeps = observeSentPayload(
 			() => undefined,
 			payload => seen.push(payload),
 		);
 		keeps(original);
-		expect(seen).toEqual([replacement, replacement, original]);
+		expect(seen).toEqual([replacement, replacement, replacement, original]);
 	});
 
 	test("keeps Azure Responses and Codex on the default entry under long retention", () => {
@@ -551,6 +569,24 @@ describe("cache warmer lifecycle", () => {
 		expect(h.warmer.status).not.toMatchObject({ reason: "cache lifetime unavailable" });
 		sent({ contents: [], cachedContent: undefined });
 		await advance(SHORT_DELAY_MS);
+		expect(h.replays).toHaveLength(1);
+		h.warmer.cancel();
+	});
+
+	test("sends no refresh while the request still waits for a provider slot", async () => {
+		const h = harness();
+		const sent = h.warmer.start(
+			{ model: makeModel(), context: { messages: [] }, options: { cacheRetention: "long" } },
+			() => change(h),
+		);
+		// Queued past the provisional 5-minute schedule: nothing was written, so nothing is refreshed.
+		await advance(SHORT_DELAY_MS + 5_000);
+		expect(h.replays).toHaveLength(0);
+		// Sent with 1-hour directives: the schedule counts from the send, on the long tier.
+		sent(LONG_PAYLOAD);
+		await advance(SHORT_DELAY_MS);
+		expect(h.replays).toHaveLength(0);
+		await advance(LONG_DELAY_MS - SHORT_DELAY_MS);
 		expect(h.replays).toHaveLength(1);
 		h.warmer.cancel();
 	});
