@@ -42,7 +42,7 @@ use std::{
 };
 
 use crate::{
-	bash::{ExitStatus, ExtProc, OsHandle, Signal},
+	bash::{ExitStatus, ExtProc, OsHandle, ProcEvent, Signal},
 	sys::pump::{
 		BUF, BURST, End, PollIo, orphan,
 		os::{self, OsPipe, Timer},
@@ -297,15 +297,28 @@ impl ExtProc for Relayed {
 	}
 
 	fn poll_wait(&mut self, cx: &mut Context<'_>) -> Poll<ExitStatus> {
+		loop {
+			match std::task::ready!(self.poll_event(cx)) {
+				ProcEvent::Exited(status) => return Poll::Ready(status),
+				ProcEvent::Stopped(_) | ProcEvent::Continued => {},
+			}
+		}
+	}
+
+	fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<ProcEvent> {
 		for relay in &mut self.relays {
 			let _ = relay.poll(cx);
 		}
 		let status = if let Some(status) = self.status {
 			status
 		} else {
-			let status = std::task::ready!(self.child.poll_wait(cx));
-			self.status = Some(status);
-			status
+			match std::task::ready!(self.child.poll_event(cx)) {
+				ProcEvent::Exited(status) => {
+					self.status = Some(status);
+					status
+				},
+				change => return Poll::Ready(change),
+			}
 		};
 		let mut drained = true;
 		for relay in &mut self.relays {
@@ -313,10 +326,14 @@ impl ExtProc for Relayed {
 		}
 		orphan::poll(cx);
 		if drained {
-			Poll::Ready(status)
+			Poll::Ready(ProcEvent::Exited(status))
 		} else {
 			Poll::Pending
 		}
+	}
+
+	fn pgid(&self) -> Option<u32> {
+		self.child.pgid()
 	}
 
 	fn signal(&mut self, sig: Signal) -> io::Result<()> {

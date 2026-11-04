@@ -600,11 +600,10 @@ describe("spotlight notice", () => {
 		expect(h.errors).toEqual([]);
 	});
 
-	it("draws a read the edit gate kept whole dim, as the would-be cut it traced, not as a saving", () => {
+	it("draws an old transcript's read the edit gate kept whole dim, as the would-be cut it traced, not as a saving", () => {
 		const gated: SpotlightDetails = {
 			...RICH,
 			gated: true,
-			editLikely: true,
 			// A gated trace saves nothing; what it would have saved is `plain`'s tokens less the would-be cut's.
 			savedTokens: 0,
 			plainTokens: RICH.outTokens + 150,
