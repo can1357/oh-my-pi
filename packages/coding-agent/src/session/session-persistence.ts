@@ -586,6 +586,12 @@ export function prepareEntryForPersistence(entry: FileEntry, blobStore: BlobStor
 			throw error;
 		}
 		if (json === undefined) throw error;
-		return truncateForPersistence(JSON.parse(json), blobStore) as FileEntry;
+		try {
+			return truncateForPersistence(JSON.parse(json), blobStore) as FileEntry;
+		} catch {
+			// A cause the clone does not remove (blob I/O) fails again: keep the
+			// first error so the logged cause stays stable.
+			throw error;
+		}
 	}
 }
