@@ -1680,7 +1680,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/olla
 
 ## OpenCode Go (`opencode-go`)
 
-OpenCode Go serves subscription models (including Kimi, DeepSeek, GLM, Qwen, MiniMax, and Gemini) at `https://opencode.ai/inference/go/v1`. Models use Chat Completions, Responses, Anthropic Messages, or native Google Generative AI according to `api-routes`; account usage remains on the separate `/zen/go/v1/usage` route.
+OpenCode Go serves subscription models (including Kimi, DeepSeek, GLM, Qwen, MiniMax, and Gemini) under `https://opencode.ai/inference/go`, with one documented root per wire protocol: Chat Completions and Responses at `/openai/v1`, Anthropic Messages at `/anthropic/v1/messages`, and native Google Generative AI at `/google/v1beta`. `api-routes` picks the protocol per model; the model list stays at `/inference/go/v1/models` and account usage remains on the separate `/zen/go/v1/usage` route.
 
 ### Special casings
 
@@ -1708,13 +1708,13 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/open
 - For models minimax-m2.5: `thinking.effortMap={"low":"adaptive","medium":"adaptive","high":"adaptive"}`, `thinking.mode="anthropic-adaptive"`.
 - Provider defaults: `whenThinking={"requiresReasoningContentForToolCalls":true,"allowsSyntheticReasoningContentForToolCalls":false,"reasoningContentField":"reasoning_content"}`.
 
-- **API Resolution & Model ID Overrides**: `createOpenCodeApiResolution` (`packages/catalog/src/provider-models/openai-compat.ts`) resolves the model endpoint under `https://opencode.ai/inference/go`. Route pins override npm hints; `gemini-4-argon-contributor` uses `google-generative-ai` at `/v1/models/{id}:streamGenerateContent`, while MiniMax M3 and selected Qwen IDs use `openai-completions` at `/v1/chat/completions`.
+- **API Resolution & Model ID Overrides**: `createOpenCodeApiResolution` (`packages/catalog/src/provider-models/openai-compat.ts`) resolves the model endpoint under `https://opencode.ai/inference/go` via `openCodeBaseUrlForApi`. Route pins override npm hints; `gemini-4-argon-contributor` uses `google-generative-ai` at `/google/v1beta/models/{id}:streamGenerateContent`, while MiniMax M3 and selected Qwen IDs use `openai-completions` at `/openai/v1/chat/completions`.
 - **`X-Api-Key` Auth Normalization**: In `packages/ai/src/providers/anthropic.ts`, when `model.provider === "opencode-go"`, the transport deletes auto-generated `Authorization` Bearer headers so `AnthropicMessagesClient` emits `X-Api-Key`. Bearer-only requests to OpenCode Anthropic endpoints fail with HTTP `401 Missing API key` (#6510).
 
 ### Auth & usage
 
 - **API Key Login Flow**: Declared in `packages/catalog/src/compat/rules/auth/opencode-go.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`). It directs the user to `https://opencode.ai/auth`, prompts for the API key, and returns the trimmed key stored under `OPENCODE_API_KEY`.
-- **Spend Windows**: `opencodeGoUsageProvider` (`packages/ai/src/usage/opencode-go.ts`) polls the account endpoint `GET https://opencode.ai/zen/go/v1/usage` per stored key (Bearer + `User-Agent` + `x-opencode-session`). Bundled `/inference/go[/v1]` model URLs map back to this route; user-configured proxy URLs retain their own prefixes. The response's `rolling`, `weekly`, and `monthly` windows (`{status, percent, resetsAt}`) become percent limits with reset deadlines. Ranking uses rolling/weekly headroom; monthly is display-only because the console's "Use balance" fallback can still serve on an exhausted monthly window.
+- **Spend Windows**: `opencodeGoUsageProvider` (`packages/ai/src/usage/opencode-go.ts`) polls the account endpoint `GET https://opencode.ai/zen/go/v1/usage` per stored key (Bearer + `User-Agent` + `x-opencode-session`). Bundled `/inference/go[/v1]` model URLs and their protocol-specific children map back to this route; user-configured proxy URLs retain their own prefixes. The response's `rolling`, `weekly`, and `monthly` windows (`{status, percent, resetsAt}`) become percent limits with reset deadlines. Ranking uses rolling/weekly headroom; monthly is display-only because the console's "Use balance" fallback can still serve on an exhausted monthly window.
 - **Account funds 402**: Go can return `402 Upstream request failed: Insufficient account funds (type=server_error)` when an account cannot fund a request. OMP treats this as an account-local usage cap and retries a stored sibling API key instead of backing off on the exhausted key (#13019).
 
 ### Catalog model handling
@@ -1725,7 +1725,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/open
 
 ## OpenCode Zen (`opencode-zen`)
 
-OpenCode Zen (`opencode-zen`) is a subscription service providing access to multi-vendor AI models (Anthropic Claude, DeepSeek, MiniMax, Gemini, etc.) routed through unified proxy endpoints at `https://opencode.ai/zen`. Requests are dispatched dynamically across multiple underlying transport APIs—primarily "Anthropic Messages" (`/zen`), "OpenAI Chat Completions" (`/zen/v1`), "OpenAI Responses" (`/zen/v1`), and "Google Generative AI" (`/zen/v1`)—based on catalog resolution rules, with `claude-opus-5` designated as its default model.
+OpenCode Zen (`opencode-zen`) is a subscription service providing access to multi-vendor AI models (Anthropic Claude, DeepSeek, MiniMax, Gemini, etc.) routed through OpenCode Console inference at `https://opencode.ai/inference`. Requests are dispatched across the documented protocol roots—"Anthropic Messages" (`/inference/anthropic`), "OpenAI Chat Completions" and "OpenAI Responses" (`/inference/openai/v1`), "Google Generative AI" (`/inference/google/v1beta`), and the Jev System One judge (`/inference/systemone`)—based on catalog resolution rules, with `claude-opus-5` designated as its default model.
 
 ### Special casings
 
@@ -1753,7 +1753,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/open
 - For models qwen3.6-plus-free: `thinking.efforts=["minimal","low","medium","high"]`, `thinking.mode="effort"`.
 - Provider defaults: `whenThinking={"requiresReasoningContentForToolCalls":true,"allowsSyntheticReasoningContentForToolCalls":false,"reasoningContentField":"reasoning_content"}`, `supportsContextManagement=false`.
 
-- **Multi-API Resolution & Endpoint Wiring**: `createOpenCodeApiResolution` in `packages/catalog/src/provider-models/openai-compat.ts` resolves model transport targets via `@ai-sdk/*` npm metadata. `OPENCODE_ZEN_API_RESOLUTION` defines per-id overrides mapping `"minimax-m3"` and `"minimax-m3-free"` to `"openai-completions"` at `https://opencode.ai/zen/v1`, overriding upstream `@ai-sdk/anthropic` tags that lead to HTTP 400 errors or raw `<invoke>`/`<|minimax|>`/`<tool_call>` markup leaks (#1617).
+- **Multi-API Resolution & Endpoint Wiring**: `createOpenCodeApiResolution` in `packages/catalog/src/provider-models/openai-compat.ts` resolves model transport targets via `@ai-sdk/*` npm metadata. `OPENCODE_ZEN_API_RESOLUTION` defines per-id overrides mapping `"minimax-m3"` and `"minimax-m3-free"` to `"openai-completions"` at `https://opencode.ai/inference/openai/v1`, overriding upstream `@ai-sdk/anthropic` tags that lead to HTTP 400 errors or raw `<invoke>`/`<|minimax|>`/`<tool_call>` markup leaks (#1617).
 - **Anthropic Proxy Header & Beta Handling**: In `packages/ai/src/providers/anthropic.ts`, `opencode-zen` deletes default `Authorization` headers (`delete defaultHeaders.Authorization`) and supplies `apiKey` to emit `X-Api-Key` headers. Thinking requests on `opencode-zen` suppress the `context_management_20251015` beta header and body field (`context_management`) because the Zen Anthropic proxy rejects unrecognized fields with `400 Extra inputs are not permitted` (#6510).
 
 ### Auth & usage
@@ -1765,9 +1765,9 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/open
 
 - **Provider entry (`opencode-zen`)**: `packages/catalog/src/compat/rules/providers/opencode-zen.kdl` declares default model `claude-opus-5`. Environment keys: `OPENCODE_API_KEY`.
 - **Discovery replacement**: Successful authoritative discovery replaces fallback provider rows rather than retaining retired seed models.
-- **Dynamic Discovery & Base URL Normalization**: `opencodeZenModelManagerOptions` invokes `openCodeModelManagerOptions("opencode-zen", config)`, fetching dynamic OpenAI-compatible models from `https://opencode.ai/zen/v1/models` (`discoveryBaseUrl`). Models are mapped to positive `contextWindow` (`context_length`) and `maxTokens` (`max_completion_tokens`), with base URLs normalized per API type (`openCodeBaseUrlForApi` / `normalizeOpenCodeBasePath`).
+- **Dynamic Discovery & Base URL Normalization**: `opencodeZenModelManagerOptions` invokes `openCodeModelManagerOptions("opencode-zen", config)`, fetching dynamic OpenAI-compatible models from `https://opencode.ai/inference/v1/models` (`discoveryBaseUrl`). Models are mapped to positive `contextWindow` (`context_length`) and `maxTokens` (`max_completion_tokens`), with base URLs normalized per API type (`openCodeBaseUrlForApi` / `normalizeOpenCodeBasePath`).
 - **Zen vs Go Differences**:
-   - **Base URL Root**: Zen uses base path `https://opencode.ai/zen` (completions at `/zen/v1`), whereas OpenCode Go (`opencode-go`) targets `https://opencode.ai/zen/go` (completions at `/zen/go/v1`).
+   - **Base URL Root**: Zen uses base path `https://opencode.ai/inference` (completions at `/inference/openai/v1`), whereas OpenCode Go (`opencode-go`) targets `https://opencode.ai/inference/go` (completions at `/inference/go/openai/v1`). Both keep model discovery at `{base}/v1/models`.
    - **Default Models**: Zen defaults to `claude-opus-5`; Go defaults to `kimi-k2.7-code`.
    - **API Resolution Overrides**: Zen (`OPENCODE_ZEN_API_RESOLUTION`) overrides `"minimax-m3"` and `"minimax-m3-free"` to `"openai-completions"`. Go (`OPENCODE_GO_API_RESOLUTION`) overrides `"minimax-m2.7"`, `"minimax-m3"`, `"minimax-m3-free"`, `"qwen3.5-plus"`, and `"qwen3.6-plus"` to `"openai-completions"` to prevent gateway 404s or XML markup leaks (#887, #1617).
    - **Model Aliasing**: Zen includes the `big-pickle` alias (DeepSeek reasoning), which is uniquely detected through the reviewed taxonomy override for DeepSeek compat policy application.

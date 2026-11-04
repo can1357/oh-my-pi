@@ -128,7 +128,7 @@ provider "opencode-zen" {
 		thinking-mode "effort"
 	}
 	// Zen serves Jev over System One, not chat completions.
-	seed api="typesafe" bundle="always" base-url="https://opencode.ai/zen" {
+	seed api="typesafe" bundle="always" base-url="https://opencode.ai/inference/systemone" {
 		model "jev-1.13" name="Jev 1.13" {
 			reasoning #false
 			input "text"

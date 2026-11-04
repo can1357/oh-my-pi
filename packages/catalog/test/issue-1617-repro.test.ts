@@ -22,8 +22,10 @@ import {
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
-const OPENCODE_ZEN_BASE = "https://opencode.ai/zen/v1";
-const OPENCODE_GO_BASE = "https://opencode.ai/inference/go/v1";
+const OPENCODE_ZEN_BASE = "https://opencode.ai/inference/openai/v1";
+const OPENCODE_ZEN_MODELS_URL = "https://opencode.ai/inference/v1/models";
+const OPENCODE_GO_BASE = "https://opencode.ai/inference/go/openai/v1";
+const OPENCODE_GO_MODELS_URL = "https://opencode.ai/inference/go/v1/models";
 
 describe("opencode-zen/-go resolver routes MiniMax M3 to openai-completions (issue #1617)", () => {
 	const zenDescriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(d => d.providerId === "opencode-zen");
@@ -82,9 +84,9 @@ describe("opencode-zen/-go resolver routes MiniMax M3 to openai-completions (iss
 		const models = await options.fetchDynamicModels?.();
 		const m3 = models?.find(model => model.id === "minimax-m3-free");
 
-		expect(requestedUrl).toBe("https://opencode.ai/zen/v1/models");
+		expect(requestedUrl).toBe(OPENCODE_ZEN_MODELS_URL);
 		expect(m3?.api).toBe("openai-completions");
-		expect(m3?.baseUrl).toBe("https://opencode.ai/zen/v1");
+		expect(m3?.baseUrl).toBe(OPENCODE_ZEN_BASE);
 	});
 
 	test("opencode-go /v1/models refresh routes a freshly-discovered M3 to openai-completions", async () => {
@@ -112,7 +114,7 @@ describe("opencode-zen/-go resolver routes MiniMax M3 to openai-completions (iss
 		const models = await options.fetchDynamicModels?.();
 		const m3 = models?.find(model => model.id === "minimax-m3");
 
-		expect(requestedUrl).toBe(`${OPENCODE_GO_BASE}/models`);
+		expect(requestedUrl).toBe(OPENCODE_GO_MODELS_URL);
 		expect(m3?.api).toBe("openai-completions");
 		expect(m3?.baseUrl).toBe(OPENCODE_GO_BASE);
 	});

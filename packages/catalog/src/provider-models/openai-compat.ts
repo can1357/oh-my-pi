@@ -3238,8 +3238,9 @@ export interface OpenCodeModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
-const OPENCODE_ZEN_BASE_PATH = "https://opencode.ai/zen";
-const OPENCODE_ZEN_GOOGLE_BASE_URL = "https://opencode.ai/inference/google/v1beta";
+const OPENCODE_ZEN_BASE_PATH = "https://opencode.ai/inference";
+const OPENCODE_GO_BASE_PATH = "https://opencode.ai/inference/go";
+const OPENCODE_FIRST_PARTY_BASE_PATHS: ReadonlySet<string> = new Set([OPENCODE_ZEN_BASE_PATH, OPENCODE_GO_BASE_PATH]);
 
 function normalizeOpenCodeBasePath(baseUrl: string | undefined, fallbackBasePath: string): string {
 	const value = normalizeAnthropicBaseUrl(baseUrl, fallbackBasePath);
@@ -3247,10 +3248,19 @@ function normalizeOpenCodeBasePath(baseUrl: string | undefined, fallbackBasePath
 }
 
 function openCodeBaseUrlForApi(api: Api, basePath: string): string {
-	if (api === "google-generative-ai" && basePath === OPENCODE_ZEN_BASE_PATH) {
-		return OPENCODE_ZEN_GOOGLE_BASE_URL;
+	if (OPENCODE_FIRST_PARTY_BASE_PATHS.has(basePath)) {
+		switch (api) {
+			case "anthropic-messages":
+				return `${basePath}/anthropic`;
+			case "google-generative-ai":
+				return `${basePath}/google/v1beta`;
+			case "typesafe":
+				return `${basePath}/systemone`;
+			default:
+				return `${basePath}/openai/v1`;
+		}
 	}
-	return api === "anthropic-messages" ? basePath : `${basePath}/v1`;
+	return api === "anthropic-messages" || api === "typesafe" ? basePath : `${basePath}/v1`;
 }
 
 // Per-id API pins correcting upstream metadata mismatches on the OpenCode
@@ -3292,7 +3302,7 @@ function openCodeModelManagerOptions(
 	const defaultBaseUrl = getDefaultModelDiscoveryBaseUrl(providerId)!;
 	const defaultBasePath = defaultBaseUrl.endsWith("/v1") ? defaultBaseUrl.slice(0, -3) : defaultBaseUrl;
 	const basePath = normalizeOpenCodeBasePath(config?.baseUrl, defaultBasePath);
-	const discoveryBaseUrl = openCodeBaseUrlForApi("openai-completions", basePath);
+	const discoveryBaseUrl = `${basePath}/v1`;
 	const references = createBundledReferenceMap<Api>(providerId);
 	// Both gateways share one operator with identical endpoint semantics, so
 	// the sibling's bundled catalog is a routing hint for ids models.dev has
@@ -3421,7 +3431,10 @@ function openCodeModelManagerOptions(
 					fetch: config?.fetch,
 				});
 				if (!discovered) return null;
-				const seeds = seedModels(providerId).map(seed => ({ ...seed, baseUrl: basePath }));
+				const seeds = seedModels(providerId).map(seed => ({
+					...seed,
+					baseUrl: openCodeBaseUrlForApi(seed.api, basePath),
+				}));
 				const seedIds = new Set(seeds.map(seed => seed.id));
 				return [...discovered.filter(model => !seedIds.has(model.id)), ...seeds];
 			},
@@ -7219,7 +7232,6 @@ function createOpenCodeApiResolution(
 	defaultResolution: { api: Api; baseUrl: string };
 	rules: ApiResolutionRule[];
 } {
-	const completionsBaseUrl = `${basePath}/v1`;
 	const baseUrlForApi = (api: Api): string => openCodeBaseUrlForApi(api, basePath);
 	// Per-id route pins live in the `api-routes` behavior rules.
 	const overrideRules: ApiResolutionRule[] = (
@@ -7229,22 +7241,22 @@ function createOpenCodeApiResolution(
 		resolved: { api, baseUrl: baseUrlForApi(api) },
 	}));
 	return {
-		defaultResolution: { api: "openai-completions", baseUrl: completionsBaseUrl },
+		defaultResolution: { api: "openai-completions", baseUrl: baseUrlForApi("openai-completions") },
 		rules: [
 			// Per-id overrides take precedence over npm-based heuristics so we can
 			// correct upstream metadata mismatches (see OPENCODE_GO_API_RESOLUTION).
 			...overrideRules,
 			{
 				matches: (_modelId, raw) => raw.provider?.npm === "@ai-sdk/openai",
-				resolved: { api: "openai-responses", baseUrl: completionsBaseUrl },
+				resolved: { api: "openai-responses", baseUrl: baseUrlForApi("openai-responses") },
 			},
 			{
 				matches: (_modelId, raw) => raw.provider?.npm === "@ai-sdk/anthropic",
-				resolved: { api: "anthropic-messages", baseUrl: basePath },
+				resolved: { api: "anthropic-messages", baseUrl: baseUrlForApi("anthropic-messages") },
 			},
 			{
 				matches: (_modelId, raw) => raw.provider?.npm === "@ai-sdk/google",
-				resolved: { api: "google-generative-ai", baseUrl: completionsBaseUrl },
+				resolved: { api: "google-generative-ai", baseUrl: baseUrlForApi("google-generative-ai") },
 			},
 		],
 	};
@@ -7253,7 +7265,6 @@ function createOpenCodeApiResolution(
 // Resolver rules for the models.dev descriptor path; the per-id pins live in
 // the `api-routes` behavior rules, which also drive the live-discovery mapper.
 const OPENCODE_ZEN_API_RESOLUTION = createOpenCodeApiResolution(OPENCODE_ZEN_BASE_PATH, "opencode-zen");
-const OPENCODE_GO_BASE_PATH = "https://opencode.ai/inference/go";
 const OPENCODE_GO_API_RESOLUTION = createOpenCodeApiResolution(OPENCODE_GO_BASE_PATH, "opencode-go");
 
 /**
@@ -7262,6 +7273,11 @@ const OPENCODE_GO_API_RESOLUTION = createOpenCodeApiResolution(OPENCODE_GO_BASE_
  */
 export function openCodeGoBaseUrlForApi(api: Api): string {
 	return openCodeBaseUrlForApi(api, OPENCODE_GO_BASE_PATH);
+}
+
+/** OpenCode Zen endpoint for one request API; see {@link openCodeGoBaseUrlForApi}. */
+export function openCodeZenBaseUrlForApi(api: Api): string {
+	return openCodeBaseUrlForApi(api, OPENCODE_ZEN_BASE_PATH);
 }
 
 const COPILOT_BASE_URL = "https://api.githubcopilot.com";
@@ -7630,26 +7646,36 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_GOOGLE_VERTEX: readonly ModelsDevProviderD
 ];
 
 const OPENCODE_MODELS_DEV_DESCRIPTORS: readonly ModelsDevProviderDescriptor[] = [
-	openAiCompletionsDescriptor("opencode", "opencode-zen", "https://opencode.ai/zen/v1", {
-		filterModel: filterActiveToolCallModels,
-		resolveApi: (modelId, raw) =>
-			resolveApiByRules(
-				modelId,
-				raw,
-				OPENCODE_ZEN_API_RESOLUTION.rules,
-				OPENCODE_ZEN_API_RESOLUTION.defaultResolution,
-			),
-	}),
-	openAiCompletionsDescriptor("opencode-go", "opencode-go", `${OPENCODE_GO_BASE_PATH}/v1`, {
-		filterModel: filterActiveToolCallModels,
-		resolveApi: (modelId, raw) =>
-			resolveApiByRules(
-				modelId,
-				raw,
-				OPENCODE_GO_API_RESOLUTION.rules,
-				OPENCODE_GO_API_RESOLUTION.defaultResolution,
-			),
-	}),
+	openAiCompletionsDescriptor(
+		"opencode",
+		"opencode-zen",
+		openCodeBaseUrlForApi("openai-completions", OPENCODE_ZEN_BASE_PATH),
+		{
+			filterModel: filterActiveToolCallModels,
+			resolveApi: (modelId, raw) =>
+				resolveApiByRules(
+					modelId,
+					raw,
+					OPENCODE_ZEN_API_RESOLUTION.rules,
+					OPENCODE_ZEN_API_RESOLUTION.defaultResolution,
+				),
+		},
+	),
+	openAiCompletionsDescriptor(
+		"opencode-go",
+		"opencode-go",
+		openCodeBaseUrlForApi("openai-completions", OPENCODE_GO_BASE_PATH),
+		{
+			filterModel: filterActiveToolCallModels,
+			resolveApi: (modelId, raw) =>
+				resolveApiByRules(
+					modelId,
+					raw,
+					OPENCODE_GO_API_RESOLUTION.rules,
+					OPENCODE_GO_API_RESOLUTION.defaultResolution,
+				),
+		},
+	),
 ];
 
 const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDescriptor[] = [
