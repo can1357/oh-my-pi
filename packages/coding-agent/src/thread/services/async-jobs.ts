@@ -34,6 +34,7 @@ import {
 	type AsyncJobManagerProtocol,
 	type AsyncJobWire,
 	fromWireReason,
+	fromWireSignal,
 	type JobFeedDelta,
 	toWireSignal,
 	type WireJobFeed,
@@ -197,6 +198,20 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 	return {
 		hasWidgets: manager => manager.widgets !== undefined,
 		atCapacity: manager => manager.atCapacity,
+		// A worker that exits gives up its place in line, and releases a slot it
+		// holds, so a dead worker never shrinks the cap for good.
+		acquireRunSlot: async (manager, signal) => {
+			const exited = new AbortController();
+			const stopWatchingExit = cleanups.track(threadId, () => exited.abort(new Error("Worker exited")));
+			let release: () => void;
+			try {
+				release = await manager.acquireRunSlot(AbortSignal.any([fromWireSignal(signal), exited.signal]));
+			} finally {
+				// Untracks the exit watch; its abort no longer reaches a granted or failed wait.
+				stopWatchingExit();
+			}
+			return cleanups.track(threadId, release);
+		},
 		onJobSettled: (manager, listener) =>
 			cleanups.track(
 				threadId,

@@ -2479,6 +2479,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const asyncJobManager = !options.parentTaskPrefix
 		? new AsyncJobManager({
 				maxRunningJobs: () => Math.min(100, cfgAsyncMaxJobs.get(settings)),
+				watchMaxRunningJobs: onChange => cfgAsyncMaxJobs.listen(settings, onChange),
 			})
 		: undefined;
 	if (asyncJobManager) {

@@ -135,8 +135,10 @@ export interface AsyncJob {
 	widgetInputs?: JobWidgetInputs;
 	/**
 	 * Job is registered but parked behind a caller-managed gate (e.g. a task
-	 * batch semaphore). Queued jobs do not count toward the running-job limit
-	 * until the caller invokes `markRunning()` from the run context.
+	 * batch semaphore). A queued job never counts toward the running-job limit
+	 * itself: its caller holds a slot from
+	 * {@link AsyncJobManagerApi.acquireRunSlot} while the job's work runs, and
+	 * calls `markRunning()` from the run context once that work starts.
 	 */
 	queued?: boolean;
 	/**
@@ -187,6 +189,12 @@ export interface AsyncJobManagerOptions {
 	onJobComplete?: AsyncJobDeliverySink;
 	/** Running-job cap; a function is re-read on every capacity check so a live setting resizes the cap. */
 	maxRunningJobs?: number | (() => number);
+	/**
+	 * Subscribes to changes of a live `maxRunningJobs`, so a raised cap starts
+	 * callers waiting in {@link AsyncJobManager.acquireRunSlot} without waiting
+	 * for a job to settle. Returns the unsubscribe, which `dispose()` runs.
+	 */
+	watchMaxRunningJobs?: (onChange: () => void) => () => void;
 	retentionMs?: number;
 	/**
 	 * Delay after a job's `async-result` delivery settles before its retained
@@ -290,7 +298,7 @@ export interface AsyncJobRunContext {
 	jobId: string;
 	signal: AbortSignal;
 	reportProgress: (text: string, details?: AsyncJobDetails) => Promise<void>;
-	/** Clear the queued flag once the job actually starts executing. */
+	/** Clear the queued flag once the job's work starts under its caller's run slot. */
 	markRunning: () => void;
 }
 
@@ -308,6 +316,13 @@ export interface AsyncJobManagerApi {
 	readonly widgets: JobWidgetRegistry | undefined;
 	/** True when the running-job count has reached the configured cap. */
 	readonly atCapacity: boolean;
+	/**
+	 * Wait for a running-job slot, in arrival order, and hold it until the
+	 * returned release runs (once; later calls do nothing). A held slot counts
+	 * as one running job against the cap. Rejects with the signal's reason
+	 * when `signal` aborts first, and when the manager is disposed.
+	 */
+	acquireRunSlot(signal: AbortSignal): Promise<() => void>;
 	/** Calls `listener` whenever a job settles; returns the unsubscribe. */
 	onJobSettled(listener: () => void): () => void;
 	/** Start tracking `run` as a job; returns its id. */
@@ -397,6 +412,13 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	/** Live widgets of this root's jobs; set by the root session when widgets are available. */
 	widgets: JobWidgetRegistry | undefined;
 	readonly #settleListeners = new Set<() => void>();
+	/** Jobs registered queued; they never count toward the cap (their callers' run slots do). */
+	readonly #parkedJobs = new WeakSet<AsyncJob>();
+	/** Slots held through {@link acquireRunSlot}; each counts as one running job. */
+	#heldRunSlots = 0;
+	/** Callers waiting in {@link acquireRunSlot}, in arrival order. */
+	readonly #runSlotWaiters: Array<{ grant: () => void; fail: (reason: unknown) => void }> = [];
+	readonly #unwatchMaxRunningJobs: (() => void) | undefined;
 
 	/**
 	 * Calls `listener` whenever a job settles (completed, failed or cancelled), so
@@ -439,6 +461,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			0,
 			Math.floor(options.consumedResultEvictionMs ?? CONSUMED_RESULT_EVICTION_MS),
 		);
+		this.#unwatchMaxRunningJobs = options.watchMaxRunningJobs?.(() => this.#grantRunSlots());
 	}
 
 	/** Effective running-job cap (at least 1), resolved at check time. */
@@ -448,29 +471,68 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		return Math.max(1, Math.floor(value ?? DEFAULT_MAX_RUNNING_JOBS));
 	}
 
+	/** Running jobs plus held run slots; queued jobs hold no execution slot of their own. */
+	#activeCount(): number {
+		let activeCount = this.#heldRunSlots;
+		for (const job of this.#jobs.values()) {
+			if (job.status === "running" && !this.#parkedJobs.has(job)) activeCount++;
+		}
+		return activeCount;
+	}
+
 	/** True when the running-job count has reached the configured cap. */
 	get atCapacity(): boolean {
 		if (this.#disposed) return true;
-		// Mirror register(): queued jobs hold no execution slot.
-		let activeCount = 0;
-		for (const job of this.#jobs.values()) {
-			if (job.status === "running" && !job.queued) activeCount++;
+		return this.#activeCount() >= this.#maxRunningJobs;
+	}
+
+	acquireRunSlot(signal: AbortSignal): Promise<() => void> {
+		if (this.#disposed) return Promise.reject(new Error("Async job manager is disposed"));
+		if (signal.aborted) return Promise.reject(signal.reason);
+		const { promise, resolve, reject } = Promise.withResolvers<() => void>();
+		const onAbort = (): void => {
+			const index = this.#runSlotWaiters.indexOf(waiter);
+			if (index >= 0) this.#runSlotWaiters.splice(index, 1);
+			reject(signal.reason);
+		};
+		const waiter = {
+			grant: () => {
+				signal.removeEventListener("abort", onAbort);
+				this.#heldRunSlots++;
+				let held = true;
+				resolve(() => {
+					if (!held) return;
+					held = false;
+					this.#heldRunSlots--;
+					this.#grantRunSlots();
+				});
+			},
+			fail: (reason: unknown) => {
+				signal.removeEventListener("abort", onAbort);
+				reject(reason);
+			},
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		this.#runSlotWaiters.push(waiter);
+		this.#grantRunSlots();
+		return promise;
+	}
+
+	/** Hand free slots to waiters in arrival order; runs whenever a slot may have freed or the cap changed. */
+	#grantRunSlots(): void {
+		while (this.#runSlotWaiters.length > 0 && !this.atCapacity) {
+			this.#runSlotWaiters.shift()?.grant();
 		}
-		return activeCount >= this.#maxRunningJobs;
 	}
 
 	register(type: AsyncJobType, label: string, run: AsyncJobRun, options?: AsyncJobRegisterOptions): string {
 		if (this.#disposed) {
 			throw new Error("Async job manager is disposed");
 		}
-		// Queued jobs hold no execution slot yet — only count jobs that are
-		// actually running so a large parked batch cannot starve registration.
-		let activeCount = 0;
-		for (const existing of this.#jobs.values()) {
-			if (existing.status === "running" && !existing.queued) activeCount++;
-		}
+		// A queued job holds no execution slot, so a large parked batch cannot
+		// starve registration; its work counts through its caller's run slot.
 		const maxRunningJobs = this.#maxRunningJobs;
-		if (activeCount >= maxRunningJobs) {
+		if (!options?.queued && this.#activeCount() >= maxRunningJobs) {
 			throw new Error(
 				`Background job limit reached (${maxRunningJobs}). Wait for running jobs to finish or cancel one.`,
 			);
@@ -497,6 +559,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			queued: options?.queued === true,
 			...(options?.foreground ? { foreground: true } : {}),
 		};
+		if (job.queued) this.#parkedJobs.add(job);
 
 		const reportProgress = async (text: string, details?: AsyncJobDetails): Promise<void> => {
 			job.progressText = text;
@@ -549,6 +612,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			}
 			if (this.#releasedForegroundJobs.has(id)) this.#discardForegroundJob(id);
 			else this.#scheduleEviction(id);
+			this.#grantRunSlots();
 			for (const listener of this.#settleListeners) {
 				try {
 					listener();
@@ -621,6 +685,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		if (job.status !== "running") return false;
 		job.status = "cancelled";
 		job.abortController.abort();
+		this.#grantRunSlots();
 		return true;
 	}
 
@@ -786,6 +851,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			job.status = "cancelled";
 			job.abortController.abort(reason);
 		}
+		this.#grantRunSlots();
 	}
 
 	/**
@@ -948,6 +1014,9 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 
 	async dispose(options?: { timeoutMs?: number }): Promise<boolean> {
 		this.#disposed = true;
+		this.#unwatchMaxRunningJobs?.();
+		const disposedError = new Error("Async job manager is disposed");
+		for (const waiter of this.#runSlotWaiters.splice(0)) waiter.fail(disposedError);
 		this.#clearEvictionTimers();
 		this.#cancelJobs(undefined, ASYNC_JOB_MANAGER_SHUTDOWN_REASON);
 		const timeoutMs = Math.max(options?.timeoutMs ?? 3_000, 0);

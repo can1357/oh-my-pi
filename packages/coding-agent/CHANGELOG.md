@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- `async.maxJobs` now limits how many background `task` subagents run at once: spawns past the cap stay queued and start in order as running ones finish or the cap is raised, where before every spawn of a batch ran at once whatever the cap
 - `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
 - Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset
 - The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm

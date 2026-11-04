@@ -253,12 +253,12 @@ describe("task per-item blocking split", () => {
 			makeResult(options.id ?? "?", options.agent.name),
 		);
 
-		// A running non-queued filler job exhausts maxRunningJobs, so the
-		// worker spawn's registration throws while the scout still runs inline.
-		const filler = Promise.withResolvers<string>();
-		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: () => {} });
+		// A disposed manager refuses registration, so the worker spawn fails to
+		// schedule while the scout still runs inline. (A full `async.maxJobs`
+		// cap no longer refuses it: a spawn past the cap waits queued.)
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		managers.push(manager);
-		manager.register("bash", "filler", () => filler.promise, { id: "filler" });
+		await manager.dispose();
 
 		const tool = await TaskTool.create(createSession({ manager }));
 		const result = await tool.execute("tc-mixed-schedfail", {
@@ -268,7 +268,6 @@ describe("task per-item blocking split", () => {
 				{ name: "WorkerThree", agent: "task", task: "Build." },
 			],
 		} as TaskParams);
-		filler.resolve("done");
 
 		const text = firstText(result);
 		expect(text).toContain('id="ScoutThree"');

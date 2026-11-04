@@ -201,6 +201,44 @@ describe("runtime thread services: async jobs", () => {
 		manager.publishCompleted("task", "after exit", { text: "late" }, { ownerId: "Worker" });
 		expect(await manager.drainDeliveries({ timeoutMs: 1_000 })).toBe(true);
 	});
+
+	it("counts a worker's run slot against main's cap and frees it on release or worker exit", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 1 });
+		managers.push(manager);
+		const probe = await startWorker();
+		const releaseMain = await manager.acquireRunSlot(new AbortController().signal);
+		let granted = false;
+		const acquired = probe("acquireSlot", manager).then(() => {
+			granted = true;
+		});
+		await probe("noop");
+		expect(granted).toBe(false);
+
+		releaseMain();
+		await acquired;
+		expect(manager.atCapacity).toBe(true);
+		await probe("releaseSlot");
+		expect(manager.atCapacity).toBe(false);
+
+		await probe("acquireSlot", manager);
+		expect(manager.atCapacity).toBe(true);
+		const entry = started[0];
+		if (!entry) throw new Error("no worker");
+		for (const service of SERVICES) service.onWorkerExit?.(entry.peer, "crash");
+		expect(manager.atCapacity).toBe(false);
+
+		// A worker that exits while it waits gives up its place: the slot it was
+		// waiting for goes free instead of to the dead worker.
+		const releaseAgain = await manager.acquireRunSlot(new AbortController().signal);
+		const waiter = await startWorker();
+		void waiter("acquireSlot", manager).catch(() => {});
+		await waiter("noop");
+		const waiting = started[1];
+		if (!waiting) throw new Error("no second worker");
+		for (const service of SERVICES) service.onWorkerExit?.(waiting.peer, "crash");
+		releaseAgain();
+		expect(manager.atCapacity).toBe(false);
+	});
 });
 
 describe("runtime thread services: cost gate, event bus, artifacts, storage", () => {

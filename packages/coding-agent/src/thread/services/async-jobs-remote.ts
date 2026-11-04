@@ -42,6 +42,7 @@ import {
 	type JobFeedDelta,
 	type JobFeedSource,
 	toWireReason,
+	toWireSignal,
 	type WireJobFeed,
 	type WireJobRun,
 	type WireRegisterOptions,
@@ -228,6 +229,10 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 
 	get atCapacity(): boolean {
 		return this.#remote.callSync("atCapacity");
+	}
+
+	async acquireRunSlot(signal: AbortSignal): Promise<() => void> {
+		return localUnsubscribe(await this.#remote.call("acquireRunSlot", toWireSignal(signal)));
 	}
 
 	onJobSettled(listener: () => void): () => void {

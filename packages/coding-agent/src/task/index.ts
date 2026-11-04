@@ -1002,7 +1002,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return manager;
 	}
 
-	/** Start one spawn's subagent run behind the session semaphore. */
+	/** Start one spawn's subagent run behind the session semaphore (and, detached, a running-job slot). */
 	#launch(spawn: {
 		toolCallId: string;
 		params: SpawnParams;
@@ -1010,8 +1010,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		agentId?: string;
 		detached: boolean;
 	}): SpawnRun {
+		const jobs = spawn.detached ? this.session.asyncJobManager : undefined;
 		return new SpawnRun(
-			this.#permit,
+			jobs ? this.#jobPermit(jobs) : this.#permit,
 			run =>
 				this.#runSpawn(
 					spawn.toolCallId,
@@ -1027,6 +1028,33 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				),
 			{ agentId: spawn.agentId, detached: spawn.detached },
 		);
+	}
+
+	/**
+	 * Permit of a run that becomes a background job: a session semaphore
+	 * permit, then a running-job slot from the session's job manager, so
+	 * `async.maxJobs` bounds the subagents that run, not only the jobs
+	 * registered. The semaphore comes first so a spawn parked behind
+	 * `task.maxConcurrency` holds no running-job slot.
+	 */
+	#jobPermit(jobs: AsyncJobManagerApi): SpawnPermit {
+		let releaseRunSlot: (() => void) | undefined;
+		return {
+			acquire: async signal => {
+				await this.#permit.acquire(signal);
+				try {
+					releaseRunSlot = await jobs.acquireRunSlot(signal);
+				} catch (error) {
+					this.#permit.release();
+					throw error;
+				}
+			},
+			release: () => {
+				releaseRunSlot?.();
+				releaseRunSlot = undefined;
+				this.#permit.release();
+			},
+		};
 	}
 
 	/**

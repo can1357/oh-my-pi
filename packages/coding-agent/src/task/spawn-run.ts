@@ -20,7 +20,11 @@ export interface SpawnLaunchTiming {
 	acquiredAt: number;
 }
 
-/** Permit source bounding concurrent subagents; the task tool's session semaphore. */
+/**
+ * Permit source bounding concurrent subagents: the task tool's session
+ * semaphore, plus a running-job slot (`async.maxJobs`) for a run that becomes
+ * a background job.
+ */
 export interface SpawnPermit {
 	acquire(signal: AbortSignal): Promise<void>;
 	release(): void;

@@ -118,6 +118,8 @@ export type WireDeliverySink = (jobId: string, text: string, job?: AsyncJobWire)
 export type AsyncJobManagerProtocol = {
 	hasWidgets: RpcMethod<[], boolean>;
 	atCapacity: RpcMethod<[], boolean>;
+	/** Resolves once main holds a running-job slot for the worker; the result releases it. */
+	acquireRunSlot: RpcMethod<[signal: AbortSignal], WireUnsubscribe>;
 	onJobSettled: RpcMethod<[listener: WireCallback<[]>], WireUnsubscribe>;
 	register: RpcMethod<
 		[type: AsyncJobType, label: string, run: WireJobRun, options: WireRegisterOptions | undefined],
