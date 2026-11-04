@@ -30,6 +30,7 @@ import { agentsThreadService } from "../../src/thread/services/agents";
 import { authService } from "../../src/thread/services/auth";
 import { identityThreadService } from "../../src/thread/services/identity";
 import { getApprovalGrants } from "../../src/tools/approval-cache";
+import type { BlockedKind } from "../../src/utils/run-status";
 
 /** What the worker-side session reports about itself. */
 export interface FocusSessionReport {
@@ -56,6 +57,10 @@ export interface FocusProbe {
 	recordSessionGrant(id: string, key: string): Promise<void>;
 	/** Drop every queued follow-up for good, as queue editing does. */
 	dropFollowUps(id: string): Promise<void>;
+	/** Open a dialog on the session that waits for a person until {@link answerDialog}; its wait is published on return. */
+	openDialog(id: string, prompt: string, kind: BlockedKind): Promise<void>;
+	/** Answer the dialog {@link openDialog} opened; resolves once the session closed its wait. */
+	answerDialog(id: string): Promise<void>;
 }
 
 /** Test-only boot globals of the probe service. */
@@ -68,6 +73,8 @@ if (!port) throw new Error("fixture must run in a worker");
 
 const sessions = new Map<string, AgentSession>();
 let gate = Promise.withResolvers<void>();
+/** Open dialogs by session id: the answer, and the session's wait around it. */
+const dialogs = new Map<string, { answer: () => void; settled: Promise<void> }>();
 
 function zeroUsage(): AssistantMessage["usage"] {
 	return {
@@ -191,6 +198,18 @@ const probe: FocusProbe = {
 			"read",
 			"session",
 		);
+	},
+	openDialog: async (id, prompt, kind) => {
+		const answer = Promise.withResolvers<void>();
+		const settled = local(id).waitForUser(() => answer.promise, prompt, { kind });
+		dialogs.set(id, { answer: () => answer.resolve(), settled });
+	},
+	answerDialog: async id => {
+		const dialog = dialogs.get(id);
+		if (!dialog) throw new Error(`no open dialog on ${id}`);
+		dialogs.delete(id);
+		dialog.answer();
+		await dialog.settled;
 	},
 };
 

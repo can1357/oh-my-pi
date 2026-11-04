@@ -148,6 +148,7 @@ function focusHarness(): FocusHarness {
 		subscribe: () => () => {},
 		settleInFlightMessagePersistence: async () => {},
 		activeToolExecutionUpdates: () => [],
+		activeUserWait: () => undefined,
 	};
 	const focus: { controller?: SessionFocusController } = {};
 	const ctx = {
@@ -503,5 +504,98 @@ describe("run status of a focused worker-homed session", () => {
 		await probe.recordSessionGrant("W1", grant);
 		await probe.prompt("W1", "once more");
 		await waitFor(() => remote.getApprovalGrants().present([grant]).has(grant));
+	});
+
+	/**
+	 * The real focus and event controllers over a main session that owes nothing, with every run
+	 * status they report (what the terminal title and the OSC 7501 record show) kept in order.
+	 */
+	function statusView(): { focus: SessionFocusController; statuses: runStatus.RunStatus[] } {
+		const statuses: runStatus.RunStatus[] = [];
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(status => {
+			statuses.push(status);
+		});
+		cleanups.push(() => report.mockRestore());
+		const ctx = createInteractiveModeContext({
+			session: {
+				activeUserWait: () => undefined,
+				toolCallRun: () => undefined,
+				activeToolExecutionUpdates: () => [],
+				settleInFlightMessagePersistence: async () => {},
+			},
+		});
+		ctx.eventController = new EventController(ctx);
+		const focus = new SessionFocusController(ctx, AgentRegistry.global(), () => AgentLifecycleManager.global());
+		Object.defineProperty(ctx, "viewSession", { get: () => focus.target ?? ctx.session, configurable: true });
+		cleanups.push(() => focus.dispose());
+		return { focus, statuses };
+	}
+
+	const approval = "Allow tool: bash — make";
+	const blocked: runStatus.RunStatus = { state: "blocked", kind: "permission", msg: approval };
+
+	it("keeps reporting the worker session's open dialog after focus leaves and returns", async () => {
+		const probe = await startWorker();
+		await probe.open("W1", await mainRegistry(), {});
+		const { focus, statuses } = statusView();
+		await focus.focusAgent("W1");
+		await probe.openDialog("W1", approval, "permission");
+		await waitFor(() => Bun.deepEquals(statuses.at(-1), blocked));
+
+		// Main owes nothing: the worker's dialog does not follow the view there.
+		await focus.unfocus();
+		expect(statuses.at(-1)).toEqual({ state: "idle" });
+
+		await focus.focusAgent("W1");
+		expect(statuses.at(-1)).toEqual(blocked);
+
+		// The replayed wait still closes when the person answers on the worker.
+		await probe.answerDialog("W1");
+		await waitFor(() => statuses.at(-1)?.state === "idle");
+	});
+
+	it("reports a dialog the worker session opened before the view first attached to it", async () => {
+		const probe = await startWorker();
+		await probe.open("W1", await mainRegistry(), {});
+		const { focus, statuses } = statusView();
+		// Nothing watches the mirror yet, so the worker forwards no event of this dialog.
+		await probe.openDialog("W1", approval, "permission");
+
+		await focus.focusAgent("W1");
+		expect(statuses.at(-1)).toEqual(blocked);
+		await probe.answerDialog("W1");
+	});
+
+	it("does not report a worker dialog answered while the view was elsewhere", async () => {
+		const probe = await startWorker();
+		await probe.open("W1", await mainRegistry(), {});
+		const { focus, statuses } = statusView();
+		await focus.focusAgent("W1");
+		await probe.openDialog("W1", approval, "permission");
+		await waitFor(() => Bun.deepEquals(statuses.at(-1), blocked));
+		await focus.unfocus();
+		// Answered while unwatched: the mirror saw the dialog open but not its end.
+		await probe.answerDialog("W1");
+
+		await focus.focusAgent("W1");
+		expect(statuses.at(-1)).toEqual({ state: "idle" });
+	});
+
+	it("follows a worker dialog's open and answer while another listener keeps its mirror watched", async () => {
+		const probe = await startWorker();
+		await probe.open("W1", await mainRegistry(), {});
+		// The watch, and with it the only snapshot, starts before the dialog: from here on the
+		// forwarded wait events alone say whether a dialog is open.
+		cleanups.push(mirrorOf("W1").subscribe(() => {}));
+		const { focus, statuses } = statusView();
+		await probe.openDialog("W1", approval, "permission");
+
+		await focus.focusAgent("W1");
+		expect(statuses.at(-1)).toEqual(blocked);
+
+		await focus.unfocus();
+		await probe.answerDialog("W1");
+		await focus.focusAgent("W1");
+		expect(statuses.at(-1)).toEqual({ state: "idle" });
 	});
 });

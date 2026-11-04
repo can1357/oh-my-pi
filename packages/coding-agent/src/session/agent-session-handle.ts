@@ -229,6 +229,9 @@ export interface AgentViewState {
 /** Live `tool_execution_update` event replayed when the TUI attaches mid-tool. */
 export type ToolExecutionUpdateEvent = Extract<AgentSessionEvent, { type: "tool_execution_update" }>;
 
+/** Open-dialog frame replayed when the TUI attaches while a person still owes the session an answer. */
+export type UserWaitStartEvent = Extract<AgentSessionEvent, { type: "user_wait_start" }>;
+
 /**
  * Whether `session` is homed on this thread. Thread bridges decode a handle
  * homed here to the local {@link AgentSession} object itself, so code running on
@@ -296,6 +299,12 @@ export interface AgentViewSession extends AgentSessionHandle {
 	readonly hasInterruptibleInput: boolean;
 	/** Tool execution updates of tools still running, for mid-tool attach. */
 	activeToolExecutionUpdates(): readonly ToolExecutionUpdateEvent[];
+	/**
+	 * The `user_wait_start` frame of a dialog still waiting on a person, or undefined when none is
+	 * open. The frame is published once, when the dialog opens, so an attach replays this to report
+	 * the session blocked rather than working or idle.
+	 */
+	activeUserWait(): UserWaitStartEvent | undefined;
 	/** Await persistence of messages already emitted. */
 	settleInFlightMessagePersistence(): Promise<void>;
 	/** Session context for transcript rendering. */

@@ -179,9 +179,10 @@ export class SessionFocusController {
 	 * Retarget core, both directions: swap subscription, transcript, and status line onto `target`.
 	 * `leaving` is the session being replaced, whose record of calls still owed an answer is kept
 	 * for its own return rather than dropped — a host that drives its own approval UI raises no
-	 * dialog to replay on the way back. Only a session homed on this thread keeps that record and
-	 * replays an open dialog wait: a session homed on a worker exposes neither the run of a call
-	 * nor its open wait here, so it is attached as before.
+	 * dialog to replay on the way back. Only a session homed on this thread keeps that record: a
+	 * session homed on a worker exposes no run of a call here, and every approval its own runner
+	 * raises is a dialog it publishes, which the replay below restores. An open dialog is replayed
+	 * for either kind: a worker's mirror carries it from the watch snapshot and the wait events.
 	 */
 	async #attach(target: AgentViewSession, leaving?: AgentViewSession): Promise<void> {
 		const generation = ++this.#attachGeneration;
@@ -255,7 +256,7 @@ export class SessionFocusController {
 			// `user_wait_start` was published when the dialog opened, which may be
 			// before this attach subscribed: replay it so a session still owing a
 			// person an answer reports blocked rather than working or idle.
-			const openWait = targetLocal?.activeUserWait();
+			const openWait = target.activeUserWait();
 			if (openWait) {
 				await this.ctx.eventController.handleEvent(openWait);
 				if (generation !== this.#attachGeneration) return;
