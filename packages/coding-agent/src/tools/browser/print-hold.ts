@@ -128,16 +128,28 @@ function holdPrintInPage(
 		true,
 	]);
 	// A proxy keeps the native function's name and length, and its source still reads `[native code]`. A held call
-	// fires the print events on the window it printed. Once this document is gone to another origin its deadline is
-	// out of reach, and a window it opened prints on.
-	const holdPrintOf = (view: object, print: Function): Function =>
-		new Proxy(print, {
+	// fires the print events on the window it printed. A window this document opened keeps the last deadline and the
+	// clock it saw here: once this document has gone to another origin, which puts its state out of reach, the window
+	// still holds until that deadline, which no later call can extend.
+	const holdPrintOf = (view: object, print: Function): Function => {
+		let seenUntil: unknown = Reflect.get(globalThis, deadline);
+		const seenClock: unknown = Reflect.get(globalThis, clockKey);
+		const PrintEvent = Event;
+		const dispatchEvent = EventTarget.prototype.dispatchEvent;
+		return new Proxy(print, {
 			apply(target, thisArg, args) {
 				let held = false;
 				try {
-					const heldUntil: unknown = Reflect.get(globalThis, deadline);
-					held = typeof heldUntil === "number" && now() < heldUntil;
-				} catch {}
+					seenUntil = Reflect.get(globalThis, deadline);
+					held = typeof seenUntil === "number" && now() < seenUntil;
+				} catch {
+					// A window with omp's own hold for this attachment already went by its current deadline.
+					try {
+						const ownHold = Reflect.get(view, wrapped) === true;
+						const time = typeof seenClock === "function" ? Number(Reflect.apply(seenClock, undefined, [])) : NaN;
+						held = !ownHold && typeof seenUntil === "number" && time < seenUntil;
+					} catch {}
+				}
 				if (!held) return Reflect.apply(target, thisArg, args);
 				// The report says where the print came from: the tab's top document, a frame in it, or a window the tab
 				// opened; `tab.pdf()` prints only the first.
@@ -155,10 +167,11 @@ function holdPrintInPage(
 					const where = !inTab ? "window" : Reflect.get(globalThis, "top") === globalThis ? "tab" : "frame";
 					if (typeof report === "function") Reflect.apply(report, undefined, [where]);
 				} catch {}
-				Reflect.apply(EventTarget.prototype.dispatchEvent, view, [new Event("beforeprint")]);
-				Reflect.apply(EventTarget.prototype.dispatchEvent, view, [new Event("afterprint")]);
+				Reflect.apply(dispatchEvent, view, [new PrintEvent("beforeprint")]);
+				Reflect.apply(dispatchEvent, view, [new PrintEvent("afterprint")]);
 			},
 		});
+	};
 	Reflect.set(globalThis, "print", holdPrintOf(globalThis, print));
 	// A page that prints through a window it opens (`open("")`, write, `print()`) calls that window's `print()` as soon
 	// as `open()` returns. omp's own hold may not be in the window yet: one sharing this renderer runs on once any
@@ -280,6 +293,7 @@ export class PrintHold {
 	static async install(page: Page, scope: PrintHoldScope): Promise<PrintHold> {
 		const session = await page.createCDPSession();
 		const printHold = new PrintHold(page, session, scope);
+		let bootstrap: Promise<string> | undefined;
 		try {
 			// The loaded document is armed with the first command, ahead of the setup round trips below, during which
 			// its own timers keep running; its frames and the current deadline follow once the setup is in.
@@ -288,25 +302,30 @@ export class PrintHold {
 					expression: printHold.#source(scope === "tab" ? null : SETUP_HOLD_MS, null),
 				})
 				.catch(() => undefined);
-			await session.send("Page.enable");
-			await session.send("Runtime.enable");
-			await session.send("Runtime.addBinding", { name: printHold.#binding });
 			// Chrome runs the scripts of the page's own session before any other session's, each session's in the order
 			// they were added: one added there first wraps `print()` before the tab's init scripts can keep the native
 			// one. It never changes, so it stays first; it holds a new document until the task running the start scripts
 			// ends, then briefly, unless this session's script, which carries the current deadline and runs before the
-			// page's own scripts, sets it first.
+			// page's own scripts, sets it first. It goes in alongside the setup, for a page that navigates meanwhile.
 			const bootstrapHoldMs = scope === "tab" ? null : USER_DRIVEN_RELEASE_MS;
-			const { identifier } = await page.mainFrame().client.send("Page.addScriptToEvaluateOnNewDocument", {
-				source: printHold.#source(bootstrapHoldMs, null, true),
-			});
-			printHold.#bootstrapId = identifier;
+			bootstrap = page
+				.mainFrame()
+				.client.send("Page.addScriptToEvaluateOnNewDocument", {
+					source: printHold.#source(bootstrapHoldMs, null, true),
+				})
+				.then(result => result.identifier);
+			bootstrap.catch(() => undefined);
+			await session.send("Page.enable");
+			await session.send("Runtime.enable");
+			await session.send("Runtime.addBinding", { name: printHold.#binding });
+			printHold.#bootstrapId = await bootstrap;
 			// The loaded document is armed at once; attaching windows takes round trips it must not wait on.
 			await Promise.all([
 				printHold.#apply(scope === "tab" ? null : Date.now() + SETUP_HOLD_MS),
 				printHold.#attachWindows(),
 			]);
 		} catch (error) {
+			printHold.#bootstrapId ??= await bootstrap?.catch(() => undefined);
 			await printHold.dispose().catch(() => undefined);
 			throw error;
 		}

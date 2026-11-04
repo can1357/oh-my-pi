@@ -1059,7 +1059,7 @@ return await tab.evaluate(() => {
 		});
 	}, 30_000);
 
-	test("arms the loaded page before the hold's own setup round trips", async () => {
+	test("arms the loaded page, and the next one it loads, before the hold's own setup round trips", async () => {
 		await withUserBrowser(async cdpUrl => {
 			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
 			try {
@@ -1097,6 +1097,12 @@ return await tab.evaluate(() => {
 						'log.length = 0, document.querySelector("#print").click(), log.includes("afterprint")',
 						{ timeout: 10_000, polling: 50 },
 					);
+				// A page that navigates meanwhile starts its next document held too, and prints as it loads.
+				await page.goto(`${baseUrl}/print-on-load`);
+				expect(await page.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
+					"afterprint",
+					"load print returned",
+				]);
 				setup.resolve();
 				await (await installing).dispose();
 			} finally {
@@ -1452,6 +1458,42 @@ return await tab.evaluate(() => {
 						"nested print returned",
 					]);
 					expect(hold.takeNotice()).toContain("A window the page opened called window.print()");
+				} finally {
+					await hold.dispose();
+				}
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
+
+	test("keeps holding print() in a window the page opened after the page leaves for another origin, in the relay", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				const hold = await PrintHold.install(withoutBrowserTarget(page), "calls");
+				try {
+					await hold.beginCall(30_000);
+					const popupTarget = user.waitForTarget(target => target.opener() === page.target());
+					await page.mainFrame().mainRealm().evaluate('open("")');
+					const popup = await (await popupTarget).page();
+					if (!popup) throw new Error("Expected the receipt popup");
+					try {
+						// The page that opened the window leaves for another origin while the call still runs.
+						await page.goto(baseUrl.replace("127.0.0.1", "localhost"));
+						expect(
+							await popup
+								.mainFrame()
+								.mainRealm()
+								.evaluate(
+									'globalThis.log = []; addEventListener("afterprint", () => log.push("afterprint")); print(); log.push("print returned"); log',
+								),
+						).toEqual(["afterprint", "print returned"]);
+					} finally {
+						await popup.close();
+					}
 				} finally {
 					await hold.dispose();
 				}
