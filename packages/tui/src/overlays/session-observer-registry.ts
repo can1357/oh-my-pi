@@ -37,6 +37,11 @@ export interface SubagentLifecyclePayload {
 	 * unset — surfaces like the subagent HUD only list detached spawns.
 	 */
 	detached?: boolean;
+	/**
+	 * Live session instance key (`AgentSession.instanceKey`) for the child this
+	 * frame describes. Native lifecycle frames carry it to reject stale events.
+	 */
+	sessionInstanceKey?: string;
 }
 
 /** Minimal event subscription surface supplied by the host. */

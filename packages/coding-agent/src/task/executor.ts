@@ -2839,6 +2839,7 @@ interface FinalizeRunArgs {
 	followUpTurn?: boolean;
 	publishMessageResult?: boolean;
 	sessionFile?: string;
+	sessionInstanceKey?: string;
 	startTime: number;
 }
 
@@ -3017,6 +3018,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		agentSource: agent.source,
 		description: progress.description,
 		status: progress.status as "completed" | "failed" | "aborted",
+		...(args.sessionInstanceKey ? { sessionInstanceKey: args.sessionInstanceKey } : {}),
 		sessionFile: args.sessionFile,
 		index,
 	};
@@ -3387,6 +3389,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			description: options.description,
 			status: "started",
 			sessionFile,
+			sessionInstanceKey: session.instanceKey,
 			index,
 		} as const;
 		emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
@@ -3468,6 +3471,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					},
 					index,
 					id,
+					sessionInstanceKey: session.instanceKey,
 					agent,
 					task: ircTask,
 					modelOverride: options.modelOverride,
@@ -3897,6 +3901,7 @@ async function driveFollowUpTurn(
 		description: options.description,
 		status: "started",
 		sessionFile,
+		sessionInstanceKey: session.instanceKey,
 		index,
 	} as const;
 	emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
@@ -3958,6 +3963,7 @@ async function driveFollowUpTurn(
 			done: { ...outcome, abortReason: outcome.abortReasonText, durationMs: Date.now() - startTime },
 			index,
 			id,
+			sessionInstanceKey: session.instanceKey,
 			agent,
 			task: message,
 			modelRole: options.modelRole,
@@ -4587,9 +4593,11 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		error?: string;
 		aborted?: boolean;
 		abortReason?: string;
+		sessionInstanceKey?: string;
 		durationMs: number;
 	}> => {
 		const sessionAbortController = new AbortController();
+		let sessionInstanceKey: string | undefined;
 		const abortSignal = monitor.abortSignal;
 		let exitCode = 0;
 		let error: string | undefined;
@@ -5000,6 +5008,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					}),
 				);
 				({ session } = await awaitAbortable(sessionPromise));
+				sessionInstanceKey = session.instanceKey;
 				if (preparedSession) untrackedSession = session;
 				// Stash the sibling family candidate once the child session exists,
 				// independent of its initial model, so a later model change (retry
@@ -5096,6 +5105,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				description: options.description,
 				status: "started" as const,
 				sessionFile: subtaskSessionFile,
+				sessionInstanceKey: session.instanceKey,
 				index,
 			};
 			emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
@@ -5438,6 +5448,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			aborted,
 			abortReason: aborted ? abortReasonText : undefined,
 			durationMs: Date.now() - startTime,
+			sessionInstanceKey,
 		};
 	};
 
@@ -5450,6 +5461,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			done,
 			index,
 			id,
+			...(done.sessionInstanceKey ? { sessionInstanceKey: done.sessionInstanceKey } : {}),
 			agent,
 			task,
 			assignment,

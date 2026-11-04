@@ -67,6 +67,10 @@ export const frameDefs = {
 		"parentToolCallId?": "string",
 		index: "number.integer",
 		"detached?": doc("boolean", "The subagent runs as a detached background job."),
+		"sessionInstanceKey?": doc(
+			"string",
+			"Live session instance key of the child session described by this lifecycle event.",
+		),
 	},
 	SubagentProgressPayload: {
 		index: "number.integer",

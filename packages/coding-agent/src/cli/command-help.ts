@@ -4,6 +4,10 @@ export const acpHelp = {
 	description: "Run omp as an ACP (Agent Client Protocol) server over stdio",
 } satisfies CommandMetadata;
 
+export const agentHelp = {
+	description: "Attach to a live native task subagent from another terminal",
+} satisfies CommandMetadata;
+
 export const agentsHelp = { description: "Manage bundled task agents" } satisfies CommandMetadata;
 
 export const anonymizeHelp = {
