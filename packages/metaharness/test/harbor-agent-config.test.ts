@@ -900,13 +900,16 @@ describe("manager", () => {
 		CASE_TIMEOUT_MS,
 	);
 	it(
-		"refuses a launch while its own environment holds another token it knows",
+		"refuses a launch while its own environment holds another token it knows, after its job name was reused",
 		async () => {
 			const { root } = await scratch("manager-token-inherited-");
 			const manager = new ManagerServer(root);
 			const server = manager.start(0);
 			try {
 				await launchThroughManager(root, server.port ?? 0, { gatewayToken: token });
+				// Launching the same job name with another token stops its resume using the first,
+				// but the first is still a live bearer the manager was given.
+				await launchThroughManager(root, server.port ?? 0, { gatewayToken: "review-second-bearer" });
 				// The runner forwards host PI_* variables to omp and hands the rest of its environment
 				// to Harbor, which expands ${NAME} from it; it knows only its own token, so a host
 				// variable holding another token the manager knows is refused here, with no --env.
@@ -933,6 +936,53 @@ describe("manager", () => {
 				}
 				expect(await Bun.file(path.join(root, "token-inherited", "manager.json")).exists()).toBe(false);
 			} finally {
+				await manager.stop();
+			}
+		},
+		CASE_TIMEOUT_MS,
+	);
+	it(
+		"gives edit and snapcompact runs no gateway token, and refuses one for them",
+		async () => {
+			const { root } = await scratch("manager-token-edit-");
+			const manager = new ManagerServer(root);
+			const server = manager.start(0);
+			// These adapters run omp in their own process, so a token in their environment would
+			// reach every tool call. Capture the environment each would start with; run `true`.
+			const realSpawn = Bun.spawn;
+			const spawned: Array<Record<string, string | undefined>> = [];
+			const spawn = spyOn(Bun, "spawn").mockImplementation(((
+				_cmd: string[],
+				options: { env?: Record<string, string | undefined> },
+			) => {
+				spawned.push(options.env ?? {});
+				return realSpawn(["true"], options as Parameters<typeof realSpawn>[1]);
+			}) as unknown as typeof Bun.spawn);
+			process.env.METAHARNESS_GATEWAY_TOKEN = "review-host-bearer";
+			try {
+				for (const benchmark of ["edit", "snapcompact"]) {
+					const refused = await refusal(server.port ?? 0, "/api/runs", {
+						benchmark,
+						model: "openrouter/test-model",
+						jobName: `${benchmark}-with-token`,
+						gatewayToken: "review-edit-bearer",
+					});
+					expect(refused).toContain("gatewayToken applies only to harbor runs");
+					const accepted = await fetch(`http://127.0.0.1:${server.port}/api/runs`, {
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify({ benchmark, model: "openrouter/test-model", jobName: `${benchmark}-plain` }),
+					});
+					expect(accepted.status).toBe(201);
+				}
+				expect(spawned).toHaveLength(2);
+				for (const env of spawned) {
+					expect(env.METAHARNESS_GATEWAY_TOKEN).toBeUndefined();
+					expect(Object.values(env)).not.toContain("review-host-bearer");
+				}
+			} finally {
+				delete process.env.METAHARNESS_GATEWAY_TOKEN;
+				spawn.mockRestore();
 				await manager.stop();
 			}
 		},

@@ -28,6 +28,7 @@ import { BENCHMARK_DEFINITIONS } from "./benchmarks";
 import { buildExperiments, experimentDetail, experimentOf } from "./experiments";
 import {
 	GATEWAY_TOKEN_INPUT_ENV,
+	isGatewayTokenVar,
 	NO_AUTH_TOKEN,
 	refuseGatewayTokenIn,
 	refuseGatewayTokenInEnv,
@@ -195,8 +196,14 @@ export function resolveArmLaunch(store: RunStore, experimentId: string, req: Add
 export class ManagerServer {
 	#store: RunStore;
 	#children = new Map<string, ManagedChild>();
-	/** Gateway tokens of runs this manager launched, for their resume; never written anywhere. */
-	#gatewayTokens = new Map<string, string>();
+	/** The gateway token each run's next resume uses; never written anywhere. */
+	#resumeTokens = new Map<string, string>();
+	/**
+	 * Every gateway token this manager has been given, by any launch or resume, for its
+	 * whole lifetime; never written anywhere. A token a reused job name stops using is
+	 * still a live bearer, so it stays here even when `#resumeTokens` drops it.
+	 */
+	#learnedGatewayTokens = new Set<string>();
 	#sse = new Set<SseClient>();
 	#lastSnapshot = "";
 	#syncTimer: Timer | undefined;
@@ -405,12 +412,17 @@ export class ManagerServer {
 		// arguments reach omp as text, so no field may repeat this launch's token or any
 		// other token the manager knows.
 		this.#refuseKnownGatewayTokens(request, "the launch request", token);
-		const childEnv = this.#runnerEnv(gatewayToken);
 		if (!request.model) throw new Error("model is required");
 		const benchmark = request.benchmark ?? "harbor";
 		if (benchmark !== "harbor" && benchmark !== "edit" && benchmark !== "snapcompact") {
 			throw new Error(`unsupported benchmark: ${benchmark}`);
 		}
+		if (benchmark !== "harbor" && gatewayToken !== undefined) {
+			// The edit and snapcompact adapters run omp in their own process, with no private
+			// token file: a token in their environment reaches every tool call omp makes.
+			throw new Error(`gatewayToken applies only to harbor runs (this launch is ${benchmark})`);
+		}
+		const childEnv = this.#runnerEnv(benchmark, gatewayToken);
 		const dataset =
 			request.dataset ??
 			(benchmark === "harbor" ? "terminal-bench@2.0" : benchmark === "edit" ? "typescript-edit" : "squad-dev");
@@ -467,9 +479,10 @@ export class ManagerServer {
 		// Every check has passed: only now does the run get a directory.
 		fs.mkdirSync(jobDir, { recursive: true });
 		const pid = this.#spawnRunner(argv, cwd, record, childEnv);
+		if (gatewayToken !== undefined) this.#learnedGatewayTokens.add(gatewayToken);
 		// A reused job name must not resume with an earlier launch's token.
-		if (gatewayToken === undefined) this.#gatewayTokens.delete(jobName);
-		else this.#gatewayTokens.set(jobName, gatewayToken);
+		if (gatewayToken === undefined) this.#resumeTokens.delete(jobName);
+		else this.#resumeTokens.set(jobName, gatewayToken);
 		if (request.goal) this.#store.setExperimentGoal(experimentOf(jobName), request.goal);
 		return { jobName, pid };
 	}
@@ -507,7 +520,7 @@ export class ManagerServer {
 			throw new Error(`${jobName} has no harbor config.json to resume from`);
 		}
 		const filterErrorTypes = opts.filterErrorTypes ?? erroredExceptionTypes(jobDir);
-		const gatewayToken = opts.gatewayToken ?? this.#gatewayTokens.get(jobName);
+		const gatewayToken = opts.gatewayToken ?? this.#resumeTokens.get(jobName);
 		const argv = ["bun", "src/runner.ts", "--resume", jobName, "--jobs-dir", this.jobsDir];
 		for (const t of filterErrorTypes) argv.push("--filter-error-type", t);
 		let prewalk: LaunchRequest["prewalk"];
@@ -540,21 +553,31 @@ export class ManagerServer {
 			"the resume",
 			gatewayToken,
 		);
-		const pid = this.#spawnRunner(argv, PKG_DIR, record, this.#runnerEnv(gatewayToken));
-		if (gatewayToken !== undefined) this.#gatewayTokens.set(jobName, gatewayToken);
+		const pid = this.#spawnRunner(argv, PKG_DIR, record, this.#runnerEnv("harbor", gatewayToken));
+		if (gatewayToken !== undefined) {
+			this.#learnedGatewayTokens.add(gatewayToken);
+			this.#resumeTokens.set(jobName, gatewayToken);
+		}
 		return { jobName, pid };
 	}
 
 	/**
-	 * The environment a runner child starts with: the manager's own, with `gatewayToken`
-	 * as `METAHARNESS_GATEWAY_TOKEN` when the request chose one. The runner forwards host
-	 * `PI_*` variables to omp and hands the rest to Harbor, which expands `${NAME}` from it
-	 * into the guest, and it can check them only against its own token. So any variable
-	 * but that one holding a token this manager knows is refused here.
+	 * The environment a run's child starts with: the manager's own, checked. A harbor
+	 * runner gets `gatewayToken` as `METAHARNESS_GATEWAY_TOKEN` when the request chose one;
+	 * it forwards host `PI_*` variables to omp and hands the rest to Harbor, which expands
+	 * `${NAME}` from it into the guest, and it can check them only against its own token.
+	 * The edit and snapcompact adapters run omp in their own process, so they get no
+	 * gateway token variable at all. Either way, any other variable holding a token this
+	 * manager knows is refused here.
 	 */
-	#runnerEnv(gatewayToken: string | undefined): Record<string, string> {
+	#runnerEnv(benchmark: LaunchRecord["benchmark"], gatewayToken: string | undefined): Record<string, string> {
 		const env: Record<string, string> = {};
 		for (const [name, value] of Object.entries(process.env)) if (value !== undefined) env[name] = value;
+		if (benchmark !== "harbor") {
+			for (const name of Object.keys(env)) if (isGatewayTokenVar(name)) delete env[name];
+			this.#refuseKnownGatewayTokens(env, "the manager's environment");
+			return env;
+		}
 		if (gatewayToken !== undefined) env[GATEWAY_TOKEN_INPUT_ENV] = gatewayToken;
 		const { [GATEWAY_TOKEN_INPUT_ENV]: _own, ...inherited } = env;
 		this.#refuseKnownGatewayTokens(inherited, "the manager's environment", gatewayToken);
@@ -695,9 +718,9 @@ export class ManagerServer {
 		for (const token of this.#knownGatewayTokens(extra)) refuseGatewayTokenIn(value, token, where);
 	}
 
-	/** `extra` (the token of the request at hand), the manager's own, and those of the runs it launched. */
+	/** `extra` (the token of the request at hand), the manager's own, and every one it has been given. */
 	#knownGatewayTokens(extra?: string): string[] {
-		const known = [this.#hostGatewayToken(), ...this.#gatewayTokens.values()];
+		const known = [this.#hostGatewayToken(), ...this.#learnedGatewayTokens];
 		return extra === undefined ? known : [extra, ...known];
 	}
 
