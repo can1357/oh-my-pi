@@ -15,9 +15,9 @@ use super::{
 	expand::{self, Expander, Stop},
 	is_ident, probe,
 	proc::{
-		AssignValue, Atom, Bang, BangStage, Coproc, Depths, Frame, FrameKind, InlineStage, LastBg,
-		LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe, ProbeResult, Run, Saved,
-		Scratch, ScriptKind, Slot, TryEnd, Vproc,
+		AssignValue, Atom, Bang, BangStage, Coproc, Depths, Frame, FrameKind, InlineStage, Landing,
+		LastBg, LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe, ProbeResult, Run,
+		Saved, Scratch, ScriptKind, Slot, TryEnd, Vproc,
 	},
 	redir,
 	state::{self, Level, Root, Scope, Var, VarMap},
@@ -431,6 +431,13 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			Flow::Exit(status) => exit_shell(k, vp, cx, status),
 			Flow::Discard(status) if unit.mode.dialect() == Dialect::Zsh => {
 				zsh_discard(k, vp, cx, status);
+			},
+			// bash's `parse_and_execute` hands the jump on in a subshell
+			// (`subshell_environment`): it ends where a fatal error lands,
+			// with its EXIT trap.
+			Flow::Discard(status) if super::nested::in_subshell(cx.store, vp) => {
+				let status = jump_status(cx, vp, Some(status));
+				exit_shell(k, vp, cx, status);
 			},
 			Flow::Discard(status) => {
 				vp.status = status;
@@ -2071,6 +2078,141 @@ fn stopped(
 	}
 }
 
+/// A fatal shell error (bash's `jump_to_top_level (FORCE_EOF)`: `${x?}`,
+/// `set -u`, a posix shell's assignment error): the shell exits with the
+/// status of the place the jump lands ([`jump_status`]), unlike `exit n`
+/// whose status is `n` wherever it runs.
+pub fn fatal(vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
+	if vp.mode.dialect() == Dialect::Zsh {
+		// zsh: 127 from a `-c` string, 1 elsewhere (`zsh_exit` decides the rest).
+		return Flow::Exit(if shell_command(cx, vp) { 127 } else { 1 });
+	}
+	Flow::Exit(jump_status(cx, vp, None))
+}
+
+/// Whether `vp` runs a `-c` string as the shell itself (a nested shell,
+/// depth 0, is its own `-c` shell).
+fn shell_command(cx: &mut Cx<'_>, vp: &Vproc) -> bool {
+	super::subshell_depth(vp) == 0
+		&& matches!(
+			state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
+			Ok(Some(Record::Misc(origin))) if origin.as_slice() == b"c"
+		)
+}
+
+/// What catches a jump out of `vp` (bash's `top_level` `setjmp`s).
+enum Catch {
+	/// `run_exit_trap`: the EXIT trap being run, with the status it saved.
+	ExitTrap(i32),
+	/// The shell itself (`run_one_command` for a `-c` string, `reader_loop`
+	/// for a script).
+	Shell,
+	/// None of its own: a forked lone simple command, or the function it
+	/// calls, lands where its parent's jump would have
+	/// ([`Vproc::fork_landing`]).
+	Fork(Landing),
+	/// Its own: a subshell (`execute_in_subshell`), a command substitution
+	/// (`command_substitute`) or a builtin a forked command runs
+	/// (`execute_subshell_builtin_or_function`).
+	Own,
+}
+
+fn catch(cx: &mut Cx<'_>, vp: &Vproc) -> Catch {
+	// `run_exit_trap` catches every jump out of its action.
+	let saved = vp.frames.iter().rev().find_map(|f| match f.kind {
+		FrameKind::Script { what: ScriptKind::Trap { key: TrapKey::Exit, status, .. }, .. } => {
+			Some(status)
+		},
+		_ => None,
+	});
+	if let Some(saved) = saved {
+		return Catch::ExitTrap(saved);
+	}
+	if !super::nested::in_subshell(cx.store, vp) {
+		return Catch::Shell;
+	}
+	vp.fork_landing.map_or(Catch::Own, Catch::Fork)
+}
+
+/// The status `vp` exits with after a fatal error (`discarded` `None`) or
+/// a command it discards with status `discarded` in a subshell (bash's
+/// `parse_and_execute` hands `DISCARD` on there): where the jump lands
+/// decides. A forked command that has not dispatched its program yet runs
+/// the EXIT trap it inherited, as bash's child does before it resets its
+/// traps ([`forked_dispatch`]).
+fn jump_status(cx: &mut Cx<'_>, vp: &mut Vproc, discarded: Option<i32>) -> i32 {
+	match catch(cx, vp) {
+		Catch::ExitTrap(saved) => saved,
+		// `run_one_command`: 127 for `FORCE_EOF`, 1 for `DISCARD`.
+		Catch::Shell if discarded.is_some() => 1,
+		Catch::Shell => {
+			if shell_command(cx, vp) {
+				127
+			} else {
+				1
+			}
+		},
+		Catch::Fork(landing) => {
+			if landing.exit_trap {
+				vp.own_traps = vp.own_traps.with(TrapKey::Exit);
+			}
+			match discarded {
+				Some(status) => landing.discard.map_or(status, i32::from),
+				None => i32::from(landing.fatal),
+			}
+		},
+		Catch::Own => discarded.unwrap_or(1),
+	}
+}
+
+/// A forked lone simple command ([`Vproc::fork_landing`]) dispatches its
+/// builtin or function: bash resets the child's traps first, and a builtin
+/// gets a `top_level` of its own (`execute_subshell_builtin_or_function`).
+/// Not for the commands a function it calls runs in turn.
+pub const fn forked_dispatch(vp: &mut Vproc, builtin: bool) {
+	if vp.frames.len() != 1 {
+		return;
+	}
+	if builtin {
+		vp.fork_landing = None;
+	} else if let Some(landing) = &mut vp.fork_landing {
+		landing.exit_trap = false;
+	}
+}
+
+/// The landing of a lone simple command `vp` forks now (a pipeline stage
+/// or job, [`Vproc::fork_landing`]).
+fn fork_landing(cx: &mut Cx<'_>, vp: &Vproc) -> Landing {
+	match catch(cx, vp) {
+		Catch::ExitTrap(saved) => {
+			// A status is a byte, as bash's is; the mask makes this exact.
+			let saved = u8::try_from(saved & 0xff).unwrap_or(0);
+			Landing { fatal: saved, discard: Some(saved), exit_trap: false }
+		},
+		Catch::Shell => Landing {
+			fatal:     if shell_command(cx, vp) { 127 } else { 1 },
+			discard:   Some(1),
+			exit_trap: true,
+		},
+		// `vp` runs a function: bash reset its traps before.
+		Catch::Fork(landing) => Landing { exit_trap: false, ..landing },
+		// A subshell runs only the EXIT trap it set itself.
+		Catch::Own => {
+			Landing { fatal: 1, discard: None, exit_trap: vp.own_traps.has(TrapKey::Exit) }
+		},
+	}
+}
+
+/// Whether the pipeline stage or job body at `entry` is one simple command
+/// (`!` before it for a job): bash forks it before it expands anything
+/// (`execute_simple_command`), so it has no `top_level` of its own.
+fn forks_simple(unit: &Unit, entry: u32) -> bool {
+	let code = |at: u32| unit.ops.get(at as usize).map(|op| op.code);
+	code(entry) == Some(Opcode::Exec)
+		&& (code(entry + 1) == Some(Opcode::SubExit)
+			|| (code(entry + 1) == Some(Opcode::Not) && code(entry + 2) == Some(Opcode::SubExit)))
+}
+
 /// Expansion errors end the shell: posix mode, not interactive.
 fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 	state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false)
@@ -2107,15 +2249,7 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 		},
 		Stop::Fail(d) | Stop::Fatal(d) => {
 			k.diag(cx, vp, line, d);
-			// bash exits 127 from a `-c` string (`run_one_command`), 1 from a
-			// script and from a subshell (`execute_in_subshell` keeps the
-			// failure status); a nested shell (depth 0) is its own `-c` shell.
-			let command = super::subshell_depth(vp) == 0
-				&& matches!(
-					state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
-					Ok(Some(Record::Misc(origin))) if origin.as_slice() == b"c"
-				);
-			Flow::Exit(if command { 127 } else { 1 })
+			fatal(vp, cx)
 		},
 		Stop::Store(err) => {
 			k.fail(err);
@@ -3662,9 +3796,9 @@ fn for_next(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 	};
 	if let Err(d) = assigned {
 		k.diag(cx, vp, line, d);
-		// An assignment error ends a posix shell.
+		// An assignment error ends a posix shell (a fatal error).
 		if state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false) {
-			return Flow::Exit(1);
+			return fatal(vp, cx);
 		}
 		if let Some(rec) = top_frame(vp).loops.last_mut() {
 			rec.status = 1;
@@ -3925,6 +4059,9 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 				if info.kind == SpawnKind::Background {
 					let level = stage_level(unit, info.stages[0].entry, true);
 					super::set_subshell_depth(&mut child, super::subshell_depth(vp) + level);
+					if unit.mode.dialect() == Dialect::Bash && forks_simple(unit, info.stages[0].entry) {
+						child.fork_landing = Some(fork_landing(cx, vp));
+					}
 					// A job of its own: its processes get their own group.
 					super::jobctl::own_job(k, child.vpid);
 				}
@@ -4011,6 +4148,9 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					let mut child = vp.child(k, cx.store, Arc::clone(unit), stage.entry, fds);
 					let level = stage_level(unit, stage.entry, false);
 					super::set_subshell_depth(&mut child, super::subshell_depth(vp) + level);
+					if unit.mode.dialect() == Dialect::Bash && forks_simple(unit, stage.entry) {
+						child.fork_landing = Some(fork_landing(cx, vp));
+					}
 					// bash keeps the job list for a `jobs` builtin run as a pipeline
 					// stage (`jobs -p | xargs kill`).
 					if !vp.jobs.is_empty() && runs_jobs(unit, stage.entry) {

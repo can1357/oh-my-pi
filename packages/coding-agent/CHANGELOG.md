@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- In the bash tool, a fatal error (`${x?}`, `set -u`, a posix-mode assignment error) now exits with Bash's status: the status an EXIT trap started with when it happens inside that trap, and 127 for a background job or pipeline stage that is one command; an arithmetic error or bad substitution in a subshell ends the subshell, and a failed `exec` of a program it found no longer runs the EXIT trap
 - `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
 - Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset
 - The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm

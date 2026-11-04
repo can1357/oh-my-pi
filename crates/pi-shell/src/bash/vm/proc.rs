@@ -96,6 +96,12 @@ pub struct Vproc {
 	/// `errtrace`/`functrace`; bash 5.3 keeps listing inherited signal
 	/// traps until the subshell changes one).
 	pub own_traps:     OwnTraps,
+	/// Where a fatal error or a discarded command lands when this vproc is
+	/// a lone simple command forked as a pipeline stage or job: bash forks
+	/// it before it expands anything (`execute_simple_command`), so it has
+	/// no `top_level` of its own and lands where its parent's jump would
+	/// have at the fork. `None` for every other vproc.
+	pub fork_landing:  Option<Landing>,
 	/// Trap-action frames ([`ScriptKind::Trap`]) on `frames`: zero lets
 	/// the per-op checks (cancellation, `BASH_COMMAND`, a trap inside its
 	/// own action) skip their frame scans. Kept by
@@ -322,6 +328,32 @@ impl OwnTraps {
 			_ => Self { pseudo: self.pseudo | Self::bit(key), signals: self.signals },
 		}
 	}
+
+	/// The set without `key`.
+	pub const fn without(self, key: crate::bash::store::TrapKey) -> Self {
+		match key {
+			crate::bash::store::TrapKey::Signal(sig) => {
+				Self { pseudo: self.pseudo, signals: self.signals.without(sig) }
+			},
+			_ => Self { pseudo: self.pseudo & !Self::bit(key), signals: self.signals },
+		}
+	}
+}
+
+/// Where a jump out of a forked lone simple command lands
+/// ([`Vproc::fork_landing`]): the statuses its shell exits with there.
+/// A status is a byte, as bash's is (`$?` is the wait status' low byte),
+/// which keeps the whole landing inside an idle vproc's spare bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Landing {
+	/// After a fatal error (bash's `FORCE_EOF`: `${x?}`, `set -u`).
+	pub fatal:     u8,
+	/// After a discarded command (bash's `DISCARD`: an arithmetic error,
+	/// a bad substitution); `None`: the command's own status.
+	pub discard:   Option<u8>,
+	/// The shell landed in runs the EXIT trap the child inherited: bash
+	/// resets a forked child's traps only once its words are expanded.
+	pub exit_trap: bool,
 }
 
 /// `getopts` progress between calls (bash's `sh_optind`, `sh_curopt` and
@@ -1705,8 +1737,11 @@ impl Live {
 // most 8 B to that, still under 2,048. The resumable `mapfile -C` counter
 // (`ExecState::resumed`, 368 → 376 B): the bench measured 1,832 B per idle
 // vproc with both. The line editor's boxed state (`Vproc::zle`, 8 B) brings
-// that to at most 1,840 B.
-const _: () = assert!(size_of::<Vproc>() <= 672, "Vproc grew (idle vproc ≤ 2 KiB)");
+// that to at most 1,840 B. A forked lone simple command's landing
+// ([`Vproc::fork_landing`], a 4-byte `Option<Landing>` in an 8-byte slot:
+// 672 → 680 B) added 8 B: the memory bench measured 1,840 B per idle
+// vproc without it and 1,848 B with it.
+const _: () = assert!(size_of::<Vproc>() <= 680, "Vproc grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Frame>() <= 256, "Frame grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Scratch>() <= 216, "Scratch grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<ExecState>() <= 376, "ExecState grew (idle vproc ≤ 2 KiB)");

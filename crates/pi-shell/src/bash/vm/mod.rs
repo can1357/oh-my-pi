@@ -2632,6 +2632,7 @@ impl Vproc {
 			spare: Vec::new(),
 			calls: Vec::new(),
 			own_traps: proc::OwnTraps::EMPTY,
+			fork_landing: None,
 			trap_frames: 0,
 			mode: ModeId::Bash,
 			zsh: None,

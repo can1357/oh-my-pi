@@ -460,7 +460,7 @@ fn assignment_statement(
 			if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 				.unwrap_or(false)
 			{
-				return Some(Flow::Exit(1));
+				return Some(exec::fatal(vp, cx));
 			}
 			return Some(Flow::Discard(1));
 		}
@@ -907,7 +907,7 @@ fn expand(
 				if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 					.unwrap_or(false)
 				{
-					return Some(Flow::Exit(1));
+					return Some(exec::fatal(vp, cx));
 				}
 				return Some(Flow::Discard(1));
 			}
@@ -1007,7 +1007,7 @@ fn expand(
 					.unwrap_or(false)
 				{
 					if IntrinsicId::from_name(&st(vp).argv[0]).is_some_and(is_special) {
-						return Some(Flow::Exit(1));
+						return Some(exec::fatal(vp, cx));
 					}
 					let s = st(vp);
 					s.status = 1;
@@ -1073,7 +1073,7 @@ fn expand(
 				if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 					.unwrap_or(false)
 				{
-					return Some(Flow::Exit(1));
+					return Some(exec::fatal(vp, cx));
 				}
 				return Some(Flow::Discard(1));
 			}
@@ -2180,7 +2180,11 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 		return None;
 	}
 	match target {
-		Target::Function(fname) => call_function(k, vp, cx, op, line, fname),
+		Target::Function(fname) => {
+			exec::forked_dispatch(vp, false);
+			call_function(k, vp, cx, op, line, fname)
+		},
+		// A builtin clears the landing itself ([`builtins::run`]).
 		Target::Intrinsic(id) => run_builtin(k, vp, cx, line, id),
 		Target::NotFound | Target::Search if jobspec => {
 			// A jobspec as a command is `fg jobspec` (bash).
@@ -2205,7 +2209,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 			let s = st(vp);
 			s.status = status;
 			s.stage = Stage::Output;
-			exec_failed(k, cx, vp);
+			exec_failed(k, cx, vp, false);
 			None
 		},
 		Target::NotFound | Target::Search => {
@@ -2298,7 +2302,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 					let s = st(vp);
 					s.status = 126;
 					s.stage = Stage::Output;
-					exec_failed(k, cx, vp);
+					exec_failed(k, cx, vp, true);
 				},
 			}
 			None
@@ -2560,7 +2564,7 @@ fn spawned_external(
 				127
 			};
 			s.stage = Stage::Output;
-			exec_failed(k, cx, vp);
+			exec_failed(k, cx, vp, true);
 		},
 		Err(err) if err.raw_os_error().is_some() => {
 			// bash's `shell_execve` looks at the file to explain the
@@ -2581,7 +2585,7 @@ fn spawned_external(
 			// Written while the command's redirections are in place
 			// (`exec ./file 2>/dev/null` prints nothing).
 			s.stage = Stage::Output;
-			exec_failed(k, cx, vp);
+			exec_failed(k, cx, vp, true);
 		},
 	}
 	None
@@ -4721,7 +4725,7 @@ fn run_script_file(
 			let s = st(vp);
 			s.status = 126;
 			s.stage = Stage::Finish;
-			exec_failed(k, cx, vp);
+			exec_failed(k, cx, vp, true);
 			return None;
 		},
 		Ok(_) => BString::default(),
@@ -4732,7 +4736,7 @@ fn run_script_file(
 		let s = st(vp);
 		s.status = 126;
 		s.stage = Stage::Finish;
-		exec_failed(k, cx, vp);
+		exec_failed(k, cx, vp, true);
 		return None;
 	}
 	// The environment the program would have been given (`exec -c`: none).
@@ -4774,19 +4778,39 @@ pub fn command_probe(
 /// After a failed `exec command`: the shell exits with the failure status
 /// (`Transfer::Exec`), unless it is not a subshell and `execfail` is set or
 /// it is interactive (bash's `no_exit_on_failed_exec`). Then it goes on, and
-/// the command's redirections are undone.
-fn exec_failed(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
-	if st(vp).exec_as.is_none() || super::nested::in_subshell(cx.store, vp) {
+/// the command's redirections are undone. `tried`: the program was found
+/// (or named with a `/`) and its start failed; bash reset the traps before
+/// it tried (`reset_signal_handlers`), so an exiting shell runs no EXIT
+/// trap.
+fn exec_failed(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, tried: bool) {
+	if st(vp).exec_as.is_none() {
 		return;
 	}
-	let execfail = state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Execfail)
-		.unwrap_or(false);
-	let interactive = matches!(
-		state::record(cx.store, vp, Key::Misc(MiscKey::Interactive)),
-		Ok(Some(Record::Misc(v))) if v.as_slice() == b"1"
-	);
-	if execfail || interactive {
-		st(vp).control = None;
+	if !super::nested::in_subshell(cx.store, vp) {
+		let execfail = state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Execfail)
+			.unwrap_or(false);
+		let interactive = matches!(
+			state::record(cx.store, vp, Key::Misc(MiscKey::Interactive)),
+			Ok(Some(Record::Misc(v))) if v.as_slice() == b"1"
+		);
+		if execfail || interactive {
+			st(vp).control = None;
+			return;
+		}
+	}
+	if tried && vp.mode.dialect() == crate::bash::ids::Dialect::Bash {
+		let exit = crate::bash::store::TrapKey::Exit;
+		if vp.parent.is_some() {
+			vp.own_traps = vp.own_traps.without(exit);
+		} else {
+			state::store_record(
+				&mut k.root,
+				cx.store,
+				vp,
+				crate::bash::store::KeyBuf::Trap(exit),
+				None,
+			);
+		}
 	}
 }
 
@@ -4932,7 +4956,7 @@ fn refused(
 	let s = st(vp);
 	s.status = status;
 	s.stage = Stage::Output;
-	exec_failed(k, cx, vp);
+	exec_failed(k, cx, vp, true);
 	None
 }
 
@@ -5018,7 +5042,7 @@ fn zsh_refused(
 	let s = st(vp);
 	s.status = status;
 	s.stage = Stage::Output;
-	exec_failed(k, cx, vp);
+	exec_failed(k, cx, vp, true);
 	None
 }
 

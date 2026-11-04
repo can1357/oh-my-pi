@@ -427,6 +427,10 @@ impl<'a, 'c> Ctx<'a, 'c> {
 /// Run builtin `id` with `argv` (`argv[0]` is its name).
 pub fn run(id: IntrinsicId, ctx: &mut Ctx<'_, '_>, argv: &[BString]) -> R {
 	use IntrinsicId as I;
+	// A builtin a forked lone simple command runs gets a jump target of
+	// its own (bash's `execute_subshell_builtin_or_function`), so a fatal
+	// error inside it no longer lands where the fork's parent would have.
+	crate::bash::vm::exec::forked_dispatch(ctx.vp, true);
 	if ctx.vp.mode.dialect() == crate::bash::ids::Dialect::Zsh
 		&& let Some(r) = zsh_args::run(id, ctx, argv)
 	{
