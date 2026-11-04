@@ -168,8 +168,8 @@ fn next_wait(mb: &Arc<Mailbox>) -> Option<Wait> {
 pub(super) struct State {
 	/// The process umask when the spawner was created: `posix_spawn` cannot
 	/// set one, so specs asking for another take the fork path.
-	umask:  Option<u32>,
-	groups: Mutex<Groups>,
+	umask:     Option<u32>,
+	groups:    Mutex<Groups>,
 	/// Optional libc extension: without it `posix_spawn` cannot set the cwd
 	/// (glibc < 2.29), so such libcs take the fork path. The gate also keeps
 	/// `POSIX_SPAWN_SETSID` (glibc 2.26+) off libcs older than that.
@@ -275,8 +275,8 @@ impl State {
 	/// it (read here otherwise).
 	pub(super) fn new(umask: Option<u32>) -> Self {
 		Self {
-			umask:     umask.or_else(process_umask),
-			groups:    Mutex::new(Groups { list: Vec::new(), next_sweep: SWEEP }),
+			umask: umask.or_else(process_umask),
+			groups: Mutex::new(Groups { list: Vec::new(), next_sweep: SWEEP }),
 			#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 			add_chdir: posix::add_chdir(),
 		}
