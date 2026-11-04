@@ -263,6 +263,22 @@ function contextWindowKey(model: { provider: string; id: string }): string {
 	return `${model.provider}\u0000${model.id}`;
 }
 
+/** A model the registry handed out: how it was looked up, and the configuration it reflected then. */
+interface HandedOutModel {
+	/** The id it was looked up by (`find`'s `modelId`), so a rebind finds the same variant again. */
+	readonly ref: string;
+	/** The catalog entry it was, or was derived from. */
+	readonly entry: Model<Api>;
+	/** Per-provider models.yml digests current when it was handed out. */
+	readonly digests: ReadonlyMap<string, string>;
+}
+
+/** A catalog entry's fields other than its limits; `JSON.stringify` drops functions (header resolvers). */
+function configShape(model: Model<Api>): unknown {
+	const { contextWindow: _contextWindow, maxTokens: _maxTokens, ...rest } = model;
+	return rest;
+}
+
 /** The context window a model runs with by default, and the larger one extended context opts it into. */
 export interface ContextWindowTiers {
 	standard: number;
@@ -380,8 +396,13 @@ export class ModelRegistry {
 	#configGeneration = 0;
 	/** The models.yml parse the static catalog was last built from; undefined when it was missing or invalid. */
 	#loadedConfig: ModelsConfig | undefined;
-	/** Per caller-held model: its rebinding to the catalog entry it was last resolved against (see {@link currentConfigOf}). */
-	#currentConfigs = new WeakMap<Model<Api>, { entry: Model<Api>; result: Model<Api> }>();
+	/** Per provider: a digest of its models.yml entry as the static catalog was last built from it. */
+	#providerConfigDigests: ReadonlyMap<string, string> = new Map();
+	/** Per model this registry handed out: how it was looked up and the configuration it reflected then. */
+	#handedOut = new WeakMap<Model<Api>, HandedOutModel>();
+	#handedOutArrays = new WeakSet<Model<Api>[]>();
+	/** Per held model: its rebinding to a catalog entry, for one settings scope (see {@link currentConfigOf}). */
+	#currentConfigs = new WeakMap<Model<Api>, { entry: Model<Api>; scope: Settings | undefined; result: Model<Api> }>();
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
 	#cacheDbPath?: string;
@@ -1254,12 +1275,15 @@ export class ModelRegistry {
 				);
 			}
 			this.#models = this.#finalizeModels(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
-			return resolveProviderModelReference(current.provider, current.id, this.#models) ?? patchedBase;
+			const refreshed = resolveProviderModelReference(current.provider, current.id, this.#models) ?? patchedBase;
+			this.#handOut(refreshed, current.id);
+			return refreshed;
 		}
 		const patched = applyModelPatch(current, patch, "merge");
 		this.#models = this.#models.map(candidate =>
 			candidate.provider === current.provider && candidate.id === current.id ? patched : candidate,
 		);
+		this.#handOut(patched, current.id);
 		return patched;
 	}
 
@@ -1440,6 +1464,12 @@ export class ModelRegistry {
 		// The parse #loadCustomModels used is still cached, so this reads nothing new.
 		const loaded = this.#ignoreLocalModelConfig ? undefined : this.#modelsConfigFile.tryLoad();
 		this.#loadedConfig = loaded?.status === "ok" ? loaded.value : undefined;
+		this.#providerConfigDigests = new Map(
+			Object.entries(this.#loadedConfig?.providers ?? {}).map(([provider, entry]) => [
+				provider,
+				Bun.hash(JSON.stringify(entry)).toString(16),
+			]),
+		);
 		this.#configGeneration++;
 	}
 
@@ -3297,6 +3327,8 @@ export class ModelRegistry {
 		if (cached?.contextWindow === window) return cached;
 		const refitted = applyModelOverride(model, { contextWindow: window });
 		this.#refittedRows.set(model, refitted);
+		const source = this.#handedOut.get(model);
+		if (source) this.#handedOut.set(refitted, source);
 		return refitted;
 	}
 
@@ -3471,17 +3503,17 @@ export class ModelRegistry {
 	 */
 	getAll(kind: ModelKind | "all" = "chat"): Model<Api>[] {
 		const models = this.#ensureFullSnapshot();
-		if (kind === "all") return models;
+		if (kind === "all") return this.#handOutAll(models);
 		let snapshots = this.#fullKindSnapshots.get(models);
 		if (!snapshots) {
 			snapshots = {};
 			this.#fullKindSnapshots.set(models, snapshots);
 		}
 		const cached = snapshots[kind];
-		if (cached) return cached;
+		if (cached) return this.#handOutAll(cached);
 		const filtered = models.filter(model => modelKind(model) === kind);
 		snapshots[kind] = filtered;
-		return filtered;
+		return this.#handOutAll(filtered);
 	}
 
 	/**
@@ -3554,7 +3586,7 @@ export class ModelRegistry {
 	 * is chat-only; pass `"all"` to include authenticated and keyless runners.
 	 */
 	getAvailable(kind: ModelKind | "all" = "chat"): Model<Api>[] {
-		return this.getAvailableForProviders(new Set(this.#knownStaticProviders()), kind);
+		return this.#handOutAll(this.getAvailableForProviders(new Set(this.#knownStaticProviders()), kind));
 	}
 
 	/**
@@ -3701,45 +3733,84 @@ export class ModelRegistry {
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		return resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
+		const model = resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
+		if (model) this.#handOut(model, modelId);
+		return model;
 	}
 
 	/**
-	 * `model` as the current catalog configures it, for a request about to be sent: the catalog
-	 * entry for the same provider and id (headers, header resolvers, compat, routing, …) with the
-	 * caller's limits — fitted, or probed from a local server — unless models.yml configures limits
-	 * for the model, in which case those apply (fitted to `scope`). A model the catalog does not
-	 * know is returned as is. Any holder (a session, a fallback chain, an advisor, an object built
-	 * from an older catalog or another registry) gets the configuration current at request time,
-	 * whatever produced it. Stable per (model, entry), so identity-keyed caches downstream hold.
+	 * `model` as the catalog configures it now, for a request about to be sent. Only a model this
+	 * registry handed out (from `find`, `getAll`, `getAvailable`, `getProviderModels`, or derived by
+	 * `fitContextWindow` / `refreshSelectedModelMetadata`) is rebound, and only when its configuration
+	 * changed since: its provider's models.yml entry, or the catalog entry's fields other than limits.
+	 * The rebound model is the current entry, looked up the way the original was, keeping the held
+	 * object's context window and output cap except where models.yml now configures a different
+	 * value for one. Any other object (an SDK caller's model, a routed or modified variant a caller
+	 * built) is sent as given. Stable per (model, entry, scope), so identity-keyed caches hold.
 	 */
 	currentConfigOf(model: Model<Api>, scope?: Settings): Model<Api> {
-		const entry = this.find(model.provider, model.id);
-		if (!entry || entry === model) return model;
+		const then = this.#handedOut.get(model);
+		if (!then) return model;
+		const now = resolveProviderModelReference(
+			model.provider,
+			then.ref,
+			this.#modelsForProviderLookup(model.provider),
+		);
+		if (!now || now === then.entry) return model;
 		const cached = this.#currentConfigs.get(model);
-		if (cached?.entry === entry) return cached.result;
-		let result: Model<Api>;
-		if (this.#configuresLimits(entry)) {
-			result = scope ? this.fitContextWindow(entry, scope) : entry;
-		} else if (model.contextWindow === entry.contextWindow && model.maxTokens === entry.maxTokens) {
-			result = entry;
-		} else {
-			result = { ...entry, contextWindow: model.contextWindow, maxTokens: model.maxTokens };
-		}
-		this.#currentConfigs.set(model, { entry, result });
+		if (cached?.entry === now && cached.scope === scope) return cached.result;
+		const result = this.#rebind(model, then, now, scope);
+		this.#currentConfigs.set(model, { entry: now, scope, result });
 		return result;
 	}
 
-	/** Whether models.yml sets a context window or output cap for `model` (a custom model or a model override). */
-	#configuresLimits(model: Model<Api>): boolean {
+	#rebind(model: Model<Api>, then: HandedOutModel, now: Model<Api>, scope: Settings | undefined): Model<Api> {
+		const provider = model.provider;
+		const providerEdited = then.digests.get(provider) !== this.#providerConfigDigests.get(provider);
+		const configuredLimits = this.#configuredLimits(now);
+		const contextWindowEdited =
+			configuredLimits.contextWindow !== undefined && then.entry.contextWindow !== now.contextWindow;
+		const maxTokensEdited = configuredLimits.maxTokens !== undefined && then.entry.maxTokens !== now.maxTokens;
+		if (
+			!providerEdited &&
+			!contextWindowEdited &&
+			!maxTokensEdited &&
+			JSON.stringify(configShape(then.entry)) === JSON.stringify(configShape(now))
+		) {
+			return model;
+		}
+		const fitted = contextWindowEdited && scope ? this.fitContextWindow(now, scope) : now;
+		const result: Model<Api> = {
+			...now,
+			contextWindow: contextWindowEdited ? fitted.contextWindow : model.contextWindow,
+			maxTokens: maxTokensEdited ? now.maxTokens : model.maxTokens,
+		};
+		this.#handedOut.set(result, { ref: then.ref, entry: now, digests: this.#providerConfigDigests });
+		return result;
+	}
+
+	/** The context window and output cap models.yml sets for `model` (a custom model or a model override). */
+	#configuredLimits(model: Model<Api>): { contextWindow?: number; maxTokens?: number } {
 		const override = this.#resolveLiveModelOverride(model);
 		const custom = this.#resolveLiveCustomModelOverlay(model);
-		return (
-			override?.contextWindow !== undefined ||
-			override?.maxTokens !== undefined ||
-			custom?.contextWindow !== undefined ||
-			custom?.maxTokens !== undefined
-		);
+		return {
+			contextWindow: override?.contextWindow ?? custom?.contextWindow,
+			maxTokens: override?.maxTokens ?? custom?.maxTokens,
+		};
+	}
+
+	/** Record that `model` (looked up as `ref`) was handed out under the current configuration. */
+	#handOut(model: Model<Api>, ref: string): void {
+		if (!this.#handedOut.has(model)) {
+			this.#handedOut.set(model, { ref, entry: model, digests: this.#providerConfigDigests });
+		}
+	}
+
+	#handOutAll<T extends Model<Api>[]>(models: T): T {
+		if (this.#handedOutArrays.has(models)) return models;
+		for (const model of models) this.#handOut(model, model.id);
+		this.#handedOutArrays.add(models);
+		return models;
 	}
 
 	/** Whether settings disable `provider` (`disabledProviders`). */
@@ -3755,8 +3826,8 @@ export class ModelRegistry {
 	 */
 	getProviderModels(provider: string): Model<Api>[] {
 		const normalizedProvider = provider.trim().toLowerCase();
-		return this.#modelsForProviderLookup(provider).filter(
-			model => model.provider.toLowerCase() === normalizedProvider,
+		return this.#handOutAll(
+			this.#modelsForProviderLookup(provider).filter(model => model.provider.toLowerCase() === normalizedProvider),
 		);
 	}
 

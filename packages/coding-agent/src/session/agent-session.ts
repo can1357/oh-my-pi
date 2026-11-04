@@ -6982,7 +6982,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
 	 * Before each model request: re-read models.yml when it changed on disk and
 	 * re-bind this session's model to its current catalog configuration
-	 * (`ModelRegistry.currentConfigOf`), so the session's state (context window,
+	 * (`ModelRegistry.currentConfigOf`: only a model the registry handed out, only
+	 * when its configuration changed), so the session's state (context window,
 	 * compat, headers) follows an edit. Requests themselves are rebound at the
 	 * session's stream function, which covers side requests, advisors and
 	 * fallbacks too. Runs once per registry generation and per model object.
@@ -11416,6 +11417,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			: this.#titleGenerationAbortController.signal;
 		// A capped session sends no further model requests, titles included.
 		if (titleSignal.aborted || this.#costGate.check()) return null;
+		// Title models are picked from the registry: fold in a models.yml edit first.
+		await this.#modelRegistry.reloadIfConfigChanged();
 		// The title request carries user text, so it follows this session's own credential
 		// redaction policy like its conversation requests (see `settingsAwareStreamFn`).
 		const title = await withCredentialRedaction(cfgSecretsEnabled.get(this.settings), () =>
