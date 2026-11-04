@@ -87,6 +87,14 @@ describe("astGrepToolRenderer header", () => {
 				.render(120)[0]!,
 		);
 		expect(header).toContain("AST Grep: f($A) in src 1 match · 1 file · searched 4");
+		// The native head reads in the same order.
+		const head = astGrepToolRenderer.describeResult(
+			result,
+			{ expanded: false, isPartial: false },
+			{ pat: "f($A)" },
+		).head;
+		const headText = typeof head === "string" ? head : (head ?? []).map(part => part.t).join("");
+		expect(headText).toBe("AST Grep f($A) in src 1 match 1 file searched 4");
 	});
 
 	it("shows the title and subject on an error, with the message on the next row", async () => {

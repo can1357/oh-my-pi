@@ -69,7 +69,7 @@ describe("grepToolRenderer", () => {
 		};
 		const header = sanitizeText(
 			grepToolRenderer
-				.renderResult(result as never, { expanded: false, isPartial: false }, uiTheme, { pattern: "needle" })
+				.renderResult(result, { expanded: false, isPartial: false }, uiTheme, { pattern: "needle" })
 				.render(120)[0]!,
 		);
 		expect(header).toContain("Grep: needle in src 1 match · 1 file");
@@ -89,7 +89,7 @@ describe("grepToolRenderer", () => {
 		};
 		const lines = sanitizeText(
 			grepToolRenderer
-				.renderResult(result as never, { expanded: false, isPartial: false }, uiTheme, {
+				.renderResult(result, { expanded: false, isPartial: false }, uiTheme, {
 					pattern: "(needle",
 					path: "src",
 				})

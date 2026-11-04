@@ -80,6 +80,12 @@ describe("grep native view", () => {
 		expect(small.inline).toBe(true);
 	});
 
+	it("names the scope before the counts, as the terminal card does", () => {
+		const scoped = { ...result, details: { ...result.details, scopePath: "src" } };
+		const view = grepToolRenderer.describeResult(scoped, collapsed, { pattern: "hit" });
+		expect((view.tool?.meta ?? []).map(plain)).toEqual(["in src", "4 matches · 3 files"]);
+	});
+
 	it("keeps non-adjacent match lines in one block numbered by their real lines", () => {
 		const view = grepToolRenderer.describeResult(result, expanded, { pattern: "hit" });
 		const first = collect(view.body, n => role(n) === "omp.tool.search.file")[0]!;

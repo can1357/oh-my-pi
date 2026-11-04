@@ -217,8 +217,7 @@ export const astGrepToolRenderer = {
 					)
 				: undefined;
 		if (matchCount === 0) {
-			const meta = ["0 matches"];
-			if (details?.scopePath) meta.push(`in ${details.scopePath}`);
+			const meta = compact([details?.scopePath && `in ${details.scopePath}`, "0 matches"]);
 			if (filesSearched > 0) meta.push(`searched ${filesSearched}`);
 			return {
 				head: toolHead("AST Grep", pattern, ...meta),
@@ -231,8 +230,11 @@ export const astGrepToolRenderer = {
 				]),
 			};
 		}
-		const meta = [formatCount("match", matchCount), formatCount("file", details?.fileCount ?? 0)];
-		if (details?.scopePath) meta.push(`in ${details.scopePath}`);
+		const meta = compact([
+			details?.scopePath && `in ${details.scopePath}`,
+			formatCount("match", matchCount),
+			formatCount("file", details?.fileCount ?? 0),
+		]);
 		meta.push(`searched ${filesSearched}`);
 		const head = toolHead("AST Grep", pattern, ...meta);
 		if (limitReached) head.push(span(" limit reached", "warning"));

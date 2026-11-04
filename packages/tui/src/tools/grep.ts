@@ -283,7 +283,8 @@ export const grepToolRenderer = {
 	},
 
 	/**
-	 * Inline (§7.3 grep): `Grep “pattern”  5 matches · 2 files  in src`, then
+	 * Inline (§7.3 grep): `Grep “pattern”  in src  5 matches · 2 files`, the scope
+	 * leading the counts as in the terminal card, then
 	 * the matches grouped by file; collapsed shows the first two files.
 	 */
 	describeResult(
@@ -307,7 +308,7 @@ export const grepToolRenderer = {
 		) {
 			const foot = footnoteText(compact([missingNote]));
 			return {
-				tool: grepNativeHead(args, compact(["0 matches", scope])),
+				tool: grepNativeHead(args, compact([scope, "0 matches"])),
 				tone: "warning",
 				inline: true,
 				body: foot ? [foot] : undefined,
@@ -320,7 +321,7 @@ export const grepToolRenderer = {
 		const counts = hasDetailedData
 			? `${formatCount("match", matchCount)} · ${formatCount("file", fileCount)}`
 			: undefined;
-		const head = grepNativeHead(args, compact([counts, scope]));
+		const head = grepNativeHead(args, compact([scope, counts]));
 		const hiddenFiles = options.expanded ? 0 : Math.max(0, fileCount - NATIVE_COLLAPSED_FILES);
 		const foot = footnoteText(
 			compact([hiddenFiles > 0 && formatCount("more file", hiddenFiles), missingNote]),
