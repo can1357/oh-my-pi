@@ -322,6 +322,36 @@ describe("OpenAI-compatible Gemini replay of unsigned tool calls", () => {
 		});
 	});
 
+	// The encoder replays a turn's signature from three carriers; a turn that kept any of them is
+	// signed already, and sending the bypass value beside it would cost the model that reasoning.
+	it("leaves a turn alone when its signature rode a reasoning detail or the message level", async () => {
+		const encrypted = JSON.stringify({ perCall: { type: "reasoning.encrypted", data: "real-enc" } });
+		const messageLevel = JSON.stringify({ message: { field: "thinking_signature", signature: "real-msg-sig" } });
+		expect(await replayedToolCalls(model, [userMessage, ...turn(own, [call("call_enc", encrypted)])])).toEqual({
+			call_enc: undefined,
+		});
+		expect(await replayedToolCalls(model, [userMessage, ...turn(own, [call("call_msg", messageLevel)])])).toEqual({
+			call_msg: undefined,
+		});
+	});
+
+	// The turn boundary is what the request sends as a user message, not what the history holds.
+	it("ends the turn at a user message this request actually sends", async () => {
+		const unsigned = turn(claude, [call("call_bounded")]);
+		// A blank user message is dropped before the wire, so it does not end the turn.
+		expect(
+			await replayedToolCalls(model, [userMessage, ...unsigned, { role: "user", content: "   ", timestamp: 9 }]),
+		).toEqual({ call_bounded: bypass });
+		// A developer message rides the user role on a host without one, so it does.
+		expect(
+			await replayedToolCalls(model, [
+				userMessage,
+				...unsigned,
+				{ role: "developer", content: "note", timestamp: 9 },
+			]),
+		).toEqual({ call_bounded: undefined });
+	});
+
 	it("sends no bypass signature to a model outside the Gemini rule", async () => {
 		const other = buildModel({
 			id: "gpt-6.1-sol",

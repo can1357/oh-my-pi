@@ -2524,10 +2524,17 @@ export function convertMessages(
 	// as it is. Measured against Vertex's OpenAI-compatible endpoint: an unsigned foreign call
 	// before a newer user message answers 200, the same call after it answers 400. Google calls the
 	// bypass value a last resort because it costs the model the reasoning it would have replayed,
-	// so it goes no further back than the provider looks.
+	// so it goes no further back than the provider looks. The boundary is what this request will
+	// actually send as a `user` message, not what the history holds: a developer message rides the
+	// user role where the host has none, and a blank message is dropped below and never reaches
+	// the provider to end a turn.
 	const currentTurnStart =
 		compat.requiresSkipThoughtSignatureOnForeignToolCall === true
-			? transformedMessages.findLastIndex(m => m.role === "user")
+			? transformedMessages.findLastIndex(m => {
+					if (m.role === "developer" ? compat.supportsDeveloperRole : m.role !== "user") return false;
+					if (typeof m.content === "string") return m.content.trim().length > 0;
+					return m.content.some(item => item.type !== "text" || item.text.trim().length > 0);
+				})
 			: -1;
 
 	let lastRole: string | null = null;
@@ -2810,15 +2817,17 @@ export function convertMessages(
 				// on replay, so a turn produced by a fallback hop or a `/model` switch arrives
 				// stripped. Its first call then carries the bypass value Google documents for
 				// history transferred from another model; one marked call per turn satisfies the
-				// check (measured), and a turn that kept any signature of its own is left alone.
+				// check (measured), and a turn that kept any signature of its own is left alone —
+				// any of the three carriers this encoder replays: a per-call `extra_content`, a
+				// per-call reasoning detail (`reasoning_details`, below), or a message-level
+				// signature field.
 				const needsBypassSignature =
 					compat.requiresSkipThoughtSignatureOnForeignToolCall === true &&
 					i > currentTurnStart &&
-					!toolCalls.some(tc =>
-						getGeminiThoughtSignatureExtraContent(
-							normalizeStoredGeminiSignature(parseStoredThoughtSignature(tc.thoughtSignature))?.perCall,
-						),
-					);
+					!toolCalls.some(tc => {
+						const carried = normalizeStoredGeminiSignature(parseStoredThoughtSignature(tc.thoughtSignature));
+						return carried?.perCall !== undefined || carried?.message !== undefined;
+					});
 				assistantMsg.tool_calls = toolCalls.map((tc, toolCallIndex) => {
 					const toolCallId = ensureToolCallId(tc.id, `${i}:${toolCallIndex}:${tc.name}`, msg);
 					rememberToolCallId(tc.id, toolCallId);

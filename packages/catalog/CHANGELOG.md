@@ -9,7 +9,7 @@
 - Added a standard Responses WebSocket capability rule for explicit opt-in through OMP settings or SDK preferences, disabled by default ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
 - Added Factory Droid Gemini 4 Argon, listed on Global inference once the account's feature flag enables it ([#17861](https://github.com/can1357/oh-my-pi/pull/17861) by [@will-bogusz](https://github.com/will-bogusz))
 - Added Muse Spark 1.3 to Factory Droid for accounts with Factory's `muse_spark_1_3` flag, on the Global region only: requests go over Responses to Factory's Vertex upstream with low to xhigh effort, and later turns omit the earlier turns' encrypted reasoning as Droid does ([#17862](https://github.com/can1357/oh-my-pi/pull/17862) by [@will-bogusz](https://github.com/will-bogusz))
-- Added the `requires-skip-thought-signature-on-foreign-tool-call` compat axis (`requiresSkipThoughtSignatureOnForeignToolCall`), enabled for Gemini 3+ on `openai-completions`, and re-baked the bundled Gemini rows of the hosts it reaches
+- Added the `requires-skip-thought-signature-on-foreign-tool-call` compat axis (`requiresSkipThoughtSignatureOnForeignToolCall`), enabled for Gemini 3+ on `openai-completions`, and re-baked the bundled Gemini rows of the hosts it reaches ([#18126](https://github.com/can1357/oh-my-pi/pull/18126) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
