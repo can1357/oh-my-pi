@@ -142,6 +142,15 @@ async fn a_fatal_expansion_error_goes_through_the_redirection_in_force() {
 		]),
 		// Already right before this change: a subshell's own descriptor table.
 		row(r#"( : "${missing:?BOOM}" ) 2>err; echo after s=$?"#, "after s=1\n", 0, &[("err", BOOM)]),
+		// A diagnostic larger than a pipe's buffer, bound to a pipe whose reader
+		// is slow: it is delivered whole after the subshell ends, and the run
+		// finishes.
+		row(
+			r#"m=$(head -c 100000 /dev/zero | tr "\0" x); { : "${missing:?$m}"; } 2>&1 | { /bin/sleep .2; /bin/cat; } | tail -c 6; echo done"#,
+			"xxxxx\ndone\n",
+			0,
+			&[],
+		),
 	])
 	.await;
 }
@@ -226,6 +235,16 @@ async fn noclobber_covers_every_output_redirection_that_truncates() {
 			&["p"],
 			"f: cannot overwrite existing file\ns=1\na\n",
 		),
+		// The file changes kind between the shell's look and the background
+		// command's own open (a FIFO before it is replaced by a regular file):
+		// the open itself decides, and the regular file is kept.
+		Row {
+			script: r#"set -C; printf ORIGINAL >replacement; /bin/echo BAD >gate >victim & p=$!; /bin/mv replacement victim; /bin/cat gate >/dev/null & wait "$p"; echo s=$?; wait; /bin/cat victim"#,
+			fifos:  &["gate", "victim"],
+			output: "victim: cannot overwrite existing file\ns=1\nORIGINAL",
+			status: 0,
+			files:  &[],
+		},
 	])
 	.await;
 }
