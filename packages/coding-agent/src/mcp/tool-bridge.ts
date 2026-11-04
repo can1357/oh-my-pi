@@ -150,6 +150,8 @@ async function resolveOutboundUrlArgs(
 		const scheme = extractUriScheme(url);
 		if (!scheme || router.spec(scheme)?.backing !== "file") return value;
 		const located = await router.locate(url, {
+			// The session too: an extension scheme locates through the calling session's own handler.
+			sessionId: context.sessionManager?.getSessionId?.(),
 			cwd: context.sessionManager?.getCwd?.(),
 			settings: context.settings,
 			localProtocolOptions: context.localProtocolOptions,

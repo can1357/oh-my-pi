@@ -1923,6 +1923,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		const session = this.viewSession;
 		return {
 			cwd: session.sessionManager.getCwd(),
+			// The focused session: an extension scheme localizes links through that session's own handler.
+			sessionId: session.sessionManager.getSessionId(),
 			sessionFile: session.sessionFile,
 			settings: session.settings,
 			localProtocolOptions: {

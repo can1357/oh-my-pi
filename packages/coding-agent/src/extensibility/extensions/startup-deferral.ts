@@ -5,13 +5,15 @@
  * Only a previous load can tell whether an extension's factory registers state
  * that must exist before the first frame: model providers (startup model
  * resolution), keyboard shortcuts (bound once at editor setup), composer shapes
- * (installed at UI init), file-mutation fallbacks (installed at runner init), or
+ * (installed at UI init), file-mutation fallbacks (installed at runner init),
  * custom message renderers, assistant reply renderers and link schemes (the
  * first frame replays the transcript with them, and the schemes reach the
- * markdown renderer at UI init). Each load records that verdict in agent.db,
- * keyed by the module's resolved path and fingerprinted by its size and mtime.
- * A source with no verdict for its current fingerprint loads eagerly and
- * records one, so a changed module is never deferred on stale knowledge.
+ * markdown renderer at UI init), or internal URL schemes (their promptDoc enters
+ * the first system prompt, and the composer completes them from the first
+ * keystroke). Each load records that verdict in agent.db, keyed by the module's
+ * resolved path and fingerprinted by its size and mtime. A source with no
+ * verdict for its current fingerprint loads eagerly and records one, so a
+ * changed module is never deferred on stale knowledge.
  */
 import * as fs from "node:fs/promises";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
@@ -21,7 +23,7 @@ import type { Extension } from "./types";
 
 // Bumped whenever canBindAfterStartup counts a new registration, so verdicts recorded without it
 // are not trusted.
-const CACHE_PREFIX = "extension_startup:v2:";
+const CACHE_PREFIX = "extension_startup:v3:";
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 interface StartupVerdict {
@@ -62,6 +64,7 @@ function readVerdict(storage: AgentStorageApi, resolvedPath: string): StartupVer
 export function canBindAfterStartup(extension: Extension): boolean {
 	return (
 		extension.registersProviders !== true &&
+		extension.registersUrlSchemes !== true &&
 		extension.shortcuts.size === 0 &&
 		extension.composerShapes.size === 0 &&
 		extension.fileWriteFallbackHandlers.length === 0 &&

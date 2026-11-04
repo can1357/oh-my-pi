@@ -91,6 +91,7 @@ import type { LiveTranscript } from "../../live/controller";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
+import type { ProtocolHandler } from "../../internal-urls/types";
 import type { LoopLimitConfig } from "../../modes/loop-limit";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
@@ -2093,6 +2094,29 @@ export interface ExtensionAPI {
 	registerLinkScheme(scheme: string): void;
 
 	/**
+	 * Route the internal URL scheme `handler.scheme` (`<scheme>://…`) to `handler`: `read` resolves
+	 * it, `write` writes it when `handler.spec.write.via` is `"handler"`, the composer completes it
+	 * when the handler has `complete()`, and the write approval gate applies `spec.write.tier` like
+	 * any built-in scheme's. Handlers receive the calling session in `context` (`cwd`, `sessionId`,
+	 * `sessionFile`, the tool `session` for tool calls).
+	 *
+	 * A scheme belongs to one extension source for the whole process: the resolved entry path, or an
+	 * inline SDK factory itself. Every load of that source — the root session's and each subagent's —
+	 * may register it. A call naming its session goes to that session's own registration, and finds
+	 * no service in a session without one; a call naming no session goes to the earliest active
+	 * registration, whose spec and `promptDoc` serve every session in the process. Throws for invalid
+	 * scheme syntax (`^[a-z][a-z0-9+.-]*$` after lowercasing), an OMP-owned or standard scheme
+	 * (`local`, `http`, …), a scheme another extension source holds, a scheme registered outside
+	 * extensions (RPC host URIs), or a spec the handler contradicts.
+	 *
+	 * Paused while this load is suspended through a live `disabledExtensions` edit (the scheme leaves
+	 * the router when no active registration is left) and resumed with it. Released when this load is
+	 * torn down (session shutdown, a throwing factory) or by calling the returned function; releasing
+	 * twice is a no-op. Registering one keeps the extension out of startup deferral.
+	 */
+	registerUrlScheme(handler: ProtocolHandler): () => void;
+
+	/**
 	 * Register a composer shape for the interactive editor.
 	 *
 	 * Registration happens during extension load. Built-in ids cannot be
@@ -2528,6 +2552,10 @@ export interface Extension {
 	shortcuts: Map<KeyId, ExtensionShortcut>;
 	/** Set once the extension calls `registerProvider`; providers feed startup model resolution. */
 	registersProviders?: boolean;
+	/** Set once the extension calls `registerUrlScheme`; a scheme's promptDoc and completion must exist at startup. */
+	registersUrlSchemes?: boolean;
+	/** Live id of the session whose runner adopted this load; set by `ExtensionRunner`, absent until then. */
+	getSessionId?: () => string;
 	/**
 	 * Registrations this load made outside its own session state (process-wide URL schemes, reply
 	 * expectations a tool honours): suspended and resumed with the load, released when it is torn
