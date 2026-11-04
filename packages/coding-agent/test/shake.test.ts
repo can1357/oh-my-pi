@@ -5,7 +5,6 @@ import { type } from "@oh-my-pi/omptype";
 import {
 	Agent,
 	type AgentMessage,
-	AGGRESSIVE_SHAKE_CONFIG,
 	RESCUE_SHAKE_CONFIG,
 	Tokenizer,
 } from "@oh-my-pi/pi-agent-core";
