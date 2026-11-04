@@ -221,6 +221,33 @@ describe("AskTool cancellation", () => {
 		await manager.dispose();
 	});
 
+	it("names the background job by the first question on one line, while the dialog shows it whole", async () => {
+		const question = "Which\tdatabase?\nPick one\x1b[31m now\x1b[0m";
+		const shown = Promise.withResolvers<string>();
+		const manager = new AsyncJobManager({});
+		const wake = new AbortController();
+		const tool = new AskTool(createSession({ asyncJobManager: manager }));
+		const pending = tool.execute(
+			"ask-label",
+			{ questions: [{ id: "choice", question, options: [{ label: "SQLite" }] }] },
+			undefined,
+			undefined,
+			createContext({
+				wakeSignal: wake.signal,
+				askDialog: async questions => {
+					shown.resolve(questions[0]!.question);
+					return await Promise.withResolvers<ExtensionAskDialogResult>().promise;
+				},
+			}),
+		);
+		expect(await shown.promise).toBe(question);
+		wake.abort("aside");
+		await pending;
+
+		expect(manager.getRunningJobs().map(job => job.label)).toEqual(["Which database? Pick one now"]);
+		await manager.dispose();
+	});
+
 	it("ends only the backgrounded question when the user dismisses it later", async () => {
 		// The turn that asked is over by then: aborting the context would cancel
 		// whatever turn runs now.

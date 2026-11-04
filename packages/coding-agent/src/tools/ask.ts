@@ -20,7 +20,8 @@ import { type as arkType } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { type ImageContent, type TextContent, type ToolExample, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { replaceTabs, TERMINAL, truncateToWidth } from "@oh-my-pi/pi-tui";
-import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import { flattenLine } from "@oh-my-pi/pi-tui/render/render-utils";
 
 import type { ExtensionUIContext, ExtensionUISelectItem } from "../extensibility/extensions";
 import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -825,7 +826,9 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const completion = Promise.withResolvers<AskJobOutcome>();
 		const jobId = manager.register(
 			"ask",
-			params.questions[0]!.question,
+			// The job label is a one-line name in job lists: the model-written question
+			// loses terminal controls, tabs and line breaks (the dialog keeps it whole).
+			flattenLine(sanitizeText(params.questions[0]!.question)),
 			async ({ signal: jobSignal, reportProgress }) => {
 				// Once backgrounded, the finished call's abort and steering no longer
 				// reach the dialog; the job's own signal (cancel, `proc://<id>/kill`) does.

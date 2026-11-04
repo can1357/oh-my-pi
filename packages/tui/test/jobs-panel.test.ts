@@ -176,6 +176,32 @@ describe("JobsSheet", () => {
 		expect(lines).toContain("running 12 tests");
 	});
 
+	it("shows a model-written ask question as one bounded row, without tabs, line breaks or controls", () => {
+		const question = `Which\tdatabase?\nPick one\x1b[31m red\x1b[0m ${"long ".repeat(60)}end_marker`;
+		const job: JobsPanelJob = { id: "ask-1", type: "ask", status: "running", label: question, startTime: NOW };
+		const sheet = new JobsSheet({
+			load: () => ({ running: [job], recent: [] }),
+			inspect: () => ({ pids: [] }),
+			close: vi.fn(),
+		});
+		const root = sheet.describe(CX);
+		const rowItem = list(root)?.c?.[0] as NativeNode;
+		const label = texts(rowItem);
+		expect(label.startsWith("Which database? Pick one red long long")).toBe(true);
+		expect(label).not.toMatch(/[\t\n\x1b]/);
+		expect(Bun.stringWidth(label)).toBeLessThanOrEqual(110);
+		expect(label).not.toContain("end_marker");
+		// The tooltip keeps the whole question on its own line above the status line.
+		const title = String(prop(rowItem, "title")).split("\n");
+		expect(title).toHaveLength(2);
+		expect(title[0]).toMatch(/^Which database\? Pick one red (long ){60}end_marker$/);
+		expect(String(prop(rowItem, "aria"))).not.toMatch(/[\t\n\x1b]/);
+		// The detail shows the whole question, wrapped, with no tab holes or escape bytes.
+		const detailTitle = String(prop(byRole(root, "omp.jobs.title")[0], "text"));
+		expect(detailTitle).toContain("end_marker");
+		expect(detailTitle).not.toMatch(/[\t\x1b]/);
+	});
+
 	it("shows the selected job's full command in the terminal fallback, bounded above its facts", () => {
 		const long = `export A=1; ${"x".repeat(150)}; cargo test --workspace -- --exact tail_marker`;
 		const script = Array.from({ length: 40 }, (_, i) => `echo step ${i}`).join("\n");
