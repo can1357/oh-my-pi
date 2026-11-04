@@ -46,6 +46,7 @@ export class BatchArgsScanner {
 	#itemStart = -1;
 	#context: string | undefined;
 	#items: Record<string, unknown>[] = [];
+	#itemsOpened = 0;
 	#malformed = false;
 
 	/** Shared `context`, once its string has closed. */
@@ -56,6 +57,11 @@ export class BatchArgsScanner {
 	/** Closed `tasks[]` elements, in order. */
 	get items(): readonly Record<string, unknown>[] {
 		return this.#items;
+	}
+
+	/** `tasks[]` elements whose `{` has streamed, closed or not: the batch's spawn count so far. */
+	get itemsOpened(): number {
+		return this.#itemsOpened;
 	}
 
 	/** Input left the batch shape (non-object items, non-array `tasks`, unparsable item). */
@@ -93,8 +99,10 @@ export class BatchArgsScanner {
 						else this.#malformed = true;
 					}
 					if (atItemLevel) {
-						if (char === "{") this.#itemStart = i;
-						else this.#malformed = true;
+						if (char === "{") {
+							this.#itemStart = i;
+							this.#itemsOpened++;
+						} else this.#malformed = true;
 					}
 					this.#depth++;
 					if (this.#depth === 1) this.#expectKey = true;
@@ -158,6 +166,7 @@ export class BatchArgsScanner {
 		this.#itemStart = -1;
 		this.#context = undefined;
 		this.#items = [];
+		this.#itemsOpened = 0;
 		this.#malformed = false;
 	}
 }

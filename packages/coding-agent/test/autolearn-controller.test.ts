@@ -1,7 +1,15 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, FetchImpl, Model, ProviderSessionState, Usage } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	FetchImpl,
+	Model,
+	ProviderSessionState,
+	Tool,
+	ToolResultMessage,
+	Usage,
+} from "@oh-my-pi/pi-ai";
 import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
@@ -340,6 +348,102 @@ describe("isolated auto-learn capture", () => {
 		};
 	}
 
+	/** What a provider serializes from a request's tools: the wire fields of `Tool`, in order. */
+	function wireView(tools: readonly Tool[] | undefined): string {
+		return JSON.stringify(
+			(tools ?? []).map(t => ({
+				name: t.name,
+				description: t.description,
+				parameters: t.parameters,
+				strict: t.strict,
+				deferLoading: t.deferLoading,
+				customFormat: t.customFormat,
+				customWireName: t.customWireName,
+				native: t.native,
+				examples: t.examples,
+			})),
+		);
+	}
+
+	it("advertises the primary turn's tool list byte for byte, so the capture request reuses its prompt cache", async () => {
+		const mock = createMockModel({
+			responses: [{ content: ["Primary answer."] }, { content: ["Nothing to keep."] }],
+		});
+		const readTool: AgentTool = { ...captureTool("read", "Read files"), concurrency: "shared", intent: "require" };
+		const learnTool = captureTool("learn", "Remember a fact");
+		const manageSkillTool = captureTool("manage_skill", "Manage reusable skills");
+		const sourceAgent = new Agent({
+			initialState: {
+				model: mock,
+				systemPrompt: ["Primary system prompt"],
+				tools: [readTool, learnTool, manageSkillTool],
+			},
+			convertToLlm,
+			streamFn: mock.stream,
+			sessionId: "primary-session",
+			promptCacheKey: "primary-cache",
+		});
+		await sourceAgent.prompt("Earlier task");
+		const runCapture = createAutoLearnCaptureRunner({
+			sourceAgent,
+			captureTools: () => [learnTool, manageSkillTool],
+			createAgent: options => new Agent({ ...options, convertToLlm, streamFn: mock.stream }),
+		});
+
+		await runCapture("Automated capture prompt");
+
+		expect(mock.calls).toHaveLength(2);
+		const [primary, capture] = mock.calls;
+		expect(wireView(capture?.context.tools)).toBe(wireView(primary?.context.tools));
+		expect(capture?.context.tools?.map(t => t.name)).toEqual(["read", "learn", "manage_skill"]);
+		// Routed to the primary prompt's cache, under its own provider session (#10869).
+		expect(primary?.options?.promptCacheKey).toBe("primary-cache");
+		expect(capture?.options?.promptCacheKey).toBe("primary-cache");
+		expect(capture?.options?.sessionId).not.toBe("primary-session");
+	});
+
+	it("refuses a call to a non-capture tool without running any of its code", async () => {
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "call_read", name: "read", arguments: {} }] },
+				{ content: ["Stopping."] },
+			],
+		});
+		let executed = 0;
+		let argStreams = 0;
+		const readTool: AgentTool = {
+			...captureTool("read", "Read files"),
+			execute: async () => {
+				executed++;
+				return { content: [{ type: "text", text: "file contents" }] };
+			},
+			openArgStream: () => {
+				argStreams++;
+				return undefined;
+			},
+		};
+		const manageSkillTool = captureTool("manage_skill", "Manage reusable skills");
+		const sourceAgent = new Agent({
+			initialState: { model: mock, systemPrompt: ["Test"], tools: [readTool, manageSkillTool] },
+		});
+		const runCapture = createAutoLearnCaptureRunner({
+			sourceAgent,
+			captureTools: () => [manageSkillTool],
+			createAgent: options => new Agent({ ...options, convertToLlm, streamFn: mock.stream }),
+		});
+
+		await runCapture("Automated capture prompt");
+
+		expect(executed).toBe(0);
+		expect(argStreams).toBe(0);
+		const followUp = mock.calls[1]?.context.messages ?? [];
+		const refusal = followUp.find((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(refusal?.toolName).toBe("read");
+		expect(refusal?.isError).toBe(true);
+		expect(JSON.stringify(refusal?.content)).toContain("auto-learn capture");
+		expect(JSON.stringify(refusal?.content)).not.toContain("file contents");
+	});
+
 	const replayCases = [
 		{ api: "openai-responses", history: "native" },
 		{ api: "openrouter", history: "native" },
@@ -521,7 +625,7 @@ describe("isolated auto-learn capture", () => {
 		});
 	}
 
-	it("uses constrained tools and sends full Google context without the primary anchor", async () => {
+	it("advertises the primary tools and sends full Google context without the primary anchor", async () => {
 		const model = googleInteractionsModel();
 		const manageSkillTool = captureTool("manage_skill", "Manage reusable skills");
 		const readTool = captureTool("read", "Read files");
@@ -590,7 +694,7 @@ describe("isolated auto-learn capture", () => {
 		expect(requestBody).toContain("Automated capture prompt");
 		expect(requestBody).toContain("manage_skill");
 		expect(requestBody).not.toContain('"name":"learn"');
-		expect(requestBody).not.toContain('"name":"read"');
+		expect(requestBody).toContain('"name":"read"');
 		expect(sourceAgent.state.messages).toHaveLength(2);
 		const sourceAssistant = sourceAgent.state.messages.find(
 			(message): message is AssistantMessage => message.role === "assistant",

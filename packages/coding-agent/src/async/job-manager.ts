@@ -67,6 +67,7 @@ export class AsyncJobError extends Error {
 		readonly structured?: StructuredSubagentOutput,
 	) {
 		super(message);
+		this.name = "AsyncJobError";
 	}
 }
 
@@ -284,7 +285,79 @@ export interface AsyncJobFilter {
 	ownerId: string | undefined;
 }
 
-export class AsyncJobManager {
+/** What a job body receives from {@link AsyncJobManagerApi.register}. */
+export interface AsyncJobRunContext {
+	jobId: string;
+	signal: AbortSignal;
+	reportProgress: (text: string, details?: AsyncJobDetails) => Promise<void>;
+	/** Clear the queued flag once the job actually starts executing. */
+	markRunning: () => void;
+}
+
+/** A job body: the work {@link AsyncJobManagerApi.register} runs and tracks. */
+export type AsyncJobRun = (ctx: AsyncJobRunContext) => Promise<string | AsyncJobRunResult>;
+
+/**
+ * The job surface sessions, tools and subagents use on their root's manager.
+ * {@link AsyncJobManager} implements it on the root's thread; a subagent worker
+ * holds a remote implementation (`thread/services/async-jobs-remote.ts`) whose
+ * job ids, rows and deliveries stay on the root's manager.
+ */
+export interface AsyncJobManagerApi {
+	/** Live widgets of this root's jobs, when the root session provides them. */
+	readonly widgets: JobWidgetRegistry | undefined;
+	/** True when the running-job count has reached the configured cap. */
+	readonly atCapacity: boolean;
+	/** Calls `listener` whenever a job settles; returns the unsubscribe. */
+	onJobSettled(listener: () => void): () => void;
+	/** Start tracking `run` as a job; returns its id. */
+	register(type: AsyncJobType, label: string, run: AsyncJobRun, options?: AsyncJobRegisterOptions): string;
+	/** Deliver an already-completed result without consuming a running-job slot. */
+	publishCompleted(
+		type: AsyncJobType,
+		label: string,
+		result: AsyncJobRunResult,
+		options: { id?: string; ownerId?: string; agentId?: string },
+	): string;
+	/** Cancel one running job; a filter whose owner does not match reads as not-found. */
+	cancel(id: string, filter?: AsyncJobFilter): boolean;
+	getJob(id: string): AsyncJob | undefined;
+	/** Running background jobs; foreground-backed jobs stay hidden until promoted. */
+	getRunningJobs(filter?: AsyncJobFilter): AsyncJob[];
+	/** Settled background jobs, newest first. */
+	getRecentJobs(limit?: number, filter?: AsyncJobFilter): AsyncJob[];
+	/** Every background job row. */
+	getAllJobs(filter?: AsyncJobFilter): AsyncJob[];
+	/** Promote a foreground-backed job to a background job; false for unknown ids. */
+	backgroundJob(jobId: string): boolean;
+	/** Drop a foreground-backed job whose result the foreground call already returned. */
+	releaseForegroundJob(jobId: string): void;
+	getDeliveryState(filter?: AsyncJobFilter): AsyncJobDeliveryState;
+	hasPendingDeliveries(filter?: AsyncJobFilter): boolean;
+	watchJobs(jobIds: string[]): number;
+	/** Stop watching jobs, re-enqueueing skipped deliveries. */
+	unwatchJobs(jobIds: string[]): number;
+	acknowledgeDeliveries(jobIds: string[]): number;
+	/** Mark settled job results as recovered by a foreground snapshot. */
+	consumeJobResults(jobIds: string[]): number;
+	/** True once a result was auto-delivered or recovered by a foreground snapshot. */
+	isJobResultConsumed(jobId: string): boolean;
+	/** Cancel running jobs (scoped by `filter`), aborting each with `reason`. */
+	cancelAll(filter?: AsyncJobFilter, reason?: unknown): void;
+	/** Evict settled jobs matching the filter now; returns how many. */
+	evictCompletedJobs(filter?: AsyncJobFilter): number;
+	waitForAll(): Promise<void>;
+	/** Route completions of jobs owned by `ownerId` to `sink`; returns the unregister. */
+	registerDeliverySink(ownerId: string, sink: AsyncJobDeliverySink): () => void;
+	/** Wait until every job owned by `ownerId` settled; false when `timeoutMs` elapses first. */
+	waitForOwnerJobs(ownerId: string, options?: { timeoutMs?: number; excludeSuppressed?: boolean }): Promise<boolean>;
+	/** Cancel every job owned by `ownerId`, then wait until `deadlineAt`. */
+	cancelAndReapOwnerJobs(ownerId: string, deadlineAt: number): Promise<AsyncJobReapResult>;
+	drainDeliveries(options?: { timeoutMs?: number; filter?: AsyncJobFilter }): Promise<boolean>;
+	isDeliverySuppressed(jobId: string): boolean;
+}
+
+export class AsyncJobManager implements AsyncJobManagerApi {
 	static #instance: AsyncJobManager | undefined;
 
 	/** Legacy pointer to the first live root; child routing uses the parent's scoped manager instead. */
@@ -386,18 +459,7 @@ export class AsyncJobManager {
 		return activeCount >= this.#maxRunningJobs;
 	}
 
-	register(
-		type: AsyncJobType,
-		label: string,
-		run: (ctx: {
-			jobId: string;
-			signal: AbortSignal;
-			reportProgress: (text: string, details?: AsyncJobDetails) => Promise<void>;
-			/** Clear the queued flag once the job actually starts executing. */
-			markRunning: () => void;
-		}) => Promise<string | AsyncJobRunResult>,
-		options?: AsyncJobRegisterOptions,
-	): string {
+	register(type: AsyncJobType, label: string, run: AsyncJobRun, options?: AsyncJobRegisterOptions): string {
 		if (this.#disposed) {
 			throw new Error("Async job manager is disposed");
 		}

@@ -1012,20 +1012,30 @@ export class TranscriptContainer extends Container {
 	 * inserts, removals (rewind, displacement) and reorders become targeted ops.
 	 * Finalized blocks are settled as a hint; they stay editable, so a later
 	 * expansion, late result or reaction still reaches them wherever they sit.
+	 * A block's {@link Component.nativeTrailers} follow it as blocks of their own.
 	 * No retirement happens on this path: the whole transcript is one document.
 	 * Returns the same array while the block list is unchanged.
 	 */
 	nativeBlocks(): readonly Component[] {
 		this.#syncEntries();
 		const children = this.children;
-		for (const child of children) {
+		// A copy only once some block has trailers.
+		let expanded: Component[] | undefined;
+		for (let i = 0; i < children.length; i++) {
+			const child = children[i]!;
 			if (!isNativeSettled(child) && isFinalized(child)) settleNative(child);
+			expanded?.push(child);
+			const trailers = child.nativeTrailers?.();
+			if (!trailers?.length) continue;
+			expanded ??= children.slice(0, i + 1);
+			expanded.push(...trailers);
 		}
+		const blocks: readonly Component[] = expanded ?? children;
 		const previous = this.#nativeBlocks;
-		if (previous.length === children.length && previous.every((child, index) => child === children[index])) {
+		if (previous.length === blocks.length && previous.every((block, index) => block === blocks[index])) {
 			return previous;
 		}
-		this.#nativeBlocks = children.slice();
+		this.#nativeBlocks = blocks === children ? children.slice() : blocks;
 		this.#nativeNode = undefined;
 		return this.#nativeBlocks;
 	}
