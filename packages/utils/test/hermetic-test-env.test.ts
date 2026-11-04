@@ -26,13 +26,16 @@ const HARNESS_ENV: Record<string, string> = {
 	PI_PYTHON_INTEGRATION: "1",
 };
 
-async function packagesWithTests(): Promise<string[]> {
+/** Every workspace the root package.json declares that has a test directory; each runs `bun test` from its own directory. */
+async function workspacesWithTests(): Promise<string[]> {
+	const manifest = (await Bun.file(path.join(REPO_ROOT, "package.json")).json()) as { workspaces: { packages: string[] } };
 	const dirs: string[] = [];
-	for (const entry of await fs.readdir(path.join(REPO_ROOT, "packages"), { withFileTypes: true })) {
-		if (!entry.isDirectory()) continue;
-		const dir = path.join(REPO_ROOT, "packages", entry.name);
-		const stat = await fs.stat(path.join(dir, "test")).catch(() => undefined);
-		if (stat?.isDirectory()) dirs.push(dir);
+	for (const pattern of manifest.workspaces.packages) {
+		for await (const match of new Bun.Glob(pattern).scan({ cwd: REPO_ROOT, onlyFiles: false })) {
+			const dir = path.join(REPO_ROOT, match);
+			const stat = await fs.stat(path.join(dir, "test")).catch(() => undefined);
+			if (stat?.isDirectory()) dirs.push(dir);
+		}
 	}
 	return dirs.sort();
 }
@@ -52,18 +55,26 @@ type SeenEnv = Record<(typeof PLACES)[number], string[]> & { agentDir: string };
 // that value instead of the name.
 const USER_NAMES = Object.keys(USER_ENV).filter(name => name !== "PI_CODING_AGENT_DIR");
 
-async function envSeenByTestIn(cwd: string, home: string, out: string): Promise<SeenEnv> {
-	// The probe starts a child and a worker that starts a child, and 14 probes run at once; Bun's 5 s
-	// default test timeout is too short for that on a loaded machine.
+async function envSeenByTestIn(
+	cwd: string,
+	home: string,
+	out: string,
+	userEnv: Record<string, string> = USER_ENV,
+): Promise<SeenEnv> {
+	// The probe starts a child and a worker that starts a child, and one probe per workspace runs at
+	// once; Bun's 5 s default test timeout is too short for that on a loaded machine.
 	const child = Bun.spawn([process.execPath, "test", "--timeout", "120000", PROBE], {
 		cwd,
 		env: {
 			...process.env,
-			...USER_ENV,
+			...userEnv,
 			...HARNESS_ENV,
 			HOME: home,
 			USERPROFILE: home,
 			PI_TEST_HERMETIC_ENV_OUT: out,
+			// As from a shell without it: this test's own preload set it, and the probe's run must
+			// autoload the run directory's `.env` the way a developer's `bun test` does.
+			BUN_OPTIONS: undefined,
 		},
 		stdout: "pipe",
 		stderr: "pipe",
@@ -97,14 +108,15 @@ async function withUserHome<T>(run: (root: string, home: string) => Promise<T>):
 	}
 }
 
-test("every package's tests, children and workers start without the invoking user's omp environment", async () => {
+test("every workspace's tests, children and workers start without the invoking user's omp environment", async () => {
 	await withUserHome(async (root, home) => {
-		const packages = await packagesWithTests();
+		const workspaces = await workspacesWithTests();
 		const runs = await Promise.all(
-			packages.map(async dir => ({
-				label: path.basename(dir),
-				seen: await envSeenByTestIn(dir, home, path.join(root, `${path.basename(dir)}.json`)),
-			})),
+			workspaces.map(async dir => {
+				const label = path.relative(REPO_ROOT, dir);
+				const out = path.join(root, `${label.replaceAll(path.sep, "_")}.json`);
+				return { label, seen: await envSeenByTestIn(dir, home, out) };
+			}),
 		);
 		const userAgentDirs = runs
 			.filter(({ seen }) => seen.agentDir === USER_ENV.PI_CODING_AGENT_DIR || seen.agentDir.startsWith(home))
@@ -126,9 +138,44 @@ test("a .env in the directory the run starts from does not put removed names bac
 			`${PROJECT_DOTENV}=from-project-dotenv\nPI_CONFIG_FILES=/home/user/.omp/project-overlay.yml\n`,
 		);
 		const seen = await envSeenByTestIn(project, home, path.join(root, "project.json"));
-		// The probe starts its children outside this directory: a bun process started inside it loads
-		// its `.env` itself (Bun's own autoload, which only `--no-env-file` stops).
+		// The probe's children start in this directory too, where Bun's own autoload would read the
+		// `.env` again in each of them.
 		expect(leaksAndDrops([{ label: "project", seen }], [PROJECT_DOTENV, ...USER_NAMES])).toEqual({
+			leaks: [],
+			dropped: [],
+		});
+	});
+}, 180_000);
+
+// Windows reads environment names in any case but enumerates them as spelled, so `pi_config_files`
+// is PI_CONFIG_FILES to omp there.
+const WINDOWS_SPELLED_ENV: Record<string, string> = {
+	pi_config_files: "/home/user/.omp/overlay.yml",
+	Omp_Profile: "work",
+};
+
+test("on Windows, a name spelled in another case is removed too", async () => {
+	await withUserHome(async (root, home) => {
+		const project = path.join(root, "win32");
+		// The preload runs as on Windows; the test after it runs on the real platform again, so omp
+		// loads the native addon it has.
+		const asWindows = path.join(root, "as-windows.ts");
+		const asItself = path.join(root, "as-itself.ts");
+		await Bun.write(
+			asWindows,
+			[
+				'(globalThis as Record<string, unknown>).realPlatform = Object.getOwnPropertyDescriptor(process, "platform");',
+				'Object.defineProperty(process, "platform", { value: "win32", configurable: true });',
+			].join("\n"),
+		);
+		await Bun.write(
+			asItself,
+			'Object.defineProperty(process, "platform", (globalThis as Record<string, PropertyDescriptor>).realPlatform);\n',
+		);
+		const preloads = [asWindows, PRELOAD, asItself].map(file => JSON.stringify(file)).join(", ");
+		await Bun.write(path.join(project, "bunfig.toml"), `[test]\npreload = [${preloads}]\n`);
+		const seen = await envSeenByTestIn(project, home, path.join(root, "win32.json"), WINDOWS_SPELLED_ENV);
+		expect(leaksAndDrops([{ label: "win32", seen }], Object.keys(WINDOWS_SPELLED_ENV))).toEqual({
 			leaks: [],
 			dropped: [],
 		});

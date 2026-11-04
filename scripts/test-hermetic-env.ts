@@ -27,6 +27,11 @@
  *   Worker starts from `process.env` itself, but its ESM export cannot be
  *   replaced from a preload, so its own children are not covered; nothing in
  *   this repository constructs it.
+ * - A Bun process a test starts loads the `.env` of its working directory again
+ *   before any of its code runs, putting back a removed name the directory's
+ *   `.env` sets. `BUN_OPTIONS=--no-env-file` reaches every such process through
+ *   the environment it inherits; the names that `.env` gave this process are
+ *   in that environment already, and an explicit `--env-file` still loads.
  * - `packages/utils/src/env.ts` fills absent names from `~/.env`, the config
  *   root's `.env`, the agent dir's `.env` and the working directory's `.env`.
  *   `PI_TEST_INVOKING_HOME` and `PI_TEST_INVOKING_CWD` tell it which home and
@@ -85,7 +90,9 @@ const USER_NAMES = [
 	"XDG_CACHE_HOME",
 ];
 
-function isRemoved(name: string): boolean {
+function isRemoved(enumerated: string): boolean {
+	// Windows reads environment names in any case but enumerates them as spelled.
+	const name = process.platform === "win32" ? enumerated.toUpperCase() : enumerated;
 	if (USER_NAMES.includes(name)) return true;
 	if (!name.startsWith("PI_") && !name.startsWith("OMP_")) return false;
 	return KEEP_NAMES[name] !== true && !KEEP_PREFIXES.some(prefix => name.startsWith(prefix));
@@ -105,6 +112,8 @@ if (!inWorker) {
 	process.env.PI_TEST_INVOKING_CWD = process.cwd();
 	launchEnv.PI_TEST_INVOKING_HOME = process.env.PI_TEST_INVOKING_HOME;
 	launchEnv.PI_TEST_INVOKING_CWD = process.env.PI_TEST_INVOKING_CWD;
+	process.env.BUN_OPTIONS = [process.env.BUN_OPTIONS, "--no-env-file"].filter(Boolean).join(" ");
+	launchEnv.BUN_OPTIONS = process.env.BUN_OPTIONS;
 
 	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-test-agent-"));
 	process.env.PI_CODING_AGENT_DIR = agentDir;

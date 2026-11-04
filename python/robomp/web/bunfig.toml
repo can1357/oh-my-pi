@@ -1,0 +1,4 @@
+# `bun test` reads only the bunfig.toml in its working directory, so each workspace
+# names the preload that keeps the invoking user's omp environment out of its tests.
+[test]
+preload = ["../../../scripts/test-hermetic-env.ts"]

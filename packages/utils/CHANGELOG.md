@@ -9,6 +9,10 @@
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
 
+### Fixed
+
+- Fixed the repository's tests running with your shell's `PI_*`/`OMP_*` variables, your own `.env` files and your `~/.omp/agent` setup: every workspace's `bun test` now starts from a cleaned environment and an empty agent dir of its own, and so do the children and workers it starts
+
 ## [18.15.0] - 2026-11-01
 
 ### Added

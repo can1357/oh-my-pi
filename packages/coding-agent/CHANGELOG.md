@@ -17,6 +17,7 @@
 
 - `pr://<n>`, `issue://<n>`, and repo-less `github` tool calls in a checkout whose `upstream` remote is not the fork parent of `origin` now resolve to `origin` instead of the upstream project; `gh repo set-default` still wins
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
+- Fixed running the test suite adding test prompts to your real `~/.omp/agent/history.db`: under `bun test`, a test that chooses no agent dir gets an in-memory prompt history
 
 ## [18.15.0] - 2026-11-01
 
