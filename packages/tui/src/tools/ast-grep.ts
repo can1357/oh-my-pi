@@ -8,7 +8,7 @@ import {
 	fitHeaderedRows,
 	formatCount,
 	formatEmptyMessage,
-	formatErrorMessage,
+	formatErrorDetail,
 	formatParseErrorsCountLabel,
 	PREVIEW_LIMITS,
 	toPathList,
@@ -19,6 +19,7 @@ import {
 	createGroupedRowStyler,
 	describeGroupedOutput,
 	fitGroupsToBudget,
+	formatScopedSubject,
 	groupedLinkTargets,
 	groupLineIndicesByBlank,
 	groupsByFile,
@@ -64,6 +65,12 @@ interface AstGrepRenderArgs {
 	lang?: string;
 }
 
+/** Header subject, `pattern in scope`: the result's display scope, or the call's requested paths. */
+function astGrepSubject(args: AstGrepRenderArgs | undefined, uiTheme: Theme, scopePath?: string): string | undefined {
+	const scope = scopePath || toPathList(args?.path ?? args?.paths).join(", ") || undefined;
+	return formatScopedSubject(args?.pat ?? "?", scope, uiTheme);
+}
+
 const COLLAPSED_MATCH_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2;
 
 /** Render AST grep calls and results. */
@@ -71,11 +78,8 @@ export const astGrepToolRenderer = {
 	inline: true,
 	renderCall(args: AstGrepRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const meta: string[] = [];
-		const scopePaths = toPathList(args.path ?? args.paths);
-		if (scopePaths.length) meta.push(`in ${scopePaths.join(", ")}`);
 		if (args.skip !== undefined && args.skip > 0) meta.push(`skip:${args.skip}`);
-
-		const description = args.pat ?? "?";
+		const description = astGrepSubject(args, uiTheme);
 		const text = renderStatusLine({ icon: "pending", title: "AST Grep", description, meta }, uiTheme);
 		return new Text(text, 0, 0);
 	},
@@ -87,10 +91,12 @@ export const astGrepToolRenderer = {
 		args?: AstGrepRenderArgs,
 	): Component {
 		const details = result.details;
+		const description = astGrepSubject(args, uiTheme, details?.scopePath);
 
 		if (result.isError) {
 			const errorText = result.content?.find(c => c.type === "text")?.text || "Unknown error";
-			return new Text(formatErrorMessage(errorText, uiTheme), 0, 0);
+			const header = renderStatusLine({ icon: "error", title: "AST Grep", description }, uiTheme);
+			return new Text(`${header}\n${formatErrorDetail(errorText, uiTheme)}`, 0, 0);
 		}
 
 		const matchCount = details?.matchCount ?? 0;
@@ -99,9 +105,7 @@ export const astGrepToolRenderer = {
 		const limitReached = details?.limitReached ?? false;
 
 		if (matchCount === 0) {
-			const description = args?.pat;
 			const meta = ["0 matches"];
-			if (details?.scopePath) meta.push(`in ${details.scopePath}`);
 			if (filesSearched > 0) meta.push(`searched ${filesSearched}`);
 			const header = renderStatusLine({ icon: "warning", title: "AST Grep", description, meta }, uiTheme);
 			const lines = [header, formatEmptyMessage("No matches found", uiTheme)];
@@ -112,12 +116,8 @@ export const astGrepToolRenderer = {
 			return new Text(lines.join("\n"), 0, 0);
 		}
 
-		const summaryParts = [formatCount("match", matchCount), formatCount("file", fileCount)];
-		const meta = [...summaryParts];
-		if (details?.scopePath) meta.push(`in ${details.scopePath}`);
-		meta.push(`searched ${filesSearched}`);
+		const meta = [formatCount("match", matchCount), formatCount("file", fileCount), `searched ${filesSearched}`];
 		if (limitReached) meta.push(uiTheme.fg("warning", "limit reached"));
-		const description = args?.pat;
 		const header = renderStatusLine(
 			{
 				...(limitReached
@@ -147,6 +147,9 @@ export const astGrepToolRenderer = {
 			const first = allLines[indices[0]!]!;
 			return !first.startsWith("Result limit reached") && !first.startsWith("Parse issues:");
 		});
+		// Collapsed previews drop the per-match `meta:` capture rows; a match keeps all its rows,
+		// since only its first carries the `*` mark.
+		const compactGroups = matchGroups.map(group => group.filter(index => !allLines[index]!.startsWith("  meta:")));
 
 		const extraLines: string[] = [];
 		if (limitReached) {
@@ -162,7 +165,7 @@ export const astGrepToolRenderer = {
 			() => options.expanded,
 			width => {
 				const { shown, summary } = fitGroupsToBudget(
-					matchGroups,
+					options.expanded ? matchGroups : compactGroups,
 					options.expanded ? Number.POSITIVE_INFINITY : COLLAPSED_MATCH_LIMIT,
 					{ isUnit: index => isMatchRow(allLines[index]!), unit: "match", total: matchCount },
 				);
