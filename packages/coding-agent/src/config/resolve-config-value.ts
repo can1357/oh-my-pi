@@ -104,11 +104,16 @@ async function resolveCommandValue(valueConfig: string): Promise<string | undefi
 	const lastGood = commandLastGood.get(command);
 	const retryAt = commandFailureRetryAt.get(command);
 	if (retryAt !== undefined && Date.now() < retryAt) return lastGood;
+	const generation = commandGeneration.get(command) ?? 0;
 	const run = commandInFlight.get(command) ?? startCommandRun(command);
 	// After a failed run, the retry runs in the background while the last good value serves.
 	if (retryAt !== undefined && lastGood !== undefined) return lastGood;
+	const value = await run;
+	// An invalidation while the run was in flight (a 401, an explicit refresh) made its
+	// output stale: resolve again instead of handing the old value to this waiter.
+	if ((commandGeneration.get(command) ?? 0) !== generation) return resolveCommandValue(valueConfig);
 	// A 401 during the run drops the last good value, so read it after the run.
-	return (await run) ?? commandLastGood.get(command);
+	return value ?? commandLastGood.get(command);
 }
 
 function startCommandRun(command: string): Promise<string | undefined> {

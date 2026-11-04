@@ -6,7 +6,11 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
 import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { invalidateAllCommandConfigs, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
+import {
+	invalidateAllCommandConfigs,
+	invalidateCommandConfig,
+	resolveConfigValue,
+} from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -923,6 +927,29 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(await registry.getApiKey(model)).toBeUndefined();
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("111");
 	});
+
+	test.skipIf(process.platform === "win32")(
+		"a waiter whose run a 401 invalidated gets the fresh key, not the rejected one",
+		async () => {
+			const tokenFile = path.join(tempDir, "token.txt");
+			const readMarker = path.join(tempDir, "read");
+			fs.writeFileSync(tokenFile, "rejected-key");
+			// The helper reads the token first, signals that it did, then sleeps before printing it,
+			// so a run started before the rotation keeps printing the old value.
+			const config = `!IFS= read -r token < ${shellQuote(tokenFile)}; : > ${shellQuote(readMarker)}; sleep 1; printf %s "$token"`;
+			const waiter = resolveConfigValue(config);
+			const deadline = Date.now() + 10_000;
+			while (!fs.existsSync(readMarker) && Date.now() < deadline) await Bun.sleep(10);
+			expect(fs.existsSync(readMarker)).toBe(true);
+
+			// A 401 rejects the key while the waiter's run is still in flight, and the key rotates.
+			fs.writeFileSync(tokenFile, "fresh-key");
+			invalidateCommandConfig(config, "rejected");
+
+			expect(await waiter).toBe("fresh-key");
+			expect(await resolveConfigValue(config)).toBe("fresh-key");
+		},
+	);
 
 	test("a command that never succeeded still resolves to no key", async () => {
 		const counterFile = path.join(tempDir, "counter.txt");
