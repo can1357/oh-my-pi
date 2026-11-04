@@ -497,6 +497,14 @@ impl Theft {
 		if !key.physical {
 			return None;
 		}
+		// A physical ⌘/⌃ press chooses the target even when it already holds
+		// the keyboard, so no new focus notification announces the choice.
+		if self.stolen()
+			&& matches!(key.stroke, Some(Stroke::Press))
+			&& matches!(key.code, 54 | 55 | 59 | 62)
+		{
+			self.holder = Holder::UserChose;
+		}
 		let fresh = self.reroutes(secure, buttons).then_some(self.user);
 		self.publish(registry);
 		let target = self.target;
@@ -1423,6 +1431,15 @@ mod tests {
 		rig.steal();
 		rig.notify(NEW_FRONT, 1, TARGET);
 		assert_eq!(rig.key(Q, Stroke::Press), MOVED);
+		// A switch modifier pressed while it already holds the keyboard
+		// needs no repeated front-app notification to end the theft.
+		let mut rig = Rig::new();
+		rig.steal();
+		assert_eq!(rig.key(Q, Stroke::Press), MOVED);
+		assert_eq!(rig.key(55, Stroke::Press), KEPT);
+		assert_eq!(rig.key(LEFT_SHIFT, Stroke::Press), KEPT);
+		assert_eq!(rig.key(Q, Stroke::Release), MOVED);
+		assert_eq!(rig.key(55, Stroke::Release), KEPT);
 
 		// The same, read back after the focus tap was disabled.
 		for (front, focus, signals) in
