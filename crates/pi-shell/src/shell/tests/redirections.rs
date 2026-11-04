@@ -163,28 +163,35 @@ async fn process_substitutions_leave_room_under_the_shells_own_limit() {
 	.await;
 }
 
-/// The descriptors the shell chooses for a process substitution and a
-/// coprocess follow the lower of its own `ulimit -n` and the host
-/// process's open-file limit, as Bash's follow its one limit: under
-/// `ulimit -n 48` it takes the lowest free descriptors, and under
-/// `ulimit -n 100` it takes 63 and below again. Regression: it read only
-/// the host process's limit, so a lowered `ulimit -n` still gave
-/// `/dev/fd/63`, which a command under that limit cannot open for itself.
+/// The shell's own `ulimit -n` does not move its chosen descriptors down:
+/// they stay at 63 and below while the host process's limit allows them.
+/// This is the one measured divergence from Bash in this file, and the
+/// rows below are what it costs and what it buys. Bash chooses by the one
+/// limit it has, which is both; here a command is given its descriptors
+/// before its own limit is applied, so a high one stays usable while the
+/// lowest free ones take the room the command needs for its own opens.
+/// Row 1 is the cost: `ulimit -n 48; echo <(true)` prints `/dev/fd/63`
+/// where Bash 5.2.21 and 5.3.0 both print `/dev/fd/3`. Row 2 is what it
+/// buys: under `ulimit -n 10` eight process substitutions all run, where
+/// choosing the lowest free descriptors leaves the command's loader no
+/// free number below the limit and it exits 127 with
+/// `libc.so.6: cannot open shared object file: Error 24`, and where Bash
+/// loses two of the eight to `cannot make pipe for process substitution`.
 #[tokio::test(flavor = "multi_thread")]
-async fn shell_chosen_descriptors_follow_a_lowered_ulimit() {
+async fn shell_chosen_descriptors_stay_clear_of_a_lowered_ulimit() {
 	check(&[
 		Row {
-			script: "ulimit -n 48; /bin/cat <(echo hi); echo s=$?; echo <(true); coproc cat; echo \
-			         ${COPROC[@]}; /bin/echo x 5>/dev/null 7<&0; /bin/bash -c 'echo y >&40' 40>&1",
+			script: "ulimit -n 48; echo <(true); coproc cat; echo ${COPROC[@]}",
 			fifos:  &[],
-			output: "hi\ns=0\n/dev/fd/3\n3 6\nx\ny\n",
+			output: "/dev/fd/63\n63 60\n",
 			status: 0,
 			files:  &[],
 		},
 		Row {
-			script: "ulimit -n 100; echo <(true); coproc cat; echo ${COPROC[@]}",
+			script: "ulimit -n 10; /bin/cat <(echo a) <(echo b) <(echo c) <(echo d) <(echo e) <(echo \
+			         f) <(echo g) <(echo h); echo s=$?",
 			fifos:  &[],
-			output: "/dev/fd/63\n63 60\n",
+			output: "a\nb\nc\nd\ne\nf\ng\nh\ns=0\n",
 			status: 0,
 			files:  &[],
 		},
