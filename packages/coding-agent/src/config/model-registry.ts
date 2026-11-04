@@ -1256,28 +1256,32 @@ export class ModelRegistry {
 		this.#customProviderApiKeys.clear();
 		this.#keylessProviders.clear();
 		this.#discoverableProviders = [];
-		// Drop config-sourced apiKeys from AuthStorage before reload; entries
-		// removed from models.yml must actually disappear from the resolver, not
-		// linger from the previous parse. The post-load setters below repopulate.
-		if (!this.#owner) this.authStorage.keys.clearConfig();
-		// Runtime API keys are installed on both sides of #loadModels: before, so
-		// the load sees every provider's configured auth as it did at startup;
-		// after, so a runtime key outranks the models.yml key for its provider
-		// across every reload, as registration made it (installed after the
-		// startup load), and a request never pairs a runtime endpoint with the
-		// models.yml credential.
-		const installRuntimeKeys = () => {
-			for (const [provider, { keyConfig, fallback }] of this.#runtimeProviderApiKeys) {
-				this.#installProviderApiKey(provider, keyConfig, { fallback });
-			}
-		};
-		installRuntimeKeys();
-		this.#providerOverrides.clear();
-		this.#modelOverrides.clear();
-		this.#configError = undefined;
-		this.#providerDiscoveryStates.clear();
-		this.#loadModels();
-		installRuntimeKeys();
+		// One key-store batch: a provider whose key the reload leaves as it was
+		// keeps its key generation, so its in-flight discovery is not refused.
+		this.authStorage.keys.batch(() => {
+			// Drop config-sourced apiKeys from AuthStorage before reload; entries
+			// removed from models.yml must actually disappear from the resolver, not
+			// linger from the previous parse. The post-load setters below repopulate.
+			if (!this.#owner) this.authStorage.keys.clearConfig();
+			// Runtime API keys are installed on both sides of #loadModels: before, so
+			// the load sees every provider's configured auth as it did at startup;
+			// after, so a runtime key outranks the models.yml key for its provider
+			// across every reload, as registration made it (installed after the
+			// startup load), and a request never pairs a runtime endpoint with the
+			// models.yml credential.
+			const installRuntimeKeys = () => {
+				for (const [provider, { keyConfig, fallback }] of this.#runtimeProviderApiKeys) {
+					this.#installProviderApiKey(provider, keyConfig, { fallback });
+				}
+			};
+			installRuntimeKeys();
+			this.#providerOverrides.clear();
+			this.#modelOverrides.clear();
+			this.#configError = undefined;
+			this.#providerDiscoveryStates.clear();
+			this.#loadModels();
+			installRuntimeKeys();
+		});
 		this.#syncConfigEpochs();
 		if (!preservedRuntimeState) return;
 
@@ -1686,12 +1690,21 @@ export class ModelRegistry {
 	 *  - the key config installed for the provider and its keyless (`auth:
 	 *    none`) membership;
 	 *  - the owning extension registration, by object identity (its fetcher is
-	 *    a function and has no value to compare).
+	 *    a function and has no value to compare);
+	 *  - AuthStorage's key generation for the provider (`keys.generation`),
+	 *    which moves on every change to the runtime key, config key or config
+	 *    fallback AuthStorage holds, however it was made: `--api-key`, another
+	 *    thread through the `keys.*` service, or an SDK caller. It is a
+	 *    counter, so a change and a change back differ here even with no
+	 *    `#syncConfigEpochs` in between. A mirror (`#owner`) sends no discovery
+	 *    request and leaves it out.
 	 * Two normalizations, both of meaning-free spelling: endpoints by
 	 * `normalizeModelCacheEndpoint`, and object member order by `canonicalJson`.
 	 * Excluded by design: stored login credentials in AuthStorage (account
 	 * state, not configuration; a token refresh or a re-login sends to the same
-	 * configured host).
+	 * configured host). Not covered: provider key environment variables
+	 * changed in-process, and a `!command` key whose output changes between
+	 * runs; neither is a write to AuthStorage.
 	 *
 	 * Publication test: a discovery result or discovery state is published
 	 * only while this value equals the one captured before the discovery's
@@ -1729,6 +1742,7 @@ export class ModelRegistry {
 			runtimeKey: this.#runtimeProviderApiKeys.get(providerId) ?? null,
 			installedKey: this.#customProviderApiKeys.get(providerId) ?? null,
 			keyless: this.#keylessProviders.has(providerId),
+			keyGeneration: this.#owner ? null : this.authStorage.keys.generation(providerId),
 		});
 	}
 
