@@ -1,10 +1,14 @@
 import { executeShell } from "@oh-my-pi/pi-natives";
 import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
+import { effectsSettings } from "./registry";
 
 const COMMAND_FAILURE_RETRY_MS = 30_000;
 /** Default of the `providers.commandTimeoutSeconds` setting, in milliseconds. */
 export const DEFAULT_COMMAND_TIMEOUT_MS = 10_000;
+/** Set by the `providers.commandTimeoutSeconds` effect of the settings that drive effects. */
 let commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
+/** Reads the time limit from the settings a process without a settings owner resolves credentials for. */
+let readStandaloneCommandTimeoutMs: (() => number) | undefined;
 /** Fresh stdout, served without re-running the command until it is invalidated. */
 const commandResultCache = new Map<string, string>();
 /**
@@ -46,10 +50,33 @@ export interface ConfigHeaderResolutionOptions {
 
 /**
  * Set the time limit of each `!command` run (setting `providers.commandTimeoutSeconds`).
- * A non-positive or non-finite value restores the 10 s default.
+ * A non-positive or non-finite value restores the 10 s default. The settings
+ * effect calls this for the settings instance that drives effects.
  */
 export function configureCommandTimeoutMs(timeoutMs: number): void {
 	commandTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_COMMAND_TIMEOUT_MS;
+}
+
+/**
+ * Name the source of the time limit for a process whose effects no settings
+ * instance drives (a standalone command such as `omp token`, `omp usage` or
+ * `omp auth-broker status`): `read` is consulted at each run, so it follows the
+ * settings that credential resolution was given. While some settings drive
+ * effects (`Settings.init`, an SDK session's `bindEffects`), their limit wins
+ * and this source is not consulted, so it never overrides an owner. With
+ * `keepExisting`, a source named earlier (by a caller that passed its own
+ * settings) stays.
+ */
+export function useStandaloneCommandTimeout(read: () => number, options?: { keepExisting?: boolean }): void {
+	if (options?.keepExisting && readStandaloneCommandTimeoutMs !== undefined) return;
+	readStandaloneCommandTimeoutMs = read;
+}
+
+/** The limit of a run starting now: the effect owner's, else the standalone source's, else the last one set. */
+function currentCommandTimeoutMs(): number {
+	if (effectsSettings() !== undefined || readStandaloneCommandTimeoutMs === undefined) return commandTimeoutMs;
+	const timeoutMs = readStandaloneCommandTimeoutMs();
+	return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_COMMAND_TIMEOUT_MS;
 }
 
 /** Identify command-backed values when collecting credentials that must be invalidated together. */
@@ -118,7 +145,7 @@ async function resolveCommandValue(valueConfig: string): Promise<string | undefi
 
 function startCommandRun(command: string): Promise<string | undefined> {
 	const generation = commandGeneration.get(command) ?? 0;
-	const timeoutMs = commandTimeoutMs;
+	const timeoutMs = currentCommandTimeoutMs();
 	const startedAt = performance.now();
 	const promise: Promise<string | undefined> = runConfigCommand(command, timeoutMs)
 		.then(outcome => {
@@ -287,4 +314,5 @@ export function createConfigHeaderResolver(
 export function clearConfigValueCache(): void {
 	invalidateAllCommandConfigs("rejected");
 	commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
+	readStandaloneCommandTimeoutMs = undefined;
 }

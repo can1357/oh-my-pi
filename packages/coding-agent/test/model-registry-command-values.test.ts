@@ -7,6 +7,7 @@ import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
+	clearConfigValueCache,
 	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
 	resolveConfigValue,
@@ -16,9 +17,12 @@ import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import "@oh-my-pi/pi-coding-agent/session/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { resolveEffectiveSettings } from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
+import {
+	resolveAuthBrokerConfig,
+	resolveEffectiveSettings,
+} from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
 import * as piUtils from "@oh-my-pi/pi-utils";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { getAgentDir, removeSyncWithRetries, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
 
 function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;
@@ -987,24 +991,77 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		}
 	});
 
-	test.skipIf(process.platform === "win32")(
-		"a process without global settings takes the command time limit from credential discovery's settings",
-		async () => {
-			// `omp token` and other standalone commands never call `Settings.init`, so no effect
-			// applies `providers.commandTimeoutSeconds`; credential discovery's read-only load must.
+	/** Config dir whose config.yml sets `commandTimeoutSeconds` (and optionally more YAML). */
+	function scopeWithTimeout(name: string, seconds: number, extraYaml = ""): string {
+		const agentDir = path.join(tempDir, name);
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			`providers:\n  commandTimeoutSeconds: ${seconds}\n${extraYaml}`,
+		);
+		return agentDir;
+	}
+
+	// Each case starts from a 0.5 s process limit left by an earlier owner, shorter than its 1 s helper,
+	// so only the limit the case's own settings name lets the helper finish.
+	describe.skipIf(process.platform === "win32")("standalone command time limit", () => {
+		beforeEach(() => {
 			expect(Settings.current).toBeNull();
-			const agentDir = path.join(tempDir, "standalone-agent");
-			fs.mkdirSync(agentDir, { recursive: true });
-			fs.writeFileSync(path.join(agentDir, "config.yml"), "providers:\n  commandTimeoutSeconds: 30\n");
+			bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 0.5 }))();
+		});
+		afterEach(() => {
+			bindEffects(Settings.isolated({}))();
+			clearConfigValueCache();
+		});
+
+		test("credential discovery's read-only load names the limit (omp token)", async () => {
+			const agentDir = scopeWithTimeout("standalone-agent", 30);
+			await resolveEffectiveSettings({ cwd: tempDir, agentDir });
+			const marker = path.join(tempDir, "standalone");
+			expect(await resolveConfigValue(`!sleep 1; printf %s ${shellQuote(marker)}`)).toBe(marker);
+		});
+
+		test("settings a caller passes to credential discovery name the limit (omp usage)", async () => {
+			const agentDir = scopeWithTimeout("explicit-agent", 30);
+			const settings = await Settings.loadReadOnly({ cwd: tempDir, agentDir });
+			await resolveEffectiveSettings({ settings });
+			const marker = path.join(tempDir, "explicit");
+			expect(await resolveConfigValue(`!sleep 1; printf %s ${shellQuote(marker)}`)).toBe(marker);
+		});
+
+		test("a !command broker token runs under the agent dir's limit (omp auth-broker, auth-gateway)", async () => {
+			const agentDir = scopeWithTimeout(
+				"broker-agent",
+				30,
+				`auth:\n  broker:\n    url: http://127.0.0.1:9\n    token: ${JSON.stringify("!sleep 1; printf broker-token")}\n`,
+			);
+			const previousAgentDir = getAgentDir();
+			const previousEnv = Object.fromEntries(
+				["PI_CODING_AGENT_DIR", "OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"].map(key => [key, process.env[key]]),
+			);
+			delete process.env.OMP_AUTH_BROKER_URL;
+			delete process.env.OMP_AUTH_BROKER_TOKEN;
+			setAgentDir(agentDir);
 			try {
-				// Start from a limit shorter than the helper, so only the configured one lets it finish.
-				bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 0.5 }))();
-				await resolveEffectiveSettings({ cwd: tempDir, agentDir });
-				const marker = path.join(tempDir, "standalone");
+				expect(await resolveAuthBrokerConfig()).toEqual({ url: "http://127.0.0.1:9", token: "broker-token" });
+			} finally {
+				setAgentDir(previousAgentDir);
+				for (const [key, value] of Object.entries(previousEnv)) {
+					if (value === undefined) delete process.env[key];
+					else process.env[key] = value;
+				}
+			}
+		});
+
+		test("settings that drive effects keep their limit when discovery loads another scope", async () => {
+			const releaseOwner = bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 30 }));
+			try {
+				await resolveEffectiveSettings({ cwd: tempDir, agentDir: scopeWithTimeout("other-scope", 0.5) });
+				const marker = path.join(tempDir, "owned");
 				expect(await resolveConfigValue(`!sleep 1; printf %s ${shellQuote(marker)}`)).toBe(marker);
 			} finally {
-				bindEffects(Settings.isolated({}))();
+				releaseOwner();
 			}
-		},
-	);
+		});
+	});
 });
