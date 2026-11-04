@@ -1613,8 +1613,8 @@ export class ExtensionRunner {
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
 			reloadPlugins: async () => {
-				if (this.#mode !== "tui" || !this.#reloadPluginsFn) {
-					throw new Error("reloadPlugins is only available in the interactive TUI");
+				if (agent.kind !== "main" || this.#mode !== "tui" || !this.#reloadPluginsFn) {
+					throw new Error("reloadPlugins is only available in the main interactive TUI");
 				}
 				await this.#reloadPluginsFn();
 			},

@@ -5,7 +5,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -42,7 +42,7 @@ describe("ctx.reloadPlugins", () => {
 	});
 	afterAll(() => registry.authStorage.close());
 
-	async function tui() {
+	async function tui(install?: (api: ExtensionAPI) => void) {
 		const dir = TempDir.createSync("omp-extension-reload-");
 		cleanups.push(() => dir.removeSync());
 		setProjectDir(dir.path());
@@ -61,6 +61,7 @@ describe("ctx.reloadPlugins", () => {
 					pi.on("session_start", (_event, context) => {
 						captured.context = context;
 					});
+					install?.(pi);
 				},
 			],
 			skills: [],
@@ -132,6 +133,60 @@ describe("ctx.reloadPlugins", () => {
 		await session.waitForIdle();
 		await context.reloadPlugins();
 		expect(session.slashCommands.some(command => command.name === "reload-check")).toBe(true);
+	});
+
+	it("keeps advisor tool hooks from reloading the host TUI's command catalog", async () => {
+		let callerKind: string | undefined;
+		let failure: unknown;
+		const { session, cwd } = await tui(pi => {
+			pi.on("tool_call", async (_event, ctx) => {
+				callerKind = ctx.agent.kind;
+				try {
+					await ctx.reloadPlugins();
+				} catch (error) {
+					failure = error;
+				}
+			});
+		});
+		await addCommand(cwd);
+		const runner = session.extensionRunner;
+		if (!runner) throw new Error("Expected the shared extension runner");
+
+		await runner.emitToolCall(
+			{
+				type: "tool_call",
+				toolName: "read",
+				toolCallId: "advisor-reload-18034",
+				input: { path: path.join(cwd, "README.md") },
+			},
+			undefined,
+			{ kind: "sub", id: "advisor", name: "advisor", depth: 0, parentId: session.sessionId },
+		);
+
+		expect(callerKind).toBe("sub");
+		expect(failure).toBeInstanceOf(Error);
+		expect(session.slashCommands.some(command => command.name === "reload-check")).toBe(false);
+	});
+
+	it("lets an idle main-agent extension command reload without a model turn", async () => {
+		let admittedAtReload = false;
+		const owner: { session?: { readonly hasAdmittedSubmission: boolean } } = {};
+		const { session, provider, cwd } = await tui(pi => {
+			pi.registerCommand("refresh-local-18034", {
+				handler: async (_args, ctx) => {
+					admittedAtReload = owner.session?.hasAdmittedSubmission === true;
+					await ctx.reloadPlugins();
+				},
+			});
+		});
+		owner.session = session;
+		await addCommand(cwd);
+
+		await session.prompt("/refresh-local-18034");
+
+		expect(admittedAtReload).toBe(true);
+		expect(session.slashCommands.some(command => command.name === "reload-check")).toBe(true);
+		expect(provider.calls).toEqual([]);
 	});
 
 	it("revokes a saved TUI context's reload capability when rebound to a headless host", async () => {

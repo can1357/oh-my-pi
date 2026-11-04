@@ -754,7 +754,7 @@ export interface ExtensionContext {
 	getAsyncJobSnapshot(): AsyncJobSnapshot | null;
 	/** Compact the session context (interactive mode shows UI). */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
-	/** Reload plugins without changing the editor draft. Rejects outside an idle interactive TUI or on failure. */
+	/** Reload plugins without changing the editor draft. Main agent in an idle interactive TUI only; failures reject. */
 	reloadPlugins(): Promise<void>;
 	/** Whether UI is available (false in print/RPC mode) */
 	hasUI: boolean;
