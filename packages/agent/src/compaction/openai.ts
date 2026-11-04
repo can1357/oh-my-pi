@@ -39,6 +39,7 @@ import type {
 	Message,
 	Model,
 	ProviderSessionState,
+	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai/types";
 import {
 	dropMalformedOpenAIResponsesToolCalls,
@@ -59,7 +60,16 @@ import {
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
-import { $env, isRecord, logger, prompt, ptree, stringifyJson, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	isRecord,
+	logger,
+	prompt,
+	ptree,
+	stringifyJson,
+	structuredCloneJSON,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import { dataUrlImageSize } from "../image-tokens";
 import { Tokenizer } from "../tokenizer";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
@@ -1059,16 +1069,24 @@ export async function requestOpenAiRemoteCompaction(
  * HTTP 400 `"'messages' is required"`, compaction silently fell back to
  * local summarization, and context grew unbounded.
  *
- * When `context.model` is provided the chat-completions body is tagged with
- * that model's wire id (llama.cpp requires the field) and `context.apiKey` is
- * forwarded as `Authorization: Bearer`. Callers wrap this in `withAuth` so
- * 401s force-refresh through the standard credential rotation policy.
+ * On chat-completions endpoints the model's request headers are resolved for
+ * each call, its wire id is sent (llama.cpp requires it), and `opts.apiKey` is
+ * forwarded as `Authorization: Bearer`. Custom summarizers receive no model
+ * credentials. `opts.onPayload` can inspect or replace either request body.
+ * Callers wrap this in `withAuth` so 401s force-refresh through the standard
+ * credential rotation policy.
  */
 export async function requestRemoteCompaction(
 	endpoint: string,
 	request: RemoteCompactionRequest,
 	signal?: AbortSignal,
-	opts?: { fetch?: FetchImpl; timeoutMs?: number; model?: Model; apiKey?: string },
+	opts?: {
+		fetch?: FetchImpl;
+		timeoutMs?: number;
+		model?: Model;
+		apiKey?: string;
+		onPayload?: SimpleStreamOptions["onPayload"];
+	},
 ): Promise<RemoteCompactionResponse> {
 	let endpointPath = endpoint;
 	try {
@@ -1080,10 +1098,16 @@ export async function requestRemoteCompaction(
 	const headers: Record<string, string> = { "content-type": "application/json" };
 	if (isChatCompletions) {
 		if (opts?.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;
-		if (opts?.model?.headers) Object.assign(headers, opts.model.headers);
+		const model = opts?.model;
+		const resolveHeaders = model?.resolveHeaders;
+		const configuredHeaders = resolveHeaders
+			? await untilAborted(signal, () => resolveHeaders(signal))
+			: model?.headers;
+		signal?.throwIfAborted();
+		if (configuredHeaders) Object.assign(headers, configuredHeaders);
 	}
 
-	const body: Record<string, unknown> = isChatCompletions
+	let body: unknown = isChatCompletions
 		? {
 				model: opts?.model ? resolveOpenAiCompactModel(opts.model) : undefined,
 				messages: [
@@ -1094,6 +1118,8 @@ export async function requestRemoteCompaction(
 				max_tokens: request.maxTokens,
 			}
 		: { systemPrompt: request.systemPrompt, prompt: request.prompt, maxTokens: request.maxTokens };
+	const replacement = await opts?.onPayload?.(body, opts.model, signal);
+	if (replacement !== undefined) body = replacement;
 
 	const response = await (opts?.fetch ?? fetch)(endpoint, {
 		method: "POST",
