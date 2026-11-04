@@ -22,7 +22,8 @@
 //! - **Input** (engine → child) runs until the engine side reaches end of file
 //!   (then flushed), the child closes its end (`EPIPE`), or the tracker cancels
 //!   it (the child exited, the spawn failed or the `ExtProc` was dropped); a
-//!   cancel wakes the poller, which drops the input work.
+//!   cancel wakes the poller, which drops the input work. An exit is reported
+//!   only once the input work it cancelled is gone.
 //! - **Feed** (engine fd object → children): input from an engine fd object
 //!   goes through one OS pipe per object, shared by every external and fd it is
 //!   handed to ([`Feed`]), as bash shares one kernel pipe. A pump per handoff
@@ -50,9 +51,18 @@ use parking_lot::Mutex;
 
 use self::os::OsPipe;
 use crate::{
-	bash::{FdRef, File},
+	bash::{ExitStatus, FdRef, File},
 	sys::lifecycle::Tracker,
 };
+
+#[cfg(test)]
+thread_local! {
+	/// Test seam: the next [`Pumps::poll_wait`] on this thread runs it once,
+	/// after polling the pumps and before polling the exit, where a waiter
+	/// thread's exit can land.
+	pub static BETWEEN_POLLS: std::cell::RefCell<Option<Box<dyn FnOnce(&Tracker)>>> =
+		const { std::cell::RefCell::new(None) };
+}
 
 /// Engine side of a pump.
 pub enum End {
@@ -362,11 +372,30 @@ impl Pumps {
 		Self { tasks, feeds }
 	}
 
+	/// The exit `tracker` observed, once the output has drained, reported
+	/// only after the input work the exit cancelled is gone, so an exited
+	/// child holds no engine object. What `ExtProc::poll_wait` returns;
+	/// every side that cannot go on has registered `cx`'s waker.
+	pub fn poll_wait(&mut self, cx: &mut Context<'_>, tracker: &Tracker) -> Poll<ExitStatus> {
+		self.poll(cx, tracker);
+		#[cfg(test)]
+		if let Some(hook) = BETWEEN_POLLS.take() {
+			hook(tracker);
+		}
+		let status = std::task::ready!(tracker.poll(cx));
+		// The waiter thread can record the exit after `poll` read the
+		// cancellation, leaving input work running. Recording the exit cancels
+		// the input first ([`Tracker::exited`]) and the drained output pumps
+		// are gone, so what is left is input work: it ends here.
+		self.tasks.retain_mut(|t| t.poll(cx, true).is_pending());
+		debug_assert!(self.tasks.is_empty(), "only cancelled input work outlives the drain");
+		Poll::Ready(status)
+	}
+
 	/// Move what can move now; every side that cannot go on has registered
 	/// `cx`'s waker. Input pumps are dropped once `tracker` cancelled them.
-	/// Also advances retained [`orphan`] work. Called by
-	/// `ExtProc::poll_wait` before it polls the tracker.
-	pub fn poll(&mut self, cx: &mut Context<'_>, tracker: &Tracker) {
+	/// Also advances retained [`orphan`] work.
+	fn poll(&mut self, cx: &mut Context<'_>, tracker: &Tracker) {
 		let cancelled = tracker.pumps_cancelled(cx.waker());
 		self
 			.tasks

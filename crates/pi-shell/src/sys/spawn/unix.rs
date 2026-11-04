@@ -1294,8 +1294,7 @@ impl ExtProc for UnixProc {
 		if self.pidfd.is_some() && !self.exited_now() {
 			self.await_exit(cx.waker());
 		}
-		self.pumps.poll(cx, &self.tracker);
-		self.tracker.poll(cx)
+		self.pumps.poll_wait(cx, &self.tracker)
 	}
 
 	fn signal(&mut self, sig: Signal) -> io::Result<()> {

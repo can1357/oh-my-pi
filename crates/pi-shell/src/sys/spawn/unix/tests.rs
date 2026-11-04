@@ -979,6 +979,30 @@ fn input_waiting_for_engine_bytes_is_dropped_with_the_child() {
 	until("the abandoned child is gone", || s.leftovers().unwrap().is_empty());
 }
 
+/// The waiter thread records the exit after `poll_wait` polled the pumps
+/// (which kept the input work: not cancelled yet) and before it polled the
+/// exit. The exit `poll_wait` then reports has still released the engine
+/// object: an exited child holds no input source.
+#[test]
+fn an_exit_between_the_pump_and_exit_polls_still_releases_the_input() {
+	let env = EnvView::default();
+	let s = NativeSpawner::default();
+	let silent = Silent::default();
+	let a = argv(&["/bin/sleep", "30"]);
+	let mut sp = spec(&a, &env, NEW);
+	sp.stdio = [StdioSpec::File(Box::new(silent.clone())), StdioSpec::Null, StdioSpec::Null];
+	let mut p = s.spawn(sp).unwrap();
+	let pid = i32::try_from(p.pid()).unwrap();
+	crate::sys::pump::BETWEEN_POLLS.set(Some(Box::new(move |tracker| {
+		// SAFETY: signals our own child, which is not reaped while its
+		// `ExtProc` lives.
+		assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+		until("the waiter thread recorded the exit", || tracker.lock().has_exited());
+	})));
+	assert_eq!(wait(&mut p), ExitStatus::Signaled(Signal::Term));
+	assert_eq!(Arc::strong_count(&silent.0), 1, "the reported exit released the engine object");
+}
+
 #[test]
 fn external_dies_of_sigpipe_when_the_engine_reader_is_gone() {
 	let env = EnvView::default();

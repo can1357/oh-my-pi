@@ -172,7 +172,7 @@ impl Lifecycle {
 
 	/// Whether the exit has been observed.
 	#[cfg_attr(
-		not(target_os = "linux"),
+		not(any(target_os = "linux", all(test, unix))),
 		expect(dead_code, reason = "only Linux externals observe their own exit (pidfd)")
 	)]
 	pub const fn has_exited(&self) -> bool {
