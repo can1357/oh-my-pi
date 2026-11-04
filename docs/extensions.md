@@ -307,7 +307,7 @@ Also exposed:
 
 ### Todo backends (`registerTodoBackend`)
 
-A todo backend mirrors the session todo list into an external store (a task tracker, a database, a file).
+A todo backend mirrors the session todo list into an external store (a task tracker, a database, a file). Users pick one with the `todo.backend` setting (default `native`).
 
 ```ts
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -340,12 +340,11 @@ interface TodoBackend {
 
 - omp applies each `todo` op natively, then calls `apply(op, params, next, signal)` before committing `next`. The session transcript stays the source of truth; the backend mirrors it. `params` holds only the keys declared by the `todo` tool schema; the tool validates leniently, so their values are passed as the model sent them once omp applied them without errors.
 - `replace(phases)` receives the full new list for edits made outside the `todo` tool. Exactly these writers call it: the interactive `/todo` verbs (append, start, done, drop, rm, import, edit), the ACP/text-mode `/todo` command, the RPC `set_todos` command, the Cursor todo mirror, and the interactive subagent auto-complete. If `replace` throws, the edit is refused: the list is unchanged and each writer reports the error as it does its other failures. A `todo` call made from an eval cell goes through the `todo` tool, so it reaches `apply` and never `replace`. Resets (`/new`, the `/tan` clone clear, transcript reloads) call neither.
-- Calls run one at a time per session. A throw fails that call and leaves the list unchanged.
+- Calls run one at a time per session. A throwing `apply` fails that `todo` call and leaves the list unchanged.
 - `create`, `apply` and `replace` run like event handlers: in the session's settings scope and within the 30-second handler budget. When the budget runs out, or the user aborts the `todo` call while `apply` is pending, omp aborts `signal`, fails the call with the list unchanged and stops waiting, so the next call can start while one that ignores `signal` is still running. Your backend may then be one op ahead; the next `apply` or `replace` carries the full list. A `create` that runs out of the budget falls back to native todos, and dialogs it opened through `ctx.ui` close. A write aborted before it started never reaches `apply`, and a write queued across `/new`, a session switch, a rewind or a fork from an earlier message is dropped rather than applied to the new list. A fork of the whole session keeps the list, so its queued writes still apply.
 - `native` is reserved and duplicate ids are rejected: `registerTodoBackend` throws. Register during the factory, like `registerTool`; an extension whose factory throws keeps none of its backends.
-- Users select a backend with the `todo.backend` setting (default `native`).
 - Main session only: subagents (prewalk-armed ones included), `/tan` clones and seance use native todos. A prewalk in the main session uses the selected backend.
-- If `create` throws, or `todo.backend` names an id that is not registered, omp falls back to native todos and shows one notice naming the id and the reason. The backend resolves once startup-deferred extensions are loaded, so the notice never appears before they are bound; a `todo` call that arrives earlier waits for the resolution.
+- If `create` throws, or `todo.backend` names an id that is not registered, omp falls back to native todos and shows one notice naming the id and the reason. Resolution waits for startup-deferred extensions, and a `todo` call that arrives earlier waits for it.
 - Changing `todo.backend` mid-session takes effect after the writes already queued finish: the next write goes to the new backend, and `native` stops mirroring. A switch calls neither `apply` nor `replace`, so it does not copy the current list into the new backend.
 - Disabling the backend's extension mid-session (`disabledExtensions`) hides its backends from `/settings` and works like a switch to an unregistered id: native todos and one notice. Re-enabling the extension switches back.
 

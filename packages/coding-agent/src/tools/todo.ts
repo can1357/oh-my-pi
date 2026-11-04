@@ -74,36 +74,8 @@ const todoSchema = type({
 export type TodoParams = TodoSchema;
 type TodoSchema = typeof todoSchema.infer;
 
-/**
- * Keys `todoSchema` declares. Typed as a full `Record` so adding or removing a schema key without
- * updating this list fails to compile.
- */
-const TODO_PARAM_KEYS: Record<keyof TodoSchema, true> = {
-	op: true,
-	list: true,
-	task: true,
-	phase: true,
-	items: true,
-	reason: true,
-};
-
-/**
- * Drop keys the schema does not declare, at the top level and inside `list` entries.
- * `lenientArgValidation` lets raw model arguments reach `execute`, and omptype objects keep
- * undeclared keys, so backends would otherwise see them.
- */
-function stripToTodoParams(entry: TodoParams): TodoParams {
-	const stripped: TodoParams = { op: entry.op };
-	let key: keyof TodoSchema;
-	for (key in TODO_PARAM_KEYS) copyTodoParam(entry, stripped, key);
-	if (stripped.list) stripped.list = stripped.list.map(({ phase, items }) => ({ phase, items }));
-	return stripped;
-}
-
-function copyTodoParam<K extends keyof TodoSchema>(from: TodoParams, to: TodoParams, key: K): void {
-	const value = from[key];
-	if (value !== undefined) to[key] = value;
-}
+// Lenient arg validation lets undeclared keys reach `execute`; backends must not see them.
+const toBackendParams = todoSchema.onDeepUndeclaredKey("delete");
 
 /** A single todo op entry (the params object itself). */
 type TodoOpEntryValue = TodoParams;
@@ -827,7 +799,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		const completedTasks = readOnly || failed ? [] : getCompletionTransitions(previousPhases, updated);
 		if (active && !readOnly && !failed) {
 			try {
-				await active.apply(op, stripToTodoParams(entry), clonePhases(updated), signal);
+				await active.apply(op, toBackendParams.assert(entry), clonePhases(updated), signal);
 			} catch (error) {
 				return {
 					content: [

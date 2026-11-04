@@ -217,9 +217,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		sourceId: string;
 	}> = [];
 
-	get todoBackends(): TodoBackendRegistry {
-		return this.runtime.todoBackends;
-	}
+	readonly todoBackends = new TodoBackendRegistry();
 
 	get pi() {
 		return getCodingAgentApi();

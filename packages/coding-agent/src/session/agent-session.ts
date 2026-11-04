@@ -268,7 +268,7 @@ import {
 } from "../tools/resolve";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
-import type { ActiveTodoBackend, TodoCommitOptions, TodoPhasesUpdate, TodoWriteGuard } from "../tools/todo-backend";
+import type { TodoCommitOptions, TodoPhasesUpdate, TodoWrite } from "../tools/todo-backend";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { currentThreadId, isMainThread } from "../thread/identity";
@@ -11084,10 +11084,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/** Queue a todo write; see {@link TodoWrites.run}. */
-	runTodoWrite<T>(
-		write: (active: ActiveTodoBackend | undefined, guard: TodoWriteGuard) => Promise<T>,
-		options?: { signal?: AbortSignal },
-	): Promise<T> {
+	runTodoWrite<T>(write: TodoWrite<T>, options?: { signal?: AbortSignal }): Promise<T> {
 		return this.#todoWrites.run(write, options);
 	}
 

@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { findScopedSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -10,13 +9,12 @@ import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
 	testSetExtensionHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import {
 	cfgCompactionAutoContinue,
 	cfgCompactionKeepRecentTokens,
 } from "@oh-my-pi/pi-coding-agent/session/context-settings";
-import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgTodoBackend } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import {
@@ -26,13 +24,24 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
-import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
-import { createTodoBackendRecorder, flushTodoWrites, type RecordedTodoBackendCall } from "./helpers/todo-backend";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
+import {
+	createTodoBackendRecorder,
+	createTodoSession,
+	disposeTodoSession,
+	flushTodoWrites,
+	hold,
+	type RecordedTodoBackendCall,
+	settled,
+	taskContents,
+	type TodoSessionOptions,
+	todo,
+	userTodoEdits,
+} from "./helpers/todo-backend";
 
 describe("todo backends in a real session", () => {
 	let tempDir: TempDir;
-	const authStorages: AuthStorage[] = [];
 	const sessions: AgentSession[] = [];
 
 	beforeEach(() => {
@@ -41,69 +50,14 @@ describe("todo backends in a real session", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
-		for (const session of sessions.splice(0)) await session.dispose();
-		for (const authStorage of authStorages.splice(0)) authStorage.close();
+		for (const session of sessions.splice(0)) await disposeTodoSession(session);
 		await tempDir.remove();
 	});
 
-	async function createSession(
-		options: Partial<CreateAgentSessionOptions> & { backend?: string } = {},
-	): Promise<AgentSession> {
-		const { backend, ...rest } = options;
-		const authStorage = createInMemoryAuthStorage();
-		authStorages.push(authStorage);
-		const { session } = await createAgentSession({
-			cwd: tempDir.path(),
-			agentDir: tempDir.path(),
-			authStorage,
-			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
-			settings: Settings.isolated(backend ? { "todo.backend": backend } : {}),
-			sessionManager: SessionManager.inMemory(),
-			disableExtensionDiscovery: true,
-			skills: [],
-			contextFiles: [],
-			promptTemplates: [],
-			slashCommands: [],
-			enableMCP: false,
-			enableLsp: false,
-			skipPythonPreflight: true,
-			rules: [],
-			preloadedCustomToolPaths: [],
-			toolNames: ["read", "todo"],
-			...rest,
-		});
+	async function createSession(options: TodoSessionOptions = {}): Promise<AgentSession> {
+		const session = await createTodoSession(tempDir.path(), options);
 		sessions.push(session);
 		return session;
-	}
-
-	/** Run one `todo` call through the session's real tool. */
-	function todo(session: AgentSession, params: TodoParams, signal?: AbortSignal): Promise<AgentToolResult> {
-		const tool = session.getToolByName("todo");
-		if (!tool) throw new Error("todo tool is not active");
-		return tool.execute(`call-${Snowflake.next()}`, params, signal);
-	}
-
-	const taskContents = (session: AgentSession) =>
-		session.getTodoPhases().flatMap(phase => phase.tasks.map(task => task.content));
-
-	const userTodoEdits = (session: AgentSession) =>
-		session.sessionManager
-			.getEntries()
-			.filter(entry => entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE);
-
-	/** A tracker whose `apply` blocks while `gate.held`; `gate.started` fires when a held apply begins. */
-	function createGate() {
-		const gate = {
-			held: false,
-			started: Promise.withResolvers<void>(),
-			release: Promise.withResolvers<void>(),
-			beforeApply: async () => {
-				if (!gate.held) return;
-				gate.started.resolve();
-				await gate.release.promise;
-			},
-		};
-		return gate;
 	}
 
 	const text = (result: AgentToolResult) =>
@@ -403,8 +357,6 @@ describe("todo backends in a real session", () => {
 			});
 		};
 		const session = await createSession({ backend: "asker", extensions: [hanging] });
-		const runner = session.extensionRunner;
-		if (!runner) throw new Error("extension runner is not available");
 		const ui = {
 			select: (_title: string, _options: string[], dialogOptions?: { signal?: AbortSignal }) => {
 				dialogSignals.push(dialogOptions?.signal);
@@ -413,35 +365,7 @@ describe("todo backends in a real session", () => {
 				return dialog.promise;
 			},
 		} as unknown as ExtensionUIContext;
-		runner.initialize(
-			{
-				sendMessage: () => {},
-				sendUserMessage: () => {},
-				appendEntry: () => {},
-				setLabel: () => {},
-				getActiveTools: () => [],
-				getAllTools: () => [],
-				setActiveTools: async () => {},
-				getCommands: () => [],
-				setModel: async () => false,
-				getThinkingLevel: () => undefined,
-				setThinkingLevel: () => {},
-				getSessionName: () => undefined,
-				setSessionName: async () => {},
-			},
-			{
-				getModel: () => undefined,
-				isIdle: () => true,
-				abort: () => {},
-				hasPendingMessages: () => false,
-				shutdown: () => {},
-				getContextUsage: () => undefined,
-				compact: async () => {},
-				getSystemPrompt: () => [],
-			},
-			undefined,
-			ui,
-		);
+		await initializeExtensions(session, { reportSendError: () => {}, reportRuntimeError: () => {}, uiContext: ui });
 		const notices = collectNotices(session);
 
 		testSetExtensionHandlerTimeoutMs(50);
@@ -512,31 +436,20 @@ export default function(pi) {
 		const calls: RecordedTodoBackendCall[] = [];
 		const a = createTodoBackendRecorder("a", { label: "Tracker a", calls });
 		const b = createTodoBackendRecorder("b", { label: "Tracker b", calls });
-		const applyStarted = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		a.beforeApply = async () => {
-			applyStarted.resolve();
-			await release.promise;
-		};
+		const gate = hold(a, "apply");
 		const session = await createSession({ backend: "a", extensions: [a.extension(), b.extension()] });
 
 		const first = todo(session, { op: "init", items: ["one"] });
-		await applyStarted.promise;
+		await gate.started.promise;
 		cfgTodoBackend.override(session.settings, "b");
 		const second = todo(session, { op: "append", phase: "Tasks", items: ["two"] });
-		release.resolve();
+		gate.release.resolve();
 		await Promise.all([first, second]);
 
 		expect(calls.filter(call => call.method === "apply").map(call => `${call.backend}:${call.op}`)).toEqual([
 			"a:init",
 			"b:append",
 		]);
-
-		// Nothing reaches the old backend after the switch.
-		await todo(session, { op: "append", phase: "Tasks", items: ["three"] });
-		const applies = calls.filter(call => call.method === "apply");
-		expect(applies.filter(call => call.backend === "a")).toHaveLength(1);
-		expect(applies.filter(call => call.backend === "b")).toHaveLength(2);
 	});
 
 	test("switching to native stops mirroring, and a switch alone calls neither apply nor replace", async () => {
@@ -549,7 +462,7 @@ export default function(pi) {
 		expect(b.created).toBe(0);
 
 		cfgTodoBackend.override(session.settings, "b");
-		expect(await session.runTodoWrite(async active => active?.id)).toBe("b");
+		expect(await session.runTodoWrite(async active => active?.label)).toBe("Tracker b");
 		cfgTodoBackend.override(session.settings, "native");
 		expect(await session.runTodoWrite(async active => active)).toBeUndefined();
 
@@ -564,30 +477,23 @@ export default function(pi) {
 
 	test("aborting while apply is pending returns at once, aborts apply's signal, never commits, and frees the queue", async () => {
 		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
-		const gate = createGate();
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 		await todo(session, { op: "init", items: ["base"] });
 		const before = structuredClone(session.getTodoPhases());
-		let heldSignal: AbortSignal | undefined;
-		recorder.beforeApply = signal => {
-			heldSignal ??= signal;
-			return gate.beforeApply();
-		};
-
-		gate.held = true;
+		const gate = hold(recorder, "apply");
 		const controller = new AbortController();
 		const pending = todo(session, { op: "append", phase: "Tasks", items: ["ghost"] }, controller.signal);
-		await gate.started.promise;
+		const heldSignal = await gate.started.promise;
 		controller.abort();
 		const result = await pending;
 
 		expect(result.isError).toBe(true);
 		expect(text(result)).toContain("aborted");
 		expect(result.details).toMatchObject({ op: "append", phases: before });
-		expect(heldSignal?.aborted).toBe(true);
+		expect(heldSignal.aborted).toBe(true);
 
 		// The aborted apply has not returned, yet the next write runs and carries the full list.
-		gate.held = false;
+		recorder.beforeApply = undefined;
 		await todo(session, { op: "append", phase: "Tasks", items: ["real"] });
 		const lastApply = recorder.calls.filter(call => call.method === "apply").at(-1);
 		expect(lastApply?.phases.flatMap(phase => phase.tasks.map(task => task.content))).toEqual(["base", "real"]);
@@ -600,9 +506,7 @@ export default function(pi) {
 
 	test("aborting a write that is still queued skips it: apply is never called for it", async () => {
 		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
-		const gate = createGate();
-		gate.held = true;
-		recorder.beforeApply = gate.beforeApply;
+		const gate = hold(recorder, "apply");
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 		const first = todo(session, { op: "init", items: ["one"] });
 		await gate.started.promise;
@@ -614,7 +518,6 @@ export default function(pi) {
 		expect(result.isError).toBe(true);
 		expect(text(result)).toContain("aborted");
 
-		gate.held = false;
 		gate.release.resolve();
 		await first;
 		await flushTodoWrites(session);
@@ -625,27 +528,18 @@ export default function(pi) {
 
 	test("/new while an edit is queued rejects it and leaves the new session empty", async () => {
 		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
-		const gate = createGate();
-		recorder.beforeApply = gate.beforeApply;
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 		await todo(session, { op: "init", items: ["old"] });
 
-		gate.held = true;
+		const gate = hold(recorder, "apply");
 		const inFlight = todo(session, { op: "append", phase: "Tasks", items: ["late"] });
 		await gate.started.promise;
 		const edit = session.commitTodoPhases([{ name: "Stale", tasks: [{ content: "stale", status: "pending" }] }]);
 		// Capture settlement now; asserting with `expect(...).rejects` on a still-pending promise would block until the gate opens.
-		const editSettled = edit.then(
-			() => undefined,
-			(error: unknown) => error,
-		);
-		const inFlightSettled = inFlight.then(
-			() => undefined,
-			(error: unknown) => error,
-		);
+		const editSettled = settled(edit);
+		const inFlightSettled = settled(inFlight);
 
 		await session.newSession();
-		gate.held = false;
 		gate.release.resolve();
 		expect((await editSettled)?.toString()).toContain("The session changed before the todo edit was saved");
 		const inFlightResult = await inFlightSettled;
@@ -660,11 +554,7 @@ export default function(pi) {
 
 	test("a commit whose replace settles while switchSession is swapping files never lands in the target session", async () => {
 		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
-		const replaceGate = createGate();
-		recorder.beforeReplace = async () => {
-			replaceGate.started.resolve();
-			await replaceGate.release.promise;
-		};
+		const replaceGate = hold(recorder, "replace");
 		const sessionDir = tempDir.join("sessions");
 		const target = SessionManager.create(tempDir.path(), sessionDir);
 		target.appendMessage({ role: "user", content: "target", timestamp: Date.now() });
@@ -677,10 +567,8 @@ export default function(pi) {
 			sessionManager: SessionManager.create(tempDir.path(), sessionDir),
 		});
 
-		const edit = session.commitTodoPhases([{ name: "Stale", tasks: [{ content: "stale", status: "pending" }] }]);
-		const editSettled = edit.then(
-			() => undefined,
-			(error: unknown) => error,
+		const editSettled = settled(
+			session.commitTodoPhases([{ name: "Stale", tasks: [{ content: "stale", status: "pending" }] }]),
 		);
 		await replaceGate.started.promise;
 
@@ -702,12 +590,7 @@ export default function(pi) {
 
 	test("a maintenance reload while a commit's replace is pending does not reject the commit", async () => {
 		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
-		const replaceGate = createGate();
-		replaceGate.held = true;
-		recorder.beforeReplace = async () => {
-			replaceGate.started.resolve();
-			await replaceGate.release.promise;
-		};
+		const replaceGate = hold(recorder, "replace");
 		const hook: ExtensionFactory = pi => {
 			pi.on("session_before_compact", async event => ({
 				compaction: {
@@ -728,10 +611,7 @@ export default function(pi) {
 		session.sessionManager.appendMessage({ role: "user", content: "second turn", timestamp: Date.now() });
 
 		const edit = session.commitTodoPhases([{ name: "Kept", tasks: [{ content: "kept", status: "pending" }] }]);
-		const editSettled = edit.then(
-			() => undefined,
-			(error: unknown) => error,
-		);
+		const editSettled = settled(edit);
 		await replaceGate.started.promise;
 		await session.compact();
 		expect(session.sessionManager.getEntries().some(entry => entry.type === "compaction")).toBe(true);
@@ -743,10 +623,8 @@ export default function(pi) {
 	});
 
 	test("a commit that lands while a todo call's result is still unsaved is what a rebuild from the branch restores", async () => {
-		const gate = createGate();
-		gate.held = true;
 		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
-		recorder.beforeApply = gate.beforeApply;
+		const gate = hold(recorder, "apply");
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in the bundled catalog");

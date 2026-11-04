@@ -1,30 +1,38 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { AgentEvent, AgentTool } from "@oh-my-pi/pi-agent-core";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
-import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { TodoCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/todo-command-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { handleTodoAcp } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/todo";
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task";
 import { getLatestTodoPhasesFromEntries, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
-import { TODO_BACKEND_NOTICE_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
-import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import {
+	TODO_BACKEND_NOTICE_SOURCE,
+	type TodoCommitOptions,
+	type TodoPhasesUpdate,
+} from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
-import { createTodoBackendRecorder, flushTodoWrites, type TodoBackendRecorder } from "./helpers/todo-backend";
+import {
+	contentsOf,
+	createTodoBackendRecorder,
+	createTodoSession,
+	disposeTodoSession,
+	flushTodoWrites,
+	hold,
+	todo,
+	type TodoBackendRecorder,
+	userTodoEdits,
+} from "./helpers/todo-backend";
 
 const BACKEND_ID = "recorder";
 const REFUSAL = "tracker is offline";
@@ -37,39 +45,41 @@ interface Harness {
 	sessionManager: SessionManager;
 }
 
+let mode: InteractiveMode | undefined;
 const cleanups: Array<() => Promise<void> | void> = [];
+
+beforeAll(async () => {
+	resetSettingsForTest();
+	await initTheme();
+	await Settings.init({ inMemory: true });
+});
+
+afterEach(async () => {
+	mode?.stop();
+	mode = undefined;
+	vi.useRealTimers();
+	vi.restoreAllMocks();
+	for (const cleanup of cleanups.splice(0)) await cleanup();
+});
+
+afterAll(() => {
+	resetSettingsForTest();
+});
 
 async function createHarness(): Promise<Harness> {
 	const tempDir = await TempDir.create("@pi-todo-writers-");
 	const dir = tempDir.path();
-	const authStorage = createInMemoryAuthStorage();
-	authStorage.keys.setRuntime("anthropic", "test-key");
-	const modelRegistry = new ModelRegistry(authStorage);
-	const sessionManager = SessionManager.create(dir, dir);
 	const eventBus = new EventBus();
+	const sessionManager = SessionManager.create(dir, dir);
 	const recorder = createTodoBackendRecorder(BACKEND_ID, { label: "Recorder" });
-
-	const runtime = new ExtensionRuntime();
-	const extension = await loadExtensionFromFactory(recorder.extension(), dir, eventBus, runtime, "recorder-extension");
-	const extensionRunner = new ExtensionRunner([extension], runtime, dir, sessionManager, modelRegistry);
-	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-	if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in the bundled catalog");
-	const session = new AgentSession({
-		agent: new Agent({
-			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [] },
-		}),
+	const session = await createTodoSession(dir, {
+		backend: BACKEND_ID,
+		extensions: [recorder.extension()],
+		eventBus,
 		sessionManager,
-		settings: Settings.isolated({ "todo.backend": BACKEND_ID }),
-		modelRegistry,
-		agentId: "Main",
-		extensionRunner,
 	});
-	session.initializeTodoBackend();
-
 	cleanups.push(async () => {
-		await session.dispose();
-		authStorage.close();
+		await disposeTodoSession(session);
 		await tempDir.remove();
 	});
 	return { session, recorder, dir, eventBus, sessionManager };
@@ -80,35 +90,11 @@ function phasesOf(details: unknown): TodoPhase[] | undefined {
 	return Array.isArray(details.phases) ? details.phases : undefined;
 }
 
-/** A `todo` tool bound to the session's write queue, exactly as `sdk.ts` wires it. */
-function createTodoTool(session: AgentSession, dir: string): { tool: TodoTool; toolSession: ToolSession } {
-	const toolSession: ToolSession = {
-		cwd: dir,
-		hasUI: false,
-		getSessionFile: () => session.sessionManager.getSessionFile() ?? null,
-		getSessionSpawns: () => null,
-		settings: session.settings,
-		getTodoPhases: () => session.getTodoPhases(),
-		setTodoPhases: phases => session.setTodoPhases(phases),
-		runTodoWrite: (write, options) => session.runTodoWrite(write, options),
-		commitTodoPhases: (phases, options) => session.commitTodoPhases(phases, options),
-		getToolByName: name => (name === "todo" ? (tool as unknown as AgentTool) : undefined),
-	};
-	const tool = new TodoTool(toolSession);
-	return { tool, toolSession };
-}
-
 /** Seeds a list through the `todo` tool, then forgets what the backend saw. */
-async function seedList(h: Harness, tool: TodoTool): Promise<TodoPhase[]> {
-	await tool.execute("seed", { op: "init", list: [{ phase: "Work", items: ["first", "second"] }] });
+async function seedList(h: Harness): Promise<TodoPhase[]> {
+	await todo(h.session, { op: "init", list: [{ phase: "Work", items: ["first", "second"] }] });
 	h.recorder.calls.length = 0;
 	return h.session.getTodoPhases();
-}
-
-function userTodoEdits(session: AgentSession): unknown[] {
-	return session.sessionManager
-		.getBranch()
-		.filter(entry => entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE);
 }
 
 function controllerContext(session: AgentSession) {
@@ -141,10 +127,6 @@ function slashRuntime(session: AgentSession, dir: string) {
 
 function todoCommand(args: string) {
 	return { name: "todo", args, text: `/todo ${args}` };
-}
-
-function contentsOf(phases: TodoPhase[]): string[] {
-	return phases.flatMap(phase => phase.tasks.map(task => task.content));
 }
 
 /** Resolves once `count` todo writes (tool writes and commits) were issued on the session from now. */
@@ -201,26 +183,9 @@ function createCursor(h: Harness, wiring: "recorded" | "session" = "recorded") {
 }
 
 describe("todo writers reach the selected backend's replace", () => {
-	beforeAll(async () => {
-		resetSettingsForTest();
-		await initTheme();
-		await Settings.init({ inMemory: true });
-	});
-
-	afterEach(async () => {
-		vi.useRealTimers();
-		vi.restoreAllMocks();
-		for (const cleanup of cleanups.splice(0)) await cleanup();
-	});
-
-	afterAll(() => {
-		resetSettingsForTest();
-	});
-
 	it("/todo sends the full new list to replace and commits it after replace resolves", async () => {
 		const h = await createHarness();
-		const { tool } = createTodoTool(h.session, h.dir);
-		const seeded = await seedList(h, tool);
+		const seeded = await seedList(h);
 		const { ctx, controller } = controllerContext(h.session);
 
 		await controller.handleTodoCommand('append "Third item"');
@@ -236,8 +201,7 @@ describe("todo writers reach the selected backend's replace", () => {
 
 	it("/todo surfaces the backend's message and changes nothing when replace throws", async () => {
 		const h = await createHarness();
-		const { tool } = createTodoTool(h.session, h.dir);
-		const seeded = await seedList(h, tool);
+		const seeded = await seedList(h);
 		h.recorder.replaceError = new Error(REFUSAL);
 		const { ctx, controller } = controllerContext(h.session);
 
@@ -253,8 +217,7 @@ describe("todo writers reach the selected backend's replace", () => {
 
 	it("the slash helper sends the full list to replace, and reports a refusal as a failed command", async () => {
 		const h = await createHarness();
-		const { tool } = createTodoTool(h.session, h.dir);
-		const seeded = await seedList(h, tool);
+		const seeded = await seedList(h);
 		const { runtime, output } = slashRuntime(h.session, h.dir);
 
 		const ok = await handleTodoAcp(todoCommand('append "Slash item"'), runtime);
@@ -276,8 +239,7 @@ describe("todo writers reach the selected backend's replace", () => {
 
 	it("Cursor todoSync mirrors through replace; a refusal settles each call once and a reload keeps the committed list in either persist order", async () => {
 		const h = await createHarness();
-		const { tool } = createTodoTool(h.session, h.dir);
-		await seedList(h, tool);
+		await seedList(h);
 		const cursor = createCursor(h);
 		const mirroredList: TodoPhase[] = [{ name: "Tasks", tasks: [{ content: "cursor step", status: "in_progress" }] }];
 
@@ -322,22 +284,9 @@ describe("todo writers reach the selected backend's replace", () => {
 
 	it("Cursor refusal with a /todo edit queued behind it rewrites its result with, and reloads, the edited list", async () => {
 		const h = await createHarness();
-		const { tool } = createTodoTool(h.session, h.dir);
-		const seeded = await seedList(h, tool);
+		const seeded = await seedList(h);
 		h.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: seeded });
-		const gate = Promise.withResolvers<void>();
-		const firstReplaceEntered = Promise.withResolvers<void>();
-		let replaces = 0;
-		h.recorder.beforeReplace = async () => {
-			replaces += 1;
-			if (replaces === 1) {
-				firstReplaceEntered.resolve();
-				await gate.promise;
-				h.recorder.replaceError = new Error(REFUSAL);
-			} else {
-				h.recorder.replaceError = undefined;
-			}
-		};
+		const gate = hold(h.recorder, "replace");
 		const cursor = createCursor(h);
 		const { controller } = controllerContext(h.session);
 		const editQueued = writeQueuedAt(h.session, 2);
@@ -346,10 +295,14 @@ describe("todo writers reach the selected backend's replace", () => {
 			{ merged: false, todos: [{ content: "refused step", status: "pending" }] },
 			"refused",
 		);
-		await firstReplaceEntered.promise;
+		await gate.started.promise;
+		h.recorder.replaceError = new Error(REFUSAL);
+		h.recorder.beforeReplace = () => {
+			h.recorder.replaceError = undefined;
+		};
 		const edit = controller.handleTodoCommand('append "Queued edit"');
 		await editQueued;
-		gate.resolve();
+		gate.release.resolve();
 		await edit;
 		await cursor.refusalSettled();
 
@@ -364,21 +317,13 @@ describe("todo writers reach the selected backend's replace", () => {
 
 	it("a Cursor sync queued behind an edit that renames a phase keeps the new name", async () => {
 		const h = await createHarness();
-		const { tool } = createTodoTool(h.session, h.dir);
-		const seeded = await seedList(h, tool);
-		const gate = Promise.withResolvers<void>();
-		const firstReplaceEntered = Promise.withResolvers<void>();
-		let replaces = 0;
-		h.recorder.beforeReplace = async () => {
-			if (++replaces > 1) return;
-			firstReplaceEntered.resolve();
-			await gate.promise;
-		};
+		const seeded = await seedList(h);
+		const gate = hold(h.recorder, "replace");
 		const cursor = createCursor(h);
 		const renamed = seeded.map(phase => ({ ...phase, name: "Renamed" }));
 
 		const rename = h.session.commitTodoPhases(renamed);
-		await firstReplaceEntered.promise;
+		await gate.started.promise;
 		cursor.handlers.todoSync(
 			{
 				merged: false,
@@ -389,7 +334,7 @@ describe("todo writers reach the selected backend's replace", () => {
 			},
 			"cursor-call",
 		);
-		gate.resolve();
+		gate.release.resolve();
 		await rename;
 		await flushTodoWrites(h.session);
 
@@ -406,8 +351,7 @@ describe("todo writers reach the selected backend's replace", () => {
 
 	it("resets and transcript reloads never call replace", async () => {
 		const h = await createHarness();
-		const { tool } = createTodoTool(h.session, h.dir);
-		await seedList(h, tool);
+		await seedList(h);
 
 		await h.session.newSession();
 
@@ -430,27 +374,26 @@ describe("todo writers reach the selected backend's replace", () => {
 
 	it("an eval-bridged todo call reaches apply once and never replace, and does not undo a /todo edit queued behind it", async () => {
 		const h = await createHarness();
-		const { tool, toolSession } = createTodoTool(h.session, h.dir);
-		const seeded = await seedList(h, tool);
+		const seeded = await seedList(h);
+		const toolSession = {
+			getToolByName: (name: string) => h.session.getToolByName(name),
+			commitTodoPhases: (update: TodoPhasesUpdate, options?: TodoCommitOptions) =>
+				h.session.commitTodoPhases(update, options),
+		} satisfies Pick<ToolSession, "getToolByName" | "commitTodoPhases">;
 		h.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: seeded });
-		const gate = Promise.withResolvers<void>();
-		const applyEntered = Promise.withResolvers<void>();
-		h.recorder.beforeApply = () => {
-			applyEntered.resolve();
-			return gate.promise;
-		};
+		const gate = hold(h.recorder, "apply");
 		const { controller } = controllerContext(h.session);
 		const editQueued = writeQueuedAt(h.session, 2);
 
 		const bridged = callSessionTool(
 			"todo",
 			{ op: "append", phase: "Work", items: ["Bridged item"] },
-			{ session: toolSession },
+			{ session: toolSession as ToolSession },
 		);
-		await applyEntered.promise;
+		await gate.started.promise;
 		const edit = controller.handleTodoCommand('append "Queued edit"');
 		await editQueued;
-		gate.resolve();
+		gate.release.resolve();
 		await Promise.all([bridged, edit]);
 		await flushTodoWrites(h.session);
 
@@ -464,24 +407,18 @@ describe("todo writers reach the selected backend's replace", () => {
 
 	it("a /todo verb and the slash helper queued behind a gated tool write keep the tool's item", async () => {
 		const h = await createHarness();
-		const { tool } = createTodoTool(h.session, h.dir);
-		await seedList(h, tool);
-		const gate = Promise.withResolvers<void>();
-		const applyStarted = Promise.withResolvers<void>();
-		h.recorder.beforeApply = () => {
-			applyStarted.resolve();
-			return gate.promise;
-		};
+		await seedList(h);
+		const gate = hold(h.recorder, "apply");
 		const { ctx, controller } = controllerContext(h.session);
 		const { runtime, output } = slashRuntime(h.session, h.dir);
 
-		const toolCall = tool.execute("gated", { op: "append", phase: "Work", items: ["Tool item"] });
-		await applyStarted.promise;
+		const toolCall = todo(h.session, { op: "append", phase: "Work", items: ["Tool item"] });
+		await gate.started.promise;
 		// "Tool item" is not in the committed list yet: only the queued updater can see it.
 		const verb = controller.handleTodoCommand("done Tool item");
 		const slash = handleTodoAcp(todoCommand('append "Slash item"'), runtime);
 
-		gate.resolve();
+		gate.release.resolve();
 		await Promise.all([toolCall, verb, slash]);
 
 		expect(ctx.showError).not.toHaveBeenCalled();
@@ -494,45 +431,16 @@ describe("todo writers reach the selected backend's replace", () => {
 		]);
 	});
 
-	it("skips the post-commit UI when the session changes while a /todo edit is pending", async () => {
-		const h = await createHarness();
-		const { tool } = createTodoTool(h.session, h.dir);
-		await seedList(h, tool);
-		const gate = Promise.withResolvers<void>();
-		const replaceStarted = Promise.withResolvers<void>();
-		h.recorder.beforeReplace = () => {
-			replaceStarted.resolve();
-			return gate.promise;
-		};
-		const { ctx, controller } = controllerContext(h.session);
-
-		const edit = controller.handleTodoCommand('append "Late item"');
-		await replaceStarted.promise;
-		Object.assign(ctx, { session: {} });
-		gate.resolve();
-		await edit;
-
-		expect(ctx.setTodos).not.toHaveBeenCalled();
-		expect(ctx.agent.appendMessage).not.toHaveBeenCalled();
-		expect(ctx.showError).not.toHaveBeenCalled();
-	});
-
 	it("keeps the focused agent's HUD but still tells the main agent when focus moves during a /todo edit", async () => {
 		const h = await createHarness();
-		const { tool } = createTodoTool(h.session, h.dir);
-		await seedList(h, tool);
-		const gate = Promise.withResolvers<void>();
-		const replaceStarted = Promise.withResolvers<void>();
-		h.recorder.beforeReplace = () => {
-			replaceStarted.resolve();
-			return gate.promise;
-		};
+		await seedList(h);
+		const gate = hold(h.recorder, "replace");
 		const { ctx, controller } = controllerContext(h.session);
 
 		const edit = controller.handleTodoCommand('append "Focus item"');
-		await replaceStarted.promise;
+		await gate.started.promise;
 		ctx.viewSession = {} as AgentSession;
-		gate.resolve();
+		gate.release.resolve();
 		await edit;
 
 		expect(ctx.setTodos).not.toHaveBeenCalled();
@@ -543,26 +451,6 @@ describe("todo writers reach the selected backend's replace", () => {
 });
 
 describe("interactive mode with a backend", () => {
-	let mode: InteractiveMode | undefined;
-
-	beforeAll(async () => {
-		resetSettingsForTest();
-		await initTheme();
-		await Settings.init({ inMemory: true });
-	});
-
-	afterEach(async () => {
-		mode?.stop();
-		mode = undefined;
-		vi.useRealTimers();
-		vi.restoreAllMocks();
-		for (const cleanup of cleanups.splice(0)) await cleanup();
-	});
-
-	afterAll(() => {
-		resetSettingsForTest();
-	});
-
 	async function startMode(h: Harness): Promise<InteractiveMode> {
 		const started = new InteractiveMode(h.session, "test", undefined, undefined, undefined, h.eventBus);
 		mode = started;
@@ -590,20 +478,14 @@ describe("interactive mode with a backend", () => {
 	it("sends the completed list to replace, reconciled with a queued tool write, and updates the HUD", async () => {
 		const h = await createHarness();
 		const started = await startMode(h);
-		const { tool } = createTodoTool(h.session, h.dir);
-		const gate = Promise.withResolvers<void>();
-		const applyStarted = Promise.withResolvers<void>();
-		h.recorder.beforeApply = () => {
-			applyStarted.resolve();
-			return gate.promise;
-		};
+		const gate = hold(h.recorder, "apply");
 		vi.useFakeTimers();
 
-		const toolCall = tool.execute("gated", { op: "append", phase: "Plan", items: ["Tool item"] });
-		await applyStarted.promise;
+		const toolCall = todo(h.session, { op: "append", phase: "Plan", items: ["Tool item"] });
+		await gate.started.promise;
 		completeSubagent(h);
 
-		gate.resolve();
+		gate.release.resolve();
 		await toolCall;
 		await flushTodoWrites(h.session);
 
@@ -639,6 +521,30 @@ describe("interactive mode with a backend", () => {
 
 		expect(h.recorder.calls.filter(call => call.method === "replace")).toHaveLength(1);
 		expect(warning).toHaveBeenCalledTimes(1);
+	});
+
+	it("stays quiet when /new discards the list while the reconcile commit's replace is pending", async () => {
+		const h = await createHarness();
+		const started = await startMode(h);
+		const warning = vi.spyOn(started, "showWarning").mockImplementation(() => {});
+		const gate = hold(h.recorder, "replace");
+		// The list is invalidated before the session manager starts the new file; release once it returns.
+		const newSession = h.session.sessionManager.newSession.bind(h.session.sessionManager);
+		vi.spyOn(h.session.sessionManager, "newSession").mockImplementation(async (...args) => {
+			const result = await newSession(...args);
+			gate.release.resolve();
+			return result;
+		});
+		vi.useFakeTimers();
+
+		completeSubagent(h);
+		await gate.started.promise;
+		await h.session.newSession();
+		await flushTodoWrites(h.session);
+
+		expect(h.recorder.calls.filter(call => call.method === "replace")).toHaveLength(1);
+		expect(h.session.getTodoPhases()).toEqual([]);
+		expect(warning).not.toHaveBeenCalledWith(expect.stringContaining("The session changed"));
 	});
 
 	it("a Cursor mirror the backend refuses leaves the HUD on the committed list", async () => {

@@ -41,7 +41,6 @@ import {
 	type SkillRediscoverySource,
 } from "../../extensibility/skills";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import {
 	type WordCompletionEngine,
@@ -2366,12 +2365,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			}
 
 			case "set_todos": {
-				let committed: TodoPhase[] | undefined;
-				try {
-					committed = await session.commitTodoPhases(command.phases);
-				} catch (err) {
-					return error(id, "set_todos", err instanceof Error ? err.message : String(err));
-				}
+				const committed = await session.commitTodoPhases(command.phases);
 				// The committed list, not a later read: a write queued behind this one can land before this handler resumes.
 				return success(id, "set_todos", { todoPhases: committed ?? session.getTodoPhases() });
 			}

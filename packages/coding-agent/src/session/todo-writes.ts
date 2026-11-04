@@ -10,13 +10,21 @@ import {
 	TODO_BACKEND_NOTICE_SOURCE,
 	type TodoCommitOptions,
 	type TodoPhasesUpdate,
-	type TodoWriteGuard,
+	type TodoWrite,
 	todoBackendText,
 } from "../tools/todo-backend";
 import type { SessionManager } from "./session-manager";
 import type { TodoTracker } from "./todo-tracker";
 
 const SESSION_CHANGED_MESSAGE = "The session changed before the todo edit was saved; nothing was changed.";
+
+/** Thrown by a write's guard when the todo list was reset or reloaded after the write was enqueued. */
+export class TodoListChangedError extends Error {
+	constructor() {
+		super(SESSION_CHANGED_MESSAGE);
+		this.name = "TodoListChangedError";
+	}
+}
 
 /** What {@link TodoWrites} needs from its session. The session is the scope `todo.backend` is watched in. */
 export interface TodoWritesHost extends SettingsScope {
@@ -82,14 +90,7 @@ export class TodoWrites {
 	/** Queue the first backend resolution, once armed. Later calls do nothing. */
 	resolveBackend(): void {
 		if (!this.#armed || this.#initial) return;
-		const id = cfgTodoBackend.get(this.#host.settings);
-		this.#requestedId = id;
-		this.#requestedAvailable = this.#isAvailable(id);
-		this.#initial = this.#queue
-			.run(() => this.#resolve(id))
-			.catch((error: unknown) => {
-				logger.warn("Todo backend resolution failed", { id, error: String(error) });
-			});
+		this.#initial = this.#queueResolve(cfgTodoBackend.get(this.#host.settings), "resolution");
 	}
 
 	/**
@@ -102,15 +103,12 @@ export class TodoWrites {
 	 * returned promise rejects at once on abort, a not-yet-started write is skipped, and a started one
 	 * keeps the queue slot until it settles but fails `assertCurrent()` so it never commits.
 	 */
-	run<T>(
-		write: (active: ActiveTodoBackend | undefined, guard: TodoWriteGuard) => Promise<T>,
-		options?: { signal?: AbortSignal },
-	): Promise<T> {
+	run<T>(write: TodoWrite<T>, options?: { signal?: AbortSignal }): Promise<T> {
 		const signal = options?.signal;
 		const epoch = this.#epoch;
 		const assertCurrent = (): void => {
 			signal?.throwIfAborted();
-			if (this.#epoch !== epoch) throw new Error(SESSION_CHANGED_MESSAGE);
+			if (this.#epoch !== epoch) throw new TodoListChangedError();
 		};
 		const queued = (async () => {
 			await this.#ready();
@@ -194,14 +192,18 @@ export class TodoWrites {
 		// Before the first resolution runs, it reads the setting itself.
 		if (!this.#initial || this.#host.isDisposed()) return;
 		const id = cfgTodoBackend.get(this.#host.settings);
-		const available = this.#isAvailable(id);
-		if (id === this.#requestedId && available === this.#requestedAvailable) return;
+		if (id === this.#requestedId && this.#isAvailable(id) === this.#requestedAvailable) return;
+		void this.#queueResolve(id, "switch");
+	}
+
+	/** Record `id` as requested and queue its resolution; a failure is logged, never thrown. */
+	#queueResolve(id: string, what: "resolution" | "switch"): Promise<void> {
 		this.#requestedId = id;
-		this.#requestedAvailable = available;
-		this.#queue
+		this.#requestedAvailable = this.#isAvailable(id);
+		return this.#queue
 			.run(() => this.#resolve(id))
 			.catch((error: unknown) => {
-				logger.warn("Todo backend switch failed", { id, error: String(error) });
+				logger.warn(`Todo backend ${what} failed`, { id, error: String(error) });
 			});
 	}
 
@@ -233,7 +235,6 @@ export class TodoWrites {
 				throw new Error("create() did not return an object with apply() and replace()");
 			}
 			this.#active = {
-				id,
 				label: todoBackendText(definition.label),
 				apply: (op, params, next, signal) =>
 					runner.runTodoBackendCall(backendSignal => backend.apply(op, params, next, backendSignal), signal),

@@ -76,7 +76,6 @@ export interface TodoBackendDefinition {
  * means native todos.
  */
 export interface ActiveTodoBackend {
-	readonly id: string;
 	readonly label: string;
 	apply(op: TodoOp, params: TodoBackendParams, next: TodoPhase[], signal?: AbortSignal): Promise<void>;
 	replace(phases: TodoPhase[], signal?: AbortSignal): Promise<void>;
@@ -98,6 +97,9 @@ export interface TodoCommitOptions {
 export interface TodoWriteGuard {
 	assertCurrent(): void;
 }
+
+/** A queued todo write: gets the backend resolved when it starts (`undefined` = native todos) and its guard. */
+export type TodoWrite<T> = (active: ActiveTodoBackend | undefined, guard: TodoWriteGuard) => Promise<T>;
 
 /** One registration: the backend and the resolved path of the extension that registered it. */
 export interface TodoBackendRegistration {

@@ -75,7 +75,7 @@ import { SecurityScanTool } from "./security-scan";
 import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TodoTool } from "./todo";
-import type { ActiveTodoBackend, TodoCommitOptions, TodoPhasesUpdate, TodoWriteGuard } from "./todo-backend";
+import type { TodoCommitOptions, TodoPhasesUpdate, TodoWrite } from "./todo-backend";
 import { WriteTool } from "./write";
 import { WaitTool } from "./wait";
 import { isMountableUnderXdev, resolveXdevTool, type XdevState } from "./xdev";
@@ -496,10 +496,7 @@ export interface ToolSession {
 	 * runs compute → backend `apply` → commit inside it. `options.signal` abandons the call without
 	 * releasing the queue slot early.
 	 */
-	runTodoWrite?: <T>(
-		write: (active: ActiveTodoBackend | undefined, guard: TodoWriteGuard) => Promise<T>,
-		options?: { signal?: AbortSignal },
-	) => Promise<T>;
+	runTodoWrite?: <T>(write: TodoWrite<T>, options?: { signal?: AbortSignal }) => Promise<T>;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/**
