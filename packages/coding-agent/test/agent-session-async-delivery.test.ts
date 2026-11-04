@@ -26,6 +26,7 @@ import { tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { ArtifactManager } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import {
+	ASYNC_INLINE_RESULT_MAX_CHARS,
 	buildAsyncResultBatchMessage,
 	type AsyncResultDetails,
 	type AsyncResultEntry,
@@ -1303,6 +1304,7 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 	// images, and `attachment://N` must open the image the model reads as `[Image #N]`.
 	let session: AgentSession | undefined;
 	let authStorage: AuthStorage | undefined;
+	let store: SessionManager | undefined;
 
 	beforeAll(async () => {
 		await initTheme(false);
@@ -1313,6 +1315,8 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 		session = undefined;
 		authStorage?.close();
 		authStorage = undefined;
+		await store?.close();
+		store = undefined;
 		vi.restoreAllMocks();
 		AsyncJobManager.resetForTests();
 	});
@@ -1330,9 +1334,12 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
+		const sessionStore = SessionManager.inMemory(dir);
+		sessionStore.adoptArtifactManager(new ArtifactManager(path.join(dir, "artifacts")));
+		store = sessionStore;
 		const owner = new AgentSession({
 			agent,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: sessionStore,
 			settings: Settings.isolated(),
 			modelRegistry: new ModelRegistry(authStorage),
 			agentId: "Owner",
@@ -1395,7 +1402,7 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 				});
 		}
 
-		return { session: owner, manager, mock, backgroundAsk };
+		return { session: owner, store: sessionStore, toolSession, manager, mock, backgroundAsk };
 	}
 
 	/** A pasted image backed by a file, as a clipboard paste committed to the session is. */
@@ -1567,6 +1574,106 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 		// The marker the model reads opens the same file the notice names.
 		expect(resolveAttachment(owner, 2)).toEqual({ data: "user-image", file: "user-[Image #1].png" });
 		expect(owner.getImageAttachments()[1]?.sourcePath).toBe(userPath);
+	});
+
+	it("cuts a long answer to the preview and saves its renumbered full text in a file the model can read", async () => {
+		using tempDir = TempDir.createSync("@pi-async-ask-attachment-");
+		const { session: owner, store: sessionStore, backgroundAsk } = await startSession(tempDir.path());
+		const answerOld = await backgroundAsk("ask-old", "Which database?");
+		const answerLong = await backgroundAsk("ask-long", "Which cache?");
+		// The session has saved an artifact before, as a session that ran one oversized
+		// command has: the artifact directory exists and its ids are already scanned, so
+		// reserving this answer's file costs no disk work and both answers still reach the
+		// model in one delivery.
+		await sessionStore.saveArtifact("earlier output", "bash");
+
+		const delivered = observeAsyncResultEnqueue(owner, 2);
+		answerOld("old schema [Image #1]", [pasted(tempDir.path(), "old-image")]);
+		answerLong(`see [Image #1]\n${"long line\n".repeat(1_500)}end-of-answer`, [pasted(tempDir.path(), "long-image")]);
+		await delivered;
+		await owner.settleAsyncWork();
+
+		const texts = deliveries(owner);
+		// Wherever it lands, the long answer reaches the model as the usual preview, never whole.
+		expect(texts.join("\n")).toContain("[Output truncated. Showing first 4,000 characters.]");
+		expect(texts.join("\n")).not.toContain("end-of-answer");
+		// Both answers reach the model in one delivery, and it stays within the inline limit.
+		expect(texts).toHaveLength(1);
+		const text = texts[0]!;
+		expect(text.length).toBeLessThan(ASYNC_INLINE_RESULT_MAX_CHARS);
+		// The preview carries the answer's delivery-wide marker, and it opens the answer's image.
+		expect(text).toContain("User added note:\n  see [Image #2]");
+		expect(resolveAttachment(owner, 2)?.data).toBe("long-image");
+		expect(resolveAttachment(owner, 1)?.data).toBe("old-image");
+		// The saved file holds the renumbered full text and the model can read it.
+		const artifactUrl = text.match(/Full output: (artifact:\/\/\d+)/)?.[1];
+		if (!artifactUrl) throw new Error("Expected the long answer's saved file");
+		const read = await new ReadTool({
+			cwd: tempDir.path(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			settings: Settings.isolated(),
+			localProtocolOptions: {
+				getArtifactsDir: () => sessionStore.getArtifactsDir(),
+				getSessionId: () => sessionStore.getSessionId(),
+			},
+		}).execute("read-long-answer", { path: `${artifactUrl}:raw:1-2000` });
+		const saved = read.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
+		expect(saved).toContain("  see [Image #2]");
+		expect(saved).toContain("end-of-answer");
+		expect(saved).toMatch(/`\[Image #2\]` to their ask answer\.\s+Source path: `[^`]*long-image\.png`/);
+		expect(saved).not.toContain("see [Image #1]");
+	});
+
+	it("an inline answer's real marker opens its image while the same marker in a code span stays text", async () => {
+		using tempDir = TempDir.createSync("@pi-async-ask-attachment-");
+		const { session: owner, toolSession } = await startSession(tempDir.path());
+		const context = {
+			hasUI: true,
+			ui: {
+				askDialog: async () => ({
+					kind: "submit",
+					results: [
+						{
+							id: "choice",
+							question: "Which cache?",
+							options: ["SQLite"],
+							multi: false,
+							selectedOptions: ["SQLite"],
+							customInput: "front [Image #1]",
+							customInputImages: [pasted(tempDir.path(), "front-image")],
+							note: "back [Image #1], not `[Image #1]`",
+							noteImages: [pasted(tempDir.path(), "back-image")],
+						},
+					],
+				}),
+				select: async () => undefined,
+				editor: async () => undefined,
+			},
+			abort: () => {},
+		} as unknown as AgentToolContext;
+		// No job manager: the answer returns inline as the tool result.
+		const result = await new AskTool({ ...toolSession, asyncJobManager: undefined }).execute(
+			"ask-inline",
+			{ questions: [{ id: "choice", question: "Which cache?", options: [{ label: "SQLite" }] }] },
+			undefined,
+			undefined,
+			context,
+		);
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("User provided custom input: front [Image #1]");
+		expect(text).toContain("User added note: back [Image #2], not `[Image #1]`");
+		owner.agent.appendMessage({
+			role: "toolResult",
+			toolCallId: "ask-inline",
+			toolName: "ask",
+			content: result.content,
+			timestamp: Date.now(),
+			isError: false,
+		});
+		expect(resolveAttachment(owner, 1)?.data).toBe("front-image");
+		expect(resolveAttachment(owner, 2)?.data).toBe("back-image");
 	});
 
 	it("across deliveries the newest message owns attachment numbers; an older answer's path notice still names its file", async () => {

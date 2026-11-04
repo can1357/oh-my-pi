@@ -35,6 +35,11 @@ export const ASYNC_PREVIEW_MAX_CHARS = 4_000;
  */
 export const ASYNC_PREVIEW_TAIL_CHARS = 1_000;
 
+/** The inline preview of a result too long to deliver whole. */
+export function asyncResultPreview(text: string): string {
+	return `${text.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]`;
+}
+
 export interface AsyncResultEntry {
 	jobId: string;
 	result: string;
@@ -48,6 +53,12 @@ export interface AsyncResultEntry {
 	 * the manager's per-id suppression marker.
 	 */
 	epoch: number;
+	/**
+	 * Set when the result is too long to deliver whole and its text is rendered at build time
+	 * (a backgrounded `ask` answer, numbered against the answers delivered with it). Saves the
+	 * rendered full text and returns its artifact id, or undefined when nothing was saved.
+	 */
+	spill?: (fullText: string) => string | undefined;
 }
 
 type AsyncResultJobDetails = {
@@ -124,8 +135,8 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 	// the answers share one message, so render each answer again with its markers raised
 	// past the images of the answers before it: `[Image #N]` then names one image of the
 	// whole delivery. Only the markers the answer inserted move; file names, code spans
-	// and the person's own text stay as written. The answer reaches the model whole, as
-	// an inline answer does.
+	// and the person's own text stay as written. An answer too long to deliver whole is
+	// cut to the usual preview, and its saved file holds the renumbered full text.
 	const answerImages: ImageContent[] = [];
 	const otherImages: ImageContent[] = [];
 	const results = entries.map(entry => {
@@ -137,7 +148,10 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 		const marked = entry.job.latestDetails?.imageMarkedText;
 		const text = marked ? renderImageMarkedText(marked, answerImages.length) : entry.result;
 		answerImages.push(...images);
-		return text;
+		if (!marked || !entry.spill) return text;
+		const artifactId = entry.spill(text);
+		const preview = asyncResultPreview(text);
+		return artifactId ? `${preview}\nFull output: artifact://${artifactId}` : preview;
 	});
 	const jobs = entries.map((entry, index) => {
 		const structured = entry.job?.structured;
