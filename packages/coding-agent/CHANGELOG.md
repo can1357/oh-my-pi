@@ -29,8 +29,8 @@
 - The `devin-windsurf` login lets Windsurf Enterprise users authenticate the `devin` provider with their existing Windsurf account ([#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 
 ### Fixed
-- Thin tool images are padded to the vision model's minimum height or width instead of causing a 400 on the next turn ([#18081](https://github.com/can1357/oh-my-pi/issues/18081))
 
+- Thin tool images are padded to the vision model's minimum height or width instead of causing a 400 on the next turn ([#18081](https://github.com/can1357/oh-my-pi/issues/18081))
 - JSON query truncation notices now report the 50KB read budget instead of the bytes shown ([#18022](https://github.com/can1357/oh-my-pi/pull/18022) by [@eggpeat](https://github.com/eggpeat))
 - Extension links stay clickable and extension-drawn replies and custom messages keep their renderers on every launch, not only the first after an edit; `ctx.ui.getLinkClicksAvailable()` no longer turns false on later launches ([#18116](https://github.com/can1357/oh-my-pi/pull/18116) by [@materemias](https://github.com/materemias))
 - An AST Grep capture spanning several lines shows on one `meta:` row of the result card instead of one row per line, so collapsed results no longer show its later lines and a blank line inside it no longer splits the match from its file ([#18105](https://github.com/can1357/oh-my-pi/pull/18105) by [@JustasMasiulis](https://github.com/JustasMasiulis))
@@ -79,7 +79,6 @@
 
 ### Fixed
 - A grouped `read` row that names a URL links the whole URL instead of only its last path segment, so a click anywhere on the visible URL opens it; the row's last `/` no longer splits it into a dim prefix and a linked tail ([#18071](https://github.com/can1357/oh-my-pi/pull/18071) by [@iacore](https://github.com/iacore))
-- Spotlight cuts `grep`, `find` and `glob` results and filtered bash output (`| grep`, `sed -n`, `awk`) past ~3.9k chars like any other result instead of showing them whole up to ~12k, and collapses lines already shown even when the call's intent names them
 - Fixed a second `ask` note on a later single-select question reopening and replacing the previous question's note ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
 - Fixed the first run of a compiled binary after an install or upgrade keeping every subagent on the main thread and failing `omp --smoke-test` with `SubagentCodeChangedError` for the native addon it had just extracted ([#18060](https://github.com/can1357/oh-my-pi/issues/18060))
 
