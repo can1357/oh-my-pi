@@ -12,7 +12,9 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-types";
+import { convertToLlm, PREWALK_PLAN_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { cfgProvidersCacheRetention } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { formatShakeSummary, type ShakeAdmitPlan } from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import {
@@ -1129,6 +1131,197 @@ describe("AgentSession shake", () => {
 				event => event.type === "auto_compaction_start" && (event as { action?: string }).action === "context-full",
 			);
 			expect(fullStart).toBeDefined();
+		});
+
+		describe("prompt-cache cost", () => {
+			const TRIGGER_PROMPT_TOKENS = 101_000;
+			const HEAVY_TOOL_CALL_ID = "call_heavy";
+
+			function assistantAt(promptTokens: number, content: AssistantMessage["content"]): AssistantMessage {
+				return {
+					role: "assistant",
+					content,
+					...apiInfo,
+					stopReason: content.some(block => block.type === "toolCall") ? "toolUse" : "stop",
+					usage: {
+						input: promptTokens,
+						output: 100,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: promptTokens + 100,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					timestamp: Date.now(),
+				};
+			}
+
+			/**
+			 * An old heavy tool result (~30K tokens), then three turns of recent
+			 * text whose requests grew by `growthPerRequest` tokens each, then a
+			 * turn billed over the 100K threshold. Shaking the old result leaves the
+			 * context inside the recovery band, and on Claude the next request
+			 * writes the whole post-shake prompt to the cache again.
+			 */
+			function seedThresholdBranch(growthPerRequest: number): void {
+				cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+				cfgCompactionThresholdTokens.set(session.settings, 100_000);
+				cfgContextPromotionEnabled.set(session.settings, false);
+				const promptAt = (turn: number) => TRIGGER_PROMPT_TOKENS - (4 - turn) * growthPerRequest;
+				sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "do it" }], timestamp: 1 });
+				sessionManager.appendMessage(
+					assistantAt(promptAt(0), [
+						{ type: "toolCall", id: HEAVY_TOOL_CALL_ID, name: "bash", arguments: { command: "cat big.log" } },
+					]),
+				);
+				sessionManager.appendMessage({
+					role: "toolResult",
+					toolCallId: HEAVY_TOOL_CALL_ID,
+					toolName: "bash",
+					content: [{ type: "text", text: "lorem ipsum dolor sit amet ".repeat(6_000) }],
+					isError: false,
+					timestamp: 2,
+				});
+				for (let turn = 1; turn <= 3; turn++) {
+					sessionManager.appendMessage({
+						role: "user",
+						// Three of these put the heavy result outside auto-shake's 16K protected tail.
+						content: [{ type: "text", text: `turn ${turn}\n${"tail ".repeat(8_000)}` }],
+						timestamp: 2 + turn,
+					});
+					sessionManager.appendMessage(assistantAt(promptAt(turn), [{ type: "text", text: `done ${turn}` }]));
+				}
+				session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			}
+
+			async function driveThresholdShake(growthPerRequest: number): Promise<ToolResultMessage> {
+				seedThresholdBranch(growthPerRequest);
+				const trigger = assistantAt(TRIGGER_PROMPT_TOKENS, [{ type: "text", text: "trigger" }]);
+				session.agent.emitExternalEvent({ type: "message_end", message: trigger });
+				session.agent.emitExternalEvent({ type: "agent_end", messages: [trigger] });
+				await session.waitForIdle();
+				const heavy = branchToolResults().find(result => result.toolCallId === HEAVY_TOOL_CALL_ID);
+				if (!heavy) throw new Error("heavy tool result missing from the branch");
+				return heavy;
+			}
+
+			function mockSoftCompaction() {
+				return vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+					summary: "compacted instead of shaking",
+					shortSummary: undefined,
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: preparation.tokensBefore,
+					details: {},
+				}));
+			}
+
+			it("declines a threshold shake whose cache rewrite costs more than the reads it saves", async () => {
+				const compactSpy = mockSoftCompaction();
+				// 10K tokens a request: the ~40K freed are back within ~4 requests,
+				// far short of what rewriting the ~61K post-shake prompt costs.
+				const heavy = await driveThresholdShake(10_000);
+
+				expect(heavy.prunedAt).toBeUndefined();
+				expect(heavy.content[0]).toMatchObject({ type: "text", text: expect.stringMatching(/^lorem ipsum/) });
+				const shakeEnd = events.find(event => event.type === "auto_compaction_end" && event.action === "shake");
+				expect(shakeEnd).toMatchObject({ skipped: true, errorMessage: expect.stringMatching(/prompt cache/) });
+				expect(compactSpy).toHaveBeenCalledTimes(1);
+			});
+
+			it("keeps a threshold shake whose freed tokens stay out long enough to repay the rewrite", async () => {
+				const compactSpy = mockSoftCompaction();
+				// 100 tokens a request: the freed tokens stay out for ~300 requests.
+				const heavy = await driveThresholdShake(100);
+
+				expect(heavy.prunedAt).toBeGreaterThan(0);
+				const shakeEnd = events.find(event => event.type === "auto_compaction_end" && event.action === "shake");
+				expect(shakeEnd).toMatchObject({ skipped: false });
+				expect(shakeEnd).not.toHaveProperty("errorMessage");
+				expect(compactSpy).not.toHaveBeenCalled();
+			});
+
+			it("prices the rewrite at the retention tier the next request writes, not at the short-tier rate", async () => {
+				// 1.8K tokens a request: the ~40K freed repay a short-tier rewrite of
+				// the ~61K post-shake prompt over the ~22 requests it takes to grow
+				// back, but not a long-tier one, which bills at twice the input rate.
+				cfgProvidersCacheRetention.set(session.settings, "long");
+				const compactSpy = mockSoftCompaction();
+				const heavy = await driveThresholdShake(1_800);
+
+				expect(heavy.prunedAt).toBeUndefined();
+				const shakeEnd = events.find(event => event.type === "auto_compaction_end" && event.action === "shake");
+				expect(shakeEnd).toMatchObject({ skipped: true, errorMessage: expect.stringMatching(/prompt cache/) });
+				expect(compactSpy).toHaveBeenCalledTimes(1);
+			});
+
+			it("admits the same shake at the short retention tier", async () => {
+				cfgProvidersCacheRetention.set(session.settings, "short");
+				const compactSpy = mockSoftCompaction();
+				const heavy = await driveThresholdShake(1_800);
+
+				expect(heavy.prunedAt).toBeGreaterThan(0);
+				expect(compactSpy).not.toHaveBeenCalled();
+			});
+
+			it("measures the unchanged prefix on the request the provider receives, not on stored entries", async () => {
+				// A prewalk plan entry is stored but never sent, so it is not part of
+				// the prefix a provider keeps cached behind the shake's first edit.
+				sessionManager.appendCustomMessageEntry(PREWALK_PLAN_MESSAGE_TYPE, "hidden plan ".repeat(4_000), false);
+				seedThresholdBranch(1_000);
+				let plan: ShakeAdmitPlan | undefined;
+				await session.shake("elide", {
+					admit: received => {
+						plan = received;
+						return false;
+					},
+				});
+
+				const sent = sessionManager.buildSessionContext().messages;
+				const edited = sent.findIndex(message => message.role === "toolResult");
+				expect(edited).toBeGreaterThan(0);
+				const tokenizer = new Tokenizer();
+				const expected =
+					plan!.requestHeadTokens +
+					tokenizer.countMessages(convertToLlm(sent.slice(0, edited)), { excludeEncryptedReasoning: true });
+				expect(plan!.unchangedPrefixTokens).toBe(expected);
+				expect(JSON.stringify(sent)).not.toContain("hidden plan");
+			});
+
+			it("frees only what the sent request loses, so an unsent region cannot buy a losing shake", async () => {
+				// A fenced block inside a prewalk plan entry is an eligible region but
+				// reaches no request, so it must not count toward the saving either.
+				const compactSpy = mockSoftCompaction();
+				sessionManager.appendCustomMessageEntry(
+					PREWALK_PLAN_MESSAGE_TYPE,
+					`plan\n\`\`\`\n${"hidden ".repeat(40_000)}\n\`\`\`\n`,
+					false,
+				);
+				const heavy = await driveThresholdShake(10_000);
+
+				expect(heavy.prunedAt).toBeUndefined();
+				const shakeEnd = events.find(event => event.type === "auto_compaction_end" && event.action === "shake");
+				expect(shakeEnd).toMatchObject({ skipped: true, errorMessage: expect.stringMatching(/prompt cache/) });
+				expect(compactSpy).toHaveBeenCalledTimes(1);
+			});
+
+			it("measures growth after a /clear, not across the history it hid", async () => {
+				// 200 slow requests before the reset: averaged into the live ones they
+				// make the conversation look slow enough to repay the rewrite, and the
+				// losing shake runs.
+				const compactSpy = mockSoftCompaction();
+				for (let turn = 0; turn < 200; turn++) {
+					sessionManager.appendMessage({
+						role: "user",
+						content: [{ type: "text", text: "old" }],
+						timestamp: turn,
+					});
+					sessionManager.appendMessage(assistantAt(1_000 + turn, [{ type: "text", text: "older" }]));
+				}
+				sessionManager.appendResetBoundary();
+				const heavy = await driveThresholdShake(10_000);
+
+				expect(heavy.prunedAt).toBeUndefined();
+				expect(compactSpy).toHaveBeenCalledTimes(1);
+			});
 		});
 	});
 

@@ -8,6 +8,19 @@
 /** Mode selector for `AgentSession.shake`. */
 export type ShakeMode = "elide" | "images" | "thinking";
 
+/** What an elide shake would leave of the provider request, known before it edits anything. */
+export interface ShakeAdmitPlan {
+	/** Estimated tokens the shake removes from every later request. */
+	tokensFreed: number;
+	/** Tokens of the request prefix the edit keeps byte-identical: request head plus the context before the first edit. */
+	unchangedPrefixTokens: number;
+	/** Tokens of the request head alone (tools and system prompt). */
+	requestHeadTokens: number;
+}
+
+/** Decides, once an elide shake has planned its edit and before it edits anything, whether it runs. */
+export type ShakeAdmit = (plan: ShakeAdmitPlan) => boolean;
+
 /** Outcome of an `AgentSession.shake` run. */
 export interface ShakeResult {
 	mode: ShakeMode;
