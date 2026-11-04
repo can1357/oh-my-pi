@@ -38,3 +38,37 @@ describe("LSP status rows", () => {
 		expect(text).toContain("keep-me");
 	});
 });
+
+describe("LSP diagnostics", () => {
+	const render = (text: string) =>
+		lspToolRenderer
+			.renderResult({ content: [{ type: "text", text }] }, { expanded: false, isPartial: false }, theme, {
+				action: "diagnostics",
+				file: "src/a.ts",
+			})
+			.render(100)
+			.map(row => Bun.stripANSI(row).trimEnd());
+
+	// The tool groups diagnostics under `# dir/` and `## file` headers, rows carrying only `line:col`.
+	it("lists grouped diagnostics under their file's path", () => {
+		const rows = render(
+			[
+				"1 error(s), 1 warning(s):",
+				"# src/",
+				"## a.ts",
+				"  3:5 [error] [ts] Cannot find name 'x'. (2304)",
+				"  9:1 [warning] [ts] Unused 'y'. (6133)",
+			].join("\n"),
+		);
+		expect(rows[0]).toEndWith("1 error · 1 warning");
+		expect(rows.some(row => row.includes("src/a.ts:3:5 [error] [ts] Cannot find name 'x'. (2304)"))).toBe(true);
+		expect(rows.some(row => row.includes("src/a.ts:9:1 [warning] [ts] Unused 'y'. (6133)"))).toBe(true);
+	});
+
+	it("counts a failed server instead of reporting no issues", () => {
+		const rows = render(`${theme.status.error} src/a.ts: all language servers failed (tsserver)`);
+		expect(rows[0]).toEndWith("1 server failure");
+		expect(rows[0]).not.toContain("No issues");
+		expect(rows.join("\n")).toContain("src/a.ts: all language servers failed (tsserver)");
+	});
+});

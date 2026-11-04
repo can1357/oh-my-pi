@@ -30,12 +30,15 @@
 - The native composer's first frame shows the cached thinking level on the model chip (or effort chip) instead of the plain model icon until the session attaches
 - Clicking the popup of an enum setting with many values (Edit Mode, Session Tree Filter, Advisor Sync Backlog) on a native settings page opens its menu instead of doing nothing
 - Ask notes added on successive single-select questions now start with an empty editor and stay with their respective answers ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
+- LSP references render as references even when a referenced line reads like a diagnostics summary (`"1 error(s)"`) or holds a code fence, instead of turning into a diagnostics or hover card ([#18106](https://github.com/can1357/oh-my-pi/pull/18106) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- The LSP diagnostics card lists diagnostics grouped under their file, the form the tool reports, instead of only their counts, and a failed language server counts as a server failure instead of `No issues` ([#18106](https://github.com/can1357/oh-my-pi/pull/18106) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 - Closing an overlay that others were opened over no longer leaves them returning focus to it once they close ([#16476](https://github.com/can1357/oh-my-pi/pull/16476))
 
 ### Changed
 
 - Tab in the `/usage` Details view now switches back to Overview ([#17962](https://github.com/can1357/oh-my-pi/pull/17962) by [@SuperUserA](https://github.com/SuperUserA))
+- LSP results render under one header that carries the request and the counts (`LSP: references src/a.ts:42 (validateToken) 6 references · 4 files`) instead of a card repeating the request above a `Response` section; each reference previews its source line (`42:14│ export function validateToken(…)`), reference previews and definition snippets are highlighted in the file's language, and an error's message hangs under the header ([#18106](https://github.com/can1357/oh-my-pi/pull/18106) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ## [18.16.0] - 2026-11-02
 
