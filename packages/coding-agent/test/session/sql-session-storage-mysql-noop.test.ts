@@ -57,8 +57,10 @@ function mysqlFake(): { client: SqlSessionStorageClient; stored(path: string): s
 			if (sql.startsWith("SELECT 1 AS found FROM omp_session_files_parts")) {
 				return mysqlResult(0, orderedParts(values[0] as string).length > 0 ? [{ found: 1 }] : []);
 			}
-			// The store writes only root-relative and `abs:` keys, so no row has an older key.
-			if (sql.startsWith("SELECT path FROM omp_session_files WHERE substr")) return mysqlResult(0);
+			// The store writes only current keys in both fake tables, so the legacy-key probe finds nothing.
+			if (sql.startsWith("SELECT 'omp_session_files' AS table_name, path FROM omp_session_files WHERE substr")) {
+				return mysqlResult(0);
+			}
 			if (sql.startsWith("SELECT path")) {
 				return mysqlResult(
 					0,
