@@ -3976,13 +3976,11 @@ async function executeToolCalls(
 			}
 			let tier: ToolTier = "exec";
 			try {
-				// A resolver that takes a context may tier the call higher with it than
-				// without, and none exists yet here, so count it as "exec".
+				// A resolver may tier the call higher with a context than without, so
+				// hand it the host's session context, as the approval gate would.
 				const approval =
 					typeof tool?.approval === "function"
-						? tool.approval.length > 1
-							? "exec"
-							: tool.approval(record.executionArgs ?? record.args)
+						? tool.approval(record.executionArgs ?? record.args, getToolContext?.())
 						: tool?.approval;
 				tier = typeof approval === "string" ? approval : (approval?.tier ?? "exec");
 			} catch {
