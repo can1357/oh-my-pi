@@ -349,7 +349,7 @@ fn conditions_arith_time_coproc_and_separators() {
 		panic!()
 	};
 	let CondExpr::Or(terms) = cond else { panic!() };
-	assert!(matches!(terms.as_slice(), [CondExpr::And(_), CondExpr::Not(_)]));
+	assert!(matches!(terms.as_slice(), [CondExpr::And(_), CondExpr::Not(1, _)]));
 	let CommandKind::Cond(CondExpr::Unary { op, .. }) = first_cmd(b"[[ a ]]").kind else {
 		panic!()
 	};

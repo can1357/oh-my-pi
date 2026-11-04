@@ -704,8 +704,8 @@ impl<'a> Bp<'a> {
 	fn cond(&mut self, e: &CondExpr) {
 		let mut e = e;
 		let mut invert = false;
-		while let CondExpr::Not(inner) = e {
-			invert = !invert;
+		while let CondExpr::Not(bangs, inner) = e {
+			invert ^= bangs % 2 == 1;
 			e = inner;
 		}
 		if invert {
@@ -746,7 +746,7 @@ impl<'a> Bp<'a> {
 				self.put(b"-n ");
 				word_text(w, &mut self.out);
 			},
-			CondExpr::Not(_) => {},
+			CondExpr::Not(..) => {},
 		}
 	}
 

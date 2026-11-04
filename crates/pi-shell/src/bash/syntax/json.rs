@@ -561,7 +561,13 @@ mod native {
 				("rhs", word(m, rhs)),
 			]),
 			CondExpr::Word(w) => V::Obj(vec![("type", s(b"word")), ("word", word(m, w))]),
-			CondExpr::Not(x) => V::Obj(vec![("type", s(b"not")), ("expr", cond(m, x))]),
+			CondExpr::Not(bangs, x) => {
+				let mut v = cond(m, x);
+				for _ in 0..*bangs {
+					v = V::Obj(vec![("type", s(b"not")), ("expr", v)]);
+				}
+				v
+			},
 			CondExpr::Group(x) => V::Obj(vec![("type", s(b"group")), ("expr", cond(m, x))]),
 			CondExpr::And(terms) | CondExpr::Or(terms) => {
 				let kind: &[u8] = if matches!(e, CondExpr::And(_)) {
@@ -1683,17 +1689,24 @@ mod shfmt {
 					("X", self.word(lhs, true)),
 					("Y", self.word(rhs, true)),
 				]),
-				CondExpr::Not(x) => {
-					let (xlo, xhi) = test_span(x);
-					let olo = self.find_back_op(xlo, b"!");
-					V::Obj(vec![
-						("Type", s(b"UnaryTest")),
-						("Pos", p(olo)),
-						("End", p(xhi)),
-						("OpPos", p(olo)),
-						("Op", s(b"!")),
-						("X", self.test(x)),
-					])
+				CondExpr::Not(bangs, x) => {
+					// Innermost `!` first: each one is found right before the
+					// one inside it.
+					let (mut lo, hi) = test_span(x);
+					let mut v = self.test(x);
+					for _ in 0..*bangs {
+						let olo = self.find_back_op(lo, b"!");
+						v = V::Obj(vec![
+							("Type", s(b"UnaryTest")),
+							("Pos", p(olo)),
+							("End", p(hi)),
+							("OpPos", p(olo)),
+							("Op", s(b"!")),
+							("X", v),
+						]);
+						lo = olo;
+					}
+					v
 				},
 				CondExpr::Group(x) => {
 					let (xlo, xhi) = test_span(x);
@@ -2309,9 +2322,9 @@ mod shfmt {
 			CondExpr::Word(w) => (w.span.lo, w.span.hi),
 			CondExpr::Unary { arg, .. } => (arg.span.lo.saturating_sub(3), arg.span.hi),
 			CondExpr::Binary { lhs, rhs, .. } => (lhs.span.lo, rhs.span.hi),
-			CondExpr::Not(x) => {
+			CondExpr::Not(bangs, x) => {
 				let (a, b) = test_span(x);
-				(a.saturating_sub(2), b)
+				(a.saturating_sub(u32::try_from(bangs.saturating_mul(2)).unwrap_or(u32::MAX)), b)
 			},
 			CondExpr::Group(x) => {
 				let (a, b) = test_span(x);

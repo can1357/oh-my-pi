@@ -356,8 +356,9 @@ pub enum CondExpr {
 	},
 	/// A lone word: true when non-empty.
 	Word(Word),
-	/// `! expr`
-	Not(Box<Self>),
+	/// `! ! … expr`: a run of `!`s, at least one, kept as one node so its
+	/// length sets no recursion depth. The operand is never itself `Not`.
+	Not(usize, Box<Self>),
 	/// `a && b && …`: at least two operands, in source order.
 	And(Vec<Self>),
 	/// `a || b || …`: at least two operands, in source order.

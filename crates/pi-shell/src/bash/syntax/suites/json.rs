@@ -149,7 +149,10 @@ fn long_bang_runs_export_json_without_stack_growth() {
 		let json = to_json(src.as_bytes(), &program, JsonDialect::Native, Offsets::Bytes);
 		assert_eq!(json.matches("\"type\":\"not\"").count(), 100_000);
 	}
+	// The shfmt dialect indents each level, so its size grows with the square
+	// of the depth: a shorter run keeps the output small.
+	let src = format!("[[ {}a ]]", "! ".repeat(5_000));
 	let program = parse_all(src.as_bytes(), Features::NONE).unwrap();
 	let json = to_json(src.as_bytes(), &program, JsonDialect::Shfmt, Offsets::Bytes);
-	assert_eq!(json.matches("\"Op\": \"!\"").count(), 100_000);
+	assert_eq!(json.matches("\"Op\": \"!\"").count(), 5_000);
 }

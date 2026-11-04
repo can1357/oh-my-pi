@@ -1481,17 +1481,31 @@ impl Ctx<'_> {
 	}
 
 	/// zsh `par_cond_2`: `BANG cond_2 | INPAR cond OUTPAR | STRING STRING
-	/// STRING | STRING STRING | STRING ( INANG | OUTANG ) STRING`.
-	#[allow(clippy::cognitive_complexity, reason = "a direct port of zsh's par_cond_2")]
+	/// STRING | STRING STRING | STRING ( INANG | OUTANG ) STRING`. A run of
+	/// `BANG`s is read in a loop and kept as one node.
 	fn par_cond_2(&mut self) -> Option<CondExpr> {
-		while self.cond_sep() {
+		let mut bangs = 0;
+		loop {
+			while self.cond_sep() {
+				self.zshlex();
+			}
+			if self.lx.tok != T::Bang {
+				break;
+			}
 			self.zshlex();
+			bangs += 1;
 		}
-		if self.lx.tok == T::Bang {
-			self.zshlex();
-			let e = self.par_cond_2()?;
-			return Some(CondExpr::Not(Box::new(e)));
-		}
+		let e = self.par_cond_operand()?;
+		Some(if bangs == 0 {
+			e
+		} else {
+			CondExpr::Not(bangs, Box::new(e))
+		})
+	}
+
+	/// The rest of `par_cond_2`, after any `BANG`s.
+	#[allow(clippy::cognitive_complexity, reason = "a direct port of zsh's par_cond_2")]
+	fn par_cond_operand(&mut self) -> Option<CondExpr> {
 		if self.lx.tok == T::Inpar {
 			self.zshlex();
 			while self.cond_sep() {

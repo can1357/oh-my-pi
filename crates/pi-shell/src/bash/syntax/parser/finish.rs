@@ -129,7 +129,7 @@ impl Walk<'_> {
 				self.word(rhs);
 			},
 			CondExpr::Word(w) => self.word(w),
-			CondExpr::Not(x) | CondExpr::Group(x) => self.cond(x),
+			CondExpr::Not(_, x) | CondExpr::Group(x) => self.cond(x),
 			CondExpr::And(terms) | CondExpr::Or(terms) => {
 				for term in terms {
 					self.cond(term);

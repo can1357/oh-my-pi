@@ -896,13 +896,13 @@ impl Lower {
 				let c = self.cond_ir(CondIr::Word(w));
 				self.emit(Opcode::CondTest, c, 0, id);
 			},
-			syn::CondExpr::Not(inner) => {
+			syn::CondExpr::Not(bangs, inner) => {
 				// A run of `!`s, lowered at once: bash's trace shows one `!`
 				// on a primary under an odd number of them.
-				let mut nots = 1;
+				let mut nots = *bangs;
 				let mut leaf = inner.as_ref();
-				while let syn::CondExpr::Not(i) = leaf {
-					nots += 1;
+				while let syn::CondExpr::Not(more, i) = leaf {
+					nots += more;
 					leaf = i;
 				}
 				let primary = matches!(
