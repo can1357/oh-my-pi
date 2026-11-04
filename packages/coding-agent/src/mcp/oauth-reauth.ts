@@ -19,6 +19,7 @@ import type { OAuthController } from "@oh-my-pi/pi-ai/oauth/types";
 import { expandEnvVarsDeep } from "../discovery/helpers";
 import { connectToServer, disconnectServer } from "./client";
 import { readMCPConfigFile, updateMCPServer } from "./config-writer";
+import { redactUrlForLog } from "./json-rpc";
 import { MCPManager } from "./manager";
 import {
 	analyzeAuthError,
@@ -387,7 +388,7 @@ export async function resolveMcpOAuthEndpointsFromServer(
 	// produces the misleading "reauthorization is not required".
 	if (config.type !== "http" && config.type !== "sse") {
 		const remoteUrl = config.args?.find(arg => /^https?:\/\//.test(arg));
-		const httpHint = `{ "type": "http", "url": ${JSON.stringify(remoteUrl ?? "<remote url>")} }`;
+		const httpHint = `{ "type": "http", "url": ${JSON.stringify(remoteUrl ? redactUrlForLog(remoteUrl) : "<remote url>")} }`;
 		const usesMcpRemote = [config.command, ...(config.args ?? [])].some(part => part?.includes("mcp-remote"));
 		throw new McpReauthRefusalError(
 			usesMcpRemote

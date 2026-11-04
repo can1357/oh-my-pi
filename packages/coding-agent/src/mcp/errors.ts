@@ -1,4 +1,4 @@
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, redactUrlCredentials } from "@oh-my-pi/pi-utils";
 import type { JsonRpcError } from "./types";
 
 /** MCP transport used by a failed operation. */
@@ -102,7 +102,7 @@ function errorCode(error: unknown): string | number | undefined {
 
 function sanitizeDiagnosticText(value: string, maxChars: number): string {
 	return (
-		value
+		redactUrlCredentials(value)
 			.replace(FETCH_VERBOSE_ADVICE, "")
 			// A credential is token68 and never contains `"`; `Bearer name="…"` is a
 			// WWW-Authenticate challenge whose params (resource_metadata, scope, error)
@@ -116,6 +116,16 @@ function sanitizeDiagnosticText(value: string, maxChars: number): string {
 			.slice(0, maxChars)
 			.trim()
 	);
+}
+
+/**
+ * Remove credential-shaped text from an MCP connection diagnostic that did not
+ * become an {@link MCPTransportError} (a stdio spawn failure, a config error),
+ * before it is reported as a server's failure: the status line, the
+ * connection events other modes forward, and the error log.
+ */
+export function redactMCPDiagnostic(value: string): string {
+	return sanitizeDiagnosticText(value, MAX_MESSAGE_CHARS);
 }
 
 function sanitizeData(value: unknown, depth: number, seen: WeakSet<object>): unknown {

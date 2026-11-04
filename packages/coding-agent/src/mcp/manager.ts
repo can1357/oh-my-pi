@@ -34,6 +34,7 @@ import {
 	loadAllMCPConfigs,
 	validateServerConfig,
 } from "./config";
+import { redactMCPDiagnostic } from "./errors";
 import {
 	lookupMcpOAuthCredential,
 	type MCPOAuthCredentialLookup,
@@ -711,7 +712,7 @@ export class MCPManager implements MCPManagerApi {
 				extensionRoots: options?.extensionRoots,
 			});
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
+			const message = redactMCPDiagnostic(error instanceof Error ? error.message : String(error));
 			this.#startupServers.add(".mcp.json");
 			options?.onStatus?.({ type: "failed", serverName: ".mcp.json", error: message });
 			this.#emitConnectionStatus({ type: "failed", serverName: ".mcp.json", error: message });
@@ -1003,7 +1004,7 @@ export class MCPManager implements MCPManagerApi {
 					if (isAbortedHandshake(connectSignal, error) || this.#pendingToolLoads.get(name) !== toolsPromise)
 						return;
 					this.#pendingToolLoads.delete(name);
-					const message = error instanceof Error ? error.message : String(error);
+					const message = redactMCPDiagnostic(error instanceof Error ? error.message : String(error));
 					notify(createMcpStartupFailure(name, message, sources[name]));
 					if (allowBackgroundLogging && !reportedErrors.has(name)) {
 						logger.error("MCP tool load failed", { path: `mcp:${name}`, error: message });
@@ -1076,8 +1077,9 @@ export class MCPManager implements MCPManagerApi {
 				} else if (task.tracked.status === "rejected") {
 					// disconnectAll aborted this handshake inside the startup window: torn down, not failed.
 					if (isAbortedHandshake(task.connectSignal, task.tracked.reason)) continue;
-					const message =
-						task.tracked.reason instanceof Error ? task.tracked.reason.message : String(task.tracked.reason);
+					const message = redactMCPDiagnostic(
+						task.tracked.reason instanceof Error ? task.tracked.reason.message : String(task.tracked.reason),
+					);
 					errors.set(name, message);
 					reportedErrors.add(name);
 				} else {
@@ -1714,7 +1716,7 @@ export class MCPManager implements MCPManagerApi {
 					return null;
 				}
 
-				const msg = error instanceof Error ? error.message : String(error);
+				const msg = redactMCPDiagnostic(error instanceof Error ? error.message : String(error));
 				if (attempt < delays.length) {
 					logger.debug("MCP reconnect attempt failed, retrying", {
 						path: `mcp:${name}`,

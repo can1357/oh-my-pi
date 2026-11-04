@@ -13,6 +13,8 @@
  *    origin. Method-changing redirects of non-GET requests are refused.
  */
 
+import { redactUrlForLog } from "../json-rpc";
+
 /** Header buckets for one MCP HTTP request. */
 interface MCPHeaderSources {
 	/** Client-generated HTTP/MCP/authorization headers; win case-insensitively. */
@@ -127,5 +129,5 @@ export async function mcpFetch(
 		}
 		currentUrl = new URL(location, currentUrl).href;
 	}
-	throw new Error(`Too many redirects (> ${MAX_REDIRECT_HOPS}) fetching ${url}`);
+	throw new Error(`Too many redirects (> ${MAX_REDIRECT_HOPS}) fetching ${redactUrlForLog(url)}`);
 }
