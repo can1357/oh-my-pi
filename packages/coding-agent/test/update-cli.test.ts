@@ -37,6 +37,7 @@ import {
 	updateViaBinaryAt,
 	updateViaManager,
 	updateViaShimTakeover,
+	verifyInstalledVersion,
 } from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 import Update from "@oh-my-pi/pi-coding-agent/commands/update";
 import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -1838,6 +1839,31 @@ describe("update-cli concurrent binary updates", () => {
 		expect(await Bun.file(targetPath).bytes()).toEqual(new Uint8Array(payload));
 		const residue = (await fs.readdir(dir)).filter(name => name.endsWith(".bak") || name.endsWith(".new"));
 		expect(residue).toEqual([]);
+	});
+});
+
+describe("verifyInstalledVersion", () => {
+	// A Windows shim takeover retires the launcher PATH first resolved (`omp.cmd`)
+	// for one later on PATH (`omp.exe`); the check must follow it, not a cached path.
+	it.skipIf(process.platform === "win32")("re-resolves PATH after an install moves the launcher", async () => {
+		const [first, second] = [await makeTempDir(), await makeTempDir()];
+		await Bun.write(path.join(first, "omp"), "#!/bin/sh\necho omp/1.0.0\n");
+		await Bun.write(path.join(second, "omp"), "#!/bin/sh\necho omp/2.0.0\n");
+		await fs.chmod(path.join(first, "omp"), 0o755);
+		await fs.chmod(path.join(second, "omp"), 0o755);
+		const originalPath = process.env.PATH;
+		process.env.PATH = [first, second, originalPath].join(path.delimiter);
+		try {
+			expect((await verifyInstalledVersion("2.0.0")).actual).toBe("1.0.0");
+			await fs.rm(path.join(first, "omp"));
+			expect(await verifyInstalledVersion("2.0.0")).toEqual({
+				ok: true,
+				actual: "2.0.0",
+				path: path.join(second, "omp"),
+			});
+		} finally {
+			process.env.PATH = originalPath;
+		}
 	});
 });
 

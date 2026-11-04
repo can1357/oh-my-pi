@@ -235,7 +235,8 @@ interface SpawnedWorker {
  * Mirror the running worker's status into `sinks` until its lock is free (and
  * the worker this launch spawned, if any, has exited), then show how the run
  * ended. A run that ended without a final status (killed, crashed) shows as
- * failed.
+ * failed; a failure also gets the startup notice, since the banner may have
+ * scrolled into history or be hidden (`startup.quiet`).
  */
 async function follow(file: string, sinks: AutoUpdateSinks, spawned?: SpawnedWorker): Promise<void> {
 	const since = Date.now();
@@ -267,13 +268,17 @@ async function follow(file: string, sinks: AutoUpdateSinks, spawned?: SpawnedWor
 		await Bun.sleep(POLL_MS);
 	}
 	const final = await readState(file);
+	let outcome: VersionUpdate | null;
 	if (final && PHASE_IS_FINAL[final.phase] && (live || final.at >= since)) {
-		show(describeAutoUpdate(final));
+		outcome = describeAutoUpdate(final);
+	} else if (live || spawned) {
+		const version = final?.version ?? final?.target ?? spawned?.target;
+		outcome = version === undefined ? null : { phase: "failed", version };
+	} else {
 		return;
 	}
-	if (!live && !spawned) return;
-	const version = final?.version ?? final?.target ?? spawned?.target;
-	show(version === undefined ? null : { phase: "failed", version });
+	show(outcome);
+	if (outcome?.phase === "failed") sinks.notify(outcome.version);
 }
 
 /** Serialized status writes with download progress throttled; only the lock holder makes them. */

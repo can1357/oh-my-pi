@@ -20,6 +20,7 @@ import {
 	isCompiledBinary,
 	isEnoent,
 	VERSION,
+	WhichCachePolicy,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { type FileLockHandle, tryAcquireFileLock, withFileLock } from "@oh-my-pi/pi-utils/file-lock";
@@ -1173,7 +1174,9 @@ async function validateExistingUpdateTarget(targetPath: string): Promise<void> {
  * Run the PATH-resolved omp binary and check if it reports the expected version.
  */
 export async function verifyInstalledVersion(expectedVersion: string): Promise<InstalledVersionVerification> {
-	const ompPath = resolveOmpPath();
+	// A fresh lookup: the install may have moved what PATH resolves to (a Windows
+	// shim takeover retires `omp.cmd` for `omp.exe`) since the target was resolved.
+	const ompPath = $which(APP_NAME, { cache: WhichCachePolicy.Fresh }) ?? undefined;
 	if (!ompPath) return { ok: false };
 	const binaryPath = tryRealpath(ompPath) ?? ompPath;
 	return await verifyBinaryAtPath(binaryPath, expectedVersion);
