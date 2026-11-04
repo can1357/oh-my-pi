@@ -718,9 +718,11 @@ function mergeDynamicModel<TApi extends Api>(
 	const dynamicHeaders = dynamicModel.resolveHeaders ?? dynamicModel.headers;
 	let resolveHeaders = dynamicModel.resolveHeaders ?? existingModel.resolveHeaders;
 	if (resolveHeaders && existingHeaders && dynamicHeaders && existingHeaders !== dynamicHeaders) {
-		resolveHeaders = async signal => {
-			const previous = typeof existingHeaders === "function" ? await existingHeaders(signal) : existingHeaders;
-			const next = typeof dynamicHeaders === "function" ? await dynamicHeaders(signal) : dynamicHeaders;
+		// Forward the options too: a closing `configurationCheck` must reach both layers.
+		resolveHeaders = async (signal, options) => {
+			const previous =
+				typeof existingHeaders === "function" ? await existingHeaders(signal, options) : existingHeaders;
+			const next = typeof dynamicHeaders === "function" ? await dynamicHeaders(signal, options) : dynamicHeaders;
 			return { ...previous, ...next };
 		};
 	}

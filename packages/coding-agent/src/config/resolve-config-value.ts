@@ -1,6 +1,5 @@
 import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { executeShell } from "@oh-my-pi/pi-natives";
 import {
@@ -85,6 +84,10 @@ export function isCachedConfigValue(valueConfig: string | undefined): valueConfi
  * fully qualified after that expansion: a relative path, a bare `~`, and on
  * Windows a drive-relative path (`\secret`, `C:secret`), none of which names
  * one file in every directory and on every drive omp runs from.
+ *
+ * The path is otherwise kept as written, not normalized as text: the file
+ * system resolves `..` after the symlink before it, so `link/../key` can name
+ * another file than the `key` beside `link`.
  */
 export function normalizeFileConfigPath(
 	filePath: string,
@@ -92,8 +95,7 @@ export function normalizeFileConfigPath(
 ): string | undefined {
 	const homeRelative = filePath.startsWith("~/") || (platform === "win32" && filePath.startsWith("~\\"));
 	const expanded = homeRelative ? expandTilde(filePath) : filePath;
-	if (!isFullyQualifiedPath(expanded, platform)) return undefined;
-	return (platform === "win32" ? path.win32 : path.posix).normalize(expanded);
+	return isFullyQualifiedPath(expanded, platform) ? expanded : undefined;
 }
 
 /** Internal config value that resolves to the trimmed content of the file at an absolute path. */
