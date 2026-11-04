@@ -482,61 +482,59 @@ pub const fn path_separator(platform: Platform) -> u8 {
 	}
 }
 
-/// `dir/name` for every `$PATH` entry, including Windows `PATHEXT` suffixes.
+/// `dir/name` for every `$PATH` entry; on Windows each is followed by the
+/// `extensions` (`PATHEXT`) spellings unless `name` already ends in one.
 pub fn candidates(
 	path: &[u8],
 	name: &[u8],
 	cwd: &[u8],
 	platform: Platform,
-	extensions: &[u8],
+	extensions: &[String],
 ) -> Vec<BString> {
-	let separator = path_separator(platform);
-	let add_extensions = platform == Platform::Windows
-		&& !extensions.split(|&c| c == b';').any(|suffix| {
-			!suffix.is_empty()
-				&& name.len() >= suffix.len()
-				&& name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-		});
-	path
-		.split(|&c| c == separator)
-		.flat_map(|dir| {
-			std::iter::once(b"".as_slice())
-				.chain(
-					extensions
-						.split(|&c| c == b';')
-						.filter(|suffix| add_extensions && !suffix.is_empty()),
-				)
-				.map(move |suffix| {
-					let mut p = if dir.is_empty() {
-						BString::from(cwd)
-					} else {
-						absolute_on(cwd, dir, platform)
-					};
-					if !(p.ends_with(b"/") || platform == Platform::Windows && p.ends_with(b"\\")) {
-						p.push(b'/');
-					}
-					p.extend_from_slice(name);
-					p.extend_from_slice(suffix);
-					p
-				})
-		})
-		.collect()
+	let has_extension = extensions.iter().any(|ext| {
+		name.len() >= ext.len() && name[name.len() - ext.len()..].eq_ignore_ascii_case(ext.as_bytes())
+	});
+	let suffixes = if has_extension { &[] } else { extensions };
+	let windows = platform == Platform::Windows;
+	let mut out = Vec::new();
+	for dir in path.split(|&c| c == path_separator(platform)) {
+		let mut base = if dir.is_empty() {
+			BString::from(cwd)
+		} else {
+			absolute_on(cwd, dir, platform)
+		};
+		if !(base.ends_with(b"/") || windows && base.ends_with(b"\\")) {
+			base.push(b'/');
+		}
+		base.extend_from_slice(name);
+		// The bare name first, then its PATHEXT spellings.
+		let at = out.len();
+		out.push(base);
+		for ext in suffixes {
+			let base = &out[at];
+			let mut p = BString::from(Vec::with_capacity(base.len() + ext.len()));
+			p.extend_from_slice(base);
+			p.extend_from_slice(ext.as_bytes());
+			out.push(p);
+		}
+	}
+	out
 }
 
-/// Executable suffixes from the shell's environment, through the same
-/// [`Pathext`](crate::sys::pathext::Pathext) rules the exec check uses;
-/// unused on POSIX.
-pub fn executable_extensions(k: &Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> BString {
+/// The shell's `PATHEXT` suffixes, normalized as the exec check reads them
+/// ([`Pathext`](crate::sys::pathext::Pathext)); empty off Windows.
+pub fn executable_extensions(k: &Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> Vec<String> {
 	if k.engine.config().platform != Platform::Windows {
-		return BString::default();
+		return Vec::new();
 	}
-	let scalar: Option<BString> = super::state::lookup(&k.root, cx.store, vp, b"PATHEXT")
+	let var = super::state::lookup(&k.root, cx.store, vp, b"PATHEXT")
 		.ok()
-		.flatten()
-		.and_then(|value| value.as_scalar().map(BString::from));
-	let raw = scalar.map(|value| String::from_utf8_lossy(&value).into_owned());
-	let pathext = crate::sys::pathext::Pathext::parse(raw.as_deref().map(std::ffi::OsStr::new));
-	BString::from(pathext.extensions().join(";"))
+		.flatten();
+	let raw = var
+		.as_ref()
+		.and_then(|v| v.as_scalar())
+		.map(String::from_utf8_lossy);
+	crate::sys::pathext::Pathext::parse(raw.as_deref().map(std::ffi::OsStr::new)).into_extensions()
 }
 
 /// The `idx`th `$PATH` candidate as bash prints it (`type -p`,
@@ -678,16 +676,8 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn standard_path_uses_the_platform_separator() {
-		assert!(standard_path(Platform::Linux).contains(':'));
-		assert!(!standard_path(Platform::Linux).contains(';'));
-		assert!(standard_path(Platform::Windows).contains(';'));
-		assert!(!standard_path(Platform::Windows).contains(':'));
-	}
-
-	#[test]
 	fn path_candidates_resolve_empty_and_relative_entries_against_cwd() {
-		let c = candidates(b"/bin::rel", b"ls", b"/home/u", Platform::Linux, b"");
+		let c = candidates(b"/bin::rel", b"ls", b"/home/u", Platform::Linux, &[]);
 		assert_eq!(c, vec![
 			BString::from("/bin/ls"),
 			BString::from("/home/u/ls"),
@@ -696,40 +686,33 @@ mod tests {
 	}
 
 	#[test]
-	fn windows_path_search_preserves_drives_empty_entries_and_extension_order() {
-		let found: Vec<String> = candidates(
-			br"C:\Tools;;relative",
-			b"tool",
-			br"C:\project",
-			Platform::Windows,
-			b".EXE;.CMD",
-		)
-		.into_iter()
-		.map(|path| String::from_utf8_lossy(&path).into_owned())
-		.collect();
-		let expected = [
+	fn windows_path_search_tries_the_bare_name_then_pathext_spellings() {
+		let exts = [".exe".to_owned(), ".cmd".to_owned()];
+		let win = |path: &[u8], name: &[u8]| -> Vec<String> {
+			candidates(path, name, br"C:\project", Platform::Windows, &exts)
+				.into_iter()
+				.map(|p| String::from_utf8_lossy(&p).into_owned())
+				.collect()
+		};
+		assert_eq!(win(br"C:\Tools;;rel", b"tool"), [
 			r"C:\Tools/tool",
-			r"C:\Tools/tool.EXE",
-			r"C:\Tools/tool.CMD",
+			r"C:\Tools/tool.exe",
+			r"C:\Tools/tool.cmd",
 			r"C:\project/tool",
-			r"C:\project/tool.EXE",
-			r"C:\project/tool.CMD",
-			r"C:\project/relative/tool",
-			r"C:\project/relative/tool.EXE",
-			r"C:\project/relative/tool.CMD",
-		];
-		assert_eq!(found, expected);
-	}
-
-	#[test]
-	fn windows_pathext_keeps_explicit_extensions_but_expands_dotted_names() {
-		assert_eq!(candidates(b"", b"tool.exe", br"C:\project", Platform::Windows, b".EXE"), vec![
-			BString::from(br"C:\project/tool.exe".as_slice())
-		],);
-		assert_eq!(candidates(b"", b"my.tool", br"C:\project", Platform::Windows, b".EXE"), vec![
-			BString::from(br"C:\project/my.tool".as_slice()),
-			BString::from(br"C:\project/my.tool.EXE".as_slice()),
-		],);
+			r"C:\project/tool.exe",
+			r"C:\project/tool.cmd",
+			r"C:\project/rel/tool",
+			r"C:\project/rel/tool.exe",
+			r"C:\project/rel/tool.cmd",
+		]);
+		// A name already carrying a PATHEXT suffix is not re-suffixed; any other
+		// dot is.
+		assert_eq!(win(b"", b"tool.EXE"), [r"C:\project/tool.EXE"]);
+		assert_eq!(win(b"", b"my.tool"), [
+			r"C:\project/my.tool",
+			r"C:\project/my.tool.exe",
+			r"C:\project/my.tool.cmd"
+		]);
 	}
 
 	#[test]

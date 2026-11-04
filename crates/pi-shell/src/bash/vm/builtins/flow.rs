@@ -78,7 +78,7 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		};
 		if let Some(search) = search {
 			let cwd = ctx.vp.cwd.clone();
-			for cand in candidates(&search, file, &cwd, ctx.k.engine.config().platform, b"") {
+			for cand in candidates(&search, file, &cwd, ctx.k.engine.config().platform, &[]) {
 				if let ProbeResult::Stat(Some(st)) =
 					ctx.probe(Probe::Stat { path: cand.clone(), follow: true })?
 					&& st.kind == StatKind::File

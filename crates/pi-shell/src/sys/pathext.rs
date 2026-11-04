@@ -45,8 +45,8 @@ impl Pathext {
 	}
 
 	/// The normalized suffixes, each with its leading dot.
-	pub fn extensions(&self) -> &[String] {
-		&self.exts
+	pub fn into_extensions(self) -> Vec<String> {
+		self.exts
 	}
 
 	/// From the process's `PATHEXT`.
