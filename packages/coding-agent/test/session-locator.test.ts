@@ -599,7 +599,7 @@ describe("session index: lookups by id", () => {
 		},
 	);
 
-	describe("an unreadable file or directory never costs a readable session (round 8)", () => {
+	describe("an unreadable file or directory never costs a readable session", () => {
 		const unlessRoot = process.platform === "win32" || process.getuid?.() === 0;
 
 		it.skipIf(unlessRoot)(
@@ -717,6 +717,193 @@ describe("session index: lookups by id", () => {
 			const cwdC = path.join(agentDir, "project-c");
 			fs.mkdirSync(cwdC);
 			expect((await resolveResumableSession(childId, cwdC))?.session.path).toBe(movedChild);
+		});
+
+		it.skipIf(unlessRoot)("refuses to replace a snapshot it cannot read, and loses nothing it held", async () => {
+			const parentId = "019a000d-0000-7000-8000-000000000001";
+			const childId = "019a000d-0000-7000-8000-000000000002";
+			const parent = path.join(getSessionsDir(), "--snap--", `2026-01-01T00-00-00-000Z_${parentId}.jsonl`);
+			const artifacts = parent.slice(0, -".jsonl".length);
+			writeTranscript(parent, parentId, "/s");
+			writeTranscript(path.join(artifacts, "Worker.jsonl"), childId, "/s");
+			await rebuildSessionLocator(getSessionsDir());
+			const snapshot = path.join(getSessionsDir(), ".session-index.base.tsv");
+			const before = fs.readFileSync(snapshot, "utf8");
+			fs.chmodSync(snapshot, 0o000);
+			fs.chmodSync(artifacts, 0o000);
+			try {
+				await expect(rebuildSessionLocator(getSessionsDir())).rejects.toThrow(
+					"cannot be read, so it was not replaced",
+				);
+			} finally {
+				fs.chmodSync(artifacts, 0o700);
+				fs.chmodSync(snapshot, 0o600);
+			}
+			expect(fs.readFileSync(snapshot, "utf8")).toBe(before);
+			expect((await resolveResumableSession(childId, cwdB))?.session.id).toBe(childId);
+		});
+
+		it.skipIf(unlessRoot)("merges a reindex that published while another was still walking", async () => {
+			const childId = "019a000e-0000-7000-8000-000000000001";
+			const child = path.join(getSessionsDir(), "--race--", "parent", "Worker.jsonl");
+			writeTranscript(child, childId, "/r");
+			fs.chmodSync(child, 0o000);
+			// Hold the first reindex right after it has seen the file unreadable.
+			const access = fs.promises.access.bind(fs.promises);
+			const sawUnreadable = Promise.withResolvers<void>();
+			const resume = Promise.withResolvers<void>();
+			let paused = false;
+			const accessSpy = spyOn(fs.promises, "access").mockImplementation(async (file, mode) => {
+				const result = access(file, mode);
+				if (!paused && path.resolve(String(file)) === child) {
+					paused = true;
+					await result.catch(() => undefined);
+					sawUnreadable.resolve();
+					await resume.promise;
+				}
+				return result;
+			});
+			try {
+				const stale = rebuildSessionLocator(getSessionsDir());
+				await sawUnreadable.promise;
+				fs.chmodSync(child, 0o600);
+				expect((await rebuildSessionLocator(getSessionsDir())).indexed).toBe(1);
+				expect((await resolveResumableSession(childId, cwdB))?.session.path).toBe(child);
+				resume.resolve();
+				await stale;
+			} finally {
+				resume.resolve();
+				accessSpy.mockRestore();
+				fs.chmodSync(child, 0o600);
+			}
+			expect((await resolveResumableSession(childId, cwdB))?.session.path).toBe(child);
+		});
+
+		it.skipIf(unlessRoot)(
+			"finds an archived session by the id inside it when its name says another",
+			async () => {
+				const headerId = "019a000f-0000-7000-8000-00000000000a";
+				const nameId = "019a000f-0000-7000-8000-00000000000b";
+				const file = path.join(getSessionsDir(), "--gz--", `2026-01-01T00-00-00-000Z_${nameId}.jsonl`);
+				writeFinishedTranscript(file, headerId, "/gz");
+				const old = new Date(Date.now() - 90 * 86_400_000);
+				fs.utimesSync(file, old, old);
+				await rebuildSessionLocator(getSessionsDir());
+				const result = await runGcCommand({
+					flags: {
+						agentDir,
+						archive: true,
+						apply: true,
+						coldArchiveAfterDays: 30,
+						retainNewestGlobal: 0,
+						retainNewestPerCwd: 0,
+					},
+				});
+				expect(result.archive?.archived).toBe(1);
+				const archived = `${path.join(archiveRootFor(getSessionsDir()), path.relative(getSessionsDir(), file))}.gz`;
+				const error = await resolveResumableSession(headerId, cwdB).catch((e: unknown) => e);
+				expect(error).toBeInstanceOf(ArchivedSessionError);
+				expect((error as ArchivedSessionError).archivePath).toBe(archived);
+				// The name's id does not stand for the session inside.
+				expect(await resolveResumableSession(nameId, cwdB)).toBeUndefined();
+			},
+			600_000,
+		);
+
+		it.skipIf(unlessRoot)("keeps every id a moved transcript had when it cannot be read", async () => {
+			const parent = await persistedSession(cwdA);
+			const headerId = "019a0010-0000-7000-8000-00000000000a";
+			const nameId = "019a0010-0000-7000-8000-00000000000b";
+			const artifacts = parent.getSessionFile()!.slice(0, -".jsonl".length);
+			const childName = `2026-01-01T00-00-00-000Z_${nameId}.jsonl`;
+			writeTranscript(path.join(artifacts, childName), headerId, cwdA);
+			await rebuildSessionLocator(getSessionsDir());
+			fs.chmodSync(path.join(artifacts, childName), 0o000);
+			let movedChild = "";
+			try {
+				await parent.moveTo(cwdB);
+				movedChild = path.join(parent.getSessionFile()!.slice(0, -".jsonl".length), childName);
+			} finally {
+				fs.chmodSync(movedChild && fs.existsSync(movedChild) ? movedChild : path.join(artifacts, childName), 0o600);
+			}
+			await parent.close();
+			const cwdC = path.join(agentDir, "project-c");
+			fs.mkdirSync(cwdC);
+			expect((await resolveResumableSession(headerId, cwdC))?.session.path).toBe(movedChild);
+		});
+
+		it.skipIf(unlessRoot)(
+			"`omp session reindex` reports a root it cannot read and still reindexes the others",
+			async () => {
+				const locked = path.join(agentDir, "locked-root");
+				const good = path.join(agentDir, "good-root");
+				const legacyId = "019a0011-0000-7000-8000-000000000001";
+				const legacy = path.join(good, "--legacy--", `2026-01-01T00-00-00-000Z_${legacyId}.jsonl`);
+				writeTranscript(legacy, legacyId, "/g");
+				fs.mkdirSync(locked);
+				fs.chmodSync(locked, 0o000);
+				const cli = path.join(import.meta.dir, "../src/cli.ts");
+				let result: Bun.SyncSubprocess<"pipe", "pipe">;
+				try {
+					result = Bun.spawnSync([process.execPath, cli, "session", "reindex"], {
+						env: {
+							...process.env,
+							PI_CODING_AGENT_DIR: agentDir,
+							PI_SESSION_EXTRA_ROOTS: [locked, good].join(path.delimiter),
+						},
+					});
+				} finally {
+					fs.chmodSync(locked, 0o700);
+				}
+				expect(result.exitCode).toBe(1);
+				expect(result.stderr.toString()).toContain(`${locked} was not reindexed`);
+				expect(result.stdout.toString().split("\n")).toContain(`1\t${good}`);
+				configureSessionExtraRoots([good]);
+				expect((await resolveResumableSession(legacyId, cwdB))?.session.path).toBe(legacy);
+			},
+			120_000,
+		);
+
+		it.skipIf(unlessRoot)("records a session once its index log can be written again", async () => {
+			fs.mkdirSync(getSessionsDir(), { recursive: true });
+			const log = path.join(getSessionsDir(), SESSION_LOCATOR_FILE);
+			fs.writeFileSync(log, "");
+			fs.chmodSync(log, 0o000);
+			const session = SessionManager.create(cwdA);
+			try {
+				session.appendMessage({ role: "user", content: "first", timestamp: 1 });
+				session.appendMessage(makeAssistantMessage());
+				await session.flush();
+			} finally {
+				fs.chmodSync(log, 0o600);
+			}
+			session.appendMessage({ role: "user", content: "second", timestamp: 2 });
+			await session.flush();
+			const id = session.getSessionId();
+			await session.close();
+			expect((await resolveResumableSession(id, cwdB))?.session.id).toBe(id);
+		});
+
+		it.skipIf(unlessRoot)("reports a symlinked transcript it cannot reach, and keeps what it knew", async () => {
+			const childId = "019a0012-0000-7000-8000-000000000001";
+			const dir = path.join(getSessionsDir(), "--links--", "parent");
+			const target = path.join(agentDir, "elsewhere", "Real.jsonl");
+			writeTranscript(target, childId, "/l");
+			fs.mkdirSync(dir, { recursive: true });
+			const link = path.join(dir, "Linked.jsonl");
+			fs.symlinkSync(target, link);
+			const loop = path.join(dir, "Loop.jsonl");
+			fs.symlinkSync(loop, loop);
+			expect((await rebuildSessionLocator(getSessionsDir())).indexed).toBe(1);
+			fs.chmodSync(target, 0o000);
+			let rebuilt: SessionLocatorRebuild;
+			try {
+				rebuilt = await rebuildSessionLocator(getSessionsDir());
+			} finally {
+				fs.chmodSync(target, 0o600);
+			}
+			expect(rebuilt.unreadable.map(entry => entry.bucket).sort()).toEqual([link, loop].sort());
+			expect((await resolveResumableSession(childId, cwdB))?.session.path).toBe(link);
 		});
 	});
 

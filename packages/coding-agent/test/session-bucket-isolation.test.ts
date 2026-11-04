@@ -74,26 +74,30 @@ describe("cross-project session bucket isolation", () => {
 		expect((await listRecentProjects(10, sessionsRoot)).map(project => project.latest.id)).toEqual([SESSION_ID]);
 	});
 
-	it.each(["EACCES", "EPERM", "ENOENT", "ENOTDIR"])("discards a bucket's partial matches on %s", async code => {
-		await fs.promises.copyFile(sessionFile, path.join(blockedBucket, SESSION_NAME));
-		const scan = Bun.Glob.prototype.scan;
-		vi.spyOn(Bun.Glob.prototype, "scan").mockImplementation(async function* (this: Bun.Glob, options) {
-			if (typeof options === "object" && options.cwd === blockedBucket) {
-				yield SESSION_NAME;
-				throw Object.assign(new Error("bucket unavailable"), { code });
-			}
-			yield* scan.call(this, options);
-		});
+	/** Make `fs.promises.readdir` of `bucket` reject with `failure`; every other directory reads as usual. */
+	function failBucketReads(bucket: string, failure: Error): void {
+		const readdir = fs.promises.readdir.bind(fs.promises);
+		vi.spyOn(fs.promises, "readdir").mockImplementation(((dir: fs.PathLike, ...rest: unknown[]) =>
+			path.resolve(String(dir)) === bucket
+				? Promise.reject(failure)
+				: (readdir as (...args: unknown[]) => Promise<unknown>)(dir, ...rest)) as typeof fs.promises.readdir);
+	}
 
-		expect(await reindexedLookup()).toEqual([sessionFile]);
-	});
+	it.each(["EACCES", "EPERM", "ENOENT", "ENOTDIR"])(
+		"reports a bucket that fails with %s and keeps the rest",
+		async code => {
+			await fs.promises.copyFile(sessionFile, path.join(blockedBucket, SESSION_NAME));
+			failBucketReads(blockedBucket, Object.assign(new Error("bucket unavailable"), { code }));
+
+			const rebuilt = await rebuildSessionLocator(sessionsRoot);
+			expect(rebuilt.unreadable.map(entry => entry.bucket)).toEqual([blockedBucket]);
+			expect(await findSessionFiles(SESSION_ID, [sessionsRoot])).toEqual([sessionFile]);
+		},
+	);
 
 	it("surfaces an unexpected bucket enumeration failure during reindex", async () => {
 		const failure = Object.assign(new Error("bucket I/O failure"), { code: "EIO" });
-		vi.spyOn(Bun.Glob.prototype, "scan").mockImplementationOnce(async function* () {
-			yield SESSION_NAME;
-			throw failure;
-		});
+		failBucketReads(blockedBucket, failure);
 
 		await expect(rebuildSessionLocator(sessionsRoot)).rejects.toBe(failure);
 	});

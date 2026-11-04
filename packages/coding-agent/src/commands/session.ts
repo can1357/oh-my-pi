@@ -17,7 +17,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Args, CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { sessionHelp as commandHelp } from "../cli/command-help";
 import { applySessionExtraRootsSetting, resolveSessionFileArg } from "../cli/session-arg";
-import { rebuildSessionLocator, sessionLocatorRoots } from "../session/session-locator";
+import { rebuildSessionLocator, type SessionLocatorRebuild, sessionLocatorRoots } from "../session/session-locator";
 import { SessionMoveRefusedError } from "../session/session-manager";
 import { probeSessionLeases } from "../session/session-storage";
 import {
@@ -68,13 +68,22 @@ function printSessionLeases(sessionIds: string[], json: boolean): void {
  * Rebuild the session index snapshot of `root`, or of every root a lookup
  * consults (this profile's sessions root and archive, `session.extraRoots`,
  * and every other profile's root and archive). This is the one command that
- * walks the sessions tree; lookups by id read only the index files.
+ * walks the sessions tree; lookups by id read only the index files. A root
+ * that cannot be reindexed (unreadable, or its snapshot unreadable) is
+ * reported and the rest are still reindexed; the command then exits 1.
  */
 async function reindexSessionRoots(root: string | undefined): Promise<void> {
 	if (root === undefined) await applySessionExtraRootsSetting(process.cwd());
 	const roots = root === undefined ? sessionLocatorRoots() : [path.resolve(root)];
 	for (const target of roots) {
-		const result = await rebuildSessionLocator(target);
+		let result: SessionLocatorRebuild;
+		try {
+			result = await rebuildSessionLocator(target);
+		} catch (error) {
+			process.stderr.write(`${chalk.red(`error: ${target} was not reindexed: ${String(error)}`)}\n`);
+			process.exitCode = 1;
+			continue;
+		}
 		for (const { bucket, error } of result.unreadable) {
 			process.stderr.write(
 				`${chalk.yellow(`warning: ${bucket} could not be read; the index keeps what it recorded there before: ${error}`)}\n`,

@@ -1598,16 +1598,21 @@ export async function getRecentSessions(
 }
 
 function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): boolean {
+	return resumeKeyMatches(session.id, session.path, sessionArg);
+}
+
+/** Whether `sessionArg` names session `id`, held in the transcript at `filePath` (a `.jsonl` path). */
+function resumeKeyMatches(id: string, filePath: string, sessionArg: string): boolean {
 	const normalizedArg = sessionArg.toLowerCase();
-	const normalizedId = session.id.toLowerCase();
+	const normalizedId = id.toLowerCase();
 	if (normalizedId.startsWith(normalizedArg)) {
 		return true;
 	}
 
-	const fileName = path.basename(session.path, ".jsonl").toLowerCase();
+	const fileName = path.basename(filePath, ".jsonl").toLowerCase();
 	// The id a name records: a generated `<timestamp>_<id>` name's whole id
 	// (which may hold underscores), else whatever follows the last `_`.
-	const generatedId = parseSessionFileName(session.path)?.id.toLowerCase();
+	const generatedId = parseSessionFileName(filePath)?.id.toLowerCase();
 	const separator = fileName.lastIndexOf("_");
 	const fileSessionId = generatedId ?? (separator >= 0 ? fileName.slice(separator + 1) : undefined);
 	// The name's id matches only as the id of the session the file holds. A
@@ -1691,7 +1696,8 @@ export async function resolveResumableSession(
 	let archived: LocatedSession | undefined;
 	for (const hit of await locateSessions(sessionArg, { matchFileName: true })) {
 		if (hit.archived) {
-			archived ??= hit;
+			// The same rule as a live file: a name that records another session does not name this one.
+			if (resumeKeyMatches(hit.id, hit.path.slice(0, -".gz".length), sessionArg)) archived ??= hit;
 			continue;
 		}
 		const [session] = await collectSessionsFromFiles([hit.path], storage, true);

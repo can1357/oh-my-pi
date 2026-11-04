@@ -1,6 +1,8 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { createReadStream } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { createGunzip } from "node:zlib";
 import {
 	ConcatSink,
 	getBlobsDir,
@@ -209,6 +211,43 @@ export async function readSessionHeaderId(filePath: string): Promise<string | un
 	} catch (err) {
 		if (isEnoent(err) || isEnotdir(err) || isEisdir(err)) return undefined;
 		throw err;
+	}
+}
+
+/**
+ * The session id in the header of a gzip-compressed transcript (`omp gc`'s
+ * `.jsonl.gz`), decompressing only as far as the header: at most
+ * {@link SESSION_HEADER_READ_LIMIT} bytes. `undefined` when there is no file,
+ * the data is not gzip, or it does not start with a valid session header;
+ * throws when the file cannot be read (permissions).
+ */
+export async function readGzipSessionHeaderId(filePath: string): Promise<string | undefined> {
+	const source = createReadStream(filePath);
+	const gunzip = createGunzip();
+	source.on("error", error => gunzip.destroy(error));
+	const chunks: Buffer[] = [];
+	let length = 0;
+	try {
+		for await (const chunk of source.pipe(gunzip)) {
+			const bytes: Buffer = chunk;
+			chunks.push(bytes);
+			length += bytes.length;
+			if (length < SESSION_HEADER_FIRST_READ) continue;
+			const id = sessionHeaderIdFromPrefix(Buffer.concat(chunks), length >= SESSION_HEADER_READ_LIMIT);
+			if (id !== HEADER_INCOMPLETE) return id;
+		}
+		const id = sessionHeaderIdFromPrefix(Buffer.concat(chunks), true);
+		return id === HEADER_INCOMPLETE ? undefined : id;
+	} catch (err) {
+		if (isEnoent(err) || isEnotdir(err) || isEisdir(err)) return undefined;
+		// Not gzip, or truncated (zlib's `Z_*` codes): not a session this can read, which is not a permission failure.
+		if (err instanceof Error && "code" in err && typeof err.code === "string" && err.code.startsWith("Z_")) {
+			return undefined;
+		}
+		throw err;
+	} finally {
+		source.destroy();
+		gunzip.destroy();
 	}
 }
 

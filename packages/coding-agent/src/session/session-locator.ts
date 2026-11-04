@@ -26,9 +26,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProfileSessionsDirs, getSessionsDir } from "@oh-my-pi/pi-utils/dirs";
+import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { hasFsCode, isEacces, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
-import { readSessionHeaderId } from "./session-loader";
+import { readGzipSessionHeaderId, readSessionHeaderId } from "./session-loader";
 
 /** The append-only log inside each sessions root. A dotfile, so bucket and transcript globs skip it. */
 export const SESSION_LOCATOR_FILE = ".session-index.tsv";
@@ -151,21 +152,28 @@ function appendIndexLine(indexFile: string, line: string, createRoot: boolean): 
  * of the root among `roots` (default: {@link sessionLocatorRoots}) that holds
  * `file`, relative to it; a file outside every root is recorded by absolute
  * path in this process's sessions root. Never throws: a log that misses a
- * line costs a lookup, not a session.
+ * line costs a lookup, not a session. Returns whether the line was written,
+ * so a caller can try again on its next write.
  */
 export function recordSessionLocation(
 	id: string,
 	file: string,
 	roots: readonly string[] = sessionLocatorRoots(),
-): void {
-	if (!SESSION_ID_RE.test(id)) return;
+): boolean {
+	if (!SESSION_ID_RE.test(id)) return false;
 	const absolute = path.resolve(file);
 	const owner = owningRoot(absolute, roots);
 	const indexFile = path.join(owner?.root ?? getSessionsDir(), SESSION_LOCATOR_FILE);
 	try {
 		appendIndexLine(indexFile, `\n${id}\t${encodeStoredPath(owner?.relative ?? absolute)}\n`, owner === undefined);
+		return true;
 	} catch (error) {
-		logger.debug("Session index append failed", { indexFile, id, error: String(error) });
+		logger.warn("Session index append failed; will retry on the next write", {
+			indexFile,
+			id,
+			error: String(error),
+		});
+		return false;
 	}
 }
 
@@ -191,7 +199,7 @@ export async function recordSessionTree(
 	const files = options.artifactsOnly ? [] : [file];
 	const unreadable: SessionLocatorRebuild["unreadable"] = [];
 	try {
-		await scanNestedTranscripts(artifacts, files, unreadable);
+		await scanTranscripts(artifacts, false, files, unreadable);
 	} catch (error) {
 		logger.debug("Session tree scan failed", { artifacts, error: String(error) });
 	}
@@ -202,19 +210,26 @@ export async function recordSessionTree(
 			? previousFile
 			: previousArtifacts && path.join(previousArtifacts, path.relative(artifacts, moved));
 	for (const transcript of files) {
-		let id = await sessionIdOfFile(transcript).catch(() => undefined);
-		const old = id ? undefined : before(transcript);
-		if (old) id = (await recordedRowsAt(old, roots, false)).at(-1)?.id;
-		if (id) recordSessionLocation(id, transcript, roots);
+		const ids = new Set<string>();
+		const headerId = await sessionIdOfFile(transcript).catch(() => undefined);
+		if (headerId) ids.add(headerId);
+		// As reindex does: a generated name's id beside the header's, for continuations.
+		const nameId = generatedNameId(transcript);
+		if (nameId) ids.add(nameId);
+		// Unreadable now: keep every id the index had for it at its old path, not one of them.
+		const old = headerId ? undefined : before(transcript);
+		if (old) for (const row of await recordedRowsAt(old, roots, false)) ids.add(row.id);
+		for (const id of ids) recordSessionLocation(id, transcript, roots);
 	}
-	// A directory the move carried but this walk cannot read keeps every line
-	// the index had under its old path, at the matching new path.
+	// A directory, or a symlinked transcript, the move carried but this walk
+	// cannot read keeps every line the index had at or under its old path.
 	if (previousArtifacts === undefined) return;
-	for (const { bucket: dir } of unreadable) {
-		const old = before(dir);
-		if (!old || !fs.existsSync(dir)) continue;
-		for (const row of await recordedRowsAt(old, roots, true)) {
-			recordSessionLocation(row.id, path.join(dir, path.relative(old, row.file)), roots);
+	for (const { bucket: unreadablePath } of unreadable) {
+		const old = before(unreadablePath);
+		if (!old) continue;
+		const rows = [...(await recordedRowsAt(old, roots, false)), ...(await recordedRowsAt(old, roots, true))];
+		for (const row of rows) {
+			recordSessionLocation(row.id, path.join(unreadablePath, path.relative(old, row.file)), roots);
 		}
 	}
 }
@@ -297,10 +312,16 @@ function idFromFileName(file: string): string | undefined {
 	return id && SESSION_ID_RE.test(id) ? id : undefined;
 }
 
-/** The session id `file` holds: its header's, or for a `.jsonl.gz` archive the one its name carries. */
+/**
+ * The session id `file` holds: its header's. For a `.jsonl.gz` archive that is
+ * the header inside the compressed data; only when that cannot be parsed (not
+ * gzip, no header) does the id its name carries stand in. Throws when the file
+ * cannot be read.
+ */
 async function sessionIdOfFile(file: string): Promise<string | undefined> {
-	if (file.endsWith(ARCHIVED_SUFFIX)) return idFromFileName(file);
-	const id = await readSessionHeaderId(file);
+	const id = file.endsWith(ARCHIVED_SUFFIX)
+		? ((await readGzipSessionHeaderId(file)) ?? idFromFileName(file))
+		: await readSessionHeaderId(file);
 	return id && SESSION_ID_RE.test(id) ? id : undefined;
 }
 
@@ -507,13 +528,18 @@ function isUnavailable(error: unknown): boolean {
 }
 
 /**
- * Every `*.jsonl` below `dir`, one directory at a time: a directory that cannot
- * be read is reported in `unreadable` and skipped, and everything readable
- * beside it is kept. Dot-directories (gc scratch) and symlinked directories
- * are not entered.
+ * Session files in `dir` and below it, one directory at a time. In a bucket
+ * (`topLevel`) that is `*.jsonl` and `*.jsonl.gz`; below it, `*.jsonl`. A
+ * symlinked transcript is followed to its target, as the session listing
+ * does; one whose target cannot be reached (dangling, looping, unreadable
+ * path) is reported in `unreadable`. A symlinked directory is not entered, so
+ * a scan never leaves the tree, and neither are dot-entries (gc scratch). A
+ * directory that cannot be read is reported and skipped, and everything
+ * readable beside it is kept.
  */
-async function scanNestedTranscripts(
+async function scanTranscripts(
 	dir: string,
+	topLevel: boolean,
 	files: string[],
 	unreadable: SessionLocatorRebuild["unreadable"],
 ): Promise<void> {
@@ -528,20 +554,29 @@ async function scanNestedTranscripts(
 	for (const entry of entries) {
 		if (entry.name.startsWith(".")) continue;
 		const child = path.join(dir, entry.name);
-		if (entry.isSymbolicLink()) continue;
-		if (entry.isDirectory()) await scanNestedTranscripts(child, files, unreadable);
-		else if (entry.isFile() && entry.name.endsWith(SESSION_SUFFIX)) files.push(child);
+		const isTranscriptName =
+			entry.name.endsWith(SESSION_SUFFIX) || (topLevel && entry.name.endsWith(ARCHIVED_SUFFIX));
+		if (entry.isSymbolicLink()) {
+			if (!isTranscriptName) continue;
+			try {
+				if ((await fs.promises.stat(child)).isFile()) files.push(child);
+			} catch (error) {
+				unreadable.push({ bucket: child, error: String(error) });
+			}
+		} else if (entry.isDirectory()) {
+			await scanTranscripts(child, false, files, unreadable);
+		} else if (entry.isFile() && isTranscriptName) {
+			files.push(child);
+		}
 	}
 }
 
 /**
  * Session files under `root`: each bucket's top-level `*.jsonl` and
- * `*.jsonl.gz` (following a symlinked transcript, as the session listing
- * does), and every `*.jsonl` nested in their artifact directories. A
- * symlinked bucket is skipped, so a scan never leaves the root through it.
- * An unreadable bucket, or an unreadable directory inside one, is reported
- * and skipped without dropping what else is readable. `undefined` when
- * `root` is missing or not a directory.
+ * `*.jsonl.gz`, and every `*.jsonl` nested in their artifact directories (see
+ * {@link scanTranscripts}). A symlinked bucket is skipped, so a scan never
+ * leaves the root through it. `undefined` when `root` is missing or not a
+ * directory; throws when `root` itself cannot be read.
  */
 async function scanRootTranscripts(
 	root: string,
@@ -556,65 +591,34 @@ async function scanRootTranscripts(
 	}
 	const files: string[] = [];
 	for (const entry of entries) {
-		if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
-		const bucket = path.join(root, entry.name);
-		const bucketStart = files.length;
-		let children: fs.Dirent[];
-		try {
-			for await (const name of new Bun.Glob("*.{jsonl,jsonl.gz}").scan({ cwd: bucket, followSymlinks: true })) {
-				files.push(path.join(bucket, name));
-			}
-			children = await fs.promises.readdir(bucket, { withFileTypes: true });
-		} catch (error) {
-			if (!isUnavailable(error)) throw error;
-			files.length = bucketStart;
-			unreadable.push({ bucket, error: String(error) });
-			continue;
-		}
-		for (const child of children) {
-			if (child.isDirectory() && !child.name.startsWith(".")) {
-				await scanNestedTranscripts(path.join(bucket, child.name), files, unreadable);
-			}
-		}
+		if (entry.isSymbolicLink() || !entry.isDirectory() || entry.name.startsWith(".")) continue;
+		await scanTranscripts(path.join(root, entry.name), true, files, unreadable);
 	}
 	return files;
 }
 
 /**
- * Rewrite `root`'s snapshot: every line the previous snapshot held, plus one
- * for each session file the walk finds, by its header id. A reindex adds and
- * never removes: a file it cannot read now (permissions, a directory it cannot
- * enter, a header it cannot parse) keeps every line the index knew for it, and
- * is reported in `unreadable`. Lines for files that are gone cost nothing, as
- * lookups check each candidate's header. The snapshot is staged beside the
- * log and renamed into place; the log is never touched, so lines other
- * processes append meanwhile stay too. This is the one operation that walks
- * the tree.
+ * Rewrite `root`'s snapshot: every line the snapshot holds when this reindex
+ * publishes, plus one for each session file the walk found, by its header id.
+ * A reindex adds and never removes: a file it cannot read now (permissions, a
+ * directory it cannot enter, a header it cannot parse, a dangling or looping
+ * symlink) keeps every line the index knew for it, and is reported in
+ * `unreadable`. Lines for files that are gone cost nothing, as lookups check
+ * each candidate's header.
+ *
+ * The walk runs unlocked; the read-merge-rename of the snapshot runs under
+ * an exclusive per-root lock, so a reindex that finished meanwhile is merged
+ * rather than overwritten. A snapshot that exists but cannot be read is never
+ * replaced: the reindex throws instead, since publishing would drop what only
+ * it knew. The log is never touched, so lines other processes append stay.
+ * This is the one operation that walks the tree.
  */
 export async function rebuildSessionLocator(root: string): Promise<SessionLocatorRebuild> {
 	const resolvedRoot = path.resolve(root);
 	const result: SessionLocatorRebuild = { root: resolvedRoot, indexed: 0, unreadable: [] };
 	const files = await scanRootTranscripts(resolvedRoot, result.unreadable);
 	if (files === undefined) return result;
-	const snapshot = path.join(resolvedRoot, SESSION_LOCATOR_BASE_FILE);
-	const kept = new Set<string>();
-	const lines: string[] = [`${REBUILT_MARKER}${new Date().toISOString()}\n`];
-	const keep = (line: string): void => {
-		if (kept.has(line)) return;
-		kept.add(line);
-		lines.push(`${line}\n`);
-	};
-	let previous = "";
-	try {
-		previous = await Bun.file(snapshot).text();
-	} catch (error) {
-		if (!isEnoent(error))
-			logger.debug("Previous session index snapshot unreadable", { snapshot, error: String(error) });
-	}
-	for (const line of previous.split("\n")) {
-		const tab = line.indexOf("\t");
-		if (tab > 0 && SESSION_ID_RE.test(line.slice(0, tab)) && line.length > tab + 1) keep(line);
-	}
+	const walked: string[] = [];
 	for (let i = 0; i < files.length; i += HEADER_READ_CONCURRENCY) {
 		const batch = files.slice(i, i + HEADER_READ_CONCURRENCY);
 		const headerIds = await Promise.all(batch.map(file => sessionIdOfFile(file).catch(() => undefined)));
@@ -636,19 +640,49 @@ export async function rebuildSessionLocator(root: string): Promise<SessionLocato
 			const nameId = generatedNameId(batch[j]);
 			for (const id of new Set([headerIds[j], nameId !== headerIds[j] ? nameId : undefined])) {
 				if (!id) continue;
-				keep(`${id}\t${encodeStoredPath(relative)}`);
+				walked.push(`${id}\t${encodeStoredPath(relative)}`);
 				if (id === headerIds[j]) result.indexed++;
 			}
 		}
 	}
-	// Unique per call: two reindexes of one root in one process may start in the same millisecond.
-	const staged = `${snapshot}.${process.pid}.${crypto.randomUUID()}.tmp`;
-	try {
-		await fs.promises.writeFile(staged, lines.join(""), { mode: 0o600 });
-		await fs.promises.rename(staged, snapshot);
-	} catch (error) {
-		await fs.promises.rm(staged, { force: true });
-		throw error;
-	}
+	const snapshot = path.join(resolvedRoot, SESSION_LOCATOR_BASE_FILE);
+	await withFileLock(
+		snapshot,
+		async () => {
+			let previous = "";
+			try {
+				previous = await Bun.file(snapshot).text();
+			} catch (error) {
+				if (!isEnoent(error)) {
+					throw new Error(`${snapshot} cannot be read, so it was not replaced: ${String(error)}`, {
+						cause: error,
+					});
+				}
+			}
+			const kept = new Set<string>();
+			const lines: string[] = [`${REBUILT_MARKER}${new Date().toISOString()}\n`];
+			const keep = (line: string): void => {
+				if (kept.has(line)) return;
+				kept.add(line);
+				lines.push(`${line}\n`);
+			};
+			for (const line of previous.split("\n")) {
+				const tab = line.indexOf("\t");
+				if (tab > 0 && SESSION_ID_RE.test(line.slice(0, tab)) && line.length > tab + 1) keep(line);
+			}
+			for (const line of walked) keep(line);
+			// Unique per call: two reindexes of one root in one process may start in the same millisecond.
+			const staged = `${snapshot}.${process.pid}.${crypto.randomUUID()}.tmp`;
+			try {
+				await fs.promises.writeFile(staged, lines.join(""), { mode: 0o600 });
+				await fs.promises.rename(staged, snapshot);
+			} catch (error) {
+				await fs.promises.rm(staged, { force: true });
+				throw error;
+			}
+		},
+		// The locked step is one read and one write; wait out a peer's for up to a minute.
+		{ retries: 600, retryDelayMs: 100 },
+	);
 	return result;
 }
