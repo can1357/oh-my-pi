@@ -2,18 +2,14 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-use brush_core::{ShellExtensions, builtins::Registration};
-
-use crate::host::util;
-
 #[cfg(not(any(unix, windows)))]
 use crate::host::{self, Host, Utility, matches_parser};
 
 #[cfg(any(unix, windows))]
-use imp::Stat;
+pub(crate) use imp::Stat;
 
 #[cfg(not(any(unix, windows)))]
-struct Stat {
+pub(crate) struct Stat {
 	matches: clap::ArgMatches,
 }
 
@@ -37,11 +33,6 @@ fn app() -> clap::Command {
 		.version("0.8.0")
 		.about("Display file or file system status.")
 		.override_usage(host::format_usage("stat [OPTION]... FILE..."))
-}
-
-/// Creates the `stat` builtin registration.
-pub(crate) fn stat_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Stat, SE>()
 }
 
 #[cfg(any(unix, windows))]
