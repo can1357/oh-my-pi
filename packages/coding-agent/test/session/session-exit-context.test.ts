@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
@@ -279,6 +279,49 @@ describe("writeExitIntent", () => {
 		writeExitIntent(4242, "move", dir);
 		expect(fs.readFileSync(target, "utf8")).toBe("move\n");
 		expect(fs.readdirSync(dir)).toEqual(["4242"]);
+	});
+
+	describe("where rename over an existing file is refused (Windows)", () => {
+		afterEach(() => {
+			vi.restoreAllMocks();
+		});
+
+		const refusal = () => Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" });
+
+		it("replaces an earlier word and leaves no staging or backup file", () => {
+			using tempDir = TempDir.createSync("@omp-exit-intent-win-");
+			const dir = tempDir.path();
+			const target = writeExitIntent(4242, "stop", dir);
+			const rename = fs.renameSync.bind(fs);
+			let refused = 0;
+			vi.spyOn(fs, "renameSync").mockImplementation((source, destination) => {
+				if (destination === target && fs.existsSync(target)) {
+					refused++;
+					throw refusal();
+				}
+				rename(source, destination);
+			});
+
+			writeExitIntent(4242, "move", dir);
+			expect(refused).toBe(1);
+			expect(fs.readFileSync(target, "utf8")).toBe("move\n");
+			expect(fs.readdirSync(dir)).toEqual(["4242"]);
+		});
+
+		it("keeps the earlier word when the retry is refused too", () => {
+			using tempDir = TempDir.createSync("@omp-exit-intent-win-keep-");
+			const dir = tempDir.path();
+			const target = writeExitIntent(4242, "stop", dir);
+			const rename = fs.renameSync.bind(fs);
+			vi.spyOn(fs, "renameSync").mockImplementation((source, destination) => {
+				if (destination === target && String(source).endsWith(".tmp")) throw refusal();
+				rename(source, destination);
+			});
+
+			expect(() => writeExitIntent(4242, "move", dir)).toThrow("EPERM");
+			expect(fs.readFileSync(target, "utf8")).toBe("stop\n");
+			expect(fs.readdirSync(dir)).toEqual(["4242"]);
+		});
 	});
 
 	it("refuses a pid that is not a positive integer", () => {

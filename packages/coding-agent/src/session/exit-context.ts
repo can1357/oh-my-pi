@@ -25,6 +25,7 @@ import * as path from "node:path";
 import { getExitIntentDir } from "@oh-my-pi/pi-utils/dirs";
 import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
 import { EXIT_CONTEXT_WORKER_ARG } from "../cli/worker-selectors";
+import { writeFileAtomicallySync } from "../utils/atomic-file";
 import {
 	EXIT_CONTEXT_RESULT_OFFSET,
 	type ExitContextIoRequest,
@@ -188,23 +189,15 @@ export function readExitContext(
 
 /**
  * Leave `intent` for omp process `pid` to record at its next exit. The file
- * appears whole or not at all (written aside, then renamed), so the process
- * never reads a partial word. Returns the file path.
+ * appears whole or not at all (written aside, then renamed over any earlier
+ * word, Windows included), so the process never reads a partial word. Returns
+ * the file path.
  */
 export function writeExitIntent(pid: number, intent: ExitIntent, intentDir: string = getExitIntentDir()): string {
 	if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(`Invalid pid: ${pid}`);
 	fs.mkdirSync(intentDir, { recursive: true, mode: 0o700 });
 	const target = path.join(intentDir, String(pid));
-	const staging = path.join(intentDir, `.${pid}.${process.pid}.${crypto.randomUUID()}.tmp`);
-	try {
-		fs.writeFileSync(staging, `${intent}\n`, { mode: 0o600, flag: "wx" });
-		fs.renameSync(staging, target);
-	} catch (error) {
-		try {
-			fs.unlinkSync(staging);
-		} catch {}
-		throw error;
-	}
+	writeFileAtomicallySync(target, `${intent}\n`, 0o600);
 	return target;
 }
 
