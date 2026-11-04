@@ -611,7 +611,10 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
  * and sends nothing once `signal` has aborted, however late before the send.
  */
 export async function afterRequestHolds<T>(signal: AbortSignal | undefined, send: () => T): Promise<Awaited<T>> {
-	if (!scopes.getStore()) return await send();
+	if (!scopes.getStore()) {
+		signal?.throwIfAborted();
+		return await send();
+	}
 	const holds = openRequestHolds();
 	try {
 		for (let held = holds.check(); held; held = holds.check()) await untilAborted(signal, held);

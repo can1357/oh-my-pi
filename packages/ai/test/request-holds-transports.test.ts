@@ -1040,4 +1040,77 @@ describe("frames sent on an open model connection wait for request holds", () =>
 			await done;
 		}
 	});
+
+	it("Cursor over HTTP/2: a hold that fails fails the stream, and no later frame goes out", async () => {
+		const writes: string[] = [];
+		let opened = false;
+		let destroyedWith: unknown;
+		vi.spyOn(http2, "connect").mockImplementation((() => {
+			const client = {
+				on: () => client,
+				once: () => client,
+				off: () => client,
+				removeListener: () => client,
+				close: () => {},
+				destroy: () => {},
+				request: () => {
+					opened = true;
+					const stream = {
+						writableEnded: false,
+						closed: false,
+						on: () => stream,
+						once: () => stream,
+						off: () => stream,
+						removeListener: () => stream,
+						write: () => {
+							writes.push("frame");
+							return true;
+						},
+						end: () => {
+							writes.push("end");
+							stream.writableEnded = true;
+						},
+						close: () => {},
+						destroy: (error?: unknown) => {
+							destroyedWith ??= error;
+						},
+					};
+					return stream;
+				},
+			};
+			return client;
+		}) as unknown as typeof http2.connect);
+		// The first frame's hold fails; every later check lets go, so a later frame would be sent if
+		// the queue went on past the failed one.
+		const failure = new Error("hold failed");
+		let checks = 0;
+		const failingOnce: RequestHolds = {
+			open: () => ({
+				check: () => {
+					if (!opened) return undefined;
+					checks++;
+					return checks === 1 ? Promise.reject(failure) : undefined;
+				},
+				release: () => {},
+			}),
+		};
+		const controller = new AbortController();
+		const model = heldModel("cursor-agent", "cursor", "https://cursor.held.test");
+		const done = runWithRequestHolds(failingOnce, () =>
+			stream(model, context, {
+				apiKey: "cursor-key",
+				transport: "http2",
+				signal: controller.signal,
+			} as OptionsForApi<"cursor-agent">).result(),
+		).catch(() => undefined);
+		try {
+			await waitFor(() => destroyedWith !== undefined, "the stream to fail with the hold's error");
+			expect(destroyedWith).toBe(failure);
+			await turns();
+			expect(writes).toEqual([]);
+		} finally {
+			controller.abort();
+			await done;
+		}
+	});
 });

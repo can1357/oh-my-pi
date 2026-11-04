@@ -33,11 +33,16 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
 		given ?? (model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
 	const proxyUrl = getProxyForProvider(model.provider);
 
+	// The origin is recorded as the request is handed to the network, after the
+	// holds in the held form: a request a hold stopped never reached its endpoint.
+	const recorded: FetchImpl = (input, init) => {
+		if ((init?.method ?? (input instanceof Request ? input.method : "GET")) === "POST") {
+			recordDispatchOrigin(model, input);
+		}
+		return base(input, init);
+	};
 	const build = (send: FetchImpl): TransportFetch => {
 		const fetch: TransportFetch = async (input, init) => {
-			if ((init?.method ?? (input instanceof Request ? input.method : "GET")) === "POST") {
-				recordDispatchOrigin(model, input);
-			}
 			init = withInferenceUserAgent(input, init);
 			const extraCa = resolveExtraCa();
 			if (extraCa) init = withExtraCaInit(init, extraCa);
@@ -50,7 +55,7 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
 		fetch[TRANSPORT_FETCH] = true;
 		return fetch;
 	};
-	return withHeldForm(build(base), build(heldFetch(base)));
+	return withHeldForm(build(recorded), build(heldFetch(recorded)));
 }
 
 const dispatchOrigins = new Map<string, string>();

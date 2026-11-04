@@ -76,6 +76,14 @@ describe("afterRequestHolds", () => {
 		expect(await sent.result).toBe("sent");
 	});
 
+	it("sends nothing outside any context once the signal has aborted", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const sent = request(controller.signal);
+		await expect(sent.result).rejects.toThrow();
+		expect(sent.sent).toBe(false);
+	});
+
 	it("holds a request started in the context until the hold lets go, then releases the view it opened", async () => {
 		const holds = new TestHolds();
 		const sent = runWithRequestHolds(holds, () => request());

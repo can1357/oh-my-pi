@@ -816,12 +816,24 @@ interface CursorRunTransport extends CursorMessageWriter {
  * The Connect frames written on the request stream carry the model request —
  * the run request, exec replies, heartbeats — so each is held like any send
  * ({@link afterRequestHolds}), in order, and the half-close follows the frames
- * queued before it. A frame held until `signal` aborts is dropped.
+ * queued before it. A frame held until `signal` aborts is dropped with the run.
+ * A hold that fails fails the stream with its error: no later frame may go out
+ * ahead of the one it held, and the run hears why.
  */
 function wrapHttp2RunTransport(request: http2.ClientHttp2Stream, signal: AbortSignal | undefined): CursorRunTransport {
 	let tail: Promise<void> = Promise.resolve();
+	let failed = false;
 	const afterQueued = (send: () => void): void => {
-		tail = tail.then(() => afterRequestHolds(signal, send)).catch(() => {});
+		tail = tail.then(async () => {
+			if (failed) return;
+			try {
+				await afterRequestHolds(signal, send);
+			} catch (error) {
+				if (signal?.aborted) return;
+				failed = true;
+				request.destroy(error instanceof Error ? error : new Error(String(error)));
+			}
+		});
 	};
 	return {
 		get closed() {
