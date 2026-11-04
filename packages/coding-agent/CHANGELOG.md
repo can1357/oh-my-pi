@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Forcing a queued message with Enter now resumes the agent even when interruption races tool completion or model preparation
 - `.`/`c` continue no longer fails with "Nothing to resume" in a session started by a `/skill:` command
 - Long bash output cut in the middle no longer splits a line at the `[…N ln elided…]` marker, and its "Showing lines …" notice now names the lines actually shown, ending at the output's real last line ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
 - A bash command that prints nothing and succeeds now returns `(no output, exit code 0)` instead of a bare `(no output)`, so an empty diff or search no longer reads like a failed command ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))

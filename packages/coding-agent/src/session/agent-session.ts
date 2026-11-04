@@ -1362,6 +1362,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#userWaitEndedTurn = false;
 	#inFlightEpoch = 0;
 	#abortInProgress = false;
+	/** Forced sends still unwinding, including while their pending agent_end is flushed. */
+	#forcedQueuedMessageDeliveryCount = 0;
 	/** In-flight {@link abort} calls; each settles after scheduling its stranded-queue drain, which {@link waitForIdle} must observe. */
 	#abortUnwinds = new Set<Promise<void>>();
 	/** Submissions accepted by prompt()/promptCustomMessage()/sendCustomMessage() that have not
@@ -1959,6 +1961,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return extracted;
 	}
 
+	/** Move forced user follow-ups and their adjacent hidden companions behind existing steers.
+	 *  A continuation polls steers before its first model call; follow-ups are otherwise
+	 *  polled only after that call, and a user interrupt suppresses their idle drain. */
+	#promoteForcedFollowUps(): void {
+		if (this.agent.state.isStreaming) return;
+		const followUp = this.agent.peekFollowUpQueue();
+		const promoted: AgentMessage[] = [];
+		const remaining: AgentMessage[] = [];
+		let cursor = 0;
+		for (let i = 0; i < followUp.length; i++) {
+			if (!isUserAuthoredQueuedMessage(followUp[i])) continue;
+			const start = this.#queuedUserGroupStart(followUp, i);
+			remaining.push(...followUp.slice(cursor, start));
+			promoted.push(...followUp.slice(start, i + 1));
+			cursor = i + 1;
+		}
+		if (promoted.length === 0) return;
+		remaining.push(...followUp.slice(cursor));
+		this.agent.replaceQueues([...this.agent.peekSteeringQueue(), ...promoted], remaining);
+	}
+
 	/** Record a suppressed advisor concern as visible, persisted advice without
 	 *  triggering a turn. When the agent is idle (the normal post-interrupt case,
 	 *  including the post-prompt unwind window where the core loop has ended), emit
@@ -2011,6 +2034,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// a queued steer (interrupt-and-send), so queued work counts during an abort
 		// too. Stranded IRC does not: a user interrupt folds most of it into context
 		// instead of waking.
+		// The prompt can unwind before abort() reaches its own idle barrier. Once
+		// the core loop is idle its claimed inputs have been restored, so promote
+		// forced follow-ups before deciding whether this end is terminal.
+		if (this.#forcedQueuedMessageDeliveryCount > 0) this.#promoteForcedFollowUps();
 		const canDrain = this.#unsubscribeAgent !== undefined && this.#modeExitDrainSuppressionDepth === 0;
 		const queuedContinuation =
 			canDrain &&
@@ -7012,14 +7039,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	async #runQueuedUsageAwarePreflight(signal?: AbortSignal): Promise<boolean> {
+		const generation = this.#promptGeneration;
 		try {
 			const allowed = await this.#runUsageAwarePreflight(signal);
+			// An interrupted preflight is not a usage denial. Its queue is still
+			// owned by the next turn, so it must not block the post-abort drain.
+			if (signal?.aborted || this.#promptGeneration !== generation) return false;
 			this.#usagePreflightReadyForNextModelCall = allowed;
 			this.#usagePreflightReadyModel = allowed ? this.model : undefined;
 			this.#queuedMessageDrainBlocked = !allowed && this.agent.hasQueuedMessages();
 			return allowed;
 		} catch (error) {
-			this.#queuedMessageDrainBlocked = this.agent.hasQueuedMessages();
+			if (!signal?.aborted && this.#promptGeneration === generation) {
+				this.#queuedMessageDrainBlocked = this.agent.hasQueuedMessages();
+			}
 			throw error;
 		}
 	}
@@ -10977,6 +11010,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#promptSkills;
 	}
 
+	/** Start skill-description compression held by `deferSkillDescriptionCompression` (see `createAgentSession`). */
+	startSkillDescriptionCompression(): void {
+		this.#skillDescriptions.startCompression();
+	}
+
 	/** Frozen skill-URI hint visibility snapshot (see {@link SessionTools.skillHintVisible}). */
 	getSkillHintVisible(): boolean {
 		return this.#tools.skillHintVisible;
@@ -10986,11 +11024,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	get skillWarnings(): readonly SkillWarning[] {
 		return this.#tools.skillWarnings;
 	}
-	/** Start skill-description compression held by `deferSkillDescriptionCompression` (see `createAgentSession`). */
-	startSkillDescriptionCompression(): void {
-		this.#skillDescriptions.startCompression();
-	}
-
 
 	/** Session-local general-purpose agents pinned to user-tagged models. */
 	getSessionAgents(): AgentDefinition[] {
@@ -11569,6 +11602,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async abort(options?: {
 		goalReason?: "interrupted" | "internal";
 		reason?: string;
+		/** Force queued user follow-ups into the continuation after a user interrupt. */
+		deliverQueuedMessages?: boolean;
 		/** Internal `/compact` startup keeps the manual-compaction marker alive while aborting the active turn. */
 		preserveCompaction?: boolean;
 	}): Promise<void> {
@@ -11592,6 +11627,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// leave any queued steer/follow-up visible for the user rather than
 		// auto-starting a fresh turn during cleanup.
 		this.#abortInProgress = true;
+		const forceQueuedDelivery = userInterrupt && options?.deliverQueuedMessages === true;
+		if (forceQueuedDelivery) this.#forcedQueuedMessageDeliveryCount++;
 		const unwind = Promise.withResolvers<void>();
 		this.#abortUnwinds.add(unwind.promise);
 		try {
@@ -11643,6 +11680,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			await manualCompactionCleanup;
 			await this.#drainAutolearnCapture();
 			await this.#goalRuntime.onTaskAborted({ reason: options?.goalReason ?? "interrupted" });
+			// The loop has restored any claimed input by now. Promote forced follow-ups
+			// before flushing agent_end so observers see the pending continuation.
+			if (forceQueuedDelivery) this.#promoteForcedFollowUps();
 			// Clear prompt-in-flight state: waitForIdle resolves when the agent loop's finally
 			// block runs, but nested prompt setup/finalizers may still be unwinding. Without this,
 			// a subsequent prompt() can incorrectly observe the session as busy after an abort.
@@ -11680,6 +11720,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		} finally {
 			this.#abortInProgress = false;
 			this.#drainStrandedQueuedMessages();
+			if (forceQueuedDelivery) this.#forcedQueuedMessageDeliveryCount--;
 			this.#abortUnwinds.delete(unwind.promise);
 			unwind.resolve();
 		}

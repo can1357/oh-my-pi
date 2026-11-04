@@ -151,6 +151,7 @@ export interface AgentSessionHandle {
 		goalReason?: "interrupted" | "internal";
 		reason?: string;
 		preserveCompaction?: boolean;
+		deliverQueuedMessages?: boolean;
 	}): Promise<void>;
 	/** Replace the pooled-turn yield contract. */
 	setWorkPoolYieldItems(items: readonly WorkPoolYieldItem[]): Promise<void>;
