@@ -33,6 +33,7 @@
 - Skills listed in the system prompt get their compressed routing hint instead of a cut-off description when the hint runs past 12 words but fits 160 characters; skills an earlier version gave up on are compressed again
 - Uncached skill descriptions no longer send background model requests after the session-tree cost cap is reached, and their completed spend counts toward the cap ([#18016](https://github.com/can1357/oh-my-pi/issues/18016))
 - Added `tui.maxFps` (also `--max-fps` and `PI_MAX_FPS`) to cap how often the TUI repaints; keystroke echo keeps 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- A failed, cancelled or timed-out isolated subagent now saves its changes to its patch or task branch (not applied) and its task result names where; one-shot runs used to delete them. If saving fails, the workspace is kept and named ([#18077](https://github.com/can1357/oh-my-pi/pull/18077) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 

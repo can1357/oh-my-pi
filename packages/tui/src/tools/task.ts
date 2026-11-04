@@ -2555,6 +2555,11 @@ export interface SingleResult {
 	 * other copy of that work, so these paths are the durable record.
 	 */
 	nestedPatchPaths?: string[];
+	/**
+	 * Isolation workspace kept because a failed run's changes could not be
+	 * captured; the only copy of that work.
+	 */
+	retainedWorkspace?: string;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**

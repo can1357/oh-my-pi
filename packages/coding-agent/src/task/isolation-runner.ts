@@ -57,6 +57,7 @@ type IsoBackendKind = natives.IsoBackendKind;
 export type IsolationSummaryKind =
 	| "captured"
 	| "capture-error"
+	| "failed-run"
 	| "nested-apply-failed"
 	| "not-applied"
 	| "branch-merge-failed"
@@ -71,6 +72,8 @@ export interface IsolationSummaryContext {
 	rootPatchPath?: string;
 	nestedCount?: number;
 	nestedPatchPaths?: string[];
+	/** Workspace kept because a failed run's changes could not be captured. */
+	retainedDir?: string;
 	error?: string;
 	conflict?: string;
 }
@@ -338,7 +341,7 @@ export async function retainIsolationWorkspace(
 }
 /** Context for `isolation-error.md`: the `result.error` text for a run whose changes could not be captured or landed. */
 interface IsolationErrorContext {
-	kind: "merge-failed" | "patch-capture-failed" | "nested-capture-failed";
+	kind: "merge-failed" | "patch-capture-failed" | "nested-capture-failed" | "failed-run-capture-failed";
 	message: string;
 	captureError?: string;
 	rescueBranch?: string;
@@ -372,7 +375,9 @@ function renderIsolationError(context: IsolationErrorContext): string {
  *
  * Failure paths preserve the underlying `SingleResult` whenever possible so
  * the caller can still surface the subagent's output; only isolation setup
- * itself routes through {@link IsolatedRunOptions.buildFailureResult}.
+ * itself routes through {@link IsolatedRunOptions.buildFailureResult}. A run
+ * that fails gets the same capture per merge mode before its workspace goes,
+ * and the result names what was captured; nothing is applied.
  *
  * Kept-alive runs retain the isolation handle through idle/parked lifecycle
  * transitions, then capture final changes and clean up on release. One-shot
@@ -390,6 +395,12 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	let baseReleasePromise: Promise<void> | undefined;
 	let cleanupPromise: Promise<void> | undefined;
 	let releasePromise: Promise<void> | undefined;
+	/** What a release during the run captured, so a failed result can name it. */
+	let releasedChanges:
+		| Pick<SingleResult, "patchPath" | "hasRootChanges" | "nestedPatchPaths" | "branchName">
+		| undefined;
+	/** Workspace a release during the run kept because it could not capture it. */
+	let releaseRetainedDir: string | undefined;
 	/** The run's IRC wake hold, released only once the run-end capture is done. */
 	let releaseIrcWakes: (() => void) | undefined;
 	const releaseBase = (): Promise<void> => {
@@ -416,6 +427,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				} catch (captureErr) {
 					retainWorkspace = true;
 					const retained = await retainIsolationWorkspace(handle.mergedDir, handle.backend);
+					releaseRetainedDir = retained.dir;
 					throw new Error(
 						renderIsolationError({
 							kind: "patch-capture-failed",
@@ -445,11 +457,109 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					branchName: commitResult?.branchName,
 					nestedPatchPaths: patchResult.nestedPatchPaths,
 				});
+				releasedChanges = { ...patchResult, branchName: commitResult?.branchName };
 			} finally {
 				await cleanupHandle();
 			}
 		})();
 		return releasePromise;
+	};
+	/**
+	 * Capture a failed run's workspace before it is removed, with the capture a
+	 * successful run gets: the task branch in branch mode, the patch artifact
+	 * otherwise. The result carries the location; nothing is applied. A run that
+	 * changed nothing comes back unchanged. When the capture throws, the
+	 * workspace is retained and named in `result.error` and `retainedWorkspace`.
+	 */
+	const captureFailedRun = async (
+		result: SingleResult,
+		isolation: IsolationHandle,
+		baseline: WorktreeBaseline,
+	): Promise<SingleResult> => {
+		const keepWorkspace = async (captureErr: unknown, rescueBranch?: string): Promise<SingleResult> => {
+			retainWorkspace = true;
+			const retained = await retainIsolationWorkspace(isolation.mergedDir, isolation.backend);
+			const note = renderIsolationError({
+				kind: "failed-run-capture-failed",
+				message: captureErr instanceof Error ? captureErr.message : String(captureErr),
+				rescueBranch,
+				retainedDir: retained.dir,
+				sidecarMissing: !retained.sidecarOk,
+			});
+			return {
+				...result,
+				error: result.error ? `${result.error}\n\n${note}` : note,
+				retainedWorkspace: retained.dir,
+			};
+		};
+		if (releasePromise) {
+			// The agent lifecycle already captured and removed the workspace.
+			try {
+				await releasePromise;
+			} catch (releaseErr) {
+				const note = releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
+				return {
+					...result,
+					error: result.error ? `${result.error}\n\n${note}` : note,
+					retainedWorkspace: releaseRetainedDir,
+				};
+			}
+			const changed =
+				releasedChanges &&
+				(releasedChanges.hasRootChanges ||
+					(releasedChanges.nestedPatchPaths?.length ?? 0) > 0 ||
+					releasedChanges.branchName);
+			return changed ? { ...result, ...releasedChanges } : result;
+		}
+		if (opts.mergeMode === "branch") {
+			let commitResult: CommitToBranchResult | null;
+			try {
+				commitResult = await commitToBranch(
+					isolation.mergedDir,
+					baseline,
+					opts.agentId,
+					opts.description,
+					opts.buildCommitMessage?.(),
+				);
+			} catch (commitErr) {
+				const branchName = `omp/task/${opts.agentId}`;
+				return keepWorkspace(
+					commitErr,
+					await rescueTaskBranch(opts.context.repoRoot, branchName, baseline.root.headCommit),
+				);
+			}
+			if (!commitResult) return result;
+			handedOff = deltaFingerprint(commitResult.rootPatch, commitResult.nestedPatches);
+			const branchResult = {
+				...result,
+				branchName: commitResult.branchName,
+				branchBaseSha: commitResult.baseSha,
+				nestedPatches: commitResult.nestedPatches,
+			};
+			try {
+				const nestedPatchPaths = await persistNestedPatches(
+					opts.artifactsDir,
+					opts.agentId,
+					commitResult.nestedPatches,
+				);
+				return { ...branchResult, nestedPatchPaths };
+			} catch (persistErr) {
+				const kept = await keepWorkspace(persistErr);
+				return { ...branchResult, error: kept.error, retainedWorkspace: kept.retainedWorkspace };
+			}
+		}
+		let capture: IsolationPatchCapture;
+		try {
+			capture = await writeIsolationPatch(isolation.mergedDir, baseline, opts.artifactsDir, opts.agentId);
+		} catch (patchErr) {
+			return keepWorkspace(patchErr);
+		}
+		handedOff = capture.fingerprint;
+		if (!capture.artifacts.hasRootChanges && capture.artifacts.nestedPatchPaths.length === 0) {
+			await fs.rm(capture.artifacts.patchPath, { force: true });
+			return result;
+		}
+		return { ...result, ...capture.artifacts };
 	};
 	try {
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
@@ -479,9 +589,13 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		});
 		opts.onSubprocessResult?.(result);
 		// A successful result cannot be captured while deferred owner jobs or
-		// shutdown hooks may still write the worktree. Failed runs skip capture,
-		// so their cleanup remains asynchronous.
-		if (deferredCleanup && result.exitCode === 0) {
+		// shutdown hooks may still write the worktree. A failed run is captured
+		// without that wait, so a stuck shutdown cannot hold its result; writes
+		// that land after the capture go with the workspace.
+		if (result.exitCode !== 0) {
+			return rememberAgentArtifacts(await captureFailedRun(result, handle, baseline));
+		}
+		if (deferredCleanup) {
 			await deferredCleanup;
 		}
 		if (opts.mergeMode === "branch" && result.exitCode === 0) {
@@ -586,7 +700,11 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		}
 		return rememberAgentArtifacts(result);
 	} catch (err) {
-		return rememberAgentArtifacts(opts.buildFailureResult(err));
+		const failure = opts.buildFailureResult(err);
+		// A throw after the child ran (from `runSubprocess` or the caller's
+		// `onSubprocessResult`) leaves its work in the workspace like a failed run.
+		if (!handle || !taskBaseline) return rememberAgentArtifacts(failure);
+		return rememberAgentArtifacts(await captureFailedRun(failure, handle, taskBaseline));
 	} finally {
 		if (
 			handle &&
