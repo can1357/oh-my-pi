@@ -553,6 +553,75 @@ describe("wait", () => {
 			expect(result.useless).toBe(true);
 		});
 
+		describe("in a subagent", () => {
+			// An idle wait ends only on a message. An agent blocked on the caller's
+			// result cannot send one, so the caller must finish instead of idling.
+			function registerChild(manager: AsyncJobManager) {
+				registerMain();
+				AgentRegistry.global().register({
+					id: "Child",
+					displayName: "Child",
+					kind: "sub",
+					parentId: "Main",
+					session: { isStreaming: true } as never,
+					status: "running",
+				});
+				const run = Promise.withResolvers<string>();
+				manager.register("task", "Child", async () => run.promise, {
+					id: "Child",
+					agentId: "Child",
+					ownerId: "Main",
+				});
+				return run;
+			}
+
+			test("returns at once while its parent waits on its result", async () => {
+				vi.useFakeTimers();
+				const manager = new AsyncJobManager({ onJobComplete: () => {} });
+				const childRun = registerChild(manager);
+				const parentWait = new WaitTool(session(manager, "Main")).execute("parent-wait", {});
+				const childWait = new WaitTool(session(manager, "Child")).execute("child-idle", { timeout: 600 });
+				// Past the child's deadline but inside the parent's 30-minute cap:
+				// an idling child would end here on "Deadline reached" instead.
+				vi.advanceTimersByTime(600_000);
+				const result = await childWait;
+				childRun.resolve("done");
+				await parentWait;
+				expect(result.content[0]).toMatchObject({
+					text: expect.stringContaining("Nothing to wait for: `Main` is waiting on your result"),
+				});
+			});
+
+			test("stops idling once its parent starts waiting on its result", async () => {
+				vi.useFakeTimers();
+				const manager = new AsyncJobManager({ onJobComplete: () => {} });
+				const childRun = registerChild(manager);
+				const childWait = new WaitTool(session(manager, "Child")).execute("child-idle", { timeout: 600 });
+				await Promise.resolve();
+				const parentWait = new WaitTool(session(manager, "Main")).execute("parent-wait", {});
+				vi.advanceTimersByTime(600_000);
+				const result = await childWait;
+				childRun.resolve("done");
+				await parentWait;
+				expect(result.content[0]).toMatchObject({
+					text: expect.stringContaining("Nothing to wait for: `Main` is waiting on your result"),
+				});
+				// A parent that started blocking is news, not an idle poll.
+				expect(result.useless).toBeUndefined();
+			});
+
+			test("idles until a message while its parent works on without waiting on it", async () => {
+				const manager = new AsyncJobManager({ onJobComplete: () => {} });
+				const childRun = registerChild(manager);
+				const childWait = new WaitTool(session(manager, "Child")).execute("child-idle", { timeout: 600 });
+				await Promise.resolve();
+				await IrcBus.global().send({ from: "Main", to: "Child", body: "the schema changed" });
+				const result = await childWait;
+				childRun.resolve("done");
+				expect(result.details?.waited).toMatchObject({ from: "Main", body: "the schema changed" });
+			});
+		});
+
 		test("caps a job wait at the timeout instead of the 30-minute safety cap", async () => {
 			registerMain();
 			vi.useFakeTimers();

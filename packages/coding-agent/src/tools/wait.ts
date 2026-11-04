@@ -85,6 +85,12 @@ function noReplyText(replies: PendingReplies): string {
 	return "no background job or service you started is running, and no agent you messaged this run owes a reply. Other agents' results and messages arrive on their own; to idle until one does, call `wait` with `timeout` instead of starting a sleep job.";
 }
 
+/** Why an idle wait cannot get a message: each of `waiters` is blocked on the caller's result. */
+function awaitedText(waiters: string[]): string {
+	const names = waiters.map(id => `\`${id}\``).join(", ");
+	return `${names} ${waiters.length === 1 ? "is" : "are"} waiting on your result and cannot message you before you finish. Finish your work instead of idling.`;
+}
+
 /** Whether `session` has the `wait` tool active, so prompts may point blocked callers at it. */
 export function hasWaitTool(session: ToolSession): boolean {
 	return session.isToolActive?.("wait") ?? true;
@@ -197,6 +203,18 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				// hold the wait open. An interrupt that already landed ends that
 				// block at once with the interrupt's own result.
 				if (capMs !== undefined && !replyNews) {
+					// An agent blocked on the caller's result (an inline task spawn
+					// of it, a `wait` or untimed eval handle wait on its job) cannot
+					// send the message an idle wait is for: both would sit until a
+					// deadline. Return at once, as a wait without `timeout` does.
+					const waiters = messaging ? messaging.registry.awaits.waitersOn(messaging.senderId) : [];
+					if (waiters.length > 0) {
+						return {
+							content: [{ type: "text", text: `Nothing to wait for: ${awaitedText(waiters)}` }],
+							details: { op: "wait", jobs: [] },
+							...(news ? {} : { useless: true }),
+						};
+					}
 					return this.#blockUntilWake({
 						jobs,
 						manager,
@@ -231,7 +249,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	 * Block until an owned job settles, an owned service finishes, a message arrives, the cap elapses, or the call aborts.
 	 * With neither jobs nor a service, the block is a reply wait: it also ends once no agent asked can still reply.
 	 * An `idle` block (nothing owed, the caller gave a deadline) ends only on a message, an interrupt
-	 * (steering, an aside, a job result) or `capMs`.
+	 * (steering, an aside, a job result), an agent starting to block on the caller's result, or `capMs`.
 	 */
 	async #blockUntilWake(args: {
 		jobs: AsyncJob[];
@@ -282,6 +300,22 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				);
 			}
 		}
+		// An idle block ends once an agent starts blocking on the caller's
+		// result: no message can come from it before the caller finishes.
+		let awaitedBy: string[] = [];
+		const awaited = Promise.withResolvers<void>();
+		if (idle && messaging) {
+			const checkWaiters = () => {
+				const waiters = messaging.registry.awaits.waitersOn(messaging.senderId);
+				if (waiters.length === 0) return;
+				awaitedBy = waiters;
+				awaited.resolve();
+			};
+			unsubscribers.push(messaging.registry.awaits.onChange(checkWaiters));
+			// A worker's registry is a proxy: a block that began between the
+			// caller's check and this subscription sends no change event here.
+			checkWaiters();
+		}
 		// A wait that only these subagents' results can end blocks the caller on
 		// them, which their own reply waits read. A bash job or service is
 		// another way out, so such a wait blocks on no one.
@@ -305,13 +339,14 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			});
 		const progressTimer = onUpdate && jobs.length > 0 ? setInterval(emitProgress, PROGRESS_INTERVAL_MS) : undefined;
 		if (jobs.length > 0) emitProgress();
-		let wake: "job" | "message" | "service" | "unanswerable" | "timeout" | "abort";
+		let wake: "job" | "message" | "service" | "unanswerable" | "awaited" | "timeout" | "abort";
 		try {
 			wake = await Promise.race([
 				...jobs.map(job => job.promise.then(() => "job" as const)),
 				...(busLeg ? [busLeg.then(() => "message" as const)] : []),
 				...(serviceLeg ? [serviceLeg.then(() => "service" as const)] : []),
 				...(replyWait ? [replyGone.promise.then(() => "unanswerable" as const)] : []),
+				...(idle && messaging ? [awaited.promise.then(() => "awaited" as const)] : []),
 				timeout.then(() => "timeout" as const),
 				abort.promise.then(() => "abort" as const),
 			]);
@@ -362,11 +397,13 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 								? "A service finished. Read proc:// for its status and output."
 								: wake === "unanswerable" && noReply
 									? noReplyText(noReply)
-									: idle
-										? "Deadline reached: no message, steer or job result arrived."
-										: replyWait
-											? "Wait limit reached with no reply. Ask again, or finish without the answer."
-											: "Wait limit reached; background work may still be running. Read proc:// for status.",
+									: wake === "awaited"
+										? `Nothing to wait for: ${awaitedText(awaitedBy)}`
+										: idle
+											? "Deadline reached: no message, steer or job result arrived."
+											: replyWait
+												? "Wait limit reached with no reply. Ask again, or finish without the answer."
+												: "Wait limit reached; background work may still be running. Read proc:// for status.",
 					},
 				],
 				details: { op: "wait", jobs: [] },

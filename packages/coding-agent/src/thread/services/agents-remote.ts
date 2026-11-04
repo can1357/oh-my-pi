@@ -80,6 +80,10 @@ export class RemoteAgentAwaits implements AgentAwaitsApi {
 		return this.#remote.callSync("awaitsBlocksOn", agent, target, sentAt);
 	}
 
+	waitersOn(target: string): string[] {
+		return this.#remote.callSync("awaitsWaitersOn", target);
+	}
+
 	onChange(listener: () => void): () => void {
 		return this.#listeners.add(listener);
 	}

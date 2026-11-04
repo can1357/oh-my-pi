@@ -1,7 +1,8 @@
 /**
  * Which agents are blocked until other agents finish, so a `wait` for a
- * reply can tell when none can come: the agent it asked is itself blocked
- * on the asker. Owned by the {@link AgentRegistry} whose ids it names.
+ * reply can tell when none can come (the agent it asked is itself blocked
+ * on the asker), and an idle `wait` can tell that an agent is blocked on the
+ * caller's result. Owned by the {@link AgentRegistry} whose ids it names.
  */
 
 interface AwaitHold {
@@ -18,6 +19,8 @@ export interface AgentAwaitsApi {
 	hold(waiter: string, awaited: readonly string[], options: { interruptible: boolean }): () => void;
 	/** Whether `agent` cannot act on a message `target` sent it at `sentAt` until `target` finishes. */
 	blocksOn(agent: string, target: string, sentAt: number): boolean;
+	/** Agents blocked until `target` finishes; only a message from `target` could end an interruptible block sooner. */
+	waitersOn(target: string): string[];
 	/** Subscribe to hold changes; returns the unsubscribe function. */
 	onChange(listener: () => void): () => void;
 }
@@ -65,6 +68,26 @@ export class AgentAwaits implements AgentAwaitsApi {
 			if (hold.awaited.every(id => this.#reaches(id, target, new Set([agent])))) return true;
 		}
 		return false;
+	}
+
+	/**
+	 * Agents that cannot finish until `target` does: one of their blocks waits
+	 * only on `target` (directly, or through agents blocked on it in turn).
+	 * Unlike {@link blocksOn}, an interruptible block counts too: a message
+	 * could end it, but the caller idling for a message sends none.
+	 */
+	waitersOn(target: string): string[] {
+		const waiters: string[] = [];
+		for (const [agent, holds] of this.#holds) {
+			if (agent === target) continue;
+			for (const hold of holds) {
+				if (hold.awaited.every(id => this.#reaches(id, target, new Set([agent])))) {
+					waiters.push(agent);
+					break;
+				}
+			}
+		}
+		return waiters;
 	}
 
 	/** Whether `id` finishes only after `target` does. */
