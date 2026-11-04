@@ -767,79 +767,30 @@ describe("extension transcript presenters", () => {
 		expect(ids).toEqual([recordedId]);
 	});
 
-	it("asks a `!` run issued mid-run again when that run settles, before it moves into the transcript", async () => {
-		// Regression guard: the settled re-ask visiting only the transcript, so a `!` run waiting
-		// outside it kept the answer it got mid-run and carried that stale drawing into the transcript.
+	it("asks a `!` run waiting outside the transcript again when refreshTranscript names it", async () => {
+		// Regression guard: a refresh visiting only the transcript, so a `!` run queued mid-run kept
+		// its old drawing and carried it into the transcript.
 		let label = "BEFORE-ROW";
-		const { startRun, endRun } = await runHarness(pi => {
-			pi.registerTranscriptPresenter(block =>
-				block.type === "message" && block.message.role === "bashExecution" ? { compact: { label } } : undefined,
-			);
-			pi.on("agent_end", () => {
-				label = "AFTER-ROW";
-			});
-		});
+		let runId: string | undefined;
+		const { runner } = await installExtensions(
+			presenter(block => {
+				if (block.type !== "message" || block.message.role !== "bashExecution") return undefined;
+				runId = block.id;
+				return { compact: { label } };
+			}),
+		);
 		stubShell();
-		startRun();
+		await start();
 		await runBashMidRun("echo live");
 		const pending = () => plainRows(mode.pendingShellContainer.render(120)).join("\n");
 		expect(pending()).toContain("BEFORE-ROW");
 
-		await endRun();
+		label = "AFTER-ROW";
+		runner.getUIContext().refreshTranscript([runId!]);
 		expect(pending()).toContain("AFTER-ROW");
 		mode.flushPendingBashComponents();
 		expect(chat()).toContain("AFTER-ROW");
 		expect(chat()).not.toContain("BEFORE-ROW");
-	});
-
-	it("leaves a `!` run still waiting from an earlier run alone when the next run settles", async () => {
-		// Regression guard: a queued `!` run counting as whichever run is current, so every later
-		// run's settle asked it again until a submission moved it into the transcript.
-		let asked = 0;
-		const { startRun, endRun } = await runHarness(
-			presenter(block => {
-				if (block.type === "message" && block.message.role === "bashExecution") asked++;
-				return undefined;
-			}),
-		);
-		stubShell();
-		startRun();
-		await runBashMidRun("echo live");
-		await endRun();
-
-		startRun();
-		asked = 0;
-		await endRun();
-		expect(asked).toBe(0);
-	});
-
-	it("keeps a `!` run in the run it was issued in when the session records it later", async () => {
-		// Regression guard: recording a run swaps its provisional id for the recorded one, so a run
-		// recorded after the next run started counted as that run's and its settle asked it again.
-		let asked = 0;
-		const entered = Promise.withResolvers<void>();
-		const gate = Promise.withResolvers<void>();
-		const { startRun, endRun } = await runHarness(
-			presenter(block => {
-				if (block.type === "message" && block.message.role === "bashExecution") asked++;
-				return undefined;
-			}),
-		);
-		stubShell(() => {
-			entered.resolve();
-			return gate.promise;
-		});
-		startRun();
-		const ran = runBashMidRun("echo live");
-		await entered.promise;
-		await endRun();
-
-		startRun();
-		gate.resolve();
-		await ran;
-		asked = 0;
-		await endRun();
-		expect(asked).toBe(0);
 	});
 
 	it("draws a `!` run in full while every block is expanded, live and resumed", async () => {

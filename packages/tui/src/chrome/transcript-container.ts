@@ -1,4 +1,4 @@
-import { type Component, Container, type HistoryBatch } from "../tui";
+import { type Component, Container, type HistoryBatch, ownDescription } from "../tui";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils";
 import { measureRender, renderForScrollback } from "../components/image";
@@ -205,15 +205,8 @@ function separatorRows(above: RowsAbove, compact: boolean): number {
 
 /** Whether a native surface lays out nothing of `component` (a hidden node, or a `col`/`row` of such nodes). */
 function describesNothing(component: Component, cx: DescribeContext, depth = 0): boolean {
-	const describe = component.describe;
-	// The reconciler draws these as rows (a Container painting its own rows inherits the column description).
-	if (
-		describe === undefined ||
-		(describe === Container.prototype.describe && component.render !== Container.prototype.render)
-	) {
-		return false;
-	}
-	const described = describe.call(component, cx);
+	// `null`: the reconciler draws it as rows.
+	const described = ownDescription(component, cx);
 	return described !== null && isVoidNode(described, cx, depth);
 }
 
@@ -343,6 +336,9 @@ class CompactRun implements Component {
 	}
 }
 
+/** {@link TranscriptContainer.nativeBlocks}' run wrappers while no run has formed. */
+const NO_RUNS: ReadonlyMap<Component, CompactRun> = new Map();
+
 /** Owns transcript order, live capacity, and ordered immutable retirement. */
 export class TranscriptContainer extends Container {
 	#entries: TranscriptEntry[] = [];
@@ -387,7 +383,7 @@ export class TranscriptContainer extends Container {
 	/** `true` when history ends with a compact block whose separator was withheld; history rows never change. */
 	#historyEnd: RowsAbove;
 	/** Native wrappers of compact runs keyed by their first member; see {@link nativeBlocks}. */
-	#nativeRuns = new Map<Component, CompactRun>();
+	#nativeRuns: ReadonlyMap<Component, CompactRun> = NO_RUNS;
 	override addChild(component: Component): void {
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
 		super.addChild(component);
@@ -1215,8 +1211,9 @@ export class TranscriptContainer extends Container {
 		}
 		const units: readonly Component[] = flat ?? children;
 		const compactAt = (at: number): boolean => isCompact((owners ?? units)[at]!);
-		const blocks: Component[] = [];
-		const runs = new Map<Component, CompactRun>();
+		// Copies only once a run forms.
+		let blocks: Component[] | undefined;
+		let runs: Map<Component, CompactRun> | undefined;
 		let index = 0;
 		while (index < units.length) {
 			const first = units[index]!;
@@ -1229,21 +1226,23 @@ export class TranscriptContainer extends Container {
 				}
 			}
 			if (last === index) {
-				blocks.push(first);
+				blocks?.push(first);
 				index++;
 				continue;
 			}
 			const run = this.#nativeRuns.get(first) ?? new CompactRun();
 			run.setMembers(units, index, last + 1);
-			runs.set(first, run);
-			blocks.push(run);
+			(runs ??= new Map()).set(first, run);
+			(blocks ??= units.slice(0, index)).push(run);
 			index = last + 1;
 		}
-		this.#nativeRuns = runs;
-		if (sameItems(this.#nativeBlocks, blocks)) return this.#nativeBlocks;
-		this.#nativeBlocks = blocks;
+		this.#nativeRuns = runs ?? NO_RUNS;
+		const next = blocks ?? units;
+		if (sameItems(this.#nativeBlocks, next)) return this.#nativeBlocks;
+		// `children` mutates in place: keep a snapshot.
+		this.#nativeBlocks = next === children ? children.slice() : next;
 		this.#nativeNode = undefined;
-		return blocks;
+		return this.#nativeBlocks;
 	}
 
 	/** Embedded as a child (transcript viewers): a stack of the {@link nativeBlocks}. */

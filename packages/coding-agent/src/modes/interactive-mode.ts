@@ -4663,7 +4663,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#applyTranscriptPresenters()) this.refreshTranscriptPresentation();
 	}
 
-
 	refreshTranscriptPresentation(ids?: ReadonlySet<string>): void {
 		const refresh = (block: Component) => isTranscriptPresentable(block) && block.refreshTranscriptPresentation(ids);
 		this.redrawTranscriptBlocks(this.chatContainer.children, refresh);

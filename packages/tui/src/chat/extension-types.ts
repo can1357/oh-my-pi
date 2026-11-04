@@ -73,7 +73,8 @@ export interface AssistantTextRendering {
  *
  * - `toolCall`: a model tool call, `id` its `toolCallId`. `result` arrives with the call's first
  *   result frame; `isPartial` stays true while the call still streams progress.
- * - `message`: a session message drawn as its own block, `id` the decimal `message.timestamp`.
+ * - `message`: a session message drawn as its own block, `id` the decimal `message.timestamp`
+ *   (shared by messages recorded in the same millisecond).
  *   `custom` messages with `customType` `"advisor"`, `"skill-prompt"`, `"lsp-late-diagnostic"`,
  *   `"async-result"` or `"launch-completion"`, and `!`/`$` runs (`bashExecution`,
  *   `pythonExecution`). A `!`/`$` run still going has a provisional message and id; it is asked

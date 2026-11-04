@@ -4,7 +4,7 @@
  * {@link TranscriptPresentationState}.
  */
 import type { TspProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
-import { type Component, Container } from "../tui";
+import { type Component, Container, ownDescription } from "../tui";
 import { theme } from "../theme";
 import { truncateToWidth } from "../render";
 import { card, col, node, span, text, withHidden } from "../native/describe";
@@ -608,9 +608,11 @@ export class PresentedBlock<T extends WrappedComponent = WrappedComponent>
 
 	override describe(cx: DescribeContext): NativeNode | null {
 		const shown = this.#presentation.draw();
-		if (shown.mode === "full") return this.inner.describe?.(cx) ?? super.describe(cx);
+		// An inner that draws as rows stays a child component, so the reconciler renders it as rows.
+		const inner = ownDescription(this.inner, cx) ?? super.describe(cx);
+		if (shown.mode === "full") return inner;
 		const dataFirst = cx.supports("tool");
-		const full = this.inner.describe?.(cx) ?? super.describe(cx) ?? col([]);
+		const full = inner ?? col([]);
 		return this.#native.get([full, shown, dataFirst, this.#toolActivityVisible, this.#block], () => {
 			const head = (this.#head ??= blockHead(this.#block));
 			let own = full;

@@ -31,6 +31,7 @@ import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { TspNode, TspOp } from "@oh-my-pi/pi-wire";
 import { TspHarness } from "./tsp-harness";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { Container } from "@oh-my-pi/pi-tui/tui";
 
 beforeAll(async () => {
 	await initTheme(false);
@@ -405,6 +406,20 @@ describe("native transcript", () => {
 		} finally {
 			setTranscriptPresenters([]);
 		}
+	});
+
+	it("draws a wrapped block that paints its own rows as those rows", async () => {
+		// Regression guard: the wrapper asking `inner.describe()` directly, so a Container subclass
+		// that overrides render but inherits the column description lost its rows in Tern.
+		class PaintedRows extends Container {
+			override render(): readonly string[] {
+				return ["PAINTED-ROW"];
+			}
+		}
+		const message = createCustomMessage("painted", "body", true, undefined, "2026-01-01");
+		const h = await startWith(h => h.tui.addChild(new PresentedBlock(new PaintedRows(), messageBlock(message))));
+		const rows = h.find(node => node.k === "rows");
+		expect(JSON.stringify(rows?.p)).toContain("PAINTED-ROW");
 	});
 
 	it("mirrors a native toggle into the tool card and re-collapses it on a transcript-wide collapse", async () => {
