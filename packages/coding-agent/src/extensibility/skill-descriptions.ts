@@ -28,7 +28,9 @@ const MAX_PREVIEW_CHARS = 100;
 // A sentence or word cut shorter than this discards too much; cut at the budget instead.
 const MIN_PREVIEW_CUT = 40;
 const MAX_COMPRESSED_CHARS = 160;
-const MAX_COMPRESSED_WORDS = 12;
+// Revision of validCompression's rules, part of every unusable-answer marker: bump it whenever the
+// rules accept more, so answers an older, stricter revision rejected are asked for again.
+const VALIDATION_REVISION = 2;
 // Leave ample room for other cleanup under postmortem's 10-second deadline.
 const STORE_CLOSE_GRACE_MS = 4_000;
 const inFlight = new Map<string, Promise<void>>();
@@ -146,11 +148,19 @@ export function previewSkillDescription(description: string): string {
 	return `${cut}…`;
 }
 
+/**
+ * The prompt's 12-word target stays advisory: small models routinely overshoot it by a few words
+ * while staying well inside the character budget, which is what bounds the prompt.
+ */
 function validCompression(text: string): string | null {
 	const line = text.trim();
 	if (!line || /[\r\n]/.test(line) || line.length > MAX_COMPRESSED_CHARS) return null;
-	if (line.split(/\s+/).length > MAX_COMPRESSED_WORDS) return null;
 	return line;
+}
+
+/** Store key recording that `model`'s answer for the skill at `key` failed this validation revision. */
+function unusableKey(key: string, model: string): string {
+	return `${key}:v${VALIDATION_REVISION}:${model}`;
 }
 
 function pendingForStore(store: SkillDescriptionStore): Promise<void>[] {
@@ -246,8 +256,9 @@ function adoptLegacyDatabase(legacyPath: string, dbPath: string): void {
 }
 
 /**
- * SQLite store of compressed descriptions, keyed by prompt + skill content hash. A `<key>:<provider/id>` row
- * records that model's unusable answer, so it is not asked again while new models still are.
+ * SQLite store of compressed descriptions, keyed by prompt + skill content hash. A
+ * `<key>:v<revision>:<provider/id>` row records that model's unusable answer, so it is not asked
+ * again while new models and validation revisions still are.
  */
 export class SkillDescriptionStore {
 	/** Database file; scopes in-flight compression jobs shared by catalogs on this store. */
@@ -350,11 +361,24 @@ export class SkillDescriptionCatalog {
 	readonly #store: SkillDescriptionStore | undefined;
 	readonly #compress?: SkillDescriptionCompressor;
 	readonly #snapshot = new Map<string, string>();
+	/** Misses rendered before {@link startCompression}; `undefined` once compression runs. */
+	#deferred: Map<string, Skill> | undefined;
 
-	/** `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews. */
-	constructor(options: { store?: SkillDescriptionStore; compress?: SkillDescriptionCompressor } = {}) {
+	/**
+	 * `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews.
+	 * `deferCompression` holds model work until {@link startCompression}, keeping the compression
+	 * model's resolution (a whole-catalog composition) off a startup path.
+	 */
+	constructor(
+		options: {
+			store?: SkillDescriptionStore;
+			compress?: SkillDescriptionCompressor;
+			deferCompression?: boolean;
+		} = {},
+	) {
 		this.#store = options.store ?? sharedSkillDescriptionStore();
 		this.#compress = options.compress;
+		if (options.deferCompression) this.#deferred = new Map();
 	}
 
 	/** Read the session's frozen prompt hints without starting new model work. */
@@ -368,7 +392,8 @@ export class SkillDescriptionCatalog {
 	render(skills: readonly Skill[]): Array<Skill & { description: string }> {
 		if (skills.length === 0) return [];
 		const store = this.#store;
-		return skills.map(skill => {
+		const misses = new Map<string, Skill>();
+		const rendered = skills.map(skill => {
 			const key = keyFor(skill);
 			let description = this.#snapshot.get(key);
 			if (description === undefined) {
@@ -379,12 +404,26 @@ export class SkillDescriptionCatalog {
 				}
 				if (description === undefined) {
 					description = previewSkillDescription(skill.description);
-					if (store) this.#schedule(store, key, skill);
+					misses.set(key, skill);
 				}
 				this.#snapshot.set(key, description);
 			}
 			return { ...skill, description };
 		});
+		if (!store || misses.size === 0) return rendered;
+		if (this.#deferred) {
+			for (const [key, skill] of misses) this.#deferred.set(key, skill);
+		} else {
+			this.#schedule(store, misses);
+		}
+		return rendered;
+	}
+
+	/** Start compression held by `deferCompression`; later renders schedule theirs immediately. */
+	startCompression(): void {
+		const deferred = this.#deferred;
+		this.#deferred = undefined;
+		if (deferred && deferred.size > 0 && this.#store) this.#schedule(this.#store, deferred);
 	}
 
 	/** Await background writes already scheduled by this catalog (for shutdown or tests). */
@@ -393,50 +432,69 @@ export class SkillDescriptionCatalog {
 		await Promise.all(pendingForStore(this.#store));
 	}
 
-	#schedule(store: SkillDescriptionStore, key: string, skill: Skill): void {
+	#schedule(store: SkillDescriptionStore, misses: ReadonlyMap<string, Skill>): void {
 		const compressor = this.#compress;
 		if (!compressor || store.isClosing) return;
-		const job = `${store.path}:${key}`;
-		if (inFlight.has(job)) return;
-		// Defer model work until the current synchronous prompt rendering has finished.
-		const pending = Promise.resolve().then(async () => {
+		// One resolution serves the whole batch: each composes the available model catalog, and a
+		// miss that model already answered unusably needs nothing more. Deferred until the current
+		// synchronous prompt rendering has finished.
+		let batchModel: Promise<string | undefined> | undefined;
+		for (const [key, skill] of misses) {
+			const job = `${store.path}:${key}`;
+			if (inFlight.has(job)) continue;
+			batchModel ??= Promise.resolve().then(() => compressor.modelKey());
+			const pending = compressSkill(store, compressor, batchModel, key, skill).finally(() => inFlight.delete(job));
+			inFlight.set(job, pending);
+		}
+	}
+}
+
+/**
+ * Compress one skill's description into `store`. `batchModel` filters out skills that model
+ * already answered unusably (and everything when no model is available) before taking a slot.
+ */
+async function compressSkill(
+	store: SkillDescriptionStore,
+	compressor: SkillDescriptionCompressor,
+	batchModel: Promise<string | undefined>,
+	key: string,
+	skill: Skill,
+): Promise<void> {
+	try {
+		const candidate = await batchModel;
+		if (candidate === undefined || store.isClosing || store.get(unusableKey(key, candidate)) !== undefined) return;
+		await compressionSlots.acquire();
+		try {
+			if (store.isClosing) return;
+			// Unusable answers are remembered per model: that model is not asked again, a newly selected one is.
+			// Re-resolved because the role can change while this job waits behind running requests.
+			const model = compressor.modelKey();
+			const unusable = model === undefined ? undefined : unusableKey(key, model);
+			if (unusable !== undefined && store.get(unusable) !== undefined) return;
+			const request = prompt.render(compressDescriptionPrompt, {
+				name: skill.name,
+				description: skill.description,
+			});
+			let result: string | null = null;
 			try {
-				await compressionSlots.acquire();
-				try {
-					if (store.isClosing) return;
-					// Unusable answers are remembered per model: that model is not asked again, a newly selected one is.
-					const model = compressor.modelKey();
-					const unusableKey = model === undefined ? undefined : `${key}:${model}`;
-					if (unusableKey !== undefined && store.get(unusableKey) !== undefined) return;
-					const request = prompt.render(compressDescriptionPrompt, {
-						name: skill.name,
-						description: skill.description,
-					});
-					let result: string | null = null;
-					try {
-						result = validCompression(await compressor.compress(skill.name, skill.description, request));
-					} catch (error) {
-						if (!(error instanceof SkillDescriptionLengthError)) throw error;
-					}
-					if (store.isClosed) return;
-					if (result !== null) {
-						store.put(key, result);
-					} else if (unusableKey !== undefined) {
-						logger.warn("Skill description compression unusable; keeping the preview for this model", {
-							skill: skill.name,
-							model,
-						});
-						store.put(unusableKey, previewSkillDescription(skill.description));
-					}
-				} finally {
-					compressionSlots.release();
-				}
+				result = validCompression(await compressor.compress(skill.name, skill.description, request));
 			} catch (error) {
-				logger.warn("Skill description compression failed", { skill: skill.name, error: String(error) });
-			} finally {
-				inFlight.delete(job);
+				if (!(error instanceof SkillDescriptionLengthError)) throw error;
 			}
-		});
-		inFlight.set(job, pending);
+			if (store.isClosed) return;
+			if (result !== null) {
+				store.put(key, result);
+			} else if (unusable !== undefined) {
+				logger.warn("Skill description compression unusable; keeping the preview for this model", {
+					skill: skill.name,
+					model,
+				});
+				store.put(unusable, previewSkillDescription(skill.description));
+			}
+		} finally {
+			compressionSlots.release();
+		}
+	} catch (error) {
+		logger.warn("Skill description compression failed", { skill: skill.name, error: String(error) });
 	}
 }

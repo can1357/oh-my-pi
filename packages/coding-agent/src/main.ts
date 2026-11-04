@@ -2390,6 +2390,7 @@ export async function runRootCommand(
 			options.settingsApproval = isInteractive;
 			options.tuiTranscript = isInteractive;
 			options.autoTitle = isInteractive;
+			options.deferSkillDescriptionCompression = isInteractive;
 			options.settings = settingsInstance;
 			options.telemetry = startupTelemetry;
 			options.extensions = startupExtensions;
@@ -2730,6 +2731,7 @@ export async function runRootCommand(
 			// background refresh already raced the first prompt when it ran earlier.
 			const startDeferredStartupWork = (): void => {
 				void session.loadDeferredExtensions();
+				session.startSkillDescriptionCompression();
 				modelRegistry.refreshInBackground();
 				session.validateRetryFallbackChains();
 				if (configuredScope.length > 0) {

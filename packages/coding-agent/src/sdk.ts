@@ -980,6 +980,12 @@ export interface CreateAgentSessionOptions {
 	deferUsageReserveConfirmation?: boolean;
 
 	/**
+	 * Hold background skill-description compression until
+	 * {@link AgentSession.startSkillDescriptionCompression}: resolving its model composes the
+	 * whole model catalog. The interactive TUI sets this and starts it after the first frame. Default: false.
+	 */
+	deferSkillDescriptionCompression?: boolean;
+	/**
 	 * Opt-in OpenTelemetry instrumentation forwarded to the underlying Agent.
 	 * Passing `{}` enables the loop's GenAI-semantic-convention spans. See
 	 * {@link AgentTelemetryConfig} for the full surface (hooks, content capture,
@@ -4200,6 +4206,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// the telemetry config and session id the agent is constructed with.
 			compress: createSkillDescriptionCompressor(modelRegistry, settings, undefined, () =>
 				agent
+			deferCompression: options.deferSkillDescriptionCompression === true,
 					? resolveTelemetry(agent.telemetry, agent.sessionId)
 					: resolveTelemetry(options.telemetry, providerSessionId),
 			),

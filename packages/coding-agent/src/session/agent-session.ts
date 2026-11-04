@@ -10977,6 +10977,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	get skillWarnings(): readonly SkillWarning[] {
 		return this.#tools.skillWarnings;
 	}
+	/** Start skill-description compression held by `deferSkillDescriptionCompression` (see `createAgentSession`). */
+	startSkillDescriptionCompression(): void {
+		this.#skillDescriptions.startCompression();
+	}
+
 
 	/** Session-local general-purpose agents pinned to user-tagged models. */
 	getSessionAgents(): AgentDefinition[] {

@@ -164,7 +164,6 @@ describe("skill description failure caching and shutdown", () => {
 	}
 
 	it.each([
-		["more than 12 words", "one two three four five six seven eight nine ten eleven twelve thirteen"],
 		["more than 160 characters", "x".repeat(161)],
 		["multiple lines", "Use for migrations.\nCheck rollout safety."],
 	])("does not ask the same model again after an answer with %s", async (_reason, answer) => {
@@ -180,6 +179,17 @@ describe("skill description failure caching and shutdown", () => {
 		expect(second.render([entry])[0].description).toBe(preview);
 		await second.waitForPending();
 		expect(retry).toHaveBeenCalledTimes(0);
+	});
+
+	it("stores an answer past the prompt's 12-word target when it fits the character budget", async () => {
+		using store = SkillDescriptionStore.open(path.join(tempDir, "cache.db"));
+		const entry = skill();
+		const answer =
+			"Use for planning, reviewing, or rolling back multi-service data migrations; not for schema-only changes.";
+		const catalog = new SkillDescriptionCatalog({ store, compress: fast(async () => answer) });
+		catalog.render([entry]);
+		await catalog.waitForPending();
+		expect(new SkillDescriptionCatalog({ store }).render([entry])[0].description).toBe(answer);
 	});
 
 	it("asks a newly selected model after the previous model's answer was unusable", async () => {
@@ -264,6 +274,42 @@ describe("skill description failure caching and shutdown", () => {
 		await second.waitForPending();
 		expect(retry).toHaveBeenCalledTimes(1);
 		expect(new SkillDescriptionCatalog({ store }).render([edited])[0].description).toBe(compressed);
+	});
+
+	it("resolves the compression model once for every skill a render leaves uncached", async () => {
+		using store = SkillDescriptionStore.open(path.join(tempDir, "cache.db"));
+		const entries = Array.from({ length: 5 }, (_, index) => skill(`migrations-${index}`));
+		const first = new SkillDescriptionCatalog({ store, compress: fast(async () => "Bad\nanswer") });
+		first.render(entries);
+		await first.waitForPending();
+
+		const modelKey = vi.fn(() => "test/fast");
+		const retry = vi.fn(async () => compressed);
+		const second = new SkillDescriptionCatalog({ store, compress: { modelKey, compress: retry } });
+		second.render(entries);
+		await second.waitForPending();
+		expect(modelKey).toHaveBeenCalledTimes(1);
+		expect(retry).toHaveBeenCalledTimes(0);
+	});
+
+	it("holds deferred compression until started, then compresses later renders immediately", async () => {
+		using store = SkillDescriptionStore.open(path.join(tempDir, "cache.db"));
+		const held = skill("held");
+		const later = skill("later");
+		const modelKey = vi.fn(() => "test/fast");
+		const compress = vi.fn<SkillDescriptionCompressor["compress"]>(async () => compressed);
+		const catalog = new SkillDescriptionCatalog({ store, compress: { modelKey, compress }, deferCompression: true });
+		catalog.render([held]);
+		await catalog.waitForPending();
+		expect(modelKey).toHaveBeenCalledTimes(0);
+		expect(compress).toHaveBeenCalledTimes(0);
+
+		catalog.startCompression();
+		await catalog.waitForPending();
+		catalog.render([later]);
+		await catalog.waitForPending();
+		expect(compress.mock.calls.map(([name]) => name)).toEqual(["held", "later"]);
+		expect(storedDescriptions(store.path)).toEqual([compressed, compressed]);
 	});
 
 	it("waits for an in-flight compression before closing so its row survives reopening", async () => {
