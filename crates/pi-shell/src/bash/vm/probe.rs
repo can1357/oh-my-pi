@@ -468,7 +468,17 @@ fn read_file(
 pub const fn standard_path(platform: crate::bash::ids::Platform) -> &'static str {
 	match platform {
 		crate::bash::ids::Platform::MacOs => "/usr/bin:/bin:/usr/sbin:/sbin",
-		crate::bash::ids::Platform::Linux | crate::bash::ids::Platform::Windows => "/bin:/usr/bin",
+		crate::bash::ids::Platform::Linux => "/bin:/usr/bin",
+		crate::bash::ids::Platform::Windows => "/bin;/usr/bin",
+	}
+}
+
+/// The `$PATH` list separator on `platform`.
+pub const fn path_separator(platform: Platform) -> u8 {
+	if matches!(platform, Platform::Windows) {
+		b';'
+	} else {
+		b':'
 	}
 }
 
@@ -480,11 +490,7 @@ pub fn candidates(
 	platform: Platform,
 	extensions: &[u8],
 ) -> Vec<BString> {
-	let separator = if platform == Platform::Windows {
-		b';'
-	} else {
-		b':'
-	};
+	let separator = path_separator(platform);
 	let add_extensions = platform == Platform::Windows
 		&& !extensions.split(|&c| c == b';').any(|suffix| {
 			!suffix.is_empty()
@@ -670,6 +676,14 @@ pub fn path_search(tcx: &mut Context<'_>, cx: &mut Cx<'_>, sc: &mut Scratch) -> 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn standard_path_uses_the_platform_separator() {
+		assert!(standard_path(Platform::Linux).contains(':'));
+		assert!(!standard_path(Platform::Linux).contains(';'));
+		assert!(standard_path(Platform::Windows).contains(';'));
+		assert!(!standard_path(Platform::Windows).contains(':'));
+	}
 
 	#[test]
 	fn path_candidates_resolve_empty_and_relative_entries_against_cwd() {

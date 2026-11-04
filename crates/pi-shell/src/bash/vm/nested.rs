@@ -409,7 +409,7 @@ fn fresh_shell(
 	let values = if args.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 		super::zsh_startup_values(cx, k.engine.config().platform)
 	} else {
-		startup_values(cx, &args.shell_name, ppid, super::StartupVars {
+		startup_values(cx, &args.shell_name, ppid, k.engine.config().platform, super::StartupVars {
 			lookup_shell: need_shell,
 			interactive:  args.interactive,
 		})

@@ -1059,7 +1059,7 @@ fn startup_vars(k: &mut Kernel, cx: &mut Cx<'_>, init: &ShellInit) -> Result<(),
 	let values = if init.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 		zsh_startup_values(cx, k.engine.config().platform)
 	} else {
-		startup_values(cx, &init.argv0, ppid, StartupVars {
+		startup_values(cx, &init.argv0, ppid, k.engine.config().platform, StartupVars {
 			lookup_shell: need_shell && !deferred_shell,
 			interactive:  init.interactive,
 		})
@@ -1251,6 +1251,7 @@ pub fn startup_values(
 	cx: &Cx<'_>,
 	argv0: &[u8],
 	ppid: u32,
+	platform: crate::bash::ids::Platform,
 	options: StartupVars,
 ) -> Vec<(&'static [u8], Var, bool)> {
 	let user = cx.host.user();
@@ -1277,7 +1278,7 @@ pub fn startup_values(
 		(b"SHELL", shell),
 		(b"TERM", BString::from("dumb")),
 		// bash's `DEFAULT_PATH_VALUE` when the environment has no PATH.
-		(b"PATH", BString::from(crate::bash::invocation::DEFAULT_PATH)),
+		(b"PATH", BString::from(crate::bash::invocation::default_path(platform))),
 	];
 	let mut out = Vec::with_capacity(defaults.len() + 2 + usize::from(options.interactive));
 	if options.interactive {
