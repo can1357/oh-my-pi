@@ -303,6 +303,10 @@ pub struct JobTable {
 	/// status of such a job, 0 for one forgotten while it ran (`disown`).
 	/// Oldest first, at most [`SAVED_MAX`].
 	#[serde(default)]
+	#[expect(
+		clippy::box_collection,
+		reason = "one pointer in every job table; most never forget a job"
+	)]
 	pub saved:    Option<Box<Vec<(u32, i32)>>>,
 }
 

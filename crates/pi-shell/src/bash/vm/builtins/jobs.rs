@@ -107,7 +107,7 @@ fn print_job(ctx: &mut Ctx<'_, '_>, number: u32, form: Form, show: &Show<'_>) {
 			.stages
 			.as_deref()
 			.and_then(|s| s.first())
-			.map_or(job.pid(), |s| s.pid());
+			.map_or_else(|| job.pid(), |s| s.pid());
 		let line = format!("{pid}\n");
 		ctx.out(line.as_bytes());
 		return;

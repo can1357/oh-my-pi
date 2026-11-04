@@ -1383,8 +1383,7 @@ fn break_loops(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, n: u32, cont: bo
 				let children: Vec<Vpid> = top_frame(vp)
 					.scratch
 					.as_ref()
-					.map(|sc| sc.children.iter().map(|&(v, _)| v).collect())
-					.unwrap_or_default();
+					.map_or_else(Vec::new, |sc| sc.children.iter().map(|&(v, _)| v).collect());
 				vp.jobs
 					.remove_where(|j| j.foreground && children.contains(&j.vpid));
 			}
@@ -1679,7 +1678,7 @@ pub fn start_sub(
 		let spans = unit
 			.strs
 			.get(t as usize)
-			.map_or(0, |s| s.iter().filter(|&&b| b == b'\n').count());
+			.map_or(0, |s| bstr::ByteSlice::find_iter(s.as_slice(), b"\n").count());
 		let eval = matches!(
 			vp.frames.last().map(|f| &f.kind),
 			Some(FrameKind::Script { what: ScriptKind::Eval, .. })
@@ -3401,7 +3400,7 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 		statuses
 			.iter()
 			.rposition(|&s| s != 0)
-			.unwrap_or(statuses.len().saturating_sub(1))
+			.unwrap_or_else(|| statuses.len().saturating_sub(1))
 	} else {
 		statuses.len().saturating_sub(1)
 	};

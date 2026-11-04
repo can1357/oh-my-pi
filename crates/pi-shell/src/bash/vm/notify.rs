@@ -434,7 +434,7 @@ pub fn cleanup(vp: &mut Vproc) {
 pub fn report_foreground(
 	k: &mut Kernel,
 	cx: &mut Cx<'_>,
-	vp: &mut Vproc,
+	vp: &Vproc,
 	procs: &[ProcLine<'_>],
 	death: Option<Death>,
 	line: u32,

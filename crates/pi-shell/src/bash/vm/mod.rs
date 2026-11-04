@@ -1854,7 +1854,7 @@ impl Shell {
 	fn pick(&mut self, wakes: u64) -> Option<usize> {
 		// A vproc parked to settle goes first once no child has an end
 		// left to take note of.
-		if let Some(i) = self.procs.iter().position(settling)
+		if let Some(i) = self.procs.iter().position(|p| settling(p))
 			&& !self.settle_pending(wakes)
 		{
 			self.k.settle_done = Some(self.procs[i].vpid);
@@ -2145,8 +2145,7 @@ impl Shell {
 		// pipeline's) reaches each of them.
 		let stages: Vec<Vpid> = job
 			.and_then(|j| j.stages.as_deref())
-			.map(|s| s.iter().map(|s| s.vpid).collect())
-			.unwrap_or_default();
+			.map_or_else(Vec::new, |s| s.iter().map(|s| s.vpid).collect());
 		// A signal to a vproc that only runs a subshell reaches the subshell,
 		// which bash runs in that process.
 		let target = match target {
@@ -2596,7 +2595,7 @@ fn sole_subshell(p: &Vproc) -> Option<Vpid> {
 }
 
 /// `p` is parked to settle ([`WaitKey::Settle`]).
-fn settling(p: &Box<Vproc>) -> bool {
+fn settling(p: &Vproc) -> bool {
 	p.blocked.as_ref().is_some_and(|b| b.key == WaitKey::Settle)
 }
 
