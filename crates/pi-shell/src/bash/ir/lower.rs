@@ -1085,6 +1085,10 @@ impl Lower {
 		{
 			let mut indices = Vec::with_capacity(alts.len());
 			for parts in alts {
+				// A pending cancel discards this compile (`Engine::intern`).
+				if crate::bash::vm::control::tick() {
+					break;
+				}
 				let alt = syn::Word { id: w.id, span: w.span, parts };
 				indices.push(self.plain_word(&alt, kind)?);
 			}

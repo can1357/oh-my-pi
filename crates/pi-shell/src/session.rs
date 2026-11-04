@@ -68,8 +68,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
 	bash::{
-		Budget, CallId, Cx, Engine, EngineConfig, EventMask, Fs, MemStore, PipeTap, RunId, Script,
-		Shell, ShellError, ShellInit, Signal, Step, ToolCall, VprocSel,
+		Budget, CallId, ControlHandle, Cx, Engine, EngineConfig, EventMask, Fs, MemStore, PipeTap,
+		RunId, Script, Shell, ShellError, ShellInit, Signal, Step, ToolCall, VprocSel,
 		store::{Key, MiscKey, Record},
 	},
 	host::{PiHost, SpawnObserver, TERM_GRACE},
@@ -288,6 +288,12 @@ pub struct Session {
 	jobs:     Option<flume::Sender<Request>>,
 	/// Rings the driver's bell.
 	waker:    Waker,
+	/// Cancels the engine from this task: the driver applies the run's
+	/// cancel level between steps, which is too late for a command whose
+	/// work is inside one op (a long read, a brace expansion, a pattern
+	/// search). The engine applies a request at its next safepoint, and
+	/// the ops that work inside one check it themselves.
+	control:  ControlHandle,
 	children: Children,
 }
 
@@ -325,9 +331,10 @@ impl Session {
 			.map_err(SessionError::Create)?;
 		// Nothing observes events: skip building them.
 		shell.set_event_mask(EventMask::NONE);
+		let control = shell.control();
 		let driver = Driver { shell, store, host, bell, jobs: rx, children: children.clone(), tools };
 		runtime.spawn(driver.serve());
-		Ok(Self { jobs: Some(jobs), waker, children })
+		Ok(Self { jobs: Some(jobs), waker, control, children })
 	}
 
 	/// The live externals of the run in flight; usable while
@@ -403,7 +410,12 @@ impl Session {
 			.send(Request::Run(job))
 			.map_err(|_| SessionError::Closed)?;
 		self.waker.wake_by_ref();
-		let mut guard = CancelOnDrop { level: &level, waker: &self.waker, armed: true };
+		let mut guard = CancelOnDrop {
+			level:   &level,
+			waker:   &self.waker,
+			control: &self.control,
+			armed:   true,
+		};
 		let reply = reply_rx.recv_async();
 		tokio::pin!(reply);
 		let outcome = tokio::select! {
@@ -474,17 +486,27 @@ impl CancelLevel {
 	}
 }
 
-/// Escalates the run's cancel level and wakes the driver; stops the run with
-/// `KILL` when the run future is dropped before the reply.
+/// Escalates the run's cancel level, asks the engine to cancel and wakes the
+/// driver; stops the run with `KILL` when the run future is dropped before
+/// the reply.
 struct CancelOnDrop<'a> {
-	level: &'a CancelLevel,
-	waker: &'a Waker,
-	armed: bool,
+	level:   &'a CancelLevel,
+	waker:   &'a Waker,
+	control: &'a ControlHandle,
+	armed:   bool,
 }
 
 impl CancelOnDrop<'_> {
 	fn raise(&self, level: u8) {
 		self.level.0.fetch_max(level, Ordering::AcqRel);
+		// The driver applies the level between steps, which a command
+		// whose work is inside one op never reaches in time; the engine
+		// applies this at its next safepoint, and such work stops for it.
+		self.control.cancel(if level >= CancelLevel::KILL {
+			Signal::Kill
+		} else {
+			Signal::Term
+		});
 		self.waker.wake_by_ref();
 	}
 }

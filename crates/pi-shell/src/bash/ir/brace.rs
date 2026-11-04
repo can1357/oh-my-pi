@@ -6,7 +6,7 @@
 //! word once into its alternatives; the VM uses them while `braceexpand`
 //! (`set -B`) is on.
 
-use crate::bash::syntax as syn;
+use crate::bash::{syntax as syn, vm::control::tick};
 
 /// One unit of a word: an active (unquoted) byte or an opaque part.
 #[derive(Clone, Copy)]
@@ -21,6 +21,11 @@ enum Tok<'a> {
 /// Upper bound on the number of words one brace expression may produce
 /// (bash has none; this keeps `{1..999999999}` from exhausting memory).
 const MAX_WORDS: usize = 1 << 20;
+
+// The words grow with the product of the expressions, not with the source:
+// every loop that makes one calls `tick` and, once a cancel is pending,
+// stops with what it has. The compile is then discarded
+// (`Engine::intern`) and the op parks (`control::interrupted`).
 
 /// The alternatives of `parts`, or `None` when it has no brace expression.
 pub fn expand(parts: &[syn::WordPart]) -> Option<Vec<Vec<syn::WordPart>>> {
@@ -44,7 +49,14 @@ pub fn expand(parts: &[syn::WordPart]) -> Option<Vec<Vec<syn::WordPart>>> {
 	if !expand_toks(&toks, &mut out) {
 		return None;
 	}
-	Some(out.iter().map(|t| rebuild(t)).collect())
+	let mut words = Vec::with_capacity(out.len());
+	for t in &out {
+		if tick() {
+			return None;
+		}
+		words.push(rebuild(t));
+	}
+	Some(words)
 }
 
 /// bash finds braces in the word as written with a naive quote tracker
@@ -94,7 +106,7 @@ fn quoted_alternatives_from(part: &syn::WordPart, from: usize) -> Option<Vec<syn
 						Some(more) => alternatives.extend(more),
 						None => alternatives.push(part),
 					}
-					if alternatives.len() >= MAX_WORDS {
+					if alternatives.len() >= MAX_WORDS || tick() {
 						break;
 					}
 				}
@@ -159,7 +171,7 @@ fn expand_toks<'a>(toks: &[Tok<'a>], out: &mut Vec<Vec<Tok<'a>>>) -> bool {
 			}
 			for alt in alts {
 				for post in &posts {
-					if out.len() >= MAX_WORDS {
+					if out.len() >= MAX_WORDS || tick() {
 						return true;
 					}
 					let mut word = Vec::with_capacity(s + 1 + post.len());
@@ -202,7 +214,7 @@ fn expand_toks<'a>(toks: &[Tok<'a>], out: &mut Vec<Vec<Tok<'a>>>) -> bool {
 			}
 			for item in &items {
 				for post in &posts {
-					if out.len() >= MAX_WORDS {
+					if out.len() >= MAX_WORDS || tick() {
 						return true;
 					}
 					let mut word = Vec::with_capacity(s + item.len() + post.len());
@@ -302,21 +314,24 @@ fn sequence<'a>(inner: &[Tok<'a>]) -> Option<Vec<Vec<Tok<'a>>>> {
 			if count > MAX_WORDS as u64 {
 				return None;
 			}
-			(0..count)
-				.map(|k| {
-					let off = i64::try_from(k * step).unwrap_or(i64::MAX);
-					let v = if a <= b {
-						a.saturating_add(off)
-					} else {
-						a.saturating_sub(off)
-					};
-					if v < 0 {
-						format!("-{:0w$}", v.unsigned_abs(), w = width.saturating_sub(1)).into_bytes()
-					} else {
-						format!("{v:0width$}").into_bytes()
-					}
-				})
-				.collect()
+			let mut items = Vec::new();
+			for k in 0..count {
+				if tick() {
+					return None;
+				}
+				let off = i64::try_from(k * step).unwrap_or(i64::MAX);
+				let v = if a <= b {
+					a.saturating_add(off)
+				} else {
+					a.saturating_sub(off)
+				};
+				items.push(if v < 0 {
+					format!("-{:0w$}", v.unsigned_abs(), w = width.saturating_sub(1)).into_bytes()
+				} else {
+					format!("{v:0width$}").into_bytes()
+				});
+			}
+			items
 		},
 		(None, None) if parts[0].len() == 1 && parts[1].len() == 1 => {
 			let (a, b) = (parts[0][0], parts[1][0]);
@@ -342,18 +357,18 @@ fn sequence<'a>(inner: &[Tok<'a>]) -> Option<Vec<Vec<Tok<'a>>>> {
 		},
 		_ => return None,
 	};
-	Some(
-		items
-			.into_iter()
-			.map(|w| {
-				if w == b"\\" {
-					vec![Tok::Atom(&EMPTY_QUOTE)]
-				} else {
-					w.into_iter().map(Tok::Ch).collect()
-				}
-			})
-			.collect(),
-	)
+	let mut words = Vec::with_capacity(items.len());
+	for w in items {
+		if tick() {
+			return None;
+		}
+		words.push(if w == b"\\" {
+			vec![Tok::Atom(&EMPTY_QUOTE)]
+		} else {
+			w.into_iter().map(Tok::Ch).collect()
+		});
+	}
+	Some(words)
 }
 
 /// Split at `..` (exactly two dots).

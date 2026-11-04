@@ -170,6 +170,8 @@ pub fn matches(ex: &mut Expander<'_, '_>, pat: &Pattern, subject: &[u8]) -> X<bo
 	} else {
 		pat.matches(&s, &env.env())
 	};
+	// A match cut short by a pending cancel (`control::tick`).
+	crate::bash::vm::expand::uninterrupted()?;
 	if ok && want {
 		set_match_vars(ex, &s, &caps)?;
 	}

@@ -22,6 +22,20 @@ use crate::bash::{
 	host::Deadline,
 };
 
+/// Reads one `perform` of an `Input` or `Read` probe makes before it
+/// yields. Input that is always ready (`/dev/zero`, a fast producer)
+/// would otherwise keep the op from the safepoint, and with it a cancel
+/// and every other vproc; the read resumes from `ScratchIo::input` when
+/// the vproc runs again.
+const READS_PER_TURN: u32 = 16 * 1024;
+
+/// Give the turn back with `key`: the engine waker fires first, so the
+/// parked op is runnable again at once (`Shell::runnable`).
+fn yield_turn<T>(tcx: &Context<'_>, key: T) -> T {
+	tcx.waker().wake_by_ref();
+	key
+}
+
 /// The cached answer to `p`.
 pub fn cached<'s>(sc: &'s Scratch, p: &Probe) -> Option<&'s ProbeResult> {
 	sc.probes().iter().find(|(q, _)| q == p).map(|(_, r)| r)
@@ -83,6 +97,7 @@ pub fn perform(
 		io.search = None;
 		io.walk = None;
 		io.input.clear();
+		io.counted = (0, 0);
 		sc.live = Live::None;
 	}
 	let mut tcx = Context::from_waker(&k.waker);
@@ -193,7 +208,12 @@ pub fn perform(
 				// `. /dev/stdin`: the engine's fd, not the host process's.
 				let handle = vp.fds.handle(fd);
 				let input = &mut sc.io().input;
+				let mut reads = 0;
 				loop {
+					if reads == READS_PER_TURN {
+						return Err(yield_turn(&tcx, WaitKey::Read { fd }));
+					}
+					reads += 1;
 					let mut buf = [0u8; 8192];
 					match handle.poll_read(&mut tcx, &mut buf) {
 						Poll::Ready(Ok(0)) => {
@@ -255,11 +275,17 @@ pub fn perform(
 			let handle = vp.fds.handle(*fd);
 			let seekable = handle.kind() == Some(FileKind::Regular);
 			// The bytes so far, beside `sc.live` (the timer).
-			let input = &mut sc.io.get_or_insert_with(Box::default).input;
+			let io = sc.io.get_or_insert_with(Box::default);
+			let (input, counted) = (&mut io.input, &mut io.counted);
 			let lines = (*lines).max(1) as usize;
-			// Delimiters read so far.
+			// Delimiters read so far: counted before a yield, else now.
+			if counted.0 > input.len() {
+				*counted = (0, 0);
+			}
 			#[expect(clippy::naive_bytecount, reason = "bytecount is not a pi-shell dependency")]
-			let mut seen = delim.map_or(0, |d| input.iter().filter(|&&c| c == d).count());
+			let mut seen =
+				counted.1 + delim.map_or(0, |d| input[counted.0..].iter().filter(|&&c| c == d).count());
+			let mut reads = 0;
 			loop {
 				let done_len = nchars.is_some_and(|n| input.len() >= n);
 				let done_delim = delim.is_some() && seen >= lines;
@@ -270,6 +296,11 @@ pub fn perform(
 						timed_out: false,
 					};
 				}
+				if reads == READS_PER_TURN {
+					*counted = (input.len(), seen);
+					return Err(yield_turn(&tcx, WaitKey::Read { fd: *fd }));
+				}
+				reads += 1;
 				let mut buf = [0u8; 4096];
 				let want = if seekable { buf.len() } else { 1 };
 				let want = nchars.map_or(want, |n| want.min(n - input.len()));
@@ -350,6 +381,7 @@ fn read_file(
 	let err = |e: &std::io::Error| BString::from(diag::strerror(e).as_bytes());
 	// The bytes so far, beside `sc.live` (the file).
 	let input = &mut sc.io.get_or_insert_with(Box::default).input;
+	let mut reads = 0;
 	loop {
 		match &mut sc.live {
 			Live::None => {
@@ -367,6 +399,10 @@ fn read_file(
 				Poll::Pending => return Poll::Pending,
 			},
 			Live::File(f) => {
+				if reads == READS_PER_TURN {
+					return yield_turn(tcx, Poll::Pending);
+				}
+				reads += 1;
 				let mut buf = [0u8; 8192];
 				match f.poll_read(tcx, &mut buf) {
 					Poll::Ready(Ok(0)) => {

@@ -39,7 +39,7 @@ use crate::bash::{
 		Cx, Kernel,
 		exec::{self, Flow},
 		expand::{Expander, Stop, X},
-		glob::{Ask, Fact, answer},
+		glob::{ASKS_PER_TURN, Ask, Fact, answer, yield_key},
 		probe,
 		proc::{Atom, Scratch, Vproc},
 	},
@@ -1447,7 +1447,14 @@ fn glob_words(
 		// Ask every open question first.
 		let mut tcx = Context::from_waker(&k.waker);
 		let mut pending = None;
+		let mut asked = 0;
 		while let Some(ask) = walk.asking.front() {
+			// A large tree answers from cache for long: give the turn back.
+			if asked == ASKS_PER_TURN {
+				pending = Some(yield_key(&tcx, ask, &vp.cwd));
+				break;
+			}
+			asked += 1;
 			match answer(ask, &mut walk.names, &mut tcx, cx, &mut sc, &vp.cwd) {
 				Ok(fact) => {
 					if let Some(ask) = walk.asking.pop_front() {
@@ -1506,6 +1513,10 @@ fn glob_words(
 				continue;
 			},
 			Err(stop) => break Err(stop),
+			// A match cut short by a pending cancel (`control::tick`).
+			Ok(()) if crate::bash::vm::control::interrupted() => {
+				break Err(Stop::Wait(crate::bash::event::WaitKey::Signal));
+			},
 			Ok(()) => {},
 		}
 		if missing.is_empty() {

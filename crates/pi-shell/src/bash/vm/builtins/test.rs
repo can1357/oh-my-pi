@@ -695,6 +695,13 @@ pub fn cond_test(
 			};
 			(res, std::mem::take(&mut ctx.chunks))
 		};
+		// A cancel cut a pattern match short (`control::tick`): no status.
+		if crate::bash::vm::control::interrupted() {
+			if let Some(f) = vp.frames.last_mut() {
+				f.scratch = Some(sc);
+			}
+			return Flow::Block(crate::bash::event::WaitKey::Signal);
+		}
 		match res {
 			Ok(v) => {
 				report(k, cx, vp, line, chunks);

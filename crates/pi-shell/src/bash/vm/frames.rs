@@ -928,6 +928,8 @@ impl Shell {
 								probing: img.probing,
 								search: None,
 								input: img.input,
+								// Recounted from `input` when the probe resumes.
+								counted: (0, 0),
 								walk: None,
 								zsh: (!img.redir_more.is_empty()).then(|| {
 									Box::new(ScratchZsh { more: img.redir_more, ..ScratchZsh::default() })

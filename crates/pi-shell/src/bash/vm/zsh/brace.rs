@@ -336,7 +336,9 @@ pub fn xpandbraces(word: &[u8], braceccl: bool) -> Vec<Vec<u8>> {
 				rend -= (rend - rstart) % rincr;
 			}
 			let mut out = Vec::new();
-			while rend >= rstart {
+			// Unbounded, as zsh: a pending cancel stops it, and the caller
+			// discards the words (`expand::uninterrupted`).
+			while rend >= rstart && !crate::bash::vm::control::tick() {
 				let n = if rend < 0 {
 					format!("-{:0w$}", -rend, w = minw.saturating_sub(1))
 				} else {

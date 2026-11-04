@@ -103,6 +103,16 @@ impl From<StoreError> for Stop {
 
 pub type X<T> = Result<T, Stop>;
 
+/// `Err` when a cancel is pending for the vproc: work since the last check
+/// may have stopped early ([`super::control::tick`]), so its result must
+/// not be used. The op parks; the cancel ends the vproc at the next turn.
+pub fn uninterrupted() -> X<()> {
+	if super::control::interrupted() {
+		return Err(Stop::Wait(WaitKey::Signal));
+	}
+	Ok(())
+}
+
 /// A parameter's value before an operator applies.
 #[derive(Clone, Debug)]
 enum Val {
@@ -1317,6 +1327,7 @@ impl<'e, 'c> Expander<'e, 'c> {
 					let pat = self.pattern_text(unit, pat_word)?;
 					let pattern = self.compile(&pat)?;
 					if let Some(out) = self.with_scalar(p, |s| trim(s, &pattern, *suffix, *longest))? {
+						uninterrupted()?;
 						sink.value(&out, quoted);
 						return Ok(());
 					}
@@ -1328,6 +1339,7 @@ impl<'e, 'c> Expander<'e, 'c> {
 				let pat = self.pattern_text(unit, &unit.words[*pat as usize])?;
 				let pattern = self.compile(&pat)?;
 				let out = map_val(v, |s| trim(s, &pattern, *suffix, *longest));
+				uninterrupted()?;
 				self.push(sink, out, quoted, rhs)?;
 			},
 			OpIr::Replace { mode, pat, rep } => {
@@ -1347,6 +1359,7 @@ impl<'e, 'c> Expander<'e, 'c> {
 				let out = map_val(v, |s| {
 					replace(s, &pattern, pat.is_empty(), *mode, rep.as_ref().map(|r| r.as_slice()))
 				});
+				uninterrupted()?;
 				self.push(sink, out, quoted, rhs)?;
 			},
 			OpIr::Case { mode, all, pat } => {
@@ -1362,6 +1375,7 @@ impl<'e, 'c> Expander<'e, 'c> {
 					None => None,
 				};
 				let out = map_val(v, |s| case_convert(s, *mode, *all, pattern.as_deref()));
+				uninterrupted()?;
 				self.push(sink, out, quoted, rhs)?;
 			},
 			OpIr::Transform(op) => {
@@ -3708,6 +3722,8 @@ pub fn compound_string(
 		.engine
 		.text_unit(text, super::TextKind::Compound, mode)
 		.map_err(|e| Stop::Fail(Diag::Syntax { msg: e.msg }))?;
+	// Its brace expansions may have stopped early for a pending cancel.
+	uninterrupted()?;
 	let Some(Part::Compound(elems)) = unit.words.last().and_then(|w| w.parts.first()) else {
 		return Ok(Vec::new());
 	};
