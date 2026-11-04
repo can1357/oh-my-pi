@@ -260,7 +260,7 @@ fn rand48(ex: &mut Expander<'_, '_>, text: &[u8]) -> X<Number> {
 		}
 	}
 	let x = u64::from(seed[2]) << 32 | u64::from(seed[1]) << 16 | u64::from(seed[0]);
-	let x = 0x5_DEEC_E66D_u64.wrapping_mul(x).wrapping_add(0xB) & ((1 << 48) - 1);
+	let x = 0x5_deec_e66d_u64.wrapping_mul(x).wrapping_add(0xb) & ((1 << 48) - 1);
 	let ret = x as f64 / (1u64 << 48) as f64;
 	if !arg.is_empty() {
 		let out = format!("{:04x}{:04x}{:04x}", x & 0xffff, (x >> 16) & 0xffff, x >> 32);

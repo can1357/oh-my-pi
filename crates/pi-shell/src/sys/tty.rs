@@ -13,10 +13,9 @@ use std::io;
 
 use bstr::BString;
 
-use crate::bash::{OsHandle, Pty, SetWhen, Shtty, Terminal, Termios, TtyInfo};
-
 #[cfg(unix)]
 pub use self::unix::*;
+use crate::bash::{OsHandle, Pty, SetWhen, Shtty, Terminal, Termios, TtyInfo};
 
 #[cfg(unix)]
 mod unix {

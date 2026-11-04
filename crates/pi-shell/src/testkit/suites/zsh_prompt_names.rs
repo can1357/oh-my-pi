@@ -75,7 +75,8 @@ fn hash_d_lists_adds_and_removes() {
 	);
 	assert_eq!(
 		out,
-		"bar=/tmp/pn/h/proj\nfoo=/tmp/pn/w\nhash -d bar=/tmp/pn/h/proj\nhash -d foo=/tmp/pn/w\nfoo=/tmp/pn/w\nbar=/tmp/pn/h/proj\n0\n"
+		"bar=/tmp/pn/h/proj\nfoo=/tmp/pn/w\nhash -d bar=/tmp/pn/h/proj\nhash -d \
+		 foo=/tmp/pn/w\nfoo=/tmp/pn/w\nbar=/tmp/pn/h/proj\n0\n"
 	);
 	assert_eq!(err, "");
 	assert_eq!(st, 0);
@@ -89,7 +90,8 @@ fn hash_d_errors() {
 	assert_eq!(out, "1\n1\n1\nk=/l\n");
 	assert_eq!(
 		err,
-		"zsh:hash:1: invalid character in directory name: a b\nzsh:unhash:1: no such hash table element: nope\nzsh:hash:1: no such directory name: nope\n"
+		"zsh:hash:1: invalid character in directory name: a b\nzsh:unhash:1: no such hash table \
+		 element: nope\nzsh:hash:1: no such directory name: nope\n"
 	);
 	assert_eq!(st, 0);
 }
@@ -132,8 +134,10 @@ fn nameddirs_parameter_is_the_table() {
 
 #[test]
 fn parameters_name_directories_only_interactively() {
-	let (out, _, st) =
-		zsh("hash -d x=/tmp/pn/h/proj; foo=/tmp/pn/w; echo ~foo; hash -d; setopt autonamedirs; bar=/tmp/pn/w; hash -d");
+	let (out, _, st) = zsh(
+		"hash -d x=/tmp/pn/h/proj; foo=/tmp/pn/w; echo ~foo; hash -d; setopt autonamedirs; \
+		 bar=/tmp/pn/w; hash -d",
+	);
 	assert_eq!(out, "/tmp/pn/w\nx=/tmp/pn/h/proj\nx=/tmp/pn/h/proj\n");
 	assert_eq!(st, 0);
 }
@@ -155,7 +159,9 @@ fn attributes_for_xterm_256color() {
 	);
 	assert_eq!(
 		out,
-		"\x1b[1mb\x1b[0mx\x1b[4mu\x1b[24ms\x1b[7ms\x1b[27mk\x1b[31mr\x1b[39m\x1b[44mb\x1b[49m\x1b[38;5;123mn\x1b[39m\x1b[38;2;255;0;0mt\x1b[39m\x1b[38;2;255;0;0mt\x1b[K\x1b[1m\n\x1b[1m\x1b[38;2;255;0;0m\x1b[32mx\x1b[0m\x1b[38;2;0;0;2m\x1b[39m\n\x1b[4m\n\x1b[0m\x1b[4my\n"
+		"\x1b[1mb\x1b[0mx\x1b[4mu\x1b[24ms\x1b[7ms\x1b[27mk\x1b[31mr\x1b[39m\x1b[44mb\x1b[49m\\
+		 x1b[38;5;123mn\x1b[39m\x1b[38;2;255;0;0mt\x1b[39m\x1b[38;2;255;0;0mt\x1b[K\x1b[1m\n\x1b[1m\\
+		 x1b[38;2;255;0;0m\x1b[32mx\x1b[0m\x1b[38;2;0;0;2m\x1b[39m\n\x1b[4m\n\x1b[0m\x1b[4my\n"
 	);
 	assert_eq!(st, 0);
 }
@@ -167,7 +173,8 @@ fn attributes_for_dumb() {
 	);
 	assert_eq!(
 		out,
-		"bxussk\x1b[31mr\x1b[39m\x1b[44mb\x1b[49m\x1b[3123mn\x1b[39m\x1b[38;2;255;0;0mt\x1b[39m\x1b[38;2;255;0;0mt\x1b[1m\n\x1b[32mx\x1b[39m\n\ny\n"
+		"bxussk\x1b[31mr\x1b[39m\x1b[44mb\x1b[49m\x1b[3123mn\x1b[39m\x1b[38;2;255;0;0mt\x1b[39m\\
+		 x1b[38;2;255;0;0mt\x1b[1m\n\x1b[32mx\x1b[39m\n\ny\n"
 	);
 	assert_eq!(st, 0);
 }
@@ -175,11 +182,13 @@ fn attributes_for_dumb() {
 #[test]
 fn bookmarks_file_registers_named_directories() {
 	let (out, err, st) = zsh(
-		"source ~/.dotfiles/zsh/22-bookmarks.zsh; echo st=$?; hash -d; cd ~/.dotfiles/zsh; print -P %~; cd ~dl; print -P '%~ %d'",
+		"source ~/.dotfiles/zsh/22-bookmarks.zsh; echo st=$?; hash -d; cd ~/.dotfiles/zsh; print -P \
+		 %~; cd ~dl; print -P '%~ %d'",
 	);
 	assert_eq!(
 		out,
-		"st=0\ncfg=/tmp/pn/h/.config\ndl=/tmp/pn/h/Downloads\ndot=/tmp/pn/h/.dotfiles\n~dot/zsh\n~dl /tmp/pn/h/Downloads\n"
+		"st=0\ncfg=/tmp/pn/h/.config\ndl=/tmp/pn/h/Downloads\ndot=/tmp/pn/h/.dotfiles\n~dot/zsh\\
+		 n~dl /tmp/pn/h/Downloads\n"
 	);
 	assert_eq!(err, "");
 	assert_eq!(st, 0);
@@ -188,7 +197,9 @@ fn bookmarks_file_registers_named_directories() {
 #[test]
 fn zsh_directory_name_hook_names_and_finds_directories() {
 	let (out, err, st) = zsh(
-		"zsh_directory_name() { if [[ $1 = n && $2 = foo ]]; then reply=(/tmp/pn/w); return 0; fi; if [[ $1 = d && $2 = /tmp/pn/w* ]]; then reply=(ww 9); return 0; fi; return 1; }; echo ~[foo]/x; cd /tmp/pn/w; print -P %~; echo ${(D)PWD}; echo ~[bar]; echo after",
+		"zsh_directory_name() { if [[ $1 = n && $2 = foo ]]; then reply=(/tmp/pn/w); return 0; fi; \
+		 if [[ $1 = d && $2 = /tmp/pn/w* ]]; then reply=(ww 9); return 0; fi; return 1; }; echo \
+		 ~[foo]/x; cd /tmp/pn/w; print -P %~; echo ${(D)PWD}; echo ~[bar]; echo after",
 	);
 	assert_eq!(out, "/tmp/pn/w/x\n~[ww]\n~[ww]\n");
 	assert_eq!(err, "zsh:1: no directory expansion: ~[bar]\n");
@@ -211,11 +222,13 @@ fn bash_prompt_escapes() {
 #[test]
 fn startup_parameters() {
 	let (out, _, st) = zsh(
-		"typeset -p TIMEFMT MAILCHECK; echo ${signals[1]} ${signals[-2]} ${signals[-1]} $+HOST $+MACHTYPE $+VENDOR $+OSTYPE $+CPUTYPE $+TTY",
+		"typeset -p TIMEFMT MAILCHECK; echo ${signals[1]} ${signals[-2]} ${signals[-1]} $+HOST \
+		 $+MACHTYPE $+VENDOR $+OSTYPE $+CPUTYPE $+TTY",
 	);
 	assert_eq!(
 		out,
-		"typeset TIMEFMT='%J  %U user %S system %P cpu %*E total'\ntypeset -i MAILCHECK=60\nEXIT ZERR DEBUG 1 1 1 1 1 1\n"
+		"typeset TIMEFMT='%J  %U user %S system %P cpu %*E total'\ntypeset -i MAILCHECK=60\nEXIT \
+		 ZERR DEBUG 1 1 1 1 1 1\n"
 	);
 	assert_eq!(st, 0);
 }

@@ -9,6 +9,8 @@
 //! obash's own options (before bash's):
 //! --events=jsonl        write every event as a JSON line
 //! --events-out=PATH     write the events to PATH instead of stderr
+//! --trace=PATH          write the run trace (the `ShellTrace` JSON the bash
+//!                       tool's live view draws) to PATH at exit
 //! --fault=SEED:K        inject faults (see --fault-mode); a snapshot that
 //!                       would lose externals in flight or open OS handles is
 //!                       not restored unless PI_SHELL_FAULT_LOST=restore
@@ -50,14 +52,15 @@ use std::{
 	fs,
 	io::{self, BufWriter, Write},
 	path::PathBuf,
+	sync::Arc,
 };
 
 use bstr::BString;
 use clap::Parser;
 use pi_shell::{
 	bash::{
-		Cx, Engine, EngineConfig, EventMask, MemStore, ModeId, Origin, RestoreOpts, Script, Shell,
-		ir, syntax::Features,
+		Cx, Engine, EngineConfig, EventMask, EventSink, MemStore, ModeId, Origin, RestoreOpts,
+		Script, Shell, ir, syntax::Features, trace::RunTrace,
 	},
 	process::{self, Input, Launch, NativeHost, ProcessOptions, Start},
 };
@@ -79,6 +82,9 @@ struct Cli {
 	/// Event destination (default: stderr).
 	#[arg(long, value_name = "PATH")]
 	events_out:   Option<PathBuf>,
+	/// Write the run trace (`ShellTrace` JSON) to PATH at exit.
+	#[arg(long, value_name = "PATH")]
+	trace:        Option<PathBuf>,
 	/// Fault injection: `--fault=SEED:K`, `--fault-mode=step|pause|exec`.
 	#[command(flatten)]
 	fault:        fault::FaultArgs,
@@ -108,6 +114,7 @@ const OBASH_FLAGS: &[&str] = &["--ir", "--print", "--supported"];
 const OBASH_WITH_VALUE: &[&str] = &[
 	"--events",
 	"--events-out",
+	"--trace",
 	"--fault",
 	"--fault-mode",
 	"--fault-resume",
@@ -338,20 +345,31 @@ fn run(cli: &Cli, launch: Launch, modes: EnvModes) -> Result<i32, Box<dyn std::e
 	env.retain(|(k, _)| k.as_slice() != fault::FAULT_DEPTH.as_bytes());
 	env.push((BString::from(fault::FAULT_DEPTH), BString::from((depth + 1).to_string())));
 	let Input { source, origin, argv0, args: params } = input;
+	let trace = cli
+		.trace
+		.as_ref()
+		.map(|_| Arc::new(RunTrace::new(source.clone())));
 	let init = process::shell_init(&args, argv0, params, env, process::current_dir());
 	// Without an event sink nothing observes events: skip building them (each
 	// one reads the clock).
-	let mask = if cli.events.is_some() {
+	let mut mask = if cli.events.is_some() {
 		EventMask::DEFAULT
 	} else {
 		EventMask::NONE
 	};
+	if let Some(trace) = &trace {
+		mask = EventMask::from_bits(mask.bits() | trace.mask().bits());
+		host.set_event_sink(Some(Arc::clone(trace) as Arc<dyn EventSink>));
+	}
 	let mut shell = Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, init)?;
 	host.bind_signals(shell.control(), pi_shell::bash::Vpid(cfg.vpid_base));
 	shell.set_event_mask(mask);
 	let run = shell.submit(Script { origin, ..Script::command(source) });
 	let status = injector.drive(fault::Parts { cfg, host, store, shell, run, mask });
 	injector.finish();
+	if let (Some(path), Some(trace)) = (&cli.trace, &trace) {
+		fs::write(path, trace.snapshot_json())?;
+	}
 	Ok(status?)
 }
 
@@ -398,6 +416,7 @@ impl Cli {
 	const fn testing(&self) -> bool {
 		self.events.is_some()
 			|| self.events_out.is_some()
+			|| self.trace.is_some()
 			|| self.fault.fault.is_some()
 			|| self.fault.fault_mode.is_some()
 			|| self.fault.fault_resume.is_some()
