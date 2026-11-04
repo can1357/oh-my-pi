@@ -145,8 +145,8 @@ Register shortcuts in the extension factory; omp binds them before `session_star
 `getShortcutConflict(chord)` returns `undefined` for a free chord, otherwise the first holder of:
 
 - `{ kind: "reserved" }`: omp keeps the chord (see [Constraints and pitfalls](#constraints-and-pitfalls)); a shortcut on it is never bound.
-- `{ kind: "keybinding", keybindings }`: `app.*` actions bound to it (Ctrl+Enter counts for approve and follow-up when their bindings are emptied). Where those actions apply, they usually take the key first.
-- `{ kind: "extension", extensionPath }`: another extension's shortcut; only one of them runs.
+- `{ kind: "keybinding", keybindings }`: keymap actions bound to it in the editor (Ctrl+Enter counts for approve and follow-up when their bindings are emptied). `app.*` actions usually take the key first where they apply; editing keys (`tui.editor.*`, `tui.input.*`, e.g. `alt+y` yank-pop) lose it to the shortcut.
+- `{ kind: "extension", extensionPath }`: another extension's shortcut. When several extensions register one chord, in any spelling, only the last one loaded is bound.
 
 Chords compare as the TUI matches them: `alt+ctrl+x` is `ctrl+alt+x`, and `?` also covers `shift+?`. The caller's own registrations don't count. Keybindings come from the session's TUI keymap, user remaps included; sessions without a TUI (print, RPC, ACP, SDK) use omp's defaults.
 

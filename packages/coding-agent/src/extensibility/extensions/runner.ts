@@ -25,8 +25,8 @@ import {
 	markPerCallContextMessage,
 	setContextHistoryIndex,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { addKeyAliases, canonicalKeyId, type KeyId } from "@oh-my-pi/pi-tui";
-import { type AppKeybinding, KEYBINDINGS, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { addKeyAliases, canonicalKeyId, type KeyId, type Keybinding } from "@oh-my-pi/pi-tui";
+import { KEYBINDINGS, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appApproveKeys, appFollowUpKeys } from "@oh-my-pi/pi-tui/keybinding-matchers";
 import { logger } from "@oh-my-pi/pi-utils";
 import { refreshShellConfigCache } from "@oh-my-pi/pi-utils/procmgr";
@@ -1384,8 +1384,12 @@ export class ExtensionRunner {
 		].map(canonicalKeyId),
 	);
 
-	static readonly #APP_KEYBINDINGS: readonly AppKeybinding[] = Object.keys(KEYBINDINGS).filter(
-		(id): id is AppKeybinding => id.startsWith("app."),
+	/**
+	 * Keymap actions the main editor answers to, where extension shortcuts are bound: app actions,
+	 * and the editing and input keys a shortcut on the same chord would take over.
+	 */
+	static readonly #EDITOR_KEYBINDINGS: readonly Keybinding[] = (Object.keys(KEYBINDINGS) as Keybinding[]).filter(
+		id => id.startsWith("app.") || id.startsWith("tui.editor.") || id.startsWith("tui.input."),
 	);
 
 	/** Default keymap for sessions without a TUI (print, RPC, ACP, SDK). */
@@ -1406,7 +1410,7 @@ export class ExtensionRunner {
 		};
 		const keymap = this.#keybindings ?? (ExtensionRunner.#defaultKeybindings ??= KeybindingsManager.inMemory());
 		// Approve and follow-up fall back to Ctrl+Enter when unbound; everything else is its bound keys.
-		const keybindings = ExtensionRunner.#APP_KEYBINDINGS.filter(action =>
+		const keybindings = ExtensionRunner.#EDITOR_KEYBINDINGS.filter(action =>
 			holds(
 				action === "app.approval.approve"
 					? appApproveKeys(keymap)
@@ -1416,13 +1420,16 @@ export class ExtensionRunner {
 			),
 		);
 		if (keybindings.length > 0) return { kind: "keybinding", keybindings };
-		// `getShortcuts` lets the last registration win; report that one.
+		// `getShortcuts` binds the last registration of a chord in any spelling; report that one.
 		const holder = this.extensions.findLast(ext => ext.path !== extensionPath && holds(ext.shortcuts.keys()));
 		return holder ? { kind: "extension", extensionPath: holder.path } : undefined;
 	}
 
 	getShortcuts(): Map<KeyId, ExtensionShortcut> {
 		const allShortcuts = new Map<KeyId, ExtensionShortcut>();
+		// Each match key (alias) to the registration holding it: a later registration of the same chord,
+		// in any spelling, replaces the earlier one, so the editor binds exactly one handler per chord.
+		const holders = new Map<string, KeyId>();
 		for (const ext of this.extensions) {
 			for (const [key, shortcut] of ext.shortcuts) {
 				const normalizedKey = key.toLowerCase() as KeyId;
@@ -1435,14 +1442,20 @@ export class ExtensionRunner {
 					continue;
 				}
 
-				const existing = allShortcuts.get(normalizedKey);
-				if (existing) {
+				const aliases = new Set<string>();
+				addKeyAliases(aliases, normalizedKey);
+				for (const alias of aliases) {
+					const held = holders.get(alias);
+					const existing = held === undefined ? undefined : allShortcuts.get(held);
+					if (held === undefined || existing === undefined) continue;
 					logger.warn("Extension shortcut conflict", {
 						key,
 						extensionPath: shortcut.extensionPath,
 						existingExtensionPath: existing.extensionPath,
 					});
+					allShortcuts.delete(held);
 				}
+				for (const alias of aliases) holders.set(alias, normalizedKey);
 				allShortcuts.set(normalizedKey, shortcut);
 			}
 		}
