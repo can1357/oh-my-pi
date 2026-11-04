@@ -144,9 +144,10 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			const refreshSignal =
 				refreshDeadline && signal ? AbortSignal.any([signal, refreshDeadline]) : (refreshDeadline ?? signal);
 			// The refresh is raced, not trusted: client creation and connection
-			// setup do not all observe the signal, so the wait stops waiting on
-			// the refresh at the deadline or an abort and lets it finish on its
-			// own (it only updates service tracking).
+			// setup do not observe the signal, so the wait stops waiting on the
+			// refresh at the deadline or an abort. The abandoned refresh checks
+			// the aborted signal once each of those steps ends and stops there,
+			// before it subscribes the session or changes its service tracking.
 			const refresh = listServicesTolerant(this.session, refreshSignal).then(
 				() => undefined,
 				(error: unknown) => ({ error }),

@@ -593,5 +593,48 @@ describe("wait", () => {
 				release.reject(new Error("broker gave up"));
 			});
 		}
+
+		test("a refresh the deadline abandoned does not subscribe the session once its broker client arrives", async () => {
+			// Client creation does not observe the signal, so the deadline can win
+			// while it is pending, and the caller may dispose the session after the
+			// call returns. The late refresh must not register a completion sink
+			// for it with the process-shared broker client. Real time here: the
+			// refresh's deadline is an AbortSignal.timeout, which fake timers do
+			// not drive.
+			registerMain();
+			const client = Promise.withResolvers<DaemonBrokerClient>();
+			vi.spyOn(daemonClient, "daemonClientForProject").mockReturnValue(client.promise);
+			const listServicesTolerant = servicesModule.listServicesTolerant;
+			let abandoned: Promise<unknown> | undefined;
+			vi.spyOn(servicesModule, "listServicesTolerant").mockImplementation((refreshed, signal) => {
+				const refresh = listServicesTolerant(refreshed, signal);
+				abandoned = refresh;
+				return refresh;
+			});
+			const subscribed: string[] = [];
+			const broker = {
+				request: async (_operation: unknown, signal?: AbortSignal) => {
+					if (signal?.aborted) throw new Error("Daemon broker request aborted");
+					return { op: "list", daemons: [] };
+				},
+				onCompletion: (owner: string) => {
+					subscribed.push(owner);
+					return () => {};
+				},
+			} as unknown as DaemonBrokerClient;
+			const disposeCallbacks: Array<() => void> = [];
+			const caller = {
+				...session(undefined, "Main", true),
+				registerDisposeCallback: (callback: () => void) => disposeCallbacks.push(callback),
+			} as unknown as ToolSession;
+			const result = await new WaitTool(caller).execute("abandoned-refresh", { timeout: 1 });
+			expect(result.content[0]).toMatchObject({ text: expect.stringContaining("Deadline reached") });
+			// The caller disposes the session; then client creation completes.
+			for (const callback of disposeCallbacks.splice(0)) callback();
+			client.resolve(broker);
+			await abandoned?.catch(() => undefined);
+			expect(subscribed).toEqual([]);
+			expect(disposeCallbacks).toEqual([]);
+		});
 	});
 });

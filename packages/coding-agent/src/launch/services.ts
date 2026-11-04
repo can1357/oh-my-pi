@@ -113,6 +113,11 @@ async function request(
 	signal?: AbortSignal,
 ): Promise<DaemonRpcResult> {
 	const client = await daemonClientForProject(session.cwd);
+	// Client creation does not observe `signal`. A caller that stopped waiting
+	// meanwhile (a `wait` past its deadline) may have disposed the session:
+	// subscribing it now would leave the shared client a completion sink for
+	// a dead session.
+	if (signal?.aborted) throw new Error("Daemon broker request aborted");
 	subscribe(session, client);
 	const result = await client.request(operation, signal);
 	if (result.op === "list") {
