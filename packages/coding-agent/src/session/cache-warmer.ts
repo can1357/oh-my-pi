@@ -267,11 +267,13 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
 /**
  * Tier a completed response actually wrote, from the provider's per-TTL
  * cache-write breakdown (Anthropic `usage.cache_creation`). Undefined when the
- * response wrote nothing or the provider does not report the split.
+ * response wrote nothing or the provider does not report the split. A response
+ * that wrote both is short: a refresh replays the whole request, so it must
+ * keep the 5-minute part alive.
  */
 export function observedPromptCacheTier(usage: Usage): PromptCacheTier | undefined {
-	if ((usage.cttl?.ephemeral1h ?? 0) > 0) return "long";
 	if ((usage.cttl?.ephemeral5m ?? 0) > 0) return "short";
+	if ((usage.cttl?.ephemeral1h ?? 0) > 0) return "long";
 	return undefined;
 }
 
@@ -471,7 +473,7 @@ interface TrackedCacheEntry {
 	touchedAt: number;
 	change: () => PromptCacheChange | undefined;
 	refreshMissed?: boolean;
-	/** False until the provider sent the request (its dispatch hook ran or a response arrived): no entry exists yet. */
+	/** False until the provider sent the request (its dispatch hook ran or its stream started): no entry exists yet. */
 	sent?: boolean;
 	promptTokens?: number;
 }
@@ -700,11 +702,17 @@ export class CacheWarmer {
 		const pending = this.#pendingEntry;
 		if (pending && answers(message, pending.model)) {
 			this.#pendingEntry = undefined;
-			pending.sent = true;
-			if (message.stopReason !== "error" && (message.usage.cacheRead > 0 || message.usage.cacheWrite > 0)) {
+			const cached = message.usage.cacheRead > 0 || message.usage.cacheWrite > 0;
+			if (message.stopReason !== "error" && cached) {
 				if (observed !== undefined) pending.tier = observed;
 				pending.promptTokens = promptTokensOf(message.usage);
 				this.#entry = pending;
+			}
+			// A request that failed without reading or writing the cache (a hook that rejected before the
+			// send, a refused request) left nothing to keep warm.
+			if (!cached && (message.stopReason === "error" || message.stopReason === "aborted")) {
+				if (this.#run?.entry === pending) this.#stop("request failed before writing the cache");
+				return;
 			}
 		}
 		const run = this.#run;
@@ -721,6 +729,16 @@ export class CacheWarmer {
 		run.tier = observed;
 		run.delayMs = delayMs;
 		this.#schedule(run);
+	}
+
+	/**
+	 * The armed request's provider stream produced its first event, so the request left even when its
+	 * transport reported no payload (pi-native). Its lifetime keeps counting from the dispatch hook or the
+	 * arming; this only lets a refresh that comes due go out.
+	 */
+	onRequestStarted(): void {
+		if (this.#pendingEntry?.sent === false) this.#pendingEntry.sent = true;
+		if (this.#run?.entry.sent === false) this.#run.entry.sent = true;
 	}
 
 	onAgentSettled(): void {

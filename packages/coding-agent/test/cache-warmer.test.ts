@@ -591,6 +591,37 @@ describe("cache warmer lifecycle", () => {
 		h.warmer.cancel();
 	});
 
+	test("refreshes a request whose transport reports no payload once its stream has started", async () => {
+		// pi-native: the gateway builds the provider request, so no dispatch hook runs; the stream's first
+		// event shows the request left.
+		const h = harness();
+		h.warmer.start({ model: makeModel(), context: { messages: [] }, options: {} }, () => change(h));
+		h.warmer.onRequestStarted();
+		await advance(SHORT_DELAY_MS);
+		expect(h.replays).toHaveLength(1);
+		h.warmer.cancel();
+	});
+
+	test("stops when the request failed before reading or writing the cache", async () => {
+		const h = harness();
+		h.warmer.start({ model: makeModel(), context: { messages: [] }, options: {} }, () => change(h));
+		// A payload hook rejected before the send; the agent loop still reports the error as a message.
+		h.warmer.onRequestStarted();
+		h.warmer.onResponse(makeMessage(makeUsage({}), "error"));
+		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "request failed before writing the cache" });
+		await advance(SHORT_DELAY_MS);
+		expect(h.replays).toHaveLength(0);
+	});
+
+	test("keeps the 5-minute part warm when a response wrote both lifetimes", async () => {
+		const h = harness();
+		start(h, { cacheRetention: "long" })(LONG_PAYLOAD);
+		h.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 800, cttl: { ephemeral5m: 300, ephemeral1h: 500 } })));
+		await advance(SHORT_DELAY_MS);
+		expect(h.replays).toHaveLength(1);
+		h.warmer.cancel();
+	});
+
 	test("keeps warming a short entry when the estimated long lifetime passes the warming window", async () => {
 		// A 24h long lifetime would schedule the first refresh past the one-hour limit; the payload shows 5 minutes.
 		const h = harness();

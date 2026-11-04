@@ -4554,6 +4554,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// land in one tick its handler can run before this handler's post-emit
 		// bookkeeping — leaving maintenance looking at the previous (e.g.
 		// toolUse) assistant message and skipping settle-only work.
+		// The provider's first event means the request left, even on a transport that reports no
+		// payload (pi-native): the warmer may refresh it from now on.
+		if (event.type === "message_start" && event.message.role === "assistant") this.#cacheWarmer?.onRequestStarted();
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			this.#lastAssistantMessage = event.message;
 			for (const block of event.message.content) {
