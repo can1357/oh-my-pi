@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- A schema of a specific type is now always assignable to the schema of a supertype (`Type<{ id: number }>` to `Type<unknown>`, so to `TSchema` and through `Static`). Before, whether TypeScript accepted it depended on the order it met the comparisons, so the same code type-checked in one program and failed in another. `keyof()` now reads its keys from the schema it is called on; called detached (`bind`, `call`) it gives any property key instead of the exact keys ([#17898](https://github.com/can1357/oh-my-pi/pull/17898) by [@sjawhar](https://github.com/sjawhar))
+- Schemas are consistently assignable to schemas of their declared supertypes ([#17898](https://github.com/can1357/oh-my-pi/pull/17898) by [@sjawhar](https://github.com/sjawhar))
 - Exported schemas, schema factories, and fluent members can be included in consumers' generated TypeScript declarations ([#17898](https://github.com/can1357/oh-my-pi/pull/17898) by [@sjawhar](https://github.com/sjawhar))
 ### Breaking Changes
 
