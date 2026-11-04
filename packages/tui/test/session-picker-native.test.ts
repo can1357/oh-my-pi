@@ -8,6 +8,7 @@ import { type SessionSelectorEntry, SessionSelectorComponent } from "../src/over
 import { initTheme } from "../src/theme";
 import { KeybindingsManager } from "../src/app-keybindings";
 import { getKeybindings, setKeybindings } from "../src/keybindings";
+import { sanitizeDisplayLine } from "../src/overlays/extensions/display-text";
 
 const withPicker: DescribeContext = {
 	cols: 120,
@@ -534,6 +535,80 @@ describe("session selector rename", () => {
 
 		finishGenerate("Late Title");
 		await pendingPromise;
+	});
+
+	it("preserves edits made while title generation is in flight", async () => {
+		const renamed = { calls: [] as RenameCall[] };
+		const { promise: titlePromise, resolve: finishGenerate } = Promise.withResolvers<string>();
+		const { selector, beta } = makeRename(renamed, {
+			onGenerateTitle: async (_s, signal) => {
+				expect(signal.aborted).toBe(false);
+				return titlePromise;
+			},
+		});
+
+		selector.handleInput("\x1bOQ");
+		const opened = renameDialogOf(selector);
+		expect(opened).toBeDefined();
+		expect(opened!.field.getValue()).toBe(beta.title ?? "");
+
+		selector.handleInput("\x1bt");
+
+		const { promise: generationSettled, resolve: onSettledRender } = Promise.withResolvers<void>();
+		selector.setOnRequestRender(() => {
+			onSettledRender();
+		});
+
+		type(selector, " manual edit");
+		expect(opened!.field.getValue()).toBe("Beta manual edit");
+
+		finishGenerate("Auto Generated Beta");
+		await generationSettled;
+
+		expect(opened!.field.getValue()).toBe("Beta manual edit");
+
+		const updated = renderedWhen(
+			selector,
+			p => p.items?.find(item => item.id === beta.path)?.label === "Beta manual edit",
+		);
+		selector.handleInput("\r");
+		await updated;
+
+		expect(renamed.calls).toEqual([{ id: "b", title: "Beta manual edit" }]);
+		expect(renameDialogOf(selector)).toBeUndefined();
+	});
+
+	it("sanitizes generated titles containing newlines, tabs, and escape sequences", async () => {
+		const renamed = { calls: [] as RenameCall[] };
+		const { promise: titlePromise, resolve: finishGenerate } = Promise.withResolvers<string>();
+		const { selector } = makeRename(renamed, {
+			onGenerateTitle: async () => titlePromise,
+		});
+
+		selector.handleInput("\x1bOQ");
+		const opened = renameDialogOf(selector);
+		expect(opened).toBeDefined();
+
+		const dirtyTitle = "\x1b[31m  Sanitized\tTitle\r\nwith newline  \x1b[0m";
+		const expectedClean = sanitizeDisplayLine(dirtyTitle);
+
+		const { promise: renderedGeneration, resolve: onGeneratedRender } = Promise.withResolvers<void>();
+		selector.setOnRequestRender(() => {
+			if (opened?.field.getValue() === expectedClean) {
+				onGeneratedRender();
+			}
+		});
+
+		selector.handleInput("\x1bt");
+		finishGenerate(dirtyTitle);
+		await renderedGeneration;
+
+		expect(opened!.field.getValue()).toBe(expectedClean);
+		expect(opened!.field.getValue()).toBe("Sanitized   Title with newline");
+		expect(opened!.field.getValue()).not.toContain("\x1b");
+		expect(opened!.field.getValue()).not.toContain("\n");
+		expect(opened!.field.getValue()).not.toContain("\r");
+		expect(opened!.field.getValue()).not.toContain("\t");
 	});
 });
 

@@ -27,7 +27,6 @@
 - `unwrapHashlineHeaderPath` is exported from `@oh-my-pi/pi-coding-agent`, turning a `[path#TAG]` write/edit target into its plain path ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
 - The `devin-cli` login imports Devin CLI credentials into a stored `devin` account, so the provider no longer requires `DEVIN_API_KEY` ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - The `devin-windsurf` login lets Windsurf Enterprise users authenticate the `devin` provider with their existing Windsurf account ([#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-- Pressing `Alt+T` (`app.session.generateTitle`, remappable) inside the resume picker's F2 rename dialog fills the input with a suggested title generated from the session's transcript, keeping or naming its title card like `/rename` (by [@SuperUserA](https://github.com/SuperUserA))
 - Pressing `Alt+T` (`app.session.generateTitle`, remappable) inside the resume picker's F2 rename dialog fills the input with a suggested title generated from the session's transcript, keeping or naming its title card like `/rename` ([#18025](https://github.com/can1357/oh-my-pi/pull/18025) by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Fixed
@@ -80,7 +79,9 @@
 - Factory Droid Gemini 4 Argon sessions keep its earlier turns intact through save and reload, and the image clamp counts those turns at the size Argon is sent ([#17861](https://github.com/can1357/oh-my-pi/pull/17861) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
+
 - A grouped `read` row that names a URL links the whole URL instead of only its last path segment, so a click anywhere on the visible URL opens it; the row's last `/` no longer splits it into a dim prefix and a linked tail ([#18071](https://github.com/can1357/oh-my-pi/pull/18071) by [@iacore](https://github.com/iacore))
+
 - Fixed a second `ask` note on a later single-select question reopening and replacing the previous question's note ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
 - Fixed the first run of a compiled binary after an install or upgrade keeping every subagent on the main thread and failing `omp --smoke-test` with `SubagentCodeChangedError` for the native addon it had just extracted ([#18060](https://github.com/can1357/oh-my-pi/issues/18060))
 

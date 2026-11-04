@@ -34,6 +34,7 @@ import { theme } from "../theme/theme";
 import { contentRowWidth } from "../chrome/selector-helpers";
 import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { getKeybindings } from "../keybindings";
+import { sanitizeDisplayLine } from "./extensions/display-text";
 /** Session lifecycle status presented by the picker. */
 export type SessionSelectorStatus = "complete" | "interrupted" | "aborted" | "error" | "pending" | "unknown";
 
@@ -1984,6 +1985,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 			? () => {
 					const generateTitle = this.#onGenerateTitle;
 					if (!generateTitle || pending || generating) return;
+					const startValue = field.getValue();
 					generating = true;
 					this.#renameAbort?.abort();
 					const abort = new AbortController();
@@ -1997,9 +1999,11 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 						.then(generated => {
 							if (abort.signal.aborted || this.#renameDialog !== owner) return;
 							this.#clearError();
-							const trimmed = generated?.trim();
-							if (trimmed) {
-								field.setValue(trimmed);
+							const clean = generated ? sanitizeDisplayLine(generated) : "";
+							if (clean) {
+								if (field.getValue() === startValue) {
+									field.setValue(clean);
+								}
 							} else {
 								this.#showError("Could not generate a title for this session.");
 							}
