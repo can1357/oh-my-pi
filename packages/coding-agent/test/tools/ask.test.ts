@@ -1612,6 +1612,39 @@ describe("askToolRenderer question layout", () => {
 		}
 	});
 
+	it("wraps a tag wider than the row under its indent, without a blank row", () => {
+		const id = "which-database-should-the-new-billing-service-use-in-production";
+		const rendered = askToolRenderer.renderCall(
+			{ questions: [{ id, question: "Short?", options: [{ label: "A" }] }, questions[1]] },
+			{ expanded: true, isPartial: false },
+			darkTheme,
+		);
+		const lines = stripAnsi(rendered.render(60).join("\n")).split("\n");
+		const question = lines.findIndex(line => line.includes("Short?"));
+		expect(lines[question + 1]).toStartWith("│  (which-database");
+		expect(lines[question + 2]).toMatch(/^│ {2}\S/);
+		expect(lines.slice(question + 1, question + 3).join("")).toContain("1 option)");
+	});
+
+	it("keeps a model-supplied id with a newline on one row of the header and the tag", () => {
+		const broken = { id: "db\nchoice", question: "Which database?", options: [{ label: "Postgres" }] };
+		const lone = stripAnsi(
+			askToolRenderer
+				.renderCall({ questions: [broken] }, { expanded: true, isPartial: false }, darkTheme)
+				.render(100)
+				.join("\n"),
+		).split("\n");
+		expect(lone[0]).toContain("Ask: db choice");
+		expect(lone[1]).toStartWith("│");
+		const multi = stripAnsi(
+			askToolRenderer
+				.renderCall({ questions: [broken, questions[1]] }, { expanded: true, isPartial: false }, darkTheme)
+				.render(100)
+				.join("\n"),
+		);
+		expect(multi).toContain("Which database? (db choice · 1 option)");
+	});
+
 	it("names a lone question by its id and counts its options in the footer", () => {
 		const rendered = askToolRenderer.renderCall(
 			{ questions: [questions[0]] },

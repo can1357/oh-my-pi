@@ -259,8 +259,10 @@ interface QuestionTag {
 
 function questionTag(uiTheme: Theme, question: string, id: string, flags: readonly string[]): QuestionTag {
 	const lastBlock = lexDocument(question).findLast(token => token.type !== "space");
+	// Ids are model-supplied: a newline or tab would split or hole the row.
+	const label = replaceTabs(id.replace(/\n+/g, " "));
 	return {
-		text: uiTheme.fg("dim", `(${[id, ...flags].join(uiTheme.sep.dot)})`),
+		text: uiTheme.fg("dim", `(${[label, ...flags].join(uiTheme.sep.dot)})`),
 		afterText: lastBlock?.type === "paragraph",
 	};
 }
@@ -274,13 +276,16 @@ function appendQuestionTag(lines: readonly string[], tag: QuestionTag, contentWi
 	// Markdown pads each row to the full width; the tag follows the text, not the padding.
 	const last = lines.at(-1)?.trimEnd() ?? "";
 	const fits = last.trim() !== "" && visibleWidth(last) + 1 + visibleWidth(tag.text) <= contentWidth;
-	if (!tag.afterText || !fits) return [...lines, ` ${tag.text}`];
+	// A tag wider than the row wraps under its own one-column indent.
+	if (!tag.afterText || !fits) return [...lines, ...wrapPrefixedLine(" ", " ", tag.text, contentWidth)];
 	return [...lines.slice(0, -1), `${last} ${tag.text}`];
 }
 
-/** Header subject: the lone question's id, or the question count. */
+/** Header subject: the lone question's id on one row, or the question count. */
 function askSubject(questions: readonly { id: string }[]): string {
-	return questions.length === 1 ? questions[0].id : formatCount("question", questions.length);
+	return questions.length === 1
+		? replaceTabs(questions[0].id.replace(/\n+/g, " "))
+		: formatCount("question", questions.length);
 }
 
 /**
