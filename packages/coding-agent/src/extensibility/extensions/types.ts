@@ -2062,7 +2062,9 @@ export interface ExtensionAPI {
 	 * tool activity. A focused subagent, a collab guest and the transcript overlays draw stock
 	 * cards. Display only: the session, exports and model context are unchanged. Returns a
 	 * disposer that removes the presenter. Presenters run synchronously while the transcript draws,
-	 * so keep them cheap. Interactive mode only; elsewhere the presenter is registered but never asked.
+	 * so keep them cheap. Interactive mode only, and only while the
+	 * `extensionRenderers.transcriptPresenters` setting is on; elsewhere the presenter is registered
+	 * but never asked.
 	 */
 	registerTranscriptPresenter(presenter: TranscriptPresenter): () => void;
 

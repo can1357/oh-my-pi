@@ -116,7 +116,11 @@ import type {
 	UserPythonEventResult,
 } from "./types";
 
-import { cfgExtensionAssistantTextRenderers, cfgExtensionHandlersToolCallTimeoutMs } from "../settings";
+import {
+	cfgExtensionAssistantTextRenderers,
+	cfgExtensionHandlersToolCallTimeoutMs,
+	cfgExtensionTranscriptPresenters,
+} from "../settings";
 
 /** Combined result from all before_agent_start handlers */
 interface BeforeAgentStartCombinedResult {
@@ -1525,11 +1529,13 @@ export class ExtensionRunner {
 	}
 
 	/**
-	 * Transcript presenters in extension load order, skipping suspended extensions. Each answers
-	 * plain data read inside its guard (see `readTranscriptPresentation`), or `"full"` when it throws
-	 * or answers something else, reporting its first such failure through {@link emitError}.
+	 * Transcript presenters in extension load order, skipping suspended extensions; none while
+	 * `extensionRenderers.transcriptPresenters` is off. Each answers plain data read inside its guard
+	 * (see `readTranscriptPresentation`), or `"full"` when it throws or answers something else,
+	 * reporting its first such failure through {@link emitError}.
 	 */
 	getTranscriptPresenters(): TranscriptPresenter[] {
+		if (!this.settings || !cfgExtensionTranscriptPresenters.get(this.settings)) return [];
 		const presenters: TranscriptPresenter[] = [];
 		for (const ext of this.#drawingExtensions()) {
 			for (const presenter of ext.transcriptPresenters) {

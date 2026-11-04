@@ -1376,6 +1376,8 @@ A display-only transform of each assistant text block in the main transcript, us
 
 ## Transcript presenter
 
+Opt-in: presenters are asked only while the `extensionRenderers.transcriptPresenters` setting is on (default off; **Tools → Extensions → Extension Transcript Presenters**). Off, they are never called and every block draws as without them; turning it on or off redraws the transcript.
+
 ```ts
 // Tool calls of runs that have ended: answers depend only on the block and this set.
 const finished = new Set<string>();
@@ -1395,7 +1397,7 @@ pi.registerTranscriptPresenter(block => {
 });
 ```
 
-Chooses how each block of the main session's transcript is drawn, in the plain terminal and in Tern's native view. It is display only: the session, `/export` and the model context are unchanged. It works in interactive mode; elsewhere the presenter is registered but never asked.
+Chooses how each block of the main session's transcript is drawn, in the plain terminal and in Tern's native view. It is display only: the session, `/export` and the model context are unchanged. It works in interactive mode with the setting on; elsewhere the presenter is registered but never asked.
 
 - **Blocks.** A presenter receives a read-only `TranscriptBlock`. Later versions add block types: return `undefined` for a `type` you do not know.
   - `{ type: "toolCall", id, toolName, args, result?, isError, isPartial }` for a model tool call, `id` its `toolCallId`; the reads of a grouped read card are asked one by one.

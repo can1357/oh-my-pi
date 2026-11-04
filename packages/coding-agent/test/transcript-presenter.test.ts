@@ -18,6 +18,7 @@ import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { cfgExtensionTranscriptPresenters } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -86,6 +87,8 @@ describe("extension transcript presenters", () => {
 			eventBus,
 			new Composer({ terminal: term }),
 		);
+		// Presenters are opt-in; every test but the opt-in one runs with them on.
+		cfgExtensionTranscriptPresenters.set(mode.settings, true);
 	});
 
 	afterEach(async () => {
@@ -607,6 +610,27 @@ describe("extension transcript presenters", () => {
 		runner.getUIContext().refreshTranscript(["call1"]);
 		expect(resets).not.toHaveBeenCalled();
 		expect(chat()).not.toContain("echo call1");
+	});
+
+	it("asks presenters only while the opt-in setting is on, redrawing the transcript when it flips", async () => {
+		// Regression guard: an installed extension changing the transcript without the user opting in,
+		// or flipping the setting leaving the old drawing on screen.
+		await installExtensions(
+			presenter(block => (block.type === "toolCall" ? { compact: { label: `ROW-${block.id}` } } : undefined)),
+		);
+		cfgExtensionTranscriptPresenters.set(mode.settings, false);
+		appendToolCall("call1", 10);
+		await start();
+		await mode.renderInitialMessages();
+		expect(chat()).toContain("OUTPUT-call1");
+		expect(chat()).not.toContain("ROW-call1");
+
+		cfgExtensionTranscriptPresenters.set(mode.settings, true);
+		await Promise.resolve();
+		expect(chat()).toContain("ROW-call1");
+		cfgExtensionTranscriptPresenters.set(mode.settings, false);
+		await Promise.resolve();
+		expect(chat()).toContain("OUTPUT-call1");
 	});
 
 	it("restores omp's own drawing when the presenter is disposed", async () => {
