@@ -177,11 +177,13 @@ fn a_process_substitution_sets_the_last_background_pid() {
 	assert_eq!(out, "123\n");
 }
 
-// Failure mode: a disowned job that ends leaves its finished proc record in
-// the store for good (no wait collects it): 200 `f & disown` left 200.
+// Failure mode: a disowned job that ran to its end left its proc record in
+// the store for good (no `wait` can collect a disowned job's status): 200
+// `f & disown` left 200 records. The root's script ends before the jobs it
+// disowned have run, so the shell is stepped to idle before the count.
 #[test]
 fn disowned_jobs_leave_no_proc_records_behind() {
-	use crate::bash::{Script, StateStore, store::Table};
+	use crate::bash::{Budget, Cx, Script, StateStore, Step, store::Table};
 	let mut r = crate::testkit::Rig::new(FakeHost::new(), crate::testkit::fault::skeleton_init(&[]));
 	for script in [
 		"f() { :; }; i=0; while [ $i -lt 100 ]; do f & disown; i=$((i + 1)); done",
@@ -189,11 +191,30 @@ fn disowned_jobs_leave_no_proc_records_behind() {
 	] {
 		r.run(Script::command(script.as_bytes()), Fault::None);
 	}
-	r.run(Script::command(&b"sleep 0; :"[..]), Fault::None);
-	let (_, _, store) = r.parts();
+	let (shell, host, store) = r.parts();
+	let mut settled = false;
+	for _ in 0..10_000 {
+		match shell.step(&mut Cx { host: &mut *host, store: &mut *store }, Budget::default()) {
+			Step::Idle | Step::Blocked => {
+				settled = true;
+				break;
+			},
+			Step::Done { .. } | Step::Yield => {},
+			other => panic!("{other:?} while the disowned jobs ran"),
+		}
+	}
+	assert!(settled, "the disowned jobs were still running after 10,000 steps");
 	let mut procs = 0;
-	store.scan(Table::Proc, &mut |_, _| procs += 1).unwrap();
-	assert!(procs < 5, "{procs} proc records left behind");
+	let mut shown = Vec::new();
+	store
+		.scan(Table::Proc, &mut |key, rec| {
+			procs += 1;
+			if shown.len() < 5 {
+				shown.push(format!("{key:?} {rec:?}"));
+			}
+		})
+		.unwrap();
+	assert!(procs < 5, "{procs} proc records left behind: {shown:?}");
 }
 
 // Failure mode: after `jobs` deletes a waited job, a snapshot of the root
