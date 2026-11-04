@@ -43,7 +43,6 @@ import {
 	type ShakeConfig,
 	type ShakeRegion,
 	type SummaryOptions,
-	shakeUnchangedPrefixTokens,
 	shouldCompact,
 	shouldUseProviderNativeCompaction,
 } from "@oh-my-pi/pi-agent-core/compaction";
@@ -113,8 +112,9 @@ import type { BuildSessionContextOptions, SessionContext } from "./session-conte
 import { buildSessionContext, getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
-import type { ShakeAdmit, ShakeMode, ShakeResult } from "./shake-types";
+import type { ShakeAdmit, ShakeAdmitPlan, ShakeMode, ShakeResult } from "./shake-types";
 import { measurePromptGrowthPerRequest, priceShakeCacheCost } from "./shake-cache-cost";
+import { resolvePromptCacheTier } from "./cache-warmer";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 import experimentalContextNotesReminderPrompt from "../prompts/system/experimental-context-notes-reminder.md" with { type: "text" };
 import experimentalContextRolloverPrompt from "../prompts/system/experimental-context-rollover.md" with { type: "text" };
@@ -129,7 +129,7 @@ import {
 	cfgSnapcompactShape,
 } from "./context-settings";
 import { resolveModelCompactionSettings } from "./model-compaction-threshold";
-import { cfgProvidersOpenaiCodexDaybreak, cfgRetry } from "./settings";
+import { cfgProvidersCacheRetention, cfgProvidersOpenaiCodexDaybreak, cfgRetry } from "./settings";
 
 export type CompactionCheckResult = Readonly<{
 	continuationScheduled: boolean;
@@ -1043,15 +1043,7 @@ export class SessionMaintenance {
 		}
 		if (
 			opts.admit &&
-			!opts.admit({
-				tokensFreed: savings,
-				unchangedPrefixTokens: shakeUnchangedPrefixTokens(
-					branchEntries,
-					regions,
-					this.#tokenizer,
-					config.keepBoundaryId,
-				),
-			})
+			!opts.admit(this.#shakeRequestPrefix(branchEntries, regions, replacements, replacementTokenCounts, savings))
 		) {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
@@ -6402,13 +6394,14 @@ export class SessionMaintenance {
 	 * not charged. Otherwise the next request writes the post-shake prompt from
 	 * the last reusable cached point: with a bounded cache lookback (Anthropic
 	 * looks back a fixed number of blocks from a breakpoint) an edit deep in
-	 * history misses back to the request head, measured as a full rewrite after
-	 * every shake; a provider that caches any prefix keeps the history before
-	 * the first edit.
+	 * history misses back to the request head (tools and system prompt, which
+	 * carry their own breakpoint), measured as a full rewrite after every shake;
+	 * a provider that caches any prefix keeps everything before the first edit.
+	 * The rewrite is priced at the retention tier the next request writes.
 	 */
 	#thresholdShakeCacheCost(
 		triggerContextTokens: number,
-		plan: { tokensFreed: number; unchangedPrefixTokens: number },
+		plan: ShakeAdmitPlan,
 	): { pays: boolean; rewriteTokens: number } {
 		const model = this.#model;
 		if (!model) return { pays: true, rewriteTokens: 0 };
@@ -6420,27 +6413,25 @@ export class SessionMaintenance {
 				return { pays: true, rewriteTokens: 0 };
 			}
 		}
-		const rewriteTokens =
-			resolvePromptCacheLookback(model) === undefined
-				? Math.max(0, postShakeTokens - plan.unchangedPrefixTokens)
-				: postShakeTokens;
+		const rewriteTokens = Math.max(
+			0,
+			postShakeTokens -
+				(resolvePromptCacheLookback(model) === undefined ? plan.unchangedPrefixTokens : plan.requestHeadTokens),
+		);
 		const branch = this.#host.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branch);
 		const sinceCompaction = latestCompaction ? branch.slice(branch.lastIndexOf(latestCompaction) + 1) : branch;
-		let cacheTtl: AssistantMessage["usage"]["cttl"];
-		for (let index = sinceCompaction.length - 1; index >= 0; index--) {
-			const entry = sinceCompaction[index];
-			if (entry?.type === "message" && entry.message.role === "assistant") {
-				cacheTtl = entry.message.usage.cttl;
-				break;
-			}
-		}
+		const retention = cfgProvidersCacheRetention.get(this.#host.settings);
 		const cost = priceShakeCacheCost({
 			model,
 			tokensFreed: plan.tokensFreed,
 			rewriteTokens,
 			growthPerRequest: measurePromptGrowthPerRequest(sinceCompaction),
-			cacheTtl,
+			cacheTier: resolvePromptCacheTier(
+				model,
+				{ cacheRetention: retention === "auto" ? undefined : retention },
+				model.api === "anthropic-messages" && this.#host.modelRegistry.isUsingOAuth(model),
+			),
 		});
 		logger.debug("Auto-shake cache cost", {
 			tokensFreed: plan.tokensFreed,
@@ -6451,6 +6442,55 @@ export class SessionMaintenance {
 			pays: cost.pays,
 		});
 		return { pays: cost.pays, rewriteTokens };
+	}
+
+	/**
+	 * What a planned shake leaves of the request the provider receives: the
+	 * tokens of the longest prefix the edit keeps byte-identical (request head
+	 * plus the context messages before the first changed one) and of the head
+	 * alone. Measured on the provider-facing context itself, built for the
+	 * branch as it is and as the edit would leave it (applied to copies of the
+	 * edited entries), so a compaction summary counts and an entry the context
+	 * leaves out does not.
+	 */
+	#shakeRequestPrefix(
+		branchEntries: SessionEntry[],
+		regions: readonly ShakeRegion[],
+		replacements: readonly string[],
+		replacementTokenCounts: readonly number[],
+		tokensFreed: number,
+	): ShakeAdmitPlan {
+		const copies = new Map<SessionEntry, SessionEntry>();
+		for (const region of regions) {
+			if (!copies.has(region.entry)) copies.set(region.entry, structuredClone(region.entry));
+		}
+		applyShakeRegions(
+			regions.map((region, index) => ({
+				region: { ...region, entry: copies.get(region.entry) } as ShakeRegion,
+				replacement: replacements[index] ?? "",
+				replacementTokens: replacementTokenCounts[index] ?? 0,
+			})),
+		);
+		const before = buildSessionContext(branchEntries, undefined, undefined, this.#contextBuildOptions).messages;
+		const after = buildSessionContext(
+			branchEntries.map(entry => copies.get(entry) ?? entry),
+			undefined,
+			undefined,
+			this.#contextBuildOptions,
+		).messages;
+		let shared = 0;
+		while (shared < before.length && shared < after.length && Bun.deepEquals(before[shared], after[shared])) shared++;
+		const requestHeadTokens = computeNonMessageTokens(
+			this.#host.nonMessageTokenSource(),
+			this.#tokenizer,
+			this.#host.settings.revision,
+		);
+		return {
+			tokensFreed,
+			requestHeadTokens,
+			unchangedPrefixTokens:
+				requestHeadTokens + this.#countProjectedMessages(before.slice(0, shared), branchEntries),
+		};
 	}
 
 	/**

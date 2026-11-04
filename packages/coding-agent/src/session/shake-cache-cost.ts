@@ -23,8 +23,12 @@ export interface ShakeCacheCostInput {
 	rewriteTokens: number;
 	/** Mean tokens one request adds to the context on this branch; undefined when not measured. */
 	growthPerRequest: number | undefined;
-	/** Cache-write TTL breakdown of the latest request; the rewrite is written with the same TTLs. */
-	cacheTtl: Usage["cttl"];
+	/**
+	 * Retention tier the next request writes, or undefined when it writes no
+	 * cache entry (caching off): then every request pays full input and a shake
+	 * adds no write of its own.
+	 */
+	cacheTier: "short" | "long" | undefined;
 }
 
 export interface ShakeCacheCost {
@@ -50,28 +54,24 @@ function tokenUsage(fields: Partial<Usage>): Usage {
 	};
 }
 
-/** The rewrite's TTL breakdown, in the proportions the latest request wrote. */
-function scaleTtl(cacheTtl: Usage["cttl"], tokens: number): Usage["cttl"] {
-	const fiveMinute = cacheTtl?.ephemeral5m ?? 0;
-	const oneHour = cacheTtl?.ephemeral1h ?? 0;
-	if (fiveMinute + oneHour <= 0) return undefined;
-	const oneHourTokens = Math.round((tokens * oneHour) / (fiveMinute + oneHour));
-	return { ephemeral5m: tokens - oneHourTokens, ephemeral1h: oneHourTokens };
-}
-
 /** Price a shake's rewrite against the cache reads it saves, at the model's own rates. */
 export function priceShakeCacheCost(input: ShakeCacheCostInput): ShakeCacheCost {
-	const { model, tokensFreed, rewriteTokens, growthPerRequest, cacheTtl } = input;
+	const { model, tokensFreed, rewriteTokens, growthPerRequest, cacheTier } = input;
+	const requestsToRegrow =
+		growthPerRequest !== undefined && growthPerRequest > 0 ? tokensFreed / growthPerRequest : undefined;
+	if (cacheTier === undefined) {
+		return { rewritePremium: 0, readSavings: 0, requestsToRegrow, pays: true };
+	}
 	const readCost = calculateCost(model, tokenUsage({ cacheRead: rewriteTokens })).cacheRead;
+	// `calculateCost` prices a long-retention write from the model's input rate;
+	// the flat catalog `cacheWrite` rate is the short-tier one.
+	const cttl: Usage["cttl"] = cacheTier === "long" ? { ephemeral1h: rewriteTokens } : undefined;
 	// A provider without a cache-write price bills a missed prefix as plain input.
 	const writeCost =
 		model.cost.cacheWrite > 0
-			? calculateCost(model, tokenUsage({ cacheWrite: rewriteTokens, cttl: scaleTtl(cacheTtl, rewriteTokens) }))
-					.cacheWrite
+			? calculateCost(model, tokenUsage({ cacheWrite: rewriteTokens, cttl })).cacheWrite
 			: calculateCost(model, tokenUsage({ input: rewriteTokens })).input;
 	const rewritePremium = Math.max(0, writeCost - readCost);
-	const requestsToRegrow =
-		growthPerRequest !== undefined && growthPerRequest > 0 ? tokensFreed / growthPerRequest : undefined;
 	// Unmeasured growth leaves the saving unknown: nothing shows the shake loses.
 	if (requestsToRegrow === undefined) {
 		return { rewritePremium, readSavings: Number.POSITIVE_INFINITY, requestsToRegrow, pays: true };
