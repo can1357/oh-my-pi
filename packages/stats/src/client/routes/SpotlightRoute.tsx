@@ -6,7 +6,6 @@ import { rangeMeta } from "../data/range";
 import { Compounding } from "../spotlight/Compounding";
 import { Coverage } from "../spotlight/Coverage";
 import { Economics } from "../spotlight/Economics";
-import { EditGate } from "../spotlight/EditGate";
 import { FetchBack, FetchBackGaps } from "../spotlight/FetchBack";
 import { SpotlightHero } from "../spotlight/Hero";
 import { Overhead } from "../spotlight/Overhead";
@@ -125,12 +124,10 @@ export function SpotlightRoute({ active, range }: SpotlightRouteProps) {
 						<FetchBackGaps stats={data} stale={stats.stale} />
 
 						<SectionHeading id="spot-tune" title="Where to tune">
-							Which steps, sizes and tools pay, whether reads about to be edited should stay whole, and which
-							tools Spotlight doesn't shape yet.
+							Which steps, sizes and tools pay, and which tools Spotlight doesn't shape yet.
 						</SectionHeading>
 						<Steps stats={data} stale={stats.stale} />
 						<Economics stats={data} stale={stats.stale} />
-						<EditGate stats={data} stale={stats.stale} />
 						<Coverage stats={data} stale={stats.stale} />
 						<ResultsFeed rows={data.recent} stale={stats.stale} />
 					</>

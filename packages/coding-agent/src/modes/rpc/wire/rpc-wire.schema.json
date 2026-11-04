@@ -2832,6 +2832,12 @@
 					"items": {
 						"$ref": "#/$defs/ImageContent"
 					}
+				},
+				"trace": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {},
+					"description": "The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."
 				}
 			},
 			"required": [

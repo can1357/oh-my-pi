@@ -51,7 +51,7 @@ import type { DescribeContext, NativeChild, NativeNode, NativeSurface, NativeUiE
 import { NARROW_SHEET_COLS } from "./overlay";
 import { resetQuietMotion } from "./quiet";
 import { nativeComponentId, Reconciler } from "./reconcile";
-import { setNativeButtons, setNativeRendering } from "./state";
+import { setNativeButtons, setNativePacing, setNativeRendering } from "./state";
 
 /** A visible TUI overlay, bottom to top. */
 export interface NativeOverlay {
@@ -203,9 +203,9 @@ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
  * once the real `hello` lists them, so the optimistic start never emits a node
  * an older terminal cannot draw (`media`: files Tern loads by path; `json`:
  * raw JSON values Tern draws as its own tree; `button`: omp's buttons, which
- * older builds get as role-styled rows).
+ * older builds get as role-styled rows; `shell`: the bash tool's live trace).
  */
-const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = { media: true, json: true, button: true };
+const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = { media: true, json: true, button: true, shell: true };
 
 /**
  * The reply a v1 terminal is assumed to give before its real `hello` arrives
@@ -403,6 +403,7 @@ export class NativeBackend {
 		this.#inline.doc?.close();
 		setNativeRendering(false);
 		setNativeButtons(false);
+		setNativePacing(false);
 		this.#unbindMotion?.();
 		this.#unbindMotion = undefined;
 		this.#useNerdSymbols(false);
@@ -567,6 +568,7 @@ export class NativeBackend {
 		this.#cx = new NativeContext(hello, hello.cols ?? this.#cx.cols);
 		// A changed vocabulary re-describes every component (`confirm`).
 		setNativeButtons(this.#cx.supports("button"));
+		setNativePacing(this.#cx.feature("pace"));
 		this.#sawResize = false;
 	}
 

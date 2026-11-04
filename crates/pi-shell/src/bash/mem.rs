@@ -137,9 +137,12 @@ impl File for PipeReader {
 	fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
 		let mut s = self.0.lock();
 		if s.buf.is_empty() {
-			if s.writers == 0 || buf.is_empty() {
+			if s.writers == 0 {
 				return Poll::Ready(Ok(0));
 			}
+			// A zero-length read too waits while a writer may still write:
+			// it is how readiness is asked (`read -t 0`, `zselect`), and an
+			// empty pipe is not ready.
 			s.wait(cx.waker());
 			return Poll::Pending;
 		}

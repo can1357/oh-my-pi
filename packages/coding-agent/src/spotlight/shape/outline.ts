@@ -233,8 +233,6 @@ function rememberFolds(run: Run, abs: string, folded: [number, number][]): void 
 export interface Outlined {
 	/** The shaped view, or undefined when nothing was outlined. */
 	view?: View;
-	/** The paths outlined (as the agent named them), for the note. */
-	paths: string[];
 	/** Some window was a read of folded code (shown whole). */
 	recovery: boolean;
 }
@@ -242,20 +240,19 @@ export interface Outlined {
 /** Outline of one `read` of a source file; a read overlapping folded code is shown whole. */
 export async function outlineRead(run: Run, abs: string): Promise<Outlined> {
 	const read = run.input.read;
-	if (!read) return { paths: [], recovery: false };
+	if (!read) return { recovery: false };
 	if (isRecovery(run, abs, read.firstLine, read.firstLine + read.lines.length - 1)) {
 		bump(run, "outlineRecoveries");
-		return { paths: [], recovery: true };
+		return { recovery: true };
 	}
 	const o = await outlineWindow(run, read.lines, read.shown, read.firstLine, shifted(0));
-	if (!o) return { paths: [], recovery: false };
+	if (!o) return { recovery: false };
 	rememberFolds(run, abs, o.folded);
-	return { view: o.view, paths: [read.path], recovery: false };
+	return { view: o.view, recovery: false };
 }
 
 interface CodeWindow {
 	abs: string;
-	path: string;
 	first: number;
 	content: string[];
 	shown: string[];
@@ -270,9 +267,9 @@ async function codeWindows(command: string, output: string, cwd: string): Promis
 	const targets = readTargets(command).filter(t => /[*?[]/.test(t.arg) || SOURCE_PATH.test(t.arg));
 	let cursor = 0;
 	for (const t of targets) {
-		for (const file of await resolveTarget(t, cwd)) {
-			if (!SOURCE_PATH.test(file.abs)) continue;
-			const lines = await fileLines(file.abs);
+		for (const abs of await resolveTarget(t, cwd)) {
+			if (!SOURCE_PATH.test(abs)) continue;
+			const lines = await fileLines(abs);
 			if (!lines) continue;
 			for (const [a, b] of t.ranges ?? [[1, lines.length]]) {
 				const lo = Math.max(1, a);
@@ -283,7 +280,7 @@ async function codeWindows(command: string, output: string, cwd: string): Promis
 				const block = shown.join("\n");
 				const at = output.indexOf(block, cursor);
 				if (at < 0) continue;
-				out.push({ abs: file.abs, path: file.path, first: lo, content, shown, at, len: block.length });
+				out.push({ abs, first: lo, content, shown, at, len: block.length });
 				cursor = at + block.length;
 			}
 		}
@@ -318,8 +315,7 @@ async function codeWindows(command: string, output: string, cwd: string): Promis
 				const shown = lines.slice(i, j);
 				const resolved = await resolveTarget({ arg: file, numbered: false, cds: [] }, cwd);
 				out.push({
-					abs: resolved[0]?.abs ?? file,
-					path: file,
+					abs: resolved[0] ?? file,
 					first: Number(m[2]),
 					content: shown.map(l => parse(l)?.[3] ?? ""),
 					shown,
@@ -334,15 +330,12 @@ async function codeWindows(command: string, output: string, cwd: string): Promis
 }
 
 /** Outlines every long code window a bash command printed; windows inside a span folded earlier stay whole. */
-export async function outlineBash(
-	run: Run,
-	output: string,
-): Promise<{ text?: string; paths: string[]; recovery: boolean }> {
+export async function outlineBash(run: Run, output: string): Promise<{ text?: string; recovery: boolean }> {
 	const command = run.input.command ?? "";
 	const windows = await codeWindows(command, output, run.cwd);
 	let text = "";
 	let pos = 0;
-	const paths: string[] = [];
+	let outlined = false;
 	let recovery = false;
 	for (const w of windows) {
 		if (w.at < pos) continue;
@@ -358,8 +351,8 @@ export async function outlineBash(
 		rememberFolds(run, w.abs, o.folded);
 		text += output.slice(pos, w.at) + o.view.lines.join("\n");
 		pos = w.at + w.len;
-		paths.push(w.path);
+		outlined = true;
 	}
-	if (!paths.length) return { paths, recovery };
-	return { text: text + output.slice(pos), paths, recovery };
+	if (!outlined) return { recovery };
+	return { text: text + output.slice(pos), recovery };
 }

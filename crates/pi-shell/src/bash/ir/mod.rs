@@ -10,9 +10,16 @@
 //!
 //! Runtime function definitions retain their validated source, or serialized
 //! alias-expanded syntax when source replay is not possible. Their IR is
-//! lowered on first call. This input and its original source positions survive
-//! snapshots; materialization retains the same unit id.
+//! lowered on first call. Autoload reuses its validated single definition and
+//! also defers nested functions in files loaded as bodies. This input and its
+//! original source positions survive snapshots; materialization retains the
+//! same unit id.
 //! `obash --ir` continues to lower all bodies eagerly.
+//! Canonical function text is retained as source spans or validated syntax and
+//! printed only for text readers or serialized state records, not definitions.
+//! Source-replayable commands are addressed by their source context, without
+//! serializing deterministic IR tables. Alias-buffer commands and synthetic
+//! units also hash their code, since their source spans need not identify them.
 //!
 //! Every [`Op`] is 16 bytes: `code` (u8), `flags` (u8: [`Op::COND`] marks code
 //! whose failure does not trigger `set -e`), `ev` (u16: the [`EventKind`]s,
@@ -45,7 +52,7 @@
 //! | `CaseWord` | `words` index | – | expand the `case` subject (no splitting) and push it |
 //! | `CaseArm` | `pats` index | next-arm pc | match the subject against the patterns; no match: jump to `b` |
 //! | `CaseEnd` | – | – | pop the `case` subject |
-//! | `Arith` | `ariths` index | – | expand and evaluate arithmetic text; `$?` = 0 when non-zero (an empty text is true) |
+//! | `Arith` | `ariths` index | [`Op::LITERAL`] or 0 | expand and evaluate arithmetic text; `$?` = 0 when non-zero (an empty text is true) |
 //! | `CondTest` | `conds` index | – | one `[[ ]]` primary (staged: file probes are pollable) |
 //! | `FuncDef` | `funcs` index | – | define a function |
 //! | `TimeStart` | – | – | push the `time` start |
@@ -69,13 +76,18 @@ pub mod asm;
 mod brace;
 mod lower;
 
+use std::{
+	ops::Deref,
+	sync::{Arc, OnceLock},
+};
+
 use bstr::BString;
 use serde::{Deserialize, Serialize};
 
 use self::lower::lower;
 pub(crate) use self::lower::{
-	ANON, abort_unit, ansi_c, ansi_c_with, function_from_source, lower_compound, lower_deferred,
-	lower_text, materialize, syntax_unit,
+	ANON, abort_unit, ansi_c, ansi_c_with, function_from_parsed, function_from_source,
+	function_from_source_at, lower_compound, lower_deferred, lower_text, materialize, syntax_unit,
 };
 use crate::bash::{
 	event::{EventKind, EventMask, NodeKind, RedirKind},
@@ -83,7 +95,7 @@ use crate::bash::{
 };
 
 /// IR version; part of the frames header.
-pub const IR_VERSION: u32 = 14;
+pub const IR_VERSION: u32 = 15;
 
 /// Opcodes.
 #[derive(
@@ -200,6 +212,15 @@ impl Op {
 	/// Flag on a background `Spawn`: zsh `&!`/`&|`, the job is disowned at
 	/// once (not in the job table).
 	pub const DISOWN: u8 = 1 << 7;
+	/// `Nop` operand `b` in a zsh unit: the end of a list (the DEBUG trap
+	/// point after it).
+	pub const LIST_END: u32 = 2;
+	/// `Nop` operand `b` in a zsh unit: the start of a list (`execlist`'s
+	/// DEBUG trap point before it); operand `a` is its [`Self::LIST_END`].
+	pub const LIST_START: u32 = 1;
+	/// `Arith` operand `b`: the text has nothing to expand (no `$`, `` ` ``,
+	/// quote or backslash), so it is evaluated as written.
+	pub const LITERAL: u32 = 1;
 	/// Flag on `ForIn`: zsh `for a b … in`: `names[b]` holds the loop
 	/// variables separated by newlines.
 	pub const MULTI: u8 = 1 << 6;
@@ -213,56 +234,64 @@ impl Op {
 	/// Flag on `Abort`: `strs[a]` is a syntax error (otherwise it names an
 	/// unsupported construct).
 	pub const SYNTAX: u8 = 1 << 2;
+	/// Flag on `FuncDef` and `CallAnon`: zsh `function -T`, the function
+	/// is defined traced (`PM_TAGGED_LOCAL`). Shares its bit with the
+	/// `ForIn`-only [`Self::MULTI`].
+	pub const TRACED: u8 = 1 << 6;
 }
 
 /// A compiled command.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Unit {
 	/// Content address.
-	pub id:              UnitId,
+	pub id:                  UnitId,
 	/// Mode it was parsed in.
-	pub mode:            ModeId,
+	pub mode:                ModeId,
 	/// [`crate::bash::syntax::Features`] bits it was parsed with.
-	pub features:        u32,
+	pub features:            u32,
 	/// Unit source bytes (node spans are relative to them).
-	pub source:          BString,
+	pub source:              BString,
 	/// Alias substitutions applied while parsing.
-	pub aliases:         Vec<(BString, BString)>,
+	pub aliases:             Vec<(BString, BString)>,
 	/// For a function body: the node id of the function definition in
 	/// `source` (function units share their defining unit's source and ids).
-	pub root:            Option<u32>,
+	pub root:                Option<u32>,
 	/// 1-based script line of the first byte of `source`.
-	pub line:            u32,
+	pub line:                u32,
 	/// Deferred function input, retained in snapshots. An empty string means
 	/// reparse `source`; otherwise this encodes `(source_offset, Command)` to
 	/// preserve alias-expanded syntax that the source alone cannot reproduce.
-	pub(crate) deferred: Option<BString>,
+	pub(crate) deferred:     Option<BString>,
+	/// Canonical syntax shared only when a compilation is observed. Not
+	/// executable state.
+	#[serde(skip)]
+	pub(crate) trace_syntax: std::sync::OnceLock<Arc<crate::bash::trace::syntax::UnitSyntax>>,
 	/// Code.
-	pub ops:             Vec<Op>,
+	pub ops:                 Vec<Op>,
 	/// Syntax nodes by [`AstNodeId`].
-	pub nodes:           Vec<NodeInfo>,
+	pub nodes:               Vec<NodeInfo>,
 	/// Word operands.
-	pub words:           Vec<Word>,
+	pub words:               Vec<Word>,
 	/// Word lists (indexes into `words`).
-	pub lists:           Vec<Vec<u32>>,
+	pub lists:               Vec<Vec<u32>>,
 	/// Simple commands.
-	pub cmds:            Vec<Cmd>,
+	pub cmds:                Vec<Cmd>,
 	/// Variable names.
-	pub names:           Vec<BString>,
+	pub names:               Vec<BString>,
 	/// Diagnostic texts.
-	pub strs:            Vec<BString>,
+	pub strs:                Vec<BString>,
 	/// Redirection lists.
-	pub redirs:          Vec<Vec<RedirIr>>,
+	pub redirs:              Vec<Vec<RedirIr>>,
 	/// Subshells, pipelines and background jobs.
-	pub spawns:          Vec<SpawnIr>,
+	pub spawns:              Vec<SpawnIr>,
 	/// `case` arm pattern lists (indexes into `words`).
-	pub pats:            Vec<Vec<u32>>,
+	pub pats:                Vec<Vec<u32>>,
 	/// Arithmetic texts (`(( ))`, `for (( ))`).
-	pub ariths:          Vec<BString>,
+	pub ariths:              Vec<BString>,
 	/// `[[ ]]` primaries.
-	pub conds:           Vec<CondIr>,
+	pub conds:               Vec<CondIr>,
 	/// Function definitions.
-	pub funcs:           Vec<FuncIr>,
+	pub funcs:               Vec<FuncIr>,
 }
 
 impl Unit {
@@ -277,6 +306,7 @@ impl Unit {
 			root: None,
 			line: 1,
 			deferred: None,
+			trace_syntax: std::sync::OnceLock::new(),
 			ops: Vec::new(),
 			nodes: Vec::new(),
 			words: Vec::new(),
@@ -315,6 +345,19 @@ impl Unit {
 		}
 		h.update(&self.line.to_le_bytes());
 		h
+	}
+
+	/// Seal a source-replayable command from lowering without serializing its
+	/// deterministic tables.
+	pub(crate) fn seal_source_from(&mut self, mut h: blake3::Hasher) {
+		for word in &mut self.words {
+			word.classify();
+		}
+		h.update(b"syntax");
+		if let Some(root) = self.root {
+			h.update(&root.to_le_bytes());
+		}
+		self.id = UnitId(*h.finalize().as_bytes());
 	}
 
 	/// Seal using the hash of this unit's source context.
@@ -383,7 +426,7 @@ impl Unit {
 			+ self
 				.funcs
 				.iter()
-				.map(|f| f.body.weight() + f.source.len())
+				.map(|f| f.body.weight() + f.definition.as_ref().map_or(0, FuncDefinition::weight))
 				.sum::<usize>()
 	}
 }
@@ -696,6 +739,10 @@ pub struct Cmd {
 	pub words:   u32,
 	/// Redirections (`redirs` index).
 	pub redirs:  Option<u32>,
+	/// zsh: the command word is a reserved word of the `typeset` family
+	/// ([`crate::bash::syntax::Simple::typeset`]).
+	#[serde(default)]
+	pub typeset: bool,
 }
 
 /// One prefix assignment.
@@ -833,15 +880,132 @@ pub enum CondIr {
 	Word(u32),
 }
 
+/// Input for canonical function text, retained by lowering without printing the
+/// body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FuncDefinition {
+	/// Source-replayable definition span relative to its body unit's source.
+	Source(crate::bash::syntax::Span),
+	/// Serialized definition syntax when aliases or external here-documents
+	/// prevent replay.
+	Parsed(BString),
+}
+
+impl FuncDefinition {
+	fn weight(&self) -> usize {
+		match self {
+			Self::Source(_) => 0,
+			Self::Parsed(bytes) => bytes.len(),
+		}
+	}
+}
+
+/// Canonical function text shared by records, printed only when a reader needs
+/// it.
+#[derive(Clone)]
+pub struct FuncText(Arc<FuncTextInner>);
+
+struct FuncTextInner {
+	text:  OnceLock<BString>,
+	input: Option<(BString, FuncDefinition, Arc<Unit>)>,
+}
+
+impl FuncText {
+	/// Retain a function's validated definition for record readers without
+	/// printing it.
+	pub(crate) fn of(function: &FuncIr) -> Self {
+		Self(Arc::new(FuncTextInner {
+			text:  OnceLock::new(),
+			input: function.definition.as_ref().map(|definition| {
+				(function.name.clone(), definition.clone(), Arc::clone(&function.body))
+			}),
+		}))
+	}
+}
+
+impl Default for FuncText {
+	fn default() -> Self {
+		BString::default().into()
+	}
+}
+
+impl From<BString> for FuncText {
+	fn from(text: BString) -> Self {
+		Self(Arc::new(FuncTextInner { text: OnceLock::from(text), input: None }))
+	}
+}
+
+impl Deref for FuncText {
+	type Target = BString;
+
+	fn deref(&self) -> &BString {
+		self.0.text.get_or_init(|| match &self.0.input {
+			Some((name, definition, body)) => lower::definition_text(name, definition, body),
+			None => BString::default(),
+		})
+	}
+}
+
+impl std::fmt::Debug for FuncText {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self.0.text.get() {
+			Some(text) => text.fmt(f),
+			None => f.write_str("FuncText(deferred)"),
+		}
+	}
+}
+
+impl PartialEq for FuncText {
+	fn eq(&self, other: &Self) -> bool {
+		Arc::ptr_eq(&self.0, &other.0) || **self == **other
+	}
+}
+
+impl Eq for FuncText {}
+
+impl Serialize for FuncText {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		(**self).serialize(serializer)
+	}
+}
+
+impl<'de> Deserialize<'de> for FuncText {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		BString::deserialize(deserializer).map(Self::from)
+	}
+}
+
 /// A function definition.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FuncIr {
 	/// Name.
-	pub name:   BString,
-	/// Canonical `declare -f` text.
-	pub source: BString,
+	pub name:       BString,
+	/// Input retained for the canonical function text consumed by record
+	/// readers.
+	pub definition: Option<FuncDefinition>,
 	/// Compiled body (ends with `End`).
-	pub body:   Box<Unit>,
+	#[serde(with = "function_body_serde")]
+	pub body:       Arc<Unit>,
+}
+
+mod function_body_serde {
+	use super::*;
+
+	/// Serialize the shared body as its unit, preserving the internal wire
+	/// layout.
+	pub(super) fn serialize<S: serde::Serializer>(
+		body: &Arc<Unit>,
+		serializer: S,
+	) -> Result<S::Ok, S::Error> {
+		(**body).serialize(serializer)
+	}
+
+	/// Restore a shared function body from the serialized unit.
+	pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+		deserializer: D,
+	) -> Result<Arc<Unit>, D::Error> {
+		Unit::deserialize(deserializer).map(Arc::new)
+	}
 }
 
 /// Parse and compile every top-level command of `src` without running it.
@@ -889,6 +1053,91 @@ mod tests {
 			.iter()
 			.map(|&w| (u.words[w as usize].fixed, u.words[w as usize].noglob))
 			.collect()
+	}
+
+	#[test]
+	fn lazy_function_text_keeps_a_body_redirections_external_heredoc() {
+		use crate::bash::syntax::{Features, NO_ALIASES, Parser, PrintStyle};
+
+		let source = b"f() { :; } <<EOF\npayload\nEOF\n";
+		let command = Parser::new(source, Features::NONE, NO_ALIASES)
+			.next_command()
+			.unwrap()
+			.unwrap();
+		let expected = crate::bash::syntax::print(
+			&command.list.items[0].and_or.first.stages[0].cmd,
+			PrintStyle::DeclareF,
+		);
+		let unit = lower_deferred(&command, source, ModeId::Bash, Features::NONE).unwrap();
+		assert_eq!(FuncText::of(&unit.funcs[0]).as_slice(), expected);
+	}
+
+	#[test]
+	fn lazy_function_text_agrees_for_source_and_alias_expanded_syntax() {
+		use crate::bash::syntax::{AliasLookup, Features, NO_ALIASES, Parser};
+
+		struct Aliases;
+		impl AliasLookup for Aliases {
+			fn alias(&self, name: &[u8]) -> Option<&[u8]> {
+				(name == b"a").then_some(b"echo x")
+			}
+		}
+
+		let plain = b"f() { echo x; }\n";
+		let expanded = b"f() { a; }\n";
+		let plain_cc = Parser::new(plain, Features::NONE, NO_ALIASES)
+			.next_command()
+			.unwrap()
+			.unwrap();
+		let expanded_cc = Parser::new(expanded, Features::NONE, &Aliases)
+			.next_command()
+			.unwrap()
+			.unwrap();
+		assert!(plain_cc.source_replay);
+		assert!(!expanded_cc.source_replay);
+		let plain = lower_deferred(&plain_cc, plain, ModeId::Bash, Features::NONE).unwrap();
+		let expanded = lower_deferred(&expanded_cc, expanded, ModeId::Bash, Features::NONE).unwrap();
+		let plain_text = FuncText::of(&plain.funcs[0]);
+		let expanded_text = FuncText::of(&expanded.funcs[0]);
+		let clone = plain_text.clone();
+		assert!(plain_text.0.text.get().is_none());
+		assert!(expanded_text.0.text.get().is_none());
+		// Persisting a unit must not force its function records' canonical text.
+		let encoded_unit = postcard::to_stdvec(&plain).unwrap();
+		let restored: Unit = postcard::from_bytes(&encoded_unit).unwrap();
+		assert!(plain_text.0.text.get().is_none());
+		let expected = BString::from("f () \n{ \n    echo x\n}");
+		assert_eq!(&*plain_text, &expected);
+		assert_eq!(&*expanded_text, &expected);
+		assert_eq!(&*FuncText::of(&restored.funcs[0]), &expected);
+		assert!(clone.0.text.get().is_some());
+		let encoded_text = postcard::to_stdvec(&expanded_text).unwrap();
+		assert_eq!(encoded_text, postcard::to_stdvec(&expected).unwrap());
+		let restored_text: FuncText = postcard::from_bytes(&encoded_text).unwrap();
+		assert_eq!(&*restored_text, &expected);
+	}
+
+	#[test]
+	fn alias_buffer_commands_with_identical_spans_have_distinct_ids() {
+		use crate::bash::syntax::{AliasLookup, Features, Parser};
+
+		struct Aliases;
+		impl AliasLookup for Aliases {
+			fn alias(&self, name: &[u8]) -> Option<&[u8]> {
+				(name == b"a").then_some(b":\necho one\necho two")
+			}
+		}
+
+		let src = b"a\n";
+		let mut parser = Parser::new(src, Features::NONE, &Aliases);
+		parser.next_command().unwrap().unwrap();
+		let first = parser.next_command().unwrap().unwrap();
+		let second = parser.next_command().unwrap().unwrap();
+		assert_eq!(first.span, second.span);
+		assert!(!first.source_replay && !second.source_replay);
+		let first = lower_deferred(&first, src, ModeId::Bash, Features::NONE).unwrap();
+		let second = lower_deferred(&second, src, ModeId::Bash, Features::NONE).unwrap();
+		assert_ne!(first.id, second.id);
 	}
 
 	#[test]
