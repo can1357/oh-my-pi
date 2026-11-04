@@ -302,8 +302,8 @@ export interface Hover {
  * Can be implemented using LSP protocol or CLI tools.
  */
 export interface LinterClient {
-	/** Format file content. Returns formatted content. */
-	format(filePath: string, content: string): Promise<string>;
+	/** Format file content. Returns formatted content. A CLI formatter's run ends when `signal` aborts. */
+	format(filePath: string, content: string, signal?: AbortSignal): Promise<string>;
 
 	/** Get diagnostics for a file. Content should already be written to disk. */
 	lint(filePath: string, signal?: AbortSignal): Promise<Diagnostic[]>;
@@ -312,7 +312,10 @@ export interface LinterClient {
 	dispose?(): void;
 }
 
-/** Factory function to create a LinterClient */
+/**
+ * Factory function to create a LinterClient. `cwd` is the linter's project root
+ * for the file being linted (see `getLinterClient`), not the session cwd.
+ */
 export type LinterClientFactory = (config: ServerConfig, cwd: string) => LinterClient;
 
 // =============================================================================

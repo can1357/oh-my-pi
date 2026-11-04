@@ -60,7 +60,7 @@ function healthyLinterConfig(): ServerConfig {
 describe("issue #4910: diagnostics pipeline is wall-clock bounded", () => {
 	test("a linter that never settles cannot hang getDiagnosticsForFile", async () => {
 		const started = Date.now();
-		// Unique server name: getLinterClient caches by `serverName:cwd`.
+		// Unique server name: getLinterClient caches by server name + linter root.
 		const result = await getDiagnosticsForFile(
 			"/tmp/issue-4910/falcon_emu.py",
 			"/tmp/issue-4910",

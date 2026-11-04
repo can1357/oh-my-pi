@@ -3,7 +3,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
-import { createLinuxSubreaperScript, exec, NonZeroExitError, spawn, TimeoutError } from "@oh-my-pi/pi-utils/ptree";
+import {
+	AbortError,
+	createLinuxSubreaperScript,
+	exec,
+	NonZeroExitError,
+	spawn,
+	TimeoutError,
+} from "@oh-my-pi/pi-utils/ptree";
 
 async function supportsLinuxMountNamespaces(): Promise<boolean> {
 	if (process.platform !== "linux") return false;
@@ -484,4 +491,189 @@ ${createLinuxSubreaperScript()}
 			expect(threw).toBeInstanceOf(TimeoutError);
 		},
 	);
+});
+
+describe.skipIf(process.platform === "win32")("ptree group keeper", () => {
+	async function readPid(pidFile: string): Promise<number> {
+		// Polls a file a real process writes; returns as soon as it holds a pid.
+		const deadline = Date.now() + 10_000;
+		while (Date.now() < deadline) {
+			const pid = Number.parseInt(
+				await Bun.file(pidFile)
+					.text()
+					.catch(() => ""),
+				10,
+			);
+			if (pid > 0) return pid;
+			await Bun.sleep(10);
+		}
+		throw new Error("command never wrote its pid");
+	}
+
+	async function runningAfter(pid: number, ms: number): Promise<boolean> {
+		const deadline = Date.now() + ms;
+		let status = Process.fromPid(pid)?.status();
+		while (status === ProcessStatus.Running && Date.now() < deadline) {
+			await Bun.sleep(10);
+			status = Process.fromPid(pid)?.status();
+		}
+		return status === ProcessStatus.Running;
+	}
+
+	it("passes the command's output and exit code through", async () => {
+		const result = await exec(["/bin/sh", "-c", "echo out; echo err >&2; exit 3"], {
+			groupKeeper: true,
+			allowNonZero: true,
+		});
+
+		expect(result.stdout).toBe("out\n");
+		expect(result.stderr).toBe("err\n");
+		expect(result.exitCode).toBe(3);
+	});
+
+	for (const [stop, gracefulMs] of [
+		["a graceful abort", undefined],
+		["a hard kill", -1],
+	] as const) {
+		it(`kills the run's group on ${stop} after the command died from a signal`, async () => {
+			// The command starts a SIGTERM-ignoring child on its stdout, then kills
+			// itself with SIGKILL: the child is orphaned but stays in the group.
+			// The child would outlive any test budget, so only the kill ends it.
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-group-keeper-"));
+			const pidFile = path.join(dir, "pid");
+			let orphanPid: number | undefined;
+			try {
+				const child = spawn(["/bin/sh", "-c", `trap "" TERM; sleep 3600 & echo $! > '${pidFile}'; kill -KILL $$`], {
+					groupKeeper: true,
+				});
+				const outcome = child.wait().then(
+					() => new Error("run finished without the kill"),
+					(error: unknown) => error,
+				);
+				orphanPid = await readPid(pidFile);
+				const stoppedAt = Date.now();
+
+				child.kill(new AbortError(new Error("user abort"), ""), gracefulMs);
+
+				expect(await outcome).toBeInstanceOf(AbortError);
+				expect(await runningAfter(orphanPid, 2_000)).toBe(false);
+				expect(Date.now() - stoppedAt).toBeLessThan(10_000);
+			} finally {
+				if (orphanPid) Process.fromPid(orphanPid)?.killTree(9);
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		}, 30_000);
+	}
+
+	it("holds the run open while a member that closed its output is left in the group, then kills it at the deadline", async () => {
+		// The command exits at once; its SIGTERM-ignoring member stays in the
+		// group with its output on /dev/null. Waiting only for output closure
+		// would report success and leave the member outside every cleanup.
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-group-keeper-"));
+		const pidFile = path.join(dir, "pid");
+		let memberPid: number | undefined;
+		try {
+			const child = spawn(
+				["/bin/sh", "-c", `trap "" TERM; sleep 3600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; exit 0`],
+				{ groupKeeper: true, timeout: 2_000 },
+			);
+			const outcome = child.wait().then(
+				() => new Error("run reported success with a member left"),
+				(error: unknown) => error,
+			);
+			memberPid = await readPid(pidFile);
+
+			expect(await outcome).toBeInstanceOf(TimeoutError);
+			expect(await runningAfter(memberPid, 2_000)).toBe(false);
+		} finally {
+			if (memberPid) Process.fromPid(memberPid)?.killTree(9);
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("holds the run open while members fork and exit, then kills the whole chain at the deadline", async () => {
+		// Each link starts its replacement and exits at once, so at every instant
+		// the group has a member, but a member list assembled over time can miss
+		// all of them. Only the deadline's group kill may end the chain.
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-group-keeper-"));
+		const pidLog = path.join(dir, "pids");
+		const chain = path.join(dir, "chain.sh");
+		await Bun.write(
+			chain,
+			`trap "" TERM\necho $$ >> "$1"\nsleep 0.002\n/bin/sh "$0" "$1" </dev/null >/dev/null 2>&1 &\nexit 0\n`,
+		);
+		const links = async () =>
+			(
+				await Bun.file(pidLog)
+					.text()
+					.catch(() => "")
+			)
+				.split("\n")
+				.map(Number)
+				.filter(pid => pid > 0);
+		try {
+			const child = spawn(["/bin/sh", chain, pidLog], { groupKeeper: true, timeout: 2_000 });
+			const outcome = await child.wait().then(
+				() => new Error("run reported success while the chain was running"),
+				(error: unknown) => error,
+			);
+
+			expect(outcome).toBeInstanceOf(TimeoutError);
+			const alive: number[] = [];
+			for (const pid of await links()) if (await runningAfter(pid, 500)) alive.push(pid);
+			expect(alive).toEqual([]);
+		} finally {
+			// Only on failure is a link left: kill the logged links in a few rounds,
+			// since a link killed mid-fork may log its replacement just after.
+			for (let round = 0; round < 3; round++) {
+				for (const pid of await links()) Process.fromPid(pid)?.killTree(9);
+				await Bun.sleep(20);
+			}
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("still kills the group when the keeper was killed on its own with members left", async () => {
+		// A keeper killed from outside (as the OOM killer would) proved nothing
+		// about its group, so a later stop must reach the member it left.
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-group-keeper-"));
+		const pidFile = path.join(dir, "pid");
+		let memberPid: number | undefined;
+		try {
+			const child = spawn(
+				["/bin/sh", "-c", `trap "" TERM; sleep 3600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; exit 0`],
+				{ groupKeeper: true },
+			);
+			const outcome = child.wait().catch((error: unknown) => error);
+			memberPid = await readPid(pidFile);
+			process.kill(child.pid, "SIGKILL");
+			await child.proc.exited;
+
+			child.kill(new AbortError(new Error("late abort"), ""), -1);
+
+			await outcome;
+			expect(await runningAfter(memberPid, 2_000)).toBe(false);
+		} finally {
+			if (memberPid) Process.fromPid(memberPid)?.killTree(9);
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("signals nothing once the keeper has exited after its last member", async () => {
+		// The keeper outlives its member and then exits on its own: its group id
+		// is no longer reserved for this run, so a late stop must not signal it.
+		const killSpy = spyOn(process, "kill");
+		try {
+			const child = spawn(["/bin/sh", "-c", "sleep 0.2 </dev/null >/dev/null 2>&1 & exit 0"], { groupKeeper: true });
+			const result = await child.wait();
+			killSpy.mockClear();
+
+			child.kill(new AbortError(new Error("late abort"), ""), -1);
+
+			expect(result.exitCode).toBe(0);
+			expect(killSpy).not.toHaveBeenCalled();
+		} finally {
+			killSpy.mockRestore();
+		}
+	});
 });

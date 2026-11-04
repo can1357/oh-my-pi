@@ -10,6 +10,7 @@ import {
 	readConfigFile,
 } from "../utils/config-file-sources";
 import { BiomeClient } from "./clients/biome-client";
+import { linterFilePath } from "./clients/cli-process";
 import { SwiftLintClient } from "./clients/swiftlint-client";
 import DEFAULTS from "./defaults.json" with { type: "json" };
 import type { ServerConfig } from "./types";
@@ -203,18 +204,60 @@ export function hasRootMarkers(cwd: string, markers: string[]): boolean {
 }
 
 /**
- * Check whether any ancestor directory of a file is an LSP project root.
+ * Nearest directory, starting at the file's own directory and walking up, that
+ * holds one of `markers`; null when no ancestor does. This is the file's own
+ * project root for a server, independent of the session cwd.
  */
-export function hasRootMarkerAncestor(filePath: string, markers: string[]): boolean {
-	if (markers.length === 0) return false;
+export function findRootMarkerAncestor(filePath: string, markers: string[]): string | null {
+	if (markers.length === 0) return null;
 
 	let dir = path.dirname(path.resolve(filePath));
 	while (true) {
-		if (hasRootMarkers(dir, markers)) return true;
+		if (hasRootMarkers(dir, markers)) return dir;
 		const parent = path.dirname(dir);
-		if (parent === dir) return false;
+		if (parent === dir) return null;
 		dir = parent;
 	}
+}
+
+/**
+ * The linter root for `filePath`: the nearest ancestor of the file's physical
+ * location holding one of `markers`. Symlinks are resolved, a dangling one to
+ * the target it will create, and a missing tail is kept. A symlink into another
+ * repository therefore yields that repository's root, not the root of the
+ * directory the link sits in. Null when no ancestor has one.
+ */
+export function findLinterRoot(filePath: string, markers: string[]): string | null {
+	return findRootMarkerAncestor(linterFilePath(filePath), markers);
+}
+
+/**
+ * Whether a server's lint/format pass may act on `filePath` in a session at `cwd`.
+ *
+ * A linter applies only to a file whose own project root ({@link findLinterRoot},
+ * found from the file, not from the cwd) selects it, so the cwd repository's
+ * linter and config never judge a file of another repository. A CLI linter then
+ * runs from that root with the executable {@link resolveLinterCommand} picks
+ * for it, so it also needs one. An LSP linter is a single server started in the cwd
+ * with the cwd's binary, so it serves only files whose root lies inside the
+ * cwd. Type checkers, and servers without root markers, are not gated.
+ */
+export function linterAppliesToFile(config: ServerConfig, filePath: string, cwd: string): boolean {
+	if (!config.isLinter && !config.createClient) return true;
+	if (config.rootMarkers.length === 0) return true;
+	const root = findLinterRoot(filePath, config.rootMarkers);
+	if (root === null) return false;
+	if (config.createClient) return resolveLinterCommand(config, root, cwd) !== null;
+	return pathIsWithin(linterFilePath(cwd), root);
+}
+
+/** Drop the linters {@link linterAppliesToFile} rules out for `filePath`; keeps order. */
+export function filterLintersForFile(
+	servers: Array<[string, ServerConfig]>,
+	filePath: string,
+	cwd: string,
+): Array<[string, ServerConfig]> {
+	return servers.filter(([, config]) => linterAppliesToFile(config, filePath, cwd));
 }
 
 // =============================================================================
@@ -269,9 +312,23 @@ function resolveLocalCommand(basePath: string): string | null {
 	return null;
 }
 
-function resolveCommandFromLocalRoot(command: string, cwd: string): string | null {
+/** Whether `command` names a file (`./tools/biome`, `/opt/biome`) rather than a name to search for. */
+function commandNamesPath(command: string): boolean {
+	return command.includes("/") || (process.platform === "win32" && command.includes("\\"));
+}
+
+/**
+ * First executable named `command` in `cwd`'s local bin directories. With
+ * `requireProjectMarkers`, a directory counts only beside its project marker
+ * (`node_modules/.bin` beside `package.json`, …); a bare `bin/` always needs it.
+ * A command that names a path (`./tools/biome`, `/opt/biome`) is never looked
+ * up there: it means that file, which `$which` resolves.
+ */
+function resolveCommandFromLocalRoot(command: string, cwd: string, requireProjectMarkers: boolean): string | null {
+	if (commandNamesPath(command)) return null;
 	for (const { markers, binDir } of LOCAL_BIN_PATHS) {
-		if (!hasRootMarkers(cwd, markers)) continue;
+		const markerRequired = requireProjectMarkers || binDir === "bin";
+		if (markerRequired && !hasRootMarkers(cwd, markers)) continue;
 		const resolved = resolveLocalCommand(path.join(cwd, binDir, command));
 		if (resolved) return resolved;
 	}
@@ -285,26 +342,62 @@ export interface ResolveCommandOptions extends Pick<WhichOptions, "cache" | "PAT
 }
 
 /**
- * Resolve a command to an executable path.
- * Checks project-local bin directories first, then falls back to $PATH.
+ * Resolve a command to an executable path for a session at `cwd`.
+ * Checks project-local bin directories first, then `$PATH`. A relative command
+ * (`./tools/biome`) and a relative `PATH` entry resolve against `cwd`, the
+ * session's own directory, never against the process's working directory; an
+ * empty entry is skipped.
  *
  * @param command - The command name (e.g., "typescript-language-server")
  * @param cwd - Working directory to search from
  * @returns Absolute path to the executable, or null if not found
  */
 export function resolveCommand(command: string, cwd: string, options?: ResolveCommandOptions): string | null {
-	if (options?.localRoots) {
-		for (const root of options.localRoots) {
-			const resolved = resolveCommandFromLocalRoot(command, root);
-			if (resolved) return resolved;
-		}
-	} else {
-		const resolved = resolveCommandFromLocalRoot(command, cwd);
+	for (const root of options?.localRoots ?? [cwd]) {
+		const resolved = resolveCommandFromLocalRoot(command, root, true);
 		if (resolved) return resolved;
 	}
+	return $which(command, { cache: options?.cache, PATH: options?.PATH, cwd });
+}
 
-	if (!options) return $which(command);
-	return $which(command, { cache: options.cache, PATH: options.PATH });
+/**
+ * Resolve a linter's executable for the project rooted at `root`: the local bin
+ * directories of `root` and then of each ancestor (the lookup Node itself does
+ * for a package at `root`, which needs no `package.json`), then PATH. The
+ * session cwd plays no part, so a file of another repository never runs the
+ * cwd repository's binary.
+ *
+ * A command that names a path is that file, a relative one resolved against
+ * `root`, whatever `PATH` holds. A bare name is searched only in the absolute
+ * `PATH` entries: an empty or relative entry would make `root`, which may be
+ * any repository the agent writes into, a search directory, so a checkout
+ * could supply the executable that runs on it.
+ */
+export function resolveCommandForRoot(command: string, root: string): string | null {
+	for (let dir = root; ;) {
+		const resolved = resolveCommandFromLocalRoot(command, dir, false);
+		if (resolved) return resolved;
+		const parent = path.dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	return $which(command, { cwd: root, requireAbsolutePaths: !commandNamesPath(command) });
+}
+
+/**
+ * The executable a CLI linter runs for a file whose linter root is `root`, in a
+ * session at `cwd`. Both the decision whether the linter applies and the client
+ * that runs it use this, so they never disagree.
+ *
+ * The session's own root (the cwd itself) keeps the executable the session's
+ * configuration already resolved ({@link resolveCommand}, at load), under the
+ * session's rules: a relative `PATH` entry or command there is the session's
+ * own choice. Any other root is resolved under the foreign-root rules of
+ * {@link resolveCommandForRoot}.
+ */
+export function resolveLinterCommand(config: ServerConfig, root: string, cwd: string): string | null {
+	if (root === linterFilePath(cwd)) return config.resolvedCommand ?? resolveCommand(config.command, cwd);
+	return resolveCommandForRoot(config.command, root);
 }
 
 // =============================================================================

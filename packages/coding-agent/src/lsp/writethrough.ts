@@ -12,7 +12,7 @@ import {
 	reconcileOpenFilesFromDisk,
 	sendRequest,
 } from "./client";
-import { getConfig, getServersForFile } from "./config";
+import { filterLintersForFile, getConfig, getServersForFile } from "./config";
 import {
 	captureDiagnosticVersions,
 	captureOpenFileVersions,
@@ -441,7 +441,8 @@ async function runLspWritethrough(
 	}
 
 	const config = getConfig(cwd);
-	const servers = getServersForFile(config, dst);
+	// Linters run only on files whose own project root selects them.
+	const servers = filterLintersForFile(getServersForFile(config, dst), dst, cwd);
 
 	if (servers.length === 0) {
 		await commitWrite();

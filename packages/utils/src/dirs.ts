@@ -167,9 +167,76 @@ export interface EquivalentPathOptions {
 	 * missing suffix, so a symlinked parent canonicalizes the same before and after the path appears.
 	 */
 	throughMissing?: boolean;
+	/**
+	 * With `throughMissing`: resolve the path the way a writer that creates missing parent
+	 * directories would reach it. Each component is walked in order, a symlink (dangling or not,
+	 * leaf or ancestor) is replaced by its target, a missing component is taken as a directory to
+	 * be created, and `..` steps out of the directory reached so far, never lexically across a
+	 * link. A file about to be created through a link resolves to where it will be created. At
+	 * most 40 links are followed; past that, the rest of the path is kept as written.
+	 */
+	followDanglingLinks?: boolean;
+}
+
+const MAX_LINK_HOPS = 40;
+
+/** The host's path separators: a backslash is an ordinary filename character on POSIX. */
+const PATH_SEPARATORS = process.platform === "win32" ? /[\\/]/ : /\//;
+
+/** Split a path into its root and its components, keeping `.` and `..` as written. */
+function splitPathComponents(input: string): { root: string; parts: string[] } {
+	const root = path.parse(input).root;
+	const parts = input
+		.slice(root.length)
+		.split(PATH_SEPARATORS)
+		.filter(part => part.length > 0);
+	return { root, parts };
+}
+
+/** Physical location of `input` with every symlink followed, existing or not (see `followDanglingLinks`). */
+function resolveFollowingLinks(input: string): string {
+	// Not `path.resolve`: it would apply `..` lexically before any link is followed.
+	const absolute = path.isAbsolute(input) ? input : `${process.cwd()}${path.sep}${input}`;
+	let { root: current, parts: pending } = splitPathComponents(absolute);
+	let hops = 0;
+	while (pending.length > 0) {
+		const part = pending.shift() as string;
+		if (part === ".") continue;
+		if (part === "..") {
+			current = path.dirname(current);
+			continue;
+		}
+		const next = path.join(current, part);
+		// A missing component is taken as a directory still to be created (as a writer that
+		// creates parent directories does); `..` may lead back to existing links, so each
+		// component is checked rather than stopping at the first missing one.
+		if (hops < MAX_LINK_HOPS) {
+			// One `readlink` both asks whether the component is a link and reads its target, so a
+			// link replaced or removed by another process cannot fail the walk between two calls:
+			// not a link (EINVAL), missing (ENOENT) or unreadable is a plain component.
+			let link: string | undefined;
+			try {
+				link = fs.readlinkSync(next);
+			} catch {
+				// A plain component.
+			}
+			if (link !== undefined) {
+				hops++;
+				const target = splitPathComponents(link);
+				if (target.root) current = target.root;
+				pending = [...target.parts, ...pending];
+				continue;
+			}
+		}
+		current = next;
+	}
+	return current;
 }
 
 export function resolveEquivalentPath(inputPath: string, options?: EquivalentPathOptions): string {
+	// The walker also handles an existing path: realpath of `path.resolve(input)` would apply a
+	// `..` that follows a symlink lexically, before the link is followed.
+	if (options?.throughMissing && options.followDanglingLinks) return resolveFollowingLinks(inputPath);
 	const resolvedPath = path.resolve(inputPath);
 	try {
 		return fs.realpathSync(resolvedPath);

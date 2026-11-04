@@ -20,16 +20,18 @@ const LINUX_SUBREAPER_BUN_BE_BUN_ENV = "OMP_PTREE_SUBREAPER_BUN_BE_BUN";
 const SUBREAPER_KILL_WINDOW_MS = 100;
 const SUBREAPER_KILL_POLL_MS = 5;
 
-/**
- * Build the Linux child-subreaper entrypoint.
- *
- * @internal Exported so tests can force a missing first libc soname and verify
- * the loader continues to the next candidate.
- */
-export function createLinuxSubreaperScript(libcCandidates: readonly string[] = ["libc.so.6", "libc.so"]): string {
-	return `
-import { dlopen, FFIType } from "bun:ffi";
+const DEFAULT_LIBC_CANDIDATES = ["libc.so.6", "libc.so"] as const;
 
+/**
+ * Script source that makes the running Bun process a Linux child subreaper and
+ * defines `hasLiveChildren()`: it reaps exited children and reports whether any
+ * child is left. Every orphaned descendant is reparented to a subreaper, so "no
+ * child left" is the kernel's own, atomic answer to "no descendant left": a
+ * descendant that forks and exits always leaves its replacement a child of
+ * someone still counted.
+ */
+function linuxSubreaperSetup(libcCandidates: readonly string[]): string {
+	return `
 let libc;
 for (const soname of ${JSON.stringify(libcCandidates)}) {
 	try {
@@ -52,6 +54,26 @@ if (libc.symbols.prctl(36, 1, 0, 0, 0) !== 0) {
 	throw new Error("failed to become a Linux child subreaper");
 }
 
+function hasLiveChildren() {
+	let childPid;
+	do {
+		childPid = libc.symbols.waitpid(-1, null, 1);
+	} while (childPid > 0);
+	return childPid === 0;
+}
+`;
+}
+
+/**
+ * Build the Linux child-subreaper entrypoint.
+ *
+ * @internal Exported so tests can force a missing first libc soname and verify
+ * the loader continues to the next candidate.
+ */
+export function createLinuxSubreaperScript(libcCandidates: readonly string[] = DEFAULT_LIBC_CANDIDATES): string {
+	return `
+import { dlopen, FFIType } from "bun:ffi";
+${linuxSubreaperSetup(libcCandidates)}
 const commandJson = Bun.env.${LINUX_SUBREAPER_COMMAND_ENV};
 if (!commandJson) throw new Error("missing supervised command");
 const callerBunBeBun = Bun.env.${LINUX_SUBREAPER_BUN_BE_BUN_ENV};
@@ -74,14 +96,6 @@ async function relay(stream, destination) {
 	await writer.flush();
 }
 
-function hasLiveChildren() {
-	let childPid;
-	do {
-		childPid = libc.symbols.waitpid(-1, null, 1);
-	} while (childPid > 0);
-	return childPid === 0;
-}
-
 const [exitCode] = await Promise.all([
 	child.exited,
 	relay(child.stdout, Bun.stdout),
@@ -93,6 +107,98 @@ process.exit(exitCode ?? 1);
 }
 
 const LINUX_SUBREAPER_SCRIPT = createLinuxSubreaperScript();
+
+/**
+ * Group-keeper entrypoint (POSIX without a child subreaper, such as macOS).
+ *
+ * It runs detached, so it leads the command's process group, and stays alive
+ * until the command has exited, every holder of the command's output has
+ * closed it, and no other process is left in its group. While it lives, the
+ * group id stays reserved for this run, so a group kill can only reach
+ * processes of this run (also ones whose launcher died or that closed their
+ * output). Once it exits, nothing of the run is left in the group, and ptree
+ * never signals that group id again. Like the Linux subreaper, it therefore
+ * holds the run open until its members are gone: a member that outlives the
+ * command keeps the run going until its deadline or abort kills the group.
+ *
+ * "No member left" must be one atomic answer, never a listing assembled over
+ * time: a member that forks and exits while a listing is read leaves a
+ * replacement the listing never saw. macOS answers with one
+ * `proc_listpids(PROC_PGRP_ONLY)` call, which walks the process list under the
+ * kernel's process-list lock. Elsewhere (Linux) the keeper is also a child
+ * subreaper, so every member is a descendant and "no child left" (`waitpid`) is
+ * the kernel's answer; it also waits for a descendant that left the group,
+ * which the group kill cannot reach. On macOS such a descendant escapes. The
+ * mechanism is set up before the command starts, so a host where it cannot
+ * work fails the run instead of leaving members unowned.
+ *
+ * It survives the polite phase of a group termination (SIGTERM, also SIGINT and
+ * SIGHUP): if it died there, a member that ignores SIGTERM would be left in a
+ * group nobody anchors and the SIGKILL that follows would be skipped. It exits
+ * once the members are gone, or dies with them on SIGKILL. Exec resets caught
+ * signals, so the command keeps default signal dispositions.
+ */
+const GROUP_KEEPER_SCRIPT = `
+import { dlopen, FFIType } from "bun:ffi";
+
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => {});
+let membersLeft;
+if (process.platform === "darwin") {
+	const group = process.pid;
+	const libproc = dlopen("/usr/lib/libproc.dylib", {
+		proc_listpids: { args: [FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+	});
+	// Two slots suffice: the keeper itself and any one other member.
+	const pids = new Int32Array(2);
+	membersLeft = () => {
+		const bytes = libproc.symbols.proc_listpids(2 /* PROC_PGRP_ONLY */, group, pids, pids.byteLength);
+		if (bytes < 0) throw new Error("proc_listpids failed");
+		for (let i = 0; i < bytes / 4; i++) if (pids[i] !== 0 && pids[i] !== group) return true;
+		return false;
+	};
+} else {
+${linuxSubreaperSetup(DEFAULT_LIBC_CANDIDATES)}
+	membersLeft = hasLiveChildren;
+}
+
+const commandJson = Bun.env.${LINUX_SUBREAPER_COMMAND_ENV};
+if (!commandJson) throw new Error("missing supervised command");
+const callerBunBeBun = Bun.env.${LINUX_SUBREAPER_BUN_BE_BUN_ENV};
+delete Bun.env.${LINUX_SUBREAPER_COMMAND_ENV};
+delete Bun.env.${LINUX_SUBREAPER_BUN_BE_BUN_ENV};
+if (callerBunBeBun === undefined) delete Bun.env.BUN_BE_BUN;
+else Bun.env.BUN_BE_BUN = callerBunBeBun;
+const child = Bun.spawn(JSON.parse(commandJson), {
+	stdin: "inherit",
+	stdout: "pipe",
+	stderr: "pipe",
+	env: Bun.env,
+});
+
+async function relay(stream, destination) {
+	const writer = destination.writer();
+	for await (const chunk of stream) writer.write(chunk);
+	await writer.flush();
+}
+
+// The keeper's own exit is ptree's proof that the group is empty, so no
+// failure may skip the check: a relay error still waits for the command, and a
+// check that cannot answer counts as members left.
+const [exited] = await Promise.allSettled([
+	child.exited,
+	relay(child.stdout, Bun.stdout),
+	relay(child.stderr, Bun.stderr),
+]);
+const stillHeld = () => {
+	try {
+		return membersLeft();
+	} catch {
+		return true;
+	}
+};
+for (let delay = 5; stillHeld(); delay = Math.min(delay * 2, 100)) await Bun.sleep(delay);
+process.exit(exited.status === "fulfilled" ? (exited.value ?? 1) : 1);
+`;
 
 // ── Exceptions ───────────────────────────────────────────────────────────────
 
@@ -197,6 +303,14 @@ export class ChildProcess<In extends InMask = InMask> {
 	#hardKillSweep?: Promise<void>;
 	#terminateGroup: boolean;
 	#hardKillTree: boolean;
+	// The root is a group keeper. It exits on its own only once no other process
+	// is left in its group, so after that exit the group id is no longer reserved
+	// and nothing is signalled.
+	#groupKeeper: boolean;
+	// Set once this run's own termination signalled the keeper's group. A group
+	// kill reaches every member, so a keeper that then dies from a signal leaves
+	// nothing of the run behind.
+	#keeperGroupSignalled = false;
 	// Windows has no process groups. Retaining the root's native handle pins
 	// its PID after exit so killTree() can still enumerate its original children.
 	#windowsRootProcess?: Process;
@@ -206,9 +320,11 @@ export class ChildProcess<In extends InMask = InMask> {
 		retainFullStderr = exposeStderr,
 		terminateGroup = false,
 		hardKillTree = false,
+		groupKeeper = false,
 	) {
 		this.#terminateGroup = terminateGroup;
 		this.#hardKillTree = hardKillTree;
+		this.#groupKeeper = groupKeeper;
 		this.#windowsRootProcess = process.platform === "win32" ? (Process.fromPid(proc.pid) ?? undefined) : undefined;
 		if (retainFullStderr) this.#stderrChunks = [];
 		// Eagerly drain stderr into a truncated tail, retaining raw chunks only for explicit full capture.
@@ -343,6 +459,27 @@ export class ChildProcess<In extends InMask = InMask> {
 		// started. Do not replace that sweep with a normal root termination: the
 		// root must stay alive until adopted descendants have been collected.
 		if (this.#hardKillSweep) return;
+		if (this.#groupKeeper && this.proc.exitCode !== null) {
+			// The keeper exited on its own, which it does only after proving its
+			// group empty; the group id may already belong to another process.
+			this.#terminating = Promise.resolve();
+			return;
+		}
+		if (this.#groupKeeper && this.proc.signalCode !== null) {
+			// The keeper died from a signal. After this run's own group kill the
+			// members died with it. Otherwise (OOM killer, a kill aimed at the keeper
+			// alone) it proved nothing: kill whatever is left of its group. A member
+			// still alive keeps the group id from being reused; with none left, only
+			// a pid wrap to this exact id could make the signal reach another group.
+			if (!this.#keeperGroupSignalled) {
+				this.#keeperGroupSignalled = true;
+				try {
+					process.kill(-this.proc.pid, "SIGKILL");
+				} catch {}
+			}
+			this.#terminating = Promise.resolve();
+			return;
+		}
 		if (gracefulMs !== undefined && gracefulMs < 0 && this.#hardKillTree && this.proc.exitCode === null) {
 			// Keep the subreaper alive while descendants are killed. A single
 			// killTree() snapshot can miss a worker whose parent exits during the
@@ -387,6 +524,7 @@ export class ChildProcess<In extends InMask = InMask> {
 						? { group: true }
 						: undefined
 					: { gracefulMs, group: this.#terminateGroup };
+			if (this.#groupKeeper) this.#keeperGroupSignalled = true;
 			this.#terminating = this.#terminateTree(options);
 		}
 	}
@@ -649,6 +787,16 @@ type ChildSpawnOptions<In extends InMask = InMask> = Omit<
 	 * descendant that creates a new session and reparents to launchd.
 	 */
 	subreaper?: boolean;
+	/**
+	 * On POSIX, run the command under a group keeper: a supervisor that leads a
+	 * new process group (implies `detached`) and lives until the command has
+	 * exited, its output is closed and no other process is left in the group
+	 * (on Linux, until no descendant is left at all). Kills reach the whole
+	 * group, also after the command's launcher died, and never signal a group id
+	 * after the keeper exited on its own. Ignored on Windows and when `subreaper`
+	 * applies (Linux). A descendant that leaves the group stays out of reach.
+	 */
+	groupKeeper?: boolean;
 	/** Expose and retain complete stderr for a later `wait({ stderr: "full" })`. */
 	stderr?: "full" | null;
 };
@@ -658,17 +806,20 @@ function spawnInternal<In extends InMask = InMask>(
 	opts: ChildSpawnOptions<In> | undefined,
 	retainFullStderr: boolean,
 ): ChildProcess<In> {
-	const { timeout = -1, signal, stderr, detached, subreaper = false, ...rest } = opts ?? {};
+	const { timeout = -1, signal, stderr, detached, subreaper = false, groupKeeper = false, ...rest } = opts ?? {};
 	const useSubreaper = subreaper && process.platform === "linux";
+	const useGroupKeeper = groupKeeper && !useSubreaper && process.platform !== "win32";
+	const supervisorScript = useSubreaper ? LINUX_SUBREAPER_SCRIPT : useGroupKeeper ? GROUP_KEEPER_SCRIPT : undefined;
+	const leadsGroup = useGroupKeeper || detached === true;
 	const commandEnv = rest.env ?? Bun.env;
-	const child = Bun.spawn(useSubreaper ? [process.execPath, "-e", LINUX_SUBREAPER_SCRIPT] : cmd, {
+	const child = Bun.spawn(supervisorScript ? [process.execPath, "-e", supervisorScript] : cmd, {
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
 		windowsHide: true,
-		detached,
 		...rest,
-		env: useSubreaper
+		detached: leadsGroup,
+		env: supervisorScript
 			? {
 					...commandEnv,
 					BUN_BE_BUN: "1",
@@ -677,7 +828,7 @@ function spawnInternal<In extends InMask = InMask>(
 				}
 			: rest.env,
 	});
-	const cp = new ChildProcess(child, stderr === "full", retainFullStderr, detached === true, useSubreaper);
+	const cp = new ChildProcess(child, stderr === "full", retainFullStderr, leadsGroup, useSubreaper, useGroupKeeper);
 	if (signal) cp.attachSignal(signal);
 	if (timeout > 0) cp.attachTimeout(timeout);
 	return cp;

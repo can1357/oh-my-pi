@@ -3081,7 +3081,7 @@ describe("lsp regressions", () => {
 		try {
 			const config = loadConfig(tempDir.path());
 			expect(getServersForFile(config, specPath).map(([name]) => name)).toEqual(["tlaplus"]);
-			expect(whichSpy).toHaveBeenCalledWith("tlapm_lsp");
+			expect(whichSpy).toHaveBeenCalledWith("tlapm_lsp", expect.objectContaining({ cwd: tempDir.path() }));
 			expect(existsSpy).toHaveBeenCalled();
 			expect(detectLanguageId(specPath)).toBe("tlaplus");
 			expect(detectLanguageId(aliasPath)).toBe("tlaplus");
@@ -3178,7 +3178,7 @@ describe("lsp regressions", () => {
 			expect(config.servers["csharp-ls"]?.resolvedCommand).toBe(resolvedCsharpLs);
 			expect(getServersForFile(config, path.join(cwd, "Program.cs")).map(([name]) => name)).toEqual(["csharp-ls"]);
 			expect(config.servers["csharp-ls"]?.rootMarkers).toEqual(["."]);
-			expect(whichSpy).toHaveBeenCalledWith("csharp-ls");
+			expect(whichSpy).toHaveBeenCalledWith("csharp-ls", expect.objectContaining({ cwd }));
 		} finally {
 			try {
 				await preloadPluginRoots(path.join(tempDir.path(), "empty-home"), cwd);

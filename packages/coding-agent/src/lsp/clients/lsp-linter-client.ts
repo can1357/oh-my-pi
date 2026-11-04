@@ -33,12 +33,12 @@ export class LspLinterClient implements LinterClient {
 		return this.#client;
 	}
 
-	async format(filePath: string, content: string): Promise<string> {
-		const client = await this.#getClient();
+	async format(filePath: string, content: string, signal?: AbortSignal): Promise<string> {
+		const client = await this.#getClient(signal);
 		const uri = fileToUri(filePath);
 
 		// Sync content to LSP
-		await syncContent(client, filePath, content);
+		await syncContent(client, filePath, content, signal);
 
 		// Check if server supports formatting
 		const caps = client.serverCapabilities;
@@ -47,10 +47,15 @@ export class LspLinterClient implements LinterClient {
 		}
 
 		// Request formatting
-		const edits = (await sendRequest(client, "textDocument/formatting", {
-			textDocument: { uri },
-			options: resolveFormatOptions(filePath, content),
-		})) as TextEdit[] | null;
+		const edits = (await sendRequest(
+			client,
+			"textDocument/formatting",
+			{
+				textDocument: { uri },
+				options: resolveFormatOptions(filePath, content),
+			},
+			signal,
+		)) as TextEdit[] | null;
 
 		if (!edits || edits.length === 0) {
 			return content;

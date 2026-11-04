@@ -9,8 +9,19 @@ import { cfgLspDiagnosticsDeduplicate } from "./settings";
 export class DeferredDiagnostics {
 	readonly #pendingFetches = new Map<string, AbortController>();
 	readonly #fallbackVersions = new Map<string, number>();
+	/**
+	 * Aborted when the session is disposed. Every handle's signal follows it, so
+	 * disposal ends a fetch (and its linter run) at any stage, also one still in
+	 * the write's own wait, without this class holding the handles.
+	 */
+	readonly #sessionDisposed = new AbortController();
 
-	constructor(private readonly session: ToolSession) {}
+	constructor(private readonly session: ToolSession) {
+		session.registerDisposeCallback?.(() => {
+			this.#sessionDisposed.abort(new Error("session disposed"));
+			this.#pendingFetches.clear();
+		});
+	}
 
 	/** Begin a file mutation and return the handle consumed by LSP writethrough. */
 	begin(path: string): WritethroughDeferredHandle {
@@ -27,7 +38,7 @@ export class DeferredDiagnostics {
 				this.#pendingFetches.delete(path);
 				this.#inject(path, diagnostics, mutationVersion);
 			},
-			signal: controller.signal,
+			signal: AbortSignal.any([controller.signal, this.#sessionDisposed.signal]),
 			finalize: diagnostics => {
 				if (!diagnostics) {
 					this.#pendingFetches.set(path, controller);
