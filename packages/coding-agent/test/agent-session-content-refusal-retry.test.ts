@@ -63,6 +63,56 @@ function responsesModel(baseUrl: string): Model<"openai-responses"> {
 	} satisfies ModelSpec<"openai-responses">);
 }
 
+// The other refusal shape on the wire: Anthropic refuses inside an ordinary HTTP 200
+// stream, with `stop_reason: "refusal"` on the trailing `message_delta` and no error event.
+const ANTHROPIC_REFUSAL_EXPLANATION = "I can't help with that request.";
+const ANTHROPIC_REFUSAL_LINE = `Refusal (cyber): ${ANTHROPIC_REFUSAL_EXPLANATION}`;
+
+function anthropicRefusalResponse(): Response {
+	const frames = [
+		`event: message_start\ndata: ${JSON.stringify({
+			type: "message_start",
+			message: {
+				id: "msg_refused",
+				type: "message",
+				role: "assistant",
+				model: "claude-refusal-route",
+				content: [],
+				stop_reason: null,
+				usage: { input_tokens: 1, output_tokens: 0 },
+			},
+		})}`,
+		`event: message_delta\ndata: ${JSON.stringify({
+			type: "message_delta",
+			delta: {
+				stop_reason: "refusal",
+				stop_details: { type: "refusal", category: "cyber", explanation: ANTHROPIC_REFUSAL_EXPLANATION },
+			},
+			usage: { output_tokens: 1 },
+		})}`,
+		'event: message_stop\ndata: {"type":"message_stop"}',
+	];
+	return new Response(`${frames.join("\n\n")}\n\n`, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
+function anthropicModel(baseUrl: string): Model<"anthropic-messages"> {
+	return buildModel({
+		api: "anthropic-messages",
+		name: "Anthropic Refusal Route",
+		id: "claude-refusal-route",
+		provider: "anthropic",
+		baseUrl,
+		contextWindow: 200_000,
+		maxTokens: 8192,
+		input: ["text"],
+		reasoning: false,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	} satisfies ModelSpec<"anthropic-messages">);
+}
+
 /** HTTP 503 with hidden transport retries off, so each one reaches the session's retry policy. */
 function transientResponse(): Response {
 	return Response.json(
@@ -85,12 +135,13 @@ const CHAIN_PROVIDER = "refusal-chain";
 /**
  * A real AgentSession on the real Responses provider; `respond` answers request N (1-based).
  * `chain` serves models `primary`, `middle` and `last` from models.yml, with the fallback chain
- * primary -> middle -> last.
+ * primary -> middle -> last. `anthropic` serves the real Anthropic provider instead, for the
+ * refusal shape that arrives inside an ordinary 200 response.
  */
 async function createHarness(
 	respond: (request: number) => Response,
 	settingsOverrides = {},
-	options: { chain?: boolean } = {},
+	options: { chain?: boolean; anthropic?: boolean } = {},
 ): Promise<Harness> {
 	let requests = 0;
 	const models: string[] = [];
@@ -106,7 +157,7 @@ async function createHarness(
 	const baseUrl = server.url.toString().replace(/\/$/, "");
 	const tempDir = TempDir.createSync("@pi-content-refusal-");
 	const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
-	authStorage.keys.setRuntime("openai", "refusal-test-key");
+	authStorage.keys.setRuntime(options.anthropic ? "anthropic" : "openai", "refusal-test-key");
 	const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 	const settings = Settings.isolated({
 		"retry.baseDelayMs": 1,
@@ -141,7 +192,11 @@ async function createHarness(
 		settings.setModelRole("default", `${CHAIN_PROVIDER}/primary`);
 	}
 	const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"), { settings });
-	const model = options.chain ? modelRegistry.find(CHAIN_PROVIDER, "primary") : responsesModel(baseUrl);
+	const model = options.chain
+		? modelRegistry.find(CHAIN_PROVIDER, "primary")
+		: options.anthropic
+			? anthropicModel(baseUrl)
+			: responsesModel(baseUrl);
 	if (!model) throw new Error("models.yml did not register the chain's primary model");
 	const agent = new Agent({
 		getApiKey: () => "refusal-test-key",
@@ -278,6 +333,42 @@ describe("AgentSession content-policy refusal retries", () => {
 			expect(lines).toContain(`Retrying (1/1): ${REFUSAL_LINE}`);
 			expect(lines).toContain(REFUSAL_LINE);
 			expect(harness.requests()).toBe(2);
+		} finally {
+			vi.restoreAllMocks();
+			await harness.cleanup();
+		}
+	}, 30_000);
+
+	// The same exit rule on the second wire shape: the provider refuses inside a 200
+	// response, with `stop_reason: "refusal"` on the trailing delta and no error event.
+	// One predicate decides both — the turn's `stopDetails.type` — so neither shape is missed.
+	it("exits print mode with the refusal status when Anthropic refuses inside a 200 response", async () => {
+		const harness = await createHarness(() => anthropicRefusalResponse(), {}, { anthropic: true });
+		const stderr: string[] = [];
+		vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+			stderr.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+			return true;
+		});
+		vi.spyOn(process.stdout, "write").mockImplementation((...args: unknown[]) => {
+			const callback = args.at(-1);
+			if (typeof callback === "function") (callback as (error?: Error | null) => void)(null);
+			return true;
+		});
+		try {
+			const exitCode = await runPrintMode(harness.session, {
+				mode: "text",
+				initialMessage: "Review this exploit mitigation",
+			});
+
+			expect(exitCode).toBe(PRINT_MODE_REFUSAL_EXIT_CODE);
+			expect(stderr.join("").split("\n")).toContain(ANTHROPIC_REFUSAL_LINE);
+			// An Anthropic refusal walks fallback chains only; with no chain it is one request,
+			// never a same-model retry — `retry.refusalRetries` is for `cyber_policy` alone.
+			expect(harness.requests()).toBe(1);
+			expect(harness.session.getLastAssistantMessage()).toMatchObject({
+				stopReason: "error",
+				stopDetails: { type: "refusal", category: "cyber" },
+			});
 		} finally {
 			vi.restoreAllMocks();
 			await harness.cleanup();
