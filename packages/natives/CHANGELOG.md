@@ -19,12 +19,32 @@
 - Fixed the bash tool's shell hanging, or losing an error or output, when a background command it took for an external one ran as a builtin or function (`${c[n++]} >fifo &`); the command now makes its named-pipe redirections, reports its errors through them, and the `eval` string or function it runs makes its own redirections once, as in Bash ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool's shell failing a command given many file descriptors with `Too many open files` where Bash runs it (`cmd 3>&1 4>&1 …`, or hundreds of `N>file`); a command now needs one descriptor per distinct file, and a redirection to a descriptor at or past `ulimit -n` fails with `Bad file descriptor` as in Bash ([#17802](https://github.com/can1357/oh-my-pi/pull/17802) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool's shell not running a background subshell's, group's or function's `EXIT` trap when `kill` ends it; the trap now runs and the job ends with the signal's status, as in Bash ([#17802](https://github.com/can1357/oh-my-pi/pull/17802) by [@sjawhar](https://github.com/sjawhar))
+### Breaking Changes
+
+- Replaced visualization-only `parseShell()` with engine-owned `RunTrace.present()` and `ShellVisualization` APIs.
+
+### Added
+
+- `RunTrace` exposes real command states, assignments, producer-attributed output and bounded replay, with native Raw/Pseudo presentation and persisted-trace restoration.
+- `obash --trace=PATH` writes that model as JSON at exit; `UnitCompiled` events now carry the unit's node table (`nodes: [{kind, lo, hi, line, col}]`) instead of `node_count`
+
 ### Changed
 
+- Native builds now reuse the shared diff implementation, and macOS display discovery no longer needs a separate capture library
+- Shell spawn benchmarks report median and p99 latency without an additional benchmark framework
+
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections
+- Made the bash tool's shell faster on `while read` loops over files (no per-line `lseek`), output sent to `/dev/null`, `(( ))` arithmetic, recursive functions, plain assignments and every simple command
+- Made starting external commands from the bash tool's shell cheaper on Linux (the child no longer resets every signal disposition before `exec`, and the parent reuses its spawn setup and makes about half as many system calls per command)
+- Made the bash tool's shell parse scripts and define functions about a fifth faster, with a function's `declare -f` text now produced on first use
+- Made the bash tool's shell start with about half as many system calls on Linux
+- The work-profile flamegraph is now a static SVG (hover titles, no click-to-zoom or search)
+- The bash tool's built-in `jq` reports errors as plain text with `line:column` positions instead of colored source snippets
+- Sixel image output uses a built-in encoder; images with more than 256 colors may get a slightly different palette
 
 ### Fixed
 
+- Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
 ### Fixed
 

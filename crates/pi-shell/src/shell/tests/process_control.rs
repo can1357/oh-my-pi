@@ -920,7 +920,7 @@ async fn kill_builtin_signals_every_process_in_a_jobspec_pipeline() {
 		.await
 		.expect("reap jobspec");
 	for pid in pids {
-		assert!(process::Process::from_pid(pid).is_none(), "pipeline process {pid} survived");
+		assert!(proctree::Process::from_pid(pid).is_none(), "pipeline process {pid} survived");
 	}
 }
 

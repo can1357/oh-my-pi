@@ -1,11 +1,15 @@
-//! Execution events: live feedback now, bash-viz later.
+//! Execution events: live feedback and the run trace
+//! ([`crate::bash::trace`]).
 //!
 //! Events are emitted synchronously at safepoints through
 //! [`Host::event`](crate::bash::Host::event). A kind whose [`EventMask`] bit is
 //! off costs one AND per op and allocates nothing. Every event of a script
 //! carries its [`RunId`]; node events carry a [`NodeRef`] and a [`SpanRef`]
 //! into the unit announced earlier by `UnitCompiled` (built when read:
-//! [`Event::node`], [`Event::span`]).
+//! [`Event::node`], [`Event::span`]). `UnitCompiled` carries the unit's
+//! node table ([`CompiledUnit`]), so an observer can lay the unit out
+//! without re-parsing it. A host that forwards events to a per-run observer
+//! does so through an [`EventSink`].
 //!
 //! Output bytes are not events: hosts tag what commands write with the
 //! [`CmdTag`](crate::bash::CmdTag) of the command that produced it.
@@ -122,6 +126,21 @@ impl<'a> Event<'a> {
 		self.script().map(|r| r.id)
 	}
 
+	/// Output identity of the simple command active at this safepoint.
+	/// Read lazily without enlarging the event or changing its JSON format.
+	pub fn command_tag(&self) -> Option<crate::bash::ids::CmdTag> {
+		let Source::Op { vp, .. } = self.src else {
+			return None;
+		};
+		vp.frames
+			.last()?
+			.scratch
+			.as_ref()?
+			.exec
+			.as_ref()
+			.map(|exec| exec.tag)
+	}
+
 	/// The emitting vproc's mode when it emitted it: inside
 	/// a sticky or cross-dialect function call, the callee's (`FuncEnter`
 	/// included).
@@ -201,6 +220,100 @@ impl Serialize for Event<'_> {
 	}
 }
 
+/// A per-run observer of engine events
+/// ([`RunOptions::events`](crate::session::RunOptions::events)).
+///
+/// The host forwards every event of the attached run to it; [`Self::mask`]
+/// is the shell's event mask while the run is attached.
+pub trait EventSink: Send + Sync {
+	/// Kinds the sink wants.
+	fn mask(&self) -> EventMask;
+	/// One event.
+	fn event(&self, ev: &Event<'_>);
+	/// Pin the actual root submission before stepping a persistent session.
+	/// Descendant submissions are reported by explicit engine lineage instead.
+	fn run_submitted(&self, _run: RunId) {}
+	/// End of a visible capture generation, after its writer slots close.
+	/// Incremental output decoding must finalize here, not at command exit.
+	fn output_end(&self, _t_ns: u64, _fd: i32) {}
+	/// Successfully forwarded bytes of a run's visible stdout/stderr.
+	/// `tag` is absent for shell-level output without an executing command;
+	/// `fd` names the final capture stream (merged stderr therefore uses 1).
+	/// The clock is the same monotonic clock used by engine events.
+	fn output(&self, _tag: Option<crate::bash::ids::CmdTag>, _t_ns: u64, _fd: i32, _bytes: &[u8]) {}
+}
+
+/// The payload of `UnitCompiled`: the unit and the script line of its
+/// first byte.
+///
+/// Serialized as `unit` (id), `source` (unit bytes; spans are relative to
+/// them), `line` (1-based script line of the first byte), `nodes` (the node
+/// table, index = node id, each `{kind, lo, hi, line, col}` with `line`
+/// 0-based within the unit), `features` ([`crate::bash::syntax::Features`]
+/// bits) and `aliases` (substitutions applied, in order). Re-parsing
+/// `source` with `features` and `aliases` reproduces the node ids.
+#[derive(Clone, Copy)]
+pub struct CompiledUnit<'a> {
+	/// The unit.
+	pub unit:   &'a Unit,
+	/// 1-based script line of the first byte of its source.
+	pub line:   u32,
+	/// Compiler-known literal origin, when the source was entered natively.
+	pub parent: Option<&'a SourceOrigin>,
+}
+
+impl CompiledUnit<'_> {
+	/// Unit id.
+	pub const fn id(&self) -> UnitId {
+		self.unit.id
+	}
+
+	/// Unit bytes.
+	pub fn source(&self) -> &BStr {
+		BStr::new(&self.unit.source)
+	}
+
+	/// The node table (index = node id).
+	pub fn nodes(&self) -> &[NodeInfo] {
+		&self.unit.nodes
+	}
+}
+
+impl fmt::Debug for CompiledUnit<'_> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("CompiledUnit")
+			.field("unit", &self.unit.id)
+			.field("source", &self.source())
+			.field("line", &self.line)
+			.field("nodes", &self.unit.nodes.len())
+			.field("features", &self.unit.features)
+			.field("aliases", &self.unit.aliases)
+			.finish()
+	}
+}
+
+impl Serialize for CompiledUnit<'_> {
+	fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+		let mut st = s.serialize_struct("UnitCompiled", 6)?;
+		st.serialize_field("unit", &self.unit.id)?;
+		st.serialize_field("source", &text::Text(&self.unit.source))?;
+		st.serialize_field("line", &self.line)?;
+		st.serialize_field("nodes", &self.unit.nodes)?;
+		st.serialize_field("features", &self.unit.features)?;
+		st.serialize_field("aliases", &Pairs(&self.unit.aliases))?;
+		st.end()
+	}
+}
+
+/// `(name, value)` pairs as two-element arrays (`text::pairs` as a value).
+struct Pairs<'a>(&'a [(BString, BString)]);
+
+impl Serialize for Pairs<'_> {
+	fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+		text::pairs(self.0, s)
+	}
+}
+
 /// A node in a compiled unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeRef {
@@ -256,6 +369,17 @@ pub struct SpanOwned {
 	pub line: u32,
 	/// 1-based byte column.
 	pub col:  u32,
+}
+
+/// Exact emitting activation and canonical parent span of native script input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SourceOrigin {
+	/// Process owning the parent unit.
+	pub vpid: Vpid,
+	/// Canonical word id of the source argument in that unit.
+	pub node: u32,
+	/// Actual literal argument entering this script.
+	pub span: SpanOwned,
 }
 
 /// Chain of origins from the outermost script to the code running now.
@@ -642,24 +766,9 @@ pub enum EventData<'a> {
 	},
 	/// A unit was compiled; it precedes every event that references it.
 	///
-	/// Re-parsing `source` with `features` and `aliases` reproduces the
-	/// unit's node ids.
-	UnitCompiled {
-		/// Unit id.
-		unit:       &'a UnitId,
-		/// Unit bytes (spans are relative to them).
-		#[serde(serialize_with = "text::bytes")]
-		source:     &'a BStr,
-		/// 1-based script line of the first byte.
-		line:       u32,
-		/// Number of nodes.
-		node_count: u32,
-		/// [`crate::bash::syntax::Features`] bits.
-		features:   u32,
-		/// Alias substitutions applied, in order.
-		#[serde(serialize_with = "text::pairs")]
-		aliases:    &'a [(BString, BString)],
-	},
+	/// Serialized as `{unit, source, line, nodes, features, aliases}`
+	/// ([`CompiledUnit`]).
+	UnitCompiled(CompiledUnit<'a>),
 	/// A command starts.
 	CmdStart {
 		/// Node kind.
@@ -870,7 +979,7 @@ impl EventData<'_> {
 		match self {
 			Self::RunStart { .. } => EventKind::RunStart,
 			Self::RunEnd { .. } => EventKind::RunEnd,
-			Self::UnitCompiled { .. } => EventKind::UnitCompiled,
+			Self::UnitCompiled(_) => EventKind::UnitCompiled,
 			Self::CmdStart { .. } => EventKind::CmdStart,
 			Self::CmdExpanded { .. } => EventKind::CmdExpanded,
 			Self::CmdEnd { .. } => EventKind::CmdEnd,

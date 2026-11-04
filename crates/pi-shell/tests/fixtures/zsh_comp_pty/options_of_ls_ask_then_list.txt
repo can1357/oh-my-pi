@@ -1,0 +1,30 @@
+### "ls -\t"
+% ls -
+zsh: do you wish to see all 114 possibilities (38 lines)?
+@ 1,58
+### "y"
+-H      -- follow symlinks on the command line
+-i      -- print file inode numbers
+-k      -- print sizes in kilobytes
+-l      -- long listing
+-L      -- list referenced file for sym link
+-m      -- comma separated
+-n      -- numeric uid, gid
+-o      -- long listing but without group information
+-O      -- display file flags
+-p      -- append file type indicators for directory
+-P      -- do not follow symlinks
+-q      -- hide control chars
+-r      -- reverse sort order
+-R      -- list subdirectories recursively
+-s      -- display size of each file in blocks
+-S      -- sort by size
+-t      -- sort by modification time
+-T      -- show complete time information
+-u      -- access time
+-U      -- file creation time
+-v  -w  -- print raw characters
+-W      -- display whiteouts when scanning directories
+-x      -- sort horizontally
+% ls -
+@ 23,6
