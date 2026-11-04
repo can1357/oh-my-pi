@@ -333,4 +333,9 @@ export class ConfigFile<T> implements IConfigFile<T> {
 	adopt(value: T) {
 		this.#cache = { value, status: "ok" };
 	}
+
+	/** Read as missing until the next {@link invalidate}, whatever is on disk. */
+	adoptMissing() {
+		this.#cache = { status: "not-found" };
+	}
 }

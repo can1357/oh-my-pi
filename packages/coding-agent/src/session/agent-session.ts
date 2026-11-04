@@ -990,22 +990,6 @@ function todoRetryMatches(failed: Record<string, unknown>, retry: Record<string,
 	return true;
 }
 
-/**
- * The parts of a model that come from configuration (models.yml, the catalog),
- * compared to tell whether an on-disk edit changed this model: every field
- * except the context window and output cap, which a session fits to its
- * settings and may probe at runtime, and functions, which each catalog build
- * recreates.
- */
-function modelConfigShape(model: Model): Record<string, unknown> {
-	const shape: Record<string, unknown> = {};
-	for (const [key, value] of Object.entries(model)) {
-		if (key === "contextWindow" || key === "maxTokens" || typeof value === "function") continue;
-		shape[key] = value;
-	}
-	return shape;
-}
-
 export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
 	 * Cross-thread identity token (`${homeThreadId}:${snowflake}`), unique per
@@ -1278,8 +1262,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Registry catalog generation and model object last checked against it (see {@link syncModelConfig}). */
 	#modelConfigGeneration: number | undefined;
 	#modelConfigCheckedModel: Model | undefined;
-	/** Per model object: the catalog configuration it was last validated against (see {@link #currentConfigFor}). */
-	#boundModelConfigs = new WeakMap<Model, { key: string; contextWindow: number | null; maxTokens: number | null }>();
 	/** Main thread only: spots streaming spawning tool calls so a subagent worker boots ahead of dispatch. */
 	readonly #spawnSignal = isMainThread() ? new SubagentSpawnSignal() : undefined;
 	/** Creation-time permission for switchSession to keep the current model when a target's saved model is unrestorable. */
@@ -2410,12 +2392,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#autoTitle = config.autoTitle === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
-		const sideStreamFn = config.sideStreamFn ?? streamSimple;
-		// Side requests (/btw, /omfg, advisors, maintenance, handoff) see a models.yml edit at their next request too.
-		this.#sideStreamFn = async (model, context, options) => {
-			await this.syncModelConfig();
-			return sideStreamFn(this.#currentConfigFor(model), context, options);
-		};
+		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
 		// Avoid wrapping in an `async` closure when no user callback is configured: the
@@ -7004,10 +6981,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Before each model request: re-read models.yml when it changed on disk and
-	 * re-bind this session's model to the rebuilt catalog entry, so an edit
-	 * (a compat flag, a provider setting) reaches a running session at its next
-	 * request. The check runs once per registry generation and per model object,
-	 * so a model handed in from an older catalog is caught at the first request.
+	 * re-bind this session's model to its current catalog configuration
+	 * (`ModelRegistry.currentConfigOf`), so the session's state (context window,
+	 * compat, headers) follows an edit. Requests themselves are rebound at the
+	 * session's stream function, which covers side requests, advisors and
+	 * fallbacks too. Runs once per registry generation and per model object.
 	 */
 	async syncModelConfig(): Promise<void> {
 		await this.#modelRegistry.reloadIfConfigChanged();
@@ -7015,52 +6993,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const current = this.model;
 		if (generation === this.#modelConfigGeneration && current === this.#modelConfigCheckedModel) return;
 		this.#modelConfigGeneration = generation;
-		const fresh = current ? this.#currentConfigFor(current) : current;
+		const fresh = current ? this.#modelRegistry.currentConfigOf(current, this.settings) : current;
 		if (fresh !== current && fresh) this.agent.setModel(fresh);
 		this.#modelConfigCheckedModel = this.model;
-	}
-
-	/**
-	 * `model` as the current catalog configures it: the registry entry for the
-	 * same provider and id when its configuration changed, else `model` itself.
-	 *
-	 * A model object this session validated before is compared by what it was
-	 * validated against: its provider's models.yml digest (which sees header
-	 * resolvers and other functions that compare by identity) and the catalog
-	 * entry's configured fields and limits. An object the session has not seen
-	 * (handed in from an older catalog) is compared field by field, limits
-	 * aside, since the session may have fitted them. An edit to another provider
-	 * leaves the object alone. A context window probed at runtime survives a
-	 * re-bind, unless the edit changed the configured limits.
-	 */
-	#currentConfigFor(model: Model): Model {
-		const entry = this.#modelRegistry.find(model.provider, model.id);
-		if (!entry) return model;
-		const current = {
-			key: `${this.#modelRegistry.providerConfigFingerprint(model.provider) ?? ""}:${Bun.hash(
-				JSON.stringify([modelConfigShape(entry), entry.contextWindow, entry.maxTokens]),
-			).toString(16)}`,
-			contextWindow: entry.contextWindow,
-			maxTokens: entry.maxTokens,
-		};
-		const validated = this.#boundModelConfigs.get(model);
-		const changed = validated
-			? validated.key !== current.key
-			: !Bun.deepEquals(modelConfigShape(entry), modelConfigShape(model));
-		if (!changed) {
-			this.#boundModelConfigs.set(model, current);
-			return model;
-		}
-		const limitsEdited =
-			validated !== undefined &&
-			(validated.contextWindow !== entry.contextWindow || validated.maxTokens !== entry.maxTokens);
-		const fitted = this.#modelRegistry.fitContextWindow(entry, this.settings);
-		const rebound =
-			limitsEdited || !this.#lazyContextRefreshed.has(`${model.provider}/${model.id}`)
-				? fitted
-				: { ...fitted, contextWindow: model.contextWindow, maxTokens: model.maxTokens };
-		this.#boundModelConfigs.set(rebound, current);
-		return rebound;
 	}
 
 	/**

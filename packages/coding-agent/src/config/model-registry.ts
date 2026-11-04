@@ -378,8 +378,10 @@ export class ModelRegistry {
 	#rejectedConfigStamp: string | null = null;
 	#configReload?: Promise<boolean>;
 	#configGeneration = 0;
-	/** Per-provider digest of the models.yml entry the static catalog was last built from. */
-	#providerConfigFingerprints: Map<string, string> = new Map();
+	/** The models.yml parse the static catalog was last built from; undefined when it was missing or invalid. */
+	#loadedConfig: ModelsConfig | undefined;
+	/** Per caller-held model: its rebinding to the catalog entry it was last resolved against (see {@link currentConfigOf}). */
+	#currentConfigs = new WeakMap<Model<Api>, { entry: Model<Api>; result: Model<Api> }>();
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
 	#cacheDbPath?: string;
@@ -676,7 +678,14 @@ export class ModelRegistry {
 		if (this.#mirrorListeners.size === 0) this.#mirroredDiscovery = discovery;
 		this.#mirrorListeners.add(listener);
 		return {
-			snapshot: { seq: this.#mirrorSeq, changes: [...this.#runtimeRegistrations], discovery },
+			snapshot: {
+				seq: this.#mirrorSeq,
+				changes: [...this.#runtimeRegistrations],
+				discovery,
+				// The owner's models.yml as it last built from it, `null` when missing or invalid: never what a
+				// new mirror happens to read from disk.
+				staticConfig: this.#loadedConfig ?? null,
+			},
 			unsubscribe: () => {
 				this.#mirrorListeners.delete(listener);
 			},
@@ -690,6 +699,13 @@ export class ModelRegistry {
 	 */
 	applyMirrorBatch(batch: ModelRegistryMirrorBatch): void {
 		if (!this.#owner) throw new Error("applyMirrorBatch: this registry is not a mirror");
+		// A new mirror read models.yml itself while it was built; the owner's parse wins (the file may have
+		// changed since the owner loaded it, or hold an edit the owner rejected).
+		if (batch.staticConfig !== undefined) {
+			if (batch.staticConfig === null) this.#modelsConfigFile.adoptMissing();
+			else this.#modelsConfigFile.adopt(batch.staticConfig);
+			this.#reloadStaticModels({ force: true, configLoaded: true });
+		}
 		for (const change of batch.changes) {
 			if (change.seq <= this.#mirrorSeq) continue;
 			try {
@@ -722,7 +738,8 @@ export class ModelRegistry {
 				return;
 			case "reload":
 				// Main's parse, not this thread's read: the file may have changed (or been truncated) since.
-				if (change.config !== undefined) this.#modelsConfigFile.adopt(change.config);
+				if (change.config === null) this.#modelsConfigFile.adoptMissing();
+				else if (change.config !== undefined) this.#modelsConfigFile.adopt(change.config);
 				this.#reloadStaticModels({ force: true, configLoaded: change.config !== undefined });
 				return;
 			case "invalidateCommands":
@@ -1041,15 +1058,6 @@ export class ModelRegistry {
 		await this.#refreshRuntimeDiscoveries("offline");
 	}
 
-	/**
-	 * A digest of `provider`'s models.yml entry as last loaded (headers, limits, compat, models, …),
-	 * or undefined when models.yml does not configure it. A session compares it to tell an edit to
-	 * its provider apart from one to another provider, including edits a resolver function hides.
-	 */
-	providerConfigFingerprint(provider: string): string | undefined {
-		return this.#providerConfigFingerprints.get(provider);
-	}
-
 	/** Increments on every rebuild of the static catalog (models.yml load). */
 	get configGeneration(): number {
 		return this.#configGeneration;
@@ -1289,7 +1297,7 @@ export class ModelRegistry {
 		// change carries the parse this reload uses, so a mirror never reads a later version of the file.
 		if (this.#mirrorChangeDepth === 0) {
 			const loaded = this.#modelsConfigFile.tryLoad();
-			this.#recordMirrorChange({ kind: "reload", ...(loaded.status === "ok" ? { config: loaded.value } : {}) });
+			this.#recordMirrorChange({ kind: "reload", config: loaded.status === "ok" ? loaded.value : null });
 		}
 		let preservedRuntimeState:
 			| {
@@ -1431,12 +1439,7 @@ export class ModelRegistry {
 		this.#loadedConfigStamp = configStamp;
 		// The parse #loadCustomModels used is still cached, so this reads nothing new.
 		const loaded = this.#ignoreLocalModelConfig ? undefined : this.#modelsConfigFile.tryLoad();
-		this.#providerConfigFingerprints = new Map(
-			Object.entries(loaded?.status === "ok" ? (loaded.value.providers ?? {}) : {}).map(([provider, entry]) => [
-				provider,
-				Bun.hash(JSON.stringify(entry)).toString(16),
-			]),
-		);
+		this.#loadedConfig = loaded?.status === "ok" ? loaded.value : undefined;
 		this.#configGeneration++;
 	}
 
@@ -3701,6 +3704,44 @@ export class ModelRegistry {
 		return resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
 	}
 
+	/**
+	 * `model` as the current catalog configures it, for a request about to be sent: the catalog
+	 * entry for the same provider and id (headers, header resolvers, compat, routing, …) with the
+	 * caller's limits — fitted, or probed from a local server — unless models.yml configures limits
+	 * for the model, in which case those apply (fitted to `scope`). A model the catalog does not
+	 * know is returned as is. Any holder (a session, a fallback chain, an advisor, an object built
+	 * from an older catalog or another registry) gets the configuration current at request time,
+	 * whatever produced it. Stable per (model, entry), so identity-keyed caches downstream hold.
+	 */
+	currentConfigOf(model: Model<Api>, scope?: Settings): Model<Api> {
+		const entry = this.find(model.provider, model.id);
+		if (!entry || entry === model) return model;
+		const cached = this.#currentConfigs.get(model);
+		if (cached?.entry === entry) return cached.result;
+		let result: Model<Api>;
+		if (this.#configuresLimits(entry)) {
+			result = scope ? this.fitContextWindow(entry, scope) : entry;
+		} else if (model.contextWindow === entry.contextWindow && model.maxTokens === entry.maxTokens) {
+			result = entry;
+		} else {
+			result = { ...entry, contextWindow: model.contextWindow, maxTokens: model.maxTokens };
+		}
+		this.#currentConfigs.set(model, { entry, result });
+		return result;
+	}
+
+	/** Whether models.yml sets a context window or output cap for `model` (a custom model or a model override). */
+	#configuresLimits(model: Model<Api>): boolean {
+		const override = this.#resolveLiveModelOverride(model);
+		const custom = this.#resolveLiveCustomModelOverlay(model);
+		return (
+			override?.contextWindow !== undefined ||
+			override?.maxTokens !== undefined ||
+			custom?.contextWindow !== undefined ||
+			custom?.maxTokens !== undefined
+		);
+	}
+
 	/** Whether settings disable `provider` (`disabledProviders`). */
 	#isProviderDisabled(provider: string): boolean {
 		return getDisabledProviderIdsFromSettings(this.#settings).has(provider);
@@ -4362,9 +4403,9 @@ type ModelRegistryMirrorChangeInput =
 	| { readonly kind: "syncSources"; readonly activeSourceIds: readonly string[] }
 	/**
 	 * A static (models.yml + cache) reload outside the other changes. `config` is the parse the owner
-	 * reloaded from, absent when the file was missing or invalid; a mirror reloads from it, not from disk.
+	 * reloaded from, `null` when the file was missing or invalid; a mirror reloads from it, not from disk.
 	 */
-	| { readonly kind: "reload"; readonly config?: ModelsConfig }
+	| { readonly kind: "reload"; readonly config?: ModelsConfig | null }
 	/** Owner dropped cached `!command` results (one provider's, or all when `provider` is undefined). */
 	| { readonly kind: "invalidateCommands"; readonly provider: string | undefined };
 
@@ -4396,6 +4437,11 @@ export interface ModelRegistryMirrorBatch {
 	readonly seq: number;
 	readonly changes: readonly ModelRegistryMirrorChange[];
 	readonly discovery?: ModelRegistryDiscoveryLayer;
+	/**
+	 * In a snapshot only: the owner's models.yml as it last built from it, `null` when missing or
+	 * invalid. A new mirror builds from this, never from its own read of the file.
+	 */
+	readonly staticConfig?: ModelsConfig | null;
 }
 
 /** Same length and pairwise identical or deeply equal (functions by identity). */

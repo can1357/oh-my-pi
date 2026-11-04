@@ -393,6 +393,59 @@ describe("worker model registry mirror", () => {
 		expect(registry.find("unit-worker-local", "worker-local-model")).toBeUndefined();
 	});
 
+	it("builds a new worker's mirror without providers main does not have when main's models.yml is missing", async () => {
+		const modelsPath = path.join(dir, "models.yml");
+		fs.rmSync(modelsPath);
+		expect(await registry.reloadIfConfigChanged()).toBe(true);
+		// A file appears after main loaded the missing one; main has not reloaded it when the worker boots.
+		fs.writeFileSync(
+			modelsPath,
+			[
+				"providers:",
+				"  unit-ghost-provider:",
+				"    baseUrl: https://unit-ghost.example.invalid/v1",
+				"    apiKey: GHOST_KEY",
+				"    api: openai-completions",
+				"    models:",
+				"      - id: ghost-model",
+				"        reasoning: false",
+				"        input: [text]",
+				"",
+			].join("\n"),
+		);
+		expect(registry.find("unit-ghost-provider", "ghost-model")).toBeUndefined();
+		expect(await probe.find(registry, "unit-ghost-provider", "ghost-model")).toBeUndefined();
+	});
+
+	it("builds a new worker's mirror from main's last good models.yml after main rejected an edit", async () => {
+		const modelsPath = path.join(dir, "models.yml");
+		fs.writeFileSync(
+			modelsPath,
+			[
+				"providers:",
+				"  unit-file-provider:",
+				"    baseUrl: https://unit-file.example.invalid/v1",
+				"    apiKey: FILE_KEY",
+				"    api: openai-completions",
+				"    models:",
+				"      - id: file-model",
+				"        reasoning: false",
+				"        input: [text]",
+				"",
+			].join("\n"),
+		);
+		const next = new Date(fs.statSync(modelsPath).mtimeMs + 1_000);
+		fs.utimesSync(modelsPath, next, next);
+		expect(await registry.reloadIfConfigChanged()).toBe(true);
+		// A half-written edit main rejects; the worker's mirror is first built only after it.
+		fs.writeFileSync(modelsPath, "providers:\n  unit-file-provider: [unterminated\n");
+		fs.utimesSync(modelsPath, new Date(next.getTime() + 1_000), new Date(next.getTime() + 1_000));
+		expect(await registry.reloadIfConfigChanged()).toBe(false);
+
+		expect(registry.find("unit-file-provider", "file-model")).toBeDefined();
+		expect(await probe.find(registry, "unit-file-provider", "file-model")).toBeDefined();
+	});
+
 	it("reloads an edited models.yml on main when the worker asks, so main and the mirror both serve the edit", async () => {
 		const modelsPath = path.join(dir, "models.yml");
 		expect(await probe.find(registry, "unit-file-provider", "file-model")).toBeUndefined();
