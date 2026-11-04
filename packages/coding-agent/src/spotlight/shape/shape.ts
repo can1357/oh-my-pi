@@ -29,7 +29,6 @@ import {
 	shapesItself,
 } from "../types";
 import { lineIndex, matchLine } from "./align";
-import { EDIT_TOOLS } from "../edit-gate";
 import { isPageBack, isTestRun, namesSource, printsFiles, runsAgent, runsProgram, SOURCE_PATH } from "./command";
 import { foldBashDocs, foldReadDoc } from "./docs";
 import { shapeDumpOutput, shapeDumpRead } from "./dumps";
@@ -481,7 +480,9 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 	const report =
 		input.tool === "task" ||
 		input.tool === "wait" ||
-		Object.hasOwn(EDIT_TOOLS, input.tool) ||
+		input.tool === "edit" ||
+		input.tool === "write" ||
+		input.tool === "ast_edit" ||
 		(input.tool === "bash" && runsAgent(command));
 	// A diff is reviewed whole: each cut one a review needed its hidden lines (4 of 4). Searches and filtered commands
 	// get no such pass: cut, 2% of `grep` results and 11% of filtered commands were read back, costing a fraction of

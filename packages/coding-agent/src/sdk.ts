@@ -2743,12 +2743,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 		// The Spotlight experiment starts before the first prompt build: its shaping rule rides the system prompt
 		// and its shaping replaces the native read summarizer / bash minimizer for the session.
-		// Helper sessions (security scan, spec generation) stay out of it. A task subagent's reads are edit-likely only
-		// once it read or edited the file.
+		// Helper sessions (security scan, spec generation) stay out of it.
 		const spotlightExperiment =
-			options.bindProcessState === false
-				? undefined
-				: startSpotlightExperiment(settings, sessionManager, { subagent: taskDepth > 0 });
+			options.bindProcessState === false ? undefined : startSpotlightExperiment(settings, sessionManager);
 		if (spotlightExperiment) toolSession.spotlight = spotlightExperiment;
 		let browserPrelude: EvalPreludeDefinition | undefined;
 		let computerPrelude: EvalPreludeDefinition | undefined;
