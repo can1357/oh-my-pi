@@ -9,6 +9,7 @@
 - Replaced `CustomEditor.modelMentionLabel` with `resolveModelMention`, which returns the chip label and the canonical selector the chip expands to; `collapseModelMentions` takes the same `{ label, selector }` callback, and `getModelMentionSuggestions` returns a `ModelMentionCompletion` (`unhandled`, `no-match`, or `matched` with the suggestions) instead of suggestions or `null` ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
 - `SetupHost` requires `autoUpdate`, `canAutoUpdate()`, and `saveAutoUpdate()` for the new `auto-update` setup scene (setup version 3); `setupWizardAllowed()` exposes the launch gates `selectSetupScenes` applies
 - Removed `SPINNER_ADVANCE_MS`; spinners follow the shared spinner clock (`spinnerInterval()`). `sharedSpinnerFrame` moved from `chat/tool-execution` to `spinner-clock` and reads `Date.now()` by default ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Removed `formatMeta` (`render/render-utils`); no renderer joins header metadata through it anymore ([#18104](https://github.com/can1357/oh-my-pi/pull/18104) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ### Added
 
@@ -32,9 +33,11 @@
 - Ask notes added on successive single-select questions now start with an empty editor and stay with their respective answers ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
 
 - Closing an overlay that others were opened over no longer leaves them returning focus to it once they close ([#16476](https://github.com/can1357/oh-my-pi/pull/16476))
+- ASCII tree branches are two columns (`|-`, `'-`) like their Unicode counterparts, so rows hanging under a branch, such as a single-file Grep's code frames, line up with its text instead of sitting one column left ([#18103](https://github.com/can1357/oh-my-pi/pull/18103) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ### Changed
 
+- Ask cards no longer draw a section header line per question: each question shows its id and flags after its text (`(db · 3 options)`), a single-question card names its id in the header with the option count in the bottom border, and the header no longer says `1 questions` ([#18104](https://github.com/can1357/oh-my-pi/pull/18104) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Tab in the `/usage` Details view now switches back to Overview ([#17962](https://github.com/can1357/oh-my-pi/pull/17962) by [@SuperUserA](https://github.com/SuperUserA))
 - Grep and AST Grep headers put the search scope right after the pattern (`Grep: useState in packages/tui/src 5 matches · 3 files`), their errors show the tool title and pattern above the message instead of `Error: …`, and collapsed AST Grep results drop the `meta:` capture rows ([#18105](https://github.com/can1357/oh-my-pi/pull/18105) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - AST Edit's header names the search scope after the pattern, its error card keeps the same subject, and the `proposed` state and replacement counts move to the card's bottom border (`proposed · 3 replacements · 2 files · searched 214`) ([#18105](https://github.com/can1357/oh-my-pi/pull/18105) by [@JustasMasiulis](https://github.com/JustasMasiulis))
