@@ -93,6 +93,7 @@ const PREPAINT_SAFE_FLAGS: Record<string, true> = {
 	"--no-skills": true,
 	"--no-rules": true,
 	"--no-context-files": true,
+	"--no-date-cwd-reminder": true,
 	"--no-tools": true,
 	"--no-lsp": true,
 	"--no-title": true,

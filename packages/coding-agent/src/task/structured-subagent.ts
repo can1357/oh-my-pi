@@ -825,6 +825,7 @@ function buildExecutorOptions(
 		workPoolYieldItems: request.workPoolYieldItems,
 		contextFiles: session.contextFiles,
 		noContextFiles: session.noContextFiles,
+		noDateCwdReminder: session.noDateCwdReminder,
 		skills,
 		// Autoload runs after session start, outside the seance isolation options.
 		autoloadSkills: preparedSession ? undefined : autoloadSkills,

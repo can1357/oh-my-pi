@@ -543,6 +543,7 @@ export interface ExecutorOptions {
 	subagentEventBus?: EventBus;
 	contextFiles?: ContextFileEntry[];
 	noContextFiles?: boolean;
+	noDateCwdReminder?: boolean;
 	skills?: Skill[];
 	promptTemplates?: PromptTemplate[];
 	workspaceTree?: WorkspaceTree;
@@ -4911,6 +4912,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					requireYieldTool: structured,
 					contextFiles: options.contextFiles,
 					noContextFiles: options.noContextFiles,
+					noDateCwdReminder: options.noDateCwdReminder,
 					// Subagents never receive AGENTS.md, including from additional workspace roots they rediscover.
 					excludeAgentsMd: true,
 					skills: options.skills,

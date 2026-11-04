@@ -73,6 +73,8 @@ export interface PersistedSubagentReviveContext {
 	settings: Settings;
 	/** LSP policy of the top-level session; revived subagents inherit it rather than defaulting on. */
 	enableLsp: boolean;
+	/** Reminder policy of the top-level session; revived subagents inherit it. */
+	noDateCwdReminder?: boolean;
 	/**
 	 * Shared event bus feeding RPC/collab subagent subscriptions. Passed through
 	 * to the wake-turn monitor so an IRC send to a cold-revived subagent emits
@@ -110,6 +112,7 @@ export interface PersistedReviveSpec {
 	readonly modelRegistry: ModelRegistry;
 	readonly settings: Settings;
 	readonly enableLsp: boolean;
+	readonly noDateCwdReminder?: boolean;
 	readonly eventBus: EventBus | undefined;
 	readonly subagentEventBus: EventBus | undefined;
 }
@@ -215,6 +218,7 @@ export function createPersistedSubagentReviverFactory(
 				modelRegistry: ctx.modelRegistry,
 				settings: ctx.settings,
 				enableLsp: ctx.enableLsp,
+				noDateCwdReminder: ctx.noDateCwdReminder,
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
 			};
@@ -484,6 +488,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			spawns: init.spawns ?? "",
 			hasUI: false,
 			enableLsp: restrictToolNames ? false : spec.enableLsp,
+			noDateCwdReminder: spec.noDateCwdReminder,
 			...(restrictToolNames
 				? {
 						enableIrc: false,

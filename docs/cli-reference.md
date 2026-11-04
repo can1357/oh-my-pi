@@ -166,6 +166,7 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--no-skills`                     | Disable skills discovery and loading.                                                                                                                                                     |
 | `--no-rules`                      | Disable rules discovery and loading. See [context files](./context-files.md).                                                                                                             |
 | `--no-context-files`              | Disable [context files](./context-files.md) (`AGENTS.md`, `CLAUDE.md`, ...) for the working directory and every `--add-dir` root. Subagents inherit it.                                   |
+| `--no-date-cwd-reminder`          | Send no date/cwd reminder on any model request. Subagents inherit it.                                                                                                                     |
 
 #### System prompt
 
