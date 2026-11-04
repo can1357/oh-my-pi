@@ -1011,6 +1011,7 @@ pub fn define_function(
 	cx: &mut Cx<'_>,
 	f: &FuncIr,
 	line: u32,
+	traced: bool,
 ) -> Flow {
 	let posix = state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false);
 	// bash's `valid_function_word`: no `$`, process substitution or quoting
@@ -1061,7 +1062,39 @@ pub fn define_function(
 		vp.status = 1;
 		return Flow::Next;
 	}
-	let file = match crate::bash::vm::callstack::definition_file(k, cx.store, vp) {
+	// zsh `execfuncdef`: a new definition has only `function -T`'s flag;
+	// a function redefining itself while it runs keeps its tracing.
+	let attrs = if mode.dialect() == crate::bash::ids::Dialect::Zsh {
+		let mut fresh = if traced {
+			Attrs::ZSH_TRACE_ONCE
+		} else {
+			Attrs::NONE
+		};
+		use crate::bash::vm::proc::{FrameKind, ScriptKind};
+		let innermost = vp.frames.iter().rev().find_map(|fr| match &fr.kind {
+			FrameKind::Function { name, .. } => Some(Some(name)),
+			FrameKind::Script { what: ScriptKind::Source | ScriptKind::Eval, .. } => Some(None),
+			_ => None,
+		});
+		if innermost.flatten().is_some_and(|n| *n == f.name) {
+			for bit in [Attrs::TRACE, Attrs::ZSH_TRACE_ONCE] {
+				if attrs.contains(bit) {
+					fresh = fresh.with(bit);
+				}
+			}
+		}
+		fresh
+	} else {
+		attrs
+	};
+	// zsh records its `scriptfilename` (a `-c` string's functions are
+	// `zsh`'s, not `$0`'s), bash `BASH_SOURCE[0]`.
+	let file = if mode.dialect() == crate::bash::ids::Dialect::Zsh {
+		super::zsh_print::scriptfilename(k, cx.store, vp)
+	} else {
+		crate::bash::vm::callstack::definition_file(k, cx.store, vp)
+	};
+	let file = match file {
 		Ok(file) => file,
 		Err(e) => {
 			k.fail(e);
@@ -1069,7 +1102,14 @@ pub fn define_function(
 		},
 	};
 	let sticky = vp.sticky().cloned().map(Box::new);
-	let rec = Record::Func { mode, sticky, source: f.source.clone(), unit: unit.id, attrs, file };
+	let rec = Record::Func {
+		mode,
+		sticky,
+		source: crate::bash::ir::FuncText::of(f),
+		unit: unit.id,
+		attrs,
+		file,
+	};
 	state::store_record(&mut k.root, cx.store, vp, KeyBuf::Func(f.name.clone()), Some(rec));
 	vp.status = 0;
 	Flow::Next
@@ -1240,7 +1280,9 @@ pub fn all_functions(ctx: &mut Ctx<'_, '_>) -> Result<Vec<(BString, BString, Att
 	Ok(state::scan(&ctx.k.root, ctx.cx.store, ctx.vp, Table::Func)?
 		.into_iter()
 		.filter_map(|(k, r)| match (k, r) {
-			(KeyBuf::Func(n), Record::Func { source, attrs, .. }) => Some((n, source, attrs)),
+			(KeyBuf::Func(n), Record::Func { source, attrs, .. }) => {
+				Some((n, (*source).clone(), attrs))
+			},
 			_ => None,
 		})
 		.collect())

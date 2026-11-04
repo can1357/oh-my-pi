@@ -3,7 +3,10 @@
 
 use std::{
 	fmt, io,
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicU8, Ordering},
+	},
 	task::{Context, Poll},
 };
 
@@ -29,6 +32,34 @@ pub struct FdRef(Arc<FdObj>);
 pub struct FdObj {
 	state:  Mutex<FdState>,
 	origin: FdOrigin,
+	/// [`FdFlags`] bits.
+	flags:  AtomicU8,
+}
+
+/// Per-descriptor flags of an fd object ([`FdRef::flags`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FdFlags(u8);
+
+impl FdFlags {
+	/// Close on exec (`FD_CLOEXEC`): externals do not inherit it (zsh
+	/// `sysopen -o cloexec`, `zsystem flock` without `-e`).
+	pub const CLOEXEC: Self = Self(1);
+	/// Holds a `zsystem flock` lock (zsh `FDT_FLOCK`): `zsystem flock -u`
+	/// closes only such fds.
+	pub const FLOCK: Self = Self(1 << 1);
+	/// No flag.
+	pub const NONE: Self = Self(0);
+
+	/// Union of two flag sets.
+	#[must_use]
+	pub const fn with(self, other: Self) -> Self {
+		Self(self.0 | other.0)
+	}
+
+	/// Whether every flag of `other` is set.
+	pub const fn contains(self, other: Self) -> bool {
+		self.0 & other.0 == other.0
+	}
 }
 
 enum FdState {
@@ -86,12 +117,20 @@ impl FdState {
 
 impl FdRef {
 	pub(crate) fn open(file: Box<dyn File>, origin: FdOrigin) -> Self {
-		Self(Arc::new(FdObj { state: Mutex::new(FdState::Open(file)), origin }))
+		Self(Arc::new(FdObj {
+			state: Mutex::new(FdState::Open(file)),
+			origin,
+			flags: AtomicU8::new(0),
+		}))
 	}
 
 	/// An fd for an engine memory object.
 	pub(crate) fn mem(file: impl Into<MemFile>) -> Self {
-		Self(Arc::new(FdObj { state: Mutex::new(FdState::Mem(file.into())), origin: FdOrigin::Mem }))
+		Self(Arc::new(FdObj {
+			state:  Mutex::new(FdState::Mem(file.into())),
+			origin: FdOrigin::Mem,
+			flags:  AtomicU8::new(0),
+		}))
 	}
 
 	/// Identity of the fd object (shared by every slot holding this handle).
@@ -114,11 +153,32 @@ impl FdRef {
 	}
 
 	pub(crate) fn closed() -> Self {
-		Self(Arc::new(FdObj { state: Mutex::new(FdState::Closed), origin: FdOrigin::Closed }))
+		Self(Arc::new(FdObj {
+			state:  Mutex::new(FdState::Closed),
+			origin: FdOrigin::Closed,
+			flags:  AtomicU8::new(0),
+		}))
 	}
 
 	pub(crate) fn lost(origin: FdOrigin) -> Self {
-		Self(Arc::new(FdObj { state: Mutex::new(FdState::Lost), origin }))
+		Self(Arc::new(FdObj { state: Mutex::new(FdState::Lost), origin, flags: AtomicU8::new(0) }))
+	}
+
+	/// A handle that does not keep the object alive: whether some fd still
+	/// holds it ([`FdWeak::is_alive`]).
+	pub(crate) fn downgrade(&self) -> FdWeak {
+		FdWeak(Arc::downgrade(&self.0))
+	}
+
+	/// The descriptor flags ([`FdFlags`]); none unless set with
+	/// [`Self::set_flags`].
+	pub fn flags(&self) -> FdFlags {
+		FdFlags(self.0.flags.load(Ordering::Relaxed))
+	}
+
+	/// Replace the descriptor flags.
+	pub fn set_flags(&self, flags: FdFlags) {
+		self.0.flags.store(flags.0, Ordering::Relaxed);
 	}
 
 	pub(crate) fn origin(&self) -> FdOrigin {
@@ -207,6 +267,12 @@ impl FdRef {
 		self.0.state.lock().file_ref().map(File::kind)
 	}
 
+	/// `fstat(2)` of the underlying object ([`File::stat`]); `None` when
+	/// closed, lost or an engine-memory object.
+	pub fn stat(&self) -> Option<io::Result<crate::bash::fs::Stat>> {
+		self.0.state.lock().file_ref().map(File::stat)
+	}
+
 	/// OS handle an external can inherit directly.
 	pub fn os_handle(&self) -> Option<OsHandle> {
 		self.0.state.lock().file_ref().and_then(File::os_handle)
@@ -221,6 +287,22 @@ impl FdRef {
 	/// Whether the object is usable (not closed, not lost).
 	pub fn is_open(&self) -> bool {
 		matches!(&*self.0.state.lock(), FdState::Open(_) | FdState::Mem(_))
+	}
+}
+
+/// A non-owning [`FdRef`] ([`FdRef::downgrade`]).
+#[derive(Clone)]
+pub struct FdWeak(std::sync::Weak<FdObj>);
+
+impl FdWeak {
+	/// Whether any fd table (or other holder) still has the object.
+	pub fn is_alive(&self) -> bool {
+		self.0.strong_count() > 0
+	}
+
+	/// Whether it is a handle to the same object as `r`.
+	pub fn is(&self, r: &FdRef) -> bool {
+		std::ptr::eq(self.0.as_ptr(), Arc::as_ptr(&r.0))
 	}
 }
 

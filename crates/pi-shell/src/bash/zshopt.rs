@@ -288,12 +288,13 @@ impl ZshOpt {
 		(i / 64, 1 << (i % 64))
 	}
 
-	/// Default under emulation `mode` (zsh `defset`): `sh` and `ksh` use
-	/// zsh's sh and ksh columns, every other mode the zsh column.
+	/// Default under emulation `mode` (zsh `defset`): `sh`, `ksh` and `csh`
+	/// use zsh's sh, ksh and csh columns, every other mode the zsh column.
 	pub const fn default_in(self, mode: ModeId) -> bool {
 		let col = match mode {
 			ModeId::ZshSh | ModeId::Sh => OPT_SH,
 			ModeId::Ksh => OPT_KSH,
+			ModeId::ZshCsh => OPT_CSH,
 			ModeId::Zsh | ModeId::Bash => OPT_ZSH,
 		};
 		FLAGS[self as usize] & col != 0
@@ -307,12 +308,14 @@ impl ZshOpt {
 	/// zsh `dosetopt`'s refusals: whether the option, now `cur`, cannot
 	/// become `on` (`interactive`, `shinstdin` and `singlecommand` are
 	/// fixed, `zle` needs a terminal, `restricted` cannot be turned off,
-	/// `exec` not off in an `interactive` shell). Shared by `setopt` and
-	/// assignments to `$options` (zsh `setpmoption`).
+	/// `exec` not off in an `interactive` shell). `interactive` is whether
+	/// the shell is interactive (for `zle`: and has its terminal, zsh's
+	/// `interact && SHTTY != -1`). Shared by `setopt` and assignments to
+	/// `$options` (zsh `setpmoption`).
 	pub const fn fixed(self, cur: bool, on: bool, interactive: bool) -> bool {
 		match self {
 			Self::Interactive | Self::Shinstdin | Self::Singlecommand => cur != on,
-			Self::Zle => on,
+			Self::Zle => on && !interactive,
 			Self::Restricted => cur && !on,
 			Self::Exec => !on && interactive,
 			_ => false,
@@ -324,12 +327,6 @@ impl ZshOpt {
 	/// `singlecommand`, `zle`).
 	pub const fn special(self) -> bool {
 		FLAGS[self as usize] & OPT_SPECIAL != 0
-	}
-
-	/// Whether `emulate csh` would turn it on (kept for `emulate -l csh`
-	/// listings; csh emulation itself is unsupported).
-	pub const fn csh_default(self) -> bool {
-		FLAGS[self as usize] & OPT_CSH != 0
 	}
 
 	/// The bash option this env option is shared with (env

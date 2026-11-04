@@ -632,7 +632,9 @@ export const __providerInFlightForTesting = {
 	},
 };
 
-function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal" | "maxInFlightRequests">>(
+function withProviderInFlightLimit<
+	TOptions extends Pick<StreamOptions, "signal" | "maxInFlightRequests" | "beforeDispatch">,
+>(
 	model: Model<Api>,
 	options: TOptions | undefined,
 	dispatch: (limited: boolean) => AssistantMessageEventStream,
@@ -642,7 +644,10 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 	// provider exits are covered by one wrap. Official first-party providers are
 	// exempt (see `healLeakedThinking`); healing is otherwise idempotent.
 	const limit = resolveProviderInFlightLimit(model.provider, options);
-	if (limit === undefined) return runWithRequestSendHooks({}, () => healLeakedThinking(model, dispatch(false)), false);
+	if (limit === undefined) {
+		options?.beforeDispatch?.();
+		return runWithRequestSendHooks({}, () => healLeakedThinking(model, dispatch(false)), false);
+	}
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
@@ -701,6 +706,10 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 				await prepare();
 				options?.signal?.throwIfAborted();
 			}
+			if (options?.signal?.aborted) {
+				throw options.signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
+			}
+			options?.beforeDispatch?.();
 			const inner = runWithRequestSendHooks(
 				{ prepare, held: releaseBestEffort },
 				() => healLeakedThinking(model, dispatch(true)),
@@ -1479,15 +1488,16 @@ function streamSimpleRequest<TApi extends Api>(
 	// GitLab Duo Workflow - IDE workflow protocol + WebSocket action bridge
 	if (model.api === "gitlab-duo-agent") {
 		// Does not route through withProviderInFlightLimit, so heal explicitly.
-		return withThinkingLoopGuard(model, requestOptions, opts =>
-			healLeakedThinking(
+		return withThinkingLoopGuard(model, requestOptions, opts => {
+			opts?.beforeDispatch?.();
+			return healLeakedThinking(
 				model,
 				streamGitLabDuoWorkflow(model as Model<"gitlab-duo-agent">, context, {
 					...opts,
 					apiKey,
 				}),
-			),
-		);
+			);
+		});
 	}
 
 	// Kimi Code - route to dedicated handler that wraps OpenAI or Anthropic API
@@ -1839,6 +1849,7 @@ function mapOptionsForApi<TApi extends Api>(
 		minimizeEffort: options?.minimizeEffort,
 		liveSteering: options?.liveSteering,
 		maxInFlightRequests: options?.maxInFlightRequests,
+		beforeDispatch: options?.beforeDispatch,
 		onPayload: options?.onPayload,
 		onResponse: options?.onResponse,
 		onSseEvent: options?.onSseEvent,

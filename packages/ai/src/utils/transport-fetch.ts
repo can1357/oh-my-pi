@@ -15,8 +15,10 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
  * The one fetch every inference request goes through. Per call it applies, in
  * order: the inference User-Agent default, `NODE_EXTRA_CA_CERTS`, the
  * per-provider proxy, and `PI_REQ_DEBUG` request/response recording — then
- * calls `fetchImpl` (or the model's default fetch) exactly once. Providers
- * never layer transport concerns themselves.
+ * calls `fetchImpl` (or the model's default fetch) exactly once.
+ *
+ * `beforeDispatch` runs for every HTTP attempt, including retries, before
+ * dispatch bookkeeping; a thrown refusal prevents that attempt.
  *
  * Idempotent: the built fetch is stamped and returned as-is on later passes.
  * `streamSimple` re-enters `stream`, and `streamSimpleRequest` re-enters itself
@@ -26,7 +28,11 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
  * Its held form ({@link heldFetch}), which model requests send through, waits
  * for the request holds after all of the above, right before `fetchImpl`.
  */
-export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefined): FetchImpl {
+export function transportFetch(
+	model: Model<Api>,
+	fetchImpl: FetchImpl | undefined,
+	beforeDispatch?: () => void,
+): FetchImpl {
 	const given = fetchImpl as TransportFetch | undefined;
 	if (given?.[TRANSPORT_FETCH]) return given;
 	const base =
@@ -43,6 +49,9 @@ export function transportFetch(model: Model<Api>, fetchImpl: FetchImpl | undefin
 	};
 	const build = (send: FetchImpl): TransportFetch => {
 		const fetch: TransportFetch = async (input, init) => {
+			// Host code: it runs before the holds are checked, never between the
+			// last check and the send. A thrown refusal prevents this attempt.
+			beforeDispatch?.();
 			init = withInferenceUserAgent(input, init);
 			const extraCa = resolveExtraCa();
 			if (extraCa) init = withExtraCaInit(init, extraCa);
