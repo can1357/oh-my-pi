@@ -29,6 +29,7 @@
 - Added a frame-rate ceiling (`frame-rate`: `setMaxFps`, `minFrameIntervalMs`) honoured by the render scheduler and animation timers; frames a keystroke waits on keep 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - Added a decorative-motion switch (`motion-effects`: `setMotionEffects`) gating the status-line blink and brand fade, the editor's magic-keyword sweep, and native `fx` spans; a static spinner clock also stills native `spinner` nodes ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - `CompactTranscriptBlock` (`chrome/transcript-container`): consecutive blocks whose `isTranscriptBlockCompact()` returns true draw without blank rows between them in the terminal (scrollback included) and as one gapless entry on a native (TSP) surface. Tool cards, read groups and `PresentedBlock` report it while a presenter draws them compact, and `FramedMessageComponent` forwards it from an extension renderer's component ([#17997](https://github.com/can1357/oh-my-pi/pull/17997) by [@materemias](https://github.com/materemias))
+- Added `SessionSelectorOptions.onGenerateTitle` (`SessionPickerOptions.onGenerateTitle` / `SessionPickerHost.generateSessionTitle`) and the `app.session.generateTitle` (`Alt+T`) keybinding to populate the session rename dialog with a generated title (by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Fixed
 - Tern's classic renderer draws inline images (table charts included) as Kitty Unicode placeholders, so text that replaces an image's cells removes the image instead of leaving a stale copy over the table while an answer streams or the pane resizes
@@ -40,6 +41,7 @@
 
 - Closing an overlay that others were opened over no longer leaves them returning focus to it once they close ([#16476](https://github.com/can1357/oh-my-pi/pull/16476))
 - ASCII tree branches are two columns (`|-`, `'-`) like their Unicode counterparts, so rows hanging under a branch, such as a single-file Grep's code frames, line up with its text instead of sitting one column left ([#18103](https://github.com/can1357/oh-my-pi/pull/18103) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- The session selector's F2 rename dialog no longer repeats the "Rename Session" heading inside the input field or shows the session list's shortcuts in its footer (by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Changed
 

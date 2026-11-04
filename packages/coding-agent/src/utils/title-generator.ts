@@ -29,7 +29,14 @@ import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import { formatTitleUserMessage } from "../tiny/message-preproc";
-import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
+import { isAttachmentOnlyTitleInput, isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
+import { readSessionInfo, type SessionInfo } from "../session/session-listing";
+import { buildSessionMetadata } from "../session/session-metadata";
+import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { cfgSecretsEnabled } from "../secrets/settings";
+import { formatCardTitle, keepTitleCard, parseCardReply, splitCardTitle } from "./title-card";
+import { cfgTitleIcons, type TitleIcons } from "./title-settings";
+import titleCardPrompt from "../prompts/system/title-card.md" with { type: "text" };
 import { tinyTitleClient } from "../tiny/title-client";
 
 import { cfgRetryModelFallback } from "../session/settings";
@@ -299,6 +306,86 @@ export async function generateTitleOnline(
 		customSystemPrompt,
 		credentialSourceSessionId,
 	);
+}
+
+export interface GeneratePickerSessionTitleOptions {
+	registry: ModelRegistry;
+	settings: Settings;
+	signal?: AbortSignal;
+	currentModel?: Model<Api>;
+	credentialSourceSessionId?: string;
+	generate?: (text: string, customSystemPrompt?: string, signal?: AbortSignal) => Promise<string | null>;
+}
+
+/**
+ * Generate a suggested title for a picker session from its 4 KB transcript
+ * prefix (scanning the file on demand when `session` is an index-only row),
+ * keeping or naming its `<icon> <CODE>: ` card like in-session `/rename`.
+ */
+export async function generatePickerSessionTitle(
+	session: Pick<SessionInfo, "id" | "path" | "title" | "firstMessage" | "allMessagesText">,
+	options: GeneratePickerSessionTitleOptions,
+): Promise<string | null> {
+	let { firstMessage, allMessagesText } = session;
+	if (!firstMessage && !allMessagesText && session.path) {
+		const scanned = await readSessionInfo(session.path);
+		if (options.signal?.aborted) return null;
+		if (scanned) {
+			firstMessage = scanned.firstMessage;
+			allMessagesText = scanned.allMessagesText;
+		}
+	}
+	const first = firstMessage && firstMessage !== "(no messages)" ? firstMessage.trim() : "";
+	const all = allMessagesText && allMessagesText !== "(no messages)" ? allMessagesText.trim() : "";
+	const candidates: string[] = [];
+	if (first && !isLowSignalTitleInput(first) && !isAttachmentOnlyTitleInput(first)) {
+		candidates.push(first);
+	}
+	if (all && all !== first && !isLowSignalTitleInput(all)) {
+		candidates.push(all);
+	}
+	if (candidates.length === 0) return null;
+
+	const runGenerate =
+		options.generate ??
+		((text: string, customSystemPrompt?: string, signal?: AbortSignal) => {
+			const titleSessionId = session.id ? `${session.id}:title` : undefined;
+			return withCredentialRedaction(cfgSecretsEnabled.get(options.settings), () =>
+				generateSessionTitle(
+					text,
+					options.registry,
+					options.settings,
+					titleSessionId,
+					options.currentModel,
+					titleSessionId
+						? provider => buildSessionMetadata(titleSessionId, provider, options.registry.authStorage)
+						: undefined,
+					customSystemPrompt,
+					signal,
+					options.credentialSourceSessionId ?? session.id,
+				),
+			);
+		});
+
+	let named: string | null = null;
+	for (const text of candidates) {
+		if (options.signal?.aborted) return null;
+		const title = await runGenerate(text, undefined, options.signal);
+		if (title) {
+			named = keepTitleCard(session.title, title);
+			break;
+		}
+	}
+	if (!named || options.signal?.aborted) return null;
+
+	const configuredIcons = cfgTitleIcons.get(options.settings);
+	const icons: TitleIcons = configuredIcons === "nf+emoji" && !nerdGlyphsActive() ? "emoji" : configuredIcons;
+	if (icons === "boring" || splitCardTitle(named)) return named;
+	const cardPrompt = prompt.render(titleCardPrompt, { nerdFonts: icons === "nf+emoji" });
+	const reply = await runGenerate(named, cardPrompt, options.signal);
+	if (options.signal?.aborted) return null;
+	const card = reply ? parseCardReply(reply, icons) : undefined;
+	return card ? formatCardTitle(card, named) : named;
 }
 
 async function generateTitleOnlineWithModels(

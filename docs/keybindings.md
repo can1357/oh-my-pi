@@ -58,6 +58,7 @@ app.history.search: []
 | `app.agents.hub`             | `Alt+A`                                                               | [Open the Agent Hub](./agent-hub.md)                                                                                                                   |
 | `app.session.pin`            | `Alt+K`                                                               | Pin the selected session in the resume picker; pinned sessions stay on top, including in search results                                                |
 | `app.session.unpin`          | `Alt+Shift+K`                                                         | Unpin the selected session in the resume picker                                                                                                        |
+| `app.session.generateTitle`  | `Alt+T`                                                               | Generate session title from transcript in the rename dialog                                                            |
 | `app.tree.previousBranch`    | Unbound                                                               | Jump to the previous visible branch in `/tree` ([details](./tree.md))                                                                                  |
 | `app.tree.nextBranch`        | Unbound                                                               | Jump to the next visible branch in `/tree` ([details](./tree.md))                                                                                      |
 

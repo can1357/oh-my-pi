@@ -99,7 +99,7 @@ import { ToolAbortError } from "../../tools/tool-errors";
 import { captureBrowserSession } from "../../utils/browser-session";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
-import { setSessionTerminalTitle } from "../../utils/title-generator";
+import { generatePickerSessionTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 import { getAssistantMessageLinkTargets } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { createAgentsHubDeps } from "../agents-hub-deps";
@@ -1877,6 +1877,18 @@ export class SelectorController {
 								}
 								return renamed;
 							},
+							onGenerateTitle: (session: SessionInfo, signal: AbortSignal) =>
+								generatePickerSessionTitle(session, {
+									registry: this.ctx.session.modelRegistry,
+									settings: this.ctx.settings,
+									signal,
+									currentModel: this.ctx.session.model,
+									credentialSourceSessionId: this.ctx.session.sessionId,
+									generate:
+										typeof this.ctx.session.generateTitle === "function"
+											? (text, customPrompt, sig) => this.ctx.session.generateTitle(text, customPrompt, sig)
+											: undefined,
+								}),
 							onSetPinned: async (session: SessionInfo, pinned: boolean) => {
 								await setSessionPinned(session.id, pinned);
 								this.ctx.applySessionPin(session.id, pinned);

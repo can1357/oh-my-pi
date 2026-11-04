@@ -2,10 +2,12 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import type { TspPickerProps } from "@oh-my-pi/pi-wire";
 import { OverlayPanel } from "../src/chrome/overlay-box";
 import { TextFormField } from "../src/components/form";
-import type { DescribeContext, NativeNode } from "../src/native/node";
+import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { type HistorySearchEntry, HistorySearchComponent } from "../src/overlays/history-search";
 import { type SessionSelectorEntry, SessionSelectorComponent } from "../src/overlays/session-selector";
 import { initTheme } from "../src/theme";
+import { KeybindingsManager } from "../src/app-keybindings";
+import { setKeybindings } from "../src/keybindings";
 
 const withPicker: DescribeContext = {
 	cols: 120,
@@ -171,7 +173,16 @@ describe("session selector rename", () => {
 		title: string;
 	}
 
-	function makeRename(renamed?: { calls: RenameCall[]; result?: string | null }) {
+	function makeRename(
+		renamed?: { calls: RenameCall[]; result?: string | null },
+		extra?: {
+			onGenerateTitle?: (session: SessionSelectorEntry, signal: AbortSignal) => Promise<string | null>;
+			onSetPinned?: (session: SessionSelectorEntry, pinned: boolean) => Promise<void>;
+			onDelete?: (session: SessionSelectorEntry) => Promise<boolean>;
+			loadAllSessions?: () => Promise<{ sessions: SessionSelectorEntry[] }>;
+		},
+	) {
+		setKeybindings(KeybindingsManager.inMemory());
 		// Fresh entries per test: rename mutates the shared entry in place.
 		const entries = [session("a", "Alpha", 0), session("b", "Beta", 1), session("c", "Gamma", 40 * 24 * HOUR)];
 		const selector = new SessionSelectorComponent(
@@ -188,10 +199,39 @@ describe("session selector rename", () => {
 							},
 						}
 					: {}),
+				onGenerateTitle: extra?.onGenerateTitle,
+				onSetPinned: extra?.onSetPinned,
+				onDelete: extra?.onDelete,
+				loadAllSessions: extra?.loadAllSessions,
 				currentSessionPath: entries[1]!.path,
 			},
 		);
 		return { selector, beta: entries[1]! };
+	}
+
+	function isNativeNode(child: NativeChild): child is NativeNode {
+		return Boolean(child && typeof child === "object" && "k" in child);
+	}
+
+	function hintLabelsOf(card: NativeNode): string[] {
+		const hintsNode = (card.c ?? []).find(
+			(child): child is NativeNode =>
+				isNativeNode(child) && child.k === "row" && child.p?.role === "omp.overlay.hints",
+		);
+		if (!hintsNode || !hintsNode.c) return [];
+		const labels: string[] = [];
+		for (const hintChild of hintsNode.c) {
+			if (!isNativeNode(hintChild) || hintChild.k !== "row" || !hintChild.c) continue;
+			for (const part of hintChild.c) {
+				if (!isNativeNode(part) || part.k !== "text" || !part.p?.spans) continue;
+				for (const s of part.p.spans) {
+					if (s && typeof s === "object" && "t" in s) {
+						labels.push(s.t);
+					}
+				}
+			}
+		}
+		return labels;
 	}
 
 	/** The open rename dialog and its field, via the ANSI card (the native picker props have no text-input affordance). */
@@ -284,6 +324,123 @@ describe("session selector rename", () => {
 		selector.handleInput("Beta");
 		const stale = props(selector.describe(withPicker)).items?.find(item => item.id === beta.path);
 		expect(stale?.label).toBe("Beta Prime");
+	});
+
+	it("renders Rename Session once and replaces footer hints with dialog hints", () => {
+		const { selector } = makeRename(
+			{ calls: [] },
+			{
+				onDelete: async () => true,
+				onSetPinned: async () => {},
+				loadAllSessions: async () => ({ sessions: [] }),
+				onGenerateTitle: async () => "New Title",
+			},
+		);
+
+		const beforeRender = selector.render(100).join("\n");
+		expect(beforeRender).toContain("delete");
+		expect(beforeRender).toContain("rename");
+		expect(beforeRender).toContain("pin");
+		expect(beforeRender).toContain("all projects");
+
+		const beforeCard = selector.describe(withoutPicker);
+		const beforeHints = hintLabelsOf(beforeCard);
+		expect(beforeHints).toContain("delete");
+		expect(beforeHints).toContain("rename");
+		expect(beforeHints).toContain("pin");
+		expect(beforeHints).toContain("all projects");
+
+		selector.handleInput("\x1bOQ");
+
+		const afterRender = selector.render(100).join("\n");
+		const titleMatches = afterRender.match(/Rename [Ss]ession/g);
+		expect(titleMatches).toEqual(["Rename Session"]);
+
+		expect(afterRender).toContain("save");
+		expect(afterRender).toContain("auto-title");
+		expect(afterRender).toContain("cancel");
+		expect(afterRender).not.toContain("delete");
+		expect(afterRender).not.toContain("rename ·");
+		expect(afterRender).not.toContain("pin");
+		expect(afterRender).not.toContain("all projects");
+
+		const afterCard = selector.describe(withoutPicker);
+		const afterHints = hintLabelsOf(afterCard);
+		expect(afterHints).toEqual(["save", "auto-title", "cancel"]);
+	});
+
+	it("generates a title on Alt+T and commits on Enter", async () => {
+		const renamed = { calls: [] as RenameCall[] };
+		const generatedTitles: string[] = [];
+		const { promise: titlePromise, resolve: finishGenerate } = Promise.withResolvers<string>();
+		const { selector, beta } = makeRename(renamed, {
+			onGenerateTitle: async (s, signal) => {
+				generatedTitles.push(s.id);
+				expect(signal.aborted).toBe(false);
+				return titlePromise;
+			},
+		});
+
+		selector.handleInput("\x1bOQ");
+		const opened = renameDialogOf(selector);
+		expect(opened).toBeDefined();
+		expect(opened!.field.getValue()).toBe(beta.title ?? "");
+
+		const { promise: renderedGeneration, resolve: onGeneratedRender } = Promise.withResolvers<void>();
+		selector.setOnRequestRender(() => {
+			if (opened?.field.getValue() === "Auto Generated Beta") {
+				onGeneratedRender();
+			}
+		});
+
+		selector.handleInput("\x1bt");
+		finishGenerate("Auto Generated Beta");
+		await renderedGeneration;
+
+		expect(generatedTitles).toEqual([beta.id]);
+		expect(opened!.field.getValue()).toBe("Auto Generated Beta");
+		expect(renamed.calls).toEqual([]);
+
+		const updated = renderedWhen(
+			selector,
+			p => p.items?.find(item => item.id === beta.path)?.label === "Auto Generated Beta",
+		);
+		selector.handleInput("\r");
+		await updated;
+
+		expect(renamed.calls).toEqual([{ id: "b", title: "Auto Generated Beta" }]);
+		expect(renameDialogOf(selector)).toBeUndefined();
+	});
+
+	it("aborts onGenerateTitle and closes rename dialog on Esc", async () => {
+		const renamed = { calls: [] as RenameCall[] };
+		let abortSignal: AbortSignal | undefined;
+		const { promise: pendingPromise, resolve: finishGenerate } = Promise.withResolvers<string>();
+
+		const { selector, beta } = makeRename(renamed, {
+			onGenerateTitle: async (s, signal) => {
+				abortSignal = signal;
+				return pendingPromise;
+			},
+		});
+
+		selector.handleInput("\x1bOQ");
+		expect(renameDialogOf(selector)).toBeDefined();
+
+		selector.handleInput("\x1bt");
+		expect(abortSignal).toBeDefined();
+		expect(abortSignal!.aborted).toBe(false);
+
+		selector.handleInput("\x1b");
+		expect(abortSignal!.aborted).toBe(true);
+		expect(renameDialogOf(selector)).toBeUndefined();
+
+		finishGenerate("Late Title");
+		await pendingPromise;
+
+		expect(renamed.calls).toEqual([]);
+		const after = props(selector.describe(withPicker));
+		expect(after.items?.find(item => item.id === beta.path)?.label).toBe("Beta");
 	});
 });
 

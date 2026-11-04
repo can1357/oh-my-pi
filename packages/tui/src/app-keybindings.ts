@@ -62,6 +62,7 @@ interface AppKeybindings {
 	"app.session.deleteNoninvasive": true;
 	"app.session.pin": true;
 	"app.session.unpin": true;
+	"app.session.generateTitle": true;
 	"app.tree.previousBranch": true;
 	"app.tree.nextBranch": true;
 	"app.plan.toggle": true;
@@ -254,6 +255,10 @@ export const KEYBINDINGS = {
 	"app.session.unpin": {
 		defaultKeys: "alt+shift+k",
 		description: "Unpin the selected session in the resume picker",
+	},
+	"app.session.generateTitle": {
+		defaultKeys: "alt+t",
+		description: "Generate session title in rename dialog",
 	},
 	"app.tree.previousBranch": {
 		defaultKeys: [],

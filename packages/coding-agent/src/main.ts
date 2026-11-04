@@ -217,14 +217,24 @@ type SessionPicker = (
 ) => Promise<SessionInfo | null>;
 
 /** Resume/import-only graph boundary; ordinary launches never construct a picker. */
-async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionPicker> {
-	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds, setSessionPinned }, { FileSessionStorage }] =
-		await Promise.all([
-			import("@oh-my-pi/pi-tui/apps/session-picker"),
-			import("./session/history-storage"),
-			import("./session/session-pins"),
-			import("./session/session-storage"),
-		]);
+async function loadSessionPicker(init?: {
+	foreign?: boolean;
+	modelRegistry?: ModelRegistry;
+	settings?: Settings;
+}): Promise<SessionPicker> {
+	const [
+		{ selectSession },
+		{ HistoryStorage },
+		{ loadPinnedSessionIds, setSessionPinned },
+		{ FileSessionStorage },
+		{ generatePickerSessionTitle },
+	] = await Promise.all([
+		import("@oh-my-pi/pi-tui/apps/session-picker"),
+		import("./session/history-storage"),
+		import("./session/session-pins"),
+		import("./session/session-storage"),
+		import("./utils/title-generator"),
+	]);
 	return (sessions, options) => {
 		const storage = new FileSessionStorage();
 		// The picker runs before interactive mode loads the user's keymap, and its pin keys are remappable.
@@ -247,6 +257,16 @@ async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionP
 						renameSession: (session: SessionInfo, title: string) =>
 							SessionManager.renameSessionTitle(session.path, title, { cwd: session.cwd }),
 						setSessionPinned: (session: SessionInfo, pinned: boolean) => setSessionPinned(session.id, pinned),
+						...(init?.modelRegistry && init?.settings
+							? {
+									generateSessionTitle: (session: SessionInfo, signal: AbortSignal) =>
+										generatePickerSessionTitle(session, {
+											registry: init.modelRegistry!,
+											settings: init.settings!,
+											signal,
+										}),
+								}
+							: {}),
 					}),
 			loadAllSessions: () => SessionManager.listAllForPicker(storage),
 		});
@@ -2268,7 +2288,8 @@ export async function runRootCommand(
 				}
 			}
 			pauseStartupWatchdog();
-			const selectSessionImpl = deps.selectSession ?? (await loadSessionPicker());
+			const selectSessionImpl =
+				deps.selectSession ?? (await loadSessionPicker({ modelRegistry, settings: settingsInstance }));
 			const picked = await logger.time("selectSession", selectSessionImpl, folder.sessions, {
 				completeSessions: folder.complete,
 				allSessions: preloadedAllSessions,
