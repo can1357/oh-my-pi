@@ -651,10 +651,20 @@ export function tryAcquireSessionLease(sessionId: string): FileLockHandle | null
  */
 export function isSessionLeaseHeld(sessionId: string): boolean | null {
 	try {
+		return isSessionLeaseHeldOrThrow(sessionId);
+	} catch {
+		return null;
+	}
+}
+
+/** Observe the same ownership lease, preserving failed-check errors for maintenance reports. */
+export function isSessionLeaseHeldOrThrow(sessionId: string): boolean {
+	try {
 		return isFileLockHeld(sessionLeasePath(sessionId, false));
-	} catch (err) {
+	} catch (error) {
 		// No sidecar directory yet: nobody has ever claimed a session here.
-		return isEnoent(err) ? false : null;
+		if (isEnoent(error)) return false;
+		throw error;
 	}
 }
 

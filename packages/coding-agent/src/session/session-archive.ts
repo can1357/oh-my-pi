@@ -29,7 +29,7 @@ import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
 import { getAgentDir, getSessionsDir, isEnoent, type FileLockHandle } from "@oh-my-pi/pi-utils";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
-import { codeOf, statIfPresent, withGcLock } from "./gc-lock";
+import { codeOf, GcLockHeld, statIfPresent, withGcLock } from "./gc-lock";
 import { type NoReplaceRename, renameNoReplace } from "./libc";
 import {
 	absentFile,
@@ -38,7 +38,6 @@ import {
 	makeHeldDirectory,
 	newNonce,
 	NotARegularFile,
-	notRegularAsAbsent,
 	openRegularFile,
 	removeFileNoOneElseWrites,
 	removeFileOthersMayWrite,
@@ -49,7 +48,12 @@ import {
 } from "./regular-file";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import { readSessionHeaderIdFromHandle, sessionHeaderIdFromBytes } from "./session-loader";
-import { isSessionLeaseHeld, SESSION_STAGING_RE, sessionStagingPath, tryAcquireSessionLease } from "./session-storage";
+import {
+	isSessionLeaseHeldOrThrow,
+	SESSION_STAGING_RE,
+	sessionStagingPath,
+	tryAcquireSessionLease,
+} from "./session-storage";
 import { parseTitleSlotFromContent, parseTitleSlotLine } from "./session-title-slot";
 
 /** Suffix `gc --archive` gives a transcript it has compressed. */
@@ -265,14 +269,10 @@ export function restoreRecordLeftNote(record: string): string {
 async function setAsideStaleRestoreRecord(record: string): Promise<string | undefined> {
 	for (let attempt = 0; attempt < 8; attempt++) {
 		const aside = `${record}.${randomBytes(8).toString("hex")}.stale`;
-		let moved: NoReplaceRename;
-		try {
-			moved = await renameNoReplace(record, aside);
-		} catch {
-			return undefined;
-		}
+		const moved = await renameNoReplace(record, aside);
 		if (moved.outcome === "renamed") return aside;
-		if (moved.outcome !== "taken") return undefined;
+		if (moved.outcome === "unsupported") throw new Error(`${record} could not be moved aside (${moved.why})`);
+		if (moved.outcome === "absent") return undefined;
 	}
 	return undefined;
 }
@@ -421,12 +421,12 @@ export async function scanArchivedSessionFiles(
 			for (const name of await fs.readdir(dir)) {
 				if (!name.endsWith(ARCHIVED_SESSION_SUFFIX)) continue;
 				const entry = path.join(dir, name);
-				if ((await fs.stat(entry).catch(() => undefined))?.isDirectory()) continue;
+				if ((await statIfPresent(entry))?.isDirectory()) continue;
 				found.push(entry);
 			}
 		} catch (error) {
 			if (isEnoent(error) || isPermissionError(error) || codeOf(error) === "ENOTDIR") {
-				unreadable.push({ bucket: dir, error: codeOf(error) ?? errorText(error) });
+				unreadable.push({ bucket: dir, error: errorText(error) });
 				continue;
 			}
 			throw error;
@@ -437,9 +437,15 @@ export async function scanArchivedSessionFiles(
 	return { files, unreadable };
 }
 
-/** The archived transcripts {@link scanArchivedSessionFiles} could read — for a count, never for choosing one. */
+/** All archived transcripts; an incomplete scan cannot supply a count or list. */
 export async function listArchivedSessionFiles(agentDir?: string): Promise<string[]> {
-	return (await scanArchivedSessionFiles(agentDir)).files;
+	const { files, unreadable } = await scanArchivedSessionFiles(agentDir);
+	if (unreadable.length > 0) {
+		throw new Error(
+			`archive listing could not be completed: ${unreadable.map(({ bucket, error }) => `${bucket} (${error})`).join("; ")}`,
+		);
+	}
+	return files;
 }
 
 /**
@@ -517,8 +523,8 @@ export interface RestoredSession {
  * damaged archive and callers test it with `isEnoent`.
  */
 function archiveReadError(file: string, cause: unknown): unknown {
-	// zlib failures carry a `Z_`-prefixed code; an errno is the filesystem's.
-	if (cause instanceof Error && "code" in cause && /^E[A-Z]+$/.test(String(cause.code))) return cause;
+	const code = codeOf(cause);
+	if (!code?.startsWith("Z_") && code !== "ERR_STREAM_PREMATURE_CLOSE") return cause;
 	const stem = path.basename(file, ARCHIVED_SESSION_SUFFIX);
 	const id = stem.slice(stem.lastIndexOf("_") + 1) || stem;
 	return new Error(
@@ -586,7 +592,9 @@ export async function inflateArchivedTranscript(
 	const ground = await mintStagingGround(destination, ledger, mode);
 	try {
 		await ground.handle.chmod(mode);
-		const written = await inflateIntoHandleWithDigest(bytesOfRegularFile(source), ground.handle);
+		const written = await inflateIntoHandleWithDigest(bytesOfRegularFile(source), ground.handle).catch(error => {
+			throw archiveReadError(source, error);
+		});
 		const landed = await fs.lstat(ground.file).catch((error: unknown) => {
 			if (isEnoent(error)) return undefined;
 			throw error;
@@ -602,8 +610,6 @@ export async function inflateArchivedTranscript(
 			);
 		}
 		return written.size;
-	} catch (error) {
-		throw archiveReadError(source, error);
 	} finally {
 		try {
 			const note = await removeStagingGround(ground);
@@ -1202,12 +1208,8 @@ function isWithin(root: string, target: string): boolean {
  * the session.
  */
 async function survivesRemovalOf(destination: string, destinationStat: Stats, source: Stats, archiveRoot: string) {
-	const real = await fs.realpath(destination).catch((error: unknown) => {
-		// Gone since it was opened: not a copy that survives anything.
-		if (isEnoent(error)) return undefined;
-		throw error;
-	});
-	if (real === undefined || isWithin(archiveRoot, real)) return false;
+	const real = await fs.realpath(destination);
+	if (isWithin(archiveRoot, real)) return false;
 	return !(destinationStat.dev === source.dev && destinationStat.ino === source.ino);
 }
 
@@ -1263,7 +1265,7 @@ async function assertLiveTreeHoldsArchive(
 	}
 	// A link or a device: neither was carried home, and neither is an artifact.
 	if (!stat.isFile()) return;
-	const live = await openRegularFile(destination).catch(notRegularAsAbsent);
+	const live = await openRegularFile(destination);
 	try {
 		const liveStat = await live?.stat();
 		if (!live || !liveStat?.isFile()) {
@@ -1438,7 +1440,7 @@ async function copyEntryDereferenced(
 	}
 	if (!stat.isFile()) return;
 	if (existing) {
-		const live = await openRegularFile(destination).catch(notRegularAsAbsent);
+		const live = await openRegularFile(destination);
 		try {
 			if (live) {
 				const target = await live.stat();
@@ -1640,12 +1642,14 @@ async function planWritableDirectory(dir: string, plan: RestorePlan, what: strin
 			const code = codeOf(error);
 			if (code === "EACCES" || code === "EPERM") {
 				throw new Error(
-					`${dir} is not writable (${code}), so ${what} could not be restored into it: make it writable with ` +
+					`${dir} is not writable (${errorText(error)}), so ${what} could not be restored into it: make it writable with ` +
 						`\`chmod u+w\` and run the same command again`,
 				);
 			}
 			if (code === "EROFS") {
-				throw new Error(`${dir} is on a read-only filesystem (EROFS), so ${what} could not be restored into it`);
+				throw new Error(
+					`${dir} is on a read-only filesystem (${errorText(error)}), so ${what} could not be restored into it`,
+				);
 			}
 			throw new Error(
 				`whether ${dir} can be written could not be checked (${errorText(error)}), so ${what} was not restored into it`,
@@ -1883,18 +1887,20 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 			// it made — and a directory at that name that no record names is one
 			// a later restore carries home as somebody's artifact. So while
 			// anything stands at the name, the record stays, and says so.
-			// A lookup that fails cannot show the name empty, so it counts as standing.
+			// Unknown existence keeps the record, but is never reported as observed existence.
 			let standing = false;
+			let unchecked: string | undefined;
 			if (codeOf(error) !== "EEXIST") {
 				try {
 					standing = (await lstatIfPresent(dir)) !== undefined;
-				} catch {
-					standing = true;
+				} catch (failure) {
+					unchecked = `${dir} could not be checked (${errorText(failure)})`;
 				}
 			}
-			if (standing) {
+			if (standing || unchecked) {
 				await release();
 				throw failed(error, [
+					...(unchecked ? [unchecked] : []),
 					`${dir} was left where it is, and the staging record ${record} names it, so a later restore leaves it out of the live tree and names it`,
 				]);
 			}
@@ -2183,8 +2189,8 @@ async function readStagingRecords(
 		try {
 			// Non-blocking and regular files only: a FIFO among the records
 			// must refuse, not wait for a writer that never comes.
-			const handle = await openRegularFile(record).catch(notRegularAsAbsent);
-			if (!handle) throw new Error("it is not a regular file");
+			const handle = await openRegularFile(record);
+			if (!handle) throw absentFile(record);
 			let text: string;
 			try {
 				text = await handle.readFile("utf8");
@@ -2248,6 +2254,7 @@ async function checkRecordedGround(entry: StagingRecord, roots: readonly string[
 	if (typeof real === "object") {
 		return { kind: "unknown", note: `${entry.dir} could not be resolved, so it was left as it is: ${real.failed}` };
 	}
+	if (real === undefined) return { kind: "gone" };
 	const contained = real !== undefined && roots.some(root => isWithin(root, real) && real !== root);
 	if (!contained) {
 		return {
@@ -2482,13 +2489,16 @@ export async function stagingResidueNote(dir: string, record: string, consequenc
 	const agentDir = path.dirname(path.dirname(record));
 	const roots = await stagingRoots(agentDir);
 	const trees = roots.length > 0 ? roots.join(" and ") : "the sessions tree and the archive";
-	const realAgentDir = await fs.realpath(agentDir).catch(() => undefined);
+	const realAgentDir = await fs.realpath(agentDir).catch((error: unknown) => {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	});
 	let example: string;
 	let afterSteps = "";
 	if (realAgentDir !== undefined && !roots.some(root => isWithin(root, realAgentDir))) {
 		const aside = path.join(realAgentDir, `gc-quarantine-${path.basename(record, ".json")}`);
-		const realDir = await fs.realpath(dir).catch(() => dir);
-		const realRecord = await fs.realpath(record).catch(() => record);
+		const realDir = await fs.realpath(dir);
+		const realRecord = await fs.realpath(record);
 		const checks = [getSessionsDir(agentDir), getArchivedSessionsDir(agentDir)].map(shellQuote).join(" ");
 		const sources = [path.dirname(realDir), path.dirname(realRecord)].map(shellQuote).join(" ");
 		example =
@@ -2523,9 +2533,7 @@ export async function stagingResidueNote(dir: string, record: string, consequenc
 			`was put, and the next run moves what is left into a new numbered directory beside it. The command never ` +
 			`deletes anything; once the restore has finished, what to keep of ${aside} is yours to decide.`;
 	} else {
-		example =
-			`no example is given here, because ${agentDir} resolves to ${realAgentDir ?? "a path that could not be read"}, ` +
-			`inside a session tree`;
+		example = `no example is given here, because ${agentDir} ${realAgentDir === undefined ? "is absent" : `resolves to ${realAgentDir}, inside a session tree`}`;
 	}
 	return (
 		`${dir} is named by the staging record ${record}, ${consequence}. If a killed gc run left it: 1. stop any gc run ` +
@@ -2610,8 +2618,8 @@ async function ownerSignature(owners: () => Promise<(string | undefined)[]>): Pr
  */
 export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: string): Promise<boolean> {
 	// Non-blocking, so a FIFO at the live name is a refusal rather than a hang.
-	const live = await openRegularFile(sessionPath).catch(notRegularAsAbsent);
-	if (!live) return false;
+	const live = await openRegularFile(sessionPath);
+	if (!live) throw absentFile(sessionPath);
 	try {
 		let holds = false;
 		await pipeline(bytesOfRegularFile(archiveFile), createGunzip(), async (source: NodeJS.ReadableStream) => {
@@ -2644,8 +2652,8 @@ export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: st
  * being re-archivable with nothing competing with it at all.
  */
 export async function archivedHandleIsPrefixOfLive(archived: fs.FileHandle, livePath: string): Promise<boolean> {
-	const live = await openRegularFile(livePath).catch(notRegularAsAbsent);
-	if (!live) return false;
+	const live = await openRegularFile(livePath);
+	if (!live) throw absentFile(livePath);
 	try {
 		let holds = false;
 		await pipeline(bytesOfHandle(archived), createGunzip(), async (source: NodeJS.ReadableStream) => {
@@ -2678,8 +2686,8 @@ export async function archivedHandleIsHeldBy(
 	candidatePath: string,
 	transcript = false,
 ): Promise<boolean> {
-	const candidate = await openRegularFile(candidatePath).catch(notRegularAsAbsent);
-	if (!candidate) return false;
+	const candidate = await openRegularFile(candidatePath);
+	if (!candidate) throw absentFile(candidatePath);
 	try {
 		const candidateStat = await candidate.stat();
 		if (archivedStat.dev === candidateStat.dev && archivedStat.ino === candidateStat.ino) return false;
@@ -2814,8 +2822,7 @@ async function tryAcquireRestoreLeases(
 					if (observeOnly) {
 						// A preview looks without taking: a lease it held would make
 						// a session opened meanwhile fork its turn into a new one.
-						const held = isSessionLeaseHeld(id);
-						if (held === null) throw new Error(`the ownership lease of session ${id} could not be probed`);
+						const held = isSessionLeaseHeldOrThrow(id);
 						if (held) return { kind: "owned" };
 					} else {
 						const lease = tryAcquireSessionLease(id);
@@ -3129,15 +3136,15 @@ export async function restoreArchivedSessionLocked(
 		// Planned: what creating the record needs — its directory written to —
 		// and whether a file already at the name would be set aside, as below.
 		let setAsideRecord: string | undefined;
-		let recordWouldStay = false;
+		let recordWouldStay: string | undefined;
 		if (plan) {
 			await planWritableDirectory(path.dirname(record), plan, "the restore record");
 			// Set aside only where `rename(2)` would let applying move it: a
 			// record another user owns in a sticky bucket stays, as applying
 			// finds.
 			if (await statIfPresent(record)) {
-				if ((await renameRefusal(record, path.dirname(record))) === undefined) setAsideRecord = record;
-				else recordWouldStay = true;
+				recordWouldStay = await renameRefusal(record, path.dirname(record));
+				if (recordWouldStay === undefined) setAsideRecord = record;
 			}
 		} else {
 			own = await createRestoreRecord(record, `${restoreCommand}\n`);
@@ -3288,7 +3295,7 @@ export async function restoreArchivedSessionLocked(
 		notRestored.push(...notes);
 		// A preview reports the record applying would set aside, not one it
 		// would leave: applying holds the gc lock, which proves its writer gone.
-		if (plan && recordWouldStay) notRestored.push(restoreRecordLeftNote(record));
+		if (plan && recordWouldStay) notRestored.push(`${record} would be left: ${recordWouldStay}`);
 		if (!plan && own === undefined) {
 			if (await statIfPresent(record)) notRestored.push(restoreRecordLeftNote(record));
 		} else if (!plan && own && notRestored.length === 0) {
@@ -3324,17 +3331,18 @@ export async function restoreArchivedSession(
 ): Promise<RestoredSession> {
 	const dir = agentDir ?? getAgentDir();
 	try {
-		return await withGcLock(dir, () => restoreArchivedSessionLocked(archiveFile, dir, undefined, progress), {
+		const notes: string[] = [];
+		const result = await withGcLock(dir, () => restoreArchivedSessionLocked(archiveFile, dir, undefined, progress), {
 			waitMs: 30_000,
-			// Said where the restore's own progress is said: the session is
-			// whole, and a lock left behind blocks only later gc runs.
-			onReleaseFailure: note =>
-				progress?.(`The session came back, but this process could not remove its gc lock: ${note}`),
+			onReleaseFailure: note => notes.push(note),
 		});
+		for (const note of notes) progress?.(`This process could not remove its gc lock: ${note}`);
+		result.notRestored.push(...notes);
+		return result;
 	} catch (error) {
-		if (error instanceof Error && error.message.startsWith("GC already running")) {
+		if (error instanceof GcLockHeld) {
 			throw new Error(
-				`Cannot open "${archiveFile}": an omp storage maintenance run is holding ${path.join(dir, "gc.lock")}, so the session cannot come out of the archive yet. Retry once it finishes.`,
+				`Cannot open "${archiveFile}": ${error.message}. The session cannot come out of the archive yet. Retry once the lock is released.`,
 			);
 		}
 		throw error;

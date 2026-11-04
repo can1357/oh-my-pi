@@ -44,6 +44,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { type FileLockHandle, getAgentDir, getBlobsDir, getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { leaveDeadGcLock } from "./helpers/gc-lock-fixture";
 import { getXattr, setXattr } from "./helpers/xattr";
@@ -2981,7 +2982,7 @@ test("a FIFO where an artifact belongs is refused rather than waited on", async 
 	// comes; this test would then end as a timeout rather than a refusal.
 	const restored = await restoreArchivedSession(archiveFile, root);
 
-	expect(restored.notRestored.join("\n")).toContain("already holds something else");
+	expect(restored.notRestored.join("\n")).toContain("is a FIFO, not a regular file");
 });
 
 test("a tool output the session empties after a restore does not refuse the next resume", async () => {
@@ -4782,7 +4783,7 @@ for (const occupant of [
 }
 
 test.skipIf(process.getuid?.() === 0)(
-	"a record left at its name in a read-only archive bucket is reported with how to make it movable, and the session then finishes",
+	"a record that cannot move out of a read-only bucket reports the rename error and a later restore finishes",
 	async () => {
 		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
@@ -4803,10 +4804,10 @@ test.skipIf(process.getuid?.() === 0)(
 		}
 
 		const told = applied.restore?.errors.join("\n") ?? "";
-		expect(told).toContain(`${bucket} is not writable`);
-		expect(told).toContain("chmod u+w");
+		expect(told).toContain("EACCES");
+		expect(told).not.toContain("chmod u+w");
 		expect(moved).not.toBe(0);
-		// What the message says: make it writable, then move it.
+		// With permissions restored, setting the unchanged record aside permits retry.
 		await fs.rename(record, path.join(root, "aside"));
 		const finished = await runGcCommand({ flags: { agentDir: root, restore: SESSION_ID, apply: true, json: true } });
 		expect(finished.restore?.errors).toEqual([]);
@@ -5969,11 +5970,13 @@ test("a gc run keeps a file put at gc.lock while it ran, even one given its lock
 	let old: Stats | undefined;
 	const happened = replaceOnNextLook(lock, foreign, () => old);
 
-	await withGcLock(root, async () => {
-		const handle = await fs.open(lock, "r");
-		old = await handle.stat();
-		await handle.close();
-	});
+	await expect(
+		withGcLock(root, async () => {
+			const handle = await fs.open(lock, "r");
+			old = await handle.stat();
+			await handle.close();
+		}),
+	).rejects.toThrow("not the lock this run took");
 
 	expect(happened.replaced).toBe(true);
 	expect(await Bun.file(lock).text()).toBe(foreign);
@@ -6427,12 +6430,12 @@ test.skipIf(process.getuid?.() === 0)(
 			const resumed = resolveResumableSession("zzzz9999", root);
 
 			expect(reclaimed.reclaim?.reclaimed ?? 0).toBe(0);
-			expect(reclaimed.reclaim?.errors.join("\n")).toContain(`${hidden} (EACCES) could not be read`);
+			expect(reclaimed.reclaim?.errors.join("\n")).toContain(`${hidden} (EACCES:`);
 			expect(await Bun.file(sessionFile).exists()).toBe(true);
 			expect(await Bun.file(otherFile).exists()).toBe(true);
-			expect(restored.restore?.errors.join("\n")).toContain(`${hidden} (EACCES) could not be read`);
+			expect(restored.restore?.errors.join("\n")).toContain(`${hidden} (EACCES:`);
 			expect(unknown.restore?.errors.join("\n")).toContain("none was chosen");
-			await expect(resumed).rejects.toThrow(`${hidden} (EACCES) could not be read`);
+			await expect(resumed).rejects.toThrow(`${hidden} (EACCES:`);
 		} finally {
 			await fs.chmod(hidden, 0o700);
 		}
@@ -7295,7 +7298,7 @@ test("a reclaim keeps a file only a forked child holds open, and what the child 
 	expect(result.reclaim?.moved).toBeUndefined();
 	const said = result.reclaim?.errors.join("\n") ?? "";
 	expect(said).toContain(`${artifact} is open or mapped elsewhere`);
-	expect(said).toContain("nor does this process through another descriptor");
+	expect(said).toMatch(/nor does this process through another descriptor|This process holds no other descriptor/);
 	expect(said).toContain("EAGAIN");
 	expect(said).toContain("fuser -v");
 	expect(await Bun.file(artifact).text()).toBe("FIRST LATE CHILD OUTPUT");
@@ -8622,9 +8625,10 @@ test.skipIf(!sudoForSticky)(
 			const applied = await runGcCommand({ flags: restoreApply() });
 
 			expect(preview.restore?.setAsideRecord).toBeUndefined();
-			expect(preview.restore?.errors).toEqual([restoreRecordLeftNote(record)]);
+			expect(preview.restore?.errors.join("\n")).toContain("sticky bit");
 			expect(applied.restore?.setAsideRecord).toBeUndefined();
-			expect(applied.restore?.errors).toEqual([restoreRecordLeftNote(record)]);
+			expect(applied.restore?.errors.join("\n")).toContain("EPERM");
+			expect(applied.restore?.errors.join("\n")).not.toContain("chmod u+w");
 			expect(await Bun.file(record).text()).toBe("omp gc --restore <id> --apply\n");
 		} finally {
 			asRoot("chown", "-R", String(process.getuid?.() ?? ""), bucket);
@@ -8820,3 +8824,400 @@ test("a restore whose tree cannot follow the transcript home says the transcript
 	expect((await fs.stat(sessionFile)).ino).toBe(before.ino);
 	expect(await Bun.file(path.join(reclaimedNames().artifacts, "a.log")).text()).toBe("ORIGINAL");
 }, 60_000);
+
+// Each failed observation must retain its error, never invent a different file,
+// actor or remedy. These drive the command, not the reporting helpers.
+function round54Error(where: string, code = "EIO"): Error {
+	return Object.assign(new Error(`${code}: round54 ${where}`), { code });
+}
+
+test("round54 reclaim preview reports a failed copy permission check without promising safety", async () => {
+	const live = path.join(sessionFile.slice(0, -6), "sub", "a.log");
+	await Bun.write(live, "ORIGINAL");
+	await archiveOnly();
+	const copyDir = path.join(archiveFile.slice(0, -9), "sub");
+	const access = fs.access;
+	spyOn(fs, "access").mockImplementation(async (target, mode) => {
+		if (String(target) === copyDir) throw round54Error("copy access");
+		return await access(target, mode);
+	});
+	const result = await runGcCommand({ flags: { ...reclaimApply(), apply: false } });
+	const said = result.reclaim?.errors.join("\n") ?? "";
+	expect(said).toContain("EIO: round54 copy access");
+	expect(said).not.toContain("not writable");
+	expect(said).not.toContain("would be safe");
+	expect(await Bun.file(live).text()).toBe("ORIGINAL");
+});
+
+test("round54 rename ancestor lookup fails without promising a move or blaming an ancestor", async () => {
+	const into = path.join(root, "destination");
+	await fs.mkdir(into, { mode: 0o500 });
+	const stat = fs.stat;
+	spyOn(fs, "stat").mockImplementation((async (...args: Parameters<typeof fs.stat>) => {
+		if (String(args[0]) === into) throw round54Error("ancestor stat");
+		return await Reflect.apply(stat, fs, args);
+	}) as typeof fs.stat);
+	await expect(regularFile.renameRefusal(sessionFile, into)).rejects.toThrow("EIO: round54 ancestor stat");
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+});
+
+test("round54 post-link lookup failure does not call an intact archive damaged", async () => {
+	await archiveEverything();
+	const before = await fs.readFile(archiveFile);
+	let published = false;
+	const link = fs.link;
+	const lstat = fs.lstat;
+	spyOn(fs, "link").mockImplementation(async (from, to) => {
+		await link(from, to);
+		if (String(to) === sessionFile) published = true;
+	});
+	spyOn(fs, "lstat").mockImplementation((async (...args: Parameters<typeof fs.lstat>) => {
+		if (published && String(args[0]) === sessionFile) throw round54Error("post-link lookup");
+		return await Reflect.apply(lstat, fs, args);
+	}) as typeof fs.lstat);
+	const result = await runGcCommand({ flags: restoreApply() });
+	expect(result.restore?.errors.join("\n")).toContain("EIO: round54 post-link lookup");
+	expect(result.restore?.errors.join("\n")).not.toContain("archive is damaged");
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+	expect(await fs.readFile(archiveFile)).toEqual(before);
+});
+
+for (const progress of [false, true]) {
+	test(`round54 failed restore preserves its lock release failure with progress ${progress}`, async () => {
+		await archiveEverything();
+		const open = fs.open;
+		const unlink = fs.unlink;
+		spyOn(fs, "open").mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+			if (String(args[0]) === archiveFile) throw round54Error("archive open");
+			return await Reflect.apply(open, fs, args);
+		}) as typeof fs.open);
+		spyOn(fs, "unlink").mockImplementation(async file => {
+			if (String(file) === path.join(root, "gc.lock")) throw round54Error("lock release");
+			return await unlink(file);
+		});
+		const lines: string[] = [];
+		const restore = restoreArchivedSession(archiveFile, root, progress ? line => lines.push(line) : undefined);
+		await expect(restore).rejects.toThrow("EIO: round54 archive open");
+		await expect(restore).rejects.toThrow("EIO: round54 lock release");
+		expect(lines.join("\n")).not.toContain("session came back");
+		expect(await Bun.file(sessionFile).exists()).toBe(false);
+		expect(await Bun.file(archiveFile).exists()).toBe(true);
+	});
+}
+
+test("round54 rearchive lookup failure is not a different session", async () => {
+	await archiveOnly();
+	await fs.appendFile(
+		sessionFile,
+		`${JSON.stringify({ type: "message", id: "m3", message: { role: "assistant", content: [] } })}\n`,
+	);
+	const lstat = fs.lstat;
+	let looks = 0;
+	spyOn(fs, "lstat").mockImplementation((async (...args: Parameters<typeof fs.lstat>) => {
+		if (String(args[0]) === archiveFile && ++looks === 2) throw round54Error("rearchive lookup");
+		return await Reflect.apply(lstat, fs, args);
+	}) as typeof fs.lstat);
+	const result = await archiveOnly();
+	expect(result.archive?.errors.join("\n")).toContain("EIO: round54 rearchive lookup");
+	expect(result.archive?.errors.join("\n")).not.toContain("different session");
+	expect(await Bun.file(sessionFile).text()).toContain('"m3"');
+});
+
+for (const kind of ["directory", "missing", "unreadable"] as const) {
+	test(`round54 restore comparison reports a ${kind} live path rather than a different session`, async () => {
+		await archiveOnly();
+		if (kind === "directory") {
+			await fs.unlink(sessionFile);
+			await fs.mkdir(sessionFile);
+		} else {
+			const open = fs.open;
+			spyOn(fs, "open").mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+				if (String(args[0]) === sessionFile)
+					throw round54Error("live comparison", kind === "missing" ? "ENOENT" : "EIO");
+				return await Reflect.apply(open, fs, args);
+			}) as typeof fs.open);
+		}
+		const result = await runGcCommand({ flags: restoreApply(false) });
+		const said = result.restore?.errors.join("\n") ?? "";
+		expect(said).toContain(
+			kind === "directory" ? "is a directory" : kind === "missing" ? "ENOENT" : "EIO: round54 live comparison",
+		);
+		expect(said).not.toContain("different session");
+		expect(await Bun.file(archiveFile).exists()).toBe(true);
+	});
+}
+
+test("round54 reclaim names a hard-linked archived artifact as an alias, not different bytes", async () => {
+	const artifact = path.join(sessionFile.slice(0, -6), "a.log");
+	const copy = path.join(archiveFile.slice(0, -9), "a.log");
+	await Bun.write(artifact, "ORIGINAL");
+	await archiveOnly();
+	await fs.unlink(copy);
+	await fs.link(artifact, copy);
+	const result = await runGcCommand({ flags: reclaimApply() });
+	const said = result.reclaim?.errors.join("\n") ?? "";
+	expect(said).toContain("is not a copy");
+	expect(said).not.toContain("holds what");
+	expect(await Bun.file(artifact).text()).toBe("ORIGINAL");
+	expect(await Bun.file(copy).text()).toBe("ORIGINAL");
+});
+
+test("round54 vanished realpath is not reported as the archived file itself", async () => {
+	const artifact = path.join(sessionFile.slice(0, -6), "a.log");
+	await Bun.write(artifact, "ORIGINAL");
+	await archiveOnly();
+	const realpath = fs.realpath;
+	spyOn(fs, "realpath").mockImplementation((async (...args: Parameters<typeof fs.realpath>) => {
+		if (String(args[0]) === artifact) throw round54Error("vanished destination", "ENOENT");
+		return await Reflect.apply(realpath, fs, args);
+	}) as typeof fs.realpath);
+	const result = await runGcCommand({ flags: restoreApply() });
+	expect(result.restore?.errors.join("\n")).toContain("ENOENT: round54 vanished destination");
+	expect(result.restore?.errors.join("\n")).not.toContain("itself, not a second copy");
+	expect(await Bun.file(artifact).text()).toBe("ORIGINAL");
+});
+
+for (const operation of ["lstat", "open"] as const) {
+	test(`round54 reclaim reports failed ${operation} of an archived copy directory`, async () => {
+		const artifact = path.join(sessionFile.slice(0, -6), "sub", "a.log");
+		const copyDir = path.join(archiveFile.slice(0, -9), "sub");
+		await Bun.write(artifact, "ORIGINAL");
+		await archiveOnly();
+		let moved = false;
+		const rename = libcModule.renameNoReplace;
+		spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+			const answer = await rename(from, to);
+			if (from === path.dirname(path.dirname(artifact)) && answer.outcome === "renamed") moved = true;
+			return answer;
+		});
+		const original = fs[operation];
+		spyOn(fs, operation).mockImplementation((async (...args: unknown[]) => {
+			if (moved && String(args[0]) === copyDir) throw round54Error(`copy directory ${operation}`);
+			return await Reflect.apply(original, fs, args);
+		}) as typeof original);
+		const result = await runGcCommand({ flags: reclaimApply() });
+		expect(result.reclaim?.errors.join("\n")).toContain(`EIO: round54 copy directory ${operation}`);
+		mock.restore();
+		expect(await Bun.file(path.join(reclaimedNames().artifacts, "sub", "a.log")).text()).toBe("ORIGINAL");
+	});
+}
+
+test("round54 publication withdrawal reports a failed read, not somebody else's publication", async () => {
+	const artifact = path.join(sessionFile.slice(0, -6), "a.log");
+	const copy = path.join(archiveFile.slice(0, -9), "a.log");
+	await Bun.write(artifact, "ORIGINAL");
+	let linked = false;
+	const link = fs.link;
+	const open = fs.open;
+	spyOn(fs, "link").mockImplementation(async (from, to) => {
+		await link(from, to);
+		if (String(to) === copy) linked = true;
+	});
+	spyOn(fs, "open").mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+		const handle = await Reflect.apply(open, fs, args);
+		if (linked && (String(args[0]) === copy || String(args[0]).endsWith(".leaving"))) {
+			handle.read = (async () => {
+				throw round54Error("withdrawal read");
+			}) as typeof handle.read;
+		}
+		return handle;
+	}) as typeof fs.open);
+	const result = await archiveOnly();
+	expect(result.archive?.errors.join("\n")).toContain("EIO: round54 withdrawal read");
+	expect(result.archive?.errors.join("\n")).not.toContain("is not what this run published");
+	expect(await Bun.file(artifact).text()).toBe("ORIGINAL");
+});
+
+test("round54 stale restore record rename errors retain the failed operation", async () => {
+	await archiveEverything();
+	const record = restoreRecordPath(archiveFile);
+	await Bun.write(record, "unfinished restore");
+	const rename = libcModule.renameNoReplace;
+	spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+		if (from === record) throw round54Error("record rename");
+		return await rename(from, to);
+	});
+	const result = await runGcCommand({ flags: restoreApply() });
+	expect(result.restore?.errors.join("\n")).toContain("EIO: round54 record rename");
+	expect(await Bun.file(record).text()).toBe("unfinished restore");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("round54 archive listing does not count entries whose stat failed", async () => {
+	await archiveOnly();
+	const stat = fs.stat;
+	spyOn(fs, "stat").mockImplementation((async (...args: Parameters<typeof fs.stat>) => {
+		if (String(args[0]) === archiveFile) throw round54Error("listing stat");
+		return await Reflect.apply(stat, fs, args);
+	}) as typeof fs.stat);
+	await expect(sessionArchive.listArchivedSessionFiles(root)).rejects.toThrow("EIO: round54 listing stat");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("round54 incomplete archive listing is unknown rather than a shorter list", async () => {
+	await archiveOnly();
+	const readdir = fs.readdir;
+	spyOn(fs, "readdir").mockImplementation((async (...args: Parameters<typeof fs.readdir>) => {
+		if (String(args[0]) === path.dirname(archiveFile)) throw round54Error("listing bucket", "EACCES");
+		return await Reflect.apply(readdir, fs, args);
+	}) as typeof fs.readdir);
+	await expect(sessionArchive.listArchivedSessionFiles(root)).rejects.toThrow("EACCES: round54 listing bucket");
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+for (const operation of ["readlink", "realpath"] as const) {
+	test(`round54 failed link ${operation} check gives no invented move advice`, async () => {
+		const artifacts = sessionFile.slice(0, -6);
+		await Bun.write(path.join(root, "outside.log"), "ORIGINAL");
+		await fs.mkdir(artifacts);
+		const link = path.join(artifacts, "link");
+		await fs.symlink(path.join(root, "outside.log"), link);
+		await archiveOnly();
+		const original = fs[operation];
+		spyOn(fs, operation).mockImplementation((async (...args: Parameters<typeof fs.realpath>) => {
+			if (String(args[0]) === link) throw round54Error(`link ${operation}`);
+			return await Reflect.apply(original, fs, args);
+		}) as typeof original);
+		const result = await runGcCommand({ flags: reclaimApply() });
+		expect(result.reclaim?.errors.join("\n")).toContain(`EIO: round54 link ${operation}`);
+		expect(result.reclaim?.errors.join("\n")).not.toContain("move the link out");
+		expect(await Bun.file(path.join(root, "outside.log")).text()).toBe("ORIGINAL");
+	});
+}
+
+test("round54 failed inode flag probe does not promise a rename", async () => {
+	const real = libcModule.libc();
+	spyOn(libcModule, "libc").mockReturnValue({ ...real, ioctl: () => -1, errno: () => os.constants.errno.EIO });
+	await expect(regularFile.renameRefusal(sessionFile, root)).rejects.toThrow("EIO");
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+});
+
+test("round54 residue resolution failure gives no unverified recovery command", async () => {
+	const record = path.join(stagingLedgerDir(root), "record.json");
+	const dir = path.join(root, "stage");
+	await fs.mkdir(dir);
+	await Bun.write(record, "record bytes");
+	const realpath = fs.realpath;
+	spyOn(fs, "realpath").mockImplementation((async (...args: Parameters<typeof fs.realpath>) => {
+		if (String(args[0]) === root) throw round54Error("residue resolution");
+		return await Reflect.apply(realpath, fs, args);
+	}) as typeof fs.realpath);
+	await expect(stagingResidueNote(dir, record, "kept")).rejects.toThrow("EIO: round54 residue resolution");
+	expect(await Bun.file(record).text()).toBe("record bytes");
+});
+
+test("round54 failed broken link lookup does not report a smaller broken link count", async () => {
+	const artifact = path.join(sessionFile.slice(0, -6), "broken");
+	await fs.mkdir(path.dirname(artifact));
+	await fs.symlink(path.join(root, "absent"), artifact);
+	const lstat = fs.lstat;
+	spyOn(fs, "lstat").mockImplementation((async (...args: Parameters<typeof fs.lstat>) => {
+		if (String(args[0]) === artifact) throw round54Error("broken link lookup");
+		return await Reflect.apply(lstat, fs, args);
+	}) as typeof fs.lstat);
+	const result = await archiveOnly();
+	expect(result.archive?.errors.join("\n")).toContain("EIO: round54 broken link lookup");
+	expect(result.archive?.archived).toBe(0);
+	expect(result.archive?.brokenLinks).toBeUndefined();
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+});
+
+test("round54 failed staging existence check preserves both errors and the record", async () => {
+	const open = fs.open;
+	const lstat = fs.lstat;
+	let openFailed = false;
+	spyOn(fs, "open").mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+		if (String(args[0]).endsWith(".tmp")) {
+			openFailed = true;
+			throw round54Error("stage open");
+		}
+		return await Reflect.apply(open, fs, args);
+	}) as typeof fs.open);
+	spyOn(fs, "lstat").mockImplementation((async (...args: Parameters<typeof fs.lstat>) => {
+		if (openFailed && String(args[0]).endsWith(".tmp")) throw round54Error("stage existence");
+		return await Reflect.apply(lstat, fs, args);
+	}) as typeof fs.lstat);
+	const mint = mintStagingGround(sessionFile, stagingLedgerDir(root));
+	await expect(mint).rejects.toThrow("EIO: round54 stage open");
+	await expect(mint).rejects.toThrow("EIO: round54 stage existence");
+	expect((await fs.readdir(stagingLedgerDir(root))).filter(name => name.endsWith(".json")).length).toBe(1);
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+});
+
+test("round54 failed write-back size check is unknown with its error, not silently unknown", async () => {
+	const file = path.join(root, "copy");
+	await Bun.write(file, "ORIGINAL");
+	const open = fs.open;
+	let unlinked = false;
+	const unlink = fs.unlink;
+	spyOn(fs, "unlink").mockImplementation(async target => {
+		await unlink(target);
+		if (String(target).endsWith(".leaving")) unlinked = true;
+	});
+	spyOn(fs, "open").mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+		const handle = await Reflect.apply(open, fs, args);
+		if (String(args[0]) === file && unlinked) {
+			handle.stat = (async () => {
+				throw round54Error("write-back size");
+			}) as typeof handle.stat;
+		} else if (String(args[0]).endsWith(".leaving")) {
+			const read = handle.read.bind(handle) as (...a: unknown[]) => Promise<{ bytesRead: number }>;
+			handle.read = (async (...a: unknown[]) => {
+				if (unlinked && Number(a[3]) >= 8) throw round54Error("write-back end");
+				return await read(...a);
+			}) as typeof handle.read;
+		}
+		return handle;
+	}) as typeof fs.open);
+	const result = await regularFile.removeFileOthersMayWrite(file, {
+		matches: () => true,
+		mismatch: "different file",
+		judge: async () => undefined,
+		confirm: async () => "copy must stay",
+	});
+	expect(result.outcome).toBe("kept");
+	if (result.outcome !== "kept") throw new Error("copy was not retained");
+	expect(result.note).toContain("EIO: round54 write-back size");
+	expect(result.note).toContain("EIO: round54 write-back end");
+	expect(result.lost).toBeUndefined();
+	expect(await Bun.file(file).text()).toBe("ORIGINAL");
+});
+
+test("round54 failed reclaim container cleanup is reported with its original intact", async () => {
+	await archiveOnly();
+	const container = path.dirname(reclaimedNames().transcript);
+	const rmdir = fs.rmdir;
+	spyOn(fs, "rmdir").mockImplementation((async (...args: Parameters<typeof fs.rmdir>) => {
+		if (String(args[0]) === container) throw round54Error("container cleanup");
+		return await Reflect.apply(rmdir, fs, args);
+	}) as typeof fs.rmdir);
+	const result = await runGcCommand({ flags: reclaimApply() });
+	expect(result.reclaim?.errors.join("\n")).toContain("EIO: round54 container cleanup");
+	expect(await Bun.file(reclaimedNames().transcript).text()).toContain(PROMPT);
+});
+
+test("round54 restore preview preserves the ownership probe's original error", async () => {
+	await archiveOnly();
+	spyOn(fileLock, "isFileLockHeld").mockImplementation(() => {
+		throw round54Error("ownership probe");
+	});
+	const result = await runGcCommand({ flags: restoreApply(false) });
+	expect(isSessionLeaseHeld(SESSION_ID)).toBeNull();
+	expect(result.restore?.errors.join("\n")).toContain("EIO: round54 ownership probe");
+	expect(result.restore?.errors.join("\n")).not.toMatch(/^a running process owns/m);
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+	expect(await Bun.file(archiveFile).exists()).toBe(true);
+});
+
+test("round54 unsupported attribute inspection is unknown, not an empty attribute list", async () => {
+	const real = libcModule.libc();
+	spyOn(libcModule, "libc").mockReturnValue({
+		...real,
+		flistxattr: () => -1,
+		errno: () => os.constants.errno.ENOTSUP,
+	});
+	const result = await archiveOnly();
+	expect(result.archive?.errors.join("\n")).toContain("ENOTSUP");
+	expect(result.archive?.archived).toBe(0);
+	expect(await Bun.file(sessionFile).text()).toContain(PROMPT);
+});

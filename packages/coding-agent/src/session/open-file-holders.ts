@@ -177,7 +177,7 @@ export interface OpenFileHolder {
 }
 
 /** Who holds the files open, or why that could not be told. */
-export type OpenFileHolders = { holders: OpenFileHolder[] } | { unknown: string };
+export type OpenFileHolders = { holders: OpenFileHolder[] } | { unknown: string; seen?: OpenFileHolder[] };
 
 /** Every process found holding one of `files` open; none of them may be a directory. */
 export async function openFileHolders(files: readonly string[]): Promise<OpenFileHolders> {
@@ -193,24 +193,14 @@ export function describeOpenFileHolder(holder: OpenFileHolder): string {
 }
 
 /**
- * How many descriptors this process holds on the file `identity` names, by
- * `/proc/self/fd`; undefined where that cannot be read in full. A lease is
- * refused while any other open of the file exists — this process's own
- * included — so a caller holding one descriptor of its own, and asking why
- * the kernel refused, reads more than one as this process holding the file
- * elsewhere. A descriptor whose lookup fails for any reason but its closing
- * meanwhile (`ENOENT`) makes the count unknown, not smaller: a review made one
- * lookup fail with `EIO`, and the count left out the very descriptor that
- * held the file. A mapping holds no descriptor and is not counted.
+ * How many descriptors this process holds on `identity`, by `/proc/self/fd`.
+ * Undefined where this platform has no descriptor listing. A failed lookup
+ * throws: it cannot supply a count or show that a holder is invisible.
+ * Descriptors closed since the listing are skipped; mappings are not counted.
  */
 export async function ownDescriptorCount(identity: { dev: number; ino: number }): Promise<number | undefined> {
 	if (process.platform !== "linux") return undefined;
-	let descriptors: string[];
-	try {
-		descriptors = await fs.readdir("/proc/self/fd");
-	} catch {
-		return undefined;
-	}
+	const descriptors = await fs.readdir("/proc/self/fd");
 	let count = 0;
 	for (const descriptor of descriptors) {
 		let held: Stats;
@@ -218,7 +208,7 @@ export async function ownDescriptorCount(identity: { dev: number; ino: number })
 			held = await fs.stat(`/proc/self/fd/${descriptor}`);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-			return undefined;
+			throw error;
 		}
 		if (held.dev === identity.dev && held.ino === identity.ino) count++;
 	}
@@ -238,9 +228,8 @@ async function linuxHolders(files: readonly string[]): Promise<OpenFileHolders> 
 		return { unknown: `/proc could not be read: ${error instanceof Error ? error.message : String(error)}` };
 	}
 	const holders: OpenFileHolder[] = [];
-	// A failure that is neither "gone" nor "not this user's" says nothing
-	// about what the process holds, and is not read as "nothing".
-	let unreadable: string | undefined;
+	// A failed lookup leaves the list incomplete, even if other holders were seen.
+	const unreadable: string[] = [];
 	await Promise.all(
 		pids.map(async pid => {
 			let descriptors: string[];
@@ -248,8 +237,10 @@ async function linuxHolders(files: readonly string[]): Promise<OpenFileHolders> 
 				descriptors = await fs.readdir(`/proc/${pid}/fd`);
 			} catch (error) {
 				const code = codeOf(error);
-				if (code === "ENOENT" || code === "ESRCH" || code === "EACCES" || code === "EPERM") return;
-				unreadable ??= `/proc/${pid}/fd could not be read: ${error instanceof Error ? error.message : String(error)}`;
+				if (code === "ENOENT" || code === "ESRCH") return;
+				unreadable.push(
+					`/proc/${pid}/fd could not be read: ${error instanceof Error ? error.message : String(error)}`,
+				);
 				return;
 			}
 			await Promise.all(
@@ -260,8 +251,10 @@ async function linuxHolders(files: readonly string[]): Promise<OpenFileHolders> 
 					} catch (error) {
 						const code = codeOf(error);
 						// Closed since the listing, or the process is gone.
-						if (code === "ENOENT" || code === "ESRCH" || code === "EACCES" || code === "EPERM") return;
-						unreadable ??= `/proc/${pid}/fd/${descriptor} could not be followed: ${error instanceof Error ? error.message : String(error)}`;
+						if (code === "ENOENT" || code === "ESRCH") return;
+						unreadable.push(
+							`/proc/${pid}/fd/${descriptor} could not be followed: ${error instanceof Error ? error.message : String(error)}`,
+						);
 						return;
 					}
 					const file = wanted.get(`${held.dev}:${held.ino}`);
@@ -270,16 +263,19 @@ async function linuxHolders(files: readonly string[]): Promise<OpenFileHolders> 
 			);
 		}),
 	);
-	if (unreadable !== undefined && holders.length === 0) return { unknown: unreadable };
-	for (const holder of holders) {
-		holder.command =
-			(
-				await Bun.file(`/proc/${holder.pid}/comm`)
-					.text()
-					.catch(() => "")
-			).trim() || undefined;
+	const seen = dedupe(holders);
+	for (const holder of seen) {
+		try {
+			holder.command = (await Bun.file(`/proc/${holder.pid}/comm`).text()).trim() || undefined;
+		} catch (error) {
+			if (codeOf(error) !== "ENOENT" && codeOf(error) !== "ESRCH") {
+				unreadable.push(
+					`/proc/${holder.pid}/comm could not be read: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
 	}
-	return { holders: dedupe(holders) };
+	return unreadable.length > 0 ? { unknown: unreadable.join("; "), seen } : { holders: seen };
 }
 
 async function darwinHolders(files: readonly string[]): Promise<OpenFileHolders> {

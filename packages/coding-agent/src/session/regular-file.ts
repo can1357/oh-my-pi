@@ -22,7 +22,7 @@ import * as fs from "node:fs/promises";
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { errnoName, isErrno, type Libc, libc, type NoReplaceRename, renameNoReplace } from "./libc";
+import { errnoName, isErrno, libc, type NoReplaceRename, renameNoReplace } from "./libc";
 
 /** What a name stands for when it is not a regular file, in a reader's words: "a FIFO", "a socket", "a device". */
 export function kindOf(stat: Stats): string {
@@ -241,8 +241,6 @@ function extendedAttributeNames(fd: number): string[] {
 		const size = lib.flistxattr(fd, null, 0);
 		if (size < 0) {
 			const code = lib.errno();
-			// The filesystem keeps no extended attributes.
-			if (isErrno(code, "ENOTSUP", "EOPNOTSUPP")) return [];
 			throw new Error(`its extended attributes could not be listed (${errnoName(code)})`);
 		}
 		if (size === 0) return [];
@@ -252,7 +250,6 @@ function extendedAttributeNames(fd: number): string[] {
 			const code = lib.errno();
 			// The list grew between sizing the buffer and reading it.
 			if (isErrno(code, "ERANGE")) continue;
-			if (isErrno(code, "ENOTSUP", "EOPNOTSUPP")) return [];
 			throw new Error(`its extended attributes could not be listed (${errnoName(code)})`);
 		}
 		return names
@@ -283,7 +280,7 @@ export async function holdSeenDirectory(dir: string, seen: Stats): Promise<HeldF
 		handle = await fs.open(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
 	} catch (error) {
 		const code = error instanceof Error && "code" in error ? error.code : undefined;
-		if (code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP") return undefined;
+		if (code === "ENOENT" || code === "ENOTDIR") return undefined;
 		throw error;
 	}
 	try {
@@ -451,17 +448,7 @@ export async function unlinkFileNoOneElseWrites(file: string, own: readonly Held
 	const first = await lookAgain();
 	if (!first) return "absent";
 	if (!first.isFile() || !own.some(held => held.dev === first.dev && held.ino === first.ino)) return "kept";
-	let handle: fs.FileHandle | undefined;
-	try {
-		handle = await openRegularFile(file, { noFollow: true });
-	} catch (error) {
-		// Something else took the name since the look: a link, which `noFollow`
-		// refuses, or a FIFO, a socket or a device.
-		if (error instanceof NotARegularFile || (error instanceof Error && "code" in error && error.code === "ELOOP")) {
-			return "kept";
-		}
-		throw error;
-	}
+	const handle = await openRegularFile(file, { noFollow: true });
 	if (!handle) return "absent";
 	let ours: HeldFile | undefined;
 	try {
@@ -631,9 +618,7 @@ export async function removeFileOthersMayWrite(file: string, rule: OthersMayWrit
 	try {
 		try {
 			standing = await fs.lstat(aside);
-			handle = standing.isFile()
-				? await openRegularFile(aside, { noFollow: true }).catch(notRegularAsAbsent)
-				: undefined;
+			handle = standing.isFile() ? await openRegularFile(aside, { noFollow: true }) : undefined;
 			why = await rule.judge(standing, handle);
 		} catch (error) {
 			why = `${file} could not be checked (${errorText(error)})`;
@@ -769,11 +754,16 @@ async function writeBack(
 			if (whole) {
 				return { note: `${why}, so its bytes were written back to ${target}, though ${errorText(error)}` };
 			}
+			let sizeFailure: string | undefined;
 			const holds = await written
 				.stat()
 				.then(stat => stat.size)
-				.catch(() => undefined);
-			const counted = holds === undefined ? "an unknown number" : `${holds}`;
+				.catch((failure: unknown) => {
+					sizeFailure = errorText(failure);
+					return undefined;
+				});
+			const counted =
+				holds === undefined ? `an unknown number (size could not be checked: ${sizeFailure})` : `${holds}`;
 			if (shortOf(holds)) {
 				return {
 					note:
@@ -923,26 +913,23 @@ const FS_IOC_GETFLAGS = 0x80086601;
 /** `FS_IMMUTABLE_FL` and `FS_APPEND_FL`: the kernel refuses to rename an entry carrying either, or out of a directory carrying either. */
 const RENAME_LOCKING_FLAGS = 0x10 | 0x20;
 
-/** Whether `entry` carries the immutable or the append-only flag; false where inode flags cannot be read here. */
+/** Whether `entry` carries an immutable or append-only flag; a failed probe throws. */
 async function renameLocked(entry: string, directory: boolean): Promise<boolean> {
-	let lib: Libc;
-	try {
-		lib = libc();
-	} catch {
-		return false;
-	}
+	const lib = libc();
 	const ioctl = lib.ioctl;
-	if (!ioctl) return false;
+	if (!ioctl) throw new Error(`inode flags of ${entry} could not be checked (no ioctl binding here)`);
 	const flags =
 		fsConstants.O_RDONLY |
 		fsConstants.O_NOFOLLOW |
 		fsConstants.O_NONBLOCK |
 		(directory ? fsConstants.O_DIRECTORY : 0);
-	const handle = await fs.open(entry, flags).catch(() => undefined);
-	if (!handle) return false;
+	const handle = await fs.open(entry, flags);
 	try {
 		const into = Buffer.alloc(8);
-		return ioctl(handle.fd, FS_IOC_GETFLAGS, into) === 0 && (into.readUInt32LE(0) & RENAME_LOCKING_FLAGS) !== 0;
+		if (ioctl(handle.fd, FS_IOC_GETFLAGS, into) !== 0) {
+			throw new Error(`inode flags of ${entry} could not be checked (${errnoName(lib.errno())})`);
+		}
+		return (into.readUInt32LE(0) & RENAME_LOCKING_FLAGS) !== 0;
 	} finally {
 		await handle.close().catch(() => undefined);
 	}
@@ -977,7 +964,7 @@ export async function renameRefusal(from: string, toParent: string): Promise<str
 			return undefined;
 		} catch (error) {
 			const code = (error as NodeJS.ErrnoException).code;
-			if (code === "EACCES" || code === "EPERM" || code === "EROFS") return `${refused} (${code})`;
+			if (code === "EACCES" || code === "EPERM" || code === "EROFS") return `${refused} (${errorText(error)})`;
 			return `whether this process can ${what} could not be checked (${errorText(error)})`;
 		}
 	};
@@ -991,7 +978,17 @@ export async function renameRefusal(from: string, toParent: string): Promise<str
 	const out = await writable(leaves, `move ${from} out of it`);
 	if (out) return out;
 	let into = toParent;
-	while (!(await fs.stat(into).catch(() => undefined)) && path.dirname(into) !== into) into = path.dirname(into);
+	for (;;) {
+		try {
+			await fs.stat(into);
+			break;
+		} catch (error) {
+			const code = error instanceof Error && "code" in error ? error.code : undefined;
+			if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+			if (path.dirname(into) === into) throw error;
+			into = path.dirname(into);
+		}
+	}
 	const made = into === toParent ? "move" : `make ${toParent} to move`;
 	const inside = await writable(into, `${made} ${from} into it`);
 	if (inside) return inside;
@@ -1012,6 +1009,8 @@ export async function renameRefusal(from: string, toParent: string): Promise<str
 		[from, entry.isDirectory()],
 		[leaves, true],
 	] as const) {
+		// Symlinks have no rename-locking inode flags of their own to read.
+		if (name === from && entry.isSymbolicLink()) continue;
 		if (await renameLocked(name, directory)) {
 			return `${name} is immutable or append-only (\`chattr\` flag \`i\` or \`a\`), so ${from} cannot be moved`;
 		}

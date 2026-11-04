@@ -1382,29 +1382,23 @@ describe("runGcCommand lock handling", () => {
 	// running gc: a review failed its removal with `EIO`, and made the lock's
 	// directory read-only, and every command said "GC already running" with
 	// the holder dead.
-	for (const how of ["its removal fails with EIO", "its directory is read-only"] as const) {
+	for (const how of ["its removal fails with EIO", "its removal fails with EACCES"] as const) {
 		test(`a stale gc lock that cannot be removed because ${how} is reported as that, not as a running gc`, async () => {
 			const lockPath = path.join(root, "gc.lock");
 			await leaveDeadGcLock(root);
 			const left = await Bun.file(lockPath).text();
 			const realUnlink = fs.unlink;
-			if (how === "its removal fails with EIO") {
-				spyOn(fs, "unlink").mockImplementation(async file => {
-					if (String(file) === lockPath)
-						throw Object.assign(new Error("EIO: injected lock removal"), { code: "EIO" });
-					return await realUnlink(file);
-				});
-			} else {
-				await fs.chmod(root, 0o500);
-			}
+			spyOn(fs, "unlink").mockImplementation(async file => {
+				if (String(file) === lockPath) {
+					const code = how === "its removal fails with EIO" ? "EIO" : "EACCES";
+					throw Object.assign(new Error(`${code}: injected lock removal`), { code });
+				}
+				return await realUnlink(file);
+			});
 			try {
 				const refused = runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
-				// A read-only directory refuses the breaker lock before the stale
-				// one is reached: the refusal names that, as it came.
 				await expect(refused).rejects.toThrow(
-					how === "its removal fails with EIO"
-						? "was left by a gc run that is no longer running, and it could not be removed (EIO: injected lock removal)"
-						: "EACCES",
+					`was left by a gc run that is no longer running, and it could not be removed (${how === "its removal fails with EIO" ? "EIO" : "EACCES"}: injected lock removal)`,
 				);
 				await expect(refused).rejects.not.toThrow("GC already running");
 				expect(await Bun.file(lockPath).text()).toBe(left);
@@ -1925,4 +1919,97 @@ describe("runGcCommand session compression", () => {
 		expect(await Bun.file(path.join(root, GC_AUTO_COMPRESS_LOG)).text()).toContain("compress skipped: unsupported");
 		expect(await snapshot(file)).toEqual(before);
 	});
+});
+
+test("round54 failed lock takeover reports the breaker left by this process too", async () => {
+	const lock = path.join(root, "gc.lock");
+	const breaker = `${lock}.break`;
+	await leaveDeadGcLock(root);
+	const unlink = fs.unlink;
+	spyOn(fs, "unlink").mockImplementation(async file => {
+		if ([lock, breaker].includes(String(file))) {
+			throw Object.assign(new Error(`EIO: round54 unlink ${String(file)}`), { code: "EIO" });
+		}
+		return await unlink(file);
+	});
+	const run = runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+	await expect(run).rejects.toThrow(`EIO: round54 unlink ${lock}`);
+	await expect(run).rejects.toThrow(`EIO: round54 unlink ${breaker}`);
+	expect(await Bun.file(breaker).text()).toContain(`${process.pid}\n`);
+});
+
+test("round54 a stale symlink lock kept by unlink is not a running gc", async () => {
+	await leaveDeadGcLock(root);
+	const lock = path.join(root, "gc.lock");
+	const target = path.join(root, "stale-target");
+	await fs.rename(lock, target);
+	await fs.symlink(target, lock);
+	const run = runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+	await expect(run).rejects.not.toThrow("GC already running");
+	await expect(run).rejects.toThrow("left");
+	expect((await fs.lstat(lock)).isSymbolicLink()).toBe(true);
+	expect(await Bun.file(target).exists()).toBe(true);
+});
+
+test("round54 command failure retains a simultaneous lock release error", async () => {
+	const lock = path.join(root, "gc.lock");
+	const readdir = fs.readdir;
+	const unlink = fs.unlink;
+	spyOn(fs, "readdir").mockImplementation((async (...args: Parameters<typeof fs.readdir>) => {
+		if (String(args[0]) === getBlobsDir(root)) {
+			throw Object.assign(new Error("EIO: round54 blob listing"), { code: "EIO" });
+		}
+		return await Reflect.apply(readdir, fs, args);
+	}) as typeof fs.readdir);
+	spyOn(fs, "unlink").mockImplementation(async file => {
+		if (String(file) === lock) throw Object.assign(new Error("EIO: round54 release"), { code: "EIO" });
+		return await unlink(file);
+	});
+	const run = runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+	await expect(run).rejects.toThrow("EIO: round54 blob listing");
+	await expect(run).rejects.toThrow("EIO: round54 release");
+	expect(await Bun.file(lock).exists()).toBe(true);
+});
+
+test("round54 failed dangling pointer lookup surfaces instead of silently keeping it", async () => {
+	const target = path.join(root, "unreadable.jsonl");
+	await Bun.write(target, "ORIGINAL");
+	const marker = path.join(getCustomSessionFilesDir(root), "pointer");
+	await Bun.write(marker, target);
+	await agePath(marker, 90);
+	const stat = fs.stat;
+	spyOn(fs, "stat").mockImplementation((async (...args: Parameters<typeof fs.stat>) => {
+		if (String(args[0]) === target) throw Object.assign(new Error("EIO: round54 pointer target"), { code: "EIO" });
+		return await Reflect.apply(stat, fs, args);
+	}) as typeof fs.stat);
+	await expect(runGcCommand({ flags: { agentDir: root, stale: true, apply: true } })).rejects.toThrow(
+		"EIO: round54 pointer target",
+	);
+	expect(await Bun.file(marker).text()).toBe(target);
+	expect(await Bun.file(target).text()).toBe("ORIGINAL");
+});
+
+test("round54 gc lock pid probe failure is not a running gc", async () => {
+	await leaveDeadGcLock(root);
+	const lock = path.join(root, "gc.lock");
+	const bytes = await Bun.file(lock).text();
+	const pid = Number(bytes.split("\n")[0]);
+	const kill = process.kill;
+	spyOn(process, "kill").mockImplementation((target, signal) => {
+		if (target === pid && signal === 0) throw Object.assign(new Error("EIO: round54 pid probe"), { code: "EIO" });
+		return kill(target, signal);
+	});
+	const run = runGcCommand({ flags: { agentDir: root, blobs: true } });
+	await expect(run).rejects.toThrow("EIO: round54 pid probe");
+	await expect(run).rejects.not.toThrow("GC already running");
+	expect(await Bun.file(lock).text()).toBe(bytes);
+});
+
+test("round54 fresh empty lock names no unseen running process", async () => {
+	const lock = path.join(root, "gc.lock");
+	await Bun.write(lock, "");
+	const run = runGcCommand({ flags: { agentDir: root, blobs: true } });
+	await expect(run).rejects.not.toThrow("GC already running");
+	await expect(run).rejects.toThrow("empty");
+	expect(await Bun.file(lock).text()).toBe("");
 });
