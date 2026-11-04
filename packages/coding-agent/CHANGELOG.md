@@ -76,6 +76,7 @@
 
 ### Fixed
 - Fixed a second `ask` note on a later single-select question reopening and replacing the previous question's note ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
+- Fixed the first run of a compiled binary after an install or upgrade keeping every subagent on the main thread and failing `omp --smoke-test` with `SubagentCodeChangedError` for the native addon it had just extracted ([#18060](https://github.com/can1357/oh-my-pi/issues/18060))
 
 - Retrying an aborted turn keeps the unsent composer draft instead of clearing it ([#17977](https://github.com/can1357/oh-my-pi/pull/17977) by [@Shadorain](https://github.com/Shadorain))
 - Fixed the `tts` tool never producing Grok Voice audio: xAI rejected every request for a missing `language`, so it silently fell back to local Kokoro. The tool's `language` is now sent to xAI, which auto-detects when it is omitted ([#17992](https://github.com/can1357/oh-my-pi/pull/17992) by [@Mirceone](https://github.com/Mirceone))
