@@ -56,6 +56,7 @@
 - Subagents can no longer broadcast: `write agent://all` from a subagent fails and points it at a direct `agent://<id>` message, and subagent prompts no longer advertise `agent://all`. The main agent can still broadcast
 
 ### Fixed
+- Fixed image attachment for lowercase macOS screenshot filenames by resolving the narrow no-break space before `am`/`pm` ([#14733](https://github.com/can1357/oh-my-pi/pull/14733) by [@WebDeveloperBen](https://github.com/WebDeveloperBen))
 - Fixed a second `ask` note on a later single-select question reopening and replacing the previous question's note ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
 
 - Retrying an aborted turn keeps the unsent composer draft instead of clearing it ([#17977](https://github.com/can1357/oh-my-pi/pull/17977) by [@Shadorain](https://github.com/Shadorain))
