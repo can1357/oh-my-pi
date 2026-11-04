@@ -11,6 +11,7 @@
 - Added the `devin-windsurf` login, which exchanges a Windsurf Enterprise sign-in for the seat's raw API key and stores it as a `devin` API key ([#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - Factory Droid Gemini 4 Argon requests match droid's: no sampling parameters, the output cap at the model maximum, and its earlier turns replayed exactly as Gemini streamed them ([#17861](https://github.com/can1357/oh-my-pi/pull/17861) by [@will-bogusz](https://github.com/will-bogusz))
 - Added the `liquid-systemone` judgment wire (`liquidWire`: `POST /decisions/v1/systemone` with top-level base64 image data URLs) ([#18076](https://github.com/can1357/oh-my-pi/issues/18076) by [@SuperUserA](https://github.com/SuperUserA))
+- Added the `liquid-systemone` judgment wire (`liquidWire`: `POST /decisions/v1/systemone` with top-level base64 image data URLs) ([#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Fixed
 
@@ -25,15 +26,19 @@
 
 - Switching into or out of the Codex `ultrafast` service tier now opens a fresh WebSocket routed to the new tier instead of reusing the old one ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
 - Factory Droid requests now identify as droid 1.1.0: they no longer carry SDK telemetry (`X-Stainless-*`), a placeholder `x-api-key` or Claude Code's `x-app` and browser-access headers, and login asks whoami for its extended response ([#17885](https://github.com/can1357/oh-my-pi/pull/17885) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Fixed Gemini and Vertex `MALFORMED_RESPONSE` finishes showing as "Unhandled stop reason" and dropping that turn's token usage; RPC prompt errors now report them as retryable
+
 ### Fixed
 
 - Fixed `rerank()` rejecting Cohere-style answers that carry no `model` field; the result then reports the requested model id ([#17975](https://github.com/can1357/oh-my-pi/pull/17975) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
 ### Fixed
 
 - Fixed `rerank()` requests leaving out the model's configured headers, including `models.yml` `headers`, so a rerank endpoint that needs its own header or `Authorization` rejected every call ([#17974](https://github.com/can1357/oh-my-pi/pull/17974) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
 ### Fixed
 
 - The OpenAI-wire transport and provider-level retry loops (OpenAI Responses, Anthropic) no longer replay a response marked `x-should-retry: false`, so a retrying gateway's terminal 5xx is no longer multiplied by in-provider retries ([#17920](https://github.com/can1357/oh-my-pi/issues/17920))

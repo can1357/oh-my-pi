@@ -5,6 +5,7 @@
 ### Added
 
 - Added `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))
+- Added `liquid-systemone` to the models configuration schema and enabled Liquid AI (`liquid`) as a native judge provider ([#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
 - Added Keenable as a web search engine (`web/keenable`). It uses `KEENABLE_API_KEY` or a stored `keenable` credential when present; an explicit selection without a key uses Keenable's keyless public endpoint ([#17953](https://github.com/can1357/oh-my-pi/pull/17953) by [@KGKallasmaa](https://github.com/KGKallasmaa))
 - Bash commands now visualize execution incrementally in Raw or Python-like Pseudo, with variable values beside their latest setter and bounded replay history for foreground and background jobs; PTY and user-shell runs retain their plain command view.
 - Added opt-in auto-update (`update.auto`, offered by a new setup wizard step): a launch that finds a newer release installs it in the background through whatever installed omp (standalone binary, Homebrew, mise, bun, npm), shows the version and download progress beside the welcome banner's version, and the next launch runs it. Quitting mid-update does not interrupt it. Skipped under Tern, which updates its omp itself, and on Nix and source checkouts
@@ -79,6 +80,7 @@
 
 ### Fixed
 - A grouped `read` row that names a URL links the whole URL instead of only its last path segment, so a click anywhere on the visible URL opens it; the row's last `/` no longer splits it into a dim prefix and a linked tail ([#18071](https://github.com/can1357/oh-my-pi/pull/18071) by [@iacore](https://github.com/iacore))
+
 - Fixed a second `ask` note on a later single-select question reopening and replacing the previous question's note ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
 - Fixed the first run of a compiled binary after an install or upgrade keeping every subagent on the main thread and failing `omp --smoke-test` with `SubagentCodeChangedError` for the native addon it had just extracted ([#18060](https://github.com/can1357/oh-my-pi/issues/18060))
 

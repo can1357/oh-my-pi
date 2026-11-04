@@ -16,7 +16,7 @@
  *   API token plus the account id the URL needs.
  */
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
-import { $env, isRecord } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, parseImageMetadata } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { embeddedImageDataUrl } from "../images/shared";
 import type { ImageContent } from "../types";
@@ -218,6 +218,27 @@ export const liquidWire: JudgmentWire = {
 	images: {
 		mimeTypes: ["image/jpeg", "image/png", "image/webp", "image/gif"],
 		maxCount: 8,
+		maxBytes: 3 * 1024 * 1024,
+		maxTotalBytes: 3 * 1024 * 1024,
+		maxPixels: 10_240_000,
 	},
-	encode: encodeSystemOneWithImages,
+	encode(request, model) {
+		const body = encodeSystemOneWithImages(request, model);
+		for (const [index, image] of (request.images ?? []).entries()) {
+			const metadata = parseImageMetadata(Buffer.from(image.data, "base64"));
+			if (metadata?.width && metadata?.height) {
+				const { width, height } = metadata;
+				if (Math.max(width, height) > 100 * Math.min(width, height)) {
+					throw new AIError.ValidationError(
+						`Liquid AI image aspect ratio exceeds 100:1 (images[${index}] is ${width}x${height})`,
+					);
+				}
+			}
+		}
+		const bodyBytes = Buffer.byteLength(JSON.stringify(body));
+		if (bodyBytes > 4.5 * 1024 * 1024) {
+			throw new AIError.ValidationError(`Liquid AI System One request body exceeds 4.5 MB (${bodyBytes} bytes)`);
+		}
+		return body;
+	},
 };

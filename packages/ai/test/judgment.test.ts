@@ -1875,6 +1875,38 @@ describe("NativeJudge Liquid AI dialect", () => {
 		expect(String(error)).toMatch(/at most 8 images, got 9/);
 		expect(calls).toBe(0);
 	});
+
+	it("rejects request bodies exceeding 4.5 MB before calling fetch", async () => {
+		let calls = 0;
+		const judge = createNativeJudge(d1Ultra, {
+			apiKey: "liquid-test-key",
+			fetch: async () => {
+				calls++;
+				return new Response("unreachable", { status: 500 });
+			},
+		});
+		const hugeState = "x".repeat(5 * 1024 * 1024);
+		const error = await judge.judge({ ...request, state: hugeState }).catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(ValidationError);
+		expect(String(error)).toMatch(/Liquid AI System One request body exceeds 4\.5 MB/);
+		expect(calls).toBe(0);
+	});
+
+	it("rejects images with an aspect ratio exceeding 100:1 before calling fetch", async () => {
+		let calls = 0;
+		const judge = createNativeJudge(d1Ultra, {
+			apiKey: "liquid-test-key",
+			fetch: async () => {
+				calls++;
+				return new Response("unreachable", { status: 500 });
+			},
+		});
+		const extremeRatioImage = pngHeader(1010, 10);
+		const error = await judge.judge({ ...request, images: [extremeRatioImage] }).catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(ValidationError);
+		expect(String(error)).toMatch(/Liquid AI image aspect ratio exceeds 100:1 \(images\[0\] is 1010x10\)/);
+		expect(calls).toBe(0);
+	});
 });
 
 describe("chat judgment backend images", () => {

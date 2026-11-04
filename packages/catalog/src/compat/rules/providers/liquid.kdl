@@ -2,7 +2,7 @@
 // https://docs.liquid.ai/lfm/models/d1.md and https://www.liquid.ai/pricing
 
 provider "liquid" {
-	default-model "d1-ultra"
+	default-model "d1.1"
 	env "LIQUID_API_KEY"
 
 	seed api="liquid-systemone" base-url="https://api.liquid.ai" bundle="always" {
