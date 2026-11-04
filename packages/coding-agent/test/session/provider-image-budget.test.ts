@@ -928,6 +928,42 @@ describe("provider context image budgets", () => {
 		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
 	});
 
+	it("charges a Factory Gemini turn kept for native replay at the native content it sends", async () => {
+		const argon = factoryModel("gemini-4-argon");
+		const fresh = "C".repeat(3_400_000);
+		// An unsigned thought: the rebuilt turn drops it, the native content Argon replays keeps it.
+		const chunk = {
+			candidates: [
+				{
+					content: { role: "model", parts: [{ text: "t".repeat(1_200_000), thought: true }, { text: "done" }] },
+					finishReason: "STOP",
+				},
+			],
+		};
+		const fetch = async (_url: string | URL | Request, _init?: RequestInit) =>
+			new Response(`data: ${JSON.stringify(chunk)}\n\n`, { headers: { "Content-Type": "text/event-stream" } });
+		const [header, claims] = [{ alg: "none" }, { external_org_id: "org-1" }].map(part =>
+			Buffer.from(JSON.stringify(part)).toString("base64url"),
+		);
+		const ask: Message = { role: "user", content: [text("think")], timestamp: 0 };
+		const turn = await streamFactoryDroid(
+			argon,
+			{ systemPrompt: [], messages: [ask] },
+			{ apiKey: `${header}.${claims}.sig`, fetch: fetch as typeof globalThis.fetch },
+		).result();
+		expect(turn.providerPayload?.type).toBe("geminiNativeContent");
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [ask, turn, { role: "user", content: [text("look"), image(fresh)], timestamp: 2 }],
+		};
+		expect(imageData(clampProviderContextImageBytes(context, argon))).toEqual([]);
+		// Kept, the image would have pushed the body past the route limit.
+		expect(Buffer.byteLength(await factoryRequestBody(argon, context))).toBeGreaterThan(
+			FACTORY_DROID_ROUTE_BODY_LIMIT,
+		);
+	});
+
 	it("charges inactive tool definitions only on the Anthropic wire that re-declares them", () => {
 		const fresh = "C".repeat(3_400_000);
 		const context: Context = {

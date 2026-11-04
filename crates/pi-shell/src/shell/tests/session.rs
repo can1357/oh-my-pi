@@ -931,8 +931,8 @@ async fn pids_reports_in_flight_children_until_run_returns() {
 	.await
 	.expect("in-flight run never reported a pid");
 	assert_eq!(pids.len(), 1, "exactly the sleep child: {pids:?}");
-	let child = process::Process::from_pid(pids[0]).expect("reported pid is alive");
-	assert_eq!(child.status(), process::ProcessStatus::Running);
+	let child = proctree::Process::from_pid(pids[0]).expect("reported pid is alive");
+	assert_eq!(child.status(), proctree::ProcessStatus::Running);
 
 	shell.abort().await;
 	let result = time::timeout(Duration::from_secs(5), run)
@@ -942,6 +942,131 @@ async fn pids_reports_in_flight_children_until_run_returns() {
 		.expect("run result");
 	assert!(result.cancelled, "run was aborted");
 	assert!(shell.pids().is_empty(), "pids cleared once the run returns");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn segmented_minimizer_trace_spans_submissions_without_early_completion() {
+	use crate::bash::{
+		event::NodeKind,
+		trace::{RunTrace, history::HistoryData},
+	};
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("trace chain directory");
+	let gate = root.path().join("gate");
+	let minimizer = printf_minimizer(&root.path().join("minimizer.toml"), None);
+	let repeated = format!("printf '{}'", "hello\\n".repeat(200));
+	let gate_command =
+		format!("/bin/sh -c 'while [ ! -e \"{}\" ]; do sleep 0.01; done'", gate.display());
+	let command =
+		format!("{repeated}; {gate_command}; {repeated}; false && printf skipped; {repeated}; false");
+	let trace = Arc::new(RunTrace::new(command.as_str()));
+	let shell = Shell::new(Some(ShellOptions { minimizer: Some(minimizer), ..Default::default() }));
+	let (tx, rx) = flume::unbounded::<String>();
+	let options = ShellRunOptions {
+		command: command.clone(),
+		trace: Some(trace.clone()),
+		..Default::default()
+	};
+	let probe = async {
+		loop {
+			let snapshot = trace.snapshot();
+			if snapshot.history.iter().any(|entry| entry.segment == Some(1)
+				&& matches!(&entry.data, HistoryData::CmdExpanded { argv, .. } if argv.first().is_some_and(|arg| arg.as_slice() == b"/bin/sh")))
+			{
+				assert_eq!(snapshot.status, None, "first segment RunEnd cannot end the logical call");
+				assert!(snapshot.history.iter().any(|entry| entry.segment == Some(0)
+					&& matches!(entry.data, HistoryData::RunEnd { status: 0 }) && !entry.logical_end));
+				std::fs::write(&gate, []).expect("release second segment");
+				break;
+			}
+			tokio::task::yield_now().await;
+		}
+	};
+	let (result, ()) = time::timeout(Duration::from_secs(10), async {
+		tokio::join!(shell.run(options, Some(tx), CancelToken::default()), probe)
+	})
+	.await
+	.expect("segmented trace completes");
+	let result = result.expect("real segmented run");
+	assert_eq!(result.exit_code, Some(1));
+	assert_eq!(rx.drain().collect::<String>(), "hello\n".repeat(600));
+	let minimized = result
+		.minimized
+		.expect("segmentation/minimization stays active");
+	assert_eq!(minimized.filter, "chain");
+	assert_eq!(minimized.text, "HI\n".repeat(600));
+	let snapshot = trace.snapshot();
+	assert_eq!(snapshot.status, Some(1));
+	let output: String = snapshot
+		.history
+		.iter()
+		.filter_map(|entry| match &entry.data {
+			HistoryData::Output { text, .. } => Some(String::from_utf8_lossy(text).into_owned()),
+			_ => None,
+		})
+		.collect();
+	assert_eq!(output, "hello\n".repeat(600));
+	let mut source_offsets = std::collections::HashSet::new();
+	for entry in &snapshot.history {
+		if matches!(entry.data, HistoryData::Output { .. }) {
+			let unit = &snapshot.units[entry.u.expect("exact segment unit") as usize];
+			let node = &unit.nodes[entry.n.expect("exact segment producer") as usize];
+			let at = unit.at.expect("AST-planned source location") as usize;
+			assert_eq!(
+				&command.as_bytes()[at + node.lo as usize..at + node.hi as usize],
+				repeated.as_bytes()
+			);
+			source_offsets.insert(at);
+		}
+	}
+	assert_eq!(
+		source_offsets.len(),
+		3,
+		"identical repeated commands before and after a skipped operand have distinct authoritative \
+		 spans"
+	);
+	let boundaries: Vec<_> = snapshot
+		.history
+		.iter()
+		.filter(|entry| {
+			matches!(entry.data, HistoryData::RunEnd { .. }) && entry.vpid == snapshot.root_vpid
+		})
+		.collect();
+	assert_eq!(
+		boundaries.len(),
+		6,
+		"skipped && operand is never submitted, but later semicolon operands continue"
+	);
+	assert!(boundaries[..5].iter().all(|entry| !entry.logical_end));
+	assert!(boundaries[5].logical_end);
+	assert_eq!(boundaries[5].logical_status, Some(1));
+	assert_eq!(snapshot.history.first().unwrap().t_ns, 0);
+	assert!(
+		snapshot
+			.history
+			.windows(2)
+			.filter(|entries| entries[0].segment != entries[1].segment)
+			.all(|entries| entries[1].t_ns >= entries[0].t_ns),
+		"actual segment transitions share one measured clock"
+	);
+	assert!(
+		snapshot.history.iter().any(|entry| entry.segment == Some(3)
+			&& matches!(entry.data, HistoryData::CmdEnd { status: 1, .. })
+			&& entry.n.zip(entry.u).is_some_and(|(n, u)| {
+				let unit = &snapshot.units[u as usize];
+				let node = &unit.nodes[n as usize];
+				node.k == NodeKind::Simple
+					&& unit.at.is_some_and(|at| {
+						&command.as_bytes()
+							[at as usize + node.lo as usize..at as usize + node.hi as usize]
+							== b"false"
+					})
+			})),
+		"known brace wrapper maps false back to its original bytes"
+	);
+	assert!(!snapshot.history.iter().any(|entry| matches!(&entry.data,
+		HistoryData::CmdExpanded { argv, .. } if argv.iter().any(|arg| arg.as_slice() == b"skipped"))));
 }
 
 #[cfg(unix)]

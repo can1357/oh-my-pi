@@ -157,6 +157,37 @@ export function concreteThinkingLevel(level: ConfiguredThinkingLevel | undefined
 }
 
 /**
+ * Selector a new session on `model` starts with when neither the launch nor a
+ * restored session pins one: the default role's explicit selector, then the
+ * model's own default level (unless the configured default is `auto`), then the
+ * configured default. Shared by session startup and the next launch's prepaint.
+ */
+export function newSessionThinkingLevel(
+	model: Model | undefined,
+	roleLevel: ConfiguredThinkingLevel | undefined,
+	configuredDefault: ConfiguredThinkingLevel | undefined,
+): ConfiguredThinkingLevel | undefined {
+	if (roleLevel !== undefined) return roleLevel;
+	if (configuredDefault !== AUTO_THINKING && model?.thinking?.defaultLevel !== undefined) {
+		return model.thinking.defaultLevel;
+	}
+	return automaticThinkingLevel(model, configuredDefault);
+}
+
+/**
+ * Concrete level `selector` runs at on `model`: clamped to its ladder, or the
+ * provisional effort while `auto` awaits its first per-turn classification.
+ */
+export function resolveConfiguredThinkingLevel(
+	model: Model | undefined,
+	selector: ConfiguredThinkingLevel | undefined,
+): ResolvedThinkingLevel | undefined {
+	return selector === AUTO_THINKING
+		? resolveProvisionalAutoLevel(model)
+		: resolveThinkingLevelForModel(model, selector);
+}
+
+/**
  * True when a prewalk hand-off from `current`/`currentLevel` to
  * `target`/`targetLevel` would change nothing observable: same model id, same
  * auto/fixed mode, and the same model-clamped effective effort. Prewalk arms and

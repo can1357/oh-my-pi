@@ -160,9 +160,7 @@ mod count_fast {
 	
 	/// A [`BUF_SIZE`] read buffer aligned to a 32-byte boundary.
 	///
-	/// This is useful as bytecount uses 256-bit wide vector operations that run
-	/// much faster on aligned data (at least on x86 with AVX2 support). One
-	/// serves every input of an invocation: zero-filling 256 KiB per file
+	/// One buffer serves every input of an invocation: zero-filling 256 KiB per file
 	/// dwarfs counting a small one.
 	#[repr(align(32))]
 	pub(crate) struct AlignedBuffer {
@@ -204,17 +202,14 @@ mod count_fast {
 						total.bytes += n;
 					}
 					if COUNT_CHARS {
-						total.chars += if simd_allowed {
-							bytecount::num_chars(&buf[..n])
-						} else {
-							bytecount::naive_num_chars(&buf[..n])
-						};
+						// Count leading bytes so UTF-8 sequences split across reads count once.
+						total.chars += buf[..n].iter().filter(|&&byte| byte & 0xc0 != 0x80).count();
 					}
 					if COUNT_LINES {
 						total.lines += if simd_allowed {
-							bytecount::count(&buf[..n], b'\n')
+							memchr::memchr_iter(b'\n', &buf[..n]).count()
 						} else {
-							bytecount::naive_count(&buf[..n], b'\n')
+							buf[..n].iter().filter(|&&byte| byte == b'\n').count()
 						};
 					}
 				},

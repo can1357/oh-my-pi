@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use crate::git::GIT_REPO_LOCATION_ENV_VARS;
 use crate::{
+	bash::trace::{RunTrace, SegmentSource},
 	cancel::{AbortReason, AbortToken, CancelToken},
 	git::is_git_repo_location_var,
 	minimizer,
@@ -158,6 +159,8 @@ struct ShellRunConfig {
 	pipe_taps:   Option<Arc<PipeTaps>>,
 	/// The first output of this run its consumer did not take.
 	lost_output: Arc<LostOutput>,
+	/// Folds the run's engine events.
+	trace:       Option<Arc<RunTrace>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -170,6 +173,9 @@ pub struct ShellRunOptions {
 	pub filesystem: Option<Fs>,
 	/// Receives a copy of every byte crossing the run's pipeline pipes.
 	pub pipe_taps:  Option<Arc<PipeTaps>>,
+	/// Folds the run's engine events into a live model of `command`
+	/// (built over the same command text).
+	pub trace:      Option<Arc<RunTrace>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -262,6 +268,7 @@ impl Shell {
 			filesystem:  options.filesystem,
 			pipe_taps:   options.pipe_taps,
 			lost_output: Arc::default(),
+			trace:       options.trace,
 		};
 		run_shell_session(
 			self.session.clone(),
@@ -336,6 +343,7 @@ pub async fn execute_shell(
 		filesystem: None,
 		pipe_taps: None,
 		lost_output: Arc::default(),
+		trace: None,
 	};
 	run_shell_oneshot(config, run_config, on_chunk, cancel_token).await
 }
@@ -376,6 +384,7 @@ pub async fn execute_shell_streams(
 		filesystem:  None,
 		pipe_taps:   None,
 		lost_output: Arc::default(),
+		trace:       None,
 	};
 	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
 }
@@ -994,6 +1003,11 @@ impl CommandScope<'_> {
 				.map(|taps| Arc::clone(taps) as Arc<dyn crate::bash::PipeTap>),
 			reported_error,
 			text_capture: false,
+			events: self
+				.options
+				.trace
+				.as_ref()
+				.map(|trace| Arc::clone(trace) as Arc<dyn crate::bash::EventSink>),
 		}
 	}
 }
@@ -1133,9 +1147,16 @@ async fn run_shell_command_single(
 		minimizer::engine::MinimizerMode::SegmentedChain => CommandCaptureMode::Streaming,
 	};
 
-	let command_run =
-		run_shell_command_once(session, scope, options.command.clone(), cwd, on_chunk, capture_mode)
-			.await?;
+	let command_run = run_shell_command_once(
+		session,
+		scope,
+		options.command.clone(),
+		cwd,
+		on_chunk,
+		capture_mode,
+		None,
+	)
+	.await?;
 	if let Some(undelivered) = command_run.undelivered {
 		return Err(undelivered.into());
 	}
@@ -1246,9 +1267,23 @@ async fn run_shell_command_segmented_chain(
 
 		// Only the first segment moves the shell; later ones start wherever
 		// the earlier ones left it.
-		let command_run =
-			run_shell_command_once(session, scope, source, cwd.take(), on_chunk.clone(), capture_mode)
-				.await?;
+		let events = options.trace.as_ref().map(|trace| {
+			trace.segment(SegmentSource {
+				at:     segment.source_at,
+				len:    segment.source_len,
+				prefix: if segment.suppress_errexit { 2 } else { 0 },
+			})
+		});
+		let command_run = run_shell_command_once(
+			session,
+			scope,
+			source,
+			cwd.take(),
+			on_chunk.clone(),
+			capture_mode,
+			events,
+		)
+		.await?;
 		if let Some(lost) = command_run.undelivered {
 			undelivered.get_or_insert(lost);
 			on_chunk = None;
@@ -1300,6 +1335,10 @@ async fn run_shell_command_segmented_chain(
 		return Err(Error::msg("Segmented chain executed no segments"));
 	};
 
+	if let Some(trace) = options.trace.as_ref() {
+		trace.finish_segments(status);
+	}
+
 	let minimized_out = aggregate
 		// Only surface telemetry when the segmented chain actually rewrote the
 		// output; a `chain-noop` capture (`changed == false`) must yield `None`,
@@ -1336,6 +1375,7 @@ async fn run_shell_command_once(
 	cwd: Option<BString>,
 	on_chunk: Option<Sender<String>>,
 	capture_mode: CommandCaptureMode,
+	events: Option<Arc<dyn crate::bash::EventSink>>,
 ) -> Result<CommandRunOutput> {
 	let cancel_token = scope.cancel.clone();
 	let (reader_file, writer_file) = pipe_to_files("output")?;
@@ -1386,6 +1426,9 @@ async fn run_shell_command_once(
 	});
 	ensure_trailing_newline_for_heredoc(&mut command);
 	let mut run = scope.run_options(command, cwd, reported_error.clone());
+	if let Some(events) = events {
+		run.events = Some(events);
+	}
 	// Stdout and stderr are one pipe read as text: externals' output is
 	// decoded per program before it joins what the builtins wrote.
 	run.text_capture = true;

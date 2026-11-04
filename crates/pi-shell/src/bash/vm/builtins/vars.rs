@@ -8,6 +8,7 @@ use bstr::{BStr, BString, ByteSlice};
 use super::{Ctx, Need, R, done, number, opts};
 use crate::bash::{
 	diag::Diag,
+	event::{AssignScope, EventData, EventKind},
 	ids::IntrinsicId,
 	ir::{self, FuncIr},
 	store::{
@@ -23,6 +24,117 @@ use crate::bash::{
 		state::{self, Level, Var, VarEdit},
 	},
 };
+
+/// Emit a successful setter's actual stored value, using the current
+/// executable op (or its current explicit assignment node) as its source.
+/// No store lookup, value copy or scope work occurs with Assign disabled.
+pub fn emit_assignment(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, name: &[u8], level: Level) {
+	if !k.mask.contains(EventKind::Assign) {
+		return;
+	}
+	let Some(frame) = vp.frames.last() else {
+		return;
+	};
+	let Some(unit) = frame.unit.as_ref() else {
+		return;
+	};
+	let Some(op) = unit.ops.get(frame.pc as usize) else {
+		return;
+	};
+	let node = if op.code == ir::Opcode::Exec
+		&& let Some(exec) = frame
+			.scratch
+			.as_ref()
+			.and_then(|scratch| scratch.exec.as_ref())
+		&& exec.stage == crate::bash::vm::proc::Stage::Expand
+		&& let Some(assign) = unit
+			.cmds
+			.get(op.a as usize)
+			.and_then(|command| command.assigns.get(exec.values.len()))
+		&& assign.name.as_slice() == name
+	{
+		assign.node
+	} else {
+		op.node
+	};
+	emit_assignment_at(k, cx, vp, name, level, node);
+}
+
+/// Like [`emit_assignment`], with an explicit IR setter node. The binding
+/// is read only after a real successful mutation; this is not a state diff.
+pub fn emit_assignment_at(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	name: &[u8],
+	level: Level,
+	node: u32,
+) {
+	if !k.mask.contains(EventKind::Assign) {
+		return;
+	}
+	let read = (|| -> Result<Option<(BString, usize, AssignScope)>, StoreError> {
+		let scope = match level {
+			Level::Global => None,
+			Level::Local => state::func_scope(&k.root, cx.store, vp)?,
+			Level::Dynamic => state::binding_scope(&k.root, cx.store, vp, name)?,
+		};
+		let scope = if let Some(index) = scope {
+			if state::scope_func(cx.store, vp, index)?.is_some() {
+				AssignScope::Local
+			} else {
+				AssignScope::Env
+			}
+		} else if vp.overlay.is_some() {
+			AssignScope::Subshell
+		} else {
+			AssignScope::Global
+		};
+		let Some(var) = state::binding(&k.root, cx.store, vp, name, level)? else {
+			return Ok(None);
+		};
+		let (value, full_len) = match &var.value {
+			VarValue::Str(value) => (BString::from(&value[..value.len().min(256)]), value.len()),
+			VarValue::Indexed(values) => {
+				assignment_preview(values.iter().map(|(_, value)| value.as_slice()))
+			},
+			VarValue::Assoc(values) => {
+				assignment_preview(values.iter().map(|(_, value)| value.as_slice()))
+			},
+		};
+		Ok(Some((value, full_len, scope)))
+	})();
+	match read {
+		Ok(Some((value, full_len, scope))) => {
+			k.emit_op(cx, vp, node, EventData::Assign {
+				name: BStr::new(name),
+				value: value.as_bstr(),
+				full_len,
+				scope,
+			});
+		},
+		Ok(None) => {},
+		Err(error) => k.fail(error),
+	}
+}
+
+/// The engine's array assignment display, bounded before any copying.
+fn assignment_preview<'a>(values: impl Iterator<Item = &'a [u8]>) -> (BString, usize) {
+	let mut shown = BString::default();
+	let mut full_len = 0usize;
+	for (index, value) in values.enumerate() {
+		if index != 0 {
+			full_len = full_len.saturating_add(1);
+			if shown.len() < 256 {
+				shown.push(b' ');
+			}
+		}
+		full_len = full_len.saturating_add(value.len());
+		let kept = value.len().min(256 - shown.len());
+		shown.extend_from_slice(&value[..kept]);
+	}
+	(shown, full_len)
+}
 
 /// Left-hand side of an assignment.
 #[derive(Clone, Copy)]
@@ -690,6 +802,7 @@ fn set_value_plain(
 		k.diag(cx, vp, line, Diag::Usage { msg: msg.into() });
 	}
 	state::store_var(&mut k.root, cx.store, vp, name, Some(var), level);
+	emit_assignment(k, cx, vp, name, level);
 	if name == b"PATH"
 		&& let Err(e) = super::names::flush_hash(&mut k.root, cx.store, vp)
 	{
@@ -765,6 +878,7 @@ pub fn assign_special_prefix(
 		Some(Some(value)) => {
 			let var = Var { attrs: Attrs::NONE, value };
 			state::store_var(&mut k.root, cx.store, vp, lhs.name, Some(var), Level::Global);
+			emit_assignment(k, cx, vp, lhs.name, Level::Global);
 		},
 		Some(None) => {
 			let edit = VarEdit::AddAttrs(Attrs::EXPORT);
@@ -867,7 +981,12 @@ fn assign_in_place(
 		},
 	};
 	match edited {
-		Ok(rest) => Ok(rest),
+		Ok(rest) => {
+			if rest.is_none() {
+				emit_assignment(k, cx, vp, name, level);
+			}
+			Ok(rest)
+		},
 		Err(e) => {
 			k.fail(e);
 			Err(Diag::StoreFailed)
@@ -996,7 +1115,10 @@ pub fn assign_loop_var(
 	let var = Var { attrs: attrs.without(Attrs::INVISIBLE), value: VarValue::Str(value) };
 	let edit = VarEdit::Replace(var);
 	match state::edit_var(&mut k.root, cx.store, vp, name, Level::Dynamic, edit) {
-		Ok(_) => Ok(()),
+		Ok(_) => {
+			emit_assignment(k, cx, vp, name, Level::Dynamic);
+			Ok(())
+		},
 		Err(e) => {
 			k.fail(e);
 			Err(Diag::StoreFailed)
@@ -1011,6 +1133,7 @@ pub fn define_function(
 	cx: &mut Cx<'_>,
 	f: &FuncIr,
 	line: u32,
+	traced: bool,
 ) -> Flow {
 	let posix = state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false);
 	// bash's `valid_function_word`: no `$`, process substitution or quoting
@@ -1061,7 +1184,39 @@ pub fn define_function(
 		vp.status = 1;
 		return Flow::Next;
 	}
-	let file = match crate::bash::vm::callstack::definition_file(k, cx.store, vp) {
+	// zsh `execfuncdef`: a new definition has only `function -T`'s flag;
+	// a function redefining itself while it runs keeps its tracing.
+	let attrs = if mode.dialect() == crate::bash::ids::Dialect::Zsh {
+		let mut fresh = if traced {
+			Attrs::ZSH_TRACE_ONCE
+		} else {
+			Attrs::NONE
+		};
+		use crate::bash::vm::proc::{FrameKind, ScriptKind};
+		let innermost = vp.frames.iter().rev().find_map(|fr| match &fr.kind {
+			FrameKind::Function { name, .. } => Some(Some(name)),
+			FrameKind::Script { what: ScriptKind::Source | ScriptKind::Eval, .. } => Some(None),
+			_ => None,
+		});
+		if innermost.flatten().is_some_and(|n| *n == f.name) {
+			for bit in [Attrs::TRACE, Attrs::ZSH_TRACE_ONCE] {
+				if attrs.contains(bit) {
+					fresh = fresh.with(bit);
+				}
+			}
+		}
+		fresh
+	} else {
+		attrs
+	};
+	// zsh records its `scriptfilename` (a `-c` string's functions are
+	// `zsh`'s, not `$0`'s), bash `BASH_SOURCE[0]`.
+	let file = if mode.dialect() == crate::bash::ids::Dialect::Zsh {
+		super::zsh_print::scriptfilename(k, cx.store, vp)
+	} else {
+		crate::bash::vm::callstack::definition_file(k, cx.store, vp)
+	};
+	let file = match file {
 		Ok(file) => file,
 		Err(e) => {
 			k.fail(e);
@@ -1069,7 +1224,14 @@ pub fn define_function(
 		},
 	};
 	let sticky = vp.sticky().cloned().map(Box::new);
-	let rec = Record::Func { mode, sticky, source: f.source.clone(), unit: unit.id, attrs, file };
+	let rec = Record::Func {
+		mode,
+		sticky,
+		source: crate::bash::ir::FuncText::of(f),
+		unit: unit.id,
+		attrs,
+		file,
+	};
 	state::store_record(&mut k.root, cx.store, vp, KeyBuf::Func(f.name.clone()), Some(rec));
 	vp.status = 0;
 	Flow::Next
@@ -1240,7 +1402,9 @@ pub fn all_functions(ctx: &mut Ctx<'_, '_>) -> Result<Vec<(BString, BString, Att
 	Ok(state::scan(&ctx.k.root, ctx.cx.store, ctx.vp, Table::Func)?
 		.into_iter()
 		.filter_map(|(k, r)| match (k, r) {
-			(KeyBuf::Func(n), Record::Func { source, attrs, .. }) => Some((n, source, attrs)),
+			(KeyBuf::Func(n), Record::Func { source, attrs, .. }) => {
+				Some((n, (*source).clone(), attrs))
+			},
 			_ => None,
 		})
 		.collect())
@@ -1536,6 +1700,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 			// returns.
 			let saved = state::set_options_on(&mut ctx.k.root, ctx.cx.store, ctx.vp)?;
 			ctx.set_var(b"-", Some(Var::scalar(saved, Attrs::NONE)), Level::Local);
+			super::emit_assignment(ctx.k, ctx.cx, ctx.vp, b"-", Level::Local);
 			continue;
 		}
 		let flat = match arg.find_byte(b'[') {
@@ -1651,6 +1816,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 				r.attrs = r.attrs.without(Attrs::NAMEREF).with(Attrs::INVISIBLE);
 				r.value = VarValue::Str(BString::default());
 				ctx.set_var(name, Some(r.clone()), Level::Dynamic);
+				super::emit_assignment(ctx.k, ctx.cx, ctx.vp, name, Level::Dynamic);
 				raw = Some(r);
 				raw_ref = false;
 			}
@@ -1786,6 +1952,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 				continue;
 			},
 		};
+		let mut binds_value = false;
 		if cur.is_none() && level == Level::Local && in_function {
 			// bash will not shadow a readonly global with a local one
 			// (`old_var->context == 0`).
@@ -1802,6 +1969,9 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 				continue;
 			}
 			cur = new_local_start(ctx, name, o.has(b'I'))?;
+			binds_value = cur
+				.as_ref()
+				.is_some_and(|v| !v.attrs.contains(Attrs::INVISIBLE));
 		} else if level == Level::Local
 			&& in_function
 			&& value.is_none()
@@ -1812,6 +1982,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 			// innermost temporary value wins.
 			cur =
 				Some(Var { attrs: cur.as_ref().map_or(Attrs::NONE, |v| v.attrs), value: temp.value });
+			binds_value = true;
 		}
 		if cur
 			.as_ref()
@@ -1897,6 +2068,9 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 					.is_none()
 			{
 				ctx.set_var(name, Some(var), level);
+				if binds_value {
+					super::emit_assignment(ctx.k, ctx.cx, ctx.vp, name, level);
+				}
 			}
 			status = 1;
 			continue;
@@ -1994,6 +2168,9 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 					var.attrs = var.attrs.with(Attrs::READONLY);
 				}
 				ctx.set_var(name, Some(var), level);
+				if binds_value {
+					super::emit_assignment(ctx.k, ctx.cx, ctx.vp, name, level);
+				}
 				propagate_temp(ctx, name, kind, on, level);
 			},
 			Some(value) if on.contains(Attrs::NAMEREF) && index.is_none() => {
@@ -2077,6 +2254,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 					var.attrs = var.attrs.with(Attrs::READONLY);
 				}
 				ctx.set_var(name, Some(var), level);
+				super::emit_assignment(ctx.k, ctx.cx, ctx.vp, name, level);
 			},
 			Some(value)
 				if index.is_none()
@@ -2450,8 +2628,15 @@ fn declare_functions(
 				out.extend_from_slice(name);
 				// `extdebug`: the line and file it was defined in.
 				if ctx.option(OptId::Extdebug)? {
-					let line = crate::bash::vm::frames::load_unit(&ctx.k.engine, ctx.cx.store, unit)
-						.map_or(0, |u| crate::bash::vm::callstack::definition_line(&u));
+					let line = crate::bash::vm::frames::load_unit(
+						&ctx.k.engine,
+						ctx.cx.store,
+						unit,
+						ctx.k
+							.mask
+							.contains(crate::bash::event::EventKind::UnitCompiled),
+					)
+					.map_or(0, |u| crate::bash::vm::callstack::definition_line(&u));
 					out.push(b' ');
 					out.extend_from_slice(line.to_string().as_bytes());
 					out.push(b' ');

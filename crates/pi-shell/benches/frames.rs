@@ -26,6 +26,9 @@
 //! Output: one `frames …` line per measurement with `PASS`/`MISS` against its
 //! target, then the breakdown.
 
+#[path = "common/statistics.rs"]
+mod statistics;
+
 use std::{
 	hint::black_box,
 	sync::{
@@ -46,6 +49,7 @@ use pi_shell::{
 		run::{Stop, advance},
 	},
 };
+use statistics::quantiles;
 
 /// The gate's case: a `for` loop at function depth 3.
 const DEPTH_3: &[u8] =
@@ -128,12 +132,6 @@ fn at_safepoint(
 	let step = shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default());
 	assert!(matches!(step, Step::SuspendReady), "suspend at the safepoint, got {step:?}");
 	(shell, host, store, run)
-}
-
-/// Median and p99 of `samples`.
-fn quantiles(samples: &mut [Duration]) -> (Duration, Duration) {
-	samples.sort_unstable();
-	(samples[samples.len() / 2], samples[samples.len() * 99 / 100])
 }
 
 const fn verdict(ok: bool) -> &'static str {
