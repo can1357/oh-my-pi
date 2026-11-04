@@ -102,3 +102,68 @@ it.skipIf(process.platform === "win32")("gives a background job the session iden
 	expect(file).toBe(sessionFile);
 	expect(callId).toBe("bg-env");
 });
+
+it.skipIf(process.platform === "win32")(
+	"holds the cancelled job's slot until its shell is gone, so the queued successor never overlaps it",
+	async () => {
+		// A cancelled command answers at once while its shell is still being killed.
+		// The successor must not start beside it: at a cap of one, the process the
+		// first job started has to be gone by the time the second job's body runs.
+		const capped = new AsyncJobManager({ maxRunningJobs: 1 });
+		const session: ToolSession = {
+			cwd,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionId: () => cwd,
+			getSessionSpawns: () => "*",
+			asyncJobManager: capped,
+			settings: Settings.isolated({}),
+		};
+		const script = path.join(cwd, "slow-exit.sh");
+		await Bun.write(
+			script,
+			"trap 'sleep 0.5; exit 0' TERM\nprintf '%s' $$ > holder.pid\nwhile :; do sleep 0.05; done\n",
+		);
+		const holderTool = new BashTool(session);
+		const started = await holderTool.execute("winddown-holder", {
+			command: `sh ${JSON.stringify(script)}`,
+			async: true,
+			timeout: 0,
+		});
+		const holderJob = started.details?.async?.jobId;
+		if (!holderJob) throw new Error("expected background job");
+		const pidFile = path.join(cwd, "holder.pid");
+		const deadline = Date.now() + 10_000;
+		while (!(await Bun.file(pidFile).exists())) {
+			if (Date.now() > deadline) throw new Error("holder never started");
+			await Bun.sleep(10);
+		}
+		const holderPid = Number(await Bun.file(pidFile).text());
+		const alive = (): boolean => {
+			try {
+				process.kill(holderPid, 0);
+				return true;
+			} catch {
+				return false;
+			}
+		};
+
+		// Queued behind the holder; its body records whether that process still exists.
+		let sawHolderAlive: boolean | undefined;
+		const successor = capped.register("bash", "successor", async () => {
+			sawHolderAlive = alive();
+			return "done";
+		});
+		expect(capped.getJob(successor)?.waitingForSlot).toBe(true);
+
+		try {
+			expect(capped.cancel(holderJob)).toBe(true);
+			await capped.getJob(successor)!.promise;
+			expect(sawHolderAlive).toBe(false);
+		} finally {
+			if (alive()) process.kill(holderPid, "SIGKILL");
+			await capped.dispose({ timeoutMs: 2000 });
+		}
+	},
+	30_000,
+);

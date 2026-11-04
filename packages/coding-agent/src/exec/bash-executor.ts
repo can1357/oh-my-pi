@@ -86,6 +86,13 @@ export interface BashExecutorOptions {
 	 */
 	onSessionShellBusy?: () => void;
 	/**
+	 * Invoked on the cancel and timeout paths with a promise that settles once
+	 * the aborted shell has finished winding down. The result returns without
+	 * waiting for it; a caller whose accounting must outlive the command (an
+	 * async job holding a running-job slot) awaits it before it settles.
+	 */
+	onWinddown?: (winddown: Promise<void>) => void;
+	/**
 	 * Asked once the run settles: `false` means the agent session that owns
 	 * `sessionKey` was left (new, fork, switch, branch) while the command ran,
 	 * so the persistent shell it used is dropped instead of kept for a next call.
@@ -790,6 +797,10 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			} else {
 				void Promise.allSettled([runPromise, cleanupPromise]);
 			}
+			// The shell is still winding down. A caller that must stay charged for
+			// this command (an async job holding a running-job slot) waits on this;
+			// the foreground path returns at once, as it always has.
+			options?.onWinddown?.(Promise.allSettled([runPromise, cleanupPromise]).then(() => undefined));
 			let notice = "Command cancelled";
 			if (winner.kind === "timeout" && deadlineTimeoutMs !== undefined) {
 				const seconds = Math.round(deadlineTimeoutMs / 1000);
