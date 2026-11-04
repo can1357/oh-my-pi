@@ -79,6 +79,9 @@ fn lower_command(
 		let idx = l.str(&w.bash_msg);
 		l.emit(Opcode::Warn, idx, w.line, w.line);
 	}
+	if cc.word_eof {
+		l.emit(Opcode::SetStatus, 2, 0, 0);
+	}
 	l.list(&cc.list)?;
 	l.emit(Opcode::End, 0, 0, 0);
 	l.unit.seal_from(l.source_hash);
@@ -238,9 +241,10 @@ pub fn syntax_unit(e: &syn::ParseError, src: &[u8], mode: ModeId, feat: syn::Fea
 			.ops
 			.push(Op { code: Opcode::End, flags: 0, ev: 0, a: 0, b: 0, node: 0 });
 	} else {
+		let status = if e.command_substitution { 127 } else { 2 };
 		unit
 			.ops
-			.push(Op { code: Opcode::Abort, flags, ev: 0, a, b: 2, node: e.line });
+			.push(Op { code: Opcode::Abort, flags, ev: 0, a, b: status, node: e.line });
 	}
 	unit.seal();
 	unit
@@ -860,12 +864,16 @@ impl Lower {
 		sub.command(cmd)?;
 		sub.emit(Opcode::End, 0, 0, root);
 		let mut body = sub.unit;
-		// Node records filled while lowering the body belong to both units.
-		for (i, n) in body.nodes.iter().enumerate() {
+		// A function lowered from run-time text (for example a here-document
+		// substitution) may add node ids beyond the enclosing unit's records.
+		// Preserve existing records and append the newly discovered ones.
+		let shared = self.unit.nodes.len();
+		for (i, n) in body.nodes[..shared].iter().enumerate() {
 			if n.hi > 0 {
 				self.unit.nodes[i] = *n;
 			}
 		}
+		self.unit.nodes.extend_from_slice(&body.nodes[shared..]);
 		body.seal_from(self.source_hash.clone());
 		Ok(body)
 	}
@@ -1243,6 +1251,7 @@ impl Lower {
 				let entry = self.block(&c.body)?;
 				let kind = match c.kind {
 					syn::ComsubKind::Dollar | syn::ComsubKind::Backtick => ComsubForm::Fork,
+					syn::ComsubKind::DollarDeferred => ComsubForm::ForkReparse,
 					syn::ComsubKind::NoFork => ComsubForm::NoFork,
 					syn::ComsubKind::ValueSub => ComsubForm::Value,
 				};

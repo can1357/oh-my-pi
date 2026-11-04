@@ -141,3 +141,76 @@ async fn arithmetic_for_errors_end_the_loop_not_the_command_list() {
 	)
 	.await;
 }
+
+#[tokio::test]
+async fn malformed_arithmetic_fallback_reports_its_substitution_error() {
+	run(
+		concat!(
+			"v=1; printf \"[%s]\\n\" \"$(( ${v-'('1)} ))\"; echo after\n",
+			"echo \"${v-$(( ${v-'('1)} ))}\"; echo lazy\n",
+		),
+		"[)]\nafter\n1\nlazy\n",
+		true,
+		0,
+	)
+	.await;
+}
+
+#[tokio::test]
+async fn bracket_arithmetic_expands_ansi_c_quotes() {
+	run(
+		"v=1; echo \"$[ ${v+$'('1)} ]\"\necho \"$[ $'1' ]\"\necho after\n",
+		"1\n1\nafter\n",
+		false,
+		0,
+	)
+	.await;
+}
+
+#[tokio::test]
+async fn arithmetic_parse_errors_in_command_substitutions_use_bash_c_status() {
+	run(
+		concat!(
+			"echo \"$( for ((x=${v:-$(( ${w:?(} ))};0;)); do :; done; echo x=$x )\"\n",
+			"echo after\n",
+		),
+		"",
+		true,
+		127,
+	)
+	.await;
+}
+
+// Both Bash 5.2.21 and 5.3.0 segfault on this input. The explicit expectation
+// is a parse error instead, with no command execution, as approved for this
+// reference-shell defect.
+#[tokio::test]
+async fn malformed_for_inside_a_pending_here_document_fails_without_execution() {
+	let dir = tempfile::tempdir().expect("marker directory");
+	let marker = dir.path().join("marker");
+	let script = format!(
+		"v=0\ncat <<EOF; echo \"$( for ((i=0;0;i+(;))); do echo body; printf ran > '{}'; break; done )\"\ndoc\nEOF\necho rc=$?\n",
+		marker.display(),
+	);
+	run(&script, "", true, 2).await;
+	assert!(!marker.exists(), "the invalid loop wrote its marker");
+}
+
+#[tokio::test]
+async fn grouped_conditional_function_definitions_inside_here_documents_do_not_abort() {
+	run(
+		concat!(
+			"cat <<DOC\n$(\nv=1\nf() [[ (( a == @(a) )) ]]\n",
+			"printf \"rc=%s\\n\" \"$?\"\n)\nDOC\n",
+		),
+		"rc=0\n",
+		false,
+		0,
+	)
+	.await;
+}
+
+#[tokio::test]
+async fn regexp_groups_count_parentheses_inside_parameter_words() {
+	run("v=1\n[[ a =~ (a|(( ${v:-(} ))) ]]\necho rc=$?\n", "", true, 2).await;
+}

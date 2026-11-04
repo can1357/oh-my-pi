@@ -7,8 +7,8 @@
 //! expansion, here-document gathering and assignment-word recognition happen
 //! in the lexer, exactly where bash does them.
 //!
-//! Input is a byte cursor over the source plus a stack of alias expansions;
-//! nothing is copied per byte. Words are lexed straight into
+//! Input is a byte cursor over the source plus pushed alias and arithmetic
+//! replay text; nothing is copied per byte. Words are lexed straight into
 //! [`WordPart`]s; command substitutions are parsed recursively at parse
 //! time, as bash 5.3 does.
 //!
@@ -27,7 +27,7 @@ use core::fmt;
 
 pub use self::lex::looks_like_assignment;
 use self::{
-	cursor::{Frame, Skip},
+	cursor::{Buffer, Frame, Skip},
 	lex::{LexState, Tok},
 };
 use crate::bash::syntax::{
@@ -59,10 +59,24 @@ pub struct ParseError {
 	/// [`Parser::next_command`] continues with the next line. Otherwise the
 	/// error ends the script.
 	pub recovered: bool,
+	/// A grammar error raised while parsing `$(…)`: `bash -c` exits 127.
+	/// Unclosed delimiters remain ordinary syntax errors (status 2).
+	pub command_substitution: bool,
+	/// Internal yacc recovery, distinct from a fatal grammar error.
+	recovery: Recovery,
 }
 
 // The parser returns `Result<_, ParseError>` from every grammar function.
 const _: () = assert!(size_of::<ParseError>() <= 88);
+
+/// The arithmetic-for action raises `YYERROR` without calling `yyerror`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Recovery {
+	None,
+	ArithmeticFor,
+	/// `parse_comsub` reached EOF; `yylex` drops the unfinished word.
+	WordEof,
+}
 
 /// Classes of syntax errors.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,7 +107,23 @@ pub enum ParseErrorKind {
 
 impl ParseError {
 	pub(super) fn new(span: Span, line: u32, kind: ParseErrorKind) -> Self {
-		Self { span, line, kind, warnings: Box::new([]), detail: None, recovered: false }
+		Self {
+			span,
+			line,
+			kind,
+			warnings: Box::new([]),
+			detail: None,
+			recovered: false,
+			command_substitution: false,
+			recovery: Recovery::None,
+		}
+	}
+
+	pub(super) fn in_command_substitution(mut self) -> Self {
+		if self.recovery == Recovery::None && !matches!(self.kind, ParseErrorKind::Unmatched(_)) {
+			self.command_substitution = true;
+		}
+		self
 	}
 
 	/// Attach the line bash prints before the message.
@@ -216,14 +246,16 @@ pub struct Parser<'s> {
 	base:           u32,
 	feat:           Features,
 	aliases:        &'s dyn AliasLookup,
-	/// Current input buffer: `src` or an alias value.
-	buf:            &'s [u8],
+	/// Current input buffer: source, alias value or normalized replay text.
+	buf:            Buffer<'s>,
 	/// Cursor in `buf`.
 	pos:            usize,
 	/// 1 + newlines consumed from `src` (the line of the next byte).
 	line:           u32,
-	/// Saved outer buffers while alias expansions are being read.
+	/// Saved outer buffers while pushed input is being read.
 	frames:         Vec<Frame<'s>>,
+	/// Normalized arithmetic text; cursor handles remain valid as this grows.
+	replay:         Vec<Vec<u8>>,
 	/// Byte bash appends to a final line without a newline (`\n`, or `\`
 	/// after an odd trailing backslash); 0 when the source ends in `\n`.
 	virt:           u8,
@@ -263,6 +295,10 @@ pub struct Parser<'s> {
 	/// The error being raised is one bash recovers from by dropping the
 	/// rest of the input line.
 	discard_line:   bool,
+	/// Recursive `parse_comsub` calls; only the outer lexer exposes word EOF.
+	comsub_depth:   u32,
+	/// Diagnostic retained when yacc treats an unfinished word as EOF.
+	word_eof:       Option<ParseError>,
 }
 
 /// Where the next top-level command starts, alias text included.
@@ -331,10 +367,11 @@ impl<'s> Parser<'s> {
 			base: 0,
 			feat,
 			aliases,
-			buf: src,
+			buf: Buffer::Borrowed(src),
 			pos: 0,
 			line: 1,
 			frames: Vec::new(),
+			replay: Vec::new(),
 			virt,
 			virt_done: false,
 			skip: None,
@@ -355,6 +392,8 @@ impl<'s> Parser<'s> {
 			cond_eof: false,
 			virt_comment: false,
 			discard_line: false,
+			comsub_depth: 0,
+			word_eof: None,
 			zsh: feat
 				.contains(Features::ZSH)
 				.then(|| Box::new(crate::bash::syntax::zsh::ZshParser::new(src, feat, aliases))),
@@ -368,7 +407,8 @@ impl<'s> Parser<'s> {
 			return self;
 		}
 		self.frames.clear();
-		self.buf = self.src;
+		self.buf = Buffer::Borrowed(self.src);
+		self.replay.clear();
 		self.pos = (pos.offset as usize).min(self.src.len());
 		self.line = pos.line;
 		self.virt_done = self.pos == self.src.len();
@@ -391,20 +431,20 @@ impl<'s> Parser<'s> {
 		p.virt_done = false;
 		let mut names = resume.active.iter();
 		p.frames.push(Frame {
-			buf:         p.src,
+			buf:         Buffer::Borrowed(p.src),
 			pos:         p.pos,
 			alias:       names.next().cloned().unwrap_or_default(),
 			expand_next: false,
 		});
 		for name in names {
 			p.frames.push(Frame {
-				buf:         cursor::EMPTY,
+				buf:         Buffer::Borrowed(cursor::EMPTY),
 				pos:         0,
 				alias:       name.clone(),
 				expand_next: false,
 			});
 		}
-		p.buf = &resume.pending;
+		p.buf = Buffer::Borrowed(&resume.pending);
 		p.pos = 0;
 		p
 	}
@@ -454,17 +494,21 @@ impl<'s> Parser<'s> {
 		if self.failed {
 			return None;
 		}
+		if self.frames.is_empty() {
+			self.replay.clear();
+		}
 		match self.complete_command() {
 			Ok(Some(cc)) => Some(Ok(cc)),
 			Ok(None) => None,
 			Err(mut e) => {
+				self.warn_word_eof();
 				if core::mem::take(&mut self.discard_line) {
 					self.drop_line();
 					e.recovered = true;
 				} else {
 					self.failed = true;
 					self.frames.clear();
-					self.buf = self.src;
+					self.buf = Buffer::Borrowed(self.src);
 					self.pos = self.src.len();
 					self.virt_done = true;
 				}
@@ -478,13 +522,33 @@ impl<'s> Parser<'s> {
 }
 
 impl Parser<'_> {
+	/// Preserve diagnostics from a dropped word on the retained command.
+	fn warn_word_eof(&mut self) -> bool {
+		let Some(e) = self.word_eof.take() else { return false };
+		let msg = e.bash_msg();
+		let detail = e.detail();
+		self.warnings.extend(e.warnings);
+		self.warnings.extend(detail);
+		self.warnings.push(ParseWarning { line: e.line, bash_msg: msg });
+		true
+	}
+
+	/// EOF recovery abandons both pushed text and the remaining source.
+	fn stop_input(&mut self) {
+		self.frames.clear();
+		self.buf = Buffer::Borrowed(self.src);
+		self.pos = self.src.len();
+		self.virt_done = true;
+		self.skip = None;
+	}
+
 	/// bash's `DISCARD`: forget the command being parsed, any alias text,
 	/// and the rest of the source line; the next command starts on the next
 	/// line.
 	fn drop_line(&mut self) {
 		let at = self.src_pos().min(self.src.len());
 		self.frames.clear();
-		self.buf = self.src;
+		self.buf = Buffer::Borrowed(self.src);
 		self.pos = at;
 		self.skip = None;
 		self.raw_depth = 0;

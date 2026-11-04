@@ -6,7 +6,7 @@ use alloc::{boxed::Box, vec::Vec};
 
 use super::{
 	PResult, ParseError, ParseErrorKind, Parser, PendingDoc,
-	cursor::{self, Frame},
+	cursor::{self, Buffer, Frame},
 	word::WordTok,
 };
 use crate::bash::syntax::{
@@ -353,7 +353,17 @@ impl<'s> Parser<'s> {
 	pub(super) fn lex(&mut self) -> PResult<Tok> {
 		self.lx.before = self.lx.last;
 		self.lx.last = self.lx.cur;
-		let t = self.read_token()?;
+		let t = match self.read_token() {
+			Err(e) if e.recovery == super::Recovery::WordEof && self.comsub_depth == 0 => {
+				// Bash's negative read_token result becomes YYEOF when
+				// parse_comsub has reached EOF. Keep earlier words, not this
+				// unfinished one, and do not re-read the remaining source.
+				self.word_eof = Some(e);
+				self.stop_input();
+				Tok::new(T::Eof, self.off(), self.off(), self.line)
+			},
+			result => result?,
+		};
 		self.lx.cur = t.kind;
 		Ok(t)
 	}
@@ -446,7 +456,7 @@ impl<'s> Parser<'s> {
 	/// bash `time_command_acceptable`.
 	fn time_command_acceptable(&self) -> bool {
 		if self.feat.contains(Features::POSIX) {
-			let buf: &'s [u8] = self.buf;
+			let buf = self.bytes();
 			let rest = buf.get(self.pos..).unwrap_or_default();
 			if rest.iter().find(|&&c| c != b' ' && c != b'\t') == Some(&b'-') {
 				return false;
@@ -708,11 +718,10 @@ impl<'s> Parser<'s> {
 			return Ok(Some(t));
 		}
 		if self.reserved_word_acceptable(self.lx.last) {
-			let m = self.mark();
 			self.bump();
 			let alo = self.off();
 			let start = self.bash_line();
-			let text = self.raw_arith(b'(', b')', start)?;
+			let mut text = self.raw_arith(b'(', b')', start)?;
 			let ahi = self.off().saturating_sub(1);
 			if self.peek() == Some(b')') {
 				self.bump();
@@ -720,9 +729,12 @@ impl<'s> Parser<'s> {
 				t.arith = Some(Box::new(ArithTok { text, semis: Vec::new(), lo: alo, hi: ahi }));
 				return Ok(Some(t));
 			}
-			// Not `(( … ))`: a subshell inside a subshell. Re-read from the
-			// second parenthesis.
-			if self.reset(m) && !self.lx.casepat && !self.lx.condcmd {
+			// Bash pushes parse_matched_pair's normalized text, not the raw
+			// source: removed continuations can change the next recognition.
+			text.insert(0, b'(');
+			text.push(b')');
+			self.push_replay(text);
+			if !self.lx.casepat && !self.lx.condcmd {
 				self.open_compound(T::LParen, line);
 			}
 			return Ok(Some(Tok::new(T::LParen, lo, lo + 1, line)));
@@ -845,7 +857,7 @@ impl<'s> Parser<'s> {
 		if !self.in_source() || self.lx.regexp {
 			return None;
 		}
-		let buf: &'s [u8] = self.buf;
+		let buf: &'s [u8] = self.src;
 		let rest = &buf[self.pos..];
 		let n = rest
 			.iter()
@@ -1002,12 +1014,12 @@ impl<'s> Parser<'s> {
 				expand_next: false,
 			};
 			self.frames.push(outer);
-			self.buf = &cursor::END_ALIAS_SPACE;
+			self.buf = Buffer::Borrowed(&cursor::END_ALIAS_SPACE);
 			self.pos = 0;
 		}
 		let outer = Frame { buf: self.buf, pos: self.pos, alias: text.to_vec(), expand_next };
 		self.frames.push(outer);
-		self.buf = value;
+		self.buf = Buffer::Borrowed(value);
 		self.pos = 0;
 		true
 	}
@@ -1015,6 +1027,10 @@ impl<'s> Parser<'s> {
 	/// Read the bodies of pending here-documents (bash
 	/// `gather_here_documents`), starting at the cursor.
 	pub(super) fn gather(&mut self) {
+		if self.replaying() {
+			self.gather_physical();
+			return;
+		}
 		let pending = core::mem::take(&mut self.pending);
 		let at_line = self.bash_line();
 		for doc in pending {
@@ -1040,16 +1056,24 @@ impl<'s> Parser<'s> {
 		self
 			.warnings
 			.push(ParseWarning { line: self.bash_line(), bash_msg: msg });
-		if !self.in_source() {
+		if !self.in_source() && !self.replaying() {
 			self.gather();
 			return;
 		}
+		self.gather_physical();
+	}
+
+	/// `read_a_line` bypasses `PSH_DPAREN`: the matched-pair scan has
+	/// already read the current physical line, even when its text is now
+	/// being replayed. Keep that line's tail and skip the gathered lines
+	/// when the source cursor eventually reaches its newline.
+	fn gather_physical(&mut self) {
 		// Read from the start of the next line (or from where an earlier
 		// read-ahead stopped), then come back.
 		let (start, start_line) = match self.skip {
 			Some(sk) => (sk.to, sk.line),
-			None => match self.src[self.pos..].iter().position(|&c| c == b'\n') {
-				Some(n) => (self.pos + n + 1, self.line + 1),
+			None => match self.src[self.src_pos()..].iter().position(|&c| c == b'\n') {
+				Some(n) => (self.src_pos() + n + 1, self.line + 1),
 				None => (self.src.len(), self.line + 1),
 			},
 		};
@@ -1057,6 +1081,9 @@ impl<'s> Parser<'s> {
 		let saved_line = self.line;
 		let saved_virt = self.virt_done;
 		let saved_skip = self.skip.take();
+		let saved_buf = self.buf;
+		let saved_frames = core::mem::take(&mut self.frames);
+		self.buf = Buffer::Borrowed(self.src);
 		let at = saved_skip.map_or(start, |s| s.at);
 		self.pos = start;
 		self.line = start_line;
@@ -1074,6 +1101,8 @@ impl<'s> Parser<'s> {
 		self.pos = saved_pos;
 		self.line = saved_line;
 		self.virt_done = saved_virt;
+		self.buf = saved_buf;
+		self.frames = saved_frames;
 		self.skip = Some(super::cursor::Skip { at, to, line });
 	}
 
@@ -1142,12 +1171,12 @@ impl<'s> Parser<'s> {
 	/// at end of input. `unquoted` removes `\newline`.
 	fn read_doc_line(&mut self, out: &mut Vec<u8>, unquoted: bool) -> bool {
 		loop {
-			if self.pos == 0 && core::ptr::eq(self.buf.as_ptr(), cursor::END_ALIAS_SPACE.as_ptr()) {
+			if self.pos == 0 && core::ptr::eq(self.bytes().as_ptr(), cursor::END_ALIAS_SPACE.as_ptr()) {
 				self.pos = 1;
 				continue;
 			}
 			// Fast path: copy up to a newline or backslash.
-			let buf: &'s [u8] = self.buf;
+			let buf = self.bytes();
 			let rest = buf.get(self.pos..).unwrap_or_default();
 			let n = rest
 				.iter()

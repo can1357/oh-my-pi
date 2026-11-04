@@ -563,6 +563,9 @@ pub enum Part {
 pub enum ComsubForm {
 	/// `$(…)` and `` `…` ``: a subshell.
 	Fork,
+	/// An arithmetic fallback whose source is parsed in its subshell even
+	/// without aliases or a line-number shift.
+	ForkReparse,
 	/// `${ …;}`: in the current shell, capturing stdout.
 	NoFork,
 	/// `${| …;}`: in the current shell, value is `$REPLY`.

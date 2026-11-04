@@ -154,6 +154,9 @@ impl Parser<'_> {
 					self.reset_lexer();
 				},
 				T::Eof => {
+					if let Some(e) = self.word_eof.take() {
+						return Err(e);
+					}
 					self.la = None;
 					return Ok(None);
 				},
@@ -204,12 +207,14 @@ impl Parser<'_> {
 		let mut list = List { items };
 		super::finish::fill_docs(&mut list, &self.docs);
 		let node_count = super::finish::assign_ids(&mut list);
+		let word_eof = self.warn_word_eof();
 		Ok(Some(CompleteCommand {
 			span: Span::new(lo, hi.max(lo)),
 			line,
 			list,
 			node_count,
-			source_replay: source_replay && self.alias_uses.is_empty(),
+			source_replay: source_replay && self.alias_uses.is_empty() && !word_eof,
+			word_eof,
 			aliases: core::mem::take(&mut self.alias_uses),
 			warnings: core::mem::take(&mut self.warnings),
 		}))
@@ -564,10 +569,10 @@ impl Parser<'_> {
 			msg.extend_from_slice(&arith.text);
 			msg.extend_from_slice(b"))'");
 			let kind = ParseErrorKind::Message(msg.into_boxed_slice());
-			return Err(
-				ParseError::new(t.span(), for_line, kind)
-					.with_detail(Some(ParseWarning { line: for_line, bash_msg: detail.to_vec() })),
-			);
+			let mut error = ParseError::new(t.span(), for_line, kind)
+				.with_detail(Some(ParseWarning { line: for_line, bash_msg: detail.to_vec() }));
+			error.recovery = super::Recovery::ArithmeticFor;
+			return Err(error);
 		}
 		let at = |i: usize| {
 			let (s, e) = pieces[i];

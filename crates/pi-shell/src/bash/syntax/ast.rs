@@ -38,6 +38,9 @@ pub struct CompleteCommand {
 	pub aliases:              Vec<AliasUse>,
 	/// Source bytes reproduce this tree without an alias input buffer.
 	pub(crate) source_replay: bool,
+	/// Arithmetic-for recovery dropped the unfinished word at EOF. Bash
+	/// sets `$?` to 2 before it executes the retained command.
+	pub(crate) word_eof: bool,
 	/// Non-fatal diagnostics bash prints while parsing this command (e.g.
 	/// ``warning: here-document at line 2 delimited by end-of-file (wanted
 	/// `EOF')``).
@@ -760,11 +763,14 @@ pub struct Comsub {
 	pub text: Vec<u8>,
 }
 
-/// The four command-substitution forms of bash 5.3.
+/// Command-substitution forms and deferred arithmetic fallback of bash 5.3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ComsubKind {
 	/// `$(…)`
 	Dollar,
+	/// A `$((` that became `$( (…) )` but whose body must be parsed when
+	/// expanded, so a syntax error is reported only if the word is used.
+	DollarDeferred,
 	/// `` `…` ``
 	Backtick,
 	/// `${ …;}`: runs in the current shell, captures stdout.

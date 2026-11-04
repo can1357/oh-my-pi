@@ -585,7 +585,7 @@ mod native {
 			WordPart::Param(pp) => param(m, pp),
 			WordPart::Comsub(c) => {
 				let kind: &[u8] = match c.kind {
-					ComsubKind::Dollar => b"dollar",
+					ComsubKind::Dollar | ComsubKind::DollarDeferred => b"dollar",
 					ComsubKind::Backtick => b"backtick",
 					ComsubKind::NoFork => b"nofork",
 					ComsubKind::ValueSub => b"valuesub",
@@ -2001,7 +2001,7 @@ mod shfmt {
 						ComsubKind::Backtick => f.push(("Backquotes", V::Bool(true))),
 						ComsubKind::NoFork => f.push(("TempFile", V::Bool(true))),
 						ComsubKind::ValueSub => f.push(("ReplyVar", V::Bool(true))),
-						ComsubKind::Dollar => {},
+						ComsubKind::Dollar | ComsubKind::DollarDeferred => {},
 					}
 					V::Obj(f)
 				},
@@ -2384,6 +2384,7 @@ impl PartScan<'_> {
 					}
 					self.i += 1;
 				},
+				ComsubKind::DollarDeferred => self.i += 2 + c.text.len() + 1,
 				ComsubKind::Dollar if c.body.items.is_empty() || self.at(self.i + 2) == b'(' => {
 					self.i += 2 + c.text.len() + 1;
 				},
