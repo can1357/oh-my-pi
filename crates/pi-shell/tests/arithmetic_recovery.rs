@@ -44,18 +44,16 @@ async fn run(id: &str, script: &str, stdout: &str, status: i32) {
 async fn eof_recovery_keeps_the_command_but_drops_its_unfinished_word_and_remaining_input() {
 	run(
 		"00ca30a711176eb6a286",
-		"v=0\nprintf \"<%s>\\n\" \"$( for ((i=0;0;i+(;))); do echo body; break; done )\"\necho after\n",
+		"v=0\nprintf \"<%s>\\n\" \"$( for ((i=0;0;i+(;))); do echo body; break; done )\"\necho \
+		 after\n",
 		"<>\n",
 		0,
 	)
 	.await;
-}
-
-#[tokio::test]
-async fn dropping_the_only_assignment_leaves_the_arithmetic_for_error_status() {
 	run(
 		"semantic-refs:assignment",
-		"x=\"$( for ((i=0;0;i+(;))); do echo body; break; done )\"\nprintf \"status=%s x=%s\\n\" \"$?\" \"$x\"\n",
+		"x=\"$( for ((i=0;0;i+(;))); do echo body; break; done )\"\nprintf \"status=%s x=%s\\n\" \
+		 \"$?\" \"$x\"\n",
 		"",
 		2,
 	)
@@ -78,11 +76,13 @@ async fn recovery_discards_commands_and_separators_after_the_bad_loop() {
 	for (id, script) in [
 		(
 			"semantic-refs:extra-command",
-			"printf \"<%s>\\n\" \"$( for ((i=0;0;i+(;))); do echo body; break; done; echo next )\"\necho after\n",
+			"printf \"<%s>\\n\" \"$( for ((i=0;0;i+(;))); do echo body; break; done; echo next \
+			 )\"\necho after\n",
 		),
 		(
 			"semantic-refs:semi-close",
-			"printf \"<%s>\\n\" \"$( for ((i=0;0;i+(;))); do echo body; break; done; )\"\necho after\n",
+			"printf \"<%s>\\n\" \"$( for ((i=0;0;i+(;))); do echo body; break; done; )\"\necho \
+			 after\n",
 		),
 	] {
 		run(id, script, "<>\n", 0).await;
@@ -104,7 +104,8 @@ async fn newline_recovery_abandons_the_containing_command_with_status_127() {
 async fn a_case_pattern_close_in_the_completed_body_does_not_end_recovery() {
 	run(
 		"semantic-refs:case-body",
-		"printf \"<%s>\\n\" \"$( for ((i=0;0;i+(;))); do case x in x) echo body;; esac; done )\"\necho after\n",
+		"printf \"<%s>\\n\" \"$( for ((i=0;0;i+(;))); do case x in x) echo body;; esac; done \
+		 )\"\necho after\n",
 		"<>\n",
 		0,
 	)
@@ -131,23 +132,18 @@ async fn unquoted_arithmetic_substitution_tails_recover_at_newline_not_word_eof(
 		),
 		(
 			"dbeabc0f037fd679426f",
-			"unset v\necho $[ $( for ((i=0;0;i+(;))); do echo body; break; done; echo 1 ) ]\necho rc=$?\n",
+			"unset v\necho $[ $( for ((i=0;0;i+(;))); do echo body; break; done; echo 1 ) ]\necho \
+			 rc=$?\n",
 		),
 	] {
 		run(id, script, "", 127).await;
 	}
-}
-
-#[tokio::test]
-async fn eof_before_any_complete_command_retains_status_2() {
 	for (id, script) in [
-		(
-			"5a68bc3b10d5f28d80b5",
-			"for ((i=0;0;i+(;))); do echo never; done\necho after\n",
-		),
+		("5a68bc3b10d5f28d80b5", "for ((i=0;0;i+(;))); do echo never; done\necho after\n"),
 		(
 			"968a999cdcca2b4dbe62",
-			"v=0\n(( echo \"$( for ((i=0;0;i+(;))); do echo body; printf ran > marker; break; done )\" ) )\necho rc=$?\n",
+			"v=0\n(( echo \"$( for ((i=0;0;i+(;))); do echo body; printf ran > marker; break; done \
+			 )\" ) )\necho rc=$?\n",
 		),
 	] {
 		run(id, script, "", 2).await;
@@ -161,23 +157,28 @@ async fn pending_outer_here_documents_fail_safely_without_word_eof_recovery() {
 	for (id, script) in [
 		(
 			"4307d039542d3251efad",
-			"v=0\ncat <<EOF; echo \"$( for ((i=0;0;i+(;))); do echo body; printf ran > marker; break; done )\"\ndoc\nEOF\necho rc=$?\n",
+			"v=0\ncat <<EOF; echo \"$( for ((i=0;0;i+(;))); do echo body; printf ran > marker; \
+			 break; done )\"\ndoc\nEOF\necho rc=$?\n",
 		),
 		(
 			"e0246cd55cff6058cd18",
-			"v=0\ncat <<'EOF'; echo \"$( for ((i=0;0;i+(;))); do echo body; printf ran > marker; break; done )\"\ndoc\nEOF\necho rc=$?\n",
+			"v=0\ncat <<'EOF'; echo \"$( for ((i=0;0;i+(;))); do echo body; printf ran > marker; \
+			 break; done )\"\ndoc\nEOF\necho rc=$?\n",
 		),
 		(
 			"845db30f405f2cabeb38",
-			"v=0\ncat <<-EOF; echo \"$( for ((i=0;0;i+(;))); do echo body; printf ran > marker; break; done )\"\ndoc\nEOF\necho rc=$?\n",
+			"v=0\ncat <<-EOF; echo \"$( for ((i=0;0;i+(;))); do echo body; printf ran > marker; \
+			 break; done )\"\ndoc\nEOF\necho rc=$?\n",
 		),
 		(
 			"8046418935e81e1359e0",
-			"v=0\ncat <<for; echo \"$( for ((i=0;0;i+(;))); do echo body; printf ran > marker; break; done )\"\ndoc\nfor\necho rc=$?\n",
+			"v=0\ncat <<for; echo \"$( for ((i=0;0;i+(;))); do echo body; printf ran > marker; \
+			 break; done )\"\ndoc\nfor\necho rc=$?\n",
 		),
 		(
 			"7457930d815c46f87d21",
-			"v=0\ncat <<EOF <<SECOND; echo \"$( for ((i=0;0;i+(;))); do echo body; printf ran > marker; break; done )\"\ndoc\nEOF\ndoc2\nSECOND\necho rc=$?\n",
+			"v=0\ncat <<EOF <<SECOND; echo \"$( for ((i=0;0;i+(;))); do echo body; printf ran > \
+			 marker; break; done )\"\ndoc\nEOF\ndoc2\nSECOND\necho rc=$?\n",
 		),
 	] {
 		run(id, script, "", 2).await;

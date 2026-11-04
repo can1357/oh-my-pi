@@ -203,9 +203,10 @@ fn zsh_prefix(
 
 fn expand_ps4(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32) -> Option<BString> {
 	let mode = super::exec::mode_of(vp);
+	let feat = super::exec::features(k, cx.store, vp).ok()?;
 	let tunit = k
 		.engine
-		.text_unit(b"${PS4@P}", TextKind::HereDoc, mode)
+		.text_unit(b"${PS4@P}", TextKind::HereDoc, mode, feat)
 		.ok()?;
 	let w = tunit.words.last().cloned()?;
 	let mut log = Vec::new();

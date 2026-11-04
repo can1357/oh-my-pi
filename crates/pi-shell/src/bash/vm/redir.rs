@@ -238,7 +238,11 @@ fn target_text(
 		},
 		RedirTargetIr::HereDoc { text, quoted: false } => {
 			let mode = super::exec::mode_of(vp);
-			let tunit = match k.engine.text_unit(text, TextKind::HereDoc, mode) {
+			let feat = super::exec::features(k, cx.store, vp).map_err(|err| {
+				k.fail(err);
+				Halt::Failed
+			})?;
+			let tunit = match k.engine.text_unit(text, TextKind::HereDoc, mode, feat) {
 				Ok(u) => u,
 				Err(e) => {
 					// bash reports the script line after the document.

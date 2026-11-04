@@ -68,7 +68,7 @@ pub struct Engine {
 	cfg:          EngineConfig,
 	units:        Mutex<UnitCache>,
 	/// Units of text parsed at run time (here-document bodies, arithmetic).
-	texts:        Mutex<HashMap<(TextKind, ModeId, BString), Arc<Unit>>>,
+	texts:        Mutex<HashMap<(TextKind, ModeId, Features, BString), Arc<Unit>>>,
 	/// Compiled arithmetic expressions by text (bounded; see
 	/// [`ArithCache::get`]).
 	arith:        ArithCache,
@@ -172,8 +172,9 @@ impl Engine {
 		text: &[u8],
 		kind: TextKind,
 		mode: ModeId,
+		feat: Features,
 	) -> Result<Arc<Unit>, TextError> {
-		let key = (kind, mode, BString::from(text));
+		let key = (kind, mode, feat, BString::from(text));
 		if let Some(u) = self.texts.lock().get(&key) {
 			return Ok(Arc::clone(u));
 		}
@@ -188,9 +189,9 @@ impl Engine {
 				} else {
 					TextMode::HereDoc
 				};
-				let word = crate::bash::syntax::parse_text(text, Features::NONE, tmode)
+				let word = crate::bash::syntax::parse_text(text, feat, tmode)
 					.map_err(|e| TextError { line: e.line, msg: BString::from(e.bash_msg()) })?;
-				ir::lower_text(&word, text, mode, Features::NONE).map_err(unsupported)?
+				ir::lower_text(&word, text, mode, feat).map_err(unsupported)?
 			},
 			TextKind::Compound => {
 				// bash parses the text as words with the shell parser
@@ -201,7 +202,7 @@ impl Engine {
 				src.extend_from_slice(b"declare __=(");
 				src.extend_from_slice(text);
 				src.extend_from_slice(b")\n");
-				let mut parser = crate::bash::syntax::Parser::new(&src, Features::NONE, NO_ALIASES);
+				let mut parser = crate::bash::syntax::Parser::new(&src, feat, NO_ALIASES);
 				let cc = match parser.next_command() {
 					Some(Ok(cc)) => cc,
 					Some(Err(e)) => {
@@ -212,7 +213,7 @@ impl Engine {
 				if parser.next_command().is_some() {
 					return Err(unsupported("a compound array value that is not one word list"));
 				}
-				ir::lower_compound(&cc, &src, mode, Features::NONE).map_err(unsupported)?
+				ir::lower_compound(&cc, &src, mode, feat).map_err(unsupported)?
 			},
 		};
 		let unit = Arc::new(unit);

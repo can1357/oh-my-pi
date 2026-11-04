@@ -39,7 +39,6 @@ async fn run(id: &str, script: &str, stdout: &str, stderr: bool, status: i32) {
 	assert_eq!(result.exit_code, Some(status), "{id}: {script:?}");
 }
 
-
 #[tokio::test]
 async fn continued_openings_do_not_execute_shell_words_when_arithmetic_closes() {
 	for (id, script) in [
@@ -65,16 +64,11 @@ async fn fallback_replay_distinguishes_inner_and_closing_continuations() {
 	}
 }
 
-
 #[tokio::test]
 async fn fallback_here_document_reads_past_the_physical_line_not_from_replay() {
 	for (id, script, stdout) in [
 		("905e3e16cf37d3fc06ca", "((cat <<EOF\nhello\nEOF\n) )\n", ""),
-		(
-			"5d6327dcf942cdb0aa01",
-			"((cat <<EOF\nhello\nEOF\n) )\necho after\n",
-			"echo after\n",
-		),
+		("5d6327dcf942cdb0aa01", "((cat <<EOF\nhello\nEOF\n) )\necho after\n", "echo after\n"),
 		(
 			"829549b493219f5e823c",
 			"(( for ((i=0;0;i++)); do :; done; cat <<EOF\ndoc\nEOF\n) )\ncat <<AFTER\nafter\nAFTER\n",
@@ -87,12 +81,5 @@ async fn fallback_here_document_reads_past_the_physical_line_not_from_replay() {
 
 #[tokio::test]
 async fn arithmetic_recognition_counts_parentheses_in_physical_here_document_text() {
-	run(
-		"2942018c2cc9403047da",
-		"((cat <<EOF\n(\nEOF\n) )\necho rc=$?\n",
-		"",
-		true,
-		2,
-	)
-	.await;
+	run("2942018c2cc9403047da", "((cat <<EOF\n(\nEOF\n) )\necho rc=$?\n", "", true, 2).await;
 }

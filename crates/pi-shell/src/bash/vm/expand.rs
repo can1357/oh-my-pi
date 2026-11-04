@@ -103,6 +103,18 @@ impl From<StoreError> for Stop {
 
 pub type X<T> = Result<T, Stop>;
 
+fn indexed_arithmetic_error(stop: Stop) -> Stop {
+	match stop {
+		Stop::Fail(Diag::Arith { expr, msg, token }) => {
+			Stop::Fail(Diag::ArithSubscript { expr, msg, token })
+		},
+		Stop::Fatal(Diag::Arith { expr, msg, token }) => {
+			Stop::Fatal(Diag::ArithSubscript { expr, msg, token })
+		},
+		other => other,
+	}
+}
+
 /// A parameter's value before an operator applies.
 #[derive(Clone, Debug)]
 enum Val {
@@ -658,10 +670,11 @@ impl<'e, 'c> Expander<'e, 'c> {
 
 	/// Expand `text` parsed as arithmetic text.
 	fn expand_arith_text(&mut self, text: &[u8]) -> X<BString> {
+		let feat = super::exec::features(self.k, self.cx.store, self.vp)?;
 		let unit = self
 			.k
 			.engine
-			.text_unit(text, super::TextKind::Arith, self.vp_mode())
+			.text_unit(text, super::TextKind::Arith, self.vp_mode(), feat)
 			.map_err(|e| Stop::Fail(Diag::Syntax { msg: e.msg }))?;
 		let word = unit.words.last().cloned().unwrap_or_default();
 		self.scalar(&unit, &word)
@@ -1595,7 +1608,7 @@ impl<'e, 'c> Expander<'e, 'c> {
 		// arithmetic syntax error). Only such text differs from the word.
 		let src = word_source(unit, wi);
 		if src.iter().any(|c| matches!(c, b'\'' | b'\\')) {
-			let n = self.arith(src)?;
+			let n = self.arith(src).map_err(indexed_arithmetic_error)?;
 			return Ok(BString::from(n.format_into(&mut NumBuffer::new())));
 		}
 		// bash expands no tilde-prefix in an arithmetic subscript (`${b[~]}`
@@ -1605,7 +1618,7 @@ impl<'e, 'c> Expander<'e, 'c> {
 		let Sink::Scalar(text) = sink else {
 			return Ok(BString::default());
 		};
-		let n = self.arith_eval(&text)?;
+		let n = self.arith_eval(&text).map_err(indexed_arithmetic_error)?;
 		Ok(BString::from(n.format_into(&mut NumBuffer::new())))
 	}
 
@@ -1624,7 +1637,7 @@ impl<'e, 'c> Expander<'e, 'c> {
 			}
 			return self.expand_arith_text(&subscript_as_arith_text(sub));
 		}
-		let n = self.arith(sub)?;
+		let n = self.arith(sub).map_err(indexed_arithmetic_error)?;
 		Ok(BString::from(n.format_into(&mut NumBuffer::new())))
 	}
 
@@ -2086,10 +2099,11 @@ impl<'e, 'c> Expander<'e, 'c> {
 		if !promptvars {
 			return Ok(BString::from(out));
 		}
+		let feat = super::exec::features(self.k, self.cx.store, self.vp)?;
 		let unit = self
 			.k
 			.engine
-			.text_unit(&out, super::TextKind::HereDoc, self.vp_mode())
+			.text_unit(&out, super::TextKind::HereDoc, self.vp_mode(), feat)
 			.map_err(|err| Stop::Fail(Diag::Syntax { msg: err.msg }))?;
 		let word = unit.words.last().cloned().unwrap_or_default();
 		self.scalar(&unit, &word)
@@ -3704,9 +3718,10 @@ pub fn compound_string(
 	assoc: bool,
 ) -> Result<Vec<CompoundElem>, Stop> {
 	let mode = super::exec::mode_of(vp);
+	let feat = super::exec::features(k, cx.store, vp)?;
 	let unit = k
 		.engine
-		.text_unit(text, super::TextKind::Compound, mode)
+		.text_unit(text, super::TextKind::Compound, mode, feat)
 		.map_err(|e| Stop::Fail(Diag::Syntax { msg: e.msg }))?;
 	let Some(Part::Compound(elems)) = unit.words.last().and_then(|w| w.parts.first()) else {
 		return Ok(Vec::new());

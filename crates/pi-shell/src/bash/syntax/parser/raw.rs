@@ -256,7 +256,10 @@ impl Parser<'_> {
 					self.raw_into(&mut nested, 0, b'(', b')', Flags::ARITH, line)?;
 					nested
 				} else {
-					self.comsub(b')', false).map_err(super::ParseError::in_command_substitution)?.1
+					self
+						.comsub(b')', false)
+						.map_err(super::ParseError::in_command_substitution)?
+						.1
 				};
 				out.extend_from_slice(&nested);
 				out.push(b')');
@@ -310,7 +313,8 @@ impl Parser<'_> {
 					self.bump();
 					out.push(c);
 				},
-				b':' | b'}' if depth == 0 => return Ok((out, c == b':')),
+				b'}' => return Ok((out, false)),
+				b':' if depth == 0 => return Ok((out, true)),
 				b'\\' => {
 					self.bump();
 					match self.peek() {
@@ -445,9 +449,9 @@ impl Parser<'_> {
 		Ok((list, text))
 	}
 
-	/// `YYERROR` in make_arith_for_command discards tokens, not characters:
+	/// `YYERROR` in `make_arith_for_command` discards tokens, not characters:
 	/// a quote can carry recovery past newlines to EOF. In that case
-	/// parse_comsub returns matched_pair_error and the outer yylex drops
+	/// `parse_comsub` returns `matched_pair_error` and the outer `yylex` drops
 	/// its unfinished word. A newline token instead forces bash -c to exit.
 	fn recover_arith_for(&mut self, mut error: super::ParseError) -> super::ParseError {
 		loop {
