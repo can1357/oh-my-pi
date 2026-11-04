@@ -657,6 +657,15 @@ export function getReportsDir(): string {
 }
 
 /**
+ * Get the self-update state directory (~/.omp/update): the background
+ * auto-update's status file and worker log, and the lock that keeps two
+ * installs (`omp update`, auto-update) from running at once.
+ */
+export function getUpdateStateDir(): string {
+	return dirs.rootSubdir("update", "state");
+}
+
+/**
  * Get the logs directory (~/.omp/logs). `bun test` processes get
  * `<tmpdir>/omp-test-logs-<uid>` instead, so suites never write into the
  * developer's real logs; the uid suffix (as for the test session-owners dir)

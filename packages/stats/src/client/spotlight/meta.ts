@@ -137,7 +137,7 @@ export const CUT_GROUP: Record<SpotlightCutGroup, CutGroupMeta> = {
 		label: "Gated",
 		color: "var(--spot-gated)",
 		shape: "ring",
-		rule: "A read the agent was likely to edit: the edit gate kept it whole and the model saw it uncut",
+		rule: "A read pi's former edit gate (removed) kept whole: the model saw it uncut",
 	},
 };
 
