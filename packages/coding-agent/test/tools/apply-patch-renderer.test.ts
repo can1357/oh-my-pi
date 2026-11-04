@@ -109,7 +109,7 @@ describe("apply_patch rendering", () => {
 	});
 
 	it("shows apply_patch preview diffs after args complete", async () => {
-		await getUiTheme();
+		const uiTheme = await getUiTheme();
 		const uiStub = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
 		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "apply-patch-preview-"));
 		try {
@@ -123,9 +123,12 @@ describe("apply_patch rendering", () => {
 				"*** End Patch",
 			].join("\n");
 
+			// The card's bottom rule, where the preview label sits.
+			const bottomRule = (text: string): string =>
+				text.split("\n").findLast(line => line.includes(uiTheme.boxRound.bottomLeft)) ?? "";
 			const component = new ToolExecutionComponent("apply_patch", { input }, {}, undefined, uiStub, tmpDir);
 			const before = Bun.stripANSI(component.render(160).join("\n"));
-			expect(before).not.toContain("(preview)");
+			expect(bottomRule(before)).not.toContain("preview");
 
 			component.updateStreamPreview({
 				generation: 1,
@@ -140,7 +143,7 @@ describe("apply_patch rendering", () => {
 			});
 			component.setArgsComplete();
 			const after = Bun.stripANSI(component.render(160).join("\n"));
-			expect(after).toContain("(preview)");
+			expect(bottomRule(after)).toContain(" preview ");
 			expect(after).toContain("const value = 2;");
 		} finally {
 			await removeWithRetries(tmpDir);

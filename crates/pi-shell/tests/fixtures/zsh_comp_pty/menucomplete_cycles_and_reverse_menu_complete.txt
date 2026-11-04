@@ -1,0 +1,24 @@
+### "echo f\t"
+% echo file1
+file1  file2  foo.c  foo.h
+@ 0,12
+### "\t"
+% echo file2
+file1  file2  foo.c  foo.h
+@ 0,12
+### "\t"
+% echo foo.c
+file1  file2  foo.c  foo.h
+@ 0,12
+### "\u{1b}[Z"
+% echo file2
+file1  file2  foo.c  foo.h
+@ 0,12
+### "\u{1b}[Z"
+% echo file1
+file1  file2  foo.c  foo.h
+@ 0,12
+### "\u{1b}[Z"
+% echo foo.h
+file1  file2  foo.c  foo.h
+@ 0,12

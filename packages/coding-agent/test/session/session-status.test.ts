@@ -13,6 +13,12 @@ function header(id: string): string {
 	return line({ type: "session", version: 3, id, cwd: "/proj", timestamp: new Date().toISOString() });
 }
 
+/** Ids of the picker's full scan, newest first. */
+async function pickerIds(storage: MemorySessionStorage): Promise<string[]> {
+	const listing = await SessionManager.listForPicker("/proj", SESSION_DIR, storage);
+	return (await listing.complete).map(s => s.id);
+}
+
 let nextEntryId = 0;
 function msg(message: unknown): string {
 	nextEntryId += 1;
@@ -74,7 +80,7 @@ describe("SessionManager.list session status (tail derivation)", () => {
 	it("excludes untitled header-only sessions from the picker list but keeps them in raw list", async () => {
 		const storage = seed({ "header-only": "" });
 		expect((await SessionManager.list("/proj", SESSION_DIR, storage)).map(s => s.id)).toEqual(["header-only"]);
-		expect((await SessionManager.listForPicker("/proj", SESSION_DIR, storage)).map(s => s.id)).toEqual([]);
+		expect(await pickerIds(storage)).toEqual([]);
 	});
 	it("keeps titled header-only sessions in the picker list", async () => {
 		const storage = new MemorySessionStorage();
@@ -82,18 +88,14 @@ describe("SessionManager.list session status (tail derivation)", () => {
 			`${SESSION_DIR}/titled-empty.jsonl`,
 			`${JSON.stringify({ type: "session", version: 3, id: "titled-empty", cwd: "/proj", title: "Named stub", timestamp: new Date().toISOString() })}\n`,
 		);
-		expect((await SessionManager.listForPicker("/proj", SESSION_DIR, storage)).map(s => s.id)).toEqual([
-			"titled-empty",
-		]);
+		expect(await pickerIds(storage)).toEqual(["titled-empty"]);
 	});
 
 	it("elides unnamed 0-turn stubs from the picker but keeps named 0-turn sessions", async () => {
 		const storage = new MemorySessionStorage();
 		storage.writeTextSync(`${SESSION_DIR}/named-user-only.jsonl`, header("named-user-only") + user("typed prompt"));
 		storage.writeTextSync(`${SESSION_DIR}/blank-stub.jsonl`, header("blank-stub"));
-		expect((await SessionManager.listForPicker("/proj", SESSION_DIR, storage)).map(s => s.id).sort()).toEqual([
-			"named-user-only",
-		]);
+		expect((await pickerIds(storage)).sort()).toEqual(["named-user-only"]);
 	});
 
 	it("keeps a titleless session whose first assistant turn starts past the prefix", async () => {
@@ -101,9 +103,7 @@ describe("SessionManager.list session status (tail derivation)", () => {
 		const storage = seed({
 			"late-assistant": user(bigImage) + assistant("stop", [textBlock("answered")]),
 		});
-		expect((await SessionManager.listForPicker("/proj", SESSION_DIR, storage)).map(s => s.id)).toEqual([
-			"late-assistant",
-		]);
+		expect(await pickerIds(storage)).toEqual(["late-assistant"]);
 	});
 
 	it("keeps a pending session whose assistant reply sits mid-transcript", async () => {
@@ -112,9 +112,7 @@ describe("SessionManager.list session status (tail derivation)", () => {
 			"mid-assistant-pending":
 				user(bigImage) + assistant("stop", [textBlock("answered")]) + user("awaiting follow-up"),
 		});
-		expect((await SessionManager.listForPicker("/proj", SESSION_DIR, storage)).map(s => s.id)).toEqual([
-			"mid-assistant-pending",
-		]);
+		expect(await pickerIds(storage)).toEqual(["mid-assistant-pending"]);
 	});
 
 	it("keeps a titleless session whose only assistant record fits in neither window", async () => {
@@ -124,9 +122,7 @@ describe("SessionManager.list session status (tail derivation)", () => {
 			"middle-gap-assistant":
 				msg({ role: "user", content: [imageBlock] }) + assistant("stop", [textBlock(bigAssistant)]),
 		});
-		expect((await SessionManager.listForPicker("/proj", SESSION_DIR, storage)).map(s => s.id)).toEqual([
-			"middle-gap-assistant",
-		]);
+		expect(await pickerIds(storage)).toEqual(["middle-gap-assistant"]);
 	});
 
 	it("keeps a gap assistant record serialized with valid JSON whitespace", async () => {
@@ -155,9 +151,7 @@ describe("SessionManager.list session status (tail derivation)", () => {
 			`${SESSION_DIR}/gap-whitespace.jsonl`,
 			`${JSON.stringify({ type: "session", version: 3, id: "gap-whitespace", cwd: "/proj", timestamp: new Date().toISOString() })}\n${userLine}\n${asstRecord}\n`,
 		);
-		expect((await SessionManager.listForPicker("/proj", SESSION_DIR, storage)).map(s => s.id)).toEqual([
-			"gap-whitespace",
-		]);
+		expect(await pickerIds(storage)).toEqual(["gap-whitespace"]);
 	});
 	it("reports unknown rather than misclassifying when the final message exceeds the tail window", async () => {
 		// A completed turn whose final assistant message is larger than the 32 KiB

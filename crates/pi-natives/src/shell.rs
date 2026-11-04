@@ -1,4 +1,4 @@
-//! Brush-based shell execution exported via N-API.
+//! Embedded bash engine (pi-shell) shell execution exported via N-API.
 
 pub mod vfs;
 
@@ -230,7 +230,8 @@ impl PipeStreams {
 	}
 }
 
-/// Options for executing a shell command via brush-core.
+/// Options for executing a shell command via the embedded bash engine
+/// (pi-shell).
 #[napi(object, object_to_js = false)]
 pub struct ShellExecuteOptions<'env> {
 	/// Command string to execute in the shell.
@@ -320,7 +321,7 @@ impl From<CoreShellRunResult> for ShellRunResult {
 	}
 }
 
-/// Persistent brush-core shell session.
+/// Persistent embedded bash engine (pi-shell) shell session.
 #[napi]
 pub struct Shell {
 	inner: Arc<CoreShell>,
@@ -401,7 +402,23 @@ impl Shell {
 	}
 }
 
-/// Execute a brush shell command.
+/// Run the pi-shell engine as a process shell in this process (`omp zsh`,
+/// `omp bash`, `omp sh`): `argv` is the shell's whole command line,
+/// `argv[0]` naming it (`zsh`, `bash` or `sh` pick the dialect), as a real
+/// shell gets it. Synchronous: blocks the calling thread until the shell
+/// exits and returns the status the process should exit with (0–255; 101
+/// after a panic). The shell uses the process's own stdin, stdout, stderr,
+/// terminal and inherited descriptors (duplicated, never taken over); the
+/// job-control and termination signals the runtime handles are reset to
+/// their defaults for the run and restored after it.
+#[napi]
+pub fn run_shell_main(argv: Vec<String>) -> i32 {
+	let opts = pi_shell::process::ProcessOptions { embedded: true };
+	std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pi_shell::process::main(argv, opts)))
+		.unwrap_or(101)
+}
+
+/// Execute a command in the embedded bash engine (pi-shell).
 ///
 /// Creates a fresh session for each call. The `on_chunk` callback receives
 /// streamed stdout/stderr output. Returns the exit code when the command

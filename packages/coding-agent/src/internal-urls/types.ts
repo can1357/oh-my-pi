@@ -18,7 +18,7 @@ import type { ShellFsDirEntry } from "@oh-my-pi/pi-natives";
 import type { Settings } from "../config/settings";
 import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
-import type { AgentRegistry } from "../registry/agent-registry";
+import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { LocalProtocolOptions } from "./local-protocol";
 import type { SessionEntry } from "../session/session-entries";
 import type { ToolSession } from "../tools";
@@ -156,6 +156,8 @@ export interface SchemeHost {
 	settingsApproval: boolean;
 	/** `out://` writes reach the user as transcript replies: `out.enabled` is on in the top-level TUI session. */
 	outReplies: boolean;
+	/** The session is a subagent: `agent://all` broadcasts are refused, so they go unadvertised. */
+	subagent: boolean;
 }
 
 /**
@@ -276,7 +278,7 @@ export interface ResolveContext {
 	 */
 	seanceSourceArtifactsDir?: string;
 	/** Registry that owns the calling session; defaults to the process-wide registry. */
-	agentRegistry?: AgentRegistry;
+	agentRegistry?: AgentRegistryApi;
 	/** Settings of the calling session (used by `issue://`/`pr://` for cache TTLs). */
 	settings?: Settings;
 	/** Caller's abort signal. */

@@ -19,6 +19,7 @@ import {
 	formatExpandHint,
 	formatMoreItems,
 	formatStatusIcon,
+	formatStyledPath,
 	PREVIEW_LIMITS,
 	type ParsedDiagnostic,
 	parseDiagnosticMessage,
@@ -171,6 +172,26 @@ export function renderCall(args: LspParams, _options: RenderResultOptions, theme
 const UNREPORTED_LINE_RE = /\bno diagnostics report yet\b/;
 
 /**
+ * Whether a line is one of the LSP tool's per-file status rows (`<glyph> <path>: …`).
+ * Only a row's start counts: response text such as source or hover content can hold
+ * the same characters (ASCII `[-]`).
+ */
+function isStatusRow(line: string, glyph: string): boolean {
+	return line.startsWith(`${glyph} `);
+}
+
+/**
+ * Whether a result holds a status row drawn with `glyph`. Only the diagnostics action
+ * writes status rows; any other action's text is the server's (a `request` response
+ * verbatim), so a glyph there is content even at a line start. A result whose action
+ * is unknown keeps the inference.
+ */
+function hasStatusRow(action: string | undefined, lines: readonly string[], glyph: string): boolean {
+	if (action !== undefined && action !== "diagnostics") return false;
+	return lines.some(line => isStatusRow(line, glyph));
+}
+
+/**
  * Render LSP tool result with intelligent formatting based on result type.
  * Detects hover, diagnostics, references, symbols, etc. and formats accordingly.
  */
@@ -198,14 +219,15 @@ export function renderResult(
 	const warningMatch = text.match(/(\d+)\s+warning\(s\)/);
 	const refMatch = text.match(/(\d+)\s+reference\(s\)/);
 	const symbolsMatch = text.match(/Symbols in (.+):/);
-	const hasStatusError = text.includes(theme.status.error);
 	const unreportedCount = lines.filter(line => UNREPORTED_LINE_RE.test(line)).length;
 
 	// Static request info
 	const request = args ?? result.details?.request;
+	const action = request?.action ?? result.details?.action;
+	const hasStatusError = hasStatusRow(action, lines, theme.status.error);
 	const requestLines: string[] = [];
 	if (request?.file) {
-		requestLines.push(theme.fg("toolOutput", request.file));
+		requestLines.push(formatStyledPath(request.file, theme));
 	}
 	if (request?.line !== undefined) {
 		requestLines.push(theme.fg("dim", `line ${request.line}`));
@@ -261,7 +283,7 @@ export function renderResult(
 				bodyLines: [`${theme.styledSymbol("tool.lsp", "accent")} ${theme.fg("dim", "OK")}`],
 			};
 		}
-		return { label: "Response", state: "success", bodyLines: renderGeneric(text, lines, expanded, theme) };
+		return { label: "Response", state: "success", bodyLines: renderGeneric(text, lines, action, expanded, theme) };
 	};
 
 	return framedToolCard(theme, ({ contentWidth }) => {
@@ -386,10 +408,16 @@ function renderHover(
 // Diagnostics Rendering
 // =============================================================================
 
+/** A diagnostic's location: the muted file-type icon, the styled path and the muted `:line:col`. */
 function formatDiagnosticLocation(file: string, line: number, col: number, theme: Theme): string {
 	const lang = getLanguageFromPath(file);
 	const icon = theme.fg("muted", theme.getLangIcon(lang));
-	return `${icon} ${file}:${line}:${col}`;
+	return `${icon} ${formatStyledPath(file, theme)}${theme.fg("muted", `:${line}:${col}`)}`;
+}
+
+/** The `[severity]` tag in its severity's color: the path no longer carries it. */
+function formatSeverityTag(severity: ParsedDiagnostic["severity"], theme: Theme): string {
+	return theme.fg(severityToColor(severity), `[${severity}]`);
 }
 
 /**
@@ -419,7 +447,7 @@ function renderDiagnostics(
 	if (unreportedLines.length > 0) meta.push(formatCount("unverified file", unreportedLines.length));
 	if (meta.length === 0) meta.push("No issues");
 
-	const diagLines = lines.filter(l => l.includes(theme.status.error) || /:\d+:\d+/.test(l));
+	const diagLines = lines.filter(l => isStatusRow(l, theme.status.error) || /:\d+:\d+/.test(l));
 	const parsedDiagnostics = diagLines
 		.map(line => parseDiagnosticMessage(line.trim()))
 		.filter((diag): diag is ParsedDiagnostic => diag !== null);
@@ -443,12 +471,8 @@ function renderDiagnostics(
 				output += `\n ${theme.fg("dim", branch)} ${theme.fg("muted", item.raw)}`;
 				continue;
 			}
-			const severityColor = severityToColor(item.severity);
 			const location = formatDiagnosticLocation(item.filePath, item.line, item.col, theme);
-			output += `\n ${theme.fg("dim", branch)} ${theme.fg(severityColor, location)} ${theme.fg(
-				"dim",
-				`[${item.severity}]`,
-			)}`;
+			output += `\n ${theme.fg("dim", branch)} ${location} ${formatSeverityTag(item.severity, theme)}`;
 			const message = formatDiagnosticMessage(item);
 			if (message) {
 				output += `\n ${theme.fg("dim", detailPrefix)}${theme.fg("muted", message)}`;
@@ -473,13 +497,12 @@ function renderDiagnostics(
 			output += `\n ${theme.fg("dim", branch)} ${theme.fg("muted", item.raw)}`;
 			continue;
 		}
-		const severityColor = severityToColor(item.severity);
 		const location = formatDiagnosticLocation(item.filePath, item.line, item.col, theme);
 		const diagnosticMessage = formatDiagnosticMessage(item);
 		const message = diagnosticMessage
 			? ` ${theme.fg("muted", truncateToWidth(diagnosticMessage, TRUNCATE_LENGTHS.CONTENT))}`
 			: "";
-		output += `\n ${theme.fg("dim", branch)} ${theme.fg(severityColor, location)}${message}`;
+		output += `\n ${theme.fg("dim", branch)} ${location} ${formatSeverityTag(item.severity, theme)}${message}`;
 	}
 	if (remaining > 0) {
 		output += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg("muted", `… ${remaining} more`)}`;
@@ -529,7 +552,7 @@ function renderReferences(refMatch: RegExpMatchArray, lines: string[], expanded:
 			const fileCont = isLastFile ? "   " : `${theme.tree.vertical}  `;
 
 			const fileMeta = `${locs.length} reference${locs.length !== 1 ? "s" : ""}`;
-			output += `\n ${theme.fg("dim", fileBranch)} ${theme.fg("accent", file)} ${theme.fg("dim", fileMeta)}`;
+			output += `\n ${theme.fg("dim", fileBranch)} ${formatStyledPath(file, theme)} ${theme.fg("dim", fileMeta)}`;
 
 			if (maxLocsPerFile > 0) {
 				const locsToShow = locs.slice(0, maxLocsPerFile);
@@ -543,10 +566,8 @@ function renderReferences(refMatch: RegExpMatchArray, lines: string[], expanded:
 						`line ${line}, col ${col}`,
 					)}`;
 					if (expanded) {
-						output += `\n ${theme.fg("dim", fileCont)}${theme.fg("dim", locCont)}${theme.fg(
-							"muted",
-							`at ${file}:${line}:${col}`,
-						)}`;
+						const at = `${theme.fg("muted", "at ")}${formatStyledPath(file, theme)}${theme.fg("muted", `:${line}:${col}`)}`;
+						output += `\n ${theme.fg("dim", fileCont)}${theme.fg("dim", locCont)}${at}`;
 					}
 				}
 				if (locs.length > maxLocsPerFile) {
@@ -645,7 +666,7 @@ function renderLocations(parsed: LspLocations, expanded: boolean, theme: Theme):
 		const branch = isLast ? theme.tree.last : theme.tree.branch;
 		const rail = isLast ? "   " : `${theme.tree.vertical}  `;
 		const position = theme.fg("muted", `:${location.line}:${location.col}`);
-		const file = theme.fg("accent", replaceTabs(shortenPath(location.file)));
+		const file = formatStyledPath(replaceTabs(shortenPath(location.file)), theme);
 		rows.push(` ${theme.fg("dim", branch)} ${file}${position}`);
 
 		const numberWidth = location.context.reduce((width, line) => Math.max(width, String(line.n).length), 0);
@@ -784,9 +805,15 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 /**
  * Generic fallback rendering for unknown result types.
  */
-function renderGeneric(text: string, lines: string[], expanded: boolean, theme: Theme): string[] {
-	const hasError = text.includes("Error:") || text.includes(theme.status.error);
-	const hasSuccess = text.includes(theme.status.success) || text.includes("Applied");
+function renderGeneric(
+	text: string,
+	lines: string[],
+	action: string | undefined,
+	expanded: boolean,
+	theme: Theme,
+): string[] {
+	const hasError = text.includes("Error:") || hasStatusRow(action, lines, theme.status.error);
+	const hasSuccess = hasStatusRow(action, lines, theme.status.success) || text.includes("Applied");
 
 	const icon =
 		hasError && !hasSuccess
@@ -930,7 +957,7 @@ interface LspDiagnosticsParse {
 
 const DIAGNOSTIC_AT_RE = /^\d+:\d+\s+\[/;
 const DIAGNOSTICS_SUMMARY_RE = /^\d+ \w+\(s\)(?:, \d+ \w+\(s\))*:?$/;
-/** A per-file status line's leading status glyph (`✘`, `⚠`, a Nerd Font glyph, ASCII `[!!]`). */
+/** A per-file status line's leading status glyph (`✘`, `⚠`, a Nerd Font glyph, ASCII `[-]`). */
 const STATUS_GLYPH_RE = /^(?:\[[^\]\s]*\]|[^\p{L}\p{N}\s./~\\]+)\s+/u;
 /** Per-file summaries (`✗ a.ts: 2 error(s)`, `✓ a.ts: no issues`) repeat what the rows and head count. */
 const FILE_SUMMARY_RE = /: (?:no issues|\d+ \w+\(s\)(?:, \d+ \w+\(s\))*)$/;
@@ -1149,6 +1176,7 @@ function describeLspLocations(
 function describeLspResult(result: ToolRenderResult<LspToolDetails>, args: LspParams | undefined): NativeToolView {
 	const request = args ?? result.details?.request;
 	const fallbackAction = result.details?.action ?? "request";
+	const action = request?.action ?? result.details?.action;
 	const content = result.content?.[0];
 	const text = content?.type === "text" ? (content.text ?? "") : "";
 	if (result.isError) return inlineErrorView(lspNativeHead(request, fallbackAction), text || "LSP request failed");
@@ -1167,7 +1195,7 @@ function describeLspResult(result: ToolRenderResult<LspToolDetails>, args: LspPa
 	}
 	if (
 		/\d+\s+(?:error|warning)\(s\)/.test(text) ||
-		text.includes(statusError) ||
+		hasStatusRow(action, lines, statusError) ||
 		(request?.action ?? fallbackAction) === "diagnostics"
 	) {
 		return describeLspDiagnostics(request, fallbackAction, lines);
@@ -1192,8 +1220,8 @@ function describeLspResult(result: ToolRenderResult<LspToolDetails>, args: LspPa
 			preview: { lines: 8 },
 		};
 	}
-	const hasError = text.includes("Error:") || text.includes(statusError);
-	const hasSuccess = text.includes(activeThemeSymbol("status.success")) || text.includes("Applied");
+	const hasError = text.includes("Error:") || hasStatusRow(action, lines, statusError);
+	const hasSuccess = hasStatusRow(action, lines, activeThemeSymbol("status.success")) || text.includes("Applied");
 	return {
 		tool: lspNativeHead(request, fallbackAction),
 		tone: hasError && !hasSuccess ? "error" : undefined,

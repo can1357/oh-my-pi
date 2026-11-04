@@ -39,8 +39,8 @@ function getSummaryParseCache(session: object): LRUCache<string, SummaryResult |
 	}
 	return cache;
 }
-const MAX_SUMMARY_BYTES = 2 * 1024 * 1024;
-const MAX_SUMMARY_LINES = 20_000;
+export const MAX_SUMMARY_BYTES = 2 * 1024 * 1024;
+export const MAX_SUMMARY_LINES = 20_000;
 /**
  * Prose files (Markdown flavors and plain text) skip code-block summarization
  * unless `read.summarize.prose` opts them in.
