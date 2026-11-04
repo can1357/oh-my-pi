@@ -89,7 +89,7 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 			async ({ signal }) => {
 				const result = await runSubagentFollowUpTurn({
 					id,
-					agent: persistedAgentDefinition(agentName, init),
+					agent: persistedAgentDefinition(ref.displayName, init),
 					message: init.task,
 					restore: true,
 					structured,

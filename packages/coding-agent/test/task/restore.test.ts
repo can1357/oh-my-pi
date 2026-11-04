@@ -131,7 +131,7 @@ describe("restoreSession (omp --restore)", () => {
 		expect(followUp).toHaveBeenCalledTimes(1);
 		expect(followUp.mock.calls[0]![0]).toMatchObject({
 			id: "Cut",
-			agent: { name: "scout" },
+			agent: { name: "Cut" },
 			restore: true,
 			message: "Cut task",
 			softRequestBudget: 100,
