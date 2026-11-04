@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- `env` and `xargs` in the bash tool's shell now fail with status 126 and the real error, as GNU's do, for a command they cannot run: a name longer than the file system allows, a directory or a symbolic-link loop on `PATH`, or an argument list too long. Before, they said "No such file or directory" with status 127, or showed the shell's own error line ([#18004](https://github.com/can1357/oh-my-pi/pull/18004) by [@sjawhar](https://github.com/sjawhar))
+- `env` and `xargs` now use the command's real exec errors when searching `PATH` and reporting a command they cannot run, instead of stopping at the first executable-looking file or replacing the error with "No such file or directory" ([#18004](https://github.com/can1357/oh-my-pi/pull/18004) by [@sjawhar](https://github.com/sjawhar))
 ### Changed
 
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections

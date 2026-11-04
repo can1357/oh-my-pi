@@ -3,19 +3,15 @@
 //! ([`crate::extras`]), and its [`CommandRunner`] hands each command to the
 //! driver, which runs it in a subshell of the caller.
 //!
-//! As in pi, a command is looked up before it runs, so the utility reports
-//! a missing or unexecutable command in its own words, with the error glibc's
-//! `execvp` would give (`xargs: nope: No such file or directory`, status
-//! 127): a builtin (an engine intrinsic, a tool or
-//! an extra) runs through `command`, so shell functions never run, as in
-//! pi's earlier shell; any other name is searched on the
-//! command's own `PATH` (with environment changes applied; the C library's
-//! default path without one) and runs by absolute path through `exec -a`, so
-//! the program sees the name it was asked for. An `exec` the OS refuses
-//! (`E2BIG`) comes back to the utility as that error too
-//! ([`Script::report_exec_error`]), which reports it as GNU's do after
-//! `execvp`. Environment changes (`env -i`,
-//! `-u`, `NAME=VALUE`) apply in the subshell before the command, in order.
+//! A builtin (an engine intrinsic, a tool or an extra) runs through
+//! `command`, so shell functions never run. An external runs through
+//! `exec -a` with the name it was asked for as argv[0]. The host tries the
+//! command's own PATH with execvp's error-selection rules and /bin/sh
+//! fallback, or executes a name with a slash directly. No metadata guess
+//! ends the search before the real exec. A refusal reaches the utility
+//! through [`Script::report_exec_error`], so it can report its own name
+//! and the OS error (126, or 127 for ENOENT). Environment changes (`env -i`,
+//! `-u`, `NAME=VALUE`) apply in the subshell before the exec, in order.
 //!
 //! The subshell's stdin is what the utility asks for (the null device by
 //! default; `env`'s own stdin is the caller's fd 0); stdout and stderr are the
@@ -30,7 +26,7 @@ use std::{
 	ffi::OsStr,
 	future::Future,
 	io,
-	path::{Path, PathBuf},
+	path::PathBuf,
 	pin::Pin,
 	sync::Arc,
 	task::{Context, Poll, Waker},
@@ -48,13 +44,6 @@ use crate::{
 	},
 	extras::Done,
 	sys::StdFile,
-};
-
-/// `execvp`'s search path when a command's environment has no `PATH`.
-const DEFAULT_PATH: &str = if cfg!(any(target_os = "linux", target_os = "android")) {
-	"/bin:/usr/bin"
-} else {
-	"/usr/bin:/bin"
 };
 
 /// How a command a utility asked for ended, back to the utility.
@@ -121,11 +110,7 @@ impl Extra {
 				turn.config,
 			);
 			invocation.cancel = Some(cancel.clone());
-			let lookup = Lookup {
-				path:   invocation.env.get("PATH").cloned(),
-				cwd:    invocation.cwd.clone(),
-				config: turn.config.clone(),
-			};
+			let lookup = Lookup { config: turn.config.clone() };
 			invocation.commands =
 				Some(Box::new(Runner { requests, waker: turn.waker.clone(), lookup }));
 			let done = crate::extras::spawn(&runtime, invocation);
@@ -348,60 +333,26 @@ fn cancelled() -> io::Error {
 	io::Error::new(io::ErrorKind::Interrupted, "command cancelled")
 }
 
-/// What a command name runs, as of the utility's start.
+/// Whether the command runs in-process; external lookup belongs to exec.
 struct Lookup {
-	/// The utility's `PATH`.
-	path:   Option<String>,
-	/// The utility's working directory.
-	cwd:    PathBuf,
 	config: ToolConfig,
 }
 
 impl Lookup {
-	/// How `command` runs, or the error `execvp` gives for it. A name with a
-	/// slash fails as `execve` does on that path: `ENOENT` (`NotFound`),
-	/// `EACCES` for a directory or a file that may not be executed, or the
-	/// error of resolving the path (`ENAMETOOLONG`, `ELOOP`, `ENOTDIR`). A bare
-	/// name is searched in the command's `PATH` as glibc's `execvp` does: a
-	/// directory that lacks it, is not a directory, is stale, is on a missing
-	/// device or timed out moves the search on; `EACCES` moves it on too, and
-	/// is the error when no directory holds a program of that name; any other
-	/// error ends the search (a name longer than the file system allows:
-	/// `ENAMETOOLONG`).
+	/// Do not predict an exec from metadata: permissions and interpreters
+	/// are decided by the OS. A bare name reaches the host's execvp search
+	/// with its actual environment; a path reaches execve unchanged.
 	fn program(&self, command: &ShellCommand) -> io::Result<Program> {
 		let name = command
 			.args()
 			.first()
+			.filter(|name| !name.is_empty())
 			.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-		let cwd = command.dir().unwrap_or(&self.cwd);
-		if has_separator(name) {
-			let path = cwd.join(name);
-			return exec_target(&path).map(|()| Program::Path(path));
+		if !has_separator(name) && self.builtin(name) {
+			Ok(Program::Builtin)
+		} else {
+			Ok(Program::Path(PathBuf::from(name)))
 		}
-		if self.builtin(name) {
-			return Ok(Program::Builtin);
-		}
-		let path = command
-			.env_changes()
-			.iter()
-			.fold(self.path.as_deref(), |path, change| match change {
-				EnvChange::Clear => None,
-				EnvChange::Remove(var) if var == "PATH" => None,
-				EnvChange::Set(var, value) if var == "PATH" => Some(value.as_str()),
-				_ => path,
-			})
-			.unwrap_or(DEFAULT_PATH);
-		let mut denied = None;
-		for dir in std::env::split_paths(OsStr::new(path)) {
-			let candidate = cwd.join(dir).join(name);
-			match exec_target(&candidate) {
-				Ok(()) => return Ok(Program::Path(candidate)),
-				Err(error) if search_denied(&error) => denied = Some(error),
-				Err(error) if search_moves_on(&error) => {},
-				Err(error) => return Err(error),
-			}
-		}
-		Err(denied.unwrap_or_else(|| io::ErrorKind::NotFound.into()))
 	}
 
 	/// Whether `name` runs in-process: an engine intrinsic, a tool or an
@@ -417,57 +368,6 @@ impl Lookup {
 fn has_separator(name: &OsStr) -> bool {
 	let bytes = name.as_encoded_bytes();
 	bytes.contains(&b'/') || (cfg!(windows) && bytes.contains(&b'\\'))
-}
-
-/// What `execve` makes of `path`: nothing when it holds a program, else the
-/// error it fails with, `EACCES` for a directory or a file without execute
-/// permission.
-#[cfg(unix)]
-fn exec_target(path: &Path) -> io::Result<()> {
-	use std::os::unix::fs::PermissionsExt as _;
-	let meta = std::fs::metadata(path)?;
-	if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
-		Ok(())
-	} else {
-		Err(io::Error::from_raw_os_error(libc::EACCES))
-	}
-}
-
-#[cfg(not(unix))]
-fn exec_target(path: &Path) -> io::Result<()> {
-	if path.is_file() || path.with_extension("exe").is_file() {
-		Ok(())
-	} else {
-		Err(io::ErrorKind::NotFound.into())
-	}
-}
-
-/// Whether glibc's `execvp` notes `error` and searches on, reporting it
-/// when no directory holds a program: `EACCES`.
-#[cfg(unix)]
-fn search_denied(error: &io::Error) -> bool {
-	error.raw_os_error() == Some(libc::EACCES)
-}
-
-#[cfg(not(unix))]
-fn search_denied(error: &io::Error) -> bool {
-	error.kind() == io::ErrorKind::PermissionDenied
-}
-
-/// Whether glibc's `execvp` searches on after `error`: the directory lacks
-/// the name, is not a directory, is stale, is on a missing device or timed
-/// out.
-#[cfg(unix)]
-fn search_moves_on(error: &io::Error) -> bool {
-	matches!(
-		error.raw_os_error(),
-		Some(libc::ENOENT | libc::ENOTDIR | libc::ESTALE | libc::ENODEV | libc::ETIMEDOUT)
-	)
-}
-
-#[cfg(not(unix))]
-fn search_moves_on(error: &io::Error) -> bool {
-	error.kind() == io::ErrorKind::NotFound
 }
 
 #[cfg(test)]

@@ -1315,6 +1315,13 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 		let target = loop {
 			// Borrowed (the resolution only reads `vp`): no copy of the
 			// name per command.
+			// A utility's exec uses the host's actual execvp search, not the
+			// shell's metadata lookup or hash table. Keep relative paths too.
+			if vp.runs.front().is_some_and(|run| run.report_exec_error)
+				&& current_exec(vp).is_some_and(|s| s.exec_as.is_some())
+			{
+				break Target::External(current_argv(vp)[0].clone());
+			}
 			let name = &current_argv(vp)[0];
 			let has_slash = name.contains(&b'/');
 			if external_only {
@@ -1930,6 +1937,18 @@ fn spawned_external(
 			// `Target::Refused` (stage stays `Dispatch`).
 			let code = err.raw_os_error().unwrap_or_default();
 			st(vp).target = Some(Target::Refused { path, code });
+		},
+		Err(err) if is_enoexec(&err) && vp.runs.front().is_some_and(|run| run.report_exec_error) => {
+			// execvp's fallback is the platform /bin/sh, not another run of
+			// this engine. Keep this exec's fds, environment and lineage.
+			let s = st(vp);
+			s.argv[0] = path;
+			s.argv.insert(0, BString::from("/bin/sh"));
+			if let Some(how) = &mut s.exec_as {
+				how.argv0 = None;
+				how.login = false;
+			}
+			s.target = Some(Target::External(BString::from("/bin/sh")));
 		},
 		Err(err) if is_enoexec(&err) && !interp => {
 			// Retried as `Target::Script` (stage stays `Dispatch`).

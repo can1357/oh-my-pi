@@ -436,7 +436,7 @@ pub struct Kernel {
 	pub reported_signal:     Option<(RunId, i32)>,
 	/// Errors of a submitted run's own `exec` that the run reports to its
 	/// caller ([`Script::report_exec_error`]), pending its completion
-	/// report; not imaged, as `exec_signals`.
+	/// report; imaged so an EXIT trap can resume without losing the error.
 	pub exec_errors:         HashMap<RunId, i32>,
 	/// `exec` error associated with the most recently reported run.
 	pub reported_exec_error: Option<(RunId, i32)>,

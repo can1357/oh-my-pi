@@ -135,3 +135,67 @@ async fn a_command_that_cannot_run_reports_execvp_s_error() {
 	}
 	assert!(wrong.is_empty(), "{wrong:#?}");
 }
+
+/// Permission bits alone cannot predict an exec: only the OS knows whether
+/// this user may execute it and whether its interpreter exists.
+#[tokio::test]
+async fn path_search_continues_after_real_exec_refusals() {
+	let dir = tempfile::tempdir().expect("scratch directory");
+	for name in ["denied", "broken", "good", "loop", "text"] {
+		std::fs::create_dir(dir.path().join(name)).unwrap();
+	}
+	for (path, contents, mode) in [
+		("denied/pick", "#!/bin/sh\necho BAD\n", 0o001),
+		("broken/pick", "#!/no-such-exec-interpreter-18004\n", 0o755),
+		("good/pick", "#!/bin/sh\nprintf 'GOOD:%s\\n' \"$*\"\n", 0o755),
+		("text/pick", "printf 'TEXT:%s\\n' \"$*\"\n", 0o755),
+		("pick", "printf 'ZERO:%s ARGS:%s\\n' \"$0\" \"$*\"\n", 0o755),
+	] {
+		let file = dir.path().join(path);
+		std::fs::write(&file, contents).unwrap();
+		std::fs::set_permissions(file, std::fs::Permissions::from_mode(mode)).unwrap();
+	}
+	std::os::unix::fs::symlink("pick", dir.path().join("loop/pick")).unwrap();
+	let huge = format!("/{}", "a/".repeat(2200));
+	let mut wrong = Vec::new();
+	for utility in ["env", "xargs"] {
+		for (label, path, name) in [
+			("empty command", "good".to_owned(), "''"),
+			("oversized component", format!("{huge}:good"), "pick"),
+			("actual permission class", "denied:good".to_owned(), "pick"),
+			("missing interpreter", "broken:good".to_owned(), "pick"),
+			("denial survives later missing interpreter", "denied:broken".to_owned(), "pick"),
+			("fatal error stops search", "loop:good".to_owned(), "pick"),
+			("ENOEXEC invokes sh instead of later program", "text:good".to_owned(), "pick"),
+			("an empty PATH entry preserves the fallback script name", String::new(), "pick"),
+		] {
+			let script = if utility == "env" {
+				format!("env PATH='{path}' {name} arg; echo st:$?")
+			} else {
+				format!("printf 'arg\\n' | env PATH='{path}' xargs {name}; echo st:$?")
+			};
+			// Absolute utility names preserve the custom PATH for the operand.
+			let oracle = script
+				.replace("env PATH=", "/usr/bin/env PATH=")
+				.replace(" xargs ", " /usr/bin/xargs ");
+			let expected = std::process::Command::new("/bin/bash")
+				.args(["--noprofile", "--norc", "-c", &oracle])
+				.env("LC_ALL", "C")
+				.current_dir(dir.path())
+				.output()
+				.unwrap();
+			let expected = (
+				String::from_utf8(expected.stdout).unwrap(),
+				String::from_utf8(expected.stderr)
+					.unwrap()
+					.replace("/usr/bin/env:", "env:")
+					.replace("/usr/bin/xargs:", "xargs:"),
+			);
+			let actual = run(dir.path(), &script).await;
+			if actual != expected {
+				wrong.push(format!("{utility}: {label}: {actual:?}, GNU {expected:?}"));
+			}
+		}
+	}
+	assert!(wrong.is_empty(), "{wrong:#?}");
+}

@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 29;
+pub const FRAMES_VERSION: u32 = 30;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -71,29 +71,31 @@ struct Header {
 
 #[derive(Serialize, Deserialize)]
 struct Image {
-	seq:       u64,
-	next_run:  u64,
-	next_call: u64,
-	next_cmd:  u64,
-	paused:    bool,
-	mask:      u64,
-	rr:        u32,
+	seq:         u64,
+	next_run:    u64,
+	next_call:   u64,
+	next_cmd:    u64,
+	paused:      bool,
+	mask:        u64,
+	rr:          u32,
 	/// The scheduler's unfinished slice (vproc, ops left).
-	slice:     Option<(Vpid, u32)>,
+	slice:       Option<(Vpid, u32)>,
 	/// The control's wake count (the `at` marks of blocked vprocs refer
 	/// to it).
-	wakes:     u64,
-	done:      Vec<(RunId, i32)>,
-	results:   Vec<(CallId, CallOutcome)>,
-	procs:     Vec<ProcImage>,
+	wakes:       u64,
+	done:        Vec<(RunId, i32)>,
+	results:     Vec<(CallId, CallOutcome)>,
+	/// Known exec refusals whose resumable runs have not finished yet.
+	exec_errors: Vec<(RunId, i32)>,
+	procs:       Vec<ProcImage>,
 	/// Fd objects, referred to by index.
-	fd_objs:   Vec<FdObjImage>,
+	fd_objs:     Vec<FdObjImage>,
 	/// Engine memory objects, referred to by index.
-	mems:      Vec<MemImage>,
+	mems:        Vec<MemImage>,
 	/// Background jobs still deciding on their pid ([`Kernel::bangs`]).
-	bangs:     Vec<super::proc::Bang>,
+	bangs:       Vec<super::proc::Bang>,
 	/// Their commands' redirections still deciding ([`Kernel::deferrals`]).
-	deferrals: Vec<super::proc::Deferral>,
+	deferrals:   Vec<super::proc::Deferral>,
 }
 
 /// One fd object.
@@ -303,8 +305,6 @@ struct RunImage {
 	env:               Vec<(BString, BString)>,
 	started:           bool,
 	exit_trap_started: bool,
-	/// Absent in images written before it existed.
-	#[serde(default)]
 	report_exec_error: bool,
 }
 
@@ -617,6 +617,11 @@ impl Shell {
 			wakes: k.ctl.wakes(),
 			done: k.done.iter().copied().collect(),
 			results: k.results.iter().map(|(id, o)| (*id, o.clone())).collect(),
+			exec_errors: k
+				.exec_errors
+				.iter()
+				.map(|(run, code)| (*run, *code))
+				.collect(),
 			procs,
 			fd_objs: fds.objs,
 			mems: fds.mems,
@@ -750,6 +755,7 @@ impl Shell {
 		k.ctl.restore_wakes(img.wakes);
 		k.done = img.done.into();
 		k.results = img.results.into_iter().collect();
+		k.exec_errors = img.exec_errors.into_iter().collect();
 		// Only a restored vproc still decides (a job that never settles
 		// would hold its `$!` readers forever).
 		k.bangs = img
@@ -1329,5 +1335,44 @@ mod tests {
 		assert!(r.poll_read(&mut cx, &mut buf).is_pending(), "the duplicate writer keeps it open");
 		drop(w2);
 		assert!(matches!(r.poll_read(&mut cx, &mut buf), Poll::Ready(Ok(0))), "then EOF");
+	}
+
+	/// Version 29 predates the exec-error fields in the positional image.
+	/// It must be rejected before attempting to decode that image.
+	#[test]
+	fn a_pre_exec_error_image_is_incompatible_not_corrupt() {
+		use crate::{
+			bash::{Cx, Engine, EngineConfig, MemStore, RestoreOpts, Shell, ShellInit, StateStore},
+			testkit::FakeHost,
+		};
+		let engine = Engine::new(EngineConfig::default());
+		let mut host = FakeHost::new();
+		let mut store = MemStore::new();
+		let shell = Shell::create(
+			&engine,
+			&mut Cx { host: &mut host, store: &mut store },
+			ShellInit::default(),
+		)
+		.unwrap();
+		drop(shell);
+		let old = super::Header {
+			magic:  super::MAGIC,
+			ir:     super::IR_VERSION,
+			frames: 29,
+			build:  Engine::build_id(),
+			runs:   Vec::new(),
+		};
+		store
+			.put_blob(super::BlobSlot::Frames, &postcard::to_stdvec(&old).unwrap())
+			.unwrap();
+		let restored = Shell::restore(
+			&engine,
+			&mut Cx { host: &mut host, store: &mut store },
+			RestoreOpts::default(),
+		);
+		assert!(matches!(
+			restored,
+			Err(super::RestoreError::Incompatible { why: super::Incompatibility::Build })
+		));
 	}
 }
