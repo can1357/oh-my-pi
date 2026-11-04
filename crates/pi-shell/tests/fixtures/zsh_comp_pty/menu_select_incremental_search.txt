@@ -1,0 +1,30 @@
+### ": \t"
+% :
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,4
+### "\t"
+% : dir1/
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,9
+### "\u{12}"
+% : dir1/
+isearch backward:
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,9
+### "fo"
+% : foo.h
+wrapped isearch backward: fo
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,9
+### "\u{12}"
+% : foo.c
+wrapped isearch backward: fo
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,9
+### "\r"
+% : foo.c
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,9
+### "\r"
+% : foo.c
+@ 0,10

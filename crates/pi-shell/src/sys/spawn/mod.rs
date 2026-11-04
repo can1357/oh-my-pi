@@ -58,6 +58,18 @@ use crate::{
 	sys::pump::{End, Feed, Pump, os},
 };
 
+/// Tell the spawners that the process changed a signal's disposition.
+///
+/// They read which signals the host ignores once per change (`sigaction`,
+/// `signal`), not per spawn, to reset those in the child. Everything that
+/// changes a disposition while spawners may run calls it (the shell's trap
+/// table, an embedding runtime's reset); a change it misses leaves a newly
+/// ignored signal ignored in later children.
+pub fn dispositions_changed() {
+	#[cfg(unix)]
+	imp::dispositions_changed();
+}
+
 /// Spawns externals for a [`Host`](crate::bash::Host). Cheap to clone; clones
 /// share the leak-check registry.
 #[derive(Clone)]
@@ -111,8 +123,10 @@ pub enum Exits {
 	/// switch per external fewer in each direction. For hosts whose engine
 	/// thread polls the `ExtProc`s and blocks only in [`Parker::park`]
 	/// (`obash`). An external falls back to a waiter thread when no parker
-	/// exists, `pidfd_open` fails, or it is abandoned while running; other
-	/// platforms always use [`Exits::Thread`].
+	/// exists, `pidfd_open` fails, or it is abandoned while running; a
+	/// job-controlled external ([`crate::bash::PgroupSpec::Job`]) always has
+	/// one (a pidfd reports exits, not stops); other platforms always use
+	/// [`Exits::Thread`].
 	///
 	/// [`Parker::park`]: crate::sys::Parker::park
 	Park,
@@ -139,11 +153,16 @@ pub enum Sessions {
 	/// Non-interactive bash layout: externals stay in the host's process
 	/// group and session (no `setpgid`, no `setsid`), so they share its
 	/// controlling terminal (`read < /dev/tty` in a nested shell works).
-	/// `PgroupSpec` is ignored. Because the group is the host's, every
-	/// group-wide operation narrows to the spawned process itself: signals,
-	/// `stop`/`cont` and the abandon escalation reach only that pid, and
-	/// leak checks see only it, not processes it forked (bash's own view of
-	/// its children). For standalone shells such as `obash`.
+	/// `PgroupSpec::New`/`Join` are ignored. Because the group is the
+	/// host's, every group-wide operation narrows to the spawned process
+	/// itself: signals, `stop`/`cont` and the abandon escalation reach only
+	/// that pid, and leak checks see only it, not processes it forked
+	/// (bash's own view of its children). For standalone shells such as
+	/// `obash` and the process shell. Job control is the exception: a
+	/// [`PgroupSpec::Job`](crate::bash::PgroupSpec::Job) spawn is placed as
+	/// under `Share` (its job's group, and the terminal for a foreground
+	/// job), so an interactive shell with `MONITOR` set runs every job in
+	/// its own group while its other externals stay in the shell's.
 	Inherit,
 }
 

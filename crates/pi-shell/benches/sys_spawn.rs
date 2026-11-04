@@ -102,6 +102,7 @@ mod unix {
 			rlimits: &[],
 			lineage: pi_shell::bash::Lineage::default(),
 			redirs: None,
+			ctty: None,
 		}
 	}
 

@@ -278,7 +278,6 @@ mod filter {
 		Ctx, DataT, Error as CoreError, Exn, RunPtr, ValT as _, Vars, box_iter::box_once, compile,
 		data, load, native,
 	};
-	use jaq_fmts::write::tabular::Row;
 	use jaq_std::{
 		ValT as _,
 		input::{self, Inputs, RcIter},
@@ -382,8 +381,8 @@ def tonumber: tonumber_;
 				box_once(Ok(Val::from(cv.0.data().session.input.lines.get())))
 			}),
 			("tonumber_", native::v(0), |cv| box_once(tonumber(cv.1).map_err(Exn::from))),
-			("@csv", native::v(0), |cv| box_once(table_row(&cv.1, "CSV", Row::write_csv))),
-			("@tsv", native::v(0), |cv| box_once(table_row(&cv.1, "TSV", Row::write_tsv))),
+			("@csv", native::v(0), |cv| box_once(table_row(&cv.1, true))),
+			("@tsv", native::v(0), |cv| box_once(table_row(&cv.1, false))),
 		]
 	}
 
@@ -423,16 +422,52 @@ def tonumber: tonumber_;
 		num.map(Val::Num).ok_or_else(|| CoreError::typ(v, "number"))
 	}
 
-	/// An array of scalars as one CSV or TSV row.
-	fn table_row<'a>(
-		v: &Val,
-		format: &str,
-		write: fn(&Row, &mut dyn io::Write) -> io::Result<()>,
-	) -> jaq_core::ValX<'a, Val> {
-		let fail = |e| CoreError::str(format_args!("cannot serialise {v} as {format}: {e}"));
-		let row = Row::try_from(v).map_err(fail)?;
+	/// jq's tabular formats accept only arrays of scalars; null is an empty field.
+	fn table_row<'a>(v: &Val, csv: bool) -> jaq_core::ValX<'a, Val> {
+		let format = if csv { "CSV" } else { "TSV" };
+		let fail = |message| CoreError::str(format_args!("cannot serialise {v} as {format}: {message}"));
+		let Val::Arr(row) = v else {
+			return Err(fail("expected an array").into());
+		};
 		let mut buf = Vec::new();
-		write(&row, &mut buf).expect("writing to memory cannot fail");
+		for (i, field) in row.iter().enumerate() {
+			if i != 0 {
+				buf.push(if csv { b',' } else { b'\t' });
+			}
+			match field {
+				Val::Null => {},
+				Val::Num(jaq_json::Num::Float(x)) if x.is_nan() => {},
+				Val::TStr(s) | Val::BStr(s) if csv => {
+					buf.push(b'"');
+					let mut start = 0;
+					for quote in memchr::memchr_iter(b'"', s) {
+						buf.extend_from_slice(&s[start..quote]);
+						buf.extend_from_slice(b"\"\"");
+						start = quote + 1;
+					}
+					buf.extend_from_slice(&s[start..]);
+					buf.push(b'"');
+				},
+				Val::TStr(s) | Val::BStr(s) => {
+					for byte in s.iter() {
+						match byte {
+							b'\t' => buf.extend_from_slice(b"\\t"),
+							b'\n' => buf.extend_from_slice(b"\\n"),
+							b'\r' => buf.extend_from_slice(b"\\r"),
+							b'\\' => buf.extend_from_slice(b"\\\\"),
+							byte => buf.push(*byte),
+						}
+					}
+				},
+				Val::Bool(_) | Val::Num(_) => {
+					output::Printer::compact().write(&mut buf, field).map_err(|e| match e {
+						output::WriteError::Key(key) => CoreError::typ(key, "object key"),
+						output::WriteError::Io(e) => CoreError::str(e),
+					})?;
+				},
+				Val::Arr(_) | Val::Obj(_) => return Err(fail("expected a scalar field").into()),
+			}
+		}
 		Ok(Val::utf8_str(buf))
 	}
 
@@ -684,13 +719,18 @@ def tonumber: tonumber_;
 	impl Display for FileReports {
 		fn fmt(&self, f: &mut Formatter) -> fmt::Result {
 			let Self(file, reports) = self;
-			let idx = codesnake::LineIndex::new(&file.code);
-			reports.iter().try_for_each(|e| {
-				writeln!(f, "Error: {}", e.message)?;
-				let block = e.to_block(&idx);
-				writeln!(f, "{}[{}]", block.prologue(), file.path.display())?;
-				writeln!(f, "{}{}", block, block.epilogue())
-			})
+			for report in reports {
+				writeln!(f, "Error: {}", report.message)?;
+				for (range, text) in &report.labels {
+					let offset = range.start.min(file.code.len());
+					let prefix = &file.code.as_bytes()[..offset];
+					let line = memchr::memchr_iter(b'\n', prefix).count() + 1;
+					let start = memchr::memrchr(b'\n', prefix).map_or(0, |newline| newline + 1);
+					let column = String::from_utf8_lossy(&prefix[start..]).chars().count() + 1;
+					writeln!(f, "{}:{line}:{column}: {text}", file.path.display())?;
+				}
+			}
+			Ok(())
 		}
 	}
 
@@ -718,36 +758,17 @@ def tonumber: tonumber_;
 		errs.collect()
 	}
 
-	type StringColors = Vec<(String, Option<Color>)>;
-
 	#[derive(Debug)]
 	struct Report {
 		message: String,
-		labels:  Vec<(core::ops::Range<usize>, StringColors, Color)>,
-	}
-
-	#[derive(Clone, Debug)]
-	enum Color {
-		Yellow,
-		Red,
-	}
-
-	impl Color {
-		fn apply(&self, d: impl Display) -> String {
-			use yansi::{Color, Paint};
-			let color = match self {
-				Self::Yellow => Color::Yellow,
-				Self::Red => Color::Red,
-			};
-			d.fg(color).to_string()
-		}
+		labels:  Vec<(core::ops::Range<usize>, String)>,
 	}
 
 	fn report_io(code: &str, (path, error): (&str, String)) -> Report {
 		let path_range = load::span(code, path);
 		Report {
 			message: format!("could not load file {}: {}", path, error),
-			labels:  [(path_range, [(error, None)].into(), Color::Red)].into(),
+			labels:  [(path_range, error)].into(),
 		}
 	}
 
@@ -757,18 +778,15 @@ def tonumber: tonumber_;
 
 		let found_range = load::span(code, found);
 		let found = match found {
-			"" => [("unexpected end of input".to_string(), None)].into(),
-			c => [("unexpected character ", None), (c, Some(Color::Red))]
-				.map(|(s, c)| (s.into(), c))
-				.into(),
+			"" => "unexpected end of input".to_string(),
+			c => format!("unexpected character {c}"),
 		};
-		let label = (found_range, found, Color::Red);
+		let label = (found_range, found);
 
 		let labels = match expected {
 			load::lex::Expect::Delim(open) => {
-				let text = [("unclosed delimiter ", None), (open, Some(Color::Yellow))]
-					.map(|(s, c)| (s.into(), c));
-				Vec::from([(load::span(code, open), text.into(), Color::Yellow), label])
+				let text = format!("unclosed delimiter {open}");
+				Vec::from([(load::span(code, open), text), label])
 			},
 			_ => Vec::from([label]),
 		};
@@ -784,11 +802,9 @@ def tonumber: tonumber_;
 		} else {
 			"unexpected token"
 		};
-		let found = [(found.to_string(), None)].into();
-
 		Report {
 			message: format!("expected {}", expected.as_str()),
-			labels:  Vec::from([(found_range, found, Color::Red)]),
+			labels:  Vec::from([(found_range, found.to_string())]),
 		}
 	}
 
@@ -801,38 +817,8 @@ def tonumber: tonumber_;
 			("foreach", Filter(arity)) => wnoa("2 or 3", arity),
 			(_, undefined) => format!("undefined {}", undefined.as_str()),
 		};
-		let found = [(message.clone(), None)].into();
-
-		Report { message, labels: Vec::from([(found_range, found, Color::Red)]) }
-	}
-
-	type CodeBlock = codesnake::Block<codesnake::CodeWidth<String>, String, Option<Color>>;
-
-	impl Report {
-		fn to_block(&self, idx: &codesnake::LineIndex) -> CodeBlock {
-			use codesnake::{Block, CodeWidth, Label};
-			let color_maybe = |(text, color): (_, Option<Color>)| match color {
-				None => text,
-				Some(color) => color.apply(text).to_string(),
-			};
-			let labels = self.labels.iter().cloned().map(|(range, text, color)| {
-				let text = text.into_iter().map(color_maybe).collect::<Vec<_>>();
-				Label::new(range)
-					.with_text(text.join(""))
-					.with_style(Some(color))
-			});
-			Block::new(idx, labels)
-				.unwrap()
-				.map_code(|c| {
-					let c = c.replace('\t', "    ");
-					let w = xutf::width_str(&c);
-					CodeWidth::new(c, core::cmp::max(w, 1))
-				})
-				.with_paint(|f, color, value| match color {
-					Some(color) => write!(f, "{}", color.apply(value)),
-					None => write!(f, "{value}"),
-				})
-		}
+		let labels = Vec::from([(found_range, message.clone())]);
+		Report { message, labels }
 	}
 
 }
@@ -932,7 +918,7 @@ mod read {
 				enter();
 				let mut buf = Vec::new();
 				read.read_to_end(&mut buf)?;
-				pos.lines.set(bytecount::count(&buf, b'\n'));
+				pos.lines.set(memchr::memchr_iter(b'\n', &buf).count());
 				Ok(Val::utf8_str(buf))
 			}));
 		}
@@ -960,7 +946,7 @@ mod read {
 				for (name, bytes) in files {
 					pos.enter(name);
 					all.extend_from_slice(&bytes);
-					pos.lines.set(bytecount::count(&bytes, b'\n'));
+					pos.lines.set(memchr::memchr_iter(b'\n', &bytes).count());
 				}
 				Ok(Val::utf8_str(all))
 			}));
@@ -1420,9 +1406,6 @@ impl Utility for Jq {
 	const USAGE_ERROR: u8 = 2;
 
 	fn run(self, host: &mut Host) -> i32 {
-		color::init();
-		color::set(false);
-
 		let mut cli = self.cli;
 		resolve_cli_paths(&mut cli, host);
 		let stdout_is_terminal = host.stdout.is_terminal();
@@ -1432,7 +1415,6 @@ impl Utility for Jq {
 		match real_main(&cli, host, &mut stdout, color) {
 			Ok(exit) => exit,
 			Err(error) => {
-				color::set(cli.color_if(|| stdout_is_terminal));
 				let _ = write!(host.stderr, "{error}");
 				error.report()
 			},
@@ -1495,23 +1477,6 @@ impl Session {
 		if let Some(flag) = &self.reported_error {
 			flag.store(true, Ordering::Relaxed);
 		}
-	}
-}
-
-mod color {
-	use std::{cell::Cell, sync::Once};
-
-	thread_local! {
-		static COLOR: Cell<bool> = const { Cell::new(false) };
-	}
-
-	pub fn init() {
-		static ONCE: Once = Once::new();
-		ONCE.call_once(|| yansi::whenever(yansi::Condition(|| COLOR.with(Cell::get))));
-	}
-
-	pub fn set(on: bool) {
-		COLOR.with(|color| color.set(on));
 	}
 }
 
@@ -2019,6 +1984,65 @@ mod tests {
 		] {
 			let (code, out, err) = run_jq(&["-c", filter], input);
 			assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""), "{filter} on {input}");
+		}
+	}
+
+	#[test]
+	fn tabular_formats_render_scalar_fields() {
+		let input = r#"[null,true,false,0,-12,1.5,9007199254740993,"","text"]"#;
+		for (format, expected) in [
+			("@csv", ",true,false,0,-12,1.5,9007199254740993,\"\",\"text\"\n"),
+			("@tsv", "\ttrue\tfalse\t0\t-12\t1.5\t9007199254740993\t\ttext\n"),
+		] {
+			let (code, out, err) = run_jq(&["-r", format], input);
+			assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""), "{format}");
+		}
+	}
+
+	#[test]
+	fn csv_quotes_strings_and_doubles_inner_quotes() {
+		let input = r#"["a,\"b\"\r\n\\z","é"]"#;
+		let (code, out, err) = run_jq(&["-r", "@csv"], input);
+		assert_eq!((code, out.as_str(), err.as_str()), (0, "\"a,\"\"b\"\"\r\n\\z\",\"é\"\n", ""));
+	}
+
+	#[test]
+	fn tsv_escapes_only_tab_newline_carriage_return_and_backslash() {
+		let input = r#"["\t\n\r\\","literal\\t","a,\"b\"","é"]"#;
+		let (code, out, err) = run_jq(&["-r", "@tsv"], input);
+		let expected = "\\t\\n\\r\\\\\tliteral\\\\t\ta,\"b\"\té\n";
+		assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""));
+	}
+
+	#[test]
+	fn tabular_formats_accept_empty_rows() {
+		for format in ["@csv", "@tsv"] {
+			let (code, out, err) = run_jq(&["-r", format], "[]");
+			assert_eq!((code, out.as_str(), err.as_str()), (0, "\n", ""), "{format}");
+		}
+	}
+
+	#[test]
+	fn tabular_formats_render_nan_as_empty_and_clamp_infinity() {
+		for (format, expected) in [
+			("@csv", ",1.7976931348623157e+308,-1.7976931348623157e+308\n"),
+			("@tsv", "\t1.7976931348623157e+308\t-1.7976931348623157e+308\n"),
+		] {
+			let filter = format!("[nan, infinite, -infinite] | {format}");
+			let (code, out, err) = run_jq(&["-nr", &filter], "");
+			assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""), "{format}");
+		}
+	}
+
+	#[test]
+	fn tabular_formats_reject_nonarrays_and_nested_containers() {
+		for format in ["@csv", "@tsv"] {
+			for input in ["null", "true", "1", "\"text\"", "{}", "[[]]", "[{}]", "[1,[]]", "[1,{}]"] {
+				let (code, out, err) = run_jq(&["-r", format], input);
+				assert_eq!(code, 5, "{format} on {input}: {err}");
+				assert!(out.is_empty(), "{format} on {input}: {out:?}");
+				assert!(err.contains("cannot serialise"), "{format} on {input}: {err}");
+			}
 		}
 	}
 

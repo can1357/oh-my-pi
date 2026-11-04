@@ -7,7 +7,7 @@
 //! engine's unit cache after the first iteration), then the drop of the
 //! shell (reported, no target). The shell keeps its default event mask
 //! (`EventMask::DEFAULT`, as a host that does not choose one), delivered to a
-//! null sink. Allocator: mimalloc, as `obash`.
+//! null sink. Allocator: system, as `obash`.
 //!
 //! Run (release): `cango bench -p pi-shell --bench create`.
 //! Output:
@@ -32,9 +32,6 @@ use pi_shell::{
 };
 
 use crate::common::{NullHost, new_shell, run, verdict};
-
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Timed iterations.
 const ITERS: usize = 5_000;
