@@ -85,7 +85,7 @@
 - Fixed minimized `git diff`, `git show` and `diff -r` output leaving binary files, pure renames and mode-only changes out of its file list and count: binary files now show as `Bin`, as in `git diff --stat` ([#18148](https://github.com/can1357/oh-my-pi/pull/18148) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS popup key repair staying off after you release ⌘ or ⌃ while its tap starts or is disabled ([#17894](https://github.com/can1357/oh-my-pi/pull/17894) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS popup key repair staying off after you release ⌘ or ⌃ while its tap starts or is disabled, and continuing to move new keys after you press ⌘ or ⌃ while Chrome holds the keyboard ([#17894](https://github.com/can1357/oh-my-pi/pull/17894) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed concurrent macOS front-app reads discarding a newer popup key repair before their input reaches Chrome ([#17894](https://github.com/can1357/oh-my-pi/pull/17894) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed concurrent macOS front-app reads discarding a newer popup key repair before their input reaches Chrome, and missing Accessibility repeatedly stalling input on failed tap setup ([#17894](https://github.com/can1357/oh-my-pi/pull/17894) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed
 
 - Fixed `el.type` and `el.press(keys)` on Wayland moving focus inside the element's app (GNOME showed "… is ready") before refusing the call: they are now refused before anything reaches the app ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))
