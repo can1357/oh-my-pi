@@ -1569,6 +1569,38 @@ describe("withdrawn guest request", () => {
 		}
 	});
 
+	it("does not wait on a writer that left before the request was shown, while its frames still decrypt", async () => {
+		const host = await startHost();
+		const leaving = await joinWriter(host, "left earlier", true);
+		const opened = Promise.withResolvers<void>();
+		const realDecrypt = crypto.subtle.decrypt.bind(crypto.subtle);
+		const decrypt = vi
+			.spyOn(crypto.subtle, "decrypt")
+			.mockImplementation(async (...args: Parameters<typeof crypto.subtle.decrypt>) => {
+				await opened.promise;
+				return realDecrypt(...args);
+			});
+		try {
+			// The writer leaves with a frame the host has received but not yet decrypted.
+			await sendInOrder(leaving, { t: "prompt", text: "still decrypting" });
+			leaving.socket.close();
+			await waitFor(() => host.participants.length === 1, "host never saw the guest leave");
+			// Only then does the host ask, so that writer is never shown the request and cannot reply to its
+			// withdrawal.
+			const superseded = new AbortController();
+			const result = host.requestGuestUi(select, superseded.signal)!;
+			const ended = watch(result);
+			superseded.abort(new DialogSupersededError());
+			await drain();
+			expect(host.awaitingGuests).toEqual([]);
+			expect(ended.settled).toBe(true);
+			expect(await result).toEqual({ kind: "unavailable" });
+		} finally {
+			opened.resolve();
+			decrypt.mockRestore();
+		}
+	});
+
 	it("ends a withdrawn request at once when its caller stops waiting, leaving room for later questions", async () => {
 		const host = await startHost();
 		// Connected and opted in, but never replies: only the caller can end the wait in time.
