@@ -216,7 +216,11 @@ export function composerTokenRegex(mentionLabels: Iterable<string>): RegExp {
 	);
 }
 
-const VISION_MARKER_REGEX = /\[(Image|Video) #([1-9]\d*)((?:,[^\]\n]*)?)\](?: attachment:\/\/(\2))?/g;
+/**
+ * An image or video marker as composers write it: `[Image #N]`, `[Image #N, WxH]`, optionally
+ * followed by a legacy ` attachment://N`. Global: iterate with `matchAll`, which copies it.
+ */
+export const VISION_MARKER_REGEX = /\[(Image|Video) #([1-9]\d*)((?:,[^\]\n]*)?)\](?: attachment:\/\/(\2))?/g;
 
 /** Marker for the Nth attached image or video preview: `[Image #N, WxH]`, or `[Image #N]` without dims. */
 export function formatVisionMarker(

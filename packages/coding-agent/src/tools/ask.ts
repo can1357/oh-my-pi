@@ -39,7 +39,7 @@ import {
 	sanitizeCarriageReturns,
 	TRUNCATE_LENGTHS,
 } from "@oh-my-pi/pi-tui/render/render-utils";
-import { shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
+import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { ToolAbortError } from "./tool-errors";
 import { cfgAsyncEnabled } from "./settings";
@@ -47,7 +47,7 @@ import { hasWaitTool } from "./wait";
 
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { cfgAskNotify, askTimeoutMs } from "../modes/settings";
-import { renderAttachmentSourceNotice } from "../session/attachment-source-notice";
+import { type ImageMarkedPart, markOwnImages, renderImageMarkedText } from "../session/image-marked-text";
 import { cfgSpeechEnabled } from "../tts/settings";
 import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
 
@@ -488,58 +488,76 @@ async function askSingleQuestion(
 	return { selectedOptions, customInput, note, timedOut };
 }
 
-function formatQuestionResult(result: QuestionResult): string {
+/** A question's answer with its free-text fields kept as marked text (see {@link markOwnImages}). */
+type MarkedQuestionResult = Omit<QuestionResult, "customInput" | "note"> & {
+	customInput?: ImageMarkedPart[];
+	note?: ImageMarkedPart[];
+};
+
+/** A typed field with no images as marked text: one literal run, none for an empty field. */
+function plainField(text: string | undefined): ImageMarkedPart[] | undefined {
+	if (text === undefined) return undefined;
+	return text ? [text] : [];
+}
+
+/** Indent every line of `parts` by two spaces; markers never span lines. */
+function indentLines(parts: ImageMarkedPart[]): ImageMarkedPart[] {
+	return ["  ", ...parts.map(part => (typeof part === "string" ? part.replaceAll("\n", "\n  ") : part))];
+}
+
+function hasLineBreak(parts: ImageMarkedPart[]): boolean {
+	return parts.some(part => typeof part === "string" && part.includes("\n"));
+}
+
+/** Join marked-text lines with line breaks. */
+function joinLines(lines: ImageMarkedPart[][]): ImageMarkedPart[] {
+	return lines.flatMap((line, index) => (index === 0 ? line : ["\n", ...line]));
+}
+
+function formatQuestionResult(result: MarkedQuestionResult): ImageMarkedPart[] {
 	const noteOn = result.noteOption === undefined ? "" : ` on ${result.noteOption}`;
-	const noteSuffix = result.note ? ` (note${noteOn}: ${result.note})` : "";
-	const custom = result.customInput === undefined ? undefined : `"${result.customInput}"`;
+	const noteSuffix: ImageMarkedPart[] = result.note?.length ? [` (note${noteOn}: `, ...result.note, ")"] : [];
+	const custom = result.customInput === undefined ? undefined : ['"', ...result.customInput, '"'];
 	if (result.selectedOptions.length === 0) {
-		if (custom !== undefined) return `${result.id}: ${custom}${noteSuffix}`;
-		return result.multi ? `${result.id}: []${noteSuffix}` : `${result.id}: (cancelled)${noteSuffix}`;
+		if (custom !== undefined) return [`${result.id}: `, ...custom, ...noteSuffix];
+		return [result.multi ? `${result.id}: []` : `${result.id}: (cancelled)`, ...noteSuffix];
 	}
-	const picked = result.multi ? `[${result.selectedOptions.join(", ")}]` : result.selectedOptions[0];
-	const answer = custom === undefined ? picked : `${picked} + ${custom}`;
+	const picked = result.multi ? `[${result.selectedOptions.join(", ")}]` : result.selectedOptions[0]!;
+	const answer = custom === undefined ? [picked] : [`${picked} + `, ...custom];
 	const timeoutSuffix = result.timedOut ? " (auto-selected after timeout)" : "";
-	return `${result.id}: ${answer}${timeoutSuffix}${noteSuffix}`;
+	return [`${result.id}: `, ...answer, timeoutSuffix, ...noteSuffix];
 }
 
 function formatSingleQuestionResponse(result: {
 	selectedOptions: string[];
-	customInput?: string;
-	note?: string;
+	customInput?: ImageMarkedPart[];
+	note?: ImageMarkedPart[];
 	noteOption?: string;
 	timedOut?: boolean;
 	multi: boolean;
-}): string {
-	const responseParts: string[] = [];
+}): ImageMarkedPart[] {
+	const responseParts: ImageMarkedPart[][] = [];
 	if (result.selectedOptions.length > 0) {
 		const selectedText = result.multi
 			? `User selected: ${result.selectedOptions.join(", ")}`
 			: `User selected: ${result.selectedOptions[0]}`;
-		responseParts.push(result.timedOut ? `${selectedText} (auto-selected after timeout)` : selectedText);
+		responseParts.push([result.timedOut ? `${selectedText} (auto-selected after timeout)` : selectedText]);
 	}
 	if (result.customInput !== undefined) {
 		responseParts.push(
-			result.customInput.includes("\n")
-				? `User provided custom input:\n${result.customInput
-						.split("\n")
-						.map(line => `  ${line}`)
-						.join("\n")}`
-				: `User provided custom input: ${result.customInput}`,
+			hasLineBreak(result.customInput)
+				? ["User provided custom input:\n", ...indentLines(result.customInput)]
+				: ["User provided custom input: ", ...result.customInput],
 		);
 	}
-	if (result.note) {
+	if (result.note?.length) {
 		const label = `User added note${result.noteOption === undefined ? "" : ` on ${result.noteOption}`}:`;
 		responseParts.push(
-			result.note.includes("\n")
-				? `${label}\n${result.note
-						.split("\n")
-						.map(line => `  ${line}`)
-						.join("\n")}`
-				: `${label} ${result.note}`,
+			hasLineBreak(result.note) ? [`${label}\n`, ...indentLines(result.note)] : [`${label} `, ...result.note],
 		);
 	}
-	if (responseParts.length > 0) return responseParts.join("\n");
-	return result.multi ? "User did not select any options" : "User cancelled the selection";
+	if (responseParts.length > 0) return joinLines(responseParts);
+	return [result.multi ? "User did not select any options" : "User cancelled the selection"];
 }
 
 // =============================================================================
@@ -559,6 +577,31 @@ interface AskDialogRun {
 
 /** How a dialog run that backs a job settled. */
 type AskJobOutcome = { kind: "answered"; result: AgentToolResult<AskToolDetails> } | { kind: "failed"; error: unknown };
+
+/**
+ * A dialog's answer, plus its text blocks joined as the job's result text with the image markers
+ * the answer inserted kept as structure, so a delivery can renumber them.
+ */
+interface AskAnswer {
+	result: AgentToolResult<AskToolDetails>;
+	text: ImageMarkedPart[];
+}
+
+/** Build an answer from text blocks (marked text) and images in result order. */
+function askAnswer(blocks: Array<ImageMarkedPart[] | ImageContent>, details: AskToolDetails): AskAnswer {
+	const text: ImageMarkedPart[] = [];
+	const content: Array<TextContent | ImageContent> = [];
+	for (const block of blocks) {
+		if (!Array.isArray(block)) {
+			content.push(block);
+			continue;
+		}
+		if (text.length > 0) text.push("\n\n");
+		text.push(...block);
+		content.push({ type: "text", text: renderImageMarkedText(block) });
+	}
+	return { result: { content, details }, text };
+}
 
 /**
  * Ask tool for interactive user prompting during execution.
@@ -626,7 +669,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	async #answerImageBlocks(
 		images: ImageContent[],
 		signal: AbortSignal | undefined,
-	): Promise<Array<TextContent | ImageContent>> {
+	): Promise<Array<ImageMarkedPart[] | ImageContent>> {
 		if (images.length === 0) return [];
 		let descriptions: TextContent[] | undefined;
 		const model = this.session.getActiveModel?.();
@@ -653,14 +696,15 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				});
 			}
 		}
-		const blocks: Array<TextContent | ImageContent> = [];
+		const blocks: Array<ImageMarkedPart[] | ImageContent> = [];
 		for (const [index, image] of images.entries()) {
-			const notice = renderAttachmentSourceNotice(image, index + 1, { askAnswer: true });
-			if (notice) blocks.push({ type: "text", text: notice.content });
+			const source = imageAttachmentSource(image);
+			if (source)
+				blocks.push([{ type: "notice", index: index + 1, source: { path: source.path, kind: source.kind } }]);
 			// Keep the source tag: `attachment://N` resolves this result's images to their files.
 			blocks.push(image);
 			const description = descriptions?.[index];
-			if (description) blocks.push(description);
+			if (description) blocks.push([description.text]);
 		}
 		return blocks;
 	}
@@ -814,7 +858,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		if (!manager) {
 			// Async jobs off: the dialog holds the call until the user answers.
 			const dialogSignal = signal ? AbortSignal.any([signal, userSteering.signal]) : userSteering.signal;
-			return await this.#runDialog(run, dialogSignal, signal, cancelInline);
+			return (await this.#runDialog(run, dialogSignal, signal, cancelInline)).result;
 		}
 
 		// Async jobs on: the dialog runs as a foreground job the call waits on.
@@ -835,16 +879,17 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				const workSignal = AbortSignal.any([jobSignal, callAbort.signal]);
 				const dialogSignal = AbortSignal.any([workSignal, userSteering.signal]);
 				try {
-					const result = await this.#runDialog(run, dialogSignal, workSignal, () => {
+					const { result, text: markedText } = await this.#runDialog(run, dialogSignal, workSignal, () => {
 						if (!backgrounded) return cancelInline();
 						// The turn that asked is over: a dismissal ends only the question.
 						throw new ToolError(prompt.render(askDismissedMessage));
 					});
 					completion.resolve({ kind: "answered", result });
-					const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n\n");
-					// Answer images ride the delivery, as a backgrounded command's images do.
+					const text = renderImageMarkedText(markedText);
+					// Answer images ride the delivery, as a backgrounded command's images do; the
+					// marked text lets a delivery shared with other answers renumber their markers.
 					const images = result.content.filter((block): block is ImageContent => block.type === "image");
-					if (images.length > 0) await reportProgress(text, { images });
+					if (images.length > 0) await reportProgress(text, { images, imageMarkedText: markedText });
 					return text;
 				} catch (error) {
 					completion.resolve({ kind: "failed", error });
@@ -905,7 +950,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		dialogSignal: AbortSignal,
 		workSignal: AbortSignal | undefined,
 		cancelAsk: () => never,
-	): Promise<AgentToolResult<AskToolDetails>> {
+	): Promise<AskAnswer> {
 		const { params, extensionUi, ui, timeout, abortError } = run;
 
 		const richAskDialog = extensionUi.askDialog;
@@ -931,20 +976,16 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				if (!richResult) return cancelAsk();
 				if (richResult.kind === "chat") {
 					const questionText = params.questions.map(q => q.question).join("\n");
-					return {
-						content: [
-							{
-								type: "text" as const,
-								text: `User chose to chat about this instead of answering.\n\nQuestions asked:\n${questionText}`,
-							},
-						],
-						details: { chatRedirect: true, questions: params.questions.map(q => q.question) },
-					};
+					return askAnswer(
+						[[`User chose to chat about this instead of answering.\n\nQuestions asked:\n${questionText}`]],
+						{ chatRedirect: true, questions: params.questions.map(q => q.question) },
+					);
 				}
 				if (richResult.results.length !== params.questions.length) {
 					throw new Error("Ask dialog returned a result count that does not match the requested questions");
 				}
 				const results: QuestionResult[] = [];
+				const marked: MarkedQuestionResult[] = [];
 				// Each prompt numbers markers from 1; shift them so `[Image #N]` indexes all result images.
 				const answerImages: ImageContent[] = [];
 				for (let index = 0; index < params.questions.length; index++) {
@@ -957,23 +998,29 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 					if (result.customInputImages) answerImages.push(...result.customInputImages);
 					const noteOffset = answerImages.length;
 					if (result.noteImages) answerImages.push(...result.noteImages);
-					results.push({
+					const customInput =
+						result.customInput === undefined
+							? undefined
+							: markOwnImages(result.customInput, customOffset, result.customInputImages?.length ?? 0);
+					const note =
+						result.note === undefined
+							? undefined
+							: markOwnImages(result.note, noteOffset, result.noteImages?.length ?? 0);
+					const answer = {
 						id: question.id,
 						question: question.question,
 						options: question.options.map(option => option.label),
 						multi: question.multi ?? false,
 						selectedOptions: result.selectedOptions,
-						customInput:
-							result.customInput === undefined
-								? undefined
-								: shiftImageMarkers(result.customInput, customOffset, result.customInputImages?.length ?? 0),
-						note:
-							result.note === undefined
-								? undefined
-								: shiftImageMarkers(result.note, noteOffset, result.noteImages?.length ?? 0),
 						noteOption: result.noteOption,
 						timedOut: result.timedOut,
+					};
+					results.push({
+						...answer,
+						customInput: customInput && renderImageMarkedText(customInput),
+						note: note && renderImageMarkedText(note),
 					});
+					marked.push({ ...answer, customInput, note });
 				}
 				if (params.questions.length === 1) {
 					const result = results[0];
@@ -998,14 +1045,13 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						noteOption: result.noteOption,
 						timedOut: result.timedOut,
 					};
-					const responseText = formatSingleQuestionResponse(result);
 					const imageBlocks = await this.#answerImageBlocks(answerImages, workSignal);
-					return { content: [{ type: "text" as const, text: responseText }, ...imageBlocks], details };
+					return askAnswer([formatSingleQuestionResponse(marked[0]!), ...imageBlocks], details);
 				}
 				const details: AskToolDetails = { results };
-				const responseText = `User answers:\n${results.map(formatQuestionResult).join("\n")}`;
+				const response = ["User answers:\n", ...joinLines(marked.map(formatQuestionResult))];
 				const imageBlocks = await this.#answerImageBlocks(answerImages, workSignal);
-				return { content: [{ type: "text" as const, text: responseText }, ...imageBlocks], details };
+				return askAnswer([response, ...imageBlocks], details);
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") throw abortError();
 				throw error;
@@ -1057,15 +1103,15 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				timedOut: timedOut || undefined,
 			};
 
-			const responseText = formatSingleQuestionResponse({
+			const response = formatSingleQuestionResponse({
 				selectedOptions,
-				customInput,
-				note,
+				customInput: plainField(customInput),
+				note: plainField(note),
 				timedOut: timedOut || undefined,
 				multi: q.multi ?? false,
 			});
 
-			return { content: [{ type: "text" as const, text: responseText }], details };
+			return askAnswer([response], details);
 		}
 
 		const resultsByIndex: Array<QuestionResult | undefined> = Array.from({ length: params.questions.length });
@@ -1123,10 +1169,19 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		});
 
 		const details: AskToolDetails = { results };
-		const responseLines = results.map(formatQuestionResult);
-		const responseText = `User answers:\n${responseLines.join("\n")}`;
-
-		return { content: [{ type: "text" as const, text: responseText }], details };
+		const response = [
+			"User answers:\n",
+			...joinLines(
+				results.map(result =>
+					formatQuestionResult({
+						...result,
+						customInput: plainField(result.customInput),
+						note: plainField(result.note),
+					}),
+				),
+			),
+		];
+		return askAnswer([response], details);
 	}
 }
 

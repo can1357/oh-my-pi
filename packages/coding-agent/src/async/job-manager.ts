@@ -5,6 +5,7 @@ import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { IrcBus } from "../irc/bus";
 import type { JobWidgetInputs, JobWidgetRegistry } from "../job-widgets/types";
+import type { ImageMarkedPart } from "../session/image-marked-text";
 
 const DELIVERY_RETRY_BASE_MS = 500;
 const DELIVERY_RETRY_MAX_MS = 30_000;
@@ -77,6 +78,11 @@ export interface AsyncJobDetails extends Record<string, unknown> {
 	images?: ImageContent[];
 	/** Tool output metadata needed when a completion is delivered or recovered later. */
 	meta?: OutputMeta;
+	/**
+	 * The result text with the image markers the job inserted kept as structure, so a delivery
+	 * that numbers several jobs' images together renumbers only those markers.
+	 */
+	imageMarkedText?: ImageMarkedPart[];
 }
 
 export interface AsyncJob {

@@ -10,7 +10,7 @@
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
-import { shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
+import { renderImageMarkedText } from "./image-marked-text";
 import type { AsyncJob, AsyncJobType } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
@@ -121,8 +121,11 @@ export function taskAgentHandles(
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
 	// Each backgrounded `ask` answer numbers its pasted images from 1. In one delivery
-	// the answers share one message, so shift each answer's markers past the images of
-	// the answers before it: `[Image #N]` then names one image of the whole delivery.
+	// the answers share one message, so render each answer again with its markers raised
+	// past the images of the answers before it: `[Image #N]` then names one image of the
+	// whole delivery. Only the markers the answer inserted move; file names, code spans
+	// and the person's own text stay as written. The answer reaches the model whole, as
+	// an inline answer does.
 	const answerImages: ImageContent[] = [];
 	const otherImages: ImageContent[] = [];
 	const results = entries.map(entry => {
@@ -131,9 +134,10 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			otherImages.push(...images);
 			return entry.result;
 		}
-		const shifted = shiftImageMarkers(entry.result, answerImages.length, images.length);
+		const marked = entry.job.latestDetails?.imageMarkedText;
+		const text = marked ? renderImageMarkedText(marked, answerImages.length) : entry.result;
 		answerImages.push(...images);
-		return shifted;
+		return text;
 	});
 	const jobs = entries.map((entry, index) => {
 		const structured = entry.job?.structured;

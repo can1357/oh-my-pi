@@ -1354,7 +1354,7 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 		async function backgroundAsk(
 			callId: string,
 			question: string,
-		): Promise<(note: string, images?: ImageContent[]) => void> {
+		): Promise<(note: string, images?: ImageContent[], customInput?: string) => void> {
 			const answer = Promise.withResolvers<ExtensionAskDialogResult>();
 			const wake = new AbortController();
 			const context = {
@@ -1377,7 +1377,7 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 			wake.abort("aside");
 			const yielded = await pending;
 			expect(yielded.content[0]?.type === "text" && yielded.content[0].text).toContain("question stays open");
-			return (note, images = []) =>
+			return (note, images = [], customInput) =>
 				answer.resolve({
 					kind: "submit",
 					results: [
@@ -1388,6 +1388,7 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 							multi: false,
 							selectedOptions: ["SQLite"],
 							note,
+							...(customInput === undefined ? {} : { customInput }),
 							...(images.length > 0 ? { noteImages: images } : {}),
 						},
 					],
@@ -1524,6 +1525,48 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 		for (const [i, n] of newMarkers.entries()) byMarker.set(n, ["front-image", "back-image"][i]!);
 		const inMarkerOrder = [...byMarker.entries()].sort((a, b) => a[0] - b[0]).map(([, data]) => data);
 		expect(lastRequestImages(mock)).toEqual(inMarkerOrder);
+	});
+
+	it("renumbers only the markers an answer inserted, never file names, code spans or the person's own text", async () => {
+		using tempDir = TempDir.createSync("@pi-async-ask-attachment-");
+		const { session: owner, backgroundAsk } = await startSession(tempDir.path());
+		const answerOld = await backgroundAsk("ask-old", "Which database?");
+		const answerNew = await backgroundAsk("ask-new", "Which cache?");
+		const oldPath = path.join(tempDir.path(), "old-image.png");
+		// A real file whose name looks like a marker.
+		const userPath = path.join(tempDir.path(), "user-[Image #1].png");
+		await Bun.write(oldPath, "old");
+		await Bun.write(userPath, "user");
+		const image = (data: string, file: string) =>
+			tagImageAttachmentSource({ type: "image", data, mimeType: "image/png" }, file, "image");
+
+		const delivered = observeAsyncResultEnqueue(owner, 2);
+		answerOld("old schema [Image #1]", [image("old-image", oldPath)]);
+		// The custom answer has no image and the code span is typed text: neither is a marker.
+		answerNew(
+			"cache layout [Image #1], typed as `[Image #1]`",
+			[image("user-image", userPath)],
+			"like [Image #1] in the docs",
+		);
+		await delivered;
+		await owner.settleAsyncWork();
+
+		const texts = deliveries(owner);
+		expect(texts).toHaveLength(1);
+		const text = texts[0]!;
+		expect(text).toContain("User provided custom input: like [Image #1] in the docs");
+		expect(text).toContain("User added note: cache layout [Image #2], typed as `[Image #1]`");
+		// Each notice carries the marker's delivery number and the file's real path.
+		const notices = [...text.matchAll(/`\[Image #(\d+)\]` to their ask answer\.\s+Source path: `([^`]+)`/g)];
+		expect(notices.map(([, index, file]) => [Number(index), file])).toEqual([
+			[1, oldPath],
+			[2, userPath],
+		]);
+		expect(text).not.toContain("user-[Image #2].png");
+		expect(await Bun.file(userPath).exists()).toBe(true);
+		// The marker the model reads opens the same file the notice names.
+		expect(resolveAttachment(owner, 2)).toEqual({ data: "user-image", file: "user-[Image #1].png" });
+		expect(owner.getImageAttachments()[1]?.sourcePath).toBe(userPath);
 	});
 
 	it("across deliveries the newest message owns attachment numbers; an older answer's path notice still names its file", async () => {
