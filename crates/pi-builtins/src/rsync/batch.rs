@@ -10,7 +10,7 @@
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::AtomicBool};
 
 use crate::rsync::flists::lock;
 use crate::rsync::exit::{RERR_FILEIO, RERR_FILESELECT, RERR_SYNTAX, RsyncError};
@@ -177,6 +177,9 @@ pub(crate) enum BatchFiles {
 }
 
 fn open_error(cwd: &Path, name: &[u8], err: &io::Error, code: i32, line: u32) -> RsyncError {
+	if RsyncError::is_cancellation(err) {
+		return RsyncError::cancelled();
+	}
 	let text = format!("Batch file {} open error", String::from_utf8_lossy(&paths::full_fname(cwd, name)));
 	RsyncError::new(code, syserr_text(Role::Client, err, &text)).at("batch.c", line)
 }
@@ -184,17 +187,19 @@ fn open_error(cwd: &Path, name: &[u8], err: &io::Error, code: i32, line: u32) ->
 /// upstream `open_batch_files` + `write_stream_flags`/`read_stream_flags`.
 ///
 /// `resolve` maps an operator path to what the shell would open; `stdin`
-/// supplies `--read-batch=-`.
+/// supplies `--read-batch=-`; `cancel` ends a wait on a FIFO (see
+/// [`OperatorOpts::cancel`]).
 pub(crate) fn open_batch_files(
 	opts: &Options,
 	fs: &pi_vfs::BlockingFs,
 	cwd: &Path,
 	resolve: &dyn Fn(&Path) -> PathBuf,
 	stdin: &mut dyn FnMut() -> Box<dyn Read + Send>,
+	cancel: &Arc<AtomicBool>,
 ) -> Result<BatchFiles, RsyncError> {
 	let name = opts.batch_name.clone().unwrap_or_default();
 	let name_bytes = os_bytes_lossy(&name).into_owned();
-	let operator = OperatorOpts { insecure: opts.insecure_links, confine: None };
+	let operator = OperatorOpts { insecure: opts.insecure_links, confine: None, cancel };
 	if opts.write_batch != 0 {
 		let mut sh = name.clone();
 		sh.push(".sh");
@@ -215,7 +220,7 @@ pub(crate) fn open_batch_files(
 		let path = resolve(Path::new(&name));
 		let file = paths::open_operator_file_with(fs, &path, &operator)
 			.map_err(|e| open_error(cwd, &name_bytes, &e, RERR_FILEIO, 271))?;
-		if !paths::batch_input_ok(&file).unwrap_or(true) {
+		if !paths::batch_input_ok(file.file()).unwrap_or(true) {
 			let shown = String::from_utf8_lossy_owned(paths::full_fname(cwd, &name_bytes));
 			return Err(RsyncError::new(
 				RERR_FILEIO,
@@ -370,11 +375,15 @@ pub(crate) fn write_shell_file(
 	text: &[u8],
 	batch_name: &OsString,
 	insecure: bool,
+	cancel: &Arc<AtomicBool>,
 ) -> Result<(), RsyncError> {
-	let operator = OperatorOpts { insecure, confine: None };
+	let operator = OperatorOpts { insecure, confine: None, cancel };
 	let res = paths::create_operator_file_with(fs, script, false, 0o700, &operator)
 		.and_then(|mut f| f.write_all(text).and_then(|()| f.flush()));
 	res.map_err(|e| {
+		if RsyncError::is_cancellation(&e) {
+			return RsyncError::cancelled();
+		}
 		let text = format!("Batch file {}.sh write error", batch_name.display());
 		RsyncError::new(RERR_FILEIO, syserr_text(Role::Client, &e, &text)).at("batch.c", 345)
 	})

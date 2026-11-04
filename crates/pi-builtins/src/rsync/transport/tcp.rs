@@ -16,7 +16,7 @@ use crate::rsync::log::syserr_text;
 use crate::{
 	host::ChildEnv,
 	rsync::{
-		exit::{RERR_CONTIMEOUT, RERR_IPC, RERR_SIGNAL, RERR_SOCKETIO, RsyncError},
+		exit::{RERR_CONTIMEOUT, RERR_IPC, RERR_SOCKETIO, RsyncError},
 		log::{Debug, LogCode, Logger},
 	},
 };
@@ -414,17 +414,11 @@ fn read_proxy_line(reader: &mut dyn Read) -> Result<ProxyLine, RsyncError> {
 				}
 			}
 			Ok(_) => return Ok(ProxyLine::Failed(io::Error::from_raw_os_error(0))),
-			Err(err) if is_cancel(&err) => return Err(RsyncError::cancelled()),
+			Err(err) if RsyncError::is_cancellation(&err) => return Err(RsyncError::cancelled()),
 			Err(err) => return Ok(ProxyLine::Failed(err)),
 		}
 	}
 	Ok(ProxyLine::TooLong)
-}
-
-fn is_cancel(err: &io::Error) -> bool {
-	err.get_ref()
-		.and_then(|inner| inner.downcast_ref::<RsyncError>())
-		.is_some_and(|e| e.code == RERR_SIGNAL)
 }
 
 /// Runs the `CONNECT` exchange. Ok(false) after a refusal or I/O problem
@@ -446,7 +440,7 @@ fn establish_proxy(
 		Err(text) => return error(text.to_owned()),
 	};
 	if let Err(err) = writer.write_all(request.as_bytes()).and_then(|()| writer.flush()) {
-		if is_cancel(&err) {
+		if RsyncError::is_cancellation(&err) {
 			return Err(RsyncError::cancelled());
 		}
 		logger.rsyserr(LogCode::Error, &err, b"failed to write to proxy");
@@ -560,7 +554,7 @@ fn sock_exec(
 		use std::os::fd::OwnedFd;
 		let mut cmd = cmd;
 		let (ours, theirs) = socketpair_tcp(&cancel).map_err(|err| {
-			if is_cancel(&err) {
+			if RsyncError::is_cancellation(&err) {
 				RsyncError::cancelled()
 			} else {
 				socket_failure_msg(syserr_text(role, &err, "socketpair_tcp failed"))
@@ -828,7 +822,7 @@ mod tests {
 		let mut got = [0u8; 22];
 		conn.reader.read_exact(&mut got).unwrap();
 		assert_eq!(&got, b"host=example.org\nping\n");
-		conn.finish().unwrap();
+		assert!(matches!(conn.finish(), crate::rsync::transport::Reaped::Code(0)), "the connect program did not exit 0");
 	}
 
 	#[test]

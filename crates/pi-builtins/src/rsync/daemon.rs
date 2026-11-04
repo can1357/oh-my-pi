@@ -13,6 +13,7 @@ use std::{
 	ffi::OsString,
 	io::{self, Read, Write as _},
 	path::Path,
+	sync::{Arc, atomic::AtomicBool},
 	time::{Duration, Instant},
 };
 
@@ -125,6 +126,9 @@ pub(crate) struct DaemonConfig<'a> {
 	pub fs:                      &'a pi_vfs::BlockingFs,
 	/// Skip the trusted-owner walk for operator files.
 	pub insecure_operator_files: bool,
+	/// The command's cancellation, which ends a wait on an operator FIFO
+	/// (see [`paths::OperatorOpts::cancel`]).
+	pub cancel:                  &'a Arc<AtomicBool>,
 	/// The shell's environment (`USER`, `LOGNAME`, `RSYNC_PASSWORD`).
 	pub getenv:                  &'a dyn Fn(&str) -> Option<String>,
 	/// Reads one line from stdin (for `--password-file=-`); None = no stdin.
@@ -474,11 +478,15 @@ fn read_password_file(
 			None => Vec::new(),
 		}
 	} else {
-		let mut file = paths::open_operator_file(cfg.fs, path, cfg.insecure_operator_files)
+		let mut file = paths::open_operator_file(cfg.fs, path, cfg.insecure_operator_files, cfg.cancel)
 			.map_err(|err| {
+				if RsyncError::is_cancellation(&err) {
+					return RsyncError::cancelled();
+				}
 				auth_error(syserr_text(role, &err, &format!("could not open password file {shown}")), 247)
 			})?;
 		let meta = file
+			.file()
 			.metadata()
 			.map_err(|err| auth_error(syserr_text(role, &err, &format!("fstat({shown})")), 257))?;
 		#[cfg(unix)]
@@ -502,6 +510,7 @@ fn read_password_file(
 				Ok(0) => break,
 				Ok(n) => len += n,
 				Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+				Err(err) if RsyncError::is_cancellation(&err) => return Err(RsyncError::cancelled()),
 				Err(_) => break,
 			}
 		}
@@ -531,11 +540,25 @@ fn send_early_input(
 	role: Role,
 ) -> Result<(), RsyncError> {
 	let shown = path.to_string_lossy();
-	let open_failed =
-		|err: &io::Error| startclient(syserr_text(role, err, &format!("failed to open {shown}")));
-	let mut file = paths::open_operator_file(cfg.fs, path, cfg.insecure_operator_files)
+	let open_failed = |err: &io::Error| {
+		if RsyncError::is_cancellation(err) {
+			return RsyncError::cancelled();
+		}
+		startclient(syserr_text(role, err, &format!("failed to open {shown}")))
+	};
+	let mut file = paths::open_operator_file(cfg.fs, path, cfg.insecure_operator_files, cfg.cancel)
 		.map_err(|e| open_failed(&e))?;
-	let len = file.metadata().map_err(|e| open_failed(&e))?.len();
+	// rsync's open of the file waits for a FIFO's writer; ours returns at
+	// once, and a FIFO's metadata length is zero, so without this the send is
+	// over and the reader closed before a producer that opens later finds it,
+	// and that producer waits for ever.
+	paths::wait_for_fifo_writer(cfg.fs, path, &paths::OperatorOpts {
+		insecure: cfg.insecure_operator_files,
+		confine:  None,
+		cancel:   cfg.cancel,
+	})
+	.map_err(|e| open_failed(&e))?;
+	let len = file.file().metadata().map_err(|e| open_failed(&e))?.len();
 	if len > BIGPATHBUFLEN as u64 {
 		return Err(startclient(format!("{shown} is > {BIGPATHBUFLEN} bytes.")));
 	}
@@ -550,6 +573,7 @@ fn send_early_input(
 			Ok(0) => return Err(startclient(format!("Early EOF in {shown}"))),
 			Ok(n) => got += n,
 			Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+			Err(err) if RsyncError::is_cancellation(&err) => return Err(RsyncError::cancelled()),
 			Err(_) => return Err(startclient(format!("Early EOF in {shown}"))),
 		}
 	}
@@ -708,6 +732,9 @@ mod tests {
 		if proto >= 30 { (vec![OsString::from("-de.LsfxCIvu")], None) } else { (Vec::new(), None) }
 	}
 
+	/// No test here cancels its handshake through the config.
+	static NEVER: std::sync::LazyLock<Arc<AtomicBool>> = std::sync::LazyLock::new(|| Arc::new(AtomicBool::new(false)));
+
 	fn base_cfg<'a>(args: &'a [OsString], fs: &'a pi_vfs::BlockingFs) -> DaemonConfig<'a> {
 		DaemonConfig {
 			user: Some("alice"),
@@ -721,6 +748,7 @@ mod tests {
 			early_input: None,
 			fs,
 			insecure_operator_files: false,
+			cancel: &NEVER,
 			getenv: &no_env,
 			read_stdin_line: None,
 			connect_deadline: None,

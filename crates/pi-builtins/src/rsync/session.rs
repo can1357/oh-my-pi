@@ -48,7 +48,7 @@ use crate::rsync::flists::Flists;
 use crate::rsync::generator::{self, DestTrees, SibOut, Sibling};
 use crate::rsync::handshake::{self, Negotiated, Roles, Setup};
 use crate::rsync::iconv;
-use crate::rsync::log::{self, Info, LogCode, LogConfig, Logger, OutLevels, Role, Stats};
+use crate::rsync::log::{self, Info, LogCode, LogConfig, Logger, OutLevels, ReportGate, Role, Stats};
 use crate::rsync::meta::MetaOpts;
 use crate::rsync::mux::{IoCounters, Msg, MuxReader, MuxWriter, ReadConfig, ReadProbe, WriteConfig};
 use crate::rsync::operands::{self, OperandConfig, Operands, Remote};
@@ -914,9 +914,10 @@ fn filter_config(io: &HostIo, opts: &Options, am_sender: bool, am_server: bool, 
 	let fs = io.fs.clone();
 	let paths = io.paths.clone();
 	let insecure = opts.insecure_links;
+	let cancel = Arc::clone(&io.cancel);
 	let read_file: FileReader = Arc::new(move |p: &[u8]| {
 		let path = paths.resolve(bytes_os_lossy(p));
-		let mut f = paths::open_operator_file(&fs, &path, insecure)?;
+		let mut f = paths::open_operator_file(&fs, &path, insecure, &cancel)?;
 		let mut buf = Vec::new();
 		f.read_to_end(&mut buf)?;
 		Ok(buf)
@@ -946,6 +947,7 @@ fn client_filters(io: &HostIo, opts: &Options, argv: &[OsString], cfg: FilterCon
 	let stdin = io.stdin.clone();
 	let insecure = opts.insecure_links;
 	let paths = io.paths.clone();
+	let cancel = Arc::clone(&io.cancel);
 	let files = move |p: &Path| -> io::Result<Vec<u8>> {
 		let mut buf = Vec::new();
 		if p.as_os_str() == "-" {
@@ -955,7 +957,7 @@ fn client_filters(io: &HostIo, opts: &Options, argv: &[OsString], cfg: FilterCon
 		// --include-from/--exclude-from files are not confined by --confine-root
 		// (rsync 3.5.1 reads one outside DIR).
 		let path = paths.resolve(p);
-		paths::open_operator_file(&fs, &path, insecure)?.read_to_end(&mut buf)?;
+		paths::open_operator_file(&fs, &path, insecure, &cancel)?.read_to_end(&mut buf)?;
 		Ok(buf)
 	};
 	let split = if opts.delete_excluded {
@@ -1088,11 +1090,15 @@ struct Streams {
 	counters: IoCounters,
 }
 
+/// The connection's streams. `stop` ends this side's output (a client's:
+/// the host's cancellation, see [`WriteConfig::stop`]); the server half of a
+/// local copy has none, as its exit line still goes out after its stop.
 fn make_streams(
 	conn_reader: Box<dyn Read + Send>,
 	conn_writer: Box<dyn Write + Send>,
 	probe: Option<ReadProbe>,
 	abort: &Arc<AtomicBool>,
+	stop: Option<&Arc<AtomicBool>>,
 	opts: &Options,
 ) -> Streams {
 	let counters = IoCounters::default();
@@ -1101,6 +1107,7 @@ fn make_streams(
 		bwlimit: (opts.bwlimit > 0).then(|| opts.bwlimit as u64),
 		timeout,
 		cancel: Some(Arc::clone(abort)),
+		stop: stop.cloned(),
 	};
 	let writer = MuxWriter::new(conn_writer, counters.clone(), wcfg);
 	let mut reader = MuxReader::new(conn_reader, counters.clone(), Arc::clone(abort), ReadConfig { timeout });
@@ -1121,8 +1128,9 @@ fn open_files_from(io: &HostIo, opts: &Options) -> Result<Option<Box<dyn Read + 
 			// The list file itself is not confined by --confine-root; the names it
 			// selects are (scan.rs).
 			let path = io.resolve(&name);
-			match paths::open_operator_file(&io.fs, &path, opts.insecure_links) {
+			match paths::open_operator_file(&io.fs, &path, opts.insecure_links, &io.cancel) {
 				Ok(f) => Ok(Some(Box::new(io::BufReader::new(f)))),
+				Err(err) if RsyncError::is_cancellation(&err) => Err(RsyncError::cancelled()),
 				Err(err) => Err(options::files_from_open_error(&name, &err)),
 			}
 		}
@@ -1139,6 +1147,9 @@ fn client_main(io: &HostIo, mut opts: Options, argv: &[OsString]) -> i32 {
 		.with_role(Role::PreReceiver);
 	let fail = |err: RsyncError, role: Role| {
 		let logger = logger.with_role(role);
+		// Whatever the cancellation broke (a FIFO's wait, a read of stdin)
+		// ends as upstream's signal exit, from the step it interrupted.
+		let err = if io.host_cancel.load(Ordering::Relaxed) { RsyncError::cancelled() } else { err };
 		report(&logger, &err);
 		logger.finish(err.code, err.site, &Stats::default(), false);
 		err.code
@@ -1160,9 +1171,16 @@ fn client_main(io: &HostIo, mut opts: Options, argv: &[OsString]) -> i32 {
 	let logger = Logger::local(Box::new(io.out.clone()), Box::new(io.err.clone()), log_config(io, &opts, false, local))
 		.with_role(role);
 	// Upstream's client opens its log while it parses its options, still
-	// starting up, so a failure there names it `[client]` (who_am_i).
-	if opts.logfile_name.is_some() {
-		logger.with_role(Role::Client).open_log_file(&io.fs, opts.insecure_links);
+	// starting up, so a failure there names it `[client]` (who_am_i), and
+	// before its signal handlers exist: a cancellation there ends the run
+	// before any peer starts (here with the signal trailer; see the pull
+	// request's one difference).
+	if opts.logfile_name.is_some()
+		&& logger.with_role(Role::Client).open_log_file(&io.fs, opts.insecure_links, &io.cancel)
+	{
+		let err = RsyncError::cancelled();
+		logger.finish(err.code, err.site, &Stats::default(), false);
+		return err.code;
 	}
 	for notice in &opts.notices {
 		logger.rprintf(LogCode::Info, format!("{notice}\n").as_bytes());
@@ -1200,7 +1218,7 @@ fn client_inputs(
 		let stdin = io.stdin.clone();
 		let mut take = move || -> Box<dyn Read + Send> { Box::new(stdin.clone()) };
 		let resolve = |p: &Path| io.paths.resolve(p);
-		Some(batch::open_batch_files(opts, &io.fs, &io.cwd, &resolve, &mut take)?)
+		Some(batch::open_batch_files(opts, &io.fs, &io.cwd, &resolve, &mut take, &io.cancel)?)
 	} else {
 		None
 	};
@@ -1225,8 +1243,9 @@ fn client_inputs(
 /// What reaches the peer: the connection plus how its exit is collected.
 enum PeerKind {
 	/// The in-process server half; its exit status arrives on the join.
-	/// `kill` stops it (upstream's SIGUSR1 to the local child).
-	Local { handle: Option<thread::JoinHandle<i32>>, kill: Arc<AtomicBool> },
+	/// `kill` stops it (upstream's SIGUSR1 to the local child); `report`
+	/// holds its last report until the client's (see [`ReportGate`]).
+	Local { handle: Option<thread::JoinHandle<i32>>, kill: Arc<AtomicBool>, report: Arc<ReportGate>, reported: Arc<ReportGate> },
 	/// A remote shell / connect program (reaped by `Connection::finish`).
 	Child(Option<Connection>),
 	/// TCP daemon or batch file: nothing to wait for.
@@ -1236,15 +1255,34 @@ enum PeerKind {
 impl PeerKind {
 	/// The peer's exit status as upstream folds it in: after a clean run it is
 	/// waited for (wait_process_with_flush); after a failure only a remote
-	/// child that already exited counts (cleanup_child_pid, WNOHANG).
-	fn status(&mut self, failed: bool) -> i32 {
+	/// child that already exited counts (cleanup_child_pid, WNOHANG). A
+	/// cancellation during the wait ends it with no status, as upstream's
+	/// client stops waiting and runs its exit cleanup; the local half is left
+	/// running (its kill is raised by [`Self::signal_exit`] after), and a
+	/// remote child is kept to be stopped after the client has reported.
+	fn status(&mut self, failed: bool, host_cancel: &AtomicBool) -> i32 {
 		match self {
 			Self::Local { handle, .. } if !failed => {
-				handle.take().map_or(0, |h| h.join().unwrap_or(crate::rsync::exit::RERR_CRASHED))
+				let Some(h) = handle.take() else { return 0 };
+				while !h.is_finished() {
+					if host_cancel.load(Ordering::Relaxed) {
+						*handle = Some(h);
+						return 0;
+					}
+					thread::sleep(Duration::from_millis(5));
+				}
+				h.join().unwrap_or(crate::rsync::exit::RERR_CRASHED)
 			}
-			Self::Child(conn) if !failed => {
-				conn.take().map_or(0, |c| c.finish().map_or_else(|e| e.code, |()| 0))
-			}
+			Self::Child(conn) if !failed => match conn.take() {
+				None => 0,
+				Some(c) => match c.finish() {
+					transport::Reaped::Code(code) => code,
+					transport::Reaped::Cancelled(child) => {
+						*conn = Some(Connection::from_child(child));
+						0
+					},
+				},
+			},
 			Self::Child(Some(conn)) => conn.child_exit_code().unwrap_or(0),
 			_ => 0,
 		}
@@ -1266,8 +1304,9 @@ impl PeerKind {
 	/// in-process half waiting to be stopped.
 	fn stop(&mut self) {
 		match self {
-			Self::Local { handle, kill } => {
+			Self::Local { handle, kill, report, .. } => {
 				kill.store(true, Ordering::Relaxed);
+				report.open();
 				if let Some(h) = handle.take() {
 					let _ = h.join();
 				}
@@ -1275,6 +1314,58 @@ impl PeerKind {
 			// Dropping the guard kills and reaps a child that still runs.
 			Self::Child(conn) => drop(conn.take()),
 			Self::None => {}
+		}
+	}
+
+	/// The client's signal exit, as upstream's `sig_int` and `exit_cleanup`
+	/// run it: [`SIGNAL_GRACE`], then the local half is signalled
+	/// (`kill_all`), then the client reports (`log_exit`), and the peer is
+	/// stopped. A local half that the command's cancellation found in its
+	/// protocol loop has reported already; one still in setup reports after
+	/// the client ([`ReportGate`]).
+	fn signal_exit(&mut self, report: impl FnOnce()) {
+		self.await_peer_report();
+		if let Self::Local { kill, .. } = self {
+			kill.store(true, Ordering::Relaxed);
+		}
+		report();
+		self.stop();
+	}
+}
+
+/// Upstream `sig_int` sleeps this long (`msleep(400)`) before its exit
+/// cleanup signals the local child and reports; the child runs on meanwhile
+/// (a half waiting on its log FIFO may get past it).
+const SIGNAL_GRACE: Duration = Duration::from_millis(400);
+
+impl PeerKind {
+	/// Waits for the peer's own report, at most [`SIGNAL_GRACE`]. Upstream
+	/// sleeps that whole time because its peer is another process it cannot
+	/// see; this peer is a thread of this process, or a child whose exit is
+	/// visible, so the wait ends as soon as the peer has reported (or has
+	/// decided to report after the client). A host that stops collecting a
+	/// cancelled command's output when the command returns kept the client's
+	/// own report only if it came out promptly, and a peer that is stuck
+	/// still gets the full upstream grace.
+	fn await_peer_report(&self) {
+		match self {
+			Self::Local { reported, .. } => reported.wait(SIGNAL_GRACE),
+			Self::Child(Some(conn)) => {
+				let slice = Duration::from_millis(5);
+				let mut waited = Duration::ZERO;
+				while waited < SIGNAL_GRACE && conn.child_exit_code().is_none() {
+					thread::sleep(slice);
+					waited += slice;
+				}
+			},
+			// No peer at all: a daemon socket, a batch file, a child already
+			// collected. Upstream sleeps here too, because its handler cannot
+			// tell whether a child is still reporting; this run knows there is
+			// nobody to report before it, so it reports at once. Sleeping lost
+			// the trailer of a cancelled `--read-batch` from a FIFO, which a
+			// host that stops collecting a command's output when the command
+			// returns never saw.
+			Self::Child(None) | Self::None => {},
 		}
 	}
 }
@@ -1368,22 +1459,42 @@ fn client_start(
 				sfilters.set_role(Role::Server);
 				let mut sio = io.clone();
 				sio.cancel = Arc::clone(&kill);
+				let client_logs = opts.logfile_name.is_some();
+				let report = Arc::new(ReportGate::default());
+				let half_report = Arc::clone(&report);
+				let reported = Arc::new(ReportGate::default());
+				let half_reported = Arc::clone(&reported);
 				let handle = thread::Builder::new()
 					.name("rsync-local-server".into())
-					.spawn(move || server_main(&sio, sopts, Some(LocalServer { conn: server, client_info: info, filters: sfilters })))
+					.spawn(move || {
+						let local =
+							LocalServer { conn: server, client_info: info, filters: sfilters, client_logs, report: half_report, reported: Arc::clone(&half_reported) };
+						let code = server_main(&sio, sopts, Some(local));
+						// However this half ended, its client waits no longer.
+						half_reported.open();
+						code
+					})
 					.map_err(|e| RsyncError::new(crate::rsync::exit::RERR_IPC, syserr_text(Role::Client, &e, "fork")).at("pipe.c", 112))?;
-				(client.reader, client.writer, client.probe, PeerKind::Local { handle: Some(handle), kill: Arc::clone(&kill) })
+				(client.reader, client.writer, client.probe, PeerKind::Local { handle: Some(handle), kill: Arc::clone(&kill), report, reported })
 			}
 			(Some(remote), other) => {
 				if let Some(BatchFiles::Write { data, script }) = other {
 					batch_writer = Some((data, script));
 				}
-				let (mut conn, protocol) = connect_remote(io, &mut opts, &ops, remote, logger)?;
-				let protocol = protocol.unwrap_or(0);
-				if protocol < 0 {
+				let (mut conn, protocol) = match connect_remote(io, &mut opts, &ops, remote, logger)? {
+					Connected::Ready(conn, protocol) => (conn, protocol),
 					// The daemon ended the session (module listing).
-					return Ok(0);
-				}
+					Connected::Ended => return Ok(0),
+					Connected::Cancelled(conn) => {
+						// Held until the client has reported, as upstream's exit
+						// cleanup stops its remote shell after its own line.
+						let err = RsyncError::cancelled();
+						let (mut peer, _socket) =
+							if conn.child.is_some() { (PeerKind::Child(Some(conn)), None) } else { (PeerKind::None, Some(conn)) };
+						peer.signal_exit(|| logger.finish(err.code, err.site, &Stats::default(), false));
+						return Ok(err.code);
+					},
+				};
 				if protocol > 0 {
 					remote_protocol = Some(protocol as u32);
 				}
@@ -1394,7 +1505,7 @@ fn client_start(
 				(reader, writer, probe, peer)
 			}
 		};
-	let streams = make_streams(conn_reader, conn_writer, probe, &abort, &opts);
+	let streams = make_streams(conn_reader, conn_writer, probe, &abort, Some(&io.host_cancel), &opts);
 	let end = ClientRun {
 		io,
 		opts,
@@ -1418,15 +1529,26 @@ fn client_start(
 	Ok(end)
 }
 
-/// Connects to a remote shell or daemon. The second value is the daemon's
-/// protocol (0 for a remote shell, -1 when the daemon ended the session).
+/// What [`connect_remote`] reached.
+enum Connected {
+	/// A connection ready for the transfer, with the remote protocol (0 for a
+	/// remote shell).
+	Ready(Connection, i32),
+	/// The daemon ended the session (module listing).
+	Ended,
+	/// The run was cancelled during the daemon handshake; the connection is
+	/// still open, so its remote shell is stopped after the client reports.
+	Cancelled(Connection),
+}
+
+/// Connects to a remote shell or daemon.
 fn connect_remote(
 	io: &HostIo,
 	opts: &mut Options,
 	ops: &Operands,
 	remote: &Remote,
 	logger: &Logger,
-) -> Result<(Connection, Option<i32>), RsyncError> {
+) -> Result<Connected, RsyncError> {
 	let remote_args = ops.remote_args();
 	let getenv = |k: &str| io.getenv(k);
 	let rsh = opts
@@ -1463,7 +1585,7 @@ fn connect_remote(
 				env: &[],
 				logger,
 			};
-			Ok((transport::spawn_shell(&io.child, &cfg, Arc::clone(&io.cancel))?, None))
+			Ok(Connected::Ready(transport::spawn_shell(&io.child, &cfg, Arc::clone(&io.cancel))?, 0))
 		}
 		Remote::Daemon { user, host, .. } => {
 			if remote_args.first().is_some_and(|a| os_bytes_lossy(a).first() == Some(&b'/')) && !ops.daemon_over_shell {
@@ -1544,17 +1666,22 @@ fn connect_remote(
 				early_input: early.as_deref(),
 				fs: &io.fs,
 				insecure_operator_files: opts.insecure_links,
+				cancel: &io.cancel,
 				getenv: &getenv,
 				read_stdin_line: Some(read_line),
 				connect_deadline: deadline,
 				io_timeout: (opts.io_timeout > 0).then(|| Duration::from_secs(opts.io_timeout as u64)),
 			};
-			let session = daemon::daemon_handshake(&mut conn, &dcfg, logger)?;
+			let session = match daemon::daemon_handshake(&mut conn, &dcfg, logger) {
+				Ok(session) => session,
+				Err(_) if io.host_cancel.load(Ordering::Relaxed) => return Ok(Connected::Cancelled(conn)),
+				Err(err) => return Err(err),
+			};
 			if session.exited {
-				return Ok((conn, Some(-1)));
+				return Ok(Connected::Ended);
 			}
 			opts.protocol_version = session.protocol as i32;
-			Ok((conn, Some(session.remote_protocol as i32)))
+			Ok(Connected::Ready(conn, session.remote_protocol as i32))
 		}
 	}
 }
@@ -1584,17 +1711,22 @@ struct ClientRun<'a> {
 /// A client failure before the transfer started: the diagnostic and trailer,
 /// then the peer is stopped (upstream exit_cleanup with kill_all). When the
 /// host cancelled the run, whatever the cancellation broke (a read failing, a
-/// killed remote shell's EOF) ends as upstream's signal exit instead.
+/// killed remote shell's EOF) ends as upstream's signal exit instead
+/// ([`PeerKind::signal_exit`]): rsync 3.5.1 prints its own `code 20` trailer
+/// and its child's comes after, unless the client's waits on its log. Its
+/// connection stays open until the child exits, so the child is signalled,
+/// not left to find the connection closed (a protocol error) while the
+/// trailer is still being written.
 fn setup_failed(logger: &Logger, err: &RsyncError, streams: Streams, mut peer: PeerKind, cancelled: bool) -> i32 {
-	drop(streams);
 	if cancelled {
-		peer.stop();
 		let err = RsyncError::cancelled();
-		logger.finish(err.code, err.site, &Stats::default(), false);
+		peer.signal_exit(|| logger.finish(err.code, err.site, &Stats::default(), false));
+		drop(streams);
 		return err.code;
 	}
+	drop(streams);
 	report(logger, err);
-	let code = err.code.max(peer.status(true));
+	let code = err.code.max(peer.status(true, &AtomicBool::new(false)));
 	logger.finish(code, err.site, &Stats::default(), false);
 	peer.stop();
 	code
@@ -1659,7 +1791,7 @@ impl ClientRun<'_> {
 			}
 			let text = batch::shell_script(&raw, &opts.args, &filters.script_lines(), opts.eol_nulls, neg.proto.version, &vfs);
 			setup_err = match text {
-				Ok(text) => batch::write_shell_file(&self.io.fs, script, &text, &opts.batch_name.clone().unwrap_or_default(), opts.insecure_links).err(),
+				Ok(text) => batch::write_shell_file(&self.io.fs, script, &text, &opts.batch_name.clone().unwrap_or_default(), opts.insecure_links, &self.io.cancel).err(),
 				Err(e) => Some(e),
 			};
 		}
@@ -1771,13 +1903,17 @@ impl ClientRun<'_> {
 		let cancelled = self.io.host_cancel.load(Ordering::Relaxed);
 		let failed = failure.is_some() || cancelled;
 		// The peer's status (wait_process_with_flush / cleanup_child_pid).
-		let status = peer.status(failed);
+		let status = peer.status(failed, &self.io.host_cancel);
+		// The wait above can end at a cancellation that came while it ran; from
+		// here the run ends as a cancelled one (upstream's client, interrupted
+		// in its wait, runs its signal exit cleanup).
+		let cancelled = cancelled || self.io.host_cancel.load(Ordering::Relaxed);
 		let mut stats = lock(&outcome.ctx.stats).clone();
 		if let Some(totals) = outcome.totals {
 			stats.total_read = totals.0;
 			stats.total_written = totals.1;
 		}
-		if !failed && outcome.summary {
+		if !failed && !cancelled && outcome.summary {
 			let elapsed = outcome.end.map(|end| end.saturating_duration_since(start));
 			logger.with_role(outcome.role).output_summary(&stats, neg.proto.version, elapsed, opts.dry_run, opts.write_batch < 0);
 		}
@@ -1787,7 +1923,7 @@ impl ClientRun<'_> {
 		let (code, role) = if cancelled {
 			let err = RsyncError::cancelled();
 			let role = failure.as_ref().map_or(outcome.role, |f| f.role);
-			logger.with_role(role).finish(err.code, err.site, &stats, false);
+			peer.signal_exit(|| logger.with_role(role).finish(err.code, err.site, &stats, false));
 			(err.code, role)
 		} else {
 			let base = failure.as_ref().map_or(0, |f| f.err.code).max(status);
@@ -1910,6 +2046,14 @@ struct LocalServer {
 	conn: Connection,
 	client_info: Vec<u8>,
 	filters: Filters,
+	/// Whether the client has a `--log-file` of its own (see `server_main`).
+	client_logs: bool,
+	/// Holds this half's last report until the client's ([`ReportGate`]).
+	report: Arc<ReportGate>,
+	/// Opened once this half has reported, or once it is waiting on `report`
+	/// and so reports after its client: either way its client need not wait
+	/// for it ([`PeerKind::await_peer_report`]).
+	reported: Arc<ReportGate>,
 }
 
 fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
@@ -1926,12 +2070,21 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 		Arc::clone(&shared_slot),
 	);
 	let local_server = local.is_some();
+	// A cancellation of the command reaches a local half too, as a signal to
+	// the process group reaches rsync's child; it ends at its next I/O step
+	// (see the end of this function). A remote server gets its signals from
+	// the system.
+	let _host_watch =
+		local_server.then(|| Watch::start(Arc::clone(&io.host_cancel), vec![Arc::clone(&abort)], 0, Arc::default()));
+	let client_logs = local.as_ref().is_some_and(|local| local.client_logs);
+	let report_gate = local.as_ref().map(|local| Arc::clone(&local.report));
+	let reported_gate = local.as_ref().map(|local| Arc::clone(&local.reported));
 	let (conn_reader, conn_writer, probe, client_info, local_filters): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, Vec<u8>, Option<Filters>) =
 		match local {
-			Some(LocalServer { conn, client_info, filters }) => (conn.reader, conn.writer, conn.probe, client_info, Some(filters)),
+			Some(LocalServer { conn, client_info, filters, .. }) => (conn.reader, conn.writer, conn.probe, client_info, Some(filters)),
 			None => (Box::new(io.stdin.clone()), Box::new(io.stdout_raw.clone()), None, Vec::new(), None),
 		};
-	let mut streams = make_streams(conn_reader, conn_writer, probe, &abort, &opts);
+	let mut streams = make_streams(conn_reader, conn_writer, probe, &abort, None, &opts);
 	let mut opts = opts;
 	if opts.secluded_pending() {
 		let argv = match handshake::read_secluded_args(&mut streams.reader, &io.fs, &io.cwd, opts.max_alloc) {
@@ -1980,10 +2133,17 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 		base_logger.set_deleted_sink(Some(deleted));
 	}
 	// A remote server opens its log while it parses its options, still
-	// starting up (`[server]`); a local half's opens later, as the receiver.
+	// starting up (`[server]`); a local half's opens later, as the receiver,
+	// and a half whose client logs too inherits "logging set up" and opens
+	// its own only at its first log write ("receiving file list"), past the
+	// protocol setup.
 	if opts.logfile_name.is_some() {
 		let opener = if local_server { base_logger.clone() } else { base_logger.with_role(Role::Server) };
-		opener.open_log_file(&io.fs, opts.insecure_links);
+		if local_server && client_logs {
+			opener.defer_log_file(&io.fs, opts.insecure_links, &io.cancel);
+		} else {
+			opener.open_log_file(&io.fs, opts.insecure_links, &io.cancel);
+		}
 	}
 	for notice in &opts.notices {
 		base_logger.rprintf(LogCode::Info, format!("{notice}\n").as_bytes());
@@ -2011,16 +2171,24 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	};
 	let neg = match neg {
 		Ok(neg) => neg,
-		Err(err) if local_server && err.code == RERR_PROTOCOL => {
+		Err(err)
+			if local_server
+				&& (err.code == RERR_PROTOCOL || io.cancel.load(Ordering::Relaxed) || io.host_cancel.load(Ordering::Relaxed)) =>
+		{
 			// The client fails the same protocol check, reports it, and stops
-			// this half (upstream: SIGUSR1 to the local child). Closing the
-			// connection first makes sure the client cannot wait on it.
+			// this half (upstream: SIGUSR1 to the local child). The stop can
+			// land before this half has finished its own side of the
+			// exchange, which then fails as cancelled rather than with the
+			// mismatch; upstream's child is killed by the signal wherever it
+			// is, so both end the same way. Closing the connection first makes
+			// sure the client cannot wait on it.
 			*lock(&sink_writer) = None;
 			drop(streams);
 			while !io.cancel.load(Ordering::Relaxed) {
 				thread::sleep(Duration::from_millis(10));
 			}
-			return killed_exit(&logger, logger.role(), &Stats::default());
+			let how = if io.host_cancel.load(Ordering::Relaxed) { HalfStop::InSetup } else { HalfStop::ByClient };
+			return half_stopped(&logger, logger.role(), &Stats::default(), report_gate.as_deref(), reported_gate.as_deref(), how);
 		}
 		Err(err) => {
 			report(&logger, &err);
@@ -2179,20 +2347,18 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	};
 	let end_role = failure.as_ref().map_or_else(|| outcome.as_ref().map_or(role, |o| o.role), |f| f.role);
 	let writer = lock(&shared.writer).take();
-	// A cancelled local copy: the client prints its signal trailer first, then
-	// stops this half (upstream's parent SIGUSR1s its child, whose generator
-	// reports `received SIGUSR1`). Wait for that stop so the order is upstream's.
-	if local_server && io.host_cancel.load(Ordering::Relaxed) {
-		let deadline = Instant::now() + Duration::from_secs(10);
-		while !io.cancel.load(Ordering::Relaxed) && Instant::now() < deadline {
-			thread::sleep(Duration::from_millis(5));
-		}
-	}
-	let code = if local_server && io.cancel.load(Ordering::Relaxed) {
+	let code = if local_server && io.host_cancel.load(Ordering::Relaxed) {
+		// A cancellation of the command reaches this half as well as its
+		// client, as a signal to the process group reaches rsync's child:
+		// upstream's child defers it to its next I/O step (`got_kill_signal`)
+		// and ends there, before its client, which sleeps 400 ms first.
+		*lock(&sink_writer) = None;
+		half_stopped(&logger, outcome.as_ref().map_or(role, |o| o.role), &stats, None, None, HalfStop::AtIo)
+	} else if local_server && io.cancel.load(Ordering::Relaxed) {
 		*lock(&sink_writer) = None;
 		// The process upstream signals is the half's generator (its "Receiver"
 		// before the split); the receiver child exits quietly.
-		killed_exit(&logger, outcome.as_ref().map_or(role, |o| o.role), &stats)
+		half_stopped(&logger, outcome.as_ref().map_or(role, |o| o.role), &stats, report_gate.as_deref(), reported_gate.as_deref(), HalfStop::ByClient)
 	} else if io.host_cancel.load(Ordering::Relaxed) {
 		let err = RsyncError::cancelled();
 		logger.with_role(end_role).finish(err.code, err.site, &stats, false);
@@ -2233,11 +2399,45 @@ fn live_totals(mut stats: Stats, counters: &IoCounters) -> Stats {
 	stats
 }
 
-/// The local server half after its client stopped it (upstream's SIGUSR1 to
-/// the local child): `rsync error: received SIGUSR1 (code 19) at main.c(1687)`.
-/// The connection is gone, so the trailer goes to stderr.
-fn killed_exit(logger: &Logger, role: Role, stats: &Stats) -> i32 {
-	let err = RsyncError::bare(RERR_SIGNAL1).at("main.c", 1687);
+/// How a local server half ended at a stop or a signal.
+#[derive(Clone, Copy)]
+enum HalfStop {
+	/// Its client stopped it (upstream's SIGUSR1 to the local child), with
+	/// no signal of its own: `received SIGUSR1 (code 19) at main.c(1687)`.
+	ByClient,
+	/// The command's cancellation found it in setup, before its protocol
+	/// loop: it ends at its client's stop with upstream's
+	/// `received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874)`.
+	InSetup,
+	/// The command's cancellation found it in its protocol loop:
+	/// `… (code 20) at io.c(604)`, from `handle_kill_signal`.
+	AtIo,
+}
+
+/// The local server half's last report. The connection is gone, so it goes
+/// to stderr; with `report_gate`, after its client's own (see [`ReportGate`]),
+/// and `reported` then tells the client not to wait for this half first.
+fn half_stopped(
+	logger: &Logger,
+	role: Role,
+	stats: &Stats,
+	report_gate: Option<&ReportGate>,
+	reported: Option<&ReportGate>,
+	how: HalfStop,
+) -> i32 {
+	if let Some(gate) = report_gate {
+		// This half reports after its client, so the client must not hold
+		// its own report back for it ([`PeerKind::await_peer_report`]).
+		if let Some(reported) = reported {
+			reported.open();
+		}
+		gate.wait(Duration::from_secs(10));
+	}
+	let err = match how {
+		HalfStop::ByClient => RsyncError::bare(RERR_SIGNAL1).at("main.c", 1687),
+		HalfStop::InSetup => RsyncError::cancelled(),
+		HalfStop::AtIo => RsyncError::bare(RERR_SIGNAL).at("io.c", 604),
+	};
 	logger.with_role(role).finish(err.code, err.site, stats, false);
 	err.code
 }

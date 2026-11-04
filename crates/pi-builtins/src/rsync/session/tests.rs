@@ -426,10 +426,20 @@ fn cancel_mid_connection_exits_20_with_trailer() {
 	assert_eq!(cap.err(), "rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n");
 }
 
-/// Cancelling a local copy mid-transfer: the client reports the signal, then
-/// stops its server half, whose generator reports SIGUSR1. Captured from
-/// rsync 3.5.1 (`rsync -a bigsrc/ dst/`, SIGTERM to the client), three runs:
-/// exactly these two lines, exit 20.
+/// Cancelling a local copy mid-transfer. A cancellation of the command
+/// reaches the server half as well as the client, as a signal to the process
+/// group does: the half ends at its next I/O step with its own code-20 line,
+/// and the client follows. rsync 3.5.1 (`rsync -a --bwlimit=500 bigsrc/
+/// dst/`, SIGTERM to the process group, 10 runs) printed these two lines in
+/// 6; the client's line first then the half's in 2; the client's then the
+/// half's SIGUSR1 line in 2.
+///
+/// Both lines are out well inside the 400 ms upstream sleeps before its own
+/// (it cannot see its child; this half is a thread of this process, so the
+/// client waits for the half's report instead and goes straight on). A host
+/// that stops collecting a cancelled command's output once the command
+/// returns keeps only what was written by then, and with the sleep the
+/// client's line came too late for it.
 #[test]
 fn cancel_local_copy_reports_like_upstream() {
 	use clap::Parser as _;
@@ -438,12 +448,283 @@ fn cancel_local_copy_reports_like_upstream() {
 	fs::write(dir.path().join("bigsrc/f"), vec![0u8; 8 << 20]).unwrap();
 	let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
 	let cancel = host.cancel_flag_for_test();
+	let (sent, cancelled_at) = std::sync::mpsc::channel();
 	let canceller = std::thread::spawn(move || {
 		std::thread::sleep(Duration::from_millis(500));
 		cancel.store(true, Ordering::Relaxed);
+		sent.send(Instant::now()).unwrap();
 	});
 	// --bwlimit keeps the copy running well past the cancellation.
 	let parsed = Rsync::try_parse_from(["rsync", "--", "-a", "--bwlimit=500", "bigsrc/", "dst/"]).unwrap();
+	let started = Instant::now();
+	let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
+	let ended = Instant::now();
+	canceller.join().unwrap();
+	let after = ended.saturating_duration_since(cancelled_at.recv().unwrap());
+	assert_eq!(code, RERR_SIGNAL);
+	assert!(started.elapsed() < Duration::from_secs(10), "cancellation was not prompt");
+	assert!(after < super::SIGNAL_GRACE, "the client's report came {after:?} after the cancellation");
+	assert_eq!(
+		cap.err(),
+		"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at io.c(604) [generator=3.5.1]\n\
+		 rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n"
+	);
+}
+
+/// Cancelling a local copy while its server half is still setting up (here
+/// blocked opening a FIFO given as its log file, which nobody opens): the
+/// half, which got the signal too but has no I/O step to end at, ends at
+/// its client's stop, after the client's line. rsync 3.5.1 (`rsync -a
+/// -M--log-file=FIFO src/ d/`, SIGTERM to the process group, 10 runs)
+/// printed these two lines in 5; the half's SIGUSR1 line second in 3; the
+/// half's code-20 line first in 2. The half's wait for a reader ends at its
+/// stop; before, the client waited for the half until someone opened the
+/// FIFO.
+#[cfg(unix)]
+#[test]
+fn cancelling_a_local_copy_in_setup_reports_before_the_server_half() {
+	use clap::Parser as _;
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	let fifo = dir.path().join("logfifo");
+	assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+	let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
+	let cancel = host.cancel_flag_for_test();
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(300));
+		cancel.store(true, Ordering::Relaxed);
+	});
+	let rescue = release_fifo_after(fifo.clone(), Duration::from_secs(10));
+	let log_file = format!("-M--log-file={}", fifo.display());
+	let parsed = Rsync::try_parse_from(["rsync", "--", "-a", log_file.as_str(), "src/", "d/"]).unwrap();
+	let started = Instant::now();
+	let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
+	let took = started.elapsed();
+	canceller.join().unwrap();
+	drop(rescue);
+	assert!(took < Duration::from_secs(5), "the server half waited for its log FIFO: {took:?}");
+	assert_eq!(code, RERR_SIGNAL);
+	assert_eq!(
+		cap.err(),
+		"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n\
+		 rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [Receiver=3.5.1]\n"
+	);
+}
+
+/// A local copy whose client and server half both log to FIFOs, cancelled
+/// with the client's log full; the half's log gets a reader `server_log_at`
+/// after the cancellation, and both are drained 900 ms after it. Returns
+/// stderr. Upstream's half of a client that logs opens its log only at its
+/// first log write ("receiving file list"), so it is waiting there, past
+/// the protocol setup, when the client is cancelled; the client sleeps
+/// 400 ms (`sig_int`), signals the half, then logs its exit line, which
+/// waits on its full log.
+#[cfg(unix)]
+fn both_logs_cancelled(server_log_at: Duration) -> (i32, String) {
+	use std::io::Read as _;
+	use std::os::unix::fs::OpenOptionsExt;
+
+	use clap::Parser as _;
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	let (server_log, client_log) = (dir.path().join("serverlog"), dir.path().join("clientlog"));
+	for fifo in [&server_log, &client_log] {
+		assert!(Command::new("mkfifo").arg(fifo).status().unwrap().success());
+	}
+	// Both ends of the client's log, held here, so its open does not wait.
+	let mut client_log_end =
+		fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NONBLOCK).open(&client_log).unwrap();
+	let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
+	let cancel = host.cancel_flag_for_test();
+	let release = server_log.clone();
+	let driver = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(300));
+		// Fill the client's log, then cancel: its exit line waits to be logged.
+		while std::io::Write::write(&mut client_log_end, &[b'x'; 4096]).is_ok() {}
+		cancel.store(true, Ordering::Relaxed);
+		let cancelled = Instant::now();
+		std::thread::sleep(server_log_at);
+		// Let the server half open its log.
+		let mut server_log_end = fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&release).unwrap();
+		std::thread::sleep((cancelled + Duration::from_millis(900)).saturating_duration_since(Instant::now()));
+		// Then let both logs drain.
+		let mut buf = [0u8; 65536];
+		let deadline = Instant::now() + Duration::from_secs(10);
+		while Instant::now() < deadline {
+			let _ = server_log_end.read(&mut buf);
+			match client_log_end.read(&mut buf) {
+				Ok(0) => break,
+				Ok(_) | Err(_) => std::thread::sleep(Duration::from_millis(10)),
+			}
+		}
+	});
+	let parsed = Rsync::try_parse_from([
+		"rsync",
+		"--",
+		"-a",
+		&format!("--log-file={}", client_log.display()),
+		&format!("-M--log-file={}", server_log.display()),
+		"src/",
+		"d/",
+	])
+	.unwrap();
+	let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
+	drop(driver);
+	(code, cap.err())
+}
+
+/// [`both_logs_cancelled`] with the half's log opened 300 ms after the
+/// cancellation, within the client's 400 ms: the half gets past its log and
+/// ends at its next I/O step with its own line, before the client, whose
+/// exit line waits on its log. rsync 3.5.1, SIGTERM to the process group, 10
+/// runs: these two lines in 7, the client's alone in 3. (With the signal to
+/// the client alone, which no cancellation of the builtin gives, rsync
+/// printed the half's SIGUSR1 line instead, before or after the client's.)
+#[cfg(unix)]
+#[test]
+fn a_half_past_its_log_reports_before_a_client_waiting_on_its_own() {
+	let (code, err) = both_logs_cancelled(Duration::from_millis(300));
+	assert_eq!(code, RERR_SIGNAL, "{err}");
+	assert_eq!(
+		err,
+		"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at io.c(604) [Receiver=3.5.1]\n\
+		 rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n"
+	);
+}
+
+/// [`both_logs_cancelled`] with the half's log opened 900 ms after the
+/// cancellation, past the client's 400 ms: the half is still opening its
+/// log, inside its first log write, when the client stops it, so its line
+/// is lost (`rwrite`'s `in_block`) and the client's prints alone. rsync
+/// 3.5.1, SIGTERM to the process group, 10 runs: this line alone in 7, the
+/// half's code-20 line first in 3; to the client alone, this line in 15 of 15.
+#[cfg(unix)]
+#[test]
+fn a_half_stopped_opening_its_log_prints_nothing_when_the_client_logs() {
+	let (code, err) = both_logs_cancelled(Duration::from_millis(900));
+	assert_eq!(code, RERR_SIGNAL, "{err}");
+	assert_eq!(err, "rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n");
+}
+
+/// Opens the other end of the FIFO at `path` (without waiting) every 50 ms
+/// from `after` on, until dropped: a test whose run should not wait on the
+/// FIFO then fails on its time limit instead of hanging.
+#[cfg(unix)]
+fn release_fifo_after(path: PathBuf, after: Duration) -> impl Drop {
+	use std::os::unix::fs::OpenOptionsExt;
+	struct Stop(Arc<AtomicBool>);
+	impl Drop for Stop {
+		fn drop(&mut self) {
+			self.0.store(true, Ordering::Relaxed);
+		}
+	}
+	let stop = Arc::new(AtomicBool::new(false));
+	let flag = Arc::clone(&stop);
+	std::thread::spawn(move || {
+		let deadline = Instant::now() + after;
+		while !flag.load(Ordering::Relaxed) {
+			if Instant::now() >= deadline {
+				for write in [false, true] {
+					let _ = fs::OpenOptions::new().read(!write).write(write).custom_flags(libc::O_NONBLOCK).open(&path);
+				}
+			}
+			std::thread::sleep(Duration::from_millis(50));
+		}
+	});
+	Stop(stop)
+}
+
+/// Cancelling `--read-batch` while the batch file is a FIFO, one nobody
+/// writes to or one whose writer sends nothing, and `--write-batch` while it
+/// is a FIFO nobody reads, ends at once with upstream's signal exit as the
+/// receiver. Captured from rsync 3.5.1 under `LC_ALL=C`, SIGTERM 0.6 s in,
+/// three runs of each: exactly this line, exit 20. Before, the read or the
+/// open did not observe the cancellation: the bash tool gave up on the
+/// command with nothing printed, and `timeout` waited for it indefinitely.
+/// There is no peer here to report before this run, so it reports without
+/// waiting out rsync's 400 ms grace; sleeping it out put the line past the
+/// window of a host that stops collecting output when the command returns.
+#[cfg(unix)]
+#[test]
+fn cancelling_a_batch_on_a_fifo_reports_the_signal() {
+	use std::os::unix::fs::OpenOptionsExt;
+
+	use clap::Parser as _;
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	let fifo = dir.path().join("batch");
+	assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+	let cases: [(&str, &[&str], bool); 3] = [
+		("no writer", &["--read-batch=batch", "dst/"], false),
+		("a silent writer", &["--read-batch=batch", "dst/"], true),
+		("no reader", &["-a", "--write-batch=batch", "src/", "dst/"], false),
+	];
+	for (case, args, silent_writer) in cases {
+		let held = silent_writer.then(|| {
+			fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap()
+		});
+		let rescue = release_fifo_after(fifo.clone(), Duration::from_secs(10));
+		let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
+		let cancel = host.cancel_flag_for_test();
+		let (sent, cancelled_at) = std::sync::mpsc::channel();
+		let canceller = std::thread::spawn(move || {
+			std::thread::sleep(Duration::from_millis(300));
+			cancel.store(true, Ordering::Relaxed);
+			sent.send(Instant::now()).unwrap();
+		});
+		let parsed = Rsync::try_parse_from(["rsync", "--"].into_iter().chain(args.iter().copied())).unwrap();
+		let started = Instant::now();
+		let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
+		let took = started.elapsed();
+		let ended = Instant::now();
+		canceller.join().unwrap();
+		let after = ended.saturating_duration_since(cancelled_at.recv().unwrap());
+		drop((rescue, held));
+		assert!(took < Duration::from_secs(5), "{case}: {took:?}");
+		// Nothing here reports before this run, so it must not wait out
+		// rsync's grace: a host that stops collecting a cancelled command's
+		// output when the command returns never saw the line below.
+		assert!(after < super::SIGNAL_GRACE, "{case}: the report came {after:?} after the cancellation");
+		assert_eq!(code, RERR_SIGNAL, "{case}: {}", cap.err());
+		assert_eq!(
+			cap.err(),
+			"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [Receiver=3.5.1]\n",
+			"{case}"
+		);
+	}
+}
+
+/// A cancelled client stops its remote shell with SIGUSR1, as rsync 3.5.1's
+/// exit cleanup does (`kill_all`), after its own trailer, and forwards what
+/// the remote side prints for it before reaping it. rsync 3.5.1 with a real
+/// server held in setup (`-e RSH --rsync-path=rsync -M--log-file=FIFO src/
+/// h:dst/`, SIGTERM, three runs) printed its trailer, then the server's
+/// `received SIGUSR1 (code 19) at main.c(1687) [server=3.5.1]`; here a shell
+/// stands in for that server. Before, the remote shell was killed outright
+/// the moment the run was cancelled, and the second line never came.
+#[cfg(unix)]
+#[test]
+fn a_cancelled_client_lets_its_remote_shell_report_sigusr1() {
+	use std::os::unix::fs::PermissionsExt;
+
+	use clap::Parser as _;
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	let rsh = dir.path().join("trailerrsh");
+	fs::write(
+		&rsh,
+		"#!/bin/sh\ntrap 'echo \"rsync error: received SIGUSR1 (code 19) at main.c(1687) [server=3.5.1]\" >&2; exit 19' USR1\nwhile :; do sleep 0.05; done\n",
+	)
+	.unwrap();
+	fs::set_permissions(&rsh, fs::Permissions::from_mode(0o755)).unwrap();
+	let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
+	let cancel = host.cancel_flag_for_test();
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(300));
+		cancel.store(true, Ordering::Relaxed);
+	});
+	let rsh_arg = rsh.to_str().unwrap().to_string();
+	let parsed = Rsync::try_parse_from(["rsync", "--", "-a", "-e", &rsh_arg, "src/", "h:dst/"]).unwrap();
 	let started = Instant::now();
 	let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
 	canceller.join().unwrap();
@@ -452,8 +733,180 @@ fn cancel_local_copy_reports_like_upstream() {
 	assert_eq!(
 		cap.err(),
 		"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n\
-		 rsync error: received SIGUSR1 (code 19) at main.c(1687) [generator=3.5.1]\n"
+		 rsync error: received SIGUSR1 (code 19) at main.c(1687) [server=3.5.1]\n"
 	);
+}
+
+/// Cancelling a local copy whose server half's `--log-file` FIFO is full and
+/// nobody drains it ends promptly, not held by the half's blocked log write:
+/// the half drops its trailer (as rsync 3.5.1 drops a log line it cannot
+/// write at once) and the client's line prints alone. rsync 3.5.1 under a
+/// process-group SIGTERM with the FIFO nearly full printed this line alone
+/// (6 of 10, the half's `io.c(604)` line with it in 4); the builtin prints
+/// the more frequent one. Before, the client's wait for the half never
+/// returned, so the run hung past its cancellation.
+#[cfg(unix)]
+#[test]
+fn a_cancelled_copy_with_a_full_log_fifo_does_not_hang() {
+	use std::io::Write as _;
+	use std::os::unix::fs::OpenOptionsExt;
+
+	use clap::Parser as _;
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	let fifo = dir.path().join("slog");
+	assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+	// A reader keeps the FIFO open; a writer fills it so every log write blocks.
+	let _reader = fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap();
+	let mut filler = fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap();
+	while filler.write(&[b'x'; 4096]).is_ok() {}
+	let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
+	let cancel = host.cancel_flag_for_test();
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(300));
+		cancel.store(true, Ordering::Relaxed);
+	});
+	let parsed = Rsync::try_parse_from(["rsync", "--", "-a", "-M--log-file=slog", "src/", "dst/"]).unwrap();
+	let started = Instant::now();
+	let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
+	canceller.join().unwrap();
+	assert!(started.elapsed() < Duration::from_secs(10), "the run hung on the full log FIFO: {:?}", started.elapsed());
+	assert_eq!(code, RERR_SIGNAL, "{}", cap.err());
+	assert_eq!(cap.err(), "rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n");
+}
+
+/// A daemon reached over a remote shell (`rsync -e RSH src/ h::mod/`),
+/// cancelled during the daemon handshake: the client reports first, after
+/// its 400 ms, then stops the remote shell, whose SIGUSR1 line follows, as
+/// rsync 3.5.1's exit cleanup orders it (the client's line, then the remote
+/// daemon's `received SIGUSR1`, in 6 of 6 runs in review, password-file and
+/// early-input FIFOs). Before, the cancelled handshake dropped the
+/// connection, which stopped the remote shell first. A shell stands in for
+/// the remote daemon: it greets, then waits.
+#[cfg(unix)]
+#[test]
+fn a_cancelled_daemon_handshake_reports_before_its_remote_shell() {
+	use std::os::unix::fs::PermissionsExt;
+
+	use clap::Parser as _;
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	let rsh = dir.path().join("daemonrsh");
+	fs::write(
+		&rsh,
+		"#!/bin/sh\ntrap 'echo \"rsync error: received SIGUSR1 (code 19) at main.c(1687) [Receiver=3.5.1]\" >&2; exit 19' USR1\nprintf '@RSYNCD: 31.0\\n'\nwhile :; do sleep 0.05; done\n",
+	)
+	.unwrap();
+	fs::set_permissions(&rsh, fs::Permissions::from_mode(0o755)).unwrap();
+	let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
+	let cancel = host.cancel_flag_for_test();
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(300));
+		cancel.store(true, Ordering::Relaxed);
+	});
+	let rsh_arg = rsh.to_str().unwrap().to_string();
+	let parsed = Rsync::try_parse_from(["rsync", "--", "-a", "-e", &rsh_arg, "src/", "h::mod/"]).unwrap();
+	let started = Instant::now();
+	let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
+	canceller.join().unwrap();
+	assert_eq!(code, RERR_SIGNAL, "{}", cap.err());
+	assert!(started.elapsed() < Duration::from_secs(10), "cancellation was not prompt");
+	assert_eq!(
+		cap.err(),
+		"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n\
+		 rsync error: received SIGUSR1 (code 19) at main.c(1687) [Receiver=3.5.1]\n"
+	);
+}
+
+/// A client cancelled while it opens its own `--log-file` FIFO, which nobody
+/// reads, ends there, before any server half starts: the code-20 line alone
+/// (rsync 3.5.1 opens that log before its signal handlers exist and dies
+/// with no output; the pull request states this one difference). Before, it
+/// went on, started its local half, and that half printed a protocol error.
+#[cfg(unix)]
+#[test]
+fn a_client_cancelled_opening_its_log_starts_no_half() {
+	use clap::Parser as _;
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	let fifo = dir.path().join("logfifo");
+	assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+	let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
+	let cancel = host.cancel_flag_for_test();
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(600));
+		cancel.store(true, Ordering::Relaxed);
+	});
+	let parsed = Rsync::try_parse_from(["rsync", "--", "-a", "--log-file=logfifo", "src/", "dst/"]).unwrap();
+	let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
+	canceller.join().unwrap();
+	assert_eq!(code, RERR_SIGNAL, "{}", cap.err());
+	assert_eq!(cap.err(), "rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n");
+	assert!(!dir.path().join("dst").exists());
+}
+
+/// Cancelling a copy whose `--log-file`, `--write-batch` file or batch
+/// script is a FIFO a reader holds but empties nothing from (filled before
+/// the start) ends as rsync 3.5.1 does. rsync 3.5.1 under `LC_ALL=C`,
+/// SIGTERM to the process group 0.6 s in, 10 runs of each: the log-file
+/// line in 6 (the half's SIGUSR1 line alone in 4), the batch-file line in 10,
+/// the batch-script lines in 6 (the client's line, then the half's SIGUSR1
+/// line, in 4). A trailer due while the client's log write is blocked is
+/// lost, as `rwrite` drops it, so only the server half's shows. Before, each
+/// write stayed blocked until someone read the FIFO.
+#[cfg(unix)]
+#[test]
+fn cancelling_a_write_to_a_full_fifo_ends_as_rsync_does() {
+	use std::os::unix::fs::OpenOptionsExt;
+
+	use clap::Parser as _;
+	let cases: [(&str, &str, &[&str], &str); 3] = [
+		(
+			"log file",
+			"logfifo",
+			&["-a", "--log-file=logfifo", "src/", "dst/"],
+			"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at io.c(604) [Receiver=3.5.1]\n",
+		),
+		(
+			"batch file",
+			"batch",
+			&["-a", "--write-batch=batch", "src/", "dst/"],
+			"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [Receiver=3.5.1]\n",
+		),
+		(
+			"batch script",
+			"b.sh",
+			&["-a", "--write-batch=b", "src/", "dst/"],
+			"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at io.c(604) [Receiver=3.5.1]\n\
+			 rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n",
+		),
+	];
+	for (case, fifo_name, args, expected) in cases {
+		let dir = tempfile::tempdir().unwrap();
+		make_tree(&dir.path().join("src"));
+		let fifo = dir.path().join(fifo_name);
+		assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+		let reader = fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap();
+		{
+			let mut filler = fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap();
+			while std::io::Write::write(&mut filler, &[b'x'; 4096]).is_ok() {}
+		}
+		let rescue = release_fifo_after(fifo.clone(), Duration::from_secs(10));
+		let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
+		let cancel = host.cancel_flag_for_test();
+		let canceller = std::thread::spawn(move || {
+			std::thread::sleep(Duration::from_millis(300));
+			cancel.store(true, Ordering::Relaxed);
+		});
+		let parsed = Rsync::try_parse_from(["rsync", "--"].into_iter().chain(args.iter().copied())).unwrap();
+		let started = Instant::now();
+		let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
+		let took = started.elapsed();
+		canceller.join().unwrap();
+		drop((rescue, reader));
+		assert!(took < Duration::from_secs(5), "{case}: {took:?}");
+		assert_eq!((code, cap.err().as_str()), (RERR_SIGNAL, expected), "{case}");
+	}
 }
 
 /// A cancelled run ends with upstream's signal exit (code 20).

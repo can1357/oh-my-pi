@@ -919,11 +919,14 @@ impl Scanner {
 		let base = self.base().abs.clone();
 		let insecure = self.ctx.opts.insecure_links;
 		let confine = self.ctx.opts.confine_root.as_ref().map(PathBuf::from);
+		let cancel = Arc::clone(&self.ctx.cancel);
 		move |p: &[u8]| -> io::Result<Option<Vec<u8>>> {
 			let path = join_name(&base, p)?;
-			let opts = paths::OperatorOpts { insecure, confine: confine.as_deref() };
-			let Ok(mut file) = paths::open_operator_file_with(&fs, &path, &opts) else {
-				return Ok(None);
+			let opts = paths::OperatorOpts { insecure, confine: confine.as_deref(), cancel: &cancel };
+			let mut file = match paths::open_operator_file_with(&fs, &path, &opts) {
+				Ok(file) => file,
+				Err(err) if RsyncError::is_cancellation(&err) => return Err(err),
+				Err(_) => return Ok(None),
 			};
 			let mut data = Vec::new();
 			file.read_to_end(&mut data)?;
