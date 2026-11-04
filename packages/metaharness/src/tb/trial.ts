@@ -3,7 +3,7 @@ import * as path from "node:path";
 
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 
-import { refuseGatewayTokenInEnv } from "../gateway-models";
+import { knownGatewayTokens, refuseGatewayTokenInEnv } from "../gateway-models";
 import { installAgent } from "./agent";
 import type { AgentBinaries, AgentConfig, GatewayConfig, TbTask, TrialResult, TrialUsage, VmonConfig } from "./types";
 import { TrialVm } from "./vmon";
@@ -104,8 +104,9 @@ export async function runTrial(opts: {
 		await ensureHostDir(opts.trialDir);
 		// A task's environment reaches the guest omp's environment, which every tool call
 		// inherits, and its verifier environment reaches the verifier's shell in the guest.
-		refuseGatewayTokenInEnv(opts.task.environmentEnv, opts.gateway.token);
-		refuseGatewayTokenInEnv(opts.task.verifierEnv, opts.gateway.token);
+		const tokens = knownGatewayTokens(process.env, opts.gateway.token);
+		refuseGatewayTokenInEnv(opts.task.environmentEnv, tokens);
+		refuseGatewayTokenInEnv(opts.task.verifierEnv, tokens);
 		const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 6);
 		const vmName = `tb-${opts.task.name}-${suffix}`;
 		opts.log?.(`boot ${vmName} from ${opts.task.image}`);

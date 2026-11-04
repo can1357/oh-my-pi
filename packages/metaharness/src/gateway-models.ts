@@ -19,13 +19,26 @@ export function isGatewayTokenVar(name: string): boolean {
 }
 
 /**
+ * Every gateway token a process knows: `selected` (the one it uses, if any) and the value of
+ * each gateway token variable in `env`, its own environment. A token in either variable is a
+ * live bearer even when another one is selected, so every check refuses all of them.
+ */
+export function knownGatewayTokens(env: Record<string, string | undefined>, selected?: string): string[] {
+	const tokens = new Set<string>();
+	for (const value of [selected, ...[...GATEWAY_TOKEN_VARS].map(name => env[name])]) {
+		if (value !== undefined && value.length > 0 && value !== NO_AUTH_TOKEN) tokens.add(value);
+	}
+	return [...tokens];
+}
+
+/**
  * Refuse an environment meant for the omp process (`--env` entries and forwarded
- * `PI_*` variables) that names a gateway token variable or holds the token. omp
+ * `PI_*` variables) that names a gateway token variable or holds any of `tokens`. omp
  * reads the token from its private file; in its environment every process omp
  * starts, the model's own tool calls included, would inherit it, and the container
  * runtime would get it on its command line.
  */
-export function refuseGatewayTokenInEnv(env: Record<string, string>, token: string): void {
+export function refuseGatewayTokenInEnv(env: Record<string, string>, tokens: string | readonly string[]): void {
 	for (const name of Object.keys(env)) {
 		if (isGatewayTokenVar(name)) {
 			throw new Error(
@@ -34,21 +47,23 @@ export function refuseGatewayTokenInEnv(env: Record<string, string>, token: stri
 			);
 		}
 	}
-	refuseGatewayTokenIn(env, token, "the environment for omp");
+	refuseGatewayTokenIn(env, tokens, "the environment for omp");
 }
 
 /**
- * Refuse `value` when any string in it, key or value, holds the gateway token. Use it on
+ * Refuse `value` when any string in it, key or value, holds any of `tokens`. Use it on
  * everything that is stored (a launch request, the runner's config snapshot) or reaches omp
  * as text (settings, agent arguments, environment): the token goes only to omp's private file.
  */
-export function refuseGatewayTokenIn(value: unknown, token: string, where: string): void {
-	if (token === NO_AUTH_TOKEN || token.length === 0) return;
-	const at = findToken(value, token, where);
-	if (at !== undefined) {
-		throw new Error(
-			`${at} holds the gateway token, which must not be stored or reach omp except through its private file`,
-		);
+export function refuseGatewayTokenIn(value: unknown, tokens: string | readonly string[], where: string): void {
+	for (const token of typeof tokens === "string" ? [tokens] : tokens) {
+		if (token === NO_AUTH_TOKEN || token.length === 0) continue;
+		const at = findToken(value, token, where);
+		if (at !== undefined) {
+			throw new Error(
+				`${at} holds the gateway token, which must not be stored or reach omp except through its private file`,
+			);
+		}
 	}
 }
 

@@ -259,6 +259,12 @@ describe("omp_local", () => {
 			argv: [],
 			hostEnv: { OMP_BENCH_GATEWAY_TOKEN: "legacy-runner-bearer", REVIEW_ALIAS: "legacy-runner-bearer" },
 		},
+		{
+			name: "an inherited variable holding a METAHARNESS_GATEWAY_TOKEN that --gateway-token overrides",
+			token: "same-env-secret",
+			argv: ["--gateway-token", "override-bearer"],
+			hostEnv: { REVIEW_ALIAS: "same-env-secret" },
+		},
 	])("refuses a run with $name before anything prints or starts", ({ token, argv, hostEnv }) => {
 		const saved = { ...process.env };
 		Object.assign(process.env, { METAHARNESS_GATEWAY_TOKEN: token }, hostEnv);
@@ -285,6 +291,24 @@ describe("omp_local", () => {
 			expect(env.OMP_BENCH_GATEWAY_TOKEN).toBeUndefined();
 			expect(env.METAHARNESS_GATEWAY_TOKEN).toBeUndefined();
 			expect(Object.values(env)).not.toContain("legacy-runner-bearer");
+		} finally {
+			for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+			Object.assign(process.env, saved);
+		}
+	});
+
+	it("refuses an --env entry holding an inherited OMP_BENCH_GATEWAY_TOKEN's value while parsing, before any snapshot", () => {
+		const saved = { ...process.env };
+		delete process.env.METAHARNESS_GATEWAY_TOKEN;
+		Object.assign(process.env, {
+			OMP_BENCH_GATEWAY_TOKEN: "legacy-runner-bearer",
+			REVIEW_ALIAS: "legacy-runner-bearer",
+		});
+		try {
+			// The launch snapshot is written from the parsed config, so the parse itself must refuse it.
+			expect(() => parseArgs(["--model", "openrouter/test-model", "--env", "REVIEW_ALIAS"])).toThrow(
+				/gateway token/,
+			);
 		} finally {
 			for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
 			Object.assign(process.env, saved);
@@ -959,6 +983,43 @@ describe("manager", () => {
 					}
 				}
 				expect(await Bun.file(path.join(root, "token-inherited", "manager.json")).exists()).toBe(false);
+			} finally {
+				await manager.stop();
+			}
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	it(
+		"refuses a gatewayToken that is not a non-empty string, and keeps serving ordinary requests",
+		async () => {
+			const { root } = await scratch("manager-token-malformed-");
+			const manager = new ManagerServer(root);
+			const server = manager.start(0);
+			const port = server.port ?? 0;
+			try {
+				expect((await launchThroughManager(root, port, {})).status).toBe(201);
+				await Bun.write(path.join(root, "token-probe", "config.json"), '{"environment":{"type":"docker"}}');
+				// The token arrives as JSON; a value that is not a token must change no state.
+				for (const bad of [null, 42, "", {}]) {
+					for (const [route, body] of [
+						[
+							"/api/runs",
+							{ model: "openrouter/test-model", environment: "docker", jobName: "bad-token", gatewayToken: bad },
+						],
+						["/api/runs/token-probe/resume", { gatewayToken: bad }],
+					] as const) {
+						expect(await refusal(port, route, body)).toContain("gatewayToken must be a non-empty string");
+					}
+				}
+				expect(await refusal(port, "/api/runs/token-probe/resume", { filterErrorTypes: [42] })).toContain(
+					"filterErrorTypes must be a list of strings",
+				);
+
+				expect(await refusal(port, "/api/experiments", { id: "afterbad", goal: "ordinary goal" })).toBe(
+					"status 201",
+				);
+				expect((await launchThroughManager(root, port, { jobName: "after-bad-launch" })).status).toBe(201);
 			} finally {
 				await manager.stop();
 			}

@@ -6,6 +6,7 @@ import { connect } from "@stencil-hq/vibemon";
 import {
 	GATEWAY_TOKEN_INPUT_ENV,
 	isGatewayTokenVar,
+	knownGatewayTokens,
 	NO_AUTH_TOKEN,
 	refuseGatewayTokenIn,
 	refuseGatewayTokenInEnv,
@@ -249,10 +250,12 @@ export function parseArgs(argv: string[]): Config {
 		throw new Error("--budget must be a non-negative number");
 	}
 	if (config.agent.tools.length === 0) throw new Error("--tools must name at least one tool");
-	refuseGatewayTokenInEnv(config.agent.env, config.gatewayToken);
+	// Every token this process knows, an inherited one that --gateway-token overrides included.
+	const tokens = knownGatewayTokens(process.env, config.gatewayToken);
+	refuseGatewayTokenInEnv(config.agent.env, tokens);
 	// Provider ids, the gateway URL and every other field are written into the guest's
 	// config files or reach omp as text; only `gatewayToken` may hold the token.
-	refuseGatewayTokenIn({ ...config, gatewayToken: undefined }, config.gatewayToken, "the Terminal-Bench arguments");
+	refuseGatewayTokenIn({ ...config, gatewayToken: undefined }, tokens, "the Terminal-Bench arguments");
 	return config;
 }
 

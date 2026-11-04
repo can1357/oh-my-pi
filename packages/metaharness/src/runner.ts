@@ -25,6 +25,7 @@ import {
 	GATEWAY_TOKEN_INPUT_ENV,
 	gatewayModelsYaml,
 	isGatewayTokenVar,
+	knownGatewayTokens,
 	NO_AUTH_TOKEN,
 	refuseGatewayTokenIn,
 	refuseGatewayTokenInEnv,
@@ -434,11 +435,16 @@ export function parseArgs(argv: string[]): Config {
 	return cfg;
 }
 
-/** Refuse a config that carries the gateway token anywhere but `gatewayToken`: the rest is stored and reaches omp. */
+/**
+ * Refuse a config that carries a gateway token anywhere but `gatewayToken`: the rest is
+ * stored and reaches omp. Every token the runner knows is checked, the value of an inherited
+ * token variable that `--gateway-token` overrides included, before anything is written.
+ */
 function refuseGatewayTokenInConfig(cfg: Config): void {
-	refuseGatewayTokenInEnv(cfg.env, cfg.gatewayToken);
+	const tokens = knownGatewayTokens(process.env, cfg.gatewayToken);
+	refuseGatewayTokenInEnv(cfg.env, tokens);
 	const rest = { ...cfg, gatewayToken: undefined };
-	refuseGatewayTokenIn(rest, cfg.gatewayToken, "the runner's arguments");
+	refuseGatewayTokenIn(rest, tokens, "the runner's arguments");
 	refuseGatewayTokenReference(rest, "the runner's arguments");
 }
 
@@ -1554,7 +1560,7 @@ export function collectForwardEnv(cfg: Config): Record<string, string> {
 		setOwn(out, k, v);
 	}
 	for (const [k, v] of Object.entries(cfg.env)) setOwn(out, k, v);
-	refuseGatewayTokenInEnv(out, cfg.gatewayToken);
+	refuseGatewayTokenInEnv(out, knownGatewayTokens(process.env, cfg.gatewayToken));
 	return out;
 }
 
@@ -1612,28 +1618,24 @@ export function buildHarborEnv(
  * Harbor's environment without a gateway token anywhere. Harbor expands `${NAME}` in agent
  * env (`--ae`) and in task files from its own environment, so no gateway token variable is
  * passed on (the agent reads its token from `OMP_BENCH_GATEWAY_TOKEN_FILE`), and an inherited
- * variable whose value holds the run's token, or the value of an inherited
- * `OMP_BENCH_GATEWAY_TOKEN`, is refused before Harbor starts. Harbor hands the agent, and a
+ * variable holding any token the runner knows (the run's own, or the value of either token
+ * variable, overridden or not) is refused before Harbor starts. Harbor hands the agent, and a
  * dry run prints, every OMP_BENCH_* name, so such a name holding a token is refused too; no
  * refusal repeats a name that holds one.
  */
 function withoutGatewayTokenCopies(env: Record<string, string>, token: string): Record<string, string> {
-	const tokens = [token, env.OMP_BENCH_GATEWAY_TOKEN].filter(
-		(value): value is string => value !== undefined && value.length > 0 && value !== NO_AUTH_TOKEN,
-	);
+	const tokens = knownGatewayTokens(env, token);
 	for (const name of Object.keys(env)) if (isGatewayTokenVar(name)) delete env[name];
 	for (const [name, value] of Object.entries(env)) {
 		const named = tokens.some(known => name.includes(known));
 		if (named && name.startsWith("OMP_BENCH_")) {
 			throw new Error("an OMP_BENCH_* variable in Harbor's environment has the gateway token in its name; unset it");
 		}
-		for (const known of tokens) {
-			refuseGatewayTokenIn(
-				value,
-				known,
-				named ? "a variable in Harbor's environment" : `Harbor's environment variable ${name}`,
-			);
-		}
+		refuseGatewayTokenIn(
+			value,
+			tokens,
+			named ? "a variable in Harbor's environment" : `Harbor's environment variable ${name}`,
+		);
 	}
 	return env;
 }

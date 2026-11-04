@@ -29,6 +29,7 @@ import { buildExperiments, experimentDetail, experimentOf } from "./experiments"
 import {
 	GATEWAY_TOKEN_INPUT_ENV,
 	isGatewayTokenVar,
+	knownGatewayTokens,
 	NO_AUTH_TOKEN,
 	refuseGatewayTokenIn,
 	refuseGatewayTokenInEnv,
@@ -402,7 +403,9 @@ export class ManagerServer {
 	 * token anywhere in `extraArgs`, which are stored with the run, is refused.
 	 */
 	launch(request: LaunchRequest, gatewayToken?: string): { jobName: string; pid: number } {
-		// A token the manager was given is a live bearer whether or not this launch goes ahead.
+		// A token the manager was given is a live bearer whether or not this launch goes ahead,
+		// so it is learned at once, but only once it is known to be a token at all.
+		requireGatewayToken(gatewayToken);
 		if (gatewayToken !== undefined) this.#learnedGatewayTokens.add(gatewayToken);
 		if (request.extraArgs?.some(arg => arg === "--gateway-token" || arg.startsWith("--gateway-token="))) {
 			throw new Error(
@@ -458,8 +461,7 @@ export class ManagerServer {
 			// The runner's own parser decides what each extra argument means: it refuses an
 			// `--env` entry naming the token variable, and a host value it forwards is checked
 			// here against every token the manager knows, before the request is stored.
-			const forwarded = parseArgs(runnerArgs).env;
-			for (const known of this.#knownGatewayTokens(token)) refuseGatewayTokenInEnv(forwarded, known);
+			refuseGatewayTokenInEnv(parseArgs(runnerArgs).env, this.#knownGatewayTokens(token));
 			argv = ["bun", "src/runner.ts", ...runnerArgs];
 		}
 		if (benchmark !== "harbor") argv.push(...(request.extraArgs ?? []));
@@ -505,6 +507,10 @@ export class ManagerServer {
 		jobName: string,
 		opts: { filterErrorTypes?: string[]; gatewayToken?: string } = {},
 	): { jobName: string; pid: number } {
+		requireGatewayToken(opts.gatewayToken);
+		if (opts.filterErrorTypes !== undefined && !isStringList(opts.filterErrorTypes)) {
+			throw new Error("filterErrorTypes must be a list of strings");
+		}
 		if (opts.gatewayToken !== undefined) this.#learnedGatewayTokens.add(opts.gatewayToken);
 		const run = this.#store.getRun(jobName);
 		if (!run) throw new Error(`run ${jobName} not found`);
@@ -697,6 +703,7 @@ export class ManagerServer {
 	 * `gatewayToken` is the arm's token, as for `launch`.
 	 */
 	addArm(experimentId: string, req: AddArmRequest, gatewayToken?: string): { jobName: string; pid: number } {
+		requireGatewayToken(gatewayToken);
 		if (gatewayToken !== undefined) this.#learnedGatewayTokens.add(gatewayToken);
 		return this.launch(resolveArmLaunch(this.#store, experimentId, req), gatewayToken);
 	}
@@ -708,9 +715,7 @@ export class ManagerServer {
 
 	/** Every gateway token in the manager's own environment, under either token variable. */
 	#hostGatewayTokens(): string[] {
-		return [process.env[GATEWAY_TOKEN_INPUT_ENV], process.env.OMP_BENCH_GATEWAY_TOKEN].filter(
-			(value): value is string => value !== undefined && value.length > 0 && value !== NO_AUTH_TOKEN,
-		);
+		return knownGatewayTokens(process.env);
 	}
 
 	/**
@@ -718,7 +723,7 @@ export class ManagerServer {
 	 * of the request at hand), its own, and those of the runs it launched.
 	 */
 	#refuseKnownGatewayTokens(value: unknown, where: string, extra?: string): void {
-		for (const token of this.#knownGatewayTokens(extra)) refuseGatewayTokenIn(value, token, where);
+		refuseGatewayTokenIn(value, this.#knownGatewayTokens(extra), where);
 	}
 
 	/** `extra` (the token of the request at hand), the manager's own, and every one it has been given. */
@@ -917,4 +922,18 @@ if (import.meta.main) {
 			throw err; // preserve fail-fast for real bugs
 		});
 	}
+}
+
+/**
+ * Check a request's `gatewayToken` before any state changes: it arrives as JSON, so the type
+ * the method signature claims is not yet true. It is a non-empty string, or absent.
+ */
+function requireGatewayToken(value: unknown): void {
+	if (value !== undefined && (typeof value !== "string" || value.length === 0)) {
+		throw new Error("gatewayToken must be a non-empty string");
+	}
+}
+
+function isStringList(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every(item => typeof item === "string");
 }
