@@ -3,6 +3,7 @@
  */
 import { scheduler } from "node:timers/promises";
 import { ptree } from "@oh-my-pi/pi-utils";
+import { decodeEntities } from "@oh-my-pi/pi-utils/dom/parser";
 import type TurndownService from "@oh-my-pi/pi-utils/turndown";
 
 import type { ModelRegistry } from "../../config/model-registry";
@@ -74,11 +75,12 @@ const ATTR_VALUE_RE = /\s*=\s*(?:"([^"]*)"?|'([^']*)'?|([^\s>]*))/y;
 
 /**
  * True when a page small enough to be an interstitial holds an `<input name="js_challenge">` field.
- * One forward pass reads the markup as an HTML tokenizer does (quoted attribute values, comments,
- * raw-text elements, `<template>` contents), so a form quoted anywhere in an article is not one.
+ * One forward pass reads the markup as an HTML tokenizer does (quoted attribute values, character
+ * references, comments, raw-text elements, `<template>` contents), so a form quoted anywhere in an
+ * article is not one.
  */
 function hasChallengeForm(html: string): boolean {
-	if (html.length > CHALLENGE_PAGE_MAX_CHARS || !html.includes("js_challenge")) return false;
+	if (html.length > CHALLENGE_PAGE_MAX_CHARS) return false;
 	let templates = 0;
 	let at = 0;
 	for (;;) {
@@ -115,7 +117,7 @@ function hasChallengeForm(html: string): boolean {
 			const value = ATTR_VALUE_RE.exec(html);
 			if (value) pos = ATTR_VALUE_RE.lastIndex;
 			if (fieldName === undefined && attr[0].toLowerCase() === "name") {
-				fieldName = value ? (value[1] ?? value[2] ?? value[3]) : "";
+				fieldName = value ? decodeEntities(value[1] ?? value[2] ?? value[3]) : "";
 			}
 		}
 		at = pos + 1;
@@ -127,7 +129,8 @@ function hasChallengeForm(html: string): boolean {
 			templates++;
 		} else if (Object.hasOwn(RAW_TEXT_TAGS, tagName)) {
 			if (tagName === "plaintext") return false;
-			const end = new RegExp(`</${tagName}`, "gi");
+			// Only `</tag` followed by whitespace, `/` or `>` ends raw text; `</scripture>` is text.
+			const end = new RegExp(`</${tagName}(?=[\\s/>])`, "gi");
 			end.lastIndex = at;
 			const match = end.exec(html);
 			if (!match) return false;
