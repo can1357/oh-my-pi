@@ -3103,7 +3103,8 @@ export class InputController {
 
 	setToolsExpanded(expanded: boolean): void {
 		this.ctx.toolOutputExpanded = expanded;
-		for (const child of this.ctx.chatContainer.children) {
+		// `!`/`$` runs queued while the agent streams join the transcript later.
+		for (const child of [...this.ctx.chatContainer.children, ...this.ctx.pendingShellContainer.children]) {
 			if (isExpandable(child)) {
 				child.setExpanded(expanded);
 			}
