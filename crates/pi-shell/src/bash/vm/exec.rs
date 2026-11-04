@@ -26,7 +26,7 @@ use crate::bash::{
 	diag::Diag,
 	event::{Construct, EventData, NodeKind, Origin, WaitKey},
 	fd::FdRef,
-	host::{ResolveCtx, Resolved, Via},
+	host::{ResolveCtx, Resolved, Rlimit, Via},
 	ids::{Dialect, ModeId, UnitId, Vpid},
 	ir::{self, ComsubForm, Op, Opcode, SpawnKind, Unit},
 	mem::{self, Capture},
@@ -1741,10 +1741,7 @@ pub fn start_zsh_procsub(
 	let (r, w) = mem::pipe();
 	let (r, w) = (FdRef::mem(r), FdRef::mem(w));
 	let (mine, theirs, their_fd) = if output { (w, r, 0) } else { (r, w, 1) };
-	let fd = (3..64)
-		.rev()
-		.find(|&fd| vp.fds.get(fd).is_none_or(|h| !h.is_open()))
-		.unwrap_or_else(|| vp.fds.lowest_free(64));
+	let fd = shell_fd(vp, high_fds_fit(cx, vp), &[]);
 	let mut fds = vp.fds.clone();
 	fds.set(their_fd, Some(theirs));
 	for &(_, sibling) in &vp.procsubs {
@@ -1874,10 +1871,7 @@ pub fn start_procsub(
 	let r = FdRef::mem(r);
 	let w = FdRef::mem(w);
 	let (mine, theirs, their_fd) = if output { (w, r, 0) } else { (r, w, 1) };
-	let fd = (3..64)
-		.rev()
-		.find(|&fd| vp.fds.get(fd).is_none_or(|h| !h.is_open()))
-		.unwrap_or_else(|| vp.fds.lowest_free(64));
+	let fd = shell_fd(vp, high_fds_fit(cx, vp), &[]);
 	// The child gets the parent's fds before `fd` is set: it must not hold
 	// the parent's end (a `>( )` reader would never see end of input).
 	let mut fds = vp.fds.clone();
@@ -3224,6 +3218,27 @@ fn runs_jobs(unit: &Unit, entry: u32) -> bool {
 	})
 }
 
+/// Whether the vproc's open-file limit (its `ulimit -n`, else the host's)
+/// leaves room for the descriptors bash puts at 63 and below (process
+/// substitutions, coprocesses): with a limit of 63 or less bash keeps the
+/// lowest free descriptors instead, which every command can be given.
+fn high_fds_fit(cx: &mut Cx<'_>, vp: &Vproc) -> bool {
+	let soft = match vp.rlimits.iter().find(|(r, ..)| *r == Rlimit::Nofile) {
+		Some(&(_, soft, _)) => soft,
+		None => cx.host.rlimit(Rlimit::Nofile).ok().and_then(|(soft, _)| soft),
+	};
+	soft.is_none_or(|soft| soft > 63)
+}
+
+/// A free descriptor for a process substitution or coprocess end, not in
+/// `taken`: the highest from 63 down when they fit ([`high_fds_fit`]),
+/// else the lowest from 3 up.
+fn shell_fd(vp: &Vproc, high: bool, taken: &[i32]) -> i32 {
+	let free = |fd: &i32| !taken.contains(fd) && vp.fds.get(*fd).is_none_or(|h| !h.is_open());
+	let found = if high { (3..64).rev().find(free) } else { (3..).find(free) };
+	found.unwrap_or_else(|| vp.fds.lowest_free(64) + taken.len() as i32)
+}
+
 /// `coproc NAME cmd`: run the body at `entry` as a background child whose
 /// stdout the shell reads from `NAME[0]` and whose stdin it writes to
 /// `NAME[1]`; `NAME_PID` and `$!` are its pid. As bash's `sh_openpipe`,
@@ -3238,12 +3253,10 @@ fn start_coproc(
 	entry: u32,
 	name: BString,
 ) {
+	let high = high_fds_fit(cx, vp);
 	let mut taken: Vec<i32> = Vec::with_capacity(4);
 	while taken.len() < 4 {
-		let fd = (3..64)
-			.rev()
-			.find(|fd| !taken.contains(fd) && vp.fds.get(*fd).is_none_or(|h| !h.is_open()))
-			.unwrap_or_else(|| vp.fds.lowest_free(64) + taken.len() as i32);
+		let fd = shell_fd(vp, high, &taken);
 		taken.push(fd);
 	}
 	let (read, write) = (taken[0], taken[3]);

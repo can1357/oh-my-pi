@@ -339,19 +339,31 @@ fn child_fd(
 	}
 }
 
-/// Move every source fd above every target fd, so installing one target
-/// (`dup2`) can never clobber a source still to be installed.
+/// Move every source fd that is also a target number to a descriptor that
+/// is none, so installing one target (`dup2`) can never clobber a source
+/// still to be installed, and no source is its own target (`dup2` onto
+/// itself would keep close-on-exec). The new descriptors are the lowest
+/// free ones, not ones above every target: a target near the open-file
+/// limit leaves no room above it.
 fn lift(fds: &mut [(i32, OwnedFd)]) -> io::Result<()> {
-	let floor = fds.iter().map(|(t, _)| *t).max().unwrap_or(2).max(2) + 1;
+	let targets: Vec<i32> = fds.iter().map(|(t, _)| *t).collect();
 	for (_, fd) in fds.iter_mut() {
-		if fd.as_raw_fd() < floor {
+		// Descriptors handed out meanwhile that are targets themselves; they
+		// close when this loop step ends.
+		let mut skipped = Vec::new();
+		while targets.contains(&fd.as_raw_fd()) {
 			// SAFETY: fcntl on an fd we own; returns a new descriptor.
-			let lifted = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, floor) };
+			let lifted = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
 			if lifted < 0 {
 				return Err(io::Error::last_os_error());
 			}
 			// SAFETY: a successful F_DUPFD_CLOEXEC returned a descriptor we own.
-			*fd = unsafe { OwnedFd::from_raw_fd(lifted) };
+			let lifted = unsafe { OwnedFd::from_raw_fd(lifted) };
+			if targets.contains(&lifted.as_raw_fd()) {
+				skipped.push(lifted);
+			} else {
+				*fd = lifted;
+			}
 		}
 	}
 	Ok(())
@@ -834,6 +846,113 @@ fn errno() -> i32 {
 	io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
+/// One past the highest descriptor this process can hold, for the child's
+/// check of every descriptor when it cannot list them: the larger of its
+/// open-file limits (a descriptor opened before the soft limit was lowered
+/// stays open above it), up to 1,048,576, Linux's default `nr_open` and the
+/// highest number a process gets unless an administrator raises it. Read
+/// before a fork.
+fn descriptor_bound() -> i32 {
+	const MOST: u64 = 1 << 20;
+	let limit = match rlimit::get(Rlimit::Nofile) {
+		Ok((soft, hard)) => soft.unwrap_or(MOST).max(hard.unwrap_or(MOST)).min(MOST),
+		Err(_) => MOST,
+	};
+	i32::try_from(limit).unwrap_or(i32::MAX)
+}
+
+/// Close every descriptor marked close-on-exec, which `exec` would close.
+/// Lists the open ones in `/proc/self/fd` where it can, else checks each
+/// below `bound`. Async-signal-safe: for a forked child.
+fn close_descriptors_exec_closes(bound: i32) {
+	#[cfg(target_os = "linux")]
+	if close_listed_descriptors_exec_closes() {
+		return;
+	}
+	for fd in 0..bound {
+		close_if_closed_on_exec(fd, -1);
+	}
+}
+
+/// Close `fd` if it is marked close-on-exec and is not `keep`.
+fn close_if_closed_on_exec(fd: i32, keep: i32) {
+	if fd == keep {
+		return;
+	}
+	// SAFETY: plain descriptor calls; `fcntl` on a closed descriptor fails
+	// with `EBADF`.
+	unsafe {
+		let flags = libc::fcntl(fd, libc::F_GETFD);
+		if flags >= 0 && flags & libc::FD_CLOEXEC != 0 {
+			libc::close(fd);
+		}
+	}
+}
+
+/// [`close_descriptors_exec_closes`] over the descriptors `/proc/self/fd`
+/// lists; whether it listed them all.
+#[cfg(target_os = "linux")]
+fn close_listed_descriptors_exec_closes() -> bool {
+	// SAFETY: the path is NUL-terminated.
+	let dir = unsafe {
+		libc::open(c"/proc/self/fd".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC)
+	};
+	if dir < 0 {
+		return false;
+	}
+	let listed = close_descriptors_listed_in(dir);
+	// SAFETY: `dir` is open and owned here.
+	unsafe { libc::close(dir) };
+	listed
+}
+
+/// Read the descriptor listing open at `dir` with `getdents64` into a
+/// buffer on the stack and close each descriptor it names that is marked
+/// close-on-exec, except `dir`. Whether it read the listing to its end: a
+/// failed read other than `EINTR`, or a record it cannot parse, leaves
+/// descriptors unchecked, and the caller checks them another way.
+#[cfg(target_os = "linux")]
+fn close_descriptors_listed_in(dir: i32) -> bool {
+	let mut buffer = [0u8; 4096];
+	loop {
+		// SAFETY: `buffer` is valid for its length; the kernel writes whole
+		// `linux_dirent64` records into it.
+		let read =
+			unsafe { libc::syscall(libc::SYS_getdents64, dir, buffer.as_mut_ptr(), buffer.len()) };
+		let Ok(read) = usize::try_from(read) else {
+			if errno() == libc::EINTR {
+				continue;
+			}
+			return false;
+		};
+		if read == 0 {
+			return true;
+		}
+		// Each record: inode (8 bytes), offset (8), length (2), type (1), name.
+		let mut at = 0;
+		while at < read {
+			if at + 19 > read {
+				return false;
+			}
+			let length = usize::from(u16::from_ne_bytes([buffer[at + 16], buffer[at + 17]]));
+			if length < 19 || at + length > read {
+				return false;
+			}
+			let name = &buffer[at + 19..at + length];
+			let fd = name
+				.iter()
+				.take_while(|b| b.is_ascii_digit())
+				.try_fold(0i32, |fd, d| fd.checked_mul(10)?.checked_add(i32::from(d - b'0')));
+			if name.first().is_some_and(u8::is_ascii_digit)
+				&& let Some(fd) = fd
+			{
+				close_if_closed_on_exec(fd, dir);
+			}
+			at += length;
+		}
+	}
+}
+
 /// The spawn of a process that applies redirections itself
 /// ([`ChildRedirs`]): a bare `fork` whose child installs its fds, applies
 /// the redirections in order (an open may wait for a FIFO's other end:
@@ -858,6 +977,7 @@ fn fork_redirs(
 	let mask = prog.umask as libc::mode_t;
 	let limits = limits(prog);
 	let raw: Vec<(i32, RawFd)> = fds.iter().map(|(t, fd)| (*t, fd.as_raw_fd())).collect();
+	let fd_bound = descriptor_bound();
 	// Every signal stays blocked across the fork: the child runs with the
 	// host's handlers until it resets them, and a signal delivered then (a
 	// `kill $!` right after the spawn) would run host code and be lost
@@ -905,6 +1025,12 @@ fn fork_redirs(
 					child_fail(&exec_diag, errno(), 126, texts);
 				}
 			}
+			// The redirections below run with only the command's own
+			// descriptors, as in the child bash forks: every host descriptor
+			// `exec` would close goes now, so a lowered open-file limit
+			// leaves room for their opens and a duplication of a descriptor
+			// the command lacks fails.
+			close_descriptors_exec_closes(fd_bound);
 			libc::umask(mask);
 			for (n, &ign) in ignore.iter().enumerate().skip(1) {
 				let n = n as i32;

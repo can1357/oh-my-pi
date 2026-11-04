@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed the bash tool's shell under a low open-file limit: a background command's own redirections no longer fail for want of descriptors the shell holds, a duplication of a descriptor the command lacks fails as in Bash, and process substitutions and coprocesses take descriptors the command can be given when the limit is 63 or less
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
 ### Fixed
 
