@@ -326,6 +326,13 @@ export type ContextManagement = {
 
 export type OnDemandCompaction = { type: "summarize"; instructions?: string };
 
+/**
+ * Message threads beta (`message-threads-2026-08-12`): `create` stores the
+ * conversation under the response id; `continue` appends to the conversation
+ * stored under `previous_message_id` and omits everything sent before.
+ */
+export type ThreadParam = { type: "create" } | { type: "continue"; previous_message_id: string };
+
 export type MessageCreateParams = {
 	model: string;
 	messages: MessageParam[];
@@ -357,6 +364,8 @@ export type MessageCreateParams = {
 	fallbacks?: FallbackParam[];
 	/** Fallback credit token redeemed from a prior refusal (`fallback-credit-2026-06-01` / `fallback-credit-2026-07-01`). */
 	fallback_credit_token?: string;
+	/** Message threads beta: start or continue a server-held conversation. */
+	thread?: ThreadParam;
 };
 
 export type MessageCreateParamsStreaming = MessageCreateParams & { stream: true };

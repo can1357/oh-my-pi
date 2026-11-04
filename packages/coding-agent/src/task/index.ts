@@ -53,7 +53,7 @@ import {
 	type TaskToolSchemaInstance,
 } from "./types";
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import { AsyncJobError, type AsyncJobManager } from "../async";
+import { AsyncJobError, type AsyncJobManagerApi } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
@@ -1539,7 +1539,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * feeds the caller's aggregate counters.
 	 */
 	#registerSpawnJob(options: {
-		manager: AsyncJobManager;
+		manager: AsyncJobManagerApi;
 		toolCallId: string;
 		spawnParams: SpawnParams;
 		agentId: string;
