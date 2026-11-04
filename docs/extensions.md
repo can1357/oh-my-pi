@@ -357,6 +357,8 @@ Handlers and tool `execute` receive `ctx` with:
 - `getContextUsage()`
 - `getAsyncJobSnapshot()` returns the current session's read-only async-job snapshot, or `null` when no session owns the context
 - `compact(instructionsOrOptions?)`: accepts summary focus text or `CompactOptions`, including one-off `mode: "soft" | "remote" | "snapcompact"`, `onComplete`, `onError`, and `suppressContinuation`
+- `reloadPlugins(): Promise<void>`: reload skills, file slash commands, task-agent definitions, the capability cache, and MCP servers through the same workflow as `/reload-plugins`, without submitting a prompt or changing the editor draft. Interactive TUI only: rejects while streaming, compacting, retrying, or switching sessions, and in print, JSON, RPC, ACP, and subagent hosts (even when they provide UI methods). Successful completion shows `Plugins reloaded.`
+  Thrown reload failures reject the promise. Per-server MCP warnings and background connections retain `/reload-plugins` semantics: completion does not guarantee that every server has connected. This does not reload extension modules or the whole session; command-handler `ctx.reload()` remains the separate session/runtime reload.
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
 - `resolvePlanReview(reviewId, choice, input?)`: answer the open interactive plan review; returns `false` when the review or choice is unavailable, `refine` requires non-empty `input.feedback`, and on approvals (`execute`, `compact`, `keep`) `input.role` may name a tier from the event's `tiers` to pick the execution model (an unknown role, or a `role` on any other choice, returns `false`)
