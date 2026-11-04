@@ -27,6 +27,7 @@ import { AuthStorage, type SessionRestrictionLease, type UsageProvider } from "@
 import { AuthBrokerError, AuthBrokerStreamUnsupportedError } from "@oh-my-pi/pi-ai/auth-broker";
 import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import {
+	AccountPoolUnavailableError,
 	ApiKeyRequiredError,
 	ConfigurationError,
 	LoginCancelledError,
@@ -257,6 +258,8 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		},
 		"sessions.permits": (storage, provider, sessionId, credentialId) =>
 			storage.sessions.permits(provider, sessionId, credentialId),
+		"sessions.permitsIdentity": (storage, provider, sessionId, identityKey) =>
+			storage.sessions.permitsIdentity(provider, sessionId, identityKey),
 		"sessions.release": (storage, provider, sessionId) => storage.sessions.release(provider, sessionId),
 
 		"usage.reports": (storage, options) =>
@@ -409,6 +412,13 @@ function registerAuthErrors(): void {
 	if (authErrorsRegistered) return;
 	authErrorsRegistered = true;
 	registerRpcError("MissingApiKeyError", message => new MissingApiKeyError(undefined, message));
+	registerRpcError("AccountPoolUnavailableError", message => {
+		// A worker's turn must read the pool error's own class: that is what makes its key
+		// failure retryable rather than the end of the turn.
+		const error = new AccountPoolUnavailableError("", undefined);
+		error.message = message;
+		return error;
+	});
 	registerRpcError("OAuthRefreshUnavailableError", message => {
 		const error = new OAuthRefreshUnavailableError("", undefined);
 		error.message = message;
