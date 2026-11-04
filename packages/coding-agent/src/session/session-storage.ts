@@ -406,10 +406,9 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 			// Replacing the descriptor abandoned the old one; nothing else to do.
 		}
 		this.#fd = nextFd;
-		this.#heldIdentity = undefined;
 		writerRegistry.register(this, nextFd, this);
 		const next = fs.fstatSync(nextFd, { bigint: true });
-		this.#heldIdentity = { ino: next.ino, dev: next.dev };
+		this.#heldIdentity = fileIdentity(next);
 		return Number(next.size);
 	}
 
