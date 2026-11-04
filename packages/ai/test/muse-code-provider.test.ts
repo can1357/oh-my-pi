@@ -7,8 +7,6 @@ import {
 	mapOpenAIResponsesToolChoiceForTools,
 	streamOpenAIResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import { encodeResponsesToolName } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import { toolNamesByWire } from "@oh-my-pi/pi-ai/utils/tool-names";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry/registry";
 import type { AssistantMessage, Context, FetchImpl, Tool, ToolChoice } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -201,86 +199,58 @@ describe("Muse Code provider", () => {
 		]);
 	});
 
-	test("forces a named tool_choice under the same wire name it declares", () => {
-		const bash: Tool = { name: "bash", description: "Run a command.", parameters: type({ command: "string" }) };
-		const namedChoice = {
-			...seedModels<"openai-responses">("muse-code")[0]!,
-			compat: { supportsToolChoice: true, supportsNamedToolChoice: true },
-		};
-		expect(
-			mapOpenAIResponsesToolChoiceForTools({ type: "tool", name: "bash" }, [bash], buildModel(namedChoice)),
-		).toEqual({ type: "function", name: "_bash" });
-		// A host without the prefix keeps the plain name.
-		const meta = buildModel({
-			...seedModels<"openai-responses">("meta")[0]!,
-			compat: { supportsToolChoice: true, supportsNamedToolChoice: true },
-		});
-		expect(mapOpenAIResponsesToolChoiceForTools({ type: "tool", name: "bash" }, [bash], meta)).toEqual({
-			type: "function",
-			name: "bash",
-		});
-	});
-
-	test("keeps the forced tool when a string-only host must receive it as required", () => {
+	test("forces a named tool_choice under the wire name it declares", () => {
 		const bash: Tool = { name: "bash", description: "Run a command.", parameters: type({ command: "string" }) };
 		const read: Tool = { name: "read", description: "Read a file.", parameters: type({ path: "string" }) };
-		const model = buildModel({
-			...seedModels<"openai-responses">("muse-code")[0]!,
-			compat: { supportsToolChoice: true, supportsForcedToolChoice: true, supportsNamedToolChoice: false },
-		});
-		const { params } = buildParams(
-			model,
-			{ messages: [{ role: "user", content: "list files", timestamp: 1 }], tools: [bash, read] },
-			{ toolChoice: { type: "tool", name: "bash" } },
-			undefined,
-		);
-		// The named choice is encoded before the catalogue restriction, so the
-		// surviving tool still matches and `required` forces it.
-		expect(params.tools?.map(tool => (tool as { name?: string }).name)).toEqual(["_bash"]);
-		expect(params.tool_choice).toBe("required");
+		const build = (supportsNamedToolChoice: boolean) =>
+			buildParams(
+				buildModel({
+					...seedModels<"openai-responses">("muse-code")[0]!,
+					compat: { supportsToolChoice: true, supportsForcedToolChoice: true, supportsNamedToolChoice },
+				}),
+				{ messages: [{ role: "user", content: "list files", timestamp: 1 }], tools: [bash, read] },
+				{ toolChoice: { type: "tool", name: "bash" } },
+				undefined,
+			).params;
+		expect(build(true).tool_choice).toEqual({ type: "function", name: "_bash" });
+		// A string-only host gets the catalogue restricted to the forced tool instead.
+		const stringOnly = build(false);
+		expect(stringOnly.tools?.map(tool => (tool as { name?: string }).name)).toEqual(["_bash"]);
+		expect(stringOnly.tool_choice).toBe("required");
 	});
 
-	test("builds the wire-name table after schema quarantine", () => {
-		// A 63-character name prefixes to 64, which is exactly the wire name of a
-		// 64-character name starting with `_`. When the latter is quarantined for
-		// an invalid schema, the request must still declare the surviving tool
-		// instead of failing the turn on a collision that never reaches the wire.
+	test("derives wire names from the tools that survive schema quarantine", () => {
+		// A 63-character name prefixes to 64, the wire name of the unprefixable
+		// 64-character `_` + name.
 		const long63 = "a".repeat(63);
-		const bad: Tool = {
-			name: `_${long63}`,
-			description: "invalid nullable-enum schema",
+		const good: Tool = { name: long63, description: "valid", parameters: type({}) };
+		const twin: Tool = { name: `_${long63}`, description: "valid", parameters: type({}) };
+		const quarantined: Tool = {
+			...twin,
 			parameters: {
 				type: "object",
 				properties: { choice: { enum: ["A", "B"], type: "null" } },
 				required: ["choice"],
 			},
 		};
-		const good: Tool = { name: long63, description: "valid", parameters: type({}) };
-		const model = buildModel(seedModels<"openai-responses">("muse-code")[0]!);
-		const { params } = buildParams(
-			model,
-			{ messages: [{ role: "user", content: "go", timestamp: 1 }], tools: [bad, good] },
-			undefined,
-			undefined,
-		);
-		expect(params.tools?.map(tool => (tool as { name?: string }).name)).toEqual([`_${long63}`]);
-	});
+		const model = buildModel({
+			...seedModels<"openai-responses">("muse-code")[0]!,
+			compat: { supportsToolChoice: true, supportsForcedToolChoice: true, supportsNamedToolChoice: true },
+		});
+		const build = (tools: Tool[], toolChoice?: ToolChoice) =>
+			buildParams(
+				model,
+				{ messages: [{ role: "user", content: "go", timestamp: 1 }], tools },
+				{ toolChoice },
+				undefined,
+			);
 
-	test("leaves names the prefix would push past the host limit unprefixed and rejects collisions", () => {
-		const tool = (name: string): Tool => ({ name, description: "", parameters: type({}) });
-		const naming = { prefix: "_", maxLength: 64 };
-		const longest = "a".repeat(64);
-		expect(encodeResponsesToolName(longest, naming)).toBe(longest);
-		expect(encodeResponsesToolName("a".repeat(63), naming)).toBe(`_${"a".repeat(63)}`);
-		// A name that already starts with the prefix gets a second one and maps back intact.
-		expect(toolNamesByWire([tool("_private")], name => encodeResponsesToolName(name, naming)).get("__private")).toBe(
-			"_private",
-		);
-		// `_abc` is too long to prefix under a 4-character limit, and `abc` prefixes to `_abc`.
-		expect(() =>
-			toolNamesByWire([tool("_abc"), tool("abc")], name =>
-				encodeResponsesToolName(name, { prefix: "_", maxLength: 4 }),
-			),
-		).toThrow('Tool names "_abc" and "abc" both encode as "_abc"');
+		// Two declared tools on one wire name could not be told apart.
+		expect(() => build([twin, good])).toThrow(`both encode as "_${long63}"`);
+		// A quarantined twin never reaches the wire: no collision, and forcing it
+		// must not resolve to the surviving tool's wire name.
+		const { params } = build([quarantined, good], { type: "tool", name: quarantined.name });
+		expect(params.tools?.map(tool => (tool as { name?: string }).name)).toEqual([`_${long63}`]);
+		expect(params.tool_choice).toBeUndefined();
 	});
 });

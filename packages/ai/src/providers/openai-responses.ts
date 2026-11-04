@@ -876,7 +876,7 @@ const streamOpenAIResponsesOnce = (
 			};
 			// Rebuilt with each request so the table reflects the tools that
 			// survived construction (schema quarantine, strict-mode retry).
-			let toolNamesByWire: ReadonlyMap<string, string> | undefined;
+			let wireToolNames: ReadonlyMap<string, string> | undefined;
 			const prepareRequest = async (disableStrictTools = false) => {
 				const builtParams = buildParams(
 					model,
@@ -888,7 +888,7 @@ const streamOpenAIResponsesOnce = (
 					chainState?.canAppend ? chainState.lastParams?.input : undefined,
 				);
 				const { params, trailingScaffoldingItems } = builtParams;
-				toolNamesByWire = builtParams.toolNamesByWire;
+				wireToolNames = builtParams.toolNamesByWire;
 				if (chainState && !chainState.disabled) params.store = true;
 				applyReasoningEffortFallbackForRequest(params);
 				const chained: OpenAIResponsesChainedParams =
@@ -1232,7 +1232,7 @@ const streamOpenAIResponsesOnce = (
 							sawTerminalResponseEvent = true;
 						},
 						requestServiceTier: options?.serviceTier,
-						toolNamesByWire,
+						toolNamesByWire: wireToolNames,
 					});
 
 					const localAbortReason = abortTracker.getLocalAbortReason();
@@ -1352,7 +1352,7 @@ const streamOpenAIResponsesOnce = (
 											resumedSawTerminal = true;
 										},
 										requestServiceTier: options?.serviceTier,
-										toolNamesByWire,
+										toolNamesByWire: wireToolNames,
 									},
 								);
 								const resumedLocalAbort = abortTracker.getLocalAbortReason();
@@ -1796,7 +1796,6 @@ export function buildParams(
 	const canReconstructReasoningReplay =
 		!policy.reasoning.filterReasoningHistory || policy.reasoning.allowsSyntheticReasoningContentForToolCalls;
 	const toolNaming = responsesToolNaming(model);
-	const declaredFunctionTools: Tool[] = [];
 	const messages = buildResponsesInput({
 		model,
 		context,
@@ -1887,31 +1886,29 @@ export function buildParams(
 	// `StreamOptions.frequencyPenalty` is intentionally dropped for this provider.
 
 	let strictToolsApplied = false;
+	let wireToolNames: ReadonlyMap<string, string> | undefined;
 	if (context.tools) {
 		const disableStrictTools =
 			disableStrictToolsOverride || isStrictToolsDisabledForScope(providerSessionState, strictToolsScope);
 		const strictMode = !disableStrictTools && model.compat.supportsStrictMode !== false;
-		params.tools = convertTools(context.tools, strictMode, model, undefined, declaredFunctionTools);
-		strictToolsApplied = params.tools.some(t => (t as { strict?: boolean }).strict === true);
+		const emittedTools: Tool[] = [];
+		const tools = convertTools(context.tools, strictMode, model, undefined, emittedTools);
+		params.tools = tools;
+		strictToolsApplied = tools.some(t => (t as { strict?: boolean }).strict === true);
+		if (toolNaming) {
+			// Built from what was declared, so returned calls map back to their tool
+			// and a quarantined tool cannot cause a false wire-name collision.
+			wireToolNames = toolNamesByWire(
+				emittedTools.filter((_, index) => tools[index]?.type === "function"),
+				name => encodeResponsesToolName(name, toolNaming),
+			);
+		}
 		if (options?.toolChoice) {
 			// Map tool_choice against the tools that survived quarantine, not the
 			// original list: a forced choice for a dropped tool — or "required" when
 			// every tool was dropped — would otherwise send a tool_choice with no
 			// matching tool, which the provider rejects just like the bad schema did (#2652).
-			const emittedNames = new Set(
-				params.tools.map(t => (t as { name?: string }).name).filter((n): n is string => n !== undefined),
-			);
-			const emittedComputer = params.tools.some(tool => tool.type === "computer");
-			const survivingTools =
-				params.tools.length === context.tools.length
-					? context.tools
-					: context.tools.filter(
-							t =>
-								emittedNames.has(t.customWireName ?? t.name) ||
-								emittedNames.has(encodeResponsesToolName(t.name, toolNaming)) ||
-								(t.native?.type === "computer" && emittedComputer),
-						);
-			const toolChoice = mapOpenAIResponsesToolChoiceForTools(options.toolChoice, survivingTools, model);
+			const toolChoice = mapOpenAIResponsesToolChoiceForTools(options.toolChoice, emittedTools, model);
 			if (toolChoice !== undefined && params.tools.length > 0) {
 				if (
 					typeof toolChoice === "object" &&
@@ -1977,11 +1974,7 @@ export function buildParams(
 		trailingScaffoldingItems = 1;
 	}
 
-	const functionToolNames =
-		toolNaming && declaredFunctionTools.length > 0
-			? toolNamesByWire(declaredFunctionTools, name => encodeResponsesToolName(name, toolNaming))
-			: undefined;
-	return { params, trailingScaffoldingItems, strictToolsApplied, toolNamesByWire: functionToolNames };
+	return { params, trailingScaffoldingItems, strictToolsApplied, toolNamesByWire: wireToolNames };
 }
 
 /**
@@ -2104,8 +2097,8 @@ export function convertTools(
 		logger.warn(
 			`Tool "${toolName}" omitted from the openai-responses request: its parameter schema is invalid for this provider at ${schemaPath} (an enum/const value cannot match its declared type). Other tools are unaffected.`,
 		),
-	/** Filled with the tools that survive as function declarations, in wire order. */
-	declaredFunctionTools?: Tool[],
+	/** Filled with the source tool of each returned entry, index-aligned with the result. */
+	emittedTools?: Tool[],
 ): OpenAITool[] {
 	const allowFreeform = supportsFreeformApplyPatch(model);
 	const rejectRootObjectUnion = model.compat.rejectRootObjectUnion;
@@ -2113,6 +2106,7 @@ export function convertTools(
 	const out: OpenAITool[] = [];
 	for (const tool of tools) {
 		if (tool.native?.type === "computer" && model.supportsComputerUse === true) {
+			emittedTools?.push(tool);
 			out.push({ type: "computer" });
 			continue;
 		}
@@ -2120,6 +2114,7 @@ export function convertTools(
 		// tool as a plain function tool (name/description/schema below), so
 		// function-calling models can still drive the desktop.
 		if (allowFreeform && tool.customFormat) {
+			emittedTools?.push(tool);
 			out.push({
 				type: "custom",
 				// Tool advertises its wire-level name (e.g. `apply_patch`) — the
@@ -2158,7 +2153,7 @@ export function convertTools(
 			onQuarantine(tool.name, violation);
 			continue;
 		}
-		declaredFunctionTools?.push(tool);
+		emittedTools?.push(tool);
 		out.push({
 			type: "function",
 			name: encodeResponsesToolName(tool.name, toolNaming),
