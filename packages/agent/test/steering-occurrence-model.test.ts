@@ -399,7 +399,15 @@ async function execute(operations: readonly Op[]): Promise<Result> {
 			}
 			settleWait();
 		}
-		if (event.type === "message_end") check("message_end");
+		if (event.type === "message_end") {
+			check("message_end");
+			if (watch?.mode === "record" && (watch.object === undefined || numberOf(event.message) === watch.object)) {
+				const trigger = watch;
+				watch = undefined;
+				for (const child of trigger.body ?? []) applySync(child);
+				check("record listener action");
+			}
+		}
 		if (event.type === "agent_end") {
 			for (const queue of ["steering", "followUp"] as const) {
 				const restored = batches.flatMap(batch =>
@@ -546,12 +554,16 @@ async function execute(operations: readonly Op[]): Promise<Result> {
 		let results: Array<LiveSteerClaim | undefined>;
 		try {
 			results =
-				op.count === 2 ? await Promise.all([live.claim(signal), live.claim(signal)]) : [await live.claim(signal)];
+				op.mode === "reverse"
+					? [await live.claim(signal), await live.claim(signal)]
+					: op.count === 2
+						? await Promise.all([live.claim(signal), live.claim(signal)])
+						: [await live.claim(signal)];
 		} finally {
 			liveDepth--;
 		}
 		const taken = batches.slice(start).filter(batch => batch.live);
-		for (let i = 0; i < results.length; i++) {
+		for (const i of op.mode === "reverse" ? [1, 0] : results.map((_, index) => index)) {
 			const result = results[i];
 			const batch = taken[i];
 			if (!batch) {
@@ -571,7 +583,11 @@ async function execute(operations: readonly Op[]): Promise<Result> {
 			}
 			same("live-handover", result.messages.map(numberOf), nums(items), `claim ${i}`);
 			for (const o of items) o.delivered = true;
-			const accept = op.mode === "accept" || (op.mode === "first" && i === 0) || (op.mode === "second" && i === 1);
+			const accept =
+				op.mode === "reverse" ||
+				op.mode === "accept" ||
+				(op.mode === "first" && i === 0) ||
+				(op.mode === "second" && i === 1);
 			if (accept) {
 				result.accept();
 				accepted.push(...items);
@@ -708,7 +724,7 @@ function generate(seed: number): Op[] {
 	const prepare: Op = { type: "prepare", mode: pick(["none", "plain", "context"]), object };
 	const action: Op = { type: pick(["remove", "clear", "withdraw"]), object };
 	const ops: Op[] = [];
-	switch (seed % 18) {
+	switch (seed % 20) {
 		case 0:
 			ops.push(
 				prepare,
@@ -886,6 +902,42 @@ function generate(seed: number): Op[] {
 			// Prompt input that is also a queued occurrence, first in the request.
 			ops.push(prepare, enqueue(object, pick([1, 2])), run([], "prompt-first", object));
 			break;
+		case 18:
+			// Prepared context that is a later batch's message, with a withdrawal or removal at one of its records.
+			ops.push(
+				run([
+					{ type: "prepare", mode: "context", object },
+					enqueue(agentObject),
+					claim("accept"),
+					{ type: "prepare", mode: "none" },
+					enqueue(object),
+					claim(pick(["accept", "reject"])),
+					{
+						type: "watch",
+						mode: "record",
+						object,
+						body: [{ type: pick(["withdraw", "remove", "clear"]), object }],
+					},
+				]),
+			);
+			break;
+		case 19:
+			// Two claims accepted in reverse order, their prepared context one object.
+			ops.push(
+				run([
+					{ type: "prepare", mode: "context", object },
+					enqueue(agentObject),
+					enqueue(pick([6, 7])),
+					claim("reverse", 2),
+					{
+						type: "watch",
+						mode: "record",
+						object,
+						body: [{ type: pick(["withdraw", "remove", "clear"]), object }],
+					},
+				]),
+			);
+			break;
 	}
 	// Mix fresh and reused objects before another real run. Never mutate message identities for tagging.
 	for (let i = 0; i < 2 + Math.floor(random() * 4); i++) {
@@ -972,6 +1024,34 @@ it("keeps a held promotion on its own occurrence when overlapping takes accept o
 	expect(result.violations).toEqual([]);
 });
 
+it("records prepared context that is a later batch's message as context, not as that message", async () => {
+	const result = await execute([
+		run([
+			{ type: "prepare", mode: "context", object: 2 },
+			enqueue(0),
+			claim("accept"),
+			{ type: "prepare", mode: "none" },
+			enqueue(2),
+			claim("accept"),
+			{ type: "watch", mode: "record", object: 2, body: [{ type: "withdraw" }] },
+		]),
+	]);
+	expect(result.violations).toEqual([]);
+});
+
+it("gives shared prepared context to each batch when claims are accepted in reverse order", async () => {
+	const result = await execute([
+		run([
+			{ type: "prepare", mode: "context", object: 4 },
+			enqueue(0),
+			enqueue(2),
+			claim("reverse", 2),
+			{ type: "watch", mode: "record", object: 4, body: [{ type: "withdraw" }] },
+		]),
+	]);
+	expect(result.violations).toEqual([]);
+});
+
 it("keeps every aliased queued occurrence in one place, with its own delivery, promotion, allowance and gate lease", async () => {
 	const started = performance.now();
 	const sequences = 2000;
@@ -988,7 +1068,7 @@ it("keeps every aliased queued occurrence in one place, with its own delivery, p
 		requests += result.requests;
 		for (const branch of result.coverage) coverage.add(branch);
 		for (const v of result.violations) {
-			const key = `${v.rule}/shape-${seed % 16}`;
+			const key = `${v.rule}/shape-${seed % 20}`;
 			if (!failures.has(key)) failures.set(key, { seed, rule: v.rule, operations, detail: v.detail });
 		}
 	}

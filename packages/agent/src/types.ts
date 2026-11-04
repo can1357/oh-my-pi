@@ -333,18 +333,18 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	onLiveSteeringTaken?: (messages: AgentMessage[]) => void;
 
 	/**
-	 * Queued input the loop was handed and is about to put into a provider request (at a boundary, or
-	 * before live steering hands it to the provider), without what the host took back since. The loop
-	 * neither sends nor records what this drops.
+	 * One list of queued input the loop was handed (as the host handed it, or as this hook returned it) and is
+	 * about to put into a provider request (at a boundary, or before live steering hands it to the provider),
+	 * without what the host took back since. The loop neither sends nor records what this drops.
 	 */
-	keepQueuedInput?: (messages: AgentMessage[], live: boolean) => AgentMessage[];
+	keepQueuedInput?: (messages: AgentMessage[]) => AgentMessage[];
 
 	/**
-	 * The loop put `messages` into a provider request, or live steering handed them to the provider
-	 * (`live`, kept from the batch the live take returned as `taken`): they are delivered, so the host can no
-	 * longer take them back, and the loop records them.
+	 * The loop put `segments` into a provider request, in order, or live steering handed them to the provider
+	 * (`live`): they are delivered, so the host can no longer take them back, and the loop records them. Each
+	 * segment is a list as the host or {@link keepQueuedInput} returned it, or one the host never saw (asides).
 	 */
-	commitQueuedInput?: (messages: readonly AgentMessage[], live: boolean, taken?: readonly AgentMessage[]) => void;
+	commitQueuedInput?: (segments: readonly (readonly AgentMessage[])[], live: boolean) => void;
 
 	/**
 	 * The provider handed back the live-steered `messages` (the same list passed to

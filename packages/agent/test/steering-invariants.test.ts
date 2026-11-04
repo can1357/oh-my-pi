@@ -3107,3 +3107,109 @@ describe("steering invariants: the round-twenty-one reproductions", () => {
 		expect(transcriptTexts(agent)).not.toContain("V");
 	});
 });
+
+/**
+ * Round twenty-two: the record ledger says which holder each request occurrence is from where the Agent
+ * handed it out, never from the message object. Prepared context, an aside and a queued message can be one
+ * object; claims can be accepted out of order. Each record ends exactly its own occurrence.
+ */
+describe("steering invariants: the round-twenty-two reproductions", () => {
+	for (const alias of [false, true]) {
+		it(`prepared context ${alias ? "that is the next batch's message" : "of its own"} keeps its own place in the ledger`, async () => {
+			const { agent, mock } = createAgent();
+			const [a, b, c] = [person("A"), person("B"), person("C")];
+			const context = alias ? b : person("X");
+			agent.prepareQueuedMessages = messages => ({ commit: () => (messages[0] === a ? [context] : [c]) });
+			let first = true;
+			let acted = false;
+			let withdrawn: AgentMessage[] = [];
+			const ends: string[][] = [];
+			agent.subscribe(event => {
+				if (event.type === "agent_end") ends.push(texts(event.messages.filter(message => message.role === "user")));
+				if (acted || event.type !== "message_end" || event.message !== context) return;
+				acted = true;
+				withdrawn = agent.withdrawUndeliveredQueuedMessages().steering;
+				agent.abort();
+			});
+			agent.streamFn = async (model, streamContext, options) => {
+				if (first && options?.liveSteering && options.signal) {
+					first = false;
+					for (const message of [a, b]) {
+						agent.steer(message);
+						(await options.liveSteering.claim(options.signal))?.accept();
+					}
+				}
+				return mock.stream(model, streamContext, options);
+			};
+
+			await agent.prompt("start");
+
+			const expected = ["start", "A", messageText(context)];
+			expect(acted).toBe(true);
+			expect(withdrawn).toEqual([b]);
+			expect(transcriptTexts(agent)).toEqual(expected);
+			expect(ends).toEqual([expected]);
+		});
+
+		it(`claims accepted out of order keep each context with its own batch (contexts are one object: ${alias})`, async () => {
+			const { agent, mock } = createAgent();
+			const [a, b, c] = [person("A"), person("B"), person("C")];
+			const d = alias ? c : person("D");
+			agent.prepareQueuedMessages = messages => ({ commit: () => (messages[0] === a ? [c] : [d]) });
+			let first = true;
+			let acted = false;
+			let withdrawn: AgentMessage[] = [];
+			agent.subscribe(event => {
+				if (acted || event.type !== "message_end" || event.message !== d) return;
+				acted = true;
+				withdrawn = agent.withdrawUndeliveredQueuedMessages().steering;
+				agent.abort();
+			});
+			agent.streamFn = async (model, context, options) => {
+				if (first && options?.liveSteering && options.signal) {
+					first = false;
+					agent.steer(a);
+					const one = await options.liveSteering.claim(options.signal);
+					agent.steer(b);
+					const two = await options.liveSteering.claim(options.signal);
+					two?.accept();
+					one?.accept();
+				}
+				return mock.stream(model, context, options);
+			};
+
+			await agent.prompt("start");
+
+			expect(acted).toBe(true);
+			expect(withdrawn).toEqual([a]);
+			expect(transcriptTexts(agent)).toEqual(["start", "B", messageText(d)]);
+		});
+
+		it(`a stop aside ${alias ? "that is a queued follow-up's object" : "of its own"} does not record the follow-up`, async () => {
+			const { agent } = createAgent();
+			const b = person("B");
+			const aside = alias ? b : person("X");
+			let supplied = false;
+			let acted = false;
+			let withdrawn: AgentMessage[] = [];
+			agent.setAsideMessageProvider(boundary => {
+				if (boundary !== "stop" || supplied) return [];
+				supplied = true;
+				agent.followUp(b);
+				return [aside];
+			});
+			agent.subscribe(event => {
+				if (acted || event.type !== "message_end" || event.message !== aside) return;
+				acted = true;
+				withdrawn = agent.withdrawUndeliveredQueuedMessages().followUp;
+				agent.abort();
+			});
+
+			await agent.prompt("start");
+
+			expect(acted).toBe(true);
+			expect(withdrawn).toEqual([b]);
+			expect(transcriptTexts(agent)).toEqual(["start", messageText(aside)]);
+		});
+	}
+});

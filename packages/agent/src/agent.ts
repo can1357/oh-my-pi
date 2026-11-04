@@ -655,7 +655,7 @@ interface QueuedMessageDelivery {
 	additional: readonly AgentMessage[];
 	/** Which of `messages` are promoted occurrences, by index ({@link SteeringQueue}). */
 	promoted?: readonly boolean[];
-	/** The loop holds the unit: {@link Agent.removeQueuedMessages} takes it back through {@link Agent.#takenBack}. */
+	/** The loop was handed the unit ({@link Agent.#stillHeld}): its records say where each occurrence is held. */
 	handed?: true;
 	/** The loop put the unit into a provider request: it is delivered, and only its record is still to come. */
 	committed?: true;
@@ -666,12 +666,19 @@ interface QueuedMessageDelivery {
 /** Which kind of holder a record ended. */
 type RecordedHolder = "live" | "delivery" | "none";
 
-/** One occurrence a request carries, with the holder it is; prepared context and asides have none. */
-interface RecordedOccurrence {
-	message: AgentMessage;
+/**
+ * Where the Agent holds one occurrence it handed the loop: the live-steered entry or delivery record holding it,
+ * or the batch whose prepared context it is. An aside or prompt input has neither.
+ */
+interface HandedOccurrence {
 	holder?: LiveSteeredEntry | QueuedMessageDelivery;
 	/** The batch whose prepared context this occurrence is. */
 	context?: QueuedMessageDelivery | LiveSteeredBatch;
+}
+
+/** One occurrence a request carries, with where the Agent holds it ({@link HandedOccurrence}). */
+interface RecordedOccurrence extends HandedOccurrence {
+	message: AgentMessage;
 	/** {@link Agent.withdrawUndeliveredQueuedMessages} took it back: the run skips this record. */
 	suppressed?: true;
 }
@@ -738,17 +745,13 @@ export class Agent {
 	/** Dequeued originals remain recoverable until their transcript events arrive. */
 	#queuedMessageDeliveries = new Set<QueuedMessageDelivery>();
 	/**
-	 * Occurrences {@link removeQueuedMessages} took back after the run was handed them, by run, counted per
-	 * message object: the run drops each one once, where it would put it into a provider request
-	 * ({@link #keepHandedInput}), so a later occurrence of the same object is delivered as usual.
+	 * For each list the Agent handed the loop (a dequeued batch, live steering kept or delivered from one), where
+	 * it holds the occurrence at each position. Keep, commit, accept, release and the record ledger read this and
+	 * never match message objects, so one object queued twice stays two occurrences.
 	 */
-	#takenBack = new WeakMap<AbortController, Map<AgentMessage, number>>();
-	/** The live-steered entries each live hand-over committed, by the list it handed, so a declined one releases exactly those. */
-	#liveCommits = new WeakMap<readonly AgentMessage[], LiveSteeredEntry[]>();
-	/** The delivery record each handed batch came from, by the list handed over, so a live take adopts its own. */
-	#batchRecords = new WeakMap<readonly AgentMessage[], QueuedMessageDelivery>();
-	/** The live-steered entries each live take adopted, by the list the take returned. */
-	#adoptedBy = new WeakMap<readonly AgentMessage[], LiveSteeredEntry[]>();
+	#handed = new WeakMap<readonly AgentMessage[], HandedOccurrence[]>();
+	/** Batches whose prepared context was taken back with them: it is never sent or recorded. */
+	#contextTakenBack = new WeakSet<QueuedMessageDelivery | LiveSteeredBatch>();
 	/**
 	 * Per run, the occurrences its requests carry and have not recorded yet, in request order, each with the
 	 * holder it is (none for prepared context and asides), so {@link appendMessage} records exactly that holder.
@@ -1460,14 +1463,17 @@ export class Agent {
 	 * What a delivery record just announced still gives the run: a listener of that announcement may have
 	 * removed some of it ({@link removeQueuedMessages}) or taken it all back ({@link withdrawUndeliveredQueuedMessages},
 	 * {@link clearAllQueues}), and the run must not hand the provider input it will neither record nor put back.
-	 * From here on the run holds the unit, so a removal takes it back through {@link #takenBack}.
+	 * From here on the run holds the unit, and the returned list says where each occurrence in it is held.
 	 */
 	#stillHeld(record: QueuedMessageDelivery): AgentMessage[] {
 		if (!this.#queuedMessageDeliveries.has(record)) return [];
 		record.handed = true;
-		const pending = record.next === 0 ? record.messages : record.messages.slice(record.next);
-		const batch = record.additional.length > 0 ? [...pending, ...record.additional] : pending;
-		this.#batchRecords.set(batch, record);
+		const pending = record.messages.slice(record.next);
+		const batch = [...pending, ...record.additional];
+		this.#handed.set(batch, [
+			...pending.map((): HandedOccurrence => ({ holder: record })),
+			...record.additional.map((): HandedOccurrence => ({ context: record })),
+		]);
 		return batch;
 	}
 
@@ -1576,67 +1582,39 @@ export class Agent {
 	/**
 	 * Move steering live steering took out of the queue-delivery records into {@link #liveSteered}: the
 	 * pending messages of the record the take was handed ({@link #stillHeld}), never a record a request
-	 * already carries, which is delivered.
+	 * already carries, which is delivered. The taken list then says which entry holds each occurrence.
 	 */
 	#adoptLiveSteering(taken: readonly AgentMessage[]): void {
-		let adopted = false;
+		const provenance = this.#handed.get(taken);
+		const own = provenance?.find(item => item.holder && "queue" in item.holder)?.holder;
+		if (!provenance || !own || !("queue" in own) || !this.#queuedMessageDeliveries.has(own) || own.committed) return;
+		// Context prepared for the batch goes with the batch's entries.
+		const batch: LiveSteeredBatch | undefined =
+			own.next === 0 && own.additional.length > 0 ? { additional: own.additional } : undefined;
 		const entries: LiveSteeredEntry[] = [];
-		// A take hands over exactly one delivery record's pending messages (with that record's prepared
-		// context after them, which is not a message to adopt), so it adopts exactly those: another take of
-		// the same message object may have dequeued a record of its own since.
-		const own = this.#batchRecords.get(taken);
-		const ownHeld = own !== undefined && this.#queuedMessageDeliveries.has(own) && !own.committed;
-		const wanted = new Map<AgentMessage, number>();
-		if (!ownHeld) for (const message of taken) wanted.set(message, (wanted.get(message) ?? 0) + 1);
-		const take = (message: AgentMessage): boolean => {
-			const count = wanted.get(message);
-			if (!count) return false;
-			wanted.set(message, count - 1);
-			return true;
-		};
-		const records = ownHeld ? [own] : [...this.#queuedMessageDeliveries].reverse();
-		for (const delivery of records) {
-			if (delivery.committed) continue;
-			const adopting = new Set<number>();
-			for (let i = delivery.next; i < delivery.messages.length; i++) {
-				if (ownHeld || take(delivery.messages[i])) adopting.add(i);
-			}
-			if (adopting.size === 0) continue;
-			const pending = delivery.messages.slice(delivery.next);
-			const kept = pending.filter((_, offset) => !adopting.has(delivery.next + offset));
-			// Context prepared for a batch taken whole goes with that batch's entries.
-			const batch =
-				kept.length === 0 && delivery.additional.length > 0 ? { additional: delivery.additional } : undefined;
-			const keptPromoted: boolean[] = [];
-			adopted = true;
-			for (let i = delivery.next; i < delivery.messages.length; i++) {
-				const message = delivery.messages[i];
-				const promoted = delivery.promoted?.[i] === true;
-				if (!adopting.has(i)) {
-					keptPromoted.push(promoted);
-					continue;
-				}
-				// Each occurrence keeps its promotion while live-steered, so the run's end puts it back promoted.
-				const entry: LiveSteeredEntry = { message, controller: delivery.controller };
-				if (batch) entry.batch = batch;
-				if (delivery.unit) entry.unit = delivery.unit;
-				if (promoted) entry.promoted = true;
-				this.#liveSteered.push(entry);
-				entries.push(entry);
-			}
-			if (kept.length === 0) {
-				this.#queuedMessageDeliveries.delete(delivery);
-			} else {
-				delivery.messages = kept;
-				delivery.promoted = keptPromoted.includes(true) ? keptPromoted : undefined;
-				delivery.next = 0;
-			}
+		for (let i = own.next; i < own.messages.length; i++) {
+			// Each occurrence keeps its promotion while live-steered, so the run's end puts it back promoted.
+			const entry: LiveSteeredEntry = { message: own.messages[i], controller: own.controller };
+			if (batch) entry.batch = batch;
+			if (own.unit) entry.unit = own.unit;
+			if (own.promoted?.[i] === true) entry.promoted = true;
+			this.#liveSteered.push(entry);
+			entries.push(entry);
 		}
-		this.#adoptedBy.set(taken, entries);
+		this.#queuedMessageDeliveries.delete(own);
+		let next = 0;
+		this.#handed.set(
+			taken,
+			provenance.map((item): HandedOccurrence => {
+				if (item.holder === own) return { holder: entries[next++] };
+				if (item.context === own) return { context: batch ?? own };
+				return item;
+			}),
+		);
 		// The adopted messages move into #liveSteered, which queue snapshots
 		// (peekLiveSteeredMessages) count as still pending; listeners must hear
 		// about the swap or their queue view goes stale for the rest of the turn.
-		if (adopted) this.#emitQueueChanged();
+		if (entries.length > 0) this.#emitQueueChanged();
 	}
 
 	/**
@@ -1696,12 +1674,11 @@ export class Agent {
 			}
 			const { message, controller, batch } = entry;
 			withdrawn.steering.push(message);
-			this.#takeBack(controller, message);
 			suppress(controller, entry);
 			if (entry.unit) units.add(entry.unit);
 			if (!batch || batches.has(batch) || keptBatches.has(batch)) continue;
 			batches.add(batch);
-			for (const context of batch.additional) this.#takeBack(controller, context);
+			this.#contextTakenBack.add(batch);
 			suppress(controller, batch);
 		}
 		this.#liveSteered = keptLive;
@@ -1710,13 +1687,11 @@ export class Agent {
 			const pending = delivery.messages.slice(delivery.next);
 			withdrawn[delivery.queue].push(...pending);
 			if (delivery.committed) suppress(delivery.controller, delivery);
-			else if (delivery.handed) {
-				const context = delivery.next === 0 ? delivery.additional : [];
-				for (const message of [...pending, ...context]) this.#takeBack(delivery.controller, message);
-			}
+			else this.#contextTakenBack.add(delivery);
 			if (delivery.unit) units.add(delivery.unit);
 			this.#queuedMessageDeliveries.delete(delivery);
 		}
+		if (withdrawn.steering.length > 0 || withdrawn.followUp.length > 0) this.#takeBack();
 		return { withdrawn, units };
 	}
 
@@ -1751,7 +1726,7 @@ export class Agent {
 			else removedByUnit.set(unit, [message]);
 		};
 		const live: LiveSteeredEntry[] = [];
-		const removedBatches = new Map<LiveSteeredBatch, AbortController | undefined>();
+		const removedBatches = new Set<LiveSteeredBatch>();
 		for (const entry of this.#liveSteered) {
 			if (entry.committed || !shouldRemove(entry.message)) {
 				live.push(entry);
@@ -1759,16 +1734,14 @@ export class Agent {
 			}
 			removed.steering.push(entry.message);
 			unitLost(entry.unit, entry.message);
-			this.#takeBack(entry.controller, entry.message);
-			if (entry.batch) removedBatches.set(entry.batch, entry.controller);
+			if (entry.batch) removedBatches.add(entry.batch);
 		}
 		const liveChanged = live.length !== this.#liveSteered.length;
 		if (liveChanged) {
 			this.#liveSteered = live;
 			// A batch's context goes with the last of its messages.
-			for (const [batch, controller] of removedBatches) {
-				if (live.some(entry => entry.batch === batch)) continue;
-				for (const context of batch.additional) this.#takeBack(controller, context);
+			for (const batch of removedBatches) {
+				if (!live.some(entry => entry.batch === batch)) this.#contextTakenBack.add(batch);
 			}
 		}
 		for (const delivery of this.#queuedMessageDeliveries) {
@@ -1780,7 +1753,6 @@ export class Agent {
 				if (shouldRemove(message)) {
 					removed[delivery.queue].push(message);
 					unitLost(delivery.unit, message);
-					if (delivery.handed) this.#takeBack(delivery.controller, message);
 				} else {
 					kept.push(message);
 					keptPromoted.push(delivery.promoted?.[i] === true);
@@ -1795,7 +1767,7 @@ export class Agent {
 			}
 			this.#queuedMessageDeliveries.delete(delivery);
 			// Nothing of the batch is delivered, so neither is its context.
-			if (delivery.handed) for (const context of delivery.additional) this.#takeBack(delivery.controller, context);
+			this.#contextTakenBack.add(delivery);
 		}
 		// Only the unit an occurrence was taken in loses it; another unit holding the same message keeps its place.
 		for (const [unit, lost] of removedByUnit) {
@@ -1839,199 +1811,124 @@ export class Agent {
 		}
 		if (removed.steering.length > 0) this.#notifySteeringWaiters();
 		if (releasedHeld.length > 0) this.queuedMessageGate?.release(releasedHeld);
+		if (removedHeld > 0) this.#takeBack();
 		if (liveChanged || queuedChanged || removedHeld > 0) this.#emitQueueChanged();
 		return removed;
 	}
 
-	/** Count one occurrence the run `controller` was handed as taken back ({@link #takenBack}). */
-	#takeBack(controller: AbortController | undefined, message: AgentMessage): void {
-		if (this.#takeBackWaiters.size > 0) {
-			const waiters = [...this.#takeBackWaiters];
-			this.#takeBackWaiters.clear();
-			for (const resolve of waiters) resolve();
-		}
-		if (!controller) return;
-		let counts = this.#takenBack.get(controller);
-		if (!counts) {
-			counts = new Map();
-			this.#takenBack.set(controller, counts);
-		}
-		counts.set(message, (counts.get(message) ?? 0) + 1);
+	/** The host took back input the run held: a live wait parked behind deferred input re-checks it. */
+	#takeBack(): void {
+		if (this.#takeBackWaiters.size === 0) return;
+		const waiters = [...this.#takeBackWaiters];
+		this.#takeBackWaiters.clear();
+		for (const resolve of waiters) resolve();
 	}
 
 	/**
-	 * The input the run `controller` was handed and is about to put into a provider request (or live steering
-	 * to hand the provider, `live`), without what {@link removeQueuedMessages} took back since: each taken-back
-	 * occurrence is dropped once. A request also carries live steering the provider already accepted, which
-	 * is delivered and never taken back; those occurrences are passed over first, so a taken-back copy of the
-	 * same message is the one dropped.
+	 * `messages` without the occurrences the Agent no longer holds for delivery (removed, withdrawn or cleared
+	 * since they were handed). A list the Agent did not hand out (asides, prompt input) is kept whole.
 	 */
-	#keepHandedInput(controller: AbortController, messages: AgentMessage[], live = false): AgentMessage[] {
-		const counts = this.#takenBack.get(controller);
-		if (!counts || counts.size === 0) return messages;
-		const delivered = live ? new Map<AgentMessage, number>() : this.#acceptedLiveOccurrences(controller);
+	#keepHandedInput(messages: AgentMessage[]): AgentMessage[] {
+		const provenance = this.#handed.get(messages);
+		if (!provenance) return messages;
 		const kept: AgentMessage[] = [];
-		for (const message of messages) {
-			const passed = delivered.get(message);
-			if (passed) {
-				delivered.set(message, passed - 1);
-				kept.push(message);
-				continue;
-			}
-			const count = counts.get(message);
-			if (count === undefined) {
-				kept.push(message);
-			} else if (count > 1) {
-				counts.set(message, count - 1);
-			} else {
-				counts.delete(message);
-			}
-		}
+		const keptProvenance: HandedOccurrence[] = [];
+		// Occurrences of each message already kept per delivery record: a record holds a count per object.
+		const used = new Map<QueuedMessageDelivery, Map<AgentMessage, number>>();
+		messages.forEach((message, i) => {
+			const item = provenance[i] ?? {};
+			if (!this.#stillHolds(item, message, used)) return;
+			kept.push(message);
+			keptProvenance.push(item);
+		});
+		if (kept.length === messages.length) return messages;
+		this.#handed.set(kept, keptProvenance);
 		return kept;
 	}
 
+	/** Whether the Agent still holds the occurrence `item` describes for delivery ({@link #keepHandedInput}). */
+	#stillHolds(
+		item: HandedOccurrence,
+		message: AgentMessage,
+		used: Map<QueuedMessageDelivery, Map<AgentMessage, number>>,
+	): boolean {
+		const { holder, context } = item;
+		if (context) return !this.#contextTakenBack.has(context);
+		if (!holder) return true;
+		if (!("queue" in holder)) return this.#liveSteered.includes(holder);
+		if (!this.#queuedMessageDeliveries.has(holder)) return false;
+		let counts = used.get(holder);
+		if (!counts) {
+			counts = new Map();
+			used.set(holder, counts);
+		}
+		const count = counts.get(message) ?? 0;
+		const held = holder.messages.slice(holder.next).filter(pending => pending === message).length;
+		if (count >= held) return false;
+		counts.set(message, count + 1);
+		return true;
+	}
+
 	/**
-	 * The run `controller` put `messages` into a provider request, or live steering handed them to the
-	 * provider (`live`, taken by the live take that returned `taken`): they are delivered now, so
-	 * {@link removeQueuedMessages} leaves the delivery records and live-steered entries holding them. Each
-	 * occurrence marks one holder: a live hand-over marks the entries its own take adopted, and a request marks
-	 * accepted live steering first, then the delivery records it carries, then declined live steering. A
-	 * request also writes down, in request order, which holder (or none, for prepared context and asides)
-	 * each occurrence is, so recording it ({@link appendMessage}) touches exactly that holder.
+	 * The run `controller` put `segments` into a provider request, or live steering handed them to the provider
+	 * (`live`): they are delivered now, so {@link removeQueuedMessages} leaves their holders alone. A request also
+	 * writes down, in request order, which holder (or batch context, or nothing) each occurrence is, so recording
+	 * it ({@link #recordLoopMessage}) touches exactly that holder.
 	 */
 	#commitHandedInput(
 		controller: AbortController,
-		messages: readonly AgentMessage[],
-		live = false,
-		taken?: readonly AgentMessage[],
+		segments: readonly (readonly AgentMessage[])[],
+		live: boolean,
 	): void {
-		if (messages.length === 0) return;
-		const own = this.#liveSteered.filter(entry => entry.controller === controller);
 		if (live) {
-			const candidates = (taken && this.#adoptedBy.get(taken)) ?? own;
-			const marked: LiveSteeredEntry[] = [];
-			const remaining = [...messages];
-			for (const entry of candidates) {
-				const at = remaining.indexOf(entry.message);
-				if (entry.committed || at < 0) continue;
-				remaining.splice(at, 1);
-				entry.committed = true;
-				marked.push(entry);
+			for (const segment of segments) {
+				for (const { holder } of this.#handed.get(segment) ?? []) {
+					if (holder && !("queue" in holder)) holder.committed = true;
+				}
 			}
-			if (marked.length > 0) this.#liveCommits.set(messages, marked);
 			return;
 		}
-		const counts = new Map<AgentMessage, number>();
-		for (const message of messages) counts.set(message, (counts.get(message) ?? 0) + 1);
-		const accepted = own.filter(entry => entry.accepted);
-		// Each occurrence of accepted prepared context, with the batch it belongs to, in batch order.
-		const acceptedContext: Array<{ message: AgentMessage; batch: LiveSteeredBatch }> = [];
-		const batches = new Set<LiveSteeredBatch>();
-		for (const entry of accepted) {
-			counts.set(entry.message, (counts.get(entry.message) ?? 0) - 1);
-			if (!entry.batch || batches.has(entry.batch)) continue;
-			batches.add(entry.batch);
-			for (const context of entry.batch.additional) {
-				acceptedContext.push({ message: context, batch: entry.batch });
-				counts.set(context, (counts.get(context) ?? 0) - 1);
-			}
-		}
-		const carried: Array<{ message: AgentMessage; record: QueuedMessageDelivery }> = [];
-		const carriedContext: Array<{ message: AgentMessage; record: QueuedMessageDelivery }> = [];
-		for (const delivery of this.#queuedMessageDeliveries) {
-			if (delivery.controller !== controller || delivery.committed || !delivery.handed) continue;
-			const pending = delivery.messages.slice(delivery.next);
-			if (pending.length === 0 || !pending.every(message => (counts.get(message) ?? 0) > 0)) continue;
-			for (const message of pending) {
-				counts.set(message, (counts.get(message) ?? 0) - 1);
-				carried.push({ message, record: delivery });
-			}
-			if (delivery.next === 0) {
-				for (const message of delivery.additional) carriedContext.push({ message, record: delivery });
-			}
-			delivery.committed = true;
-		}
 		const ledger = this.#recordLedger.get(controller) ?? [];
-		for (const message of messages) {
-			const acceptedAt = accepted.findIndex(entry => entry.message === message);
-			if (acceptedAt >= 0) {
-				ledger.push({ message, holder: accepted.splice(acceptedAt, 1)[0] });
-				continue;
-			}
-			const acceptedContextAt = acceptedContext.findIndex(occurrence => occurrence.message === message);
-			if (acceptedContextAt >= 0) {
-				ledger.push({ message, context: acceptedContext.splice(acceptedContextAt, 1)[0].batch });
-				continue;
-			}
-			const carriedAt = carried.findIndex(occurrence => occurrence.message === message);
-			if (carriedAt >= 0) {
-				ledger.push({ message, holder: carried.splice(carriedAt, 1)[0].record });
-				continue;
-			}
-			// Live steering the provider declined is delivered by this request.
-			const declined = own.find(entry => entry.message === message && entry.declined);
-			if (declined) {
-				delete declined.declined;
-				declined.committed = true;
-				ledger.push({ message, holder: declined });
-				continue;
-			}
-			const contextAt = carriedContext.findIndex(occurrence => occurrence.message === message);
-			if (contextAt >= 0) {
-				ledger.push({ message, context: carriedContext.splice(contextAt, 1)[0].record });
-				continue;
-			}
-			ledger.push({ message });
+		for (const segment of segments) {
+			const provenance = this.#handed.get(segment);
+			segment.forEach((message, i) => {
+				const { holder, context } = provenance?.[i] ?? {};
+				if (holder && "queue" in holder) holder.committed = true;
+				else if (holder?.declined) {
+					// Live steering the provider declined is delivered by this request.
+					delete holder.declined;
+					holder.committed = true;
+				}
+				ledger.push({ message, holder, context });
+			});
 		}
 		this.#recordLedger.set(controller, ledger);
 	}
 
-	/**
-	 * Occurrences the provider accepted into the run `controller`'s response, which the next request carries
-	 * again: each accepted entry's message, and once per batch the context prepared for it.
-	 */
-	#acceptedLiveOccurrences(controller: AbortController): Map<AgentMessage, number> {
-		const accepted = new Map<AgentMessage, number>();
-		const add = (message: AgentMessage): void => {
-			accepted.set(message, (accepted.get(message) ?? 0) + 1);
-		};
-		const batches = new Set<LiveSteeredBatch>();
-		for (const entry of this.#liveSteered) {
-			if (entry.controller !== controller || !entry.accepted) continue;
-			add(entry.message);
-			if (!entry.batch || batches.has(entry.batch)) continue;
-			batches.add(entry.batch);
-			for (const context of entry.batch.additional) add(context);
-		}
-		return accepted;
-	}
-
 	/** Keep what of `messages` is still to be delivered ({@link #keepHandedInput}) and deliver it ({@link #commitHandedInput}). */
 	#deliverHandedInput(controller: AbortController, messages: AgentMessage[]): AgentMessage[] {
-		const kept = this.#keepHandedInput(controller, messages);
-		this.#commitHandedInput(controller, kept);
+		const kept = this.#keepHandedInput(messages);
+		this.#commitHandedInput(controller, [kept], false);
 		return kept;
 	}
 
 	/**
-	 * The provider handed back live steering it was handed as `messages` (the same list {@link #commitHandedInput}
-	 * marked): exactly the entries that commit marked are undelivered again, until the next boundary.
+	 * Live steering went back undelivered: the provider declined the list it was handed, or the taken batch could
+	 * not be converted. Exactly the entries that list holds are undelivered again, until the next boundary.
 	 */
 	#releaseLiveSteering(messages: readonly AgentMessage[]): void {
-		// A declined hand-over releases the entries it committed; a batch that could not be converted, the
-		// entries its take adopted.
-		const entries = this.#liveCommits.get(messages) ?? this.#adoptedBy.get(messages) ?? [];
-		for (const entry of entries) {
-			delete entry.committed;
-			if (this.#liveSteered.includes(entry)) entry.declined = true;
+		for (const { holder } of this.#handed.get(messages) ?? []) {
+			if (!holder || "queue" in holder) continue;
+			delete holder.committed;
+			if (this.#liveSteered.includes(holder)) holder.declined = true;
 		}
-		this.#liveCommits.delete(messages);
 	}
 
-	/** The provider accepted the live steering it was handed as `messages`: exactly the entries that hand-over committed. */
+	/** The provider accepted the live steering it was handed as `messages`: exactly the entries that list holds. */
 	#acceptLiveSteering(messages: readonly AgentMessage[]): void {
-		for (const entry of this.#liveCommits.get(messages) ?? []) entry.accepted = true;
-		this.#liveCommits.delete(messages);
+		for (const { holder } of this.#handed.get(messages) ?? []) {
+			if (holder && !("queue" in holder)) holder.accepted = true;
+		}
 	}
 
 	/** Steering live steering took for the streaming response; the transcript records it once
@@ -3397,9 +3294,8 @@ export class Agent {
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			waitForTakeBack: signal => this.#waitForTakeBack(signal),
 			onLiveSteeringTaken: messages => this.#adoptLiveSteering(messages),
-			keepQueuedInput: (messages, live) => this.#keepHandedInput(loopAbortController, messages, live),
-			commitQueuedInput: (messages, live, taken) =>
-				this.#commitHandedInput(loopAbortController, messages, live, taken),
+			keepQueuedInput: messages => this.#keepHandedInput(messages),
+			commitQueuedInput: (segments, live) => this.#commitHandedInput(loopAbortController, segments, live),
 			releaseQueuedInput: messages => this.#releaseLiveSteering(messages),
 			acceptQueuedInput: messages => this.#acceptLiveSteering(messages),
 			hasIrcInterrupts: this.hasIrcInterrupts,

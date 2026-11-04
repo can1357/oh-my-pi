@@ -26,8 +26,8 @@ export interface LiveSteeringQueue {
 	keep?(messages: AgentMessage[]): AgentMessage[];
 	/** Resolves when the host next takes back input, or `signal` aborts (`AgentLoopConfig.waitForTakeBack`). */
 	takenBack?(signal: AbortSignal): Promise<void>;
-	/** The provider is handed `messages`, kept from the batch `taken` returned (`AgentLoopConfig.commitQueuedInput`). */
-	commit?(messages: readonly AgentMessage[], taken: readonly AgentMessage[]): void;
+	/** The provider is handed `messages`, a list `take` or `keep` returned (`AgentLoopConfig.commitQueuedInput`). */
+	commit?(messages: readonly AgentMessage[]): void;
 	/**
 	 * `messages` went back undelivered (`AgentLoopConfig.releaseQueuedInput`): the provider declined the list
 	 * `commit` was given, or the batch `take` returned could not be converted.
@@ -39,10 +39,13 @@ export interface LiveSteeringQueue {
 
 /** One provider call's {@link LiveSteering} source. */
 export class LiveSteeringChannel implements LiveSteering {
-	/** Steering the provider delivered into the in-flight response, in queue order. */
-	readonly accepted: AgentMessage[] = [];
-	/** Steering taken from the queue but not delivered; always queued after {@link accepted}. */
-	readonly deferred: AgentMessage[] = [];
+	/**
+	 * Steering the provider delivered into the in-flight response, in queue order: one list per accepted claim,
+	 * as the host handed it, so the host knows where it holds each occurrence.
+	 */
+	readonly accepted: AgentMessage[][] = [];
+	/** Steering taken from the queue but not delivered, one list per claim; always queued after {@link accepted}. */
+	readonly deferred: AgentMessage[][] = [];
 	readonly #queue: LiveSteeringQueue;
 
 	constructor(queue: LiveSteeringQueue) {
@@ -51,9 +54,10 @@ export class LiveSteeringChannel implements LiveSteering {
 
 	/** Drop deferred input the host took back since: it no longer holds later input back. */
 	#pruneDeferred(): void {
-		if (this.deferred.length === 0 || !this.#queue.keep) return;
-		const kept = this.#queue.keep(this.deferred);
-		if (kept.length !== this.deferred.length) this.deferred.splice(0, this.deferred.length, ...kept);
+		const keep = this.#queue.keep;
+		if (this.deferred.length === 0 || !keep) return;
+		const kept = this.deferred.map(messages => keep(messages)).filter(messages => messages.length > 0);
+		this.deferred.splice(0, this.deferred.length, ...kept);
 	}
 
 	async wait(signal: AbortSignal): Promise<void> {
@@ -106,7 +110,7 @@ export class LiveSteeringChannel implements LiveSteering {
 				// Not delivered: the next boundary delivers it, as it does a steer the provider declined.
 				messages = this.#queue.keep?.(messages) ?? messages;
 				this.#queue.release?.(taken);
-				this.deferred.push(...messages);
+				if (messages.length > 0) this.deferred.push(messages);
 				return undefined;
 			}
 			const kept = this.#queue.keep?.(messages) ?? messages;
@@ -115,7 +119,7 @@ export class LiveSteeringChannel implements LiveSteering {
 			if (messages.length === 0) return undefined;
 		}
 		const delivered = messages;
-		this.#queue.commit?.(delivered, taken);
+		this.#queue.commit?.(delivered);
 		let settled = false;
 		return {
 			messages: providerMessages,
@@ -123,13 +127,13 @@ export class LiveSteeringChannel implements LiveSteering {
 				if (settled) return;
 				settled = true;
 				this.#queue.accept?.(delivered);
-				this.accepted.push(...delivered);
+				this.accepted.push(delivered);
 			},
 			reject: () => {
 				if (settled) return;
 				settled = true;
 				this.#queue.release?.(delivered);
-				this.deferred.push(...delivered);
+				this.deferred.push(delivered);
 			},
 		};
 	}

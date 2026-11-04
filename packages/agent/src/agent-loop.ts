@@ -1243,10 +1243,17 @@ async function runLoopBody(
 	let preserveSoftRequirementState = false;
 
 	let pendingMessages: AgentMessage[] = [];
-	// Steering the provider took from the queue during the last response:
+	// The next request's queued input, as the lists the host handed out (and asides), so the host can tell
+	// where it holds each occurrence; `pendingMessages` is their concatenation.
+	let pendingSegments: AgentMessage[][] = [];
+	const setPending = (...segments: AgentMessage[][]): void => {
+		pendingSegments = segments.filter(segment => segment.length > 0);
+		pendingMessages = pendingSegments.flat();
+	};
+	// Steering the provider took from the queue during the last response, one list per claim:
 	// `liveAccepted` reached the model inside it, `liveDeferred` did not.
-	let liveAccepted: AgentMessage[] = [];
-	let liveDeferred: AgentMessage[] = [];
+	let liveAccepted: AgentMessage[][] = [];
+	let liveDeferred: AgentMessage[][] = [];
 	try {
 		let messagesToEmit = [...initialMessages];
 		if (isDeadlineExceeded(config.deadline)) {
@@ -1258,7 +1265,7 @@ async function runLoopBody(
 		// Skip when the run is already externally aborted — dequeuing would strand
 		// the messages in a run that is about to die.
 		try {
-			pendingMessages = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
+			setPending(signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || []);
 		} catch (error) {
 			stream.push({ type: "turn_start" });
 			emitInputMessages(stream, messagesToEmit);
@@ -1344,8 +1351,9 @@ async function runLoopBody(
 				if (agentPauseGate.paused) await waitForProcessPause(config, signal);
 				// Queued input the host took back since it was dequeued is not delivered; the rest is
 				// put into the request below, in this same step, and is delivered from here on.
-				if (pendingMessages.length > 0 && config.keepQueuedInput) {
-					pendingMessages = config.keepQueuedInput(pendingMessages, false);
+				const keepQueuedInput = config.keepQueuedInput;
+				if (pendingMessages.length > 0 && keepQueuedInput) {
+					setPending(...pendingSegments.map(segment => keepQueuedInput(segment)));
 					if (pendingMessages.length === 0 && !hasMoreToolCalls) continue;
 				}
 
@@ -1361,8 +1369,8 @@ async function runLoopBody(
 						turnMessages.push(message);
 						(message as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
 					}
-					config.commitQueuedInput?.(pendingMessages, false);
-					pendingMessages = [];
+					config.commitQueuedInput?.(pendingSegments, false);
+					setPending();
 				}
 
 				let preparedProviderCall: PreparedProviderCall;
@@ -1689,7 +1697,7 @@ async function runLoopBody(
 						config,
 						telemetry,
 						invokeAgentSpan,
-						[...liveAccepted, ...liveDeferred],
+						[...liveAccepted.flat(), ...liveDeferred.flat()],
 					);
 					toolResults.push(...executionResult.toolResults);
 
@@ -1794,7 +1802,7 @@ async function runLoopBody(
 				const live = signal?.aborted ? [] : [...liveAccepted, ...liveDeferred];
 				const liveReachedModel = !signal?.aborted && liveAccepted.length > 0;
 				if (liveReachedModel) {
-					for (const message of liveAccepted) {
+					for (const message of liveAccepted.flat()) {
 						if (message.role === "user") message.liveSteered = true;
 					}
 				}
@@ -1804,20 +1812,18 @@ async function runLoopBody(
 					// The server continues from exactly this steering; anything else
 					// queued now would not line up with its continuation, so it waits
 					// for the next boundary (or is steered into that response).
-					pendingMessages = live;
+					setPending(...live);
 				} else {
-					const steering = signal?.aborted
-						? []
-						: [...live, ...((await config.getSteeringMessages?.(signal)) || [])];
+					const steering = signal?.aborted ? [] : [...live, (await config.getSteeringMessages?.(signal)) || []];
 					if (hasMoreToolCalls) {
 						// Mid-work: fold any non-interrupting asides into the next turn alongside steering.
 						const asides = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.("work"));
-						pendingMessages = asides.length > 0 ? [...steering, ...asides] : steering;
+						setPending(...steering, asides);
 					} else {
 						// Stop boundary: only steering (live user input) forces another turn here. Leave
 						// asides for the outer drain below so a passive aside can't trigger an extra model
 						// turn ahead of a queued follow-up — the outer drain batches asides + follow-ups together.
-						pendingMessages = steering;
+						setPending(...steering);
 					}
 				}
 			}
@@ -1843,7 +1849,7 @@ async function runLoopBody(
 			const followUpMessages = signal?.aborted ? [] : (await config.getFollowUpMessages?.(signal)) || [];
 			if (lateSteering.length > 0 || asideMessages.length > 0 || followUpMessages.length > 0) {
 				// Set as pending so the inner loop processes them before stopping.
-				pendingMessages = [...lateSteering, ...asideMessages, ...followUpMessages];
+				setPending(lateSteering, asideMessages, followUpMessages);
 				drainPass = true;
 				continue;
 			}
@@ -1956,13 +1962,11 @@ function openLiveSteering(
 			if (messages.length > 0) config.onLiveSteeringTaken?.(messages);
 			return messages;
 		},
-		keep: config.keepQueuedInput ? messages => config.keepQueuedInput?.(messages, true) ?? messages : undefined,
+		keep: config.keepQueuedInput,
 		takenBack: config.waitForTakeBack
 			? signal => config.waitForTakeBack?.(bound(signal)) ?? Promise.resolve()
 			: undefined,
-		commit: config.commitQueuedInput
-			? (messages, taken) => config.commitQueuedInput?.(messages, true, taken)
-			: undefined,
+		commit: config.commitQueuedInput ? messages => config.commitQueuedInput?.([messages], true) : undefined,
 		release: config.releaseQueuedInput,
 		accept: config.acceptQueuedInput,
 		toProvider: async (messages, signal) => {
