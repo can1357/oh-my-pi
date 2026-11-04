@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added OrcaRouter (`orcarouter`) as a provider: `/login orcarouter` with an API key (`ORCA_KEY`) and dynamic discovery of Responses-API-compatible models from `https://api.orcarouter.ai/v1/models` ([#17734](https://github.com/can1357/oh-my-pi/pull/17734) by [@Naster17](https://github.com/Naster17))
 - Added the `supports-message-threads` compat axis (`supportsMessageThreads`), enabled for Claude 4.5 and newer on the first-party Anthropic provider
 - Added a standard Responses WebSocket capability rule for explicit opt-in through OMP settings or SDK preferences, disabled by default ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
 
