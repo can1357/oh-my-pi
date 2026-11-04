@@ -62,6 +62,7 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 				<label>Field <dfn id="label-dfn">required</dfn><input></label>
 				<section id="bare-image-section" aria-labelledby="bare-image-target"></section><input id="bare-image-target" type="image" src="data:,">
 				<div style="display:none"><span id="hidden-ancestor-target"><b style="display:none">Hidden</b> name</span></div><section id="hidden-ancestor-section" aria-labelledby="hidden-ancestor-target"></section>
+				<span id="contents-target" role="note" style="display:contents">Visible <b hidden>Hidden</b></span><section id="contents-section" aria-labelledby="contents-target"></section>
 				<form id="form" aria-label="Named form"></form><form id="unnamed-form">Content</form>
 				<header id="header" aria-label="Header"></header><footer id="footer" aria-label="Footer"></footer>
 				${["article", "aside", "main", "nav", "section"].map(tag => `<${tag}><header id="${tag}-header" aria-label="${tag} header"></header><footer id="${tag}-footer" aria-label="${tag} footer"></footer></${tag}>`).join("")}
@@ -205,7 +206,10 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 				<section title="Title section"><button>A</button></section>
 				<section aria-label="Fallback" aria-labelledby="primary"><h2 id="primary">Primary</h2><button>B</button></section>
 				<section aria-labelledby="svc"><span id="svc" aria-label="Billing"></span><button>C</button></section>
-				<select><optgroup label="Fruit"><option>Apple</option></optgroup></select>`);
+				<select><optgroup label="Fruit"><option>Apple</option></optgroup></select>
+				<section aria-labelledby="titled-img"><img id="titled-img" alt="" title="Pictured" src="data:,"><button>D</button></section>
+				<section aria-labelledby="choice"><select id="choice"><option selected>One</option><option>Two</option></select></section>
+				<figure><img alt="Photo" src="data:,"><figcaption>Caption</figcaption></figure>`);
 			await page.evaluate(`(function () {\n${TERN_KIT_SOURCE}\n})()`);
 			const observed = await page.evaluate(() => {
 				const kit = (
@@ -218,18 +222,22 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 				).__ompTernKit;
 				return kit
 					.observe({ includeAll: true })
-					.elements.filter(entry => ["region", "generic", "group"].includes(entry.role) && entry.name)
+					.elements.filter(entry => ["region", "group", "figure"].includes(entry.role) && entry.name)
 					.map(entry => {
 						const query = `${entry.role}[name="${entry.name}" exact]`;
 						return [query, kit.count({ engine: "role", query })];
 					});
 			});
+			// Every named region, group and figure the observer reports reselects exactly that element.
+			expect(observed.filter(([, matched]) => matched !== 1)).toEqual([]);
 			expect(observed).toEqual(
 				expect.arrayContaining([
 					['region[name="Title section" exact]', 1],
 					['region[name="Primary" exact]', 1],
 					['region[name="Billing" exact]', 1],
 					['group[name="Fruit" exact]', 1],
+					['region[name="Pictured" exact]', 1],
+					['region[name="One" exact]', 1],
 				]),
 			);
 		} finally {

@@ -480,7 +480,13 @@ const idrefText = (el, attribute) => {
 		// A target named by its own label, alt or control value gives that, as the role/ handler reads it.
 		const own = normalizeSpace(target.getAttribute("aria-label"));
 		if (own) return own;
-		if (target.localName === "img" || target.localName === "area") return normalizeSpace(target.getAttribute("alt"));
+		if (target.localName === "img" || target.localName === "area") {
+			const alt = normalizeSpace(target.getAttribute("alt"));
+			if (alt) return alt;
+		}
+		// A select or text area stands for its value, as an embedded control does.
+		if (target.localName === "select") return normalizeSpace(Array.from(target.selectedOptions, option => option.text).join(" "));
+		if (target.localName === "textarea") return normalizeSpace(target.value);
 		if (target.localName === "input") {
 			const type = inputType(target);
 			if (type === "image") {
@@ -582,8 +588,9 @@ const accessibleName = (el, role) => {
 			if (type === "reset") return "Reset";
 		}
 	}
-	if (tag === "fieldset" || tag === "figure" || tag === "table") {
-		const caption = el.querySelector(tag === "fieldset" ? "legend" : tag === "figure" ? "figcaption" : "caption");
+	// A figure has no native name: Chrome does not name it from its figcaption.
+	if (tag === "fieldset" || tag === "table") {
+		const caption = el.querySelector(tag === "fieldset" ? "legend" : "caption");
 		if (caption) {
 			const text = contentText(caption, null);
 			if (text) return text;
