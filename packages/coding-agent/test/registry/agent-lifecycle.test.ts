@@ -1161,6 +1161,47 @@ describe("AgentLifecycleManager", () => {
 		expect(revived.disposeCalls()).toBe(0);
 	});
 
+	it("a release during a cold revive's factory await is final: the revive adopts nothing and the hook runs once", async () => {
+		const gate = deferred();
+		const factoryStarted = deferred();
+		const revived = makeSessionStub();
+		let releases = 0;
+		// A reviver-less adoption — a warm reviver whose worker died — carries
+		// the release hook into cold revival.
+		const ref = registry.register({
+			id: "Cold-ReleaseRace",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/Cold-ReleaseRace.jsonl",
+			status: "parked",
+		});
+		lifecycle.adopt("Cold-ReleaseRace", { idleTtlMs: 0, onRelease: async () => void (releases += 1) }, ref);
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => {
+				factoryStarted.resolve();
+				await gate.promise;
+				return async () => revived.session;
+			},
+			() => TTL,
+		);
+
+		const revival = lifecycle.ensureLive("Cold-ReleaseRace");
+		await factoryStarted.promise;
+		expect(await lifecycle.release("Cold-ReleaseRace", ref)).toBe(true);
+		expect(releases).toBe(1);
+		gate.resolve();
+
+		await expect(revival).rejects.toThrow(/changed while its persisted session was being prepared/);
+		// The released agent stays released: nothing owes its release any more,
+		// so teardown has nothing to run a second time.
+		expect(lifecycle.has("Cold-ReleaseRace")).toBe(false);
+		expect(lifecycle.owesRelease("Cold-ReleaseRace")).toBe(false);
+		await lifecycle.dispose();
+		expect(releases).toBe(1);
+		expect(revived.disposeCalls()).toBe(0);
+	});
+
 	it("a cold revive whose session resolves after dispose disposes that session and rejects", async () => {
 		const gate = deferred();
 		const revived = makeSessionStub();

@@ -11,7 +11,8 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { __resetDirsFromEnvForTests, logger, removeWithRetries } from "@oh-my-pi/pi-utils";
-import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import * as natives from "@oh-my-pi/pi-natives";
+import type { AgentProgress, SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { AsyncJobManager } from "../../src/async/job-manager";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
@@ -26,6 +27,7 @@ import { CostGate } from "../../src/session/cost-gate";
 import { convertToLlm } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../../src/task/executor";
+import { prepareIsolationContext, runIsolatedSubprocess } from "../../src/task/isolation-runner";
 import { createPersistedSubagentReviverFactory } from "../../src/task/persisted-revive";
 import { type AgentDefinition, TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "../../src/task/types";
 import { RemoteAgentSession } from "../../src/thread/remote-agent-session";
@@ -34,7 +36,7 @@ import { EventBus } from "../../src/utils/event-bus";
 import { createReleaseHold } from "../../src/utils/release-hold";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
-const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
+const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE", "OMP_WORKTREE_DIR"] as const;
 const MODEL = "fake/fake-model";
 const TEST_TIMEOUT_MS = 120_000;
 
@@ -83,8 +85,9 @@ function chunks(reply: Reply): string {
 
 /**
  * Scripted model, by the conversation's last user message: `bg_job` → an async `bash`
- * call; `hang` → no answer until the request is aborted; anything else (including the
- * job's completion notice) → `pong`. A tool result is answered with `tool said: …`.
+ * call; `hang` → no answer until the request is aborted; `spawn_nested` → a `task` call
+ * spawning one isolated child; anything else (including the job's completion notice) →
+ * `pong`. A tool result is answered with `tool said: …`.
  */
 class FakeModelServer {
 	readonly #server: Bun.Server<undefined>;
@@ -152,7 +155,15 @@ class FakeModelServer {
 			reply = { text: `tool said: ${messageText(last.content)}` };
 		} else if (userText.includes("bg_job")) {
 			reply = { tool: "bash", args: { command: "echo bg-done", async: true } };
-		} else if (userText.includes("hang")) {
+		} else if (userText.includes("spawn_nested")) {
+			reply = {
+				tool: "task",
+				args: {
+					context: "nested test",
+					tasks: [{ name: "NestedChild", task: "say hi", solutionSpace: "closed", isolated: true }],
+				},
+			};
+		} else if (/\bhang\b/.test(userText)) {
 			const held = Promise.withResolvers<void>();
 			this.#hangs.push(held.resolve);
 			request.signal.addEventListener("abort", () => held.resolve(), { once: true });
@@ -173,6 +184,15 @@ async function waitFor(check: () => boolean, timeoutMs = 30_000): Promise<void> 
 	}
 }
 
+/**
+ * Like {@link waitFor}, but gives up quietly at the deadline so the caller's assertion reports
+ * what it saw. Polls a condition another thread settles; there is no clock to fake across threads.
+ */
+async function waitUntil(check: () => boolean | Promise<boolean>, timeoutMs = 15_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!(await check()) && Date.now() <= deadline) await Bun.sleep(10);
+}
+
 function mirrorOf(session: AgentSessionHandle | null | undefined): RemoteAgentSession {
 	if (!(session instanceof RemoteAgentSession)) throw new Error("expected a worker-homed session mirror on main");
 	return session;
@@ -186,8 +206,129 @@ const AGENT: AgentDefinition = {
 	tools: ["read", "bash"],
 };
 
+const SETTINGS = {
+	"task.agentIdleTtlMs": 0,
+	"task.completionProbe": false,
+	"compaction.enabled": false,
+	"retry.enabled": false,
+	"todo.enabled": false,
+	"todo.reminders": false,
+	"advisor.enabled": false,
+	"async.enabled": true,
+	modelRoles: { default: MODEL },
+} as const;
+
+async function git(repo: string, args: string[]): Promise<void> {
+	const proc = Bun.spawn(["git", ...args], { cwd: repo, stdout: "ignore", stderr: "pipe" });
+	if ((await proc.exited) !== 0) throw new Error(await new Response(proc.stderr).text());
+}
+
+/**
+ * An extension whose `session_shutdown` handler blocks until {@link GatedShutdown.open}:
+ * a child's disposal that outruns its cleanup grace for as long as the test says. The gate
+ * is a file, so the handler can wait for it on whichever thread hosts the child.
+ */
+interface GatedShutdown {
+	readonly source: string;
+	open(): Promise<void>;
+}
+
+function gatedShutdown(name: string): GatedShutdown {
+	const gate = path.join(root, `${name}.open`);
+	return {
+		source: [
+			"export default function (api) {",
+			'\tapi.on("session_shutdown", async () => {',
+			`\t\twhile (!(await Bun.file(${JSON.stringify(gate)}).exists())) await Bun.sleep(10);`,
+			"\t});",
+			"}",
+			"",
+		].join("\n"),
+		open: async () => {
+			await Bun.write(gate, "open");
+		},
+	};
+}
+
+/** A committed git repo to isolate children from; `extension` lands in its project extensions. */
+async function makeRepo(name: string, extension?: GatedShutdown): Promise<string> {
+	const repo = path.join(root, name);
+	await fs.mkdir(repo, { recursive: true });
+	await git(repo, ["init", "-q", "-b", "main"]);
+	await git(repo, ["config", "user.email", "test@example.com"]);
+	await git(repo, ["config", "user.name", "Test"]);
+	await Bun.write(path.join(repo, "file.txt"), "hello\n");
+	if (extension) await Bun.write(path.join(repo, ".omp", "extensions", "gate.ts"), extension.source);
+	await git(repo, ["add", "."]);
+	await git(repo, ["commit", "-q", "-m", "init"]);
+	return repo;
+}
+
+/** Isolation workspaces still on disk. */
+async function workspaces(): Promise<string[]> {
+	return (await fs.readdir(worktreesDir)).filter(entry => !entry.endsWith(".lock"));
+}
+
+/** Run `id` isolated in `repo` with the rcopy backend, where the test pool places it. */
+async function runIsolated(
+	repo: string,
+	id: string,
+	task: string,
+	extra: Partial<ExecutorOptions> = {},
+	onSubprocessResult?: (result: SingleResult) => void,
+): Promise<SingleResult> {
+	return runIsolatedSubprocess({
+		baseOptions: runOptions(id, task, { cwd: repo, ...extra }),
+		context: await prepareIsolationContext(repo),
+		preferredBackend: natives.IsoBackendKind.Rcopy,
+		agentId: id,
+		mergeMode: "patch",
+		artifactsDir: path.join(root, "artifacts"),
+		onSubprocessResult,
+		buildFailureResult: error => ({
+			index: 0,
+			id,
+			agent: AGENT.name,
+			agentSource: AGENT.source,
+			task,
+			exitCode: 1,
+			output: "",
+			stderr: String(error),
+			truncated: false,
+			durationMs: 0,
+			tokens: 0,
+			requests: 0,
+			error: String(error),
+		}),
+	});
+}
+
+/**
+ * Main's lifecycle mid-teardown, held there by a child whose disposal waits for the
+ * cleanup's release: every adoption is refused until then.
+ */
+function refusingLifecycle(): void {
+	const gate = Promise.withResolvers<void>();
+	const blocker = AgentRegistry.global().register({
+		id: "Blocker",
+		displayName: "Blocker",
+		kind: "sub",
+		session: { dispose: () => gate.promise } as unknown as AgentSession,
+		sessionFile: null,
+		status: "idle",
+	});
+	const lifecycle = AgentLifecycleManager.global();
+	lifecycle.adopt("Blocker", { idleTtlMs: 0 }, blocker);
+	const tearingDown = lifecycle.dispose(Date.now() + 60_000);
+	cleanups.push(async () => {
+		gate.resolve();
+		await tearingDown;
+	});
+}
+
 let root: string;
 let cwd: string;
+let worktreesDir: string;
 let savedEnv: Record<string, string | undefined> = {};
 let server: FakeModelServer;
 let pool: SubagentWorkerPool;
@@ -216,13 +357,16 @@ beforeEach(async () => {
 	const home = path.join(root, "home");
 	const agentDir = path.join(home, ".omp", "agent");
 	cwd = path.join(root, "work");
+	worktreesDir = path.join(root, "worktrees");
 	await fs.mkdir(agentDir, { recursive: true });
 	await fs.mkdir(cwd, { recursive: true });
+	await fs.mkdir(worktreesDir, { recursive: true });
 	// Workers read these at start-up, so set them before the pool spawns any.
 	setEnv("HOME", home);
 	setEnv("PI_CODING_AGENT_DIR", agentDir);
 	setEnv("OMP_PROFILE", undefined);
 	setEnv("PI_PROFILE", undefined);
+	setEnv("OMP_WORKTREE_DIR", worktreesDir);
 	__resetDirsFromEnvForTests();
 	AgentRegistry.resetGlobalForTests();
 	AgentLifecycleManager.resetGlobalForTests();
@@ -233,17 +377,7 @@ beforeEach(async () => {
 	authStorage = createInMemoryAuthStorage();
 	modelRegistry = new ModelRegistry(authStorage, modelsPath);
 	await modelRegistry.refresh();
-	settings = Settings.isolated({
-		"task.agentIdleTtlMs": 0,
-		"task.completionProbe": false,
-		"compaction.enabled": false,
-		"retry.enabled": false,
-		"todo.enabled": false,
-		"todo.reminders": false,
-		"advisor.enabled": false,
-		"async.enabled": true,
-		modelRoles: { default: MODEL },
-	});
+	settings = Settings.isolated(SETTINGS);
 	jobs = new AsyncJobManager({ maxRunningJobs: 4 });
 	costGate = new CostGate(settings, 0, () => {});
 	eventBus = new EventBus();
@@ -598,6 +732,199 @@ describe("subagent runs routed into pooled workers", () => {
 				structured: false,
 			});
 			expect(again.output).toBe("pong");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"tears down a one-shot isolated child's workspace when its run ends, on the main thread and in a worker",
+		async () => {
+			const repo = await makeRepo("oneshot");
+			const mainPool = new SubagentWorkerPool({ maxWorkers: () => 4, idleMs: 600_000 });
+			cleanups.push(() => mainPool.dispose());
+			for (const [mode, placing] of [
+				["main", mainPool],
+				["worker", pool],
+			] as const) {
+				setSubagentWorkerPoolForTests(placing);
+				let baseReleased = 0;
+				const result = await runIsolated(repo, `OneShot-${mode}`, "ping", {
+					keepAlive: false,
+					onRelease: async () => void (baseReleased += 1),
+				});
+				expect(result.output).toBe("pong");
+				expect(baseReleased).toBe(1);
+				// The run discharged its hold and was then told the take-over
+				// happened; that must not read as the lifecycle owning the workspace.
+				expect(await workspaces()).toEqual([]);
+			}
+			expect(mainPool.workers()).toEqual([]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"tears down an isolated child's workspace when its worker dies mid-run, despite the lease its session left",
+		async () => {
+			const repo = await makeRepo("midrun");
+			let baseReleased = 0;
+			const running = runIsolated(repo, "MidRunDeath", "hang", {
+				onRelease: async () => void (baseReleased += 1),
+			});
+			await server.hung();
+			const [worker] = pool.workers();
+			if (!worker) throw new Error("no pooled worker");
+			worker.terminate("worker crashed: boom");
+			const result = await running;
+			expect(result.exitCode).toBe(1);
+			expect(baseReleased).toBe(1);
+			expect(await workspaces()).toEqual([]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"tears down an adopted isolated child's workspace on release after its worker died, with nothing left unhandled",
+		async () => {
+			const unhandled: unknown[] = [];
+			const onUnhandled = (reason: unknown): void => void unhandled.push(reason);
+			process.on("unhandledRejection", onUnhandled);
+			cleanups.push(() => process.off("unhandledRejection", onUnhandled));
+			const repo = await makeRepo("adopted");
+			let baseReleased = 0;
+			const result = await runIsolated(repo, "AdoptedDeath", "ping", {
+				onRelease: async () => void (baseReleased += 1),
+			});
+			expect(result.output).toBe("pong");
+			const [worker] = pool.workers();
+			if (!worker) throw new Error("no pooled worker");
+			// Dies with the run's IRC wake release still on its way to it.
+			worker.terminate("worker crashed after adopt");
+			expect(await AgentLifecycleManager.global().release("AdoptedDeath")).toBe(true);
+			expect(baseReleased).toBe(1);
+			expect(await workspaces()).toEqual([]);
+			expect(unhandled).toEqual([]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"holds a worker while main's lifecycle owns a release hook that lives there, and runs that hook on release",
+		async () => {
+			const failures: unknown[] = [];
+			cleanups.push(
+				logger.registerLogSink(event => {
+					if (event.message.includes("owned resource cleanup failed")) failures.push(event.context);
+				}),
+			);
+			const repo = await makeRepo("nested");
+			const nestedSettings = Settings.isolated({ ...SETTINGS, "task.isolation.mode": "rcopy" });
+			const parent = await runSubprocess(
+				runOptions("ParentInWorker", "spawn_nested", {
+					cwd: repo,
+					settings: nestedSettings,
+					agent: { ...AGENT, tools: ["read", "task"], spawns: "*" },
+				}),
+			);
+			expect(parent.exitCode).toBe(0);
+			const ids = AgentRegistry.global()
+				.list()
+				.map(ref => ref.id);
+			expect(ids.length).toBe(2);
+			const lifecycle = AgentLifecycleManager.global();
+			for (const id of ids) await lifecycle.park(id);
+			const [worker] = pool.workers();
+			if (!worker) throw new Error("no pooled worker");
+			// Both sessions are parked: only the nested child's release hook, which
+			// lives on this worker, keeps it from going idle and taking the hook with it.
+			expect(worker.load).toBeGreaterThan(0);
+
+			for (const id of ids) await lifecycle.release(id);
+			expect(failures).toEqual([]);
+			expect(await workspaces()).toEqual([]);
+			expect(worker.load).toBe(0);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"holds a worker while its refused child's deferred release is pending, and lets it run there",
+		async () => {
+			refusingLifecycle();
+			const shutdown = gatedShutdown("refused");
+			const extension = path.join(root, "ext", "gate.ts");
+			await Bun.write(extension, shutdown.source);
+			let releases = 0;
+			const hold = createReleaseHold(async () => void (releases += 1));
+			const result = await runSubprocess(
+				runOptions("RefusedDeferred", "ping", {
+					cleanupGraceMs: 20,
+					preloadedExtensionPaths: [extension],
+					onRelease: hold,
+				}),
+			);
+			expect(result.output).toBe("pong");
+			const [worker] = pool.workers();
+			if (!worker) throw new Error("no pooled worker");
+			expect(releases).toBe(0);
+			expect(worker.load).toBeGreaterThan(0);
+
+			await shutdown.open();
+			await waitUntil(() => releases > 0 && worker.load === 0);
+			expect(releases).toBe(1);
+			expect(worker.load).toBe(0);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"runs a refused child's deferred release on main, once, when its worker dies before running it",
+		async () => {
+			refusingLifecycle();
+			const shutdown = gatedShutdown("refused-death");
+			const extension = path.join(root, "ext", "gate.ts");
+			await Bun.write(extension, shutdown.source);
+			let releases = 0;
+			const result = await runSubprocess(
+				runOptions("RefusedDeferredDeath", "ping", {
+					cleanupGraceMs: 20,
+					preloadedExtensionPaths: [extension],
+					onRelease: async () => void (releases += 1),
+				}),
+			);
+			expect(result.output).toBe("pong");
+			const [worker] = pool.workers();
+			if (!worker) throw new Error("no pooled worker");
+			worker.terminate("worker crashed: boom");
+			await waitUntil(() => releases > 0);
+			expect(releases).toBe(1);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"keeps a worker alive through its deferred cleanup, and keeps a finished isolated result when that worker dies",
+		async () => {
+			const shutdown = gatedShutdown("deferred-cleanup");
+			cleanups.push(() => shutdown.open());
+			const repo = await makeRepo("deferred", shutdown);
+			const returned = Promise.withResolvers<void>();
+			const running = runIsolated(repo, "DeferredCleanup", "ping", { keepAlive: false, cleanupGraceMs: 20 }, () =>
+				returned.resolve(),
+			);
+			await returned.promise;
+			const [worker] = pool.workers();
+			if (!worker) throw new Error("no pooled worker");
+			// The child's disposal is still running there and main is waiting on it.
+			expect(worker.load).toBeGreaterThan(0);
+
+			worker.terminate("worker crashed: boom");
+			const result = await running;
+			expect(result.error).toBeUndefined();
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe("pong");
+			await waitUntil(async () => (await workspaces()).length === 0);
+			expect(await workspaces()).toEqual([]);
 		},
 		TEST_TIMEOUT_MS,
 	);

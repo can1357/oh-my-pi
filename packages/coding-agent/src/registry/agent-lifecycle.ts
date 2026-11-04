@@ -638,7 +638,8 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 	 * when the agent is not revivable or no reviver can be produced.
 	 */
 	async #resolveAndRevive(id: string, ref: AgentRef): Promise<AgentSessionHandle> {
-		let adoption = this.#adopted.get(id);
+		const read = this.#adopted.get(id);
+		let adoption = read;
 		// A reviver-less adoption of this ref (its warm reviver's thread died) keeps
 		// its release hook through cold revival and restores it if that fails.
 		const prior = adoption?.ref === ref ? adoption : undefined;
@@ -653,6 +654,14 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				throw new Error(
 					`Agent "${id}" revival aborted: its lifecycle was disposed while its persisted session was being prepared.`,
 				);
+			}
+			// Everything this decision read can have moved during the await: a
+			// release drops the adoption and discharges its hook, an unregister
+			// or a replacement changes the ref. Writing the adoption back over
+			// that resurrects a released agent and runs its release a second
+			// time, so the map is written only if nothing it was built from moved.
+			if (this.#registry.get(id) !== ref || ref.status !== "parked" || this.#adopted.get(id) !== read) {
+				throw new Error(`Agent "${id}" changed while its persisted session was being prepared.`);
 			}
 			if (revive) {
 				adoption = {

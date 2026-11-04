@@ -17,7 +17,10 @@
 export interface ReleaseHold {
 	/** Discharge the hold. The underlying release runs at most once; later callers await that same run. */
 	(): Promise<void>;
-	/** Record that something which will certainly end has taken the hold over, and must discharge it. */
+	/**
+	 * Record that something which will certainly end has taken the hold over, and must discharge it.
+	 * A no-op once the hold has been discharged: nothing takes over a debt that is already paid.
+	 */
 	claim(): void;
 	/** True while nobody has taken the hold over and nothing has discharged it. */
 	isOwed(): boolean;
@@ -51,7 +54,11 @@ export function createReleaseHold(release: () => void | Promise<void>, onClaim?:
 		return discharge;
 	}) as ReleaseHold;
 	hold.claim = (): void => {
-		if (claimed) return;
+		// A discharged hold has no owner left to name. Running `onClaim` here
+		// would tell the hold this one was derived from that a new party owns
+		// it — an isolation run reads that as "the lifecycle owns the
+		// workspace" and skips a teardown nobody else will run.
+		if (claimed || discharge) return;
 		claimed = true;
 		onClaim?.();
 	};

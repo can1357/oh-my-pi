@@ -51,4 +51,23 @@ describe("ReleaseHold", () => {
 		await base();
 		expect(releases).toBe(1);
 	});
+
+	it("takes no claim over a hold already discharged, so nothing up the chain is told it has a new owner", async () => {
+		// An isolation run reads a claim on its derived hold as "the lifecycle
+		// owns the workspace" and skips its own teardown; a one-shot run whose
+		// hold was discharged and then reported taken over leaked its sandbox.
+		let claims = 0;
+		let releases = 0;
+		const derived = createReleaseHold(
+			() => void (releases += 1),
+			() => void (claims += 1),
+		);
+
+		await derived();
+		derived.claim();
+
+		expect(claims).toBe(0);
+		expect(releases).toBe(1);
+		expect(derived.isOwed()).toBe(false);
+	});
 });

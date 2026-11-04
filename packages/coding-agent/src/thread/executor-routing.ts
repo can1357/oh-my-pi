@@ -15,12 +15,14 @@
  *
  * Kept apart from the thread service so importing it never evaluates the service list.
  */
+import { logger } from "@oh-my-pi/pi-utils";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import {
 	type ExecutorOptions,
 	type FollowUpTurnOptions,
+	type ReleaseTakeOver,
 	type SubagentRunRequest,
 	subagentRunRequest,
 } from "../task/executor";
@@ -119,23 +121,82 @@ async function callOnWorker(
 }
 
 /**
+ * Keep `worker` from going idle until `owed` — work it scheduled and still owes this
+ * thread — settles. The worker dying first settles it too: a rejection here says only
+ * that nothing more will happen there, and the caller decides what that means.
+ */
+function holdWorkerUntil(worker: SubagentWorker, owed: Promise<void>): void {
+	const release = worker.retain();
+	owed.then(release, release);
+}
+
+/**
+ * Call a function a worker handed this thread, for its effect only. Over the link the call
+ * returns a promise that rejects once the worker has gone, and nobody here awaits it.
+ */
+function callWorkerFunction(fn: () => void, id: string): void {
+	const pending: unknown = fn();
+	if (pending instanceof Promise) {
+		pending.catch(error => logger.debug("A worker's callback did not run: its worker is gone", { id, error }));
+	}
+}
+
+/**
+ * The options a worker run receives in place of the caller's, at the one boundary
+ * everything the worker owes this thread crosses. While the worker still owes work it
+ * scheduled — a deferred disposal or release, late cleanups — it is held, so it cannot go
+ * idle and drop that work; what reaches the caller cannot reject when the worker dies,
+ * so no consumer turns a dead worker into a lost result, capture or cleanup.
+ */
+function workerRunOptions(worker: SubagentWorker, options: ExecutorOptions): ExecutorOptions {
+	const bridged = bridgeIntegrationOptions(options);
+	const onCleanupDeferred = options.onCleanupDeferred;
+	const deferIrcWakeRelease = options.deferIrcWakeRelease;
+	return {
+		...bridged,
+		onCleanupDeferred: completion => {
+			holdWorkerUntil(worker, completion);
+			// Settled, not failed, by the worker's death: nothing more will
+			// happen there, and a consumer reading a rejection as failure would
+			// throw away the run's result, its capture or its cleanup.
+			onCleanupDeferred?.(
+				completion.then(
+					() => {},
+					() => {},
+				),
+			);
+		},
+		deferIrcWakeRelease: deferIrcWakeRelease
+			? release => deferIrcWakeRelease(() => callWorkerFunction(release, options.id))
+			: undefined,
+	};
+}
+
+/**
  * Main thread: run the subagent of `options` where `pool` places it (see
  * {@link SubagentWorkerPool.place}): in a worker, or through `runHere` on this thread, its
  * run counted either way. For a worker, the integration options are converted synchronously
  * at placement, so a parent telemetry config captures the caller's active span.
  * `onReleaseTakenOver` is called on this thread, wherever the run is placed, once the run
- * no longer owes `options.onRelease`.
+ * no longer owes `options.onRelease`; a release the worker still owes holds the worker
+ * until it has run.
  */
 export async function runSubprocessPlaced(
 	pool: SubagentWorkerPool,
 	options: ExecutorOptions,
-	onReleaseTakenOver: () => void,
-	runHere: (options: ExecutorOptions, onReleaseTakenOver: () => void) => Promise<SingleResult>,
+	onReleaseTakenOver: ReleaseTakeOver,
+	runHere: (options: ExecutorOptions, onReleaseTakenOver: ReleaseTakeOver) => Promise<SingleResult>,
 ): Promise<SingleResult> {
 	const placed = pool.place();
 	let request: SubagentRunRequest | undefined;
 	try {
-		request = placed.worker ? subagentRunRequest(bridgeIntegrationOptions(options), onReleaseTakenOver) : undefined;
+		const worker = placed.worker;
+		request = worker
+			? subagentRunRequest(workerRunOptions(worker, options), pendingRelease => {
+					if (pendingRelease) holdWorkerUntil(worker, pendingRelease);
+					return onReleaseTakenOver(pendingRelease);
+				})
+			: undefined;
 	} catch (error) {
 		placed.release();
 		throw error;

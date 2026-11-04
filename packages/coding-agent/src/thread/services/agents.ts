@@ -23,12 +23,12 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { IrcBus } from "../../irc/bus";
 import { type AdoptOptions, type AgentReviver, AgentLifecycleManager } from "../../registry/agent-lifecycle";
-import { AgentRegistry, type RegistryListener } from "../../registry/agent-registry";
+import { type AgentRefExpectation, AgentRegistry, type RegistryListener } from "../../registry/agent-registry";
 import { PromptDroppedError, SessionBusyError } from "../../session/agent-session";
 import type { WorkerThreadLink } from "../protocol";
 import { installPeerBridge } from "../peer-agent-session";
 import { RemoteAgentSession, SessionHostClient } from "../remote-agent-session";
-import { registerRpcError, type RpcServe } from "../rpc";
+import { isRpcProxy, registerRpcError, type RpcServe } from "../rpc";
 import type { ThreadService, WorkerPeer } from "../services";
 import { holdRemoteSession, onLocalSessionRegistered, releaseRemoteSession } from "../session-directory";
 import {
@@ -159,6 +159,29 @@ export class MainSessionBridge {
 	}
 
 	/**
+	 * Offer `lifecycle` the adoption of `id` this worker asked for. A release hook that lives
+	 * on this worker — a child the worker spawned inside one of its own runs — holds the
+	 * worker until main runs it or refuses the adoption: a worker that went idle under it
+	 * would turn the agent's final release into a closed-link error, and the workspace,
+	 * lease and caller hold behind the hook would never be released.
+	 */
+	adopt(lifecycle: AgentLifecycleManager, id: string, opts: AdoptOptions, expected?: AgentRefExpectation): boolean {
+		const onRelease = opts.onRelease;
+		if (!onRelease || !isRpcProxy(onRelease)) return lifecycle.adopt(id, this.adopted(lifecycle, id, opts), expected);
+		const letGo = this.#peer.retain?.() ?? (() => {});
+		const held = async (): Promise<void> => {
+			try {
+				await onRelease();
+			} finally {
+				letGo();
+			}
+		};
+		const taken = lifecycle.adopt(id, this.adopted(lifecycle, id, { ...opts, onRelease: held }), expected);
+		if (!taken) letGo();
+		return taken;
+	}
+
+	/**
 	 * Record a reviver this worker handed to `lifecycle` for `id`; returns the adopt options
 	 * to pass on, whose reviver holds the worker (and its idle shutdown off) while a revive
 	 * runs there. The record is dropped when the adoption lets go of the reviver.
@@ -273,7 +296,7 @@ function serveRegistry(bridge: MainSessionBridge): RpcServe<AgentRegistry, Agent
 
 function serveLifecycle(bridge: MainSessionBridge): RpcServe<AgentLifecycleManager, AgentLifecycleProtocol> {
 	return {
-		adopt: (lifecycle, id, opts, expected) => lifecycle.adopt(id, bridge.adopted(lifecycle, id, opts), expected),
+		adopt: (lifecycle, id, opts, expected) => bridge.adopt(lifecycle, id, opts, expected),
 		has: (lifecycle, id, expected) => lifecycle.has(id, expected),
 		reclaimDeadCorpse: (lifecycle, id, expected) => lifecycle.reclaimDeadCorpse(id, expected),
 		manages: (lifecycle, registry) => lifecycle.manages(registry),

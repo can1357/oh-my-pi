@@ -110,7 +110,7 @@ import { ToolAbortError } from "../tools/tool-errors";
 import { resetYieldTurnState } from "../tools/yield";
 import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
-import { asReleaseHold } from "../utils/release-hold";
+import { asReleaseHold, createReleaseHold, type ReleaseHold } from "../utils/release-hold";
 import { isMainThread } from "../thread/identity";
 import { runFollowUpTurnOnHome, runSubprocessPlaced } from "../thread/executor-routing";
 import { existingSubagentWorkerPool, subagentWorkerPool } from "../thread/subagent-worker";
@@ -3573,6 +3573,11 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
  * the run: a kept-alive, revivable agent stays interrogable and resumable
  * (IRC wake / revival) from its transcript. Terminal teardown is reserved for
  * explicit kills and agents nothing can revive.
+ *
+ * Returns `pendingRelease` when the caller's release is scheduled behind a
+ * disposal that outran the deadline rather than run: it settles once that
+ * release has run, and whoever reports the take-over must say so, because the
+ * thread running it still owes it.
  */
 export async function finalizeSubagentLifecycle(args: {
 	id: string;
@@ -3587,7 +3592,7 @@ export async function finalizeSubagentLifecycle(args: {
 	cleanupDeadlineAt?: number;
 	onCleanupDeferred?: (completion: Promise<void>) => void;
 	onRelease?: () => Promise<void>;
-}): Promise<void> {
+}): Promise<{ pendingRelease?: Promise<void> }> {
 	const registry = AgentRegistry.global();
 	const ref = registry.get(args.id);
 	const ownsRef = Boolean(ref && ref.session === args.session);
@@ -3669,7 +3674,7 @@ export async function finalizeSubagentLifecycle(args: {
 			await disposeSession();
 		}
 		await releaseOwnedResources();
-		return;
+		return {};
 	}
 
 	if (!args.keepAlive) {
@@ -3677,7 +3682,7 @@ export async function finalizeSubagentLifecycle(args: {
 		await disposeSession();
 		if (ref && ownsRef) registry.unregister(args.id, ref);
 		await releaseOwnedResources();
-		return;
+		return {};
 	}
 
 	// Keep-alive: finished and failed subagents both stay interrogable.
@@ -3685,7 +3690,7 @@ export async function finalizeSubagentLifecycle(args: {
 	if (!ref || !ownsRef || !registry.setStatus(args.id, "idle", ref)) {
 		await disposeSession();
 		await releaseOwnedResources();
-		return;
+		return {};
 	}
 	const adopted = AgentLifecycleManager.global().adopt(
 		args.id,
@@ -3696,7 +3701,7 @@ export async function finalizeSubagentLifecycle(args: {
 		},
 		ref,
 	);
-	if (adopted) return;
+	if (adopted) return {};
 	// Nothing will keep this child: the only owner of an idle, kept-alive agent
 	// is the lifecycle, and it refused. Ending it is the same teardown a
 	// one-shot gets — dispose, unregister, release — because releasing what the
@@ -3707,7 +3712,7 @@ export async function finalizeSubagentLifecycle(args: {
 	if (registry.get(args.id) === ref) registry.unregister(args.id, ref);
 	if (!deferred) {
 		await releaseOwnedResources();
-		return;
+		return {};
 	}
 	// The disposal outran the cleanup deadline. What the caller held is what the
 	// child is still being disposed on — its isolation workspace, its kernel —
@@ -3741,6 +3746,7 @@ export async function finalizeSubagentLifecycle(args: {
 		await releaseOwnedResources();
 	});
 	trackLateCleanup(settled, { id: args.id, resource: "refused-adoption-release" });
+	return { pendingRelease: settled };
 }
 
 /** Options for {@link runSubagentFollowUpTurn}. */
@@ -4371,6 +4377,13 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 }
 
 /**
+ * Tells the caller's thread that a run no longer owes {@link ExecutorOptions.onRelease}.
+ * `pendingRelease`, when given, is a release the run's thread scheduled and still owes (see
+ * {@link finalizeSubagentLifecycle}); it settles once that release has run.
+ */
+export type ReleaseTakeOver = (pendingRelease?: Promise<void>) => void | Promise<void>;
+
+/**
  * Run a single agent. On the main thread with worker mode on, the pool places the whole run
  * on this thread or in a pooled subagent worker (the child session is homed where it runs),
  * by how many subagents run at once; otherwise — worker mode off, or already inside a
@@ -4388,26 +4401,48 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
  * was created.
  */
 export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
-	let releaseOwed = options.onRelease !== undefined;
-	const onReleaseTakenOver = (): void => {
+	// Carried as a hold even when the caller passed a plain callback, so every
+	// party that may discharge it — the run's thread, this boundary, a dead
+	// worker's backstop below — shares one discharge that runs at most once.
+	const hold: ReleaseHold | undefined = options.onRelease
+		? (asReleaseHold(options.onRelease) ?? createReleaseHold(options.onRelease))
+		: undefined;
+	const runOptions = hold === options.onRelease ? options : { ...options, onRelease: hold };
+	let releaseOwed = hold !== undefined;
+	const onReleaseTakenOver: ReleaseTakeOver = pendingRelease => {
 		releaseOwed = false;
 		// Only the call crosses to a worker, never the hold's own state, so a
 		// worker's run cannot claim it; record the take-over here, on the object
 		// the boundaries that created it read ownership from.
-		asReleaseHold(options.onRelease)?.claim();
+		hold?.claim();
+		if (!hold || !pendingRelease) return;
+		// The run's thread still owes this release. A worker's promise rejects
+		// only when the worker died first, and then nothing over there will
+		// ever run it: it is due here. A release the worker already ran is
+		// the same discharge, so this cannot run it twice.
+		trackLateCleanup(
+			pendingRelease.catch(async () => {
+				try {
+					await hold();
+				} catch (error) {
+					logger.warn("Subagent lifecycle resource cleanup failed", { id: options.id, error: String(error) });
+				}
+			}),
+			{ id: options.id, resource: "worker-deferred-release" },
+		);
 	};
 	try {
 		const pool = isMainThread() && options.settings ? subagentWorkerPool(options.settings) : undefined;
 		return pool
-			? await runSubprocessPlaced(pool, options, onReleaseTakenOver, runDispatchedSubprocess)
-			: await runDispatchedSubprocess(options, onReleaseTakenOver);
+			? await runSubprocessPlaced(pool, runOptions, onReleaseTakenOver, runDispatchedSubprocess)
+			: await runDispatchedSubprocess(runOptions, onReleaseTakenOver);
 	} finally {
 		// A worker that adopted the child into this thread's lifecycle and died
 		// before its report arrived has still handed the hold over: the adoption
 		// claimed it.
-		if (releaseOwed && (asReleaseHold(options.onRelease)?.isOwed() ?? true)) {
+		if (releaseOwed && hold?.isOwed()) {
 			try {
-				await options.onRelease?.();
+				await hold();
 			} catch (error) {
 				logger.warn("Subagent lifecycle resource cleanup failed", { id: options.id, error: String(error) });
 			}
@@ -4422,11 +4457,11 @@ export interface SubagentRunRequest {
 	/** Root compaction thresholds tagged on `options.settings` (a symbol property, which never crosses). */
 	readonly rootThresholds: RootCompactionThresholds | undefined;
 	/** Tells the caller's thread that the run no longer owes {@link ExecutorOptions.onRelease}. */
-	readonly onReleaseTakenOver: () => void | Promise<void>;
+	readonly onReleaseTakenOver: ReleaseTakeOver;
 }
 
 /** Package `options` for a worker, carrying what the settings' symbol tag holds explicitly. */
-export function subagentRunRequest(options: ExecutorOptions, onReleaseTakenOver: () => void): SubagentRunRequest {
+export function subagentRunRequest(options: ExecutorOptions, onReleaseTakenOver: ReleaseTakeOver): SubagentRunRequest {
 	const settings: SubagentChainSettings | undefined = options.settings;
 	return { options, rootThresholds: settings?.[kRootCompactionThresholds], onReleaseTakenOver };
 }
@@ -4436,11 +4471,13 @@ export function runSubagentRunRequest(request: SubagentRunRequest): Promise<Sing
 	const settings: SubagentChainSettings | undefined = request.options.settings;
 	if (settings && request.rootThresholds) settings[kRootCompactionThresholds] = request.rootThresholds;
 	const report = request.onReleaseTakenOver;
-	return runDispatchedSubprocess(request.options, async () => {
-		// Awaited, so the caller has recorded the take-over before this run
-		// returns. A link that closed has no caller left to owe anything to.
+	return runDispatchedSubprocess(request.options, async pendingRelease => {
+		// Awaited, so the caller has recorded the take-over — and, with a
+		// pending release, holds this worker until it has run — before this
+		// run returns and the worker can go idle. A link that closed has no
+		// caller left to owe anything to.
 		try {
-			await report();
+			await report(pendingRelease);
 		} catch (error) {
 			logger.warn("Subagent release take-over did not reach its caller", {
 				id: request.options.id,
@@ -4459,7 +4496,7 @@ export function runSubagentRunRequest(request: SubagentRunRequest): Promise<Sing
  */
 async function runDispatchedSubprocess(
 	options: ExecutorOptions,
-	onReleaseTakenOver: () => void | Promise<void>,
+	onReleaseTakenOver: ReleaseTakeOver,
 ): Promise<SingleResult> {
 	const {
 		cwd,
@@ -5397,7 +5434,7 @@ async function runDispatchedSubprocess(
 				if (options.keepAlive !== false && (!preparedSession || readyAt !== undefined)) {
 					attachIrcWakeTurnMonitor(session, wakeOptions);
 				}
-				await finalizeSubagentLifecycle({
+				const { pendingRelease } = await finalizeSubagentLifecycle({
 					id,
 					session,
 					aborted,
@@ -5413,9 +5450,10 @@ async function runDispatchedSubprocess(
 						deferCleanup(completion);
 					},
 				});
-				// Either it ran the release or the lifecycle manager now holds it
-				// for a kept-alive child: it is no longer owed by this run.
-				await onReleaseTakenOver();
+				// It ran the release, the lifecycle manager now holds it for a
+				// kept-alive child, or it is scheduled behind a late disposal and
+				// still owed by this thread until `pendingRelease` settles.
+				await onReleaseTakenOver(pendingRelease);
 			}
 			if (jobManager) {
 				if (deferredSessionShutdown) {

@@ -293,4 +293,34 @@ describe("isolation workspace leases", () => {
 			forgetIsolationWorkspace(mergedDir);
 		}
 	});
+
+	it("lets the owner tear down a sandbox whose only lease belongs to an exited worker thread of this process", async () => {
+		// A worker shares this process's pid. Its session's lease, left behind
+		// when the worker died before the session let go, used to pin the
+		// sandbox — and keep a poll running — for the life of the process.
+		// No worker of this process ever ran as `w9001`, so it is gone.
+		const { baseDir, mergedDir } = await makeSandbox();
+		registerIsolationWorkspace(mergedDir, { baseDir, generation: "gen-1" });
+		try {
+			const workerLease = path.join(baseDir, ISOLATION_LEASE_DIR, "worker.json");
+			await Bun.write(workerLease, JSON.stringify({ pid: process.pid, thread: "w9001" }));
+
+			expect(await deferTeardownWhileLeased(mergedDir, async () => {})).toBe(false);
+			expect(await fs.readdir(path.join(baseDir, ISOLATION_LEASE_DIR))).toEqual([]);
+		} finally {
+			forgetIsolationWorkspace(mergedDir);
+		}
+	});
+
+	it("still honours another process's lease by its pid alone, whatever thread it names", async () => {
+		// Only this process sees its own workers exit; a thread id read from
+		// another process's lease says nothing about whether that holder is here.
+		const { baseDir } = await makeSandbox();
+		await Bun.write(
+			path.join(baseDir, ISOLATION_LEASE_DIR, "foreign.json"),
+			JSON.stringify({ pid: process.ppid, thread: "w9002" }),
+		);
+
+		expect(await hasLiveIsolationLease(baseDir)).toBe(true);
+	});
 });

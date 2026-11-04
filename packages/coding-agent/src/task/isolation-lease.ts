@@ -25,11 +25,17 @@
  * - the owner's own child session does not pin its own sandbox. It is part of
  *   the run, so its lease carries the owner's agent id and the owner ignores
  *   it; a nested child's does not and is honoured.
+ * - a lease, unfinished-writer record or intent written on a worker thread
+ *   names that thread. The thread shares this process's pid, so a worker
+ *   that died before its session let go would otherwise pin the sandbox for
+ *   the life of the process; in this process a record whose thread is gone
+ *   counts as released. Other processes see only the pid, as before.
  */
 import { type FSWatcher, watch } from "./isolation-fs";
 import * as fs from "./isolation-fs";
 import * as path from "node:path";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { currentThreadId, isMainThread, isThreadId, isThreadOfThisProcessAlive } from "../thread/identity";
 import {
 	withSandboxLock,
 	isProcessStillLive,
@@ -183,16 +189,42 @@ function isOwnersOwnLease(holder: ProcessIdentity, agentId: unknown, ownerAgentI
 	return holder.pid === process.pid;
 }
 
-/** The agent id recorded in a lease file, if any. */
-async function readLeaseAgentId(file: string): Promise<unknown> {
-	// An id nobody can read is simply not an id: this only decides whether a
-	// lease is the owner's own, and the unreadable case is already counted as
-	// a live foreign holder by `readHolders`, which is the strict answer.
+/** The owner agent id and the holding thread recorded in a holder file, if any. */
+async function readLeaseRecord(file: string): Promise<{ agentId?: unknown; thread?: unknown }> {
+	// A field nobody can read is simply absent: these only decide whether a
+	// lease is the owner's own or its thread has gone, and the unreadable case
+	// is already counted as a live foreign holder by the identity read, which
+	// is the strict answer.
 	const found = await fs.readJsonLookup(file);
-	if (found.kind !== "found") return undefined;
+	if (found.kind !== "found") return {};
 	const decoded = found.value;
-	if (typeof decoded !== "object" || decoded === null || !("agentId" in decoded)) return undefined;
-	return decoded.agentId;
+	if (typeof decoded !== "object" || decoded === null) return {};
+	return {
+		agentId: "agentId" in decoded ? decoded.agentId : undefined,
+		thread: "thread" in decoded ? decoded.thread : undefined,
+	};
+}
+
+/**
+ * The thread a holder record written here names: a worker's, so that its
+ * record dies with it in this process. Main's lives as long as the process,
+ * so its pid already says everything.
+ */
+function holderThread(): { thread?: string } {
+	return isMainThread() ? {} : { thread: currentThreadId() };
+}
+
+/**
+ * Whether the holder of the record at `file` — a lease, an unfinished
+ * writer, an announced intent — is still here: its process is live and, when
+ * the record is this process's and names a worker thread, that thread has
+ * not exited.
+ */
+async function isHolderLive(holder: ProcessIdentity, file: string): Promise<boolean> {
+	if (!(await isProcessStillLive(holder))) return false;
+	if (holder.pid !== process.pid) return true;
+	const { thread } = await readLeaseRecord(file);
+	return !isThreadId(thread) || isThreadOfThisProcessAlive(thread);
 }
 
 /**
@@ -223,10 +255,11 @@ export async function hasLiveIsolationLease(baseDir: string, ownerAgentId?: stri
 			live = true;
 			continue;
 		}
-		if (holder && (await isProcessStillLive(holder))) {
+		if (holder && (await isHolderLive(holder, file))) {
+			const record = await readLeaseRecord(file);
 			// The owner's own child session is part of the run, not a later user
 			// of its workspace: it must not stop its own run's capture.
-			if (isOwnersOwnLease(holder, await readLeaseAgentId(file), ownerAgentId)) continue;
+			if (isOwnersOwnLease(holder, record.agentId, ownerAgentId)) continue;
 			live = true;
 			continue;
 		}
@@ -290,7 +323,10 @@ export async function leaseIsolationWorkspace(
 						"cannot lease a workspace that has been replaced.",
 				);
 			}
-			await writeProcessIdentity(leaseFile, options.agentId === undefined ? {} : { agentId: options.agentId });
+			await writeProcessIdentity(leaseFile, {
+				...(options.agentId === undefined ? {} : { agentId: options.agentId }),
+				...holderThread(),
+			});
 		});
 	} finally {
 		await intent();
@@ -357,7 +393,7 @@ export async function markUnfinishedWriter(cwd: string): Promise<() => Promise<v
 						"cannot record a writer against a workspace that has been replaced.",
 				);
 			}
-			await writeProcessIdentity(record);
+			await writeProcessIdentity(record, holderThread());
 		});
 	} finally {
 		await intent();
@@ -388,7 +424,7 @@ async function announceIntent(baseDir: string): Promise<() => Promise<void>> {
 	// A caller told it announced itself waits for a lock believing the holder
 	// can see it, and on a full disk the holder saw nothing at all.
 	try {
-		await writeProcessIdentity(file);
+		await writeProcessIdentity(file, holderThread());
 	} catch (error) {
 		throw new Error(
 			`Could not announce a stake in isolation workspace ${baseDir} (${fs.reasonOf(error)}); ` +
@@ -430,7 +466,7 @@ async function hasLiveRecordIn(dir: string): Promise<boolean> {
 			continue;
 		}
 		if (holder === undefined) continue;
-		if (await isProcessStillLive(holder)) {
+		if (await isHolderLive(holder, file)) {
 			live = true;
 			continue;
 		}
@@ -465,14 +501,15 @@ async function readHolders(dir: string): Promise<HolderReading> {
 	let anyLive = false;
 	let allOurs = true;
 	for (const entry of entries) {
-		const holder = await readProcessIdentity(path.join(dir, entry));
+		const file = path.join(dir, entry);
+		const holder = await readProcessIdentity(file);
 		if (holder === undefined) continue;
 		if (holder === "unreadable") {
 			anyLive = true;
 			allOurs = false;
 			continue;
 		}
-		if (!(await isProcessStillLive(holder))) continue;
+		if (!(await isHolderLive(holder, file))) continue;
 		anyLive = true;
 		if (holder.pid !== process.pid) allOurs = false;
 	}

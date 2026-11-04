@@ -31,7 +31,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import { cfgTaskWorkerThreads } from "../task/settings";
 import { firstSharedModule, SubagentCodeChangedError } from "./code-skew";
-import { isMainThread, type ThreadId } from "./identity";
+import { isMainThread, markWorkerThreadLive, type ThreadId } from "./identity";
 import type { MainThreadLink, SubagentWorkerInit } from "./protocol";
 import { type RpcFrame, RpcLink } from "./rpc";
 import type { ThreadService, WorkerPeer } from "./services";
@@ -139,6 +139,7 @@ export class SubagentWorker implements WorkerPeer {
 
 	constructor(options: SubagentWorkerOptions = {}) {
 		this.threadId = `w${nextThreadNumber++}`;
+		markWorkerThreadLive(this.threadId, true);
 		this.#options = options;
 		this.#services = options.services ?? THREAD_SERVICES;
 		const worker = spawnBunWorker(options.entry);
@@ -309,6 +310,9 @@ export class SubagentWorker implements WorkerPeer {
 	#die(reason: string): void {
 		if (this.#exitReason !== undefined) return;
 		this.#exitReason = reason;
+		// First, before any exit hook: a hook that tears down an isolation
+		// workspace must already read this thread's leases as released.
+		markWorkerThreadLive(this.threadId, false);
 		this.#worker.terminate();
 		this.#handshake.reject(new Error(`Subagent worker ${this.threadId} exited before ready: ${reason}`));
 		this.link.close(reason);
