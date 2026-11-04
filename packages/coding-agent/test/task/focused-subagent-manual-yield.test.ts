@@ -234,7 +234,15 @@ async function spawnKeptAliveChild(options?: {
 		close();
 		throw new Error("kept-alive subagent has no live session");
 	}
-	return { session: localSession(session), artifact, deliveries, firstDelivery: firstDelivery.promise, close, mock };
+	return {
+		session: localSession(session),
+		artifact,
+		deliveries,
+		firstDelivery: firstDelivery.promise,
+		close,
+		[Symbol.dispose]: close,
+		mock,
+	};
 }
 
 it("a focused manual prompt's yield rewrites the artifact and notifies the parent", async () => {
@@ -252,45 +260,40 @@ it("a focused manual prompt's yield rewrites the artifact and notifies the paren
 }, 15_000);
 
 it("minimal-task omits inherited prompt and autoload skill content while default retains it", async () => {
-	const normal = await spawnKeptAliveChild();
-	const minimal = await spawnKeptAliveChild({ systemPreset: "minimal-task", agentId: "MinimalYield" });
-	try {
-		const normalText = normal.mock.calls.map(call => (call.context.systemPrompt ?? []).join("\n")).join("\n");
-		const minimalText = minimal.mock.calls.map(call => (call.context.systemPrompt ?? []).join("\n")).join("\n");
-		const normalMessages = JSON.stringify(normal.mock.calls.map(call => call.context.messages));
-		const minimalMessages = JSON.stringify(minimal.mock.calls.map(call => call.context.messages));
-		expect(normalText).toContain("PROJECT_SENTINEL");
-		expect(normalText).toContain("RULE_SENTINEL");
-		expect(normalText).toContain("SKILL_SENTINEL");
-		expect(normalMessages).toContain("Skill body sentinel");
-		expect(normalText).toContain("CHILD_ROLE_SENTINEL");
-		expect(minimalText).not.toContain("PROJECT_SENTINEL");
-		expect(minimalText).not.toContain("RULE_SENTINEL");
-		expect(minimalText).not.toContain("SKILL_SENTINEL");
-		expect(minimalMessages).not.toContain("Skill body sentinel");
-		expect(minimalText).toContain("CHILD_ROLE_SENTINEL");
-		const normalTools = normal.mock.calls.flatMap(call => call.context.tools ?? []);
-		const minimalTools = minimal.mock.calls.flatMap(call => call.context.tools ?? []);
-		const normalYieldTool = normalTools.find(tool => tool.name === "yield");
-		const minimalYieldTool = minimalTools.find(tool => tool.name === "yield");
-		expect(normalYieldTool).toBeDefined();
-		expect(minimalYieldTool).toBeDefined();
-		expect(normalYieldTool?.description).toBe("");
-		expect(minimalYieldTool?.description).toContain("Submit subagent output");
-		expect(normalTools.some(tool => tool.name === "mounted_probe")).toBe(false);
-		const minimalMountedTool = minimalTools.find(tool => tool.name === "mounted_probe");
-		expect(minimalMountedTool).toBeDefined();
-		expect(minimalMountedTool?.description).toContain("mounted probe description sentinel");
-		expect(JSON.stringify(minimalMountedTool?.parameters)).toContain("mounted value sentinel");
-		expect(JSON.stringify(minimalYieldTool?.parameters)).toContain("Optional result type");
-	} finally {
-		normal.close();
-		minimal.close();
-	}
+	using normal = await spawnKeptAliveChild();
+	using minimal = await spawnKeptAliveChild({ systemPreset: "minimal-task", agentId: "MinimalYield" });
+	const normalText = normal.mock.calls.map(call => (call.context.systemPrompt ?? []).join("\n")).join("\n");
+	const minimalText = minimal.mock.calls.map(call => (call.context.systemPrompt ?? []).join("\n")).join("\n");
+	const normalMessages = JSON.stringify(normal.mock.calls.map(call => call.context.messages));
+	const minimalMessages = JSON.stringify(minimal.mock.calls.map(call => call.context.messages));
+	expect(normalText).toContain("PROJECT_SENTINEL");
+	expect(normalText).toContain("RULE_SENTINEL");
+	expect(normalText).toContain("SKILL_SENTINEL");
+	expect(normalMessages).toContain("Skill body sentinel");
+	expect(normalText).toContain("CHILD_ROLE_SENTINEL");
+	expect(minimalText).not.toContain("PROJECT_SENTINEL");
+	expect(minimalText).not.toContain("RULE_SENTINEL");
+	expect(minimalText).not.toContain("SKILL_SENTINEL");
+	expect(minimalMessages).not.toContain("Skill body sentinel");
+	expect(minimalText).toContain("CHILD_ROLE_SENTINEL");
+	const normalTools = normal.mock.calls.flatMap(call => call.context.tools ?? []);
+	const minimalTools = minimal.mock.calls.flatMap(call => call.context.tools ?? []);
+	const normalYieldTool = normalTools.find(tool => tool.name === "yield");
+	const minimalYieldTool = minimalTools.find(tool => tool.name === "yield");
+	expect(normalYieldTool).toBeDefined();
+	expect(minimalYieldTool).toBeDefined();
+	expect(normalYieldTool?.description).toBe("");
+	expect(minimalYieldTool?.description).toContain("Submit subagent output");
+	expect(normalTools.some(tool => tool.name === "mounted_probe")).toBe(false);
+	const minimalMountedTool = minimalTools.find(tool => tool.name === "mounted_probe");
+	expect(minimalMountedTool).toBeDefined();
+	expect(minimalMountedTool?.description).toContain("mounted probe description sentinel");
+	expect(JSON.stringify(minimalMountedTool?.parameters)).toContain("mounted value sentinel");
+	expect(JSON.stringify(minimalYieldTool?.parameters)).toContain("Optional result type");
 }, 15_000);
 
 it("warm revival keeps ordinary descendants on the original live prompt preferences", async () => {
-	const minimal = await spawnKeptAliveChild({ systemPreset: "minimal-task" });
+	using minimal = await spawnKeptAliveChild({ systemPreset: "minimal-task" });
 	const rootSettings = minimal.session.settings.overlayParent()!;
 	const lifecycle = AgentLifecycleManager.global();
 	await lifecycle.park(AGENT_ID);

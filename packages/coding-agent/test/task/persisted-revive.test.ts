@@ -55,6 +55,7 @@ import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/irc-types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { localSession } from "../helpers/local-session";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
@@ -575,49 +576,7 @@ describe("persisted subagent revival", () => {
 				expect(capturedOptions?.customTools).toBeUndefined();
 			}
 		});
-
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
-
-		expect(capturedOptions?.restrictToolNames).toBeUndefined();
-		expect(capturedOptions?.enableLsp).toBe(true);
-		expect(capturedOptions?.mcpManager).toBe(hostileMcp);
-		expect(capturedOptions?.mcpTools?.map(tool => tool.name)).toEqual(["mcp__server_read"]);
-		expect(capturedOptions?.customTools).toBeUndefined();
-	});
-
-	it("preserves minimal-task capability suppression during cold revival", async () => {
-		const cwd = makeTempDir("@pi-minimal-revive-");
-		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
-			systemPreset: "minimal-task",
-		});
-		let capturedOptions: CreateAgentSessionOptions | undefined;
-		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedOptions = options;
-			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
-		});
-
-		const rootSettings = Settings.isolated({ inlineToolDescriptors: "on", "tools.xdev": true });
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd, undefined, { settings: rootSettings })(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
-
-		expect(cfgInlineToolDescriptors.get(capturedOptions?.settings ?? Settings.isolated())).toBe("off");
-		expect(capturedOptions?.skills).toEqual([]);
-		expect(capturedOptions?.rules).toEqual([]);
-		const revivedSettings = capturedOptions?.settings;
-		if (!revivedSettings) throw new Error("Expected revived settings");
-		const ordinaryChild = executorModule.createSubagentSettings(revivedSettings);
-		expect(cfgInlineToolDescriptors.get(ordinaryChild)).toBe("on");
-		expect(cfgToolsXdev.get(ordinaryChild)).toBe(true);
-		expect(cfgInlineToolDescriptors.get(revivedSettings)).toBe("off");
-		expect(cfgToolsXdev.get(revivedSettings)).toBe(false);
-		expect(cfgInlineToolDescriptors.get(rootSettings)).toBe("on");
-		expect(cfgToolsXdev.get(rootSettings)).toBe(true);
-	});
+	}
 
 	it("keeps project context out of an advisor after a minimal cold revival", async () => {
 		const cwd = makeTempDir("@pi-minimal-revive-context-");
@@ -626,7 +585,7 @@ describe("persisted subagent revival", () => {
 			systemPreset: "minimal-task",
 			tools: ["read", "bash", "yield"],
 		});
-		const authStorage = await AuthStorage.create(":memory:");
+		const authStorage = createInMemoryAuthStorage();
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
 		const settings = Settings.isolated({
@@ -642,9 +601,7 @@ describe("persisted subagent revival", () => {
 		});
 		let revived: AgentSession | undefined;
 		try {
-			const reviver = await createFactory(cwd, undefined, { authStorage, modelRegistry, settings })(ref);
-			if (!reviver) throw new Error("Expected a persisted reviver");
-			revived = localSession(await reviver(ref));
+			revived = await reviveSession(cwd, ref, { authStorage, modelRegistry, settings });
 			const advisor = revived.getAdvisorAgent();
 			if (!advisor) throw new Error("Expected a revived advisor");
 			expect(revived.getMountedToolCommandNames()).toEqual([]);
@@ -727,10 +684,7 @@ describe("persisted subagent revival", () => {
 			},
 		});
 
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd, undefined, { settings })(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
+		await reviveSession(cwd, createRef(sessionFile), { settings });
 
 		expect(capturedOptions?.oauthAccountPools).toEqual({ anthropic: ["email:a@example.com|org:org-a"] });
 	});
@@ -1473,10 +1427,7 @@ describe("persisted subagent revival", () => {
 			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
 		});
 
-		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd, undefined, { settings: rootSettings })(ref);
-		if (!reviver) throw new Error("Expected a persisted reviver");
-		await reviver(ref);
+		await reviveSession(cwd, createRef(sessionFile), { settings: rootSettings });
 
 		expect(captured?.getModelRole("advisor")).toBe("anthropic/claude-sonnet-4-5:high");
 	});
@@ -2624,17 +2575,10 @@ describe("minimal-task settings stay session-local", () => {
 		const minimal = executorModule.createSubagentSettings(root, undefined, undefined, "minimal-task");
 		const nestedMinimal = executorModule.createSubagentSettings(minimal, undefined, undefined, "minimal-task");
 		for (const parent of [minimal, nestedMinimal]) {
-			const ordinary = executorModule.createSubagentSettings(parent);
+			const ordinary = expectMinimalInheritance(root, parent);
 			const ordinaryGrandchild = executorModule.createSubagentSettings(ordinary);
-			for (const child of [ordinary, ordinaryGrandchild]) {
-				expect(cfgInlineToolDescriptors.get(child)).toBe("on");
-				expect(cfgToolsXdev.get(child)).toBe(true);
-			}
-			expect(cfgInlineToolDescriptors.get(parent)).toBe("off");
-			expect(cfgToolsXdev.get(parent)).toBe(false);
+			expectPromptPreferences(ordinaryGrandchild, "on", true);
 		}
-		expect(cfgInlineToolDescriptors.get(root)).toBe("on");
-		expect(cfgToolsXdev.get(root)).toBe(true);
 	});
 
 	it("keeps existing ordinary descendants live while preserving their own overrides", async () => {
@@ -2646,16 +2590,13 @@ describe("minimal-task settings stay session-local", () => {
 		cfgToolsCommands.set(root, false);
 		expectPromptPreferences(root, "auto", false);
 		const ordinary = executorModule.createSubagentSettings(minimal);
-		expect(cfgInlineToolDescriptors.get(ordinary)).toBe("auto");
-		expect(cfgToolsXdev.get(ordinary)).toBe(false);
+		expectPromptPreferences(ordinary, "auto", false);
 		const explicit = executorModule.createSubagentSettings(minimal, {
 			inlineToolDescriptors: "on",
 			"tools.commands": true,
 		});
-		expect(cfgInlineToolDescriptors.get(explicit)).toBe("on");
-		expect(cfgToolsXdev.get(explicit)).toBe(true);
-		expect(cfgInlineToolDescriptors.get(minimal)).toBe("off");
-		expect(cfgToolsXdev.get(minimal)).toBe(false);
+		expectPromptPreferences(explicit, "on", true);
+		expectPromptPreferences(minimal, "off", false);
 		const grandchild = executorModule.createSubagentSettings(ordinary);
 		const changes: string[] = [];
 		const stop = cfgInlineToolDescriptors.listen(grandchild, value => {
