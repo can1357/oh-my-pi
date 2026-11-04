@@ -802,7 +802,8 @@ class RpcClient(WireClient):
         self._last_schedule_async_error_index = 0
         # Number of `session_settled` frames received; `wait_for_settled` waits for it to advance.
         self._session_settled_count = 0
-        self._ui_requests: queue.Queue[ExtensionUiRequest] = queue.Queue()
+        # The child's UI requests, then the error that closed it (see `next_ui_request`).
+        self._ui_requests: queue.Queue[ExtensionUiRequest | BaseException] = queue.Queue()
         # Ids of the current child's dialogs that await an answer: an answer
         # is sent only for one of these (see `_send_ui_response`).
         self._pending_ui_ids: set[str] = set()
@@ -1295,12 +1296,25 @@ class RpcClient(WireClient):
         return self.on_ui_request(handle)
 
     def next_ui_request(self, timeout: float | None = None) -> ExtensionUiRequest:
+        """Return the child's next extension UI request.
+
+        Raises the error that closed the child (`RpcProcessExitError` when it
+        exited or was stopped) once the requests it sent are drained, also to a
+        wait that began before the close and to one whose client was restarted
+        since: a wait belongs to the child that was current when it began.
+        """
+        ui_requests = self._ui_requests
         try:
-            return self._ui_requests.get(timeout=timeout)
+            item = ui_requests.get(timeout=timeout)
         except queue.Empty as exc:
             raise RpcTimeoutError(
                 "Timed out waiting for an extension UI request"
             ) from exc
+        if isinstance(item, BaseException):
+            # Leave the close error for every other waiter on this child.
+            ui_requests.put(item)
+            raise item
+        return item
 
     def send_ui_value(self, request_id: str, value: str) -> None:
         self._send_ui_response(
@@ -2712,6 +2726,8 @@ class RpcClient(WireClient):
         self._closed_error = error
         self._ready.set()
         self._fail_pending(error)
+        # Wakes `next_ui_request` waiters; `start` gives the next child a new queue.
+        self._ui_requests.put(error)
         with self._event_condition:
             self._event_condition.notify_all()
 

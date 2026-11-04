@@ -1161,6 +1161,36 @@ class RpcClientTests(unittest.TestCase):
         }
         return RpcClient(command=[sys.executable, "-u", "-c", server], **options)
 
+    def test_ui_waiter_gets_the_exit_error_when_its_child_stops_or_is_replaced(self) -> None:
+        for restart in (False, True):
+            with self.subTest(restart=restart):
+                client = self.make_client()
+                client.start()
+                outcome: list[BaseException | object] = []
+
+                def wait() -> None:
+                    try:
+                        outcome.append(client.next_ui_request())
+                    except BaseException as exc:
+                        outcome.append(exc)
+
+                waiter = threading.Thread(target=wait, daemon=True)
+                waiter.start()
+                time.sleep(0.2)
+                client.stop()
+                if restart:
+                    client.start()
+                waiter.join(3.0)
+                try:
+                    self.assertFalse(waiter.is_alive(), "next_ui_request() stayed blocked")
+                    self.assertIsInstance(outcome[0], RpcProcessExitError)
+                    if restart:
+                        # The new child's waits are not poisoned by the old child's close.
+                        with self.assertRaises(RpcTimeoutError):
+                            client.next_ui_request(timeout=0.2)
+                finally:
+                    client.stop()
+
     def test_ask_answers_reach_the_wire_in_question_order(self) -> None:
         with self.make_client() as client:
             client.prompt("needs ask")
