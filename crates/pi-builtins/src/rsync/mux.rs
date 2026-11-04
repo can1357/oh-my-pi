@@ -474,6 +474,12 @@ struct WShared {
 	/// A message went out since the last output pass that wrote data (upstream: a
 	/// non-empty `iobuf.msg`, which the next `perform_io` pass writes instead of data).
 	msgs_written: AtomicBool,
+	/// Tests only: set by a keepalive decision as soon as it has passed its
+	/// first output-clock check (it takes the output lock after that, first
+	/// in `check_failed`), so a test can move the clock after that point
+	/// instead of guessing with a sleep.
+	#[cfg(test)]
+	past_first_clock_check: AtomicBool,
 }
 
 impl Drop for WShared {
@@ -645,6 +651,8 @@ impl MuxWriter {
 				out,
 				peer: Mutex::new(None),
 				msgs_written: AtomicBool::new(false),
+				#[cfg(test)]
+				past_first_clock_check: AtomicBool::new(false),
 			}),
 		}
 	}
@@ -1019,6 +1027,8 @@ impl MuxWriter {
 		if idle_secs(now, sh.counters.last_out.load(Ordering::Relaxed)) < lull {
 			return Ok(());
 		}
+		#[cfg(test)]
+		sh.past_first_clock_check.store(true, Ordering::SeqCst);
 		if role == Some(Role::Receiver)
 			&& idle_secs(now, sh.counters.last_in.load(Ordering::Relaxed)) >= timeout
 		{
@@ -3011,6 +3021,12 @@ mod tests {
 	/// lock while a write finishes; without the second read it queued a
 	/// keepalive right after that write (1 to 3 ms apart, 15 of 15 times, over
 	/// a real socket in review).
+	///
+	/// The write's clock moves only once the decision has passed its first
+	/// check, which it signals. A review found the earlier shape, a 300 ms
+	/// sleep, proved nothing on a loaded runner: a decision that started late
+	/// saw the moved clock at its first check and returned, so the test
+	/// passed with the second read removed.
 	#[test]
 	fn a_write_finished_during_the_decision_holds_the_keepalive() {
 		let sink = Sink::default();
@@ -3024,7 +3040,11 @@ mod tests {
 			thread::spawn(move || w.maybe_keepalive(0))
 		};
 		// The decision passes the clock check and waits for the output lock.
-		thread::sleep(Duration::from_millis(300));
+		let deadline = std::time::Instant::now() + Duration::from_secs(30);
+		while !w.shared.past_first_clock_check.load(Ordering::SeqCst) {
+			assert!(std::time::Instant::now() < deadline, "the decision never passed its clock check");
+			thread::sleep(Duration::from_millis(1));
+		}
 		// A write finishes, recorded as write_out records it.
 		w.shared.counters.last_out.store(clock_ms(), Ordering::Relaxed);
 		drop(held);
