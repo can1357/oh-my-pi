@@ -8,7 +8,7 @@ use std::os::unix::process::ExitStatusExt as _;
 use tokio::process::Command;
 
 use super::*;
-use crate::process;
+use crate::proctree;
 
 mod builtins;
 mod env_cwd;
@@ -248,6 +248,7 @@ fn pseudo_terminal_session() -> (std::os::fd::OwnedFd, fs::File) {
 		let previous = unsafe { libc::signal(signal, libc::SIG_IGN) };
 		assert_ne!(previous, libc::SIG_ERR, "ignore terminal job-control signal {signal}");
 	}
+	crate::sys::dispositions_changed();
 	(master, slave)
 }
 
@@ -362,7 +363,7 @@ impl Drop for PidfileProcessCleanup {
 			if let Some(process) = fs::read_to_string(pidfile)
 				.ok()
 				.and_then(|pid| pid.trim().parse::<i32>().ok())
-				.and_then(process::Process::from_pid)
+				.and_then(proctree::Process::from_pid)
 			{
 				let _ = process.kill_tree(Some(libc::SIGKILL));
 			}

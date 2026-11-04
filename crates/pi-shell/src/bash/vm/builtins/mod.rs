@@ -26,18 +26,52 @@ pub mod misc;
 mod names;
 mod options;
 mod printf;
-mod strftime;
+pub mod strftime;
 mod test;
 pub mod trap;
 mod vars;
 pub mod zsh_args;
 mod zsh_dir;
+pub mod zsh_jobs;
+mod zsh_kill;
+mod zsh_mod_attr;
+mod zsh_mod_cap;
+mod zsh_mod_clone;
+pub mod zsh_mod_curses;
+mod zsh_mod_datetime;
+pub mod zsh_mod_example;
+mod zsh_mod_files;
+pub mod zsh_mod_langinfo;
+pub mod zsh_mod_mapfile;
+pub mod zsh_mod_mathfunc;
+pub mod zsh_mod_nearcolor;
+pub mod zsh_mod_newuser;
+pub mod zsh_mod_pcre;
+mod zsh_mod_private;
+pub mod zsh_mod_regex;
+mod zsh_mod_rlimits;
+pub mod zsh_mod_sched;
+mod zsh_mod_socket;
+mod zsh_mod_stat;
+pub mod zsh_mod_system;
+pub mod zsh_mod_tcp;
+pub mod zsh_mod_termcap;
+pub mod zsh_mod_terminfo;
+mod zsh_mod_util;
+pub mod zsh_mod_watch;
+pub mod zsh_mod_zftp;
+pub mod zsh_mod_zprof;
+pub mod zsh_mod_zpty;
+mod zsh_mod_zselect;
+mod zsh_mod_zutil;
+pub mod zsh_module;
 pub mod zsh_names;
 pub mod zsh_print;
 pub mod zsh_prompt;
 pub mod zsh_quote;
 pub mod zsh_typeset;
-mod zsh_vars;
+pub mod zsh_vars;
+pub mod zsh_zcompile;
 
 use bstr::{BStr, BString};
 
@@ -48,7 +82,7 @@ pub use self::{
 	trap::hard_ignore,
 	vars::{
 		Lhs, assign, assign_loop_var, assign_special_prefix, declare_line, define_function,
-		prefix_value, set_value,
+		emit_assignment, emit_assignment_at, parse_compound, prefix_value, set_value,
 	},
 	zsh_vars::assign_zsh_loop_var,
 };
@@ -80,6 +114,10 @@ pub enum Need {
 	/// Run this command substitution ([`super::expand::Stop::Sub`]), then
 	/// run the builtin again.
 	Sub(super::expand::Stop),
+	/// Park until `WaitKey`'s source is ready, then run the builtin again
+	/// (the line editor waiting for a key: `vared`, `zle WIDGET`); its
+	/// progress lives in the vproc's editor state.
+	Park(crate::bash::event::WaitKey),
 }
 
 impl From<StoreError> for Need {
@@ -231,6 +269,12 @@ impl<'a, 'c> Ctx<'a, 'c> {
 			.find(|(q, _)| *q == p)
 			.map(|(_, r)| r.clone())
 			.ok_or(Need::Probe(p))
+	}
+
+	/// The probes answered so far, in the order they were answered (for a
+	/// builtin that walks its own answers instead of searching per probe).
+	pub const fn answered(&self) -> &'a [(Probe, ProbeResult)] {
+		self.probes
 	}
 
 	/// Expand the array subscript text a builtin was given (bash's
@@ -492,7 +536,67 @@ pub fn run(id: IntrinsicId, ctx: &mut Ctx<'_, '_>, argv: &[BString]) -> R {
 		| I::Compquote
 		| I::Comptags
 		| I::Comptry
-		| I::Compvalues => done(2),
+		| I::Compvalues
+		| I::Zstyle
+		| I::Zformat
+		| I::Zparseopts
+		| I::Zregexparse
+		| I::Strftime
+		| I::Echoti
+		| I::Echotc
+		| I::PcreCompile
+		| I::PcreStudy
+		| I::PcreMatch
+		| I::Private
+		| I::Zpty
+		| I::Zcurses
+		| I::ZshClone
+		| I::R
+		| I::Zcompile
+		| I::Limit
+		| I::Unlimit
+		| I::Sched
+		| I::Log
+		| I::Zprof
+		| I::Example
+		| I::Cap
+		| I::Getcap
+		| I::Setcap
+		| I::Chgrp
+		| I::Chmod
+		| I::Chown
+		| I::Ln
+		| I::Mkdir
+		| I::Mv
+		| I::Rm
+		| I::Rmdir
+		| I::Sync
+		| I::ZfChgrp
+		| I::ZfChmod
+		| I::ZfChown
+		| I::ZfLn
+		| I::ZfMkdir
+		| I::ZfMv
+		| I::ZfRm
+		| I::ZfRmdir
+		| I::ZfSync
+		| I::Stat
+		| I::Zstat
+		| I::Zgetattr
+		| I::Zsetattr
+		| I::Zdelattr
+		| I::Zlistattr
+		| I::Syserror
+		| I::Sysread
+		| I::Syswrite
+		| I::Sysopen
+		| I::Sysseek
+		| I::Zsystem
+		| I::Zselect
+		| I::Zsocket
+		| I::Ztcp
+		| I::Zftp
+		| I::ModuleStub => done(2),
 	}
 }
 

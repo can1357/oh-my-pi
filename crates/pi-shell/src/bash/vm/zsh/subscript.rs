@@ -37,14 +37,15 @@ pub fn parse_subscript_end(s: &[u8], sub: bool, endchar: u8) -> Option<usize> {
 }
 
 /// zsh `get_strarg`: the delimited argument starting at `s[i]` (the
-/// delimiter; brackets pair with their closers). Returns the index of the
-/// closing delimiter (`s.len()` when missing) and its length (0 then).
-pub fn get_strarg(s: &[u8], i: usize) -> (usize, usize) {
+/// delimiter, a character under `mb`; brackets pair with their closers).
+/// Returns the index of the closing delimiter (`s.len()` when missing)
+/// and its length (0 then). The argument starts after the opening
+/// delimiter, `text::charlen(s, i, mb)` bytes on.
+pub fn get_strarg(s: &[u8], i: usize, mb: bool) -> (usize, usize) {
 	if i >= s.len() {
 		return (i, 0);
 	}
-	let len = text::charlen(s, i);
-	let del = text::char_at(s, i);
+	let (len, del) = text::delim_at(s, i, mb);
 	let mut j = i + len;
 	let ctok = match at(s, i) {
 		INPAR => Some(OUTPAR),
@@ -59,19 +60,19 @@ pub fn get_strarg(s: &[u8], i: usize) -> (usize, usize) {
 		}
 		return (j, usize::from(j < s.len()));
 	}
-	let del = match del {
-		b'(' => b')',
-		b'[' => b']',
-		b'{' => b'}',
-		b'<' => b'>',
-		d => d,
+	let del = match char::from_u32(del) {
+		Some('(') => u32::from(b')'),
+		Some('[') => u32::from(b']'),
+		Some('{') => u32::from(b'}'),
+		Some('<') => u32::from(b'>'),
+		_ => del,
 	};
 	while j < s.len() {
-		let l = text::charlen(s, j);
-		if text::char_at(s, j) == del {
+		let (l, d) = text::delim_at(s, j, mb);
+		if d == del {
 			return (j, l);
 		}
-		j += l;
+		j += l.max(1);
 	}
 	(j, 0)
 }
@@ -105,6 +106,7 @@ pub fn getindex(
 	flags: u32,
 ) -> X<()> {
 	let dq = flags & SCANPM_DQUOTED != 0;
+	let mb = params::mb(ex)?;
 	let body = tail(s, *pos + 1);
 	let Some((tok, e)) = crate::bash::syntax::zsh::parse_subscript(body, dq, b']') else {
 		return Err(params::bad_subscript("invalid subscript"));
@@ -131,6 +133,10 @@ pub fn getindex(
 		i += 1;
 	}
 	*pos += 1 + e + 1;
+	// Only a plain key is answered without the whole value.
+	if v.pm.lazy && (sub == b"*" || sub == b"@" || sub.first() == Some(&b'(')) {
+		v.pm.materialize(ex)?;
+	}
 	if sub == b"*" || sub == b"@" {
 		if (v.isarr != 0 || is_unset_value(v)) && sub.first() == Some(&b'@') {
 			v.isarr |= SCANPM_ISVAR_AT;
@@ -152,7 +158,7 @@ pub fn getindex(
 				let mut nstart: i64 = 0;
 				let mut p = 0;
 				while p < t.len() {
-					p += text::charlen(&t, p);
+					p += text::charlen(&t, p, mb);
 					if p < target {
 						nstart += 1;
 					} else {
@@ -173,9 +179,10 @@ pub fn getindex(
 					let so = usize::try_from(startoff).unwrap_or(0);
 					let mut p = 0;
 					while p < so {
-						p += text::charlen(&t, p);
+						p += text::charlen(&t, p, mb);
 					}
-					start = -i64::try_from(text::strlen_chars(tail(&t, p.min(t.len())))).unwrap_or(0);
+					start =
+						-i64::try_from(text::strlen_chars(tail(&t, p.min(t.len())), mb)).unwrap_or(0);
 				}
 			}
 		}
@@ -271,6 +278,7 @@ fn getarg(
 	flags: u32,
 ) -> X<GetArg> {
 	let ishash = v.pm.flags.type_bits() == PmFlags::HASHED && v.elem.is_none();
+	let mb = params::mb(ex)?;
 	let mut f = SubFlags { num: 1, ..SubFlags::default() };
 	let mut arg = Arg { inv: false, w: 0, prevlen: 1, nextlen: 1, end: *at };
 	let mut s = *at;
@@ -325,12 +333,12 @@ fn getarg(
 				b'p' => escapes = true,
 				b'n' | b'b' | b's' => {
 					let which = sub.get(k).copied().unwrap_or(0);
-					let (t, arglen) = get_strarg(sub, k + 1);
+					let (t, arglen) = get_strarg(sub, k + 1, mb);
 					if t >= sub.len() || arglen == 0 {
 						ok = false;
 						break;
 					}
-					let start = k + 1 + text::charlen(sub, k + 1);
+					let start = k + 1 + text::charlen(sub, k + 1, mb);
 					let body = span(sub, start.min(t), t);
 					match which {
 						b'n' => {
@@ -457,9 +465,13 @@ fn getarg(
 			}
 			untokenize(&mut s);
 			let key = BString::from(unmetafy(&s));
-			let value = match &v.pm.value {
-				PValue::Hash(h) => h.iter().find(|e| e.0 == key).map(|e| e.1.clone()),
-				_ => None,
+			let value = match v.pm.special {
+				// A keyed special's `getnode`: that one entry.
+				Some(sp) if sp.keyed() => super::specials::get_elem(ex, sp, &key)?,
+				_ => match &v.pm.value {
+					PValue::Hash(h) => h.iter().find(|e| e.0 == key).map(|e| e.1.clone()),
+					_ => None,
+				},
 			};
 			v.elem = Some(HashElem { key, value });
 			v.isarr = if arg.inv { SCANPM_WANTINDEX } else { 0 };
@@ -511,7 +523,7 @@ fn getarg(
 					let mut t = 0;
 					let mut lastlen = 1;
 					while nchars > 0 && t < st.len() {
-						lastlen = text::charlen(&st, t);
+						lastlen = text::charlen(&st, t, mb);
 						t += lastlen;
 						nchars -= 1;
 					}
@@ -520,17 +532,17 @@ fn getarg(
 						arg.prevlen = i64::try_from(lastlen).unwrap_or(1);
 					}
 					if t < st.len() {
-						arg.nextlen = i64::try_from(text::charlen(&st, t)).unwrap_or(1);
+						arg.nextlen = i64::try_from(text::charlen(&st, t, mb)).unwrap_or(1);
 					}
 				},
 				std::cmp::Ordering::Equal => {
 					arg.prevlen = 0;
 					if !st.is_empty() {
-						arg.nextlen = i64::try_from(text::charlen(&st, 0)).unwrap_or(1);
+						arg.nextlen = i64::try_from(text::charlen(&st, 0, mb)).unwrap_or(1);
 					}
 				},
 				std::cmp::Ordering::Less => {
-					let nchars = i64::try_from(text::strlen_chars(&st)).unwrap_or(0) + r;
+					let nchars = i64::try_from(text::strlen_chars(&st, mb)).unwrap_or(0) + r;
 					if nchars < 0 {
 						r -= i64::try_from(st.len()).unwrap_or(0);
 					} else {
@@ -540,13 +552,13 @@ fn getarg(
 							if t >= st.len() {
 								break;
 							}
-							lastlen = text::charlen(&st, t);
+							lastlen = text::charlen(&st, t, mb);
 							t += lastlen;
 						}
 						r = -i64::try_from(st.len() - t.min(st.len())).unwrap_or(0);
 						arg.prevlen = i64::try_from(lastlen).unwrap_or(1);
 						if t < st.len() {
-							arg.nextlen = i64::try_from(text::charlen(&st, t)).unwrap_or(1);
+							arg.nextlen = i64::try_from(text::charlen(&st, t, mb)).unwrap_or(1);
 						}
 					}
 				},
@@ -771,7 +783,7 @@ fn getarg(
 	if d.is_empty() {
 		return Ok(GetArg { start: 0, arg });
 	}
-	let len = i64::try_from(text::strlen_chars(&d)).unwrap_or(0);
+	let len = i64::try_from(text::strlen_chars(&d, mb)).unwrap_or(0);
 	let slen = d.len();
 	if beg < 0 {
 		beg += len;
@@ -781,7 +793,7 @@ fn getarg(
 	let mut p = 0;
 	while p < slen {
 		bounds.push(p);
-		p += text::charlen(&d, p);
+		p += text::charlen(&d, p, mb);
 	}
 	bounds.push(slen);
 	let off = |i: i64| {
@@ -846,14 +858,14 @@ fn getarg(
 			if found.len() >= n {
 				let lastpos = found.get(found.len() - n).copied().unwrap_or(0);
 				let cl = if lastpos < slen {
-					text::charlen(&d, lastpos)
+					text::charlen(&d, lastpos, mb)
 				} else {
 					1
 				};
 				let after = lastpos + cl;
 				arg.prevlen = i64::try_from(cl).unwrap_or(1);
 				arg.nextlen = if after < slen {
-					i64::try_from(text::charlen(&d, after)).unwrap_or(1)
+					i64::try_from(text::charlen(&d, after, mb)).unwrap_or(1)
 				} else {
 					1
 				};
@@ -867,11 +879,15 @@ fn getarg(
 				if tries(&pprog, tail(&d, t)) {
 					left -= 1;
 					if left == 0 {
-						let cl = if t < slen { text::charlen(&d, t) } else { 1 };
+						let cl = if t < slen {
+							text::charlen(&d, t, mb)
+						} else {
+							1
+						};
 						let after = t + cl;
 						arg.prevlen = i64::try_from(cl).unwrap_or(1);
 						arg.nextlen = if after < slen {
-							i64::try_from(text::charlen(&d, after)).unwrap_or(1)
+							i64::try_from(text::charlen(&d, after, mb)).unwrap_or(1)
 						} else {
 							1
 						};
@@ -933,9 +949,11 @@ mod tests {
 
 	#[test]
 	fn strarg_finds_matching_delimiters() {
-		assert_eq!(get_strarg(b":a:b", 0), (2, 1));
-		assert_eq!(get_strarg(b"(ab)c", 0), (3, 1));
-		assert_eq!(get_strarg(b"<x>", 0), (2, 1));
-		assert_eq!(get_strarg(b":abc", 0), (4, 0));
+		assert_eq!(get_strarg(b":a:b", 0, false), (2, 1));
+		assert_eq!(get_strarg(b"(ab)c", 0, false), (3, 1));
+		assert_eq!(get_strarg(b"<x>", 0, false), (2, 1));
+		assert_eq!(get_strarg(b":abc", 0, false), (4, 0));
+		// A multibyte delimiter: `£` is two bytes.
+		assert_eq!(get_strarg("£5£".as_bytes(), 0, true), (3, 2));
 	}
 }
