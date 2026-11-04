@@ -596,7 +596,10 @@ describe.skipIf(process.platform !== "linux")("ptree subreaper stop", () => {
 	}
 
 	for (const [name, start] of [
-		["its signal is already aborted", (cmd: string[]) => spawn(cmd, { subreaper: true, signal: AbortSignal.abort() })],
+		[
+			"its signal is already aborted",
+			(cmd: string[]) => spawn(cmd, { subreaper: true, signal: AbortSignal.abort() }),
+		],
 		[
 			"it is killed before the subreaper launches it",
 			(cmd: string[]) => {

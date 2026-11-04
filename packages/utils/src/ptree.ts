@@ -437,17 +437,31 @@ export class ChildProcess<In extends InMask = InMask> {
 	 * `gracefulMs`, the subreaper's own exit, or `escalated`, the hard sweep.
 	 * A negative `gracefulMs` skips the SIGTERM; zero sends it and sweeps at once.
 	 * The subreaper stays alive through the grace period, so a descendant
-	 * orphaned in it is still the subreaper's child when the sweep runs. A
-	 * subreaper with no child has not launched the command yet (or the command
-	 * has ended): there is nothing to warn, and a grace period would let a
-	 * cancelled command start, so the sweep runs at once. The grace timer is
-	 * cleared as soon as the sequence moves on, so a finished stop never keeps
-	 * the caller's process alive.
+	 * orphaned in it is still the subreaper's child when the sweep runs.
+	 *
+	 * A subreaper with no child has not launched the command yet (or the
+	 * command has ended). It is checked while stopped with SIGSTOP and, when
+	 * childless, killed before it resumes, so a command cancelled before its
+	 * launch never starts. The grace timer is cleared as soon as the sequence
+	 * moves on, so a finished stop never keeps the caller's process alive.
 	 */
 	async #stopSubreaperTree(root: Process, gracefulMs: number, escalated: Promise<void>): Promise<void> {
-		const children = gracefulMs >= 0 ? root.children() : [];
-		if (children.length > 0) {
-			for (const child of children) child.killTree(15);
+		process.kill(this.proc.pid, "SIGSTOP");
+		let killed = false;
+		try {
+			const children = root.children();
+			if (children.length === 0) {
+				root.killTree(9);
+				killed = true;
+				return;
+			}
+			// The first wave (SIGTERM, or SIGKILL for a hard stop) goes to the
+			// snapshot taken while the subreaper is stopped.
+			for (const child of children) child.killTree(gracefulMs < 0 ? 9 : 15);
+		} finally {
+			if (!killed) process.kill(this.proc.pid, "SIGCONT");
+		}
+		if (gracefulMs >= 0) {
 			const { promise: graceOver, resolve: endGrace } = Promise.withResolvers<void>();
 			const graceTimer = setTimeout(endGrace, gracefulMs);
 			try {
