@@ -78,7 +78,7 @@ import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
-import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
+import { formatModelString, type ResolvedModelRoleValue, resolveModelRoleValue } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
@@ -177,7 +177,14 @@ import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	newSessionThinkingLevel,
+	parseConfiguredThinkingLevel,
+	resolveConfiguredThinkingLevel,
+} from "@oh-my-pi/pi-tui/thinking";
 import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { resolvePlanFilePath } from "../plan-mode/plan-files";
@@ -437,7 +444,7 @@ import {
 import { cfgTasksTodoClearDelay } from "../tools/settings";
 import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
 import { cfgExpandThinkingBlocks, cfgProseOnlyThinking } from "../session/settings";
-import { cfgHideThinkingBlock } from "../session/settings";
+import { cfgDefaultThinkingLevel, cfgHideThinkingBlock } from "../session/settings";
 import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
 import { cfgExtensionHandlersModeControl } from "../extensibility/settings";
 import { cfgGoalContinuationModes, cfgGoalEnabled } from "../goals/settings";
@@ -1436,7 +1443,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		| ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor)
 		| undefined;
 	#composerStatusPersistTimer: NodeJS.Timeout | undefined;
-	readonly #initialComposerModel: Model | undefined;
 	readonly #judgmentBatchProgressHud = new JudgmentBatchProgressHud();
 	readonly #downloadActivityHud = new DownloadActivityHud(() => this.ui.requestRender());
 	readonly #judgmentBatchProgressClearTimers = new Map<string, NodeJS.Timeout>();
@@ -2059,7 +2065,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
 		this.settings = session.settings;
-		this.#initialComposerModel = session.model;
 		const preferences = {
 			quiet: cfgStartupQuiet.get(settings),
 			composerShape: cfgComposerShape.get(settings),
@@ -2838,10 +2843,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
 		);
-		// Cache the live model for the next status-bar prepaint: init-time
-		// reconciliations (#reconcileModeFromSession, #enterPlanMode for
-		// plan.defaultOnStartup) can change the model before this subscription
-		// exists, so the model_changed events they emit are never observed above.
+		// Refresh the next launch's status prepaint once startup settles: settings
+		// and the model catalog may have changed since the last session wrote it.
 		this.#scheduleComposerStatusPersist();
 		// Config warnings can change during the same pre-subscription window; the
 		// event is not replayed, so rebuild from the live array once here too.
@@ -4581,16 +4584,30 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
-	 * Cache the inputs of a fresh session's status bar (settings, model, thinking
-	 * state) so the next launch renders it at first paint; see `createStartupStatusLine`.
+	 * Cache the inputs of a fresh session's status bar (settings, the configured
+	 * default model and the thinking level a new session starts it at) so the
+	 * next launch renders it at first paint; see `createStartupStatusLine`.
 	 */
 	#persistComposerStatus(): void {
 		if (!this.sessionManager.getSessionFile()) return;
-		// Role changes affect the next fresh launch; session-only switches do not.
-		const initialModel = this.#initialComposerModel ?? this.session.model;
-		const model = this.settings.getModelRole("default")
-			? (this.session.resolveRoleModelWithThinking("default").model ?? initialModel)
-			: initialModel;
+		// Prepaint runs only for launches without model flags, which read the persisted
+		// roles alone: `--model`/`--smol` overrides and session-only switches stay out.
+		const roles: ModelRoleLookup = {
+			getModelRole: role => this.settings.getProjectModelRole(role) ?? this.settings.getGlobalModelRole(role),
+		};
+		const defaultRole = resolveModelRoleValue(
+			roles.getModelRole("default"),
+			this.session.modelRegistry.getAvailable(),
+			{ settings: this.settings, roleLookup: roles },
+		);
+		const model = defaultRole.model;
+		// Without a resolvable default the next launch picks a fallback; keep the previous speculation.
+		if (!model) return;
+		const thinking = newSessionThinkingLevel(
+			model,
+			defaultRole.explicitThinkingLevel ? defaultRole.thinkingLevel : undefined,
+			parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings)),
+		);
 		// Recover the border's ANSI wrapper by coloring a sentinel and splitting around it.
 		const marker = "\0";
 		const colored = this.editor.borderColor(marker);
@@ -4607,18 +4624,21 @@ export class InteractiveMode implements InteractiveModeContext {
 				settings: statusLineHost.getSettings(),
 				gitEnabled: statusLineHost.gitEnabled(),
 				model,
-				thinkingLevel: this.session.thinkingLevel,
-				autoThinking: this.session.isAutoThinking,
+				thinkingLevel: resolveConfiguredThinkingLevel(model, thinking),
+				autoThinking: thinking === AUTO_THINKING,
 				// A fresh session derives tiers from settings, not this session's `/fast` toggles.
-				fastMode: model ? this.session.isFastModeConfiguredFor(model) : false,
-				usingSubscription: model ? this.session.modelRegistry.isUsingOAuth(model) : false,
+				fastMode: this.session.isFastModeConfiguredFor(model),
+				usingSubscription: this.session.modelRegistry.isUsingOAuth(model),
 				autoCompactEnabled: this.session.autoCompactionEnabled,
-				compactionBoundaries: model?.contextWindow
+				compactionBoundaries: model.contextWindow
 					? statusLineHost.computeCompactionBoundaries(this.session, model.contextWindow, model)
 					: null,
 			},
 		};
-		sharedComposerCache()?.writeStatus(this.sessionManager.getCwd(), status);
+		// A project-scoped default must not become every other folder's first frame.
+		sharedComposerCache()?.writeStatus(this.sessionManager.getCwd(), status, {
+			shared: this.settings.getProjectModelRole("default") === undefined,
+		});
 	}
 
 	#handleSessionAccentInputsChanged(): void {
