@@ -22,6 +22,13 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getAgentDir, getMCPConfigPath, getProjectDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { allowMCPDiscoveryInTests, allowMCPInTests } from "./helpers/mcp-policy";
 import { setNoMcpEnvForTest } from "./helpers/no-mcp-env";
+import { type } from "@oh-my-pi/omptype";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { type CustomTool, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 const tempDirs: string[] = [];
 
@@ -199,6 +206,70 @@ describe("PI_NO_MCP=1 and explicitly named MCP servers", () => {
 			server.stop(true);
 		}
 	});
+
+	// PR #17795 review, round 10: tools an SDK host passes as `mcpTools` call their
+	// server through an existing connection, and stayed callable with MCP off.
+	it("offers none of the MCP tools an SDK host supplies", async () => {
+		setNoMcpEnvForTest("1");
+		const dir = await tempDir();
+		let calls = 0;
+		const supplied = {
+			name: "mcp__recording__ping",
+			label: "ping",
+			description: "Calls the recording server",
+			parameters: type({}),
+			mcpServerName: "recording",
+			mcpToolName: "ping",
+			execute: async () => {
+				calls += 1;
+				return { content: [{ type: "text" as const, text: "pong" }] };
+			},
+		} as unknown as CustomTool;
+		const auth = await AuthStorage.create(path.join(dir, "auth.db"));
+		auth.keys.setRuntime("openai", "test-key");
+		try {
+			const { session } = await createAgentSession({
+				cwd: dir,
+				agentDir: dir,
+				authStorage: auth,
+				modelRegistry: new ModelRegistry(auth, path.join(dir, "models.yml")),
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				settings: Settings.isolated({
+					"async.enabled": false,
+					"compaction.enabled": false,
+					"retry.enabled": false,
+				}),
+				sessionManager: SessionManager.inMemory(dir),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableLsp: false,
+				skipPythonPreflight: true,
+				mcpTools: [supplied],
+				// Requested by name, so a supplied tool would be offered directly.
+				toolNames: ["read", supplied.name],
+			});
+			try {
+				expect(session.getEnabledToolNames()).not.toContain(supplied.name);
+				expect(session.getMountedXdevToolNames()).not.toContain(supplied.name);
+				session.agent.streamFn = createMockModel({
+					provider: "openai",
+					responses: [
+						{ content: [{ type: "toolCall", name: supplied.name, arguments: {} }] },
+						{ content: ["done"] },
+					],
+				}).stream;
+				await session.agent.prompt("call the supplied tool");
+				expect(calls).toBe(0);
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			auth.close();
+		}
+	}, 60_000);
 });
 
 // Round-2 review: the test opt-in let discovery find and start the

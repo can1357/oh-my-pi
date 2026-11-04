@@ -2,6 +2,8 @@ import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import { startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import { createBrokerAuthStorage } from "@oh-my-pi/pi-coding-agent/cli/auth-broker-cli";
 import { refreshStoredManagedMcpOAuthCredential } from "@oh-my-pi/pi-coding-agent/mcp/oauth-credentials";
 import type { MCPStoredOAuthCredential } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -235,6 +237,72 @@ for (const { name, args, noMcp, stored, lead, typed } of [
 			tokenServer.stop(true);
 		}
 	}, 30_000);
+}
+
+// PR #17795 review, round 10: a process with MCP off asked an auth broker (MCP
+// on) to refresh, and the broker contacted the token endpoint for it.
+for (const { name, noMcp, lead } of [
+	{ name: "PI_NO_MCP=1", noMcp: "1", lead: [] },
+	{ name: "--no-mcp", noMcp: "", lead: ["--no-mcp"] },
+	{ name: "MCP on (control)", noMcp: "", lead: [] },
+] as Array<{ name: string; noMcp: string; lead: string[] }>) {
+	test(`token through an auth broker refreshes an MCP credential only with MCP on: ${name}`, async () => {
+		using tempDir = TempDir.createSync("@omp-token-mcp-broker-");
+		const provider = storedId;
+		let requests = 0;
+		const tokenServer = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch() {
+				requests += 1;
+				return Response.json({ access_token: "access-1", refresh_token: "refresh-1", expires_in: 3600 });
+			},
+		});
+		const storage = createBrokerAuthStorage(await SqliteAuthCredentialStore.open(tempDir.join("broker.db")));
+		const broker = startAuthBroker({
+			storage,
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			disableRefresher: true,
+		});
+		try {
+			const credential: MCPStoredOAuthCredential = {
+				type: "oauth",
+				access: "access-0",
+				refresh: "refresh-0",
+				expires: Date.now() - 60_000,
+				tokenUrl: `http://127.0.0.1:${tokenServer.port}/token`,
+			};
+			await storage.credentials.set(provider, credential);
+			const proc = Bun.spawn([process.execPath, cliEntry, ...lead, "token", provider], {
+				cwd: path.resolve(import.meta.dir, "../../.."),
+				env: {
+					...process.env,
+					NO_COLOR: "1",
+					OMP_AUTH_BROKER_URL: broker.url,
+					OMP_AUTH_BROKER_TOKEN: "test-token",
+					PI_CODING_AGENT_DIR: tempDir.path(),
+					PI_NO_MCP: noMcp,
+				},
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [exitCode, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
+
+			if (name.endsWith("(control)")) {
+				expect(requests).toBe(1);
+				expect(stdout).toBe("access-1\n");
+			} else {
+				expect(requests).toBe(0);
+				expect(stdout).not.toContain("access-");
+				expect(exitCode).not.toBe(0);
+			}
+		} finally {
+			await broker.close();
+			storage.close();
+			tokenServer.stop(true);
+		}
+	}, 60_000);
 }
 
 // An id typed in another case (`MCP_OAUTH:`) is looked up lowercased; it gets

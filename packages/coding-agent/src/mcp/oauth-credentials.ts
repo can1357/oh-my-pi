@@ -13,6 +13,7 @@ import {
 	refreshMCPOAuthToken,
 } from "./oauth-flow";
 import type { MCPAuthConfig, MCPServerConfig } from "./types";
+import { assertMCPEnabled } from "./policy";
 
 export interface MCPOAuthCredentialLookup {
 	credentialId: string;
@@ -192,14 +193,18 @@ export async function refreshStoredManagedMcpOAuthCredential(
 			const material = selectMcpOAuthRefreshMaterial(current, opts.auth);
 			return Boolean(current.refresh && material?.tokenUrl);
 		},
-		refresh: (current, signal) =>
-			current.refresh === REMOTE_REFRESH_SENTINEL
+		refresh: (current, signal) => {
+			// While MCP is off nothing refreshes an MCP credential: not here, and not an
+			// auth broker asked to do it for this process. A stored token stays readable.
+			assertMCPEnabled();
+			return current.refresh === REMOTE_REFRESH_SENTINEL
 				? refreshBrokeredMcpOAuthCredential(authStorage, row.id, provider, signal)
 				: refreshManagedMcpOAuthCredential(current, {
 						serverUrl,
 						auth: opts.auth,
 						signal,
-					}),
+					});
+		},
 		mergeRefreshedCredential: (current, refreshed) => {
 			const material = selectMcpOAuthRefreshMaterial(current, opts.auth);
 			const resourceIsFallback = !material?.resource && Boolean(serverUrl);

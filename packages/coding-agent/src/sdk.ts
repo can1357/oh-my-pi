@@ -162,7 +162,7 @@ import {
 	shouldFilterBrowserMCPForPrelude,
 } from "./mcp";
 import { parseMCPToolName } from "@oh-my-pi/pi-tui/tools/mcp";
-import { isMCPDisabled } from "./mcp/policy";
+import { isMCPDisabled, refusesMCPServerStarts } from "./mcp/policy";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
 import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
@@ -3818,9 +3818,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				? []
 				: (options.customTools?.filter(tool => !isLegacyBuiltinToolDefinition(tool)) ?? []);
 		const explicitCustomToolNames = new Set(explicitCustomTools.map(tool => tool.name));
-		const sdkMcpTools = restrictToolNames
-			? []
-			: (options.mcpTools ?? []).filter(tool => !explicitCustomToolNames.has(tool.name));
+		// MCP tools an SDK host supplies call their server: none while MCP is off
+		// (a test that builds its own stub server lifts this with `allowMCPInTests`).
+		const sdkMcpTools =
+			restrictToolNames || refusesMCPServerStarts()
+				? []
+				: (options.mcpTools ?? []).filter(tool => !explicitCustomToolNames.has(tool.name));
 		initialMcpManagerTools.push(...sdkMcpTools);
 		const sdkCustomTools = [...sdkMcpTools, ...explicitCustomTools];
 		const sdkCustomToolNames = new Set(sdkCustomTools.map(tool => tool.name));
