@@ -149,6 +149,35 @@ export function sortDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
 	});
 }
 
+function diagnosticFingerprint(d: Diagnostic): string {
+	return `${d.range.start.line}:${d.range.start.character}:${d.range.end.line}:${d.range.end.character}:${d.source ?? ""}:${d.message}`;
+}
+
+/**
+ * Merge two diagnostic lists, preserving order and deduplicating by range, source and message.
+ */
+export function mergeDiagnosticLists(primary: Diagnostic[], secondary: Diagnostic[]): Diagnostic[] {
+	if (primary.length === 0) return secondary.slice();
+	if (secondary.length === 0) return primary.slice();
+	const seen = new Set<string>();
+	const merged: Diagnostic[] = [];
+	for (const d of primary) {
+		const key = diagnosticFingerprint(d);
+		if (!seen.has(key)) {
+			seen.add(key);
+			merged.push(d);
+		}
+	}
+	for (const d of secondary) {
+		const key = diagnosticFingerprint(d);
+		if (!seen.has(key)) {
+			seen.add(key);
+			merged.push(d);
+		}
+	}
+	return merged;
+}
+
 /**
  * Get icon for diagnostic severity.
  */
