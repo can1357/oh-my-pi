@@ -47,6 +47,10 @@ import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
+import {
+	notifyTranscriptPresentersChanged,
+	readTranscriptPresentation,
+} from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import type {
 	AfterProviderResponseEvent,
 	AssistantMessageRewriteEvent,
@@ -105,13 +109,18 @@ import type {
 	ToolRegistrationListener,
 	ToolResultEvent,
 	ToolResultEventResult,
+	TranscriptPresenter,
 	UserBashEvent,
 	UserBashEventResult,
 	UserPythonEvent,
 	UserPythonEventResult,
 } from "./types";
 
-import { cfgExtensionAssistantTextRenderers, cfgExtensionHandlersToolCallTimeoutMs } from "../settings";
+import {
+	cfgExtensionAssistantTextRenderers,
+	cfgExtensionHandlersToolCallTimeoutMs,
+	cfgExtensionTranscriptPresenters,
+} from "../settings";
 
 /** Combined result from all before_agent_start handlers */
 interface BeforeAgentStartCombinedResult {
@@ -471,6 +480,7 @@ const noOpUIContext: ExtensionUIContext = {
 	notify: () => {},
 	onTerminalInput: () => () => {},
 	rerenderMessage: () => {},
+	refreshTranscript: () => {},
 	// A subagent's runner has no UI of its own, yet its links are picked from the interactive screen
 	// while its transcript is focused: answer as the interactive UI does.
 	getLinkClicksAvailable: extensionLinkClicksAvailable,
@@ -566,6 +576,8 @@ export class ExtensionRunner {
 	#sessionStartEvent: RunnerEmitEvent | undefined;
 	/** Notified after {@link setSuspendedExtensions} suspends or resumes any extension. */
 	#suspensionListeners = new Set<() => void>();
+	/** Fail-open wrappers of transcript presenters, kept so their identity is stable. */
+	#guardedPresenters = new WeakMap<TranscriptPresenter, TranscriptPresenter>();
 	/** Main runner whose suspensions this runner's drawing follows; see {@link followSuspension}. */
 	#suspensionParent: ExtensionRunner | undefined;
 	/**
@@ -1141,6 +1153,10 @@ export class ExtensionRunner {
 		if (added.length === 0) return;
 		this.extensions.push(...added);
 		this.#loadOrder?.push(...added);
+		// Presenters their factories registered before they joined.
+		if (added.some(extension => extension.transcriptPresenters.length > 0)) {
+			notifyTranscriptPresentersChanged();
+		}
 		if (this.#initialized) {
 			for (const extension of added) this.#installFileFallbacks(extension);
 		}
@@ -1523,6 +1539,52 @@ export class ExtensionRunner {
 	getAssistantTextRenderers(): AssistantTextRenderer[] {
 		if (!this.settings || !cfgExtensionAssistantTextRenderers.get(this.settings)) return [];
 		return this.#drawingExtensions().flatMap(ext => ext.assistantTextRenderers);
+	}
+
+	/**
+	 * Transcript presenters in extension load order, skipping suspended extensions; none while
+	 * `extensionRenderers.transcriptPresenters` is off. Each answers plain data read inside its guard
+	 * (see `readTranscriptPresentation`), or `"full"` when it throws or answers something else,
+	 * reporting its first such failure through {@link emitError}.
+	 */
+	getTranscriptPresenters(): TranscriptPresenter[] {
+		if (!this.settings || !cfgExtensionTranscriptPresenters.get(this.settings)) return [];
+		const presenters: TranscriptPresenter[] = [];
+		for (const ext of this.#drawingExtensions()) {
+			for (const presenter of ext.transcriptPresenters) {
+				let guarded = this.#guardedPresenters.get(presenter);
+				if (!guarded) {
+					let reported = false;
+					const report = (failure: { error: string; stack?: string }): void => {
+						reported = true;
+						this.emitError({ extensionPath: ext.path, event: "transcript_presenter", ...failure });
+					};
+					guarded = block => {
+						try {
+							const answer: unknown = presenter(block);
+							const presentation = readTranscriptPresentation(answer);
+							if (presentation !== null) return presentation;
+							// An async presenter: nothing awaits its Promise, so a rejection must not go unhandled.
+							if (answer instanceof Promise) answer.catch(() => {});
+							if (!reported)
+								report({ error: `Unknown transcript presentation ${Bun.inspect(answer, { depth: 1 })}` });
+						} catch (error) {
+							if (!reported) {
+								report(
+									error instanceof Error
+										? { error: error.message, stack: error.stack }
+										: { error: String(error) },
+								);
+							}
+						}
+						return "full";
+					};
+					this.#guardedPresenters.set(presenter, guarded);
+				}
+				presenters.push(guarded);
+			}
+		}
+		return presenters;
 	}
 
 	/** Link schemes claimed with `registerLinkScheme`; none while `extensionRenderers.assistantText` is off. */

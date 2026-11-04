@@ -27,9 +27,17 @@
 
 ### Fixed
 
+- Fixed the bash tool's `$!` inside a command substitution, a `( )` subshell or a pipeline stage: it now names the parent's last background job, as in Bash ([#18107](https://github.com/can1357/oh-my-pi/pull/18107) by [@sjawhar](https://github.com/sjawhar))
+- Fixed Windows `rsync` treating a one-letter daemon host such as `h::module` as a local drive path ([#18048](https://github.com/can1357/oh-my-pi/pull/18048) by [@jchanghong023](https://github.com/jchanghong023))
 - Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
 - Fixed external commands getting the null device on Unix for a descriptor the script closed (`cmd 2>&-`, `cmd 5>&-`): the descriptor is now closed in the command, as in Bash, so its writes there fail instead of vanishing; on Windows, which has no closed standard handle, a closed standard stream gets the null device ([#18089](https://github.com/can1357/oh-my-pi/pull/18089) by [@sjawhar](https://github.com/sjawhar))
+- Fixed native addon startup on glibc 2.17–2.28 by falling back to fork for external shell commands when `posix_spawn_file_actions_addchdir_np` is unavailable ([#18046](https://github.com/can1357/oh-my-pi/pull/18046) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed Windows `rmdir` accepting trailing-dot or trailing-space operands that can remove a different directory ([#18047](https://github.com/can1357/oh-my-pi/pull/18047) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed `timeout`, `nohup`, `git` and command-running utilities inside shell functions skipping their operands or running the function's arguments instead ([#18030](https://github.com/can1357/oh-my-pi/pull/18030) by [@sjawhar](https://github.com/sjawhar))
+- Fixed native Windows shell commands not finding installed executables through PATH and PATHEXT, and absolute Windows paths being prefixed with the shell cwd ([#18041](https://github.com/can1357/oh-my-pi/pull/18041) by [@jchanghong023](https://github.com/jchanghong023))
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
+- Fixed GTK3 Open and Save file dialogs on Linux: `ax()` and element input no longer fail there with `has 0 matching AT-SPI frames`, and Wayland window lists include them ([#18011](https://github.com/can1357/oh-my-pi/pull/18011) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `capabilities()` on Wayland desktops whose xdg-desktop-portal has no RemoteDesktop backend, such as sway, reporting `input: true`: it now reports `input: false` and `inputPermission: "unavailable"`, and typing and key presses fail at once naming the missing portal ([#18012](https://github.com/can1357/oh-my-pi/pull/18012) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed
 
 - Fixed `el.type` and `el.press(keys)` on Wayland moving focus inside the element's app (GNOME showed "… is ready") before refusing the call: they are now refused before anything reaches the app ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))
