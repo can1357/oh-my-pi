@@ -4,21 +4,34 @@
 
 ### Added
 
+- Added opt-in standard Responses WebSockets for catalog-supported models, with incremental turns and session-scoped HTTP/SSE fallback; OMP enables them through settings ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
+- `AuthStorage` can be constructed over an `AuthStorageBackend` (its namespaces plus `setAccountPolicies`/`replaceStore`/`close`) instead of a credential store, so another thread's instance can serve every call
+- Anthropic sessions on the official API now use message threads (`message-threads-2026-08-12`, as Claude Code does): after the first turn each request sends only the new messages, cutting time to first token in long conversations; a refused or expired thread replays the full conversation automatically. `statefulResponses: false` or `PI_ANTHROPIC_MESSAGE_THREADS=0` turns it off, `PI_ANTHROPIC_MESSAGE_THREADS=1` opts other endpoints in
 - A model's `cacheRetention` (set from `providers.<id>.cacheRetention` in models.yml) now fills a request that names no retention, ahead of `PI_CACHE_RETENTION`, at the shared stream entries and at each provider's exported stream function ([#17964](https://github.com/can1357/oh-my-pi/pull/17964) by [@sjawhar](https://github.com/sjawhar))
-
-### Changed
-
-- Synthetic now receives the request's prompt-cache retention (else the model's) like Kimi Code; the shim option that used to gate it is now `forwardRequestMetadata` and gates only request metadata ([#17964](https://github.com/can1357/oh-my-pi/pull/17964) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
 - Fixed `cacheRetention: "none"` being overridden downstream: Factory Droid's Responses route still sent `prompt_cache_key` and `prompt_cache_retention`, an OAuth Anthropic request still put a cache breakpoint on the Claude Code identity block, Chat Completions routes with an Anthropic cache format (OpenRouter, Vercel AI Gateway, Cline) still added a `cache_control` breakpoint, and Devin still asked for the ephemeral system-prompt cache ([#17964](https://github.com/can1357/oh-my-pi/pull/17964) by [@sjawhar](https://github.com/sjawhar))
 - Fixed prompt-cache tiers not following the chosen retention: Factory Droid's Responses route asked for a 24h entry under `short` (it still does when nothing chose a retention, as the native client does), and Chat Completions routes with an Anthropic cache format sent the 5-minute marker under `long` instead of `ttl: "1h"` ([#17964](https://github.com/can1357/oh-my-pi/pull/17964) by [@sjawhar](https://github.com/sjawhar))
+- Fixed xAI speech requests failing with `422 missing field language`: `xai-tts` now sends `language`, which xAI's `/v1/tts` requires, defaulting to `auto` (automatic detection) when the caller passes none, as the auth gateway's `/v1/audio/speech` does ([#17992](https://github.com/can1357/oh-my-pi/pull/17992) by [@Mirceone](https://github.com/Mirceone))
 - Fixed Codex WebSocket turns sending a delta `input` after a pooled socket reconnected (closed, idle eviction, token refresh, or prewarm routing-hint change) or when `onPayload` deleted `previous_response_id` (including when it also rewrote the input), and skipped late prewarm while a socket is busy or holding accepted steering ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
 
 ### Changed
 
+- Synthetic now receives the request's prompt-cache retention (else the model's) like Kimi Code; the shim option that used to gate it is now `forwardRequestMetadata` and gates only request metadata ([#17964](https://github.com/can1357/oh-my-pi/pull/17964) by [@sjawhar](https://github.com/sjawhar))
 - Switching into or out of the Codex `ultrafast` service tier now opens a fresh WebSocket routed to the new tier instead of reusing the old one ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
+### Fixed
+
+- Fixed Gemini and Vertex `MALFORMED_RESPONSE` finishes showing as "Unhandled stop reason" and dropping that turn's token usage; RPC prompt errors now report them as retryable
+### Fixed
+
+- Fixed `rerank()` rejecting Cohere-style answers that carry no `model` field; the result then reports the requested model id ([#17975](https://github.com/can1357/oh-my-pi/pull/17975) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+### Fixed
+
+- Fixed `rerank()` requests leaving out the model's configured headers, including `models.yml` `headers`, so a rerank endpoint that needs its own header or `Authorization` rejected every call ([#17974](https://github.com/can1357/oh-my-pi/pull/17974) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+### Fixed
+
+- The OpenAI-wire transport and provider-level retry loops (OpenAI Responses, Anthropic) no longer replay a response marked `x-should-retry: false`, so a retrying gateway's terminal 5xx is no longer multiplied by in-provider retries ([#17920](https://github.com/can1357/oh-my-pi/issues/17920))
 
 ## [18.16.0] - 2026-11-02
 

@@ -578,7 +578,7 @@ use std::{cell::RefCell, mem, path::PathBuf, rc::Rc};
 
 use crate::sed::error_handling::{SedError, SedResult};
 
-use brush_core::openfiles::OpenFile;
+use crate::openfile::OpenFile;
 use crate::host::ShellPaths;
 use crate::sed::{
 	command::{
@@ -7283,7 +7283,7 @@ use pi_vfs::Permissions;
 use pi_vfs::{BlockingFs, File, TempOptions};
 use uucore::display::Quotable;
 
-use brush_core::openfiles::OpenFile;
+use crate::openfile::OpenFile;
 use crate::sed::{
 	command::ProcessingContext,
 	error_handling::{IoContext, SedError, SedResult},
@@ -7656,7 +7656,7 @@ use std::{
 	rc::Rc,
 };
 
-use brush_core::openfiles::{DescriptorPath, OpenFiles};
+use crate::openfile::{DescriptorPath, STDERR_FD, STDOUT_FD};
 use pi_vfs::{File, OpenOptions};
 use crate::host::{Host, ShellPaths};
 use crate::sed::fast_io::OutputBuffer;
@@ -7705,8 +7705,8 @@ impl NamedWriter {
 		location: ScriptLocation,
 	) -> SedResult<Rc<RefCell<Self>>> {
 		let target = match DescriptorPath::parse(&path) {
-			Some(DescriptorPath::Fd(OpenFiles::STDOUT_FD)) => Target::Stdout,
-			Some(DescriptorPath::Fd(OpenFiles::STDERR_FD)) => Target::Stderr,
+			Some(DescriptorPath::Fd(STDOUT_FD)) => Target::Stdout,
+			Some(DescriptorPath::Fd(STDERR_FD)) => Target::Stderr,
 			_ => {
 				let file = paths
 					.fs()
@@ -8789,7 +8789,7 @@ use std::{
 
 use uucore::display::Quotable;
 
-use brush_core::openfiles::OpenFile;
+use crate::openfile::OpenFile;
 use crate::{host::ShellPaths, sed::error_handling::{IoContext, SedResult}};
 
 #[derive(Debug, PartialEq)]
@@ -9091,11 +9091,9 @@ mod tests {
 
 use std::{collections::HashMap, ffi::OsString, io::Write, path::PathBuf};
 
-use brush_core::{ShellExtensions, builtins::Registration};
-
 use clap::{Arg, ArgMatches, Command, arg};
 
-use crate::host::{Host, ShellPaths, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, ShellPaths, Utility, format_usage, matches_parser};
 use crate::sed::error_handling::{SedError, SedResult};
 
 use crate::sed::{
@@ -9381,11 +9379,6 @@ impl Utility for Sed {
 			}
 		}
 	}
-}
-
-/// Creates the `sed` builtin registration.
-pub(crate) fn sed_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Sed, SE>()
 }
 
 #[cfg(test)]

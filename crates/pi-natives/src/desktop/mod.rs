@@ -1782,8 +1782,9 @@ impl SessionCore {
 		let tx = self.ensure_started()?;
 		self.in_flight.fetch_add(1, Ordering::AcqRel);
 		let reply_by = Instant::now() + self.operation_timeout;
-		// Input waiting for the user to pause gives up before this caller does.
-		#[cfg(target_os = "macos")]
+		// Input waiting for the user (to pause on macOS, to answer a Wayland
+		// permission prompt) gives up before this caller does.
+		#[cfg(any(target_os = "macos", target_os = "linux"))]
 		let token = token.replying_by(reply_by);
 		let response = tx
 			.send(QueuedRequest { request: make(txr), token })
@@ -2164,16 +2165,16 @@ impl DesktopSession {
 	}
 
 	/// Sets when the current run ends, `remaining_ms` from now; each run sets
-	/// it before its first call. On macOS, input waiting for the user to pause
-	/// in its app gives up shortly before it.
+	/// it before its first call. Input waiting for the user to pause in its app
+	/// (macOS) or for a Wayland permission prompt gives up shortly before it.
 	#[napi]
 	pub fn set_run_deadline(&self, remaining_ms: f64) {
 		let deadline = Duration::try_from_secs_f64(remaining_ms.max(0.0) / 1000.0)
 			.ok()
 			.and_then(|remaining| Instant::now().checked_add(remaining));
-		#[cfg(target_os = "macos")]
+		#[cfg(any(target_os = "macos", target_os = "linux"))]
 		self.core.cancellation.set_deadline(deadline);
-		#[cfg(not(target_os = "macos"))]
+		#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 		let _ = deadline;
 	}
 

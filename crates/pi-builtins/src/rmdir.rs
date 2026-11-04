@@ -10,11 +10,10 @@ use std::{
 	path::Path,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use uucore::display::Quotable;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno};
 
 mod options {
 	pub const IGNORE_FAIL_NON_EMPTY: &str = "ignore-fail-on-non-empty";
@@ -59,10 +58,6 @@ impl Utility for Rmdir {
 		}
 		host.exit_code()
 	}
-}
-
-pub(crate) fn rmdir_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Rmdir, SE>()
 }
 
 fn app() -> Command {

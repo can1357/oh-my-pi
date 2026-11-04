@@ -22,7 +22,7 @@ test("settled eval progress is emitted once", async () => {
 	await runEvalWait(
 		{ items: [{ kind: "agent", id }] },
 		{
-			session: { asyncJobManager: manager, getAgentId: () => "Main" } as ToolSession,
+			session: { asyncJobManager: manager, getAgentId: () => "Main" } as Partial<ToolSession> as ToolSession,
 			emitStatus: event => events.push(event),
 		},
 	);
@@ -51,7 +51,7 @@ test("timeouts past the 32-bit timer limit do not fire instantly (issue #12375)"
 		const result = await runEvalWait(
 			{ items: [{ kind: "agent", id }], timeoutMs: 2_400_000_000 },
 			{
-				session: { asyncJobManager: manager, getAgentId: () => "Main" } as ToolSession,
+				session: { asyncJobManager: manager, getAgentId: () => "Main" } as Partial<ToolSession> as ToolSession,
 				emitStatus: () => {},
 			},
 		);

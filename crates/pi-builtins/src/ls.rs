@@ -18,7 +18,7 @@ use std::{
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use crate::openfile::OpenFile;
 use clap::{
 	Arg, ArgAction, ArgMatches, Command,
 	builder::{NonEmptyStringValueParser, PossibleValue, ValueParser},
@@ -37,7 +37,7 @@ use uucore::{
 use crate::{
 	fsmeta::metadata_get_time,
 	host::{
-		Host, ShellPaths, StreamWriter, Utility, format_usage, matches_parser, os_bytes_lossy, util,
+		Host, ShellPaths, StreamWriter, Utility, format_usage, matches_parser, os_bytes_lossy,
 	},
 };
 
@@ -4732,11 +4732,6 @@ pub fn uu_app() -> Command {
 			 interpreted like in date. Also the TIME_STYLE environment variable sets the default \
 			 style to use.",
 		)
-}
-
-/// Creates the `ls` builtin registration.
-pub(crate) fn ls_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Ls, SE>()
 }
 
 /// Represents the possible values of [`PathData::display_name`]. The reason
