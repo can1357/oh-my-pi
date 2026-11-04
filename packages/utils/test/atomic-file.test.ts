@@ -426,4 +426,24 @@ describe("classification does not depend on where omp happens to be pointed", ()
 		// The runtime's own directory above `node_modules` is still omp's.
 		expect(isOmpOwnedPath(path.join(getBaseConfigRoot(), "agent", "cache", "tts-runtime"))).toBe(true);
 	});
+
+	test("a project config directory is foreign under either name omp uses for it", () => {
+		// `getProjectAgentDir()` builds it from the constant; discovery walks up
+		// looking for `getConfigDirName()`, which `PI_CONFIG_DIR` renames, and the
+		// one discovery finds is the one the project writers write into.
+		const previous = process.env.PI_CONFIG_DIR;
+		process.env.PI_CONFIG_DIR = ".myomp";
+		try {
+			setAgentDir(owned);
+			const root = getBaseConfigRoot();
+			for (const spelling of [".omp", ".myomp"]) {
+				const inside = path.join(root, "trees-b", "pr-1", spelling, "plugins", "installed_plugins.json");
+				expect(isOmpOwnedPath(inside)).toBe(false);
+			}
+		} finally {
+			if (previous === undefined) delete process.env.PI_CONFIG_DIR;
+			else process.env.PI_CONFIG_DIR = previous;
+			setAgentDir(owned);
+		}
+	});
 });

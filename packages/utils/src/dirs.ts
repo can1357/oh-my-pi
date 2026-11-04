@@ -640,9 +640,14 @@ export function isOmpOwnedPath(candidate: string): boolean {
 	// `worktree.base` is per project while `getWorktreesDir()` answers for
 	// whichever project this process last set — so the shape decides, not the
 	// location, and it decides under an agent directory moved out of the config
-	// root too. The name is the constant one a project uses, which `PI_CONFIG_DIR`
-	// renames the config root by but does not move.
-	if (segments.includes(CONFIG_DIR_NAME)) return false;
+	// root too.
+	//
+	// Both names, because omp uses both: `getProjectAgentDir()` builds the
+	// project directory from the constant, while `discovery/helpers.ts` walks up
+	// looking for `getConfigDirName()`, which `PI_CONFIG_DIR` renames — and the
+	// one it finds is the one the project writers write into. Matching a single
+	// name leaves whichever spelling that module did not use wide open.
+	if (segments.includes(CONFIG_DIR_NAME) || segments.includes(getConfigDirName())) return false;
 	// A `node_modules` is a package manager's, not a person's. Every runtime omp
 	// installs on demand — speech, transcription, the tiny title model, the
 	// embedder — puts one under its own directory (`EnsureRuntimeInstalledOptions`
