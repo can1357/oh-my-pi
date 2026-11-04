@@ -503,9 +503,10 @@ unsafe extern "C" fn observe_user(_proxy: Ref, kind: u32, event: Ref, user: Ref)
 	event
 }
 
-/// What [`ButtonMonitor`] hands each mouse button press and release: where
-/// the pointer was when it happened.
-pub(crate) type ButtonSeen = Box<dyn Fn(CGPoint) + Send>;
+/// What [`ButtonMonitor`] hands each mouse button press and release: whether
+/// it pressed a button rather than released one, and where the pointer was
+/// when it happened.
+pub(crate) type ButtonSeen = Box<dyn Fn(bool, CGPoint) + Send>;
 
 unsafe extern "C" fn observe_button(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
 	// SAFETY: the monitor thread retains this stack context through
@@ -520,7 +521,7 @@ unsafe extern "C" fn observe_button(_proxy: Ref, kind: u32, event: Ref, user: Re
 	}
 	if !event.is_null() {
 		// SAFETY: a read-only query of a live event.
-		(context.inner)(unsafe { CGEventGetLocation(event) });
+		(context.inner)(is_pointer_press(kind), unsafe { CGEventGetLocation(event) });
 	}
 	event
 }
