@@ -2223,7 +2223,11 @@ export class ModelRegistry {
 			if (providerConfig.api && (providerConfig.models?.length ?? 0) === 0) {
 				baseUrlApis.add(providerConfig.api);
 			}
-			const baseUrlScope = baseUrlApis.size > 0 ? [...baseUrlApis] : undefined;
+			// Sorted: this set's spelling reaches `#providerConfigIdentity`, and route
+			// resolution only asks `.includes`, so the order two models were written in
+			// must not read as a configuration change. Only this derived set is sorted;
+			// a configuration array whose order means something keeps it.
+			const baseUrlScope = baseUrlApis.size > 0 ? [...baseUrlApis].sort() : undefined;
 			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/guardrail*/transport are present
 			if (
 				providerConfig.baseUrl ||
@@ -2584,10 +2588,15 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 	): Promise<ConfiguredModelDiscoveryResult> {
 		// Captured before the first await: the publication identity, the request
-		// epoch, and the endpoint and headers the request uses, all under one
-		// configuration (see `#providerConfigIdentity` and `#configEpoch`).
+		// epoch, the per-model overlays the result is transformed by, and the
+		// endpoint and headers the request uses, all under one configuration
+		// (see `#providerConfigIdentity` and `#configEpoch`).
 		const configIdentity = this.#providerConfigIdentity(providerConfig.provider);
 		const configEpoch = this.#configEpoch(providerConfig.provider);
+		// A copy, not the live map: a models.yml reload clears and refills
+		// `#modelOverrides` in place, so a reference would follow it and a row
+		// fetched under this configuration could acquire another one's header.
+		const modelOverridesAtStart = new Map(this.#modelOverrides.get(providerConfig.provider) ?? []);
 		const effectiveConfig = this.#effectiveDiscoveryConfig(providerConfig);
 		const isCurrent = () => this.#providerConfigIdentity(providerConfig.provider) === configIdentity;
 		const cacheProviderId = this.#configuredDiscoveryCacheProviderId(providerConfig);
@@ -2634,6 +2643,7 @@ export class ModelRegistry {
 						requestConfig,
 						this.#discoveryContext(this.#guardedFetch(providerId, configEpoch)),
 					),
+					modelOverridesAtStart,
 				);
 				this.#lastDiscoveryWarnings.delete(providerId);
 				return models.map(toModelSpec);
@@ -2702,6 +2712,7 @@ export class ModelRegistry {
 					providerConfig,
 					this.#applyProviderCompat(providerConfig.compat, result.models),
 				),
+				modelOverridesAtStart,
 			),
 			replaceRuntimeModels: result.source === "provider",
 			configIdentity,
@@ -3188,8 +3199,18 @@ export class ModelRegistry {
 		}
 	}
 
-	#applyProviderModelOverrides(provider: string, models: Model<Api>[]): Model<Api>[] {
-		const overrides = this.#modelOverrides.get(provider);
+	/**
+	 * `capturedOverrides` is the provider's overlays as they were before the
+	 * caller's first await. A discovery passes it so a row fetched under one
+	 * configuration is never transformed by another's per-model header; callers
+	 * with nothing in flight omit it and read the live map.
+	 */
+	#applyProviderModelOverrides(
+		provider: string,
+		models: Model<Api>[],
+		capturedOverrides?: Map<string, ModelOverride>,
+	): Model<Api>[] {
+		const overrides = capturedOverrides ?? this.#modelOverrides.get(provider);
 		if (!overrides || overrides.size === 0) return models;
 		let liveIds: Set<string> | null = null;
 		const hasLiveModel = (_provider: string, id: string) => {
