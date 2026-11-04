@@ -211,9 +211,15 @@ interface ConfiguredModelDiscoveryResult {
 	configIdentity: string;
 }
 
-/** A header map as configuration identity: entry order carries no meaning. */
-function canonicalHeaders(headers: Record<string, string> | undefined): Array<[string, string]> | undefined {
-	return headers && Object.entries(headers).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+/** JSON with every object's keys in sorted order: configuration identity, where member order carries no meaning. */
+function canonicalJson(value: unknown): string {
+	return JSON.stringify(value, (_key, member: unknown) =>
+		member !== null && typeof member === "object" && !Array.isArray(member)
+			? Object.fromEntries(
+					Object.entries(member as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+				)
+			: member,
+	);
 }
 
 /**
@@ -1254,16 +1260,25 @@ export class ModelRegistry {
 		// removed from models.yml must actually disappear from the resolver, not
 		// linger from the previous parse. The post-load setters below repopulate.
 		if (!this.#owner) this.authStorage.keys.clearConfig();
-		// Restore runtime API keys before #loadModels — survives because
-		// #loadModels only calls .set() on #customProviderApiKeys, never reassigns it.
-		for (const [provider, { keyConfig, fallback }] of this.#runtimeProviderApiKeys) {
-			this.#installProviderApiKey(provider, keyConfig, { fallback });
-		}
+		// Runtime API keys are installed on both sides of #loadModels: before, so
+		// the load sees every provider's configured auth as it did at startup;
+		// after, so a runtime key outranks the models.yml key for its provider
+		// across every reload, as registration made it (installed after the
+		// startup load), and a request never pairs a runtime endpoint with the
+		// models.yml credential.
+		const installRuntimeKeys = () => {
+			for (const [provider, { keyConfig, fallback }] of this.#runtimeProviderApiKeys) {
+				this.#installProviderApiKey(provider, keyConfig, { fallback });
+			}
+		};
+		installRuntimeKeys();
 		this.#providerOverrides.clear();
 		this.#modelOverrides.clear();
 		this.#configError = undefined;
 		this.#providerDiscoveryStates.clear();
 		this.#loadModels();
+		installRuntimeKeys();
+		this.#syncConfigEpochs();
 		if (!preservedRuntimeState) return;
 
 		const preservedProviderIds = preservedRuntimeState.runtimeProviderIds;
@@ -1347,7 +1362,6 @@ export class ModelRegistry {
 		this.#modelOverrides = modelOverrides;
 
 		this.#addImplicitDiscoverableProviders(configuredProviders);
-		this.#syncConfigEpochs();
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(provider => provider.provider));
 		this.#pendingStandardCacheProviders = new Set(
 			STARTUP_MODEL_CACHE_PROVIDER_IDS.filter(
@@ -1660,13 +1674,24 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Everything that decides where a provider's discovery request goes and
-	 * which credential it carries: the extension registration that owns it, its
-	 * models.yml `discovery:` config, and the endpoint, key and header config of
-	 * its models.yml and runtime overrides. Compared by value, with endpoints
-	 * normalized and headers in a canonical order, so an identical reload or an
-	 * equivalent spelling keeps a result current, and a return to an earlier
-	 * configuration makes its result current again.
+	 * The provider's configuration state that a discovery request depends on,
+	 * as one canonical serialization of the whole state objects, not a list of
+	 * chosen fields: a field added to any of them is part of the identity
+	 * without anyone listing it. Included, each object whole:
+	 *  - the models.yml `discovery:` config;
+	 *  - the models.yml provider override (endpoint, key, headers, auth mode,
+	 *    compat, transport and every other override field);
+	 *  - the runtime provider override, the same way;
+	 *  - the runtime API key entry (key config and its fallback precedence);
+	 *  - the key config installed for the provider and its keyless (`auth:
+	 *    none`) membership;
+	 *  - the owning extension registration, by object identity (its fetcher is
+	 *    a function and has no value to compare).
+	 * Two normalizations, both of meaning-free spelling: endpoints by
+	 * `normalizeModelCacheEndpoint`, and object member order by `canonicalJson`.
+	 * Excluded by design: stored login credentials in AuthStorage (account
+	 * state, not configuration; a token refresh or a re-login sends to the same
+	 * configured host).
 	 *
 	 * Publication test: a discovery result or discovery state is published
 	 * only while this value equals the one captured before the discovery's
@@ -1679,29 +1704,17 @@ export class ModelRegistry {
 			registrationId = this.#registrationIds.get(registration) ?? this.#nextRegistrationId++;
 			this.#registrationIds.set(registration, registrationId);
 		}
-		const configured = this.#discoverableProviders.find(provider => provider.provider === providerId);
-		const route = (override: ProviderOverride | undefined) =>
-			override
-				? {
-						baseUrl: normalizeModelCacheEndpoint(override.baseUrl),
-						apiKey: override.apiKey,
-						authHeader: override.authHeader,
-						headers: canonicalHeaders(override.headers),
-					}
-				: null;
-		return JSON.stringify([
-			registrationId,
-			configured
-				? {
-						...configured,
-						baseUrl: normalizeModelCacheEndpoint(configured.baseUrl),
-						headers: canonicalHeaders(configured.headers),
-					}
-				: null,
-			route(this.#providerOverrides.get(providerId)),
-			route(this.#runtimeProviderOverrides.get(providerId)),
-			this.#runtimeProviderApiKeys.get(providerId)?.keyConfig ?? null,
-		]);
+		const withEndpoint = <T extends { baseUrl?: string }>(state: T | undefined) =>
+			state ? { ...state, baseUrl: normalizeModelCacheEndpoint(state.baseUrl) } : null;
+		return canonicalJson({
+			registration: registrationId,
+			discovery: withEndpoint(this.#discoverableProviders.find(provider => provider.provider === providerId)),
+			override: withEndpoint(this.#providerOverrides.get(providerId)),
+			runtimeOverride: withEndpoint(this.#runtimeProviderOverrides.get(providerId)),
+			runtimeKey: this.#runtimeProviderApiKeys.get(providerId) ?? null,
+			installedKey: this.#customProviderApiKeys.get(providerId) ?? null,
+			keyless: this.#keylessProviders.has(providerId),
+		});
 	}
 
 	/**
@@ -4319,13 +4332,7 @@ export class ModelRegistry {
 				// active source) keeps its cache.
 				cacheProviderId: scopeModelCacheProviderIdToEndpoint(
 					`${providerName}:extension-v2:${Bun.hash(
-						JSON.stringify([
-							sourceId ?? "",
-							providerApi,
-							providerApiKey,
-							providerAuthHeader,
-							canonicalHeaders(providerHeaders),
-						]),
+						canonicalJson([sourceId ?? "", providerApi, providerApiKey, providerAuthHeader, providerHeaders]),
 					).toString(36)}`,
 					config.baseUrl,
 				),

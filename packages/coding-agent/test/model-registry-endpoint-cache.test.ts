@@ -459,7 +459,135 @@ describe("model cache follows the configured endpoint", () => {
 		expect(registry.find("anthropic", "old-model")).toBeUndefined();
 		expect(registry.find("anthropic", "current-model")?.baseUrl).toBe("http://current-extension.invalid:4000");
 	});
+
+	test("a discovery survives a reload that only reorders its discovery options", async () => {
+		const held = heldCommand(tempDir, "held");
+		// `type` before `timeoutMs` is not the canonical (sorted) order; the reload swaps it.
+		const config = (discovery: string) =>
+			`providers:\n  probe:\n    baseUrl: http://probe.invalid/v1\n    api: openai-completions\n    apiKey: ${FAKE_KEY}\n    headers:\n      x-held: "${held.command}"\n    discovery:\n${discovery}`;
+		fs.writeFileSync(modelsPath, config("      type: openai-models-list\n      timeoutMs: 60000\n"));
+		const sent: string[] = [];
+		const registry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async input => {
+				sent.push(String(input));
+				return Response.json({ data: [{ id: "probe-model" }] });
+			},
+		});
+		const inFlight = registry.refreshProvider("probe", "online");
+		await held.started();
+		writeWithNewMtime(modelsPath, config("      timeoutMs: 60000\n      type: openai-models-list\n"));
+		await registry.refreshProvider("unrelated", "offline");
+		held.release();
+		await inFlight;
+		expect(sent).toEqual(["http://probe.invalid/v1/models"]);
+		expect(registry.find("probe", "probe-model")).toBeDefined();
+	});
+
+	test("a change of keyless mode while a discovery request is assembled refuses the send", async () => {
+		const held = heldCommand(tempDir, "held");
+		const config = (auth: string) =>
+			`providers:\n  probe:\n    baseUrl: http://probe.invalid/v1\n    api: openai-completions\n    auth: ${auth}\n    apiKey: ${FAKE_KEY}\n    headers:\n      x-held: "${held.command}"\n    discovery:\n      type: openai-models-list\n`;
+		fs.writeFileSync(modelsPath, config("none"));
+		const sent: string[] = [];
+		const registry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async input => {
+				sent.push(String(input));
+				return Response.json({ data: [{ id: "probe-model" }] });
+			},
+		});
+		const inFlight = registry.refreshDiscoverableProviders(["probe"], "online");
+		await held.started();
+		writeWithNewMtime(modelsPath, config("apiKey"));
+		await registry.refreshProvider("unrelated", "offline");
+		held.release();
+		await inFlight;
+		expect(sent).toEqual([]);
+	});
+
+	test("a change of a runtime key's precedence while its key resolves refuses the send", async () => {
+		fs.writeFileSync(modelsPath, DIRECT_CONFIG);
+		const held = heldCommand(tempDir, "fake-runtime-config-key");
+		const sent: Array<string | null> = [];
+		const registry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async (_input, init) => {
+				sent.push(new Headers(init?.headers).get("x-api-key"));
+				return Response.json({ data: [{ id: "probe-model", type: "model" }] });
+			},
+		});
+		const config = { baseUrl: "http://runtime.invalid:4000", apiKey: held.command };
+		registry.registerProvider("anthropic", config, "test-extension");
+		const inFlight = registry.refreshProvider("anthropic", "online");
+		await held.started();
+		// The same key, now only a fallback behind the stored login.
+		registry.registerProvider(
+			"anthropic",
+			{
+				...config,
+				oauth: {
+					name: "Test OAuth",
+					login: async () => {
+						throw new Error("not used");
+					},
+					refreshToken: async credential => credential,
+					getApiKey: credential => credential.access,
+				},
+			},
+			"test-extension",
+		);
+		held.release();
+		await inFlight;
+		expect(sent.filter(key => key === "fake-runtime-config-key")).toEqual([]);
+	});
+
+	test("a runtime key keeps its precedence over the models.yml key across repeated reloads", async () => {
+		const config = `providers:\n  probe:\n    baseUrl: http://models-yml.invalid/v1\n    api: openai-completions\n    apiKey: fake-models-yml-key\n    discovery:\n      type: openai-models-list\n`;
+		fs.writeFileSync(modelsPath, config);
+		const sent: Array<{ url: string; authorization: string | null }> = [];
+		const registry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async (input, init) => {
+				sent.push({ url: String(input), authorization: new Headers(init?.headers).get("authorization") });
+				return Response.json({ data: [{ id: "probe-model" }] });
+			},
+		});
+		registry.registerProvider(
+			"probe",
+			{ baseUrl: "http://runtime.invalid/v1", apiKey: "fake-runtime-key" },
+			"override-source",
+		);
+		for (let reload = 1; reload <= 3; reload++) {
+			writeWithNewMtime(modelsPath, `${config}${"\n".repeat(reload)}`);
+			await registry.refreshProvider("unrelated", "offline");
+			expect(await registry.getApiKeyForProvider("probe")).toBe("fake-runtime-key");
+		}
+		await registry.refreshProvider("probe", "online");
+		expect(sent).toEqual([{ url: "http://runtime.invalid/v1/models", authorization: "Bearer fake-runtime-key" }]);
+	});
 });
+
+/**
+ * A `!command` config value that prints `output` only once released, so a
+ * test can change configuration while a discovery is resolving it.
+ */
+function heldCommand(dir: string, output: string) {
+	const id = Bun.hash(`${dir}${output}${Math.random()}`).toString(36);
+	const startedPath = path.join(dir, `${id}.started`);
+	const gatePath = path.join(dir, `${id}.gate`);
+	return {
+		command: `!sh -c 'touch ${startedPath}; while [ ! -f ${gatePath} ]; do sleep 0.02; done; echo ${output}'`,
+		started: async () => {
+			while (!fs.existsSync(startedPath)) await Bun.sleep(10);
+		},
+		release: () => fs.writeFileSync(gatePath, ""),
+	};
+}
+
+/** Rewrite a file with a modification time the registry's reload check cannot miss. */
+function writeWithNewMtime(file: string, content: string) {
+	const previous = fs.statSync(file).mtimeMs;
+	fs.writeFileSync(file, content);
+	const next = new Date(Math.max(Date.now(), previous + 2000));
+	fs.utimesSync(file, next, next);
+}
 
 /** A discovery endpoint whose `/v1/models` answer is held until released. */
 function deferredDiscovery(modelsUrl: string, modelId: string) {
