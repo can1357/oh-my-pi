@@ -4,15 +4,21 @@ mod libei;
 mod portal;
 mod xkb;
 
+use std::{
+	os::{fd::AsRawFd, unix::net::UnixStream},
+	path::PathBuf,
+};
+
 use image::RgbaImage;
 
 use crate::desktop::{
-	backend::{AxBackend, Backend, DeliveryMode, PointerEvent},
+	ax::AxHandle,
+	backend::{AxBackend, Backend, DeliveryMode, ElementDelivery, ElementInput, PointerEvent},
 	control::{self, OperationToken},
 	error::{CoreResult, DesktopError},
 	frame::FrameGeometry,
 	keys::KeyName,
-	linux::ax::{AtSpiAx, AtSpiWindow},
+	linux::ax::{AtSpiAx, AtSpiWindow, resolve_focus},
 	types::{
 		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector, Target,
 	},
@@ -129,11 +135,40 @@ pub struct WaylandBackend {
 		not(feature = "wayland-pipewire"),
 		expect(dead_code, reason = "only read by the pipewire capture path")
 	)]
-	display:  DisplaySelector,
-	ax:       Option<AtSpiAx>,
-	ax_error: Option<DesktopError>,
-	input:    Option<libei::Libei>,
-	displays: Vec<DesktopDisplay>,
+	display:        DisplaySelector,
+	ax:             Option<AtSpiAx>,
+	ax_error:       Option<DesktopError>,
+	input:          Option<libei::Libei>,
+	displays:       Vec<DesktopDisplay>,
+	/// The PID that listens on the Wayland socket: gnome-shell on GNOME, whose
+	/// own AT-SPI frames never count as the focused application window. On
+	/// Plasma it is `kwin_wayland_wrapper`, which owns no frames.
+	compositor_pid: Option<u32>,
+}
+
+/// Reads the compositor's PID from the peer credentials of its Wayland socket.
+fn compositor_pid() -> Option<u32> {
+	let display = PathBuf::from(std::env::var_os("WAYLAND_DISPLAY")?);
+	let path = if display.is_absolute() {
+		display
+	} else {
+		PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?).join(display)
+	};
+	let socket = UnixStream::connect(path).ok()?;
+	let mut credentials = libc::ucred { pid: 0, uid: 0, gid: 0 };
+	let mut length = size_of::<libc::ucred>() as libc::socklen_t;
+	// SAFETY: `credentials` and `length` are live, correctly sized out-params
+	// for SO_PEERCRED on a connected Unix socket; the kernel keeps no pointer.
+	let status = unsafe {
+		libc::getsockopt(
+			socket.as_raw_fd(),
+			libc::SOL_SOCKET,
+			libc::SO_PEERCRED,
+			(&raw mut credentials).cast(),
+			&raw mut length,
+		)
+	};
+	(status == 0 && credentials.pid > 0).then_some(credentials.pid as u32)
 }
 
 impl WaylandBackend {
@@ -145,7 +180,14 @@ impl WaylandBackend {
 			Ok(ax) => (Some(ax), None),
 			Err(err) => (None, Some(err)),
 		};
-		Self { display, ax, ax_error, input: None, displays: Vec::new() }
+		Self {
+			display,
+			ax,
+			ax_error,
+			input: None,
+			displays: Vec::new(),
+			compositor_pid: compositor_pid(),
+		}
 	}
 
 	fn window_input_error(target: &Target, kind: &str) -> CoreResult<()> {
@@ -263,13 +305,18 @@ impl Backend for WaylandBackend {
 	}
 
 	fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>> {
-		Ok(self
-			.atspi_windows()?
-			.into_iter()
-			.map(|entry| entry.window)
-			.collect())
+		let mut windows = self.atspi_windows()?;
+		if let Some(ax) = self.ax.as_ref() {
+			resolve_focus(&mut windows, self.compositor_pid, |window| ax.holds_focus(window));
+		}
+		Ok(windows.into_iter().map(|entry| entry.window).collect())
 	}
 
+	/// Reads the unresolved list. A native app's frame has no known position,
+	/// so it must keep failing this check until the real outputs are counted;
+	/// resolving focus here would refuse GNOME display typing that `main` allows
+	/// through the shell frame, or, with a one-monitor shortcut, type on a
+	/// monitor the agent cannot see.
 	fn focused_keyboard_window(&mut self) -> CoreResult<DesktopWindow> {
 		let entry = self
 			.atspi_windows()?
@@ -391,6 +438,26 @@ impl Backend for WaylandBackend {
 		super::menus::select(window, path)
 	}
 
+	/// Refuses before anything reaches the element's app. The default focuses
+	/// the element and then sends through its window's keyboard path, which
+	/// Wayland always refuses, so the refused call still moved focus inside
+	/// that app (GNOME announced "… is ready").
+	fn element_input(
+		&mut self,
+		_element: &AxHandle,
+		_input: &ElementInput,
+		_mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<ElementDelivery> {
+		token.check()?;
+		Err(DesktopError::background_unavailable(
+			"wayland-compositor-focus-only: Wayland cannot programmatically activate the element's \
+			 window, so el.type and el.press(keys) are refused before the element is focused; \
+			 nothing was sent. Use setValue, or click the field where a desktop screenshot shows it \
+			 (AX bounds are window-relative here) and then type with desktop input",
+		))
+	}
+
 	fn raise_window(&mut self, id: &str, token: &OperationToken) -> CoreResult<()> {
 		token.check()?;
 		Err(DesktopError::background_unavailable(format!(
@@ -419,11 +486,12 @@ mod tests {
 
 	fn backend_without_services() -> WaylandBackend {
 		WaylandBackend {
-			display:  DisplaySelector::All,
-			ax:       None,
-			ax_error: None,
-			input:    None,
-			displays: Vec::new(),
+			display:        DisplaySelector::All,
+			ax:             None,
+			ax_error:       None,
+			input:          None,
+			displays:       Vec::new(),
+			compositor_pid: None,
 		}
 	}
 	fn with_fake_libei(action: impl FnOnce(&mut WaylandBackend)) -> bool {
@@ -545,6 +613,24 @@ mod tests {
 		assert_eq!(error.code.as_str(), "InvalidCoordinateFrame");
 	}
 
+	/// The refusal comes before any AT-SPI call: the default path's first step,
+	/// the window lookup, would fail `AxUnsupported` here instead, and its next
+	/// step focuses the element.
+	#[test]
+	fn element_input_is_refused_before_anything_reaches_the_app() {
+		let mut backend = backend_without_services();
+		let source = control::CancellationSource::default();
+		for input in [ElementInput::Text("zz".into()), ElementInput::Chord(vec![KeyName::Enter])] {
+			let error = backend
+				.element_input(&AxHandle::Test(1), &input, DeliveryMode::Foreground, &source.token())
+				.err()
+				.expect("Wayland element input is refused");
+			assert_eq!(error.code.as_str(), "BackgroundUnavailable");
+			assert!(error.message.contains("nothing was sent"), "{}", error.message);
+		}
+		assert!(backend.input.is_none());
+	}
+
 	#[test]
 	fn cancelled_mutations_stop_before_initializing_input() {
 		let mut backend = backend_without_services();
@@ -592,13 +678,7 @@ mod tests {
 	#[test]
 	#[cfg(not(feature = "wayland-pipewire"))]
 	fn capabilities_report_no_capture_without_pipewire_feature() {
-		let mut backend = WaylandBackend {
-			display:  DisplaySelector::All,
-			ax:       None,
-			ax_error: None,
-			input:    None,
-			displays: Vec::new(),
-		};
+		let mut backend = backend_without_services();
 		let caps = backend.capabilities();
 		// Shipped builds compile without wayland-pipewire, so the capture path is
 		// absent; capabilities() must not advertise capture the binary cannot do.

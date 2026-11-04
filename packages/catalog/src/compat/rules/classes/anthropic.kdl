@@ -209,6 +209,22 @@ class "anthropic" {
 			stops-output-at-context-window #true
 		}
 	}
+	// Message threads (`message-threads-2026-08-12`) keep the conversation on
+	// the server so later turns send only new messages. Claude 4.5 and newer
+	// support them on the Claude API; the transport checks the effective URL
+	// per request because `ANTHROPIC_BASE_URL` / Foundry reroutes leave this
+	// flag stale. Vertex and Bedrock do not support them.
+	// https://platform.claude.com/docs/en/build-with-claude/message-threads
+	on "anthropic" {
+		on-api "anthropic-messages" {
+			revision ">=4.5" {
+				supports-message-threads #true
+			}
+			models "claude-mythos-preview" {
+				supports-message-threads #true
+			}
+		}
+	}
 	// Opus 5.5 rejects forced tool selection the way Fable/Mythos do — a
 	// `tool_choice` of `tool` or `any` fails the request with 400
 	// `invalid_request_error`: `tool_choice: type "tool" and "any" are not

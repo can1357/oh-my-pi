@@ -14,11 +14,10 @@ use std::{
 	time::SystemTime,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{ArgAction, Parser};
 use similar::{Algorithm, DiffOp, DiffTag, capture_diff_slices};
 
-use crate::host::{Host, Utility, forward_slash_display, strip_errno, util};
+use crate::host::{Host, Utility, forward_slash_display, strip_errno};
 
 /// Parsed `diff` invocation.
 #[derive(Parser)]
@@ -899,11 +898,6 @@ fn is_binary(bytes: &[u8]) -> bool {
 fn child_display(dir: &Path, name: &OsStr) -> PathBuf {
 	let joined = pi_vfs::join_path(dir, Path::new(name));
 	forward_slash_display(&joined).unwrap_or(joined)
-}
-
-/// Creates the `diff` builtin registration.
-pub(crate) fn diff_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Diff, SE>()
 }
 
 #[cfg(test)]

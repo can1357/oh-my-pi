@@ -165,6 +165,8 @@ export interface WriteTextAtomicOptions extends SessionStorageWriteOptions {
 }
 
 export interface SessionStorage {
+	/** A worker may use its own file-storage default for these same transcripts; omitted means keep runs inline. */
+	readonly crossesWorkerBoundary?: boolean;
 	/**
 	 * `true` when synchronous writes ({@link writeTextSync} and a writer's
 	 * {@link SessionStorageWriter.appendSync}) have reached the backing store by
@@ -776,6 +778,8 @@ async function writeLinesToFile(target: string, lines: readonly string[]): Promi
 }
 
 export class FileSessionStorage implements SessionStorage {
+	readonly crossesWorkerBoundary = true;
+
 	#assertExpectedSize(fpath: string, expectedSize: number | null | undefined): void {
 		if (expectedSize === undefined) return;
 		let actualSize: number | null;

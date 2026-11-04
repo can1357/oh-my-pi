@@ -3,7 +3,7 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import type { Settings } from "../config/settings";
 import { IrcBus } from "./bus";
-import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import type { SessionStorage } from "../session/session-storage";
 import { canSpawnAtDepth } from "../task/types";
@@ -28,7 +28,7 @@ export function formatIncoming(msg: IrcMessage): string {
 }
 
 /** Session-buffered inbox drain used before parking a bus waiter. */
-export function drainPendingInbox(registry: AgentRegistry, senderId: string, from?: string): IrcMessage | undefined {
+export function drainPendingInbox(registry: AgentRegistryApi, senderId: string, from?: string): IrcMessage | undefined {
 	const session = registry.get(senderId)?.session;
 	return typeof session?.drainPendingIrcInboxMessages === "function"
 		? session.drainPendingIrcInboxMessages(senderId, { from, limit: 1 })[0]
@@ -49,7 +49,7 @@ export function messageResult(senderId: string, waited: IrcMessage): AgentToolRe
  * recipient's transcript is found; omitted, the default session storage.
  */
 export async function executeSend(
-	deps: { registry: AgentRegistry; senderId: string; sessionFileHint?: string | null; storage?: SessionStorage },
+	deps: { registry: AgentRegistryApi; senderId: string; sessionFileHint?: string | null; storage?: SessionStorage },
 	params: { to: string; message: string; progress?: boolean },
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const { registry, senderId, sessionFileHint, storage } = deps;
