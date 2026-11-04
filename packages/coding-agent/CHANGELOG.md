@@ -45,7 +45,6 @@
 
 - A CLI flag, session-only settings write or SDK override now outranks the setting's environment variable, so `PI_MOTION=none omp --motion full` runs with full motion; env vars still outrank every settings file
 - Updated abort error handling for JS and Python tools to propagate original abort reasons
-- Shaped tool results cut by Spotlight end with a short `[cut: artifact://N]` line instead of a sentence explaining the gaps, and cut reads, outlined code and folded docs end with no such line; the system prompt explains the gaps and folds once
 - Subagents now move into worker threads when many run at once, so their model streaming and tool work no longer competes with the TUI: up to 3 concurrent subagents run on the main thread, 4 add a worker, and each doubling (8, 16, 32) adds one more, up to the new `task.workerThreads` (default 4; `0` keeps every subagent on the main thread). Each subagent goes where the fewest are running; a needed worker starts while the model is still streaming the spawning call and exits a minute after its last subagent finishes or parks. IRC, the Agent Hub and focus view, `agent://`/`history://`/`proc://`, parking and revival, async jobs, cost caps, account pools and OAuth refresh, runtime model providers, MCP, memory, telemetry, `PI_PROXY` and logs keep working across the thread boundary. If omp's own files change while it runs (a source checkout or an in-place update), new subagents run on the main thread until omp restarts
 - Interactive startup reaches the first frame ~75ms sooner with skills listed in the system prompt: background skill-description compression now starts after the first frame, and resolves its model once per batch of uncached skills instead of once per skill
 - Startup release notes ("What's New") now appear just after the first interactive frame instead of being resolved before the session starts; a launch quit before that frame keeps them for the next start
@@ -55,12 +54,7 @@
 - Subagent and task prompts no longer tell agents to message or broadcast before editing shared files; subagents message only to get unblocked and wait only on their own jobs
 - Subagents can no longer broadcast: `write agent://all` from a subagent fails and points it at a direct `agent://<id>` message, and subagent prompts no longer advertise `agent://all`. The main agent can still broadcast
 
-### Removed
-
-- Removed the Spotlight experiment's edit gate (`spotlight.experiment.editGate`, `PI_SPOTLIGHT_EDIT_GATE`): reads of code files are cut like any other read instead of half of them being kept whole ("spotlight: kept whole for editing")
-
 ### Fixed
-- Spotlight cuts `grep`, `find` and `glob` results and filtered bash output (`| grep`, `sed -n`, `awk`) past ~3.9k chars like any other result instead of showing them whole up to ~12k, and collapses lines already shown even when the call's intent names them
 - Fixed a second `ask` note on a later single-select question reopening and replacing the previous question's note ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
 
 - Retrying an aborted turn keeps the unsent composer draft instead of clearing it ([#17977](https://github.com/can1357/oh-my-pi/pull/17977) by [@Shadorain](https://github.com/Shadorain))
