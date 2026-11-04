@@ -2633,8 +2633,9 @@ describe("agentLoop with AgentMessage", () => {
 			label: "Op",
 			description: "Op tool",
 			parameters: toolSchema,
-			// Reads without a context, writes with one.
-			approval: (_args, context) => (context ? "write" : "read"),
+			// Reads without a context, writes with one; a rest parameter hides the
+			// context from `Function.length`.
+			approval: (...[, context]: [unknown, AgentToolContext?]) => (context ? "write" : "read"),
 			async execute(_toolCallId, params) {
 				return { content: [{ type: "text", text: `ok:${params.value}` }], details: { value: params.value } };
 			},
