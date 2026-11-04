@@ -372,6 +372,56 @@ macro_rules! thread_fault {
 	($what:expr) => {};
 }
 
+/// A spawned terminal child that nothing waits for yet. Dropping the master
+/// hangs the child up, which kills it, but nobody waits for it, so it stays a
+/// zombie of this process for as long as this process lives. Every exit from
+/// the window between the spawn and the waiter thread — an error return, a
+/// panic, a thread the host refuses to start — therefore goes through this
+/// guard, which kills the child and reaps it.
+struct UnreapedChild(Option<Box<dyn portable_pty::Child + Send + Sync>>);
+
+impl UnreapedChild {
+	fn process_id(&self) -> Option<u32> {
+		self.0.as_ref().and_then(|child| child.process_id())
+	}
+
+	/// Waits for the child and hands its reaping over to the caller: the
+	/// guard has nothing left to kill.
+	fn wait(&mut self) -> std::io::Result<ExitStatus> {
+		match self.0.take() {
+			Some(mut child) => child.wait(),
+			None => Err(std::io::Error::other("the terminal child was already waited for")),
+		}
+	}
+}
+
+impl Drop for UnreapedChild {
+	fn drop(&mut self) {
+		let Some(mut child) = self.0.take() else {
+			return;
+		};
+		// `Child::kill` is a SIGHUP on Unix, which the child may ignore, and
+		// the wait below must not be able to block for ever.
+		#[cfg(unix)]
+		let killed = match child.process_id().and_then(|pid| i32::try_from(pid).ok()) {
+			Some(pid) => {
+				// SAFETY: `kill` takes no pointer. The pid is this process's
+				// own child, not yet waited for, so the kernel cannot have
+				// reused it.
+				let sent = unsafe { libc::kill(pid, libc::SIGKILL) };
+				sent == 0
+			},
+			None => false,
+		};
+		#[cfg(not(unix))]
+		let killed = false;
+		if !killed {
+			let _ = child.kill();
+		}
+		let _ = child.wait();
+	}
+}
+
 /// Starts a terminal thread the run cannot go on without. `std::thread::spawn`
 /// panics when the host refuses a thread, and after the child exists a panic
 /// unwinds past its owner, so each start here is fallible and its failure is
@@ -513,9 +563,11 @@ fn run_pty_sync(
 		.try_clone()
 		.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?;
 
-	let mut child = slave
-		.spawn_command(cmd)
-		.map_err(|err| Error::from_reason(format!("Failed to spawn PTY command: {err}")))?;
+	let child = UnreapedChild(Some(
+		slave
+			.spawn_command(cmd)
+			.map_err(|err| Error::from_reason(format!("Failed to spawn PTY command: {err}")))?,
+	));
 	drop(slave);
 	let child_process_id = child.process_id();
 	let child_pid = child_process_id.and_then(|value| i32::try_from(value).ok());
@@ -526,7 +578,9 @@ fn run_pty_sync(
 	// `exec`'d OS process. The master hangup delivers SIGHUP to the child
 	// (it's the pty's session leader), which kills it almost immediately, but
 	// nothing calls wait() afterward, so an exit from here that only dropped
-	// the master would leak the child as a permanent zombie. A cancellation
+	// the master would leak the child as a permanent zombie. Every remaining
+	// step that can fail — a thread the host refuses to start — therefore
+	// leaves through `UnreapedChild`, which kills and reaps. A cancellation
 	// here is instead delivered by the cancel forwarder below (immediately,
 	// for an already-aborted token) and handled by the control loop, which
 	// kills, and whose waiter thread reaps, correctly.
@@ -611,6 +665,8 @@ fn run_pty_sync(
 	// timer: an idle session costs no wakeups, and exit is seen immediately.
 	// `wait` also guarantees the reap even after the run stops waiting for a
 	// SIGKILL'd child (`std::process::Child` never waits on `Drop`).
+	// The waiter owns the child from here: a start that fails drops the
+	// closure, and with it the guard, which kills and reaps.
 	let exit_tx = control_tx.clone();
 	start_terminal_thread("waiter", move || {
 		let mut child = child;
