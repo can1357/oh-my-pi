@@ -269,7 +269,7 @@ impl<'s> Parser<'s> {
 	/// Skip blanks and line continuations.
 	pub(super) fn skip_blanks(&mut self) {
 		loop {
-			while let Some(&c) = self.buf.get(self.pos) {
+			while let Some(c) = self.bytes().get(self.pos).copied() {
 				if !matches!(c, b' ' | b'\t') {
 					if c != b'\\' {
 						return;
