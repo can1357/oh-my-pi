@@ -4,6 +4,8 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
+import { RecapNotice } from "@oh-my-pi/pi-tui/chat/recap-notice";
+import { previewLine, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -81,6 +83,8 @@ import {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 } from "../../session/messages";
+import type { SessionEntry, SessionMessageEntry } from "../../session/session-entries";
+import { listSessionRecaps } from "../../session/session-index";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
@@ -130,6 +134,10 @@ const TRANSCRIPT_RENDER_CHUNK_MS = 8;
  * durable in the session file and reach the display on the next rebuild.
  */
 const TRANSCRIPT_REPLAY_MAX_ATTEMPTS = 5;
+
+function isMessageEntry(entry: SessionEntry): entry is SessionMessageEntry {
+	return entry.type === "message";
+}
 
 function waitForImmediate(): Promise<void> {
 	const { promise, resolve } = Promise.withResolvers<void>();
@@ -940,6 +948,21 @@ export class UiHelpers {
 		// (#10447). Membership is re-checked against `pendingTools`.
 		if (backgroundCallIds.size > 0) {
 			this.ctx.eventController?.markBackgroundCalls(backgroundCallIds);
+		}
+		// The idle recap lives only in the recap journal, never in the session file, so a replay
+		// (resume, /restart, transcript rebuild) would drop it. Re-show the newest one when it came
+		// after the session's latest message and the viewed branch ends at that message; a view
+		// rewound to an earlier entry or another branch does not get it.
+		if (!this.ctx.viewSession.isStreaming) {
+			const sessionManager = this.ctx.viewSession.sessionManager;
+			const newest = sessionManager.getEntries().findLast(isMessageEntry);
+			if (newest && sessionManager.getBranch().findLast(isMessageEntry)?.id === newest.id) {
+				const [recap] = listSessionRecaps({ sessionIds: [sessionManager.getSessionId()], limit: 1 });
+				if (recap && recap.createdAt * 1000 > newest.message.timestamp) {
+					const text = previewLine(recap.recap, TRUNCATE_LENGTHS.RECAP);
+					if (text) this.ctx.chatContainer.addChild(new RecapNotice(text));
+				}
+			}
 		}
 
 		// Entries still in `pendingTools` are toolCalls whose result never landed

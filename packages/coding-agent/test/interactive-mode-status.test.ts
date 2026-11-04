@@ -172,7 +172,7 @@ describe("InteractiveMode.showStatus", () => {
 			transcriptMessageComponents: new WeakMap(),
 			pendingTools: new Map(),
 			ui: { requestRender: vi.fn() },
-			viewSession: { isStreaming: false },
+			viewSession: { isStreaming: false, sessionManager: { getEntries: () => [] } },
 			optimisticUserMessageSignature: "hello\u00001",
 		} as unknown as InteractiveModeContext;
 		const helpers = new UiHelpers(ctx);
