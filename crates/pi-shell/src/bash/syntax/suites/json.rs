@@ -156,3 +156,41 @@ fn long_bang_runs_export_json_without_stack_growth() {
 	let json = to_json(src.as_bytes(), &program, JsonDialect::Shfmt, Offsets::Bytes);
 	assert_eq!(json.matches("\"Op\": \"!\"").count(), 5_000);
 }
+
+#[test]
+fn a_conditional_chain_starts_where_its_operators_are_written() {
+	// Two blanks after the inner `!` and two before the unary operand: the
+	// enclosing `&&` must start at the first `!` and its right operand at
+	// `-n`, read from the source, not estimated at a fixed width per
+	// operator. A consumer slicing the source with these offsets otherwise
+	// gets a condition with one negation missing.
+	let src = b"[[ ! !  a && -n  b ]]";
+	let program = parse_all(src, Features::NONE).unwrap();
+	let shfmt: serde_json::Value =
+		serde_json::from_str(&to_json(src, &program, JsonDialect::Shfmt, Offsets::Bytes)).unwrap();
+	let expr = &shfmt["Stmts"][0]["Cmd"]["X"];
+	assert_eq!(expr["Op"], "&&");
+	assert_eq!(expr["Pos"]["Offset"], 3, "chain starts at the outer `!`");
+	assert_eq!(expr["End"]["Offset"], 18, "chain ends after `b`");
+	assert_eq!(expr["X"]["Pos"]["Offset"], 3, "left operand starts at the outer `!`");
+	assert_eq!(expr["Y"]["Pos"]["Offset"], 13, "right operand starts at `-n`");
+	assert_eq!(expr["Y"]["OpPos"]["Offset"], 13);
+}
+
+#[test]
+fn a_conditional_chain_ends_where_its_group_closes() {
+	// Blanks inside the parentheses: the enclosing `&&` must end at the
+	// group's `)`, read from the source, not two bytes after the operand.
+	// A consumer otherwise gets a parent range that does not contain its
+	// own right operand.
+	let src = b"[[ b &&  (  a  ) ]]";
+	let program = parse_all(src, Features::NONE).unwrap();
+	let shfmt: serde_json::Value =
+		serde_json::from_str(&to_json(src, &program, JsonDialect::Shfmt, Offsets::Bytes)).unwrap();
+	let expr = &shfmt["Stmts"][0]["Cmd"]["X"];
+	assert_eq!(expr["Op"], "&&");
+	assert_eq!(expr["Pos"]["Offset"], 3, "chain starts at `b`");
+	assert_eq!(expr["End"]["Offset"], 16, "chain ends after the group's `)`");
+	assert_eq!(expr["Y"]["Rparen"]["Offset"], 15);
+	assert_eq!(expr["Y"]["End"]["Offset"], 16);
+}
