@@ -1554,11 +1554,7 @@ pub(in super::super) fn front_app(browser: Option<pid_t>) -> Option<FrontApp> {
 						Some((psn_pid(&picks.front?)?, (read_at, picks)))
 					},
 					|user| rearm(browser, user, Instant::now()),
-					|user, armed| match armed {
-						Rearm::Keep(armed) => armed.covers_now(user, browser),
-						Rearm::Replace(Some(reroute)) => reroute.armed().covers_now(user, browser),
-						Rearm::Replace(None) => true,
-					},
+					|user, armed| armed.covers_now(user, browser),
 				)?;
 				(read_at, picks, rearm)
 			} else {
@@ -1835,6 +1831,16 @@ enum Rearm {
 	Keep(Armed),
 	/// A new one, or none.
 	Replace(Option<KeyReroute>),
+}
+
+impl Rearm {
+	fn covers_now(&self, user: pid_t, browser: pid_t) -> bool {
+		match self {
+			Self::Keep(armed) => armed.covers_now(user, browser),
+			Self::Replace(Some(reroute)) => reroute.armed().covers_now(user, browser),
+			Self::Replace(None) => true,
+		}
+	}
 }
 
 /// Keeps a [`KeyReroute`] moving the keys the user types while `browser`
@@ -4619,6 +4625,26 @@ mod tests {
 		.unwrap();
 		assert_eq!(setups.get(), 2, "a same-app click invalidates the first setup's mouse counters");
 		assert_eq!(snapshot, 2, "the returned read follows the replacement setup");
+	}
+
+	#[test]
+	fn a_no_reroute_read_drops_the_retained_tap_without_retrying() {
+		let now = Instant::now();
+		let mut log = pick_log(Some((now, now + PICK_WATCH)));
+		let (reroute, ended) = KeyReroute::unwatched_for_test();
+		log.reroute = Some((now, reroute));
+		let mut reads = [(100, 0), (100, 1)].into_iter();
+		let (snapshot, rearm) = rearm_for_front(
+			|| reads.next(),
+			|_| Rearm::Replace(None),
+			|user, armed| armed.covers_now(user, 200),
+		)
+		.expect("absence must cover the secure read without retrying");
+		assert_eq!(snapshot, 1);
+		let picks = Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_USER) };
+		assert!(log.watch_read(picks, now, rearm));
+		assert!(log.reroute.is_none());
+		assert!(ended.load(Ordering::Acquire));
 	}
 
 	#[test]

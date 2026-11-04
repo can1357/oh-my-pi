@@ -719,6 +719,8 @@ pub(super) struct Armed {
 	/// The mouse button counters: a change after arming is the user picking
 	/// an app ([`Theft::user_acted`]).
 	buttons:    [u32; 6],
+	/// Secure keyboard entry in this snapshot prevents tap reuse.
+	secure:     bool,
 }
 
 impl Armed {
@@ -729,12 +731,12 @@ impl Armed {
 	}
 
 	/// Whether it moves the same keys as one armed `now`: it [`serves`]
-	/// `now`, and no mouse button went down or up since, which it would take
-	/// for the user's choice where the new one would not.
+	/// `now`, secure entry is off, and no mouse button went down or up since,
+	/// which it would take for the user's choice where the new one would not.
 	///
 	/// [`serves`]: Self::serves
 	fn covers(self, now: Self) -> bool {
-		self.serves(now) && self.buttons == now.buttons
+		!now.secure && self.serves(now) && self.buttons == now.buttons
 	}
 
 	/// Whether the reroute armed as `self` moves the keys one armed now for
@@ -751,7 +753,13 @@ impl KeyReroute {
 		(
 			Self {
 				ended: Arc::clone(&ended),
-				armed: Armed { user: 100, target: 200, generation: 0, buttons: [0; 6] },
+				armed: Armed {
+					user:       100,
+					target:     200,
+					generation: 0,
+					buttons:    [0; 6],
+					secure:     false,
+				},
 			},
 			ended,
 		)
@@ -759,7 +767,7 @@ impl KeyReroute {
 
 	fn now(user: pid_t, target: pid_t) -> Armed {
 		let generation = REGISTRY.lock().latest.0;
-		Armed { user, target, generation, buttons: mouse_buttons() }
+		Armed { user, target, generation, buttons: mouse_buttons(), secure: secure_entry() }
 	}
 
 	/// What it was armed with.
@@ -911,10 +919,10 @@ impl KeyReroute {
 				}
 			})
 			.ok()?;
-		receive
-			.recv()
-			.unwrap_or(false)
-			.then_some(Self { ended, armed: Armed { user, target, generation, buttons } })
+		receive.recv().unwrap_or(false).then_some(Self {
+			ended,
+			armed: Armed { user, target, generation, buttons, secure: false },
+		})
 	}
 }
 
@@ -1497,13 +1505,20 @@ mod tests {
 
 	#[test]
 	fn a_reroute_serves_its_apps_until_a_newer_action_and_stands_in_for_a_new_one_until_a_click() {
-		let armed =
-			Armed { user: USER, target: TARGET, generation: 7, buttons: BUTTONS };
+		let armed = Armed {
+			user:       USER,
+			target:     TARGET,
+			generation: 7,
+			buttons:    BUTTONS,
+			secure:     false,
+		};
 		assert!(armed.covers(armed));
 		// The user clicked since: an action under way keeps it, but it would
 		// take the click for their choice where a new one would not.
 		let clicked = Armed { buttons: CLICKED, ..armed };
 		assert!(armed.serves(clicked) && !armed.covers(clicked));
+		let secure = Armed { secure: true, ..armed };
+		assert!(armed.serves(secure) && !armed.covers(secure));
 		for other in [Armed { generation: 8, ..armed }, Armed { user: SPOTLIGHT, ..armed }, Armed {
 			target: SPOTLIGHT,
 			..armed
