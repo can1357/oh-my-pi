@@ -3062,6 +3062,12 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 						: monitor.resolveAbortReasonText()
 		: undefined;
 	progress.status = wasAborted ? "aborted" : exitCode === 0 ? "completed" : "failed";
+	// The settled row carries the same protocol mark as the summary. An
+	// autonomous wake job publishes this progress record itself, with no
+	// `TaskTool` run to copy the finalized result onto a row of its own, so
+	// this is where every view of the row — terminal, native, web, exported
+	// HTML — learns that the turn skipped `yield`.
+	progress.missingYield = finalized.missingYield;
 	monitor.scheduleProgress(true);
 
 	// Emit lifecycle end event after finalization so yield status is reflected
@@ -3181,12 +3187,13 @@ function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
 
 /**
  * Hand a woken subagent's turn output to whoever woke it, when the subagent
- * did not answer them itself. A re-`yield` delivers the `<task-result>`
+ * did not answer them itself: the peers whose messages started the turn, and
+ * the parent whose steer joined it. A re-`yield` delivers the `<task-result>`
  * envelope (the artifact was just rewritten, so it carries the `agent://`
  * pointer); a plain turn delivers its final assistant text. Without this, a
- * recipients without a dedicated messaging tool can still answer a sender;
- * otherwise their re-yield silently
- * updates the artifact nobody is told to re-read.
+ * recipient without a dedicated messaging tool is never told that the turn
+ * answered it, and the subagent's re-yield silently updates an artifact
+ * nobody is asked to re-read.
  */
 async function relayWakeTurnOutput(args: {
 	id: string;
@@ -3203,8 +3210,15 @@ async function relayWakeTurnOutput(args: {
 	abortReason: string | undefined;
 	/** A {@link finalizeRunResult} throw, so the waiter is notified instead of stranded. */
 	finalizeError: unknown;
-	/** Waker already receiving this turn's outcome as an async job delivery. */
+	/** Waker already receiving this turn's outcome as an async job or message-result delivery. */
 	jobOwnerId: string | undefined;
+	/**
+	 * Parent whose steer entered this turn, making it the turn's owner. Its
+	 * request was consumed and answered here, so it is a recipient like any
+	 * waker — including when a peer started the turn, which leaves the parent
+	 * out of the wake records entirely.
+	 */
+	joinedOwnerId: string | undefined;
 	/**
 	 * Parent that owns a wake carrying the missing-yield mark. When no wake job
 	 * could carry the outcome, the parent gets the finalized summary (warning
@@ -3214,6 +3228,8 @@ async function relayWakeTurnOutput(args: {
 }): Promise<void> {
 	const bus = IrcBus.global();
 	const sources = wakeSources(args.records, args.id);
+	if (args.joinedOwnerId !== undefined && !sources.some(source => source.from === args.joinedOwnerId))
+		sources.push({ from: args.joinedOwnerId });
 	if (sources.length === 0) return;
 	const failed = wakeTurnFailed(args);
 	for (const source of sources) {
@@ -3576,10 +3592,12 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				// enqueue its delivery without reserving an execution slot.
 				const messageResult =
 					(userPrompted || ownerPrompted) && options.structured === false && result?.outputPath !== undefined;
+				let messageResultPublished = false;
 				if (messageResult && !wakeJob && ownerId && session.asyncJobManager && result) {
 					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 					try {
 						session.asyncJobManager.publishCompleted("task", id, { text }, { id, agentId: id, ownerId });
+						messageResultPublished = true;
 					} catch (error) {
 						logger.warn("User-resumed subagent result delivery failed", {
 							id,
@@ -3644,6 +3662,12 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						abortReason,
 						finalizeError,
 						jobOwnerId: wakeJob?.ownerId,
+						// A parent that steered a turn a peer started owns the turn
+						// but woke nothing, so no wake record names it. Unless a job
+						// or the message-result delivery above already carries the
+						// outcome, the relay is its only answer — and a marked wake
+						// hands it the finalized summary, warning included.
+						joinedOwnerId: ownerPrompted && !messageResultPublished ? ownerId : undefined,
 						markedWakeOwnerId: markedWake ? ownerId : undefined,
 					});
 				} catch (relayError) {
