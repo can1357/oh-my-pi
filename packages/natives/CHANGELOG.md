@@ -4,12 +4,12 @@
 
 ### Added
 
-- Added `lsFilesWithWarnings` to `VcsGitRepo` and `VcsRepo`: the untracked listing together with the directories git could not open and the names that are not valid UTF-8, so a caller can tell a short listing from a complete one ([#PENDING](https://github.com/can1357/oh-my-pi/pull/PENDING) by [@sjawhar](https://github.com/sjawhar))
+- Added `lsFilesWithWarnings` to `VcsGitRepo` and `VcsRepo`: the untracked listing together with the directories git could not open and the names that are not valid UTF-8, so a caller can tell a short listing from a complete one ([#18096](https://github.com/can1357/oh-my-pi/pull/18096) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections
-- `lsFiles` on a git repository now leaves out a name that is not valid UTF-8 instead of returning it with `�` in place of its bytes, and `diffNoIndex` now fails on a path that does not exist instead of diffing it as empty ([#PENDING](https://github.com/can1357/oh-my-pi/pull/PENDING) by [@sjawhar](https://github.com/sjawhar))
+- `lsFiles` on a git repository now leaves out a name that is not valid UTF-8 instead of returning it with `�` in place of its bytes, and `diffNoIndex` now fails on a path that does not exist instead of diffing it as empty ([#18096](https://github.com/can1357/oh-my-pi/pull/18096) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
