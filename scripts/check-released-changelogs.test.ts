@@ -1526,7 +1526,7 @@ describe("check-released-changelogs", () => {
 			name: "a footnote definition, whose text GitHub renders as a release heading",
 			change: (released: string) =>
 				released.replace("## [1.0.0]", "[^ship]: ## [9.9.9] - 2026-02-02\n\nShipped[^ship].\n\n## [1.0.0]"),
-			shown: "Markdown shows a footnote definition, whose text GitHub renders as Markdown at the end of the page, where the changelog tools read text",
+			shown: "the line starts a footnote definition",
 		},
 	])(
 		"fails $name, added or already at the base, in the working tree, the index and a commit",
@@ -1548,19 +1548,10 @@ describe("check-released-changelogs", () => {
 		TEST_TIMEOUT_MS,
 	);
 
-	// A line scan, not a renderer, decides: only a code block or an HTML comment provably shows
-	// `[^note]:` as text, and `[^note]:` after other text starts no block at all.
+	// `[^label]:` only after other text on the line defines no footnote anywhere, so it stays fine.
 	test.each([
 		{ name: "inline code inside an entry", text: "- Documented the `[^note]:` footnote syntax" },
 		{ name: "text inside an entry", text: "- Fixed parsing of [^note]: definitions" },
-		{ name: "a fenced code block", text: "```\n[^note]: ## [9.9.9]\n```" },
-		{ name: "a tilde-fenced code block", text: "~~~\n[^note]: ## [9.9.9]\n~~~" },
-		{ name: "an indented code block", text: "Syntax:\n\n    [^note]: ## [9.9.9]" },
-		{
-			name: "the second line of an indented code block",
-			text: "Syntax:\n\n    [^one]: ## [9.9.9]\n    [^two]: ## [9.9.8]",
-		},
-		{ name: "an HTML comment", text: "<!--\n[^note]: ## [9.9.9]\n-->" },
 	])("passes [^note]: in $name, where it defines no footnote", async ({ text }) => {
 		const options = { release: false, readArchive: async () => undefined };
 		const added = BASE_CHANGELOG.replace(`${FIRST_ENTRY}\n`, `${FIRST_ENTRY}\n\n${text}\n`);
@@ -1568,8 +1559,10 @@ describe("check-released-changelogs", () => {
 		expect((await findReleasedSectionChanges(CHANGELOG, added, added, options)).changes).toEqual([]);
 	});
 
-	// GitHub renders every case below as a footnote whose text holds a level-2 release heading,
-	// although Bun's renderer keeps the line as a title's text, a list item's text or raw HTML.
+	// A line that starts `[^label]:` is refused wherever it stands: GitHub renders a footnote
+	// definition's text as Markdown at the end of the page, and no block state may excuse the line.
+	// The last rows are literal code, refused by design, since only GitHub's own block parser could
+	// tell them from a definition.
 	test.each([
 		{ name: "in a list item", text: "- [^note]: ## [9.9.9]" },
 		{ name: "in a quote", text: "> [^note]: ## [9.9.9]" },
@@ -1598,12 +1591,29 @@ describe("check-released-changelogs", () => {
 		{ name: "indented four spaces as an open list item's text", text: "- item\n\n    [^note]: ## [9.9.9]" },
 		{ name: "below a code fence inside an HTML block", text: "<div>\n```text\n\n[^note]: ## [9.9.9]\n```\n</div>" },
 		{ name: "below an HTML comment that ends on its own line", text: "<!-- -->\n[^note]: ## [9.9.9]" },
-	])("still fails a footnote definition $name", async ({ text }) => {
+		{
+			name: "after a list item's unclosed fence, which ends where the list ends",
+			text: "- item\n  ```\n  example\n\n[^note]: ## [9.9.9]\n\nRef[^note].",
+		},
+		{
+			name: "after an HTML block that a blank line does not close",
+			text: "<script>\n\n```\n</script>\n\n[^note]: ## [9.9.9]\n\nRef[^note].",
+		},
+		{ name: "in a fenced code block", text: "```\n[^note]: ## [9.9.9]\n```" },
+		{ name: "in a tilde-fenced code block", text: "~~~\n[^note]: ## [9.9.9]\n~~~" },
+		{ name: "in an indented code block", text: "Syntax:\n\n    [^note]: ## [9.9.9]" },
+		{ name: "in an HTML comment", text: "<!--\n[^note]: ## [9.9.9]\n-->" },
+		{ name: "in a fenced code block inside a quote", text: "> ```\n> [^note]: literal\n> ```" },
+		{ name: "in an indented code block inside a list", text: "- item\n\n      [^note]: literal" },
+	])("refuses a line that starts a footnote definition $name", async ({ text }) => {
 		const options = { release: false, readArchive: async () => undefined };
 		const added = BASE_CHANGELOG.replace(`${FIRST_ENTRY}\n`, `${FIRST_ENTRY}\n\n${text}\n`);
 		const { changes } = await findReleasedSectionChanges(CHANGELOG, BASE_CHANGELOG, added, options);
 		expect(changes.map(change => change.problem)).toEqual(["heading"]);
-		expect(changes[0]?.heading).toContain("Markdown shows a footnote definition");
+		expect(changes[0]?.heading).toContain("the line starts a footnote definition");
+		expect(changes[0]?.heading).toContain(
+			"show such text inline instead, in a code span in the middle of a sentence",
+		);
 	});
 
 	test(

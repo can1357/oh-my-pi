@@ -157,7 +157,7 @@ function createNumberedLine(text: string, lineNumber: number): NumberedLine {
 
 /** How the changelog tools may write each heading; anything else Markdown shows as a heading is refused. */
 export const HEADING_RULE =
-	"Write the title as `# Changelog`, once, above the first release, the unreleased section as `## [Unreleased]` with nothing after it, a release as `## [x.y.z] - YYYY-MM-DD` and a category as `### Added`, each at the start of its line with one space after the `#`s, write no other heading, and start no line with `[^label]:`, which GitHub reads as a footnote definition, unless a code block or an HTML comment holds it.";
+	"Write the title as `# Changelog`, once, above the first release, the unreleased section as `## [Unreleased]` with nothing after it, a release as `## [x.y.z] - YYYY-MM-DD` and a category as `### Added`, each at the start of its line with one space after the `#`s, write no other heading, and start no line with `[^label]:`, which GitHub reads as a footnote definition, wherever that line stands, a code block and an HTML comment included; to show such text, put it in a code span in the middle of a sentence.";
 
 /** A heading as Markdown shows it. */
 interface ShownHeading {
@@ -165,11 +165,13 @@ interface ShownHeading {
 	text: string;
 }
 
-/** Where Markdown and the changelog tools first disagree about a changelog's headings. */
+/** Where a changelog breaks the heading rule; nothing was changed. */
 export interface HeadingMismatch {
-	/** 1-based: the first line after which the headings Markdown shows differ from those the tools read. */
+	/** 1-based: the line the rule refuses, or the first line after which Markdown's headings differ from the tools'. */
 	lineNumber: number;
 	line: string;
+	/** The whole sentence, where the line breaks a rule no renderer decides, such as the footnote rule. */
+	description?: string;
 	/** What Markdown shows there, such as `a level-2 heading "[9.9.9]"`. */
 	shown: string;
 	/** What the tools read there. */
@@ -188,104 +190,59 @@ export class ChangelogHeadingError extends Error {
 }
 
 export function describeHeadingMismatch(mismatch: HeadingMismatch): string {
-	return `line ${mismatch.lineNumber}, ${JSON.stringify(mismatch.line)}: Markdown shows ${mismatch.shown} where the changelog tools read ${mismatch.read}`;
+	const problem =
+		mismatch.description ?? `Markdown shows ${mismatch.shown} where the changelog tools read ${mismatch.read}`;
+	return `line ${mismatch.lineNumber}, ${JSON.stringify(mismatch.line)}: ${problem}`;
 }
 
 /** An HTML heading element, as Markdown renders a heading and as raw HTML writes one. */
 const HTML_HEADING_TAG = /<h[1-6](?=[\s/>])/gi;
 
 /**
- * A line that may hold a footnote definition: `[^label]:` after nothing but
- * indentation and list or quote markers. GitHub renders a definition's text as
- * Markdown at the end of the page, so `[^n]: ## [9.9.9]` is a release heading
- * there; Bun's renderer has no footnotes and shows it as text.
+ * A line GitHub can read as a footnote definition: `[^label]:` after nothing
+ * but indentation, `>` quote markers and list markers. GitHub renders a
+ * definition's text as Markdown at the end of the page, so `[^n]: ## [9.9.9]`
+ * is a release heading there, and Bun's renderer, which has no footnotes,
+ * shows it as text.
  */
-const FOOTNOTE_CANDIDATE = /^[ \t>*+\-\d.)]*\[\^[^\]\n]*\]:/;
-
-/** A code fence and the rest of its line: three or more backticks or tildes, at most three spaces in. */
-const CODE_FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-
-/** Where an HTML block may start: `<` at the start of a line, at most three spaces in. */
-const HTML_BLOCK_START = /^ {0,3}</;
-
-/** A list item's marker; the lines indented below it are its text, not a code block. */
-const LIST_MARKER = /^ {0,3}([-*+]|\d{1,9}[.)])([ \t]|$)/;
-
-/** A line indented four spaces or a tab: a code block where no paragraph and no list item is open. */
-const INDENTED_LINE = /^(?: {4}|\t)/;
+const FOOTNOTE_PREFIX = /^[ \t]*(?:(?:>[ \t]*)|(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$))*/;
+const FOOTNOTE_DEFINITION = /^\[\^[^\]\n]*\]:/;
 
 /**
- * The first line (0-based) that may define a footnote, or -1. The scan refuses
- * every candidate except one it proves GitHub shows as text: a line of a
- * fenced code block, of an indented code block, or of an HTML comment, each
- * opened and closed as CommonMark does. No renderer decides this. GitHub's
- * block parser reads a definition where a renderer without footnotes shows
- * none at all: inside a link, reference or image title that spans lines, the
- * renderer keeps the line as title text while GitHub ends the title there and
- * renders the definition. So a candidate counts wherever a block can start —
- * a paragraph, a list item, a quote, a table, a line that continues a
- * paragraph, an HTML block that is not a comment, a title — and `[^label]:`
- * after other text, such as inline code in an entry, is no candidate at all.
+ * The first line (0-based) GitHub can read as a footnote definition, or -1.
+ * No block state decides this: a line that starts with `[^label]:` is refused
+ * wherever it stands — in a fenced or indented code block, in an HTML block,
+ * in a comment, in a quote, in a list. Deciding it by block state needs
+ * GitHub's own block parser, and three rounds of emulating it by hand each
+ * left a shape that hid a definition (an unclosed fence inside a list, a
+ * blank line inside an HTML block, a renderer without footnotes). This rule
+ * is fail-closed by construction: GitHub renders a footnote definition only
+ * from a line that begins this way, so no block state can hide one. The cost
+ * is that a changelog cannot start a line with `[^label]:` inside a code
+ * block; `[^label]:` after other text, such as a code span in an entry, is
+ * no definition and stays fine.
  */
 function footnoteDefinitionLine(lines: readonly string[]): number {
-	/** The open fenced code block's fence character and length. */
-	let fence: { char: string; length: number } | undefined;
-	/** Whether an HTML comment, whose lines GitHub hides, is open. */
-	let comment = false;
-	/** Whether an HTML block that is not a comment is open; it ends at a blank line. */
-	let html = false;
-	/** Whether the line before holds text, which a paragraph continues, so no code block starts below it. */
-	let paragraph = false;
-	/** Whether a list item is open, so an indented line is its text and not a code block. */
-	let list = false;
 	for (let index = 0; index < lines.length; index++) {
 		const line = lines[index] ?? "";
-		const blank = line.trim() === "";
-		if (fence) {
-			const [, bar = "", rest = ""] = CODE_FENCE.exec(line) ?? [];
-			if (bar.startsWith(fence.char) && bar.length >= fence.length && rest.trim() === "") fence = undefined;
-			continue;
-		}
-		if (comment) {
-			// The line that holds `-->` ends the comment, and all of it is still the comment's.
-			comment = !line.includes("-->");
-			continue;
-		}
-		if (html && !blank) {
-			// GitHub reads no definition inside an HTML block, but only a comment provably hides one.
-			if (FOOTNOTE_CANDIDATE.test(line)) return index;
-			continue;
-		}
-		html = false;
-		if (blank) {
-			paragraph = false;
-			continue;
-		}
-		const [, bar, rest] = CODE_FENCE.exec(line) ?? [];
-		if (bar !== undefined && !(bar.startsWith("`") && rest?.includes("`"))) {
-			fence = { char: bar.slice(0, 1), length: bar.length };
-			paragraph = false;
-			continue;
-		}
-		if (HTML_BLOCK_START.test(line)) {
-			const at = line.indexOf("<");
-			if (line.startsWith("<!--", at)) comment = !line.slice(at + 4).includes("-->");
-			else html = true;
-			paragraph = false;
-			continue;
-		}
-		const indented = INDENTED_LINE.test(line);
-		const code = indented && !paragraph && !list;
-		if (!code && FOOTNOTE_CANDIDATE.test(line)) return index;
-		// A list item's marker opens the item even where it interrupts a paragraph; only a line that
-		// starts its own block, below a blank line, closes the list and lets a code block start again.
-		if (!indented) {
-			if (LIST_MARKER.test(line)) list = true;
-			else if (!paragraph) list = false;
-		}
-		paragraph = !code;
+		const prefix = FOOTNOTE_PREFIX.exec(line)?.[0].length ?? 0;
+		if (FOOTNOTE_DEFINITION.test(line.slice(prefix))) return index;
 	}
 	return -1;
+}
+
+/** The refusal for a line that starts a footnote definition. */
+function footnoteMismatch(lines: readonly string[], index: number): HeadingMismatch {
+	return {
+		lineNumber: index + 1,
+		line: lines[index] ?? "",
+		description:
+			"the line starts a footnote definition, whose text GitHub renders as Markdown at the end of the page, " +
+			"so a changelog starts no line with `[^label]:`, in a code block or anywhere else; " +
+			"show such text inline instead, in a code span in the middle of a sentence",
+		shown: "a footnote definition",
+		read: "text",
+	};
 }
 
 /** A line marker between two private-use characters, which have no Markdown meaning. */
@@ -331,24 +288,38 @@ function describeHeading(heading: ShownHeading | undefined): string {
 }
 
 /**
- * Where the headings Markdown shows (a CommonMark renderer, Bun's) and the
- * headings the changelog tools read first differ, or undefined when they
- * agree: each heading Markdown shows comes from a line the tools read as a
- * heading, at its level, and each such line shows as one, in order. A line the
- * tools read must be a heading where it stands, and not code, HTML or text a
- * list or a quote holds; every other heading Markdown shows, in any spelling
- * (indented, a tab or two spaces after the `#`s, underlined, in a list or a
- * quote, an HTML `<h2>`), is one the tools would not read, so a release written
- * that way would escape them, even with the same text as one they read. A
- * line that may define a footnote is refused too, by the line scan above and
- * not by the renderer: GitHub renders a definition's text as Markdown. The
+ * Where a changelog breaks the heading rule, or undefined where it keeps it.
+ * Two rules decide it, and the earlier line wins. A line that starts a
+ * footnote definition is refused outright, by the line scan above: GitHub
+ * renders a definition's text as Markdown at the end of the page and no
+ * renderer here has footnotes, so no block state may excuse such a line.
+ * Every other heading is decided by what Markdown shows (a CommonMark
+ * renderer, Bun's) against what the tools read: each heading Markdown shows
+ * comes from a line the tools read as a heading, at its level, and each such
+ * line shows as one, in order. A line the tools read must be a heading where
+ * it stands, and not code, HTML or text a list or a quote holds; every other
+ * heading Markdown shows, in any spelling (indented, a tab or two spaces
+ * after the `#`s, underlined, in a list or a quote, an HTML `<h2>`), is one
+ * the tools would not read, so a release written that way would escape them,
+ * even with the same text as one they read. GitHub's own block parser differs
+ * from CommonMark only where it reads a footnote definition, and the footnote
+ * rule refuses every such line first, so the renderer decides the rest. The
  * title must be `# Changelog`, once, above the first release: `bun run release`
  * writes the next `## [Unreleased]` below it.
  */
 export function findHeadingMismatch(content: string): HeadingMismatch | undefined {
 	const lines = splitContentLines(content);
-	const read = readHeadingLines(lines);
 	const footnote = footnoteDefinitionLine(lines);
+	const heading = headingMismatch(lines);
+	if (footnote >= 0 && (heading === undefined || footnote + 1 <= heading.lineNumber)) {
+		return footnoteMismatch(lines, footnote);
+	}
+	return heading;
+}
+
+/** Where the headings Markdown shows and the headings the tools read first differ, or the missing title. */
+function headingMismatch(lines: readonly string[]): HeadingMismatch | undefined {
+	const read = readHeadingLines(lines);
 	// Each line the tools read ends with a marker no changelog can forge, so a
 	// heading Markdown shows is matched to its own line, not to another line with
 	// the same text. A marker at the end of an ATX heading line changes no block.
@@ -368,10 +339,8 @@ export function findHeadingMismatch(content: string): HeadingMismatch | undefine
 			shown.headings[first]?.text.includes(marker(read[first]?.index ?? -1))
 		)
 			first++;
-		const headingsAgree = first === expected && first === shown.headings.length && shown.elements === first;
 		return {
-			agree: headingsAgree && !(footnote >= 0 && footnote < count),
-			headingsAgree,
+			agree: first === expected && first === shown.headings.length && shown.elements === first,
 			shown: shown.headings[first],
 			read: first < expected ? read[first] : undefined,
 		};
@@ -388,22 +357,13 @@ export function findHeadingMismatch(content: string): HeadingMismatch | undefine
 	}
 	const parted = compare(high);
 	if (untitled && untitled.lineNumber <= high) return untitled;
-	const line = lines[high - 1] ?? "";
-	if (parted.headingsAgree) {
-		return {
-			lineNumber: high,
-			line,
-			shown: "a footnote definition, whose text GitHub renders as Markdown at the end of the page,",
-			read: "text",
-		};
-	}
 	const shown = parted.shown && { level: parted.shown.level, text: parted.shown.text.replace(LINE_MARKER, "").trim() };
 	// What Markdown makes of the line the tools read on its own: the heading they read there.
 	const readLine = parted.read ? (lines[parted.read.index] ?? "") : "";
 	const alone = parted.read ? shownHeadings(readLine).headings : [];
 	return {
 		lineNumber: high,
-		line,
+		line: lines[high - 1] ?? "",
 		shown: shown || parted.read ? describeHeading(shown) : "an HTML heading element",
 		read: describeHeading(parted.read && (alone.length === 1 ? alone[0] : { level: 0, text: readLine })),
 	};
