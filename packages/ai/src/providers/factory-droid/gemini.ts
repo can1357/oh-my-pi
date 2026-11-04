@@ -496,7 +496,7 @@ export function streamFactoryDroidGemini(
 			let finishReason: string | undefined;
 			let blockReason: string | undefined;
 			const toolCallIndices: number[] = [];
-			// Native replay keeps every streamed part in order, merged like the CLI.
+			// Native replay keeps every streamed part as received, one part per chunk part, in arrival order.
 			let nativeContent: GeminiNativeContentPayload["content"] | undefined;
 
 			clearTimeout(firstEventTimer);
@@ -532,7 +532,7 @@ export function streamFactoryDroidGemini(
 				const candidateContent = chunk.candidates?.[0]?.content;
 				if (nativeReplay && candidateContent) {
 					const { parts: chunkParts, ...fields } = structuredClone(candidateContent);
-					nativeContent ??= { parts: [] };
+					nativeContent ??= { role: "model", parts: [] };
 					Object.assign(nativeContent, fields);
 					nativeContent.parts.push(...((chunkParts ?? []) as unknown as Record<string, unknown>[]));
 				}

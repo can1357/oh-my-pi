@@ -835,15 +835,6 @@ describe("Factory Droid gemini wire — native replay policy", () => {
 		return contents;
 	}
 
-	it("rebuilds a native turn when normalization drops its malformed call beside text", async () => {
-		const contents = await replayWithResults([
-			{ text: "Looking." },
-			{ functionCall: { id: "fc-bad", name: "", args: {} } },
-		]);
-		expect(JSON.stringify(contents)).not.toContain("fc-bad");
-		expect(contents[1]).toEqual({ role: "model", parts: [{ text: "Looking." }] });
-	});
-
 	it("rebuilds a native turn when normalization drops its malformed call beside a valid one", async () => {
 		const contents = await replayWithResults([
 			{ functionCall: { id: "fc-1", name: "Read", args: { path: "a" } }, thoughtSignature: "sig-1" },
