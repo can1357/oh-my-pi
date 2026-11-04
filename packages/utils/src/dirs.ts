@@ -768,9 +768,23 @@ export function setWorktreesDir(dir: string | undefined): string | undefined {
  * `worktree.base` setting), then the `~/.omp/wt` default. The env var and the
  * override are both `~`-expanded and must be absolute; a relative value is
  * ignored and resolution falls through.
+ *
+ * A `bun test` process defaults to `<tmpdir>/omp-test-worktrees-<uid>`
+ * instead, as {@link getLogsDir} does for logs: a test that materialised a
+ * sandbox without naming a root wrote it into the developer's real `~/.omp/wt`
+ * and left it there (56 dead `retry-path-unavailable` trees on one host), and
+ * the start-up sweep and `omp worktree clear` then treat it as real work.
  */
 export function getWorktreesDir(): string {
-	return resolveAbsoluteDir(process.env.OMP_WORKTREE_DIR) ?? worktreesDirOverride ?? dirs.rootSubdir("wt", "data");
+	return resolveAbsoluteDir(process.env.OMP_WORKTREE_DIR) ?? worktreesDirOverride ?? defaultWorktreesDir();
+}
+
+function defaultWorktreesDir(): string {
+	if (isBunTestRuntime()) {
+		const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
+		return path.join(os.tmpdir(), `omp-test-worktrees-${uid}`);
+	}
+	return dirs.rootSubdir("wt", "data");
 }
 
 /** Get the SSH control socket directory (~/.omp/ssh-control). */

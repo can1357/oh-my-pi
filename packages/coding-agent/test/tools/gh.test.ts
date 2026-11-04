@@ -25,7 +25,14 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withRepoLock } from "@oh-my-pi/pi-coding-agent/utils/repo-lock";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getAgentDir, hashPath, normalizePathForComparison, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDir,
+	hashPath,
+	normalizePathForComparison,
+	removeWithRetries,
+	setAgentDir,
+	setWorktreesDir,
+} from "@oh-my-pi/pi-utils";
 
 const TINY_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
@@ -189,9 +196,11 @@ async function createPrFixture(): Promise<PrFixture> {
 }
 
 /**
- * Stub `os.homedir()` AND rebuild the cached `dirs` resolver in pi-utils so
- * `getWorktreesDir()` resolves under an isolated temp home instead of the
- * user's real `~/.omp/wt`. Returns the temp home and a cleanup hook.
+ * Stub `os.homedir()` AND rebuild the cached `dirs` resolver in pi-utils, and
+ * point the worktree root at the temp home's `.omp/wt`, so PR checkouts land
+ * where a real `~/.omp/wt` would be without touching the user's. (A test
+ * process with no root configured defaults to a temp directory instead.)
+ * Returns the temp home and a cleanup hook.
  */
 interface TempHome {
 	home: string;
@@ -214,9 +223,11 @@ async function setupTempHome(): Promise<{ home: string; cleanup: () => Promise<v
 	// `setAgentDir` recreates it; we point it at the temp home's default agent dir.
 	const originalAgentDir = getAgentDir();
 	setAgentDir(path.join(home, ".omp", "agent"));
+	setWorktreesDir(path.join(home, ".omp", "wt"));
 	return {
 		home,
 		cleanup: async () => {
+			setWorktreesDir(undefined);
 			setAgentDir(originalAgentDir);
 			for (const key of xdgKeys) {
 				const previous = xdgPrevious[key];

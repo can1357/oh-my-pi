@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Fixed test runs leaving isolation trees in the real `~/.omp/wt`: a `bun test` process with no worktree root configured uses a temp directory ([#PENDING](https://github.com/can1357/oh-my-pi/pull/PENDING) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the isolation fallback reason naming an unrelated backend ("zfs CLI is unavailable") instead of why the preferred backend failed to start ("fuse-overlayfs not found on PATH") ([#PENDING](https://github.com/can1357/oh-my-pi/pull/PENDING) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Windows bash output on non-UTF-8 code pages (Korean, Chinese, Japanese, …) turning into mojibake for the rest of a command after a builtin wrote one invalid byte (`printf '\xeb'`, `cut -c` through a CJK character); the stray byte now becomes `�` on its own line, and native programs' ANSI output still decodes, including through `| head` or from `cat` of a legacy file ([#17947](https://github.com/can1357/oh-my-pi/pull/17947) by [@H4vC](https://github.com/H4vC))
 - Fixed Hindsight silently dropping the last mental model (often `User Preferences`) from the prompt once models outgrew their share of the render budget ([#17548](https://github.com/can1357/oh-my-pi/issues/17548), [#17955](https://github.com/can1357/oh-my-pi/pull/17955) by [@harshaygadekar](https://github.com/harshaygadekar))

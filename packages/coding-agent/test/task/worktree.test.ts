@@ -14,6 +14,7 @@ import {
 	ensureIsolation,
 	getRepoRoot,
 	ISOLATION_BASELINE_MAX_CONTENT_BYTES,
+	type IsolationHandle,
 	IsolationBaselineTooLargeError,
 	mergeTaskBranches,
 	parseIsolationBackend,
@@ -31,6 +32,7 @@ import {
 	writeIsolationOwner,
 } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import { removeWithRetries, setWorktreesDir, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
+import { useTempWorktreesDir } from "../helpers/temp-worktrees";
 
 const tempDirs: string[] = [];
 
@@ -734,6 +736,9 @@ describe("worktree isolation helpers", () => {
 		const BASE_BRANCH = "main";
 		const TASK_BRANCH = "task/merge-staged";
 		let repo: string;
+		// Every sandbox these tests materialise goes under a root of their own,
+		// removed after each test.
+		const worktrees = useTempWorktreesDir();
 		let initialSha: string;
 
 		beforeAll(async () => {
@@ -784,6 +789,7 @@ describe("worktree isolation helpers", () => {
 
 			const handle = await ensureIsolation(repo, "retry-path-unavailable");
 
+			expect(path.relative(await fs.realpath(worktrees.dir), handle.mergedDir).startsWith("..")).toBe(false);
 			expect(isoResolve).toHaveBeenCalledWith(null);
 			expect(isoStart.mock.calls.map(call => call[0])).toEqual([
 				natives.IsoBackendKind.Btrfs,
@@ -1095,6 +1101,36 @@ describe("worktree isolation helpers", () => {
 				}
 			});
 		});
+	});
+});
+
+describe("the isolation root of a test process", () => {
+	// A test that materialised a sandbox without naming a root wrote it into
+	// the developer's real `~/.omp/wt` and never removed it: one host had 56
+	// dead `retry-path-unavailable` trees there, which `omp worktree clear` and
+	// the start-up sweep then treat as real work.
+	it("is under the temp directory when nothing configures one, not the real ~/.omp/wt", async () => {
+		const repo = await createGitRepo();
+		await fs.writeFile(path.join(repo, "file.txt"), "base\n");
+		await runGit(repo, ["add", "file.txt"]);
+		await runGit(repo, ["-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "-m", "base"]);
+		const savedEnv = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(undefined);
+		let handle: IsolationHandle | undefined;
+		try {
+			handle = await ensureIsolation(repo, "default-root", natives.IsoBackendKind.Rcopy);
+			const temp = await fs.realpath(os.tmpdir());
+			expect(path.relative(temp, handle.mergedDir).startsWith("..")).toBe(false);
+		} finally {
+			if (handle) {
+				const base = path.dirname(handle.mergedDir);
+				await cleanupIsolation(handle);
+				await fs.rm(`${base}.lock`, { force: true });
+			}
+			if (savedEnv === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = savedEnv;
+		}
 	});
 });
 
