@@ -1182,6 +1182,18 @@ export class RelayBridge {
 		}
 	}
 
+	/** Resolve a session's ownership through every real child to its live pseudo-session. */
+	#sessionOwner(conn: CdpConnection, sessionId: string | undefined, tab: TabState): SessionRef | undefined {
+		if (this.#conns.get(conn.id) !== conn) return undefined;
+		while (sessionId !== undefined) {
+			const ref = conn.sessions.get(sessionId);
+			if (ref) return ref.tabKey === tab.tabKey ? ref : undefined;
+			if (!tab.realSessions.has(sessionId)) return undefined;
+			sessionId = conn.childParents.get(sessionId);
+		}
+		return undefined;
+	}
+
 	/**
 	 * Forward a command to the tab and reply to it; resolves whether the command succeeded.
 	 * `beforeReply` runs on success ahead of the reply. Target lifecycle commands are answered by the
@@ -1233,6 +1245,8 @@ export class RelayBridge {
 		}
 		const socket = inst.socket;
 		const generation = tab.runtimeGeneration;
+		const owner = this.#sessionOwner(conn, msg.sessionId, tab);
+		const child = realSessionId === undefined ? undefined : tab.realSessions.get(realSessionId);
 		// Every forwarded command joins the same lookup, even after it settles, so a key release cannot overtake its press.
 		const browserPid = inst.browserLookup ? await inst.browserLookup : null;
 		if (inst.socket !== socket || this.#tabs.get(tabKey) !== tab) {
@@ -1241,6 +1255,14 @@ export class RelayBridge {
 		}
 		if (tab.runtimeGeneration !== generation) {
 			this.#replyError(conn, msg, "relay debugger attachment changed before input");
+			return false;
+		}
+		if (
+			!owner ||
+			this.#sessionOwner(conn, msg.sessionId, tab) !== owner ||
+			(realSessionId !== undefined && tab.realSessions.get(realSessionId) !== child)
+		) {
+			this.#replyError(conn, msg, "relay session closed before input");
 			return false;
 		}
 		if (this.#readFrontApp && canOpenWindow(msg.method, msg.params)) {
