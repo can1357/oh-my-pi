@@ -610,14 +610,10 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 
 	const skills = Array.from(skillMap.values()).filter(skill => matchesIncludePatterns(skill.name));
 	if (manualSkills.length > 0) {
+		const manualGlobs = manualSkills.map(pattern => new Bun.Glob(pattern));
 		for (const skill of skills) {
 			const rawName = admitted.get(skill.name)?.rawName ?? skill.name;
-			if (
-				manualSkills.some(pattern => {
-					const glob = new Bun.Glob(pattern);
-					return glob.match(rawName) || glob.match(skill.name);
-				})
-			) {
+			if (manualGlobs.some(glob => glob.match(rawName) || glob.match(skill.name))) {
 				skill.hide = true;
 			}
 		}
