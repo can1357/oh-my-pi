@@ -2219,10 +2219,23 @@ export class ModelRegistry {
 							...(await this.#discoverProviderModelsCoalesced(provider, strategy)),
 						})),
 					);
-		const [configuredDiscoveryResults, builtInDiscovery] = await Promise.all([
+		const [configuredDiscoveryResults, builtInDiscoveries] = await Promise.all([
 			configuredDiscoveriesPromise,
 			this.#discoverBuiltInProviderModels(strategy, providerFilter),
 		]);
+		// Publication point: drop every result whose configuration moved while it ran.
+		const builtInDiscovery: BuiltInDiscoveryResult = {
+			models: [],
+			authoritativeProviders: new Set(),
+			replaceRuntimeProviders: new Set(),
+		};
+		for (const { discovery, isCurrent } of builtInDiscoveries) {
+			if (!isCurrent()) continue;
+			builtInDiscovery.models.push(...discovery.models);
+			for (const provider of discovery.authoritativeProviders) builtInDiscovery.authoritativeProviders.add(provider);
+			for (const provider of discovery.replaceRuntimeProviders)
+				builtInDiscovery.replaceRuntimeProviders.add(provider);
+		}
 		this.#captureCatalogMetrics(builtInDiscovery.models, providerFilter === undefined);
 		const currentDiscoverableProviders = new Set(this.#discoverableProviders);
 		const currentConfiguredDiscoveryResults = configuredDiscoveryResults.filter(result =>
@@ -2354,10 +2367,23 @@ export class ModelRegistry {
 		return providerConfig.discovery.advertisedReasoning === false ? "advertised-off-context-v6" : "context-v6";
 	}
 
+	/**
+	 * Every non-Ollama namespace is scoped to the provider's `baseUrl` as the
+	 * built-in ones are (`scopeModelCacheProviderIdToEndpoint`): a roster
+	 * discovered from one endpoint never answers for another. Ollama's
+	 * namespace already hashes its normalized endpoint.
+	 */
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
 		if (providerConfig.discovery.type === "ollama") {
 			return resolveOllamaModelCacheProviderId(providerConfig.provider, providerConfig.baseUrl);
 		}
+		return scopeModelCacheProviderIdToEndpoint(
+			this.#configuredDiscoveryNamespace(providerConfig),
+			providerConfig.baseUrl,
+		);
+	}
+
+	#configuredDiscoveryNamespace(providerConfig: DiscoveryProviderConfig): string {
 		if (providerConfig.discovery.type === "openai-models-list") {
 			// context-v3 invalidates rows cached before server-advertised input
 			// modalities were parsed from `/v1/models`; warm v2 rows pinned
@@ -2562,23 +2588,30 @@ export class ModelRegistry {
 		}
 	}
 
+	/**
+	 * One result per built-in or runtime manager, each with the check that its
+	 * configuration is still current. The caller filters at publication time,
+	 * after every await, so a result started under another configuration is
+	 * never published.
+	 */
 	async #discoverBuiltInProviderModels(
 		strategy: ModelRefreshStrategy,
 		providerFilter?: ReadonlySet<string>,
-	): Promise<BuiltInDiscoveryResult> {
+	): Promise<Array<{ discovery: BuiltInDiscoveryResult; isCurrent: () => boolean }>> {
 		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(p => p.provider));
-		const managerOptions = await this.#collectBuiltInModelManagerOptions(
+		const managers = await this.#collectBuiltInModelManagerOptions(
 			strategy,
 			providerFilter,
 			configuredDiscoveryProviders,
 		);
-		if (managerOptions.length === 0) {
-			return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
-		}
+		if (managers.length === 0) return [];
 		const writesBefore = getModelCacheWriteStats();
 		const discoveries = await Promise.all(
-			managerOptions.map(options => this.#discoverWithModelManager(options, strategy)),
+			managers.map(async ({ options, isCurrent }) => ({
+				discovery: await this.#discoverWithModelManager(options, strategy, isCurrent),
+				isCurrent,
+			})),
 		);
 		const writesAfter = getModelCacheWriteStats();
 		const rewrittenRows = writesAfter.payloadWrites - writesBefore.payloadWrites;
@@ -2593,19 +2626,7 @@ export class ModelRegistry {
 				strategy,
 			});
 		}
-		const authoritativeProviders = new Set<string>();
-		const replaceRuntimeProviders = new Set<string>();
-		const models: Model<Api>[] = [];
-		for (const discovery of discoveries) {
-			models.push(...discovery.models);
-			for (const provider of discovery.authoritativeProviders) {
-				authoritativeProviders.add(provider);
-			}
-			for (const provider of discovery.replaceRuntimeProviders) {
-				replaceRuntimeProviders.add(provider);
-			}
-		}
-		return { models, authoritativeProviders, replaceRuntimeProviders };
+		return discoveries;
 	}
 
 	/**
@@ -2686,7 +2707,7 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 		providerFilter: ReadonlySet<string> | undefined,
 		configuredDiscoveryProviders: ReadonlySet<string>,
-	): Promise<ModelManagerOptions<Api>[]> {
+	): Promise<Array<{ options: ModelManagerOptions<Api>; isCurrent: () => boolean }>> {
 		const specialProviderDescriptors: Array<{
 			providerId: string;
 			resolveKey: (value: string | undefined) => string | undefined;
@@ -2788,7 +2809,11 @@ export class ModelRegistry {
 				this.#resolveBuiltInDiscoveryApiKey(
 					descriptor.providerId,
 					strategy,
-					descriptor.providerId,
+					// Antigravity and Gemini CLI write their bare provider id, scoped below.
+					scopeModelCacheProviderIdToEndpoint(
+						descriptor.providerId,
+						this.#configuredBaseUrl(descriptor.providerId),
+					),
 					AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS.has(descriptor.providerId),
 				),
 			),
@@ -2867,33 +2892,46 @@ export class ModelRegistry {
 		// Every built-in manager reads and writes a namespace scoped to the
 		// configured endpoint, as `#resolveStartupModelCacheProviderId` reads, so
 		// a roster discovered through one endpoint is never served for another
-		// (`scopeModelCacheProviderIdToEndpoint`).
-		for (let i = 0; i < options.length; i++) {
-			const { providerId, cacheProviderId } = options[i];
-			options[i] = {
-				...options[i],
-				cacheProviderId: scopeModelCacheProviderIdToEndpoint(
-					cacheProviderId ?? providerId,
-					this.#configuredBaseUrl(providerId),
-				),
-			};
-		}
+		// (`scopeModelCacheProviderIdToEndpoint`). Its result is published only
+		// while that endpoint is still the configured one: a discovery started
+		// before the configuration moved must not restore the old roster.
+		const managers: Array<{ options: ModelManagerOptions<Api>; isCurrent: () => boolean }> = options.map(
+			managerOptions => {
+				const { providerId } = managerOptions;
+				const configuredBaseUrl = this.#configuredBaseUrl(providerId);
+				return {
+					options: {
+						...managerOptions,
+						cacheProviderId: scopeModelCacheProviderIdToEndpoint(
+							managerOptions.cacheProviderId ?? providerId,
+							configuredBaseUrl,
+						),
+					},
+					isCurrent: () => this.#configuredBaseUrl(providerId) === configuredBaseUrl,
+				};
+			},
+		);
 
-		// Append runtime model managers registered by extensions via fetchDynamicModels.
+		// Append runtime model managers registered by extensions via fetchDynamicModels;
+		// a result counts only while its registration is still the live one.
 		for (const { options: managerOpts } of this.#runtimeModelManagers.values()) {
 			if (
 				!configuredDiscoveryProviders.has(managerOpts.providerId) &&
 				(!providerFilter || providerFilter.has(managerOpts.providerId))
 			) {
-				options.push(managerOpts);
+				managers.push({
+					options: managerOpts,
+					isCurrent: () => this.#runtimeModelManagers.get(managerOpts.providerId)?.options === managerOpts,
+				});
 			}
 		}
-		return options;
+		return managers;
 	}
 
 	async #discoverWithModelManager(
 		options: ModelManagerOptions<Api>,
 		strategy: ModelRefreshStrategy,
+		isCurrent: () => boolean,
 	): Promise<BuiltInDiscoveryResult> {
 		let failure: string | undefined;
 		try {
@@ -2901,6 +2939,9 @@ export class ModelRegistry {
 			const result = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
 				manager.refresh(strategy),
 			);
+			if (!isCurrent()) {
+				return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
+			}
 			const models = result.models.map(model =>
 				model.provider === options.providerId ? model : { ...model, provider: options.providerId },
 			);
@@ -4095,6 +4136,10 @@ export class ModelRegistry {
 			const providerCompat = config.compat;
 			const managerOptions: ModelManagerOptions<Api> = {
 				providerId: providerName as Parameters<typeof createModelManager>[0]["providerId"],
+				// Never a built-in manager's namespace: the startup cache read of a
+				// built-in provider id would serve this extension's rows, and the
+				// endpoint baked into them, after the extension is gone.
+				cacheProviderId: scopeModelCacheProviderIdToEndpoint(`${providerName}:extension-v1`, config.baseUrl),
 				staticModels: [],
 				cacheDbPath: this.#cacheDbPath,
 				cacheTtlMs: 24 * 60 * 60 * 1000,

@@ -11,7 +11,11 @@ import type { Api, Model } from "./types";
 
 // Rows persist fully materialized Models so compatible warm-cache reads do not
 // rerun the compat cascade. Request headers are intentionally omitted:
-// arbitrary provider-defined header names can carry credentials. v15
+// arbitrary provider-defined header names can carry credentials. v16
+// invalidates rows written before namespaces were scoped to the configured
+// endpoint: a bare namespace may hold another endpoint's roster, whose rows
+// would send requests (with the stored login) to a host no configuration
+// names any more. v15
 // invalidates unbundled OpenAI-compatible rows that ignored provider-reported
 // token limits. v14 invalidates Antigravity rows predating per-SKU
 // `antigravityWireProfiles` (model_enum label, output cap, SKU thinking). v13 replaces
@@ -29,7 +33,7 @@ import type { Api, Model } from "./types";
 // retired unknown-limit sentinels (222222/8888); v5 invalidated rows predating
 // effort-tier variant collapsing (raw `-low`/`-high`/`-thinking` member ids);
 // v4 dropped the pre-efforts ThinkingConfig shape.
-const CACHE_SCHEMA_VERSION = 15;
+const CACHE_SCHEMA_VERSION = 16;
 /** Oldest schema whose rows are guaranteed never to carry request headers. */
 const FIRST_HEADERLESS_SCHEMA_VERSION = 11;
 const HEADER_RESTORE_VERSION = 1;

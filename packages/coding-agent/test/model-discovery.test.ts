@@ -18,6 +18,7 @@ import {
 	cursorModelManagerOptions,
 	resolveModelCacheProviderId,
 	resolveOllamaModelCacheProviderId,
+	scopeModelCacheProviderIdToEndpoint,
 } from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { CODEX_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/wire/codex";
@@ -25,6 +26,7 @@ import {
 	discoverLiteLLMModels,
 	discoverOpenAIModelsList,
 	discoveryProbeTimeoutMs,
+	LLAMA_CPP_DEFAULT_BASE_URLS,
 } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
 import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resolveCliModel } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -32,6 +34,9 @@ import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+
+/** The implicit llama.cpp provider's cache namespace: its first default root. */
+const LLAMA_CPP_CACHE_ID = scopeModelCacheProviderIdToEndpoint("llama.cpp", LLAMA_CPP_DEFAULT_BASE_URLS[0]);
 
 describe("ModelRegistry runtime discovery", () => {
 	let tempDir: string;
@@ -1827,7 +1832,7 @@ describe("ModelRegistry runtime discovery", () => {
 			},
 		});
 		writeModelCache(
-			"custom-llama",
+			scopeModelCacheProviderIdToEndpoint("custom-llama", "http://remote:8080"),
 			Date.now(),
 			[
 				buildModel({
@@ -2165,7 +2170,7 @@ describe("ModelRegistry runtime discovery", () => {
 		// the child hasn't been spawned yet (meta.n_ctx absent), but the
 		// configured window is still what the user wants surfaced.
 		writeModelCache(
-			"llama.cpp",
+			LLAMA_CPP_CACHE_ID,
 			Date.now(),
 			[
 				buildModel({
@@ -2261,7 +2266,7 @@ describe("ModelRegistry runtime discovery", () => {
 
 	test("llama.cpp selected model refresh patches newly loaded meta n_ctx and unlimited output limit", async () => {
 		writeModelCache(
-			"llama.cpp",
+			LLAMA_CPP_CACHE_ID,
 			Date.now(),
 			[
 				buildModel({
@@ -2317,7 +2322,7 @@ describe("ModelRegistry runtime discovery", () => {
 
 	test("llama.cpp selected model refresh marks cached text-only models image-capable from /props vision modality", async () => {
 		writeModelCache(
-			"llama.cpp",
+			LLAMA_CPP_CACHE_ID,
 			Date.now(),
 			[
 				buildModel({
@@ -2373,7 +2378,7 @@ describe("ModelRegistry runtime discovery", () => {
 
 	test("llama.cpp selected model refresh reads image capability from per-model architecture", async () => {
 		writeModelCache(
-			"llama.cpp",
+			LLAMA_CPP_CACHE_ID,
 			Date.now(),
 			[
 				buildModel({
@@ -2437,7 +2442,7 @@ describe("ModelRegistry runtime discovery", () => {
 
 	test("llama.cpp selected model refresh leaves the cached model untouched when /models no longer lists it", async () => {
 		writeModelCache(
-			"llama.cpp",
+			LLAMA_CPP_CACHE_ID,
 			Date.now(),
 			[
 				buildModel({
@@ -2502,7 +2507,7 @@ describe("ModelRegistry runtime discovery", () => {
 			},
 		});
 		writeModelCache(
-			"llama.cpp",
+			LLAMA_CPP_CACHE_ID,
 			Date.now(),
 			[
 				buildModel({
@@ -2633,7 +2638,7 @@ describe("ModelRegistry runtime discovery", () => {
 
 	test("llama.cpp refresh bypasses fresh cache so server restarts update n_ctx", async () => {
 		writeModelCache(
-			"llama.cpp",
+			LLAMA_CPP_CACHE_ID,
 			Date.now(),
 			[
 				buildModel({

@@ -93,4 +93,92 @@ describe("model cache follows the configured endpoint", () => {
 		if (!model) throw new Error("expected the gateway's cached model");
 		expect(new URL(await requestUrl(model)).origin).toBe(GATEWAY);
 	});
+
+	test("a models.yml discovery provider moved to another endpoint does not list the old endpoint's roster", async () => {
+		const config = (baseUrl: string) =>
+			`providers:\n  probe:\n    baseUrl: ${baseUrl}\n    api: openai-completions\n    apiKey: ${FAKE_KEY}\n    discovery:\n      type: openai-models-list\n`;
+		fs.writeFileSync(modelsPath, config("http://endpoint-a.invalid/v1"));
+		const before = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async input => {
+				if (String(input) === "http://endpoint-a.invalid/v1/models") {
+					return Response.json({ data: [{ id: "endpoint-a-only-model" }] });
+				}
+				throw new Error(`offline: ${String(input)}`);
+			},
+		});
+		await before.refreshProvider("probe", "online");
+		expect(before.find("probe", "endpoint-a-only-model")).toBeDefined();
+
+		fs.writeFileSync(modelsPath, config("http://endpoint-b.invalid/v1"));
+		const after = new ModelRegistry(authStorage, modelsPath, {
+			fetch: () => Promise.reject(new Error("offline")),
+		});
+		await after.refresh("offline");
+		expect(after.find("probe", "endpoint-a-only-model")).toBeUndefined();
+	});
+
+	test("a discovery still running when the baseUrl is removed does not restore the gateway roster", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const registry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async input => {
+				if (String(input) === `${GATEWAY}/v1/models`) {
+					started.resolve();
+					await release.promise;
+					return Response.json({ data: [{ id: "late-gateway-model", type: "model" }] });
+				}
+				throw new Error(`offline: ${String(input)}`);
+			},
+		});
+		try {
+			const inFlight = registry.refreshProvider("anthropic", "online");
+			await started.promise;
+			fs.writeFileSync(modelsPath, DIRECT_CONFIG);
+			await registry.refreshProvider("anthropic", "offline");
+			release.resolve();
+			await inFlight;
+		} finally {
+			release.resolve();
+		}
+		expect(registry.find("anthropic", "late-gateway-model")).toBeUndefined();
+		expect(registry.find("anthropic", "gateway-only-model")).toBeUndefined();
+		const model = registry.find("anthropic", "claude-opus-5-5");
+		if (!model) throw new Error("expected the bundled model");
+		expect(new URL(await requestUrl(model)).host).not.toBe(new URL(GATEWAY).host);
+	});
+
+	test("an extension's discovered roster for a built-in provider id is gone once the extension is", async () => {
+		fs.writeFileSync(modelsPath, DIRECT_CONFIG);
+		const extensionHost = "http://extension.invalid:4000";
+		const registry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: () => Promise.reject(new Error("offline")),
+		});
+		registry.registerProvider(
+			"anthropic",
+			{
+				baseUrl: extensionHost,
+				api: "anthropic-messages",
+				fetchDynamicModels: async () => [
+					{
+						id: "extension-only-model",
+						name: "Extension Only",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 200_000,
+						maxTokens: 8_192,
+					},
+				],
+			},
+			"test-extension",
+		);
+		await registry.refreshRuntimeProviders("online");
+		expect(registry.find("anthropic", "extension-only-model")).toBeDefined();
+		registry.unregisterProvider("anthropic");
+
+		const restarted = new ModelRegistry(authStorage, modelsPath, {
+			fetch: () => Promise.reject(new Error("offline")),
+		});
+		expect(restarted.find("anthropic", "extension-only-model")).toBeUndefined();
+	});
 });

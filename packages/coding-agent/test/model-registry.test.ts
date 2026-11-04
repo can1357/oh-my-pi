@@ -14,6 +14,7 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import * as catalogModels from "@oh-my-pi/pi-catalog/models";
 import { calculateUsageCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { scopeModelCacheProviderIdToEndpoint } from "@oh-my-pi/pi-catalog/provider-models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { finalizeCustomModel } from "@oh-my-pi/pi-coding-agent/config/custom-models";
 import { applyModelPatch, mergeDiscoveredModel } from "@oh-my-pi/pi-coding-agent/config/model-patch";
@@ -3530,7 +3531,10 @@ describe("ModelRegistry", () => {
 				{
 					seedCache: dbPath =>
 						writeModelCache(
-							"cached-compact-proxy:openai-models-list-context-v6",
+							scopeModelCacheProviderIdToEndpoint(
+								"cached-compact-proxy:openai-models-list-context-v6",
+								"https://compact-proxy.example.com/v1",
+							),
 							Date.now(),
 							[
 								buildModel({
@@ -3581,7 +3585,10 @@ describe("ModelRegistry", () => {
 				// decisions-mode routing was already corrected in that namespace.
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v6",
+						scopeModelCacheProviderIdToEndpoint(
+							"litellm-proxy:litellm-rich-v6",
+							"http://litellm-proxy.example:4000/v1",
+						),
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3 (3x usage)")],
 						true,
@@ -3592,7 +3599,10 @@ describe("ModelRegistry", () => {
 			litellmCurrentNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v7",
+						scopeModelCacheProviderIdToEndpoint(
+							"litellm-proxy:litellm-rich-v7",
+							"http://litellm-proxy.example:4000/v1",
+						),
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3")],
 						true,
@@ -3617,7 +3627,10 @@ describe("ModelRegistry", () => {
 					// bump must orphan it instead of serving the stale output limit.
 					seedCache: dbPath =>
 						writeModelCache(
-							"stale-openai-proxy:openai-models-list-context-v3",
+							scopeModelCacheProviderIdToEndpoint(
+								"stale-openai-proxy:openai-models-list-context-v3",
+								"https://stale-proxy.example.com/v1",
+							),
 							Date.now(),
 							[
 								buildModel({
