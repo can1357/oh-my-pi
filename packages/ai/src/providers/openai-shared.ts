@@ -1973,14 +1973,23 @@ function adaptResponsesReplayItemsForModel(
 	return changed ? adapted : input;
 }
 
-/** Wire name of a function tool on a host with a `toolNamePrefix`; unchanged when unset. */
-export function encodeResponsesToolName(name: string, prefix: string | undefined): string {
-	return prefix ? `${prefix}${name}` : name;
+/**
+ * Tool-name rule for a host with a `toolNamePrefix` catalog axis: the prefix,
+ * and the longest name the host accepts (`tool-call-name-max-length`).
+ */
+export interface ResponsesToolNaming {
+	prefix: string;
+	maxLength: number | undefined;
 }
 
-/** Caller tool name for a returned call: one leading `prefix` is removed; other names pass through. */
-export function decodeResponsesToolName(name: string, prefix: string | undefined): string {
-	return prefix && name.startsWith(prefix) ? name.slice(prefix.length) : name;
+/**
+ * Wire name of a function tool. It carries the prefix unless the prefixed name
+ * would exceed the host's limit. Without a naming rule the name is unchanged.
+ */
+export function encodeResponsesToolName(name: string, naming: ResponsesToolNaming | undefined): string {
+	if (!naming) return name;
+	const wire = `${naming.prefix}${name}`;
+	return naming.maxLength !== undefined && wire.length > naming.maxLength ? name : wire;
 }
 
 export interface BuildResponsesInputOptions<TApi extends Api> {
@@ -2013,8 +2022,8 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
 	requiresReasoningReplayForAllTurns?: boolean;
 	/** As {@link requiresReasoningReplayForAllTurns}, but only for turns that contain a tool call. */
 	requiresReasoningReplayForToolCalls?: boolean;
-	/** Prefix for rebuilt `function_call` names; see `ResolvedOpenAIResponsesCompat.toolNamePrefix`. */
-	toolNamePrefix?: string;
+	/** Naming rule for rebuilt `function_call` names; see {@link ResponsesToolNaming}. */
+	toolNaming?: ResponsesToolNaming;
 }
 
 /**
@@ -2329,7 +2338,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				computerCallIds,
 				options.requiresReasoningReplayForAllTurns ?? false,
 				options.requiresReasoningReplayForToolCalls ?? false,
-				options.toolNamePrefix,
+				options.toolNaming,
 			);
 			const outputItems = suppressHiddenEmptyFallback
 				? sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(convertedOutputItems)
@@ -2503,7 +2512,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	computerCallIds?: Set<string>,
 	requiresReasoningReplayForAllTurns = false,
 	requiresReasoningReplayForToolCalls = false,
-	toolNamePrefix?: string,
+	toolNaming?: ResponsesToolNaming,
 ): ResponseInput {
 	const outputItems: ResponseInput = [];
 	let unsignedTextBlocks = 0;
@@ -2648,7 +2657,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			type: "function_call",
 			...(itemId ? { id: itemId } : {}),
 			call_id: normalized.callId,
-			name: encodeResponsesToolName(functionName, toolNamePrefix),
+			name: encodeResponsesToolName(functionName, toolNaming),
 			arguments: stringifyJson(block.arguments) ?? "null",
 		});
 	}
@@ -3227,8 +3236,12 @@ export interface ProcessResponsesStreamOptions {
 	 * response omits the `service_tier` echo. Only applied for `provider: "openai"`.
 	 */
 	requestServiceTier?: ServiceTier;
-	/** Prefix removed from returned `function_call` names; see `ResolvedOpenAIResponsesCompat.toolNamePrefix`. */
-	toolNamePrefix?: string;
+	/**
+	 * Declared tool name per wire name (`toolNamesByWire` in `utils/tool-names`). A
+	 * returned `function_call` dispatches to the tool it was offered as; a name
+	 * the map lacks passes through unchanged.
+	 */
+	toolNamesByWire?: ReadonlyMap<string, string>;
 }
 
 export function computerCallMetadata(item: ResponseComputerToolCall): ComputerToolCallMetadata {
@@ -3535,7 +3548,7 @@ export async function processResponsesStream<TApi extends Api>(
 				const block: StreamingToolCallBlock = {
 					type: "toolCall",
 					id: encodeResponsesToolCallId(item.call_id, item.id),
-					name: decodeResponsesToolName(item.name, options?.toolNamePrefix),
+					name: options?.toolNamesByWire?.get(item.name) ?? item.name,
 					arguments: {},
 					[kStreamingPartialJson]: item.arguments || "",
 				};
@@ -3759,7 +3772,7 @@ export async function processResponsesStream<TApi extends Api>(
 				const toolCall: ToolCall = {
 					type: "toolCall",
 					id: encodeResponsesToolCallId(item.call_id, item.id),
-					name: decodeResponsesToolName(item.name, options?.toolNamePrefix),
+					name: options?.toolNamesByWire?.get(item.name) ?? item.name,
 					arguments: args,
 				};
 				let contentIndex: number;

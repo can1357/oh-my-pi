@@ -3,10 +3,12 @@ import { describe, expect, test } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import {
+	buildParams,
 	mapOpenAIResponsesToolChoiceForTools,
 	streamOpenAIResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import { decodeResponsesToolName, encodeResponsesToolName } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { encodeResponsesToolName } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { toolNamesByWire } from "@oh-my-pi/pi-ai/utils/tool-names";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry/registry";
 import type { AssistantMessage, Context, FetchImpl, Tool, ToolChoice } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -117,13 +119,18 @@ describe("Muse Code provider", () => {
 		}
 	});
 
-	test("declares and replays tools under a `_` prefix and returns calls under the caller's names", async () => {
-		// 2026-10-31: a subscription key answers 403 `client_attestation_denied`
+	test("declares and replays function tools under `_` and returns calls under their own names", async () => {
+		// 2026-11-03: a subscription key answers 403 `client_attestation_denied`
 		// when the declared tools include `bash`, `web_search` and other reserved
 		// exact names; the same tools prefixed with `_` are accepted.
+		// api.meta.ai also rejects tool names over 64 characters (#9130), and omp
+		// caps MCP names at exactly 64, so such a name must go out unprefixed.
+		const mcpName = "mcp__long_server_name_tool_name_tool_name_tool_name_too_139vuzq6";
+		expect(mcpName).toHaveLength(64);
 		const tools: Tool[] = [
 			{ name: "bash", description: "Run a command.", parameters: type({ command: "string" }) },
 			{ name: "web_search", description: "Search the web.", parameters: type({ query: "string" }) },
+			{ name: mcpName, description: "An MCP tool.", parameters: type({ query: "string" }) },
 		];
 		const runTurn = async (provider: "muse-code" | "meta") => {
 			const model = buildModel(seedModels<"openai-responses">(provider).find(spec => spec.id === "muse-spark-1.3")!);
@@ -152,19 +159,24 @@ describe("Muse Code provider", () => {
 					{ role: "user", content: "search for omp", timestamp: 4 },
 				],
 			};
-			const wireName = provider === "muse-code" ? "_web_search" : "web_search";
-			const call = { type: "function_call", id: "fc_1", call_id: "call_1", name: wireName, arguments: "" };
+			const searchName = provider === "muse-code" ? "_web_search" : "web_search";
+			const calls = [
+				{ type: "function_call", id: "fc_1", call_id: "call_1", name: searchName, arguments: "" },
+				{ type: "function_call", id: "fc_2", call_id: "call_2", name: mcpName, arguments: "" },
+			];
 			let body: { tools: Array<{ name: string }>; input: Array<{ type?: string; name?: string }> } | undefined;
 			const fetch: FetchImpl = async (_input, init) => {
 				body = JSON.parse(String(init?.body));
 				return sseResponse([
-					{ type: "response.output_item.added", output_index: 0, item: call },
-					{
-						type: "response.output_item.done",
-						output_index: 0,
-						item: { ...call, arguments: '{"query":"omp"}', status: "completed" },
-					},
-					{ type: "response.completed", response: { id: "resp_1", status: "completed" } },
+					...calls.flatMap((call, outputIndex) => [
+						{ type: "response.output_item.added", output_index: outputIndex, item: call },
+						{
+							type: "response.output_item.done",
+							output_index: outputIndex,
+							item: { ...call, arguments: '{"query":"omp"}', status: "completed" },
+						},
+					]),
+					{ type: "response.completed", response: { id: "resp_1", status: "completed", output: [] } },
 				]);
 			};
 			const result = await streamOpenAIResponses(model, context, { apiKey: "LLM|key", fetch }).result();
@@ -172,23 +184,103 @@ describe("Muse Code provider", () => {
 		};
 
 		const muse = await runTurn("muse-code");
-		expect(muse.body.tools.map(tool => tool.name)).toEqual(["_bash", "_web_search"]);
+		expect(muse.body.tools.map(tool => tool.name)).toEqual(["_bash", "_web_search", mcpName]);
 		expect(muse.body.input.filter(item => item.type === "function_call").map(item => item.name)).toEqual(["_bash"]);
 		expect(muse.result.content).toEqual([
 			expect.objectContaining({ type: "toolCall", name: "web_search", arguments: { query: "omp" } }),
+			expect.objectContaining({ type: "toolCall", name: mcpName, arguments: { query: "omp" } }),
 		]);
 
 		// Direct Meta API keys are not attested and keep the plain names.
 		const meta = await runTurn("meta");
-		expect(meta.body.tools.map(tool => tool.name)).toEqual(["bash", "web_search"]);
+		expect(meta.body.tools.map(tool => tool.name)).toEqual(["bash", "web_search", mcpName]);
 		expect(meta.body.input.filter(item => item.type === "function_call").map(item => item.name)).toEqual(["bash"]);
-		expect(meta.result.content).toEqual([expect.objectContaining({ type: "toolCall", name: "web_search" })]);
+		expect(meta.result.content).toEqual([
+			expect.objectContaining({ type: "toolCall", name: "web_search" }),
+			expect.objectContaining({ type: "toolCall", name: mcpName }),
+		]);
 	});
 
-	test("tool-name prefix round-trips names that already start with it", () => {
-		expect(encodeResponsesToolName("_private", "_")).toBe("__private");
-		expect(decodeResponsesToolName("__private", "_")).toBe("_private");
-		// A call the model returns without the prefix still reaches its tool.
-		expect(decodeResponsesToolName("bash", "_")).toBe("bash");
+	test("forces a named tool_choice under the same wire name it declares", () => {
+		const bash: Tool = { name: "bash", description: "Run a command.", parameters: type({ command: "string" }) };
+		const namedChoice = {
+			...seedModels<"openai-responses">("muse-code")[0]!,
+			compat: { supportsToolChoice: true, supportsNamedToolChoice: true },
+		};
+		expect(
+			mapOpenAIResponsesToolChoiceForTools({ type: "tool", name: "bash" }, [bash], buildModel(namedChoice)),
+		).toEqual({ type: "function", name: "_bash" });
+		// A host without the prefix keeps the plain name.
+		const meta = buildModel({
+			...seedModels<"openai-responses">("meta")[0]!,
+			compat: { supportsToolChoice: true, supportsNamedToolChoice: true },
+		});
+		expect(mapOpenAIResponsesToolChoiceForTools({ type: "tool", name: "bash" }, [bash], meta)).toEqual({
+			type: "function",
+			name: "bash",
+		});
+	});
+
+	test("keeps the forced tool when a string-only host must receive it as required", () => {
+		const bash: Tool = { name: "bash", description: "Run a command.", parameters: type({ command: "string" }) };
+		const read: Tool = { name: "read", description: "Read a file.", parameters: type({ path: "string" }) };
+		const model = buildModel({
+			...seedModels<"openai-responses">("muse-code")[0]!,
+			compat: { supportsToolChoice: true, supportsForcedToolChoice: true, supportsNamedToolChoice: false },
+		});
+		const { params } = buildParams(
+			model,
+			{ messages: [{ role: "user", content: "list files", timestamp: 1 }], tools: [bash, read] },
+			{ toolChoice: { type: "tool", name: "bash" } },
+			undefined,
+		);
+		// The named choice is encoded before the catalogue restriction, so the
+		// surviving tool still matches and `required` forces it.
+		expect(params.tools?.map(tool => (tool as { name?: string }).name)).toEqual(["_bash"]);
+		expect(params.tool_choice).toBe("required");
+	});
+
+	test("builds the wire-name table after schema quarantine", () => {
+		// A 63-character name prefixes to 64, which is exactly the wire name of a
+		// 64-character name starting with `_`. When the latter is quarantined for
+		// an invalid schema, the request must still declare the surviving tool
+		// instead of failing the turn on a collision that never reaches the wire.
+		const long63 = "a".repeat(63);
+		const bad: Tool = {
+			name: `_${long63}`,
+			description: "invalid nullable-enum schema",
+			parameters: {
+				type: "object",
+				properties: { choice: { enum: ["A", "B"], type: "null" } },
+				required: ["choice"],
+			},
+		};
+		const good: Tool = { name: long63, description: "valid", parameters: type({}) };
+		const model = buildModel(seedModels<"openai-responses">("muse-code")[0]!);
+		const { params } = buildParams(
+			model,
+			{ messages: [{ role: "user", content: "go", timestamp: 1 }], tools: [bad, good] },
+			undefined,
+			undefined,
+		);
+		expect(params.tools?.map(tool => (tool as { name?: string }).name)).toEqual([`_${long63}`]);
+	});
+
+	test("leaves names the prefix would push past the host limit unprefixed and rejects collisions", () => {
+		const tool = (name: string): Tool => ({ name, description: "", parameters: type({}) });
+		const naming = { prefix: "_", maxLength: 64 };
+		const longest = "a".repeat(64);
+		expect(encodeResponsesToolName(longest, naming)).toBe(longest);
+		expect(encodeResponsesToolName("a".repeat(63), naming)).toBe(`_${"a".repeat(63)}`);
+		// A name that already starts with the prefix gets a second one and maps back intact.
+		expect(toolNamesByWire([tool("_private")], name => encodeResponsesToolName(name, naming)).get("__private")).toBe(
+			"_private",
+		);
+		// `_abc` is too long to prefix under a 4-character limit, and `abc` prefixes to `_abc`.
+		expect(() =>
+			toolNamesByWire([tool("_abc"), tool("abc")], name =>
+				encodeResponsesToolName(name, { prefix: "_", maxLength: 4 }),
+			),
+		).toThrow('Tool names "_abc" and "abc" both encode as "_abc"');
 	});
 });
