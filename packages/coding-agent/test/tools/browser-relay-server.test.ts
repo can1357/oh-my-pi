@@ -98,6 +98,7 @@ async function waitForDiscovery(port: number): Promise<void> {
 }
 
 describe("browser relay discovery endpoint", () => {
+	const savedKeepFront = process.env.PI_BROWSER_RELAY_KEEP_FRONT;
 	let relay: RelayServer | undefined;
 	let extension: WebSocket | undefined;
 
@@ -106,6 +107,9 @@ describe("browser relay discovery endpoint", () => {
 		relay?.stop();
 		extension = undefined;
 		relay = undefined;
+		vi.restoreAllMocks();
+		if (savedKeepFront === undefined) delete process.env.PI_BROWSER_RELAY_KEEP_FRONT;
+		else process.env.PI_BROWSER_RELAY_KEEP_FRONT = savedKeepFront;
 	});
 
 	async function startReadyRelay(): Promise<number> {
@@ -117,7 +121,30 @@ describe("browser relay discovery endpoint", () => {
 	}
 
 	it("advertises the requested Host authority so a remote Puppeteer client dials the relay", async () => {
-		const port = await startReadyRelay();
+		process.env.PI_BROWSER_RELAY_KEEP_FRONT = "1";
+		const lookups = vi.spyOn(natives, "macOSLoopbackPeerApp").mockResolvedValue(null);
+		const serve = vi.spyOn(Bun, "serve");
+		relay = startRelayServer({ port: 0 });
+		const server = serve.mock.results[0]!.value as Bun.Server<unknown>;
+		const requestIP = server.requestIP.bind(server);
+		const acceptedPeers: Bun.SocketAddress[] = [];
+		vi.spyOn(server, "requestIP").mockImplementation(req => {
+			const peer = requestIP(req);
+			if (peer) acceptedPeers.push(peer);
+			return peer;
+		});
+		const port = server.port!;
+		extension = await connectExtension(port);
+		await waitForDiscovery(port);
+		expect(acceptedPeers).toHaveLength(1);
+		const peer = acceptedPeers[0]!;
+		expect(peer.address).toBe("127.0.0.1");
+		if (process.platform === "darwin") {
+			expect(lookups).toHaveBeenCalledTimes(1);
+			expect(lookups).toHaveBeenCalledWith("127.0.0.1", port, peer.address, peer.port);
+		} else {
+			expect(lookups).not.toHaveBeenCalled();
+		}
 		const response = await rawGet(
 			port,
 			"GET /json/version HTTP/1.1\r\nHost: 100.100.92.97:12803\r\nConnection: close\r\n\r\n",
