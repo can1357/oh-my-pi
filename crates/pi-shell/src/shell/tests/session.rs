@@ -1872,13 +1872,19 @@ async fn abort_state_signals_cancel_token() {
 	assert!(matches!(reason, AbortReason::Signal));
 }
 
+/// A reader's sink for `sender`, recording into a loss slot of its own.
+#[cfg(unix)]
+fn test_sink<T: Send>(sender: Option<flume::Sender<T>>) -> ChunkSink<T> {
+	ChunkSink::new(sender, "output", Arc::default())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn read_output_stops_when_cancelled_before_pipe_eof() {
 	let (reader, _writer) = pipe_to_files("test").expect("test pipe should be created");
 	let cancel = CancellationToken::new();
 	let (activity_tx, _activity_rx) = flume::bounded(1);
-	let handle = tokio::spawn(read_output(reader, None, cancel.clone(), activity_tx));
+	let handle = tokio::spawn(read_output(reader, test_sink(None), cancel.clone(), activity_tx));
 
 	time::sleep(Duration::from_millis(10)).await;
 	cancel.cancel();
@@ -1920,7 +1926,7 @@ async fn cancelled_readers_deliver_the_bytes_already_in_the_pipe() {
 	let (reader, _writer) = pipe_holding(expected.as_bytes());
 	let (tx, rx) = flume::unbounded::<String>();
 	let (activity_tx, _activity_rx) = flume::bounded(1);
-	time::timeout(bound, read_output(reader, Some(tx), cancelled(), activity_tx))
+	time::timeout(bound, read_output(reader, test_sink(Some(tx)), cancelled(), activity_tx))
 		.await
 		.expect("streaming reader should stop")
 		.expect("streaming reader should read its pipe");
@@ -1931,7 +1937,7 @@ async fn cancelled_readers_deliver_the_bytes_already_in_the_pipe() {
 	let (activity_tx, _activity_rx) = flume::bounded(1);
 	let buffered = time::timeout(
 		bound,
-		read_output_buffered(reader, Some(tx), cancelled(), activity_tx, usize::MAX),
+		read_output_buffered(reader, test_sink(Some(tx)), cancelled(), activity_tx, usize::MAX),
 	)
 	.await
 	.expect("buffered reader should stop")
@@ -1943,7 +1949,7 @@ async fn cancelled_readers_deliver_the_bytes_already_in_the_pipe() {
 	let (reader, _writer) = pipe_holding(expected.as_bytes());
 	let (tx, rx) = flume::unbounded::<Bytes>();
 	let (activity_tx, _activity_rx) = flume::bounded(1);
-	time::timeout(bound, read_output_bytes(reader, Some(tx), cancelled(), activity_tx))
+	time::timeout(bound, read_output_bytes(reader, test_sink(Some(tx)), cancelled(), activity_tx))
 		.await
 		.expect("byte reader should stop")
 		.expect("byte reader should read its pipe");
@@ -1964,7 +1970,7 @@ async fn cancelled_reader_stops_while_its_writer_keeps_writing() {
 	let cancel = CancellationToken::new();
 	let (tx, rx) = flume::unbounded::<String>();
 	let (activity_tx, _activity_rx) = flume::bounded(1);
-	let reader = tokio::spawn(read_output(reader, Some(tx), cancel.clone(), activity_tx));
+	let reader = tokio::spawn(read_output(reader, test_sink(Some(tx)), cancel.clone(), activity_tx));
 	rx.recv_async().await.expect("the flood reaches the reader");
 	cancel.cancel();
 	time::timeout(Duration::from_secs(10), reader)

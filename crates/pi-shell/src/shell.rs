@@ -148,14 +148,16 @@ pub struct ShellOptions {
 }
 
 struct ShellRunConfig {
-	command:    String,
-	cwd:        Option<String>,
-	env:        Option<HashMap<String, String>>,
-	minimizer:  Option<minimizer::MinimizerConfig>,
+	command:     String,
+	cwd:         Option<String>,
+	env:         Option<HashMap<String, String>>,
+	minimizer:   Option<minimizer::MinimizerConfig>,
 	/// Replaces the session filesystem for this run only.
-	filesystem: Option<Fs>,
+	filesystem:  Option<Fs>,
 	/// Mirrors the run's pipeline pipes.
-	pipe_taps:  Option<Arc<PipeTaps>>,
+	pipe_taps:   Option<Arc<PipeTaps>>,
+	/// The first output of this run its consumer did not take.
+	lost_output: Arc<LostOutput>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -253,12 +255,13 @@ impl Shell {
 		mut cancel_token: CancelToken,
 	) -> Result<ShellRunResult> {
 		let run_config = ShellRunConfig {
-			command:    options.command,
-			cwd:        options.cwd,
-			env:        options.env,
-			minimizer:  self.config.minimizer.clone(),
-			filesystem: options.filesystem,
-			pipe_taps:  options.pipe_taps,
+			command:     options.command,
+			cwd:         options.cwd,
+			env:         options.env,
+			minimizer:   self.config.minimizer.clone(),
+			filesystem:  options.filesystem,
+			pipe_taps:   options.pipe_taps,
+			lost_output: Arc::default(),
 		};
 		run_shell_session(
 			self.session.clone(),
@@ -332,6 +335,7 @@ pub async fn execute_shell(
 		minimizer,
 		filesystem: None,
 		pipe_taps: None,
+		lost_output: Arc::default(),
 	};
 	run_shell_oneshot(config, run_config, on_chunk, cancel_token).await
 }
@@ -365,12 +369,13 @@ pub async fn execute_shell_streams(
 		filesystem:    options.filesystem,
 	};
 	let run_config = ShellRunConfig {
-		command:    options.command,
-		cwd:        options.cwd,
-		env:        options.env,
-		minimizer:  None,
-		filesystem: None,
-		pipe_taps:  None,
+		command:     options.command,
+		cwd:         options.cwd,
+		env:         options.env,
+		minimizer:   None,
+		filesystem:  None,
+		pipe_taps:   None,
+		lost_output: Arc::default(),
 	};
 	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
 }
@@ -432,19 +437,20 @@ const fn cancelled_result(reason: AbortReason) -> ShellRunResult {
 }
 
 /// Waits up to [`CANCEL_RUN_GRACE`] for a cancelled run's task, then aborts
-/// it (dropping the run stops the command with `KILL`). Returns the task's
-/// [`OutputNotDelivered`] failure: output the consumer did not take is lost
-/// whatever ended the command, so the cancellation must not hide it.
-async fn settle_cancelled_run<T>(task: &mut tokio::task::JoinHandle<Result<T>>) -> Option<Error> {
-	match time::timeout(CANCEL_RUN_GRACE, &mut *task).await {
-		Ok(Ok(Err(err))) if err.is::<OutputNotDelivered>() => Some(err),
-		Ok(_) => None,
-		Err(_) => {
-			task.abort();
-			let _ = task.await;
-			None
-		},
+/// it (dropping the run stops the command with `KILL`). Returns the run's
+/// [`OutputNotDelivered`] failure, recorded the moment the output was lost:
+/// output the consumer did not take is lost whatever ended the command, so
+/// the cancellation must not hide it, even when it ends the run before its
+/// readers do.
+async fn settle_cancelled_run<T>(
+	task: &mut tokio::task::JoinHandle<Result<T>>,
+	lost_output: &LostOutput,
+) -> Option<Error> {
+	if time::timeout(CANCEL_RUN_GRACE, &mut *task).await.is_err() {
+		task.abort();
+		let _ = task.await;
 	}
+	lost_output.take().map(Error::from)
 }
 
 async fn run_shell_session(
@@ -457,6 +463,7 @@ async fn run_shell_session(
 	ct: &mut CancelToken,
 ) -> Result<ShellRunResult> {
 	let tokio_cancel = CancellationToken::new();
+	let lost_output = Arc::clone(&run_config.lost_output);
 	let mut run_task = tokio::spawn({
 		let session = session.clone();
 		let abort_state = abort_state.clone();
@@ -480,7 +487,7 @@ async fn run_shell_session(
 		res = &mut run_task => res,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			let undelivered = settle_cancelled_run(&mut run_task).await;
+			let undelivered = settle_cancelled_run(&mut run_task, &lost_output).await;
 			abort_state.clear().await;
 			// Use try_lock to avoid deadlocking if another task holds the session.
 			// If we can't acquire the lock, the session will be cleaned up when the
@@ -515,6 +522,7 @@ async fn run_shell_oneshot(
 	ct: CancelToken,
 ) -> Result<ShellExecuteResult> {
 	let tokio_cancel = CancellationToken::new();
+	let lost_output = Arc::clone(&run_config.lost_output);
 	let mut task = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
 		async move {
@@ -528,7 +536,7 @@ async fn run_shell_oneshot(
 		result = &mut task => result,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			let undelivered = settle_cancelled_run(&mut task).await;
+			let undelivered = settle_cancelled_run(&mut task, &lost_output).await;
 			return undelivered.map_or(Ok(cancelled_result(reason)), Err);
 		},
 	};
@@ -545,6 +553,7 @@ async fn run_shell_oneshot_streams(
 	ct: CancelToken,
 ) -> Result<ShellExecuteResult> {
 	let tokio_cancel = CancellationToken::new();
+	let lost_output = Arc::clone(&run_config.lost_output);
 	let mut task = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
 		async move {
@@ -557,7 +566,7 @@ async fn run_shell_oneshot_streams(
 		result = &mut task => result,
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
-			let undelivered = settle_cancelled_run(&mut task).await;
+			let undelivered = settle_cancelled_run(&mut task, &lost_output).await;
 			return undelivered.map_or(Ok(cancelled_result(reason)), Err);
 		},
 	};
@@ -1344,7 +1353,7 @@ async fn run_shell_command_once(
 		.then(|| Arc::new(AtomicBool::new(false)));
 	let reader_cancel = CancellationToken::new();
 	let (activity_tx, activity_rx) = flume::bounded::<()>(1);
-	let reader_callback = on_chunk;
+	let reader_callback = ChunkSink::new(on_chunk, "output", Arc::clone(&scope.options.lost_output));
 	let reader_handle = tokio::spawn({
 		let reader_cancel = reader_cancel.clone();
 		async move {
@@ -1534,13 +1543,13 @@ async fn run_shell_command_streams_in_filesystem(
 	let StreamSinks { stdout: stdout_sink, stderr: stderr_sink } = streams;
 	let stdout_handle = tokio::spawn(Box::pin(read_output_bytes(
 		stdout_reader,
-		stdout_sink,
+		ChunkSink::new(stdout_sink, "stdout", Arc::clone(&options.lost_output)),
 		reader_cancel.clone(),
 		activity_tx.clone(),
 	)));
 	let stderr_handle = tokio::spawn(Box::pin(read_output_bytes(
 		stderr_reader,
-		stderr_sink,
+		ChunkSink::new(stderr_sink, "stderr", Arc::clone(&options.lost_output)),
 		reader_cancel.clone(),
 		activity_tx,
 	)));
@@ -1591,15 +1600,14 @@ async fn run_shell_command_streams_in_filesystem(
 
 async fn read_output_bytes(
 	reader: fs::File,
-	sink: Option<Sender<Bytes>>,
+	mut sink: ChunkSink<Bytes>,
 	cancel_token: CancellationToken,
 	activity: Sender<()>,
 ) -> io::Result<()> {
 	const BUF: usize = 65536;
 
 	let mut buf = vec![0u8; BUF];
-	let mut pipe = OutputPipe::new(reader, cancel_token)?;
-	let mut sink = ChunkSink::new(sink);
+	let mut pipe = OutputPipe::new(reader, cancel_token).inspect_err(|err| sink.record(err))?;
 	loop {
 		let n = match pipe.read(&mut buf, false).await {
 			PipeRead::Bytes(n) => n,
@@ -1766,15 +1774,14 @@ impl OutputPipe {
 
 async fn read_output(
 	reader: fs::File,
-	on_chunk: Option<Sender<String>>,
+	mut sink: ChunkSink<String>,
 	cancel_token: CancellationToken,
 	activity: Sender<()>,
 ) -> io::Result<()> {
 	const BUF: usize = 65536;
 	let mut buf = vec![0u8; BUF];
 	let mut decoder = CaptureDecoder::new();
-	let mut pipe = OutputPipe::new(reader, cancel_token)?;
-	let mut sink = ChunkSink::new(on_chunk);
+	let mut pipe = OutputPipe::new(reader, cancel_token).inspect_err(|err| sink.record(err))?;
 
 	loop {
 		let n = match pipe.read(&mut buf, decoder.holds_line()).await {
@@ -1801,7 +1808,7 @@ async fn read_output(
 
 async fn read_output_buffered(
 	reader: fs::File,
-	on_chunk: Option<Sender<String>>,
+	mut sink: ChunkSink<String>,
 	cancel_token: CancellationToken,
 	activity: Sender<()>,
 	max_capture_bytes: usize,
@@ -1815,8 +1822,7 @@ async fn read_output_buffered(
 	let mut captured_bytes = 0usize;
 	let mut exceeded = false;
 	let mut decoder = CaptureDecoder::new();
-	let mut pipe = OutputPipe::new(reader, cancel_token)?;
-	let mut sink = ChunkSink::new(on_chunk);
+	let mut pipe = OutputPipe::new(reader, cancel_token).inspect_err(|err| sink.record(err))?;
 
 	loop {
 		let n = match pipe.read(&mut buf, decoder.holds_line()).await {
@@ -1925,15 +1931,23 @@ const CONSUMER_STALL_TIMEOUT: Duration = Duration::from_secs(3);
 /// (#4078). A consumer that drops its receiver, or takes nothing for
 /// [`CONSUMER_STALL_TIMEOUT`], has lost output: from then on the reader still
 /// drains the pipe, so the command does not block on it, but drops what it
-/// reads, and [`ChunkSink::finish`] reports the loss.
+/// reads. The loss is recorded for the run at once ([`LostOutput`]) and
+/// reported by [`ChunkSink::finish`].
 struct ChunkSink<T> {
-	sender: Option<Sender<T>>,
-	lost:   Option<String>,
+	sender:   Option<Sender<T>>,
+	lost:     Option<String>,
+	/// Which output this is, for the run's error.
+	stream:   &'static str,
+	run_lost: Arc<LostOutput>,
 }
 
 impl<T: Send> ChunkSink<T> {
-	const fn new(sender: Option<Sender<T>>) -> Self {
-		Self { sender, lost: None }
+	const fn new(
+		sender: Option<Sender<T>>,
+		stream: &'static str,
+		run_lost: Arc<LostOutput>,
+	) -> Self {
+		Self { sender, lost: None, stream, run_lost }
 	}
 
 	/// Whether a chunk sent now can still reach a consumer.
@@ -1945,14 +1959,21 @@ impl<T: Send> ChunkSink<T> {
 		let Some(sender) = &self.sender else {
 			return;
 		};
-		self.lost = match time::timeout(CONSUMER_STALL_TIMEOUT, sender.send_async(chunk)).await {
+		let reason = match time::timeout(CONSUMER_STALL_TIMEOUT, sender.send_async(chunk)).await {
 			Ok(Ok(())) => return,
-			Ok(Err(_disconnected)) => Some("its consumer stopped receiving it".to_owned()),
+			Ok(Err(_disconnected)) => "its consumer stopped receiving it".to_owned(),
 			Err(_stalled) => {
-				Some(format!("its consumer took none of it for {} s", CONSUMER_STALL_TIMEOUT.as_secs()))
+				format!("its consumer took none of it for {} s", CONSUMER_STALL_TIMEOUT.as_secs())
 			},
 		};
+		self.run_lost.record(self.stream, &reason);
+		self.lost = Some(reason);
 		self.sender = None;
+	}
+
+	/// Records that the reader could not read its pipe at all.
+	fn record(&self, err: &io::Error) {
+		self.run_lost.record(self.stream, &err.to_string());
 	}
 
 	/// The reader's outcome: an error when a chunk did not reach the consumer.
@@ -1960,6 +1981,25 @@ impl<T: Send> ChunkSink<T> {
 		self
 			.lost
 			.map_or(Ok(()), |reason| Err(io::Error::other(reason)))
+	}
+}
+
+/// The first output of a run that did not reach its consumer, recorded the
+/// moment it is lost. A cancelled run can end before its readers do (its task
+/// is aborted after [`CANCEL_RUN_GRACE`]), and the loss must still fail it.
+#[derive(Debug, Default)]
+struct LostOutput(parking_lot::Mutex<Option<OutputNotDelivered>>);
+
+impl LostOutput {
+	fn record(&self, stream: &'static str, reason: &str) {
+		self.0.lock().get_or_insert_with(|| OutputNotDelivered {
+			stream,
+			cause: io::Error::other(reason.to_owned()),
+		});
+	}
+
+	fn take(&self) -> Option<OutputNotDelivered> {
+		self.0.lock().take()
 	}
 }
 
