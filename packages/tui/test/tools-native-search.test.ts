@@ -250,6 +250,31 @@ describe("glob native view", () => {
 describe("lsp native view", () => {
 	const args = { action: "diagnostics" as const, file: "src/frame.rs" };
 
+	it("previews each reference's source line, and lists one past the context limit by position", () => {
+		const text = [
+			"Found 3 reference(s):",
+			"  src/a.ts:3:7",
+			"    3: const claims = validate(token);",
+			"  src/a.ts:3:20",
+			"    3: const claims = validate(token);",
+			"  ... 1 additional reference(s) shown without context",
+			"  src/a.ts:9:1",
+		].join("\n");
+		const view = lspToolRenderer.describeResult({ content: [{ type: "text", text }] }, collapsed, {
+			action: "references",
+		});
+		// Two references on one line share its source row.
+		expect(codeProps(view?.body)).toEqual([
+			expect.objectContaining({
+				text: "const claims = validate(token);",
+				start: 3,
+				marks: [{ line: 3, tone: "accent" }],
+			}),
+		]);
+		const texts = collect(view?.body, n => n.k === "text").map(n => (n.k === "text" ? plain(n.p?.spans) : ""));
+		expect(texts).toContain("9:1");
+	});
+
 	it("shows a server failure as an error row, never as no issues", () => {
 		const view = lspToolRenderer.describeResult(
 			{
@@ -280,6 +305,28 @@ describe("lsp native view", () => {
 		expect(meta).toContain("1 unverified file");
 		expect(meta).not.toContain("No issues");
 		expect(collect(view?.body, n => role(n) === "omp.tool.diagnostic")).toHaveLength(1);
+	});
+
+	it("shows a partial server failure as a warning, never as no issues", () => {
+		const view = lspToolRenderer.describeResult(
+			{
+				content: [{ type: "text", text: "OK\n⚠ src/frame.rs: some servers failed (rust-analyzer)" }],
+				details: { action: "diagnostics", success: true },
+			},
+			collapsed,
+			args,
+		);
+		expect(view?.tone).toBe("warning");
+		expect((view?.tool?.meta ?? []).map(plain).join(" ")).not.toContain("No issues");
+		expect(collect(view?.body, n => role(n) === "omp.tool.diagnostic")).toHaveLength(1);
+
+		const clean = lspToolRenderer.describeResult(
+			{ content: [{ type: "text", text: "OK" }], details: { action: "diagnostics", success: true } },
+			collapsed,
+			args,
+		);
+		expect(clean?.tone).toBeUndefined();
+		expect((clean?.tool?.meta ?? []).map(plain)).toEqual(["No issues"]);
 	});
 
 	it("parses grouped diagnostics into file:line:col rows and frames them", () => {
