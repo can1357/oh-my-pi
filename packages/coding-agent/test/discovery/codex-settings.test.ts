@@ -9,7 +9,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/capability/settings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgDisabledProviders } from "@oh-my-pi/pi-coding-agent/config/model-settings";
-import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
+import { initializeWithSettings, isProviderEnabled, loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { cfgPersonality } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { logger, removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -86,6 +86,16 @@ describe("Codex config.toml settings", () => {
 		const settings = await Settings.init({ cwd: project, agentDir });
 
 		expect(cfgPersonality.get(settings)).toBe("default");
+		const release = initializeWithSettings(settings);
+		try {
+			expect(isProviderEnabled("codex")).toBe(false);
+			await Bun.write(path.join(agentDir, "config.yml"), "{}\n");
+			await settings.reloadFromDisk();
+			expect(isProviderEnabled("codex")).toBe(true);
+			expect(cfgPersonality.get(settings)).toBe("friendly");
+		} finally {
+			release();
+		}
 	});
 
 	test("drops project config.toml on reload once the codex provider is disabled", async () => {
@@ -146,6 +156,38 @@ describe("Codex config.toml settings", () => {
 		expect(cfgPersonality.get(await Settings.init({ cwd: project, agentDir }))).toBe("default");
 		resetSettingsForTest();
 		expect(cfgPersonality.get(await Settings.init({ cwd: other, agentDir }))).toBe("friendly");
+	});
+
+	test("keeps a self-disabling project provider disabled through reload and enables it after removal", async () => {
+		const agentDir = path.join(root, "agent");
+		const codexConfig = path.join(project, ".codex", "config.toml");
+		await Bun.write(codexConfig, 'personality = "friendly"\ndisabledProviders = ["codex"]\n');
+		const settings = await Settings.init({ cwd: project, agentDir });
+		const release = initializeWithSettings(settings);
+		try {
+			expect(cfgDisabledProviders.get(settings)).toEqual(["codex"]);
+			expect(isProviderEnabled("codex")).toBe(false);
+			expect(cfgPersonality.get(settings)).toBe("default");
+
+			await settings.reloadFromDisk();
+			expect(cfgDisabledProviders.get(settings)).toEqual(["codex"]);
+			expect(isProviderEnabled("codex")).toBe(false);
+			expect(cfgPersonality.get(settings)).toBe("default");
+
+			await Bun.write(codexConfig, 'personality = "friendly"\n');
+			await settings.reloadFromDisk();
+			expect(cfgDisabledProviders.get(settings)).toEqual([]);
+			expect(isProviderEnabled("codex")).toBe(true);
+			expect(cfgPersonality.get(settings)).toBe("friendly");
+
+			await Bun.write(codexConfig, 'personality = "friendly"\ndisabledProviders = ["codex"]\n');
+			await settings.reloadFromDisk();
+			expect(cfgDisabledProviders.get(settings)).toEqual(["codex"]);
+			expect(isProviderEnabled("codex")).toBe(false);
+			expect(cfgPersonality.get(settings)).toBe("default");
+		} finally {
+			release();
+		}
 	});
 
 	test.each(["global", "overlay"] as const)(

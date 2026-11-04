@@ -136,7 +136,7 @@ type ProjectSettingsReadResult = {
 	settings: RawSettings;
 	fileSettings: RawSettings;
 	shellPathSource: string | undefined;
-	/** Files that supplied merged project-level settings items. */
+	/** Discovered project files to invalidate and watch, including filtered or temporarily missing sources. */
 	sourcePaths: string[];
 	/** Project warnings surfaced for this read; commit with the layer as `#projectSettingsWarningsSeen`. */
 	warningsSeen: Set<string>;
@@ -657,7 +657,7 @@ export class Settings {
 	#configOverlay: RawSettings = {};
 	/** Project settings file that most recently supplied shellPath. */
 	#projectShellPathSource: string | undefined;
-	/** Discovered files that supplied the current project layer (watch targets). */
+	/** Project files to invalidate and watch, including filtered or temporarily missing sources. */
 	#projectSourcePaths: string[] = [];
 	/** Capability warnings already surfaced for the current project scope; reloads stay quiet. */
 	#projectSettingsWarningsSeen = new Set<string>();
@@ -2677,7 +2677,10 @@ export class Settings {
 		let rejectedWarnings: string[] | undefined;
 		let warningsSeen = this.#projectSettingsWarningsSeen;
 		try {
-			const result = await loadCapability(settingsCapability.id, { cwd: discoveryCwd });
+			const result = await loadCapability(settingsCapability.id, {
+				cwd: discoveryCwd,
+				includeDisabledProviders: true,
+			});
 			// `loadCapability` aggregates warnings across every level, but this
 			// method only merges project items — user-level parse failures belong
 			// to the global layer and would misattribute here. Warnings embed
@@ -2731,16 +2734,38 @@ export class Settings {
 		let project = this.#mergeProjectItems(read.items, read.nativeModelRoles);
 		const disabled = this.#disabledProviderIds({ ...layers, project: project.settings }, read.cwd);
 		if (read.items.some(item => disabled.has(item._source.provider))) {
-			project = this.#mergeProjectItems(
+			const filtered = this.#mergeProjectItems(
 				read.items.filter(item => !disabled.has(item._source.provider)),
 				read.nativeModelRoles,
 			);
+			const projectSwitch = getByPath(project.settings, cfgDisabledProviders.segments);
+			if (projectSwitch !== undefined) {
+				const remaining = this.#disabledProviderIds({ ...layers, project: filtered.settings }, read.cwd);
+				// A project provider may disable itself; preserve only its switch when removing
+				// its other settings would undo that decision. Do not pin a global/overlay switch.
+				let changed = disabled.size !== remaining.size;
+				if (!changed) {
+					for (const id of disabled) {
+						if (!remaining.has(id)) {
+							changed = true;
+							break;
+						}
+					}
+				}
+				if (changed) setByPath(filtered.settings, cfgDisabledProviders.segments, projectSwitch);
+			}
+			project = filtered;
 		}
 		return {
 			settings: this.#migrateRawSettings(project.settings, read.quarantineInvalid),
 			fileSettings: read.fileSettings,
 			shellPathSource: project.shellPathSource,
-			sourcePaths: project.sourcePaths,
+			sourcePaths: [
+				...new Set([
+					...(read.cwd === this.#cwd ? this.#projectSourcePaths : []),
+					...read.items.map(item => item.path),
+				]),
+			],
 			warningsSeen: read.warningsSeen,
 		};
 	}
