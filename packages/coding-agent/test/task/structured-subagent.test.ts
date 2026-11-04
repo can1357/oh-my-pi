@@ -1657,6 +1657,36 @@ describe("structured subagent primitive", () => {
 			await fs.rm(outside, { recursive: true, force: true });
 		}
 	});
+
+	it("releases an isolated child's caller hold once when its workspace cannot be created", async () => {
+		// Through the structured boundary, as a parent's eval-tool kernel hold
+		// travels: the repository resolves, then the real `ensureIsolation`
+		// fails on a directory that is no repository, before any child or
+		// lifecycle exists. A boundary that marked the child as owning the
+		// release at dispatch would skip its own release here and leave the
+		// parent kernel held for good.
+		mockDiscovery();
+		const outside = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-structured-"));
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: outside } as never);
+		const run = vi.spyOn(executorModule, "runSubprocess");
+		let released = 0;
+		try {
+			const settled = await runStructuredSubagent(
+				request({
+					session: session({ isolationEnabled: true }),
+					isolation: { requested: true },
+					onRelease: () => void (released += 1),
+				}),
+			);
+
+			expect(settled.result.exitCode).toBe(1);
+			expect(run).not.toHaveBeenCalled();
+			expect(released).toBe(1);
+			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+		} finally {
+			await fs.rm(outside, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("agent frontmatter structured opt-in", () => {

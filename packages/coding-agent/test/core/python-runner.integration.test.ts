@@ -4,7 +4,7 @@
  * Gated by `PI_PYTHON_INTEGRATION=1` so CI without a real Python interpreter
  * (or sandboxes where subprocess spawning is restricted) does not fail.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -374,6 +374,46 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		// directory earlier and never comes back to start a new one.
 		await disposeKernelSessionsByOwner("agent-session:co-two");
 		expect(await waitForExit(first, EXIT_BUDGET_MS)).toBe(true);
+	}, 60_000);
+
+	it("ends the runner of an older directory whose cold start finished after a newer directory's cell", async () => {
+		setSupersededKernelGraceMs(RECLAIM_GRACE_MS);
+		using olderDir = TempDir.createSync("@python-runner-overlap-a-");
+		using newerDir = TempDir.createSync("@python-runner-overlap-b-");
+		const options = {
+			sessionId: "overlapping-start",
+			kernelOwnerId: "agent-session:overlap",
+			kernelMode: "session" as const,
+			timeoutMs: 30_000,
+		};
+		// The older directory's runner is held back until the newer directory's
+		// cell is done, so the owner's cell there starts first and publishes last.
+		const olderStarting = Promise.withResolvers<void>();
+		const releaseOlder = Promise.withResolvers<void>();
+		const start = PythonKernel.start.bind(PythonKernel);
+		const spawn = vi.spyOn(PythonKernel, "start").mockImplementation(async startOptions => {
+			if (startOptions.cwd === olderDir.path()) {
+				olderStarting.resolve();
+				await releaseOlder.promise;
+			}
+			return await start(startOptions);
+		});
+		try {
+			const older = runnerPid({ ...options, cwd: olderDir.path() });
+			await olderStarting.promise;
+			const newer = await runnerPid({ ...options, cwd: newerDir.path() });
+			releaseOlder.resolve();
+			const first = await older;
+
+			// The owner has been at the newer directory since before the older
+			// runner existed, and runs nothing more: the older cell ending is the
+			// last event that can arm its grace.
+			expect(await waitForExit(first, EXIT_BUDGET_MS)).toBe(true);
+			expect(isRunning(newer)).toBe(true);
+		} finally {
+			releaseOlder.resolve();
+			spawn.mockRestore();
+		}
 	}, 60_000);
 
 	it("tells the owner that a subprocess its cell started in its own session survived the reclaim", async () => {
