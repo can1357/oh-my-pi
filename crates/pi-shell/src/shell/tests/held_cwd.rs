@@ -769,12 +769,27 @@ y
 ",
 		),
 	];
+	assert_as_bash(
+		rows
+			.iter()
+			.map(|&(name, script, bash)| (name, script, bash, script.contains("chmod"))),
+	)
+	.await;
+}
+
+/// Runs each row's script as one command in a fresh directory and fails
+/// with every row whose status is not 0 or whose output, with the
+/// directory spelled `T` and this shell's `bash: line N: ` prefixes taken
+/// off, is not the one Bash printed. A row that needs a directory the user
+/// may not search is skipped as root, which may search any directory.
+pub(super) async fn assert_as_bash<'a>(
+	rows: impl IntoIterator<Item = (&'a str, &'a str, &'a str, bool)>,
+) {
 	// SAFETY: `geteuid` has no preconditions.
 	let root = unsafe { libc::geteuid() } == 0;
 	let mut failures = Vec::new();
-	for (name, script, bash) in rows {
-		// Root searches a directory without search permission.
-		if root && script.contains("chmod") {
+	for (name, script, bash, needs_permissions) in rows {
+		if root && needs_permissions {
 			continue;
 		}
 		let dir = tempfile::tempdir().expect("scratch directory");
@@ -791,7 +806,7 @@ y
 		match outcome {
 			Ok((result, output)) => {
 				let output = unprefixed(&output.replace(&top, "T"));
-				if result.exit_code != Some(0) || output != *bash {
+				if result.exit_code != Some(0) || output != bash {
 					failures.push(format!(
 						"{name}: Bash prints {bash:?}; got status {:?}, output {output:?}",
 						result.exit_code

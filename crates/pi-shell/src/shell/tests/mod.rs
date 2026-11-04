@@ -11,6 +11,7 @@ use super::*;
 use crate::process;
 
 mod builtins;
+mod dir_changes;
 mod env_cwd;
 mod held_cwd;
 mod process_control;
