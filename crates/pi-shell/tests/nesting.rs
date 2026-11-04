@@ -130,6 +130,105 @@ golden!(
 	false,
 	0
 );
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn funcnest_rejects_decimal_overflow_before_narrowing() {
+	for (value, out, err, status) in [
+		("9223372036854775809", "BOTTOMAFTER", false, 0),
+		("9223372036854775807", "BOTTOMAFTER", false, 0),
+		("9223372036854775808", "BOTTOMAFTER", false, 0),
+		("9223372036854775810", "BOTTOMAFTER", false, 0),
+		("-9223372036854775808", "BOTTOMAFTER", false, 0),
+		("-9223372036854775809", "BOTTOMAFTER", false, 0),
+		("-9223372036854775807", "", true, 1),
+		("18446744073709551617", "BOTTOMAFTER", false, 0),
+		("18446744073709551615", "BOTTOMAFTER", false, 0),
+		("18446744073709551616", "BOTTOMAFTER", false, 0),
+		("-18446744073709551615", "BOTTOMAFTER", false, 0),
+		("-18446744073709551616", "BOTTOMAFTER", false, 0),
+		("-18446744073709551617", "BOTTOMAFTER", false, 0),
+		(
+			"100000000000000000000000000000000000000000000000000000000000000000000000000000001",
+			"BOTTOMAFTER",
+			false,
+			0,
+		),
+		(
+			"100000000000000000000000000000000000000000000000000000000000000000000000000000000",
+			"BOTTOMAFTER",
+			false,
+			0,
+		),
+		(
+			"99999999999999999999999999999999999999999999999999999999999999999999999999999999",
+			"BOTTOMAFTER",
+			false,
+			0,
+		),
+		("4294967297", "", true, 1),
+		("4294967295", "BOTTOMAFTER", false, 0),
+		("4294967296", "BOTTOMAFTER", false, 0),
+		("4294967306", "BOTTOMAFTER", false, 0),
+		("-4294967295", "", true, 1),
+	] {
+		let script = format!(
+			"FUNCNEST='{value}'; f(){{ if (( $1 )); then f $(($1-1)); else printf BOTTOM; fi; }}; f \
+			 8; printf AFTER"
+		);
+		assert_eq!(capture(&script).await, (out.into(), err, status), "FUNCNEST={value:?}");
+	}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn funcnest_decimal_syntax_matches_bash53() {
+	for (value, out, err, status) in [
+		("+1", "", true, 1),
+		("-1", "BOTTOMAFTER", false, 0),
+		(" 1", "", true, 1),
+		("1 ", "", true, 1),
+		("\t+1\t", "", true, 1),
+		("\n+1\n", "", true, 1),
+		("\r+1\r", "", true, 1),
+		("\x0b+1\x0b", "", true, 1),
+		("\x0c+1\x0c", "", true, 1),
+		(" +9223372036854775809 ", "BOTTOMAFTER", false, 0),
+		(" -9223372036854775809 ", "BOTTOMAFTER", false, 0),
+		("+9223372036854775807", "BOTTOMAFTER", false, 0),
+		("-0", "BOTTOMAFTER", false, 0),
+		("+0", "BOTTOMAFTER", false, 0),
+		("010", "BOTTOMAFTER", false, 0),
+		("08", "", true, 1),
+		("01", "", true, 1),
+		("0x1", "BOTTOMAFTER", false, 0),
+		("0X1", "BOTTOMAFTER", false, 0),
+		("-0x1", "BOTTOMAFTER", false, 0),
+		("2#1", "BOTTOMAFTER", false, 0),
+		("10#1", "BOTTOMAFTER", false, 0),
+		("16#1", "BOTTOMAFTER", false, 0),
+		("", "BOTTOMAFTER", false, 0),
+		(" ", "BOTTOMAFTER", false, 0),
+		("+", "BOTTOMAFTER", false, 0),
+		("-", "BOTTOMAFTER", false, 0),
+		("++1", "BOTTOMAFTER", false, 0),
+		("+-1", "BOTTOMAFTER", false, 0),
+		("1 0", "BOTTOMAFTER", false, 0),
+		("1x", "BOTTOMAFTER", false, 0),
+		("1.0", "BOTTOMAFTER", false, 0),
+		("1e0", "BOTTOMAFTER", false, 0),
+		(
+			"000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+			"",
+			true,
+			1,
+		),
+	] {
+		let script = format!(
+			"FUNCNEST='{value}'; f(){{ if (( $1 )); then f $(($1-1)); else printf BOTTOM; fi; }}; f \
+			 8; printf AFTER"
+		);
+		assert_eq!(capture(&script).await, (out.into(), err, status), "FUNCNEST={value:?}");
+	}
+}
 golden!(
 	source_refusal_ends_pipeline_stage,
 	"set -o pipefail; printf 'FUNCNEST=1; f(){ f; }; f\nprintf WRONG_FILE\n' > leaf.sh; { . \

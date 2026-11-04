@@ -2020,14 +2020,19 @@ fn call_function(
 	let funcnest = match state::lookup(&k.root, cx.store, vp, b"FUNCNEST") {
 		Ok(v) => v
 			.and_then(|v| v.as_scalar())
-			.and_then(builtins::number)
-			// Bash stores the parsed intmax_t in a signed C int before
-			// testing positivity: both positive and negative values wrap.
-			.map(|n| {
+			.and_then(|v| {
 				if vp.mode.dialect() == Dialect::Bash {
-					i64::from(n as i32)
+					// `legal_number` rejects intmax_t overflow. Only a parsed
+					// value is then narrowed to a signed C int. Bash 5.3 accepts
+					// all six C-locale whitespace bytes around the decimal.
+					let n = std::str::from_utf8(v)
+						.ok()?
+						.trim_matches(|c| matches!(c, '\t'..='\r' | ' '))
+						.parse::<i64>()
+						.ok()?;
+					Some(i64::from(n as i32))
 				} else {
-					n
+					builtins::number(v)
 				}
 			})
 			.filter(|&n| n > 0)
