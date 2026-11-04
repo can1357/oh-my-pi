@@ -23,6 +23,8 @@
 
 ### Changed
 
+- Source-checkout sessions start faster and record the commit and branch without hashing uncommitted changes; existing build stamps remain readable.
+
 - A CLI flag, session-only settings write or SDK override now outranks the setting's environment variable, so `PI_MOTION=none omp --motion full` runs with full motion; env vars still outrank every settings file
 - Updated abort error handling for JS and Python tools to propagate original abort reasons
 - Shaped tool results cut by Spotlight end with a short `[cut: artifact://N]` line instead of a sentence explaining the gaps, and cut reads, outlined code and folded docs end with no such line; the system prompt explains the gaps and folds once
