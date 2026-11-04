@@ -7,6 +7,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSessionTeardown } from "@oh-my-pi/pi-coding-agent/modes/session-teardown";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -22,6 +23,7 @@ import {
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const pendingAssistant: AssistantMessage = {
 	role: "assistant",
@@ -207,6 +209,61 @@ describe("session exit diagnostics", () => {
 			reason: "sigterm",
 			kind: "signal",
 		});
+	});
+
+	it("a session createAgentSession built records the reason its dispose() is given", async () => {
+		tempDir = TempDir.createSync("@pi-session-exit-sdk-signal-");
+		const memoryAuth = createInMemoryAuthStorage();
+		authStorage = memoryAuth;
+		memoryAuth.keys.setRuntime("anthropic", "test-key");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected built-in anthropic model to exist");
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		const created = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage: memoryAuth,
+			modelRegistry: new ModelRegistry(memoryAuth, tempDir.join("models.yml")),
+			model,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			sessionManager,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		});
+		session = created.session;
+		const activeSession = created.session;
+		activeSession.agent.emitExternalEvent({ type: "message_end", message: pendingAssistant });
+		await Promise.resolve();
+		activeSession.agent.emitExternalEvent({
+			type: "tool_execution_start",
+			toolCallId: "toolu_repro",
+			toolName: "bash",
+			args: { command: "bun run check:ts" },
+		});
+		await Promise.resolve();
+
+		// Worker-thread subagents are SDK sessions; their pool disposes them with the signal's reason.
+		await activeSession.dispose({ reason: postmortem.Reason.SIGTERM });
+		session = undefined;
+
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const reopened = await SessionManager.open(sessionFile, tempDir.path());
+		const exitEntry = reopened
+			.getEntries()
+			.find(entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE);
+		await reopened.close();
+		if (exitEntry?.type !== "custom") throw new Error("Expected session exit marker");
+		expect(exitEntry.data).toMatchObject({ reason: "sigterm", kind: "signal" });
 	});
 
 	it("does not materialize an empty session just to write an exit marker", async () => {
