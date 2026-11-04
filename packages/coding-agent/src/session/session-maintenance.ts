@@ -1041,11 +1041,14 @@ export class SessionMaintenance {
 		if (opts.toolResultsOnly && savings < config.minSavings) {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
-		if (
-			opts.admit &&
-			!opts.admit(this.#shakeRequestPlan(branchEntries, regions, replacements, replacementTokenCounts))
-		) {
-			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+		// The admitted plan's saving is what the sent request loses, which the
+		// caller's post-shake threshold check needs; the region total it would
+		// otherwise use counts content no request carries.
+		let sentTokensFreed: number | undefined;
+		if (opts.admit) {
+			const plan = this.#shakeRequestPlan(branchEntries, regions, replacements, replacementTokenCounts);
+			if (!opts.admit(plan)) return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+			sentTokensFreed = plan.tokensFreed;
 		}
 		if (reservedArtifact.path && reservedArtifact.id) {
 			try {
@@ -1122,7 +1125,7 @@ export class SessionMaintenance {
 			mode,
 			toolResultsDropped,
 			blocksDropped,
-			tokensFreed: Math.max(0, originalTokens - replacementTokens),
+			tokensFreed: sentTokensFreed ?? Math.max(0, originalTokens - replacementTokens),
 			artifactId,
 		};
 	}
@@ -6391,13 +6394,16 @@ export class SessionMaintenance {
 	 *
 	 * A shake that leaves the context above the recovery band falls through to
 	 * the next method, whose own history rewrite replaces this one's, so it is
-	 * not charged. Otherwise the next request writes the post-shake prompt from
-	 * the last reusable cached point: with a bounded cache lookback (Anthropic
-	 * looks back a fixed number of blocks from a breakpoint) an edit deep in
-	 * history misses back to the request head (tools and system prompt, which
-	 * carry their own breakpoint), measured as a full rewrite after every shake;
-	 * a provider that caches any prefix keeps everything before the first edit.
-	 * The rewrite is priced at the retention tier the next request writes.
+	 * not charged. Otherwise the next request re-writes everything the provider
+	 * can no longer match. With a bounded cache lookback (Anthropic looks back
+	 * a fixed number of block positions from a breakpoint) that depends on how
+	 * deep the first edit is: an edit inside the window still leaves a
+	 * breakpoint the provider can match behind it, so only the suffix after the
+	 * edit is re-written, while a deeper edit misses back to the request head
+	 * (tools and system prompt, which carry their own breakpoint) — the full
+	 * rewrite measured after every shake of a long session. A provider that
+	 * caches any prefix always keeps everything before the first edit. The
+	 * rewrite is priced at the retention tier the next request writes.
 	 */
 	#thresholdShakeCacheCost(
 		triggerContextTokens: number,
@@ -6413,11 +6419,12 @@ export class SessionMaintenance {
 				return { pays: true, rewriteTokens: 0 };
 			}
 		}
-		const rewriteTokens = Math.max(
-			0,
-			postShakeTokens -
-				(resolvePromptCacheLookback(model) === undefined ? plan.unchangedPrefixTokens : plan.requestHeadTokens),
-		);
+		const lookback = resolvePromptCacheLookback(model);
+		const reachable =
+			lookback === undefined || plan.positionsAfterEdit <= lookback
+				? plan.unchangedPrefixTokens
+				: plan.requestHeadTokens;
+		const rewriteTokens = Math.max(0, postShakeTokens - reachable);
 		// A `/clear` hides everything before it from the request just as a
 		// compaction does, so growth is measured after whichever came last.
 		const branch = this.#host.sessionManager.getBranch();
@@ -6432,6 +6439,7 @@ export class SessionMaintenance {
 			model,
 			tokensFreed: plan.tokensFreed,
 			rewriteTokens,
+			requestTokens: postShakeTokens,
 			growthPerRequest: measurePromptGrowthPerRequest(sinceBoundary),
 			cacheTier: resolvePromptCacheTier(
 				model,
@@ -6493,6 +6501,7 @@ export class SessionMaintenance {
 				this.#countProjectedMessages(before, branchEntries) - this.#countProjectedMessages(after, projected),
 			),
 			requestHeadTokens,
+			positionsAfterEdit: after.length - shared,
 			unchangedPrefixTokens:
 				requestHeadTokens + this.#countProjectedMessages(before.slice(0, shared), branchEntries),
 		};

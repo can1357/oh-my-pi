@@ -16,6 +16,12 @@ export interface ShakeAdmitPlan {
 	unchangedPrefixTokens: number;
 	/** Tokens of the request head alone (tools and system prompt). */
 	requestHeadTokens: number;
+	/**
+	 * Messages of the sent request at or after the first one the edit changes.
+	 * A provider whose cache looks back a bounded number of block positions can
+	 * still match a breakpoint behind an edit this shallow.
+	 */
+	positionsAfterEdit: number;
 }
 
 /** Decides, once an elide shake has planned its edit and before it edits anything, whether it runs. */
