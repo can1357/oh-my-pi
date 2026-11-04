@@ -751,7 +751,8 @@ export const cfgDisplaySmoothStreaming = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Smooth Streaming",
-		description: "Reveal assistant text and streamed tool input smoothly while chunks arrive",
+		description:
+			"Reveal assistant text and streamed tool input smoothly while chunks arrive (Tern types assistant text out itself)",
 	},
 });
 

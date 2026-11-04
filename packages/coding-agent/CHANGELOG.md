@@ -24,6 +24,7 @@
 
 ### Changed
 
+- In a Tern that types streamed text out itself, omp sends assistant text and thinking as they arrive instead of pacing them, so streaming costs omp less CPU; other terminals keep omp's smooth reveal
 - Source-checkout sessions start faster and record the commit and branch without hashing uncommitted changes; existing build stamps remain readable.
 
 - A CLI flag, session-only settings write or SDK override now outranks the setting's environment variable, so `PI_MOTION=none omp --motion full` runs with full motion; env vars still outrank every settings file
