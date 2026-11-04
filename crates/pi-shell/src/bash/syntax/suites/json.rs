@@ -118,3 +118,38 @@ fn long_logical_chains_export_native_json_without_stack_growth() {
 		}
 	}
 }
+
+#[test]
+fn bang_runs_export_one_not_per_bang_at_its_own_position() {
+	// Two blanks after the inner `!`: each `!` keeps the offset it has in the
+	// source.
+	let src = b"[[ ! !  a ]]";
+	let program = parse_all(src, Features::NONE).unwrap();
+	let shfmt: serde_json::Value =
+		serde_json::from_str(&to_json(src, &program, JsonDialect::Shfmt, Offsets::Bytes)).unwrap();
+	let expr = &shfmt["Stmts"][0]["Cmd"]["X"];
+	assert_eq!(expr["Op"], "!");
+	assert_eq!(expr["OpPos"]["Offset"], 3);
+	assert_eq!(expr["X"]["Op"], "!");
+	assert_eq!(expr["X"]["OpPos"]["Offset"], 5);
+	assert_eq!(expr["X"]["X"]["Parts"][0]["Value"], "a");
+	let native: serde_json::Value =
+		serde_json::from_str(&to_json(src, &program, JsonDialect::Native, Offsets::Bytes)).unwrap();
+	let expr = &native["commands"][0]["list"][0]["and_or"]["first"]["stages"][0]["cmd"]["expr"];
+	assert_eq!(expr["type"], "not");
+	assert_eq!(expr["expr"]["type"], "not");
+	assert_eq!(expr["expr"]["expr"]["type"], "word");
+}
+
+#[test]
+fn long_bang_runs_export_json_without_stack_growth() {
+	let src = format!("[[ {}a ]]", "! ".repeat(100_000));
+	for features in [Features::NONE, Features::ZSH] {
+		let program = parse_all(src.as_bytes(), features).unwrap();
+		let json = to_json(src.as_bytes(), &program, JsonDialect::Native, Offsets::Bytes);
+		assert_eq!(json.matches("\"type\":\"not\"").count(), 100_000);
+	}
+	let program = parse_all(src.as_bytes(), Features::NONE).unwrap();
+	let json = to_json(src.as_bytes(), &program, JsonDialect::Shfmt, Offsets::Bytes);
+	assert_eq!(json.matches("\"Op\": \"!\"").count(), 100_000);
+}

@@ -83,3 +83,13 @@ fn long_test_chains_keep_zsh_short_circuiting_and_precedence() {
 	);
 	assert_eq!(zsh(&script), ("1\n0\n0\n1\n0\nalive\n".to_owned(), String::new(), 0));
 }
+
+#[test]
+fn long_bang_runs_in_test_keep_their_parity() {
+	let script = format!(
+		"test {even}x; echo $?\n[ {odd}x ]; echo $?\n[[ {odd}a ]]; echo $?\necho alive",
+		even = "! ".repeat(100_000),
+		odd = "! ".repeat(100_001),
+	);
+	assert_eq!(zsh(&script), ("0\n1\n1\nalive\n".to_owned(), String::new(), 0));
+}

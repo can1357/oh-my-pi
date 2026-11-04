@@ -55,6 +55,21 @@ fn long_conditional_chains_preserve_zsh_function_text() {
 	}
 }
 
+#[test]
+fn bang_runs_keep_zsh_function_text() {
+	// zsh shows a negated `!` in parentheses: `! ( ! -n a )`.
+	for n in [1, 2, 3, 100_000] {
+		let src = format!("f() {{ [[ {}a ]] }}", "! ".repeat(n));
+		let CommandKind::FuncDef(function) = first_cmd(src.as_bytes()).kind else {
+			panic!("function expected")
+		};
+		let text = function_text(b"f", &function);
+		let expected =
+			format!("f () {{\n\t[[ {}! -n a{} ]]\n}}", "! ( ".repeat(n - 1), " )".repeat(n - 1));
+		assert_eq!(text, expected.as_bytes(), "{n} bangs");
+	}
+}
+
 fn simple(src: &[u8]) -> Simple {
 	match first_cmd(src).kind {
 		CommandKind::Simple(s) => s,

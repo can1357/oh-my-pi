@@ -1,7 +1,8 @@
 //! Flat operator chains run through the bash tool's `Shell::run` entry point,
 //! including error cleanup, short circuiting, tracing and function display.
-//! Conditional chains must not build a tree as deep as the chain: parsing,
-//! copying, lowering, printing and dropping it must all survive 100,000 terms.
+//! Conditional chains and runs of `!` must not build a tree as deep as the
+//! chain: parsing, copying, lowering, printing and dropping it must all
+//! survive 100,000 terms.
 #![cfg(unix)]
 
 use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
@@ -98,6 +99,19 @@ runs! {
 	conditional_unfinished: format!("[[ {} && ]]", chain("a", " && ", LONG))
 		=> format!("bash: -c: line 1: syntax error near `]]'\nbash: -c: line 1: `[[ {} && ]]'\n", chain("a", " && ", LONG)), 2;
 	test_unfinished: format!("[ {} -a ]", chain("x", " -a ", LONG)) => "bash: line 1: [: argument expected\n".to_owned(), 2;
+	// A run of `!`s in `[[ ]]`: an even number leaves the operand's result,
+	// an odd one inverts it. `set -x` and `declare -f` show one `!` for an odd
+	// run and none for an even one, as Bash 5.3 does.
+	conditional_bang_run_even: format!("[[ {}a ]]; echo $?", "! ".repeat(LONG)) => "0\n".to_owned(), 0;
+	conditional_bang_run_odd: format!("[[ {}a ]]; echo $?", "! ".repeat(LONG + 1)) => "1\n".to_owned(), 0;
+	conditional_bang_run_not_run: format!("false && [[ {}a ]]; echo yes", "! ".repeat(LONG)) => "yes\n".to_owned(), 0;
+	conditional_bang_run_traced: format!("set -x; [[ {}a ]]; set +x", "! ".repeat(LONG + 1))
+		=> "+ [[ ! -n a ]]\n+ set +x\n".to_owned(), 0;
+	conditional_bang_run_in_declared_function: format!(
+		"f() {{ [[ {}a && {}-z b ]]; }}; declare -f f",
+		"! ".repeat(LONG + 1),
+		"! ".repeat(LONG),
+	) => "f () \n{ \n    [[ ! -n a && -z b ]]\n}\n".to_owned(), 0;
 }
 
 /// Every length from 1 to 40 operators, with a final operand that changes the
