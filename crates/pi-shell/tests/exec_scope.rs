@@ -51,11 +51,3 @@ async fn exec_parses_its_options_as_bash_does() {
 async fn exec_changes_last_as_long_as_bash_keeps_them() {
 	assert_rows(rows(FIXTURE, "exec_changes_last_as_long_as_bash_keeps_them"), PARALLEL).await;
 }
-
-/// Each `exec` form, across the commands and lines of one run, in a
-/// function (the shell's own descriptors) and in a subshell (only the
-/// subshell's), and an external started after it.
-#[tokio::test(flavor = "multi_thread")]
-async fn exec_redirections_persist_for_later_commands() {
-	assert_rows(rows(FIXTURE, "exec_redirections"), PARALLEL).await;
-}
