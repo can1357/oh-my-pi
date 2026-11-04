@@ -2,15 +2,13 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed the bash tool's shell reporting a failed `cd` as `error: cd: i/o error: No such file or directory (os error 2)`, which names no directory: `cd`, `pushd` and `popd` now print `cd: DIR: reason` as Bash does; `cd` refuses a directory it may not search, looks a written directory up in `CDPATH` (a provider URL entry included), follows `cdable_vars`, lets `-L` override `set -P` (which `pushd` and `popd` now follow too), and reports an unknown option or a second directory in Bash's words, and a `popd` that cannot enter its directory keeps it on the stack ([#17892](https://github.com/can1357/oh-my-pi/pull/17892) by [@sjawhar](https://github.com/sjawhar))
 ### Changed
 
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections
 
 ### Fixed
 
+- Fixed the bash tool's `cd`, `pushd`, `popd` and `dirs` changing directory and failing unlike Bash 5.3: `cd ""` reports `null directory`, `cd -` and a `CDPATH` match under `-P` print the directory as written, `CDPATH` is searched for names starting with a dot and expands `~` in its entries, `cdable_vars` works, a name that passes through a file or a missing directory fails instead of entering the directory past it, and `pushd` and `dirs` under `set -P` in a removed directory report it and leave the stack as it was ([#17892](https://github.com/can1357/oh-my-pi/pull/17892) by [@sjawhar](https://github.com/sjawhar))
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
 ### Fixed
 

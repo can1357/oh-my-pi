@@ -226,6 +226,44 @@ enum Sink<'o> {
 	Regex(Vec<u8>),
 }
 
+/// The directory of tilde-prefix `~user`: `$HOME` (the user database when
+/// unset), `$PWD`, `$OLDPWD`, a directory stack entry or the current user's
+/// home; `None` leaves the prefix literal. Also `cd`'s for a `CDPATH` entry.
+pub fn tilde_dir(
+	k: &Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	user: &[u8],
+) -> Result<Option<BString>, crate::bash::store::StoreError> {
+	let var: &[u8] = match user {
+		b"" => b"HOME",
+		b"+" => b"PWD",
+		b"-" => b"OLDPWD",
+		// `~N`, `~+N`, `~-N`: directory stack entries.
+		_ if {
+			let digits = user
+				.strip_prefix(b"+")
+				.or_else(|| user.strip_prefix(b"-"))
+				.unwrap_or(user);
+			!digits.is_empty() && digits.iter().all(u8::is_ascii_digit)
+		} =>
+		{
+			return super::builtins::dirstack::tilde(k, cx.store, vp, user);
+		},
+		_ => {
+			let me = cx.host.user();
+			return Ok((user == me.name.as_slice()).then_some(me.home));
+		},
+	};
+	let v =
+		state::lookup(&k.root, cx.store, vp, var)?.and_then(|v| v.as_scalar().map(BString::from));
+	Ok(match (v, user) {
+		(Some(v), _) => Some(v),
+		(None, b"") => Some(cx.host.user().home),
+		(None, _) => None,
+	})
+}
+
 impl<'e, 'c> Expander<'e, 'c> {
 	pub const fn new(
 		k: &'e mut Kernel,
@@ -879,37 +917,9 @@ impl<'e, 'c> Expander<'e, 'c> {
 		}
 	}
 
-	/// The directory of tilde-prefix `~user`: `$HOME` (the user database
-	/// when unset), `$PWD`, `$OLDPWD` or the current user's home; `None`
-	/// leaves the prefix literal.
+	/// [`tilde_dir`].
 	fn tilde(&mut self, user: &[u8]) -> X<Option<BString>> {
-		let var: &[u8] = match user {
-			b"" => b"HOME",
-			b"+" => b"PWD",
-			b"-" => b"OLDPWD",
-			// `~N`, `~+N`, `~-N`: directory stack entries.
-			_ if {
-				let digits = user
-					.strip_prefix(b"+")
-					.or_else(|| user.strip_prefix(b"-"))
-					.unwrap_or(user);
-				!digits.is_empty() && digits.iter().all(u8::is_ascii_digit)
-			} =>
-			{
-				return Ok(super::builtins::dirstack::tilde(self.k, self.cx.store, self.vp, user)?);
-			},
-			_ => {
-				let me = self.cx.host.user();
-				return Ok((user == me.name.as_slice()).then_some(me.home));
-			},
-		};
-		let v = state::lookup(&self.k.root, self.cx.store, self.vp, var)?
-			.and_then(|v| v.as_scalar().map(BString::from));
-		Ok(match (v, user) {
-			(Some(v), _) => Some(v),
-			(None, b"") => Some(self.cx.host.user().home),
-			(None, _) => None,
-		})
+		Ok(tilde_dir(self.k, self.cx, self.vp, user)?)
 	}
 
 	fn part(

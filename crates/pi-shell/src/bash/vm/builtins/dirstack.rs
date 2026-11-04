@@ -6,10 +6,14 @@
 
 use bstr::{BString, ByteSlice};
 
-use super::{Ctx, R, dir, done, io::invalid_number, number};
+use super::{Ctx, Need, R, dir, done, io::invalid_number, number};
 use crate::bash::{
-	store::{Key, KeyBuf, Record, StateStore, StoreError},
-	vm::{Kernel, proc::Vproc, state},
+	store::{Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError},
+	vm::{
+		Kernel,
+		proc::{Probe, ProbeResult, Vproc},
+		state,
+	},
 };
 
 /// The stack, top first, without the current directory.
@@ -159,12 +163,50 @@ pub fn polite(home: Option<&[u8]>, dir: &[u8], long: bool) -> BString {
 	BString::from(dir)
 }
 
+/// bash `get_working_directory(who)`: the shell's name for the directory it
+/// works in; under `set -P` what `getcwd` answers for it, which becomes that
+/// name, and which fails, with `WHO: error retrieving current directory: …`,
+/// once the directory has been removed.
+fn working_directory(ctx: &mut Ctx<'_, '_>, who: &str) -> Result<Option<BString>, Need> {
+	if !ctx.option(OptId::Physical)? {
+		return Ok(Some(ctx.vp.cwd.clone()));
+	}
+	if let ProbeResult::Path(Some(name)) = ctx.probe(Probe::Getcwd { entered: None })? {
+		// bash keeps what `getcwd` answered as its idea of the directory,
+		// which a `cd` of the same command then reads names from.
+		if ctx.vp.overlay.is_none() {
+			ctx.k
+				.root
+				.set_misc(ctx.cx.store, MiscKey::Cwd, name.clone());
+		}
+		ctx.vp.cwd = name.clone();
+		return Ok(Some(name));
+	}
+	ctx.out_fd(
+		2,
+		format!(
+			"{who}: error retrieving current directory: getcwd: cannot access parent directories: No \
+			 such file or directory\n"
+		)
+		.as_bytes(),
+	);
+	Ok(None)
+}
+
 const DIRS_USAGE: &[u8] = b"dirs: usage: dirs [-clpv] [+N] [-N]\n";
 const PUSHD_USAGE: &[u8] = b"pushd: usage: pushd [-n] [+N | -N | dir]\n";
 const POPD_USAGE: &[u8] = b"popd: usage: popd [-n] [+N | -N]\n";
 
 /// `dirs [-clpv] [+N] [-N]`.
 pub fn dirs(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
+	dirs_from(ctx, args, None)
+}
+
+/// `dirs` with the current directory `cwd` when a `cd` of the same command
+/// just entered it (an op answers each `getcwd` probe once), else as bash's
+/// `get_working_directory("dirs")` answers: `<no current directory>` when
+/// that fails.
+fn dirs_from(ctx: &mut Ctx<'_, '_>, args: &[BString], cwd: Option<BString>) -> R {
 	let (mut long, mut clear, mut vflag) = (false, false, 0u8);
 	let mut want: Option<(i64, bool, &[u8])> = None;
 	for word in args {
@@ -195,7 +237,14 @@ pub fn dirs(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let list = entries(ctx.cx.store, ctx.vp)?;
 	let home = ctx.scalar(b"HOME")?;
 	let show = |dir: &[u8]| polite(home.as_ref().map(|h| h.as_slice()), dir, long);
-	let cwd = ctx.vp.cwd.clone();
+	let cwd = match want {
+		// `dirs +N` reads the current directory only for index 0.
+		Some((n, plus, _)) if slot(n, plus, list.len()) != Slot::Cwd => BString::default(),
+		_ => match cwd {
+			Some(cwd) => cwd,
+			None => working_directory(ctx, "dirs")?.unwrap_or_else(|| "<no current directory>".into()),
+		},
+	};
 	let mut out = Vec::new();
 	if let Some((n, plus, digits)) = want {
 		let (text, pos) = match slot(n, plus, list.len()) {
@@ -242,18 +291,20 @@ pub fn pushd(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let skipopt = args.first().is_some_and(|a| is_option(a, b'-'));
 	let mut rest = if skipopt { &args[1..] } else { args };
 	let mut list = entries(ctx.cx.store, ctx.vp)?;
-	let cwd = ctx.vp.cwd.clone();
 	if rest.is_empty() {
 		// Swap the current directory and the top of the stack.
 		let Some(top) = list.first().cloned() else {
 			ctx.usage("no other directory");
 			return done(1);
 		};
+		let Some(cwd) = working_directory(ctx, "pushd")? else {
+			return done(1);
+		};
 		list[0] = cwd;
 		let st = cd_to(ctx, &top)?;
 		store_entries(ctx.k, ctx.cx.store, ctx.vp, list);
 		if st == 0 {
-			return dirs(ctx, &[]);
+			return entered(ctx);
 		}
 		return done(st);
 	}
@@ -287,12 +338,17 @@ pub fn pushd(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		}
 	}
 	if let Some(n) = rotate {
+		// bash reads the current directory before rotating; where that
+		// fails it changes nothing (and crashes rotating a stack around it).
+		let Some(cwd) = working_directory(ctx, "pushd")? else {
+			return done(1);
+		};
 		if n == 0 {
 			if nocd {
 				return done(0);
 			}
 			let st = cd_to(ctx, &cwd)?;
-			return if st == 0 { dirs(ctx, &[]) } else { done(st) };
+			return if st == 0 { entered(ctx) } else { done(st) };
 		}
 		// Rotate the ring [cwd, top, …] so element `n` leads.
 		let mut ring = Vec::with_capacity(list.len() + 1);
@@ -306,21 +362,35 @@ pub fn pushd(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		}
 		let st = cd_to(ctx, &front)?;
 		store_entries(ctx.k, ctx.cx.store, ctx.vp, ring);
-		return if st == 0 { dirs(ctx, &[]) } else { done(st) };
+		return if st == 0 { entered(ctx) } else { done(st) };
 	}
 	let Some(dir) = rest.first() else {
 		return done(0);
 	};
-	if !nocd {
-		let cd_args = if skipopt { args } else { rest };
-		let st = dir::cd(ctx, cd_args)?.status;
-		if st != 0 {
-			return done(1);
-		}
+	// The directory left goes on the stack: read before the change, and
+	// where that fails (`set -P` in a removed directory) nothing changes.
+	let Some(cwd) = working_directory(ctx, "pushd")? else {
+		return done(1);
+	};
+	if nocd {
+		list.insert(0, dir.clone());
+		store_entries(ctx.k, ctx.cx.store, ctx.vp, list);
+		return dirs(ctx, &[]);
 	}
-	list.insert(0, if nocd { dir.clone() } else { cwd });
+	let cd_args = if skipopt { args } else { rest };
+	if dir::cd(ctx, cd_args)?.status != 0 {
+		return done(1);
+	}
+	list.insert(0, cwd);
 	store_entries(ctx.k, ctx.cx.store, ctx.vp, list);
-	dirs(ctx, &[])
+	entered(ctx)
+}
+
+/// `dirs` after a `cd` of this command entered the current directory: the
+/// name it gave the directory is what `getcwd` would answer now.
+fn entered(ctx: &mut Ctx<'_, '_>) -> R {
+	let cwd = ctx.vp.cwd.clone();
+	dirs_from(ctx, &[], Some(cwd))
 }
 
 /// `popd [-n] [+N | -N]`.
@@ -366,6 +436,9 @@ pub fn popd(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			if st != 0 {
 				return done(st);
 			}
+			list.remove(0);
+			store_entries(ctx.k, ctx.cx.store, ctx.vp, list);
+			return entered(ctx);
 		}
 		list.remove(0);
 	} else {
