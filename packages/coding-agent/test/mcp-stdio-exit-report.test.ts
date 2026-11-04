@@ -233,28 +233,22 @@ describe.skipIf(process.platform === "win32" || !PYTHON)("StdioTransport exit re
 		);
 	}
 
-	// Round 5: the advice took the report's room and the error then removed it,
-	// leaving no reason at all.
-	// Round 6: two or more hints left one to take the room, and the error then removed it.
-	// Round 7: hints enough to pass the internal buffer pushed the reason out of it.
-	for (const hints of [1, 2, 3, 420, 1_000]) {
-		it(
-			`keeps a long reason that ${hints} runtime-only fetch hint${hints === 1 ? "" : "s"} follow`,
-			async () => {
-				const reason = `REFUSED: ${"word ".repeat(175)}FINAL_REASON`;
-				const advice = "For more information, pass `verbose: true` in the second argument to fetch().";
-				const args = server(`${stderrWrites([`${reason}\n${`${advice}\n`.repeat(hints)}`])}\nsys.exit(77)`);
-				const error = await withTransport({ command: python, args }, transport =>
-					transportRejection(transport.request("tools/call")),
-				);
+	// The error drops one trailing fetch hint from every MCP error message, as at
+	// main. The report is stderr's own last lines, so the reason before a hint stays.
+	it(
+		"keeps the reason before a trailing fetch hint, and drops the hint",
+		async () => {
+			const advice = "For more information, pass `verbose: true` in the second argument to fetch().";
+			const args = server(`${stderrWrites([`REFUSED: FINAL_REASON\n${advice}\n`])}\nsys.exit(77)`);
+			const error = await withTransport({ command: python, args }, transport =>
+				transportRejection(transport.request("tools/call")),
+			);
 
-				expect(error.code).toBe(77);
-				expect(error.message).toEndWith("FINAL_REASON");
-				expect(error.message).not.toContain("verbose: true");
-			},
-			TEST_TIMEOUT_MS,
-		);
-	}
+			expect(error.code).toBe(77);
+			expect(error.message).toEndWith("FINAL_REASON");
+		},
+		TEST_TIMEOUT_MS,
+	);
 
 	// Round 8: dropping each hint as it completed also dropped hints that more
 	// text followed, and hints joined without whitespace slipped past it.
@@ -272,99 +266,10 @@ describe.skipIf(process.platform === "win32" || !PYTHON)("StdioTransport exit re
 		TEST_TIMEOUT_MS,
 	);
 
-	for (const joiner of ["", "."]) {
-		it(
-			`keeps the reason before 1000 fetch hints joined by ${joiner ? "periods" : "nothing"}`,
-			async () => {
-				const advice = "For more information, pass `verbose: true` in the second argument to fetch()";
-				const hints = `${advice}${joiner}`.repeat(1_000);
-				const args = server(`${stderrWrites([`REFUSAL_REASON_CANARY\n${hints}\n`])}\nsys.exit(77)`);
-				const error = await withTransport({ command: python, args }, transport =>
-					transportRejection(transport.request("tools/call")),
-				);
-
-				expect(error.message).toEndWith("REFUSAL_REASON_CANARY");
-			},
-			TEST_TIMEOUT_MS,
-		);
-	}
-
-	// Round 9: a hint cut off at the end (a process stopped while writing it)
-	// kept the complete hints before it from being dropped.
-	for (const hints of [3, 520]) {
-		it(
-			`keeps the reason before ${hints} fetch hints and one cut off at the end`,
-			async () => {
-				const advice = "For more information, pass `verbose: true` in the second argument to fetch().";
-				const args = server(
-					`${stderrWrites([`REFUSAL_REASON_CANARY\n${`${advice}\n`.repeat(hints)}${advice.slice(0, 30)}`])}\nsys.exit(77)`,
-				);
-				const error = await withTransport({ command: python, args }, transport =>
-					transportRejection(transport.request("tools/call")),
-				);
-
-				expect(error.message).toEndWith("REFUSAL_REASON_CANARY");
-			},
-			TEST_TIMEOUT_MS,
-		);
-	}
-
-	// Round 11: a cut-off hint between complete ones (`H + "F" + H`) survived
-	// the report's pass and took the reason's room; the error then removed it.
-	for (const [name, between] of [
-		["F", "F"],
-		["For", "For"],
-		["F on its own line", "\nF\n"],
-		["a 30-character piece", "\nFor more information, pass `ver\n"],
-	] as const) {
-		it(
-			`keeps the reason before a hint, ${name} and a hint`,
-			async () => {
-				const advice = "For more information, pass `verbose: true` in the second argument to fetch()";
-				const reason = `REFUSED: ${"word ".repeat(175)}FINAL_REASON_CANARY`;
-				const args = server(`${stderrWrites([`${reason}\n${advice}${between}${advice}`])}\nsys.exit(77)`);
-				const error = await withTransport({ command: python, args }, transport =>
-					transportRejection(transport.request("tools/call")),
-				);
-
-				expect(error.code).toBe(77);
-				expect(error.message).toEndWith("FINAL_REASON_CANARY");
-			},
-			TEST_TIMEOUT_MS,
-		);
-	}
-
-	// Round 12: past the 32 KiB buffer, the kept text ended in a hint, a cut-off
-	// piece and a hint still being written; the trim saw no hint run there and cut
-	// the reason away.
-	for (const [count, between] of [
-		[420, "F"],
-		[1_100, "F"],
-		[520, "\nF\n"],
-		[420, "\nFor more information, pass `ver\n"],
-	] as const) {
-		it(
-			`keeps the reason before ${count} hints each followed by ${JSON.stringify(between)}`,
-			async () => {
-				const advice = "For more information, pass `verbose: true` in the second argument to fetch()";
-				const reason = `REFUSED: ${"word ".repeat(175)}FINAL_REASON_CANARY`;
-				const args = server(
-					`${stderrWrites([`${reason}\n${`${advice}${between}`.repeat(count)}${advice}`])}\nsys.exit(77)`,
-				);
-				const error = await withTransport({ command: python, args }, transport =>
-					transportRejection(transport.request("tools/call")),
-				);
-
-				expect(error.code).toBe(77);
-				expect(error.message).toEndWith("FINAL_REASON_CANARY");
-			},
-			TEST_TIMEOUT_MS,
-		);
-	}
-
-	// Round 11: 1 MiB of "ff " on stderr cost a healthy server's request about
-	// 3 s of this process's CPU (each word searched for a hint), past a 1 s deadline.
-	for (const word of ["noise", "ff", "ffff)", "F", "For"]) {
+	// Rounds 10 and 11: 1 MiB of stderr words cost a healthy server's request about
+	// 3 s of this process's CPU (each word redacted with the whole text, then each
+	// searched for a fetch hint), past a 1 s deadline.
+	for (const word of ["noise", "ff"]) {
 		it(
 			`spends little CPU on a MiB of stderr words like ${JSON.stringify(word)}`,
 			async () => {
@@ -652,6 +557,94 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'ok':True}}),flush=True
 			} finally {
 				if (child.exitCode === null) child.kill("SIGKILL");
 				await child.exited;
+				await removeWithRetries(root);
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	// Round 13: one request's failed write started the wait for the exit report,
+	// but another pending request's timer waited only once stdout had ended.
+	it(
+		"keeps every pending request waiting for the report once a write fails",
+		async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-stdio-concurrent-"));
+			const closed = path.join(root, "stdin-closed");
+			const go = path.join(root, "go");
+			const timeoutMs = 1_000;
+			try {
+				// The server closes stdin while the first request is pending, and exits only
+				// on cue, after the first request's deadline has passed.
+				const args = server(
+					`os.close(0);open(${JSON.stringify(closed)},'w').close()\nwhile not os.path.exists(${JSON.stringify(go)}): time.sleep(.01)\nos.write(2,b'CONCURRENT_REFUSAL\\n');sys.exit(77)`,
+				);
+				await withTransport({ command: python, args, timeout: timeoutMs }, async transport => {
+					const started = performance.now();
+					const first = transportRejection(transport.request("first"));
+					await waitForFile(closed);
+					// This write fails: the server closed stdin. That starts the exit report.
+					const second = transportRejection(transport.request("second", { bulk: "x".repeat(2_000_000) }));
+					const until = performance.now() + 10_000;
+					while (!transport.reportingExit) {
+						if (performance.now() > until) throw new Error("The failed write was never seen");
+						await Bun.sleep(5);
+					}
+					// The cue follows the real request clock, which fake timers cannot drive.
+					await Bun.sleep(Math.max(0, started + timeoutMs + 100 - performance.now()));
+					await Bun.write(go, "");
+					for (const error of await Promise.all([first, second])) {
+						expect(error.code).toBe(77);
+						expect(error.message).toEndWith("CONCURRENT_REFUSAL");
+					}
+				});
+			} finally {
+				await removeWithRetries(root);
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	// Round 13: after the report, the handshake awaited the transport's close, and
+	// a server that ignores SIGTERM held it there for the kill grace as well.
+	it(
+		"fails the handshake within the close deadline when the server ignores SIGTERM",
+		async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-stdio-sigterm-"));
+			const closed = path.join(root, "stdout-closed");
+			let pid = 0;
+			try {
+				const pending = connectToServer("wrapper", {
+					type: "stdio",
+					command: python,
+					args: [
+						"-u",
+						"-c",
+						`import os,signal,sys,time\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\nsys.stdin.readline()\nos.close(1);os.write(2,b'IGNORES_TERM\\n')\nopen(${JSON.stringify(closed)},'w').write(str(os.getpid()))\ntime.sleep(60)`,
+					],
+					// Long enough for the server to start on a loaded host; the report comes first.
+					timeout: 8_000,
+				}).then(
+					() => new Error("Expected the handshake to fail"),
+					(error: unknown) => error,
+				);
+				await waitForFile(closed);
+				const sign = performance.now();
+				pid = Number(await Bun.file(closed).text());
+				const outcome = await pending;
+				const elapsed = performance.now() - sign;
+				if (!(outcome instanceof MCPTransportError)) throw outcome;
+
+				expect(outcome.message).toEndWith("IGNORES_TERM");
+				// The close deadline is 1.5 s; the kill grace after it would add another second.
+				expect(elapsed).toBeLessThan(2_000);
+			} finally {
+				if (pid > 0) {
+					try {
+						process.kill(pid, "SIGKILL");
+					} catch {
+						// Already gone.
+					}
+				}
 				await removeWithRetries(root);
 			}
 		},

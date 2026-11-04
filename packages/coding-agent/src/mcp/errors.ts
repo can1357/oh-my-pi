@@ -38,110 +38,8 @@ const MAX_TRACE_ID_CHARS = 128;
 const MAX_DATA_STRING_CHARS = 256;
 const MAX_DATA_DEPTH = 5;
 const MAX_DATA_ENTRIES = 30;
-/** Bun's fetch hint, lowercased and without its final period. */
-const FETCH_VERBOSE_ADVICE = "for more information, pass `verbose: true` in the second argument to fetch()";
-
-/** The run of Bun fetch hints at the end of a text; see {@link trailingFetchAdvice}. */
-export interface TrailingFetchAdvice {
-	/** Where the run starts: the text before it is what stays. `value.length` when there is none. */
-	start: number;
-	/** Where each complete hint in the run starts, last first. */
-	hints: number[];
-}
-
-/**
- * The run of Bun's fetch hints at the end of `value`: complete hints, with or
- * without whitespace or a final period between copies, and pieces of a hint
- * cut off (a process stopped while writing one, or the stream is still
- * writing it). Cut-off pieces count only when a complete hint comes before
- * them, so text that merely starts like a hint ("REFUSED for") is kept, and
- * only while the pieces since that hint are shorter than one hint. The
- * walk goes back over complete hints and cut-off pieces alike and ends the
- * run at the earliest complete hint it reaches, so the text before the run
- * ends in nothing the walk would take: removing the run again removes nothing
- * (redaction is idempotent). Each step goes back at least one character and
- * compares at most one hint's length of candidates, character by character.
- */
-export function trailingFetchAdvice(value: string): TrailingFetchAdvice {
-	const hints: number[] = [];
-	let start = value.length;
-	let cursor = value.length;
-	/** Where the cut-off pieces since the last complete hint end, whitespace excluded. */
-	let piecesEnd: number | undefined;
-	for (;;) {
-		let end = cursor;
-		while (end > 0 && /\s/.test(value[end - 1]!)) end--;
-		const before = hints.length;
-		completeFetchAdviceStarts(value, end, hints);
-		if (hints.length > before) {
-			start = cursor = hints[hints.length - 1]!;
-			piecesEnd = undefined;
-			continue;
-		}
-		// A cut-off piece joins the run only if a complete hint is reached before it,
-		// and the pieces since the last complete hint are shorter than one hint: a
-		// process stopped mid-write leaves no more than that, and the walk stays short.
-		// Measured from where the pieces end, so a second strip, which starts there,
-		// measures the same.
-		const partial = fetchAdvicePrefixLength(value, end);
-		piecesEnd ??= end;
-		if (partial === 0 || piecesEnd - (end - partial) > FETCH_VERBOSE_ADVICE.length) break;
-		cursor = end - partial;
-	}
-	return { start, hints };
-}
-
-/** Push where each complete hint ending at or before `end` starts, last first. */
-function completeFetchAdviceStarts(value: string, end: number, starts: number[]): void {
-	for (;;) {
-		let cut = end;
-		while (cut > 0 && /\s/.test(value[cut - 1]!)) cut--;
-		if (cut > 0 && value[cut - 1] === ".") cut--;
-		const start = cut - FETCH_VERBOSE_ADVICE.length;
-		if (start < 0 || matchedAdviceLength(value, start, cut) !== FETCH_VERBOSE_ADVICE.length) return;
-		starts.push(start);
-		end = start;
-	}
-}
-
-/**
- * Length of the longest end of `value.slice(0, end)` that is the start of a
- * fetch hint and shorter than one (case-insensitive). The hint starts with
- * "f", and each candidate is compared character by character until it
- * differs, so text full of "f" costs no more than other text.
- */
-function fetchAdvicePrefixLength(value: string, end: number): number {
-	for (let start = Math.max(0, end - FETCH_VERBOSE_ADVICE.length + 1); start < end; start++) {
-		if (matchedAdviceLength(value, start, end) === end - start) return end - start;
-	}
-	return 0;
-}
-
-/** How many characters of `value` from `start` (before `end`) match the hint's start, case-insensitively. */
-function matchedAdviceLength(value: string, start: number, end: number): number {
-	let length = 0;
-	while (
-		start + length < end &&
-		length < FETCH_VERBOSE_ADVICE.length &&
-		value[start + length]!.toLowerCase() === FETCH_VERBOSE_ADVICE[length]
-	) {
-		length++;
-	}
-	return length;
-}
-
-/**
- * `value` without the run of Bun fetch hints at its end and the whitespace
- * before it ({@link trailingFetchAdvice}). Idempotent, so a caller that budgets
- * text after this never loses room to a hint the error later drops.
- */
-export function stripTrailingFetchAdvice(value: string): string {
-	let end = trailingFetchAdvice(value).start;
-	if (end === value.length) return value;
-	while (end > 0 && /\s/.test(value[end - 1]!)) end--;
-	return value.slice(0, end);
-}
-
+const FETCH_VERBOSE_ADVICE =
+	/\s*For more information, pass `verbose: true` in the second argument to fetch\(\)\.?\s*$/i;
 // Substring match, not exact: compound names (`client_secret`, `clientSecret`,
 // `private_key`, `signingSecret`, `access_token`) must classify as secrets so
 // their values never reach the exposed `data:` diagnostic.
@@ -204,15 +102,6 @@ function errorCode(error: unknown): string | number | undefined {
 }
 
 /**
- * Diagnostic text as an error shows it: without Bun's trailing fetch hints
- * ({@link stripTrailingFetchAdvice}), with credential values replaced
- * ({@link redactCredentials}). Idempotent.
- */
-export function redactDiagnosticText(value: string): string {
-	return redactCredentials(stripTrailingFetchAdvice(value));
-}
-
-/**
  * Replace credential values in text: bearer and basic credentials, credential
  * query parameters, and `key: value` / `key=value` pairs whose key names a
  * secret. A value is found from its label, so text must be redacted whole,
@@ -234,7 +123,7 @@ export function redactCredentials(value: string): string {
 }
 
 function sanitizeDiagnosticText(value: string, maxChars: number): string {
-	return redactDiagnosticText(value).slice(0, maxChars).trim();
+	return redactCredentials(value.replace(FETCH_VERBOSE_ADVICE, "")).slice(0, maxChars).trim();
 }
 
 function sanitizeData(value: unknown, depth: number, seen: WeakSet<object>): unknown {

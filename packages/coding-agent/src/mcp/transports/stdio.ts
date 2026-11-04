@@ -27,9 +27,6 @@ import {
 	nonRetryableMCPTransportError,
 	normalizeMCPTransportError,
 	redactCredentials,
-	redactDiagnosticText,
-	stripTrailingFetchAdvice,
-	trailingFetchAdvice,
 } from "../errors";
 import { RequestIdAllocator } from "../request-id";
 import { routeProgressNotification, withProgressToken } from "../progress";
@@ -444,8 +441,6 @@ const CLOSE_DEADLINE_MS = TERM_GRACE_MS + KILL_GRACE_MS;
 const STDERR_WORD_MAX_CHARS = 256;
 /** Characters of redacted stderr kept for the exit report. */
 const STDERR_TAIL_CHARS = 16 * 1024;
-/** Characters of trailing fetch hints kept when the buffer is cut: more than a report shows. */
-const STDERR_HINT_KEEP_CHARS = 4 * 1024;
 /** Words before the current one that redaction sees, enough for `Authorization: Bearer` and `api_key =`. */
 const STDERR_CONTEXT_WORDS = 6;
 /** End of each context word redaction sees: a label ends the word before its value. */
@@ -495,7 +490,7 @@ async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Prom
  * The last non-empty lines of `text`, at most `maxChars` characters in all.
  * A single last line longer than that keeps its end from the start of a word,
  * marked with `…`: cutting inside a word could leave a fragment that
- * {@link redactDiagnosticText} reads differently when the error is built.
+ * {@link redactCredentials} reads differently when the error is built.
  */
 function lastLines(text: string, maxChars: number): string {
 	const lines = text
@@ -562,15 +557,13 @@ class StderrTail {
 
 	/**
 	 * The last lines of stderr with credential values redacted, at most
-	 * `maxChars` characters; see {@link lastLines}.
+	 * `maxChars` characters; see {@link lastLines}. They are stderr's own last
+	 * lines, whatever they say: the error built from them drops one trailing
+	 * fetch hint, as it does for every MCP error, and nothing else.
 	 */
 	report(maxChars: number): string {
 		const current = this.#wordLength > 0 ? this.#redactWord() : "";
-		// Whole-text redaction again before choosing the tail: it also drops
-		// runtime-only advice at the end (fetch's `verbose: true` hint, which may
-		// end the word still being written), which the error removes anyway, so
-		// the reason before it is not cut to make room.
-		return lastLines(redactDiagnosticText(this.#redacted + current), maxChars);
+		return lastLines(this.#redacted + current, maxChars);
 	}
 
 	#append(text: string): void {
@@ -601,7 +594,6 @@ class StderrTail {
 			return `${separator}[${this.#wordLength}-character word omitted]`;
 		}
 		const context = this.#context.join("");
-		// Credentials only: the fetch hints go at report time, from the whole text.
 		const before = redactCredentials(context);
 		const after = redactCredentials(`${context}${separator}${this.#word}`);
 		// The redactor rewrites only from a label onward and keeps the label, so
@@ -609,33 +601,11 @@ class StderrTail {
 		return after.startsWith(before) ? after.slice(before.length) : `${separator}[redacted]`;
 	}
 
-	/**
-	 * Cut the kept text back to about {@link STDERR_TAIL_CHARS}. Fetch hints at
-	 * its end are kept apart from the text before them: the error drops trailing
-	 * hints, so they must not push that text out of the buffer, and only the last
-	 * {@link STDERR_HINT_KEEP_CHARS} of them are kept, whole, in case more text
-	 * follows them.
-	 */
-	#trim(): void {
-		const text = this.#redacted;
-		const advice = trailingFetchAdvice(text);
-		if (advice.start === text.length) {
-			this.#redacted = text.slice(-STDERR_TAIL_CHARS);
-			return;
-		}
-		const before = stripTrailingFetchAdvice(text);
-		// Keep from the start of a complete hint: what follows it is then a run
-		// of hints again, which the report removes whole.
-		const keepFrom = advice.hints.find(start => text.length - start >= STDERR_HINT_KEEP_CHARS) ?? advice.start;
-		const separator =
-			keepFrom === advice.start ? text.slice(before.length, advice.start) : before.length > 0 ? "\n" : "";
-		this.#redacted = before.slice(-STDERR_TAIL_CHARS) + separator + text.slice(keepFrom);
-	}
-
 	#finishWord(): void {
 		if (this.#wordLength === 0) return;
 		this.#redacted += this.#redactWord();
-		if (this.#redacted.length > 2 * STDERR_TAIL_CHARS) this.#trim();
+		// Redacted text may be cut anywhere: keep about the last STDERR_TAIL_CHARS.
+		if (this.#redacted.length > 2 * STDERR_TAIL_CHARS) this.#redacted = this.#redacted.slice(-STDERR_TAIL_CHARS);
 		const separator = this.#context.length === 0 ? "" : this.#separator;
 		this.#context.push(`${separator}${this.#word.slice(-STDERR_CONTEXT_WORD_CHARS)}`);
 		if (this.#context.length > STDERR_CONTEXT_WORDS) {
@@ -783,6 +753,11 @@ class StdioConnection {
 		readonly detached: boolean,
 	) {}
 
+	/** Whether a sign of the exit came: stdout ended, or a write failed (which starts the close deadline). */
+	get exitObserved(): boolean {
+		return this.outputDone || this.closeDeadline !== undefined;
+	}
+
 	/** Milliseconds left until the close deadline, which this call starts if no sign of the exit came before. */
 	untilCloseDeadline(): number {
 		this.closeDeadline ??= performance.now() + CLOSE_DEADLINE_MS;
@@ -812,8 +787,7 @@ export class StdioTransport implements MCPTransport {
 
 	/** See {@link MCPTransport.reportingExit}: set by the first sign of the exit, stdout ending or a failed write. */
 	get reportingExit(): boolean {
-		const connection = this.#connection;
-		return connection !== null && (connection.outputDone || connection.closeDeadline !== undefined);
+		return this.#connection?.exitObserved ?? false;
 	}
 
 	/**
@@ -1113,10 +1087,7 @@ export class StdioTransport implements MCPTransport {
 		});
 
 		if (isMCPTimeoutEnabled(timeout)) {
-			timer = setTimeout(() => {
-				// Stdout already ended: the close is about to reject this request with the
-				// server's exit code and stderr, which say more than a timeout would.
-				if (connection.outputDone) return;
+			const expire = () => {
 				if (
 					settle(
 						new MCPTransportError({
@@ -1130,6 +1101,17 @@ export class StdioTransport implements MCPTransport {
 				) {
 					sendCancellation(`Request timed out after ${timeout}ms`);
 				}
+			};
+			timer = setTimeout(() => {
+				// A sign of the exit came (stdout ended, or any request's write failed):
+				// the close is about to reject this request with the server's exit code
+				// and stderr, which say more than a timeout would. If stdout stays open
+				// past the close deadline the server is still running, and the timeout stands.
+				if (!connection.exitObserved) return expire();
+				if (connection.outputDone) return;
+				void settlesWithin(connection.outputEnded.promise, connection.untilCloseDeadline()).then(ended => {
+					if (!ended) expire();
+				});
 			}, timeout);
 		}
 

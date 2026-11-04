@@ -203,7 +203,9 @@ export async function connectToServer(
 				instructions: initResult.instructions,
 			};
 		} catch (error) {
-			await closeTransport();
+			// Close in the background: the error is the result, and a server that ignores
+			// SIGTERM must not hold it for the close's kill grace.
+			void closeTransport()?.catch(() => {});
 			throw error;
 		}
 	};
