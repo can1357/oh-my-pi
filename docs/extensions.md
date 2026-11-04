@@ -1354,6 +1354,8 @@ A display-only transform of each assistant text block in the main transcript, us
 
 ## Transcript presenter
 
+Opt-in: presenters are asked only while the `extensionRenderers.transcriptPresenters` setting is on (default off; **Tools → Extensions → Extension Transcript Presenters**). Off, they are never called and every block draws as without them; turning it on or off redraws the transcript.
+
 ```ts
 // Tool calls of runs that have ended: answers depend only on the block and this set.
 const finished = new Set<string>();
@@ -1373,7 +1375,7 @@ pi.registerTranscriptPresenter(block => {
 });
 ```
 
-Chooses how each block of the main session's transcript is drawn, in the plain terminal and in Tern's native view. It is display only: the session, `/export` and the model context are unchanged. It works in interactive mode; elsewhere the presenter is registered but never asked.
+Chooses how each block of the main session's transcript is drawn, in the plain terminal and in Tern's native view. It is display only: the session, `/export` and the model context are unchanged. It works in interactive mode with the setting on; elsewhere the presenter is registered but never asked.
 
 - **Blocks.** A presenter receives a read-only `TranscriptBlock`. Today that is `{ type: "toolCall", id, toolName, args, result?, isError, isPartial }` for a model tool call, with `id` the `toolCallId`; the reads of a grouped read card are asked one by one. `args` and `result` are not copies: they are the live objects omp draws the card from, often the session's own message data, so never mutate them. Later versions add block types: return `undefined` for a `type` you do not know.
 - **Answers.** `undefined` defers to the next presenter. `"full"` is omp's own drawing. `"hidden"` draws nothing, as `display.hideToolActivity` does. `"compact"` is one row of omp's own summary. `{ compact: { label, rows } }` replaces that row's text with `label` and adds one row per entry of `rows` below it; both take `TspText` (a string or theme-token spans). Presenters answer synchronously and run while the transcript draws, so keep them cheap: any other value (a misspelt mode, the Promise of an `async` presenter) draws the block in full and is reported like a throw.

@@ -225,7 +225,7 @@ Full event catalog: see [extension authoring guide](../extensions.md).
 
 ## Changing how transcript blocks are drawn
 
-`pi.registerTranscriptPresenter(block => …)` picks `"full"`, `"compact"`, `"hidden"` or `{ compact: { label, rows } }` for each tool call of the main session's transcript (`block.type === "toolCall"`, `block.id` its `toolCallId`), or `undefined` to leave it to the next presenter. Return `undefined` for block types you do not know; later versions add more. It returns a disposer.
+`pi.registerTranscriptPresenter(block => …)` picks `"full"`, `"compact"`, `"hidden"` or `{ compact: { label, rows } }` for each tool call of the main session's transcript (`block.type === "toolCall"`, `block.id` its `toolCallId`), or `undefined` to leave it to the next presenter. Return `undefined` for block types you do not know; later versions add more. It returns a disposer. Presenters only run while the user turns on `extensionRenderers.transcriptPresenters` (default off).
 
 ```ts
 const finished = new Set<string>(); // tool calls of runs that have ended
