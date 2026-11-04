@@ -8372,7 +8372,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async resume(): Promise<void> {
 		const prompt = this.#recovery.prepareResume();
 		if (!prompt) {
-			if (!this.agent.state.messages.some(message => message.role === "user")) {
+			if (!this.agent.state.messages.some(isUserAuthoredMessage)) {
 				throw new Error("Nothing to resume");
 			}
 			await this.prompt(manualContinuePrompt, {

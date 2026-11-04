@@ -1,8 +1,8 @@
 /**
  * Contract: the `.`/`c` continue shortcut (`AgentSession.resume`) re-runs a
  * prompt the model has not answered yet without adding any message, injects
- * the hidden manual-continue directive after an answered turn, and refuses to
- * continue an empty conversation.
+ * the hidden manual-continue directive after an answered turn (typed or
+ * `/skill:` prompt), and refuses to continue an empty conversation.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
@@ -13,7 +13,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
@@ -152,6 +152,28 @@ describe("AgentSession.resume", () => {
 
 		expect(session.agent.state.messages.map(message => [message.role, textOf(message)])).toEqual([
 			["user", "do the thing"],
+			["assistant", "done"],
+			["developer", manualContinuePrompt],
+			["assistant", "more"],
+		]);
+	});
+
+	it("continues a conversation a `/skill:` prompt started", async () => {
+		const { session } = createSession([{ content: ["done"] }, { content: ["more"] }]);
+		await session.promptCustomMessage({
+			customType: SKILL_PROMPT_MESSAGE_TYPE,
+			content: "follow the skill",
+			display: true,
+			details: { name: "disk-cleanup", path: "/skills/disk-cleanup/SKILL.md", lineCount: 1 },
+			attribution: "user",
+		});
+		await session.waitForIdle();
+
+		await session.resume();
+		await session.waitForIdle();
+
+		expect(session.agent.state.messages.map(message => [message.role, textOf(message)])).toEqual([
+			["custom", "follow the skill"],
 			["assistant", "done"],
 			["developer", manualContinuePrompt],
 			["assistant", "more"],
