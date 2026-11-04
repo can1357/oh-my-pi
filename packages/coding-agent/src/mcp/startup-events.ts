@@ -1,5 +1,5 @@
 import { type } from "@oh-my-pi/omptype";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import {
 	replaceTabs,
 	shortenEmbeddedPaths,
@@ -7,6 +7,7 @@ import {
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui/render/render-utils";
+import unavailableServersTemplate from "../prompts/tools/mcp-unavailable-servers.md" with { type: "text" };
 
 export const MCP_CONNECTION_STATUS_EVENT_CHANNEL = "mcp:connection-status";
 
@@ -99,14 +100,20 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
  * it a server that failed at startup (an OAuth server with no stored login
  * answers HTTP 401) leaves no trace in the session: its tools are simply
  * absent, and "No such tool" reads like a typo.
+ *
+ * `awaitingLogin` names the listed servers that failed while no OAuth login
+ * for them was stored and that the caller is checking for one now; only they
+ * get the sentence saying omp reconnects a server once a login turns up.
  */
-export function formatMCPUnavailableServersNote(failures: readonly McpConnectionFailure[]): string {
-	const list = failures.map(formatFailedServer).join("; ");
-	return [
-		`MCP ${formatServerCount(failures.length)} configured but not connected, so ${failures.length === 1 ? "its" : "their"} tools are not mounted: ${list}.`,
-		"A person can sign an OAuth server in with `/mcp reauth <server>` or retry any server with `/mcp reconnect <server>`.",
-		"When a login for one of them was stored after it failed (for example by `/mcp reauth` in another session), omp reconnects it now; its tools appear once it connects.",
-	].join(" ");
+export function formatMCPUnavailableServersNote(
+	failures: readonly McpConnectionFailure[],
+	awaitingLogin: readonly string[],
+): string {
+	return prompt.render(unavailableServersTemplate, {
+		single: failures.length === 1,
+		servers: failures.map(formatFailedServer).join("; "),
+		awaitingLogin: formatServerList(awaitingLogin),
+	});
 }
 
 const McpConnectionStatusEventShape = type({ type: "'connecting'", serverNames: "string[]" })

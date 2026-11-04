@@ -160,6 +160,31 @@ describe("MCP server that is not connected", () => {
 		expect(manager.explainMissingTool("read")).toBeUndefined();
 	});
 
+	it("promises a reconnect only for the servers that failed for want of a login", async () => {
+		// `crashed` exits before answering: no login would bring it back, so the
+		// note must not tell the model that omp is reconnecting it.
+		const mixed = new MCPManager(tempDir);
+		mixed.setAuthStorage(session);
+		try {
+			await mixed.connectServers(
+				{
+					crashed: { type: "stdio", command: process.execPath, args: ["-e", "process.exit(3)"], timeout: 2_000 },
+				},
+				{},
+			);
+			await mixed.waitForStartup(GUARD_MS);
+			expect(mixed.getConnectionStatus("crashed")).toBe("disconnected");
+			const crashedOnly = mixed.explainMissingTool("mcp__crashed_ping");
+			expect(crashedOnly).toContain("crashed");
+			expect(crashedOnly).not.toContain("omp is checking now");
+		} finally {
+			await mixed.disconnectAll();
+		}
+		const remoteNote = manager.explainMissingTool("mcp__remote_ping");
+		expect(remoteNote).toContain("omp is checking now whether a login was stored for remote");
+		await session.credentials.poll();
+	});
+
 	it("puts the note in the xd:// error the model reads", () => {
 		const toolSession = { mcpManager: manager } as unknown as ToolSession;
 		const state = createXdevState(toolSession, new Map(), new Set());
@@ -187,5 +212,46 @@ describe("MCP server that is not connected", () => {
 		await toolRegistered(manager, "mcp__remote_ping");
 		expect(manager.getConnectionStatus("remote")).toBe("connected");
 		expect(manager.explainMissingTool("mcp__remote_ping")).toBeUndefined();
+	});
+
+	it("reconnects every server whose login another session stored, on one miss", async () => {
+		// Two more servers down for want of a login, plus an unrelated login in the store, so the
+		// credential pool holds more than one provider. Another session then stores a login for the
+		// last one only. One `mcp__` miss must bring that server back: a check that reads the pool
+		// before this session has reloaded the other session's write would leave it down.
+		const alpha = startLoginRequiredServer();
+		const beta = startLoginRequiredServer();
+		const two = new MCPManager(tempDir);
+		two.setAuthStorage(session);
+		try {
+			await otherSession.credentials.set("unrelated-provider", { type: "api_key", key: "k" });
+			await session.credentials.poll();
+			await two.connectServers(
+				{
+					alpha: { type: "http", url: alpha.url, timeout: 2_000 },
+					beta: { type: "http", url: beta.url, timeout: 2_000 },
+				},
+				{},
+			);
+			await two.waitForStartup(GUARD_MS);
+			expect(two.getConnectionStatus("beta")).toBe("disconnected");
+			await otherSession.credentials.set(mcpOAuthCredentialId(beta.url), {
+				type: "oauth",
+				access: GOOD_TOKEN,
+				refresh: "unused-refresh",
+				expires: Date.now() + 3_600_000,
+			});
+			two.explainMissingTool("mcp__beta_ping");
+			await toolRegistered(two, "mcp__beta_ping");
+			expect(two.getConnectionStatus("beta")).toBe("connected");
+			expect(two.getConnectionStatus("alpha")).toBe("disconnected");
+		} finally {
+			await two.disconnectAll();
+			alpha.stop();
+			beta.stop();
+			await otherSession.credentials.remove(mcpOAuthCredentialId(beta.url));
+			await otherSession.credentials.remove("unrelated-provider");
+			await session.credentials.poll();
+		}
 	});
 });

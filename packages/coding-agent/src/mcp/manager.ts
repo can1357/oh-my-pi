@@ -1332,12 +1332,15 @@ export class MCPManager implements MCPManagerApi {
 	explainMissingTool(toolName: string): string | undefined {
 		if (!toolName.startsWith(MCP_TOOL_NAME_PREFIX)) return undefined;
 		const failures: Array<{ serverName: string; error: string; sourcePath?: string }> = [];
+		const awaitingLogin: string[] = [];
 		for (const [serverName, error] of this.#startupFailures) {
 			if (this.getConnectionStatus(serverName) !== "disconnected") continue;
 			failures.push({ serverName, error, sourcePath: this.#sources.get(serverName)?.path });
-			if (this.#failedWithoutLogin.has(serverName)) void this.#reconnectWithStoredLogin(serverName);
+			if (!this.#failedWithoutLogin.has(serverName)) continue;
+			awaitingLogin.push(serverName);
+			void this.#reconnectWithStoredLogin(serverName);
 		}
-		return failures.length > 0 ? formatMCPUnavailableServersNote(failures) : undefined;
+		return failures.length > 0 ? formatMCPUnavailableServersNote(failures, awaitingLogin) : undefined;
 	}
 
 	/**

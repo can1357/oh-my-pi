@@ -182,6 +182,25 @@ describe("credential pool visibility across processes", () => {
 		expect(listCalls).toBe(afterInitialLoad);
 	});
 
+	it("returns from a poll that overlaps another poll's reload only once the commit is in the pool", async () => {
+		// Two providers: the reload then yields between them, which is where an overlapping poll got in.
+		const rows = [oauthRow(1), { ...oauthRow(9), provider: "other-provider" }];
+		const { store, commitExternally } = makeExternallyMutableStore(rows);
+		const storage = new AuthStorage(store, { configValueResolver: async value => value });
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		commitExternally(oauthRow(2));
+		// The store reports each external commit once. The first poll takes that report and starts
+		// its reload; a second caller polling meanwhile (another credential check, another MCP
+		// server's login check) must not read the pool before that reload lands.
+		const first = storage.credentials.poll();
+		const second = storage.credentials.poll();
+		expect(await second).toBe(false);
+		expect(storage.credentials.list("anthropic").map(row => row.id)).toEqual([1, 2]);
+		expect(await first).toBe(true);
+	});
+
 	it("does not blame a sibling when another process deletes the pinned account", async () => {
 		const rows = [oauthRow(1), oauthRow(2)];
 		const { store, removeExternally, blocks } = makeExternallyMutableStore(rows);
