@@ -324,7 +324,6 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 }
 
 describe("user-level roots a variable moves out of the home", () => {
-	// Set before the file's per-test isolation runs, as a variable inherited from the shell is.
 	const outside = TempDir.createSync("@pi-revive-alternate-roots-");
 	const planted: Record<(typeof ALTERNATE_ROOT_ENV_KEYS)[number], string | undefined> = {
 		CLAUDE_CONFIG_DIR: path.join(outside.path(), "claude"),
@@ -334,25 +333,26 @@ describe("user-level roots a variable moves out of the home", () => {
 		COPILOT_HOME: path.join(outside.path(), "copilot"),
 		COPILOT_CUSTOM_INSTRUCTIONS_DIRS: path.join(outside.path(), "copilot-extra"),
 	};
+	const skill = "---\nname: planted\ndescription: planted\n---\nplanted\n";
+	/** Every file planted in those roots that discovery finds once the variables point at them. */
+	const plantedFiles: Record<string, string> = {
+		[path.join(outside.path(), "claude", "commands", "planted", "index.ts")]: "export default () => {};\n",
+		[path.join(outside.path(), "claude", "CLAUDE.md")]: "planted\n",
+		[path.join(outside.path(), "claude", "skills", "planted", "SKILL.md")]: skill,
+		[path.join(outside.path(), "windows-home", ".agents", "AGENTS.md")]: "planted\n",
+		[path.join(outside.path(), "windows-home", ".agents", "skills", "planted", "SKILL.md")]: skill,
+		[path.join(outside.path(), "windows-home", ".agents", "commands", "planted.md")]: "planted\n",
+		[path.join(outside.path(), "copilot-extra", "AGENTS.md")]: "planted\n",
+	};
 	let inherited: Record<string, string | undefined> = {};
+	let setBeforeIsolation = false;
 
-	beforeAll(async () => {
-		const skill = "---\nname: planted\ndescription: planted\n---\nplanted\n";
-		await Promise.all([
-			Bun.write(
-				path.join(outside.path(), "claude", "commands", "planted", "index.ts"),
-				"export default () => {};\n",
-			),
-			Bun.write(path.join(outside.path(), "claude", "CLAUDE.md"), "planted\n"),
-			Bun.write(path.join(outside.path(), "claude", "skills", "planted", "SKILL.md"), skill),
-			Bun.write(path.join(outside.path(), "windows-home", ".agents", "AGENTS.md"), "planted\n"),
-			Bun.write(path.join(outside.path(), "windows-home", ".agents", "skills", "planted", "SKILL.md"), skill),
-			Bun.write(path.join(outside.path(), "windows-home", ".agents", "commands", "planted.md"), "planted\n"),
-			Bun.write(path.join(outside.path(), "copilot", "copilot-instructions.md"), "planted\n"),
-			Bun.write(path.join(outside.path(), "copilot-extra", "AGENTS.md"), "planted\n"),
-		]);
+	// The variables must be in place before the file's per-test isolation runs, as a variable
+	// inherited from the shell is; a test body or an inner `beforeEach` runs after it.
+	beforeAll(() => {
 		inherited = Object.fromEntries(ALTERNATE_ROOT_ENV_KEYS.map(key => [key, process.env[key]]));
 		for (const key of ALTERNATE_ROOT_ENV_KEYS) restoreEnvValue(key, planted[key]);
+		setBeforeIsolation = true;
 	});
 
 	afterAll(() => {
@@ -360,8 +360,8 @@ describe("user-level roots a variable moves out of the home", () => {
 		outside.removeSync();
 	});
 
-	it("discovers no command, skill, rule or context file in them", async () => {
-		const cwd = makeTempDir("@pi-revive-alternate-roots-cwd-");
+	/** Paths under the planted roots that command discovery and every file-based capability return. */
+	async function discoverPlanted(cwd: string): Promise<string[]> {
 		const discovered = (await discoverCustomCommands({ cwd })).paths.map(command => command.path);
 		for (const capability of [
 			contextFileCapability,
@@ -375,7 +375,20 @@ describe("user-level roots a variable moves out of the home", () => {
 			const result = await loadCapability<{ _source: SourceMeta }>(capability.id, { cwd });
 			discovered.push(...result.all.map(item => item._source.path));
 		}
-		expect(discovered.filter(found => found.startsWith(outside.path()))).toEqual([]);
+		return [...new Set(discovered.filter(found => found.startsWith(outside.path())))].sort();
+	}
+
+	it("discovers no command, skill, rule or context file in them", async () => {
+		expect(setBeforeIsolation).toBe(true);
+		await Promise.all(Object.entries(plantedFiles).map(([file, content]) => Bun.write(file, content)));
+		const cwd = makeTempDir("@pi-revive-alternate-roots-cwd-");
+
+		expect(await discoverPlanted(cwd)).toEqual([]);
+
+		// Control: with the same variables set again in this process, discovery finds every planted
+		// file, so the empty result above comes from the isolation and not from a blind probe.
+		for (const key of ALTERNATE_ROOT_ENV_KEYS) restoreEnvValue(key, planted[key]);
+		expect(await discoverPlanted(cwd)).toEqual(Object.keys(plantedFiles).sort());
 	});
 });
 
