@@ -135,16 +135,6 @@ describe("setup surfaces under native rendering", () => {
 		}
 	});
 
-	it("wizard completes immediately when motion is none and no scenes apply", async () => {
-		const ui = fakeUi();
-		const host = { ...ui.host, motion: "none" as const };
-		const scene = probeScene("ansi", true);
-		const wizard = new SetupWizardComponent(fakeSetupHost(host), [scene]);
-		await wizard.run();
-		expect(scene.hosts).toHaveLength(0);
-		expect(ui.renders()).toBe(0);
-	});
-
 	it("wizard skips outro when motion is none", async () => {
 		const ui = fakeUi();
 		const host = { ...ui.host, motion: "none" as const };
@@ -158,6 +148,38 @@ describe("setup surfaces under native rendering", () => {
 			await done;
 			// No outro phase rendered
 			expect(ui.renders()).toBeLessThanOrEqual(2);
+		} finally {
+			wizard.dispose();
+		}
+	});
+	it("wizard goes straight to scene in ANSI mode when motion is none", async () => {
+		setNativeRendering(false);
+		const ui = fakeUi();
+		const host = { ...ui.host, motion: "none" as const };
+		let mounted: SetupSceneController | undefined;
+		const scene: SetupScene = {
+			id: "probe",
+			title: "Probe scene",
+			step: "Probe",
+			minVersion: 1,
+			mount: () => {
+				mounted = { title: "Probe scene", render: () => [] };
+				return mounted;
+			},
+		};
+		const wizard = new SetupWizardComponent(fakeSetupHost(host), [scene]);
+		const done = wizard.run();
+		try {
+			// In ANSI mode with motion=none, should go straight to scene without splash/transition
+			expect(mounted).toBeDefined();
+			expect(nodes([wizard.describe(cx)]).some(n => n.c?.some(child => child === mounted))).toBe(true);
+			// No splash phase, no transition phase - ANSI render shows scene immediately
+			expect(wizard.render(80).some(l => l.includes("Setup step 1 of 1"))).toBe(true);
+			// No splash phase, no transition phase - only initial render
+			expect(ui.renders()).toBe(1);
+
+			wizard.handleInput("\x03");
+			await done;
 		} finally {
 			wizard.dispose();
 		}

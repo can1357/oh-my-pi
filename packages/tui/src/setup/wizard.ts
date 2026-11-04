@@ -79,7 +79,6 @@ export async function selectSetupScenes(
 export interface RunSetupWizardOptions {
 	markComplete?: boolean;
 	playWelcomeIntro?: boolean;
-	motion?: "full" | "reduced" | "none";
 }
 
 /**
