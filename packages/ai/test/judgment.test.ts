@@ -1,5 +1,6 @@
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
+import type { Api, Model, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import { describe, expect, it, spyOn } from "bun:test";
 import {
@@ -1114,6 +1115,64 @@ describe("NativeJudge", () => {
 				expect(wireState.__omp_judgment_images_1).toEqual(states[0].__omp_judgment_images_1);
 			}
 		}
+	});
+
+	it("sends an OpenRouter Decisions model's compat routing and extraBody as the request's provider controls", async () => {
+		const pin = { only: ["typesafe"], allow_fallbacks: false, data_collection: "deny" };
+		// Judgment APIs share the chat compat vocabulary, as models.yml overrides apply it to every API.
+		const decisionsModel = (compat?: OpenAICompat) => {
+			const spec: ModelSpec<Api> = {
+				id: "typesafe/jev-1.14",
+				name: "Jev 1.14",
+				api: "openrouter-decisions",
+				provider: "openrouter",
+				// A relay base URL: the Decisions API is OpenRouter's own, so routing applies off openrouter.ai too.
+				baseUrl: "https://relay.example/agents/openrouter/api/alpha",
+				reasoning: false,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: null,
+				compat,
+			};
+			return buildModel(spec);
+		};
+		const image: ImageContent = { type: "image", data: JEV_PNG, mimeType: "image/png" };
+		const send = async (model: Model) => {
+			const bodies: Record<string, unknown>[] = [];
+			const judge = createNativeJudge(model, {
+				apiKey: "or-key",
+				fetch: async (_url, init) => {
+					bodies.push(JSON.parse(String(init?.body)));
+					return Response.json({
+						model: "typesafe/jev-1.14",
+						answers: { urgent: { type: "noul", noul: 0.7 } },
+						usage: { input_tokens: 10, output_tokens: 2, cost: 0.00001 },
+					});
+				},
+			});
+			const result = await judge.judge({ ...request, images: [image] });
+			expect(result.answers.urgent.noul).toBe(0.7);
+			expect(result.usage).toMatchObject({ input: 10, output: 2, cost: { total: 0.00001 } });
+			expect(bodies).toHaveLength(1);
+			const body = bodies[0];
+			expect(body).toMatchObject({ model: "typesafe/jev-1.14", questions: request.questions });
+			expect(body.state).toEqual([
+				request.state,
+				{ type: "image_url", image_url: { url: `data:image/png;base64,${JEV_PNG}` } },
+			]);
+			return body;
+		};
+
+		// `extraBody` overlays `openRouterRouting`, as on chat requests: privacy fields only fit there.
+		const configured = await send(
+			decisionsModel({ openRouterRouting: { only: ["fallback-host"] }, extraBody: { provider: pin } }),
+		);
+		expect(configured.provider).toEqual(pin);
+		const routed = await send(decisionsModel({ openRouterRouting: { only: ["typesafe"] } }));
+		expect(routed.provider).toEqual({ only: ["typesafe"] });
+		const unconfigured = await send(decisionsModel());
+		expect(unconfigured).not.toHaveProperty("provider");
 	});
 
 	it("rejects malformed OpenRouter image input before fetching", async () => {
