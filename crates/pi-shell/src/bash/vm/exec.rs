@@ -2367,7 +2367,7 @@ pub fn start_zsh_procsub(
 	let (r, w) = mem::pipe();
 	let (r, w) = (FdRef::mem(r), FdRef::mem(w));
 	let (mine, theirs, their_fd) = if output { (w, r, 0) } else { (r, w, 1) };
-	let fd = shell_fd(vp, high_fds_fit(cx), &[]);
+	let fd = shell_fd(vp, high_fds_fit(cx, vp), &[]);
 	// The other substitutions' fds stay open in the child (zsh `getproc`'s
 	// `closem` spares `FDT_PROC_SUBST`): its words may name them.
 	let mut fds = vp.fds.clone();
@@ -2507,7 +2507,7 @@ pub fn start_procsub(
 	let r = FdRef::mem(r);
 	let w = FdRef::mem(w);
 	let (mine, theirs, their_fd) = if output { (w, r, 0) } else { (r, w, 1) };
-	let fd = shell_fd(vp, high_fds_fit(cx), &[]);
+	let fd = shell_fd(vp, high_fds_fit(cx, vp), &[]);
 	// The child gets the parent's fds before `fd` is set: it must not hold
 	// the parent's end (a `>( )` reader would never see end of input).
 	let mut fds = vp.fds.clone();
@@ -4128,20 +4128,32 @@ fn runs_jobs(unit: &Unit, entry: u32) -> bool {
 	})
 }
 
-/// Whether the process's open-file limit leaves room for the descriptors
-/// bash puts at 63 and below (process substitutions, coprocesses): with a
-/// limit of 63 or less bash keeps the lowest free descriptors instead,
-/// which every command can be given. The process's soft limit decides, not
-/// the vproc's `ulimit -n`: a child is given its descriptors before its own
-/// limit applies, so only the process's limit bounds them, and a low
-/// `ulimit -n` must leave the command room below it for its own opens.
-fn high_fds_fit(cx: &mut Cx<'_>) -> bool {
-	let soft = cx
+/// Whether the open-file limit leaves room for the descriptors bash puts
+/// at 63 and below (process substitutions, coprocesses): with a limit of
+/// 63 or less bash keeps the lowest free descriptors instead, which every
+/// command can be given. Two limits bound them and the lower decides. The
+/// host process's soft limit, because the engine opens the descriptor in
+/// that process, so one at or above it cannot exist. The vproc's
+/// `ulimit -n`, because that is the limit bash would have applied to
+/// itself, and because a command is given its descriptors before its own
+/// limit is applied: a low `ulimit -n` leaves a high one usable but no
+/// room below it for the command's own opens.
+fn high_fds_fit(cx: &mut Cx<'_>, vp: &Vproc) -> bool {
+	let host = cx
 		.host
 		.rlimit(Rlimit::Nofile)
 		.ok()
 		.and_then(|(soft, _)| soft);
-	soft.is_none_or(|soft| soft > 63)
+	let own = vp
+		.rlimits
+		.iter()
+		.find(|(res, ..)| *res == Rlimit::Nofile)
+		.and_then(|&(_, soft, _)| soft);
+	[host, own]
+		.into_iter()
+		.flatten()
+		.min()
+		.is_none_or(|soft| soft > 63)
 }
 
 /// A free descriptor for a process substitution or coprocess end, not in
@@ -4171,7 +4183,7 @@ fn start_coproc(
 	entry: u32,
 	name: BString,
 ) {
-	let high = high_fds_fit(cx);
+	let high = high_fds_fit(cx, vp);
 	let mut taken: Vec<i32> = Vec::with_capacity(4);
 	while taken.len() < 4 {
 		let fd = shell_fd(vp, high, &taken);
