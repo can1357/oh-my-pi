@@ -55,7 +55,7 @@ export async function statIfPresent(target: string) {
 	try {
 		return await fs.stat(target);
 	} catch (error) {
-		if (codeOf(error) === "ENOENT") return undefined;
+		if (codeOf(error) === "ENOENT" || codeOf(error) === "ENOTDIR") return undefined;
 		throw error;
 	}
 }
@@ -100,7 +100,7 @@ function readLockText(text: string): LockReading {
 async function readHeldLock(lockPath: string): Promise<{ text: string; mtimeMs: number; held: HeldFile } | null> {
 	let handle: fs.FileHandle | undefined;
 	try {
-		handle = await openRegularFile(lockPath);
+		handle = await openRegularFile(lockPath, { noFollow: true });
 	} catch (error) {
 		if (error instanceof NotARegularFile) {
 			throw new Error(

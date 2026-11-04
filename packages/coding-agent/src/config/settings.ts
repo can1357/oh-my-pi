@@ -165,6 +165,14 @@ export interface SettingsOptions {
 	inMemory?: boolean;
 	/** Read config sources without opening storage or writing migrations */
 	readOnly?: boolean;
+	/**
+	 * In a read-only load with no config.yml, read the settings a writing load
+	 * would migrate out of legacy `settings.json`, so a read-only caller sees
+	 * what the directory is configured with rather than schema defaults. Only
+	 * `omp gc`, deciding whether a destructive phase is enabled, asks for this;
+	 * every other read-only consumer keeps seeing the defaults it always has.
+	 */
+	readLegacyIfNoConfig?: boolean;
 	/** Initial runtime overrides, keyed by setting id (legacy ids migrate; values are checked like `override`). */
 	overrides?: Readonly<Record<string, unknown>>;
 	/** Extra config.yml-style overlays loaded after global/project settings */
@@ -632,6 +640,7 @@ export class Settings {
 	#cwd: string;
 	#agentDir: string;
 	#storage: AgentStorageApi | null = null;
+	#readLegacyIfNoConfig = false;
 
 	#configFiles: string[] = [];
 	/** Global settings from config.yml/config.yaml */
@@ -739,6 +748,7 @@ export class Settings {
 		if (options.configFiles) configFiles.push(...options.configFiles);
 		this.#configFiles = configFiles.map(file => path.resolve(this.#cwd, expandTilde(file)));
 		this.#persist = !options.inMemory && options.readOnly !== true;
+		this.#readLegacyIfNoConfig = options.readLegacyIfNoConfig === true;
 		liveSettingsInstances.add(new WeakRef(this));
 		if (options.overrides) this.#overrides = this.#overrideLayer(options.overrides);
 	}
@@ -2197,15 +2207,15 @@ export class Settings {
 		if (projectResult.status === "rejected") throw projectResult.reason;
 		if (globalResult.value) {
 			this.#global = globalResult.value;
-		} else if (!(await Bun.file(this.#configPath ?? path.join(this.#agentDir, "config.yml")).exists())) {
-			// There is no config.yml at all, so the settings this agent directory
-			// is actually configured with may still be in the legacy
+		} else if (this.#readLegacyIfNoConfig && (await this.#noMainConfigFile())) {
+			// No config.yml or config.yaml exists, so the settings this agent
+			// directory is actually configured with may still be in the legacy
 			// `settings.json` that a writing load would migrate. Reading them —
 			// and only reading them — is what keeps a read-only view from
 			// reporting schema defaults for a directory that is configured,
 			// which a caller deciding whether a destructive phase is enabled
-			// must not do. A config.yml that exists but could not be read is a
-			// different thing: the layer already in hand stays.
+			// must not do. A config file that exists but could not be read threw
+			// above, so the layer already in hand stays.
 			const legacy = await this.#readLegacySettingsJson();
 			if (Object.keys(legacy).length > 0) this.#global = legacy;
 		}
@@ -2215,6 +2225,30 @@ export class Settings {
 		this.#rebuildMerged();
 		this.#validateAll();
 		return this;
+	}
+
+	/**
+	 * Whether no main config file (`config.yml`/`config.yaml`) is there to be
+	 * read: each is opened once and `ENOENT` means absent, so there is no
+	 * exists-then-open of the same name. A file that exists but cannot be
+	 * opened is not absent, and makes a read-only load keep the layer in hand
+	 * rather than fall back to legacy settings.
+	 */
+	async #noMainConfigFile(): Promise<boolean> {
+		if (!this.#configPath) return false;
+		for (const filename of MAIN_CONFIG_FILENAMES) {
+			let handle: fs.promises.FileHandle | undefined;
+			try {
+				handle = await fs.promises.open(path.join(this.#agentDir, filename), fs.constants.O_RDONLY);
+			} catch (error) {
+				if (isEnoent(error)) continue;
+				return false;
+			} finally {
+				await handle?.close().catch(() => undefined);
+			}
+			return false;
+		}
+		return true;
 	}
 
 	/**

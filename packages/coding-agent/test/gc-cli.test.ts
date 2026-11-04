@@ -1938,7 +1938,7 @@ test("round54 failed lock takeover reports the breaker left by this process too"
 	expect(await Bun.file(breaker).text()).toContain(`${process.pid}\n`);
 });
 
-test("round54 a stale symlink lock kept by unlink is not a running gc", async () => {
+test("round54 a stale symlink lock is reported as a link, not a running gc", async () => {
 	await leaveDeadGcLock(root);
 	const lock = path.join(root, "gc.lock");
 	const target = path.join(root, "stale-target");
@@ -1946,7 +1946,7 @@ test("round54 a stale symlink lock kept by unlink is not a running gc", async ()
 	await fs.symlink(target, lock);
 	const run = runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
 	await expect(run).rejects.not.toThrow("GC already running");
-	await expect(run).rejects.toThrow("left");
+	await expect(run).rejects.toThrow("a symbolic link");
 	expect((await fs.lstat(lock)).isSymbolicLink()).toBe(true);
 	expect(await Bun.file(target).exists()).toBe(true);
 });

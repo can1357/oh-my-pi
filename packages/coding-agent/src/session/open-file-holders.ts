@@ -177,7 +177,9 @@ export interface OpenFileHolder {
 }
 
 /** Who holds the files open, or why that could not be told. */
-export type OpenFileHolders = { holders: OpenFileHolder[] } | { unknown: string; seen?: OpenFileHolder[] };
+export type OpenFileHolders = ({ holders: OpenFileHolder[] } | { unknown: string; seen?: OpenFileHolder[] }) & {
+	/** Processes with at least one descriptor check denied. */ unlisted?: string;
+};
 
 /** Every process found holding one of `files` open; none of them may be a directory. */
 export async function openFileHolders(files: readonly string[]): Promise<OpenFileHolders> {
@@ -230,6 +232,19 @@ async function linuxHolders(files: readonly string[]): Promise<OpenFileHolders> 
 	const holders: OpenFileHolder[] = [];
 	// A failed lookup leaves the list incomplete, even if other holders were seen.
 	const unreadable: string[] = [];
+	let failedChecks = 0;
+	const denied = new Map<string, Set<string>>();
+	const failed = (note: string): void => {
+		failedChecks++;
+		if (unreadable.length < 8) unreadable.push(note.length > 512 ? `${note.slice(0, 509)}...` : note);
+	};
+	const inaccessible = (pid: string, code: string | undefined): boolean => {
+		if (code !== "EACCES" && code !== "EPERM") return false;
+		let processes = denied.get(code);
+		if (!processes) denied.set(code, (processes = new Set()));
+		processes.add(pid);
+		return true;
+	};
 	await Promise.all(
 		pids.map(async pid => {
 			let descriptors: string[];
@@ -238,9 +253,8 @@ async function linuxHolders(files: readonly string[]): Promise<OpenFileHolders> 
 			} catch (error) {
 				const code = codeOf(error);
 				if (code === "ENOENT" || code === "ESRCH") return;
-				unreadable.push(
-					`/proc/${pid}/fd could not be read: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				if (inaccessible(pid, code)) return;
+				failed(`/proc/${pid}/fd could not be read: ${error instanceof Error ? error.message : String(error)}`);
 				return;
 			}
 			await Promise.all(
@@ -252,7 +266,8 @@ async function linuxHolders(files: readonly string[]): Promise<OpenFileHolders> 
 						const code = codeOf(error);
 						// Closed since the listing, or the process is gone.
 						if (code === "ENOENT" || code === "ESRCH") return;
-						unreadable.push(
+						if (inaccessible(pid, code)) return;
+						failed(
 							`/proc/${pid}/fd/${descriptor} could not be followed: ${error instanceof Error ? error.message : String(error)}`,
 						);
 						return;
@@ -269,13 +284,22 @@ async function linuxHolders(files: readonly string[]): Promise<OpenFileHolders> 
 			holder.command = (await Bun.file(`/proc/${holder.pid}/comm`).text()).trim() || undefined;
 		} catch (error) {
 			if (codeOf(error) !== "ENOENT" && codeOf(error) !== "ESRCH") {
-				unreadable.push(
+				failed(
 					`/proc/${holder.pid}/comm could not be read: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
 		}
 	}
-	return unreadable.length > 0 ? { unknown: unreadable.join("; "), seen } : { holders: seen };
+	if (failedChecks > unreadable.length)
+		unreadable.push(`${failedChecks - unreadable.length} more failed process checks`);
+	const unlisted =
+		[...denied]
+			.map(
+				([code, pids]) =>
+					`${pids.size} ${pids.size === 1 ? "process" : "processes"} could not be listed (${code}); some descriptors were not seen`,
+			)
+			.join("; ") || undefined;
+	return unreadable.length > 0 ? { unknown: unreadable.join("; "), seen, unlisted } : { holders: seen, unlisted };
 }
 
 async function darwinHolders(files: readonly string[]): Promise<OpenFileHolders> {

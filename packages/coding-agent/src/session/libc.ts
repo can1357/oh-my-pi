@@ -26,6 +26,8 @@ export interface Libc {
 	fcntl?(fd: number, cmd: number, arg: number): number;
 	/** `ioctl(fd, request, into)` with a pointer argument — its result, or -1 — where it can be called. */
 	ioctl?(fd: number, request: number, into: Buffer): number;
+	/** `statx(AT_FDCWD, file, AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS, into)`, where available. */
+	statx?(file: string, into: Buffer): number;
 	/** The calling thread's `errno`, read straight after the call that failed. */
 	errno(): number;
 }
@@ -48,10 +50,22 @@ export function libc(): Libc {
 				ioctl: { args: [FFIType.i32, FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
 				__errno_location: { args: [], returns: FFIType.ptr },
 			});
+			// Optional: older C libraries need not export statx. Keep the
+			// descriptor calls available there for the ioctl fallback.
+			let statx: Libc["statx"];
+			try {
+				const named = dlopen(soname, {
+					statx: { args: [FFIType.i32, FFIType.ptr, FFIType.i32, FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
+				});
+				statx = (file, into) => named.symbols.statx(AT_FDCWD, cPath(file), 0x100, 0x7ff, ptr(into));
+			} catch {
+				// renameLocked reports a failure if the fallback cannot inspect flags.
+			}
 			loaded = {
 				flistxattr: (fd, into, size) => Number(lib.symbols.flistxattr(fd, into ? ptr(into) : null, size)),
 				fcntl: (fd, cmd, arg) => lib.symbols.fcntl(fd, cmd, arg),
 				ioctl: (fd, request, into) => lib.symbols.ioctl(fd, request, ptr(into)),
+				statx,
 				errno: () => read.i32(lib.symbols.__errno_location() as Pointer, 0),
 			};
 			return loaded;
