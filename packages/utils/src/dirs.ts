@@ -555,6 +555,46 @@ export function getConfigRootDir(): string {
 	return dirs.configRoot;
 }
 
+/**
+ * Whether omp itself owns the directory `candidate` names, so anything found
+ * inside it — a symlink in particular — was put there by the user rather than
+ * by a checkout or a downloaded tree.
+ *
+ * Owned: the profile-independent config root (`~/.omp`, every profile under
+ * it), the active profile's root, an agent directory `--agent-dir` moved
+ * outside it, and the XDG app roots.
+ *
+ * Not owned, even inside those: the project's own `.omp` directory, whose
+ * contents git restores with their symlinks, and any profile's `plugins/cache`,
+ * which holds cloned marketplaces and plugins. A write must not follow a link
+ * it finds there, because the link is the repository's statement and not the
+ * user's.
+ */
+export function isOmpOwnedPath(candidate: string): boolean {
+	// Canonicalize first, through a component that does not exist yet: a `..`
+	// after a symlinked directory collapses to the wrong place lexically, and
+	// that is exactly how a path would be spelled to look owned when it is not.
+	const target = resolveEquivalentPath(candidate, { throughMissing: true });
+	const roots = [getBaseConfigRoot(), dirs.configRoot, dirs.agentDir];
+	for (const envVar of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]) {
+		const value = process.env[envVar];
+		if (value) roots.push(path.join(value, APP_NAME));
+	}
+	if (pathIsWithin(getProjectAgentDir(), target)) return false;
+	for (const root of roots) {
+		if (!pathIsWithin(root, target)) continue;
+		const relative = relativePathWithinRoot(root, target) ?? "";
+		// Every profile keeps its downloads under `<root>/plugins/cache`, and the
+		// active profile is not the only one a process can write into.
+		const segments = relative.split(path.sep);
+		for (let i = 0; i + 1 < segments.length; i++) {
+			if (segments[i] === "plugins" && segments[i + 1] === "cache") return false;
+		}
+		return true;
+	}
+	return false;
+}
+
 /** Set the coding agent directory. Creates a fresh resolver, invalidating all cached paths. */
 export function setAgentDir(dir: string): void {
 	activeProfile = undefined;

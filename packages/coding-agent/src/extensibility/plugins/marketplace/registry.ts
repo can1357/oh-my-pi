@@ -10,16 +10,17 @@
  * Read/write functions accept explicit file paths so callers control the
  * location. Path helpers compute the default paths from the dir singleton.
  *
- * All three go through `writeFileAtomically`, the shared helper: a staged temp
- * sibling published with one rename, a symlinked destination resolved first so
- * the link survives, and the Windows replacement fallback.
+ * All three are staged next to their path and published with
+ * `replaceFileAtomically`, the shared helper: one rename, a symlinked
+ * destination inside omp's own directories resolved first so the link
+ * survives, and the Windows replacement fallback.
  */
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import { getPluginsDir, isEnoent, logger, tryParseJson } from "@oh-my-pi/pi-utils";
-import { writeFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
+import { replaceFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 
 export { getMarketplacesRegistryPath } from "@oh-my-pi/pi-utils";
 
@@ -45,14 +46,23 @@ export function getPluginsCacheDir(): string {
 
 // ── Atomic write ─────────────────────────────────────────────────────
 
-/** Registry files are world-readable config, not secrets, so they keep 0644 rather than the helper's 0600 default. */
-const REGISTRY_FILE_MODE = 0o644;
-
+/**
+ * Stage the JSON ourselves and let the shared helper publish it: `Bun.write`
+ * leaves the mode to the user's umask, which is what these files had before and
+ * what a 0600-or-0644 argument to `writeFileAtomically` would override.
+ */
 async function atomicWriteJson(filePath: string, data: unknown): Promise<void> {
-	// The helper stages with `open(…, "wx")`, which does not create directories; a
-	// project registry's parent may not exist yet.
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
-	await writeFileAtomically(filePath, `${JSON.stringify(data, null, 2)}\n`, REGISTRY_FILE_MODE);
+	// Unique per writer, so two processes writing one registry never share a
+	// staging path and rename each other's file out from under them.
+	const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+	try {
+		await Bun.write(tempPath, `${JSON.stringify(data, null, 2)}\n`);
+		await replaceFileAtomically(tempPath, filePath);
+	} catch (error) {
+		await fs.rm(tempPath, { force: true }).catch(() => {});
+		throw error;
+	}
 }
 
 // ── Marketplaces registry ────────────────────────────────────────────

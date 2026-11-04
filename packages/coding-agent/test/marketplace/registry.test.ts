@@ -24,6 +24,7 @@ import {
 	writeMarketplacesRegistry,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 
 // ── ID helpers ───────────────────────────────────────────────────────
 
@@ -175,14 +176,19 @@ describe("registry file I/O", () => {
 	let tmpDir: string;
 	let marketplacesPath: string;
 	let installedPath: string;
+	let originalAgentDir: string;
 
 	beforeEach(() => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-mkt-test-"));
 		marketplacesPath = path.join(tmpDir, "marketplaces.json");
 		installedPath = path.join(tmpDir, "installed_plugins.json");
+		// A registry write only follows a symlink inside a directory omp owns.
+		originalAgentDir = getAgentDir();
+		setAgentDir(tmpDir);
 	});
 
 	afterEach(() => {
+		setAgentDir(originalAgentDir);
 		removeSyncWithRetries(tmpDir);
 	});
 

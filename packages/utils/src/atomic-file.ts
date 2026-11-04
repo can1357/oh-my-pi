@@ -1,15 +1,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isOmpOwnedPath } from "./dirs";
 import { hasFsCode, isEexist, isEnoent } from "./fs-error";
 import * as logger from "./logger";
 import { toError } from "./type-guards";
 
 /**
- * Link hops followed before a destination is declared cyclic. Linux gives up at
- * 40 and macOS at 32; stopping at the lower of the two keeps a cycle surfacing
- * as `ELOOP` here rather than as an unbounded loop.
+ * Link hops followed before a destination is declared cyclic. Linux stops at
+ * 40, so a chain this host would have opened never fails here first.
  */
-const MAX_SYMLINK_HOPS = 32;
+const MAX_SYMLINK_HOPS = 40;
 
 function symlinkLoopError(filePath: string): NodeJS.ErrnoException {
 	const error: NodeJS.ErrnoException = new Error(`ELOOP: too many symbolic links encountered, open '${filePath}'`);
@@ -35,15 +35,24 @@ function endsSymlinkWalk(error: unknown): boolean {
  * into a regular file. That breaks a shared omp profile, whose registry and
  * config paths are links at a profile root into the default root, and it breaks
  * a link someone made themselves into another directory. Both are honoured, and
- * deliberately so: the helper cannot tell them apart, and an atomic write must
- * land where a plain `open(path, "w")` would.
+ * deliberately so: within omp's own directories the helper cannot tell them
+ * apart, and an atomic write there must land where a plain `open(path, "w")`
+ * would.
+ *
+ * Outside omp's own directories the path is returned untouched and the link is
+ * replaced, as before. A project checkout's `.omp/` holds whatever the
+ * repository committed, symlinks included; following one would let a clone
+ * redirect omp's write onto any file its user can write. {@link isOmpOwnedPath}
+ * draws that line.
  *
  * A dangling link resolves to the path it names, which the write then creates —
- * again what a plain write does.
+ * again what a plain write does, including failing when that path's directory
+ * does not exist.
  */
-async function resolveWriteTarget(filePath: string): Promise<string> {
-	let current = path.resolve(filePath);
-	for (let hop = 0; hop < MAX_SYMLINK_HOPS; hop++) {
+export async function resolveWriteTarget(filePath: string): Promise<string> {
+	if (!isOmpOwnedPath(path.dirname(filePath))) return filePath;
+	let current = filePath;
+	for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
 		let link: string;
 		try {
 			link = await fs.promises.readlink(current);
@@ -51,15 +60,31 @@ async function resolveWriteTarget(filePath: string): Promise<string> {
 			if (endsSymlinkWalk(error)) return current;
 			throw error;
 		}
-		current = path.resolve(path.dirname(current), link);
+		// The hop lands where the kernel would put it. The link's text is appended
+		// to its directory's physical path WITHOUT normalizing — `path.resolve`
+		// and `path.join` would collapse a `..` lexically, and after a component
+		// that is itself a link that leaves the wrong parent — and the result's own
+		// parent is then canonicalized by the filesystem.
+		const joined = path.isAbsolute(link)
+			? link
+			: `${await fs.promises.realpath(path.dirname(current))}${path.sep}${link}`;
+		try {
+			current = path.join(await fs.promises.realpath(path.dirname(joined)), path.basename(joined));
+		} catch (error) {
+			// The named directory is not there; the write will fail on it, as a plain
+			// write through the same link does.
+			if (!endsSymlinkWalk(error)) throw error;
+			current = joined;
+		}
 	}
 	throw symlinkLoopError(filePath);
 }
 
 /** Synchronous sibling of {@link resolveWriteTarget}. */
-function resolveWriteTargetSync(filePath: string): string {
-	let current = path.resolve(filePath);
-	for (let hop = 0; hop < MAX_SYMLINK_HOPS; hop++) {
+export function resolveWriteTargetSync(filePath: string): string {
+	if (!isOmpOwnedPath(path.dirname(filePath))) return filePath;
+	let current = filePath;
+	for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
 		let link: string;
 		try {
 			link = fs.readlinkSync(current);
@@ -67,7 +92,13 @@ function resolveWriteTargetSync(filePath: string): string {
 			if (endsSymlinkWalk(error)) return current;
 			throw error;
 		}
-		current = path.resolve(path.dirname(current), link);
+		const joined = path.isAbsolute(link) ? link : `${fs.realpathSync(path.dirname(current))}${path.sep}${link}`;
+		try {
+			current = path.join(fs.realpathSync(path.dirname(joined)), path.basename(joined));
+		} catch (error) {
+			if (!endsSymlinkWalk(error)) throw error;
+			current = joined;
+		}
 	}
 	throw symlinkLoopError(filePath);
 }
@@ -76,21 +107,31 @@ function resolveWriteTargetSync(filePath: string): string {
  * Publish a staged sibling file atomically, preserving an existing destination
  * across Windows `EPERM`/`EEXIST` replacement failures.
  *
- * A destination that is a symlink is resolved first, so the link survives the
- * publication. When the resolved file lives in another directory the staged
- * file is no longer its sibling and a rename could cross a device boundary, so
- * it is re-staged beside the real file and published from there.
+ * A destination that is a symlink is resolved first (see
+ * {@link resolveWriteTarget}), so the link survives the publication.
  */
 export async function replaceFileAtomically(tempPath: string, targetPath: string): Promise<void> {
-	const destination = await resolveWriteTarget(targetPath);
-	if (path.dirname(destination) !== path.dirname(path.resolve(tempPath))) {
-		await replaceFileAcrossDevices(tempPath, destination);
-		return;
-	}
+	await publishStagedFile(tempPath, await resolveWriteTarget(targetPath));
+}
+
+/**
+ * The publication step itself, on a destination already resolved. Callers that
+ * resolved before staging use this so the destination cannot be swapped between
+ * the two steps, and so one write never walks the links twice.
+ */
+async function publishStagedFile(tempPath: string, destination: string): Promise<void> {
 	try {
 		await fs.promises.rename(tempPath, destination);
 		return;
 	} catch (error) {
+		// A rename only fails this way when the destination is on another
+		// filesystem, which here means a link that leaves this one. Copy beside the
+		// real file and publish from there; every same-device destination, in this
+		// directory or another, still moves by rename and keeps its inode.
+		if (hasFsCode(error, "EXDEV")) {
+			await replaceFileAcrossDevices(tempPath, destination);
+			return;
+		}
 		if (!hasFsCode(error, "EPERM") && !isEexist(error)) throw error;
 		await replaceAfterWindowsRenameFailure(tempPath, destination, error);
 	}
@@ -154,7 +195,8 @@ async function replaceAfterWindowsRenameFailure(
  *
  * The staged file is created with `mode` (0600 by default) and published with
  * that mode, so the destination stays readable only by its owner even when it
- * carries a secret.
+ * carries a secret. A caller that must leave the mode to the user's umask
+ * stages the file itself and publishes it with {@link replaceFileAtomically}.
  */
 export async function writeFileAtomically(
 	filePath: string,
@@ -175,7 +217,7 @@ export async function writeFileAtomically(
 		}
 		// The umask narrows the mode passed to open(); restore it explicitly.
 		await fs.promises.chmod(tempPath, mode);
-		await replaceFileAtomically(tempPath, destination);
+		await publishStagedFile(tempPath, destination);
 		removeTemp = false;
 	} finally {
 		if (removeTemp) {
@@ -218,6 +260,10 @@ export function writeFileAtomicallySync(filePath: string, content: string, mode:
  * Move a live file across devices without exposing a partial destination.
  * The source remains authoritative while the copy is staged. Publication and
  * source removal are synchronous so in-process writers cannot land between them.
+ *
+ * This one does not resolve a symlinked destination, and does not need to: it
+ * publishes with `link`, which refuses an existing destination of any kind, so
+ * it never replaces a link in the first place.
  */
 export async function moveFileAcrossDevices(source: string, destination: string): Promise<void> {
 	const staging = `${destination}.${process.pid}.${crypto.randomUUID()}.move`;
@@ -262,13 +308,15 @@ export async function replaceFileAcrossDevices(source: string, destination: stri
 	const staging = `${target}.${process.pid}.${crypto.randomUUID()}.move`;
 	try {
 		await fs.promises.copyFile(source, staging);
-		const fd = fs.openSync(staging, "r+");
+		// The copy carries the source's mode, which may be read-only; fsync needs
+		// only a readable descriptor.
+		const fd = fs.openSync(staging, "r");
 		try {
 			fs.fsyncSync(fd);
 		} finally {
 			fs.closeSync(fd);
 		}
-		await replaceFileAtomically(staging, target);
+		await publishStagedFile(staging, target);
 	} catch (error) {
 		await fs.promises.rm(staging, { force: true });
 		throw error;
