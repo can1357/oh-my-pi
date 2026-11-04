@@ -4,8 +4,10 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
+import { RecapNotice } from "@oh-my-pi/pi-tui/chat/recap-notice";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
+import { previewLine, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { InternalUrlRouter } from "../../internal-urls";
@@ -42,6 +44,7 @@ import { ReplyWriteComponent, replyDisplayMessage, toolResultReplies } from "@oh
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StrippedToolCallsPlaceholder } from "@oh-my-pi/pi-tui/chat/stripped-tool-calls-placeholder";
 import { imageContent, textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { messageBlock, PresentedBlock } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import { ToolActivityContainer } from "@oh-my-pi/pi-tui/chrome/tool-activity";
 import {
 	isSettledJobFrame,
@@ -82,6 +85,7 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
+import { listSessionRecaps } from "../../session/session-index";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
@@ -296,7 +300,9 @@ export class UiHelpers {
 					images: message.images,
 					showImages: cfgTerminalShowImages.get(settings),
 				});
-				this.ctx.chatContainer.addChild(component);
+				const block = new PresentedBlock(component, messageBlock(message));
+				block.setExpanded(this.ctx.toolOutputExpanded);
+				this.ctx.chatContainer.addChild(block);
 				break;
 			}
 			case "pythonExecution": {
@@ -308,7 +314,9 @@ export class UiHelpers {
 					truncation: message.meta?.truncation,
 					artifactError: message.meta?.artifactError,
 				});
-				this.ctx.chatContainer.addChild(component);
+				const block = new PresentedBlock(component, messageBlock(message));
+				block.setExpanded(this.ctx.toolOutputExpanded);
+				this.ctx.chatContainer.addChild(block);
 				break;
 			}
 			case "hookMessage":
@@ -316,7 +324,10 @@ export class UiHelpers {
 				if (message.display) {
 					if (message.customType === "async-result") {
 						const renderer = this.ctx.viewSession.extensionRunner?.getMessageRenderer(message.customType);
-						const component = buildAsyncResultComponent(message, renderer);
+						const component = new PresentedBlock(
+							buildAsyncResultComponent(message, renderer),
+							messageBlock(message),
+						);
 						component.setExpanded(this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(component);
 						break;
@@ -330,13 +341,18 @@ export class UiHelpers {
 						// Native: into the edit/write frames they belong to; the rest stand alone.
 						const files = routeLateDiagnostics(this.ctx.chatContainer.children, details?.files ?? []);
 						if (files.length === 0) break;
-						const component = new LateDiagnosticsMessageComponent(files);
+						const component = new PresentedBlock(
+							new LateDiagnosticsMessageComponent(files),
+							messageBlock(message),
+						);
 						component.setExpanded(this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(component);
 						break;
 					}
 					if (message.customType === LAUNCH_COMPLETION_MESSAGE_TYPE) {
-						this.ctx.chatContainer.addChild(buildLaunchCompletionBlock(message));
+						const component = new PresentedBlock(buildLaunchCompletionBlock(message), messageBlock(message));
+						component.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(component);
 						break;
 					}
 					if (message.customType === COLLAB_PROMPT_MESSAGE_TYPE) {
@@ -345,7 +361,10 @@ export class UiHelpers {
 						break;
 					}
 					if (message.customType === SKILL_PROMPT_MESSAGE_TYPE) {
-						const component = new SkillMessageComponent(message as CustomMessage<SkillPromptDetails>);
+						const component = new PresentedBlock(
+							new SkillMessageComponent(message as CustomMessage<SkillPromptDetails>),
+							messageBlock(message),
+						);
 						component.setExpanded(this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(component);
 						break;
@@ -362,9 +381,12 @@ export class UiHelpers {
 					}
 					if (message.customType === "advisor") {
 						const details = (message as CustomMessage<AdvisorMessageDetails>).details;
-						this.ctx.chatContainer.addChild(
+						const card = new PresentedBlock(
 							createAdvisorMessageCard(details, () => this.ctx.toolOutputExpanded, theme),
+							messageBlock(message),
 						);
+						card.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(card);
 						break;
 					}
 					if (message.customType === BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE) {
@@ -940,6 +962,19 @@ export class UiHelpers {
 		// (#10447). Membership is re-checked against `pendingTools`.
 		if (backgroundCallIds.size > 0) {
 			this.ctx.eventController?.markBackgroundCalls(backgroundCallIds);
+		}
+		// The idle recap is journaled only in history.db, never in the session file, so a replay
+		// (resume, /restart, rebuild) would drop it. Re-show the newest one while the conversation
+		// has not moved since it was recorded and the view still stands at that point.
+		const sessionManager = this.ctx.viewSession.sessionManager;
+		const tip = this.ctx.viewSession.isStreaming ? undefined : sessionManager.getConversationTip();
+		if (tip) {
+			const [recap] = listSessionRecaps({ sessionIds: [sessionManager.getSessionId()], limit: 1 });
+			// `createdAt` has second precision; a recap lands at least a second after the turn it follows.
+			if (recap && recap.createdAt * 1000 > Date.parse(tip.timestamp)) {
+				const text = previewLine(recap.recap, TRUNCATE_LENGTHS.RECAP);
+				if (text) this.ctx.chatContainer.addChild(new RecapNotice(text));
+			}
 		}
 
 		// Entries still in `pendingTools` are toolCalls whose result never landed

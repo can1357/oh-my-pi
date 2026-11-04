@@ -1577,6 +1577,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			// No transcript is drawn in RPC mode
 		}
 
+		refreshTranscript(): void {
+			// No transcript is drawn in RPC mode
+		}
+
 		getLinkClicksAvailable(): boolean {
 			return false;
 		}

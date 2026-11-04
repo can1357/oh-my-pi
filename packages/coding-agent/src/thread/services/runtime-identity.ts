@@ -1,21 +1,15 @@
 /**
  * Build identity across subagent worker links: a worker adopts the main
- * thread's settled runtime identity (`../../session/runtime-identity`) at boot,
- * so every thread stamps the same build and no worker repeats the source
- * checkout's `git diff HEAD` before its first session.
+ * thread's runtime identity (`../../session/runtime-identity`) at boot,
+ * so every thread stamps the same build.
  */
-import {
-	adoptRuntimeIdentity,
-	currentRuntimeIdentity,
-	loadRuntimeIdentity,
-	type RuntimeIdentity,
-} from "../../session/runtime-identity";
+import { adoptRuntimeIdentity, currentRuntimeIdentity, type RuntimeIdentity } from "../../session/runtime-identity";
 import type { ThreadService } from "../services";
 
 /** Boot globals of {@link runtimeIdentityThreadService}. */
 export interface RuntimeIdentityGlobals {
-	/** Main's identity once its checkout diff was read. */
-	readonly identity: Promise<RuntimeIdentity>;
+	/** Main's build identity. */
+	readonly identity: RuntimeIdentity;
 }
 
 function isRuntimeIdentity(value: unknown): value is RuntimeIdentity {
@@ -27,12 +21,12 @@ export const runtimeIdentityThreadService: ThreadService = {
 	name: "runtime-identity",
 
 	globals(): RuntimeIdentityGlobals {
-		return { identity: loadRuntimeIdentity().then(() => currentRuntimeIdentity()) };
+		return { identity: currentRuntimeIdentity() };
 	},
 
-	async boot(globals: unknown): Promise<void> {
+	boot(globals: unknown): void {
 		const identity: unknown =
-			typeof globals === "object" && globals !== null ? await Reflect.get(globals, "identity") : undefined;
+			typeof globals === "object" && globals !== null ? Reflect.get(globals, "identity") : undefined;
 		if (!isRuntimeIdentity(identity)) throw new Error("runtime identity service: malformed boot globals");
 		adoptRuntimeIdentity(identity);
 	},

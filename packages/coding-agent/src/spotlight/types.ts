@@ -12,8 +12,8 @@ import type { SpotlightClient } from "./client";
  * prompt), `find` ranks with Spotlight, and the session journals one entry per shaped result.
  *
  * "Plain" is what a result would be without shaping: the tool's own output with pi's read summarizer and bash
- * minimizer off (the experiment turns both off), under pi's normal limits. Held-out and gated results get it, and
- * savings count against it.
+ * minimizer off (the experiment turns both off), under pi's normal limits. Held-out results get it, and savings count
+ * against it.
  */
 
 /** Stencil Cloud's Spotlight route. */

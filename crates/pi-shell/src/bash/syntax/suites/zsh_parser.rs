@@ -508,6 +508,117 @@ fn a_syntax_error_ends_the_parse() {
 	assert!(p.next_command().is_none());
 }
 
+// ---- cmdstack (PS2 `%_`)
+// ------------------------------------------------------
+
+/// The `%_` names of the constructs open where `src` runs out: the stack
+/// of the first event that ran out inside a construct (a here-document
+/// cut short still parses), else of the last one.
+fn cmdstack(src: &str) -> Vec<&'static str> {
+	let mut p = Parser::new(src.as_bytes(), zf(), &NoAliases);
+	loop {
+		let more = matches!(p.next_command(), Some(Ok(_)));
+		let stack = p.zsh_cmdstack().expect("zsh grammar");
+		if !more || !stack.is_empty() {
+			return stack;
+		}
+	}
+}
+
+/// Expected stacks: the `PS2='%_> '` zsh 5.9 prints after each input is
+/// typed into `zsh -f -i` on a pty.
+#[test]
+fn cmdstack_names_the_constructs_left_open() {
+	let cases: &[(&str, &[&str])] = &[
+		("if true\n", &["if"]),
+		("if true; then\n", &["then"]),
+		("if true; then :; else\n", &["else"]),
+		("if true; then :; elif false\n", &["elif"]),
+		("if true; then :; elif false; then\n", &["elif-then"]),
+		("if true; then :; else if false\n", &["else", "if"]),
+		("if true {\n", &["if"]),
+		("if (\n", &["if", "subsh"]),
+		("if [[ a\n", &["if", "cond"]),
+		("if true; then echo \"\n", &["then", "dquote"]),
+		("if true; then while true; do\n", &["then", "while"]),
+		("echo \"\n", &["dquote"]),
+		("echo '\n", &["quote"]),
+		("echo $'\n", &["quote"]),
+		("echo `\n", &["bquote"]),
+		("echo \"`\n", &["dquote", "bquote"]),
+		("cat <<E\n", &["heredoc"]),
+		("cat <<-E\n", &["heredocd"]),
+		("cat <<A <<B\nx\nA\n", &["heredoc"]),
+		("a &&\n", &["cmdand"]),
+		("a ||\n", &["cmdor"]),
+		("a && b &&\n", &["cmdand", "cmdand"]),
+		("a && b ||\n", &["cmdand", "cmdor"]),
+		("if true; then :; fi &&\n", &["cmdand"]),
+		("a |\n", &["pipe"]),
+		("a | b |\n", &["pipe", "pipe"]),
+		("! a |\n", &["pipe"]),
+		("a |&\n", &["errpipe"]),
+		("for i\n", &["for"]),
+		("for i in 1; do echo \"$(\n", &["for", "dquote", "cmdsubst"]),
+		("for ((i=0;\n", &["for", "math"]),
+		("foreach x (a b)\n", &["foreach"]),
+		("select x in a\n", &["select"]),
+		("while true\n", &["while"]),
+		("while true; do a=(\n", &["while", "array"]),
+		("until false\n", &["until"]),
+		("repeat 3\n", &["repeat"]),
+		("case x in\n", &["case"]),
+		("case x in a)\n", &["case"]),
+		("f() {\n", &["function"]),
+		("f() (\n", &["function", "subsh"]),
+		("function f {\n", &["function"]),
+		("(\n", &["subsh"]),
+		("time (\n", &["subsh"]),
+		("{\n", &["cursh"]),
+		("coproc {\n", &["cursh"]),
+		("{ a } always\n", &["cursh"]),
+		("{ a } always {\n", &["always"]),
+		("[[ a\n", &["cond"]),
+		("((\n", &["math"]),
+		("a=(\n", &["array"]),
+		("typeset a=(\n", &["array"]),
+		("echo $(\n", &["cmdsubst"]),
+		("echo <(\n", &["cmdsubst"]),
+		("echo $(if true\n", &["cmdsubst", "if"]),
+		("echo $(echo \"\n", &["cmdsubst", "dquote"]),
+		("x=$(cat <<E\n", &["cmdsubst", "heredoc"]),
+		("echo $((\n", &["mathsubst"]),
+		("echo \"$((\n", &["dquote", "mathsubst"]),
+		("echo $[\n", &["mathsubst"]),
+		("echo ${\n", &["braceparam"]),
+		("echo ${a[\n", &["braceparam"]),
+		("echo ${a:-\"\n", &["braceparam", "dquote"]),
+		("echo ${a:-${\n", &["braceparam", "braceparam"]),
+		("echo ${a:-{\n", &["braceparam", "brace"]),
+		("echo \"${\n", &["dquote", "braceparam"]),
+		("echo \"${a:-{\n", &["dquote", "braceparam"]),
+		("echo hi\n", &[]),
+		("if true; then :; fi\n", &[]),
+	];
+	for (src, want) in cases {
+		assert_eq!(cmdstack(src), *want, "{src:?}");
+	}
+}
+
+#[test]
+fn cmdnames_are_zshs() {
+	assert_eq!(zsh::cmdname(zsh::CS_FOR), "for");
+	assert_eq!(zsh::cmdname(zsh::CS_ELIFTHEN), "elif-then");
+	assert_eq!(zsh::cmdname(zsh::CS_BRACEPAR), "braceparam");
+	assert_eq!(zsh::cmdname(zsh::CS_ALWAYS), "always");
+	assert_eq!(zsh::cmdname(zsh::CS_COUNT - 1), "always");
+	assert!(
+		Parser::new(b"if\n", Features::NONE, &NoAliases)
+			.zsh_cmdstack()
+			.is_none()
+	);
+}
+
 // ---- aliases ----------------------------------------------------------------
 
 #[derive(Default)]

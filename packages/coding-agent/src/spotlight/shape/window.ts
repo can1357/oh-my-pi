@@ -4,43 +4,47 @@
  * trace.
  */
 import { reasonShows, type SpotlightReason } from "@oh-my-pi/pi-tui/chat/spotlight";
-import { MARKER, norm, WITNESS_CHARS } from "./lines";
+import { MARKER, norm, pairKey } from "./lines";
+import type { Seen } from "./state";
+
+/** Lines inside runs of already-seen lines ({@link witnessedRuns}), and the first line of each run. */
+export interface Witnessed {
+	mask: boolean[];
+	/** Back to back runs are two passages of the context: each collapses to a marker of its own. */
+	starts: boolean[];
+}
 
 /**
- * Lines inside runs of ≥ `run` already-seen lines (short lines inside a run don't break it; a run ends on a seen line).
- * A line `keep` marks never counts as seen and ends any run it is in.
+ * Runs of ≥ `run` already-seen lines in the order the context holds them: each line came right after the one before
+ * it in one text there (short lines inside a run count only so), and a run starts and ends on a seen line. A line
+ * dropped, moved or changed between two passages splits them. A line `keep` marks never counts as seen and ends any
+ * run it is in.
  */
-export function witnessedMask(
-	lines: readonly string[],
-	seen: ReadonlySet<string>,
-	run: number,
-	keep?: readonly boolean[],
-): boolean[] {
+export function witnessedRuns(lines: readonly string[], seen: Seen, run: number, keep?: readonly boolean[]): Witnessed {
 	const mask = Array.from({ length: lines.length }, () => false);
-	const isSeen = (i: number) => !keep?.[i] && !MARKER.test(lines[i]) && seen.has(norm(lines[i]));
+	const starts = Array.from({ length: lines.length }, () => false);
+	const keys = lines.map(norm);
+	const open = (i: number) => !keep?.[i] && !MARKER.test(lines[i]);
 	for (let i = 0; i < lines.length;) {
-		if (!isSeen(i)) {
+		if (!open(i) || !seen.lines.has(keys[i])) {
 			i++;
 			continue;
 		}
-		let j = i;
 		let last = i;
-		let count = 0;
-		while (
-			j < lines.length &&
-			!keep?.[j] &&
-			(isSeen(j) || (!MARKER.test(lines[j]) && norm(lines[j]).length < WITNESS_CHARS))
-		) {
-			if (isSeen(j)) {
-				count++;
-				last = j;
-			}
-			j++;
+		let count = 1;
+		// A pair names two lines of the context, so a line it reaches is seen or short.
+		for (let j = i + 1; j < lines.length && open(j) && seen.pairs.has(pairKey(keys[j - 1], keys[j])); j++) {
+			if (!seen.lines.has(keys[j])) continue;
+			count++;
+			last = j;
 		}
-		if (count >= run) mask.fill(true, i, last + 1);
+		if (count >= run) {
+			mask.fill(true, i, last + 1);
+			starts[i] = true;
+		}
 		i = last + 1;
 	}
-	return mask;
+	return { mask, starts };
 }
 
 /** Knobs of the valve window ({@link frameLines}). */

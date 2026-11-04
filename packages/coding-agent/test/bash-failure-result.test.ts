@@ -35,6 +35,15 @@ function makeSession(): ToolSession {
 }
 
 describe("BashTool execution results", () => {
+	it("persists the entire bounded trace when its JSON exceeds 200 KB", async () => {
+		const tool = new BashTool(makeSession());
+		const result = await tool.execute("call-large-trace", { command: "printf '%0210000d' 0" }, undefined, () => {});
+		const trace = result.details?.trace;
+		expect(trace).toBeDefined();
+		expect(JSON.stringify(trace).length).toBeGreaterThan(200_000);
+		expect(trace?.history?.some(event => event.kind === "Output")).toBe(true);
+	});
+
 	it.each([
 		{ wallTimeMs: 0, noticeCount: 1 },
 		{ wallTimeMs: 1000, noticeCount: 2 },

@@ -342,7 +342,7 @@ export class CollabGuestLink {
 		this.#writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
 		this.#returnSessionFile = this.#ctx.sessionManager.getSessionFile() ?? null;
 		// Claim the process before any async setup or replica session transition.
-		this.#ctx.collabGuest = this;
+		this.#ctx.setCollabGuest(this);
 		let key: CryptoKey;
 		try {
 			key = await importRoomKey(parsed.key);
@@ -991,7 +991,7 @@ export class CollabGuestLink {
 			this.#replicaLease = undefined;
 		}
 		if (this.#ctx.collabGuest !== this) return false;
-		this.#ctx.collabGuest = undefined;
+		this.#ctx.setCollabGuest(undefined);
 		this.#ctx.syncRunningSubagentBadge();
 		return this.#replicaActivated;
 	}
