@@ -1048,6 +1048,52 @@ return await tab.evaluate(() => {
 		});
 	}, 30_000);
 
+	test("arms the loaded page before the hold's own setup round trips", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				// The hold's setup stays in flight until the page shows a held print.
+				const setup = Promise.withResolvers<void>();
+				const bound = (object: object, key: string | symbol): unknown => {
+					const value: unknown = Reflect.get(object, key);
+					return typeof value === "function" ? value.bind(object) : value;
+				};
+				const slowed = new Proxy(page, {
+					get: (target, key) =>
+						key === "createCDPSession"
+							? async () => {
+									const session = await target.createCDPSession();
+									const send = session.send.bind(session);
+									return new Proxy(session, {
+										get: (object, name) =>
+											name === "send"
+												? async (...args: Parameters<typeof send>) => {
+														if (args[0] === "Page.enable") await setup.promise;
+														return await send(...args);
+													}
+												: bound(object, name),
+									});
+								}
+							: bound(target, key),
+				});
+				const installing = PrintHold.install(slowed, "calls");
+				await page
+					.mainFrame()
+					.mainRealm()
+					.waitForFunction(
+						'log.length = 0, document.querySelector("#print").click(), log.includes("afterprint")',
+						{ timeout: 10_000, polling: 50 },
+					);
+				setup.resolve();
+				await (await installing).dispose();
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
+
 	test("arms the loaded page before attaching the windows it may open", async () => {
 		await withUserBrowser(async cdpUrl => {
 			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
