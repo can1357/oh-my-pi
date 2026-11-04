@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `cd` and `pwd` in native Windows shell sessions corrupting drive and UNC roots during logical directory changes.
+- Fixed `cd` and `pwd` in native Windows shell sessions corrupting drive and UNC roots during logical directory changes ([#18042](https://github.com/can1357/oh-my-pi/pull/18042) by [@jchanghong023](https://github.com/jchanghong023))
 
 ## [18.17.0] - 2026-11-06
 
