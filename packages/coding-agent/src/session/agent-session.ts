@@ -4073,16 +4073,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			event.type === "agent_end" ? revokeComputerControlForOwner(this.#eval.getKernelOwnerId()) : undefined;
 		// Only the user's own prompt, steer or follow-up lifts the computer-use stop their Escape set;
 		// synthetic continues and agent-sent messages (subagent budget steers) never do.
-		// The same message, reaching a refusal report's wake run, makes it the user's
-		// turn: a refusal of it gets its own wake (`settleTerminalRefusal`). Synthetic
-		// messages must not, or an injected reminder would let wakes chain.
 		if (
 			event.type === "message_start" &&
 			isUserAuthoredMessage(event.message) &&
 			!(event.message.role === "user" && (event.message.synthetic || event.message.attribution === "agent"))
 		) {
 			resumeComputerUseForOwner(this.#eval.getKernelOwnerId());
-			this.#recovery.noteRefusalWakeAnswered();
 		}
 		if (event.type === "tool_execution_end" && this.#isTerminalYieldToolResult(event)) {
 			const alreadyTerminated = this.#synchronouslyTerminatedYieldToolCallIds.delete(event.toolCallId);
@@ -4559,7 +4555,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// batch) executes that turn's calls without a new message_end.
 			this.#runToolCallIds = new Set(event.resumedToolCallIds);
 			this.#prunedTerminalFailure = undefined;
-			this.#recovery.noteAgentStarted();
 			this.#advisors.onPrimaryAgentStart();
 			this.#emitRunState("running");
 			this.#maintenance.noteTurnStarted();
@@ -4588,9 +4583,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// toolUse) assistant message and skipping settle-only work.
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			this.#lastAssistantMessage = event.message;
-			if (event.message.stopReason !== "error" && event.message.stopReason !== "aborted") {
-				this.#recovery.noteRefusalWakeAnswered();
-			}
 			for (const block of event.message.content) {
 				if (block.type === "toolCall") this.#runToolCallIds.add(block.id);
 			}
@@ -5056,6 +5048,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						(msg.stopReason === "error" && AIError.isContextOverflow(msg, model.contextWindow ?? 0)));
 				const speculationCompletion = requiresSpeculativeRecovery ? skippedSpeculationCompletion : undefined;
 				if (!speculationCompletion) {
+					// A context-transfer summary owns post-turn maintenance, but a refused
+					// turn's calls must still be reported. Its wake cannot start while the
+					// summary is generated; the summary's commit restarts it from the context.
+					if (this.#recovery.isClassifierRefusal(msg)) {
+						this.#prunedTerminalFailure = msg;
+						const settled = this.#recovery.settleTerminalRefusal(msg);
+						if (settled.persisted) this.#trackPostPromptTask(settled.persisted);
+					}
 					maintenanceRoute("skip-post-turn-maintenance");
 					await emitAgentEndNotification();
 					return;
@@ -11604,11 +11604,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
-		// Any abort but an internal one (the user's interrupt, an RPC or SDK abort,
-		// `newSession`) withdraws an owed refusal wake; the report stays for the
-		// next turn. An internal abort (a compaction) leaves it owed; a wake owed in
-		// another session is never taken by this one (`TurnRecovery`, session-scoped).
-		if (options?.goalReason !== "internal") this.#recovery.withdrawRefusalWake();
 		// Latch only when the interrupt stops something; an idle Esc would otherwise fold
 		// every later background completion for the rest of the session.
 		if (userInterrupt && (this.isStreaming || this.agent.hasQueuedMessages())) {
@@ -11711,6 +11706,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					this.#interruptWithdrawnMessages.delete(message);
 					this.agent.followUp(message);
 				} else this.#recordWithoutTurn([message]);
+			}
+			// Any abort but an internal one (the user's interrupt, an RPC or SDK abort,
+			// `newSession`) withdraws a refusal report's owed wake, with a persisted note
+			// so a later compaction or reload does not restart it. An internal abort (a
+			// compaction, a session switch) leaves it owed. A run another source already
+			// started took the wake, so there is nothing to withdraw.
+			if (options?.goalReason !== "internal" && !this.agent.state.isStreaming) {
+				this.#recovery.withdrawOwedRefusalWake();
 			}
 		} finally {
 			this.#abortInProgress = false;
@@ -12880,12 +12883,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * abort ends it. That turn is then retried as `/retry` does: a batch whose every
 	 * call was cut off runs again, otherwise the model answers from where the
 	 * transcript stops. A turn that finished, failed, or the user interrupted stays
-	 * as it is.
+	 * as it is. A refusal report whose wake the process never ran gets that wake.
 	 *
 	 * @returns whether a continuation was scheduled; false while a turn runs, without
 	 * a model, or with nothing left unfinished.
 	 */
 	async restoreInterruptedTurn(): Promise<boolean> {
+		if (!this.isStreaming && this.#recovery.resumeOwedRefusalWake()) return true;
 		const branch = this.sessionManager.getBranch();
 		if (this.isStreaming || !hasRestorableTurn(branch)) return false;
 		const model = this.model;
@@ -13773,6 +13777,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
 			}
+			// The switch's internal abort dropped any scheduled refusal-report wake; the
+			// session now on screen restarts the one its context says it owes.
+			this.#recovery.resumeOwedRefusalWake();
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);

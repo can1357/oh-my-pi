@@ -499,7 +499,7 @@ export interface SessionMaintenanceHost {
 	 * post-settle readers (`AgentSession.getLastAssistantMessage`) until the next run.
 	 */
 	retainTerminalFailure(message: AssistantMessage): void;
-	/** Re-schedule a refusal report's wake that this pass's abort dropped (see `TurnRecovery.resumeOwedRefusalWake`). */
+	/** Schedule the refusal-report wake the context says is owed, if any (see `TurnRecovery.resumeOwedRefusalWake`). */
 	resumeOwedRefusalWake(): void;
 	runRecoveryCompactionWithRollback(
 		reason: "overflow" | "incomplete",
@@ -2239,6 +2239,9 @@ export class SessionMaintenance {
 		} finally {
 			this.#handoffCleanup = undefined;
 			cleanup.resolve();
+			// A refusal settled while the summary was generated could not start its
+			// wake; the commit keeps the report (it is after the cut), so restart it.
+			this.#host.resumeOwedRefusalWake();
 		}
 	}
 

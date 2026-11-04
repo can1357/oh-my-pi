@@ -4,7 +4,8 @@
  * ({@link AgentSession.restoreInterruptedTurn}) and the subagents it was running.
  *
  * Every persisted subagent transcript under the session ({@link collectSubSessions})
- * that its process left mid-turn ({@link hasRestorableTurn}), was not killed (no
+ * that its process left mid-turn ({@link hasRestorableTurn}) or with a refusal
+ * report's wake not yet run ({@link refusalWakeOwed}), was not killed (no
  * tombstone) and can be revived (a `session_init` contract, not isolated) runs one
  * more monitored turn as a background job of its parent: the lifecycle reviver
  * rebuilds it from its transcript, {@link runSubagentFollowUpTurn} goes on with the
@@ -19,8 +20,10 @@ import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import { hasRestorableTurn } from "../session/exit-diagnostics";
+import { buildSessionContext } from "../session/session-context";
 import { extractSessionInit } from "../session/session-manager";
 import { collectSubSessions } from "../session/sub-sessions";
+import { refusalWakeOwed } from "../session/turn-recovery";
 import type { EventBus } from "../utils/event-bus";
 import { runSubagentFollowUpTurn, softRequestBudgetFor } from "./executor";
 import { persistedAgentDefinition } from "./persisted-revive";
@@ -72,7 +75,8 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 	const restored: string[] = [];
 	for (const key of keys) {
 		const sub = subSessions[key]!;
-		if (sub.aborted || !hasRestorableTurn(sub.entries)) continue;
+		const owesRefusalWake = refusalWakeOwed(buildSessionContext(sub.entries).messages);
+		if (sub.aborted || !(hasRestorableTurn(sub.entries) || owesRefusalWake)) continue;
 		const id = sub.agentId;
 		const ref = registry.get(id);
 		const init = extractSessionInit(sub.entries);

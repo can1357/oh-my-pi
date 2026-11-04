@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessage, Model, SimpleStreamOptions, ToolCall } from "@oh-my-pi/pi-ai";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -42,25 +42,30 @@ function baseMessage(model: Model<Api>): AssistantMessage {
 }
 
 /**
- * The provider stream of a turn the provider refuses: committed text, then the
- * given tool calls in order. A `completed` call closes (`toolcall_end`) before
- * the next one starts; a call that is not completed is cut off by the refusal
- * while its arguments are still streaming (where a call carrying large pasted
- * content is most likely to be cut), so it must be the last one.
+ * The provider stream of a turn the provider refuses: committed text (unless
+ * `withText` is false), then the given tool calls in order. A `completed` call
+ * closes (`toolcall_end`) before the next one starts; a call that is not
+ * completed is cut off by the refusal while its arguments are still streaming
+ * (where a call carrying large pasted content is most likely to be cut), so it
+ * must be the last one. Without text a refused turn is replay-safe, which lets
+ * the configured fallback chain try the next model.
  */
 function refusedToolCallStream(
 	model: Model<Api>,
 	calls: Array<{ call: ToolCall; completed: boolean }>,
+	withText = true,
 ): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
 	queueMicrotask(() => {
 		const partial = baseMessage(model);
-		const text = "Dispatching the brief now.";
-		partial.content.push({ type: "text", text });
 		stream.push({ type: "start", partial });
-		stream.push({ type: "text_start", contentIndex: 0, partial });
-		stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial });
-		stream.push({ type: "text_end", contentIndex: 0, content: text, partial });
+		if (withText) {
+			const text = "Dispatching the brief now.";
+			partial.content.push({ type: "text", text });
+			stream.push({ type: "text_start", contentIndex: 0, partial });
+			stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial });
+			stream.push({ type: "text_end", contentIndex: 0, content: text, partial });
+		}
 		for (const { call, completed } of calls) {
 			const contentIndex = partial.content.length;
 			partial.content.push(call);
@@ -119,6 +124,38 @@ function recordingTool(name: string, executed: string[]): AgentTool {
 	} as AgentTool;
 }
 
+const REPORT_TYPE = "refusal-tool-call-report";
+
+/** Whether each refusal report in the context is final, in order. */
+function reportFinals(messages: readonly AgentMessage[]): unknown[] {
+	return messages.flatMap(m => {
+		if (m.role !== "custom" || m.customType !== REPORT_TYPE) return [];
+		const details = m.details;
+		return [typeof details === "object" && details !== null && "final" in details ? details.final : undefined];
+	});
+}
+
+function hasReport(messages: readonly AgentMessage[]): boolean {
+	return messages.some(m => m.role === "custom" && m.customType === REPORT_TYPE);
+}
+
+function retriableErrorStream(model: Model<Api>): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	queueMicrotask(() =>
+		stream.push({
+			type: "error",
+			reason: "error",
+			error: {
+				...baseMessage(model),
+				stopReason: "error",
+				errorStatus: 503,
+				errorMessage: "503 Service unavailable",
+			},
+		}),
+	);
+	return stream;
+}
+
 describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
@@ -148,11 +185,17 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 		tools: AgentTool[],
 		sessionManager: SessionManager = SessionManager.inMemory(),
 		extensionRunner?: ExtensionRunner,
+		extra: {
+			settings?: Record<string, unknown>;
+			sideStreamFn?: (model: Model<Api>) => AssistantMessageEventStream;
+		} = {},
 	) {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled test model to exist");
 		// Each request's messages as JSON: everything the model could read in it.
 		const requests: string[] = [];
+		// The model each request went to.
+		const models: string[] = [];
 		const agent = new Agent({
 			getApiKey: () => "anthropic-test-key",
 			initialState: { model, systemPrompt: ["Test"], tools, messages: [] },
@@ -160,6 +203,7 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 			convertToLlm,
 			streamFn: (streamModel, context, options) => {
 				requests.push(JSON.stringify(context.messages));
+				models.push(`${streamModel.provider}/${streamModel.id}`);
 				const next = responses[requests.length - 1] ?? (m => textStream(m, "unexpected extra turn"));
 				return next(streamModel, options);
 			},
@@ -169,10 +213,18 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 			"retry.baseDelayMs": 1,
 			"retry.maxRetries": 1,
 			"retry.modelFallback": false,
+			...extra.settings,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
-		return { session, agent, requests };
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			extensionRunner,
+			sideStreamFn: extra.sideStreamFn,
+		});
+		return { session, agent, requests, models };
 	}
 
 	const taskCall: ToolCall = {
@@ -553,17 +605,33 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 		expect(reports.at(-1)).not.toContain("the session will NOT continue on its own this time");
 	});
 
-	// Turns that something other than this code starts after a final report. Each
-	// gets one wake if refused, and that woken turn refused again stops: wakes never
-	// chain, so the bound holds whoever keeps starting turns.
-	const otherStarters: Array<{ kind: string; start: (session: AgentSession) => Promise<unknown> }> = [
+	// After a final report, a turn that something else starts. New work (a parent's
+	// assignment; the user's own prompt is covered above) opens a new chain: refused,
+	// it gets one wake. Anything that adds no new work does not: refused, it gets a
+	// final report and no wake. That includes the operator's continue, which here
+	// re-sends the refused request (the refused turns left the context, so the
+	// user's prompt is the one still unanswered), and peer or extension messages, so
+	// an extension that starts a turn every time the session goes idle cannot buy wakes.
+	const starters: Array<{ kind: string; newWork: boolean; start: (session: AgentSession) => Promise<unknown> }> = [
+		{
+			kind: "a parent's follow-up assignment",
+			newWork: true,
+			start: session => session.prompt("A NEW ASSIGNMENT", { attribution: "agent" }),
+		},
+		{
+			kind: "the operator's continue (it re-sends the refused request)",
+			newWork: false,
+			start: session => session.resume(),
+		},
 		{
 			kind: "a peer agent's message",
+			newWork: false,
 			start: session =>
 				session.deliverIrcMessage({ id: "peer-message", from: "peer", to: "me", body: "A note.", ts: Date.now() }),
 		},
 		{
 			kind: "an extension notification",
+			newWork: false,
 			start: session =>
 				session.sendCustomMessage(
 					{ customType: "extension-notice", content: "A notice.", display: false, attribution: "agent" },
@@ -572,23 +640,19 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 		},
 		{
 			kind: "an extension notification that accepts an empty stop",
+			newWork: false,
 			start: session =>
 				session.sendCustomMessage(
 					{ customType: "extension-notice", content: "A notice.", display: false, attribution: "agent" },
 					{ triggerTurn: true, deliverAs: "nextTurn", acceptTerminalEmptyStop: true },
 				),
 		},
-		{
-			kind: "a parent's follow-up assignment",
-			start: session => session.prompt("A NEW ASSIGNMENT", { attribution: "agent" }),
-		},
-		{ kind: "the operator's resume", start: session => session.resume() },
 	];
-	for (const { kind, start } of otherStarters) {
-		it(`${kind} after a final report gets one wake when refused, and no more`, async () => {
+	for (const { kind, newWork, start } of starters) {
+		it(`${kind} after a final report ${newWork ? "gets one wake" : "gets no wake"} when refused`, async () => {
 			const refused = (id: string) => (m: Model<Api>) =>
 				refusedToolCallStream(m, [{ call: { ...writeCall, id }, completed: true }]);
-			const { session, requests } = createSession(
+			const { session, agent, requests } = createSession(
 				[
 					refused("toolu_a"),
 					refused("toolu_b"),
@@ -605,10 +669,10 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 			await start(session);
 			await session.waitForIdle();
 
-			// Its turn (request 3) is refused and woken (request 4); the woken turn's refusal is final.
-			expect(requests).toHaveLength(4);
-			const reports = (requests[3] ?? "").split("The provider ended your last response with a refusal");
-			expect(reports.at(-1)).not.toContain("the session will NOT continue on its own this time");
+			// New work: its turn (request 3) is refused and woken (request 4), whose refusal is final.
+			// Otherwise its turn (request 3) is refused and its report is final.
+			expect(requests).toHaveLength(newWork ? 4 : 3);
+			expect(reportFinals(agent.state.messages)).toEqual(newWork ? [false, true, false, true] : [false, true, true]);
 			expect(session.getLastAssistantMessage()?.errorMessage).toBe(REFUSAL);
 		});
 	}
@@ -656,4 +720,290 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 		expect(requests).toHaveLength(3);
 		expect(requests[2]).toContain(REFUSAL);
 	});
+
+	/** An extension that answers every compaction with a summary, or vetoes it. */
+	async function compactionRunner(dir: string, sessionManager: SessionManager, veto: boolean) {
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session_before_compact", async event =>
+					veto
+						? { cancel: true }
+						: {
+								compaction: {
+									summary: "Earlier work was summarized.",
+									firstKeptEntryId: event.preparation.firstKeptEntryId,
+									tokensBefore: event.preparation.tokensBefore,
+									details: {},
+								},
+							},
+				);
+			},
+			dir,
+			new EventBus(),
+			runtime,
+			"refusal-compaction-runner",
+		);
+		return new ExtensionRunner([extension], runtime, dir, sessionManager, modelRegistry);
+	}
+
+	/** Calls `act` once, the first time the session goes idle holding a refusal report. */
+	function onceIdleAfterReport(session: AgentSession, agent: Agent, act: () => void): void {
+		let done = false;
+		session.subscribeRunState(state => {
+			if (state !== "idle" || done || !hasReport(agent.state.messages)) return;
+			done = true;
+			act();
+		});
+	}
+
+	it("every way the woken turn can start reads the same answer: its refusal is final and nothing more runs", async () => {
+		const executed: string[] = [];
+		const tools = [recordingTool("write", executed)];
+		const refused =
+			(id: string, withText = true) =>
+			(m: Model<Api>) =>
+				refusedToolCallStream(m, [{ call: { ...writeCall, id }, completed: true }], withText);
+		let extraTurns = 0;
+		const extraTurn = (m: Model<Api>) => {
+			extraTurns++;
+			return textStream(m, "unexpected extra turn");
+		};
+		const fileSession = (name: string) => {
+			const dir = path.join(tempDir.path(), `${name}-${Date.now()}`);
+			return { dir, sessionManager: SessionManager.create(dir, dir) };
+		};
+
+		// Each driver starts the woken turn its own way and returns the context it ends with.
+		const drivers: Record<string, () => Promise<readonly AgentMessage[]>> = {
+			// The wake's request fails with a retriable error; the automatic retry is refused.
+			retry: async () => {
+				const { session, agent, requests } = createSession(
+					[refused("a"), retriableErrorStream, refused("b"), extraTurn],
+					tools,
+				);
+				await session.prompt("Write to the device");
+				await session.waitForIdle();
+				expect(requests).toHaveLength(3);
+				return agent.state.messages;
+			},
+			// The wake is refused on the primary model; the fallback model is refused too.
+			fallback: async () => {
+				const { session, agent, models } = createSession(
+					[refused("a"), refused("b", false), refused("c"), extraTurn],
+					tools,
+					undefined,
+					undefined,
+					{
+						settings: {
+							"retry.modelFallback": true,
+							"retry.fallbackChains": { default: ["anthropic/claude-haiku-4-5"] },
+						},
+					},
+				);
+				await session.prompt("Write to the device");
+				await session.waitForIdle();
+				expect(models).toEqual([
+					"anthropic/claude-sonnet-4-5",
+					"anthropic/claude-sonnet-4-5",
+					"anthropic/claude-haiku-4-5",
+				]);
+				return agent.state.messages;
+			},
+			// A committed compaction between the report and the wake resumes it.
+			"compaction resume": async () => {
+				const { dir, sessionManager } = fileSession("driver-compact");
+				const runner = await compactionRunner(dir, sessionManager, false);
+				const { session, agent } = createSession(
+					[m => textStream(m, "Done with the first task."), refused("a"), refused("b"), extraTurn],
+					tools,
+					sessionManager,
+					runner,
+				);
+				let compaction: Promise<unknown> | undefined;
+				onceIdleAfterReport(session, agent, () => {
+					compaction = session.compact(undefined, { mode: "soft" });
+				});
+				await session.prompt(`First task. ${"old work ".repeat(10000)}`);
+				await session.waitForIdle();
+				await session.prompt("Write to the device");
+				await compaction;
+				await session.waitForIdle();
+				expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
+				return agent.state.messages;
+			},
+			// The session switches to another session before the wake, runs a turn there, and comes back.
+			"switch back": async () => {
+				const { dir, sessionManager } = fileSession("driver-switch");
+				const other = SessionManager.create(dir, dir);
+				other.appendMessage({ role: "user", content: "OTHER SESSION", timestamp: Date.now() });
+				await other.ensureOnDisk();
+				const otherFile = other.getSessionFile();
+				await other.close();
+				const { session, agent } = createSession(
+					[refused("a"), m => textStream(m, "Other session answered."), refused("b"), extraTurn],
+					tools,
+					sessionManager,
+				);
+				const original = sessionManager.getSessionFile();
+				if (!otherFile || !original) throw new Error("Expected session files");
+				let switching: Promise<unknown> | undefined;
+				onceIdleAfterReport(session, agent, () => {
+					switching = session.switchSession(otherFile, { keepModel: true });
+				});
+				await session.prompt("Write to the device");
+				await switching;
+				await session.waitForIdle();
+				await session.prompt("OTHER REQUEST");
+				await session.waitForIdle();
+				await session.switchSession(original, { keepModel: true });
+				await session.waitForIdle();
+				return agent.state.messages;
+			},
+			// The process ends before the wake; `omp --restore` reopens the session.
+			reopen: async () => {
+				const { sessionManager } = fileSession("driver-reopen");
+				const first = createSession([refused("a"), extraTurn], tools, sessionManager);
+				let disposing: Promise<void> | undefined;
+				onceIdleAfterReport(first.session, first.agent, () => {
+					disposing = first.session.dispose();
+				});
+				await first.session.prompt("Write to the device");
+				await disposing;
+				await sessionManager.flush();
+				const file = sessionManager.getSessionFile();
+				await sessionManager.close();
+				if (!file) throw new Error("Expected a session file");
+				const reopened = await SessionManager.open(file);
+				const { session, agent } = createSession([refused("b"), extraTurn], tools, reopened);
+				agent.replaceMessages(reopened.buildSessionContext().messages);
+				expect(await session.restoreInterruptedTurn()).toBe(true);
+				await session.waitForIdle();
+				return agent.state.messages;
+			},
+		};
+
+		const outcomes: Record<string, unknown> = {};
+		for (const [name, drive] of Object.entries(drivers)) {
+			extraTurns = 0;
+			const messages = await drive();
+			outcomes[name] = { reportFinals: reportFinals(messages), extraTurns };
+			await session?.dispose();
+			session = undefined;
+		}
+		const answer = { reportFinals: [false, true], extraTurns: 0 };
+		expect(outcomes).toEqual(Object.fromEntries(Object.keys(drivers).map(name => [name, answer])));
+		expect(executed).toEqual([]);
+	});
+
+	describe("while a context-transfer summary is generated", () => {
+		let releaseSummary = () => {};
+		const summaryStream = (m: Model<Api>) => {
+			const stream = new AssistantMessageEventStream();
+			releaseSummary = () => {
+				void (async () => {
+					for await (const event of textStream(m, "Earlier completed work summarized.")) stream.push(event);
+				})();
+			};
+			return stream;
+		};
+
+		it("a refusal still reports the dropped call, and the model reads it after the summary commits", async () => {
+			let started: Promise<unknown> | undefined;
+			const { session, requests } = createSession(
+				[
+					m => textStream(m, "Done with the first task."),
+					m => {
+						// The summary starts while this response streams; the refusal lands during it.
+						started = session?.handoff();
+						return refusedToolCallStream(m, [{ call: writeCall, completed: false }]);
+					},
+					m => textStream(m, "I read the report."),
+				],
+				[recordingTool("write", [])],
+				undefined,
+				undefined,
+				{ sideStreamFn: summaryStream },
+			);
+			session.subscribeRunState(state => {
+				if (state === "idle" && requests.length === 2) releaseSummary();
+			});
+			await session.prompt(`First task. ${"old work ".repeat(20000)}`);
+			await session.waitForIdle();
+			await session.prompt("Write to the device");
+			await started;
+			await session.waitForIdle();
+
+			expect(requests).toHaveLength(3);
+			expect(requests[2]).toContain(REFUSAL);
+			expect(requests[2]).toContain("`write` (cut off while its arguments were still streaming)");
+		});
+
+		it("a context-transfer summary begun between the report and the wake keeps the wake and its final report", async () => {
+			const { session, agent, requests } = createSession(
+				[
+					m => textStream(m, "Done with the first task."),
+					m => refusedToolCallStream(m, [{ call: writeCall, completed: true }]),
+					m => refusedToolCallStream(m, []),
+					m => textStream(m, "unexpected extra turn"),
+				],
+				[recordingTool("write", [])],
+				undefined,
+				undefined,
+				// The summary completes on its own: whether the woken turn is refused while
+				// it is generated or after it commits, the answer must be the same.
+				{ sideStreamFn: m => textStream(m, "Earlier completed work summarized.") },
+			);
+			let summary: Promise<unknown> | undefined;
+			onceIdleAfterReport(session, agent, () => {
+				summary = session.handoff();
+			});
+			await session.prompt(`First task. ${"old work ".repeat(20000)}`);
+			await session.waitForIdle();
+			await session.prompt("Write to the device");
+			await summary;
+			await session.waitForIdle();
+
+			expect(requests).toHaveLength(3);
+			expect(reportFinals(agent.state.messages)).toEqual([false, true]);
+		});
+	});
+
+	for (const withdrawn of [true, false]) {
+		it(`a reload ${withdrawn ? "keeps a wake the user withdrew withdrawn" : "restarts a wake nobody withdrew"}`, async () => {
+			const dir = path.join(tempDir.path(), `withdraw-${withdrawn}-${Date.now()}`);
+			const sessionManager = SessionManager.create(dir, dir);
+			const { session, agent, requests } = createSession(
+				[
+					m => refusedToolCallStream(m, [{ call: writeCall, completed: true }]),
+					m => textStream(m, "I read the report."),
+				],
+				[recordingTool("write", [])],
+				sessionManager,
+			);
+			let reloaded: Promise<unknown> | undefined;
+			onceIdleAfterReport(session, agent, () => {
+				reloaded = (async () => {
+					// The user's interrupt, before the wake runs.
+					if (withdrawn) await session.abort();
+					const file = sessionManager.getSessionFile();
+					if (!file) throw new Error("Expected a session file");
+					await session.switchSession(file, { keepModel: true });
+				})();
+			});
+			await session.prompt("Write to the device");
+			await reloaded;
+			await session.waitForIdle();
+
+			expect(requests).toHaveLength(withdrawn ? 1 : 2);
+			// A fresh process agrees: `omp --restore` restarts only a wake nobody withdrew.
+			await sessionManager.flush();
+			const file = sessionManager.getSessionFile();
+			if (!file) throw new Error("Expected a session file");
+			const reopened = await SessionManager.open(file);
+			const persisted = reopened.getEntries().flatMap(e => (e.type === "custom_message" ? [e.customType] : []));
+			expect(persisted).toEqual(withdrawn ? [REPORT_TYPE, "refusal-wake-withdrawn"] : [REPORT_TYPE]);
+			await reopened.close();
+		});
+	}
 });
