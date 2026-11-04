@@ -193,8 +193,8 @@ export class ChildProcess<In extends InMask = InMask> {
 	#stderrStream?: ReadableStream<Uint8Array>;
 	// Termination in flight after kill(); aborted exits await it before reporting.
 	#terminating?: Promise<boolean | void>;
-	// The one stop sequence of a subreaper-supervised command; later kill
-	// requests only shorten its grace period.
+	// The one stop sequence of a subreaper-supervised command; a later hard
+	// kill request ends its grace period, and any other later request is a no-op.
 	#subreaperStop?: { escalate: () => void };
 	#terminateGroup: boolean;
 	#hardKillTree: boolean;
@@ -350,12 +350,19 @@ export class ChildProcess<In extends InMask = InMask> {
 			return;
 		}
 		if (this.#hardKillTree && this.proc.exitCode === null && this.proc.signalCode === null) {
-			const root = Process.fromPid(this.proc.pid);
+			let root: Process | null = null;
+			try {
+				root = Process.fromPid(this.proc.pid);
+			} catch {
+				// No usable native handle: the direct-signal fallback below still ends the subreaper.
+			}
 			if (root) {
 				const { promise: escalated, resolve: escalate } = Promise.withResolvers<void>();
-				const hard = gracefulMs !== undefined && gracefulMs < 0;
-				if (hard) escalate();
-				const stop = this.#stopSubreaperTree(root, hard ? 0 : (gracefulMs ?? 1000), escalated).catch(e => void e);
+				const graceMs = gracefulMs === undefined ? 1000 : gracefulMs;
+				if (graceMs < 0) escalate();
+				// A stop that fails part-way (a native handle that cannot be used)
+				// must not count as a finished termination: signal the subreaper directly.
+				const stop = this.#stopSubreaperTree(root, graceMs, escalated).catch(() => this.#signalChild(graceMs));
 				this.#subreaperStop = { escalate };
 				this.#terminating = stop;
 				return;
@@ -428,14 +435,19 @@ export class ChildProcess<In extends InMask = InMask> {
 	 * Stop a subreaper-supervised command: SIGTERM to each of the subreaper's
 	 * children and their trees (never the subreaper itself), then, after
 	 * `gracefulMs`, the subreaper's own exit, or `escalated`, the hard sweep.
+	 * A negative `gracefulMs` skips the SIGTERM; zero sends it and sweeps at once.
 	 * The subreaper stays alive through the grace period, so a descendant
-	 * orphaned in it is still the subreaper's child when the sweep runs. The
-	 * grace timer is cleared as soon as the sequence moves on, so a finished
-	 * stop never keeps the caller's process alive.
+	 * orphaned in it is still the subreaper's child when the sweep runs. A
+	 * subreaper with no child has not launched the command yet (or the command
+	 * has ended): there is nothing to warn, and a grace period would let a
+	 * cancelled command start, so the sweep runs at once. The grace timer is
+	 * cleared as soon as the sequence moves on, so a finished stop never keeps
+	 * the caller's process alive.
 	 */
 	async #stopSubreaperTree(root: Process, gracefulMs: number, escalated: Promise<void>): Promise<void> {
-		if (gracefulMs > 0) {
-			for (const child of root.children()) child.killTree(15);
+		const children = gracefulMs >= 0 ? root.children() : [];
+		if (children.length > 0) {
+			for (const child of children) child.killTree(15);
 			const { promise: graceOver, resolve: endGrace } = Promise.withResolvers<void>();
 			const graceTimer = setTimeout(endGrace, gracefulMs);
 			try {

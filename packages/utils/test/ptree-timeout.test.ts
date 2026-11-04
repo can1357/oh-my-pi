@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import {
 	AbortError,
+	type ChildProcess,
 	createLinuxSubreaperScript,
 	exec,
 	NonZeroExitError,
@@ -521,10 +522,10 @@ describe.skipIf(process.platform !== "linux")("ptree subreaper stop", () => {
 	}
 
 	const stops = [
-		["an AbortSignal", (child: ReturnType<typeof spawn>, controller: AbortController) => controller.abort()],
-		["dispose", (child: ReturnType<typeof spawn>) => child[Symbol.dispose]()],
-		["a graceful kill", (child: ReturnType<typeof spawn>) => child.kill(new AbortError(new Error("stop"), ""), 500)],
-		["a hard kill", (child: ReturnType<typeof spawn>) => child.kill(new AbortError(new Error("stop"), ""), -1)],
+		["an AbortSignal", (child: ChildProcess, controller: AbortController) => controller.abort()],
+		["dispose", (child: ChildProcess) => child[Symbol.dispose]()],
+		["a graceful kill", (child: ChildProcess) => child.kill(new AbortError(new Error("stop"), ""), 500)],
+		["a hard kill", (child: ChildProcess) => child.kill(new AbortError(new Error("stop"), ""), -1)],
 	] as const;
 
 	for (const [name, stop] of stops) {
@@ -560,33 +561,70 @@ describe.skipIf(process.platform !== "linux")("ptree subreaper stop", () => {
 		}, 30_000);
 	}
 
-	it("gives the command its SIGTERM before the hard kill on a graceful stop", async () => {
-		// A command that cleans up on SIGTERM must get the chance on a graceful
-		// stop, not only a SIGKILL.
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-subreaper-stop-"));
-		const pidFile = path.join(dir, "pid");
-		const marker = path.join(dir, "cleaned");
-		try {
-			const controller = new AbortController();
-			const child = spawn(
-				[
-					"/bin/sh",
-					"-c",
-					`trap 'echo cleaned > "${marker}"; exit 0' TERM; echo $$ > '${pidFile}'; sleep 3600 & wait`,
-				],
-				{ subreaper: true, signal: controller.signal },
-			);
-			const outcome = child.wait().catch((error: unknown) => error);
-			await readPid(pidFile);
+	for (const [name, stop] of [
+		["an AbortSignal", (_child: ChildProcess, controller: AbortController) => controller.abort()],
+		// A zero grace still means SIGTERM, then SIGKILL at once, as on every other kill path.
+		["a zero-grace kill", (child: ChildProcess) => child.kill(new AbortError(new Error("stop"), ""), 0)],
+	] as const) {
+		it(`gives the command its SIGTERM before the hard kill on ${name}`, async () => {
+			// A command that cleans up on SIGTERM must get the chance on a graceful
+			// stop, not only a SIGKILL.
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-subreaper-stop-"));
+			const pidFile = path.join(dir, "pid");
+			const marker = path.join(dir, "cleaned");
+			try {
+				const controller = new AbortController();
+				const child = spawn(
+					[
+						"/bin/sh",
+						"-c",
+						`trap 'echo cleaned > "${marker}"; exit 0' TERM; echo $$ > '${pidFile}'; sleep 3600 & wait`,
+					],
+					{ subreaper: true, signal: controller.signal },
+				);
+				const outcome = child.wait().catch((error: unknown) => error);
+				await readPid(pidFile);
 
-			controller.abort();
+				stop(child, controller);
 
-			expect(await outcome).toBeInstanceOf(AbortError);
-			expect(await Bun.file(marker).text()).toBe("cleaned\n");
-		} finally {
-			await fs.rm(dir, { recursive: true, force: true });
-		}
-	}, 30_000);
+				expect(await outcome).toBeInstanceOf(AbortError);
+				expect(await Bun.file(marker).text()).toBe("cleaned\n");
+			} finally {
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		}, 30_000);
+	}
+
+	for (const [name, start] of [
+		["its signal is already aborted", (cmd: string[]) => spawn(cmd, { subreaper: true, signal: AbortSignal.abort() })],
+		[
+			"it is killed before the subreaper launches it",
+			(cmd: string[]) => {
+				const child = spawn(cmd, { subreaper: true });
+				child.kill(new AbortError(new Error("stop"), ""));
+				return child;
+			},
+		],
+	] as const) {
+		it(`never runs the command when ${name}`, async () => {
+			// The subreaper has no child yet, so there is nothing to warn: the
+			// stop must end the subreaper before it launches the cancelled command,
+			// not wait out a grace period during which the command starts.
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-subreaper-stop-"));
+			const marker = path.join(dir, "ran");
+			try {
+				const child = start(["/bin/sh", "-c", `echo ran > '${marker}'; sleep 5`]);
+				expect(await child.wait().catch((error: unknown) => error)).toBeInstanceOf(AbortError);
+				// A command the subreaper launched in its last instant would be a real
+				// process outside our control; no event marks "it never wrote", so give
+				// such an escaped command real time to write before checking.
+				await Bun.sleep(100);
+				expect(await fs.exists(marker)).toBe(false);
+			} finally {
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		}, 30_000);
+	}
 
 	for (const [name, escalate] of [
 		["the command exits on SIGTERM", false],
