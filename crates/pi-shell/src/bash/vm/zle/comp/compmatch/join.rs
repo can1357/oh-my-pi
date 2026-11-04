@@ -55,7 +55,11 @@ fn pattern_match_restrict(
 	ni: isize,
 ) -> bool {
 	let get = |v: &[u32], i: isize| usize::try_from(i).ok().and_then(|i| v.get(i).copied());
-	let pr = |i: isize| usize::try_from(i).ok().and_then(|i| prestrict.get(i).copied());
+	let pr = |i: isize| {
+		usize::try_from(i)
+			.ok()
+			.and_then(|i| prestrict.get(i).copied())
+	};
 	let (mut k, mut wk, mut ws, mut pri, mut nl) = (0usize, 0usize, wsi, pi, ni);
 	let (mut mt, mut wmt) = (0i32, 0i32);
 	let mut put = |nl: &mut isize, c: u32| -> bool {
@@ -259,7 +263,9 @@ fn bld_line(
 			let mut ms = bm;
 			while let Some(m) = ms {
 				ms = m.next.as_deref();
-				let Some(mp2) = m.matcher.as_deref() else { continue };
+				let Some(mp2) = m.matcher.as_deref() else {
+					continue;
+				};
 				if mp2.flags == 0 && mp2.wlen <= wlen && mp2.llen <= llen {
 					let (mut lp, mut wq, mut tg2) = (linep, wordcp, curgen);
 					if sfx {
@@ -322,7 +328,9 @@ fn join_strs(
 				&& !t
 			{
 				ms = m.next.as_deref();
-				let Some(mp) = m.matcher.as_deref() else { continue };
+				let Some(mp) = m.matcher.as_deref() else {
+					continue;
+				};
 				if mp.flags == 0 && mp.wlen > 0 && mp.llen > 0 && mp.wlen <= la && mp.wlen <= lb {
 					let ta = pattern_match(&mp.word, tail(sa, ia));
 					if ta || pattern_match(&mp.word, tail(sb, ib)) {
@@ -517,7 +525,9 @@ fn join_sub(
 		&& !t
 	{
 		ms = m.next.as_deref();
-		let Some(mp) = m.matcher.as_deref() else { continue };
+		let Some(mp) = m.matcher.as_deref() else {
+			continue;
+		};
 		if mp.flags == 0 && mp.wlen > 0 && mp.llen > 0 {
 			let (lo, wo) = if sfx {
 				(mp.llen as isize, mp.wlen as isize)

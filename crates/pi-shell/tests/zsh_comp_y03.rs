@@ -17,9 +17,9 @@ mod comp_support;
 mod pty_support;
 
 use comp_support::comptest::{
-	Case, Suite,
+	Case,
 	Step::{self, Eval, Test},
-	run_case,
+	Suite, run_case,
 };
 
 /// The `%prep` steps (after `comptestinit`).
@@ -33,17 +33,9 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments ':desc1:(arg1)' }"),
 			Test(
 				"tst \t\x17a\t\x17ar\t\x17arg\t\x17arg1\t\x17r\t\x17x\t \ty \t",
-				"line: {tst arg1 }{}\n\
-				 line: {tst arg1 }{}\n\
-				 line: {tst arg1 }{}\n\
-				 line: {tst arg1 }{}\n\
-				 line: {tst arg1 }{}\n\
-				 line: {tst r}{}\n\
-				 line: {tst x}{}\n\
-				 line: {tst x }{}\n\
-				 MESSAGE:{no more arguments}\n\
-				 line: {tst x y }{}\n\
-				 MESSAGE:{no more arguments}",
+				"line: {tst arg1 }{}\nline: {tst arg1 }{}\nline: {tst arg1 }{}\nline: {tst arg1 \
+				 }{}\nline: {tst arg1 }{}\nline: {tst r}{}\nline: {tst x}{}\nline: {tst x \
+				 }{}\nMESSAGE:{no more arguments}\nline: {tst x y }{}\nMESSAGE:{no more arguments}",
 			),
 		],
 	},
@@ -51,13 +43,7 @@ const CASES: &[Case] = &[
 		name:  "a and b",
 		steps: &[
 			Eval("_tst () { _arguments ':desc1:(a b)' }"),
-			Test(
-				"tst \t",
-				"line: {tst }{}\n\
-				 DESCRIPTION:{desc1}\n\
-				 NO:{a}\n\
-				 NO:{b}",
-			),
+			Test("tst \t", "line: {tst }{}\nDESCRIPTION:{desc1}\nNO:{a}\nNO:{b}"),
 		],
 	},
 	Case {
@@ -66,10 +52,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments ':desc2:((a\\:a\\ value b\\:other\\\\\\\\value))' }"),
 			Test(
 				"tst \t",
-				"line: {tst }{}\n\
-				 DESCRIPTION:{desc2}\n\
-				 NO:{a  -- a value}\n\
-				 NO:{b  -- other\\value}",
+				"line: {tst }{}\nDESCRIPTION:{desc2}\nNO:{a  -- a value}\nNO:{b  -- other\\value}",
 			),
 		],
 	},
@@ -79,11 +62,8 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments ':desc1:(arg1)' ':desc2:(arg2)' ':desc3:(arg3)' }"),
 			Test(
 				"tst \t\t\t\x17\x17\x17\x04",
-				"line: {tst arg1 }{}\n\
-				 line: {tst arg1 arg2 }{}\n\
-				 line: {tst arg1 arg2 arg3 }{}\n\
-				 DESCRIPTION:{desc1}\n\
-				 NO:{arg1}",
+				"line: {tst arg1 }{}\nline: {tst arg1 arg2 }{}\nline: {tst arg1 arg2 arg3 \
+				 }{}\nDESCRIPTION:{desc1}\nNO:{arg1}",
 			),
 		],
 	},
@@ -91,12 +71,7 @@ const CASES: &[Case] = &[
 		name:  "first argument",
 		steps: &[
 			Eval("_tst () { _arguments '1:desc1:(arg1)' }"),
-			Test(
-				"tst \t\t",
-				"line: {tst arg1 }{}\n\
-				 line: {tst arg1 }{}\n\
-				 MESSAGE:{no more arguments}",
-			),
+			Test("tst \t\t", "line: {tst arg1 }{}\nline: {tst arg1 }{}\nMESSAGE:{no more arguments}"),
 		],
 	},
 	Case {
@@ -105,9 +80,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-a' '2:desc2:(arg2)' }"),
 			Test(
 				"tst a1\t \t",
-				"line: {tst a1}{}\n\
-				 MESSAGE:{no more arguments}\n\
-				 line: {tst a1 arg2 }{}",
+				"line: {tst a1}{}\nMESSAGE:{no more arguments}\nline: {tst a1 arg2 }{}",
 			),
 		],
 	},
@@ -117,9 +90,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '2:desc2:(arg2)' '*:rest:(rest)' }"),
 			Test(
 				"tst \t\t\t",
-				"line: {tst rest }{}\n\
-				 line: {tst rest arg2 }{}\n\
-				 line: {tst rest arg2 rest }{}",
+				"line: {tst rest }{}\nline: {tst rest arg2 }{}\nline: {tst rest arg2 rest }{}",
 			),
 		],
 	},
@@ -127,11 +98,7 @@ const CASES: &[Case] = &[
 		name:  "-+",
 		steps: &[
 			Eval("_tst () { _arguments '-\\+[opt]' }"),
-			Test(
-				"tst -\x04",
-				"DESCRIPTION:{option}\n\
-				 NO:{-+  -- opt}",
-			),
+			Test("tst -\x04", "DESCRIPTION:{option}\nNO:{-+  -- opt}"),
 		],
 	},
 	Case {
@@ -140,14 +107,9 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-+o' }"),
 			Test(
 				"tst -\t\t\t\x17\x17+\t\t\t",
-				"line: {tst -o }{}\n\
-				 line: {tst -o +o }{}\n\
-				 line: {tst -o +o }{}\n\
-				 MESSAGE:{no arguments}\n\
-				 line: {tst +o }{}\n\
-				 line: {tst +o -o }{}\n\
-				 line: {tst +o -o }{}\n\
-				 MESSAGE:{no arguments}",
+				"line: {tst -o }{}\nline: {tst -o +o }{}\nline: {tst -o +o }{}\nMESSAGE:{no \
+				 arguments}\nline: {tst +o }{}\nline: {tst +o -o }{}\nline: {tst +o -o \
+				 }{}\nMESSAGE:{no arguments}",
 			),
 		],
 	},
@@ -155,13 +117,7 @@ const CASES: &[Case] = &[
 		name:  "option beginning with + and -, specified the other way around",
 		steps: &[
 			Eval("_tst () { _arguments '+-o' }"),
-			Test(
-				"tst \t",
-				"line: {tst }{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{+o}\n\
-				 NO:{-o}",
-			),
+			Test("tst \t", "line: {tst }{}\nDESCRIPTION:{option}\nNO:{+o}\nNO:{-o}"),
 		],
 	},
 	Case {
@@ -170,19 +126,9 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-s' '-a' '-b' '-c' '!-d' '!-e' '!-f' '!+d' '!+e' '!+f' }"),
 			Test(
 				"tst -ad\t\x14\t\x08ef\t",
-				"line: {tst -ad}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-b}\n\
-				 NO:{-c}\n\
-				 line: {tst -da}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-b}\n\
-				 NO:{-c}\n\
-				 line: {tst -def}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-a}\n\
-				 NO:{-b}\n\
-				 NO:{-c}",
+				"line: {tst -ad}{}\nDESCRIPTION:{option}\nNO:{-b}\nNO:{-c}\nline: {tst \
+				 -da}{}\nDESCRIPTION:{option}\nNO:{-b}\nNO:{-c}\nline: {tst \
+				 -def}{}\nDESCRIPTION:{option}\nNO:{-a}\nNO:{-b}\nNO:{-c}",
 			),
 		],
 	},
@@ -197,12 +143,7 @@ const CASES: &[Case] = &[
 		name:  "two option arguments",
 		steps: &[
 			Eval("_tst () { _arguments '-o:1:(a):2:(b)' }"),
-			Test(
-				"tst \t\t\t",
-				"line: {tst -o }{}\n\
-				 line: {tst -o a }{}\n\
-				 line: {tst -o a b }{}",
-			),
+			Test("tst \t\t\t", "line: {tst -o }{}\nline: {tst -o a }{}\nline: {tst -o a b }{}"),
 		],
 	},
 	Case {
@@ -243,10 +184,8 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '*-a:value:(1)' }"),
 			Test(
 				"tst -a\t\t -a=\t",
-				"line: {tst -a }{}\n\
-				 line: {tst -a 1 }{}\n\
-				 line: {tst -a 1 -a=}{}\n\
-				 MESSAGE:{no arguments}",
+				"line: {tst -a }{}\nline: {tst -a 1 }{}\nline: {tst -a 1 -a=}{}\nMESSAGE:{no \
+				 arguments}",
 			),
 		],
 	},
@@ -256,9 +195,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '*-a+:value:(1)' }"),
 			Test(
 				"tst -a\t -a \t -a=\t",
-				"line: {tst -a1 }{}\n\
-				 line: {tst -a1 -a 1 }{}\n\
-				 line: {tst -a1 -a 1 -a=}{}",
+				"line: {tst -a1 }{}\nline: {tst -a1 -a 1 }{}\nline: {tst -a1 -a 1 -a=}{}",
 			),
 		],
 	},
@@ -268,9 +205,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '*-a-:value:(1)' }"),
 			Test(
 				"tst -a\t -a \t=\t",
-				"line: {tst -a1 }{}\n\
-				 line: {tst -a1 -a -a}{}\n\
-				 line: {tst -a1 -a -a=}{}",
+				"line: {tst -a1 }{}\nline: {tst -a1 -a -a}{}\nline: {tst -a1 -a -a=}{}",
 			),
 		],
 	},
@@ -280,9 +215,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '*-a=:value:(1)' }"),
 			Test(
 				"tst -a\t\t -a \t",
-				"line: {tst -a=}{}\n\
-				 line: {tst -a=1 }{}\n\
-				 line: {tst -a=1 -a 1 }{}",
+				"line: {tst -a=}{}\nline: {tst -a=1 }{}\nline: {tst -a=1 -a 1 }{}",
 			),
 		],
 	},
@@ -292,9 +225,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-s' '*-a=:value:(1)' }"),
 			Test(
 				"tst -a\t-a=\t -a \t",
-				"line: {tst -a1 }{}\n\
-				 line: {tst -a1 -a=1 }{}\n\
-				 line: {tst -a1 -a=1 -a 1 }{}",
+				"line: {tst -a1 }{}\nline: {tst -a1 -a=1 }{}\nline: {tst -a1 -a=1 -a 1 }{}",
 			),
 		],
 	},
@@ -304,9 +235,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '*-a=-:value:(1)' }"),
 			Test(
 				"tst -a\t\t-a \t",
-				"line: {tst -a=}{}\n\
-				 line: {tst -a=1 }{}\n\
-				 line: {tst -a=1 -a -a=}{}",
+				"line: {tst -a=}{}\nline: {tst -a=1 }{}\nline: {tst -a=1 -a -a=}{}",
 			),
 		],
 	},
@@ -318,11 +247,7 @@ const CASES: &[Case] = &[
 		name:  "option argument with prefix that passes option prefix-needed test",
 		steps: &[
 			Eval("_tst () { _arguments '-x:arg' '-y' '-z' }"),
-			Test(
-				"tst -x -\t",
-				"line: {tst -x -}{}\n\
-				 DESCRIPTION:{arg}",
-			),
+			Test("tst -x -\t", "line: {tst -x -}{}\nDESCRIPTION:{arg}"),
 		],
 	},
 	Case {
@@ -333,13 +258,7 @@ const CASES: &[Case] = &[
 		name:  "argument beginning with minus",
 		steps: &[
 			Eval("_tst () { _arguments '-x' ':arg:' }"),
-			Test(
-				"tst -\t",
-				"line: {tst -}{}\n\
-				 DESCRIPTION:{arg}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-x}",
-			),
+			Test("tst -\t", "line: {tst -}{}\nDESCRIPTION:{arg}\nDESCRIPTION:{option}\nNO:{-x}"),
 		],
 	},
 	Case {
@@ -355,12 +274,8 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-o::optarg:(oa)' ':arg1:(a1)' }"),
 			Test(
 				"tst -o\t\t",
-				"line: {tst -o }{}\n\
-				 line: {tst -o }{}\n\
-				 DESCRIPTION:{optarg}\n\
-				 NO:{oa}\n\
-				 DESCRIPTION:{arg1}\n\
-				 NO:{a1}",
+				"line: {tst -o }{}\nline: {tst -o \
+				 }{}\nDESCRIPTION:{optarg}\nNO:{oa}\nDESCRIPTION:{arg1}\nNO:{a1}",
 			),
 		],
 	},
@@ -370,8 +285,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-o:*a:a:(a)' ':A:(A)' ':B:(B)' }"),
 			Test(
 				"tst A -o a \t\x17\x17-a -b -c a \t",
-				"line: {tst A -o a B }{}\n\
-				 line: {tst A -o -a -b -c a B }{}",
+				"line: {tst A -o a B }{}\nline: {tst A -o -a -b -c a B }{}",
 			),
 		],
 	},
@@ -383,20 +297,22 @@ const CASES: &[Case] = &[
 		],
 	},
 	Case {
-		name:  "opt_args with multiple arguments and quoting of colons and backslashes, part #1: default behaviour",
+		name:  "opt_args with multiple arguments and quoting of colons and backslashes, part #1: \
+		        default behaviour",
 		steps: &[
 			Eval("_tst () { _arguments '-a:one: :two' ':descr:{compadd -Q - $opt_args[-a]}' }"),
 			Test("tst -a 1:x \\2 \t", "line: {tst -a 1:x \\2 1\\:x:\\\\2 }{}"),
 		],
 	},
 	Case {
-		name:  "opt_args with multiple arguments and quoting of colons and backslashes, part #2: NUL escaping",
+		name:  "opt_args with multiple arguments and quoting of colons and backslashes, part #2: \
+		        NUL escaping",
 		steps: &[
-			Eval("_tst () { _arguments '-0' ':' '-a:one: :two' ':descr:{compadd -Q - ${(qqqq)opt_args[-a]}}' }"),
-			Test(
-				"tst -a 1:x \\2 \t",
-				"line: {tst -a 1:x \\2 $'1:x\\0\\\\2' }{}",
+			Eval(
+				"_tst () { _arguments '-0' ':' '-a:one: :two' ':descr:{compadd -Q - \
+				 ${(qqqq)opt_args[-a]}}' }",
 			),
+			Test("tst -a 1:x \\2 \t", "line: {tst -a 1:x \\2 $'1:x\\0\\\\2' }{}"),
 		],
 	},
 	Case {
@@ -405,11 +321,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-a' '-b' }"),
 			Test(
 				"tst  rest -\t\x17\x1bb\x02-\t",
-				"line: {tst  rest -}{}\n\
-				 line: {tst -}{ rest }\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-a}\n\
-				 NO:{-b}",
+				"line: {tst  rest -}{}\nline: {tst -}{ rest }\nDESCRIPTION:{option}\nNO:{-a}\nNO:{-b}",
 			),
 		],
 	},
@@ -439,14 +351,7 @@ const CASES: &[Case] = &[
 		name:  "rest arguments with single colon",
 		steps: &[
 			Eval("_tst () { _arguments '-a' ':more' '*:rest:{ compadd - $words }' }"),
-			Test(
-				"tst x -a rest \t",
-				"line: {tst x -a rest }{}\n\
-				 NO:{-a}\n\
-				 NO:{rest}\n\
-				 NO:{tst}\n\
-				 NO:{x}",
-			),
+			Test("tst x -a rest \t", "line: {tst x -a rest }{}\nNO:{-a}\nNO:{rest}\nNO:{tst}\nNO:{x}"),
 		],
 	},
 	Case {
@@ -455,10 +360,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-a' ':more' '*::rest:{ compadd - $words }' }"),
 			Test(
 				"tst x -a rest \t\x1bb\x1bb\x1bb\x1bt\x05 \t",
-				"line: {tst x -a rest rest }{}\n\
-				 line: {tst -a x rest rest }{}\n\
-				 NO:{rest}\n\
-				 NO:{x}",
+				"line: {tst x -a rest rest }{}\nline: {tst -a x rest rest }{}\nNO:{rest}\nNO:{x}",
 			),
 		],
 	},
@@ -466,12 +368,7 @@ const CASES: &[Case] = &[
 		name:  "rest arguments with three colons",
 		steps: &[
 			Eval("_tst () { _arguments '-a' '-b' ':more' '*:::rest:{ compadd - $words }' }"),
-			Test(
-				"tst -b x -a -x rest \t",
-				"line: {tst -b x -a -x rest }{}\n\
-				 NO:{-x}\n\
-				 NO:{rest}",
-			),
+			Test("tst -b x -a -x rest \t", "line: {tst -b x -a -x rest }{}\nNO:{-x}\nNO:{rest}"),
 		],
 	},
 	Case {
@@ -494,13 +391,9 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-e:*last:::b:{compadd \"${(j:,:)words}\"}' ':arg1:(arg1)' }"),
 			Test(
 				"tst -\t\tla\t\x08st\t\t\x1bb\x1bb\x02\t\t",
-				"line: {tst -e }{}\n\
-				 line: {tst -e  }{}\n\
-				 line: {tst -e  la }{}\n\
-				 line: {tst -e  last }{}\n\
-				 line: {tst -e  last arg1 }{}\n\
-				 line: {tst -e ,last }{ last arg1}\n\
-				 line: {tst -e ,last ,last,,last }{ last arg1}",
+				"line: {tst -e }{}\nline: {tst -e  }{}\nline: {tst -e  la }{}\nline: {tst -e  last \
+				 }{}\nline: {tst -e  last arg1 }{}\nline: {tst -e ,last }{ last arg1}\nline: {tst -e \
+				 ,last ,last,,last }{ last arg1}",
 			),
 		],
 	},
@@ -510,9 +403,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-s' '-d+:msg1:' '*::msg2:{compadd $CURRENT}' }"),
 			Test(
 				"tst add \t\t\t",
-				"line: {tst add 2 }{}\n\
-				 line: {tst add 2 3 }{}\n\
-				 line: {tst add 2 3 4 }{}",
+				"line: {tst add 2 }{}\nline: {tst add 2 3 }{}\nline: {tst add 2 3 4 }{}",
 			),
 		],
 	},
@@ -520,24 +411,14 @@ const CASES: &[Case] = &[
 		name:  "options and words (zsh-workers:12257)",
 		steps: &[
 			Eval("_tst () { _arguments '-s' '-a' '-b' '-c' ':words:compadd - abyyy abzzz' }"),
-			Test(
-				"tst ab\t",
-				"line: {tst ab}{}\n\
-				 DESCRIPTION:{words}\n\
-				 NO:{abyyy}\n\
-				 NO:{abzzz}",
-			),
+			Test("tst ab\t", "line: {tst ab}{}\nDESCRIPTION:{words}\nNO:{abyyy}\nNO:{abzzz}"),
 		],
 	},
 	Case {
 		name:  "matcher applies to options but not rest arguments",
 		steps: &[
 			Eval("_tst () { _arguments '-M' 'm:{j}={y}' '-y' '-n' ':yes/no:(y n)' }"),
-			Test(
-				"tst j\t\x1bb-\x05\t",
-				"line: {tst j}{}\n\
-				 line: {tst -y }{}",
-			),
+			Test("tst j\t\x1bb-\x05\t", "line: {tst j}{}\nline: {tst -y }{}"),
 		],
 	},
 	Case {
@@ -572,11 +453,7 @@ const CASES: &[Case] = &[
 		name:  "only first of duplicate -- is ignored",
 		steps: &[
 			Eval("_tst () { _arguments '-S' '1:one' '2:two' }"),
-			Test(
-				"tst -- -- \t",
-				"line: {tst -- -- }{}\n\
-				 DESCRIPTION:{two}",
-			),
+			Test("tst -- -- \t", "line: {tst -- -- }{}\nDESCRIPTION:{two}"),
 		],
 	},
 	Case {
@@ -590,22 +467,14 @@ const CASES: &[Case] = &[
 		name:  "long option after word that doesn't match -A pattern",
 		steps: &[
 			Eval("_tst () { _arguments '-A' '-*' '-x' '--extra' '::first' }"),
-			Test(
-				"tst word -\t",
-				"line: {tst word -}{}\n\
-				 MESSAGE:{no more arguments}",
-			),
+			Test("tst word -\t", "line: {tst word -}{}\nMESSAGE:{no more arguments}"),
 		],
 	},
 	Case {
 		name:  "option after word that doesn't match -A pattern, no space before pattern",
 		steps: &[
 			Eval("_tst () { _arguments '-A-*' '-x' ':word' }"),
-			Test(
-				"tst word -\t",
-				"line: {tst word -}{}\n\
-				 MESSAGE:{no more arguments}",
-			),
+			Test("tst word -\t", "line: {tst word -}{}\nMESSAGE:{no more arguments}"),
 		],
 	},
 	Case {
@@ -614,11 +483,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-A' '-*' '-x' ':word:(-word)' }"),
 			Test(
 				"tst  word\x1bB\x02-\t",
-				"line: {tst -}{ word}\n\
-				 DESCRIPTION:{word}\n\
-				 NO:{-word}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-x}",
+				"line: {tst -}{ word}\nDESCRIPTION:{word}\nNO:{-word}\nDESCRIPTION:{option}\nNO:{-x}",
 			),
 		],
 	},
@@ -633,13 +498,7 @@ const CASES: &[Case] = &[
 		name:  "word matching -A pattern doesn't exclude options",
 		steps: &[
 			Eval("_tst () { _arguments '-A' '-*' '-a' '-b' '*: :(words)' }"),
-			Test(
-				"tst -x -\t",
-				"line: {tst -x -}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-a}\n\
-				 NO:{-b}",
-			),
+			Test("tst -x -\t", "line: {tst -x -}{}\nDESCRIPTION:{option}\nNO:{-a}\nNO:{-b}"),
 		],
 	},
 	Case {
@@ -652,12 +511,10 @@ const CASES: &[Case] = &[
 	Case {
 		name:  "exclusion from option following word matching -A pattern should not apply",
 		steps: &[
-			Eval("_tst () { _arguments '-A' '-*' '(3)-a' '1:one' '2:two' '3:three' '4:four' '*:extra' }"),
-			Test(
-				"tst x -a \t",
-				"line: {tst x -a }{}\n\
-				 DESCRIPTION:{three}",
+			Eval(
+				"_tst () { _arguments '-A' '-*' '(3)-a' '1:one' '2:two' '3:three' '4:four' '*:extra' }",
 			),
+			Test("tst x -a \t", "line: {tst x -a }{}\nDESCRIPTION:{three}"),
 		],
 	},
 	Case {
@@ -667,48 +524,38 @@ const CASES: &[Case] = &[
 	Case {
 		name:  "rest arguments from another set not completed after option from first set",
 		steps: &[
-			Eval("_tst () { _arguments '-' 'set1' '--label=:arg:(a b)' '-' 'set2' ':rest:(rest args --label=not)' }"),
-			Test(
-				"tst --label=\t",
-				"line: {tst --label=}{}\n\
-				 DESCRIPTION:{arg}\n\
-				 NO:{a}\n\
-				 NO:{b}",
+			Eval(
+				"_tst () { _arguments '-' 'set1' '--label=:arg:(a b)' '-' 'set2' ':rest:(rest args \
+				 --label=not)' }",
 			),
+			Test("tst --label=\t", "line: {tst --label=}{}\nDESCRIPTION:{arg}\nNO:{a}\nNO:{b}"),
 		],
 	},
 	Case {
 		name:  "continue completion after rest argument that looks like an option (with sets)",
 		steps: &[
-			Eval("_tst () { _arguments '-A' '-*' '-' 'help' '-h' '-V' '-' 'other' '-a' '*: :(-x more)' }"),
-			Test(
-				"tst -a -x m\t",
-				"line: {tst -a -x more }{}",
+			Eval(
+				"_tst () { _arguments '-A' '-*' '-' 'help' '-h' '-V' '-' 'other' '-a' '*: :(-x more)' \
+				 }",
 			),
+			Test("tst -a -x m\t", "line: {tst -a -x more }{}"),
 		],
 	},
 	Case {
 		name:  "foreign option disables whole set (without -A)",
 		steps: &[
 			Eval("_tst () { _arguments '-' '(help)' '-h' '-V' '-' 'other' '-a' '*:rest:(1 2 3)' }"),
-			Test(
-				"tst -h \t-a \t",
-				"line: {tst -h }{}\n\
-				 MESSAGE:{no arguments}\n\
-				 line: {tst -h -a }{}",
-			),
+			Test("tst -h \t-a \t", "line: {tst -h }{}\nMESSAGE:{no arguments}\nline: {tst -h -a }{}"),
 		],
 	},
 	Case {
 		name:  "foreign option disables whole set (with -A)",
 		steps: &[
-			Eval("_tst () { _arguments '-A' '-*' '-' '(help)' '-h' '-V' '-' 'other' '-a' '*:rest:(1 2 3)' }"),
-			Test(
-				"tst -h \t-a \t",
-				"line: {tst -h }{}\n\
-				 MESSAGE:{no arguments}\n\
-				 line: {tst -h -a }{}",
+			Eval(
+				"_tst () { _arguments '-A' '-*' '-' '(help)' '-h' '-V' '-' 'other' '-a' '*:rest:(1 2 \
+				 3)' }",
 			),
+			Test("tst -h \t-a \t", "line: {tst -h }{}\nMESSAGE:{no arguments}\nline: {tst -h -a }{}"),
 		],
 	},
 	Case {
@@ -717,71 +564,49 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '(-C)-a' '-' 'set1' '-C' '-v' '-' 'set2' '(-a)-C' '-w' }"),
 			Test(
 				"tst -a -\t \x17\x17-C -\t",
-				"line: {tst -a -}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-v}\n\
-				 NO:{-w}\n\
-				 line: {tst -C -}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-a}\n\
-				 NO:{-v}\n\
-				 NO:{-w}",
+				"line: {tst -a -}{}\nDESCRIPTION:{option}\nNO:{-v}\nNO:{-w}\nline: {tst -C \
+				 -}{}\nDESCRIPTION:{option}\nNO:{-a}\nNO:{-v}\nNO:{-w}",
 			),
 		],
 	},
 	Case {
 		name:  "rest argument rule in two sets",
 		steps: &[
-			Eval("_tst () { _arguments '-e' '-' 'one' '-o' '*:number:(1 2)' '-' 'two' '(-e)*:letter:(a b)' }"),
+			Eval(
+				"_tst () { _arguments '-e' '-' 'one' '-o' '*:number:(1 2)' '-' 'two' '(-e)*:letter:(a \
+				 b)' }",
+			),
 			Test(
 				"tst \t a -\t",
-				"line: {tst }{}\n\
-				 DESCRIPTION:{letter}\n\
-				 NO:{a}\n\
-				 NO:{b}\n\
-				 DESCRIPTION:{number}\n\
-				 NO:{1}\n\
-				 NO:{2}\n\
-				 line: {tst  a -}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-e}\n\
-				 NO:{-o}",
+				"line: {tst \
+				 }{}\nDESCRIPTION:{letter}\nNO:{a}\nNO:{b}\nDESCRIPTION:{number}\nNO:{1}\nNO:{2}\\
+				 nline: {tst  a -}{}\nDESCRIPTION:{option}\nNO:{-e}\nNO:{-o}",
 			),
 		],
 	},
 	Case {
 		name:  "exclude various forms of rest argument in set specific form",
 		steps: &[
-			Eval("_tst () { _arguments '(set1-: set2-* set3-1)-a' '-' 'set1' '1: :(1)' '2: :(2)' '-' 'set2' '*:rest:(rest)' '-' 'set3' '1:num:(num)' '*: :(allowable)' '-' 'set4' ': :(allowed)' }"),
-			Test(
-				"tst -a \t",
-				"line: {tst -a allow}{}",
+			Eval(
+				"_tst () { _arguments '(set1-: set2-* set3-1)-a' '-' 'set1' '1: :(1)' '2: :(2)' '-' \
+				 'set2' '*:rest:(rest)' '-' 'set3' '1:num:(num)' '*: :(allowable)' '-' 'set4' ': \
+				 :(allowed)' }",
 			),
+			Test("tst -a \t", "line: {tst -a allow}{}"),
 		],
 	},
 	Case {
 		name:  "exclusion lists",
 		steps: &[
-			Eval("_tst () { _arguments '(-v)-a' '(set1--m -a)-b' '-' '(set1)' '( -a )-m' '( )-n' '-' 'set2' '(-w)*-v' '-w' }"),
+			Eval(
+				"_tst () { _arguments '(-v)-a' '(set1--m -a)-b' '-' '(set1)' '( -a )-m' '( )-n' '-' \
+				 'set2' '(-w)*-v' '-w' }",
+			),
 			Test(
 				"tst -a -\t \x17\x17-b -\t \x17\x17-m -\t \x17\x17-v -\t",
-				"line: {tst -a -}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-b}\n\
-				 NO:{-m}\n\
-				 NO:{-n}\n\
-				 NO:{-w}\n\
-				 line: {tst -b -}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-n}\n\
-				 NO:{-v}\n\
-				 NO:{-w}\n\
-				 line: {tst -m -b }{}\n\
-				 line: {tst -v -}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-a}\n\
-				 NO:{-b}\n\
-				 NO:{-v}",
+				"line: {tst -a -}{}\nDESCRIPTION:{option}\nNO:{-b}\nNO:{-m}\nNO:{-n}\nNO:{-w}\nline: \
+				 {tst -b -}{}\nDESCRIPTION:{option}\nNO:{-n}\nNO:{-v}\nNO:{-w}\nline: {tst -m -b \
+				 }{}\nline: {tst -v -}{}\nDESCRIPTION:{option}\nNO:{-a}\nNO:{-b}\nNO:{-v}",
 			),
 		],
 	},
@@ -791,23 +616,19 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-a' '-b' '-c' '(-a)1:one' '(-b)2:two' '(-c)*:extra' }"),
 			Test(
 				"tst  x y z\x1b6\x02-\t",
-				"line: {tst -}{ x y z}\n\
-				 DESCRIPTION:{one}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-a}\n\
-				 NO:{-b}\n\
-				 NO:{-c}",
+				"line: {tst -}{ x y \
+				 z}\nDESCRIPTION:{one}\nDESCRIPTION:{option}\nNO:{-a}\nNO:{-b}\nNO:{-c}",
 			),
 		],
 	},
 	Case {
 		name:  "exclude own set from an option",
 		steps: &[
-			Eval("_tst () { _arguments '-a' '-' 'set1' '-d' '-' 'set2' '(set2)-m' '-n' '-o' ':arg:(x)' '-' 'set2' '-x' }"),
-			Test(
-				"tst -m \t",
-				"line: {tst -m -a }{}",
+			Eval(
+				"_tst () { _arguments '-a' '-' 'set1' '-d' '-' 'set2' '(set2)-m' '-n' '-o' ':arg:(x)' \
+				 '-' 'set2' '-x' }",
 			),
+			Test("tst -m \t", "line: {tst -m -a }{}"),
 		],
 	},
 	Case {
@@ -816,12 +637,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-' 'set1' '(set2)-a' '-m' '-n' '-' 'set2' '-a' '-t' '-u' }"),
 			Test(
 				"tst -a -\t",
-				"line: {tst -a -}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-m}\n\
-				 NO:{-n}\n\
-				 NO:{-t}\n\
-				 NO:{-u}",
+				"line: {tst -a -}{}\nDESCRIPTION:{option}\nNO:{-m}\nNO:{-n}\nNO:{-t}\nNO:{-u}",
 			),
 		],
 	},
@@ -831,12 +647,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-' 'set2' '-a' '-t' '-u' '-' 'set1' '(set2)-a' '-m' '-n' }"),
 			Test(
 				"tst -a -\t",
-				"line: {tst -a -}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-m}\n\
-				 NO:{-n}\n\
-				 NO:{-t}\n\
-				 NO:{-u}",
+				"line: {tst -a -}{}\nDESCRIPTION:{option}\nNO:{-m}\nNO:{-n}\nNO:{-t}\nNO:{-u}",
 			),
 		],
 	},
@@ -850,36 +661,24 @@ const CASES: &[Case] = &[
 	Case {
 		name:  "excluding a set doesn't exclude common options as part of the set",
 		steps: &[
-			Eval("_tst () { _arguments '(set-c set-g)-a' '(set)-b' '-c' '+' 'grp' '-g' '-' 'set' '-s' }"),
-			Test(
-				"tst -a -b -\t",
-				"line: {tst -a -b -}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-c}\n\
-				 NO:{-g}",
+			Eval(
+				"_tst () { _arguments '(set-c set-g)-a' '(set)-b' '-c' '+' 'grp' '-g' '-' 'set' '-s' }",
 			),
+			Test("tst -a -b -\t", "line: {tst -a -b -}{}\nDESCRIPTION:{option}\nNO:{-c}\nNO:{-g}"),
 		],
 	},
 	Case {
 		name:  "exclude all other options",
 		steps: &[
 			Eval("_tst () { _arguments '(-)-h' '-a' '-b' '-c' '--long' '+p' }"),
-			Test(
-				"tst -h -\t",
-				"line: {tst -h -}{}\n\
-				 MESSAGE:{no arguments}",
-			),
+			Test("tst -h -\t", "line: {tst -h -}{}\nMESSAGE:{no arguments}"),
 		],
 	},
 	Case {
 		name:  "exclude all options from a normal argument",
 		steps: &[
 			Eval("_tst () { _arguments '--args' '-b' '-c' '+p' '(-)1:normal' }"),
-			Test(
-				"tst arg -\t",
-				"line: {tst arg -}{}\n\
-				 MESSAGE:{no more arguments}",
-			),
+			Test("tst arg -\t", "line: {tst arg -}{}\nMESSAGE:{no more arguments}"),
 		],
 	},
 	Case {
@@ -888,10 +687,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-a' '(-a)-b' }"),
 			Test(
 				"tst - -b\x02\x02\x02\t",
-				"line: {tst -}{ -b}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-a}\n\
-				 NO:{-b}",
+				"line: {tst -}{ -b}\nDESCRIPTION:{option}\nNO:{-a}\nNO:{-b}",
 			),
 		],
 	},
@@ -901,14 +697,8 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-s' ':' '(-d)-a' '-b' '-c' '-d' }"),
 			Test(
 				"tst -ab\t\x08 -\t\x1bb\x1bb \x02-\t",
-				"line: {tst -abc}{}\n\
-				 line: {tst -ab -c }{}\n\
-				 line: {tst -}{ -ab -c}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-a}\n\
-				 NO:{-b}\n\
-				 NO:{-c}\n\
-				 NO:{-d}",
+				"line: {tst -abc}{}\nline: {tst -ab -c }{}\nline: {tst -}{ -ab \
+				 -c}\nDESCRIPTION:{option}\nNO:{-a}\nNO:{-b}\nNO:{-c}\nNO:{-d}",
 			),
 		],
 	},
@@ -918,14 +708,8 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-s' '(-conf)-c' '-conf' '-f' '(-)--long' '--longer' }"),
 			Test(
 				"tst -c\t\x08-long\t",
-				"line: {tst -c}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-conf}\n\
-				 NO:{-f}\n\
-				 line: {tst --long}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{--long}\n\
-				 NO:{--longer}",
+				"line: {tst -c}{}\nDESCRIPTION:{option}\nNO:{-conf}\nNO:{-f}\nline: {tst \
+				 --long}{}\nDESCRIPTION:{option}\nNO:{--long}\nNO:{--longer}",
 			),
 		],
 	},
@@ -942,11 +726,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-s' ':' '-ad' '(-d)-a' '-b' '-ca' '-d' }"),
 			Test(
 				"tst -ad\t-b\t",
-				"line: {tst -ad }{}\n\
-				 line: {tst -ad -b}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-a}\n\
-				 NO:{-d}",
+				"line: {tst -ad }{}\nline: {tst -ad -b}{}\nDESCRIPTION:{option}\nNO:{-a}\nNO:{-d}",
 			),
 		],
 	},
@@ -956,11 +736,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '-s' ':' '(-d)-a+:arg:(b)' '(-c)-b' '-c' '-d' }"),
 			Test(
 				"tst -ab\t-\t",
-				"line: {tst -ab }{}\n\
-				 line: {tst -ab -}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-b}\n\
-				 NO:{-c}",
+				"line: {tst -ab }{}\nline: {tst -ab -}{}\nDESCRIPTION:{option}\nNO:{-b}\nNO:{-c}",
 			),
 		],
 	},
@@ -968,25 +744,20 @@ const CASES: &[Case] = &[
 		name:  "exclusion with option argument that looks like an option",
 		steps: &[
 			Eval("_tst () { _arguments '-a:arg' '-b' '(-b)-c' }"),
-			Test(
-				"tst -a -c -\t",
-				"line: {tst -a -c -}{}\n\
-				 MESSAGE:{no arguments}",
-			),
+			Test("tst -a -c -\t", "line: {tst -a -c -}{}\nMESSAGE:{no arguments}"),
 		],
 	},
 	Case {
 		name:  "exclude group options",
 		steps: &[
-			Eval("_tst () { _arguments '+' 'grp1' '-a' '-b' '-' 'onlyset' '(-a grp3--y grp2 grp4--)-m' '-n' '+' 'grp2' '-u' '-v' '+' 'grp3' '-x' '-y' '+' 'grp4' '-0' ':rest' }"),
+			Eval(
+				"_tst () { _arguments '+' 'grp1' '-a' '-b' '-' 'onlyset' '(-a grp3--y grp2 grp4--)-m' \
+				 '-n' '+' 'grp2' '-u' '-v' '+' 'grp3' '-x' '-y' '+' 'grp4' '-0' ':rest' }",
+			),
 			Test(
 				"tst -m -\t",
-				"line: {tst -m -}{}\n\
-				 DESCRIPTION:{rest}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-b}\n\
-				 NO:{-n}\n\
-				 NO:{-x}",
+				"line: {tst -m \
+				 -}{}\nDESCRIPTION:{rest}\nDESCRIPTION:{option}\nNO:{-b}\nNO:{-n}\nNO:{-x}",
 			),
 		],
 	},
@@ -994,43 +765,30 @@ const CASES: &[Case] = &[
 		name:  "single option groups are not mutually exclusive",
 		steps: &[
 			Eval("_tst () { _arguments '-x' '+' '(grp1)' '-a' '-b' '+' '(grp2)' '-m' '-n' }"),
-			Test(
-				"tst -m -\t",
-				"line: {tst -m -}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-a}\n\
-				 NO:{-b}\n\
-				 NO:{-x}",
-			),
+			Test("tst -m -\t", "line: {tst -m -}{}\nDESCRIPTION:{option}\nNO:{-a}\nNO:{-b}\nNO:{-x}"),
 		],
 	},
 	Case {
 		name:  "exclude rest args listed within a group",
 		steps: &[
-			Eval("_tst () { _arguments '(grp1 grp2-2)-a' '(grp1-*)-b' '+' 'grp1' ':first' '*:rest' '+' 'grp2' ':second' }"),
-			Test(
-				"tst -a \t\x1bb\x17\x05 x y \t",
-				"line: {tst -a -b }{}\n\
-				 line: {tst -b x y -a }{}",
+			Eval(
+				"_tst () { _arguments '(grp1 grp2-2)-a' '(grp1-*)-b' '+' 'grp1' ':first' '*:rest' '+' \
+				 'grp2' ':second' }",
 			),
+			Test("tst -a \t\x1bb\x17\x05 x y \t", "line: {tst -a -b }{}\nline: {tst -b x y -a }{}"),
 		],
 	},
 	Case {
 		name:  "two forms of same option in different groups",
 		steps: &[
-			Eval("_tst () { _arguments '(grp--m)-a' '+' 'grp' '-m:value:(a b c)' '+' 'agrp' '-m:other:(1 2 3)' }"),
+			Eval(
+				"_tst () { _arguments '(grp--m)-a' '+' 'grp' '-m:value:(a b c)' '+' 'agrp' \
+				 '-m:other:(1 2 3)' }",
+			),
 			Test(
 				"tst -m \t\x17-a -m \t",
-				"line: {tst -m }{}\n\
-				 DESCRIPTION:{value}\n\
-				 NO:{a}\n\
-				 NO:{b}\n\
-				 NO:{c}\n\
-				 line: {tst -a -m }{}\n\
-				 DESCRIPTION:{other}\n\
-				 NO:{1}\n\
-				 NO:{2}\n\
-				 NO:{3}",
+				"line: {tst -m }{}\nDESCRIPTION:{value}\nNO:{a}\nNO:{b}\nNO:{c}\nline: {tst -a -m \
+				 }{}\nDESCRIPTION:{other}\nNO:{1}\nNO:{2}\nNO:{3}",
 			),
 		],
 	},
@@ -1044,34 +802,25 @@ const CASES: &[Case] = &[
 	Case {
 		name:  "mix sets, groups and option stacking",
 		steps: &[
-			Eval("_tst () { _arguments '-s' '-a' '-' 'set1' '-c' '-s' '-' 'set2' '-c' '-t' '+' 'grp' '-d' }"),
+			Eval(
+				"_tst () { _arguments '-s' '-a' '-' 'set1' '-c' '-s' '-' 'set2' '-c' '-t' '+' 'grp' \
+				 '-d' }",
+			),
 			Test(
 				"tst -s\t -\t",
-				"line: {tst -s}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-a}\n\
-				 NO:{-c}\n\
-				 NO:{-d}\n\
-				 NO:{-t}\n\
-				 line: {tst -s -}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-a}\n\
-				 NO:{-c}\n\
-				 NO:{-d}",
+				"line: {tst -s}{}\nDESCRIPTION:{option}\nNO:{-a}\nNO:{-c}\nNO:{-d}\nNO:{-t}\nline: \
+				 {tst -s -}{}\nDESCRIPTION:{option}\nNO:{-a}\nNO:{-c}\nNO:{-d}",
 			),
 		],
 	},
 	Case {
 		name:  "sets and groups with - in their name",
 		steps: &[
-			Eval("_tst () { _arguments '-s' '(set-a set--b grp-a grp--b grp-)-a' '-' 'set-a' '-s' '-' 'set--b' '-t' '+' 'grp-a' '-g' '+' 'grp--b' '-h' '+' 'grp-' '-i' }"),
-			Test(
-				"tst -a\t",
-				"line: {tst -a}{}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-h}\n\
-				 NO:{-t}",
+			Eval(
+				"_tst () { _arguments '-s' '(set-a set--b grp-a grp--b grp-)-a' '-' 'set-a' '-s' '-' \
+				 'set--b' '-t' '+' 'grp-a' '-g' '+' 'grp--b' '-h' '+' 'grp-' '-i' }",
 			),
+			Test("tst -a\t", "line: {tst -a}{}\nDESCRIPTION:{option}\nNO:{-h}\nNO:{-t}"),
 		],
 	},
 	Case {
@@ -1081,13 +830,9 @@ const CASES: &[Case] = &[
 			Eval("setopt bashautolist automenu"),
 			Test(
 				"tst --a\t\t\t",
-				"line: {tst --a}{}\n\
-				 line: {tst --a}{}\n\
-				 DESCRIPTION:{arg}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{--aah}\n\
-				 NO:{--abc}\n\
-				 line: {tst --aah}{}",
+				"line: {tst --a}{}\nline: {tst \
+				 --a}{}\nDESCRIPTION:{arg}\nDESCRIPTION:{option}\nNO:{--aah}\nNO:{--abc}\nline: {tst \
+				 --aah}{}",
 			),
 		],
 	},
@@ -1098,13 +843,9 @@ const CASES: &[Case] = &[
 			Eval("setopt bashautolist noautomenu"),
 			Test(
 				"tst --a\t\t\t",
-				"line: {tst --a}{}\n\
-				 line: {tst --a}{}\n\
-				 DESCRIPTION:{arg}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{--aah}\n\
-				 NO:{--abc}\n\
-				 line: {tst --a}{}",
+				"line: {tst --a}{}\nline: {tst \
+				 --a}{}\nDESCRIPTION:{arg}\nDESCRIPTION:{option}\nNO:{--aah}\nNO:{--abc}\nline: {tst \
+				 --a}{}",
 			),
 		],
 	},
@@ -1115,16 +856,9 @@ const CASES: &[Case] = &[
 			Eval("setopt nobashautolist noautomenu"),
 			Test(
 				"tst --\t\t",
-				"line: {tst --}{}\n\
-				 DESCRIPTION:{arg}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{--aah}\n\
-				 NO:{--abc}\n\
-				 line: {tst --}{}\n\
-				 DESCRIPTION:{arg}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{--aah}\n\
-				 NO:{--abc}",
+				"line: {tst \
+				 --}{}\nDESCRIPTION:{arg}\nDESCRIPTION:{option}\nNO:{--aah}\nNO:{--abc}\nline: {tst \
+				 --}{}\nDESCRIPTION:{arg}\nDESCRIPTION:{option}\nNO:{--aah}\nNO:{--abc}",
 			),
 		],
 	},
@@ -1135,12 +869,9 @@ const CASES: &[Case] = &[
 			Eval("setopt nobashautolist automenu"),
 			Test(
 				"tst --\t\t",
-				"line: {tst --}{}\n\
-				 DESCRIPTION:{arg}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{--aah}\n\
-				 NO:{--abc}\n\
-				 line: {tst --aah}{}",
+				"line: {tst \
+				 --}{}\nDESCRIPTION:{arg}\nDESCRIPTION:{option}\nNO:{--aah}\nNO:{--abc}\nline: {tst \
+				 --aah}{}",
 			),
 		],
 	},
@@ -1151,12 +882,9 @@ const CASES: &[Case] = &[
 			Eval("zstyle \":completion:*::::\" completer _oldlist _complete"),
 			Test(
 				"tst --\t\t",
-				"line: {tst --}{}\n\
-				 DESCRIPTION:{arg}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{--aah}\n\
-				 NO:{--abc}\n\
-				 line: {tst --aah}{}",
+				"line: {tst \
+				 --}{}\nDESCRIPTION:{arg}\nDESCRIPTION:{option}\nNO:{--aah}\nNO:{--abc}\nline: {tst \
+				 --aah}{}",
 			),
 		],
 	},
@@ -1166,8 +894,7 @@ const CASES: &[Case] = &[
 			Eval("_tst () { _arguments '--prefix=: :(one two)' '--prop=: :(three four)' '--pre' }"),
 			Test(
 				"tst --pre=o\t --=\t",
-				"line: {tst --prefix=one }{}\n\
-				 line: {tst --prefix=one --prop=}{}",
+				"line: {tst --prefix=one }{}\nline: {tst --prefix=one --prop=}{}",
 			),
 		],
 	},
@@ -1175,13 +902,7 @@ const CASES: &[Case] = &[
 		name:  "with -W options mixed with arguments",
 		steps: &[
 			Eval("_tst () { _arguments '-s' '-W' '-a+:arg' '-b' }"),
-			Test(
-				"tst -a\t",
-				"line: {tst -a}{}\n\
-				 DESCRIPTION:{arg}\n\
-				 DESCRIPTION:{option}\n\
-				 NO:{-b}",
-			),
+			Test("tst -a\t", "line: {tst -a}{}\nDESCRIPTION:{arg}\nDESCRIPTION:{option}\nNO:{-b}"),
 		],
 	},
 ];

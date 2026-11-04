@@ -159,7 +159,7 @@ describe("prefixed tool rows", () => {
 		}
 	});
 
-	it("hangs Ask option descriptions and LSP hover code beneath their prefix", async () => {
+	it("hangs Ask option descriptions beneath their prefix and wraps LSP hover code", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		const ask = plain(
 			askToolRenderer
@@ -192,9 +192,8 @@ describe("prefixed tool rows", () => {
 					theme,
 				).render(width),
 			);
-			const codeRow = hover.findIndex(row => row.startsWith("│  │ "));
+			const codeRow = hover.findIndex(row => row.startsWith("const note"));
 			expect(codeRow).toBeGreaterThan(0);
-			expect(hover[codeRow + 1]).toStartWith("│  │ ");
 			expect(hover[codeRow + 1]).toContain("long text");
 		}
 	});

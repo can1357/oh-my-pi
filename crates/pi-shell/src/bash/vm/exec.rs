@@ -24,7 +24,7 @@ use super::{
 };
 use crate::bash::{
 	diag::Diag,
-	event::{Construct, EventData, NodeKind, Origin, WaitKey},
+	event::{CompiledUnit, Construct, EventData, NodeKind, Origin, WaitKey},
 	fd::FdRef,
 	host::{ResolveCtx, Resolved, Via},
 	ids::{Dialect, ModeId, UnitId, Vpid},
@@ -163,6 +163,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		}
 		let current = frame.unit.as_ref().expect("checked above");
 		if !held.as_ref().is_some_and(|u| Arc::ptr_eq(u, current)) {
+			announce(k, cx, vp.vpid, vp.runs.front(), current, current.line);
 			held = Some(Arc::clone(current));
 		}
 		let unit = held.as_ref().expect("just set");
@@ -780,6 +781,8 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 fn end_run(k: &mut Kernel, vp: &Vproc, cx: &mut Cx<'_>, run: &super::proc::Run) {
 	let status = vp.status;
 	k.emit(cx, (vp.vpid, vp.mode), Some(run), EventData::RunEnd { status });
+	k.trace_sources.remove(&vp.vpid);
+	k.trace_unit_origins.remove(&vp.vpid);
 	k.done.push_back((run.id, status));
 }
 
@@ -895,6 +898,31 @@ pub(super) fn features(
 /// frame at end of input. A script read from stdin first reads lines until
 /// the command is complete; `Some` is the wait key while fd 0 has none.
 fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitKey> {
+	let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
+	let depth = vp.frames.len();
+	if observed {
+		if let Some(origins) = k.trace_sources.get_mut(&vp.vpid) {
+			origins.retain(|at, _| *at <= depth);
+		}
+		if let Some(Frame { kind: FrameKind::Script { src, pos, what: ScriptKind::Eval, .. }, .. }) = vp.frames.last()
+			&& pos.0 == 0
+			&& let Some(origin) = literal_script_origin(vp, src, false)
+		{
+			if k.trace_sources.len() < crate::bash::trace::history::HISTORY_EVENTS {
+				k.trace_sources.entry(vp.vpid).or_default().insert(depth, origin);
+			}
+		} else if vp.frames.last().is_some_and(|frame| matches!(&frame.kind, FrameKind::Script { pos, what: ScriptKind::Eval, .. } if pos.0 == 0)) {
+			if let Some(origins) = k.trace_sources.get_mut(&vp.vpid) { origins.remove(&depth); }
+		}
+	}
+	let source_origin = observed
+		.then(|| {
+			k.trace_sources
+				.get(&vp.vpid)
+				.and_then(|origins| origins.get(&depth))
+				.copied()
+		})
+		.flatten();
 	// zsh `parse_string`: a string (`eval`, a trap, `-c`) parses whole
 	// before it runs; its first command takes the snapshot the rest reuse.
 	let (snapped, snapshot) = match vp.frames.last().map(|f| &f.kind) {
@@ -1191,7 +1219,11 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 	}
 	let (unit, line) = match res {
 		Ok(_) if noexec || !run => return None,
-		Ok(cc) => (k.engine.compile(&cc, src, mode, feat), cc.line),
+		Ok(cc) => {
+			let line = cc.line;
+			let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
+			(k.engine.compile(cc, src, mode, feat, observed), line)
+		},
 		Err(e) => {
 			// bash abandons the rest of a script after a syntax error,
 			// except one it recovers from (the parser resumes after it).
@@ -1216,16 +1248,86 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		let now = cx.host.wall().secs;
 		builtins::history::remember(k, cx.store, vp, lines, now);
 	}
-	announce(k, cx, vp.vpid, vp.runs.front(), &unit, line);
+	announce_at(k, cx, vp.vpid, vp.runs.front(), &unit, line, source_origin.as_ref());
 	None
 }
 
-/// Announce `unit` with `UnitCompiled` the first time the shell gets it
-/// (`line`: the script line of its first byte), so it precedes every event
-/// that names it: a top-level command when it is parsed, a function body
-/// when the function is defined or imported, every unit a shell can still
-/// run once after `create`/`restore` ([`super::Shell::step`]). `run` is
-/// the script it belongs to, `None` for those re-announcements.
+/// The literal argument that actually entered a native script. IR word ids
+/// are canonical parser ids; fixed-word proof rules out expansion/split drift.
+pub(super) fn literal_script_origin(
+	vp: &Vproc,
+	source: &[u8],
+	shell: bool,
+) -> Option<crate::bash::event::SourceOrigin> {
+	let (unit, node) = vp.command.as_ref()?;
+	let op = unit
+		.ops
+		.iter()
+		.find(|op| op.code == Opcode::Exec && op.node == *node)?;
+	let command = unit.cmds.get(op.a as usize)?;
+	let words = unit.lists.get(command.words as usize)?;
+	let literal = |index: usize| -> Option<Vec<u8>> {
+		let word = unit.words.get(*words.get(index)? as usize)?;
+		if !word.fixed || !word.noglob {
+			return None;
+		}
+		let mut text = Vec::new();
+		for part in &word.parts {
+			match part {
+				ir::Part::Lit(bytes) | ir::Part::Quoted(bytes) => text.extend_from_slice(bytes),
+				_ => return None,
+			}
+		}
+		Some(text)
+	};
+	let index = if shell {
+		let mut executable = None;
+		for i in 0..words.len() {
+			let text = literal(i)?;
+			let name = text.rsplit(|byte| *byte == b'/').next()?;
+			if matches!(name, b"bash" | b"sh" | b"zsh" | b"dash" | b"ksh") {
+				executable = Some(i);
+				break;
+			}
+		}
+		let mut body = None;
+		for i in executable? + 1..words.len() {
+			let flag = literal(i)?;
+			if flag.starts_with(b"-") && !flag.starts_with(b"--") && flag[1..].contains(&b'c') {
+				body = Some(i + 1);
+				break;
+			}
+		}
+		body?
+	} else {
+		if words.len() != 2 || literal(0)?.as_slice() != b"eval" {
+			return None;
+		}
+		1
+	};
+	if literal(index)?.as_slice() != source {
+		return None;
+	}
+	let word = unit.words.get(*words.get(index)? as usize)?;
+	let span = unit.nodes.get(word.node as usize)?;
+	Some(crate::bash::event::SourceOrigin {
+		vpid: vp.vpid,
+		node: word.node,
+		span: crate::bash::event::SpanOwned {
+			unit: unit.id,
+			lo:   span.lo,
+			hi:   span.hi,
+			line: unit.line + span.line,
+			col:  span.col,
+		},
+	})
+}
+
+/// Announce `unit` with `UnitCompiled`, deduplicated within a bounded
+/// observer-generation cache (eviction may safely reannounce a unit).
+/// (`line`: the script line of its first byte), before events naming it.
+/// Parsed commands announce immediately; cached/restored frames announce
+/// only when executed. No store scan or parsing ahead is needed.
 pub fn announce(
 	k: &mut Kernel,
 	cx: &mut Cx<'_>,
@@ -1234,15 +1336,81 @@ pub fn announce(
 	unit: &Unit,
 	line: u32,
 ) {
-	if !unit.nodes.is_empty() && k.announced.insert(unit.id) {
-		k.emit(cx, (vpid, unit.mode), run, EventData::UnitCompiled {
-			unit: &unit.id,
-			source: BStr::new(&unit.source),
-			line,
-			node_count: unit.nodes.len() as u32,
-			features: unit.features,
-			aliases: &unit.aliases,
-		});
+	if !k.mask.contains(crate::bash::event::EventKind::UnitCompiled) {
+		return;
+	}
+	let origin = k
+		.trace_unit_origins
+		.get(&vpid)
+		.and_then(|origins| origins.get(&unit.id))
+		.copied();
+	announce_at(k, cx, vpid, run, unit, line, origin.as_ref());
+}
+
+fn announce_at(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vpid: crate::bash::ids::Vpid,
+	run: Option<&Run>,
+	unit: &Unit,
+	line: u32,
+	parent: Option<&crate::bash::event::SourceOrigin>,
+) {
+	if k.mask.contains(crate::bash::event::EventKind::UnitCompiled) && !unit.nodes.is_empty() {
+		let key = (vpid, unit.id, parent.copied());
+		if let Some(parent) = parent {
+			record_source_origin(k, unit, vpid, *parent);
+		} else {
+			clear_source_origin(k, unit, vpid);
+		}
+		// Vpids keep advancing in long-running pipeline/background loops.
+		// Reannouncements are safe; an already-known key needs no eviction.
+		if k.announced.len() >= 20_000 && !k.announced.contains(&key) {
+			k.announced.clear();
+		}
+		if k.announced.insert(key) {
+			if unit.trace_syntax.get().is_none()
+				&& let Some(syntax) = crate::bash::trace::syntax::UnitSyntax::restore(unit)
+			{
+				let _ = unit.trace_syntax.set(Arc::new(syntax));
+			}
+			k.emit(
+				cx,
+				(vpid, unit.mode),
+				run,
+				EventData::UnitCompiled(CompiledUnit { unit, line, parent }),
+			);
+		}
+	}
+}
+
+fn clear_source_origin(k: &mut Kernel, unit: &Unit, vpid: crate::bash::ids::Vpid) {
+	if let Some(origins) = k.trace_unit_origins.get_mut(&vpid) {
+		if origins.contains_key(&unit.id) {
+			Arc::make_mut(origins).remove(&unit.id);
+		}
+		for function in &unit.funcs {
+			clear_source_origin(k, &function.body, vpid);
+		}
+	}
+}
+
+fn record_source_origin(
+	k: &mut Kernel,
+	unit: &Unit,
+	vpid: crate::bash::ids::Vpid,
+	origin: crate::bash::event::SourceOrigin,
+) {
+	if k.trace_unit_origins.len() >= crate::bash::trace::history::HISTORY_EVENTS {
+		return;
+	}
+	let origins = k.trace_unit_origins.entry(vpid).or_default();
+	if origins.get(&unit.id) == Some(&origin) {
+		return;
+	}
+	Arc::make_mut(origins).insert(unit.id, origin);
+	for function in &unit.funcs {
+		record_source_origin(k, &function.body, vpid, origin);
 	}
 }
 
@@ -2286,7 +2454,8 @@ fn nofork_unit(
 			.next_command(),
 	}?
 	.ok()?;
-	let unit = k.engine.compile(&cc, &src, key.4, feat);
+	let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
+	let unit = k.engine.compile(cc, &src, key.4, feat, observed);
 	announce(k, cx, vp.vpid, vp.runs.front(), &unit, line);
 	if aliases.is_none() {
 		if k.nofork_units.len() >= NOFORK_UNITS {
@@ -3513,14 +3682,18 @@ fn for_next(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 		}
 	}
 	if k.mask.any_op(op.ev) {
-		let scope = assign_scope(vp);
-		let shown = &value[..value.len().min(256)];
-		k.emit_op(cx, vp, op.node, EventData::Assign {
-			name: BStr::new(&var),
-			value: BStr::new(shown),
-			full_len: value.len(),
-			scope,
-		});
+		// Bash/select setters emit at their actual commit seam. The zsh
+		// parameter setter has separate assignment semantics.
+		if !select && vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
+			let scope = assign_scope(vp);
+			let shown = &value[..value.len().min(256)];
+			k.emit_op(cx, vp, op.node, EventData::Assign {
+				name: BStr::new(&var),
+				value: BStr::new(shown),
+				full_len: value.len(),
+				scope,
+			});
+		}
 		k.emit_op(cx, vp, op.node, EventData::IterStart {
 			n,
 			var: BStr::new(&var),

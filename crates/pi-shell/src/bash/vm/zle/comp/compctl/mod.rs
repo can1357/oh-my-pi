@@ -27,9 +27,8 @@ mod generate;
 use std::collections::BTreeMap;
 
 use bstr::{BString, ByteSlice};
-use serde::{Deserialize, Serialize};
-
 pub use generate::{CcRun, cleanup, compcall, compctlread, loaded, make};
+use serde::{Deserialize, Serialize};
 
 use super::{
 	compmatch::parse_cmatcher,

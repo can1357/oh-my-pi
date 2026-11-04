@@ -178,7 +178,9 @@ impl ArgRef {
 	/// zsh `arg->next`.
 	fn next(self, sets: &[Cadef]) -> Option<Self> {
 		match self {
-			Self::Arg { set, i } => (i + 1 < sets[set].args.len()).then_some(Self::Arg { set, i: i + 1 }),
+			Self::Arg { set, i } => {
+				(i + 1 < sets[set].args.len()).then_some(Self::Arg { set, i: i + 1 })
+			},
 			Self::Rest { .. } => None,
 			Self::Opt { set, opt, i } => {
 				(i + 1 < sets[set].opts[opt].args.len()).then_some(Self::Opt { set, opt, i: i + 1 })
@@ -589,7 +591,9 @@ fn parse_cadef(args: &[BString]) -> Result<Vec<Cadef>, Option<String>> {
 		let xnum;
 		if at(p, k) == b'(' {
 			let mut list = Vec::new();
-			let Some(e) = xor_list(p, k, &mut list) else { return invalid("invalid argument") };
+			let Some(e) = xor_list(p, k, &mut list) else {
+				return invalid("invalid argument");
+			};
 			k = e;
 			if let Some(ax) = gaxor {
 				list.push(ax.clone());
@@ -1606,7 +1610,13 @@ fn ca_set_data(
 ) {
 	let sets = &rec.sets;
 	let head = &rec.states[0].s;
-	let head_rest = || sets[head.d].rest.as_ref().filter(|r| r.active).map(|_| ArgRef::Rest { set: head.d });
+	let head_rest = || {
+		sets[head.d]
+			.rest
+			.as_ref()
+			.filter(|r| r.active)
+			.map(|_| ArgRef::Rest { set: head.d })
+	};
 	let mut restr = false;
 	let mut miss = false;
 	let mut oopt: i64 = 1;
@@ -1663,8 +1673,9 @@ fn ca_set_data(
 			// may come here: no normal arguments.
 			if a.typ == CAA_NORMAL
 				&& opt
-				&& optdef.is_some_and(|(s, o)| matches!(sets[s].opts[o].typ, CAO_NEXT | CAO_ODIRECT | CAO_OEQUAL))
-			{
+				&& optdef.is_some_and(|(s, o)| {
+					matches!(sets[s].opts[o].typ, CAO_NEXT | CAO_ODIRECT | CAO_OEQUAL)
+				}) {
 				return;
 			}
 			if single {
@@ -1747,7 +1758,9 @@ pub fn comparguments(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 	if !gate(ctx) {
 		return done(1);
 	}
-	let Some(a0) = args.first() else { return warn(ctx, "not enough arguments") };
+	let Some(a0) = args.first() else {
+		return warn(ctx, "not enough arguments");
+	};
 	if a0.len() != 2 || a0[0] != b'-' {
 		return warn(ctx, format!("invalid argument: {}", lossy(a0)));
 	}
