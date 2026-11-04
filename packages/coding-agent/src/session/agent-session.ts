@@ -623,6 +623,11 @@ export const MCP_DISCOVERY_TURN_WAIT_MS = 1500;
 const IMAGE_DESCRIPTION_ADMISSION_TIMEOUT_MS = 20_000;
 /** Marks work running inside the deferred extension load so it never waits on itself. */
 const deferredExtensionLoadScope = new AsyncLocalStorage<true>();
+/**
+ * Marks work running inside a session transition with that transition's turn, so a transition it
+ * starts itself runs nested within it instead of queuing behind it.
+ */
+const sessionTransitionTurnScope = new AsyncLocalStorage<object>();
 
 /** A failed preparation, not a provider failure: the ordinary input can still be restored. */
 class AgentStartPolicyChangedError extends Error {
@@ -1395,6 +1400,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#sessionTransitionSettled: Promise<void> | undefined;
 	#resolveSessionTransition: (() => void) | undefined;
 	#sessionTransitionDepth = 0;
+	/** Settles when the last session transition to queue has finished: the next one waits for it. */
+	#sessionTransitionQueueTail: Promise<void> = Promise.resolve();
+	/** Turn of the session transition running now, which a transition nested in it shares. */
+	#activeSessionTransitionTurn: object | undefined;
 	/** Each using declaration disposes one depth, so nested transitions reuse this token. */
 	readonly #sessionTransitionScope: Disposable = {
 		[Symbol.dispose]: () => {
@@ -6245,6 +6254,42 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#sessionTransitionScope;
 	}
 
+	/**
+	 * Whether the caller runs inside the session transition that holds the turn now: a transition it
+	 * starts (from that transition's hooks or callbacks) runs nested within it, as before, since
+	 * waiting for the outer one would wait for itself.
+	 */
+	#inSessionTransitionTurn(): boolean {
+		const turn = sessionTransitionTurnScope.getStore();
+		return turn !== undefined && turn === this.#activeSessionTransitionTurn;
+	}
+
+	/**
+	 * Runs a session transition (switch, new session, fork, branch, tree navigation, context reset)
+	 * once every transition requested before it has finished. A transition snapshots the session and
+	 * restores that snapshot when it rolls back, so one that overlapped another would either restore
+	 * over the other's result or snapshot a session the other was still changing. Each entry point
+	 * calls itself again through this unless {@link #inSessionTransitionTurn} says it already holds
+	 * the turn.
+	 */
+	async #runSessionTransition<T>(run: () => Promise<T>): Promise<T> {
+		const previous = this.#sessionTransitionQueueTail;
+		const done = Promise.withResolvers<void>();
+		this.#sessionTransitionQueueTail = done.promise;
+		try {
+			await previous;
+			const turn = {};
+			this.#activeSessionTransitionTurn = turn;
+			try {
+				return await sessionTransitionTurnScope.run(turn, run);
+			} finally {
+				this.#activeSessionTransitionTurn = undefined;
+			}
+		} finally {
+			done.resolve();
+		}
+	}
+
 	/** Register cleanup that runs when this AgentSession adopts a different session ID. */
 	registerSessionChangeCallback(callback: () => void): () => void {
 		this.#sessionChangeCallbacks.add(callback);
@@ -6832,6 +6877,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * streaming or a foreground bash/python execution is in flight.
 	 */
 	async resetSessionContext(): Promise<ResetSessionContextResult | undefined> {
+		if (!this.#inSessionTransitionTurn()) return this.#runSessionTransition(() => this.resetSessionContext());
 		using _transition = this.#beginSessionTransition();
 		// Refuse while a response streams OR a foreground user bash/python
 		// execution is in flight: those complete via recordBashResult()/
@@ -11679,6 +11725,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * @returns true if completed, false if cancelled by hook
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
+		if (!this.#inSessionTransitionTurn()) return this.#runSessionTransition(() => this.newSession(options));
 		using _transition = this.#beginSessionTransition();
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
@@ -11833,6 +11880,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * @returns true if completed, false if cancelled by hook or not persisting
 	 */
 	async fork(entryId?: string, options?: { requireIdle?: boolean }): Promise<boolean> {
+		if (!this.#inSessionTransitionTurn()) return this.#runSessionTransition(() => this.fork(entryId, options));
 		using _transition = this.#beginSessionTransition();
 		this.#assertVibeSessionTransitionAllowed("fork the session");
 		const requireIdleFor = entryId !== undefined || options?.requireIdle ? "fork the session" : undefined;
@@ -13413,6 +13461,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			onModelFallback?: (warning: string) => void;
 		},
 	): Promise<boolean> {
+		if (!this.#inSessionTransitionTurn()) {
+			return this.#runSessionTransition(() => this.switchSession(sessionPath, options));
+		}
 		const explicitModel = options?.model;
 		if (explicitModel && !this.#modelRegistry.hasConfiguredAuth(explicitModel)) {
 			throw new Error(`No API key for ${explicitModel.provider}/${explicitModel.id}`);
@@ -13855,6 +13906,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		selectedImages: ImageContent[];
 		cancelled: boolean;
 	}> {
+		if (!this.#inSessionTransitionTurn()) return this.#runSessionTransition(() => this.branch(entryId));
 		using _transition = this.#beginSessionTransition();
 		const selectedEntry = this.sessionManager.getEntry(entryId);
 
@@ -13993,6 +14045,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		sessionId: string,
 		images?: ImageContent[],
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
+		if (!this.#inSessionTransitionTurn()) {
+			return this.#runSessionTransition(() =>
+				this.branchFromBtw(question, assistantMessage, leafId, sessionId, images),
+			);
+		}
 		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionFile;
 		if (!this.sessionManager.getSessionFile()) {
@@ -14155,6 +14212,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			requireIdle?: boolean;
 		} = {},
 	): Promise<NavigateTreeResult> {
+		if (!this.#inSessionTransitionTurn())
+			return this.#runSessionTransition(() => this.navigateTree(targetId, options));
 		using _transition = this.#beginSessionTransition();
 		await this.#bash.flushPending();
 		const oldLeafId = this.sessionManager.getLeafId();
