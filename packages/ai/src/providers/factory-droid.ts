@@ -389,6 +389,7 @@ function streamGoogleWire(a: Attempt): AssistantMessageEventStream {
 		...a.forwarded,
 		baseUrl: a.baseUrl,
 		thinkingDialect: a.route.policy.googleThinking,
+		requestPolicy: a.route.policy,
 		temperature: a.options?.temperature,
 		topP: a.options?.topP,
 		topK: a.options?.topK,
