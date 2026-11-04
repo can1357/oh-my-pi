@@ -196,6 +196,10 @@ await agent.prompt({ role: "user", content: "Hello", timestamp: Date.now() });
 await agent.continue();
 ```
 
+Use `reserveTurn(signal?, isCurrent?)` to keep arrival order across asynchronous preparation. Wait for `ready` before preparing, then check `canClaim()` and call `prompt(messages, { turnReservation })` or `continue(signal, reservation)` without an intervening `await`. Both claims recheck the reservation synchronously. Always release it in `finally`; a successful claim releases it once the run owns the agent. The optional synchronous `isCurrent` callback checks host ownership at the claim, not just when `ready` resolves.
+
+Hosts can hold new turns during state cleanup with `const release = agent.holdTurnAdmission()`. This revokes existing reservations. Later reservations, including those made by raw `prompt` and `continue` calls, wait for all nested holds to release and the active run to finish. Release the hold in `finally`, after committing the cleanup state. Cancelling a reservation does not stop a run that already claimed the agent; use `abort()` for that.
+
 ### State Management
 
 ```typescript

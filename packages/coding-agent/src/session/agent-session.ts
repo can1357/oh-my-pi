@@ -34,6 +34,7 @@ import {
 	type AgentToolContext,
 	type AgentToolResult,
 	type AgentTurnEndContext,
+	type AgentTurnReservation,
 	AppendOnlyContextManager,
 	type AsideMessage,
 	type BeforeToolCallContext,
@@ -623,6 +624,13 @@ export const MCP_DISCOVERY_TURN_WAIT_MS = 1500;
 const IMAGE_DESCRIPTION_ADMISSION_TIMEOUT_MS = 20_000;
 /** Marks work running inside the deferred extension load so it never waits on itself. */
 const deferredExtensionLoadScope = new AsyncLocalStorage<true>();
+
+/**
+ * Where running session work came from: the run whose agent events it handles (`runEpoch`), and the
+ * post-prompt task running it (`taskSignal`). An interrupt owns work that came from the run it stopped,
+ * and work waiting for an interrupt gives up when its task is cancelled; see `AgentSession.abort`.
+ */
+const workOrigin = new AsyncLocalStorage<{ runEpoch?: number; taskSignal?: AbortSignal }>();
 
 /** A failed preparation, not a provider failure: the ordinary input can still be restored. */
 class AgentStartPolicyChangedError extends Error {
@@ -1307,12 +1315,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  `message_end` + `stopReason: "aborted"`; callers clear it in `finally` so
 	 *  it cannot leak into later unrelated aborts. */
 	#planInternalAbortPending = false;
-	#pendingAbortErrorId?: number;
 
 	#postPromptTasks = new Set<Promise<unknown>>();
 	#postPromptTasksPromise: Promise<void> | undefined = undefined;
 	#postPromptTasksResolve: (() => void) | undefined = undefined;
 	#postPromptTasksAbortController = new AbortController();
+	/** Incremented synchronously whenever a run claims the agent (its `agent_start`). */
+	#runEpoch = 0;
+	/**
+	 * While an interrupt unwinds: the post-prompt work the stopped run's aftermath schedules
+	 * (an `agent_end` retry or continuation), which that interrupt cancels. Work scheduled once
+	 * another run has claimed the agent belongs to that run and stays out of it.
+	 */
+	#interruptAftermath: { runEpoch: number; controller: AbortController; tasks: Set<Promise<unknown>> } | undefined;
+	/** Interrupts still in their state cleanup; new runs wait for them (see {@link abort}). */
+	#abortsInProgress = 0;
+	/** Open prompt (`#beginInFlight`) and client (`#prompt`) brackets by the in-flight epoch they opened in. */
+	#inFlightByEpoch = new Map<number, { prompts: number; clients: number }>();
 	/**
 	 * Cancels the current turn's pre-dispatch setup (memory-backend auto-recall and
 	 * other awaited preparation in {@link #prepareAgentStart}) when {@link abort} runs.
@@ -1358,7 +1377,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Whether the open dialogs ended a prompt's computer turn, which goes on once they settle. */
 	#userWaitEndedTurn = false;
 	#inFlightEpoch = 0;
-	#abortInProgress = false;
+	/** Whether an interrupt is in its state cleanup; nested interrupts each hold it until their own cleanup ends. */
+	get #abortInProgress(): boolean {
+		return this.#abortsInProgress > 0;
+	}
+
+	/** Reserve before preparation; validate ownership again synchronously at every claim. */
+	#reserveTurn(signal?: AbortSignal, allowDisposed = false): AgentTurnReservation {
+		const generation = this.#promptGeneration;
+		const sessionGeneration = this.#sessionGeneration;
+		const taskSignal = workOrigin.getStore()?.taskSignal;
+		const cancellation = signal && taskSignal ? AbortSignal.any([signal, taskSignal]) : (signal ?? taskSignal);
+		return this.agent.reserveTurn(
+			cancellation,
+			() =>
+				this.#promptGeneration === generation &&
+				this.#sessionGeneration === sessionGeneration &&
+				(!this.#isDisposed || allowDisposed) &&
+				!this.#abortInProgress,
+		);
+	}
+
 	/** In-flight {@link abort} calls; each settles after scheduling its stranded-queue drain, which {@link waitForIdle} must observe. */
 	#abortUnwinds = new Set<Promise<void>>();
 	/** Submissions accepted by prompt()/promptCustomMessage()/sendCustomMessage() that have not
@@ -1478,8 +1517,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
+	/** Open prompt and client brackets by in-flight epoch; an interrupt drops the epochs it took over. */
+	#inFlightEntry(epoch: number): { prompts: number; clients: number } {
+		let entry = this.#inFlightByEpoch.get(epoch);
+		if (!entry) {
+			entry = { prompts: 0, clients: 0 };
+			this.#inFlightByEpoch.set(epoch, entry);
+		}
+		return entry;
+	}
+
 	#beginInFlight(): number {
 		this.#promptInFlightCount++;
+		this.#inFlightEntry(this.#inFlightEpoch).prompts++;
 		if (this.#promptInFlightCount === 1) {
 			this.#acquirePowerAssertion();
 			this.#beginComputerTurn();
@@ -1489,10 +1539,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	#endInFlight(epoch: number, onSettled?: () => void | Promise<void>): void {
 		if (onSettled) this.#inFlightSettledCallbacks.push(onSettled);
-		// Abort has already taken an earlier epoch's bracket out of the count, so its late finalizer leaves the
-		// count to a newer turn; with none in flight it still settles, since a turn begun while abort() was
-		// finishing has its bracket reset by it and ends here.
-		if (epoch === this.#inFlightEpoch) this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
+		// A bracket an interrupt already dropped (#takeInterruptedInFlight) no longer counts, so its late
+		// finalizer leaves the count to newer turns; with none in flight it still settles.
+		const entry = this.#inFlightByEpoch.get(epoch);
+		if (entry && entry.prompts > 0) {
+			entry.prompts--;
+			if (entry.prompts === 0 && entry.clients === 0) this.#inFlightByEpoch.delete(epoch);
+			this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
+		}
 		if (this.#promptInFlightCount !== 0) return;
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
@@ -1777,35 +1831,47 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// delaying the observation's finish and mis-attributing the successor's RPC
 		// progress to this now-dead wake monitor.
 		const generation = this.#promptGeneration;
+		const sessionGeneration = this.#sessionGeneration;
 		const inFlightEpoch = this.#beginInFlight();
 		let turnError: unknown;
 		// A pooled-turn yield transition (item-set mutation + prompt rebuild) may be
 		// in flight when the wake lands. Starting the turn on the stale prompt would
 		// advertise one yield schema while the runtime enforces the other, so join
 		// the transition before building the turn from a consistent contract.
+		const reservation = this.#reserveTurn();
 		void this.whenWorkPoolYieldSettled()
-			.then(() => {
-				// Synchronous ownership check, atomic with the dispatch below:
-				// agent.prompt() claims streaming with no await in between, and the
-				// yield contract above mutates synchronously, so no install can
-				// interleave here.
-				if (this.#workPoolYieldItems.length > 0) {
-					// A pooled turn owns this worker (installed, running, or
-					// dispatch-imminent): park wake-intended records where pooled
-					// turns cannot flush them, for a monitored wake after clearing.
-					// Flushing them as ordinary asides would feed them to the batch
-					// with no observer to reply to the sender.
-					this.#irc.queueDeferredWake(records);
-					logger.debug("IRC wake turn parked while pooled");
-					return;
+			.then(async () => {
+				try {
+					if (!(await reservation.ready) || !reservation.canClaim()) {
+						// A revoked wake is stopped work, not a fresh peer delivery that may wake again.
+						if (!this.#isDisposed && this.#sessionGeneration === sessionGeneration)
+							this.#recordWithoutTurn(records);
+						return;
+					}
+					// Synchronous ownership check, atomic with the dispatch below:
+					// agent.prompt() claims streaming with no await in between, and the
+					// yield contract above mutates synchronously, so no install can
+					// interleave here.
+					if (this.#workPoolYieldItems.length > 0) {
+						// A pooled turn owns this worker (installed, running, or
+						// dispatch-imminent): park wake-intended records where pooled
+						// turns cannot flush them, for a monitored wake after clearing.
+						// Flushing them as ordinary asides would feed them to the batch
+						// with no observer to reply to the sender.
+						this.#irc.queueDeferredWake(records);
+						logger.debug("IRC wake turn parked while pooled");
+						return;
+					}
+					if (this.agent.state.isStreaming) {
+						this.#irc.queueAside(records);
+						logger.debug("IRC wake turn deferred behind the running turn");
+						return;
+					}
+					observation = this.#startTurnObservation(records);
+					await this.agent.prompt(records, { turnReservation: reservation });
+				} finally {
+					reservation.release();
 				}
-				if (this.agent.state.isStreaming) {
-					this.#irc.queueAside(records);
-					logger.debug("IRC wake turn deferred behind the running turn");
-					return;
-				}
-				observation = this.#startTurnObservation(records);
-				return this.agent.prompt(records);
 			})
 			.catch(error => {
 				if (error instanceof AgentBusyError) {
@@ -1966,23 +2032,34 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#recordWithoutTurn([card]);
 	}
 
-	#resetInFlight(): void {
-		this.#inFlightEpoch++;
-		this.#promptInFlightCount = 0;
-		this.#clientPromptInFlightCount = 0;
-		this.yieldQueue.requestIdleFlush();
-		this.#releasePowerAssertion();
-		this.#endComputerTurn();
-		this.#flushPendingAgentEnd();
-		// The abort/disposal cleared every in-flight bracket: wake steers
-		// parked on a dispatch that will never go live — they re-check
-		// `#abortInProgress` and keep their content.
-		this.#wakeDispatchLiveWaiters();
-		if (this.#inFlightSettledCallbacks.length === 0) {
-			this.#drainStrandedQueuedMessages();
-			return;
-		}
-		void this.#flushInFlightSettledCallbacks().finally(() => this.#drainStrandedQueuedMessages());
+	/**
+	 * Takes over the prompt brackets open when an interrupt begins: they belong to the work it stops. The
+	 * epoch moves on, so brackets opened during the interrupt (later work) are counted apart. The stopped
+	 * work's brackets still close normally while the interrupt unwinds; the returned release, called once
+	 * its cleanup is done, drops whichever of them are still open and leaves later work's in flight.
+	 */
+	#takeInterruptedInFlight(): () => void {
+		const laterEpoch = ++this.#inFlightEpoch;
+		return () => {
+			for (const [epoch, entry] of this.#inFlightByEpoch) {
+				if (epoch >= laterEpoch) continue;
+				this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - entry.prompts);
+				this.#clientPromptInFlightCount = Math.max(0, this.#clientPromptInFlightCount - entry.clients);
+				this.#inFlightByEpoch.delete(epoch);
+			}
+			// Steers parked on a dispatch the interrupt ended re-check `#abortInProgress` and keep their content.
+			this.#wakeDispatchLiveWaiters();
+			if (this.#promptInFlightCount !== 0) return;
+			this.yieldQueue.requestIdleFlush();
+			this.#releasePowerAssertion();
+			this.#endComputerTurn();
+			this.#flushPendingAgentEnd();
+			if (this.#inFlightSettledCallbacks.length === 0) {
+				this.#drainStrandedQueuedMessages();
+				return;
+			}
+			void this.#flushInFlightSettledCallbacks().finally(() => this.#drainStrandedQueuedMessages());
+		};
 	}
 
 	#flushPendingAgentEnd(): void {
@@ -2442,31 +2519,43 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
-				// A user interrupt is still in effect: background completions (async job
-				// results, launch completions, MCP/LSP/advisor asides) must not restart
-				// the run the user stopped. Fold them into context so the next deliberate
-				// prompt sees them — same policy as #resumeStrandedIrcAsides — until a later
-				// turn has ended on its own.
-				if (this.#advisors.autoResumeSuppressed && !this.#turnSettledSinceUserInterrupt) {
-					logger.debug("Background delivery folded into context without a turn", {
-						count: messages.length,
-						customTypes: messages.map(message => (message.role === "custom" ? message.customType : message.role)),
-					});
-					this.#recordWithoutTurn(messages);
-					return;
-				}
-				const observation =
-					this.#ircWakeTurnObserver && !this.#openTurnObservation
-						? this.#startTurnObservation(messages)
-						: undefined;
+				const sessionGeneration = this.#sessionGeneration;
+				const reservation = this.#reserveTurn();
+				let observation: TurnObservation | undefined;
 				let turnError: unknown;
 				const inFlightEpoch = this.#beginInFlight();
 				try {
-					await this.agent.prompt(messages.length === 1 ? first : messages);
+					const admitted = await reservation.ready;
+					if (this.#isDisposed || this.#sessionGeneration !== sessionGeneration) return;
+					// A user interrupt is still in effect: background completions (async job
+					// results, launch completions, MCP/LSP/advisor asides) must not restart
+					// the run the user stopped. Fold them into context so the next deliberate
+					// prompt sees them — same policy as #resumeStrandedIrcAsides — until a later
+					// turn has ended on its own.
+					if (
+						!admitted ||
+						!reservation.canClaim() ||
+						(this.#advisors.autoResumeSuppressed && !this.#turnSettledSinceUserInterrupt)
+					) {
+						logger.debug("Background delivery folded into context without a turn", {
+							count: messages.length,
+							customTypes: messages.map(message =>
+								message.role === "custom" ? message.customType : message.role,
+							),
+						});
+						this.#recordWithoutTurn(messages);
+						return;
+					}
+					observation =
+						this.#ircWakeTurnObserver && !this.#openTurnObservation
+							? this.#startTurnObservation(messages)
+							: undefined;
+					await this.agent.prompt(messages.length === 1 ? first : messages, { turnReservation: reservation });
 				} catch (error) {
 					turnError = error;
 					throw error;
 				} finally {
+					reservation.release();
 					this.#endInFlight(inFlightEpoch);
 					// The delivery receipt settles when injectIdle returns; waiting for
 					// owned deliveries here would wait on this very flush.
@@ -2561,6 +2650,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			steeringArrivalSeq: () => this.#steeringArrivalSeq(),
 			steeringArrivalAdmitted: since => this.#steeringArrivalAdmitted(since),
 			steeringArrivalRelease: seq => this.#steeringArrivalRelease(seq),
+			interrupt: () => this.#interruptFromToolContext(),
 			queuedMessageCount: () => this.queuedMessageCount,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			model: () => this.model,
@@ -4001,6 +4091,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * timeout, and their post-notification work is fenced by `#promptGeneration`.
 	 */
 	#inFlightAgentEndMaintenance = new Set<Promise<void>>();
+	/**
+	 * For an `agent_end` post-prompt task, the part an interrupt must see settle before later work may
+	 * run: its maintenance, without the computer-control revocation ack it also waits for.
+	 */
+	#postPromptTaskCores = new Map<Promise<unknown>, Promise<void>>();
 
 	/**
 	 * Subscriber entry point. Delegates to {@link #dispatchAgentEvent} and
@@ -4039,7 +4134,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
-	/** Await every in-flight `agent_end` maintenance pass, including ones started while waiting. */
+	/** Await every in-flight `agent_end` maintenance pass (not its revocation ack), including ones started while waiting. */
 	async #drainAgentEndMaintenance(): Promise<void> {
 		while (this.#inFlightAgentEndMaintenance.size > 0) {
 			await Promise.allSettled(this.#inFlightAgentEndMaintenance);
@@ -4065,6 +4160,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// never revoke a foreground-control grant acquired by a later prompt.
 		const computerControlRevocation =
 			event.type === "agent_end" ? revokeComputerControlForOwner(this.#eval.getKernelOwnerId()) : undefined;
+		if (event.type === "agent_start") this.#runEpoch++;
+		// Work this event's handling schedules comes from this run; an interrupt that stops the run owns it.
+		const origin = { runEpoch: this.#runEpoch };
 		// Only the user's own prompt, steer or follow-up lifts the computer-use stop their Escape set;
 		// synthetic continues and agent-sent messages (subagent budget steers) never do.
 		if (
@@ -4083,7 +4181,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		}
 		if (event.type !== "agent_end") {
-			const processing = this.#processAgentEvent(event);
+			const processing = workOrigin.run(origin, () => this.#processAgentEvent(event));
 			if ((event.type === "message_start" || event.type === "message_end") && isAdvisorCard(event.message)) {
 				this.#advisors.trackCardEvent(processing);
 			}
@@ -4091,22 +4189,35 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#trackPostPromptTask(promise);
-		this.#inFlightAgentEndMaintenance.add(promise);
+		// The run's end-of-turn maintenance, without the revocation ack: an interrupt waits for this
+		// before it lets later work in, and waits for the ack only after that (see `abort`).
+		// Maintenance starts now, not behind the revocation ack: it classifies this run's end
+		// against live abort state, and a deferred start lets `abort()` settle first, so a
+		// deliberate empty abort reads as a reasonless one and is auto-retried.
+		const maintenance = (async () => {
+			try {
+				await workOrigin.run(origin, () => this.#processAgentEvent(event));
+			} catch (error) {
+				// Post-turn maintenance (compaction, pruning rewrites, hooks) threw before
+				// publishing the settle. Without it the run never reports idle and every
+				// surface keeps showing a working turn that will never finish.
+				const message = toError(error).message;
+				logger.error("agent_end maintenance failed", { error: message });
+				this.emitNotice("warning", `Post-turn maintenance failed: ${message}`, "agent-end");
+				if (this.#settledAgentEnd !== event) await this.#settleAgentEnd(event, [...this.agent.state.messages]);
+			}
+		})();
+		this.#inFlightAgentEndMaintenance.add(maintenance);
+		this.#postPromptTaskCores.set(promise, maintenance);
+		// Leave the in-flight set the moment maintenance settles, not after the ack: a drain that
+		// still found a settled entry would spin without yielding to I/O, and the ack never came.
+		// The rejection itself still reaches this dispatcher's caller through the await below.
+		const leave = () => void this.#inFlightAgentEndMaintenance.delete(maintenance);
+		void maintenance.then(leave, leave);
 		try {
-			// Maintenance starts now, not behind the revocation ack: it classifies this run's end
-			// against live abort state, and a deferred start lets `abort()` settle first, so a
-			// deliberate empty abort reads as a reasonless one and is auto-retried.
-			await Promise.all([this.#processAgentEvent(event), computerControlRevocation]);
-		} catch (error) {
-			// Post-turn maintenance (compaction, pruning rewrites, hooks) threw before
-			// publishing the settle. Without it the run never reports idle and every
-			// surface keeps showing a working turn that will never finish.
-			const message = toError(error).message;
-			logger.error("agent_end maintenance failed", { error: message });
-			this.emitNotice("warning", `Post-turn maintenance failed: ${message}`, "agent-end");
-			if (this.#settledAgentEnd !== event) await this.#settleAgentEnd(event, [...this.agent.state.messages]);
+			await Promise.all([maintenance, computerControlRevocation]);
 		} finally {
-			this.#inFlightAgentEndMaintenance.delete(promise);
+			this.#postPromptTaskCores.delete(promise);
 			resolve();
 		}
 	};
@@ -4607,9 +4718,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				message.errorMessage = SILENT_ABORT_MARKER;
 				message.errorId = AIError.create(AIError.Flag.SilentAbort);
 				this.#planInternalAbortPending = false;
-			} else if (this.#pendingAbortErrorId) {
-				message.errorId = this.#pendingAbortErrorId;
-				this.#pendingAbortErrorId = undefined;
+			} else if (message.errorMessage === USER_INTERRUPT_LABEL) {
+				// The interrupt's reason rides the stopped run's own abort signal into this
+				// message, so only the run the interrupt stopped is marked: never a later,
+				// unrelated abort.
+				message.errorId = AIError.create(AIError.Flag.UserInterrupt);
 			} else if (this.#ttsr.abortPending) {
 				// A TTSR rule interruption is control flow, not a failure: the turn
 				// re-runs and the injection surfaces via `TtsrNotificationComponent`.
@@ -5330,7 +5443,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		options?: { delayMs?: number; generation?: number; onSkip?: (reason: PostPromptSkipReason) => void },
 	): void {
 		const delayMs = options?.delayMs ?? 0;
-		const signal = this.#postPromptTasksAbortController.signal;
+		// Work that came from the run an unwinding interrupt stopped belongs to that interrupt; work begun
+		// since (a message queued during the unwind) does not, and runs once the unwind is done.
+		const runEpoch = workOrigin.getStore()?.runEpoch;
+		const aftermath =
+			runEpoch !== undefined && this.#interruptAftermath?.runEpoch === runEpoch
+				? this.#interruptAftermath
+				: undefined;
+		const signal = aftermath
+			? AbortSignal.any([this.#postPromptTasksAbortController.signal, aftermath.controller.signal])
+			: this.#postPromptTasksAbortController.signal;
 		const scheduled = (async () => {
 			if (delayMs > 0) {
 				try {
@@ -5348,9 +5470,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				options.onSkip?.("stale-generation");
 				return;
 			}
-			await task(signal);
+			await workOrigin.run({ runEpoch, taskSignal: signal }, () => task(signal));
 		})();
 		this.#trackPostPromptTask(scheduled);
+		aftermath?.tasks.add(scheduled);
 	}
 
 	#skipAgentContinue(reason: AgentContinueSkipReason, request: ScheduledAgentContinueRequest): void {
@@ -5376,7 +5499,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		coalescedSources: Set<string>,
 		onStart?: () => void,
 	): Promise<AgentContinueOutcome> {
+		let reservation: AgentTurnReservation | undefined = this.#reserveTurn(signal);
 		try {
+			if (!(await reservation.ready) || !reservation.canClaim()) {
+				return { status: "skipped", reason: "session-unavailable" };
+			}
 			// During an automatic-retry saga the primary model's selector cooldown
 			// can expire while a chain-tail fallback is still mid-backoff. Restoring
 			// the primary then would reset the retry budget and re-enter a model
@@ -5409,8 +5536,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			for (;;) {
 				try {
-					if (!this.agent.state.isStreaming) onStart?.();
-					await this.agent.continue(signal);
+					reservation ??= this.#reserveTurn(signal);
+					try {
+						if (!(await reservation.ready) || !reservation.canClaim()) {
+							return { status: "skipped", reason: "session-unavailable" };
+						}
+						onStart?.();
+						await this.agent.continue(signal, reservation);
+					} finally {
+						reservation.release();
+						reservation = undefined;
+					}
 					return { status: "completed" };
 				} catch (error) {
 					if (!(error instanceof AgentBusyError)) throw error;
@@ -5450,6 +5586,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				stack: error instanceof Error ? error.stack : undefined,
 			});
 			return { status: "failed", error };
+		} finally {
+			reservation?.release();
 		}
 	}
 
@@ -5625,6 +5763,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	async #cancelPostPromptTasks(): Promise<void> {
+		await this.#beginCancelPostPromptTasks().settled;
+	}
+
+	/**
+	 * Cancels every post-prompt task and returns two waits: `cores` settles once each task's own work
+	 * is done (an `agent_end` task's maintenance, but not the computer-control revocation ack it also
+	 * waits for), and `settled` once the tasks themselves have settled, acks included.
+	 */
+	#beginCancelPostPromptTasks(): { cores: Promise<void>; settled: Promise<void> } {
 		this.#postPromptTasksAbortController.abort();
 		this.#postPromptTasksAbortController = new AbortController();
 		this.#ttsr.resolveResume();
@@ -5632,13 +5779,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const pendingTasks = Array.from(this.#postPromptTasks);
 		if (pendingTasks.length === 0) {
 			this.#resolvePostPromptTasks();
-			return;
+			return { cores: Promise.resolve(), settled: Promise.resolve() };
 		}
-
-		await Promise.allSettled(pendingTasks);
-		if (this.#postPromptTasks.size === 0) {
-			this.#resolvePostPromptTasks();
-		}
+		const cores = Promise.allSettled(pendingTasks.map(task => this.#postPromptTaskCores.get(task) ?? task)).then(
+			() => undefined,
+		);
+		const settled = Promise.allSettled(pendingTasks).then(() => {
+			if (this.#postPromptTasks.size === 0) this.#resolvePostPromptTasks();
+		});
+		return { cores, settled };
 	}
 	/**
 	 * Wait for retry, TTSR resume, and any background continuation to settle.
@@ -6435,6 +6584,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.agent.cancelTurnReservations();
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
@@ -6853,12 +7003,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		//     re-deliver stale tool output into the cleared conversation
 		//     (mirrors newSession()).
 		this.#promptGeneration++;
+		this.agent.cancelTurnReservations();
 		await this.#cancelPostPromptTasks();
 		this.#cancelOwnAsyncJobs();
 
 		// Drop the conversation: messages, queued steers/follow-ups, pending tool
 		// calls, and error state. agent.reset() keeps the model and system prompt.
 		this.#releaseQueuedTtsrReservations();
+		// The session is idle, so no aborted reply is still on its way; the rule continuation is cancelled.
+		this.#ttsr.cancelPendingAbort();
 		this.agent.reset();
 		// The cleared context is a new transcript: an aside or held message captured for the old one drops
 		// its record instead of landing here (mirrors newSession()).
@@ -7827,7 +7980,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	setGoalModeState(state: GoalModeState | undefined): void {
-		this.#goalModeState = state;
+		this.#goalRuntime.setState(state);
 	}
 
 	getVibeModeState(): VibeModeState | undefined {
@@ -8413,11 +8566,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// #promptWithMessage, past those awaits. Released when the dispatched
 		// turn settles (this bracket spans dispatch + run, matching
 		// #promptWithMessage's awaited lifetime) or on every path that never
-		// starts a turn. The epoch guard keeps an aborted prompt's finally
-		// from eating a later prompt's claim after #resetInFlight zeroed the
-		// count.
+		// starts a turn. The epoch keeps an aborted prompt's finally from
+		// eating a later prompt's claim: once the interrupt dropped this
+		// bracket (#takeInterruptedInFlight), the finally finds nothing to close.
 		const claimEpoch = this.#inFlightEpoch;
 		this.#clientPromptInFlightCount++;
+		this.#inFlightEntry(claimEpoch).clients++;
 		try {
 			// Idle compaction rewrites history without owning a prompt. Manual `/compact`
 			// reconnects the agent after preserving queues; `/handoff` commits a new
@@ -8433,13 +8587,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				release(outcome.sessionClaimed);
 			}
 		} finally {
-			if (claimEpoch === this.#inFlightEpoch) {
+			const entry = this.#inFlightByEpoch.get(claimEpoch);
+			if (entry && entry.clients > 0) {
+				entry.clients--;
+				if (entry.prompts === 0 && entry.clients === 0) this.#inFlightByEpoch.delete(claimEpoch);
 				this.#clientPromptInFlightCount = Math.max(0, this.#clientPromptInFlightCount - 1);
 				// Dropped after the settle wake inside #endInFlight (this
 				// frame settles after #promptWithMessage returns): wake the
 				// parked steers again so they re-check against zero and
 				// refuse (keeping their content) instead of admitting after
-				// settle, mirroring #resetInFlight's wake.
+				// settle, mirroring the interrupt's release wake.
 				if (this.#clientPromptInFlightCount === 0) {
 					this.#wakeDispatchLiveWaiters();
 				}
@@ -8950,7 +9107,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		generation: number,
 		signal: AbortSignal | undefined,
 		origin: "direct" | "queued",
-	): Promise<QueuedMessagePreparation & { baseXdevCatalogDelivered: boolean }> {
+	): Promise<
+		QueuedMessagePreparation & {
+			baseXdevCatalogDelivered: boolean;
+			/** The messages `commit` publishes, for sizing before the claim; undefined when setup was superseded. */
+			staged: readonly AgentMessage[] | undefined;
+			systemPrompt: string[];
+		}
+	> {
 		const sessionGeneration = this.#sessionGeneration;
 		const alreadyDisposing = this.#isDisposed && origin === "direct";
 		const isCurrent = () =>
@@ -8958,7 +9122,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#sessionGeneration === sessionGeneration &&
 			(!this.#isDisposed || alreadyDisposing) &&
 			!signal?.aborted;
-		const cancelled = { baseXdevCatalogDelivered: false, commit: () => undefined };
+		const cancelled = {
+			baseXdevCatalogDelivered: false,
+			staged: undefined,
+			systemPrompt: [],
+			commit: () => undefined,
+		};
 		if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
 		const pendingMCPDiscovery = this.#pendingMCPDiscovery;
 		if (pendingMCPDiscovery) {
@@ -9031,6 +9200,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (!overrideIsCurrent()) continue;
 			return {
 				baseXdevCatalogDelivered: result?.systemPrompt === undefined,
+				staged: messages,
+				systemPrompt: result?.systemPrompt ?? basePreparation.systemPrompt,
 				commit: () => {
 					// No await may separate ownership validation from publishing memory and policy.
 					if (!isCurrent() || !overrideIsCurrent()) return undefined;
@@ -9078,6 +9249,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#promptSequence++;
 		const setupAbort = new AbortController();
 		this.#promptSetupAbortController = setupAbort;
+		let drainedNextTurnMessages: CustomMessage[] = [];
+		let handedToAgent = false;
+		const sessionGeneration = this.#sessionGeneration;
+		// A prompt started while the session was already disposing may still run (the "direct"
+		// preparation origin allows it); one that disposal overtook must not.
+		const disposingAtStart = this.#isDisposed;
 		try {
 			options?.onPromptAdmitted?.();
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
@@ -9136,26 +9313,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 			await this.#prewalk.armPlanYoloIfNeeded();
 
-			// Build messages array (session context, eager todo prelude, then active prompt message)
-			const messages: AgentMessage[] = [];
-			const planReferenceMessage = await this.#buildPlanReferenceMessage?.();
-			if (planReferenceMessage) {
-				messages.push(planReferenceMessage);
-			}
-			const planModeMessage = await this.#buildPlanModeMessage();
-			if (planModeMessage) {
-				messages.push(planModeMessage);
-			}
-			const goalModeMessage = this.#buildGoalModeMessage();
-			if (goalModeMessage) {
-				messages.push(goalModeMessage);
-			}
-			const vibeModeMessage = this.#buildVibeModeMessage();
-			if (vibeModeMessage) {
-				messages.push(vibeModeMessage);
-			}
+			// Build attachments and collect accepted messages before turn preparation.
+			const promptMessages: AgentMessage[] = [];
 			if (options?.prependMessages) {
-				messages.push(...options.prependMessages);
+				promptMessages.push(...options.prependMessages);
 			}
 
 			// Early bail-out: if a newer abort/prompt cycle started during setup,
@@ -9164,19 +9325,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				return false;
 			}
 
-			// Pending tool-roster and xd:// deltas accompany the next user-authored
-			// prompt, never an agent-initiated continuation. Reserve their pre-user
-			// position now. Non-consuming previews count toward pre-prompt context
-			// maintenance, while the live deltas are consumed only after maintenance:
-			// promotion/summary can rebuild the base prompt and clear a roster delta
-			// it subsumes, avoiding a contradictory materialized notice.
-			const xdevMountNoticeIndex = messages.length;
-			messages.push(message);
+			promptMessages.push(message);
 			// Inject any pending "nextTurn" messages as context alongside the user message
-			for (const msg of this.#pendingNextTurnMessages) {
-				messages.push(msg);
-			}
+			// Messages it drains here go back to the queue if this prompt never reaches the agent.
+			drainedNextTurnMessages = this.#pendingNextTurnMessages;
 			this.#pendingNextTurnMessages = [];
+			promptMessages.push(...drainedNextTurnMessages);
 
 			// Auto-read @filepath mentions
 			const fileMentions = extractFileMentions(expandedText);
@@ -9188,24 +9342,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					signal: setupAbort.signal,
 				});
 				for (const fileMentionMessage of fileMentionMessages) {
-					messages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
+					promptMessages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
 					// `@image.png` mentions are attachments too: a text-only model gets the
 					// same vision-description companion as `options.images`.
 					const mentionImages = fileMentionMessage.files.flatMap(file => (file.image ? [file.image] : []));
 					const descriptionNotice = mentionImages.length
 						? await this.#buildImageDescriptionNotice(mentionImages)
 						: undefined;
-					if (descriptionNotice) messages.push(descriptionNotice);
+					if (descriptionNotice) promptMessages.push(descriptionNotice);
 				}
 			}
-
-			const preparation = await logger.time("prompt:prepareAgentStart", () =>
-				this.#prepareAgentStart(message, expandedText, options?.images, generation, setupAbort.signal, "direct"),
-			);
-			const preparedMessages = preparation.commit();
-			if (!preparedMessages) return false;
-			messages.push(...preparedMessages);
-			const baseXdevCatalogDelivered = preparation.baseXdevCatalogDelivered;
 
 			// Auto thinking: classify this real user turn and set the effective level
 			// before the model request. A user-invoked `/skill:<name>` arrives as a
@@ -9223,116 +9369,182 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return false;
 				}
 			}
+			const turnReservation = this.#reserveTurn(setupAbort.signal, disposingAtStart);
+			try {
+				if (!(await turnReservation.ready) || !turnReservation.canClaim()) return false;
+				if (
+					this.#promptGeneration !== generation ||
+					this.#sessionGeneration !== sessionGeneration ||
+					(this.#isDisposed && !disposingAtStart)
+				)
+					return false;
+				const messages: AgentMessage[] = [];
+				const planReferenceMessage = await this.#buildPlanReferenceMessage();
+				if (planReferenceMessage) {
+					messages.push(planReferenceMessage);
+				}
+				const planModeMessage = await this.#buildPlanModeMessage();
+				if (planModeMessage) {
+					messages.push(planModeMessage);
+				}
+				const goalModeMessage = this.#buildGoalModeMessage();
+				if (goalModeMessage) {
+					messages.push(goalModeMessage);
+				}
+				const vibeModeMessage = this.#buildVibeModeMessage();
+				if (vibeModeMessage) {
+					messages.push(vibeModeMessage);
+				}
+				const xdevMountNoticeIndex = messages.length + (options?.prependMessages?.length ?? 0);
+				messages.push(...promptMessages);
+				const preparation = await logger.time("prompt:prepareAgentStart", () =>
+					this.#prepareAgentStart(message, expandedText, options?.images, generation, setupAbort.signal, "direct"),
+				);
+				// Memory and policy are published at the claim (`commitDelivery`), so a prompt cancelled while it
+				// waits behind another run publishes nothing; until then the staged messages only count toward
+				// context maintenance, in the place they are delivered.
+				if (!preparation.staged) return false;
+				messages.push(...preparation.staged);
+				const baseXdevCatalogDelivered = preparation.baseXdevCatalogDelivered;
 
-			// Only the xd:// mount notice can carry substantial inline docs (up to
-			// XDEV_DOCS_TOTAL_BUDGET), so preview it in a copy and let context
-			// maintenance see the request's true size without consuming a delta a
-			// rebuild may supersede. The tool-roster notice is a tiny name list with
-			// no budget impact, so it is not previewed here — it must always ship
-			// alongside the schema change it describes (see below).
-			const previewXdevMountNotice = isUserQueuedMessage(message)
-				? this.#tools.peekPendingXdevMountNotice({ baseCatalogDelivered: baseXdevCatalogDelivered })
-				: undefined;
-			const maintenanceMessages = previewXdevMountNotice?.notice ? [...messages] : messages;
-			if (maintenanceMessages !== messages && previewXdevMountNotice?.notice) {
-				maintenanceMessages.splice(xdevMountNoticeIndex, 0, previewXdevMountNotice.notice);
-			}
-			await logger.time("prompt:prePromptCompaction", () =>
-				this.#maintenance.runPrePromptCompactionIfNeeded(maintenanceMessages),
-			);
-			if (this.#promptGeneration !== generation) {
-				return false;
-			}
-			if (autoPrewalk) {
-				const decision = await autoPrewalk;
+				// Only the xd:// mount notice can carry substantial inline docs (up to
+				// XDEV_DOCS_TOTAL_BUDGET), so preview it in a copy and let context
+				// maintenance see the request's true size without consuming a delta a
+				// rebuild may supersede. The tool-roster notice is a tiny name list with
+				// no budget impact, so it is not previewed here — it must always ship
+				// alongside the schema change it describes (see below).
+				const previewXdevMountNotice = isUserQueuedMessage(message)
+					? this.#tools.peekPendingXdevMountNotice({ baseCatalogDelivered: baseXdevCatalogDelivered })
+					: undefined;
+				const maintenanceMessages = previewXdevMountNotice?.notice ? [...messages] : messages;
+				if (maintenanceMessages !== messages && previewXdevMountNotice?.notice) {
+					maintenanceMessages.splice(xdevMountNoticeIndex, 0, previewXdevMountNotice.notice);
+				}
+				await logger.time("prompt:prePromptCompaction", () =>
+					this.#maintenance.runPrePromptCompactionIfNeeded(maintenanceMessages, preparation.systemPrompt),
+				);
 				if (this.#promptGeneration !== generation) {
 					return false;
 				}
-				// Synchronous from here to dispatch, so the arm and its plan nudge travel with this task.
-				const planMessage = this.#prewalk.applyAuto(decision);
-				if (planMessage) {
-					messages.push(planMessage);
-					// The first-turn eager todo reminder was built before this task armed. Like a configured
-					// prewalk (#10510), the plan nudge owns todo creation, so the reminder would contradict it.
-					this.#toolChoiceQueue.removeByLabel("eager-todo");
-					const eager = messages.findIndex(
-						candidate => candidate.role === "custom" && candidate.customType === EAGER_TODO_PRELUDE_MESSAGE_TYPE,
-					);
-					if (eager >= 0) messages.splice(eager, 1);
+				const prewalkDecision = autoPrewalk ? await autoPrewalk : undefined;
+				if (autoPrewalk && this.#promptGeneration !== generation) {
+					return false;
 				}
-			}
-			// Consume the xd:// notice only when its previewed revision still holds.
-			// A mount delta or catalog rebuild during the await invalidates it: any
-			// additions carried by the delivered base are recorded as announced,
-			// while remaining notice content waits for the next context check.
-			// The roster notice is re-derived from the live delta here and always
-			// delivered, keeping the model's stated availability in lockstep with
-			// the wire tool list even when a roster change landed during maintenance.
-			const xdevMountNotice = previewXdevMountNotice
-				? this.#tools.takePendingXdevMountNotice({
-						baseCatalogDelivered: baseXdevCatalogDelivered,
-						expectedContentKey: previewXdevMountNotice.contentKey,
-					})
-				: undefined;
-			const toolRosterNotice = isUserQueuedMessage(message)
-				? this.#tools.takePendingToolRosterNotice({ baseDelivered: baseXdevCatalogDelivered })
-				: undefined;
-			const evalPreludeNotice = isUserQueuedMessage(message) ? this.#tools.takeEvalPreludeNotice() : undefined;
-			const sessionAgentNotice = isUserQueuedMessage(message) ? this.#tools.takeSessionAgentNotice() : undefined;
-			if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice) {
-				messages.splice(
-					xdevMountNoticeIndex,
-					0,
-					...(xdevMountNotice ? [xdevMountNotice] : []),
-					...(toolRosterNotice ? [toolRosterNotice] : []),
-					...(evalPreludeNotice ? [evalPreludeNotice] : []),
-					...(sessionAgentNotice ? [sessionAgentNotice] : []),
-				);
-			}
-
-			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
-			const nonMessageTokens = computeNonMessageTokens(this, this.agent.tokenizer, this.settings.revision);
-			const contextWindow = this.model?.contextWindow ?? 0;
-			const breakdown = this.getContextBreakdown({ contextWindow, pendingMessages: messages });
-			const promptTokens =
-				breakdown?.usedTokens ??
-				nonMessageTokens +
-					this.agent.tokenizer.countMessages(this.messages) +
-					this.agent.tokenizer.countMessages(messages);
-			this.#stats.setPendingSnapshot({
-				promptTokens,
-				nonMessageTokens,
-				cutoffCount: this.messages.length + messages.length,
-			});
-			// Commit the plan-reference delivery flag only now that the message is
-			// actually handed to agent.prompt. Every pre-send setup step above can
-			// return (generation-bail) or throw (@-mention reads, before_agent_start
-			// hooks, pre-prompt compaction) before this point; setting the flag at
-			// construction time (#buildPlanReferenceMessage) stranded it `true` with
-			// nothing delivered, so the retry skipped re-injection and the executor
-			// lost the approved plan (issue #4094). The compaction-success resets
-			// (issue #1246) still clear it for re-injection on the next turn.
-			if (planReferenceMessage) {
-				this.#planReferenceSent = true;
-			}
-			try {
-				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
-					// `agent.prompt` claims streaming synchronously before its
-					// first await: this callback fires exactly when THIS
-					// client-owned run goes live (never on a busy-retry that
-					// waits behind an autonomous run) — wake steers parked on
-					// the dispatch so they admit into the run they targeted.
-					this.#wakeDispatchLiveWaiters();
-				});
-				await run;
+				const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
+				// Admission stays reserved from before preparation to this synchronous claim.
+				// Keep the upstream source-base retry within preparation, never repeat a
+				// preparation merely because another run was busy.
+				const commitDelivery = (): AgentMessage[] | undefined => {
+					if (!preparation.commit()) return undefined;
+					if (prewalkDecision !== undefined) {
+						const planMessage = this.#prewalk.applyAuto(prewalkDecision);
+						if (planMessage) {
+							messages.push(planMessage);
+							// The first-turn eager todo reminder was built before this task armed. Like a configured
+							// prewalk (#10510), the plan nudge owns todo creation, so the reminder would contradict it.
+							this.#toolChoiceQueue.removeByLabel("eager-todo");
+							const eager = messages.findIndex(
+								candidate =>
+									candidate.role === "custom" && candidate.customType === EAGER_TODO_PRELUDE_MESSAGE_TYPE,
+							);
+							if (eager >= 0) messages.splice(eager, 1);
+						}
+					}
+					// Consume the xd:// notice only when its previewed revision still holds.
+					// A mount delta or catalog rebuild during the await invalidates it: any
+					// additions carried by the delivered base are recorded as announced,
+					// while remaining notice content waits for the next context check.
+					// The roster notice is re-derived from the live delta here and always
+					// delivered, keeping the model's stated availability in lockstep with
+					// the wire tool list even when a roster change landed during maintenance.
+					const xdevMountNotice = previewXdevMountNotice
+						? this.#tools.takePendingXdevMountNotice({
+								baseCatalogDelivered: baseXdevCatalogDelivered,
+								expectedContentKey: previewXdevMountNotice.contentKey,
+							})
+						: undefined;
+					const toolRosterNotice = isUserQueuedMessage(message)
+						? this.#tools.takePendingToolRosterNotice({ baseDelivered: baseXdevCatalogDelivered })
+						: undefined;
+					const evalPreludeNotice = isUserQueuedMessage(message) ? this.#tools.takeEvalPreludeNotice() : undefined;
+					const sessionAgentNotice = isUserQueuedMessage(message)
+						? this.#tools.takeSessionAgentNotice()
+						: undefined;
+					if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice) {
+						messages.splice(
+							xdevMountNoticeIndex,
+							0,
+							...(xdevMountNotice ? [xdevMountNotice] : []),
+							...(toolRosterNotice ? [toolRosterNotice] : []),
+							...(evalPreludeNotice ? [evalPreludeNotice] : []),
+							...(sessionAgentNotice ? [sessionAgentNotice] : []),
+						);
+					}
+					const nonMessageTokens = computeNonMessageTokens(this, this.agent.tokenizer, this.settings.revision);
+					const contextWindow = this.model?.contextWindow ?? 0;
+					const breakdown = this.getContextBreakdown({ contextWindow, pendingMessages: messages });
+					const promptTokens =
+						breakdown?.usedTokens ??
+						nonMessageTokens +
+							this.agent.tokenizer.countMessages(this.messages) +
+							this.agent.tokenizer.countMessages(messages);
+					this.#stats.setPendingSnapshot({
+						promptTokens,
+						nonMessageTokens,
+						cutoffCount: this.messages.length + messages.length,
+					});
+					// Commit the plan-reference delivery flag only now that the message is
+					// actually handed to agent.prompt. Every pre-send setup step above can
+					// return (generation-bail) or throw (@-mention reads, before_agent_start
+					// hooks, pre-prompt compaction) before this point; setting the flag at
+					// construction time (#buildPlanReferenceMessage) stranded it `true` with
+					// nothing delivered, so the retry skipped re-injection and the executor
+					// lost the approved plan (issue #4094). The compaction-success resets
+					// (issue #1246) still clear it for re-injection on the next turn.
+					if (planReferenceMessage && messages.includes(planReferenceMessage)) {
+						this.markPlanReferenceSent();
+					}
+					return messages;
+				};
+				let dispatched: "dispatched" | "cancelled";
+				try {
+					const run = this.#recovery.promptPreparedAgent(
+						turnReservation,
+						commitDelivery,
+						agentPromptOptions,
+						() => {
+							handedToAgent = true;
+							// `agent.prompt` claims streaming synchronously before its
+							// first await: this callback fires exactly when THIS
+							// client-owned run goes live, not while its reservation
+							// waits behind an autonomous run — wake steers parked on
+							// the dispatch so they admit into the run they targeted.
+							this.#wakeDispatchLiveWaiters();
+						},
+						() =>
+							!turnReservation.canClaim() ||
+							this.#promptGeneration !== generation ||
+							this.#sessionGeneration !== sessionGeneration ||
+							(this.#isDisposed && !disposingAtStart),
+					);
+					dispatched = await run;
+				} finally {
+					this.#stats.setPendingSnapshot(undefined);
+				}
+				if (dispatched === "cancelled") return false;
+				if (!options?.skipPostPromptRecoveryWait) {
+					await this.#waitForPostPromptRecovery(generation);
+				}
+				return true;
 			} finally {
-				this.#stats.setPendingSnapshot(undefined);
+				turnReservation.release();
 			}
-			if (!options?.skipPostPromptRecoveryWait) {
-				await this.#waitForPostPromptRecovery(generation);
-			}
-			return true;
 		} finally {
+			// A bail before dispatch (an interrupt's generation bump, disposal, a usage denial or a setup
+			// error) must not lose the accepted next-turn messages this prompt drained.
+			if (!handedToAgent && drainedNextTurnMessages.length > 0 && sessionGeneration === this.#sessionGeneration) {
+				this.#pendingNextTurnMessages = [...drainedNextTurnMessages, ...this.#pendingNextTurnMessages];
+			}
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
@@ -9661,7 +9873,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (this.#abortInProgress || this.#clientPromptInFlightCount === 0) return false;
 				if (this.agent.state.isStreaming) break;
 				// The client prompt is still dispatching behind an
-				// autonomous run (e.g. an IRC wake its busy-retry is
+				// autonomous run (e.g. an IRC wake its reservation is
 				// waiting out) that has since ended: keep parking — only
 				// the client run's own claim (the dispatch-live wake)
 				// admits, never an autonomous run's streaming.
@@ -9891,8 +10103,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * steer here instead of refusing it, so the steer injects at the owning
 	 * run's first batch boundary. Fired from the client prompt's own
 	 * `agent.prompt` claim (the `onClaimed` hook in
-	 * `#promptAgentWithIdleRetry` — an autonomous run's streaming never
-	 * fires it), and from `#endInFlight`/`#resetInFlight` when the count
+	 * `TurnRecovery.promptPreparedAgent` — an autonomous run's streaming never
+	 * fires it), and from `#endInFlight`/an interrupt's release when the count
 	 * drains without the client run ever going live (setup failure, abort,
 	 * disposal).
 	 */
@@ -10168,15 +10380,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 
 		const prependMessages = queuedMessages.slice(0, -1);
+		const sessionGeneration = this.#sessionGeneration;
 		const textContent = this.#getCustomMessageTextContent(message);
+		let dispatched: boolean;
 		try {
-			await this.#promptWithMessage(message, textContent, {
+			dispatched = await this.#promptWithMessage(message, textContent, {
 				prependMessages,
 				skipPostPromptRecoveryWait: true,
 			});
 		} catch (error) {
 			this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
 			throw error;
+		}
+		// An interrupt, disposal or usage denial dropped the prompt before it reached the agent:
+		// the messages were accepted, so they wait for the next prompt instead of being lost. A
+		// session switch meanwhile discarded the old session's queue, and these with it.
+		if (!dispatched && sessionGeneration === this.#sessionGeneration) {
+			this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
 		}
 	}
 
@@ -10216,14 +10436,24 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		options?: { acceptTerminalEmptyStop?: boolean },
 	): Promise<boolean> {
 		const inFlightEpoch = this.#beginInFlight();
+		const sessionGeneration = this.#sessionGeneration;
+		const reservation = this.#reserveTurn();
 		try {
+			if (!(await reservation.ready) || !reservation.canClaim()) {
+				if (!this.#isDisposed && this.#sessionGeneration === sessionGeneration) this.#recordWithoutTurn([message]);
+				return false;
+			}
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
+			if (!reservation.canClaim()) {
+				if (!this.#isDisposed && this.#sessionGeneration === sessionGeneration) this.#recordWithoutTurn([message]);
+				return false;
+			}
 			const acceptTerminalEmptyStop = options?.acceptTerminalEmptyStop === true;
 			if (acceptTerminalEmptyStop) {
 				this.#resetPromptMaintenanceState();
 			}
 			this.#recovery.setAcceptTerminalEmptyStop(acceptTerminalEmptyStop);
-			const run = this.agent.prompt(message);
+			const run = this.agent.prompt(message, { turnReservation: reservation });
 			// No dispatch-live wake here: an agent-initiated turn has no
 			// client promptTurn, so steers parked on a dispatching CLIENT
 			// prompt must keep parking through it — waking on this claim
@@ -10232,6 +10462,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			await this.#waitForPostPromptRecovery();
 			return true;
 		} finally {
+			reservation?.release();
 			this.#usagePreflightReadyForNextModelCall = false;
 			this.#recovery.setAcceptTerminalEmptyStop(false);
 			this.#endInFlight(inFlightEpoch);
@@ -11544,6 +11775,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#promptDropped = handler;
 	}
 
+	/** A tool or dialog context's `abort()`: the user's interrupt, exactly as Esc sends it. */
+	#interruptFromToolContext(): void {
+		void this.abort({ reason: USER_INTERRUPT_LABEL });
+	}
+
 	/**
 	 * Abort current operation and wait for agent to become idle.
 	 *
@@ -11559,7 +11795,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		preserveCompaction?: boolean;
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
-		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
 		// Latch only when the interrupt stops something; an idle Esc would otherwise fold
 		// every later background completion for the rest of the session.
 		if (userInterrupt && (this.isStreaming || this.agent.hasQueuedMessages())) {
@@ -11576,99 +11811,174 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const strandedMessages = this.#extractInterruptedQueuedMessages(userInterrupt);
 		// Session switch/compact paths disconnect first; explicit aborts should
 		// leave any queued steer/follow-up visible for the user rather than
-		// auto-starting a fresh turn during cleanup.
-		this.#abortInProgress = true;
+		// auto-starting a fresh turn during cleanup. Until this interrupt's state
+		// cleanup ends, reservations stay ungranted, so the cleanup below
+		// only ever meets the work it stops.
+		this.#abortsInProgress++;
+		const releaseTurnAdmission = this.agent.holdTurnAdmission();
+		const releaseInterruptedInFlight = this.#takeInterruptedInFlight();
 		const unwind = Promise.withResolvers<void>();
 		this.#abortUnwinds.add(unwind.promise);
+		// A failing step (a computer-control revocation or a requeue callback that throws, say) must
+		// not skip the cleanup after it: every step runs, and the first failure is kept and rethrown
+		// once the interrupt has fully unwound.
+		let failure: { error: unknown } | undefined;
+		const keepFailure = (error: unknown): void => {
+			failure ??= { error };
+		};
+		const step = (run: () => void): void => {
+			try {
+				run();
+			} catch (error) {
+				keepFailure(error);
+			}
+		};
+		// A resume is later work even when it reuses the same goal id.
+		const interruptedGoalActivation = this.#goalRuntime.activeActivation;
+		const releaseGoalNotifications = this.#goalRuntime.holdNotifications();
+		let goalNotifications: Promise<void> | undefined;
+		let cleaning = true;
+		const endStateCleanup = (): void => {
+			if (!cleaning) return;
+			cleaning = false;
+			this.#abortsInProgress--;
+			releaseTurnAdmission();
+			step(() => this.#drainStrandedQueuedMessages());
+			goalNotifications = releaseGoalNotifications().catch(keepFailure);
+		};
 		try {
-			this.#titleGenerationAbortController.abort();
-			if (!this.#isDisposed) this.#titleGenerationAbortController = new AbortController();
-			this.#abortAutolearnCapture();
-			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
-			for (const controller of this.#imageDescriptionAbortControllers) controller.abort(options?.reason);
-			this.abortRetry();
+			step(() => {
+				this.#titleGenerationAbortController.abort();
+				if (!this.#isDisposed) this.#titleGenerationAbortController = new AbortController();
+			});
+			step(() => this.#abortAutolearnCapture());
+			for (const controller of this.#usagePreflightAbortControllers) step(() => controller.abort());
+			for (const controller of this.#imageDescriptionAbortControllers) {
+				step(() => controller.abort(options?.reason));
+			}
+			step(() => this.abortRetry());
 			this.#promptGeneration++;
 			// Cancel any awaited pre-dispatch setup (e.g. Hindsight auto-recall) so the
 			// admitted submission unwinds now instead of at the recall timeout (#12668).
-			this.#promptSetupAbortController?.abort(options?.reason);
+			step(() => this.#promptSetupAbortController?.abort(options?.reason));
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			// Abort the handoff first so generic compaction cancellation cannot replace
 			// the harness reason with an unreasoned "Handoff cancelled".
-			this.#handoff.abortHandoff(new Error(options?.reason ?? "Handoff aborted by session"));
+			step(() => this.#handoff.abortHandoff(new Error(options?.reason ?? "Handoff aborted by session")));
 			let manualCompactionCleanup: Promise<void> | undefined;
-			if (options?.preserveCompaction) {
-				// Manual `/compact` installed its own #compactionAbortController before
-				// this internal abort and must keep it alive (that marker is what makes
-				// isCompacting report true during startup). Any in-flight
-				// auto-compaction MUST still be cancelled, though: otherwise a
-				// background maintenance pass races the manual run and both
-				// appendCompaction/replaceMessages, double-rewriting session history.
-				this.#maintenance.abortAutomaticCompaction();
-			} else {
-				manualCompactionCleanup = this.#maintenance.abortCompaction(options?.reason);
+			step(() => {
+				if (options?.preserveCompaction) {
+					// Manual `/compact` installed its own #compactionAbortController before
+					// this internal abort and must keep it alive (that marker is what makes
+					// isCompacting report true during startup). Any in-flight
+					// auto-compaction MUST still be cancelled, though: otherwise a
+					// background maintenance pass races the manual run and both
+					// appendCompaction/replaceMessages, double-rewriting session history.
+					this.#maintenance.abortAutomaticCompaction();
+				} else {
+					manualCompactionCleanup = this.#maintenance.abortCompaction(options?.reason);
+				}
+			});
+			step(() => this.abortBash());
+			step(() => this.abortEval());
+			const computerControlRevocation = Promise.try(() =>
+				revokeComputerControlForOwner(this.#eval.getKernelOwnerId()),
+			).catch(keepFailure);
+			const postPromptCancel = this.#beginCancelPostPromptTasks();
+			step(() => this.agent.abort(options?.reason));
+			// From here, post-prompt work that comes from the stopped run (its agent_end
+			// maintenance) belongs to this interrupt; so does the rule interruption pending now.
+			const aftermath = {
+				runEpoch: this.#runEpoch,
+				controller: new AbortController(),
+				tasks: new Set<Promise<unknown>>(),
+			};
+			this.#interruptAftermath = aftermath;
+			const ttsrInterruption = this.#ttsr.interruptionToken;
+			try {
+				// The state cleanup waits for the stopped work itself, never for a computer-control
+				// revocation ack (an outside round trip): later work waiting on this cleanup must
+				// not wait on that. The acks are awaited once the cleanup is done, below.
+				await postPromptCancel.cores;
+				await this.agent.waitForIdle();
+				this.#persistToolResultsEndedWhileDisconnected();
+				// agent_end maintenance can enqueue a retry after the first cancellation.
+				// Keep the abort barrier up until those handlers settle, then cancel
+				// what they scheduled before making the session revivable. Only
+				// agent_end is awaited: a message_end stalled in an extension hook would
+				// otherwise hold /new and every abort for the full handler timeout.
+				await this.#drainAgentEndMaintenance();
+			} catch (error) {
+				keepFailure(error);
 			}
-			this.abortBash();
-			this.abortEval();
-			const computerControlRevocation = revokeComputerControlForOwner(this.#eval.getKernelOwnerId());
-			const postPromptDrain = this.#cancelPostPromptTasks();
-			this.agent.abort(options?.reason);
-			await Promise.all([postPromptDrain, computerControlRevocation]);
-			await this.agent.waitForIdle();
-			this.#persistToolResultsEndedWhileDisconnected();
-			// agent_end maintenance can enqueue a retry after the first cancellation.
-			// Keep the abort barrier up until those handlers settle, then cancel
-			// anything they scheduled before making the session revivable. Only
-			// agent_end is awaited: a message_end stalled in an extension hook would
-			// otherwise hold /new and every abort for the full handler timeout.
-			await this.#drainAgentEndMaintenance();
-			this.abortRetry();
-			await this.#cancelPostPromptTasks();
+			// The interrupted run's aborted reply is handled by now, so the rule interruption whose
+			// continuation this abort cancelled can be dropped without unmarking that reply.
+			if (ttsrInterruption !== undefined) step(() => this.#ttsr.cancelPendingAbort(ttsrInterruption));
+			step(() => this.abortRetry());
+			step(() => aftermath.controller.abort());
+			if (this.#interruptAftermath === aftermath) this.#interruptAftermath = undefined;
+			await Promise.allSettled(aftermath.tasks);
 			// `/compact` disconnects the agent subscription until its finally block.
 			// Do not let abort-and-replace callers start a new prompt before that cleanup
 			// finishes, or the replacement turn's events are neither forwarded nor persisted.
-			await manualCompactionCleanup;
-			await this.#drainAutolearnCapture();
-			await this.#goalRuntime.onTaskAborted({ reason: options?.goalReason ?? "interrupted" });
-			// Clear prompt-in-flight state: waitForIdle resolves when the agent loop's finally
-			// block runs, but nested prompt setup/finalizers may still be unwinding. Without this,
-			// a subsequent prompt() can incorrectly observe the session as busy after an abort.
-			this.#resetInFlight();
-			this.#resetSessionStopContinuationState();
-			this.#clearPendingSessionStopContinuations();
+			await manualCompactionCleanup?.catch(keepFailure);
+			// waitForIdle resolves when the agent loop's finally block runs, but the stopped
+			// prompt's setup/finalizers may still be unwinding: drop the brackets this
+			// interrupt took over, so a subsequent prompt() does not observe the session as busy.
+			step(releaseInterruptedInFlight);
+			step(() => this.#resetSessionStopContinuationState());
+			step(() => this.#clearPendingSessionStopContinuations());
 			// Safety net: if the agent loop aborted without producing an assistant
 			// message (e.g. failed before the first stream), the in-flight yield was
 			// never resolved or rejected by the normal message_end path. Reject it now
-			// so any requeue callback still fires and the queue stays consistent.
-			if (this.#toolChoiceQueue.hasInFlight) {
-				this.#toolChoiceQueue.reject("aborted");
-			}
+			// so any requeue callback still fires and the queue stays consistent. No
+			// later run can hold a directive yet: runs wait for this cleanup.
+			step(() => {
+				if (this.#toolChoiceQueue.hasInFlight) this.#toolChoiceQueue.reject("aborted");
+			});
 			// Record the queued messages the interrupt took out of the queues as persisted
 			// transcript entries without triggering a turn, plus any advisor cards that
 			// arrived via AdviseTool routing mid-abort and were parked hidden in
 			// #pendingNextTurnMessages while the turn was still tearing down. Other deferred
-			// next-turn context (non-advisor) stays queued, in order. A turn another source
-			// started during the awaits above (an idle triggerTurn send, an IRC wake) that is
-			// already streaming must not get them spliced into its live stream: they ride that
-			// turn as follow-ups instead. A prompt still in its setup has sent nothing yet, so
-			// recording them now puts them ahead of it, as for any later prompt.
+			// next-turn context (non-advisor) stays queued, in order. An autonomous run that
+			// is somehow streaming must not get them spliced into its live stream: they ride
+			// that turn as follow-ups instead.
 			const parkedAdvisorCards = this.#pendingNextTurnMessages.filter(isAdvisorCard);
 			if (parkedAdvisorCards.length > 0) {
 				this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(m => !isAdvisorCard(m));
 			}
 			for (const message of [...strandedMessages, ...parkedAdvisorCards]) {
-				if (isAdvisorCard(message)) this.#preserveAdvisorCard(message);
-				else if (this.agent.state.isStreaming) {
-					// Requeued as ordinary work: a later abort must not take it out again.
-					this.#interruptWithdrawnMessages.delete(message);
-					this.agent.followUp(message);
-				} else this.#recordWithoutTurn([message]);
+				step(() => {
+					if (isAdvisorCard(message)) this.#preserveAdvisorCard(message);
+					else if (this.agent.state.isStreaming) {
+						// Requeued as ordinary work: a later abort must not take it out again.
+						this.#interruptWithdrawnMessages.delete(message);
+						this.agent.followUp(message);
+					} else this.#recordWithoutTurn([message]);
+				});
 			}
+			// Commit accounting and the pause before admission reopens. All goal notifications,
+			// including accounting during agent_end, keep their commit order but cannot run
+			// extension handlers until endStateCleanup releases this interrupt's hold.
+			try {
+				await this.#goalRuntime.onTaskAborted({
+					reason: options?.goalReason ?? "interrupted",
+					activation: interruptedGoalActivation,
+				});
+			} catch (error) {
+				keepFailure(error);
+			}
+			// The session state is clean: later work may run. The remaining steps only wait on
+			// outside work (revocation acks, goal notifications, autolearn capture) and touch none of it.
+			endStateCleanup();
+			await Promise.all([goalNotifications, computerControlRevocation, postPromptCancel.settled]);
+			await this.#drainAutolearnCapture().catch(keepFailure);
 		} finally {
-			this.#abortInProgress = false;
-			this.#drainStrandedQueuedMessages();
+			endStateCleanup();
 			this.#abortUnwinds.delete(unwind.promise);
 			unwind.resolve();
 		}
+		if (failure) throw failure.error;
 	}
 
 	/**
@@ -11760,6 +12070,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// outgoing session also drops its record instead of landing in this new one.
 			this.#irc.clearPending();
 			this.#sessionGeneration++;
+			this.agent.cancelTurnReservations();
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
@@ -11880,7 +12191,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			try {
 				// No file means fork() is a no-op. Otherwise invalidate admitted
 				// prompt setup before the asynchronous identity rewrite begins.
-				if (previousSessionFile) this.#promptGeneration++;
+				if (previousSessionFile) {
+					this.#promptGeneration++;
+					this.agent.cancelTurnReservations();
+				}
 				forkResult = await this.sessionManager.fork();
 			} catch (error) {
 				this.#bash.finishSessionTransition(bashTransition, false);
@@ -13496,6 +13810,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// record on success but stays valid if the switch is rolled back to this same session.
 		const previousIrcPending = this.#irc.clearPending();
 		const previousSessionGeneration = this.#sessionGeneration++;
+		this.agent.cancelTurnReservations();
 		const generationSettled = Promise.withResolvers<void>();
 		const previousSessionGenerationSettled = this.#sessionGenerationSettled;
 		this.#sessionGenerationSettled = generationSettled.promise;
@@ -13931,6 +14246,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// A prompt admitted during the drain awaits above belongs to the history
 				// being replaced; the generation bump drops its pending setup.
 				this.#promptGeneration++;
+				this.agent.cancelTurnReservations();
 				if (!leafId) {
 					const title = this.sessionManager.getSessionName();
 					const titleSource = this.sessionManager.titleSource;
@@ -14037,6 +14353,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.#releaseQueuedTtsrReservations();
+		this.#ttsr.cancelPendingAbort();
 		this.agent.replaceQueues([], []);
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
@@ -14059,6 +14376,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// A prompt may have been admitted during the flush/drain awaits
 				// after the idle check. It still belongs to the pre-branch context.
 				this.#promptGeneration++;
+				this.agent.cancelTurnReservations();
 				this.sessionManager.createBranchedSession(leafId);
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
@@ -14311,6 +14629,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// All cancellation/no-op exits are behind us. Invalidate prompt setup
 		// admitted on the abandoned branch before committing any tree changes.
 		this.#promptGeneration++;
+		this.agent.cancelTurnReservations();
 
 		// Determine the new leaf position based on target type
 		let newLeafId: string | null;
@@ -14528,9 +14847,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			model: this.model,
 			isIdle: () => !this.isStreaming,
 			hasQueuedMessages: () => this.queuedMessageCount > 0,
-			abort: () => {
-				this.agent.abort();
-			},
+			// The re-answer's cancel is the user's interrupt: it cancels the retry, usage
+			// preflights and title work an Esc cancels, not only the agent loop.
+			abort: () => this.#interruptFromToolContext(),
 			settings: this.settings,
 			ui: uiContext,
 			hasUI: true,

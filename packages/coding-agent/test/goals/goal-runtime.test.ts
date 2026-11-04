@@ -53,7 +53,14 @@ function cloneEvent(event: GoalRuntimeEvent): GoalRuntimeEvent {
 	return { ...event };
 }
 
-function createHarness(initial: { state?: GoalModeState; usage?: GoalTokenUsage; now?: number } = {}) {
+function createHarness(
+	initial: {
+		state?: GoalModeState;
+		usage?: GoalTokenUsage;
+		now?: number;
+		onEvent?: (event: GoalRuntimeEvent) => void | Promise<void>;
+	} = {},
+) {
 	let state = cloneState(initial.state);
 	let usage = createUsage(initial.usage);
 	let now = initial.now ?? 0;
@@ -69,6 +76,7 @@ function createHarness(initial: { state?: GoalModeState; usage?: GoalTokenUsage;
 		getCurrentUsage: () => createUsage(usage),
 		emit: async event => {
 			events.push(cloneEvent(event));
+			await initial.onEvent?.(event);
 		},
 		persist: (mode, persistedState) => {
 			persists.push({ mode, state: cloneState(persistedState) });
@@ -374,5 +382,45 @@ describe("goal runtime", () => {
 		expect(next.goal.timeUsedSeconds).toBe(0);
 		expect(next.goal.id).not.toBe("goal-1");
 		expect(harness.persists.at(-1)?.state?.goal.objective).toBe("Second");
+	});
+	it("held pause, drop and create notifications retain commit order without blocking mutations", async () => {
+		const harness = createHarness({ state: { enabled: true, mode: "active", goal: createGoal() } });
+		const release = harness.runtime.holdNotifications();
+		try {
+			await harness.runtime.onTaskAborted({ reason: "interrupted" });
+			await harness.runtime.dropGoal();
+			await harness.runtime.createGoal({ objective: "later goal" });
+			expect(harness.getState()?.goal.status).toBe("active");
+			expect(harness.events).toEqual([]);
+		} finally {
+			await release();
+		}
+		expect(harness.events.map(event => event.type === "goal_updated" && event.goal?.status)).toEqual([
+			"paused",
+			"dropped",
+			"active",
+		]);
+	});
+
+	it("a failed held notification does not strand a later committed resume", async () => {
+		const failure = new Error("pause observer failed");
+		const active = Promise.withResolvers<void>();
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal: createGoal() },
+			onEvent: event => {
+				if (event.type !== "goal_updated") return;
+				if (event.goal?.status === "paused") throw failure;
+				if (event.goal?.status === "active") active.resolve();
+			},
+		});
+		const release = harness.runtime.holdNotifications();
+		await harness.runtime.onTaskAborted({ reason: "interrupted" });
+		await harness.runtime.resumeGoal();
+		await expect(release()).rejects.toBe(failure);
+		await active.promise;
+		expect(harness.events.map(event => event.type === "goal_updated" && event.goal?.status)).toEqual([
+			"paused",
+			"active",
+		]);
 	});
 });

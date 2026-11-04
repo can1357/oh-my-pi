@@ -2706,13 +2706,13 @@ export class SessionMaintenance {
 		);
 	}
 
-	#estimatePrePromptContextTokens(messages: AgentMessage[], contextWindow: number): number {
+	#estimatePrePromptContextTokens(messages: AgentMessage[], contextWindow: number, systemPromptDelta = 0): number {
 		const breakdown = this.#host.getContextBreakdown({ contextWindow, pendingMessages: messages });
-		const localEstimate = this.#estimateStoredContextTokens(messages);
+		const localEstimate = this.#estimateStoredContextTokens(messages) + systemPromptDelta;
 		// Floor by the local estimate: a payload-shrinking before_provider_request
 		// hook deflates the provider-anchored breakdown, which must not suppress
 		// pre-prompt compaction (see #estimateStoredContextTokens).
-		return compactionContextTokens(breakdown?.usedTokens ?? 0, localEstimate);
+		return compactionContextTokens((breakdown?.usedTokens ?? 0) + systemPromptDelta, localEstimate);
 	}
 
 	/**
@@ -2771,13 +2771,17 @@ export class SessionMaintenance {
 		return !previousArchive || previousArchive.frames.length === 0 || previousArchive.text !== undefined;
 	}
 
-	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
+	async runPrePromptCompactionIfNeeded(messages: AgentMessage[], systemPrompt?: string[]): Promise<void> {
 		const model = this.#model;
 		if (!model) return;
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
 		const compactionSettings = this.#compactionSettings;
-		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
+		// Size the prospective request without publishing a waiting turn's memory or policy.
+		const systemPromptDelta = systemPrompt
+			? this.#tokenizer.countTokens(systemPrompt) - this.#tokenizer.countTokens(this.#host.agent.state.systemPrompt)
+			: 0;
+		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow, systemPromptDelta);
 		const pendingMidTurnDeadEnd = this.#midTurnDeadEndPendingPrePrompt;
 		this.#midTurnDeadEndPendingPrePrompt = undefined;
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
@@ -2833,7 +2837,8 @@ export class SessionMaintenance {
 		await this.runAutoCompaction("threshold", false, {
 			autoContinue: false,
 			triggerContextTokens: contextTokens,
-			pendingContextTokens: this.#tokenizer.countMessages(messages, { excludeEncryptedReasoning: true }),
+			pendingContextTokens:
+				this.#tokenizer.countMessages(messages, { excludeEncryptedReasoning: true }) + systemPromptDelta,
 			preparedContextTokens: this.#estimateStoredContextTokens(),
 			phase: "pre_turn",
 		});

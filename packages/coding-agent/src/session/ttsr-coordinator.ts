@@ -110,6 +110,11 @@ export class TtsrCoordinator {
 		return this.#abortPending;
 	}
 
+	/** Identifies the rule interruption awaiting its continuation, if any; see {@link cancelPendingAbort}. */
+	get interruptionToken(): number | undefined {
+		return this.#abortPending ? this.#retryToken : undefined;
+	}
+
 	/** Current resume gate awaited by post-prompt recovery. */
 	get resumeGate(): Promise<void> | undefined {
 		return this.#resumePromise;
@@ -340,6 +345,24 @@ export class TtsrCoordinator {
 		this.#resumeResolve();
 		this.#resumeResolve = undefined;
 		this.#resumePromise = undefined;
+	}
+
+	/**
+	 * Drops a rule interruption whose continuation was cancelled (an interrupt,
+	 * a conversation reset or a branch). The continuation would have cleared this
+	 * state; left pending, it marks the next unrelated abort as a rule interruption.
+	 * Call it only once the interrupted run's own aborted reply has been handled.
+	 * With `token` (from {@link interruptionToken}), it drops only that interruption:
+	 * a newer one belongs to a later run and keeps its continuation.
+	 */
+	cancelPendingAbort(token?: number): void {
+		if (token !== undefined && token !== this.#retryToken) return;
+		this.#retryToken++;
+		this.#abortPending = false;
+		this.#pendingInjections = [];
+		this.#pendingExcerpts = {};
+		this.#perToolInjections.clear();
+		this.resolveResume();
 	}
 
 	#ensureResumePromise(): void {
@@ -688,6 +711,10 @@ export class TtsrCoordinator {
 		if (!shouldInterrupt) return false;
 
 		this.#abortPending = true;
+		// Own this interruption before any listener runs: a `ttsr_triggered` handler that interrupts the
+		// session must see this interruption's token and the generation it belongs to.
+		const retryToken = ++this.#retryToken;
+		const generation = this.#host.promptGeneration();
 		this.#ensureResumePromise();
 		const abortReason = this.#formatAbortReason(matches);
 		this.#host.agent.abort(
@@ -700,8 +727,6 @@ export class TtsrCoordinator {
 				: abortReason,
 		);
 		this.#emitTriggerOnce(matchContext, matches);
-		const retryToken = ++this.#retryToken;
-		const generation = this.#host.promptGeneration();
 		this.#host.schedulePostPromptTask(
 			async () => {
 				if (this.#retryToken !== retryToken) {

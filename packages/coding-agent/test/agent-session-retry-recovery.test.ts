@@ -377,10 +377,10 @@ describe("AgentSession retry recovery", () => {
 		});
 		const continueAgent = agent.continue.bind(agent);
 		let continueCalls = 0;
-		const continueSpy = vi.spyOn(agent, "continue").mockImplementation(async signal => {
+		const continueSpy = vi.spyOn(agent, "continue").mockImplementation(async (signal, reservation) => {
 			continueCalls++;
 			if (continueCalls === 1) throw new AgentBusyError();
-			await continueAgent(signal);
+			await continueAgent(signal, reservation);
 		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,

@@ -1,7 +1,7 @@
 import {
 	type Agent,
-	AgentBusyError,
 	type AgentMessage,
+	type AgentTurnReservation,
 	isSyntheticToolResultMessage,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
@@ -860,17 +860,6 @@ export class TurnRecovery {
 			this.#usageLimitOutcomes.set(message, recorded);
 		}
 		return (await recorded).switchedCredential;
-	}
-
-	/** Prompts after transient overlap with a prior agent run. `onClaimed` fires synchronously
-	 *  right after a successful `agent.prompt` claim (before the run is awaited), letting the
-	 *  caller mark the exact moment its own run went live. */
-	promptAgentWithIdleRetry(
-		messages: AgentMessage[],
-		options?: { toolChoice?: ToolChoice },
-		onClaimed?: () => void,
-	): Promise<void> {
-		return this.#promptAgentWithIdleRetry(messages, options, onClaimed);
 	}
 
 	/** Parses provider retry and rate-limit reset hints into a delay. */
@@ -3318,42 +3307,33 @@ export class TurnRecovery {
 		this.resolveRetry();
 	}
 
-	async #promptAgentWithIdleRetry(
-		messages: AgentMessage[],
+	/** Commit a prepared turn under its still-held admission reservation. */
+	async promptPreparedAgent(
+		reservation: AgentTurnReservation,
+		messages: () => AgentMessage[] | undefined,
 		options?: { toolChoice?: ToolChoice },
 		onClaimed?: () => void,
-	): Promise<void> {
-		const deadline = Date.now() + 30_000;
-		for (;;) {
-			// A claim whose synchronous prefix throws (busy agent, missing
-			// model) returns an already-rejected promise. Probe for that
-			// before firing `onClaimed`: a busy-retry parked behind an
-			// autonomous run must not report that run's streaming as ours
-			// going live. The rejection handler rethrows, so the error
-			// still surfaces at the await below.
-			let claimFailed = false;
-			try {
-				const claim = this.#host.agent.prompt(messages, options).then(undefined, error => {
-					claimFailed = true;
-					throw error;
-				});
-				// One microtask turn: an already-rejected promise's reaction
-				// job is queued ahead of this await's continuation, so
-				// `claimFailed` is settled by the time we resume.
-				await Promise.resolve();
-				if (!claimFailed) onClaimed?.();
-				await claim;
-				return;
-			} catch (err) {
-				if (!(err instanceof AgentBusyError)) {
-					throw err;
-				}
-				if (Date.now() >= deadline) {
-					throw new Error("Timed out waiting for prior agent run to finish before prompting.");
-				}
-				await this.#host.agent.waitForIdle();
-			}
+		isCancelled?: () => boolean,
+	): Promise<"dispatched" | "cancelled"> {
+		if (!reservation.canClaim() || isCancelled?.()) return "cancelled";
+		// reserveTurn waits for the complete active run, including internal follow-ups.
+		// No other prompt/continue can claim until this reservation is released.
+		if (this.#host.agent.state.isStreaming) {
+			throw new Error("Reserved agent turn is unexpectedly busy");
 		}
+		const batch = messages();
+		if (batch === undefined || !reservation.canClaim() || isCancelled?.()) return "cancelled";
+		let claimFailed = false;
+		const claim = this.#host.agent
+			.prompt(batch, { ...options, turnReservation: reservation })
+			.then(undefined, error => {
+				claimFailed = true;
+				throw error;
+			});
+		await Promise.resolve();
+		if (!claimFailed) onClaimed?.();
+		await claim;
+		return "dispatched";
 	}
 
 	/** Whether auto-retry is currently in progress */

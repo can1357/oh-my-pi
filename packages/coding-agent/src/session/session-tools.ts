@@ -121,6 +121,11 @@ export interface SessionToolsHost {
 	 * would pin every arrival group since that stale snapshot forever.
 	 */
 	steeringArrivalRelease(seq: number): void;
+	/**
+	 * Interrupt the session as the user's Esc does: the agent loop, the pending
+	 * retry, usage preflights and title work. A tool context's `abort()` calls it.
+	 */
+	interrupt(): void;
 	queuedMessageCount(): number;
 	planModeEnabled(): boolean;
 	model(): Model | undefined;
@@ -448,9 +453,7 @@ export class SessionTools {
 		model: this.#host.model(),
 		isIdle: () => !this.#host.isStreaming(),
 		hasQueuedMessages: () => this.#host.queuedMessageCount() > 0,
-		abort: () => {
-			this.#host.agent.abort();
-		},
+		abort: () => this.#host.interrupt(),
 		settings: this.#host.settings,
 		localProtocolOptions: this.#host.localProtocolOptions(),
 	});
