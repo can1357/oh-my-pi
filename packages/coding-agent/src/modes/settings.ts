@@ -1283,6 +1283,24 @@ export const cfgUpdateChannel = register({
 	},
 });
 
+/**
+ * Background self-update: a launch that finds a newer release installs it the
+ * way `omp update` would, showing progress beside the welcome banner's version;
+ * the next launch runs it. Ignored where omp cannot update itself (Tern, Nix, a
+ * source checkout). Offered by the setup wizard.
+ */
+export const cfgUpdateAuto = register({
+	id: "update.auto",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Auto Update",
+		description: "Install omp updates in the background on startup; the next launch runs the new version",
+	},
+});
+
 export const cfgMarketplaceAutoUpdate = register({
 	id: "marketplace.autoUpdate",
 	type: "enum",

@@ -942,6 +942,7 @@ The `cache` segment (in the `full` and `nerd` presets) shows before you send whe
 | `startup.showSplash`           | boolean | `false`         | Show the full setup animation on ordinary interactive startup without rerunning setup.                                                                                                                                                                      |
 | `startup.changelogMode`        | enum    | `summary`       | `summary`, `expanded`, `hidden`: choose startup release-note presentation.                                                                                                                                                                                  |
 | `startup.setupWizard`          | boolean | `true`          | Show newly added onboarding steps once per setup version.                                                                                                                                                                                                   |
+| `update.auto`                  | boolean | `false`         | Install a newer release in the background on interactive startup, through whatever owns the install (standalone binary, Homebrew, mise, bun, npm); progress shows after the welcome banner's version and the next launch runs the new build. Ignored under Tern, Nix, and source checkouts. Status and worker log: `~/.omp/update/`. |
 
 ### Providers and services
 

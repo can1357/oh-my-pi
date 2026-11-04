@@ -138,7 +138,7 @@ const TEST_CONFIG: CliConfig = {
 describe("update command plugin dispatch", () => {
 	it("routes -l to plugin upgrade instead of the app updater", async () => {
 		const pluginSpy = spyOn(pluginCli, "runPluginCommand").mockResolvedValue(undefined);
-		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue(undefined);
+		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue({ kind: "current" });
 
 		const command = new Update(["-l"], TEST_CONFIG);
 		await command.run();
@@ -149,7 +149,7 @@ describe("update command plugin dispatch", () => {
 
 	it("keeps normal update flags on the app updater path", async () => {
 		const pluginSpy = spyOn(pluginCli, "runPluginCommand").mockResolvedValue(undefined);
-		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue(undefined);
+		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue({ kind: "current" });
 
 		const command = new Update(["--check", "--force"], TEST_CONFIG);
 		await command.run();
@@ -1092,6 +1092,32 @@ describe("update-cli release binary integrity", () => {
 		expect(await Bun.file(targetPath).text()).toBe(content);
 		// Windows has no POSIX mode bits; the executable bit is only observable elsewhere.
 		if (process.platform !== "win32") expect((await fs.stat(targetPath)).mode & 0o777).toBe(0o755);
+	});
+
+	it("reports cumulative bytes per chunk, ending at the full size", async () => {
+		const dir = await makeTempDir();
+		const chunks = ["verified ", "binary"];
+		const received: number[] = [];
+
+		await downloadVerifiedBinary({
+			url,
+			targetPath: path.join(dir, binaryName),
+			expectedSize: Buffer.byteLength(content),
+			expectedDigest: digest,
+			fetchImpl: async () =>
+				new Response(
+					new ReadableStream<Uint8Array>({
+						pull(controller) {
+							const chunk = chunks.shift();
+							if (chunk === undefined) controller.close();
+							else controller.enqueue(new TextEncoder().encode(chunk));
+						},
+					}),
+				),
+			onProgress: bytes => received.push(bytes),
+		});
+
+		expect(received).toEqual([9, 15]);
 	});
 
 	it("aborts the response stream as soon as it exceeds the expected size", async () => {
