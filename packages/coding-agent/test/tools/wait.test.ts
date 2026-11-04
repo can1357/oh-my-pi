@@ -1040,7 +1040,7 @@ describe("wait", () => {
 				return result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
 			};
 			expect(await elapse("first")).not.toContain("<system-notice>");
-			expect(await elapse("second")).toContain("Nothing new after 10s of back-to-back waits");
+			expect(await elapse("second")).toContain("Nothing new after 10.0s of back-to-back waits");
 			job.resolve("done");
 			await manager.dispose({ timeoutMs: 1000 });
 		});
