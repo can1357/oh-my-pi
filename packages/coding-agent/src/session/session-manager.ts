@@ -565,8 +565,6 @@ export class SessionEntryIndex {
 	#generation = 0;
 	#branchCache: { leaf: string | null | undefined; generation: number; branch: SessionEntry[] } | undefined;
 
-	constructor(readonly onChange?: () => void) {}
-
 	clear(): void {
 		this.#entriesById.clear();
 		this.#children.clear();
@@ -575,7 +573,6 @@ export class SessionEntryIndex {
 		this.#usage = emptyUsageStatistics();
 		this.#generation++;
 		this.#branchCache = undefined;
-		this.onChange?.();
 	}
 
 	rebuild(entries: readonly SessionEntry[]): void {
@@ -626,7 +623,6 @@ export class SessionEntryIndex {
 		if (usage && entry.type === "message" && entry.message.role === "toolResult") {
 			this.#usage.subagentCost += usage.cost.total;
 		}
-		this.onChange?.();
 	}
 
 	has(id: string): boolean {
@@ -658,7 +654,6 @@ export class SessionEntryIndex {
 		this.#leaf = id;
 		this.#generation++;
 		this.#branchCache = undefined;
-		this.onChange?.();
 	}
 
 	/**
@@ -953,8 +948,7 @@ export class SessionManager {
 	#titleUpdatedAt = "";
 	#hasTitleSlot = true;
 	#entries: SessionEntry[] = [];
-	#contextChangeListeners = new Set<() => void>();
-	#index = new SessionEntryIndex(() => this.#notifyContextChanged());
+	#index = new SessionEntryIndex();
 
 	/** File reflects all current entries; appends can go incrementally. */
 	#fileIsCurrent = false;
@@ -2039,16 +2033,6 @@ export class SessionManager {
 		);
 	}
 
-	/** Synchronous journal mutations, including appends not yet flushed and branch moves. */
-	onContextChange(listener: () => void): () => void {
-		this.#contextChangeListeners.add(listener);
-		return () => this.#contextChangeListeners.delete(listener);
-	}
-
-	#notifyContextChanged(): void {
-		for (const listener of this.#contextChangeListeners) listener();
-	}
-
 	#notifyEntryAppended(entry: SessionEntry): void {
 		const callback = this.onEntryAppended;
 		if (callback) {
@@ -2765,7 +2749,6 @@ export class SessionManager {
 				this.#header.additionalDirectories =
 					this.#additionalDirectories.length > 0 ? this.#additionalDirectories : undefined;
 			}
-			this.#notifyContextChanged();
 
 			// Rewrite at the new location when the file already existed (update cwd) or
 			// there is in-memory output worth materializing; otherwise stay lazy.
@@ -3108,7 +3091,6 @@ export class SessionManager {
 		}
 		this.#cwd = resolvedCwd;
 		this.#fallbackRuntimeOnly = true;
-		this.#notifyContextChanged();
 		if (this.#sessionFile) {
 			this.#rememberBreadcrumb(resolvedCwd, this.#sessionFile);
 		}
@@ -3119,7 +3101,6 @@ export class SessionManager {
 		this.#cwd = path.resolve(recordedCwd);
 		if (this.#sessionFile) this.#sessionDir = path.dirname(this.#sessionFile);
 		this.#fallbackRuntimeOnly = false;
-		this.#notifyContextChanged();
 		if (this.#sessionFile) this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
 	}
 
@@ -3167,7 +3148,6 @@ export class SessionManager {
 		}
 		if (this.#additionalDirectories.includes(resolved)) return null;
 		this.#additionalDirectories = [...this.#additionalDirectories, resolved];
-		this.#notifyContextChanged();
 		// In fallback the transcript is still in the stale bucket; keep
 		// workspace edits runtime-only until relocation.
 		if (this.#fallbackRuntimeOnly) {
@@ -3188,7 +3168,6 @@ export class SessionManager {
 		const idx = this.#additionalDirectories.findIndex(p => path.resolve(p) === resolved);
 		if (idx === -1) return null;
 		this.#additionalDirectories = this.#additionalDirectories.filter((_, i) => i !== idx);
-		this.#notifyContextChanged();
 		// In fallback keep edits runtime-only until relocation.
 		if (this.#fallbackRuntimeOnly) {
 			return resolved;
@@ -3209,7 +3188,6 @@ export class SessionManager {
 		// In fallback keep edits runtime-only until relocation.
 		if (this.#fallbackRuntimeOnly) {
 			this.#additionalDirectories = next;
-			this.#notifyContextChanged();
 			return;
 		}
 		if (
@@ -3219,7 +3197,6 @@ export class SessionManager {
 			return;
 		}
 		this.#additionalDirectories = next;
-		this.#notifyContextChanged();
 		if (this.#additionalDirectories.length > 0) {
 			this.#header.additionalDirectories = this.#additionalDirectories;
 		} else {
@@ -3788,7 +3765,6 @@ export class SessionManager {
 	 */
 	async rewriteEntries(): Promise<void> {
 		this.#bodyRevision++;
-		this.#notifyContextChanged();
 		if (!this.#persist || !this.#sessionFile) return;
 		await this.#rewriteAtomically();
 	}
@@ -3993,10 +3969,7 @@ export class SessionManager {
 			entry.message = sanitized;
 			changed = true;
 		}
-		if (changed) {
-			this.#bodyRevision++;
-			this.#notifyContextChanged();
-		}
+		if (changed) this.#bodyRevision++;
 		return changed;
 	}
 
@@ -4013,7 +3986,6 @@ export class SessionManager {
 		if (this.#header.taskPromptCacheKey === key && this.#header.providerPromptCacheKey === undefined) return;
 		this.#header.taskPromptCacheKey = key;
 		this.#header.providerPromptCacheKey = undefined;
-		this.#notifyContextChanged();
 		if (!this.#persist || !this.#sessionFile || !this.#shouldHaveSessionFile()) return;
 		this.#rewriteRequired = true;
 		await this.#rewriteAtomically();

@@ -471,7 +471,6 @@ async function withMnemopiSession(fn: (fixture: MnemopiFixture) => Promise<void>
 				getSessionId: () => "test-mnemopi",
 			},
 			emitNotice: () => {},
-			invalidateContext: () => {},
 			getHindsightSessionState: () => undefined,
 			settings: Settings.isolated({ "memory.backend": "mnemopi" }),
 		} as unknown as AgentSession;
@@ -614,7 +613,6 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 						getSessionId: () => "peer-mnemopi",
 					},
 					emitNotice: () => {},
-					invalidateContext: () => {},
 					settings: Settings.isolated({ "memory.backend": "mnemopi" }),
 				} as unknown as AgentSession;
 				peerState = new MnemopiSessionState({
@@ -673,7 +671,6 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 						getSessionId: () => "twin-mnemopi",
 					},
 					emitNotice: () => {},
-					invalidateContext: () => {},
 					settings: Settings.isolated({ "memory.backend": "mnemopi" }),
 				} as unknown as AgentSession;
 				twinState = new MnemopiSessionState({

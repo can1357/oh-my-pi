@@ -135,7 +135,6 @@ export interface SessionToolsHost {
 	captureMemoryPromotionSnapshot(prompt: string[]): void;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	notifyCommandMetadataChanged(): void;
-	contextChanged(): void;
 	localProtocolOptions(): LocalProtocolOptions;
 	/** Live enabled eval preludes; candidates for the next base rebuild's advertised snapshot. */
 	evalPreludes(): readonly EvalPreludeDefinition[];
@@ -559,7 +558,6 @@ export class SessionTools {
 	/** Replaces the controller-owned base prompt without applying it to the agent. */
 	setBaseSystemPrompt(prompt: string[]): void {
 		this.#baseSystemPrompt = prompt;
-		this.#host.contextChanged();
 	}
 
 	/**
@@ -831,7 +829,6 @@ export class SessionTools {
 	/** Updates extension ownership when a lifecycle registration commits or rolls back. */
 	setExtensionMCPTool(name: string, tool: AgentTool | undefined): void {
 		if (!isMCPToolName(name)) return;
-		this.#host.contextChanged();
 		if (tool) {
 			this.#extensionMcpTools.set(name, tool);
 			this.#mcpManagerToolNames.delete(name);
@@ -841,16 +838,11 @@ export class SessionTools {
 	}
 
 	/** Serializes every registry and presentation mutation for this session. */
-	runToolRegistryMutation<T>(mutation: () => Promise<T>, signal?: AbortSignal, changesRegistry = true): Promise<T> {
+	runToolRegistryMutation<T>(mutation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
 		if (this.#toolRegistryMutationScope.getStore()) return untilAborted(signal, mutation);
-		const serialized = this.#toolRegistryMutationTail.then(async () => {
+		const serialized = this.#toolRegistryMutationTail.then(() => {
 			signal?.throwIfAborted();
-			if (changesRegistry) this.#host.contextChanged();
-			try {
-				return await this.#toolRegistryMutationScope.run(true, mutation);
-			} finally {
-				if (changesRegistry) this.#host.contextChanged();
-			}
+			return this.#toolRegistryMutationScope.run(true, mutation);
 		});
 		const operation = untilAborted(signal, serialized);
 		this.#toolRegistryMutationTail = serialized.then(
@@ -2083,14 +2075,6 @@ export class SessionTools {
 
 	/** Selects enabled tools, ignoring names absent from the registry. */
 	setActiveToolsByName(toolNames: string[]): Promise<void> {
-		const normalizedNames = normalizeToolNames(toolNames);
-		const currentNames = this.getEnabledToolNames();
-		if (
-			normalizedNames.length === currentNames.length &&
-			normalizedNames.every((name, index) => name === currentNames[index])
-		) {
-			return Promise.resolve();
-		}
 		return this.runToolRegistryMutation(async () => {
 			const normalized = normalizeToolNames(toolNames);
 			// Transport-write eligibility keys off the *current* active set: an ordinary
@@ -2296,15 +2280,11 @@ export class SessionTools {
 	 * after its inputs have been superseded.
 	 */
 	refreshBaseSystemPrompt(commitIf?: () => boolean): Promise<void> {
-		return this.runToolRegistryMutation(
-			async () => {
-				const prepared = await this.#prepareBaseSystemPrompt();
-				if (commitIf && !commitIf()) return;
-				prepared?.commit?.();
-			},
-			undefined,
-			false,
-		);
+		return this.runToolRegistryMutation(async () => {
+			const prepared = await this.#prepareBaseSystemPrompt();
+			if (commitIf && !commitIf()) return;
+			prepared?.commit?.();
+		});
 	}
 
 	async #prepareBaseSystemPrompt(isCurrent?: () => boolean): Promise<SystemPromptPreparation | undefined> {

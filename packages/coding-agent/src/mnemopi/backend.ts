@@ -172,7 +172,13 @@ export const mnemopiBackend: MemoryBackend = {
 
 	async beforeAgentStartPrompt(session, promptText, signal): Promise<MemoryPromptPreparation | undefined> {
 		const state = getMnemopiSessionState(session);
-		return state?.beforeAgentStartPrompt(promptText, signal);
+		const preparation = await state?.beforeAgentStartPrompt(promptText, signal);
+		if (!state || !preparation) return undefined;
+		return {
+			context: preparation.context,
+			notice: preparation.notice,
+			commit: () => getMnemopiSessionState(session) === state && preparation.commit(),
+		};
 	},
 
 	async clear(agentDir, _cwd, session): Promise<void> {

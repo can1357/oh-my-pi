@@ -13,7 +13,7 @@
 
 ### Fixed
 
-- A waiting prompt now uses the current approved plan (including same-path file edits), memory, goal state, tool roster and extension policy when it starts, and compacts for the full prepared system prompt before its first request ([#17856](https://github.com/can1357/oh-my-pi/pull/17856) by [@sjawhar](https://github.com/sjawhar))
+- Prompts rebuild their plan, memory and extension policy after waiting for another run or interrupt cleanup, and compact for the full prepared system prompt; existing source-base policy retries remain, while other changes during hooks do not restart preparation ([#17856](https://github.com/can1357/oh-my-pi/pull/17856) by [@sjawhar](https://github.com/sjawhar))
 - Long bash output cut in the middle no longer splits a line at the `[…N ln elided…]` marker, and its "Showing lines …" notice now names the lines actually shown, ending at the output's real last line ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
 - A bash command that prints nothing and succeeds now returns `(no output, exit code 0)` instead of a bare `(no output)`, so an empty diff or search no longer reads like a failed command ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
 - Added `tui.motion` (`full` / `reduced` / `none`, also `--motion` and `PI_MOTION`), one switch over spinners, the thinking pulse, shimmer and the status-line blink/fade for many-pane or reduced-motion use; a `tui.spinnerInterval` you set still wins over the preset ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))

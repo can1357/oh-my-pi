@@ -321,7 +321,8 @@ describe("queued user delivery policy", () => {
 		async backendId => {
 			let recalls = 0;
 			const { requests, pausePreparation } = await setupMemory(backendId, async () => {
-				return `staged-memory-${++recalls}`;
+				recalls++;
+				return "staged memory";
 			});
 			pausePreparation(async () => {
 				await session.setActiveToolsByName(["new_tool"]);
@@ -332,12 +333,10 @@ describe("queued user delivery policy", () => {
 			const prompt = requests[0].systemPrompt?.join("\n");
 			expect(prompt).toContain("tools:new_tool");
 			expect(prompt).not.toContain("tools:old_tool");
-			expect(prompt?.match(/staged-memory-2/g)).toHaveLength(1);
-			expect(prompt).not.toContain("staged-memory-1");
+			expect(prompt?.match(/staged memory/g)).toHaveLength(1);
 			await session.prompt("next turn");
-			expect(recalls).toBe(2);
-			expect(requests[1].systemPrompt?.join("\n").match(/staged-memory-2/g)).toHaveLength(1);
-			expect(requests[1].systemPrompt?.join("\n")).not.toContain("staged-memory-1");
+			expect(recalls).toBe(1);
+			expect(requests[1].systemPrompt?.join("\n").match(/staged memory/g)).toHaveLength(1);
 		},
 	);
 
@@ -397,30 +396,39 @@ describe("queued user delivery policy", () => {
 		["mnemopi", "rekey"],
 		["hindsight", "reset"],
 		["hindsight", "rekey"],
-	] as const)("delivers current real %s recall after %s invalidates its preparation", async (backendId, change) => {
-		let recalls = 0;
-		const { requests, pausePreparation } = await setupMemory(
-			backendId,
-			async () => `owned-recall-${++recalls}`,
-			true,
-		);
-		const state = backendId === "mnemopi" ? getMnemopiSessionState(session) : session.getHindsightSessionState();
-		if (!state) throw new Error("Real memory state was not installed");
-		pausePreparation(async () => {
+	] as const)(
+		"declines real %s delivery when its memory state is invalidated by %s in the hook",
+		async (backendId, change) => {
+			let recalls = 0;
+			const { agent, requests, delivered, pausePreparation } = await setupMemory(
+				backendId,
+				async () => `owned-recall-${++recalls}`,
+				true,
+			);
+			const state = backendId === "mnemopi" ? getMnemopiSessionState(session) : session.getHindsightSessionState();
+			if (!state) throw new Error("Real memory state was not installed");
+			const basePrompt = session.systemPrompt;
+			pausePreparation(async () => {
+				if (change === "reset") state.resetConversationTracking();
+				else state.setSessionId("rekeyed-memory-session");
+			});
+			await session.steer("retain rejected delivery");
+			await session.waitForIdle();
+			expect(requests).toEqual([]);
+			expect(delivered).toEqual([]);
+			expect(session.systemPrompt).toEqual(basePrompt);
+			expect(agent.peekSteeringQueue()).toMatchObject([
+				{ content: [{ type: "text", text: "retain rejected delivery" }] },
+			]);
+
 			pausePreparation(async () => {});
-			if (change === "reset") state.resetConversationTracking();
-			else state.setSessionId("rekeyed-memory-session");
-		});
-		await session.steer("deliver with current memory");
-		await session.waitForIdle();
-		expect(requests).toHaveLength(1);
-		expect(recalls).toBe(2);
-		expect(requests[0].systemPrompt?.join("\n")).toContain("owned-recall-2");
-		expect(requests[0].systemPrompt?.join("\n")).not.toContain("owned-recall-1");
-		await session.prompt("continue current delivery");
-		expect(requests.at(-1)?.systemPrompt?.join("\n")).toContain("owned-recall-2");
-		expect(requests.at(-1)?.systemPrompt?.join("\n")).not.toContain("owned-recall-1");
-	});
+			await session.prompt("resume valid delivery");
+			await session.waitForIdle();
+			expect(recalls).toBe(2);
+			expect(requests[0].systemPrompt?.join("\n")).toContain("owned-recall-2");
+			expect(requests[0].systemPrompt?.join("\n")).not.toContain("owned-recall-1");
+		},
+	);
 
 	it("discards older real mnemopi background recall when a tool-tail user preparation takes ownership", async () => {
 		const backgroundStarted = Promise.withResolvers<void>();
@@ -910,7 +918,7 @@ describe("queued user delivery policy", () => {
 		expect(requests[0].systemPrompt?.join("\n")).not.toMatch(/retry-memory-[12]/);
 	});
 
-	it("restages a source-base change at the queued claim and delivers only current memory and context", async () => {
+	it("declines a source-base change after preparation without partially committing memory or context", async () => {
 		let recalls = 0;
 		const { agent, requests, delivered } = await setupMemory(
 			"hindsight",
@@ -926,19 +934,18 @@ describe("queued user delivery policy", () => {
 		};
 		await session.steer("changed before commit");
 		await session.waitForIdle();
-		expect(requests).toHaveLength(1);
-		expect(requests[0].tools?.map(tool => tool.name)).toEqual(["new_tool"]);
-		expect(requests[0].systemPrompt?.join("\n")).toContain("commit-memory-2");
-		expect(requests[0].systemPrompt?.join("\n")).not.toContain("commit-memory-1");
-		expect(delivered.filter(message => message.role === "user")).toHaveLength(1);
-		expect(agent.peekSteeringQueue()).toEqual([]);
+		expect(requests).toEqual([]);
+		expect(delivered.filter(message => message.role === "user" || message.role === "custom")).toEqual([]);
+		expect(session.systemPrompt.join("\n")).not.toContain("commit-memory-");
+		expect(session.systemPrompt.join("\n")).not.toContain("policy:changed before commit");
+		expect(agent.peekSteeringQueue()).toMatchObject([{ content: [{ type: "text", text: "changed before commit" }] }]);
 
 		agent.prepareQueuedMessages = prepare;
 		await session.prompt("resume commit");
 		await session.waitForIdle();
-		expect(recalls).toBe(2);
-		expect(requests.at(-1)?.systemPrompt?.join("\n")).toContain("commit-memory-2");
-		expect(requests.at(-1)?.systemPrompt?.join("\n")).not.toContain("commit-memory-1");
+		expect(requests[0].tools?.map(tool => tool.name)).toEqual(["new_tool"]);
+		expect(requests[0].systemPrompt?.join("\n")).toContain("commit-memory-2");
+		expect(requests[0].systemPrompt?.join("\n")).not.toContain("commit-memory-1");
 	});
 
 	it.each(["memory lookup", "prompt rebuild", "extension hook", "extension hook after rebuild"] as const)(

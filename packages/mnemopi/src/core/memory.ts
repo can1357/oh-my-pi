@@ -9,7 +9,6 @@ import { AnnotationStore } from "./annotations";
 import { BankManager } from "./banks";
 import { BeamMemory, initBeam } from "./beam/index";
 import { reconcileEmbeddingModel } from "./beam/store";
-import { databaseWriteToken, updateRecallCounts } from "./beam/recall";
 import type { RecallEnhancedOptions, RecallOptions, RecallResult, SleepResult } from "./beam/types";
 import { EpisodicGraph } from "./episodic-graph";
 import {
@@ -334,7 +333,6 @@ function toRecallOptions(options: RecallFacadeOptions): BeamRecallFacadeOptions 
 		ftsWeight: options.ftsWeight ?? options.fts_weight ?? undefined,
 		importanceWeight: options.importanceWeight ?? options.importance_weight ?? undefined,
 		contentPreviewChars: options.contentPreviewChars,
-		updateRecallCounts: options.updateRecallCounts,
 	};
 	// Preserve the three-state semantics (`undefined` = auto-derive, `null` = explicitly
 	// FTS-only, `number[]` = caller-supplied) so callers can opt out of `recall()`'s
@@ -459,11 +457,6 @@ export class Mnemopi {
 		}
 	}
 
-	/** Changes for local row writes or commits by another database connection. */
-	get writeToken(): string {
-		return databaseWriteToken(this.beam);
-	}
-
 	close(): void {
 		withLoopPhase("mnemopi.close", () => {
 			if (this.#closed) return;
@@ -498,13 +491,6 @@ export class Mnemopi {
 				useCache: options.useCache,
 				includeFacts: options.includeFacts,
 			}),
-		);
-	}
-
-	/** Account for a read-only recall once its consumer has accepted the results. */
-	recordRecall(results: readonly RecallResult[], options: RecallFacadeOptions = {}): void {
-		this.#withRuntimeOptions("mnemopi.recall", () =>
-			updateRecallCounts(this.beam, results, toRecallOptions(options)),
 		);
 	}
 

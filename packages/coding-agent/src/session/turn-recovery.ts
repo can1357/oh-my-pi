@@ -864,14 +864,14 @@ export class TurnRecovery {
 
 	/** Prompts after transient overlap with a prior agent run. `onClaimed` fires synchronously
 	 *  right after a successful `agent.prompt` claim (before the run is awaited), letting the
-	 *  caller mark the exact moment its own run went live. `admit` runs before every claim and
-	 *  may wait; `false` means the prompt was superseded and must not claim the agent. */
+	 *  caller mark the exact moment its own run went live. `admit` runs before every claim;
+	 *  false cancels it, and "waited" discards its preparation so the caller prepares again. */
 	promptAgentWithIdleRetry(
-		messages: AgentMessage[] | (() => AgentMessage[] | undefined),
+		messages: () => AgentMessage[] | undefined,
 		options?: { toolChoice?: ToolChoice },
 		onClaimed?: () => void,
-		admit?: () => Promise<boolean>,
-	): Promise<boolean> {
+		admit?: () => Promise<boolean | "waited">,
+	): Promise<"dispatched" | "cancelled" | "retry"> {
 		return this.#promptAgentWithIdleRetry(messages, options, onClaimed, admit);
 	}
 
@@ -3321,64 +3321,41 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Prompts the agent, waiting behind a run that already holds it. Resolves
-	 * `true` once this prompt's run finishes, or `false` when `admit` reports,
-	 * before a claim, that the prompt was superseded while it waited.
-	 * `messages` may be a commit function: it runs once, only when the agent is
-	 * free, synchronously before the claim, so a prompt cancelled while it waits
-	 * commits nothing it would have delivered. It returns undefined when the
-	 * prompt was superseded, and nothing is claimed.
+	 * Try one prepared prompt. Waiting for interrupt cleanup or a busy agent commits
+	 * nothing and returns "retry": the caller must discard and rebuild the preparation.
+	 * Admission is checked before every claim, including each re-prepared attempt.
 	 */
 	async #promptAgentWithIdleRetry(
-		messages: AgentMessage[] | (() => AgentMessage[] | undefined),
+		messages: () => AgentMessage[] | undefined,
 		options?: { toolChoice?: ToolChoice },
 		onClaimed?: () => void,
-		admit?: () => Promise<boolean>,
-	): Promise<boolean> {
-		const deadline = Date.now() + 30_000;
-		let batch = typeof messages === "function" ? undefined : messages;
-		const waitForIdle = async (): Promise<void> => {
-			if (Date.now() >= deadline) {
-				throw new Error("Timed out waiting for prior agent run to finish before prompting.");
-			}
+		admit?: () => Promise<boolean | "waited">,
+	): Promise<"dispatched" | "cancelled" | "retry"> {
+		const admission = await admit?.();
+		if (admission === false) return "cancelled";
+		if (admission === "waited") return "retry";
+		if (this.#host.agent.state.isStreaming) {
 			await this.#host.agent.waitForIdle();
-		};
-		for (;;) {
-			if (admit && !(await admit())) return false;
-			// The agent refuses a claim exactly while it streams; wait before committing.
-			if (batch === undefined && this.#host.agent.state.isStreaming) {
-				await waitForIdle();
-				continue;
-			}
-			if (batch === undefined) {
-				batch = (messages as () => AgentMessage[] | undefined)();
-				if (batch === undefined) return false;
-			}
-			// A claim whose synchronous prefix throws (busy agent, missing
-			// model) returns an already-rejected promise. Probe for that
-			// before firing `onClaimed`: a busy-retry parked behind an
-			// autonomous run must not report that run's streaming as ours
-			// going live. The rejection handler rethrows, so the error
-			// still surfaces at the await below.
-			let claimFailed = false;
-			try {
-				const claim = this.#host.agent.prompt(batch, options).then(undefined, error => {
-					claimFailed = true;
-					throw error;
-				});
-				// One microtask turn: an already-rejected promise's reaction
-				// job is queued ahead of this await's continuation, so
-				// `claimFailed` is settled by the time we resume.
-				await Promise.resolve();
-				if (!claimFailed) onClaimed?.();
-				await claim;
-				return true;
-			} catch (err) {
-				if (!(err instanceof AgentBusyError)) {
-					throw err;
-				}
-				await waitForIdle();
-			}
+			return "retry";
+		}
+		const batch = messages();
+		if (batch === undefined) return "cancelled";
+		// A claim whose synchronous prefix throws returns an already-rejected
+		// promise. Observe that rejection before reporting this run as claimed.
+		let claimFailed = false;
+		try {
+			const claim = this.#host.agent.prompt(batch, options).then(undefined, error => {
+				claimFailed = true;
+				throw error;
+			});
+			await Promise.resolve();
+			if (!claimFailed) onClaimed?.();
+			await claim;
+			return "dispatched";
+		} catch (error) {
+			if (!(error instanceof AgentBusyError)) throw error;
+			await this.#host.agent.waitForIdle();
+			return "retry";
 		}
 	}
 
