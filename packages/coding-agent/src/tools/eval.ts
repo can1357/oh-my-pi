@@ -38,6 +38,7 @@ import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import evalAgentsTopic from "../prompts/tools/eval-agents.md" with { type: "text" };
 import evalJudgeTopic from "../prompts/tools/eval-judge.md" with { type: "text" };
 import evalHelpersTopic from "../prompts/tools/eval-helpers.md" with { type: "text" };
+import evalMapReduceTopic from "../prompts/tools/eval-map-reduce.md" with { type: "text" };
 import {
 	DEFAULT_MAX_BYTES,
 	findColumnCapped,
@@ -234,14 +235,15 @@ function evalTemplateContext(options: EvalToolDescriptionOptions) {
 
 /**
  * On-demand eval docs (`topic → markdown`) served at `xd://eval/<topic>`:
- * `judge` (including completion), `helpers`, `agents` (when spawning is allowed),
- * and one per enabled prelude.
+ * `judge` (including completion), `helpers`, `map-reduce`, `agents` (when
+ * spawning is allowed), and one per enabled prelude.
  */
 export function getEvalDocTopics(options: EvalToolDescriptionOptions = {}): Record<string, string> {
 	const context = evalTemplateContext(options);
 	const topics: Record<string, string> = {
 		judge: prompt.render(evalJudgeTopic, context),
 		helpers: prompt.render(evalHelpersTopic, context),
+		"map-reduce": prompt.render(evalMapReduceTopic, context),
 	};
 	if (context.spawns) topics.agents = prompt.render(evalAgentsTopic, context);
 	for (const prelude of options.preludes ?? []) {

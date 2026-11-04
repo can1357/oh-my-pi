@@ -176,6 +176,7 @@ Inline first. Fan out only when 2+ independent slices each cost more than a hand
 {{#when MAX_CONCURRENCY ">" 0}}
 - Max {{MAX_CONCURRENCY}} concurrent subagents; excess queue.
 {{/when}}
+{{#has tools "eval"}}- **Bulk transforms stay in-kernel.** Per-item semantic work over many chunks (label/extract/summarize each) → `{{toolRefs.eval}}` `completion(model="smol")` per slice, barrier with in-kernel `wait(handles)`, not subagent fan-out; `{{toolRefs.task}}` = stateful multi-step slices.{{/has}}
 - Shared prerequisite inline; sequence ONLY true dependencies. {{#if taskIrcEnabled}}Small missing detail? Run parallel; B messages A via `write agent://<id>`.{{/if}}
 {{/has}}
 
