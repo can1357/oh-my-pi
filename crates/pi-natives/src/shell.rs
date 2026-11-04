@@ -587,7 +587,9 @@ pub(crate) fn undelivered_output_error(end: PumpEnd) -> Option<Error> {
 /// cause even when the shell also reported the output it could not hand over.
 /// Cancellation and timeout are bounded because an orphaned pipe reader can
 /// otherwise keep a sender alive forever; aborting the pump drops its
-/// `flume::Receiver`, disconnecting that reader.
+/// `flume::Receiver`, disconnecting that reader. A cancelled run whose pump had
+/// already stopped because the callback failed or stalled fails too: the
+/// cancellation does not undo the lost output.
 async fn await_drain(
 	handle: Option<napi::tokio::task::JoinHandle<PumpEnd>>,
 	result: Result<ShellRunResult>,
@@ -602,14 +604,20 @@ async fn await_drain(
 			None => result,
 		};
 	}
-	if napi::tokio::time::timeout(INTERRUPTED_DRAIN_SHUTDOWN_TIMEOUT, &mut handle)
-		.await
-		.is_err()
-	{
-		handle.abort();
-		let _ = handle.await;
+	match napi::tokio::time::timeout(INTERRUPTED_DRAIN_SHUTDOWN_TIMEOUT, &mut handle).await {
+		// The pump stopped on its own because the callback failed or stalled:
+		// output was lost before the run ended, and the cancellation must not
+		// hide that.
+		Ok(Ok(end @ (PumpEnd::ConsumerGone | PumpEnd::Stalled))) => {
+			undelivered_output_error(end).map_or(result, Err)
+		},
+		Ok(_) => result,
+		Err(_) => {
+			handle.abort();
+			let _ = handle.await;
+			result
+		},
 	}
-	result
 }
 
 #[cfg(test)]

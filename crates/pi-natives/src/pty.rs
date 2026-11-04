@@ -565,9 +565,6 @@ fn run_pty_sync(
 
 	let mut timed_out = false;
 	let mut cancelled = false;
-	// The output callback failed first: the command is stopped, and the run
-	// fails because its output was not all delivered, not as cancelled.
-	let mut callback_failed = false;
 	// Set when termination starts: SIGKILL is due at `kill_at` (or as soon as
 	// the child exits, for the rest of its group), and the run stops waiting
 	// for an exit status at `give_up_at`.
@@ -595,10 +592,7 @@ fn run_pty_sync(
 				true
 			},
 			// The first termination cause decides `cancelled`/`timed_out`.
-			Ok(ControlMessage::JsGone) if give_up_at.is_none() => {
-				callback_failed = true;
-				true
-			},
+			Ok(ControlMessage::JsGone) if give_up_at.is_none() => true,
 			Ok(ControlMessage::Cancelled { timed_out: by_timeout }) if give_up_at.is_none() => {
 				timed_out = by_timeout;
 				cancelled = !by_timeout;
@@ -688,21 +682,28 @@ fn run_pty_sync(
 		&progress,
 		&decoder,
 		unread,
-		interrupted || callback_failed,
+		interrupted,
 		|| abort_pump.abort(),
 	);
 	drop(pump_task);
-	// The pump dropped output after a callback stalled or failed: the run must
-	// not resolve as if all of it had arrived, or as if it were cancelled.
-	let pump_end = if callback_failed {
-		Some(PumpEnd::ConsumerGone)
-	} else {
-		pump_end
-	};
-	if !interrupted && let Some(error) = pump_end.and_then(undelivered_output_error) {
+	if let Some(error) = lost_terminal_output(pump_end, interrupted) {
 		return Err(error);
 	}
 	Ok(PtyRunResult { exit_code, cancelled, timed_out })
+}
+
+/// The error of a terminal run whose output was lost, from how its pump
+/// ended. A callback that failed or stalled lost output: the run fails
+/// whatever else ended the command (a kill, a timeout, or the failure itself),
+/// so a later cancellation never hides the loss. A pump that panicked fails a
+/// run that was not interrupted; an interrupted run stops its pump itself.
+fn lost_terminal_output(pump_end: Option<PumpEnd>, interrupted: bool) -> Option<Error> {
+	let lost = match pump_end? {
+		end @ (PumpEnd::ConsumerGone | PumpEnd::Stalled) => end,
+		PumpEnd::Panicked if !interrupted => PumpEnd::Panicked,
+		PumpEnd::Panicked | PumpEnd::Drained => return None,
+	};
+	undelivered_output_error(lost)
 }
 
 /// How far the PTY reader thread and the pump have got. The drain compares
@@ -982,8 +983,27 @@ mod reader_queue_tests {
 
 	use super::{
 		BRIDGE_QUEUE_CHUNKS, POST_CANCEL_DRAIN_TIMEOUT, PumpEnd, ReaderEvent, ReaderProgress,
-		STUCK_SLAVE_IDLE, await_pty_output_drain,
+		STUCK_SLAVE_IDLE, await_pty_output_drain, lost_terminal_output,
 	};
+
+	/// A callback that failed or stalled lost output, so the run fails even
+	/// when a kill or a timeout ended the command afterwards; before, the later
+	/// cancellation resolved the run as cancelled. A pump the run stopped
+	/// itself (none reported) or one that delivered everything loses nothing.
+	#[test]
+	fn lost_output_fails_the_run_whatever_ended_it() {
+		for interrupted in [false, true] {
+			for end in [PumpEnd::ConsumerGone, PumpEnd::Stalled] {
+				let error = lost_terminal_output(Some(end), interrupted)
+					.unwrap_or_else(|| panic!("{end:?}, interrupted {interrupted}: must fail"));
+				assert!(error.reason.contains("not all delivered"), "{}", error.reason);
+			}
+			assert!(lost_terminal_output(Some(PumpEnd::Drained), interrupted).is_none());
+			assert!(lost_terminal_output(None, interrupted).is_none());
+		}
+		assert!(lost_terminal_output(Some(PumpEnd::Panicked), false).is_some());
+		assert!(lost_terminal_output(Some(PumpEnd::Panicked), true).is_none());
+	}
 
 	/// The drain with an empty decoder and a terminal that holds nothing
 	/// unread.
