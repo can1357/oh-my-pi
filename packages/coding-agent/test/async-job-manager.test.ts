@@ -440,6 +440,39 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)?.resultText).toBe("late result");
 	});
 
+	test("cancelling a job that runs an agent cancels the jobs that agent owns, down its tree", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		const runUntilAborted = async ({ signal }: { signal: AbortSignal }) => {
+			const aborted = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+			await aborted.promise;
+			return "stopped";
+		};
+		const lane = manager.register("task", "Lane", runUntilAborted, { id: "Lane", ownerId: "Main", agentId: "Lane" });
+		const arm = manager.register("task", "Lane.Arm", runUntilAborted, {
+			id: "Lane.Arm",
+			ownerId: "Lane",
+			agentId: "Lane.Arm",
+		});
+		const armBash = manager.register("bash", "arm bash", runUntilAborted, { ownerId: "Lane.Arm" });
+		const sibling = manager.register("task", "Beta", runUntilAborted, {
+			id: "Beta",
+			ownerId: "Main",
+			agentId: "Beta",
+		});
+
+		expect(manager.cancel(lane, { ownerId: "Main" })).toBe(true);
+
+		expect([lane, arm, armBash, sibling].map(id => manager.getJob(id)?.status)).toEqual([
+			"cancelled",
+			"cancelled",
+			"cancelled",
+			"running",
+		]);
+		manager.cancel(sibling);
+		await manager.waitForAll();
+	});
+
 	test.each(["single", "bulk"] as const)("keeps %s cancelled work reapable past retention", async kind => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ retentionMs: 25 });

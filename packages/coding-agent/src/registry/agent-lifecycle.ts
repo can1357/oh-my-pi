@@ -225,6 +225,8 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 	#persistedReviveTtlMs: () => number = () => 0;
 	/** Set once {@link dispose} runs; blocks late revivals from adopting into a torn-down manager. */
 	#disposed = false;
+	/** Releases of agents whose run ended after {@link dispose} began; dispose waits for them. */
+	readonly #lateReleases = new Set<Promise<void>>();
 
 	constructor(registry: AgentRegistryApi = AgentRegistry.global()) {
 		this.#registry = registry;
@@ -260,6 +262,16 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			opts.onReviverDropped?.();
 			return;
 		}
+		if (this.#disposed) {
+			// The run ended while this lifecycle tears down (a released owner's
+			// disposal cancelled it): release the agent rather than keep it alive
+			// past the teardown. Transcript stays on disk, as for any released agent.
+			opts.onReviverDropped?.();
+			const late = this.#releaseLate(id, ref, opts.onRelease);
+			this.#lateReleases.add(late);
+			void late.finally(() => this.#lateReleases.delete(late));
+			return;
+		}
 		const existing = this.#adopted.get(id);
 		clearTimeout(existing?.timer);
 		const adopted: AdoptedAgent = {
@@ -272,6 +284,20 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		dropReviver(existing);
 		this.#adopted.set(id, adopted);
 		this.#armTimer(id, adopted);
+	}
+
+	async #releaseLate(id: string, ref: AgentRef, onRelease: (() => Promise<void>) | undefined): Promise<void> {
+		try {
+			await ref.session?.dispose();
+		} catch (error) {
+			logger.warn("AgentLifecycleManager: late session dispose failed", { id, error: String(error) });
+		}
+		try {
+			await onRelease?.();
+		} catch (error) {
+			logger.warn("AgentLifecycleManager: late resource cleanup failed", { id, error: String(error) });
+		}
+		this.#registry.unregister(id, ref);
 	}
 
 	/**
@@ -706,6 +732,18 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				}
 			}),
 		);
+		// A released owner's disposal waits for its running `task` children to
+		// settle; each one that ended its run during it was released through
+		// adopt(). Wait for those too (they can release children of their own).
+		while (this.#lateReleases.size > 0 && Date.now() < deadlineAt) {
+			const pending = Promise.all(this.#lateReleases).then(() => {});
+			try {
+				await untilAborted(AbortSignal.timeout(Math.max(0, deadlineAt - Date.now())), () => pending);
+			} catch {
+				break;
+			}
+		}
+		for (const late of this.#lateReleases) trackLateCleanup(late, { id: "late-release", resource: "adopted-agent" });
 		this.#revivals.clear();
 		this.#parks.clear();
 		this.#persistedReviverFactory = undefined;

@@ -38,7 +38,7 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { getBlobsDir, logger } from "@oh-my-pi/pi-utils";
-import type { AsyncJobManagerApi } from "../async";
+import { type AsyncJobManagerApi, ownerAsyncWakePending } from "../async";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
@@ -386,6 +386,11 @@ export class RemoteAgentSession implements AgentViewSession {
 	}
 
 	get asyncWakePending(): boolean {
+		// The jobs live in main's manager, which answers for them now; the mirror is
+		// republished only on session events, and a job cancelled while the session
+		// is idle (no turn follows) would leave it true and the agent unparkable.
+		const jobs = this.#asyncJobs;
+		if (jobs && this.agentId) return ownerAsyncWakePending(jobs, this.agentId);
 		return this.#state.asyncWakePending;
 	}
 

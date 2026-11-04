@@ -4,8 +4,9 @@
  * job, and Lane's run then ends while `Arm` is still inside a `bash` call: at its
  * request budget, or on a terminal model error (a context-limit refusal). `Arm`
  * must finish its work, and its result must reach `Lane` in a later turn, the way
- * a finished background job's result reaches the root. An explicit kill of
- * `Lane` still stops `Arm`.
+ * a finished background job's result reaches the root. What ends Lane still ends
+ * Arm: an explicit kill, a cancel of Lane's run or follow-up turn by its caller
+ * (also after a timeout already ended the run), and the lifecycle's teardown.
  */
 import { afterEach, beforeEach, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -15,15 +16,19 @@ import type { Context } from "@oh-my-pi/pi-ai";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, type MockResponse, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { runSubagentFollowUpTurn, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { emptyMirrorState, RemoteAgentSession } from "@oh-my-pi/pi-coding-agent/thread/remote-agent-session";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
@@ -33,8 +38,17 @@ const ARM_RESULT = "ARM-RESULT-7f3a";
 const LANE_SAW_ARM = "LANE-SAW-ARM-7f3a";
 const KILL_LANE = "Kill Lane now.";
 
-/** How Lane's run ends while Arm runs. */
-type LaneEnd = "budget" | "error";
+/** How Lane's run ends while Arm runs: busy work past its request budget or wall-clock limit, or a model error. */
+type LaneEnd = "budget" | "timeout" | "error";
+
+const LEAD: AgentDefinition = {
+	name: "lead",
+	description: "Lead",
+	systemPrompt: "Lead",
+	tools: ["bash", "task"],
+	spawns: "*",
+	source: "bundled",
+};
 
 let savedEnv: Record<string, string | undefined> = {};
 let root: string;
@@ -98,9 +112,10 @@ function toolCall(name: string, args: Record<string, unknown>): MockResponse {
 
 /**
  * Root: spawn Lane; on {@link KILL_LANE}, write `proc://Lane/kill`. Lane: spawn
- * Arm, then end its run (busy work past its request budget, or one terminal model
- * error); once Arm's result is in its conversation, acknowledge it. Arm: run a
- * bash that waits for the test's gate, then report.
+ * Arm, then end its run (busy work until its request budget or wall-clock limit
+ * stops it, or one terminal model error); once Arm's result is in its
+ * conversation, acknowledge it. Arm: run a bash that waits for the test's gate,
+ * then report.
  */
 function handler(context: Context): MockResponse {
 	const first = context.messages.find(message => message.role === "user");
@@ -147,14 +162,7 @@ async function harness(options: { idleTtlMs: number }) {
 	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [mock, ...catalogAvailable(kind)]);
 	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 		agents: [
-			{
-				name: "lead",
-				description: "Lead",
-				systemPrompt: "Lead",
-				tools: ["bash", "task"],
-				spawns: "*",
-				source: "bundled",
-			},
+			LEAD,
 			{ name: "worker", description: "Worker", systemPrompt: "Worker", tools: ["bash"], source: "bundled" },
 		],
 		projectAgentsDir: null,
@@ -300,3 +308,142 @@ it("stops the child when its parent is killed explicitly", async () => {
 		authStorage.close();
 	}
 }, 120_000);
+
+it("stops the child when its parent's caller cancels after a wall-clock timeout ended the run", async () => {
+	laneEnd = "timeout";
+	const { authStorage, session } = await harness({ idleTtlMs: 0 });
+	// Hold the session abort Lane's timeout starts, so the caller's cancel lands
+	// while the run is ending with `timeout` as its abort reason.
+	const timeoutAbortStarted = Promise.withResolvers<void>();
+	const timeoutAbortHeld = Promise.withResolvers<void>();
+	const abort = AgentSession.prototype.abort;
+	vi.spyOn(AgentSession.prototype, "abort").mockImplementation(async function (
+		this: AgentSession,
+		...args: Parameters<AgentSession["abort"]>
+	) {
+		await abort.apply(this, args);
+		if (this.getAgentId() !== "Lane") return;
+		timeoutAbortStarted.resolve();
+		await timeoutAbortHeld.promise;
+	});
+	const caller = new AbortController();
+	try {
+		const run = runSubprocess({
+			cwd: path.join(root, "home", "work"),
+			agent: LEAD,
+			task: "Do assignment Lane.",
+			index: 0,
+			id: "Lane",
+			structured: false,
+			modelOverride: "mock/mock-model",
+			settings: session.settings,
+			authStorage,
+			modelRegistry: session.modelRegistry,
+			asyncJobManager: session.asyncJobManager,
+			maxRuntimeMs: 3000,
+			enableMCP: false,
+			enableLsp: false,
+			signal: caller.signal,
+			artifactsDir: path.join(root, "artifacts"),
+		});
+		await timeoutAbortStarted.promise;
+		const armJob = session.asyncJobManager!.getJob("Lane.Arm")!;
+		expect(armJob.status).toBe("running");
+		caller.abort(new Error("the caller cancelled Lane"));
+		timeoutAbortHeld.resolve();
+		await run;
+		await armJob.promise;
+		expect(armJob.status).toBe("cancelled");
+		expect(transcriptHas("Lane.Arm", "arm-work-2")).toBe(false);
+	} finally {
+		timeoutAbortHeld.resolve();
+		await session.dispose();
+		authStorage.close();
+	}
+}, 120_000);
+
+it("stops the child when its parent's follow-up turn is cancelled", async () => {
+	laneEnd = "budget";
+	const { authStorage, session } = await harness({ idleTtlMs: 0 });
+	try {
+		const armJob = await laneRunEndsWhileArmWorks(session);
+		const lane = AgentRegistry.global().get("Lane")!.session!;
+		const caller = new AbortController();
+		const followUp = runSubagentFollowUpTurn({
+			id: "Lane",
+			agent: LEAD,
+			message: "Keep working.",
+			structured: false,
+			signal: caller.signal,
+		});
+		await until(() => lane.isStreaming, "Lane's follow-up turn to start");
+		expect(armJob.status).toBe("running");
+		caller.abort(new Error("the caller cancelled Lane's follow-up turn"));
+		await followUp;
+		await armJob.promise;
+		expect(armJob.status).toBe("cancelled");
+	} finally {
+		await session.dispose();
+		authStorage.close();
+	}
+}, 120_000);
+
+it("releases a running child with its parent when the lifecycle tears down", async () => {
+	laneEnd = "budget";
+	const { authStorage, session } = await harness({ idleTtlMs: 0 });
+	try {
+		const armJob = await laneRunEndsWhileArmWorks(session);
+		await AgentLifecycleManager.global().dispose();
+		await armJob.promise;
+		expect(armJob.status).toBe("cancelled");
+		const liveSubagents = AgentRegistry.global()
+			.list()
+			.filter(ref => ref.id !== MAIN_AGENT_ID && ref.session)
+			.map(ref => `${ref.id} ${ref.status}`);
+		expect(liveSubagents).toEqual([]);
+	} finally {
+		await session.dispose();
+		authStorage.close();
+	}
+}, 120_000);
+
+it("parks an idle worker-homed parent once its child's job is cancelled, whatever its mirror last said", async () => {
+	const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+	const armJob = manager.register(
+		"task",
+		"W.Arm",
+		async ({ signal }) => {
+			const aborted = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+			await aborted.promise;
+			return "stopped";
+		},
+		{ id: "W.Arm", ownerId: "W", agentId: "W.Arm" },
+	);
+	// The worker last published "background work pending"; no session event follows the cancel.
+	const mirror = new RemoteAgentSession({
+		key: "w1:W",
+		home: "w1",
+		agentId: "W",
+		host: undefined,
+		state: { ...emptyMirrorState(), asyncWakePending: true },
+		messages: [],
+		asyncJobManager: manager,
+	});
+	AgentRegistry.global().register({
+		id: "W",
+		displayName: "task",
+		kind: "sub",
+		session: mirror,
+		sessionFile: null,
+		status: "idle",
+	});
+	AgentLifecycleManager.global().adopt("W", { idleTtlMs: 20 });
+	// Several idle TTLs pass while the child runs (real lifecycle timer).
+	await Bun.sleep(150);
+	expect(AgentRegistry.global().get("W")?.status).toBe("idle");
+	manager.cancel(armJob);
+	await manager.waitForAll();
+	await until(() => AgentRegistry.global().get("W")?.status === "parked", "the idle parent to park");
+	await manager.dispose({ timeoutMs: 1000 });
+}, 60_000);

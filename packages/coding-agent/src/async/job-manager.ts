@@ -45,6 +45,20 @@ const DEFAULT_MAX_RUNNING_JOBS = 15;
 /** Abort reason used only when the owning session shuts down the entire manager. */
 export const ASYNC_JOB_MANAGER_SHUTDOWN_REASON = Symbol("AsyncJobManager shutdown");
 
+/**
+ * Whether background work still owes its owner a turn: a running job whose result
+ * will wake the owner, or a result queued or in delivery (a delivery stays in
+ * flight until the owner's session has injected or discarded it). `ownerId`
+ * undefined means every job of the manager.
+ */
+export function ownerAsyncWakePending(manager: AsyncJobManagerApi, ownerId: string | undefined): boolean {
+	const filter = ownerId ? { ownerId } : undefined;
+	return (
+		manager.getRunningJobs(filter).some(job => !manager.isDeliverySuppressed(job.id)) ||
+		manager.hasPendingDeliveries(filter)
+	);
+}
+
 /** Kind of work a managed job runs; drives job-row badges and delivery labels. */
 export type AsyncJobType = "bash" | "task" | "eval";
 
@@ -619,8 +633,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		if (!job) return false;
 		if (filter && job.ownerId !== filter.ownerId) return false;
 		if (job.status !== "running") return false;
-		job.status = "cancelled";
-		job.abortController.abort();
+		this.#cancelJob(job);
 		return true;
 	}
 
@@ -782,9 +795,22 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 
 	#cancelJobs(filter?: AsyncJobFilter, reason?: unknown): void {
 		for (const job of this.#filterJobs(this.#jobs.values(), filter)) {
-			if (job.status !== "running") continue;
-			job.status = "cancelled";
-			job.abortController.abort(reason);
+			if (job.status === "running") this.#cancelJob(job, reason);
+		}
+	}
+
+	/**
+	 * Cancel one running job. A job that runs a subagent ({@link AsyncJob.agentId})
+	 * takes the jobs that agent owns with it: the agent's background work outlives
+	 * the end of one of its runs, but not an explicit cancel of the agent, so the
+	 * cancellation reaches its `task` children and their own children however
+	 * late in the run it lands.
+	 */
+	#cancelJob(job: AsyncJob, reason?: unknown): void {
+		job.status = "cancelled";
+		job.abortController.abort(reason);
+		if (job.agentId !== undefined && job.agentId !== job.ownerId) {
+			this.#cancelJobs({ ownerId: job.agentId }, reason);
 		}
 	}
 

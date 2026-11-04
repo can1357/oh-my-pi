@@ -118,7 +118,13 @@ import { frameDataBytesBudget, readerIncludesThinking } from "@oh-my-pi/snapcomp
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { loadAdvisorTranscriptCosts } from "../advisor";
-import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager, type AsyncJobManagerApi } from "../async";
+import {
+	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
+	type AsyncJob,
+	AsyncJobManager,
+	type AsyncJobManagerApi,
+	ownerAsyncWakePending,
+} from "../async";
 import { classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -3543,10 +3549,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#hasPendingAsyncWake(): boolean {
 		const manager = this.#asyncJobManager;
 		if (!manager) return false;
-		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
 		return (
-			manager.getRunningJobs(ownerFilter).some(job => !manager.isDeliverySuppressed(job.id)) ||
-			manager.hasPendingDeliveries(ownerFilter) ||
+			ownerAsyncWakePending(manager, this.#agentId) ||
 			// Delivered but not yet injected: the sink has enqueued the
 			// async-result follow-up on the yield queue, and the manager no
 			// longer reports it. Without this leg a terminal yield in the
@@ -6488,7 +6492,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// explicit hard kill) leaves `#ownedAsyncJobManager` undefined and must
 		// propagate a generic cancellation so its nested children stay terminal.
 		this.#cancelOwnAsyncJobs(manager ? ASYNC_JOB_MANAGER_SHUTDOWN_REASON : undefined);
-		if (!manager) return;
+		if (!manager) {
+			// A subagent's jobs outlive its runs (task/executor.ts ownerJobsOutliveRun),
+			// so its disposal is where they end. Wait for them to settle: a `task`
+			// child's run finalizes its own lifecycle as it settles, and a release or
+			// a lifecycle teardown that returned first would miss that late adoption.
+			const shared = this.#asyncJobManager;
+			if (shared && this.#agentId) await shared.waitForOwnerJobs(this.#agentId, { timeoutMs: 3_000 });
+			return;
+		}
 
 		try {
 			const drained = await manager.dispose({ timeoutMs: 3_000 });

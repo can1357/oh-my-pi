@@ -3584,28 +3584,48 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
  * wall-clock limit, a terminal error or a loop guard ended the run, or the run
  * finished), each job goes on and its result reaches the agent as a later turn,
  * as a background job's result reaches the root session. The jobs stop with the
- * agent: an explicit cancel of the run (`proc://<id>/kill`, a kill from the Agent
- * Hub or RPC, the parent's own call being aborted), a process shutdown, a
- * one-shot or isolated agent (its worktree is captured and removed right after
- * the run), and an agent the lifecycle does not keep. Session disposal (park,
- * release, shutdown) cancels whatever the agent still owns.
+ * agent: an explicit cancel of the run (its caller's signal aborted, or a kill
+ * from the Agent Hub or RPC), a process shutdown, a one-shot or isolated agent
+ * (its worktree is captured and removed right after the run), and an agent the
+ * lifecycle does not keep. A cancel that lands after this decision is handled by
+ * {@link cancelOwnerJobsOnCallerCancel} and by the job manager, which cancels an
+ * agent's jobs with the job that runs it. Session disposal (park, release,
+ * shutdown) cancels whatever the agent still owns.
  */
 export function ownerJobsOutliveRun(args: {
 	id: string;
 	session: AgentSession;
 	aborted: boolean;
 	abortKind?: AbortReason;
+	/** The run's caller cancelled it (its signal aborted), whichever abort reason won the run. */
+	callerCancelled: boolean;
 	keepAlive: boolean;
 	isolated: boolean;
 	reviveSession: AgentReviver | null;
 }): boolean {
-	if (!args.keepAlive || args.isolated) return false;
+	if (!args.keepAlive || args.isolated || args.callerCancelled) return false;
 	if (args.abortKind === "signal" || args.abortKind === "shutdown") return false;
 	const ref = AgentRegistry.global().get(args.id);
 	if (!ref || ref.session !== args.session || ref.status === "aborted") return false;
 	// The same rule finalizeSubagentLifecycle applies: an aborted run keeps the
 	// agent only when it can be revived from its transcript.
 	return !args.aborted || args.reviveSession !== null;
+}
+
+/**
+ * An explicit cancel of an agent's run or turn stops the background jobs the
+ * agent owns, whenever it lands before the run or turn returns: also after an
+ * earlier timeout or budget stop won the run's abort reason, and after
+ * {@link ownerJobsOutliveRun} decided to keep them. Called as the run or turn
+ * returns; a cancel of the job that runs the agent after that is the job
+ * manager's (it cancels the agent's jobs with it).
+ */
+function cancelOwnerJobsOnCallerCancel(
+	signal: AbortSignal | undefined,
+	manager: AsyncJobManagerApi | undefined,
+	id: string,
+): void {
+	if (signal?.aborted) manager?.cancelAll({ ownerId: id }, signal.reason);
 }
 
 /**
@@ -3982,6 +4002,7 @@ async function driveFollowUpTurn(
 			const active = monitor.takeActiveSession();
 			if (active) monitor.captureSalvage(active);
 			monitor.finish();
+			cancelOwnerJobsOnCallerCancel(signal, session.asyncJobManager, id);
 		}
 
 		return await finalizeRunResult({
@@ -5328,6 +5349,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					session,
 					aborted,
 					abortKind: monitor.abortKind(),
+					callerCancelled: signal?.aborted === true,
 					keepAlive,
 					isolated: worktree !== undefined,
 					reviveSession,
@@ -5380,6 +5402,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					}
 				}
 			}
+			if (keepOwnerJobs) cancelOwnerJobsOnCallerCancel(signal, jobManager, id);
 			if (preparedSession && untrackedSession) {
 				const incompleteSession = untrackedSession;
 				untrackedSession = undefined;
