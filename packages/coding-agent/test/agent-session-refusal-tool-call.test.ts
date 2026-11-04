@@ -12,6 +12,10 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { collectPendingToolCalls } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
@@ -143,6 +147,7 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 		responses: Array<(model: Model<Api>, options?: SimpleStreamOptions) => AssistantMessageEventStream>,
 		tools: AgentTool[],
 		sessionManager: SessionManager = SessionManager.inMemory(),
+		extensionRunner?: ExtensionRunner,
 	) {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled test model to exist");
@@ -166,7 +171,7 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 			"retry.modelFallback": false,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
 		return { session, agent, requests };
 	}
 
@@ -438,5 +443,108 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 		expect(agent.state.messages.some(m => m.role === "custom" && m.customType === "refusal-tool-call-report")).toBe(
 			true,
 		);
+	});
+
+	it("a finished refusal chain leaves no tool call pending in the session record", async () => {
+		const dir = path.join(tempDir.path(), `pending-${Date.now()}`);
+		const sessionManager = SessionManager.create(dir, dir);
+		const { session } = createSession(
+			[m => refusedToolCallStream(m, [{ call: writeCall, completed: true }]), m => refusedToolCallStream(m, [])],
+			[recordingTool("write", [])],
+			sessionManager,
+		);
+
+		await session.prompt("Write to the device");
+		await session.waitForIdle();
+		await sessionManager.flush();
+		const file = sessionManager.getSessionFile();
+		if (!file) throw new Error("Expected a session file path");
+		await session.dispose();
+		await sessionManager.close();
+
+		// A pending call here makes the next resume report a crashed process and
+		// append an aborted turn, though nothing was running.
+		const reloaded = await SessionManager.open(file);
+		const pending = collectPendingToolCalls(reloaded.getBranch());
+		await reloaded.close();
+		expect(pending).toEqual([]);
+	});
+
+	it("a manual compaction between the report and the wake still gives the model its turn", async () => {
+		const dir = path.join(tempDir.path(), `compact-${Date.now()}`);
+		const sessionManager = SessionManager.create(dir, dir);
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session_before_compact", async event => ({
+					compaction: {
+						summary: "Earlier work was summarized.",
+						firstKeptEntryId: event.preparation.firstKeptEntryId,
+						tokensBefore: event.preparation.tokensBefore,
+						details: {},
+					},
+				}));
+			},
+			dir,
+			new EventBus(),
+			runtime,
+			"refusal-compaction-test",
+		);
+		const runner = new ExtensionRunner([extension], runtime, dir, sessionManager, modelRegistry);
+		const { session, agent, requests } = createSession(
+			[
+				m => textStream(m, "Done with the first task."),
+				m => refusedToolCallStream(m, [{ call: writeCall, completed: false }]),
+				m => textStream(m, "I will split the write."),
+			],
+			[recordingTool("write", [])],
+			sessionManager,
+			runner,
+		);
+		let compaction: Promise<unknown> | undefined;
+		session.subscribeRunState(state => {
+			if (state !== "idle" || compaction) return;
+			if (!agent.state.messages.some(m => m.role === "custom" && m.customType === "refusal-tool-call-report"))
+				return;
+			// A small session makes this a no-op compaction; its abort still cancels the wake.
+			compaction = session.compact(undefined, { mode: "soft" }).catch(() => undefined);
+		});
+
+		await session.prompt(`First task. ${"old work ".repeat(100)}`);
+		await session.waitForIdle();
+		await session.prompt("Write to the device");
+		await compaction;
+		await session.waitForIdle();
+
+		expect(compaction).toBeDefined();
+		expect(requests).toHaveLength(3);
+		expect(requests[2]).toContain(REFUSAL);
+	});
+
+	it("a user prompt queued during a finished chain gets its own wake when it is refused", async () => {
+		const refused = (id: string) => (m: Model<Api>) =>
+			refusedToolCallStream(m, [{ call: { ...writeCall, id }, completed: true }]);
+		const { session, agent, requests } = createSession(
+			[refused("toolu_a"), refused("toolu_b"), refused("toolu_c"), m => textStream(m, "Answering the new request.")],
+			[recordingTool("write", [])],
+		);
+		let queued: Promise<unknown> | undefined;
+		session.subscribeRunState(state => {
+			if (state !== "idle" || queued) return;
+			if (!agent.state.messages.some(m => m.role === "custom" && m.customType === "refusal-tool-call-report"))
+				return;
+			queued = session.prompt("A DIFFERENT REQUEST", { streamingBehavior: "steer" });
+		});
+
+		await session.prompt("Write to the device");
+		await queued;
+		await session.waitForIdle();
+
+		// The new request's first refusal (request 3) is a first refusal: it wakes (request 4).
+		const newRequestAt = requests.findIndex(r => r.includes("A DIFFERENT REQUEST"));
+		expect(newRequestAt).toBeGreaterThanOrEqual(0);
+		expect(requests.length).toBe(newRequestAt + 2);
+		const reports = (requests.at(-1) ?? "").split("The provider ended your last response with a refusal");
+		expect(reports.at(-1)).not.toContain("the session will NOT continue on its own this time");
 	});
 });

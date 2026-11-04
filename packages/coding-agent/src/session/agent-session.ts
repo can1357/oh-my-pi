@@ -2937,6 +2937,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			retainTerminalFailure: message => {
 				this.#prunedTerminalFailure = message;
 			},
+			refusalWakeOwed: () => this.#recovery.refusalWakeOwed(),
 			runRecoveryCompactionWithRollback: (reason, message, options) =>
 				this.#recovery.runRecoveryCompactionWithRollback(reason, message, options),
 			parseRetryAfterMsFromError: errorMessage => this.#recovery.parseRetryAfterMsFromError(errorMessage),
@@ -3836,6 +3837,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#recordToolExecutionStart(event: Extract<AgentEvent, { type: "tool_execution_start" }>): void {
+		// The agent loop announces the never-run placeholder of a refused call with
+		// this event too. Its turn is not written, so a marker would read as a call
+		// left pending by a crashed process on the next resume.
+		if (this.#callOfRefusedTurnLeavingHistory(event.toolCallId)) return;
 		const data: ToolExecutionStartData = {
 			toolCallId: event.toolCallId,
 			toolName: event.toolName,
@@ -4068,12 +4073,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			event.type === "agent_end" ? revokeComputerControlForOwner(this.#eval.getKernelOwnerId()) : undefined;
 		// Only the user's own prompt, steer or follow-up lifts the computer-use stop their Escape set;
 		// synthetic continues and agent-sent messages (subagent budget steers) never do.
+		// The same message is new user work, so it also ends a refusal-report chain:
+		// a first refusal of it gets its own wake (`settleTerminalRefusal`).
 		if (
 			event.type === "message_start" &&
 			isUserAuthoredMessage(event.message) &&
 			!(event.message.role === "user" && (event.message.synthetic || event.message.attribution === "agent"))
 		) {
 			resumeComputerUseForOwner(this.#eval.getKernelOwnerId());
+			this.#recovery.endRefusalChain();
 		}
 		if (event.type === "tool_execution_end" && this.#isTerminalYieldToolResult(event)) {
 			const alreadyTerminated = this.#synchronouslyTerminatedYieldToolCallIds.delete(event.toolCallId);
@@ -4275,16 +4283,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// are the placeholder results the agent loop paired with its calls:
 		// persisted alone they would be orphans that a reload replays. A terminal
 		// refusal reports the calls in its own notice instead (`settleTerminalRefusal`).
-		if (isSyntheticToolResultMessage(message)) {
-			const messages = this.agent.state.messages;
-			for (let i = messages.length - 1; i >= 0; i--) {
-				const owner = messages[i];
-				if (owner.role !== "assistant") continue;
-				if (!owner.content.some(block => block.type === "toolCall" && block.id === message.toolCallId)) continue;
-				if (this.#recovery.refusedTurnLeavesHistory(owner)) return;
-				break;
-			}
-		}
+		if (isSyntheticToolResultMessage(message) && this.#callOfRefusedTurnLeavingHistory(message.toolCallId)) return;
 		const skipPersistedRewindResult =
 			message.role === "toolResult" &&
 			semanticToolResult(message.toolName, message)?.toolName === "rewind" &&
@@ -4292,6 +4291,22 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (!skipPersistedRewindResult) {
 			this.#appendSessionMessage(message);
 		}
+	}
+
+	/**
+	 * Whether `toolCallId` belongs to the latest assistant turn that emitted it,
+	 * and that turn is a refusal leaving history. None of its calls ran, so none
+	 * of their execution records (start marker, placeholder result) may be written.
+	 */
+	#callOfRefusedTurnLeavingHistory(toolCallId: string): boolean {
+		const messages = this.agent.state.messages;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const owner = messages[i];
+			if (owner.role !== "assistant") continue;
+			if (!owner.content.some(block => block.type === "toolCall" && block.id === toolCallId)) continue;
+			return this.#recovery.refusedTurnLeavesHistory(owner);
+		}
+		return false;
 	}
 
 	/**
@@ -4543,6 +4558,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// batch) executes that turn's calls without a new message_end.
 			this.#runToolCallIds = new Set(event.resumedToolCallIds);
 			this.#prunedTerminalFailure = undefined;
+			this.#recovery.noteAgentStarted();
 			this.#advisors.onPrimaryAgentStart();
 			this.#emitRunState("running");
 			this.#maintenance.noteTurnStarted();
@@ -4572,7 +4588,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			this.#lastAssistantMessage = event.message;
 			if (event.message.stopReason !== "error" && event.message.stopReason !== "aborted") {
-				this.#recovery.noteAnsweredTurn();
+				this.#recovery.endRefusalChain();
 			}
 			for (const block of event.message.content) {
 				if (block.type === "toolCall") this.#runToolCallIds.add(block.id);

@@ -499,6 +499,8 @@ export interface SessionMaintenanceHost {
 	 * post-settle readers (`AgentSession.getLastAssistantMessage`) until the next run.
 	 */
 	retainTerminalFailure(message: AssistantMessage): void;
+	/** A refusal report's wake is scheduled and has not started (see `TurnRecovery.settleTerminalRefusal`). */
+	refusalWakeOwed(): boolean;
 	runRecoveryCompactionWithRollback(
 		reason: "overflow" | "incomplete",
 		message: AssistantMessage,
@@ -1255,7 +1257,9 @@ export class SessionMaintenance {
 				// is also true while a prompt is still in async setup (before its message
 				// reaches the agent). The abort bump drops that prompt, so resuming on
 				// its behalf would nudge the model on the previous transcript instead.
-				const interruptedActiveTurn = this.#host.agent.state.isStreaming;
+				// A refusal report whose wake has not started is the same kind of owed
+				// turn: the abort below cancels the wake, and the report would sit unread.
+				const interruptedActiveTurn = this.#host.agent.state.isStreaming || this.#host.refusalWakeOwed();
 				this.#host.disconnectFromAgent();
 				await this.#host.abort({ goalReason: "internal", preserveCompaction: true });
 				resumeInterruptedTurn =
