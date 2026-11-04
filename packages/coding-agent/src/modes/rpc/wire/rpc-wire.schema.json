@@ -4697,6 +4697,10 @@
 				"detached": {
 					"type": "boolean",
 					"description": "The subagent runs as a detached background job."
+				},
+				"sessionInstanceKey": {
+					"type": "string",
+					"description": "Live session instance key of the child session described by this lifecycle event."
 				}
 			},
 			"required": [

@@ -4202,6 +4202,9 @@ pub struct SubagentLifecyclePayload {
 	/// The subagent runs as a detached background job.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub detached: Option<bool>,
+	/// Live session instance key of the child session described by this lifecycle event.
+	#[serde(rename = "sessionInstanceKey", default, skip_serializing_if = "Option::is_none")]
+	pub session_instance_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

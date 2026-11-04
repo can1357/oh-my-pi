@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `omp agent attach <agent-id>` to view and steer a live task subagent from another terminal, abort its current work, or detach without stopping it ([#18099](https://github.com/can1357/oh-my-pi/pull/18099) by [@mark-major](https://github.com/mark-major))
 - Added Keenable as a web search engine (`web/keenable`). It uses `KEENABLE_API_KEY` or a stored `keenable` credential when present; an explicit selection without a key uses Keenable's keyless public endpoint ([#17953](https://github.com/can1357/oh-my-pi/pull/17953) by [@KGKallasmaa](https://github.com/KGKallasmaa))
 - Bash commands now visualize execution incrementally in Raw or Python-like Pseudo, with variable values beside their latest setter and bounded replay history for foreground and background jobs; PTY and user-shell runs retain their plain command view.
 - Added opt-in auto-update (`update.auto`, offered by a new setup wizard step): a launch that finds a newer release installs it in the background through whatever installed omp (standalone binary, Homebrew, mise, bun, npm), shows the version and download progress beside the welcome banner's version, and the next launch runs it. Quitting mid-update does not interrupt it. Skipped under Tern, which updates its omp itself, and on Nix and source checkouts
@@ -21,6 +22,7 @@
 
 ### Fixed
 
+- Live task attachments remain unambiguous after rapid owner-session changes, and working-directory names no longer break the attached-view header ([#18099](https://github.com/can1357/oh-my-pi/pull/18099) by [@mark-major](https://github.com/mark-major))
 - `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
 - Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset
 - The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm

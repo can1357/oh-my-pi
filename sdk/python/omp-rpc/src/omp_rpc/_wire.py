@@ -1327,6 +1327,8 @@ class SubagentLifecyclePayload:
     parent_tool_call_id: str | None = None
     detached: bool | None = None
     """The subagent runs as a detached background job."""
+    session_instance_key: str | None = None
+    """Live session instance key of the child session described by this lifecycle event."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -2778,6 +2780,7 @@ def parse_subagent_lifecycle_payload(value: object, path: str = "SubagentLifecyc
         session_file=optional(payload, "sessionFile", decode_str, path),
         parent_tool_call_id=optional(payload, "parentToolCallId", decode_str, path),
         detached=optional(payload, "detached", decode_bool, path),
+        session_instance_key=optional(payload, "sessionInstanceKey", decode_str, path),
     )
 
 

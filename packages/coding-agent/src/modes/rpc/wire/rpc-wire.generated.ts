@@ -1118,6 +1118,8 @@ export interface SubagentLifecyclePayload {
 	parentToolCallId?: string;
 	/** The subagent runs as a detached background job. */
 	detached?: boolean;
+	/** Live session instance key of the child session described by this lifecycle event. */
+	sessionInstanceKey?: string;
 }
 
 export interface SubagentProgressPayload {

@@ -113,6 +113,18 @@ Artifacts and side channels:
 - Each subagent gets `<id>.jsonl` session history when the parent persists artifacts; `history://<id>` renders it as a concise transcript (works for live and parked agents).
 - Isolated patch mode writes `<id>.patch` before merge; nested changes write `<id>.nested-<n>-<path>.patch` files in both merge modes.
 
+## Attach from another terminal
+
+Run `omp agent attach <agent-id>` in an interactive terminal to view a live native task subagent's transcript and streaming activity. The subagent keeps running in its owner process; attaching does not create a new model or tool runtime.
+
+If the same agent ID is live under multiple owner sessions, select one with `omp agent attach <agent-id> --owner <session-id>`.
+
+Changing the owner session disconnects existing attachments. Attach again to a live child of the new session.
+
+- Submit text to steer a running subagent or start a new turn when it is idle.
+- Press Ctrl+C to abort its current work.
+- Press Ctrl+D with an empty editor to detach without stopping the subagent.
+
 ## Flow
 
 1. `TaskTool.create(...)` discovers agents through a process-level memo keyed by resolved cwd and effective extension roots (`discoverAgentsForCreate`). `refreshAgentDiscovery(...)` replaces the matching description snapshot after explicit reloads.

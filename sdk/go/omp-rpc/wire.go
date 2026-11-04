@@ -4942,6 +4942,8 @@ type SubagentLifecyclePayload struct {
 	ParentToolCallID *string                 `json:"parentToolCallId,omitempty"`
 	// The subagent runs as a detached background job.
 	Detached *bool `json:"detached,omitempty"`
+	// Live session instance key of the child session described by this lifecycle event.
+	SessionInstanceKey *string `json:"sessionInstanceKey,omitempty"`
 }
 
 func (v *SubagentLifecyclePayload) UnmarshalJSON(data []byte) error {
@@ -4960,6 +4962,7 @@ func (v *SubagentLifecyclePayload) decodeFrom(raw map[string]json.RawMessage) er
 	d.optional("sessionFile", &out.SessionFile)
 	d.optional("parentToolCallId", &out.ParentToolCallID)
 	d.optional("detached", &out.Detached)
+	d.optional("sessionInstanceKey", &out.SessionInstanceKey)
 	if d.err != nil {
 		return d.err
 	}

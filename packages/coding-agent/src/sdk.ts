@@ -178,6 +178,7 @@ import {
 	type AgentRegistryApi,
 	MAIN_AGENT_ID,
 } from "./registry/agent-registry";
+import { startAgentAttachService, type AgentAttachService } from "./agent-attach/service";
 import {
 	buildSecretObfuscator,
 	deobfuscateSessionContext,
@@ -5511,6 +5512,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			throw new Error(`Agent "${resolvedAgentId}" was replaced during session initialization.`);
 		}
 		hasRegistered = true;
+		let agentAttachService: AgentAttachService | undefined;
+		if (agentKind === "main" && isMainThread()) {
+			try {
+				agentAttachService = await startAgentAttachService({
+					session,
+					registry: agentRegistry,
+					eventBus,
+					subagentEventBus,
+				});
+			} catch (error) {
+				logger.warn("Agent attach service failed to start", {
+					ownerSessionId: sessionManager.getSessionId(),
+					error: String(error),
+				});
+				session.emitNotice("warning", "Live task attachment could not be started.", "agent-attach");
+			}
+		}
 		// MCP notification bridge cleanup — assigned when the bridge is wired below,
 		// invoked from the dispose wrapper AND registered as a postmortem so both
 		// explicit-dispose (SDK embedders that reuse the process across sessions) and
@@ -5534,6 +5552,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						// adopted subagent sessions, revivers. Tear it down while shared
 						// resources (kernels, MCP, LSP) are still live. Subagent disposal
 						// must NOT touch the global lifecycle.
+						try {
+							await agentAttachService?.close();
+						} catch (error) {
+							logger.warn("Agent attach service failed to close", { error: String(error) });
+						} finally {
+							agentAttachService = undefined;
+						}
 						const vibeRegistry = VibeSessionRegistry.global();
 						const vibeParentSession = {
 							getAgentId: () => resolvedAgentId,

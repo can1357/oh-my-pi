@@ -11,7 +11,7 @@
  * entry count, but it cannot duplicate or misorder rows the way incremental
  * component reuse could.
  */
-import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AgentEvent, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { type Component, type TUI } from "../tui";
 import type { AdvisorMessageDetails } from "./messages";
@@ -67,7 +67,7 @@ import {
 import { groupedReadUsageCallIds, ReadToolGroupComponent, readArgsCollapseIntoGroup } from "./read-tool-group";
 import { isReplyWrite, ReplyWriteComponent, replyDisplayMessage, toolResultReplies } from "./reply-write";
 import { SkillMessageComponent } from "./skill-message";
-import { ToolExecutionComponent, type ToolExecutionHandle } from "./tool-execution";
+import { asyncJobState, ToolExecutionComponent, type ToolExecutionHandle } from "./tool-execution";
 import { TranscriptContainer } from "../chrome/transcript-container";
 import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "../overlays/usage-row";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user-message";
@@ -556,6 +556,43 @@ export class ChatTranscriptBuilder {
 		this.#pendingReadUsageCallIds = this.#pendingUsage ? groupedReadUsageCallIds(message) : undefined;
 		this.#pendingUsageElapsedMs =
 			this.#pendingUsage && displayPreferences.showTurnTime ? this.#turnElapsedMs(message) : undefined;
+	}
+
+	/**
+	 * Apply a live tool event to the card already showing its call. Only existing
+	 * handles change: a grouped read still waiting in `#readArgs` is materialized
+	 * first. Nothing settles here; partial updates keep the card open, and the
+	 * committed result still arrives through `#appendToolResult`.
+	 */
+	applyToolEvent(
+		event: Extract<AgentEvent, { type: "tool_execution_start" | "tool_execution_update" | "tool_stream_update" }>,
+	): void {
+		const pending = this.#pendingTools.get(event.toolCallId) ?? this.#materializeReadGroup(event.toolCallId);
+		if (!pending) return;
+		switch (event.type) {
+			case "tool_execution_start":
+				pending.setExecutionStarted(event.toolCallId);
+				return;
+			case "tool_execution_update": {
+				const isError = asyncJobState(event.partialResult.details) === "failed";
+				pending.updateResult({ ...event.partialResult, isError }, true, event.toolCallId);
+				return;
+			}
+			case "tool_stream_update":
+				pending.updateStreamPreview?.(event.update);
+				return;
+		}
+	}
+
+	/** Move a read still waiting in `#readArgs` into the shared read group so a live event can reach it. */
+	#materializeReadGroup(toolCallId: string): ToolExecutionHandle | undefined {
+		const args = this.#readArgs.get(toolCallId);
+		if (!args) return undefined;
+		const group = this.#ensureReadGroup();
+		group.updateArgs(args, toolCallId);
+		this.#pendingTools.set(toolCallId, group);
+		this.#readArgs.delete(toolCallId);
+		return group;
 	}
 
 	#appendToolResult(message: Extract<AgentMessage, { role: "toolResult" }>): void {
