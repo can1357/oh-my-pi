@@ -305,6 +305,7 @@ export class IrcBridge {
 				const steer: AgentMessage = {
 					role: "user",
 					content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: envelopeBody }),
+					parentIrc: { from: msg.from, body: msg.body },
 					attribution: "agent",
 					timestamp: msg.ts,
 					steering: true,

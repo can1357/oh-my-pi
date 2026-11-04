@@ -1213,6 +1213,8 @@ export interface ProviderInputTransformation {
 export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
+	/** Original sender and body of a parent-agent IRC steer, for transcript presentation only. */
+	parentIrc?: { from: string; body: string };
 	/** True if the message was injected by the system (e.g., auto-continue). */
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */

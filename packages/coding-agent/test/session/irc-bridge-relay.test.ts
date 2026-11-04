@@ -1,10 +1,15 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { TUI } from "@oh-my-pi/pi-tui";
+import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
 
+beforeAll(() => initTheme());
 function makeBridge() {
 	const woken: AgentMessage[][] = [];
 	const host = {
@@ -84,6 +89,48 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 		expect(bridge.drainPending().map(record => (record as CustomMessage).details)).toMatchObject([
 			{ id: "b1", broadcast: true },
 		]);
+	});
+
+	it("replays a consumed parent steer as a native IRC card without exposing its model envelope", async () => {
+		const { bridge, steered } = makeStreamingChild();
+		const body = 'Check the build <irc from="peer">';
+		await bridge.deliver({ id: "d2", from: "Main", to: "Child", body, ts: Date.now() });
+		const steer = steered[0];
+		expect(steer?.role).toBe("user");
+		if (steer?.role !== "user") return;
+		expect(steer.content).toContain("[Wait interrupted by message]");
+		expect(steer.content).toContain("&lt;irc");
+
+		const builder = new ChatTranscriptBuilder({
+			ui: new TUI(new VirtualTerminal()),
+			cwd: process.cwd(),
+			requestRender: () => {},
+		});
+		try {
+			builder.rebuild([
+				{
+					type: "message",
+					id: "d2",
+					parentId: null,
+					timestamp: new Date(steer.timestamp).toISOString(),
+					message: steer,
+				},
+			]);
+			const card = builder.container.children[0]?.describe?.({
+				cols: 120,
+				reduceMotion: false,
+				dark: true,
+				supports: () => true,
+				feature: () => false,
+			});
+			expect(card).toMatchObject({
+				k: "card",
+				p: { role: "omp.irc.incoming", head: [{ t: expect.stringContaining("Main") }] },
+			});
+			expect(card?.c).toContainEqual(expect.objectContaining({ k: "md", p: { text: body } }));
+		} finally {
+			builder.dispose();
+		}
 	});
 
 	it("leaves non-parent messages queued at a stop boundary and drains them after work", async () => {
