@@ -9,12 +9,11 @@ use std::{
 	path::Path,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use pi_vfs::BlockingFs;
 use uucore::{display::Quotable, line_ending::LineEnding};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 mod options {
 	pub const COLUMN_1: &str = "1";
@@ -353,11 +352,6 @@ fn app() -> Command {
 		.arg(Arg::new(options::TOTAL).long(options::TOTAL).help("output a summary").action(ArgAction::SetTrue))
 		.arg(Arg::new(options::CHECK_ORDER).long(options::CHECK_ORDER).help("check that input is correctly sorted, even if all input lines are pairable").action(ArgAction::SetTrue))
 		.arg(Arg::new(options::NO_CHECK_ORDER).long(options::NO_CHECK_ORDER).help("do not check that input is correctly sorted").action(ArgAction::SetTrue).conflicts_with(options::CHECK_ORDER))
-}
-
-/// Creates the `comm` builtin registration.
-pub(crate) fn comm_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Comm, SE>()
 }
 
 #[cfg(test)]

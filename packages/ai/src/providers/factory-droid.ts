@@ -7,6 +7,7 @@ import {
 } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
+import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import type { RequestPolicy } from "@oh-my-pi/pi-catalog/compat/types";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
@@ -221,8 +222,8 @@ function resolveRoute(
 	if (wire === "google-generate") {
 		route = { policy: resolveModelPolicy(model, { upstream }).request };
 	} else {
-		const resolved = resolveModelPolicy({ ...model, api: wire }, { upstream });
-		const fallbackModels = resolved.catalog.serverSideFallbackModels;
+		const spec = { ...model, api: wire };
+		const resolved = resolveModelPolicy(spec, { upstream });
 		route = {
 			policy: resolved.request,
 			inner: buildModel({
@@ -232,9 +233,7 @@ function resolveRoute(
 				compat: resolved.compat,
 				thinking: resolved.thinking,
 			} as ModelSpec<SharedWire>),
-			serverSideFallbackModels: Array.isArray(fallbackModels)
-				? fallbackModels.filter((entry): entry is string => typeof entry === "string")
-				: undefined,
+			serverSideFallbackModels: serverSideFallbackModels(spec, { upstream }),
 		};
 	}
 	routes.set(key, route);
@@ -332,7 +331,11 @@ function buildCompletionsReasoningBody(
 		case "none":
 			return {};
 		case "effort":
-			return { ...effortField(disabled ? "none" : effort), ...history };
+			return {
+				...effortField(disabled ? "none" : effort),
+				...history,
+				...(policy.completionsAllowMissingThinking ? { allow_missing_thinking: true } : {}),
+			};
 		case "forced-on":
 			// The route cannot turn thinking off; off maps to its lowest rung.
 			return { ...effortField(disabled ? "low" : effort), ...history };
@@ -392,6 +395,8 @@ interface Attempt {
 	/** Registry base model whose wire identity may serve this fast tier. */
 	baseVariant?: string;
 	baseUrl: string;
+	/** Organization the request is served for. */
+	orgId: string | undefined;
 	effort: Effort | undefined;
 	disabled: boolean;
 	sessionUuid: string;
@@ -429,7 +434,13 @@ function streamMessagesWire(a: Attempt, inner: Model<"anthropic-messages">): Ass
 			: !adaptive && (effort === "xhigh" || effort === "max")
 				? "high"
 				: effort;
-	const fallbackModels = a.route.serverSideFallbackModels;
+	// Discovery narrows the route's fallbacks to models its account can run; a
+	// model built without discovery keeps the route's full list, and a request
+	// served for another organization than discovery saw gets none.
+	const discoveredFor = a.model.factoryDroidOrgId;
+	const available =
+		discoveredFor !== undefined && discoveredFor !== a.orgId ? [] : a.model.factoryDroidRefusalFallbacks;
+	const fallbackModels = a.route.serverSideFallbackModels?.filter(model => available?.includes(model) ?? true);
 	const refusalFallbacks =
 		options?.disableServerSideFallback || !fallbackModels?.length
 			? undefined
@@ -745,6 +756,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				model: scope.model,
 				route,
 				baseVariant: registry?.entitlement.baseVariant,
+				orgId: scope.orgId,
 				baseUrl: scope.baseUrl,
 				...selectEffort(scope.model, registry, options),
 				sessionUuid,

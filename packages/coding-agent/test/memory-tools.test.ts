@@ -761,32 +761,81 @@ describe("retain.execute (Mnemopi backend)", () => {
 });
 
 describe("global memory scope exposure", () => {
+	beforeEach(() => {
+		registeredState = undefined;
+	});
+
+	afterEach(() => {
+		registeredState = undefined;
+	});
+
 	const offersScope = (tool: MemoryRetainTool | LearnTool) => ({
 		schema: JSON.stringify(tool.parameters.toJsonSchema()).includes('"scope"'),
 		prompt: tool.description.includes("scope: global"),
 	});
-
-	it.each([
-		["mnemopi", { "mnemopi.scoping": "per-project" }, false],
-		["mnemopi", { "mnemopi.scoping": "per-project-tagged" }, true],
-		["mnemopi", { "mnemopi.scoping": "global" }, true],
-		["hindsight", { "hindsight.scoping": "per-project-tagged" }, false],
-		["hindsight", { "hindsight.globalScope": true, "hindsight.scoping": "per-project" }, false],
-		["hindsight", { "hindsight.globalScope": true, "hindsight.scoping": "per-project-tagged" }, true],
-		["hindsight", { "hindsight.globalScope": true, "hindsight.scoping": "global" }, true],
-		["local", { "hindsight.globalScope": true, "mnemopi.scoping": "per-project-tagged" }, false],
-	] as const)("%s backend with %j offers scope: %p", (backend, overrides, offered) => {
-		const settings = Settings.isolated({
+	const expectOffered = (session: ToolSession, offered: boolean) => {
+		expect(offersScope(LearnTool.createIf(session)!)).toEqual({ schema: offered, prompt: offered });
+		expect(offersScope(MemoryRetainTool.createIf(session)!)).toEqual({ schema: offered, prompt: offered });
+	};
+	const memorySettings = (backend: "mnemopi" | "hindsight" | "local", overrides: Record<string, unknown> = {}) =>
+		Settings.isolated({
 			"memory.backend": backend,
 			"hindsight.apiUrl": "http://localhost:8888",
 			"autolearn.enabled": true,
 			...overrides,
 		});
+
+	it.each([
+		["per-project", false],
+		["per-project-tagged", true],
+		["global", true],
+	] as const)("mnemopi backend with %s scoping offers scope: %p", (scoping, offered) => {
+		expectOffered(makeSession(memorySettings("mnemopi", { "mnemopi.scoping": scoping })), offered);
+	});
+
+	it("local backend never offers scope", () => {
+		const session = makeSession(
+			memorySettings("local", { "hindsight.globalScope": true, "mnemopi.scoping": "per-project-tagged" }),
+		);
+		expect(offersScope(LearnTool.createIf(session)!)).toEqual({ schema: false, prompt: false });
+	});
+
+	it.each([
+		["off", { scoping: "per-project-tagged" }, false],
+		["on under per-project", { scoping: "per-project", globalScope: true }, false],
+		["on under per-project-tagged", { scoping: "per-project-tagged", globalScope: true }, true],
+		["on under global", { scoping: "global", globalScope: true }, true],
+	] as const)("hindsight state with global scope %s offers scope: %p", (_label, config, offered) => {
+		const settings = memorySettings("hindsight");
+		registerState(new HindsightApi({ baseUrl: "http://localhost:8888" }), settings, { config });
+		expectOffered(makeSession(settings), offered);
+	});
+
+	it("follows the Hindsight state's config, not live settings, so it never offers a scope the queue rejects", async () => {
+		// A keep-alive subagent alias keeps the config its parent had when it started; the user enabled
+		// hindsight.globalScope afterwards.
+		const settings = memorySettings("hindsight", {
+			"hindsight.globalScope": true,
+			"hindsight.scoping": "per-project-tagged",
+		});
+		registerState(new HindsightApi({ baseUrl: "http://localhost:8888" }), settings, {
+			config: { scoping: "per-project-tagged", globalScope: false },
+		});
 		const session = makeSession(settings);
-		expect(offersScope(LearnTool.createIf(session)!)).toEqual({ schema: offered, prompt: offered });
-		if (backend !== "local") {
-			expect(offersScope(MemoryRetainTool.createIf(session)!)).toEqual({ schema: offered, prompt: offered });
-		}
+
+		expectOffered(session, false);
+		await expect(
+			MemoryRetainTool.createIf(session)!.execute("alias-global", {
+				items: [{ content: "cross-project fact", scope: "global" }],
+			}),
+		).rejects.toThrow(/set hindsight\.globalScope to true/);
+	});
+
+	it("offers no Hindsight scope before the session's Hindsight state exists", () => {
+		expectOffered(
+			makeSession(memorySettings("hindsight", { "hindsight.globalScope": true, "hindsight.scoping": "global" })),
+			false,
+		);
 	});
 
 	it("requires write approval only for global writes", () => {

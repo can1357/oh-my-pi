@@ -41,7 +41,7 @@ import {
 	shouldDisableReasoning,
 	toReasoningEffort,
 } from "@oh-my-pi/pi-tui/thinking";
-import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import type { EditModeSetting } from "../edit/settings";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
@@ -57,6 +57,95 @@ import {
 } from "./settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
 
+/** Whether `model` takes effort per message, so changing it mid-conversation keeps the cached prefix. */
+function takesPerMessageEffort(model: Model): boolean {
+	const { compat } = model;
+	return compat !== undefined && "supportsPerMessageEffort" in compat && compat.supportsPerMessageEffort === true;
+}
+
+/**
+ * Explicit thinking suffix of the first configured role that resolves to `model`
+ * among `availableModels`; what a temporary picker applies when it selects that model.
+ */
+export function roleThinkingLevelForModel(
+	settings: Settings,
+	availableModels: Model[],
+	model: Model,
+): ConfiguredThinkingLevel | undefined {
+	if (availableModels.length === 0) return undefined;
+	const matchPreferences = getModelMatchPreferences(settings);
+	for (const role of getKnownRoleIds(settings)) {
+		const roleValue = settings.getModelRole(role);
+		if (!roleValue) continue;
+		const resolved = resolveModelRoleValue(roleValue, availableModels, { settings, matchPreferences });
+		if (!resolved.explicitThinkingLevel || resolved.thinkingLevel === undefined || !resolved.model) continue;
+		if (modelsAreEqual(resolved.model, model)) return resolved.thinkingLevel;
+	}
+	return undefined;
+}
+
+/**
+ * Role-model cycle in `roleOrder` for a session running `currentModel` whose
+ * newest recorded model change used `lastRole`; see {@link ModelControls.getRoleModelCycle}.
+ */
+export function resolveRoleModelCycle(
+	settings: Settings,
+	availableModels: Model[],
+	currentModel: Model | undefined,
+	lastRole: string | undefined,
+	roleOrder: readonly string[],
+): RoleModelCycle | undefined {
+	if (availableModels.length === 0 || !currentModel) return undefined;
+	const matchPreferences = getModelMatchPreferences(settings);
+	const models: ResolvedRoleModel[] = [];
+	for (const role of roleOrder) {
+		const roleModelStr =
+			role === "default"
+				? (settings.getModelRole("default") ?? `${currentModel.provider}/${currentModel.id}`)
+				: settings.getModelRole(role);
+		if (!roleModelStr) continue;
+		const resolved = resolveModelRoleValue(roleModelStr, availableModels, { settings, matchPreferences });
+		if (!resolved.model) continue;
+		models.push({
+			role,
+			model: resolved.model,
+			thinkingLevel: resolved.thinkingLevel,
+			explicitThinkingLevel: resolved.explicitThinkingLevel,
+		});
+	}
+	if (models.length === 0) return undefined;
+
+	// Trust the recorded role only while its resolved model still IS the
+	// active model. A model switch through another surface (alt+m, retry
+	// fallback, /model) or a role re-configuration leaves the recorded role
+	// pointing at a model the session no longer runs; cycling from that
+	// stale slot lands on the wrong neighbor and reads as a skipped entry.
+	let currentIndex = lastRole ? models.findIndex(entry => entry.role === lastRole) : -1;
+	if (currentIndex !== -1 && !modelsAreEqual(models[currentIndex].model, currentModel)) currentIndex = -1;
+	if (currentIndex === -1) currentIndex = models.findIndex(entry => modelsAreEqual(entry.model, currentModel));
+	if (currentIndex === -1) currentIndex = 0;
+	return { models, currentIndex };
+}
+
+/**
+ * Effective wire service tier for a request to `model` under the per-family
+ * `tiers`. Fireworks models take the Priority serving path only when the
+ * Providers › Fireworks Tier setting is `"priority"` (and never for `-fast`
+ * variants, whose Fast serving path is mutually exclusive with Priority).
+ */
+export function serviceTierForModel(
+	settings: Settings,
+	model: Model,
+	tiers: ServiceTierByFamily,
+): ServiceTier | undefined {
+	if (model.provider === "fireworks") {
+		return cfgProvidersFireworksTier.get(settings) === "priority" && !isFireworksFastModelId(model.id)
+			? "priority"
+			: undefined;
+	}
+	return resolveModelServiceTier(tiers, model);
+}
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface ModelControlsHost {
 	agent: Agent;
@@ -67,8 +156,8 @@ export interface ModelControlsHost {
 	model(): Model | undefined;
 	sessionId(): string;
 	promptGeneration(): number;
-	resolveActiveEditMode(): EditMode;
-	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
+	resolveActiveEditMode(): EditModeSetting;
+	syncAfterModelChange(previousEditMode: EditModeSetting): Promise<void>;
 	setModelWithProviderSessionReset(model: Model, selection?: "explicit" | "automatic"): Promise<void>;
 	clearActiveRetryFallback(): void;
 	clearInheritedProviderPromptCacheKey(): void;
@@ -211,23 +300,7 @@ export class ModelControls {
 	}
 
 	resolveTemporaryModelThinkingLevel(model: Model): ConfiguredThinkingLevel | undefined {
-		const availableModels = this.#host.modelRegistry.getAvailable();
-		if (availableModels.length === 0) return undefined;
-
-		const matchPreferences = getModelMatchPreferences(this.#host.settings);
-		for (const role of getKnownRoleIds(this.#host.settings)) {
-			const roleValue = this.#host.settings.getModelRole(role);
-			if (!roleValue) continue;
-
-			const resolved = resolveModelRoleValue(roleValue, availableModels, {
-				settings: this.#host.settings,
-				matchPreferences,
-			});
-			if (!resolved.explicitThinkingLevel || resolved.thinkingLevel === undefined || !resolved.model) continue;
-			if (modelsAreEqual(resolved.model, model)) return resolved.thinkingLevel;
-		}
-
-		return undefined;
+		return roleThinkingLevelForModel(this.#host.settings, this.#host.modelRegistry.getAvailable(), model);
 	}
 
 	async setModel(
@@ -336,52 +409,14 @@ export class ModelControls {
 	 */
 	getRoleModelCycle(roleOrder: readonly string[]): RoleModelCycle | undefined {
 		const availableModels = this.#host.modelRegistry.getAvailable();
-		if (availableModels.length === 0) return undefined;
-
-		const currentModel = this.#model;
-		if (!currentModel) return undefined;
-		const matchPreferences = getModelMatchPreferences(this.#host.settings);
-		const models: ResolvedRoleModel[] = [];
-
-		for (const role of roleOrder) {
-			const roleModelStr =
-				role === "default"
-					? (this.#host.settings.getModelRole("default") ?? `${currentModel.provider}/${currentModel.id}`)
-					: this.#host.settings.getModelRole(role);
-			if (!roleModelStr) continue;
-
-			const resolved = resolveModelRoleValue(roleModelStr, availableModels, {
-				settings: this.#host.settings,
-				matchPreferences,
-			});
-			if (!resolved.model) continue;
-
-			models.push({
-				role,
-				model: resolved.model,
-				thinkingLevel: resolved.thinkingLevel,
-				explicitThinkingLevel: resolved.explicitThinkingLevel,
-			});
-		}
-
-		if (models.length === 0) return undefined;
-
-		// Trust the recorded role only while its resolved model still IS the
-		// active model. A model switch through another surface (alt+m, retry
-		// fallback, /model) or a role re-configuration leaves the recorded role
-		// pointing at a model the session no longer runs; cycling from that
-		// stale slot lands on the wrong neighbor and reads as a skipped entry.
-		const lastRole = this.#host.sessionManager.getLastModelChangeRole();
-		let currentIndex = lastRole ? models.findIndex(entry => entry.role === lastRole) : -1;
-		if (currentIndex !== -1 && !modelsAreEqual(models[currentIndex].model, currentModel)) {
-			currentIndex = -1;
-		}
-		if (currentIndex === -1) {
-			currentIndex = models.findIndex(entry => modelsAreEqual(entry.model, currentModel));
-		}
-		if (currentIndex === -1) currentIndex = 0;
-
-		return { models, currentIndex };
+		if (availableModels.length === 0 || !this.#model) return undefined;
+		return resolveRoleModelCycle(
+			this.#host.settings,
+			availableModels,
+			this.#model,
+			this.#host.sessionManager.getLastModelChangeRole(),
+			roleOrder,
+		);
 	}
 
 	/**
@@ -685,6 +720,37 @@ export class ModelControls {
 			this.#thinkingLevelCeiling,
 		);
 		if (effort === undefined) return;
+		this.#resolveAutoThinkingLevel(effort);
+	}
+
+	/**
+	 * Apply a `chillax` keyword in `promptText`: drop effort to the model's
+	 * lowest supported level from the next request on. Only models that take
+	 * per-message effort qualify — they switch effort between steps without
+	 * rewriting the cached prefix, so a steer relaxes the running turn. In auto
+	 * mode the floor is this turn's resolution (later prompts reclassify); a
+	 * pinned level is re-pinned lower, never raised, and off stays off.
+	 * @returns Whether the keyword applied, so auto classification must not run for the turn.
+	 */
+	applyChillax(promptText: string): boolean {
+		if (!this.#host.magicKeywordEnabled("chillax") || !containsMagicKeyword(promptText, "chillax")) return false;
+		const model = this.#model;
+		if (!model?.reasoning || model.thinking?.unverified || !takesPerMessageEffort(model)) return false;
+		const floor = getSupportedEfforts(model)[0];
+		if (floor === undefined) return false;
+		if (this.#autoThinking) {
+			this.#resolveAutoThinkingLevel(floor);
+			return true;
+		}
+		const current = toReasoningEffort(this.#thinkingLevel);
+		if (current !== undefined && THINKING_EFFORTS.indexOf(floor) < THINKING_EFFORTS.indexOf(current)) {
+			this.setThinkingLevel(floor);
+		}
+		return true;
+	}
+
+	/** Publish `effort` as the turn's auto resolution; the transcript records only a changed level. */
+	#resolveAutoThinkingLevel(effort: Effort): void {
 		const shouldPersistResolution = this.#thinkingLevel !== effort;
 		this.#autoResolvedLevel = effort;
 		this.#thinkingLevel = effort;
@@ -757,7 +823,7 @@ export class ModelControls {
 	}
 
 	#realizesFastTier(model: Model, tiers: ServiceTierByFamily): boolean {
-		const tier = this.#serviceTierFor(model, tiers);
+		const tier = serviceTierForModel(this.#host.settings, model, tiers);
 		return tier === "ultrafast" ? shouldSendServiceTier(tier, model) : realizesPriorityServiceTier(tier, model);
 	}
 
@@ -769,16 +835,7 @@ export class ModelControls {
 	 * per-family tier map down to the entry for its family.
 	 */
 	effectiveServiceTier(model: Model | undefined = this.#model): ServiceTier | undefined {
-		return model ? this.#serviceTierFor(model, this.#serviceTierByFamily) : undefined;
-	}
-
-	#serviceTierFor(model: Model, tiers: ServiceTierByFamily): ServiceTier | undefined {
-		if (model.provider === "fireworks") {
-			return cfgProvidersFireworksTier.get(this.#host.settings) === "priority" && !isFireworksFastModelId(model.id)
-				? "priority"
-				: undefined;
-		}
-		return resolveModelServiceTier(tiers, model);
+		return model ? serviceTierForModel(this.#host.settings, model, this.#serviceTierByFamily) : undefined;
 	}
 
 	/** The live per-family tier map, or `null` when empty (for session persistence). */

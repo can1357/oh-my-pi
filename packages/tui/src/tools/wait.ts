@@ -144,8 +144,8 @@ export interface CoordinationDetails {
 	from?: string;
 	to?: string;
 	receipts?: IrcDeliveryReceipt[];
-	/** Message consumed by `wait`. */
-	waited?: IrcMessage | null;
+	/** Messages consumed by `wait`, oldest first. */
+	waited?: IrcMessage[];
 	jobs?: JobSnapshot[];
 	cancelled?: { id: string; status: CancelStatus }[];
 	/** Running subagents not represented by a job row in this result. */
@@ -168,7 +168,7 @@ const PREVIEW_LINE_WIDTH = 80;
 function statusToIcon(status: JobSnapshot["status"]): ToolUIStatus {
 	switch (status) {
 		case "completed":
-			return "done";
+			return "success";
 		case "failed":
 			return "error";
 		case "cancelled":
@@ -377,7 +377,7 @@ function jobsRenderResult(
 	const widgetJobs = sortedJobs.filter(job => job.status === "running" && job.widget?.state === "live");
 	const compactJobLines = (width: number, live: boolean): string[] => {
 		const lines: string[] = [];
-		const indent = " ".repeat(visibleWidth(formatStatusIcon("done", uiTheme)) + 1);
+		const indent = " ".repeat(visibleWidth(formatStatusIcon("success", uiTheme)) + 1);
 		// Failures sort first, so the cap never hides one behind successes;
 		// Ctrl+O lists the rest.
 		for (const job of settledJobs.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS)) {
@@ -838,27 +838,30 @@ function describeJobsResult(
 	};
 }
 
-/** Received-message view: sender head, terminal-clocked age, markdown body. */
-function describeMessage(
-	from: string,
-	ts: number | undefined,
-	bodyText: string,
-	meta: readonly string[],
-): NativeToolView {
-	const head: TspSpan[] = [span(`IRC ← ${plainText(from)}`, "toolTitle strong")];
-	for (const part of meta) head.push(span(` ${part}`, "muted"));
+/** One received message: sender (when the card holds several), terminal-clocked age, markdown body. */
+function describeMessage(msg: IrcMessage, single: boolean): NativeNode[] {
+	const sender = single
+		? []
+		: [text([span(plainText(msg.from), "toolTitle strong"), ...(msg.replyTo ? [span(" reply", "muted")] : [])])];
+	const age = msg.ts
+		? [text([span("received", "dim")]), elapsed(Date.now() - msg.ts), text([span("ago", "dim")])]
+		: [];
+	const head = [...sender, ...age];
+	return compact([head.length > 0 ? row(head, { gap: "xs" }) : undefined, msg.body.trim() ? md(msg.body) : undefined]);
+}
+
+/** Received-messages view: senders head, then each message oldest first. */
+function describeMessages(messages: readonly IrcMessage[]): NativeToolView {
+	const single = messages.length === 1;
+	const senders = [...new Set(messages.map(msg => plainText(msg.from)))];
+	const head: TspSpan[] = [span(`IRC ← ${senders.join(", ")}`, "toolTitle strong")];
+	if (!single) head.push(span(` ${messages.length} messages`, "muted"));
+	else if (messages[0]?.replyTo) head.push(span(" reply", "muted"));
 	return {
 		head,
 		tone: "info",
-		preview: { lines: BODY_LINES_COLLAPSED + 1 },
-		body: compact([
-			ts
-				? row([text([span("received", "dim")]), elapsed(Date.now() - ts), text([span("ago", "dim")])], {
-						gap: "xs",
-					})
-				: undefined,
-			bodyText.trim() ? md(bodyText) : undefined,
-		]),
+		preview: { lines: (BODY_LINES_COLLAPSED + 1) * messages.length },
+		body: messages.flatMap(msg => describeMessage(msg, single)),
 	};
 }
 
@@ -890,8 +893,8 @@ export const waitToolRenderer = {
 				};
 			}
 			const waited = details?.waited;
-			if (!waited) return describeJobsResult(result, options.isPartial);
-			return describeMessage(waited.from, waited.ts, waited.body, waited.replyTo ? ["reply"] : []);
+			if (!waited?.length) return describeJobsResult(result, options.isPartial);
+			return describeMessages(waited);
 		});
 	},
 	renderResult(
@@ -911,21 +914,23 @@ export const waitToolRenderer = {
 			);
 		}
 		const waited = result.details?.waited;
-		if (!waited) return jobsRenderResult(result, options, uiTheme);
+		if (!waited?.length) return jobsRenderResult(result, options, uiTheme);
 		return createCachedComponent(
 			() => options.expanded,
 			(width, expanded) =>
-				[
-					renderStatusLine(
-						{
-							iconOverride: ircGlyph(uiTheme),
-							title: `IRC ${uiTheme.nav.back} ${replaceTabs(waited.from)}`,
-							meta: [messageAge(waited.ts), ...(waited.replyTo ? ["reply"] : [])],
-						},
-						uiTheme,
-					),
-					...bodyLines(waited.body, expanded, uiTheme, { indent: "  " }),
-				].map(line => truncateToWidth(line, width, Ellipsis.Unicode)),
+				waited
+					.flatMap(msg => [
+						renderStatusLine(
+							{
+								iconOverride: ircGlyph(uiTheme),
+								title: `IRC ${uiTheme.nav.back} ${replaceTabs(msg.from)}`,
+								meta: [messageAge(msg.ts), ...(msg.replyTo ? ["reply"] : [])],
+							},
+							uiTheme,
+						),
+						...bodyLines(msg.body, expanded, uiTheme, { indent: "  " }),
+					])
+					.map(line => truncateToWidth(line, width, Ellipsis.Unicode)),
 		);
 	},
 } satisfies ToolRenderer<object, CoordinationDetails>;

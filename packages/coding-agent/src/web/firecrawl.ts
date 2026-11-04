@@ -10,7 +10,7 @@
  */
 import { type FetchImpl, getEnvApiKey } from "@oh-my-pi/pi-ai";
 import { fetchWithRetry } from "@oh-my-pi/pi-utils";
-import type { AgentStorage } from "../session/agent-storage";
+import type { AgentStorageApi } from "../session/agent-storage";
 import { findCredential, withHardTimeout } from "./search/providers/utils";
 
 const FIRECRAWL_DEFAULT_BASE_URL = "https://api.firecrawl.dev/v2";
@@ -72,7 +72,7 @@ export interface FirecrawlScrapeOptions {
 	fetch?: FetchImpl;
 }
 
-export function findFirecrawlApiKey(storage: AgentStorage | null | undefined): string | null {
+export function findFirecrawlApiKey(storage: AgentStorageApi | null | undefined): string | null {
 	return findCredential(storage, getEnvApiKey("firecrawl"), "firecrawl");
 }
 
@@ -99,7 +99,7 @@ function parseFirecrawlErrorResponse(statusCode: number, responseText: string): 
 export async function scrapeWithFirecrawl(
 	url: string,
 	options: FirecrawlScrapeOptions,
-	storage: AgentStorage | null | undefined,
+	storage: AgentStorageApi | null | undefined,
 ): Promise<string | null> {
 	const apiKey = findFirecrawlApiKey(storage);
 	if (!apiKey) {

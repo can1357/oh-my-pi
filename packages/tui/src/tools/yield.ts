@@ -166,7 +166,7 @@ function renderSubmission(s: Submission, options: RenderResultOptions, theme: Th
 			const failed = s.settled && s.error !== undefined;
 			const size = sizeMeta(s.data);
 			const status: StatusLineOptions = {
-				icon: !s.settled ? (running ? "running" : "pending") : failed ? "error" : "done",
+				icon: !s.settled ? (running ? "running" : "pending") : failed ? "error" : "success",
 				spinnerFrame: options.spinnerFrame,
 				title: TITLE,
 				description: s.target,
