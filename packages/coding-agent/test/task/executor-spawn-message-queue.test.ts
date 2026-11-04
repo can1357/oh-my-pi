@@ -112,7 +112,7 @@ it("agent:// write at 0 ms after child creation queues behind the real task brie
 			path: "agent://SpawnChild",
 			content: "Spawn later message",
 		});
-		expect(receipt.isError).not.toBe(true);
+		expect(receipt.isError, JSON.stringify(receipt)).not.toBe(true);
 		return created;
 	});
 	const result = await runSubprocess({
