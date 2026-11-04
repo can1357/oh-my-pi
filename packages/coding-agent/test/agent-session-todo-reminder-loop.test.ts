@@ -295,6 +295,43 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		expect(continueSpy).not.toHaveBeenCalled();
 	});
 
+	it.each([
+		// A closing status paragraph after a permission request does not answer it (#15986).
+		"This is implementation scope, so I did not start it myself. If you confirm, I'll hand these tickets to subagents.\n\nRepository unchanged, no commits.",
+		"Revert them or keep them in the working tree? Separately, tell me whether to commit the docs.",
+		"The migration is staged. Once you allow it, I'll run the backfill.",
+		"Blocked on credentials. Then message me, I'll continue from step 1.",
+		// Non-English: a question one sentence from the end, followed by an imperative the
+		// detector has no lexicon for.
+		"Три агента остановлены, правки не проверены. Откатить их или оставить в рабочей копии? Отдельно скажите, коммитить ли документацию.",
+		"Откатить их или оставить в рабочей копии?\nОтдельно скажите, коммитить ли документацию.",
+	])("does not resume when the closing paragraph hands a decision to the user: %s", async text => {
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		emitTextOnlyStop(text);
+		await session.waitForIdle();
+
+		expect(reminderAttempts).toEqual([]);
+		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		"**What's next?**\n\nI'll continue with slice 82.",
+		"Which configuration should this use? Use the existing default; the todo items still need work.",
+		"Let me continue with slice 82.",
+		// A one-line paragraph after a question may be its answer.
+		"Do you need to update anything?\n\nNo, the configuration remains compatible.",
+		"Finally, answer validation is complete.",
+	])("still resumes when no request is left open: %s", async text => {
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		emitTextOnlyStop(text);
+		await session.waitForIdle();
+
+		expect(reminderAttempts).toEqual([1]);
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+	});
+
 	it("still resumes unfinished work after a question-headed status list", async () => {
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 

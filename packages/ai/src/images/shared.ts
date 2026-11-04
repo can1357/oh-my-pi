@@ -50,7 +50,7 @@ export function errorMessage(rawText: string): string {
 	}
 }
 
-async function parseImageApiResponse(model: Model, response: Response): Promise<unknown> {
+export async function parseImageApiResponse(model: Model, response: Response): Promise<unknown> {
 	const text = await response.text();
 	if (!response.ok) {
 		throw new ImageApiError(

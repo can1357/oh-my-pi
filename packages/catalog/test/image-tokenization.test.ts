@@ -24,6 +24,16 @@ const GPT_PATCH: ImageTokenization = {
 	original: { maxEdge: 6000, patchBudget: 10_000 },
 };
 
+/** DeepSeek V4.1 Flash's vision config: 14px patches merged 3×3, 1,024-token cap, 544² floor. */
+const DEEPSEEK_PATCH: ImageTokenization = {
+	regime: "deepseek-patch",
+	verified: true,
+	patchSize: 14,
+	downsample: 3,
+	maxTokens: 1024,
+	minPixels: 295_936,
+};
+
 function ruleFor(provider: string, id: string): ImageTokenization {
 	const rule = resolveImageTokenization({ provider, id });
 	if (!rule) throw new Error(`no image rule for ${provider}/${id}`);
@@ -246,6 +256,29 @@ describe("resolveImageTokenization", () => {
 		expect(resolveImageTokenization(model)).toEqual(STANDARD);
 		expect(resolveImageTokenization({ ...model, identity: { ...model.identity, revision: "4.7.0" } })).toEqual(HIRES);
 	});
+
+	it("prices DeepSeek V4.1 Flash by its own vision config on every host, and V4.0 by the wire", () => {
+		for (const [provider, id] of [
+			["openrouter", "deepseek/deepseek-v4.1-flash-1017"],
+			["openrouter", "deepseek/deepseek-v4.1-flash"],
+			["deepseek", "deepseek-flash"],
+			// DeepSeek's API serves the retired preview id with the current Flash.
+			["deepseek", "deepseek-v4-flash-vision-exp"],
+			["fireworks", "deepseek-v4.1-flash"],
+			["together", "deepseek-ai/DeepSeek-V4.1-Flash"],
+		] as const) {
+			expect(resolveImageTokenization(getBundledModel(provider, id))).toEqual(DEEPSEEK_PATCH);
+		}
+		// Hosts still running the V4.0 vision preview keep their wire fallback.
+		expect(resolveImageTokenization(getBundledModel("openrouter", "deepseek/deepseek-v4-flash-vision-exp"))).toEqual(
+			HIRES_FALLBACK,
+		);
+		expect(resolveImageTokenization(getBundledModel("fireworks", "deepseek-v4-flash-vision-exp"))).toEqual(GPT_PATCH);
+		// An unmeasured later Flash release is not priced, let alone verified, by V4.1's rule.
+		expect(
+			resolveImageTokenization({ provider: "fireworks", api: "openai-completions", id: "deepseek-v4.2-flash" }),
+		).toEqual(GPT_PATCH);
+	});
 });
 
 describe("imageTokens", () => {
@@ -281,6 +314,37 @@ describe("imageTokens", () => {
 		expect(imageTokens(STANDARD, { width: 2999, height: 3000 })).toBe(39 * 39);
 		expect(imageTokens({ regime: "fixed", tokens: 1120 }, { width: 2048, height: 2048 })).toBe(1120);
 	});
+
+	it("matches DeepSeek V4.1 Flash billing measured through OpenRouter", () => {
+		// Input-token delta over a text-only request, identical on Fireworks and
+		// DeepInfra: upscaled to the 544² floor, then 42px cells up to the cap.
+		const measured: [width: number, height: number, tokens: number][] = [
+			[256, 256, 184],
+			[512, 512, 184],
+			[784, 784, 382],
+			[1024, 1024, 652],
+			[1280, 1280, 994],
+			[1568, 1562, 994],
+			[1568, 784, 743],
+			[784, 1568, 762],
+			[2576, 1716, 977],
+			[3000, 1000, 992],
+			[4000, 4000, 994],
+		];
+		for (const [width, height, tokens] of measured) {
+			expect(imageTokens(DEEPSEEK_PATCH, { width, height })).toBe(tokens);
+		}
+	});
+
+	it("resizes DeepSeek images like the reference processor at extreme aspect ratios", () => {
+		// Values from `plan_image_grid` in DeepSeek's `inference/image_processor.py`.
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 1, height: 8192 })).toBe(1024);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 8192, height: 1 })).toBe(1024);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 64, height: 8192 })).toBe(590);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 8192, height: 64 })).toBe(396);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 100, height: 2000 })).toBe(234);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 2000, height: 100 })).toBe(179);
+	});
 });
 
 function isPositiveNumber(value: unknown): boolean {
@@ -301,6 +365,9 @@ function payloadProblems(payload: unknown): string[] {
 		case "anthropic-patch":
 			requirePositive(payload, "maxEdge", "");
 			requirePositive(payload, "maxTokens", "");
+			break;
+		case "deepseek-patch":
+			for (const field of ["patchSize", "downsample", "maxTokens", "minPixels"]) requirePositive(payload, field, "");
 			break;
 		case "openai-patch":
 			requirePositive(payload, "multiplier", "");

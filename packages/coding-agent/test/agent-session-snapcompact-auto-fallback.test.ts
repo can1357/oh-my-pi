@@ -132,6 +132,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		authStorage.keys.setRuntime("aimlapi", "test-key");
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		authStorage.keys.setRuntime("openai", "test-key");
+		authStorage.keys.setRuntime("venice", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -148,6 +149,24 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	it("uses soft compaction when snapcompact is unavailable for the active model", async () => {
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "aimlapi", id: "alibaba/qwen3-coder-480b-a35b-instruct" },
+		});
+		session = harness.session;
+		harness.triggerThreshold();
+
+		const result = await harness.awaitCompactionEnd();
+		expect(result).toEqual({ action: "context-full", errorMessage: undefined });
+		expect(compactionModule.compact).toHaveBeenCalled();
+		expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")).toMatchObject({
+			type: "compaction",
+			summary: "compacted",
+		});
+	});
+
+	it("uses soft compaction when the active model's wire strips image input", async () => {
+		// Declares image input, but `compat.stripImageInput` replaces every image
+		// with a placeholder on the wire, so snapcompact frames would never reach it.
+		const harness = await createHarness(modelRegistry, {
+			activeModel: { provider: "venice", id: "deepseek-v4-1-flash" },
 		});
 		session = harness.session;
 		harness.triggerThreshold();

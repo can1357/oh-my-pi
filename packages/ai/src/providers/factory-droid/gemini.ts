@@ -1,3 +1,4 @@
+import { resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import type { RequestPolicy } from "@oh-my-pi/pi-catalog/compat/types";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
@@ -15,6 +16,7 @@ import { notifyProviderResponse } from "../../utils/provider-response";
 import { dereferenceJsonSchema, normalizeSchemaForFactoryDroid, toolWireSchema } from "../../utils/schema";
 import {
 	extractGoogleErrorMessage,
+	FunctionCallOrder,
 	googleStreamChunkError,
 	GoogleTextBlocks,
 	mapGoogleUsage,
@@ -24,6 +26,7 @@ import {
 } from "../google-shared";
 import type { GenerateContentResponse, Part } from "../google-types";
 import { transformMessages } from "../transform-messages";
+import { factoryDroidToolNamesByWire, sanitizeFactoryDroidToolName } from "./tool-names";
 
 /** Factory's Gemini endpoint speaks native generateContent SSE at `/api/llm/g/v1/generate`. */
 
@@ -38,35 +41,6 @@ function geminiThinkingLevel(effort: string | undefined, supportsMedium: boolean
 		default:
 			return "HIGH";
 	}
-}
-
-/**
- * The CLI sanitizes tool names to `[a-zA-Z0-9_-]`; names longer than 64 chars
- * are truncated and suffixed with `_` + an 8-char sha256. Applied to
- * declarations and replayed functionCall/functionResponse names.
- */
-function sanitizeFactoryDroidToolName(name: string): string {
-	const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, "_");
-	if (sanitized.length <= 64) return sanitized;
-	return `${sanitized.slice(0, 64)}_${Bun.SHA256.hash(sanitized, "hex").slice(0, 8)}`;
-}
-
-/**
- * Wire name -> caller tool name for the declared tools, so returned calls
- * dispatch to the tool that was advertised. Two tools sharing one wire name
- * could not be told apart, so that request is rejected.
- */
-function factoryDroidToolNamesByWire(tools: Tool[] | undefined): Map<string, string> {
-	const names = new Map<string, string>();
-	for (const tool of tools ?? []) {
-		const wire = sanitizeFactoryDroidToolName(tool.name);
-		const existing = names.get(wire);
-		if (existing !== undefined && existing !== tool.name) {
-			throw new Error(`Factory Gemini tool names "${existing}" and "${tool.name}" both encode as "${wire}"`);
-		}
-		names.set(wire, tool.name);
-	}
-	return names;
 }
 
 /** Finish reasons the CLI reports as a content-filter block (with stopDetails). */
@@ -112,11 +86,29 @@ const GOOGLE_APIS: Record<string, true> = {
 	"google-gemini-cli": true,
 };
 
+/** Whether Factory serves `model` on this Gemini generate wire rather than through an inner Anthropic or OpenAI model. */
+export function isFactoryDroidGeminiWire(model: Pick<Model, "id" | "requestModelId">): boolean {
+	return resolveFactoryDroidPolicy(model)?.wire === "google-generate";
+}
+
+/**
+ * Whether {@link adoptFactoryReplay} may keep `turn`'s opaque reasoning payload
+ * (thinking and call signatures): only a Google-origin turn's survive.
+ */
+export function keepsFactoryGeminiReasoning(turn: Pick<AssistantMessage, "api">): boolean {
+	return GOOGLE_APIS[turn.api] === true;
+}
+
 /**
  * Apply Factory's replay provenance before canonical normalization: only
  * signed, Google-origin thinking and Google-origin call signatures survive;
  * everything else is DROPPED (never demoted to visible text). A text block
  * keeps its signature only when this model signed it.
+ *
+ * Tool-call names are encoded to their wire form here, before
+ * `transformMessages` drops calls whose names no provider could declare: the
+ * proxy accepts any caller tool name once sanitized, so a declared
+ * `my.tool/name` call must survive replay.
  *
  * Only Google-origin turns are stamped as the target, so `transformMessages`
  * keeps their surviving signatures verbatim instead of demoting/stripping them
@@ -126,9 +118,9 @@ const GOOGLE_APIS: Record<string, true> = {
  * Responses-origin call), and with its reasoning already gone there is
  * nothing left for a cross-model pass to demote.
  */
-function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent">): Message {
+export function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent">): Message {
 	if (message.role !== "assistant") return message;
-	const googleOrigin = GOOGLE_APIS[message.api] === true;
+	const googleOrigin = keepsFactoryGeminiReasoning(message);
 	const sameModel = googleOrigin && message.provider === model.provider && message.model === model.id;
 	const content: AssistantMessage["content"] = [];
 	for (const block of message.content) {
@@ -137,8 +129,9 @@ function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent"
 			if (googleOrigin && block.thinking.trim() && signature && signature !== SKIP_THOUGHT_SIGNATURE) {
 				content.push(block);
 			}
-		} else if (block.type === "toolCall" && !googleOrigin && block.thoughtSignature) {
-			content.push({ ...block, thoughtSignature: undefined });
+		} else if (block.type === "toolCall") {
+			const thoughtSignature = googleOrigin ? block.thoughtSignature : undefined;
+			content.push({ ...block, name: sanitizeFactoryDroidToolName(block.name), thoughtSignature });
 		} else if (block.type === "text" && !sameModel && block.textSignature) {
 			content.push({ ...block, textSignature: undefined });
 		} else {
@@ -161,7 +154,9 @@ function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent"
  *   text carries the signature Gemini put on it.
  * - Tool calls replay as `functionCall` parts carrying their
  *   `thoughtSignature`; consecutive tool results group into ONE user content,
- *   because the proxy 400s when a call turn's response part count mismatches.
+ *   because the proxy 400s when a call turn's response part count mismatches,
+ *   and sort back into call order, because Gemini pairs id-less responses by
+ *   position.
  * - Tool names are sanitized to the CLI's `[a-zA-Z0-9_-]` shape on
  *   declarations and on replayed call/response names.
  * - After the latest user turn containing a non-response part, function calls
@@ -176,6 +171,7 @@ function toGeminiContents(
 	systemInstruction?: { parts: Part[] };
 } {
 	const contents: Array<{ role: "user" | "model"; parts: Part[] }> = [];
+	const callOrder = new FunctionCallOrder();
 	const messages = transformMessages(
 		context.messages.map(message => adoptFactoryReplay(message, model)),
 		model,
@@ -203,8 +199,9 @@ function toGeminiContents(
 				} else if (block.type === "thinking" && block.thinkingSignature) {
 					parts.push({ text: block.thinking, thoughtSignature: block.thinkingSignature });
 				} else if (block.type === "toolCall") {
+					callOrder.call(block.id);
 					parts.push({
-						functionCall: { name: sanitizeFactoryDroidToolName(block.name), args: block.arguments },
+						functionCall: { name: block.name, args: block.arguments },
 						...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}),
 					});
 				}
@@ -233,6 +230,7 @@ function toGeminiContents(
 				...(binaryParts.length > 0 ? { parts: binaryParts } : {}),
 			},
 		};
+		callOrder.response(part, message.toolCallId);
 		const last = contents[contents.length - 1];
 		if (last && last.role === "user" && last.parts.every(p => p.functionResponse)) {
 			last.parts.push(part);
@@ -240,6 +238,7 @@ function toGeminiContents(
 			contents.push({ role: "user", parts: [part] });
 		}
 	}
+	callOrder.apply(contents);
 	// Sentinel injection: scope to model turns at/after the latest user turn
 	// with a non-response part (the validator only checks the current tail).
 	let lastUserText = 0;
@@ -265,7 +264,7 @@ function toGeminiContents(
 	};
 }
 
-function toGeminiTools(tools: Tool[] | undefined): Array<{ functionDeclarations: unknown[] }> | undefined {
+export function toGeminiTools(tools: Tool[] | undefined): Array<{ functionDeclarations: unknown[] }> | undefined {
 	if (!tools || tools.length === 0) return undefined;
 	return [
 		{

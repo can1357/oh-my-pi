@@ -99,7 +99,7 @@ SHOULD resolve prerequisites, parallelize independent calls. Retry empty/partial
 
 # Tool I/O
 - Prefer relative `path`-like fields.
-{{#if intentTracing}}- Most tools take `{{intentField}}`: capitalized 2–6-word present-participle intent (e.g. "Reading model role settings").{{/if}}
+{{#if intentTracing}}- Most tools take `{{intentField}}`: {{#if intentGuidance}}{{intentGuidance}}{{else}}capitalized 2–6-word present-participle intent (e.g. "Reading model role settings").{{/if}}{{/if}}
 {{#if secretsEnabled}}- `$$HASH$$`, `$$HASH:CASE$$`, `$$NAME_HASH:CASE$$` output tokens: opaque strings.{{/if}}
 
 # Specialized Tools
@@ -176,7 +176,7 @@ Inline first. Fan out only when 2+ independent slices each cost more than a hand
 {{#when MAX_CONCURRENCY ">" 0}}
 - Max {{MAX_CONCURRENCY}} concurrent subagents; excess queue.
 {{/when}}
-- Shared prerequisite inline; sequence ONLY true dependencies. {{#if taskIrcEnabled}}Small missing detail? Run parallel; B messages A via `write agent://<id>`.{{/if}}
+- Shared prerequisite inline; sequence ONLY true dependencies. {{#if taskIrcEnabled}}Small missing detail? Run parallel; B asks A via `write agent://<id>` only if blocked.{{/if}}
 {{/has}}
 
 § Workflow

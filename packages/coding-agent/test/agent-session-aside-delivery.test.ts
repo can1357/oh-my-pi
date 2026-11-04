@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
+import { AsyncJobManager, type AsyncJobManagerApi } from "@oh-my-pi/pi-coding-agent/async";
 import type { AssistantMessage, Context, ImageContent } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -159,7 +159,7 @@ describe("AgentSession aside delivery", () => {
 			const nextCall = Promise.withResolvers<void>();
 			const waitStarted = Promise.withResolvers<void>();
 			const job = Promise.withResolvers<string>();
-			const manager = new AsyncJobManager({});
+			const manager: AsyncJobManagerApi = new AsyncJobManager({});
 			const settings = Settings.isolated({
 				"compaction.enabled": false,
 				"todo.enabled": false,
@@ -456,6 +456,67 @@ describe("AgentSession aside delivery", () => {
 		expect(startedTurn).toBe(true);
 		expect(contexts).toHaveLength(1);
 		expect(JSON.stringify(contexts[0]!.messages)).toContain("IDLE_ASIDE_BODY");
+	});
+
+	it("two asides sent back to back to an idle session both reach the model, in order", async () => {
+		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
+		const modelRegistry = new ModelRegistry(authStorage);
+		const contexts: Context[] = [];
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: (_model, context) => {
+				contexts.push(context);
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "text", text: "Acknowledged." }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: zeroUsage,
+					stopReason: "stop",
+					timestamp: Date.now(),
+				};
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			},
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+		});
+
+		const first = session.sendCustomMessage(
+			{ customType: "ext-aside", content: "FIRST_ASIDE", display: true, attribution: "agent" },
+			{ deliverAs: "aside", triggerTurn: true },
+		);
+		const second = session.sendCustomMessage(
+			{ customType: "ext-aside", content: "SECOND_ASIDE", display: true, attribution: "agent" },
+			{ deliverAs: "aside", triggerTurn: true },
+		);
+		await Promise.all([first, second]);
+		await session.waitForIdle();
+
+		const sent = JSON.stringify(contexts.at(-1)!.messages);
+		expect(sent).toContain("FIRST_ASIDE");
+		expect(sent).toContain("SECOND_ASIDE");
+		expect(sent.indexOf("FIRST_ASIDE")).toBeLessThan(sent.indexOf("SECOND_ASIDE"));
+		const persisted = session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom_message")
+			.map(entry => entry.content);
+		expect(persisted).toEqual(["FIRST_ASIDE", "SECOND_ASIDE"]);
 	});
 
 	it("a stranded aside queued during an aborted turn does not leak into a fresh session (newSession)", async () => {
@@ -1701,5 +1762,11 @@ describe("AgentSession aside delivery", () => {
 		);
 		expect(notice).toBeDefined();
 		expect(notice && typeof notice.content === "string" ? notice.content : "").toContain("m1");
+		// One-at-a-time steering must deliver the notice and the steer it announces
+		// in the same model call; split, the model answers the notice alone first.
+		expect(mock.calls.length).toBe(2);
+		const steerCall = JSON.stringify(mock.calls[1]!.context.messages);
+		expect(steerCall).toContain("Now available:");
+		expect(steerCall).toContain("delegate to");
 	});
 });

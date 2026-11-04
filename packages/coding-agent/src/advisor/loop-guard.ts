@@ -56,6 +56,7 @@ export class AdvisorLoopGuard {
 		const detection = this.#activeGuard()?.recordTurn({
 			message: context.message,
 			toolResults: context.toolResults,
+			injectedContext: (context.additionalMessages?.length ?? 0) > 0,
 		});
 		if (!detection) return;
 		if (this.#redirectIssued) {

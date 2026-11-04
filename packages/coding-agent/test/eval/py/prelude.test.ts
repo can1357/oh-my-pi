@@ -10,7 +10,7 @@ async function runPrelude(
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
 	const prelude = PYTHON_PRELUDE.replace(
 		"from __future__ import annotations",
-		"from __future__ import annotations\n__omp_display = lambda *args, **kwargs: None",
+		"from __future__ import annotations\n__omp_emit_status = __omp_emit_image = lambda *args, **kwargs: None",
 	);
 	const script = `${prelude}\n${code}`;
 	// The full prelude exceeds Windows' ~32k `python -c` command-line limit
@@ -284,6 +284,40 @@ describe("python prelude", () => {
 		} finally {
 			bridge.stop(true);
 			proxy.stop(true);
+		}
+	});
+});
+
+describe("python workpool model selection", () => {
+	it("forwards an exact model selector and preserves omission through the real Python bridge", async () => {
+		const requests: unknown[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async request => {
+				requests.push(await request.json());
+				return Response.json({ ok: true, value: { name: "chosen", agent: "scout", limit: 2 } });
+			},
+		});
+		try {
+			const result = await runPrelude('workpool("scout", model="p/chosen:high")\nworkpool("scout")', {
+				PI_TOOL_BRIDGE_URL: server.url.toString(),
+				PI_TOOL_BRIDGE_TOKEN: "test-token",
+				PI_TOOL_BRIDGE_SESSION: "test-session",
+			});
+			expect(result.stderr).toBe("");
+			expect(result.exitCode).toBe(0);
+			expect(requests).toEqual([
+				{
+					session: "test-session",
+					run: null,
+					name: "__workpool__",
+					args: { op: "create", agent: "scout", model: "p/chosen:high" },
+				},
+				{ session: "test-session", run: null, name: "__workpool__", args: { op: "create", agent: "scout" } },
+			]);
+		} finally {
+			server.stop(true);
 		}
 	});
 });

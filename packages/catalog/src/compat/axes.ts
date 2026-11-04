@@ -109,6 +109,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		"preserved",
 		"interleaved",
 	]),
+	"completions-allow-missing-thinking": wire("completionsAllowMissingThinking", ["request"]),
 	"anthropic-thinking": wire("anthropicThinking", ["request"], "scalar", [
 		"adaptive",
 		"adaptive-summarized",
@@ -119,7 +120,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"openai-platform-header": wire("openaiPlatformHeader", ["request"]),
 	"responses-cache-retention": wire("responsesCacheRetention", ["request"]),
 	"responses-verbosity": wire("responsesVerbosity", ["request"], "scalar", ["low"]),
-	"responses-service-tier": wire("responsesServiceTier", ["request"], "scalar", ["priority"]),
+	"responses-service-tier": wire("responsesServiceTier", ["request"], "scalar", ["priority", "ultrafast"]),
 	"responses-parallel-tool-calls": wire("responsesParallelToolCalls", ["request"]),
 	"responses-safety-identifier": wire("responsesSafetyIdentifier", ["request"]),
 	"responses-tool-choice-auto": wire("responsesToolChoiceAuto", ["request"]),
@@ -248,6 +249,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	]),
 	"effort-beta": wire("effortBeta", ["anthropic"]),
 	"escape-builtin-tool-names": wire("escapeBuiltinToolNames", ["anthropic"]),
+	"extended-cache-ttl-beta": wire("extendedCacheTtlBeta", ["anthropic"]),
 	"fast-mode": wire("fastMode", ["anthropic"]),
 	"first-party-provider": wire("firstPartyProvider", ["anthropic"]),
 	"honors-claude-code-beta-kill-switch": wire("honorsClaudeCodeBetaKillSwitch", ["anthropic"]),
@@ -257,9 +259,10 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"official-endpoint": wire("officialEndpoint", ["anthropic", "openai-responses"]),
 	"replay-unsigned-thinking": wire("replayUnsignedThinking", ["anthropic"]),
 	"requires-thinking-enabled": wire("requiresThinkingEnabled", ["anthropic"]),
+	"requires-thinking-presence": wire("requiresThinkingPresence", ["anthropic"]),
 	"requires-tool-result-id": wire("requiresToolResultId", ["anthropic"]),
 	"signing-endpoint": wire("signingEndpoint", ["anthropic"]),
-	"strip-thinking-history": wire("stripThinkingHistory", ["anthropic", "ollama"]),
+	"strip-thinking-history": wire("stripThinkingHistory", ["openai", "anthropic", "ollama"]),
 	"supports-context-management": wire("supportsContextManagement", ["anthropic"]),
 	"supports-output-effort": wire("supportsOutputEffort", ["anthropic"]),
 	"supports-eager-tool-input-streaming": wire("supportsEagerToolInputStreaming", ["anthropic"]),
@@ -267,7 +270,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-mid-conversation-system": wire("supportsMidConversationSystem", ["anthropic"]),
 	"supports-mid-conversation-tool-changes": wire("supportsMidConversationToolChanges", ["anthropic"]),
 	"supports-per-message-effort": wire("supportsPerMessageEffort", ["anthropic"]),
-	"supports-server-compaction": wire("supportsServerCompaction", ["anthropic"]),
+	"supports-server-compaction": wire("supportsServerCompaction", ["anthropic", "bedrock"]),
+	"supports-message-threads": wire("supportsMessageThreads", ["anthropic"]),
 	"supports-between-tools-thinking": wire("supportsBetweenToolsThinking", ["anthropic"]),
 	"supports-thinking-binding-controls": wire("supportsThinkingBindingControls", ["anthropic", "bedrock"]),
 	"supports-turn-scoped-system": wire("supportsTurnScopedSystem", ["anthropic"]),
@@ -315,11 +319,6 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"strip-image-input": wire("stripImageInput", [...OAI, "anthropic", "google"]),
 	"supports-forced-tool-choice": wire("supportsForcedToolChoice", [...OAI, "anthropic", "bedrock"]),
 	"supports-sampling-params": wire("supportsSamplingParams", [...OAI, "anthropic", "bedrock", "devin", "google"]),
-	"thinking-loop-guard": wire("thinkingLoopGuard", [...OAI, "anthropic", "google"], "scalar", [
-		"gemini",
-		"deepseek",
-		"xai",
-	]),
 
 	// ── thinking control surface ──
 	"thinking-default-level": { key: "defaultLevel", set: "thinking", shape: "scalar", values: EFFORTS },
@@ -341,6 +340,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"thinking-unverified": { key: "unverified", set: "thinking", shape: "scalar" },
 
 	// ── catalog metadata ──
+	"supports-websockets": { key: "supportsWebsockets", set: "catalog", shape: "scalar", values: [true, false] },
 	"apply-patch-tool-type": {
 		key: "applyPatchToolType",
 		set: "catalog",
@@ -355,6 +355,14 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: [true, false],
 	},
+	/** Replayed tool calls must satisfy the target wire's declaration charset and length. */
+	"tool-call-name-charset": {
+		key: "toolCallNameCharset",
+		set: "catalog",
+		shape: "scalar",
+		values: ["ascii", "google"],
+	},
+	"tool-call-name-max-length": { key: "toolCallNameMaxLength", set: "catalog", shape: "scalar" },
 	"preserves-max-output-tokens": {
 		key: "preservesMaxOutputTokens",
 		set: "catalog",
@@ -401,6 +409,19 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: [true, false],
 	},
+	/**
+	 * The model's long-context price tier does not bound its runtime context
+	 * window: with extended context off, the window is not capped at the
+	 * tier's input threshold (subscription hosts carrying API-equivalent tier
+	 * prices, or a model served at its full window). Explicit user context
+	 * overrides still apply.
+	 */
+	"long-context-window-uncapped": {
+		key: "longContextWindowUncapped",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
 	"cost-patch": { key: "costPatch", set: "catalog", shape: "object" },
 	"cost-fallback": { key: "costFallback", set: "catalog", shape: "object" },
 	/**
@@ -433,6 +454,19 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: ["output", "signature"],
 	},
+	/**
+	 * Stream loop guard for the model line, on every host and API (read
+	 * through `loopGuardLevel` in pi-ai `utils/thinking-loop`). `semantic`
+	 * adds near-duplicate and stalled-wording paragraph detection to the
+	 * exact repeated-cycle check; `off` disables the guard. Unassigned: exact
+	 * repeated cycles only.
+	 */
+	"thinking-loop-guard": {
+		key: "thinkingLoopGuard",
+		set: "catalog",
+		shape: "scalar",
+		values: ["off", "semantic"],
+	},
 	"delegation-bias": { key: "delegationBias", set: "catalog", shape: "scalar", values: DELEGATION_BIASES },
 	"discovery-api": { key: "discoveryApi", set: "catalog", shape: "scalar" },
 	"edit-prompt-variant": { key: "editPromptVariant", set: "catalog", shape: "scalar", values: ["full", "compact"] },
@@ -446,6 +480,12 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		values: ["gemini", "anthropic", "codex", "xai", "openrouter", "openai"],
 	},
 	"web-search-model": { key: "webSearchModel", set: "catalog", shape: "scalar" },
+	/**
+	 * Revision suffix the host appends to the model's id (Vertex `@default`): a
+	 * `provider/id` selector written without it names this model exactly.
+	 * Unassigned: the id has no implied revision and must be written in full.
+	 */
+	"selector-revision-suffix": { key: "selectorRevisionSuffix", set: "catalog", shape: "scalar" },
 	"hosted-image": { key: "hostedImage", set: "catalog", shape: "scalar", values: [true, false] },
 	/** How the model line bills an input image; shape and formulas in `./image-tokenization`. */
 	"image-tokenization": { key: "imageTokenization", set: "catalog", shape: "object" },
@@ -456,7 +496,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"image-count-budget": { key: "imageCountBudget", set: "catalog", shape: "scalar" },
 	/**
 	 * Replaces `image-count-budget` while the request reaches the official
-	 * endpoint (pi-ai `reachesOfficialEndpoint`): a limit measured or documented
+	 * endpoint (pi-ai `reachesBudgetedHost`): a limit measured or documented
 	 * for the host's own endpoint, which a custom `baseUrl` or an
 	 * `ANTHROPIC_BASE_URL`/`FOUNDRY_BASE_URL` reroute (proxy, gateway) need not share.
 	 */
@@ -473,15 +513,68 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"image-max-edge": { key: "imageMaxEdge", set: "catalog", shape: "scalar" },
 	"inline-image-byte-budget": { key: "inlineImageByteBudget", set: "catalog", shape: "scalar" },
 	/**
+	 * Largest request body the host accepts. Where set, the inline-image byte clamp keeps images within what the
+	 * request's other bytes leave of it, and keeps the newest user message's and newest tool result's images past
+	 * `inline-image-byte-budget` while they fit that room.
+	 */
+	"request-body-byte-limit": { key: "requestBodyByteLimit", set: "catalog", shape: "scalar" },
+	/**
+	 * Opt-in: the host budgets above apply whenever the request reaches the provider's own catalog endpoint
+	 * (`endpoint-hosts`, or an unset `baseUrl`), for a hosted gateway whose compat names no official endpoint.
+	 * Unassigned: they apply only on the official endpoint (pi-ai `reachesOfficialEndpoint`).
+	 */
+	"catalog-endpoint-budgets": {
+		key: "catalogEndpointBudgets",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
+	/**
+	 * Supported formats and size bounds for judgment-request images; `mime-types`
+	 * is comma-separated because object payloads have no array shape.
+	 */
+	"judgment-image-input": { key: "judgmentImageInput", set: "catalog", shape: "object" },
+	/**
+	 * `Content-Encoding`s the host decodes on request bodies, most preferred
+	 * first. Applied only while the request reaches the provider's own endpoint
+	 * (see `endpoint-hosts`), so a proxy or rerouted endpoint never receives
+	 * bytes it cannot read. Unassigned: bodies are sent uncompressed.
+	 */
+	"request-encodings": { key: "requestEncodings", set: "catalog", shape: "array", values: ["zstd", "gzip"] },
+	/**
+	 * HTTPS hostnames the provider itself serves besides its bundled base URL's
+	 * host — per-account endpoints such as Copilot's plan hosts. Together with
+	 * that host they define the provider's own endpoint, which tells first-party
+	 * traffic from a custom gateway that reuses the provider id.
+	 */
+	"endpoint-hosts": { key: "endpointHosts", set: "catalog", shape: "array" },
+	/**
+	 * Pattern of the JSON 400/415 error body the host returns when it cannot
+	 * decode a compressed request body. Unassigned: every JSON 400/415 is a
+	 * possible rejection and is re-checked with an uncompressed resend. Either
+	 * way, a 400/403/415 whose body is not JSON (presumed a proxy's answer, not
+	 * the host's) is re-checked too.
+	 */
+	"request-encoding-rejection": { key: "requestEncodingRejection", set: "catalog", shape: "scalar" },
+	/**
 	 * Most questions one System One judgment request may carry; the judge
 	 * splits larger requests. Unassigned: the endpoint takes any batch size.
 	 */
 	"judgment-questions-max": { key: "judgmentQuestionsMax", set: "catalog", shape: "scalar" },
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
+	/** Seeds `maxTokens` only when the row reports none; applied after `limits-patch`. */
+	"max-tokens-fallback": { key: "maxTokensFallback", set: "catalog", shape: "scalar" },
+	/** Most output tokens the host serves: a larger reported `maxTokens` (and Antigravity per-SKU `maxOutputTokens`) is lowered to it; an unknown one stays unknown. */
+	"max-tokens-ceiling": { key: "maxTokensCeiling", set: "catalog", shape: "scalar" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },
-	"task-sibling-prompt-cache": {
-		key: "taskSiblingPromptCache",
+	/**
+	 * The lane rewards routing related requests — Task siblings, forks, explicit
+	 * `--prompt-cache-key` callers — under one shared prompt-cache key instead of
+	 * each conversation's own identity. Unassigned: per-conversation routing.
+	 */
+	"shared-prompt-cache": {
+		key: "sharedPromptCache",
 		set: "catalog",
 		shape: "scalar",
 		values: [true, false],
@@ -492,6 +585,13 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * Unassigned: no known lookback bound.
 	 */
 	"prompt-cache-lookback": { key: "promptCacheLookback", set: "catalog", shape: "scalar" },
+	/**
+	 * The provider's own endpoint keeps prompt-cache entries indefinitely
+	 * (logged-in Codex subscriptions): an idle gap never cools the prefix, so
+	 * rewriting it while idle only discards a warm cache. Read through
+	 * `compat/prompt-cache-persistent.ts`. Unassigned: entries expire.
+	 */
+	"prompt-cache-persistent": { key: "promptCachePersistent", set: "catalog", shape: "scalar", values: [true, false] },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	/**
@@ -575,7 +675,9 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"region-limits-eu": { key: "regionLimitsEu", set: "catalog", shape: "object" },
 	/**
 	 * Subscription credit rates: `input` is the per-token credit weight shown
-	 * as the model's multiplier; `output` and `cache-read` multiply it.
+	 * as the model's multiplier; `output` and `cache-read` multiply it. An
+	 * `effective-rates` block of dated cards overwrites them from each card's
+	 * `effective-from`, as on `cost-patch`.
 	 */
 	"credit-rates": { key: "creditRates", set: "catalog", shape: "object" },
 	/**

@@ -1865,11 +1865,12 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 	});
 
 	it.each(["shellArgs", "shellStreamArgs", "miniSweAgentBashArgs"] as const)(
-		"records a %s display block's millisecond timeout in bash-tool seconds",
+		"records a %s display block's millisecond hard timeout in bash-tool seconds",
 		async frameCase => {
 			// Cursor states shell budgets in milliseconds; the bridge converts them
 			// before running bash, and the transcript block must match what ran
-			// rather than showing a 15 s budget as 15000.
+			// rather than showing a 15 s budget as 15000. `timeout` is the
+			// `block_until_ms` wait, not the deadline.
 			const output = cursorAssistantMessage();
 			const stream = new AssistantMessageEventStream();
 			const state = newBlockState();
@@ -1886,7 +1887,8 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 								value: create(ShellArgsSchema, {
 									command: "sleep 1",
 									workingDirectory: "/tmp",
-									timeout: 15000,
+									timeout: 5000,
+									hardTimeout: 15000,
 									toolCallId: `call-${frameCase}`,
 								}),
 							},

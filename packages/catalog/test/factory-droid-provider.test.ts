@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, setSystemTime } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -21,7 +21,7 @@ import {
 } from "../src/discovery/factory-droid";
 import { Effort } from "../src/effort";
 import { resolveProviderModels } from "../src/model-manager";
-import { getBundledModel } from "../src/models";
+import { getBundledModel, getFactoryDroidCreditRate } from "../src/models";
 import { resolveModelCacheProviderId } from "../src/provider-models/cache-provider-id";
 import { factoryDroidModelManagerOptions } from "../src/provider-models/special";
 import type { FetchImpl, ModelSpec } from "../src/types";
@@ -56,6 +56,12 @@ const DEPRECATION_FLAG = registryModel(DEPRECATED).policy.entitlement.deprecatio
 interface FactoryEndpoints {
 	flags?: Record<string, boolean>;
 	modelPolicy?: Record<string, unknown>;
+	/** Other managed settings (image generation) beside the model policy. */
+	settings?: Record<string, unknown>;
+	/** Managed-settings HTTP status; the flags endpoint always succeeds. */
+	settingsStatus?: number;
+	/** Raw managed-settings body, replacing the JSON one. */
+	settingsBody?: string;
 	routing?: Record<string, unknown>;
 	responseHeaders?: Record<string, string>;
 	onRequest?: (url: string, init: RequestInit | undefined) => void;
@@ -70,8 +76,17 @@ function factoryEndpoints(endpoints: FactoryEndpoints = {}): FetchImpl {
 					flags: endpoints.flags ?? ALL_FLAGS_ON,
 					...(endpoints.routing ? { configs: { provider_routing: endpoints.routing } } : {}),
 				}
-			: { settings: endpoints.modelPolicy ? { modelPolicy: endpoints.modelPolicy } : {} };
-		return Response.json(body, { headers: endpoints.responseHeaders });
+			: {
+					settings: {
+						...(endpoints.modelPolicy ? { modelPolicy: endpoints.modelPolicy } : {}),
+						...endpoints.settings,
+					},
+				};
+		const status = String(url).includes("managed-settings") ? (endpoints.settingsStatus ?? 200) : 200;
+		if (String(url).includes("managed-settings") && endpoints.settingsBody !== undefined) {
+			return new Response(endpoints.settingsBody, { status, headers: endpoints.responseHeaders });
+		}
+		return Response.json(body, { status, headers: endpoints.responseHeaders });
 	};
 }
 
@@ -114,6 +129,7 @@ function syntheticModel(policy: Partial<FactoryDroidModelPolicy>): FactoryDroidR
 			policyAliases: [],
 			entitlement: { requiresExplicitOptIn: false },
 			defaultReasoningOff: false,
+			image: false,
 			...policy,
 		},
 	};
@@ -185,6 +201,64 @@ describe("Factory Droid model builder", () => {
 		expect(unknown.cost).toEqual(zeroCost);
 	});
 
+	describe("dated credit rates", () => {
+		const startsAt = Date.parse("2026-08-22T00:00:00Z");
+		const endsAt = Date.parse("2026-11-22T00:00:00Z");
+		const model = buildFactoryDroidModel(
+			syntheticModel({
+				creditRates: {
+					input: 2,
+					output: 5,
+					effectiveRates: [
+						{ effectiveFrom: startsAt, input: 1.6 },
+						{ effectiveFrom: endsAt, input: 2 },
+					],
+				},
+			}),
+		);
+
+		it("keeps the base rate on the model and applies the card due at each time", () => {
+			expect(model.factoryDroidCredits).toBe(2);
+			expect(getFactoryDroidCreditRate(model, startsAt - 1)).toEqual({ rate: 2, next: { rate: 1.6, at: startsAt } });
+			expect(getFactoryDroidCreditRate(model, startsAt)).toEqual({ rate: 1.6, next: { rate: 2, at: endsAt } });
+			expect(getFactoryDroidCreditRate(model, endsAt)).toEqual({ rate: 2 });
+		});
+
+		it("drops a discount cached while it was due once the next card takes over", async () => {
+			const entry = factoryDroidRegistry().find(model => model.policy.creditRates?.effectiveRates);
+			const rates = entry?.policy.creditRates;
+			const [discounted, restored] = rates?.effectiveRates ?? [];
+			if (!entry || !rates || !discounted || !restored) throw new Error("no registry model with dated credit rates");
+			const id = entry.spec.id;
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "factory-credit-cards-"));
+			const cacheDbPath = path.join(dir, "models.db");
+			const up = factoryEndpoints();
+			const down: FetchImpl = async () => new Response("down", { status: 503 });
+			const resolve = (fetch: FetchImpl, mode: "online" | "offline") =>
+				resolveProviderModels(
+					{ ...factoryDroidModelManagerOptions({ apiKey: "token", fetch }), cacheDbPath },
+					mode,
+				);
+			try {
+				setSystemTime(new Date(discounted.effectiveFrom));
+				const inside = (await resolve(up, "online")).models.find(model => model.id === id);
+				expect(inside && getFactoryDroidCreditRate(inside)?.rate).toBe(discounted.input);
+
+				setSystemTime(new Date(restored.effectiveFrom));
+				for (const [fetch, mode] of [
+					[down, "offline"],
+					[down, "online"],
+				] as const) {
+					const cached = (await resolve(fetch, mode)).models.find(model => model.id === id);
+					expect(cached && getFactoryDroidCreditRate(cached)?.rate).toBe(restored.input ?? rates.input);
+				}
+			} finally {
+				setSystemTime();
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		});
+	});
+
 	it("builds Haiku 5.5 with an Off rung and Anthropic's list price on the Standard pool", () => {
 		const model = buildFactoryDroidModel(registryModel("claude-haiku-5-5"));
 		expect(model.thinking).toMatchObject({
@@ -242,6 +316,10 @@ describe("Factory Droid route policy scoping", () => {
 			resolveModelPolicy(messages, { upstream: "bedrock_anthropic" }).catalog.serverSideFallbackModels,
 		).toBeUndefined();
 		expect(serverSideFallbackModels(buildModel(fable))).toEqual([]);
+		// The shared reader resolves the chain per upstream, memoized apart from the bare model.
+		expect(serverSideFallbackModels(messages, { upstream: "anthropic" })).toEqual(["claude-opus-5"]);
+		expect(serverSideFallbackModels(messages, { upstream: "bedrock_anthropic" })).toEqual([]);
+		expect(serverSideFallbackModels(messages)).toEqual([]);
 		// Direct Anthropic keeps its own thinking contract.
 		const direct = resolveModelPolicy({ ...messages, provider: "anthropic" }, { upstream: "snowflake" }).compat;
 		expect(direct?.stripThinkingHistory).toBeUndefined();
@@ -259,6 +337,13 @@ describe("Factory Droid offline seed", () => {
 			expect(ids).not.toContain(gated.spec.id);
 		}
 		expect(ids).toContain(PLAIN);
+	});
+
+	it("names Opus 5.5's refusal fallback offline, where every unblocked model is available", () => {
+		const models = factoryDroidModelManagerOptions().staticModels ?? [];
+		expect(models.find(model => model.id === "claude-opus-5-5")?.factoryDroidRefusalFallbacks).toEqual([
+			"claude-opus-5",
+		]);
 	});
 
 	it("keeps offline EU models on the EU host with EU rotations", () => {
@@ -393,6 +478,71 @@ describe("Factory Droid discovery gates", () => {
 		expect(denied).toEqual(allowed.filter(id => !fastIds.includes(id)));
 	});
 
+	it("offers a refusal fallback only while the account can run the fallback model", async () => {
+		const open = await discover({ modelPolicy: { allowAllFactoryModels: true } });
+		const openIds = open?.map(model => model.id) ?? [];
+		const withFallback = open?.filter(model => model.factoryDroidRefusalFallbacks?.length) ?? [];
+		expect(withFallback.map(model => model.id)).toContain("claude-opus-5-5");
+		const fallbackIds = [...new Set(withFallback.flatMap(model => model.factoryDroidRefusalFallbacks ?? []))];
+		for (const id of fallbackIds) expect(openIds).toContain(id);
+
+		const blocked = await discover({ modelPolicy: { allowAllFactoryModels: true, blockedModelIds: fallbackIds } });
+		for (const { id } of withFallback) {
+			expect(blocked?.find(model => model.id === id)?.factoryDroidRefusalFallbacks).toEqual([]);
+		}
+	});
+
+	describe("image generation models", () => {
+		const imageIds = factoryDroidRegistry()
+			.filter(({ policy }) => policy.image)
+			.map(({ spec }) => spec.id);
+		const [firstImage, ...otherImages] = imageIds;
+
+		it("lists image models as image-kind specs while the org leaves image generation on", async () => {
+			expect(imageIds.length).toBeGreaterThan(1);
+			const models = (await discover({})) ?? [];
+			const listed = models.filter(model => imageIds.includes(model.id));
+			expect(listed.map(model => model.id).sort()).toEqual([...imageIds].sort());
+			for (const spec of listed) expect(buildModel(spec).kind).toBe("image");
+			// Chat models keep their kind.
+			expect(buildModel(models.find(model => model.id === PLAIN)!).kind).toBeUndefined();
+		});
+
+		it("hides every image model, and nothing else, when the org disables image generation", async () => {
+			const enabled = await discoverIds({ settings: { imageGenerationEnabled: true } });
+			const disabled = await discoverIds({ settings: { imageGenerationEnabled: false } });
+			expect(disabled).toEqual(enabled.filter(id => !imageIds.includes(id)));
+		});
+
+		it.each([
+			{ label: "narrows to the org image allowlist", allowed: () => [firstImage], show: () => [firstImage] },
+			{ label: "hides every image model for an empty allowlist", allowed: () => [], show: () => [] },
+		])("$label", async ({ allowed, show }) => {
+			const ids = await discoverIds({ settings: { imageGenerationAllowedModelIds: allowed() } });
+			expect(ids.filter(id => imageIds.includes(id))).toEqual(show());
+			expect(ids).toContain(PLAIN);
+		});
+
+		it("still applies the org model policy blocks to image models", async () => {
+			const ids = await discoverIds({ modelPolicy: { allowAllFactoryModels: true, blockedModelIds: [firstImage] } });
+			expect(ids).not.toContain(firstImage);
+			for (const id of otherImages) expect(ids).toContain(id);
+		});
+
+		it("keeps image models hidden until managed settings prove them enabled", async () => {
+			const offline = (factoryDroidModelManagerOptions().staticModels ?? []).map(model => model.id);
+			const unreadable = await discoverIds({ settingsStatus: 500 });
+			const unparsable = await discoverIds({ settingsBody: "{not json" });
+			expect(unparsable).toContain(PLAIN);
+			for (const id of imageIds) expect(unparsable).not.toContain(id);
+			for (const id of imageIds) {
+				expect(offline).not.toContain(id);
+				expect(unreadable).not.toContain(id);
+			}
+			expect(unreadable).toContain(PLAIN);
+		});
+	});
+
 	it.each([
 		{ label: "without a credential", apiKey: undefined },
 		{ label: "when the flags fetch fails", apiKey: "token" },
@@ -434,6 +584,41 @@ describe("Factory Droid discovery gates", () => {
 		const ids = await discoverIds({ flags: { gpt_6_luna: false, deepseek_v4_1_flash: false } });
 		expect(ids).toContain("gpt-6-luna");
 		expect(ids).toContain("deepseek-v4.1-flash");
+	});
+
+	it("lists models whose flags droid 1.1.0 retired with those flags off", async () => {
+		const ids = await discoverIds({
+			flags: {
+				claude_opus_5_5_fast: false,
+				gpt_6_1_sol: false,
+				minimax_m3: false,
+				gpt_6_fast_modes: false,
+				muse_spark_1_2: false,
+			},
+		});
+		const retired = [
+			"claude-opus-5-5-fast",
+			"gpt-6.1-sol",
+			"minimax-m3",
+			"gpt-6-sol-fast",
+			"gpt-6-luna-fast",
+			"muse-spark-1.2",
+		];
+		for (const id of retired) expect(ids).toContain(id);
+	});
+
+	it("gates droid 1.1.0's new models on their live flags and Ultra Fast on the high-cost opt-in", async () => {
+		const gated = ["gpt-6.1-terra", "nemotron-3.5-super", "muse-spark-open", "beam-1.0", "gpt-6-astra-ultrafast"];
+		const ultraFast = ["gpt-6-astra-ultrafast", "gpt-6.1-sol-ultrafast"];
+		const flagsOff = await discoverIds({ flags: {}, modelPolicy: { allowAllFactoryModels: true } });
+		for (const id of gated) expect(flagsOff).not.toContain(id);
+		const unconsented = await discoverIds({
+			modelPolicy: { allowAllFactoryModels: true, requireExplicitOptInModelIds: ultraFast },
+		});
+		for (const id of gated.filter(id => !ultraFast.includes(id))) expect(unconsented).toContain(id);
+		for (const id of ultraFast) expect(unconsented).not.toContain(id);
+		const consented = await discoverIds({ modelPolicy: { allowAllFactoryModels: true } });
+		for (const id of [...gated, ...ultraFast]) expect(consented).toContain(id);
 	});
 
 	it("keeps global overrides restrictive without removing the EU Mistral route", async () => {

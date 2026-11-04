@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { parseReviewDiffSnapshot, type ReviewDiffSnapshot } from "./diff";
 
@@ -5,7 +6,7 @@ export type LocalReviewKind = "base-branch" | "uncommitted" | "commit";
 
 /** One frozen diff: the annotation view and the reviewer prompt both read this snapshot. */
 export interface ResolvedReviewTarget {
-	/** `patch` is a caller-supplied diff (annotations API); `pr` never maps to the local checkout. */
+	/** `patch` is a caller-supplied diff (annotations API); `pr` (a PR/MR) never maps to the local checkout. */
 	kind: LocalReviewKind | "pr" | "patch";
 	mode: string;
 	rawDiff: string;
@@ -14,8 +15,12 @@ export interface ResolvedReviewTarget {
 	filteredMessage?: string;
 	diffInstruction?: string;
 	contextInstruction?: string;
-	/** Base URL for per-file slices of the original, unfiltered PR diff. */
+	/** Base URL for per-file slices of the original, unfiltered PR/MR diff. */
 	prDiffUrl?: string;
+	/** Leading `?at=<generation>` when `prDiffUrl` is pinned, otherwise empty. */
+	prDiffQuery?: string;
+	/** Checkout root of a local review run outside the session cwd; diff paths are relative to it. */
+	repository?: string;
 }
 
 export interface ReviewTargetUI {
@@ -38,7 +43,10 @@ export function createResolvedReviewTarget(
 	mode: string,
 	rawDiff: string,
 	emptyMessage: string,
-	options: Pick<ResolvedReviewTarget, "filteredMessage" | "diffInstruction" | "contextInstruction" | "prDiffUrl"> = {},
+	options: Pick<
+		ResolvedReviewTarget,
+		"filteredMessage" | "diffInstruction" | "contextInstruction" | "prDiffUrl" | "prDiffQuery"
+	> = {},
 ): ResolvedReviewTarget {
 	return {
 		kind,
@@ -56,6 +64,12 @@ export function getReviewTargetIssue(target: ResolvedReviewTarget): string | und
 		return target.filteredMessage ?? "No reviewable files (all changes filtered out)";
 	}
 	return undefined;
+}
+
+/** Checkout root for a review whose cwd differs from the session cwd; `undefined` when they match. */
+export function reviewRepository(reviewCwd: string, sessionCwd: string): string | undefined {
+	if (path.resolve(reviewCwd) === path.resolve(sessionCwd)) return undefined;
+	return vcs.repo(reviewCwd)?.root() ?? reviewCwd;
 }
 
 function errorMessage(error: unknown): string {

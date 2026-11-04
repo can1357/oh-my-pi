@@ -27,7 +27,9 @@ import { IssueProtocolHandler, PrProtocolHandler } from "./issue-pr-protocol";
 import { LocalProtocolHandler } from "./local-protocol";
 import { McpProtocolHandler } from "./mcp-protocol";
 import { MemoryProtocolHandler } from "./memory-protocol";
+import { MrProtocolHandler } from "./mr-protocol";
 import { OmpProtocolHandler } from "./omp-protocol";
+import { OutProtocolHandler } from "./out-protocol";
 import { extractUriScheme, parseInternalUrl } from "./parse";
 import { ProcProtocolHandler } from "./proc-protocol";
 import { RuleProtocolHandler } from "./rule-protocol";
@@ -54,7 +56,10 @@ setInternalUrlCompletionHost({
 	resolveCompletions: (scheme, query, context) => InternalUrlRouter.instance().complete(scheme, query, context),
 });
 
-setInternalUrlSchemeHost({ spec: scheme => InternalUrlRouter.instance().spec(scheme) });
+setInternalUrlSchemeHost({
+	spec: scheme => InternalUrlRouter.instance().spec(scheme),
+	specs: () => InternalUrlRouter.instance().specs(),
+});
 
 /**
  * Routed read/search target.
@@ -106,6 +111,7 @@ export class InternalUrlRouter {
 		this.register(new SkillProtocolHandler());
 		this.register(new RuleProtocolHandler());
 		this.register(new MemoryProtocolHandler());
+		this.register(new OutProtocolHandler());
 		this.register(new AgentProtocolHandler());
 		this.register(new HistoryProtocolHandler());
 		this.register(new ArtifactProtocolHandler());
@@ -118,6 +124,7 @@ export class InternalUrlRouter {
 		this.register(new VaultProtocolHandler());
 		this.register(new IssueProtocolHandler());
 		this.register(new PrProtocolHandler());
+		this.register(new MrProtocolHandler());
 		this.register(resourceFallback);
 		this.register(new OmpProtocolHandler());
 		this.register(new XdProtocolHandler());

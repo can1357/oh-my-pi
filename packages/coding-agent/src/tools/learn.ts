@@ -9,8 +9,8 @@ import learnDescription from "../prompts/tools/learn.md" with { type: "text" };
 import type { ToolSession } from ".";
 
 import { cfgAutolearnEnabled } from "../autolearn/settings";
+import { isGlobalMemoryScopeAvailable } from "../memory-backend/global-scope";
 import { cfgMemoryBackend } from "../memory-backend/settings";
-import { isGlobalMemoryScopeAvailable } from "../mnemopi/settings";
 
 const learnSkillSchema = type({
 	action: "'create' | 'update'",
@@ -25,7 +25,7 @@ const learnSchemaBase = type({
 	"skill?": learnSkillSchema,
 });
 
-/** Offered only where a shared bank exists; see {@link isGlobalMemoryScopeAvailable}. */
+/** Offered only where every project recalls a global item; see {@link isGlobalMemoryScopeAvailable}. */
 const learnSchemaWithScope = type({
 	memory: type("string").describe("the durable, self-contained lesson to remember (what, when, why)"),
 	"context?": type("string").describe("optional source context for the lesson"),
@@ -57,10 +57,10 @@ export class LearnTool implements AgentTool<LearnSchema> {
 	};
 	readonly label = "Learn";
 	get description(): string {
-		return prompt.render(learnDescription, { globalScope: isGlobalMemoryScopeAvailable(this.session.settings) });
+		return prompt.render(learnDescription, { globalScope: isGlobalMemoryScopeAvailable(this.session) });
 	}
 	get parameters(): LearnSchema {
-		return isGlobalMemoryScopeAvailable(this.session.settings) ? learnSchemaWithScope : learnSchemaBase;
+		return isGlobalMemoryScopeAvailable(this.session) ? learnSchemaWithScope : learnSchemaBase;
 	}
 	readonly strict = true;
 	readonly loadMode = "essential" as const;
@@ -79,8 +79,8 @@ export class LearnTool implements AgentTool<LearnSchema> {
 	async execute(_id: string, params: LearnParams): Promise<AgentToolResult> {
 		// 1) Persist or queue the lesson to long-term memory (mirrors MemoryRetainTool).
 		const backend = cfgMemoryBackend.get(this.session.settings);
-		if (params.scope === "global" && backend !== "mnemopi") {
-			throw new Error("Global memory scope is only available with the Mnemopi backend.");
+		if (params.scope === "global" && backend !== "mnemopi" && backend !== "hindsight") {
+			throw new Error(`Global memory scope is not available with the ${backend} memory backend.`);
 		}
 		let memoryMessage = "Lesson stored";
 		if (backend === "mnemopi") {
@@ -130,7 +130,8 @@ export class LearnTool implements AgentTool<LearnSchema> {
 			if (!state) {
 				throw new Error("Hindsight backend is not initialised for this session.");
 			}
-			state.enqueueRetain(params.memory, params.context);
+			// Throws before queueing while global scope is off or has no destination, so no skill is written either.
+			state.enqueueRetain(params.memory, params.context, params.scope);
 			memoryMessage = "Lesson queued for retention";
 		}
 
@@ -166,6 +167,14 @@ export class LearnTool implements AgentTool<LearnSchema> {
 				throw new Error(`${memoryMessage}, but the managed skill could not be written: ${reason}`);
 			}
 			const verb = params.skill.action === "create" ? "Created" : "Updated";
+			try {
+				await this.session.refreshSkills?.();
+			} catch (err) {
+				const reason = err instanceof Error ? err.message : String(err);
+				throw new Error(
+					`${memoryMessage}. ${verb} managed skill "${params.skill.name}", but refreshing session skills failed: ${reason}`,
+				);
+			}
 			return {
 				content: [{ type: "text", text: `${memoryMessage}. ${verb} managed skill "${params.skill.name}".` }],
 				details: { skill: params.skill.name },

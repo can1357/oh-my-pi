@@ -15,6 +15,7 @@ describe("Windows release binary target", () => {
 			.nothrow();
 		expect(result.exitCode).toBe(0);
 		const output = result.text();
+		expect(output).toContain("DRY RUN bun --cwd=packages/collab-web run gen:export-viewer --check");
 
 		expect(output).toContain("Building packages/coding-agent/binaries/omp-windows-x64.exe...");
 		expect(output).toContain(
@@ -65,7 +66,6 @@ it("runs compiled bytecode containing dependency import.meta.resolve calls", asy
 		repoRoot: temp.path(),
 		entrypoint,
 		outfile,
-		transformersVersion: "unused",
 		native: null,
 	});
 	const result = await $`${outfile}`.quiet().nothrow();
@@ -85,7 +85,6 @@ it("runs code behind a lazy import() from a split chunk of the compiled binary",
 		repoRoot: temp.path(),
 		entrypoint,
 		outfile,
-		transformersVersion: "unused",
 		native: null,
 	});
 	const result = await $`${outfile}`.quiet().nothrow();

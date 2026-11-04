@@ -12,6 +12,7 @@
  * line and file it processes. Path segments and placeholders share the index space:
  * `name: "Probe"` → `PLACEHOLDER_7` and `agent://Probe` → `agent://seg7`.
  */
+import { editErrorKinds } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { getBundledAgentsMap } from "../task/agents";
 import { BUILTIN_TOOL_NAMES, isMCPToolName } from "../tools/builtin-names";
@@ -77,6 +78,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	...fields("num", [
 		"version",
 		"resolvedModelIsFallback",
+		"perCallModel",
 		"display",
 		"synthetic",
 		"steering",
@@ -182,6 +184,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"chars",
 		"multi",
 		"wakeRelay",
+		"broadcast",
 		"partialLine",
 		"requestedTimeoutSeconds",
 	]),
@@ -203,6 +206,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"role",
 		"titleSource",
 		"thinkingLevel",
+		"perCallThinkingLevel",
 		"configured",
 		"serviceTier",
 		"purpose",
@@ -244,12 +248,14 @@ const FIELD_RULES: Record<string, Rule> = {
 		"server",
 		"customWireName",
 		"visibility",
+		"errorKind",
 	]),
 	...fields("identity", [
 		"api",
 		"provider",
 		"model",
 		"resolvedModel",
+		"perCallModelIdentity",
 		"upstreamProvider",
 		"upstreamModel",
 		"advisor",
@@ -261,6 +267,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	...fields("id", [
 		"id",
 		"parentId",
+		"continuationOf",
 		"toolCallId",
 		"call_id",
 		"responseId",
@@ -330,7 +337,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	]),
 	...fields("label", ["title", "previousTitle", "label", "injectedRules", "intent", "emoji", "nf"]),
 	...fields("error", ["errorMessage", "explanation", "errorClassificationMessage", "upstreamError"]),
-	...fields("tool", ["toolName", "tools", "declared", "deferred", "active"]),
+	...fields("tool", ["toolName", "tools", "mountedTools", "declared", "deferred", "active"]),
 	name: "name",
 	customType: "customType",
 	inputTransformations: "transforms",
@@ -404,7 +411,8 @@ const FIELD_RULES: Record<string, Rule> = {
 		"metadata",
 		"internal_chat_message_metadata_passthrough",
 		"block",
-		"jsonOutputs",
+		// Eval cell pretty views: printed tables/JSON/Markdown of user data.
+		"views",
 		"structured",
 		"xdev",
 		"response",
@@ -560,6 +568,7 @@ const TOOL_ENUM_VALUES: Record<string, ReadonlySet<string>> = {
 	contentType: MIME_TYPES,
 	mimeType: MIME_TYPES,
 	detail: new Set(["auto", "low", "high", "original"]),
+	errorKind: new Set(editErrorKinds()),
 };
 
 /** Built-in tool argument keys holding free-form structures (env maps, schemas, structured output). */
@@ -1113,6 +1122,7 @@ const KNOWN_SCHEMES = new Set([
 	"local",
 	"mcp",
 	"memory",
+	"mr",
 	"omp",
 	"pr",
 	"proc",
@@ -1401,6 +1411,8 @@ export class SessionAnonymizer {
 		for (const [key, value] of Object.entries(block)) {
 			const rule = allowed.has(key) && Object.hasOwn(FIELD_RULES, key) ? FIELD_RULES[key] : undefined;
 			if (rule === undefined) out[this.placeholder(key)] = this.#opaque(value);
+			// The block type is already allowlisted; replay consumers use it to distinguish text from images.
+			else if (key === "type") out[key] = value;
 			// A tool call is the model's own request (its id must stay joinable with the result).
 			else out[key] = this.#field(rule, value, block, key, fromTool && block.type !== "toolCall");
 		}
@@ -1788,7 +1800,9 @@ export async function anonymizeSessionTranscripts(session: AnonymizeSessionInput
 	let subagentError: string | undefined;
 	try {
 		if (session.sessionFile) {
-			subSessions = await collectSubSessions(session.sessionFile, key => unreadable.push(memberFor(key)));
+			subSessions = await collectSubSessions(session.sessionFile, {
+				onUnreadable: key => unreadable.push(memberFor(key)),
+			});
 		}
 	} catch (error) {
 		subagentError = error instanceof Error ? error.message : String(error);

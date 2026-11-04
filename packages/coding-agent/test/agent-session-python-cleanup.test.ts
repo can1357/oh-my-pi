@@ -16,6 +16,9 @@ import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 const OK_EXECUTION = { status: "ok", cancelled: false, timedOut: false, stdinRequested: false } as const;
 
 class FakeKernel {
+	readonly id = Snowflake.next();
+	readonly pythonPath = "/fake/python";
+	readonly #death = Promise.withResolvers<void>();
 	executeCalls: string[] = [];
 	shutdownCalls = 0;
 	alive = true;
@@ -27,6 +30,10 @@ class FakeKernel {
 
 	isAlive(): boolean {
 		return this.alive;
+	}
+
+	whenDead(): Promise<void> {
+		return this.#death.promise;
 	}
 
 	async execute(code: string, options?: { signal?: AbortSignal }): Promise<typeof OK_EXECUTION> {
@@ -58,6 +65,7 @@ class FakeKernel {
 	shutdown = vi.fn(async () => {
 		this.shutdownCalls += 1;
 		this.alive = false;
+		this.#death.resolve();
 		this.blockedExecutionReject?.(new Error("Kernel shut down during execution"));
 		return { confirmed: true };
 	});

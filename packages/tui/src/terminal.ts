@@ -25,6 +25,7 @@ import {
 	NotifyProtocol,
 	setCellDimensions,
 	setOsc99Supported,
+	setTerminalBackgroundColor,
 	setTerminalGlyphProtocol,
 	TERMINAL,
 } from "./terminal-capabilities";
@@ -773,7 +774,8 @@ type Da1SentinelOwner =
 	| { kind: "privateMode"; mode: number }
 	| { kind: "osc99Probe"; id: string }
 	| { kind: "glyphProtocol"; phase: "support" | "confirm" }
-	| { kind: "tsp" };
+	| { kind: "tsp" }
+	| { kind: "drain"; answered: () => void };
 
 let nextOsc99ProbeId = 1;
 
@@ -855,6 +857,8 @@ export class ProcessTerminal implements Terminal {
 	// Releases a relayed lone ESC the decoder held for a sequence tail that never came.
 	#win32PendingFlushTimer?: Timer;
 	#stdinBuffer?: StdinBuffer;
+	/** Parsed input path shared by direct VT and win32-input-mode relayed text. */
+	#stdinSequenceHandler?: (sequence: string) => void;
 	#stdinDataHandler?: (data: string) => void;
 	#disconnectHandler?: () => void;
 	#stdinEndHandler = () => {
@@ -1125,6 +1129,8 @@ export class ProcessTerminal implements Terminal {
 		// Own stdout: out-of-band writers route through this terminal, and the
 		// emergency restore finds it on crash.
 		setActiveTerminal(this);
+		// RGB belongs to this ownership session, including deferred-input prepaint.
+		setTerminalBackgroundColor(undefined);
 		terminalEverStarted = true;
 		// Own the blocking write(2) on a pump thread (unix TTYs only). A stale
 		// prebuilt natives module without the export falls back to direct writes.
@@ -1384,7 +1390,30 @@ export class ProcessTerminal implements Terminal {
 		// skip the subparameter tail instead of dropping the whole report.
 		const inBandResizePattern = /^\x1b\[48;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?t$/;
 
-		this.#stdinBuffer.on("data", (sequence: string) => {
+		this.#stdinSequenceHandler = (sequence: string) => {
+			const decoder = this.#win32InputDecoder;
+			const win32Keys = decoder?.decode(sequence);
+			if (decoder && win32Keys !== undefined) {
+				clearTimeout(this.#win32PendingFlushTimer);
+				this.#win32PendingFlushTimer = undefined;
+				// The record is ESC-led, so it interrupts any direct reply still being
+				// reassembled, just as a raw escape does below. Decoded keys carry no ESC
+				// of their own and would otherwise be appended to that fragment.
+				this.#privateCsiResponseBuffer = "";
+				this.#inBandResizeBuffer = "";
+				this.#osc11ResponseBuffer = "";
+				this.#osc99ResponseBuffer = "";
+				this.#glyphProtocolReplyBuffer = "";
+				this.#tspReplyBuffer = "";
+				for (const key of win32Keys) this.#stdinSequenceHandler?.(key);
+				if (decoder.hasPendingSequence) {
+					this.#win32PendingFlushTimer = setTimeout(
+						() => this.#releaseWin32PendingSequence(),
+						WIN32_RELAYED_ESCAPE_TIMEOUT_MS,
+					);
+				}
+				return;
+			}
 			// Fast path for plain-text bytes: every escape-probe regex below
 			// anchors on `^\x1b…`, so a byte that is not ESC can never match. A
 			// non-bracketed paste of N printable chars arrives as N per-scalar
@@ -1579,6 +1608,10 @@ export class ProcessTerminal implements Terminal {
 						if (owner.phase === this.#glyphProtocolPhase) this.#resolveGlyphProtocolSupport(false);
 						break;
 					}
+					case "drain": {
+						owner.answered();
+						break;
+					}
 					case "tsp": {
 						// DA1 before any `tsp;r` reply: the terminal doesn't speak TSP.
 						this.#resolveTspSupport(
@@ -1716,20 +1749,6 @@ export class ProcessTerminal implements Terminal {
 				return;
 			}
 			if (this.#inputHandler) {
-				const decoder = this.#win32InputDecoder;
-				const win32Keys = decoder?.decode(sequence);
-				if (decoder && win32Keys !== undefined) {
-					clearTimeout(this.#win32PendingFlushTimer);
-					this.#win32PendingFlushTimer = undefined;
-					for (const key of win32Keys) this.#inputHandler(key);
-					if (decoder.hasPendingSequence) {
-						this.#win32PendingFlushTimer = setTimeout(
-							() => this.#releaseWin32PendingSequence(),
-							WIN32_RELAYED_ESCAPE_TIMEOUT_MS,
-						);
-					}
-					return;
-				}
 				// Windows console hosts drop AltGr text under kitty (AltGr+F → `CSI 102;3u`);
 				// recover it from the active layout before any keybinding sees an Alt chord.
 				const altGrText =
@@ -1738,7 +1757,8 @@ export class ProcessTerminal implements Terminal {
 						: undefined;
 				this.#inputHandler(altGrText ?? sequence);
 			}
-		});
+		};
+		this.#stdinBuffer.on("data", this.#stdinSequenceHandler);
 
 		// Re-wrap paste content with bracketed paste markers for existing editor
 		// handling. An Enter that shared the paste's stdin read rides along so
@@ -2041,7 +2061,11 @@ export class ProcessTerminal implements Terminal {
 			const max = 16 ** hex.length - 1;
 			return max > 0 ? value / max : 0;
 		};
-		const luminance = 0.299 * normalize(rHex) + 0.587 * normalize(gHex) + 0.114 * normalize(bHex);
+		const r = normalize(rHex);
+		const g = normalize(gHex);
+		const b = normalize(bHex);
+		setTerminalBackgroundColor((Math.round(r * 255) << 16) | (Math.round(g * 255) << 8) | Math.round(b * 255));
+		const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
 		const mode: TerminalAppearance = luminance < 0.5 ? "dark" : "light";
 		const changed = mode !== this.#appearance;
 		this.#appearance = mode;
@@ -2097,7 +2121,7 @@ export class ProcessTerminal implements Terminal {
 		clearTimeout(this.#win32PendingFlushTimer);
 		this.#win32PendingFlushTimer = undefined;
 		const pending = this.#win32InputDecoder?.flushPendingSequence() ?? [];
-		for (const key of pending) this.#inputHandler?.(key);
+		for (const key of pending) this.#stdinSequenceHandler?.(key);
 	}
 
 	#disableWin32InputMode(): void {
@@ -2295,12 +2319,29 @@ export class ProcessTerminal implements Terminal {
 		process.stdin.on("data", onData);
 		const endTime = Date.now() + maxMs;
 
+		// A terminal that answers DA1 (`#sixelSupport` is set from its first
+		// reply) answers this one after everything it sent before reading it:
+		// replies to output already written (TSP acks for the last frames, which
+		// a terminal may send well after the idle window) are read here instead
+		// of reaching the shell as typed text.
+		let sentinelAnswered = true;
+		if (this.#sixelSupport !== undefined && !this.#dead) {
+			sentinelAnswered = false;
+			this.#da1SentinelOwners.push({
+				kind: "drain",
+				answered: () => {
+					sentinelAnswered = true;
+				},
+			});
+			this.#safeWrite("\x1b[c");
+		}
+
 		try {
 			while (true) {
 				const now = Date.now();
 				const timeLeft = endTime - now;
 				if (timeLeft <= 0) break;
-				if (now - lastDataTime >= idleMs) break;
+				if (sentinelAnswered && now - lastDataTime >= idleMs) break;
 				await new Promise(resolve => setTimeout(resolve, Math.min(idleMs, timeLeft)));
 			}
 		} finally {
@@ -2313,11 +2354,13 @@ export class ProcessTerminal implements Terminal {
 		// Suppress observer/timer callbacks before any teardown can yield or throw.
 		this.#active = false;
 		this.#inputDeferred = false;
-		if (this.#headless) return;
 		// Release stdout ownership (out-of-band writers and emergency cleanup)
+		// before headless/teardown exits, without disturbing another owner's RGB.
 		if (getActiveTerminal() === this) {
 			setActiveTerminal(null);
+			setTerminalBackgroundColor(undefined);
 		}
+		if (this.#headless) return;
 
 		// Release terminal ownership of fd 2 first so external programs,
 		// suspend, and shutdown see the real stderr even if a later teardown
@@ -2433,6 +2476,7 @@ export class ProcessTerminal implements Terminal {
 			this.#stdinBuffer.destroy();
 			this.#stdinBuffer = undefined;
 		}
+		this.#stdinSequenceHandler = undefined;
 
 		// Remove event handlers
 		if (this.#stdinDataHandler) {

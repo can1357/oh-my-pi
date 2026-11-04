@@ -15,7 +15,7 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use crate::openfile::OpenFile;
 use clap::{Arg, ArgMatches, Command};
 use pi_vfs::{File, OpenOptions};
 use uucore::{
@@ -25,7 +25,7 @@ use uucore::{
 };
 
 use self::human::human_readable;
-use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno};
 
 /// Default `ibs`/`obs`.
 const DEFAULT_BLOCKSIZE: usize = 512;
@@ -172,8 +172,7 @@ impl Utility for Dd {
 		let operands: Vec<OsString> = self
 			.matches
 			.get_many::<OsString>(OPERANDS)
-			.map(|values| values.cloned().collect())
-			.unwrap_or_default();
+			.map_or_default(|values| values.cloned().collect());
 		let settings = match parse_operands(host, &operands) {
 			Ok(settings) => settings,
 			Err(code) => return code,
@@ -252,11 +251,6 @@ fn app() -> Command {
 		.after_help(AFTER_HELP)
 		.infer_long_args(true)
 		.arg(Arg::new(OPERANDS).num_args(1..).value_parser(clap::value_parser!(OsString)))
-}
-
-/// Creates the `dd` builtin registration.
-pub(crate) fn dd_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Dd, SE>()
 }
 
 // ---------------------------------------------------------------------------
@@ -753,7 +747,15 @@ fn open_flags(flags: u32, input: bool) -> i32 {
 		let _ = input;
 		open
 	}
-	#[cfg(not(unix))]
+	// POSIX opens a directory for reading and fails the first read (EISDIR);
+	// Win32 refuses to open one at all unless asked for backup semantics.
+	#[cfg(windows)]
+	{
+		use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+		let _ = flags;
+		if input { FILE_FLAG_BACKUP_SEMANTICS as i32 } else { 0 }
+	}
+	#[cfg(not(any(unix, windows)))]
 	{
 		let _ = (flags, input);
 		0
@@ -768,13 +770,10 @@ fn try_zeroed(len: usize) -> Option<Vec<u8>> {
 	}
 	let layout = std::alloc::Layout::array::<u8>(len).ok()?;
 	// SAFETY: `layout` has a non-zero size.
-	let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
-	if ptr.is_null() {
-		return None;
-	}
+	let ptr = std::ptr::NonNull::new(unsafe { std::alloc::alloc_zeroed(layout) })?;
 	// SAFETY: `ptr` came from the global allocator with the layout of `len`
 	// bytes, all initialized (zeroed); capacity equals that allocation.
-	Some(unsafe { Vec::from_raw_parts(ptr, len, len) })
+	Some(unsafe { Vec::from_parts(ptr, len, len) })
 }
 
 // ---------------------------------------------------------------------------
@@ -1093,7 +1092,20 @@ impl<'h> Copier<'h> {
 
 	fn read_input(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		match self.input.as_mut() {
-			Some(file) => file.read(buf),
+			Some(file) => {
+				let result = file.read(buf);
+				// Reading a directory handle fails with ERROR_INVALID_FUNCTION
+				// ("Incorrect function"); POSIX reports EISDIR.
+				#[cfg(windows)]
+				if let Err(error) = &result
+					&& error.raw_os_error()
+						== Some(windows_sys::Win32::Foundation::ERROR_INVALID_FUNCTION as i32)
+					&& file.metadata().is_ok_and(|meta| meta.is_dir())
+				{
+					return Err(pi_vfs::is_a_directory());
+				}
+				result
+			},
 			None => self.host.stdin.read(buf),
 		}
 	}
@@ -1733,8 +1745,8 @@ impl Copier<'_> {
 			len -= 1;
 			self.saved_byte = Some(ibuf[from + len]);
 		}
-		for pair in ibuf[from..from + len].chunks_exact_mut(2) {
-			pair.swap(0, 1);
+		for [a, b] in ibuf[from..from + len].as_chunks_mut::<2>().0 {
+			std::mem::swap(a, b);
 		}
 		(from, len)
 	}
@@ -1966,7 +1978,7 @@ mod tests {
 		sync::{Arc, Mutex},
 	};
 
-	use brush_core::openfiles;
+	use crate::openfile as openfiles;
 	use clap::Parser;
 
 	use super::*;
@@ -2008,21 +2020,7 @@ mod tests {
 		}
 	}
 
-	impl openfiles::Stream for Chunked {
-		fn clone_box(&self) -> Box<dyn openfiles::Stream> {
-			Box::new(self.clone())
-		}
-
-		#[cfg(unix)]
-		fn try_clone_to_owned(&self) -> Result<std::os::fd::OwnedFd, brush_core::Error> {
-			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
-		}
-
-		#[cfg(unix)]
-		fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, brush_core::Error> {
-			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
-		}
-	}
+	impl openfiles::Stream for Chunked {}
 
 	struct Outcome {
 		code: i32,
@@ -2371,7 +2369,7 @@ mod tests {
 		let (_dir, root) = tempdir();
 		let outcome = run(&["if=."], b"", &root);
 		assert_eq!(outcome.code, 1);
-		assert!(outcome.err.starts_with("dd: error reading '.': "), "{}", outcome.err);
+		assert!(outcome.err.starts_with("dd: error reading '.': Is a directory\n"), "{}", outcome.err);
 		assert!(outcome.stats().ends_with("0+0 records in\n0+0 records out\n0 bytes copied, T, R\n"));
 	}
 

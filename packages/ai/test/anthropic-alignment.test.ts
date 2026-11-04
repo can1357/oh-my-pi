@@ -9,17 +9,15 @@ import { NO_AUTH_SENTINEL } from "@oh-my-pi/pi-ai/auth-retry";
 import {
 	applyClaudeToolPrefix,
 	buildAnthropicClientOptions,
-	buildAnthropicHeaders,
 	claudeCodeSystemInstruction,
 	claudeToolPrefix,
 	deriveClaudeDeviceId,
 	generateClaudeCloakingUserId,
 	isClaudeCloakingUserId,
-	mapStainlessArch,
-	mapStainlessOs,
 	streamAnthropic,
 	stripClaudeToolPrefix,
 } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { buildAnthropicHeaders, mapStainlessArch, mapStainlessOs } from "@oh-my-pi/pi-ai/providers/anthropic-headers";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import { getClaudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
@@ -37,6 +35,7 @@ import type {
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
+import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 
 const ANTHROPIC_MODEL_SPEC: ModelSpec<"anthropic-messages"> = {
 	id: "claude-sonnet-4-5",
@@ -132,6 +131,23 @@ function captureSimpleAnthropicPayload(
 		onPayload: payload => resolve(payload),
 	});
 	return promise;
+}
+
+function countSerializedSchemaParameters(schema: unknown): { optionalCount: number; unionCount: number } {
+	const counts = { optionalCount: 0, unionCount: 0 };
+	const visit = (node: unknown): void => {
+		if (node === null || typeof node !== "object") return;
+		const record = node as Record<string, unknown>;
+		if (record.properties !== null && typeof record.properties === "object") {
+			const required = new Set(Array.isArray(record.required) ? record.required : []);
+			counts.optionalCount += Object.keys(record.properties).filter(name => !required.has(name)).length;
+		}
+		if (Array.isArray(record.type) || Array.isArray(record.anyOf)) counts.unionCount++;
+		for (const value of Object.values(node)) visit(value);
+	};
+	// Match the wire representation, without deduplicating shared schema objects.
+	visit(JSON.parse(JSON.stringify(schema)));
+	return counts;
 }
 
 function expectClaudeMetadataUserId(userId: string | undefined, expectedSessionId?: string): void {
@@ -1880,6 +1896,70 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.tools?.find(tool => tool.name === "edit")?.input_schema?.required).toEqual(["requiredValue"]);
 	});
 
+	for (const copies of [11, 12]) {
+		it(`charges optional parameters for all ${copies} occurrences of a shared schema`, async () => {
+			const shared = {
+				type: "object",
+				properties: { first: { type: "string" }, second: { type: "string" } },
+			};
+			const payloads: Array<{ tools: Array<{ strict?: boolean; input_schema: unknown }> }> = [];
+			for (const reuse of [true, false]) {
+				const properties = Object.fromEntries(
+					Array.from({ length: copies }, (_, index) => [`item${index}`, reuse ? shared : structuredClone(shared)]),
+				);
+				const parameters = { type: "object", properties, required: Object.keys(properties) } as TJsonSchema;
+				payloads.push(
+					(await captureAnthropicPayload(
+						ANTHROPIC_MODEL,
+						{
+							messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+							tools: [
+								{
+									name: "find",
+									description: "Find a value",
+									parameters: { type: "object", properties: { query: { type: "string" } } } as TJsonSchema,
+								},
+								{ name: "edit", description: "Edit values", parameters },
+							],
+						},
+						{ isOAuth: false },
+					)) as { tools: Array<{ strict?: boolean; input_schema: unknown }> },
+				);
+			}
+
+			for (const payload of payloads) {
+				const counts = countSerializedSchemaParameters(
+					payload.tools.filter(tool => tool.strict).map(tool => tool.input_schema),
+				);
+				expect(counts.unionCount).toBeLessThanOrEqual(16);
+				expect(payload.tools[0].strict).toBe(true);
+				expect(payload.tools[1].strict).toBe(true);
+				expect(counts.optionalCount).toBe(copies === 11 ? 23 : 24);
+			}
+			expect(JSON.stringify(payloads[0].tools)).toBe(JSON.stringify(payloads[1].tools));
+		});
+	}
+
+	for (const copies of [16, 17]) {
+		it(`charges union parameters for all ${copies} occurrences of a shared schema`, async () => {
+			const shared = { anyOf: [{ type: "string" }, { type: "number" }] };
+			const properties = Object.fromEntries(Array.from({ length: copies }, (_, index) => [`item${index}`, shared]));
+			const parameters = { type: "object", properties, required: Object.keys(properties) } as TJsonSchema;
+			const payload = (await captureAnthropicPayload(
+				ANTHROPIC_MODEL,
+				{
+					messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+					tools: [{ name: "edit", description: "Edit values", parameters }],
+				},
+				{ isOAuth: false },
+			)) as { tools: Array<{ strict?: boolean; input_schema: unknown }> };
+
+			const tool = payload.tools[0];
+			expect(tool.strict).toBe(copies === 16 ? true : undefined);
+			if (tool.strict) expect(countSerializedSchemaParameters(tool.input_schema).unionCount).toBeLessThanOrEqual(16);
+		});
+	}
+
 	it("sends yield with buffered input streaming while other tools stream eagerly", async () => {
 		const tools: Tool[] = (["yield", "read"] as const).map(name => ({
 			name,
@@ -3095,14 +3175,14 @@ describe("Anthropic request fingerprint alignment", () => {
 });
 
 describe("cch attestation", () => {
-	it("wrapFetchForCch: replaces cch=00000 with correct XXHash64 in outgoing request body", async () => {
+	it("wrapFetchForCch: patches cch over the uncompressed body before the transport gzips it", async () => {
 		const { promise: bodyPromise, resolve: bodyResolve } = Promise.withResolvers<string>();
 		const controller = new AbortController();
 
+		let gzipped = false;
 		const fakeFetch = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-			const raw = init?.body;
-			const body = typeof raw === "string" ? raw : new TextDecoder().decode(raw as Uint8Array);
-			bodyResolve(body);
+			gzipped = new Headers(init?.headers).get("content-encoding") === "gzip";
+			bodyResolve(requestBodyText(init) ?? "");
 			controller.abort();
 			return new Response('event: message_stop\ndata: {"type":"message_stop"}\n\n', {
 				status: 200,
@@ -3114,12 +3194,14 @@ describe("cch attestation", () => {
 			ANTHROPIC_MODEL,
 			{
 				systemPrompt: ["Be helpful."],
-				messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
+				// Above the gzip floor, so the official-API request is compressed.
+				messages: [{ role: "user", content: "hello ".repeat(500), timestamp: Date.now() }],
 			},
 			{ apiKey: "sk-ant-oat-test", isOAuth: true, signal: controller.signal, fetch: fakeFetch },
 		);
 
 		const capturedBody = await bodyPromise;
+		expect(gzipped).toBe(true);
 
 		// The placeholder must have been replaced before the request was sent.
 		expect(capturedBody).toContain("cch=");

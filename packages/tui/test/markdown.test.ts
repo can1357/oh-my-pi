@@ -189,6 +189,39 @@ describe("Markdown component", () => {
 			expect(plainLines.join("")).toContain("x");
 		});
 
+		it("renders a table inside an ordered list item under its continuation indent", () => {
+			const source = `10. **Keep:**
+
+    | Part | Why |
+    |---|---|
+    | pi | MIT |
+11. Next item`;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+			const lines = markdown.render(30).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(lines[0]).toBe("10. Keep:");
+			expect(lines.filter(line => line.startsWith("    |"))).toHaveLength(2);
+			expect(lines.some(line => line.includes("pi") && line.includes("MIT"))).toBe(true);
+			expect(lines.at(-1)).toBe("11. Next item");
+			expect(lines.every(line => visibleWidth(line) <= 30)).toBe(true);
+		});
+
+		it("keeps a narrow list-item table visible as raw markdown", () => {
+			const source = `10. Keep:
+
+    | Part | Why |
+    |---|---|
+    | pi | MIT |`;
+			const lines = new Markdown(source, 0, 0, defaultMarkdownTheme)
+				.render(10)
+				.map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(lines[0]).toBe("10. Keep:");
+			expect(lines.slice(1).join("\n")).toContain("Part");
+			expect(lines.slice(1).join("\n")).toContain("MIT");
+			expect(lines.every(line => visibleWidth(line) <= 10)).toBe(true);
+		});
+
 		it("should maintain numbering when code blocks are not indented (LLM output)", () => {
 			// When code blocks aren't indented, marked parses each item as a separate list.
 			// We use token.start to preserve the original numbering.
@@ -397,6 +430,82 @@ Average Latency: 1,240 ms
 				expect(rendered.slice(0, settled.length - 1)).toEqual(settled.slice(0, -1));
 				expect(rendered.slice(settled.length - 1).some(line => line.includes(shown))).toBe(true);
 			}
+		});
+
+		it("keeps a streaming table's height while its last row's open cell grows, then shows it whole", () => {
+			const table = "| # | Name | Score |\n| --- | --- | --- |\n| 1 | black | 1.1 |\n| 2 | bright";
+			const label = "green with a long label that wraps";
+			const markdown = new Markdown(table, 0, 0, defaultMarkdownTheme);
+			markdown.transientRenderCache = true;
+			const frame = (tail: string): string[] => {
+				clearRenderCache();
+				markdown.setText(table + tail);
+				return markdown.render(40).map(line => stripVTControlCharacters(line));
+			};
+			const open = [" gr", " green", ` ${label}`].map(frame);
+			const closed = frame(` ${label} | 2.2 |`);
+			clearRenderCache();
+			// Rows below the table would move by the difference between any two frames.
+			const height = open[0]!.length;
+			expect(open.map(lines => lines.length)).toEqual([height, height, height]);
+			// The held-back tail of the open cell reads as hidden.
+			expect(open[2]!.some(line => line.includes("…"))).toBe(true);
+			// Closing the cell never shrinks the table, and every word of the label shows.
+			expect(closed.length).toBeGreaterThanOrEqual(height);
+			const shown = closed
+				.join(" ")
+				.replace(/[│|]/g, " ")
+				.split(/\s+/);
+			expect(label.split(" ").every(word => shown.includes(word))).toBe(true);
+		});
+
+		it("marks a held streaming cell's hidden lines even when they came from explicit breaks", () => {
+			const table = "| # | Description of the row |\n| --- | --- |\n| 1 | short |\n| 2 | First<br><br>Second";
+			const markdown = new Markdown(table, 0, 0, defaultMarkdownTheme);
+			markdown.transientRenderCache = true;
+			clearRenderCache();
+			const lines = markdown.render(60).map(line => stripVTControlCharacters(line));
+			clearRenderCache();
+			const row = lines.filter(line => line.includes("First"));
+			// The row keeps its settled single line and says lines are held back.
+			expect(row.length).toBe(1);
+			expect(row[0]).toContain("…");
+			expect(lines.some(line => line.includes("Second"))).toBe(false);
+		});
+
+		it("keeps a held streaming cell's visible lines when its column is one cell wide", () => {
+			const markdown = new Markdown(
+				"| a | b |\n| --- | --- |\n| 1 | 2 |\n| x<br>y<br>z | defgh",
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			markdown.transientRenderCache = true;
+			clearRenderCache();
+			const lines = markdown.render(12).map(line => stripVTControlCharacters(line).trimEnd());
+			clearRenderCache();
+			// Only the last held line gives way to the marker; the lines above it fit and stay.
+			expect(lines.slice(-4, -1)).toEqual(["| x | d |", "| y | e |", "| z | … |"]);
+		});
+
+		it("keeps a held streaming cell's marker inside a two-cell column holding wide glyphs", () => {
+			const markdown = new Markdown(
+				"| a | bb |\n| --- | --- |\n| 1 | 22 |\n| x<br>y | 漢字漢",
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			markdown.transientRenderCache = true;
+			clearRenderCache();
+			const lines = markdown.render(12);
+			clearRenderCache();
+			const widths = new Set(lines.map(line => visibleWidth(line)));
+			// Every row, the held one included, keeps the table's border column.
+			expect(widths.size).toBe(1);
+			expect(lines.map(line => stripVTControlCharacters(line).trimEnd()).slice(-3, -1)).toEqual([
+				"| x | 漢 |",
+				"| y | …  |",
+			]);
 		});
 
 		it("measures a streaming table's finished last row even without its trailing newline", () => {
@@ -1565,6 +1674,23 @@ bar`,
 			return { visible, targets };
 		}
 
+		it("keeps a held streaming cell's link from spilling into the marker and borders", () => {
+			// The link fills the open cell's first wrapped line, so holding the row
+			// at one line cuts the cell inside the link.
+			const table = "| # | Link |\n| --- | --- |\n| 1 | a |\n| 2 | [documentation](https://example.com/x) more";
+			const markdown = new Markdown(table, 0, 0, defaultMarkdownTheme);
+			markdown.transientRenderCache = true;
+			clearRenderCache();
+			const lines = markdown.render(24);
+			clearRenderCache();
+			const row = lines.map(inspectHyperlinks).filter(line => line.visible.includes("…"));
+			expect(row.length).toBe(1);
+			// Only the link text itself may carry the target; the marker and the
+			// table borders after it must not become clickable.
+			const { visible, targets } = row[0]!;
+			for (let i = visible.indexOf("…"); i < visible.length; i++) expect(targets[i]).toBeNull();
+		});
+
 		it("should not duplicate URL for autolinked emails", () => {
 			const markdown = new Markdown("Contact user@example.com for help", 0, 0, defaultMarkdownTheme);
 
@@ -1608,6 +1734,63 @@ bar`,
 				expect(line.split(`\x1b]8;;${url}\x07`)).toHaveLength(2);
 				expect(line.match(/\x1b\]8;;\x07/g)).toHaveLength(1);
 				expect(new Set(inspectHyperlinks(line).targets.filter(target => target !== null))).toEqual(new Set([url]));
+			}
+		});
+
+		it("links every wrapped fragment of a URL in a fenced code block, and only when hyperlinks are on (issue #12321)", () => {
+			const url =
+				"https://example.com/very/long/path/segment-one/segment-two/segment-three/segment-four?query=value&another=value";
+			const text = `\`\`\`\n${url}\n\`\`\``;
+			// Highlighters can split a URL across several SGR spans; the link must span them all.
+			const highlighted = {
+				...defaultMarkdownTheme,
+				highlightCode: (code: string): string[] =>
+					code.split("\n").map(line => `\x1b[32m${line.slice(0, 30)}\x1b[39m\x1b[33m${line.slice(30)}\x1b[39m`),
+			};
+
+			for (const theme of [defaultMarkdownTheme, highlighted]) {
+				clearRenderCache();
+				const lines = new Markdown(text, 0, 0, theme).render(40);
+				const fragments = lines.filter(line => inspectHyperlinks(line).targets.includes(url));
+				expect(fragments.length).toBeGreaterThan(2);
+				for (const line of fragments) {
+					const { visible, targets } = inspectHyperlinks(line);
+					expect(line.split(`\x1b]8;;${url}\x07`)).toHaveLength(2);
+					expect(line.match(/\x1b\]8;;\x07/g)).toHaveLength(1);
+					expect(visible.length).toBeLessThanOrEqual(40);
+					for (let i = 0; i < visible.length; i++) {
+						if (visible[i] !== " ") expect(targets[i]).toBe(url);
+					}
+				}
+				const linkedText = fragments.map(line => inspectHyperlinks(line).visible.trimEnd()).join("");
+				expect(linkedText).toBe(url);
+
+				terminalState.hyperlinks = false;
+				try {
+					clearRenderCache();
+					const plainLines = new Markdown(text, 0, 0, theme).render(40);
+					expect(plainLines.join("")).not.toContain("\x1b]8;");
+					expect(plainLines.map(line => inspectHyperlinks(line).visible)).toEqual(
+						lines.map(line => inspectHyperlinks(line).visible),
+					);
+				} finally {
+					terminalState.hyperlinks = true;
+				}
+			}
+		});
+
+		it("leaves an unbalanced closing bracket after a code-block URL out of the link", () => {
+			const cases = [
+				["urls = [https://a.com/x]", "https://a.com/x"],
+				["{https://a.com/x}", "https://a.com/x"],
+				["(https://a.com/x),", "https://a.com/x"],
+				["https://a.com/w[1]", "https://a.com/w[1]"],
+			] as const;
+			for (const [code, target] of cases) {
+				clearRenderCache();
+				const lines = new Markdown(`\`\`\`\n${code}\n\`\`\``, 0, 0, defaultMarkdownTheme).render(80);
+				const targets = lines.flatMap(line => inspectHyperlinks(line).targets).filter(t => t !== null);
+				expect(new Set(targets)).toEqual(new Set([target]));
 			}
 		});
 
@@ -2150,6 +2333,40 @@ describe("Module-level LRU render cache", () => {
 		const closed = stripVTControlCharacters(markdown.render(80).join("\n"));
 		expect(closed).toContain("F<def f():>");
 		expect(pushes).toEqual(["def f():\n", "    x = 1\n"]);
+	});
+
+	it("settles an open fence's finished lines so a long block can retire", () => {
+		// A fenced block never reaches a "\n\n" boundary, so the block walk alone
+		// settles nothing for it and a long streamed SQL/log block stays in the
+		// mutable viewport, losing every row that leaves the screen (#9780).
+		clearRenderCache();
+		const markdown = new Markdown("```sql\nSELECT 1;\nSELECT 2;\nSELECT 3;", 0, 0, defaultMarkdownTheme);
+		markdown.transientRenderCache = true;
+		markdown.render(80);
+		// The last two lines stay live: the newest is still being written, and the
+		// cut keeps one more so the publisher always has a tail to extend.
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nSELECT 1;\n");
+
+		markdown.setText("```sql\nSELECT 1;\nSELECT 2;\nSELECT 3;\nSELECT 4;");
+		markdown.render(80);
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nSELECT 1;\nSELECT 2;\n");
+	});
+
+	it("clears the settled fence text when a non-append edit rewinds it", () => {
+		// Regression: the stored prefix survived a rewind, so every later frame
+		// failed the prefix check and the block stayed unretirable for the rest
+		// of the stream.
+		clearRenderCache();
+		const markdown = new Markdown("```sql\nold\nrow\n", 0, 0, defaultMarkdownTheme);
+		markdown.transientRenderCache = true;
+		markdown.render(80);
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nold\n");
+
+		markdown.setText("```sql\nnew\nrow\n");
+		markdown.render(80);
+		markdown.setText("```sql\nnew\nrow\nthird\nfourth\n");
+		markdown.render(80);
+		expect(markdown.getLastRenderStableText()).toBe("```sql\nnew\nrow\nthird\n");
 	});
 
 	it("keeps an open fence plain when the highlight stream factory rejects the language", () => {
@@ -2885,12 +3102,22 @@ describe("large documents", () => {
 	for (const [name, doc] of displayMathScans) {
 		it(`lexes ${name} in time proportional to the document`, () => {
 			// CPU time, not wall time: a parallel run deschedules this process,
-			// which stretches wall time without adding work.
+			// which stretches wall time without adding work. Some platforms
+			// (Windows) account CPU time in ~16ms ticks, coarser than one lex of
+			// the small document, so each sample repeats the lex until it spans
+			// many ticks and reports the cost of one pass.
+			const minSampleMicros = 100_000;
 			const cost = (text: string): number => {
 				const start = process.cpuUsage();
-				extractMarkdownLinks(text);
-				const { user, system } = process.cpuUsage(start);
-				return user + system;
+				let passes = 0;
+				let elapsed = 0;
+				do {
+					extractMarkdownLinks(text);
+					passes++;
+					const { user, system } = process.cpuUsage(start);
+					elapsed = user + system;
+				} while (elapsed < minSampleMicros);
+				return elapsed / passes;
 			};
 			const small = doc(32 * 1024);
 			const large = doc(512 * 1024);

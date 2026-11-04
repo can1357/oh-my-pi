@@ -594,7 +594,7 @@ async function fetchGitHubJobLogs(
 	jobId: number,
 	timeout: number,
 	signal?: AbortSignal,
-): Promise<string | null> {
+): Promise<{ content: string; truncated: boolean } | null> {
 	const headers: Record<string, string> = {
 		Accept: "application/vnd.github+json",
 		"X-GitHub-Api-Version": "2022-11-28",
@@ -608,7 +608,7 @@ async function fetchGitHubJobLogs(
 		headers,
 		signal,
 	});
-	return result.ok && result.content ? result.content : null;
+	return result.ok && result.content ? { content: result.content, truncated: Boolean(result.truncated) } : null;
 }
 
 /**
@@ -653,7 +653,7 @@ async function renderGitHubActionsJob(
 	gh: GitHubUrl,
 	timeout: number,
 	signal?: AbortSignal,
-): Promise<{ content: string; ok: boolean }> {
+): Promise<{ content: string; ok: boolean; truncated?: boolean }> {
 	// The URL already names the run, so its context can load alongside the job.
 	const runEndpoint = (runId: number | undefined) => `/repos/${gh.owner}/${gh.repo}/actions/runs/${runId}`;
 	const [jobResult, urlRunResult] = await Promise.all([
@@ -688,10 +688,10 @@ async function renderGitHubActionsJob(
 	const logs = await fetchGitHubJobLogs(gh.owner, gh.repo, job.id, timeout, signal);
 	md += `## Logs\n\n`;
 	md += logs
-		? stripActionsLogTimestamps(logs)
+		? stripActionsLogTimestamps(logs.content)
 		: "*Logs unavailable — requires a GITHUB_TOKEN/GH_TOKEN with read access, or the run's logs have expired.*\n";
 
-	return { content: md, ok: true };
+	return { content: md, ok: true, truncated: logs?.truncated };
 }
 
 /**
@@ -722,6 +722,7 @@ export const handleGitHub: SpecialHandler = async (
 					fetchedAt,
 					notes,
 					contentType: "text/plain",
+					truncated: result.truncated,
 				});
 			}
 			break;
@@ -791,7 +792,13 @@ export const handleGitHub: SpecialHandler = async (
 			notes.push(`Fetched via GitHub API`);
 			const result = await renderGitHubActionsJob(gh, timeout, signal);
 			if (result.ok) {
-				return buildResult(result.content, { url, method: "github-actions-job", fetchedAt, notes });
+				return buildResult(result.content, {
+					url,
+					method: "github-actions-job",
+					fetchedAt,
+					notes,
+					truncated: result.truncated,
+				});
 			}
 			break;
 		}

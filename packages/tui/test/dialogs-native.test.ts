@@ -113,6 +113,26 @@ describe("dialogs under a native surface", () => {
 		expect(onSubmit.mock.calls[0]?.[0].results[1].selectedOptions).toEqual(["Yes"]);
 	});
 
+	it("ask: Next after a cancelled Other moves on to the review instead of reopening the editor", async () => {
+		const onPrompt = vi.fn(async () => undefined);
+		const dialog = new AskDialogComponent(QUESTIONS, { onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt });
+		dialog.handleInput(ENTER);
+		const options = find(dialog.describe(CX), node => node.p?.role === "omp.ask.options");
+		dialog.handleNativeEvent({ type: "activate", key: options!.path, item: "other" });
+		// The dialog awaits this same promise first, so its cancel handling has run once it settles.
+		await onPrompt.mock.results[0]?.value;
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		dialog.handleNativeEvent({ type: "action", key: "x", act: "submit", mods: [] });
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		const answers = find(dialog.describe(CX), node => node.p?.role === "omp.ask.answers")?.node.p as
+			| { items: { k: string; v: { t: string }[] }[] }
+			| undefined;
+		expect(answers?.items.map(entry => [entry.k, entry.v.map(part => part.t).join("")])).toEqual([
+			["policy", "Park them"],
+			["flag", "Unanswered"],
+		]);
+	});
+
 	it("ask: docks in place of the composer instead of a modal sheet over the transcript", async () => {
 		// A modal bottom sheet hid the transcript rows explaining the question and blocked scrolling.
 		const transcript: Component = { render: () => [], invalidate: () => {}, describe: () => md("Why this decision") };
@@ -214,14 +234,15 @@ describe("dialogs under a native surface", () => {
 				inputGuard: {
 					isBlocked: () => draft.length > 0,
 					handleInput: key => routed.push(key),
-					hint: "Finish or clear the current prompt to answer",
+					hint: "typing edits your prompt",
 				},
 			},
 		);
 		const line = () => stripVTControlCharacters(dialog.render(200).join("\n"));
 
 		dialog.handleInput("\x1bh");
-		expect(line()).toContain("Finish or clear the current prompt to answer");
+		// A Submit delivered after Hide is stale: it must not hand input to the question.
+		dialog.handleNativeEvent({ type: "action", key: "x", act: "submit", mods: [] });
 		expect(line()).not.toContain("/⏎ show");
 		dialog.handleInput(ENTER);
 		expect(routed).toEqual([ENTER]);
@@ -233,7 +254,7 @@ describe("dialogs under a native surface", () => {
 		expect(dialog.render(200).length).toBeGreaterThan(1);
 	});
 
-	it("approval: Enter never approves; the follow-up chord is ignored until armed, then approves; Esc denies", () => {
+	it("approval: Enter and the follow-up chord are ignored until armed; then Enter takes the highlighted choice", () => {
 		const prompt = "Allow tool: write\nPath: /tmp/out.txt";
 		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
 		try {
@@ -243,6 +264,7 @@ describe("dialogs under a native surface", () => {
 			for (const key of [ENTER, "\r", "\x1b[13;5u", "\x11"]) dialog.handleInput(key);
 			now.mockReturnValue(1_000 + APPROVE_ARM_MS - 1);
 			dialog.handleInput("\x1b[13;5u");
+			dialog.handleInput(ENTER);
 			expect(keyed.onApprove).not.toHaveBeenCalled();
 			expect(keyed.onDeny).not.toHaveBeenCalled();
 			now.mockReturnValue(1_000 + APPROVE_ARM_MS);
@@ -252,6 +274,20 @@ describe("dialogs under a native surface", () => {
 			expect(keyed.onApprove).toHaveBeenCalledTimes(1);
 			expect(keyed.onDeny).not.toHaveBeenCalled();
 
+			// The arrows wrap between Approve and Deny; Enter takes the highlighted one.
+			const listed = { onApprove: vi.fn(), onDeny: vi.fn() };
+			const list = new ApprovalDialogComponent(prompt, listed);
+			now.mockReturnValue(1_000 + 2 * APPROVE_ARM_MS);
+			list.handleInput(UP);
+			expect(stripVTControlCharacters(list.render(60).join("\n"))).toMatch(/\S Deny/);
+			list.handleInput(ENTER);
+			expect(listed.onDeny).toHaveBeenCalledTimes(1);
+			expect(listed.onApprove).not.toHaveBeenCalled();
+			const defaulted = { onApprove: vi.fn(), onDeny: vi.fn() };
+			const approveFirst = new ApprovalDialogComponent(prompt, defaulted);
+			now.mockReturnValue(1_000 + 3 * APPROVE_ARM_MS);
+			approveFirst.handleInput(ENTER);
+			expect(defaulted.onApprove).toHaveBeenCalledTimes(1);
 			// Denying and clicking Approve are deliberate, so neither waits to arm.
 			const denied = { onApprove: vi.fn(), onDeny: vi.fn() };
 			new ApprovalDialogComponent(prompt, denied).handleInput("\x1b");
@@ -266,7 +302,111 @@ describe("dialogs under a native surface", () => {
 		}
 	});
 
-	it("approval: with a composer draft, typing edits it, an empty Enter is swallowed, and arrows scroll only while it is empty", () => {
+	it("approval: the session row sits between Approve and Deny; the arrows reach it, Enter or a Tern click takes it", () => {
+		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+		try {
+			const callbacks = { onApprove: vi.fn(), onDeny: vi.fn() };
+			const onSession = vi.fn();
+			const dialog = new ApprovalDialogComponent("Allow tool: bash\nCommand: ls", callbacks, {
+				session: { label: "Approve bash for this session", onApprove: onSession },
+			});
+			const rows = () =>
+				stripVTControlCharacters(dialog.render(80).join("\n"))
+					.split("\n")
+					.filter(line => /Approve|Deny/.test(line));
+			const choices = () => find(dialog.describe(), node => node.p?.role === "omp.approval.choices")!;
+			const selected = () => {
+				const props = choices().node.p;
+				return props && "selected" in props ? props.selected : undefined;
+			};
+			expect(rows().map(line => line.replace(/[│❯>\s]+/g, " ").trim())).toEqual([
+				"Approve",
+				"Approve bash for this session",
+				"Deny",
+			]);
+			dialog.handleInput(DOWN);
+			// Tern's list shows the same highlight the arrows moved.
+			expect(selected()).toBe("session");
+			now.mockReturnValue(1_000 + APPROVE_ARM_MS);
+			dialog.handleInput(ENTER);
+			expect(onSession).toHaveBeenCalledTimes(1);
+			expect(callbacks.onApprove).not.toHaveBeenCalled();
+
+			const clicked = { onApprove: vi.fn(), onDeny: vi.fn() };
+			const pointed = new ApprovalDialogComponent("Allow tool: bash\nCommand: ls", clicked);
+			const list = find(pointed.describe(), node => node.p?.role === "omp.approval.choices")!;
+			pointed.handleNativeEvent({ type: "select", key: list.path, item: "deny" });
+			expect(clicked.onDeny).toHaveBeenCalledTimes(1);
+		} finally {
+			now.mockRestore();
+		}
+	});
+
+	it("approval: grants sit above Approve Once, the toggle keeps them across sessions, Enter or a Tern click takes one", () => {
+		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+		try {
+			const callbacks = { onApprove: vi.fn(), onDeny: vi.fn() };
+			const onGrant = vi.fn();
+			const folder = { label: "Approve Directory: ~/src", alwaysLabel: "Always Approve Directory: ~/src" };
+			const file = { label: "Approve File", alwaysLabel: "Always Approve File" };
+			const dialog = new ApprovalDialogComponent("Allow tool: write\nPath: a.ts", callbacks, {
+				grants: [folder, file],
+				onGrant,
+			});
+			const rows = () =>
+				stripVTControlCharacters(dialog.render(80).join("\n"))
+					.split("\n")
+					.filter(line => /Approve|Deny|Remember/.test(line))
+					.map(line => line.replace(/[│❯>\s]+/g, " ").trim());
+			expect(rows().slice(1)).toEqual(["Approve Directory: ~/src", "Approve File", "Approve Once", "Deny"]);
+			now.mockReturnValue(1_000 + APPROVE_ARM_MS);
+			// Approve Once is highlighted on mount: the least the call can be granted.
+			for (let step = 0; step < 3; step++) dialog.handleInput(UP);
+			dialog.handleInput(ENTER);
+			expect(rows().slice(1, 3)).toEqual(["Always Approve Directory: ~/src", "Always Approve File"]);
+			dialog.handleInput(DOWN);
+			dialog.handleInput(DOWN);
+			dialog.handleInput(ENTER);
+			expect(onGrant).toHaveBeenCalledWith(file, true);
+			expect(callbacks.onApprove).not.toHaveBeenCalled();
+
+			const clicked = vi.fn();
+			const pointed = new ApprovalDialogComponent("Allow tool: write\nPath: a.ts", callbacks, {
+				grants: [folder, file],
+				onGrant: clicked,
+			});
+			const list = find(pointed.describe(), node => node.p?.role === "omp.approval.choices")!;
+			pointed.handleNativeEvent({ type: "select", key: list.path, item: "grant0" });
+			expect(clicked).toHaveBeenCalledWith(folder, false);
+		} finally {
+			now.mockRestore();
+		}
+	});
+
+	it("approval: while a draft holds Enter, the highlight sits on Deny, relabeled to say Enter sends, and returns once cleared", () => {
+		let draft = "";
+		const dialog = new ApprovalDialogComponent(
+			"Allow tool: bash\nCommand: ls",
+			{ onApprove: vi.fn(), onDeny: vi.fn() },
+			{
+				draft: { hasDraft: () => draft.length > 0, handleInput: key => (draft += key) },
+			},
+		);
+		const highlighted = () =>
+			stripVTControlCharacters(dialog.render(80).join("\n"))
+				.split("\n")
+				.find(line => line.includes("❯"));
+		expect(highlighted()).toContain("Approve");
+		dialog.handleInput("k");
+		expect(highlighted()).toContain("Deny and send message");
+		const choices = find(dialog.describe(), node => node.p?.role === "omp.approval.choices")!;
+		expect(choices.node.p && "selected" in choices.node.p ? choices.node.p.selected : undefined).toBe("deny");
+		draft = "";
+		expect(highlighted()).toContain("Approve");
+		expect(highlighted()).not.toContain("Deny");
+	});
+
+	it("approval: with a composer draft, typing edits it; once it holds text, the arrows and Enter edit and send it", () => {
 		let draft = "";
 		const routed: string[] = [];
 		const callbacks = { onApprove: vi.fn(), onDeny: vi.fn() };
@@ -280,9 +420,9 @@ describe("dialogs under a native surface", () => {
 				},
 			},
 		});
-		// Empty composer: Enter neither submits nor interrupts, and Down scrolls the details.
+		// Empty composer: Enter (before the dialog arms) neither submits nor interrupts, and Page Down scrolls the details.
 		dialog.handleInput(ENTER);
-		dialog.handleInput(DOWN);
+		dialog.handleInput("\x1b[6~");
 		expect(routed).toEqual([]);
 		expect(stripVTControlCharacters(dialog.render(60).join("\n"))).not.toContain("Line 0");
 		// Typing reaches the composer; once it holds text, arrows and Enter edit and send it.
@@ -294,7 +434,6 @@ describe("dialogs under a native surface", () => {
 		dialog.handleInput("\x03");
 		expect(routed).toEqual(["n", "o", UP, ENTER, "\x03"]);
 		expect(callbacks.onDeny).not.toHaveBeenCalled();
-		expect(stripVTControlCharacters(dialog.render(60).join("\n"))).not.toContain("Line 0");
 		// Esc stays the dialog's: it denies without touching the draft.
 		dialog.handleInput("\x1b");
 		expect(callbacks.onDeny).toHaveBeenCalledTimes(1);

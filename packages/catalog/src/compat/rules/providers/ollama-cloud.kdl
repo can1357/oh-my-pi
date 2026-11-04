@@ -10,6 +10,9 @@ provider "ollama-cloud" {
 	thinking-mode "effort"
 	// Same runtime as local Ollama: a trailing assistant turn is continued verbatim.
 	supports-assistant-prefill #true
+	// Replaces the provider checks in model-registry.ts and the generator:
+	// never send a caller output limit.
+	omit-max-output-tokens #true
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high"
 	}

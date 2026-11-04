@@ -4,6 +4,9 @@ provider "google-vertex" {
 	default-model "gemini-3.1-pro-preview"
 	allow-unauthenticated #true
 	image-count-budget 200
+	// Vertex publishes Anthropic ids pinned to a revision (`claude-opus-4-8@default`);
+	// `google-vertex/claude-opus-4-8` names that model exactly.
+	selector-revision-suffix "@default"
 
 	// Replaces google-shared.ts stripping functionCall/functionResponse ids for Vertex.
 	supports-function-part-id #false

@@ -121,6 +121,29 @@ describe("HookInputComponent timeout", () => {
 
 		component.dispose();
 	});
+
+	it("masks characters as bullets when secret is true", () => {
+		const onSubmit = vi.fn();
+		const onCancel = vi.fn();
+		const component = new HookInputComponent("API Key", undefined, onSubmit, onCancel, { secret: true });
+
+		component.handleInput("s");
+		component.handleInput("e");
+		component.handleInput("c");
+		component.handleInput("r");
+		component.handleInput("e");
+		component.handleInput("t");
+
+		const rendered = stripVTControlCharacters(component.render(80).join("\n"));
+		expect(rendered).toContain("••••••");
+		expect(rendered).not.toContain("secret");
+
+		component.handleInput("\n");
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit).toHaveBeenCalledWith("secret");
+
+		component.dispose();
+	});
 });
 
 describe("HookInputComponent native sheet", () => {

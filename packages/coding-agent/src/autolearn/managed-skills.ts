@@ -109,18 +109,29 @@ function serializeSkillMutation<T>(name: string, op: () => Promise<T>): Promise<
 }
 
 /**
- * Reject when the managed-skills root itself is a symlink. lstat on a child
- * follows intermediate components, so a symlinked root would let an otherwise
- * valid name write/delete outside the isolated directory (e.g. onto authored
- * skills). Checked before composing any child path.
+ * Validate the managed-skills root before composing any child path. A symlinked
+ * root is allowed when it resolves to an existing directory: the operator may
+ * point the store at the shared skills tree (`~/.omp/agent/managed-skills` ->
+ * `~/meta/notes/omp-skills`). Child paths stay inside that target because a
+ * skill name is one safe path segment and a child directory symlink is rejected
+ * at the mutation itself. A broken link or a link to a non-directory has no
+ * defined write target, so it is refused.
  */
 async function assertManagedRootSafe(): Promise<void> {
-	const rootStat = await fs.lstat(getManagedSkillsDir()).catch(err => {
+	const root = getManagedSkillsDir();
+	const rootStat = await fs.lstat(root).catch(err => {
 		if (isEnoent(err)) return null;
 		throw err;
 	});
-	if (rootStat?.isSymbolicLink()) {
-		throw new Error("The managed-skills root is a symlink; refusing to operate outside the managed directory.");
+	if (!rootStat?.isSymbolicLink()) return;
+	const targetStat = await fs.stat(root).catch(err => {
+		if (isEnoent(err)) {
+			throw new Error(`The managed-skills root ${root} is a broken symlink; refusing to write.`);
+		}
+		throw err;
+	});
+	if (!targetStat.isDirectory()) {
+		throw new Error(`The managed-skills root ${root} links to a non-directory; refusing to write.`);
 	}
 }
 

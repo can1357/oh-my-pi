@@ -16,6 +16,7 @@ import {
 	lookupTableChart,
 	setTableCharts,
 	splitTableCharts,
+	TableChartFigure,
 	type TableChartPlanner,
 } from "@oh-my-pi/pi-tui/chat/table-chart";
 import { lexDocument } from "@oh-my-pi/pi-tui/components/markdown";
@@ -280,6 +281,14 @@ describe("parseCell", () => {
 		expect(parseCell("constructor").kind).toBe("text");
 	});
 
+	// Regression (#16175): `1 988` read as `1` before prose, so space-grouped columns lost to period columns.
+	it("reads thousands grouped by spaces like grouped by commas, three digits a group", () => {
+		expect(parseCell("17 083")).toMatchObject({ value: 17_083, fit: "pure" });
+		expect(parseCell("1\u00a0988\u202f000 ms")).toMatchObject({ value: 1988, dim: "duration", fit: "pure" });
+		expect(parseCell("12 5")).toMatchObject({ value: 12, fit: "prose" });
+		expect(parseCell("1 2345")).toMatchObject({ value: 1, fit: "prose" });
+	});
+
 	it("reads a lone m as millions unless the column holds other durations", () => {
 		const millions = analyze("| k | v |\n|---|---|\n| a | 3.3m |\n| b | 1.2m |\n| c | 0.4m |");
 		expect(millions.measures[0]!.dim).toBe("count");
@@ -359,6 +368,32 @@ describe("analyzeTable", () => {
 			"| Input | GNU | uutils |\n|---|---|---|\n| a | 36ms | 112ms |\n| b | 31ms | 1,222ms |\n| c | 30ms | TIMEOUT |",
 		);
 		expect(analysis.measures.map(column => column.header)).toEqual(["GNU", "uutils"]);
+	});
+
+	// Regression (#16175): space-grouped counts read as prose, so the period column became the measure.
+	it("labels by the period column when the counts beside it group thousands by spaces", () => {
+		const analysis = analyze(
+			"| Okres | Commity | Średnio dziennie |\n|---|---|---|\n| ostatnie 24 h | 386 | 386 |\n| 7 dni | 1 988 | ~284 |\n| 30 dni | 7 715 | ~257 |\n| 90 dni | 17 083 | ~190 |\n| 365 dni | 31 489 | ~86 |",
+		);
+		expect(analysis.label?.header).toBe("Okres");
+		expect(analysis.measures.map(column => column.header)).toEqual(["Commity", "Średnio dziennie"]);
+		expect(analysis.measures[0]!.cells.map(cell => cell.kind === "number" && cell.value)).toEqual([
+			386, 1988, 7715, 17_083, 31_489,
+		]);
+	});
+
+	// Regression: a bare `ratio` of two timings stayed a measure, and a judged chart drew it as 719× less than C++.
+	it("reads a column dividing two others as restating them, never one of the terms", () => {
+		const bare = analyze(
+			"| mode | old C++ (ms) | Python (ms) | ratio | median per request |\n|---|---|---|---|---|\n| probe-best4 | 717 | 715 | 0.997 | 1.000 |\n| probe-all-heads | 1298 | 1294 | 0.997 | 1.000 |\n| call | 2320 | 2325 | 1.002 | 1.003 |\n| gen32 | 5536 | 5545 | 1.002 | 1.001 |\n| all, wall time | 10181 | 10180 | 1.000 | |",
+		);
+		// Every column is the others' quotient or product: the ratio is the one steady across workload sizes.
+		expect(bare.measures.map(column => column.header)).toEqual(["old C++ (ms)", "Python (ms)", "median per request"]);
+		// A speedup written as a factor is the ratio however much more than the timings it varies.
+		const factors = analyze(
+			"| case | Go | Zig | speedup |\n|---|---|---|---|\n| a | 80 ms | 20 ms | 4.0× |\n| b | 90 ms | 60 ms | 1.5× |\n| c | 100 ms | 10.0 ms | 10.0× |",
+		);
+		expect(factors.measures.map(column => column.header)).toEqual(["Go", "Zig"]);
 	});
 });
 
@@ -642,6 +677,39 @@ describe("table charts in assistant Markdown", () => {
 
 	const answer = `Timings:\n\n${TIMINGS}\n\nThat is all.`;
 
+	it("counts its separator in a caller's ceiling, and below two rows neither plans nor holds up completion", async () => {
+		const protocol = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const choice = Promise.withResolvers<ChartPlan | null>();
+		const planner = vi.fn<TableChartPlanner>(() => choice.promise);
+		setTableCharts("smart", planner);
+		let maxRows = 1;
+		let changed = Promise.withResolvers<void>();
+		const chart = new TableChartFigure({ maxRows: () => maxRows, onChange: () => changed.resolve() });
+		chart.update(table(BEFORE_AFTER));
+		try {
+			expect(chart.render(76)).toEqual([]);
+			expect(chart.pending).toBe(false);
+			expect(planner).not.toHaveBeenCalled();
+
+			maxRows = 4;
+			chart.render(76);
+			expect(chart.pending).toBe(true);
+			choice.resolve(planner.mock.calls[0]![0].guess);
+			await changed.promise;
+			changed = Promise.withResolvers<void>();
+			chart.render(76);
+			await changed.promise;
+			const drawn = chart.render(76);
+			expect(drawn.length).toBeLessThanOrEqual(4);
+			expect(drawn[0]).toBe("");
+			expect(drawn.some(row => TERMINAL.isImageLine(row))).toBe(true);
+		} finally {
+			chart.dispose();
+			setTerminalImageProtocol(protocol);
+		}
+	});
+
 	it("leaves a table streaming at the tail whole and charts it once the answer moves on", () => {
 		setTableCharts("always");
 		expect(splitTableCharts(`Timings:\n\n${TIMINGS}\n`, true).map(segment => segment.kind)).toEqual(["markdown"]);
@@ -748,15 +816,21 @@ describe("table charts in assistant Markdown", () => {
 		}
 	});
 
-	it("asks the smart planner only for multi-series tables, once per table", async () => {
-		const planner = vi.fn<TableChartPlanner>(async request => ({ ...request.guess, kind: "heatmap" }));
+	it("asks the smart planner once per table the guess would chart, single series included", async () => {
+		const planner = vi.fn<TableChartPlanner>(async request =>
+			request.table.measures.length > 1 ? { ...request.guess, kind: "heatmap" } : null,
+		);
 		setTableCharts("smart", planner);
-		expect(lookupTableChart(table(TIMINGS))).toContain("bar chart of");
+		// Three rows of one measure draw nothing locally: nothing for the judge to veto or refine.
+		expect(lookupTableChart(table("| Step | Time |\n|---|---|\n| a | 1 s |\n| b | 2 s |\n| c | 3 s |"))).toBeNull();
+		// One measure the guess would draw, which the judge may still read as references rather than quantities.
+		await lookupTableChart(table(TIMINGS));
+		expect(lookupTableChart(table(TIMINGS))).toBeNull();
 		const pick = lookupTableChart(table(BEFORE_AFTER));
 		expect(pick).toBeInstanceOf(Promise);
 		await pick;
 		expect(lookupTableChart(table(BEFORE_AFTER))).toContain("heatmap chart of");
-		expect(planner).toHaveBeenCalledTimes(1);
+		expect(planner).toHaveBeenCalledTimes(2);
 	});
 
 	it("draws no chart when the planner declines, and the local guess when it fails", async () => {
@@ -770,5 +844,10 @@ describe("table charts in assistant Markdown", () => {
 		});
 		await lookupTableChart(table(BEFORE_AFTER));
 		expect(lookupTableChart(table(BEFORE_AFTER))).toContain("paired chart of");
+
+		// No judge to ask (`auto` without a native one): the guess at once, held to the gate `always` applies.
+		setTableCharts("smart", () => undefined);
+		expect(lookupTableChart(table(BEFORE_AFTER))).toContain("paired chart of");
+		expect(lookupTableChart(table(RUNS))).toBeNull();
 	});
 });

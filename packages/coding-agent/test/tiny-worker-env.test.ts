@@ -44,7 +44,8 @@ describe("tinyWorkerEnvOverlay", () => {
 describe("PI_TINY_DEVICE", () => {
 	it("wins over the persisted setting case-insensitively and ignores unknown devices", () => {
 		const previous = process.env.PI_TINY_DEVICE;
-		const settings = Settings.isolated({ "providers.tinyModelDevice": "cuda" });
+		const settings = Settings.isolated();
+		cfgProvidersTinyModelDevice.set(settings, "cuda");
 		try {
 			process.env.PI_TINY_DEVICE = "CPU";
 			expect(cfgProvidersTinyModelDevice.get(settings)).toBe("cpu");

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { streamSimple } from "../src/stream";
 
 // Bedrock hosts the GPT-5.x SKUs behind OpenAI's own request schema. It rejects
@@ -70,4 +71,20 @@ describe("Bedrock OpenAI-schema reasoning", () => {
 			thinking: { type: "enabled", budget_tokens: 16384 },
 		});
 	});
+
+	test.each(["global.moonshotai.kimi-k3", "us.moonshotai.kimi-k3"])(
+		"sends reasoning.effort for the bundled %s inference profile",
+		async id => {
+			// The `global.`/`us.` profile prefixes kept these rows out of the Kimi class, so
+			// they fell back to the Anthropic budget block; an exact KDL rule fixes the ladder.
+			const model = getBundledModel<"bedrock-converse-stream">("amazon-bedrock", id);
+			expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+			for (const effort of [Effort.High, Effort.Max]) {
+				const payload = (await payloadFor(model, effort)) as {
+					additionalModelRequestFields?: Record<string, unknown>;
+				};
+				expect(payload.additionalModelRequestFields).toEqual({ reasoning: { effort } });
+			}
+		},
+	);
 });

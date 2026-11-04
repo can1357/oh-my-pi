@@ -141,7 +141,9 @@ describe("enum flag validation", () => {
 		expect(parsed.approvalMode).toBeUndefined();
 		let stderr = "";
 		expect(reportInvalidFlagValues(parsed, text => (stderr += text))).toBe(true);
-		expect(stderr).toContain('Invalid --approval-mode value: "sometimes". Expected one of: always-ask, write, yolo.');
+		expect(stderr).toContain(
+			'Invalid --approval-mode value: "sometimes". Expected one of: always-ask, always-ask-cached, write, yolo.',
+		);
 	});
 
 	it("records an unknown --mode instead of falling back to text", () => {

@@ -165,7 +165,9 @@ describe("browser run cancellation", () => {
 	it("keeps a later cause-wrapped rejection on the fatal path", async () => {
 		vi.useRealTimers();
 		const script = `
+			import { postmortem } from "@oh-my-pi/pi-utils";
 			import { markBrowserRunRejection } from ${JSON.stringify(runScopeModuleUrl)};
+			postmortem.installProcessHandlers();
 
 			const browserFailure = new Error("browser failure");
 			markBrowserRunRejection(browserFailure, {});
@@ -576,7 +578,7 @@ describe("browser run cancellation", () => {
 
 		const run = Promise.race([
 			runtime.run(
-				'try { await wait(60); } catch {} await tab.goto("https://late.example"); display("late display");',
+				'try { await wait(60); } catch {} await tab.goto("https://late.example"); print("late print");',
 				"browser-run-cancellation-test.js",
 				hooks,
 			),

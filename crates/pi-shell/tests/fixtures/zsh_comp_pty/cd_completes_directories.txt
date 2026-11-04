@@ -1,0 +1,7 @@
+### "cd \t"
+% cd dir
+@ 0,8
+### "\t"
+% cd dir
+dir1/  dir2/
+@ 0,8

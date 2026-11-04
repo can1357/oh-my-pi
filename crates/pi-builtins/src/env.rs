@@ -26,7 +26,6 @@ use std::{
 	io::{self, Read, Write},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use uucore::{
 	display::Quotable,
@@ -35,7 +34,7 @@ use uucore::{
 };
 
 use crate::{
-	host::{Host, ShellCommand, Utility, format_usage, os_bytes_lossy, strip_errno, util},
+	host::{Host, ShellCommand, Utility, format_usage, os_bytes_lossy, strip_errno},
 	locale,
 	quoting_style::quoting_style_by_name,
 };
@@ -269,11 +268,6 @@ fn app() -> Command {
 				.num_args(1..)
 				.trailing_var_arg(true),
 		)
-}
-
-/// Creates the `env` builtin registration.
-pub(crate) fn env_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Env, SE>()
 }
 
 /// The message for a whitespace character used as a short option.
@@ -541,7 +535,7 @@ impl Run<'_> {
 			// directory updates these.
 			command = keep_directory_variables(command, &env);
 		}
-		if let Ok(stdin) = self.host.stdin.file().try_clone() {
+		if let Ok(stdin) = self.host.stdin.file().to_fd() {
 			command = command.stdin(stdin);
 		}
 		match self.host.run_command(command) {
@@ -688,11 +682,12 @@ impl Run<'_> {
 	/// uutils' splitter also expands `$VAR` and `${VAR:-default}` and reports
 	/// positions; GNU accepts neither form, so this follows GNU.
 	fn build_argv(&mut self, string: &[u8]) -> Result<Vec<Vec<u8>>, Exit> {
-		fn start_arg(args: &mut Vec<Vec<u8>>, sep: &mut bool) {
+		fn start_arg<'a>(args: &'a mut Vec<Vec<u8>>, sep: &mut bool) -> &'a mut Vec<u8> {
 			if *sep {
-				args.push(Vec::new());
 				*sep = false;
+				return args.push_mut(Vec::new());
 			}
+			args.last_mut().expect("started")
 		}
 
 		let mut args: Vec<Vec<u8>> = Vec::new();
@@ -762,9 +757,9 @@ impl Run<'_> {
 					let name = String::from_utf8_lossy(name).into_owned();
 					match self.host.var(&name).map(str::to_owned) {
 						Some(value) => {
-							start_arg(&mut args, &mut sep);
+							let arg = start_arg(&mut args, &mut sep);
 							self.vmsg(&format!("expanding ${{{name}}} into {}\n", value.quote()));
-							args.last_mut().expect("started").extend(value.as_bytes());
+							arg.extend(value.as_bytes());
 						},
 						None => self.vmsg(&format!("replacing ${{{name}}} with empty string\n")),
 					}
@@ -774,8 +769,7 @@ impl Run<'_> {
 				},
 				_ => {},
 			}
-			start_arg(&mut args, &mut sep);
-			args.last_mut().expect("started").push(newc);
+			start_arg(&mut args, &mut sep).push(newc);
 			i += 1;
 		}
 		if dq || sq {
@@ -1371,59 +1365,66 @@ mod sig {
 mod tests {
 	use std::{ffi::OsString, io::Write, path::Path};
 
-	use crate::host::{Host, ShellCommand, Utility, run_script};
+	use crate::host::{Host, ShellCommand, Utility, run_extra};
 
-	/// Runs `script` in a real shell from `cwd`, in the C locale unless the
-	/// script sets its own.
-	async fn sh(script: &str) -> (i32, String, String) {
-		sh_in(script, &std::env::temp_dir()).await
+	/// Runs `env ARGS` from the temp directory in the C locale, its commands
+	/// served by the test runner.
+	async fn env(args: &[&str]) -> (i32, String, String) {
+		env_in(&std::env::temp_dir(), args, &[]).await
 	}
 
-	async fn sh_in(script: &str, cwd: &Path) -> (i32, String, String) {
-		run_script(&format!("export LC_ALL=C\n{script}"), "", cwd).await
+	/// Runs `env ARGS` from `cwd` in the C locale with `vars` exported.
+	async fn env_in(cwd: &Path, args: &[&str], vars: &[(&str, &str)]) -> (i32, String, String) {
+		let argv: Vec<&str> = std::iter::once("env").chain(args.iter().copied()).collect();
+		let mut exported = vec![("LC_ALL", "C")];
+		exported.extend_from_slice(vars);
+		run_extra(&argv, "", cwd, &exported).await
 	}
 
 	#[tokio::test]
 	async fn ignore_environment_runs_command_with_only_assignments() {
-		let (code, out, err) = sh("env -i FOO=1 env").await;
+		let (code, out, err) = env(&["-i", "FOO=1", "env"]).await;
 		assert_eq!((code, out.as_str(), err.as_str()), (0, "FOO=1\n", ""));
 		// Printed in environment order: assignments append.
-		let (code, out, _) = sh("env - FOO=1 BAR='x y'").await;
+		let (code, out, _) = env(&["-", "FOO=1", "BAR=x y"]).await;
 		assert_eq!((code, out.as_str()), (0, "FOO=1\nBAR='x y'\n"));
-		let (code, out, _) = sh("env -i -i A=1").await;
+		let (code, out, _) = env(&["-i", "-i", "A=1"]).await;
 		assert_eq!((code, out.as_str()), (0, "A=1\n"));
 	}
 
 	#[cfg(unix)]
 	#[tokio::test]
 	async fn external_command_sees_only_the_changed_environment() {
+		let dir = std::env::temp_dir();
+		let home = [("HOME", "/h")];
 		let (code, out, err) =
-			sh("export HOME=/h; env -i FOO=1 /bin/sh -c 'echo $FOO ${HOME-unset}'").await;
+			env_in(&dir, &["-i", "FOO=1", "/bin/sh", "-c", "echo $FOO ${HOME-unset}"], &home).await;
 		assert_eq!((code, out.as_str(), err.as_str()), (0, "1 unset\n", ""));
-		let (code, out, _) = sh("export HOME=/h; env -u HOME /bin/sh -c 'echo ${HOME-unset}'").await;
+		let (code, out, _) = env_in(&dir, &["-u", "HOME", "/bin/sh", "-c", "echo ${HOME-unset}"], &home).await;
 		assert_eq!((code, out.as_str()), (0, "unset\n"));
 	}
 
 	#[tokio::test]
 	async fn assignments_reach_builtin_commands() {
-		let (code, out, _) = sh("env FOO=bar env | /usr/bin/grep '^FOO='").await;
-		assert_eq!((code, out.as_str()), (0, "FOO=bar\n"));
-		let (code, out, _) = sh("export X=1; env -u X env | /usr/bin/grep -c '^X=' ; true").await;
-		assert_eq!((code, out.as_str()), (0, "0\n"));
+		let (code, out, _) = env(&["FOO=bar", "env"]).await;
+		assert_eq!(code, 0);
+		assert_eq!(out.lines().filter(|line| line.starts_with("FOO=")).collect::<Vec<_>>(), ["FOO=bar"]);
+		let (code, out, _) = env_in(&std::env::temp_dir(), &["-u", "X", "env"], &[("X", "1")]).await;
+		assert_eq!(code, 0);
+		assert!(!out.lines().any(|line| line.starts_with("X=")), "{out}");
 	}
 
 	/// Options end at the first operand: the rest belongs to the command.
 	#[tokio::test]
 	async fn options_stop_at_the_first_operand() {
-		let (code, _, err) = sh("env -i A=1 env -i B=2 -u A env").await;
+		let (code, _, err) = env(&["-i", "A=1", "env", "-i", "B=2", "-u", "A", "env"]).await;
 		assert_eq!((code, err.as_str()), (127, "env: '-u': No such file or directory\n"));
-		let (code, out, _) = sh("env -i A=1 printf '%s,' -i -u; echo").await;
-		assert_eq!((code, out.as_str()), (0, "-i,-u,\n"));
+		let (code, out, _) = env(&["-i", "A=1", "echo", "-i", "-u"]).await;
+		assert_eq!((code, out.as_str()), (0, "-i -u\n"));
 	}
 
 	/// Runs `env` four times through [`Host::run_command`], alternating
-	/// commands with and without environment changes; sequential commands
-	/// share one reused worker subshell.
+	/// commands with and without environment changes.
 	#[derive(clap::Parser)]
 	struct FourRuns {}
 
@@ -1456,42 +1457,27 @@ mod tests {
 	}
 
 	/// Contract: changes apply to that one command only; the next command
-	/// run by the same reused worker, and the invoking shell, see the
-	/// original environment.
+	/// sees the original environment.
 	#[tokio::test]
 	async fn changes_do_not_leak_into_later_commands() {
 		use std::io::{Read, Seek};
 
-		use brush_core::{
-			ProfileLoadBehavior, RcLoadBehavior, Shell, SourceInfo,
-			openfiles::{OpenFile, OpenFiles},
-		};
+		use crate::extras::{Fd, Invocation};
 
-		use crate::{
-			factory::{BuiltinSet, default_builtins, utility_builtins},
-			host::util,
-		};
-
-		let mut shell = Shell::builder()
-			.profile(ProfileLoadBehavior::Skip)
-			.rc(RcLoadBehavior::Skip)
-			.builtins(default_builtins(BuiltinSet::BashMode))
-			.build()
-			.await
-			.unwrap();
-		for (name, builtin) in utility_builtins() {
-			shell.register_builtin(name, builtin);
-		}
-		shell.register_builtin("four-runs", util::<FourRuns, _>());
 		let mut output = tempfile::tempfile().unwrap();
-		let mut params = shell.default_exec_params();
-		params.set_fd(OpenFiles::STDOUT_FD, OpenFile::from(output.try_clone().unwrap()));
-		let script = "export KEEP=k DROP=d; four-runs; env -u KEEP true; env";
-		let result = shell
-			.run_string(script, &SourceInfo::from("test"), &params)
-			.await
-			.unwrap();
-		assert_eq!(u8::from(result.exit_code), 0);
+		let vars: std::collections::HashMap<String, String> =
+			[("KEEP", "k"), ("DROP", "d")].map(|(name, value)| (name.to_string(), value.to_string())).into();
+		let cwd = std::env::temp_dir();
+		let mut invocation = Invocation::new(vec!["four-runs".into()], cwd.clone(), pi_vfs::Fs::native());
+		invocation.env = vars.clone();
+		invocation.stdio = [Fd::Closed, Fd::File(output.try_clone().unwrap()), Fd::Closed];
+		invocation.commands = Some(Box::new(crate::host::TestRunner::new(
+			vars,
+			cwd,
+			output.try_clone().unwrap(),
+			tempfile::tempfile().unwrap(),
+		)));
+		assert_eq!(crate::host::run_utility::<FourRuns>(invocation).await, 0);
 
 		let mut text = String::new();
 		output.rewind().unwrap();
@@ -1517,16 +1503,14 @@ mod tests {
 			"--",
 			"DROP=d",
 			"KEEP=k",
-			"DROP=d",
-			"KEEP=k",
 		]);
 	}
 
 	#[tokio::test]
 	async fn env_running_env_twice_sees_each_layer() {
-		let (code, out, _) = sh("env -i A=1 env B=2 env").await;
+		let (code, out, _) = env(&["-i", "A=1", "env", "B=2", "env"]).await;
 		assert_eq!((code, out.as_str()), (0, "A=1\nB=2\n"));
-		let (code, out, _) = sh("env -i A=1 env -u A B=2 env").await;
+		let (code, out, _) = env(&["-i", "A=1", "env", "-u", "A", "B=2", "env"]).await;
 		assert_eq!((code, out.as_str()), (0, "B=2\n"));
 	}
 
@@ -1535,26 +1519,32 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let target = dir.path().join("sub");
 		std::fs::create_dir(&target).unwrap();
-		let (code, out, err) = sh_in("env -C sub pwd; pwd", dir.path()).await;
+		let (code, out, err) = env_in(dir.path(), &["-C", "sub", "pwd"], &[]).await;
 		assert_eq!(err, "");
 		assert_eq!(code, 0);
-		assert_eq!(out, format!("{}\n{}\n", target.display(), dir.path().display()));
-		// As `chdir` does, -C leaves PWD as it was.
-		let (code, out, _) = sh_in("env -C sub env | /usr/bin/grep '^PWD='", dir.path()).await;
-		assert_eq!((code, out), (0, format!("PWD={}\n", dir.path().display())));
+		assert_eq!(out, format!("{}\n", target.display()));
+		// As `chdir` does, -C leaves PWD as it was. Literal style: a Windows
+		// path's backslashes would otherwise print shell-quoted.
+		let pwd = dir.path().display().to_string();
+		let vars = [("QUOTING_STYLE", "literal"), ("PWD", pwd.as_str())];
+		let (code, out, _) = env_in(dir.path(), &["-C", "sub", "env"], &vars).await;
+		assert_eq!(code, 0);
+		assert_eq!(out.lines().filter(|line| line.starts_with("PWD=")).collect::<Vec<_>>(), [format!(
+			"PWD={pwd}"
+		)]);
 	}
 
 	#[tokio::test]
 	async fn chdir_failures_exit_125() {
 		let dir = tempfile::tempdir().unwrap();
 		std::fs::write(dir.path().join("file"), "").unwrap();
-		let (code, _, err) = sh_in("env -C nonexist true", dir.path()).await;
+		let (code, _, err) = env_in(dir.path(), &["-C", "nonexist", "true"], &[]).await;
 		assert_eq!(code, 125);
 		assert_eq!(err, "env: cannot change directory to 'nonexist': No such file or directory\n");
-		let (code, _, err) = sh_in("env -C file true", dir.path()).await;
+		let (code, _, err) = env_in(dir.path(), &["-C", "file", "true"], &[]).await;
 		assert_eq!(code, 125);
 		assert_eq!(err, "env: cannot change directory to 'file': Not a directory\n");
-		let (code, _, err) = sh_in("env -C sub", dir.path()).await;
+		let (code, _, err) = env_in(dir.path(), &["-C", "sub"], &[]).await;
 		assert_eq!(code, 125);
 		assert_eq!(
 			err,
@@ -1564,44 +1554,54 @@ mod tests {
 
 	#[tokio::test]
 	async fn split_string_splits_quotes_and_expands() {
-		let (code, out, _) = sh("env -S 'echo a  b'").await;
+		let (code, out, _) = env(&["-S", "echo a  b"]).await;
 		assert_eq!((code, out.as_str()), (0, "a b\n"));
-		let (code, out, _) =
-			sh(r#"export V='v w'; env -S "printf %s| 'x y' \"\${V}\"\_z\tq #c" ; echo"#).await;
-		assert_eq!((code, out.as_str()), (0, "x y|v w|z\tq|\n"));
-		let (code, out, _) = sh(r#"env -S"-i A=1 env" ; env -S 'printf [%s] a\cb' ; echo"#).await;
-		assert_eq!((code, out.as_str()), (0, "A=1\n[a]\n"));
+		let (code, out, _) = env_in(
+			&std::env::temp_dir(),
+			&["-S", r#"echo 'x y' "${V}"\_z\tq #c"#],
+			&[("V", "v w")],
+		)
+		.await;
+		assert_eq!((code, out.as_str()), (0, "x y v w z\tq\n"));
+		let (code, out, _) = env(&["-S-i A=1 env"]).await;
+		assert_eq!((code, out.as_str()), (0, "A=1\n"));
+		let (code, out, _) = env(&["-S", r"echo [a]\cb"]).await;
+		assert_eq!((code, out.as_str()), (0, "[a]\n"));
 		// The split replaces only the -S argument; later operands follow.
-		let (code, out, _) = sh("env -S'printf %s,' a b; echo").await;
-		assert_eq!((code, out.as_str()), (0, "a,b,\n"));
+		let (code, out, _) = env(&["-Secho a", "b"]).await;
+		assert_eq!((code, out.as_str()), (0, "a b\n"));
 		// Options the split carries are parsed; an assignment ends them.
-		let (code, out, _) = sh("env -i --split-string='A=1 printf %s,' -i; echo").await;
-		assert_eq!((code, out.as_str()), (0, "-i,\n"));
-		let (code, out, _) = sh("env -iS'B=2 -u' A=1; env -i -vS 'C=3' 2>/dev/null").await;
+		let (code, out, _) = env(&["-i", "--split-string=A=1 echo", "-i"]).await;
+		assert_eq!((code, out.as_str()), (0, "-i\n"));
+		// `B=2` ends the split's options, so `-u` is no option: nothing runs.
+		let (code, out, _) = env(&["-iSB=2 -u", "A=1"]).await;
+		assert_ne!(code, 0);
+		assert_eq!(out, "");
+		let (code, out, _) = env(&["-i", "-vS", "C=3"]).await;
 		assert_eq!((code, out.as_str()), (0, "C=3\n"));
 	}
 
 	#[tokio::test]
 	async fn split_string_errors_exit_125() {
 		let cases = [
-			(r"env -S 'echo a\q'", "env: invalid sequence '\\q' in -S\n"),
-			(r#"env -S 'echo "a\c"'"#, "env: '\\c' must not appear in double-quoted -S string\n"),
-			(r"env -S 'echo a\'", "env: invalid backslash at end of string in -S\n"),
-			(r#"env -S 'echo "a'"#, "env: no terminating quote in -S string\n"),
-			(r"env -S 'echo $HOME'", "env: only ${VARNAME} expansion is supported, error at: $HOME\n"),
+			(r"echo a\q", "env: invalid sequence '\\q' in -S\n"),
+			(r#"echo "a\c""#, "env: '\\c' must not appear in double-quoted -S string\n"),
+			(r"echo a\", "env: invalid backslash at end of string in -S\n"),
+			(r#"echo "a"#, "env: no terminating quote in -S string\n"),
+			(r"echo $HOME", "env: only ${VARNAME} expansion is supported, error at: $HOME\n"),
 		];
-		for (script, want) in cases {
-			let (code, out, err) = sh(script).await;
-			assert_eq!((code, out.as_str(), err.as_str()), (125, "", want), "{script}");
+		for (split, want) in cases {
+			let (code, out, err) = env(&["-S", split]).await;
+			assert_eq!((code, out.as_str(), err.as_str()), (125, "", want), "{split}");
 		}
 	}
 
 	#[tokio::test]
 	async fn missing_and_unrunnable_commands() {
-		let (code, _, err) = sh("env nonexistent-command-xyz").await;
+		let (code, _, err) = env(&["nonexistent-command-xyz"]).await;
 		assert_eq!(code, 127);
 		assert_eq!(err, "env: 'nonexistent-command-xyz': No such file or directory\n");
-		let (code, _, err) = sh("env 'a b'").await;
+		let (code, _, err) = env(&["a b"]).await;
 		assert_eq!(code, 127);
 		assert_eq!(
 			err,
@@ -1609,24 +1609,27 @@ mod tests {
 		);
 		#[cfg(unix)]
 		{
-			let (code, _, err) = sh("env /").await;
+			let (code, _, err) = env(&["/"]).await;
 			assert_eq!((code, err.as_str()), (126, "env: '/': Permission denied\n"));
 		}
 	}
 
 	#[tokio::test]
 	async fn command_status_and_stdin_pass_through() {
-		let (code, ..) = sh("env sh -c 'exit 3'").await;
-		assert_eq!(code, 3);
-		let (code, out, _) = sh("echo piped | env cat").await;
+		#[cfg(unix)]
+		{
+			let (code, ..) = env(&["sh", "-c", "exit 3"]).await;
+			assert_eq!(code, 3);
+		}
+		let (code, out, _) = run_extra(&["env", "cat"], "piped\n", &std::env::temp_dir(), &[]).await;
 		assert_eq!((code, out.as_str()), (0, "piped\n"));
 	}
 
 	#[tokio::test]
 	async fn null_output_and_its_conflict_with_a_command() {
-		let (code, out, _) = sh("env -0 -i A='x y' B=").await;
+		let (code, out, _) = env(&["-0", "-i", "A=x y", "B="]).await;
 		assert_eq!((code, out.as_str()), (0, "A=x y\0B=\0"));
-		let (code, _, err) = sh("env -0 true").await;
+		let (code, _, err) = env(&["-0", "true"]).await;
 		assert_eq!(code, 125);
 		assert_eq!(
 			err,
@@ -1636,13 +1639,14 @@ mod tests {
 
 	#[tokio::test]
 	async fn printed_values_are_shell_quoted_per_quoting_style() {
-		let (code, out, _) = sh("env -i 'A=b c' X= 'S=a#' 'D=$x'").await;
+		let (code, out, _) = env(&["-i", "A=b c", "X=", "S=a#", "D=$x"]).await;
 		assert_eq!((code, out.as_str()), (0, "A='b c'\nX=\nS=a#\nD='$x'\n"));
-		let (_, out, _) = sh("QUOTING_STYLE=literal env -i 'A=b c'").await;
+		let dir = std::env::temp_dir();
+		let (_, out, _) = env_in(&dir, &["-i", "A=b c"], &[("QUOTING_STYLE", "literal")]).await;
 		assert_eq!(out, "A=b c\n");
-		let (_, out, _) = sh("QUOTING_STYLE=c env -i 'A=b c'").await;
+		let (_, out, _) = env_in(&dir, &["-i", "A=b c"], &[("QUOTING_STYLE", "c")]).await;
 		assert_eq!(out, "\"A\"=\"b c\"\n");
-		let (_, out, err) = sh("QUOTING_STYLE=sh env -i 'A=b c'").await;
+		let (_, out, err) = env_in(&dir, &["-i", "A=b c"], &[("QUOTING_STYLE", "sh")]).await;
 		assert_eq!(out, "A='b c'\n");
 		assert_eq!(err, "env: ignoring invalid value of environment variable QUOTING_STYLE: 'sh'\n");
 	}
@@ -1651,48 +1655,59 @@ mod tests {
 	/// short option (a shebang line without -S) also suggests -S.
 	#[tokio::test]
 	async fn usage_errors_exit_125() {
-		for script in ["env -x", "env --foo=bar", "env -u", "env --unset", "env --null=x", "env --de"]
-		{
-			let (code, out, err) = sh(script).await;
-			assert_eq!((code, out.as_str()), (125, ""), "{script}");
-			assert!(err.starts_with("error: "), "{script}: {err}");
+		for args in [
+			&["-x"][..],
+			&["--foo=bar"],
+			&["-u"],
+			&["--unset"],
+			&["--null=x"],
+			&["--de"],
+		] {
+			let (code, out, err) = env(args).await;
+			assert_eq!((code, out.as_str()), (125, ""), "{args:?}");
+			assert!(err.starts_with("error: "), "{args:?}: {err}");
 		}
-		let (code, _, err) = sh("env '-i true'").await;
+		let (code, _, err) = env(&["-i true"]).await;
 		assert_eq!(code, 125);
 		assert_eq!(
 			err,
 			"env: invalid option -- ' '\nenv: use -[v]S to pass options in shebang lines\nTry 'env \
 			 --help' for more information.\n"
 		);
-		for (script, want) in [
-			("env --ignore-signal=FOO true", "env: 'FOO': invalid signal\n"),
-			("env --block-signal=0 true", "env: '0': invalid signal\n"),
+		for (option, want) in [
+			("--ignore-signal=FOO", "env: 'FOO': invalid signal\n"),
+			("--block-signal=0", "env: '0': invalid signal\n"),
 		] {
-			let (code, _, err) = sh(script).await;
-			assert_eq!(code, 125, "{script}");
-			assert_eq!(err, format!("{want}Try 'env --help' for more information.\n"), "{script}");
+			let (code, _, err) = env(&[option, "true"]).await;
+			assert_eq!(code, 125, "{option}");
+			assert_eq!(err, format!("{want}Try 'env --help' for more information.\n"), "{option}");
 		}
 	}
 
 	#[tokio::test]
 	async fn unset_rejects_invalid_names() {
-		let (code, _, err) = sh("env -u A=B true").await;
+		let (code, _, err) = env(&["-u", "A=B", "true"]).await;
 		assert_eq!((code, err.as_str()), (125, "env: cannot unset 'A=B': Invalid argument\n"));
-		let (code, _, err) = sh("env -u '' true").await;
+		let (code, _, err) = env(&["-u", "", "true"]).await;
 		assert_eq!((code, err.as_str()), (125, "env: cannot unset '': Invalid argument\n"));
 	}
 
 	#[tokio::test]
 	async fn double_dash_and_abbreviations() {
-		let (code, out, _) = sh("env --ignore-e -- A=1").await;
+		let (code, out, _) = env(&["--ignore-e", "--", "A=1"]).await;
 		assert_eq!((code, out.as_str()), (0, "A=1\n"));
-		let (code, out, _) = sh("env -i -- -i 2>&1; echo $?").await;
-		assert_eq!((code, out.as_str()), (0, "env: '-i': No such file or directory\n127\n"));
+		let (code, out, err) = env(&["-i", "--", "-i"]).await;
+		assert_eq!((code, out.as_str(), err.as_str()), (127, "", "env: '-i': No such file or directory\n"));
 	}
 
 	#[tokio::test]
 	async fn debug_traces_each_step() {
-		let (code, _, err) = sh("export V=x; env -v -i -a zz -S 'A=1 true ${V} ${NOPE}' y").await;
+		let (code, _, err) = env_in(
+			&std::env::temp_dir(),
+			&["-v", "-i", "-a", "zz", "-S", "A=1 true ${V} ${NOPE}", "y"],
+			&[("V", "x")],
+		)
+		.await;
 		assert_eq!(code, 0);
 		assert_eq!(
 			err,
@@ -1707,14 +1722,14 @@ mod tests {
 	async fn env0_from_file_merges_entries() {
 		let dir = tempfile::tempdir().unwrap();
 		std::fs::write(dir.path().join("vars"), b"A=1\0B=x y\0A=2\0").unwrap();
-		let (code, out, _) = sh_in("env -i --env0-from=vars", dir.path()).await;
+		let (code, out, _) = env_in(dir.path(), &["-i", "--env0-from=vars"], &[]).await;
 		assert_eq!((code, out.as_str()), (0, "A=1\nB='x y'\nA=2\n"));
-		let (code, out, _) = sh_in("env -i --env0-from=vars -u A C=3 env", dir.path()).await;
+		let (code, out, _) = env_in(dir.path(), &["-i", "--env0-from=vars", "-u", "A", "C=3", "env"], &[]).await;
 		assert_eq!((code, out.as_str()), (0, "B='x y'\nC=3\n"));
 		std::fs::write(dir.path().join("bad"), b"A=1").unwrap();
-		let (code, _, err) = sh_in("env --env0-from=bad", dir.path()).await;
+		let (code, _, err) = env_in(dir.path(), &["--env0-from=bad"], &[]).await;
 		assert_eq!((code, err.as_str()), (125, "env: bad: file must end with a NUL byte\n"));
-		let (code, _, err) = sh_in("env --env0-from=missing", dir.path()).await;
+		let (code, _, err) = env_in(dir.path(), &["--env0-from=missing"], &[]).await;
 		assert_eq!(
 			(code, err.as_str()),
 			(125, "env: cannot read 'missing': No such file or directory\n")
@@ -1727,13 +1742,13 @@ mod tests {
 	#[tokio::test]
 	async fn signal_options() {
 		// Only signals the test process itself ignores may be listed.
-		let (code, _, err) = sh("env --default-signal=INT,PIPE --list-signal-handling true").await;
+		let (code, _, err) = env(&["--default-signal=INT,PIPE", "--list-signal-handling", "true"]).await;
 		assert_eq!(code, 0);
 		assert!(err.lines().all(|line| line.ends_with("): IGNORE")), "{err}");
 		assert!(!err.contains("INT ") && !err.contains("PIPE "), "{err}");
-		let (code, _, err) = sh("env --ignore-signal=, --default-signal= true").await;
+		let (code, _, err) = env(&["--ignore-signal=,", "--default-signal=", "true"]).await;
 		assert_eq!((code, err.as_str()), (0, ""));
-		let (code, _, err) = sh("env --ignore-signal=USR1 true").await;
+		let (code, _, err) = env(&["--ignore-signal=USR1", "true"]).await;
 		assert_eq!(code, 125);
 		assert_eq!(
 			err,
@@ -1742,11 +1757,11 @@ mod tests {
 				libc::SIGUSR1
 			)
 		);
-		let (code, _, err) = sh("env --block-signal=HUP true").await;
+		let (code, _, err) = env(&["--block-signal=HUP", "true"]).await;
 		assert_eq!(code, 125);
 		assert_eq!(err, "env: failed to set signal process mask: Operation not supported\n");
 		// Later options win, in command-line order; 143 names TERM as `$?` does.
-		let (code, _, err) = sh("env -v --block-signal=KILL --default-signal=143 true").await;
+		let (code, _, err) = env(&["-v", "--block-signal=KILL", "--default-signal=143", "true"]).await;
 		assert_eq!(code, 0);
 		assert_eq!(
 			err,
@@ -1756,17 +1771,17 @@ mod tests {
 				term = libc::SIGTERM
 			)
 		);
-		let (code, _, err) = sh("env -v --default-signal=HUP --block-signal true").await;
+		let (code, _, err) = env(&["-v", "--default-signal=HUP", "--block-signal", "true"]).await;
 		assert_eq!(code, 125);
 		assert!(err.contains("signal HUP (1) mask set to BLOCK\n"), "{err}");
-		let (code, _, err) = sh("env -v --block-signal --default-signal=HUP true").await;
+		let (code, _, err) = env(&["-v", "--block-signal", "--default-signal=HUP", "true"]).await;
 		assert_eq!(code, 125);
 		assert!(err.contains("signal HUP (1) mask set to UNBLOCK\n"), "{err}");
 	}
 
 	#[tokio::test]
 	async fn help_and_version() {
-		let (code, out, err) = sh("env --help").await;
+		let (code, out, err) = env(&["--help"]).await;
 		assert_eq!((code, err.as_str()), (0, ""));
 		assert!(out.contains("Usage: env [OPTION]... [-] [NAME=VALUE]... [COMMAND [ARG]...]\n"));
 		assert!(out.contains("--split-string"), "{out}");
@@ -1775,11 +1790,11 @@ mod tests {
 				.ends_with("-    the exit status of COMMAND otherwise"),
 			"{out}"
 		);
-		let (code, out, _) = sh("env -i --version").await;
+		let (code, out, _) = env(&["-i", "--version"]).await;
 		assert_eq!(code, 0);
 		assert!(out.starts_with("env "), "{out}");
 		// Through -S as well.
-		let (code, out, _) = sh("env -S--version").await;
+		let (code, out, _) = env(&["-S--version"]).await;
 		assert_eq!(code, 0);
 		assert!(out.starts_with("env "), "{out}");
 	}

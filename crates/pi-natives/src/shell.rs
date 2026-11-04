@@ -1,4 +1,4 @@
-//! Brush-based shell execution exported via N-API.
+//! Embedded bash engine (pi-shell) shell execution exported via N-API.
 
 pub mod vfs;
 
@@ -18,7 +18,7 @@ use napi::{
 };
 use napi_derive::napi;
 use pi_shell::{
-	MinimizerResult as CoreMinimizerResult, Shell as CoreShell,
+	MinimizerResult as CoreMinimizerResult, PipeTaps, Shell as CoreShell,
 	ShellExecuteOptions as CoreShellExecuteOptions, ShellOptions as CoreShellOptions,
 	ShellRunOptions as CoreShellRunOptions, ShellRunResult as CoreShellRunResult,
 	execute_shell as core_execute_shell, minimizer,
@@ -34,7 +34,6 @@ pub fn expand_windows_long_path(path: String) -> String {
 	#[cfg(windows)]
 	{
 		pi_shell::expand_to_long_path(std::path::Path::new(&path))
-			.into_os_string()
 			.into_string()
 			.unwrap_or(path)
 	}
@@ -51,7 +50,6 @@ pub fn get_windows_short_path(path: String) -> String {
 	#[cfg(windows)]
 	{
 		pi_shell::get_short_path(std::path::Path::new(&path))
-			.into_os_string()
 			.into_string()
 			.unwrap_or(path)
 	}
@@ -147,9 +145,93 @@ pub struct ShellRunOptions<'env> {
 	/// Filesystem for this run only, replacing the session's; the session's
 	/// filesystem applies again to later runs.
 	pub filesystem: Option<ShellFilesystem>,
+	/// Receives a copy of every byte crossing the run's pipeline pipes.
+	pub streams:    Option<ClassInstance<'env, PipeStreams>>,
 }
 
-/// Options for executing a shell command via brush-core.
+/// The bytes crossing one shell run's pipeline pipes, during and after the run.
+///
+/// For `cargo build 2>&1 | tail -5`, stream 1 holds what `cargo` has written
+/// so far while `tail` still holds it back. Create one per run and pass it as
+/// [`ShellRunOptions::streams`]. Streams are numbered from 1 in the order the
+/// run opened its pipes; each keeps its most recent 1 MiB, and a run keeps its
+/// 4 newest finished streams.
+#[derive(Default)]
+#[napi]
+pub struct PipeStreams {
+	taps: Arc<PipeTaps>,
+}
+
+/// A tapped pipe of a run.
+#[napi(object)]
+pub struct PipeStreamInfo {
+	/// Stream number, from 1.
+	pub id:       u32,
+	/// Source text of the stage writing into the pipe.
+	pub producer: String,
+	/// Source text of the stage reading from it.
+	pub consumer: String,
+	/// Bytes written so far, including those no longer retained.
+	pub total:    f64,
+	/// Whether bytes may still arrive.
+	pub open:     bool,
+}
+
+/// Retained bytes of a stream, as stream offsets `start..end`.
+#[napi(object)]
+pub struct PipeStreamChunk {
+	/// Stream offset of `data`'s first byte; past 0 once older bytes were
+	/// dropped.
+	pub start: f64,
+	/// Stream offset just past `data`: the next read's `from`.
+	pub end:   f64,
+	/// The bytes `start..end`.
+	pub data:  Buffer,
+	/// Whether bytes may still arrive.
+	pub open:  bool,
+}
+
+#[napi]
+impl PipeStreams {
+	#[napi(constructor)]
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// The run's retained streams, oldest first.
+	#[napi]
+	pub fn list(&self) -> Vec<PipeStreamInfo> {
+		self
+			.taps
+			.list()
+			.into_iter()
+			.map(|stream| PipeStreamInfo {
+				id:       stream.id,
+				producer: stream.producer,
+				consumer: stream.consumer,
+				total:    stream.total as f64,
+				open:     stream.open,
+			})
+			.collect()
+	}
+
+	/// Retained bytes of stream `id` from stream offset `from` on (all of them
+	/// without it), or `null` for a stream the run never opened or no longer
+	/// keeps.
+	#[napi]
+	pub fn read(&self, id: u32, from: Option<f64>) -> Option<PipeStreamChunk> {
+		let from = from.map(|from| from.max(0.0) as u64);
+		self.taps.read(id, from).map(|read| PipeStreamChunk {
+			start: read.start as f64,
+			end:   read.end as f64,
+			data:  read.data.into(),
+			open:  read.open,
+		})
+	}
+}
+
+/// Options for executing a shell command via the embedded bash engine
+/// (pi-shell).
 #[napi(object, object_to_js = false)]
 pub struct ShellExecuteOptions<'env> {
 	/// Command string to execute in the shell.
@@ -239,7 +321,7 @@ impl From<CoreShellRunResult> for ShellRunResult {
 	}
 }
 
-/// Persistent brush-core shell session.
+/// Persistent embedded bash engine (pi-shell) shell session.
 #[napi]
 pub struct Shell {
 	inner: Arc<CoreShell>,
@@ -276,6 +358,7 @@ impl Shell {
 			env:        options.env,
 			timeout_ms: options.timeout_ms,
 			filesystem: options.filesystem.map(ShellFilesystem::into_fs),
+			pipe_taps:  options.streams.map(|streams| Arc::clone(&streams.taps)),
 		};
 		task::future(env, "shell.run", async move {
 			let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -319,7 +402,23 @@ impl Shell {
 	}
 }
 
-/// Execute a brush shell command.
+/// Run the pi-shell engine as a process shell in this process (`omp zsh`,
+/// `omp bash`, `omp sh`): `argv` is the shell's whole command line,
+/// `argv[0]` naming it (`zsh`, `bash` or `sh` pick the dialect), as a real
+/// shell gets it. Synchronous: blocks the calling thread until the shell
+/// exits and returns the status the process should exit with (0–255; 101
+/// after a panic). The shell uses the process's own stdin, stdout, stderr,
+/// terminal and inherited descriptors (duplicated, never taken over); the
+/// job-control and termination signals the runtime handles are reset to
+/// their defaults for the run and restored after it.
+#[napi]
+pub fn run_shell_main(argv: Vec<String>) -> i32 {
+	let opts = pi_shell::process::ProcessOptions { embedded: true };
+	std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pi_shell::process::main(argv, opts)))
+		.unwrap_or(101)
+}
+
+/// Execute a command in the embedded bash engine (pi-shell).
 ///
 /// Creates a fresh session for each call. The `on_chunk` callback receives
 /// streamed stdout/stderr output. Returns the exit code when the command
@@ -782,6 +881,7 @@ mod tests {
 						env:        None,
 						timeout_ms: None,
 						filesystem: None,
+						pipe_taps:  None,
 					},
 					Some(tx),
 					CancelToken::default(),
@@ -830,6 +930,7 @@ mod tests {
 						env:        None,
 						timeout_ms: None,
 						filesystem: None,
+						pipe_taps:  None,
 					},
 					None,
 					cancel,
@@ -869,6 +970,7 @@ mod tests {
 						env:        None,
 						timeout_ms: None,
 						filesystem: None,
+						pipe_taps:  None,
 					},
 					Some(tx),
 					cancel,

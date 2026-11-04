@@ -13,9 +13,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { type Api, type Model, modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
+	expandTilde,
 	getAgentDbPath,
 	getAgentDir,
 	getLastChangelogVersionPath,
@@ -34,10 +37,9 @@ import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
-import { AgentStorage } from "../session/agent-storage";
+import { AgentStorage, type AgentStorageApi } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
-import MODEL_PRIO from "../priority.json" with { type: "json" };
-import { replaceFileAtomically } from "../utils/atomic-file";
+import { writeFileAtomically } from "../utils/atomic-file";
 import { isRegisteredSearchEngine } from "../web/search/provider";
 import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
 import {
@@ -305,7 +307,61 @@ interface OwnLayers {
 }
 
 /** The layers an {@link Settings.overlay} child writes locally; see {@link Settings.overlayLayers}. */
-export type OverlayLayers = Readonly<Pick<OwnLayers, "global" | "overrides">>;
+export type OverlayLayers = Readonly<Pick<OwnLayers, "global" | "overrides"> & { derived: boolean }>;
+
+/**
+ * Copy of one instance's own layers and scope, from which a worker-thread {@link Settings.mirror}
+ * is built and kept current ({@link Settings.mirrorState}, {@link Settings.applyMirrorState}).
+ */
+export interface SettingsMirrorState {
+	/** Bumped on every own-layer change of the source; a mirror ignores states not newer than its last. */
+	readonly generation: number;
+	readonly cwd: string;
+	readonly agentDir: string;
+	readonly configFiles: readonly string[];
+	readonly global: RawSettings;
+	readonly project: RawSettings;
+	readonly configOverlay: RawSettings;
+	readonly overrides: RawSettings;
+	readonly derived: boolean;
+	readonly projectShellPathSource: string | undefined;
+	readonly overlayShellPathSource: string | undefined;
+}
+
+/** A write made on a worker mirror, replayed on its main-thread instance; settings travel by id. */
+export type SettingsMirrorWrite =
+	| { readonly op: "writeValue"; readonly id: string; readonly value: unknown; readonly layer: "global" | "override" }
+	| { readonly op: "unsetGlobalValue"; readonly id: string }
+	| { readonly op: "writeEntry"; readonly id: string; readonly key: string; readonly value: unknown }
+	| { readonly op: "writeMember"; readonly id: string; readonly item: string; readonly member: boolean }
+	| { readonly op: "pinDefaultValue"; readonly id: string }
+	| { readonly op: "clearOverrideValue"; readonly id: string }
+	| { readonly op: "setModelRole"; readonly role: string; readonly modelId: string | undefined }
+	| { readonly op: "setProjectModelRole"; readonly role: string; readonly modelId: string }
+	| { readonly op: "clearProjectModelRole"; readonly role: string }
+	| { readonly op: "overrideModelRoles"; readonly roles: ReadOnlyDict<string> };
+
+/** A disk or scope operation a worker mirror runs on its main-thread instance. */
+export type SettingsMirrorRefresh =
+	| { readonly op: "flush" }
+	| { readonly op: "reloadFromDisk"; readonly includeParents: boolean }
+	| { readonly op: "reloadForCwd"; readonly cwd: string };
+
+/**
+ * The main-thread instance behind a worker {@link Settings.mirror}. Mirrors never write locally:
+ * every write and disk operation goes through here (the main instance is the single writer) and
+ * the mirror adopts the state it returns.
+ */
+export interface SettingsMirrorSource {
+	/** Applies `write` on the main instance (the worker blocks until it is done); returns its state afterwards. */
+	write(write: SettingsMirrorWrite): SettingsMirrorState;
+	/** Runs `refresh` on the main instance; resolves with its state afterwards. */
+	refresh(refresh: SettingsMirrorRefresh): Promise<SettingsMirrorState>;
+	/** The main instance's {@link Settings.cloneForCwd}, received as a mirror. */
+	cloneForCwd(cwd: string): Promise<Settings>;
+	/** The main instance's {@link Settings.getStorage}, as a remote handle; absent keeps the parent's (or none). */
+	readonly storage?: AgentStorageApi | null;
+}
 
 /** A persisted layer re-read from disk: its new value, the file(s) it came from, and the read-side state it commits. */
 interface LayerRefresh {
@@ -362,10 +418,6 @@ export function dropSettingsGroupShadows(data: RawSettings, sourcePath: string, 
 		result[key] = dropSettingsGroupShadows(value as RawSettings, sourcePath, path);
 	}
 	return result;
-}
-
-function expandTilde(p: string): string {
-	return p === "~" ? os.homedir() : p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
 }
 
 function normalizePathPrefix(prefix: string): string {
@@ -579,7 +631,7 @@ export class Settings {
 	#configPath: string | null;
 	#cwd: string;
 	#agentDir: string;
-	#storage: AgentStorage | null = null;
+	#storage: AgentStorageApi | null = null;
 
 	#configFiles: string[] = [];
 	/** Global settings from config.yml/config.yaml */
@@ -621,8 +673,12 @@ export class Settings {
 	#childForwarders = new Set<SettingChangeListener>();
 	/** Instance this overlay reads through to ({@link overlay}); overlays never persist or write back. */
 	#parent: Settings | undefined;
+	/** A subagent-derived view inherits its parent's grant authority; host-created overlays do not. */
+	#derived = false;
 	/** Parent {@link revision} `#merged` was last built from; any other parent revision re-merges. */
 	#syncedParentRevision = -1;
+	/** Project-free view returned by {@link grantAuthority}, valid while {@link revision} is unchanged. */
+	#grantView: { revision: number; view: Settings } | undefined;
 
 	/**
 	 * Global-layer paths written during this session (for partial save), keyed by
@@ -666,6 +722,14 @@ export class Settings {
 
 	/** Whether to persist changes */
 	#persist: boolean;
+	/** Main-thread instance this worker mirror replicates; set only by {@link Settings.mirror}. */
+	#mirror: SettingsMirrorSource | undefined;
+	/** {@link SettingsMirrorState.generation} this mirror last adopted; `-1` before the first. */
+	#mirrorGeneration = -1;
+	/** Bumped by every own-layer or scope rebuild; reported as {@link SettingsMirrorState.generation}. */
+	#layerGeneration = 0;
+	/** Observers of own-layer and scope changes ({@link onLayersChange}). */
+	#layerListeners = new Set<() => void>();
 
 	private constructor(options: SettingsOptions = {}) {
 		this.#cwd = path.normalize(options.cwd ?? getProjectDir());
@@ -757,7 +821,7 @@ export class Settings {
 	 */
 	static isolated(
 		overrides: Readonly<Record<string, unknown>> = {},
-		options: { storage?: AgentStorage | null } = {},
+		options: { storage?: AgentStorageApi | null } = {},
 	): Settings {
 		const instance = new Settings({ inMemory: true, overrides });
 		instance.#storage = options.storage ?? null;
@@ -766,16 +830,43 @@ export class Settings {
 	}
 
 	/**
-	 * Child view for a subagent or other derived session: reads fall through to this instance
-	 * live (a later edit here reaches the child and its listeners), while `overrides` and every
-	 * later write on the child stay in the child — never persisted, never written back here.
+	 * The operator or SDK host's authority for model grants: a read-only view of the global,
+	 * `--config` and runtime layers (an overlay's own over its parent's) without any project layer,
+	 * because repository settings files are writable by the agent. Only subagent-derived overlays
+	 * delegate to their parent's authority, so a host's own overlay remains authoritative.
+	 */
+	grantAuthority(): Settings {
+		if (this.#derived && this.#parent) return this.#parent.grantAuthority();
+		const revision = this.revision;
+		if (this.#grantView?.revision === revision) return this.#grantView.view;
+		const view = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir });
+		view.#storage = this.#storage;
+		view.#global = this.#operatorLayers();
+		inheritWarnings(view, this);
+		view.#rebuildMerged();
+		this.#grantView = { revision, view };
+		return view;
+	}
+
+	/** Global, `--config` and runtime layers merged over an overlay parent's, skipping every project layer. */
+	#operatorLayers(): RawSettings {
+		const own = this.#mergeOwnLayers({ ...this.#ownLayers(), project: {} });
+		return this.#parent ? this.#deepMerge(this.#parent.#operatorLayers(), own) : own;
+	}
+
+	/**
+	 * Child view: reads fall through to this instance live (a later edit here reaches the
+	 * child and its listeners), while overrides and later writes stay local and non-persistent.
+	 * Use `derived: true` for subagent-injected settings, which must not grant models.
+	 * Plain overlays are host-created authority boundaries.
 	 *
 	 * @throws Error when `overrides` names an unknown setting or a value its definition rejects.
 	 */
-	overlay(overrides: Readonly<Record<string, unknown>> = {}): Settings {
+	overlay(overrides: Readonly<Record<string, unknown>> = {}, options: { derived?: boolean } = {}): Settings {
 		const child = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir, overrides });
 		child.#storage = this.#storage;
 		child.#parent = this;
+		child.#derived = options.derived ?? false;
 		inheritWarnings(child, this);
 		child.#rebuildMerged();
 		// The parent holds only a weak reference, so a discarded child is collected without an
@@ -799,12 +890,12 @@ export class Settings {
 	 * this plain data instead of the live child with its merged view, memoized values and listeners.
 	 */
 	overlayLayers(): OverlayLayers {
-		return structuredClone({ global: this.#global, overrides: this.#overrides });
+		return structuredClone({ global: this.#global, overrides: this.#overrides, derived: this.#derived });
 	}
 
 	/** {@link overlay} of this instance whose own layers are `layers` (from {@link overlayLayers}). */
 	restoreOverlay(layers: OverlayLayers): Settings {
-		const child = this.overlay();
+		const child = this.overlay({}, { derived: layers.derived });
 		child.#global = structuredClone(layers.global);
 		child.#overrides = structuredClone(layers.overrides);
 		child.#rebuildMerged();
@@ -821,7 +912,7 @@ export class Settings {
 
 	/** Re-merges an overlay whose parent changed since the last merge (every parent write bumps its revision). */
 	#syncParent(): void {
-		if (this.#parent && this.#parent.revision !== this.#syncedParentRevision) this.#rebuildMerged();
+		if (this.#parent && this.#parent.revision !== this.#syncedParentRevision) this.#remerge();
 	}
 
 	/** Merged layers, re-merged first when the parent moved on. */
@@ -844,6 +935,116 @@ export class Settings {
 	/** Return the initialized or in-flight global settings without starting a writable load. */
 	static get current(): Promise<Settings> | null {
 		return globalInstancePromise;
+	}
+
+	/**
+	 * Worker thread: in-memory replica of a main-thread instance, seeded from its {@link mirrorState}
+	 * and kept current by {@link applyMirrorState}. It never opens agent.db, config files or locks.
+	 * Reads, `onEffectiveChange` listeners, {@link revision} and child {@link overlay}s behave as on
+	 * the source; every write and disk operation on the mirror itself goes to `source` (the main
+	 * instance stays the single writer), while overlays created from the mirror keep their writes
+	 * local like any overlay. A mirror of an overlay is an overlay of `parent`, its parent's mirror.
+	 */
+	static mirror(source: SettingsMirrorSource, state: SettingsMirrorState, parent?: Settings): Settings {
+		const instance = parent
+			? parent.overlay({}, { derived: state.derived })
+			: new Settings({ inMemory: true, cwd: state.cwd, agentDir: state.agentDir });
+		instance.#mirror = source;
+		if (source.storage !== undefined) instance.#storage = source.storage;
+		instance.applyMirrorState(state);
+		return instance;
+	}
+
+	/**
+	 * Worker bootstrap only: makes `instance`, the {@link mirror} of the main thread's global
+	 * settings, this thread's global singleton (`settings`, {@link instance}, {@link current},
+	 * unscoped {@link findScopedSettings}) and the driver of process-wide effects, without
+	 * {@link init} loading anything.
+	 *
+	 * @throws Error when `instance` is not a mirror.
+	 */
+	static installGlobalMirror(instance: Settings): void {
+		if (!instance.#mirror) throw new Error("Settings.installGlobalMirror expects a worker mirror");
+		if (globalInstance === instance) return;
+		releaseGlobalMirrorEffects?.();
+		globalInstance = instance;
+		globalInstancePromise = Promise.resolve(instance);
+		clearBoundSettingsMethods();
+		releaseGlobalMirrorEffects = bindEffects(instance);
+	}
+
+	/** Whether this instance is a worker {@link mirror} of a main-thread instance. */
+	get isMirror(): boolean {
+		return this.#mirror !== undefined;
+	}
+
+	/** Instance this {@link overlay} reads through to; `undefined` for a root instance. */
+	overlayParent(): Settings | undefined {
+		return this.#parent;
+	}
+
+	/** Main thread: copy of this instance's own layers and scope, for building or refreshing a worker {@link mirror}. */
+	mirrorState(): SettingsMirrorState {
+		return {
+			generation: this.#layerGeneration,
+			cwd: this.#cwd,
+			agentDir: this.#agentDir,
+			configFiles: [...this.#configFiles],
+			global: structuredClone(this.#global),
+			project: structuredClone(this.#project),
+			configOverlay: structuredClone(this.#configOverlay),
+			overrides: structuredClone(this.#overrides),
+			derived: this.#derived,
+			projectShellPathSource: this.#projectShellPathSource,
+			overlayShellPathSource: this.#overlayShellPathSource,
+		};
+	}
+
+	/**
+	 * Worker mirror: adopts a newer {@link mirrorState} of the main instance, then notifies change
+	 * listeners (and overlay children) of every setting whose effective value changed, like a disk
+	 * reload. A state not newer than the last adopted one is ignored.
+	 *
+	 * @throws Error when this instance is not a {@link mirror}.
+	 */
+	applyMirrorState(state: SettingsMirrorState): void {
+		if (!this.#mirror) throw new Error("Settings.applyMirrorState expects a worker mirror");
+		if (state.generation <= this.#mirrorGeneration) return;
+		const previous = this.#mirrorGeneration < 0 ? undefined : this.#snapshot();
+		this.#mirrorGeneration = state.generation;
+		this.#cwd = state.cwd;
+		this.#agentDir = state.agentDir;
+		this.#configFiles = [...state.configFiles];
+		this.#global = structuredClone(state.global);
+		this.#project = structuredClone(state.project);
+		this.#configOverlay = structuredClone(state.configOverlay);
+		this.#overrides = structuredClone(state.overrides);
+		this.#derived = state.derived;
+		this.#projectShellPathSource = state.projectShellPathSource;
+		this.#overlayShellPathSource = state.overlayShellPathSource;
+		this.#rebuildMerged();
+		if (previous) this.#fireChangesSince(previous);
+	}
+
+	/**
+	 * Calls `listener` synchronously after every rebuild of this instance's own layers or scope
+	 * (writes, reloads, re-scopes; not a parent's changes). Returns the unsubscribe.
+	 */
+	onLayersChange(listener: () => void): () => void {
+		this.#layerListeners.add(listener);
+		return () => {
+			this.#layerListeners.delete(listener);
+		};
+	}
+
+	/** Replays `write` on the main instance behind this mirror and adopts the resulting state. */
+	#forward(mirror: SettingsMirrorSource, write: SettingsMirrorWrite): void {
+		this.applyMirrorState(mirror.write(write));
+	}
+
+	/** Runs `refresh` on the main instance behind this mirror and adopts the resulting state. */
+	async #forwardRefresh(mirror: SettingsMirrorSource, refresh: SettingsMirrorRefresh): Promise<void> {
+		this.applyMirrorState(await mirror.refresh(refresh));
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -890,6 +1091,17 @@ export class Settings {
 	}
 
 	/**
+	 * Whether a runtime override — a CLI flag, a session-only write, an SDK override — sets `setting`
+	 * here or on an overlay parent. Such an override outranks the setting's environment variable; a
+	 * soft-pinned protocol default does not.
+	 */
+	hasRuntimeOverride(setting: AnySetting): boolean {
+		const own = getByPath(this.#overrides, setting.segments);
+		if (own !== undefined && own !== null) return !this.#softPins.has(setting);
+		return this.#parent?.hasRuntimeOverride(setting) ?? false;
+	}
+
+	/**
 	 * Registry plumbing behind `Setting.set` / `Setting.override`: writes `value` for `setting` to the
 	 * global layer (persisted in the background; releases a soft pin, see {@link pinDefaultValue}) or
 	 * the runtime-override layer, then notifies change listeners (process-wide effects apply
@@ -898,6 +1110,7 @@ export class Settings {
 	 * @throws Error when the value does not fit the definition's type or fails its `items`/`validate` check.
 	 */
 	writeValue(setting: AnySetting, value: unknown, layer: "global" | "override"): void {
+		if (this.#mirror) return this.#forward(this.#mirror, { op: "writeValue", id: setting.id, value, layer });
 		setting.assertWritable(value);
 		if (layer === "override" && setting === cfgModelRoles) {
 			this.#savedRuntimeModelRoleOverrides.clear();
@@ -924,6 +1137,7 @@ export class Settings {
 	 * the default — supply the value.
 	 */
 	unsetGlobalValue(setting: AnySetting): void {
+		if (this.#mirror) return this.#forward(this.#mirror, { op: "unsetGlobalValue", id: setting.id });
 		const current = getByPath(this.#global, setting.segments);
 		if (current === undefined && !this.#softPins.has(setting)) return;
 		const prev = setting.get(this);
@@ -944,6 +1158,7 @@ export class Settings {
 	 */
 	writeEntry(setting: AnySetting, key: string, value: unknown): void {
 		if (setting.type !== "record") throw new Error(`Setting ${setting.id} is not a record`);
+		if (this.#mirror) return this.#forward(this.#mirror, { op: "writeEntry", id: setting.id, key, value });
 		if (value !== undefined) setting.assertWritable({ [key]: value });
 		const record = getByPath(this.#global, setting.segments);
 		// An entry re-set to its persisted value stages nothing (no config.yml rewrite).
@@ -973,6 +1188,7 @@ export class Settings {
 	 */
 	writeMember(setting: AnySetting, item: string, { member }: { member: boolean }): void {
 		if (setting.type !== "array") throw new Error(`Setting ${setting.id} is not a list`);
+		if (this.#mirror) return this.#forward(this.#mirror, { op: "writeMember", id: setting.id, item, member });
 		const list = getByPath(this.#global, setting.segments);
 		const base: readonly unknown[] = Array.isArray(list) ? list : (setting.default as readonly unknown[]);
 		const present = base.includes(item);
@@ -1008,6 +1224,7 @@ export class Settings {
 	 * override/clear ends it.
 	 */
 	pinDefaultValue(setting: AnySetting): void {
+		if (this.#mirror) return this.#forward(this.#mirror, { op: "pinDefaultValue", id: setting.id });
 		const value = setting.default;
 		if (value === undefined || this.isConfigured(setting)) return;
 		this.writeValue(setting, value, "override");
@@ -1033,6 +1250,7 @@ export class Settings {
 
 	/** Registry plumbing behind `Setting.clearOverride`: drops the runtime override of `setting`. */
 	clearOverrideValue(setting: AnySetting): void {
+		if (this.#mirror) return this.#forward(this.#mirror, { op: "clearOverrideValue", id: setting.id });
 		if (setting === cfgModelRoles) {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
@@ -1106,7 +1324,8 @@ export class Settings {
 	 * Apply on-disk edits live: watch the directories holding config.yml, the
 	 * project settings files, and `--config` overlays, and run a debounced
 	 * keep-last-good reload (a file that fails to parse or validate keeps its
-	 * layer's last good values). Arming a watch also schedules one reload, so
+	 * layer's last good values; a single value this build cannot read keeps its
+	 * last good value). Arming a watch also schedules one reload, so
 	 * edits that landed before it went live are not lost. Only the persisting
 	 * process-global instance watches; other instances ignore the call. Stopped
 	 * by {@link stopWatching} / {@link cancelPendingSaves}.
@@ -1196,6 +1415,15 @@ export class Settings {
 		for (const [dir, names] of targets) {
 			const existing = this.#fileWatchers.get(dir);
 			if (existing) {
+				// A newly followed target can share a directory with the old one.
+				// Events for its name were filtered out while the reload was reading
+				// the files, so reconcile once even though no new watch was opened.
+				for (const name of names) {
+					if (!existing.names.has(name)) {
+						armed = true;
+						break;
+					}
+				}
 				existing.names = names;
 				continue;
 			}
@@ -1220,10 +1448,9 @@ export class Settings {
 			this.#fileWatchers.set(dir, { watcher, names });
 			armed = true;
 		}
-		// The sources were last read before this watch existed, and Bun arms macOS
-		// FSEvents asynchronously, so a write in between raises no event (a write
-		// right after a symlink retarget, or any edit during startup). Re-read once
-		// the watch is live; that reload's own sync arms nothing new, so it settles.
+		// The sources were last read before a watch or name was added. Bun also
+		// arms macOS FSEvents asynchronously, so a write in between may raise no
+		// event. Re-read once; the next sync adds nothing new, so it settles.
 		if (armed) this.#scheduleWatchReload();
 	}
 
@@ -1253,6 +1480,7 @@ export class Settings {
 	 * Call before exit to ensure all changes are persisted.
 	 */
 	async flush(): Promise<void> {
+		if (this.#mirror) return this.#forwardRefresh(this.#mirror, { op: "flush" });
 		if (this.#saveTimer) {
 			clearTimeout(this.#saveTimer);
 			this.#saveTimer = undefined;
@@ -1283,9 +1511,10 @@ export class Settings {
 	 * @throws Error when a configured value fails its definition's `validate` check.
 	 */
 	async cloneForCwd(cwd: string): Promise<Settings> {
+		if (this.#mirror) return this.#mirror.cloneForCwd(cwd);
 		let cloned: Settings;
 		if (this.#parent) {
-			cloned = (await this.#parent.cloneForCwd(cwd)).overlay();
+			cloned = (await this.#parent.cloneForCwd(cwd)).overlay({}, { derived: this.#derived });
 			cloned.#project = structuredClone(this.#project);
 		} else {
 			cloned = new Settings({
@@ -1315,7 +1544,9 @@ export class Settings {
 
 	/**
 	 * Re-read the current global, project, and explicit overlay layers from disk
-	 * without replacing this instance or discarding runtime overrides.
+	 * without replacing this instance or discarding runtime overrides. An in-memory
+	 * overlay has no layers of its own on disk; `includeParents` reloads the persisted
+	 * settings behind it, keeping the overlay's own overrides.
 	 *
 	 * All sources are loaded and validated before any live layer is replaced, so
 	 * readers never observe a partially refreshed or invalid configuration.
@@ -1324,7 +1555,14 @@ export class Settings {
 	 * @throws Error when a source fails to load or a value fails its definition's
 	 * `validate` check; the previous layers stay in effect.
 	 */
-	async reloadFromDisk(): Promise<void> {
+	async reloadFromDisk(options?: { includeParents?: boolean }): Promise<void> {
+		if (this.#mirror) {
+			return this.#forwardRefresh(this.#mirror, {
+				op: "reloadFromDisk",
+				includeParents: options?.includeParents === true,
+			});
+		}
+		if (options?.includeParents && this.#parent) await this.#parent.reloadFromDisk(options);
 		if (!this.#persist) return;
 		await this.#exclusive("strict", () => this.#reloadPersistedLayers("strict"));
 	}
@@ -1422,6 +1660,7 @@ export class Settings {
 			let layers = this.#ownLayers();
 			const adopted: LayerRefresh[] = [];
 			for (const refresh of refreshed) {
+				if (keepLastGood) this.#keepReadableValues(refresh.settings, layers[refresh.layer], refresh.source);
 				const trial: OwnLayers = { ...layers, [refresh.layer]: refresh.settings };
 				if (keepLastGood && !this.#acceptsLayers(trial, refresh.source)) continue;
 				layers = trial;
@@ -1440,6 +1679,30 @@ export class Settings {
 			this.#rebuildMerged();
 			this.#fireChangesSince(previous);
 			return;
+		}
+	}
+
+	/**
+	 * Keeps, in a re-read layer `fresh`, the value the `live` layer holds for each setting whose new
+	 * on-disk value this build cannot read (an enum value a newer omp added, a wrong type) while its
+	 * old value was readable. Reading an unreadable value falls back to the default, so a config
+	 * written for another version would otherwise move a running session to a value neither config
+	 * chose — and rebuild every tool description and prompt derived from it, losing the session's
+	 * prompt cache. The file keeps the edit; instances loading it fresh read it as before.
+	 */
+	#keepReadableValues(fresh: RawSettings, live: RawSettings, source: string): void {
+		for (const setting of allSettings()) {
+			const next = getByPath(fresh, setting.segments);
+			if (next === undefined || next === null || setting.accepts(next)) continue;
+			const kept = getByPath(live, setting.segments);
+			if (kept === undefined || kept === null || !setting.accepts(kept)) continue;
+			setByPath(fresh, setting.segments, structuredClone(kept));
+			logger.warn("Settings: keeping last good value; on-disk value is invalid", {
+				path: source,
+				setting: setting.id,
+				value: next,
+				kept,
+			});
 		}
 	}
 
@@ -1479,6 +1742,7 @@ export class Settings {
 	 * `validate` check; the instance then stays on its previous scope.
 	 */
 	async reloadForCwd(cwd: string): Promise<void> {
+		if (this.#mirror) return this.#forwardRefresh(this.#mirror, { op: "reloadForCwd", cwd });
 		const normalized = path.normalize(cwd);
 		for (let active = this.#activeReload; active; active = this.#activeReload) {
 			await active.promise.catch(() => {});
@@ -1528,7 +1792,7 @@ export class Settings {
 	// Accessors
 	// ─────────────────────────────────────────────────────────────────────────
 
-	getStorage(): AgentStorage | null {
+	getStorage(): AgentStorageApi | null {
 		return this.#storage;
 	}
 
@@ -1738,6 +2002,7 @@ export class Settings {
 	 * stale skip in place.
 	 */
 	setModelRole(role: ModelRole | string, modelId: string | undefined): void {
+		if (this.#mirror) return this.#forward(this.#mirror, { op: "setModelRole", role, modelId });
 		const prev = cfgModelRoles.get(this);
 		// Re-setting the persisted role (or clearing an absent one) stages no config.yml rewrite;
 		// the runtime-override sync below still applies.
@@ -1783,6 +2048,7 @@ export class Settings {
 	 * Set a model role in the current project's settings layer.
 	 */
 	setProjectModelRole(role: ModelRole | string, modelId: string): void {
+		if (this.#mirror) return this.#forward(this.#mirror, { op: "setProjectModelRole", role, modelId });
 		this.#setProjectModelRoleValue(role, modelId);
 		this.#captureRuntimeModelRoleOverride(role);
 		this.#updateRuntimeModelRoleOverride(role, modelId);
@@ -1791,6 +2057,7 @@ export class Settings {
 	 * Clear a model role from the current project's settings layer.
 	 */
 	clearProjectModelRole(role: ModelRole | string): void {
+		if (this.#mirror) return this.#forward(this.#mirror, { op: "clearProjectModelRole", role });
 		this.#setProjectModelRoleValue(role, null);
 		this.#captureRuntimeModelRoleOverride(role);
 		this.#updateRuntimeModelRoleOverride(role, undefined);
@@ -1900,6 +2167,7 @@ export class Settings {
 	 * Override model roles (helper for modelRoles record).
 	 */
 	overrideModelRoles(roles: ReadOnlyDict<string>): void {
+		if (this.#mirror) return this.#forward(this.#mirror, { op: "overrideModelRoles", roles: { ...roles } });
 		const next = this.#modelRolesFromLayer(this.#overrides);
 		for (const [role, modelId] of Object.entries(roles)) {
 			if (modelId) {
@@ -2555,7 +2823,7 @@ export class Settings {
 		}
 
 		try {
-			const dbSettings = this.#storage?.getSettings();
+			const dbSettings = this.#storage instanceof AgentStorage ? this.#storage.getSettings() : null;
 			if (dbSettings) {
 				settings = this.#deepMerge(settings, this.#migrateRawSettings(dbSettings as RawSettings));
 				migrated = true;
@@ -2588,7 +2856,7 @@ export class Settings {
 			}
 
 			try {
-				this.#storage?.clearMigratedSettings();
+				if (this.#storage instanceof AgentStorage) this.#storage.clearMigratedSettings();
 			} catch (error) {
 				logger.warn("Settings: failed to clear migrated agent.db settings", { error: String(error) });
 			}
@@ -3286,6 +3554,23 @@ export class Settings {
 			const legacyWebOrder = legacy(providerSettings, "webSearchOrder", "providers.webSearchOrder");
 			const legacyWebExclude = legacy(providerSettings, "webSearchExclude", "providers.webSearchExclude");
 			const legacyGeminiModel = legacy(providerSettings, "webSearchGeminiModel", "providers.webSearchGeminiModel");
+			// Legacy settings named a provider; its swap target is the catalog's
+			// resolved per-model policy (`web-search-model` / `image-model` / tts
+			// seed kind), uniform across that provider's bundled rows.
+			const bundledSelector = (
+				provider: string,
+				pick: (model: Model<Api>) => string | undefined,
+			): string | undefined => {
+				for (const model of getBundledModels(provider as GeneratedProvider)) {
+					const id = pick(model);
+					if (id) return `${provider}/${id}`;
+				}
+				return undefined;
+			};
+			const webSearchSelector = (provider: string): string[] => {
+				const selector = bundledSelector(provider, model => model.webSearchModel);
+				return selector ? [selector] : [];
+			};
 			const geminiSelectors = (model: string): string[] => [
 				`google-gemini-cli/${model}`,
 				`google-antigravity/${model}`,
@@ -3296,11 +3581,11 @@ export class Settings {
 					case "gemini":
 						return geminiSelectors(geminiModel);
 					case "anthropic":
-						return ["anthropic/claude-haiku-4-5"];
+						return webSearchSelector("anthropic");
 					case "codex":
-						return ["openai-codex/gpt-5.6-luna"];
+						return webSearchSelector("openai-codex");
 					case "xai":
-						return ["xai/grok-4.5"];
+						return webSearchSelector("xai");
 					case "auto":
 						return [];
 					default:
@@ -3310,7 +3595,7 @@ export class Settings {
 			const geminiModel =
 				typeof legacyGeminiModel === "string" && legacyGeminiModel.trim()
 					? legacyGeminiModel.trim()
-					: "gemini-2.5-flash";
+					: (getBundledModels("google").find(model => model.webSearchModel)?.webSearchModel ?? "");
 			const excludedWebProviders = new Set(
 				Array.isArray(legacyWebExclude)
 					? legacyWebExclude.filter(
@@ -3343,31 +3628,28 @@ export class Settings {
 			if (orderedWebSelectors.length > 0 || excludedWebProviders.size > 0) {
 				setRoleChain(
 					"web",
-					dedupe([...orderedWebSelectors, ...MODEL_PRIO.web]).filter(selector => !isWebSelectorExcluded(selector)),
+					dedupe([...orderedWebSelectors, ...roleDefaultModels().web]).filter(
+						selector => !isWebSelectorExcluded(selector),
+					),
 				);
 			}
 
 			const legacyImage = legacy(providerSettings, "image", "providers.image");
 			const legacyImageOrder = legacy(providerSettings, "imageOrder", "providers.imageOrder");
+			const legacyImageProviders: Record<string, string> = {
+				openai: "openai",
+				"openai-codex": "openai-codex",
+				antigravity: "google-antigravity",
+				xai: "xai",
+				gemini: "google",
+				deepinfra: "deepinfra",
+			};
 			const imageSelector = (provider: string): string | undefined => {
-				switch (provider) {
-					case "openai":
-						return "openai/gpt-image-2";
-					case "openai-codex":
-						return "openai-codex/gpt-image-2";
-					case "antigravity":
-						return "google-antigravity/gemini-3-pro-image";
-					case "xai":
-						return "xai/grok-imagine-image";
-					case "openrouter":
-						return "openrouter/google/gemini-3-pro-image";
-					case "gemini":
-						return "google/gemini-3-pro-image";
-					case "deepinfra":
-						return "deepinfra/black-forest-labs/FLUX-2-pro";
-					default:
-						return undefined;
-				}
+				// OpenRouter rows carry no gemini image-model swap (the gemini class
+				// binds to Google transports only), so its legacy target stays literal.
+				if (provider === "openrouter") return "openrouter/google/gemini-3-pro-image";
+				const catalogProvider = legacyImageProviders[provider];
+				return catalogProvider ? bundledSelector(catalogProvider, model => model.imageModel) : undefined;
 			};
 			const orderedImageProviders = Array.isArray(legacyImageOrder)
 				? legacyImageOrder
@@ -3378,18 +3660,14 @@ export class Settings {
 				typeof value === "string" ? (imageSelector(value) ?? []) : [],
 			);
 			if (orderedImageSelectors.length > 0) {
-				setRoleChain("image", dedupe([...orderedImageSelectors, ...MODEL_PRIO.image]));
+				setRoleChain("image", dedupe([...orderedImageSelectors, ...roleDefaultModels().image]));
 			}
 
 			const legacyTtsProvider = legacy(providerSettings, "tts", "providers.tts");
 			const speechSelector =
-				legacyTtsProvider === "local"
-					? "local/kokoro"
-					: legacyTtsProvider === "xai"
-						? "xai/grok-tts"
-						: legacyTtsProvider === "deepinfra"
-							? "deepinfra/hexgrad/Kokoro-82M"
-							: undefined;
+				legacyTtsProvider === "local" || legacyTtsProvider === "xai" || legacyTtsProvider === "deepinfra"
+					? bundledSelector(legacyTtsProvider, model => (modelKind(model) === "tts" ? model.id : undefined))
+					: undefined;
 			if (speechSelector) setRoleChain("speech", [speechSelector]);
 
 			const legacySttModel = legacy(sttSettings, "modelName", "stt.modelName");
@@ -3419,7 +3697,7 @@ export class Settings {
 				(typeof legacyUnexpectedStopModel === "string" && legacyUnexpectedStopModel !== "online");
 			if (nonDefaultJudge) {
 				const judgeCandidates: string[] = [];
-				if (legacyJudgmentProvider !== "llm") judgeCandidates.push("typesafe/jev-latest");
+				if (legacyJudgmentProvider !== "llm") judgeCandidates.push("typesafe/jev-1.14.0");
 				if (typeof legacyAutoThinkingModel === "string" && legacyAutoThinkingModel !== "online") {
 					judgeCandidates.push(`local/${legacyAutoThinkingModel}`);
 				}
@@ -3475,6 +3753,23 @@ export class Settings {
 			if (sttSettings && Object.keys(sttSettings).length === 0) delete raw.stt;
 		}
 		migrateKindRoleSettings();
+
+		// The old web-provider migration persisted this pair of fuzzy defaults.
+		// Qualified selectors are now exact, so replace the pair without changing
+		// independently configured selectors or other role chains.
+		{
+			const retry = isRecord(raw.retry) ? raw.retry : undefined;
+			const chains = retry && isRecord(retry.fallbackChains) ? retry.fallbackChains : undefined;
+			const web = chains?.web;
+			if (chains && Array.isArray(web)) {
+				const index = web.findIndex(
+					(selector, i) => selector === "openai-codex/gpt-5.6" && web[i + 1] === "openai-codex/gpt-5.5",
+				);
+				if (index !== -1) {
+					chains.web = [...web.slice(0, index), "openai-codex/gpt-5.6-sol", ...web.slice(index + 2)];
+				}
+			}
+		}
 
 		// Consolidate the retired Exa suite toggles onto the sole remaining
 		// provider switch. The old runtime required both `enabled` and
@@ -3553,24 +3848,7 @@ export class Settings {
 	// ─────────────────────────────────────────────────────────────────────────
 
 	async #writeYamlAtomically(filePath: string, content: string): Promise<void> {
-		const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-		let removeTemp = false;
-		try {
-			const handle = await fs.promises.open(tempPath, "wx", 0o600);
-			removeTemp = true;
-			try {
-				await handle.writeFile(content, "utf8");
-				await handle.sync();
-			} finally {
-				await handle.close();
-			}
-			await replaceFileAtomically(tempPath, filePath);
-			removeTemp = false;
-		} finally {
-			if (removeTemp) {
-				await fs.promises.rm(tempPath, { force: true }).catch(() => {});
-			}
-		}
+		await writeFileAtomically(filePath, content);
 	}
 
 	#queueSave(): void {
@@ -3787,6 +4065,7 @@ export class Settings {
 	 */
 	#adoptSavedGlobal(saved: RawSettings, source: string): void {
 		this.#applyPendingGlobalWrites(saved);
+		this.#keepReadableValues(saved, this.#global, source);
 		if (!this.#acceptsLayers({ ...this.#ownLayers(), global: saved }, source)) return;
 		const previous = this.#snapshot();
 		this.#global = saved;
@@ -3881,7 +4160,22 @@ export class Settings {
 	// Utilities
 	// ─────────────────────────────────────────────────────────────────────────
 
+	/** Re-merges after a change to this instance's own layers or scope, then tells {@link onLayersChange} observers. */
 	#rebuildMerged(): void {
+		this.#remerge();
+		this.#layerGeneration++;
+		if (this.#layerListeners.size === 0) return;
+		for (const listener of Array.from(this.#layerListeners)) {
+			try {
+				listener();
+			} catch (error) {
+				logger.warn("Settings: layer-change listener failed", { error: String(error) });
+			}
+		}
+	}
+
+	/** Rebuilds the merged view from the own layers over the parent's current view. */
+	#remerge(): void {
 		this.#revision++;
 		if (this.#parent) this.#syncedParentRevision = this.#parent.revision;
 		this.#merged = this.#mergeOverParent(this.#mergeOwnLayers(this.#ownLayers()));
@@ -3975,6 +4269,8 @@ let globalInstance: Settings | null = null;
 let globalInstancePromise: Promise<Settings> | null = null;
 let boundSettingsInstance: Settings | null = null;
 let boundSettingsMethods = new Map<PropertyKey, unknown>();
+/** Releases the effects hold {@link Settings.installGlobalMirror} took for the current global mirror. */
+let releaseGlobalMirrorEffects: (() => void) | undefined;
 
 function clearBoundSettingsMethods(): void {
 	boundSettingsInstance = null;
@@ -4030,6 +4326,7 @@ export function resetSettingsForTest(): void {
 	liveSettingsInstances.clear();
 	globalInstance = null;
 	globalInstancePromise = null;
+	releaseGlobalMirrorEffects = undefined;
 	clearBoundSettingsMethods();
 	// Effect-owned process state (theme, redaction, request limits, …) returns to its defaults.
 	resetRegistryForTest(Settings.isolated());

@@ -443,7 +443,9 @@ export class ChildProcess<In extends InMask = InMask> {
 	// ── Output helpers ───────────────────────────────────────────────────
 
 	async #throwIfAborted(): Promise<void> {
-		const exitReason = this.exitReason;
+		// A kill() issued before Bun reports the root's exit only records the
+		// reason as pending; output readers that do not wait for exit must still see it.
+		const exitReason = this.#exitReason ?? this.#exitReasonPending;
 		if (!exitReason?.aborted) return;
 		if (this.#terminating) await this.#terminating;
 		throw exitReason;

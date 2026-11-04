@@ -54,6 +54,8 @@ pub use error::{
 	not_a_directory, permission_denied, read_only_filesystem, unsupported,
 };
 pub use file::{File, FileHandle};
+#[cfg(unix)]
+pub use file::{POLL_SLICE, fd_reads_can_block, readable_within, reads_can_block, wait_readable};
 pub use fs::{BlockingFs, Fs};
 pub use metadata::Metadata;
 pub use options::{

@@ -312,6 +312,28 @@ describe("auth-gateway POST /v1/systemone", () => {
 		expect(harness.upstream).toHaveLength(0);
 	});
 
+	it("rejects a Jev image below the catalog minimum before gateway credential lookup", async () => {
+		harness = await boot(() => Response.json(UPSTREAM_ANSWER));
+		harness.storage.keys.removeRuntime("typesafe");
+		const credentialLookup = vi.spyOn(harness.storage.keys, "getWithCredential");
+		const response = await post(harness.url, "/v1/systemone", {
+			model: "typesafe/jev-latest",
+			state: "Inspect this tiny image.",
+			questions: REQUEST.questions,
+			images: [{ type: "image", data: PNG_DATA, mimeType: "image/png" }],
+		});
+
+		expect(response.status).toBe(422);
+		expect(await response.json()).toMatchObject({
+			error: {
+				type: "invalid_request_error",
+				message: expect.stringContaining("at least 78400 pixels"),
+			},
+		});
+		expect(credentialLookup).not.toHaveBeenCalled();
+		expect(harness.upstream).toHaveLength(0);
+	});
+
 	it("serves the OpenRouter Decisions path with the same handler", async () => {
 		harness = await boot(() => Response.json(UPSTREAM_ANSWER));
 		const response = await post(harness.url, "/alpha/decisions", { model: "jev-latest", ...REQUEST });

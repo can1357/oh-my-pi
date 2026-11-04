@@ -36,6 +36,13 @@ export function envBool(name: string, defaultValue: boolean, env: Env = process.
 	return defaultValue;
 }
 
+/** Unset or blank → `defaultValue`; otherwise true only for `1`/`true`/`yes`/`on`, so a malformed value disables. */
+export function envFlag(name: string, defaultValue: boolean, env: Env = process.env): boolean {
+	const value = env[name]?.trim().toLowerCase();
+	if (!value) return defaultValue;
+	return TRUE_VALUES[value] === true;
+}
+
 export function envInt(name: string, defaultValue: number, env: Env = process.env): number {
 	const raw = env[name]?.trim();
 	if (!raw) return defaultValue;

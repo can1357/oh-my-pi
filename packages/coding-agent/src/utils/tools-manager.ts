@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, getToolsDir, logger, ptree, TempDir, USER_AGENT } from "@oh-my-pi/pi-utils";
+import { $env, $which, getToolsDir, logger, ptree, TempDir, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { extractArchive } from "@oh-my-pi/pi-utils/ar";
 import { type DownloadTracker, trackDownload, withDownload } from "../downloads/activity";
 
@@ -173,11 +173,17 @@ export function getToolPath(tool: ToolName): string | null {
 }
 
 // Fetch latest release version from GitHub
-async function getLatestVersion(repo: string, signal?: AbortSignal): Promise<string> {
+export async function getLatestVersion(repo: string, signal?: AbortSignal): Promise<string> {
+	// Use GITHUB_TOKEN if available
+	const token = $env.GITHUB_TOKEN || $env.GH_TOKEN;
+	const headers: Record<string, string> = { "User-Agent": USER_AGENT };
+	if (token) {
+		headers.Authorization = `Bearer ${token}`;
+	}
 	let response: Response;
 	try {
 		response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
-			headers: { "User-Agent": USER_AGENT },
+			headers,
 			signal: ptree.combineSignals(signal, TOOL_METADATA_TIMEOUT_MS),
 		});
 	} catch (err) {

@@ -1,4 +1,4 @@
-// Catalog entry for "deepinfra"; no deployment-contract compat rules are needed.
+// Catalog entry for "deepinfra".
 
 provider "deepinfra" {
 	default-model "deepseek-ai/DeepSeek-V4-Flash-0731"
@@ -9,6 +9,8 @@ provider "deepinfra" {
 		image "openai-images"
 		tts "openai-speech"
 	}
+	// Same-provider image-generation swap target for chat models.
+	image-model "black-forest-labs/FLUX-2-pro"
 
 	seed base-url="https://api.deepinfra.com/v1/openai" bundle="always" {
 		model "black-forest-labs/FLUX-2-pro" name="FLUX.2 Pro" api="openai-images" {

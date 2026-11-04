@@ -16,7 +16,14 @@ export interface BashInterceptorRule {
 const EMPTY_STRING_ARRAY: string[] = [];
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
-		pattern: "^\\s*(cat|head|tail|less|more)\\s+",
+		// `cat` that sends stdout to a file or reads a heredoc writes rather than
+		// reads, also after leading redirects of other fds (`cat 2>err > out`);
+		// the write rule below owns those forms. `cat 2>err file` and
+		// `cat >&2 file` (stdout duplicated, not sent to a file) still read.
+		// A redirect target cannot start with `>` or `|`, so each leading
+		// redirect is consumed one way and matching stays linear.
+		pattern:
+			"^\\s*(?:(?:head|tail|less|more)\\s+|cat\\s+(?!\\s|(?:[02-9]>{1,2}\\|?\\s*[^\\s>|]\\S*\\s+)*(?:<<|1?>(?!&)|&>)))",
 		tool: "read",
 		message: "Use the `read` tool instead of cat/head/tail. It provides better context and handles binary files.",
 	},
@@ -48,14 +55,27 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
 		// `>` must sit outside quoted regions (so `echo "a -> b"` passes) and be
 		// followed by a plausible filename — including `$VAR` targets; `>|`
-		// (clobber) counts as a redirect; `>&2`/`2>&1` style fd duplication is
-		// not matched. Allowed device sinks are consumed while looking for later
-		// real file redirects because the write tool cannot replace shell
-		// output/discard targets.
+		// (clobber) counts as a redirect; `>&2`/`2>&1` style fd duplication and
+		// redirects of fds other than stdout (`2>err.log`) are not matched, and
+		// the scan continues past them and past input duplication (`<&0`), so
+		// `2>&1 > out.txt` is a write. The scan stops at an unquoted,
+		// unescaped `;`, `&&`, `|` or newline outside a command substitution,
+		// so a redirect in a later command or a heredoc body is not attributed
+		// to the echo/cat, while `echo foo\; > out.txt` and
+		// `echo $(printf a; printf b) > out.txt` keep theirs. Allowed device
+		// sinks are consumed while looking for later real file redirects
+		// because the write tool cannot replace shell output/discard targets.
+		// Each character has exactly one way to be consumed (an fd-numbered
+		// redirect only by the fd branch, an escape only by the escape branch,
+		// a `$(`, `${` or backtick only by the substitution branch, and as a
+		// plain character only when that branch cannot consume it, so a deeper
+		// nesting such as `${a:-${b}}` is scanned as before), which keeps
+		// matching linear on long commands.
 		pattern:
-			"^\\s*(echo|printf|cat\\s*<<)\\s+(?:(?:[^\"'>]|\"[^\"]*\"|'[^']*')|(?<!\\|)>{1,2}\\|?\\s*(?:\"/dev/(?:null|tty|stdout|stderr)\"|'/dev/(?:null|tty|stdout|stderr)'|/dev/(?:null|tty|stdout|stderr))(?:[\\s;&|]|$))*(?<!\\|)>{1,2}\\|?\\s*(?!(?:\"/dev/(?:null|tty|stdout|stderr)\"|'/dev/(?:null|tty|stdout|stderr)'|/dev/(?:null|tty|stdout|stderr))(?:[\\s;&|]|$))[$\\w./~\"'-]",
+			"^\\s*(?:(?:echo|printf)\\s+|cat\\s*<<|cat(?=\\s+(?:\\d+|&)?>)\\s+)(?:(?:\\\\[\\s\\S]|\\$\\((?:[^()\"'`]|\"[^\"]*\"|'[^']*'|`[^`]*`|\\([^()]*\\))*\\)|\\$\\{[^{}]*\\}|`[^`]*`|\\$(?!\\((?:[^()\"'`]|\"[^\"]*\"|'[^']*'|`[^`]*`|\\([^()]*\\))*\\)|\\{[^{}]*\\})|`(?![^`]*`)|[^\"'>;&|\\n\\\\$`]|(?<=[<>])&|(?<![<>])&(?=>)|(?<=(?:^|\\s)[02-9])>{1,2}\\|?|\"[^\"]*\"|'[^']*')|(?<!\\||>|(?:^|\\s)[02-9])>{1,2}\\|?\\s*(?:\"/dev/(?:null|tty|stdout|stderr)\"|'/dev/(?:null|tty|stdout|stderr)'|/dev/(?:null|tty|stdout|stderr))(?=[\\s;&|]|$))*(?<!\\||>|(?:^|\\s)[02-9])>{1,2}\\|?\\s*(?!(?:\"/dev/(?:null|tty|stdout|stderr)\"|'/dev/(?:null|tty|stdout|stderr)'|/dev/(?:null|tty|stdout|stderr))(?:[\\s;&|]|$))[$\\w./~\"'-]",
 		tool: "write",
-		message: "Use the `write` tool instead of echo/cat redirection. It handles encoding and provides confirmation.",
+		message:
+			"Use the `write` tool instead of echo/cat redirection. It handles encoding and provides confirmation. `write` replaces the whole file; to append to an existing file, use `edit` to insert after its last line.",
 	},
 	{
 		pattern: "^\\s*nohup\\s+|(?<!&)\\&\\s*$",
@@ -78,6 +98,9 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 ];
 
 export const cfgShellPath = register({ id: "shellPath", type: "string", default: undefined });
+
+/** Pi shell command prefix forwarded to legacy extensions; OMP's native shell does not apply it. */
+export const cfgLegacyShellCommandPrefix = register({ id: "shellCommandPrefix", type: "string", default: undefined });
 
 export const cfgBashEnabled = register({
 	id: "bash.enabled",
@@ -126,7 +149,7 @@ export const cfgBashGitGuard = register({
 		group: "Bash",
 		label: "Git Guard",
 		description:
-			"Refuse git commands that discard or move shared work in the bash tool: stash, reset --hard or to another commit, and checkout/switch/restore outside a merge or rebase conflict",
+			"Refuse git commands that discard or move shared work in a repository's main checkout: stash, reset --hard or to another commit, and checkout/switch/restore outside a merge or rebase conflict. In a linked worktree they run, saving uncommitted changes they discard first",
 	},
 });
 

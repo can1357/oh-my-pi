@@ -737,6 +737,10 @@ describe("AgentSession auto-compaction progress guard", () => {
 				}),
 			}),
 		);
+		expect(session.getLastAssistantMessage()).toMatchObject({
+			stopReason: "error",
+			errorMessage: assistantMsg.errorMessage,
+		});
 	});
 
 	it("restores the persisted overflow error when compaction skips without committing", async () => {
@@ -1202,7 +1206,9 @@ describe("AgentSession auto-compaction progress guard", () => {
 		// the journal to prove the durable branch marker, rather than the discarded
 		// physical leaf, selects the active branch after a process restart.
 		vi.spyOn(telemetryExport, "flushTelemetryExport").mockResolvedValue();
-		const printModeExitCode = await runPrintMode(session, { mode: "json" });
+		// Print mode reads a turn's stop reason only after admitting a model turn; with
+		// `agent.prompt` mocked, that turn adds nothing and the capped failure stays last.
+		const printModeExitCode = await runPrintMode(session, { mode: "json", initialMessage: "continue" });
 		expect(printModeExitCode).toBe(1);
 		const reloaded = await SessionManager.open(sessionFile, sessionDir);
 		expect(reloaded.getBranch()).not.toContainEqual(
@@ -1738,6 +1744,34 @@ describe("AgentSession auto-compaction progress guard", () => {
 		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
 		expect(noProgress.length).toBe(1);
 		expect(noProgress[0].level).toBe("warning");
+	});
+
+	it("reports the overflow error as the run's outcome when an overflow recovery still does not fit", async () => {
+		// Print mode and the task executor read the outcome after settle through
+		// getLastAssistantMessage(); the retry branch dropped the failed turn from
+		// active context, so without a retained failure they report an earlier
+		// assistant message as a clean finish.
+		seedPriorTurns();
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 205000, contextWindow: 200000, percent: 102.5 });
+
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+
+		const assistantMsg = overflowAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await session.waitForIdle();
+
+		expect(session.getLastAssistantMessage()).toMatchObject({
+			stopReason: "error",
+			errorMessage: assistantMsg.errorMessage,
+		});
 	});
 
 	it("auto-continues (no warning) when a shake rescue frees the oversized tail", async () => {

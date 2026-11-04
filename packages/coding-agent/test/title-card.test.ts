@@ -67,6 +67,18 @@ describe("parseCardTitleReply", () => {
 		expect(parseCardTitleReply("<title>Fix: the parser</title>", "emoji")).toBe("Fix: the parser");
 	});
 
+	it("reads a code heading the text when the icons are attributes, but not a plain title's leading word", () => {
+		expect(parseCardTitleReply('<title emoji="⏳">WAIT Observe agent waits</title>', "emoji")).toBe(
+			"⏳ WAIT: Observe agent waits",
+		);
+		expect(parseCardTitleReply("<title>CI pipeline fails on arm64</title>", "emoji")).toBe(
+			"CI pipeline fails on arm64",
+		);
+		expect(parseCardTitleReply('<title emoji="📝">A new parser for imports</title>', "emoji")).toBe(
+			"A new parser for imports",
+		);
+	});
+
 	it("reconciles the title's casing against the user's message", () => {
 		expect(
 			parseCardTitleReply(

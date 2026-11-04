@@ -60,7 +60,7 @@ def _make_computer():
         return {"method": method, "args": _arguments(args, kwargs)}
 
     class _Observation(dict):
-        """A non-silent observe() result; its displays leave out the `ax` tree observe() already printed."""
+        """A non-silent observe() result; its printed text leaves out the `ax` tree observe() already printed."""
 
         __slots__ = ()
 
@@ -69,9 +69,6 @@ def _make_computer():
 
         def __repr__(self):
             return repr(self._shown())
-
-        def _repr_mimebundle_(self, include=None, exclude=None):
-            return {"application/json": self._shown(), "text/plain": repr(self)}
 
         def __reduce__(self):
             # Pickle and copy as the plain dict, `ax` included: this class is local to the prelude.
@@ -89,6 +86,9 @@ def _make_computer():
         async def setValue(self, *args, **kwargs):
             return await self._method("setValue", args, kwargs)
 
+        async def selectText(self, *args, **kwargs):
+            return await self._method("selectText", args, kwargs)
+
         async def bounds(self, *args, **kwargs):
             return await self._method("bounds", args, kwargs)
 
@@ -103,6 +103,9 @@ def _make_computer():
 
         async def press(self, *args, **kwargs):
             return await self._method("press", args, kwargs)
+
+        async def type(self, *args, **kwargs):
+            return await self._method("type", args, kwargs)
 
         async def click(self, *args, **kwargs):
             return await self._method("click", args, kwargs)
@@ -215,7 +218,10 @@ def _make_computer():
             return await self._method("list", (options,), kwargs)
 
         async def open(self, id_or_name_or_path, options=None, **kwargs):
-            return await self._method("open", (id_or_name_or_path, options), kwargs)
+            app = await self._method("open", (id_or_name_or_path, options), kwargs)
+            if isinstance(app, dict) and isinstance(app.get("window"), dict):
+                app["window"] = _Window(app["window"])
+            return app
 
     class _Control(_Namespace):
         async def acquire(self, options=None, **kwargs):
