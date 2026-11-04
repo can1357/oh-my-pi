@@ -31,6 +31,20 @@ describe("Factory Droid public stream controls", () => {
 		expect(captured[0]?.body.reasoning_history).toBeUndefined();
 	});
 
+	it("keeps mandatory MiniMax M3.1 Flash reasoning at low when forced off", async () => {
+		const captured: CapturedRequest[] = [];
+		const result = await streamSimple(factoryModel("minimax-m3.1-flash"), context, {
+			apiKey: WORKOS_TOKEN,
+			reasoning: Effort.Max,
+			forceReasoningOff: true,
+			fetch: captureFetch(captured, completionsChunks("ok", "minimax-m3.1-flash")),
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(captured[0].body.reasoning_effort).toBe("low");
+		expect(Object.hasOwn(captured[0].body, "reasoning_history")).toBe(false);
+	});
+
 	it("disables Responses reasoning without a thinking-budget instruction", async () => {
 		const captured: CapturedRequest[] = [];
 		const result = await streamSimple(factoryModel("gpt-5.6-terra", ["snowflake"]), context, {

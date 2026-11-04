@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added MiniMax M3.1 Flash to Factory Droid with low through max reasoning levels and the existing Factory sign-in ([#17709](https://github.com/can1357/oh-my-pi/pull/17709) by [@skipper019](https://github.com/skipper019)).
 - Added the `supports-message-threads` compat axis (`supportsMessageThreads`), enabled for Claude 4.5 and newer on the first-party Anthropic provider
 - Added a standard Responses WebSocket capability rule for explicit opt-in through OMP settings or SDK preferences, disabled by default ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
 
