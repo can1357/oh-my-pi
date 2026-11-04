@@ -203,6 +203,39 @@ describe("methods", () => {
 		}
 	});
 
+	it("object-definition spreads replace hidden fields in every merge path and either property order", () => {
+		const hidden: FluentType<{}> = type({ id: "string" });
+		for (const schema of [
+			type({ id: "number" }).merge({ "...": hidden }),
+			type({ id: "number" }).merge({ "...": type({ "...": hidden }) }),
+			type.keywords.Merge({ id: "number" }, { "...": hidden }),
+			type.merge({ id: "number" }, { "...": hidden }),
+			type({ id: "number", "...": hidden }),
+			type("null").or({ id: "number", "...": hidden }),
+		]) {
+			expect(schema.assert({ id: "replacement" })).toEqual({ id: "replacement" });
+			expect(schema({ id: 1 })).toBeInstanceOf(OmpErrors);
+		}
+		expect(type({ "...": type({ id: "string" }), id: "number" }).assert({ id: 1 })).toEqual({ id: 1 });
+	});
+
+	it("concrete exclusion, required values, and output keys retain their runtime contracts", () => {
+		const excluded = type("string | number").exclude(type("string"));
+		expect(excluded.assert(42)).toBe(42);
+		expect(excluded("not retained")).toBeInstanceOf(OmpErrors);
+		const required = type({ "value?": "string" }).required();
+		expect(required.assert({ value: "ok" })).toEqual({ value: "ok" });
+		expect(required({ value: undefined })).toBeInstanceOf(OmpErrors);
+		expect(type({ "value?": "string | undefined" }).required().assert({ value: undefined })).toEqual({
+			value: undefined,
+		});
+		const schema = type({ id: "number", name: "string" });
+		const view: FluentType<{ id: number }> = schema;
+		expect(schema.out.keyof().from("name")).toBe("name");
+		expect(type(["keyof", view]).from("name")).toBe("name");
+		expect(type("keyof", view).from("name")).toBe("name");
+	});
+
 	it("supports ArkType-compatible Type checks", () => {
 		const schema = type({ kind: "'first'" }).or({ kind: "'second'", enabled: "boolean = false" });
 		expect(schema).toBeInstanceOf(Type);

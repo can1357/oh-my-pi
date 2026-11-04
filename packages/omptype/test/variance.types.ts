@@ -192,6 +192,76 @@ const exactStaticIntersectionKeys: true = exactly<"id" | "name" | "nick" | "acti
 );
 const exactStaticMergedKeys: true = exactly<"id" | "name" | "nick">()(type.merge(user, { id: "string" }).keyof().infer);
 
+// Hidden spread replacements cannot retain an earlier property's declared type.
+const spreadMerge = type({ id: "number", keep: "boolean" }).merge({ "...": replacementView });
+admits(spreadMerge, { id: "replacement", keep: true });
+const nestedSpreadMerge = type({ id: "number" }).merge({ "...": type({ "...": replacementView }) });
+admits(nestedSpreadMerge, { id: "replacement" });
+const spreadAfterProperty = type({ id: "number", "...": replacementView });
+admits(spreadAfterProperty, { id: "replacement" });
+const propertyAfterSpread = type({ "...": type({ id: "string" }), id: "number" });
+admits(propertyAfterSpread, { id: 1 });
+admits(type.keywords.Merge({ id: "number" }, { "...": replacementView }), { id: "replacement" });
+admits(type.merge({ id: "number" }, { "...": replacementView }), { id: "replacement" });
+admits(type("null").or({ id: "number", "...": replacementView }), { id: "replacement" });
+
+// Exact knowledge survives on concrete schemas and is erased by ordinary widening.
+const exactSchemaExcluded: true = exactly<number>()(type("string | number").exclude(type("string")).infer);
+const exactRequiredValue: true = exactly<{ value: string }>()(type({ "value?": "string" }).required().infer);
+const exactRequiredUndefined: true = exactly<{ value: string | undefined }>()(
+	type({ "value?": "string | undefined" }).required().infer,
+);
+const exactOutputKeys: true = exactly<"id">()(type({ id: "number" }).out.keyof().infer);
+const exactRequiredAfterDescription: true = exactly<{ value: string }>()(
+	type({ "value?": "string" }).describe("value").required().infer,
+);
+const exactRequiredAfterPartial: true = exactly<{ value: string }>()(
+	type({ value: "string" }).partial().required().infer,
+);
+const exactKeywordExcluded: true = exactly<number>()(type.or(type.string, type.number).exclude(type.string).infer);
+const exactStaticRequiredValue: true = exactly<{ value: string }>()(
+	type.keywords.Required({ "value?": "string" }).infer,
+);
+const exactProjectedRequired: true = exactly<{ value: string }>()(
+	type({ "value?": "string", flag: "boolean" }).pick("value").required().infer,
+);
+const exactMergedRequired: true = exactly<{ value: string; flag: boolean }>()(
+	type({ "value?": "string" }).merge({ flag: "boolean" }).required().infer,
+);
+const exactValidatedOutputKeys: true = exactly<"id">()(
+	type({ name: "string" })
+		.pipe(() => ({ id: 1 }))
+		.to({ id: "number" })
+		.out.keyof().infer,
+);
+admits(type("string").exclude(type("string").matching(/^a/)), "z");
+admits(type("string").exclude(type("string").narrow(value => value.length > 0)), "");
+const optionalWidened: FluentType<{ value?: string }> = type({ value: "undefined" });
+admits(optionalWidened.describe("optional").required(), { value: undefined });
+export {
+	exactKeywordExcluded,
+	exactStaticRequiredValue,
+	exactProjectedRequired,
+	exactMergedRequired,
+	exactValidatedOutputKeys,
+};
+
+// The keyof expression constructors use the same key metadata as the fluent method.
+admits(type(["keyof", objectView]), "name");
+admits(type("keyof", objectView), "name");
+const exactTupleKeys: true = exactly<"id" | "name" | "nick">()(type(["keyof", user]).infer);
+const exactVariadicKeys: true = exactly<"id" | "name" | "nick">()(type("keyof", user).infer);
+export {
+	exactSchemaExcluded,
+	exactRequiredValue,
+	exactRequiredUndefined,
+	exactOutputKeys,
+	exactRequiredAfterDescription,
+	exactRequiredAfterPartial,
+	exactTupleKeys,
+	exactVariadicKeys,
+};
+
 export {
 	exactPickedKeys,
 	exactOmittedKeys,

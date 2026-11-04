@@ -12,7 +12,18 @@
  */
 import { compile, compileAllows } from "./compile";
 import { type ErrorConfig, OmpErrors, OmpTypeError, TraversalError } from "./errors";
-import type { InferDef, InferDefIn, InferObjectLiteral, InferObjectLiteralIn, InferString } from "./infer";
+import type {
+	InferDef,
+	InferDefIn,
+	InferObjectLiteral,
+	InferObjectLiteralIn,
+	InferString,
+	InferRequiredDef,
+	InferRequiredDefIn,
+	InferSchemaFacts,
+	InferSchemaKeys as DefinitionKeys,
+} from "./infer";
+import type { SchemaAcceptance, SchemaFacts, schemaFacts, schemaKeys } from "./schema-inference";
 import { walk } from "./interp";
 import {
 	type AliasResolver,
@@ -63,17 +74,17 @@ export interface SchemaConfig extends ErrorConfig {
 export interface ToJsonSchemaOptions extends JsonSchemaOptions {}
 
 declare const brand: unique symbol;
-declare const keyofType: unique symbol;
 
 /** Inference-only nominal brand attached by `.brand(name)`. */
 export type Brand<t, name extends string> = t & { readonly [brand]: name };
 
-/** Inference metadata used to compose schema outputs, inputs, and possible structural keys. */
-export interface SchemaInference<out t, out i = t, out keys extends PropertyKey = PropertyKey> {
+/** Inference metadata for schema bounds, structural keys, and retained concrete facts. */
+export interface SchemaInference<out t, out i = t, out keys extends PropertyKey = PropertyKey, out facts = unknown> {
 	readonly [IR_BRAND]: true;
 	readonly infer: t;
 	readonly inferIn: i;
-	readonly [keyofType]?: keys;
+	readonly [schemaKeys]?: keys;
+	readonly [schemaFacts]?: facts;
 }
 
 /** Property descriptor exposed by object schemas and consumed by `.map()`. */
@@ -139,10 +150,11 @@ export interface StandardJsonSchemaOptions {
 }
 
 /** A compiled schema: callable validator plus composition methods. */
-export interface Type<out t = unknown, out i = t, out keys extends PropertyKey = PropertyKey> {
+export interface Type<out t = unknown, out i = t, out keys extends PropertyKey = PropertyKey, out facts = unknown> {
 	(data: unknown): t | OmpErrors;
 	readonly [IR_BRAND]: true;
-	readonly [keyofType]?: keys;
+	readonly [schemaKeys]?: keys;
+	readonly [schemaFacts]?: facts;
 	/** Structural IR (base type; runtime steps live in `steps`). */
 	readonly ir: IR;
 	/** `.pipe()` / `.narrow()` steps applied after structural validation. */
@@ -164,9 +176,9 @@ export interface Type<out t = unknown, out i = t, out keys extends PropertyKey =
 	/** Inference-only output type (no runtime value). */
 	readonly infer: t;
 	/** Standalone validator for the schema's accepted input. */
-	readonly in: FluentType<i, i, keys>;
+	readonly in: FluentType<i, i, keys, InputFacts<keys, facts>>;
 	/** Standalone validator for its known output, or `unknown` after an opaque morph. */
-	readonly out: FluentType<t>;
+	readonly out: FluentType<t, t, KnownOutKeys<facts>, OutputFacts<facts>>;
 	/** Inference-only input type (no runtime value). */
 	readonly inferIn: i;
 
@@ -243,28 +255,146 @@ type NaryPipeInput<items extends readonly unknown[]> = items extends readonly [i
 			: InferDefIn<first>
 	: unknown;
 
-interface FluentMethods<out t, out i, out keys extends PropertyKey> {
-	describe(description: string): FluentType<t, i, keys>;
-	configure(config: SchemaConfig, selector?: "self" | ConfigureSelector): FluentType<t, i, keys>;
+type KnownRequiredOut<facts> =
+	facts extends SchemaFacts<infer required, unknown, PropertyKey, unknown, unknown> ? required : unknown;
+type KnownRequiredIn<facts> =
+	facts extends SchemaFacts<unknown, infer required, PropertyKey, unknown, unknown> ? required : unknown;
+type KnownOutKeys<facts> =
+	facts extends SchemaFacts<unknown, unknown, infer outputKeys, unknown, unknown> ? outputKeys : PropertyKey;
+type KnownOutRequired<facts> =
+	facts extends SchemaFacts<unknown, unknown, PropertyKey, unknown, infer required> ? required : unknown;
+type KnownAcceptance<facts> =
+	facts extends SchemaFacts<unknown, unknown, PropertyKey, infer accepted, unknown> ? accepted : unknown;
+type WithoutAcceptance<facts> =
+	facts extends SchemaFacts<infer ro, infer ri, infer keys, unknown, infer outRequired>
+		? SchemaFacts<ro, ri, keys, unknown, outRequired>
+		: unknown;
+type InputFacts<keys extends PropertyKey, facts> = SchemaFacts<
+	KnownRequiredIn<facts>,
+	KnownRequiredIn<facts>,
+	keys,
+	KnownAcceptance<facts>
+>;
+type OutputFacts<facts> = SchemaFacts<
+	KnownOutRequired<facts>,
+	KnownOutRequired<facts>,
+	KnownOutKeys<facts>,
+	KnownAcceptance<facts>
+>;
+type PipeFacts<facts, keys extends PropertyKey = PropertyKey, required = unknown> = SchemaFacts<
+	KnownRequiredOut<facts>,
+	KnownRequiredIn<facts>,
+	keys,
+	unknown,
+	required
+>;
+type RequiredObject<value> = [value] extends [object] ? { [key in keyof value]: value[key] } : value & object;
+type ExcludeAccepted<t, accepted> = accepted extends SchemaAcceptance<infer value> ? Exclude<t, value> : t;
+type ExcludeKnown<t, facts, target> =
+	KnownAcceptance<facts> extends SchemaAcceptance<infer value>
+		? ExcludeAccepted<[t] extends [value] ? t : t & value, KnownAcceptance<target>>
+		: t;
+type CombinedAcceptance<left, right, union extends boolean> =
+	left extends SchemaAcceptance<infer l>
+		? right extends SchemaAcceptance<infer r>
+			? SchemaAcceptance<union extends true ? l | r : l & r>
+			: unknown
+		: unknown;
+type CombinedFacts<left, right, union extends boolean> =
+	left extends SchemaFacts<infer lo, infer li, infer lk, infer la, infer lr>
+		? right extends SchemaFacts<infer ro, infer ri, infer rk, infer ra, infer rr>
+			? SchemaFacts<
+					union extends true ? lo | ro : lo & ro,
+					union extends true ? li | ri : li & ri,
+					union extends true ? lk & rk : lk | rk,
+					CombinedAcceptance<la, ra, union>,
+					union extends true ? lr | rr : lr & rr
+				>
+			: unknown
+		: unknown;
+type RequiredFacts<facts, keys extends PropertyKey> = SchemaFacts<
+	KnownRequiredOut<facts>,
+	KnownRequiredIn<facts>,
+	keys
+>;
+type PickedFacts<facts, keys extends PropertyKey, selected extends PropertyKey> = SchemaFacts<
+	Pick<KnownRequiredOut<facts>, Extract<selected, keyof KnownRequiredOut<facts>>>,
+	Pick<KnownRequiredIn<facts>, Extract<selected, keyof KnownRequiredIn<facts>>>,
+	PickedKeys<keys, selected>
+>;
+type OmittedFacts<facts, keys extends PropertyKey, selected extends PropertyKey> = SchemaFacts<
+	Omit<KnownRequiredOut<facts>, selected>,
+	Omit<KnownRequiredIn<facts>, selected>,
+	Exclude<keys, selected>
+>;
+type MergeFacts<left, right, keys extends PropertyKey, rightKeys extends PropertyKey> = SchemaFacts<
+	MergeTypes<KnownRequiredOut<left>, KnownRequiredOut<right>, rightKeys>,
+	MergeTypes<KnownRequiredIn<left>, KnownRequiredIn<right>, rightKeys>,
+	keys | rightKeys
+>;
+type NaryFacts<definitions extends readonly unknown[], union extends boolean> = definitions extends readonly [
+	infer head,
+	...infer tail,
+]
+	? CombinedFacts<InferSchemaFacts<head>, NaryFacts<tail, union>, union>
+	: definitions extends readonly []
+		? SchemaFacts<
+				union extends true ? never : unknown,
+				union extends true ? never : unknown,
+				union extends true ? PropertyKey : never,
+				SchemaAcceptance<union extends true ? never : unknown>
+			>
+		: unknown;
+type NaryMergeFacts<
+	definitions extends readonly unknown[],
+	result = SchemaFacts<{}, {}, never>,
+> = definitions extends readonly [infer head, ...infer tail]
+	? NaryMergeFacts<tail, MergeFacts<result, InferSchemaFacts<head>, KnownOutKeys<result>, DefinitionKeys<head>>>
+	: definitions extends readonly []
+		? result
+		: unknown;
 
-	default(value: i | (() => i)): FluentType<t, i | undefined, keys>;
-	optional(): readonly [SchemaInference<t, i, keys>, "?"];
-	or<r, ri, rk extends PropertyKey>(def: SchemaInference<r, ri, rk>): FluentType<t | r, i | ri, keys & rk>;
+interface FluentMethods<out t, out i, out keys extends PropertyKey, out facts = unknown> {
+	describe(description: string): FluentType<t, i, keys, facts>;
+	configure(config: SchemaConfig, selector?: "self" | ConfigureSelector): FluentType<t, i, keys, facts>;
+
+	default(value: i | (() => i)): FluentType<t, i | undefined, keys, WithoutAcceptance<facts>>;
+	optional(): readonly [SchemaInference<t, i, keys, facts>, "?"];
+	or<r, ri, rk extends PropertyKey, rf>(
+		def: SchemaInference<r, ri, rk, rf>,
+	): FluentType<t | r, i | ri, keys & rk, CombinedFacts<facts, rf, true>>;
 	or<const def extends string>(
 		def: def,
-	): FluentType<t | InferString<def>, i | InferString<def>, keys & DefinitionKeys<def>>;
+	): FluentType<
+		t | InferString<def>,
+		i | InferString<def>,
+		keys & DefinitionKeys<def>,
+		CombinedFacts<facts, InferSchemaFacts<def>, true>
+	>;
 	or<const def extends Record<string, unknown>>(
 		def: def,
-	): FluentType<t | InferObjectLiteral<def>, i | InferObjectLiteralIn<def>, keys & DefinitionKeys<def>>;
+	): FluentType<
+		t | InferObjectLiteral<def>,
+		i | InferObjectLiteralIn<def>,
+		keys & DefinitionKeys<def>,
+		CombinedFacts<facts, InferSchemaFacts<def>, true>
+	>;
 	or(def: Def): FluentType<unknown>;
-	and<r, ri, rk extends PropertyKey>(def: SchemaInference<r, ri, rk>): FluentType<t & r, i & ri, keys | rk>;
+	and<r, ri, rk extends PropertyKey, rf>(
+		def: SchemaInference<r, ri, rk, rf>,
+	): FluentType<t & r, i & ri, keys | rk, CombinedFacts<facts, rf, false>>;
 	and<const def extends Record<string, unknown>>(
 		def: def,
-	): FluentType<t & InferObjectLiteral<def>, i & InferObjectLiteralIn<def>, keys | DefinitionKeys<def>>;
+	): FluentType<
+		t & InferObjectLiteral<def>,
+		i & InferObjectLiteralIn<def>,
+		keys | DefinitionKeys<def>,
+		CombinedFacts<facts, InferSchemaFacts<def>, false>
+	>;
 	and(def: Def): FluentType<unknown>;
 	equals(def: Def): boolean;
-	ifEquals(def: Def): FluentType<t, i, keys> | undefined;
-	ifExtends(def: Def): FluentType<t, i, keys> | undefined;
+	ifEquals(def: Def): FluentType<t, i, keys, facts> | undefined;
+	ifExtends(def: Def): FluentType<t, i, keys, facts> | undefined;
 	extends(def: Def): boolean;
 	overlaps(def: Def): boolean;
 	distribute<r>(
@@ -273,53 +403,68 @@ interface FluentMethods<out t, out i, out keys extends PropertyKey> {
 	): FluentType<r>;
 	select(kind: string): readonly SelectedNode[];
 	array(): FluentType<t[], i[]>;
-	atLeastLength(bound: number): FluentType<t, i, keys>;
-	atMostLength(bound: number): FluentType<t, i, keys>;
-	moreThanLength(bound: number): FluentType<t, i, keys>;
-	lessThanLength(bound: number): FluentType<t, i, keys>;
-	exactlyLength(bound: number): FluentType<t, i, keys>;
-	atLeast(bound: number): FluentType<t, i, keys>;
-	atMost(bound: number): FluentType<t, i, keys>;
-	moreThan(bound: number): FluentType<t, i, keys>;
-	lessThan(bound: number): FluentType<t, i, keys>;
-	divisibleBy(divisor: number): FluentType<t, i, keys>;
-	positive(): FluentType<t, i, keys>;
-	negative(): FluentType<t, i, keys>;
-	nonNegative(): FluentType<t, i, keys>;
-	nonPositive(): FluentType<t, i, keys>;
-	matching(pattern: RegExp): FluentType<t, i, keys>;
-	atOrAfter(bound: Date | number): FluentType<t, i, keys>;
-	atOrBefore(bound: Date | number): FluentType<t, i, keys>;
-	laterThan(bound: Date | number): FluentType<t, i, keys>;
-	earlierThan(bound: Date | number): FluentType<t, i, keys>;
-	readonly pipe: PipeMethod<t, i, keys>;
-	to<const def>(def: def): FluentType<InferDef<def>, i, keys>;
-	filter<narrowed extends i>(fn: (data: i, ctx: NarrowContext) => data is narrowed): FluentType<t, narrowed, keys>;
-	filter(fn: (data: i, ctx: NarrowContext) => boolean | OmpErrors): FluentType<t, i, keys>;
-	narrow<narrowed extends t>(fn: (data: t, ctx: NarrowContext) => data is narrowed): FluentType<narrowed, i, keys>;
-	narrow(fn: (data: t, ctx: NarrowContext) => boolean | OmpErrors): FluentType<t, i, keys>;
-	brand<const name extends string>(name: name): FluentType<Brand<t, name>, i, keys>;
-	as<castTo>(): FluentType<castTo, i, keys>;
-	readonly(): FluentType<Readonly<t>, i, keys>;
+	atLeastLength(bound: number): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	atMostLength(bound: number): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	moreThanLength(bound: number): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	lessThanLength(bound: number): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	exactlyLength(bound: number): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	atLeast(bound: number): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	atMost(bound: number): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	moreThan(bound: number): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	lessThan(bound: number): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	divisibleBy(divisor: number): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	positive(): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	negative(): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	nonNegative(): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	nonPositive(): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	matching(pattern: RegExp): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	atOrAfter(bound: Date | number): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	atOrBefore(bound: Date | number): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	laterThan(bound: Date | number): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	earlierThan(bound: Date | number): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	readonly pipe: PipeMethod<t, i, keys, facts>;
+	to<const def>(
+		def: def,
+	): FluentType<
+		InferDef<def>,
+		i,
+		keys,
+		PipeFacts<facts, KnownOutKeys<InferSchemaFacts<def>>, KnownOutRequired<InferSchemaFacts<def>>>
+	>;
+	filter<narrowed extends i>(
+		fn: (data: i, ctx: NarrowContext) => data is narrowed,
+	): FluentType<t, narrowed, keys, WithoutAcceptance<facts>>;
+	filter(fn: (data: i, ctx: NarrowContext) => boolean | OmpErrors): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	narrow<narrowed extends t>(
+		fn: (data: t, ctx: NarrowContext) => data is narrowed,
+	): FluentType<narrowed, i, keys, WithoutAcceptance<facts>>;
+	narrow(fn: (data: t, ctx: NarrowContext) => boolean | OmpErrors): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	brand<const name extends string>(name: name): FluentType<Brand<t, name>, i, keys, facts>;
+	as<castTo>(): FluentType<castTo, i, keys, WithoutAcceptance<facts>>;
+	readonly(): FluentType<Readonly<t>, i, keys, facts>;
 	extract<r, ri>(def: SchemaInference<r, ri>): FluentType<t & r, i & ri>;
 	extract<const def extends string>(def: def): FluentType<t & InferString<def>, i & InferString<def>>;
 	extract(def: Def): FluentType<unknown>;
-	// A schema operand can hide a narrower validator; its complement is not known.
-	exclude<r, ri>(def: SchemaInference<r, ri>): FluentType<t, i>;
+	// Exclusion needs complete domains, not merely the widened output bounds of its operands.
+	exclude<r, ri, rk extends PropertyKey, rf>(
+		def: SchemaInference<r, ri, rk, rf>,
+	): FluentType<ExcludeKnown<t, facts, rf>, ExcludeKnown<i, facts, rf>>;
 	exclude<const def extends string>(def: def): FluentType<Exclude<t, InferString<def>>, Exclude<i, InferString<def>>>;
 	exclude(def: Def): FluentType<unknown>;
-	onUndeclaredKey(behavior: "ignore" | "reject" | "delete"): FluentType<t, i, keys>;
-	onDeepUndeclaredKey(behavior: "ignore" | "reject" | "delete"): FluentType<t, i, keys>;
+	onUndeclaredKey(behavior: "ignore" | "reject" | "delete"): FluentType<t, i, keys, WithoutAcceptance<facts>>;
+	onDeepUndeclaredKey(behavior: "ignore" | "reject" | "delete"): FluentType<t, i, keys, WithoutAcceptance<facts>>;
 }
 
 /** Callable composition methods that preserve the source input and structural keys. */
-export interface PipeMethod<out t, out i, out keys extends PropertyKey = PropertyKey> {
-	<r>(fn: (data: t, ctx: NarrowContext) => r): FluentType<Exclude<r, OmpErrors>, i, keys>;
-	<r, ri>(schema: SchemaInference<r, ri>): FluentType<r, i, keys>;
-	(...steps: readonly unknown[]): FluentType<unknown, i, keys>;
+export interface PipeMethod<out t, out i, out keys extends PropertyKey = PropertyKey, out facts = unknown> {
+	<r>(fn: (data: t, ctx: NarrowContext) => r): FluentType<Exclude<r, OmpErrors>, i, keys, PipeFacts<facts>>;
+	<r, ri, rk extends PropertyKey, rf>(
+		schema: SchemaInference<r, ri, rk, rf>,
+	): FluentType<r, i, keys, PipeFacts<facts, KnownOutKeys<rf>, KnownOutRequired<rf>>>;
+	(...steps: readonly unknown[]): FluentType<unknown, i, keys, PipeFacts<facts>>;
 	readonly try: {
-		<r>(fn: (data: t, ctx: NarrowContext) => r): FluentType<Exclude<r, OmpErrors>, i, keys>;
-		(...steps: readonly unknown[]): FluentType<unknown, i, keys>;
+		<r>(fn: (data: t, ctx: NarrowContext) => r): FluentType<Exclude<r, OmpErrors>, i, keys, PipeFacts<facts>>;
+		(...steps: readonly unknown[]): FluentType<unknown, i, keys, PipeFacts<facts>>;
 	};
 }
 
@@ -327,7 +472,7 @@ type InputObject<i> = i extends object ? i : object;
 
 /** Structural-key validator retaining covariant key information when detached or rebound. */
 export interface KeyofMethod<out keys extends PropertyKey> {
-	readonly [keyofType]?: keys;
+	readonly [schemaKeys]?: keys;
 	(): FluentType<keys>;
 	call<receiver extends { readonly keyof: KeyofMethod<PropertyKey> }>(thisArg: receiver): KeyofResult<receiver>;
 	bind<receiver extends { readonly keyof: KeyofMethod<PropertyKey> }>(thisArg: receiver): () => KeyofResult<receiver>;
@@ -340,28 +485,11 @@ export interface KeyofMethod<out keys extends PropertyKey> {
 /** Distributes over receiver unions so each schema retains its possible keys. */
 type KeyofResult<receiver> = receiver extends { readonly keyof: KeyofMethod<infer keys> } ? FluentType<keys> : never;
 
-// Removing optionality must not remove an explicitly accepted undefined value.
-type RequiredValues<t> = { [key in keyof Required<t>]: t[key] };
 type PickedKeys<keys extends PropertyKey, selected extends PropertyKey> =
 	| selected
 	| (string extends keys ? string : never)
 	| (number extends keys ? number : never)
 	| (symbol extends keys ? symbol : never);
-type DefinitionKeys<def> = 0 extends 1 & def
-	? PropertyKey
-	: def extends SchemaInference<unknown, unknown, infer keys>
-		? keys
-		: def extends readonly [infer left, "|", infer right]
-			? DefinitionKeys<left> & DefinitionKeys<right>
-			: def extends readonly [infer left, "&", infer right]
-				? DefinitionKeys<left> | DefinitionKeys<right>
-				: def extends readonly [infer base, "=>" | "|>" | ":" | "@", unknown]
-					? DefinitionKeys<base>
-					: def extends { readonly "...": infer base }
-						? DefinitionKeys<base> | keyof InferDefIn<def>
-						: unknown extends InferDefIn<def>
-							? PropertyKey
-							: keyof InferDefIn<def>;
 
 type CombinedKeys<definitions extends readonly unknown[], union extends boolean> = definitions extends readonly [
 	infer head,
@@ -379,7 +507,7 @@ type NaryPipeKeys<definitions extends readonly unknown[]> = definitions extends 
 	? DefinitionKeys<first>
 	: PropertyKey;
 
-interface ObjectMethods<out t extends object, out i, out schemaKeys extends PropertyKey> {
+interface ObjectMethods<out t extends object, out i, out schemaKeys extends PropertyKey, out facts = unknown> {
 	readonly props: readonly TypeProperty[];
 	map(
 		mapper: (property: TypeProperty) => TypeProperty | readonly TypeProperty[],
@@ -391,43 +519,56 @@ interface ObjectMethods<out t extends object, out i, out schemaKeys extends Prop
 	): FluentType<
 		Pick<t, keys[number]>,
 		Pick<InputObject<i>, Extract<keys[number], keyof InputObject<i>>>,
-		PickedKeys<schemaKeys, keys[number]>
+		PickedKeys<schemaKeys, keys[number]>,
+		PickedFacts<facts, schemaKeys, keys[number]>
 	>;
 	omit<const keys extends readonly (keyof t)[]>(
 		...keys: keys
 	): FluentType<
 		Omit<t, keys[number]>,
 		Omit<InputObject<i>, Extract<keys[number], keyof InputObject<i>>>,
-		Exclude<schemaKeys, keys[number]>
+		Exclude<schemaKeys, keys[number]>,
+		OmittedFacts<facts, schemaKeys, keys[number]>
 	>;
-	partial(): FluentType<Partial<t>, Partial<InputObject<i>>, schemaKeys>;
-	required(): FluentType<RequiredValues<t>, RequiredValues<InputObject<i>>, schemaKeys>;
-	merge<r, ri, rk extends PropertyKey>(
-		def: SchemaInference<r, ri, rk>,
-	): FluentType<MergeTypes<t, r, rk>, MergeTypes<i, ri, rk>, schemaKeys | rk>;
+	partial(): FluentType<Partial<t>, Partial<InputObject<i>>, schemaKeys, RequiredFacts<facts, schemaKeys>>;
+	required(): FluentType<
+		RequiredObject<KnownRequiredOut<facts>>,
+		RequiredObject<KnownRequiredIn<facts>>,
+		schemaKeys,
+		RequiredFacts<facts, schemaKeys>
+	>;
+	merge<r, ri, rk extends PropertyKey, rf>(
+		def: SchemaInference<r, ri, rk, rf>,
+	): FluentType<MergeTypes<t, r, rk>, MergeTypes<i, ri, rk>, schemaKeys | rk, MergeFacts<facts, rf, schemaKeys, rk>>;
 	merge<const def extends Record<string, unknown>>(
 		def: def,
 	): FluentType<
-		MergeTypes<t, InferObjectLiteral<def>>,
-		MergeTypes<i, InferObjectLiteralIn<def>>,
-		schemaKeys | DefinitionKeys<def>
+		MergeTypes<t, InferObjectLiteral<def>, DefinitionKeys<def>>,
+		MergeTypes<i, InferObjectLiteralIn<def>, DefinitionKeys<def>>,
+		schemaKeys | DefinitionKeys<def>,
+		MergeFacts<facts, InferSchemaFacts<def>, schemaKeys, DefinitionKeys<def>>
 	>;
 	merge(def: Def): FluentType<unknown>;
 }
 
-type ObjectMethodsFor<t, i, keys extends PropertyKey> = [t] extends [never]
+type ObjectMethodsFor<t, i, keys extends PropertyKey, facts> = [t] extends [never]
 	? unknown
 	: [t] extends [readonly unknown[]]
 		? unknown
 		: [t] extends [object]
-			? ObjectMethods<t & object, i, keys>
+			? ObjectMethods<t & object, i, keys, facts>
 			: unknown;
 /** Covariant callable fluent surface, independent of compiler comparison order. */
-export interface FluentCore<out t, out i, out keys extends PropertyKey = PropertyKey>
-	extends Type<t, i, keys>, FluentMethods<t, i, keys> {}
-/** Callable schema with fluent methods specialized to its output and input. */
-export type FluentType<t = unknown, i = t, keys extends PropertyKey = PropertyKey> = FluentCore<t, i, keys> &
-	ObjectMethodsFor<t, i, keys>;
+export interface FluentCore<out t, out i, out keys extends PropertyKey = PropertyKey, out facts = unknown>
+	extends Type<t, i, keys, facts>, FluentMethods<t, i, keys, facts> {}
+/** Callable schema with covariant bounds and separately retained keys and concrete facts. */
+export type FluentType<t = unknown, i = t, keys extends PropertyKey = PropertyKey, facts = unknown> = FluentCore<
+	t,
+	i,
+	keys,
+	facts
+> &
+	ObjectMethodsFor<t, i, keys, facts>;
 
 type FnDefinition = Def | SchemaInference<unknown, unknown>;
 
@@ -1224,11 +1365,11 @@ Object.setPrototypeOf(typeMethods, Function.prototype);
 Object.defineProperty(typeMethods, "bind", { value: undefined });
 
 function makeType(ir: IR, steps: Step[], meta: TypeMeta): InternalType;
-function makeType<t = unknown, i = t, keys extends PropertyKey = PropertyKey>(
+function makeType<t = unknown, i = t, keys extends PropertyKey = PropertyKey, facts = unknown>(
 	ir: IR,
 	steps: Step[],
 	meta: TypeMeta,
-): FluentType<t, i, keys>;
+): FluentType<t, i, keys, facts>;
 function makeType(ir: IR, steps: Step[], meta: TypeMeta): unknown {
 	let morph = false;
 	if (!isSimpleIR(ir)) {
@@ -2748,7 +2889,9 @@ function createRuntimeGeneric(
 }
 
 export function type<const definition>(parameters: `<${string}>`, definition: definition): Generic;
-export function type<const def>(def: def): FluentType<InferDef<def>, InferDefIn<def>, DefinitionKeys<def>>;
+export function type<const def>(
+	def: def,
+): FluentType<InferDef<def>, InferDefIn<def>, DefinitionKeys<def>, InferSchemaFacts<def>>;
 export function type<input, output>(
 	def: SchemaInference<input> | string,
 	operator: "=>",
@@ -2761,7 +2904,7 @@ export function type<const input, const output>(
 ): FluentType<InferDef<output>, InferDefIn<input>, DefinitionKeys<input>>;
 export function type<const expression extends readonly unknown[]>(
 	...definition: expression
-): FluentType<InferDef<expression>, InferDefIn<expression>, DefinitionKeys<expression>>;
+): FluentType<InferDef<expression>, InferDefIn<expression>, DefinitionKeys<expression>, InferSchemaFacts<expression>>;
 export function type(first?: unknown): FluentType<unknown> | Generic {
 	const count = arguments.length;
 	if (count === 2 && typeof first === "string" && first.trimStart().startsWith("<")) {
@@ -2838,7 +2981,7 @@ export interface ParseKeyword {
 }
 
 /** Full string keyword module attached to `type.string`. */
-export interface StringKeyword extends FluentType<string> {
+export interface StringKeyword extends FluentType<string, string, PropertyKey, InferSchemaFacts<"string">> {
 	readonly alpha: FluentType<string>;
 	readonly alphanumeric: FluentType<string>;
 	readonly base64: Base64Keyword;
@@ -2863,7 +3006,7 @@ export interface StringKeyword extends FluentType<string> {
 }
 
 /** Number keyword module attached to `type.number`. */
-export interface NumberKeyword extends FluentType<number> {
+export interface NumberKeyword extends FluentType<number, number, PropertyKey, InferSchemaFacts<"number">> {
 	readonly integer: FluentType<number>;
 }
 
@@ -3281,10 +3424,10 @@ function sameUnionMember(left: IR, right: IR): boolean {
 }
 
 function buildOr(definitions: readonly unknown[], resolve?: AliasResolver): InternalType;
-function buildOr<output, input, keys extends PropertyKey = PropertyKey>(
+function buildOr<output, input, keys extends PropertyKey = PropertyKey, facts = unknown>(
 	definitions: readonly unknown[],
 	resolve?: AliasResolver,
-): FluentType<output, input, keys>;
+): FluentType<output, input, keys, facts>;
 function buildOr(definitions: readonly unknown[], resolve?: AliasResolver): InternalType {
 	const members: IR[] = [];
 	const add = (candidate: IR): boolean => {
@@ -3312,10 +3455,10 @@ function buildOr(definitions: readonly unknown[], resolve?: AliasResolver): Inte
 }
 
 function buildAnd(definitions: readonly unknown[], resolve?: AliasResolver): InternalType;
-function buildAnd<output, input, keys extends PropertyKey = PropertyKey>(
+function buildAnd<output, input, keys extends PropertyKey = PropertyKey, facts = unknown>(
 	definitions: readonly unknown[],
 	resolve?: AliasResolver,
-): FluentType<output, input, keys>;
+): FluentType<output, input, keys, facts>;
 function buildAnd(definitions: readonly unknown[], resolve?: AliasResolver): InternalType {
 	if (definitions.length === 0) return makeType({ k: "unknown" }, [], {});
 	let ir = parseDef(definitions[0], resolve);
@@ -3332,10 +3475,10 @@ function requireNaryObject(ir: IR): ObjectIR {
 }
 
 function buildMerge(definitions: readonly unknown[], resolve?: AliasResolver): InternalType;
-function buildMerge<output, input, keys extends PropertyKey = PropertyKey>(
+function buildMerge<output, input, keys extends PropertyKey = PropertyKey, facts = unknown>(
 	definitions: readonly unknown[],
 	resolve?: AliasResolver,
-): FluentType<output, input, keys>;
+): FluentType<output, input, keys, facts>;
 function buildMerge(definitions: readonly unknown[], resolve?: AliasResolver): InternalType {
 	if (definitions.length === 0) return makeType({ k: "anyobject" }, [], {});
 	let object = requireNaryObject(parseDef(definitions[0], resolve));
@@ -3389,10 +3532,18 @@ export namespace type {
 	/** Build a union from zero or more definitions. */
 	export function or<const definitions extends readonly unknown[]>(
 		...definitions: definitions
-	): FluentType<NaryOrOutput<definitions>, NaryOrInput<definitions>, CombinedKeys<definitions, false>> {
-		return buildOr<NaryOrOutput<definitions>, NaryOrInput<definitions>, CombinedKeys<definitions, false>>(
-			definitions,
-		);
+	): FluentType<
+		NaryOrOutput<definitions>,
+		NaryOrInput<definitions>,
+		CombinedKeys<definitions, false>,
+		NaryFacts<definitions, true>
+	> {
+		return buildOr<
+			NaryOrOutput<definitions>,
+			NaryOrInput<definitions>,
+			CombinedKeys<definitions, false>,
+			NaryFacts<definitions, true>
+		>(definitions);
 	}
 
 	/** Build an array schema from an element definition. */
@@ -3405,16 +3556,29 @@ export namespace type {
 	/** Build a union from a runtime array of definitions. */
 	export function union<const definitions extends readonly unknown[]>(
 		definitions: definitions,
-	): FluentType<NaryOrOutput<definitions>, NaryOrInput<definitions>, CombinedKeys<definitions, false>> {
-		return buildOr<NaryOrOutput<definitions>, NaryOrInput<definitions>, CombinedKeys<definitions, false>>(
-			definitions,
-		);
+	): FluentType<
+		NaryOrOutput<definitions>,
+		NaryOrInput<definitions>,
+		CombinedKeys<definitions, false>,
+		NaryFacts<definitions, true>
+	> {
+		return buildOr<
+			NaryOrOutput<definitions>,
+			NaryOrInput<definitions>,
+			CombinedKeys<definitions, false>,
+			NaryFacts<definitions, true>
+		>(definitions);
 	}
 
 	/** Build a tuple schema from a runtime array of definitions. */
 	export function tuple<const definitions extends readonly unknown[]>(
 		definitions: definitions,
-	): FluentType<InferDef<definitions>, InferDefIn<definitions>, DefinitionKeys<definitions>> {
+	): FluentType<
+		InferDef<definitions>,
+		InferDefIn<definitions>,
+		DefinitionKeys<definitions>,
+		InferSchemaFacts<definitions>
+	> {
 		return type(definitions);
 	}
 
@@ -3432,19 +3596,35 @@ export namespace type {
 	/** Build an intersection from zero or more definitions. */
 	export function and<const definitions extends readonly unknown[]>(
 		...definitions: definitions
-	): FluentType<NaryAndOutput<definitions>, NaryAndInput<definitions>, CombinedKeys<definitions, true>> {
-		return buildAnd<NaryAndOutput<definitions>, NaryAndInput<definitions>, CombinedKeys<definitions, true>>(
-			definitions,
-		);
+	): FluentType<
+		NaryAndOutput<definitions>,
+		NaryAndInput<definitions>,
+		CombinedKeys<definitions, true>,
+		NaryFacts<definitions, false>
+	> {
+		return buildAnd<
+			NaryAndOutput<definitions>,
+			NaryAndInput<definitions>,
+			CombinedKeys<definitions, true>,
+			NaryFacts<definitions, false>
+		>(definitions);
 	}
 
 	/** Right-biased object merge over zero or more definitions. */
 	export function merge<const definitions extends readonly unknown[]>(
 		...definitions: definitions
-	): FluentType<NaryMergeOutput<definitions>, NaryMergeInput<definitions>, CombinedKeys<definitions, true>> {
-		return buildMerge<NaryMergeOutput<definitions>, NaryMergeInput<definitions>, CombinedKeys<definitions, true>>(
-			definitions,
-		);
+	): FluentType<
+		NaryMergeOutput<definitions>,
+		NaryMergeInput<definitions>,
+		CombinedKeys<definitions, true>,
+		NaryMergeFacts<definitions>
+	> {
+		return buildMerge<
+			NaryMergeOutput<definitions>,
+			NaryMergeInput<definitions>,
+			CombinedKeys<definitions, true>,
+			NaryMergeFacts<definitions>
+		>(definitions);
 	}
 
 	/** Compose Types, definitions, and morph callbacks from left to right. */
@@ -3485,7 +3665,7 @@ export namespace type {
 
 	/** String validator and its refinement/morph keyword module. */
 	export const string: StringKeyword = Object.defineProperties(
-		makeType<string>({ k: "string" }, [], {}),
+		makeType<string, string, PropertyKey, InferSchemaFacts<"string">>({ k: "string" }, [], {}),
 		Object.getOwnPropertyDescriptors({
 			alpha: keywordSchema("string.alpha"),
 			alphanumeric: keywordSchema("string.alphanumeric"),
@@ -3523,9 +3703,12 @@ export namespace type {
 	};
 
 	/** Number validator with integer refinement. */
-	export const number: NumberKeyword = Object.assign(makeType<number>({ k: "number" }, [], {}), {
-		integer: makeType<number>({ k: "number", int: true }, [], {}),
-	});
+	export const number: NumberKeyword = Object.assign(
+		makeType<number, number, PropertyKey, InferSchemaFacts<"number">>({ k: "number" }, [], {}),
+		{
+			integer: makeType<number>({ k: "number", int: true }, [], {}),
+		},
+	);
 
 	/** Schema-valued key representing any non-negative integer array index. */
 	export const arrayIndex = makeType<string>(
@@ -3540,15 +3723,23 @@ export namespace type {
 	);
 
 	/** Boolean validator. */
-	export const boolean = makeType<boolean>({ k: "boolean" }, [], {});
+	export const boolean = makeType<boolean, boolean, PropertyKey, InferSchemaFacts<"boolean">>(
+		{ k: "boolean" },
+		[],
+		{},
+	);
 	/** Bigint validator. */
-	export const bigint = makeType<bigint>({ k: "bigint" }, [], {});
+	export const bigint = makeType<bigint, bigint, PropertyKey, InferSchemaFacts<"bigint">>({ k: "bigint" }, [], {});
 	/** Symbol validator. */
-	export const symbol = makeType<symbol>({ k: "symbol" }, [], {});
+	export const symbol = makeType<symbol, symbol, PropertyKey, InferSchemaFacts<"symbol">>({ k: "symbol" }, [], {});
 	/** Non-null object validator. */
-	export const object = makeType<object>({ k: "anyobject" }, [], {});
+	export const object = makeType<object, object, PropertyKey, InferSchemaFacts<"object">>({ k: "anyobject" }, [], {});
 	/** Unknown validator. */
-	export const unknown = makeType<unknown>({ k: "unknown" }, [], {});
+	export const unknown = makeType<unknown, unknown, PropertyKey, InferSchemaFacts<"unknown">>(
+		{ k: "unknown" },
+		[],
+		{},
+	);
 	/** Alias of the unknown validator. */
 	export const any = unknown;
 	/** Validator that rejects every value. */
@@ -3607,25 +3798,29 @@ export namespace type {
 		): FluentType<
 			Partial<InferDef<definition>>,
 			Partial<InputObject<InferDefIn<definition>>>,
-			DefinitionKeys<definition>
+			DefinitionKeys<definition>,
+			RequiredFacts<InferSchemaFacts<definition>, DefinitionKeys<definition>>
 		> {
 			return makeType<
 				Partial<InferDef<definition>>,
 				Partial<InputObject<InferDefIn<definition>>>,
-				DefinitionKeys<definition>
+				DefinitionKeys<definition>,
+				RequiredFacts<InferSchemaFacts<definition>, DefinitionKeys<definition>>
 			>(setObjectOptionality(parseDef(definition), true, "partial"), [], {});
 		},
 		Required<const definition>(
 			definition: definition,
 		): FluentType<
-			RequiredValues<InferDef<definition>>,
-			RequiredValues<InputObject<InferDefIn<definition>>>,
-			DefinitionKeys<definition>
+			RequiredObject<InferRequiredDef<definition>>,
+			RequiredObject<InferRequiredDefIn<definition>>,
+			DefinitionKeys<definition>,
+			RequiredFacts<InferSchemaFacts<definition>, DefinitionKeys<definition>>
 		> {
 			return makeType<
-				RequiredValues<InferDef<definition>>,
-				RequiredValues<InputObject<InferDefIn<definition>>>,
-				DefinitionKeys<definition>
+				RequiredObject<InferRequiredDef<definition>>,
+				RequiredObject<InferRequiredDefIn<definition>>,
+				DefinitionKeys<definition>,
+				RequiredFacts<InferSchemaFacts<definition>, DefinitionKeys<definition>>
 			>(setObjectOptionality(parseDef(definition), false, "required"), [], {});
 		},
 		Pick<const definition, const keys extends readonly PropertyKey[]>(
@@ -3634,12 +3829,14 @@ export namespace type {
 		): FluentType<
 			Pick<InferDef<definition>, Extract<keys[number], keyof InferDef<definition>>>,
 			Pick<InputObject<InferDefIn<definition>>, Extract<keys[number], keyof InputObject<InferDefIn<definition>>>>,
-			PickedKeys<DefinitionKeys<definition>, keys[number]>
+			PickedKeys<DefinitionKeys<definition>, keys[number]>,
+			PickedFacts<InferSchemaFacts<definition>, DefinitionKeys<definition>, keys[number]>
 		> {
 			return makeType<
 				Pick<InferDef<definition>, Extract<keys[number], keyof InferDef<definition>>>,
 				Pick<InputObject<InferDefIn<definition>>, Extract<keys[number], keyof InputObject<InferDefIn<definition>>>>,
-				PickedKeys<DefinitionKeys<definition>, keys[number]>
+				PickedKeys<DefinitionKeys<definition>, keys[number]>,
+				PickedFacts<InferSchemaFacts<definition>, DefinitionKeys<definition>, keys[number]>
 			>(selectObjectProps(parseDef(definition), keys, true, "pick"), [], {});
 		},
 		Omit<const definition, const keys extends readonly PropertyKey[]>(
@@ -3648,12 +3845,14 @@ export namespace type {
 		): FluentType<
 			Omit<InferDef<definition>, Extract<keys[number], keyof InferDef<definition>>>,
 			Omit<InputObject<InferDefIn<definition>>, Extract<keys[number], keyof InputObject<InferDefIn<definition>>>>,
-			Exclude<DefinitionKeys<definition>, keys[number]>
+			Exclude<DefinitionKeys<definition>, keys[number]>,
+			OmittedFacts<InferSchemaFacts<definition>, DefinitionKeys<definition>, keys[number]>
 		> {
 			return makeType<
 				Omit<InferDef<definition>, Extract<keys[number], keyof InferDef<definition>>>,
 				Omit<InputObject<InferDefIn<definition>>, Extract<keys[number], keyof InputObject<InferDefIn<definition>>>>,
-				Exclude<DefinitionKeys<definition>, keys[number]>
+				Exclude<DefinitionKeys<definition>, keys[number]>,
+				OmittedFacts<InferSchemaFacts<definition>, DefinitionKeys<definition>, keys[number]>
 			>(selectObjectProps(parseDef(definition), keys, false, "omit"), [], {});
 		},
 		Merge<const left, const right>(
@@ -3662,12 +3861,14 @@ export namespace type {
 		): FluentType<
 			MergeTypes<InferDef<left>, InferDef<right>, DefinitionKeys<right>>,
 			MergeTypes<InferDefIn<left>, InferDefIn<right>, DefinitionKeys<right>>,
-			DefinitionKeys<left> | DefinitionKeys<right>
+			DefinitionKeys<left> | DefinitionKeys<right>,
+			MergeFacts<InferSchemaFacts<left>, InferSchemaFacts<right>, DefinitionKeys<left>, DefinitionKeys<right>>
 		> {
 			return makeType<
 				MergeTypes<InferDef<left>, InferDef<right>, DefinitionKeys<right>>,
 				MergeTypes<InferDefIn<left>, InferDefIn<right>, DefinitionKeys<right>>,
-				DefinitionKeys<left> | DefinitionKeys<right>
+				DefinitionKeys<left> | DefinitionKeys<right>,
+				MergeFacts<InferSchemaFacts<left>, InferSchemaFacts<right>, DefinitionKeys<left>, DefinitionKeys<right>>
 			>(mergeObjectDefinition(parseDef(left), right), [], {});
 		},
 		object: {
@@ -3842,7 +4043,12 @@ export interface ScopeOptions {
 /** Callable builder bound to one alias scope. */
 export type ScopedBuilder = (<const definition>(
 	definition: definition,
-) => FluentType<InferDef<definition>, InferDefIn<definition>, DefinitionKeys<definition>>) &
+) => FluentType<
+	InferDef<definition>,
+	InferDefIn<definition>,
+	DefinitionKeys<definition>,
+	InferSchemaFacts<definition>
+>) &
 	typeof type;
 
 const MODULE_SCOPE = Symbol("omptype.moduleScope");
