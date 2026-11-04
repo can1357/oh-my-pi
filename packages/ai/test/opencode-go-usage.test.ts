@@ -100,7 +100,13 @@ describe("opencode-go usage provider", () => {
 	});
 
 	it("maps bundled Go inference URLs to the Zen account endpoint", async () => {
-		for (const baseUrl of ["https://opencode.ai/inference/go", "https://opencode.ai/inference/go/v1"]) {
+		for (const baseUrl of [
+			"https://opencode.ai/inference/go",
+			"https://opencode.ai/inference/go/v1",
+			"https://opencode.ai/inference/go/openai/v1",
+			"https://opencode.ai/inference/go/anthropic",
+			"https://opencode.ai/inference/go/google/v1beta",
+		]) {
 			const calls: Array<{ url: string; headers: Record<string, string> }> = [];
 			const report = await opencodeGoUsageProvider.fetchUsage(
 				{ provider: "opencode-go", credential: { type: "api_key", apiKey: "sk-test" }, baseUrl },

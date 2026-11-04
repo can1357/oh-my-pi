@@ -39,7 +39,8 @@ function normalizeBaseUrl(baseUrl?: string): string {
 	// back to the separate Zen account endpoint.
 	const withoutTrailingSlash = baseUrl.trim().replace(/\/+$/, "");
 	const normalized = withoutTrailingSlash.replace(/\/v1$/i, "");
-	return normalized === MODEL_ENDPOINT ? DEFAULT_ENDPOINT : normalized || DEFAULT_ENDPOINT;
+	if (normalized === MODEL_ENDPOINT || normalized.startsWith(`${MODEL_ENDPOINT}/`)) return DEFAULT_ENDPOINT;
+	return normalized || DEFAULT_ENDPOINT;
 }
 
 function resolveStatus(windowStatus: unknown, usedFraction: number): UsageStatus {
