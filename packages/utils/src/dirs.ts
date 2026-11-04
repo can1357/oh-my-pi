@@ -618,14 +618,20 @@ export function isOmpOwnedPath(candidate: string): boolean {
 		const value = process.env[envVar];
 		if (value) configRoots.push(path.join(value, APP_NAME));
 	}
-	for (const root of configRoots) {
-		if (!pathIsWithin(root, target)) continue;
+	const owningRoot = configRoots.find(root => pathIsWithin(root, target));
+	if (owningRoot !== undefined) {
+		const segments = (relativePathWithinRoot(owningRoot, target) ?? "").split(path.sep);
+		// A nested `.omp` is some project's config directory, and the project tree
+		// around it came from a checkout. Which directory holds that checkout is
+		// not knowable from here — `worktree.base` is per project while
+		// `getWorktreesDir()` answers for whichever project this process last set
+		// — so the shape is what decides, not the location.
+		if (segments.includes(getConfigDirName())) return false;
 		// The producers above answer for the ACTIVE profile. Another profile keeps
 		// the same trees under its own root, which no producer names, so the names
 		// are matched one level into a config root too — anchored, and only here,
 		// because an agent directory moved outside the config root holds none of
 		// them and a directory the user named `plugins/cache` there is theirs.
-		const segments = (relativePathWithinRoot(root, target) ?? "").split(path.sep);
 		const offset = segments[0] === "profiles" && segments.length > 2 ? 2 : 0;
 		const head = segments[offset];
 		if (head === "wt" || head === "remote" || head === "skillshare") return false;
@@ -634,7 +640,6 @@ export function isOmpOwnedPath(candidate: string): boolean {
 			return false;
 		}
 		if (head === "cache" && segments[offset + 1] === "fastembed-runtime") return false;
-		break;
 	}
 	return configRoots.some(root => pathIsWithin(root, target)) || pathIsWithin(dirs.agentDir, target);
 }

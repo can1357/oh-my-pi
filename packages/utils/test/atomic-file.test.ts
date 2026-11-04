@@ -340,4 +340,17 @@ describe("classification does not depend on where omp happens to be pointed", ()
 		expect(isOmpOwnedPath(path.join(owned, "webcache", "x"))).toBe(true);
 		expect(isOmpOwnedPath(path.join(getPluginsDir(), "cache", "x"))).toBe(false);
 	});
+
+	test("a project's config directory is foreign wherever the checkout holding it sits", () => {
+		// `worktree.base` is per project, while the directory producer answers for
+		// whichever project this process set last, so a second project's checkout
+		// cannot be recognised by location. Its shape is what gives it away.
+		for (const base of ["wt", "trees-b", path.join("nested", "anywhere")]) {
+			const checkout = path.join(getBaseConfigRoot(), base, "pr-1", ".omp");
+			expect(isOmpOwnedPath(path.join(checkout, "mcp.json"))).toBe(false);
+			expect(isOmpOwnedPath(path.join(checkout, "plugins"))).toBe(false);
+		}
+		// The config root itself is not a nested project directory.
+		expect(isOmpOwnedPath(path.join(getBaseConfigRoot(), "agent"))).toBe(true);
+	});
 });
