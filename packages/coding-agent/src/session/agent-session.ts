@@ -8405,8 +8405,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Resume the agent for the operator's `.`/`c` continue shortcut. A prompt the
 	 * model has not answered yet (an Esc before any output) runs again as is: a
 	 * continue directive would add nothing. Otherwise the hidden manual-continue
-	 * directive asks the model to pick its work back up. An empty conversation
-	 * cannot be continued.
+	 * directive asks the model to pick its work back up. A conversation with
+	 * neither a user turn nor a compaction/branch summary of earlier ones cannot
+	 * be continued.
 	 *
 	 * @throws {AgentBusyError} while a turn runs.
 	 * @throws {Error} when there is no conversation to resume.
@@ -8414,7 +8415,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async resume(): Promise<void> {
 		const prompt = this.#recovery.prepareResume();
 		if (!prompt) {
-			if (!this.agent.state.messages.some(isUserAuthoredMessage)) {
+			// A handoff or full compaction can leave only the summary: it carries the
+			// summarized requests, so it is a conversation the directive can resume.
+			const resumable = this.agent.state.messages.some(
+				message =>
+					isUserAuthoredMessage(message) ||
+					message.role === "compactionSummary" ||
+					message.role === "branchSummary",
+			);
+			if (!resumable) {
 				throw new Error("Nothing to resume");
 			}
 			await this.prompt(manualContinuePrompt, {

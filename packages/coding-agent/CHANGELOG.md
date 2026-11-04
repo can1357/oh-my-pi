@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
 - Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset
 - The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm
 - A running session no longer falls back to a setting's default when `config.yml` gains a value its omp version doesn't know (such as an `edit.mode` a newer omp added); it keeps the value it had, so the edit doesn't change its tools and throw away every open session's prompt cache
