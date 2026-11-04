@@ -241,6 +241,7 @@ import {
 	type Observation,
 	type ObservationEntry,
 	ownsPage,
+	printHoldScope,
 	type ReadyInfo,
 	type RunErrorPayload,
 	type ScreenshotResult,
@@ -1793,13 +1794,9 @@ export class WorkerCore {
 				this.#observeDialogs();
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
 			}
-			// Nobody else drives a browser omp launched, so its tabs hold every print(); the user's own browser only
-			// while omp acts, so the page's Print buttons still work for the user. The hold comes first: it covers the
-			// setup below, and its script must reach new documents before any init script the tab adds.
-			this.#printHold = await PrintHold.install(
-				this.#page,
-				payload.mode === "headless" || payload.userDriven !== true ? "tab" : "calls",
-			);
+			// The hold comes first: it covers the setup below, and its script must reach new documents before any init
+			// script the tab adds.
+			this.#printHold = await PrintHold.install(this.#page, printHoldScope(payload));
 			const client = this.#page.mainFrame().client;
 			client.on("Page.frameNavigated", this.#onFrameNavigated);
 			client.on("Page.frameRequestedNavigation", this.#onFrameRequestedNavigation);
