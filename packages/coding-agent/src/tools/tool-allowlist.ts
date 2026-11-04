@@ -32,6 +32,23 @@ export function isToolAllowListSelector(entry: string): boolean {
 	return entry === ALL_DEVICES_SELECTOR || entry.startsWith(MCP_SELECTOR_PREFIX);
 }
 
+/** A {@link ToolAllowList} as plain data. */
+export interface ToolAllowListWire {
+	names: string[];
+	mcpServers: string[];
+	allDevices: boolean;
+}
+
+/**
+ * Whether the session's `--tools` list leaves `write` only as the `xd://`
+ * transport. It then changes no file through any path: the `write` tool (not
+ * even in the session's local:// sandbox), Cursor's native delete and resource
+ * download frames, or anything else that asks whether `write` was granted.
+ */
+export function allowListDeniesWrite(list: ToolAllowList | undefined): boolean {
+	return list !== undefined && !list.allows("write", undefined);
+}
+
 export class ToolAllowList {
 	readonly #names: ReadonlySet<string>;
 	readonly #mcpServers: ReadonlySet<string>;
@@ -63,13 +80,18 @@ export class ToolAllowList {
 		return new ToolAllowList(new Set([...this.#names, ...names]), new Set(this.#mcpServers), this.#allDevices);
 	}
 
-	/** The `--tools` entries this list parses from, selectors included ({@link ToolAllowList.parse}). */
-	get entries(): string[] {
-		return [
-			...this.#names,
-			...[...this.#mcpServers].map(server => `${MCP_SELECTOR_PREFIX}${server}`),
-			...(this.#allDevices ? [ALL_DEVICES_SELECTOR] : []),
-		];
+	/**
+	 * This list as plain data, for another thread ({@link ToolAllowList.fromWire}).
+	 * Names and selectors stay apart: a name added by {@link withNames} that looks
+	 * like a selector (`mcp:x`) stays a name.
+	 */
+	toWire(): ToolAllowListWire {
+		return { names: [...this.#names], mcpServers: [...this.#mcpServers], allDevices: this.#allDevices };
+	}
+
+	/** The list {@link toWire} described. */
+	static fromWire(wire: ToolAllowListWire): ToolAllowList {
+		return new ToolAllowList(new Set(wire.names), new Set(wire.mcpServers), wire.allDevices);
 	}
 
 	/** The entries that name one tool (selectors excluded). */

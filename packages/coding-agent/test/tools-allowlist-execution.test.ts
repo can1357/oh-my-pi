@@ -205,6 +205,26 @@ describe("write is only the device transport when --tools does not list it", () 
 		expect(await Bun.file(target).exists()).toBe(false);
 	});
 
+	// Round 3: the device-only exception for the session's local:// sandbox let a
+	// session whose list does not name `write` write files there.
+	it("for the local:// sandbox", async () => {
+		const artifacts = path.join(dir, "sandbox-artifacts");
+		const session = await create({
+			toolNames: ["read"],
+			toolAllowList: policy,
+			mcpTools: [fixtureDevice],
+			localProtocolOptions: { getArtifactsDir: () => artifacts, getSessionId: () => "sandbox" },
+		});
+		for (const [target, disk] of [
+			["local://sandbox.txt", path.join(artifacts, "local", "sandbox.txt")],
+			["[local://bracket.txt#ABCD]", path.join(artifacts, "local", "bracket.txt")],
+			[path.join(artifacts, "local", "absolute.txt"), path.join(artifacts, "local", "absolute.txt")],
+		] as const) {
+			await attemptWrite(session, target);
+			expect(await Bun.file(disk).exists(), target).toBe(false);
+		}
+	});
+
 	it("but writes files when the list names write", async () => {
 		const session = await create({
 			toolNames: ["read", "write"],
@@ -277,6 +297,28 @@ describe("other paths that run tools", () => {
 		expect(frame).toBeDefined();
 		expect(JSON.stringify(frame)).not.toContain("sent marker");
 		expect(await Bun.file(marker).exists()).toBe(false);
+	});
+
+	// Round 3: Cursor's native delete frame asked only whether `write` was active,
+	// and a child re-registers `write` as the device transport.
+	it("refuses a Cursor delete frame when the list does not name write", async () => {
+		for (const toolNames of [undefined, ["read", "write"]]) {
+			const target = path.join(dir, `cursor-delete-${toolNames ? "explicit" : "default"}.txt`);
+			await Bun.write(target, "keep this file");
+			const child = await create({
+				toolNames,
+				requireYieldTool: true,
+				toolAllowList: ToolAllowList.parse(["read", "task", "mcp:fixture"]),
+				mcpTools: [fixtureDevice],
+			});
+			const mock = createMockModel({ provider: "openai", responses: [{ content: ["frame done"] }] });
+			child.agent.streamFn = async (streamModel, context, options) => {
+				await options?.cursorExecHandlers?.delete?.({ toolCallId: "delete-1", path: target });
+				return mock.stream(streamModel, context, options);
+			};
+			await child.agent.prompt("deliver a native delete frame");
+			expect(await Bun.file(target).text()).toBe("keep this file");
+		}
 	});
 
 	it("offers the private auto-learn capture no tool the list does not allow", async () => {

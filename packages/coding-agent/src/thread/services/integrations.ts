@@ -22,7 +22,7 @@
  * {@link bridgeIntegrationOptions} before an `ExecutorOptions` object crosses a link.
  */
 import type { TSchema } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { CustomTool } from "../../extensibility/custom-tools/types";
 import { importExtensionModule } from "../../extensibility/extensions/loader";
 import type { ExtensionFactory, PreparedExtension } from "../../extensibility/extensions/types";
@@ -378,16 +378,21 @@ function installMcpGlobal(mcp: Record<string, unknown>): void {
 // Tool allow-list
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** A session's `--tools` list crosses as its entries and is parsed again, so a worker's subagent keeps it. */
+/** A session's `--tools` list crosses as plain data and is rebuilt, so a worker's subagent keeps it exactly. */
 const toolAllowListCodec: RpcCodec<ToolAllowList> = {
 	kind: TOOL_ALLOW_LIST_KIND,
 	is: (value): value is ToolAllowList => value instanceof ToolAllowList,
-	encode: list => list.entries,
+	encode: list => list.toWire(),
 	decode: data => {
-		if (!Array.isArray(data) || !data.every(entry => typeof entry === "string")) {
+		const strings = (value: unknown): value is string[] =>
+			Array.isArray(value) && value.every(entry => typeof entry === "string");
+		const names: unknown = isRecord(data) ? data.names : undefined;
+		const mcpServers: unknown = isRecord(data) ? data.mcpServers : undefined;
+		const allDevices: unknown = isRecord(data) ? data.allDevices : undefined;
+		if (!strings(names) || !strings(mcpServers) || typeof allDevices !== "boolean") {
 			throw new Error("Malformed tool allow-list on the wire");
 		}
-		return ToolAllowList.parse(data);
+		return ToolAllowList.fromWire({ names, mcpServers, allDevices });
 	},
 };
 

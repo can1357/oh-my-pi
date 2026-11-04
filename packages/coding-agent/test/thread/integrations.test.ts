@@ -233,13 +233,19 @@ describe("integrations thread service", () => {
 	// A subagent's options cross into a pooled worker; the thread RPC refuses a class
 	// instance it has no codec for, so a `--tools` list must cross as itself (PR #17970).
 	it("sends a --tools allow-list to a worker as an allow-list", async () => {
-		const list = ToolAllowList.parse(["read", "mcp:fixture"]);
-		expect(await probe.allowList(list)).toEqual({
+		expect(await probe.allowList(ToolAllowList.parse(["read", "mcp:fixture"]))).toEqual({
 			isList: true,
-			entries: ["read", "mcp:fixture"],
 			write: false,
 			read: true,
 			mcp: true,
+		});
+		// Round 3: a name added with `withNames` that looks like a selector stays a name
+		// on the other side; it had become an `mcp:` selector allowing the whole server.
+		expect(await probe.allowList(ToolAllowList.parse(["read"]).withNames(["mcp:fixture"]))).toEqual({
+			isList: true,
+			write: false,
+			read: true,
+			mcp: false,
 		});
 	}, 20_000);
 });

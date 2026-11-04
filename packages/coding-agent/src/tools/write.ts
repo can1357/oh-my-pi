@@ -94,6 +94,7 @@ import {
 	cfgLspFormatOnWrite,
 	cfgLspRequestTimeout,
 } from "../lsp/settings";
+import { allowListDeniesWrite } from "./tool-allowlist";
 
 const EXECUTABLE_NOTICE = "[Notice: Made executable via chmod +x]";
 const URI_LIKE_WRITE_PATH_RE = /^([a-z][a-z0-9+.-]*):\/{1,2}(.*)$/i;
@@ -626,20 +627,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		return key === undefined ? undefined : [key];
 	};
 	readonly label = "Write";
-	/**
-	 * Whether the session's `--tools` allow-list leaves `write` only as the device
-	 * transport: whatever path (re)registers `write` — a child session, a clone, a
-	 * device mount — it then writes no files.
-	 */
-	#deniedByAllowList(): boolean {
-		const allowList = this.session.toolAllowList;
-		return allowList !== undefined && !allowList.allows("write", undefined);
-	}
-
 	get description(): string {
 		const deviceOnly =
 			(this.session.deviceOnlyWrite === true && this.session.pendingFullWriteDescription !== true) ||
-			this.#deniedByAllowList();
+			allowListDeniesWrite(this.session.toolAllowList);
 		return prompt.render(deviceOnly ? writeDeviceOnlyDescription : writeDescription);
 	}
 	readonly parameters = writeSchema;
@@ -980,12 +971,15 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// A device-only session grants `write` purely as the device transport (see
 		// createTools): device dispatches, file-free writes, and the session's
 		// local:// sandbox proceed; every other target is rejected before any
-		// handler, guard, conflict resolver, or bridge sees it.
+		// handler, guard, conflict resolver, or bridge sees it. A `--tools` list
+		// without `write` (whatever path registered it: a child, a clone, a device
+		// mount) allows no file at all, the local:// sandbox included.
+		const deniedByAllowList = allowListDeniesWrite(this.session.toolAllowList);
 		if (
-			(this.session.deviceOnlyWrite === true || this.#deniedByAllowList()) &&
+			(this.session.deviceOnlyWrite === true || deniedByAllowList) &&
 			policy?.scope !== "device" &&
 			!touchesNoFiles &&
-			!(await targetsLocalSandbox(this.session, path, signal))
+			(deniedByAllowList || !(await targetsLocalSandbox(this.session, path, signal)))
 		) {
 			// A device-only session that still has `yield` is the read-only subagent
 			// shape: `write` is present only as the xd:// transport, yet the parent's

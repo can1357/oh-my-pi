@@ -313,7 +313,7 @@ import {
 	warmupLspServers,
 	xdevEntries,
 } from "./tools";
-import type { ToolAllowList } from "./tools/tool-allowlist";
+import { allowListDeniesWrite, type ToolAllowList } from "./tools/tool-allowlist";
 import { resolveYieldReportText } from "./tools/yield";
 import {
 	createModelJobCaptionWriter,
@@ -4187,7 +4187,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				(editWasGranted && toolSession.isToolActive?.("edit") === true) ||
 				(toolSession.isToolActive?.("write") === true &&
 					toolRegistry.has("write") &&
-					toolSession.deviceOnlyWrite !== true),
+					toolSession.deviceOnlyWrite !== true &&
+					!allowListDeniesWrite(toolSession.toolAllowList)),
 		});
 
 		// Resolve the live inline-descriptors setting against the active model.
@@ -4437,7 +4438,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
 				writeTransportOnly:
-					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,
+					(toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true) ||
+					allowListDeniesWrite(toolSession.toolAllowList),
 				secretsEnabled: obfuscator?.obfuscates() === true,
 				workspaceTree: workspaceTreePromise ?? emptyWorkspaceTree,
 				includeWorkspaceTree,

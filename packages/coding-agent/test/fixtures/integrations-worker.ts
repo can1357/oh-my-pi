@@ -55,9 +55,7 @@ export interface IntegrationsProbe {
 	/** Read local-protocol getters synchronously, twice with an awaited gap the test fills. */
 	localRoot(options: LocalProtocolOptions): Promise<string>;
 	/** What a `--tools` list sent from main allows in this thread. */
-	allowList(
-		list: ToolAllowList,
-	): Promise<{ isList: boolean; entries: string[]; write: boolean; read: boolean; mcp: boolean }>;
+	allowList(list: ToolAllowList): Promise<{ isList: boolean; write: boolean; read: boolean; mcp: boolean }>;
 	/** Bind prepared extensions in this thread and list the commands they registered. */
 	bindExtensions(prepared: PreparedExtension[], cwd: string): Promise<{ commands: string[]; errors: string[] }>;
 }
@@ -164,7 +162,6 @@ function buildProbe(): IntegrationsProbe {
 		localRoot: async options => resolveLocalRoot(options),
 		allowList: async list => ({
 			isList: list instanceof ToolAllowList,
-			entries: list.entries,
 			write: list.allows("write", undefined),
 			read: list.allows("read", undefined),
 			mcp: list.allows("mcp__fixture_probe", { name: "mcp__fixture_probe", mcpServerName: "fixture" }),
