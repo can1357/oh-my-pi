@@ -95,9 +95,9 @@ export function enablePragmas(db: Database, path?: DatabasePath, pageSize?: Sqli
 	if (path !== ":memory:") {
 		applyPageSize(db, path ?? dbPath(), pageSize);
 		db.exec("PRAGMA journal_mode=WAL");
-		// WAL keeps every commit across a process crash without syncing it; NORMAL syncs at
-		// checkpoints only (the default FULL synced the WAL on every commit), as omp's other stores do.
-		// A power loss can drop the newest commits, never corrupt the bank.
+		// WAL keeps every commit across a process crash without syncing it. NORMAL syncs the WAL only
+		// when a new WAL starts and at checkpoints (the default FULL synced it on every commit), as
+		// omp's other stores do. A power loss can drop the newest commits, never corrupt the bank.
 		db.exec("PRAGMA synchronous=NORMAL");
 	}
 }
