@@ -27,8 +27,9 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { runSubagentFollowUpTurn, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { type AgentDefinition, TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import { emptyMirrorState, RemoteAgentSession } from "@oh-my-pi/pi-coding-agent/thread/remote-agent-session";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
@@ -447,3 +448,76 @@ it("parks an idle worker-homed parent once its child's job is cancelled, whateve
 	await until(() => AgentRegistry.global().get("W")?.status === "parked", "the idle parent to park");
 	await manager.dispose({ timeoutMs: 1000 });
 }, 60_000);
+
+it("stops the child when its parent's caller cancels while the run's result is being published", async () => {
+	laneEnd = "budget";
+	const { authStorage, session } = await harness({ idleTtlMs: 0 });
+	const caller = new AbortController();
+	// The run's settled lifecycle frame goes out from its result publication, after
+	// the run decided to keep Arm; the caller cancels right there.
+	const events = new EventBus();
+	events.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, frame => {
+		const settled =
+			typeof frame === "object" && frame !== null && "id" in frame && "status" in frame && frame.id === "Lane";
+		if (settled && frame.status !== "started") caller.abort(new Error("the caller cancelled Lane"));
+	});
+	try {
+		await runSubprocess({
+			cwd: path.join(root, "home", "work"),
+			agent: LEAD,
+			task: "Do assignment Lane.",
+			index: 0,
+			id: "Lane",
+			structured: false,
+			modelOverride: "mock/mock-model",
+			settings: session.settings,
+			authStorage,
+			modelRegistry: session.modelRegistry,
+			asyncJobManager: session.asyncJobManager,
+			enableMCP: false,
+			enableLsp: false,
+			signal: caller.signal,
+			eventBus: events,
+			artifactsDir: path.join(root, "artifacts"),
+		});
+		expect(caller.signal.aborted).toBe(true);
+		const armJob = session.asyncJobManager!.getJob("Lane.Arm")!;
+		await armJob.promise;
+		expect(armJob.status).toBe("cancelled");
+		expect(transcriptHas("Lane.Arm", "arm-work-2")).toBe(false);
+	} finally {
+		await session.dispose();
+		authStorage.close();
+	}
+}, 120_000);
+
+it("releases a child whose cancelled run unwinds past its parent's teardown", async () => {
+	laneEnd = "budget";
+	const { authStorage, session } = await harness({ idleTtlMs: 0 });
+	// Hold Arm's abort past the 3 s its parent's disposal waits for it, so Arm's
+	// run ends after the lifecycle's dispose() has returned.
+	const armAbortHeld = Promise.withResolvers<void>();
+	const abort = AgentSession.prototype.abort;
+	vi.spyOn(AgentSession.prototype, "abort").mockImplementation(async function (
+		this: AgentSession,
+		...args: Parameters<AgentSession["abort"]>
+	) {
+		await abort.apply(this, args);
+		if (this.getAgentId() === "Lane.Arm") await armAbortHeld.promise;
+	});
+	try {
+		const armJob = await laneRunEndsWhileArmWorks(session);
+		await AgentLifecycleManager.global().dispose();
+		armAbortHeld.resolve();
+		await armJob.promise;
+		const liveSubagents = AgentRegistry.global()
+			.list()
+			.filter(ref => ref.id !== MAIN_AGENT_ID && ref.session)
+			.map(ref => `${ref.id} ${ref.status}`);
+		expect({ arm: armJob.status, liveSubagents }).toEqual({ arm: "cancelled", liveSubagents: [] });
+	} finally {
+		armAbortHeld.resolve();
+		await session.dispose();
+		authStorage.close();
+	}
+}, 120_000);

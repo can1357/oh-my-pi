@@ -263,11 +263,15 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			return;
 		}
 		if (this.#disposed) {
-			// The run ended while this lifecycle tears down (a released owner's
-			// disposal cancelled it): release the agent rather than keep it alive
-			// past the teardown. Transcript stays on disk, as for any released agent.
+			// The run ended after this lifecycle began tearing down (a released
+			// owner's disposal cancelled it, however long its unwind took: runs keep
+			// the lifecycle they started under). Release the agent rather than keep it
+			// alive past the teardown; its transcript stays on disk, as for any
+			// released agent. Detached now, so no caller sees its session as live.
 			opts.onReviverDropped?.();
-			const late = this.#releaseLate(id, ref, opts.onRelease);
+			const session = ref.session;
+			this.#registry.detachSession(id, ref);
+			const late = this.#releaseLate(id, ref, session, opts.onRelease);
 			this.#lateReleases.add(late);
 			void late.finally(() => this.#lateReleases.delete(late));
 			return;
@@ -286,9 +290,14 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		this.#armTimer(id, adopted);
 	}
 
-	async #releaseLate(id: string, ref: AgentRef, onRelease: (() => Promise<void>) | undefined): Promise<void> {
+	async #releaseLate(
+		id: string,
+		ref: AgentRef,
+		session: AgentSessionHandle | null,
+		onRelease: (() => Promise<void>) | undefined,
+	): Promise<void> {
 		try {
-			await ref.session?.dispose();
+			await session?.dispose();
 		} catch (error) {
 			logger.warn("AgentLifecycleManager: late session dispose failed", { id, error: String(error) });
 		}
