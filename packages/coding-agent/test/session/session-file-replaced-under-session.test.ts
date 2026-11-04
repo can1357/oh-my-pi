@@ -162,6 +162,163 @@ describe("a session whose transcript is replaced under it", () => {
 		}
 	});
 
+	/** `source`'s bytes padded with blank lines to `size`, renamed over `sessionFile`. */
+	function renameOverPadded(sessionFile: string, source: string, size: number): void {
+		const text = fs.readFileSync(source, "utf8");
+		fs.writeFileSync(`${sessionFile}.staging`, text + "\n".repeat(size - Buffer.byteLength(text)));
+		fs.renameSync(`${sessionFile}.staging`, sessionFile);
+	}
+
+	it("writes the whole journal back over a same-size older copy that lands after a full rewrite", async () => {
+		using tempDir = TempDir.createSync("@omp-session-same-size-after-rewrite-");
+		const { manager, sessionFile, older, notices, failures } = await liveSession(tempDir.path());
+		try {
+			// The rewrite closes the append writer, so the next one opens whatever is at the path.
+			await manager.rewriteEntries();
+			renameOverPadded(sessionFile, older, fs.statSync(sessionFile).size);
+			manager.appendMessage(userTurn(allTurns[2]));
+			manager.appendMessage(userTurn(allTurns[3]));
+
+			await expectWholeJournal(sessionFile, tempDir.path(), manager, allTurns);
+			expect(notices).toEqual([]);
+			expect(failures).toEqual([]);
+		} finally {
+			await manager.close();
+		}
+	});
+
+	it("leaves a foreign journal alone when it replaces the file again while the session is recovering", async () => {
+		using tempDir = TempDir.createSync("@omp-session-replaced-during-recovery-");
+		const { manager, sessionFile, older, notices, failures } = await liveSession(tempDir.path());
+		const other = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "other"), new FileSessionStorage());
+		try {
+			// Header only: smaller than the older copy, so it can be padded to exactly its size.
+			await other.ensureOnDisk();
+			await other.close();
+			const otherFile = other.getSessionFile();
+			if (!otherFile) throw new Error("Expected the other session's file");
+
+			// First failure: an older copy of this journal replaces the file.
+			fs.copyFileSync(older, `${sessionFile}.staging`);
+			fs.renameSync(`${sessionFile}.staging`, sessionFile);
+			// Second failure, inside the recovery: right after it reads the older copy back,
+			// another session's journal of the very same size replaces the file again.
+			const olderSize = fs.statSync(older).size;
+			expect(fs.statSync(other.getSessionFile() ?? "").size).toBeLessThan(olderSize);
+			let foreignBytes: string | undefined;
+			const readTextSync = FileSessionStorage.prototype.readTextSync;
+			vi.spyOn(FileSessionStorage.prototype, "readTextSync").mockImplementation(
+				function (this: FileSessionStorage, file) {
+					const text = readTextSync.call(this, file);
+					if (foreignBytes === undefined) {
+						renameOverPadded(sessionFile, otherFile, olderSize);
+						foreignBytes = fs.readFileSync(sessionFile, "utf8");
+					}
+					return text;
+				},
+			);
+			manager.appendMessage(userTurn(allTurns[2]));
+			vi.restoreAllMocks();
+			manager.appendMessage(userTurn(allTurns[3]));
+
+			// The foreign journal is untouched; this session saves elsewhere, whole.
+			if (foreignBytes === undefined) throw new Error("Expected the file to be replaced during recovery");
+			expect(fs.readFileSync(sessionFile, "utf8")).toBe(foreignBytes);
+			const sibling = manager.getSessionFile();
+			if (!sibling) throw new Error("Expected a session file");
+			expect(sibling).not.toBe(sessionFile);
+			expect(notices).toEqual([{ reason: "replaced", from: sessionFile, to: sibling }]);
+			const moved = await SessionManager.open(sibling, tempDir.path(), new FileSessionStorage(), {
+				suppressBreadcrumb: true,
+			});
+			expect(userTurnsOf(moved.getEntries())).toEqual(allTurns);
+			expect(failures).toEqual([]);
+		} finally {
+			await manager.close();
+		}
+	});
+
+	it("leaves another session's same-size journal alone and moves to a sibling", async () => {
+		using tempDir = TempDir.createSync("@omp-session-foreign-same-size-");
+		const { manager, sessionFile, notices, failures } = await liveSession(tempDir.path());
+		const other = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "other"), new FileSessionStorage());
+		try {
+			await other.ensureOnDisk();
+			other.appendMessage(userTurn("the other session's turn"));
+			await other.close();
+			const otherFile = other.getSessionFile();
+			if (!otherFile) throw new Error("Expected the other session's file");
+			renameOverPadded(sessionFile, otherFile, fs.statSync(sessionFile).size);
+			const foreignBytes = fs.readFileSync(sessionFile, "utf8");
+			manager.appendMessage(userTurn(allTurns[2]));
+			manager.appendMessage(userTurn(allTurns[3]));
+
+			const sibling = manager.getSessionFile();
+			if (!sibling) throw new Error("Expected a session file");
+			expect(notices).toEqual([{ reason: "replaced", from: sessionFile, to: sibling }]);
+			expect(fs.readFileSync(sessionFile, "utf8")).toBe(foreignBytes);
+			const moved = await SessionManager.open(sibling, tempDir.path(), new FileSessionStorage(), {
+				suppressBreadcrumb: true,
+			});
+			expect(userTurnsOf(moved.getEntries())).toEqual(allTurns);
+			expect(failures).toEqual([]);
+		} finally {
+			await manager.close();
+		}
+	});
+
+	it("announces a restore of the session it switched to after an earlier one failed to restore", async () => {
+		using tempDir = TempDir.createSync("@omp-session-restore-after-switch-");
+		const dir = path.join(tempDir.path(), "sessions");
+		fs.mkdirSync(dir);
+		const { manager, sessionFile, older, notices } = await liveSession(dir);
+		const otherDir = path.join(tempDir.path(), "other");
+		const other = SessionManager.create(tempDir.path(), otherDir, new FileSessionStorage());
+		try {
+			await other.ensureOnDisk();
+			other.appendMessage(userTurn("other: first"));
+			const otherFile = other.getSessionFile();
+			if (!otherFile) throw new Error("Expected the other session's file");
+			const otherOlder = path.join(tempDir.path(), "other-older.jsonl");
+			fs.copyFileSync(otherFile, otherOlder);
+			other.appendMessage(userTurn("other: second"));
+			await other.close();
+
+			// The first session's write back fails, so its restore is never announced.
+			fs.copyFileSync(older, `${sessionFile}.staging`);
+			fs.renameSync(`${sessionFile}.staging`, sessionFile);
+			const readTextSync = FileSessionStorage.prototype.readTextSync;
+			vi.spyOn(FileSessionStorage.prototype, "readTextSync").mockImplementation(
+				function (this: FileSessionStorage, file) {
+					fs.chmodSync(dir, 0o500);
+					return readTextSync.call(this, file);
+				},
+			);
+			manager.appendMessage(userTurn(allTurns[2]));
+			vi.restoreAllMocks();
+			fs.chmodSync(dir, 0o700);
+
+			await manager.setSessionFile(otherFile);
+			const written = fs.statSync(otherFile).size;
+			fs.copyFileSync(otherOlder, `${otherFile}.staging`);
+			fs.renameSync(`${otherFile}.staging`, otherFile);
+			manager.appendMessage(userTurn("other: third"));
+
+			expect(notices).toEqual([
+				{
+					reason: "restored",
+					from: otherFile,
+					to: otherFile,
+					expectedBytes: written,
+					foundBytes: fs.statSync(otherOlder).size,
+				},
+			]);
+		} finally {
+			fs.chmodSync(dir, 0o700);
+			await manager.close();
+		}
+	});
+
 	it("writes back in place when a symlinked file's target is removed while no writer holds it", async () => {
 		using tempDir = TempDir.createSync("@omp-session-link-target-gone-");
 		const { manager, sessionFile, notices, failures } = await liveSession(tempDir.path());

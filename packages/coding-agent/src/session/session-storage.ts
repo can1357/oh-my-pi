@@ -318,10 +318,32 @@ function statPathByHandle(filePath: string): fs.BigIntStats | undefined {
 	}
 }
 
+/**
+ * Which file a path names (not what it holds), read through a descriptor as
+ * {@link statPathByHandle} does. Device and inode alone are reused once a file
+ * is deleted, so the birth time is part of it; a filesystem that reports none
+ * gives 0 there and falls back to device and inode.
+ */
+interface FileIdentity {
+	ino: bigint;
+	dev: bigint;
+	birthtimeNs: bigint;
+}
+
+function fileIdentity(stats: fs.BigIntStats): FileIdentity {
+	return { ino: stats.ino, dev: stats.dev, birthtimeNs: stats.birthtimeNs };
+}
+
+function sameFile(a: FileIdentity, b: FileIdentity): boolean {
+	return a.ino === b.ino && a.dev === b.dev && a.birthtimeNs === b.birthtimeNs;
+}
+
 class FileSessionStorageWriter implements SessionStorageWriter {
 	#fd: number;
 	/** Identity of the file `#fd` is open on: fixed for the descriptor's lifetime, so read once per descriptor. */
-	#heldIdentity: { ino: bigint; dev: bigint } | undefined;
+	#heldIdentity: FileIdentity | undefined;
+	/** The file the storage last wrote at this path, when it knows one: a held descriptor on any other file is stale. */
+	#lastWritten: (() => FileIdentity | undefined) | undefined;
 	#fpath: string;
 	#publishLock: ((append: () => void, landed: () => boolean) => void) | undefined;
 	#closed = false;
@@ -335,10 +357,12 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 			create?: boolean;
 			onError?: (err: Error) => void;
 			publishLock?: (append: () => void, landed: () => boolean) => void;
+			lastWritten?: () => FileIdentity | undefined;
 		},
 	) {
 		this.#fpath = fpath;
 		this.#publishLock = options?.publishLock;
+		this.#lastWritten = options?.lastWritten;
 		this.#onError = options?.onError;
 		const flags = options?.flags ?? "a";
 		// Ensure parent directory exists
@@ -353,11 +377,9 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		writerRegistry.register(this, this.#fd, this);
 	}
 
-	#heldFile(): { ino: bigint; dev: bigint } {
-		if (!this.#heldIdentity) {
-			const held = fs.fstatSync(this.#fd, { bigint: true });
-			this.#heldIdentity = { ino: held.ino, dev: held.dev };
-		}
+	/** The file the held descriptor is open on. */
+	identity(): FileIdentity {
+		if (!this.#heldIdentity) this.#heldIdentity = fileIdentity(fs.fstatSync(this.#fd, { bigint: true }));
 		return this.#heldIdentity;
 	}
 
@@ -372,7 +394,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	 * identity check and the append rollback point.
 	 */
 	#reopenIfReplaced(): number {
-		const held = this.#heldFile();
+		const held = this.identity();
 		const live = statPathByHandle(this.#fpath);
 		if (!live) return fs.fstatSync(this.#fd).size;
 		if (live.ino === held.ino && live.dev === held.dev) return Number(live.size);
@@ -401,9 +423,11 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	 */
 	#assertHoldsAt(expectedSize: number): number {
 		const live = statPathByHandle(this.#fpath);
-		const held = this.#heldFile();
+		const held = this.identity();
+		const written = this.#lastWritten?.();
 		const size = live ? Number(live.size) : null;
-		if (!live || live.ino !== held.ino || live.dev !== held.dev || size !== expectedSize) {
+		// A writer opened after the last publish was replaced holds the replacement: refuse it too.
+		if (!live || !sameFile(live, held) || (written && !sameFile(written, held)) || size !== expectedSize) {
 			throw new SessionWriteConflictError(this.#fpath, expectedSize, size);
 		}
 		return expectedSize;
@@ -415,7 +439,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	 * and `#reopenIfReplaced` would append to the same descriptor again.
 	 */
 	#holdsLivePath(): boolean {
-		const held = this.#heldFile();
+		const held = this.identity();
 		const live = statPathByHandle(this.#fpath);
 		if (!live) return true;
 		return live.ino === held.ino && live.dev === held.dev;
@@ -766,17 +790,33 @@ async function writeLinesToFile(target: string, lines: readonly string[]): Promi
 }
 
 export class FileSessionStorage implements SessionStorage {
-	#assertExpectedSize(fpath: string, expectedSize: number | null | undefined): void {
+	/**
+	 * The file this storage last wrote at each session path, keyed by
+	 * `path.resolve` of the path as callers name it: the staged file a publish
+	 * renamed in, or the file an appender first opened. A size check alone takes
+	 * a different file of the same size; this lets a publish or an append refuse
+	 * one until the caller has read it back.
+	 */
+	readonly #lastWritten = new Map<string, FileIdentity>();
+
+	/**
+	 * Throw a {@link SessionWriteConflictError} unless `target` (what the
+	 * session path `fpath` resolves to) measures `expectedSize` and, when this
+	 * storage wrote that path last, is still that file. A conflict pins the file
+	 * it found: the caller reads it back and retries against the size it read,
+	 * and a retry that meets yet another file (one replaced again while the
+	 * caller was reading) conflicts again instead of writing over it.
+	 */
+	#assertExpected(fpath: string, target: string, expectedSize: number | null | undefined): void {
 		if (expectedSize === undefined) return;
-		let actualSize: number | null;
-		try {
-			actualSize = fs.statSync(fpath).size;
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			actualSize = null;
-		}
-		if (actualSize !== expectedSize) {
-			throw new SessionWriteConflictError(fpath, expectedSize, actualSize);
+		const key = path.resolve(fpath);
+		const live = statPathByHandle(target);
+		const actualSize = live ? Number(live.size) : null;
+		const written = this.#lastWritten.get(key);
+		if (actualSize !== expectedSize || (live && written && !sameFile(live, written))) {
+			if (live) this.#lastWritten.set(key, fileIdentity(live));
+			else this.#lastWritten.delete(key);
+			throw new SessionWriteConflictError(target, expectedSize, actualSize);
 		}
 	}
 
@@ -1075,23 +1115,31 @@ export class FileSessionStorage implements SessionStorage {
 			this.#discardTemp(tempPath, target);
 			throw toError(err);
 		}
+		const staged = statPathByHandle(tempPath);
 		// The freshness check through the final rename runs under the
 		// cross-process publish lock: no cooperating writer can slip an
 		// append between the size check and the rename.
 		try {
 			this.#withPublishLock(target, () => {
-				this.#assertExpectedSize(target, options?.expectedSize);
+				this.#assertExpected(fpath, target, options?.expectedSize);
 				try {
 					this.renameSync(tempPath, target);
 				} catch (err) {
 					if (!hasFsCode(err, "EPERM")) throw toError(err);
 					this.#replaceSessionFileAfterEpermSync(tempPath, target, err);
 				}
+				this.#rememberPublished(fpath, target, staged);
 			});
 		} catch (err) {
 			this.#discardTemp(tempPath, target);
 			throw toError(err);
 		}
+	}
+
+	/** Record the staged file as the one this storage wrote at `fpath`, once `target` names it. */
+	#rememberPublished(fpath: string, target: string, staged: fs.BigIntStats | undefined): void {
+		const live = statPathByHandle(target);
+		if (staged && live && sameFile(live, staged)) this.#lastWritten.set(path.resolve(fpath), fileIdentity(staged));
 	}
 
 	async updateSessionTitle(fpath: string, update: SessionTitleUpdate): Promise<void> {
@@ -1206,6 +1254,7 @@ export class FileSessionStorage implements SessionStorage {
 			this.#discardTemp(tempPath, target);
 			throw toError(err);
 		}
+		const staged = statPathByHandle(tempPath);
 		// Guard-check + rename MUST NOT be separated by an await. A concurrent
 		// synchronous rewrite (flushSync -> #rewriteSynchronously) can otherwise
 		// publish a fresh body between the check and the rename, and this stale
@@ -1219,14 +1268,14 @@ export class FileSessionStorage implements SessionStorage {
 			// its EPERM fallback): a cooperating appender or rewrite cannot
 			// interleave, and appenders re-open a replaced path before writing.
 			this.#withPublishLock(target, () => {
-				this.#assertExpectedSize(target, options?.expectedSize);
+				this.#assertExpected(fpath, target, options?.expectedSize);
 				try {
 					this.renameSync(tempPath, target);
-					return;
 				} catch (err) {
 					if (!hasFsCode(err, "EPERM")) throw toError(err);
 					this.#replaceSessionFileAfterEpermSync(tempPath, target, err, options?.commitGuard);
 				}
+				this.#rememberPublished(fpath, target, staged);
 			});
 		} catch (err) {
 			this.#discardTemp(tempPath, target);
@@ -1348,10 +1397,15 @@ export class FileSessionStorage implements SessionStorage {
 	): SessionStorageWriter {
 		const lockPath = this.#publishLockPath(fpath);
 		const gatePath = this.#osGatePath(lockPath);
-		return new FileSessionStorageWriter(fpath, {
+		const key = path.resolve(fpath);
+		const writer = new FileSessionStorageWriter(fpath, {
 			...options,
 			publishLock: (append, landed) => this.#withAppendLock(fpath, lockPath, gatePath, append, landed),
+			lastWritten: () => this.#lastWritten.get(key),
 		});
+		// With nothing published here yet, the file the appender opened is the baseline.
+		if (!this.#lastWritten.has(key)) this.#lastWritten.set(key, writer.identity());
+		return writer;
 	}
 
 	/** Run a synchronous session mutation under its cross-process lock. */

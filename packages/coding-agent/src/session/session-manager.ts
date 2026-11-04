@@ -1219,7 +1219,8 @@ export class SessionManager {
 	 * never for a write that failed. A file that only grew loses nothing.
 	 */
 	#noteJournalLost(error: SessionWriteConflictError, sessionFile: string): void {
-		if (this.#pendingRestore || error.expectedSize === null) return;
+		// One owed notice per file: a stale one for a file this manager has left gives way.
+		if (this.#pendingRestore?.from === sessionFile || error.expectedSize === null) return;
 		if (error.actualSize !== null && error.actualSize >= error.expectedSize) return;
 		this.#pendingRestore = {
 			reason: "restored",
