@@ -270,6 +270,8 @@ function withBaseReleases(baseContent: string, headContent: string): string {
  * `archiveCommit`. `matches` holds when the head's released sections
  * and footer equal the fixer's, byte for byte; never when the fixer refuses
  * the text for its headings, since then it writes no archive.
+ * `archivedTitles` names each base title the fixer left fewer copies of; the
+ * archive commit must hold every copy of each.
  */
 async function fixerArchive(
 	changelogPath: string,
@@ -290,15 +292,19 @@ async function fixerArchive(
 	}
 	const expected = releasedHistory(fixed.content);
 	const actual = releasedHistory(headContent);
-	const kept = new Set(releasedBlocks(fixed.content).blocks.map(block => block.title));
+	// A title the base has twice can lose one copy and keep the other: count copies, not titles.
+	const kept = new Map<string, number>();
+	for (const block of releasedBlocks(fixed.content).blocks) kept.set(block.title, (kept.get(block.title) ?? 0) + 1);
+	const archivedTitles = new Set<string>();
+	for (const block of releasedBlocks(baseContent).blocks) {
+		const left = kept.get(block.title) ?? 0;
+		if (left > 0) kept.set(block.title, left - 1);
+		else archivedTitles.add(block.title);
+	}
 	return {
 		matches: expected.length === actual.length && expected.every((text, index) => text === actual[index]),
 		collapsedReleases: fixed.collapsedReleases,
-		archivedTitles: new Set(
-			releasedBlocks(baseContent)
-				.blocks.map(block => block.title)
-				.filter(title => !kept.has(title)),
-		),
+		archivedTitles,
 	};
 }
 
@@ -398,19 +404,24 @@ export async function findReleasedSectionChanges(
 		),
 	);
 	const footerChanged = head.archiveLink !== base.archiveLink;
+	// Fewer copies here than at the base, entries or not: what a new archive footer has to account for.
+	const fewer = titles.filter(
+		title => (head.sections.get(title)?.length ?? 0) < (base.sections.get(title)?.length ?? 0),
+	);
 
-	// A released section with entries may go only behind a new archive footer
-	// that the fixer itself writes, naming a commit that still holds it: run the
-	// fixer, compare what it leaves, then read that commit. The fixer promises to
-	// keep the newest release; hold it to that here, so a fault in its collapse
-	// cannot certify losing that release.
+	// A released section may go behind a new archive footer only when the
+	// fixer itself writes that footer, naming a commit that still holds it: run
+	// the fixer, compare what it leaves, then read that commit. This holds for
+	// sections without entries too, so the fixer's own archive of them passes.
+	// The fixer promises to keep the newest release; hold it to that here, so a
+	// fault in its collapse cannot certify losing that release.
 	const sorted = parseChangelog(splitArchiveFooter(baseContent).body);
 	sortReleaseSections(sorted);
 	const newest = sorted.sections.find(section => section.title !== UNRELEASED_TITLE)?.title;
 	const archiveCommit = footerChanged ? head.archiveLink?.match(/\/blob\/([0-9a-f]{40})\//)?.[1] : undefined;
 	let explained = new Set<string>();
 	let unverified = false;
-	if (missing.size > 0 && archiveCommit !== undefined && (newest === undefined || !missing.has(newest))) {
+	if (fewer.length > 0 && archiveCommit !== undefined && (newest === undefined || !missing.has(newest))) {
 		const archive = await fixerArchive(changelogPath, baseContent, headContent, archiveCommit);
 		explained = archive.archivedTitles;
 		if (archive.matches) {

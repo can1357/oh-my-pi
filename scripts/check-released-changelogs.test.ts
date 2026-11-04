@@ -4,7 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import { FIX_COMMAND, findReleasedSectionChanges, UnreadableInputError } from "./check-released-changelogs";
-import { MAX_CHANGELOG_BYTES, type RunChangelogFixerResult, runChangelogFixer } from "./fix-changelogs";
+import {
+	fixChangelogFile,
+	MAX_CHANGELOG_BYTES,
+	type RunChangelogFixerResult,
+	runChangelogFixer,
+} from "./fix-changelogs";
 import { updateChangelogsForRelease } from "./release";
 
 const CHANGELOG = "packages/tui/CHANGELOG.md";
@@ -633,6 +638,71 @@ describe("check-released-changelogs", () => {
 			const result = await check(repo, "--base", "HEAD");
 			expect(result.exitCode).toBe(1);
 			expect(result.output).toContain(`${CHANGELOG}: ## [1.1.0] - 2026-02-01\n  Missing here.`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	/** What `bun run fix:changelogs` writes for `content`, archiving behind `commit`. */
+	async function fixerOutput(
+		content: string,
+		commit: string,
+	): Promise<{ content: string; collapsedReleases: number }> {
+		return fixChangelogFile(CHANGELOG, content, {
+			promotableAddedItemStartLines: new Set<number>(),
+			maxBytes: MAX_CHANGELOG_BYTES,
+			archiveCommit: async () => commit,
+		});
+	}
+
+	test(
+		"verifies every archived copy of a duplicated release: a footer commit that lacks the collapsed copy fails",
+		async () => {
+			const top =
+				"# Changelog\n\n## [Unreleased]\n\n## [1.1.0] - 2026-02-01\n\n### Fixed\n\n- Fixed a recent bug\n\n";
+			const firstCopy = "## [1.0.0] - 2026-01-01\n\n### Fixed\n\n- Fixed in the first copy\n\n";
+			const secondCopy = `## [1.0.0] - 2026-01-01\n\n### Fixed\n\n- Fixed in the second copy ${"x".repeat(MAX_CHANGELOG_BYTES)}\n\n`;
+			const older = "## [0.9.0] - 2025-12-01\n\n### Fixed\n\n- Fixed an older bug\n";
+			const base = `${top}${firstCopy}${secondCopy}${older}`;
+			// The fixer keeps the first copy and archives the second with 0.9.0.
+			const fixed = await fixerOutput(base, "a".repeat(40));
+			expect(fixed.collapsedReleases).toBe(2);
+			expect(fixed.content).toContain("- Fixed in the first copy\n");
+			expect(fixed.content).not.toContain("second copy");
+
+			const linkedTo = (linked: string) => ({ release: false, readArchive: async () => linked });
+			const certified = await findReleasedSectionChanges(CHANGELOG, base, fixed.content, linkedTo(base));
+			expect(certified.changes).toEqual([]);
+
+			// The linked commit holds 0.9.0 and one copy of 1.0.0: the second copy's history would go.
+			const partial = `${top}${firstCopy}${older}`;
+			const { changes } = await findReleasedSectionChanges(CHANGELOG, base, fixed.content, linkedTo(partial));
+			expect(changes.map(change => [change.heading, change.baseCopies, change.headCopies, change.problem])).toEqual([
+				["## [1.0.0] - 2026-01-01", 2, 1, undefined],
+				["## [0.9.0] - 2025-12-01", 1, 0, "archive-unverified"],
+			]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"passes the fixer's archive of only empty releases when the footer's commit holds them, and fails it when it does not",
+		async () => {
+			const base = `# Changelog\n\n## [Unreleased]\n\n## [1.1.0] - 2026-02-01\n\n### Fixed\n\n- Fixed a recent bug ${"x".repeat(MAX_CHANGELOG_BYTES)}\n\n## [1.0.0] - 2026-01-01\n\n### Fixed\n`;
+			const fixed = await fixerOutput(base, "a".repeat(40));
+			expect(fixed.collapsedReleases).toBe(1);
+			expect(fixed.content).not.toContain("## [1.0.0]");
+
+			const certified = await findReleasedSectionChanges(CHANGELOG, base, fixed.content, {
+				release: false,
+				readArchive: async () => base,
+			});
+			expect([certified.archived, certified.changes]).toEqual([1, []]);
+
+			const unread = await findReleasedSectionChanges(CHANGELOG, base, fixed.content, {
+				release: false,
+				readArchive: async () => undefined,
+			});
+			expect(unread.changes.map(change => change.problem)).toEqual(["archive-footer"]);
 		},
 		TEST_TIMEOUT_MS,
 	);
