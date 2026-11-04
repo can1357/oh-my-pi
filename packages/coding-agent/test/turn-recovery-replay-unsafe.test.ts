@@ -394,6 +394,36 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(recovery.isHardErrorFallbackEligible(message)).toBe(true);
 	});
 
+	it("keeps an unusable { file } key or header off retry and the fallback chain", () => {
+		const fallbackChains = { [`${model.provider}/${model.id}`]: ["openai/gpt-4o-mini"] };
+		const recovery = new TurnRecovery(createHost(model, modelRegistry, { fallbackChains }));
+		// A path that reads like a transient failure must not make the error retryable either.
+		for (const filePath of ["/run/secrets/tenant", "/srv/timeout/overloaded-503/key"]) {
+			const message = {
+				...makeMessage([], model),
+				errorMessage: `Config value file ${filePath} could not be read (ENOENT). Fix the file, or the { file: ... } value that names it in models.yml.`,
+			} as AssistantMessage;
+			message.errorId = AIError.classifyMessage(message);
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(recovery.isHardErrorFallbackEligible(message)).toBe(false);
+		}
+		// Control: the same chain admits an ordinary hard error.
+		expect(recovery.isHardErrorFallbackEligible(makeMessage([], model))).toBe(true);
+	});
+
+	it("keeps an unusable { file } key or header off the Fireworks Fast to base fallback", () => {
+		const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
+		if (!fastModel) throw new Error("Expected bundled model kimi-k3-fast");
+		const recovery = new TurnRecovery(createHost(fastModel, modelRegistry));
+		const message = {
+			...makeMessage([], fastModel),
+			errorMessage:
+				"Config value file /run/secrets/fw could not be read (ENOENT). Fix the file, or the { file: ... } value that names it in models.yml.",
+		} as AssistantMessage;
+		expect(recovery.isFireworksFastFallbackEligible(message)).toBe(false);
+		expect(recovery.isFireworksFastFallbackEligible(makeMessage([], fastModel))).toBe(true);
+	});
+
 	it("retries partial text while its buffered output remains uncommitted", () => {
 		const fallbackChains = {
 			[`${model.provider}/${model.id}`]: ["openai/gpt-4o-mini"],

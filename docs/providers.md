@@ -87,7 +87,7 @@ For Command Code, set `COMMAND_CODE_API_KEY` or run `/login commandcode`; login 
 
 ### Pinning a key in `models.yml`
 
-A custom provider's `apiKey` is resolved as **environment-variable-name-or-literal**: if the value names an exact-case environment variable with a non-empty value, that value is used; otherwise the string itself is the key. Prefixing the value with `!` runs it as a shell command and uses the trimmed stdout (see [Model and Provider Configuration](./models.md) for the full value syntax).
+A custom provider's `apiKey` is resolved as **environment-variable-name-or-literal**: if the value names an exact-case environment variable with a non-empty value, that value is used; otherwise the string itself is the key. Prefixing the value with `!` runs it as a shell command and uses the trimmed stdout; `apiKey: { file: /absolute/path }` (or `~/…`) reads the trimmed content of a file in-process, re-reading it when the file changes (see [Model and Provider Configuration](./models.md) for the full value syntax).
 
 ```yaml
 # ~/.omp/agent/models.yml

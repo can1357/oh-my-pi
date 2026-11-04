@@ -12,6 +12,7 @@
 
 - Fixed xAI speech requests failing with `422 missing field language`: `xai-tts` now sends `language`, which xAI's `/v1/tts` requires, defaulting to `auto` (automatic detection) when the caller passes none, as the auth gateway's `/v1/audio/speech` does ([#17992](https://github.com/can1357/oh-my-pi/pull/17992) by [@Mirceone](https://github.com/Mirceone))
 - Fixed Codex WebSocket turns sending a delta `input` after a pooled socket reconnected (closed, idle eviction, token refresh, or prewarm routing-hint change) or when `onPayload` deleted `previous_response_id` (including when it also rewrote the input), and skipped late prewarm while a socket is busy or holding accepted steering ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
+- `withAuth` and the stream auth retry no longer hide a `ConfigurationError` raised while resolving a refreshed key (for example an unreadable key file) behind the 401 that triggered the refresh; other refresh failures are still swallowed. When the stream's auth retry ends without another attempt, it re-checks the request's own headers (and its key, when no retry step read one and no OAuth credential sent the attempt) once, so a value that became unusable ends the stream with its `ConfigurationError` instead of the auth or quota failure ([#18026](https://github.com/can1357/oh-my-pi/pull/18026), [#18029](https://github.com/can1357/oh-my-pi/pull/18029) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 

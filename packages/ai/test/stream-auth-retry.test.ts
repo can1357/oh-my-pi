@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { ApiKeyResolution, ApiKeyResolveContext } from "@oh-my-pi/pi-ai";
 import { registerCustomApi, resolveApiKeyOnce, seedApiKeyResolver, unregisterCustomApis } from "@oh-my-pi/pi-ai";
-import { OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { ConfigurationError, OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { classify } from "@oh-my-pi/pi-ai/error/flags";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
@@ -137,6 +137,34 @@ describe("streamSimple resolver auth retry", () => {
 		]);
 		expect(contexts[1]).toBeDefined();
 		expect((contexts[1]!.error as { status?: number }).status).toBe(401);
+	});
+
+	it("ends the stream with a ConfigurationError the refresh step throws, instead of hanging", async () => {
+		const keys: unknown[] = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(authError()));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const refreshFailure = new ConfigurationError("Config value file /run/key could not be read (ENOENT).");
+		const stream = streamSimple(model(), context, {
+			apiKey: async ctx => {
+				if (ctx.error === undefined) return "old-key";
+				throw refreshFailure;
+			},
+		});
+		const drained = (async () => {
+			for await (const _event of stream) {
+				// drain
+			}
+		})();
+		await expect(drained).rejects.toBe(refreshFailure);
+		expect(keys).toEqual(["old-key"]);
 	});
 
 	it("stamps the serving sibling after a 401 rotates away from the signed-in credential", async () => {
@@ -571,6 +599,80 @@ describe("streamSimple resolver auth retry", () => {
 		// The cause carries the original 429 so the resolver can branch usage-limit vs 401.
 		expect((errors[0] as { status?: number }).status).toBe(429);
 		expect((errors[0] as Error).message).toMatch(/usage limit/i);
+	});
+
+	it("does not re-resolve an OAuth credential's key when a usage limit finds no sibling", async () => {
+		const keys: unknown[] = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(usageLimitError()));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const calls: Array<{ lastChance: boolean; hadError: boolean }> = [];
+		const stream = streamSimple(model(), context, {
+			apiKey: async ctx => {
+				calls.push({ lastChance: ctx.lastChance, hadError: ctx.error !== undefined });
+				// The OAuth credential has no sibling: rotation returns nothing.
+				if (ctx.error !== undefined) return undefined;
+				return { apiKey: "oauth-access-token", oauthIdentity: { orgId: "org-1" } };
+			},
+		});
+		const drained = (async () => {
+			for await (const _event of stream) {
+				// drain
+			}
+		})();
+		await expect(drained).rejects.toThrow(/usage limit/i);
+		expect(keys).toEqual(["oauth-access-token"]);
+		// One initial resolution, one rotation attempt; no plain re-resolution that could refresh the token.
+		expect(calls).toEqual([
+			{ lastChance: false, hadError: false },
+			{ lastChance: true, hadError: true },
+		]);
+	});
+
+	it("re-checks the key when a usage limit rotates from an OAuth credential to a configured key and finds no further sibling", async () => {
+		const keys: unknown[] = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(usageLimitError()));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const keyFileGone = new ConfigurationError("Config value file /run/key could not be read (ENOENT).");
+		let plainResolutions = 0;
+		let rotations = 0;
+		const stream = streamSimple(model(), context, {
+			apiKey: async ctx => {
+				if (ctx.error !== undefined) {
+					rotations++;
+					// The first rotation reaches a configured (`{ file }`) key; after it, no sibling is left.
+					return rotations === 1 ? "file-key" : undefined;
+				}
+				plainResolutions++;
+				if (plainResolutions === 1) return { apiKey: "oauth-access-token", oauthIdentity: { orgId: "org-1" } };
+				// The closing re-check resolves the configured key again; its file has gone.
+				throw keyFileGone;
+			},
+		});
+		const drained = (async () => {
+			for await (const _event of stream) {
+				// drain
+			}
+		})();
+		await expect(drained).rejects.toBe(keyFileGone);
+		expect(keys).toEqual(["oauth-access-token", "file-key"]);
+		expect(rotations).toBe(2);
+		expect(plainResolutions).toBe(2);
 	});
 
 	it("retries a usage-limit error event before content", async () => {
