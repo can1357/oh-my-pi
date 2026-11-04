@@ -17,8 +17,8 @@ use super::{
 	CallOutcome, Cx, Kernel, ToolCall, assign_scope,
 	builtins::{self, Chunk, Control, Ctx, Lhs, Need},
 	exec::{self, Flow, expanding, line_of},
-	notify,
 	expand::{CompoundElem, Stop, compound_text},
+	notify,
 	probe::{self, Search, absolute, candidates},
 	proc::{
 		AssignValue, Awaited, BangStage, DeferPhase, ExecAs, ExecState, Frame, FrameKind, JobState,
@@ -408,11 +408,16 @@ fn expand(
 	// (`expand_compound_array_assignment`): reading that text reports the
 	// jobs a signal ended, as reading a line does.
 	if !st(vp).expanded
-		&& (cmd.assigns.iter().any(|a| matches!(a.value, AssignVal::Array(_)))
-			|| unit.lists[cmd.words as usize]
-				.iter()
-				.any(|&w| unit.words[w as usize].parts.iter().any(|p| matches!(p, Part::Compound(_)))))
-	{
+		&& (cmd
+			.assigns
+			.iter()
+			.any(|a| matches!(a.value, AssignVal::Array(_)))
+			|| unit.lists[cmd.words as usize].iter().any(|&w| {
+				unit.words[w as usize]
+					.parts
+					.iter()
+					.any(|p| matches!(p, Part::Compound(_)))
+			})) {
 		if k.needs_settle(vp) {
 			return Some(Flow::Block(WaitKey::Settle));
 		}
@@ -3335,8 +3340,10 @@ fn traps_block_exec(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 	}
 	// `set -E`: the subshell keeps the `ERR` trap it inherited.
 	if state::option(&mut k.root, cx.store, vp, OptId::Errtrace).unwrap_or(false)
-		&& matches!(state::record(cx.store, vp, Key::Trap(TrapKey::Err)), Ok(Some(Record::Trap { .. })))
-	{
+		&& matches!(
+			state::record(cx.store, vp, Key::Trap(TrapKey::Err)),
+			Ok(Some(Record::Trap { .. }))
+		) {
 		return true;
 	}
 	vp.own_traps.signals().iter().any(|sig| {
@@ -3353,7 +3360,11 @@ fn traps_block_exec(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 
 /// The command at `op` has redirections of its own.
 fn has_redirs(unit: &Unit, op: Op) -> bool {
-	op.code == Opcode::Exec && unit.cmds.get(op.a as usize).is_some_and(|c| c.redirs.is_some())
+	op.code == Opcode::Exec
+		&& unit
+			.cmds
+			.get(op.a as usize)
+			.is_some_and(|c| c.redirs.is_some())
 }
 
 /// A compound command node: it holds lists of its own.
@@ -3376,21 +3387,37 @@ const fn compound(kind: NodeKind) -> bool {
 fn tail_command(unit: &Unit, within: Option<u32>, cmd: u32) -> Option<bool> {
 	let nodes = &unit.nodes;
 	let me = nodes.get(cmd as usize)?;
-	let (lo, hi) = within.and_then(|w| nodes.get(w as usize)).map_or((0, u32::MAX), |n| (n.lo, n.hi));
-	let inside = |n: &crate::bash::ir::NodeInfo| lo <= n.lo && n.hi <= hi && (n.lo, n.hi) != (lo, hi);
+	let (lo, hi) = within
+		.and_then(|w| nodes.get(w as usize))
+		.map_or((0, u32::MAX), |n| (n.lo, n.hi));
+	let inside =
+		|n: &crate::bash::ir::NodeInfo| lo <= n.lo && n.hi <= hi && (n.lo, n.hi) != (lo, hi);
 	// Nodes directly in the list: inside `within`, in no compound node that
 	// is itself inside `within`.
 	let direct = |n: &crate::bash::ir::NodeInfo| {
 		inside(n)
-			&& !nodes
-				.iter()
-				.any(|c| compound(c.kind) && inside(c) && c.lo <= n.lo && n.hi <= c.hi && (c.lo, c.hi) != (n.lo, n.hi))
+			&& !nodes.iter().any(|c| {
+				compound(c.kind)
+					&& inside(c)
+					&& c.lo <= n.lo
+					&& n.hi <= c.hi
+					&& (c.lo, c.hi) != (n.lo, n.hi)
+			})
 	};
-	let items: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::AndOr && direct(n)).collect();
+	let items: Vec<_> = nodes
+		.iter()
+		.filter(|n| n.kind == NodeKind::AndOr && direct(n))
+		.collect();
 	let item = items.iter().find(|a| a.lo <= me.lo && me.hi <= a.hi)?;
 	let pipe = nodes
 		.iter()
-		.filter(|p| p.kind == NodeKind::Pipeline && item.lo <= p.lo && p.hi <= item.hi && p.lo <= me.lo && me.hi <= p.hi)
+		.filter(|p| {
+			p.kind == NodeKind::Pipeline
+				&& item.lo <= p.lo
+				&& p.hi <= item.hi
+				&& p.lo <= me.lo
+				&& me.hi <= p.hi
+		})
 		.min_by_key(|p| p.hi - p.lo)?;
 	// One stage (a simple or compound command directly in the pipeline),
 	// and the last pipeline of its item.
@@ -3432,7 +3459,12 @@ fn stands_for_vproc(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, op: Op) -> bool
 	let Some(unit) = frame.unit.as_ref() else {
 		return false;
 	};
-	if frame.scratch.as_ref().and_then(|sc| sc.exec.as_ref()).is_some_and(|e| e.exec_as.is_some()) {
+	if frame
+		.scratch
+		.as_ref()
+		.and_then(|sc| sc.exec.as_ref())
+		.is_some_and(|e| e.exec_as.is_some())
+	{
 		return true;
 	}
 	let last = unit
@@ -3479,13 +3511,19 @@ fn oneshot(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, op: Op) -> bool {
 	let FrameKind::Script { what: ScriptKind::Run, stdin: false, src, pos, .. } = &frame.kind else {
 		return false;
 	};
-	if !src.get(pos.0 as usize..).is_some_and(|rest| rest.iter().all(u8::is_ascii_whitespace)) {
+	if !src
+		.get(pos.0 as usize..)
+		.is_some_and(|rest| rest.iter().all(u8::is_ascii_whitespace))
+	{
 		return false;
 	}
 	let Some(unit) = frame.unit.as_ref() else {
 		return false;
 	};
-	if unit.ops.get(frame.pc as usize + 1).is_none_or(|next| next.code != Opcode::End)
+	if unit
+		.ops
+		.get(frame.pc as usize + 1)
+		.is_none_or(|next| next.code != Opcode::End)
 		|| has_redirs(unit, op)
 		|| tail_command(unit, None, op.node).is_none()
 	{

@@ -17,8 +17,8 @@ use crate::bash::{
 	store::OptId,
 	vm::{
 		exec::push_script,
-		notify,
 		expand::Stop,
+		notify,
 		proc::{JobLookup, JobState, LastBg, ScriptKind},
 		quote,
 	},
@@ -103,7 +103,11 @@ fn print_job(ctx: &mut Ctx<'_, '_>, number: u32, form: Form, show: &Show<'_>) {
 	}
 	if form == Form::Pids {
 		// bash `JLIST_PID_ONLY`: the process group leader, the first stage.
-		let pid = job.stages.as_deref().and_then(|s| s.first()).map_or(job.pid(), |s| s.pid());
+		let pid = job
+			.stages
+			.as_deref()
+			.and_then(|s| s.first())
+			.map_or(job.pid(), |s| s.pid());
 		let line = format!("{pid}\n");
 		ctx.out(line.as_bytes());
 		return;
@@ -133,7 +137,11 @@ fn print_job(ctx: &mut Ctx<'_, '_>, number: u32, form: Form, show: &Show<'_>) {
 		platform:   show.platform,
 		wd:         wd.as_ref().map(|w| w.as_slice()),
 	};
-	let format = if long { notify::Format::Long } else { notify::Format::Standard };
+	let format = if long {
+		notify::Format::Long
+	} else {
+		notify::Format::Standard
+	};
 	notify::print_pipeline(&mut line, &notify::job_procs(job), format, &look);
 	ctx.out(&line);
 	if let Some(job) = ctx.vp.jobs.get_mut(number) {

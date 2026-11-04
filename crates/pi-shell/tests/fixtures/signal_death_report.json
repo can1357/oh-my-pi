@@ -5669,7 +5669,7 @@
 	{
 		"group": "async_signals",
 		"name": "row8",
-		"script": "trap 'echo T' INT; ( trap; sleep .5; echo end ) & wait",
+		"script": "trap 'echo T' INT; ( trap -p INT; sleep .5; echo end ) & wait",
 		"prefix": "line",
 		"status": 0,
 		"output": "trap -- 'echo T' SIGINT\nend\n"

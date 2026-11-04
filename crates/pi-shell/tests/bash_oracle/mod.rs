@@ -31,16 +31,16 @@ use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize)]
 pub struct Row {
 	/// The contract the row belongs to (one test each).
-	pub group:  String,
-	pub name:   String,
-	pub script: String,
+	pub group:     String,
+	pub name:      String,
+	pub script:    String,
 	/// The tool calls the row makes on one shell, when several: Bash runs
 	/// them as one string, one per line.
 	#[serde(default)]
-	pub calls:  Vec<String>,
+	pub calls:     Vec<String>,
 	/// What of Bash's diagnostic prefix the row compares ([`normalize`]).
 	#[serde(default)]
-	pub prefix: Prefix,
+	pub prefix:    Prefix,
 	/// A program this shell runs dies by a signal that dumps core: whether
 	/// the report says `(core dumped)` is the host kernel's call (a
 	/// `core_pattern` pipe to a helper that gives up under load writes
@@ -48,8 +48,8 @@ pub struct Row {
 	/// such row is a program's.
 	#[serde(default)]
 	pub host_core: bool,
-	pub status: i32,
-	pub output: String,
+	pub status:    i32,
+	pub output:    String,
 }
 
 /// What of Bash's `NAME: line N: ` prefix a row compares.
@@ -136,7 +136,10 @@ async fn run_bash(bash: PathBuf, script: &str) -> (Option<i32>, String) {
 			.output()
 			.expect("bash");
 		// A shell a signal ended reads as its status would to a parent shell.
-		let status = output.status.code().or_else(|| output.status.signal().map(|n| 128 + n));
+		let status = output
+			.status
+			.code()
+			.or_else(|| output.status.signal().map(|n| 128 + n));
 		(status, String::from_utf8_lossy(&output.stdout).into_owned())
 	})
 	.await

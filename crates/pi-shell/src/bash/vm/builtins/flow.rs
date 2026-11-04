@@ -725,7 +725,13 @@ fn wait_any(ctx: &mut Ctx<'_, '_>, args: &[BString], into: Option<BString>) -> R
 	let mut list = Vec::new();
 	if args.is_empty() {
 		// bash `wait_for_any_job` passes over foreground jobs.
-		list.extend(ctx.vp.jobs.iter().filter(|j| !j.inherited && !j.foreground).map(|j| j.vpid));
+		list.extend(
+			ctx.vp
+				.jobs
+				.iter()
+				.filter(|j| !j.inherited && !j.foreground)
+				.map(|j| j.vpid),
+		);
 	} else {
 		// bash `check_nonjobs`: a pid no longer in the job table whose
 		// status is kept.

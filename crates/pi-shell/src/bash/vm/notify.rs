@@ -4,8 +4,8 @@
 //! signal ended is reported by its processes' lines on standard error at
 //! bash's notify points, then forgotten:
 //!
-//! - background jobs, at each input line the shell reads ([`notify`] from
-//!   the command reader), when `wait` returns the job, and after `jobs`;
+//! - background jobs, at each input line the shell reads ([`notify`] from the
+//!   command reader), when `wait` returns the job, and after `jobs`;
 //! - a foreground command, when the shell's wait for it ends
 //!   ([`report_foreground`]).
 //!
@@ -87,10 +87,8 @@ pub struct JobLook<'a> {
 
 /// bash `j_strsignal`: the text of signal number `n`.
 pub fn signal_text(n: u8, platform: Platform) -> String {
-	Signal::from_number(n, platform).map_or_else(
-		|| format!("Unknown signal {n}"),
-		|sig| sig.description(platform),
-	)
+	Signal::from_number(n, platform)
+		.map_or_else(|| format!("Unknown signal {n}"), |sig| sig.description(platform))
 }
 
 /// bash `printable_job_status` for one process of a job.
@@ -121,7 +119,12 @@ const fn core(st: ProcStatus) -> bool {
 /// bash `print_pipeline`: the lines of `procs` (in pipeline order) in
 /// `format`, appended to `out`. The caller writes a `jobs` listing's
 /// `[N]+ ` before them.
-pub fn print_pipeline(out: &mut Vec<u8>, procs: &[ProcLine<'_>], format: Format, job: &JobLook<'_>) {
+pub fn print_pipeline(
+	out: &mut Vec<u8>,
+	procs: &[ProcLine<'_>],
+	format: Format,
+	job: &JobLook<'_>,
+) {
 	let Some((first, last)) = procs.first().zip(procs.last()) else {
 		return;
 	};
@@ -147,7 +150,8 @@ pub fn print_pipeline(out: &mut Vec<u8>, procs: &[ProcLine<'_>], format: Format,
 			let show = if long { p } else { last };
 			let mut text = status_text(show.status, job, format);
 			if !is_first
-				&& matches!(show.status, ProcStatus::Running) == matches!(first.status, ProcStatus::Running)
+				&& matches!(show.status, ProcStatus::Running)
+					== matches!(first.status, ProcStatus::Running)
 				&& show.status == first.status
 			{
 				text.clear();
@@ -217,7 +221,9 @@ fn raw_death(job: &Job, pipefail: bool) -> Option<Death> {
 	match job.stages.as_deref() {
 		Some(stages) if !stages.is_empty() => {
 			let raw = if pipefail {
-				stages.iter().rposition(|s| s.status.is_some_and(|st| st != 0))
+				stages
+					.iter()
+					.rposition(|s| s.status.is_some_and(|st| st != 0))
 			} else {
 				None
 			}
@@ -257,7 +263,13 @@ enum Report {
 	None,
 }
 
-fn report_kind(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, death: Death, foreground: bool) -> Report {
+fn report_kind(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	death: Death,
+	foreground: bool,
+) -> Report {
 	let platform = k.engine.config().platform;
 	let is = |sig: Signal| death.signal == sig.number(platform);
 	let silent_name = is(Signal::Int) || is(Signal::Pipe);
@@ -295,12 +307,12 @@ fn job_lines(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, job: &Job, format: For
 	let wd = wd_note(k, cx, vp, &job.wd);
 	let posix = state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false);
 	let look = JobLook {
-		running:    job.state == JobState::Running,
-		stopped:    matches!(job.state, JobState::Stopped(_)),
+		running: job.state == JobState::Running,
+		stopped: matches!(job.state, JobState::Stopped(_)),
 		background: !job.foreground,
 		posix,
-		platform:   k.engine.config().platform,
-		wd:         wd.as_ref().map(|w| w.as_slice()),
+		platform: k.engine.config().platform,
+		wd: wd.as_ref().map(|w| w.as_slice()),
 	};
 	let mut out = Vec::new();
 	print_pipeline(&mut out, &job_procs(job), format, &look);
@@ -447,7 +459,11 @@ pub fn report_foreground(
 		platform: k.engine.config().platform,
 		wd: None,
 	};
-	let mut out = if format == Format::Long { k.line_prefix(vp, line) } else { Vec::new() };
+	let mut out = if format == Format::Long {
+		k.line_prefix(vp, line)
+	} else {
+		Vec::new()
+	};
 	print_pipeline(&mut out, procs, format, &look);
 	out
 }

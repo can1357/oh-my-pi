@@ -1385,7 +1385,8 @@ fn break_loops(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, n: u32, cont: bo
 					.as_ref()
 					.map(|sc| sc.children.iter().map(|&(v, _)| v).collect())
 					.unwrap_or_default();
-				vp.jobs.remove_where(|j| j.foreground && children.contains(&j.vpid));
+				vp.jobs
+					.remove_where(|j| j.foreground && children.contains(&j.vpid));
 			}
 			// The caller's op (`eval`) is abandoned with the loop.
 			clear_scratch(&mut k.root, cx.store, vp);
@@ -1540,7 +1541,9 @@ fn forked_simple(vp: &Vproc) -> bool {
 	if op.code != Opcode::Exec || exit.code != Opcode::SubExit {
 		return false;
 	}
-	let (Some(me), Some(stage)) = (unit.nodes.get(op.node as usize), unit.nodes.get(exit.node as usize)) else {
+	let (Some(me), Some(stage)) =
+		(unit.nodes.get(op.node as usize), unit.nodes.get(exit.node as usize))
+	else {
 		return false;
 	};
 	// A background job's node is its list item: no compound command may
@@ -1550,7 +1553,11 @@ fn forked_simple(vp: &Vproc) -> bool {
 		NodeKind::Pipeline | NodeKind::AndOr => !unit.nodes.iter().any(|n| {
 			!matches!(
 				n.kind,
-				NodeKind::AndOr | NodeKind::Pipeline | NodeKind::Simple | NodeKind::Assign | NodeKind::Word
+				NodeKind::AndOr
+					| NodeKind::Pipeline
+					| NodeKind::Simple
+					| NodeKind::Assign
+					| NodeKind::Word
 			) && stage.lo <= n.lo
 				&& n.hi <= stage.hi
 				&& n.lo <= me.lo
@@ -1669,8 +1676,14 @@ pub fn start_sub(
 		// bash's line count then: the command's line, plus the lines its
 		// text spans and the newline its parse reads after it (not in an
 		// `eval`'d string).
-		let spans = unit.strs.get(t as usize).map_or(0, |s| s.iter().filter(|&&b| b == b'\n').count());
-		let eval = matches!(vp.frames.last().map(|f| &f.kind), Some(FrameKind::Script { what: ScriptKind::Eval, .. }));
+		let spans = unit
+			.strs
+			.get(t as usize)
+			.map_or(0, |s| s.iter().filter(|&&b| b == b'\n').count());
+		let eval = matches!(
+			vp.frames.last().map(|f| &f.kind),
+			Some(FrameKind::Script { what: ScriptKind::Eval, .. })
+		);
 		let at = line + u32::try_from(spans).unwrap_or(0) + u32::from(!eval);
 		notify::notify(k, cx, vp, None, at);
 	}
@@ -3084,7 +3097,10 @@ fn bang_stage(unit: &Unit, entry: u32) -> Option<BangStage> {
 	if code(entry) == Some(Opcode::Exec) && code(entry + 1) == Some(Opcode::SubExit) {
 		return Some(BangStage::Lone);
 	}
-	if let Some(op) = unit.ops.get(entry as usize).filter(|op| op.code == Opcode::Spawn)
+	if let Some(op) = unit
+		.ops
+		.get(entry as usize)
+		.filter(|op| op.code == Opcode::Spawn)
 		&& let Some(spawn) = unit.spawns.get(op.a as usize)
 		&& spawn.kind == SpawnKind::Pipeline
 		&& code(spawn.end) == Some(Opcode::SubExit)
@@ -3131,7 +3147,10 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 		// own) is not just one program: it keeps its virtual pid. A job
 		// that is one pipeline settles on its last stage below.
 		let pipeline_bang = info.kind == SpawnKind::Pipeline
-			&& k.bangs.iter().any(|b| b.vproc == vp.vpid && b.stage == BangStage::Pipeline);
+			&& k
+				.bangs
+				.iter()
+				.any(|b| b.vproc == vp.vpid && b.stage == BangStage::Pipeline);
 		if !k.bangs.is_empty() && !pipeline_bang {
 			k.settle_bang(vp.vpid, None);
 		}
@@ -3178,7 +3197,8 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					// spawns it (bash's subshell `exec`s a lone simple command):
 					// readers of the pid wait for that decision.
 					if let Some(stage) = bang_stage(unit, info.stages[0].entry) {
-						k.bangs.push(Bang { vproc: vpid, job: vpid, stage, virtual_pid: None });
+						k.bangs
+							.push(Bang { vproc: vpid, job: vpid, stage, virtual_pid: None });
 					}
 					let job = k.job_id(cx.store);
 					// zsh `&|` / `&!`: disowned at once (no job entry).
@@ -3228,7 +3248,8 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 									death: None,
 								})
 								.collect();
-							let text = BString::from(bstr::join(" | ", stages.iter().map(|s| s.text.as_slice())));
+							let text =
+								BString::from(bstr::join(" | ", stages.iter().map(|s| s.text.as_slice())));
 							let id = k.job_id(cx.store);
 							let cwd = vp.cwd.clone();
 							let number = vp.jobs.add_foreground(id, last, text, cwd);
@@ -3336,7 +3357,12 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 	// A `lastpipe` job's process a `wait` of the last command collected
 	// already: its job kept its status.
 	if sc.inline.is_some() && sc.children.iter().any(|(_, s)| s.is_none()) {
-		let missing: Vec<Vpid> = sc.children.iter().filter(|(_, s)| s.is_none()).map(|&(v, _)| v).collect();
+		let missing: Vec<Vpid> = sc
+			.children
+			.iter()
+			.filter(|(_, s)| s.is_none())
+			.map(|&(v, _)| v)
+			.collect();
 		let known: Vec<(Vpid, i32, Option<Death>)> = vp
 			.jobs
 			.iter()
@@ -3358,7 +3384,11 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 	if let Some((vpid, _)) = sc.children.iter().find(|(_, s)| s.is_none()) {
 		return Flow::Block(WaitKey::Proc(*vpid));
 	}
-	let children: Vec<(Vpid, i32)> = sc.children.iter().map(|&(v, s)| (v, s.unwrap_or(0))).collect();
+	let children: Vec<(Vpid, i32)> = sc
+		.children
+		.iter()
+		.map(|&(v, s)| (v, s.unwrap_or(0)))
+		.collect();
 	let inline = sc.inline;
 	let mut statuses: Vec<i32> = children.iter().map(|&(_, s)| s).collect();
 	if let Some(InlineStage::Done(last)) = inline {
@@ -3368,7 +3398,10 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 	let pipefail = state::option(&mut k.root, cx.store, vp, OptId::Pipefail).unwrap_or(false);
 	// The process the status comes from (bash `raw_job_exit_status`).
 	let raw = if pipefail {
-		statuses.iter().rposition(|&s| s != 0).unwrap_or(statuses.len().saturating_sub(1))
+		statuses
+			.iter()
+			.rposition(|&s| s != 0)
+			.unwrap_or(statuses.len().saturating_sub(1))
 	} else {
 		statuses.len().saturating_sub(1)
 	};
@@ -3380,7 +3413,10 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 	}
 	// A background job's own pipeline is the shell's to report (`Job::stages`).
 	let job_pipeline = info.kind == SpawnKind::Pipeline && k.pipeline_jobs.remove(&vp.vpid);
-	if inline.is_none() && !job_pipeline && matches!(info.kind, SpawnKind::Subshell | SpawnKind::Pipeline) {
+	if inline.is_none()
+		&& !job_pipeline
+		&& matches!(info.kind, SpawnKind::Subshell | SpawnKind::Pipeline)
+	{
 		report_children(k, vp, cx, unit, op, &children, &deaths, raw);
 	}
 	Flow::Jump(info.end)
@@ -3454,8 +3490,14 @@ fn report_children(
 	if info.kind == SpawnKind::Subshell
 		&& vp.transient
 		&& vp.frames.len() == 1
-		&& unit.ops.get(info.end as usize).is_some_and(|o| o.code == Opcode::Leave)
-		&& unit.ops.get(info.end as usize + 1).is_some_and(|o| o.code == Opcode::SubExit)
+		&& unit
+			.ops
+			.get(info.end as usize)
+			.is_some_and(|o| o.code == Opcode::Leave)
+		&& unit
+			.ops
+			.get(info.end as usize + 1)
+			.is_some_and(|o| o.code == Opcode::SubExit)
 		&& !vp.own_traps.has(TrapKey::Exit)
 		&& !vp.own_traps.has(TrapKey::Err)
 	{
@@ -3465,14 +3507,16 @@ fn report_children(
 	let texts: Vec<BString> = if info.kind == SpawnKind::Subshell {
 		vec![job_text(k, cx, vp, unit, op.node)]
 	} else {
-		(0..children.len()).map(|i| stage_job_text(k, cx, vp, unit, info, i)).collect()
+		(0..children.len())
+			.map(|i| stage_job_text(k, cx, vp, unit, info, i))
+			.collect()
 	};
 	let procs: Vec<notify::ProcLine<'_>> = children
 		.iter()
 		.zip(deaths)
 		.zip(&texts)
 		.map(|((&(v, status), death), text)| notify::ProcLine {
-			pid:    v.0,
+			pid: v.0,
 			text,
 			status: death.map_or(notify::ProcStatus::Exited(status), notify::ProcStatus::Signaled),
 		})
@@ -3553,7 +3597,13 @@ fn node_text(unit: &Unit, node: u32) -> BString {
 /// re-printed by bash's `make_command_string` (`( sleep 2; exit 4 )`, a
 /// `while` body indented on its own lines), or as written when the text
 /// does not parse alone.
-pub(super) fn job_text(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, unit: &Unit, node: u32) -> BString {
+pub(super) fn job_text(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	unit: &Unit,
+	node: u32,
+) -> BString {
 	let src = node_text(unit, node);
 	let feat = features(k, cx.store, vp).unwrap_or(Features::NONE);
 	match crate::bash::syntax::parse_all(&src, feat) {

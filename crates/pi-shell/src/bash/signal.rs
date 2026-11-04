@@ -310,11 +310,16 @@ impl Signal {
 		matches!(
 			self,
 			Self::Quit
-				| Self::Ill | Self::Trap
-				| Self::Abrt | Self::Bus
-				| Self::Fpe | Self::Segv
-				| Self::Sys | Self::Xcpu
-				| Self::Xfsz | Self::Emt
+				| Self::Ill
+				| Self::Trap
+				| Self::Abrt
+				| Self::Bus
+				| Self::Fpe
+				| Self::Segv
+				| Self::Sys
+				| Self::Xcpu
+				| Self::Xfsz
+				| Self::Emt
 		)
 	}
 

@@ -673,7 +673,9 @@ impl Kernel {
 			self.settle_done = None;
 			return false;
 		}
-		vp.jobs.iter().any(|j| !j.inherited && j.state == proc::JobState::Running)
+		vp.jobs
+			.iter()
+			.any(|j| !j.inherited && j.state == proc::JobState::Running)
 	}
 
 	/// The signal that ended finished child vproc `vpid`, if one did; read
@@ -1693,7 +1695,9 @@ impl Shell {
 				self.k.pipeline_jobs.remove(&p.vpid);
 				self.k.async_ignore.remove(&p.vpid);
 				self.k.stage_vprocs.remove(&p.vpid);
-				self.k.proc_exited(cx.store, p.vpid, p.parent, p.status, death);
+				self
+					.k
+					.proc_exited(cx.store, p.vpid, p.parent, p.status, death);
 				self.k.ctl.notify();
 				self.rr = 0;
 				self.reaped(cx, p.parent, p.vpid, p.status, death);
@@ -1718,7 +1722,11 @@ impl Shell {
 		for (stage, pid) in std::mem::take(&mut self.k.stage_pids) {
 			for p in &mut self.procs {
 				for job in &mut p.jobs.list {
-					if let Some(s) = job.stages.as_mut().and_then(|s| s.iter_mut().find(|s| s.vpid == stage)) {
+					if let Some(s) = job
+						.stages
+						.as_mut()
+						.and_then(|s| s.iter_mut().find(|s| s.vpid == stage))
+					{
 						s.os_pid = Some(pid);
 					}
 				}
@@ -1779,7 +1787,11 @@ impl Shell {
 		// A stage of a background pipeline job: the job's record of it.
 		for p in &mut self.procs {
 			for job in &mut p.jobs.list {
-				if let Some(stage) = job.stages.as_mut().and_then(|s| s.iter_mut().find(|s| s.vpid == vpid)) {
+				if let Some(stage) = job
+					.stages
+					.as_mut()
+					.and_then(|s| s.iter_mut().find(|s| s.vpid == vpid))
+				{
 					stage.status = Some(status);
 					stage.death = death;
 				}
@@ -1864,7 +1876,10 @@ impl Shell {
 		let p = &self.procs[i];
 		p.has_work()
 			&& !p.stopped
-			&& p.blocked.as_ref().is_none_or(|b| b.at != wakes && b.key != WaitKey::Settle)
+			&& p
+				.blocked
+				.as_ref()
+				.is_none_or(|b| b.at != wakes && b.key != WaitKey::Settle)
 	}
 
 	/// Whether a vproc still has to take note of a child's end before a
@@ -2050,7 +2065,9 @@ impl Shell {
 			self.k.pipeline_jobs.remove(&p.vpid);
 			self.k.async_ignore.remove(&p.vpid);
 			self.k.stage_vprocs.remove(&p.vpid);
-			self.k.proc_exited(cx.store, p.vpid, p.parent, status, death);
+			self
+				.k
+				.proc_exited(cx.store, p.vpid, p.parent, status, death);
 			self.rr = 0;
 			self.reaped(cx, p.parent, p.vpid, status, death);
 		}
@@ -2116,7 +2133,11 @@ impl Shell {
 			.emit(cx, root, None, EventData::Signal { sig, target });
 		let platform = self.k.engine.config().platform;
 		let job = match target {
-			SigTarget::Job(id) => self.procs.iter().flat_map(|p| p.jobs.iter()).find(|job| job.id == id),
+			SigTarget::Job(id) => self
+				.procs
+				.iter()
+				.flat_map(|p| p.jobs.iter())
+				.find(|job| job.id == id),
 			_ => None,
 		};
 		let job_root = job.map(|job| job.vpid);
@@ -2242,9 +2263,16 @@ impl Shell {
 					// core for (`ulimit -c`) would write one.
 					let core = sig.dumps_core() && {
 						let p = &self.procs[i];
-						let limit = match p.rlimits.iter().find(|(r, ..)| *r == crate::bash::Rlimit::Core) {
+						let limit = match p
+							.rlimits
+							.iter()
+							.find(|(r, ..)| *r == crate::bash::Rlimit::Core)
+						{
 							Some(&(_, soft, _)) => Ok(soft),
-							None => cx.host.rlimit(crate::bash::Rlimit::Core).map(|(soft, _)| soft),
+							None => cx
+								.host
+								.rlimit(crate::bash::Rlimit::Core)
+								.map(|(soft, _)| soft),
 						};
 						limit.is_ok_and(|limit| cx.host.dumps_core(limit))
 					};
@@ -2575,9 +2603,9 @@ fn settling(p: &Box<Vproc>) -> bool {
 /// The external `p` waits for has exited (a peek: the vproc still has to
 /// take note of it).
 fn ext_exited(p: &Vproc) -> bool {
-	p.frames.iter().any(|f| {
-		matches!(f.scratch.as_ref().map(|sc| &sc.live), Some(Live::Ext(ext)) if ext.exited())
-	})
+	p.frames.iter().any(
+		|f| matches!(f.scratch.as_ref().map(|sc| &sc.live), Some(Live::Ext(ext)) if ext.exited()),
+	)
 }
 
 fn set_stopped(p: &mut Vproc, on: bool) {

@@ -482,7 +482,13 @@ impl JobTable {
 
 	/// The status of a forgotten job `$!` named `pid` (bash `bgp_search`).
 	pub fn saved_status(&self, pid: u32) -> Option<i32> {
-		self.saved.as_deref()?.iter().rev().find(|&&(p, _)| p == pid).map(|&(_, s)| s)
+		self
+			.saved
+			.as_deref()?
+			.iter()
+			.rev()
+			.find(|&&(p, _)| p == pid)
+			.map(|&(_, s)| s)
 	}
 
 	fn state(&self, number: Option<u32>) -> Option<JobState> {
@@ -672,11 +678,11 @@ impl LastBg {
 pub struct Bang {
 	/// The vproc that decides: the job's own, or the subshell a callout of
 	/// its lone command handed the job to.
-	pub vproc: Vpid,
+	pub vproc:       Vpid,
 	/// The job's vproc (the one `$!` and the job table name).
-	pub job:   Vpid,
+	pub job:         Vpid,
 	/// What may still give the job its program.
-	pub stage: BangStage,
+	pub stage:       BangStage,
 	/// The pid the job is known by when the deciding vproc spawns no
 	/// program: a background pipeline's last stage's virtual pid (bash's
 	/// `$!` names that stage); `None`: the job's own.
@@ -730,7 +736,10 @@ impl Vproc {
 	/// a `lastpipe` pipeline runs. No job leaves the table then, and none
 	/// is reported.
 	pub fn jobs_frozen(&self) -> bool {
-		self.frames.iter().any(|f| matches!(f.kind, FrameKind::Stage))
+		self
+			.frames
+			.iter()
+			.any(|f| matches!(f.kind, FrameKind::Stage))
 	}
 
 	/// The pid the user knows the child `v` by (`wait -p`): its job's or

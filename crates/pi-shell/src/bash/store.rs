@@ -508,43 +508,43 @@ pub struct Var {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
 	/// Identity in the scheduler and the store key.
-	pub id:        JobId,
+	pub id:         JobId,
 	/// `%n`.
-	pub number:    u32,
+	pub number:     u32,
 	/// The job's root vproc (its process group leader for `jobs -p`, `$!`).
-	pub vpid:      Vpid,
+	pub vpid:       Vpid,
 	/// The command as bash prints it (`jobs`, `fg`, `bg`).
-	pub text:      BString,
+	pub text:       BString,
 	/// State.
-	pub state:     JobState,
+	pub state:      JobState,
 	/// Started while `set -m` was on (bash `J_JOBCONTROL`): only these can
 	/// be moved by `fg`/`bg`.
-	pub control:   bool,
+	pub control:    bool,
 	/// The current state was reported (bash `J_NOTIFIED`): `jobs -n` skips
 	/// the job until its state changes.
-	pub notified:  bool,
+	pub notified:   bool,
 	/// `disown -h`: kept, but marked not to get a `SIGHUP` (bash
 	/// `J_NOHUP`).
-	pub nohup:     bool,
+	pub nohup:      bool,
 	/// Copied from the parent shell into a command substitution (or a
 	/// `jobs` pipeline stage): listed, but not a child of this vproc. Never
 	/// set in the root shell's table.
-	pub inherited: bool,
+	pub inherited:  bool,
 	/// Working directory it started in (`(wd: …)` when it differs).
-	pub wd:        BString,
+	pub wd:         BString,
 	/// The signal that ended the job's process (bash `WIFSIGNALED` of its
 	/// `raw_job_exit_status`): set with [`JobState::Done`] when the job died
 	/// by a signal rather than exiting with a status above 128. A job a
 	/// signal ended is reported by a line at the next notify point (bash
 	/// `notify_of_job_status`).
 	#[serde(default)]
-	pub death:     Option<Death>,
+	pub death:      Option<Death>,
 	/// The processes of a background pipeline, in order (bash's `PROCESS`
 	/// list of the job): each stage's pid, text and how it ended, as
 	/// `jobs -l` and the job's report list them. `None` for a job of one
 	/// process. `$!` names the last stage, `jobs -p` the first.
 	#[serde(default)]
-	pub stages:    Option<Box<Vec<JobStage>>>,
+	pub stages:     Option<Box<Vec<JobStage>>>,
 	/// A foreground job (bash `J_FOREGROUND`): the processes of a
 	/// `lastpipe` pipeline but its last command, or a command its last
 	/// command ran, while the job list is frozen. Never the current job;
@@ -557,7 +557,7 @@ pub struct Job {
 	/// is known by that program's pid (`$!`, `jobs -l`/`-p`; `kill`, `wait`
 	/// and `disown` accept it). `None` for a compound job, a builtin, a
 	/// function, a failed spawn, and while the job has not decided yet.
-	pub os_pid:    Option<u32>,
+	pub os_pid:     Option<u32>,
 }
 
 impl Job {
