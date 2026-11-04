@@ -164,6 +164,12 @@ export interface WriteTextAtomicOptions extends SessionStorageWriteOptions {
 	commitGuard?: () => boolean;
 }
 
+/** One entry directly inside a directory, as {@link SessionStorage.listEntriesSync} reports it. */
+export interface SessionStorageEntry {
+	name: string;
+	isDirectory: boolean;
+}
+
 export interface SessionStorage {
 	/** A worker may use its own file-storage default for these same transcripts; omitted means keep runs inline. */
 	readonly crossesWorkerBoundary?: boolean;
@@ -228,6 +234,18 @@ export interface SessionStorage {
 	 * empty; any other fault throws, as in {@link listFilesSync}.
 	 */
 	listDirsSync(dir: string): string[];
+	/**
+	 * Everything directly inside `dir`, files and directories together, in one
+	 * ordered pass. {@link listFilesSync} and {@link listDirsSync} answer "which
+	 * files" and "which directories"; this answers "in what order", which a walk
+	 * that must prefer whichever of `Worker.jsonl` and `Z/Worker.jsonl` comes
+	 * first needs and cannot reconstruct from two separate listings. A file
+	 * backend reads the directory, so its order and its dotfiles are the
+	 * directory's own; key-indexed backends derive the entries from the keys
+	 * below `dir` and return them in name order. A missing `dir` lists as empty;
+	 * any other fault throws, as in {@link listFilesSync}.
+	 */
+	listEntriesSync(dir: string): SessionStorageEntry[];
 	/**
 	 * Bring the synchronous view ({@link existsSync}, {@link statSync}, the
 	 * listings) up to date with writes other processes made to a shared
@@ -1151,6 +1169,19 @@ export class FileSessionStorage implements SessionStorage {
 		}
 	}
 
+	listEntriesSync(dir: string): SessionStorageEntry[] {
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch (err) {
+			if (isMissingDirectory(err)) return [];
+			throw err;
+		}
+		// The directory's own order, dotfiles included: a walk that reproduces
+		// what a plain readdir walk chose depends on both.
+		return entries.map(entry => ({ name: entry.name, isDirectory: entry.isDirectory() }));
+	}
+
 	listDirsSync(dir: string): string[] {
 		let entries: fs.Dirent[];
 		try {
@@ -1617,6 +1648,37 @@ export function childKeyName(resolvedDir: string, key: string, segments: number)
  * so a directory exists exactly while a key lives below it — which is what
  * makes a subagent tree walkable on those backends.
  */
+/**
+ * Every direct child of `resolvedDir` among `keys`, files and directories
+ * together, in name order. A key exactly one level inside is a file; a key
+ * deeper than that contributes its next segment as a directory. The order is
+ * the backend's contract, not an accident: a walk preferring whichever of
+ * `Worker.jsonl` and `Z/Worker.jsonl` it meets first must be reproducible.
+ */
+export function childEntryNames(resolvedDir: string, keys: Iterable<string>): SessionStorageEntry[] {
+	const entries = new Map<string, boolean>();
+	for (const key of keys) {
+		const name = childKeyName(resolvedDir, key, 1);
+		if (name !== undefined) {
+			entries.set(name, false);
+			continue;
+		}
+		let child = path.dirname(key);
+		let parent = path.dirname(child);
+		while (parent !== child) {
+			if (parent === resolvedDir) {
+				if (!entries.has(path.basename(child))) entries.set(path.basename(child), true);
+				break;
+			}
+			child = parent;
+			parent = path.dirname(child);
+		}
+	}
+	return [...entries]
+		.map(([name, isDirectory]) => ({ name, isDirectory }))
+		.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export function childDirNames(resolvedDir: string, keys: Iterable<string>): string[] {
 	const names = new Set<string>();
 	for (const key of keys) {
@@ -1913,6 +1975,10 @@ export class MemorySessionStorage implements SessionStorage {
 			files.push(key);
 		}
 		return files;
+	}
+
+	listEntriesSync(dir: string): SessionStorageEntry[] {
+		return childEntryNames(path.resolve(dir), this.#files.keys());
 	}
 
 	listDirsSync(dir: string): string[] {

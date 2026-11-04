@@ -30,6 +30,7 @@ import {
 	type SessionStorageWriteOptions,
 	type SessionStorageWriter,
 	type WriteTextAtomicOptions,
+	type SessionStorageEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 /**
@@ -82,6 +83,10 @@ class BackgroundFailureStorage implements SessionStorage {
 	}
 
 	listDirsSync(): string[] {
+		return [];
+	}
+
+	listEntriesSync(): SessionStorageEntry[] {
 		return [];
 	}
 

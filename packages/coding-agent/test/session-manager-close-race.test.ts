@@ -31,6 +31,7 @@ import {
 	type SessionStorage,
 	type SessionStorageWriter,
 	type WriteTextAtomicOptions,
+	type SessionStorageEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import type { SessionTitleUpdate } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
@@ -95,6 +96,9 @@ class CloseHoldingStorage implements SessionStorage {
 	}
 	listDirsSync(dir: string): string[] {
 		return this.#inner.listDirsSync(dir);
+	}
+	listEntriesSync(dir: string): SessionStorageEntry[] {
+		return this.#inner.listEntriesSync(dir);
 	}
 	exists(p: string): Promise<boolean> {
 		return this.#inner.exists(p);

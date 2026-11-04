@@ -133,6 +133,7 @@ import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from
 import { computeDefaultSessionDir } from "./session/session-paths";
 import { FileSessionStorage, setDefaultSessionStorage } from "./session/session-storage";
 import { resolveSessionStorage, SessionStorageConfigError } from "./session/session-storage-config";
+import { takeSessionStorageFallback } from "./session/session-storage-fallback";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
@@ -327,21 +328,29 @@ function rejectNoUiWithoutRpc(args: Pick<Args, "noUi" | "mode">): void {
  * answers `null` for anything it cannot resolve there, so a doubtful launch
  * refuses rather than forks.
  */
-async function resumableFileSessionId(
-	args: Pick<Args, "resume" | "restore" | "continue" | "noSession" | "sessionDir">,
+export async function resumableFileSessionId(
+	parsed: Args,
+	rawArgs: readonly string[] | undefined,
 	cwd: string,
 ): Promise<string | null> {
-	if (args.noSession) return null;
+	if (parsed.noSession) return null;
 	const storage = new FileSessionStorage();
 	try {
+		// `--continue <id>` is still spelled as `continue` plus a positional at
+		// this point; the launch normalizes it into `resume` later. Decide from
+		// the normalized form on a copy, or an unresolvable id would read as
+		// "continue this project's newest session" and fall back naming a
+		// session the user never asked for.
+		const args: Args = { ...parsed, messages: [...parsed.messages], fileArgs: [...parsed.fileArgs] };
+		normalizeContinueSessionArgs(args, rawArgs);
 		const selector = typeof args.restore === "string" ? args.restore : args.resume;
 		if (typeof selector === "string") {
 			const match = await resolveResumableSession(selector, cwd, args.sessionDir, storage);
 			return match?.session.id ?? null;
 		}
-		// `--continue` and the interactive auto-resume both take this project's
-		// most recent session; `--resume` with no value opens the picker, which
-		// lists the same directory.
+		// Bare `--continue` and the interactive auto-resume both take this
+		// project's most recent session; `--resume` with no value opens the
+		// picker, which lists the same directory.
 		if (!args.continue && args.resume !== true) return null;
 		const dir = args.sessionDir ?? computeDefaultSessionDir(cwd, storage);
 		const [newest] = await listSessionsReadOnly(dir, storage);
@@ -2037,13 +2046,23 @@ export async function runRootCommand(
 				await logger.time("resolveSessionStorage", resolveSessionStorage, {
 					settings: settingsInstance,
 					env: process.env,
-					resumableFileSession: () => resumableFileSessionId(parsedArgs, getProjectDir()),
+					resumableFileSession: () => resumableFileSessionId(parsedArgs, rawArgs, getProjectDir()),
 				}),
 			);
 		} catch (error) {
 			if (!(error instanceof SessionStorageConfigError)) throw error;
 			process.stderr.write(`${chalk.red(`Error: ${error.message}`)}\n`);
 			process.exit(1);
+		}
+		// A fallback is a degraded launch, so say so where the user is looking,
+		// not only in the log: the ledger is for the fleet, this line is for the
+		// person whose session just stopped being a database row.
+		const fallback = takeSessionStorageFallback();
+		if (fallback) {
+			writeStartupWarning(
+				`session.storage is sql, but the session database is unusable (${fallback.reason}: ${fallback.dsn_path}); ` +
+					`continuing this resumed session on file storage`,
+			);
 		}
 		if (parsedArgs.approvalMode) {
 			// Runtime override (not persisted): every `tools.approvalMode` read downstream

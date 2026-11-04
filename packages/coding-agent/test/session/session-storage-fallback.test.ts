@@ -13,7 +13,9 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { SQL } from "bun";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resumableFileSessionId } from "@oh-my-pi/pi-coding-agent/main";
 import { registerArtifactsDir, sessionFilesFromDisk } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import { FileSessionStorage, setDefaultSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import {
@@ -27,6 +29,9 @@ import {
 	resetSqlWriteLatchForTest,
 	sqlStoreHasWritten,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage-fallback";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
+import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -171,12 +176,105 @@ describe("sql → file fallback", () => {
 		expect(fs.existsSync(path.dirname(sessionFile))).toBe(false);
 	});
 
-	it("a ledger line stays inside one page even when the connection path is enormous", () => {
-		const line = ledgerLine(fallbackEvent("s".repeat(64), "db-unreachable", "/".repeat(9000)));
-		expect(Buffer.byteLength(line, "utf8")).toBeLessThanOrEqual(4096);
-		expect(line.endsWith("\n")).toBe(true);
-		expect(line.indexOf("\n")).toBe(line.length - 1);
-		expect(JSON.parse(line.trim())).toMatchObject({ reason: "db-unreachable" });
+	it("a ledger line stays inside one page however large its caller-sized fields are", () => {
+		for (const [session, dsn] of [
+			["s".repeat(64), "/".repeat(9000)],
+			["s".repeat(9000), "/tmp/dsn"],
+			["s".repeat(9000), "/".repeat(9000)],
+		]) {
+			const line = ledgerLine(fallbackEvent(session!, "db-unreachable", dsn!));
+			expect(Buffer.byteLength(line, "utf8")).toBeLessThanOrEqual(4096);
+			expect(line.indexOf("\n")).toBe(line.length - 1);
+			expect(JSON.parse(line.trim())).toMatchObject({ reason: "db-unreachable" });
+		}
+	});
+
+	it("a fallback whose ledger cannot be written is not taken", async () => {
+		const { env, ledger } = brokenSqlEnv();
+		// A directory where the ledger file goes: the append can never succeed.
+		fs.mkdirSync(ledger, { recursive: true });
+
+		const error = await rejection(
+			resolveSessionStorage({
+				settings: Settings.isolated(),
+				env,
+				resumableFileSession: async () => "01a1a000-0000-7000-8000-000000000003",
+			}),
+		);
+
+		expect(error.message).toContain(ledger);
+		expect(fs.statSync(ledger).isDirectory()).toBe(true);
+	});
+
+	it("a write committed while the resume probe is awaited stops the fallback", async () => {
+		const { env, ledger } = brokenSqlEnv();
+		const error = await rejection(
+			resolveSessionStorage({
+				settings: Settings.isolated(),
+				env,
+				resumableFileSession: async () => {
+					// The latch is read before and after this await; a write landing
+					// here must still halt the launch.
+					await Bun.sleep(1);
+					noteSqlWriteCommitted();
+					return "01a1a000-0000-7000-8000-000000000004";
+				},
+			}),
+		);
+
+		expect(error).toBeInstanceOf(SessionStorageConfigError);
+		expect(ledgerLines(ledger)).toHaveLength(0);
+	});
+});
+
+describe("which launches may fall back", () => {
+	/** A session file written exactly as `SessionManager.createEmptySessionFile` writes one. */
+	let seq = 0;
+	function writeTranscript(dir: string, cwd: string): string {
+		fs.mkdirSync(dir, { recursive: true });
+		const id = crypto.randomUUID();
+		const timestamp = new Date(Date.UTC(2026, 10, 4) + seq++ * 1000).toISOString();
+		const file = path.join(dir, `${timestamp.replace(/[:.]/g, "-")}_${id}.jsonl`);
+		const header = { type: "session", version: CURRENT_SESSION_VERSION, id, timestamp, cwd: path.resolve(cwd) };
+		new FileSessionStorage().writeTextSync(
+			file,
+			`${serializeTitleSlot({ updatedAt: timestamp })}${JSON.stringify(header)}\n`,
+		);
+		return id;
+	}
+
+	const base = {
+		messages: [] as string[],
+		fileArgs: [] as string[],
+		unrecognizedFlags: [] as string[],
+	} as unknown as Args;
+
+	it("`--continue <id>` that resolves to nothing may not fall back", async () => {
+		const dir = makeTempDir("@pi-session-continue-");
+		writeTranscript(path.join(dir, "sessions"), dir);
+		const unknown = "00000000-0000-7000-8000-000000000000";
+
+		const args: Args = { ...base, continue: true, sessionDir: path.join(dir, "sessions"), messages: [unknown] };
+		expect(await resumableFileSessionId(args, ["--continue", unknown], dir)).toBeNull();
+	});
+
+	it("`--continue <id>` that resolves answers that session, not the newest one", async () => {
+		const dir = makeTempDir("@pi-session-continue-known-");
+		const sessions = path.join(dir, "sessions");
+		const wanted = writeTranscript(sessions, dir);
+		const newer = writeTranscript(sessions, dir);
+		expect(newer).not.toBe(wanted);
+
+		const args: Args = { ...base, continue: true, sessionDir: sessions, messages: [wanted] };
+		expect(await resumableFileSessionId(args, ["--continue", wanted], dir)).toBe(wanted);
+	});
+
+	it("a launch with no session may not fall back", async () => {
+		const dir = makeTempDir("@pi-session-nosession-");
+		const sessions = path.join(dir, "sessions");
+		writeTranscript(sessions, dir);
+		const args: Args = { ...base, continue: true, noSession: true, sessionDir: sessions };
+		expect(await resumableFileSessionId(args, ["--continue"], dir)).toBeNull();
 	});
 });
 
@@ -190,19 +288,34 @@ describe("default file storage keeps main's listing behaviour", () => {
 		expect(listed).toEqual(["2026-11-04T00-00-00-000Z_abc.jsonl"]);
 	});
 
-	it("a dotted agent id resolves to its canonical nested transcript, not a copy beside it", async () => {
+	it("the full transcript walk follows the directory's own order, as a readdir walk did", async () => {
 		const dir = makeTempDir("@pi-session-nested-");
-		fs.mkdirSync(path.join(dir, "A"));
-		const nested = path.join(dir, "A", "A.B.jsonl");
-		fs.writeFileSync(nested, "{}\n");
-		fs.writeFileSync(path.join(dir, "A.B.jsonl"), "{}\n");
+		fs.mkdirSync(path.join(dir, "Z"));
+		fs.writeFileSync(path.join(dir, "Z", "Worker.jsonl"), "{}\n");
+		fs.writeFileSync(path.join(dir, "Worker.jsonl"), "{}\n");
+		fs.writeFileSync(path.join(dir, ".Hidden.jsonl"), "{}\n");
+
+		// What a plain readdir walk — the one this replaced — would have chosen:
+		// entries in the directory's order, descending into each as it is met.
+		const storage = new FileSessionStorage();
+		const entries = storage.listEntriesSync(dir);
+		expect(entries.map(entry => entry.name).sort()).toEqual([".Hidden.jsonl", "Worker.jsonl", "Z"]);
+		let expected: string | undefined;
+		for (const entry of entries) {
+			if (entry.isDirectory) expected ??= path.join(dir, entry.name, "Worker.jsonl");
+			else if (entry.name === "Worker.jsonl") expected ??= path.join(dir, entry.name);
+		}
 
 		const unregister = registerArtifactsDir(dir);
 		try {
-			expect((await sessionFilesFromDisk()).get("A.B")).toBe(nested);
+			const found = await sessionFilesFromDisk();
+			expect(found.get("Worker")).toBe(expected);
+			// A dot-named transcript is still a transcript to this walk, as it was
+			// to readdir; only the session listings hide hidden names.
+			expect(found.get(".Hidden")).toBe(path.join(dir, ".Hidden.jsonl"));
 			// `onlyPreferred` keeps its own rule: a direct transcript wins there.
-			expect((await sessionFilesFromDisk(dir, { onlyPreferred: true })).get("A.B")).toBe(
-				path.join(dir, "A.B.jsonl"),
+			expect((await sessionFilesFromDisk(dir, { onlyPreferred: true })).get("Worker")).toBe(
+				path.join(dir, "Worker.jsonl"),
 			);
 		} finally {
 			unregister();

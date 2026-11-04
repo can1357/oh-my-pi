@@ -3,9 +3,11 @@ import * as path from "node:path";
 import { toError } from "@oh-my-pi/pi-utils";
 import {
 	childDirNames,
+	childEntryNames,
 	childKeyName,
 	SessionWriteConflictError,
 	type SessionStorage,
+	type SessionStorageEntry,
 	type SessionStorageStat,
 	type SessionStorageWriter,
 	type SessionStorageWriteOptions,
@@ -341,6 +343,10 @@ export class IndexedSessionStorage implements SessionStorage {
 			out.push(key);
 		}
 		return out;
+	}
+
+	listEntriesSync(dir: string): SessionStorageEntry[] {
+		return childEntryNames(path.resolve(dir), this.#index.keys());
 	}
 
 	listDirsSync(dir: string): string[] {

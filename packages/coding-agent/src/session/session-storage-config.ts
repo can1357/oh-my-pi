@@ -108,8 +108,21 @@ export async function resolveSessionStorage({
 		};
 		if (resumableFileSession === undefined || sqlStoreHasWritten()) return refuse();
 		const sessionId = await resumableFileSession();
-		if (sessionId === null) return refuse();
-		await recordSessionStorageFallback(fallbackEvent(sessionId, reason, dsnPath), fallbackLedgerPath(settings, env));
+		// Re-read the latch: the probe above awaits, and a write this run
+		// committed meanwhile makes the file store the wrong answer.
+		if (sessionId === null || sqlStoreHasWritten()) return refuse();
+		try {
+			await recordSessionStorageFallback(
+				fallbackEvent(sessionId, reason, dsnPath),
+				fallbackLedgerPath(settings, env),
+			);
+		} catch (ledgerError) {
+			// The count is the control, so a fallback that cannot be recorded is
+			// not taken: refuse, naming both why sql failed and why the record did.
+			throw new SessionStorageConfigError(`${message} (${toError(ledgerError).message})`, {
+				cause: ledgerError,
+			});
+		}
 		return new FileSessionStorage();
 	};
 

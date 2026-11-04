@@ -73,12 +73,15 @@ export function artifactsDirsFromRegistry(options?: { preferredDir?: string }): 
  * resumed session's subagent transcripts are rows, and a directory walk of
  * the artifacts tree finds nothing. When the same id appears in multiple dirs,
  * the first hit wins (registry dirs are scanned first; a `preferredDir` from
- * the caller root is scanned before them). Within one directory the two modes
- * keep the orders they had: `onlyPreferred` records direct files before it
- * descends, so a direct transcript beats a nested same-id copy, while a full
- * walk descends first, so the canonical nested path of a dotted id
- * (`A/A.B.jsonl`) beats a stray copy beside it. `preserveDuplicates` retains
- * every candidate path per id for ambiguity checks.
+ * the caller root is scanned before them). Within one directory both modes
+ * keep the orders they had when this walked the filesystem directly:
+ * `onlyPreferred` records direct files before it descends, so a direct
+ * transcript beats a nested same-id copy, while a full walk takes the
+ * directory's entries in their own order and descends as it meets them, so
+ * whichever of `Worker.jsonl` and `Z/Worker.jsonl` the directory lists first
+ * wins. That order is what `listEntriesSync` exists to carry across the
+ * storage abstraction. `preserveDuplicates` retains every candidate path per
+ * id for ambiguity checks.
  */
 export function sessionFilesFromDisk(
 	preferredDir: string | undefined,
@@ -115,12 +118,21 @@ export async function sessionFilesFromDisk(
 	const scan = (dir: string, depth: number): void => {
 		if (depth > MAX_SCAN_DEPTH || seenDirs.has(dir)) return;
 		seenDirs.add(dir);
-		const descend = (): void => {
-			for (const name of storage.listDirsSync(dir)) scan(path.join(dir, name), depth + 1);
-		};
-		if (!options?.onlyPreferred) descend();
-		for (const file of storage.listFilesSync(dir, "*.jsonl")) recordFile(file);
-		if (options?.onlyPreferred) descend();
+		const entries = storage.listEntriesSync(dir);
+		if (options?.onlyPreferred) {
+			// Prefer a direct transcript over a nested same-id copy.
+			for (const entry of entries) {
+				if (!entry.isDirectory) recordFile(path.join(dir, entry.name));
+			}
+			for (const entry of entries) {
+				if (entry.isDirectory) scan(path.join(dir, entry.name), depth + 1);
+			}
+			return;
+		}
+		for (const entry of entries) {
+			if (entry.isDirectory) scan(path.join(dir, entry.name), depth + 1);
+			else recordFile(path.join(dir, entry.name));
+		}
 	};
 	for (const dir of dirs) scan(dir, 0);
 	return found;
