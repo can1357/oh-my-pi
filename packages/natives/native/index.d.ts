@@ -87,8 +87,8 @@ export declare class DesktopSession {
   retire(): void
   /**
    * Sets when the current run ends, `remaining_ms` from now; each run sets
-   * it before its first call. On macOS, input waiting for the user to pause
-   * in its app gives up shortly before it.
+   * it before its first call. Input waiting for the user to pause in its app
+   * (macOS) or for a Wayland permission prompt gives up shortly before it.
    */
   setRunDeadline(remainingMs: number): void
   capture(target: string, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>

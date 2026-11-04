@@ -1930,9 +1930,8 @@ export class InputController {
 			return;
 		}
 		const didRetry = await this.ctx.viewSession.retry();
-		if (didRetry) {
-			this.ctx.editor.clearDraft();
-		} else {
+		// Composer text is an unsent draft, not the request retry() resends.
+		if (!didRetry) {
 			this.ctx.showStatus("Nothing to retry");
 		}
 	}

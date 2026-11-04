@@ -23,7 +23,7 @@
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { HindsightApi } from "./client";
+import type { HindsightClientApi } from "./client";
 import type { HindsightConfig } from "./config";
 
 const DEFAULT_BANK_NAME = "omp";
@@ -32,6 +32,14 @@ const UNKNOWN_PROJECT = "unknown";
 const MISSION_SET_CAP = 10_000;
 
 export type RecallTagsMatch = "any" | "all" | "any_strict" | "all_strict";
+
+/** Banks already ensured on the server: a `Set<string>`, or a subagent worker's view of main's set. */
+export interface HindsightBankSet extends Iterable<string> {
+	readonly size: number;
+	has(bankId: string): boolean;
+	add(bankId: string): unknown;
+	delete(bankId: string): boolean;
+}
 
 /**
  * Resolved bank target for a session: which bank to talk to, plus optional
@@ -126,10 +134,10 @@ export function deriveBankId(config: HindsightConfig, directory: string): string
  * unboundedly across long-lived processes.
  */
 export async function ensureBankExists(
-	client: HindsightApi,
+	client: HindsightClientApi,
 	bankId: string,
 	config: HindsightConfig,
-	banksSet: Set<string>,
+	banksSet: HindsightBankSet,
 ): Promise<void> {
 	if (banksSet.has(bankId)) return;
 

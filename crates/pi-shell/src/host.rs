@@ -26,10 +26,9 @@ use parking_lot::Mutex;
 
 use crate::{
 	bash::{
-		Deadline, Event, ExitStatus, ExtProc, FdRef, File, FileKind, Fs, IntrinsicId, Invocation, ModeId,
-		NativeRef, OsHandle, ResolveCtx, Resolved, Rlimit, Signal, SpawnFuture, SpawnSpec, StdFd,
-		StdioSpec, SystemTimeLike,
-		Task, Timer, TtyInfo, UserInfo, Verdict,
+		Deadline, Event, ExitStatus, ExtProc, FdRef, File, FileKind, Fs, IntrinsicId, Invocation,
+		ModeId, NativeRef, OsHandle, ResolveCtx, Resolved, Rlimit, Signal, SpawnFuture, SpawnSpec,
+		StdFd, StdioSpec, SystemTimeLike, Task, Timer, TtyInfo, UserInfo, Verdict,
 	},
 	output_decode,
 	sys::{End, Exits, NativeSpawner, OutputDecoding, Relays, Sessions, SpawnConfig, StdFile},

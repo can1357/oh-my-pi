@@ -70,8 +70,9 @@ pub use crate::bash::{
 	fs::{DirEntry, DirIter, File, FileKind, Fs, FsPending, FsPoll, OpenFlags, Stat},
 	host::{
 		ChildRedir, ChildRedirs, CpuTimes, Deadline, EnvView, ExitStatus, ExtProc, Host, Invocation,
-		Lineage, OsHandle, PgroupSpec, PipeMirror, PipeTap, ResolveCtx, Resolved, Rlimit, SpawnFuture,
-		SpawnSpec, StdFd, StdioSpec, SystemTimeLike, Task, Timer, TtyInfo, UserInfo, Verdict, Via,
+		Lineage, OsHandle, PgroupSpec, PipeMirror, PipeTap, ResolveCtx, Resolved, Rlimit,
+		SpawnFuture, SpawnSpec, StdFd, StdioSpec, SystemTimeLike, Task, Timer, TtyInfo, UserInfo,
+		Verdict, Via,
 	},
 	ids::{
 		AstNodeId, CallId, CmdTag, Dialect, IntrinsicId, JobId, ModeId, NativeRef, Platform, RunId,

@@ -340,7 +340,7 @@ fn until_done(r: &mut Rig) -> i32 {
 fn pending_spawn_does_not_block_the_shell_and_resumes_when_answered() {
 	let gate = Arc::new(Mutex::new(Gate::default()));
 	let mut r = Rig::new(gated_host(&gate), skeleton_init(&[]));
-	let (shell, _, _) = r.parts();
+	let (shell, ..) = r.parts();
 	shell.submit(Script::command(b"{ echo bg; } & /x/prog; echo \"status $?\"".as_slice()));
 	until_blocked(&mut r);
 	// The spawn is pending: no process, and the background job ran meanwhile.
@@ -359,7 +359,7 @@ fn pending_spawn_does_not_block_the_shell_and_resumes_when_answered() {
 fn cancel_drops_a_pending_spawn_before_any_process_exists() {
 	let gate = Arc::new(Mutex::new(Gate::default()));
 	let mut r = Rig::new(gated_host(&gate), skeleton_init(&[]));
-	let (shell, _, _) = r.parts();
+	let (shell, ..) = r.parts();
 	shell.submit(Script::command(b"/x/prog; echo after".as_slice()));
 	until_blocked(&mut r);
 	r.shell().control().cancel(Signal::Term);
@@ -378,7 +378,7 @@ fn cancel_drops_a_pending_spawn_before_any_process_exists() {
 fn snapshot_of_a_pending_spawn_reissues_it_without_duplicating_the_process() {
 	let gate = Arc::new(Mutex::new(Gate::default()));
 	let mut r = Rig::new(gated_host(&gate), skeleton_init(&[]));
-	let (shell, _, _) = r.parts();
+	let (shell, ..) = r.parts();
 	shell.submit(Script::command(b"/x/prog; echo \"status $?\"".as_slice()));
 	until_blocked(&mut r);
 	r.snapshot();

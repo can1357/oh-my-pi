@@ -18,7 +18,7 @@ pub(super) struct WordTok {
 	/// bash `quoted`: a quote character or backslash appeared.
 	pub quoted: bool,
 	/// The text is an assignment (bash `assignment()`): how to split it.
-	pub asg:    Option<AsgSplit>,
+	pub asg:    Option<Box<AsgSplit>>,
 }
 
 /// Where an assignment word splits.
@@ -120,23 +120,17 @@ impl WordTok {
 }
 
 /// Join adjacent literal parts.
-pub(super) fn merge_lits(parts: Vec<WordPart>) -> Vec<WordPart> {
-	let mut out: Vec<WordPart> = Vec::with_capacity(parts.len());
-	for p in parts {
-		if let WordPart::Lit(s) = &p
-			&& let Some(WordPart::Lit(prev)) = out.last_mut()
-		{
-			prev.extend_from_slice(s);
-			continue;
+pub(super) fn merge_lits(mut parts: Vec<WordPart>) -> Vec<WordPart> {
+	parts.retain(|part| !matches!(part, WordPart::Lit(s) if s.is_empty()));
+	parts.dedup_by(|next, previous| {
+		if let (WordPart::Lit(next), WordPart::Lit(previous)) = (next, previous) {
+			previous.extend_from_slice(next);
+			true
+		} else {
+			false
 		}
-		if let WordPart::Lit(s) = &p
-			&& s.is_empty()
-		{
-			continue;
-		}
-		out.push(p);
-	}
-	out
+	});
+	parts
 }
 
 /// Accumulates literal bytes and parts.
@@ -268,7 +262,7 @@ impl<'s> Parser<'s> {
 		} else {
 			Scan::Start
 		};
-		let mut split: Option<AsgSplit> = None;
+		let mut split: Option<Box<AsgSplit>> = None;
 		let mut sub: Option<(usize, usize, Span)> = None;
 		let compassign = self.lx.compassign;
 		let mut first = true;
@@ -459,7 +453,7 @@ impl<'s> Parser<'s> {
 							self.bump();
 							s.array = Some(self.compound_assignment()?);
 						}
-						split = Some(s);
+						split = Some(Box::new(s));
 					} else if scan != Scan::Found {
 						scan = Scan::No;
 					}

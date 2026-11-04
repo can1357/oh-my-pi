@@ -400,6 +400,9 @@ fn expand(
 	line: u32,
 ) -> Option<Flow> {
 	let cmd = &unit.cmds[op.a as usize];
+	if !st(vp).expanded && unit.lists[cmd.words as usize].is_empty() {
+		st(vp).expanded = true;
+	}
 	if !st(vp).expanded {
 		let words = &unit.lists[cmd.words as usize];
 		let record = words.iter().any(|&w| unit.words[w as usize].parks);
@@ -1954,11 +1957,7 @@ fn spawned_external(
 			// bash names the file it tried: the PATH (or hash table)
 			// result, a name with `/` as written.
 			let name = st(vp).argv[0].clone();
-			let name = if name.contains(&b'/') {
-				name
-			} else {
-				path
-			};
+			let name = if name.contains(&b'/') { name } else { path };
 			let (diag, status) = spawn_error(name, err);
 			k.diag(cx, vp, line, diag);
 			let s = st(vp);
@@ -2233,8 +2232,15 @@ fn load_body(
 	unit_id: crate::bash::ids::UnitId,
 	mode: crate::bash::ids::ModeId,
 ) -> Result<Option<Arc<Unit>>, StoreError> {
+	if let Some(unit) = k.engine.cached(&unit_id) {
+		return Ok(Some(unit));
+	}
+	k.clock_stale();
 	match super::frames::load_unit(&k.engine, cx.store, unit_id) {
-		Ok(u) => return Ok(Some(u)),
+		Ok(u) => {
+			exec::announce(k, cx, vp.vpid, vp.runs.front(), &u, u.line);
+			return Ok(Some(u));
+		},
 		Err(crate::bash::RestoreError::Store(err)) => return Err(err),
 		// Missing or unusable blob: fall back to the canonical text.
 		Err(_) => {},

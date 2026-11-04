@@ -38,7 +38,14 @@ use crate::bash::{
 
 /// `Fs` over the host filesystem.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct StdFs;
+pub struct StdFs {
+	/// The process's file-creation mask, when nothing changes it while this
+	/// filesystem is in use (obash reads it once at startup; an embedding
+	/// process may change its mask at any time and leaves this `None`). A
+	/// create whose mode the mask leaves intact then takes a single `open`
+	/// instead of an exclusive-create probe first ([`create_with_mode`]).
+	pub umask: Option<u32>,
+}
 
 /// A host file, pipe or terminal as an engine [`File`].
 #[derive(Debug)]
@@ -67,13 +74,17 @@ impl StdFile {
 		expect(clippy::missing_const_for_fn, reason = "reads the access mode with fcntl on Unix")
 	)]
 	fn with_kind(file: fs::File, kind: FileKind) -> Self {
+		// Only a descriptor that waits for readiness consults its access
+		// mode ([`Self::gated`]); a regular file or device skips the `fcntl`.
 		#[cfg(unix)]
-		let access = {
-			use std::os::fd::AsRawFd;
-			// SAFETY: F_GETFL only reads the flags of our open descriptor.
-			let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
-			(flags >= 0).then_some(flags & libc::O_ACCMODE)
-		};
+		let access = waits(kind)
+			.then(|| {
+				use std::os::fd::AsRawFd;
+				// SAFETY: F_GETFL only reads the flags of our open descriptor.
+				let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+				(flags >= 0).then_some(flags & libc::O_ACCMODE)
+			})
+			.flatten();
 		Self {
 			file,
 			kind,
@@ -98,7 +109,7 @@ impl StdFile {
 		let allowed = self
 			.access
 			.is_none_or(|acc| acc == libc::O_RDWR || acc == wanted);
-		allowed && matches!(self.kind, FileKind::Pipe | FileKind::Socket | FileKind::Tty)
+		allowed && waits(self.kind)
 	}
 
 	/// `Ready` when `events` are ready now; else registers `cx`'s waker.
@@ -159,16 +170,30 @@ impl StdFile {
 	}
 }
 
+/// Whether I/O on a descriptor of `kind` waits for readiness instead of
+/// blocking ([`StdFile::gated`]).
+#[cfg(unix)]
+const fn waits(kind: FileKind) -> bool {
+	matches!(kind, FileKind::Pipe | FileKind::Socket | FileKind::Tty)
+}
+
+/// Only a character device (or a handle `fstat` cannot read) can be a
+/// terminal, so a regular file, pipe or socket costs one `fstat` and no
+/// terminal probe.
 fn classify(file: &fs::File) -> FileKind {
-	if file.is_terminal() {
-		return FileKind::Tty;
-	}
 	let Ok(meta) = file.metadata() else {
-		return FileKind::Device;
+		return if file.is_terminal() {
+			FileKind::Tty
+		} else {
+			FileKind::Device
+		};
 	};
 	let ft = meta.file_type();
 	if ft.is_file() {
 		return FileKind::Regular;
+	}
+	if file.is_terminal() {
+		return FileKind::Tty;
 	}
 	#[cfg(unix)]
 	{
@@ -364,25 +389,32 @@ fn stat_of(meta: &fs::Metadata) -> Stat {
 	}
 }
 
-fn open(path: &BStr, flags: OpenFlags, mode: u32) -> io::Result<Box<dyn File>> {
+fn open(path: &BStr, flags: OpenFlags, mode: u32, umask: Option<u32>) -> io::Result<Box<dyn File>> {
 	#[cfg(windows)]
 	if let Some(server) = pipe::take(path, flags) {
-		return Ok(server);
+		return server;
 	}
 	let path = host_path(path)?;
-	Ok(Box::new(StdFile::new(create_with_mode(path, flags, mode)?)))
+	Ok(Box::new(StdFile::new(create_with_mode(path, flags, mode, umask)?)))
 }
 
 /// Opens `path`, giving a file the open creates exactly `mode`.
 ///
 /// The engine passes `0o666 & !umask` with the shell's own umask, but the
-/// kernel still applies the process umask on creation, so a looser shell mask
-/// (`umask 000`) would lose the bits the process mask clears. Only an
-/// exclusive create proves the file is new (an existing file keeps its mode),
-/// so a plain `O_CREAT` open tries one first and falls back on `EEXIST`.
-fn create_with_mode(path: &std::path::Path, flags: OpenFlags, mode: u32) -> io::Result<fs::File> {
+/// kernel still applies the process umask (`process_umask`) on creation, so
+/// a looser shell mask (`umask 000`) would lose the bits the process mask
+/// clears. When the process mask is known and clears none of `mode`, a plain
+/// open already creates exactly `mode`. Otherwise only an exclusive create
+/// proves the file is new (an existing file keeps its mode), so a plain
+/// `O_CREAT` open tries one first and falls back on `EEXIST`.
+fn create_with_mode(
+	path: &std::path::Path,
+	flags: OpenFlags,
+	mode: u32,
+	process_umask: Option<u32>,
+) -> io::Result<fs::File> {
 	#[cfg(unix)]
-	if flags.contains(OpenFlags::CREATE) {
+	if flags.contains(OpenFlags::CREATE) && process_umask.is_none_or(|mask| mode & mask != 0) {
 		use std::os::unix::fs::PermissionsExt as _;
 		let mut exclusive = options(flags, mode);
 		exclusive.create_new(true);
@@ -644,34 +676,38 @@ fn chdir_check(path: &BStr) -> io::Result<()> {
 /// [`pipe::create`] makes the server end and parks it; the producer side of
 /// the substitution takes it with [`Fs::open`] in its direction (write for
 /// `<( )`, read for `>( )`), the consumer opens the path as a client. The
-/// server connects lazily on first I/O, and reports no OS handle, so an
-/// external producer is fed through a pump that waits for the consumer.
+/// server end is overlapped ([`OsPipe::server`](crate::sys::pump::os::OsPipe)):
+/// it connects on first I/O, which stays `Pending` until the consumer has
+/// opened the path, and its reads and writes never wait either. It reports
+/// no OS handle, so an external producer is fed through a pump.
 #[cfg(windows)]
 mod pipe {
 	use std::{
 		collections::HashMap,
-		fs,
-		io::{self, Read, Write},
-		os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+		io,
+		os::windows::io::{FromRawHandle, OwnedHandle},
 		ptr,
-		sync::LazyLock,
+		sync::{Arc, LazyLock},
 		task::{Context, Poll},
 	};
 
 	use bstr::{BStr, BString};
 	use parking_lot::Mutex;
 	use windows_sys::Win32::{
-		Foundation::{ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE},
 		Storage::FileSystem::{
-			FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND,
+			FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_INBOUND,
+			PIPE_ACCESS_OUTBOUND,
 		},
 		System::Pipes::{
-			ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-			PIPE_TYPE_BYTE, PIPE_WAIT,
+			CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+			PIPE_WAIT,
 		},
 	};
 
-	use crate::bash::{File, FileKind, OpenFlags, OsHandle, fs::TempNode};
+	use crate::{
+		bash::{File, FileKind, OpenFlags, OsHandle, fs::TempNode},
+		sys::pump::os::OsPipe,
+	};
 
 	/// Server ends not yet taken, by path; `true` when the server writes.
 	static PENDING: LazyLock<Mutex<HashMap<BString, (OwnedHandle, bool)>>> =
@@ -693,7 +729,7 @@ mod pipe {
 		let h = unsafe {
 			CreateNamedPipeW(
 				wide.as_ptr(),
-				access | FILE_FLAG_FIRST_PIPE_INSTANCE,
+				access | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
 				PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
 				1,
 				BUF,
@@ -714,58 +750,63 @@ mod pipe {
 
 	/// The parked server end of `path`, when `flags` open it in the server's
 	/// direction; `None` leaves the open to the client path.
-	pub fn take(path: &BStr, flags: OpenFlags) -> Option<Box<dyn File>> {
+	pub fn take(path: &BStr, flags: OpenFlags) -> Option<io::Result<Box<dyn File>>> {
 		let mut pending = PENDING.lock();
 		let &(_, writes) = pending.get(path)?;
 		if flags.contains(OpenFlags::WRITE) != writes {
 			return None;
 		}
 		let (h, _) = pending.remove(path)?;
-		Some(Box::new(Server { file: fs::File::from(h), connected: false }))
+		Some(OsPipe::server(h).map(|pipe| {
+			Box::new(Server(Arc::new(Mutex::new(ServerEnd { pipe, connected: false }))))
+				as Box<dyn File>
+		}))
 	}
 
-	/// Server end of a substitution pipe.
-	struct Server {
-		file:      fs::File,
+	/// Server end of a substitution pipe. Duplicates share it, as the
+	/// duplicates of one open file do.
+	struct Server(Arc<Mutex<ServerEnd>>);
+
+	struct ServerEnd {
+		pipe:      OsPipe,
 		connected: bool,
 	}
 
-	impl Server {
-		/// Wait for the consumer (blocking, like opening a FIFO).
-		fn connect(&mut self) -> io::Result<()> {
-			if self.connected {
-				return Ok(());
+	impl ServerEnd {
+		/// Ready once the consumer has connected (`Pending` until it opens
+		/// the path, like opening a FIFO, without waiting).
+		fn poll_connected(&mut self, cx: &Context<'_>) -> Poll<io::Result<()>> {
+			if !self.connected {
+				std::task::ready!(self.pipe.poll_connect(cx))?;
+				self.connected = true;
 			}
-			// SAFETY: our pipe handle; null overlapped = synchronous.
-			let ok = unsafe { ConnectNamedPipe(self.file.as_raw_handle() as HANDLE, ptr::null_mut()) };
-			if ok == 0 {
-				let e = io::Error::last_os_error();
-				// Connected before we asked, or connected and already gone (the
-				// I/O then reports end of file / a broken pipe).
-				let done = [ERROR_PIPE_CONNECTED, ERROR_NO_DATA].map(|c| Some(c as i32));
-				if !done.contains(&e.raw_os_error()) {
-					return Err(e);
-				}
-			}
-			self.connected = true;
-			Ok(())
+			Poll::Ready(Ok(()))
 		}
 	}
 
 	impl File for Server {
-		fn poll_read(&mut self, _cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
-			Poll::Ready(self.connect().and_then(|()| match self.file.read(buf) {
-				Err(e) if e.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) => Ok(0),
-				r => r,
-			}))
+		fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+			let mut end = self.0.lock();
+			if let Err(e) = std::task::ready!(end.poll_connected(cx)) {
+				return Poll::Ready(Err(e));
+			}
+			end.pipe.poll_read(cx, buf)
 		}
 
-		fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-			Poll::Ready(self.connect().and_then(|()| self.file.write(buf)))
+		fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+			let mut end = self.0.lock();
+			if let Err(e) = std::task::ready!(end.poll_connected(cx)) {
+				return Poll::Ready(Err(e));
+			}
+			end.pipe.poll_write(cx, buf)
 		}
 
-		fn poll_flush(&mut self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-			Poll::Ready(self.file.flush())
+		fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+			let mut end = self.0.lock();
+			if !end.connected {
+				return Poll::Ready(Ok(()));
+			}
+			end.pipe.poll_flush(cx)
 		}
 
 		fn seek(&mut self, _pos: io::SeekFrom) -> io::Result<u64> {
@@ -782,7 +823,7 @@ mod pipe {
 		}
 
 		fn dup(&self) -> io::Result<Box<dyn File>> {
-			Ok(Box::new(Self { file: self.file.try_clone()?, connected: self.connected }))
+			Ok(Box::new(Self(Arc::clone(&self.0))))
 		}
 	}
 }
@@ -793,7 +834,7 @@ impl Fs for StdFs {
 		if let Some(pending) = fifo::pending(path, flags, mode) {
 			return FsPoll::Pending(pending);
 		}
-		FsPoll::Ready(open(path, flags, mode))
+		FsPoll::Ready(open(path, flags, mode, self.umask))
 	}
 
 	fn stat(&mut self, path: &BStr, follow: bool) -> FsPoll<Stat> {
@@ -857,7 +898,7 @@ mod tests {
 	#[test]
 	fn stat_and_access_distinguish_files_dirs_and_missing_paths() {
 		let dir = std::env::temp_dir();
-		let mut fs = StdFs;
+		let mut fs = StdFs::default();
 		let dir_bytes = engine_path(&dir);
 		assert_eq!(ready(fs.stat(dir_bytes.as_bstr(), true)).unwrap().kind, StatKind::Dir);
 		let missing = ready(fs.stat(b"/definitely/not/here".as_bstr(), true)).unwrap_err();
@@ -887,7 +928,8 @@ mod tests {
 		}
 
 		fn fifo() -> BString {
-			let node = ready(StdFs.mkfifo_or_temp(TempPurpose::ProcSub { output: false })).unwrap();
+			let node =
+				ready(StdFs::default().mkfifo_or_temp(TempPurpose::ProcSub { output: false })).unwrap();
 			assert!(node.fifo);
 			node.path
 		}
@@ -915,7 +957,7 @@ mod tests {
 		#[test]
 		fn reading_a_fifo_is_pending_until_a_writer_opens() {
 			let path = fifo();
-			let mut p = pending(StdFs.open(path.as_bstr(), OpenFlags::READ, 0));
+			let mut p = pending(StdFs::default().open(path.as_bstr(), OpenFlags::READ, 0));
 			let host = host_path(&path).unwrap().to_path_buf();
 			let writer = thread::spawn(move || {
 				thread::sleep(Duration::from_millis(50));
@@ -941,7 +983,7 @@ mod tests {
 		#[test]
 		fn writing_a_fifo_is_pending_until_a_reader_opens() {
 			let path = fifo();
-			let mut p = pending(StdFs.open(path.as_bstr(), OpenFlags::WRITE, 0));
+			let mut p = pending(StdFs::default().open(path.as_bstr(), OpenFlags::WRITE, 0));
 			let host = host_path(&path).unwrap().to_path_buf();
 			let reader = thread::spawn(move || {
 				let mut s = String::new();
@@ -966,8 +1008,8 @@ mod tests {
 		#[test]
 		fn both_ends_of_a_fifo_on_one_thread_never_block() {
 			let path = fifo();
-			let mut r = pending(StdFs.open(path.as_bstr(), OpenFlags::READ, 0));
-			let mut w = pending(StdFs.open(path.as_bstr(), OpenFlags::WRITE, 0));
+			let mut r = pending(StdFs::default().open(path.as_bstr(), OpenFlags::READ, 0));
+			let mut w = pending(StdFs::default().open(path.as_bstr(), OpenFlags::WRITE, 0));
 			let mut reader = finish(&mut r);
 			let mut writer = finish(&mut w);
 			assert_eq!(reader.kind(), FileKind::Pipe);
@@ -1109,7 +1151,7 @@ mod tests {
 		fn dropping_a_pending_fifo_open_releases_the_helper() {
 			let path = fifo();
 			let host = host_path(&path).unwrap().to_path_buf();
-			let p = pending(StdFs.open(path.as_bstr(), OpenFlags::READ, 0));
+			let p = pending(StdFs::default().open(path.as_bstr(), OpenFlags::READ, 0));
 			drop(p);
 			// Once the helper's read end is closed, no reader is left: a
 			// non-blocking write open fails with ENXIO.
@@ -1132,17 +1174,20 @@ mod tests {
 		fn read_write_fifo_opens_and_regular_files_stay_ready() {
 			let path = fifo();
 			let both = OpenFlags::READ.with(OpenFlags::WRITE);
-			assert!(ready(StdFs.open(path.as_bstr(), both, 0)).is_ok(), "O_RDWR never blocks");
+			assert!(
+				ready(StdFs::default().open(path.as_bstr(), both, 0)).is_ok(),
+				"O_RDWR never blocks"
+			);
 			fs::remove_file(host_path(&path).unwrap()).unwrap();
-			let node = ready(StdFs.mkfifo_or_temp(TempPurpose::HereDoc)).unwrap();
-			assert!(ready(StdFs.open(node.path.as_bstr(), OpenFlags::READ, 0)).is_ok());
+			let node = ready(StdFs::default().mkfifo_or_temp(TempPurpose::HereDoc)).unwrap();
+			assert!(ready(StdFs::default().open(node.path.as_bstr(), OpenFlags::READ, 0)).is_ok());
 			fs::remove_file(host_path(&node.path).unwrap()).unwrap();
 		}
 	}
 
 	#[test]
 	fn exclusive_open_refuses_an_existing_file() {
-		let mut fs = StdFs;
+		let mut fs = StdFs::default();
 		let node = ready(fs.mkfifo_or_temp(TempPurpose::HereDoc)).unwrap();
 		assert!(!node.fifo);
 		let flags = OpenFlags::WRITE

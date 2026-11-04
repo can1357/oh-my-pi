@@ -33,8 +33,8 @@ use crate::{
 	bash::{
 		Budget, CallOutcome, Cx, Deadline, Event, ExitStatus, ExtProc, File, FileKind, Fs,
 		IntrinsicId, Invocation, ModeId, NativeRef, OsHandle, PipeTap, ResolveCtx, Resolved, Shell,
-		ShellApi, Signal, SpawnFuture, SpawnSpec, StateStore, StdFd, Step, SystemTimeLike, Task, Timer,
-		ToolRef, TtyInfo, UserInfo, Verdict, fs::SeekFrom,
+		ShellApi, Signal, SpawnFuture, SpawnSpec, StateStore, StdFd, Step, SystemTimeLike, Task,
+		Timer, ToolRef, TtyInfo, UserInfo, Verdict, fs::SeekFrom,
 	},
 	testkit::{memfs::MemFs, rng::Rng},
 };

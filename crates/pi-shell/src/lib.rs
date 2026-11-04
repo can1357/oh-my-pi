@@ -10,10 +10,10 @@
 //!   `std::fs` filesystem, readiness, parking).
 //! - pi's host: [`vfs::VfsFs`] (the engine's filesystem over `pi-vfs`),
 //!   [`host::PiHost`], [`session::Session`] (a persistent shell driven by a
-//!   task on the caller's runtime), [`tools`] (`timeout`, `nohup`, `git` and the
-//!   command-running extras as host callouts), [`extras`] (pi's utilities from
-//!   `pi-builtins` as engine commands) and [`git`] (the guard and in-process
-//!   worktree layers).
+//!   task on the caller's runtime), [`tools`] (`timeout`, `nohup`, `git` and
+//!   the command-running extras as host callouts), [`extras`] (pi's utilities
+//!   from `pi-builtins` as engine commands) and [`git`] (the guard and
+//!   in-process worktree layers).
 //! - The API pi-natives uses: [`Shell`], [`execute_shell`],
 //!   [`execute_shell_streams`], [`minimizer`], [`taps`], [`cancel`],
 //!   [`process`].

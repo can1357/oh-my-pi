@@ -81,6 +81,19 @@ export class IrcBridge {
 		);
 	}
 
+	/** Distinct senders with an IRC message still queued for a turn yet to run (see {@link hasQueuedFrom}). */
+	queuedSenders(): string[] {
+		const senders = new Set<string>();
+		for (const queue of [this.#interrupts, this.#asides, this.#deferredWakes]) {
+			for (const record of queue) {
+				if (record.role !== "custom" || record.customType !== "irc:incoming" || !isRecord(record.details)) continue;
+				const from = record.details.from;
+				if (typeof from === "string") senders.add(from);
+			}
+		}
+		return [...senders];
+	}
+
 	/** Waits until every in-flight wake-turn relay has settled. */
 	async waitForReplies(): Promise<void> {
 		while (this.#pendingReplies.size > 0) {

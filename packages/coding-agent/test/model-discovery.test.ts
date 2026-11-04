@@ -26,7 +26,7 @@ import {
 	discoverOpenAIModelsList,
 	discoveryProbeTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
-import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { kNoAuth, ModelRegistry, type ModelRegistryOwner } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resolveCliModel } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -389,6 +389,56 @@ describe("ModelRegistry runtime discovery", () => {
 		touch();
 		expect(await registry.reloadIfConfigChanged()).toBe(true);
 		expect(longRetention()).toBe(false);
+	});
+
+	test("a worker mirror's reloadIfConfigChanged reloads on the owner, which pushes the rebuilt catalog to the mirror", async () => {
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				apiKey: "TEST_KEY",
+				api: "anthropic-messages",
+				models: [{ id: "claude-gateway", reasoning: false, input: ["text"] }],
+			},
+		});
+		const owner = new ModelRegistry(authStorage, modelsJsonPath);
+		// The owner surface the worker bridge serves (thread/services/auth.ts); only the reload is exercised.
+		const ownerSurface = {
+			reloadIfConfigChanged: () => owner.reloadIfConfigChanged(),
+		} as unknown as ModelRegistryOwner;
+		const mirror = new ModelRegistry(authStorage, modelsJsonPath, { owner: ownerSurface });
+		const subscription = owner.subscribeMirror(batch => mirror.applyMirrorBatch(batch));
+		mirror.applyMirrorBatch(subscription.snapshot);
+		const longRetention = () =>
+			(mirror.find("gateway", "claude-gateway")?.compat as { supportsLongCacheRetention?: boolean } | undefined)
+				?.supportsLongCacheRetention;
+		try {
+			const startGeneration = mirror.configGeneration;
+			expect(longRetention()).toBe(false);
+
+			writeRawModelsJson({
+				gateway: {
+					baseUrl: "http://127.0.0.1:9991",
+					apiKey: "TEST_KEY",
+					api: "anthropic-messages",
+					compat: { supportsLongCacheRetention: true },
+					models: [{ id: "claude-gateway", reasoning: false, input: ["text"] }],
+				},
+			});
+			const next = new Date(fs.statSync(modelsJsonPath).mtimeMs + 1_000);
+			fs.utimesSync(modelsJsonPath, next, next);
+			expect(await mirror.reloadIfConfigChanged()).toBe(true);
+			// The owner flushes its change batch on a microtask; the bridge delivers it before answering.
+			await Bun.sleep(0);
+			expect(longRetention()).toBe(true);
+			expect(mirror.configGeneration).toBeGreaterThan(startGeneration);
+			// The reload ran on the owner, so main and every other mirror see the edit too.
+			expect(
+				(owner.find("gateway", "claude-gateway")?.compat as { supportsLongCacheRetention?: boolean } | undefined)
+					?.supportsLongCacheRetention,
+			).toBe(true);
+		} finally {
+			subscription.unsubscribe();
+		}
 	});
 
 	test("refreshProvider online refreshes expired anthropic OAuth before model discovery", async () => {

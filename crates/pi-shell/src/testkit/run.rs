@@ -9,6 +9,7 @@ use std::{
 
 use crate::{
 	bash::{Budget, ControlHandle, Cx, RunId, Shell, StateStore, Step},
+	sys::NativeSpawner,
 	testkit::host::FakeHost,
 };
 
@@ -104,7 +105,11 @@ impl Wake for Unpark {
 pub fn wait_runnable(ctl: &ControlHandle) {
 	let waker = Waker::from(Arc::new(Unpark(thread::current())));
 	let mut cx = Context::from_waker(&waker);
-	while ctl.poll_runnable(&mut cx).is_pending() {
+	loop {
+		NativeSpawner::poll_orphans(&cx);
+		if ctl.poll_runnable(&mut cx).is_ready() {
+			break;
+		}
 		thread::park_timeout(Duration::from_millis(50));
 	}
 }

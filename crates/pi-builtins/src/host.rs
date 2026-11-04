@@ -55,8 +55,10 @@ use parking_lot::Mutex;
 use pi_vfs::{BlockingFs, Metadata, absolute_path};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(unix)]
+use crate::openfile::DescriptorPath;
 use crate::{
-	openfile::{self, DescriptorPath, Fd, OpenFile},
+	openfile::{self, Fd, OpenFile},
 	stdio::{AsyncOut, Source},
 };
 

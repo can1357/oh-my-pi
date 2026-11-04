@@ -658,6 +658,31 @@ fn dropped_detached_external_runs_on_and_is_no_leftover() {
 	until("reaped after its exit", || proc::info(pid).is_none());
 }
 
+/// The shell tears down while a detached external runs: its `ExtProc` is
+/// dropped, but what it writes after that still reaches the engine object,
+/// as a pipe would carry it, and its end of file completes the work. With no
+/// runtime, the retained output work advances whenever anyone polls it:
+/// here a drive loop before it parks (as a `Parker` does).
+#[test]
+fn output_written_after_the_extproc_is_dropped_still_arrives() {
+	let env = EnvView::default();
+	let s = NativeSpawner::default();
+	let out = MemFile::default();
+	let a = sh("/bin/sleep 0.3; echo late");
+	let mut sp = spec(&a, &env, NEW);
+	sp.stdio = [StdioSpec::Null, out.boxed(), StdioSpec::Null];
+	sp.lineage = crate::bash::Lineage { label: 0, detached: true };
+	drop(s.spawn(sp).unwrap());
+	let waker = Waker::from(Arc::new(Unpark(thread::current())));
+	let cx = Context::from_waker(&waker);
+	let deadline = Instant::now() + LONG;
+	while out.captured() != b"late\n" {
+		assert!(Instant::now() < deadline, "late output lost: {:?}", out.captured());
+		NativeSpawner::poll_orphans(&cx);
+		thread::park_timeout(Duration::from_millis(50));
+	}
+}
+
 #[test]
 fn abandoned_external_is_killed_after_a_short_grace() {
 	let grace = Duration::from_millis(300);
@@ -833,7 +858,10 @@ impl File for Trickle {
 	}
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-		if self.full.fetch_xor(true, std::sync::atomic::Ordering::SeqCst) {
+		if self
+			.full
+			.fetch_xor(true, std::sync::atomic::Ordering::SeqCst)
+		{
 			cx.waker().wake_by_ref();
 			return Poll::Pending;
 		}
@@ -876,7 +904,11 @@ fn large_output_crosses_a_slow_engine_sink_intact() {
 	sp.stdio = [StdioSpec::Null, StdioSpec::File(Box::new(sink.clone())), StdioSpec::Null];
 	let mut p = s.spawn(sp).unwrap();
 	assert_eq!(wait(&mut p), ExitStatus::Exited(0));
-	let expected: String = (1..=200_000).map(|i| format!("{i}\n")).collect();
+	let expected = (1..=200_000).fold(String::new(), |mut all, i| {
+		use std::fmt::Write as _;
+		let _ = writeln!(all, "{i}");
+		all
+	});
 	assert!(*sink.output.lock() == expected.as_bytes(), "output lost, doubled or reordered");
 }
 
@@ -922,7 +954,10 @@ impl File for Silent {
 #[test]
 fn input_waiting_for_engine_bytes_is_dropped_with_the_child() {
 	let env = EnvView::default();
-	let s = NativeSpawner::new(SpawnConfig { grace: Duration::from_millis(300), ..SpawnConfig::default() });
+	let s = NativeSpawner::new(SpawnConfig {
+		grace: Duration::from_millis(300),
+		..SpawnConfig::default()
+	});
 	let silent = Silent::default();
 	let a = sh("exit 3");
 	let mut sp = spec(&a, &env, NEW);

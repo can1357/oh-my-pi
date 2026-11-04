@@ -14,7 +14,10 @@
 //! - [`ExtProc::poll_wait`] is ready once the process has exited *and* its
 //!   output pumps have delivered everything (a redirect into a VFS file is
 //!   complete when the command is). It also drives the pumps and the shared
-//!   input feeds of the external: no thread moves their bytes.
+//!   input feeds of the external: no thread moves their bytes. Output still
+//!   flowing when the `ExtProc` is dropped (an abandoned or detached external)
+//!   is delivered to its end of file as adopted work
+//!   ([`NativeSpawner::poll_orphans`]); input stops with the `ExtProc`.
 //! - Dropping the `ExtProc` after the exit reaps the process. Dropping it while
 //!   the process runs *abandons* it (the engine's cancel unwinds this way):
 //!   TERM goes to the group at once unless it was already sent, KILL follows
@@ -39,6 +42,7 @@ mod windows;
 use std::{
 	fmt, fs, io,
 	sync::{Arc, Weak},
+	task::Context,
 	time::Duration,
 };
 
@@ -257,6 +261,17 @@ impl NativeSpawner {
 		}
 		#[cfg(not(unix))]
 		None
+	}
+
+	/// Advance the output work of externals whose `ExtProc` is gone: output
+	/// pumps of a detached or abandoned external and relays a leftover holds
+	/// open deliver to the ends of their streams, as plain pipes would. Inside
+	/// a Tokio runtime that work runs as tasks of it; elsewhere it is kept for
+	/// whoever calls this (every external's `poll_wait` and a
+	/// [`Parker`](crate::sys::Parker) do) and wakes `cx`'s task when it can go
+	/// on.
+	pub fn poll_orphans(cx: &Context<'_>) {
+		crate::sys::pump::orphan::poll(cx);
 	}
 
 	/// Spawn `spec`; see the module docs for the process lifecycle.
