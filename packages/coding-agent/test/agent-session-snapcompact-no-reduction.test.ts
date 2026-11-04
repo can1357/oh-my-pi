@@ -424,12 +424,13 @@ describe("AgentSession snapcompact no-reduction guard on a resumed session that 
 	 * A resumed session whose live context opens with a 10-frame snapcompact
 	 * archive (its frames blob references until read), followed by a few short
 	 * turns. A new archive of `frames` frames replaces that archive and the turns.
-	 * `withoutSource` stores the archive without the source text a new archive
-	 * re-renders it from, as archives written before `Archive.text` were.
+	 * `withoutSource` stores the archive as archives written before `Archive.text`
+	 * were: frames and text edges, but not the source text a new archive
+	 * re-renders it from. `thresholdTokens` sets the automatic compaction trigger.
 	 */
 	async function createArchivedSession(
 		frames: number,
-		{ withoutSource = false }: { withoutSource?: boolean } = {},
+		{ withoutSource = false, thresholdTokens }: { withoutSource?: boolean; thresholdTokens?: number } = {},
 	): Promise<{ session: AgentSession; previousId: string }> {
 		tempDir = TempDir.createSync("@pi-snapcompact-resumed-archive-");
 		setAgentDir(path.join(tempDir.path(), "agent"));
@@ -452,7 +453,9 @@ describe("AgentSession snapcompact no-reduction guard on a resumed session that 
 					frames: Array.from({ length: PREVIOUS_FRAMES }, () => persistedFrame),
 					totalChars: 40,
 					truncatedChars: 0,
-					...(withoutSource ? {} : { text: "first question first answer" }),
+					...(withoutSource
+						? { textHead: "first question", textTail: "first answer" }
+						: { text: "first question first answer" }),
 				},
 			},
 		});
@@ -493,6 +496,7 @@ describe("AgentSession snapcompact no-reduction guard on a resumed session that 
 				"compaction.autoContinue": false,
 				"compaction.asyncEnabled": false,
 				"compaction.keepRecentTokens": 1,
+				...(thresholdTokens === undefined ? {} : { "compaction.thresholdTokens": thresholdTokens }),
 			}),
 			modelRegistry,
 		});
@@ -519,6 +523,15 @@ describe("AgentSession snapcompact no-reduction guard on a resumed session that 
 
 		const error = await rejectionOf(session.compact(undefined, { mode: "snapcompact" }));
 		expect(String(error)).toContain("snapcompact would not reduce context");
+		expect(latestArchiveFrames(session, previousId)).toBeUndefined();
+	});
+
+	it("does not count those frames as replaced when a turn crosses the compaction threshold", async () => {
+		const { session, previousId } = await createArchivedSession(6, { withoutSource: true, thresholdTokens: 1_000 });
+
+		await session.prompt("fourth question");
+
+		expect(snapcompact.compact).toHaveBeenCalled();
 		expect(latestArchiveFrames(session, previousId)).toBeUndefined();
 	});
 

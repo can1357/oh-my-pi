@@ -43,6 +43,7 @@ import {
 	createSubagentSettings,
 	followMCPTools,
 	replayRevivedAgentStart,
+	softRequestBudgetFor,
 	subagentRetryFallbackRole,
 } from "./executor";
 import { isCompletionProbeEnabled } from "./completion-probe";
@@ -549,6 +550,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 		id: ref.id,
 		agent: persistedAgentDefinition(ref.displayName, init),
 		completionProbe: isCompletionProbeEnabled(spec.settings, taskDepth - 1),
+		...softRequestBudgetFor(ref.displayName, spec.settings),
 		eventBus: spec.eventBus,
 		subagentEventBus: spec.subagentEventBus,
 		sessionFile,

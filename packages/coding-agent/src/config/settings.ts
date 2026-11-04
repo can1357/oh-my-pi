@@ -13,12 +13,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { type Api, type Model, modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
+	expandTilde,
 	getAgentDbPath,
 	getAgentDir,
 	getLastChangelogVersionPath,
@@ -418,10 +418,6 @@ export function dropSettingsGroupShadows(data: RawSettings, sourcePath: string, 
 		result[key] = dropSettingsGroupShadows(value as RawSettings, sourcePath, path);
 	}
 	return result;
-}
-
-function expandTilde(p: string): string {
-	return p === "~" ? os.homedir() : p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
 }
 
 function normalizePathPrefix(prefix: string): string {
@@ -1092,6 +1088,17 @@ export class Settings {
 		if (getByPath(projectLayerForMerge(this.#project), segments) !== undefined) return "project";
 		if (getByPath(this.#global, segments) !== undefined) return "global";
 		return this.#parent?.getProvenance(setting) ?? "default";
+	}
+
+	/**
+	 * Whether a runtime override — a CLI flag, a session-only write, an SDK override — sets `setting`
+	 * here or on an overlay parent. Such an override outranks the setting's environment variable; a
+	 * soft-pinned protocol default does not.
+	 */
+	hasRuntimeOverride(setting: AnySetting): boolean {
+		const own = getByPath(this.#overrides, setting.segments);
+		if (own !== undefined && own !== null) return !this.#softPins.has(setting);
+		return this.#parent?.hasRuntimeOverride(setting) ?? false;
 	}
 
 	/**

@@ -656,6 +656,8 @@ export class Theme {
 			job: this.#symbols["icon.job"],
 			cache: this.#symbols["icon.cache"],
 			cacheMiss: this.#symbols["icon.cacheMiss"],
+			cacheWarm: this.#symbols["icon.cacheWarm"],
+			cacheCold: this.#symbols["icon.cacheCold"],
 			input: this.#symbols["icon.input"],
 			output: this.#symbols["icon.output"],
 			throughput: this.#symbols["icon.throughput"],
