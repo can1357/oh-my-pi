@@ -66,11 +66,11 @@ afterEach(async () => {
 });
 
 it.each([
-	{ label: "the parent", from: MAIN_AGENT_ID, ownTurn: false },
-	{ label: "a peer", from: "SiblingScout", ownTurn: true },
+	{ label: "the parent", from: MAIN_AGENT_ID },
+	{ label: "a peer", from: "SiblingScout" },
 ])(
 	"delivers the assignment when $label messages the subagent during startup",
-	async ({ from, ownTurn }) => {
+	async ({ from }) => {
 		const cwd = path.join(root, "home", "work");
 		const artifactsDir = path.join(root, "artifacts");
 		await fs.mkdir(cwd, { recursive: true });
@@ -151,10 +151,11 @@ it.each([
 			expect(result.exitCode).toBe(0);
 			await ircSeen.promise;
 			await session.waitForIdle();
-			// Every turn sees the assignment. The parent's message rides the assignment's turn; a peer's
-			// waits for a turn of its own after the run, whose result must not answer the peer.
+			// Every turn sees the assignment, and startup IRC reaches the model only after
+			// the initial brief, whether queued as a parent follow-up or a separate peer wake.
 			expect(requests.every(request => request.assignment)).toBe(true);
-			expect(requests[0]!.irc).toBe(!ownTurn);
+			expect(requests[0]!.irc).toBe(false);
+			expect(requests.slice(1).some(request => request.irc)).toBe(true);
 		} finally {
 			authStorage.close();
 		}
