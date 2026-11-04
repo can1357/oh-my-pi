@@ -1,4 +1,12 @@
-import type { CustomQueryHandler, default as PuppeteerInstance, Puppeteer as PuppeteerClass } from "puppeteer-core";
+import type {
+	CustomQueryHandler,
+	ElementHandle,
+	Frame,
+	default as PuppeteerInstance,
+	Puppeteer as PuppeteerClass,
+	WaitForSelectorOptions,
+} from "puppeteer-core";
+import { puppeteerTimeoutError } from "./launch";
 
 /** Root node Puppeteer passes to a custom query handler (the document for page-level queries). */
 type QueryNode = Parameters<NonNullable<CustomQueryHandler["queryAll"]>>[0];
@@ -92,28 +100,30 @@ export function queryByTitle(node: QueryNode, selector: string): Element[] {
 	);
 }
 
+/** The Tern kit's role and accessible-name rules, from {@link roleRules}. */
+export interface RoleRules {
+	/** The element's explicit role (its first token; `presentation` as `none`), else its implicit one. */
+	role(element: Element): string | null;
+	/** The element's accessible name. */
+	name(element: Element): string;
+	/** The text of the elements its `aria-describedby` names. */
+	description(element: Element): string;
+	/** The `role/` handler: `role[name="…" exact]` below `node`, open shadow roots included. */
+	query(node: QueryNode, selector: string): Element[];
+}
+
 /**
- * `role/` handler: `role[name="…" exact]` — explicit or implicit ARIA role, optionally filtered by
- * accessible name. Anything else in the selector (a chained `>> role/…`, another attribute) is refused
- * rather than ignored, since ignoring it would match the outer element.
+ * Role and accessible-name rules computed by hand, for the Tern kit, whose WebKit page offers no accessibility tree
+ * to ask; Chromium asks Chrome instead ({@link registerSemanticQueryHandlers}). The kit's `observe()` and its `role/`
+ * selector both use them, so a name `observe()` reports selects the same element again. Serialized whole into the kit,
+ * so it MUST stay self-contained. Each instance caches roles, so take a fresh one per pass over the page.
+ *
+ * The `role/` handler refuses anything else in the selector (a chained `>> role/…`, another attribute) rather than
+ * ignoring it, since ignoring it would match the outer element; the grammar is {@link parseRoleSelector}'s, repeated
+ * here because this function is serialized whole.
  */
-export function queryByRole(node: QueryNode, selector: string): Element[] {
-	const root = node as unknown as QueryRoot;
-	const parsed =
-		/^\s*([a-z][a-z0-9-]*)\s*(?:\[\s*name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))(?:\s+(exact))?\s*\])?\s*$/i.exec(
-			selector,
-		);
-	if (!parsed) {
-		throw new Error(
-			`role/ selector ${JSON.stringify(selector)} is not one role with an optional [name="…"] or [name="…" exact] filter. ` +
-				"role/ selectors do not chain; to act inside a section, pass the section's selector to observe({ selector }) or ariaSnapshot(selector) and use the id or ref it returns.",
-		);
-	}
-	const wantedRole = parsed[1]!.toLocaleLowerCase();
+export function roleRules(): RoleRules {
 	const normalizeSpace = (value: string): string => value.replace(/\s+/g, " ").trim();
-	const nameText = parsed[2] ?? parsed[3] ?? parsed[4];
-	const wantedName = nameText === undefined ? undefined : normalizeSpace(nameText).toLocaleLowerCase();
-	const exact = parsed[5]?.toLocaleLowerCase() === "exact";
 	const hasLandmarkName = (element: Element): boolean =>
 		Boolean(
 			idrefText(element) ||
@@ -221,17 +231,26 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		if (tag === "tr") return "row";
 		if (tag === "th") return element.getAttribute("scope") === "row" ? "rowheader" : "columnheader";
 		if (tag === "td") return "cell";
-		if (tag !== "input") return null;
+		if (tag === "summary") return "button";
+		if (tag === "a") return "generic";
+		if (tag !== "input") {
+			// The outermost editable element is a text box; plain containers are generic.
+			const editable = element as unknown as { isContentEditable?: boolean };
+			const parent = element.parentElement as unknown as { isContentEditable?: boolean } | null;
+			if (editable.isContentEditable && !parent?.isContentEditable) return "textbox";
+			return ["div", "span", "b", "i", "u", "small", "label"].includes(tag) ? "generic" : null;
+		}
 		const type = ((element as unknown as { type?: string }).type || "text").toLocaleLowerCase();
+		if (type === "hidden") return null;
 		if (type === "checkbox") return "checkbox";
 		if (type === "radio") return "radio";
 		if (type === "range") return "slider";
+		if (["button", "submit", "reset", "image", "file", "color"].includes(type)) return "button";
+		// A field with suggestions (`list`) is a combo box.
+		if (element.hasAttribute("list")) return "combobox";
 		if (type === "number") return "spinbutton";
 		if (type === "search") return "searchbox";
-		if (["button", "submit", "reset", "image"].includes(type)) return "button";
-		if (!["hidden", "file", "color", "date", "datetime-local", "month", "time", "week"].includes(type)) {
-			return "textbox";
-		}
+		if (!["date", "datetime-local", "month", "time", "week"].includes(type)) return "textbox";
 		return null;
 	};
 	/**
@@ -248,9 +267,9 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		return role;
 	};
 	// Roles named by their content, so `title` names them only when the content is empty.
-	const namedByContent =
+	const namedByContent = (role: string | null): boolean =>
 		/^(?:button|cell|checkbox|columnheader|gridcell|heading|link|menuitem|menuitemcheckbox|menuitemradio|option|radio|row|rowheader|switch|tab|term|tooltip|treeitem)$/.test(
-			wantedRole,
+			role ?? "",
 		);
 	/** An image input's name: its alt, value or title, else the browser's default caption for an image submit button. */
 	const imageInputName = (element: Element): string =>
@@ -330,7 +349,11 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 						normalizeSpace(control.value ?? "") ||
 						(inputType === "submit" ? "Submit" : inputType === "reset" ? "Reset" : "");
 					text += shown ? caption : "";
-				} else if (tag !== "input") walk(childElement, visibility === "any" ? "any" : style.visibility);
+				} else if (tag !== "input") {
+					// An element with a shadow root shows that tree.
+					const shadow = (childElement as unknown as { shadowRoot?: Element | null }).shadowRoot;
+					walk(shadow ?? childElement, visibility === "any" ? "any" : style.visibility);
+				}
 				text += gap;
 			}
 		};
@@ -354,12 +377,12 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		);
 	};
 	/**
-	 * Text of the elements an `aria-labelledby` names (a hidden target read whole), without following their own
-	 * references. Each target is read as a node embedded in a label, so a control target gives its value and an image its
-	 * alt, as its descendants would.
+	 * Text of the elements an `aria-labelledby` (or `attribute`) names (a hidden target read whole), without following
+	 * their own references. Each target is read as a node embedded in a label, so a control target gives its value and an
+	 * image its alt, as its descendants would.
 	 */
-	const idrefText = (element: Element, visited = new Set<Element>()): string => {
-		const labelledBy = element.getAttribute("aria-labelledby");
+	const idrefText = (element: Element, visited = new Set<Element>(), attribute = "aria-labelledby"): string => {
+		const labelledBy = element.getAttribute(attribute);
 		if (!labelledBy || visited.has(element)) return "";
 		visited.add(element);
 		try {
@@ -367,7 +390,12 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				labelledBy
 					.split(/\s+/)
 					.map(id => {
-						const target = element.ownerDocument?.getElementById(id);
+						// An id names an element in the same tree: the shadow root around the element, else the document.
+						const node = element as unknown as {
+							getRootNode(): { getElementById?: (id: string) => Element | null };
+						};
+						const tree = node.getRootNode();
+						const target = tree.getElementById?.(id) ?? element.ownerDocument?.getElementById(id);
 						if (!target) return "";
 						// Hidden by visibility, `display: none` (its own or an ancestor's, which leaves its own computed display
 						// untouched), or a `hidden`/`aria-hidden` ancestor: read the whole subtree. A `display: contents` target
@@ -412,23 +440,14 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		if (ariaLabel) return ariaLabel;
 		const native = nativeName(element);
 		if (native) return native;
-		// `<label>` names only the form controls it can label, so an optgroup in a labelled select keeps its own label
-		// (or title) and a term inside a label keeps its own text.
-		const tag = element.tagName.toLocaleLowerCase();
-		const labelable =
-			["button", "meter", "output", "progress", "select", "textarea"].includes(tag) ||
-			(tag === "input" && element.getAttribute("type")?.toLocaleLowerCase() !== "hidden");
-		if (labelable) {
-			if (element.id) {
-				for (const label of element.ownerDocument?.querySelectorAll("label") ?? []) {
-					if (label.getAttribute("for") === element.id) {
-						return normalizeSpace(contentText(label, element, "visible"));
-					}
-				}
-			}
-			const wrappingLabel = element.closest("label");
-			if (wrappingLabel) return normalizeSpace(contentText(wrappingLabel, element, "visible"));
+		// Only the form controls a `<label>` can label have `labels`, so an optgroup in a labelled select keeps its own
+		// label (or title) and a term inside a label keeps its own text. Every label of a field names it, in order.
+		const labels = (element as unknown as { labels?: ArrayLike<Element> | null }).labels;
+		if (labels && labels.length > 0) {
+			const text = normalizeSpace(Array.from(labels, label => contentText(label, element, "visible")).join(" "));
+			if (text) return text;
 		}
+		const tag = element.tagName.toLocaleLowerCase();
 		// An `<input>`'s type and value decide its name; other elements have neither.
 		const input = tag === "input" ? (element as unknown as { type: string; value: string }) : null;
 		const inputType = input?.type.toLocaleLowerCase();
@@ -442,7 +461,7 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				? normalizeSpace(input?.value ?? "") ||
 					(inputType === "submit" ? "Submit" : inputType === "reset" ? "Reset" : "")
 				: normalizeSpace(contentText(element, null, "visible"));
-		if (content && namedByContent) return content;
+		if (content && namedByContent(roleOf(element))) return content;
 		return normalizeSpace(
 			element.getAttribute("title") ||
 				element.getAttribute("placeholder") ||
@@ -450,26 +469,351 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				"",
 		);
 	};
-	return Array.from(root.querySelectorAll("*")).filter(element => {
-		const role = (element.getAttribute("role")?.trim().split(/\s+/)[0] ?? implicitRole(element))?.toLocaleLowerCase();
-		if (role !== wantedRole && !(role === "img" && wantedRole === "image")) return false;
-		if (wantedName === undefined) return true;
-		const name = accessibleName(element).toLocaleLowerCase();
-		return exact ? name === wantedName : name.includes(wantedName);
-	});
+	const roleOf = (element: Element): string | null => {
+		const explicit = element.getAttribute("role")?.trim().split(/\s+/)[0]?.toLocaleLowerCase();
+		if (explicit) return explicit === "presentation" ? "none" : explicit;
+		return implicitRole(element);
+	};
+	const query = (node: QueryNode, selector: string): Element[] => {
+		const parsed =
+			/^\s*([a-z][a-z0-9-]*)\s*(?:\[\s*name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))(?:\s+(exact))?\s*\])?\s*$/i.exec(
+				selector,
+			);
+		if (!parsed) {
+			throw new Error(
+				`role/ selector ${JSON.stringify(selector)} is not one role with an optional [name="…"] or [name="…" exact] filter. ` +
+					"role/ selectors do not chain; to act inside a section, pass the section's selector to observe({ selector }) or ariaSnapshot(selector) and use the id or ref it returns.",
+			);
+		}
+		// The ARIA synonyms: Chrome calls an image "image", and `presentation` is `none`.
+		const aliases: Record<string, string> = { image: "img", presentation: "none" };
+		const typedRole = parsed[1]!.toLocaleLowerCase();
+		const wantedRole = aliases[typedRole] ?? typedRole;
+		const nameText = parsed[2] ?? parsed[3] ?? parsed[4];
+		const wantedName = nameText === undefined ? undefined : normalizeSpace(nameText).toLocaleLowerCase();
+		const exact = parsed[5]?.toLocaleLowerCase() === "exact";
+		const elements: Element[] = [];
+		const visit = (scope: QueryRoot): void => {
+			for (const element of Array.from(scope.querySelectorAll("*"))) {
+				elements.push(element);
+				const shadow = (element as unknown as { shadowRoot?: QueryRoot | null }).shadowRoot;
+				if (shadow) visit(shadow);
+			}
+		};
+		visit(node as unknown as QueryRoot);
+		return elements.filter(element => {
+			const role = roleOf(element);
+			if ((role && (aliases[role] ?? role)) !== wantedRole) return false;
+			if (wantedName === undefined) return true;
+			const name = accessibleName(element).toLocaleLowerCase();
+			return exact ? name === wantedName : name.includes(wantedName);
+		});
+	};
+	return {
+		role: roleOf,
+		name: accessibleName,
+		description: element => idrefText(element, new Set(), "aria-describedby"),
+		query,
+	};
 }
 
-/** Semantic selector prefixes (`label/`, `role/`, …) and their self-contained `queryAll` handlers. */
+/** Semantic selector prefixes (`label/`, …) and their self-contained `queryAll` handlers; `role/` is separate. */
 export const SEMANTIC_QUERY_HANDLERS = {
 	label: queryByLabel,
 	placeholder: queryByPlaceholder,
 	testid: queryByTestId,
 	alt: queryByAlt,
 	title: queryByTitle,
-	role: queryByRole,
 } as const satisfies Record<string, (node: QueryNode, selector: string) => Element[]>;
 
-/** Register the browser tool's semantic selector prefixes on a worker-local Puppeteer instance. */
+/** A parsed `role/` selector; the name filter is whitespace-collapsed and lower-cased, as names are compared. */
+export interface RoleQuery {
+	role: string;
+	name?: string;
+	exact: boolean;
+}
+
+/** Parse a `role/` selector body with the grammar {@link roleRules} reads in the Tern kit, refusing what it refuses. */
+export function parseRoleSelector(selector: string): RoleQuery {
+	const parsed =
+		/^\s*([a-z][a-z0-9-]*)\s*(?:\[\s*name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))(?:\s+(exact))?\s*\])?\s*$/i.exec(
+			selector,
+		);
+	if (!parsed) {
+		throw new Error(
+			`role/ selector ${JSON.stringify(selector)} is not one role with an optional [name="…"] or [name="…" exact] filter. ` +
+				"role/ selectors do not chain; to act inside a section, pass the section's selector to observe({ selector }) or ariaSnapshot(selector) and use the id or ref it returns.",
+		);
+	}
+	const name = parsed[2] ?? parsed[3] ?? parsed[4];
+	return {
+		role: parsed[1]!.toLowerCase(),
+		name: name === undefined ? undefined : name.replace(/\s+/g, " ").trim().toLowerCase(),
+		exact: parsed[5] !== undefined,
+	};
+}
+
+/** Wait between Chromium `role/` polls. */
+const ROLE_POLL_MS = 100;
+
+/**
+ * Elements Chrome can give each role without a `role` attribute (HTML-AAM's implicit roles, as Chrome spells them).
+ * It only narrows which elements Chrome is asked about, so it errs wide: a tag listed for a role it does not get costs
+ * a lookup, a missing one loses a match. An empty entry is an ARIA-only role; a role not listed asks about every
+ * element.
+ */
+const ROLE_TAGS = new Map<string, string>(
+	Object.entries({
+		abbr: "abbr",
+		alert: "",
+		alertdialog: "",
+		application: "",
+		article: "article",
+		audio: "audio",
+		banner: "header",
+		blockquote: "blockquote",
+		button: "button, input, summary",
+		canvas: "canvas",
+		caption: "caption",
+		cell: "td, th",
+		checkbox: "input",
+		code: "code",
+		colorwell: "input",
+		columnheader: "th, td",
+		combobox: "input, select",
+		complementary: "aside",
+		contentinfo: "footer",
+		date: "input",
+		datetime: "input",
+		definition: "dd",
+		deletion: "del, s",
+		descriptionlist: "dl",
+		dialog: "dialog",
+		disclosuretriangle: "summary",
+		emphasis: "em",
+		feed: "",
+		figcaption: "figcaption",
+		figure: "figure",
+		form: "form",
+		grid: "",
+		gridcell: "td, th",
+		group: "address, details, fieldset, hgroup, optgroup",
+		heading: "h1, h2, h3, h4, h5, h6",
+		iframe: "iframe",
+		image: "img, svg",
+		inputtime: "input",
+		insertion: "ins",
+		labeltext: "label",
+		layouttable: "table",
+		layouttablecell: "td, th",
+		layouttablerow: "tr",
+		legend: "legend",
+		link: "a, area",
+		list: "ul, ol, menu",
+		listbox: "select, datalist",
+		listitem: "li",
+		log: "",
+		main: "main",
+		mark: "mark",
+		marquee: "",
+		math: "math",
+		menu: "",
+		menubar: "",
+		menuitem: "",
+		menuitemcheckbox: "",
+		menuitemradio: "",
+		meter: "meter",
+		navigation: "nav",
+		note: "",
+		option: "option",
+		paragraph: "p",
+		progressbar: "progress",
+		radio: "input",
+		radiogroup: "",
+		region: "section",
+		row: "tr",
+		rowgroup: "thead, tbody, tfoot",
+		rowheader: "th, td",
+		scrollbar: "",
+		search: "search",
+		searchbox: "input",
+		sectionfooter: "footer",
+		sectionheader: "header",
+		separator: "hr",
+		slider: "input",
+		spinbutton: "input",
+		status: "output",
+		strong: "strong",
+		subscript: "sub",
+		superscript: "sup",
+		switch: "input",
+		tab: "",
+		table: "table",
+		tablist: "",
+		tabpanel: "",
+		term: "dfn, dt",
+		textbox: "input, textarea",
+		time: "time",
+		timer: "",
+		toolbar: "",
+		tooltip: "",
+		tree: "",
+		treegrid: "",
+		treeitem: "",
+		video: "video",
+	}),
+);
+
+/**
+ * The elements below `root` that match `selector`, in document order, each followed by the matches inside its open
+ * shadow root. Runs in the page.
+ */
+function collectCandidates(root: unknown, selector: string): unknown[] {
+	// A document, element or shadow root of this page; the tool's TypeScript config has no DOM library to name them.
+	type Scope = { querySelectorAll(selector: string): Iterable<Candidate> };
+	type Candidate = Scope & { shadowRoot: Scope | null; matches(selector: string): boolean };
+	const found: Candidate[] = [];
+	const visit = (scope: Scope): void => {
+		for (const element of scope.querySelectorAll("*")) {
+			if (element.matches(selector)) found.push(element);
+			if (element.shadowRoot) visit(element.shadowRoot);
+		}
+	};
+	visit(root as Scope);
+	return found;
+}
+
+/**
+ * Elements Chrome is asked about in the first round trip while a `queryOne` looks for its first match; each later round
+ * asks about twice as many, so a match near the end of a long list costs a few round trips, not one per batch.
+ */
+const ROLE_PROBE_BATCH = 32;
+
+/**
+ * Chromium's `role/` resolution: the elements below `root` whose role and accessible name Chrome computes as the
+ * selector asks, so they are the elements and names `observe()` reports. Each candidate's own accessibility node is
+ * read with `Accessibility.getPartialAXTree`, which answers at once even in a background tab; `queryAXTree` waits for
+ * a rendering update that a background tab never gets, and the whole tree costs tens of milliseconds on a large page.
+ * It searches the page and its open shadow roots, and leaves out what the tree leaves out: hidden and `aria-hidden`
+ * elements. Stops after `limit` matches.
+ */
+async function queryRoleInAXTree(root: ElementHandle, query: RoleQuery, limit: number): Promise<ElementHandle[]> {
+	const role = query.role === "img" ? "image" : query.role;
+	const tags = ROLE_TAGS.get(role);
+	const tokens = role === "image" ? '[role~="img" i], [role~="image" i]' : `[role~=${JSON.stringify(role)} i]`;
+	const selector = tags === undefined ? "*" : tags ? `${tags}, ${tokens}` : tokens;
+	const list = await root.realm.evaluateHandle(collectCandidates, root, selector);
+	const candidates: ElementHandle[] = [];
+	try {
+		for (const property of (await list.getProperties()).values()) {
+			const element = property.asElement();
+			if (element) candidates.push(element);
+			else await property.dispose();
+		}
+	} finally {
+		await list.dispose();
+	}
+	const client = root.frame.client;
+	const matches: ElementHandle[] = [];
+	const rejected: ElementHandle[] = [];
+	let batch = limit === 1 ? ROLE_PROBE_BATCH : candidates.length;
+	let next = 0;
+	try {
+		while (next < candidates.length && matches.length < limit) {
+			const probed = candidates.slice(next, next + batch);
+			next += probed.length;
+			batch *= 2;
+			const nodes = await Promise.all(
+				probed.map(candidate =>
+					client
+						.send("Accessibility.getPartialAXTree", {
+							objectId: candidate.remoteObject().objectId,
+							fetchRelatives: false,
+						})
+						// A candidate the page removed meanwhile matches nothing.
+						.then(
+							({ nodes }) => nodes[0],
+							() => undefined,
+						),
+				),
+			);
+			for (const [index, candidate] of probed.entries()) {
+				const node = nodes[index];
+				let matched =
+					matches.length < limit &&
+					node !== undefined &&
+					!node.ignored &&
+					// Chrome spells roles outside ARIA in CamelCase (`DescriptionList`), as `observe()` shows them.
+					String(node.role?.value ?? "").toLowerCase() === role;
+				if (matched && query.name !== undefined) {
+					const name = String(node!.name?.value ?? "")
+						.replace(/\s+/g, " ")
+						.trim()
+						.toLowerCase();
+					matched = query.exact ? name === query.name : name.includes(query.name);
+				}
+				(matched ? matches : rejected).push(candidate);
+			}
+		}
+	} finally {
+		await Promise.all([...rejected, ...candidates.slice(next)].map(candidate => candidate.dispose()));
+	}
+	return matches;
+}
+
+/**
+ * Puppeteer's `waitFor` for Chromium `role/` selectors, polling the accessibility tree from Node: the first match, once
+ * visible if `visible` is set; with `hidden`, null once there is no match or the first is hidden. Like Puppeteer's own,
+ * the handle comes back in the frame's isolated realm.
+ */
+async function waitForRole(
+	elementOrFrame: ElementHandle | Frame,
+	selector: string,
+	options: WaitForSelectorOptions,
+): Promise<ElementHandle | null> {
+	const query = parseRoleSelector(selector);
+	const { visible = false, hidden = false, signal } = options;
+	const frame = "frame" in elementOrFrame ? elementOrFrame.frame : elementOrFrame;
+	const realm = frame.isolatedRealm();
+	// A frame is searched from its document, which Puppeteer hands to query handlers as an element handle too.
+	const root =
+		"frame" in elementOrFrame
+			? await realm.adoptHandle(elementOrFrame)
+			: ((await realm.evaluateHandle(() => document)) as unknown as ElementHandle);
+	const timeout = options.timeout ?? frame.page().getDefaultTimeout();
+	const deadline = timeout > 0 ? Date.now() + timeout : Number.POSITIVE_INFINITY;
+	try {
+		while (true) {
+			signal?.throwIfAborted();
+			const [found] = await queryRoleInAXTree(root, query, 1);
+			if (found && !hidden && (!visible || (await found.isVisible()))) return found;
+			if (hidden && (!found || (await found.isHidden()))) {
+				await found?.dispose();
+				return null;
+			}
+			await found?.dispose();
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) {
+				const error = puppeteerTimeoutError(`Waiting for selector \`${selector}\` failed`);
+				error.cause = puppeteerTimeoutError(`Waiting failed: ${timeout}ms exceeded`);
+				throw error;
+			}
+			await Bun.sleep(Math.min(ROLE_POLL_MS, remaining));
+		}
+	} finally {
+		if (root !== elementOrFrame) await root.dispose();
+	}
+}
+
+/** Puppeteer's handler registry (`@internal` upstream, stripped from published types), as far as it is used here. */
+interface QueryHandlerRegistry {
+	get(name: string): object | undefined;
+}
+
+/**
+ * Register the browser tool's semantic selector prefixes on a worker-local Puppeteer instance. `role/` resolves in
+ * Node through Chrome's accessibility tree ({@link queryRoleInAXTree}); {@link roleRules} serves only the Tern kit.
+ */
 export function registerSemanticQueryHandlers(puppeteer: typeof PuppeteerInstance): void {
 	const Puppeteer = puppeteer.constructor as typeof PuppeteerClass;
 	const registered = new Set(Puppeteer.customQueryHandlerNames());
@@ -477,4 +821,22 @@ export function registerSemanticQueryHandlers(puppeteer: typeof PuppeteerInstanc
 		const queryAll = SEMANTIC_QUERY_HANDLERS[name as keyof typeof SEMANTIC_QUERY_HANDLERS];
 		if (!registered.has(name)) Puppeteer.registerCustomQueryHandler(name, { queryAll });
 	}
+	if (registered.has("role")) return;
+	// The page-side half runs only inside a P-selector (`::-p-role(…)`), which cannot reach the accessibility tree.
+	Puppeteer.registerCustomQueryHandler("role", {
+		queryAll: () => {
+			throw new Error('role/ selectors must be the whole selector, as in role/button[name="Save"]');
+		},
+	});
+	// Registration builds a QueryHandler class whose static methods resolve `role/…` for $, $$ and waitForSelector.
+	const registry = Reflect.get(Puppeteer, "customQueryHandlers") as QueryHandlerRegistry;
+	Object.assign(registry.get("role")!, {
+		async *queryAll(root: ElementHandle, selector: string) {
+			yield* await queryRoleInAXTree(root, parseRoleSelector(selector), Number.POSITIVE_INFINITY);
+		},
+		async queryOne(root: ElementHandle, selector: string) {
+			return (await queryRoleInAXTree(root, parseRoleSelector(selector), 1))[0] ?? null;
+		},
+		waitFor: waitForRole,
+	});
 }
