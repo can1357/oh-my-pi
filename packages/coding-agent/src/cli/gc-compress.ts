@@ -714,7 +714,7 @@ async function swapUnlocked(candidate: CompressCandidate, copyPath: string, copy
 			// A removal of the session file is that process's deletion of it, which
 			// stands: the copy not put in place goes, as any such copy does.
 			const which = isHeld(await identityAt(copyPath), copy)
-				? `another process removed ${file} just before its compressed copy took its place`
+				? `${file} was removed just before its compressed copy took its place`
 				: `the compressed copy of ${file} lost its name ${copyPath} just before it took ${file}'s place`;
 			return kept(`${which}, so nothing moved`);
 		}
@@ -843,8 +843,8 @@ async function settleExchange(
 		// Removed, or replaced by a rename onto it, after the exchange: the other
 		// process's deletion or replacement of the session, which stands.
 		const happened = atName
-			? `another process put a file at ${file} as it was compressed, and it was left there`
-			: `another process removed ${file} as it was compressed`;
+			? `another file was put at ${file} as it was compressed, and it was left there`
+			: `${file} was removed as it was compressed`;
 		if (!isHeld(atScratch, original)) {
 			return {
 				swapped: false,
@@ -858,7 +858,7 @@ async function settleExchange(
 		return { swapped: false, originalFreed: why === undefined, copyAtScratch: false, notes };
 	}
 	const giveBack = !isHeld(atScratch, original)
-		? `another process put a file at ${file} as it was exchanged with its compressed copy`
+		? `another file was put at ${file} as it was exchanged with its compressed copy`
 		: await originalChanged(file, original);
 	// A write to the copy is a reach too: after a long enough stall its lease
 	// lapses, and a process that opened the name has written through it.
@@ -880,8 +880,8 @@ async function settleExchange(
 		if (!isHeld(atNameNow, copy)) {
 			notes.push(
 				atNameNow
-					? `another process put a file at ${file} as it was compressed, and it was left there`
-					: `another process removed ${file} as it was compressed`,
+					? `another file was put at ${file} as it was compressed, and it was left there`
+					: `${file} was removed as it was compressed`,
 			);
 			return { swapped: false, originalFreed: why === undefined, copyAtScratch: false, notes };
 		}
@@ -989,7 +989,7 @@ async function exchangeBack(file: string, copyPath: string, copy: LeasedFile, wh
 	try {
 		if (!isHeld(await identityAt(copyPath), copy)) {
 			return left(
-				`${why}, so ${file} was given back what it held; another process put a file at ${file} as it was given back, and that file is at ${copyPath}, where it was left`,
+				`${why}, so ${file} was given back what it held; another file was put at ${file} as it was given back, and that file is at ${copyPath}, where it was left`,
 				false,
 			);
 		}

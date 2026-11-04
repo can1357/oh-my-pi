@@ -2697,7 +2697,7 @@ describe("runGcCommand session compression", () => {
 				expect(await Bun.file(file).text()).toBe("ONLY NEW PUBLISHED SESSION");
 				expect(result.compressed).toBe(0);
 				expect(result.errors.join("\n")).toContain(
-					`another process put a file at ${file} as it was compressed, and it was left there`,
+					`another file was put at ${file} as it was compressed, and it was left there`,
 				);
 				expect(await scratchIn(path.dirname(file))).toEqual([]);
 			});
@@ -2715,8 +2715,8 @@ describe("runGcCommand session compression", () => {
 				expect(await fs.lstat(file).catch(() => undefined)).toBeUndefined();
 				expect(result.compressed).toBe(0);
 				const said = result.errors.join("\n");
-				expect(said).toContain(`another process removed ${file} as it was compressed`);
-				expect(said).not.toContain("put a file");
+				expect(said).toContain(`${file} was removed as it was compressed`);
+				expect(said).not.toContain("was put at");
 				expect(await scratchIn(path.dirname(file))).toEqual([]);
 			});
 
@@ -2733,7 +2733,7 @@ describe("runGcCommand session compression", () => {
 				expect(await fs.lstat(file).catch(() => undefined)).toBeUndefined();
 				expect(result.compressed).toBe(0);
 				expect(result.errors.join("\n")).toContain(
-					`another process removed ${file} just before its compressed copy took its place`,
+					`${file} was removed just before its compressed copy took its place`,
 				);
 				expect(await scratchIn(path.dirname(file))).toEqual([]);
 			});
@@ -2753,7 +2753,7 @@ describe("runGcCommand session compression", () => {
 						fsSync.writeFileSync(fresh, "ONLY NEW PUBLISHED SESSION");
 						fsSync.renameSync(fresh, file);
 					},
-					said: "another process put a file at",
+					said: "another file was put at",
 					kept: async (): Promise<boolean> =>
 						(await filesUnder(root)).some(({ bytes }) => bytes.toString() === "ONLY NEW PUBLISHED SESSION"),
 				},
@@ -2843,12 +2843,12 @@ describe("runGcCommand session compression", () => {
 						fsSync.writeFileSync(fresh, "ONLY NEW PUBLISHED SESSION");
 						fsSync.renameSync(fresh, file);
 					},
-					(file: string) => `another process put a file at ${file} as it was compressed, and it was left there`,
+					(file: string) => `another file was put at ${file} as it was compressed, and it was left there`,
 				],
 				[
 					"a removal of",
 					(file: string) => fsSync.unlinkSync(file),
-					(file: string) => `another process removed ${file} as it was compressed`,
+					(file: string) => `${file} was removed as it was compressed`,
 				],
 			] as const) {
 				test(`${what} the session file's name as the swap ends is not counted as compressed, and is said`, async () => {
@@ -3012,7 +3012,7 @@ describe("runGcCommand session compression", () => {
 				expect(result.compressed).toBe(0);
 				const said = result.errors.join("\n");
 				expect(said).toContain(`${file} could not be checked (EIO: injected) after it was exchanged`);
-				expect(said).not.toContain("another process put a file");
+				expect(said).not.toContain("another file was put");
 			});
 
 			// Round 4's review: an error reading the moved original left it at its
