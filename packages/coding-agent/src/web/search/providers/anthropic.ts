@@ -1,7 +1,7 @@
 /**
  * Anthropic Web Search Provider
  *
- * Uses Claude's built-in web_search_20250305 tool to search the web.
+ * Uses Claude's server-side web_search tool (web_search_20250305) to search the web.
  * Returns synthesized answers with citations and source metadata.
  */
 import {
@@ -22,13 +22,18 @@ import {
 import { buildAnthropicSystemBlocks, wrapFetchForCch } from "@oh-my-pi/pi-ai/providers/anthropic";
 import {
 	anthropicApiVersionAcceptsSamplingParams,
+	isOfficialAnthropicApiUrl,
 	resolveAnthropicApiVersion,
 } from "@oh-my-pi/pi-catalog/compat/anthropic";
+import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { $env } from "@oh-my-pi/pi-utils";
+// The model decides whether to search and answers from its weights when a query
+// reads as stable knowledge; a search backend must always search.
+import searchInstruction from "../../../prompts/system/web-search-anthropic.md" with { type: "text" };
 import type { AnthropicApiResponse, AnthropicCitation } from "../../../web/search/types";
 import type { SearchCitation, SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
-import { formatQuery, parseSearchQuery, type QuerySyntax, type StructuredQuery } from "../query";
+import { parseSearchQuery, type StructuredQuery } from "../query";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
@@ -36,22 +41,13 @@ import { classifyProviderHttpError, withHardTimeout } from "./utils";
 const DEFAULT_MAX_TOKENS = 4096;
 const WEB_SEARCH_TOOL_NAME = "web_search";
 const WEB_SEARCH_TOOL_TYPE = "web_search_20250305";
-
 /**
- * Claude's search backend understands common Google-style operators, so most
- * directives are re-emitted as query text. `site:` is intentionally absent:
- * site includes/excludes map onto the web_search tool's native
- * `allowed_domains`/`blocked_domains` parameters instead.
+ * Server-side refusal fallback (`fallbacks: "default"`): when a model's safety
+ * classifier declines, the API retries on the model Anthropic recommends for
+ * the refusal category and returns that model's answer in the same response
+ * (https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback).
  */
-const ANTHROPIC_QUERY_SYNTAX: QuerySyntax = {
-	phrases: true,
-	negation: true,
-	or: true,
-	inUrl: true,
-	inTitle: true,
-	filetype: true,
-	dateRange: true,
-};
+const SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01";
 
 /** Upstream request shape derived from the parsed query. */
 interface AnthropicQueryPlan {
@@ -61,13 +57,13 @@ interface AnthropicQueryPlan {
 }
 
 /**
- * Map parsed directives onto the request: `site:` includes become
- * `allowed_domains`, `-site:` exclusions become `blocked_domains` (the two are
- * mutually exclusive on the API, so exclusions are only sent when there are no
- * includes), and remaining directives are re-emitted as query syntax.
- * Directive-free queries pass through byte-identical. Anthropic domain
- * filters take bare hosts (subdomains included automatically); any path part
- * of a `site:` value is enforced by the central constraint filter.
+ * Map `site:` includes onto `allowed_domains` and `-site:` exclusions onto
+ * `blocked_domains` (mutually exclusive on the API, so exclusions are only
+ * sent when there are no includes). Filters take bare hosts (subdomains
+ * included automatically); any path part of a `site:` value is enforced by the
+ * central constraint filter. The query text itself goes to Claude unchanged:
+ * it writes its own searches, and stripping `site:` would hide what the query
+ * is about (`site:github.com/org/repo/file.c "fn"` would reach it as `"fn"`).
  */
 function planQuery(rawQuery: string, parsed: StructuredQuery): AnthropicQueryPlan {
 	if (!parsed.hasDirectives) return { query: rawQuery };
@@ -83,7 +79,7 @@ function planQuery(rawQuery: string, parsed: StructuredQuery): AnthropicQueryPla
 	const allowed = hosts(parsed.sites);
 	const blocked = allowed.length === 0 ? hosts(parsed.excludedSites) : [];
 	return {
-		query: formatQuery(parsed, ANTHROPIC_QUERY_SYNTAX),
+		query: rawQuery,
 		allowedDomains: allowed.length > 0 ? allowed : undefined,
 		blockedDomains: blocked.length > 0 ? blocked : undefined,
 	};
@@ -104,7 +100,9 @@ function buildSystemBlocks(
 	// Match the streaming path: the CC billing header + system instruction are
 	// an OAuth fingerprint and must not be claimed on API-key requests.
 	const includeClaudeCode = auth.isOAuth && injectClaudeCodeInstruction;
-	const extraInstructions = auth.isOAuth ? ["You are a helpful AI assistant with web search capabilities."] : [];
+	const extraInstructions = auth.isOAuth
+		? ["You are a helpful AI assistant with web search capabilities.", searchInstruction]
+		: [searchInstruction];
 
 	return buildAnthropicSystemBlocks(systemPrompt ? [systemPrompt] : undefined, {
 		includeClaudeCodeInstruction: includeClaudeCode,
@@ -136,12 +134,16 @@ async function callSearch(
 	timeoutMs?: number,
 ): Promise<AnthropicApiResponse> {
 	const url = buildAnthropicUrl(auth);
+	// Only Anthropic's own endpoint runs the fallback chain, and only models with
+	// a refusal classifier have targets to fall back to (Haiku 5.5 has none).
+	const serverSideFallback = isOfficialAnthropicApiUrl(auth.baseUrl) && fallbackCreditTargets(model).length > 0;
 	const headers = buildAnthropicSearchHeaders(auth, {
 		modelHeaders: configuredHeaders,
 		allowAnthropicHeaderOverrides:
 			model.compat !== undefined &&
 			"allowAnthropicHeaderOverrides" in model.compat &&
 			model.compat.allowAnthropicHeaderOverrides === true,
+		extraBetas: serverSideFallback ? [SERVER_SIDE_FALLBACK_BETA] : undefined,
 	});
 
 	const injectClaudeCodeInstruction =
@@ -163,6 +165,7 @@ async function callSearch(
 			},
 		],
 	};
+	if (serverSideFallback) body.fallbacks = "default";
 
 	if (metadataUserId) {
 		body.metadata = { user_id: metadataUserId };
@@ -248,6 +251,8 @@ function parsePageAge(pageAge: string | null | undefined): number | undefined {
  * Parses the Anthropic API response into a unified SearchResponse.
  * @param response - Raw API response containing content blocks
  * @returns Normalized response with answer, sources, citations, and usage
+ * @throws {SearchProviderError} When no results came back because the safety
+ *   classifier declined the query or every search failed
  */
 function parseResponse(response: AnthropicApiResponse): SearchResponse {
 	// Citations split continuous text into adjacent text blocks; insert a paragraph
@@ -257,6 +262,7 @@ function parseResponse(response: AnthropicApiResponse): SearchResponse {
 	const searchQueries: string[] = [];
 	const sources: SearchSource[] = [];
 	const citations: SearchCitation[] = [];
+	const toolErrors = new Set<string>();
 
 	for (const block of response.content) {
 		if (block.type !== "text") previousWasText = false;
@@ -270,7 +276,11 @@ function parseResponse(response: AnthropicApiResponse): SearchResponse {
 				searchQueries.push(block.input.query);
 			}
 		} else if (block.type === "web_search_tool_result" && block.content) {
-			// Search results
+			// A failed search carries one error object instead of a result list.
+			if (!Array.isArray(block.content)) {
+				toolErrors.add(block.content.error_code);
+				continue;
+			}
 			for (const result of block.content) {
 				if (result.type === "web_search_result") {
 					sources.push({
@@ -297,6 +307,20 @@ function parseResponse(response: AnthropicApiResponse): SearchResponse {
 				}
 			}
 		}
+	}
+
+	// A classifier decline (before or mid-output) leaves any text incomplete;
+	// Anthropic says to discard it. Results it already searched stay usable, and
+	// the answer says why it is missing.
+	if (response.stop_reason === "refusal") {
+		const category = response.stop_details?.category ?? "uncategorized";
+		const explanation = response.stop_details?.explanation;
+		const refusal = `${response.model} declined the query (${category} safety classifier)${explanation ? `: ${explanation}` : "."}`;
+		if (sources.length === 0) throw new SearchProviderError("anthropic", refusal);
+		answer = `${refusal} The results it found before declining follow.`;
+		citations.length = 0;
+	} else if (sources.length === 0 && toolErrors.size > 0) {
+		throw new SearchProviderError("anthropic", `Anthropic web search failed: ${[...toolErrors].join(", ")}.`);
 	}
 
 	return {
