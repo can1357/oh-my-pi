@@ -2841,8 +2841,7 @@ async function driveSessionToResult(
 			if (!recoverableStop || abortSignal.aborted || endsRun(err)) throw err;
 		} finally {
 			// The brief's admission lifetime ends with its first turn, however that turn ends.
-			const ref = AgentRegistry.global().get(session.getAgentId?.() ?? "");
-			if (ref?.session === session) ref.initialPromptPending = false;
+			AgentRegistry.global().clearInitialPromptPending(session.getAgentId?.() ?? "", session);
 		}
 	};
 
@@ -5365,8 +5364,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						resolveServiceTierByFamily,
 						onFirstChatDispatch: () => {
 							firstChatDispatchAt ??= performance.now();
-							const ref = AgentRegistry.global().get(id);
-							if (ref?.session === session) ref.initialPromptPending = false;
+							if (session) AgentRegistry.global().clearInitialPromptPending(id, session);
 						},
 					}),
 				);
