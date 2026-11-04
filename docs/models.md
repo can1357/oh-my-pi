@@ -412,8 +412,9 @@ models.yml `baseUrl` (built-in providers and models.yml `discovery:` providers a
 `fetchDynamicModels` roster has a namespace of its own, keyed by its extension source and its
 declared `api`, `apiKey`, `authHeader`, `headers` and `baseUrl`, never a built-in provider's. A
 built-in model manager's or `discovery:` provider's discovery request is sent only if the
-provider's configuration (endpoint, key and header config, owning registration) has not changed
-since the discovery started, even if it changed back, and its result is published only while the
+provider's configuration (its `discovery:` config, models.yml and runtime overrides, key
+configuration, keyless mode and owning registration, compared whole) has not changed since the
+discovery started, even if it changed back, and its result is published only while the
 configuration is, by value, the one it was fetched under. Removing or changing a models.yml
 `baseUrl` therefore reads a different namespace, and requests go to the newly configured endpoint
 (with no `baseUrl`, the built-in one) at once. A runtime override changes where requests go at

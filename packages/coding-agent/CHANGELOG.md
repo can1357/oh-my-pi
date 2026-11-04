@@ -19,6 +19,7 @@
 - Added `tui.spinnerInterval` (also `--spinner-interval` and `PI_SPINNER_INTERVAL`) to slow every spinner, the terminal title included, or pin them static with `0` ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - Added `tui.maxFps` (also `--max-fps` and `PI_MAX_FPS`) to cap how often the TUI repaints; keystroke echo keeps 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - Removing or changing a provider's `baseUrl` in models.yml now takes effect at once: models discovered through the old endpoint (a gateway, say), or by an extension that is gone, no longer keep sending requests, and the stored login, to it until the next model discovery
+- An extension's runtime API key for a provider keeps its precedence over that provider's models.yml key after models.yml is reloaded, instead of losing it at the first reload
 
 ### Changed
 
