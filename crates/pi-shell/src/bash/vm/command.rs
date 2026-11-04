@@ -1866,8 +1866,9 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 			} else {
 				false
 			};
+			let control = via == Via::Plain && vp.frames.last().is_some_and(|f| f.control_source);
 			// Outside posix mode a function name may contain a slash.
-			if via == Via::Plain && (!has_slash || !posix) && !special {
+			if via == Via::Plain && !control && (!has_slash || !posix) && !special {
 				let found = match state::record(cx.store, vp, Key::Func(BStr::new(name))) {
 					Ok(Some(Record::Func { .. })) => true,
 					Ok(_) => false,
@@ -1881,11 +1882,19 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 				}
 			}
 			let rctx = ResolveCtx { has_slash, via };
-			let resolved = match resolve(k, cx, vp, name, mode, rctx) {
-				Ok(resolved) => resolved,
-				Err(err) => {
-					k.fail(err);
-					return Some(Flow::Discard(1));
+			let control_intrinsic = if control {
+				IntrinsicId::lookup(name, mode)
+			} else {
+				None
+			};
+			let resolved = match control_intrinsic {
+				Some(id) => Resolved::Intrinsic(id),
+				None => match resolve(k, cx, vp, name, mode, rctx) {
+					Ok(resolved) => resolved,
+					Err(err) => {
+						k.fail(err);
+						return Some(Flow::Discard(1));
+					},
 				},
 			};
 			let ExecState { argv, arrayref, .. } = st(vp);
@@ -2189,6 +2198,10 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 				Ok(ProbeResult::Stat(Some(st))) => st.kind == StatKind::Dir,
 				Ok(_) => false,
 			};
+			let code = if dir { EACCES } else { ENOENT };
+			if exec_error_to_caller(k, cx, vp, code, if dir { 126 } else { 127 }) {
+				return None;
+			}
 			let (msg, status) = if dir {
 				(format!("{name}: cannot execute: Is a directory"), 126)
 			} else {
@@ -2297,7 +2310,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 			None
 		},
 		Target::External(path) | Target::Interp(path) => {
-			// zsh: the interpreter run for a refused script fails as it is.
+			// An interpreter substituted for a refused script fails as it is.
 			let interp = matches!(st(vp).target, Some(Target::Interp(_)));
 			// A spawn the host has not finished (`Live::Spawn`) is polled again
 			// as it is: its redirections and job id were handed over with the
@@ -2535,6 +2548,22 @@ fn spawned_external(
 			// `Target::Refused` (stage stays `Dispatch`).
 			let code = err.raw_os_error().unwrap_or_default();
 			st(vp).target = Some(Target::Refused { path, code });
+		},
+		Err(err)
+			if is_enoexec(&err)
+				&& !interp
+				&& vp.runs.front().is_some_and(|run| run.report_exec_error) =>
+		{
+			// execvp's fallback is the platform /bin/sh, not another run of
+			// this engine. Keep this exec's fds, environment and lineage.
+			let s = st(vp);
+			s.argv[0] = path;
+			s.argv.insert(0, BString::from("/bin/sh"));
+			if let Some(how) = &mut s.exec_as {
+				how.argv0 = None;
+				how.login = false;
+			}
+			s.target = Some(Target::Interp(BString::from("/bin/sh")));
 		},
 		Err(err) if is_enoexec(&err) && !interp => {
 			// Retried as `Target::Script` (stage stays `Dispatch`).
@@ -4067,7 +4096,11 @@ fn exec_builtin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> O
 		s.stage = Stage::Output;
 		return None;
 	}
-	let target = if zsh
+	let target = if cfg!(unix) && vp.runs.front().is_some_and(|run| run.report_exec_error) {
+		// exec already preselects its target, before `lookup` runs again.
+		// Preserve the requested name for the host's actual execvp search.
+		Some(Target::External(name))
+	} else if zsh
 		&& !state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Posixbuiltins).unwrap_or(false)
 	{
 		// zsh `exec` is a precommand modifier: a function or builtin runs
@@ -4753,6 +4786,41 @@ pub fn command_probe(
 	answer
 }
 
+/// The OS's "no such file or directory" (`ERROR_FILE_NOT_FOUND` on Windows).
+const ENOENT: i32 = 2;
+/// The OS's "permission denied" (`ERROR_ACCESS_DENIED` on Windows).
+const EACCES: i32 = if cfg!(windows) { 5 } else { 13 };
+
+/// When `vp`'s run reports its own `exec` errors to its caller
+/// ([`super::Script::report_exec_error`]) and this failure is an `exec`'s:
+/// records `code` for the caller and ends that `exec` with `status`, printing
+/// nothing. `false` otherwise.
+fn exec_error_to_caller(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+	code: i32,
+	status: i32,
+) -> bool {
+	if st(vp).exec_as.is_none() {
+		return false;
+	}
+	let Some(run) = vp
+		.runs
+		.front()
+		.filter(|run| run.report_exec_error)
+		.map(|run| run.id)
+	else {
+		return false;
+	};
+	k.exec_errors.insert(run, code);
+	let s = st(vp);
+	s.status = status;
+	s.stage = Stage::Output;
+	exec_failed(k, cx, vp);
+	true
+}
+
 /// After a failed `exec command`: the shell exits with the failure status
 /// (`Transfer::Exec`), unless it is not a subshell and `execfail` is set or
 /// it is interactive (bash's `no_exit_on_failed_exec`). Then it goes on, and
@@ -4875,6 +4943,9 @@ fn refused(
 	};
 	let enoent = err.kind() == ErrorKind::NotFound;
 	let mut status = if enoent { 127 } else { 126 };
+	if exec_error_to_caller(k, cx, vp, code, status) {
+		return None;
+	}
 	let stat = match command_probe(k, cx, vp, &Probe::Stat { path: path.clone(), follow: true }) {
 		Err(key) => return Some(Flow::Block(key)),
 		Ok(ProbeResult::Stat(stat)) => stat,

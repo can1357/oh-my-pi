@@ -663,7 +663,8 @@ impl Driver {
 	/// host callout ([`ToolCalls::on_done`]); nothing else submits scripts.
 	fn on_done(&mut self, run: RunId, status: i32) {
 		let signal = self.shell.exec_signal(run);
-		self.tools.on_done(run, status, signal);
+		let exec_error = self.shell.exec_error(run);
+		self.tools.on_done(run, status, signal, exec_error);
 	}
 
 	/// Start a host callout ([`crate::bash::Resolved::Tool`]).

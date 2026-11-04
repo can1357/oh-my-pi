@@ -42,3 +42,63 @@ fn bash_command_survives_a_snapshot_inside_a_trap() {
 	let (out, _) = same_under_snapshots(b"trap ': x; echo \"[$BASH_COMMAND]\"' DEBUG; echo one");
 	assert_eq!(out, b"[echo one]\none\n");
 }
+
+/// An exec refusal is already known while the EXIT trap runs. It is part
+/// of the resumable run, not an external resource lost by restoration.
+#[cfg(unix)]
+#[test]
+fn a_pending_exec_error_survives_the_exit_trap_snapshot() {
+	use crate::{
+		bash::{Budget, Cx, Script, ShellInit, Step, VprocSel},
+		sys::NativeSpawner,
+		testkit::Rig,
+	};
+	for snapshot in [false, true] {
+		let spawner = NativeSpawner::default();
+		let host = FakeHost::new().with_spawner(Box::new(move |spec| spawner.spawn(spec)));
+		let mut rig = Rig::new(host, ShellInit::default());
+		let mut script = Script::command(
+			b"trap 'for i in 1 2 3 4 5 6 7 8 9 10; do :; done' EXIT; exec /no-such-exec-18004"
+				.as_slice(),
+		);
+		script.report_exec_error = true;
+		script.vproc = VprocSel::NewSubshell;
+		let id = rig.shell().submit(script);
+		let mut complete = false;
+		for _ in 0..1000 {
+			let (shell, host, store) = rig.parts();
+			let step = shell.step(&mut Cx { host, store }, Budget { max_ops: 1, ..Budget::default() });
+			if let Step::Done { run, status } = step {
+				assert_eq!(run, id);
+				assert_eq!(status, 127);
+				assert_eq!(shell.exec_error(id), Some(libc::ENOENT), "snapshot={snapshot}");
+				complete = true;
+				break;
+			}
+			if snapshot {
+				rig.snapshot();
+			}
+		}
+		assert!(complete, "exec did not finish");
+		if snapshot {
+			assert!(rig.snapshots > 10, "did not snapshot the trap");
+		}
+	}
+}
+
+#[test]
+fn control_source_namespace_survives_snapshots_without_changing_user_eval() {
+	use crate::{
+		bash::{Script, ShellInit, VprocSel},
+		testkit::Rig,
+	};
+	let mut rig = Rig::new(FakeHost::new(), ShellInit::default());
+	rig.run(Script::command(b"command() { echo USER:$*; }".as_slice()), Fault::None);
+	let mut script = Script::command(b"command echo HOST; command eval 'command data'".as_slice());
+	script.vproc = VprocSel::NewSubshell;
+	script.control_source = true;
+	assert_eq!(rig.run(script, Fault::Snapshot { every: 1 }), 0);
+	assert!(rig.snapshots > 0);
+	rig.run(Script::command(b"command root".as_slice()), Fault::None);
+	assert_eq!(rig.host.stdout.bytes(), b"HOST\nUSER:data\nUSER:root\n");
+}

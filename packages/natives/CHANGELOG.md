@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `env` and `xargs` now use the command's real exec errors when searching `PATH` and reporting a command they cannot run, instead of stopping at the first executable-looking file or replacing the error with "No such file or directory" ([#18004](https://github.com/can1357/oh-my-pi/pull/18004) by [@sjawhar](https://github.com/sjawhar))
 ### Changed
 
 - Native builds now reuse the shared diff implementation, and macOS display discovery no longer needs a separate capture library

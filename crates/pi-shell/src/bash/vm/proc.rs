@@ -800,6 +800,10 @@ pub struct Run {
 	pub env:               Vec<(BString, BString)>,
 	pub started:           bool,
 	pub exit_trap_started: bool,
+	/// [`Script::report_exec_error`](super::Script::report_exec_error).
+	pub report_exec_error: bool,
+	/// [`Script::control_source`](super::Script::control_source).
+	pub control_source:    bool,
 }
 
 /// What kind of activation a frame is.
@@ -992,6 +996,8 @@ pub struct Frame {
 	/// default state: no allocation per call, and 40 bytes less per frame
 	/// (idle vproc ≤ 2 KiB).
 	pub getopts:           Option<Box<GetoptsState>>,
+	/// This frame's source belongs to the host, not user alias/function scope.
+	pub control_source:    bool,
 }
 
 impl Frame {
@@ -1017,6 +1023,7 @@ impl Frame {
 			ignore_errexit: false,
 			subshell_line: None,
 			getopts: None,
+			control_source: false,
 		}
 	}
 }
@@ -1556,8 +1563,8 @@ pub enum Target {
 	/// An external without `#!` that the OS refused (`ENOEXEC`): read it and
 	/// run it as a script in a subshell, as bash does.
 	Script(BString),
-	/// zsh `zexecve`: the `#!` interpreter run in place of a script the OS
-	/// refused (an external that gets no second substitution).
+	/// An interpreter run in place of a refused script (zsh `#!` handling
+	/// or execvp's `/bin/sh` fallback), with no second substitution.
 	Interp(BString),
 	/// PATH search in progress.
 	Search,

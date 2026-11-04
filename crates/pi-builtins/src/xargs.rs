@@ -12,7 +12,7 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches};
 
-use crate::host::{CommandStatus, Host, RunningCommand, ShellCommand, Utility, matches_parser};
+use crate::host::{CommandStatus, Host, RunningCommand, ShellCommand, Utility, matches_parser, strip_errno};
 
 mod options {
 	pub const COMMAND: &str = "COMMAND";
@@ -300,7 +300,8 @@ enum CommandExecutionError {
 	// exit code 255
 	UrgentlyFailed,
 	Killed { name: OsString, signal: i32 },
-	CannotRun(io::Error),
+	/// The command named `name` could not run (GNU: status 126).
+	CannotRun { name: OsString, error: io::Error },
 	/// Nothing runs under this command name (GNU: status 127).
 	NotFound(OsString),
 }
@@ -312,7 +313,7 @@ impl Display for CommandExecutionError {
 			Self::Killed { name, signal } => {
 				write!(f, "{}: terminated by signal {signal}", name.to_string_lossy())
 			},
-			Self::CannotRun(err) => write!(f, "Command could not be run: {err}"),
+			Self::CannotRun { name, error } => write!(f, "{}: {}", name.to_string_lossy(), strip_errno(error)),
 			Self::NotFound(name) => write!(f, "{}: No such file or directory", name.to_string_lossy()),
 		}
 	}
@@ -341,7 +342,7 @@ fn cannot_run(error: io::Error, name: &OsStr) -> CommandExecutionError {
 	if error.kind() == io::ErrorKind::NotFound {
 		CommandExecutionError::NotFound(name.to_owned())
 	} else {
-		CommandExecutionError::CannotRun(error)
+		CommandExecutionError::CannotRun { name: name.to_owned(), error }
 	}
 }
 
@@ -1144,7 +1145,7 @@ impl Utility for Xargs {
 					match command_error {
 						CommandExecutionError::UrgentlyFailed => 124,
 						CommandExecutionError::Killed { .. } => 125,
-						CommandExecutionError::CannotRun(_) => 126,
+						CommandExecutionError::CannotRun { .. } => 126,
 						CommandExecutionError::NotFound(_) => 127,
 					}
 				} else {
@@ -1551,7 +1552,7 @@ mod tests {
 		let (code, _, err) = run_simple(&["cd"], "definitely-missing-dir\n").await;
 		assert_eq!(code, 123);
 		assert!(err.contains("cd:"), "got: {err:?}");
-		assert!(!err.contains("could not be run"), "got: {err:?}");
+		assert!(!err.contains("xargs:"), "got: {err:?}");
 	}
 
 	#[tokio::test]
@@ -1561,14 +1562,15 @@ mod tests {
 		assert_eq!(err, "xargs: definitely-not-a-real-command-xyz: No such file or directory\n");
 	}
 
+	/// Contract: a command that cannot be executed fails as GNU `xargs`
+	/// reports it after `execvp`: 126, `xargs: NAME: STRERROR`.
 	#[cfg(unix)]
 	#[tokio::test]
 	async fn unexecutable_command_yields_126() {
 		let file = tempfile::NamedTempFile::new().expect("temporary command");
 		let command = file.path().to_str().expect("utf8 temporary path");
 		let (code, _, err) = run_simple(&[command], "x\n").await;
-		assert_eq!(code, 126);
-		assert!(err.contains("could not be run"), "got: {err:?}");
+		assert_eq!((code, err), (126, format!("xargs: {command}: Permission denied\n")));
 	}
 
 	#[tokio::test]

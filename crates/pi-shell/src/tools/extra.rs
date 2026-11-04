@@ -3,15 +3,15 @@
 //! ([`crate::extras`]), and its [`CommandRunner`] hands each command to the
 //! driver, which runs it in a subshell of the caller.
 //!
-//! As in pi, a command is looked up before it runs, so the utility reports
-//! a missing or unexecutable command in its own words (`xargs: nope: No such
-//! file or directory`, status 127): a builtin (an engine intrinsic, a tool or
-//! an extra) runs through `command`, so shell functions never run, as in
-//! pi's earlier shell; any other name is searched on the
-//! command's own `PATH` (with environment changes applied; the C library's
-//! default path without one) and runs by absolute path through `exec -a`, so
-//! the program sees the name it was asked for. Environment changes (`env -i`,
-//! `-u`, `NAME=VALUE`) apply in the subshell before the command, in order.
+//! A builtin (an engine intrinsic, a tool or an extra) runs through
+//! `command`, so shell functions never run. An external runs through
+//! `exec -a` with the name it was asked for as argv[0]. The host tries the
+//! command's own PATH with execvp's error-selection rules and /bin/sh
+//! fallback, or executes a name with a slash directly. No metadata guess
+//! ends the search before the real exec. A refusal reaches the utility
+//! through [`Script::report_exec_error`], so it can report its own name
+//! and the OS error (126, or 127 for ENOENT). Environment changes (`env -i`,
+//! `-u`, `NAME=VALUE`) apply in the subshell before the exec, in order.
 //!
 //! The subshell's stdin is what the utility asks for (the null device by
 //! default; `env`'s own stdin is the caller's fd 0); stdout and stderr are the
@@ -26,7 +26,7 @@ use std::{
 	ffi::OsStr,
 	future::Future,
 	io,
-	path::{Path, PathBuf},
+	path::PathBuf,
 	pin::Pin,
 	sync::Arc,
 	task::{Context, Poll, Waker},
@@ -44,13 +44,6 @@ use crate::{
 	},
 	extras::Done,
 	sys::StdFile,
-};
-
-/// `execvp`'s search path when a command's environment has no `PATH`.
-const DEFAULT_PATH: &str = if cfg!(any(target_os = "linux", target_os = "android")) {
-	"/bin:/usr/bin"
-} else {
-	"/usr/bin:/bin"
 };
 
 /// How a command a utility asked for ended, back to the utility.
@@ -117,11 +110,7 @@ impl Extra {
 				turn.config,
 			);
 			invocation.cancel = Some(cancel.clone());
-			let lookup = Lookup {
-				path:   invocation.env.get("PATH").cloned(),
-				cwd:    invocation.cwd.clone(),
-				config: turn.config.clone(),
-			};
+			let lookup = Lookup { config: turn.config.clone() };
 			invocation.commands =
 				Some(Box::new(Runner { requests, waker: turn.waker.clone(), lookup }));
 			let done = crate::extras::spawn(&runtime, invocation);
@@ -147,16 +136,25 @@ impl Extra {
 	}
 
 	/// `run` ended with `status`; `false` when it is not one of this call's
-	/// commands.
-	pub(super) fn on_done(&mut self, run: RunId, status: i32, signal: Option<i32>) -> bool {
+	/// commands. `exec_error` is the OS error of its program's `exec`.
+	pub(super) fn on_done(
+		&mut self,
+		run: RunId,
+		status: i32,
+		signal: Option<i32>,
+		exec_error: Option<i32>,
+	) -> bool {
 		let Some(at) = self.runs.iter().position(|(r, _)| *r == run) else {
 			return false;
 		};
 		let (_, reply) = self.runs.swap_remove(at);
 		let code = u8::try_from(status.rem_euclid(256)).unwrap_or(u8::MAX);
+		let outcome = match exec_error {
+			Some(error) => Err(io::Error::from_raw_os_error(error)),
+			None => Ok(signal.map_or(CommandStatus::Exited(code), CommandStatus::Signaled)),
+		};
 		// The utility may have stopped waiting (cancelled).
-		let outcome = signal.map_or(CommandStatus::Exited(code), CommandStatus::Signaled);
-		let _ = reply.send(Ok(outcome));
+		let _ = reply.send(outcome);
 		true
 	}
 
@@ -249,6 +247,8 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 	script.foreign_env = foreign_env;
 	script.unexport_env = unexport_env;
 	script.args = Some(args);
+	script.report_exec_error = matches!(program, Program::Path(_));
+	script.control_source = true;
 	// The working directory is logical, as after `cd`: `-execdir` hands over
 	// `<root>/./sub`, and the command's `$PWD` is `<root>/sub`.
 	script.cwd = command
@@ -334,59 +334,26 @@ fn cancelled() -> io::Error {
 	io::Error::new(io::ErrorKind::Interrupted, "command cancelled")
 }
 
-/// What a command name runs, as of the utility's start.
+/// Whether the command runs in-process; external lookup belongs to exec.
 struct Lookup {
-	/// The utility's `PATH`.
-	path:   Option<String>,
-	/// The utility's working directory.
-	cwd:    PathBuf,
 	config: ToolConfig,
 }
 
 impl Lookup {
-	/// How `command` runs; `NotFound` when nothing has its name,
-	/// `PermissionDenied` when only files that cannot be executed have it.
+	/// Do not predict an exec from metadata: permissions and interpreters
+	/// are decided by the OS. A bare name reaches the host's execvp search
+	/// with its actual environment; a path reaches execve unchanged.
 	fn program(&self, command: &ShellCommand) -> io::Result<Program> {
 		let name = command
 			.args()
 			.first()
+			.filter(|name| !name.is_empty())
 			.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-		let cwd = command.dir().unwrap_or(&self.cwd);
-		if has_separator(name) {
-			return match executable(&cwd.join(name)) {
-				Some(true) => Ok(Program::Path(cwd.join(name))),
-				Some(false) => Err(io::ErrorKind::PermissionDenied.into()),
-				None => Err(io::ErrorKind::NotFound.into()),
-			};
-		}
-		if self.builtin(name) {
-			return Ok(Program::Builtin);
-		}
-		let path = command
-			.env_changes()
-			.iter()
-			.fold(self.path.as_deref(), |path, change| match change {
-				EnvChange::Clear => None,
-				EnvChange::Remove(var) if var == "PATH" => None,
-				EnvChange::Set(var, value) if var == "PATH" => Some(value.as_str()),
-				_ => path,
-			})
-			.unwrap_or(DEFAULT_PATH);
-		let mut denied = false;
-		for dir in std::env::split_paths(OsStr::new(path)) {
-			let candidate = cwd.join(dir).join(name);
-			match executable(&candidate) {
-				Some(true) => return Ok(Program::Path(candidate)),
-				Some(false) => denied = true,
-				None => {},
-			}
-		}
-		let kind = if denied {
-			io::ErrorKind::PermissionDenied
+		if !has_separator(name) && self.builtin(name) {
+			Ok(Program::Builtin)
 		} else {
-			io::ErrorKind::NotFound
-		};
-		Err(kind.into())
+			Ok(Program::Path(PathBuf::from(name)))
+		}
 	}
 
 	/// Whether `name` runs in-process: an engine intrinsic, a tool or an
@@ -402,22 +369,6 @@ impl Lookup {
 fn has_separator(name: &OsStr) -> bool {
 	let bytes = name.as_encoded_bytes();
 	bytes.contains(&b'/') || (cfg!(windows) && bytes.contains(&b'\\'))
-}
-
-/// `Some(true)` for an executable file at `path`, `Some(false)` for a file
-/// that is not executable, `None` for nothing (or a directory).
-#[cfg(unix)]
-fn executable(path: &Path) -> Option<bool> {
-	use std::os::unix::fs::PermissionsExt as _;
-	let meta = std::fs::metadata(path)
-		.ok()
-		.filter(std::fs::Metadata::is_file)?;
-	Some(meta.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
-fn executable(path: &Path) -> Option<bool> {
-	(path.is_file() || path.with_extension("exe").is_file()).then_some(true)
 }
 
 #[cfg(test)]

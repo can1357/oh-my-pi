@@ -337,7 +337,9 @@ pub trait Task: Send {
 
 /// Arguments of [`Host::spawn`].
 pub struct SpawnSpec<'a> {
-	/// Absolute program path.
+	/// Program path, relative to `cwd` when not absolute. On Unix a bare
+	/// name asks for execvp search in `env`'s PATH and `/bin/sh` fallback.
+	/// Other platforms receive a path resolved by the engine.
 	pub path:        &'a BStr,
 	/// Argument vector (`argv[0]` included).
 	pub argv:        &'a [BString],

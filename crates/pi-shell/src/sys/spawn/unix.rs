@@ -687,8 +687,88 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	}))
 }
 
-/// Spawn by the best path; returns the pid and the placement that took.
+/// A bare name is a utility's execvp request. Try real execs rather than
+/// selecting by metadata: an executable bit says nothing about this user's
+/// permissions or the existence of a shebang interpreter.
 fn launch(
+	state: &State,
+	prog: &Program<'_>,
+	fds: &[(i32, Source)],
+	place: Place,
+) -> io::Result<(i32, Place)> {
+	if prog.path.contains(&b'/') {
+		return launch_resolved(state, prog, fds, place);
+	}
+	if prog.path.is_empty() {
+		return Err(io::Error::from_raw_os_error(libc::ENOENT));
+	}
+	let default: &[u8] = if cfg!(any(target_os = "linux", target_os = "android")) {
+		b"/bin:/usr/bin"
+	} else {
+		b"/usr/bin:/bin"
+	};
+	let path = prog.env.get(b"PATH").map_or(default, |p| p.as_ref());
+	let mut candidate = Vec::new();
+	let mut denied = false;
+	let mut last = libc::ENOENT;
+	let path_bound = path.len().min(libc::PATH_MAX as usize - 1) + 1;
+	let mut rest = path;
+	loop {
+		let end = rest.iter().position(|&c| c == b':').unwrap_or(rest.len());
+		let dir = &rest[..end];
+		if dir.len() >= path_bound {
+			if end == rest.len() {
+				break;
+			}
+			// glibc retains this separator when it skips an oversized
+			// component. The next probe is therefore the empty component.
+			rest = &rest[end..];
+			continue;
+		}
+		candidate.clear();
+		candidate.extend_from_slice(dir);
+		if !dir.is_empty() {
+			candidate.push(b'/');
+		}
+		candidate.extend_from_slice(prog.path);
+		let attempt = Program { path: &candidate, ..*prog };
+		let result = launch_resolved(state, &attempt, fds, place).or_else(|error| {
+			if error.raw_os_error() != Some(libc::ENOEXEC) {
+				return Err(error);
+			}
+			// execvp runs a text file with the platform sh, preserving
+			// its arguments after argv[0]. It does not search later files
+			// if sh starts and then reports an error in that script.
+			let mut argv = Vec::with_capacity(prog.argv.len() + 1);
+			argv.push(BString::from("/bin/sh"));
+			argv.push(BString::from(candidate.as_slice()));
+			argv.extend_from_slice(prog.argv.get(1..).unwrap_or_default());
+			launch_resolved(state, &Program { path: b"/bin/sh", argv: &argv, ..*prog }, fds, place)
+		});
+		match result {
+			Ok(child) => return Ok(child),
+			Err(error) => {
+				last = match error.raw_os_error() {
+					Some(code) => code,
+					None => return Err(error),
+				};
+				match last {
+					libc::EACCES => denied = true,
+					libc::ENOENT | libc::ENOTDIR | libc::ESTALE | libc::ENODEV | libc::ETIMEDOUT => {},
+					_ => return Err(error),
+				}
+			},
+		}
+		if end == rest.len() {
+			break;
+		}
+		rest = &rest[end + 1..];
+	}
+	Err(io::Error::from_raw_os_error(if denied { libc::EACCES } else { last }))
+}
+
+/// Spawn by the best path; returns the pid and the placement that took.
+fn launch_resolved(
 	state: &State,
 	prog: &Program<'_>,
 	fds: &[(i32, Source)],
