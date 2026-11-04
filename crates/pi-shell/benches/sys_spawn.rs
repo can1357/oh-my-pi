@@ -9,19 +9,25 @@
 //!   (pump thread + completion on drain).
 //!
 //! Run: `cango bench -p pi-shell --bench sys_spawn`.
+//! Reports median and p99 after untimed warmup, like the engine benches.
+
+#[cfg(unix)]
+#[path = "common/statistics.rs"]
+mod statistics;
 
 #[cfg(unix)]
 mod unix {
 	use std::{
 		hint::black_box,
 		io,
+		process::Command,
 		sync::Arc,
 		task::{Context, Poll, Wake, Waker},
 		thread,
+		time::Instant,
 	};
 
 	use bstr::{BString, ByteSlice};
-	use criterion::Criterion;
 	use pi_shell::{
 		bash::{
 			CmdTag, EnvView, ExitStatus, ExtProc, File, FileKind, JobId, OsHandle, PgroupSpec, RunId,
@@ -29,6 +35,8 @@ mod unix {
 		},
 		sys::NativeSpawner,
 	};
+
+	use crate::statistics::quantiles;
 
 	struct Unpark(thread::Thread);
 
@@ -102,47 +110,53 @@ mod unix {
 			rlimits: &[],
 			lineage: pi_shell::bash::Lineage::default(),
 			redirs: None,
+			ctty: None,
 		}
 	}
 
-	pub fn spawn(c: &mut Criterion) {
+	const WARMUP: usize = 50;
+	const ITERS: usize = 1_000;
+
+	fn measure<T>(name: &str, mut run: impl FnMut() -> T) {
+		for _ in 0..WARMUP {
+			black_box(run());
+		}
+		let mut samples = Vec::with_capacity(ITERS);
+		for _ in 0..ITERS {
+			let start = Instant::now();
+			black_box(run());
+			samples.push(start.elapsed());
+		}
+		let (median, p99) = quantiles(&mut samples);
+		println!("{name}: median {median:?}, p99 {p99:?} over {ITERS} iterations");
+	}
+
+	/// Measure the four external-process spawn paths with the engine bench
+	/// reporter.
+	pub fn run() {
 		let argv = vec![BString::from("/usr/bin/true")];
 		let env = EnvView::default();
 		let host = process_umask();
 		let s = NativeSpawner::default();
-		c.bench_function("std_command", |b| {
-			b.iter(|| {
-				black_box(
-					std::process::Command::new("/usr/bin/true")
-						.status()
-						.unwrap(),
-				)
-			});
+		measure("std_command", || Command::new("/usr/bin/true").status().unwrap());
+		measure("posix_spawn", || wait(s.spawn(spec(&argv, &env, host, StdioSpec::Null)).unwrap()));
+		measure("fork_exec", || {
+			wait(
+				s.spawn(spec(&argv, &env, host ^ 0o002, StdioSpec::Null))
+					.unwrap(),
+			)
 		});
-		c.bench_function("posix_spawn", |b| {
-			b.iter(|| black_box(wait(s.spawn(spec(&argv, &env, host, StdioSpec::Null)).unwrap())));
-		});
-		c.bench_function("fork_exec", |b| {
-			b.iter(|| {
-				black_box(wait(
-					s.spawn(spec(&argv, &env, host ^ 0o002, StdioSpec::Null))
-						.unwrap(),
-				))
-			});
-		});
-		c.bench_function("posix_spawn_pumped", |b| {
-			b.iter(|| {
-				let out = StdioSpec::File(Box::new(Sink));
-				black_box(wait(s.spawn(spec(&argv, &env, host, out)).unwrap()))
-			});
+		measure("posix_spawn_pumped", || {
+			let out = StdioSpec::File(Box::new(Sink));
+			wait(s.spawn(spec(&argv, &env, host, out)).unwrap())
 		});
 	}
 }
 
 #[cfg(unix)]
-criterion::criterion_group!(benches, unix::spawn);
-#[cfg(unix)]
-criterion::criterion_main!(benches);
+fn main() {
+	unix::run();
+}
 
 #[cfg(not(unix))]
 fn main() {}
