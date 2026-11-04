@@ -1,12 +1,11 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import type { JsDisplayOutput } from "../../eval/js/shared/types";
+import type { EvalDisplayOutput } from "../../eval/types";
 
 /**
- * Accumulates a browser run's result entries: explicit `display()` payloads,
- * screenshot captions/images, and buffered stream text (`console.*`, `print`,
- * `display()` of strings/primitives — `JsRuntime.displayValue` emits those via
- * `onText`). Stream text is buffered and flushed as one entry before the next
- * display/screenshot (and on `finish()`) so it reaches the tool result in
+ * Accumulates a browser run's result entries: printed images, status events,
+ * screenshot captions/images, and buffered stream text (`console.*`, `print`).
+ * Stream text is buffered and flushed as one entry before the next
+ * image/status/screenshot (and on `finish()`) so it reaches the tool result in
  * order instead of vanishing into the debug log.
  */
 export class RunOutput {
@@ -18,18 +17,14 @@ export class RunOutput {
 		this.#textBuffer += chunk;
 	}
 
-	/** Append a `display()` payload (image/json/status), flushing buffered text first. */
-	pushDisplay(output: JsDisplayOutput): void {
+	/** Append a runtime display output (image/status), flushing buffered text first. Views add nothing: their text is already in the stream. */
+	pushDisplay(output: EvalDisplayOutput): void {
 		if (output.type === "image") {
 			this.push({ type: "image", data: output.data, mimeType: output.mimeType });
 			return;
 		}
-		if (output.type === "json") {
-			this.push({ type: "text", text: safeJsonStringify(output.data) });
-			return;
-		}
-		// status — surface as compact JSON so helper side effects (read/write/env) appear in
-		// the cell result alongside explicit display() output.
+		if (output.type === "view") return;
+		// status — surface as JSON so helper side effects (read/write/env) appear in the cell result.
 		this.push({ type: "text", text: safeJsonStringify(output.event) });
 	}
 

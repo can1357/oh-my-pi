@@ -18,12 +18,12 @@ import {
 	skillChipStyle,
 } from "../prompt/composer-attachments";
 import { MODEL_MENTION_TAG_RE } from "../prompt/model-mention-syntax";
-import { expandKeyHint, fileHyperlink } from "../render";
-import { imageReferenceHyperlink } from "../prompt/image-references";
+import { expandKeyHint, fileHyperlink, fileLinkSpan } from "../render";
+import { imageLinksEnabled, imageReferenceHyperlink } from "../prompt/image-references";
 import { highlightMagicKeywords } from "../prompt/magic-keywords";
 import type { ReactionTarget } from "./reaction";
 import { card, md, node, row, span, text } from "../native/describe";
-import { base64ImageNode } from "../native/blobs";
+import { base64ImageNode, openableImageProps } from "../native/blobs";
 import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions";
 import {
 	type DescribeContext,
@@ -145,8 +145,9 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 	readonly #tokens: RegExp;
 	#reaction: string | undefined;
 	#native: NativeNode | undefined;
-	/** The terminal's clock {@link #native} was described with. */
+	/** The terminal's clock and the image link policy {@link #native} was described with. */
 	#nativeHour12: boolean | undefined;
+	#nativeLinked = false;
 
 	constructor(text: string, options: UserBubbleOptions = {}) {
 		super();
@@ -195,44 +196,60 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 	/**
 	 * A head-less user-toned frame with the prompt as markdown under its
 	 * attached images (titled `#N` like their chips, opening the materialized
-	 * file on click): the fill says "you". A quiet toolbar (time, Copy, Rewind) fades in on hover when the
-	 * host handles transcript actions. The live-steering marker and the
+	 * file on click): the fill says "you". A quiet footer like a turn's usage line
+	 * (`⧉ ⏪ · 09:45`: Copy, Rewind, the time sent) fades in at its bottom-left on hover when
+	 * the host handles transcript actions. The live-steering marker and the
 	 * agent's reaction are chips at the bottom-right, so a reaction landing
 	 * later updates the frame in place, even deep in scrollback.
 	 */
 	override describe(cx?: DescribeContext): NativeNode {
 		// The terminal's clock: Bun's own default locale ignores the user's.
 		const hour12 = cx?.hour12;
-		if (this.#native && this.#nativeHour12 === hour12) return this.#native;
+		// Chip marks and thumbnails carry links only under an enabled policy.
+		const linked = imageLinksEnabled();
+		if (this.#native && this.#nativeHour12 === hour12 && this.#nativeLinked === linked) return this.#native;
 		this.#nativeHour12 = hour12;
+		this.#nativeLinked = linked;
 		const children: NativeChild[] = [];
 		if (!this.#synthetic && hasTranscriptActions()) {
-			const tools: NativeChild[] = [];
+			const tools: NativeChild[] = [
+				// `copy-message`, not Tern's local `copy` (that would copy the icon's empty label).
+				node(
+					"icon",
+					{
+						name: "copy",
+						role: "omp.user.tool",
+						title: "Copy message",
+						aria: "Copy message",
+						actions: { click: "copy-message" },
+					},
+					undefined,
+					"copy",
+				),
+				node(
+					"icon",
+					{
+						name: "rewind",
+						role: "omp.user.tool",
+						title: "Rewind the conversation to an earlier message",
+						aria: "Rewind",
+						actions: { click: "rewind" },
+					},
+					undefined,
+					"rewind",
+				),
+			];
 			if (this.#timestamp !== undefined) {
 				const at = new Date(this.#timestamp);
 				tools.push(
+					node("text", { text: "·" }, undefined, "dot"),
 					text([span(at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12 }), "dim mono")], {
 						role: "omp.user.time",
 						title: at.toLocaleString([], { hour12 }),
 					}),
 				);
 			}
-			tools.push(
-				// `copy-message`, not Tern's local `copy` (that would copy the label).
-				text("Copy", {
-					role: "omp.user.tool",
-					actions: { click: "copy-message" },
-					title: "Copy message",
-					key: "copy",
-				}),
-				text("Rewind", {
-					role: "omp.user.tool",
-					actions: { click: "rewind" },
-					title: "Rewind the conversation to an earlier message",
-					key: "rewind",
-				}),
-			);
-			children.push(node("row", { gap: "xs", role: "omp.user.tools" }, tools, "tools"));
+			children.push(node("row", { gap: "xs", align: "center", role: "omp.user.tools" }, tools, "tools"));
 		}
 		// Videos keep their chip only: the native image node decodes stills.
 		const thumbs: NativeNode[] = [];
@@ -240,16 +257,14 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 			this.#images.forEach((image, i) => {
 				if (!image.mimeType.startsWith("image/")) return;
 				const label = `#${i + 1}`;
-				const link = this.#imageLinks?.[i];
-				// A click zooms the image in the terminal; the file opens from its context menu.
-				const open = link ? { href: link, actions: { menu: ["open"] } } : {};
+				const open = openableImageProps(linked ? this.#imageLinks?.[i] : undefined);
 				thumbs.push(base64ImageNode(image.data, image.mimeType, { alt: label, title: label, ...open }, label));
 			});
 		}
 		if (thumbs.length > 0) {
 			children.push(row(thumbs, { gap: "sm", wrap: true, align: "start", role: "omp.user.images" }));
 		}
-		const marks = this.#synthetic ? [] : tokenMarks(this.#text, this.#tokens);
+		const marks = this.#synthetic ? [] : tokenMarks(this.#text, this.#tokens, this.#imageLinks);
 		children.push(md(this.#text, marks.length > 0 ? { marks } : undefined));
 		const badges: NativeChild[] = [];
 		if (this.#liveSteered) {
@@ -346,13 +361,13 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 /**
  * The composer tokens in `text` as `md` marks, styled as the composer
  * decorates them (`CustomEditor.describeDecorations`), so a sent prompt keeps
- * its chips highlighted.
+ * its chips highlighted. Image and video chips link to their file, as in text mode.
  */
-function tokenMarks(text: string, tokens: RegExp): TspSpan[] {
+function tokenMarks(text: string, tokens: RegExp, imageLinks: readonly (string | undefined)[] | undefined): TspSpan[] {
 	// One mark per distinct token: Tern styles every occurrence of its text.
-	const styles = new Map<string, string>();
+	const marks = new Map<string, TspSpan>();
 	const mark = (s: string) => (label: string) => {
-		styles.set(label, s);
+		marks.set(label, { t: label, s });
 		return "";
 	};
 	renderPlaceholders(
@@ -361,11 +376,16 @@ function tokenMarks(text: string, tokens: RegExp): TspSpan[] {
 			renderText: () => "",
 			renderSkill: mark("customMessageLabel strong"),
 			renderMention: mark("statusLineModel strong"),
-			renderReference: mark("accent strong"),
+			renderReference: (label, kind, index) => {
+				const s = "accent strong";
+				const link = kind === "image" || kind === "video" ? imageLinks?.[index - 1] : undefined;
+				marks.set(label, link ? fileLinkSpan(link, label, s) : { t: label, s });
+				return "";
+			},
 		},
 		tokens,
 	);
-	return [...styles].map(([t, s]) => ({ t, s }));
+	return [...marks.values()];
 }
 
 /**

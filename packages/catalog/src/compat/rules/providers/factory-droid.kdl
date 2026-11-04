@@ -12,6 +12,18 @@ provider "factory-droid" {
 	dynamic-models-authoritative #true
 	// Native subscription limits are not direct-host price-tier or capacity heuristics.
 	context-window-authoritative #true
+	// Factory's hosted HTTP routes refuse request bodies over 4,500,000 bytes.
+	// The native CLI keeps inline media under 3,500,000 base64 bytes, leaving
+	// ~1 MB for system, tools and text, but never evicts the newest user
+	// message's or newest tool result's media. Applied only on Factory's own
+	// hosts; a custom gateway baseUrl keeps its own limit.
+	inline-image-byte-budget 3500000
+	request-body-byte-limit 4500000
+	// Factory's own hosts per residency (wire/factory-droid.ts factoryDroidApiBaseUrl);
+	// seed rows are never bundled, so they are listed here for isCatalogEndpointUrl,
+	// which gates the budgets above (Factory's compat names no official endpoint).
+	endpoint-hosts "api.factory.ai" "api.eu.factory.ai"
+	catalog-endpoint-budgets #true
 
 	// The registry roster. Factory has no model-listing endpoint, so first-party
 	// clients ship this list and narrow it per account with feature flags, org
@@ -129,7 +141,25 @@ provider "factory-droid" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=922000 max-tokens=128000
 		}
+		model "gpt-6-astra-ultrafast" name="GPT-6 Astra Ultra Fast" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
 		model "gpt-6.1-sol" name="GPT-6.1 Sol" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
+		model "gpt-6.1-sol-ultrafast" name="GPT-6.1 Sol Ultra Fast" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
+		model "gpt-6.1-terra" name="GPT-6.1 Terra" {
 			reasoning #true
 			input "text" "image"
 			cost input=0 output=0 cache-read=0 cache-write=0
@@ -141,7 +171,19 @@ provider "factory-droid" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=922000 max-tokens=128000
 		}
+		model "gpt-6-sol-fast" name="GPT-6 Sol Fast Mode" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
 		model "gpt-6-luna" name="GPT-6 Luna" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=922000 max-tokens=128000
+		}
+		model "gpt-6-luna-fast" name="GPT-6 Luna Fast Mode" {
 			reasoning #true
 			input "text" "image"
 			cost input=0 output=0 cache-read=0 cache-write=0
@@ -327,11 +369,41 @@ provider "factory-droid" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=131072 max-tokens=131072
 		}
+		model "nemotron-3.5-super" name="Nemotron 3.5 Super" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=934464 max-tokens=65536
+		}
 		model "nemotron-3-ultra" name="Nemotron 3 Ultra" {
 			reasoning #true
 			input "text"
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=136464 max-tokens=65536
+		}
+		model "muse-spark-open" name="Muse Spark Open" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=908928 max-tokens=131072
+		}
+		model "muse-spark-1.2" name="Muse Spark 1.2" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=908928 max-tokens=131072
+		}
+		model "beam-1.0" name="Beam 1.0" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1015808 max-tokens=32768
+		}
+		model "deepseek-v4.1-flash-1017" name="DeepSeek V4.1 Flash 1017" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=908928 max-tokens=131072
 		}
 		model "deepseek-v4.1-flash" name="DeepSeek V4.1 Flash" {
 			reasoning #true
@@ -393,6 +465,26 @@ provider "factory-droid" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=196600 max-tokens=64000
 		}
+		// `generate_image` models, in the CLI's tool preference order. GPT Image 2
+		// is retired from the CLI's selectable chain and is not listed.
+		model "gpt-image-2.5-sunburst" name="GPT Image 2.5" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+		}
+		model "gpt-image-2.5-flare" name="GPT Image 2.5 Flare" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+		}
+		model "gemini-3-pro-image-preview" name="Gemini 3 Pro Image" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+		}
 	}
 
 	// Upstream serving regions (the CLI's upstream region table). A model's own
@@ -408,7 +500,10 @@ provider "factory-droid" {
 	// Per-model registry entries: live-routing family, upstream rotation (first
 	// entry is the default `x-api-provider`), region overrides, Standard Credits
 	// rates, list-price source, org-policy aliases, the effort ladder (an off/none
-	// rung means `thinking-requires-effort #false`), and account gates.
+	// rung means `thinking-requires-effort #false`), and account gates. A credit
+	// promotion is two dated `effective-rates` cards copied from the droid
+	// release's model registry: the discounted `input` from its start and the
+	// base again from its end.
 	models "claude-fable-5.1" {
 		routing-family "anthropic"
 		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic"
@@ -446,7 +541,7 @@ provider "factory-droid" {
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #true
 		thinking-default-level "medium"
-		entitlement { feature-flag "claude_opus_5_5_fast"; base-variant "claude-opus-5-5" }
+		entitlement { base-variant "claude-opus-5-5" }
 	}
 	models "claude-opus-5" {
 		routing-family "anthropic"
@@ -583,6 +678,20 @@ provider "factory-droid" {
 		thinking-requires-effort #true
 		thinking-default-level "medium"
 	}
+	models "gpt-6-astra-ultrafast" {
+		routing-family "openai"
+		upstream-rotation "openai"
+		region-upstreams-eu
+		credit-rates { input 24; output 5 }
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #true
+		thinking-default-level "medium"
+		entitlement {
+			feature-flag "gpt_6_astra_ultrafast"
+			base-variant "gpt-6-astra"
+			requires-explicit-opt-in #true
+		}
+	}
 	models "gpt-6.1-sol" {
 		routing-family "openai"
 		upstream-rotation "openai" "bedrock_openai" "databricks"
@@ -591,7 +700,28 @@ provider "factory-droid" {
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #true
 		thinking-default-level "medium"
-		entitlement { feature-flag "gpt_6_1_sol" }
+	}
+	models "gpt-6.1-sol-ultrafast" {
+		routing-family "openai"
+		upstream-rotation "openai"
+		credit-rates { input 4.8; output 5; cache-read 0.05 }
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #true
+		thinking-default-level "medium"
+		entitlement {
+			base-variant "gpt-6.1-sol"
+			requires-explicit-opt-in #true
+		}
+	}
+	models "gpt-6.1-terra" {
+		routing-family "openai"
+		upstream-rotation "openai"
+		credit-rates { input 0.4; output 5; cache-read 0.05 }
+		list-price-from "openai"
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "medium"
+		entitlement { feature-flag "gpt_6_1_terra" }
 	}
 	models "gpt-6-sol" {
 		routing-family "openai"
@@ -603,6 +733,15 @@ provider "factory-droid" {
 		thinking-requires-effort #false
 		thinking-default-level "medium"
 	}
+	models "gpt-6-sol-fast" {
+		routing-family "openai"
+		upstream-rotation "openai"
+		credit-rates { input 1.6; output 5 }
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "medium"
+		entitlement { base-variant "gpt-6-sol" }
+	}
 	models "gpt-6-luna" {
 		routing-family "openai"
 		upstream-rotation "openai" "bedrock_openai" "azure_openai"
@@ -613,11 +752,33 @@ provider "factory-droid" {
 		thinking-requires-effort #false
 		thinking-default-level "medium"
 	}
+	models "gpt-6-luna-fast" {
+		routing-family "openai"
+		upstream-rotation "openai"
+		credit-rates { input 0.08; output 5 }
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #false
+		thinking-default-level "medium"
+		entitlement { base-variant "gpt-6-luna" }
+	}
 	models "gpt-5.6-sol" {
 		routing-family "openai"
 		upstream-rotation "openai" "bedrock_openai" "azure_openai" "snowflake" "databricks"
 		region-upstreams-eu "openai"
-		credit-rates { input 2; output 5 }
+		credit-rates {
+			input 2
+			output 5
+			effective-rates {
+				promotion {
+					effective-from "2026-08-22T00:00:00Z"
+					input 1.6
+				}
+				standard {
+					effective-from "2026-11-22T00:00:00Z"
+					input 2
+				}
+			}
+		}
 		list-price-from "openai"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #false
@@ -626,7 +787,20 @@ provider "factory-droid" {
 	models "gpt-5.6-sol-fast" {
 		routing-family "openai"
 		upstream-rotation "openai" "azure_openai"
-		credit-rates { input 4; output 5 }
+		credit-rates {
+			input 4
+			output 5
+			effective-rates {
+				promotion {
+					effective-from "2026-08-22T00:00:00Z"
+					input 3.2
+				}
+				standard {
+					effective-from "2026-11-22T00:00:00Z"
+					input 4
+				}
+			}
+		}
 		policy-aliases "gpt-5.6-fast"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #false
@@ -655,7 +829,7 @@ provider "factory-droid" {
 	}
 	models "gpt-5.5" {
 		routing-family "openai"
-		upstream-rotation "openai" "bedrock_openai" "azure_openai" "snowflake" "databricks"
+		upstream-rotation "openai" "bedrock_openai" "azure_openai" "databricks"
 		region-upstreams-eu "openai"
 		credit-rates { input 2; output 6 }
 		list-price-from "openai"
@@ -690,6 +864,12 @@ provider "factory-droid" {
 		thinking-efforts "low" "medium" "high" "xhigh"
 		thinking-requires-effort #true
 		thinking-default-level "medium"
+	}
+	// The native 922K window is authoritative; the class-wide gpt-5.4 1M patch does not apply.
+	class "openai" {
+		models "gpt-5.4" {
+			limits-patch {}
+		}
 	}
 	models "gpt-5.4-fast" {
 		routing-family "openai"
@@ -772,7 +952,20 @@ provider "factory-droid" {
 		routing-family "google"
 		upstream-rotation "google"
 		region-upstreams-eu "google"
-		credit-rates { input 0.6; output 5 }
+		credit-rates {
+			input 0.6
+			output 5
+			effective-rates {
+				promotion {
+					effective-from "2026-08-17T21:10:19Z"
+					input 0.3
+				}
+				standard {
+					effective-from "2027-01-01T08:00:00Z"
+					input 0.6
+				}
+			}
+		}
 		list-price-from "google"
 		thinking-efforts "low" "medium" "high"
 		thinking-requires-effort #true
@@ -782,7 +975,20 @@ provider "factory-droid" {
 		routing-family "google"
 		upstream-rotation "google"
 		region-upstreams-eu "google"
-		credit-rates { input 0.6; output 5 }
+		credit-rates {
+			input 0.6
+			output 5
+			effective-rates {
+				promotion {
+					effective-from "2026-08-17T21:10:19Z"
+					input 0.3
+				}
+				standard {
+					effective-from "2027-01-01T08:00:00Z"
+					input 0.6
+				}
+			}
+		}
 		list-price-from "google"
 		thinking-efforts "low" "medium" "high"
 		thinking-requires-effort #true
@@ -817,6 +1023,23 @@ provider "factory-droid" {
 		thinking-efforts "minimal" "low" "medium" "high"
 		thinking-requires-effort #true
 		thinking-default-level "high"
+	}
+	// Image models: the org's `imageGenerationEnabled` and
+	// `imageGenerationAllowedModelIds` managed settings gate them
+	// (discovery/factory-droid.ts), not feature flags. Credits follow the CLI's
+	// image registry: OpenAI output is image tokens at 6x input, Gemini's 60x.
+	models "gpt-image-2.5-sunburst" "gpt-image-2.5-flare" {
+		kind "image"
+		routing-family "openai"
+		upstream-rotation "openai"
+		credit-rates { input 2.0; output 6 }
+	}
+	models "gemini-3-pro-image-preview" {
+		kind "image"
+		routing-family "google"
+		upstream-rotation "google"
+		region-upstreams-us
+		credit-rates { input 0.8; output 60 }
 	}
 	models "inkling" {
 		routing-family "factory"
@@ -911,6 +1134,15 @@ provider "factory-droid" {
 		thinking-requires-effort #true
 		thinking-default-level "xhigh"
 	}
+	models "nemotron-3.5-super" {
+		routing-family "factory"
+		upstream-rotation "baseten"
+		credit-rates { input 0.08; output 2.5; cache-read 0.2 }
+		thinking-efforts "high"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+		entitlement { feature-flag "nemotron_3_5_super" }
+	}
 	models "nemotron-3-ultra" {
 		routing-family "factory"
 		upstream-rotation "baseten" "fireworks"
@@ -919,6 +1151,45 @@ provider "factory-droid" {
 		thinking-efforts "high"
 		thinking-requires-effort #false
 		thinking-default-level "high"
+	}
+	models "muse-spark-open" {
+		routing-family "factory"
+		upstream-rotation "baseten"
+		credit-rates { input 0.5; output 3.4; cache-read 0.12 }
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+		entitlement { feature-flag "muse_spark_open" }
+	}
+	// Factory serves no `minimal` rung, so this ladder outranks the Meta class ladder.
+	models "muse-spark-1.2" priority=1 {
+		routing-family "factory"
+		upstream-rotation "fireworks"
+		credit-rates { input 0.5; output 3.4; cache-read 0.12 }
+		list-price-from "meta"
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+	}
+	models "beam-1.0" {
+		routing-family "factory"
+		upstream-rotation "baseten"
+		credit-rates { input 0.52; output 3.3077 }
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+		entitlement { feature-flag "beam_1_0" }
+	}
+	models "deepseek-v4.1-flash-1017" {
+		routing-family "factory"
+		upstream-rotation "fireworks" "baseten" "databricks"
+		credit-rates { input 0.12; output 4; cache-read 0.024 }
+		// No bundled Fireworks row for the 1017 slug; Fireworks prices it like V4.1 Flash.
+		list-price-from "fireworks" "deepseek-v4.1-flash"
+		thinking-efforts "low" "high" "max"
+		thinking-requires-effort #false
+		thinking-default-level "high"
+		entitlement { feature-flag "deepseek_v4_1_flash_1017" }
 	}
 	models "deepseek-v4.1-flash" {
 		routing-family "factory"
@@ -957,7 +1228,6 @@ provider "factory-droid" {
 		thinking-efforts "high"
 		thinking-requires-effort #true
 		thinking-default-level "high"
-		entitlement { feature-flag "minimax_m3" }
 	}
 	models "grok-4.7" {
 		routing-family "xai"
@@ -1037,8 +1307,8 @@ provider "factory-droid" {
 		// Native declares every Responses tool `strict: false`; the field must reach the wire.
 		supports-strict-mode #true
 	}
-	models "glm-*" "kimi-*" "deepseek-*" "nemotron-*" "inkling" "mistral-medium-3.5" "mistral-large-4" "qwen3.8-max" \
-		"minimax-m3" {
+	models "glm-*" "kimi-*" "deepseek-*" "nemotron-*" "muse-spark-open" "muse-spark-1.2" "beam-1.0" "inkling" \
+		"mistral-medium-3.5" "mistral-large-4" "qwen3.8-max" "minimax-m3" {
 		clamp-output-to-model-max #true
 		completions-reasoning-mode "none"
 		completions-reasoning-history "omit"
@@ -1064,6 +1334,10 @@ provider "factory-droid" {
 			completions-reasoning-mode "opt-in"
 		}
 	}
+	// Beam tolerates tool-call turns that arrive without reasoning.
+	models "beam-1.0" {
+		completions-allow-missing-thinking #true
+	}
 	models "deepseek-*" {
 		on-upstream "baseten" priority=10 {
 			completions-reasoning-mode "forced-on"
@@ -1074,6 +1348,13 @@ provider "factory-droid" {
 		on-upstream "fireworks" "baseten" {
 			requires-reasoning-content-for-tool-calls #true
 			synthetic-reasoning-content-fallback " "
+		}
+	}
+	// Droid 0.250.0 configures the 1017 checkpoint's Baseten route with
+	// thinkingMode "reasoning-effort": thinking off is sent as `none`.
+	models "deepseek-v4.1-flash-1017" {
+		on-upstream "baseten" {
+			completions-reasoning-mode "effort"
 		}
 	}
 	// The replay codec follows the selected route, including EU GLM routes.
@@ -1112,6 +1393,12 @@ provider "factory-droid" {
 		on-upstream "snowflake" {
 			disabled-thinking "disabled"
 		}
+		// Factory's proxy honors `ttl: "1h"` without the extended-cache-ttl beta
+		// and the Anthropic and Bedrock upstreams reject the beta.
+		extended-cache-ttl-beta #false
+		on-upstream "anthropic" "vertex_anthropic" "bedrock_anthropic" "azure_anthropic" {
+			supports-long-cache-retention #true
+		}
 	}
 	// Adaptive models the registry marks `supportsDisabledThinking` send the
 	// explicit disabled form at Off on every upstream.
@@ -1119,8 +1406,13 @@ provider "factory-droid" {
 		"claude-opus-4-8-fast" "claude-opus-5" "claude-opus-5-fast" "claude-haiku-5-5" {
 		disabled-thinking "disabled"
 	}
+	// Cache entry lifetimes per retention tier, in seconds, for the cache warmer.
 	models "claude-*" "atlas-07-21" "aster-07-15" {
 		anthropic-thinking "adaptive-summarized"
+		prompt-cache {
+			short 300
+			long 3600
+		}
 	}
 	models "claude-opus-4-6" "claude-sonnet-4-6" {
 		anthropic-thinking "adaptive"
@@ -1151,7 +1443,7 @@ provider "factory-droid" {
 		fast-mode #true
 	}
 	// Refusals retry server-side only on the first-party Anthropic upstream.
-	models "claude-fable-5" "claude-fable-5.1" {
+	models "claude-fable-5" "claude-fable-5.1" "claude-opus-5-5" {
 		on-upstream "anthropic" {
 			server-side-fallback-models "claude-opus-5"
 		}
@@ -1193,7 +1485,8 @@ provider "factory-droid" {
 	}
 	// GPT models whose ladder has an Off/None rung send the literal `none`
 	// tier on every upstream.
-	models "gpt-5.2" "gpt-5.6-sol" "gpt-5.6-sol-fast" "gpt-5.6-terra" "gpt-5.6-luna" "gpt-6-sol" "gpt-6-luna" {
+	models "gpt-5.2" "gpt-5.6-sol" "gpt-5.6-sol-fast" "gpt-5.6-terra" "gpt-5.6-luna" "gpt-6.1-terra" "gpt-6-sol" \
+		"gpt-6-sol-fast" "gpt-6-luna" "gpt-6-luna-fast" {
 		reasoning-disable-mode "none-effort"
 	}
 	models "gpt-*" {
@@ -1215,6 +1508,9 @@ provider "factory-droid" {
 	}
 	models "gpt-*-fast" {
 		responses-service-tier "priority"
+	}
+	models "gpt-*-ultrafast" {
+		responses-service-tier "ultrafast"
 	}
 	models "grok-*" {
 		supports-reasoning-summary #false

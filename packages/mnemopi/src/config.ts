@@ -170,16 +170,19 @@ export function tier3Days(env: Env = process.env): number {
 	return envInt("MNEMOPI_TIER3_DAYS", 180, env);
 }
 
+/** Recall-time score multiplier for an episodic row still at degradation tier 1. */
 export function tier1Weight(env: Env = process.env): number {
 	return envFloat("MNEMOPI_TIER1_WEIGHT", 1.0, env);
 }
 
+/** Recall-time score multiplier for an episodic row degraded to tier 2. */
 export function tier2Weight(env: Env = process.env): number {
-	return envFloat("MNEMOPI_TIER2_WEIGHT", 0.5, env);
+	return envFloat("MNEMOPI_TIER2_WEIGHT", 0.85, env);
 }
 
+/** Recall-time score multiplier for an episodic row degraded to tier 3 or beyond. */
 export function tier3Weight(env: Env = process.env): number {
-	return envFloat("MNEMOPI_TIER3_WEIGHT", 0.25, env);
+	return envFloat("MNEMOPI_TIER3_WEIGHT", 0.7, env);
 }
 
 export function degradeBatchSize(env: Env = process.env): number {

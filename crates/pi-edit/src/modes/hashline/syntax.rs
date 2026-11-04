@@ -10,7 +10,7 @@ use pi_ast::{
 		BlockRangeOptions, EnclosingBoundaryOptions, LineRange, NodeSpan, enclosing_block_boundaries,
 		node_chain_at,
 	},
-	summary::{SummaryOptions, summarize_code},
+	summary::parse_code_status,
 };
 use xxhash_rust::xxh64::xxh64;
 
@@ -102,16 +102,7 @@ pub fn parses_cleanly(path: Option<&str>, text: &str) -> bool {
 	{
 		return *cached;
 	}
-	let parsed = summarize_code(SummaryOptions {
-		code:               text.to_owned(),
-		lang:               None,
-		path:               Some(path.to_owned()),
-		min_body_lines:     None,
-		min_comment_lines:  None,
-		unfold_until_lines: None,
-		unfold_limit_lines: None,
-	})
-	.is_ok_and(|summary| summary.parsed);
+	let parsed = parse_code_status(text, None, Some(path)).is_ok_and(|language| language.is_some());
 	if let Ok(mut cache) = CACHE.lock() {
 		let SyntaxCache { parses, parse_order, .. } = &mut *cache;
 		insert_fifo(parses, parse_order, cache_key, parsed);

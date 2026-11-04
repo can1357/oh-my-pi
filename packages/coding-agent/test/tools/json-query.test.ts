@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "../../src/config/settings";
+import { resolveLocalUrlToPath } from "../../src/internal-urls";
 import { ReadTool } from "../../src/tools/read";
 
 type ToolTextResult = {
@@ -127,6 +128,21 @@ describe("JSON query in read tool", () => {
 		);
 	});
 
+	it("retains the reason and key when jaq rejects a large JSON value", async () => {
+		const largeFile = path.join(tempDir, "large.json");
+		const rows = Array.from({ length: 400 }, (_, index) => ({ label: `row ${index}`, input: "x".repeat(40) }));
+		await Bun.write(largeFile, JSON.stringify([{ rows }]));
+
+		const error = await readTool.execute("large-error", { path: `${largeFile}?q=.changedFiles` }).then(
+			() => null,
+			error => error,
+		);
+		const message = String(error);
+		expect(message).toContain("cannot index");
+		expect(message).toContain('with "changedFiles"');
+		expect(message.length).toBeLessThan(1000);
+	});
+
 	it("reads the file normally without jq query when ?q= is omitted", async () => {
 		const result = await readTool.execute("call_7", { path: jsonFile });
 		const text = getText(result);
@@ -185,6 +201,38 @@ describe("JSON query in read tool", () => {
 		expect(text).not.toContain("alice");
 		expect(text).not.toContain("charlie");
 		expect(text).toContain("[more results; append ?q=.user&raw=true&limit=1&offset=2 to continue]");
+	});
+
+	it("queries located local JSONL and artifact JSON without losing pagination or URI identity", async () => {
+		const artifactsDir = path.join(tempDir, "artifacts");
+		const localProtocolOptions = { getArtifactsDir: () => artifactsDir, getSessionId: () => "json-query" };
+		const locatedTool = new ReadTool(
+			createSession(tempDir, { getArtifactsDir: () => artifactsDir, localProtocolOptions }),
+		);
+		const localFile = resolveLocalUrlToPath("local://events.jsonl", localProtocolOptions);
+		await fs.mkdir(path.dirname(localFile), { recursive: true });
+		await fs.mkdir(artifactsDir, { recursive: true });
+		await fs.copyFile(jsonlFile, localFile);
+		await fs.copyFile(jsonFile, path.join(artifactsDir, "0.json"));
+
+		const localUrl = "local://events.jsonl?q=.user&raw=true&offset=1&limit=1";
+		const localResult = await locatedTool.execute("local-json-page", { path: localUrl });
+		expect(getText(localResult)).toBe("bob\n[more results; append ?q=.user&raw=true&limit=1&offset=2 to continue]");
+		expect(localResult.details?.meta?.source).toEqual({ type: "internal", value: localUrl });
+		expect(
+			getText(
+				await locatedTool.execute("local-next-page", {
+					path: "local://events.jsonl?q=.user&raw=true&limit=1&offset=2",
+				}),
+			),
+		).toBe("charlie");
+
+		const artifactUrl = "artifact://0?q=.items&compact=true&offset=1&limit=1";
+		const artifactResult = await locatedTool.execute("artifact-json-page", { path: artifactUrl });
+		expect(getText(artifactResult)).toBe(
+			'[{"id":2,"name":"item-two","active":false}]\n[1 more items; append ?q=.items&compact=true&limit=1&offset=2 to continue]',
+		);
+		expect(artifactResult.details?.meta?.source).toEqual({ type: "internal", value: artifactUrl });
 	});
 
 	it("keeps number literals verbatim when paging an array", async () => {

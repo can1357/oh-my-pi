@@ -162,6 +162,43 @@ fn does_not_spare_a_deleted_closing_line_that_the_payload_restates() {
 	assert!(result.warnings.is_empty());
 }
 
+fn rejection(text: &str, edits: &[Edit], path: &str) -> String {
+	apply_edits(text, edits, ApplyOptions {
+		clipboard:      None,
+		path:           Some(path),
+		on_empty_paste: EmptyPaste::Throw,
+	})
+	.unwrap_err()
+	.to_string()
+}
+
+const JSON_LIST: &str = "{\n  \"a\": [\n    \"x\",\n    \"y\"\n  ]\n}\n";
+
+#[test]
+fn names_the_trailing_comma_that_keeps_a_one_row_replacement_from_parsing() {
+	for body in [&["    \"z\","][..], &["    \"z\",  ", ""]] {
+		let error = rejection(JSON_LIST, &replacement(4, 4, body, 1), "x.json");
+		assert!(error.contains("`PUT 4.=4:` rejected"), "{error}");
+		assert!(error.contains("ends with a comma"), "{error}");
+		assert!(!error.contains("body indentation"), "{error}");
+	}
+}
+
+#[test]
+fn keeps_the_placement_rejection_when_dropping_the_comma_does_not_parse() {
+	// The comma stands in for a JSON closer, and a non-JSON space after the
+	// comma stays when only the comma goes.
+	let cases = [
+		("{\n  \"a\": [\n    \"x\"\n  ],\n  \"b\": 1\n}\n", "  \"c\": 2,"),
+		(JSON_LIST, "    \"z\",\u{a0}"),
+	];
+	for (file, row) in cases {
+		let error = rejection(file, &replacement(4, 4, &[row], 1), "x.json");
+		assert!(error.contains("`PUT 4.=4:` rejected"), "{error}");
+		assert!(error.contains("body indentation does not establish"), "{error}");
+	}
+}
+
 #[test]
 fn drops_duplicated_leading_and_trailing_boundary_lines_around_a_range_replacement() {
 	let file = "function f() {\n  keepA();\n  old1();\n  old2();\n  keepB();\n}";
@@ -202,6 +239,175 @@ fn rejects_a_leading_keeper_echo_when_the_payload_cannot_fill_the_widened_range(
 	)
 	.unwrap_err();
 	assert!(error.to_string().contains("body opens by restating"));
+}
+
+/// A body that restates the line above the range and is shorter than the
+/// range must not delete the range rows it never restates. A parsed language
+/// used to apply it (the duplicate broke the parse, so the syntax-probed
+/// repair dropped the echo and the rest of the range with it) while an
+/// unparsed one refused the same bytes.
+#[test]
+fn refuses_a_too_short_leading_echo_the_same_way_with_or_without_a_parser() {
+	let file = "import time\n\ndef run(a=None, b=None):\n    \"\"\"Time each phase: reap, \
+	            collect,\n    grade, so the part outside the cap is\n    measured, not \
+	            assumed.\"\"\"\n    rs, wd = a or 1, b or 2\n    t0 = time.monotonic()\n    return \
+	            rs, wd, t0\n";
+	let edits = replacement(
+		5,
+		8,
+		&[
+			"    \"\"\"Time each phase: reap, collect,",
+			"    collect_objects, grade, so the part outside the cap is",
+			"    measured, not assumed.\"\"\"",
+		],
+		1,
+	);
+	for path in ["server.py", "server.txt"] {
+		let error = apply_edits(file, &edits, ApplyOptions {
+			clipboard:      None,
+			path:           Some(path),
+			on_empty_paste: EmptyPaste::Throw,
+		})
+		.expect_err(path);
+		let error = error.to_string();
+		assert!(
+			error.contains("body opens by restating the 1 line(s) just above the range")
+				&& error.contains("the body leaves out lines 7-8"),
+			"{path}: {error}"
+		);
+	}
+}
+
+/// The same shape where a repair that keeps a source row also parses: the body
+/// repeats line 5 and has one row for the three-row range 6-8. Keeping line 6
+/// beside the body still deleted the conditional and wrote two adjacent
+/// string literals, which Python joins into one, and it reported success. The
+/// edit is refused like the drop-only reading.
+#[test]
+fn refuses_a_too_short_echo_whose_keep_row_repair_also_parses() {
+	let file =
+		"def stop_of(choice):\n    usage = {\n        \"a\": 1,\n    }\n    stop = (\n        \
+		 \"length\"\n        if choice\n        else \"stop\"\n    )\n    return stop\n";
+	let error = apply_edits(
+		file,
+		&replacement(6, 8, &["    stop = (", "        \"max_tokens\""], 1),
+		ApplyOptions {
+			clipboard:      None,
+			path:           Some("stop.py"),
+			on_empty_paste: EmptyPaste::Throw,
+		},
+	)
+	.expect_err("stop.py");
+	let error = error.to_string();
+	assert!(
+		error.contains("body opens by restating the 1 line(s) just above the range")
+			&& error.contains("the body leaves out lines 7-8"),
+		"{error}"
+	);
+}
+
+/// A body that restates the line above (or below) its range more than once.
+/// The first pass drops one copy and records no refusal, and what remains is
+/// the one-sided too-short shape. The drop-only repair parses and deletes
+/// `old();`, which the body never restates; skipping that repair applied the
+/// body as written, which does not parse (the first case writes the function
+/// header twice). Each case is refused and names the range row the body
+/// leaves out. The third case reaches that shape after the first pass drops
+/// an echo on each side.
+#[test]
+fn refuses_a_too_short_echo_a_dropped_copy_exposed() {
+	let one = "const z = 0;\nfunction f() {\n\told();\n}\nafter();\n";
+	let two = "const z = 0;\nfunction f() {\n\told();\n\tmore();\n}\nafter();\n";
+	// (file, start, end, body, restates, left_out)
+	type Case<'a> = (&'a str, u32, u32, &'a [&'a str], &'a str, &'a str);
+	let cases: [Case; 3] = [
+		(
+			one,
+			3,
+			4,
+			&["function f() {", "function f() {", "}"],
+			"opens by restating the 1 line(s) just above the range more than once",
+			"it leaves out line 4,",
+		),
+		(
+			one,
+			2,
+			3,
+			&["function f() {", "}", "}"],
+			"ends by restating the 1 line(s) just below the range more than once",
+			"it leaves out line 2,",
+		),
+		(
+			two,
+			3,
+			4,
+			&["function f() {", "function f() {", "\tfresh();", "}"],
+			"opens by restating the 1 line(s) just above the range more than once",
+			"it leaves out line 4,",
+		),
+	];
+	for (file, start, end, body, restates, left_out) in cases {
+		let error = apply_edits(file, &replacement(start, end, body, 1), ApplyOptions {
+			clipboard:      None,
+			path:           Some("f.ts"),
+			on_empty_paste: EmptyPaste::Throw,
+		})
+		.expect_err("f.ts")
+		.to_string();
+		assert!(error.contains(restates) && error.contains(left_out), "{body:?}: {error}");
+	}
+}
+
+/// A body that restates the line above its range, fills the range, and adds
+/// a new line equal to that neighbour: a `break;` above a new `case`, a second
+/// `@property`, a second `#[test]` on a one-row range. Dropping the echo keeps
+/// no range row, so the new copy is content the body asks for, not a
+/// duplicate: the edit applies. It was refused as holding "one more copy" of
+/// the neighbour.
+#[test]
+fn applies_a_dropped_echo_whose_body_adds_a_new_copy_of_the_neighbour() {
+	// (path, file, start, end, body, expected)
+	type Case<'a> = (&'a str, &'a str, u32, u32, &'a [&'a str], &'a str);
+	let cases: [Case; 3] = [
+		(
+			"s.ts",
+			"switch (x) {\n\tcase 1:\n\t\ta();\n\t\tbreak;\n\tdefault:\n\t\tb();\n}\n",
+			5,
+			6,
+			&["\t\tbreak;", "\tcase 2:", "\t\tc();", "\t\tbreak;", "\tdefault:", "\t\tb();"],
+			"switch (x) {\n\tcase 1:\n\t\ta();\n\t\tbreak;\n\tcase \
+			 2:\n\t\tc();\n\t\tbreak;\n\tdefault:\n\t\tb();\n}\n",
+		),
+		(
+			"c.py",
+			"class C:\n    @property\n    def a(self):\n        return 1\n",
+			3,
+			4,
+			&[
+				"    @property",
+				"    def a(self):",
+				"        return 2",
+				"",
+				"    @property",
+				"    def b(self):",
+				"        return 3",
+			],
+			"class C:\n    @property\n    def a(self):\n        return 2\n\n    @property\n    def \
+			 b(self):\n        return 3\n",
+		),
+		(
+			"t.rs",
+			"#[test]\nfn a() {}\n",
+			2,
+			2,
+			&["#[test]", "fn a() { x(); }", "", "#[test]", "fn b() {}"],
+			"#[test]\nfn a() { x(); }\n\n#[test]\nfn b() {}\n",
+		),
+	];
+	for (path, file, start, end, body, expected) in cases {
+		let result = apply(file, &replacement(start, end, body, 1), Some(path));
+		assert_eq!(result.text, expected, "{path}");
+	}
 }
 
 #[test]
@@ -570,6 +776,321 @@ fn recovery_remaps_a_uniform_line_shift() {
 	.unwrap();
 	assert_eq!(recovered.text, "// header\nfn f() {\n\tnew();\n}\n");
 	assert!(recovered.warnings[0].contains("remapping stale line anchors"));
+}
+
+const ERRANDS: &str = "start the engine\ncheck the oil\ndrive home\n";
+const SHIFTED_ERRANDS: &str =
+	"header one\nheader two\nstart the engine\ncheck the oil\ndrive home\n";
+
+#[test]
+fn recovery_refuses_a_remap_of_a_body_written_for_the_current_line() {
+	// The agent read line 3 (`start the engine`) from an untagged view of the
+	// current file and paired it with the old tag; remapping would replace
+	// `drive home`.
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-current-line.txt");
+	let tag = store.record(path, ERRANDS, None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: SHIFTED_ERRANDS,
+		file_hash: &tag,
+		edits: &replacement(3, 3, &["start the engine twice"], 1),
+		clipboard: None,
+	})
+	.unwrap();
+	assert!(recovered.is_none());
+}
+
+#[test]
+fn recovery_remaps_a_body_written_for_the_tagged_line() {
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-tagged-line.txt");
+	let tag = store.record(path, ERRANDS, None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: SHIFTED_ERRANDS,
+		file_hash: &tag,
+		edits: &replacement(3, 3, &["drive home slowly"], 1),
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	assert_eq!(
+		recovered.text,
+		"header one\nheader two\nstart the engine\ncheck the oil\ndrive home slowly\n"
+	);
+}
+
+#[test]
+fn recovery_skips_the_body_check_past_its_comparison_budget() {
+	// The refused shape above at 400 lines: scoring it would be quadratic, so
+	// the check abstains and the remap stands.
+	let tagged_rows = (0..400)
+		.map(|i| format!("tagged {i:04}"))
+		.collect::<Vec<_>>();
+	let tagged = format!("{}\nend\n", tagged_rows.join("\n"));
+	let current_rows = (0..400)
+		.map(|i| format!("current row {i} with some ordinary width to it"))
+		.collect::<Vec<_>>();
+	let body = current_rows
+		.iter()
+		.map(|row| format!("{row}!"))
+		.collect::<Vec<_>>();
+	let body = body.iter().map(String::as_str).collect::<Vec<_>>();
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-budget.txt");
+	let tag = store.record(path, &tagged, None);
+	let current = format!("{}\n{tagged}", current_rows.join("\n"));
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: &current,
+		file_hash: &tag,
+		edits: &replacement(1, 400, &body, 1),
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	let expected = format!("{}\n{}\nend\n", current_rows.join("\n"), body.join("\n"));
+	assert_eq!(recovered.text, expected);
+}
+
+#[test]
+fn recovery_budgets_the_body_check_in_chars_not_bytes() {
+	// 40 rows of 40 CJK chars: within the comparison budget counted in chars,
+	// nine times over it counted in UTF-8 bytes.
+	let tagged_rows = (0..40)
+		.map(|i| format!("{}{i:03}", "タ".repeat(37)))
+		.collect::<Vec<_>>();
+	let tagged = format!("{}\nend\n", tagged_rows.join("\n"));
+	let current_rows = (0..40)
+		.map(|i| format!("{}{i:03}", "中".repeat(37)))
+		.collect::<Vec<_>>();
+	let body = current_rows
+		.iter()
+		.map(|row| format!("{row}！"))
+		.collect::<Vec<_>>();
+	let body = body.iter().map(String::as_str).collect::<Vec<_>>();
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-budget-chars.txt");
+	let tag = store.record(path, &tagged, None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: &format!("{}\n{tagged}", current_rows.join("\n")),
+		file_hash: &tag,
+		edits: &replacement(1, 40, &body, 1),
+		clipboard: None,
+	})
+	.unwrap();
+	assert!(recovered.is_none());
+}
+
+#[test]
+fn recovery_shares_one_comparison_budget_across_hunks() {
+	// Two 48-row hunks: the first (written for its tagged rows) spends part of
+	// the budget, so the second, which alone would be refused, is not scored.
+	let rows = |letter: &str| {
+		(0..48)
+			.map(|i| format!("{}{i:03}", letter.repeat(37)))
+			.collect::<Vec<_>>()
+	};
+	let (header, first, second) = (rows("h"), rows("a"), rows("b"));
+	let tagged = format!("{}\n{}\nend\n", first.join("\n"), second.join("\n"));
+	let current = format!("{}\n{tagged}", header.join("\n"));
+	let first_body = first
+		.iter()
+		.map(|row| format!("{row}!"))
+		.collect::<Vec<_>>();
+	let second_body = first
+		.iter()
+		.map(|row| format!("{row}?"))
+		.collect::<Vec<_>>();
+	let first_body = first_body.iter().map(String::as_str).collect::<Vec<_>>();
+	let second_body = second_body.iter().map(String::as_str).collect::<Vec<_>>();
+	let mut edits = replacement(1, 48, &first_body, 1);
+	edits.extend(replacement(49, 96, &second_body, 2));
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-shared-budget.txt");
+	let tag = store.record(path, &tagged, None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: &current,
+		file_hash: &tag,
+		edits: &edits,
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	let expected = format!(
+		"{}\n{}\n{}\nend\n",
+		header.join("\n"),
+		first_body.join("\n"),
+		second_body.join("\n")
+	);
+	assert_eq!(recovered.text, expected);
+}
+
+#[test]
+fn recovery_remaps_a_shifted_range_that_overlaps_its_kept_line() {
+	// Shifted by one, the authored window (blank, `alpha line`) shares
+	// `alpha line` with the tagged range; the blank must not tip it.
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-overlap.txt");
+	let tag = store.record(path, "intro text\n\nalpha line\nobsolete line\nend text\n", None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "header\nintro text\n\nalpha line\nobsolete line\nend text\n",
+		file_hash: &tag,
+		edits: &replacement(3, 4, &["alpha line 2"], 1),
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	assert_eq!(recovered.text, "header\nintro text\n\nalpha line 2\nend text\n");
+}
+
+#[test]
+fn recovery_remaps_a_filled_blank_line_next_to_a_similar_line() {
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-blank-fill.txt");
+	let tag = store.record(path, "first line here\n\nthird line here\n", None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "a header\nfirst line here\n\nthird line here\n",
+		file_hash: &tag,
+		edits: &replacement(2, 2, &["first line here too"], 1),
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	assert_eq!(recovered.text, "a header\nfirst line here\nfirst line here too\nthird line here\n");
+}
+
+#[test]
+fn recovery_remaps_a_short_body_next_to_a_short_line() {
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-short.txt");
+	let tag = store.record(path, "header\nx\nlong legacy line\ntail\n", None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "prefix\nheader\nx\nlong legacy line\ntail\n",
+		file_hash: &tag,
+		edits: &replacement(3, 3, &["x2"], 1),
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	assert_eq!(recovered.text, "prefix\nheader\nx\nx2\ntail\n");
+}
+
+#[test]
+fn recovery_remaps_a_rewrite_loosely_like_the_neighboring_line() {
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-rewrite.rs");
+	let previous = "fn f() -> u32 {\n\tlet computed = 1;\n\tpanic!(\"not implemented\");\n}\n";
+	let tag = store.record(path, previous, None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: &format!("// header\n{previous}"),
+		file_hash: &tag,
+		edits: &replacement(3, 3, &["\treturn computed;"], 1),
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	assert_eq!(
+		recovered.text,
+		"// header\nfn f() -> u32 {\n\tlet computed = 1;\n\treturn computed;\n}\n"
+	);
+}
+
+#[test]
+fn recovery_refuses_a_shifted_remap_that_breaks_the_parse() {
+	// Meant after the current `"z": 0,` (line 2); the remap lands the entry
+	// after `"a": 1`, which has no trailing comma.
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-breaks-parse.json");
+	let tag = store.record(path, "{\n  \"a\": 1\n}\n", None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "{\n  \"z\": 0,\n  \"a\": 1\n}\n",
+		file_hash: &tag,
+		edits: &[insert_after(2, "  \"y\": 9,", 1)],
+		clipboard: None,
+	})
+	.unwrap();
+	assert!(recovered.is_none());
+}
+
+#[test]
+fn recovery_remaps_a_shifted_insert_that_keeps_the_parse() {
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-keeps-parse.json");
+	let tag = store.record(path, "{\n  \"a\": 1\n}\n", None);
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "{\n  \"z\": 0,\n  \"a\": 1\n}\n",
+		file_hash: &tag,
+		edits: &[insert_before(2, "  \"y\": 9,", 1)],
+		clipboard: None,
+	})
+	.unwrap()
+	.unwrap();
+	assert_eq!(recovered.text, "{\n  \"z\": 0,\n  \"y\": 9,\n  \"a\": 1\n}\n");
+	assert!(recovered.warnings[0].contains("remapping stale line anchors"));
+}
+
+#[test]
+fn recovery_parse_refusal_leaves_the_clipboard_untouched() {
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-refused-cut.json");
+	let tag = store.record(path, "{\n  \"a\": 1\n}\n", None);
+	let cut = Edit::Cut {
+		range:    ParsedRange { start: Anchor { line: 2 }, end: Anchor { line: 2 } },
+		register: Some("reg".into()),
+		line_num: 1,
+		index:    0,
+	};
+	let mut clipboard = Clipboard {
+		named: Some(HashMap::from([("reg".to_owned(), vec!["SAVED".to_owned()])])),
+		..Clipboard::default()
+	};
+	let before = clipboard.clone();
+	// Cutting the remapped `"a": 1` leaves `"z": 0,` with a trailing comma.
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "{\n  \"z\": 0,\n  \"a\": 1\n}\n",
+		file_hash: &tag,
+		edits: &[cut, delete(2, 1)],
+		clipboard: Some(&mut clipboard),
+	})
+	.unwrap();
+	assert!(recovered.is_none());
+	assert_eq!(clipboard, before);
+}
+
+#[test]
+fn recovery_publishes_the_registers_of_an_accepted_remap() {
+	let store = EditStore::new();
+	let path = Path::new("/tmp/recovery-accepted-cut.txt");
+	let tag = store.record(path, "a\nb\nc\n", None);
+	let cut = Edit::Cut {
+		range:    ParsedRange { start: Anchor { line: 2 }, end: Anchor { line: 2 } },
+		register: Some("reg".into()),
+		line_num: 1,
+		index:    0,
+	};
+	let mut clipboard = Clipboard::default();
+	let recovered = try_recover(&store, RecoveryArgs {
+		path,
+		current_text: "h\na\nb\nc\n",
+		file_hash: &tag,
+		edits: &[cut, delete(2, 1)],
+		clipboard: Some(&mut clipboard),
+	})
+	.unwrap()
+	.unwrap();
+	assert_eq!(recovered.text, "h\na\nc\n");
+	assert_eq!(clipboard.named.unwrap()["reg"], vec!["b".to_owned()]);
 }
 
 #[test]

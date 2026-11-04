@@ -1,7 +1,7 @@
 import * as native from "@oh-my-pi/pi-natives";
 import { TERMINAL } from "../index";
 import type { EditorInlineReplacement, EditorTextAssistProvider, EditorWordReplacements } from "../components/editor";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { isMagicKeyword } from "./magic-keywords";
 import { maskNonProse } from "./markdown-prose";
 import { isProseWord, lineContext, ProseSource, type SpellingDecorationContext } from "./prose-gate";
@@ -46,6 +46,12 @@ const NATIVE_BACKEND: SpellingBackend = {
 };
 
 /**
+ * The native side awaits a `flume::bounded(1)` reply with no timeout, so a stuck call
+ * stays pending and never reaches the `catch` that disables the provider.
+ */
+const BACKEND_TIMEOUT_MS = 2_000;
+
+/**
  * Bridges Apple's spelling service into the editor's typo and autocorrection
  * paths. Word completion is the cross-platform `WordCompletionProvider`
  * (`word-completion.ts`).
@@ -56,7 +62,7 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 	#availabilityChecked = false;
 	#cacheGeneration = 0;
 	#typoCache = new Map<string, readonly native.SpellingRange[]>();
-	/** {@link #projectTypoRanges} answers for the current {@link #typoCache}; segments re-ask every frame. */
+	/** {@link #projectTypoRanges} answers for the current {@link #typoCache}; render segments re-ask every frame. */
 	#projectionMemo = new Map<string, readonly native.SpellingRange[] | undefined>();
 	#typoInFlight = new Map<string, Promise<readonly native.SpellingRange[]>>();
 	#automaticTypoActive = false;
@@ -113,35 +119,49 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 
 	/**
 	 * Misspelled prose ranges in `text` (offsets into it), in order and
-	 * non-overlapping. Schedules the verification check for uncached text; its
-	 * result arrives through {@link onUpdate}.
+	 * non-overlapping, except ones touching `context.typing` (the word still
+	 * being typed). Checks the full logical line so rendering cuts cannot
+	 * change spelling or prose boundaries. Uncached lines arrive through {@link onUpdate}.
 	 */
 	typoRanges(text: string, context: SpellingDecorationContext): readonly native.SpellingRange[] {
 		if (!this.#available || !this.#features.typoDetection || text.length === 0) return [];
-		if (!this.#prose.isProse(context, context.startCol, context.startCol + text.length)) return [];
-		const lane = `${context.line}:${context.startCol}`;
-		const cached = this.#typoCache.get(text);
+		const line = context.lines[context.line];
+		const segmentEnd = context.startCol + text.length;
+		if (
+			line === undefined ||
+			context.startCol < 0 ||
+			segmentEnd > line.length ||
+			!line.startsWith(text, context.startCol)
+		)
+			return [];
+		if (!this.#prose.isProse(context, context.startCol, segmentEnd)) return [];
+		const lane = `${context.line}:0`;
+		const cached = this.#typoCache.get(line);
 		// A cache hit obsoletes any older text queued for this lane. A miss must
 		// keep its just-scheduled entry alive: deleting it here used to cancel the
 		// verification check whenever a stale projection painted ranges while
 		// another check was in flight, freezing the projected undercurl (e.g. the
 		// "eac" of a fast-typed "each") until an unrelated repaint rescheduled it.
-		if (cached === undefined) this.#scheduleTypoRanges(text, lane);
+		if (cached === undefined) this.#scheduleTypoRanges(line, lane);
 		else this.#automaticTypoQueue.delete(lane);
-		const ranges = cached ?? this.#projectTypoRanges(text);
+		const ranges = cached ?? this.#projectTypoRanges(line);
 		if (!ranges || ranges.length === 0) return [];
 		const kept: native.SpellingRange[] = [];
+		const typing = context.typing?.line === context.line ? context.typing : undefined;
 		let cursor = 0;
 		for (const range of ranges) {
 			const end = range.start + range.length;
+			if (typing && range.start <= typing.end && typing.start <= end) continue;
 			// Overlapping or out-of-bounds ranges (stale native data, edit projection)
 			// must never re-emit already-rendered text: that doubles it on screen and
 			// desyncs the rendered width from the measured width (cursor drift).
-			if (range.start < cursor || end > text.length) continue;
-			if (!this.#prose.isProse(context, context.startCol + range.start, context.startCol + end)) {
-				continue;
+			if (range.start < cursor || end > line.length) continue;
+			if (!this.#prose.isProse(context, range.start, end)) continue;
+			const start = Math.max(range.start, context.startCol);
+			const clippedEnd = Math.min(end, segmentEnd);
+			if (start < clippedEnd) {
+				kept.push({ start: start - context.startCol, length: clippedEnd - start });
 			}
-			kept.push(range);
 			cursor = end;
 		}
 		return kept;
@@ -167,7 +187,11 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		const context = lineContext(lines, cursorLine);
 		if (!this.#prose.isProse(context, start, start + word.length)) return null;
 		try {
-			const correction = await this.backend.autocorrectWord(textBeforeCursor, start, word.length);
+			const correction = await withTimeout(
+				this.backend.autocorrectWord(textBeforeCursor, start, word.length),
+				BACKEND_TIMEOUT_MS,
+				`macOS spelling service did not respond within ${BACKEND_TIMEOUT_MS}ms`,
+			);
 			if (!correction || correction === word) return null;
 			return { replaceLen: word.length + boundary.length, insert: correction + boundary };
 		} catch (error) {
@@ -200,7 +224,11 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		try {
 			const seen = new Set<string>();
 			const items: string[] = [];
-			for (const guess of await this.backend.spellingGuesses(line, range.start, range.length)) {
+			for (const guess of await withTimeout(
+				this.backend.spellingGuesses(line, range.start, range.length),
+				BACKEND_TIMEOUT_MS,
+				`macOS spelling service did not respond within ${BACKEND_TIMEOUT_MS}ms`,
+			)) {
 				if (!guess || seen.has(guess)) continue;
 				seen.add(guess);
 				items.push(guess);
@@ -305,7 +333,11 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 	async #fetchTypoRanges(text: string, generation: number): Promise<readonly native.SpellingRange[]> {
 		let checked: readonly native.SpellingRange[];
 		try {
-			checked = await this.backend.checkSpelling(text);
+			checked = await withTimeout(
+				this.backend.checkSpelling(text),
+				BACKEND_TIMEOUT_MS,
+				`macOS spelling service did not respond within ${BACKEND_TIMEOUT_MS}ms`,
+			);
 		} catch (error) {
 			this.#disable(error);
 			return [];

@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { IpcConnection } from "@oh-my-pi/pi-natives";
-import { getGlobalDaemonRuntimeDir, isEexist, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { getGlobalDaemonRuntimeDir, isEexist, isEnoent, logger, postmortem, toError } from "@oh-my-pi/pi-utils";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
 import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
 import {
@@ -115,7 +115,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly projectDir: string;
 	readonly #runtimeDir: string;
 	readonly #endpoint: string;
-	readonly #token: string;
+	#token: string;
 	readonly #seenCompletionIds = new Set<string>();
 	readonly #idleGraceMs: number | undefined;
 	readonly #pending = new Map<string, PendingRequest>();
@@ -162,6 +162,17 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				if (!this.#pending.delete(id)) return;
 				clearTimeout(timer);
 				reject(new Error("Daemon broker request aborted"));
+				// Dropping the local entry alone leaves the broker polling a wait or
+				// follow until its own timeout; ask it to stop. The answer is unread.
+				if ((operation.op === "wait" || operation.op === "logs") && !socket.closed) {
+					socket.send(
+						JSON.stringify({
+							id: crypto.randomUUID(),
+							token: this.#token,
+							operation: { op: "cancel", requestId: id } satisfies DaemonOperation,
+						}),
+					);
+				}
 			};
 			signal.addEventListener("abort", abort, { once: true });
 			pending.removeAbort = () => signal.removeEventListener("abort", abort);
@@ -261,6 +272,10 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	async #connectOnce(): Promise<void> {
+		// The broker authenticates against the token file it read at startup. A
+		// replacement broker may have started from a different file, or a deleted
+		// runtime dir may need a fresh one before any broker can start.
+		this.#token = await readOrCreateToken(this.#runtimeDir);
 		try {
 			this.#bindSocket(await IpcConnection.connect(this.#endpoint, { framing: "lines", timeoutMs: 250 }));
 			return;
@@ -277,7 +292,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				this.#bindSocket(await IpcConnection.connect(this.#endpoint, { framing: "lines", timeoutMs: 250 }));
 				return;
 			} catch (error) {
-				lastError = error instanceof Error ? error : new Error(String(error));
+				lastError = toError(error);
 				await Bun.sleep(CONNECT_RETRY_MS);
 			}
 		}
@@ -324,14 +339,14 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		try {
 			decoded = JSON.parse(line);
 		} catch (error) {
-			this.#rejectPending(error instanceof Error ? error : new Error(String(error)));
+			this.#rejectPending(toError(error));
 			return;
 		}
 		let message: DaemonWireMessage;
 		try {
 			message = parseDaemonWireMessage(decoded);
 		} catch (error) {
-			const parseError = error instanceof Error ? error : new Error(String(error));
+			const parseError = toError(error);
 			if (
 				typeof decoded === "object" &&
 				decoded !== null &&
@@ -361,7 +376,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		try {
 			pending.resolve(parseDaemonRpcResult(pending.operation, response.result));
 		} catch (error) {
-			pending.reject(error instanceof Error ? error : new Error(String(error)));
+			pending.reject(toError(error));
 		}
 	}
 

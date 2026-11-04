@@ -97,6 +97,33 @@ describe("composeRecallQuery", () => {
 		expect(out).not.toContain("secret");
 		expect(out).toContain("visible");
 	});
+
+	it("drops punctuation-only assistant placeholder turns while preserving symbol-only user turns (#1806)", () => {
+		const withPlaceholders: HindsightMessage[] = [
+			{ role: "user", content: "Approve deploy?" },
+			{ role: "assistant", content: "." },
+			{ role: "user", content: "✅" },
+			{ role: "assistant", content: "..." },
+			{ role: "user", content: "What did I approve?" },
+		];
+		const out = composeRecallQuery("What did I approve?", withPlaceholders, 3);
+		expect(out).toContain("user: Approve deploy?");
+		expect(out).toContain("user: ✅");
+		expect(out).not.toContain("assistant: .");
+		expect(out).not.toContain("assistant: ...");
+	});
+
+	it("suppresses only the trailing user message when an earlier turn repeated the same prompt", () => {
+		const repeated: HindsightMessage[] = [
+			{ role: "user", content: "Run the tests" },
+			{ role: "assistant", content: "1 failing spec in auth.test.ts" },
+			{ role: "user", content: "Run the tests" },
+		];
+		const out = composeRecallQuery("Run the tests", repeated, 2);
+		expect(out).toBe(
+			"Prior context:\n\nuser: Run the tests\nassistant: 1 failing spec in auth.test.ts\n\nRun the tests",
+		);
+	});
 });
 
 describe("truncateRecallQuery", () => {
@@ -116,6 +143,25 @@ describe("truncateRecallQuery", () => {
 		expect(out.endsWith(latest)).toBe(true);
 		expect(out).toContain("CCCC");
 		expect(out).not.toContain("AAAA");
+	});
+
+	it("drops whole multi-line prior messages without splitting on YAML keys or callouts", () => {
+		const latest = "ZZ";
+		const composed = composeRecallQuery(
+			latest,
+			[
+				{ role: "assistant", content: "First line\nNote: check config\nport: 8080\nuser: quoted line" },
+				{ role: "user", content: "Keep this entry" },
+				{ role: "user", content: latest },
+			],
+			3,
+		);
+		const budget = `Prior context:\n\nuser: Keep this entry\n\n${latest}`.length + 5;
+		const out = truncateRecallQuery(composed, latest, budget);
+		expect(out).toBe(`Prior context:\n\nuser: Keep this entry\n\n${latest}`);
+		expect(out).not.toContain("Note: check config");
+		expect(out).not.toContain("port: 8080");
+		expect(out).not.toContain("quoted line");
 	});
 });
 

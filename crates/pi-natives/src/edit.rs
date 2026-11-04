@@ -12,6 +12,12 @@
 //! Apply never reuses a preview's answers: it asks again for every URL target
 //! the finished payload names, in one pass, before staging.
 //!
+//! Missing-path recovery follows the same pattern. The engine never walks: a
+//! must-exist path absent on disk is recorded as a miss, the async layer
+//! searches the working tree for its unique trailing-suffix match
+//! (`recover_one`, under a timeout), feeds the answer back into the session,
+//! and reruns the pass.
+//!
 //! [`EditStore`] holds the session-wide snapshot/clipboard/no-op state that
 //! read-side tools populate. The remaining exports are pure helpers used by
 //! the TypeScript tool shell (matcher projection, prompts, hashline display
@@ -22,8 +28,9 @@ use std::{
 	path::{Path, PathBuf},
 	sync::{
 		Arc,
-		atomic::{AtomicBool, Ordering},
+		atomic::{AtomicBool, AtomicUsize, Ordering},
 	},
+	time::Duration,
 };
 
 use async_trait::async_trait;
@@ -34,15 +41,21 @@ use napi::{
 };
 use napi_derive::napi;
 use pi_edit::{
-	EditError, EditMode, EditResult, PathPolicy, Session, UrlResolution,
+	EditError, EditMode, EditResult, PathPolicy, Resolved, Session, UrlResolution,
 	diff_string::{BlockContextSource, generate_diff_string},
 	modes::{hashline, sloppy},
-	path_policy::canonical_key,
+	path_policy::{RecoveryGlob, canonical_key},
 	session::{ApplyRequest, EditWriter, PreviewBatch, SessionConfig, WriteRequest, WriteResponse},
 	store,
 	stream_json::snapshot_from_text,
 	text::normalize_to_lf,
 };
+use pi_walker::{
+	Fs,
+	walk::{self, Action, Options},
+};
+
+use crate::memory::{self, Settled, native_work};
 
 fn parse_mode(mode: &str) -> Result<EditMode> {
 	EditMode::parse(mode)
@@ -66,6 +79,10 @@ pub struct EditPolicy {
 	pub allow_fuzzy:          bool,
 	pub fuzzy_threshold:      f64,
 	pub enforce_seen_lines:   bool,
+	/// Narrowest per-line display cap any tool applies, in UTF-8 bytes (0: no
+	/// tool cuts lines). Without recorded read provenance, hashline anchors on
+	/// longer lines are rejected.
+	pub max_columns:          u32,
 	pub block_auto_generated: bool,
 	pub plan_active:          bool,
 	/// Registered internal URL schemes (router spec keys).
@@ -100,6 +117,7 @@ impl EditPolicy {
 			allow_fuzzy:        self.allow_fuzzy,
 			fuzzy_threshold:    self.fuzzy_threshold,
 			enforce_seen_lines: self.enforce_seen_lines,
+			max_columns:        self.max_columns as usize,
 			raw_input:          self.raw_input,
 		})
 	}
@@ -219,12 +237,13 @@ pub struct EditFileOutcome {
 }
 
 /// Whole-call apply outcome. `is_error` carries the model-facing failure in
-/// `text` with no files.
+/// `text` with no files, and `error_kind` its class (`EditError::kind`).
 #[napi(object)]
 pub struct EditApplyOutcome {
-	pub text:     String,
-	pub files:    Vec<EditFileOutcome>,
-	pub is_error: bool,
+	pub text:       String,
+	pub files:      Vec<EditFileOutcome>,
+	pub is_error:   bool,
+	pub error_kind: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -371,8 +390,22 @@ enum ArgOp {
 	Finish,
 }
 
+/// Longest a missing-path recovery searches the working tree.
+const RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// One preview computation: the batch plus what it missed.
+struct Pass {
+	batch: PreviewBatch,
+	/// Internal URLs without a host answer.
+	urls:  Vec<String>,
+	/// Missing authored paths without a recovery answer.
+	paths: Vec<String>,
+}
+
 struct Shared {
-	session:     napi::tokio::sync::Mutex<Session>,
+	session:     Arc<napi::tokio::sync::Mutex<Session>>,
+	/// Working directory missing paths are recovered under.
+	cwd:         PathBuf,
 	queue:       parking_lot::Mutex<Vec<ArgOp>>,
 	/// Stops the preview pump; set by both `close` and `apply`.
 	closed:      AtomicBool,
@@ -397,6 +430,7 @@ impl Shared {
 	/// is never previewed or applied again, so a fresh one is equivalent.
 	fn release(session: &mut Session) {
 		*session = Session::new(session.config().clone(), session.store().clone());
+		memory::released();
 	}
 
 	/// `true` when the pump must stop. Releases the session's buffers only
@@ -419,9 +453,9 @@ impl Shared {
 	}
 
 	/// One preview computation under the session lock (blocking pool): the
-	/// batch plus the URLs it missed, or `None` when nothing is pending or the
-	/// session closed meanwhile.
-	fn preview_pass(&self, session: &mut Session) -> Option<(PreviewBatch, Vec<String>)> {
+	/// batch plus the URLs and paths it missed, or `None` when nothing is
+	/// pending or the session closed meanwhile.
+	fn preview_pass(&self, session: &mut Session) -> Option<Pass> {
 		self.drain_into(session);
 		if !session.preview_pending() {
 			return None;
@@ -430,7 +464,7 @@ impl Shared {
 		if self.stop_previewing(session) {
 			return None;
 		}
-		Some((batch, session.take_unresolved()))
+		Some(Pass { batch, urls: session.take_unresolved(), paths: session.take_recovery_misses() })
 	}
 
 	/// Apply every queued mutation to the locked session.
@@ -503,6 +537,47 @@ async fn resolve_one(resolver: &ResolverCallback, url: &str) -> UrlResolution {
 	}
 }
 
+/// The single file or directory below `cwd` whose path ends with the missing
+/// `authored` path (hidden entries included, ignore files honoured, `.git`
+/// pruned). `None` when there is no match, more than one, or the search
+/// outlives [`RECOVERY_TIMEOUT`]; the walk stops at the second match.
+async fn recover_one(cwd: &Path, authored: &str) -> Option<Resolved> {
+	let glob = RecoveryGlob::new(authored)?;
+	let opts = Options { hidden: true, gitignore: true, skip_git: true, ..Options::default() };
+	let matches = Arc::new(AtomicUsize::new(0));
+	let seen = Arc::clone(&matches);
+	let fs = Fs::Native;
+	let search = walk::collect(&fs, cwd, &opts, false, move |_, entry| {
+		if !glob.matches(entry.path, entry.name(), entry.file_type) {
+			return Action::Skip;
+		}
+		if seen.fetch_add(1, Ordering::AcqRel) == 0 {
+			Action::Continue
+		} else {
+			Action::Stop
+		}
+	});
+	let found = tokio::time::timeout(RECOVERY_TIMEOUT, search)
+		.await
+		.ok()?
+		.ok()?;
+	if matches.load(Ordering::Acquire) != 1 {
+		return None;
+	}
+	let display = found.iter().next()?.path_lossy().into_owned();
+	Some(Resolved { absolute: cwd.join(&display), display })
+}
+
+/// [`recover_one`] for every path, paired with its answer.
+async fn recover_all(cwd: &Path, paths: Vec<String>) -> Vec<(String, Option<Resolved>)> {
+	let mut answers = Vec::with_capacity(paths.len());
+	for authored in paths {
+		let answer = recover_one(cwd, &authored).await;
+		answers.push((authored, answer));
+	}
+	answers
+}
+
 /// Resolve the URLs `session` missed that `resolved` has not answered yet
 /// and feed the answers back. `true` when anything new was provided, so a
 /// retry can make progress; a URL that misses again after its answer never
@@ -547,8 +622,13 @@ impl EditSession {
 	) -> Result<Self> {
 		let config = policy.into_config()?;
 		let (wake, rx) = flume::bounded::<()>(1);
+		let cwd = config.policy.cwd.clone();
 		let shared = Arc::new(Shared {
-			session: napi::tokio::sync::Mutex::new(Session::new(config, store.inner.clone())),
+			session: Arc::new(napi::tokio::sync::Mutex::new(Session::new(
+				config,
+				store.inner.clone(),
+			))),
+			cwd,
 			queue: parking_lot::Mutex::new(Vec::new()),
 			closed: AtomicBool::new(false),
 			applying: AtomicBool::new(false),
@@ -608,10 +688,21 @@ impl EditSession {
 				session.provide(url, resolution);
 			}
 		}
-		// Misses the payload projection did not predict surface before the first
-		// write, so a retry is safe; each one follows a newly resolved URL,
-		// bounding attempts by distinct URLs + 1.
+		// Missing paths are answered before staging for real, so no write is
+		// ever retried. Misses the payload projection did not predict surface
+		// before the first write, so a retry is safe; each one follows a newly
+		// resolved URL or recovered path, bounding attempts by distinct URLs and
+		// paths + 1.
+		let mut recovered = HashSet::new();
 		let outcome = loop {
+			let mut missing = session.apply_recovery_misses();
+			missing.retain(|authored| recovered.insert(authored.clone()));
+			if !missing.is_empty() {
+				for (authored, answer) in recover_all(&shared.cwd, missing).await {
+					session.provide_recovery(authored, answer);
+				}
+				continue;
+			}
 			let outcome = session.apply(request.clone(), &writer).await;
 			if matches!(outcome, Err(EditError::UnresolvedUrl(_)))
 				&& let Some(resolver) = &shared.resolve_url
@@ -625,8 +716,8 @@ impl EditSession {
 		drop(session);
 		Ok(match outcome {
 			Ok(outcome) => EditApplyOutcome {
-				text:     outcome.text,
-				files:    outcome
+				text:       outcome.text,
+				files:      outcome
 					.files
 					.into_iter()
 					.map(|file| EditFileOutcome {
@@ -645,10 +736,14 @@ impl EditSession {
 						parse_regressed:    file.parse_regressed,
 					})
 					.collect(),
-				is_error: false,
+				is_error:   false,
+				error_kind: None,
 			},
-			Err(err) => {
-				EditApplyOutcome { text: err.to_string(), files: Vec::new(), is_error: true }
+			Err(err) => EditApplyOutcome {
+				error_kind: Some(err.kind().to_owned()),
+				text:       err.to_string(),
+				files:      Vec::new(),
+				is_error:   true,
 			},
 		})
 	}
@@ -684,6 +779,9 @@ async fn preview_pump(shared: Arc<Shared>, rx: flume::Receiver<()>, on_preview: 
 		let Some(batch) = settled_preview(&shared).await else {
 			continue;
 		};
+		// Held until the delivery below has converted and released the batch
+		// on the JS thread, however this iteration ends.
+		let _settled = Settled::new(());
 		let is_final = !batch.streaming;
 		if shared.closed.load(Ordering::Acquire) {
 			return;
@@ -703,44 +801,59 @@ async fn preview_pump(shared: Arc<Shared>, rx: flume::Receiver<()>, on_preview: 
 }
 
 /// Compute the preview on the blocking pool; while it misses internal URLs
-/// this settle has not answered yet, resolve them with no session lock held
-/// across the JS round trips, feed the answers back, and recompute, so a
-/// delivered batch is never superseded by a pending resolution rerun. Each
-/// rerun follows a newly resolved URL, bounding passes by distinct URLs + 1.
+/// or missing paths this settle has not answered yet, answer them with no
+/// session lock held across the JS round trips and the working-tree search,
+/// feed the answers back, and recompute, so a delivered batch is never
+/// superseded by a pending resolution rerun. Each rerun follows a newly
+/// answered URL or path, bounding passes by distinct URLs and paths + 1.
 /// `None` when nothing is pending, the session closed, or the blocking task
 /// failed.
 async fn settled_preview(shared: &Arc<Shared>) -> Option<PreviewBatch> {
+	// Every pass's batch and misses are freed by the time this returns,
+	// including passes abandoned while an answer was pending.
+	let _settled = Settled::new(());
 	let mut resolved = HashSet::new();
+	let mut recovered = HashSet::new();
 	loop {
 		if shared.closed.load(Ordering::Acquire) {
 			return None;
 		}
+		let mut guard = Arc::clone(&shared.session).lock_owned().await;
 		let compute = Arc::clone(shared);
 		let pass = napi::bindgen_prelude::spawn_blocking(move || {
-			compute.preview_pass(&mut compute.session.blocking_lock())
+			let _work = native_work();
+			compute.preview_pass(&mut guard)
 		})
 		.await;
-		let Ok(Some((batch, mut misses))) = pass else {
+		let Ok(Some(Pass { batch, mut urls, mut paths })) = pass else {
 			return None;
 		};
-		let Some(resolver) = &shared.resolve_url else {
-			return Some(batch);
-		};
-		misses.retain(|url| resolved.insert(url.clone()));
-		if misses.is_empty() {
+		if shared.resolve_url.is_some() {
+			urls.retain(|url| resolved.insert(url.clone()));
+		} else {
+			urls.clear();
+		}
+		paths.retain(|authored| recovered.insert(authored.clone()));
+		if urls.is_empty() && paths.is_empty() {
 			return Some(batch);
 		}
-		let mut answers = Vec::with_capacity(misses.len());
-		for url in misses {
-			let resolution = resolve_one(resolver, &url).await;
-			answers.push((url, resolution));
+		let mut url_answers = Vec::with_capacity(urls.len());
+		if let Some(resolver) = &shared.resolve_url {
+			for url in urls {
+				let resolution = resolve_one(resolver, &url).await;
+				url_answers.push((url, resolution));
+			}
 		}
+		let path_answers = recover_all(&shared.cwd, paths).await;
 		let mut session = shared.session.lock().await;
 		if shared.stop_previewing(&mut session) {
 			return None;
 		}
-		for (url, resolution) in answers {
+		for (url, resolution) in url_answers {
 			session.provide(url, resolution);
+		}
+		for (authored, answer) in path_answers {
+			session.provide_recovery(authored, answer);
 		}
 	}
 }
@@ -780,7 +893,7 @@ pub struct EditInspection {
 pub fn edit_inspect(mode: String, args_json: String) -> Result<EditInspection> {
 	let mode = parse_mode(&mode)?;
 	let snapshot = snapshot_from_text(&args_json, false, true);
-	let engine = pi_edit::modes::engine_for(mode, true, 0.95, false);
+	let engine = pi_edit::modes::engine_for(mode, true, 0.95, false, 0);
 	let inspection = engine.inspect(&snapshot);
 	Ok(EditInspection {
 		paths:    inspection.paths,
@@ -836,6 +949,15 @@ pub fn edit_description(mode: String) -> Result<String> {
 #[napi]
 pub fn edit_grammar(mode: String) -> Result<Option<String>> {
 	Ok(pi_edit::grammar(parse_mode(&mode)?).map(str::to_owned))
+}
+
+/// Every `errorKind` a failed apply outcome can carry.
+#[napi]
+pub fn edit_error_kinds() -> Vec<String> {
+	EditError::KINDS
+		.iter()
+		.map(|kind| (*kind).to_owned())
+		.collect()
 }
 
 /// Auto-generated-file guard: the rejection message when `absolutePath`
@@ -956,7 +1078,111 @@ pub fn notebook_to_editable_text(json: String, display_path: String) -> Result<S
 mod tests {
 	use super::*;
 
-	fn shared_with_finished_patch(cwd: &Path) -> Shared {
+	/// A fresh directory removed on drop.
+	struct Scratch(PathBuf);
+
+	impl Scratch {
+		fn new(name: &str) -> Self {
+			let path =
+				std::env::temp_dir().join(format!("pi-natives-edit-{name}-{}", std::process::id()));
+			let _ = std::fs::remove_dir_all(&path);
+			std::fs::create_dir_all(&path).unwrap();
+			Self(path)
+		}
+
+		fn write(&self, relative: &str, content: &str) {
+			let path = self.0.join(relative);
+			std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+			std::fs::write(path, content).unwrap();
+		}
+	}
+
+	impl Drop for Scratch {
+		fn drop(&mut self) {
+			let _ = std::fs::remove_dir_all(&self.0);
+		}
+	}
+
+	const ADD_PATCH: &str =
+		"*** Begin Patch\n*** Add File: pi-edit-session-test.txt\n+hi\n*** End Patch\n";
+
+	const UPDATE_PATCH: &str =
+		"*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n*** End Patch\n";
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn recovers_the_one_file_with_a_matching_suffix() {
+		let tree = Scratch::new("unique");
+		tree.write("deep/src/a.ts", "");
+		tree.write("deep/src/other.ts", "");
+		let recovered = recover_one(&tree.0, "src/a.ts").await.unwrap();
+		assert_eq!(recovered.display, "deep/src/a.ts");
+		assert_eq!(recovered.absolute, tree.0.join("deep/src/a.ts"));
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn recovers_hidden_entries_and_directories() {
+		let tree = Scratch::new("hidden");
+		tree.write(".config/app/settings.json", "");
+		assert_eq!(
+			recover_one(&tree.0, "app/settings.json")
+				.await
+				.unwrap()
+				.display,
+			".config/app/settings.json"
+		);
+		assert_eq!(recover_one(&tree.0, "./app/").await.unwrap().display, ".config/app");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn declines_ambiguous_and_absent_suffixes() {
+		let tree = Scratch::new("ambiguous");
+		tree.write("deep/src/a.ts", "");
+		tree.write("other/src/a.ts", "");
+		assert!(recover_one(&tree.0, "src/a.ts").await.is_none());
+		assert!(recover_one(&tree.0, "src/missing.ts").await.is_none());
+		assert!(recover_one(&tree.0, "/").await.is_none());
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn does_not_search_git_metadata() {
+		let tree = Scratch::new("git");
+		tree.write(".git/objects/a.ts", "");
+		tree.write("deep/a.ts", "");
+		assert_eq!(recover_one(&tree.0, "a.ts").await.unwrap().display, "deep/a.ts");
+	}
+
+	/// The preview settles on the recovered path: the first pass misses
+	/// `src/a.ts`, the search answers it, and the rerun previews the match.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn settled_preview_recovers_a_missing_path() {
+		let tree = Scratch::new("preview");
+		tree.write("deep/src/a.ts", "old\n");
+		let shared = Arc::new(shared_with_finished_patch(&tree.0, UPDATE_PATCH));
+		let batch = settled_preview(&shared).await.unwrap();
+		assert_eq!(batch.files.len(), 1, "{batch:?}");
+		assert_eq!(batch.files[0].display, "deep/src/a.ts");
+		assert!(batch.files[0].error.is_none(), "{batch:?}");
+	}
+
+	/// An ambiguous suffix stays unrecovered: the preview reports the miss.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn settled_preview_keeps_an_ambiguous_path_unrecovered() {
+		let tree = Scratch::new("preview-ambiguous");
+		tree.write("deep/src/a.ts", "old\n");
+		tree.write("other/src/a.ts", "old\n");
+		let shared = Arc::new(shared_with_finished_patch(&tree.0, UPDATE_PATCH));
+		let batch = settled_preview(&shared).await.unwrap();
+		assert!(batch.files[0].error.is_some(), "{batch:?}");
+		assert!(
+			batch
+				.files
+				.iter()
+				.all(|file| !file.display.ends_with("/src/a.ts")),
+			"{batch:?}"
+		);
+	}
+
+	fn shared_with_finished_patch(cwd: &Path, patch: &str) -> Shared {
 		let config = SessionConfig {
 			mode:               EditMode::ApplyPatch,
 			policy:             PathPolicy {
@@ -971,11 +1197,16 @@ mod tests {
 			allow_fuzzy:        true,
 			fuzzy_threshold:    0.95,
 			enforce_seen_lines: false,
+			max_columns:        512,
 			raw_input:          false,
 		};
 		let (wake, _rx) = flume::bounded::<()>(1);
 		let shared = Shared {
-			session: napi::tokio::sync::Mutex::new(Session::new(config, store::EditStore::new())),
+			session: Arc::new(napi::tokio::sync::Mutex::new(Session::new(
+				config,
+				store::EditStore::new(),
+			))),
+			cwd: cwd.to_path_buf(),
 			queue: parking_lot::Mutex::new(Vec::new()),
 			closed: AtomicBool::new(false),
 			applying: AtomicBool::new(false),
@@ -983,7 +1214,7 @@ mod tests {
 			resolve_url: None,
 		};
 		let args = serde_json::json!({
-			"input": "*** Begin Patch\n*** Add File: pi-edit-session-test.txt\n+hi\n*** End Patch\n",
+			"input": patch,
 		});
 		shared.enqueue(ArgOp::SetArgs(args.to_string()));
 		shared.enqueue(ArgOp::Finish);
@@ -994,10 +1225,10 @@ mod tests {
 	/// the pass has drained the queue into the session, so releasing it on
 	/// seeing `closed` would leave `apply` an empty buffer. Fails on the
 	/// single shared `closed` flag.
-	#[test]
-	fn preview_pass_keeps_buffers_when_apply_closed_the_session() {
-		let shared = shared_with_finished_patch(&std::env::temp_dir());
-		let mut session = shared.session.blocking_lock();
+	#[tokio::test]
+	async fn preview_pass_keeps_buffers_when_apply_closed_the_session() {
+		let shared = shared_with_finished_patch(&std::env::temp_dir(), ADD_PATCH);
+		let mut session = shared.session.lock().await;
 		shared.begin_apply();
 		assert!(shared.preview_pass(&mut session).is_none());
 		assert!(shared.queue.lock().is_empty(), "the pass drained the queue");
@@ -1007,10 +1238,10 @@ mod tests {
 	}
 
 	/// A pass that sees `close()` still frees the buffers.
-	#[test]
-	fn preview_pass_releases_buffers_after_close() {
-		let shared = shared_with_finished_patch(&std::env::temp_dir());
-		let mut session = shared.session.blocking_lock();
+	#[tokio::test]
+	async fn preview_pass_releases_buffers_after_close() {
+		let shared = shared_with_finished_patch(&std::env::temp_dir(), ADD_PATCH);
+		let mut session = shared.session.lock().await;
 		shared.closed.store(true, Ordering::Release);
 		assert!(shared.preview_pass(&mut session).is_none());
 		assert!(session.preview().files.is_empty());

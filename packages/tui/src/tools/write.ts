@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { HighlightStream } from "@oh-my-pi/pi-natives";
 import type { Component } from "../tui";
 import { fencedCode } from "../components/markdown";
@@ -7,6 +8,7 @@ import { getLanguageFromPath } from "../lang-from-path";
 import { createHighlightStream, highlightCode, type Theme } from "../theme/theme";
 import { fileHyperlink, renderStatusLine } from "../render";
 import { framedToolCard } from "../render/tool-card";
+import { wrapPrefixedLine } from "../render/hanging-wrap";
 import {
 	cachedRenderedString,
 	createRenderedStringCache,
@@ -15,7 +17,6 @@ import {
 	formatErrorDetail,
 	formatExpandHint,
 	formatMoreItems,
-	formatStatusIcon,
 	PREVIEW_LIMITS,
 	type RenderedStringCache,
 	replaceTabs,
@@ -162,10 +163,12 @@ function describeFigure(figure: ToolFigure | undefined): NativeNode | undefined 
 	return { ...md(text, { role: "omp.tool.write.figure", stream: !figure.closed }), key: "figure" };
 }
 
-/** The written content as numbered code, keyed so it keeps its node as the figure above it comes and goes. */
+/**
+ * The written content as numbered code, highlighted by Tern from the file's path,
+ * keyed so it keeps its node as the figure above it comes and goes.
+ */
 function describeSource(rawPath: string, content: string): NativeNode {
-	const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
-	return { ...code(content, { lang, numbers: true }), key: "source" };
+	return { ...code(content, { path: rawPath || undefined, numbers: true, wrap: true }), key: "source" };
 }
 
 function countLines(text: string): number {
@@ -338,13 +341,12 @@ function formatStreamingContent(
 	expanded: boolean,
 	language: string | undefined,
 	uiTheme: Theme,
-	spinnerFrame?: number,
 	cache?: RenderedStringCache,
 	streamKey?: WriteStreamingPreviewStateCarrier,
 	argsComplete?: boolean,
 ): string {
 	if (!content) return "";
-	const bodyText = cachedRenderedString(cache, uiTheme, expanded, language ?? "", content, () => {
+	return cachedRenderedString(cache, uiTheme, expanded, language ?? "", content, () => {
 		const state = updateStreamingPreview(streamKey, content, language, uiTheme, argsComplete === true);
 		let totalLines: number;
 		let startIndex: number;
@@ -367,25 +369,26 @@ function formatStreamingContent(
 		const hidden = startIndex;
 		const lineNumberWidth = Math.max(WRITE_GUTTER_MIN_WIDTH, String(totalLines).length);
 
-		let text = "\n\n";
+		const rows: string[] = [];
 		if (hidden > 0) {
-			text += `${uiTheme.fg("dim", `… (${hidden} earlier line${hidden === 1 ? "" : "s"})`)}\n`;
+			rows.push(uiTheme.fg("dim", `… (${hidden} earlier line${hidden === 1 ? "" : "s"})`));
 		}
 		for (let i = 0; i < visibleLines.length; i++) {
 			const lineNum = startIndex + i + 1;
 			const gutter = uiTheme.fg("dim", `${String(lineNum).padStart(lineNumberWidth, " ")} `);
-			const body = replaceTabs(visibleLines[i] ?? "");
-			text += `${gutter}${body}\n`;
+			rows.push(`${gutter}${replaceTabs(visibleLines[i] ?? "")}`);
 		}
-		return text;
+		return `\n\n${rows.join("\n")}`;
 	});
-	if (bodyText.length === 0) return "";
-	// The animated glyph lives on this trailing line — inside the transcript's
-	// volatile-tail holdback — never in the header: an animating head row pins
-	// the native-scrollback commit boundary at the top of the block, so a long
-	// expanded preview could never scroll-append mid-stream.
-	const spinner = spinnerFrame !== undefined ? `${formatStatusIcon("running", uiTheme, spinnerFrame)} ` : "";
-	return `${bodyText}${spinner}${uiTheme.fg("dim", `… (streaming)`)}`;
+}
+
+function wrapWritePreviewRows(lines: string[], width: number): string[] {
+	return lines.flatMap(line => {
+		const gutter = /^(\x1b\[[0-9;]*m)( *\d+ )(\x1b\[[0-9;]*m)(.*)$/.exec(line);
+		if (!gutter) return line;
+		const prefix = `${gutter[1]}${gutter[2]}${gutter[3]}`;
+		return wrapPrefixedLine(prefix, " ".repeat(Bun.stringWidth(gutter[2]!)), gutter[4] ?? "", width);
+	});
 }
 
 function renderContentPreview(
@@ -424,6 +427,8 @@ function renderContentPreview(
 /** Render context for the write tool: resolves an `xd://`-mounted tool so its live renderer drives device dispatch previews. */
 export interface WriteRenderContext {
 	resolveXdevMounted?: (name: string) => XdevMountedRenderer | undefined;
+	/** Original result metadata used only for filesystem link targets. */
+	rawDetails?: unknown;
 }
 
 /** Process id and operation named by the text after `proc://`. */
@@ -540,6 +545,15 @@ function describeWriteUrl(
 	}
 }
 
+function writeResolvedPath(rawDetails: unknown, fallback: string | undefined): string | undefined {
+	return rawDetails !== null &&
+		typeof rawDetails === "object" &&
+		"resolvedPath" in rawDetails &&
+		typeof rawDetails.resolvedPath === "string"
+		? rawDetails.resolvedPath
+		: fallback;
+}
+
 /** Native write head shared by the call and result: `Write · path · 22 lines`, executable/diagnostics chips. */
 function writeToolHead(
 	rawPath: string,
@@ -553,7 +567,7 @@ function writeToolHead(
 	if (diagnostics) badges.push(diagnostics);
 	return {
 		title: "Write",
-		target: rawPath ? displayPath(rawPath) : undefined,
+		target: rawPath ? sanitizeText(displayPath(rawPath)) : undefined,
 		targetKind: "path",
 		href: fileHref(details?.resolvedPath),
 		meta: lineCount > 0 ? [`${lineCount} line${lineCount === 1 ? "" : "s"}`] : undefined,
@@ -611,7 +625,7 @@ export const writeToolRenderer = {
 			if (xdev.name === REPORT_ISSUE_DEVICE_NAME) return renderReportIssueDeviceCall(args.content, uiTheme);
 			return renderXdevCall(xdev.name, args.content, options, uiTheme, options.renderContext?.resolveXdevMounted);
 		}
-		const filePath = shortenPath(rawPath);
+		const filePath = sanitizeText(shortenPath(rawPath));
 		const lang = rawPath ? (getLanguageFromPath(rawPath) ?? "text") : "text";
 		const langIcon = uiTheme.fg("muted", uiTheme.getLangIcon(lang));
 		const styledPath = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
@@ -619,17 +633,6 @@ export const writeToolRenderer = {
 		// rather than an archive member or database row selector.
 		const pathDisplay =
 			filePath && args.content !== undefined ? fileHyperlink(pendingFileLinkPath(rawPath), styledPath) : styledPath;
-		// No status icon on the head row: it's the head of the framed block, and
-		// native-scrollback commits are prefix-only — an animated glyph would pin
-		// the commit boundary at the top, and the pending hourglass just adds
-		// noise. The liveness cue rides the trailing "(streaming)" line instead.
-		const header = renderStatusLine(
-			{
-				title: "Write",
-				description: `${langIcon} ${pathDisplay}`,
-			},
-			uiTheme,
-		);
 		// Raw content, not normalizeDisplayText(args.content): the collapsed
 		// streaming path normalizes only its tail window, so a full-payload
 		// normalize on every reveal tick would re-introduce the O(n²) streaming
@@ -639,14 +642,23 @@ export const writeToolRenderer = {
 		const streamingCache = createRenderedStringCache();
 		return framedToolCard(
 			uiTheme,
-			() => {
+			({ contentWidth }) => {
+				// Only a live spinner fills the icon slot, as in Edit's call card.
+				const header = renderStatusLine(
+					{
+						icon: options?.spinnerFrame === undefined ? undefined : "running",
+						spinnerFrame: options?.spinnerFrame,
+						title: "Write",
+						description: `${langIcon} ${pathDisplay}`,
+					},
+					uiTheme,
+				);
 				const body = content
 					? formatStreamingContent(
 							content,
 							Boolean(options?.expanded),
 							lang,
 							uiTheme,
-							options?.spinnerFrame,
 							streamingCache,
 							// `options` is the ToolExecutionComponent's persistent
 							// render-state object — a stable identity across reveal ticks
@@ -660,7 +672,9 @@ export const writeToolRenderer = {
 				while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
 				return {
 					header,
-					sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
+					// The label ends with the args: once the content is complete the write is just running.
+					footerMeta: body && !options?.argsComplete ? uiTheme.fg("dim", "streaming") : undefined,
+					sections: bodyLines.length > 0 ? [{ content: wrapWritePreviewRows(bodyLines, contentWidth) }] : [],
 					phase: "pending",
 					borderColor: "borderMuted",
 				};
@@ -695,14 +709,14 @@ export const writeToolRenderer = {
 		}
 		const rawPath =
 			typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
-		const filePath = shortenPath(rawPath);
+		const filePath = sanitizeText(shortenPath(rawPath));
 		const fileContent = normalizeDisplayText(args?.content);
 		const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
 		const langIcon = uiTheme.fg("muted", uiTheme.getLangIcon(lang));
 		// The header shows the cwd-relative path but links to the absolute path the
 		// write resolved to (args.path may be relative, which would yield a broken
 		// `file://` URI). Falls back to plain text when the result lacks a path.
-		const linkTarget = result.details?.resolvedPath;
+		const linkTarget = writeResolvedPath(options.renderContext?.rawDetails, result.details?.resolvedPath);
 		const styledPath = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
 		const pathDisplay = filePath && linkTarget ? fileHyperlink(linkTarget, styledPath) : styledPath;
 
@@ -743,7 +757,7 @@ export const writeToolRenderer = {
 		const previewCache = createRenderedStringCache();
 		return framedToolCard(
 			uiTheme,
-			() => {
+			({ contentWidth }) => {
 				const { expanded } = options;
 				let body = renderContentPreview(fileContent, expanded, lang, uiTheme, previewCache);
 				if (isPartial && progressText) {
@@ -768,7 +782,7 @@ export const writeToolRenderer = {
 				while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
 				return {
 					header,
-					sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
+					sections: bodyLines.length > 0 ? [{ content: wrapWritePreviewRows(bodyLines, contentWidth) }] : [],
 					phase: isPartial ? "partial" : "success",
 					borderColor: "borderMuted",
 				};
@@ -825,7 +839,7 @@ export const writeToolRenderer = {
 		const diagnostics = isPartial ? undefined : result.details?.diagnostics;
 		const tool = writeToolHead(rawPath, fileContent, {
 			madeExecutable: !isPartial && result.details?.madeExecutable === true,
-			resolvedPath: result.details?.resolvedPath,
+			resolvedPath: writeResolvedPath(options.renderContext?.rawDetails, result.details?.resolvedPath),
 			diagnostics,
 		});
 		if (result.isError) return { tool, tone: "error", body: [errorText(resultText(result))] };

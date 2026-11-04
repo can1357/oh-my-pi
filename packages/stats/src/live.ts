@@ -15,6 +15,7 @@ import * as path from "node:path";
 import { getSessionsDir, logger } from "@oh-my-pi/pi-utils";
 import { syncAllSessions } from "./aggregator";
 import { getDataVersion, initDb } from "./db";
+import { isCompressScratchPath } from "./parser";
 import { getRollupStatus, refreshRollups } from "./rollup";
 import type { LiveStatus, LiveSyncStatus } from "./shared-types";
 
@@ -24,6 +25,11 @@ const WATCH_DEBOUNCE_MS = 800;
 const FULL_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 /** Minimum spacing of `version` bumps; each bump makes open pages refetch. */
 const VERSION_THROTTLE_MS = 1000;
+/**
+ * The same while a full sync runs. Pages rebuild on the thread that ingests, so a catch-up over many transcripts would
+ * otherwise spend most of its time serving refetches; the held-back bump lands when the sync ends.
+ */
+const SYNCING_VERSION_THROTTLE_MS = 15_000;
 /** Delay before retrying a failed sync (typically a lock held by another omp process). */
 const SYNC_RETRY_MS = 10_000;
 /** Minimum spacing of progress-only status events. */
@@ -168,6 +174,8 @@ export class StatsLive {
 		}
 		// Another process may have ingested too; its commits move SQLite's data_version.
 		if (this.#externalWrites()) this.#changed();
+		// A full sync held its last bump back: show its data now rather than at the end of the throttle.
+		if (visible && this.#versionTimer) this.#advanceVersion();
 		this.#emit();
 	}
 
@@ -186,17 +194,22 @@ export class StatsLive {
 		this.#bumpVersion();
 	}
 
-	/** Bump the data version (throttled), making open pages refetch. */
+	/** Bump the data version (throttled, more so during a full sync), making open pages refetch. */
 	#bumpVersion(): void {
 		if (this.#versionTimer) return;
-		const wait = Math.max(0, this.#lastVersionAt + VERSION_THROTTLE_MS - Date.now());
-		this.#versionTimer = setTimeout(() => {
-			this.#versionTimer = null;
-			this.#lastVersionAt = Date.now();
-			this.#version++;
-			this.#indexingHours = getRollupStatus().dirtyHours;
-			this.#emit();
-		}, wait);
+		const spacing = this.#sync.phase === "syncing" ? SYNCING_VERSION_THROTTLE_MS : VERSION_THROTTLE_MS;
+		const wait = Math.max(0, this.#lastVersionAt + spacing - Date.now());
+		this.#versionTimer = setTimeout(() => this.#advanceVersion(), wait);
+	}
+
+	/** Bump the data version now, cancelling a pending throttled bump. */
+	#advanceVersion(): void {
+		clearTimeout(this.#versionTimer ?? undefined);
+		this.#versionTimer = null;
+		this.#lastVersionAt = Date.now();
+		this.#version++;
+		this.#indexingHours = getRollupStatus().dirtyHours;
+		this.#emit();
 	}
 
 	async #refresh(): Promise<void> {
@@ -231,7 +244,7 @@ export class StatsLive {
 		const pending = new Set<string>();
 		try {
 			this.#watcher = fs.watch(root, { recursive: true }, (_event, filename) => {
-				if (!filename?.endsWith(".jsonl")) return;
+				if (!filename?.endsWith(".jsonl") || isCompressScratchPath(filename)) return;
 				pending.add(path.join(root, filename));
 				clearTimeout(this.#debounceTimer ?? undefined);
 				this.#debounceTimer = setTimeout(() => {

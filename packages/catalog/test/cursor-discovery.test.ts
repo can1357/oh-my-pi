@@ -32,7 +32,7 @@ import { create, fromBinary, toBinary } from "../src/discovery/protobuf";
 import { collapseBuiltVariants, getVariantAliasSources, resolveVariantSelector } from "../src/compat/collapse";
 import { resolveProviderModels } from "../src/model-manager";
 import { cursorModelManagerOptions } from "../src/provider-models/special";
-import { getModelPricingStatus } from "../src/models";
+import { calculateUncachedInputCost, getModelPricingStatus } from "../src/models";
 import type { ModelSpec } from "../src/types";
 
 const FIXTURE_MODEL_IDS = [
@@ -521,6 +521,8 @@ describe("fetchCursorUsableModels", () => {
 				"claude-opus-4-8-high",
 				"claude-opus-4-8-high-fast",
 				"gpt-5.1",
+				"gemini-4-argon",
+				"gemini-4-argon-fast",
 			].map(modelId => create(ModelDetailsSchema, { modelId })),
 		});
 		const available = create(AvailableModelsResponseSchema, {
@@ -545,6 +547,14 @@ describe("fetchCursorUsableModels", () => {
 					name: "gpt-5.1",
 					clientDisplayName: "GPT-5.1",
 					supportsAgent: true,
+				}),
+				create(AvailableModelsResponse_ModelDetailsSchema, {
+					name: "gemini-4-argon",
+					clientDisplayName: "Gemini 4 Argon",
+					supportsAgent: true,
+					legacySlugs: ["gemini-4-argon", "gemini-4-argon-fast"],
+					parameterDefinitions: [fastDefinition],
+					variants: [fastVariant("gemini-4-argon", false), fastVariant("gemini-4-argon-fast", true)],
 				}),
 			],
 		});
@@ -583,6 +593,18 @@ describe("fetchCursorUsableModels", () => {
 		const uncovered = built("gpt-5.1");
 		expect(uncovered.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 		expect(getModelPricingStatus(uncovered)).toBe("unknown");
+		// A lane priced from a sibling slug's card (no rule names its own id)
+		// keeps that card's dated schedule, scaled by the declared multiplier,
+		// so it changes price on the date even on a row built before it.
+		const argonSwitch = Date.parse("2026-12-01T08:00:00Z");
+		for (const [id, multiplier] of [
+			["gemini-4-argon", 1],
+			["gemini-4-argon-fast", 2],
+		] as const) {
+			const argon = built(id);
+			expect(calculateUncachedInputCost(argon.cost, 1_000_000, argonSwitch - 1)).toBeCloseTo(2 * multiplier, 10);
+			expect(calculateUncachedInputCost(argon.cost, 1_000_000, argonSwitch)).toBeCloseTo(4 * multiplier, 10);
+		}
 	});
 	it("decodes Cursor's length-delimited vendor metadata", () => {
 		const encoded = Uint8Array.from(Buffer.from("0a0766697874757265d202020801", "hex"));

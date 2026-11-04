@@ -17,7 +17,9 @@ import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 
 import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
 import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
-import MODEL_PRIO from "../src/priority.json" with { type: "json" };
+import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getAgentDbPath, getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
@@ -40,11 +42,8 @@ import {
 	cfgFeaturesUnexpectedStopDetection,
 	cfgRetryFallbackChains,
 	cfgProviderAppendOnlyContext,
-	cfgCodeModeInputs,
 	cfgDefaultThinkingLevel,
 	cfgInlineToolDescriptors,
-	cfgProvidersOpenaiCodexCodeMode,
-	cfgProvidersOpenaiCodexCodeModeDirectTools,
 	cfgRetryModelFallback,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import {
@@ -81,7 +80,6 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgModelRoles, cfgDisabledProviders, cfgEnabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
-import { cfgEvalJs } from "@oh-my-pi/pi-coding-agent/eval/settings";
 
 /** Lets microtask-coalesced setting listeners run. */
 const tick = () => Promise.resolve();
@@ -1286,78 +1284,6 @@ describe("Settings", () => {
 				unsubscribe();
 			}
 		});
-
-		it("signals Code Mode partition inputs picked up from disk", async () => {
-			await writeSettings({ providers: { "openai-codex": { codeMode: "off" } }, eval: { js: true } });
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			let signalCount = 0;
-			const unsubscribe = cfgCodeModeInputs.listen(settings, () => {
-				signalCount++;
-			});
-
-			try {
-				await settings.reloadFromDisk();
-				await tick();
-				expect(signalCount).toBe(0);
-
-				await writeSettings({ providers: { "openai-codex": { codeMode: "on" } }, eval: { js: true } });
-				await settings.reloadFromDisk();
-				await tick();
-
-				expect(cfgProvidersOpenaiCodexCodeMode.get(settings)).toBe("on");
-				expect(signalCount).toBe(1);
-
-				// A single reload that changes several partition inputs signals once.
-				await writeSettings({
-					providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["bash"] } },
-					eval: { js: false },
-				});
-				await settings.reloadFromDisk();
-				await tick();
-
-				expect(cfgEvalJs.get(settings)).toBe(false);
-				expect(cfgProvidersOpenaiCodexCodeModeDirectTools.get(settings)).toEqual(["bash"]);
-				expect(signalCount).toBe(2);
-
-				// `edit.mode` renames the direct edit tool on the wire.
-				await writeSettings({
-					providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["bash"] } },
-					eval: { js: false },
-					edit: { mode: "apply_patch" },
-				});
-				await settings.reloadFromDisk();
-				await tick();
-
-				expect(cfgEditMode.get(settings)).toBe("apply_patch");
-				expect(signalCount).toBe(3);
-			} finally {
-				unsubscribe();
-			}
-		});
-
-		it("signals Code Mode partition inputs supplied by the destination project", async () => {
-			await writeSettings({ providers: { "openai-codex": { codeMode: "off" } } });
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			const otherProject = tempDir.join("code-mode-project");
-			await Bun.write(
-				path.join(getProjectAgentDir(otherProject), "config.yml"),
-				YAML.stringify({ providers: { "openai-codex": { codeMode: "on" } } }, null, 2),
-			);
-			let signalCount = 0;
-			const unsubscribe = cfgCodeModeInputs.listen(settings, () => {
-				signalCount++;
-			});
-
-			try {
-				await settings.reloadForCwd(otherProject);
-				await tick();
-
-				expect(cfgProvidersOpenaiCodexCodeMode.get(settings)).toBe("on");
-				expect(signalCount).toBe(1);
-			} finally {
-				unsubscribe();
-			}
-		});
 	});
 
 	describe("get()", () => {
@@ -1893,13 +1819,14 @@ describe("Settings", () => {
 			expectedChains: Record<string, string[]>,
 		];
 
+		const MODEL_PRIO = roleDefaultModels();
 		const webExaCandidates = ["web/exa", ...MODEL_PRIO.web.filter(selector => selector !== "web/exa")];
 		const webOrderedHead = [
 			"google-gemini-cli/gemini-2.5-flash",
 			"google-antigravity/gemini-2.5-flash",
 			"google/gemini-2.5-flash",
 			"anthropic/claude-haiku-4-5",
-			"openai-codex/gpt-5.6-luna",
+			"openai-codex/gpt-6-luna",
 			"xai/grok-4.5",
 			"web/exa",
 			"web/tavily",
@@ -1969,14 +1896,14 @@ describe("Settings", () => {
 				"auto-thinking model",
 				"providers.autoThinkingModel",
 				"qwen3-1.7b",
-				{ judge: "typesafe/jev-latest" },
+				{ judge: "typesafe/jev-1.14.0" },
 				{ judge: ["local/qwen3-1.7b", "@tiny", "@smol", "@default"] },
 			],
 			[
 				"unexpected-stop model",
 				"providers.unexpectedStopModel",
 				"gemma-3-1b",
-				{ judge: "typesafe/jev-latest" },
+				{ judge: "typesafe/jev-1.14.0" },
 				{ judge: ["local/gemma-3-1b", "@tiny", "@smol", "@default"] },
 			],
 			["tiny model", "providers.tinyModel", "lfm2.5-230m", { tiny: "local/lfm2.5-230m" }, {}],
@@ -2024,6 +1951,46 @@ describe("Settings", () => {
 				}
 			},
 		);
+
+		it("repairs the old generated web fallback pair without changing unrelated chains", async () => {
+			await writeSettings({
+				modelRoles: { web: "web/parallel" },
+				retry: {
+					fallbackChains: {
+						web: [
+							"web/searxng",
+							"openai-codex/gpt-6-luna",
+							"openai-codex/gpt-5.6",
+							"openai-codex/gpt-5.5",
+							"xai/grok-4.5",
+						],
+						slow: ["openai-codex/gpt-5.5"],
+					},
+				},
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgRetryFallbackChains.get(settings)).toEqual({
+				web: ["web/searxng", "openai-codex/gpt-6-luna", "openai-codex/gpt-5.6-sol", "xai/grok-4.5"],
+				slow: ["openai-codex/gpt-5.5"],
+			});
+			const codex = getBundledModels("openai-codex").filter(model => model.webSearch);
+			expect(resolveRoleChain("web", settings, codex).map(candidate => candidate.model.id)).toEqual([
+				"gpt-6-luna",
+				"gpt-5.6-sol",
+			]);
+		});
+
+		it("preserves independently configured Codex web selectors", async () => {
+			await writeSettings({
+				retry: { fallbackChains: { web: ["openai-codex/gpt-5.5", "openai-codex/gpt-5.6"] } },
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgRetryFallbackChains.get(settings).web).toEqual(["openai-codex/gpt-5.5", "openai-codex/gpt-5.6"]);
+		});
 
 		it("keeps a legacy Gemini wire tier ahead of non-Gemini fallbacks", async () => {
 			await writeSettings({

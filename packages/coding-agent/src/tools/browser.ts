@@ -12,11 +12,13 @@ import {
 	type BrowserKind,
 	type BrowserKindTag,
 	holdBrowser,
+	normalizeConnectedCdpUrl,
 	releaseBrowser,
 } from "./browser/registry";
 import { ensureChromiumExecutable } from "./browser/launch";
 import { resolveInitScriptSources } from "./browser/open-options";
 import { resolveRelayKind } from "./browser/relay/kind";
+import { relayExtensionNotice } from "./browser/relay/probe";
 import { describeTernTargets, listTernBlocks, type TernTarget, ternTargets } from "./browser/tern/blocks";
 import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
@@ -31,6 +33,7 @@ import {
 	getTab,
 	listTabs,
 	releaseAllTabs,
+	releaseTabsForOwner,
 	releaseIdleTabsForOwner,
 	releaseTab,
 	runInTab,
@@ -38,7 +41,7 @@ import {
 	type TernTabSession,
 	ternBlocksTaken,
 } from "./browser/tab-supervisor";
-import { renderTabCall } from "./browser/tab-call";
+import { renderTabCall, tabCallBudgetSeconds } from "./browser/tab-call";
 import { resolveToCwd } from "./path-utils";
 import { renderCallChain, renderFunctionRun } from "./run-code";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
@@ -98,7 +101,9 @@ const BROWSER_RUN_SCOPE: readonly string[] = ["tab", "page", "browser", "wait", 
 const appSchema = type({
 	"path?": type("string").describe("binary path to spawn"),
 	"cdp_url?": type("string").describe("existing cdp endpoint"),
-	"relay?": type("boolean").describe("drive the user's own tabs via the omp browser relay"),
+	"relay?": type("boolean").describe(
+		"true drives the user's own tabs via the omp browser relay; false skips a relay the settings enable",
+	),
 	"tern?": type("boolean").describe("inside Tern: true forces a Tern picture-in-picture, false opts out"),
 	"args?": type("string[]").describe("extra cli args"),
 	"target?": type("string").describe(
@@ -137,9 +142,11 @@ const browserSchema = type({
 	"args?": type("unknown[]").describe("arguments passed to a serialized function"),
 	"chain?": tabCallStepSchema.array(),
 	"timeout?": type("number").describe("timeout in seconds"),
-	"all?": type("boolean").describe("release every managed tab"),
+	"all?": type("boolean").describe("release every managed tab this agent opened"),
 	"kill?": type("boolean").describe("also kill spawned-app browsers"),
-	"persist?": type("boolean").describe("keep tab live across turn settle and idle close"),
+	"persist?": type("boolean").describe(
+		"keep tab live across turn settle and idle close; on a relay tab omp opened, keep it open after the session ends",
+	),
 });
 
 type BrowserParams = typeof browserSchema.infer;
@@ -255,6 +262,12 @@ export function createBrowserPrelude(session: ToolSession): EvalPreludeDefinitio
 	return createBrowserPreludeDefinition(session, {
 		invoke: (parameters: unknown, context: EvalPreludeContext) => invokeBrowser(session, parameters, context),
 		status: describeBrowserCall,
+		// The documentation promises omp's own browser for an open without `app`; while
+		// the relay takes that open, the prompt names where `app.relay: false` goes instead.
+		relayFallback:
+			resolveBrowserKind({ action: "open" }, session).kind === "relay"
+				? resolveBrowserKind({ action: "open", app: { relay: false } }, session)
+				: undefined,
 	});
 }
 
@@ -287,12 +300,22 @@ export async function restartBrowserForModeChange(): Promise<void> {
 }
 
 /**
+ * Owner key for tabs this session opens: the agent's stable kernel owner id,
+ * which survives `/new`, `/resume`, fork, and branch (unlike the conversation
+ * session id) and is shared with its advisors, like eval kernels and computer
+ * sessions. Subagents get their own.
+ */
+function tabOwnerId(session: ToolSession): string | undefined {
+	return session.getEvalKernelOwnerId?.() ?? undefined;
+}
+
+/**
  * Best-effort idle-close sweep for the calling session's owned headless
  * tabs. Never throws — callers detach it (`void`) so a slow reap cannot
  * delay the open it follows.
  */
 function sweepIdleOwnedTabs(session: ToolSession): Promise<number> {
-	const ownerId = session.getSessionId?.() ?? undefined;
+	const ownerId = tabOwnerId(session);
 	if (!ownerId) return Promise.resolve(0);
 	const idleSec = cfgBrowserIdleCloseSec.get(session.settings);
 	if (!(idleSec > 0)) {
@@ -319,7 +342,8 @@ async function invokeBrowser(
 
 	try {
 		throwIfAborted(context.signal);
-		const timeoutSeconds = clampTimeout("browser", parsed.timeout, cfgToolsMaxTimeout.get(session.settings));
+		const requested = parsed.timeout ?? (parsed.action === "call" ? tabCallBudgetSeconds(parsed.chain) : undefined);
+		const timeoutSeconds = clampTimeout("browser", requested, cfgToolsMaxTimeout.get(session.settings));
 		const timeoutMs = timeoutSeconds * 1000;
 		const name = parsed.name ?? DEFAULT_TAB_NAME;
 		const details: BrowserPreludeDetails = { action: parsed.action, name };
@@ -328,7 +352,7 @@ async function invokeBrowser(
 			case "open":
 				return await openBrowser(session, name, parsed, details, timeoutMs, context.signal);
 			case "close":
-				return await closeBrowser(name, parsed, details, timeoutMs, context.signal);
+				return await closeBrowser(session, name, parsed, details, timeoutMs, context.signal);
 			case "tabs":
 				details.value = listTabs();
 				return toolResult(details).done();
@@ -410,6 +434,12 @@ async function openOnKind(
 			`Tab ${JSON.stringify(name)} is bound to a different browser (${describeKind(existing.browser.kind)}). Close it first.`,
 		);
 	}
+	// Chrome's extension debugger API exposes no Security domain, so the relay cannot honor the override.
+	if (params.ignore_https_errors && kind.kind === "relay") {
+		throw new ToolError(
+			"ignore_https_errors is not supported through the Chrome relay: the extension debugger API does not expose the CDP Security domain. Pass app.relay:false to use omp's Chromium instead.",
+		);
+	}
 
 	// First browser use may have to download Chrome for Testing (~180 MB).
 	// That is a one-time install, not part of the open, so it runs before the
@@ -457,8 +487,15 @@ async function openOnKind(
 		// rolling the fresh browser back on failure.
 		holdBrowser(browser);
 		let result: AcquireTabResult;
-		stage = `opening tab ${JSON.stringify(name)}`;
+		let relayNotice: string | null = null;
 		try {
+			// Read before the tab is acquired, so a cancel or the deadline landing during the read leaves no tab to close.
+			if (kind.kind === "relay") {
+				stage = "reading the relay extension version";
+				relayNotice = await relayExtensionNotice(normalizeConnectedCdpUrl(kind.cdpUrl), openSignal);
+				throwIfAborted(openSignal);
+			}
+			stage = `opening tab ${JSON.stringify(name)}`;
 			const initScripts = await untilAborted(openSignal, () =>
 				resolveInitScriptSources(params.init_scripts, session.cwd),
 			);
@@ -496,7 +533,7 @@ async function openOnKind(
 					userAgent: params.user_agent,
 					ignoreHttpsErrors: params.ignore_https_errors,
 					signal: openSignal,
-					ownerSessionId: session.getSessionId?.() ?? undefined,
+					ownerSessionId: tabOwnerId(session),
 					// Omitted stays undefined: creation defaults it to false
 					// while reuse by the owner leaves a set value alone.
 					persist: params.persist,
@@ -530,6 +567,7 @@ async function openOnKind(
 			...(tab.backend === "tern" ? ternNotes(tab) : []),
 			...notes,
 			result.note,
+			relayNotice,
 		].filter((line): line is string => typeof line === "string");
 		return toolResult(details).text(lines.join("\n")).done();
 	} catch (error) {
@@ -597,6 +635,7 @@ async function listTargets(
 }
 
 async function closeBrowser(
+	session: ToolSession,
 	name: string,
 	params: BrowserParams,
 	details: BrowserPreludeDetails,
@@ -605,7 +644,13 @@ async function closeBrowser(
 ): Promise<AgentToolResult<unknown>> {
 	const kill = !!params.kill;
 	if (params.all) {
-		const count = await untilAborted(signal, () => releaseAllTabs({ kill, timeoutMs }));
+		// Only the caller's own tabs: another agent's tabs (a parent's, a sibling's)
+		// are reaped when that agent disposes. No owner (SDK callers) keeps the
+		// process-wide release.
+		const ownerId = tabOwnerId(session);
+		const count = await untilAborted(signal, () =>
+			ownerId ? releaseTabsForOwner(ownerId, { kill, timeoutMs }) : releaseAllTabs({ kill, timeoutMs }),
+		);
 		const text = `Released ${count} managed tab${count === 1 ? "" : "s"}`;
 		return toolResult(details).text(text).done();
 	}

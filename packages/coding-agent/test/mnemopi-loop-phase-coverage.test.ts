@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { mnemopiBackend } from "@oh-my-pi/pi-coding-agent/mnemopi/backend";
 import { extendRecallWithLegacyBanks, type MnemopiBackendConfig } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
+import * as content from "@oh-my-pi/pi-coding-agent/hindsight/content";
 import {
 	loadMnemopi,
 	loadMnemopiCore,
@@ -285,4 +286,21 @@ it("labels every SQLite statement across scoped session memory flows", async () 
 	expect(monitoredExecutions).toBeGreaterThan(0);
 	expect(currentLoopPhase()).toBeUndefined();
 	expect(violations).toEqual([]);
+});
+
+it("labels recall query truncation on every recall path", async () => {
+	const truncate = content.truncateRecallQuery;
+	const phases: (string | undefined)[] = [];
+	spies.push(
+		spyOn(content, "truncateRecallQuery").mockImplementation((...args: Parameters<typeof truncate>) => {
+			phases.push(currentLoopPhase());
+			return truncate(...args);
+		}),
+	);
+	const entries = [{ type: "message", message: { role: "user", content: "espresso launch checklist" } }];
+	state = registerMnemopiState(() => entries);
+	await state.beforeAgentStartPrompt("espresso launch checklist");
+	await state.recallForCompaction([{ role: "user", content: "espresso launch checklist" }] as never);
+	await state.maybeRecallOnAgentStart();
+	expect(phases).toEqual(["mnemopi.recall", "mnemopi.recall", "mnemopi.recall"]);
 });

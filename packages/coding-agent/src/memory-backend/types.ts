@@ -9,8 +9,8 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
-import type { HindsightSessionState } from "../hindsight/state";
-import type { MnemopiSessionState } from "../mnemopi/state";
+import type { HindsightSessionStateApi } from "../hindsight/state";
+import type { MnemopiSessionStateApi } from "../mnemopi/state";
 import type { AgentSession } from "../session/agent-session";
 
 export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi" | "sharpshooter";
@@ -88,8 +88,8 @@ export interface MemoryBackendStartOptions {
 	modelRegistry: ModelRegistry;
 	agentDir: string;
 	taskDepth: number;
-	parentHindsightSessionState?: HindsightSessionState;
-	parentMnemopiSessionState?: MnemopiSessionState;
+	parentHindsightSessionState?: HindsightSessionStateApi;
+	parentMnemopiSessionState?: MnemopiSessionStateApi;
 }
 
 /** A successful recall, including an empty result, staged until user-turn delivery. */
@@ -120,9 +120,11 @@ export interface MemoryBackend {
 	/**
 	 * Markdown injected as the system-prompt append section.
 	 * Returned on every prompt rebuild via `refreshBaseSystemPrompt()`.
+	 * `cwd` is the session's project directory and selects project-scoped memory.
 	 */
 	buildDeveloperInstructions(
 		agentDir: string,
+		cwd: string,
 		settings: Settings,
 		session?: AgentSession,
 	): Promise<string | undefined>;
@@ -175,12 +177,14 @@ export interface MemoryBackend {
 	 * Returning a string appends one entry to the compaction's `extraContext`
 	 * list (which becomes part of the summarization prompt). Return `undefined`
 	 * to inject nothing — the local backend takes this branch because its
-	 * summary is already part of the system prompt.
+	 * summary is already part of the system prompt. `signal` aborts when the
+	 * compaction pass is cancelled or superseded.
 	 */
 	preCompactionContext?(
 		messages: AgentMessage[],
 		settings: Settings,
 		session?: AgentSession,
+		signal?: AbortSignal,
 	): Promise<string | undefined>;
 
 	/**

@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { RenderResultOptions } from "../src/tools/renderer";
@@ -137,6 +137,26 @@ describe("bashToolRenderer", () => {
 		// Notice text must not appear in the output region — the styled label is the
 		// only place wall time is shown so users don't read it twice.
 		expect(rendered).not.toContain("Wall time: 1.23 seconds");
+	});
+
+	it("strips only the generated subsecond footer from older results with identical stdout", () => {
+		const result = {
+			content: [{ type: "text", text: "Wall time: 0.02 seconds\n\nWall time: 0.02 seconds" }],
+			details: { wallTimeMs: 20 },
+		};
+		for (const expanded of [false, true]) {
+			const options = { expanded, isPartial: false };
+			const args = { command: "benchmark" };
+			const component = bashToolRenderer.renderResult(result, options, uiTheme, args);
+			const rendered = sanitizeText(component.render(120).join("\n"));
+			expect(rendered.match(/Wall time: 0\.02 seconds/gu)).toHaveLength(1);
+			expect(rendered).toContain("Wall: 0.02s");
+			const view = bashToolRenderer.describeResult(result, options, args);
+			const output = (view.body ?? [])
+				.flatMap(node => ("k" in node ? (node.c ?? []) : []))
+				.find(node => "k" in node && node.k === "ansi");
+			expect(output).toMatchObject({ p: { role: "omp.tool.bash.output", text: "Wall time: 0.02 seconds" } });
+		}
 	});
 
 	it("shows a supervised service's readiness and output without a command timeout", async () => {
@@ -401,5 +421,50 @@ describe("bashToolRenderer", () => {
 		const expandedFinal = render({ expanded: true, isPartial: false });
 		expect(expandedFinal).toContain("echo step_0");
 		expect(expandedFinal).not.toContain("earlier line");
+	});
+
+	it("shows a minimizer filter label as one sanitized, width-bounded footer fact", () => {
+		const filter = `\x1b[31mlint\x1b[0m\tun\x07safe\nfooter ${"界".repeat(30)}`;
+		const label = `lint unsafe footer ${"界".repeat(10)}…`;
+		const result = {
+			content: [{ type: "text" as const, text: "1 error\n[raw output: artifact://2]" }],
+			details: { meta: { minimized: { filter, inputBytes: 1960, outputBytes: 27, artifactId: "2" } } },
+		};
+		const args = { command: "pnpm lint" };
+		const options = { expanded: false, isPartial: false };
+		const rendered = bashToolRenderer.renderResult(result, options, uiTheme, args).render(200).join("\n");
+		expect(rendered).not.toContain("\x1b[31m");
+		expect(rendered).not.toContain("\x07");
+		const footer = Bun.stripANSI(rendered)
+			.split("\n")
+			.find(line => line.includes("Minimized:"));
+		expect(footer).toContain(`Minimized: ${label} 1.9KB → 27B`);
+		expect(footer).not.toContain("\t");
+		const view = JSON.stringify(bashToolRenderer.describeResult(result, options, args));
+		expect(view).toContain(`Minimized ${label} 1.9KB → 27B`);
+		expect(view).not.toContain("\\u001b[31m");
+	});
+
+	it("shows a home path in a minimizer filter label as ~", () => {
+		const home = spyOn(os, "homedir").mockReturnValue("/home/alice");
+		try {
+			const result = {
+				content: [{ type: "text" as const, text: "ok\n[raw output: artifact://3]" }],
+				details: {
+					meta: {
+						minimized: { filter: "/home/alice/bin/lint", inputBytes: 1960, outputBytes: 27, artifactId: "3" },
+					},
+				},
+			};
+			const options = { expanded: false, isPartial: false };
+			const rendered = bashToolRenderer
+				.renderResult(result, options, uiTheme, { command: "lint" })
+				.render(200)
+				.join("\n");
+			expect(Bun.stripANSI(rendered)).toContain("Minimized: ~/bin/lint 1.9KB → 27B");
+			expect(rendered).not.toContain("/home/alice");
+		} finally {
+			home.mockRestore();
+		}
 	});
 });

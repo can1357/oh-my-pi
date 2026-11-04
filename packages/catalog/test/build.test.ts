@@ -356,6 +356,30 @@ describe("buildModel", () => {
 	});
 });
 
+describe("TypeSafe Jev image input", () => {
+	const typesafeModel = (id: string, provider = "typesafe") =>
+		buildModel({
+			id,
+			name: id,
+			api: "typesafe",
+			provider,
+			baseUrl: "https://api.typesafe.ai",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		} satisfies ModelSpec<"typesafe">);
+
+	it("exposes images only for the four confirmed direct TypeSafe ids", () => {
+		expect(typesafeModel("jev-latest").input).toEqual(["text", "image"]);
+		expect(typesafeModel("jev-1.14.0").input).toEqual(["text", "image"]);
+		expect(typesafeModel("jev-fast").input).toEqual(["text"]);
+		expect(typesafeModel("jev-1.13").input).toEqual(["text"]);
+		expect(typesafeModel("jev-latest", "unrelated-provider").input).toEqual(["text"]);
+	});
+});
+
 describe("Responses native-resolution image compatibility", () => {
 	it.each([
 		["custom loopback", "custom", "openai-responses", "http://127.0.0.1:8080/v1", false],
@@ -975,9 +999,29 @@ describe("local OpenAI-compat output clamp", () => {
 		expect(resolveModelPolicy(completionsSpec({ provider, baseUrl })).compat.clampOutputToModelMax).toBe(true);
 	});
 
+	it.each(["box.local.", "localhost."])("preserves local Qwen compat for absolute host %s", hostname => {
+		const compat = resolveModelPolicy(
+			completionsSpec({
+				id: "qwen3.8-27b",
+				reasoning: true,
+				baseUrl: `http://${hostname}:8133/v1`,
+				compat: { thinkingFormat: "qwen-chat-template" },
+			}),
+		).compat;
+		expect(compat).toMatchObject({
+			replayReasoningContent: true,
+			qwenPreserveThinking: true,
+			toolSchemaFlavor: "grammar",
+			clampOutputToModelMax: true,
+			streamFirstEventTimeoutMs: 0,
+			streamIdleTimeoutMs: 300_000,
+		});
+	});
+
 	it.each([
 		["LiteLLM loopback", "litellm", "http://127.0.0.1:4000/v1"],
 		["remote custom", "custom", "https://api.example.com/v1"],
+		["remote absolute host", "custom", "https://api.example.com./v1"],
 		["official OpenAI", "openai", "https://api.openai.com/v1"],
 	] as const)("leaves clampOutputToModelMax off for %s", (_label, provider, baseUrl) => {
 		expect(resolveModelPolicy(completionsSpec({ provider, baseUrl })).compat.clampOutputToModelMax).toBe(false);
@@ -992,6 +1036,15 @@ describe("local OpenAI-compat output clamp", () => {
 			resolveModelPolicy(responsesSpec({ provider: "custom", baseUrl: "http://10.0.0.8:8080/v1" })).compat
 				.clampOutputToModelMax,
 		).toBe(true);
+	});
+
+	it("keeps the local Responses stream budget for an absolute .local host", () => {
+		const compat = resolveModelPolicy(responsesSpec({ baseUrl: "http://box.local.:8133/v1" })).compat;
+		expect(compat).toMatchObject({
+			clampOutputToModelMax: true,
+			streamFirstEventTimeoutMs: 0,
+			streamIdleTimeoutMs: 300_000,
+		});
 	});
 
 	it("uses providerType when clamping aliased Responses backends", () => {

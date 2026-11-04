@@ -20,11 +20,15 @@ use image::RgbaImage;
 #[cfg(target_os = "windows")]
 use self::ax::Win32Ax;
 #[cfg(target_os = "windows")]
-use super::backend::{AxBackend, Backend, DeliveryMode, PointerEvent};
+use super::ax::AxHandle;
+#[cfg(target_os = "windows")]
+use super::backend::{
+	AxBackend, Backend, DeliveryMode, ElementDelivery, ElementInput, PointerEvent,
+};
 #[cfg(target_os = "windows")]
 use super::control::OperationToken;
 #[cfg(target_os = "windows")]
-use super::error::CoreResult;
+use super::error::{CoreResult, DesktopError};
 #[cfg(target_os = "windows")]
 use super::frame::FrameGeometry;
 #[cfg(target_os = "windows")]
@@ -135,6 +139,47 @@ impl Backend for Win32Backend {
 	) -> CoreResult<()> {
 		token.check()?;
 		input::key_chord(&mut self.global_input, target, keys, mode)
+	}
+
+	/// Background keys go straight to the element's own control window,
+	/// leaving the window's focus and the foreground alone: UI Automation's
+	/// `SetFocus` would bring the window to the front, taking the user's
+	/// keyboard. A windowless element (WPF, `WinUI`, web content) has no
+	/// window to post to, so background input refuses. Takeover focuses the
+	/// element and types through the foreground route.
+	fn element_input(
+		&mut self,
+		element: &AxHandle,
+		input: &ElementInput,
+		mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<ElementDelivery> {
+		token.check()?;
+		let windows = capture::windows()?;
+		let id = self.ax.window_id(element, &windows)?;
+		match mode {
+			DeliveryMode::Background => {
+				let own = Win32Ax::own_window(element)?.ok_or_else(|| {
+					DesktopError::background_unavailable(format!(
+						"this element of window {id} is drawn without a control window of its own, so \
+						 background keys cannot address it, and focusing it would bring the window to \
+						 the front; nothing was sent"
+					))
+				})?;
+				input::element_background(&id, own, input)?;
+			},
+			DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => {
+				let target = Target::Window(id);
+				self.ax.focus(element)?;
+				match input {
+					ElementInput::Text(text) => input::type_text(&target, text, mode)?,
+					ElementInput::Chord(keys) => {
+						input::key_chord(&mut self.global_input, &target, keys, mode)?;
+					},
+				}
+			},
+		}
+		Ok(ElementDelivery::Delivered)
 	}
 
 	fn hold_keys(

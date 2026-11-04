@@ -8,14 +8,14 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Ellipsis } from "@oh-my-pi/pi-natives";
+import { Ellipsis } from "@oh-my-pi/pi-natives";
 import { expandWindowsLongPath, getWindowsShortPath } from "@oh-my-pi/pi-natives/path";
 import { pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatKeyHint, type KeyId } from "../app-keybindings";
 import { getKeybindings } from "../keybindings";
-import type { Theme } from "../theme/theme";
+import type { Theme, ThemeColor } from "../theme/theme";
 import type { Component } from "../tui";
-import { replaceTabs, sliceByColumn, truncateToWidth, visibleWidth } from "../utils";
+import { replaceTabs, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { Hasher } from "./utils";
 
 export { Ellipsis } from "@oh-my-pi/pi-natives";
@@ -103,6 +103,8 @@ export const PREVIEW_LIMITS = {
 	EXPANDED_LINES: 12,
 	/** Items (files, results) shown in collapsed view */
 	COLLAPSED_ITEMS: 8,
+	/** Definition, type-definition and implementation locations shown in collapsed view */
+	LOCATIONS_COLLAPSED: 2,
 	/** Output preview lines in collapsed view */
 	OUTPUT_COLLAPSED: 3,
 	/** Output preview lines in expanded view */
@@ -233,15 +235,29 @@ export function getPreviewLines(text: string, maxLines: number, maxLineLen: numb
 	return lines.slice(0, maxLines).map(l => truncateToWidth(l.trim(), maxLineLen, ellipsis));
 }
 
+/** Collapse a possibly multi-line string into one line; whitespace runs (tabs included) become one space. */
+export function flattenLine(text: string): string {
+	return text.replace(/\s+/g, " ").trim();
+}
+
 /**
  * Collapse a possibly multi-line string into a single line, then truncate it to
  * `maxWidth` display cells. {@link truncateToWidth} alone caps width but
  * newlines are zero-width, so multi-line content (markdown briefs, tool args,
  * provider errors) would otherwise spill a single status row across several
- * visual lines. Whitespace runs collapse to one space, so tabs are handled too.
+ * visual lines.
  */
 export function previewLine(text: string, maxWidth: number, ellipsis?: Ellipsis): string {
-	return truncateToWidth(text.replace(/\s+/g, " ").trim(), maxWidth, ellipsis);
+	return truncateToWidth(flattenLine(text), maxWidth, ellipsis);
+}
+
+/**
+ * Clip a result row to `maxWidth` only while collapsed. Expanded rows stay whole
+ * so the frame wraps them: the expand key ({@link formatExpandHint}) must reveal
+ * text, not re-clip it.
+ */
+export function clipCollapsed(text: string, maxWidth: number, expanded: boolean | undefined): string {
+	return expanded ? text : truncateToWidth(text, maxWidth);
 }
 
 // =============================================================================
@@ -277,9 +293,8 @@ export { formatAge, formatBytes, formatCount, formatDuration, formatNumber, plur
 export function formatStatusIcon(status: ToolUIStatus, theme: Theme, spinnerFrame?: number): string {
 	switch (status) {
 		case "success":
-			return theme.styledSymbol("status.success", "success");
 		case "done":
-			return theme.styledSymbol("status.done", "success");
+			return theme.styledSymbol("status.success", "success");
 		case "error":
 			return theme.styledSymbol("status.error", "error");
 		case "warning":
@@ -419,6 +434,34 @@ export function formatEmptyMessage(message: string, theme: Theme): string {
 	return `${theme.styledSymbol("status.warning", "warning")} ${theme.fg("muted", message)}`;
 }
 
+/**
+ * Color of a file's name, or a whole URL, in tool bodies: it keeps paths apart
+ * from the tool titles above them (bronze in titanium).
+ */
+export const FILE_NAME_COLOR = "customMessageLabel" satisfies ThemeColor;
+
+/**
+ * Where a display path's final segment (file or folder name) starts, past its
+ * last `/` or `\` separator; a trailing-slash directory keeps its slash on the
+ * name. Shared by the terminal ({@link formatStyledPath}) and Tern file rows.
+ */
+export function pathNameStart(filePath: string): number {
+	let end = filePath.length;
+	while (end > 0 && (filePath[end - 1] === "/" || filePath[end - 1] === "\\")) end--;
+	return end === 0 ? 0 : Math.max(filePath.lastIndexOf("/", end - 1), filePath.lastIndexOf("\\", end - 1)) + 1;
+}
+
+/**
+ * A file path in a tool body: the directory (with its trailing separator) dim,
+ * the final segment in {@link FILE_NAME_COLOR}. Tool headers keep paths in
+ * their plain subject color instead.
+ */
+export function formatStyledPath(filePath: string, theme: Theme): string {
+	const cut = pathNameStart(filePath);
+	const name = theme.fg(FILE_NAME_COLOR, filePath.slice(cut));
+	return cut > 0 ? `${theme.fg("dim", filePath.slice(0, cut))}${name}` : name;
+}
+
 // =============================================================================
 // Code Frame Formatting
 // =============================================================================
@@ -443,7 +486,10 @@ export function formatCodeFrameLine(
 // Tool UI Helpers
 // =============================================================================
 
-/** Status states supported by shared tool renderer icons. */
+/**
+ * Status states supported by shared tool renderer icons. `done` is a deprecated
+ * alias of `success`, kept for extension renderers.
+ */
 export type ToolUIStatus = "success" | "done" | "error" | "warning" | "info" | "pending" | "running" | "aborted";
 /** Semantic foreground colors used by tool renderer labels. */
 export type ToolUIColor = "success" | "error" | "warning" | "accent" | "muted";
@@ -584,7 +630,7 @@ export function formatDiagnostics(
 		const fileBranch = isLastFileNode ? theme.tree.last : theme.tree.branch;
 
 		const fileIcon = theme.fg("muted", getLangIcon(filePath));
-		output += `\n ${theme.fg("dim", fileBranch)} ${fileIcon} ${theme.fg("accent", filePath)}`;
+		output += `\n ${theme.fg("dim", fileBranch)} ${fileIcon} ${formatStyledPath(filePath, theme)}`;
 
 		for (let di = 0; di < diagnostics.length && diagsShown < maxDiags; di++) {
 			const d = diagnostics[di];
@@ -608,7 +654,7 @@ export function formatDiagnostics(
 					: d.severity === "warning"
 						? theme.styledSymbol("status.warning", "warning")
 						: theme.styledSymbol("status.info", "muted");
-			const location = theme.fg("dim", `:${d.line}:${d.col}`);
+			const location = theme.fg("muted", `:${d.line}:${d.col}`);
 			const codeTag = d.code ? theme.fg("dim", ` (${d.code})`) : "";
 			const msgColor = d.severity === "error" ? "error" : d.severity === "warning" ? "warning" : "toolOutput";
 
@@ -1132,6 +1178,15 @@ export function createCachedComponent(
 			cached = undefined;
 		},
 	};
+}
+
+/**
+ * Fit a status header plus body rows to `width` for search-style results. The
+ * header soft-wraps so its trailing summary meta (counts, `truncated`) stays
+ * visible behind a long pattern; body rows keep single-row truncation.
+ */
+export function fitHeaderedRows(header: string, rows: readonly string[], width: number): string[] {
+	return [...wrapTextWithAnsi(header, width), ...rows.map(row => truncateToWidth(row, width, Ellipsis.Omit))];
 }
 
 /**

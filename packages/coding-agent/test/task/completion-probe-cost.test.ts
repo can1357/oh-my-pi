@@ -96,7 +96,7 @@ describe("completion probe cost persistence", () => {
 			startCompletionProbe({
 				session: () => session ?? null,
 				signal: controller.signal,
-				onEstimate: (percent, cost) => estimates.push({ percent, cost }),
+				onEstimate: ({ percent }, cost) => estimates.push({ percent, cost }),
 			});
 			vi.advanceTimersByTime(2 * 60_000);
 			await flushMicrotasks();
@@ -124,6 +124,26 @@ describe("completion probe cost persistence", () => {
 			const liveUsageAfterProbe = sessionManager.getUsageStatistics();
 			expect(liveUsageAfterProbe.cost).toBeCloseTo(0.8, 9);
 			expect(liveUsageAfterProbe.subagentCost).toBe(0);
+
+			await sessionManager.flush();
+			const flushedFile = sessionManager.getSessionFile();
+			if (!flushedFile) throw new Error("Expected the flushed session file");
+			const reopenedBeforeClose = await SessionManager.open(flushedFile, undefined, undefined, {
+				initialCwd: tempDir.path(),
+				suppressBreadcrumb: true,
+			});
+			try {
+				expect(reopenedBeforeClose.getLeafId()).toBe(interveningLeaf);
+				const reopenedContext = reopenedBeforeClose.buildSessionContext().messages;
+				expect(reopenedContext.map(message => message.role)).toEqual(["user", "assistant", "assistant"]);
+				expect(reopenedContext.at(-1)).toMatchObject({
+					role: "assistant",
+					content: [{ type: "text", text: "Warm answer while probing" }],
+				});
+				expect(reopenedBeforeClose.getUsageStatistics().cost).toBeCloseTo(0.8, 9);
+			} finally {
+				await reopenedBeforeClose.close();
+			}
 
 			sessionManager.appendMessage(assistant(target, 0.15, "Warm answer after probing"));
 			sessionManager.appendMessage({
@@ -167,6 +187,134 @@ describe("completion probe cost persistence", () => {
 			await restoredSession?.close();
 			await session?.dispose();
 			if (!sessionManagerClosed) await sessionManager.close();
+		}
+	});
+
+	it("continues on the restored leaf after flushing and reopening before close", async () => {
+		const target = modelRegistry.getAll().find(candidate => candidate.contextWindow && candidate.contextWindow > 0);
+		if (!target) throw new Error("Expected a bundled model with a context window");
+
+		using tempDir = TempDir.createSync("@omp-late-usage-reopen-");
+		const original = SessionManager.create(tempDir.path(), tempDir.path());
+		let originalClosed = false;
+		let reopened: SessionManager | undefined;
+		try {
+			original.appendMessage({ role: "user", content: "Prompt A1", timestamp: 1 });
+			const answerA1 = original.appendMessage(assistant(target, 0, "Answer A1"));
+			original.appendMessage({ role: "user", content: "Prompt A2", timestamp: 2 });
+			const answerA2 = original.appendMessage(assistant(target, 0, "Answer A2"));
+			const probeUsageId = original.appendModelUsage(
+				{
+					purpose: "task-completion-probe",
+					role: "smol",
+					api: target.api,
+					provider: target.provider,
+					model: target.id,
+					usage: usage(0.008),
+					stopReason: "stop",
+				},
+				{ sessionId: original.getSessionId(), parentId: answerA1 },
+			);
+			if (!probeUsageId) throw new Error("Expected late probe usage to be recorded");
+			await original.flush();
+			const sessionFile = original.getSessionFile();
+			if (!sessionFile) throw new Error("Expected the flushed session file");
+
+			reopened = await SessionManager.open(sessionFile, undefined, undefined, {
+				initialCwd: tempDir.path(),
+				suppressBreadcrumb: true,
+			});
+			expect(reopened.getLeafId()).toBe(answerA2);
+			expect(reopened.getEntry(probeUsageId)).toMatchObject({
+				type: "model_usage",
+				parentId: answerA1,
+				activeLeafId: answerA2,
+			});
+			expect(reopened.buildSessionContext().messages.map(message => message.role)).toEqual([
+				"user",
+				"assistant",
+				"user",
+				"assistant",
+			]);
+			expect(reopened.buildSessionContext().messages.at(-1)).toMatchObject({
+				role: "assistant",
+				content: [{ type: "text", text: "Answer A2" }],
+			});
+			expect(reopened.getUsageStatistics().cost).toBeCloseTo(0.008, 9);
+
+			await original.close();
+			originalClosed = true;
+			const promptA3 = reopened.appendMessage({ role: "user", content: "Prompt A3", timestamp: 3 });
+			expect(reopened.getEntry(promptA3)?.parentId).toBe(answerA2);
+			const answerA3 = reopened.appendMessage(assistant(target, 0, "Answer A3"));
+			expect(reopened.buildSessionContext().messages.at(-1)).toMatchObject({
+				role: "assistant",
+				content: [{ type: "text", text: "Answer A3" }],
+			});
+			await reopened.flush();
+			const continued = await SessionManager.open(sessionFile, undefined, undefined, {
+				initialCwd: tempDir.path(),
+				suppressBreadcrumb: true,
+			});
+			try {
+				expect(continued.getLeafId()).toBe(answerA3);
+				expect(continued.buildSessionContext().messages.at(-1)).toMatchObject({
+					role: "assistant",
+					content: [{ type: "text", text: "Answer A3" }],
+				});
+				expect(continued.getUsageStatistics().cost).toBeCloseTo(0.008, 9);
+			} finally {
+				await continued.close();
+			}
+			expect(reopened.getUsageStatistics().cost).toBeCloseTo(0.008, 9);
+		} finally {
+			await reopened?.close();
+			if (!originalClosed) await original.close();
+		}
+	});
+
+	it("replays an explicit cleared leaf after late usage is flushed", async () => {
+		const target = modelRegistry.getAll().find(candidate => candidate.contextWindow && candidate.contextWindow > 0);
+		if (!target) throw new Error("Expected a bundled model with a context window");
+
+		using tempDir = TempDir.createSync("@omp-cleared-usage-leaf-");
+		const original = SessionManager.create(tempDir.path(), tempDir.path());
+		let reopened: SessionManager | undefined;
+		try {
+			original.appendMessage({ role: "user", content: "Prompt before reset", timestamp: 1 });
+			const ownerParent = original.appendMessage(assistant(target, 0, "Answer before reset"));
+			original.appendMessage({ role: "user", content: "Successor before reset", timestamp: 2 });
+			original.resetLeaf();
+			const usageId = original.appendModelUsage(
+				{
+					purpose: "task-completion-probe",
+					role: "smol",
+					api: target.api,
+					provider: target.provider,
+					model: target.id,
+					usage: usage(0.008),
+					stopReason: "stop",
+				},
+				{ sessionId: original.getSessionId(), parentId: ownerParent },
+			);
+			if (!usageId) throw new Error("Expected late probe usage to be recorded");
+
+			await original.flush();
+			const sessionFile = original.getSessionFile();
+			if (!sessionFile) throw new Error("Expected the flushed session file");
+			reopened = await SessionManager.open(sessionFile, undefined, undefined, {
+				initialCwd: tempDir.path(),
+				suppressBreadcrumb: true,
+			});
+
+			expect(reopened.getEntry(usageId)).toMatchObject({ type: "model_usage", activeLeafId: null });
+			expect(reopened.getLeafId()).toBeNull();
+			expect(reopened.getBranch()).toEqual([]);
+			expect(reopened.buildSessionContext().messages).toEqual([]);
+			expect(reopened.getUsageStatistics().cost).toBeCloseTo(0.008, 9);
+		} finally {
+			await reopened?.close();
+			await original.close();
 		}
 	});
 });

@@ -8,7 +8,7 @@ import {
 	trimBlankEdges,
 } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { Component } from "@oh-my-pi/pi-tui";
+import { type Component, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 
 class Block implements Component {
 	#rows: string[];
@@ -199,6 +199,164 @@ describe("TranscriptContainer row split", () => {
 		transcript.acknowledgeFinalizedBatch(batch.id);
 		expect(transcript.renderViewport(40, 10, frame)).toEqual([...rows.slice(rows.length - 8), "", "tail"]);
 		expect(transcript.blockStates()).toEqual(["settled", "settled"]);
+	});
+
+	// An inline image: three reserved rows, then the row that draws it upward over them.
+	const imageBlock = (): Block =>
+		new Block(
+			[
+				"above 1",
+				"above 2",
+				"\x1b[0m",
+				"\x1b[0m",
+				"\x1b[0m",
+				"\x1b7\x1b[3A\x1b]1337;File=inline=1;width=10;height=4:AAAA\x07\x1b8",
+				"below 1",
+				"below 2",
+			],
+			true,
+		);
+
+	for (const [protocol, committed] of [
+		// iTerm2 cannot draw part of an image, so it goes to scrollback whole.
+		[ImageProtocol.Iterm2, 6],
+		// Kitty draws the visible part, so the cut stays where the screen ends.
+		[ImageProtocol.Kitty, 3],
+	] as const) {
+		it(`moves a split that would cut an inline image below it only where the terminal cannot draw part of it (${protocol})`, () => {
+			const previous = TERMINAL.imageProtocol;
+			setTerminalImageProtocol(protocol);
+			try {
+				const transcript = new TranscriptContainer();
+				transcript.addChild(imageBlock());
+				transcript.addChild(new Block(["tail"], true));
+				// Room 7: the tail and its separator leave 5 rows of the block live, a cut after row 3.
+				const batch = transcript.peekFinalizedBatch(40, 7)!;
+				expect(batch.rows.length).toBe(committed);
+			} finally {
+				setTerminalImageProtocol(previous);
+			}
+		});
+	}
+
+	it("retires a block in full, with its separator, when keeping its last-row image whole reaches the block's end", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const rows = imageBlock().render().slice(0, 6);
+			const transcript = new TranscriptContainer();
+			transcript.addChild(new Block([...rows], true));
+			transcript.addChild(new Block(["tail"], true));
+			// Room 5: the tail and its separator leave 3 rows live, a cut inside the image.
+			const batch = transcript.peekFinalizedBatch(40, 5)!;
+			// The next block in scrollback stays one blank row below the image.
+			expect(batch.rows).toEqual([...rows, ""]);
+			transcript.acknowledgeFinalizedBatch(batch.id);
+			expect(transcript.blockStates()).toEqual(["committed", "settled"]);
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
+	it("keeps an archived whole image in scrollback when the width changes", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const transcript = new TranscriptContainer();
+			transcript.addChild(imageBlock());
+			transcript.addChild(new Block(["tail"], true));
+			const head = transcript.peekFinalizedBatch(40, 7)!;
+			expect(head.rows.length).toBe(6);
+			transcript.acknowledgeFinalizedBatch(head.id);
+			// The image rows hold no text, so a resize must not relocate the seam above them.
+			const rest = transcript.peekFlushBatch(50)!.rows;
+			expect(rest.some(row => TERMINAL.isImageLine(row))).toBe(false);
+			expect(rest).toContain("below 1");
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
+	it("keeps a replacement image live when the archived one is swapped before a width change", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const block = imageBlock();
+			const transcript = new TranscriptContainer();
+			transcript.addChild(block);
+			transcript.addChild(new Block(["tail"], true));
+			const head = transcript.peekFinalizedBatch(40, 7)!;
+			transcript.acknowledgeFinalizedBatch(head.id);
+			// A parked tool card redraws a different image over the archived one.
+			block.finalize(block.render().map(row => row.replace(":AAAA", ":BBBB")));
+			const rest = transcript.peekFlushBatch(50)!.rows;
+			expect(rest.some(row => row.includes(":BBBB"))).toBe(true);
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
+	it("keeps a row inserted above the archived image live across a width change", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const block = imageBlock();
+			const transcript = new TranscriptContainer();
+			transcript.addChild(block);
+			transcript.addChild(new Block(["tail"], true));
+			const head = transcript.peekFinalizedBatch(40, 7)!;
+			transcript.acknowledgeFinalizedBatch(head.id);
+			// An expanded pane adds a divider between the archived text and the image.
+			const rows = [...block.render()];
+			rows.splice(2, 0, "────");
+			block.finalize(rows);
+			const rest = transcript.peekFlushBatch(50)!.rows;
+			expect(rest).toContain("────");
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
+	it("keeps an archived image in scrollback after a later split advances past it", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const transcript = new TranscriptContainer();
+			transcript.addChild(imageBlock());
+			transcript.addChild(new Block(["tail"], true));
+			const first = transcript.peekFinalizedBatch(40, 7)!;
+			transcript.acknowledgeFinalizedBatch(first.id);
+			// Growing pressure moves the seam past the image into the text below it.
+			const second = transcript.peekFinalizedBatch(40, 3)!;
+			expect(second.rows).toEqual(["below 1"]);
+			transcript.acknowledgeFinalizedBatch(second.id);
+			const rest = transcript.peekFlushBatch(50)!.rows;
+			expect(rest.some(row => TERMINAL.isImageLine(row))).toBe(false);
+			expect(rest).not.toContain("below 1");
+			expect(rest).toContain("below 2");
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
+	it("keeps an archived image live when the block moves it to another place in its text", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Iterm2);
+		try {
+			const block = imageBlock();
+			const transcript = new TranscriptContainer();
+			transcript.addChild(block);
+			transcript.addChild(new Block(["tail"], true));
+			const head = transcript.peekFinalizedBatch(40, 7)!;
+			transcript.acknowledgeFinalizedBatch(head.id);
+			// A layout update draws the same image between the two text rows above it.
+			const [above1, above2, ...image] = block.render().slice(0, 6);
+			block.finalize([above1!, ...image, above2!, "below 1", "below 2"]);
+			const rest = transcript.peekFlushBatch(50)!.rows;
+			expect(rest.some(row => TERMINAL.isImageLine(row))).toBe(true);
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
 	});
 
 	it("resumes a split block at the same content after a width change, repeating at most one row", () => {
@@ -1030,6 +1188,33 @@ describe("TranscriptContainer progressive assistant retirement", () => {
 		expect(transcript.emittedStableRows()[0]! - emitted).toBeGreaterThan(1);
 		const live = transcript.renderViewport(narrow, 1000, frame);
 		expect([...emittedRows, ...next, ...live]).toEqual([...trimBlankEdges(component.render(narrow))]);
+	});
+
+	it("retires the finished lines of a still-open fence instead of holding the block live", () => {
+		// A streamed code block (SQL, logs) closes its fence only at the end. It
+		// never reaches a "\n\n" boundary, so the block walk alone publishes
+		// nothing for it and every row past the screen height is dropped from the
+		// live viewport instead of retiring into scrollback (#9780).
+		const transcript = new TranscriptContainer();
+		const component = new AssistantMessageComponent();
+		transcript.addChild(component);
+		const statement = (index: number): string => `SELECT column_${index} FROM orders_${index};\n`;
+		let body = "```sql\n";
+		for (let index = 0; index < 12; index++) {
+			body += statement(index);
+			component.updateContent({ ...finalAnswer, content: [{ type: "text", text: body }] }, { transient: true });
+			transcript.renderViewport(WIDTH, ROOM, frame);
+		}
+		const retired = retire(transcript, WIDTH);
+		const [emitted = 0] = transcript.emittedStableRows();
+		expect(emitted).toBeGreaterThan(1);
+		const retiredText = Bun.stripANSI(retired.join("\n"));
+		expect(retiredText).toContain("SELECT column_0 FROM orders_0;");
+		// The fence has no closer yet, so the renderer's fabricated closing
+		// border must not be retired as if the block had ended.
+		expect(retired.at(-1)!.trim()).not.toBe("```");
+		const live = transcript.renderViewport(WIDTH, 1000, frame);
+		expect([...retired, ...live]).toEqual([...trimBlankEdges(component.render(WIDTH))]);
 	});
 });
 

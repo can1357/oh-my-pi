@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,6 +6,8 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadSkillsFromDir } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { readMcpResource } from "@oh-my-pi/pi-coding-agent/internal-urls/mcp-protocol";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPResource, MCPResourceReadResult, MCPResourceTemplate } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -590,6 +592,26 @@ describe("skill:// falls back to an MCP resource with the same URI", () => {
 		expect(text).not.toContain("L4");
 	});
 
+	it("reads an unloaded connected catalog despite another server's stalled connection", async () => {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		MCPManager.setInstance(
+			createMockManager({
+				servers: ["figma"],
+				resources,
+				ensureResources: async name => {
+					resources.set(name, { resources: [{ uri: skillUri, name: "figma-use" }], templates: [] });
+				},
+				waitForPendingConnections: () => Promise.withResolvers<void>().promise,
+				readResult: { contents: [{ uri: skillUri, text: mcpText }] },
+			}),
+		);
+
+		const reading = InternalUrlRouter.instance().resolve(skillUri, { skills: [] });
+		expect((await withTimeout(reading, 2_000, "connected catalog was blocked by another server")).content).toBe(
+			mcpText,
+		);
+	});
+
 	it("requires explicit MCP routing for skill URI templates", async () => {
 		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
 		resources.set("figma", {
@@ -716,6 +738,40 @@ describe("skill:// falls back to an MCP resource with the same URI", () => {
 			await expect(withTimeout(reading, 2_000, "read ignored cancellation")).rejects.toMatchObject({
 				name: "AbortError",
 			});
+		}
+	});
+
+	it("gives up on a server that never settles once the wait budget is spent, without an abort", async () => {
+		const manager = createMockManager({
+			servers: [],
+			// A hung handshake or reconnect ladder: nothing ever settles and no signal is passed.
+			waitForPendingConnections: () => Promise.withResolvers<void>().promise,
+		});
+		const reading = readMcpResource(manager, parseInternalUrl("skill://nope"), { exact: true, waitMs: 20 });
+		expect(await withTimeout(reading, 2_000, "bounded wait never ended")).toBeUndefined();
+	});
+
+	it("gives up on a deferred MCP startup that never returns once the wait budget is spent", async () => {
+		vi.useFakeTimers();
+		try {
+			const started = Promise.withResolvers<void>();
+			// `omp read` with a zero startup window: the loader awaits a handshake that never settles.
+			MCPManager.setDeferredInstance(() => {
+				started.resolve();
+				return Promise.withResolvers<MCPManager>().promise;
+			});
+			// Settle into a value: Bun's `expect(...).rejects` blocks until settlement, before timers advance.
+			const outcome = InternalUrlRouter.instance()
+				.resolve("skill://nope", { skills: [] })
+				.then(
+					() => "resolved",
+					(error: unknown) => (error instanceof Error ? error.message : String(error)),
+				);
+			await started.promise;
+			vi.advanceTimersByTime(5_000);
+			expect(await outcome).toContain("Unknown skill: nope");
+		} finally {
+			vi.useRealTimers();
 		}
 	});
 

@@ -1,5 +1,6 @@
 import { isBareIdReferenceProvider } from "../compat/behavior";
 import { isZeroCostXaiOAuthReference } from "../identity/reference";
+import { withoutUnverifiedThinking } from "../model-thinking";
 import { getBundledModels, getBundledProviders } from "../models";
 import type { Api, Model, ModelSpec } from "../types";
 
@@ -17,11 +18,13 @@ export function toModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TAp
 		supportsComputerUseConfig,
 		...rest
 	} = model;
-	return {
+	// Unverified thinking is derived output too: references must not carry it to
+	// another host as reasoning capability.
+	return withoutUnverifiedThinking({
 		...rest,
 		...(supportsComputerUseConfig !== undefined ? { supportsComputerUse: supportsComputerUseConfig } : {}),
 		compat: compatConfig,
-	} as ModelSpec<TApi>;
+	} as ModelSpec<TApi>);
 }
 
 export function createBundledReferenceMap<TApi extends Api>(

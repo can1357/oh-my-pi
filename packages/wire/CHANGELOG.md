@@ -2,6 +2,50 @@
 
 ## [Unreleased]
 
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- Added the collab envelope helpers `packEnvelope`, `unpackEnvelope` and `rewriteEnvelopePeer`
+
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `nums` to `code` props (`TspCodeProps`): each line's number, so one block can show non-contiguous lines with `…` gap rows where the numbers jump.
+- Added an optional `heat` value in [0, 1] to `code` line marks (`TspCodeMark`), so a line can be shaded by a score. A mark's `tone` is now optional.
+- Added `code` folds (`TspCodeFold`: runs of lines drawn as one row that opens in place, with an optional label, note, tone and hover card), per-line score gradients (`TspCodeMark.wash`: scores washing the row from left to right) and an overview strip (`TspCodeProps.overview`).
+- Added the TSP `button` kind (`TspButtonProps`: label, icon, keycaps, `default`/`primary`/`quiet`/`danger` variants, `sm`/`md` sizes, pressed, disabled with a reason, busy) and `tabs` `variant: "segmented"`.
+
+## [18.14.0] - 2026-10-29
+
+### Added
+
+- Added the TSP `json` kind for displaying raw JSON values as interactive, expandable trees in the terminal.
+- Added `TspEditorProps.typeahead` support so programs that cannot yet read input can preserve typed text, display it at the caret, and submit it when input becomes available.
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+### Removed
+
+- Removed `TspPalette` definition and `t` verb from the protocol specification
+
+## [18.12.3] - 2026-10-19
+
+### Added
+
+- Added `min`, `max` and dashed reference `marks` to bars/spark `chart` nodes, a `tone` per series column, and the common `hovercard` prop: a node tree Tern floats over the node while the pointer rests on it
+
+## [18.10.2] - 2026-10-12
+
+### Added
+
+- Added `TspPickerMark.icon`: an icon a picker mark draws instead of its initials when the terminal has it (`provider:<id>` names a model provider's logo)
+
 ## [18.8.8] - 2026-10-10
 
 ### Added

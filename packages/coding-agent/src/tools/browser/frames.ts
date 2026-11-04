@@ -8,9 +8,10 @@ import { formatScreenshot, resizeImage } from "../../utils/image-resize";
 import { throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { type AriaSnapshotOptions, buildAriaSnapshotScript } from "./aria/aria-snapshot";
-import { clickElement, fillViaHandle, focusTextEntryTarget, pressKey } from "./interactions";
+import { clickElement, fillViaHandle, pressKey, typeIntoElement } from "./interactions";
 import { readPageViewport } from "./launch";
 import { RunOutput } from "./run-output";
+import { whileDrawing } from "./screenshot";
 import type { ScreenshotResult, SessionSnapshot } from "./tab-protocol";
 
 /** JSON-safe metadata for one document frame. */
@@ -45,18 +46,21 @@ export interface FrameWaitOptions {
 
 /** A frame-scoped helper object exposed by `tab.frame()`. */
 export interface BrowserFrameApi {
-	/** Click a matching element in this frame. */
-	click(selector: string): Promise<void>;
+	/** Click a matching element in this frame, optionally with another button or click count. */
+	click(
+		selector: string,
+		options?: { button?: "left" | "right" | "middle" | "back" | "forward"; count?: number },
+	): Promise<void>;
 	/** Replace a matching form control's value. */
 	fill(selector: string, value: string): Promise<void>;
 	/** Type text into a matching element. */
 	type(selector: string, text: string): Promise<void>;
 	/** Press a keyboard key, optionally after focusing an element. */
 	press(key: string, options?: FramePressOptions): Promise<void>;
-	/** Return a matching element's text content. */
-	text(selector: string): Promise<string>;
-	/** Return a matching element's inner HTML. */
-	html(selector: string): Promise<string>;
+	/** Return a matching element's text content; without a selector, the frame's `<body>`. */
+	text(selector?: string): Promise<string>;
+	/** Return a matching element's inner HTML; without a selector, the frame's `<body>`. */
+	html(selector?: string): Promise<string>;
 	/** Return a matching form control's value. */
 	value(selector: string): Promise<string>;
 	/** Return a matching element attribute. */
@@ -228,7 +232,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 		return handle;
 	};
 	return {
-		click: selector =>
+		click: (selector, options) =>
 			hooks.op(
 				`frame.click(${JSON.stringify(selector)})`,
 				hooks.actionOpMs,
@@ -236,7 +240,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 					const label = `frame.click(${JSON.stringify(selector)})`;
 					const handle = await actionHandle(label, selector, signal);
 					try {
-						await clickElement(handle, label, signal);
+						await clickElement(handle, label, signal, { button: options?.button, clickCount: options?.count });
 					} finally {
 						await handle.dispose().catch(() => undefined);
 					}
@@ -265,8 +269,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 					const handle = await untilAborted(signal, () => frame.$(hooks.normalizeSelector(selector)));
 					if (!handle) throw new ToolError(`frame.type(${JSON.stringify(selector)}) matched no element`);
 					try {
-						await focusTextEntryTarget(handle, "type into", signal);
-						await untilAborted(signal, () => handle.type(text, { delay: 0 }));
+						await typeIntoElement(handle, text, signal);
 					} finally {
 						await handle.dispose().catch(() => undefined);
 					}
@@ -277,19 +280,23 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 			hooks.op(`frame.press(${JSON.stringify(key)})`, hooks.actionOpMs, async signal => {
 				if (options?.selector)
 					await untilAborted(signal, () => frame.focus(hooks.normalizeSelector(options.selector!)));
-				await untilAborted(signal, () => pressKey(frame.page(), key));
+				await pressKey(frame.page(), key, undefined, signal);
 			}),
-		text: selector =>
+		// Without a selector, the frame's `<body>`; any value passed, `null` included, is still checked as a selector.
+		text: (selector = "body") =>
 			hooks.op(
 				`frame.text(${JSON.stringify(selector)})`,
 				hooks.quickOpMs,
 				signal =>
 					untilAborted(signal, () =>
-						frame.$eval(hooks.normalizeSelector(selector), element => element.textContent ?? ""),
+						frame.$eval(hooks.normalizeSelector(selector), element => {
+							const rendered = "innerText" in element ? element.innerText : undefined;
+							return (typeof rendered === "string" ? rendered : (element.textContent ?? "")).trim();
+						}),
 					),
 				selectorOptions(selector),
 			),
-		html: selector =>
+		html: (selector = "body") =>
 			hooks.op(
 				`frame.html(${JSON.stringify(selector)})`,
 				hooks.quickOpMs,
@@ -385,7 +392,9 @@ export async function captureFrameScreenshot(
 		).catch(() => undefined);
 		captureScale = (await readPageViewport(frame.page(), signal)).deviceScaleFactor ?? 1;
 		const screenshotOptions: ElementScreenshotOptions = { type: "png", scrollIntoView: false };
-		buffer = (await untilAborted(signal, () => handle.screenshot(screenshotOptions))) as Buffer;
+		buffer = (await whileDrawing(frame.page(), signal, () =>
+			untilAborted(signal, () => handle.screenshot(screenshotOptions)),
+		)) as Buffer;
 	} finally {
 		await handle.dispose().catch(() => undefined);
 	}

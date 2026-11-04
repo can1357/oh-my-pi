@@ -521,7 +521,7 @@ describe("buildSessionContext", () => {
 		});
 
 		it("caps snapcompact frame payload in LLM context but preserves transcript frames", () => {
-			const oldFrame = "o".repeat(Math.ceil(snapcompact.FRAME_DATA_BYTES_BUDGET / 2) + 1);
+			const oldFrame = "o".repeat(Math.ceil(snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET / 2) + 1);
 			const newFrame = "n".repeat(oldFrame.length);
 			const compacted: CompactionEntry = {
 				...compaction("3", "2", "Snapcompact summary", "1"),

@@ -422,12 +422,13 @@ function getBlockTextSlot(entry: SessionMessageEntry | CustomMessageEntry, block
  *
  * Tool-result: replaces its first non-empty text block with the placeholder,
  * removes its other text blocks, preserves every non-text block, and stamps
- * `prunedAt`. Block: splices `replacement` over `[start, end)` of the
- * target text block. When several block regions share one text block they MUST
- * be applied highest-start-first so earlier offsets stay valid — use
- * {@link applyShakeRegions}, which orders them correctly.
+ * `prunedAt`. Block: splices `replacement` (`replacementTokens` long) over
+ * `[start, end)` of the target text block, and on an assistant turn adds the
+ * tokens removed to `elidedOutputTokens`. When several block regions share one
+ * text block they MUST be applied highest-start-first so earlier offsets stay
+ * valid — use {@link applyShakeRegions}, which orders them correctly.
  */
-export function applyShakeRegion(region: ShakeRegion, replacement: string): void {
+export function applyShakeRegion(region: ShakeRegion, replacement: string, replacementTokens: number): void {
 	if (region.kind === "toolResult") {
 		const message = region.entry.message as ToolResultMessage;
 		const replacementIndex = message.content.findIndex(block => block.type === "text" && block.text.length > 0);
@@ -451,7 +452,14 @@ export function applyShakeRegion(region: ShakeRegion, replacement: string): void
 	// rebuilds, so an in-place block rewrite must drop its cached estimate/convert.
 	// Custom-message entries are re-materialized into a fresh AgentMessage on every
 	// buildSessionContext, so they carry no stable cached identity to invalidate.
-	if (region.entry.type === "message") invalidateMessageCache(region.entry.message);
+	if (region.entry.type !== "message") return;
+	const message = region.entry.message;
+	// `usage.output` keeps billing the removed text; the persisted tally lets
+	// every later count of a replayed turn take it off again.
+	if (message.role === "assistant") {
+		message.elidedOutputTokens = (message.elidedOutputTokens ?? 0) + Math.max(0, region.tokens - replacementTokens);
+	}
+	invalidateMessageCache(message);
 }
 
 /**
@@ -459,11 +467,14 @@ export function applyShakeRegion(region: ShakeRegion, replacement: string): void
  * that splicing one region never shifts the offsets of another in the same text
  * block; tool-result regions are independent.
  */
-export function applyShakeRegions(items: Array<{ region: ShakeRegion; replacement: string }>): void {
+export function applyShakeRegions(
+	items: Array<{ region: ShakeRegion; replacement: string; replacementTokens: number }>,
+): void {
 	const ordered = [...items].sort((a, b) => {
 		const aStart = a.region.kind === "block" ? a.region.start : -1;
 		const bStart = b.region.kind === "block" ? b.region.start : -1;
 		return bStart - aStart;
 	});
-	for (const { region, replacement } of ordered) applyShakeRegion(region, replacement);
+	for (const { region, replacement, replacementTokens } of ordered)
+		applyShakeRegion(region, replacement, replacementTokens);
 }

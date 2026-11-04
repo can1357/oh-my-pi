@@ -146,6 +146,24 @@ describe("tool path arrays", () => {
 		expect(details?.scopePath).toBe("apps/, packages/, phases/");
 	});
 
+	it("search recurses into directories matched by a path glob", async () => {
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "grep");
+		if (!tool) throw new Error("Missing grep tool");
+
+		const braced = getText(
+			await tool.execute("search-dir-brace", { pattern: "shared-needle", path: `${tempDir}/{apps,phases}` }),
+		);
+		expect(braced).toContain("shared-needle apps");
+		expect(braced).toContain("shared-needle phases");
+		expect(braced).not.toContain("shared-needle packages");
+		expect(braced).not.toContain("shared-needle other");
+
+		const wildcard = getText(await tool.execute("search-dir-wildcard", { pattern: "shared-needle", path: "ph?ses" }));
+		expect(wildcard).toContain("shared-needle phases");
+		expect(wildcard).not.toContain("shared-needle apps");
+	});
+
 	it("search accepts JSON-array string paths in direct execute", async () => {
 		const tools = await createTools(createTestSession(tempDir));
 		const tool = tools.find(entry => entry.name === "grep");

@@ -7,6 +7,7 @@
  * widget lose per-model visibility.
  */
 import { describe, expect, it } from "bun:test";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
 
@@ -85,6 +86,28 @@ describe("openai-codex usage parser", () => {
 			expect(report?.limits.map(limit => limit.id)).toContain("openai-codex:primary");
 			if (status === 200) expect(report?.metadata?.daybreak).toBe(true);
 			else expect(report?.metadata).not.toHaveProperty("daybreak");
+		}
+	});
+
+	it("throws on a rejected token so the cached report is purged, but treats 5xx as transient", async () => {
+		// AuthStorage purges last-good quota and health checks report `ok: false`
+		// only for a thrown 401/403; `null` keeps serving the old report.
+		for (const status of [401, 403, 503]) {
+			const outcome = await openaiCodexUsageProvider
+				.fetchUsage(
+					{
+						provider: "openai-codex",
+						credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1" },
+					},
+					{ fetch: (async () => new Response("{}", { status })) as unknown as FetchImpl },
+				)
+				.catch((err: unknown) => err);
+			if (status === 503) {
+				expect(outcome).toBeNull();
+			} else {
+				expect(outcome).toBeInstanceOf(ProviderHttpError);
+				expect((outcome as ProviderHttpError).status).toBe(status);
+			}
 		}
 	});
 
@@ -305,6 +328,136 @@ describe("openai-codex usage parser", () => {
 		expect(report).not.toBeNull();
 		expect(report?.limits.map(l => l.id)).toEqual(["openai-codex:spark:primary"]);
 	});
+
+	// Credit-billed workspace seats (Business/Enterprise flexible pricing) report
+	// `rate_limit: null`; the per-user credit cap under `spend_control` is their
+	// only quota, and dropping it left these accounts with no usage at all.
+	function makeSpendCapPayload(reached: boolean, used: string) {
+		return {
+			plan_type: "business",
+			rate_limit: null,
+			additional_rate_limits: null,
+			credits: { has_credits: true, unlimited: false, overage_limit_reached: false, balance: null },
+			spend_control: {
+				reached,
+				individual_limit: {
+					source: "account_user_spend_controls",
+					unit: "credit",
+					limit: "500000",
+					used,
+					remaining: String(500_000 - Number(used)),
+					used_percent: Math.round((Number(used) / 500_000) * 100),
+					reset_after_seconds: 584638,
+					reset_at: 1_793_491_200,
+				},
+			},
+		};
+	}
+
+	it.each([
+		["under the cap", false, "663.0780472755432", "ok", true],
+		["at the cap", true, "500000", "exhausted", false],
+		// The backend can deny before the reported amount reaches the limit.
+		["reached below 100%", true, "450000", "exhausted", false],
+	] as const)(
+		"reports a credit-billed seat's spend cap %s as its chat quota",
+		async (_name, reached, used, status, allowed) => {
+			const report = await openaiCodexUsageProvider.fetchUsage(
+				{
+					provider: "openai-codex",
+					credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1" },
+				},
+				{ fetch: fakeFetch(makeSpendCapPayload(reached, used)) },
+			);
+			expect(report?.limits.map(l => l.id)).toEqual(["openai-codex:spend-cap"]);
+			const cap = report?.limits[0];
+			expect(cap?.amount).toMatchObject({ used: Number(used), limit: 500_000, unit: "credits" });
+			expect(cap?.amount.usedFraction).toBeCloseTo(Number(used) / 500_000, 9);
+			expect(cap?.window?.resetsAt).toBe(1_793_491_200_000);
+			expect(cap?.status).toBe(status);
+			expect(report?.metadata).toMatchObject({ planType: "business", allowed, limitReached: !allowed });
+
+			// The cap gates chat requests (and heals the chat block) but not Spark.
+			const chatIds = report ? codexRankingStrategy.scopeLimits?.(report, { modelId: "gpt-5.3-codex" }) : [];
+			const sparkIds = report ? codexRankingStrategy.scopeLimits?.(report, { modelId: "gpt-5.3-codex-spark" }) : [];
+			expect(chatIds?.map(l => l.id)).toEqual(["openai-codex:spend-cap"]);
+			expect(sparkIds).toEqual([]);
+		},
+	);
+
+	it("shows a spend cap alongside plan windows without letting it gate them", async () => {
+		// With plan windows the cap only bounds credit-funded overage; a request
+		// inside the plan allowance is served regardless.
+		const payload = { ...makePayload(), spend_control: makeSpendCapPayload(true, "500000").spend_control };
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+		expect(report?.limits.map(l => l.id)).toContain("openai-codex:spend-cap");
+		expect(report?.metadata).toMatchObject({ allowed: true, limitReached: false });
+		const chatIds = report ? codexRankingStrategy.scopeLimits?.(report, { modelId: "gpt-5.3-codex" }) : [];
+		expect(chatIds?.map(l => l.id)).toEqual(["openai-codex:primary", "openai-codex:secondary"]);
+		// The display-only cap must not keep a legacy shared block from healing.
+		const shared = codexRankingStrategy.healableBlockScopes?.(report!).find(s => s.blockScope === "shared");
+		expect(shared?.limits.map(l => l.id)).not.toContain("openai-codex:spend-cap");
+		expect(shared?.healthy).toBe(true);
+	});
+
+	it("leaves an omitted spend-cap verdict to the counters instead of reading it as allowed", async () => {
+		const base = makeSpendCapPayload(false, "500000");
+		const { reached: _omitted, ...spendControl } = base.spend_control;
+		const payload = { ...base, spend_control: spendControl };
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+		expect(report?.limits[0]?.status).toBe("exhausted");
+		expect(report?.metadata?.allowed).toBeUndefined();
+		expect(report?.metadata?.limitReached).toBeUndefined();
+		const chat = codexRankingStrategy.healableBlockScopes?.(report!).find(s => s.blockScope === "chat");
+		expect(chat?.healthy).toBe(false);
+	});
+
+	it.each([
+		["full counters", (cap: Record<string, unknown>) => cap],
+		["only remaining: 0", (cap: Record<string, unknown>) => ({ unit: cap.unit, remaining: "0" })],
+	] as const)(
+		"does not let credits fund plan overage when the spend cap has %s and the verdict is omitted",
+		async (_name, shape) => {
+			const { reached: _omitted, ...rest } = makeSpendCapPayload(false, "500000").spend_control;
+			const spendControl = { ...rest, individual_limit: shape(rest.individual_limit) };
+			const payload = {
+				...makePayload(),
+				rate_limit: {
+					allowed: false,
+					limit_reached: true,
+					primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+					secondary_window: null,
+				},
+				credits: { has_credits: true, unlimited: false, overage_limit_reached: false, balance: "489.25" },
+				spend_control: spendControl,
+			};
+			const report = await openaiCodexUsageProvider.fetchUsage(
+				{
+					provider: "openai-codex",
+					credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1" },
+				},
+				{ fetch: fakeFetch(payload) },
+			);
+			expect(report?.metadata).toMatchObject({ allowed: false, limitReached: true });
+			const chat = report ? (codexRankingStrategy.scopeLimits?.(report, { modelId: "gpt-5.3-codex" }) ?? []) : [];
+			expect(chat.find(l => l.id === "openai-codex:primary")?.status).toBe("exhausted");
+			const scopes = report ? (codexRankingStrategy.healableBlockScopes?.(report) ?? []) : [];
+			expect(scopes.find(s => s.blockScope === "chat")?.healthy).toBe(false);
+			expect(scopes.find(s => s.blockScope === "shared")?.healthy).toBe(false);
+		},
+	);
 
 	it("surfaces rate_limit_reset_credits.available_count as report.resetCredits", async () => {
 		const usagePayload = { ...makePayload(), rate_limit_reset_credits: { available_count: 1 } };

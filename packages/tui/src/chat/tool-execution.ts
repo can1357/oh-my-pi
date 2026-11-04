@@ -1,14 +1,20 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Box } from "../components/box";
-import { SPINNER_ADVANCE_MS } from "../components/loader";
+import {
+	onSpinnerIntervalChange,
+	sharedSpinnerFrame,
+	spinnerAnimated,
+	spinnerInterval,
+	spinnerTickDelay,
+} from "../spinner-clock";
 import { Image } from "../components/image";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
 import { getImageDimensions, ImageProtocol, imageFallback, TERMINAL } from "../terminal-capabilities";
 import { type Component, Container, type TUI } from "../tui";
 import { truncateToWidth } from "../utils";
-import { getProjectDir, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getProjectDir, isRecord, logger, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
 import type { Theme } from "../theme/theme";
 import { ensureThemeSync, getThemeEpoch, theme } from "../theme/theme";
 import {
@@ -30,9 +36,10 @@ import {
 	rootToggleExpanded,
 } from "../native/node";
 import { plainText } from "../native/spans";
-import { diagnosticsSection, displayPath, toolHead } from "../tools/native-view";
+import { diagnosticsSection, displayPath, resultText, toolHead } from "../tools/native-view";
 import type { FileDiagnosticsResult } from "../tools/lsp";
-import { NativeImageCache } from "../native/blobs";
+import { NativeImageCache, readMediaPath, shownMedia } from "../native/blobs";
+import { imageLinksEnabled, linkedImageText } from "../prompt/image-references";
 import { Memo } from "../native/memo";
 import { type EditMode, type PerFileDiffPreview, renderStreamingFallback } from "../tools/edit";
 import { taskCardAgentIds } from "../tools/task";
@@ -49,6 +56,7 @@ import type { XdevMountedState } from "../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
 import { FenceFigure } from "./fence-figure";
+import { SpotlightNotices } from "./spotlight";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
 import { renderDiff } from "../chrome/diff";
 import { type AnimationFrame, trimBlankEdges } from "../chrome/transcript-container";
@@ -124,6 +132,9 @@ function cardPreview(preview: NativeToolView["preview"]): TspPreview | undefined
 
 /** The describe hooks of a registry renderer or of a custom tool object. */
 type ToolDescriber = Pick<ToolRenderer, "describeCall" | "describeResult" | "mergeCallAndResult">;
+
+/** Optional kinds of the host's vocabulary the describe hooks branch on. */
+type NativeHostKinds = Required<Pick<RenderResultContextOptions, "media" | "json">>;
 
 class SafeToolRendererComponent implements Component {
 	#toolName: string;
@@ -218,26 +229,68 @@ export interface ToolExecutionOptions {
 	useBuiltInRenderer?: boolean;
 }
 
+/** A tool result or progress frame as a card shows it. */
+export interface ToolResultFrame {
+	content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+	details?: unknown;
+	isError?: boolean;
+}
+
 export interface ToolExecutionHandle extends Component {
 	updateArgs(args: unknown, toolCallId?: string): void;
 	updateStreamPreview?(update: unknown): void;
-	updateResult(
-		result: {
-			content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
-			details?: unknown;
-			isError?: boolean;
-		},
-		isPartial?: boolean,
-		toolCallId?: string,
-	): void;
+	updateResult(result: ToolResultFrame, isPartial?: boolean, toolCallId?: string): void;
 	setArgsComplete(toolCallId?: string): void;
 	setExecutionStarted(toolCallId?: string): void;
 	setExpanded(expanded: boolean): void;
-	setToolActivityVisible(visible: boolean): void;
 	/** Mark the call parked: it returned, but stays tracked for async job frames. */
 	parkAsBackground(): void;
 	/** Seal the block as final history and stop its animations. */
 	seal(): void;
+}
+
+/** Tools whose returned call hands its card to the background job it started (see {@link parksAsBackground}). */
+const JOB_CARD_TOOLS: Record<string, "always" | "native"> = { task: "always", bash: "native", eval: "native" };
+
+/**
+ * Whether a call that returned with `details.async.state === "running"` stays
+ * parked ({@link ToolExecutionHandle.parkAsBackground}) so its job's later
+ * frames keep filling the card until a `completed`/`failed` frame settles it.
+ * Detached `task` spawns always do; backgrounded `bash`/`eval` jobs only under
+ * native rendering, where the terminal transcript keeps them frozen instead.
+ * Shared by the live event controller and the transcript rebuild.
+ */
+export function parksAsBackground(toolName: string, details: unknown): boolean {
+	const mode = JOB_CARD_TOOLS[toolName];
+	if (mode === undefined || (mode === "native" && !isNativeRendering())) return false;
+	return asyncJobState(details) === "running";
+}
+
+/** The background job state a tool result reports (`details.async.state`: running, completed, failed, cancelled). */
+export function asyncJobState(details: unknown): string | undefined {
+	if (!isRecord(details) || !isRecord(details.async)) return undefined;
+	return typeof details.async.state === "string" ? details.async.state : undefined;
+}
+
+/** Whether a frame is a background job's last one: it completed, failed or was cancelled. */
+export function isSettledJobFrame(details: unknown): boolean {
+	const state = asyncJobState(details);
+	return state === "completed" || state === "failed" || state === "cancelled";
+}
+
+/**
+ * Settle a parked card ({@link parksAsBackground}) with its job's last frame
+ * ({@link isSettledJobFrame}): a completed or failed job is the call's result;
+ * a cancelled one keeps the output it got to and seals the card as cancelled.
+ */
+export function settleWithJobFrame(component: ToolExecutionHandle, frame: ToolResultFrame, toolCallId: string): void {
+	const state = asyncJobState(frame.details);
+	if (state === "cancelled") {
+		component.updateResult(frame, true, toolCallId);
+		component.seal();
+		return;
+	}
+	component.updateResult({ ...frame, isError: state === "failed" }, false, toolCallId);
 }
 
 /** Card tone per status when the renderer doesn't choose one; settled cards stay neutral. */
@@ -249,26 +302,27 @@ const NATIVE_STATUS_TONE: Record<TspCardStatus, TspTone | undefined> = {
 	cancelled: "info",
 };
 
-/** Phase-locked spinner glyph index shared by every live tool block so parallel
- * spinners advance in lockstep instead of each tracking its own start time. */
-export function sharedSpinnerFrame(frameCount: number, now: number = performance.now()): number {
-	return frameCount > 0 ? Math.floor(now / SPINNER_ADVANCE_MS) % frameCount : 0;
-}
-
 /** Live tool blocks currently driving a spinner. A single shared ticker (below)
  * advances and repaints every registered block per glyph step, so N concurrent
- * live/streaming blocks — e.g. parallel `task` subagents — cost one 80ms timer
- * and one coalesced render frame per tick instead of N unsynchronized timers
- * each independently waking the render scheduler (issue #8731). */
+ * live/streaming blocks — e.g. parallel `task` subagents — cost one timer at the
+ * shared spinner cadence and one coalesced render frame per tick instead of N
+ * unsynchronized timers each independently waking the render scheduler
+ * (issue #8731). The glyph index comes from `sharedSpinnerFrame`, so blocks
+ * stay in phase with every other spinner on the clock. */
 const liveSpinnerBlocks = new Set<ToolExecutionComponent>();
 let sharedSpinnerTimer: NodeJS.Timeout | undefined;
 
-/** Arm the shared spinner ticker if it is not already running. */
+/**
+ * Arm the shared ticker if it is not already running and spinners animate. Ticks land on the shared
+ * clock's boundaries, so this ticker and the working row repaint in the same frame. Each tick re-reads
+ * the period; a tick under a static spinner paints frame 0 and leaves the ticker stopped.
+ */
 function ensureSharedSpinnerTicker(): void {
-	if (sharedSpinnerTimer || isNativeRendering()) return;
-	sharedSpinnerTimer = setInterval(() => {
-		// A native surface opened while blocks were live: the terminal clocks
-		// their spinners, so the repaint ticker has nothing left to do.
+	if (sharedSpinnerTimer || isNativeRendering() || !spinnerAnimated()) return;
+	sharedSpinnerTimer = setTimeout(() => {
+		sharedSpinnerTimer = undefined;
+		// A native surface opened while blocks were live: the terminal clocks their spinners, so the
+		// repaint ticker has nothing left to do — drop the live blocks and stay stopped.
 		if (isNativeRendering()) {
 			stopSharedSpinnerTicker();
 			return;
@@ -276,8 +330,13 @@ function ensureSharedSpinnerTicker(): void {
 		const frame = sharedSpinnerFrame(theme.spinnerFrames.length);
 		// Removing the current block mid-iteration is safe on a Set.
 		for (const block of liveSpinnerBlocks) block.tickSpinner(frame);
-	}, SPINNER_ADVANCE_MS);
+		if (liveSpinnerBlocks.size > 0) ensureSharedSpinnerTicker();
+	}, spinnerTickDelay(spinnerInterval()));
 }
+// Static → animated: nothing is ticking, so restart.
+onSpinnerIntervalChange(() => {
+	if (liveSpinnerBlocks.size > 0) ensureSharedSpinnerTicker();
+});
 
 /** Register a live block with the shared ticker, starting it on first use. */
 function registerSpinnerBlock(block: ToolExecutionComponent): void {
@@ -289,22 +348,28 @@ function registerSpinnerBlock(block: ToolExecutionComponent): void {
 function unregisterSpinnerBlock(block: ToolExecutionComponent): void {
 	if (!liveSpinnerBlocks.delete(block)) return;
 	if (liveSpinnerBlocks.size === 0 && sharedSpinnerTimer) {
-		clearInterval(sharedSpinnerTimer);
+		clearTimeout(sharedSpinnerTimer);
 		sharedSpinnerTimer = undefined;
 	}
 }
 
 /** Stop the shared spinner ticker and drop every registered live block.
  *  Called on interactive-mode teardown so a stray live block cannot keep the
- *  process-wide 80ms interval alive past shutdown (lingering event-loop
+ *  process-wide spinner timer alive past shutdown (lingering event-loop
  *  handles pin the process; cf. `postmortem.quit`). Test files that assert on
  *  ticker arming also use this to start from a clean slate. */
 export function stopSharedSpinnerTicker(): void {
 	liveSpinnerBlocks.clear();
 	if (sharedSpinnerTimer) {
-		clearInterval(sharedSpinnerTimer);
+		clearTimeout(sharedSpinnerTimer);
 		sharedSpinnerTimer = undefined;
 	}
+}
+
+/** Whether the shared spinner ticker has a tick armed. Test seam: other timers on a fake clock
+ *  (collab relay heartbeats) make a raw timer count ambiguous. */
+export function sharedSpinnerTickerArmed(): boolean {
+	return sharedSpinnerTimer !== undefined;
 }
 
 // Stable per-instance counter so each tool execution's inline images get a
@@ -376,6 +441,8 @@ export class ToolExecutionComponent extends Container {
 		isError?: boolean;
 		details?: unknown;
 	};
+	// Machine paths remain verbatim; only #result.details is handed to display renderers.
+	#rawDetails: unknown;
 	// Edit preview state
 	#editMode?: EditMode;
 	#editDiffPreview?: PerFileDiffPreview[];
@@ -392,6 +459,8 @@ export class ToolExecutionComponent extends Container {
 	#spinnerActive = false;
 	// Todo write completion strikethrough reveal animation
 	#todoStrikeInterval?: NodeJS.Timeout;
+	// Once-a-second repaint for renderers that show live elapsed time (`tickElapsed`)
+	#elapsedTicker?: NodeJS.Timeout;
 	// Track if args are still being streamed (for edit/write spinner)
 	#argsComplete = false;
 	#executionStarted = false;
@@ -413,6 +482,8 @@ export class ToolExecutionComponent extends Container {
 	// LSP diagnostics that arrived after the result (native only), shown in the frame.
 	#lateDiagnostics: readonly FileDiagnosticsResult[] | undefined;
 	readonly #nativeImages = new NativeImageCache();
+	// The Spotlight notice drawn after the card in a native transcript (see nativeTrailers).
+	readonly #spotlight = new SpotlightNotices();
 	// Wall clock captured whenever a task card is rebuilt.
 	#taskRenderNowMs = Date.now();
 	// Set on each `render()` when the last painted pending shape must be
@@ -428,6 +499,8 @@ export class ToolExecutionComponent extends Container {
 		argsComplete?: boolean;
 		executionStarted?: boolean;
 		renderContext?: Record<string, unknown>;
+		/** Live: read at render time, so a ticking spinner advances it. */
+		readonly elapsedMs?: number;
 	} = {
 		expanded: false,
 		isPartial: true,
@@ -445,6 +518,10 @@ export class ToolExecutionComponent extends Container {
 		toolCallId?: string,
 	) {
 		super();
+		Object.defineProperty(this.#renderState, "elapsedMs", {
+			get: () => this.#elapsedMs(this.#nativeStatus()),
+			enumerable: true,
+		});
 		ensureThemeSync();
 		this.#toolCallId = toolCallId;
 		this.#toolName = toolName;
@@ -581,26 +658,25 @@ export class ToolExecutionComponent extends Container {
 		return result !== undefined && !this.#isPartial && (result.isError === true || result.details != null);
 	}
 
-	updateResult(
-		result: {
-			content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
-			details?: unknown;
-			isError?: boolean;
-		},
-		isPartial = false,
-		_toolCallId?: string,
-	): void {
+	updateResult(result: ToolResultFrame, isPartial = false, _toolCallId?: string): void {
 		const hadNoResult = this.#result === undefined;
 		const wasPartialResult = this.#result !== undefined && this.#isPartial;
 		const firstResultRepaintShapePainted = this.#firstResultViewportRepaintShapePainted;
 		const partialResultPainted = this.#partialResultShapePainted;
 		this.#firstResultViewportRepaintShapePainted = false;
 		this.#partialResultShapePainted = false;
-		this.#result = result;
+		this.#rawDetails = result.details;
+		// Renderers receive sanitized details for display; raw paths are available
+		// separately for links and media through the built-in render context.
+		const details = sanitizeTextDeep(result.details);
+		this.#result = details === result.details ? result : { ...result, details };
 		this.#resultVersion++;
 		this.#blockVersion++;
 		this.#isPartial = isPartial;
 		this.#displaceableByToolName = displaceableToolName(this.#toolName, result, isPartial);
+		if (!isPartial && this.#toolCallId !== undefined) {
+			this.#spotlight.set(this.#toolCallId, result.details, resultText(result));
+		}
 		// When tool is complete, ensure args are marked complete so spinner stops
 		if (!isPartial) {
 			this.#argsComplete = true;
@@ -661,14 +737,15 @@ export class ToolExecutionComponent extends Container {
 			// Convert async - catch errors from processing
 			convertImageToPngShared(image)
 				.then(converted => {
+					this.#kittyConversionsAwaited.delete(key);
 					this.#kittyConverted.set(key, converted);
 					this.#displayInputVersion++;
 					this.#updateDisplay();
 					this.#ui.requestRender();
 				})
 				.catch(() => {
-					// Ignore conversion failures - display will use original image format
 					this.#kittyConversionsAwaited.delete(key);
+					this.#ui.requestRender();
 				});
 		}
 	}
@@ -730,6 +807,32 @@ export class ToolExecutionComponent extends Container {
 				this.#renderState.spinnerFrame = undefined;
 			}
 		}
+		this.#updateElapsedTicker(isBackgroundAsyncRunning);
+	}
+
+	/**
+	 * Repaint once a second while a `tickElapsed` renderer's call executes, so a
+	 * quiet command's elapsed time advances without the 30fps spinner ticker.
+	 */
+	#updateElapsedTicker(isBackgroundAsyncRunning: boolean): void {
+		const needsTicker =
+			this.#renderer?.tickElapsed === true &&
+			this.#executionStarted &&
+			this.#isPartial &&
+			!this.#sealed &&
+			!isBackgroundAsyncRunning &&
+			!isNativeRendering();
+		if (needsTicker && !this.#elapsedTicker) {
+			this.#elapsedTicker = setInterval(() => this.#ui.requestComponentRender(this), 1000);
+		} else if (!needsTicker) {
+			this.#stopElapsedTicker();
+		}
+	}
+
+	#stopElapsedTicker(): void {
+		if (!this.#elapsedTicker) return;
+		clearInterval(this.#elapsedTicker);
+		this.#elapsedTicker = undefined;
 	}
 
 	/**
@@ -783,9 +886,12 @@ export class ToolExecutionComponent extends Container {
 		}
 	}
 
-	/** Whether the result's figure still waits for its raster; the transcript holds retirement meanwhile. */
+	/** Hold visible results until their figures and Kitty images are ready for immutable scrollback. */
 	isTranscriptBlockPending(): boolean {
-		return this.#toolActivityVisible && this.#figure?.pending === true;
+		return (
+			this.#toolActivityVisible &&
+			((this.#showImages && this.#kittyConversionsAwaited.size > 0) || this.#figure?.pending === true)
+		);
 	}
 
 	/**
@@ -875,6 +981,7 @@ export class ToolExecutionComponent extends Container {
 			this.#renderState.spinnerFrame = undefined;
 		}
 		this.#stopTodoStrikeAnimation();
+		this.#stopElapsedTicker();
 		this.#previewReady?.resolve();
 	}
 
@@ -888,6 +995,11 @@ export class ToolExecutionComponent extends Container {
 	handleNativeEvent(event: NativeUiEvent): void {
 		const expanded = rootToggleExpanded(event);
 		if (expanded !== undefined) this.setExpanded(expanded);
+	}
+
+	/** The result's Spotlight notice, a block of its own right after the card (visible while it is collapsed). */
+	nativeTrailers(): readonly Component[] {
+		return this.#spotlight.list();
 	}
 
 	/** The file paths this call targets (edit/write/apply_patch args), display-relative. */
@@ -941,6 +1053,7 @@ export class ToolExecutionComponent extends Container {
 	override describe(cx?: DescribeContext): NativeNode {
 		if (this.#toolName === "wait" && this.#isBenignSkip()) return EMPTY_NODE;
 		const dataFirst = cx?.supports("tool") === true;
+		const host: NativeHostKinds = { media: cx?.supports("media") === true, json: cx?.supports("json") === true };
 		const key = [
 			dataFirst,
 			this.#resultVersion,
@@ -953,10 +1066,12 @@ export class ToolExecutionComponent extends Container {
 			this.#showImages,
 			this.#displayInputVersion,
 			this.#toolActivityVisible,
+			host.media,
+			host.json,
 			getThemeEpoch(),
 		];
 		return this.#native.get(key, () =>
-			withHidden(dataFirst ? this.#describeTool() : this.#describeCard(), !this.#toolActivityVisible),
+			withHidden(dataFirst ? this.#describeTool(host) : this.#describeCard(host), !this.#toolActivityVisible),
 		);
 	}
 
@@ -1002,12 +1117,12 @@ export class ToolExecutionComponent extends Container {
 	 * The data-first `tool` node (§7.2): the renderer's head data, status,
 	 * timer, exit and intent as props; its body as borderless children.
 	 */
-	#describeTool(): NativeNode {
-		const view = this.#nativeView();
+	#describeTool(host: NativeHostKinds): NativeNode {
+		const view = this.#nativeView(host);
 		const status = this.#nativeStatus();
 		const head = view.tool;
 		const late = this.#lateDiagnosticsParts();
-		const body: NativeChild[] = [...(view.body ?? []), ...this.#nativeResultImages()];
+		const body: NativeChild[] = [...(view.body ?? []), ...this.#nativeResultImages(view.body)];
 		if (late.section) body.push(late.section);
 		const inline = view.inline === true;
 		const hasBody = body.length > 0;
@@ -1072,8 +1187,8 @@ export class ToolExecutionComponent extends Container {
 		return spans;
 	}
 
-	#describeCard(): NativeNode {
-		const view = this.#nativeView();
+	#describeCard(host: NativeHostKinds): NativeNode {
+		const view = this.#nativeView(host);
 		const status = this.#nativeStatus();
 		const late = this.#lateDiagnosticsParts();
 		const fallbackHead = this.#fallbackHead(view);
@@ -1095,7 +1210,7 @@ export class ToolExecutionComponent extends Container {
 		const children: NativeChild[] = [
 			node("row", { gap: "sm", align: "baseline" }, headChildren, "head"),
 			...(view.body ?? []),
-			...this.#nativeResultImages(),
+			...this.#nativeResultImages(view.body),
 			...(late.section ? [late.section] : []),
 		];
 		const role = `omp.tool.${this.#toolName}`;
@@ -1127,9 +1242,10 @@ export class ToolExecutionComponent extends Container {
 	 * the result view (merged renderers) or the call head over both bodies.
 	 * A renderer that throws falls back to the generic card.
 	 */
-	#nativeView(): NativeToolView {
+	#nativeView(host: NativeHostKinds): NativeToolView {
 		const status = this.#nativeStatus();
 		const options: RenderResultContextOptions = {
+			...host,
 			expanded: this.#expanded,
 			isPartial: this.#isPartial,
 			argsComplete: this.#argsComplete,
@@ -1208,12 +1324,17 @@ export class ToolExecutionComponent extends Container {
 		return indicators ? (output ? `${output}\n${indicators}` : indicators) : output;
 	}
 
-	#nativeResultImages(): NativeNode[] {
+	/** Result images under the renderer's body, minus those the body already shows (as an `image` blob or a `media` file). */
+	#nativeResultImages(body: readonly NativeChild[] | undefined): NativeNode[] {
 		if (!this.#result || !this.#showImages) return [];
+		const shown = shownMedia(body);
+		const mediaPath = readMediaPath(this.#rawDetails);
+		if (mediaPath && shown.paths.has(mediaPath)) return [];
 		const images: NativeNode[] = [];
 		this.#getAllImageBlocks().forEach((image, index) => {
-			if (image.data && image.mimeType)
-				images.push(this.#nativeImages.get(`img${index}`, image.data, image.mimeType));
+			if (!image.data || !image.mimeType) return;
+			const described = this.#nativeImages.get(`img${index}`, image.data, image.mimeType, mediaPath);
+			if (!shown.blobs.has((described.p as { blob?: string } | undefined)?.blob ?? "")) images.push(described);
 		});
 		return images;
 	}
@@ -1226,6 +1347,7 @@ export class ToolExecutionComponent extends Container {
 
 	setToolActivityVisible(visible: boolean): void {
 		this.#toolActivityVisible = visible;
+		this.#spotlight.setHidden(!visible);
 		super.invalidate();
 	}
 
@@ -1244,7 +1366,7 @@ export class ToolExecutionComponent extends Container {
 		// TUI startup, so a result rendered before it lands must re-shape once it
 		// does (it gates Image children vs text fallback in #rebuildDisplay); keyed
 		// here for the same reason markdown.ts keys its render cache on it.
-		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}`;
+		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${imageLinksEnabled()}`;
 		if (key === this.#lastDisplayKey && this.#displayBuilt) return;
 		this.#lastDisplayKey = key;
 
@@ -1514,6 +1636,10 @@ export class ToolExecutionComponent extends Container {
 				this.#contentBox.clear();
 
 				const renderContext = this.#buildRenderContext();
+				const rawPerFileResults =
+					isRecord(this.#rawDetails) && Array.isArray(this.#rawDetails.perFileResults)
+						? this.#rawDetails.perFileResults
+						: undefined;
 				this.#renderState.renderContext = renderContext;
 
 				for (let i = 0; i < perFileResults.length; i++) {
@@ -1525,9 +1651,13 @@ export class ToolExecutionComponent extends Container {
 					}
 					const fileBox = new Box(0, 0);
 					try {
+						const fileOptions = {
+							...this.#renderState,
+							renderContext: { ...renderContext, rawDetails: rawPerFileResults?.[i] },
+						};
 						const resultComponent = renderer.renderResult(
 							{ content: [], details: fileResult, isError: fileResult.isError },
-							this.#renderState,
+							fileOptions,
 							theme,
 						);
 						if (resultComponent) {
@@ -1651,6 +1781,7 @@ export class ToolExecutionComponent extends Container {
 
 		if (this.#result) {
 			const imageBlocks = this.#getAllImageBlocks();
+			const sourcePath = readMediaPath(this.#rawDetails);
 
 			for (let i = 0; i < imageBlocks.length; i++) {
 				const img = imageBlocks[i];
@@ -1678,6 +1809,7 @@ export class ToolExecutionComponent extends Container {
 						{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
 						{
 							...resolveImageOptions(),
+							sourcePath,
 							budget: this.#ui.imageBudget,
 							imageKey: `te${this.#instanceId}:${i}`,
 							requestRender: () => this.#ui.requestRender(),
@@ -1756,6 +1888,9 @@ export class ToolExecutionComponent extends Container {
 			return Math.max(1, Math.min(maxSeconds, value));
 		};
 
+		if (this.#renderer && !this.#tool?.renderResult && this.#rawDetails !== undefined) {
+			context.rawDetails = this.#rawDetails;
+		}
 		if (this.#toolName === "bash") {
 			// Bash needs render context even before a result exists. The renderer uses the pending-call args
 			// plus this context to keep the inline command preview visible while tool-call JSON is still streaming.
@@ -1816,7 +1951,8 @@ export class ToolExecutionComponent extends Container {
 
 	#getTextOutput(): string {
 		if (!this.#result) return "";
-		const key = `${this.#resultVersion}|${this.#showImages}|${TERMINAL.imageProtocol ?? "-"}`;
+		// Image placeholders embed a link only under an enabled hyperlink policy.
+		const key = `${this.#resultVersion}|${this.#showImages}|${TERMINAL.imageProtocol ?? "-"}|${imageLinksEnabled()}`;
 		if (key === this.#textOutputKey) return this.#textOutput;
 
 		const textBlocks = this.#result.content.filter(c => c.type === "text");
@@ -1833,7 +1969,10 @@ export class ToolExecutionComponent extends Container {
 				.map(img => {
 					const mimeType = String(img.mimeType);
 					const dims = img.data ? (getImageDimensions(img.data, mimeType) ?? undefined) : undefined;
-					return imageFallback(mimeType, dims);
+					const placeholder = imageFallback(mimeType, dims);
+					return img.data
+						? linkedImageText(placeholder, { data: img.data, mimeType }, readMediaPath(this.#rawDetails))
+						: placeholder;
 				})
 				.join("\n");
 			output = output ? `${output}\n${imageIndicators}` : imageIndicators;

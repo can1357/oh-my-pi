@@ -1,3 +1,4 @@
+import { type } from "@oh-my-pi/omptype";
 import { type IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
 import { isRecord, logger, postmortem, ptree, setProcessName } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../../jsonrpc/message-framing";
@@ -43,27 +44,27 @@ interface RegistrationBatch {
 	registrations: Registration[];
 }
 
-interface ProgressParams {
-	token: string | number;
-	value?: { kind?: string; [key: string]: unknown };
-}
-
-interface DiagnosticsParams {
-	uri: string;
-	version?: number | null;
-	[key: string]: unknown;
-}
-
-interface TextDocumentParams {
-	textDocument: { uri: string; version: number; text?: string; [key: string]: unknown };
-	contentChanges?: unknown;
-	[key: string]: unknown;
-}
+const ConnectParams = type({
+	command: "string",
+	args: "string[]",
+	cwd: "string",
+	"env?": "Record<string, string>",
+	"initializationOptions?": "unknown",
+});
+/** Every validated params value keeps its undeclared keys: messages are forwarded and replayed as received. */
+const DocumentParams = type({ textDocument: { uri: "string", version: "number" } });
+const UriParams = type({ textDocument: { uri: "string" } });
+const DiagnosticsParams = type({ uri: "string" });
+const ProgressParams = type({ token: "string | number", "value?": "Record<string, unknown>" });
+type DiagnosticsParams = typeof DiagnosticsParams.infer;
+type ProgressParams = typeof ProgressParams.infer;
 
 class Session {
 	readonly connection: IpcConnection;
 	readonly framer = new MessageFramer(Buffer.alloc(0));
 	readonly openUris = new Set<string>();
+	/** Workspace folders this session added; removed from the server when the session leaves. */
+	readonly workspaceFolders = new Map<string, unknown>();
 	readonly forwardedIds = new Map<LspJsonRpcId, LspJsonRpcId>();
 	readonly pendingClientRequests = new Map<string, ClientRequestPending>();
 	server?: ServerInstance;
@@ -131,37 +132,6 @@ function rpcError(id: LspJsonRpcId, code: number, message: string): LspJsonRpcRe
 	return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
-function parseConnectParams(params: unknown): MuxConnectParams | undefined {
-	if (!isRecord(params) || typeof params.command !== "string" || typeof params.cwd !== "string") return undefined;
-	if (!Array.isArray(params.args) || !params.args.every(arg => typeof arg === "string")) return undefined;
-	if (params.env !== undefined) {
-		if (!isRecord(params.env)) return undefined;
-		for (const key in params.env) if (typeof params.env[key] !== "string") return undefined;
-	}
-	return params as unknown as MuxConnectParams;
-}
-
-function parseDocumentParams(params: unknown): TextDocumentParams | undefined {
-	if (!isRecord(params) || !isRecord(params.textDocument)) return undefined;
-	if (typeof params.textDocument.uri !== "string" || typeof params.textDocument.version !== "number") return undefined;
-	return params as unknown as TextDocumentParams;
-}
-
-function parseUri(params: unknown): string | undefined {
-	if (!isRecord(params) || !isRecord(params.textDocument)) return undefined;
-	return typeof params.textDocument.uri === "string" ? params.textDocument.uri : undefined;
-}
-
-function parseDiagnostics(params: unknown): DiagnosticsParams | undefined {
-	if (!isRecord(params) || typeof params.uri !== "string") return undefined;
-	return params as DiagnosticsParams;
-}
-
-function parseProgress(params: unknown): ProgressParams | undefined {
-	if (!isRecord(params) || (typeof params.token !== "string" && typeof params.token !== "number")) return undefined;
-	return params as unknown as ProgressParams;
-}
-
 /**
  * Broker-owned, in-process-testable multiplexer for shared language-server children.
  */
@@ -203,7 +173,14 @@ export class LspMuxServer {
 		this.#shuttingDown = true;
 		clearTimeout(this.#idleTimer);
 		for (const session of Array.from(this.#sessions)) session.connection.destroy();
-		await Promise.all([...this.#servers].map(server => this.#stopServer(server)));
+		// Children killed earlier (restart, failed init) are still in #servers until they exit;
+		// await every exit so no child outlives shutdown holding its cwd or pipes.
+		await Promise.all(
+			[...this.#servers].map(async server => {
+				await this.#stopServer(server);
+				await server.proc.exited.catch(() => {});
+			}),
+		);
 		const listener = this.#ipcServer;
 		this.#ipcServer = undefined;
 		await listener?.close();
@@ -258,8 +235,8 @@ export class LspMuxServer {
 				this.#sendSession(session, rpcError(message.id, -32600, "session already bound"));
 				return;
 			}
-			const params = parseConnectParams(message.params);
-			if (!params) {
+			const params = ConnectParams(message.params);
+			if (params instanceof type.errors) {
 				this.#sendSession(session, rpcError(message.id, -32602, "invalid mux connect params"));
 				return;
 			}
@@ -326,6 +303,11 @@ export class LspMuxServer {
 			await this.#didClose(session, server, message);
 			return;
 		}
+		if (message.method === "workspace/didChangeWorkspaceFolders" && !request) {
+			this.#trackWorkspaceFolders(session, message);
+			await this.#writeServer(server, message);
+			return;
+		}
 		if (message.method === "$/cancelRequest" && !request) {
 			if (!isRecord(message.params)) return;
 			const originalId = message.params.id;
@@ -363,8 +345,8 @@ export class LspMuxServer {
 	}
 
 	async #didOpen(session: Session, server: ServerInstance, message: LspJsonRpcNotification): Promise<void> {
-		const params = parseDocumentParams(message.params);
-		if (!params) return;
+		const params = DocumentParams(message.params);
+		if (params instanceof type.errors) return;
 		const uri = params.textDocument.uri;
 		session.openUris.add(uri);
 		server.documents.add(uri);
@@ -376,11 +358,25 @@ export class LspMuxServer {
 	}
 
 	async #didClose(session: Session, server: ServerInstance, message: LspJsonRpcNotification): Promise<void> {
-		const uri = parseUri(message.params);
-		if (!uri) return;
+		const params = UriParams(message.params);
+		if (params instanceof type.errors) return;
+		const uri = params.textDocument.uri;
 		session.openUris.delete(uri);
+		// Safe to forward: a server is reused only once its session count is zero (see connect),
+		// so no other session holds an overlay of this document on this server.
 		server.documents.delete(uri);
 		await this.#writeServer(server, message);
+	}
+
+	#trackWorkspaceFolders(session: Session, message: LspJsonRpcNotification): void {
+		const event = isRecord(message.params) ? message.params.event : undefined;
+		if (!isRecord(event)) return;
+		const folders = (value: unknown): Array<{ uri: string } & Record<string, unknown>> =>
+			Array.isArray(value)
+				? value.filter((folder): folder is { uri: string } => isRecord(folder) && typeof folder.uri === "string")
+				: [];
+		for (const folder of folders(event.removed)) session.workspaceFolders.delete(folder.uri);
+		for (const folder of folders(event.added)) session.workspaceFolders.set(folder.uri, folder);
 	}
 
 	#spawnServer(key: string, params: MuxConnectParams): ServerInstance {
@@ -432,16 +428,16 @@ export class LspMuxServer {
 			return;
 		}
 		if (message.method === "textDocument/publishDiagnostics") {
-			const params = parseDiagnostics(message.params);
-			if (!params) return;
+			const params = DiagnosticsParams(message.params);
+			if (params instanceof type.errors) return;
 			// Freshly parsed and never mutated: stored as-is for replay to later sessions.
 			server.diagnostics.set(params.uri, params);
 			this.#broadcast(server, { jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params });
 			return;
 		}
 		if (message.method === "$/progress") {
-			const params = parseProgress(message.params);
-			if (params) {
+			const params = ProgressParams(message.params);
+			if (!(params instanceof type.errors)) {
 				if (params.value?.kind === "begin") server.progress.set(params.token, params);
 				else if (params.value?.kind === "end") server.progress.delete(params.token);
 			}
@@ -593,6 +589,11 @@ export class LspMuxServer {
 		this.#sessions.delete(session);
 		const server = session.server;
 		if (server) {
+			// Detach before awaiting teardown so a link arriving meanwhile can reuse this server.
+			// Teardown writes are enqueued synchronously below, so the server still sees every
+			// orphan didClose/cancel before anything the next session sends.
+			server.initializeWaiters.delete(session);
+			server.sessions.delete(session);
 			// Teardown writes are best-effort: the language server may already
 			// have exited (crash or mux restart) and writing its stdin then
 			// rejects. #writeServer already logs those failures — a rejection
@@ -609,15 +610,22 @@ export class LspMuxServer {
 					params: { textDocument: { uri } },
 				});
 			}
-			await cleanup;
 			for (const [muxId, pending] of server.pending) {
 				if (pending.session !== session) continue;
 				pending.drop = true;
-				await writeBestEffort({ jsonrpc: "2.0", method: "$/cancelRequest", params: { id: muxId } });
+				cleanup = writeBestEffort({ jsonrpc: "2.0", method: "$/cancelRequest", params: { id: muxId } });
 			}
-			server.initializeWaiters.delete(session);
-			server.sessions.delete(session);
+			if (session.workspaceFolders.size > 0) {
+				cleanup = writeBestEffort({
+					jsonrpc: "2.0",
+					method: "workspace/didChangeWorkspaceFolders",
+					params: { event: { added: [], removed: [...session.workspaceFolders.values()] } },
+				});
+			}
+			// The write queue is serial, so the last teardown write settling means all have.
+			await cleanup;
 			if (server.sessions.size === 0 && !server.stopping) {
+				clearTimeout(server.lingerTimer);
 				server.lingerTimer = setTimeout(() => {
 					if (server.sessions.size === 0) void this.#stopServer(server);
 				}, SERVER_LINGER_MS);

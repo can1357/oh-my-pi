@@ -36,13 +36,31 @@ export interface OpenAiPatchTokenization {
 	auto: "high" | "original";
 }
 
+/** DeepSeek ViT patches merged `downsample`² into one token, plus a newline per row and two delimiters. */
+export interface DeepSeekPatchTokenization {
+	regime: "deepseek-patch";
+	/** ViT patch edge in pixels. */
+	patchSize: number;
+	/** Patches merged per token along each axis. */
+	downsample: number;
+	/** Token budget per image, layout tokens included. */
+	maxTokens: number;
+	/** Smaller images are upscaled to this pixel area. */
+	minPixels: number;
+}
+
 /** One model line's image billing rule: the vendor formula and its per-model numbers. */
-export type ImageTokenization =
+export type ImageTokenization = (
 	| OpenAiPatchTokenization
 	/** Anthropic 28px patches, resized to fit a padded-edge limit and a visual-token budget. */
 	| { regime: "anthropic-patch"; maxEdge: number; maxTokens: number }
+	| DeepSeekPatchTokenization
 	/** A fixed per-image budget regardless of pixels (Gemini 3 `media_resolution`). */
-	| { regime: "fixed"; tokens: number };
+	| { regime: "fixed"; tokens: number }
+) & {
+	/** Provider billing was measured to match this rule; unset for docs-only rules and wire fallbacks. */
+	verified?: boolean;
+};
 
 /** A `class: "unknown"` identity for targets resolved by wire API alone. */
 const UNCLASSIFIED: Pick<ModelIdentity, "class"> = { class: "unknown" };
@@ -50,7 +68,10 @@ const UNCLASSIFIED: Pick<ModelIdentity, "class"> = { class: "unknown" };
 function isImageTokenization(value: unknown): value is ImageTokenization {
 	return (
 		isRecord(value) &&
-		(value.regime === "openai-patch" || value.regime === "anthropic-patch" || value.regime === "fixed")
+		(value.regime === "openai-patch" ||
+			value.regime === "anthropic-patch" ||
+			value.regime === "deepseek-patch" ||
+			value.regime === "fixed")
 	);
 }
 
@@ -62,17 +83,13 @@ export interface ImageTokenizationTarget {
 	identity?: Pick<ModelIdentity, "class" | "family" | "revision">;
 }
 
-/**
- * The reader's image billing rule: its lineage rule, else its wire API's
- * fallback; undefined when neither covers it (an unclassified model on an
- * unregistered API).
- */
-export function resolveImageTokenization(target: ImageTokenizationTarget): ImageTokenization | undefined {
+/** Catalog axes for `target`'s identity on its host and wire API. */
+function resolveImageAxes(target: ImageTokenizationTarget): Record<string, unknown> {
 	const provider = target.provider ?? "";
 	const model = target.id ?? "";
 	const identity: Pick<ModelIdentity, "class" | "family" | "revision"> =
 		target.identity ?? (model ? classifyModel(provider, model, { lenient: true }) : UNCLASSIFIED);
-	const rule = resolveCascade({
+	return resolveCascade({
 		provider,
 		api: target.api ?? "",
 		class: identity.class,
@@ -80,8 +97,26 @@ export function resolveImageTokenization(target: ImageTokenizationTarget): Image
 		reasoning: false,
 		...(identity.family !== undefined && { family: identity.family }),
 		...(identity.revision !== undefined && { revision: identity.revision }),
-	}).catalog.imageTokenization;
+	}).catalog;
+}
+
+/**
+ * The reader's image billing rule: its lineage rule, else its wire API's
+ * fallback; undefined when neither covers it (an unclassified model on an
+ * unregistered API).
+ */
+export function resolveImageTokenization(target: ImageTokenizationTarget): ImageTokenization | undefined {
+	const rule = resolveImageAxes(target).imageTokenization;
 	return isImageTokenization(rule) ? rule : undefined;
+}
+
+/**
+ * Longest image edge the reader's host passes to the model (`image-max-edge`),
+ * or undefined when the host keeps the image's size.
+ */
+export function resolveImageMaxEdge(target: ImageTokenizationTarget): number | undefined {
+	const edge = resolveImageAxes(target).imageMaxEdge;
+	return typeof edge === "number" && edge > 0 ? edge : undefined;
 }
 
 /** Scale `size` down (never up) so its longest side is at most `maxEdge`. */
@@ -151,6 +186,41 @@ function anthropicTokens(size: ImageSize, maxEdge: number, maxTokens: number): n
 	return patches(lo, short(lo));
 }
 
+/**
+ * DeepSeek visual tokens: the image is upscaled to `minPixels`, padded to
+ * whole patches, and when its token grid busts `maxTokens` shrunk to the
+ * largest aspect-preserving grid that fits. Port of `plan_image_grid` in the
+ * reference processor (`max_wh_ratio` is unset in the V4.1 config):
+ * <https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/inference/image_processor.py>
+ */
+function deepseekTokens(size: ImageSize, rule: DeepSeekPatchTokenization): number {
+	const { patchSize, downsample, maxTokens, minPixels } = rule;
+	const cell = patchSize * downsample;
+	const spanTokens = (height: number, width: number) => {
+		const rows = Math.ceil(Math.floor(height / patchSize) / downsample);
+		const cols = Math.ceil(Math.floor(width / patchSize) / downsample);
+		return rows * (cols + 1) + 2;
+	};
+	let { width, height } = size;
+	if (width * height < minPixels) {
+		const scale = Math.sqrt(minPixels / (width * height));
+		width = Math.trunc(width * scale);
+		height = Math.trunc(height * scale);
+	}
+	const tokens = spanTokens(Math.ceil(height / patchSize) * patchSize, Math.ceil(width / patchSize) * patchSize);
+	if (tokens <= maxTokens) return tokens;
+	const aspect = height / width;
+	const maxCols = Math.sqrt((maxTokens - 2) / aspect + 0.25) - 0.5;
+	const maxRows = maxCols * aspect;
+	if (maxCols < 1) return spanTokens(Math.floor((maxTokens - 2) / 2) * cell, cell);
+	if (maxRows < 1) return spanTokens(cell, (maxTokens - 3) * cell);
+	const beta = Math.min((Math.floor(maxCols) * cell) / width, (Math.floor(maxRows) * cell) / height);
+	return spanTokens(
+		Math.floor((height * beta) / patchSize) * patchSize,
+		Math.floor((width * beta) / patchSize) * patchSize,
+	);
+}
+
 /** Billed input tokens for one image of `size` under `rule`; only `openai-patch` reads `detail`. */
 export function imageTokens(rule: ImageTokenization, size: ImageSize, detail?: ImageDetail): number {
 	switch (rule.regime) {
@@ -162,5 +232,7 @@ export function imageTokens(rule: ImageTokenization, size: ImageSize, detail?: I
 		}
 		case "anthropic-patch":
 			return anthropicTokens(size, rule.maxEdge, rule.maxTokens);
+		case "deepseek-patch":
+			return deepseekTokens(size, rule);
 	}
 }

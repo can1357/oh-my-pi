@@ -18,7 +18,6 @@ import {
 	HighlightStream,
 	highlightCode,
 	htmlToMarkdown,
-	invalidateFsScanCache,
 	listWorkspace,
 	macOSCheckSpelling,
 	macOSSpellCheckerAvailable,
@@ -477,6 +476,31 @@ try {
 			}
 		});
 
+		it("caps matches at maxCountPerFile when the path is a single file", async () => {
+			// Regression: the cap reached only the directory walks, so naming one
+			// explicit file dropped it and a hot file returned the whole global
+			// budget.
+			const scopedDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-grep-cap-"));
+			try {
+				const hot = path.join(scopedDir, "hot.txt");
+				await fs.writeFile(hot, Array.from({ length: 50 }, (_, i) => `needle ${i}`).join("\n"));
+
+				const result = await grep({
+					pattern: "needle",
+					path: hot,
+					mode: GrepOutputMode.Content,
+					maxCount: 40,
+					maxCountPerFile: 5,
+				});
+
+				expect(result.matches).toHaveLength(5);
+				expect(result.limitReached).toBe(true);
+				expect(result.filesWithMatches).toBe(1);
+			} finally {
+				await fs.rm(scopedDir, { recursive: true, force: true });
+			}
+		});
+
 		it("streams matches through onMatches in bounded batches instead of returning them", async () => {
 			const scopedDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-grep-stream-"));
 			try {
@@ -692,18 +716,6 @@ try {
 			expect(result.totalMatches).toBe(4);
 		});
 
-		it("should invalidate scan cache when invalidateFsScanCache receives a relative path", async () => {
-			await glob({ pattern: "*.ts", path: testDir, cache: true });
-			const newFile = path.join(testDir, "newly-added.ts");
-			await fs.writeFile(newFile, "export const newer = true;\n");
-
-			const relativePath = path.relative(process.cwd(), newFile);
-			invalidateFsScanCache(relativePath);
-
-			const result = await glob({ pattern: "newly-added.ts", path: testDir, cache: true });
-			expect(result.matches.some(match => match.path === "newly-added.ts")).toBe(true);
-		});
-
 		it("should avoid scan work when maxResults is zero", async () => {
 			const result = await glob({
 				pattern: "**/*",
@@ -763,19 +775,6 @@ try {
 			} finally {
 				await fs.rm(scopedDir, { recursive: true, force: true });
 			}
-		});
-
-		it("should fast-recheck empty cached results when threshold is reached", async () => {
-			const fileName = "cache-empty-recheck-target.txt";
-			const filePath = path.join(testDir, fileName);
-			await fs.rm(filePath, { force: true });
-			invalidateFsScanCache();
-			const first = await glob({ pattern: fileName, path: testDir, hidden: true, gitignore: true, cache: true });
-			expect(first.totalMatches).toBe(0);
-			await fs.writeFile(filePath, "created after empty cached query\n");
-			await Bun.sleep(250);
-			const second = await glob({ pattern: fileName, path: testDir, hidden: true, gitignore: true, cache: true });
-			expect(second.totalMatches).toBe(1);
 		});
 	});
 
@@ -1099,6 +1098,27 @@ try {
 
 			expect(cleaned).toContain("Main content");
 			// Navigation/footer may or may not be removed depending on preprocessing
+		});
+
+		it("keeps collapsed sections only with hiddenContent reachable, never template content", async () => {
+			const html = `<main>
+<h2>Product information</h2>
+<button aria-expanded="false">Item details</button>
+<div style="display:none"><p>Country of Origin: India</p></div>
+<template><p>Template-only claim</p></template>
+</main>`;
+
+			const dropped = await htmlToMarkdown(html);
+			const reachable = await htmlToMarkdown(html, { hiddenContent: "reachable" });
+
+			expect(dropped).toContain("Product information");
+			expect(dropped).not.toContain("Country of Origin: India");
+			expect(reachable).toContain("Country of Origin: India");
+			expect(reachable).not.toContain("Template-only claim");
+		});
+
+		it("rejects an unknown hiddenContent value", async () => {
+			expect(() => htmlToMarkdown("<p>text</p>", { hiddenContent: "visible" })).toThrow(/hiddenContent/);
 		});
 
 		it("should reject depth-truncated HTML", async () => {

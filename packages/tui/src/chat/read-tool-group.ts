@@ -1,28 +1,38 @@
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { type Component } from "../tui";
 import { Container } from "../tui";
 import { Text } from "../components/text";
-import { getLanguageFromPath, theme } from "../theme";
+import { getLanguageFromPath, theme, type ThemeColor } from "../theme";
 import { parseLineRanges, selectorLineRanges } from "../tools/line-ranges";
 import {
 	type ReadRenderArgs,
 	type ReadToolDetails,
 	readContentCode,
+	readResultIsMarkdown,
 	readSourceFsPath,
 	splitPathAndSel,
+	splitReadQuery,
 } from "../tools/read";
-import { PREVIEW_LIMITS, shortenPath } from "../render/render-utils";
-import { fileHyperlink, renderCodeCell } from "../render";
+import {
+	FILE_NAME_COLOR,
+	formatStatusIcon,
+	formatStyledPath,
+	PREVIEW_LIMITS,
+	shortenPath,
+} from "../render/render-utils";
+import { fileHyperlink, renderCodeCell, renderMarkdownCell, urlHyperlinkAlways } from "../render";
+import { wrapTreeLine } from "../render/hanging-wrap";
+import { wrapTextWithAnsi } from "../utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
+import { SpotlightNotices } from "./spotlight";
 import type { ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "../overlays/usage-row";
-import { formatCount } from "@oh-my-pi/pi-utils";
+import { formatCount, isUrlLikePath, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
 import type { TspCardStatus, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeToolHead } from "../tools/renderer";
-import { card, code, keyed, node, span, text, withHidden } from "../native/describe";
+import { card, code, keyed, md, node, span, text, withHidden } from "../native/describe";
 import {
 	type DescribeContext,
 	type NativeChild,
@@ -32,7 +42,7 @@ import {
 } from "../native/node";
 import { plainText } from "../native/spans";
 import { Memo } from "../native/memo";
-import { fileHref, fileRow, inlineErrorView } from "../tools/native-view";
+import { fileHref, fileRow, inlineErrorView, resultText, urlHref } from "../tools/native-view";
 
 /**
  * Extract the read call's target path. `path` is the canonical arg; `file_path`
@@ -121,10 +131,22 @@ type ReadEntry = {
 	status: "pending" | "success" | "warning" | "error";
 	correctedFrom?: string;
 	contentText?: string;
+	/** The result's `details.contentType`; see {@link previewsMarkdown}. */
+	contentType?: string;
+	/** The call's `raw` arg, which keeps Markdown previews as source. */
+	raw?: boolean;
 	conflictCount?: number;
 	codeStartLine?: number;
 	codeLineNumbers?: Array<number | null>;
 };
+
+/**
+ * Whether an entry previews as rendered Markdown instead of numbered source.
+ * Derived on each render so `raw`/path args that land after the result still apply.
+ */
+function previewsMarkdown(entry: ReadEntry): boolean {
+	return readResultIsMarkdown({ contentType: entry.contentType }, { path: entry.path, raw: entry.raw });
+}
 
 type ReadUsageRow = {
 	toolCallIds: readonly string[];
@@ -135,15 +157,29 @@ type ReadUsageRow = {
 	turnElapsedMs?: number;
 };
 
-/** Number of code lines to show in collapsed preview mode */
+/** Number of preview rows to show per read while collapsed. */
 const COLLAPSED_PREVIEW_LINES = PREVIEW_LIMITS.OUTPUT_COLLAPSED;
 
 /**
- * Collapsed clamp for a data-first group whose previews are already trimmed
- * to {@link COLLAPSED_PREVIEW_LINES}: large enough never to cut the trimmed
- * body, so collapsed shows every file and the head of each preview.
+ * The outer data-first group must not cut off later files: code is trimmed by
+ * source line and Markdown is clamped by each file's native card after rendering.
  */
 const TRIMMED_BODY_PREVIEW = { lines: 1000 } as const;
+
+/** How a read path is painted: its path (`isUrl` for a whole URL) and its selectors' color. */
+interface PathPaint {
+	path(filePath: string, isUrl: boolean): string;
+	selectors: ThemeColor;
+}
+
+/** A `Read <path>` header line keeps the accent subject color. */
+const HEADER_PATH_PAINT: PathPaint = { path: filePath => theme.fg("accent", filePath), selectors: "accent" };
+
+/** Group rows share the tool-body path style with muted selectors. */
+const ROW_PATH_PAINT: PathPaint = {
+	path: (filePath, isUrl) => (isUrl ? theme.fg(FILE_NAME_COLOR, filePath) : formatStyledPath(filePath, theme)),
+	selectors: "muted",
+};
 
 /** Native item tone per read status; successful reads stay neutral. */
 const READ_STATUS_TONE: Record<ReadEntry["status"], "pending" | "warning" | "error" | undefined> = {
@@ -174,9 +210,12 @@ const READ_STATUS_RANK: Record<ReadEntry["status"], number> = {
 	error: 3,
 };
 
-function getDisplayReadTargets(details: ReadToolDetails | undefined): ReadDisplayPathSpec[] | undefined {
+function getDisplayReadTargets(
+	details: ReadToolDetails | undefined,
+	rawDetails: ReadToolDetails | undefined,
+): ReadDisplayPathSpec[] | undefined {
 	if (!Array.isArray(details?.displayReadTargets)) return undefined;
-	const links = Array.isArray(details.displayReadTargetLinks) ? details.displayReadTargetLinks : undefined;
+	const links = Array.isArray(rawDetails?.displayReadTargetLinks) ? rawDetails.displayReadTargetLinks : undefined;
 	const targets: ReadDisplayPathSpec[] = [];
 	details.displayReadTargets.forEach((raw, index) => {
 		if (typeof raw !== "string") return;
@@ -367,6 +406,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#blockVersion = 0;
 	#displayVersion = 0;
 	readonly #native = new Memo();
+	// The reads' Spotlight notices, drawn after the group in a native transcript (see nativeTrailers).
+	readonly #spotlight = new SpotlightNotices();
 	/** Content previews toggled in the terminal, by tool call id. */
 	#previewCollapsed = new Map<string, boolean>();
 
@@ -423,12 +464,15 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (!toolCallId) return;
 		const rawPath =
 			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
+		const displayPath = sanitizeText(rawPath);
 		const entry: ReadEntry = this.#entries.get(toolCallId) ?? {
 			toolCallId,
-			path: rawPath,
+			path: displayPath,
 			status: "pending",
 		};
-		entry.path = rawPath;
+		entry.path = displayPath;
+		entry.linkPath = path.isAbsolute(rawPath) ? rawPath : undefined;
+		entry.raw = args.raw === true;
 		this.#entries.set(toolCallId, entry);
 		this.#updateDisplay();
 	}
@@ -455,6 +499,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	/** Remove one call without discarding successful siblings in the shared group. */
 	removeEntry(toolCallId: string): boolean {
 		if (!this.#entries.delete(toolCallId)) return this.#entries.size === 0;
+		this.#spotlight.set(toolCallId, undefined, "");
 		this.#updateDisplay();
 		return this.#entries.size === 0;
 	}
@@ -469,12 +514,16 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (!entry) return;
 		if (isPartial) return;
 		this.#blockVersion++;
-		const details = result.details as ReadToolDetails | undefined;
+		this.#spotlight.set(toolCallId, result.details, resultText(result));
+		// `details` can contain raw file text and filesystem paths. Keep the
+		// latter for links while only the sanitized copy supplies display labels.
+		const rawDetails = result.details as ReadToolDetails | undefined;
+		const details = sanitizeTextDeep(rawDetails) as ReadToolDetails | undefined;
 		const suffixResolution = getSuffixResolution(details);
-		const displayPaths = getDisplayReadTargets(details);
-		entry.linkPath = readResultLinkPath(details);
+		const displayPaths = getDisplayReadTargets(details, rawDetails);
+		entry.linkPath = readResultLinkPath(rawDetails) ?? entry.linkPath;
 		if (suffixResolution) {
-			entry.path = displayPathWithSuffixResolution(entry.path, suffixResolution);
+			entry.path = sanitizeText(displayPathWithSuffixResolution(entry.path, suffixResolution));
 			entry.correctedFrom = suffixResolution.from;
 			entry.displayPaths = undefined;
 		} else {
@@ -485,6 +534,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			typeof details?.conflictCount === "number" && details.conflictCount > 0 ? details.conflictCount : undefined;
 		entry.conflictCount = conflictCount;
 		entry.status = result.isError ? "error" : suffixResolution ? "warning" : "success";
+		entry.contentType = details?.contentType;
 		// Store clean display content for preview/expanded display when the read
 		// tool provides it; fall back to model-facing text for legacy results.
 		const displayContent = details?.displayContent;
@@ -549,7 +599,13 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	setToolActivityVisible(visible: boolean): void {
 		this.#toolActivityVisible = visible;
+		this.#spotlight.setHidden(!visible);
 		super.invalidate();
+	}
+
+	/** The reads' Spotlight notices, in order: blocks of their own right after the group's card. */
+	nativeTrailers(): readonly Component[] {
+		return this.#spotlight.list();
 	}
 
 	getComponent(): Component {
@@ -578,8 +634,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	 * The read run as one inline `tool` on terminals that list the kind, else
 	 * the fallback: a bare `card` (role `omp.tool.read`) with `Read <path>` or
 	 * `Read (N)` in the head, a `list` of path items (status tone, link,
-	 * correction and conflict detail, nested usage) and, with content previews
-	 * on, a `code` block per read clamped by the card's preview while collapsed.
+	 * correction and conflict detail, nested usage) and a clamped preview per
+	 * read when content previews are on.
 	 */
 	override describe(cx?: DescribeContext): NativeNode {
 		const dataFirst = cx?.supports("tool") === true;
@@ -593,8 +649,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	 * The data-first read (§7.3 read, read group, read error): one inline
 	 * `tool` (role `omp.tool.read`). One file: `Read path:13-36`, a failure's
 	 * message in the head. Several: `Read 3 files` over one 22px row per file
-	 * (glyph, dim dir, strong name, range). Content previews are numbered
-	 * `code` (a section per file in a group), trimmed while collapsed.
+	 * (glyph, dim dir, strong name, range). Each content preview is numbered
+	 * code or rendered Markdown, clamped per file while collapsed.
 	 */
 	#describeTool(): NativeNode {
 		const entries = [...this.#entries.values()];
@@ -672,7 +728,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		return {
 			target: filePath ? `${filePath}${split.sel ? `:${split.sel}` : ""}` : "…",
 			targetKind: "path",
-			href: fileHref(linkPathForTargets(row.targets)),
+			href: fileHref(linkPathForTargets(row.targets)) ?? urlHref(split.path),
 			meta: correctedFrom ? [`corrected from ${shortenPath(correctedFrom)}`] : undefined,
 			badges: conflicts
 				? [{ text: `${conflicts} conflict${conflicts === 1 ? "" : "s"}`, tone: "warning" }]
@@ -695,7 +751,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 					: undefined;
 		return fileRow(shortenPath(split.sel ? split.path : row.targetPath), {
 			range: split.sel ? `:${split.sel}` : undefined,
-			href: fileHref(linkPathForTargets(row.targets)),
+			href: fileHref(linkPathForTargets(row.targets)) ?? urlHref(split.path),
 			icon: status === "error" ? "x-circle" : undefined,
 			tone: READ_STATUS_TONE[status],
 			chip: conflicts ? { text: `${conflicts} conflict${conflicts === 1 ? "" : "s"}` } : undefined,
@@ -715,8 +771,21 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		);
 	}
 
-	/** One read's content as numbered `code`, trimmed to its first lines (plus a count) while collapsed. */
+	/** One read's content, clamped per file while the group is collapsed. */
 	#nativePreview(entry: ReadEntry): NativeChild[] {
+		if (previewsMarkdown(entry)) {
+			return [
+				card(
+					{
+						variant: "bare",
+						collapsible: true,
+						collapsed: !this.#expanded,
+						preview: { lines: COLLAPSED_PREVIEW_LINES },
+					},
+					[md(entry.contentText ?? "")],
+				),
+			];
+		}
 		const split = splitPathAndSel(entry.path);
 		const lines = (entry.contentText ?? "").split("\n");
 		const shown = this.#expanded ? lines.length : Math.min(lines.length, COLLAPSED_PREVIEW_LINES);
@@ -724,7 +793,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			lines.slice(0, shown).join("\n"),
 			entry.codeStartLine ?? firstSelectorLine(split.sel) ?? 1,
 			entry.codeLineNumbers?.slice(0, shown),
-			getLanguageFromPath(split.path),
+			split.path,
 		);
 		const hidden = lines.length - shown;
 		if (hidden > 0) {
@@ -796,11 +865,14 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 						preview: { lines: COLLAPSED_PREVIEW_LINES },
 					},
 					[
-						code(entry.contentText ?? "", {
-							lang: getLanguageFromPath(split.path),
-							start: entry.codeStartLine,
-							numbers: true,
-						}),
+						previewsMarkdown(entry)
+							? md(entry.contentText ?? "")
+							: code(entry.contentText ?? "", {
+									path: split.path,
+									start: entry.codeStartLine,
+									numbers: true,
+									wrap: true,
+								}),
 					],
 					`p${entry.toolCallId}`,
 				),
@@ -836,7 +908,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const linkPath = linkPathForTargets(row.targets);
 		const spans: TspSpan[] = [];
 		if (filePath) {
-			const href = linkPath && path.isAbsolute(linkPath) ? pathToFileURL(linkPath).href : undefined;
+			const href = linkPath ? fileHref(linkPath) : undefined;
 			spans.push(span(filePath, "path", href ? { href } : undefined));
 		} else {
 			spans.push(span("…", "toolOutput"));
@@ -862,7 +934,9 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 		// Clear previous children and rebuild the summary and preview blocks.
 		this.clear();
-		this.#text = new Text("", 0, 0);
+		this.#text = new Text("", 0, 0).setWrapLine(
+			(line, width) => wrapTreeLine(line, width, theme) ?? wrapTextWithAnsi(line, width),
+		);
 
 		if (displayRows.length === 0) {
 			this.#text.setText(` ${theme.format.bullet} ${theme.fg("toolTitle", theme.bold("Read"))}`);
@@ -873,8 +947,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (displayRows.length === 1) {
 			const row = displayRows[0]!;
 			if (!this.#shouldRenderPreviewRow(row)) {
-				const statusSymbol = this.#formatStatus(this.#statusForTargets(row.targets));
-				const pathDisplay = this.#formatRowPath(row);
+				const statusSymbol = formatStatusIcon(this.#statusForTargets(row.targets), theme);
+				const pathDisplay = this.#formatRowPath(row, HEADER_PATH_PAINT);
 				const lines = [` ${statusSymbol} ${theme.fg("toolTitle", theme.bold("Read"))} ${pathDisplay}`.trimEnd()];
 				const usageRows = this.#usageRowsBySummaryRow(displayRows).get(0) ?? [];
 				this.#appendUsageRows(lines, usageRows, "   ");
@@ -1039,16 +1113,17 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#formatRow(row: ReadSummaryRow): string {
 		const status = this.#statusForTargets(row.targets);
-		const statusPrefix = status === "success" ? "" : `${this.#formatStatus(status)} `;
+		const statusPrefix = status === "success" ? "" : `${formatStatusIcon(status, theme)} `;
 		return `${statusPrefix}${this.#formatRowPath(row)}`;
 	}
 
-	#formatRowPath(row: ReadSummaryRow): string {
-		return this.#formatPathValue(row.targetPath, {
+	#formatRowPath(row: ReadSummaryRow, paint = ROW_PATH_PAINT): string {
+		return this.#formatPathValue(row.targetPath, paint, {
 			correctedFrom: this.#correctedFromForTargets(row.targets),
 			conflictCount: this.#conflictCountForTargets(row.targets),
 			line: firstSelectorLineForTargets(row.targets),
 			linkPath: linkPathForTargets(row.targets),
+			basePath: row.basePath,
 		});
 	}
 
@@ -1096,25 +1171,39 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#formatPathValue(
 		value: string,
-		options: { correctedFrom?: string; conflictCount?: number; line?: number; linkPath?: string } = {},
+		paint: PathPaint,
+		options: {
+			correctedFrom?: string;
+			conflictCount?: number;
+			line?: number;
+			linkPath?: string;
+			/** The path `value` selects from; merged selectors (`1-5,…,9`) do not parse back out of it. */
+			basePath?: string;
+		} = {},
 	): string {
-		const split = splitPathAndSel(value);
-		const selectorSuffix = split.sel ? `:${split.sel}` : "";
-		const baseValue = split.sel ? split.path : value;
-		const filePath = shortenPath(baseValue);
-		let pathDisplay = filePath ? theme.fg("accent", filePath) : theme.fg("toolOutput", "…");
+		const { basePath } = options;
+		const split =
+			basePath !== undefined && value.startsWith(`${basePath}:`)
+				? { path: basePath, sel: value.slice(basePath.length + 1) }
+				: splitPathAndSel(value);
+		// `?q=…` queries read like selectors: they follow the path, outside its link.
+		const target = splitReadQuery(split.sel ? split.path : value);
+		const filePath = shortenPath(target.path);
+		const selectors = split.sel ? `${target.query ?? ""}:${split.sel}` : (target.query ?? "");
+		let pathDisplay = filePath ? paint.path(filePath, isUrlLikePath(target.path)) : theme.fg("toolOutput", "…");
 		if (filePath && options.linkPath) {
 			const linkOptions = options.line !== undefined ? { line: options.line } : undefined;
 			pathDisplay = fileHyperlink(options.linkPath, pathDisplay, linkOptions);
+		} else if (filePath && isUrlLikePath(target.path)) {
+			// Text mode needs the same URL fallback as the native head, or a
+			// transcript without native rendering keeps the URL unclickable.
+			pathDisplay = urlHyperlinkAlways(urlHref(target.path) ?? target.path, pathDisplay);
 		}
-		if (selectorSuffix) {
-			pathDisplay += theme.fg("accent", selectorSuffix);
-		}
+		if (selectors) pathDisplay += theme.fg(paint.selectors, selectors);
 		if (options.correctedFrom) {
 			pathDisplay += theme.fg("dim", ` (corrected from ${shortenPath(options.correctedFrom)})`);
 		}
-		pathDisplay += this.#formatConflictBadge(options.conflictCount);
-		return pathDisplay;
+		return pathDisplay + this.#formatConflictBadge(options.conflictCount);
 	}
 
 	#formatConflictBadge(conflictCount: number | undefined): string {
@@ -1124,7 +1213,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	/**
-	 * Add a code-cell content preview below the entry summary.
+	 * Add a code-cell (or Markdown-cell) content preview below the entry summary.
 	 * When collapsed: shows first COLLAPSED_PREVIEW_LINES lines with a "… N more lines ⟨<key>: Expand⟩" hint.
 	 * When expanded: shows full content.
 	 */
@@ -1133,7 +1222,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const lang = getLanguageFromPath(split.path);
 		const pathValue = shortenPath(entry.path);
 		const pathDisplay = pathValue
-			? this.#formatPathValue(entry.path, {
+			? this.#formatPathValue(entry.path, HEADER_PATH_PAINT, {
 					correctedFrom: entry.correctedFrom,
 					conflictCount: entry.conflictCount,
 					line: firstSelectorLine(split.sel),
@@ -1151,20 +1240,33 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const component: Component = {
 			render: (width: number) => {
 				if (cachedLines && cachedWidth === width) return cachedLines;
-				cachedLines = renderCodeCell(
-					{
-						code: entry.contentText ?? "",
-						language: lang,
-						title,
-						status: entry.status === "success" ? "complete" : entry.status,
-						expanded,
-						codeMaxLines: expanded ? undefined : COLLAPSED_PREVIEW_LINES,
-						codeStartLine: entry.codeStartLine,
-						codeLineNumbers: entry.codeLineNumbers,
-						width,
-					},
-					theme,
-				);
+				const status = entry.status === "success" ? "complete" : entry.status;
+				cachedLines = previewsMarkdown(entry)
+					? renderMarkdownCell(
+							{
+								content: entry.contentText ?? "",
+								title,
+								status,
+								expanded,
+								contentMaxLines: COLLAPSED_PREVIEW_LINES,
+								width,
+							},
+							theme,
+						)
+					: renderCodeCell(
+							{
+								code: entry.contentText ?? "",
+								language: lang,
+								title,
+								status,
+								expanded,
+								codeMaxLines: expanded ? undefined : COLLAPSED_PREVIEW_LINES,
+								codeStartLine: entry.codeStartLine,
+								codeLineNumbers: entry.codeLineNumbers,
+								width,
+							},
+							theme,
+						);
 				cachedWidth = width;
 				return cachedLines;
 			},
@@ -1197,18 +1299,5 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#shouldRenderPreview(entry: ReadEntry): boolean {
 		return this.#showContentPreview && entry.contentText !== undefined;
-	}
-
-	#formatStatus(status: ReadEntry["status"]): string {
-		if (status === "success") {
-			return theme.fg("text", theme.status.enabled);
-		}
-		if (status === "warning") {
-			return theme.fg("warning", theme.status.warning);
-		}
-		if (status === "error") {
-			return theme.fg("error", theme.status.error);
-		}
-		return theme.fg("dim", theme.status.pending);
 	}
 }

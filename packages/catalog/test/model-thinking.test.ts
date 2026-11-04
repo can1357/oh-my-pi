@@ -598,6 +598,34 @@ describe("model thinking derivation", () => {
 		expect(getSupportedEfforts(resellerFlash37)).toContain(Effort.Minimal);
 	});
 
+	it("drives Gemini 4 with thinkingLevel low/medium/high on the direct Google transports", () => {
+		// Google documents LOW/MEDIUM/HIGH for Argon and Argon Cyber Permissive:
+		// `thinkingBudget` and THINKING_LEVEL_MINIMAL both return 400.
+		// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-argon
+		for (const id of ["gemini-4-argon", "gemini-4-argon-cyber-permissive"]) {
+			for (const [provider, api] of [
+				["google-vertex", "google-vertex"],
+				["google", "google-generative-ai"],
+			] as const) {
+				// `reasoning: false` mirrors Gemini API discovery, which has no bundled
+				// Argon reference and infers non-reasoning from the id.
+				for (const reasoning of [true, false]) {
+					const argon = createModel({ id, api, provider, reasoning });
+					expect(argon.reasoning).toBe(true);
+					expect(argon.thinking?.mode).toBe("google-level");
+					expect(getSupportedEfforts(argon)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+					expect(mapEffortToGoogleThinkingLevel(Effort.Medium, argon)).toBe("MEDIUM");
+				}
+			}
+		}
+
+		// The Argon ladder must not leak onto other Gemini 4 lines. No Gemini 4 Pro
+		// ships yet; a future one must keep the Pro low/high ladder (and must not tie with it).
+		const vertexPro4 = createModel({ id: "gemini-4-pro", api: "google-vertex", provider: "google-vertex" });
+		expect(vertexPro4.thinking?.mode).toBe("google-level");
+		expect(getSupportedEfforts(vertexPro4)).toEqual([Effort.Low, Effort.High]);
+	});
+
 	it("bakes requiresEffort for Gemini 3.x on any provider and backfills explicit metadata", () => {
 		// Derivation: aggregator-hosted Gemini 3.5 gets the flag, 2.5 does not.
 		const openRouterFlash = createModel({
@@ -981,6 +1009,66 @@ describe("model thinking derivation", () => {
 			createModel({ id: "claude-sonnet-4-6", api: "anthropic-messages", provider: "opencode-zen" }).compat
 				.supportsServerCompaction,
 		).toBe(false);
+		// The shared Messages policy remains enabled for those Bedrock model
+		// families on that adapter; its Haiku 4.5 case must not leak to Messages.
+		for (const id of ["claude-fable-5", "claude-mythos-5", "claude-mythos-preview"]) {
+			expect(
+				createModel({ id, api: "anthropic-messages", provider: "amazon-bedrock" }).compat.supportsServerCompaction,
+			).toBe(true);
+		}
+		expect(
+			createModel({
+				id: "claude-haiku-4-5",
+				api: "anthropic-messages",
+				provider: "amazon-bedrock",
+			}).compat.supportsServerCompaction,
+		).toBe(false);
+	});
+
+	it("enables Bedrock Runtime compaction only for model-card-supported Claude revisions", () => {
+		const supported = [
+			"global.anthropic.claude-haiku-4-5-20251001-v1:0",
+			"global.anthropic.claude-haiku-5-5",
+			"global.anthropic.claude-sonnet-5",
+			"global.anthropic.claude-sonnet-5-5",
+			"global.anthropic.claude-opus-4-7",
+			"global.anthropic.claude-opus-4-8",
+			"global.anthropic.claude-opus-5",
+			"global.anthropic.claude-opus-5-5",
+		];
+		for (const id of supported) {
+			const model = createModel({ id, api: "bedrock-converse-stream", provider: "amazon-bedrock" });
+			expect(model.api).toBe("bedrock-converse-stream");
+			expect(model.compat.supportsServerCompaction).toBe(true);
+		}
+
+		const explicitlyDisabled = createModel({
+			id: "global.anthropic.claude-opus-5-5",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			compat: { supportsServerCompaction: false },
+		});
+		expect(explicitlyDisabled.compat.supportsServerCompaction).toBe(false);
+
+		for (const id of [
+			"global.anthropic.claude-opus-4-6-v1",
+			"global.anthropic.claude-haiku-4-6",
+			"global.anthropic.claude-sonnet-4-6",
+			"global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+			"global.anthropic.claude-opus-5-1",
+			"global.anthropic.claude-sonnet-5-1",
+			"global.anthropic.claude-fable-5",
+			"global.anthropic.claude-fable-5-1",
+			"global.anthropic.claude-mythos-5",
+			"global.anthropic.claude-mythos-5-1",
+			"global.anthropic.claude-mythos-preview",
+			"global.amazon.nova-pro-v1:0",
+		]) {
+			expect(
+				createModel({ id, api: "bedrock-converse-stream", provider: "amazon-bedrock" }).compat
+					.supportsServerCompaction,
+			).toBe(false);
+		}
 	});
 
 	it("classifies OpenAI-schema Bedrock models as effort, leaving gpt-oss on budget", () => {
@@ -1635,5 +1723,31 @@ describe("Qwen 3.8 local template effort ladder", () => {
 		});
 		expect(ollama.compat.qwenTemplateReasoningEffort).toBe(false);
 		expect(ollama.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
+	});
+});
+
+describe("effortMap aliases in clampThinkingLevelForModel", () => {
+	const gateway = (efforts: Effort[], effortMap: Record<string, string>) =>
+		createModel({
+			id: "example-route",
+			api: "openai-completions",
+			provider: "example-gateway",
+			thinking: { mode: "effort", efforts, effortMap },
+		});
+
+	it("follows an alias to a served tier instead of climbing down", () => {
+		const model = gateway([Effort.Low, Effort.High, Effort.Max], { medium: "high" });
+		expect(clampThinkingLevelForModel(model, Effort.Medium)).toBe(Effort.High);
+	});
+
+	it("climbs down when the alias names an unserved tier", () => {
+		const model = gateway([Effort.Low, Effort.High], { medium: "max" });
+		expect(clampThinkingLevelForModel(model, Effort.Medium)).toBe(Effort.Low);
+	});
+
+	it("climbs down when the map remaps the alias target again", () => {
+		// Honouring `medium → high` would serialize `max` because the map sends `high` on.
+		const model = gateway([Effort.Low, Effort.High, Effort.Max], { medium: "high", high: "max" });
+		expect(clampThinkingLevelForModel(model, Effort.Medium)).toBe(Effort.Low);
 	});
 });

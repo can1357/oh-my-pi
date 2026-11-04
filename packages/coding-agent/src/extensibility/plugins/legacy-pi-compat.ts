@@ -7,7 +7,7 @@ import { createRequire, isBuiltin } from "node:module";
 import * as path from "node:path";
 import * as url from "node:url";
 import type { ParseResult, ParserPlugin } from "@babel/parser";
-import { parse as parseBabel } from "@babel/parser";
+import type * as BabelParser from "@babel/parser";
 import {
 	getDbBusyTimeoutMs,
 	getLegacyPiExtensionCacheDbPath,
@@ -62,6 +62,8 @@ interface ExtensionSpecifierReference {
 }
 
 function parseExtensionSource(source: string, importerPath: string): ParseResult {
+	// Installing specifier hooks needs no parser; only a real source rewrite does.
+	const { parse: parseBabel }: typeof BabelParser = require("@babel/parser");
 	const extension = path.extname(importerPath).toLowerCase();
 	const plugins: ParserPlugin[] = ["decorators-legacy", "explicitResourceManagement"];
 	if (extension === ".ts" || extension === ".mts" || extension === ".cts" || extension === ".tsx") {
@@ -2052,10 +2054,6 @@ async function moduleRequiresNativeAddonUncached(modulePath: string): Promise<bo
 	return false;
 }
 
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 // Source modules in an extension graph are discovered from parsed static,
 // dynamic, re-export, and direct CommonJS require specifiers. Parsing keeps
 // import-looking text in strings, templates, regex literals, and comments out
@@ -2085,6 +2083,36 @@ const commonJsModuleCache = new Map<
 	}
 >();
 const commonJsTypeScriptTranspiler = new Bun.Transpiler({ loader: "ts" });
+
+/**
+ * Node-compatible `require.cache` for graph-owned CommonJS: Bun's process-wide
+ * cache without its ES module entries.
+ *
+ * Bun also lists ES modules there, and deleting one of those keys drops the
+ * module from the ES module registry: assigning the entry back does not restore
+ * it. Packages that clear the cache to load a fresh copy (`stealthy-require`,
+ * used by `request-promise`) then make the next dynamic import re-evaluate host
+ * modules, splitting singletons such as `settings` between two copies (#15799).
+ * Node's cache holds only CommonJS modules, so hiding the ES module entries
+ * keeps such packages working without unloading the host.
+ */
+let commonJsRequireCache: NodeJS.Dict<NodeJS.Module> | undefined;
+
+function getCommonJsRequireCache(cache: NodeJS.Dict<NodeJS.Module>): NodeJS.Dict<NodeJS.Module> {
+	if (commonJsRequireCache) return commonJsRequireCache;
+	// An ES module's cache entry exposes its namespace object as `exports`.
+	const hides = (key: string | symbol): boolean =>
+		typeof key === "string" && Object.prototype.toString.call(cache[key]?.exports) === "[object Module]";
+	commonJsRequireCache = new Proxy(cache, {
+		get: (target, key, receiver) => (hides(key) ? undefined : Reflect.get(target, key, receiver)),
+		has: (target, key) => !hides(key) && Reflect.has(target, key),
+		ownKeys: target => Reflect.ownKeys(target).filter(key => !hides(key)),
+		getOwnPropertyDescriptor: (target, key) =>
+			hides(key) ? undefined : Reflect.getOwnPropertyDescriptor(target, key),
+		deleteProperty: (target, key) => hides(key) || Reflect.deleteProperty(target, key),
+	});
+	return commonJsRequireCache;
+}
 
 function evaluateGraphCommonJs(modulePath: string): unknown {
 	const cached = commonJsModuleCache.get(modulePath);
@@ -2133,7 +2161,7 @@ function evaluateGraphCommonJs(modulePath: string): unknown {
 		},
 		{
 			resolve: nativeRequire.resolve,
-			cache: nativeRequire.cache,
+			cache: getCommonJsRequireCache(nativeRequire.cache),
 			extensions: nativeRequire.extensions,
 			main: nativeRequire.main,
 		},
@@ -2514,7 +2542,7 @@ async function installExtensionGraphHook(
 	}
 
 	if (asyncModules.size > 0) {
-		const alternation = [...asyncModules.keys()].map(escapeRegExp).join("|");
+		const alternation = [...asyncModules.keys()].map(value => RegExp.escape(value)).join("|");
 		const filter = new RegExp(`^(?:${alternation})(?:\\?mtime=\\d+)?$`);
 		const hookId = Bun.hash(`${entryRealPath}\0async\0${[...asyncModules.keys()].join("\0")}`).toString(36);
 		Bun.plugin({
@@ -2555,7 +2583,7 @@ async function installExtensionGraphHook(
 	}
 
 	if (commonJsPaths.size > 0) {
-		const alternation = [...commonJsPaths].map(escapeRegExp).join("|");
+		const alternation = [...commonJsPaths].map(value => RegExp.escape(value)).join("|");
 		const filter = new RegExp(`^(?:${alternation})(?:\\?mtime=\\d+)?$`);
 		const hookId = Bun.hash(`${entryRealPath}\0commonjs\0${[...commonJsPaths].join("\0")}`).toString(36);
 		Bun.plugin({
@@ -2584,7 +2612,7 @@ async function installExtensionGraphHook(
 	}
 
 	if (synchronousSourcePaths.size > 0) {
-		const alternation = [...synchronousSourcePaths].map(escapeRegExp).join("|");
+		const alternation = [...synchronousSourcePaths].map(value => RegExp.escape(value)).join("|");
 		const filter = new RegExp(`^(?:${alternation})(?:\\?mtime=\\d+)?$`);
 		const hookId = Bun.hash(`${entryRealPath}\0sync-source\0${[...synchronousSourcePaths].join("\0")}`).toString(36);
 		Bun.plugin({
@@ -2698,8 +2726,13 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
  * the entry) resolve exactly as they do under the original Pi runtime — no
  * temp-directory mirroring and no asset copying. Graph-scoped `onLoad` hooks
  * rewrite ESM/TS sources and expose evaluated CommonJS namespaces directly.
+ *
+ * Each call re-evaluates the module graph so an edited extension is picked up
+ * (`reload`, the default). With `reload: false` the entry and its relative
+ * imports keep their plain paths, so Bun evaluates them once per process and
+ * every importer shares them, as a native `import()` would.
  */
-export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown> {
+export async function loadLegacyPiModule(resolvedPath: string, options: { reload?: boolean } = {}): Promise<unknown> {
 	// Bun reports the realpath of a loaded module to `onLoad` and exposes it as
 	// `import.meta.url`. Resolve symlinks here too (macOS `/var`→`/private/var`,
 	// `bun link`/pnpm installs) so the rewrite filter matches the path Bun
@@ -2715,6 +2748,7 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 		const entrySpecifier = isBundledVirtualSpecifier(entryRealPath)
 			? toImportSpecifier(entryRealPath)
 			: stripWindowsExtendedLengthPathPrefix(entryRealPath);
+		if (options.reload === false) return await import(entrySpecifier);
 		return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag()}`);
 	} finally {
 		// Drop whatever the initial import didn't consume: graph modules only

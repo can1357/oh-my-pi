@@ -38,24 +38,20 @@ import {
 	type TspNode,
 	type TspOp,
 } from "@oh-my-pi/pi-wire";
+import { onMotionEffectsChange } from "../motion-effects";
+import { onSpinnerIntervalChange } from "../spinner-clock";
 import type { Terminal } from "../terminal";
-import {
-	bindTheme,
-	getCurrentThemeName,
-	getNativeThemePalette,
-	getNativeThemePaletteKey,
-	isLightTheme,
-	type NativeThemePalette,
-	setNativeSymbolPreset,
-} from "../theme/theme";
+import { getCurrentThemeName, isLightTheme, setNativeSymbolPreset } from "../theme/theme";
 import type { Component, OverlayOptions, RenderScheduler, RenderTimer } from "../tui";
 import { TspDocument } from "./apply";
 import { getNativeBlob, type NativeBlob } from "./blobs";
 import { node } from "./describe";
 import { encodeTspJson, encodeTspMessage, type TspHello, TspReader, splitTspMessage } from "./encode";
 import type { DescribeContext, NativeChild, NativeNode, NativeSurface, NativeUiEvent } from "./node";
+import { NARROW_SHEET_COLS } from "./overlay";
+import { resetQuietMotion } from "./quiet";
 import { nativeComponentId, Reconciler } from "./reconcile";
-import { setNativeRendering } from "./state";
+import { setNativeButtons, setNativeRendering } from "./state";
 
 /** A visible TUI overlay, bottom to top. */
 export interface NativeOverlay {
@@ -203,11 +199,21 @@ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
 }
 
 /**
+ * Kinds newer than some Tern builds that answer `TERM_PROGRAM=tern`: used only
+ * once the real `hello` lists them, so the optimistic start never emits a node
+ * an older terminal cannot draw (`media`: files Tern loads by path; `json`:
+ * raw JSON values Tern draws as its own tree; `button`: omp's buttons, which
+ * older builds get as role-styled rows).
+ */
+const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = { media: true, json: true, button: true };
+
+/**
  * The reply a v1 terminal is assumed to give before its real `hello` arrives
- * (the `TERM_PROGRAM=tern` optimistic start): the whole vocabulary, the
- * default APC limit and credits, the terminal's width, the appearance omp
- * already detected, full motion, and `blobs`, so a resumed session's images
- * are asked about rather than resent before the reply comes.
+ * (the `TERM_PROGRAM=tern` optimistic start): the whole vocabulary except
+ * {@link UNASSUMED_KINDS}, the default APC limit and credits, the terminal's
+ * width, the appearance omp already detected, full motion, and `blobs`, so a
+ * resumed session's images are asked about rather than resent before the
+ * reply comes.
  */
 export function assumedTspHello(terminal: Terminal): TspHello {
 	const appearance = terminal.appearance;
@@ -215,7 +221,7 @@ export function assumedTspHello(terminal: Terminal): TspHello {
 		r: "hello",
 		v: TSP_VERSION,
 		term: "tern",
-		kinds: TSP_KINDS,
+		kinds: TSP_KINDS.filter(kind => !UNASSUMED_KINDS[kind]),
 		features: ["blobs"],
 		apc: TSP_DEFAULT_APC_LIMIT,
 		credits: TSP_DEFAULT_CREDITS,
@@ -236,6 +242,10 @@ class Surface {
 	acked = 0;
 	/** Send times of unacknowledged frames, oldest first. */
 	unacked: number[] = [];
+	/** Send time of the oldest frame left unanswered when the current stall began; cleared by the next ack. */
+	stalledSince: number | undefined;
+	/** Credit resets since {@link stalledSince}. */
+	stallResets = 0;
 	focus: string | null = null;
 	dirty = false;
 
@@ -300,11 +310,6 @@ export class NativeBackend {
 	#sawResize = false;
 	#live = false;
 	#overlayNodes = new Map<Component, { key: string; node: NativeNode }>();
-	#unbindTheme: (() => void) | undefined;
-	#palette: NativeThemePalette | undefined;
-	#paletteKey: string | undefined;
-	/** Serialized palette last sent, to skip resends of an unchanged theme. */
-	#paletteSent: string | undefined;
 	/** Pending delivery owns bytes until sent or confirmed held; settled descriptions may already be released. */
 	#blobs = new Map<string, NativeBlob | "sent">();
 	/** `blobs` queries sent, oldest first: the terminal answers each once, in order. */
@@ -313,6 +318,7 @@ export class NativeBackend {
 	#askHeld = true;
 	/** Bumped when the connection resets or stops, so blob cache writes finishing later are dropped. */
 	#blobEpoch = 0;
+	#unbindMotion: (() => void) | undefined;
 
 	constructor(host: NativeHost, hello: TspHello, options: NativeBackendOptions = {}) {
 		this.#host = host;
@@ -353,52 +359,26 @@ export class NativeBackend {
 		if (this.#live) return;
 		this.#live = true;
 		this.#useNerdSymbols(true);
-		this.#watchTheme();
+		this.#watchMotion();
 		this.#open(this.#inline);
 		setNativeRendering(true);
 		this.render();
 	}
 
-	/**
-	 * Any theme swap (switch, selector preview, auto light/dark, file reload)
-	 * schedules a render; `render()` resends the palette when it changed, so
-	 * bursts coalesce into one `t` and no frame is needed for it.
-	 */
-	#watchTheme(): void {
-		this.#unbindTheme?.();
-		let initial = true;
-		this.#unbindTheme = bindTheme(() => {
-			if (initial) return;
+	/** The terminal clocks spinners and span effects itself, so a motion change re-describes every component. */
+	#watchMotion(): void {
+		this.#unbindMotion?.();
+		const changed = () => {
+			resetQuietMotion();
+			this.#host.invalidate();
 			this.#host.requestRender();
-		});
-		initial = false;
-	}
-
-	/** The current palette, recomputed only when its inputs changed. */
-	#currentPalette(): NativeThemePalette {
-		const key = getNativeThemePaletteKey();
-		if (this.#palette === undefined || key !== this.#paletteKey) {
-			this.#paletteKey = key;
-			this.#palette = getNativeThemePalette();
-		}
-		return this.#palette;
-	}
-
-	/** Send the palette to `surface` (right after its `o`, before any `f`). */
-	#sendPalette(surface: Surface): void {
-		const palette = this.#currentPalette();
-		if (!palette.dark && !palette.light) return;
-		this.#paletteSent = JSON.stringify(palette);
-		this.#write("t", { sf: surface.id, ...palette });
-	}
-
-	/** Resend the palette to every open surface when the theme changed since it was sent. */
-	#refreshPalette(): void {
-		const key = this.#paletteKey;
-		const palette = this.#currentPalette();
-		if (key === this.#paletteKey || JSON.stringify(palette) === this.#paletteSent) return;
-		this.#sendPalette(this.#inline);
-		if (this.#screen) this.#sendPalette(this.#screen);
+		};
+		const unbindSpinner = onSpinnerIntervalChange(changed);
+		const unbindEffects = onMotionEffectsChange(changed);
+		this.#unbindMotion = () => {
+			unbindSpinner();
+			unbindEffects();
+		};
 	}
 
 	/**
@@ -422,8 +402,9 @@ export class NativeBackend {
 		this.#close(this.#inline, keep);
 		this.#inline.doc?.close();
 		setNativeRendering(false);
-		this.#unbindTheme?.();
-		this.#unbindTheme = undefined;
+		setNativeButtons(false);
+		this.#unbindMotion?.();
+		this.#unbindMotion = undefined;
 		this.#useNerdSymbols(false);
 		this.#clearStallTimer();
 		// Replies no longer reach the backend: forget the queries outright.
@@ -442,16 +423,17 @@ export class NativeBackend {
 		this.#applyHello(hello);
 		this.#live = true;
 		this.#useNerdSymbols(true);
-		this.#watchTheme();
 		this.#resetBlobs();
+		this.#watchMotion();
 		const surface = this.#inline;
 		surface.reconciler.detachLive();
 		surface.unacked = [];
 		surface.acked = surface.seq;
+		surface.stalledSince = undefined;
+		surface.stallResets = 0;
 		surface.focus = null;
 		surface.dirty = false;
 		this.#write("o", { id: surface.id, mode: "inline", title: "omp", role: SESSION_ROLE, adopt: true });
-		this.#sendPalette(surface);
 		// After the `o`, as in `start()`.
 		setNativeRendering(true);
 		this.render();
@@ -493,7 +475,6 @@ export class NativeBackend {
 	/** Reconcile and send a frame, unless the target surface is out of credits. */
 	render(): void {
 		if (!this.#live) return;
-		this.#refreshPalette();
 		const overlays = this.#host.overlays();
 		let fullscreen = -1;
 		for (let i = overlays.length - 1; i >= 0; i--) {
@@ -584,6 +565,8 @@ export class NativeBackend {
 		this.#limit = hello.apc !== undefined && hello.apc > 0 ? hello.apc : TSP_DEFAULT_APC_LIMIT;
 		this.#credits = hello.credits !== undefined && hello.credits > 0 ? hello.credits : TSP_DEFAULT_CREDITS;
 		this.#cx = new NativeContext(hello, hello.cols ?? this.#cx.cols);
+		// A changed vocabulary re-describes every component (`confirm`).
+		setNativeButtons(this.#cx.supports("button"));
 		this.#sawResize = false;
 	}
 
@@ -593,7 +576,6 @@ export class NativeBackend {
 
 	#open(surface: Surface): void {
 		this.#write("o", { id: surface.id, mode: surface.mode, title: "omp", role: surface.role });
-		this.#sendPalette(surface);
 	}
 
 	#close(surface: Surface, keep: boolean): void {
@@ -604,11 +586,16 @@ export class NativeBackend {
 		if (surface.unacked.length < this.#credits) return true;
 		const oldest = surface.unacked[0]!;
 		if (this.#scheduler.now() - oldest < STALLED_ACK_MS) return false;
-		logger.warn("TSP: terminal stopped acknowledging frames; resuming without credits", {
-			sf: surface.id,
-			s: surface.seq,
-			acked: surface.acked,
-		});
+		// One warning per stall: a terminal that never acks would otherwise log one every `STALLED_ACK_MS`.
+		if (surface.stalledSince === undefined) {
+			surface.stalledSince = oldest;
+			logger.warn("TSP: terminal stopped acknowledging frames; resuming without credits", {
+				sf: surface.id,
+				s: surface.seq,
+				acked: surface.acked,
+			});
+		}
+		surface.stallResets++;
 		surface.unacked = [];
 		surface.acked = surface.seq;
 		return true;
@@ -756,7 +743,7 @@ export class NativeBackend {
 		}
 	}
 
-	#write(verb: "o" | "f" | "t" | "x" | "q", body: unknown): void {
+	#write(verb: "o" | "f" | "x" | "q", body: unknown): void {
 		this.#record("out", verb, undefined, body);
 		this.#host.terminal.write(encodeTspJson(verb, body, undefined, this.#limit));
 	}
@@ -793,6 +780,15 @@ export class NativeBackend {
 				const newly = Math.min(event.s, surface.seq) - surface.acked;
 				surface.acked = Math.min(event.s, surface.seq);
 				surface.unacked.splice(0, newly);
+				if (surface.stalledSince !== undefined) {
+					logger.debug("TSP: terminal acknowledging frames again", {
+						sf: surface.id,
+						stalledMs: this.#scheduler.now() - surface.stalledSince,
+						resets: surface.stallResets,
+					});
+					surface.stalledSince = undefined;
+					surface.stallResets = 0;
+				}
 				this.#clearStallTimer();
 				if (surface.dirty) this.#host.requestRender();
 				return;
@@ -911,7 +907,12 @@ export class NativeBackend {
 		if (overlay.component.nativeSheet?.(this.#cx)) return overlay.component;
 		const own = overlay.component.nativeOverlay;
 		const anchor = own?.anchor ?? overlayAnchor(overlay.options);
-		const size = own?.size ?? overlaySize(overlay.options, this.#cx.cols);
+		let size = own?.size ?? overlaySize(overlay.options, this.#cx.cols);
+		// A centered sheet in a narrow pane fills it instead of floating with margins: `lg`, and a component's own `md`
+		// sheet (an undeclared `md` is a generic dialog sized from its options).
+		if (anchor === "center" && this.#cx.cols < NARROW_SHEET_COLS && (size === "lg" || own?.size === "md")) {
+			size = "full";
+		}
 		const modal = overlay.focused || overlay.options?.fullscreen === true;
 		const role = own?.role;
 		const head = own?.head;

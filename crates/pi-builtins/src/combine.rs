@@ -16,11 +16,10 @@ use std::{
 	sync::atomic::{AtomicBool, Ordering},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use pi_vfs::File;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 const ARG_FILE1: &str = "file1";
 const ARG_OP: &str = "op";
@@ -268,13 +267,8 @@ fn input_failure(name: &OsStr, err: &std::io::Error) -> Error {
 	if pi_vfs::is_cancelled(err) {
 		Error::Cancelled
 	} else {
-		Error::Msg(format!("{}: {err}", name.to_string_lossy()))
+		Error::Msg(format!("{}: {err}", name.display()))
 	}
-}
-
-/// Creates the `combine` builtin registration.
-pub(crate) fn combine_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Combine, SE>()
 }
 
 #[cfg(test)]

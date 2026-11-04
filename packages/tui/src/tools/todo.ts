@@ -8,6 +8,7 @@ import type { RenderResultOptions } from "./renderer";
 import type { Theme } from "../theme/theme";
 
 import { renderStatusLine, renderTreeList } from "../render";
+import { wrapTreeLine } from "../render/hanging-wrap";
 import { framedToolCard } from "../render/tool-card";
 
 import { formatErrorDetail, formatMoreItems, PREVIEW_LIMITS, pluralize, replaceTabs } from "../render/render-utils";
@@ -644,7 +645,7 @@ export const todoToolRenderer = {
 			matchByContent.clear();
 		};
 
-		return framedToolCard(uiTheme, () => {
+		return framedToolCard(uiTheme, ({ contentWidth }) => {
 			const { expanded, spinnerFrame } = options;
 			const multiPhase = phases.length > 1;
 			const indent = multiPhase ? "  " : "";
@@ -725,7 +726,7 @@ export const todoToolRenderer = {
 							);
 						})();
 				for (const line of treeLines) {
-					bodyLines.push(`${indent}${line}`);
+					bodyLines.push(...(wrapTreeLine(`${indent}${line}`, contentWidth, uiTheme) ?? [`${indent}${line}`]));
 				}
 			}
 			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();

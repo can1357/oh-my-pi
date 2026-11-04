@@ -26,6 +26,7 @@ const POLICY = {
 	agentName: "scout",
 	agent: AGENT,
 	effectiveAgent: AGENT,
+	structured: true,
 	schema: { schema: undefined, source: "none", mode: "permissive", outputSchemaOverridesAgent: false },
 	planMode: false,
 	isIsolated: false,
@@ -210,6 +211,50 @@ describe("WorkPool dispatch", () => {
 		follow.resolve();
 		await finishPool(session, workpool);
 	});
+	it("marks only the submitted error item failed after a mixed-result batch", async () => {
+		const session = makeSession([], 1);
+		const first = Promise.withResolvers<void>();
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			await first.promise;
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		vi.spyOn(executor, "runSubagentFollowUpTurn").mockImplementation(async options => {
+			markIdle(options.id);
+			return {
+				...singleResult(
+					options.id,
+					JSON.stringify({
+						"mixed#2": { error: "review unavailable" },
+						"mixed#3": { ok: true },
+					}),
+				),
+				extractedToolData: {
+					yield: [
+						{
+							status: "success",
+							type: ["mixed#2"],
+							error: "review unavailable",
+							data: { error: "review unavailable" },
+						},
+						{ status: "success", type: ["mixed#3"], data: { ok: true }, complete: true },
+					],
+				},
+			};
+		});
+		const workpool = pool(session, "mixed");
+		workpool.push(["warmup"]);
+		await until(() => workpool.agents[0]?.state === "running");
+		workpool.push(["failed review", "independent review"]);
+		await until(() => workpool.agents[0]?.queue.length === 2);
+		first.resolve();
+		await finishPool(session, workpool);
+		expect(workpool.batches[1]?.status).toBe("completed");
+		expect(workpool.items.map(item => item.status)).toEqual(["completed", "failed", "completed"]);
+		expect(workpool.batches[1]?.output).toContain("review unavailable");
+	});
+
 	it("tombstones the worker session when clearing the yield contract fails", async () => {
 		const session = makeSession([], 1);
 		let workerId = "";
@@ -410,5 +455,57 @@ describe("WorkPool dispatch", () => {
 		first.resolve();
 		await finishPool(session, workpool);
 		expect(workpool.peek().pending).toBe(0);
+	});
+});
+
+describe("WorkPool model selection", () => {
+	it("forwards the pool model to every fresh worker", async () => {
+		const session = makeSession([], 1, true);
+		const selected = "p/reviewer:high";
+		const initial = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		const follow = vi.spyOn(executor, "runSubagentFollowUpTurn");
+		const workpool = new WorkPool(session, { name: "fresh-models", policy: POLICY, model: selected });
+		workpool.push(["one", "two", "three"]);
+		await finishPool(session, workpool);
+
+		expect(initial.mock.calls.map(([request]) => request.perCallModel)).toEqual([selected, selected, selected]);
+		expect(initial.mock.calls.map(([request]) => request.identity?.id)).toEqual([
+			"fresh-models-1",
+			"fresh-models-2",
+			"fresh-models-3",
+		]);
+		expect(follow).not.toHaveBeenCalled();
+	});
+
+	it("selects each worker on the first turn and reuses its session on subsequent turns", async () => {
+		const session = makeSession([], 1);
+		const first = Promise.withResolvers<void>();
+		const selected = "p/reviewer:high";
+		const initial = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			await first.promise;
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		const follow = vi.spyOn(executor, "runSubagentFollowUpTurn").mockImplementation(async options => {
+			markIdle(options.id);
+			return singleResult(options.id);
+		});
+		const workpool = new WorkPool(session, { name: "models", policy: POLICY, model: selected });
+		workpool.push(["one", "two"]);
+		await until(() => workpool.agents[0]?.queue.length === 1);
+		first.resolve();
+		await finishPool(session, workpool);
+		expect(initial.mock.calls).toHaveLength(1);
+		expect(initial.mock.calls[0]?.[0].perCallModel).toEqual(selected);
+		expect(follow.mock.calls).toHaveLength(1);
+		const workerId = initial.mock.calls[0]?.[0].identity?.id;
+		if (!workerId) throw new Error("First turn did not receive a worker id");
+		expect(follow.mock.calls[0]?.[0].id).toBe(workerId);
+		expect((follow.mock.calls[0]?.[0] as { perCallModel?: string } | undefined)?.perCallModel).toBeUndefined();
 	});
 });

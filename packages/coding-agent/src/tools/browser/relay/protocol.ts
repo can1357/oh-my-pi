@@ -35,11 +35,50 @@ export type RelayRpcRequest =
 	/** Return tabs to their pre-omp group (or ungroup); no-op for tabs the relay never grouped. */
 	| { op: "ungroup"; tabIds: number[] };
 
-/** Messages sent relay → extension. */
-export type RelayToExtMessage = ({ t: "rpc"; id: number } & RelayRpcRequest) | { t: "pong" };
+/**
+ * Messages sent relay → extension. `reload` asks the extension to run `chrome.runtime.reload()`, which
+ * re-reads its files from disk; the relay sends it only after rewriting them (extension self-update).
+ */
+export type RelayToExtMessage = ({ t: "rpc"; id: number } & RelayRpcRequest) | { t: "pong" } | { t: "reload" };
 
 /** Required capability for safe relay target discovery and auto-attach. */
 export const DISCARDED_TABS_PROTOCOL_VERSION = 1;
+
+/** Hello capability of an extension that reloads itself on a relay `reload` message. */
+export const EXTENSION_RELOAD_PROTOCOL_VERSION = 1;
+
+/**
+ * Whether a relay or extension reported a well-formed omp release version.
+ * Stricter than `Bun.semver.order`, which ranks strings with trailing text;
+ * peers supply these and results quote them.
+ */
+export function isOmpVersion(version: string): boolean {
+	return /^(?=.{5,64}$)\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/.test(version);
+}
+
+/**
+ * Whether a reported omp version is provably older than `than`: unreported ("")
+ * is older than anything reported; otherwise both must be omp versions, since
+ * anything else has no known age.
+ */
+export function isOlderOmpVersion(version: string, than: string): boolean {
+	if (version === "") return than !== "";
+	return isOmpVersion(version) && isOmpVersion(than) && Bun.semver.order(version, than) < 0;
+}
+
+/**
+ * The extension's service worker script with `ompVersion` declared above it as `OMP_INSTALL_VERSION`, which the
+ * extension reports in its hello. The stamp sits in the script, not only the manifest, because after the files
+ * change a Chrome restart re-reads manifest.json but keeps running the service worker it registered before.
+ */
+export function stampRelayExtensionScript(script: string, ompVersion: string): string {
+	return `const OMP_INSTALL_VERSION = ${JSON.stringify(ompVersion)};\n${script}`;
+}
+
+/** The extension's manifest text with `ompVersion` as its `version_name`, which chrome://extensions shows. */
+export function stampRelayExtensionManifest(manifestJson: string, ompVersion: string): string {
+	return `${JSON.stringify({ ...JSON.parse(manifestJson), version_name: ompVersion }, null, "\t")}\n`;
+}
 
 /** Messages sent extension → relay. */
 export type ExtToRelayMessage =
@@ -61,6 +100,15 @@ export type ExtToRelayMessage =
 			 * latest-wins socket replacement.
 			 */
 			instanceId?: string;
+			/**
+			 * Identity of this browser run (`chrome.storage.session`), new after a browser restart, when Chrome
+			 * reuses tab ids: target ids embed it, so an old target id never names a new tab. Absent on older extensions.
+			 */
+			browserSession?: string;
+			/** The omp version that installed the running script ({@link stampRelayExtensionScript}). Absent on builds without the stamp. */
+			ompVersion?: string;
+			/** {@link EXTENSION_RELOAD_PROTOCOL_VERSION} when the extension reloads itself on `reload`. Absent in older extensions. */
+			reloadProtocol?: number;
 	  }
 	| { t: "cdpEvent"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
 	| { t: "detached"; tabId: number; reason: string; relayInitiated?: boolean }

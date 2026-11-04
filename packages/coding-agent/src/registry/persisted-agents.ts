@@ -5,15 +5,16 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor/transcript-recorder";
 import { resolveExplicitModelRole } from "../config/model-resolver";
 import { assistantTurnProducedOutput } from "../session/messages";
-import { EPHEMERAL_MODEL_CHANGE_ROLE } from "../session/session-entries";
-import { visitEntriesFromFileStream } from "../session/session-loader";
+import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE } from "../session/session-entries";
+import { readSessionHeaderId, visitEntriesFromFileStream } from "../session/session-loader";
 import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
 import { persistedVibeChildIds } from "../vibe/lifecycle";
 import {
 	type AgentHistorySummary,
 	type AgentMetricsSummary,
-	type AgentRegistry,
+	type AgentRef,
+	type AgentRegistryApi,
 	MAIN_AGENT_ID,
 } from "./agent-registry";
 import { getAgentTombstonePath } from "./agent-tombstone";
@@ -42,6 +43,20 @@ interface PersistedTranscript {
 	sessionFile: string;
 	createdAt?: number;
 	lastActivity?: number;
+}
+
+/** Size and mtime of a transcript when a ref's history was last read from it; an unchanged transcript is not read again. */
+const historyStamps = new WeakMap<AgentRef, string>();
+
+async function transcriptStamp(sessionFile: string): Promise<string | undefined> {
+	try {
+		const stat = await fs.promises.stat(sessionFile);
+		return `${stat.size}:${stat.mtimeMs}`;
+	} catch (error) {
+		// A vanished transcript reads as empty history, as before.
+		if (isFilesystemError(error)) throw error;
+		return undefined;
+	}
 }
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
@@ -151,7 +166,9 @@ async function readPersistedAgentHistory(
 	const parents = new Map<string, string | undefined>();
 	const assistantById = new Map<string, AssistantMetrics>();
 	const modelChangeById = new Map<string, { model: string; role?: string; resolvedModelIsFallback: boolean }>();
+	// Raw-record copy of `sessionEntryLeafId`/`resolveSessionLeafId` (session-entries.ts); keep them in sync.
 	let leafId: string | undefined;
+	let selfSelectedLeafId: string | undefined;
 	let leafTimestamp: number | undefined;
 	let directCost = 0;
 	// Direct cost mirrors lifetime SessionManager usage; legacy metrics below stay leaf-scoped.
@@ -165,7 +182,17 @@ async function readPersistedAgentHistory(
 				if (!id) return;
 				const parentId = typeof record.parentId === "string" ? record.parentId : undefined;
 				parents.set(id, parentId);
-				leafId = id;
+				// Same replay rule as `sessionEntryLeafId`: an entry written off the active
+				// branch (late usage, a routed bash result) restores the leaf it captured
+				// instead of becoming the leaf itself.
+				if (typeof record.activeLeafId === "string") {
+					leafId = record.activeLeafId;
+				} else if (record.activeLeafId === null) {
+					leafId = undefined;
+				} else {
+					leafId = id;
+					selfSelectedLeafId = id;
+				}
 				const parsedTimestamp = timestampOf(record.timestamp);
 				if (parsedTimestamp !== undefined) leafTimestamp = parsedTimestamp;
 				if (record.type === "model_usage") {
@@ -211,6 +238,7 @@ async function readPersistedAgentHistory(
 		return {};
 	}
 
+	if (leafId !== undefined && !parents.has(leafId)) leafId = selfSelectedLeafId;
 	const metrics: AgentMetricsSummary = {
 		tokens: 0,
 		requests: 0,
@@ -239,7 +267,11 @@ async function readPersistedAgentHistory(
 		const modelChange = modelChangeById.get(id);
 		if (modelChange) {
 			latestModelChange ??= modelChange;
-			if (modelChange.role && modelChange.role !== EPHEMERAL_MODEL_CHANGE_ROLE) {
+			if (
+				modelChange.role &&
+				modelChange.role !== EPHEMERAL_MODEL_CHANGE_ROLE &&
+				modelChange.role !== PREWALK_MODEL_CHANGE_ROLE
+			) {
 				modelRole ??= modelChange.role;
 			}
 			// The transition that installed the serving model: it carries the
@@ -338,7 +370,11 @@ async function readPersistedAgentMetadata(
 				}
 				if (record.type === "model_change") {
 					if (typeof record.model === "string") history.resolvedModel = record.model;
-					if (typeof record.role === "string" && record.role !== EPHEMERAL_MODEL_CHANGE_ROLE) {
+					if (
+						typeof record.role === "string" &&
+						record.role !== EPHEMERAL_MODEL_CHANGE_ROLE &&
+						record.role !== PREWALK_MODEL_CHANGE_ROLE
+					) {
 						history.modelRole = record.role;
 					}
 					if (typeof record.resolvedModelIsFallback === "boolean") {
@@ -455,7 +491,7 @@ interface PersistedRosterLatch {
 	owned: Map<string, string>;
 }
 
-interface RegistryWithPersistedRosterLatches extends AgentRegistry {
+interface RegistryWithPersistedRosterLatches extends AgentRegistryApi {
 	[kPersistedRosterLatches]?: Map<string, PersistedRosterLatch>;
 	[kPersistedRosterScanTail]?: Promise<void>;
 }
@@ -467,7 +503,7 @@ interface RegistryWithPersistedRosterLatches extends AgentRegistry {
  * invalidates the latch, forcing a re-scan that restores this root's own
  * transcripts. Refs the scan did not restore are not this root's to police.
  */
-function latchOwnershipValid(registry: AgentRegistry, owned: Map<string, string>): boolean {
+function latchOwnershipValid(registry: AgentRegistryApi, owned: Map<string, string>): boolean {
 	for (const [id, sessionFile] of owned) {
 		const ref = registry.get(id);
 		if (!ref || ref.sessionFile !== sessionFile) return false;
@@ -475,7 +511,7 @@ function latchOwnershipValid(registry: AgentRegistry, owned: Map<string, string>
 	return true;
 }
 
-async function resolveRootSessionFile(registry: AgentRegistry, hint?: string | null): Promise<string | undefined> {
+async function resolveRootSessionFile(registry: AgentRegistryApi, hint?: string | null): Promise<string | undefined> {
 	const mainFile = registry.get(MAIN_AGENT_ID)?.sessionFile;
 	const candidate =
 		typeof hint === "string" && hint.endsWith(".jsonl")
@@ -533,7 +569,7 @@ export function isCurrentSessionRosterRef(
  * roster counts, never task startup, and remains retryable.
  */
 export async function ensurePersistedRoster(
-	registry: AgentRegistry,
+	registry: AgentRegistryApi,
 	sessionFileHint?: string | null,
 ): Promise<string | undefined> {
 	let root: string | undefined;
@@ -628,7 +664,7 @@ export async function ensurePersistedRoster(
 
 /** Register persisted subagent and advisor transcripts as parked registry refs. */
 export async function registerPersistedSubagents(
-	registry: AgentRegistry,
+	registry: AgentRegistryApi,
 	sessionFile: string | null | undefined,
 	options: {
 		shouldContinue?: () => boolean;
@@ -640,25 +676,29 @@ export async function registerPersistedSubagents(
 		 * against, bounded by this root's own transcript tree.
 		 */
 		owned?: Map<string, string>;
+		/** Observe refs already registered from a different root whose transcript is also present in this root. */
+		onCopiedRef?: (ref: AgentRef) => void;
 	} = {},
 ): Promise<void> {
 	if (!sessionFile?.endsWith(".jsonl")) return;
 	const shouldContinue = options.shouldContinue ?? (() => true);
 	const hydrateHistory = options.hydrateHistory ?? true;
 	if (!shouldContinue()) return;
-	const vibeOwnedIds = await readPersistedVibeChildIds(sessionFile, shouldContinue);
-	if (!shouldContinue()) return;
+	// The main transcript can be large: read it once, and only for a transcript the registry does not hold yet.
+	let vibeOwnedIds: Promise<Set<string>> | undefined;
+	const vibeOwned = () => (vibeOwnedIds ??= readPersistedVibeChildIds(sessionFile, shouldContinue));
 	const root = sessionFile.slice(0, -6);
 	const transcripts: PersistedTranscript[] = [];
 	await registerPersistedSubagentsFromDir(
 		registry,
 		root,
 		undefined,
-		vibeOwnedIds,
+		vibeOwned,
 		transcripts,
 		shouldContinue,
 		sessionFile,
 		options.owned,
+		options.onCopiedRef,
 	);
 	if (!hydrateHistory || !shouldContinue()) return;
 	let nextTranscript = 0;
@@ -668,23 +708,30 @@ export async function registerPersistedSubagents(
 			const index = nextTranscript++;
 			const transcript = transcripts[index];
 			if (!transcript) return;
+			const ref = registry.get(transcript.id);
+			if (!ref || ref.sessionFile !== transcript.sessionFile) continue;
+			const stamp = await transcriptStamp(transcript.sessionFile);
+			if (stamp !== undefined && historyStamps.get(ref) === stamp) continue;
 			const history = await readPersistedAgentHistory(transcript, shouldContinue);
 			if (!shouldContinue()) return;
-			registry.setHistory(transcript.id, history, transcript.sessionFile);
+			if (registry.setHistory(transcript.id, history, transcript.sessionFile) && stamp !== undefined) {
+				historyStamps.set(ref, stamp);
+			}
 		}
 	});
 	await Promise.all(workers);
 }
 
 async function registerPersistedSubagentsFromDir(
-	registry: AgentRegistry,
+	registry: AgentRegistryApi,
 	dir: string,
 	parentId: string | undefined,
-	vibeOwnedIds: ReadonlySet<string>,
+	vibeOwned: () => Promise<ReadonlySet<string>>,
 	transcripts: PersistedTranscript[],
 	shouldContinue: () => boolean,
 	rootSessionFile: string,
 	owned?: Map<string, string>,
+	onCopiedRef?: (ref: AgentRef) => void,
 ): Promise<void> {
 	if (!shouldContinue()) return;
 	let entries: fs.Dirent[];
@@ -763,7 +810,7 @@ async function registerPersistedSubagentsFromDir(
 		}
 		const id = entry.name.slice(0, -6);
 		const existing = registry.get(id);
-		if (vibeOwnedIds.has(id) && existing?.sessionFile !== sessionFile) continue;
+		if (existing?.sessionFile !== sessionFile && (await vibeOwned()).has(id)) continue;
 		let tombstoned = false;
 		try {
 			await fs.promises.access(getAgentTombstonePath(sessionFile));
@@ -783,6 +830,25 @@ async function registerPersistedSubagentsFromDir(
 			typeof existing.sessionFile === "string" &&
 			!sessionFileBelongsToRoot(existing.sessionFile, rootSessionFile);
 		if (existing && !replaceable) {
+			// A fork can copy a live idle or killed transcript without detaching its
+			// source ref. The copy keeps the source transcript's header id; a
+			// separately created same-id agent does not. Report only proven copies,
+			// and never replace the live owner.
+			if (
+				existing.kind === "sub" &&
+				existing.sessionFile !== null &&
+				existing.sessionFile !== sessionFile &&
+				(existing.status === "idle" || existing.status === "aborted")
+			) {
+				const [sourceHeaderId, copiedHeaderId] = await Promise.all([
+					readSessionHeaderId(existing.sessionFile),
+					readSessionHeaderId(sessionFile),
+				]);
+				if (!shouldContinue()) return;
+				if (sourceHeaderId !== undefined && sourceHeaderId === copiedHeaderId && registry.get(id) === existing) {
+					onCopiedRef?.(existing);
+				}
+			}
 			if (existing.sessionFile === sessionFile) {
 				owned?.set(id, sessionFile);
 				transcripts.push({
@@ -840,11 +906,12 @@ async function registerPersistedSubagentsFromDir(
 				registry,
 				path.join(dir, id),
 				id,
-				vibeOwnedIds,
+				vibeOwned,
 				transcripts,
 				shouldContinue,
 				rootSessionFile,
 				owned,
+				onCopiedRef,
 			);
 		}
 	}

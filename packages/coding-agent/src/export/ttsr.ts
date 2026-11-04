@@ -369,7 +369,10 @@ interface ConditionScan {
 	scannedTo: number;
 	/** Start of the line holding `scannedTo`; the next region scan starts there. */
 	lineStart: number;
-	/** Result at `scannedTo`; `false` is exact only for line-local conditions or after a full scan at that length. */
+	/**
+	 * Result at `scannedTo`, or `false` while a region rescan is deferred; `false` is exact only for
+	 * line-local conditions scanned at the current length or after a full scan at that length.
+	 */
 	matched: boolean;
 	/** A match appending can no longer remove. */
 	settled: boolean;
@@ -379,20 +382,39 @@ interface ConditionScan {
 	paceFrom: number;
 }
 
-/** A cross-line condition rescans the whole buffer once it has grown by this fraction since its last full scan. */
+/**
+ * A cross-line condition rescans the whole buffer once it has grown by this fraction since its
+ * last full scan; any condition rescans a long region (an unterminated line) at the same pace.
+ */
 const FULL_RESCAN_GROWTH = 0.25;
-/** Buffers up to this length are cheap enough to rescan whole on every check. */
+/** Buffers and regions up to this length are cheap enough to rescan whole on every check. */
 const FULL_RESCAN_ALWAYS_BELOW = 4096;
+/** Characters of surrounding context and matched text retained in an interrupt excerpt. */
+const EXCERPT_CONTEXT = 60;
+const EXCERPT_MATCH_MAX = 120;
+
+/** One bounded line of text around a regex match, with whitespace runs collapsed. */
+function matchExcerpt(text: string, index: number, length: number): string {
+	const matchEnd = index + Math.min(length, EXCERPT_MATCH_MAX);
+	const start = Math.max(0, index - EXCERPT_CONTEXT);
+	const end = Math.min(text.length, matchEnd + EXCERPT_CONTEXT);
+	const body = text.slice(start, end).replace(/\s+/g, " ").trim();
+	return `${start > 0 ? "…" : ""}${body}${end < text.length ? "…" : ""}`;
+}
 
 /**
  * One stream's accumulated text and how far each condition has scanned it.
  * Line-local conditions scan only from the start of the line holding the
  * previous end; cross-line conditions scan that region too (a match there is a
  * whole-buffer match) and rescan the whole buffer geometrically, or on a final
- * check. Deltas stay in `#parts` until a whole-buffer scan needs the text.
+ * check. A long region — a line that never ends, like raw tool-argument JSON
+ * whose newlines are escaped — is rescanned geometrically too, so a non-final
+ * check may report its matches late. Deltas stay in `#parts` until a scan
+ * needs the text.
  */
 class StreamBuffer {
 	readonly #scans = new Map<RegExp, ConditionScan>();
+	readonly excerpts = new Map<string, string | undefined>();
 	#parts: string[] = [];
 	#joined = "";
 	#length = 0;
@@ -420,6 +442,7 @@ class StreamBuffer {
 			this.#joined = snapshot;
 			return;
 		}
+		this.excerpts.clear();
 		for (const scan of this.#scans.values()) {
 			scan.scannedTo = -1;
 			scan.lineStart = 0;
@@ -443,7 +466,10 @@ class StreamBuffer {
 		}
 		if (scan.settled) return true;
 		const length = this.#length;
-		if (scan.scannedTo !== length) this.#scanRegion(condition, traits, scan);
+		if (scan.scannedTo !== length) {
+			if (final || this.#regionRescanDue(scan)) this.#scanRegion(condition, traits, scan);
+			else scan.matched = false;
+		}
 		if (scan.matched || traits.lineLocal || scan.fullScannedTo === length) return scan.matched;
 		const rescanDue =
 			final ||
@@ -459,6 +485,31 @@ class StreamBuffer {
 		return scan.matched;
 	}
 
+	/** Bounded one-line excerpt around the first matching condition. */
+	excerpt(ruleName: string, conditions: readonly RegExp[]): string | undefined {
+		if (this.excerpts.has(ruleName)) return this.excerpts.get(ruleName);
+		const text = this.#text();
+		let excerpt: string | undefined;
+		for (const condition of conditions) {
+			condition.lastIndex = 0;
+			const match = condition.exec(text);
+			if (match && match[0].length > 0) {
+				excerpt = matchExcerpt(text, match.index, match[0].length);
+				break;
+			}
+		}
+		this.excerpts.set(ruleName, excerpt);
+		return excerpt;
+	}
+
+	/** Whether a non-final check should rescan the region from the condition's last line start. */
+	#regionRescanDue(scan: ConditionScan): boolean {
+		if (scan.scannedTo < 0) return true;
+		const region = this.#length - scan.lineStart;
+		const scanned = scan.scannedTo - scan.lineStart;
+		return region <= FULL_RESCAN_ALWAYS_BELOW || region - scanned >= scanned * FULL_RESCAN_GROWTH;
+	}
+
 	/** Scan from the start of the line holding the condition's last scanned end. */
 	#scanRegion(condition: RegExp, traits: ConditionTraits, scan: ConditionScan): void {
 		scan.matched = false;
@@ -471,6 +522,11 @@ class StreamBuffer {
 				scan.matched = true;
 				// A line-local match starting on a line already followed by `\n` can never change.
 				scan.settled = traits.monotonic || (traits.lineLocal && region.search(condition) < this.#lineStart - start);
+			}
+			// From offset 0 the region is the whole buffer: this was the full scan too.
+			if (start === 0) {
+				scan.fullScannedTo = this.#length;
+				scan.paceFrom = this.#length;
 			}
 		}
 		scan.scannedTo = this.#length;
@@ -1012,10 +1068,12 @@ export class TtsrManager {
 				continue;
 			}
 
+			const excerpt = buffer.excerpt(name, entry.conditions);
 			matches.push(entry.rule);
 			logger.debug("TTSR condition matched", {
 				ruleName: name,
 				conditions: entry.rule.condition,
+				excerpt,
 				source: context.source,
 				toolName: context.toolName,
 				filePaths: context.filePaths,
@@ -1023,6 +1081,17 @@ export class TtsrManager {
 		}
 
 		return matches;
+	}
+
+	/** Text that matched this rule in this stream; AST-only and zero-width matches have no excerpt. */
+	matchExcerpt(ruleName: string, context: TtsrMatchContext): string | undefined {
+		const key = this.#bufferKey(context);
+		for (const [bufferKey, buffer] of this.#buffers) {
+			if (bufferKey !== key && !bufferKey.startsWith(`${key}#`)) continue;
+			const excerpt = buffer.excerpts.get(ruleName);
+			if (excerpt !== undefined) return excerpt;
+		}
+		return undefined;
 	}
 
 	/** Mark rules as injected (won't trigger again until conditions allow). */
