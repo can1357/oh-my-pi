@@ -77,8 +77,8 @@ pub enum Need {
 	Probe(Probe),
 	/// The state store failed.
 	Store(StoreError),
-	/// Run this command substitution ([`super::expand::Stop::Sub`]), then
-	/// run the builtin again.
+	/// An expansion stopped: run a pending command substitution and replay
+	/// the builtin, or propagate its error to the execution boundary.
 	Sub(super::expand::Stop),
 }
 
@@ -103,11 +103,11 @@ pub enum Control {
 	},
 	/// `exit`.
 	Exit,
-	/// An error that abandons the rest of the line (bash's
-	/// `jump_to_top_level (DISCARD)` after `top_level_cleanup`: a bad array
-	/// subscript), status in [`Outcome::status`]: a `-c` string is abandoned
-	/// whole, a script file goes on with its next command.
+	/// Abandon the rest of the command line, status in [`Outcome::status`].
 	DiscardAll,
+	/// An indexed-subscript arithmetic error passes through functions,
+	/// eval and source to the run boundary, status in [`Outcome::status`].
+	ArithSubscript,
 	/// A frame was pushed (`eval`, `source`): wait for it to return.
 	Frame,
 	/// A frame was pushed (`mapfile`'s callback): wait for it to return,

@@ -1171,7 +1171,8 @@ impl<'s> Parser<'s> {
 	/// at end of input. `unquoted` removes `\newline`.
 	fn read_doc_line(&mut self, out: &mut Vec<u8>, unquoted: bool) -> bool {
 		loop {
-			if self.pos == 0 && core::ptr::eq(self.bytes().as_ptr(), cursor::END_ALIAS_SPACE.as_ptr()) {
+			if self.pos == 0 && core::ptr::eq(self.bytes().as_ptr(), cursor::END_ALIAS_SPACE.as_ptr())
+			{
 				self.pos = 1;
 				continue;
 			}

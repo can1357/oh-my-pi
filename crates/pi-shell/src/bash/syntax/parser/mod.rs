@@ -43,27 +43,27 @@ use crate::bash::syntax::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseError {
 	/// Offending token (empty at end of input).
-	pub span:      Span,
+	pub span:                 Span,
 	/// 1-based line bash reports.
-	pub line:      u32,
+	pub line:                 u32,
 	/// What went wrong.
-	pub kind:      ParseErrorKind,
+	pub kind:                 ParseErrorKind,
 	/// Warnings bash printed while parsing the command before it failed (a
 	/// here-document delimited by end of file).
-	pub warnings:  Box<[ParseWarning]>,
+	pub warnings:             Box<[ParseWarning]>,
 	/// Line and text of [`ParseError::detail`].
-	detail:        Option<(u32, Box<[u8]>)>,
+	detail:                   Option<(u32, Box<[u8]>)>,
 	/// The parser recovered, as bash does after an error inside a compound
 	/// assignment (`x=(a & b)`): the command being parsed and the rest of
 	/// the input line are dropped, `$?` becomes 1, and
 	/// [`Parser::next_command`] continues with the next line. Otherwise the
 	/// error ends the script.
-	pub recovered: bool,
+	pub recovered:            bool,
 	/// A grammar error raised while parsing `$(…)`: `bash -c` exits 127.
 	/// Unclosed delimiters remain ordinary syntax errors (status 2).
 	pub command_substitution: bool,
 	/// Internal yacc recovery, distinct from a fatal grammar error.
-	recovery: Recovery,
+	recovery:                 Recovery,
 }
 
 // The parser returns `Result<_, ParseError>` from every grammar function.
@@ -524,12 +524,16 @@ impl<'s> Parser<'s> {
 impl Parser<'_> {
 	/// Preserve diagnostics from a dropped word on the retained command.
 	fn warn_word_eof(&mut self) -> bool {
-		let Some(e) = self.word_eof.take() else { return false };
+		let Some(e) = self.word_eof.take() else {
+			return false;
+		};
 		let msg = e.bash_msg();
 		let detail = e.detail();
 		self.warnings.extend(e.warnings);
 		self.warnings.extend(detail);
-		self.warnings.push(ParseWarning { line: e.line, bash_msg: msg });
+		self
+			.warnings
+			.push(ParseWarning { line: e.line, bash_msg: msg });
 		true
 	}
 

@@ -59,6 +59,9 @@ pub enum Flow {
 	Exit(i32),
 	/// An expansion or arithmetic error: abandon the current top-level command.
 	Discard(i32),
+	/// An indexed-subscript arithmetic error: unwind past functions, eval
+	/// and source to the run's input loop, or end a `-c` string or child.
+	DiscardAll(i32),
 }
 
 /// Run vproc `vp` for up to `slice` ops; stops early when it parks, a
@@ -209,7 +212,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		// An `exit N` in the cancel trap is `exit_shell`'s (the EXIT trap, then
 		// status N, as bash).
 		let cancel_transfer = cancellation.is_some()
-			&& matches!(flow, Flow::Return(_) | Flow::Abort(_) | Flow::Discard(_));
+			&& matches!(flow, Flow::Return(_) | Flow::Abort(_) | Flow::Discard(_) | Flow::DiscardAll(_));
 		let failing = !ignore_errexit && vp.status != 0 && matches!(flow, Flow::Next | Flow::Jump(_));
 		let failed_command = failing
 			&& match op.code {
@@ -336,6 +339,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			Flow::Break { n, cont } => break_loops(k, vp, cx, n, cont, op),
 			Flow::Exit(status) if unit.mode.dialect() == Dialect::Zsh => zsh_exit(k, vp, cx, status),
 			Flow::Exit(status) => exit_shell(k, vp, cx, status),
+			Flow::DiscardAll(status) => discard_all(k, vp, cx, status),
 			Flow::Discard(status) if unit.mode.dialect() == Dialect::Zsh => {
 				zsh_discard(k, vp, cx, status);
 			},
@@ -348,16 +352,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 					.frames
 					.iter()
 					.rposition(|f| matches!(f.kind, FrameKind::Script { .. }));
-				if let Some(i) = script {
-					unwind(&mut k.root, cx.store, vp, i + 1);
-					clear_scratch(&mut k.root, cx.store, vp);
-					truncate(vp, Depths::default());
-					let f = top_frame(vp);
-					f.unit = None;
-					f.loops.clear();
-				} else {
-					unwind(&mut k.root, cx.store, vp, 0);
-				}
+				discard_script(k, vp, cx, script);
 			},
 		}
 		if cancel_transfer {
@@ -691,7 +686,7 @@ pub fn flush_out(k: &Kernel, vp: &mut Vproc) -> Option<i32> {
 }
 
 /// Grammar switches from the current options.
-fn features(
+pub(super) fn features(
 	k: &mut Kernel,
 	store: &mut dyn StateStore,
 	vp: &Vproc,
@@ -1479,6 +1474,42 @@ fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 		)
 }
 
+/// Bash's DISCARD after `top_level_cleanup`: pass through functions, eval
+/// and source to the run's input loop. A `-c` string is one command, and a
+/// child without its own run frame ends instead of returning to its caller.
+fn discard_all(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
+	vp.status = status;
+	let run = vp.frames.iter().position(|f| {
+		matches!(f.kind, FrameKind::Script { what: ScriptKind::Run, .. })
+	});
+	if let Some(i) = run {
+		let command = matches!(
+			state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
+			Ok(Some(Record::Misc(origin))) if origin.as_slice() == b"c"
+		);
+		if !command {
+			discard_script(k, vp, cx, Some(i));
+			return;
+		}
+	}
+	exit_shell(k, vp, cx, status);
+}
+
+/// Abandon the current command in `script`, restoring its expansion and
+/// redirection state before it reads another command.
+fn discard_script(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, script: Option<usize>) {
+	if let Some(i) = script {
+		unwind(&mut k.root, cx.store, vp, i + 1);
+		clear_scratch(&mut k.root, cx.store, vp);
+		truncate(vp, Depths::default());
+		let f = top_frame(vp);
+		f.unit = None;
+		f.loops.clear();
+	} else {
+		unwind(&mut k.root, cx.store, vp, 0);
+	}
+}
+
 /// The flow for an expansion error (the diagnostic is printed).
 pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, stop: Stop) -> Flow {
 	match stop {
@@ -1490,6 +1521,12 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 		Stop::Probe(_) => {
 			k.diag(cx, vp, line, Diag::Unsupported { what: "`=cmd` in this expansion".into() });
 			Flow::Discard(1)
+		},
+		Stop::Fail(d @ Diag::ArithSubscript { .. }) | Stop::Fatal(d @ Diag::ArithSubscript { .. })
+			if vp.mode.dialect() == Dialect::Bash =>
+		{
+			k.diag(cx, vp, line, d);
+			Flow::DiscardAll(1)
 		},
 		// A non-interactive posix shell exits on an expansion error (bash's
 		// `posixly_correct && !interactive_shell`), as on a fatal one.
@@ -2179,8 +2216,8 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 				}
 				match ex.arith_eval(&expanded) {
 					Ok(v) => Ok(Ok(v)),
-					// An error in a subscript abandons the line (an expansion
-					// failure).
+					// Ordinary evaluation errors fail the command; subscript
+					// errors retain their class for `stop_flow`.
 					Err(Stop::Fail(d @ (Diag::Arith { .. } | Diag::Readonly { .. }))) => Ok(Err(d)),
 					Err(stop) => Err(stop),
 				}

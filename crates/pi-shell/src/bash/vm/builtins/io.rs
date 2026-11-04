@@ -12,7 +12,7 @@ use crate::bash::{
 	vm::{
 		Cx, Kernel,
 		exec::Flow,
-		expand::DEFAULT_IFS,
+		expand::{DEFAULT_IFS, Stop},
 		is_ident,
 		locale::{self, Charset},
 		probe,
@@ -169,26 +169,32 @@ pub fn split_ref(name: &[u8]) -> Option<(&[u8], Option<&[u8]>)> {
 
 /// Assign `value` to `name` (`name[sub]` allowed) as builtins bind
 /// variables: a readonly variable is reported without the builtin prefix
-/// (bash `err_readonly`). `false` when the assignment failed.
-pub fn bind(ctx: &mut Ctx<'_, '_>, name: &[u8], value: AssignValue) -> bool {
+/// (bash `err_readonly`). `Ok(false)` when the assignment failed; an
+/// indexed-subscript arithmetic error propagates to the execution boundary.
+pub fn bind(ctx: &mut Ctx<'_, '_>, name: &[u8], value: AssignValue) -> Result<bool, Need> {
 	let Some((base, index)) = split_ref(name) else {
 		ctx.err(Diag::InvalidIdent { name: name.into() });
-		return false;
+		return Ok(false);
 	};
 	bind_lhs(ctx, Lhs { name: base, index, append: false }, value)
 }
 
 /// Assign `value` to `lhs` as [`bind`] does.
-pub fn bind_lhs(ctx: &mut Ctx<'_, '_>, lhs: Lhs<'_>, value: AssignValue) -> bool {
+pub fn bind_lhs(ctx: &mut Ctx<'_, '_>, lhs: Lhs<'_>, value: AssignValue) -> Result<bool, Need> {
 	match set_value(ctx.k, ctx.cx, ctx.vp, lhs, value, Level::Dynamic) {
-		Ok(()) => true,
+		Ok(()) => Ok(true),
+		Err(d @ Diag::ArithSubscript { .. })
+			if ctx.vp.mode.dialect() == crate::bash::ids::Dialect::Bash =>
+		{
+			Err(Need::Sub(Stop::Fail(d)))
+		},
 		Err(d @ Diag::Readonly { .. }) => {
 			ctx.diag(d);
-			false
+			Ok(false)
 		},
 		Err(d) => {
 			ctx.err(d);
-			false
+			Ok(false)
 		},
 	}
 }
@@ -678,13 +684,13 @@ pub fn read(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			.into_iter()
 			.map(|v| (None, false, v))
 			.collect();
-		if !bind(ctx, name, AssignValue::Array(items)) {
+		if !bind(ctx, name, AssignValue::Array(items))? {
 			return done(1);
 		}
 		return done(status);
 	}
 	let Some((last, init)) = o.rest.split_last() else {
-		if !bind(ctx, b"REPLY", AssignValue::Scalar(marked.all())) {
+		if !bind(ctx, b"REPLY", AssignValue::Scalar(marked.all()))? {
 			return done(2);
 		}
 		return done(status);
@@ -703,7 +709,7 @@ pub fn read(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		} else {
 			BString::default()
 		};
-		if !bind(ctx, name, AssignValue::Scalar(value)) {
+		if !bind(ctx, name, AssignValue::Scalar(value))? {
 			return done(2);
 		}
 	}
@@ -711,7 +717,7 @@ pub fn read(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		ctx.err(Diag::InvalidIdent { name: last.clone() });
 		return done(1);
 	}
-	if !bind(ctx, last, AssignValue::Scalar(last_value(&ifs, &marked, i))) {
+	if !bind(ctx, last, AssignValue::Scalar(last_value(&ifs, &marked, i)))? {
 		return done(1);
 	}
 	done(status)

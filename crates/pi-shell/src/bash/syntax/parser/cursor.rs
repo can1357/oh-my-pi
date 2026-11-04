@@ -82,7 +82,10 @@ impl<'s> Parser<'s> {
 	/// Whether pushed arithmetic text is active, including under an alias.
 	pub(super) fn replaying(&self) -> bool {
 		matches!(self.buf, Buffer::Replay(_))
-			|| self.frames.iter().any(|f| matches!(f.buf, Buffer::Replay(_)))
+			|| self
+				.frames
+				.iter()
+				.any(|f| matches!(f.buf, Buffer::Replay(_)))
 	}
 
 	/// Push normalized arithmetic text, without an alias recursion guard or
@@ -91,9 +94,9 @@ impl<'s> Parser<'s> {
 		let index = self.replay.len();
 		self.replay.push(text);
 		self.frames.push(Frame {
-			buf: self.buf,
-			pos: self.pos,
-			alias: Vec::new(),
+			buf:         self.buf,
+			pos:         self.pos,
+			alias:       Vec::new(),
 			expand_next: false,
 		});
 		self.buf = Buffer::Replay(index);

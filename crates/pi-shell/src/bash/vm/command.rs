@@ -739,6 +739,11 @@ fn expand(
 			if let Err(d) =
 				assign_now(k, vp, cx, &name, index.as_ref().map(|i| i.as_slice()), append, value)
 			{
+				if vp.mode.dialect() == crate::bash::ids::Dialect::Bash
+					&& matches!(d, Diag::ArithSubscript { .. })
+				{
+					return Some(exec::stop_flow(k, vp, cx, line, Stop::Fail(d)));
+				}
 				k.diag(cx, vp, line, d);
 				// bash abandons the rest of the command line after a failed
 				// assignment statement; a posix shell exits.
@@ -2625,7 +2630,18 @@ fn run_builtin(
 			ctx.compound.clone_from(&e.compound);
 			ctx.arrayref.clone_from(&e.arrayref);
 			ctx.resumed = e.resumed;
-			let r = builtins::run(id, &mut ctx, &e.argv);
+			let r = match builtins::run(id, &mut ctx, &e.argv) {
+				Err(Need::Sub(
+					Stop::Fail(d @ Diag::ArithSubscript { .. })
+					| Stop::Fatal(d @ Diag::ArithSubscript { .. }),
+				)) if ctx.vp.mode.dialect() == crate::bash::ids::Dialect::Bash => {
+					// Keep output produced before the fatal binding, then use
+					// the same transfer as let/declare's subscript failures.
+					ctx.diag(d);
+					Ok(builtins::Outcome { status: 1, control: Control::ArithSubscript })
+				},
+				r => r,
+			};
 			// Not through `command`.
 			let fatal = ctx.usage_error && !e.via_command;
 			let log = std::mem::take(&mut ctx.log);
@@ -2698,6 +2714,11 @@ fn run_builtin(
 					},
 					Control::Break { n, cont } => {
 						e.control = Some(Transfer::Break { n, cont });
+						e.stage = Stage::Output;
+						None
+					},
+					Control::ArithSubscript => {
+						e.control = Some(Transfer::ArithSubscript(outcome.status));
 						e.stage = Stage::Output;
 						None
 					},
@@ -3305,7 +3326,10 @@ fn finish(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Flow {
 		Some(Transfer::Return(n)) => Flow::Return(n),
 		Some(Transfer::Break { n, cont }) => Flow::Break { n, cont },
 		Some(Transfer::Exit(n)) => Flow::Exit(n),
-		Some(Transfer::DiscardAll(n)) => {
+		Some(Transfer::ArithSubscript(n)) if vp.mode.dialect() == crate::bash::ids::Dialect::Bash => {
+			Flow::DiscardAll(n)
+		},
+		Some(Transfer::DiscardAll(n) | Transfer::ArithSubscript(n)) => {
 			let command = matches!(
 				state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
 				Ok(Some(Record::Misc(origin))) if origin.as_slice() == b"c"

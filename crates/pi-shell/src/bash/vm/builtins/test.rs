@@ -15,8 +15,8 @@ use crate::bash::{
 	store::{Attrs, OptId, OptKind, VarValue},
 	vm::{
 		Cx, Kernel,
-		exec::{Flow, expanding},
-		expand::arith_value,
+		exec::{self, Flow, expanding},
+		expand::{Stop, arith_value},
 		probe::{self, absolute},
 		proc::{PendingWrite, Probe, ProbeResult, Slot, Vproc},
 		state::{Level, Var},
@@ -593,7 +593,7 @@ pub fn test(ctx: &mut Ctx<'_, '_>, args: &[BString], bracket: bool) -> R {
 		},
 		Err(Fail::Discard(d)) => {
 			ctx.diag(d);
-			Ok(super::Outcome { status: 1, control: super::Control::DiscardAll })
+			Ok(super::Outcome { status: 1, control: super::Control::ArithSubscript })
 		},
 	}
 }
@@ -709,8 +709,7 @@ pub fn cond_test(
 			},
 			Err(Fail::Discard(d)) => {
 				report(k, cx, vp, line, chunks);
-				k.diag(cx, vp, line, d);
-				return Flow::Discard(1);
+				return exec::stop_flow(k, vp, cx, line, Stop::Fail(d));
 			},
 			Err(Fail::Arith(d)) => {
 				report(k, cx, vp, line, chunks);

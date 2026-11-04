@@ -1323,6 +1323,9 @@ pub enum Transfer {
 	/// The rest of the line is abandoned with this status (a `-c` string
 	/// whole).
 	DiscardAll(i32),
+	/// An indexed-subscript arithmetic error passes through eval/source to
+	/// the run boundary (or ends the current child shell).
+	ArithSubscript(i32),
 	/// `exec command`: the shell exits with the command's status.
 	Exec,
 }

@@ -40,7 +40,7 @@ pub struct CompleteCommand {
 	pub(crate) source_replay: bool,
 	/// Arithmetic-for recovery dropped the unfinished word at EOF. Bash
 	/// sets `$?` to 2 before it executes the retained command.
-	pub(crate) word_eof: bool,
+	pub(crate) word_eof:      bool,
 	/// Non-fatal diagnostics bash prints while parsing this command (e.g.
 	/// ``warning: here-document at line 2 delimited by end-of-file (wanted
 	/// `EOF')``).

@@ -15,7 +15,7 @@ use super::{
 use crate::bash::{
 	diag::Diag,
 	store::Attrs,
-	vm::{is_ident, locale, proc::AssignValue, quote, state::Level},
+	vm::{expand::Stop, is_ident, locale, proc::AssignValue, quote, state::Level},
 };
 
 /// bash's `builtin_usage` line: no shell-name or line prefix.
@@ -73,7 +73,10 @@ pub fn printf(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		return done(2);
 	};
 	if format.is_empty() {
-		let ok = vname.is_none_or(|name| bind(ctx, name, AssignValue::Scalar(BString::default())));
+		let ok = match vname {
+			Some(name) => bind(ctx, name, AssignValue::Scalar(BString::default()))?,
+			None => true,
+		};
 		return done(i32::from(!ok));
 	}
 	let cs = locale::charset(ctx.k, ctx.cx.store, ctx.vp);
@@ -103,7 +106,7 @@ pub fn printf(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	};
 	let Fmt { ctx, out, flushed, .. } = f;
 	if let Some(name) = vname {
-		let ok = bind(ctx, name, AssignValue::Scalar(out.into()));
+		let ok = bind(ctx, name, AssignValue::Scalar(out.into()))?;
 		done(if ok { status } else { 1 })
 	} else {
 		ctx.out(&out[flushed..]);
@@ -277,9 +280,46 @@ impl<'x> Fmt<'x, '_, '_> {
 				}
 				continue;
 			}
+			if conv == b'n' {
+				if let Err(st) = self.count()? {
+					return Ok(Err(st));
+				}
+				continue;
+			}
 			if let Err(st) = self.convert(conv, long, &spec) {
 				return Ok(Err(st));
 			}
+		}
+		Ok(Ok(()))
+	}
+
+	/// `%n` may fail in the arithmetic subscript of a nameref target.
+	fn count(&mut self) -> Result<Step, Need> {
+		let var = self.getstr();
+		if var.is_empty() {
+			return Ok(Ok(()));
+		}
+		if !is_ident(var) {
+			self.report(Diag::InvalidIdent { name: var.into() }, true);
+			return Ok(Err(1));
+		}
+		let tw = self.out.len() - self.pass_start;
+		let lhs = Lhs { name: var, index: None, append: false };
+		let ctx = &mut *self.ctx;
+		let value = AssignValue::Scalar(BString::from(tw.to_string()));
+		match set_value(ctx.k, ctx.cx, ctx.vp, lhs, value, Level::Dynamic) {
+			Err(d @ Diag::ArithSubscript { .. })
+				if ctx.vp.mode.dialect() == crate::bash::ids::Dialect::Bash =>
+			{
+				// Bash flushes bytes produced before the fatal assignment,
+				// but never formats the remainder or binds `printf -v`.
+				if !self.vflag {
+					self.ctx.out(&self.out[self.flushed..]);
+				}
+				return Err(Need::Sub(Stop::Fail(d)));
+			},
+			Err(d) => self.report(d, false),
+			Ok(()) => {},
 		}
 		Ok(Ok(()))
 	}
@@ -356,23 +396,6 @@ impl<'x> Fmt<'x, '_, '_> {
 					// bash returns its current status here, before the
 					// conversion-error check.
 					return Err(0);
-				}
-				Ok(())
-			},
-			b'n' => {
-				let var = self.getstr();
-				if !var.is_empty() {
-					if !is_ident(var) {
-						self.report(Diag::InvalidIdent { name: var.into() }, true);
-						return Err(1);
-					}
-					let tw = self.out.len() - self.pass_start;
-					let lhs = Lhs { name: var, index: None, append: false };
-					let ctx = &mut *self.ctx;
-					let value = AssignValue::Scalar(BString::from(tw.to_string()));
-					if let Err(d) = set_value(ctx.k, ctx.cx, ctx.vp, lhs, value, Level::Dynamic) {
-						self.report(d, false);
-					}
 				}
 				Ok(())
 			},
