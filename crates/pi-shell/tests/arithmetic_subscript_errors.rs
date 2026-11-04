@@ -42,17 +42,9 @@ async fn run(id: &str, script: &str, stdout: &str, stderr: bool, status: i32) {
 	assert!(!dir.path().join("marker").exists(), "{id}: execution continued after the error");
 }
 
-async fn run_context(
-	context: &str,
-	wrap: impl Fn(&str) -> String,
-	stdout: &str,
-	status: i32,
-) {
+async fn run_context(context: &str, wrap: impl Fn(&str) -> String, stdout: &str, status: i32) {
 	for (name, command) in [
-		(
-			"for-init",
-			"for ((a[1+]=0;0;)); do echo body; printf body > marker; done",
-		),
+		("for-init", "for ((a[1+]=0;0;)); do echo body; printf body > marker; done"),
 		("assignment", "a[1+]=value"),
 		("parameter", "printf \"<%s>\\n\" \"${a[1+]}\""),
 		("arithmetic", "(( a[1+] ))"),
@@ -60,9 +52,8 @@ async fn run_context(
 		("declare", "declare 'a[1+]=value'"),
 		("unset", "unset 'a[1+]'"),
 	] {
-		let body = format!(
-			"a=(zero one); {command}; printf after > marker; echo inside\necho inside-next\n"
-		);
+		let body =
+			format!("a=(zero one); {command}; printf after > marker; echo inside\necho inside-next\n");
 		run(&format!("{name}-{context}"), &wrap(&body), stdout, true, status).await;
 	}
 }
@@ -74,13 +65,8 @@ async fn indexed_subscript_errors_end_the_entire_command_string() {
 
 #[tokio::test]
 async fn functions_do_not_catch_indexed_subscript_errors() {
-	run_context(
-		"function",
-		|body| format!("f() {{ {body}}}; f; echo outer\necho next\n"),
-		"",
-		1,
-	)
-	.await;
+	run_context("function", |body| format!("f() {{ {body}}}; f; echo outer\necho next\n"), "", 1)
+		.await;
 }
 
 #[tokio::test]
@@ -137,9 +123,7 @@ async fn indexed_subscript_errors_end_only_the_command_substitution() {
 	run_context(
 		"command-substitution",
 		|body| {
-			format!(
-				"x=$( {body}); printf \"rc=%s x=<%s>\\n\" \"$?\" \"$x\"; echo outer\necho next\n"
-			)
+			format!("x=$( {body}); printf \"rc=%s x=<%s>\\n\" \"$?\" \"$x\"; echo outer\necho next\n")
 		},
 		"rc=1 x=<>\nouter\nnext\n",
 		0,
@@ -156,11 +140,13 @@ async fn expanded_subscripts_in_arithmetic_for_headers_do_not_resume_at_the_next
 		),
 		(
 			"subscript-function",
-			"f() { v=0; a=(0 1); for ((a[${v+\"(\"}]=0;0;)); do :; done; echo inside; }; f; echo outer\necho next\n",
+			"f() { v=0; a=(0 1); for ((a[${v+\"(\"}]=0;0;)); do :; done; echo inside; }; f; echo \
+			 outer\necho next\n",
 		),
 		(
 			"subscript-eval",
-			"eval 'v=0; a=(0 1); for ((a[${v+\"(\"}]=0;0;)); do :; done; echo inside'; echo outer\necho next\n",
+			"eval 'v=0; a=(0 1); for ((a[${v+\"(\"}]=0;0;)); do :; done; echo inside'; echo \
+			 outer\necho next\n",
 		),
 	] {
 		run(id, script, "", true, 1).await;
@@ -171,7 +157,8 @@ async fn expanded_subscripts_in_arithmetic_for_headers_do_not_resume_at_the_next
 async fn a_failing_last_pipeline_stage_reports_status_one_without_exiting_its_parent() {
 	run(
 		"right-pipeline-status",
-		"a=(zero one); : | { (( a[1+] )); printf bad > marker; echo stage-next\necho stage-next-line; }; printf 'pipeline=%s\\n' \"$?\"; echo outer\necho next\n",
+		"a=(zero one); : | { (( a[1+] )); printf bad > marker; echo stage-next\necho \
+		 stage-next-line; }; printf 'pipeline=%s\\n' \"$?\"; echo outer\necho next\n",
 		"pipeline=1\nouter\nnext\n",
 		true,
 		0,
@@ -183,7 +170,8 @@ async fn a_failing_last_pipeline_stage_reports_status_one_without_exiting_its_pa
 async fn ordinary_arithmetic_command_errors_do_not_become_fatal_subscript_errors() {
 	run(
 		"ordinary-arithmetic-errors",
-		"(( 1+ )); printf 'arithmetic=%s\\n' \"$?\"; let '1+'; printf 'let=%s\\n' \"$?\"\necho next\n",
+		"(( 1+ )); printf 'arithmetic=%s\\n' \"$?\"; let '1+'; printf 'let=%s\\n' \"$?\"\necho \
+		 next\n",
 		"arithmetic=1\nlet=1\nnext\n",
 		true,
 		0,
@@ -211,9 +199,8 @@ async fn printf_count_errors_preserve_prior_output_but_never_format_the_suffix()
 		("printf-count-reference", "prefix%nnever", "prefix"),
 		("printf-count-lines", "prefix\\n%nnever", "prefix\n"),
 	] {
-		let script = format!(
-			"a=(zero one); declare -n r='a[1+]'; printf '{format}' r; echo same\necho next\n"
-		);
+		let script =
+			format!("a=(zero one); declare -n r='a[1+]'; printf '{format}' r; echo same\necho next\n");
 		run(id, &script, stdout, true, 1).await;
 	}
 }
@@ -223,11 +210,15 @@ async fn indexed_subscript_errors_cross_nested_source_function_and_eval_frames()
 	for (id, script) in [
 		(
 			"source-eval-function",
-			"printf '%s\\n' 'f() { eval '\\''a=(zero one); (( a[1+] )); printf bad > marker; echo eval-next'\\''; echo function-next; }; f; echo source-next' 'echo source-next-line' > script; source ./script; printf 'source=%s\\n' \"$?\"; echo outer\necho next\n",
+			"printf '%s\\n' 'f() { eval '\\''a=(zero one); (( a[1+] )); printf bad > marker; echo \
+			 eval-next'\\''; echo function-next; }; f; echo source-next' 'echo source-next-line' > \
+			 script; source ./script; printf 'source=%s\\n' \"$?\"; echo outer\necho next\n",
 		),
 		(
 			"source-in-function",
-			"printf '%s\\n' 'a=(zero one); (( a[1+] )); printf bad > marker; echo source-next' 'echo source-next-line' > script; f() { source ./script; printf 'source=%s\\n' \"$?\"; echo function-next; }; f; echo outer\necho next\n",
+			"printf '%s\\n' 'a=(zero one); (( a[1+] )); printf bad > marker; echo source-next' 'echo \
+			 source-next-line' > script; f() { source ./script; printf 'source=%s\\n' \"$?\"; echo \
+			 function-next; }; f; echo outer\necho next\n",
 		),
 	] {
 		run(id, script, "", true, 1).await;
@@ -240,22 +231,26 @@ fn file_origin_discards_to_the_outer_input_loop_instead_of_exiting_or_resuming_e
 	for (id, script, stdout) in [
 		(
 			"arithmetic-root",
-			"a=(zero one); (( a[1+] )); printf after > marker; echo inside\necho inside-next\necho outer\necho next\n",
+			"a=(zero one); (( a[1+] )); printf after > marker; echo inside\necho inside-next\necho \
+			 outer\necho next\n",
 			"inside-next\nouter\nnext\n",
 		),
 		(
 			"arithmetic-function",
-			"f() { a=(zero one); (( a[1+] )); printf after > marker; echo inside\necho inside-next\n}; f; echo outer\necho next\n",
+			"f() { a=(zero one); (( a[1+] )); printf after > marker; echo inside\necho \
+			 inside-next\n}; f; echo outer\necho next\n",
 			"next\n",
 		),
 		(
 			"arithmetic-eval",
-			"eval 'a=(zero one); (( a[1+] )); printf after > marker; echo inside\necho inside-next\n'; echo outer\necho next\n",
+			"eval 'a=(zero one); (( a[1+] )); printf after > marker; echo inside\necho \
+			 inside-next\n'; echo outer\necho next\n",
 			"next\n",
 		),
 		(
 			"arithmetic-source",
-			"printf '%s' 'a=(zero one); (( a[1+] )); printf after > marker; echo inside\necho inside-next\n' > script; source ./script; echo outer\necho next\n",
+			"printf '%s' 'a=(zero one); (( a[1+] )); printf after > marker; echo inside\necho \
+			 inside-next\n' > script; source ./script; echo outer\necho next\n",
 			"next\n",
 		),
 	] {
@@ -286,11 +281,13 @@ async fn getopts_special_variable_assignments_propagate_indexed_subscript_errors
 	for (id, script) in [
 		(
 			"getopts-optarg-reference",
-			"a=(zero one); declare -n OPTARG='a[1+]'; echo before; getopts x: r -x value; echo same\necho next\n",
+			"a=(zero one); declare -n OPTARG='a[1+]'; echo before; getopts x: r -x value; echo \
+			 same\necho next\n",
 		),
 		(
 			"getopts-optind-reference",
-			"a=(zero one); declare -n OPTIND='a[1+]'; echo before; getopts x r -x; echo same\necho next\n",
+			"a=(zero one); declare -n OPTIND='a[1+]'; echo before; getopts x r -x; echo same\necho \
+			 next\n",
 		),
 	] {
 		run(id, script, "before\n", true, 1).await;

@@ -194,8 +194,11 @@ pub(super) enum Stop {
 	Brace { dq: bool, slash: bool, pat: bool, doc: bool },
 	/// `[…]` subscript: the matching `]` (not consumed).
 	Bracket,
-	/// Extglob / regexp group: the matching `)` (consumed).
+	/// Extglob group: the matching `)` (consumed).
 	Group,
+	/// A regexp group whose raw parentheses are already paired: parse all
+	/// captured bytes, including unmatched `)` left after parameter expansion.
+	RegexpContent,
 	/// End of input ([`parse_text`](super::parse_text)).
 	Text(TextMode),
 }
@@ -649,7 +652,7 @@ impl<'s> Parser<'s> {
 		sub.base = lo;
 		sub.line = line;
 		sub.virt = 0;
-		sub.parts_into(acc, Stop::Group, line)
+		sub.parts_into(acc, Stop::RegexpContent, line)
 	}
 
 	/// The part loop shared by every quoting context.
@@ -693,7 +696,7 @@ impl<'s> Parser<'s> {
 					return Err(unmatched_error(self.eof_span(), sq_line, "'"));
 				}
 				return match stop {
-					Stop::Text(_) => Ok(()),
+					Stop::Text(_) | Stop::RegexpContent => Ok(()),
 					Stop::DQuote { .. } => Err(unmatched_error(self.eof_span(), line, "\"")),
 					Stop::Brace { .. } => Err(unmatched_error(self.eof_span(), line, "}")),
 					Stop::Bracket => Err(unmatched_error(self.eof_span(), line, "]")),

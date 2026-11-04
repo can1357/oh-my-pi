@@ -2184,7 +2184,10 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 					// the line (bash `jump_to_top_level (DISCARD)`).
 					Err(d @ Diag::ArithSubscript { .. }) => {
 						ctx.diag(d);
-						return Ok(super::Outcome { status: 1, control: super::Control::ArithSubscript });
+						return Ok(super::Outcome {
+							status:  1,
+							control: super::Control::ArithSubscript,
+						});
 					},
 					Err(d) => {
 						ctx.err(d);
@@ -2802,7 +2805,10 @@ pub fn unset(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 						},
 						Err(d @ Diag::ArithSubscript { .. }) => {
 							ctx.diag(d);
-							return Ok(super::Outcome { status: 1, control: super::Control::ArithSubscript });
+							return Ok(super::Outcome {
+								status:  1,
+								control: super::Control::ArithSubscript,
+							});
 						},
 						Err(d) => {
 							ctx.err(d);

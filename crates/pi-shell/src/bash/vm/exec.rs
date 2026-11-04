@@ -212,7 +212,10 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		// An `exit N` in the cancel trap is `exit_shell`'s (the EXIT trap, then
 		// status N, as bash).
 		let cancel_transfer = cancellation.is_some()
-			&& matches!(flow, Flow::Return(_) | Flow::Abort(_) | Flow::Discard(_) | Flow::DiscardAll(_));
+			&& matches!(
+				flow,
+				Flow::Return(_) | Flow::Abort(_) | Flow::Discard(_) | Flow::DiscardAll(_)
+			);
 		let failing = !ignore_errexit && vp.status != 0 && matches!(flow, Flow::Next | Flow::Jump(_));
 		let failed_command = failing
 			&& match op.code {
@@ -1479,9 +1482,10 @@ fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 /// child without its own run frame ends instead of returning to its caller.
 fn discard_all(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 	vp.status = status;
-	let run = vp.frames.iter().position(|f| {
-		matches!(f.kind, FrameKind::Script { what: ScriptKind::Run, .. })
-	});
+	let run = vp
+		.frames
+		.iter()
+		.position(|f| matches!(f.kind, FrameKind::Script { what: ScriptKind::Run, .. }));
 	if let Some(i) = run {
 		let command = matches!(
 			state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
@@ -1522,7 +1526,8 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 			k.diag(cx, vp, line, Diag::Unsupported { what: "`=cmd` in this expansion".into() });
 			Flow::Discard(1)
 		},
-		Stop::Fail(d @ Diag::ArithSubscript { .. }) | Stop::Fatal(d @ Diag::ArithSubscript { .. })
+		Stop::Fail(d @ Diag::ArithSubscript { .. })
+		| Stop::Fatal(d @ Diag::ArithSubscript { .. })
 			if vp.mode.dialect() == Dialect::Bash =>
 		{
 			k.diag(cx, vp, line, d);

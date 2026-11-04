@@ -61,6 +61,8 @@ impl Default for EngineConfig {
 	}
 }
 
+type TextKey = (TextKind, ModeId, Features, BString);
+
 /// Shared per runtime or process: the compiled-unit cache keyed by content
 /// address. `Send + Sync`; every [`Shell`](crate::bash::Shell) holds an `Arc`
 /// to it.
@@ -68,7 +70,7 @@ pub struct Engine {
 	cfg:          EngineConfig,
 	units:        Mutex<UnitCache>,
 	/// Units of text parsed at run time (here-document bodies, arithmetic).
-	texts:        Mutex<HashMap<(TextKind, ModeId, Features, BString), Arc<Unit>>>,
+	texts:        Mutex<HashMap<TextKey, Arc<Unit>>>,
 	/// Compiled arithmetic expressions by text (bounded; see
 	/// [`ArithCache::get`]).
 	arith:        ArithCache,

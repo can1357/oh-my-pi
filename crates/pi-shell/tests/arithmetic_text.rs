@@ -198,6 +198,14 @@ async fn grouped_conditional_function_definitions_inside_here_documents_do_not_a
 #[tokio::test]
 async fn regexp_groups_count_parentheses_inside_parameter_words() {
 	run("v=1\n[[ a =~ (a|(( ${v:-(} ))) ]]\necho rc=$?\n", "", true, 2).await;
+	for script in [
+		"v=a\n[[ forab =~ for((${v:-(}))) ]]\necho rc=$?\n",
+		"v=a\n[[ forab =~ for((${v:-${w:-(}}))) ]]\necho rc=$?\n",
+		"v=a\n[[ forab =~ for\\\n((${v:-(}))) ]]\necho rc=$?\n",
+		"v=a\n[[ forab =~ for\\\n((${v:-${w:-(}}))) ]]\necho rc=$?\n",
+	] {
+		run(script, "rc=1\n", false, 0).await;
+	}
 }
 
 #[tokio::test]
@@ -222,7 +230,8 @@ async fn arithmetic_substitutions_use_current_parser_options() {
 async fn parameter_arithmetic_offsets_end_at_the_parameter_brace() {
 	run("v=1; printf \"<%s>\\n\" \"${v:(}\"\necho after\n", "after\n", true, 0).await;
 	run(
-		"unset v w\nx=0\nprintf \"<%s>\\n\" \"$((x=${v:)(}))\"\nprintf \"after x=%s rc=%s\\n\" \"$x\" \"$?\"\n",
+		"unset v w\nx=0\nprintf \"<%s>\\n\" \"$((x=${v:)(}))\"\nprintf \"after x=%s rc=%s\\n\" \
+		 \"$x\" \"$?\"\n",
 		"<>\nafter x=0 rc=0\n",
 		false,
 		0,
