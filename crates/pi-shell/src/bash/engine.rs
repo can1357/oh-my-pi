@@ -137,8 +137,9 @@ impl Engine {
 		mode: ModeId,
 		features: Features,
 	) -> Arc<Unit> {
-		let unit = ir::lower_deferred(cc, src, mode, features).unwrap_or_else(|what| {
-			ir::abort_unit(cc.span.slice(src), mode, features, cc.line, vec![what.into()], 0, 2)
+		let unit = ir::lower_deferred(cc, src, mode, features).unwrap_or_else(|error| {
+			let (msg, flags) = error.into_diagnostic();
+			ir::abort_unit(cc.span.slice(src), mode, features, cc.line, vec![msg], flags, 2)
 		});
 		self.intern(unit)
 	}
@@ -181,6 +182,10 @@ impl Engine {
 			line: 1,
 			msg:  BString::from(format!("{what}: not supported by this engine yet")),
 		};
+		let lower_error = |error| match error {
+			ir::LowerError::Unsupported(what) => unsupported(what),
+			ir::LowerError::Syntax(msg) => TextError { line: 1, msg },
+		};
 		let unit = match kind {
 			TextKind::Arith | TextKind::HereDoc => {
 				let tmode = if kind == TextKind::Arith {
@@ -190,7 +195,7 @@ impl Engine {
 				};
 				let word = crate::bash::syntax::parse_text(text, Features::NONE, tmode)
 					.map_err(|e| TextError { line: e.line, msg: BString::from(e.bash_msg()) })?;
-				ir::lower_text(&word, text, mode, Features::NONE).map_err(unsupported)?
+				ir::lower_text(&word, text, mode, Features::NONE).map_err(lower_error)?
 			},
 			TextKind::Compound => {
 				// bash parses the text as words with the shell parser
@@ -212,7 +217,7 @@ impl Engine {
 				if parser.next_command().is_some() {
 					return Err(unsupported("a compound array value that is not one word list"));
 				}
-				ir::lower_compound(&cc, &src, mode, Features::NONE).map_err(unsupported)?
+				ir::lower_compound(&cc, &src, mode, Features::NONE).map_err(lower_error)?
 			},
 		};
 		let unit = Arc::new(unit);

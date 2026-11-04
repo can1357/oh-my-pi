@@ -20,17 +20,20 @@ enum Tok<'a> {
 
 /// Upper bound on the number of words one brace expression may produce
 /// (bash has none; this keeps `{1..999999999}` from exhausting memory).
-const MAX_WORDS: usize = 1 << 20;
+pub(super) const MAX_WORDS: usize = 1 << 22;
 
 /// The alternatives of `parts`, or `None` when it has no brace expression.
-pub fn expand(parts: &[syn::WordPart]) -> Option<Vec<Vec<syn::WordPart>>> {
-	let quirks: Vec<Option<Vec<syn::WordPart>>> = parts.iter().map(quoted_alternatives).collect();
+pub fn expand(parts: &[syn::WordPart]) -> Result<Option<Vec<Vec<syn::WordPart>>>, u128> {
+	let quirks: Vec<Option<Vec<syn::WordPart>>> = parts
+		.iter()
+		.map(quoted_alternatives)
+		.collect::<Result<_, _>>()?;
 	let candidate = parts
 		.iter()
 		.any(|p| matches!(p, syn::WordPart::Lit(b) if b.contains(&b'{')))
 		|| quirks.iter().any(Option::is_some);
 	if !candidate {
-		return None;
+		return Ok(None);
 	}
 	let mut toks: Vec<Tok<'_>> = Vec::new();
 	for (p, alts) in parts.iter().zip(&quirks) {
@@ -41,10 +44,10 @@ pub fn expand(parts: &[syn::WordPart]) -> Option<Vec<Vec<syn::WordPart>>> {
 		}
 	}
 	let mut out = Vec::new();
-	if !expand_toks(&toks, &mut out) {
-		return None;
+	if !expand_toks(&toks, &mut out)? {
+		return Ok(None);
 	}
-	Some(out.iter().map(|t| rebuild(t)).collect())
+	Ok(Some(out.iter().map(|t| rebuild(t)).collect()))
 }
 
 /// bash finds braces in the word as written with a naive quote tracker
@@ -55,16 +58,19 @@ pub fn expand(parts: &[syn::WordPart]) -> Option<Vec<Vec<syn::WordPart>>> {
 /// `${…}` inside double quotes (`"${x:-"{1,2}"}"`). The alternatives of
 /// such a double-quoted part, or `None`. An unquoted `${a["{1,2}"]}` keeps
 /// its quotes: bash skips `${`.
-fn quoted_alternatives(part: &syn::WordPart) -> Option<Vec<syn::WordPart>> {
+fn quoted_alternatives(part: &syn::WordPart) -> Result<Option<Vec<syn::WordPart>>, u128> {
 	quoted_alternatives_from(part, 0)
 }
 
 /// [`quoted_alternatives`] for the `${…}` at or after `inner[from]`: the
 /// first one expands, then (bash's postamble) each of its alternatives at
 /// the later ones; expanded text is not rescanned.
-fn quoted_alternatives_from(part: &syn::WordPart, from: usize) -> Option<Vec<syn::WordPart>> {
+fn quoted_alternatives_from(
+	part: &syn::WordPart,
+	from: usize,
+) -> Result<Option<Vec<syn::WordPart>>, u128> {
 	let syn::WordPart::DQuote(inner) = part else {
-		return None;
+		return Ok(None);
 	};
 	for (j, p) in inner.iter().enumerate().skip(from) {
 		let syn::WordPart::Param(param) = p else {
@@ -78,31 +84,30 @@ fn quoted_alternatives_from(part: &syn::WordPart, from: usize) -> Option<Vec<syn
 				let syn::WordPart::DQuote(q) = sub else {
 					continue;
 				};
-				let Some(alts) = expand(q) else {
+				let Some(alts) = expand(q)? else {
 					continue;
 				};
-				let mut alternatives = Vec::with_capacity(alts.len());
+				let posts = quoted_alternatives_from(part, j + 1)?;
+				check_count(alts.len() as u128 * posts.as_ref().map_or(1, Vec::len) as u128)?;
+				let mut alternatives = Vec::new();
 				for alt in alts {
-					let mut inner = inner.clone();
-					if let syn::WordPart::Param(param) = &mut inner[j]
-						&& let Some(word) = param_words_mut(param).into_iter().nth(w).flatten()
-					{
-						word.parts[k] = syn::WordPart::DQuote(alt);
-					}
-					let part = syn::WordPart::DQuote(inner);
-					match quoted_alternatives_from(&part, j + 1) {
-						Some(more) => alternatives.extend(more),
-						None => alternatives.push(part),
-					}
-					if alternatives.len() >= MAX_WORDS {
-						break;
+					for post in posts.as_deref().unwrap_or(std::slice::from_ref(part)) {
+						let syn::WordPart::DQuote(mut inner) = post.clone() else {
+							unreachable!("quoted alternatives stay double-quoted");
+						};
+						if let syn::WordPart::Param(param) = &mut inner[j]
+							&& let Some(word) = param_words_mut(param).into_iter().nth(w).flatten()
+						{
+							word.parts[k] = syn::WordPart::DQuote(alt.clone());
+						}
+						alternatives.push(syn::WordPart::DQuote(inner));
 					}
 				}
-				return Some(alternatives);
+				return Ok(Some(alternatives));
 			}
 		}
 	}
-	None
+	Ok(None)
 }
 
 /// The words of a `${…}`: the subscript, then the operator words.
@@ -144,7 +149,7 @@ const fn param_words_mut(p: &mut syn::Param) -> [Option<&mut syn::Word>; 3] {
 }
 
 /// Expand `toks` into `out`; `false` when nothing expanded.
-fn expand_toks<'a>(toks: &[Tok<'a>], out: &mut Vec<Vec<Tok<'a>>>) -> bool {
+fn expand_toks<'a>(toks: &[Tok<'a>], out: &mut Vec<Vec<Tok<'a>>>) -> Result<bool, u128> {
 	let mut start = 0;
 	while let Some(s) = toks[start..]
 		.iter()
@@ -154,14 +159,12 @@ fn expand_toks<'a>(toks: &[Tok<'a>], out: &mut Vec<Vec<Tok<'a>>>) -> bool {
 		if let Tok::Alts(_, alts) = toks[s] {
 			let rest = &toks[s + 1..];
 			let mut posts = Vec::new();
-			if !expand_toks(rest, &mut posts) {
+			if !expand_toks(rest, &mut posts)? {
 				posts.push(rest.to_vec());
 			}
+			check_count(out.len() as u128 + alts.len() as u128 * posts.len() as u128)?;
 			for alt in alts {
 				for post in &posts {
-					if out.len() >= MAX_WORDS {
-						return true;
-					}
 					let mut word = Vec::with_capacity(s + 1 + post.len());
 					word.extend_from_slice(&toks[..s]);
 					word.push(Tok::Atom(alt));
@@ -169,7 +172,7 @@ fn expand_toks<'a>(toks: &[Tok<'a>], out: &mut Vec<Vec<Tok<'a>>>) -> bool {
 					out.push(word);
 				}
 			}
-			return true;
+			return Ok(true);
 		}
 		let Some(e) = matching_close(toks, s) else {
 			// An unclosed `{` is literal; a later brace may still expand.
@@ -179,7 +182,7 @@ fn expand_toks<'a>(toks: &[Tok<'a>], out: &mut Vec<Vec<Tok<'a>>>) -> bool {
 		let inner = &toks[s + 1..e];
 		let (pieces, alternatives) = if let Some(p) = split_commas(inner) {
 			(p, true)
-		} else if let Some(p) = sequence(inner) {
+		} else if let Some(p) = sequence(inner)? {
 			(p, false)
 		} else {
 			// Neither alternatives nor a sequence: this brace is literal.
@@ -192,19 +195,20 @@ fn expand_toks<'a>(toks: &[Tok<'a>], out: &mut Vec<Vec<Tok<'a>>>) -> bool {
 		// `{{1..3}..{7..9}}` is `{1..7} {1..8} …`.
 		let rest = &toks[e + 1..];
 		let mut posts = Vec::new();
-		if !expand_toks(rest, &mut posts) {
+		if !expand_toks(rest, &mut posts)? {
 			posts.push(rest.to_vec());
+		}
+		if !alternatives {
+			check_count(out.len() as u128 + pieces.len() as u128 * posts.len() as u128)?;
 		}
 		for piece in pieces {
 			let mut items = Vec::new();
-			if !(alternatives && expand_toks(&piece, &mut items)) {
+			if !(alternatives && expand_toks(&piece, &mut items)?) {
 				items.push(piece);
 			}
+			check_count(out.len() as u128 + items.len() as u128 * posts.len() as u128)?;
 			for item in &items {
 				for post in &posts {
-					if out.len() >= MAX_WORDS {
-						return true;
-					}
 					let mut word = Vec::with_capacity(s + item.len() + post.len());
 					word.extend_from_slice(&toks[..s]);
 					word.extend_from_slice(item);
@@ -213,9 +217,17 @@ fn expand_toks<'a>(toks: &[Tok<'a>], out: &mut Vec<Vec<Tok<'a>>>) -> bool {
 				}
 			}
 		}
-		return true;
+		return Ok(true);
 	}
-	false
+	Ok(false)
+}
+
+fn check_count(count: u128) -> Result<(), u128> {
+	if count > MAX_WORDS as u128 {
+		Err(count)
+	} else {
+		Ok(())
+	}
 }
 
 /// A quoted empty string: bash re-reads brace-expanded text, so the `\`
@@ -267,20 +279,26 @@ fn split_commas<'a>(inner: &[Tok<'a>]) -> Option<Vec<Vec<Tok<'a>>>> {
 
 /// `x..y[..incr]` over integers (zero-padded when either end is) or single
 /// characters.
-fn sequence<'a>(inner: &[Tok<'a>]) -> Option<Vec<Vec<Tok<'a>>>> {
-	let text: Vec<u8> = inner
+fn sequence<'a>(inner: &[Tok<'a>]) -> Result<Option<Vec<Vec<Tok<'a>>>>, u128> {
+	let Some(text): Option<Vec<u8>> = inner
 		.iter()
 		.map(|t| match t {
 			Tok::Ch(c) => Some(*c),
 			Tok::Atom(_) | Tok::Alts(..) => None,
 		})
-		.collect::<Option<_>>()?;
+		.collect()
+	else {
+		return Ok(None);
+	};
 	let parts: Vec<&[u8]> = split_dots(&text);
 	if !(2..=3).contains(&parts.len()) {
-		return None;
+		return Ok(None);
 	}
 	let incr = match parts.get(2) {
-		Some(i) => parse_int(i)?,
+		Some(i) => match parse_int(i) {
+			Some(i) => i,
+			None => return Ok(None),
+		},
 		None => 1,
 	};
 	let step = incr.unsigned_abs().max(1);
@@ -298,11 +316,9 @@ fn sequence<'a>(inner: &[Tok<'a>]) -> Option<Vec<Vec<Tok<'a>>>> {
 			} else {
 				0
 			};
-			let count = a.abs_diff(b) / step + 1;
-			if count > MAX_WORDS as u64 {
-				return None;
-			}
-			(0..count)
+			let count = a.abs_diff(b) as u128 / step as u128 + 1;
+			check_count(count)?;
+			(0..count as u64)
 				.map(|k| {
 					let off = i64::try_from(k * step).unwrap_or(i64::MAX);
 					let v = if a <= b {
@@ -340,9 +356,9 @@ fn sequence<'a>(inner: &[Tok<'a>]) -> Option<Vec<Vec<Tok<'a>>>> {
 			}
 			out
 		},
-		_ => return None,
+		_ => return Ok(None),
 	};
-	Some(
+	Ok(Some(
 		items
 			.into_iter()
 			.map(|w| {
@@ -353,7 +369,7 @@ fn sequence<'a>(inner: &[Tok<'a>]) -> Option<Vec<Vec<Tok<'a>>>> {
 				}
 			})
 			.collect(),
-	)
+	))
 }
 
 /// Split at `..` (exactly two dots).
@@ -433,7 +449,7 @@ mod tests {
 	}
 
 	fn words(s: &str) -> Vec<String> {
-		match expand(&lit(s)) {
+		match expand(&lit(s)).unwrap() {
 			None => vec![s.to_owned()],
 			Some(alts) => alts
 				.into_iter()
@@ -489,7 +505,7 @@ mod tests {
 			syn::WordPart::SQuote(b"b,c".to_vec()),
 			syn::WordPart::Lit(b"}".to_vec()),
 		];
-		let alts = expand(&parts).unwrap();
+		let alts = expand(&parts).unwrap().unwrap();
 		assert_eq!(alts.len(), 2);
 		assert_eq!(alts[1], vec![syn::WordPart::SQuote(b"b,c".to_vec())]);
 	}
@@ -508,12 +524,16 @@ mod tests {
 	// prints `vx vy bazx bazy`.
 	#[test]
 	fn unbraced_names_absorb_expanded_name_characters() {
-		let alts = expand(&[var("var", false), syn::WordPart::Lit(b"{x,y-}".to_vec())]).unwrap();
+		let alts = expand(&[var("var", false), syn::WordPart::Lit(b"{x,y-}".to_vec())])
+			.unwrap()
+			.unwrap();
 		assert_eq!(alts, [vec![var("varx", false)], vec![
 			var("vary", false),
 			syn::WordPart::Lit(b"-".to_vec())
 		]]);
-		let alts = expand(&[var("var", true), syn::WordPart::Lit(b"{x,y}".to_vec())]).unwrap();
+		let alts = expand(&[var("var", true), syn::WordPart::Lit(b"{x,y}".to_vec())])
+			.unwrap()
+			.unwrap();
 		assert_eq!(alts[0], vec![var("var", true), syn::WordPart::Lit(b"x".to_vec())]);
 	}
 }

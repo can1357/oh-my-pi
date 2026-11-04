@@ -3,8 +3,8 @@
 use bstr::BString;
 
 use super::{
-	AssignOp, AssignVal, CaseIr, Cmd, ComsubForm, CondIr, ElemIr, FuncIr, NodeInfo, Op, OpIr,
-	Opcode, ParamIr, ParamRef, Part, RedirFdIr, RedirIr, RedirTargetIr, ReplaceIr, SpawnIr,
+	AssignOp, AssignVal, CaseIr, Cmd, ComsubForm, CondIr, ElemIr, FuncIr, LowerError, NodeInfo, Op,
+	OpIr, Opcode, ParamIr, ParamRef, Part, RedirFdIr, RedirIr, RedirTargetIr, ReplaceIr, SpawnIr,
 	SpawnKind, StageIr, SubIr, Unit, Word, WordKind,
 };
 use crate::bash::{
@@ -37,7 +37,7 @@ pub fn lower(
 	src: &[u8],
 	mode: ModeId,
 	features: syn::Features,
-) -> Result<Unit, &'static str> {
+) -> Result<Unit, LowerError> {
 	lower_command(cc, src, mode, features, false)
 }
 
@@ -47,7 +47,7 @@ pub(crate) fn lower_deferred(
 	src: &[u8],
 	mode: ModeId,
 	features: syn::Features,
-) -> Result<Unit, &'static str> {
+) -> Result<Unit, LowerError> {
 	lower_command(cc, src, mode, features, true)
 }
 
@@ -57,7 +57,7 @@ fn lower_command(
 	mode: ModeId,
 	features: syn::Features,
 	deferred: bool,
-) -> Result<Unit, &'static str> {
+) -> Result<Unit, LowerError> {
 	let bytes = cc.span.slice(src);
 	let mut unit = Unit::empty(bytes, mode, features.bits());
 	unit.line = cc.line;
@@ -94,7 +94,7 @@ pub fn lower_text(
 	text: &[u8],
 	mode: ModeId,
 	features: syn::Features,
-) -> Result<Unit, &'static str> {
+) -> Result<Unit, LowerError> {
 	let mut l = Lower::new(Unit::empty(text, mode, features.bits()), 0, features);
 	l.text = true;
 	l.emit(Opcode::End, 0, 0, 0);
@@ -117,14 +117,14 @@ pub fn lower_compound(
 	src: &[u8],
 	mode: ModeId,
 	features: syn::Features,
-) -> Result<Unit, &'static str> {
+) -> Result<Unit, LowerError> {
 	const NOT_A_LIST: &str = "a compound array value that is not one word list";
 	let [item] = cc.list.items.as_slice() else {
-		return Err(NOT_A_LIST);
+		return Err(NOT_A_LIST.into());
 	};
 	let and_or = &item.and_or;
 	let [stage] = and_or.first.stages.as_slice() else {
-		return Err(NOT_A_LIST);
+		return Err(NOT_A_LIST.into());
 	};
 	let (syn::CommandKind::Simple(simple), [], [], None, false) = (
 		&stage.cmd.kind,
@@ -133,14 +133,14 @@ pub fn lower_compound(
 		and_or.first.time,
 		and_or.first.bang,
 	) else {
-		return Err(NOT_A_LIST);
+		return Err(NOT_A_LIST.into());
 	};
 	let elems = match (simple.assigns.as_slice(), simple.words.as_slice()) {
 		([], [_, arg]) => match arg.parts.as_slice() {
 			[syn::WordPart::Lit(_), syn::WordPart::Compound(elems)] => elems,
-			_ => return Err(NOT_A_LIST),
+			_ => return Err(NOT_A_LIST.into()),
 		},
-		_ => return Err(NOT_A_LIST),
+		_ => return Err(NOT_A_LIST.into()),
 	};
 	let mut unit = Unit::empty(cc.span.slice(src), mode, features.bits());
 	unit.nodes = vec![
@@ -325,8 +325,8 @@ struct Lower {
 	text:          bool,
 }
 
-type R = Result<(), &'static str>;
-type Idx = Result<u32, &'static str>;
+type R = Result<(), LowerError>;
+type Idx = Result<u32, LowerError>;
 
 impl Lower {
 	fn new(unit: Unit, base: u32, features: syn::Features) -> Self {
@@ -826,7 +826,7 @@ impl Lower {
 
 	/// Compile a function body (a compound command) defined by the command
 	/// with node `root`: a unit sharing this unit's source and node ids.
-	fn func_body(&mut self, root: u32, cmd: &syn::Command) -> Result<Unit, &'static str> {
+	fn func_body(&mut self, root: u32, cmd: &syn::Command) -> Result<Unit, LowerError> {
 		let mut body = Unit::empty(&self.unit.source, self.unit.mode, self.unit.features);
 		body.aliases.clone_from(&self.unit.aliases);
 		body.nodes.clone_from(&self.unit.nodes);
@@ -974,7 +974,7 @@ impl Lower {
 		Ok(idx)
 	}
 
-	fn elems(&mut self, elems: &[syn::ArrayElem]) -> Result<Vec<ElemIr>, &'static str> {
+	fn elems(&mut self, elems: &[syn::ArrayElem]) -> Result<Vec<ElemIr>, LowerError> {
 		elems
 			.iter()
 			.map(|e| {
@@ -1081,8 +1081,24 @@ impl Lower {
 		// Run-time parsed text (here-document bodies, arithmetic) gets no
 		// brace expansion; its unit's last word must stay the text itself.
 		if !self.text
-			&& let Some(alts) = super::brace::expand(&w.parts)
-		{
+			&& let Some(alts) = super::brace::expand(&w.parts).map_err(|count| {
+				let mut msg = b"brace expansion: `".to_vec();
+				for &byte in w.span.rebase(self.base).slice(&self.unit.source) {
+					match byte {
+						b'\n' => msg.extend_from_slice(b"\\n"),
+						b'\r' => msg.extend_from_slice(b"\\r"),
+						_ => msg.push(byte),
+					}
+				}
+				msg.extend_from_slice(
+					format!(
+						"' would make at least {count} words, over the limit of {}",
+						super::brace::MAX_WORDS
+					)
+					.as_bytes(),
+				);
+				LowerError::Syntax(msg.into())
+			})? {
 			let mut indices = Vec::with_capacity(alts.len());
 			for parts in alts {
 				let alt = syn::Word { id: w.id, span: w.span, parts };
@@ -1267,7 +1283,7 @@ impl Lower {
 		Ok(())
 	}
 
-	fn param(&mut self, p: &syn::Param, quoted: bool) -> Result<ParamIr, &'static str> {
+	fn param(&mut self, p: &syn::Param, quoted: bool) -> Result<ParamIr, LowerError> {
 		let param = match &p.name {
 			syn::ParamName::Var(n) => ParamRef::Var(n.as_slice().into()),
 			syn::ParamName::Positional(n) => ParamRef::Positional(*n),

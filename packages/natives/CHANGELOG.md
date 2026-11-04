@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed large brace expansions returning literal text or silently dropping words: expansions support up to 4,194,304 words and report an error above that limit
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
 ### Fixed
 
