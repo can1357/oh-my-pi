@@ -627,9 +627,22 @@ const FETCH_PROVIDER_ORDER: readonly FetchProvider[] = [
 
 /** Reader backends that fetch the URL from their own servers, so a wall refusing this host may let them in. */
 const REMOTE_FETCH_PROVIDERS: readonly FetchProvider[] = ["parallel", "firecrawl", "jina"];
-/** Block or JavaScript-gate wording a remote reader may be served; a short rendering holding one is that page. */
-const BLOCK_PAGE_RE =
-	/blocked by network security|verify you are human|are you a robot|access to this page has been denied|enable javascript|javascript required/i;
+/** Wording of a page that shows nothing until JavaScript runs. */
+const JS_GATE_PHRASES = [
+	"enable javascript",
+	"javascript required",
+	"turn on javascript",
+	"please enable javascript",
+	"browser not supported",
+];
+/** Bot-wall wording a remote reader may be served; a short rendering holding it, or a gate's, is that page. */
+const BLOCK_PAGE_PHRASES = [
+	"blocked by network security",
+	"verify you are human",
+	"are you a robot",
+	"access to this page has been denied",
+	...JS_GATE_PHRASES,
+];
 const BLOCK_PAGE_MAX_CHARS = 2048;
 
 /**
@@ -748,12 +761,10 @@ export async function renderHtmlToText(
 			const content = stripDataUriImages(rendered);
 			if (content.trim().length <= MIN_RENDERED_CHARS) continue;
 			// A remote reader's copy of a block page is no rendering at all, so later readers still run.
-			if (
-				REMOTE_FETCH_PROVIDERS.includes(method) &&
-				content.length <= BLOCK_PAGE_MAX_CHARS &&
-				BLOCK_PAGE_RE.test(content)
-			)
-				continue;
+			if (REMOTE_FETCH_PROVIDERS.includes(method) && content.length <= BLOCK_PAGE_MAX_CHARS) {
+				const lower = content.toLowerCase();
+				if (BLOCK_PAGE_PHRASES.some(phrase => lower.includes(phrase))) continue;
+			}
 			if (!isLowQualityOutput(content, method)) {
 				return { content, ok: true, method };
 			}
@@ -786,14 +797,7 @@ function isLowQualityOutput(content: string, method: string): boolean {
 	const lower = content.toLowerCase();
 
 	// JS-gated indicators
-	const jsGated = [
-		"enable javascript",
-		"javascript required",
-		"turn on javascript",
-		"please enable javascript",
-		"browser not supported",
-	];
-	if (content.length < 1024 && jsGated.some(t => lower.includes(t))) {
+	if (content.length < 1024 && JS_GATE_PHRASES.some(t => lower.includes(t))) {
 		return true;
 	}
 
