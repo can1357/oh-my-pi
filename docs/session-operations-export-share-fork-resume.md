@@ -575,8 +575,9 @@ too. `/restart` records an idle subagent that holds such a result or message, an
 the relaunch gives it a turn whose note carries them; a result owed to the root
 is delivered to the root again. A record file that cannot be read is not
 consumed: the TUI reports it, and the next start reads it again. When a recorded
-subagent does not go on, for any reason, the root receives the messages and
-results it carried and had not read, with the reason.
+subagent does not go on, for any reason, or its resumed turn ends before the
+restart note reaches its conversation (its revival failed, for one), the root
+receives the messages and results it carried and had not read, with the reason.
 
 A subagent counts as finished only when its transcript ends in a final answer or
 an accepted `yield`; one whose last turn failed (a provider retry was waiting to

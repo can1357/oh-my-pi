@@ -624,7 +624,7 @@ it("delivers to the root the result an idle lane carried when the lane cannot be
 			const forwarded = third
 				.asyncJobManager!.getAllJobs({ ownerId: MAIN_AGENT_ID })
 				.find(job => job.agentId === "Lane");
-			expect(forwarded?.resultText).toContain("did not resume Lane");
+			expect(forwarded?.resultText).toContain("transcript was not found");
 			expect(forwarded?.resultText).toContain("Arm resumed");
 		} finally {
 			await third.dispose();
@@ -671,6 +671,38 @@ describe("transcriptWasInterrupted", () => {
 		expect(transcriptWasInterrupted([toolResult("yield", false)])).toBe(false);
 	});
 });
+
+it("delivers to the root what a subagent carried when its revival fails after the record is consumed", async () => {
+	notesSeen.clear();
+	const { cwd, authStorage, open } = await harness();
+	try {
+		const mainFile = await runUntilRestart(open, cwd, true);
+		const second = await open(await SessionManager.open(mainFile));
+		try {
+			const lifecycle = AgentLifecycleManager.global();
+			const ensureLive = lifecycle.ensureLive.bind(lifecycle);
+			vi.spyOn(lifecycle, "ensureLive").mockImplementation(async id => {
+				if (id === "Alpha") throw new Error("revival failed for the test");
+				return ensureLive(id);
+			});
+			expect((await resumeRestartedSubagents(second)).resumed).toContain("Alpha");
+			const manager = second.asyncJobManager!;
+			await manager.getJob("Alpha")!.promise.catch(() => undefined);
+			expect(manager.getJob("Alpha")!.status).toBe("failed");
+			// Alpha never read the message queued for it; the root has it whole, with the reason.
+			const forwarded = manager
+				.getAllJobs({ ownerId: MAIN_AGENT_ID })
+				.find(job => job.agentId === "Alpha" && job.id !== "Alpha");
+			expect(forwarded?.resultText).toContain("before the restart note reached it");
+			expect(forwarded?.resultText).toContain(LONG_MESSAGE);
+			expect(notesSeen.has("Alpha")).toBe(false);
+		} finally {
+			await second.dispose();
+		}
+	} finally {
+		authStorage.close();
+	}
+}, 90_000);
 
 it("without the restart record, no subagent continues after the relaunch (what `/restart` did before)", async () => {
 	notesSeen.clear();

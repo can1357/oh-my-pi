@@ -110,6 +110,24 @@ function mergeUnique<T>(earlier: readonly T[], later: readonly T[]): T[] {
 	return [...earlier.filter(item => !seen.has(JSON.stringify(item))), ...later];
 }
 
+/**
+ * How many messages of the subagent's conversation carry the restart note `note`, or
+ * undefined when the session cannot be read. The note landed when a turn added one; a
+ * copy an earlier restart left with the same text does not count.
+ */
+function noteCopies(live: AgentSessionHandle | undefined, note: string | undefined): number | undefined {
+	if (!live || note === undefined) return undefined;
+	try {
+		return live.messages.filter(
+			message =>
+				(message.role === "user" || message.role === "developer" || message.role === "custom") &&
+				contentText(message.content).includes(note),
+		).length;
+	} catch {
+		return undefined;
+	}
+}
+
 function contentText(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
@@ -589,8 +607,35 @@ export async function resumeRestartedSubagents(
 		else contracts.push({ sub, ref, init });
 	}
 	consume();
-	// The root's own unread results died with the old process's delivery queue.
 	const rootId = session.getAgentId?.() ?? MAIN_AGENT_ID;
+	/**
+	 * Deliver to the root what `sub` carried (messages to it, results of its jobs) that
+	 * it never read, with the reason, when it will not read them itself: it is not
+	 * resumed, or its resumed turn ended before the note carrying them reached it. The
+	 * results are then marked read so a later restart does not deliver them again.
+	 */
+	const forwardCarried = (sub: RestartSubagent, reason: string): void => {
+		if (sub.unreadResults.length === 0 && sub.pendingMessages.length === 0) return;
+		const parts = [
+			`${sub.id} will not read what it had not read yet (${reason}), so it is delivered here.`,
+			...(sub.pendingMessages.length > 0
+				? [`Messages to ${sub.id} that it never read:\n${bulletList(sub.pendingMessages)}`]
+				: []),
+			...(sub.unreadResults.length > 0
+				? [
+						`Results of ${sub.id}'s jobs that it never read:\n${bulletList(sub.unreadResults.map(result => `${result.id}: ${result.text}`))}`,
+					]
+				: []),
+		];
+		manager.publishCompleted(
+			"task",
+			`${sub.id} (unread input after restart)`,
+			{ text: parts.join("\n\n") },
+			{ ownerId: rootId, agentId: sub.id },
+		);
+		manager.consumeJobResults(sub.unreadResults.map(result => result.id).filter(jobId => manager.getJob(jobId)));
+	};
+	// The root's own unread results died with the old process's delivery queue.
 	const seenRootResults = new Set<string>();
 	for (const result of rootUnreadResults) {
 		if (seenRootResults.has(result.id)) continue;
@@ -614,27 +659,33 @@ export async function resumeRestartedSubagents(
 				"task",
 				sub.id,
 				async ({ signal }) => {
+					let live: AgentSessionHandle | undefined;
+					let note: string | undefined;
+					let failure: string | undefined;
+					let copiesBefore: number | undefined;
 					try {
-						const live = await AgentLifecycleManager.global().ensureLive(sub.id);
+						live = await AgentLifecycleManager.global().ensureLive(sub.id);
 						// A revived subagent is homed on this thread; a remote handle exposes no tool list.
 						const available = isLocalAgentSession(live)
 							? new Set([...live.getAllToolNames(), ...live.getMountedXdevToolNames()])
 							: undefined;
 						const missingTools = available ? init.tools.filter(name => !available.has(name)) : [];
 						const children = subagents.filter(child => child.parentId === sub.id);
+						note = buildRestartNote({
+							subagent: sub,
+							resumedChildren: children
+								.filter(child => outcome.resumed.includes(child.id))
+								.map(child => child.id),
+							notResumedChildren: outcome.notResumed.filter(entry =>
+								children.some(child => child.id === entry.id),
+							),
+							missingTools,
+						});
+						copiesBefore = noteCopies(live, note);
 						const result = await runSubagentFollowUpTurn({
 							id: sub.id,
 							agent: persistedAgentDefinition(ref.displayName, init),
-							message: buildRestartNote({
-								subagent: sub,
-								resumedChildren: children
-									.filter(child => outcome.resumed.includes(child.id))
-									.map(child => child.id),
-								notResumedChildren: outcome.notResumed.filter(entry =>
-									children.some(child => child.id === entry.id),
-								),
-								missingTools,
-							}),
+							message: note,
 							structured,
 							workPoolYieldItems: init.workPoolYieldItems,
 							outputSchema: init.outputSchema,
@@ -704,8 +755,23 @@ export async function resumeRestartedSubagents(
 							throw new AsyncJobError(text, structuredOutput);
 						}
 						return structuredOutput ? { text, structured: structuredOutput } : text;
+					} catch (error) {
+						failure = error instanceof Error ? error.message : String(error);
+						throw error;
 					} finally {
 						resumesInFlight.delete(sub.id);
+						// The note carries what the subagent had not read. If it never reached the
+						// subagent's conversation (its revival or the turn failed first), the root
+						// gets those instead; once it did, the subagent has them.
+						const after = noteCopies(live, note);
+						if (after === undefined || copiesBefore === undefined || after <= copiesBefore) {
+							forwardCarried(
+								sub,
+								failure
+									? `its resumed turn failed before the restart note reached it: ${failure}`
+									: "its resumed turn ended before the restart note reached it",
+							);
+						}
 					}
 				},
 				{ id: sub.id, agentId: sub.id, ownerId: ref.parentId },
@@ -720,31 +786,11 @@ export async function resumeRestartedSubagents(
 			});
 		}
 	}
-	// What a subagent that does not go on carried (results of its jobs, messages to it)
-	// has no other copy: the root receives it, with the reason. A record left unread
-	// for the next start keeps its own (its subagents are not in `byId`).
+	// What a subagent that does not go on carried has no other copy (see `forwardCarried`).
+	// A record left unread for the next start keeps its own (its subagents are not in `byId`).
 	for (const { id, reason } of outcome.notResumed) {
 		const sub = byId.get(id);
-		if (!sub || (sub.unreadResults.length === 0 && sub.pendingMessages.length === 0)) continue;
-		const parts = [
-			`The restart did not resume ${id} (${reason}), so what it had not read yet is delivered here.`,
-			...(sub.pendingMessages.length > 0
-				? [`Messages to ${id} that it never read:\n${bulletList(sub.pendingMessages)}`]
-				: []),
-			...(sub.unreadResults.length > 0
-				? [
-						`Results of ${id}'s jobs that it never read:\n${bulletList(sub.unreadResults.map(result => `${result.id}: ${result.text}`))}`,
-					]
-				: []),
-		];
-		manager.publishCompleted(
-			"task",
-			`${id} (not resumed after restart)`,
-			{ text: parts.join("\n\n") },
-			{ ownerId: rootId, agentId: id },
-		);
-		// The root has the results now: a later restart must not deliver them again.
-		manager.consumeJobResults(sub.unreadResults.map(result => result.id).filter(jobId => manager.getJob(jobId)));
+		if (sub) forwardCarried(sub, `the restart did not resume it: ${reason}`);
 	}
 	if (outcome.resumed.length > 0 || outcome.notResumed.length > 0) {
 		logger.info("Resumed subagents after restart", { resumed: outcome.resumed, notResumed: outcome.notResumed });
