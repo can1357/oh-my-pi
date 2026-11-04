@@ -24,6 +24,16 @@ Captured branch preserved as {{branchName}}.
 {{/if}}
 {{#list nestedPatchPaths prefix="- nested repository patch: `" suffix="`"}}{{this}}{{/list}}
 {{/when}}
+{{#when kind "==" "failed-run"}}
+Isolation: the failed run's changes were captured, not applied.
+{{#if branchName}}
+- branch: `{{branchName}}`
+{{/if}}
+{{#if rootPatchPath}}
+- patch: `{{rootPatchPath}}`
+{{/if}}
+{{#list nestedPatchPaths prefix="- nested repository patch: `" suffix="`"}}{{this}}{{/list}}
+{{/when}}
 {{#when kind "==" "nested-apply-failed"}}
 <system-notification>Some nested repository patches failed to apply: {{error}}{{#if nestedPatchPaths}}
 Captured nested patches preserved at:

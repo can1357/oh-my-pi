@@ -1121,6 +1121,15 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			});
 		} else if (policy.isIsolated && isolationContext && !policy.applyChanges) {
 			mergeSummary = describeCapturedChanges(result);
+		} else if (policy.isIsolated && isolationContext && requiresRecoveryArtifacts) {
+			// The runner captured a failed run's changes instead of applying them;
+			// this is where the parent learns where they are.
+			mergeSummary = renderIsolationSummary({
+				kind: "failed-run",
+				branchName: result.branchName,
+				rootPatchPath: result.hasRootChanges === false ? undefined : result.patchPath,
+				nestedPatchPaths: result.nestedPatchPaths ?? [],
+			});
 		}
 
 		completedSuccessfully = result.exitCode === 0 && !result.error && !result.aborted;

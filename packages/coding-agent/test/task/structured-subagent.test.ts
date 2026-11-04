@@ -1343,6 +1343,8 @@ describe("structured subagent primitive", () => {
 
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
 		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
+		// The task result is the parent's only pointer to the failed run's changes.
+		expect(settled.mergeSummary).toContain("/recovery/Worker.patch");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
