@@ -1,174 +1,101 @@
 /**
- * Windsurf Enterprise login for Devin seats: `login "custom" hook="devin-windsurf"`.
- *
- * The declarative `devin` rule mints a Devin-native token through app.devin.ai,
- * which legacy Windsurf Enterprise seats cannot complete (the continue endpoint
- * bounces unauthenticated browsers to app.devin.ai login, and its Windsurf
- * bridge does not return to the CLI callback). This hook drives the Windsurf
- * editor authorize endpoint directly, so only a Windsurf (Enterprise) browser
- * session is required; `store-as "devin"` routes the minted raw key through
- * the normal devin provider plumbing.
+ * `login "custom" hook="devin-windsurf"`: Windsurf Enterprise seats cannot finish
+ * the Devin-native app.devin.ai flow, so this drives the Windsurf editor
+ * authorize page (PKCE + loopback callback) and exchanges the code for the
+ * seat's raw API key, the same key the Devin CLI stores. `store-as "devin"`
+ * files it as a `devin` API key.
  */
-import type { FetchImpl } from "../../types";
+import {
+	ExchangePKCEAuthorizationCodeRequestSchema,
+	ExchangePKCEAuthorizationCodeResponseSchema,
+} from "@oh-my-pi/pi-catalog/discovery/devin-proto";
+import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
+import { DEVIN_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/wire/devin";
+import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
 import * as AIError from "../../error";
 import { OAuthCallbackFlow } from "./callback-server";
 import { generatePKCE } from "./pkce";
-import type { OAuthCredentials, OAuthController } from "./types";
+import type { OAuthController, OAuthCredentials } from "./types";
 
-const WINDSURF_AUTHORIZE_URL = "https://windsurf.com/editor/signin";
-const WINDSURF_EXCHANGE_URL =
-	"https://server.codeium.com/exa.seat_management_pb.SeatManagementService/ExchangePKCEAuthorizationCode";
-const DEFAULT_API_ENDPOINT = "https://server.enterprise.windsurf.com";
+const AUTHORIZE_URL = "https://windsurf.com/editor/signin";
+const EXCHANGE_PATH = "/exa.seat_management_pb.SeatManagementService/ExchangePKCEAuthorizationCode";
+/** Loopback port the official Devin CLI uses for this flow. */
 const CALLBACK_PORT = 59654;
-const FALLBACK_EXPIRES_MS = 365 * 24 * 60 * 60 * 1000;
 
-export interface WindsurfExchange {
-	apiKey: string;
-	userName: string;
-	apiEndpoint: string;
-}
-
-class DevinWindsurfOAuthFlow extends OAuthCallbackFlow {
-	#pkce?: { verifier: string; challenge: string };
+class DevinWindsurfFlow extends OAuthCallbackFlow {
+	#verifier = "";
 
 	constructor(ctrl: OAuthController) {
 		super(ctrl, { preferredPort: CALLBACK_PORT, callbackHostname: "127.0.0.1" });
 	}
 
+	/** Same state format as the official CLI. */
 	override generateState(): string {
 		return crypto.randomUUID();
 	}
 
 	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
-		this.#pkce = await generatePKCE();
+		const { verifier, challenge } = await generatePKCE();
+		this.#verifier = verifier;
 		const params = new URLSearchParams({
 			response_type: "code",
 			redirect_uri: redirectUri,
 			state,
-			code_challenge: this.#pkce.challenge,
+			code_challenge: challenge,
 			code_challenge_method: "S256",
 			prompt: "login",
 			redirect_parameters_type: "query",
 		});
 		return {
-			url: `${WINDSURF_AUTHORIZE_URL}?${params.toString()}`,
+			url: `${AUTHORIZE_URL}?${params}`,
 			instructions: "Sign in with your Windsurf (Enterprise) account in your browser.",
 		};
 	}
 
+	/** The seat key neither expires nor refreshes; the hook keeps only `access`. */
 	async exchangeToken(code: string): Promise<OAuthCredentials> {
-		if (!this.#pkce) {
-			throw new AIError.OAuthError("Devin Windsurf PKCE verifier was not initialized", {
-				kind: "configuration",
-				provider: "devin-windsurf",
-			});
-		}
-		const exchange = await exchangeWindsurfPkceCode(code, this.#pkce.verifier, this.ctrl.fetch);
-		return {
-			access: exchange.apiKey,
-			refresh: exchange.apiKey,
-			expires: Date.now() + FALLBACK_EXPIRES_MS,
-			apiEndpoint: exchange.apiEndpoint,
-			orgName: exchange.userName || undefined,
-		};
+		const access = await exchangeWindsurfCode(code, this.#verifier, this.ctrl);
+		return { access, refresh: "", expires: Number.POSITIVE_INFINITY };
 	}
 }
 
-/** Encode a Connect-unary protobuf message of two length-delimited string fields. */
-function encodeTwoStringProto(fieldOne: string, fieldTwo: string): Uint8Array {
-	const chunks: number[] = [];
-	for (const [field, value] of [
-		[1, fieldOne],
-		[2, fieldTwo],
-	] as const) {
-		chunks.push((field << 3) | 2);
-		let length = value.length;
-		while (length > 0x7f) {
-			chunks.push((length & 0x7f) | 0x80);
-			length >>>= 7;
-		}
-		chunks.push(length);
-		for (let index = 0; index < value.length; index++) chunks.push(value.charCodeAt(index));
-	}
-	return Uint8Array.from(chunks);
-}
-
-/** Decode a protobuf message of length-delimited string fields keyed by field number. */
-function decodeStringProto(data: Uint8Array): Record<number, string> {
-	const fields: Record<number, string> = {};
-	const decoder = new TextDecoder();
-	let offset = 0;
-	while (offset < data.length) {
-		const tag = data[offset++];
-		const field = tag >>> 3;
-		if ((tag & 7) !== 2) {
-			throw new AIError.OAuthError("Unexpected wire type in Windsurf exchange response", {
-				kind: "validation",
-				provider: "devin-windsurf",
-			});
-		}
-		let length = 0;
-		let shift = 0;
-		let byte: number;
-		do {
-			byte = data[offset++];
-			length |= (byte & 0x7f) << shift;
-			shift += 7;
-		} while (byte & 0x80);
-		fields[field] = decoder.decode(data.subarray(offset, offset + length));
-		offset += length;
-	}
-	return fields;
-}
-
-export async function exchangeWindsurfPkceCode(
+/** Exchanges an authorization code for the seat's raw API key (`sk-ws-…`). */
+export async function exchangeWindsurfCode(
 	code: string,
-	codeVerifier: string,
-	fetchImpl: FetchImpl = fetch,
-): Promise<WindsurfExchange> {
-	const response = await fetchImpl(WINDSURF_EXCHANGE_URL, {
+	verifier: string,
+	ctrl: Pick<OAuthController, "fetch" | "signal">,
+): Promise<string> {
+	const request = create(ExchangePKCEAuthorizationCodeRequestSchema, {
+		authorizationCode: code,
+		codeVerifier: verifier,
+	});
+	const response = await (ctrl.fetch ?? fetch)(`${DEVIN_DEFAULT_BASE_URL}${EXCHANGE_PATH}`, {
 		method: "POST",
-		headers: {
-			"Content-Type": "application/proto",
-			"Connect-Protocol-Version": "1",
-			Accept: "*/*",
-		},
-		body: encodeTwoStringProto(code, codeVerifier),
+		// Any other content type is answered with 200 and an empty body.
+		headers: { "content-type": "application/proto", "connect-protocol-version": "1", accept: "*/*" },
+		body: toBinary(ExchangePKCEAuthorizationCodeRequestSchema, request),
+		signal: ctrl.signal,
 	});
 	if (!response.ok) {
-		// The error body is a detail, not the failure: an unreadable stream must
-		// not replace the OAuthError with a raw read error.
-		let detail = "";
-		try {
-			detail = await response.text();
-		} catch {
-			detail = "<unreadable>";
-		}
-		throw new AIError.OAuthError(`Windsurf PKCE exchange failed: ${response.status} ${detail}`.trim(), {
-			kind: "validation",
+		const detail = await response.text().catch(() => "");
+		throw new AIError.OAuthError(`Windsurf code exchange failed: ${response.status} ${detail}`.trim(), {
+			kind: "token-exchange",
 			provider: "devin-windsurf",
 			status: response.status,
 		});
 	}
-	const fields = decodeStringProto(new Uint8Array(await response.arrayBuffer()));
-	if (!fields[1]) {
-		throw new AIError.OAuthError("Windsurf PKCE exchange response omitted the session key", {
+	const body = new Uint8Array(await response.arrayBuffer());
+	const apiKey = decodeDevinUnaryMessage(ExchangePKCEAuthorizationCodeResponseSchema, body)?.apiKey;
+	if (!apiKey) {
+		throw new AIError.OAuthError("Windsurf code exchange returned no API key", {
 			kind: "validation",
 			provider: "devin-windsurf",
 		});
 	}
-	// The exchange returns the `g`-prefixed wire form of the key (gsk-ws-01-...);
-	// Windsurf RPCs authenticate with the unprefixed key, which is also what the
-	// official CLI persists in credentials.toml.
-	const apiKey = fields[1].startsWith("gsk-") ? fields[1].slice(1) : fields[1];
-	return {
-		apiKey,
-		userName: fields[2] ?? "",
-		apiEndpoint: fields[3] || DEFAULT_API_ENDPOINT,
-	};
+	// The exchange returns the `g`-prefixed wire form (`gsk-ws-…`); RPCs authenticate with the raw key.
+	return apiKey.startsWith("gsk-") ? apiKey.slice(1) : apiKey;
 }
 
-export async function loginDevinWindsurfHook(callbacks: OAuthController): Promise<OAuthCredentials> {
-	const flow = new DevinWindsurfOAuthFlow(callbacks);
-	return flow.login();
+export async function loginDevinWindsurfHook(ctrl: OAuthController): Promise<string> {
+	return (await new DevinWindsurfFlow(ctrl).login()).access;
 }
