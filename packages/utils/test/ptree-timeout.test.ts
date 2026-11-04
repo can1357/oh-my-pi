@@ -595,13 +595,16 @@ describe.skipIf(process.platform !== "linux")("ptree subreaper stop", () => {
 		it(`lets the caller's process exit once the stop is over when ${name}`, async () => {
 			// The stop runs in a fresh Bun process with a 10 s grace period. Once
 			// wait() has settled, nothing of the stop may keep that process alive.
+			// For the hard kill, the command ignores SIGTERM, so only the hard kill
+			// ends the grace period.
 			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-subreaper-stop-"));
 			const pidFile = path.join(dir, "pid");
 			const script = path.join(dir, "stop.ts");
+			const onTerm = escalate ? `trap "" TERM` : `trap 'exit 0' TERM`;
 			await Bun.write(
 				script,
 				`import { AbortError, spawn } from ${JSON.stringify(path.join(import.meta.dir, "../src/ptree.ts"))};
-const child = spawn(["/bin/sh", "-c", ${JSON.stringify(`trap 'exit 0' TERM; echo $$ > '${pidFile}'; sleep 3600 & wait`)}], { subreaper: true });
+const child = spawn(["/bin/sh", "-c", ${JSON.stringify(`${onTerm}; echo $$ > '${pidFile}'; sleep 3600 & wait`)}], { subreaper: true });
 const outcome = child.wait().catch(() => {});
 while (!(await Bun.file(${JSON.stringify(pidFile)}).text().catch(() => ""))) await Bun.sleep(10);
 child.kill(new AbortError(new Error("stop"), ""), 10_000);
