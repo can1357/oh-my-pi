@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `omp agent attach <agent-id>` to view and steer a live task subagent from another terminal, abort its current work, or detach without stopping it
+- Added `omp agent attach <agent-id>` to view and steer a live task subagent from another terminal, abort its current work, or detach without stopping it ([#18099](https://github.com/can1357/oh-my-pi/pull/18099) by [@mark-major](https://github.com/mark-major))
 - Added opt-in auto-update (`update.auto`, offered by a new setup wizard step): a launch that finds a newer release installs it in the background through whatever installed omp (standalone binary, Homebrew, mise, bun, npm), shows the version and download progress beside the welcome banner's version, and the next launch runs it. Quitting mid-update does not interrupt it. Skipped under Tern, which updates its omp itself, and on Nix and source checkouts
 - `omp update` now refuses to start while another update (including a background auto-update) is installing, instead of running two installers at once
 - Added `none` to `edit.mode` (and `PI_EDIT_VARIANT`): it removes the `edit` tool and keeps `bash` available even when `bash.enabled` is off
