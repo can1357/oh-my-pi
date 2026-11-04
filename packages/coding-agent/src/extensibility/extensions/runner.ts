@@ -1361,78 +1361,64 @@ export class ExtensionRunner {
 		this.runtime.flagValues.set(name, value);
 	}
 
-	static readonly #RESERVED_SHORTCUTS: Record<string, true> = {
-		"ctrl+c": true,
-		"ctrl+d": true,
-		"ctrl+z": true,
-		"ctrl+k": true,
-		"ctrl+p": true,
-		"ctrl+l": true,
-		"ctrl+o": true,
-		"ctrl+t": true,
-		"ctrl+g": true,
-		"alt+m": true,
-		// Default chord for `app.message.followUp` (Windows Terminal can't deliver Ctrl+Enter; #1903).
-		"ctrl+q": true,
-		"shift+tab": true,
-		"shift+ctrl+p": true,
-		"alt+enter": true,
-		escape: true,
-		enter: true,
-	};
-
-	/** {@link #RESERVED_SHORTCUTS} in canonical form, shared by {@link getShortcuts} and the conflict check. */
-	static readonly #RESERVED_CHORDS: ReadonlySet<string> = new Set(
-		Object.keys(ExtensionRunner.#RESERVED_SHORTCUTS).map(canonicalKeyId),
+	/** Chords omp keeps for itself, canonicalized so every modifier spelling matches. */
+	static readonly #RESERVED_SHORTCUTS: ReadonlySet<string> = new Set(
+		[
+			"ctrl+c",
+			"ctrl+d",
+			"ctrl+z",
+			"ctrl+k",
+			"ctrl+p",
+			"ctrl+l",
+			"ctrl+o",
+			"ctrl+t",
+			"ctrl+g",
+			"alt+m",
+			// Default chord for `app.message.followUp` (Windows Terminal can't deliver Ctrl+Enter; #1903).
+			"ctrl+q",
+			"shift+tab",
+			"shift+ctrl+p",
+			"alt+enter",
+			"escape",
+			"enter",
+		].map(canonicalKeyId),
 	);
-
-	/** omp's default keymap, for sessions whose host supplied none (print, RPC, ACP, SDK). */
-	static #defaultKeybindings: KeybindingsManager | undefined;
 
 	static readonly #APP_KEYBINDINGS: readonly AppKeybinding[] = Object.keys(KEYBINDINGS).filter(
 		(id): id is AppKeybinding => id.startsWith("app."),
 	);
 
-	/**
-	 * Actions whose dialogs still take Ctrl+Enter when the user empties their key list (the approval dialog; follow-up
-	 * in the hook editor and agents hub), read through the matchers' own helpers. The other unbound fallbacks
-	 * (Escape, Ctrl+O, Ctrl+G) are reserved chords.
-	 */
-	static readonly #UNBOUND_FALLBACK_KEYS: Partial<
-		Record<AppKeybinding, (keybindings: KeybindingsManager) => readonly KeyId[]>
-	> = {
-		"app.approval.approve": appApproveKeys,
-		"app.message.followUp": appFollowUpKeys,
-	};
+	/** Default keymap for sessions without a TUI (print, RPC, ACP, SDK). */
+	static #defaultKeybindings: KeybindingsManager | undefined;
 
 	/** Backs `ExtensionAPI.getShortcutConflict`; `extensionPath`'s own registrations are not conflicts. */
 	getShortcutConflict(shortcut: KeyId, extensionPath?: string): ShortcutConflict | undefined {
-		// Lowercased first, as `getShortcuts` and the keymap do before binding a key.
 		const lowered = shortcut.toLowerCase() as KeyId;
-		if (ExtensionRunner.#RESERVED_CHORDS.has(canonicalKeyId(lowered))) return { kind: "reserved" };
-		// Keys a handler on `shortcut` fires for, as the TUI matches them: a bare shifted symbol also takes `shift+`.
-		const matchKeys = new Set<string>();
-		addKeyAliases(matchKeys, lowered);
-		const boundKeys = new Set<string>();
-		const takesShortcutKey = (bound: Iterable<KeyId>): boolean => {
-			boundKeys.clear();
-			for (const boundKey of bound) addKeyAliases(boundKeys, boundKey.toLowerCase() as KeyId);
-			for (const matchKey of matchKeys) if (boundKeys.has(matchKey)) return true;
+		if (ExtensionRunner.#RESERVED_SHORTCUTS.has(canonicalKeyId(lowered))) return { kind: "reserved" };
+		// Compare alias sets, as the TUI matches keys: a bare shifted symbol also fires on `shift+`.
+		const wanted = new Set<string>();
+		addKeyAliases(wanted, lowered);
+		const holds = (bound: Iterable<KeyId>): boolean => {
+			const keys = new Set<string>();
+			for (const key of bound) addKeyAliases(keys, key.toLowerCase() as KeyId);
+			for (const key of wanted) if (keys.has(key)) return true;
 			return false;
 		};
 		const keymap = this.#keybindings ?? (ExtensionRunner.#defaultKeybindings ??= KeybindingsManager.inMemory());
-		// `getKeys`, not `matchesCanonical`: only it drops a fallback chord a remap moved to another action.
+		// Approve and follow-up fall back to Ctrl+Enter when unbound; everything else is its bound keys.
 		const keybindings = ExtensionRunner.#APP_KEYBINDINGS.filter(action =>
-			takesShortcutKey(ExtensionRunner.#UNBOUND_FALLBACK_KEYS[action]?.(keymap) ?? keymap.getKeys(action)),
+			holds(
+				action === "app.approval.approve"
+					? appApproveKeys(keymap)
+					: action === "app.message.followUp"
+						? appFollowUpKeys(keymap)
+						: keymap.getKeys(action),
+			),
 		);
 		if (keybindings.length > 0) return { kind: "keybinding", keybindings };
-		for (let index = this.extensions.length - 1; index >= 0; index -= 1) {
-			const extension = this.extensions[index]!;
-			if (extension.path !== extensionPath && takesShortcutKey(extension.shortcuts.keys())) {
-				return { kind: "extension", extensionPath: extension.path };
-			}
-		}
-		return undefined;
+		// `getShortcuts` lets the last registration win; report that one.
+		const holder = this.extensions.findLast(ext => ext.path !== extensionPath && holds(ext.shortcuts.keys()));
+		return holder ? { kind: "extension", extensionPath: holder.path } : undefined;
 	}
 
 	getShortcuts(): Map<KeyId, ExtensionShortcut> {
@@ -1441,7 +1427,7 @@ export class ExtensionRunner {
 			for (const [key, shortcut] of ext.shortcuts) {
 				const normalizedKey = key.toLowerCase() as KeyId;
 
-				if (ExtensionRunner.#RESERVED_CHORDS.has(canonicalKeyId(normalizedKey))) {
+				if (ExtensionRunner.#RESERVED_SHORTCUTS.has(canonicalKeyId(normalizedKey))) {
 					logger.warn("Extension shortcut conflicts with built-in shortcut", {
 						key,
 						extensionPath: shortcut.extensionPath,

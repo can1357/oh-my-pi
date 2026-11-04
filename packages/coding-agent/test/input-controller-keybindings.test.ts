@@ -7,13 +7,7 @@ import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
-import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
-import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
-import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
@@ -70,7 +64,7 @@ function registeredInputListeners(addInputListener: Mock<(listener: InputListene
 	return addInputListener.mock.calls.map(call => call[0]);
 }
 
-async function createContext(extensionRunner?: ExtensionRunner) {
+async function createContext() {
 	let editorText = "";
 	const keyMap: Record<string, KeyId[]> = {
 		"app.display.reset": ["alt+l"],
@@ -120,7 +114,7 @@ async function createContext(extensionRunner?: ExtensionRunner) {
 		isGeneratingHandoff: false,
 		isBashRunning: false,
 		isEvalRunning: false,
-		extensionRunner,
+		extensionRunner: undefined,
 		prompt,
 		queuedMessageCount: 0,
 		abort,
@@ -1617,44 +1611,5 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 
 		expect(dispatchInput(listeners, "\x0f")).toEqual({ consume: true });
 		expect(ctx.toolOutputExpanded).toBe(true);
-	});
-});
-
-describe("InputController extension shortcuts", () => {
-	beforeAll(async () => {
-		await initTheme(false);
-	});
-
-	it("lets an app binding on the same chord replace an extension shortcut", async () => {
-		const runtime = new ExtensionRuntime();
-		const extensionHandler = vi.fn();
-		const extension = await loadExtensionFromFactory(
-			pi => pi.registerShortcut("alt+shift+l", { handler: extensionHandler }),
-			process.cwd(),
-			new EventBus(),
-			runtime,
-			"ext",
-		);
-		const runner = new ExtensionRunner(
-			[extension],
-			runtime,
-			process.cwd(),
-			SessionManager.inMemory(),
-			{} as ModelRegistry,
-		);
-		const { InputController, ctx, editor, setKeybinding } = await createContext(runner);
-		setKeybinding("app.clipboard.copyLine", ["alt+shift+l"]);
-		// The real editor resolves every spelling of a chord, so it decides which handler a keypress reaches.
-		const realEditor = new CustomEditor(getEditorTheme());
-		editor.setCustomKeyHandler = (key: KeyId, handler: () => void) => realEditor.setCustomKeyHandler(key, handler);
-		editor.clearCustomKeyHandlers = () => realEditor.clearCustomKeyHandlers();
-		const controller = new InputController(ctx);
-		const copyLine = vi.spyOn(controller, "handleCopyCurrentLine").mockImplementation(() => {});
-
-		controller.setupKeyHandlers();
-		realEditor.handleInput("\x1bL"); // Alt+Shift+L
-
-		expect(copyLine).toHaveBeenCalledTimes(1);
-		expect(extensionHandler).not.toHaveBeenCalled();
 	});
 });

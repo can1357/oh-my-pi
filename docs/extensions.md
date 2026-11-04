@@ -140,17 +140,17 @@ labeling action. `getAllTools()` returns tool schemas and source metadata, while
 
 ### Keyboard shortcuts
 
-Register shortcuts in the extension factory. omp binds them when it sets up the editor, before `session_start`, so a shortcut registered later is not bound until the editor is set up again, normally on the next start.
+Register shortcuts in the extension factory; omp binds them before `session_start`, so a later registration applies on the next start.
 
-`getShortcutConflict(chord)` returns `undefined` when the chord is free, otherwise what holds it, ignoring the calling extension's own registrations. It compares chords in canonical form, so `alt+ctrl+x` and `ctrl+alt+x` are one chord, and a bare shifted symbol covers its `shift+` form too, since a shortcut on `?` also runs for `shift+?`:
+`getShortcutConflict(chord)` returns `undefined` for a free chord, otherwise the first holder of:
 
 - `{ kind: "reserved" }`: omp keeps the chord (see [Constraints and pitfalls](#constraints-and-pitfalls)); a shortcut on it is never bound.
-- `{ kind: "keybinding", keybindings }`: the `app.*` actions that handle it, including Ctrl+Enter for approve and follow-up when the user empties their bindings (their dialogs fall back to it). The shortcut is still bound, but wherever an action applies (the editor, a picker, a dialog) it usually takes the key first.
-- `{ kind: "extension", extensionPath }`: another active extension's shortcut also fires on this key; only one of them runs for it.
+- `{ kind: "keybinding", keybindings }`: `app.*` actions bound to it (Ctrl+Enter counts for approve and follow-up when their bindings are emptied). Where those actions apply, they usually take the key first.
+- `{ kind: "extension", extensionPath }`: another extension's shortcut; only one of them runs.
 
-The first match in that order is reported. Keybindings come from the keymap of the session's own interactive TUI, including the user's remaps; print, RPC, ACP and SDK sessions use omp's default keymap, even when they share a process with a TUI session.
+Chords compare as the TUI matches them: `alt+ctrl+x` is `ctrl+alt+x`, and `?` also covers `shift+?`. The caller's own registrations don't count. Keybindings come from the session's TUI keymap, user remaps included; sessions without a TUI (print, RPC, ACP, SDK) use omp's defaults.
 
-It throws while omp is still loading extensions, so the factory cannot call it. Call it from a handler (a command, a shortcut, `session_start`) to validate a chord, such as one the user picks in a settings command; the extension then registers the accepted chord from its factory, where it takes effect on the next start.
+It throws while extensions are loading, so call it from a handler (a command, `session_start`), e.g. to validate a chord the user picks; the factory then registers it on the next start.
 
 ### Provider registration
 
