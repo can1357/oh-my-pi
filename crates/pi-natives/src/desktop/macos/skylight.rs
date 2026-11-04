@@ -1555,6 +1555,7 @@ pub(in super::super) fn front_app(browser: Option<pid_t>) -> Option<FrontApp> {
 					},
 					|user| rearm(browser, user, Instant::now()),
 					|user, armed| armed.covers_now(user, browser),
+					Rearm::cancel_candidate,
 				)?;
 				(read_at, picks, rearm)
 			} else {
@@ -1574,14 +1575,19 @@ fn rearm_for_front<T>(
 	mut read: impl FnMut() -> Option<(pid_t, T)>,
 	mut arm: impl FnMut(pid_t) -> Rearm,
 	mut covers: impl FnMut(pid_t, &Rearm) -> bool,
+	mut cancel: impl FnMut(Rearm),
 ) -> Option<(T, Rearm)> {
 	let (mut user, _) = read()?;
 	loop {
 		let armed = arm(user);
-		let (after, snapshot) = read()?;
+		let Some((after, snapshot)) = read() else {
+			cancel(armed);
+			return None;
+		};
 		if after == user && covers(after, &armed) {
 			return Some((snapshot, armed));
 		}
+		cancel(armed);
 		user = after;
 	}
 }
@@ -1846,6 +1852,12 @@ impl Rearm {
 			Self::Keep(armed) => armed.covers_now(user, browser),
 			Self::Replace(Some(reroute)) => reroute.armed().covers_now(user, browser),
 			Self::Replace(None) => true,
+		}
+	}
+
+	fn cancel_candidate(self) {
+		if let Self::Replace(Some(reroute)) = self {
+			reroute.cancel();
 		}
 	}
 }
@@ -4611,6 +4623,7 @@ mod tests {
 				Rearm::Replace(None)
 			},
 			|_, _| true,
+			Rearm::cancel_candidate,
 		)
 		.unwrap();
 		assert_eq!(armed, [100, 101, 102]);
@@ -4618,19 +4631,32 @@ mod tests {
 	}
 
 	#[test]
-	fn a_front_read_rearms_after_a_same_app_click_during_tap_setup() {
+	fn a_front_read_cancels_a_rejected_candidate_before_retrying_setup() {
 		let mut reads = [(100, 0), (100, 1), (100, 2)].into_iter();
 		let setups = Cell::new(0);
+		let cancelled = Cell::new(false);
+		let (candidate, ended) = KeyReroute::unwatched_for_test();
+		let mut candidate = Some(candidate);
 		let (snapshot, _) = rearm_for_front(
 			|| reads.next(),
 			|_| {
 				setups.set(setups.get() + 1);
-				Rearm::Replace(None)
+				if setups.get() == 1 {
+					Rearm::Replace(candidate.take())
+				} else {
+					assert!(cancelled.get(), "rejected setup must be cancelled before retrying");
+					Rearm::Replace(None)
+				}
 			},
 			|_, _| setups.get() > 1,
+			|armed| {
+				armed.cancel_candidate();
+				cancelled.set(true);
+			},
 		)
 		.unwrap();
-		assert_eq!(setups.get(), 2, "a same-app click invalidates the first setup's mouse counters");
+		assert_eq!(setups.get(), 2);
+		assert!(cancelled.get() && ended.load(Ordering::Acquire));
 		assert_eq!(snapshot, 2, "the returned read follows the replacement setup");
 	}
 
@@ -4645,6 +4671,7 @@ mod tests {
 			|| reads.next(),
 			|_| Rearm::Replace(None),
 			|user, armed| armed.covers_now(user, 200),
+			Rearm::cancel_candidate,
 		)
 		.expect("absence must cover the secure read without retrying");
 		assert_eq!(snapshot, 1);
