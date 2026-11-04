@@ -25,7 +25,7 @@ import type { GoalModeState } from "../goals/state";
 import type { ApprovalGrantStore } from "../tools/approval-cache";
 import type { TokenRateMeter } from "../utils/token-rate";
 import type { AgentDefinition } from "../task/types";
-import type { PersonNotice } from "../registry/agent-registry";
+import type { PersonNotice, PersonNoticeClaim } from "../registry/agent-registry";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { DueByAddress, DueByProbe, SubagentOverdueDelivery } from "../task/due-by-address";
 import { currentThreadId } from "../thread/identity";
@@ -160,14 +160,21 @@ export interface AgentSessionHandle {
 	/**
 	 * Show a person notice on this session's own subscribers, decided and shown
 	 * in one step on its home thread: false when it is disposed, closed,
-	 * mid-transition, or (with `address`) no longer holds that conversation.
+	 * mid-transition, (with `address`) no longer holds that conversation, or
+	 * (with `claim`) the notice could not be reserved, having ended.
 	 */
-	showPersonNotice(notice: PersonNotice, address: DueByAddress | undefined): Promise<boolean>;
+	showPersonNotice(
+		notice: PersonNotice,
+		address: DueByAddress | undefined,
+		claim: PersonNoticeClaim | undefined,
+	): Promise<boolean>;
 	/**
-	 * Leaf entry this session's conversation holds now, read on its home
-	 * thread (a due-by address naming no call); null mid-transition or gone.
+	 * The leaf entry this session's conversation held at `at` (`Date.now()`
+	 * ms), read on its home thread (a due-by address naming no call): null when
+	 * that can no longer be told (its conversation moved since other than by
+	 * appending, it is mid-transition, or it is gone).
 	 */
-	dueByLeaf(): Promise<string | null>;
+	dueByLeafAt(at: number): Promise<string | null>;
 	/**
 	 * Whether this session's live conversation holds the due-by `address`,
 	 * decided on its home thread after waiting out a transition for at most

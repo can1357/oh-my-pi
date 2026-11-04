@@ -1188,6 +1188,19 @@ function injectExecutionAdditionalContext(
 }
 
 /**
+ * Commit one claimable aside at its hand-off. Its request is going out, so a
+ * producer's throwing hook is logged and contained: it must never leave
+ * another aside of the same hand-off reserved and uncommitted.
+ */
+function commitAside(message: AgentMessage): void {
+	try {
+		(message as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
+	} catch (error) {
+		logger.error("Aside commit hook threw", { error });
+	}
+}
+
+/**
  * Resolve aside entries at the moment the loop is about to inject them. Each entry
  * is either a ready {@link AgentMessage} or a sync thunk evaluated here so the
  * producer can make the final inject-or-drop decision (return null) against
@@ -1349,9 +1362,11 @@ async function runLoopBody(
 		});
 		if (answers.every((answer, index) => answer === asked[index])) {
 			unclaimed = [];
+			// Each aside is committed on its own: one producer's throwing hook must not
+			// leave another's reservation held with its request already on the wire.
 			for (const message of asked) {
 				markAsideDelivered(message as AgentMessage & AsideProvenanceCarrier);
-				(message as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
+				commitAside(message);
 			}
 			return;
 		}

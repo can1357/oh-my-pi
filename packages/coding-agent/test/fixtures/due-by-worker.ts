@@ -80,6 +80,27 @@ export interface DueByProbe {
 	dispatchThenBranchAway(id: string, childName: string, dueMinutes: number, branchFrom: string): Promise<void>;
 	/** Let every stubbed child run finish. */
 	releaseChildren(): Promise<void>;
+	/** Every notice the local session showed its own subscribers, by message. */
+	notices(id: string): Promise<string[]>;
+	/**
+	 * As the next due-by leaf read from the main thread reaches the local
+	 * session, stall this worker's whole thread for `ms` before answering it:
+	 * a thread that cannot answer the main thread meanwhile.
+	 */
+	stallLeafRead(id: string, ms: number): Promise<void>;
+	/**
+	 * Make a sibling branch of the local session's current leaf now; then, as
+	 * the next due-by leaf read from the main thread reaches this session, move
+	 * the conversation onto that sibling before answering it: a move made
+	 * between the dispatch and the read being answered.
+	 */
+	moveBeforeLeafRead(id: string): Promise<void>;
+	/**
+	 * From now on, the local session's thread stalls for `ms` at the start of
+	 * showing a person notice whose message contains `match`, before it
+	 * decides or reserves anything.
+	 */
+	stallPersonShow(id: string, match: string, ms: number): Promise<void>;
 }
 
 /** Test-only boot globals of the probe service. */
@@ -98,6 +119,7 @@ interface LocalSession {
 	requests: string[];
 	taskTool: TaskTool;
 	toolSession: ToolSession;
+	notices: string[];
 }
 
 const sessions = new Map<string, LocalSession>();
@@ -109,6 +131,26 @@ function local(id: string): LocalSession {
 	const entry = sessions.get(id);
 	if (!entry) throw new Error(`no local session ${id}`);
 	return entry;
+}
+
+/**
+ * Run `first` as the next due-by leaf read reaches `session`, before it is
+ * answered. Wrapped on the instance the publisher calls, under whatever name
+ * this revision gives the read, so the same fixture reproduces at both heads.
+ */
+function beforeLeafRead(session: AgentSession, first: () => void): void {
+	for (const name of ["dueByLeafAt", "dueByLeaf"]) {
+		const read = Reflect.get(session, name);
+		if (typeof read !== "function") continue;
+		let done = false;
+		Reflect.set(session, name, (...args: unknown[]) => {
+			if (!done) {
+				done = true;
+				first();
+			}
+			return Reflect.apply(read, session, args);
+		});
+	}
 }
 
 const zeroUsage = {
@@ -186,7 +228,11 @@ const probe: DueByProbe = {
 			agentId: id,
 			asyncJobManager: workerJobManager,
 		});
-		sessions.set(id, { session, requests, taskTool, toolSession });
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(event.message);
+		});
+		sessions.set(id, { session, requests, taskTool, toolSession, notices });
 		registry.register({
 			id,
 			displayName: id,
@@ -273,6 +319,34 @@ const probe: DueByProbe = {
 	},
 	releaseChildren: async () => {
 		childGate.resolve();
+	},
+	notices: async id => [...local(id).notices],
+	stallLeafRead: async (id, ms) => {
+		beforeLeafRead(local(id).session, () => Bun.sleepSync(ms));
+	},
+	moveBeforeLeafRead: async id => {
+		const { session } = local(id);
+		const manager = session.sessionManager;
+		const from = manager.getLeafId();
+		if (from === null) throw new Error("no conversation to branch from");
+		const parent = manager.getEntry(from)?.parentId ?? null;
+		if (parent === null) manager.resetLeaf();
+		else manager.branch(parent);
+		const sibling = manager.appendCustomEntry("sibling-branch");
+		manager.branch(from);
+		session.agent.replaceMessages(manager.buildSessionContext().messages);
+		beforeLeafRead(session, () => {
+			manager.branch(sibling);
+			session.agent.replaceMessages(manager.buildSessionContext().messages);
+		});
+	},
+	stallPersonShow: async (id, match, ms) => {
+		const { session } = local(id);
+		const show = session.showPersonNotice.bind(session);
+		session.showPersonNotice = (notice, address, claim) => {
+			if (notice.message.includes(match)) Bun.sleepSync(ms);
+			return show(notice, address, claim);
+		};
 	},
 };
 

@@ -29,7 +29,7 @@ import type {
 } from "../session/agent-session-types";
 import type { CustomMessage } from "../session/messages";
 import type { ServingModel } from "../session/retry-fallback-chains";
-import type { PersonNotice } from "../registry/agent-registry";
+import type { PersonNotice, PersonNoticeClaim } from "../registry/agent-registry";
 import type { DueByAddress, DueByProbe, SubagentOverdueDelivery } from "../task/due-by-address";
 import type { AgentDefinition } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
@@ -213,12 +213,16 @@ export class PeerAgentSession implements AgentSessionHandle {
 		return mainBridge().remote.call("waitForIrcReplies", this);
 	}
 
-	showPersonNotice(notice: PersonNotice, address: DueByAddress | undefined): Promise<boolean> {
-		return mainBridge().remote.call("showPersonNotice", this, notice, address);
+	showPersonNotice(
+		notice: PersonNotice,
+		address: DueByAddress | undefined,
+		claim: PersonNoticeClaim | undefined,
+	): Promise<boolean> {
+		return mainBridge().remote.call("showPersonNotice", this, notice, address, claim);
 	}
 
-	dueByLeaf(): Promise<string | null> {
-		return mainBridge().remote.call("dueByLeaf", this);
+	dueByLeafAt(at: number): Promise<string | null> {
+		return mainBridge().remote.call("dueByLeafAt", this, at);
 	}
 
 	dueByProbe(address: DueByAddress, waitMs: number): Promise<DueByProbe> {

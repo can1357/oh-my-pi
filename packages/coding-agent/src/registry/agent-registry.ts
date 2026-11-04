@@ -46,6 +46,19 @@ export interface PersonNoticeHost {
 }
 
 /**
+ * The hold a notice the person receives (an escalation) is shown under: the
+ * showing thread reserves it before the show and commits it right after, in
+ * one synchronous step, so a notice that ended (its child settled, its bound
+ * passed) is never also shown, and a shown one ends delivered exactly once.
+ * From a worker each is a synchronous call to the main thread.
+ */
+export interface PersonNoticeClaim {
+	reserve(): boolean;
+	commit(): void;
+	release(): void;
+}
+
+/**
  * Run lifecycle milestones, stamped as they happen and scoped to the CURRENT
  * run: they are cleared when the ref re-enters `running` for a follow-up or
  * wake turn. Launch is the ref's `createdAt`; these are the post-launch
@@ -162,9 +175,11 @@ export interface AgentRegistryApi {
 	/**
 	 * Show `notice` to the person: at the window when one listens, else on the
 	 * first of `hosts` that can stand in for the person (each decides on its own
-	 * thread). False when no one was told.
+	 * thread). With `claim`, the notice is reserved in the same step as the show
+	 * and committed right after it, so an ended notice is never shown. False
+	 * when no one was told.
 	 */
-	notifyPerson(notice: PersonNotice, hosts: readonly PersonNoticeHost[]): Promise<boolean>;
+	notifyPerson(notice: PersonNotice, hosts: readonly PersonNoticeHost[], claim?: PersonNoticeClaim): Promise<boolean>;
 	/** Register (or replace) the ref for `input.id`; always mints a new generation. */
 	register(input: RegisterInput): AgentRef;
 	/** Register an absent id, or reuse the exact detached `parked` ref `expected`. */
@@ -259,10 +274,17 @@ export class AgentRegistry implements AgentRegistryApi {
 	 * host) it becomes an ordinary notice on the first of `hosts` that shows it:
 	 * each decides on its own thread, in one step with the show, whether it can
 	 * stand in for the person (alive, settled, and holding `address` when one is
-	 * given). False when there is no one to show it to.
+	 * given) and, with `claim`, reserves the notice. A host that took the hold
+	 * and then went away releases it here before the next is tried. False when
+	 * there is no one to show it to.
 	 */
-	async notifyPerson(notice: PersonNotice, hosts: readonly PersonNoticeHost[]): Promise<boolean> {
+	async notifyPerson(
+		notice: PersonNotice,
+		hosts: readonly PersonNoticeHost[],
+		claim?: PersonNoticeClaim,
+	): Promise<boolean> {
 		if (this.#personListeners.size > 0) {
+			if (claim && !claim.reserve()) return false;
 			for (const listener of this.#personListeners) {
 				try {
 					listener(notice);
@@ -270,14 +292,16 @@ export class AgentRegistry implements AgentRegistryApi {
 					logger.warn("Person notice listener threw", { error: String(error) });
 				}
 			}
+			claim?.commit();
 			return true;
 		}
 		for (const host of hosts) {
 			try {
-				if (await host.session.showPersonNotice(notice, host.address)) return true;
+				if (await host.session.showPersonNotice(notice, host.address, claim)) return true;
 			} catch {
 				// A host whose home went away shows nothing; try the next.
 			}
+			claim?.release();
 		}
 		return false;
 	}

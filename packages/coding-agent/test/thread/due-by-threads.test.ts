@@ -10,7 +10,13 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import {
+	Agent,
+	type AgentMessage,
+	ASIDE_MESSAGE_CLAIM,
+	ASIDE_MESSAGE_COMMIT,
+	type CommittableAsideMessage,
+} from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -547,5 +553,139 @@ describe("each due-by notice ends exactly once, wherever its recipient lives", (
 		await receipt;
 		expect(committed).toBe(1);
 		expect(carries(owner.requests, OWNER_NOTICE, "Child")).toBe(1);
+	}, 30_000);
+});
+
+describe("a notice the person or an ancestor receives is held to its own life", () => {
+	/** An escalation shown on a worker-homed owner whose thread stalls as the show reaches it. */
+	async function stalledShow(stallMs: number, settleDuringStall: boolean) {
+		const probe = await startWorker();
+		// No such parent: the escalation has no agent to go to, so the person is told on the owner.
+		await probe.open("Owner", "Gone");
+		await probe.prompt("Owner", "the conversation the work is dispatched from");
+		await probe.stallPersonShow("Owner", ESCALATION, stallMs);
+		const host = AgentRegistry.global().get("Owner")?.session;
+		if (!(host instanceof RemoteAgentSession)) throw new Error("owner is not worker-homed");
+		const show = host.showPersonNotice.bind(host);
+		const stalled = Promise.withResolvers<void>();
+		vi.spyOn(host, "showPersonNotice").mockImplementation((notice, address, claim) => {
+			// Sent: the worker stalls on it before it can decide or reserve anything.
+			if (notice.message.includes(ESCALATION)) stalled.resolve();
+			return show(notice, address, claim);
+		});
+		child("Child", "Owner");
+		const settle = armOnMain({ childId: "Child", ownerId: "Owner", ownerAddress: await probe.address("Owner") });
+		await stalled.promise;
+		if (settleDuringStall) settle();
+		await Bun.sleep(stallMs + 1_500);
+		settle();
+		const shown = await probe.notices("Owner");
+		return {
+			escalations: shown.filter(message => message.includes(ESCALATION) && message.includes("`Child`")).length,
+			losses: lostIn(
+				shown.map(message => ({ message })),
+				"Child",
+				"escalation",
+			),
+		};
+	}
+
+	it("an escalation to the person is never shown for a child that settled while it waited", async () => {
+		expect(await stalledShow(1_500, true)).toEqual({ escalations: 0, losses: 0 });
+	}, 30_000);
+
+	it("an escalation to the person past its bound ends once, as a loss, never also shown", async () => {
+		expect(await stalledShow(NOTICE_DEADLINE_MS + 1_000, false)).toEqual({ escalations: 0, losses: 1 });
+	}, 40_000);
+
+	it("a worker-homed ancestor that moved after the dispatch is not told on its new conversation", async () => {
+		const probe = await startWorker();
+		const main = await mainSession("Main", "main");
+		await main.session.prompt("the main conversation");
+		await probe.open("Boss", "Main");
+		await probe.prompt("Boss", "the conversation the lead was dispatched from");
+		const lead = await mainSession("Lead", "sub", "Boss");
+		await lead.session.prompt("the conversation the work is dispatched from");
+		child("Child", "Lead");
+		// Boss moves to a sibling branch after the dispatch, before it answers the leaf read.
+		await probe.moveBeforeLeafRead("Boss");
+		const settle = armOnMain({
+			childId: "Child",
+			ownerId: "Lead",
+			ownerAddress: { entryId: lead.session.sessionManager.getLeafId() },
+		});
+		await waitFor(() => carries(main.requests, ESCALATION, "Child") > 0, 15_000);
+		settle();
+		expect(carries(await probe.requests("Boss"), ESCALATION, "Child")).toBe(0);
+		expect(carries(main.requests, ESCALATION, "Child")).toBe(1);
+	}, 30_000);
+
+	it("an ancestor's stalled thread does not hold back the owner's own notice", async () => {
+		const probe = await startWorker();
+		await mainSession("Main", "main");
+		await probe.open("Boss", "Main");
+		await probe.prompt("Boss", "the conversation the lead was dispatched from");
+		const lead = await mainSession("Lead", "sub", "Boss");
+		await lead.session.prompt("the conversation the work is dispatched from");
+		child("Child", "Lead");
+		const warnings = personNotices();
+		await probe.stallLeafRead("Boss", NOTICE_DEADLINE_MS + 2_000);
+		const start = performance.now();
+		const settle = armOnMain({
+			childId: "Child",
+			ownerId: "Lead",
+			ownerAddress: { entryId: lead.session.sessionManager.getLeafId() },
+		});
+		await waitFor(() => carries(lead.requests, OWNER_NOTICE, "Child") > 0, NOTICE_DEADLINE_MS);
+		const deliveredAfterMs = performance.now() - start;
+		settle();
+		expect(deliveredAfterMs).toBeLessThan(DUE_MS + NOTICE_DEADLINE_MS);
+		expect(carries(lead.requests, OWNER_NOTICE, "Child")).toBe(1);
+		expect(lostIn(warnings, "Child", "owner")).toBe(0);
+	}, 40_000);
+
+	it("a producer's throwing commit hook does not leave another notice of the same request unsent", async () => {
+		const owner = await mainSession("Main", "main");
+		await owner.session.prompt("the conversation the work is dispatched from");
+		const warnings = personNotices();
+		// Hold the notice in the queue, so the test hands it to the loop itself.
+		Object.defineProperty(owner.session, "isStreaming", { value: true, configurable: true });
+		let receipt: Promise<void> | undefined;
+		const notify = owner.session.notifySubagentOverdue.bind(owner.session);
+		vi.spyOn(owner.session, "notifySubagentOverdue").mockImplementation(delivery => {
+			receipt = notify(delivery);
+			return receipt;
+		});
+		child("Child", "Main");
+		const settle = armOnMain({
+			childId: "Child",
+			ownerId: "Main",
+			ownerAddress: { entryId: owner.session.sessionManager.getLeafId() },
+		});
+		await waitFor(() => receipt !== undefined, 5_000);
+		const queued = owner.session.yieldQueue.drainLazy()[0]!()!;
+		Reflect.deleteProperty(owner.session, "isStreaming");
+		// Another producer's claimable aside, committed first, whose commit hook throws.
+		const other = {
+			role: "custom",
+			customType: "throwing-producer",
+			content: "another aside",
+			display: true,
+			timestamp: Date.now(),
+		} as AgentMessage & CommittableAsideMessage;
+		Object.defineProperties(other, {
+			[ASIDE_MESSAGE_CLAIM]: { value: () => other },
+			[ASIDE_MESSAGE_COMMIT]: {
+				value: () => {
+					throw new Error("producer commit threw");
+				},
+			},
+		});
+		// Run it to its end; the notice's own bound then shows whether it was left held.
+		await owner.session.agent.prompt([other, queued]).catch(() => {});
+		await Bun.sleep(NOTICE_DEADLINE_MS + 500);
+		settle();
+		expect(carries(owner.requests, OWNER_NOTICE, "Child")).toBe(1);
+		expect(lostIn(warnings, "Child", "owner")).toBe(0);
 	}, 30_000);
 });

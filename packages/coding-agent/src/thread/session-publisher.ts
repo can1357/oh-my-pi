@@ -556,8 +556,8 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 	waitForIrcReplies: async publisher => settle(publisher, publisher.session.waitForIrcReplies()),
 	setWorkPoolYieldItems: async (publisher, items) => settle(publisher, publisher.session.setWorkPoolYieldItems(items)),
 	emitIrcRelayObservation: (publisher, record) => publisher.session.emitIrcRelayObservation(record),
-	showPersonNotice: (publisher, notice, address) => publisher.session.showPersonNotice(notice, address),
-	dueByLeaf: publisher => publisher.session.dueByLeaf(),
+	showPersonNotice: (publisher, notice, address, claim) => publisher.session.showPersonNotice(notice, address, claim),
+	dueByLeafAt: (publisher, at) => publisher.session.dueByLeafAt(at),
 	dueByProbe: (publisher, address, waitMs) => publisher.session.dueByProbe(address, waitMs),
 	// The receipt settles only when a request carries the notice, long after state flushes.
 	notifySubagentOverdue: (publisher, delivery) => publisher.session.notifySubagentOverdue(delivery),

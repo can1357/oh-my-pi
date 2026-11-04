@@ -65,7 +65,7 @@ import { formatDuration, logger, prompt } from "@oh-my-pi/pi-utils";
 import escalationTemplate from "../prompts/tools/subagent-overdue-escalation.md" with { type: "text" };
 import lostTemplate from "../prompts/tools/subagent-overdue-lost.md" with { type: "text" };
 import ownerTemplate from "../prompts/tools/subagent-overdue.md" with { type: "text" };
-import type { AgentRegistryApi, PersonNoticeHost } from "../registry/agent-registry";
+import type { AgentRegistryApi, PersonNoticeClaim, PersonNoticeHost } from "../registry/agent-registry";
 import { type AgentSessionHandle, isLocalAgentSession } from "../session/agent-session-handle";
 import type { CustomMessage } from "../session/messages";
 import { rpcSync } from "../thread/rpc";
@@ -389,7 +389,7 @@ export class SubagentDueClock implements SubagentDueClockApi {
 		run.signal.addEventListener("abort", disarm, { once: true });
 		this.#origins.set(input.childId, owner);
 		if (!(input.dueMs > 0)) return;
-		const recorded = this.#record(input, owner);
+		const { dispatch, ready } = this.#record(input, owner);
 		this.#dueAt.set(input.childId, due);
 		const start = performance.now() - Math.max(0, Date.now() - input.dispatchedAt);
 		let ownerQueued = false;
@@ -410,37 +410,31 @@ export class SubagentDueClock implements SubagentDueClockApi {
 			this.#timers.add(timer);
 		};
 		const isSettled = () => done;
-		// Addresses held on other threads arrive after; the timers count from the
-		// dispatch either way, so the reads never move a due-by.
-		void recorded.then(
-			dispatch => {
-				if (done) return;
-				const track = (stage: "owner" | "escalation"): PendingNotice => {
-					const notice: PendingNotice = new PendingNotice((end, cause) => {
-						live.delete(notice);
-						if (end === "lost") this.#surfaceLoss(dispatch, stage, cause);
-					});
-					live.add(notice);
-					return notice;
-				};
-				at(dispatch.dueMs, () => {
-					const notice = track("owner");
-					void this.#tellOwner(dispatch, notice, isSettled).then(
-						queued => {
-							if (queued) ownerQueued = true;
-						},
-						() => notice.end("lost", "unsent"),
-					);
-				});
-				at(2 * dispatch.dueMs, () => {
-					const notice = track("escalation");
-					void this.#escalate(dispatch, notice, () => ownerQueued, isSettled).catch(() =>
-						notice.end("lost", "unsent"),
-					);
-				});
-			},
-			error => logger.warn("Subagent due-by clock could not record its dispatch", { error: String(error) }),
-		);
+		const track = (stage: "owner" | "escalation"): PendingNotice => {
+			const notice: PendingNotice = new PendingNotice((end, cause) => {
+				live.delete(notice);
+				if (end === "lost") this.#surfaceLoss(dispatch, stage, cause);
+			});
+			live.add(notice);
+			return notice;
+		};
+		// The timers count from the dispatch, whatever the address reads still
+		// owe: a slow read is spent from the notice's one bound, never added to it.
+		at(dispatch.dueMs, () => {
+			const notice = track("owner");
+			void this.#tellOwner(dispatch, notice, isSettled).then(
+				queued => {
+					if (queued) ownerQueued = true;
+				},
+				() => notice.end("lost", "unsent"),
+			);
+		});
+		at(2 * dispatch.dueMs, () => {
+			const notice = track("escalation");
+			void this.#escalate(dispatch, ready, notice, () => ownerQueued, isSettled).catch(() =>
+				notice.end("lost", "unsent"),
+			);
+		});
 	}
 
 	/** Clear every pending timer and recorded dispatch. */
@@ -454,22 +448,25 @@ export class SubagentDueClock implements SubagentDueClockApi {
 	/**
 	 * Build the addresses of one dispatch whose owner address is `owner`, all
 	 * decided now, at the dispatch: the ancestor chain and its recorded
-	 * origins, and the session each leaf is read from. Only a leaf held on
-	 * another thread is read in after, from that same session (a session that
-	 * replaces it under the id later is never asked), so the result resolves
-	 * once those reads land.
+	 * origins, and the session each leaf is read from. Each leaf is the one
+	 * that session held at the dispatch time: read now for a session on this
+	 * thread, and in after from that same session (a session that replaces it
+	 * under the id later is never asked) for one on another thread, which
+	 * answers with no leaf when its conversation moved since the dispatch.
+	 * `ready` resolves once those reads land; until then an unread anchor
+	 * names no conversation.
 	 */
-	#record(input: SubagentDispatchInput, owner: DispatchAnchor): Promise<SubagentDispatch> {
+	#record(input: SubagentDispatchInput, owner: DispatchAnchor): { dispatch: SubagentDispatch; ready: Promise<void> } {
 		const reads: Promise<void>[] = [];
 		const leafAnchor = (id: string): DispatchAnchor => {
 			const anchor: DispatchAnchor = { id, toolCallId: undefined, entryId: null };
 			const session = this.#registry.get(id)?.session;
 			if (!session) return anchor;
 			if (isLocalAgentSession(session)) {
-				anchor.entryId = session.dueByLeafNow();
+				anchor.entryId = session.dueByLeafAtNow(input.dispatchedAt);
 			} else {
 				reads.push(
-					session.dueByLeaf().then(
+					session.dueByLeafAt(input.dispatchedAt).then(
 						entryId => {
 							anchor.entryId = entryId;
 						},
@@ -494,7 +491,7 @@ export class SubagentDueClock implements SubagentDueClockApi {
 				continue;
 			}
 			// No recorded dispatch (a Vibe worker's parent, a restored ancestor): the
-			// conversation it holds at the dispatch, by its leaf entry.
+			// conversation it held at the dispatch, by its leaf entry.
 			const parentId = this.#registry.get(cur)?.parentId;
 			if (parentId !== undefined && !seen.has(parentId)) {
 				ancestors.push(leafAnchor(parentId));
@@ -514,7 +511,7 @@ export class SubagentDueClock implements SubagentDueClockApi {
 			dueMs: input.dueMs,
 			stated: input.stated,
 		};
-		return Promise.all(reads).then(() => dispatch);
+		return { dispatch, ready: Promise.all(reads).then(() => undefined) };
 	}
 
 	/**
@@ -546,10 +543,18 @@ export class SubagentDueClock implements SubagentDueClockApi {
 		return notice.ended ? undefined : session;
 	}
 
-	/** The first of `anchors` whose recipient holds it now, without waiting. */
-	async #firstHolding(anchors: readonly DispatchAnchor[]): Promise<DispatchAnchor | undefined> {
+	/**
+	 * The id of the first of `anchors` whose recipient holds it, told without
+	 * waiting: undefined as soon as one cannot be told now (its session lives
+	 * on another thread, or its read has not landed), since naming a later one
+	 * could name the wrong agent.
+	 */
+	#nearestHoldingNow(anchors: readonly DispatchAnchor[]): string | undefined {
 		for (const anchor of anchors) {
-			if (await this.#reach(anchor, 0)) return anchor;
+			const session = this.#registry.get(anchor.id)?.session;
+			if (!session) continue;
+			if (!isLocalAgentSession(session)) return undefined;
+			if (session.dueByHoldsNow({ entryId: anchor.entryId, toolCallId: anchor.toolCallId })) return anchor.id;
 		}
 		return undefined;
 	}
@@ -671,13 +676,9 @@ export class SubagentDueClock implements SubagentDueClockApi {
 			notice.end("lost");
 			return false;
 		}
-		// Who the escalation would reach if it fired now: the same walk #escalate makes.
-		const escalateTo = (await this.#firstHolding(dispatch.ancestors))?.id;
-		if (isSettled()) {
-			notice.end("settled");
-			return false;
-		}
-		if (notice.ended) return false;
+		// Who the escalation would reach if it fired now, when that can be told
+		// at once: the owner's notice never waits on another agent's thread.
+		const escalateTo = this.#nearestHoldingNow(dispatch.ancestors);
 		const text = prompt.render(ownerTemplate, {
 			...this.#childView(dispatch, Date.now()),
 			escalateAt: isoMinute(dispatch.dispatchedAt + 2 * dispatch.dueMs),
@@ -700,11 +701,16 @@ export class SubagentDueClock implements SubagentDueClockApi {
 
 	async #escalate(
 		dispatch: SubagentDispatch,
+		ready: Promise<void>,
 		notice: PendingNotice,
 		ownerQueued: () => boolean,
 		isSettled: () => boolean,
 	): Promise<void> {
 		if (isSettled()) return notice.end("settled");
+		// The addresses read from other threads, inside this notice's one bound.
+		await this.#within(ready, notice);
+		if (isSettled()) return notice.end("settled");
+		if (notice.ended) return;
 		// The owner's owner is the nearest live agent above the owner; its model is told.
 		for (const ancestor of dispatch.ancestors) {
 			const session = await this.#resolveReach(ancestor, notice);
@@ -731,12 +737,29 @@ export class SubagentDueClock implements SubagentDueClockApi {
 		return this.#tellPerson(dispatch, notice, ownerQueued, isSettled, [dispatch.owner], notice.msLeft);
 	}
 
+	/** Wait for `promise`, for at most what is left of `notice`'s bound. */
+	async #within(promise: Promise<void>, notice: PendingNotice): Promise<void> {
+		const left = notice.msLeft;
+		if (left <= 0) return;
+		const { promise: expired, resolve } = Promise.withResolvers<void>();
+		const timer = setTimeout(resolve, left);
+		timer.unref();
+		try {
+			await Promise.race([promise, expired]);
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
 	/**
 	 * Escalate to the person through the one person channel. The text is
 	 * rendered first; then the escalation goes ahead only while one of
 	 * `anchors` still holds its conversation (the first may wait out a
-	 * transition for `waitMs`), and with no window the stand-in session itself
-	 * re-checks that, in one step with showing it, on its own thread.
+	 * transition for `waitMs`), and the show is held by a claim: the thread
+	 * that shows it (the window's, or a stand-in session's) reserves the
+	 * notice in the same step as the show and commits it right after, so a
+	 * notice that ended (its child settled, its bound passed) is never also
+	 * shown, and a shown one ends delivered exactly once.
 	 */
 	async #tellPerson(
 		dispatch: SubagentDispatch,
@@ -763,12 +786,20 @@ export class SubagentDueClock implements SubagentDueClockApi {
 		const hosts = anchors
 			.map(anchor => this.#host(anchor))
 			.filter((host): host is PersonNoticeHost => host !== undefined);
+		const claim: PersonNoticeClaim = {
+			reserve: rpcSync(() => notice.reserve(isSettled)),
+			commit: rpcSync(() => notice.commit()),
+			release: rpcSync(() => notice.release()),
+		};
+		// A shown notice was committed, so it ended delivered, by the show itself.
 		const told = await this.#registry.notifyPerson(
 			{ level: "warning", message, source: SUBAGENT_OVERDUE_MESSAGE_TYPE },
 			hosts,
+			claim,
 		);
-		// Shown means delivered: the person has seen it, whatever happened since.
-		if (told) return notice.end("delivered");
-		notice.end(isSettled() ? "settled" : "lost");
+		if (told) return;
+		// Nobody showed it: any hold a vanished host left is let go, then it ends.
+		notice.release();
+		notice.end(isSettled() ? "settled" : "lost", notice.msLeft <= 0 ? "stuck" : "gone", true);
 	}
 }

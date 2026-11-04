@@ -232,7 +232,7 @@ import {
 	obfuscateProviderContext,
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
-import { type AgentRef, AgentRegistry, type PersonNotice } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, type PersonNotice, type PersonNoticeClaim } from "../registry/agent-registry";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
@@ -3909,17 +3909,24 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * The leaf entry this session's conversation holds now, as a due-by address
-	 * naming no tool call; null while a transition is in flight (the session is
-	 * between transcripts, so no conversation can be named) or once disposed.
+	 * The leaf entry this session's conversation held at `at` (`Date.now()`
+	 * ms), as a due-by address naming no tool call; null when that can no
+	 * longer be told: its conversation moved since other than by appending, a
+	 * transition is in flight (it is between transcripts), or it is disposed.
 	 */
-	dueByLeafNow(): string | null {
+	dueByLeafAtNow(at: number): string | null {
 		if (this.#isDisposed || this.isSessionTransitioning) return null;
-		return this.sessionManager.getLeafId();
+		return this.sessionManager.leafIdAt(at) ?? null;
 	}
 
-	async dueByLeaf(): Promise<string | null> {
-		return this.dueByLeafNow();
+	async dueByLeafAt(at: number): Promise<string | null> {
+		return this.dueByLeafAtNow(at);
+	}
+
+	/** Whether this session's live conversation holds `address` now, without waiting: for a local caller. */
+	dueByHoldsNow(address: DueByAddress): boolean {
+		if (this.#isDisposed || this.isSessionTransitioning) return false;
+		return heldAddress(this, address) !== undefined;
 	}
 
 	/**
@@ -3927,13 +3934,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * in for the person: not disposed, and, when `address` is given (a notice
 	 * about that conversation), not mid-transition and its live conversation
 	 * still holds it. A notice with no address is about no conversation (a loss
-	 * warning), so a transition does not hold it back. Decided and shown in one
-	 * step on this session's thread, so the answer is the truth about the show.
+	 * warning), so a transition does not hold it back. With `claim` the notice
+	 * is reserved first and committed right after the show. Decided, reserved,
+	 * shown and committed in one step on this session's thread, so the answer
+	 * is the truth about the show and a notice that ended is never shown.
 	 */
-	async showPersonNotice(notice: PersonNotice, address: DueByAddress | undefined): Promise<boolean> {
+	async showPersonNotice(
+		notice: PersonNotice,
+		address: DueByAddress | undefined,
+		claim: PersonNoticeClaim | undefined,
+	): Promise<boolean> {
 		if (this.#isDisposed) return false;
 		if (address && (this.isSessionTransitioning || heldAddress(this, address) === undefined)) return false;
+		if (claim && !claim.reserve()) return false;
 		this.emitNotice(notice.level, notice.message, notice.source);
+		claim?.commit();
 		return true;
 	}
 

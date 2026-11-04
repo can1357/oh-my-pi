@@ -949,6 +949,14 @@ export class SessionManager {
 	#hasTitleSlot = true;
 	#entries: SessionEntry[] = [];
 	#index = new SessionEntryIndex();
+	/**
+	 * When the conversation last moved other than by appending (`Date.now()`
+	 * ms): a branch, a reset, a summary branch, a load, a new session, a fork
+	 * in place or a release. Entries appended since are on the same
+	 * conversation; a move since means the leaf no longer tells which
+	 * conversation was held before it.
+	 */
+	#conversationMovedAt = Date.now();
 
 	/** File reflects all current entries; appends can go incrementally. */
 	#fileIsCurrent = false;
@@ -2083,6 +2091,7 @@ export class SessionManager {
 
 		this.#entries = [];
 		this.#index.clear();
+		this.#conversationMovedAt = Date.now();
 		this.#fileIsCurrent = false;
 		this.#rewriteRequired = false;
 		this.#loadedMalformedRecords = 0;
@@ -2120,6 +2129,7 @@ export class SessionManager {
 		const repairedUsage = normalizeLoadedUsage(entries);
 		if (repairedUsage > 0) logger.warn("Loaded assistant messages with incomplete usage", { count: repairedUsage });
 		this.#index.rebuild(entries);
+		this.#conversationMovedAt = Date.now();
 	}
 
 	#freshEntryFields(): { id: string; parentId: string | null; timestamp: string; runtime: RuntimeIdentity } {
@@ -3069,6 +3079,7 @@ export class SessionManager {
 		this.seal();
 		this.#entries = [];
 		this.#index.clear();
+		this.#conversationMovedAt = Date.now();
 		this.#inMemoryArtifacts = null;
 		this.#closeWriterEventually();
 		this.#entriesReleased = true;
@@ -3865,6 +3876,28 @@ export class SessionManager {
 		return this.#index.leafId();
 	}
 
+	/**
+	 * The leaf this conversation held at `at` (`Date.now()` ms), when that can
+	 * be told: undefined when the conversation has moved, other than by
+	 * appending, at or after `at`. Otherwise the current leaf with every entry
+	 * appended after `at` walked back off, which is the leaf held at `at`.
+	 * Millisecond ties resolve toward the stricter answer: a move in the same
+	 * millisecond counts as after `at` (no leaf, so a notice is reported lost
+	 * rather than sent to a conversation that may not be the one held), and
+	 * an entry appended in that millisecond stays (a later leaf only narrows
+	 * which conversations hold it).
+	 */
+	leafIdAt(at: number): string | null | undefined {
+		if (this.#conversationMovedAt >= at) return undefined;
+		let id = this.#index.leafId();
+		while (id !== null) {
+			const entry = this.#index.get(id);
+			if (!entry || !(Date.parse(entry.timestamp) > at)) break;
+			id = entry.parentId;
+		}
+		return id;
+	}
+
 	getLeafEntry(): SessionEntry | undefined {
 		return this.#index.leafEntry();
 	}
@@ -4032,11 +4065,13 @@ export class SessionManager {
 	branch(branchFromId: string): void {
 		if (!this.#index.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
 		this.#setLeaf(branchFromId);
+		this.#conversationMovedAt = Date.now();
 	}
 
 	/** Reset the leaf to null so the next append creates a new root entry. */
 	resetLeaf(): void {
 		this.#setLeaf(null);
+		this.#conversationMovedAt = Date.now();
 	}
 
 	/**
@@ -4075,6 +4110,7 @@ export class SessionManager {
 		if (branchFromId !== null && !this.#index.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
 
 		this.#setLeaf(branchFromId);
+		this.#conversationMovedAt = Date.now();
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
 			id: generateId(this.#index),
@@ -4157,6 +4193,7 @@ export class SessionManager {
 		this.#titleUpdatedAt = timestamp;
 		this.#hasTitleSlot = true;
 		this.#index.rebuild(this.#entries);
+		this.#conversationMovedAt = Date.now();
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
 		this.#forceFileCreation = this.#persist;

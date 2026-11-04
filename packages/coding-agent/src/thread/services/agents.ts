@@ -242,8 +242,8 @@ function serveBridge(): RpcServe<MainSessionBridge, SessionBridgeProtocol> {
 		waitForIrcReplies: (_bridge, session) => session.waitForIrcReplies(),
 		setWorkPoolYieldItems: (_bridge, session, items) => session.setWorkPoolYieldItems(items),
 		emitIrcRelayObservation: (_bridge, session, record) => session.emitIrcRelayObservation(record),
-		showPersonNotice: (_bridge, session, notice, address) => session.showPersonNotice(notice, address),
-		dueByLeaf: (_bridge, session) => session.dueByLeaf(),
+		showPersonNotice: (_bridge, session, notice, address, claim) => session.showPersonNotice(notice, address, claim),
+		dueByLeafAt: (_bridge, session, at) => session.dueByLeafAt(at),
 		dueByProbe: (_bridge, session, address, waitMs) => session.dueByProbe(address, waitMs),
 		notifySubagentOverdue: (_bridge, session, delivery) => session.notifySubagentOverdue(delivery),
 	};
@@ -275,7 +275,7 @@ function serveRegistry(bridge: MainSessionBridge): RpcServe<AgentRegistry, Agent
 		// The clock is main's: a worker's dispatch arms it here; the run's settle and cancel cross the link.
 		dueByArm: (registry, input, watch) => registry.dueBy.arm(input, watch),
 		dueByAt: (registry, childId) => registry.dueBy.dueAt(childId),
-		notifyPerson: (registry, notice, hosts) => registry.notifyPerson(notice, hosts),
+		notifyPerson: (registry, notice, hosts, claim) => registry.notifyPerson(notice, hosts, claim),
 		personSubscribe: (registry, listener) => bridge.forward(listener, forward => registry.onPersonNotice(forward)),
 	};
 }

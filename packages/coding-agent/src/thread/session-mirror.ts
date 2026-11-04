@@ -55,7 +55,7 @@ import type { IdleMaintenanceOptions } from "../session/idle-maintenance";
 import type { CustomMessage } from "../session/messages";
 import type { ServingModel } from "../session/retry-fallback-chains";
 import type { ModelUsageEntry, SessionEntry, UsageStatistics } from "../session/session-entries";
-import type { PersonNotice } from "../registry/agent-registry";
+import type { PersonNotice, PersonNoticeClaim } from "../registry/agent-registry";
 import type { DueByAddress, DueByProbe, SubagentOverdueDelivery } from "../task/due-by-address";
 import type { AgentDefinition } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
@@ -243,8 +243,11 @@ export type SessionHostProtocol = {
 	waitForIrcReplies: RpcMethod<[], void>;
 	setWorkPoolYieldItems: RpcMethod<[items: readonly WorkPoolYieldItem[]], void>;
 	emitIrcRelayObservation: RpcMethod<[record: CustomMessage], void>;
-	showPersonNotice: RpcMethod<[notice: PersonNotice, address: DueByAddress | undefined], boolean>;
-	dueByLeaf: RpcMethod<[], string | null>;
+	showPersonNotice: RpcMethod<
+		[notice: PersonNotice, address: DueByAddress | undefined, claim: PersonNoticeClaim | undefined],
+		boolean
+	>;
+	dueByLeafAt: RpcMethod<[at: number], string | null>;
 	dueByProbe: RpcMethod<[address: DueByAddress, waitMs: number], DueByProbe>;
 	/** The delivery's `isOpen` crosses as a synchronous call back to main (it never blocks on a worker). */
 	notifySubagentOverdue: RpcMethod<[delivery: SubagentOverdueDelivery], void>;
@@ -332,10 +335,15 @@ export type SessionBridgeProtocol = {
 	setWorkPoolYieldItems: RpcMethod<[session: AgentSessionHandle, items: readonly WorkPoolYieldItem[]], void>;
 	emitIrcRelayObservation: RpcMethod<[session: AgentSessionHandle, record: CustomMessage], void>;
 	showPersonNotice: RpcMethod<
-		[session: AgentSessionHandle, notice: PersonNotice, address: DueByAddress | undefined],
+		[
+			session: AgentSessionHandle,
+			notice: PersonNotice,
+			address: DueByAddress | undefined,
+			claim: PersonNoticeClaim | undefined,
+		],
 		boolean
 	>;
-	dueByLeaf: RpcMethod<[session: AgentSessionHandle], string | null>;
+	dueByLeafAt: RpcMethod<[session: AgentSessionHandle, at: number], string | null>;
 	dueByProbe: RpcMethod<[session: AgentSessionHandle, address: DueByAddress, waitMs: number], DueByProbe>;
 	notifySubagentOverdue: RpcMethod<[session: AgentSessionHandle, delivery: SubagentOverdueDelivery], void>;
 };
