@@ -394,6 +394,59 @@ describe("overlapping session switches", () => {
 		}
 	}, 30_000);
 
+	it("keeps a later new session waiting for a grandchild switch a nested transition left pending", async () => {
+		const target = createSession();
+		const cwd = target.sessionManager.getCwd();
+		async function sessionFileIn(name: string): Promise<string> {
+			const manager = SessionManager.create(cwd, path.join(tempDir.path(), `${name}-sessions`));
+			manager.appendMessage({ role: "user", content: `${name} session`, timestamp: Date.now() });
+			await manager.ensureOnDisk();
+			const file = manager.getSessionFile();
+			await manager.close();
+			if (!file) throw new Error("Expected target session file");
+			return file;
+		}
+		const outerFile = await sessionFileIn("outer");
+		const middleFile = await sessionFileIn("middle");
+		let grandchild: RefusedSwitch | undefined;
+		let reconciled = 0;
+		target.setSessionSwitchReconciler(async () => {
+			reconciled++;
+			// The outer switch awaits a nested middle switch; the middle one starts a grandchild and does not await it.
+			if (reconciled === 1) await target.switchSession(middleFile);
+			else if (reconciled === 2) grandchild = await startRefusedSwitch(target, "grandchild");
+		});
+		let starting: Promise<boolean> | undefined;
+		try {
+			expect(await target.switchSession(outerFile)).toBe(true);
+			if (!grandchild) throw new Error("Expected the grandchild switch to be pending");
+			// A new session requested now must wait for the grandchild, not run while it is pending.
+			let startFinished = false;
+			starting = target.newSession().then(value => {
+				startFinished = true;
+				return value;
+			});
+			await Bun.sleep(500);
+			expect(startFinished).toBe(false);
+			grandchild.refuse();
+			expect(await grandchild.done).toBe(false);
+			expect(await starting).toBe(true);
+			const newSessionFile = target.sessionManager.getSessionFile();
+			await target.waitForSessionTransition();
+
+			// The new session stays live and gets the next message.
+			expect(target.sessionManager.getSessionFile()).toBe(newSessionFile);
+			expect(newSessionFile).not.toBe(middleFile);
+			await target.prompt("after the grandchild");
+			await target.waitForIdle();
+			expect(target.sessionManager.getSessionFile()).toBe(newSessionFile);
+			expect(target.messages.some(message => messageText(message).includes("after the grandchild"))).toBe(true);
+		} finally {
+			grandchild?.refuse();
+			await Promise.allSettled([grandchild?.done, starting]);
+		}
+	}, 30_000);
+
 	it("never runs a transition still queued when its session is disposed", async () => {
 		const target = createSession();
 		const sessionFile = target.sessionManager.getSessionFile();

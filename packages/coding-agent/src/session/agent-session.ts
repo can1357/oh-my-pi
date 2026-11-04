@@ -6335,11 +6335,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		})();
 		if (!fromOutside) {
-			parent.nested.add(run);
-			void run.then(
-				() => parent.nested.delete(run),
-				() => parent.nested.delete(run),
-			);
+			// The parent waits for this transition's whole subtree, not only its body: `done` settles
+			// once this transition and every one nested in it, at any depth, have settled.
+			parent.nested.add(done.promise);
+			void done.promise.then(() => parent.nested.delete(done.promise));
 		}
 		return run;
 	}
