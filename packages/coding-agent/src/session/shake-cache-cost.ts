@@ -29,12 +29,8 @@ export interface ShakeCacheCostInput {
 	requestTokens: number;
 	/** Mean tokens one request adds to the context on this branch; undefined when not measured. */
 	growthPerRequest: number | undefined;
-	/**
-	 * Retention tier the next request writes, or undefined when it writes no
-	 * cache entry: then nothing is cached, the shake invalidates nothing, and
-	 * the smaller prompt is a saving with no premium against it.
-	 */
-	cacheTier: "short" | "long" | undefined;
+	/** Retention tier the next request writes, which decides the write rate. */
+	cacheTier: "short" | "long";
 }
 
 export interface ShakeCacheCost {
@@ -70,9 +66,9 @@ export function priceShakeCacheCost(input: ShakeCacheCostInput): ShakeCacheCost 
 	// is what each component is billed inside.
 	const size = Math.max(1, requestTokens);
 	const readRate = calculateCost(model, tokenUsage({ cacheRead: size })).cacheRead / size;
-	// This provider writes no cache entry for the next request, so the shake
-	// invalidates nothing: no premium, and every later request is simply smaller.
-	if (cacheTier === undefined || readRate <= 0) {
+	// The model's catalog prices no cached read, so it caches nothing this shake
+	// could invalidate and every later request is simply smaller.
+	if (readRate <= 0) {
 		return { rewritePremium: 0, readSavings: Number.POSITIVE_INFINITY, requestsToRegrow, pays: true };
 	}
 	// `calculateCost` prices a long-retention write from the model's input rate;
@@ -95,9 +91,12 @@ export function priceShakeCacheCost(input: ShakeCacheCostInput): ShakeCacheCost 
 }
 
 /**
- * Mean prompt-token growth between consecutive requests on `entries`, or
- * undefined without two comparable requests. A prompt smaller than the one
- * before it follows a history rewrite, not growth, so that pair is left out.
+ * Mean prompt growth between consecutive requests on `entries`, or undefined
+ * without two comparable requests. A turn that reports no prompt tokens at all
+ * was not a request against this history (a synthesized or output-only record),
+ * so it is skipped rather than taken as a new, tiny baseline; a prompt smaller
+ * than the one before it follows a history rewrite, not growth, so that pair is
+ * left out.
  */
 export function measurePromptGrowthPerRequest(entries: readonly SessionEntry[]): number | undefined {
 	let previous: number | undefined;
@@ -107,7 +106,8 @@ export function measurePromptGrowthPerRequest(entries: readonly SessionEntry[]):
 		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 		const message = entry.message;
 		if (message.stopReason === "error" || message.stopReason === "aborted") continue;
-		const prompt = calculatePromptTokens(message.usage);
+		const usage = message.usage;
+		const prompt = usage.contextTokens ?? usage.input + usage.cacheRead + usage.cacheWrite;
 		if (prompt <= 0) continue;
 		if (previous !== undefined && prompt >= previous) {
 			total += prompt - previous;

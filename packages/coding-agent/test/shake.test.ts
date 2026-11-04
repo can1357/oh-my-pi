@@ -12,9 +12,9 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { convertToLlm, PREWALK_PLAN_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { PREWALK_PLAN_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { cfgProvidersCacheRetention } from "@oh-my-pi/pi-coding-agent/session/settings";
-import { formatShakeSummary, type ShakeAdmitPlan } from "@oh-my-pi/pi-coding-agent/session/shake-types";
+import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import {
@@ -1160,10 +1160,6 @@ describe("AgentSession shake", () => {
 				growthPerRequest: number;
 				/** Turns of recent text after the heavy result: its depth in the request. */
 				recentTurns?: number;
-				/** Turns of unshakeable prose before it: the prefix an edit after it can keep. */
-				priorTurns?: number;
-				/** Size of each recent turn, so depth and size can vary independently. */
-				tailRepeats?: number;
 				thresholdTokens?: number;
 				triggerTokens?: number;
 			}
@@ -1175,27 +1171,16 @@ describe("AgentSession shake", () => {
 			 * recovery band, so the gate prices it.
 			 */
 			function seedThresholdBranch(options: ThresholdBranch): number {
-				const { growthPerRequest, recentTurns = 12, priorTurns = 0, tailRepeats = 3_000 } = options;
+				const { growthPerRequest, recentTurns = 12 } = options;
 				const thresholdTokens = options.thresholdTokens ?? 100_000;
 				const triggerTokens = options.triggerTokens ?? TRIGGER_PROMPT_TOKENS;
 				cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
 				cfgCompactionThresholdTokens.set(session.settings, thresholdTokens);
 				cfgContextPromotionEnabled.set(session.settings, false);
-				const turns = priorTurns + recentTurns;
-				const promptAt = (turn: number) => triggerTokens - (turns + 1 - turn) * growthPerRequest;
-				// Plain prose before the heavy result: nothing here is shakeable, so
-				// it is the cached prefix an edit after it can leave untouched.
-				for (let turn = 0; turn < priorTurns; turn++) {
-					sessionManager.appendMessage({
-						role: "user",
-						content: [{ type: "text", text: `prior ${turn}\n${"older ".repeat(1_000)}` }],
-						timestamp: turn,
-					});
-					sessionManager.appendMessage(assistantAt(promptAt(turn), [{ type: "text", text: `noted ${turn}` }]));
-				}
+				const promptAt = (turn: number) => triggerTokens - (recentTurns + 1 - turn) * growthPerRequest;
 				sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "do it" }], timestamp: 1 });
 				sessionManager.appendMessage(
-					assistantAt(promptAt(priorTurns), [
+					assistantAt(promptAt(0), [
 						{ type: "toolCall", id: HEAVY_TOOL_CALL_ID, name: "bash", arguments: { command: "cat big.log" } },
 					]),
 				);
@@ -1214,12 +1199,10 @@ describe("AgentSession shake", () => {
 				for (let turn = 1; turn <= recentTurns; turn++) {
 					sessionManager.appendMessage({
 						role: "user",
-						content: [{ type: "text", text: `turn ${turn}\n${"tail ".repeat(tailRepeats)}` }],
+						content: [{ type: "text", text: `turn ${turn}\n${"tail ".repeat(3_000)}` }],
 						timestamp: 2 + turn,
 					});
-					sessionManager.appendMessage(
-						assistantAt(promptAt(priorTurns + turn), [{ type: "text", text: `done ${turn}` }]),
-					);
+					sessionManager.appendMessage(assistantAt(promptAt(turn), [{ type: "text", text: `done ${turn}` }]));
 				}
 				session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
 				return triggerTokens;
@@ -1271,48 +1254,16 @@ describe("AgentSession shake", () => {
 				expect(compactSpy).not.toHaveBeenCalled();
 			});
 
-			it("charges nothing to a provider that caches nothing, and shakes", async () => {
-				// With caching off every request pays full input, so the shake
-				// invalidates no cache entry and only makes later requests smaller.
-				cfgProvidersCacheRetention.set(session.settings, "none");
+			it("charges nothing to a model whose cached reads are not priced", async () => {
+				// Nothing is cached to invalidate, so the shake can only make later
+				// requests smaller, whatever its rewrite would have cost.
+				const model = session.agent.state.model;
+				session.agent.setModel({ ...model, cost: { ...model.cost, cacheRead: 0, cacheWrite: 0 } });
 				const compactSpy = mockSoftCompaction();
 				const heavy = await driveThresholdShake({ growthPerRequest: 10_000 });
 
 				expect(heavy.prunedAt).toBeGreaterThan(0);
 				expect(compactSpy).not.toHaveBeenCalled();
-			});
-
-			it("charges only the suffix when the edit is inside the model's cache lookback", async () => {
-				// 30 turns of unshakeable prose, then the heavy result four turns from
-				// the end: a 20-position lookback still finds a breakpoint behind the
-				// edit, so only that short suffix is rewritten and the shake pays.
-				const compactSpy = mockSoftCompaction();
-				const heavy = await driveThresholdShake({
-					growthPerRequest: 2_400,
-					recentTurns: 8,
-					priorTurns: 30,
-					triggerTokens: 105_000,
-				});
-
-				expect(heavy.prunedAt).toBeGreaterThan(0);
-				expect(compactSpy).not.toHaveBeenCalled();
-			});
-
-			it("charges back to the request head when the edit is deeper than the lookback", async () => {
-				// The same history and economics, with the heavy result 12 turns from
-				// the end: no breakpoint behind the edit is reachable, so the whole
-				// post-shake prompt is re-written and the shake declines.
-				const compactSpy = mockSoftCompaction();
-				const heavy = await driveThresholdShake({
-					growthPerRequest: 2_400,
-					recentTurns: 16,
-					tailRepeats: 1_500,
-					priorTurns: 30,
-					triggerTokens: 105_000,
-				});
-
-				expect(heavy.prunedAt).toBeUndefined();
-				expect(compactSpy).toHaveBeenCalledTimes(1);
 			});
 
 			it("prices the rewrite at the retention tier the next request writes, not at the short-tier rate", async () => {
@@ -1338,28 +1289,35 @@ describe("AgentSession shake", () => {
 				expect(compactSpy).not.toHaveBeenCalled();
 			});
 
-			it("measures the unchanged prefix on the request the provider receives, not on stored entries", async () => {
-				// A prewalk plan entry is stored but never sent, so it is not part of
-				// the prefix a provider keeps cached behind the shake's first edit.
-				sessionManager.appendCustomMessageEntry(PREWALK_PLAN_MESSAGE_TYPE, "hidden plan ".repeat(4_000), false);
-				seedThresholdBranch({ growthPerRequest: 1_000 });
-				let plan: ShakeAdmitPlan | undefined;
-				await session.shake("elide", {
-					admit: received => {
-						plan = received;
-						return false;
+			it("ignores a turn that reports no prompt when measuring growth", async () => {
+				// An output-only record is not a request against this history; taken
+				// as a baseline it makes the next real request look like a huge rise,
+				// and the losing shake pays for itself.
+				const compactSpy = mockSoftCompaction();
+				seedThresholdBranch({ growthPerRequest: 10_000 });
+				sessionManager.appendMessage({
+					role: "assistant",
+					content: [{ type: "text", text: "no prompt billed" }],
+					...apiInfo,
+					stopReason: "stop",
+					usage: {
+						input: 0,
+						output: 120,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 120,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 					},
+					timestamp: Date.now(),
 				});
+				const trigger = assistantAt(TRIGGER_PROMPT_TOKENS, [{ type: "text", text: "trigger" }]);
+				session.agent.emitExternalEvent({ type: "message_end", message: trigger });
+				session.agent.emitExternalEvent({ type: "agent_end", messages: [trigger] });
+				await session.waitForIdle();
 
-				const sent = sessionManager.buildSessionContext().messages;
-				const edited = sent.findIndex(message => message.role === "toolResult");
-				expect(edited).toBeGreaterThan(0);
-				const tokenizer = new Tokenizer();
-				const expected =
-					plan!.requestHeadTokens +
-					tokenizer.countMessages(convertToLlm(sent.slice(0, edited)), { excludeEncryptedReasoning: true });
-				expect(plan!.unchangedPrefixTokens).toBe(expected);
-				expect(JSON.stringify(sent)).not.toContain("hidden plan");
+				const heavy = branchToolResults().find(result => result.toolCallId === HEAVY_TOOL_CALL_ID);
+				expect(heavy?.prunedAt).toBeUndefined();
+				expect(compactSpy).toHaveBeenCalledTimes(1);
 			});
 
 			it("frees only what the sent request loses, so an unsent region cannot buy a losing shake", async () => {

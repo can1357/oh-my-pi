@@ -8,20 +8,12 @@
 /** Mode selector for `AgentSession.shake`. */
 export type ShakeMode = "elide" | "images" | "thinking";
 
-/** What an elide shake would leave of the provider request, known before it edits anything. */
+/** What a planned elide shake would do to the provider request, known before it edits anything. */
 export interface ShakeAdmitPlan {
-	/** Estimated tokens the shake removes from every later request. */
+	/** Tokens the shake removes from the request the provider receives. */
 	tokensFreed: number;
-	/** Tokens of the request prefix the edit keeps byte-identical: request head plus the context before the first edit. */
-	unchangedPrefixTokens: number;
-	/** Tokens of the request head alone (tools and system prompt). */
+	/** Tokens of the request head (tools and system prompt), which no shake touches. */
 	requestHeadTokens: number;
-	/**
-	 * Messages of the sent request at or after the first one the edit changes.
-	 * A provider whose cache looks back a bounded number of block positions can
-	 * still match a breakpoint behind an edit this shallow.
-	 */
-	positionsAfterEdit: number;
 }
 
 /** Decides, once an elide shake has planned its edit and before it edits anything, whether it runs. */

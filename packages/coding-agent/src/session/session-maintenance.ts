@@ -6419,12 +6419,12 @@ export class SessionMaintenance {
 				return { pays: true, rewriteTokens: 0 };
 			}
 		}
-		const lookback = resolvePromptCacheLookback(model);
-		const reachable =
-			lookback === undefined || plan.positionsAfterEdit <= lookback
-				? plan.unchangedPrefixTokens
-				: plan.requestHeadTokens;
-		const rewriteTokens = Math.max(0, postShakeTokens - reachable);
+		// Charged against what the provider certainly cannot reuse: the request
+		// head carries its own breakpoint, and nothing between it and the edit is
+		// guaranteed to match. A provider that keeps more than that pays less
+		// than this, so the gate can decline a shake that would in fact have
+		// paid, and never admits one that loses.
+		const rewriteTokens = Math.max(0, postShakeTokens - plan.requestHeadTokens);
 		// A `/clear` hides everything before it from the request just as a
 		// compaction does, so growth is measured after whichever came last.
 		const branch = this.#host.sessionManager.getBranch();
@@ -6441,11 +6441,15 @@ export class SessionMaintenance {
 			rewriteTokens,
 			requestTokens: postShakeTokens,
 			growthPerRequest: measurePromptGrowthPerRequest(sinceBoundary),
-			cacheTier: resolvePromptCacheTier(
-				model,
-				{ cacheRetention: retention === "auto" ? undefined : retention },
-				model.api === "anthropic-messages" && this.#host.modelRegistry.isUsingOAuth(model),
-			),
+			// Which retention tier the next request writes decides the write rate;
+			// `none` still caches implicitly on some providers, so the tier, never
+			// the setting, decides whether a write is charged.
+			cacheTier:
+				resolvePromptCacheTier(
+					model,
+					{ cacheRetention: retention === "auto" ? undefined : retention },
+					model.api === "anthropic-messages" && this.#host.modelRegistry.isUsingOAuth(model),
+				) ?? "short",
 		});
 		logger.debug("Auto-shake cache cost", {
 			tokensFreed: plan.tokensFreed,
@@ -6460,13 +6464,12 @@ export class SessionMaintenance {
 
 	/**
 	 * What a planned shake would do to the request the provider receives: the
-	 * tokens it removes from it, the tokens of the longest prefix the edit keeps
-	 * byte-identical (request head plus the context messages before the first
-	 * changed one), and the head's own tokens. All three are measured on the
-	 * provider-facing context, built for the branch as it is and as the edit
-	 * would leave it (applied to copies of the edited entries), so a compaction
-	 * summary counts, an entry the context leaves out frees nothing, and the
-	 * saving is in the same domain as the rewrite it is weighed against.
+	 * tokens it removes from it, and the tokens of the request head it cannot
+	 * touch. The saving is measured on the provider-facing context itself,
+	 * built for the branch as it is and as the edit would leave it (applied to
+	 * copies of the edited entries), so an entry the context leaves out frees
+	 * nothing and the saving is in the same domain as the rewrite it is weighed
+	 * against.
 	 */
 	#shakeRequestPlan(
 		branchEntries: SessionEntry[],
@@ -6488,8 +6491,6 @@ export class SessionMaintenance {
 		const projected = branchEntries.map(entry => copies.get(entry) ?? entry);
 		const before = buildSessionContext(branchEntries, undefined, undefined, this.#contextBuildOptions).messages;
 		const after = buildSessionContext(projected, undefined, undefined, this.#contextBuildOptions).messages;
-		let shared = 0;
-		while (shared < before.length && shared < after.length && Bun.deepEquals(before[shared], after[shared])) shared++;
 		const requestHeadTokens = computeNonMessageTokens(
 			this.#host.nonMessageTokenSource(),
 			this.#tokenizer,
@@ -6501,9 +6502,6 @@ export class SessionMaintenance {
 				this.#countProjectedMessages(before, branchEntries) - this.#countProjectedMessages(after, projected),
 			),
 			requestHeadTokens,
-			positionsAfterEdit: after.length - shared,
-			unchangedPrefixTokens:
-				requestHeadTokens + this.#countProjectedMessages(before.slice(0, shared), branchEntries),
 		};
 	}
 
