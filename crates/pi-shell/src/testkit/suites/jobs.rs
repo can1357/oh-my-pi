@@ -177,7 +177,6 @@ fn a_process_substitution_sets_the_last_background_pid() {
 	assert_eq!(out, "123\n");
 }
 
-
 // Failure mode: a disowned job that ends leaves its finished proc record in
 // the store for good (no wait collects it): 200 `f & disown` left 200.
 #[test]
@@ -206,7 +205,9 @@ fn bang_survives_a_snapshot_after_its_job_is_deleted() {
 	r.run(Script::command(&b"f() { return 6; }; f & p=$!; wait \"$p\"; jobs"[..]), Fault::None);
 	r.snapshot();
 	r.run(
-		Script::command(&b"[ \"$!\" = \"$p\" ] && echo same || echo lost; wait \"$p\"; echo status=$?"[..]),
+		Script::command(
+			&b"[ \"$!\" = \"$p\" ] && echo same || echo lost; wait \"$p\"; echo status=$?"[..],
+		),
 		Fault::None,
 	);
 	assert_eq!(r.host.stdout.bytes(), b"same\nstatus=6\n");

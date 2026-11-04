@@ -681,8 +681,14 @@ impl Kernel {
 		let job = vp.jobs.delete(number, keep)?;
 		if !job.inherited && self.proc_collect(store, job.vpid).is_none() {
 			// Still running (`disown`): no shell waits for it now, so its
-			// record names no parent and goes when it ends.
-			if let Ok(Some(Record::Proc { status: None, .. })) = store.get(Key::Proc(job.vpid)) {
+			// record names no parent and goes when it ends. A job disowned
+			// before its first turn has no record yet; `adopt` keeps this one.
+			let running = match store.get(Key::Proc(job.vpid)) {
+				Ok(Some(Record::Proc { status, .. })) => status.is_none(),
+				Ok(_) => !matches!(job.state, proc::JobState::Done(_)),
+				Err(_) => false,
+			};
+			if running {
 				let rec = Record::Proc { parent: Some(DISOWNED), status: None };
 				self
 					.root
@@ -1665,6 +1671,12 @@ impl Shell {
 	/// subshell vprocs that finished.
 	fn adopt(&mut self, cx: &mut Cx<'_>) {
 		for p in &self.k.spawned {
+			// A job disowned before its first turn keeps its disowned record.
+			if let Ok(Some(Record::Proc { parent: Some(DISOWNED), .. })) =
+				cx.store.get(Key::Proc(p.vpid))
+			{
+				continue;
+			}
 			let rec = Record::Proc { parent: p.parent, status: None };
 			self
 				.k
