@@ -138,4 +138,29 @@ describe("print-mode dispatched builtins", () => {
 		expect(spies.prompt).toHaveBeenCalledWith("/stats");
 		expect(spies.retry).not.toHaveBeenCalled();
 	});
+
+	it("turns /changelog summary with the built review prompt, not the literal command", async () => {
+		const { session, spies } = createMockSession();
+
+		const exitCode = await runPrintMode(session, { mode: "text", messages: ["/changelog summary last 1"] });
+
+		expect(exitCode).toBe(0);
+		expect(spies.prompt).toHaveBeenCalledTimes(1);
+		const turnText: string = spies.prompt.mock.calls[0]?.[0];
+		// The command hands the model the rendered changelog plus the review
+		// instruction; the literal slash text never reaches it.
+		expect(turnText).toContain("Review the omp changelog entries below");
+		expect(turnText).toContain("the latest release");
+		expect(turnText).toContain("## [");
+		expect(turnText).not.toContain("/changelog summary");
+	});
+
+	it("consumes a raw /changelog view locally without prompting the model", async () => {
+		const { session, spies } = createMockSession();
+
+		const exitCode = await runPrintMode(session, { mode: "text", messages: ["/changelog last 1"] });
+
+		expect(exitCode).toBe(0);
+		expect(spies.prompt).not.toHaveBeenCalled();
+	});
 });

@@ -4,11 +4,13 @@ import { journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judg
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import {
+	buildChangelogSummaryPrompt,
 	getChangelogPath,
 	parseChangelog,
 	parseChangelogView,
 	renderChangelogEntries,
 	selectChangelogEntries,
+	splitChangelogSummaryArgs,
 } from "../utils/changelog";
 import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
 import { buildContextReportText } from "./helpers/context-report";
@@ -486,14 +488,25 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "news",
 		description: "Show changelog entries",
 		acpDescription: "Show changelog",
-		acpInputHint: "[full|last [N]]",
+		acpInputHint: "[summary [full|last [N]] | full | last [N]]",
 		subcommands: [
+			{ name: "summary", description: "Ask the current model to review recent changes", usage: "[full|last [N]]" },
 			{ name: "full", description: "Show complete changelog" },
 			{ name: "last", description: "Show the last N releases (default 1)", usage: "[N]" },
 		],
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			const view = parseChangelogView(command.args);
+			const { summary, range } = splitChangelogSummaryArgs(command.args);
+			if (summary) {
+				const built = await buildChangelogSummaryPrompt(range);
+				if ("error" in built) return usage(built.error, runtime);
+				if ("empty" in built) {
+					await runtime.output("No changelog entries found.");
+					return commandConsumed();
+				}
+				return { prompt: built.message };
+			}
+			const view = parseChangelogView(range);
 			if ("error" in view) return usage(view.error, runtime);
 			const changelogPath = getChangelogPath();
 			const allEntries = await parseChangelog(changelogPath);
@@ -506,7 +519,21 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
-			await runtime.ctx.handleChangelogCommand(command.args);
+			const { summary, range } = splitChangelogSummaryArgs(command.args);
+			if (summary) {
+				clearSubmittedText(runtime);
+				const built = await buildChangelogSummaryPrompt(range);
+				if ("error" in built) {
+					runtime.ctx.showWarning(built.error);
+					return;
+				}
+				if ("empty" in built) {
+					runtime.ctx.showStatus("No changelog entries found.");
+					return;
+				}
+				return { prompt: built.message };
+			}
+			await runtime.ctx.handleChangelogCommand(range);
 			clearSubmittedText(runtime);
 		},
 	},
