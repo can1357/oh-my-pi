@@ -78,25 +78,16 @@ function readOomKills(request: ExitContextIoRequest): number | undefined {
 	return undefined;
 }
 
-/**
- * Claim `<intentDir>/<pid>` by renaming it aside, then read and delete the
- * claimed file. The rename takes exactly the file this read sees: a sender that
- * publishes a new word at the path meanwhile keeps it for the next read, where
- * an unlink of the path would delete it unread.
- */
-function claimExitIntent(request: ExitContextIoRequest): string | undefined {
-	const filePath = path.join(request.intentDir, String(request.pid));
-	const claimed = path.join(request.intentDir, `.${request.pid}.claimed-${process.pid}-${crypto.randomUUID()}`);
+/** Remove a claimed copy; one that is already gone is fine. */
+function removeClaimedCopy(claimedPath: string): void {
 	try {
-		if (!fs.lstatSync(filePath).isFile()) return undefined;
-		fs.renameSync(filePath, claimed);
-	} catch {
-		return undefined;
-	}
-	const file = readSmallFile(claimed);
-	try {
-		fs.unlinkSync(claimed);
+		fs.unlinkSync(claimedPath);
 	} catch {}
+}
+
+/** The word in a claimed copy, or `undefined` when it is missing, unreadable, blank, or older than the process. */
+function readClaimedCopy(request: ExitContextIoRequest, claimedPath: string): string | undefined {
+	const file = readSmallFile(claimedPath);
 	// Left for an earlier process that had this pid and died without reading it.
 	if (!file || file.mtimeMs < request.processStartMs) return undefined;
 	const word = file.text.trim().slice(0, EXIT_INTENT_MAX_CHARS);
@@ -104,36 +95,97 @@ function claimExitIntent(request: ExitContextIoRequest): string | undefined {
 }
 
 /**
+ * Take `<intentDir>/<pid>` by renaming it to `claimedPath`. The rename takes
+ * exactly the file this read sees: a sender that publishes a new word at the
+ * path meanwhile keeps it for the next read, where an unlink of the path would
+ * delete it unread. False when there is no regular file to take.
+ */
+function takeIntentFile(filePath: string, claimedPath: string): boolean {
+	try {
+		if (!fs.lstatSync(filePath).isFile()) return false;
+		fs.renameSync(filePath, claimedPath);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function claimedCopyPath(request: ExitContextIoRequest): string {
+	return path.join(request.intentDir, `.${request.pid}.claimed-${process.pid}-${crypto.randomUUID()}`);
+}
+
+/** Claim, read and delete the intent file for this thread alone, when the board cannot be used. */
+function claimExitIntent(request: ExitContextIoRequest): string | undefined {
+	const claimedPath = claimedCopyPath(request);
+	if (!takeIntentFile(path.join(request.intentDir, String(request.pid)), claimedPath)) return undefined;
+	const word = readClaimedCopy(request, claimedPath);
+	removeClaimedCopy(claimedPath);
+	return word;
+}
+
+/**
  * The process's word from `<intentDir>/<pid>`, claimed once for every thread of
  * the process. A word on the board is returned without touching the file. A
  * claim another reader has in progress is waited for, and taken over once it is
  * older than {@link EXIT_CONTEXT_IO_TIMEOUT_MS} (its reader may have died with
- * its thread). Only a found word goes on the board, so a later word stays
- * claimable. Without the board's lock, the file is claimed for this thread alone.
+ * its thread).
+ *
+ * The claim names its claimed copy on the board before the rename, and the word
+ * goes on the board before that copy is deleted, so a reader that dies at any
+ * step loses nothing: a takeover reads the dead reader's copy first, and a word
+ * already published is simply returned (the leftover copy is removed). Only a
+ * found word goes on the board, so a later word stays claimable. Without the
+ * board's lock, the file is claimed for this thread alone.
  */
 function claimProcessIntent(request: ExitContextIoRequest): string | undefined {
 	const filePath = path.join(request.intentDir, String(request.pid));
 	const token = crypto.randomUUID();
+	const claimedPath = claimedCopyPath(request);
+	let orphan: string | undefined;
 	for (;;) {
 		const step = updateExitContextBoard(request.board, EXIT_CONTEXT_IO_TIMEOUT_MS, filePath, (state, change) => {
 			const word = state.words[filePath];
-			if (word !== undefined) return { word };
 			const claim = state.claims[filePath];
 			const age = claim ? Date.now() - claim.since : Number.POSITIVE_INFINITY;
+			if (word !== undefined) {
+				// A reader that died after publishing left its claim and maybe its copy.
+				if (claim && age >= EXIT_CONTEXT_IO_TIMEOUT_MS) {
+					delete state.claims[filePath];
+					return { word, leftover: claim.claimed };
+				}
+				return { word, leftover: undefined };
+			}
 			if (age < EXIT_CONTEXT_IO_TIMEOUT_MS) return { change, waitMs: EXIT_CONTEXT_IO_TIMEOUT_MS - age };
-			state.claims[filePath] = { token, since: Date.now() };
-			return undefined;
+			state.claims[filePath] = { token, since: Date.now(), claimed: claimedPath };
+			return { orphan: claim?.claimed };
 		});
 		if (!step) return claimExitIntent(request);
-		if (step.value === undefined) break;
-		if ("word" in step.value) return step.value.word;
+		if ("word" in step.value) {
+			if (step.value.leftover !== undefined) removeClaimedCopy(step.value.leftover);
+			return step.value.word;
+		}
+		if ("orphan" in step.value) {
+			orphan = step.value.orphan;
+			break;
+		}
 		waitForExitContextBoardChange(request.board, step.value.change, step.value.waitMs);
 	}
-	const claimed = claimExitIntent(request);
+	// A dead claimer's copy holds the word it took; only without one is the file claimed again.
+	let claimed = orphan === undefined ? undefined : readClaimedCopy(request, orphan);
+	let tookFile = false;
+	if (claimed === undefined) {
+		tookFile = takeIntentFile(filePath, claimedPath);
+		if (tookFile) claimed = readClaimedCopy(request, claimedPath);
+	}
 	const shared = updateExitContextBoard(request.board, EXIT_CONTEXT_IO_TIMEOUT_MS, filePath, state => {
-		if (state.claims[filePath]?.token === token) delete state.claims[filePath];
 		if (claimed !== undefined && state.words[filePath] === undefined) state.words[filePath] = claimed;
 		return state.words[filePath];
+	});
+	// The word is on the board (or this thread could not publish it and records it alone): drop the copies.
+	if (orphan !== undefined) removeClaimedCopy(orphan);
+	if (tookFile) removeClaimedCopy(claimedPath);
+	updateExitContextBoard(request.board, EXIT_CONTEXT_IO_TIMEOUT_MS, filePath, state => {
+		if (state.claims[filePath]?.token === token) delete state.claims[filePath];
 	});
 	return shared?.value ?? claimed;
 }

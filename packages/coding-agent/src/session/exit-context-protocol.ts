@@ -50,8 +50,12 @@ export interface ExitContextIoResult {
 export interface ExitContextBoardState {
 	/** The word claimed from each intent file path; the first word claimed for a path stays. */
 	words: Record<string, string>;
-	/** Claims in progress, by intent file path: the claiming reader's token and when it started (epoch ms). */
-	claims: Record<string, { token: string; since: number }>;
+	/**
+	 * Claims in progress, by intent file path: the claiming reader's token, when it
+	 * started (epoch ms), and the path it renames the file to, so a reader that
+	 * takes over the claim of one that died can read the word it took.
+	 */
+	claims: Record<string, { token: string; since: number; claimed?: string }>;
 }
 
 /** Board size: a production process uses one intent path; tests use a few hundred at most. */

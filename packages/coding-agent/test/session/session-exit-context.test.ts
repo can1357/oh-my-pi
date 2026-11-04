@@ -527,6 +527,73 @@ describe("sessions on several threads of one process", () => {
 	}, 60_000);
 });
 
+const KILLED_READER = path.join(import.meta.dir, "../fixtures/session-exit-context-killed-reader.ts");
+// strace holds the reader thread in one real call of its claim, so the test can kill it exactly there.
+const straceAvailable =
+	process.platform === "linux" &&
+	Bun.which("strace") !== null &&
+	Bun.spawnSync(["strace", "-f", "-o", "/dev/null", "true"]).exitCode === 0;
+
+interface KilledReaderResult {
+	claimed: string[];
+	afterDeath: ExitContext;
+	files: string[];
+}
+
+/** Run the killed-reader fixture with strace holding the reader thread's first `syscalls` call for 6 s. */
+async function runKilledReader(
+	tempDir: TempDir,
+	syscalls: string,
+	phase: "enter" | "exit",
+): Promise<KilledReaderResult> {
+	const dir = tempDir.join("exit-intent");
+	fs.mkdirSync(dir, { recursive: true });
+	const child = Bun.spawn(
+		[
+			"strace",
+			"-f",
+			"-qq",
+			"-o",
+			"/dev/null",
+			"-e",
+			`trace=${syscalls}`,
+			"-e",
+			`inject=${syscalls}:delay_${phase}=6s:when=1`,
+			process.execPath,
+			KILLED_READER,
+			dir,
+		],
+		{ stdout: "pipe", stderr: "pipe" },
+	);
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+		child.exited,
+	]);
+	expect(exitCode, stderr).toBe(0);
+	return JSON.parse(stdout.trim()) as KilledReaderResult;
+}
+
+describe.skipIf(!straceAvailable)("a reader that dies in the middle of a claim", () => {
+	it("loses no word when it dies after taking the file and before publishing the word", async () => {
+		using tempDir = TempDir.createSync("@omp-exit-context-killed-renamed-");
+		// Held on the way out of the rename: the file is taken, nothing is read or published yet.
+		const result = await runKilledReader(tempDir, "rename,renameat,renameat2", "exit");
+		expect(result.claimed).toHaveLength(1);
+		expect(result.afterDeath.intent).toBe("restart");
+		expect(result.files).toEqual([]);
+	}, 90_000);
+
+	it("loses no word when it dies while it deletes its claimed copy", async () => {
+		using tempDir = TempDir.createSync("@omp-exit-context-killed-unlink-");
+		const result = await runKilledReader(tempDir, "unlink,unlinkat", "enter");
+		expect(result.claimed).toHaveLength(1);
+		expect(result.afterDeath.intent).toBe("restart");
+		// The word is on the board before the copy is deleted; whether the held unlink finishes is the kernel's business.
+		expect(result.files.filter(name => !name.includes(".claimed-"))).toEqual([]);
+	}, 90_000);
+});
+
 const SLOW_FUSE = path.join(import.meta.dir, "../fixtures/slow-fuse.py");
 const fuseAvailable =
 	process.platform === "linux" &&
