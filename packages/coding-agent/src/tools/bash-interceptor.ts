@@ -8,6 +8,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { IMAGE_METADATA_HEADER_BYTES, parseHeifImageMimeType, parseImageMetadata } from "@oh-my-pi/pi-utils";
 import {
 	dedicatedToolCanPerformStep,
 	type FileFacts,
@@ -32,6 +33,12 @@ const SPECIAL_ROOT = /^\/(?:dev|proc|sys)(?:\/|$)/u;
  * the JavaScript one normalizes it first.
  */
 function pathKindIn(cwd: string, target: string, follow: boolean): PathKind {
+	const kind = pathKindOf(cwd, target, follow);
+	// `f/` names a directory to the shell (`cat f/` and `> f/` fail), while the tools drop the slash.
+	return target.endsWith("/") && kind !== "directory" && kind !== "unknown" ? "other" : kind;
+}
+
+function pathKindOf(cwd: string, target: string, follow: boolean): PathKind {
 	if (URL_PATH.test(cwd) || URL_PATH.test(target)) return "unknown";
 	const joined = joinPhysically(cwd, target);
 	try {
@@ -44,7 +51,9 @@ function pathKindIn(cwd: string, target: string, follow: boolean): PathKind {
 		return stat.isFile() ? "file" : stat.isDirectory() ? "directory" : "other";
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
-		if (code !== "ENOENT" && code !== "ENOTDIR") return "unknown";
+		// ENOTDIR: a file stands where the path needs a directory (`f/x`, `f/`); the shell fails there.
+		if (code === "ENOTDIR") return "other";
+		if (code !== "ENOENT") return "unknown";
 		try {
 			// A missing name is created where its directory really is; with no directory there the
 			// shell fails, while the write tool would create one.
@@ -62,7 +71,7 @@ function joinPhysically(cwd: string, target: string): string {
 	return path.isAbsolute(target) ? target : `${cwd}/${target}`;
 }
 
-/** Largest file the edit tool's byte-for-byte check reads. */
+/** Largest file checked for byte-faithful text reads or edits. */
 const PLAIN_TEXT_LIMIT = 4 * 1024 * 1024;
 
 /** A regular file's size and links, and (read on first use) whether it is plain text the edit tool keeps. */
@@ -77,18 +86,43 @@ function fileFactsIn(cwd: string, target: string): FileFacts | undefined {
 	}
 	let plainText: boolean | undefined;
 	let maybeBinary: boolean | undefined;
+	let readableText: boolean | undefined;
+	let bytes: Buffer | undefined;
+	let contentRead = false;
+	const content = () => {
+		if (!contentRead) {
+			contentRead = true;
+			if (stat.size <= PLAIN_TEXT_LIMIT) {
+				try {
+					bytes = fs.readFileSync(joined);
+				} catch {
+					// An unreadable file cannot be redirected to a text tool.
+				}
+			}
+		}
+		return bytes;
+	};
 	return {
 		size: stat.size,
 		links: stat.nlink,
 		mode: stat.mode,
 		writable: isWritable(joined),
 		plainText: () => {
-			plainText ??= isPlainText(joined, stat.size);
+			plainText ??= isPlainText(content());
 			return plainText;
 		},
 		maybeBinary: () => {
-			maybeBinary ??= mayHoldNul(joined, stat.size);
+			maybeBinary ??= mayHoldNul(content());
 			return maybeBinary;
+		},
+		readableText: () => {
+			if (readableText === undefined) {
+				const bytes = content();
+				const header = bytes?.subarray(0, IMAGE_METADATA_HEADER_BYTES);
+				readableText =
+					!mayHoldNul(bytes) && !!header && !parseImageMetadata(header) && !parseHeifImageMimeType(header);
+			}
+			return readableText;
 		},
 	};
 }
@@ -107,10 +141,9 @@ function isWritable(file: string): boolean {
  * Whether grep may treat the file as binary: it holds a NUL byte or invalid UTF-8, it cannot be
  * read, or it is over 4 MB (too large to check on each call).
  */
-function mayHoldNul(file: string, size: number): boolean {
-	if (size > PLAIN_TEXT_LIMIT) return true;
+function mayHoldNul(bytes: Buffer | undefined): boolean {
+	if (!bytes) return true;
 	try {
-		const bytes = fs.readFileSync(file);
 		if (bytes.includes(0)) return true;
 		new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 		return false;
@@ -120,10 +153,9 @@ function mayHoldNul(file: string, size: number): boolean {
 }
 
 /** Whether the file is at most 4 MB of valid UTF-8 with no byte-order mark and no carriage return. */
-function isPlainText(file: string, size: number): boolean {
-	if (size > PLAIN_TEXT_LIMIT) return false;
+function isPlainText(bytes: Buffer | undefined): boolean {
+	if (!bytes) return false;
 	try {
-		const bytes = fs.readFileSync(file);
 		if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return false;
 		if (bytes.includes(0x0d)) return false;
 		new TextDecoder("utf-8", { fatal: true }).decode(bytes);

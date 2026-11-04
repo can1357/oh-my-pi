@@ -10,6 +10,7 @@
  * adds a refusal: it only withdraws one the named tool cannot carry out.
  */
 import * as os from "node:os";
+import { readPathMayRender } from "./read";
 import { stripWriteContentWithPotentialLooseHeader } from "./write-content";
 
 /** One shell word of a simple command. */
@@ -1071,6 +1072,9 @@ export interface GlobArgs {
 /** A depth the glob tool's `depth` expresses: its search root's children are depth 1. */
 const GLOB_DEPTH = (value: string): boolean => /^[1-9]\d*$/u.test(value);
 
+/** More root/pattern pairs than this run unchecked, before root matching or filesystem work. */
+const GLOB_ROOT_CHECKS = 4096;
+
 /**
  * A `find -name` pattern the glob tool reads the same way: letters, digits, `.`, `_`, `-`, `+`,
  * `=`, a non-leading `@`, and `*` (not `**`). Every other character is read differently by glob
@@ -1092,20 +1096,22 @@ function isPlainRoot(root: string): boolean {
 /**
  * Whether no root lies inside another (`a a`, `a a/b`, `. a`): find walks each root and lists a
  * file below two of them twice, where glob lists it once. Several roots must be relative, so two
- * spellings of one directory (`/abs/cwd` and `.`) cannot hide.
+ * spellings of one directory (`/abs/cwd` and `.`) cannot hide. Sorted by segments, a root sorts
+ * just before the roots inside it, so comparing neighbours suffices.
  */
 function rootsDisjoint(roots: readonly string[]): boolean {
 	if (roots.length < 2) return true;
 	if (roots.some(root => root.startsWith("/"))) return false;
-	const normalized = roots.map(root => {
-		const segments = root.split("/").filter(segment => segment !== "" && segment !== ".");
-		return segments.join("/");
-	});
-	return normalized.every((root, i) =>
-		normalized.every(
-			(other, j) => i === j || (root !== "" && other !== "" && root !== other && !other.startsWith(`${root}/`)),
-		),
-	);
+	const keys = roots
+		.map(root =>
+			root
+				.split("/")
+				.filter(segment => segment !== "" && segment !== ".")
+				.join("\0"),
+		)
+		.sort();
+	if (keys[0] === "") return false;
+	return keys.every((key, i) => i === 0 || (key !== keys[i - 1] && !key.startsWith(`${keys[i - 1]}\0`)));
 }
 
 /**
@@ -1196,6 +1202,7 @@ function findAsGlob(command: SimpleCommand, filesystem: StepFilesystem | undefin
 		if (joiner !== undefined && rest[k + 3] === undefined) return undefined;
 	}
 	if (names.length === 0) return undefined;
+	if (roots.length * names.length > GLOB_ROOT_CHECKS) return undefined;
 	// `-print` binds to the last `-name` alone unless the alternatives are parenthesized.
 	if (printed && names.length > 1 && !grouped) return undefined;
 	if (!rootsDisjoint(roots)) return undefined;
@@ -1257,6 +1264,7 @@ function fdAsGlob(command: SimpleCommand, filesystem: StepFilesystem | undefined
 	if (pattern !== "" && !SAME_NAME_PATTERN.test(pattern)) return undefined;
 	if (pattern !== "" && !has("s", "case-sensitive") && !/[A-Z]/u.test(pattern)) return undefined;
 	const roots = rootWords.length > 0 ? rootWords.map(word => word.value) : ["."];
+	if (roots.length > GLOB_ROOT_CHECKS) return undefined;
 	if (!roots.every(isPlainRoot) || !rootsDisjoint(roots)) return undefined;
 	if (filesystem && roots.some(root => filesystem.kind(root, true) !== "directory")) return undefined;
 	const depthValue = given.get("depth");
@@ -1450,7 +1458,9 @@ function writeCanPerform(
 	if (output.op !== ">" && output.op !== ">|" && !(output.op === ">>" && availableTools.includes("edit")))
 		return false;
 	const target = output.target;
-	if (!target || !namesOneFile(target) || !toolsTakeLiterally(target.value)) return false;
+	// `> f/` fails in the shell; the write tool drops the slash and writes `f`.
+	if (!target || !namesOneFile(target) || !toolsTakeLiterally(target.value) || target.value.endsWith("/"))
+		return false;
 	if (SPECIAL_PATH.test(target.value) || NOTEBOOK.test(target.value)) return false;
 	if (filesystem && filesystem.kind(target.value, false) !== "missing") return false;
 	const args = command.words.slice(1);
@@ -1644,6 +1654,8 @@ export interface FileFacts {
 	 * and rg treat it as binary or print its bytes, where the grep tool skips it or prints
 	 * replacement characters. Reads the file on first use. */
 	maybeBinary(): boolean;
+	/** At most 4 MB of valid UTF-8 without NUL or image magic: read returns text, not pixels. */
+	readableText(): boolean;
 	/** The current user may write the file; the edit tool cannot change a read-only file that
 	 * `sed -i` and `perl -i` replace. */
 	writable: boolean;
@@ -1708,8 +1720,8 @@ const MULTILINE_OPTION = /^(?:-[^-]*U|--multiline(?:-dotall)?$)/u;
  * command this module does not know: the rule's own match decides. `false` for a step of a
  * built-in tool's command that it cannot parse: nothing shows the tool can do it. `filesystem`,
  * when given, reports what each operand or target names; a FIFO, device or path it cannot
- * inspect is never sent to read, grep, write or edit, which take regular files (and directories
- * for read and grep), and an edit's files must be plain text the edit tool rewrites byte for byte.
+ * inspect is never sent to read, grep, write or edit. File readers never become directory
+ * listings or format renderings, and an edit's files must be text the edit tool rewrites byte for byte.
  */
 export function dedicatedToolCanPerformStep(
 	tool: string,
@@ -1729,7 +1741,15 @@ export function dedicatedToolCanPerformStep(
 			const spec = own(READ_SPECS, name);
 			if (!spec) return true;
 			const paths = outputReachesAgent(pipeline) ? readPaths(spec, command) : undefined;
-			return !!paths && pathsAre(paths, ["file", "directory", "missing"], true, filesystem);
+			if (!paths || !pathsAre(paths, ["file", "missing"], true, filesystem)) return false;
+			return paths.every(
+				word =>
+					!word.value.endsWith("/") &&
+					!readPathMayRender(word.value) &&
+					(!filesystem ||
+						filesystem.kind(word.value, true) !== "file" ||
+						filesystem.facts(word.value)?.readableText() === true),
+			);
 		}
 		case "grep": {
 			const spec = own(GREP_SPECS, name);
@@ -1769,7 +1789,8 @@ export function dedicatedToolCanPerformStep(
 		default: {
 			const files = editCanPerform(name, pipeline);
 			if (!files || !pathsAre(files, ["file", "missing"], false, filesystem)) return false;
-			if (files.some(word => NOTEBOOK.test(word.value))) return false;
+			// A notebook is edited as cells; `f/` fails in the shell, while the edit tool drops the slash.
+			if (files.some(word => NOTEBOOK.test(word.value) || word.value.endsWith("/"))) return false;
 			return (
 				!filesystem ||
 				files.every(
