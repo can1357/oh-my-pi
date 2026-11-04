@@ -74,9 +74,26 @@ function holdPrintInPage(
 	const deadline = Symbol.for(`${holdKey}.until`);
 	const wrapped = Symbol.for(`${holdKey}.wrapped`);
 	const settling = Symbol.for(`${holdKey}.settling`);
-	// A timer the page replaced (paused fake timers) may never fire; without a native one the tail starts at once.
+	// A timer the page replaced (paused fake timers) may never fire: a message posted to itself runs after the task as
+	// well, and only without either does the tail start at once.
 	const pageTimer: unknown = Reflect.get(globalThis, "setTimeout");
-	const timer = isNative(pageTimer) ? pageTimer : undefined;
+	const Channel: unknown = Reflect.get(globalThis, "MessageChannel");
+	const afterThisTask = (run: () => void): boolean => {
+		if (isNative(pageTimer) && typeof pageTimer === "function") {
+			Reflect.apply(pageTimer, globalThis, [run, 0]);
+			return true;
+		}
+		if (!isNative(Channel) || typeof Channel !== "function") return false;
+		const channel: unknown = Reflect.construct(Channel, []);
+		const inbox: unknown = Reflect.get(Object(channel), "port1");
+		Reflect.set(Object(inbox), "onmessage", () => {
+			Reflect.apply(Reflect.get(Object(inbox), "close"), inbox, []);
+			run();
+		});
+		const outbox: unknown = Reflect.get(Object(channel), "port2");
+		Reflect.apply(Reflect.get(Object(outbox), "postMessage"), outbox, [0]);
+		return true;
+	};
 	// Script that runs in one task (the tab's document-start scripts, a restored page's `pageshow` handlers) can outlast
 	// any fixed tail, and nothing omp sends reaches the page before it ends: hold until then, and `ms` after, unless omp
 	// sets a deadline first.
@@ -87,8 +104,7 @@ function holdPrintInPage(
 		const settle = (): void => {
 			if (Reflect.get(globalThis, settling) === token) Reflect.set(globalThis, deadline, now() + ms);
 		};
-		if (typeof timer === "function") Reflect.apply(timer, globalThis, [settle, 0]);
-		else settle();
+		if (!afterThisTask(settle)) settle();
 	};
 	if (afterTask && holdMs !== null) {
 		holdPastTask(holdMs);
@@ -127,9 +143,14 @@ function holdPrintInPage(
 				// opened; `tab.pdf()` prints only the first.
 				try {
 					const local: unknown = Reflect.get(globalThis, binding);
-					const opener: unknown = typeof local === "function" ? undefined : Reflect.get(globalThis, "opener");
-					const report: unknown =
-						typeof local === "function" ? local : opener && Reflect.get(Object(opener), binding);
+					// A window omp added no binding to reports through the nearest opener it can reach that has one.
+					let report: unknown = local;
+					let opener: unknown = globalThis;
+					for (let hop = 0; typeof report !== "function" && hop < 8; hop++) {
+						opener = Reflect.get(Object(opener), "opener");
+						if (!opener) break;
+						report = Reflect.get(Object(opener), binding);
+					}
 					const inTab = view === globalThis && typeof local === "function";
 					const where = !inTab ? "window" : Reflect.get(globalThis, "top") === globalThis ? "tab" : "frame";
 					if (typeof report === "function") Reflect.apply(report, undefined, [where]);

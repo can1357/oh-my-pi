@@ -137,6 +137,17 @@ const server = Bun.serve({
 				{ headers },
 			);
 		}
+		if (pathname === "/receipt-nested") {
+			// A receipt that a window the page opened opens in turn; it prints as it loads and reports to the page.
+			return new Response(
+				`<p>receipt</p><script>
+					addEventListener("afterprint", () => opener.opener.log.push("nested afterprint"));
+					print();
+					opener.opener.log.push("nested print returned");
+				</script>`,
+				{ headers },
+			);
+		}
 		if (pathname === "/receipt") {
 			// A receipt window that prints as it loads, reporting to the page that opened it.
 			return new Response(
@@ -1367,6 +1378,83 @@ return await tab.evaluate(() => {
 						'log.length = 0, document.querySelector("#print").click(), log.join() === "print returned"',
 						{ timeout: 10_000, polling: 100 },
 					);
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
+
+	test("keeps the call's hold through the pageshow handler of an adopted page whose fake timers replaced setTimeout", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				// Paused fake timers, installed before omp adopts the page.
+				await page.mainFrame().mainRealm().evaluate("setTimeout = () => 0");
+				const hold = await PrintHold.install(page, "calls");
+				try {
+					await hold.beginCall(30_000);
+					// A restore handler the page adds once omp is in, so the hold's own restore listener runs ahead of it.
+					await page.mainFrame().mainRealm().evaluate(`addEventListener("pageshow", event => {
+						if (!event.persisted) return;
+						const until = Date.now() + 2_000;
+						while (Date.now() < until);
+						print();
+						log.push("restore print returned");
+					})`);
+					await page.goto(`${baseUrl}/one`);
+					await page.goBack();
+					await page
+						.mainFrame()
+						.mainRealm()
+						.waitForFunction('log.includes("restore print returned")', { timeout: 10_000, polling: 50 });
+					expect(await page.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
+						"restored",
+						"afterprint",
+						"restore print returned",
+					]);
+				} finally {
+					await hold.dispose();
+				}
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
+
+	test("reports a print in a window that a window the page opened opens in turn", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				const hold = await PrintHold.install(page, "calls");
+				try {
+					await hold.beginCall(30_000);
+					// Only the page has omp's binding; the receipt reaches it through the window that opened the receipt.
+					const firstTarget = user.waitForTarget(target => target.opener() === page.target());
+					await page.mainFrame().mainRealm().evaluate(`{
+						const first = open("");
+						first.document.write('<a id="next" href="/receipt-nested" target="_blank" rel="opener">Receipt</a>');
+						first.document.close();
+					}`);
+					const first = await (await firstTarget).page();
+					if (!first) throw new Error("Expected the first window");
+					// Clicked in that window, as a person would, so Chrome lets it open the receipt.
+					await first.mainFrame().mainRealm().evaluate('document.querySelector("#next").click()');
+					await page
+						.mainFrame()
+						.mainRealm()
+						.waitForFunction('log.includes("nested print returned")', { timeout: 10_000, polling: 50 });
+					expect(await page.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
+						"nested afterprint",
+						"nested print returned",
+					]);
+					expect(hold.takeNotice()).toContain("A window the page opened called window.print()");
+				} finally {
+					await hold.dispose();
+				}
 			} finally {
 				await user.disconnect();
 			}
