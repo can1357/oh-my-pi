@@ -23,7 +23,7 @@ import {
 } from "@oh-my-pi/pi-tui/chat/reply-write";
 import { readMediaPath } from "@oh-my-pi/pi-tui/native/blobs";
 import { TodoReminderComponent } from "@oh-my-pi/pi-tui/chat/todo-reminder";
-import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import { isNativeRendering, nativePacing } from "@oh-my-pi/pi-tui/native/state";
 import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import {
 	asyncJobState,
@@ -375,9 +375,11 @@ export class EventController {
 		);
 		this.#streamingReveal = new StreamingRevealController({
 			// Extension text renderers get the full text so far on each drawn update (deltas within one
-			// frame are coalesced), never a partly revealed prefix from the typing reveal.
+			// frame are coalesced), never a partly revealed prefix from the typing reveal. A terminal that
+			// paces streamed `md` itself (Tern) gets the text as it arrives: pacing it here too is wasted work.
 			getSmoothStreaming: () =>
 				cfgDisplaySmoothStreaming.get(this.ctx.settings) &&
+				!nativePacing() &&
 				!this.ctx.viewSession.extensionRunner?.getAssistantTextRenderers?.().length,
 			getHideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			getProseOnlyThinking: () => this.ctx.proseOnlyThinking,

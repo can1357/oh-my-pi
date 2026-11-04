@@ -26,7 +26,8 @@ import {
 } from "../google-shared";
 import type { GenerateContentResponse, Part } from "../google-types";
 import { transformMessages } from "../transform-messages";
-import { factoryDroidToolNamesByWire, sanitizeFactoryDroidToolName } from "./tool-names";
+import { toolNamesByWire } from "../../utils/tool-names";
+import { sanitizeFactoryDroidToolName } from "./tool-names";
 
 /** Factory's Gemini endpoint speaks native generateContent SSE at `/api/llm/g/v1/generate`. */
 
@@ -347,7 +348,7 @@ export function streamFactoryDroidGemini(
 								},
 				},
 			};
-			const toolNamesByWire = factoryDroidToolNamesByWire(context.tools);
+			const wireNames = toolNamesByWire(context.tools, sanitizeFactoryDroidToolName);
 			const tools = toGeminiTools(context.tools);
 			if (tools) body.tools = tools;
 			const replacement = await options.onPayload?.(body, model, options.signal);
@@ -434,7 +435,7 @@ export function streamFactoryDroidGemini(
 						const toolCall: ToolCall = {
 							type: "toolCall",
 							id: nextToolCallId(wireName || "tool"),
-							name: toolNamesByWire.get(wireName) ?? wireName,
+							name: wireNames.get(wireName) ?? wireName,
 							arguments: part.functionCall.args ?? {},
 							...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
 						};

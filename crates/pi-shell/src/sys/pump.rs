@@ -51,7 +51,7 @@ use parking_lot::Mutex;
 
 use self::os::OsPipe;
 use crate::{
-	bash::{ExitStatus, FdRef, File},
+	bash::{ExitStatus, FdRef, File, ProcEvent},
 	sys::lifecycle::Tracker,
 };
 
@@ -377,29 +377,53 @@ impl Pumps {
 	/// child holds no engine object. What `ExtProc::poll_wait` returns;
 	/// every side that cannot go on has registered `cx`'s waker.
 	pub fn poll_wait(&mut self, cx: &mut Context<'_>, tracker: &Tracker) -> Poll<ExitStatus> {
+		self.poll_between(cx, tracker);
+		let status = std::task::ready!(tracker.poll(cx));
+		self.end_cancelled_input(cx);
+		Poll::Ready(status)
+	}
+
+	/// [`Pumps::poll_wait`] reporting stops and continues as well
+	/// ([`Tracker::poll_event`]); an exit is reported on the same terms.
+	pub fn poll_event(&mut self, cx: &mut Context<'_>, tracker: &Tracker) -> Poll<ProcEvent> {
+		self.poll_between(cx, tracker);
+		let event = std::task::ready!(tracker.poll_event(cx));
+		if matches!(event, ProcEvent::Exited(_)) {
+			self.end_cancelled_input(cx);
+		}
+		Poll::Ready(event)
+	}
+
+	/// [`Pumps::poll`], then the test seam where a waiter thread's exit can
+	/// land before the exit is polled.
+	fn poll_between(&mut self, cx: &mut Context<'_>, tracker: &Tracker) {
 		self.poll(cx, tracker);
 		#[cfg(test)]
 		if let Some(hook) = BETWEEN_POLLS.take() {
 			hook(tracker);
 		}
-		let status = std::task::ready!(tracker.poll(cx));
-		// The waiter thread can record the exit after `poll` read the
-		// cancellation, leaving input work running. Recording the exit cancels
-		// the input first ([`Tracker::exited`]) and the drained output pumps
-		// are gone, so what is left is input work: it ends here.
+	}
+
+	/// The exit is about to be reported. The waiter thread can record it
+	/// after `poll` read the cancellation, leaving input work running.
+	/// Recording the exit cancels the input first ([`Tracker::exited`]) and
+	/// the drained output pumps are gone, so what is left is input work: it
+	/// ends here.
+	fn end_cancelled_input(&mut self, cx: &mut Context<'_>) {
 		self.tasks.retain_mut(|t| t.poll(cx, true).is_pending());
 		debug_assert!(self.tasks.is_empty(), "only cancelled input work outlives the drain");
-		Poll::Ready(status)
 	}
 
 	/// Move what can move now; every side that cannot go on has registered
 	/// `cx`'s waker. Input pumps are dropped once `tracker` cancelled them.
 	/// Also advances retained [`orphan`] work.
 	fn poll(&mut self, cx: &mut Context<'_>, tracker: &Tracker) {
-		let cancelled = tracker.pumps_cancelled(cx.waker());
-		self
-			.tasks
-			.retain_mut(|t| t.poll(cx, cancelled).is_pending());
+		if !self.tasks.is_empty() {
+			let cancelled = tracker.pumps_cancelled(cx.waker());
+			self
+				.tasks
+				.retain_mut(|t| t.poll(cx, cancelled).is_pending());
+		}
 		for feed in &self.feeds {
 			feed.poll(cx);
 		}

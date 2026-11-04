@@ -75,7 +75,7 @@ describe("agent-loop wait wake delivery", () => {
 			kind: "main",
 			status: "running",
 			session: {
-				drainPendingIrcInboxMessages: () => inbox.splice(0, 1),
+				drainPendingIrcInboxMessages: () => inbox.splice(0),
 				deliverIrcMessage: async (message: IrcMessage) => {
 					inbox.push(message);
 					return "queued";
@@ -123,7 +123,7 @@ describe("agent-loop wait wake delivery", () => {
 				// earlier stage instead parks the accepted push on the host queue.
 				if (stage !== "in flight") await queuedCompletion.promise;
 			} else if (source === "peer") {
-				await IrcBus.global().send({ from: "Peer", to: "Main", body: payload }, { suppressRelay: true });
+				await IrcBus.global().send({ from: "Peer", to: "Main", body: payload });
 			} else {
 				if (options.settledJob) {
 					releaseJob.resolve("settled owned output");
@@ -321,7 +321,7 @@ describe("agent-loop wait wake delivery", () => {
 				} else if (source === "parent") {
 					expect(result.result.details).toMatchObject({ interrupted: true });
 				} else {
-					expect(result.result.details).toMatchObject({ waited: { from: "Peer", body: payload } });
+					expect(result.result.details).toMatchObject({ waited: [{ from: "Peer", body: payload }] });
 				}
 			});
 		}

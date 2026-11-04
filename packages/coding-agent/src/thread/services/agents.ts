@@ -286,7 +286,7 @@ function serveLifecycle(bridge: MainSessionBridge): RpcServe<AgentLifecycleManag
 
 function serveBus(bridge: MainSessionBridge): RpcServe<IrcBus, IrcBusProtocol> {
 	return {
-		send: (bus, msg, opts) => bus.send(msg, opts),
+		send: (bus, msg) => bus.send(msg),
 		sentSince: (bus, from, to, sinceTs) => bus.sentSince(from, to, sinceTs),
 		unansweredSends: (bus, from, sinceTs) => bus.unansweredSends(from, sinceTs),
 		// A wait parked by a dead worker must not swallow the next message for its agent.

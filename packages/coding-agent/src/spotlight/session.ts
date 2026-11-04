@@ -7,7 +7,6 @@ import intentField from "../prompts/spotlight/intent-field.md" with { type: "tex
 import intentGuidance from "../prompts/spotlight/intent-guidance.md" with { type: "text" };
 import { SpotlightClient } from "./client";
 import {
-	cfgSpotlightExperimentEditGate,
 	cfgSpotlightExperimentEnabled,
 	cfgSpotlightExperimentHoldout,
 	cfgSpotlightExperimentScoreFree,
@@ -17,7 +16,6 @@ import {
 	cfgSpotlightTimeoutMs,
 	cfgSpotlightUrl,
 } from "./settings";
-import { isCodeTarget, targetKey } from "./edit-gate";
 import { newShapeState, type ShapeState } from "./shape";
 import { ArtifactShapeSink, readArtifactText } from "./sink";
 import {
@@ -55,17 +53,13 @@ export interface SpotlightSessionEntry extends SpotlightShares {
 export interface SpotlightShares {
 	/** Would-be cuts held out (`spotlight.experiment.holdout`). */
 	holdout: number;
-	/** Edit-likely reads not held out that are kept whole when shaping would cut them (`spotlight.experiment.editGate`). */
-	editGate: number;
-	/** Results neither held out nor gated that are shaped without Spotlight (`spotlight.experiment.scoreFree`). */
+	/** Results not held out that are shaped without Spotlight (`spotlight.experiment.scoreFree`). */
 	scoreFree: number;
 }
 
 /** The coins drawn for one result; at most one lands. */
 export interface SpotlightCoins {
 	holdout: boolean;
-	/** The edit gate's: drawn only for edit-likely reads. */
-	gate: boolean;
 	scoreFree: boolean;
 }
 
@@ -73,8 +67,6 @@ export interface SpotlightCoins {
 export interface SpotlightExperimentOptions extends Partial<SpotlightShares> {
 	/** Tool names whose results are shaped (`*`: every tool); default every tool. */
 	tools?: readonly string[];
-	/** The session is a task subagent's, not a main session: its reads are edit-likely only once it read or edited the file. */
-	subagent?: boolean;
 }
 
 /**
@@ -89,15 +81,10 @@ export class SpotlightExperiment implements SpotlightSession {
 	readonly shares: SpotlightShares;
 	/** The configured tool list, as journaled. */
 	readonly tools: readonly string[];
-	/** A task subagent's session ({@link SpotlightExperimentOptions.subagent}). */
-	readonly subagent: boolean;
 	/** The tools shaped, or null for every tool. */
 	readonly #toolSet: ReadonlySet<string> | null;
 	/** Calls whose result was already shaped (or kept) and journaled, so no wrapper does it twice. */
 	#shapedCalls = new Set<string>();
-	/** Targets ({@link targetKey}) the session read, and those it edited (`edit`, `write`, `ast_edit`). */
-	#reads = new Set<string>();
-	#edits = new Set<string>();
 	readonly #sessionManager: SessionManager;
 	readonly #random: () => number;
 
@@ -112,10 +99,8 @@ export class SpotlightExperiment implements SpotlightSession {
 		this.thinking = thinking;
 		this.shares = {
 			holdout: Math.min(1, Math.max(0, options.holdout ?? 0)),
-			editGate: Math.min(1, Math.max(0, options.editGate ?? 0)),
 			scoreFree: Math.min(1, Math.max(0, options.scoreFree ?? 0)),
 		};
-		this.subagent = options.subagent === true;
 		this.tools = (options.tools ?? [ALL_TOOLS]).flatMap(name =>
 			typeof name === "string" && name.trim() ? [name.trim()] : [],
 		);
@@ -142,32 +127,13 @@ export class SpotlightExperiment implements SpotlightSession {
 
 	/**
 	 * The coins of one result the arm is about to shape, drawn before shaping so the groups are alike: `holdout` with
-	 * probability {@link SpotlightShares.holdout}; else, for an edit-likely read only, `gate` with probability
-	 * {@link SpotlightShares.editGate}; else `scoreFree` with probability {@link SpotlightShares.scoreFree}. At most one
-	 * lands, and none is drawn after it.
+	 * probability {@link SpotlightShares.holdout}; else `scoreFree` with probability {@link SpotlightShares.scoreFree}.
+	 * At most one lands, and none is drawn after it.
 	 */
-	drawCoins(editLikely = false): SpotlightCoins {
-		const { holdout, editGate, scoreFree } = this.shares;
-		if (holdout > 0 && this.#random() < holdout) return { holdout: true, gate: false, scoreFree: false };
-		if (editLikely && editGate > 0 && this.#random() < editGate)
-			return { holdout: false, gate: true, scoreFree: false };
-		return { holdout: false, gate: false, scoreFree: scoreFree > 0 && this.#random() < scoreFree };
-	}
-
-	/**
-	 * Records a read of `target` (as the agent wrote it, selectors included) and returns whether it is edit-likely: a
-	 * code file ({@link isCodeTarget}) read by a main session, or by a subagent that already read or edited it.
-	 */
-	noteRead(target: string, cwd: string): boolean {
-		const key = targetKey(target, cwd);
-		const likely = isCodeTarget(key) && (!this.subagent || this.#reads.has(key) || this.#edits.has(key));
-		this.#reads.add(key);
-		return likely;
-	}
-
-	/** Records the targets of an edit-tool call (`edit`, `write`, `ast_edit`), shaped or not. */
-	noteEdits(targets: readonly string[], cwd: string): void {
-		for (const target of targets) if (target.trim()) this.#edits.add(targetKey(target, cwd));
+	drawCoins(): SpotlightCoins {
+		const { holdout, scoreFree } = this.shares;
+		if (holdout > 0 && this.#random() < holdout) return { holdout: true, scoreFree: false };
+		return { holdout: false, scoreFree: scoreFree > 0 && this.#random() < scoreFree };
 	}
 
 	log(type: SpotlightEntryType, data: Record<string, unknown>): void {
@@ -208,12 +174,9 @@ export class SpotlightExperiment implements SpotlightSession {
 	onSessionChange(): void {
 		this.shapeState = newShapeState();
 		this.#shapedCalls = new Set();
-		this.#reads = new Set();
-		this.#edits = new Set();
 		const last = lastSessionEntry(this.#sessionManager.getEntries());
 		if (
 			last?.holdout === this.shares.holdout &&
-			last.editGate === this.shares.editGate &&
 			last.scoreFree === this.shares.scoreFree &&
 			last.tools?.join(",") === this.tools.join(",")
 		) {
@@ -230,24 +193,14 @@ export class SpotlightExperiment implements SpotlightSession {
 export function startSpotlightExperiment(
 	settings: Settings,
 	sessionManager: SessionManager,
-	options: { subagent?: boolean; random?: () => number } = {},
 ): SpotlightExperiment | undefined {
-	const random = options.random ?? Math.random;
 	if (!cfgSpotlightExperimentEnabled.get(settings)) return undefined;
 	const client = spotlightClient(settings);
-	const experiment = new SpotlightExperiment(
-		client,
-		cfgSpotlightThinking.get(settings),
-		sessionManager,
-		{
-			holdout: cfgSpotlightExperimentHoldout.get(settings),
-			editGate: cfgSpotlightExperimentEditGate.get(settings),
-			scoreFree: cfgSpotlightExperimentScoreFree.get(settings),
-			tools: cfgSpotlightExperimentTools.get(settings),
-			subagent: options.subagent,
-		},
-		random,
-	);
+	const experiment = new SpotlightExperiment(client, cfgSpotlightThinking.get(settings), sessionManager, {
+		holdout: cfgSpotlightExperimentHoldout.get(settings),
+		scoreFree: cfgSpotlightExperimentScoreFree.get(settings),
+		tools: cfgSpotlightExperimentTools.get(settings),
+	});
 	experiment.log(SPOTLIGHT_ENTRY.session, { ...experiment.sessionEntry() });
 	client.warm();
 	return experiment;
