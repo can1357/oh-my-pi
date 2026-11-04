@@ -469,12 +469,12 @@ export class DateCwdReminderInjector {
 			// The conversation's first turn may be back under a new key; it is this request's first turn.
 			const turn = placement.turn === conversation ? root : placement.turn;
 			const index = indexOf.get(turn);
-			if (index === undefined) continue;
-			lastSent = Math.max(lastSent, index);
+			if (index !== undefined) lastSent = Math.max(lastSent, index);
 			if (placement.placement === "control") {
+				// Controls are replayed in journal order even when their turn is not in this request (a
+				// per-call message an older build anchored one on), so a journaled move replaces the control
+				// it moved where it stands: it keeps its order ahead of any newer control at the same turn.
 				const control = { anchor: turn, message: createReminderControl(placement.reminder) };
-				// A journaled move replaces the control at its old anchor where it stands, so it keeps its
-				// order ahead of any newer control later placed at the same turn.
 				let moved = -1;
 				if (placement.movedFrom !== undefined) {
 					const from = placement.movedFrom === conversation ? root : placement.movedFrom;
@@ -486,6 +486,7 @@ export class DateCwdReminderInjector {
 				else state.controls[moved] = control;
 				continue;
 			}
+			if (index === undefined) continue;
 			const source = messages[index]!;
 			if (source.role !== "user") continue;
 			state.injections.set(turn, {
@@ -494,6 +495,7 @@ export class DateCwdReminderInjector {
 				injected: injectReminder(source, placement.reminder),
 			});
 		}
+		state.controls = state.controls.filter(control => indexOf.has(control.anchor));
 		for (let index = 0; index <= lastSent; index++) state.seen.add(keys[index]!);
 		state.reminder = this.#carriedReminder(state, keys);
 		return state;

@@ -823,11 +823,11 @@ describe("date-cwd-reminder", () => {
 					reminder: renderDateCwdReminder("2026-08-16", "/work"),
 					placement: "control",
 				});
-				const datesOf = (injector: DateCwdReminderInjector) => {
+				const datesOf = (injector: DateCwdReminderInjector, withStatus = true) => {
 					const tail = status();
 					markPerCallContextMessage(tail);
 					const out = injector.transform(
-						{ systemPrompt: ["system"], messages: [...history, tail] },
+						{ systemPrompt: ["system"], messages: withStatus ? [...history, tail] : history },
 						"2026-08-16",
 						"/work",
 					);
@@ -839,8 +839,14 @@ describe("date-cwd-reminder", () => {
 				// The resume moves day two after the tool result, ahead of day three, and journals the move.
 				expect(datesOf(new DateCwdReminderInjector(journal))).toEqual(["2026-08-14", "2026-08-15", "2026-08-16"]);
 				const sizeAfterMove = placements.length;
-				// A reopen replays the journal, the move last: day two keeps its place.
+				// A reopen replays the journal, the move last: day two keeps its place, with or without the
+				// per-call message the old control was anchored on.
 				expect(datesOf(new DateCwdReminderInjector(journal))).toEqual(["2026-08-14", "2026-08-15", "2026-08-16"]);
+				expect(datesOf(new DateCwdReminderInjector(journal), false)).toEqual([
+					"2026-08-14",
+					"2026-08-15",
+					"2026-08-16",
+				]);
 				expect(placements.length).toBe(sizeAfterMove);
 			});
 
