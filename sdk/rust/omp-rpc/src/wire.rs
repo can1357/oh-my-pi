@@ -773,6 +773,52 @@ impl<'de> Deserialize<'de> for Usage {
 	}
 }
 
+/// Parent-agent IRC message carried by a steer; render it instead of the model-facing `content` envelope.
+///
+/// Open record: declared fields are decoded leniently (a value that does not fit stays
+/// in `extra`) and every other key is kept in `extra`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ParentIrc {
+	/// Sending parent agent id.
+	pub from: Option<String>,
+	/// Message body as the parent wrote it.
+	pub body: Option<String>,
+	/// Every key not decoded into a declared field.
+	pub extra: Map<String, Value>,
+}
+
+impl Serialize for ParentIrc {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		let mut map = serializer.serialize_map(None)?;
+		if let Some(value) = &self.from {
+			map.serialize_entry("from", value)?;
+		}
+		if let Some(value) = &self.body {
+			map.serialize_entry("body", value)?;
+		}
+		for (key, value) in &self.extra {
+			match key.as_str() {
+				"from" if self.from.is_some() => continue,
+				"body" if self.body.is_some() => continue,
+				_ => {}
+			}
+			map.serialize_entry(key, value)?;
+		}
+		map.end()
+	}
+}
+
+impl<'de> Deserialize<'de> for ParentIrc {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let mut extra = Map::<String, Value>::deserialize(deserializer)?;
+		Ok(Self {
+			from: take(&mut extra, "from"),
+			body: take(&mut extra, "body"),
+			extra,
+		})
+	}
+}
+
 ///
 /// Open record: declared fields are decoded leniently (a value that does not fit stays
 /// in `extra`) and every other key is kept in `extra`.
@@ -780,6 +826,7 @@ impl<'de> Deserialize<'de> for Usage {
 pub struct UserMessage {
 	pub content: Option<MessageContent>,
 	pub timestamp: Option<f64>,
+	pub parent_irc: Option<ParentIrc>,
 	pub synthetic: Option<bool>,
 	pub steering: Option<bool>,
 	pub live_steered: Option<bool>,
@@ -798,6 +845,9 @@ impl Serialize for UserMessage {
 		}
 		if let Some(value) = &self.timestamp {
 			map.serialize_entry("timestamp", value)?;
+		}
+		if let Some(value) = &self.parent_irc {
+			map.serialize_entry("parentIrc", value)?;
 		}
 		if let Some(value) = &self.synthetic {
 			map.serialize_entry("synthetic", value)?;
@@ -821,6 +871,7 @@ impl Serialize for UserMessage {
 			match key.as_str() {
 				"content" if self.content.is_some() => continue,
 				"timestamp" if self.timestamp.is_some() => continue,
+				"parentIrc" if self.parent_irc.is_some() => continue,
 				"synthetic" if self.synthetic.is_some() => continue,
 				"steering" if self.steering.is_some() => continue,
 				"liveSteered" if self.live_steered.is_some() => continue,
@@ -841,6 +892,7 @@ impl<'de> Deserialize<'de> for UserMessage {
 		Ok(Self {
 			content: take(&mut extra, "content"),
 			timestamp: take(&mut extra, "timestamp"),
+			parent_irc: take(&mut extra, "parentIrc"),
 			synthetic: take(&mut extra, "synthetic"),
 			steering: take(&mut extra, "steering"),
 			live_steered: take(&mut extra, "liveSteered"),
