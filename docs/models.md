@@ -114,8 +114,94 @@ An unscoped OpenRouter `baseUrl` names the `/api/v1` chat root, so OpenRouter De
 models use its `/api/alpha` sibling on the same host, e.g. a `.../api/v1` relay serves judges at
 `.../api/alpha/decisions`.
 
-`preferWebsockets` (on a model or `modelOverrides` entry) controls whether Codex requests prefer
-the WebSocket transport. `omitMaxOutputTokens` omits the model-derived output cap.
+`omitMaxOutputTokens` omits the model-derived output cap.
+
+### Standard Responses WebSockets
+
+Standard Responses uses HTTP/SSE by default, including at the official OpenAI
+endpoint. To opt in from OMP, set this in `config.yml`:
+
+```yaml
+providers:
+  openaiResponsesWebsockets: true
+```
+
+The catalog's `supports-websockets` KDL rule marks capability, not enablement.
+It covers OpenAI `openai-responses`, including custom providers that inherit that
+provider type. Copilot, OpenRouter and other unmarked provider/API combinations
+remain on HTTP/SSE. The independent `providers.openaiWebsockets: auto|off|on` setting
+and `PI_CODEX_WEBSOCKET` continue to govern Codex only.
+
+Model and request `preferWebsockets` can only narrow OMP's setting: **either explicit
+`false` disables WS**, even if the other is `true`. Turning the setting off cannot
+be overridden. Standalone pi-ai SDK callers have no OMP settings dependency: they
+must explicitly opt in with a request or model `true`; either `false` still vetoes it.
+
+For a gateway with uneven support, keep the existing provider entry in `models.yml`
+and disable WS for the affected model:
+
+```yaml
+providers:
+  openai:
+    api: openai-responses
+    baseUrl: https://gateway.example.com/v1
+    modelOverrides:
+      gpt-5:
+        preferWebsockets: false
+```
+
+Custom `models` entries accept the same boolean. WS uses the existing `/responses`
+endpoint and authentication; the gateway must implement `response.create`.
+SDK `fetch` overrides affect HTTP/SSE, not sockets. Explicit WS opt-in bypasses that
+HTTP override for the socket; an HTTP fallback still uses it.
+
+Payload construction and `onPayload` precede connecting, including for cancelled
+requests. A pre-send handshake network failure, connect timeout, or upgrade
+404/405/426/501 rebuilds the full HTTP candidate with its normal storage/chaining
+rules and calls `onPayload` again. The hook may replace each candidate; it does not
+see the final socket-local delta. Other upgrade statuses retain normal error
+classification. Diagnostics preserve status and available headers, not a buffered
+rejected-upgrade body.
+
+When handshake headers are available, `onResponse` reports the physical WS
+handshake once, marked with `metadata.transport="websocket"` and
+`metadata.phase="handshake"`. Reusing the socket does not emit another handshake.
+These are not per-generation headers; no generation request ID is invented.
+`omp bench --json` includes the transport when response metadata makes it
+observable. Standard WS cache benchmarks still measure generation usage, but
+cannot claim per-generation request IDs or HTTP response-cache headers.
+
+A healthy retained socket can send incremental `previous_response_id` turns,
+including with `store: false`. Changed history/options, credentials, concurrent
+temporary sockets, or a replacement after the **30-second idle limit** require
+full input without an old socket's anchor. Continuation follows the same opt-outs
+as HTTP chaining: `statefulResponses: false`, `PI_OPENAI_STATEFUL=0`, or a model's
+`compat.statefulResponses: false` sends full history on every WS turn, so set the
+compat flag for gateways that ignore `previous_response_id`. Three consecutive
+stale-anchor rejections stop sending anchors for the logical session. Official HTTP
+can already use stored stateful chaining independently of that socket lifetime; WS
+is not guaranteed to save traffic or latency there.
+
+Injected `previous_response_id` and `background: true` are rejected. A definite
+first-frame stale-anchor rejection permits one full-history resend on the same
+healthy socket before generation evidence. WS does not inherit HTTP transient,
+resume, or empty-completion retries; a successful empty WS response submits once.
+
+After an uncertain send, a transport failure or stream timeout fails the call
+without hidden HTTP replay. Partial output remains available; existing Agent
+recovery may start an SSE continuation under its own rules, retaining completed
+tool results and never executing incomplete arguments. Caller abort and protocol/
+queue errors do not mark transport incompatibility.
+
+An upgrade rejection (404/405/426/501) or a post-send transport failure makes the
+SSE downgrade sticky for the logical session, endpoint and model until
+`releaseSession`/provider-state `close` or a new scope. A pre-send network failure or
+connect timeout falls back for that request only; a second consecutive one becomes
+sticky, and a completed WS exchange resets the count. Embedders retaining provider
+state must release finished sessions. Calls without a logical session ID do not
+share sticky state; without `providerSessionState`, it lasts only for that call.
+Normal idle retirement is not a downgrade. Codex's protocol and recovery remain
+independent.
 
 ### Bedrock request options
 
@@ -282,9 +368,9 @@ Known record-level keys, at the top level of `compat` and inside its `whenThinki
 
 The runtime vocabulary is not filtered by the provider's `api`: a wire key that only another API family reads (for example an Anthropic-only key in an `openai-completions` provider) does not warn, even though it has no effect there.
 
-### Command- and file-resolved secrets
+### Command-resolved secrets
 
-Provider `apiKey` values and provider/model `headers` values may start with `!` to read a secret from command stdout, or be `{ file: <path> }` to read it from a file. Loading or inspecting the catalog runs no command and reads no file: credentials resolve when a request or online credential probe needs them.
+Provider `apiKey` values and provider/model `headers` values may start with `!` to read a secret from command stdout. Commands run asynchronously under a time limit of `providers.commandTimeoutSeconds` (default 10 s; on Linux the limit includes starting the process supervisor); stdout is trimmed. Loading or inspecting the catalog does not execute them: credentials resolve when a request or online credential probe needs them.
 
 ```yaml
 providers:
@@ -292,15 +378,9 @@ providers:
       apiKey: "!op read op://dev/openai/api-key"
       headers:
          X-Team-Key: "!bw get password omp-team-key"
-   my-gateway:
-      apiKey: { file: ~/.config/my-gateway/api-key }
-      headers:
-         X-Tenant: { file: /run/secrets/my-gateway-tenant }
 ```
 
-**Commands** run asynchronously under a time limit of `providers.commandTimeoutSeconds` (default 10 s; on Linux the limit includes starting the process supervisor). Stdout is trimmed. Successful output is cached for the process lifetime, and concurrent requests share an in-flight execution. A command that fails, times out or prints nothing before it ever succeeded leaves its value omitted and backs off for 30 seconds. Once a command has succeeded, a later run that fails keeps serving its last good output: omp logs a warning with the failure reason (never the command text), waits out the 30 s backoff, then re-runs the command in the background while requests keep the last good value. Refresh callers that request `refreshCommandCredentials` (including the model hub's explicit refresh) re-run commands and re-read files; 401 credential recovery does too, and also drops the last good output, so a rejected key is never served again. An ordinary catalog refresh does neither. Runtime API-key overrides, including `--api-key`, take precedence over configured credentials.
-
-**Files** are read in-process; no process starts. The path must be absolute or start with `~/`. The trimmed content is cached and re-read when the file's mtime, ctime, size or inode changes, so rotating the file (in place or by rename) takes effect on the next request. When an auth failure ends without another attempt, the failed request's own header values are resolved once more, so a header file that is gone ends the turn with its error instead of the auth failure; a key file is checked whenever the key is resolved. The auth retry itself is keyed on the bearer: when only a header file changed and the key did not, the request is not retried on the same provider. A missing, unreadable, empty or non-regular file fails the request with a configuration error (`ConfigurationError`, not a transient failure) that names the path; the turn ends with that error and is neither retried nor sent to a `retry.fallbackChains` model. Model discovery treats such a provider as unauthenticated. With `authHeader: true` the `Authorization` header is derived from the configured `apiKey` itself, so its file is read even when `--api-key` overrides the key.
+Successful command outputs are cached for the process lifetime, and concurrent requests share an in-flight execution. A command that fails, times out or prints nothing before it ever succeeded leaves its value omitted and backs off for 30 seconds. Once a command has succeeded, a later run that fails keeps serving its last good output: omp logs a warning with the failure reason and elapsed time (never the command text), waits out the 30 s backoff, then re-runs the command in the background while requests keep the last good value. Refresh callers that request `refreshCommandCredentials` (including the model hub's explicit refresh) re-run the relevant commands but keep the last good output if a re-run fails; 401 credential recovery re-runs them and drops the last good output, so a rejected key is never served again. An ordinary catalog refresh does neither. Runtime API-key overrides, including `--api-key`, take precedence over configured credentials.
 
 ## Merge and override order
 
@@ -760,6 +840,7 @@ Related settings:
 - `modelProviderOrder` (provider precedence when equivalent concrete choices share an id)
 - `providers.kimiApiFormat` (`auto|openai|anthropic`; `auto` follows server-declared model metadata)
 - `providers.openaiWebsockets` (`auto|off|on` websocket preference for OpenAI Codex transport)
+- `providers.openaiResponsesWebsockets` (opt-in standard Responses transport; see [Standard Responses WebSockets](#standard-responses-websockets))
 - `providers.openaiLiveSteering` (deliver mid-response user messages into GPT-6 responses over the Codex WebSocket)
 
 `modelRoles` stores model selectors such as `provider/modelId`; `enabledModels` and CLI `--models`

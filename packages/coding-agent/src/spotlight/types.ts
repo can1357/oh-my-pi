@@ -117,6 +117,11 @@ export interface ShapeInput {
 		/** The agent asked for this range (`path:A-B`): a source range it chose. */
 		selected: boolean;
 	};
+	/**
+	 * `bash` shaped from its whole artifact: that artifact's URL. It numbers the text's lines as cuts name them, so a
+	 * cut points there instead of saving a copy.
+	 */
+	artifact?: string;
 	exitCode?: number;
 	/** The call's id: lines it notes as seen stay seen until its result is in the model's context. */
 	toolCallId?: string;
@@ -142,6 +147,11 @@ export interface ShapeOutcome {
 	capped?: boolean;
 	/** When shaping changed the text, what became of its subject's lines ({@link ShapedLines}). */
 	lines?: ShapedLines;
+	/**
+	 * A session artifact holding exactly the input text, when a changed text's cut wrote or named one (the copy its
+	 * markers point at, or the run's own artifact): the trace's original reuses it instead of saving the text again.
+	 */
+	textUrl?: string;
 }
 
 /**

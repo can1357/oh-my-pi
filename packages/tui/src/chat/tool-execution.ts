@@ -1,7 +1,13 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Box } from "../components/box";
-import { SPINNER_ADVANCE_MS } from "../components/loader";
+import {
+	onSpinnerIntervalChange,
+	sharedSpinnerFrame,
+	spinnerAnimated,
+	spinnerInterval,
+	spinnerTickDelay,
+} from "../spinner-clock";
 import { Image } from "../components/image";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
@@ -296,26 +302,27 @@ const NATIVE_STATUS_TONE: Record<TspCardStatus, TspTone | undefined> = {
 	cancelled: "info",
 };
 
-/** Phase-locked spinner glyph index shared by every live tool block so parallel
- * spinners advance in lockstep instead of each tracking its own start time. */
-export function sharedSpinnerFrame(frameCount: number, now: number = performance.now()): number {
-	return frameCount > 0 ? Math.floor(now / SPINNER_ADVANCE_MS) % frameCount : 0;
-}
-
 /** Live tool blocks currently driving a spinner. A single shared ticker (below)
  * advances and repaints every registered block per glyph step, so N concurrent
- * live/streaming blocks — e.g. parallel `task` subagents — cost one 80ms timer
- * and one coalesced render frame per tick instead of N unsynchronized timers
- * each independently waking the render scheduler (issue #8731). */
+ * live/streaming blocks — e.g. parallel `task` subagents — cost one timer at the
+ * shared spinner cadence and one coalesced render frame per tick instead of N
+ * unsynchronized timers each independently waking the render scheduler
+ * (issue #8731). The glyph index comes from `sharedSpinnerFrame`, so blocks
+ * stay in phase with every other spinner on the clock. */
 const liveSpinnerBlocks = new Set<ToolExecutionComponent>();
 let sharedSpinnerTimer: NodeJS.Timeout | undefined;
 
-/** Arm the shared spinner ticker if it is not already running. */
+/**
+ * Arm the shared ticker if it is not already running and spinners animate. Ticks land on the shared
+ * clock's boundaries, so this ticker and the working row repaint in the same frame. Each tick re-reads
+ * the period; a tick under a static spinner paints frame 0 and leaves the ticker stopped.
+ */
 function ensureSharedSpinnerTicker(): void {
-	if (sharedSpinnerTimer || isNativeRendering()) return;
-	sharedSpinnerTimer = setInterval(() => {
-		// A native surface opened while blocks were live: the terminal clocks
-		// their spinners, so the repaint ticker has nothing left to do.
+	if (sharedSpinnerTimer || isNativeRendering() || !spinnerAnimated()) return;
+	sharedSpinnerTimer = setTimeout(() => {
+		sharedSpinnerTimer = undefined;
+		// A native surface opened while blocks were live: the terminal clocks their spinners, so the
+		// repaint ticker has nothing left to do — drop the live blocks and stay stopped.
 		if (isNativeRendering()) {
 			stopSharedSpinnerTicker();
 			return;
@@ -323,8 +330,13 @@ function ensureSharedSpinnerTicker(): void {
 		const frame = sharedSpinnerFrame(theme.spinnerFrames.length);
 		// Removing the current block mid-iteration is safe on a Set.
 		for (const block of liveSpinnerBlocks) block.tickSpinner(frame);
-	}, SPINNER_ADVANCE_MS);
+		if (liveSpinnerBlocks.size > 0) ensureSharedSpinnerTicker();
+	}, spinnerTickDelay(spinnerInterval()));
 }
+// Static → animated: nothing is ticking, so restart.
+onSpinnerIntervalChange(() => {
+	if (liveSpinnerBlocks.size > 0) ensureSharedSpinnerTicker();
+});
 
 /** Register a live block with the shared ticker, starting it on first use. */
 function registerSpinnerBlock(block: ToolExecutionComponent): void {
@@ -336,22 +348,28 @@ function registerSpinnerBlock(block: ToolExecutionComponent): void {
 function unregisterSpinnerBlock(block: ToolExecutionComponent): void {
 	if (!liveSpinnerBlocks.delete(block)) return;
 	if (liveSpinnerBlocks.size === 0 && sharedSpinnerTimer) {
-		clearInterval(sharedSpinnerTimer);
+		clearTimeout(sharedSpinnerTimer);
 		sharedSpinnerTimer = undefined;
 	}
 }
 
 /** Stop the shared spinner ticker and drop every registered live block.
  *  Called on interactive-mode teardown so a stray live block cannot keep the
- *  process-wide 80ms interval alive past shutdown (lingering event-loop
+ *  process-wide spinner timer alive past shutdown (lingering event-loop
  *  handles pin the process; cf. `postmortem.quit`). Test files that assert on
  *  ticker arming also use this to start from a clean slate. */
 export function stopSharedSpinnerTicker(): void {
 	liveSpinnerBlocks.clear();
 	if (sharedSpinnerTimer) {
-		clearInterval(sharedSpinnerTimer);
+		clearTimeout(sharedSpinnerTimer);
 		sharedSpinnerTimer = undefined;
 	}
+}
+
+/** Whether the shared spinner ticker has a tick armed. Test seam: other timers on a fake clock
+ *  (collab relay heartbeats) make a raw timer count ambiguous. */
+export function sharedSpinnerTickerArmed(): boolean {
+	return sharedSpinnerTimer !== undefined;
 }
 
 // Stable per-instance counter so each tool execution's inline images get a

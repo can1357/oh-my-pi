@@ -191,11 +191,7 @@ function isDirectCredentialRotationError(error: unknown): boolean {
 	return isUsageLimitOutcome(status, message);
 }
 
-/**
- * Resolve a single retry step, swallowing resolver failures into `undefined`.
- * A `ConfigurationError` (for example an unreadable key file) is rethrown: it
- * names what to fix, which the auth failure that led here does not.
- */
+/** Resolve a single retry step, swallowing resolver failures into `undefined`. */
 export async function resolveRetryKey(
 	resolver: ApiKeyResolver,
 	lastChance: boolean,
@@ -209,8 +205,7 @@ export async function resolveRetryKey(
 		const resolved = await resolver({ lastChance: rotateSibling, error, signal, previousKey });
 		onResolved?.(resolved);
 		return resolvedApiKeyBearer(resolved);
-	} catch (resolveError) {
-		if (resolveError instanceof AIError.ConfigurationError) throw resolveError;
+	} catch {
 		return undefined;
 	}
 }

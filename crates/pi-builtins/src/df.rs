@@ -13,7 +13,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use uucore::{
 	display::Quotable,
@@ -23,7 +22,7 @@ use uucore::{
 
 use crate::{
 	block_size::{BlockSize, Scale},
-	host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy, strip_errno, util},
+	host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy, strip_errno},
 	locale::{NumericSymbols, ctype_is_utf8, numeric_symbols},
 };
 
@@ -247,11 +246,6 @@ fn app() -> Command {
 				.value_parser(ValueParser::os_string())
 				.value_hint(clap::ValueHint::AnyPath),
 		)
-}
-
-/// Creates the `df` builtin registration.
-pub(crate) fn df_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Df, SE>()
 }
 
 /// The values of a repeatable option with their command-line positions.

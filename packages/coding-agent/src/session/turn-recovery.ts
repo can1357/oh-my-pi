@@ -17,7 +17,7 @@ import type {
 	ToolChoice,
 	AnthropicFallbackCreditHandle,
 } from "@oh-my-pi/pi-ai";
-import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
+import { calculateRateLimitBackoffMs, isBillingCapUsageLimit, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
@@ -28,7 +28,6 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong, sleepUntil } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
-import { isFileConfigErrorMessage } from "../config/resolve-config-value";
 
 import type { Settings } from "../config/settings";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
@@ -1564,8 +1563,6 @@ export class TurnRecovery {
 		if (message.stopReason !== "error") return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;
 		if (AIError.isResponsesRequestBodyReadTimeout(message)) return false;
-		// An unusable `{ file }` key or header is local configuration; retrying cannot fix it.
-		if (isFileConfigErrorMessage(message.errorMessage)) return false;
 		const model = this.#host.model();
 		const immutableAnthropicThinkingError =
 			model?.api === "anthropic-messages" &&
@@ -2478,8 +2475,6 @@ export class TurnRecovery {
 		// A content refusal/sensitivity stop is the model's decision, not a route
 		// failure — switching to the base model would just re-trigger it.
 		if (this.isClassifierRefusal(message)) return false;
-		// An unusable `{ file }` key or header is local configuration; the base model hits it too.
-		if (isFileConfigErrorMessage(message.errorMessage)) return false;
 		const id = this.#classifyRetryMessage(message);
 		if (AIError.isContextOverflow(message, model.contextWindow ?? 0)) return false;
 		if (AIError.is(id, AIError.Flag.UsageLimit)) return false;
@@ -2505,9 +2500,6 @@ export class TurnRecovery {
 	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;
-		// An unusable `{ file }` key or header is local configuration to fix: sending the
-		// prompt to another provider instead would hide it and move the user's data elsewhere.
-		if (isFileConfigErrorMessage(message.errorMessage)) return false;
 		const model = this.#host.model();
 		if (!model) return false;
 		const immutableAnthropicThinkingError =
@@ -2958,7 +2950,16 @@ export class TurnRecovery {
 		// by the stated wait so an unrelated large backoff cannot sneak
 		// through.
 		const maxDelayMs = retrySettings.maxDelayMs;
+		// An account out of money has no reset to wait for: the QUOTA_EXHAUSTED
+		// heuristic backoff is a guess at a clock that does not exist, and a
+		// `retry.maxDelayMs` set at or above it (the 30-minute default ceiling
+		// users raise) would sleep through the whole guess. Surface the provider
+		// error instead, so the user tops up and the error frame's Retry
+		// re-attempts at once rather than idling in a retry the session cannot
+		// finish.
+		const billingCap = isBillingCapUsageLimit(message.errorStatus, errorMessage);
 		const exceedsDelayCap = (waitMs: number): boolean => {
+			if (billingCap) return true;
 			const waitForUsageReset =
 				retrySettings.waitForUsageReset === true &&
 				recordedUsageLimitOutcome !== undefined &&
@@ -3109,7 +3110,11 @@ export class TurnRecovery {
 				{
 					success: false,
 					attempt,
-					finalError: `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
+					// A billing cap has no wait to report — the account is out of
+					// money — so the message the user acts on is the provider's own.
+					finalError: billingCap
+						? errorMessage
+						: `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
 				},
 				{ terminalTurn: message },
 			);

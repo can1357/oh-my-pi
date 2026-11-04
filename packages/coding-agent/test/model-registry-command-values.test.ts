@@ -6,7 +6,7 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
 import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { invalidateAllConfigValues, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
+import { invalidateAllCommandConfigs, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -486,7 +486,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		]);
 	});
 
-	test("invalidateAllConfigValues drops cached stdout so the next resolve re-runs", async () => {
+	test("invalidateAllCommandConfigs drops cached stdout so the next resolve re-runs", async () => {
 		const tokenFile = path.join(tempDir, "token.txt");
 		fs.writeFileSync(tokenFile, "initial");
 		const config = `!${stdoutFileCommand(tokenFile)}`;
@@ -495,7 +495,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		fs.writeFileSync(tokenFile, "rotated");
 		expect(await resolveConfigValue(config)).toBe("initial");
 
-		invalidateAllConfigValues("refresh");
+		invalidateAllCommandConfigs("refresh");
 		expect(await resolveConfigValue(config)).toBe("rotated");
 	});
 
@@ -888,6 +888,40 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			clock.mockRestore();
 			warn.mockRestore();
 		}
+	});
+
+	test("invalidateCommandConfigs keeps the last good key on a refresh and drops it on a rejection", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "good-key");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${trackedTokenCommand(tokenFile, counterFile)}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		// The owner registry: a worker thread's mirror forwards its invalidations to this method.
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBe("good-key");
+
+		fs.writeFileSync(tokenFile, "FAIL");
+		registry.invalidateCommandConfigs("custom-proxy", "refresh");
+		expect(await registry.getApiKey(model)).toBe("good-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+
+		registry.invalidateCommandConfigs(undefined, "rejected");
+		expect(await registry.getApiKey(model)).toBeUndefined();
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("111");
 	});
 
 	test("a command that never succeeded still resolves to no key", async () => {

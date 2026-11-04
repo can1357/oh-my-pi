@@ -22,6 +22,10 @@ const READ_SEGMENT = /^(?:cat|sed\s+-n|head|tail|nl|less|more|bat)\b(?!\s*(?:>|<
 /** The agent's own program: a heredoc or an interpreter run, whose output it shaped itself. */
 const PROGRAM = /<<-?\s*['"]?\w+|(?:^|[;&|\n]\s*)(?:python3?|node|perl|Rscript|ruby|julia)\b/;
 
+/** A segment that runs a coding agent non-interactively (`omp -p`, `claude -p`, `codex exec`, `bun src/cli.ts -p`). */
+const AGENT_SEGMENT =
+	/^(?:\w+=\S*\s+)*(?:(?:omp|claude)\b[^|]*\s(?:-p|--print)\b|codex\s+exec\b|bun\s+(?:run\s+)?\S*cli\.ts\b[^|]*\s(?:-p|--print)\b)/;
+
 /** A segment that runs tests or lint: the runner is the command word (after env vars / npx / uv run / python -m …). */
 const TEST_SEGMENT =
 	/^(?:\w+=\S*\s+)*(?:(?:npx|bunx|pnpm(?:\s+exec)?|yarn|uv\s+run(?:\s+--?[\w-]+(?:[=\s][\w.@/-]+)?)*|poetry\s+run|python3?\s+-m|(?:\S*\/)?\.bin\/|\S*\/bin\/)\s*)*(?:pytest|py\.test|vitest|jest|mocha|tox|nox|eslint|ruff|mypy|tsc|biome|playwright\s+test|python3?\s+\S*runtests\.py|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|lint|typecheck|typescript|test[:-][\w:-]+)|cargo\s+(?:test|clippy)|go\s+test|make\s+(?:test|lint|check))\b/;
@@ -32,9 +36,31 @@ const PRINT_SEGMENT = /^(?:cat|nl|sed\s+-n|head|tail|grep|rg|git\s+(?:diff|show)
 /** A whole-file read: `cat|nl|bat|more|less [-flags] F…` with no pipe or redirect. */
 const WHOLE_READ = /^(?:cat|nl|bat|more|less)(?:\s+-[A-Za-z]+)*\s+[^|<>]+$/;
 
-/** Segments of a shell command: split on `;`, `&&`, `||` and newlines; pipes stay inside a segment. */
+/**
+ * Segments of a shell command: split on `;`, `&&`, `||` and newlines outside quotes (`sed -n '1,9p;20,30p'` is one
+ * segment); pipes stay inside a segment.
+ */
 export function segments(command: string): string[] {
-	return command.split(/;|&&|\|\||\n/).map(s => s.trim());
+	const out: string[] = [];
+	let quote = "";
+	let start = 0;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (quote) {
+			if (ch === quote) quote = "";
+			else if (ch === "\\" && quote === '"') i++;
+			continue;
+		}
+		if (ch === "'" || ch === '"') quote = ch;
+		else if (ch === "\\") i++;
+		else if (ch === ";" || ch === "\n" || ((ch === "&" || ch === "|") && command[i + 1] === ch)) {
+			out.push(command.slice(start, i).trim());
+			if (ch === "&" || ch === "|") i++;
+			start = i + 1;
+		}
+	}
+	out.push(command.slice(start).trim());
+	return out;
 }
 
 /** Some segment prints file contents (`cd x; ls; cat a.py`). */
@@ -76,6 +102,23 @@ export function isTestRun(command: string): boolean {
 /** The command runs a program of the agent's own (heredoc, interpreter). */
 export function runsProgram(command: string): boolean {
 	return PROGRAM.test(command);
+}
+
+/** The command runs a coding agent whose printed report is its whole answer. */
+export function runsAgent(command: string): boolean {
+	return segments(command).some(s => AGENT_SEGMENT.test(s));
+}
+
+/** A pipeline stage that keeps only the lines it was told to (`grep`, `rg`, `sed -n 10,40p`, `awk '/x/'`). */
+const FILTER_STAGE = /^(?:\w+=\S*\s+)*(?:grep|egrep|rg|ag|sed\s+-n|awk)\b/;
+
+/**
+ * The command's output is lines the agent already picked: its last segment searches or selects (`grep -n f x.c`,
+ * `git show m:x.c | grep -A12 y`, `sed -n '99,130p' doc.md`).
+ */
+export function narrowsOutput(command: string): boolean {
+	const last = segments(command).filter(Boolean).at(-1) ?? "";
+	return last.split("|").some(stage => FILTER_STAGE.test(stage.trim()));
 }
 
 /** The command or read path reads text a shaped result saved (`artifact://N`): the agent paging hidden lines back in. */

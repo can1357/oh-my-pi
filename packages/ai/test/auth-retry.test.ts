@@ -8,7 +8,7 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
-import { ConfigurationError, MissingApiKeyError, OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { MissingApiKeyError, OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 
 function authError(status = 401): Error & { status: number } {
 	return Object.assign(new Error(`${status} authentication_error`), { status });
@@ -160,36 +160,6 @@ describe("withAuth", () => {
 			{ lastChance: false, hasError: true },
 			{ lastChance: true, hasError: true },
 		]);
-	});
-
-	it("surfaces a ConfigurationError from the refresh step instead of the auth failure", async () => {
-		const keys: string[] = [];
-		const refreshFailure = new ConfigurationError("Config value file /run/key could not be read (ENOENT).");
-		const outcome = withAuth(
-			ctx => {
-				if (ctx.error === undefined) return "k0";
-				throw refreshFailure;
-			},
-			async key => {
-				keys.push(key);
-				throw authError();
-			},
-		);
-		await expect(outcome).rejects.toBe(refreshFailure);
-		expect(keys).toEqual(["k0"]);
-	});
-
-	it("still swallows other refresh-step failures and reports the auth failure", async () => {
-		const outcome = withAuth(
-			ctx => {
-				if (ctx.error === undefined) return "k0";
-				throw new Error("refresh network blip");
-			},
-			async () => {
-				throw authError();
-			},
-		);
-		await expect(outcome).rejects.toThrow("401 authentication_error");
 	});
 
 	it("rotates through every distinct sibling on pure 401 auth failures until one succeeds", async () => {

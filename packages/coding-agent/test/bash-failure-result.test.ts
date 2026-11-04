@@ -86,6 +86,15 @@ describe("BashTool execution results", () => {
 		expect(text).toContain("Command exited with code 3");
 	});
 
+	it("says a command that printed nothing exited cleanly, so an empty result reads as success", async () => {
+		const tool = new BashTool(makeSession());
+
+		const result = await tool.execute("call-silent", { command: "true" });
+
+		expect(result.isError).toBeUndefined();
+		expect(result.content.find(c => c.type === "text")?.text).toStartWith("(no output, exit code 0)");
+	});
+
 	it("returns a warning-state timeout result with one timeout notice", async () => {
 		// Keep the real native subprocess timeout path, but compress its backend
 		// deadline; BashTool must still report the user-facing one-second timeout.

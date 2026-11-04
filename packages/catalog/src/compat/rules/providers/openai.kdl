@@ -4,6 +4,9 @@ provider "openai" {
 	default-model "gpt-5.5"
 	env "OPENAI_API_KEY"
 	image-count-budget 200
+	on-api "openai-responses" {
+		supports-websockets #true
+	}
 	kind-apis {
 		embedding "openai-embeddings"
 		image "openai-responses"
