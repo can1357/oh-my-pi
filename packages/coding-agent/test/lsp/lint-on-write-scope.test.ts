@@ -436,6 +436,54 @@ process.stdout.write(JSON.stringify({ diagnostics: [] }));
 		expect(readLog(log)).toEqual([]);
 	}, 20_000);
 
+	it("resolves an explicitly named executable without PATH, and a session's own relative PATH entry", async () => {
+		const originalPath = process.env.PATH;
+		onTestFinished(() => {
+			process.env.PATH = originalPath;
+		});
+		// An ordinary language server, configured in the session's own lsp.json.
+		const session = path.join(root, "session");
+		write(path.join(session, "marker"), "");
+		fs.mkdirSync(path.join(session, "tools"));
+		const server = writeFakeExecutable(path.join(session, "tools"), "review-server", "process.exit(0);\n");
+		const resolvedFor = (command: string, searchPath: string) => {
+			process.env.PATH = searchPath;
+			write(
+				path.join(session, "lsp.json"),
+				JSON.stringify({ servers: { review: { command, rootMarkers: ["marker"], fileTypes: [".review"] } } }),
+			);
+			const resolved = loadConfig(session).servers.review?.resolvedCommand;
+			return resolved && fs.realpathSync(resolved);
+		};
+		const intended = fs.realpathSync(server);
+		expect(resolvedFor(server, "")).toBe(intended);
+		expect(resolvedFor("./tools/review-server", "")).toBe(intended);
+		expect(resolvedFor("review-server", `tools${path.delimiter}${path.join(root, "not-present")}`)).toBe(intended);
+
+		// A CLI linter named by its absolute path still runs on its own root's file with an empty PATH.
+		const log = path.join(root, "runs.log");
+		const otherRepo = path.join(root, "repo-b");
+		write(path.join(otherRepo, "biome.json"), "{}\n");
+		const linter = installRecordingBiome(otherRepo, "B", log);
+		const target = write(path.join(otherRepo, "x.ts"), "export const x = 1;\n");
+		process.env.PATH = "";
+		const result = await getDiagnosticsForFile(target, session, [
+			[
+				"abs",
+				{
+					command: linter,
+					fileTypes: [".ts"],
+					rootMarkers: ["biome.json"],
+					isLinter: true,
+					createClient: BiomeClient.create,
+				},
+			],
+		]);
+
+		expect(result?.messages.join("\n")).toContain("from B");
+		expect(readLog(log)).toEqual([{ self: "B", cwd: otherRepo, argv: ["lint", "--reporter=json", target] }]);
+	}, 20_000);
+
 	it("serves an LSP linter only files whose own root lies inside the session cwd", () => {
 		const cwd = path.join(root, "repo-a");
 		write(path.join(cwd, ".eslintrc.json"), "{}\n");

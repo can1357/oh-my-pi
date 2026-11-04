@@ -98,11 +98,19 @@ const LINUX_SUBREAPER_SCRIPT = createLinuxSubreaperScript();
  * Group-keeper entrypoint (POSIX without a child subreaper, such as macOS).
  *
  * It runs detached, so it leads the command's process group, and stays alive
- * until the command has exited and every holder of the command's output has
- * closed it. While it lives, the group id stays reserved for this run, so a
- * group kill can only reach processes of this run (also ones whose launcher
- * died). Once it exits, nothing left of the run holds output, and ptree never
- * signals that group id again.
+ * until the command has exited, every holder of the command's output has
+ * closed it, and no other process is left in its group. While it lives, the
+ * group id stays reserved for this run, so a group kill can only reach
+ * processes of this run (also ones whose launcher died or that closed their
+ * output). Once it exits, nothing of the run is left in the group, and ptree
+ * never signals that group id again. Like the Linux subreaper, it therefore
+ * holds the run open until its members are gone: a member that outlives the
+ * command keeps the run going until its deadline or abort kills the group.
+ * Only a descendant that leaves the group (a new session or group) escapes.
+ *
+ * Members are listed by group: `proc_listpids(PROC_PGRP_ONLY)` on macOS,
+ * procfs elsewhere. The listing is set up before the command starts, so a
+ * host where it cannot work fails the run instead of leaving members unowned.
  *
  * It survives the polite phase of a group termination (SIGTERM, also SIGINT and
  * SIGHUP): if it died there, a member that ignores SIGTERM would be left in a
@@ -111,7 +119,44 @@ const LINUX_SUBREAPER_SCRIPT = createLinuxSubreaperScript();
  * signals, so the command keeps default signal dispositions.
  */
 const GROUP_KEEPER_SCRIPT = `
+import { dlopen, FFIType } from "bun:ffi";
+import * as fs from "node:fs";
+
 for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => {});
+const group = process.pid;
+let otherMemberAlive;
+if (process.platform === "darwin") {
+	const libproc = dlopen("/usr/lib/libproc.dylib", {
+		proc_listpids: { args: [FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+	});
+	// Two slots suffice: the keeper itself and any one other member.
+	const pids = new Int32Array(2);
+	otherMemberAlive = () => {
+		const bytes = libproc.symbols.proc_listpids(2 /* PROC_PGRP_ONLY */, group, pids, pids.byteLength);
+		if (bytes < 0) throw new Error("proc_listpids failed");
+		for (let i = 0; i < bytes / 4; i++) if (pids[i] !== 0 && pids[i] !== group) return true;
+		return false;
+	};
+} else {
+	otherMemberAlive = () => {
+		for (const entry of fs.readdirSync("/proc")) {
+			if (!/^[0-9]+$/.test(entry) || Number(entry) === group) continue;
+			let stat;
+			try {
+				stat = fs.readFileSync("/proc/" + entry + "/stat", "latin1");
+			} catch {
+				continue; // Exited while listed.
+			}
+			// Fields after the parenthesized name: state, ppid, pgrp, ...
+			const [state, , pgrp] = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+			if (Number(pgrp) === group && state !== "Z" && state !== "X") return true;
+		}
+		return false;
+	};
+}
+// No way to list members means no way to own them: fail before the command starts.
+if (process.platform !== "darwin") fs.readFileSync("/proc/self/stat");
+
 const commandJson = Bun.env.${LINUX_SUBREAPER_COMMAND_ENV};
 if (!commandJson) throw new Error("missing supervised command");
 const callerBunBeBun = Bun.env.${LINUX_SUBREAPER_BUN_BE_BUN_ENV};
@@ -137,6 +182,7 @@ const [exitCode] = await Promise.all([
 	relay(child.stdout, Bun.stdout),
 	relay(child.stderr, Bun.stderr),
 ]);
+for (let delay = 5; otherMemberAlive(); delay = Math.min(delay * 2, 100)) await Bun.sleep(delay);
 process.exit(exitCode ?? 1);
 `;
 
@@ -243,8 +289,8 @@ export class ChildProcess<In extends InMask = InMask> {
 	#hardKillSweep?: Promise<void>;
 	#terminateGroup: boolean;
 	#hardKillTree: boolean;
-	// The root is a group keeper: once it has exited, nothing of the run holds
-	// output and its group id is no longer reserved, so nothing is signalled.
+	// The root is a group keeper: once it has exited, no process of the run is
+	// left in its group and the group id is no longer reserved, so nothing is signalled.
 	#groupKeeper: boolean;
 	// Windows has no process groups. Retaining the root's native handle pins
 	// its PID after exit so killTree() can still enumerate its original children.
@@ -395,8 +441,8 @@ export class ChildProcess<In extends InMask = InMask> {
 		// root must stay alive until adopted descendants have been collected.
 		if (this.#hardKillSweep) return;
 		if (this.#groupKeeper && (this.proc.exitCode !== null || this.proc.signalCode !== null)) {
-			// The keeper led the group and outlived every output holder; its
-			// group id may already belong to another process. Signal nothing.
+			// The keeper led the group and outlived every member; its group id
+			// may already belong to another process. Signal nothing.
 			this.#terminating = Promise.resolve();
 			return;
 		}
@@ -709,10 +755,11 @@ type ChildSpawnOptions<In extends InMask = InMask> = Omit<
 	/**
 	 * On POSIX, run the command under a group keeper: a supervisor that leads a
 	 * new process group (implies `detached`) and lives until the command has
-	 * exited and its output is closed. Kills reach the whole group, also after
-	 * the command's launcher died, and never signal a group id after the keeper
-	 * exited. Ignored on Windows and when `subreaper` applies (Linux). A
-	 * descendant that leaves the group stays out of reach.
+	 * exited, its output is closed and no other process is left in the group.
+	 * Kills reach the whole group, also after the command's launcher died, and
+	 * never signal a group id after the keeper exited. Ignored on Windows and
+	 * when `subreaper` applies (Linux). A descendant that leaves the group stays
+	 * out of reach.
 	 */
 	groupKeeper?: boolean;
 	/** Expose and retain complete stderr for a later `wait({ stderr: "full" })`. */

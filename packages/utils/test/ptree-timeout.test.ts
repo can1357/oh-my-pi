@@ -565,17 +565,45 @@ describe.skipIf(process.platform === "win32")("ptree group keeper", () => {
 		}, 30_000);
 	}
 
-	it("signals nothing once the keeper has exited, even with members left in its group", async () => {
-		// A member that closed its output does not keep the keeper alive; after
-		// the keeper exits, the group id is no longer reserved for this run.
+	it("holds the run open while a member that closed its output is left in the group, then kills it at the deadline", async () => {
+		// The command exits at once; its SIGTERM-ignoring member stays in the
+		// group with its output on /dev/null. Waiting only for output closure
+		// would report success and leave the member outside every cleanup.
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-group-keeper-"));
+		const pidFile = path.join(dir, "pid");
+		let memberPid: number | undefined;
+		try {
+			const child = spawn(
+				["/bin/sh", "-c", `trap "" TERM; sleep 3600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; exit 0`],
+				{ groupKeeper: true, timeout: 2_000 },
+			);
+			const outcome = child.wait().then(
+				() => new Error("run reported success with a member left"),
+				(error: unknown) => error,
+			);
+			memberPid = await readPid(pidFile);
+
+			expect(await outcome).toBeInstanceOf(TimeoutError);
+			expect(await runningAfter(memberPid, 2_000)).toBe(false);
+		} finally {
+			if (memberPid) Process.fromPid(memberPid)?.killTree(9);
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("signals nothing once the keeper has exited, even with a member left that changed session", async () => {
+		// A member in a new session is out of the group, so the keeper exits; its
+		// group id is then no longer reserved for this run.
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-group-keeper-"));
 		const pidFile = path.join(dir, "pid");
 		let memberPid: number | undefined;
 		const killSpy = spyOn(process, "kill");
 		try {
-			const child = spawn(["/bin/sh", "-c", `sleep 30 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'`], {
-				groupKeeper: true,
-			});
+			const daemonize = `const member = Bun.spawn(["sleep", "30"], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(member.pid));
+member.unref();
+process.exit(0);`;
+			const child = spawn([process.execPath, "-e", daemonize], { groupKeeper: true });
 			await child.wait();
 			memberPid = await readPid(pidFile);
 			killSpy.mockClear();

@@ -57,9 +57,10 @@ async function killRunning(): Promise<void> {
  * supervisor, and a kill walks the supervisor's live children.
  *
  * Other POSIX (macOS): the command runs under ptree's group keeper, which leads
- * the run's process group and lives until the command exited and its output
- * closed, so a group kill reaches the run (also after its launcher died) and a
- * group id is never signalled once it could belong to another process.
+ * the run's process group and lives until the command exited, its output closed
+ * and no other process is left in the group, so a group kill reaches the run
+ * (also after its launcher died, or a member closed its output) and a group id
+ * is never signalled once it could belong to another process.
  *
  * Windows: ptree's tree kill from the retained root handle.
  *

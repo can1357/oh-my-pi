@@ -312,6 +312,11 @@ function resolveLocalCommand(basePath: string): string | null {
 	return null;
 }
 
+/** Whether `command` names a file (`./tools/biome`, `/opt/biome`) rather than a name to search for. */
+function commandNamesPath(command: string): boolean {
+	return command.includes("/") || (process.platform === "win32" && command.includes("\\"));
+}
+
 /**
  * First executable named `command` in `cwd`'s local bin directories. With
  * `requireProjectMarkers`, a directory counts only beside its project marker
@@ -320,7 +325,7 @@ function resolveLocalCommand(basePath: string): string | null {
  * up there: it means that file, which `$which` resolves.
  */
 function resolveCommandFromLocalRoot(command: string, cwd: string, requireProjectMarkers: boolean): string | null {
-	if (command.includes("/") || (process.platform === "win32" && command.includes("\\"))) return null;
+	if (commandNamesPath(command)) return null;
 	for (const { markers, binDir } of LOCAL_BIN_PATHS) {
 		const markerRequired = requireProjectMarkers || binDir === "bin";
 		if (markerRequired && !hasRootMarkers(cwd, markers)) continue;
@@ -337,20 +342,11 @@ export interface ResolveCommandOptions extends Pick<WhichOptions, "cache" | "PAT
 }
 
 /**
- * `$which` for a lookup made from `dir`: a relative command (`./tools/biome`)
- * resolves against `dir`, never against the process's working directory. Only
- * absolute PATH entries are searched: an empty or relative entry would turn
- * `dir`, which may be the root of any repository the agent writes into, into a
- * search directory, so a checkout could supply the executable that runs on it.
- */
-function whichFrom(command: string, dir: string, options?: Pick<WhichOptions, "cache" | "PATH">): string | null {
-	return $which(command, { cache: options?.cache, PATH: options?.PATH, cwd: dir, requireAbsolutePaths: true });
-}
-
-/**
- * Resolve a command to an executable path.
- * Checks project-local bin directories first, then falls back to $PATH, both
- * from `cwd` (see {@link whichFrom}).
+ * Resolve a command to an executable path for a session at `cwd`.
+ * Checks project-local bin directories first, then `$PATH`. A relative command
+ * (`./tools/biome`) and a relative `PATH` entry resolve against `cwd`, the
+ * session's own directory, never against the process's working directory; an
+ * empty entry is skipped.
  *
  * @param command - The command name (e.g., "typescript-language-server")
  * @param cwd - Working directory to search from
@@ -361,15 +357,21 @@ export function resolveCommand(command: string, cwd: string, options?: ResolveCo
 		const resolved = resolveCommandFromLocalRoot(command, root, true);
 		if (resolved) return resolved;
 	}
-	return whichFrom(command, cwd, options);
+	return $which(command, { cache: options?.cache, PATH: options?.PATH, cwd });
 }
 
 /**
  * Resolve a linter's executable for the project rooted at `root`: the local bin
  * directories of `root` and then of each ancestor (the lookup Node itself does
- * for a package at `root`, which needs no `package.json`), then PATH from
- * `root` (see {@link whichFrom}). The session cwd plays no part, so a file of
- * another repository never runs the cwd repository's binary.
+ * for a package at `root`, which needs no `package.json`), then PATH. The
+ * session cwd plays no part, so a file of another repository never runs the
+ * cwd repository's binary.
+ *
+ * A command that names a path is that file, a relative one resolved against
+ * `root`, whatever `PATH` holds. A bare name is searched only in the absolute
+ * `PATH` entries: an empty or relative entry would make `root`, which may be
+ * any repository the agent writes into, a search directory, so a checkout
+ * could supply the executable that runs on it.
  */
 export function resolveCommandForRoot(command: string, root: string): string | null {
 	for (let dir = root; ;) {
@@ -379,7 +381,7 @@ export function resolveCommandForRoot(command: string, root: string): string | n
 		if (parent === dir) break;
 		dir = parent;
 	}
-	return whichFrom(command, root);
+	return $which(command, { cwd: root, requireAbsolutePaths: !commandNamesPath(command) });
 }
 
 // =============================================================================
