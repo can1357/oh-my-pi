@@ -15,7 +15,6 @@ import {
 	getPromptCacheTtlMs,
 	isReplayable,
 	type PromptCacheChange,
-	streamingOnlyWarmingMode,
 } from "../src/session/cache-warmer";
 
 const SHORT_DELAY_MS = 4.5 * 60_000; // 90% of the 300s short tier
@@ -459,21 +458,6 @@ describe("cache warmer lifecycle", () => {
 			state: "inactive",
 			reason: "cache entry outlives the 30-minute idle window",
 		});
-	});
-
-	test("a streaming-only session (a task subagent) warms through a long wait and stops when its run settles", async () => {
-		// The subagent's setting is the default `idle`; the cap turns it into `streaming`.
-		const h = harness({ getMode: () => streamingOnlyWarmingMode("idle") });
-		start(h);
-		// A tool call that outlasts the 5-minute entry: the run is active, so it is refreshed.
-		await advance(SHORT_DELAY_MS);
-		expect(h.replays).toHaveLength(1);
-		h.warmer.onAgentSettled();
-		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "agent run settled" });
-		await advance(SHORT_DELAY_MS * 2);
-		expect(h.replays).toHaveLength(1);
-		expect(streamingOnlyWarmingMode("off")).toBe("off");
-		expect(streamingOnlyWarmingMode("streaming")).toBe("streaming");
 	});
 
 	test("adopts the 1h tier the provider reports writing for a resolver-keyed request", async () => {

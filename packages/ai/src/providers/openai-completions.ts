@@ -2378,9 +2378,11 @@ function maybeAddAnthropicCacheControl(
 	messages: ChatCompletionMessageParam[],
 	cacheRetention: CacheRetention,
 ): void {
-	// `none` turns prompt caching off; `long` asks for the 1h entry, as the Responses path does.
+	// `none` turns prompt caching off. Chat Completions has no per-model signal that a 1h entry is
+	// accepted (the format also covers non-Anthropic classes), so every other retention keeps the
+	// 5-minute marker.
 	if (cacheRetention === "none" || compat.cacheControlFormat !== "anthropic") return;
-	const cacheControl = cacheRetention === "long" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
+	const cacheControl = { type: "ephemeral" };
 	// Anthropic-style caching requires cache_control on a text part. Add a breakpoint
 	// on the last message with text content so the cached prefix advances every
 	// request. Tool results count: during a tool loop the request tail is

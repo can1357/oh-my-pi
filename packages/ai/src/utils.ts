@@ -728,11 +728,14 @@ export function withModelCacheRetention<T extends CacheRetentionCarrier>(model: 
 export function withModelCacheRetention<T extends CacheRetentionCarrier>(
 	model: CacheRetentionCarrier,
 	options: T | undefined,
-): T | undefined;
+): T | CacheRetentionCarrier | undefined;
 export function withModelCacheRetention<T extends CacheRetentionCarrier>(
 	model: CacheRetentionCarrier,
 	options: T | undefined,
-): T | undefined {
+): T | CacheRetentionCarrier | undefined {
 	if (model.cacheRetention === undefined || options?.cacheRetention !== undefined) return options;
-	return { ...options, cacheRetention: model.cacheRetention } as T;
+	// Without options there is nothing else to keep: a bare carrier, which every (all-optional) options type accepts.
+	return options === undefined
+		? { cacheRetention: model.cacheRetention }
+		: { ...options, cacheRetention: model.cacheRetention };
 }

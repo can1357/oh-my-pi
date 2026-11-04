@@ -247,7 +247,7 @@ import {
 	type SettingsGatedToolDelta,
 } from "./session/session-tools";
 import { anthropicSlowModeHasNoSiblingHeadroom } from "./session/anthropic-slow-mode";
-import { CacheWarmer, streamingOnlyWarmingMode } from "./session/cache-warmer";
+import { CacheWarmer } from "./session/cache-warmer";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
@@ -657,14 +657,12 @@ export interface CreateAgentSessionOptions {
 	/** OpenAI service-tier override for this session. `null` omits `service_tier`. */
 	openAIServiceTier?: ServiceTier | null;
 	/**
-	 * Prompt-cache warming for this session's main loop. Defaults to `true`
-	 * (follow `providers.cacheWarming`). `"streaming"` caps that setting at
-	 * `streaming`: entries stay warm while a run waits on a long tool call (a
-	 * task subagent blocked on its own subagents or a job), never after the run
-	 * settles. One-shot sessions (standalone compaction, agentic commit) pass
-	 * `false` and never schedule warm requests.
+	 * Enable prompt-cache warming for this session's main loop. Defaults to
+	 * `true`; one-shot and spawned sessions (task subagents, standalone
+	 * compaction, agentic commit) pass `false` so short-lived sessions never
+	 * schedule background warm requests.
 	 */
-	cacheWarming?: boolean | "streaming";
+	cacheWarming?: boolean;
 	/**
 	 * Per-family service tiers for this session, replacing the `tier.*` settings
 	 * and any persisted tier history. Called once the initial model is final —
@@ -4802,18 +4800,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Prompt-cache warmer for the main agent loop only: replays the last
 		// request through the same primary wrapper just before the entry would
 		// expire, so idle gaps do not force a full-prefix cache re-write.
-		// One-shot sessions opt out via `cacheWarming: false`; task subagents pass
-		// `"streaming"`, which never warms a settled (parked) subagent.
+		// Spawned/one-shot sessions opt out via `cacheWarming: false`.
 		const cacheWarmer: CacheWarmer | undefined =
 			options.cacheWarming === false
 				? undefined
 				: new CacheWarmer({
 						stream: (model, context, streamOptions) => primaryStreamFn(model, context, streamOptions),
 						getPromptTokens: () => session.lastPromptTokens(),
-						getMode:
-							options.cacheWarming === "streaming"
-								? () => streamingOnlyWarmingMode(cfgProvidersCacheWarming.get(settings))
-								: () => cfgProvidersCacheWarming.get(settings),
+						getMode: () => cfgProvidersCacheWarming.get(settings),
 						decide: event => extensionRunner.emitCacheWarmingDecision(event),
 					});
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {

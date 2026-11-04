@@ -336,7 +336,7 @@ describe("a retention of `none` is not put back downstream", () => {
 		expect(JSON.stringify(body)).not.toContain("cache_control");
 	});
 
-	it("Chat Completions with an Anthropic cache format writes the retention's tier: none, 5m, or 1h", async () => {
+	it("Chat Completions with an Anthropic cache format adds no breakpoint under a model's `none`", async () => {
 		process.env.PI_CACHE_RETENTION = "long";
 		const chatModel = (cacheRetention?: Model["cacheRetention"]) =>
 			buildModel({
@@ -363,9 +363,7 @@ describe("a retention of `none` is not put back downstream", () => {
 			if (body === undefined) throw new Error("no request reached the transport");
 			return body;
 		};
-		// PI_CACHE_RETENTION=long with no model value: the 1-hour marker.
-		expect(await sentBody(chatModel())).toContain('"cache_control":{"type":"ephemeral","ttl":"1h"}');
-		expect(await sentBody(chatModel("short"))).toContain('"cache_control":{"type":"ephemeral"}');
+		expect(await sentBody(chatModel())).toContain('"cache_control":{"type":"ephemeral"}');
 		expect(await sentBody(chatModel("none"))).not.toContain("cache_control");
 	});
 });

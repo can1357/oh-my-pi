@@ -3176,7 +3176,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 	context: Context,
 	rawOptions?: OpenAICodexResponsesOptions,
 ): AssistantMessageEventStream => {
-	const options = withModelCacheRetention(model, rawOptions);
+	const options: OpenAICodexResponsesOptions | undefined = withModelCacheRetention(model, rawOptions);
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {

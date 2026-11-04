@@ -499,10 +499,6 @@ providers:
       supportsLongCacheRetention: true
 ```
 
-Task subagents warm their cache entries while their run is active (`providers.cacheWarming`, capped at
-`streaming`): a subagent that waits on its own subagents, jobs or long commands keeps its prefix past
-the 5 min lifetime. A finished subagent is not warmed.
-
 ## Usage costs and time-based pricing
 
 OMP estimates token costs from the selected provider/model's catalog pricing, preferring server-reported monetary costs when available. Completed messages retain their recorded costs: crossing a pricing boundary, switching models, or reopening a session does not reprice accumulated usage.

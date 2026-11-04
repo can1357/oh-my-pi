@@ -36,15 +36,6 @@ export type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult };
 export type CacheWarmingMode = "off" | "streaming" | "idle";
 export const CACHE_WARMING_MODES = ["off", "streaming", "idle"] as const;
 
-/**
- * `providers.cacheWarming` for a session that is warmed only while a run is
- * active (task subagents): `idle` becomes `streaming`, so a settled session
- * schedules nothing; `off` and `streaming` stay as set.
- */
-export function streamingOnlyWarmingMode(mode: CacheWarmingMode): CacheWarmingMode {
-	return mode === "idle" ? "streaming" : mode;
-}
-
 /** Identity of a refresh actually sent to the provider. */
 export interface CacheWarmingRefreshStart {
 	phase: "streaming" | "idle";
