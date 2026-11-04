@@ -14,9 +14,10 @@
 # `pull_request_target` gets the base repository's token, and could get its
 # secrets, so this is safe only while all of these hold:
 # - Nothing of the pull request is checked out, installed, built or run. The
-#   checkout below is the default branch (`github.sha`); the pull request's
-#   merge commit is fetched as git objects, which the checker only reads with
-#   `git ls-tree`, `git diff` and `git cat-file`.
+#   checkout below is the default branch: `github.sha`, then the branch's tip
+#   that the merge is built on, which is newer when the branch moved after the
+#   event. The pull request's merge commit is fetched as git objects, which the
+#   checker only reads with `git ls-tree`, `git diff` and `git cat-file`.
 # - The token stays read-only (`permissions: contents: read`) and no step
 #   uses a secret.
 # - No `${{ }}` expression puts pull request text (title, body, branch name)
@@ -72,6 +73,7 @@ jobs:
       timeout-minutes: 10
       steps:
          # The default branch, with this check's own code; never the pull request.
+         # The next step moves it to the branch's tip that the merge is built on.
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
            with:
               ref: ${{ github.sha }}
@@ -91,8 +93,10 @@ jobs:
               # pull request's head, and the first the base branch's tip right
               # now: a merge built on an older tip misses a release cut since,
               # which is the defect this check exists for. Both are re-read
-              # each try, so a base branch that moves is waited out. A merge
-              # this job cannot get fails it: an unknown merge never passes.
+              # each try, so a base branch that moves is waited out. The check
+              # then runs from that tip, so the merge is judged by the rules it
+              # is built on, not by those of the older commit the event named.
+              # A merge this job cannot get fails it: an unknown merge never passes.
               merge_ref=refs/released-changelogs/merge
               base_ref=refs/released-changelogs/base
               for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
@@ -103,6 +107,7 @@ jobs:
                   base_tip=$(git rev-parse --verify --quiet --end-of-options "${base_ref}^{commit}" || true)
                   if [ -n "$PR_HEAD_SHA" ] && [ "$second_parent" = "$PR_HEAD_SHA" ] &&
                      [ -n "$base_tip" ] && [ "$first_parent" = "$base_tip" ]; then
+                    git checkout --quiet --detach "$base_tip"
                     echo "MERGE_SHA=$(git rev-parse --verify --end-of-options "${merge_ref}^{commit}")" >> "$GITHUB_ENV"
                     exit 0
                   fi
@@ -132,7 +137,8 @@ jobs:
          contents: read
          pull-requests: read
       steps:
-         # The commit pushed to main, with this check's own code.
+         # The commit pushed to main, with this check's own code. The step below
+         # moves it to main's tip when main has moved since.
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
            with:
               ref: ${{ github.sha }}
@@ -175,13 +181,18 @@ jobs:
 
               # As in the pull request job: the merge's second parent must be the
               # pull request's head and its first main's tip now, which holds the
-              # release this push brought. A pull request without one, as for a
-              # conflict, gets a warning: GitHub does not merge it as it is.
+              # release this push brought, and the check runs from that tip, so
+              # a later commit that changed the check applies. A pull request
+              # without such a merge, as for a conflict, gets a warning: GitHub
+              # does not merge it as it is.
               failed=()
               for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
                 base_tip=""
                 if git fetch --quiet --no-tags --no-recurse-submodules --depth=1 origin "+refs/heads/main:refs/released-changelogs/base"; then
                   base_tip=$(git rev-parse --verify --quiet --end-of-options "refs/released-changelogs/base^{commit}" || true)
+                fi
+                if [ -n "$base_tip" ] && [ "$base_tip" != "$(git rev-parse HEAD)" ]; then
+                  git checkout --quiet --detach "$base_tip"
                 fi
                 for number in "${!heads[@]}"; do
                   ref="refs/released-changelogs/pull/$number"

@@ -403,6 +403,46 @@ async function rewrite(work: string, file: string, search: string, replacement: 
 	await Bun.write(path.join(work, file), text.replaceAll(search, replacement));
 }
 
+/** A pull request that adds a second level-1 heading, `# Notes`, under the changelog's title. */
+const SECOND_TITLE = (work: string) => rewrite(work, CHANGELOG, "# Changelog\n", "# Changelog\n\n# Notes\n");
+
+/**
+ * Main as it was before a commit that tightened the check: from `start`, a commit whose fixer reads any level-1
+ * heading above the first release as the title, so `# Notes` passes; then `change`, if given, as a commit; then the
+ * commit that requires one `# Changelog` title again and changes no released section. Returns both commits.
+ */
+async function tightenedAfter(
+	fixture: Fixture,
+	start: string,
+	change?: (work: string) => Promise<void>,
+): Promise<{ older: string; tightened: string }> {
+	await git(fixture.work, "checkout", "-q", "--detach", start);
+	await rewrite(
+		fixture.work,
+		"scripts/fix-changelogs.ts",
+		"} else if (!titled && line === CHANGELOG_TITLE) {",
+		"} else if (/^# \\S/.test(line)) {",
+	);
+	await git(fixture.work, "commit", "-qam", "chore: the check before it required one title");
+	if (change) {
+		await change(fixture.work);
+		await git(fixture.work, "commit", "-qam", "chore: release");
+	}
+	const older = (await git(fixture.work, "rev-parse", "HEAD")).trim();
+	await git(fixture.work, "checkout", "-q", start, "--", "scripts/fix-changelogs.ts");
+	await git(fixture.work, "commit", "-qm", "ci: require one # Changelog title");
+	return { older, tightened: (await git(fixture.work, "rev-parse", "HEAD")).trim() };
+}
+
+/** The merge GitHub builds of `head` on `base`; its objects reach the fixture's origin under a ref of its own. */
+async function mergeOn(fixture: Fixture, base: string, head: string, name: string): Promise<string> {
+	await git(fixture.work, "checkout", "-q", "--detach", base);
+	await git(fixture.work, "merge", "-q", "--no-ff", "--no-edit", head);
+	const merge = (await git(fixture.work, "rev-parse", "HEAD")).trim();
+	await git(fixture.work, "push", "-q", fixture.origin, `${merge}:refs/released-changelogs/${name}`);
+	return merge;
+}
+
 /**
  * Stands in for `sleep` in the fixture's jobs: it returns at once, records the seconds asked for,
  * and first runs `onSleep`, the part of GitHub that acts while a job waits.
@@ -616,6 +656,67 @@ describe("released changelog check in CI", () => {
 			expect(runs.map(run => run.exitCode)).toEqual([0]);
 			expect(runs[0]?.output).toContain("No released changelog section changed");
 			expect(await calls()).toEqual([]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"judges the merge with the check of the base branch's tip it waited for, not that of the older commit the event names",
+		async () => {
+			const fixture = await pullRequest(SECOND_TITLE);
+			// The event names `older`; before the job runs, main gets a commit that only tightens the check.
+			const { older, tightened } = await tightenedAfter(fixture, fixture.base);
+			const stale = await mergeOn(fixture, older, fixture.head, "stale");
+			const current = await mergeOn(fixture, tightened, fixture.head, "current");
+			const ref = `refs/pull/${PULL_REQUEST.number}/merge`;
+			await git(
+				fixture.work,
+				"push",
+				"-q",
+				"--force",
+				fixture.origin,
+				`${tightened}:refs/heads/main`,
+				`${stale}:${ref}`,
+			);
+			// GitHub rebuilds the merge on the new tip while the job waits.
+			const sleeps = await fakeSleep(fixture, `git --git-dir='${fixture.origin}' update-ref ${ref} ${current}`);
+
+			const runs = await runReleasedChangelogJobs({ ...fixture, base: older, merge: current });
+			const target = runs.filter(run => run.event === "pull_request_target");
+			// Only the tightened check refuses `# Notes`; the older one passes it.
+			expect(target.map(run => run.exitCode)).toEqual([1]);
+			expect(target[0]?.output).toContain('"# Notes": Markdown shows a level-1 heading "Notes"');
+			expect(await sleeps()).toEqual([10]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"checks open pull requests after a release with the check of main's tip, when a later commit tightened it",
+		async () => {
+			const fixture = await pullRequest(SECOND_TITLE);
+			// A release under the older check, then a commit that only tightens the check; the push of the
+			// tightening changes no released section, so only the release's run checks the pull request.
+			const release = (work: string) =>
+				rewrite(
+					work,
+					CHANGELOG,
+					"## [Unreleased]\n\n",
+					"## [Unreleased]\n\n## [1.1.0] - 2026-02-01\n\n### Added\n\n- Added in 1.1.0\n\n",
+				);
+			const { older: released, tightened } = await tightenedAfter(fixture, fixture.base, release);
+			const current = await mergeOn(fixture, tightened, fixture.head, "current");
+			const ref = `refs/pull/${PULL_REQUEST.number}/merge`;
+			await git(fixture.work, "push", "-q", "--force", fixture.origin, `${tightened}:refs/heads/main`);
+			await git(fixture.origin, "update-ref", "-d", ref);
+			await fakeSleep(fixture, `git --git-dir='${fixture.origin}' update-ref ${ref} ${current}`);
+			await fakeGh(fixture, `${PULL_REQUEST.number} ${fixture.head}\n`);
+
+			const before = (await git(fixture.work, "rev-parse", `${released}^`)).trim();
+			const runs = await runPushJobs(fixture, before, released);
+			expect(runs.map(run => run.exitCode)).toEqual([1]);
+			expect(runs[0]?.output).toContain('"# Notes": Markdown shows a level-1 heading "Notes"');
+			expect(runs[0]?.output).toContain(`::error title=Released changelogs, pull request #${PULL_REQUEST.number}::`);
 		},
 		TEST_TIMEOUT_MS,
 	);
