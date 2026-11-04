@@ -17,6 +17,7 @@
 ### Fixed
 
 - Fixed tool error rates counting skipped tool calls that were explicitly marked as not executed ([#17463](https://github.com/can1357/oh-my-pi/pull/17463) by [@Xytronix](https://github.com/Xytronix)).
+- Fixed `omp stats` catching up on sessions at under one file a second while a dashboard page was open: during a full sync open pages now refresh at most every 15 seconds instead of after every batch
 
 ## [18.14.0] - 2026-10-29
 

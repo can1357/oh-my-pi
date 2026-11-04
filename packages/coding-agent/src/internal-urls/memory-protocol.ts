@@ -2,10 +2,10 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, isEnoent, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { getMemoryRoot } from "../memories";
-import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionState } from "../mnemopi/state";
+import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionStateApi } from "../mnemopi/state";
 import memoryDoc from "../prompts/internal-urls/memory.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
-import type { AgentSession } from "../session/agent-session";
+import { type AgentSessionHandle, isLocalAgentSession } from "../session/agent-session-handle";
 import {
 	buildDirectoryResource,
 	containedRealPath,
@@ -62,7 +62,7 @@ function memoryRootsFromRegistry(): string[] {
  * session-id-only caller never reads a peer project's summary. Contextless
  * legacy callers keep the registry-wide sweep.
  */
-function memoryRootsForContext(context: ResolveContext | undefined, caller: AgentSession | undefined): string[] {
+function memoryRootsForContext(context: ResolveContext | undefined, caller: AgentSessionHandle | undefined): string[] {
 	const cwd = context?.cwd ?? caller?.sessionManager.getCwd();
 	if (cwd) return [getMemoryRoot(getAgentDir(), cwd)];
 	return memoryRootsFromRegistry();
@@ -157,9 +157,9 @@ async function tryResolveInRoot(url: InternalUrl, memoryRoot: string): Promise<I
  * canonical (non-aliased) state per bank set so `memory://<id>` resolves in
  * one pass regardless of how many subagents are alive.
  */
-function mnemopiSessionStatesFromRegistry(): MnemopiSessionState[] {
+function mnemopiSessionStatesFromRegistry(): MnemopiSessionStateApi[] {
 	const seen = new Set<unknown>();
-	const states: MnemopiSessionState[] = [];
+	const states: MnemopiSessionStateApi[] = [];
 	for (const ref of AgentRegistry.global().list()) {
 		const session = ref.session;
 		if (!session) continue;
@@ -186,7 +186,7 @@ function memoryBackendFromContext(context?: ResolveContext): string | undefined 
  * names a cwd is scoped even when no single live session sits in it.
  */
 interface MemoryCallerBinding {
-	readonly session: AgentSession | undefined;
+	readonly session: AgentSessionHandle | undefined;
 	readonly backend: string | undefined;
 	readonly legacy: boolean;
 }
@@ -196,7 +196,7 @@ interface MemoryCallerBinding {
  * identities and win; a shared cwd only binds when exactly one live session
  * sits in it, so two sessions in one worktree never impersonate each other.
  */
-function findCallerSession(context: ResolveContext): AgentSession | undefined {
+function findCallerSession(context: ResolveContext): AgentSessionHandle | undefined {
 	const refs = (context.agentRegistry ?? AgentRegistry.global()).list();
 	if (context.sessionFile !== undefined) {
 		const byFile = refs.find(ref => ref.session?.sessionFile === context.sessionFile)?.session;
@@ -218,8 +218,12 @@ function resolveMemoryCaller(context?: ResolveContext): MemoryCallerBinding {
 	if (!context) return { session: undefined, backend: undefined, legacy: true };
 	const session = findCallerSession(context);
 	// The caller's own session owns the backend decision: not every tool threads
-	// its settings blob, and a same-cwd peer's backend is not an answer.
-	if (session) return { session, backend: cfgMemoryBackend.get(session.settings), legacy: false };
+	// its settings blob, and a same-cwd peer's backend is not an answer. The
+	// caller runs on its session's home thread, so a match is the local object.
+	if (session && isLocalAgentSession(session)) {
+		return { session, backend: cfgMemoryBackend.get(session.settings), legacy: false };
+	}
+	if (session) return { session, backend: memoryBackendFromContext(context), legacy: false };
 	if (context.sessionFile !== undefined || context.sessionId !== undefined) {
 		// The named caller is gone; a surviving peer may not answer for it.
 		return { session: undefined, backend: "off", legacy: false };
@@ -233,7 +237,7 @@ function resolveMemoryCaller(context?: ResolveContext): MemoryCallerBinding {
  * Canonical mnemopi state of one session. Subagents alias their parent's
  * state, so the alias is resolved to the state that owns the banks.
  */
-function callerMnemopiState(session: AgentSession): MnemopiSessionState | undefined {
+function callerMnemopiState(session: AgentSessionHandle): MnemopiSessionStateApi | undefined {
 	const state = getMnemopiSessionState(session);
 	return state?.aliasOf ?? state;
 }
@@ -417,7 +421,7 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 				(mnemopiStates.length === 0 &&
 					AgentRegistry.global()
 						.list()
-						.some(ref => ref.session?.getHindsightSessionState?.()));
+						.some(ref => ref.session?.hindsightActive === true));
 			if (hindsightActive) {
 				throw new Error(HINDSIGHT_UNADDRESSABLE);
 			}

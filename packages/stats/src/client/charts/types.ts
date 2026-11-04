@@ -11,13 +11,20 @@ export interface ChartSeries {
 	axis?: "left" | "right";
 	/** Diagonal hatching instead of a solid fill (bars/areas). */
 	pattern?: "hatch";
-	/** Dashed stroke (lines). */
+	/** Dashed stroke (lines, area outlines). */
 	dashed?: boolean;
 	/** Leave this series out of the tooltip (e.g. a trend line that repeats a bar). */
 	tooltip?: false;
 }
 
-export type ChartKind = "bars" | "area" | "line";
+/** `dots` marks each value with a point and no connecting segment (raw samples under a trend line). */
+export type ChartKind = "bars" | "area" | "line" | "dots";
+
+/** Vertical guide at an x slot (e.g. an experiment start or a compaction). */
+export interface SlotMarker {
+	index: number;
+	label?: string;
+}
 
 /** Horizontal guide drawn across the plot (e.g. a 100% capacity line). */
 export interface ReferenceLine {

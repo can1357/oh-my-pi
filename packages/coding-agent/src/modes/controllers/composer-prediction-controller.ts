@@ -3,7 +3,8 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { MeterProvider } from "@opentelemetry/api";
 import { logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import composerPredictionPrompt from "../../prompts/system/composer-prediction-user.md" with { type: "text" };
-import type { AgentSession } from "../../session/agent-session";
+import type { AgentViewSession } from "../../session/agent-session-handle";
+import { isAdvisorCard } from "../../session/queued-messages";
 import { cfgComposerPredictionAlternatives, cfgComposerPredictions } from "../settings";
 import type { InteractiveModeContext } from "../types";
 import {
@@ -37,9 +38,21 @@ const LIST_MARKER = /^\s*(?:[-*•]|\d{1,2}[.)])\s+/;
 /** Everything but letters and digits, so alternatives differing only in case or punctuation fold together. */
 const NON_WORD = /[^\p{L}\p{N}]+/gu;
 
+/**
+ * The message a prediction is keyed on: the last one that is not an advisor card. Silent advisor
+ * notes land after the turn without changing what the user would reply to.
+ */
+function predictionAnchor(session: AgentViewSession): AgentMessage | undefined {
+	const messages = session.messages;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if (!isAdvisorCard(messages[i])) return messages[i];
+	}
+	return undefined;
+}
+
 /** The conversation point a prediction was made for: a new message or session invalidates it. */
 interface PredictionSource {
-	session: AgentSession;
+	session: AgentViewSession;
 	lastMessage: AgentMessage | undefined;
 	/** Session file and entry the request branched from; its usage is recorded there. */
 	sessionId: string;
@@ -155,7 +168,7 @@ export class ComposerPredictionController {
 		this.#abort = abort;
 		const source: PredictionSource = {
 			session,
-			lastMessage: session.messages.at(-1),
+			lastMessage: predictionAnchor(session),
 			// The journal id: after `/fresh` or with an SDK provider id, `session.sessionId` is the
 			// provider-facing id, which the usage ledger rejects.
 			sessionId: session.sessionManager.getSessionId(),
@@ -275,6 +288,6 @@ export class ComposerPredictionController {
 	}
 
 	#isCurrent(source: PredictionSource): boolean {
-		return this.#ctx.viewSession === source.session && source.session.messages.at(-1) === source.lastMessage;
+		return this.#ctx.viewSession === source.session && predictionAnchor(source.session) === source.lastMessage;
 	}
 }
