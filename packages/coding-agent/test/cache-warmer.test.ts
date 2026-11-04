@@ -13,6 +13,7 @@ import {
 	type CacheWarmStream,
 	getCacheWarmingDelayMs,
 	getPromptCacheTtlMs,
+	payloadCacheTier,
 	isReplayable,
 	type PromptCacheChange,
 } from "../src/session/cache-warmer";
@@ -337,11 +338,26 @@ describe("cache warming scheduling math", () => {
 		expect(getPromptCacheTtlMs(plain, { cacheRetention: "long" })).toBe(300_000);
 	});
 
-	test("takes Factory's Responses wire at its 24h entry unless the request chose short", () => {
-		const gpt = { ...factoryModel("gpt-5.6-terra"), promptCache: { short: 300, long: 86_400 } };
-		expect(getPromptCacheTtlMs(gpt, undefined)).toBe(86_400_000);
-		expect(getPromptCacheTtlMs(gpt, { cacheRetention: "long" })).toBe(86_400_000);
-		expect(getPromptCacheTtlMs(gpt, { cacheRetention: "short" })).toBe(300_000);
+	test("reads the tier a sent payload asks for from its cache markers", () => {
+		const long = [
+			{ system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }] },
+			{ prompt_cache_options: { mode: "implicit", ttl: "12h" } },
+			{ prompt_cache_retention: "24h" },
+			{ caching: "auto", cache_ttl: "1h" },
+			{ system: [{ cachePoint: { type: "default", ttl: "1h" } }] },
+		];
+		const short = [
+			{ system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }] },
+			{ prompt_cache_options: { mode: "implicit", ttl: "30m" } },
+			{ caching: "auto", cache_ttl: "5m" },
+			{ prompt_cache_key: "session" },
+			{},
+		];
+		for (const payload of long) expect(payloadCacheTier(payload)).toBe("long");
+		for (const payload of short) expect(payloadCacheTier(payload)).toBe("short");
+		const cyclic: Record<string, unknown> = { messages: [] };
+		cyclic.self = cyclic;
+		expect(payloadCacheTier(cyclic)).toBe("short");
 	});
 
 	test("keeps Azure Responses and Codex on the default entry under long retention", () => {
@@ -425,6 +441,53 @@ describe("cache warmer lifecycle", () => {
 	afterEach(() => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
+	});
+
+	test("schedules by the tier the sent payload asks for, not the estimate", async () => {
+		// Estimated long (official Anthropic, long retention); the payload carries no 1h marker.
+		const shortWire = harness();
+		const sentShort = shortWire.warmer.start(
+			{ model: makeModel(), context: { messages: [] }, options: { cacheRetention: "long" } },
+			() => change(shortWire),
+		);
+		sentShort({ system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }] });
+		await advance(SHORT_DELAY_MS);
+		expect(shortWire.replays).toHaveLength(1);
+		shortWire.warmer.cancel();
+
+		// Estimated short; the payload asks for a 24h entry the model declares (Factory's Responses wire on its
+		// OpenAI upstream): no refresh inside the warming window.
+		const longWire = harness();
+		const sentLong = longWire.warmer.start(
+			{
+				model: { ...makeModel(), promptCache: { short: 300, long: 86_400 } },
+				context: { messages: [] },
+				options: { cacheRetention: "short" },
+			},
+			() => change(longWire),
+		);
+		sentLong({ prompt_cache_key: "session", prompt_cache_retention: "24h" });
+		await advance(SHORT_DELAY_MS);
+		expect(longWire.replays).toHaveLength(0);
+		longWire.warmer.cancel();
+	});
+
+	test("starts on the declared lifetime when the estimated tier has none, and lets the payload settle it", async () => {
+		// The bundled Antigravity declaration: a 5-minute lifetime only. Long retention estimates an undeclared tier.
+		const h = harness();
+		const sent = h.warmer.start(
+			{
+				model: { ...makeModel(), promptCache: { short: 300 } },
+				context: { messages: [] },
+				options: { cacheRetention: "long" },
+			},
+			() => change(h),
+		);
+		expect(h.warmer.status).not.toMatchObject({ reason: "cache lifetime unavailable" });
+		sent({ contents: [], cachedContent: undefined });
+		await advance(SHORT_DELAY_MS);
+		expect(h.replays).toHaveLength(1);
+		h.warmer.cancel();
 	});
 
 	test("cuts the replay off at the first generated block and re-arms on a cache hit", async () => {

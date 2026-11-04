@@ -1434,7 +1434,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Transcript the warmer was last armed for: its confirmed entry describes no other transcript. */
 	#promptCacheArmSessionId: string | undefined;
 	/** Each armed main-loop request's dispatch hook, keyed by the context it was armed with. */
-	readonly #promptCacheDispatch = new WeakMap<Context, () => void>();
+	readonly #promptCacheDispatch = new WeakMap<Context, (payload?: unknown) => void>();
 	/** {@link #promptCacheShape} for the inputs it was last built from. */
 	#promptCacheShapeMemo:
 		| {
@@ -6015,11 +6015,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Starts the prompt cache entry's lifetime for the request armed with `context` (see
-	 * {@link CacheWarmer.start}). The session streamFn calls it from `onPayload`, as the provider
-	 * sends the request, past any wait for an in-flight slot.
+	 * {@link CacheWarmer.start}), at the tier its `payload` asks for. The session streamFn calls it
+	 * from `onPayload`, as the provider sends the request, past any wait for an in-flight slot.
 	 */
-	markPromptCacheDispatched(context: Context): void {
-		this.#promptCacheDispatch.get(context)?.();
+	markPromptCacheDispatched(context: Context, payload?: unknown): void {
+		this.#promptCacheDispatch.get(context)?.(payload);
 	}
 
 	/**

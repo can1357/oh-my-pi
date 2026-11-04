@@ -4894,7 +4894,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					...merged,
 					...(fallbackCreditRedemption !== undefined ? { fallbackCreditRedemption } : {}),
 					onPayload: (payload, payloadModel, signal) => {
-						session.markPromptCacheDispatched(context);
+						session.markPromptCacheDispatched(context, payload);
 						return onPayload?.(payload, payloadModel, signal);
 					},
 				});

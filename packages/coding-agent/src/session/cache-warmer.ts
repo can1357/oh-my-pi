@@ -26,7 +26,6 @@ import {
 	type SimpleStreamOptions,
 	type Usage,
 } from "@oh-my-pi/pi-ai";
-import { resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../extensibility/shared-events";
@@ -112,7 +111,9 @@ function supportsLongCacheRetention(model: Model<Api>): boolean {
 }
 
 /**
- * Retention tier a request writes under, or undefined when caching is off.
+ * Retention tier a request writes under, or undefined when caching is off: the
+ * warmer's estimate before the request is sent. The sent payload settles it
+ * ({@link payloadCacheTier}).
  *
  * Mirrors the provider layer: an explicit option, then the model's configured
  * retention (`providers.<id>.cacheRetention`, which the stream layer applies to
@@ -126,16 +127,11 @@ export function resolvePromptCacheTier(
 	isOAuthToken = false,
 ): PromptCacheTier | undefined {
 	const longByDefault = isOAuthToken && model.api === "anthropic-messages" && supportsLongCacheRetention(model);
-	// Factory's Responses wire asks for a 24h entry unless the request chose a shorter retention, and its
-	// responses report no per-TTL split the warmer could adopt from (`factoryResponsesCacheFields`).
-	const factoryResponses =
-		model.api === "factory-droid-agent" && resolveFactoryDroidPolicy(model)?.wire === "openai-responses";
 	const retention = resolveCacheRetention(
 		options?.cacheRetention ?? model.cacheRetention,
-		longByDefault || factoryResponses ? "long" : "short",
+		longByDefault ? "long" : "short",
 	);
 	if (retention === "none") return undefined;
-	if (factoryResponses) return retention;
 	if (model.api === "openai-responses") return openAIResponsesWireTier(model, retention, options);
 	return retention === "long" && !supportsLongCacheRetention(model) ? "short" : retention;
 }
@@ -181,6 +177,46 @@ export function getPromptCacheTtlMs(
 	const tier = resolvePromptCacheTier(model, options, isOAuthToken);
 	const seconds = tier === undefined ? undefined : model.promptCache?.[tier];
 	return seconds === undefined ? undefined : seconds * 1000;
+}
+
+/**
+ * Tier the request a provider is sending asks for, read from its payload (the
+ * object `onPayload` receives): long when any cache marker in it asks for a
+ * lifetime past the provider's default (`cache_control.ttl: "1h"`,
+ * `cachePoint.ttl: "1h"`, `prompt_cache_options.ttl: "12h"`,
+ * `prompt_cache_retention: "24h"`, `cache_ttl: "1h"`), short otherwise. The
+ * payload is what the provider will write, so it settles the tier
+ * {@link resolvePromptCacheTier} could only guess per provider; with no marker
+ * the warmer errs toward refreshing early rather than letting an entry expire.
+ */
+export function payloadCacheTier(payload: unknown): PromptCacheTier {
+	const pending: unknown[] = [payload];
+	const seen = new Set<object>();
+	while (pending.length > 0) {
+		const value = pending.pop();
+		if (value === null || typeof value !== "object" || seen.has(value)) continue;
+		seen.add(value);
+		if (Array.isArray(value)) {
+			for (const item of value) pending.push(item);
+			continue;
+		}
+		const record = value as Record<string, unknown>;
+		if (
+			markerTtl(record.cache_control) === "1h" ||
+			markerTtl(record.cachePoint) === "1h" ||
+			markerTtl(record.prompt_cache_options) === "12h" ||
+			record.prompt_cache_retention === "24h" ||
+			record.cache_ttl === "1h"
+		) {
+			return "long";
+		}
+		for (const child of Object.values(record)) pending.push(child);
+	}
+	return "short";
+}
+
+function markerTtl(marker: unknown): unknown {
+	return marker !== null && typeof marker === "object" && "ttl" in marker ? marker.ttl : undefined;
 }
 
 /**
@@ -516,9 +552,10 @@ export class CacheWarmer {
 	/**
 	 * Keep the prompt cache entry written by `request` warm until `change` reports a difference in the next request.
 	 * Returns the request's dispatch hook: call it each time the provider sends the request (its `onPayload`),
-	 * so the entry's lifetime counts from when it left rather than from a wait for a provider slot.
+	 * with the payload, so the entry's lifetime counts from when it left rather than from a wait for a provider
+	 * slot, and its tier is the one the payload asks for ({@link payloadCacheTier}).
 	 */
-	start(request: CacheWarmRequest, change: () => PromptCacheChange | undefined): () => void {
+	start(request: CacheWarmRequest, change: () => PromptCacheChange | undefined): (payload?: unknown) => void {
 		this.#clearRun();
 		// A string key is classified up front. Resolver keys (rotating
 		// credentials) cannot be inspected without consuming them; they start on
@@ -530,9 +567,10 @@ export class CacheWarmer {
 		const tier = resolvePromptCacheTier(request.model, request.options, isOAuthToken);
 		const entry = tier === undefined ? undefined : { model: request.model, tier, touchedAt: Date.now(), change };
 		// The entry's lifetime, and so the next refresh, counts from the send, past any wait for a provider slot.
-		const dispatched = () => {
+		const dispatched = (payload?: unknown) => {
 			if (!entry) return;
 			entry.touchedAt = Date.now();
+			if (payload !== undefined && !this.#adoptWireTier(entry, payloadCacheTier(payload))) return;
 			const run = this.#run;
 			if (run?.entry !== entry || run.timer === undefined) return;
 			clearTimeout(run.timer);
@@ -553,10 +591,16 @@ export class CacheWarmer {
 			this.#stop("request disabled prompt caching");
 			return dispatched;
 		}
-		const delayMs = this.#delayFor(request.model, entry.tier);
+		let delayMs = this.#delayFor(request.model, entry.tier);
 		if (delayMs === undefined) {
-			this.#stop("cache lifetime unavailable");
-			return dispatched;
+			// The payload settles the tier as the request goes out; until then run on the other declared lifetime.
+			const other: PromptCacheTier = entry.tier === "long" ? "short" : "long";
+			delayMs = this.#delayFor(request.model, other);
+			if (delayMs === undefined) {
+				this.#stop("cache lifetime unavailable");
+				return dispatched;
+			}
+			entry.tier = other;
 		}
 		this.#run = {
 			...request,
@@ -572,6 +616,25 @@ export class CacheWarmer {
 		};
 		this.#schedule(this.#run);
 		return dispatched;
+	}
+
+	/**
+	 * Adopt the tier a sent payload asks for. Returns false when the run had to stop because the model
+	 * declares no lifetime for that tier.
+	 */
+	#adoptWireTier(entry: TrackedCacheEntry, tier: PromptCacheTier): boolean {
+		if (entry.tier === tier) return true;
+		entry.tier = tier;
+		const run = this.#run;
+		if (run?.entry !== entry) return true;
+		const delayMs = this.#delayFor(run.model, tier);
+		if (delayMs === undefined) {
+			this.#stop("cache lifetime unavailable");
+			return false;
+		}
+		run.tier = tier;
+		run.delayMs = delayMs;
+		return true;
 	}
 
 	/**
@@ -809,6 +872,14 @@ export class CacheWarmer {
 			signal: AbortSignal.any([run.controller.signal, cutoff.signal]),
 			onPayload: (payload, model, signal) => {
 				run.refreshSentAt = Date.now();
+				// A replay sends the armed request again; follow its payload's tier where the model declares that lifetime.
+				const tier = payloadCacheTier(payload);
+				const delayMs = tier === run.tier ? undefined : this.#delayFor(run.model, tier);
+				if (delayMs !== undefined) {
+					run.tier = tier;
+					run.delayMs = delayMs;
+					if (run.entry) run.entry.tier = tier;
+				}
 				return onPayload?.(payload, model, signal);
 			},
 		};
