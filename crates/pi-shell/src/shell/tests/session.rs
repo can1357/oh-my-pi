@@ -2183,6 +2183,34 @@ async fn timed_out_run_still_reports_output_its_consumer_lost() {
 	assert!(err.to_string().contains("not all delivered"), "{err}");
 }
 
+/// Raw streams: stdout's consumer is gone before the run starts, while
+/// stderr's takes nothing, so its reader waits on its channel. The timeout
+/// then ends the run before that reader does, and the run reported only
+/// `timed_out`, though stdout's output was already lost. It must fail.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn timed_out_run_reports_a_lost_stream_while_another_still_waits() {
+	let _guard = shell_test_lock().lock().await;
+	let (stdout_tx, stdout_rx) = flume::bounded::<Bytes>(1);
+	drop(stdout_rx);
+	let (stderr_tx, _stderr_rx) = flume::bounded::<Bytes>(1);
+	let result = time::timeout(
+		Duration::from_secs(20),
+		execute_shell_streams(
+			ShellExecuteOptions {
+				command: "printf LOST; head -c 500000 /dev/zero >&2; sleep 20".into(),
+				..Default::default()
+			},
+			StreamSinks { stdout: Some(stdout_tx), stderr: Some(stderr_tx) },
+			CancelToken::new(Some(300)),
+		),
+	)
+	.await
+	.expect("the run ends");
+	let err = result.expect_err("output lost before the timeout must fail the run");
+	assert!(err.to_string().contains("stdout was not all delivered"), "{err}");
+}
+
 /// The raw-bytes path with a bounded sink whose consumer stops after `x`. Its
 /// send blocked a runtime thread, so the run never returned.
 #[cfg(unix)]
