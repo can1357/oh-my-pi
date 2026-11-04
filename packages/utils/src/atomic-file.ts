@@ -1,6 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { CONFIG_DIR_NAME, getBaseConfigRoot, getConfigDirName, getConfigRootDir, relativePathWithinRoot } from "./dirs";
+import {
+	CONFIG_DIR_NAME,
+	getAgentDir,
+	getBaseConfigRoot,
+	getConfigDirName,
+	getConfigRootDir,
+	relativePathWithinRoot,
+} from "./dirs";
 import { hasFsCode, isEexist, isEnoent } from "./fs-error";
 import * as logger from "./logger";
 import { toError } from "./type-guards";
@@ -39,31 +46,50 @@ function namesADirectory(value: string): boolean {
 	return tail === "" || tail === "." || tail === "..";
 }
 
+/** The configured project config directory names, each split into its components. */
+function projectConfigDirNames(): string[][] {
+	return [CONFIG_DIR_NAME, getConfigDirName()].map(name => name.split(/[\\/]/).filter(Boolean));
+}
+
+function containsSequence(segments: readonly string[], wanted: readonly string[]): boolean {
+	if (wanted.length === 0) return false;
+	return segments.some((_, at) => wanted.every((part, offset) => segments[at + offset] === part));
+}
+
 /**
- * Whether `filePath` sits inside some *project's* config directory, and so
- * inside a tree a checkout produced. Both names, because omp uses both:
- * `getProjectAgentDir()` builds one from the constant, while discovery walks up
- * looking for `getConfigDirName()`, which `PI_CONFIG_DIR` renames.
+ * Whether the link at `filePath` lives inside some *project's* config directory,
+ * and so inside a tree a checkout produced. Both names are matched, because omp
+ * uses both: `getProjectAgentDir()` builds one from the constant, while
+ * discovery walks up looking for `getConfigDirName()`, which `PI_CONFIG_DIR`
+ * renames — and that one may name several components.
  *
  * This is the one thing a config write must not follow a link through. A
  * repository commits whatever it likes in its own `.omp`, and following a link
  * found there would let a clone redirect the write onto any file its user can
  * write.
  *
- * omp's own root carries the same name, so the search starts below it: a
- * `~/.omp/profiles/<name>/marketplaces.json` is the user's, while a
- * `~/.omp/wt/pr-1/.omp/mcp.json` is a checkout's, and so is any such directory
- * outside omp's roots entirely.
+ * It is the link's OWN location that decides, taken physically: the directory
+ * the link sits in, canonicalized, plus the link's name. Classifying where the
+ * link points instead would ask the question of the wrong file, and a lexical
+ * path would miss a project directory reached through an aliased parent or a
+ * `..`. omp's own roots carry the same name, so the search starts below the
+ * deepest of them that contains the link.
  */
 function insideAProjectConfigDir(filePath: string): boolean {
-	const names = new Set([CONFIG_DIR_NAME, getConfigDirName()]);
-	const target = path.resolve(filePath);
-	let searched = target;
-	for (const root of [getConfigRootDir(), getBaseConfigRoot()]) {
-		const below = relativePathWithinRoot(root, target);
+	const resolved = path.resolve(filePath);
+	let here = resolved;
+	try {
+		here = path.join(fs.realpathSync.native(path.dirname(resolved)), path.basename(resolved));
+	} catch {
+		// Not on disk yet; the lexical spelling is all there is to judge.
+	}
+	let searched = here;
+	for (const root of [getConfigRootDir(), getBaseConfigRoot(), getAgentDir()]) {
+		const below = relativePathWithinRoot(root, here);
 		if (below !== null && below.length < searched.length) searched = below;
 	}
-	return searched.split(path.sep).some(segment => names.has(segment));
+	const segments = searched.split(path.sep);
+	return projectConfigDirNames().some(name => containsSequence(segments, name));
 }
 
 /**
@@ -80,9 +106,12 @@ function insideAProjectConfigDir(filePath: string): boolean {
  * not exist.
  */
 export async function resolveConfigWriteTarget(filePath: string): Promise<string> {
-	if (insideAProjectConfigDir(filePath)) return filePath;
 	let current = filePath;
 	for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
+		// Asked of every hop, not just the entry: a link outside any project can
+		// point at one inside a checkout's config directory, and it is that link
+		// the repository controls.
+		if (insideAProjectConfigDir(current)) return current;
 		let link: string;
 		try {
 			link = await fs.promises.readlink(current);
@@ -117,9 +146,9 @@ export async function resolveConfigWriteTarget(filePath: string): Promise<string
 
 /** Synchronous sibling of {@link resolveConfigWriteTarget}. */
 function resolveWriteTargetSync(filePath: string): string {
-	if (insideAProjectConfigDir(filePath)) return filePath;
 	let current = filePath;
 	for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
+		if (insideAProjectConfigDir(current)) return current;
 		let link: string;
 		try {
 			link = fs.readlinkSync(current);
