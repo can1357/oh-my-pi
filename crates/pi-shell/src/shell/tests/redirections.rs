@@ -218,14 +218,14 @@ async fn noclobber_refuses_an_existing_file_it_cannot_open() {
 		Row {
 			script: "/bin/ln -s absent d; set -o noclobber; printf BAD >d; echo s=$?",
 			fifos:  &[],
-			output: "d: cannot overwrite existing file\ns=1",
+			output: "d: cannot overwrite existing file\ns=1\n",
 			status: 0,
 			files:  &[("absent", None)],
 		},
 		Row {
 			script: "/bin/ln -s absent d; set -o noclobber; printf BAD &>d; echo s=$?",
 			fifos:  &[],
-			output: "d: cannot overwrite existing file\ns=1",
+			output: "d: cannot overwrite existing file\ns=1\n",
 			status: 0,
 			files:  &[("absent", None)],
 		},
@@ -240,7 +240,7 @@ async fn noclobber_refuses_an_existing_file_it_cannot_open() {
 		Row {
 			script: r#"/bin/ln -s absent d; set -o noclobber; /bin/echo BAD >gate >d & p=$!; /bin/cat gate >/dev/null & wait "$p"; echo s=$?; wait"#,
 			fifos:  &["gate"],
-			output: "d: cannot overwrite existing file\ns=1",
+			output: "d: cannot overwrite existing file\ns=1\n",
 			status: 0,
 			files:  &[("absent", None)],
 		},
@@ -248,7 +248,7 @@ async fn noclobber_refuses_an_existing_file_it_cannot_open() {
 		Row {
 			script: "/bin/mkdir sub; set -o noclobber; printf BAD >sub; echo s=$?",
 			fifos:  &[],
-			output: "sub: Is a directory\ns=1",
+			output: "sub: Is a directory\ns=1\n",
 			status: 0,
 			files:  &[],
 		},
