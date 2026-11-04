@@ -1267,6 +1267,22 @@ fn cwd_env_and_argv0_reach_the_child() {
 	assert_eq!(out.captured(), b"/usr\nb a r|name0\n");
 }
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn missing_spawn_chdir_uses_fork_with_the_requested_cwd() {
+	let mut s = NativeSpawner::default();
+	Arc::get_mut(&mut s.shared).unwrap().state.add_chdir = None;
+	let env = EnvView::default();
+	let a = argv(&["/bin/pwd"]);
+	let out = MemFile::default();
+	let mut sp = spec(&a, &env, NEW);
+	sp.cwd = b"/usr".as_bstr();
+	sp.stdio = [StdioSpec::Null, out.boxed(), StdioSpec::Null];
+	let mut p = s.spawn(sp).unwrap();
+	assert_eq!(wait(&mut p), ExitStatus::Exited(0));
+	assert_eq!(out.captured(), b"/usr\n");
+}
+
 #[test]
 fn extra_fds_are_passed_to_the_child() {
 	let env = EnvView::default();
