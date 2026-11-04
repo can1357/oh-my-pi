@@ -26,10 +26,9 @@ use std::{
 	},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 const OPT_QUIET: &str = "quiet";
 const OPT_LIST: &str = "list";
@@ -257,11 +256,6 @@ fn display_name(name: &OsStr) -> String {
 	} else {
 		name.to_string_lossy().into_owned()
 	}
-}
-
-/// Creates the `isutf8` builtin registration.
-pub(crate) fn isutf8_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Isutf8, SE>()
 }
 
 #[cfg(test)]

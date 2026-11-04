@@ -17,7 +17,17 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgProvidersMuseCodeStoreResponses } from "@oh-my-pi/pi-coding-agent/session/settings";
-import { createSettingsAwareStreamFn } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
+import {
+	createSettingsAwareStreamFn,
+	resolveWebsocketPreference,
+} from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
+
+/** Settings whose global (persisted) layer holds `storeResponses`; a runtime override would outrank the env var. */
+function persistedStore(value: boolean | undefined): Settings {
+	const settings = Settings.isolated();
+	if (value !== undefined) cfgProvidersMuseCodeStoreResponses.set(settings, value);
+	return settings;
+}
 
 function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOptions }> } {
 	const calls: Array<{ options?: SimpleStreamOptions }> = [];
@@ -86,6 +96,29 @@ function replayedReasoningContext(producer: Model): Context {
 }
 
 describe("createSettingsAwareStreamFn", () => {
+	it("keeps the WebSocket setting exclusive to Codex", () => {
+		for (const setting of ["auto", "on", "off"] as const) {
+			const settings = Settings.isolated({ "providers.openaiWebsockets": setting });
+			expect(resolveWebsocketPreference(settings, stubCodexModel)).toBe(
+				setting === "on" ? true : setting === "off" ? false : undefined,
+			);
+			for (const api of ["openrouter", "anthropic-messages"] as const) {
+				expect(resolveWebsocketPreference(settings, { api } as Model)).toBeUndefined();
+			}
+			expect(resolveWebsocketPreference(settings, stubResponsesModel)).toBe(false);
+			expect(resolveWebsocketPreference(settings, undefined)).toBeUndefined();
+		}
+	});
+
+	it("treats standard Responses settings, model and request false as independent vetoes", () => {
+		const enabled = Settings.isolated({ "providers.openaiResponsesWebsockets": true });
+		const disabled = Settings.isolated({ "providers.openaiResponsesWebsockets": false });
+		expect(resolveWebsocketPreference(disabled, { ...stubResponsesModel, preferWebsockets: true }, true)).toBe(false);
+		expect(resolveWebsocketPreference(enabled, { ...stubResponsesModel, preferWebsockets: false }, true)).toBe(false);
+		expect(resolveWebsocketPreference(enabled, { ...stubResponsesModel, preferWebsockets: true }, false)).toBe(false);
+		expect(resolveWebsocketPreference(enabled, stubResponsesModel)).toBe(true);
+	});
+
 	it("applies provider settings to the forwarded options when caller omits them", () => {
 		const settings = Settings.isolated({
 			"providers.openrouterVariant": "floor",
@@ -333,9 +366,12 @@ describe("createSettingsAwareStreamFn", () => {
 			base,
 		);
 		elsewhere(copilot, context, { apiKey: "k", providerSessionState: new Map() });
+		// Explicit transport preference cannot change native-history accounting.
+		queued(copilot, context, { apiKey: "k", providerSessionState: new Map(), preferWebsockets: true });
 
 		expect(calls[0]?.options?.maxTokens).toBeLessThan(9_000);
 		expect(calls[1]?.options?.maxTokens).toBeUndefined();
+		expect(calls[2]?.options?.maxTokens).toBeLessThan(9_000);
 	});
 
 	describe("providers.anthropic.serverSideFallback (opt-in)", () => {
@@ -500,16 +536,11 @@ describe("createSettingsAwareStreamFn", () => {
 		};
 
 		it.each([
-			["stays off by default", {}, undefined, false],
-			["stores when the setting is on", { "providers.muse-code.storeResponses": true }, undefined, true],
-			[
-				"lets PI_MUSE_STORE_RESPONSES=1 override the setting",
-				{ "providers.muse-code.storeResponses": false },
-				"1",
-				true,
-			],
-		] as const)("%s", async (_label, values, env, expected) => {
-			expect(await wireStore(env, viaSession(Settings.isolated(values), museModel))).toBe(expected);
+			["stays off by default", undefined, undefined, false],
+			["stores when the setting is on", true, undefined, true],
+			["lets PI_MUSE_STORE_RESPONSES=1 override the setting", false, "1", true],
+		] as const)("%s", async (_label, stored, env, expected) => {
+			expect(await wireStore(env, viaSession(persistedStore(stored), museModel))).toBe(expected);
 		});
 
 		it("does not opt other storing hosts into retention", async () => {

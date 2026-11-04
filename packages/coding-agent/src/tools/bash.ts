@@ -47,7 +47,7 @@ import { serviceLogs, startService, type ServiceReady } from "../launch/services
 import { isFindEnabled } from "./jfind";
 import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { resolveInlineByteCapBudget } from "./output-meta";
+import { outputMeta, resolveInlineByteCapBudget } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import { extractLeadingCdTarget, extractLiteralAndChainSegments, tokenizeShellSegments } from "./shell-tokenize";
 import { ToolAbortError } from "./tool-errors";
@@ -77,6 +77,9 @@ import {
 } from "../exec/settings";
 import { cfgSkillful } from "../session/settings";
 import { cfgWorktreeClone } from "../task/settings";
+import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight";
+import { SPOTLIGHT_FULL_OUTPUT_MAX_BYTES } from "../spotlight/types";
+import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
 
 const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
 	"\n": true,
@@ -711,7 +714,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 	#formatResultOutput(result: BashResult | BashInteractiveResult): string {
 		const outputText = normalizeResultOutput(result);
-		return outputText || "(no output)";
+		// A failed exit gets its own notice; a clean one says so, or an empty diff reads like a broken command.
+		if (!outputText) return result.exitCode === 0 ? "(no output, exit code 0)" : "(no output)";
+		return outputText;
 	}
 
 	/**
@@ -761,12 +766,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			wallTimeMs?: number;
 			/** Text the run wrote to `out://`. */
 			replies?: readonly string[];
+			/** The call the result answers; shapes the output under the session's Spotlight experiment. */
+			toolCallId?: string;
 		},
 	): Promise<AgentToolResult<BashToolDetails>> {
 		const exitCode = result.exitCode;
 		const failedExit = exitCode !== undefined && exitCode !== 0;
 
-		const outputLines = [this.#formatResultOutput(result)];
+		const shaped =
+			options.toolCallId === undefined
+				? undefined
+				: await this.#shapeOutput(result, options.toolCallId, options.command);
+		const outputLines = [shaped?.text ?? this.#formatResultOutput(result)];
 		const notices: string[] = [];
 		const wallTimeMs = options.wallTimeMs;
 		const wallTimeNoticeEmitted = wallTimeMs !== undefined && wallTimeMs >= WALL_TIME_NOTICE_MIN_MS;
@@ -779,7 +790,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			}
 		}
 		if (notices.length > 0) outputLines.push("", ...notices);
-		if (failedExit) outputLines.push("", formatExitCodeNotice(exitCode));
+		// Shaped output already leads with its exit status.
+		if (failedExit && !shaped?.text?.startsWith("[exit code ")) outputLines.push("", formatExitCodeNotice(exitCode));
 		const outputText = outputLines.join("\n");
 
 		// Timeouts are not failures — the command ran its course. Return an error
@@ -805,6 +817,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			details.exitCode = exitCode;
 		}
 		if (options.replies?.length) details.replies = [...options.replies];
+		if (shaped?.spotlight) details.spotlight = shaped.spotlight;
 
 		// Final-defense inline cap config, shared by the timeout and normal
 		// completion paths. The sink already bounds inline bodies to the spill
@@ -824,17 +837,19 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			details.timedOut = true;
 			const message =
 				timeoutSec === undefined ? "Command timed out" : `Command timed out after ${timeoutSec} seconds`;
-			// executeBash has already emitted this leading sink notice. PTY output
-			// has not, so provide the LLM-facing annotation exactly once.
-			if (!normalizeResultOutput(result).startsWith(`[${message}]\n`)) {
+			// executeBash has already emitted this leading sink notice. PTY output has not, and output shaped from the
+			// artifact never carries it, so provide the LLM-facing annotation exactly once in the text sent.
+			const lead = outputLines[0];
+			if (lead !== `[${message}]` && !lead.startsWith(`[${message}]\n`)) {
 				outputLines.push("", `[${message}]`);
 			}
 			const timeoutOutputText = await enforceInlineByteCap(outputLines.join("\n"), inlineCap);
-			return toolResult(details)
-				.content([{ type: "text", text: timeoutOutputText }, ...(result.images ?? [])])
-				.truncationFromSummary(result, { direction: "tail" })
-				.error()
-				.done();
+			const timeoutBuilder = toolResult(details).content([
+				{ type: "text", text: timeoutOutputText },
+				...(result.images ?? []),
+			]);
+			if (!shaped?.whole) timeoutBuilder.truncationFromSummary(result, { direction: "tail" });
+			return timeoutBuilder.error().done();
 		}
 
 		// Non-timeout cancellations and missing exit status still propagate as thrown errors.
@@ -846,10 +861,60 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		const resultBuilder = toolResult(details)
 			.content([{ type: "text", text: cappedOutputText }, ...(result.images ?? [])])
-			.truncationFromSummary(result, { direction: "tail" })
 			.minimized("minimized" in result ? result.minimized : undefined);
+		// Output shaped from the whole spilled artifact no longer matches the sink's line ranges.
+		if (!shaped?.whole) resultBuilder.truncationFromSummary(result, { direction: "tail" });
 		if (failedExit) resultBuilder.error();
 		return resultBuilder.done();
+	}
+
+	/**
+	 * The command's output under the session's Spotlight shaping, or undefined when the session does not shape: `text`
+	 * when shaping changed it, and the trace for the result's details. A spilled output, or one whose long lines the sink
+	 * cut to its column cap, is shaped whole from its artifact (`whole`), up to {@link SPOTLIGHT_FULL_OUTPUT_MAX_BYTES}:
+	 * shaping a capped line would only cut the preview further, past anything the cap dropped. Its savings still count
+	 * against the capped text `plain` shows, truncation notice included, and a cut longer than that is not applied,
+	 * except a short one when the column cap cut `plain` (`plainWidthCut`): the cap's preview leaves the rest to a read
+	 * of the artifact. A result shaping does not cut (kept, held out, capped) stays as the sink built it, as under `plain`.
+	 */
+	async #shapeOutput(
+		result: BashResult | BashInteractiveResult,
+		toolCallId: string,
+		command: string,
+	): Promise<{ text?: string; whole: boolean; spotlight?: SpotlightDetails } | undefined> {
+		const experiment = shapingExperiment(this.session);
+		if (!experiment?.shapesTool("bash")) return undefined;
+		const built = this.#formatResultOutput(result);
+		let text = built;
+		let whole = false;
+		const widthCut = (result.columnTruncatedLines ?? 0) > 0;
+		if (
+			(result.truncated || widthCut) &&
+			result.artifactId &&
+			!result.artifactElidedBytes &&
+			!result.artifactError &&
+			result.totalBytes <= SPOTLIGHT_FULL_OUTPUT_MAX_BYTES
+		) {
+			const full = await experiment.readArtifact(result.artifactId);
+			if (full !== null) {
+				text = full;
+				whole = true;
+			}
+		}
+		const shaped = await shapeToolText(this.session, toolCallId, {
+			tool: "bash",
+			text,
+			plain: built + formatOutputNotice(outputMeta().truncationFromSummary(result, { direction: "tail" }).get()),
+			plainWidthCut: whole && widthCut,
+			artifact: whole ? `artifact://${result.artifactId}` : undefined,
+			command,
+			exitCode: result.exitCode,
+			source: command,
+		});
+		// Kept, held-out or capped text: the result stays as the sink built it (and keeps its truncation notice).
+		return shaped.text === text
+			? { whole: false, spotlight: shaped.spotlight }
+			: { text: shaped.text, whole, spotlight: shaped.spotlight };
 	}
 
 	#buildBackgroundStartResult(
@@ -908,6 +973,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		sessionEnv: Record<string, string>;
 		/** The model's `i` intent on the call, for the job's widget author. */
 		intent?: string;
+		/** The call that started the job. */
+		toolCallId: string;
 	}): ManagedBashJobHandle {
 		const manager = this.session.asyncJobManager;
 		if (!manager) {
@@ -969,6 +1036,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					const result = await executeBash(options.command, {
 						cwd: options.commandCwd,
 						env: options.sessionEnv,
+						minimize: !nativeShapingOff(this.session),
 						// A call that starts in the foreground runs in the session's
 						// persistent shell, like the direct path, so its variables,
 						// functions, and options reach the next call even after it is
@@ -1006,6 +1074,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						notices,
 						wallTimeMs,
 						replies: backgrounded ? undefined : replies,
+						toolCallId: options.toolCallId,
 					});
 					const finalText = this.#extractTextResult(finalResult);
 					latestText = finalText;
@@ -1268,6 +1337,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				sessionId,
 				sessionEnv,
 				intent: this.session.getToolCallIntent?.(toolCallId),
+				toolCallId,
 			});
 			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 				requestedTimeoutSec,
@@ -1311,6 +1381,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				sessionId,
 				sessionEnv,
 				intent: this.session.getToolCallIntent?.(toolCallId),
+				toolCallId,
 			});
 			if (startBackgrounded) {
 				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
@@ -1482,6 +1553,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						requestedTimeoutSec,
 						notices: pendingNotices,
 						wallTimeMs: performance.now() - bridgeWallTimeStart,
+						toolCallId,
 					});
 				}
 
@@ -1568,6 +1640,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							requestedTimeoutSec,
 							notices: pendingNotices,
 							wallTimeMs: performance.now() - bridgeWallTimeStart,
+							toolCallId,
 						});
 					}
 
@@ -1640,6 +1713,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					requestedTimeoutSec,
 					notices: bridgeNotices,
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
+					toolCallId,
 				});
 			} finally {
 				clearTimeout(timeoutTimer);
@@ -1695,6 +1769,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					cwd: commandCwd,
 					env: sessionEnv,
 					sessionKey: sessionId,
+					minimize: !nativeShapingOff(this.session),
 					isSessionCurrent: () => (this.session.getSessionId?.() ?? undefined) === sessionId,
 					timeout: timeoutMs ?? 0,
 					signal,
@@ -1747,6 +1822,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			notices: pendingNotices,
 			wallTimeMs,
 			replies,
+			toolCallId,
 		});
 	}
 }

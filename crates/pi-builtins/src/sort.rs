@@ -2153,7 +2153,6 @@ use std::{
 	thread::{self, JoinHandle},
 };
 
-use compare::Compare;
 use flume::{Receiver, Sender};
 use pi_vfs::{BlockingFs, File};
 
@@ -2345,19 +2344,20 @@ fn merge_without_limit<M: MergeInput + 'static, F: Iterator<Item = SortResult<M>
 
 	for (file_number, receiver) in loaded_receivers.into_iter().enumerate() {
 		if let Ok(chunk) = receiver.recv() {
-			mergeable_files.push(MergeableFile {
-				current_chunk: Rc::new(chunk),
-				file_number,
-				line_idx: 0,
-				receiver,
+			mergeable_files.push(MergeHeapEntry {
+				file: MergeableFile {
+					current_chunk: Rc::new(chunk),
+					file_number,
+					line_idx: 0,
+					receiver,
+				},
+				settings,
 			});
 		}
 	}
 
 	Ok(FileMerger {
-		heap: binary_heap_plus::BinaryHeap::from_vec_cmp(mergeable_files, FileComparator {
-			settings,
-		}),
+		heap: std::collections::BinaryHeap::from(mergeable_files),
 		request_sender,
 		prev: None,
 		reader_join_handle,
@@ -2432,7 +2432,7 @@ struct PreviousLine {
 /// Merges files together. This is **not** an iterator because of lifetime
 /// problems.
 struct FileMerger<'a> {
-	heap:               binary_heap_plus::BinaryHeap<MergeableFile, FileComparator<'a>>,
+	heap:               std::collections::BinaryHeap<MergeHeapEntry<'a>>,
 	request_sender:     Sender<(usize, RecycledChunk)>,
 	prev:               Option<PreviousLine>,
 	reader_join_handle: JoinHandle<SortResult<()>>,
@@ -2548,13 +2548,44 @@ impl FileMerger<'_> {
 	}
 }
 
-/// Compares files by their current line.
-struct FileComparator<'a> {
+/// Orders each file by its current line and original input position.
+struct MergeHeapEntry<'a> {
+	file: MergeableFile,
 	settings: &'a GlobalSettings,
 }
 
-impl Compare<MergeableFile> for FileComparator<'_> {
-	fn compare(&self, a: &MergeableFile, b: &MergeableFile) -> Ordering {
+impl std::ops::Deref for MergeHeapEntry<'_> {
+	type Target = MergeableFile;
+
+	fn deref(&self) -> &Self::Target {
+		&self.file
+	}
+}
+
+impl std::ops::DerefMut for MergeHeapEntry<'_> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.file
+	}
+}
+
+impl PartialEq for MergeHeapEntry<'_> {
+	fn eq(&self, other: &Self) -> bool {
+		self.cmp(other) == Ordering::Equal
+	}
+}
+
+impl Eq for MergeHeapEntry<'_> {}
+
+impl PartialOrd for MergeHeapEntry<'_> {
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+impl Ord for MergeHeapEntry<'_> {
+	fn cmp(&self, other: &Self) -> Ordering {
+		let a = &self.file;
+		let b = &other.file;
 		let mut cmp = compare_by(
 			&a.current_chunk.lines()[a.line_idx],
 			&b.current_chunk.lines()[b.line_idx],
@@ -3445,7 +3476,7 @@ use std::{
 };
 
 use bigdecimal::BigDecimal;
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use crate::openfile::OpenFile;
 use chunks::LineData;
 use clap::{Arg, ArgAction, ArgMatches, Command, CommandFactory, FromArgMatches, builder::ValueParser};
 use custom_str_cmp::custom_str_cmp;
@@ -3480,7 +3511,7 @@ use uucore::{
 #[cfg(unix)]
 use crate::locale::locale_loadable;
 use crate::{
-	host::{Host, Utility, format_usage, rayon_global_pool_available, util},
+	host::{Host, Utility, format_usage, rayon_global_pool_available},
 	locale::{numeric_symbols, parse_locale_name, shell_locale},
 	sort::{
 		buffer_hint::automatic_buffer_size,
@@ -6278,11 +6309,6 @@ fn uu_app() -> Command {
 		)
 }
 
-/// Creates the `sort` builtin registration.
-pub(crate) fn sort_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Sort, SE>()
-}
-
 fn exec(
 	fs: &BlockingFs,
 	stdin: &StdinOperand,
@@ -7165,6 +7191,28 @@ mod tests {
 		let (code, capture) = run_util::<Sort>(&["-C"], "beta\nalpha\n", "/");
 		assert_eq!(code, 1);
 		assert_eq!(capture.err(), "");
+	}
+
+	#[test]
+	fn merge_preserves_input_order_for_equal_keys_in_both_directions() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		std::fs::write(dir.path().join("first"), "a first-1\na first-2\nb first\n")
+			.expect("fixture");
+		std::fs::write(dir.path().join("second"), "a second\nb second\n")
+			.expect("fixture");
+		let (code, capture) =
+			run_util::<Sort>(&["-m", "-s", "-k1,1", "first", "second"], "", dir.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "a first-1\na first-2\na second\nb first\nb second\n");
+
+		std::fs::write(dir.path().join("first"), "b first\na first-1\na first-2\n")
+			.expect("fixture");
+		std::fs::write(dir.path().join("second"), "b second\na second\n")
+			.expect("fixture");
+		let (code, capture) =
+			run_util::<Sort>(&["-m", "-s", "-r", "-k1,1", "first", "second"], "", dir.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "b first\nb second\na first-1\na first-2\na second\n");
 	}
 
 	#[test]

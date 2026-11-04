@@ -1836,7 +1836,7 @@ export interface InstrumentedChatSpanOptions {
 export async function instrumentedCompleteSimple<TApi extends Api>(
 	model: Model<TApi>,
 	ctx: Context,
-	options: SimpleStreamOptions,
+	options: SimpleStreamOptions & { onAttempt?: (message: AssistantMessage) => void },
 	span: InstrumentedChatSpanOptions,
 ): Promise<AssistantMessage> {
 	const { telemetry, parent, oneshotKind } = span;
