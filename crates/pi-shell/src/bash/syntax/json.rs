@@ -1692,7 +1692,7 @@ mod shfmt {
 				CondExpr::Not(bangs, x) => {
 					// Innermost `!` first: each one is found right before the
 					// one inside it.
-					let (mut lo, hi) = test_span(x);
+					let (mut lo, hi) = self.test_span(x);
 					let mut v = self.test(x);
 					for _ in 0..*bangs {
 						let olo = self.find_back_op(lo, b"!");
@@ -1709,7 +1709,7 @@ mod shfmt {
 					v
 				},
 				CondExpr::Group(x) => {
-					let (xlo, xhi) = test_span(x);
+					let (xlo, xhi) = self.test_span(x);
 					let lp = self.find_back_op(xlo, b"(");
 					let rp = self.find(xhi, b")");
 					V::Obj(vec![
@@ -1728,10 +1728,10 @@ mod shfmt {
 						b"||"
 					};
 					let (last, rest) = terms.split_last().expect("logical chain has operands");
-					let (_, end) = test_span(last);
+					let (_, end) = self.test_span(last);
 					let mut rhs = self.test(last);
 					for lhs in rest.iter().rev() {
-						let (lo, hi) = test_span(lhs);
+						let (lo, hi) = self.test_span(lhs);
 						rhs = V::Obj(vec![
 							("Type", s(b"BinaryTest")),
 							("Pos", p(lo)),
@@ -1758,6 +1758,33 @@ mod shfmt {
 				j - n
 			} else {
 				i
+			}
+		}
+
+		/// Source extent of a `[[ ]]` expression. A `!` run, a unary test
+		/// and a group are written with operators whose spacing varies, so
+		/// each one is located in the source rather than assumed a width.
+		fn test_span(&self, e: &CondExpr) -> (u32, u32) {
+			match e {
+				CondExpr::Word(w) => (w.span.lo, w.span.hi),
+				CondExpr::Unary { op, arg } => (self.find_back_op(arg.span.lo, op), arg.span.hi),
+				CondExpr::Binary { lhs, rhs, .. } => (lhs.span.lo, rhs.span.hi),
+				CondExpr::Not(bangs, x) => {
+					let (mut lo, hi) = self.test_span(x);
+					for _ in 0..*bangs {
+						lo = self.find_back_op(lo, b"!");
+					}
+					(lo, hi)
+				},
+				CondExpr::Group(x) => {
+					let (lo, hi) = self.test_span(x);
+					(self.find_back_op(lo, b"("), self.find(hi, b")") + 1)
+				},
+				CondExpr::And(terms) | CondExpr::Or(terms) => {
+					let first = terms.first().expect("logical chain has operands");
+					let last = terms.last().expect("logical chain has operands");
+					(self.test_span(first).0, self.test_span(last).1)
+				},
 			}
 		}
 
@@ -2314,27 +2341,6 @@ mod shfmt {
 	const fn is_empty_simple(c: &Command) -> bool {
 		matches!(&c.kind, CommandKind::Simple(s) if s.assigns.is_empty() && s.words.is_empty())
 			&& c.redirs.is_empty()
-	}
-
-	/// Source extent of a `[[ ]]` expression.
-	fn test_span(e: &CondExpr) -> (u32, u32) {
-		match e {
-			CondExpr::Word(w) => (w.span.lo, w.span.hi),
-			CondExpr::Unary { arg, .. } => (arg.span.lo.saturating_sub(3), arg.span.hi),
-			CondExpr::Binary { lhs, rhs, .. } => (lhs.span.lo, rhs.span.hi),
-			CondExpr::Not(bangs, x) => {
-				let (a, b) = test_span(x);
-				(a.saturating_sub(u32::try_from(bangs.saturating_mul(2)).unwrap_or(u32::MAX)), b)
-			},
-			CondExpr::Group(x) => {
-				let (a, b) = test_span(x);
-				(a.saturating_sub(2), b + 2)
-			},
-			CondExpr::And(terms) | CondExpr::Or(terms) => (
-				test_span(terms.first().expect("logical chain has operands")).0,
-				test_span(terms.last().expect("logical chain has operands")).1,
-			),
-		}
 	}
 }
 
