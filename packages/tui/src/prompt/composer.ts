@@ -4,7 +4,7 @@ import type { StatusLineComponent } from "../status-line/component";
 import { extensionLinkLabels } from "../render/extension-links";
 import { LinkHints, type ViewportLink, viewportLinkTargets } from "../render/link-hints";
 import type { StatusLineSession } from "../status-line/host";
-import { createStartupStatusLine, type StatusLineStartupData } from "../status-line/startup";
+import { createStartupStatusLine, type StatusLineStartupData, startupComposerState } from "../status-line/startup";
 import { isInsideTerminalMultiplexer } from "../terminal-multiplexer";
 import { ProcessTerminal, type Terminal } from "../terminal";
 import {
@@ -25,7 +25,7 @@ import { postmortem } from "@oh-my-pi/pi-utils";
 import { CustomEditor } from "./custom-editor";
 import type { WordCompletionMethod } from "./word-completion";
 import { type AnimationFrame, TranscriptContainer } from "../chrome/transcript-container";
-import { WelcomeComponent } from "./welcome";
+import { type VersionUpdate, WelcomeComponent } from "./welcome";
 import { ensureThemeSync, getEditorTheme, theme } from "../theme/theme";
 
 const DOUBLE_INTERRUPT_MS = 500;
@@ -66,6 +66,8 @@ export const COMPOSER_DEFAULTS: ComposerPreferences = {
 /** Welcome data that can be supplied initially or patched as startup resolves it. */
 export interface ComposerWelcomeUpdate {
 	readonly version?: string;
+	/** Background self-update activity after the version label; `null` clears it. */
+	readonly versionUpdate?: VersionUpdate | null;
 }
 
 /**
@@ -228,6 +230,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#preferences: ComposerPreferences;
 	#welcome: WelcomeComponent | undefined;
 	#version = "";
+	#versionUpdate: VersionUpdate | null = null;
 	#headerBefore: readonly Component[] = [];
 	#headerAfter: readonly Component[] = [];
 	#runtimeChildren: readonly Component[] = [];
@@ -369,6 +372,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			this.#startupStatus = createStartupStatusLine(statusLine);
 			this.#statusHost.setComponent(this.#startupStatus);
 			this.#startupStatus.attachToEditor(this.editor, getComposerStyle(this.#preferences.composerShape));
+			const state = startupComposerState(statusLine);
+			this.editor.composerState = () => state;
 		}
 		// Emergency controls stay active until InteractiveMode installs configured bindings.
 		// They deliberately mirror the interactive editor's contract so a stalled startup
@@ -1100,6 +1105,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const welcome = this.#welcome;
 		if (!welcome) return;
 		if (update.version !== undefined) welcome.setVersion(this.#version);
+		if (update.versionUpdate !== undefined) welcome.setVersionUpdate(this.#versionUpdate);
 		this.ui.requestRender();
 	}
 
@@ -1210,10 +1216,13 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 
 	#applyWelcomeUpdate(update: ComposerWelcomeUpdate): void {
 		if (update.version !== undefined) this.#version = update.version;
+		if (update.versionUpdate !== undefined) this.#versionUpdate = update.versionUpdate;
 	}
 
 	#ensureWelcome(): void {
-		this.#welcome ??= new WelcomeComponent(this.#version);
+		if (this.#welcome) return;
+		this.#welcome = new WelcomeComponent(this.#version);
+		this.#welcome.setVersionUpdate(this.#versionUpdate);
 	}
 
 	#rebuildHeader(): void {

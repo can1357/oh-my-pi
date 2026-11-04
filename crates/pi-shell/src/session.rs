@@ -69,7 +69,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
 	bash::{
 		Budget, CallId, Cx, Engine, EngineConfig, EventMask, Fs, MemStore, PipeTap, RunId, Script,
-		Shell, ShellError, ShellInit, Signal, Step, ToolCall, VprocSel,
+		Profile, Shell, ShellError, ShellInit, Signal, Step, ToolCall, VprocSel,
 		store::{Key, MiscKey, Record},
 	},
 	host::{PiHost, SpawnObserver, TERM_GRACE},
@@ -320,7 +320,8 @@ impl Session {
 		// (no process for `pkill`, no job for `kill %N`) could reach it.
 		let engine = Engine::new(EngineConfig { end_orphan_jobs: true, ..EngineConfig::default() });
 		let mut store = MemStore::new();
-		let init = ShellInit { env, cwd, ..ShellInit::default() };
+		// A program's shell: no history, line editor or completion system.
+		let init = ShellInit { env, cwd, profile: Profile::Tool, ..ShellInit::default() };
 		let mut shell = Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, init)
 			.map_err(SessionError::Create)?;
 		// Nothing observes events: skip building them.
@@ -763,7 +764,7 @@ mod tests {
 		};
 		let (out, err) = (drain(out_r), drain(err_r));
 		let stdio = RunStdio {
-			stdin:  Some(std::fs::File::open("/dev/null").unwrap()),
+			stdin: Some(std::fs::File::open("/dev/null").unwrap()),
 			stdout: Some(std::fs::File::from(std::os::fd::OwnedFd::from(out_w))),
 			stderr: Some(std::fs::File::from(std::os::fd::OwnedFd::from(err_w))),
 		};

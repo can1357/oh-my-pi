@@ -5,10 +5,14 @@
 ### Breaking Changes
 
 - Replaced `CustomEditor.modelMentionLabel` with `resolveModelMention`, which returns the chip label and the canonical selector the chip expands to; `collapseModelMentions` takes the same `{ label, selector }` callback, and `getModelMentionSuggestions` returns a `ModelMentionCompletion` (`unhandled`, `no-match`, or `matched` with the suggestions) instead of suggestions or `null` ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
+- `SetupHost` requires `autoUpdate`, `canAutoUpdate()`, and `saveAutoUpdate()` for the new `auto-update` setup scene (setup version 3); `setupWizardAllowed()` exposes the launch gates `selectSetupScenes` applies
 - Removed `SPINNER_ADVANCE_MS`; spinners follow the shared spinner clock (`spinnerInterval()`). `sharedSpinnerFrame` moved from `chat/tool-execution` to `spinner-clock` and reads `Date.now()` by default ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ### Added
 
+- Added `VersionUpdate`, `WelcomeComponent.setVersionUpdate()`, and `ComposerWelcomeUpdate.versionUpdate`: the welcome banner shows background self-update progress, readiness, or failure after its version label, narrowing to the percent and then dropping it on narrow terminals
+- `newSessionThinkingLevel` and `resolveConfiguredThinkingLevel` resolve the thinking level a new session starts at on a model; `ComposerCache.writeStatus` takes `{ shared: false }` to keep a project's status out of the any-project fallback
+- Added `SettingItem.menu`: a cycling row's choices as a menu, which `SettingsList.openSubmenuFor` opens (a native settings page's popup) while Enter/Space still cycle
 - `StatusLineComponent.setSessionPinned()` / `setPinnedSessionIds()` / `isSessionPinned()` track pinned sessions; `session_name` prefixes the theme's pin icon for a pinned session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - `LinkBrowserComponent` (`overlays/link-browser`) replays a transcript fullscreen with extension link hint tags that each link keeps while it stays in view; `LinkHints` / `viewportLinkTargets()` (`render/link-hints`) share tag assignment (preferring the letters a label starts with) and painting with `Composer`; `ChatTranscriptBuilder` accepts `textRenderers` ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 - Added the `cache` status-line segment, `StatusLineSession.getPromptCacheStatus`, the `icon.cacheWarm` / `icon.cacheCold` symbols, the composer's `omp.composer.cache` fact and the `promptCacheBrief` / `promptCacheDetails` text helpers ([#12677](https://github.com/can1357/oh-my-pi/issues/12677)) ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
@@ -19,6 +23,8 @@
 - Added a decorative-motion switch (`motion-effects`: `setMotionEffects`) gating the status-line blink and brand fade, the editor's magic-keyword sweep, and native `fx` spans; a static spinner clock also stills native `spinner` nodes ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ### Fixed
+- The native composer's first frame shows the cached thinking level on the model chip (or effort chip) instead of the plain model icon until the session attaches
+- Clicking the popup of an enum setting with many values (Edit Mode, Session Tree Filter, Advisor Sync Backlog) on a native settings page opens its menu instead of doing nothing
 - Ask notes added on successive single-select questions now start with an empty editor and stay with their respective answers ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
 
 - Closing an overlay that others were opened over no longer leaves them returning focus to it once they close ([#16476](https://github.com/can1357/oh-my-pi/pull/16476))
