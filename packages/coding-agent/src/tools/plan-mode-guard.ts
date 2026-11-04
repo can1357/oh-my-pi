@@ -1,19 +1,12 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import {
-	HL_FILE_HASH_LENGTH,
-	HL_FILE_HASH_SEP,
-	HL_FILE_PREFIX,
-	HL_FILE_SUFFIX,
-} from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
 import type { ToolSession } from ".";
+import { unwrapHashlineHeaderPath } from "./hashline-header-path";
 import { resolveToCwd } from "./path-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-
-const HL_TRAILING_TAG_RE = new RegExp(`${HL_FILE_HASH_SEP}[0-9A-Fa-f]{${HL_FILE_HASH_LENGTH}}$`);
 
 /** Where a write to `absolutePath` lands: its deepest existing ancestor realpathed, with
  *  the missing tail re-appended. `undefined` when the path goes through a dangling
@@ -42,33 +35,6 @@ function isWithinRoot(absolutePath: string, root: string): boolean {
 	if (absolutePath === root) return true;
 	const sep = `${root}${path.sep}`;
 	return absolutePath.startsWith(sep);
-}
-
-/** Strip the hashline `[path#TAG]` wrapper from a write/edit target so the inner
- *  filesystem path drives both authorization and resolution. Only unwraps inputs
- *  that match the strict hashline header shape (`[path]` or `[path#XXXX]` with a
- *  4-hex tag); anything else returns the original string so the downstream
- *  resolver surfaces the real error. A valid tag disambiguates a `#` inside the
- *  path (yadm alt files: `conf.yaml##hostname.home`), matching the Rust
- *  tokenizer. Exported for callers (e.g. `write`) that make scheme/bridge-routing
- *  decisions before {@link resolvePlanPath} runs. */
-export function unwrapHashlineHeaderPath(targetPath: string): string {
-	const trimmed = targetPath.trimEnd();
-	if (
-		trimmed.length < HL_FILE_PREFIX.length + HL_FILE_SUFFIX.length ||
-		trimmed[0] !== HL_FILE_PREFIX ||
-		trimmed[trimmed.length - 1] !== HL_FILE_SUFFIX
-	) {
-		return targetPath;
-	}
-	const inner = trimmed.slice(HL_FILE_PREFIX.length, trimmed.length - HL_FILE_SUFFIX.length);
-	const tagMatch = HL_TRAILING_TAG_RE.exec(inner);
-	const pathPart = tagMatch ? inner.slice(0, tagMatch.index) : inner;
-	// A valid header is exactly `PATH` or `PATH#XXXX`; reject any other shape
-	// (selectors, non-hex tags, untagged `#`) so we never silently rewrite a
-	// path the model did not author.
-	if (pathPart.length === 0 || (!tagMatch && pathPart.includes(HL_FILE_HASH_SEP))) return targetPath;
-	return pathPart;
 }
 
 /** True when `targetPath` resolves into the session-local artifact sandbox.

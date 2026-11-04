@@ -27,6 +27,7 @@ import {
 	getGroundedSearchProvider,
 	getSearchProvider,
 	type SearchProvider,
+	type SearchProviderFailure,
 } from "./provider";
 import { rankXAIProviders, targetsX, xaiModelChain, xSearchAvailable } from "./providers/xai";
 import { applyQueryConstraints, parseSearchQuery } from "./query";
@@ -110,6 +111,26 @@ function formatForLLM(response: SearchResponse, notes: readonly string[] = []): 
 	return parts.join("\n");
 }
 
+/** Longest failure reason a fallback note quotes, the cap source snippets get; provider errors can carry whole response bodies. */
+const MAX_FALLBACK_REASON_CHARS = 240;
+
+/**
+ * Note naming the candidates that failed before `served` answered. Without it a
+ * fallback engine's results read as the preferred provider's, e.g. web pages
+ * standing in for an X search.
+ */
+function fallbackNotes(failures: readonly SearchProviderFailure[], served: { label: string }): string[] {
+	if (failures.length === 0) return [];
+	const failed = failures.map(failure => {
+		const reason = formatSearchProviderFailure(failure.error, failure.provider)
+			.replace(/\s+/g, " ")
+			.trim()
+			.replace(/\.$/, "");
+		return `${failure.provider.label} failed (${truncate(reason, MAX_FALLBACK_REASON_CHARS)})`;
+	});
+	return [`answered by ${served.label} after ${failed.join(" and ")}`];
+}
+
 function hasRenderableSearchContent(response: SearchResponse): boolean {
 	if (response.answer?.trim()) return true;
 	if (response.sources.length > 0) return true;
@@ -146,9 +167,8 @@ function expandHostedCandidate(
 ): RoleChainCandidate[] {
 	if (!isHostedPlaceholder(candidate.model) || !sessionModel) return [candidate];
 	const swap = resolveConfiguredModelTarget(sessionModel.webSearchModel, sessionModel, pool);
-	const models = [swap, sessionModel].filter(
-		(model, index, all): model is Model<Api> => !!model?.webSearch && all.indexOf(model) === index,
-	);
+	const distinctSwap = swap?.provider === sessionModel.provider && swap.id === sessionModel.id ? undefined : swap;
+	const models = [distinctSwap, sessionModel].filter((model): model is Model<Api> => !!model?.webSearch);
 	if (models.length === 0) return [candidate];
 	return models.map(model => ({ ...candidate, model }));
 }
@@ -208,7 +228,7 @@ async function executeSearch(
 		// Preserve the default for one-shot callers that do not initialize Settings.
 	}
 
-	const failures: Array<{ provider: { id: string; label: string }; error: unknown }> = [];
+	const failures: SearchProviderFailure[] = [];
 	let availableProviderCount = 0;
 	let lastProvider: { id: string; label: string } | undefined;
 	let failedResponseProvider: SearchResponse["provider"] = "none";
@@ -293,7 +313,7 @@ async function executeSearch(
 				throw new SearchProviderError(provider.id, `${provider.label} returned no renderable search content.`, 204);
 			}
 
-			const text = formatForLLM(finalResponse, constraintNotes);
+			const text = formatForLLM(finalResponse, [...fallbackNotes(failures, provider), ...constraintNotes]);
 
 			return {
 				content: [{ type: "text" as const, text }],

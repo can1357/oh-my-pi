@@ -23,7 +23,13 @@
  */
 import { createHash } from "node:crypto";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
-import { DISCARDED_TABS_PROTOCOL_VERSION } from "./protocol";
+import { BROWSER_PROTOCOL_TIMEOUT_MS } from "../launch";
+import {
+	DISCARDED_TABS_PROTOCOL_VERSION,
+	EXTENSION_RELOAD_PROTOCOL_VERSION,
+	isOlderOmpVersion,
+	isOmpVersion,
+} from "./protocol";
 import type { ExtToRelayMessage, RelayRpcRequest, RelayToExtMessage, TabSnapshot } from "./protocol";
 
 /** Transport-agnostic websocket surface the bridge writes to. */
@@ -112,13 +118,29 @@ class CdpConnection {
 /** Transport replacement is retryable and must not permanently ban a tab. */
 class ExtensionReplacedError extends Error {}
 
+/**
+ * Rewrites the files of the extension Chrome knows as `extensionId` to this omp's, when that is the copy this relay
+ * may update; resolves whether the files on disk are now this omp's (then the bridge asks the extension to reload).
+ */
+export type RelayBridgeExtensionUpdater = (extensionId: string) => Promise<boolean>;
+
 /** A connected extension browser instance; one per browser/profile. */
 interface ExtInstance {
 	instanceId: string;
 	/** Short code derived from the instance id and browser run; names target ids (`TAB<code>.<tabId>`). */
 	code: string;
 	socket: RelaySocket | null;
-	info: { userAgent: string; browserVersion: string; discardedTabsProtocol?: number } | null;
+	info: {
+		userAgent: string;
+		browserVersion: string;
+		discardedTabsProtocol?: number;
+		ompVersion?: string;
+		reloadProtocol?: number;
+	} | null;
+	/** Chrome extension id from the socket's `Origin`; null when the upgrade carried none. */
+	extensionId: string | null;
+	/** The relay is rewriting this extension's files to reload it: not ready meanwhile (its socket closes after). */
+	updating: boolean;
 	/** `Date.now()` when its socket closed; null while connected. */
 	goneSince: number | null;
 	/** Settles at its next hello; created by the first caller that waits for one. */
@@ -167,8 +189,11 @@ class TabState {
 	groupId: number;
 	/** Whether `chrome.debugger` is currently attached to this tab. */
 	attached = false;
-	/** Set when attach failed or the user cancelled the debugger bar; cleared on navigation. */
-	banned = false;
+	/**
+	 * Why Chrome refused omp this tab (its attach error, or the user cancelling the debugger bar); while set the
+	 * tab is not adoptable. Cleared on navigation.
+	 */
+	refusal: string | undefined;
 	/** Whether targets for this tab were announced to discovering connections. */
 	announced = false;
 	attaching: Promise<boolean> | null = null;
@@ -191,6 +216,8 @@ class TabState {
 	ompGroupId: number | undefined;
 	/** User pulled the tab out of the omp group — never re-group it. */
 	groupOptOut = false;
+	/** The app in front of the user when omp's input last reached this tab, and when; a window the tab opens uses it once. */
+	frontAtInput: { app: FrontApp; at: number } | null = null;
 	/**
 	 * Real Chrome sessions (OOPIF/worker children) under this tab's attachment: the child session
 	 * that reported each (none for the root) and its `Target.attachedToTarget` params.
@@ -250,6 +277,44 @@ const AFFINE_RECONNECT_WAIT_MS = 12_000;
 const DETACHED_COMMAND_ERROR = /Detached while handling command/;
 /** How long such a failure waits for the extension to report the detach itself. */
 const CHROME_DETACH_REPORT_MS = 1_000;
+/** {@link RelayBridge.#rpc}'s failure when the extension sent no answer within the deadline. */
+class RpcTimeoutError extends Error {}
+/**
+ * Deadline for a command whose answer waits on the page itself (a promise it settles, a navigation it commits),
+ * where {@link RPC_TIMEOUT_MS} is for one Chrome answers at once. omp's own clients give up at
+ * `BROWSER_PROTOCOL_TIMEOUT_MS`, as on a launched Chrome; the relay waits a little longer so their error, not the
+ * relay's, reaches the call.
+ */
+const PAGE_BOUND_RPC_TIMEOUT_MS = BROWSER_PROTOCOL_TIMEOUT_MS + 5_000;
+/** A window a tab opens this long after omp's input reached it is still taken to be that input's doing. */
+const POPUP_AFTER_INPUT_MS = 1_000;
+/** How long the user's app is held in front after omp's input opened a window; Chrome activates within milliseconds. */
+const KEEP_FRONT_MS = 500;
+/**
+ * omp's CDP inputs a page can open a window on, by method and event `type`: those that give the page user activation
+ * (a button or key going down, a release, a tap). Moves, wheels, key-ups and inserted text never do, so they read no
+ * front app. `true`: every event of that method.
+ */
+const WINDOW_OPENING_INPUT: Record<string, Record<string, true> | true> = {
+	"Input.dispatchMouseEvent": { mousePressed: true, mouseReleased: true },
+	"Input.emulateTouchFromMouseEvent": { mousePressed: true, mouseReleased: true },
+	"Input.dispatchKeyEvent": { keyDown: true, rawKeyDown: true },
+	"Input.dispatchTouchEvent": { touchStart: true, touchEnd: true },
+	"Input.synthesizeTapGesture": true,
+};
+
+function canOpenWindow(method: string, params: Record<string, unknown> | undefined): boolean {
+	if (!Object.hasOwn(WINDOW_OPENING_INPUT, method)) return false;
+	const types = WINDOW_OPENING_INPUT[method];
+	const type = params?.type;
+	return types === true || (typeof type === "string" && Object.hasOwn(types, type));
+}
+
+/** The app in front of the user, as `macOSFrontApp` from `@oh-my-pi/pi-natives` reads it. */
+export interface FrontApp {
+	/** Puts the app back in front each time the app that took the front takes it again within `durationMs`, until the user picks an app; resolves how many times. */
+	keepInFront(durationMs: number): Promise<number>;
+}
 
 /**
  * Multiplexing CDP bridge between downstream puppeteer connections and the
@@ -266,6 +331,12 @@ export class RelayBridge {
 	/** Connected extension browser instances, keyed by stable instance id. */
 	#instances = new Map<string, ExtInstance>();
 	#socketInstance = new Map<RelaySocket, string>();
+	/** Chrome extension id each extension socket's upgrade named in its `Origin`. */
+	#socketExtensionId = new Map<RelaySocket, string>();
+	/** Rewrites the files of the extension with this id to this omp's; resolves whether it did (see {@link RelayBridgeExtensionUpdater}). */
+	#updateExtension: RelayBridgeExtensionUpdater | null;
+	/** Per instance, the extension versions the relay already reloaded it from: never twice from the same one. */
+	#updateTried = new Map<string, Set<string>>();
 	/** Instance whose hello ran last: answers browser-wide requests and owns created tabs. */
 	#lastHelloInstance: string | null = null;
 	#extensionSeen = false;
@@ -296,22 +367,33 @@ export class RelayBridge {
 	#groupDraining = false;
 	/** Each tab's last file chooser interception transition; see {@link #serializeInterception}. */
 	#interceptionTransitions = new Map<string, Promise<void>>();
+	/** Reads the app in front of the user; set by {@link keepFrontAppWith} where the relay can put it back (macOS). */
+	#readFrontApp: (() => FrontApp | null) | undefined;
+	/**
+	 * When the running hold on the user's app ends (`Date.now()` ms), at its deadline or once it settles, whichever is
+	 * first; 0 with none. A window opened meanwhile shares it, and omp's input reads no front app then: the browser may
+	 * be in front, and a later hold would keep it there.
+	 */
+	#keepingFrontUntil = 0;
 
 	constructor(
 		opts: {
 			log?: (message: string, data?: Record<string, unknown>) => void;
 			/** Group tabs the agent actively drives under one per-window Chrome tab group. */
 			group?: { title: string; color: string } | null;
+			/** Enables extension self-update; absent, the relay never rewrites or reloads an extension. */
+			updateExtension?: RelayBridgeExtensionUpdater;
 		} = {},
 	) {
 		this.#log = opts.log ?? (() => {});
 		this.#group = opts.group ?? null;
+		this.#updateExtension = opts.updateExtension ?? null;
 	}
 
-	/** True once the extension has completed its hello handshake. */
+	/** True once an extension has completed its hello handshake, and the relay is not rewriting its files. */
 	get ready(): boolean {
 		for (const inst of this.#instances.values()) {
-			if (inst.socket && inst.info) return true;
+			if (inst.socket && inst.info && !inst.updating) return true;
 		}
 		return false;
 	}
@@ -393,10 +475,21 @@ export class RelayBridge {
 	versionInfo(wsUrl: string): Record<string, string | number> {
 		const info = this.#lastHello()?.info;
 		let hasCompatibleExtension = false;
+		// The oldest connected extension's installing omp, so a current browser cannot hide a stale one.
+		// A stamp of unknown age yields to any other, so it cannot hide one either.
+		let oldestExtensionOmp: string | undefined;
 		for (const instance of this.#instances.values()) {
-			if (instance.socket && instance.info?.discardedTabsProtocol === DISCARDED_TABS_PROTOCOL_VERSION) {
-				hasCompatibleExtension = true;
-				break;
+			if (!instance.socket || instance.info?.discardedTabsProtocol !== DISCARDED_TABS_PROTOCOL_VERSION) continue;
+			// Its files are being rewritten; it says which version it runs once it is back.
+			if (instance.updating) continue;
+			hasCompatibleExtension = true;
+			const ompVersion = instance.info.ompVersion ?? "";
+			if (
+				oldestExtensionOmp === undefined ||
+				isOlderOmpVersion(ompVersion, oldestExtensionOmp) ||
+				(oldestExtensionOmp !== "" && !isOmpVersion(oldestExtensionOmp))
+			) {
+				oldestExtensionOmp = ompVersion;
 			}
 		}
 		const ua = info?.userAgent ?? "";
@@ -411,6 +504,7 @@ export class RelayBridge {
 			ompRelayDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
 			ompExtensionDiscardedTabsProtocol: String(hasCompatibleExtension ? DISCARDED_TABS_PROTOCOL_VERSION : 0),
 			ompRelayCdpClients: this.#conns.size,
+			ompExtensionVersion: oldestExtensionOmp ?? "",
 		};
 	}
 
@@ -443,12 +537,17 @@ export class RelayBridge {
 		}
 	}
 
-	/** A new extension socket connected; its hello assigns (or reuses) a browser instance. */
-	extConnected(_socket: RelaySocket): void {
+	/**
+	 * A new extension socket connected; its hello assigns (or reuses) a browser instance.
+	 * `extensionId` is the Chrome extension id its upgrade's `Origin` named, if any.
+	 */
+	extConnected(socket: RelaySocket, extensionId?: string): void {
+		if (extensionId) this.#socketExtensionId.set(socket, extensionId);
 		this.#log("extension socket connected");
 	}
 
 	extClosed(socket: RelaySocket): void {
+		this.#socketExtensionId.delete(socket);
 		const instanceId = this.#socketInstance.get(socket);
 		if (instanceId === undefined) return;
 		this.#socketInstance.delete(socket);
@@ -456,6 +555,7 @@ export class RelayBridge {
 		if (!inst || inst.socket !== socket) return;
 		inst.socket = null;
 		inst.goneSince = Date.now();
+		inst.updating = false;
 		this.#rejectPendingExtensionRpcs(instanceId, new Error("relay extension disconnected"));
 		// Keep the instance's tabs listed (the browser may reconnect), but drop
 		// debugger state: the attachment died with the service worker.
@@ -500,6 +600,7 @@ export class RelayBridge {
 					this.#lateRpc.delete(key);
 					clearTimeout(late.timer);
 					if (msg.ok) late.onResult(msg.result);
+					if (this.#conns.size === 0) void this.#updateIdleExtensions();
 					return;
 				}
 				this.#pendingRpc.delete(key);
@@ -536,7 +637,16 @@ export class RelayBridge {
 		const code = instanceCode(instanceId, typeof msg.browserSession === "string" ? msg.browserSession : "");
 		let inst = this.#instances.get(instanceId);
 		if (!inst) {
-			inst = { instanceId, code, socket: null, info: null, goneSince: null, reconnected: null };
+			inst = {
+				instanceId,
+				code,
+				socket: null,
+				info: null,
+				goneSince: null,
+				reconnected: null,
+				extensionId: null,
+				updating: false,
+			};
 			this.#instances.set(instanceId, inst);
 		} else if (inst.socket && inst.socket !== socket) {
 			// Same browser reconnected (service-worker restart): retire the old
@@ -566,10 +676,14 @@ export class RelayBridge {
 		inst.reconnected?.resolve();
 		inst.reconnected = null;
 		this.#socketInstance.set(socket, instanceId);
+		inst.extensionId = this.#socketExtensionId.get(socket) ?? null;
+		inst.updating = false;
 		inst.info = {
 			userAgent: msg.userAgent,
 			browserVersion: msg.browserVersion,
 			discardedTabsProtocol: msg.discardedTabsProtocol,
+			ompVersion: typeof msg.ompVersion === "string" ? msg.ompVersion : undefined,
+			reloadProtocol: msg.reloadProtocol,
 		};
 		this.#lastHelloInstance = instanceId;
 		this.#extensionSeen = true;
@@ -624,7 +738,107 @@ export class RelayBridge {
 			instanceId,
 			tabs: msg.tabs.length,
 			version: msg.browserVersion,
+			omp: inst.info.ompVersion,
 		});
+		this.#maybeUpdateExtension(inst);
+	}
+
+	// ---- extension self-update ------------------------------------------------
+
+	/**
+	 * The older omp version this extension runs, when the relay may replace it: the extension reloads on request,
+	 * its script carries an omp version older than this relay's, its socket named its Chrome id, and the relay has
+	 * not already reloaded it from that version (a reload that brings the same version back must not loop).
+	 */
+	#outdatedReloadable(inst: ExtInstance): string | null {
+		const ompVersion = inst.info?.ompVersion ?? "";
+		if (inst.info?.reloadProtocol !== EXTENSION_RELOAD_PROTOCOL_VERSION || !inst.extensionId) return null;
+		if (!isOmpVersion(ompVersion) || !isOlderOmpVersion(ompVersion, VERSION)) return null;
+		return this.#updateTried.get(inst.instanceId)?.has(ompVersion) ? null : ompVersion;
+	}
+
+	/**
+	 * Why reloading this extension now would cost someone something, or null. A reload drops the extension's
+	 * socket and every debugger attachment it holds, so it waits for no CDP client to be connected (no claimed
+	 * tab, no held session) and none of the extension's tabs to be attached, attaching or detaching. It also waits
+	 * out the extension's calls in flight and the tab closes queued for its next hello: the reloaded extension
+	 * reports a new browser session, which retires the target ids they name, so a tab omp opened would stay open.
+	 */
+	#reloadBlocker(inst: ExtInstance): string | null {
+		if (!inst.socket) return "disconnected";
+		if (this.#conns.size > 0) return "CDP clients connected";
+		for (const tab of this.#tabs.values()) {
+			if (tab.instanceId === inst.instanceId && (tab.attached || tab.attaching || tab.detaching)) {
+				return "tabs attached";
+			}
+		}
+		// A call past its timeout whose late result still closes what it made (a tab created after omp gave up) counts.
+		for (const key of [...this.#pendingRpc.keys(), ...this.#lateRpc.keys()]) {
+			if (key.startsWith(`${inst.instanceId}:`)) return "extension calls pending";
+		}
+		for (const key of this.#closeOnHello.keys()) {
+			if (key.startsWith(`${inst.code}:`)) return "tab closes queued";
+		}
+		return null;
+	}
+
+	/** Rewrite an outdated extension's files to this omp's and ask it to reload, when that costs nothing. */
+	#maybeUpdateExtension(inst: ExtInstance): void {
+		const updateExtension = this.#updateExtension;
+		if (!updateExtension || inst.updating) return;
+		const from = this.#outdatedReloadable(inst);
+		if (from === null) return;
+		const busy = this.#reloadBlocker(inst);
+		if (busy !== null) {
+			this.#log("extension update deferred", { instanceId: inst.instanceId, from, reason: busy });
+			return;
+		}
+		const socket = inst.socket!;
+		// Not ready while the files change: a client waits for the reloaded extension instead of connecting.
+		inst.updating = true;
+		void updateExtension(inst.extensionId!)
+			.catch(err => {
+				this.#log("extension update failed", { error: err instanceof Error ? err.message : String(err) });
+				return false;
+			})
+			.then(updated => {
+				if (inst.socket !== socket || !inst.updating) return;
+				// A client may have connected or a tab attached while the files were written.
+				const busy = updated ? this.#reloadBlocker(inst) : "files not rewritten";
+				if (busy !== null) {
+					inst.updating = false;
+					this.#log("extension update stopped", { instanceId: inst.instanceId, from, reason: busy });
+					return;
+				}
+				const tried = this.#updateTried.get(inst.instanceId) ?? new Set<string>();
+				tried.add(from);
+				this.#updateTried.set(inst.instanceId, tried);
+				socket.send(JSON.stringify({ t: "reload" } satisfies RelayToExtMessage));
+				this.#log("extension reloading into update", { instanceId: inst.instanceId, from, to: VERSION });
+				// Retire the socket now, as if the reload had closed it: nothing new may reach a browser that is
+				// about to drop its socket and attachments. An extension that ignored the request redials.
+				socket.close();
+				this.extClosed(socket);
+			});
+	}
+
+	/**
+	 * With no CDP client left, once every tab's attach and detach has settled (their cleanup included, which can start
+	 * another detach): update the extensions that were kept busy. An attach left running after its tab was discarded
+	 * is not awaited twice; its own RPC retries the update when it settles.
+	 */
+	async #updateIdleExtensions(): Promise<void> {
+		const awaited = new Set<Promise<unknown>>();
+		for (;;) {
+			const busy = Array.from(this.#tabs.values(), tab => tab.attaching ?? tab.detaching).filter(
+				(p): p is Promise<boolean> | Promise<void> => p !== null && !awaited.has(p),
+			);
+			if (busy.length === 0) break;
+			for (const p of busy) awaited.add(p);
+			await Promise.all(busy);
+		}
+		if (this.#conns.size > 0) return;
+		for (const inst of this.#instances.values()) this.#maybeUpdateExtension(inst);
 	}
 
 	// ---- downstream (puppeteer) lifecycle -------------------------------------
@@ -660,6 +874,7 @@ export class RelayBridge {
 		// Drop the debugger (and its infobar) from tabs nobody drives anymore.
 		for (const tabKey of touched) this.#detachIfUnheld(tabKey);
 		this.#log("cdp client closed", { conn: connId });
+		if (this.#conns.size === 0) void this.#updateIdleExtensions();
 	}
 
 	cdpMessage(connId: number, raw: string): void {
@@ -830,8 +1045,30 @@ export class RelayBridge {
 
 	async #cycleRuntime(tab: TabState): Promise<void> {
 		const inst = this.#instanceFor(tab);
-		await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.disable" }, inst);
-		await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.enable" }, inst);
+		await this.#send(tab, inst, "Runtime.disable");
+		await this.#send(tab, inst, "Runtime.enable");
+	}
+
+	/**
+	 * Run one command on the tab's debugger attachment. One whose answer waits on the page itself (a promise it
+	 * settles, a navigation it commits) gets {@link PAGE_BOUND_RPC_TIMEOUT_MS}; any other gets {@link RPC_TIMEOUT_MS}.
+	 */
+	async #send(
+		tab: TabState,
+		inst: ExtInstance,
+		method: string,
+		params?: Record<string, unknown>,
+		sessionId?: string,
+	): Promise<unknown> {
+		const pageBound =
+			params?.awaitPromise === true || method === "Runtime.awaitPromise" || method === "Page.navigate";
+		const timeoutMs = pageBound ? PAGE_BOUND_RPC_TIMEOUT_MS : RPC_TIMEOUT_MS;
+		try {
+			return await this.#rpc({ op: "send", tabId: tab.tabId, sessionId, method, params }, inst, timeoutMs);
+		} catch (err) {
+			if (!(err instanceof RpcTimeoutError)) throw err;
+			throw new Error(`${method} on tab ${tab.tabId}: Chrome sent no answer within ${timeoutMs}ms`, { cause: err });
+		}
 	}
 
 	#replayRuntimeContexts(conn: CdpConnection, sessionId: string, ref: SessionRef, tab: TabState): void {
@@ -902,17 +1139,11 @@ export class RelayBridge {
 			await this.#handleBrowserCommand(conn, msg, tab);
 			return true;
 		}
+		if (this.#readFrontApp && canOpenWindow(msg.method, msg.params)) {
+			tab.frontAtInput = Date.now() < this.#keepingFrontUntil ? null : this.#readFrontAtInput(this.#readFrontApp);
+		}
 		try {
-			const result = await this.#rpc(
-				{
-					op: "send",
-					tabId: tab.tabId,
-					sessionId: realSessionId,
-					method: msg.method,
-					params: msg.params,
-				},
-				inst,
-			);
+			const result = await this.#send(tab, inst, msg.method, msg.params, realSessionId);
 			beforeReply?.();
 			this.#reply(conn, msg, (result as Record<string, unknown> | undefined) ?? {});
 			return true;
@@ -926,6 +1157,54 @@ export class RelayBridge {
 			this.#replyError(conn, msg, message);
 			return false;
 		}
+	}
+
+	/**
+	 * Read the app in front of the user with `read` as omp's input reaches a tab, to put it back when that input opens a
+	 * window and Chrome brings itself forward to show it. Only where the relay can put it back (macOS).
+	 */
+	keepFrontAppWith(read: () => FrontApp | null): void {
+		this.#readFrontApp = read;
+	}
+
+	/**
+	 * The app in front of the user now, for omp's input to a tab. A read that throws (a stale native addon without
+	 * `macOSFrontApp`) turns the reads off for good, so the input itself still goes out.
+	 */
+	#readFrontAtInput(read: () => FrontApp | null): { app: FrontApp; at: number } | null {
+		try {
+			const app = read();
+			return app && { app, at: Date.now() };
+		} catch (err) {
+			this.#readFrontApp = undefined;
+			this.#log("could not read the app in front; not holding it in front", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+			return null;
+		}
+	}
+
+	/**
+	 * Hold the app that was in front at omp's last input to `tab`, if that input can have opened the window the tab's
+	 * page is opening: Chrome makes itself the active app to show it.
+	 */
+	#keepFrontApp(tab: TabState): void {
+		const front = tab.frontAtInput;
+		tab.frontAtInput = null;
+		if (!front || Date.now() < this.#keepingFrontUntil || Date.now() - front.at > POPUP_AFTER_INPUT_MS) return;
+		const until = Date.now() + KEEP_FRONT_MS;
+		this.#keepingFrontUntil = until;
+		front.app.keepInFront(KEEP_FRONT_MS).then(
+			times => {
+				if (times > 0) this.#log("put the user's app back in front", { times });
+				if (this.#keepingFrontUntil === until) this.#keepingFrontUntil = 0;
+			},
+			err => {
+				this.#log("could not keep the user's app in front", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			},
+		);
 	}
 
 	/**
@@ -1062,7 +1341,8 @@ export class RelayBridge {
 					return;
 				}
 				if (!(await this.#ensureAttached(tab))) {
-					this.#replyError(conn, msg, `Cannot attach to tab ${tab.tabKey} (${tab.url})`);
+					const reason = tab.refusal ? `: ${tab.refusal}` : "";
+					this.#replyError(conn, msg, `Cannot attach to tab ${tab.tabKey} (${tab.url})${reason}`);
 					return;
 				}
 				const sessionId = this.#mintSession(conn, parsed.kind, tab);
@@ -1114,6 +1394,15 @@ export class RelayBridge {
 				// Creating a tab is an explicit act of driving it.
 				const createdKey = tabKeyOf(inst.code, result.tab.tabId);
 				this.#claimTab(conn, createdKey);
+				// Puppeteer waits for the new page's auto-attach. Answer once it settled: a tab Chrome refuses (an
+				// extension debugger policy refuses every tab) would otherwise hold the open for its whole timeout.
+				const created = this.#tabs.get(createdKey);
+				if (conn.autoAttach && created && !(await this.#ensureAttached(created)) && created.refusal) {
+					const refusal = created.refusal;
+					await this.#closeTab(createdKey, created.tabId, inst).catch(() => undefined);
+					this.#replyError(conn, msg, `Chrome refused to attach to the new tab: ${refusal}`);
+					return;
+				}
 				this.#reply(conn, msg, { targetId: pageTargetIdFromKey(createdKey) });
 				return;
 			}
@@ -1193,6 +1482,9 @@ export class RelayBridge {
 	): void {
 		const tab = this.#tabs.get(tabKey);
 		if (!tab) return;
+		// The page (or a frame in it, on a child session) is opening a tab or window; Chrome brings itself forward
+		// to show it.
+		if (method === "Page.windowOpen") this.#keepFrontApp(tab);
 		// Track real child sessions so downstream commands can route back.
 		if (method === "Target.attachedToTarget") {
 			const child = params?.sessionId;
@@ -1301,7 +1593,7 @@ export class RelayBridge {
 		// another extension's frame (a password manager's inline menu) starts loading in the tab: that tab
 		// stays adoptable and is announced again at once; an attach Chrome refuses still bans it (#ensureAttached).
 		const cancelledByUser = reason === "canceled_by_user";
-		if (cancelledByUser) tab.banned = true;
+		if (cancelledByUser) tab.refusal = "the user cancelled Chrome's debugging bar";
 		// A user cancel releases the tab's omp-group membership; any other detach keeps it.
 		this.#syncTabGrouping(tab);
 		// Relay-private event, ahead of the sessions' detach: a client driving the tab learns that Chrome
@@ -1339,7 +1631,7 @@ export class RelayBridge {
 			tab = new TabState(instanceId, inst.code, snap.tabId, snap);
 			this.#tabs.set(key, tab);
 		} else {
-			if (tab.url !== snap.url) tab.banned = false;
+			if (tab.url !== snap.url) tab.refusal = undefined;
 			// The user dragging a tab out of the omp group is an opt-out; the
 			// relay never fights the user over grouping.
 			if (tab.grouped && tab.ompGroupId !== undefined && snap.groupId !== tab.ompGroupId) {
@@ -1403,9 +1695,9 @@ export class RelayBridge {
 		if (!hasAutoAttach) return;
 		void this.#ensureAttached(tab, { retryAfterDiscard: true }).then(ok => {
 			if (!ok) {
-				// A refused attach banned the tab until its URL changes. Withdraw the announcement too, or the URL change
+				// A refused attach bars the tab until its URL changes. Withdraw the announcement too, or the URL change
 				// finds the tab already announced and neither announces nor attaches it again.
-				if (tab.banned && tab.announced && this.#tabs.get(tab.tabKey) === tab) this.#retractTab(tab);
+				if (tab.refusal && tab.announced && this.#tabs.get(tab.tabKey) === tab) this.#retractTab(tab);
 				return;
 			}
 			if (tab.discarded || !this.#eligible(tab) || this.#tabs.get(tab.tabKey) !== tab) {
@@ -1706,12 +1998,11 @@ export class RelayBridge {
 				return !tab.discarded;
 			})
 			.catch(err => {
-				this.#log("attach failed", {
-					tabKey: tab.tabKey,
-					url: tab.url,
-					error: err instanceof Error ? err.message : String(err),
-				});
-				if (!(err instanceof ExtensionReplacedError) && generation === tab.attachGeneration) tab.banned = true;
+				const error = err instanceof Error ? err.message : String(err);
+				this.#log("attach failed", { tabKey: tab.tabKey, url: tab.url, error });
+				if (!(err instanceof ExtensionReplacedError) && generation === tab.attachGeneration) {
+					tab.refusal = error || "Chrome refused the attach";
+				}
 				return false;
 			})
 			.finally(() => {
@@ -1723,6 +2014,8 @@ export class RelayBridge {
 				const retry = tab.retryAttachAfterDiscard;
 				tab.retryAttachAfterDiscard = false;
 				if (retry && !tab.discarded) this.#attachForAutoAttach(tab);
+				// Every client left while Chrome attached: nobody can take a session on the tab, so release it.
+				if (this.#conns.size === 0) this.#detachIfUnheld(tab.tabKey);
 			});
 		// Stop waiting for discarded tabs without dropping the extension RPC's late result.
 		const attempt = Promise.race([request, cancelled.promise]);
@@ -1732,7 +2025,7 @@ export class RelayBridge {
 	}
 
 	#eligible(tab: TabState): boolean {
-		if (tab.banned) return false;
+		if (tab.refusal) return false;
 		const instance = this.#instances.get(tab.instanceId);
 		if (!instance?.socket || instance.info?.discardedTabsProtocol !== DISCARDED_TABS_PROTOCOL_VERSION) return false;
 		if (!tab.url) return true;
@@ -1795,14 +2088,23 @@ export class RelayBridge {
 			const key = `${inst.instanceId}:${id}`;
 			this.#pendingRpc.delete(key);
 			if (onLateResult) {
-				const expiry = setTimeout(() => this.#lateRpc.delete(key), LATE_RPC_KEEP_MS);
+				const expiry = setTimeout(() => {
+					this.#lateRpc.delete(key);
+					if (this.#conns.size === 0) void this.#updateIdleExtensions();
+				}, LATE_RPC_KEEP_MS);
 				expiry.unref?.();
 				this.#lateRpc.set(key, { onResult: onLateResult, timer: expiry });
 			}
-			reject(new Error(`extension rpc '${req.op}' timed out after ${timeoutMs}ms`));
+			reject(new RpcTimeoutError(`extension rpc '${req.op}' timed out after ${timeoutMs}ms`));
 		}, timeoutMs);
 		this.#pendingRpc.set(`${inst.instanceId}:${id}`, { resolve, reject, timer });
 		inst.socket.send(JSON.stringify({ t: "rpc", id, ...req } satisfies RelayToExtMessage));
+		// A pending call defers an extension update (see #reloadBlocker): retry it once the call and its cleanup settle.
+		void promise
+			.catch(() => undefined)
+			.then(() => {
+				if (this.#conns.size === 0) void this.#updateIdleExtensions();
+			});
 		return promise;
 	}
 

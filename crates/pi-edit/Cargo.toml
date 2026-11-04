@@ -17,7 +17,6 @@ pi-ast.workspace = true
 pi-diff.workspace = true
 pi-walker.workspace = true
 regex.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 xutf.workspace = true

@@ -60,6 +60,15 @@ describe("JS console output", () => {
 		});
 	});
 
+	it("prints JSON text as text plus a JSON view, other long strings as text only", async () => {
+		const { hooks, displays, texts } = collect();
+		const value = { items: Array.from({ length: 30 }, (_, i) => i) };
+		const text = JSON.stringify(value);
+		await runtime.run(`console.log(${JSON.stringify(text)}); console.log('{' + 'x'.repeat(100));`, undefined, hooks);
+		expect(texts.join("")).toBe(`${text}\n{${"x".repeat(100)}\n`);
+		expect(displays).toEqual([{ type: "view", text, view: { kind: "json", value } }]);
+	});
+
 	it("keeps short objects and class instances as text only", async () => {
 		const { hooks, displays, texts } = collect();
 		await runtime.run(

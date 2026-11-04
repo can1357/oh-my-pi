@@ -14,6 +14,7 @@ import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir, withFileLock } from "@oh-my-pi/pi-utils";
 import {
 	buildRedactionMap,
+	annotateUsagePolicy,
 	collectHistoryIdentityStrings,
 	computeProviderWindowStats,
 	formatUsageBreakdown,
@@ -25,7 +26,7 @@ import {
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import { resetAccountLockKey } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
-import { formatResetExpiryNotice } from "@oh-my-pi/pi-coding-agent/session/reset-expiry";
+import { claimResetExpiryNotice } from "@oh-my-pi/pi-coding-agent/session/reset-expiry";
 import { resetLockPath } from "@oh-my-pi/pi-coding-agent/session/reset-fence";
 import {
 	collectUnreportedAccounts,
@@ -536,6 +537,103 @@ describe("collectUnreportedAccounts", () => {
 		expect(collectUnreportedAccounts([legacyReport, freshReport], [legacy, fresh])).toEqual([]);
 		// The org-attributed sibling alone still does NOT cover the legacy row.
 		expect(collectUnreportedAccounts([freshReport], [legacy, fresh])).toEqual([legacy]);
+	});
+});
+
+describe("usage JSON policy", () => {
+	it("annotates eligible, reserved, and unknown accounts with the same values as the text view", () => {
+		const eligible = makeReport("openai-codex", "preferred@example.test", [
+			makeLimit({ id: "5h", provider: "openai-codex", usedFraction: 0.2 }),
+			makeLimit({ id: "7d", provider: "openai-codex", usedFraction: 0.4 }),
+		]);
+		const reserved = makeReport("openai-codex", "inherited@example.test", [
+			makeLimit({ id: "5h", provider: "openai-codex", usedFraction: 0.95 }),
+		]);
+		const unrelated = makeReport("anthropic", "unrelated@example.test", []);
+		const unreported: UsageAccountIdentity[] = [
+			{ provider: "openai-codex", type: "oauth", email: "offline@example.test" },
+			{ provider: "openai-codex", type: "api_key" },
+		];
+		const options: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) =>
+				identity.email === "preferred@example.test"
+					? { provider: "openai-codex", account: { email: identity.email }, priority: 20, reservePct: 50 }
+					: undefined,
+		};
+		const annotated = annotateUsagePolicy([eligible, reserved, unrelated], unreported, unreported, options);
+		const json = JSON.parse(JSON.stringify(annotated));
+
+		expect(json.reports[0].policy).toEqual({
+			priority: 20,
+			reservePct: 50,
+			reserveSource: "override",
+			state: "eligible",
+			remainingPct: 60,
+		});
+		expect(json.reports[1].policy).toEqual({
+			priority: 0,
+			reservePct: 10,
+			reserveSource: "global",
+			state: "inside-reserve",
+			remainingPct: expect.closeTo(5),
+		});
+		expect(json.reports[2]).not.toHaveProperty("policy");
+		expect(json.accountsWithoutUsage[0].policy).toEqual({
+			priority: 0,
+			reservePct: 10,
+			reserveSource: "global",
+			state: "unknown",
+		});
+		expect(json.accountsWithoutUsage[1]).not.toHaveProperty("policy");
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([eligible, reserved, unrelated], unreported, Date.now(), undefined, [], options),
+		);
+		expect(text).toContain("policy: priority 20 · reserve 50% (override) · eligible · 60.0% left");
+		expect(text).toContain("policy: priority 0 · reserve 10% (global) · inside reserve · 5.0% left");
+		expect(text).toContain("policy: priority 0 · reserve 10% (global) · reserve unknown");
+	});
+
+	it("reports a provider-exhausted account as exhausted and carries reclaimAbovePct", () => {
+		const walled = makeReport("anthropic", "walled@example.test", [
+			makeLimit({ id: "5h", provider: "anthropic", usedFraction: 0.995, status: "exhausted" }),
+		]);
+		const options: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) => ({
+				provider: "anthropic",
+				account: { email: identity.email },
+				priority: 5,
+				reservePct: 2,
+				reclaimAbovePct: 40,
+			}),
+		};
+		const [policy] = annotateUsagePolicy([walled], [], [], options).reports.map(report => report.policy);
+		expect(policy).toEqual({
+			priority: 5,
+			reservePct: 2,
+			reserveSource: "override",
+			reclaimAbovePct: 40,
+			state: "exhausted",
+			remainingPct: expect.closeTo(0.5),
+		});
+		const text = stripVTControlCharacters(formatUsageBreakdown([walled], [], Date.now(), undefined, [], options));
+		expect(text).toContain("policy: priority 5 · reserve 2% (override) · reclaim above 40% · exhausted · 0.5% left");
+	});
+
+	it("rounds remainingPct the way the text line prints it", () => {
+		// (1 - 0.0195) * 100 is 98.0499… in binary: toFixed(1) prints 98.0, while rounding ×1000 gives 98.1.
+		const report = makeReport("openai-codex", "boundary@example.test", [
+			makeLimit({ id: "7d", provider: "openai-codex", usedFraction: 0.0195 }),
+		]);
+		const options: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) => ({ provider: "openai-codex", account: { email: identity.email } }),
+		};
+		const [policy] = annotateUsagePolicy([report], [], [], options).reports.map(entry => entry.policy);
+		expect(policy?.remainingPct).toBe(98);
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], Date.now(), undefined, [], options));
+		expect(text).toContain("eligible · 98.0% left");
 	});
 });
 
@@ -1314,7 +1412,7 @@ describe("formatUsageBreakdown", () => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
 		const base = claudeResetReport(now, { "anthropic:5h": 0.6 }, [cedarGrant(now, "cedar", 6 * HOUR)]);
 		const report = { ...base, metadata: { email: "evil\u001b[2J\n\tname@example.test" } };
-		const notice = formatResetExpiryNotice([report], now);
+		const notice = claimResetExpiryNotice([report], now, () => true);
 		expect(notice).toBe("Saved Claude reset on evil name@example.test expires in 6h · /usage");
 	});
 
@@ -1335,7 +1433,7 @@ describe("formatUsageBreakdown", () => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
 		const base = claudeResetReport(now, { "anthropic:5h": 0.6 }, [cedarGrant(now, "cedar", 6 * HOUR)]);
 		const report = { ...base, metadata: { email: `${"a".repeat(78)}😀😀@example.test` } };
-		const notice = formatResetExpiryNotice([report], now)!;
+		const notice = claimResetExpiryNotice([report], now, () => true)!;
 		expect(notice.isWellFormed()).toBe(true);
 		expect(notice).toContain("…");
 		expect(notice).toEndWith(" expires in 6h · /usage");
@@ -1685,6 +1783,101 @@ describe("omp usage accounts", () => {
 			vi.restoreAllMocks();
 			authStorage.close();
 		}
+	});
+});
+
+describe("omp usage --json account policy", () => {
+	let tempDir: TempDir;
+
+	beforeEach(() => {
+		tempDir = TempDir.createSync("@omp-usage-policy-");
+		setAgentDir(tempDir.path());
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		__resetDirsFromEnvForTests();
+		// The command's ModelRegistry opened `<agentDir>/models.db`; Windows cannot delete it while open.
+		closeModelCache();
+		tempDir.removeSync();
+	});
+
+	it.each([false, true])("matches each account's policy before --redact masks it (redact: %p)", async redact => {
+		/** Claude 5-hour utilization by bearer; every other request is unknown to the fake API. */
+		const fiveHour: Record<string, number> = { "Bearer claude-main": 99, "Bearer claude-spare": 40 };
+		const usageFetch = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const bearer = new Headers(init?.headers).get("authorization");
+				const used = bearer ? fiveHour[bearer] : undefined;
+				if (!new URL(String(input)).pathname.endsWith("/api/oauth/usage") || used === undefined) {
+					return new Response("not found", { status: 404 });
+				}
+				const resetsAt = new Date(Date.now() + 2 * HOUR).toISOString();
+				return Response.json({ five_hour: { utilization: used, resets_at: resetsAt } });
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageFetch,
+			accountPolicies: [
+				{
+					provider: "anthropic",
+					account: { email: "main@example.test" },
+					priority: 20,
+					reservePct: 2,
+					reclaimAbovePct: 30,
+				},
+			],
+		});
+		const oauth = (access: string, email: string): OAuthCredential => ({
+			type: "oauth",
+			access,
+			refresh: `refresh-${access}`,
+			expires: Date.now() + HOUR,
+			email,
+		});
+		await authStorage.credentials.set("anthropic", [
+			oauth("claude-main", "main@example.test"),
+			oauth("claude-spare", "spare@example.test"),
+		]);
+		await authStorage.credentials.set("openai-codex", oauth("codex", "codex@example.test"));
+		vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated({ "retry.usageReservePct": 10 }));
+		vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+		let stdout = "";
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			stdout += String(chunk);
+			return true;
+		});
+
+		await runUsageCommand({ json: true, redact, noExtensions: true });
+
+		const payload = JSON.parse(stdout) as {
+			reports: Array<{ provider: string; policy?: unknown; limits: Array<{ amount: { usedFraction?: number } }> }>;
+			accountsWithoutUsage: Array<{ provider: string; policy?: unknown }>;
+		};
+		const claude = payload.reports.filter(report => report.provider === "anthropic");
+		const policyFor = (used: number) =>
+			claude.find(report => report.limits.some(limit => limit.amount.usedFraction === used))?.policy;
+		expect(policyFor(0.99)).toEqual({
+			priority: 20,
+			reservePct: 2,
+			reserveSource: "override",
+			reclaimAbovePct: 30,
+			state: "inside-reserve",
+			remainingPct: 1,
+		});
+		expect(policyFor(0.4)).toEqual({
+			priority: 0,
+			reservePct: 10,
+			reserveSource: "global",
+			state: "eligible",
+			remainingPct: 60,
+		});
+		// Codex has no account policy, so its unreported account carries none, as in the text view.
+		const codex = payload.accountsWithoutUsage.find(account => account.provider === "openai-codex");
+		expect(codex).toBeDefined();
+		expect(codex).not.toHaveProperty("policy");
+		expect(stdout.includes("main@example.test")).toBe(!redact);
 	});
 });
 

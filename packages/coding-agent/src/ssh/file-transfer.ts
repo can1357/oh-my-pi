@@ -6,13 +6,21 @@
  * `ssh://` reads/writes round-trip exactly — leading/trailing whitespace, tabs,
  * and final newlines are preserved.
  */
-import { ptree } from "@oh-my-pi/pi-utils";
+import { type ShellFsDirEntry, ShellFsFileType } from "@oh-my-pi/pi-natives";
+import { ConcatSink, ptree } from "@oh-my-pi/pi-utils";
 import { buildRemoteCommand, ensureConnection, ensureHostInfo, type SSHConnectionTarget } from "./connection-manager";
 import { quotePosixArgument } from "../utils/shell-quote";
 import { wrapInPosixShell } from "./utils";
 
 /** Per-operation timeout for remote transfers (matches the ssh tool's grep window). */
 const DEFAULT_TIMEOUT_MS = 30_000;
+
+/** Successful HOME lookups, separated by the full host/account connection identity. */
+const remoteHomes = new Map<string, string>();
+
+/** Refuse rather than silently truncate a directory's searchable scope. */
+const DIRECTORY_MAX_BYTES = 1024 * 1024;
+const REMOTE_FILE_TYPES = new Set<string>(Object.values(ShellFsFileType));
 
 /**
  * Ensure the ControlMaster connection and pick the verified POSIX shell to
@@ -59,6 +67,29 @@ export interface RemoteFileReadResult {
 export interface RemoteFileWriteOptions {
 	signal?: AbortSignal;
 	timeoutMs?: number;
+}
+
+/** Resolve the remote account's HOME without shell-expanding any caller-supplied path. */
+export async function remoteHomeDirectory(
+	target: SSHConnectionTarget,
+	opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<string> {
+	opts.signal?.throwIfAborted();
+	const key = JSON.stringify([target.name, target.host, target.username, target.port, target.keyPath]);
+	const cached = remoteHomes.get(key);
+	if (cached !== undefined) return cached;
+	const shell = await ensurePosixRemote(target);
+	const args = await buildRemoteCommand(target, wrapInPosixShell(shell, `printf '%s' "$HOME"`));
+	using child = ptree.spawn(["ssh", ...args], {
+		signal: ptree.combineSignals(opts.signal, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+	});
+	const home = new TextDecoder("utf-8", { fatal: true }).decode(await child.bytes());
+	await child.exitedCleanly;
+	if (!home.startsWith("/") || home.includes("\0")) {
+		throw new Error(`ssh://: ${target.name} did not return an absolute remote HOME`);
+	}
+	remoteHomes.set(key, home);
+	return home;
 }
 
 /**
@@ -173,43 +204,61 @@ export async function statRemotePath(
 	return out === "directory" || out === "file" || out === "other" ? out : "missing";
 }
 
-/** A single entry in a remote directory listing. */
-export interface RemoteDirEntry {
-	/** Entry name (no path component), trailing `/` stripped. */
-	name: string;
-	/** True when the entry is a directory. */
-	isDirectory: boolean;
-}
-
 /**
- * List a remote directory one level deep with `ls -1Ap` (one per line; all
- * entries incl. dotfiles but not `.`/`..`; trailing `/` marks directories).
- * Plain `ls` (no `| head`) so a permission/race failure surfaces as a non-zero
- * exit instead of being masked as an empty listing. Entries are returned in
- * full, sorted directories-first then by name to mirror the local
- * directory-resource contract, so the read tool can paginate the listing.
+ * List immediate children as NUL-delimited type/name pairs, including dotfiles
+ * and preserving whitespace/newlines in names. POSIX find's prune expression
+ * limits traversal to one level; -exec passes names as argv, never shell text.
+ * Read at most 1 MiB and refuse oversized listings instead of searching only
+ * part of a directory. A find/cd failure propagates, not an empty listing.
  */
 export async function listRemoteDir(
 	target: SSHConnectionTarget,
 	remotePath: string,
 	opts: { signal?: AbortSignal; timeoutMs?: number } = {},
-): Promise<RemoteDirEntry[]> {
+): Promise<ShellFsDirEntry[]> {
 	const shell = await ensurePosixRemote(target);
-	const command = `LC_ALL=C ls -1Ap -- ${quotePosixArgument(remotePath)}`;
+	const classify =
+		`for p do ` +
+		`if [ -L "$p" ]; then t=symlink; elif [ -d "$p" ]; then t=dir; ` +
+		`elif [ -f "$p" ]; then t=file; elif [ -p "$p" ]; then t=fifo; ` +
+		`elif [ -S "$p" ]; then t=socket; elif [ -c "$p" ]; then t=char; ` +
+		`elif [ -b "$p" ]; then t=block; else continue; fi; ` +
+		`printf '%s\\000%s\\000' "$t" "\${p#./}"; done`;
+	const command =
+		`cd ${quotePosixArgument(remotePath)} && ` +
+		`LC_ALL=C find . ! -name . -prune -exec ${shell} -c ${quotePosixArgument(classify)} ${shell} {} +`;
 	const args = await buildRemoteCommand(target, wrapInPosixShell(shell, command));
 	using child = ptree.spawn(["ssh", ...args], {
 		signal: ptree.combineSignals(opts.signal, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
 	});
-	const text = new TextDecoder().decode(await child.bytes());
+	const buffer = new ConcatSink();
+	let size = 0;
+	for await (const chunk of child.proc.stdout) {
+		size += chunk.length;
+		if (size > DIRECTORY_MAX_BYTES) {
+			throw new Error("ssh://: directory listing exceeds the 1 MiB limit; use a narrower directory scope");
+		}
+		buffer.append(chunk);
+	}
 	await child.exitedCleanly;
-	const entries = text
-		.split("\n")
-		.filter(line => line.length > 0)
-		.map(line => {
-			const isDirectory = line.endsWith("/");
-			return { name: isDirectory ? line.slice(0, -1) : line, isDirectory };
-		});
+	const fields = new TextDecoder("utf-8", { fatal: true }).decode(buffer.flush()).split("\0");
+	if (fields.pop() !== "" || fields.length % 2 !== 0) {
+		throw new Error("ssh://: malformed directory listing (expected NUL-delimited type/name pairs)");
+	}
+	const entries: ShellFsDirEntry[] = [];
+	for (let index = 0; index < fields.length; index += 2) {
+		const fileType = fields[index];
+		const name = fields[index + 1];
+		if (!REMOTE_FILE_TYPES.has(fileType) || !name || name.includes("/") || name === "." || name === "..") {
+			throw new Error("ssh://: invalid directory entry");
+		}
+		entries.push({ name, fileType: fileType as ShellFsFileType });
+	}
 	// JS sort is the order contract (mirrors buildDirectoryResource): dirs first, then by name.
-	entries.sort((a, b) => Number(b.isDirectory) - Number(a.isDirectory) || a.name.localeCompare(b.name));
+	entries.sort(
+		(a, b) =>
+			Number(b.fileType === ShellFsFileType.Dir) - Number(a.fileType === ShellFsFileType.Dir) ||
+			a.name.localeCompare(b.name),
+	);
 	return entries;
 }

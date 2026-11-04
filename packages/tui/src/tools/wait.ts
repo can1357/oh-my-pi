@@ -43,14 +43,16 @@ export function isWaitingPollDetails(details: unknown): boolean {
 	return d.jobs.every(job => job?.status === "running");
 }
 /** Coordination details retained by wait and background job operations. */
-export type CoordinationOp = "send" | "wait" | "jobs" | "cancel";
+export type CoordinationOp = "send" | "wait" | "cancel";
 
-/** Background-job row surfaced by `wait`/`cancel`/`jobs` results. */
+/** Background-job row surfaced by `wait`/`cancel` results and `proc://` listings. */
 export interface JobSnapshot {
 	id: string;
 	type: "bash" | "task" | "eval";
 	status: "running" | "completed" | "failed" | "cancelled";
 	label: string;
+	/** What the job is for, in the model's words (a process job's `label` is its command line). */
+	intent?: string;
 	durationMs: number;
 	/** Process exit status when the job reports one. */
 	exitCode?: number;
@@ -66,6 +68,14 @@ export interface JobSnapshot {
 	completionPercent?: number;
 	/** The task agent's latest stage in its own words; see `AgentProgress.stage`. */
 	stage?: string;
+	/** Running task only: assistant requests so far; see `AgentProgress.requests`. */
+	requests?: number;
+	/** Running task only: cumulative cost in USD; see `AgentProgress.cost`. */
+	cost?: number;
+	/** Running task only: latest per-turn context size; see `AgentProgress.contextTokens`. */
+	contextTokens?: number;
+	/** Running task only: the model's context window; see `AgentProgress.contextWindow`. */
+	contextWindow?: number;
 	/** The job's live widget, while one is being drawn; frozen at its last state once the job settles. */
 	widget?: JobWidgetView;
 	resultText?: string;
@@ -81,6 +91,12 @@ export interface JobSnapshot {
 	 * on collision, else the job id itself. See {@link AsyncJob.agentId}.
 	 */
 	agentUrlId?: string;
+	/**
+	 * Whether this job's turn published `<agentUrlId>.md`. False where the job
+	 * body reported that it wrote none, so `agent://` still holds an earlier
+	 * turn's output; undefined where the body does not report it.
+	 */
+	agentOutputPublished?: boolean;
 }
 
 /** Outcome of cancelling one background job. */
@@ -128,8 +144,8 @@ export interface CoordinationDetails {
 	from?: string;
 	to?: string;
 	receipts?: IrcDeliveryReceipt[];
-	/** Message consumed by `wait`. */
-	waited?: IrcMessage | null;
+	/** Messages consumed by `wait`, oldest first. */
+	waited?: IrcMessage[];
 	jobs?: JobSnapshot[];
 	cancelled?: { id: string; status: CancelStatus }[];
 	/** Running subagents not represented by a job row in this result. */
@@ -152,7 +168,7 @@ const PREVIEW_LINE_WIDTH = 80;
 function statusToIcon(status: JobSnapshot["status"]): ToolUIStatus {
 	switch (status) {
 		case "completed":
-			return "done";
+			return "success";
 		case "failed":
 			return "error";
 		case "cancelled":
@@ -199,9 +215,10 @@ function flattenStructuredPreview(text: string): string {
 	return text.slice(0, PREVIEW_LINES_EXPANDED * PREVIEW_LINE_WIDTH * 2).replace(/\s+/g, " ");
 }
 
-/** The row label: a running task's own stage line when it reports one, else the job's label. */
+/** The row label: a running task's own stage line when it reports one, else what the job is for, else its label. */
 function jobRowLabel(job: JobSnapshot): string {
-	return job.type === "task" && job.status === "running" && job.stage?.trim() ? job.stage : job.label;
+	if (job.type === "task" && job.status === "running" && job.stage?.trim()) return job.stage;
+	return job.intent || job.label;
 }
 
 /** A job as its tile; `live` while the card's clocks run. */
@@ -210,7 +227,7 @@ function jobTile(job: JobSnapshot, live: boolean): JobTile {
 		id: job.id,
 		type: job.type,
 		status: job.status,
-		label: job.label,
+		label: job.intent || job.label,
 		durationMs: job.durationMs,
 		live: live && job.status === "running",
 		...(job.widget ? { widget: job.widget } : {}),
@@ -360,7 +377,7 @@ function jobsRenderResult(
 	const widgetJobs = sortedJobs.filter(job => job.status === "running" && job.widget?.state === "live");
 	const compactJobLines = (width: number, live: boolean): string[] => {
 		const lines: string[] = [];
-		const indent = " ".repeat(visibleWidth(formatStatusIcon("done", uiTheme)) + 1);
+		const indent = " ".repeat(visibleWidth(formatStatusIcon("success", uiTheme)) + 1);
 		// Failures sort first, so the cap never hides one behind successes;
 		// Ctrl+O lists the rest.
 		for (const job of settledJobs.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS)) {
@@ -821,27 +838,30 @@ function describeJobsResult(
 	};
 }
 
-/** Received-message view: sender head, terminal-clocked age, markdown body. */
-function describeMessage(
-	from: string,
-	ts: number | undefined,
-	bodyText: string,
-	meta: readonly string[],
-): NativeToolView {
-	const head: TspSpan[] = [span(`IRC ← ${plainText(from)}`, "toolTitle strong")];
-	for (const part of meta) head.push(span(` ${part}`, "muted"));
+/** One received message: sender (when the card holds several), terminal-clocked age, markdown body. */
+function describeMessage(msg: IrcMessage, single: boolean): NativeNode[] {
+	const sender = single
+		? []
+		: [text([span(plainText(msg.from), "toolTitle strong"), ...(msg.replyTo ? [span(" reply", "muted")] : [])])];
+	const age = msg.ts
+		? [text([span("received", "dim")]), elapsed(Date.now() - msg.ts), text([span("ago", "dim")])]
+		: [];
+	const head = [...sender, ...age];
+	return compact([head.length > 0 ? row(head, { gap: "xs" }) : undefined, msg.body.trim() ? md(msg.body) : undefined]);
+}
+
+/** Received-messages view: senders head, then each message oldest first. */
+function describeMessages(messages: readonly IrcMessage[]): NativeToolView {
+	const single = messages.length === 1;
+	const senders = [...new Set(messages.map(msg => plainText(msg.from)))];
+	const head: TspSpan[] = [span(`IRC ← ${senders.join(", ")}`, "toolTitle strong")];
+	if (!single) head.push(span(` ${messages.length} messages`, "muted"));
+	else if (messages[0]?.replyTo) head.push(span(" reply", "muted"));
 	return {
 		head,
 		tone: "info",
-		preview: { lines: BODY_LINES_COLLAPSED + 1 },
-		body: compact([
-			ts
-				? row([text([span("received", "dim")]), elapsed(Date.now() - ts), text([span("ago", "dim")])], {
-						gap: "xs",
-					})
-				: undefined,
-			bodyText.trim() ? md(bodyText) : undefined,
-		]),
+		preview: { lines: (BODY_LINES_COLLAPSED + 1) * messages.length },
+		body: messages.flatMap(msg => describeMessage(msg, single)),
 	};
 }
 
@@ -873,8 +893,8 @@ export const waitToolRenderer = {
 				};
 			}
 			const waited = details?.waited;
-			if (!waited) return describeJobsResult(result, options.isPartial);
-			return describeMessage(waited.from, waited.ts, waited.body, waited.replyTo ? ["reply"] : []);
+			if (!waited?.length) return describeJobsResult(result, options.isPartial);
+			return describeMessages(waited);
 		});
 	},
 	renderResult(
@@ -894,21 +914,23 @@ export const waitToolRenderer = {
 			);
 		}
 		const waited = result.details?.waited;
-		if (!waited) return jobsRenderResult(result, options, uiTheme);
+		if (!waited?.length) return jobsRenderResult(result, options, uiTheme);
 		return createCachedComponent(
 			() => options.expanded,
 			(width, expanded) =>
-				[
-					renderStatusLine(
-						{
-							iconOverride: ircGlyph(uiTheme),
-							title: `IRC ${uiTheme.nav.back} ${replaceTabs(waited.from)}`,
-							meta: [messageAge(waited.ts), ...(waited.replyTo ? ["reply"] : [])],
-						},
-						uiTheme,
-					),
-					...bodyLines(waited.body, expanded, uiTheme, { indent: "  " }),
-				].map(line => truncateToWidth(line, width, Ellipsis.Unicode)),
+				waited
+					.flatMap(msg => [
+						renderStatusLine(
+							{
+								iconOverride: ircGlyph(uiTheme),
+								title: `IRC ${uiTheme.nav.back} ${replaceTabs(msg.from)}`,
+								meta: [messageAge(msg.ts), ...(msg.replyTo ? ["reply"] : [])],
+							},
+							uiTheme,
+						),
+						...bodyLines(msg.body, expanded, uiTheme, { indent: "  " }),
+					])
+					.map(line => truncateToWidth(line, width, Ellipsis.Unicode)),
 		);
 	},
 } satisfies ToolRenderer<object, CoordinationDetails>;

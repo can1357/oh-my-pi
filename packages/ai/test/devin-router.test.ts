@@ -70,7 +70,8 @@ function decodeAssignRequest(body: RequestInit["body"]): AssignModelRequest {
 function decodeChatRequest(body: RequestInit["body"]): GetChatMessageRequest {
 	const framed = new Uint8Array(body as ArrayBuffer);
 	const length = new DataView(framed.buffer, framed.byteOffset, framed.byteLength).getUint32(1, false);
-	return fromBinary(GetChatMessageRequestSchema, gunzipSync(framed.subarray(5, 5 + length)));
+	const message = framed.subarray(5, 5 + length);
+	return fromBinary(GetChatMessageRequestSchema, framed[0] & 0x01 ? gunzipSync(message) : message);
 }
 
 function decodeAuthRequest(body: RequestInit["body"]): GetUserJwtRequest {
@@ -165,7 +166,7 @@ describe("streamDevin router assignment", () => {
 			ideName: "devin-cli",
 			ideType: "chisel",
 			extensionName: "chisel",
-			extensionVersion: "3000.11.3",
+			extensionVersion: "3000.11.205",
 			apiKey: "devin-session-token$header.payload.signature",
 			userJwt: "",
 		});

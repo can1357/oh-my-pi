@@ -19,6 +19,21 @@ import {
 
 const GIT_CLONE_TIMEOUT_MS = 30 * 60 * 1000;
 
+/** Remove abandoned clone checkouts on a later startup without touching in-flight clones. */
+export async function pruneAbandonedMarketplaceClones(cacheDir: string): Promise<void> {
+	const entries = await fs.readdir(cacheDir, { withFileTypes: true }).catch(err => {
+		if (isEnoent(err)) return [];
+		throw err;
+	});
+	const cutoff = Date.now() - GIT_CLONE_TIMEOUT_MS;
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		const match = /^\.tmp-clone-(\d{13})(?:-[\w-]+)?$/.exec(entry.name);
+		if (!match || Number(match[1]) > cutoff) continue;
+		await fs.rm(path.join(cacheDir, entry.name), { recursive: true, force: true }).catch(() => {});
+	}
+}
+
 // ── Types ─────────────────────────────────────────────────────────────
 
 export interface FetchResult {
@@ -293,13 +308,12 @@ export async function fetchMarketplace(source: string, cacheDir: string): Promis
  * `promoteCloneToCache` after any duplicate/drift checks pass.
  */
 async function cloneAndReadCatalog(url: string, source: string, cacheDir: string): Promise<FetchResult> {
-	const tmpDir = path.join(cacheDir, `.tmp-clone-${Date.now()}`);
 	await fs.mkdir(cacheDir, { recursive: true });
+	const tmpDir = await fs.mkdtemp(path.join(cacheDir, `.tmp-clone-${Date.now()}-`));
 
 	logger.debug(`[marketplace] cloning ${url} → ${tmpDir}`);
-	await vcs.clone(url, tmpDir, { timeoutMs: GIT_CLONE_TIMEOUT_MS });
-
 	try {
+		await vcs.clone(url, tmpDir, { timeoutMs: GIT_CLONE_TIMEOUT_MS });
 		const { displayPath, content } = await readMarketplaceCatalog(tmpDir, { relativeDisplayPaths: true });
 		const catalog = parseMarketplaceCatalog(content, displayPath);
 		return { catalog, clonePath: tmpDir };

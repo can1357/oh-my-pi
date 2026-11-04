@@ -33,6 +33,7 @@ import type {
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
+import { instrumentRelay, waitFor } from "./helpers/throttled-host";
 
 // In-memory transport: shared FakeWebSocket + InMemoryRelay harness (see
 // ./helpers/in-memory-relay), same contract as the other collab tests.
@@ -209,6 +210,7 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 			},
 		},
 		statusContainer: { clear: () => {} },
+		pendingShellContainer: { clear: () => {} },
 		pendingMessagesContainer: { clear: () => {} },
 		compactionQueuedMessages: [],
 		streamingComponent: undefined,
@@ -248,6 +250,12 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 			resetTranscriptAnchors: () => {},
 		},
 		syncRunningSubagentBadge: () => {},
+		setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
+			Object.assign(ctx, { collabGuest: guest });
+		},
+		closeLinkBrowser: () => {},
+		rerenderInLinkBrowser: () => {},
+		rebuildTranscriptScrollback: () => {},
 		showHookSelector: (
 			title: string,
 			options: ExtensionUISelectItem[],
@@ -578,6 +586,9 @@ describe("collab proto handshake (#4049)", () => {
 			settings: Settings.isolated(),
 			sessionManager: { getSessionFile: () => null },
 			syncRunningSubagentBadge: () => {},
+			setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
+				Object.assign(ctx, { collabGuest: guest });
+			},
 		} as unknown as InteractiveModeContext;
 		const guest = new CollabGuestLink(ctx);
 		try {
@@ -806,6 +817,7 @@ function makeAskHostContext(): InteractiveModeContext {
 		...base,
 		editorContainer: { clear: () => {}, addChild: () => {} },
 		editor: { getText: () => "", setText: () => {} },
+		closeLinkBrowser: () => {},
 		ui: {
 			requestRender: () => {},
 			setFocus: () => {},
@@ -815,6 +827,54 @@ function makeAskHostContext(): InteractiveModeContext {
 	};
 	return stub as unknown as InteractiveModeContext;
 }
+
+describe("guest ask host reconnect", () => {
+	it.each(["guest", "host"])("lets a writer answer an open ask after a %s disconnect", async disconnect => {
+		const relay = installInMemoryRelay();
+		const probe = instrumentRelay(relay, { throttle: false });
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new ExtensionUiController(ctx);
+		const abort = new AbortController();
+		const firstGuest = await joinRawGuest(host.link, COLLAB_PROTO);
+		let rejoined: { socket: CollabSocket; nextFrame(): Promise<CollabFrame> } | undefined;
+		try {
+			expect((await firstGuest.nextFrame()).t).toBe("welcome");
+			const result = controller.showAskDialog(
+				[{ id: "lock", question: "How should it lock?", options: [{ label: "ACCESS EXCLUSIVE" }] }],
+				{ signal: abort.signal },
+			);
+			expect((await firstGuest.nextFrame()).t).toBe("ui-request");
+
+			if (disconnect === "host") {
+				const previousSocket = probe.hostSocket();
+				previousSocket.close();
+				await waitFor(() => probe.hostSocket() !== previousSocket && host.relayConnected, "host did not reconnect");
+			} else {
+				firstGuest.socket.close();
+			}
+			rejoined = await joinRawGuest(host.link, COLLAB_PROTO);
+			expect((await rejoined.nextFrame()).t).toBe("welcome");
+			// A directed error is a barrier: a retained ask must arrive before it.
+			rejoined.socket.send({ t: "agent-cmd", cmd: "chat", agentId: "barrier", text: "" });
+			const request = await rejoined.nextFrame();
+			expect(request.t).toBe("ui-request");
+			if (request.t !== "ui-request") throw new Error("pending ask was lost across the host reconnect");
+			rejoined.socket.send({ t: "ui-response", reqId: request.request.reqId, value: "ACCESS EXCLUSIVE" });
+			expect(await result).toMatchObject({
+				kind: "submit",
+				results: [{ id: "lock", selectedOptions: ["ACCESS EXCLUSIVE"] }],
+			});
+		} finally {
+			abort.abort();
+			firstGuest.socket.close();
+			rejoined?.socket.close();
+			await host.stop("test done");
+		}
+	});
+});
 
 describe("guest ask room ownership", () => {
 	it.each(["next question", "custom answer"])("does not mirror a %s to a successor room", async followup => {

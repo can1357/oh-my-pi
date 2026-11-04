@@ -8,10 +8,9 @@ use std::{
 	io::{self, BufRead, BufReader, Write},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::ArgMatches;
 
-use crate::host::{Host, Utility, matches_parser, util};
+use crate::host::{Host, Utility, matches_parser};
 
 const ABOUT: &str = "encode/decode data and print to standard output\nWith no FILE, or when FILE is -, read standard input.\n\nThe data are encoded as described for the base32 alphabet in RFC 4648.\nWhen decoding, the input may contain newlines in addition to the bytes of the formal base32 alphabet. Use --ignore-garbage to attempt to recover from any other non-alphabet bytes in the encoded stream.";
 
@@ -32,11 +31,6 @@ impl Utility for Base32 {
 
 fn app() -> Command {
 	base_app(Base32::NAME, ABOUT, "base32 [OPTION]... [FILE]")
-}
-
-/// Creates the `base32` builtin registration.
-pub(crate) fn base32_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Base32, SE>()
 }
 
 #[derive(Debug)]

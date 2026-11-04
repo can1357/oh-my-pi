@@ -14,7 +14,7 @@ import { memoryToolRefs } from "../memory-backend/tool-names";
 import type { MemoryBackend, MemoryBackendStartOptions, MemoryPromptPreparation } from "../memory-backend/types";
 import hindsightInstructions from "../prompts/system/hindsight-instructions.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
-import { type BankScope, computeBankScope } from "./bank";
+import { type BankScope, computeBankScope, type HindsightBankSet } from "./bank";
 import { createHindsightClient } from "./client";
 import { type HindsightConfig, isHindsightConfigured, loadHindsightConfig } from "./config";
 import { type HindsightMessage, hasSubstantiveContent } from "./content";
@@ -137,6 +137,7 @@ export const hindsightBackend: MemoryBackend = {
 		messages: AgentMessage[],
 		settings: Settings,
 		session?: AgentSession,
+		signal?: AbortSignal,
 	): Promise<string | undefined> {
 		const config = loadHindsightConfig(settings);
 		if (!isHindsightConfigured(config)) return undefined;
@@ -145,7 +146,7 @@ export const hindsightBackend: MemoryBackend = {
 		if (!state) return undefined;
 
 		const flat = flattenMessagesForRecall(messages);
-		return await state.recallForCompaction(flat);
+		return await state.recallForCompaction(flat, signal);
 	},
 
 	async applySettings(session: AgentSession): Promise<void> {
@@ -260,7 +261,7 @@ export async function rebindMemoryBackendForCwd(session: AgentSession): Promise<
 async function installPrimaryState(
 	session: AgentSession,
 	settings: Settings,
-	banksSet: Set<string>,
+	banksSet: HindsightBankSet,
 ): Promise<HindsightSessionState | undefined> {
 	const sessionId = session.sessionId;
 	if (!sessionId) return undefined;

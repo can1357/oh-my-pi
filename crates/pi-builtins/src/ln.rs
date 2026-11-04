@@ -10,7 +10,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use pi_vfs::{
 	BlockingFs, CanonicalizeOptions, MissingHandling, ResolveMode, SymlinkKind, child_path,
@@ -24,7 +23,7 @@ use uucore::{
 
 use crate::{
 	file_backup::{backup_display, backup_path},
-	host::{Host, Utility, format_usage, matches_parser, strip_errno, util},
+	host::{Host, Utility, format_usage, matches_parser, strip_errno},
 };
 
 struct Settings {
@@ -64,7 +63,7 @@ enum LnError {
 	#[error("extra operand {}\nTry '{} --help' for more information.", _0.quote(), _1)]
 	ExtraOperand(OsString, String),
 
-	#[error("{}: hard link not allowed for directory", _0.to_string_lossy())]
+	#[error("{}: hard link not allowed for directory", _0.display())]
 	FailedToCreateHardLinkDir(PathBuf),
 
 	#[error("{0}")]
@@ -320,11 +319,6 @@ fn uu_app() -> Command {
 		)
 }
 
-/// Creates the `ln` builtin registration.
-pub(crate) fn ln_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Ln, SE>()
-}
-
 fn exec(host: &mut Host, files: &[PathBuf], settings: &Settings) -> LnResult<()> {
 	// Handle cases where we create links in a directory first.
 	if let Some(target_path) = &settings.target_dir {
@@ -432,11 +426,7 @@ fn link_files_in_dir(
 
 		linked_destinations.insert(targetpath.clone());
 	}
-	if all_successful {
-		Ok(())
-	} else {
-		Err(LnError::SomeLinksFailed.into())
-	}
+	all_successful.ok_or_else(|| LnError::SomeLinksFailed.into())
 }
 
 /// Physical canonicalization that tolerates missing components (`-m`).

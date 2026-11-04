@@ -11,7 +11,9 @@ import { JAVASCRIPT_PRELUDE_SOURCE } from "../../src/eval/js/shared/prelude";
 import type { ToolSession } from "../../src/tools";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { asGlobalFetch } from "../helpers/fetch-mock";
+import { rejectionOf } from "../helpers/rejection";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { CostCapError, CostGate } from "../../src/session/cost-gate";
 
 const SMOL: Model<Api> = {
 	id: "smol",
@@ -152,6 +154,30 @@ describe("eval judge() bridge", () => {
 			"state must be a string, a JSON object, or a JSON array",
 		);
 		expect(spy).not.toHaveBeenCalled();
+	});
+
+	it("counts billed attempts against the session's cost cap and refuses at it", async () => {
+		const billed = reply("bucket: hard\ntests: yes\ntone: 2");
+		// 1.2M input tokens at SMOL's $1/M.
+		billed.usage.input = 1_200_000;
+		billed.usage.totalTokens = 1_200_000;
+		billed.usage.cost = { input: 1.2, output: 0, cacheRead: 0, cacheWrite: 0, total: 1.2 };
+		// The real completeSimple reports each provider attempt through `onAttempt`.
+		const spy = vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, _context, options) => {
+			(options as { onAttempt?: (message: AssistantMessage) => void } | undefined)?.onAttempt?.(billed);
+			return billed;
+		});
+		const session = makeSession();
+		const costGate = new CostGate(Settings.isolated({ "session.maxCost": 1 }), 0, () => {});
+		const capped = { ...session, costGate } as ToolSession;
+
+		await runEvalJudgment({ state: "first request", questions: QUESTIONS }, { session: capped });
+		expect(costGate.spent).toBe(1.2);
+		const refused = await rejectionOf(
+			runEvalJudgment({ state: "second request", questions: QUESTIONS }, { session: capped }),
+		);
+		expect(refused).toBeInstanceOf(CostCapError);
+		expect(spy).toHaveBeenCalledTimes(1);
 	});
 
 	it("answers through the smol chat model and returns typed answers with the backend", async () => {

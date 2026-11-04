@@ -21,7 +21,11 @@ import { logger } from "@oh-my-pi/pi-utils";
 
 import { cfgSkillful } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
-import { cfgToolsXdevDocs, cfgToolsXdevInlineDevices } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import {
+	cfgToolsXdevDocs,
+	cfgToolsXdevInlineDevices,
+	cfgToolsXdevNotices,
+} from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 // Cache-stability invariant: when MCP servers reconnect with byte-identical tool
 // definitions, `refreshMCPTools` must not rebuild the system prompt. A rebuild
@@ -104,6 +108,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 
 	interface NewSessionOptions {
 		getMcpServerInstructions?: () => Map<string, string> | undefined;
+		createVibeTools?: () => AgentTool[];
 		xdev?: XdevState;
 		lazyWrite?: boolean;
 		deviceOnlyWrite?: boolean;
@@ -178,6 +183,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry: { getApiKey: async () => "test-key" } as never,
 			toolRegistry,
+			createVibeTools: options.createVibeTools,
 			builtInToolNames: options.xdev && !options.lazyWrite ? ["read", "write"] : ["read"],
 			ensureWriteRegistered: async () => {
 				if (!options.xdev) return false;
@@ -247,6 +253,36 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		await session.refreshMCPTools([initialMcp]);
 		expect(rebuildCount).toBe(1);
 	});
+
+	for (const exit of ["restore snapshot", "preserve active"] as const) {
+		it(`restores MCP tools after a failed vibe exit is retried (${exit})`, async () => {
+			let failExit = false;
+			const { session } = newSession(
+				async toolNames => {
+					if (failExit && toolNames.includes("mcp__nucleus_fetch")) {
+						failExit = false;
+						throw new Error("prompt rebuild failed");
+					}
+					return `tools:${toolNames.join(",")}`;
+				},
+				{ createVibeTools: () => [createBasicTool("vibe_spawn", "Spawn")] },
+			);
+			const beforeVibe = session.getEnabledToolNames();
+			await session.activateVibeTools(["read"]);
+			const added = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch");
+			await session.refreshMCPTools([added]);
+			expect(session.getActiveToolNames()).not.toContain(added.name);
+
+			const leaveVibe = () =>
+				exit === "restore snapshot"
+					? session.deactivateVibeTools(beforeVibe)
+					: session.removeVibeToolsPreservingActive();
+			failExit = true;
+			await expect(leaveVibe()).rejects.toThrow("prompt rebuild failed");
+			await leaveVibe();
+			expect(session.getActiveToolNames()).toContain(added.name);
+		});
+	}
 
 	it("warns and keeps the stable winner when distinct MCP tools mint the same name", async () => {
 		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
@@ -1458,28 +1494,34 @@ These tools became available:
 		expect(text).toContain("xd://mcp__nucleus_search");
 	});
 
-	it("keeps xd:// mount deltas model-visible without rendering them during quiet startup", async () => {
-		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
-			xdev: createTestXdevState(),
-			responses: [{ content: ["ok"] }],
-		});
-		cfgStartupQuiet.set(session.settings, true);
-		cfgToolsXdevDocs.set(session.settings, "builtins");
-		cfgToolsXdevInlineDevices.set(session.settings, ["mcp__nucleus_*"]);
-		const notices: string[] = [];
-		session.subscribe(event => {
-			if (event.type === "notice" && event.source === "xdev") notices.push(event.message);
-		});
+	it.each([
+		["quiet startup", cfgStartupQuiet, true],
+		["tools.xdevNotices off", cfgToolsXdevNotices, false],
+	] as const)(
+		"keeps xd:// mount deltas model-visible without rendering them under %s",
+		async (_label, setting, value) => {
+			const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+				xdev: createTestXdevState(),
+				responses: [{ content: ["ok"] }],
+			});
+			setting.set(session.settings, value);
+			cfgToolsXdevDocs.set(session.settings, "builtins");
+			cfgToolsXdevInlineDevices.set(session.settings, ["mcp__nucleus_*"]);
+			const notices: string[] = [];
+			session.subscribe(event => {
+				if (event.type === "notice" && event.source === "xdev") notices.push(event.message);
+			});
 
-		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
-		await session.refreshMCPTools([search]);
+			const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+			await session.refreshMCPTools([search]);
 
-		expect(notices).toEqual([]);
-		await session.prompt("hello");
-		const delivered = mountNoticesIn(contexts[0]);
-		expect(delivered).toHaveLength(1);
-		expect(delivered[0]).toContain("xd://mcp__nucleus_search");
-	});
+			expect(notices).toEqual([]);
+			await session.prompt("hello");
+			const delivered = mountNoticesIn(contexts[0]);
+			expect(delivered).toHaveLength(1);
+			expect(delivered[0]).toContain("xd://mcp__nucleus_search");
+		},
+	);
 	it("keeps device-only write access until a full-write activation commits", async () => {
 		let blockRebuild = false;
 		const rebuildStarted = Promise.withResolvers<void>();

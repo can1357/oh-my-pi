@@ -7,8 +7,8 @@
  * cache), else uploads it with verb `b` before the frame that first
  * references it.
  */
-import * as url from "node:url";
 import type { TspProps } from "@oh-my-pi/pi-wire";
+import { tryFileUri } from "../render/hyperlink";
 import { resolveImageOptions } from "../render/render-utils";
 import { getImageDimensions } from "../terminal-capabilities";
 import { node } from "./describe";
@@ -97,10 +97,12 @@ export function base64ImageNode(
 /**
  * Props that make an `image` node open the file at `filePath` (as a `file://` URL, the TSP
  * open-target form): a click zooms the image in the terminal, and the file opens from its
- * context menu. Empty without a file.
+ * context menu. Always uses a local file URL because the open action runs locally,
+ * even when remote file handlers are configured. Empty without a file.
  */
 export function openableImageProps(filePath: string | undefined): Pick<TspProps<"image">, "href" | "actions"> {
-	return filePath ? { href: url.pathToFileURL(filePath).href, actions: { menu: ["open"] } } : {};
+	const href = filePath ? tryFileUri(filePath, { local: true }) : undefined;
+	return href ? { href, actions: { menu: ["open"] } } : {};
 }
 
 /**
