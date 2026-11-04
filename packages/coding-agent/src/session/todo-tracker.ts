@@ -15,7 +15,13 @@ import { cfgTaskBatch, cfgTaskEager } from "../task/settings";
 import { cfgTodoEager, cfgTodoEnabled, cfgTodoReminders, cfgTodoRemindersMax } from "../tools/settings";
 
 const MID_RUN_NUDGE_MUTATION_THRESHOLD = 12;
-const MID_RUN_NUDGE_MAX_PER_CYCLE = 2;
+/**
+ * How many times the threshold may double while nudges go unanswered. A model
+ * that keeps working without touching `todo` still gets reminded — at 12, 24,
+ * 48, 96, then every 192 mutating results — instead of falling silent after
+ * the second reminder for the remainder of the turn.
+ */
+const MID_RUN_NUDGE_BACKOFF_DOUBLINGS = 4;
 const MUTATING_TOOLS: Record<string, true> = {
 	bash: true,
 	eval: true,
@@ -327,8 +333,12 @@ export class TodoTracker {
 
 	/** Takes the next hidden mid-run reconciliation nudge, if its budget and guards allow. */
 	takeMidRunNudge(): AgentMessage | null {
-		if (this.#mutationsSinceLastTouch < MID_RUN_NUDGE_MUTATION_THRESHOLD) return null;
-		if (this.#midRunNudgeCount >= MID_RUN_NUDGE_MAX_PER_CYCLE) return null;
+		// Back off instead of going silent: an ignored nudge doubles the runway
+		// before the next one, capped so a long turn still gets a reminder
+		// without the nudge spinning on every threshold.
+		const threshold =
+			MID_RUN_NUDGE_MUTATION_THRESHOLD * 2 ** Math.min(this.#midRunNudgeCount, MID_RUN_NUDGE_BACKOFF_DOUBLINGS);
+		if (this.#mutationsSinceLastTouch < threshold) return null;
 		if (!cfgTodoEnabled.get(this.#host.settings) || !cfgTodoReminders.get(this.#host.settings)) return null;
 		if (this.#host.planModeEnabled() || !this.#host.getActiveToolNames().includes("todo")) return null;
 		const incomplete = this.#phases
