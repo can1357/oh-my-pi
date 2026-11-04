@@ -135,7 +135,26 @@ fn verbose(host: &mut Host, dir: &OsStr) {
 fn rmdir(host: &Host, dir: &OsStr) -> io::Result<()> {
 	#[cfg(windows)]
 	reject_dot_component(host, dir)?;
-	host.fs().remove_dir(host.resolve(dir))
+	let resolved = host.resolve(dir);
+	#[cfg(windows)]
+	{
+		let bytes = dir.as_encoded_bytes();
+		let resolved_bytes = resolved.as_os_str().as_encoded_bytes();
+		// Win32 can trim a component to a different directory. Check the
+		// original spelling too: a verbatim cwd may normalize it during join.
+		if !bytes.starts_with(br"\\?\")
+			&& !bytes.starts_with(br"\??\")
+			&& !pi_vfs::is_virtual_path(&resolved)
+			&& [bytes, resolved_bytes].into_iter().any(|path| {
+				path.split(|&byte| byte == b'/' || byte == b'\\').any(|part| {
+					part != b"." && part != b".." && matches!(part.last(), Some(b'.' | b' '))
+				})
+			})
+		{
+			return Err(pi_vfs::invalid_argument());
+		}
+	}
+	host.fs().remove_dir(resolved)
 }
 
 /// POSIX `rmdir(2)` refuses a final `.` (EINVAL) or `..` (ENOTEMPTY) once the
@@ -403,5 +422,36 @@ mod tests {
 		);
 		assert_eq!(run(&root, &["--ignore-fail-on-non-empty", "e/.."]), (0, String::new(), String::new()));
 		assert!(root.join("e").exists());
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn normalized_operands_do_not_remove_another_directory() {
+		for operand in ["e.", "e ", "e./child", "missing./../victim"] {
+			let (dir, root) = tempdir();
+			fs::create_dir(root.join("e")).unwrap();
+			if operand == "e./child" {
+				fs::create_dir(root.join("e/child")).unwrap();
+			}
+			fs::create_dir(root.join("victim")).unwrap();
+			for cwd in [root.as_path(), dir.path()] {
+				assert_eq!(run(cwd, &[operand]).0, 1, "{operand}");
+				assert!(root.join("e").is_dir(), "{operand}");
+				if operand == "e./child" {
+					assert!(root.join("e/child").is_dir(), "{operand}");
+				}
+				assert!(root.join("victim").is_dir(), "{operand}");
+			}
+		}
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn explicit_verbatim_operands_keep_literal_trailing_dots() {
+		let (_dir, root) = tempdir();
+		let literal = root.join("literal.");
+		fs::create_dir(&literal).unwrap();
+		assert_eq!(run(&root, &[literal.to_str().unwrap()]).0, 0);
+		assert!(!literal.exists());
 	}
 }
