@@ -15,10 +15,16 @@ import {
 	getRepoRoot,
 	ISOLATION_BASELINE_MAX_CONTENT_BYTES,
 	IsolationBaselineTooLargeError,
+	type DeltaPatchResult,
 	type IsolationHandle,
+	type WorktreeBaseline,
 	mergeTaskBranches,
 	parseIsolationBackend,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
+import {
+	captureIsolationRelease,
+	IsolationWorkspaceRetainedError,
+} from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import * as isolationFs from "@oh-my-pi/pi-coding-agent/task/isolation-fs";
@@ -2389,6 +2395,123 @@ describe("a capture that could not read everything", () => {
 		const delta = await captureDeltaPatch(repo, baseline);
 
 		expect(delta.rootPatch).toContain("must-preserve.txt");
+	});
+});
+
+describe("a capture beside a repository git lists as one entry", () => {
+	// `git ls-files --others` lists an untracked nested repository or an
+	// in-tree linked worktree as one `dir/` entry and does not look inside it.
+	// Diffed as an untracked file it failed, was counted unread, and refused
+	// every capture in such a checkout.
+	/** The capture, or the error it raised — so a refusal fails an assertion, not the test harness. */
+	async function deltaOf(repo: string, baseline: WorktreeBaseline): Promise<DeltaPatchResult | Error> {
+		return captureDeltaPatch(repo, baseline).catch((error: unknown) =>
+			error instanceof Error ? error : new Error(String(error)),
+		);
+	}
+
+	async function baseRepo(): Promise<string> {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		return repo;
+	}
+
+	it("captures the run as git sees it when the repository was there before the run", async () => {
+		const repo = await baseRepo();
+		const nested = path.join(repo, "vendor", "lib");
+		await fs.mkdir(nested, { recursive: true });
+		await initRepo(nested);
+		await runGit(nested, ["config", "user.email", "src@example.com"]);
+		await runGit(nested, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(nested, "lib.txt"), "base\n");
+		await runGit(nested, ["add", "lib.txt"]);
+		await runGit(nested, ["commit", "-q", "-m", "base"]);
+		await runGit(repo, ["worktree", "add", "-q", "wt", "-b", "wt"]);
+		const baseline = await captureBaseline(repo);
+		await fs.writeFile(path.join(repo, "work.txt"), "root work\n");
+		await fs.writeFile(path.join(nested, "lib.txt"), "nested work\n");
+
+		const delta = await deltaOf(repo, baseline);
+
+		expect(delta).not.toBeInstanceOf(Error);
+		if (delta instanceof Error) throw delta;
+		expect(delta.rootPatch).toContain("+root work");
+		// The nested repository's work travels in its own patch; the linked
+		// worktree is the user's own checkout and none of the run's work.
+		expect(delta.nestedPatches.map(entry => entry.relativePath)).toEqual([path.join("vendor", "lib")]);
+		expect(delta.nestedPatches[0]?.patch).toContain("+nested work");
+		expect(delta.notCaptured).toEqual([]);
+	});
+
+	it("carries everything else and names a repository the run created, which no patch can carry", async () => {
+		const repo = await baseRepo();
+		const baseline = await captureBaseline(repo);
+		await fs.writeFile(path.join(repo, "work.txt"), "root work\n");
+		const created = path.join(repo, "spike");
+		await fs.mkdir(created);
+		await initRepo(created);
+		await fs.writeFile(path.join(created, "only-copy.txt"), "work nobody else has\n");
+
+		const delta = await deltaOf(repo, baseline);
+
+		expect(delta).not.toBeInstanceOf(Error);
+		if (delta instanceof Error) throw delta;
+		expect(delta.rootPatch).toContain("+root work");
+		expect(delta.rootPatch).not.toContain("only-copy.txt");
+		// Named, so the teardown keeps the workspace that holds it.
+		expect(delta.notCaptured).toEqual(["spike/"]);
+		expect(await fs.readFile(path.join(created, "only-copy.txt"), "utf8")).toBe("work nobody else has\n");
+	});
+
+	it("saves everything else and keeps the workspace, naming why, when the run created a repository", async () => {
+		const repo = await baseRepo();
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-not-captured-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		onTestFinished(() => {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		});
+		const handle = await ensureIsolation(repo, "not-captured");
+		const baseline = await captureIsolationBaseline(handle.mergedDir, repo);
+		await fs.writeFile(path.join(handle.mergedDir, "work.txt"), "root work\n");
+		await fs.mkdir(path.join(handle.mergedDir, "spike"));
+		await initRepo(path.join(handle.mergedDir, "spike"));
+		await fs.writeFile(path.join(handle.mergedDir, "spike", "only-copy.txt"), "work nobody else has\n");
+		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-not-captured-artifacts-"));
+		tempDirs.push(artifactsDir);
+
+		const released = await captureIsolationRelease(
+			{ handle, baseline, artifactsDir, agentId: "not-captured" },
+			undefined,
+		).catch((error: unknown) => error);
+
+		expect(released).toBeInstanceOf(IsolationWorkspaceRetainedError);
+		const message = released instanceof Error ? released.message : "";
+		expect(message).toContain("the run created a nested repository that a patch cannot carry (spike/)");
+		// Everything else was saved where the message says.
+		const patchPath = path.join(artifactsDir, "not-captured.patch");
+		expect(message).toContain(patchPath);
+		expect(await Bun.file(patchPath).text()).toContain("+root work");
+		// And the repository is still on disk, in the retained workspace the message names.
+		const retained = message.match(/retained at (\S+) —/)?.[1];
+		expect(retained).toBeDefined();
+		expect(await fs.readFile(path.join(retained ?? "", "spike", "only-copy.txt"), "utf8")).toBe(
+			"work nobody else has\n",
+		);
 	});
 });
 

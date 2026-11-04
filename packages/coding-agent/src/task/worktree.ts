@@ -395,7 +395,11 @@ async function captureRepoBaseline(repoRoot: string, budgetBytes: number): Promi
 	if (contentBytes > budgetBytes) {
 		throw new IsolationBaselineTooLargeError(repoRoot, contentBytes, budgetBytes);
 	}
-	const untrackedCapture = await captureUntrackedPatch(repoRoot, untracked, repo);
+	// A `dir/` entry is a repository git did not look inside: without
+	// `--directory`, git lists a directory only for that. It is not a file to
+	// diff; a nested repository has its own baseline, and a linked worktree of
+	// this repository is left out on purpose (#16068).
+	const untrackedCapture = await captureUntrackedPatch(repoRoot, untrackedFiles(untracked), repo);
 	if (untrackedCapture.unread.length > 0) {
 		// Recorded rather than raised: a baseline that missed a file costs
 		// precision in the delta, not a user's work. The delta capture, which
@@ -497,7 +501,32 @@ export async function captureIsolationBaseline(
 	};
 }
 
-async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRepoDir = repoDir): Promise<string> {
+/**
+ * Untracked entries that are files. `git ls-files --others` without
+ * `--directory` reports a nested repository or a linked worktree as one `dir/`
+ * entry and does not look inside it; it is not a file, and diffing it fails.
+ */
+function untrackedFiles(entries: readonly string[]): string[] {
+	return entries.filter(entry => !entry.endsWith("/"));
+}
+
+/** One repository's delta, with what it could not carry. */
+interface RepoDeltaCapture {
+	patch: string;
+	/**
+	 * Repositories the run created inside this one (`dir/` entries git lists
+	 * that the baseline did not have): no patch carries a repository's own
+	 * history and objects, and no nested capture covers one the baseline
+	 * never saw.
+	 */
+	notCaptured: string[];
+}
+
+async function captureRepoDeltaPatch(
+	repoDir: string,
+	rb: RepoBaseline,
+	objectRepoDir = repoDir,
+): Promise<RepoDeltaCapture> {
 	const repo = vcs.requireGit(repoDir);
 	const objectRepo = objectRepoDir === repoDir ? repo : vcs.requireGit(objectRepoDir);
 	const currentHead = (await repo.headSha()) ?? "";
@@ -529,8 +558,13 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 			listed.undecodable,
 		);
 	}
-	const currentUntracked = listed.paths;
-	const currentUntracked_ = await captureUntrackedPatch(repoDir, currentUntracked, repo);
+	// A `dir/` entry is a repository git did not look inside. One the baseline
+	// had is handled as git handles it: a nested repository is captured on its
+	// own, a linked worktree of this repository is left out (#16068). One the
+	// run created is carried by nothing, and is named so the workspace that
+	// holds it is kept.
+	const notCaptured = listed.paths.filter(entry => entry.endsWith("/") && !rb.untracked.includes(entry));
+	const currentUntracked_ = await captureUntrackedPatch(repoDir, untrackedFiles(listed.paths), repo);
 	if (currentUntracked_.unread.length > 0) {
 		// The whole point of the capture is to decide whether the workspace may
 		// go. Returning a patch that silently omits a file this process could
@@ -558,7 +592,7 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 		currentUntrackedPatch,
 	]);
 
-	return diffTree(objectRepo, baselineTree, currentTree);
+	return { patch: await diffTree(objectRepo, baselineTree, currentTree), notCaptured };
 }
 
 function unquoteGitDiffPath(rawPath: string): string {
@@ -609,6 +643,26 @@ function patchTouchedFiles(patch: string): string[] {
 export interface DeltaPatchResult {
 	rootPatch: string;
 	nestedPatches: NestedRepoPatch[];
+	/**
+	 * Repositories the run created inside the workspace, relative to its root
+	 * (`dir/`): the patches above carry everything else, and these are kept
+	 * only by keeping the workspace.
+	 */
+	notCaptured: string[];
+}
+
+/**
+ * Why a capture that left repositories behind keeps its workspace, or
+ * `undefined` when it left none.
+ */
+export function describeNotCaptured(delta: DeltaPatchResult): string | undefined {
+	const { notCaptured } = delta;
+	if (notCaptured.length === 0) return undefined;
+	const what = notCaptured.length === 1 ? "a nested repository" : `${notCaptured.length} nested repositories`;
+	return (
+		`the run created ${what} that a patch cannot carry (${notCaptured.slice(0, 10).join(", ")}): ` +
+		"its history and objects live in its own .git, so the workspace is kept"
+	);
 }
 
 async function hasGitEntry(dir: string): Promise<boolean> {
@@ -637,7 +691,9 @@ export async function captureDeltaPatch(isolationDir: string, baseline: Worktree
 		if (!(await hasGitEntry(isolatedDir))) continue;
 		await vcs.copyGitObjects(isolatedDir, (await hasGitEntry(sourceDir)) ? sourceDir : sourceRoot);
 	}
-	const rootPatch = await captureRepoDeltaPatch(isolationDir, baseline.root, baseline.root.repoRoot);
+	const root = await captureRepoDeltaPatch(isolationDir, baseline.root, baseline.root.repoRoot);
+	const rootPatch = root.patch;
+	const notCaptured = [...root.notCaptured];
 	const nestedPatches: NestedRepoPatch[] = [];
 
 	for (const { relativePath, baseline: nb } of baseline.nested) {
@@ -653,11 +709,12 @@ export async function captureDeltaPatch(isolationDir: string, baseline: Worktree
 				[nestedDir],
 			);
 		}
-		const patch = await captureRepoDeltaPatch(nestedDir, nb, nb.repoRoot);
-		if (patch.trim()) nestedPatches.push({ relativePath, patch });
+		const nested = await captureRepoDeltaPatch(nestedDir, nb, nb.repoRoot);
+		if (nested.patch.trim()) nestedPatches.push({ relativePath, patch: nested.patch });
+		notCaptured.push(...nested.notCaptured.map(entry => `${relativePath}/${entry}`));
 	}
 
-	return { rootPatch, nestedPatches };
+	return { rootPatch, nestedPatches, notCaptured };
 }
 
 /**
@@ -1847,7 +1904,12 @@ export async function commitToBranch(
 	const isolationHead = (await isolationRepo.headSha()) ?? "";
 	const agentCommitted = isolationHead !== "" && isolationHead !== baselineSha;
 
-	const { rootPatch, nestedPatches } = await captureDeltaPatch(isolationDir, baseline);
+	const delta = await captureDeltaPatch(isolationDir, baseline);
+	// A branch would carry everything but those repositories, and the
+	// workspace that holds them goes once the branch exists.
+	const notCaptured = describeNotCaptured(delta);
+	if (notCaptured !== undefined) throw new IsolationCaptureIncompleteError(notCaptured, delta.notCaptured);
+	const { rootPatch, nestedPatches } = delta;
 	if (!rootPatch.trim() && nestedPatches.length === 0) return null;
 	if (!rootPatch.trim()) return { rootPatch, nestedPatches };
 
@@ -1878,14 +1940,17 @@ export async function commitToBranch(
 		// Leftover = anything still uncommitted in isolation on top of the
 		// agent's last commit (staged, unstaged, untracked). The agent didn't
 		// commit it, so it goes in as one AI-summarized trailing commit.
-		const leftoverPatch = await captureRepoDeltaPatch(isolationDir, {
+		const leftover = await captureRepoDeltaPatch(isolationDir, {
 			repoRoot: isolationDir,
 			headCommit: isolationHead,
 			staged: "",
 			unstaged: "",
-			untracked: [],
+			// What was untracked at the run's baseline: a repository listed then
+			// is not one the run created.
+			untracked: baseline.root.untracked,
 			untrackedPatch: "",
 		});
+		const leftoverPatch = leftover.patch;
 		if (leftoverPatch.trim()) {
 			const msg = (commitMessage && (await commitMessage(leftoverPatch))) || fallbackMessage;
 			tip = await commitPatch(repoRoot, tip, taskId, leftoverPatch, msg);

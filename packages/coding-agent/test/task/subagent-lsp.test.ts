@@ -164,7 +164,11 @@ function mockIsolation(): void {
 	vi.spyOn(worktreeModule, "getRepoRoot").mockResolvedValue("/repo");
 	vi.spyOn(worktreeModule, "captureBaseline").mockResolvedValue(baseline);
 	vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue(isolationHandle);
-	vi.spyOn(worktreeModule, "captureDeltaPatch").mockResolvedValue({ rootPatch: "", nestedPatches: [] });
+	vi.spyOn(worktreeModule, "captureDeltaPatch").mockResolvedValue({
+		rootPatch: "",
+		nestedPatches: [],
+		notCaptured: [],
+	});
 	vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue({});
 }
 

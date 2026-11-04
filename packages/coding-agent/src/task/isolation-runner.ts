@@ -66,6 +66,7 @@ import {
 	cleanupTaskBranches,
 	type CommitToBranchResult,
 	commitToBranch,
+	describeNotCaptured,
 	ensureIsolation,
 	getRepoRoot,
 	type IsolationHandle,
@@ -285,6 +286,10 @@ interface IsolationPatchCapture {
  * Capture the isolation delta and write every part of it to disk — the root
  * patch and one file per nested repo — before the caller tears the workspace
  * down. Throws when any write fails so nothing captured is ever the only copy.
+ *
+ * A repository the run created is carried by no patch: everything else is
+ * still written, then this throws naming it and where the rest went, so the
+ * caller keeps the workspace that holds it rather than deleting it.
  */
 async function writeIsolationPatch(
 	isolationDir: string,
@@ -296,6 +301,11 @@ async function writeIsolationPatch(
 	const patchPath = path.join(artifactsDir, `${agentId}.patch`);
 	await Bun.write(patchPath, delta.rootPatch);
 	const nestedPatchPaths = await persistNestedPatches(artifactsDir, agentId, delta.nestedPatches);
+	const notCaptured = describeNotCaptured(delta);
+	if (notCaptured !== undefined) {
+		const saved = [patchPath, ...nestedPatchPaths].join(", ");
+		throw new Error(`${notCaptured}; everything else the run changed was saved to ${saved}`);
+	}
 	return {
 		artifacts: {
 			patchPath,

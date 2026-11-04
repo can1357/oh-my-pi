@@ -60,7 +60,11 @@ async function commitsAcrossRelease(id: string, runEndPatch: string, releasePatc
 	});
 	vi.spyOn(worktreeModule, "captureIsolationBaseline").mockResolvedValue(baseline);
 	vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue({});
-	vi.spyOn(worktreeModule, "captureDeltaPatch").mockResolvedValue({ rootPatch: releasePatch, nestedPatches: [] });
+	vi.spyOn(worktreeModule, "captureDeltaPatch").mockResolvedValue({
+		rootPatch: releasePatch,
+		nestedPatches: [],
+		notCaptured: [],
+	});
 	const commitSpy = vi.spyOn(worktreeModule, "commitToBranch").mockImplementation(async () => {
 		events.push("commit");
 		return { branchName: `omp/task/${id}`, baseSha: "base", rootPatch: runEndPatch, nestedPatches: [] };
