@@ -4,7 +4,10 @@
 
 ### Fixed
 
-- The bash tool's built-in `rsync` no longer reports, now and then, 5 bytes more received in the summary and `--stats` of a run that sends: it counted the server's final goodbye, which arrives after the point where rsync 3.5.1 takes its totals ([#17852](https://github.com/can1357/oh-my-pi/pull/17852) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's built-in `rsync` sometimes reporting 5 bytes too many received in the summary and `--stats` of a run that sends ([#17852](https://github.com/can1357/oh-my-pi/pull/17852) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's built-in `rsync --server` with `--timeout` timing out while its output was blocked, although its peer kept sending keepalives ([#17852](https://github.com/can1357/oh-my-pi/pull/17852) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's built-in `rsync --server` keeping its output open after a run that timed out, so the next command still found it ([#17852](https://github.com/can1357/oh-my-pi/pull/17852) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's built-in `rsync` sometimes ending a cancelled run with exit code 12 instead of 20 ([#17852](https://github.com/can1357/oh-my-pi/pull/17852) by [@sjawhar](https://github.com/sjawhar))
 ### Changed
 
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections

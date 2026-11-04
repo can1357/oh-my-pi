@@ -103,6 +103,170 @@ fn daemon_mode_is_refused() {
 }
 
 /// Captured from rsync 3.5.1: `rsync --protocol=19 -a src/ d/` on a local copy.
+/// A `--server --sender` whose output is blocked still reads its peer. With
+/// `--timeout=4`, a peer that stops reading the server's output for 6
+/// seconds after setup, but sends an empty `MSG_DATA` frame every 250 ms,
+/// keeps the transfer alive, as rsync 3.5.1's `perform_io` reads while it
+/// waits to write: a review measured rsync 3.5.1 surviving this exchange and
+/// sending the 388,292 bytes it held once reads resumed. Without a readiness
+/// probe on the server's stdin a pass waiting to write read nothing, the
+/// frames never counted as input, and the server exited with code 30 after 4
+/// seconds, as it still does at upstream main. A review of #17849 found it;
+/// the probes this change gives a server's stdio are what fix it.
+#[cfg(unix)]
+#[test]
+fn a_blocked_server_sender_reads_its_peers_frames() {
+	use std::io::{Read, Write};
+
+	struct FdIn(Arc<fs::File>);
+	impl Read for FdIn {
+		fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+			(&*self.0).read(buf)
+		}
+	}
+	impl Write for FdIn {
+		fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+			Err(io::ErrorKind::Unsupported.into())
+		}
+		fn flush(&mut self) -> io::Result<()> {
+			Ok(())
+		}
+	}
+	impl crate::openfile::Stream for FdIn {
+		fn raw_fd(&self) -> Option<std::os::fd::RawFd> {
+			Some(std::os::fd::AsRawFd::as_raw_fd(&*self.0))
+		}
+	}
+
+	let dir = tempfile::tempdir().unwrap();
+	let src = dir.path().join("src");
+	fs::create_dir(&src).unwrap();
+	// A file list far larger than a pipe holds.
+	for i in 0..2000 {
+		fs::write(src.join(format!("{i:05}-{}", "x".repeat(180))), b"").unwrap();
+	}
+	let (to_server_r, to_server_w) = nix::unistd::pipe().unwrap();
+	let (from_server_r, from_server_w) = nix::unistd::pipe().unwrap();
+	let (mut host, cap) =
+		crate::host::Host::for_test_with_stdin("rsync", Box::new(FdIn(Arc::new(fs::File::from(to_server_r)))), dir.path());
+	host.set_test_stdout(fs::File::from(from_server_w).into());
+	let peer = thread::spawn(move || {
+		let (mut to_server, mut from_server) = (fs::File::from(to_server_w), fs::File::from(from_server_r));
+		to_server.write_all(&31u32.to_le_bytes())?;
+		// Protocol, compatibility flags and checksum seed.
+		from_server.read_exact(&mut [0u8; 9])?;
+		// The empty filter list, as one multiplexed data frame.
+		to_server.write_all(&[4, 0, 0, 7, 0, 0, 0, 0])?;
+		let quiet = Instant::now();
+		while quiet.elapsed() < Duration::from_secs(6) {
+			thread::sleep(Duration::from_millis(250));
+			if to_server.write_all(&[0, 0, 0, 7]).is_err() {
+				break;
+			}
+		}
+		let mut drained = Vec::new();
+		let mut buf = vec![0u8; 1 << 16];
+		while drained.len() < 300_000 {
+			match from_server.read(&mut buf)? {
+				0 => break,
+				n => drained.extend_from_slice(&buf[..n]),
+			}
+		}
+		io::Result::Ok(drained.len())
+	});
+	let argv: Vec<OsString> =
+		["rsync", "--server", "--sender", "-r", "--protocol=31", "--timeout=4", ".", "src/"].iter().map(OsString::from).collect();
+	let started = Instant::now();
+	let code = super::run(&mut host, argv);
+	let lasted = started.elapsed();
+	// The server's ends of both pipes close with the host, so a peer still
+	// waiting on them sees the end rather than waiting for ever.
+	drop(host);
+	let drained = peer.join().unwrap();
+	let err = cap.err();
+	assert!(!err.contains("timeout"), "the server timed out after {lasted:?} while its peer kept it alive: {err}");
+	assert_ne!(code, RERR_TIMEOUT, "{err}");
+	assert!(lasted >= Duration::from_secs(6), "the server ended after {lasted:?}: {err}");
+	assert!(drained.is_ok_and(|n| n >= 300_000), "the held file list did not come once reads resumed: {err}");
+}
+
+/// A `--server --sender` that times out while its peer has stopped reading
+/// lets go of its stdout once the run ends. Its output thread used to stay
+/// with the write it could not finish for as long as the process lived,
+/// holding the descriptor, so the shell's next command still found the old
+/// pipe open: a review of #17849 found it, at upstream main as well. Here
+/// the peer completes setup, then neither reads nor writes; the run times
+/// out after 4 seconds, and once the host is gone the pipe must report that
+/// no writer is left within 2 seconds. The check polls the read end without
+/// reading it, because draining the pipe would let a held thread finish its
+/// writes and close the pipe on its own.
+#[cfg(unix)]
+#[test]
+fn a_timed_out_server_releases_its_stdout() {
+	use std::io::{Read, Write};
+	use std::os::fd::AsRawFd;
+
+	struct FdIn(Arc<fs::File>);
+	impl Read for FdIn {
+		fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+			(&*self.0).read(buf)
+		}
+	}
+	impl Write for FdIn {
+		fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+			Err(io::ErrorKind::Unsupported.into())
+		}
+		fn flush(&mut self) -> io::Result<()> {
+			Ok(())
+		}
+	}
+	impl crate::openfile::Stream for FdIn {
+		fn raw_fd(&self) -> Option<std::os::fd::RawFd> {
+			Some(std::os::fd::AsRawFd::as_raw_fd(&*self.0))
+		}
+	}
+
+	let dir = tempfile::tempdir().unwrap();
+	let src = dir.path().join("src");
+	fs::create_dir(&src).unwrap();
+	for i in 0..2000 {
+		fs::write(src.join(format!("{i:05}-{}", "x".repeat(180))), b"").unwrap();
+	}
+	let (to_server_r, to_server_w) = nix::unistd::pipe().unwrap();
+	let (from_server_r, from_server_w) = nix::unistd::pipe().unwrap();
+	let (mut host, cap) =
+		crate::host::Host::for_test_with_stdin("rsync", Box::new(FdIn(Arc::new(fs::File::from(to_server_r)))), dir.path());
+	host.set_test_stdout(fs::File::from(from_server_w).into());
+	let (ended_tx, ended) = std::sync::mpsc::channel::<()>();
+	let peer = thread::spawn(move || {
+		let (mut to_server, mut from_server) = (fs::File::from(to_server_w), fs::File::from(from_server_r));
+		to_server.write_all(&31u32.to_le_bytes())?;
+		from_server.read_exact(&mut [0u8; 9])?;
+		to_server.write_all(&[4, 0, 0, 7, 0, 0, 0, 0])?;
+		// Silent and not reading until the run is over and the host is gone.
+		let _ = ended.recv();
+		let deadline = Instant::now() + Duration::from_secs(2);
+		while Instant::now() < deadline {
+			let mut pfd = libc::pollfd { fd: from_server.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+			// SAFETY: one pollfd, valid for the call, on a descriptor this thread owns.
+			if unsafe { libc::poll(&mut pfd, 1, 100) } > 0 && pfd.revents & libc::POLLHUP != 0 {
+				return io::Result::Ok(true);
+			}
+		}
+		drop(to_server);
+		io::Result::Ok(false)
+	});
+	let argv: Vec<OsString> =
+		["rsync", "--server", "--sender", "-r", "--protocol=31", "--timeout=4", ".", "src/"].iter().map(OsString::from).collect();
+	let code = super::run(&mut host, argv);
+	let err = cap.err();
+	drop(host);
+	ended_tx.send(()).unwrap();
+	let released = peer.join().unwrap();
+	assert_eq!(code, RERR_TIMEOUT, "the run was meant to time out: {err}");
+	assert!(released.is_ok_and(|r| r), "a writer of the server's stdout was still open 2 s after the run ended: {err}");
+}
+
 #[test]
 fn too_old_protocol_is_a_mismatch() {
 	let dir = tempfile::tempdir().unwrap();

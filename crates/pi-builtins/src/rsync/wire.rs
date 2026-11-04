@@ -10,7 +10,7 @@ use std::fmt;
 use std::io::{self, Read, Write};
 
 use crate::rsync::consts::NDX_DONE;
-use crate::rsync::exit::{RERR_PROTOCOL, RERR_STREAMIO};
+use crate::rsync::exit::{RERR_PROTOCOL, RERR_STREAMIO, RsyncError};
 use crate::rsync::log::Role;
 
 /// Negotiated protocol facts every codec consults.
@@ -66,14 +66,21 @@ pub(crate) fn wire_detail(err: &io::Error) -> Option<&WireError> {
 	err.get_ref().and_then(|inner| inner.downcast_ref::<WireError>())
 }
 
-/// Recreates an equivalent io::Error (io::Error is not Clone).
+/// Recreates an equivalent io::Error (io::Error is not Clone), keeping a
+/// [`WireError`] or [`RsyncError`] it carries, and so the exit code
+/// [`RsyncError::from_io`] reads from it. Copying only the text turned a
+/// cancellation (code 20) into whatever default the reader of the copy
+/// passed, such as code 12 for an output failure.
 pub(crate) fn clone_io_error(err: &io::Error) -> io::Error {
 	match wire_detail(err) {
 		Some(w) => wire_error(err.kind(), w.code, w.message.clone(), w.site),
 		None => match err.raw_os_error() {
 			Some(errno) => io::Error::from_raw_os_error(errno),
 			None => match err.get_ref() {
-				Some(inner) => io::Error::new(err.kind(), inner.to_string()),
+				Some(inner) => match inner.downcast_ref::<RsyncError>() {
+					Some(rsync) => io::Error::new(err.kind(), rsync.clone()),
+					None => io::Error::new(err.kind(), inner.to_string()),
+				},
 				None => io::Error::from(err.kind()),
 			},
 		},
@@ -509,6 +516,19 @@ impl NdxCodec {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A copy of a cancellation still ends the run with code 20. The writer
+	/// reports what its output thread recorded through such a copy, so with
+	/// only the text copied a cancelled run whose output thread saw the
+	/// cancellation first ended with code 12, an output failure, under the
+	/// cancellation's own message.
+	#[test]
+	fn a_copied_cancellation_keeps_its_exit_code() {
+		let copy = clone_io_error(&RsyncError::cancelled_io());
+		let mapped = RsyncError::from_io(&copy, RERR_STREAMIO);
+		assert_eq!(mapped.code, crate::rsync::exit::RERR_SIGNAL, "{mapped}");
+		assert_eq!(mapped.to_string(), RsyncError::from_io(&RsyncError::cancelled_io(), RERR_STREAMIO).to_string());
+	}
 
 	const P29: Proto = Proto::new(29, 0);
 	const P30: Proto = Proto::new(30, 0);

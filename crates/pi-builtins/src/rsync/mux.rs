@@ -245,7 +245,9 @@ pub(crate) struct WriteConfig {
 	pub bwlimit: Option<u64>,
 	/// `--timeout`; keepalives are sent when idle for half of it (upstream behavior).
 	pub timeout: Option<Duration>,
-	/// Cancellation flag observed while sleeping for `--bwlimit`.
+	/// Cancellation flag, observed while sleeping for `--bwlimit`, by the
+	/// writer's own waits, and by the output thread while the connection is
+	/// not writable.
 	pub cancel: Option<Arc<AtomicBool>>,
 	/// Whether the connection takes a write now (see [`WriteProbe`]); without
 	/// one, a write call that waits to send stands for a connection that is
@@ -431,6 +433,7 @@ fn write_out(
 	counters: &IoCounters,
 	count: bool,
 	writable: Option<&WriteProbe>,
+	cancel: Option<&AtomicBool>,
 ) -> io::Result<()> {
 	let mut attempt = 0;
 	while !bytes.is_empty() {
@@ -443,6 +446,14 @@ fn write_out(
 		if let Some(writable) = writable
 			&& !writable(IDLE_POLL)
 		{
+			// A cancelled run abandons what the connection will not take.
+			// Once the last writer handle is gone every pass is allowed
+			// (`closed`), so a peer that stopped reading was polled here for
+			// ever, the write call that observes cancellation never reached,
+			// and the thread kept the connection open.
+			if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+				return Err(RsyncError::cancelled_io());
+			}
 			lock(&pipe.state).attempts += 1;
 			pipe.cond.notify_all();
 			continue;
@@ -527,6 +538,7 @@ fn out_loop(
 	mut bw: Option<BwLimit>,
 	counters: &IoCounters,
 	writable: Option<WriteProbe>,
+	cancel: Option<Arc<AtomicBool>>,
 ) {
 	loop {
 		let job = {
@@ -546,7 +558,7 @@ fn out_loop(
 		};
 		let (res, done, spent) = match job {
 			OutJob::Data { buf, start, count } => {
-				let res = write_out(pipe, &mut *inner, &buf[start..], bw.as_mut(), counters, count, writable.as_ref());
+				let res = write_out(pipe, &mut *inner, &buf[start..], bw.as_mut(), counters, count, writable.as_ref(), cancel.as_deref());
 				(res, buf.len() - start, Some(buf))
 			}
 			OutJob::Flush => (flush_out(&mut *inner), 0, None),
@@ -758,9 +770,10 @@ impl MuxWriter {
 		let worker_counters = counters.clone();
 		let bw = cfg.bwlimit.and_then(BwLimit::new);
 		let writable = cfg.writable;
+		let worker_cancel = cfg.cancel.clone();
 		let spawned = thread::Builder::new()
 			.name("rsync-io-write".into())
-			.spawn(move || out_loop(&worker, inner, bw, &worker_counters, writable));
+			.spawn(move || out_loop(&worker, inner, bw, &worker_counters, writable, worker_cancel));
 		if let Err(err) = spawned {
 			lock(&out.state).failed = Some(err);
 		}
@@ -2781,6 +2794,55 @@ mod tests {
 	/// out, as the ordinary flush does: one clock across its passes. Timed
 	/// per pass, each pass ended within a millisecond and started the clock
 	/// again, so the flush waited until it was cancelled.
+	/// A cancelled writer whose peer stopped reading lets the connection go.
+	/// Once the last writer handle is gone every output pass is allowed, so
+	/// the output thread used to poll the stalled connection every
+	/// millisecond for ever, holding it (and a direct TCP socket) open; a
+	/// review found it. Here the connection never becomes writable, the
+	/// flush is cancelled, the writer is dropped, and the connection must be
+	/// released within two seconds.
+	#[test]
+	fn a_cancelled_writer_releases_a_stalled_connection() {
+		struct Stalled(Arc<AtomicBool>);
+		impl Write for Stalled {
+			fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+				Err(io::ErrorKind::WouldBlock.into())
+			}
+			fn flush(&mut self) -> io::Result<()> {
+				Ok(())
+			}
+		}
+		impl Drop for Stalled {
+			fn drop(&mut self) {
+				self.0.store(true, Ordering::SeqCst);
+			}
+		}
+		let released = Arc::new(AtomicBool::new(false));
+		let cancel = Arc::new(AtomicBool::new(false));
+		let never: WriteProbe = Arc::new(|wait| {
+			thread::sleep(wait);
+			false
+		});
+		let cfg = WriteConfig { cancel: Some(Arc::clone(&cancel)), writable: Some(never), ..WriteConfig::default() };
+		let mut w = MuxWriter::new(Box::new(Stalled(Arc::clone(&released))), IoCounters::default(), cfg);
+		w.start_multiplex().unwrap();
+		w.write_all(&[0; 64]).unwrap();
+		let flag = Arc::clone(&cancel);
+		let canceller = thread::spawn(move || {
+			thread::sleep(Duration::from_millis(200));
+			flag.store(true, Ordering::Relaxed);
+		});
+		let err = w.flush().unwrap_err();
+		canceller.join().unwrap();
+		assert_eq!(RsyncError::from_io(&err, RERR_STREAMIO).code, RERR_SIGNAL, "{err}");
+		drop(w);
+		let deadline = std::time::Instant::now() + Duration::from_secs(2);
+		while !released.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+			thread::sleep(Duration::from_millis(10));
+		}
+		assert!(released.load(Ordering::SeqCst), "the output thread still holds the stalled connection");
+	}
+
 	#[test]
 	fn stats_flush_times_out_when_nothing_goes_out() {
 		let cancel = Arc::new(AtomicBool::new(false));
