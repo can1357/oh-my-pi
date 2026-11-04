@@ -31,7 +31,7 @@
 - Clicking the popup of an enum setting with many values (Edit Mode, Session Tree Filter, Advisor Sync Backlog) on a native settings page opens its menu instead of doing nothing
 - Ask notes added on successive single-select questions now start with an empty editor and stay with their respective answers ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
 - LSP references render as references even when a referenced line reads like a diagnostics summary (`"1 error(s)"`) or holds a code fence, instead of turning into a diagnostics or hover card ([#18106](https://github.com/can1357/oh-my-pi/pull/18106) by [@JustasMasiulis](https://github.com/JustasMasiulis))
-- The LSP diagnostics card lists diagnostics grouped under their file, the form the tool reports, instead of only their counts, and a failed language server counts as a server failure instead of `No issues` ([#18106](https://github.com/can1357/oh-my-pi/pull/18106) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- The LSP diagnostics card lists diagnostics grouped under their file, the form the tool reports, instead of only their counts; a failed language server counts as a server failure instead of `No issues`, and a partial server failure shows as a warning instead of a clean result ([#18106](https://github.com/can1357/oh-my-pi/pull/18106) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 - Closing an overlay that others were opened over no longer leaves them returning focus to it once they close ([#16476](https://github.com/can1357/oh-my-pi/pull/16476))
 

@@ -36,7 +36,7 @@ import { ansi, code, col, compact, keyed, md, node, row, span, text } from "../n
 import type { NativeNode } from "../native/node";
 import { OwnerMemo } from "../native/memo";
 import { plainText } from "../native/spans";
-import { numberedCode, renderCodeFrameRun, walkGroupedOutput } from "./grouped-file-output";
+import { type NumberedLine, numberedCode, renderCodeFrameRun, walkGroupedOutput } from "./grouped-file-output";
 import { diagnosticGlyph, displayPath, fileHref, fileRow, inlineErrorView } from "./native-view";
 import { activeThemeSymbol } from "../theme/active-symbols";
 
@@ -196,7 +196,8 @@ interface LspBodyRows {
 interface LspResultView {
 	/** The action the response answers (`references`, `type definition`); names the header when the request is unknown. */
 	action: string;
-	icon: "success" | "warning";
+	/** The header's status; `success` shows the LSP icon. */
+	icon: "success" | "warning" | "error";
 	/** Counts appended to the header after the request facts. */
 	meta: string[];
 	/** Rows wrap while collapsed too (hover code) instead of clipping to one row each. */
@@ -282,7 +283,7 @@ export function renderResult(
 			? { icon: "running", spinnerFrame }
 			: view.icon === "success"
 				? { iconOverride: theme.styledSymbol("tool.lsp", "accent") }
-				: { icon: "warning" };
+				: { icon: view.icon };
 		const header = renderStatusLine({ ...icon, title: "LSP", description, meta: headerMeta }, theme);
 		return {
 			header: layout.hinted ? `${header}${formatExpandHint(theme)}` : header,
@@ -308,11 +309,15 @@ function parseLspResult(
 	if (locations?.noun === "reference") return referencesView(locations, theme);
 	if (locations) return locationsView(locations, theme);
 
+	const errorMatch = text.match(/(\d+)\s+error\(s\)/);
+	const warningMatch = text.match(/(\d+)\s+warning\(s\)/);
+	// A diagnostics request answers with diagnostics whatever its rows hold: `OK`, a partial
+	// server failure, a summary. Without a known action, the rows themselves decide.
+	if (action === "diagnostics") return diagnosticsView(errorMatch, warningMatch, lines, theme);
+
 	const codeBlockMatch = text.match(/```(\w*)\n([\s\S]*?)```/);
 	if (codeBlockMatch) return hoverView(codeBlockMatch, text, theme);
 
-	const errorMatch = text.match(/(\d+)\s+error\(s\)/);
-	const warningMatch = text.match(/(\d+)\s+warning\(s\)/);
 	const unreportedCount = lines.filter(line => UNREPORTED_LINE_RE.test(line)).length;
 	if (errorMatch || warningMatch || hasStatusRow(action, lines, theme.status.error) || unreportedCount > 0) {
 		return diagnosticsView(errorMatch, warningMatch, lines, theme);
@@ -321,9 +326,6 @@ function parseLspResult(
 	const symbolsMatch = text.match(/Symbols in (.+):/);
 	if (symbolsMatch) return symbolsView(symbolsMatch[1], request?.file === undefined, lines, theme);
 
-	if (detailsAction === "diagnostics" && text === "OK") {
-		return { action: "diagnostics", icon: "success", meta: ["No issues"], rows: () => ({ rows: [], hidden: false }) };
-	}
 	return genericView(text, lines, action, theme);
 }
 
@@ -422,7 +424,6 @@ function diagnosticsView(
 	if (warnCount > 0) meta.push(formatCount("warning", warnCount));
 	if (parsed.failures.length > 0) meta.push(formatCount("server failure", parsed.failures.length));
 	if (parsed.unreported.length > 0) meta.push(formatCount("unverified file", parsed.unreported.length));
-	if (meta.length === 0 && parsed.diagnostics.length === 0) meta.push("No issues");
 
 	const raw = (color: ThemeColor) => (line: string) => ({ raw: sanitizeDiagnosticDisplayText(line), color });
 	const items: DiagnosticItem[] = [
@@ -432,11 +433,19 @@ function diagnosticsView(
 		...parsed.warnings.map(raw("warning")),
 		...parsed.other.map(raw("muted")),
 	];
+	// Only a response with nothing to count and nothing to show claims a clean file.
+	if (meta.length === 0 && items.length === 0) meta.push("No issues");
 
 	return {
 		action: "diagnostics",
-		// Failures and unverified files are a partial delivery; diagnostics themselves are the result.
-		icon: parsed.failures.length > 0 || parsed.unreported.length > 0 ? "warning" : "success",
+		// Errors and failed servers are an error state; warnings, unverified files and partial
+		// server failures a warning one, like the native view's tone.
+		icon:
+			errorCount > 0 || parsed.failures.length > 0
+				? "error"
+				: warnCount > 0 || parsed.unreported.length > 0 || parsed.warnings.length > 0
+					? "warning"
+					: "success",
 		meta,
 		rows(expanded) {
 			const rows = renderTreeList(
@@ -977,19 +986,32 @@ function describeLspDiagnostics(request: Partial<LspParams> | undefined, fallbac
 	} satisfies NativeToolView;
 }
 
-/** References grouped by file (§7.3): a file row with the count, then the `line:col` positions. */
+/**
+ * References grouped by file (§7.3): a file row with the count, then each referencing
+ * line as numbered source, which Tern highlights by the file's path. References past
+ * the tool's context limit come without source and list as `line:col` positions.
+ */
 function describeLspReferences(references: readonly LspLocation[]): NativeNode[] {
 	const nodes: NativeNode[] = [];
 	for (const [file, locations] of groupReferencesByFile(references)) {
-		const locs = locations.map(formatPosition);
 		const name = plainText(file);
+		const sourceLines: NumberedLine[] = [];
+		const positions: string[] = [];
+		for (const location of locations) {
+			const line = location.context.find(context => context.mark);
+			if (!line) positions.push(formatPosition(location));
+			// Two references on one line share its source row.
+			else if (sourceLines.at(-1)?.n !== line.n) sourceLines.push({ ...line, text: plainText(line.text) });
+		}
+		const chip = { text: String(locations.length), title: formatCount("reference", locations.length) };
 		nodes.push(
 			keyed(
 				col(
-					[
-						fileRow(name, { chip: { text: String(locs.length), title: formatCount("reference", locs.length) } }),
-						text([span(locs.join("  "), "mono muted")], { wrap: "word" }),
-					],
+					compact([
+						fileRow(name, { chip }),
+						numberedCode(sourceLines, { path: name }),
+						positions.length > 0 && text([span(positions.join("  "), "mono muted")], { wrap: "word" }),
+					]),
 					{ gap: "xs" },
 				),
 				name,
