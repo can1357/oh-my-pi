@@ -1514,6 +1514,52 @@ fn stopped(
 	}
 }
 
+/// Whether `vp` is a forked simple command of a `-c` shell's run: a
+/// pipeline stage or background job that is one simple command (its
+/// `SubExit`'s node). Bash runs it in a child that leaves an expansion error
+/// with the `-c` shell's status (127), where a subshell, a group or a
+/// command substitution keeps the failure status (1).
+fn forked_simple(vp: &Vproc) -> bool {
+	use crate::bash::event::NodeKind;
+	if !vp.transient || vp.jobs.comsub {
+		return false;
+	}
+	let [frame] = vp.frames.as_slice() else {
+		return false;
+	};
+	if frame.subshell_line.is_some() {
+		return false;
+	}
+	let Some(unit) = frame.unit.as_ref() else {
+		return false;
+	};
+	let at = |pc: u32| unit.ops.get(pc as usize);
+	let (Some(op), Some(exit)) = (at(frame.pc), at(frame.pc + 1)) else {
+		return false;
+	};
+	if op.code != Opcode::Exec || exit.code != Opcode::SubExit {
+		return false;
+	}
+	let (Some(me), Some(stage)) = (unit.nodes.get(op.node as usize), unit.nodes.get(exit.node as usize)) else {
+		return false;
+	};
+	// A background job's node is its list item: no compound command may
+	// stand between it and the command.
+	match stage.kind {
+		NodeKind::Simple => true,
+		NodeKind::Pipeline | NodeKind::AndOr => !unit.nodes.iter().any(|n| {
+			!matches!(
+				n.kind,
+				NodeKind::AndOr | NodeKind::Pipeline | NodeKind::Simple | NodeKind::Assign | NodeKind::Word
+			) && stage.lo <= n.lo
+				&& n.hi <= stage.hi
+				&& n.lo <= me.lo
+				&& me.hi <= n.hi
+		}),
+		_ => false,
+	}
+}
+
 /// Expansion errors end the shell: posix mode, not interactive.
 fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 	state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false)
@@ -1546,7 +1592,7 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 			// bash exits 127 from a `-c` string (`run_one_command`), 1 from a
 			// script and from a subshell (`execute_in_subshell` keeps the
 			// failure status); a nested shell (depth 0) is its own `-c` shell.
-			let command = super::subshell_depth(vp) == 0
+			let command = (super::subshell_depth(vp) == 0 || forked_simple(vp))
 				&& matches!(
 					state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
 					Ok(Some(Record::Misc(origin))) if origin.as_slice() == b"c"

@@ -41,6 +41,13 @@ pub struct Row {
 	/// What of Bash's diagnostic prefix the row compares ([`normalize`]).
 	#[serde(default)]
 	pub prefix: Prefix,
+	/// A program this shell runs dies by a signal that dumps core: whether
+	/// the report says `(core dumped)` is the host kernel's call (a
+	/// `core_pattern` pipe to a helper that gives up under load writes
+	/// none), so the row compares without that text. Under the oracle every
+	/// such row is a program's.
+	#[serde(default)]
+	pub host_core: bool,
 	pub status: i32,
 	pub output: String,
 }
@@ -190,7 +197,14 @@ pub async fn assert_rows(rows: Vec<Row>, parallel: usize) {
 	let mut mismatches = Vec::new();
 	while let Some(done) = set.join_next().await {
 		let (i, row, status, output) = done.expect("row task");
-		if (status, output.as_str()) != (Some(row.status), row.output.as_str()) {
+		let fold = |text: &str| {
+			if row.host_core || oracle().is_some() {
+				text.replace("(core dumped) ", "")
+			} else {
+				text.to_owned()
+			}
+		};
+		if (status, fold(&output)) != (Some(row.status), fold(&row.output)) {
 			mismatches.push((
 				i,
 				format!(
