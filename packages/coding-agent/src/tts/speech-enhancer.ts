@@ -16,6 +16,7 @@
  *   model.
  */
 import { type AssistantMessage, completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { roleCandidatePool } from "../config/model-roles";
@@ -105,7 +106,7 @@ export class SpeechEnhancer {
 				{ signal, provider: model.provider },
 			);
 			if (response.stopReason === "error") {
-				logger.debug("speech-enhancer: rewrite errored", { error: response.errorMessage });
+				logger.debug("speech-enhancer: rewrite errored", { error: errorDisplayText(response) });
 				return null;
 			}
 			return extractText(response.content);

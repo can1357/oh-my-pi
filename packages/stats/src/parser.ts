@@ -334,6 +334,7 @@ function extractModelUsageStats(
 				usage: entry.usage,
 				stopReason: entry.stopReason ?? "stop",
 				errorMessage: entry.errorMessage,
+				errorDisplayMessage: entry.errorDisplayMessage,
 				timestamp: Number.isFinite(timestamp) ? timestamp : 0,
 			},
 		},

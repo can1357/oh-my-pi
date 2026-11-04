@@ -79,6 +79,8 @@ export interface JudgmentUsage {
 	usage: Usage;
 	stopReason: AssistantMessage["stopReason"];
 	errorMessage?: string;
+	/** `errorMessage` as omp showed it, when that differs. Display only. */
+	errorDisplayMessage?: string;
 }
 
 export interface JudgeDeps {
@@ -512,11 +514,7 @@ export class ChainJudge implements Judge {
 					timeouts.set(timeoutKey, Date.now() + CANDIDATE_TIMEOUT_COOLDOWN_MS);
 					timedOutBefore = true;
 				}
-				const shown =
-					error instanceof Error && "errorDisplayMessage" in error && typeof error.errorDisplayMessage === "string"
-						? error.errorDisplayMessage
-						: undefined;
-				lastFailure = shown ?? (error instanceof Error ? error.message : String(error));
+				lastFailure = AIError.thrownErrorDisplayText(error);
 				logger.warn("judgment candidate failed", {
 					candidate: identity,
 					status: AIError.status(error),
@@ -629,6 +627,7 @@ export class ChainJudge implements Judge {
 					usage: attempt.usage,
 					stopReason: attempt.stopReason,
 					errorMessage: attempt.errorMessage,
+					errorDisplayMessage: attempt.errorDisplayMessage,
 					startedAt: attempt.timestamp,
 				}),
 		});
@@ -763,6 +762,7 @@ function nativeJudge(
 						usage: partial,
 						stopReason: isAbortOrTimeout(error) ? "aborted" : "error",
 						errorMessage: error instanceof Error ? error.message : String(error),
+						errorDisplayMessage: AIError.thrownErrorDisplayText(error),
 					});
 					throw error;
 				}

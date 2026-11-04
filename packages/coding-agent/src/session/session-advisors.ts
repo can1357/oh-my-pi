@@ -1640,7 +1640,7 @@ export class SessionAdvisors {
 				},
 				notifyFailure: error => {
 					this.#advisorStatuses.set(slug, { name: advisorName, status: "error" });
-					const message = error instanceof Error ? error.message : String(error);
+					const message = AIError.thrownErrorDisplayText(error);
 					this.#host.emitNotice(
 						"warning",
 						`Advisor${slug ? ` "${advisorName}"` : ""} unavailable for ${formatModelString(advisorAgent.state.model)}: ${message}`,

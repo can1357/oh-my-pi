@@ -4250,6 +4250,45 @@ describe("advisor", () => {
 			expect(resetCount).toBe(1);
 		});
 
+		it("gives the failure notice the failed turn's shown text while the error keeps the provider's", async () => {
+			const failures: unknown[] = [];
+			const shown = "HTTP 400 from http://127.0.0.1:11434/api/chat\nunknown model\nraw-http-request=/tmp/omp/4.json";
+			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
+			const agent: AdvisorAgent = {
+				prompt: async () => {
+					state.messages.push({
+						role: "assistant",
+						content: [],
+						stopReason: "error",
+						errorMessage: "HTTP 400\nunknown model",
+						errorDisplayMessage: shown,
+						timestamp: 2,
+					} as unknown as AgentMessage);
+					state.error = "HTTP 400\nunknown model";
+				},
+				abort: () => {},
+				reset: () => {
+					state.messages.length = 0;
+					state.error = undefined;
+				},
+				state,
+			};
+			const messages: AgentMessage[] = [];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				notifyFailure: error => failures.push(error),
+			};
+			const runtime = new AdvisorRuntime(agent, host, 0);
+			runtime.seedTo(0);
+
+			messages.push({ role: "user", content: "review this", timestamp: 1 } as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await settleUntil(() => failures.length > 0);
+
+			expect((failures[0] as Error).message).toBe("HTTP 400\nunknown model");
+			expect(AIError.thrownErrorDisplayText(failures[0])).toBe(shown);
+		});
+
 		it("drops only a double-overflowing batch and continues queued and later updates", async () => {
 			const overflowMessage = "context_length_exceeded: Your input exceeds the context window of this model.";
 			const promptInputs: Array<string | AgentMessage[]> = [];

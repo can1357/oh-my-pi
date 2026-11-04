@@ -125,6 +125,9 @@ const COST_UNPRICED_BACKFILL_KEY = "messages_cost_unpriced_v1";
 // Rows predating the `cost_no_cache_input` column are NULL; ingest always
 // writes a value, so one pass settles the column for good.
 const NO_CACHE_INPUT_BACKFILL_KEY = "cost_no_cache_input_v1";
+// Rows ingested before `error_display_message` existed have none; one full
+// re-parse fills it through the refreshing UPSERT in `insertMessageStats`.
+const ERROR_DISPLAY_BACKFILL_KEY = "messages_error_display_v1";
 // Zero-cost rows are repriced from the bundled catalog once per release (the
 // value stored is the version that ran it), since only a catalog update can
 // price a model it could not price before.
@@ -533,6 +536,7 @@ export async function initDb(): Promise<Database> {
 	backfillToolCalls(db);
 	backfillReingestCosts(db);
 	backfillUnpricedCosts(db);
+	backfillErrorDisplayMessages(db);
 	repairUserMessageLinks(db);
 	backfillPriorityPremiumRequests(db);
 	backfillAgentType(db);
@@ -1182,7 +1186,8 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			cost_total = excluded.cost_total,
 			cost_no_cache_input = excluded.cost_no_cache_input,
 			cost_unpriced = excluded.cost_unpriced,
-			service_tier = excluded.service_tier`,
+			service_tier = excluded.service_tier,
+			error_display_message = excluded.error_display_message`,
 	});
 	return atomically(db, () => {
 		for (const s of stats) {
@@ -1471,6 +1476,23 @@ function backfillUnpricedCosts(database: Database): void {
 }
 
 /**
+ * One-shot `file_offsets` wipe so the next sync re-parses every session and
+ * fills `error_display_message` on rows ingested before the column existed.
+ * Same sentinel protocol as {@link backfillUnpricedCosts}.
+ */
+function backfillErrorDisplayMessages(database: Database): void {
+	const row = database.query("SELECT value FROM meta WHERE key = ?").get(ERROR_DISPLAY_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	if (!shouldResetBackfill(row?.value)) return;
+
+	database.run("DELETE FROM file_offsets");
+	database
+		.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+		.run(ERROR_DISPLAY_BACKFILL_KEY, BACKFILL_PENDING);
+}
+
+/**
  * Reclassify pre-existing `messages` rows by agent type once, after the
  * `agent_type` column is added to an older database (every prior row defaulted
  * to 'main' on the ALTER). Classification is purely path-based — derived from
@@ -1597,6 +1619,7 @@ export function markSessionBackfillsComplete(): void {
 			PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY,
 			COST_REINGEST_BACKFILL_KEY,
 			COST_UNPRICED_BACKFILL_KEY,
+			ERROR_DISPLAY_BACKFILL_KEY,
 		]) {
 			markComplete.run(key, BACKFILL_COMPLETE);
 		}

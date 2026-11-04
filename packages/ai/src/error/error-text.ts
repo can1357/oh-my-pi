@@ -42,3 +42,14 @@ export function clearErrorText(
 	message.errorDisplayMessage = undefined;
 	message.errorRetryAfterMs = undefined;
 }
+
+/**
+ * The shown text of a thrown failure: the `errorDisplayMessage` a caller
+ * attached beside the provider's text it threw (request-dump path, endpoint),
+ * else the error's message. Display only: classify the error, never this.
+ */
+export function thrownErrorDisplayText(error: unknown): string {
+	if (!(error instanceof Error)) return String(error);
+	const shown = "errorDisplayMessage" in error ? error.errorDisplayMessage : undefined;
+	return typeof shown === "string" && shown.length > 0 ? shown : error.message;
+}

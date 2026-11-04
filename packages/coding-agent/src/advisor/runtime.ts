@@ -1384,7 +1384,16 @@ export class AdvisorRuntime {
 					// resolves prompt() cleanly with stopReason: "error". Treat that
 					// as a failed turn so endpoint rejections trip the retry path.
 					const promptError = this.agent.state.error;
-					if (promptError) throw new Error(promptError);
+					if (promptError) {
+						// The message stays the provider's text, which the retry path
+						// classifies; the shown text rides beside it for the failure notice.
+						const last = this.agent.state.messages.at(-1);
+						const shown = last?.role === "assistant" ? last.errorDisplayMessage : undefined;
+						throw Object.assign(
+							new Error(promptError),
+							shown === undefined ? {} : { errorDisplayMessage: shown },
+						);
+					}
 					// A content-less stop is a deliberate silent review — the documented
 					// verifier behavior ("prefer silence when the agent is on track") — and
 					// completes the turn. Sessions can legitimately have nothing to advise

@@ -46,4 +46,71 @@ describe("failed request error text", () => {
 			errorDisplayMessage: shown,
 		});
 	});
+
+	it("fills the shown text when a row stored without it is ingested again", async () => {
+		const dir = path.join(getSessionsDir(), "--tmp--error-display-reingest");
+		await fs.mkdir(dir, { recursive: true });
+		const file = path.join(dir, "session.jsonl");
+		const shown = "HTTP 400 from http://127.0.0.1:11434/api/chat\nraw-http-request=/tmp/omp/2.json";
+		await Bun.write(
+			file,
+			`${JSON.stringify({
+				type: "message",
+				id: "failed-2",
+				parentId: null,
+				timestamp: "2026-11-03T10:00:00.000Z",
+				message: {
+					role: "assistant",
+					content: [],
+					api: "ollama-chat",
+					provider: "ollama",
+					model: "llama3",
+					stopReason: "error",
+					errorMessage: "HTTP 400",
+					errorDisplayMessage: shown,
+					usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1 },
+					timestamp: 1,
+				},
+			})}\n`,
+		);
+		const result = await parseSessionFile(file);
+		await initDb();
+		// A row an older ingest stored before the column existed.
+		insertMessageStats(result.stats.map(row => ({ ...row, errorDisplayMessage: null })));
+		insertMessageStats(result.stats);
+		expect(getRecentRequests(1)[0]).toMatchObject({ entryId: "failed-2", errorDisplayMessage: shown });
+	});
+
+	it("keeps a journaled model call's shown text", async () => {
+		const dir = path.join(getSessionsDir(), "--tmp--error-display-usage");
+		await fs.mkdir(dir, { recursive: true });
+		const file = path.join(dir, "session.jsonl");
+		const shown = "HTTP 400 from http://127.0.0.1:11434/api/chat\nraw-http-request=/tmp/omp/3.json";
+		await Bun.write(
+			file,
+			`${JSON.stringify({
+				type: "model_usage",
+				id: "judge-1",
+				parentId: null,
+				timestamp: "2026-11-03T10:00:00.000Z",
+				purpose: "judgment",
+				role: "judge",
+				api: "ollama-chat",
+				provider: "ollama",
+				model: "llama3",
+				stopReason: "error",
+				errorMessage: "HTTP 400",
+				errorDisplayMessage: shown,
+				usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1 },
+			})}\n`,
+		);
+		const result = await parseSessionFile(file);
+		await initDb();
+		expect(insertMessageStats(result.stats)).toBe(1);
+		expect(getRecentRequests(1)[0]).toMatchObject({
+			entryId: "judge-1",
+			errorMessage: "HTTP 400",
+			errorDisplayMessage: shown,
+		});
+	});
 });
