@@ -11,6 +11,7 @@ use std::{
 	time::Instant,
 };
 
+use core_graphics::geometry::CGPoint;
 use parking_lot::Mutex;
 
 use super::{CoreResult, DesktopError, EmergencyStop, intervention::UserInputs};
@@ -31,6 +32,8 @@ const KEY_DOWN: u32 = 10;
 const OTHER_MOUSE_DOWN: u32 = 25;
 const SESSION_TAP: u32 = 1;
 const ANNOTATED_SESSION_TAP: u32 = 2;
+/// Left, right and other mouse buttons going down and up (`CGEventType`).
+const MOUSE_BUTTON_MASK: u64 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 25) | (1 << 26);
 type Ref = *mut c_void;
 type ConstRef = *const c_void;
 type Callback = unsafe extern "C" fn(Ref, u32, Ref, Ref) -> Ref;
@@ -60,6 +63,7 @@ unsafe extern "C" {
 		user: Ref,
 	) -> Ref;
 	fn CGEventGetIntegerValueField(event: Ref, field: u32) -> i64;
+	fn CGEventGetLocation(event: Ref) -> CGPoint;
 	fn CGEventGetFlags(event: Ref) -> u64;
 	fn CGEventTapEnable(tap: Ref, enable: bool);
 }
@@ -499,6 +503,51 @@ unsafe extern "C" fn observe_user(_proxy: Ref, kind: u32, event: Ref, user: Ref)
 	event
 }
 
+/// What [`ButtonMonitor`] hands each of the user's mouse button presses and
+/// releases: whether it pressed a button rather than released one, and where
+/// the pointer was when it happened.
+pub(crate) type ButtonSeen = Box<dyn Fn(bool, CGPoint) + Send>;
+
+/// Whether a mouse button event of `kind` is the user's press (`Some(true)`)
+/// or release (`Some(false)`); `None` for one this process posted, as its
+/// background clicks reach the session tap too, though they leave the HID
+/// button counters as they were.
+const fn user_button(kind: u32, tag: i64, source_pid: i64, own_pid: i64) -> Option<bool> {
+	if foreign(tag, source_pid, own_pid) {
+		Some(is_pointer_press(kind))
+	} else {
+		None
+	}
+}
+
+unsafe extern "C" fn observe_button(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
+	// SAFETY: the monitor thread retains this stack context through
+	// invalidation.
+	let context = unsafe { &*(user.cast::<TapContext<ButtonSeen>>()) };
+	if kind == u32::MAX || kind == u32::MAX - 1 {
+		// SAFETY: the event tap remains alive until this callback returns.
+		unsafe {
+			CGEventTapEnable(context.tap, true);
+		}
+		return event;
+	}
+	if !event.is_null() {
+		// SAFETY: documented read-only CGEvent fields and location of a live
+		// event.
+		let (tag, source, point) = unsafe {
+			(
+				CGEventGetIntegerValueField(event, SOURCE_USER_DATA),
+				CGEventGetIntegerValueField(event, SOURCE_UNIX_PID),
+				CGEventGetLocation(event),
+			)
+		};
+		if let Some(press) = user_button(kind, tag, source, i64::from(std::process::id())) {
+			(context.inner)(press, point);
+		}
+	}
+	event
+}
+
 unsafe extern "C" fn stop_loop(_: Ref) {
 	// SAFETY: this callback runs on the monitor's own run loop.
 	unsafe {
@@ -663,6 +712,28 @@ impl UserInputMonitor {
 	}
 }
 
+/// Hands each of the user's mouse button presses and releases in the session,
+/// with where the pointer was, to a callback on the tap's own thread, which
+/// nothing else holds up, until drop; this process's own are left out.
+/// Without event-listening access the tap starts but sees nothing.
+pub(crate) struct ButtonMonitor {
+	_tap: TapThread,
+}
+
+impl ButtonMonitor {
+	pub(crate) fn start(seen: ButtonSeen) -> CoreResult<Self> {
+		let tap = TapThread::start(
+			"desktop-button-events",
+			"mouse button",
+			SESSION_TAP,
+			MOUSE_BUTTON_MASK,
+			seen,
+			observe_button,
+		)?;
+		Ok(Self { _tap: tap })
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -779,6 +850,20 @@ mod tests {
 		assert!(!foreign(SYNTHETIC_EVENT_TAG, 4242, own));
 		// An untagged event this process posted is still its own.
 		assert!(!foreign(0, own, own));
+	}
+
+	#[test]
+	fn the_button_tap_hands_on_only_the_users_presses_and_releases() {
+		const LEFT_MOUSE_UP: u32 = 2;
+		let own = 900;
+		assert_eq!(user_button(LEFT_MOUSE_DOWN, 0, 0, own), Some(true));
+		assert_eq!(user_button(LEFT_MOUSE_UP, 0, 0, own), Some(false));
+		assert_eq!(user_button(OTHER_MOUSE_DOWN, 0, 4242, own), Some(true));
+		// A background click of this process's, relayed through the session tap.
+		for kind in [LEFT_MOUSE_DOWN, LEFT_MOUSE_UP] {
+			assert_eq!(user_button(kind, SYNTHETIC_EVENT_TAG, 0, own), None);
+			assert_eq!(user_button(kind, 0, own, own), None);
+		}
 	}
 
 	#[test]
