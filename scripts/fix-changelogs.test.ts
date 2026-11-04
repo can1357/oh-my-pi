@@ -558,6 +558,19 @@ describe("changelog headings", () => {
 		);
 	});
 
+	it("fixes a changelog whose entry shows `[^note]:` as inline code, which defines no footnote", async () => {
+		const content = CLEAN.replace(
+			"## [Unreleased]",
+			"## [Unreleased]\n\n### Added\n\n- Documented the `[^note]:` footnote syntax",
+		);
+		const fixed = await fixChangelogFile("packages/a/CHANGELOG.md", content, {
+			promotableAddedItemStartLines: new Set<number>(),
+			maxBytes: Number.POSITIVE_INFINITY,
+			archiveCommit: async () => undefined,
+		});
+		expect(fixed.content).toContain("- Documented the `[^note]:` footnote syntax\n");
+	});
+
 	// `bun run release` finds `## [Unreleased]` with nothing after it; read as [Unreleased], these would stay unreleased.
 	it.each([
 		{ name: "closing #s", heading: "## [Unreleased] ##" },

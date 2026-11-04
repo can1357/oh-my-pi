@@ -195,11 +195,49 @@ export function describeHeadingMismatch(mismatch: HeadingMismatch): string {
 const HTML_HEADING_TAG = /<h[1-6](?=[\s/>])/gi;
 
 /**
- * A footnote definition, anywhere in a line. GitHub renders a definition's
- * text as Markdown at the end of the page, so `[^n]: ## [9.9.9]` is a release
- * heading there; Bun's renderer has no footnotes and shows it as text.
+ * A line that may hold a footnote definition: `[^label]:` after nothing but
+ * indentation and list or quote markers. GitHub renders a definition's text as
+ * Markdown at the end of the page, so `[^n]: ## [9.9.9]` is a release heading
+ * there; Bun's renderer has no footnotes and shows it as text.
  */
-const FOOTNOTE_DEFINITION = /\[\^[^\]\n]*\]:/;
+const FOOTNOTE_CANDIDATE = /^[ \t>*+\-\d.)]*\[\^[^\]\n]*\]:/;
+
+/**
+ * The first line (0-based) that holds a footnote definition, or -1. A
+ * candidate defines one unless Markdown puts it in a code block, or in an HTML
+ * block outside a list item, where GitHub shows it as code or hides it;
+ * anywhere else (a paragraph, a list item, a quote, a line that continues a
+ * paragraph) it counts, as GitHub may read it there. `[^label]:` after other
+ * text, such as inline code in an entry, is never a definition.
+ */
+function footnoteDefinitionLine(lines: readonly string[]): number {
+	const candidates = lines.flatMap((line, index) => (FOOTNOTE_CANDIDATE.test(line) ? [index] : []));
+	if (candidates.length === 0) return -1;
+	// A marker no changelog can forge, just before the `[^` of each candidate; it changes no block.
+	const nonce = crypto.randomUUID();
+	const marker = (index: number) => `\uE000${nonce}:${index}\uE001`;
+	const marked = [...lines];
+	for (const index of candidates) {
+		const line = lines[index] ?? "";
+		const at = line.indexOf("[^");
+		marked[index] = `${line.slice(0, at)}${marker(index)}${line.slice(at)}`;
+	}
+	const shown = new Set<number>();
+	const collect = (children: string) => {
+		for (const index of candidates) if (children.includes(marker(index))) shown.add(index);
+		return children;
+	};
+	// A code block's text never reaches the blocks around it; an HTML block's reaches only a list item around it.
+	Bun.markdown.render(marked.join("\n"), {
+		code: () => "",
+		paragraph: collect,
+		heading: collect,
+		listItem: collect,
+		td: collect,
+		th: collect,
+	});
+	return candidates.find(index => shown.has(index)) ?? -1;
+}
 
 /** A line marker between two private-use characters, which have no Markdown meaning. */
 const LINE_MARKER = /\uE000[^\uE001]*\uE001/g;
@@ -260,7 +298,7 @@ function describeHeading(heading: ShownHeading | undefined): string {
 export function findHeadingMismatch(content: string): HeadingMismatch | undefined {
 	const lines = splitContentLines(content);
 	const read = readHeadingLines(lines);
-	const footnote = lines.findIndex(line => FOOTNOTE_DEFINITION.test(line));
+	const footnote = footnoteDefinitionLine(lines);
 	// Each line the tools read ends with a marker no changelog can forge, so a
 	// heading Markdown shows is matched to its own line, not to another line with
 	// the same text. A marker at the end of an ATX heading line changes no block.

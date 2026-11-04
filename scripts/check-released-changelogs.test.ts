@@ -1548,6 +1548,33 @@ describe("check-released-changelogs", () => {
 		TEST_TIMEOUT_MS,
 	);
 
+	// GitHub reads a footnote definition only where a block can start; elsewhere `[^note]:` is text.
+	test.each([
+		{ name: "inline code inside an entry", text: "- Documented the `[^note]:` footnote syntax" },
+		{ name: "text inside an entry", text: "- Fixed parsing of [^note]: definitions" },
+		{ name: "a fenced code block", text: "```\n[^note]: ## [9.9.9]\n```" },
+		{ name: "an indented code block", text: "Syntax:\n\n    [^note]: ## [9.9.9]" },
+		{ name: "an HTML comment", text: "<!--\n[^note]: ## [9.9.9]\n-->" },
+	])("passes [^note]: in $name, where it defines no footnote", async ({ text }) => {
+		const options = { release: false, readArchive: async () => undefined };
+		const added = BASE_CHANGELOG.replace(`${FIRST_ENTRY}\n`, `${FIRST_ENTRY}\n\n${text}\n`);
+		expect((await findReleasedSectionChanges(CHANGELOG, BASE_CHANGELOG, added, options)).changes).toEqual([]);
+		expect((await findReleasedSectionChanges(CHANGELOG, added, added, options)).changes).toEqual([]);
+	});
+
+	test.each([
+		{ name: "in a list item", text: "- [^note]: ## [9.9.9]" },
+		{ name: "in a quote", text: "> [^note]: ## [9.9.9]" },
+		{ name: "indented three spaces", text: "   [^note]: ## [9.9.9]" },
+		{ name: "on a line that continues a paragraph", text: "Shipped.\n[^note]: ## [9.9.9]" },
+	])("still fails a footnote definition $name", async ({ text }) => {
+		const options = { release: false, readArchive: async () => undefined };
+		const added = BASE_CHANGELOG.replace(`${FIRST_ENTRY}\n`, `${FIRST_ENTRY}\n\n${text}\n`);
+		const { changes } = await findReleasedSectionChanges(CHANGELOG, BASE_CHANGELOG, added, options);
+		expect(changes.map(change => change.problem)).toEqual(["heading"]);
+		expect(changes[0]?.heading).toContain("Markdown shows a footnote definition");
+	});
+
 	test(
 		"matches a heading to its own line, not its text, so a reference link that renders a release heading as a link passes",
 		async () => {
