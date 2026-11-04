@@ -596,6 +596,24 @@ export function createCodeFrameStyler(
 }
 
 // =============================================================================
+// Search card headers (TUI renderers)
+// =============================================================================
+
+/**
+ * Search header subject, `pattern in scope`, with `in` dim so the pattern and
+ * the scope read as two parts of one subject. Counts follow it as status meta.
+ */
+export function formatScopedSubject(
+	subject: string | undefined,
+	scope: string | undefined,
+	theme: Theme,
+): string | undefined {
+	if (!scope) return subject;
+	const keyword = theme.fg("dim", "in");
+	return subject ? `${subject} ${keyword} ${scope}` : `${keyword} ${scope}`;
+}
+
+// =============================================================================
 // Native (TSP) description of grouped output
 // =============================================================================
 

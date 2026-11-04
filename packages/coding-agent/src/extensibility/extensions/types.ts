@@ -74,7 +74,7 @@ import type {
 	TUI,
 } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
-import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import type { AppKeybinding, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type { CodeReviewAnnotation, TextReviewAnnotation } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 export type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
@@ -1788,6 +1788,18 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
 		: ServiceTier;
 
 /**
+ * What holds a keyboard chord, as reported by {@link ExtensionAPI.getShortcutConflict}.
+ *
+ * - `reserved`: omp keeps the chord; a shortcut on it is never bound.
+ * - `keybinding`: these `app.*` actions are bound to it; where they apply they usually take the key first.
+ * - `extension`: another extension's shortcut is on it; only one of them runs.
+ */
+export type ShortcutConflict =
+	| { kind: "reserved" }
+	| { kind: "keybinding"; keybindings: AppKeybinding[] }
+	| { kind: "extension"; extensionPath: string };
+
+/**
  * ExtensionAPI passed to extension factory functions.
  *
  * Methods retain their extension binding when destructured or passed as callbacks.
@@ -1976,6 +1988,19 @@ export interface ExtensionAPI {
 			handler: (ctx: ExtensionContext) => Promise<void> | void;
 		},
 	): void;
+
+	/**
+	 * What already holds `shortcut`, or `undefined` when it is free. Chords compare as the TUI matches
+	 * them (`alt+ctrl+x` is `ctrl+alt+x`; `?` also covers `shift+?`); this extension's own
+	 * registrations don't count. The first of `reserved`, `keybinding`, `extension` is reported.
+	 * Keybindings come from this session's TUI keymap (user remaps included), or omp's defaults
+	 * without a TUI.
+	 *
+	 * Throws while extensions are loading, so call it from a handler, not the factory. Shortcuts are
+	 * bound before `session_start`, so a chord validated there applies once the factory registers it
+	 * on the next start.
+	 */
+	getShortcutConflict(shortcut: KeyId): ShortcutConflict | undefined;
 
 	/** Register a CLI flag. */
 	registerFlag(
@@ -2330,6 +2355,8 @@ export interface ExtensionRuntimeState {
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
 	/** Remove a queued or initialized provider registration. */
 	unregisterProvider(name: string, sourceId: string): void;
+	/** What holds `shortcut` for the extension at `extensionPath`; answered by the runner once it exists. */
+	getShortcutConflict(shortcut: KeyId, extensionPath: string): ShortcutConflict | undefined;
 }
 
 /** Action implementations for ExtensionAPI methods. */
@@ -2366,6 +2393,8 @@ export interface ExtensionContextActions {
 	getPendingPlanReview?: () => PlanReviewRequestedEvent | undefined;
 	openPlanReview?: () => Promise<boolean>;
 	sessionModes?: ExtensionSessionModes;
+	/** The host's effective keymap, user remaps included; omitted outside the TUI, where omp's default keymap applies. */
+	keybindings?: KeybindingsManager;
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	getSystemPrompt: () => string[];
