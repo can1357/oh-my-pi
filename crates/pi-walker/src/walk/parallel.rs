@@ -34,7 +34,10 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use tokio::{sync::mpsc, task::AbortHandle};
+use tokio::{
+	sync::mpsc,
+	task::{AbortHandle, coop::consume_budget},
+};
 
 use super::{
 	Action, Batch, DirError, Entry, Options, WalkError, Worker, absolute_root,
@@ -879,6 +882,11 @@ impl<K: Sink> Ctx<K> {
 			if self.shared.halted() {
 				break;
 			}
+			// Native listings never suspend, so spend this task's coop budget per
+			// entry. Without it the walk's workers hold every runtime thread until
+			// the walk ends, and the deadline or abort raced against it
+			// (`select!` in the natives) never gets to run and stop it.
+			consume_budget().await;
 			let name = listing.name(record);
 			if pruned(name, opts.hidden, opts.skip_git, opts.skip_node_modules) {
 				continue;
@@ -916,22 +924,23 @@ impl<K: Sink> Ctx<K> {
 			if let Some(ignorer) = &self.ignorer
 				&& ignorer.ignored(frame.map(|frame| &**frame), path, is_dir, ign)
 			{
+				if let Some(bytes) = kept {
+					arena.release(bytes);
+				}
 				continue;
 			}
 			let mut entry = Entry { path, file_type, depth, size, mtime };
 			let mut worker = Worker { fs: &self.fs, root: &self.root, abs: &mut *abs };
-			match self.sink.visit(&mut worker, &mut entry, &mut batch) {
+			let action = self.sink.visit(&mut worker, &mut entry, &mut batch);
+			let mut stored = false;
+			match action {
 				Action::Stop => {
 					self.shared.halt();
 					break;
 				},
-				Action::SkipDir => continue,
-				Action::Skip => {},
-				Action::Continue => {
-					if K::COLLECTS
-						&& let Some(bytes) = kept
-					{
-						let stored = Stored {
+				Action::Continue if K::COLLECTS => {
+					if let Some(bytes) = kept {
+						let collected_entry = Stored {
 							path: bytes,
 							file_type: entry.file_type,
 							depth,
@@ -939,19 +948,29 @@ impl<K: Sink> Ctx<K> {
 							mtime: entry.mtime,
 						};
 						if job.out.is_some() {
-							items
-								.push(Item { name: bytes.tail(name.len()), kind: ItemKind::Entry(stored) });
+							items.push(Item {
+								name: bytes.tail(name.len()),
+								kind: ItemKind::Entry(collected_entry),
+							});
 						} else {
-							unordered.push(stored);
+							unordered.push(collected_entry);
 						}
+						stored = true;
 						collected += 1;
 					}
 				},
+				Action::Continue | Action::Skip | Action::SkipDir => {},
 			}
-			if !is_dir || !descend {
+			let queued = is_dir && descend && action != Action::SkipDir;
+			let Some(bytes) = kept.filter(|_| queued) else {
+				// Neither returned nor walked into: hand the path back, so a walk
+				// holds the paths it returns and those of the directories it
+				// enters, not one path per entry it has seen.
+				if !stored && let Some(bytes) = kept {
+					arena.release(bytes);
+				}
 				continue;
-			}
-			let Some(bytes) = kept else { continue };
+			};
 			// A linked directory opens by path: `open_child` refuses symlinks.
 			let parent = match dir {
 				Some(dir) if record.file_type != FileType::Symlink => {

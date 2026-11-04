@@ -3,7 +3,10 @@
 //! Chunks never move or shrink once allocated, so a [`Bytes`] handle stays
 //! valid for as long as the arena that produced it, even while the arena
 //! keeps growing on another thread or has been moved into a
-//! [`super::Collection`].
+//! [`super::Collection`]. The one exception is [`Arena::release`]: the walk
+//! gives back the path it carved last when it keeps nothing of it, so the
+//! arena holds the paths the walk returns and those of the directories it
+//! enters, not one per entry it has seen.
 
 use std::{mem::MaybeUninit, ptr::NonNull};
 
@@ -116,5 +119,58 @@ impl Arena {
 		}
 		self.used += len;
 		Bytes { ptr: start, len }
+	}
+
+	/// Gives back the bytes of the latest [`Self::push`] when nothing kept
+	/// them; the next push reuses the space. A handle that is not the latest
+	/// push is left in place. The caller must not read `bytes` afterwards.
+	pub(crate) fn release(&mut self, bytes: Bytes) {
+		let Some(chunk) = self.chunks.last() else {
+			return;
+		};
+		// SAFETY: `used <= cap`, so this is inside or one past the chunk.
+		let end = unsafe { chunk.ptr.add(self.used) }.cast::<u8>();
+		// SAFETY: `bytes` came from a push, so its end is inside or one past
+		// the chunk that holds it.
+		if bytes.len > 0 && unsafe { bytes.ptr.add(bytes.len) } == end {
+			self.used -= bytes.len;
+		}
+	}
+
+	/// Bytes of chunks allocated, used or not.
+	#[cfg(test)]
+	pub(crate) fn held(&self) -> usize {
+		self.chunks.iter().map(|chunk| chunk.cap).sum()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::Arena;
+
+	/// Only the latest push is given back: releasing an older handle leaves
+	/// it and every later path intact, and the next push reuses released
+	/// space.
+	#[test]
+	fn release_rewinds_only_the_latest_push() {
+		let mut arena = Arena::default();
+		let first = arena.push(&[b"first"]);
+		let second = arena.push(&[b"sec", b"ond"]);
+		arena.release(first);
+		let third = arena.push(&[b"third"]);
+		// SAFETY: `arena` outlives every read below.
+		unsafe {
+			assert_eq!(first.get(), b"first");
+			assert_eq!(second.get(), b"second");
+			assert_eq!(third.get(), b"third");
+		}
+		arena.release(third);
+		let fourth = arena.push(&[b"4th"]);
+		assert_eq!(fourth.ptr, third.ptr, "the released bytes are reused");
+		// SAFETY: as above.
+		unsafe {
+			assert_eq!(second.get(), b"second");
+			assert_eq!(fourth.get(), b"4th");
+		}
 	}
 }
