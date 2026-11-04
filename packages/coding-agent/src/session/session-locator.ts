@@ -177,32 +177,243 @@ export function recordSessionLocation(
 	}
 }
 
+/** A tree record that could not finish (an index or file it could not read or write), kept to try again. */
+interface PendingTreeRecord {
+	file: string;
+	roots: readonly string[] | undefined;
+	previousFile: string | undefined;
+	options: { artifactsOnly?: boolean };
+}
+
+/**
+ * Pending tree records, kept on disk beside each root's index so a later
+ * process finishes what an exited one could not. One record per line:
+ * `<file>\t<previous file or empty>\t<1 for artifacts only, else 0>[\t<root>…]`,
+ * paths percent-encoded like index lines. Rewritten whole (staged, renamed)
+ * under its own per-root lock; it holds only unfinished records, so it stays tiny.
+ */
+const PENDING_FILE = ".session-index.pending.tsv";
+const pendingTreeRecords = new Map<string, PendingTreeRecord>();
+/** Records this process knows are on disk, so finishing one also removes its line. */
+const persistedPendingFiles = new Set<string>();
+/** Least time between retries of the pending tree records, and between reads of the pending files. */
+const TREE_RETRY_INTERVAL_MS = 30_000;
+/** When this process last retried its pending records; only a run that had records to retry sets it. */
+let lastTreeRetry = 0;
+/** When this process last read the roots' pending files. */
+let lastPendingLoad = 0;
+let treeRetry: Promise<void> | undefined;
+
+function pendingRootFor(record: PendingTreeRecord): string {
+	return owningRoot(path.resolve(record.file), record.roots ?? sessionLocatorRoots())?.root ?? getSessionsDir();
+}
+
+function serializePending(record: PendingTreeRecord): string {
+	return [
+		encodeStoredPath(record.file),
+		encodeStoredPath(record.previousFile ?? ""),
+		record.options.artifactsOnly ? "1" : "0",
+		...(record.roots ?? []).map(encodeStoredPath),
+	].join("\t");
+}
+
+async function readPendingFile(target: string): Promise<Map<string, PendingTreeRecord>> {
+	const records = new Map<string, PendingTreeRecord>();
+	let text: string;
+	try {
+		text = await Bun.file(target).text();
+	} catch (error) {
+		if (isEnoent(error) || isEnotdir(error)) return records;
+		throw error;
+	}
+	for (const line of text.split("\n")) {
+		const [file, previous, flag, ...roots] = line.split("\t");
+		if (!file || flag === undefined) continue;
+		const decoded = decodeStoredPath(file);
+		records.set(decoded, {
+			file: decoded,
+			previousFile: previous ? decodeStoredPath(previous) : undefined,
+			options: { artifactsOnly: flag === "1" },
+			roots: roots.length > 0 ? roots.map(decodeStoredPath) : undefined,
+		});
+	}
+	return records;
+}
+
+/** Add (`record`) or remove (`undefined`) `file`'s line in its root's pending file. False when it could not be written. */
+async function updatePendingFile(root: string, file: string, record: PendingTreeRecord | undefined): Promise<boolean> {
+	const target = path.join(root, PENDING_FILE);
+	try {
+		await withFileLock(
+			path.join(await fs.promises.realpath(root), PENDING_FILE),
+			async () => {
+				const records = await readPendingFile(target);
+				if (record) records.set(file, record);
+				else if (!records.delete(file)) return;
+				if (records.size === 0) {
+					await fs.promises.rm(target, { force: true });
+					return;
+				}
+				const staged = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
+				try {
+					await fs.promises.writeFile(staged, `${[...records.values()].map(serializePending).join("\n")}\n`, {
+						mode: 0o600,
+					});
+					await fs.promises.rename(staged, target);
+				} catch (error) {
+					await fs.promises.rm(staged, { force: true });
+					throw error;
+				}
+			},
+			{ retries: 600, retryDelayMs: 100 },
+		);
+		return true;
+	} catch (error) {
+		logger.warn("Session index pending file could not be updated", { target, error: String(error) });
+		return false;
+	}
+}
+
+/** Pick up the records other (perhaps exited) processes left in each root's pending file. */
+async function loadPersistedPendingTrees(roots: readonly string[]): Promise<void> {
+	for (const root of roots) {
+		let records: Map<string, PendingTreeRecord>;
+		try {
+			records = await readPendingFile(path.join(root, PENDING_FILE));
+		} catch (error) {
+			logger.debug("Session index pending file unreadable", { root, error: String(error) });
+			continue;
+		}
+		for (const [file, record] of records) {
+			persistedPendingFiles.add(file);
+			if (!pendingTreeRecords.has(file)) pendingTreeRecords.set(file, record);
+		}
+	}
+}
+
+/**
+ * Try again every tree record that could not finish: this process's, and the
+ * ones earlier processes left on disk (read at most once per
+ * {@link TREE_RETRY_INTERVAL_MS}). Records are retried at most once per
+ * interval too, an interval that starts only when there was something to
+ * retry, so ordinary writes and lookups never hold back the first retry of a
+ * fresh failure. Returns the run in progress, if any.
+ */
+function startPendingTreeRetry(roots?: readonly string[]): Promise<void> | undefined {
+	if (treeRetry) return treeRetry;
+	const now = Date.now();
+	const loadDue = now - lastPendingLoad >= TREE_RETRY_INTERVAL_MS;
+	const retryDue = pendingTreeRecords.size > 0 && now - lastTreeRetry >= TREE_RETRY_INTERVAL_MS;
+	if (!loadDue && !retryDue) return undefined;
+	treeRetry = (async () => {
+		if (loadDue) {
+			lastPendingLoad = Date.now();
+			await loadPersistedPendingTrees(roots ?? sessionLocatorRoots());
+		}
+		if (pendingTreeRecords.size === 0 || Date.now() - lastTreeRetry < TREE_RETRY_INTERVAL_MS) return;
+		lastTreeRetry = Date.now();
+		// Deleting a finished entry, or re-setting an unfinished one, during the walk is safe for a Map.
+		for (const pending of pendingTreeRecords.values()) {
+			await recordSessionTree(pending.file, pending.roots, pending.previousFile, pending.options);
+		}
+	})()
+		.catch(error => logger.debug("Session tree retry failed", { error: String(error) }))
+		.finally(() => {
+			treeRetry = undefined;
+		});
+	return treeRetry;
+}
+
+/**
+ * Try the pending tree records again in the background. `SessionManager`
+ * calls this on each durable write, so a session moved while its index could
+ * not be written or read is recorded once it can be, by this process or by
+ * any later one. Cheap when nothing is pending.
+ */
+export function retryPendingSessionTrees(): void {
+	void startPendingTreeRetry();
+}
+
+/**
+ * Test-only: await the tree retry a write or lookup started, and reset the
+ * in-memory queue and its interval (as a fresh process starts) between
+ * tests. Not part of the supported API.
+ */
+export const __sessionTreeRetryForTests = {
+	async settled(): Promise<void> {
+		await treeRetry;
+	},
+	clear(): void {
+		pendingTreeRecords.clear();
+		persistedPendingFiles.clear();
+		lastTreeRetry = 0;
+		lastPendingLoad = 0;
+	},
+};
+
 /**
  * Record `file` (a session transcript) and every transcript nested in its
- * artifact directory (subagent sessions), by the id in each file's header. For
- * a `.jsonl.gz` transcript the id comes from its `<timestamp>_<id>` name. An
- * unreadable directory in the tree is skipped without losing the rest. When
- * the tree was just moved or copied from `previousFile`, a transcript whose
- * header cannot be read keeps the id the index recorded for it at its old
- * path, and so does every transcript under a directory it cannot enter.
- * `artifactsOnly` leaves `file` itself out (a fork's journal holds its own id).
- * Reads only that one session's tree.
+ * artifact directory (subagent sessions), by the id in each file's header (a
+ * `.jsonl.gz` by the header inside it). An unreadable directory in the tree
+ * is skipped without losing the rest. When the tree was just moved or copied
+ * from `previousFile`, a transcript whose header cannot be read keeps every
+ * id the index recorded for it at its old path, and so does every transcript
+ * under a directory it cannot enter. `artifactsOnly` leaves `file` itself out
+ * (a fork's journal holds its own id). Reads only that one session's tree.
+ *
+ * Returns whether everything was recorded. When something could not be read
+ * or written (a transcript, a directory, an index file, the log), the record
+ * is kept, in memory and in its root's pending file, and tried again by
+ * {@link retryPendingSessionTrees} and before every lookup, in this process
+ * or any later one, until it finishes or `file` no longer exists there.
  */
 export async function recordSessionTree(
 	file: string,
-	roots: readonly string[] = sessionLocatorRoots(),
+	roots?: readonly string[],
 	previousFile?: string,
 	options: { artifactsOnly?: boolean } = {},
-): Promise<void> {
+): Promise<boolean> {
+	const complete = await recordSessionTreeOnce(file, roots ?? sessionLocatorRoots(), previousFile, options);
+	const record: PendingTreeRecord = { file, roots, previousFile, options };
+	if (complete) {
+		pendingTreeRecords.delete(file);
+		if (persistedPendingFiles.delete(file)) await updatePendingFile(pendingRootFor(record), file, undefined);
+	} else {
+		pendingTreeRecords.set(file, record);
+		if (await updatePendingFile(pendingRootFor(record), file, record)) persistedPendingFiles.add(file);
+	}
+	return complete;
+}
+
+async function recordSessionTreeOnce(
+	file: string,
+	roots: readonly string[],
+	previousFile: string | undefined,
+	options: { artifactsOnly?: boolean },
+): Promise<boolean> {
 	const artifacts = artifactsOf(file);
-	if (artifacts === undefined) return;
+	if (artifacts === undefined) return true;
+	// Gone from here (moved again, removed): whatever is left to record belongs to its new place.
+	try {
+		await fs.promises.lstat(options.artifactsOnly ? artifacts : file);
+	} catch (error) {
+		if (isEnoent(error) || isEnotdir(error)) return true;
+	}
+	let complete = true;
+	const record = (id: string, transcript: string): void => {
+		if (!recordSessionLocation(id, transcript, roots)) complete = false;
+	};
 	const files = options.artifactsOnly ? [] : [file];
 	const unreadable: SessionLocatorRebuild["unreadable"] = [];
 	try {
 		await scanTranscripts(artifacts, false, files, unreadable);
 	} catch (error) {
 		logger.debug("Session tree scan failed", { artifacts, error: String(error) });
+		complete = false;
 	}
+	// The artifact directory not existing is not a failure: a session may have none.
+	const unreadableHere = unreadable.filter(entry => !(entry.bucket === artifacts && entry.code === "ENOENT"));
+	if (unreadableHere.length > 0) complete = false;
 	const previousArtifacts = previousFile === undefined ? undefined : artifactsOf(previousFile);
 	// Where `moved` (a path in the new tree) was before the move.
 	const before = (moved: string): string | undefined =>
@@ -211,27 +422,39 @@ export async function recordSessionTree(
 			: previousArtifacts && path.join(previousArtifacts, path.relative(artifacts, moved));
 	for (const transcript of files) {
 		const ids = new Set<string>();
-		const headerId = await sessionIdOfFile(transcript).catch(() => undefined);
+		let headerId: string | undefined;
+		try {
+			headerId = await sessionIdOfFile(transcript);
+		} catch {
+			complete = false;
+		}
 		if (headerId) ids.add(headerId);
 		// As reindex does: a generated name's id beside the header's, for continuations.
 		const nameId = generatedNameId(transcript);
 		if (nameId) ids.add(nameId);
 		// Unreadable now: keep every id the index had for it at its old path, not one of them.
 		const old = headerId ? undefined : before(transcript);
-		if (old) for (const row of await recordedRowsAt(old, roots, false)) ids.add(row.id);
-		for (const id of ids) recordSessionLocation(id, transcript, roots);
+		if (old) {
+			const carried = await recordedRowsAt(old, roots, false);
+			if (!carried.complete) complete = false;
+			for (const row of carried.rows) ids.add(row.id);
+		}
+		for (const id of ids) record(id, transcript);
 	}
 	// A directory, or a symlinked transcript, the move carried but this walk
 	// cannot read keeps every line the index had at or under its old path.
-	if (previousArtifacts === undefined) return;
-	for (const { bucket: unreadablePath } of unreadable) {
+	if (previousArtifacts === undefined) return complete;
+	for (const { bucket: unreadablePath } of unreadableHere) {
 		const old = before(unreadablePath);
 		if (!old) continue;
-		const rows = [...(await recordedRowsAt(old, roots, false)), ...(await recordedRowsAt(old, roots, true))];
-		for (const row of rows) {
-			recordSessionLocation(row.id, path.join(unreadablePath, path.relative(old, row.file)), roots);
+		const exact = await recordedRowsAt(old, roots, false);
+		const under = await recordedRowsAt(old, roots, true);
+		if (!exact.complete || !under.complete) complete = false;
+		for (const row of [...exact.rows, ...under.rows]) {
+			record(row.id, path.join(unreadablePath, path.relative(old, row.file)));
 		}
 	}
+	return complete;
 }
 
 function artifactsOf(file: string): string | undefined {
@@ -246,22 +469,26 @@ function artifactsOf(file: string): string | undefined {
  * path under each root, as {@link locateSessions} reads it, so a line another
  * root keeps for the same relative path counts. Each row's `file` is where
  * that line puts it beside `target`. In root order, then file order.
+ * `complete` is false when an index file exists but could not be read: its
+ * lines may be missing from `rows`.
  */
 async function recordedRowsAt(
 	target: string,
 	roots: readonly string[],
 	under: boolean,
-): Promise<{ id: string; file: string }[]> {
+): Promise<{ rows: { id: string; file: string }[]; complete: boolean }> {
 	const absolute = path.resolve(target);
 	const owner = owningRoot(absolute, roots);
 	const indexRoots = roots.includes(getSessionsDir()) ? roots : [...roots, getSessionsDir()];
 	const rows: { id: string; file: string }[] = [];
+	let complete = true;
 	for (const indexRoot of indexRoots) {
 		for (const name of [SESSION_LOCATOR_BASE_FILE, SESSION_LOCATOR_FILE]) {
 			let text: string;
 			try {
 				text = await Bun.file(path.join(indexRoot, name)).text();
-			} catch {
+			} catch (error) {
+				if (!isEnoent(error) && !isEnotdir(error)) complete = false;
 				continue;
 			}
 			for (const line of text.split("\n")) {
@@ -283,7 +510,7 @@ async function recordedRowsAt(
 			}
 		}
 	}
-	return rows;
+	return { rows, complete };
 }
 
 const GENERATED_STEM_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_(.+)$/;
@@ -455,6 +682,9 @@ export async function locateSessions(idPrefix: string, options: LocateSessionsOp
 	const needle = idPrefix.toLowerCase();
 	if (!SESSION_ID_RE.test(needle)) return [];
 	const roots = options.roots ?? sessionLocatorRoots();
+	// A move an exited process could not finish recording is finished first, so
+	// the lookup sees it (at most once per retry interval; nothing when none is pending).
+	await startPendingTreeRetry(roots);
 	const matchFileName = options.matchFileName === true;
 	const rowsByRoot = await Promise.all(
 		roots.flatMap(root => [
@@ -517,10 +747,22 @@ export interface SessionLocatorRebuild {
 	indexed: number;
 	/**
 	 * Buckets, directories inside them, and transcripts that could not be read,
-	 * with why (`bucket` holds the path). The new snapshot keeps what the
-	 * previous one recorded under each of them.
+	 * with why (`bucket` holds the path, `code` the errno code when there is
+	 * one). The new snapshot keeps what the previous one recorded under each.
 	 */
-	unreadable: { bucket: string; error: string }[];
+	unreadable: UnreadableEntry[];
+}
+
+/** One path a walk could not read. */
+export interface UnreadableEntry {
+	bucket: string;
+	error: string;
+	code?: string;
+}
+
+function unreadableEntry(file: string, error: unknown): UnreadableEntry {
+	const code = error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : undefined;
+	return { bucket: file, error: String(error), code };
 }
 
 function isUnavailable(error: unknown): boolean {
@@ -548,7 +790,7 @@ async function scanTranscripts(
 		entries = await fs.promises.readdir(dir, { withFileTypes: true });
 	} catch (error) {
 		if (!isUnavailable(error)) throw error;
-		unreadable.push({ bucket: dir, error: String(error) });
+		unreadable.push(unreadableEntry(dir, error));
 		return;
 	}
 	for (const entry of entries) {
@@ -561,7 +803,7 @@ async function scanTranscripts(
 			try {
 				if ((await fs.promises.stat(child)).isFile()) files.push(child);
 			} catch (error) {
-				unreadable.push({ bucket: child, error: String(error) });
+				unreadable.push(unreadableEntry(child, error));
 			}
 		} else if (entry.isDirectory()) {
 			await scanTranscripts(child, false, files, unreadable);
@@ -629,7 +871,7 @@ export async function rebuildSessionLocator(root: string): Promise<SessionLocato
 				try {
 					await fs.promises.access(batch[j], fs.constants.R_OK);
 				} catch (error) {
-					result.unreadable.push({ bucket: batch[j], error: String(error) });
+					result.unreadable.push(unreadableEntry(batch[j], error));
 				}
 			}
 			// A generated `<timestamp>_<id>.jsonl` that no longer reads as that
@@ -646,9 +888,18 @@ export async function rebuildSessionLocator(root: string): Promise<SessionLocato
 		}
 	}
 	const snapshot = path.join(resolvedRoot, SESSION_LOCATOR_BASE_FILE);
+	// One lock per physical root: a root reached through a symlink (a moved
+	// tree left a link behind) and through its real path is the same snapshot.
+	const lockKey = path.join(await fs.promises.realpath(resolvedRoot), SESSION_LOCATOR_BASE_FILE);
 	await withFileLock(
-		snapshot,
+		lockKey,
 		async () => {
+			// No other reindex of this root is publishing: a staged snapshot left here is a dead one's.
+			for (const name of await fs.promises.readdir(resolvedRoot)) {
+				if (name.startsWith(`${SESSION_LOCATOR_BASE_FILE}.`) && name.endsWith(".tmp")) {
+					await fs.promises.rm(path.join(resolvedRoot, name), { force: true });
+				}
+			}
 			let previous = "";
 			try {
 				previous = await Bun.file(snapshot).text();

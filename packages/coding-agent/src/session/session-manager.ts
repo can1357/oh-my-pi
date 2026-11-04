@@ -107,7 +107,7 @@ import {
 	type SessionLoadResult,
 	visitEntriesFromFile,
 } from "./session-loader";
-import { recordSessionLocation, recordSessionTree } from "./session-locator";
+import { recordSessionLocation, recordSessionTree, retryPendingSessionTrees } from "./session-locator";
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
@@ -1570,6 +1570,8 @@ export class SessionManager {
 	#noteLocation(): void {
 		if (!this.#persist || !this.#sessionFile || !this.#sessionId) return;
 		if (!(this.#storage instanceof FileSessionStorage)) return;
+		// A move or fork whose tree could not all be recorded tries again now.
+		retryPendingSessionTrees();
 		const location = `${this.#sessionId}\0${this.#sessionFile}`;
 		if (location === this.#indexedLocation) return;
 		if (recordSessionLocation(this.#sessionId, this.#sessionFile)) this.#indexedLocation = location;
@@ -2732,8 +2734,11 @@ export class SessionManager {
 				// The move carried the artifact tree, and with it every subagent
 				// transcript: record them all at their new paths.
 				if (sessionMoved && this.#storage instanceof FileSessionStorage) {
-					this.#indexedLocation = `${this.#sessionId}\0${newSessionFile}`;
-					await recordSessionTree(newSessionFile, undefined, oldSessionFile);
+					// Remembered only once the whole moved tree is recorded; otherwise the
+					// next durable write records this file and retries the tree.
+					if (await recordSessionTree(newSessionFile, undefined, oldSessionFile)) {
+						this.#indexedLocation = `${this.#sessionId}\0${newSessionFile}`;
+					}
 				}
 			}
 
