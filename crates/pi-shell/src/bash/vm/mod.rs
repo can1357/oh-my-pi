@@ -442,6 +442,13 @@ pub struct Kernel {
 	/// are undone, by vproc: the command's syntax node and the bytes
 	/// ([`notify::defer_report`]).
 	pub fg_reports:      HashMap<Vpid, (u32, Vec<u8>)>,
+	/// The stages of background pipeline jobs that started during the turn,
+	/// by job vproc: written into the job tables listing the job
+	/// ([`Shell::apply_settled`]).
+	pub job_stages:      Vec<(Vpid, Vec<crate::bash::store::JobStage>)>,
+	/// Background job vprocs that run one pipeline whose stages are the
+	/// job's processes: the shell, not the job, reports the pipeline.
+	pub pipeline_jobs:   std::collections::HashSet<Vpid>,
 	/// Background jobs whose pid is still to be settled
 	/// ([`proc::Bang`]): imaged (a restored job still decides).
 	pub bangs:           Vec<proc::Bang>,
@@ -515,6 +522,8 @@ impl Kernel {
 			deaths: HashMap::new(),
 			settle_done: None,
 			fg_reports: HashMap::new(),
+			job_stages: Vec::new(),
+			pipeline_jobs: std::collections::HashSet::new(),
 			reported_signal: None,
 			bangs: Vec::new(),
 			settled: Vec::new(),
@@ -1663,6 +1672,7 @@ impl Shell {
 				self.k.settle_bang(p.vpid, None);
 				self.k.forget_deferral(p.vpid);
 				let death = self.k.deaths.remove(&p.vpid);
+				self.k.pipeline_jobs.remove(&p.vpid);
 				self.k.proc_exited(cx.store, p.vpid, p.parent, p.status, death);
 				self.k.ctl.notify();
 				self.rr = 0;
@@ -1678,6 +1688,13 @@ impl Shell {
 	/// parent's, a command substitution's copies) and every `$!` naming
 	/// them.
 	fn apply_settled(&mut self) {
+		for (job, stages) in std::mem::take(&mut self.k.job_stages) {
+			for p in &mut self.procs {
+				if let Some(entry) = p.jobs.by_vpid_mut(job) {
+					entry.stages = Some(Box::new(stages.clone()));
+				}
+			}
+		}
 		for (job, pid) in std::mem::take(&mut self.k.settled) {
 			for p in &mut self.procs {
 				if p.last_bg.is(job) {
@@ -1729,6 +1746,15 @@ impl Shell {
 		// Its own children are orphans now.
 		if self.k.engine.config().end_orphan_jobs {
 			self.gone.push(vpid);
+		}
+		// A stage of a background pipeline job: the job's record of it.
+		for p in &mut self.procs {
+			for job in &mut p.jobs.list {
+				if let Some(stage) = job.stages.as_mut().and_then(|s| s.iter_mut().find(|s| s.vpid == vpid)) {
+					stage.status = Some(status);
+					stage.death = death;
+				}
+			}
 		}
 		let Some(i) = parent.and_then(|v| self.procs.iter().position(|p| p.vpid == v)) else {
 			return;
@@ -1992,6 +2018,7 @@ impl Shell {
 			self.k.settle_bang(p.vpid, None);
 			self.k.forget_deferral(p.vpid);
 			let death = self.k.deaths.remove(&p.vpid);
+			self.k.pipeline_jobs.remove(&p.vpid);
 			self.k.proc_exited(cx.store, p.vpid, p.parent, status, death);
 			self.rr = 0;
 			self.reaped(cx, p.parent, p.vpid, status, death);

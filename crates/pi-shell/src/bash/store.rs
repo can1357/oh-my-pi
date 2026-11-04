@@ -539,6 +539,12 @@ pub struct Job {
 	/// `notify_of_job_status`).
 	#[serde(default)]
 	pub death:     Option<Death>,
+	/// The processes of a background pipeline, in order (bash's `PROCESS`
+	/// list of the job): each stage's pid, text and how it ended, as
+	/// `jobs -l` and the job's report list them. `None` for a job of one
+	/// process. `$!` names the last stage, `jobs -p` the first.
+	#[serde(default)]
+	pub stages:    Option<Box<Vec<JobStage>>>,
 	/// The OS pid of the program the job runs, once it spawned it: bash's
 	/// subshell for an asynchronous simple command `exec`s the program, so
 	/// a job whose lone command is an external (or whose body `exec`s one)
@@ -562,6 +568,19 @@ impl Job {
 	pub const fn named_by(&self, pid: u32) -> bool {
 		self.vpid.0 == pid || matches!(self.os_pid, Some(os) if os == pid)
 	}
+}
+
+/// One process of a background pipeline job ([`Job::stages`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobStage {
+	/// Its virtual process, whose number is its pid.
+	pub vpid:   Vpid,
+	/// Its command as bash prints it.
+	pub text:   BString,
+	/// Its exit status once it ended.
+	pub status: Option<i32>,
+	/// The signal that ended it, if one did.
+	pub death:  Option<Death>,
 }
 
 /// How a process a signal ended died (bash `WTERMSIG`, `WCOREDUMP`).

@@ -190,6 +190,44 @@ pub const fn job_status(job: &Job) -> ProcStatus {
 	}
 }
 
+/// The processes of `job` as [`print_pipeline`] takes them: its stages, or
+/// the job as one process.
+pub fn job_procs(job: &Job) -> Vec<ProcLine<'_>> {
+	match job.stages.as_deref() {
+		Some(stages) if !stages.is_empty() => stages
+			.iter()
+			.map(|s| ProcLine {
+				pid:    s.vpid.0,
+				text:   &s.text,
+				status: match (s.status, s.death) {
+					(None, _) => ProcStatus::Running,
+					(Some(_), Some(death)) => ProcStatus::Signaled(death),
+					(Some(status), None) => ProcStatus::Exited(status),
+				},
+			})
+			.collect(),
+		_ => vec![ProcLine { pid: job.pid(), text: &job.text, status: job_status(job) }],
+	}
+}
+
+/// The signal that ended the process `job`'s status comes from (bash
+/// `raw_job_exit_status`: the last process; with `pipefail` the last one
+/// that failed), if one did.
+fn raw_death(job: &Job, pipefail: bool) -> Option<Death> {
+	match job.stages.as_deref() {
+		Some(stages) if !stages.is_empty() => {
+			let raw = if pipefail {
+				stages.iter().rposition(|s| s.status.is_some_and(|st| st != 0))
+			} else {
+				None
+			}
+			.unwrap_or(stages.len() - 1);
+			stages[raw].death
+		},
+		_ => job.death,
+	}
+}
+
 /// bash `signal_is_trapped`: `vp` has a trap for signal number `n`, an
 /// ignored one (`trap '' SIG`) included.
 fn trapped(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, n: u8) -> bool {
@@ -264,9 +302,8 @@ fn job_lines(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, job: &Job, format: For
 		platform:   k.engine.config().platform,
 		wd:         wd.as_ref().map(|w| w.as_slice()),
 	};
-	let procs = [ProcLine { pid: job.pid(), text: &job.text, status: job_status(job) }];
 	let mut out = Vec::new();
-	print_pipeline(&mut out, &procs, format, &look);
+	print_pipeline(&mut out, &job_procs(job), format, &look);
 	out
 }
 
@@ -297,6 +334,7 @@ pub fn mark(
 	line: u32,
 ) -> Vec<u8> {
 	let last = vp.last_bg;
+	let pipefail = state::option(&mut k.root, cx.store, vp, OptId::Pipefail).unwrap_or(false);
 	let numbers: Vec<u32> = vp
 		.jobs
 		.iter()
@@ -320,7 +358,7 @@ pub fn mark(
 			}
 			continue;
 		}
-		let Some(death) = job.death else {
+		let Some(death) = raw_death(&job, pipefail) else {
 			// Exited: the top-level shell keeps it for `wait` (POSIX); a
 			// subshell forgets it (bash's catch-all branch).
 			if vp.jobs.subshell

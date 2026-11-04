@@ -382,6 +382,7 @@ impl JobTable {
 			inherited: false,
 			wd,
 			death: None,
+			stages: None,
 			os_pid: None,
 		});
 		self.reset_current();
@@ -711,6 +712,9 @@ pub enum BangStage {
 	/// `nohup`); unless it does, the alias settles virtual when the host
 	/// steps the shell again.
 	Callout,
+	/// The job's body is one pipeline: bash forks each stage itself, so `$!`
+	/// is the last stage's pid, settled when the stages start.
+	Pipeline,
 }
 
 /// A running coprocess: its vproc, the variable naming it and the shell's

@@ -31,7 +31,9 @@ use crate::bash::{
 	ir::{self, ComsubForm, Op, Opcode, SpawnKind, Unit},
 	mem::{self, Capture},
 	pattern::PatOpts,
-	store::{Attrs, Death, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, TrapKey},
+	store::{
+		Attrs, Death, JobStage, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, TrapKey,
+	},
 	syntax::{CompleteCommand, Features, ParseError, ParseErrorKind, Parser, Pos, Resume},
 	zshopt::ZshOpt,
 };
@@ -3017,6 +3019,13 @@ fn bang_stage(unit: &Unit, entry: u32) -> Option<BangStage> {
 	if code(entry) == Some(Opcode::Exec) && code(entry + 1) == Some(Opcode::SubExit) {
 		return Some(BangStage::Lone);
 	}
+	if let Some(op) = unit.ops.get(entry as usize).filter(|op| op.code == Opcode::Spawn)
+		&& let Some(spawn) = unit.spawns.get(op.a as usize)
+		&& spawn.kind == SpawnKind::Pipeline
+		&& code(spawn.end) == Some(Opcode::SubExit)
+	{
+		return Some(BangStage::Pipeline);
+	}
 	let group = [Opcode::Enter, Opcode::Exec, Opcode::Leave, Opcode::SubExit]
 		.iter()
 		.zip(entry..)
@@ -3054,8 +3063,11 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 		.is_some_and(|s| !s.children.is_empty());
 	if !started {
 		// A job that forks (a subshell, pipeline, job or coprocess of its
-		// own) is not just one program: it keeps its virtual pid.
-		if !k.bangs.is_empty() {
+		// own) is not just one program: it keeps its virtual pid. A job
+		// that is one pipeline settles on its last stage below.
+		let pipeline_bang = info.kind == SpawnKind::Pipeline
+			&& k.bangs.iter().any(|b| b.vproc == vp.vpid && b.stage == BangStage::Pipeline);
+		if !k.bangs.is_empty() && !pipeline_bang {
 			k.settle_bang(vp.vpid, None);
 		}
 		let mut children = Vec::with_capacity(info.stages.len());
@@ -3127,6 +3139,10 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					|| (state::option(&mut k.root, cx.store, vp, OptId::Lastpipe).unwrap_or(false)
 						&& !job_control(k, cx, vp));
 				let mut stdin = vp.fds.get(0).cloned();
+				if lastpipe && pipeline_bang {
+					// The last stage runs in the job's own process.
+					k.settle_bang(vp.vpid, None);
+				}
 				for (i, stage) in info.stages.iter().enumerate() {
 					if lastpipe && i + 1 == n {
 						k.emit_op(cx, vp, op.node, EventData::Pipeline { stages: &children });
@@ -3173,6 +3189,23 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					k.spawned.push(Box::new(child));
 				}
 				k.emit_op(cx, vp, op.node, EventData::Pipeline { stages: &children });
+				if pipeline_bang && let Some(&last) = children.last() {
+					// A background job that is this pipeline: its processes are
+					// the stages (`jobs -l`, the report), `$!` the last one.
+					let stages = children
+						.iter()
+						.enumerate()
+						.map(|(i, &vpid)| JobStage {
+							vpid,
+							text: stage_job_text(k, cx, vp, unit, info, i),
+							status: None,
+							death: None,
+						})
+						.collect();
+					k.job_stages.push((vp.vpid, stages));
+					k.pipeline_jobs.insert(vp.vpid);
+					k.settle_bang(vp.vpid, Some(last.0));
+				}
 			},
 		}
 		scratch(vp).children = children.into_iter().map(|v| (v, None)).collect();
@@ -3213,7 +3246,9 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 	vp.status = statuses.get(raw).copied().unwrap_or(0);
 	vp.pipestatus = statuses;
 	let deaths: Vec<Option<Death>> = children.iter().map(|(v, _)| k.deaths.remove(v)).collect();
-	if inline.is_none() && matches!(info.kind, SpawnKind::Subshell | SpawnKind::Pipeline) {
+	// A background job's own pipeline is the shell's to report (`Job::stages`).
+	let job_pipeline = info.kind == SpawnKind::Pipeline && k.pipeline_jobs.remove(&vp.vpid);
+	if inline.is_none() && !job_pipeline && matches!(info.kind, SpawnKind::Subshell | SpawnKind::Pipeline) {
 		report_children(k, vp, cx, unit, op, &children, &deaths, raw);
 	}
 	Flow::Jump(info.end)
