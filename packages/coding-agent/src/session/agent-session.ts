@@ -11519,18 +11519,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async #refreshTitle(sessionId: string, trigger: SessionNameTrigger, plan?: readonly TodoPhase[]): Promise<void> {
 		const generation = this.#titleRefreshGeneration;
 		const signal = this.#titleGenerationAbortController.signal;
+		// A plan written while this refresh waits supersedes it; each wait is followed by this check,
+		// so a superseded refresh starts no further title-model request and the plan runs sooner.
+		const superseded = () => signal.aborted || generation !== this.#titleRefreshGeneration;
 		// A fitting title, one no judge could rate, or a session renamed or switched meanwhile keeps its title.
 		if (trigger === "drift" && !((await this.#titleDrifted()) && this.#titleRefreshable(sessionId, trigger))) return;
 		// An interrupt during the judgment cancels the refresh before it asks for a title.
-		if (signal.aborted) return;
+		if (superseded()) return;
 		const context = this.#buildReplanTitleContext(plan);
 		if (!context) return;
 		const retitled = await this.#retitle(context, signal);
-		if (!retitled) return;
+		if (!retitled || superseded()) return;
 		// A session first named without a card (a subagent, a title-model title) gets one here.
 		const title = this.#cardsAutoTitles() ? await this.#cardTitle(retitled, signal) : retitled;
 		// An interrupt during the refresh cancels it; a plan written meanwhile supersedes this reply.
-		if (signal.aborted || generation !== this.#titleRefreshGeneration) return;
+		if (superseded()) return;
 		if (!this.#titleRefreshable(sessionId, trigger) || title === this.sessionName) return;
 		const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;
 		await setSessionName.call(this.sessionManager, title, "auto", trigger);

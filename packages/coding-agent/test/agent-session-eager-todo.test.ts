@@ -536,6 +536,31 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(model.requests[1]).toMatch(/<plan>[\s\S]*Prove the eta rule[\s\S]*<\/plan>/);
 	});
 
+	it("asks for no card for a replan's title that a later plan superseded", async () => {
+		await recreateSession({ "title.refreshOnReplan": true, "title.icons": "emoji" });
+		await session.setSessionName("Implement arity delta rule", "auto");
+		const model = titleModelNamingPlans(
+			{ "Prove the eta rule": "Prove eta rule", "Prepare the migration": "Prepare migration" },
+			"Unrelated title",
+		);
+		scriptedResponses = [
+			todoInit("call_todo_1", "Migrate", "Prepare the migration"),
+			todoInit("call_todo_2", "Eta", "Prove the eta rule"),
+			createAssistantMessage("plans written"),
+		];
+
+		await session.prompt("resume your lane");
+		await model.firstRequested;
+		const renamed = Promise.withResolvers<void>();
+		session.sessionManager.onSessionNameChanged(() => renamed.resolve());
+		model.release();
+		await renamed.promise;
+
+		// The first plan's retitle came back after the second plan was written: its card is never asked for.
+		expect(model.requests.some(request => request.includes("Prepare migration"))).toBe(false);
+		expect(session.sessionManager.getSessionName()).toContain("Prove eta rule");
+	});
+
 	it("keeps a card title's icon and code when a replan refreshes it", async () => {
 		// Tern indexes parked panes by the card; the title model names none, so the refresh must carry it over.
 		await recreateSession({ "title.refreshOnReplan": true });
@@ -657,6 +682,28 @@ describe("AgentSession eager todo enforcement", () => {
 
 			expect(completeSimpleMock).not.toHaveBeenCalled();
 			expect(session.sessionManager.getSessionName()).toBe("Release notes");
+		});
+
+		it("asks the title model nothing for a drift check that a plan superseded while the judge decided", async () => {
+			await autoTitled({ "title.refreshAfterPrompts": 1, "title.refreshOnReplan": true });
+			const verdict = Promise.withResolvers<boolean | undefined>();
+			vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockReturnValue(verdict.promise);
+			const requests: string[] = [];
+			vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, request) => {
+				const input = request.messages[0] ? getMessageText(request.messages[0]) : "";
+				requests.push(input);
+				return titleReply(input.includes("Prove the eta rule") ? "Prove eta rule" : "Drift title");
+			});
+
+			await session.prompt("now draft the release notes for 2.0");
+			scriptedResponses = [todoInit("call_todo_1", "Eta", "Prove the eta rule"), createAssistantMessage("planned")];
+			await session.prompt("plan the eta proof");
+			const titleApplied = waitForSessionName("Prove eta rule");
+			verdict.resolve(true);
+			await titleApplied;
+
+			expect(requests).toHaveLength(1);
+			expect(requests[0]).toMatch(/<plan>[\s\S]*Prove the eta rule[\s\S]*<\/plan>/);
 		});
 	});
 
