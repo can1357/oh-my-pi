@@ -29,7 +29,7 @@ import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
 import { getAgentDir, getSessionsDir, isEnoent, type FileLockHandle } from "@oh-my-pi/pi-utils";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
-import { codeOf, statIfPresent, withGcLock } from "./gc-lock";
+import { codeOf, GcLockHeld, statIfPresent, withGcLock } from "./gc-lock";
 import { type NoReplaceRename, renameNoReplace } from "./libc";
 import {
 	absentFile,
@@ -39,7 +39,6 @@ import {
 	makeHeldDirectory,
 	newNonce,
 	NotARegularFile,
-	notRegularAsAbsent,
 	openRegularFile,
 	removeFileNoOneElseWrites,
 	removeFileOthersMayWrite,
@@ -50,7 +49,12 @@ import {
 } from "./regular-file";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import { readSessionHeaderIdFromHandle, sessionHeaderIdFromBytes } from "./session-loader";
-import { isSessionLeaseHeld, SESSION_STAGING_RE, sessionStagingPath, tryAcquireSessionLease } from "./session-storage";
+import {
+	isSessionLeaseHeldOrThrow,
+	SESSION_STAGING_RE,
+	sessionStagingPath,
+	tryAcquireSessionLease,
+} from "./session-storage";
 import { parseTitleSlotFromContent, parseTitleSlotLine } from "./session-title-slot";
 
 /** Suffix `gc --archive` gives a transcript it has compressed. */
@@ -266,14 +270,10 @@ export function restoreRecordLeftNote(record: string): string {
 async function setAsideStaleRestoreRecord(record: string): Promise<string | undefined> {
 	for (let attempt = 0; attempt < 8; attempt++) {
 		const aside = `${record}.${randomBytes(8).toString("hex")}.stale`;
-		let moved: NoReplaceRename;
-		try {
-			moved = await renameNoReplace(record, aside);
-		} catch {
-			return undefined;
-		}
+		const moved = await renameNoReplace(record, aside);
 		if (moved.outcome === "renamed") return aside;
-		if (moved.outcome !== "taken") return undefined;
+		if (moved.outcome === "unsupported") throw new Error(`${record} could not be moved aside (${moved.why})`);
+		if (moved.outcome === "absent") return undefined;
 	}
 	return undefined;
 }
@@ -422,12 +422,12 @@ export async function scanArchivedSessionFiles(
 			for (const name of await fs.readdir(dir)) {
 				if (!name.endsWith(ARCHIVED_SESSION_SUFFIX)) continue;
 				const entry = path.join(dir, name);
-				if ((await fs.stat(entry).catch(() => undefined))?.isDirectory()) continue;
+				if ((await statIfPresent(entry))?.isDirectory()) continue;
 				found.push(entry);
 			}
 		} catch (error) {
 			if (isEnoent(error) || isPermissionError(error) || codeOf(error) === "ENOTDIR") {
-				unreadable.push({ bucket: dir, error: codeOf(error) ?? errorText(error) });
+				unreadable.push({ bucket: dir, error: errorText(error) });
 				continue;
 			}
 			throw error;
@@ -438,9 +438,15 @@ export async function scanArchivedSessionFiles(
 	return { files, unreadable };
 }
 
-/** The archived transcripts {@link scanArchivedSessionFiles} could read — for a count, never for choosing one. */
+/** All archived transcripts; an incomplete scan cannot supply a count or list. */
 export async function listArchivedSessionFiles(agentDir?: string): Promise<string[]> {
-	return (await scanArchivedSessionFiles(agentDir)).files;
+	const { files, unreadable } = await scanArchivedSessionFiles(agentDir);
+	if (unreadable.length > 0) {
+		throw new Error(
+			`archive listing could not be completed: ${unreadable.map(({ bucket, error }) => `${bucket} (${error})`).join("; ")}`,
+		);
+	}
+	return files;
 }
 
 /**
@@ -518,10 +524,8 @@ export interface RestoredSession {
  * damaged archive and callers test it with `isEnoent`.
  */
 export function archiveReadError(file: string, cause: unknown): unknown {
-	// A name that is not a regular file says so itself, and is no damage.
-	if (cause instanceof NotARegularFile) return cause;
-	// zlib failures carry a `Z_`-prefixed code; an errno is the filesystem's.
-	if (cause instanceof Error && "code" in cause && /^E[A-Z]+$/.test(String(cause.code))) return cause;
+	const code = codeOf(cause);
+	if (!code?.startsWith("Z_") && code !== "ERR_STREAM_PREMATURE_CLOSE") return cause;
 	const stem = path.basename(file, ARCHIVED_SESSION_SUFFIX);
 	const id = stem.slice(stem.lastIndexOf("_") + 1) || stem;
 	return new Error(
@@ -1210,12 +1214,8 @@ function isWithin(root: string, target: string): boolean {
  * the session.
  */
 async function survivesRemovalOf(destination: string, destinationStat: Stats, source: Stats, archiveRoot: string) {
-	const real = await fs.realpath(destination).catch((error: unknown) => {
-		// Gone since it was opened: not a copy that survives anything.
-		if (isEnoent(error)) return undefined;
-		throw error;
-	});
-	if (real === undefined || isWithin(archiveRoot, real)) return false;
+	const real = await fs.realpath(destination);
+	if (isWithin(archiveRoot, real)) return false;
 	return !(destinationStat.dev === source.dev && destinationStat.ino === source.ino);
 }
 
@@ -1271,8 +1271,7 @@ async function assertLiveTreeHoldsArchive(
 	}
 	// A link or a device: neither was carried home, and neither is an artifact.
 	if (!stat.isFile()) return;
-	// What stands at the live name, if not a regular file, does not hold it.
-	const live = await openRegularFile(destination).catch(notRegularAsAbsent);
+	const live = await openRegularFile(destination);
 	try {
 		const liveStat = await live?.stat();
 		if (!live || !liveStat?.isFile()) {
@@ -1452,8 +1451,7 @@ async function copyEntryDereferenced(
 		return;
 	}
 	if (existing) {
-		// Anything but a regular file at the name already holds something else.
-		const live = await openRegularFile(destination).catch(notRegularAsAbsent);
+		const live = await openRegularFile(destination);
 		try {
 			if (live) {
 				const target = await live.stat();
@@ -1665,10 +1663,23 @@ async function planWritableDirectory(dir: string, plan: RestorePlan, what: strin
 			throw new Error(`${dir} is not a directory, so ${what} could not be restored into it`);
 		try {
 			await fs.access(dir, fsConstants.W_OK | fsConstants.X_OK);
-		} catch {
+		} catch (error) {
+			// Only a refusal is a permission to fix; any other failure of the
+			// probe is said as it came, without a remedy it does not support.
+			const code = codeOf(error);
+			if (code === "EACCES" || code === "EPERM") {
+				throw new Error(
+					`${dir} is not writable (${errorText(error)}), so ${what} could not be restored into it: make it writable with ` +
+						`\`chmod u+w\` and run the same command again`,
+				);
+			}
+			if (code === "EROFS") {
+				throw new Error(
+					`${dir} is on a read-only filesystem (${errorText(error)}), so ${what} could not be restored into it`,
+				);
+			}
 			throw new Error(
-				`${dir} is not writable, so ${what} could not be restored into it: make it writable with \`chmod u+w\` ` +
-					`and run the same command again`,
+				`whether ${dir} can be written could not be checked (${errorText(error)}), so ${what} was not restored into it`,
 			);
 		}
 		return;
@@ -1903,18 +1914,20 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 			// it made — and a directory at that name that no record names is one
 			// a later restore carries home as somebody's artifact. So while
 			// anything stands at the name, the record stays, and says so.
-			// A lookup that fails cannot show the name empty, so it counts as standing.
+			// Unknown existence keeps the record, but is never reported as observed existence.
 			let standing = false;
+			let unchecked: string | undefined;
 			if (codeOf(error) !== "EEXIST") {
 				try {
 					standing = (await lstatIfPresent(dir)) !== undefined;
-				} catch {
-					standing = true;
+				} catch (failure) {
+					unchecked = `${dir} could not be checked (${errorText(failure)})`;
 				}
 			}
-			if (standing) {
+			if (standing || unchecked) {
 				await release();
 				throw failed(error, [
+					...(unchecked ? [unchecked] : []),
 					`${dir} was left where it is, and the staging record ${record} names it, so a later restore leaves it out of the live tree and names it`,
 				]);
 			}
@@ -2203,8 +2216,8 @@ async function readStagingRecords(
 		// suffix is no proof which it is.
 		if (name.endsWith(STAGING_RECORD_PART)) continue;
 		try {
-			// Regular files only, through a descriptor: a FIFO among the
-			// records refuses, rather than being waited on or drained.
+			// Non-blocking and regular files only: a FIFO among the records
+			// must refuse, not wait for a writer that never comes.
 			const handle = await openRegularFile(record);
 			if (!handle) throw absentFile(record);
 			let text: string;
@@ -2270,6 +2283,7 @@ async function checkRecordedGround(entry: StagingRecord, roots: readonly string[
 	if (typeof real === "object") {
 		return { kind: "unknown", note: `${entry.dir} could not be resolved, so it was left as it is: ${real.failed}` };
 	}
+	if (real === undefined) return { kind: "gone" };
 	const contained = real !== undefined && roots.some(root => isWithin(root, real) && real !== root);
 	if (!contained) {
 		return {
@@ -2737,7 +2751,7 @@ async function recordCopyAt(at: string, bytes: Buffer, finish: boolean, what: st
 	// The type comes from `lstat` before anything is opened: a symlink is
 	// refused whatever it points at, and opening a device can act on it.
 	if (!standing.isFile()) return refused;
-	const reader = await openRegularFile(at, { noFollow: true }).catch(notRegularAsAbsent);
+	const reader = await openRegularFile(at, { noFollow: true });
 	if (!reader) return refused;
 	let judged: Stats;
 	let held: Buffer;
@@ -3178,10 +3192,9 @@ async function ownerSignature(owners: () => Promise<(string | undefined)[]>): Pr
  * different session file".
  */
 export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: string): Promise<boolean> {
-	// Non-blocking, so a FIFO at the live name is a refusal rather than a hang,
-	// and one that names it: it is no session for the archive to be part of.
+	// Non-blocking, so a FIFO at the live name is a refusal rather than a hang.
 	const live = await openRegularFile(sessionPath);
-	if (!live) return false;
+	if (!live) throw absentFile(sessionPath);
 	try {
 		let holds = false;
 		await pipeline(bytesOfRegularFile(archiveFile), createGunzip(), async (source: NodeJS.ReadableStream) => {
@@ -3215,8 +3228,8 @@ export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: st
  * fails throws, the same way.
  */
 export async function archivedHandleIsPrefixOfLive(archived: fs.FileHandle, livePath: string): Promise<boolean> {
-	const live = await openRegularFile(livePath).catch(notRegularAsAbsent);
-	if (!live) return false;
+	const live = await openRegularFile(livePath);
+	if (!live) throw absentFile(livePath);
 	try {
 		let holds = false;
 		await pipeline(bytesOfHandle(archived), createGunzip(), async (source: NodeJS.ReadableStream) => {
@@ -3249,8 +3262,8 @@ export async function archivedHandleIsHeldBy(
 	candidatePath: string,
 	transcript = false,
 ): Promise<boolean> {
-	const candidate = await openRegularFile(candidatePath).catch(notRegularAsAbsent);
-	if (!candidate) return false;
+	const candidate = await openRegularFile(candidatePath);
+	if (!candidate) throw absentFile(candidatePath);
 	try {
 		const candidateStat = await candidate.stat();
 		if (archivedStat.dev === candidateStat.dev && archivedStat.ino === candidateStat.ino) return false;
@@ -3392,8 +3405,7 @@ async function tryAcquireRestoreLeases(
 					if (observeOnly) {
 						// A preview looks without taking: a lease it held would make
 						// a session opened meanwhile fork its turn into a new one.
-						const held = isSessionLeaseHeld(id);
-						if (held === null) throw new Error(`the ownership lease of session ${id} could not be probed`);
+						const held = isSessionLeaseHeldOrThrow(id);
 						if (held) return { kind: "owned" };
 					} else {
 						const lease = tryAcquireSessionLease(id);
@@ -3513,7 +3525,7 @@ async function reclaimedOriginals(
 function crossFilesystemHome(move: ReclaimedMove, restoreCommand: string): string {
 	return (
 		`${move.from} cannot be moved home to ${move.to}: they are on different filesystems now, and a rename cannot ` +
-		`cross filesystems. A copy cannot stand in for the original, so nothing was moved; put the archive back on the ` +
+		`cross filesystems. A copy cannot stand in for the original, so it was not moved; put the archive back on the ` +
 		`sessions tree's filesystem and run \`${restoreCommand}\` again`
 	);
 }
@@ -3556,7 +3568,7 @@ async function moveReclaimedHome(move: ReclaimedMove, restoreCommand: string): P
 		throw new Error(
 			codeOf(error) === "EXDEV"
 				? crossFilesystemHome(move, restoreCommand)
-				: `${move.from} could not be moved home to ${move.to} (${errorText(error)}); nothing was moved`,
+				: `${move.from} could not be moved home to ${move.to} (${errorText(error)}), so it was not moved`,
 			{ cause: error },
 		);
 	}
@@ -3568,7 +3580,7 @@ async function moveReclaimedHome(move: ReclaimedMove, restoreCommand: string): P
 			: moved.outcome === "absent"
 				? `${move.from} was no longer there while this restore ran, so it was not moved home`
 				: `${move.from} could not be moved home to ${move.to}: ${moved.why}, and a rename that may replace what ` +
-					`has that name could remove another file there; nothing was moved`,
+					`has that name could remove another file there; it was not moved`,
 	);
 }
 /**
@@ -3708,15 +3720,15 @@ export async function restoreArchivedSessionLocked(
 		// Planned: what creating the record needs — its directory written to —
 		// and whether a file already at the name would be set aside, as below.
 		let setAsideRecord: string | undefined;
-		let recordWouldStay = false;
+		let recordWouldStay: string | undefined;
 		if (plan) {
 			await planWritableDirectory(path.dirname(record), plan, "the restore record");
 			// Set aside only where `rename(2)` would let applying move it: a
 			// record another user owns in a sticky bucket stays, as applying
 			// finds.
 			if (await statIfPresent(record)) {
-				if ((await renameRefusal(record, path.dirname(record))) === undefined) setAsideRecord = record;
-				else recordWouldStay = true;
+				recordWouldStay = await renameRefusal(record, path.dirname(record));
+				if (recordWouldStay === undefined) setAsideRecord = record;
 			}
 		} else {
 			own = await createRestoreRecord(record, `${restoreCommand}\n`);
@@ -3738,9 +3750,19 @@ export async function restoreArchivedSessionLocked(
 		// that put an empty directory there, with its own owner, mode and
 		// attributes, and an empty directory costs nothing. A later reclaim of
 		// the session moves into it again.
+		// Each refusal says what this run already moved home: a review saw a
+		// tree's refusal say "nothing was moved" after the transcript had.
 		for (const move of reclaimed) {
-			if (plan) await planMoveHome(move, plan, restoreCommand);
-			else await moveReclaimedHome(move, restoreCommand);
+			try {
+				if (plan) await planMoveHome(move, plan, restoreCommand);
+				else await moveReclaimedHome(move, restoreCommand);
+			} catch (error) {
+				if (plan || movedHome.length === 0) throw error;
+				throw new Error(
+					`${errorText(error)}. Already moved home by this restore, and left there: ${movedHome.join(", ")}`,
+					{ cause: error },
+				);
+			}
 			movedHome.push(move.to);
 		}
 		const transcriptReclaimed = reclaimed.find(move => move.to === sessionPath);
@@ -3876,7 +3898,7 @@ export async function restoreArchivedSessionLocked(
 		notRestored.push(...notes);
 		// A preview reports the record applying would set aside, not one it
 		// would leave: applying holds the gc lock, which proves its writer gone.
-		if (plan && recordWouldStay) notRestored.push(restoreRecordLeftNote(record));
+		if (plan && recordWouldStay) notRestored.push(`${record} would be left: ${recordWouldStay}`);
 		if (!plan && own === undefined) {
 			if (await statIfPresent(record)) notRestored.push(restoreRecordLeftNote(record));
 		} else if (!plan && own && notRestored.length === 0) {
@@ -3912,13 +3934,18 @@ export async function restoreArchivedSession(
 ): Promise<RestoredSession> {
 	const dir = agentDir ?? getAgentDir();
 	try {
-		return await withGcLock(dir, () => restoreArchivedSessionLocked(archiveFile, dir, undefined, progress), {
+		const notes: string[] = [];
+		const result = await withGcLock(dir, () => restoreArchivedSessionLocked(archiveFile, dir, undefined, progress), {
 			waitMs: 30_000,
+			onReleaseFailure: note => notes.push(note),
 		});
+		for (const note of notes) progress?.(`This process could not remove its gc lock: ${note}`);
+		result.notRestored.push(...notes);
+		return result;
 	} catch (error) {
-		if (error instanceof Error && error.message.startsWith("GC already running")) {
+		if (error instanceof GcLockHeld) {
 			throw new Error(
-				`Cannot open "${archiveFile}": an omp storage maintenance run is holding ${path.join(dir, "gc.lock")}, so the session cannot come out of the archive yet. Retry once it finishes.`,
+				`Cannot open "${archiveFile}": ${error.message}. The session cannot come out of the archive yet. Retry once the lock is released.`,
 			);
 		}
 		throw error;

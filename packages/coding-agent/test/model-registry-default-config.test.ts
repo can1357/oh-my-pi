@@ -623,6 +623,6 @@ function armRegistryModel(
 		getPromptTokens: () => 100_000,
 		getMode: () => "streaming",
 	});
-	warmer.start({ model, context: { messages: [] }, options }, () => true);
+	warmer.start({ model, context: { messages: [] }, options }, () => undefined);
 	return { warmer, streamCalls: () => streamCalls };
 }

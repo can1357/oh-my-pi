@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `compact()` dropping the imaged history of an archive saved before omp 16.1.0 without a word: the new summary now counts those characters as dropped history ([#17883](https://github.com/can1357/oh-my-pi/pull/17883) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

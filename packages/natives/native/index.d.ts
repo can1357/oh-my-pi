@@ -87,8 +87,8 @@ export declare class DesktopSession {
   retire(): void
   /**
    * Sets when the current run ends, `remaining_ms` from now; each run sets
-   * it before its first call. On macOS, input waiting for the user to pause
-   * in its app gives up shortly before it.
+   * it before its first call. Input waiting for the user to pause in its app
+   * (macOS) or for a Wayland permission prompt gives up shortly before it.
    */
   setRunDeadline(remainingMs: number): void
   capture(target: string, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
@@ -567,7 +567,7 @@ export declare class PtySession {
   kill(): void
 }
 
-/** Persistent brush-core shell session. */
+/** Persistent embedded bash engine (pi-shell) shell session. */
 export declare class Shell {
   /**
    * Create a new shell session from optional configuration.
@@ -2035,7 +2035,7 @@ export declare enum Encoding {
 export declare function execReplace(argv: Array<string>): void
 
 /**
- * Execute a brush shell command.
+ * Execute a command in the embedded bash engine (pi-shell).
  *
  * Creates a fresh session for each call. The `on_chunk` callback receives
  * streamed stdout/stderr output. Returns the exit code when the command
@@ -3415,7 +3415,7 @@ export interface SearchResult {
 
 export declare function setHangulCompatJamoWidthOverride(value: number): void
 
-/** Options for executing a shell command via brush-core. */
+/** Options for executing a shell command via the embedded bash engine (pi-shell). */
 export interface ShellExecuteOptions {
   /** Command string to execute in the shell. */
   command: string

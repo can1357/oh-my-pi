@@ -306,8 +306,11 @@ for (const how of ["mapped by this process", "held by this process, one descript
 				if (own) expect(failed).toBe(true);
 				expect(result.reclaim?.reclaimed).toBe(1);
 				expect(result.reclaim?.keptCopies?.join("\n")).toContain(copy);
-				expect(said).toContain(`${copy} is open or mapped elsewhere`);
-				expect(said).toContain("this one not excluded");
+				if (own) expect(said).toContain("EIO: injected descriptor lookup");
+				else {
+					expect(said).toContain(`${copy} is open or mapped elsewhere`);
+					expect(said).toContain("this one not excluded");
+				}
 				expect(said).not.toContain("not in this process");
 				expect(await Bun.file(copy).text()).toBe("FIRST");
 				if (mapping) expect(Buffer.from(mapping).toString()).toBe("FIRST");
@@ -333,13 +336,40 @@ test.skipIf(process.platform !== "linux")(
 				}
 				return await Reflect.apply(realStat, fs, args);
 			}) as typeof fs.stat);
-			expect(await holders.ownDescriptorCount(identity)).toBeUndefined();
+			await expect(holders.ownDescriptorCount(identity)).rejects.toThrow("EIO: injected");
 		} finally {
 			mock.restore();
 			await held.close();
 		}
 	},
 );
+
+// A lease refused with a permission error says what the error says: a
+// review saw "this user does not own it" said of a file this user owned.
+test.skipIf(!leasesGranted)("a lease refused with EACCES never claims another user owns the file", async () => {
+	const real = libcModule.libc();
+	let refused = false;
+	spyOn(libcModule, "libc").mockReturnValue({
+		...real,
+		fcntl: (fd, cmd, arg) => {
+			if (cmd === 1024 && arg !== 2) {
+				refused = true;
+				return -1;
+			}
+			return real.fcntl?.(fd, cmd, arg) ?? -1;
+		},
+		errno: () => (refused ? os.constants.errno.EACCES : real.errno()),
+	});
+	const result = await reclaim(true);
+	mock.restore();
+
+	const said = result.reclaim?.errors.join("\n") ?? "";
+	expect(refused).toBe(true);
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(said).toContain("EACCES");
+	expect(said).not.toContain("does not own");
+	expect((await fs.stat(sessionFile)).uid).toBe(process.getuid?.() ?? -1);
+});
 
 /** Whether this user may run a command as root without a password: setting a `security.*` attribute needs root. */
 const sudoWorks = Bun.spawnSync(["sudo", "-n", "true"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
@@ -447,5 +477,44 @@ for (const signal of ["SIGTERM", "SIGKILL"] as const) {
 			expect(waited).toBeLessThan(10_000);
 		},
 		60_000,
+	);
+}
+
+for (const scope of ["another process", "this process"] as const) {
+	test.skipIf(!leasesGranted || process.platform !== "linux")(
+		`round54 failed descriptor lookup for ${scope} is unknown, not an invisible holder`,
+		async () => {
+			const own = await fs.open(artifact, "r");
+			const readdir = fs.readdir;
+			const stat = fs.stat;
+			if (scope === "another process") {
+				spyOn(fs, "readdir").mockImplementation((async (...args: Parameters<typeof fs.readdir>) => {
+					if (String(args[0]) === "/proc/1/fd") {
+						throw Object.assign(new Error("EIO: round54 other descriptors"), { code: "EIO" });
+					}
+					return await Reflect.apply(readdir, fs, args);
+				}) as typeof fs.readdir);
+			} else {
+				spyOn(fs, "stat").mockImplementation((async (...args: Parameters<typeof fs.stat>) => {
+					if (String(args[0]) === `/proc/self/fd/${own.fd}`) {
+						throw Object.assign(new Error("EIO: round54 own descriptors"), { code: "EIO" });
+					}
+					return await Reflect.apply(stat, fs, args);
+				}) as typeof fs.stat);
+			}
+			try {
+				const result = await reclaim(true);
+				const said = result.reclaim?.errors.join("\n") ?? "";
+				expect(said).toContain(
+					scope === "another process" ? "EIO: round54 other descriptors" : "EIO: round54 own descriptors",
+				);
+				expect(said).not.toContain("holder is one this run cannot see");
+				expect(said).not.toContain("no other process this run can list holds");
+				expect(result.reclaim?.reclaimed).toBe(0);
+				expect(await Bun.file(artifact).text()).toBe("FIRST");
+			} finally {
+				await own.close();
+			}
+		},
 	);
 }

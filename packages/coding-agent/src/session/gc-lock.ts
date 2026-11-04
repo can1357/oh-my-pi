@@ -27,7 +27,6 @@
  * and is broken once it is older than the grace.
  */
 import * as path from "node:path";
-import { isPidAlive } from "@oh-my-pi/pi-utils/pid";
 import * as fs from "./gc-fs";
 import { sleep } from "./gc-fs";
 import {
@@ -36,6 +35,7 @@ import {
 	NotARegularFile,
 	openRegularFile,
 	removeFileNoOneElseWrites,
+	unlinkFileNoOneElseWrites,
 	writeExclusive,
 } from "./regular-file";
 
@@ -46,6 +46,10 @@ export function codeOf(error: unknown): string | undefined {
 	return typeof error === "object" && error !== null && "code" in error
 		? String((error as { code?: unknown }).code)
 		: undefined;
+}
+
+function errorText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 export async function statIfPresent(target: string) {
@@ -141,7 +145,20 @@ function judgeLock(lockPath: string, found: { text: string; mtimeMs: number }): 
 				`gone, and nothing was done; look at it and move it aside, then run gc again`,
 		);
 	}
-	const gone = reading.kind === "empty" ? Date.now() - found.mtimeMs > GC_LOCK_STALE_MS : !isPidAlive(reading.pid);
+	let gone = reading.kind === "empty" && Date.now() - found.mtimeMs > GC_LOCK_STALE_MS;
+	if (reading.kind !== "empty") {
+		try {
+			process.kill(reading.pid, 0);
+		} catch (error) {
+			if (codeOf(error) !== "ESRCH") throw error;
+			gone = true;
+		}
+	}
+	if (reading.kind === "empty" && !gone) {
+		throw new Error(
+			`${lockPath} is empty and still within the write grace, so whether a gc run holds it is not known; nothing was done`,
+		);
+	}
 	if (!gone) return "held";
 	if (reading.kind === "earlier") {
 		throw new Error(
@@ -153,18 +170,48 @@ function judgeLock(lockPath: string, found: { text: string; mtimeMs: number }): 
 	return "stale";
 }
 
+/**
+ * What became of a lock found at a name this run could not create: still
+ * held by a live run; gone — removed here, or already gone, or replaced, so
+ * taking it again is the next step; or left, because removing it failed,
+ * with why. A removal that fails is not a running gc: a review failed one
+ * lookup with `EIO`, or made the lock's directory read-only, and every
+ * command said "GC already running" with its holder dead.
+ */
+type StaleLock = { kind: "held" } | { kind: "gone" } | { kind: "left"; why: string };
+
 /** Remove a lock whose holder is gone, when it holds exactly what gc writes — see {@link judgeLock}. */
-async function removeStaleGcLock(lockPath: string): Promise<boolean> {
+async function removeStaleGcLock(lockPath: string): Promise<StaleLock> {
 	const found = await readHeldLock(lockPath);
-	if (!found) return false;
+	if (!found) return { kind: "gone" };
 	try {
-		if (judgeLock(lockPath, found) === "held") return false;
+		// A lock gc would not break throws here, naming it, as before.
+		if (judgeLock(lockPath, found) === "held") return { kind: "held" };
 		// Removed only while it is still the very file read above — the
-		// descriptor is held, and the bytes must match.
-		return (await removeFileNoOneElseWrites(lockPath, [found.held], "the stale lock this run read")) === undefined;
+		// descriptor is held, and the bytes must match. Another file at the
+		// name is a lock taken since, which the next attempt judges.
+		try {
+			if ((await unlinkFileNoOneElseWrites(lockPath, [found.held])) === "kept") {
+				return {
+					kind: "left",
+					why: `what stands at ${lockPath} is not the regular lock file and bytes this run read, so it was left as it is`,
+				};
+			}
+		} catch (error) {
+			return { kind: "left", why: errorText(error) };
+		}
+		return { kind: "gone" };
 	} finally {
 		await found.held.handle.close().catch(() => undefined);
 	}
+}
+
+/** The refusal for a lock whose holder is gone and that could not be removed. */
+function staleLockLeft(lockPath: string, why: string): Error {
+	return new Error(
+		`${lockPath} was left by a gc run that is no longer running, and it could not be removed (${why}), so ` +
+			`nothing was done; remove it once it can be, or fix what stops it, and run gc again`,
+	);
 }
 
 /** What stands at `lockPath`, read and judged as {@link removeStaleGcLock} judges it, and nothing removed. */
@@ -191,16 +238,19 @@ async function openNewGcLock(lockPath: string): Promise<HeldFile | null> {
 /**
  * Remove a lock this run took and close it — removed while its descriptor is
  * still held, so no file put at the name since can carry its inode number,
- * and only while it holds the bytes this run wrote. Best effort: a lock left
- * behind holds what gc writes and this run's pid, so the next run can break it.
+ * and only while it holds the bytes this run wrote. Returns undefined once
+ * nothing of this run's is left at the name, or why it is still there: a
+ * lock left behind holds this run's pid, and while this process lives every
+ * later run reads it as held, so the caller reports it.
  */
-async function releaseGcLockFile(lockPath: string, held: HeldFile): Promise<void> {
-	await removeFileNoOneElseWrites(lockPath, [held], "the lock this run took");
+async function releaseGcLockFile(lockPath: string, held: HeldFile): Promise<string | undefined> {
+	const note = await removeFileNoOneElseWrites(lockPath, [held], "the lock this run took");
 	await held.handle.close().catch(() => undefined);
+	return note;
 }
 
 /** Another live process holds the lock: the one failure that waiting can end. */
-class GcLockHeld extends Error {
+export class GcLockHeld extends Error {
 	constructor(lockPath: string) {
 		super(`GC already running: ${lockPath}`);
 	}
@@ -211,26 +261,52 @@ async function openGcBreakerLock(lockPath: string): Promise<{ path: string; held
 	for (let attempt = 0; attempt < 2; attempt += 1) {
 		const held = await openNewGcLock(breakerPath);
 		if (held) return { path: breakerPath, held };
-		if (!(await removeStaleGcLock(breakerPath))) throw new GcLockHeld(lockPath);
+		const stale = await removeStaleGcLock(breakerPath);
+		if (stale.kind === "held") throw new GcLockHeld(lockPath);
+		if (stale.kind === "left") throw staleLockLeft(breakerPath, stale.why);
 	}
-	throw new GcLockHeld(lockPath);
+	throw new Error(`${breakerPath} could not be acquired after its name was taken repeatedly; nothing was done`);
 }
 
-async function openGcLock(lockPath: string): Promise<HeldFile> {
+/** The lock, taken, and what this run could not remove of the breaker lock it took to take it. */
+interface TakenGcLock {
+	held: HeldFile;
+	notes: string[];
+}
+
+async function openGcLock(lockPath: string): Promise<TakenGcLock> {
 	const direct = await openNewGcLock(lockPath);
-	if (direct) return direct;
+	if (direct) return { held: direct, notes: [] };
 
 	const breaker = await openGcBreakerLock(lockPath);
+	let taken: HeldFile | undefined;
+	let breakerNote: string | undefined;
+	let outcome: TakenGcLock | { error: unknown };
 	try {
-		const raced = await openNewGcLock(lockPath);
-		if (raced) return raced;
-		if (!(await removeStaleGcLock(lockPath))) throw new GcLockHeld(lockPath);
-		const takeover = await openNewGcLock(lockPath);
-		if (takeover) return takeover;
-		throw new GcLockHeld(lockPath);
+		taken = (await openNewGcLock(lockPath)) ?? undefined;
+		if (!taken) {
+			const stale = await removeStaleGcLock(lockPath);
+			if (stale.kind === "held") throw new GcLockHeld(lockPath);
+			if (stale.kind === "left") throw staleLockLeft(lockPath, stale.why);
+			taken = (await openNewGcLock(lockPath)) ?? undefined;
+			if (!taken)
+				throw new Error(`${lockPath} could not be acquired after its name was taken again; nothing was done`);
+		}
+		outcome = { held: taken, notes: [] };
+	} catch (error) {
+		outcome = { error };
 	} finally {
-		await releaseGcLockFile(breaker.path, breaker.held);
+		// The breaker is this run's own; while this process lives, a breaker
+		// left behind reads as held, so a failure to remove it is reported.
+		breakerNote = await releaseGcLockFile(breaker.path, breaker.held);
 	}
+	if ("error" in outcome) {
+		throw breakerNote
+			? new Error(`${errorText(outcome.error)}; ${breakerNote}`, { cause: outcome.error })
+			: outcome.error;
+	}
+	if (breakerNote) outcome.notes.push(breakerNote);
+	return outcome;
 }
 
 /**
@@ -239,10 +315,11 @@ async function openGcLock(lockPath: string): Promise<HeldFile> {
  * has to come out of the archive — queues instead of failing, since the
  * phases it waits behind take milliseconds per session. Only a lock another
  * live process holds is waited for: anything else that stops the lock being
- * taken — a file at its name gc did not write, a FIFO, an error — waiting
- * cannot change, so it is reported at once.
+ * taken — a file at its name gc did not write, a FIFO, a lock left by a run
+ * no longer running that cannot be removed, an error — waiting cannot
+ * change, so it is reported at once.
  */
-async function openGcLockWaiting(lockPath: string, waitMs: number): Promise<HeldFile> {
+async function openGcLockWaiting(lockPath: string, waitMs: number): Promise<TakenGcLock> {
 	const deadline = Date.now() + waitMs;
 	for (;;) {
 		try {
@@ -254,23 +331,47 @@ async function openGcLockWaiting(lockPath: string, waitMs: number): Promise<Held
 	}
 }
 
-/** Run `fn` holding `<agentDir>/gc.lock`, releasing it however `fn` ends. */
+/**
+ * Run `fn` holding `<agentDir>/gc.lock`, releasing it however `fn` ends.
+ * What this run could not remove of its own locks — the lock, or the breaker
+ * lock it took to break a stale one — goes to `onReleaseFailure`: left
+ * behind, a lock names this process, and every later run while it lives
+ * reads it as held, so the command has to say so. A review saw a completed
+ * archive report no errors and leave its lock, and the next command refused
+ * with "GC already running".
+ */
 export async function withGcLock<T>(
 	agentDir: string,
 	fn: (lockPath: string) => Promise<T>,
-	options: { waitMs?: number } = {},
+	options: { waitMs?: number; onReleaseFailure?: (note: string) => void } = {},
 ): Promise<T> {
 	const lockPath = path.join(agentDir, "gc.lock");
 	await fs.mkdir(agentDir, { recursive: true });
-	const held = await openGcLockWaiting(lockPath, options.waitMs ?? 0);
+	const { held, notes } = await openGcLockWaiting(lockPath, options.waitMs ?? 0);
+	let outcome: { value: T } | { error: unknown };
+	let note: string | undefined;
 	try {
-		return await fn(lockPath);
+		outcome = { value: await fn(lockPath) };
+	} catch (error) {
+		outcome = { error };
 	} finally {
 		// A lock broken as stale while this ran has a new owner, and removing
 		// it would hand a third caller the lock while that owner is inside:
 		// only this run's own lock goes — see {@link releaseGcLockFile}.
-		await releaseGcLockFile(lockPath, held);
+		note = await releaseGcLockFile(lockPath, held);
 	}
+	const left = [...notes, ...(note ? [note] : [])];
+	if ("error" in outcome) {
+		throw left.length > 0
+			? new Error(`${errorText(outcome.error)}; ${left.join("; ")}`, { cause: outcome.error })
+			: outcome.error;
+	}
+	if (options.onReleaseFailure) {
+		for (const entry of left) options.onReleaseFailure(entry);
+	} else if (left.length > 0) {
+		throw new Error(left.join("; "));
+	}
+	return outcome.value;
 }
 
 /**
