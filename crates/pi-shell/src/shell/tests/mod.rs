@@ -13,6 +13,7 @@ use crate::proctree;
 mod builtins;
 mod env_cwd;
 mod process_control;
+mod redirections;
 mod session;
 
 /// The standard streams of a command a test runs on a session directly;
