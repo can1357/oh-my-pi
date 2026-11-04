@@ -38,11 +38,20 @@ export interface DueByAddress {
 export type DueByProbe = { holds: true; address: DueByAddress } | { holds: false };
 
 /**
- * One due-by notice as its recipient receives it. `isOpen` is the clock's
- * side of liveness (the notice has not ended, its bound has not passed, the
- * child has not settled): it is asked synchronously at the request hand-off,
- * and from a worker it is a synchronous call to the main thread, which never
- * blocks on a worker. The recipient checks the address itself, locally.
+ * One due-by notice as its recipient receives it. The four functions are the
+ * clock's side; from a worker each is a synchronous call to the main thread,
+ * which never blocks on a worker. The recipient checks the address itself,
+ * locally, and never stores what a check found (a peek must change nothing).
+ *
+ * - `isOpen`: the notice has not ended, its bound has not passed, and the
+ *   child has not settled. A pure read, asked by builds and peeks.
+ * - `reserve`: at the request hand-off, the same test, and when it passes the
+ *   clock holds the notice for this hand-off: nothing else (its bound
+ *   included) can end it until `commit` or `release`. False when it ended.
+ * - `release`: the reserved request was not sent; the notice is open again,
+ *   or lost if its bound passed while it was held.
+ * - `commit`: the reserved request is being handed to the provider; the notice
+ *   ends delivered, in the same step, before the request goes out.
  */
 export interface SubagentOverdueDelivery {
 	childId: string;
@@ -50,6 +59,9 @@ export interface SubagentOverdueDelivery {
 	text: string;
 	address: DueByAddress;
 	isOpen(): boolean;
+	reserve(): boolean;
+	release(): void;
+	commit(): void;
 }
 
 /** The parts of a local session the address is decided from. */

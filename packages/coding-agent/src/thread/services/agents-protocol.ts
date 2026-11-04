@@ -11,6 +11,7 @@ import type {
 	AgentRegistryApi,
 	AgentStatus,
 	PersonNotice,
+	PersonNoticeHost,
 	RegisterInput,
 	RegistryListener,
 } from "../../registry/agent-registry";
@@ -58,7 +59,7 @@ export type AgentRegistryProtocol = {
 	/** Arm main's due-by clock for a dispatch made on a worker; ordered, so it precedes the run's settle. */
 	dueByArm: RpcMethod<[input: SubagentDispatchInput, watch: SubagentRunWatch], void>;
 	dueByAt: RpcMethod<[childId: string], number | undefined>;
-	notifyPerson: RpcMethod<[notice: PersonNotice, host: AgentSessionHandle | null | undefined], boolean>;
+	notifyPerson: RpcMethod<[notice: PersonNotice, hosts: readonly PersonNoticeHost[]], boolean>;
 	/** One forwarding subscription per worker; returns a sync unsubscribe. */
 	personSubscribe: RpcMethod<[listener: (notice: PersonNotice) => void], () => void>;
 };

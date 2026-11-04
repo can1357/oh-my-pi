@@ -25,6 +25,7 @@ import type { GoalModeState } from "../goals/state";
 import type { ApprovalGrantStore } from "../tools/approval-cache";
 import type { TokenRateMeter } from "../utils/token-rate";
 import type { AgentDefinition } from "../task/types";
+import type { PersonNotice } from "../registry/agent-registry";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { DueByAddress, DueByProbe, SubagentOverdueDelivery } from "../task/due-by-address";
 import { currentThreadId } from "../thread/identity";
@@ -156,9 +157,16 @@ export interface AgentSessionHandle {
 	setWorkPoolYieldItems(items: readonly WorkPoolYieldItem[]): Promise<void>;
 	/** Dispose the session and release its resources. */
 	dispose(options?: AgentSessionDisposeOptions): Promise<void>;
-	/** Show a notice on this session's own UI subscribers (no transcript, no model context). */
-	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
-	/** Leaf entry of this session's transcript, read on its home thread (a due-by address naming no call). */
+	/**
+	 * Show a person notice on this session's own subscribers, decided and shown
+	 * in one step on its home thread: false when it is disposed, closed,
+	 * mid-transition, or (with `address`) no longer holds that conversation.
+	 */
+	showPersonNotice(notice: PersonNotice, address: DueByAddress | undefined): Promise<boolean>;
+	/**
+	 * Leaf entry this session's conversation holds now, read on its home
+	 * thread (a due-by address naming no call); null mid-transition or gone.
+	 */
 	dueByLeaf(): Promise<string | null>;
 	/**
 	 * Whether this session's live conversation holds the due-by `address`,

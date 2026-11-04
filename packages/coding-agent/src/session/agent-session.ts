@@ -232,7 +232,7 @@ import {
 	obfuscateProviderContext,
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, type PersonNotice } from "../registry/agent-registry";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
@@ -2526,12 +2526,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// the notice is held rather than dropped; the transition's end requests the
 		// flush that offers it again.
 		// A notice counts as read only when a model request that carries it is
-		// sent while it is still live, so it is checked again at that hand-off.
+		// sent while it is still live, so it is checked again at that hand-off,
+		// where the clock holds it until the hand-off commits or releases it.
 		this.yieldQueue.register<SubagentOverdueEntry>(SUBAGENT_OVERDUE_MESSAGE_TYPE, {
 			isDeferred: () => this.isSessionTransitioning,
 			isStale: entry => this.#isDisposed || entry.isStale(),
 			build: buildSubagentOverdueMessage,
 			claimAtRequest: true,
+			reserve: entry => !this.#isDisposed && entry.reserve(),
+			release: entry => entry.release(),
+			commit: entry => entry.commit(),
 		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
@@ -3874,8 +3878,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *
 	 * Whether the notice may still be read is decided here, on this session's
 	 * own thread: the clock's side (`delivery.isOpen`) and this session's live
-	 * conversation still holding `delivery.address`, both asked again at the
-	 * hand-off of the request that carries it.
+	 * conversation still holding `delivery.address`. Both are pure reads, asked
+	 * by every build and peek; at the hand-off of the request that carries the
+	 * notice the clock's side is asked again as a reservation, and the hand-off
+	 * commits or releases it in the same step.
 	 *
 	 * The returned receipt is the clock's answer: it resolves once a model
 	 * request carrying the notice is handed to the provider while the notice is
@@ -3888,23 +3894,47 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (this.#isDisposed) {
 			return Promise.reject(new Error("Session disposed before the due-by notice could be read"));
 		}
-		let address: DueByAddress | undefined = delivery.address;
 		const entry: SubagentOverdueEntry = {
 			childId: delivery.childId,
 			stage: delivery.stage,
 			text: delivery.text,
-			isStale: () => {
-				if (!delivery.isOpen()) return true;
-				address = address && heldAddress(this, address);
-				return address === undefined;
-			},
+			// Recomputed from the dispatch-time address on every ask, never stored:
+			// a peek while this conversation is elsewhere must not lose the address.
+			isStale: () => !delivery.isOpen() || heldAddress(this, delivery.address) === undefined,
+			reserve: () => delivery.reserve(),
+			release: () => delivery.release(),
+			commit: () => delivery.commit(),
 		};
 		return this.yieldQueue.enqueueWithReceipt(SUBAGENT_OVERDUE_MESSAGE_TYPE, entry);
 	}
 
-	/** The leaf entry of this session's transcript, as a due-by address that names no tool call. */
-	async dueByLeaf(): Promise<string | null> {
+	/**
+	 * The leaf entry this session's conversation holds now, as a due-by address
+	 * naming no tool call; null while a transition is in flight (the session is
+	 * between transcripts, so no conversation can be named) or once disposed.
+	 */
+	dueByLeafNow(): string | null {
+		if (this.#isDisposed || this.isSessionTransitioning) return null;
 		return this.sessionManager.getLeafId();
+	}
+
+	async dueByLeaf(): Promise<string | null> {
+		return this.dueByLeafNow();
+	}
+
+	/**
+	 * Show a person notice on this session's own subscribers, when it can stand
+	 * in for the person: not disposed, and, when `address` is given (a notice
+	 * about that conversation), not mid-transition and its live conversation
+	 * still holds it. A notice with no address is about no conversation (a loss
+	 * warning), so a transition does not hold it back. Decided and shown in one
+	 * step on this session's thread, so the answer is the truth about the show.
+	 */
+	async showPersonNotice(notice: PersonNotice, address: DueByAddress | undefined): Promise<boolean> {
+		if (this.#isDisposed) return false;
+		if (address && (this.isSessionTransitioning || heldAddress(this, address) === undefined)) return false;
+		this.emitNotice(notice.level, notice.message, notice.source);
+		return true;
 	}
 
 	/**

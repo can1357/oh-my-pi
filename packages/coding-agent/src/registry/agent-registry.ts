@@ -11,6 +11,7 @@
 
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
+import type { DueByAddress } from "../task/due-by-address";
 import { SubagentDueClock, type SubagentDueClockApi } from "../task/due-by";
 import { AgentAwaits, type AgentAwaitsApi } from "./agent-awaits";
 import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
@@ -32,6 +33,16 @@ export interface PersonNotice {
 	level: "info" | "warning" | "error";
 	message: string;
 	source?: string;
+}
+
+/**
+ * A session that may stand in for the person when no window listens, and
+ * the conversation it must still hold to do so (none for a loss warning,
+ * which is about no conversation).
+ */
+export interface PersonNoticeHost {
+	session: AgentSessionHandle;
+	address?: DueByAddress;
 }
 
 /**
@@ -148,8 +159,12 @@ export interface AgentRegistryApi {
 	readonly dueBy: SubagentDueClockApi;
 	/** Listen as the person's window for every person notice from any agent of this tree. */
 	onPersonNotice(listener: (notice: PersonNotice) => void): () => void;
-	/** Show `notice` to the person; `host` stands in for an absent window. False when no one could be told. */
-	notifyPerson(notice: PersonNotice, host: AgentSessionHandle | null | undefined): boolean;
+	/**
+	 * Show `notice` to the person: at the window when one listens, else on the
+	 * first of `hosts` that can stand in for the person (each decides on its own
+	 * thread). False when no one was told.
+	 */
+	notifyPerson(notice: PersonNotice, hosts: readonly PersonNoticeHost[]): Promise<boolean>;
 	/** Register (or replace) the ref for `input.id`; always mints a new generation. */
 	register(input: RegisterInput): AgentRef;
 	/** Register an absent id, or reuse the exact detached `parked` ref `expected`. */
@@ -241,11 +256,12 @@ export class AgentRegistry implements AgentRegistryApi {
 	 * Show `notice` to the person, from whichever agent of this tree raised it.
 	 * A listening window shows it whatever agent it displays, and nothing else
 	 * does, so the person sees it once. With no window (a print, RPC or SDK
-	 * host) it becomes an ordinary notice on `host`, the session whose
-	 * subscribers stand in for the person there. False when there is no one to
-	 * show it to.
+	 * host) it becomes an ordinary notice on the first of `hosts` that shows it:
+	 * each decides on its own thread, in one step with the show, whether it can
+	 * stand in for the person (alive, settled, and holding `address` when one is
+	 * given). False when there is no one to show it to.
 	 */
-	notifyPerson(notice: PersonNotice, host: AgentSessionHandle | null | undefined): boolean {
+	async notifyPerson(notice: PersonNotice, hosts: readonly PersonNoticeHost[]): Promise<boolean> {
 		if (this.#personListeners.size > 0) {
 			for (const listener of this.#personListeners) {
 				try {
@@ -256,9 +272,14 @@ export class AgentRegistry implements AgentRegistryApi {
 			}
 			return true;
 		}
-		if (!host) return false;
-		host.emitNotice(notice.level, notice.message, notice.source);
-		return true;
+		for (const host of hosts) {
+			try {
+				if (await host.session.showPersonNotice(notice, host.address)) return true;
+			} catch {
+				// A host whose home went away shows nothing; try the next.
+			}
+		}
+		return false;
 	}
 
 	#matchesExpected(ref: AgentRef, expected?: AgentRefExpectation): boolean {

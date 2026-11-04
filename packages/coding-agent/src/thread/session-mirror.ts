@@ -55,6 +55,7 @@ import type { IdleMaintenanceOptions } from "../session/idle-maintenance";
 import type { CustomMessage } from "../session/messages";
 import type { ServingModel } from "../session/retry-fallback-chains";
 import type { ModelUsageEntry, SessionEntry, UsageStatistics } from "../session/session-entries";
+import type { PersonNotice } from "../registry/agent-registry";
 import type { DueByAddress, DueByProbe, SubagentOverdueDelivery } from "../task/due-by-address";
 import type { AgentDefinition } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
@@ -242,7 +243,7 @@ export type SessionHostProtocol = {
 	waitForIrcReplies: RpcMethod<[], void>;
 	setWorkPoolYieldItems: RpcMethod<[items: readonly WorkPoolYieldItem[]], void>;
 	emitIrcRelayObservation: RpcMethod<[record: CustomMessage], void>;
-	emitNotice: RpcMethod<[level: "info" | "warning" | "error", message: string, source?: string], void>;
+	showPersonNotice: RpcMethod<[notice: PersonNotice, address: DueByAddress | undefined], boolean>;
 	dueByLeaf: RpcMethod<[], string | null>;
 	dueByProbe: RpcMethod<[address: DueByAddress, waitMs: number], DueByProbe>;
 	/** The delivery's `isOpen` crosses as a synchronous call back to main (it never blocks on a worker). */
@@ -330,9 +331,9 @@ export type SessionBridgeProtocol = {
 	waitForIrcReplies: RpcMethod<[session: AgentSessionHandle], void>;
 	setWorkPoolYieldItems: RpcMethod<[session: AgentSessionHandle, items: readonly WorkPoolYieldItem[]], void>;
 	emitIrcRelayObservation: RpcMethod<[session: AgentSessionHandle, record: CustomMessage], void>;
-	emitNotice: RpcMethod<
-		[session: AgentSessionHandle, level: "info" | "warning" | "error", message: string, source?: string],
-		void
+	showPersonNotice: RpcMethod<
+		[session: AgentSessionHandle, notice: PersonNotice, address: DueByAddress | undefined],
+		boolean
 	>;
 	dueByLeaf: RpcMethod<[session: AgentSessionHandle], string | null>;
 	dueByProbe: RpcMethod<[session: AgentSessionHandle, address: DueByAddress, waitMs: number], DueByProbe>;

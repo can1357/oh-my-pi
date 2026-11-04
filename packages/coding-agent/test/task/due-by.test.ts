@@ -2535,16 +2535,14 @@ describe("subagent due-by", () => {
 		const registry = AgentRegistry.global();
 		const window = windowOn(main.session);
 		const controller = new SessionFocusController(window.ctx, registry, () => new AgentLifecycleManager(registry));
-		registry.notifyPerson(
-			{ level: "warning", message: "WINDOW_OPEN", source: SUBAGENT_OVERDUE_MESSAGE_TYPE },
-			main.session,
-		);
+		await registry.notifyPerson({ level: "warning", message: "WINDOW_OPEN", source: SUBAGENT_OVERDUE_MESSAGE_TYPE }, [
+			{ session: main.session },
+		]);
 		controller.dispose();
 		window.ctx.unsubscribe?.();
-		registry.notifyPerson(
-			{ level: "warning", message: "WINDOW_GONE", source: SUBAGENT_OVERDUE_MESSAGE_TYPE },
-			main.session,
-		);
+		await registry.notifyPerson({ level: "warning", message: "WINDOW_GONE", source: SUBAGENT_OVERDUE_MESSAGE_TYPE }, [
+			{ session: main.session },
+		]);
 		expect(window.notices().map(notice => notice.message)).toEqual(["WINDOW_OPEN"]);
 		expect(main.notices.map(notice => notice.message)).toEqual(["WINDOW_GONE"]);
 	});

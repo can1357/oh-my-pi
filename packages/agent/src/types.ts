@@ -89,20 +89,32 @@ export const ASIDE_MESSAGE_DISCARD = Symbol("aside-message-discard");
  * loop checks that the provider-bound context still holds a message carrying
  * that identity (one that preparation, a callback or a transform took out, or
  * rebuilt without the identity, is handed back unsent), then asks it: it
- * returns itself (still live), a replacement (part of it went stale; the
- * producer has settled that part), or null (all of it went stale, all
- * settled). Only when every such aside of the request is carried and returns
- * itself are they committed, in the same synchronous step as the answers and
- * the hand-off, so a producer's liveness check and its delivery mark are one
- * atomic act. A replaced or dropped aside never reaches the transcript; the
- * loop rebuilds the request without it.
+ * returns itself (still live, and now reserved: its producer may not end it
+ * by any other route until the loop commits or releases it), a replacement
+ * (part of it went stale; the producer has settled that part), or null (all
+ * of it went stale, all settled). Only when every such aside of the request is
+ * carried and returns itself are they committed, in the same synchronous step
+ * as the answers and the hand-off, so a producer's liveness check and its
+ * delivery mark are one atomic act even when the producer lives on another
+ * thread. Otherwise every aside that returned itself is released
+ * ({@link ASIDE_MESSAGE_RELEASE}) and claimed again in the rebuilt request. A
+ * replaced or dropped aside never reaches the transcript; the loop rebuilds
+ * the request without it.
  */
 export const ASIDE_MESSAGE_CLAIM = Symbol("aside-message-claim");
+/**
+ * Called on a claimable aside that answered its claim with itself (and so
+ * reserved itself) when the request it was claimed for is not sent after all,
+ * because another aside of that request was replaced or dropped. The aside
+ * stays in the live context and is claimed again before the next request.
+ */
+export const ASIDE_MESSAGE_RELEASE = Symbol("aside-message-release");
 
 export type CommittableAsideMessage = AgentMessage & {
 	[ASIDE_MESSAGE_COMMIT]?: () => void;
 	[ASIDE_MESSAGE_DISCARD]?: (error: Error) => void;
 	[ASIDE_MESSAGE_CLAIM]?: () => AgentMessage | null;
+	[ASIDE_MESSAGE_RELEASE]?: () => void;
 };
 
 /**

@@ -155,8 +155,15 @@ export {
 	taskSchema,
 } from "./types";
 
-/** A run's end, without its value: what the due-by clock is told of a settled run. */
-function settledRun(): void {}
+/**
+ * One dispatch's due-by clock, armed when the dispatch was made, waiting for
+ * the run it watches: `follow` hands it that run (its settle and cancel stop
+ * the clock), `abandon` stops it when no run will ever start.
+ */
+interface DueByWatch {
+	follow(run: SpawnRun): void;
+	abandon(): void;
+}
 
 interface TaskDescriptionOptions {
 	agents: AgentDefinition[];
@@ -1024,12 +1031,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}
 
 	/**
-	 * Start one spawn's subagent run behind the session semaphore, and its
-	 * due-by clock with it: every path (inline, background job, speculative
-	 * launch while the call streams) creates its run here, so the clock starts
-	 * when the child does, with the due-by read now. The dispatcher's
-	 * `dueMinutes`, else `task.dueMinutes`; the clock stops when the run settles
-	 * or is cancelled. Nothing here stops or cancels the child.
+	 * Start one spawn's subagent run behind the session semaphore. `dueBy` is
+	 * the clock this dispatch armed when it was made; a launch without one (a
+	 * blocking spawn, a speculative launch while the call streams) arms it now,
+	 * which is its dispatch. The clock stops when the run settles or is
+	 * cancelled. Nothing here stops or cancels the child.
 	 */
 	#launch(spawn: {
 		toolCallId: string;
@@ -1039,6 +1045,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		detached: boolean;
 		/** Launched while the dispatching call still streams: its entry is not in the transcript yet. */
 		speculative?: boolean;
+		dueBy?: DueByWatch;
 	}): SpawnRun {
 		const spawnRun = new SpawnRun(
 			this.#permit,
@@ -1057,37 +1064,72 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				),
 			{ agentId: spawn.agentId, detached: spawn.detached },
 		);
-		if (spawn.agentId !== undefined) {
-			// The registry this session's agents live in: an SDK host may give a session its own.
-			const registry = this.session.agentRegistry ?? AgentRegistry.global();
-			const ownerId = this.session.getAgentId?.() ?? MAIN_AGENT_ID;
-			// A `task.dueMinutes` setting past the largest due-by counts as that due-by.
-			const minutes = Math.min(
-				spawn.params.dueMinutes ?? cfgTaskDueMinutes.get(this.session.settings),
-				MAX_DUE_MINUTES,
-			);
-			// The dispatcher's own address, decided here on its home thread: the
-			// clock runs on the main thread and never reads a transcript itself.
-			const ownerSession = registry.get(ownerId)?.session;
-			const ownerAddress =
-				ownerSession && isLocalAgentSession(ownerSession)
-					? ownerSession.dueByDispatchAddress(spawn.toolCallId, spawn.speculative === true)
-					: { entryId: null, toolCallId: spawn.toolCallId };
-			registry.dueBy.arm(
-				{
-					childId: spawn.agentId,
-					ownerId,
-					ownerAddress,
-					agent: spawn.params.agent ?? "task",
-					dispatchedAt: Date.now(),
-					dueMs: minutes * 60_000,
-					stated: spawn.params.dueMinutes !== undefined,
-				},
-				// Settle and cancel only: the run's result never crosses to the clock.
-				{ settled: spawnRun.result.then(settledRun, settledRun), signal: spawnRun.signal },
-			);
-		}
+		(spawn.dueBy ?? this.#armDueBy(spawn))?.follow(spawnRun);
 		return spawnRun;
+	}
+
+	/**
+	 * Arm the due-by clock for a dispatch being made now, and return the watch
+	 * its run settles: the due-by (the dispatcher's `dueMinutes`, else
+	 * `task.dueMinutes`), the time and the dispatcher's own address are all
+	 * read here, on the dispatcher's thread, so a job whose body starts later
+	 * (queued, or called back from the main thread) is clocked from the
+	 * dispatch and addressed to the conversation that made it. Undefined for a
+	 * spawn with no agent id.
+	 */
+	#armDueBy(spawn: {
+		toolCallId: string;
+		params: SpawnParams;
+		agentId?: string;
+		speculative?: boolean;
+	}): DueByWatch | undefined {
+		if (spawn.agentId === undefined) return undefined;
+		// The registry this session's agents live in: an SDK host may give a session its own.
+		const registry = this.session.agentRegistry ?? AgentRegistry.global();
+		const ownerId = this.session.getAgentId?.() ?? MAIN_AGENT_ID;
+		// A `task.dueMinutes` setting past the largest due-by counts as that due-by.
+		const minutes = Math.min(
+			spawn.params.dueMinutes ?? cfgTaskDueMinutes.get(this.session.settings),
+			MAX_DUE_MINUTES,
+		);
+		// The dispatcher's own address, decided here on its home thread: the
+		// clock runs on the main thread and never reads a transcript itself.
+		const ownerSession = registry.get(ownerId)?.session;
+		const ownerAddress =
+			ownerSession && isLocalAgentSession(ownerSession)
+				? ownerSession.dueByDispatchAddress(spawn.toolCallId, spawn.speculative === true)
+				: { entryId: null, toolCallId: spawn.toolCallId };
+		const settled = Promise.withResolvers<void>();
+		const cancel = new AbortController();
+		// Settle and cancel only: the run's result never crosses to the clock.
+		registry.dueBy.arm(
+			{
+				childId: spawn.agentId,
+				ownerId,
+				ownerAddress,
+				agent: spawn.params.agent ?? "task",
+				dispatchedAt: Date.now(),
+				dueMs: minutes * 60_000,
+				stated: spawn.params.dueMinutes !== undefined,
+			},
+			{ settled: settled.promise, signal: cancel.signal },
+		);
+		let followed = false;
+		return {
+			follow: run => {
+				if (followed) return;
+				followed = true;
+				const settle = (): void => settled.resolve();
+				run.result.then(settle, settle);
+				if (run.signal.aborted) cancel.abort();
+				else run.signal.addEventListener("abort", () => cancel.abort(), { once: true });
+			},
+			abandon: () => {
+				if (followed) return;
+				followed = true;
+				settled.resolve();
+			},
+		};
 	}
 
 	/**
@@ -1630,6 +1672,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// A queued job launches (or adopts) its run when it starts; until then
 		// its widget has no tool tap to read.
 		let spawnRun: SpawnRun | undefined = run;
+		// The dispatch is now, even when the body starts later (queued, or called
+		// back from the main thread for a worker's job): its clock starts here.
+		const dueBy = run ? undefined : this.#armDueBy({ toolCallId, params: spawnParams, agentId });
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			// Isolated runs are parked without a reviver once the run ends
 			// (`finalizeSubagentLifecycle`), so "message it" would point the
@@ -1647,178 +1692,187 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId) : true,
 			})}`;
 		};
-		return manager.register(
-			"task",
-			agentId,
-			async ({ jobId, signal: runSignal, reportProgress, markRunning }) => {
-				const startedAt = Date.now();
-				const forwardSyncProgress: AgentToolUpdateCallback<TaskToolDetails> = async update => {
-					const nextProgress = update.details?.progress?.[0];
-					if (nextProgress) {
-						// The job body owns status and identity (id/index/agent);
-						// copy only the live metrics the subagent streams so the
-						// polling row reflects the resolved model, reasoning level,
-						// and running counters without reverting the "running"
-						// status back to the subagent's initial "pending" snapshot.
-						progress.modelRole = nextProgress.modelRole ?? progress.modelRole;
-						progress.resolvedModel = nextProgress.resolvedModel;
-						progress.resolvedModelIdentity = nextProgress.resolvedModelIdentity;
-						progress.resolvedThinkingLevel = nextProgress.resolvedThinkingLevel;
-						progress.resolvedModelIsFallback = nextProgress.resolvedModel
-							? nextProgress.resolvedModelIsFallback
-							: undefined;
-						progress.advisor = nextProgress.advisor ?? progress.advisor;
-						progress.completionPercent = nextProgress.completionPercent ?? progress.completionPercent;
-						progress.stage = nextProgress.stage ?? progress.stage;
-						progress.watch = nextProgress.watch ?? progress.watch;
-						progress.resolvedModelRoute = nextProgress.resolvedModelRoute ?? progress.resolvedModelRoute;
-						progress.tokens = nextProgress.tokens;
-						progress.requests = nextProgress.requests;
-						progress.contextTokens = nextProgress.contextTokens;
-						progress.contextWindow = nextProgress.contextWindow;
-						progress.cost = nextProgress.cost;
-						progress.toolCount = nextProgress.toolCount;
-						progress.currentTool = nextProgress.currentTool;
-						progress.currentToolArgs = nextProgress.currentToolArgs;
-						progress.currentToolArgsKey = nextProgress.currentToolArgsKey;
-						progress.currentToolIntent = nextProgress.currentToolIntent;
-						progress.currentToolStartMs = nextProgress.currentToolStartMs;
-						progress.lastIntent = nextProgress.lastIntent;
-						progress.recentTools = nextProgress.recentTools.slice();
-						progress.recentOutput = nextProgress.recentOutput.slice();
-						progress.retryState = nextProgress.retryState;
-						progress.retryFailure = nextProgress.retryFailure;
-					}
-					const updateText =
-						update.content.find(part => part.type === "text")?.text ?? `Running background task ${agentId}...`;
-					await reportProgress(updateText, buildDetails() as unknown as Record<string, unknown>);
-				};
-				const activeRun = (spawnRun ??= this.#launch({
-					toolCallId,
-					params: spawnParams,
-					index: progress.index,
-					agentId,
-					detached: true,
-				}));
-				activeRun.attach({
-					signal: runSignal,
-					onUpdate: forwardSyncProgress,
-					onArtifactsRetained: cleanup => {
-						// Tie the retained temp directory's lifetime to this job
-						// row: the manager runs `cleanup` exactly once, on
-						// eviction or manager disposal, instead of it leaking
-						// for the process lifetime. Look up by the resolved
-						// `jobId`, not the requested `agentId` — `register()`
-						// suffixes `jobId` on collision, and looking up the
-						// requested id would hit an unrelated pre-existing row.
-						const job = manager.getJob(jobId);
-						if (job) job.retainedArtifactsCleanup = cleanup;
-						else void cleanup();
-					},
-				});
-				// An acquire-time abort and a post-acquire abort take the same
-				// path: progress + onSettled have to fire even when the spawn
-				// never reached the executor, otherwise the batch aggregate state
-				// stays "running" forever.
-				const permitHeld = await activeRun.started.then(
-					() => true,
-					() => false,
-				);
-				if (!permitHeld || runSignal.aborted) {
-					progress.status = "aborted";
-					onSettled?.(true);
-					throw new Error("Aborted before execution");
-				}
-				try {
-					markRunning();
-					progress.status = "running";
-					await reportProgress(
-						`Running background task ${agentId}...`,
-						buildDetails() as unknown as Record<string, unknown>,
-					);
-					const result = await activeRun.result;
-					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
-					const singleResult = result.details?.results[0];
-					// A missing result means the sync path failed at the tool level
-					// (results: []) — treat it as a failure, not success. A runner
-					// error on a zero exit (changes captured but not landed, or a
-					// retained workspace) is a failure too: the work needs manual
-					// recovery, which a "completed" job would hide. Mirrors the sync
-					// path's status derivation. `isError` marks a child that finished
-					// before a later step (isolation merge, nested patch apply) threw.
-					const resultFailed =
-						result.isError === true ||
-						!singleResult ||
-						(singleResult.aborted ?? false) ||
-						singleResult.exitCode !== 0 ||
-						singleResult.error !== undefined;
-					progress.status = singleResult?.aborted ? "aborted" : resultFailed ? "failed" : "completed";
-					progress.durationMs = singleResult?.durationMs ?? Math.max(0, Date.now() - startedAt);
-					progress.tokens = singleResult?.tokens ?? 0;
-					progress.requests = singleResult?.requests ?? 0;
-					progress.contextTokens = singleResult?.contextTokens;
-					progress.contextWindow = singleResult?.contextWindow;
-					progress.cost = singleResult?.usage?.cost.total ?? 0;
-					progress.extractedToolData = singleResult?.extractedToolData;
-					progress.retryFailure = singleResult?.retryFailure;
-					progress.retryState = undefined;
-					progress.modelRole = singleResult?.modelRole ?? progress.modelRole;
-					progress.advisor = singleResult?.advisor ?? progress.advisor;
-					progress.resolvedModelRoute = singleResult?.resolvedModelRoute ?? progress.resolvedModelRoute;
-					if (singleResult?.resolvedModel) {
-						progress.resolvedModel = singleResult.resolvedModel;
-						progress.resolvedModelIdentity = singleResult.resolvedModelIdentity;
-						progress.resolvedThinkingLevel = singleResult.resolvedThinkingLevel;
-						progress.resolvedModelIsFallback = singleResult.resolvedModelIsFallback;
-					} else {
-						delete progress.resolvedModel;
-						delete progress.resolvedModelIdentity;
-						delete progress.resolvedThinkingLevel;
-						delete progress.resolvedModelIsFallback;
-					}
-					onSettled?.(resultFailed);
-					const statusText = resultFailed
-						? `Background task ${agentId} failed.`
-						: `Background task ${agentId} complete.`;
-					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
-					const deliveryText = `${finalText}${await buildFollowUpHint(singleResult?.aborted === true)}`;
-					const structured = singleResult?.structuredOutput;
-					if (resultFailed) {
-						// Mark the job itself failed; the failed agent stays interrogable.
-						throw new TaskJobError(deliveryText, structured);
-					}
-					return structured ? { text: deliveryText, structured } : deliveryText;
-				} catch (error) {
-					if (error instanceof TaskJobError) {
-						throw error;
-					}
-					progress.status = "failed";
-					progress.durationMs = Math.max(0, Date.now() - startedAt);
-					onSettled?.(true);
-					const statusText = `Background task ${agentId} failed.`;
-					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
-					const message = error instanceof Error ? error.message : String(error);
-					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
-					throw new TaskJobError(`${message}${hint}`);
-				}
-			},
-			{
-				id: agentId,
+		let jobId: string;
+		try {
+			jobId = manager.register(
+				"task",
 				agentId,
-				queued: true,
-				ownerId: this.session.getAgentId?.() ?? undefined,
-				widgetInputs: createTaskWidgetInputs({
-					manager,
-					agentId,
-					tools: () => spawnRun?.tools,
-					progress,
-					intent: this.session.getToolCallIntent?.(toolCallId),
-				}),
-				onProgress: text => {
-					onUpdate?.({ content: [{ type: "text", text }], details: buildDetails() });
+				async ({ jobId, signal: runSignal, reportProgress, markRunning }) => {
+					const startedAt = Date.now();
+					const forwardSyncProgress: AgentToolUpdateCallback<TaskToolDetails> = async update => {
+						const nextProgress = update.details?.progress?.[0];
+						if (nextProgress) {
+							// The job body owns status and identity (id/index/agent);
+							// copy only the live metrics the subagent streams so the
+							// polling row reflects the resolved model, reasoning level,
+							// and running counters without reverting the "running"
+							// status back to the subagent's initial "pending" snapshot.
+							progress.modelRole = nextProgress.modelRole ?? progress.modelRole;
+							progress.resolvedModel = nextProgress.resolvedModel;
+							progress.resolvedModelIdentity = nextProgress.resolvedModelIdentity;
+							progress.resolvedThinkingLevel = nextProgress.resolvedThinkingLevel;
+							progress.resolvedModelIsFallback = nextProgress.resolvedModel
+								? nextProgress.resolvedModelIsFallback
+								: undefined;
+							progress.advisor = nextProgress.advisor ?? progress.advisor;
+							progress.completionPercent = nextProgress.completionPercent ?? progress.completionPercent;
+							progress.stage = nextProgress.stage ?? progress.stage;
+							progress.watch = nextProgress.watch ?? progress.watch;
+							progress.resolvedModelRoute = nextProgress.resolvedModelRoute ?? progress.resolvedModelRoute;
+							progress.tokens = nextProgress.tokens;
+							progress.requests = nextProgress.requests;
+							progress.contextTokens = nextProgress.contextTokens;
+							progress.contextWindow = nextProgress.contextWindow;
+							progress.cost = nextProgress.cost;
+							progress.toolCount = nextProgress.toolCount;
+							progress.currentTool = nextProgress.currentTool;
+							progress.currentToolArgs = nextProgress.currentToolArgs;
+							progress.currentToolArgsKey = nextProgress.currentToolArgsKey;
+							progress.currentToolIntent = nextProgress.currentToolIntent;
+							progress.currentToolStartMs = nextProgress.currentToolStartMs;
+							progress.lastIntent = nextProgress.lastIntent;
+							progress.recentTools = nextProgress.recentTools.slice();
+							progress.recentOutput = nextProgress.recentOutput.slice();
+							progress.retryState = nextProgress.retryState;
+							progress.retryFailure = nextProgress.retryFailure;
+						}
+						const updateText =
+							update.content.find(part => part.type === "text")?.text ?? `Running background task ${agentId}...`;
+						await reportProgress(updateText, buildDetails() as unknown as Record<string, unknown>);
+					};
+					const activeRun = (spawnRun ??= this.#launch({
+						toolCallId,
+						params: spawnParams,
+						index: progress.index,
+						agentId,
+						detached: true,
+						dueBy,
+					}));
+					activeRun.attach({
+						signal: runSignal,
+						onUpdate: forwardSyncProgress,
+						onArtifactsRetained: cleanup => {
+							// Tie the retained temp directory's lifetime to this job
+							// row: the manager runs `cleanup` exactly once, on
+							// eviction or manager disposal, instead of it leaking
+							// for the process lifetime. Look up by the resolved
+							// `jobId`, not the requested `agentId` — `register()`
+							// suffixes `jobId` on collision, and looking up the
+							// requested id would hit an unrelated pre-existing row.
+							const job = manager.getJob(jobId);
+							if (job) job.retainedArtifactsCleanup = cleanup;
+							else void cleanup();
+						},
+					});
+					// An acquire-time abort and a post-acquire abort take the same
+					// path: progress + onSettled have to fire even when the spawn
+					// never reached the executor, otherwise the batch aggregate state
+					// stays "running" forever.
+					const permitHeld = await activeRun.started.then(
+						() => true,
+						() => false,
+					);
+					if (!permitHeld || runSignal.aborted) {
+						progress.status = "aborted";
+						onSettled?.(true);
+						throw new Error("Aborted before execution");
+					}
+					try {
+						markRunning();
+						progress.status = "running";
+						await reportProgress(
+							`Running background task ${agentId}...`,
+							buildDetails() as unknown as Record<string, unknown>,
+						);
+						const result = await activeRun.result;
+						const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
+						const singleResult = result.details?.results[0];
+						// A missing result means the sync path failed at the tool level
+						// (results: []) — treat it as a failure, not success. A runner
+						// error on a zero exit (changes captured but not landed, or a
+						// retained workspace) is a failure too: the work needs manual
+						// recovery, which a "completed" job would hide. Mirrors the sync
+						// path's status derivation. `isError` marks a child that finished
+						// before a later step (isolation merge, nested patch apply) threw.
+						const resultFailed =
+							result.isError === true ||
+							!singleResult ||
+							(singleResult.aborted ?? false) ||
+							singleResult.exitCode !== 0 ||
+							singleResult.error !== undefined;
+						progress.status = singleResult?.aborted ? "aborted" : resultFailed ? "failed" : "completed";
+						progress.durationMs = singleResult?.durationMs ?? Math.max(0, Date.now() - startedAt);
+						progress.tokens = singleResult?.tokens ?? 0;
+						progress.requests = singleResult?.requests ?? 0;
+						progress.contextTokens = singleResult?.contextTokens;
+						progress.contextWindow = singleResult?.contextWindow;
+						progress.cost = singleResult?.usage?.cost.total ?? 0;
+						progress.extractedToolData = singleResult?.extractedToolData;
+						progress.retryFailure = singleResult?.retryFailure;
+						progress.retryState = undefined;
+						progress.modelRole = singleResult?.modelRole ?? progress.modelRole;
+						progress.advisor = singleResult?.advisor ?? progress.advisor;
+						progress.resolvedModelRoute = singleResult?.resolvedModelRoute ?? progress.resolvedModelRoute;
+						if (singleResult?.resolvedModel) {
+							progress.resolvedModel = singleResult.resolvedModel;
+							progress.resolvedModelIdentity = singleResult.resolvedModelIdentity;
+							progress.resolvedThinkingLevel = singleResult.resolvedThinkingLevel;
+							progress.resolvedModelIsFallback = singleResult.resolvedModelIsFallback;
+						} else {
+							delete progress.resolvedModel;
+							delete progress.resolvedModelIdentity;
+							delete progress.resolvedThinkingLevel;
+							delete progress.resolvedModelIsFallback;
+						}
+						onSettled?.(resultFailed);
+						const statusText = resultFailed
+							? `Background task ${agentId} failed.`
+							: `Background task ${agentId} complete.`;
+						await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
+						const deliveryText = `${finalText}${await buildFollowUpHint(singleResult?.aborted === true)}`;
+						const structured = singleResult?.structuredOutput;
+						if (resultFailed) {
+							// Mark the job itself failed; the failed agent stays interrogable.
+							throw new TaskJobError(deliveryText, structured);
+						}
+						return structured ? { text: deliveryText, structured } : deliveryText;
+					} catch (error) {
+						if (error instanceof TaskJobError) {
+							throw error;
+						}
+						progress.status = "failed";
+						progress.durationMs = Math.max(0, Date.now() - startedAt);
+						onSettled?.(true);
+						const statusText = `Background task ${agentId} failed.`;
+						await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
+						const message = error instanceof Error ? error.message : String(error);
+						const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
+						throw new TaskJobError(`${message}${hint}`);
+					}
 				},
-			},
-		);
+				{
+					id: agentId,
+					agentId,
+					queued: true,
+					ownerId: this.session.getAgentId?.() ?? undefined,
+					widgetInputs: createTaskWidgetInputs({
+						manager,
+						agentId,
+						tools: () => spawnRun?.tools,
+						progress,
+						intent: this.session.getToolCallIntent?.(toolCallId),
+					}),
+					onProgress: text => {
+						onUpdate?.({ content: [{ type: "text", text }], details: buildDetails() });
+					},
+				},
+			);
+		} catch (error) {
+			// No run will start for a job that was never registered.
+			dueBy?.abandon();
+			throw error;
+		}
+		return jobId;
 	}
 
 	/**

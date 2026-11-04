@@ -20,6 +20,7 @@ import type {
 	AgentRegistryApi,
 	AgentStatus,
 	PersonNotice,
+	PersonNoticeHost,
 	RegisterInput,
 	RegistryEvent,
 	RegistryListener,
@@ -126,8 +127,12 @@ export class RemoteAgentRegistry implements AgentRegistryApi {
 		return this.#personListeners.add(listener);
 	}
 
-	notifyPerson(notice: PersonNotice, host: AgentSessionHandle | null | undefined): boolean {
-		return this.#remote.callSync("notifyPerson", notice, host);
+	/**
+	 * Asynchronous on purpose: main may ask a host on this very worker to show
+	 * the notice, which a synchronous call would leave waiting on itself.
+	 */
+	notifyPerson(notice: PersonNotice, hosts: readonly PersonNoticeHost[]): Promise<boolean> {
+		return this.#remote.call("notifyPerson", notice, hosts);
 	}
 
 	register(input: RegisterInput): AgentRef {

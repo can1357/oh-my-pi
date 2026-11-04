@@ -112,6 +112,7 @@ import {
 	ASIDE_MESSAGE_CLAIM,
 	ASIDE_MESSAGE_COMMIT,
 	ASIDE_MESSAGE_DISCARD,
+	ASIDE_MESSAGE_RELEASE,
 	isSoftToolRequirement,
 	SPECULATIVE_STREAM_SESSION,
 } from "./types";
@@ -1311,11 +1312,14 @@ async function runLoopBody(
 	 * The request hand-off, given `sent`, the provider-bound context exactly as
 	 * it is about to go out. An unclaimed aside that preparation or a pre-request
 	 * callback took out of `sent` is not carried by the request, so it is handed
-	 * back unsent. Every other one answers whether it is still live; only if all
-	 * are carried and answer themselves are they committed, in this same
-	 * synchronous step, which the caller runs immediately before handing the
-	 * request to the provider. Otherwise each replaced or dropped aside leaves
-	 * the live context and `inputs` (it was never emitted) and the request is
+	 * back unsent. Every other one is claimed: it answers whether it is still
+	 * live and, when it is, reserves itself, so its producer cannot end it by
+	 * any other route until this step settles it. Only if all are carried and
+	 * answer themselves are they committed, in this same synchronous step,
+	 * which the caller runs immediately before handing the request to the
+	 * provider. Otherwise the reserved ones are released (they stay in the
+	 * request and are claimed again), each replaced or dropped aside leaves the
+	 * live context and `inputs` (it was never emitted), and the request is
 	 * rebuilt without it.
 	 */
 	const claimUnclaimed = (inputs: AgentMessage[], sent: Context): void => {
@@ -1352,6 +1356,14 @@ async function runLoopBody(
 			return;
 		}
 		const still: AgentMessage[] = [];
+		for (const [index, message] of asked.entries()) {
+			if (answers[index] !== message) continue;
+			try {
+				(message as CommittableAsideMessage)[ASIDE_MESSAGE_RELEASE]?.();
+			} catch (error) {
+				logger.error("Aside release hook threw", { error });
+			}
+		}
 		for (const [index, message] of asked.entries()) {
 			const answer = answers[index] ?? null;
 			if (answer !== message) {

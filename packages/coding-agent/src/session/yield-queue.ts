@@ -3,6 +3,7 @@ import {
 	ASIDE_MESSAGE_CLAIM,
 	ASIDE_MESSAGE_COMMIT,
 	ASIDE_MESSAGE_DISCARD,
+	ASIDE_MESSAGE_RELEASE,
 	type CommittableAsideMessage,
 } from "@oh-my-pi/pi-agent-core";
 import { markAsideProvenance } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -33,6 +34,18 @@ export interface YieldDispatcher<P> {
 	 * an idle injection that ran no request carrying it, never resolves one.
 	 */
 	claimAtRequest?: boolean;
+	/**
+	 * For a {@link claimAtRequest} kind: at the claim, after every entry of the
+	 * message proved live, reserve this entry with its producer, so nothing but
+	 * this claim can end it until {@link commit} or {@link release}. False when
+	 * the producer ended it first; the message is then withdrawn like a stale
+	 * one. The liveness checks must not reserve: a peek runs them too.
+	 */
+	reserve?(entry: P): boolean;
+	/** A reserved entry's request was not sent after all; it is claimed again later. */
+	release?(entry: P): void;
+	/** A reserved entry's request is being handed to the provider now. */
+	commit?(entry: P): void;
 }
 
 export interface YieldQueueOptions {
@@ -50,6 +63,9 @@ interface StoredDispatcher {
 	build: (survivors: unknown[]) => AgentMessage | null;
 	skipIdleFlush?: boolean;
 	claimAtRequest?: boolean;
+	reserve?: (entry: unknown) => boolean;
+	release?: (entry: unknown) => void;
+	commit?: (entry: unknown) => void;
 }
 
 interface StoredEntry {
@@ -86,6 +102,9 @@ export class YieldQueue {
 			build: survivors => dispatcher.build(survivors as P[]),
 			...(dispatcher.skipIdleFlush ? { skipIdleFlush: true } : {}),
 			...(dispatcher.claimAtRequest ? { claimAtRequest: true } : {}),
+			...(dispatcher.reserve ? { reserve: entry => dispatcher.reserve?.(entry as P) ?? true } : {}),
+			...(dispatcher.release ? { release: entry => dispatcher.release?.(entry as P) } : {}),
+			...(dispatcher.commit ? { commit: entry => dispatcher.commit?.(entry as P) } : {}),
 		};
 		this.#dispatchers.set(kind, stored);
 		return () => {
@@ -344,12 +363,24 @@ export class YieldQueue {
 
 	#attachEntrySettlement(built: BuiltMessage): void {
 		let settled = false;
+		// Entries this message reserved at its claim and has not yet committed or released.
+		let reserved: StoredEntry[] = [];
+		const release = (): void => {
+			const held = reserved;
+			reserved = [];
+			for (const entry of held) this.#call(built.kind, () => built.dispatcher.release?.(entry.value));
+		};
 		Object.defineProperties(built.message, {
 			[ASIDE_MESSAGE_COMMIT]: {
 				configurable: true,
 				value: () => {
 					if (settled) return;
 					settled = true;
+					// The producer learns of the hand-off in this same step, before the
+					// request goes out; the receipt then resolves too.
+					const held = reserved;
+					reserved = [];
+					for (const entry of held) this.#call(built.kind, () => built.dispatcher.commit?.(entry.value));
 					this.#resolveEntries(built.entries);
 				},
 			},
@@ -358,9 +389,11 @@ export class YieldQueue {
 				value: (error: Error) => {
 					if (settled) return;
 					settled = true;
+					release();
 					this.#rejectEntries(built.entries, error);
 				},
 			},
+			[ASIDE_MESSAGE_RELEASE]: { configurable: true, value: release },
 		});
 		if (!built.dispatcher.claimAtRequest) return;
 		// Its identity from the moment it exists, so no conversion or cache can
@@ -369,15 +402,19 @@ export class YieldQueue {
 		const { kind, dispatcher } = built;
 		Object.defineProperty(built.message, ASIDE_MESSAGE_CLAIM, {
 			configurable: true,
-			// Asked at the request hand-off; the loop commits right after, in the same step.
+			// Asked at the request hand-off; the loop commits or releases right after, in the same step.
 			value: (): AgentMessage | null => {
 				if (settled) return null;
+				release();
 				if (this.#dispatchers.get(kind) !== dispatcher) {
 					settled = true;
 					this.#rejectEntries(built.entries, new Error(`Yield queue dispatcher removed: ${kind}`));
 					return null;
 				}
-				if (built.entries.every(entry => this.#isLive(dispatcher, entry))) return built.message;
+				if (built.entries.every(entry => this.#isLive(dispatcher, entry)) && this.#reserveAll(kind, built)) {
+					reserved = built.entries;
+					return built.message;
+				}
 				// This message is withdrawn: stale entries are rejected, deferred ones
 				// queued again, and the rest rebuilt into a message of their own.
 				settled = true;
@@ -387,6 +424,40 @@ export class YieldQueue {
 				return rebuilt.message;
 			},
 		});
+	}
+
+	/**
+	 * Reserve every entry of `built` with its producer; all or none. An entry
+	 * its producer already ended leaves the others released and the message to
+	 * be withdrawn.
+	 */
+	#reserveAll(kind: string, built: BuiltMessage): boolean {
+		const { dispatcher } = built;
+		if (!dispatcher.reserve) return true;
+		const held: StoredEntry[] = [];
+		for (const entry of built.entries) {
+			let ok = false;
+			try {
+				ok = dispatcher.reserve(entry.value);
+			} catch (error) {
+				logger.warn("Yield queue reserve failed", { kind, error: formatError(error) });
+			}
+			if (!ok) {
+				for (const taken of held) this.#call(kind, () => dispatcher.release?.(taken.value));
+				return false;
+			}
+			held.push(entry);
+		}
+		return true;
+	}
+
+	/** Run a producer hook; a throwing hook is logged and never stops the hand-off. */
+	#call(kind: string, hook: () => void): void {
+		try {
+			hook();
+		} catch (error) {
+			logger.warn("Yield queue entry hook failed", { kind, error: formatError(error) });
+		}
 	}
 
 	/** Whether `entry` would survive a build now: neither deferred nor stale, and neither check throws. */

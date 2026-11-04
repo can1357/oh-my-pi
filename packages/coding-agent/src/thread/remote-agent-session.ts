@@ -95,6 +95,7 @@ import {
 } from "../session/session-context";
 import type { CustomEntry, SessionEntry } from "../session/session-entries";
 import { lastModelChangeRole, SessionEntryIndex } from "../session/session-manager";
+import type { PersonNotice } from "../registry/agent-registry";
 import type { DueByAddress, DueByProbe, SubagentOverdueDelivery } from "../task/due-by-address";
 import type { AgentDefinition } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
@@ -840,8 +841,14 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#command("waitForIrcReplies");
 	}
 
-	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void {
-		this.#notify("emitNotice", level, message, source);
+	/** Decided on the home worker; a closed mirror shows nothing, so it says so. */
+	async showPersonNotice(notice: PersonNotice, address: DueByAddress | undefined): Promise<boolean> {
+		if (this.#closed !== undefined) return false;
+		try {
+			return await this.#command("showPersonNotice", notice, address);
+		} catch {
+			return false;
+		}
 	}
 
 	dueByLeaf(): Promise<string | null> {
