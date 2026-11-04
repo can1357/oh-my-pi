@@ -6,12 +6,11 @@
 use std::net::ToSocketAddrs;
 use std::{collections::hash_set::HashSet, ffi::OsString, io::Write};
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 #[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
 use dns_lookup::lookup_host;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 static OPT_DOMAIN: &str = "domain";
 static OPT_IP_ADDRESS: &str = "ip-address";
@@ -195,11 +194,6 @@ fn display_hostname(matches: &ArgMatches, host: &mut Host) -> Result<(), String>
 		writeln!(host.stdout, "{hostname}").map_err(|err| err.to_string())?;
 		Ok(())
 	}
-}
-
-/// Creates the `hostname` builtin registration.
-pub(crate) fn hostname_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Hostname, SE>()
 }
 
 #[cfg(test)]

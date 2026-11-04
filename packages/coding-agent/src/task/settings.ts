@@ -395,6 +395,39 @@ export const cfgTaskMaxConcurrency = register({
 	},
 });
 
+function validateWorkerThreads(value: unknown): void {
+	if (value === undefined || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) return;
+	throw new Error(
+		`Invalid task.workerThreads: expected a non-negative integer (0 runs subagents on the main thread), got ${Bun.inspect(value)}.`,
+	);
+}
+
+/**
+ * Upper bound on worker threads hosting subagents; how many are used follows the number of
+ * concurrent subagents (`allowedSubagentWorkers`). 0 keeps every subagent on the main thread.
+ */
+export const cfgTaskWorkerThreads = register({
+	id: "task.workerThreads",
+	protocolDefault: ["rpc", "acp"],
+	type: "number",
+	default: 4,
+	validate: validateWorkerThreads,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Subagent Worker Threads",
+		description:
+			"Maximum worker threads for subagents. Up to 3 concurrent subagents run on the main thread; at 4 one worker joins, and one more each time the count doubles (8, 16, 32). Workers stop a minute after no subagent is live in them; 0 keeps every subagent on the main thread",
+		options: [
+			{ value: "0", label: "Main thread only" },
+			{ value: "1", label: "Up to 1 worker" },
+			{ value: "2", label: "Up to 2 workers" },
+			{ value: "4", label: "Up to 4 workers", description: "Default" },
+			{ value: "8", label: "Up to 8 workers" },
+		],
+	},
+});
+
 export const cfgTaskEnableLsp = register({
 	id: "task.enableLsp",
 	type: "boolean",

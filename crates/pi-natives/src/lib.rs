@@ -42,6 +42,7 @@ pub mod file_lock;
 pub mod glob;
 pub mod grammars;
 pub mod grep;
+pub mod held_files;
 pub mod highlight;
 /// HDiffPatch single-stream binary patch application.
 pub mod hpatch;

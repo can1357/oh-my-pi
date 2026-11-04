@@ -274,19 +274,27 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 
 	async execute(code: string, options?: TExecuteOptions): Promise<KernelExecuteResult> {
 		const msgId = options?.id ?? Snowflake.next();
-		return await this.#submit(msgId, this.#options.buildPayload(code, msgId, options), options, true);
+		return await this.#submit(msgId, this.#options.buildPayload(code, msgId, options), options, "interrupt");
 	}
 
-	/** Submit a raw runner request without sending SIGINT when its caller cancels. */
-	async submitRequest(msgId: string, payload: string, options?: TExecuteOptions): Promise<KernelExecuteResult> {
-		return await this.#submit(msgId, payload, options, false);
+	/**
+	 * Submit a raw runner request. Cancelling it settles it at once, without SIGINT;
+	 * a written request is followed by `cancelPayload`, when given, so the runner can stop its work.
+	 */
+	async submitRequest(
+		msgId: string,
+		payload: string,
+		options?: TExecuteOptions,
+		cancelPayload?: string,
+	): Promise<KernelExecuteResult> {
+		return await this.#submit(msgId, payload, options, { cancelPayload });
 	}
 
 	async #submit(
 		msgId: string,
 		payload: string,
 		options: TExecuteOptions | undefined,
-		interruptOnCancel: boolean,
+		cancel: "interrupt" | { cancelPayload?: string },
 	): Promise<KernelExecuteResult> {
 		if (!this.isAlive()) {
 			throw new Error(`${this.#options.languageName} kernel is not running`);
@@ -326,7 +334,12 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		let requestWritten = false;
 		const requestCancel = () => {
 			if (pending.settled || pending.escalationTimer) return;
-			if (!requestWritten || !interruptOnCancel) {
+			if (cancel !== "interrupt") {
+				if (requestWritten && cancel.cancelPayload) void this.#writeLine(cancel.cancelPayload).catch(() => {});
+				finalize();
+				return;
+			}
+			if (!requestWritten) {
 				finalize();
 				return;
 			}
