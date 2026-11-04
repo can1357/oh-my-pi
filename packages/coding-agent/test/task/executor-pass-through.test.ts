@@ -22,6 +22,8 @@ import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-
 import type { LoadExtensionsResult, PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -126,6 +128,8 @@ function createModelRegistry(
 describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
 	});
 
 	it("forwards rules, extension-root policy, prepared extensions, and preloaded source paths to createAgentSession", async () => {
@@ -590,6 +594,41 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(formatTaskResultSummary(result, { totalDurationMs: 0 })).toContain(
 			'<model-receipt requested-model="runtime-provider/runtime-model" reasons="model-auth-fallback" />',
 		);
+	});
+
+	it("rejects a deferred model whose effort floor is above task.maxEffort", async () => {
+		const baseModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!baseModel) throw new Error("Expected gpt-5.6-sol model to exist");
+		const model = {
+			...baseModel,
+			id: "runtime-model",
+			provider: "runtime-provider",
+			thinking: { mode: "effort", efforts: [Effort.High] },
+		} as Model;
+		const id = "subagent-deferred-effort-ceiling-below-floor";
+		const session = Object.assign(yieldEmittingSession(), { model });
+		const dispose = vi.spyOn(session, "dispose");
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			// createAgentSession registers the ref and attaches the live session before it returns.
+			AgentRegistry.global().register({ id, displayName: id, kind: "sub", session, status: "running" });
+			return createSessionResult(session);
+		});
+
+		const result = await runSubprocess({
+			...baseOptions,
+			modelOverride: ["runtime-provider/runtime-model"],
+			id,
+			effort: "hi",
+			settings: Settings.isolated({ "task.maxEffort": "low" }),
+			modelRegistry: createModelRegistry([]),
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain(
+			"runtime-provider/runtime-model has no supported thinking effort at or below task.maxEffort=low",
+		);
+		expect(formatTaskResultSummary(result, { totalDurationMs: 0 })).not.toContain("<model-receipt");
+		expect(dispose).toHaveBeenCalledTimes(1);
 	});
 
 	it("resolves an explicit task-role effort suffix over the agent-definition default", async () => {

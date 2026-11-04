@@ -5040,6 +5040,12 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				);
 				({ session, modelPatternAuthFallbackUsed: deferredAuthFallbackUsed } =
 					await awaitAbortable(sessionPromise));
+				// A deferred pattern resolves inside the session, past the pre-spawn
+				// ceiling check. Reject it before the monitor owns the session so the
+				// catch below disposes it; keep-alive teardown would park it instead.
+				if (!model && spawnEffortCeiling && session.model) {
+					assertModelSupportsEffortCeiling(session.model, spawnEffortCeiling);
+				}
 				if (preparedSession) untrackedSession = session;
 				// Stash the sibling family candidate once the child session exists,
 				// independent of its initial model, so a later model change (retry

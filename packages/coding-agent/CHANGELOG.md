@@ -55,6 +55,7 @@
 - Added `tui.maxFps` (also `--max-fps` and `PI_MAX_FPS`) to cap how often the TUI repaints; keystroke echo keeps 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - The idle recap no longer disappears when the session is resumed, restarted or its transcript is rebuilt; the latest recap stays at the end until the conversation moves on ([#18113](https://github.com/can1357/oh-my-pi/pull/18113) by [@materemias](https://github.com/materemias))
 - Fixed a chat session that ends up on the model assigned to the `web` (or another model-kind) role adopting that role's retry fallback chain and cycling `web/*` search providers as chat models, each failing with `Unhandled API in mapOptionsForApi: web-search` ([#18056](https://github.com/can1357/oh-my-pi/pull/18056) by [@haesol-shin](https://github.com/haesol-shin))
+- Fixed `task.maxEffort` letting a subagent run on a model it can't hold to the ceiling when that model resolves only after extension or provider discovery; the spawn now fails with the same error as a model resolved up front ([#9664](https://github.com/can1357/oh-my-pi/pull/9664) by [@aktanazat](https://github.com/aktanazat))
 
 ### Changed
 
