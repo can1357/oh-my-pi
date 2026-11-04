@@ -2598,6 +2598,38 @@ describe("compact() remote compaction failure handling", () => {
 		};
 	}
 
+	test("summarizes locally when remote compaction cannot keep pending reasoning", async () => {
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
+		const model = makeOpenAiModel({ remoteCompaction: { enabled: true, v2StreamingEnabled: true } });
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+		// No history before the kept tail, which ends in reasoning cut off by the output cap.
+		preparation.recentMessages = [
+			{ role: "user", content: "recent", timestamp: 2 },
+			{
+				role: "assistant",
+				content: [{ type: "thinking", thinking: "unfinished reasoning" }],
+				timestamp: 3,
+				provider: model.provider,
+				model: model.id,
+				api: model.api,
+				usage: ZERO_USAGE,
+				stopReason: "length",
+			},
+		];
+		const requestedUrls: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			requestedUrls.push(String(input));
+			return new Response("unexpected", { status: 500 });
+		};
+
+		const result = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+
+		expect(requestedUrls).toEqual([]);
+		expect(result.firstKeptEntryId).toBe("kept-1");
+		expect(result.summary).toContain("local summary");
+	});
+
 	test("V1 compact drops mixed-provider Anthropic state and keeps unrelated preserve data", async () => {
 		const compactionItem = { type: "compaction", encrypted_content: "enc-current-v1" };
 		const compactPaths: string[] = [];

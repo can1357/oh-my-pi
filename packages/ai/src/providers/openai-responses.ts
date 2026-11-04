@@ -1455,6 +1455,7 @@ const streamOpenAIResponsesOnce = (
 				cloneJsonTree(nativeOutputItems),
 				{
 					supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal,
+					preserveReasoningOnly: output.stopReason === "length",
 				},
 			);
 			if (replayableResponseItems) {
