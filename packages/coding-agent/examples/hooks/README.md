@@ -32,7 +32,7 @@ cp permission-gate.ts ~/.omp/agent/hooks/pre/
 
 See [docs/hooks.md](../../../../docs/hooks.md) for full documentation.
 
-```typescript
+```typescript check=hooks-readme
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI) {

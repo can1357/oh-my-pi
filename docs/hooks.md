@@ -363,7 +363,7 @@ export default function (pi: HookAPI): void {
 
 ### Modify model context per LLM call
 
-```ts
+```ts check=hooks-context-filter
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function (pi: HookAPI): void {

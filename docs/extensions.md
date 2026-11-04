@@ -68,7 +68,7 @@ Important constraint from `loader.ts`:
 
 ## Quick start
 
-```ts
+```ts check=extensions-quick-start
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
@@ -236,7 +236,7 @@ extension itself. The `api` value is an extension-owned string (built-in API
 names are reserved), and `streamSimple` returns the canonical
 `AssistantMessageEventStream`; it does not need to be an HTTP endpoint:
 
-```ts
+```ts check=extensions-command-provider
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
@@ -689,7 +689,7 @@ execute(
 
 A `tool_call` handler can return `additionalContext` without changing the tool result:
 
-```ts
+```ts check=extensions-tool-call-guard
 pi.on("tool_call", async event => {
 	if (event.toolName === "search") {
 		return { additionalContext: "Use this result before searching again." };
@@ -741,7 +741,7 @@ are already approved as, and delegation depth is guarded against accidental self
 
 Template:
 
-```ts
+```ts check=extensions-tool-template
 import { Text } from "@oh-my-pi/pi-tui";
 
 const z = pi.zod;

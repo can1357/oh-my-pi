@@ -68,7 +68,7 @@ cp examples/extensions/hello.ts ~/.omp/agent/extensions/
 
 See [docs/extensions.md](../../../../docs/extensions.md) for full documentation.
 
-```typescript
+```typescript check=extensions-readme
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
@@ -133,7 +133,7 @@ return {
 
 Reconstruct it on session events:
 
-```typescript
+```typescript check=extensions-readme-reconstruct
 pi.on("session_start", async (_event, ctx) => {
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "my_tool") {

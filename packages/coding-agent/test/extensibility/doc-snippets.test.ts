@@ -1,63 +1,117 @@
-import { describe, expect, it } from "bun:test";
+import { expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 
-/**
- * Each file in `doc-snippets/` is a type-checked copy of one documented code
- * block: the package type check compiles it against the real extension and hook
- * APIs. This test keeps every copy identical to the block it names (the Nth
- * ts/typescript block under a heading), so a documented snippet cannot drift into
- * code that no longer compiles, and a copy cannot be dropped silently.
- */
 const repoRoot = path.resolve(import.meta.dir, "../../../..");
-const snippetDir = path.join(import.meta.dir, "doc-snippets");
-const MARKER = "// ---- documented snippet below, verbatim ----\n";
-const HEADER = /^\/\/ Type-checked copy of block (\d+) under "(.+)" in (\S+);/;
-const EXPECTED_COPIES = [
-	"extensions-command-provider.ts",
-	"extensions-quick-start.ts",
-	"extensions-readme-reconstruct.ts",
-	"extensions-readme.ts",
-	"extensions-tool-call-guard.ts",
-	"extensions-tool-template.ts",
-	"hooks-context-filter.ts",
-	"hooks-readme.ts",
-	"skills-context-filter.ts",
-];
+const extensionContext =
+	'import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";\ndeclare const pi: ExtensionAPI;\n';
+// Fence IDs, rather than block positions, let surrounding prose and examples move freely.
+const sources = {
+	"docs/extensions.md": {
+		"extensions-quick-start": "",
+		"extensions-command-provider": "declare function runCommandAndPushEvents(...args: unknown[]): Promise<void>;\n",
+		"extensions-tool-call-guard": extensionContext,
+		"extensions-tool-template": extensionContext,
+	},
+	"docs/hooks.md": { "hooks-context-filter": "" },
+	"docs/skills/authoring-hooks.md": { "skills-context-filter": "" },
+	"packages/coding-agent/examples/extensions/README.md": {
+		"extensions-readme": "",
+		"extensions-readme-reconstruct": extensionContext,
+	},
+	"packages/coding-agent/examples/hooks/README.md": { "hooks-readme": "" },
+	"packages/ai/README.md": {
+		"ai-provider-options": 'import type { Context } from "@oh-my-pi/pi-ai";\ndeclare const context: Context;\n',
+		"ai-type-safety":
+			'import { stream, type Context } from "@oh-my-pi/pi-ai";\nimport { getBundledModel } from "@oh-my-pi/pi-catalog/models";\ndeclare const context: Context;\n',
+		"ai-multi-provider": "",
+	},
+};
+const assertions: Record<string, string> = {
+	"ai-type-safety": `
+const api: "anthropic-messages" = claude.api;
+// @ts-expect-error Anthropic options must reject OpenAI's reasoning option.
+stream(claude, context, { reasoning: "high" });
+`,
+	"ai-multi-provider": `
+const claudeApi: "anthropic-messages" = claude.api;
+const gptApi: "openai-responses" = gpt5.api;
+const geminiApi: "google-generative-ai" = gemini.api;
+`,
+	"ai-provider-options": `
+const openaiApi: "openai-responses" = openaiModel.api;
+const anthropicApi: "anthropic-messages" = anthropicModel.api;
+const googleApi: "google-generative-ai" = googleModel.api;
+// @ts-expect-error OpenAI options must reject Anthropic's thinking budget.
+complete(openaiModel, context, { thinkingBudgetTokens: 2048 });
+`,
+};
 
-/** The ts/typescript fenced blocks of a markdown file, each with the heading line it sits under. */
-function codeBlocks(markdown: string): { heading: string | undefined; body: string }[] {
-	const blocks: { heading: string | undefined; body: string }[] = [];
+/** Extract named TypeScript fences; neither source formatting nor ordinal positions are contracts. */
+function codeBlocks(markdown: string): Map<string, string> {
+	const blocks = new Map<string, string>();
 	const lines = markdown.split("\n");
-	let heading: string | undefined;
 	for (let index = 0; index < lines.length; index++) {
-		const line = lines[index]!;
-		if (/^#{1,6} /.test(line)) heading = line;
-		if (!/^```(ts|typescript)\s*$/.test(line)) continue;
+		const fence = lines[index]!.match(/^(`{3,}|~{3,})(?:ts|typescript)\s+check=([\w-]+)\s*$/);
+		if (!fence) continue;
+		const [, delimiter, id] = fence;
 		const body: string[] = [];
-		for (index++; index < lines.length && !lines[index]!.startsWith("```"); index++) body.push(lines[index]!);
-		blocks.push({ heading, body: `${body.join("\n")}\n` });
+		for (index++; index < lines.length && lines[index]!.trim() !== delimiter; index++) body.push(lines[index]!);
+		if (index === lines.length) throw new Error(`Unclosed TypeScript fence: ${id}`);
+		if (blocks.has(id!)) throw new Error(`Duplicate TypeScript fence: ${id}`);
+		blocks.set(id!, `${body.join("\n")}\n`);
 	}
 	return blocks;
 }
 
-describe("documented extension and hook snippets", () => {
-	it("keeps a type-checked copy of every covered block", () => {
-		const copies = [...new Bun.Glob("*.ts").scanSync(snippetDir)].sort();
-		expect(copies).toEqual(EXPECTED_COPIES);
+async function compile(config: string): Promise<{ exitCode: number; diagnostics: string }> {
+	const child = Bun.spawn([path.join(repoRoot, "node_modules/.bin/tsgo"), "--project", config, "--pretty", "false"], {
+		cwd: repoRoot,
+		stdout: "pipe",
+		stderr: "pipe",
 	});
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+		child.exited,
+	]);
+	return { exitCode, diagnostics: stdout + stderr };
+}
 
-	for (const file of EXPECTED_COPIES) {
-		it(`${file} matches the block it names`, async () => {
-			const copy = await Bun.file(path.join(snippetDir, file)).text();
-			const header = copy.match(HEADER);
-			expect(header).not.toBeNull();
-			const [, ordinal, heading, source] = header!;
-			const markerAt = copy.indexOf(MARKER);
-			expect(markerAt).toBeGreaterThan(-1);
-			const underHeading = codeBlocks(await Bun.file(path.join(repoRoot, source!)).text()).filter(
-				block => block.heading === heading,
-			);
-			expect(underHeading[Number(ordinal) - 1]?.body).toBe(copy.slice(markerAt + MARKER.length));
-		});
+it("compiles the documented extension, hook and provider examples and rejects a broken extracted block", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-doc-snippets-"));
+	try {
+		await fs.symlink(path.join(repoRoot, "node_modules"), path.join(dir, "node_modules"), "dir");
+		const files: string[] = [];
+		for (const [source, snippets] of Object.entries(sources)) {
+			const blocks = codeBlocks(await Bun.file(path.join(repoRoot, source)).text());
+			for (const [id, prelude] of Object.entries(snippets)) {
+				const body = blocks.get(id);
+				if (body === undefined) throw new Error(`Missing TypeScript fence ${id} in ${source}`);
+				const file = path.join(dir, `${id}.ts`);
+				await Bun.write(file, prelude + body + (assertions[id] ?? ""));
+				files.push(file);
+			}
+		}
+		const config = path.join(dir, "tsconfig.json");
+		await Bun.write(
+			config,
+			JSON.stringify({ extends: path.join(repoRoot, "tsconfig.base.json"), files, include: [] }),
+		);
+		const result = await compile(config);
+		expect(result.diagnostics).toBe("");
+		expect(result.exitCode).toBe(0);
+
+		// Mutate only a temporary extracted copy: the check must catch a broken documented parameter.
+		const quickStart = path.join(dir, "extensions-quick-start.ts");
+		const valid = await Bun.file(quickStart).text();
+		await Bun.write(quickStart, valid.replaceAll("params.name", "params.missingDocumentedParameter"));
+		const broken = await compile(config);
+		expect(broken.exitCode).not.toBe(0);
+		expect(broken.diagnostics).toContain("extensions-quick-start.ts");
+		expect(broken.diagnostics).toContain("missingDocumentedParameter");
+	} finally {
+		await fs.rm(dir, { recursive: true, force: true });
 	}
-});
+}, 120_000);

@@ -443,8 +443,7 @@ export const array = <Element>(element: ZodLikeSchema<Element>): ZodLikeSchema<E
  * `ObjectSchema<S>`.
  */
 export const object = <const S extends Shape, Never extends never = never>(shape: S): ObjectSchema<S> | Never =>
-	// Only `Simplify` differs in form from the builder's own return type.
-	objectSchema(shape) as ObjectSchema<S>;
+	objectSchema(shape);
 export function record<Key extends string, Value>(
 	keySchema: ZodLikeSchema<Key>,
 	valueSchema: ZodLikeSchema<Value>,

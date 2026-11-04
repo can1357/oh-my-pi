@@ -224,7 +224,7 @@ export default function apiKeyRedactor(omp: HookAPI): void {
 
 ### 3. Context filter
 
-```ts
+```ts check=skills-context-filter
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function contextFilter(omp: HookAPI): void {

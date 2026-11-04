@@ -485,26 +485,26 @@ for (const block of response.content) {
 
 For fine-grained control, use the provider-specific options:
 
-```typescript
+```typescript check=ai-provider-options
 import { complete } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 // OpenAI Reasoning (o1, o3, gpt-5)
-const openaiModel = getBundledModel("openai", "gpt-5-mini");
+const openaiModel = getBundledModel<"openai-responses">("openai", "gpt-5-mini");
 await complete(openaiModel, context, {
-	reasoningEffort: "medium",
+	reasoning: "medium",
 	reasoningSummary: "detailed", // OpenAI Responses API only
 });
 
 // Anthropic Thinking (Claude Sonnet 4)
-const anthropicModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+const anthropicModel = getBundledModel<"anthropic-messages">("anthropic", "claude-sonnet-4-5");
 await complete(anthropicModel, context, {
 	thinkingEnabled: true,
 	thinkingBudgetTokens: 8192, // Optional token limit
 });
 
 // Google Gemini Thinking
-const googleModel = getBundledModel("google", "gemini-2.5-flash");
+const googleModel = getBundledModel<"google-generative-ai">("google", "gemini-2.5-flash");
 await complete(googleModel, context, {
 	thinking: {
 		enabled: true,
@@ -684,7 +684,7 @@ import { getBundledProviders, getBundledModels, getBundledModel } from "@oh-my-p
 const providers = getBundledProviders();
 console.log(providers); // ['openai', 'anthropic', 'google', 'xai', 'groq', ...]
 
-// Get all models from a provider (fully typed)
+// Get model metadata from a provider
 const anthropicModels = getBundledModels("anthropic");
 for (const model of anthropicModels) {
 	console.log(`${model.id}: ${model.name}`);
@@ -694,8 +694,8 @@ for (const model of anthropicModels) {
 	console.log(`  Reasoning: ${model.reasoning}`);
 }
 
-// Get a specific model (both provider and model ID are auto-completed in IDEs)
-const model = getBundledModel("openai", "gpt-4o-mini");
+// Get a specific model; supply its API type for provider-specific options
+const model = getBundledModel<"openai-responses">("openai", "gpt-4o-mini");
 console.log(`Using ${model.name} via ${model.api} API`);
 ```
 
@@ -802,17 +802,17 @@ If `compat` is not set, the library falls back to URL-based detection. If `compa
 
 ### Type Safety
 
-Models are typed by their API, ensuring type-safe options:
+Supply the API type when looking up a bundled model to get provider-specific options:
 
-```typescript
+```typescript check=ai-type-safety
 // TypeScript knows this is an Anthropic model
-const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
+const claude = getBundledModel<"anthropic-messages">("anthropic", "claude-sonnet-4-5");
 
 // So these options are type-checked for AnthropicOptions
 await stream(claude, context, {
 	thinkingEnabled: true, // ✓ Valid for anthropic-messages
 	thinkingBudgetTokens: 2048, // ✓ Valid for anthropic-messages
-	// reasoningEffort: 'high'  // ✗ TypeScript error: not valid for anthropic-messages
+	// reasoning: 'high'  // ✗ TypeScript error: not valid for anthropic-messages
 });
 ```
 
@@ -831,31 +831,31 @@ When messages from one provider are sent to a different provider, the library au
 
 ### Example: Multi-Provider Conversation
 
-```typescript
-import { complete, Context } from "@oh-my-pi/pi-ai";
+```typescript check=ai-multi-provider
+import { complete, type Context } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 // Start with Claude
-const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
+const claude = getBundledModel<"anthropic-messages">("anthropic", "claude-sonnet-4-5");
 const context: Context = {
 	messages: [],
 };
 
-context.messages.push({ role: "user", content: "What is 25 * 18?" });
+context.messages.push({ role: "user", content: "What is 25 * 18?", timestamp: Date.now() });
 const claudeResponse = await complete(claude, context, {
 	thinkingEnabled: true,
 });
 context.messages.push(claudeResponse);
 
 // Switch to GPT-5 - it will see Claude's thinking as <thinking> tagged text
-const gpt5 = getBundledModel("openai", "gpt-5-mini");
-context.messages.push({ role: "user", content: "Is that calculation correct?" });
+const gpt5 = getBundledModel<"openai-responses">("openai", "gpt-5-mini");
+context.messages.push({ role: "user", content: "Is that calculation correct?", timestamp: Date.now() });
 const gptResponse = await complete(gpt5, context);
 context.messages.push(gptResponse);
 
 // Switch to Gemini
-const gemini = getBundledModel("google", "gemini-2.5-flash");
-context.messages.push({ role: "user", content: "What was the original question?" });
+const gemini = getBundledModel<"google-generative-ai">("google", "gemini-2.5-flash");
+context.messages.push({ role: "user", content: "What was the original question?", timestamp: Date.now() });
 const geminiResponse = await complete(gemini, context);
 ```
 

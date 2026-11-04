@@ -6,7 +6,8 @@
  */
 import type { ZodLikeSchema } from "@oh-my-pi/omptype/zod";
 import type { Static, TSchema } from "@oh-my-pi/pi-ai";
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ToolDefinition, ToolParamsSchema } from "@oh-my-pi/pi-coding-agent";
+import type { ConcreteExtensionAPI } from "../../src/extensibility/extensions/loader";
 
 declare const pi: ExtensionAPI;
 const z = pi.zod;
@@ -15,6 +16,35 @@ type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ?
 /** `true` only when `actual` has exactly the `Expected` type; `unknown` and `any` never match an object type. */
 declare function exactly<Expected>(): <Actual>(actual: Actual) => Equal<Actual, Expected>;
 
+// Helpers and direct callers of the loader API must have the same schema inference as ExtensionAPI.
+function defineTool<T extends ToolParamsSchema>(tool: ToolDefinition<T>): ToolDefinition<T> {
+	return tool;
+}
+defineTool({
+	name: "helper",
+	label: "Helper",
+	description: "Helper parameters",
+	parameters: z.object({ name: z.string() }),
+	async execute(_id, params) {
+		const typed: true = exactly<{ name: string }>()(params);
+		// @ts-expect-error a helper must not erase the schema's fields
+		params.missing;
+		return { content: [{ type: "text", text: `${params.name}${typed}` }] };
+	},
+});
+declare const concrete: ConcreteExtensionAPI;
+concrete.registerTool({
+	name: "concrete",
+	label: "Concrete",
+	description: "Concrete API parameters",
+	parameters: z.object({ name: z.string() }),
+	async execute(_id, params) {
+		const typed: true = exactly<{ name: string }>()(params);
+		// @ts-expect-error direct loader API callers must not lose parameter types
+		params.missing;
+		return { content: [{ type: "text", text: `${params.name}${typed}` }] };
+	},
+});
 // The documented form: inline schema, `execute` as a method with unannotated parameters.
 pi.registerTool({
 	name: "greet",

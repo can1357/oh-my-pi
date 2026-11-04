@@ -967,9 +967,15 @@ export interface ToolShellEnvironmentContext {
 export type ToolShellEnvironmentHook = (context: ToolShellEnvironmentContext) => Record<string, string> | undefined;
 
 /**
+ * Parameter schemas accepted by extension tools. `any` admits omptype schemas with
+ * every input/output type: their fluent methods make `Type<unknown>` too narrow.
+ */
+export type ToolParamsSchema = Type<any, any> | TJsonSchema;
+
+/**
  * Tool definition for registerTool().
  */
-export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = unknown> {
+export interface ToolDefinition<TParams extends ToolParamsSchema = TSchema, TDetails = unknown> {
 	/** Tool name (used in LLM tool calls) */
 	name: string;
 	/** Human-readable label for UI */
@@ -1895,13 +1901,8 @@ export interface ExtensionAPI {
 	// Tool Registration
 	// =========================================================================
 
-	/**
-	 * Register a tool that the LLM can call. `TParams` admits every omptype schema whatever its
-	 * output and input types (`Type<any, any>`): a schema of a specific type is not structurally a
-	 * `Type<unknown>`, so checked against `TSchema` alone it passed or failed depending on the order
-	 * TypeScript first compared the two types, and `params` fell back to `unknown`.
-	 */
-	registerTool<TParams extends Type<any, any> | TJsonSchema = TSchema, TDetails = unknown>(
+	/** Register a tool that the LLM can call. */
+	registerTool<TParams extends ToolParamsSchema = TSchema, TDetails = unknown>(
 		tool: ToolDefinition<TParams, TDetails>,
 	): void;
 
