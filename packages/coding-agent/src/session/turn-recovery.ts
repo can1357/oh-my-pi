@@ -21,6 +21,7 @@ import type {
 import { calculateRateLimitBackoffMs, isBillingCapUsageLimit, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
@@ -417,6 +418,8 @@ export class TurnRecovery {
 	#unexpectedStopRetryCount = 0;
 	#malformedFunctionCallRetryCount = 0;
 	#streamStallContinueCount = 0;
+	/** Wakes `settleTerminalRefusal` scheduled that no completed assistant turn has answered yet. */
+	#refusalReportWakes = 0;
 	#acceptTerminalEmptyStopForPrompt = false;
 	// Three fields sit near the word "serve" and are deliberately distinct:
 	// `#activeRetryFallback.served` gates the one-shot `retry_fallback_succeeded`
@@ -555,6 +558,7 @@ export class TurnRecovery {
 		this.#unexpectedStopRetryCount = 0;
 		this.#malformedFunctionCallRetryCount = 0;
 		this.#streamStallContinueCount = 0;
+		this.#refusalReportWakes = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 		this.#activeFallbackCreditRedemption = undefined;
 	}
@@ -725,12 +729,21 @@ export class TurnRecovery {
 	 * act as if the calls ran, and nothing would wake the session to correct
 	 * it. So every call the turn made — closed or cut off mid-arguments — is
 	 * reported with the provider's reason in a persisted notice, and the
-	 * session continues once so the model reads it. A woken turn that is
-	 * refused again gets its report but no second wake.
+	 * session continues once so the model reads it.
 	 *
-	 * @returns true when a continuation was scheduled.
+	 * The wake is bounded by a chain count, not by message order: a refusal
+	 * while a report's wake is still unanswered (no assistant turn completed
+	 * since, no new prompt) is the second in a row. It gets a final report,
+	 * even when it made no tool call, that says the session will not continue,
+	 * and no wake. {@link noteAnsweredTurn} and a new prompt end the chain.
+	 *
+	 * Runs synchronously inside the refusal's agent_end, so the wake is queued
+	 * before anything (an abort, a new prompt) can run; the durable write it
+	 * starts is returned for the caller to track.
+	 *
+	 * @returns whether a continuation was scheduled, and the pending write.
 	 */
-	settleTerminalRefusal(message: AssistantMessage): boolean {
+	settleTerminalRefusal(message: AssistantMessage): { woke: boolean; persisted?: Promise<void> } {
 		const messages = this.#host.agent.state.messages;
 		let assistantIndex = -1;
 		for (let i = messages.length - 1; i >= 0; i--) {
@@ -740,45 +753,45 @@ export class TurnRecovery {
 				break;
 			}
 		}
-		const callIds = new Set<string>();
-		for (const block of message.content) if (block.type === "toolCall") callIds.add(block.id);
 		// The agent loop runs no call of an errored turn: each gets an
-		// `executed: false` placeholder. A result that is anything else means a
-		// call ran after all (e.g. a provider that executes calls server-side);
-		// then the turn stays whole, so no result of work that happened is lost.
-		const ranIds = new Set<string>();
-		const placeholderIndexes = new Set<number>();
-		for (let i = assistantIndex + 1; assistantIndex >= 0 && i < messages.length; i++) {
-			const candidate = messages[i];
-			if (candidate.role !== "toolResult" || !callIds.has(candidate.toolCallId)) continue;
-			if (isSyntheticToolResultMessage(candidate) && candidate.details?.executed === false) {
-				placeholderIndexes.add(i);
-			} else {
-				ranIds.add(candidate.toolCallId);
-			}
-		}
+		// `executed: false` placeholder. The only calls of a refused turn that ran
+		// are ones the provider ran itself (Cursor's exec channel); such a turn
+		// stays whole, in context and on disk (`refusedTurnLeavesHistory`), so no
+		// result of work that happened is lost, and only its other calls are reported.
+		const leavesHistory = this.refusedTurnLeavesHistory(message);
+		const reportedIds = new Set<string>();
 		const calls: Array<{ name: string; unfinished: boolean }> = [];
 		for (const block of message.content) {
-			if (block.type === "toolCall" && !ranIds.has(block.id)) calls.push({ name: block.name, unfinished: false });
+			if (block.type !== "toolCall" || isCursorExecResolved(block)) continue;
+			reportedIds.add(block.id);
+			calls.push({ name: block.name, unfinished: false });
 		}
 		for (const call of message.unfinishedToolCalls ?? []) {
 			calls.push({ name: call.name || "unnamed tool", unfinished: true });
 		}
 
-		const previous = assistantIndex > 0 ? messages[assistantIndex - 1] : undefined;
-		if (assistantIndex >= 0 && ranIds.size === 0) {
+		if (assistantIndex >= 0 && leavesHistory) {
 			this.#host.agent.replaceMessages(
-				messages.filter((_, index) => index !== assistantIndex && !placeholderIndexes.has(index)),
+				messages.filter(
+					(candidate, index) =>
+						index !== assistantIndex &&
+						!(
+							index > assistantIndex &&
+							candidate.role === "toolResult" &&
+							reportedIds.has(candidate.toolCallId) &&
+							isSyntheticToolResultMessage(candidate)
+						),
+				),
 			);
 		}
-		if (calls.length === 0) return false;
+		const refusedAgain = this.#refusalReportWakes > 0;
+		if (calls.length === 0 && !refusedAgain) return { woke: false };
 
-		const wokenTurnRefusedAgain =
-			previous?.role === "custom" && previous.customType === REFUSAL_TOOL_CALL_REPORT_TYPE;
 		const report = prompt.render(refusalToolCallReportTemplate, {
 			reason: message.errorMessage ?? "none given",
 			calls,
-			final: wokenTurnRefusedAgain,
+			hasCalls: calls.length > 0,
+			final: refusedAgain,
 		});
 		this.#host.agent.appendMessage({
 			role: "custom",
@@ -795,18 +808,33 @@ export class TurnRecovery {
 			undefined,
 			"agent",
 		);
+		const wake = !refusedAgain && !this.#host.abortInProgress() && !this.#host.isDisposed();
+		if (wake) {
+			logger.info("Classifier refusal ended a tool-call turn; reporting the calls and continuing", {
+				calls: calls.length,
+				model: message.model,
+				provider: message.provider,
+			});
+			this.#refusalReportWakes++;
+			this.#host.scheduleAgentContinue({
+				source: "refusal-tool-call-report",
+				generation: this.#host.promptGeneration(),
+			});
+		}
+		// A session's file is written lazily, once it holds an assistant turn. A
+		// refused first turn is never persisted, so without this the report (and
+		// the user's request before it) would exist only in memory.
+		const persisted = this.#host.sessionManager.ensureOnDisk().catch(error => {
+			logger.warn("Could not write the session holding a refusal report", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+		return { woke: wake, persisted };
+	}
 
-		if (wokenTurnRefusedAgain || this.#host.abortInProgress() || this.#host.isDisposed()) return false;
-		logger.info("Classifier refusal ended a tool-call turn; reporting the calls and continuing", {
-			calls: calls.length,
-			model: message.model,
-			provider: message.provider,
-		});
-		this.#host.scheduleAgentContinue({
-			source: "refusal-tool-call-report",
-			generation: this.#host.promptGeneration(),
-		});
-		return true;
+	/** An assistant turn completed (not refused, not aborted): any refusal-report chain is answered. */
+	noteAnsweredTurn(): void {
+		this.#refusalReportWakes = 0;
 	}
 
 	/**
@@ -1885,6 +1913,19 @@ export class TurnRecovery {
 				(block.type === "thinking" && block.thinking.trim().length > 0) ||
 				block.type === "toolCall" ||
 				(block.type === "text" && block.text.trim().length > 0),
+		);
+	}
+
+	/**
+	 * A classifier refusal leaves history (active context and the session file)
+	 * unless a provider ran one of its calls itself (Cursor's exec channel): that
+	 * turn and its real results stay whole, so a reload never replays a result
+	 * with no call before it.
+	 */
+	refusedTurnLeavesHistory(message: AssistantMessage): boolean {
+		return (
+			this.isClassifierRefusal(message) &&
+			!message.content.some(block => block.type === "toolCall" && isCursorExecResolved(block))
 		);
 	}
 

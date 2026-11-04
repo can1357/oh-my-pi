@@ -4261,7 +4261,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (this.#sessionMessageAlreadyPersisted(message)) return;
 		if (message.role === "assistant") {
 			const assistantMsg = message as AssistantMessage;
-			if (this.#recovery.isClassifierRefusal(assistantMsg)) return;
+			if (this.#recovery.refusedTurnLeavesHistory(assistantMsg)) return;
 			if (isEmptyErrorTurn(assistantMsg)) return;
 			if (assistantMsg.stopReason !== "aborted" && assistantMsg.stopReason !== "error" && assistantMsg.usage) {
 				assistantMsg.contextSnapshot = {
@@ -4271,17 +4271,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				};
 			}
 		}
-		// A refused turn is never written (above), so neither are the placeholder
-		// results the agent loop paired with its calls: persisted alone they would
-		// be orphans that a reload replays. A terminal refusal reports the calls in
-		// its own notice instead (`settleTerminalRefusal`).
+		// A refused turn that leaves history is never written (above), so neither
+		// are the placeholder results the agent loop paired with its calls:
+		// persisted alone they would be orphans that a reload replays. A terminal
+		// refusal reports the calls in its own notice instead (`settleTerminalRefusal`).
 		if (isSyntheticToolResultMessage(message)) {
 			const messages = this.agent.state.messages;
 			for (let i = messages.length - 1; i >= 0; i--) {
 				const owner = messages[i];
 				if (owner.role !== "assistant") continue;
 				if (!owner.content.some(block => block.type === "toolCall" && block.id === message.toolCallId)) continue;
-				if (this.#recovery.isClassifierRefusal(owner)) return;
+				if (this.#recovery.refusedTurnLeavesHistory(owner)) return;
 				break;
 			}
 		}
@@ -4571,6 +4571,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// toolUse) assistant message and skipping settle-only work.
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			this.#lastAssistantMessage = event.message;
+			if (event.message.stopReason !== "error" && event.message.stopReason !== "aborted") {
+				this.#recovery.noteAnsweredTurn();
+			}
 			for (const block of event.message.content) {
 				if (block.type === "toolCall") this.#runToolCallIds.add(block.id);
 			}
@@ -5241,7 +5244,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// fire — matching the pre-fix flow for `stopReason === "error"`.
 			if (this.#recovery.isClassifierRefusal(msg)) {
 				this.#prunedTerminalFailure = msg;
-				if (this.#recovery.settleTerminalRefusal(msg)) {
+				const settled = this.#recovery.settleTerminalRefusal(msg);
+				if (settled.persisted) this.#trackPostPromptTask(settled.persisted);
+				if (settled.woke) {
 					maintenanceRoute("refusal-tool-call-reported");
 					this.#recovery.resolveRetry();
 					await emitAgentEndNotification({ willContinue: true });
