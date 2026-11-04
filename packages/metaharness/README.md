@@ -69,7 +69,10 @@ bun run serve --port 4700
    SnapCompact uses `conditions` and treats `tasks` as the passage limit.
    A harbor run's gateway token goes in `gatewayToken`, which reaches the runner
    in its environment and is never stored; `extraArgs` are stored with the run,
-   so a launch whose `extraArgs` carry the token is refused.
+   so a launch whose `extraArgs` carry the token is refused. A launch or resume is
+   also refused while any variable in the manager's own environment, other than
+   `METAHARNESS_GATEWAY_TOKEN`, holds a token the manager knows: the runner hands
+   its environment on to omp and Harbor and can check it only against its own token.
 
 - `GET /api/runs/:name` — `{ run, traces }` (syncs native artifacts on read).
 - `POST /api/runs/:name/cancel` — cancel a manager-launched run.

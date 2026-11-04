@@ -33,7 +33,7 @@ import {
 	refuseGatewayTokenInEnv,
 } from "./gateway-models";
 import { defaultJobName, harborRunnerArgs, type LaunchRequest } from "./launch-args";
-import { parseArgs } from "./runner";
+import { parseArgs, resolveResumeConfig } from "./runner";
 import { type LaunchRecord, type RunRole, type RunRow, RunStore } from "./store";
 
 /** PUT /api/experiments/:id body — goal and per-run role/note/label metadata. */
@@ -405,6 +405,7 @@ export class ManagerServer {
 		// arguments reach omp as text, so no field may repeat this launch's token or any
 		// other token the manager knows.
 		this.#refuseKnownGatewayTokens(request, "the launch request", token);
+		const childEnv = this.#runnerEnv(gatewayToken);
 		if (!request.model) throw new Error("model is required");
 		const benchmark = request.benchmark ?? "harbor";
 		if (benchmark !== "harbor" && benchmark !== "edit" && benchmark !== "snapcompact") {
@@ -421,7 +422,6 @@ export class ManagerServer {
 			throw new Error(`run ${jobName} is already running`);
 		}
 		const jobDir = path.join(this.jobsDir, jobName);
-		fs.mkdirSync(jobDir, { recursive: true });
 
 		let argv: string[];
 		let cwd: string;
@@ -464,12 +464,9 @@ export class ManagerServer {
 		// both as built, not only the request they came from.
 		this.#refuseKnownGatewayTokens({ argv, record }, "the launch's command line and record", token);
 
-		const pid = this.#spawnRunner(
-			argv,
-			cwd,
-			record,
-			gatewayToken === undefined ? {} : { [GATEWAY_TOKEN_INPUT_ENV]: gatewayToken },
-		);
+		// Every check has passed: only now does the run get a directory.
+		fs.mkdirSync(jobDir, { recursive: true });
+		const pid = this.#spawnRunner(argv, cwd, record, childEnv);
 		// A reused job name must not resume with an earlier launch's token.
 		if (gatewayToken === undefined) this.#gatewayTokens.delete(jobName);
 		else this.#gatewayTokens.set(jobName, gatewayToken);
@@ -513,42 +510,59 @@ export class ManagerServer {
 		const gatewayToken = opts.gatewayToken ?? this.#gatewayTokens.get(jobName);
 		const argv = ["bun", "src/runner.ts", "--resume", jobName, "--jobs-dir", this.jobsDir];
 		for (const t of filterErrorTypes) argv.push("--filter-error-type", t);
-		// The resume's arguments, the job name and jobs dir included, are visible in the
-		// process list; none may repeat a token.
-		this.#refuseKnownGatewayTokens(argv, "the resume arguments", gatewayToken);
 		let prewalk: LaunchRequest["prewalk"];
 		try {
 			prewalk = run.prewalk ? (JSON.parse(run.prewalk) as { into?: string }) : undefined;
 		} catch {
 			prewalk = undefined;
 		}
-		const pid = this.#spawnRunner(
-			argv,
-			PKG_DIR,
-			{
-				benchmark: "harbor",
-				jobName,
-				dataset: run.dataset,
-				agent: run.agent,
-				models: run.models ? run.models.split(",") : [],
-				prewalk,
-				config: run.config,
-				role: run.role,
-				note: run.note,
-			},
-			gatewayToken === undefined ? {} : { [GATEWAY_TOKEN_INPUT_ENV]: gatewayToken },
+		const record: Omit<LaunchRecord, "pid"> = {
+			benchmark: "harbor",
+			jobName,
+			dataset: run.dataset,
+			agent: run.agent,
+			models: run.models ? run.models.split(",") : [],
+			prewalk,
+			config: run.config,
+			role: run.role,
+			note: run.note,
+		};
+		// The resumed runner rebuilds the run's recorded launch (runner-config.json, else
+		// manager.json) and checks it only against its own token. The manager knows every
+		// token it launched with, so it rebuilds that launch the same way and checks it,
+		// the resume's command line (visible in the process list) and the record it
+		// rewrites against all of them before anything is stored or spawned.
+		const recovered = resolveResumeConfig(
+			parseArgs([...argv.slice(2), ...(gatewayToken === undefined ? [] : ["--gateway-token", gatewayToken])]),
 		);
+		this.#refuseKnownGatewayTokens(
+			{ argv, record, recovered: { ...recovered, gatewayToken: undefined } },
+			"the resume",
+			gatewayToken,
+		);
+		const pid = this.#spawnRunner(argv, PKG_DIR, record, this.#runnerEnv(gatewayToken));
 		if (gatewayToken !== undefined) this.#gatewayTokens.set(jobName, gatewayToken);
 		return { jobName, pid };
 	}
 
+	/**
+	 * The environment a runner child starts with: the manager's own, with `gatewayToken`
+	 * as `METAHARNESS_GATEWAY_TOKEN` when the request chose one. The runner forwards host
+	 * `PI_*` variables to omp and hands the rest to Harbor, which expands `${NAME}` from it
+	 * into the guest, and it can check them only against its own token. So any variable
+	 * but that one holding a token this manager knows is refused here.
+	 */
+	#runnerEnv(gatewayToken: string | undefined): Record<string, string> {
+		const env: Record<string, string> = {};
+		for (const [name, value] of Object.entries(process.env)) if (value !== undefined) env[name] = value;
+		if (gatewayToken !== undefined) env[GATEWAY_TOKEN_INPUT_ENV] = gatewayToken;
+		const { [GATEWAY_TOKEN_INPUT_ENV]: _own, ...inherited } = env;
+		this.#refuseKnownGatewayTokens(inherited, "the manager's environment", gatewayToken);
+		return env;
+	}
+
 	/** Spawn a detached runner child, wire its exit back into the store, and register the run. */
-	#spawnRunner(
-		argv: string[],
-		cwd: string,
-		record: Omit<LaunchRecord, "pid">,
-		env: Record<string, string> = {},
-	): number {
+	#spawnRunner(argv: string[], cwd: string, record: Omit<LaunchRecord, "pid">, env: Record<string, string>): number {
 		const jobName = record.jobName;
 		const logDir = path.join(this.jobsDir, "_manager", "logs");
 		fs.mkdirSync(logDir, { recursive: true });
@@ -557,7 +571,7 @@ export class ManagerServer {
 			cwd,
 			stdout: logFile,
 			stderr: logFile,
-			env: { ...process.env, ...env },
+			env,
 			// Own process group: a manager restart (Ctrl+C / --hot dev cycle) must
 			// not deliver terminal signals to runners — that killed live runs.
 			detached: true,

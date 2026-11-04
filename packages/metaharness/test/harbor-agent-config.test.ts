@@ -266,6 +266,18 @@ describe("omp_local", () => {
 			Object.assign(process.env, saved);
 		}
 	});
+	it.each([
+		{ name: "an --env entry naming the token variable", argv: ["--env", "METAHARNESS_GATEWAY_TOKEN"] },
+		{
+			name: "a Harbor agent-env entry referring to it",
+			argv: ["--", "--ae", "PI_ALIAS=$" + "{METAHARNESS_GATEWAY_TOKEN}"],
+		},
+	])("refuses $name after --help, as it does without it", ({ argv }) => {
+		// The manager parses a launch's arguments to check them; --help must not end that early.
+		expect(() => parseArgs(["--model", "openrouter/test-model", "--help", ...argv])).toThrow(
+			/METAHARNESS_GATEWAY_TOKEN/,
+		);
+	});
 
 	it("gives each run its own private token file, so a concurrent run of the job cannot remove it", async () => {
 		const { root } = await scratch("runner-token-file-");
@@ -759,13 +771,23 @@ describe("manager", () => {
 		CASE_TIMEOUT_MS,
 	);
 
+	/** The error a refused POST reports; an accepted one reports its status instead. */
+	async function refusal(port: number, route: string, body: unknown): Promise<string> {
+		const response = await fetch(`http://127.0.0.1:${port}${route}`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+		return response.status === 400 ? await response.text() : `status ${response.status}`;
+	}
+
 	it(
 		"refuses experiment metadata, arm launches and resume arguments that repeat a token it knows",
 		async () => {
 			const { root } = await scratch("manager-token-metadata-");
 			const manager = new ManagerServer(root);
 			const server = manager.start(0);
-			const send = (route: string, body: unknown, method = "POST") =>
+			const send = (route: string, body: unknown, method: "POST" | "PUT" = "POST") =>
 				fetch(`http://127.0.0.1:${server.port}${route}`, {
 					method,
 					headers: { "content-type": "application/json" },
@@ -866,9 +888,104 @@ describe("manager", () => {
 				expect(stored.includes(Buffer.from(armToken))).toBe(false);
 				expect(stored.includes(Buffer.from("slugtok-bearer"))).toBe(false);
 				// Refused before the job directory is made.
-				expect((await fs.readdir(root)).filter(name => name.includes("slugtok") || name === "token-dir")).toEqual(
-					[],
+				expect(
+					(await fs.readdir(root)).filter(
+						name => name.includes("slugtok") || ["token-dir", "token-forward", "token-inherited"].includes(name),
+					),
+				).toEqual([]);
+			} finally {
+				await manager.stop();
+			}
+		},
+		CASE_TIMEOUT_MS,
+	);
+	it(
+		"refuses a launch while its own environment holds another token it knows",
+		async () => {
+			const { root } = await scratch("manager-token-inherited-");
+			const manager = new ManagerServer(root);
+			const server = manager.start(0);
+			try {
+				await launchThroughManager(root, server.port ?? 0, { gatewayToken: token });
+				// The runner forwards host PI_* variables to omp and hands the rest of its environment
+				// to Harbor, which expands ${NAME} from it; it knows only its own token, so a host
+				// variable holding another token the manager knows is refused here, with no --env.
+				for (const variable of ["PI_RETAINED_ALIAS", "REVIEW_RETAINED_ALIAS"]) {
+					process.env[variable] = token;
+					try {
+						const reason = await refusal(server.port ?? 0, "/api/runs", {
+							model: "openrouter/test-model",
+							environment: "docker",
+							jobName: "token-inherited",
+							gatewayToken: "review-other-bearer",
+							extraArgs: [
+								"--dry-run",
+								"--binary",
+								path.join(root, "omp-linux-x64"),
+								"--gateway-url",
+								"http://127.0.0.1:1",
+							],
+						});
+						expect(reason).toContain(`the manager's environment.${variable} holds the gateway token`);
+					} finally {
+						delete process.env[variable];
+					}
+				}
+				expect(await Bun.file(path.join(root, "token-inherited", "manager.json")).exists()).toBe(false);
+			} finally {
+				await manager.stop();
+			}
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	it(
+		"refuses a resume whose recorded launch holds another token it knows",
+		async () => {
+			const { root } = await scratch("manager-token-recovered-");
+			const manager = new ManagerServer(root);
+			const server = manager.start(0);
+			try {
+				await launchThroughManager(root, server.port ?? 0, { gatewayToken: token });
+				await Bun.write(path.join(root, "token-probe", "config.json"), '{"environment":{"type":"docker"}}');
+				// A resume rebuilds the run's recorded launch; one holding a token the manager knows
+				// must not reach a runner that knows only the resume's own token.
+				await Bun.write(
+					path.join(root, "_bench", "token-probe", "runner-config.json"),
+					JSON.stringify({
+						models: ["openrouter/test-model"],
+						settings: { "review.retained": token },
+						gatewayTokenRequired: false,
+					}),
 				);
+
+				const reason = await refusal(server.port ?? 0, "/api/runs/token-probe/resume", {
+					gatewayToken: "review-resume-bearer",
+				});
+
+				expect(reason).toContain("the resume.recovered.settings.review.retained holds the gateway token");
+			} finally {
+				await manager.stop();
+			}
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	it(
+		"refuses a resume whose selected token is already in the record it rewrites",
+		async () => {
+			const { root } = await scratch("manager-token-note-");
+			const manager = new ManagerServer(root);
+			const server = manager.start(0);
+			try {
+				const noteToken = "resume-note-bearer";
+				expect((await launchThroughManager(root, server.port ?? 0, { note: noteToken })).status).toBe(201);
+				await Bun.write(path.join(root, "token-probe", "config.json"), '{"environment":{"type":"docker"}}');
+
+				const reason = await refusal(server.port ?? 0, "/api/runs/token-probe/resume", { gatewayToken: noteToken });
+
+				// The record keeps the note twice (its own field and the launch request it stores).
+				expect(reason).toMatch(/the resume\.record\.(config\.)?note holds the gateway token/);
 			} finally {
 				await manager.stop();
 			}
@@ -882,7 +999,6 @@ describe("manager", () => {
 			const { root } = await scratch("manager-token-reuse-");
 			const manager = new ManagerServer(root);
 			const server = manager.start(0);
-			const spawn = spyOn(Bun, "spawn");
 			try {
 				await launchThroughManager(root, server.port ?? 0, { gatewayToken: "stale-token" });
 				await launchThroughManager(root, server.port ?? 0, {});
@@ -892,11 +1008,11 @@ describe("manager", () => {
 					method: "POST",
 				});
 
-				expect(resumed.status).toBe(201);
-				const env = spawn.mock.calls.at(-1)?.[1]?.env;
-				expect(env?.METAHARNESS_GATEWAY_TOKEN).not.toBe("stale-token");
+				// With no token of its own, the resume is refused for want of one rather than run
+				// with the token of the launch the second one replaced.
+				expect(resumed.status).toBe(400);
+				expect(await resumed.text()).toContain("gateway token, which is not recorded");
 			} finally {
-				spawn.mockRestore();
 				await manager.stop();
 			}
 		},

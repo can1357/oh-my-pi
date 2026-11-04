@@ -389,10 +389,11 @@ export function parseArgs(argv: string[]): Config {
 				break;
 			case "-h":
 			case "--help":
-				// The caller prints the help; parsing has no side effects, since the manager
-				// also parses caller-supplied arguments in its own process.
+				// The caller prints the help. Parsing has no side effects, since the manager
+				// also parses caller-supplied arguments in its own process, and it goes on to
+				// the end, so the arguments after it get the same checks as without it.
 				cfg.help = true;
-				return cfg;
+				break;
 			case "-e":
 			case "--env": {
 				const spec = take(arg);
