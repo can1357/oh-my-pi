@@ -1600,6 +1600,15 @@ pub fn start_sub(
 	sub: Sub,
 ) -> Flow {
 	let Sub { unit, entry, form, text, line } = sub;
+	// bash parses a `$( )` (not a `` ` ` ``) from its text when it runs it:
+	// reading that text reports the jobs a signal ended, as reading a line
+	// does.
+	if text.is_some() {
+		if k.needs_settle(vp) {
+			return Flow::Block(WaitKey::Settle);
+		}
+		notify::notify(k, cx, vp, None, line);
+	}
 	let first = unit
 		.ops
 		.get(entry as usize)
@@ -1903,6 +1912,10 @@ pub fn start_procsub(
 	entry: u32,
 	output: bool,
 ) -> BString {
+	// bash parses a process substitution's text when it runs it, which
+	// reports the jobs a signal ended, as reading a line does.
+	let line = line_of(vp, unit.ops.get(entry as usize).map_or(0, |op| op.node));
+	notify::notify(k, cx, vp, None, line);
 	let (r, w) = mem::pipe();
 	let r = FdRef::mem(r);
 	let w = FdRef::mem(w);
@@ -2155,6 +2168,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 			if let Some(saves) = top_frame(vp).redirs.pop() {
 				restore(vp, saves);
 			}
+			notify::flush_report(k, vp, op.node);
 			Flow::Next
 		},
 		Opcode::Spawn => spawn(k, vp, cx, unit, op),
@@ -3223,6 +3237,20 @@ fn report_children(
 		return;
 	};
 	let info = &unit.spawns[op.a as usize];
+	// A subshell that is all its parent subshell runs (`( ( cmd ) )`, a job
+	// `( cmd ) &`) runs in that subshell's process in bash, unforked: the
+	// parent dies by the signal and is reported in turn.
+	if info.kind == SpawnKind::Subshell
+		&& vp.transient
+		&& vp.frames.len() == 1
+		&& unit.ops.get(info.end as usize).is_some_and(|o| o.code == Opcode::Leave)
+		&& unit.ops.get(info.end as usize + 1).is_some_and(|o| o.code == Opcode::SubExit)
+		&& !vp.own_traps.has(TrapKey::Exit)
+		&& !vp.own_traps.has(TrapKey::Err)
+	{
+		k.deaths.insert(vp.vpid, death);
+		return;
+	}
 	let texts: Vec<BString> = if info.kind == SpawnKind::Subshell {
 		vec![job_text(k, cx, vp, unit, op.node)]
 	} else {
@@ -3239,7 +3267,19 @@ fn report_children(
 		})
 		.collect();
 	let line = line_of(vp, op.node);
-	notify::report_foreground(k, cx, vp, &procs, Some(death), line);
+	let bytes = notify::report_foreground(k, cx, vp, &procs, Some(death), line);
+	// A subshell's own redirections (`( … ) 2>f`) applied in bash's child:
+	// the report goes where standard error is once they are undone.
+	let redirected = info.kind == SpawnKind::Subshell
+		&& unit
+			.ops
+			.get(info.end as usize + 1)
+			.is_some_and(|o| o.code == Opcode::PopRedir && o.node == op.node);
+	if redirected {
+		notify::defer_report(k, vp, op.node, bytes);
+	} else if !bytes.is_empty() {
+		vp.queue_out(2, bytes);
+	}
 }
 
 /// Stage `i`'s command as bash prints it (`make_command_string`).

@@ -21,7 +21,7 @@ use bstr::BString;
 
 use super::{
 	Kernel,
-	proc::{Job, JobState, PendingWrite, Vproc},
+	proc::{Job, JobState, Vproc},
 	state,
 };
 use crate::bash::{
@@ -235,8 +235,7 @@ fn report_kind(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, death: Death, foregr
 /// Queue `bytes` on `vp`'s standard error, as bash's `fprintf (stderr, …)`.
 fn write_stderr(vp: &mut Vproc, bytes: Vec<u8>) {
 	if !bytes.is_empty() {
-		vp.out
-			.push_back(PendingWrite { fd: 2, bytes: BString::from(bytes), off: 0 });
+		vp.queue_out(2, bytes);
 	}
 }
 
@@ -365,17 +364,17 @@ pub fn report_foreground(
 	procs: &[ProcLine<'_>],
 	death: Option<Death>,
 	line: u32,
-) {
+) -> Vec<u8> {
 	let Some(death) = death else {
-		return;
+		return Vec::new();
 	};
 	if vp.jobs.comsub {
-		return;
+		return Vec::new();
 	}
 	let format = match report_kind(k, cx, vp, death, true) {
 		Report::Full => Format::Long,
 		Report::Short => Format::Standard,
-		Report::None => return,
+		Report::None => return Vec::new(),
 	};
 	let posix = state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false);
 	let look = JobLook {
@@ -388,5 +387,24 @@ pub fn report_foreground(
 	};
 	let mut out = if format == Format::Long { k.line_prefix(vp, line) } else { Vec::new() };
 	print_pipeline(&mut out, procs, format, &look);
-	write_stderr(vp, out);
+	out
+}
+
+/// Hold the report `bytes` of the foreground command at syntax node
+/// `node` until its own redirections are undone (bash forked it: they
+/// applied in the child, and bash reports on the shell's standard error).
+pub fn defer_report(k: &mut Kernel, vp: &Vproc, node: u32, bytes: Vec<u8>) {
+	if !bytes.is_empty() {
+		k.fg_reports.insert(vp.vpid, (node, bytes));
+	}
+}
+
+/// Write the report held for the command at `node`, once its redirections
+/// are undone ([`defer_report`]).
+pub fn flush_report(k: &mut Kernel, vp: &mut Vproc, node: u32) {
+	if k.fg_reports.get(&vp.vpid).is_some_and(|(n, _)| *n == node)
+		&& let Some((_, bytes)) = k.fg_reports.remove(&vp.vpid)
+	{
+		write_stderr(vp, bytes);
+	}
 }

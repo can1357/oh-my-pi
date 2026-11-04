@@ -438,6 +438,10 @@ pub struct Kernel {
 	/// The vproc whose [`WaitKey::Settle`] park the scheduler just ended:
 	/// the op that parked takes it ([`Kernel::settled_for`]) and goes on.
 	pub settle_done:     Option<Vpid>,
+	/// Foreground reports held until the reported command's redirections
+	/// are undone, by vproc: the command's syntax node and the bytes
+	/// ([`notify::defer_report`]).
+	pub fg_reports:      HashMap<Vpid, (u32, Vec<u8>)>,
 	/// Background jobs whose pid is still to be settled
 	/// ([`proc::Bang`]): imaged (a restored job still decides).
 	pub bangs:           Vec<proc::Bang>,
@@ -510,6 +514,7 @@ impl Kernel {
 			exec_signals: HashMap::new(),
 			deaths: HashMap::new(),
 			settle_done: None,
+			fg_reports: HashMap::new(),
 			reported_signal: None,
 			bangs: Vec::new(),
 			settled: Vec::new(),

@@ -107,8 +107,6 @@ fn rows(cases: &[(&str, &str)]) -> Vec<(String, String)> {
 		.collect()
 }
 
-}
-
 /// With `lastpipe` Bash waits for the pipeline with its job list frozen, so
 /// a process a signal ended in it is reported at the next notify point, after
 /// the commands that follow on its line: the last command's own child as a

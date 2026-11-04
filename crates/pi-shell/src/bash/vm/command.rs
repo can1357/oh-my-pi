@@ -404,6 +404,20 @@ fn expand(
 	line: u32,
 ) -> Option<Flow> {
 	let cmd = &unit.cmds[op.a as usize];
+	// bash parses a compound array assignment's `( … )` when it expands it
+	// (`expand_compound_array_assignment`): reading that text reports the
+	// jobs a signal ended, as reading a line does.
+	if !st(vp).expanded
+		&& (cmd.assigns.iter().any(|a| matches!(a.value, AssignVal::Array(_)))
+			|| unit.lists[cmd.words as usize]
+				.iter()
+				.any(|&w| unit.words[w as usize].parts.iter().any(|p| matches!(p, Part::Compound(_)))))
+	{
+		if k.needs_settle(vp) {
+			return Some(Flow::Block(WaitKey::Settle));
+		}
+		notify::notify(k, cx, vp, None, line);
+	}
 	if !st(vp).expanded && unit.lists[cmd.words as usize].is_empty() {
 		st(vp).expanded = true;
 	}
@@ -3225,8 +3239,7 @@ fn report_waited(
 	};
 	let out = notify::mark(k, cx, vp, Some(number), line);
 	if !out.is_empty() {
-		vp.out
-			.push_back(PendingWrite { fd: 2, bytes: BString::from(out), off: 0 });
+		vp.queue_out(2, out);
 	}
 }
 
@@ -3258,18 +3271,24 @@ fn program_died(
 	};
 	let text = exec::job_text(k, cx, vp, &unit, op.node);
 	let procs = [notify::ProcLine { pid, text: &text, status: notify::ProcStatus::Signaled(death) }];
-	notify::report_foreground(k, cx, vp, &procs, Some(death), line);
+	let bytes = notify::report_foreground(k, cx, vp, &procs, Some(death), line);
+	notify::defer_report(k, vp, op.node, bytes);
 }
 
 /// Whether `vp` has a trap with an action for a signal, or an `EXIT` or
-/// `ERR` trap (bash `any_signals_trapped`, `signal_is_trapped (EXIT_TRAP)`,
-/// `signal_is_trapped (ERROR_TRAP)`): bash then forks its last command.
+/// `ERR` trap of its own (bash `any_signals_trapped`, `signal_is_trapped
+/// (EXIT_TRAP)`, `signal_is_trapped (ERROR_TRAP)`; a subshell resets the
+/// traps it inherited): bash then forks its last command.
 fn traps_block_exec(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
-	use crate::bash::store::TrapKey;
-	for key in [TrapKey::Exit, TrapKey::Err] {
-		if matches!(state::record(cx.store, vp, Key::Trap(key)), Ok(Some(Record::Trap { .. }))) {
-			return true;
-		}
+	use crate::bash::store::{OptId, TrapKey};
+	if vp.own_traps.has(TrapKey::Exit) || vp.own_traps.has(TrapKey::Err) {
+		return true;
+	}
+	// `set -E`: the subshell keeps the `ERR` trap it inherited.
+	if state::option(&mut k.root, cx.store, vp, OptId::Errtrace).unwrap_or(false)
+		&& matches!(state::record(cx.store, vp, Key::Trap(TrapKey::Err)), Ok(Some(Record::Trap { .. })))
+	{
+		return true;
 	}
 	vp.own_traps.signals().iter().any(|sig| {
 		match state::record(cx.store, vp, Key::Trap(TrapKey::Signal(sig))) {
@@ -3288,11 +3307,72 @@ fn has_redirs(unit: &Unit, op: Op) -> bool {
 	op.code == Opcode::Exec && unit.cmds.get(op.a as usize).is_some_and(|c| c.redirs.is_some())
 }
 
+/// A compound command node: it holds lists of its own.
+const fn compound(kind: NodeKind) -> bool {
+	!matches!(
+		kind,
+		NodeKind::AndOr | NodeKind::Pipeline | NodeKind::Simple | NodeKind::Assign | NodeKind::Word
+	)
+}
+
+/// Where the simple command at node `cmd` sits in the list it is a direct
+/// item of (inside the compound node `within`, or at the unit's top level
+/// for `None`), as bash's fork suppression sees it: `None` when it is not
+/// the list's tail command bash may run in place of its shell; otherwise
+/// whether it is the whole list (`( cmd )`: bash runs it in place even with
+/// redirections). The tail command is the last pipeline of the list when
+/// the list is one and-or list (`a && b`, `a || b && c`), or the last item
+/// when that item is a lone pipeline (`a; b`); either way a one-stage
+/// pipeline (bash `can_optimize_connection`, `optimize_subshell_command`).
+fn tail_command(unit: &Unit, within: Option<u32>, cmd: u32) -> Option<bool> {
+	let nodes = &unit.nodes;
+	let me = nodes.get(cmd as usize)?;
+	let (lo, hi) = within.and_then(|w| nodes.get(w as usize)).map_or((0, u32::MAX), |n| (n.lo, n.hi));
+	let inside = |n: &crate::bash::ir::NodeInfo| lo <= n.lo && n.hi <= hi && (n.lo, n.hi) != (lo, hi);
+	// Nodes directly in the list: inside `within`, in no compound node that
+	// is itself inside `within`.
+	let direct = |n: &crate::bash::ir::NodeInfo| {
+		inside(n)
+			&& !nodes
+				.iter()
+				.any(|c| compound(c.kind) && inside(c) && c.lo <= n.lo && n.hi <= c.hi && (c.lo, c.hi) != (n.lo, n.hi))
+	};
+	let items: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::AndOr && direct(n)).collect();
+	let item = items.iter().find(|a| a.lo <= me.lo && me.hi <= a.hi)?;
+	let pipe = nodes
+		.iter()
+		.filter(|p| p.kind == NodeKind::Pipeline && item.lo <= p.lo && p.hi <= item.hi && p.lo <= me.lo && me.hi <= p.hi)
+		.min_by_key(|p| p.hi - p.lo)?;
+	// One stage (a simple or compound command directly in the pipeline),
+	// and the last pipeline of its item.
+	let stages = nodes
+		.iter()
+		.filter(|s| {
+			(s.kind == NodeKind::Simple || compound(s.kind))
+				&& pipe.lo <= s.lo
+				&& s.hi <= pipe.hi
+				&& direct(s)
+		})
+		.count();
+	if stages != 1 || pipe.hi != item.hi {
+		return None;
+	}
+	let last_item = items.iter().all(|a| a.hi <= item.hi);
+	if !last_item {
+		return None;
+	}
+	if items.len() > 1 && (pipe.lo, pipe.hi) != (item.lo, item.hi) {
+		return None;
+	}
+	Some(items.len() == 1 && (pipe.lo, pipe.hi) == (item.lo, item.hi))
+}
+
 /// Whether the external `vp` awaits at `op` is what bash would have run in
-/// place of the subshell `vp` stands for: the vproc's last command (its
-/// `SubExit` follows), or one it `exec`s; in a `( … )` subshell only a
-/// command without redirections, with no `EXIT`, `ERR` or signal trap with
-/// an action set (bash `should_optimize_fork`).
+/// place of the subshell `vp` stands for: one it `exec`s; a background
+/// job's or pipeline stage's lone command; the tail command of a `( … )`
+/// subshell's list ([`tail_command`]; with redirections only when it is the
+/// whole list), with no `EXIT`, `ERR` or signal trap with an action set in
+/// the subshell (bash `should_optimize_fork`).
 fn stands_for_vproc(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, op: Op) -> bool {
 	if !vp.transient {
 		return false;
@@ -3313,18 +3393,33 @@ fn stands_for_vproc(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, op: Op) -> bool
 	if !last {
 		return false;
 	}
-	if frame.subshell_line.is_some() && has_redirs(unit, op) {
-		return false;
+	if frame.subshell_line.is_some() {
+		let Some(me) = unit.nodes.get(op.node as usize) else {
+			return false;
+		};
+		// The `( … )` this vproc runs: the innermost subshell node around it.
+		let within = unit
+			.nodes
+			.iter()
+			.enumerate()
+			.filter(|(_, n)| n.kind == NodeKind::Subshell && n.lo <= me.lo && me.hi <= n.hi)
+			.min_by_key(|(_, n)| n.hi - n.lo)
+			.map(|(i, _)| i as u32);
+		match tail_command(unit, within, op.node) {
+			None => return false,
+			Some(alone) if !alone && has_redirs(unit, op) => return false,
+			Some(_) => {},
+		}
 	}
 	!traps_block_exec(k, cx, vp)
 }
 
 /// Whether the external at `op` is the last command of the root's run,
-/// which `bash -c` runs in place of itself (`should_suppress_fork`): a
-/// simple command without redirections that is the run's last top-level
-/// command (or the last of its `;`, `&&` and `||` list), outside any
-/// compound command, function, `eval` or trap, with no trap with an action,
-/// `EXIT` or `ERR` trap set, and without job control.
+/// which `bash -c` runs in place of itself (`should_suppress_fork`,
+/// `optimize_connection_fork`): the tail command ([`tail_command`]) of the
+/// run's last top-level command, without redirections, outside any
+/// function, `eval` or trap, with no trap with an action, `EXIT` or `ERR`
+/// trap set, and without job control.
 fn oneshot(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, op: Op) -> bool {
 	if vp.parent.is_some() {
 		return false;
@@ -3343,18 +3438,8 @@ fn oneshot(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, op: Op) -> bool {
 	};
 	if unit.ops.get(frame.pc as usize + 1).is_none_or(|next| next.code != Opcode::End)
 		|| has_redirs(unit, op)
+		|| tail_command(unit, None, op.node).is_none()
 	{
-		return false;
-	}
-	let Some(me) = unit.nodes.get(op.node as usize) else {
-		return false;
-	};
-	let nested = unit.nodes.iter().any(|n| {
-		!matches!(n.kind, NodeKind::AndOr | NodeKind::Pipeline | NodeKind::Simple | NodeKind::Assign | NodeKind::Word)
-			&& n.lo <= me.lo
-			&& me.hi <= n.hi
-	});
-	if nested {
 		return false;
 	}
 	if exec::job_control(k, cx, vp) {
@@ -3457,6 +3542,7 @@ fn finish(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Flow {
 	let (status, t0, control) = (e.status, e.t0, e.control);
 	let in_shell = matches!(e.target, Some(Target::Function(_) | Target::Intrinsic(_)));
 	exec::drop_scratch(&mut k.root, cx.store, vp, sc);
+	notify::flush_report(k, vp, op.node);
 	if status != 0 && in_shell && vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 		print_exit_value(k, vp, cx, status);
 	}
