@@ -1,6 +1,8 @@
 use tokio::process::Command;
 
 use super::*;
+#[cfg(unix)]
+use crate::sys::proc::{self, ProcInfo, ProcState};
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
@@ -898,7 +900,7 @@ async fn kill_builtin_signals_every_process_in_a_jobspec_pipeline() {
 			.expect("pipeline pid")
 	});
 	for pid in pids {
-		wait_until_stopped(pid).await;
+		wait_until_stopped(&pinned_process(pid)).await;
 	}
 	assert_eq!(
 		session
@@ -953,7 +955,7 @@ async fn stopped_later_pipeline_stage_finishes_once_continued() {
 	let (mut session, stdio) = kill_test_context().await;
 	let continue_stage = async {
 		let pid = wait_for_pidfile(&pidfile).await;
-		wait_until_stopped(pid).await;
+		wait_until_stopped(&pinned_process(pid)).await;
 		// SAFETY: kill takes any pid and signal number; `pid` is the stopped
 		// stage this test started.
 		assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0, "continue the stopped stage");
@@ -1014,7 +1016,7 @@ async fn stopped_interactive_job_stops_every_pipeline_stage() {
 		.expect("stop the job");
 	assert_eq!(exit_code(&stopped), 0);
 	for &pid in &pids {
-		wait_until_stopped(pid).await;
+		wait_until_stopped(&pinned_process(pid)).await;
 	}
 	let jobs = tempfile::tempfile().expect("jobs capture");
 	session
@@ -1097,9 +1099,10 @@ async fn resumed_pipeline_drains_every_selected_stop_report() {
 						.expect("stage pid")
 				})
 				.collect();
-			for (stage, &pid) in pids.iter().enumerate() {
+			let stages: Vec<ProcInfo> = pids.iter().map(|&pid| pinned_process(pid)).collect();
+			for (stage, process) in stages.iter().enumerate() {
 				if stopped_subset & (1 << stage) != 0 {
-					wait_until_stopped(pid).await;
+					wait_until_stopped(process).await;
 				}
 			}
 			// The stages finish only once released, which happens after
@@ -1115,7 +1118,7 @@ async fn resumed_pipeline_drains_every_selected_stop_report() {
 			);
 			let release_stages = async {
 				time::timeout(Duration::from_secs(20), async {
-					while pids.iter().any(|&pid| is_stopped(pid)) {
+					while stages.iter().any(is_stopped) {
 						time::sleep(Duration::from_millis(10)).await;
 					}
 				})
@@ -1179,7 +1182,7 @@ async fn wait_reports_a_stop_that_precedes_the_wait() {
 		.await
 		.expect("stop the job");
 	assert_eq!(exit_code(&stopped), 0);
-	wait_until_stopped(pid).await;
+	wait_until_stopped(&pinned_process(pid)).await;
 
 	let waited = time::timeout(Duration::from_secs(20), session.run_test("wait %1", &stdio))
 		.await
@@ -1227,7 +1230,7 @@ async fn stopped_background_job_does_not_stop_foreground_process() {
 		.expect("start stopped background process");
 	assert_eq!(exit_code(&background), 0);
 	let background_pid = wait_for_pidfile(&pidfile).await;
-	wait_until_stopped(background_pid).await;
+	wait_until_stopped(&pinned_process(background_pid)).await;
 
 	let foreground = session
 		.run_test("/bin/sleep 1", &stdio)
@@ -1251,24 +1254,33 @@ async fn stopped_background_job_does_not_stop_foreground_process() {
 		.await;
 }
 
-/// Whether `pid` is stopped (state `T`).
+/// The process `pid` the test started, pinned by its kernel start time so a
+/// recycled pid cannot stand in for it.
 #[cfg(unix)]
-fn is_stopped(pid: i32) -> bool {
-	pi_builtins::ProcInfo::all()
-		.into_iter()
-		.any(|process| process.pid() == pid && process.state() == 'T')
+fn pinned_process(pid: i32) -> ProcInfo {
+	proc::info(pid).unwrap_or_else(|| panic!("process {pid} is not running"))
 }
 
-/// Waits until `pid` is stopped.
+/// Whether `process` still runs and is stopped. Reads only that process's
+/// entry: these checks run on the task that drives the shell, and a walk of
+/// the whole process table there blocks the shell for as long as the walk
+/// takes, which on a busy host is seconds per poll.
 #[cfg(unix)]
-async fn wait_until_stopped(pid: i32) {
+fn is_stopped(process: &ProcInfo) -> bool {
+	proc::info(process.pid)
+		.is_some_and(|now| now.start == process.start && now.state == ProcState::Stopped)
+}
+
+/// Waits until `process` is stopped.
+#[cfg(unix)]
+async fn wait_until_stopped(process: &ProcInfo) {
 	time::timeout(Duration::from_secs(20), async {
-		while !is_stopped(pid) {
+		while !is_stopped(process) {
 			time::sleep(Duration::from_millis(10)).await;
 		}
 	})
 	.await
-	.unwrap_or_else(|_| panic!("process {pid} did not stop"));
+	.unwrap_or_else(|_| panic!("process {} did not stop", process.pid));
 }
 
 /// The pid a test script wrote to `pidfile` (`echo $$ > pidfile`).
