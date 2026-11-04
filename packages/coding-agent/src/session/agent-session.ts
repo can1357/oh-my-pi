@@ -10003,9 +10003,18 @@ export class AgentSession implements SettingsScope {
 		);
 	}
 
-	/** Whether a hidden next-turn trigger must wait: see the trigger in {@link #scheduleHiddenNextTurn}. */
+	/**
+	 * Whether a hidden next-turn trigger must wait: see the trigger in {@link #scheduleHiddenNextTurn}.
+	 * An abort still cleaning up counts too: a turn started now would miss its cancellation, and the
+	 * abort would wait for that turn. The abort's end resumes the trigger.
+	 */
 	#hiddenNextTurnTriggerBlocked(): boolean {
-		return this.#awaitingAssignment || this.#promptInFlightCount > 0 || this.isSessionTransitioning;
+		return (
+			this.#awaitingAssignment ||
+			this.#promptInFlightCount > 0 ||
+			this.isSessionTransitioning ||
+			this.#abortInProgress
+		);
 	}
 
 	/** Schedules the hidden next-turn trigger a blocked turn put off, once nothing blocks it. */

@@ -967,6 +967,58 @@ describe("a message delivered before the task's turn starts", () => {
 		},
 		30_000,
 	);
+
+	it("starts no held hidden trigger's turn while an abort is still cleaning up, and runs it once the abort ends", async () => {
+		const harness = await createHarness();
+		const pause = pauseBeforeAgentStart();
+		const cleanupEntered = Promise.withResolvers<void>();
+		const cleanupRelease = Promise.withResolvers<void>();
+		let prompting: Promise<unknown> | undefined;
+		let aborting: Promise<void> | undefined;
+		try {
+			const session = await spawnIdle(harness, [pause.extension]);
+			harness.beginPhase("work in progress");
+			// A prompt in its setup puts off a hidden next-turn trigger.
+			pause.arm();
+			prompting = session.prompt("work in progress");
+			await pause.entered;
+			await session.sendCustomMessage(
+				{ customType: "test-plugin", content: BODY, display: false },
+				{ deliverAs: "nextTurn", triggerTurn: true },
+			);
+			// Hold the abort in its cleanup, where it waits for the agent to settle.
+			const waitForIdle = session.agent.waitForIdle.bind(session.agent);
+			vi.spyOn(session.agent, "waitForIdle").mockImplementationOnce(async () => {
+				cleanupEntered.resolve();
+				await cleanupRelease.promise;
+				await waitForIdle();
+			});
+			let abortFinished = false;
+			aborting = session.abort().then(() => {
+				abortFinished = true;
+			});
+			await cleanupEntered.promise;
+			// The paused prompt now finishes while the abort is still cleaning up.
+			pause.release();
+			await prompting;
+			await Bun.sleep(300);
+			expect(abortFinished).toBe(false);
+			expect(harness.requests.filter(request => request.bodyAt >= 0)).toEqual([]);
+
+			cleanupRelease.resolve();
+			await aborting;
+			// The trigger is a delivery: once the abort has ended it runs, once.
+			await Promise.race([harness.bodySeen(), Bun.sleep(5_000)]);
+			await session.waitForIdle();
+			expect(harness.requests.filter(request => request.bodyAt >= 0)).toHaveLength(1);
+			expect(session.messages.filter(message => messageText(message).includes(BODY))).toHaveLength(1);
+		} finally {
+			pause.release();
+			cleanupRelease.resolve();
+			await Promise.allSettled([prompting, aborting]);
+			harness.authStorage.close();
+		}
+	}, 30_000);
 });
 
 /** Spawns the subagent, lets its first run finish, and returns its kept-alive idle session. */
