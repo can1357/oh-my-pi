@@ -105,9 +105,14 @@ function rewriteLabel(args: AstEditRenderArgs | undefined): string | undefined {
  * Header subject: `pattern in scope` (or `N rewrites in scope`). The scope is the
  * result's display scope, else the call's requested paths, as in Grep and AST Grep.
  */
-function astEditSubject(args: AstEditRenderArgs | undefined, theme: Theme, scopePath?: string): string | undefined {
+function astEditSubject(
+	label: string | undefined,
+	args: AstEditRenderArgs | undefined,
+	theme: Theme,
+	scopePath?: string,
+): string | undefined {
 	const scope = scopePath || args?.paths?.join(", ") || undefined;
-	return formatScopedSubject(rewriteLabel(args), scope, theme);
+	return formatScopedSubject(label, scope, theme);
 }
 
 const AST_EDIT_CHANGE_LINE_RE = /^([+\- ])\s*(\d+)(?:│|[:|])(.*)$/;
@@ -175,7 +180,7 @@ function astEditScopeStats(details: AstEditToolDetails | undefined): NativeNode 
 export const astEditToolRenderer = {
 	inline: true,
 	renderCall(args: AstEditRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
-		const description = astEditSubject(args, uiTheme) ?? "?";
+		const description = astEditSubject(rewriteLabel(args) ?? "?", args, uiTheme);
 		const header = renderStatusLine({ icon: "pending", title: "AST Edit", description }, uiTheme);
 		// Pending call has no body yet — a lone status line is sleeker than an empty frame.
 		return new Text(header, 0, 0);
@@ -188,7 +193,7 @@ export const astEditToolRenderer = {
 		args?: AstEditRenderArgs,
 	): Component {
 		const details = result.details;
-		const description = astEditSubject(args, uiTheme, details?.scopePath);
+		const description = astEditSubject(rewriteLabel(args), args, uiTheme, details?.scopePath);
 
 		if (result.isError) {
 			const errorText = result.content?.find(c => c.type === "text")?.text || "Unknown error";
@@ -209,14 +214,18 @@ export const astEditToolRenderer = {
 		if (totalReplacements === 0) {
 			const meta = ["0 replacements"];
 			if (filesSearched > 0) meta.push(`searched ${filesSearched}`);
-			const header = renderStatusLine({ icon: "warning", title: "AST Edit", description, meta }, uiTheme);
-			// The "0 replacements" count already rides on the status line; only parse
-			// errors are worth a body, so frame solely when there are some.
+			// Only parse errors are worth a body, so frame solely when there are some; a
+			// framed card carries the counts in its bottom border, as a successful one does.
 			const bodyLines: string[] = [];
 			appendParseErrorsBulletList(bodyLines, details?.parseErrors, uiTheme, details?.parseErrorsTotal);
-			if (bodyLines.length === 0) return new Text(header, 0, 0);
+			if (bodyLines.length === 0) {
+				return new Text(renderStatusLine({ icon: "warning", title: "AST Edit", description, meta }, uiTheme), 0, 0);
+			}
+			const header = renderStatusLine({ icon: "warning", title: "AST Edit", description }, uiTheme);
+			const footerMeta = uiTheme.fg("dim", meta.join(uiTheme.sep.dot));
 			return framedToolCard(uiTheme, () => ({
 				header,
+				footerMeta,
 				sections: [{ content: bodyLines }],
 				phase: "warning",
 				borderColor: "borderMuted",
@@ -256,10 +265,10 @@ export const astEditToolRenderer = {
 			{ icon: limitReached ? "warning" : "success", title: "AST Edit", description },
 			uiTheme,
 		);
-		// Nothing is written until the proposal resolves, so the bottom rail leads with that state.
-		const footerMeta = [uiTheme.fg("warning", "proposed"), ...summaryParts.map(part => uiTheme.fg("dim", part))].join(
-			uiTheme.fg("dim", uiTheme.sep.dot),
-		);
+		// An unapplied result is a staged proposal; the bottom rail leads with that state.
+		const footerParts = summaryParts.map(part => uiTheme.fg("dim", part));
+		if (!details?.applied) footerParts.unshift(uiTheme.fg("warning", "proposed"));
+		const footerMeta = footerParts.join(uiTheme.fg("dim", uiTheme.sep.dot));
 
 		const extraLines: string[] = [];
 		if (limitReached) {
@@ -318,8 +327,10 @@ export const astEditToolRenderer = {
 		const details = result.details;
 		const patternHead = astEditPatternHead(args);
 		if (result.isError) {
+			// A failed edit keeps the scope it ran in, as the terminal card does.
+			const scope = details?.scopePath || args?.paths?.map(displayPath).join(", ");
 			return {
-				tool: { title: "AST Edit", ...patternHead },
+				tool: { title: "AST Edit", ...patternHead, meta: scope ? [`in ${scope}`] : undefined },
 				tone: "error",
 				body: [errorText(resultText(result) || "Unknown error")],
 			};

@@ -73,6 +73,11 @@ describe("grepToolRenderer", () => {
 				.render(120)[0]!,
 		);
 		expect(header).toContain("Grep: needle in src 1 match · 1 file");
+		// A result rendered without its call args names only the scope, never a `?` pattern.
+		const argless = sanitizeText(
+			grepToolRenderer.renderResult(result, { expanded: false, isPartial: false }, uiTheme).render(120)[0]!,
+		);
+		expect(argless).toContain("Grep: in src 1 match · 1 file");
 		const call = sanitizeText(
 			grepToolRenderer
 				.renderCall({ pattern: "needle", path: "lib", case: false }, { expanded: false, isPartial: true }, uiTheme)

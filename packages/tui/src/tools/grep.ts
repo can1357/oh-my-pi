@@ -107,6 +107,7 @@ function grepFlagMeta(args: GrepRenderArgs): string[] {
  * (linked to the original search path); a call falls back to the requested paths.
  */
 function grepSubject(
+	pattern: string | undefined,
 	args: GrepRenderArgs | undefined,
 	uiTheme: Theme,
 	details?: GrepToolDetails,
@@ -115,7 +116,7 @@ function grepSubject(
 	let scope = details?.scopePath || undefined;
 	if (scope && searchPath) scope = fileHyperlink(searchPath, scope);
 	scope ??= toPathList(args?.path ?? args?.paths).join(", ") || undefined;
-	return formatScopedSubject(args?.pattern || "?", scope, uiTheme);
+	return formatScopedSubject(pattern || undefined, scope, uiTheme);
 }
 
 function grepStatusIcon(uiTheme: Theme): string {
@@ -131,7 +132,7 @@ export const grepToolRenderer = {
 				icon: "pending",
 				title: "Grep",
 				titleColor: "toolTitle",
-				description: grepSubject(args, uiTheme),
+				description: grepSubject(args.pattern || "?", args, uiTheme),
 				meta: grepFlagMeta(args),
 			},
 			uiTheme,
@@ -152,7 +153,7 @@ export const grepToolRenderer = {
 			isRecord(rawDetails) && typeof rawDetails.searchPath === "string"
 				? rawDetails.searchPath
 				: details?.searchPath;
-		const description = grepSubject(args, uiTheme, details, searchPath);
+		const description = grepSubject(args?.pattern, args, uiTheme, details, searchPath);
 
 		if (result.isError || details?.error) {
 			const errorText = details?.error || result.content?.find(c => c.type === "text")?.text || "Unknown error";

@@ -66,9 +66,14 @@ interface AstGrepRenderArgs {
 }
 
 /** Header subject, `pattern in scope`: the result's display scope, or the call's requested paths. */
-function astGrepSubject(args: AstGrepRenderArgs | undefined, uiTheme: Theme, scopePath?: string): string | undefined {
+function astGrepSubject(
+	pattern: string | undefined,
+	args: AstGrepRenderArgs | undefined,
+	uiTheme: Theme,
+	scopePath?: string,
+): string | undefined {
 	const scope = scopePath || toPathList(args?.path ?? args?.paths).join(", ") || undefined;
-	return formatScopedSubject(args?.pat ?? "?", scope, uiTheme);
+	return formatScopedSubject(pattern || undefined, scope, uiTheme);
 }
 
 const COLLAPSED_MATCH_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2;
@@ -79,7 +84,7 @@ export const astGrepToolRenderer = {
 	renderCall(args: AstGrepRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const meta: string[] = [];
 		if (args.skip !== undefined && args.skip > 0) meta.push(`skip:${args.skip}`);
-		const description = astGrepSubject(args, uiTheme);
+		const description = astGrepSubject(args.pat || "?", args, uiTheme);
 		const text = renderStatusLine({ icon: "pending", title: "AST Grep", description, meta }, uiTheme);
 		return new Text(text, 0, 0);
 	},
@@ -91,7 +96,7 @@ export const astGrepToolRenderer = {
 		args?: AstGrepRenderArgs,
 	): Component {
 		const details = result.details;
-		const description = astGrepSubject(args, uiTheme, details?.scopePath);
+		const description = astGrepSubject(args?.pat, args, uiTheme, details?.scopePath);
 
 		if (result.isError) {
 			const errorText = result.content?.find(c => c.type === "text")?.text || "Unknown error";
@@ -193,8 +198,10 @@ export const astGrepToolRenderer = {
 		const details = result.details;
 		const pattern = span(args?.pat ?? "?", "code");
 		if (result.isError) {
+			// A failed search keeps the scope it ran in, as the terminal card does.
+			const scope = details?.scopePath || toPathList(args?.path ?? args?.paths).join(", ");
 			return {
-				head: toolHead("AST Grep", pattern),
+				head: toolHead("AST Grep", pattern, ...compact([scope && `in ${scope}`])),
 				tone: "error",
 				body: [errorText(resultText(result) || "Unknown error")],
 			};

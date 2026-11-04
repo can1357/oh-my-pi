@@ -108,5 +108,12 @@ describe("astGrepToolRenderer header", () => {
 		).split("\n");
 		expect(lines[0]).toContain("AST Grep: f( in src");
 		expect(lines[1]).toContain("Pattern parse error");
+		const head = astGrepToolRenderer.describeResult(
+			result,
+			{ expanded: false, isPartial: false },
+			{ pat: "f(", path: "src" },
+		).head;
+		const headText = typeof head === "string" ? head : (head ?? []).map(part => part.t).join("");
+		expect(headText).toBe("AST Grep f( in src");
 	});
 });
