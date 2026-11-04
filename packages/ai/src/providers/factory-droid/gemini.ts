@@ -7,7 +7,10 @@ import * as AIError from "../../error";
 import type { AssistantMessage, Context, Message, Model, StreamOptions, Tool, ToolCall } from "../../types";
 import { createAbortSourceTracker } from "../../utils/abort";
 import { AssistantMessageEventStream } from "../../utils/event-stream";
+import { heldFetch } from "../../utils/held-fetch";
 import {
+	armRequestTimeout,
+	type RequestTimeout,
 	getStreamFirstEventTimeoutMs,
 	getStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -322,7 +325,7 @@ export function streamFactoryDroidGemini(
 		// still wins when both fire.
 		const tracker = createAbortSourceTracker(options.signal);
 		const stalled = new AIError.StreamTimeoutError("Factory Gemini stream stalled");
-		let firstEventTimer: NodeJS.Timeout | undefined;
+		let firstEventTimer: RequestTimeout | undefined;
 
 		try {
 			const { contents, systemInstruction } = toGeminiContents(model, context);
@@ -359,23 +362,21 @@ export function streamFactoryDroidGemini(
 			// for the first SSE chunk, which inherits only the remaining budget.
 			const idleTimeoutMs = getStreamIdleTimeoutMs(options.streamIdleTimeoutMs);
 			const firstEventTimeoutMs = options.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
-			const firstEventDeadline = firstEventTimeoutMs === undefined ? undefined : Date.now() + firstEventTimeoutMs;
-			if (firstEventTimeoutMs !== undefined) {
-				firstEventTimer = setTimeout(() => tracker.abortLocally(stalled), firstEventTimeoutMs);
-				firstEventTimer.unref?.();
-			}
+			firstEventTimer = armRequestTimeout(() => tracker.abortLocally(stalled), firstEventTimeoutMs);
 
-			const response = await (options.fetch ?? fetch)(`${options.baseUrl}/generate`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					Accept: "*/*",
-					...(options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {}),
-					...options.headers,
-				},
-				body: JSON.stringify(body),
-				signal: tracker.requestSignal,
-			});
+			const response = await firstEventTimer.run(() =>
+				heldFetch(options.fetch ?? fetch)(`${options.baseUrl}/generate`, {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						Accept: "*/*",
+						...(options.apiKey ? { Authorization: `Bearer ${options.apiKey}` } : {}),
+						...options.headers,
+					},
+					body: JSON.stringify(body),
+					signal: tracker.requestSignal,
+				}),
+			);
 			if (!response.ok) {
 				const bodyText = await response.text().catch(() => "");
 				throw new AIError.GoogleApiError(
@@ -395,15 +396,15 @@ export function streamFactoryDroidGemini(
 			let blockReason: string | undefined;
 			const toolCallIndices: number[] = [];
 
-			clearTimeout(firstEventTimer);
+			const remainingFirstEventMs = firstEventTimer.remainingMs();
+			firstEventTimer.clear();
 			const chunks = iterateWithIdleTimeout(
 				readSseJson<GenerateContentResponse>(response.body, tracker.requestSignal, event =>
 					options.onSseEvent?.({ event: event.event, data: event.data, raw: [...event.raw] }, model),
 				),
 				{
 					idleTimeoutMs,
-					firstItemTimeoutMs:
-						firstEventDeadline === undefined ? undefined : Math.max(1, firstEventDeadline - Date.now()),
+					firstItemTimeoutMs: remainingFirstEventMs === undefined ? undefined : Math.max(1, remainingFirstEventMs),
 					errorMessage: stalled.message,
 					onIdle: () => tracker.abortLocally(stalled),
 					onFirstItemTimeout: () => tracker.abortLocally(stalled),
@@ -516,7 +517,7 @@ export function streamFactoryDroidGemini(
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		} finally {
-			clearTimeout(firstEventTimer);
+			firstEventTimer?.clear();
 		}
 	})();
 

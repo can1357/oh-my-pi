@@ -2,6 +2,7 @@ import type { Api, FetchImpl, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { type } from "@oh-my-pi/omptype";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { heldFetch } from "../utils/held-fetch";
 import type {
 	VideoAudioReference,
 	VideoContent,
@@ -145,9 +146,9 @@ async function authenticatedFetch(
 	model: Model<Api>,
 	path: string,
 	options: VideoOptions,
+	fetchImpl: FetchImpl,
 	init?: Omit<RequestInit, "signal">,
 ): Promise<Response> {
-	const fetchImpl = options.fetch ?? fetch;
 	return withAuth(
 		options.apiKey,
 		async key => {
@@ -169,7 +170,8 @@ export async function submitOpenRouterVideo(
 	request: VideoGenerationRequest,
 	options: VideoOptions,
 ): Promise<VideoJob> {
-	const response = await authenticatedFetch(model, "/videos", options, {
+	// Submitting a job is the model request; polling and downloading it are not.
+	const response = await authenticatedFetch(model, "/videos", options, heldFetch(options.fetch ?? fetch), {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify(encodeRequest(model, request)),
@@ -179,7 +181,12 @@ export async function submitOpenRouterVideo(
 
 /** Poll an asynchronous OpenRouter video generation job. */
 export async function pollOpenRouterVideo(model: Model<Api>, jobId: string, options: VideoOptions): Promise<VideoJob> {
-	const response = await authenticatedFetch(model, `/videos/${encodeURIComponent(jobId)}`, options);
+	const response = await authenticatedFetch(
+		model,
+		`/videos/${encodeURIComponent(jobId)}`,
+		options,
+		options.fetch ?? fetch,
+	);
 	return decodeJob(response, model);
 }
 
@@ -189,9 +196,13 @@ export async function downloadOpenRouterVideo(
 	jobId: string,
 	options: VideoOptions,
 ): Promise<VideoContent> {
-	const response = await authenticatedFetch(model, `/videos/${encodeURIComponent(jobId)}/content`, options, {
-		headers: { Accept: "video/*" },
-	});
+	const response = await authenticatedFetch(
+		model,
+		`/videos/${encodeURIComponent(jobId)}/content`,
+		options,
+		options.fetch ?? fetch,
+		{ headers: { Accept: "video/*" } },
+	);
 	if (!response.body) {
 		throw new AIError.ProviderResponseError(`${model.provider}/${model.id} video content response has no body`, {
 			provider: model.provider,

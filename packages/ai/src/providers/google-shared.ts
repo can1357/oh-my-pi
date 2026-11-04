@@ -28,6 +28,7 @@ import { shouldSendServiceTier } from "../types";
 import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
+import { heldFetch } from "../utils/held-fetch";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
 import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import type {
@@ -1069,7 +1070,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			};
 
 			const bodyJson = JSON.stringify(paramsToWireBody(params));
-			const fetchImpl = plan.fetch ?? options?.fetch ?? (globalThis.fetch.bind(globalThis) as FetchImpl);
+			const fetchImpl = heldFetch(plan.fetch ?? options?.fetch ?? (globalThis.fetch.bind(globalThis) as FetchImpl));
 			// Bun's native fetch ceiling is disabled (`timeout: false`) so configurable
 			// watchdogs govern slow-prefill streams (issues #2422, #16991). Direct callers
 			// that bypass `register-builtins` (which installs the iterator-level
@@ -1090,7 +1091,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				};
 				let response: Response;
 				try {
-					response = await fetchImpl(requestUrl, init);
+					response = await watchdog.run(() => fetchImpl(requestUrl, init));
 					if (!response.ok) {
 						const errorText = await response.text().catch(() => "");
 						throw new AIError.GoogleApiError(

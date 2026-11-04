@@ -27,6 +27,8 @@ import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeout
 export { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError };
 
 import type { FetchImpl } from "../types";
+import { heldFetch } from "../utils/held-fetch";
+import { armRequestTimeout } from "../utils/idle-iterator";
 import { getShouldRetryFromHeaders } from "../utils/retry-after";
 import type { MessageCreateParams } from "./anthropic-wire";
 
@@ -312,25 +314,27 @@ export class AnthropicHttpClient {
 	): Promise<Response> {
 		const controller = new AbortController();
 		let timedOut = false;
-		const timer = setTimeout(() => {
+		const timer = armRequestTimeout(() => {
 			timedOut = true;
 			controller.abort();
 		}, timeoutMs);
 		const onAbort = () => controller.abort();
 		callerSignal?.addEventListener("abort", onAbort, { once: true });
 		try {
-			return await fetchFn(url, {
-				...this.#options.fetchOptions,
-				method,
-				headers,
-				body,
-				signal: controller.signal,
-			});
+			return await timer.run(() =>
+				heldFetch(fetchFn)(url, {
+					...this.#options.fetchOptions,
+					method,
+					headers,
+					body,
+					signal: controller.signal,
+				}),
+			);
 		} catch (error) {
 			if (timedOut && !callerSignal?.aborted) throw new AIError.AnthropicConnectionTimeoutError();
 			throw error;
 		} finally {
-			clearTimeout(timer);
+			timer.clear();
 			callerSignal?.removeEventListener("abort", onAbort);
 		}
 	}

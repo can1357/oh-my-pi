@@ -2,6 +2,7 @@ import { resolveExtraCa, withExtraCaInit } from "@oh-my-pi/pi-utils";
 import { coworkFetch } from "../providers/cowork-fetch";
 import { withInferenceUserAgent } from "../providers/inference-headers";
 import type { Api, FetchImpl, Model } from "../types";
+import { heldFetch, withHeldForm } from "./held-fetch";
 import { getProxyForProvider, withProxyInit } from "./proxy";
 import { createFetchRequestDebugSession, isRequestDebugEnabled } from "./request-debug";
 
@@ -23,6 +24,9 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
  * `streamSimple` re-enters `stream`, and `streamSimpleRequest` re-enters itself
  * on auth retries, so without the stamp each entry point would add another
  * layer (three PI_REQ_DEBUG dumps for one request).
+ *
+ * Its held form ({@link heldFetch}), which model requests send through, waits
+ * for the request holds after all of the above, right before `fetchImpl`.
  */
 export function transportFetch(
 	model: Model<Api>,
@@ -35,22 +39,32 @@ export function transportFetch(
 		given ?? (model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
 	const proxyUrl = getProxyForProvider(model.provider);
 
-	const fetch: TransportFetch = async (input, init) => {
-		beforeDispatch?.();
+	// The origin is recorded as the request is handed to the network, after the
+	// holds in the held form: a request a hold stopped never reached its endpoint.
+	const recorded: FetchImpl = (input, init) => {
 		if ((init?.method ?? (input instanceof Request ? input.method : "GET")) === "POST") {
 			recordDispatchOrigin(model, input);
 		}
-		init = withInferenceUserAgent(input, init);
-		const extraCa = resolveExtraCa();
-		if (extraCa) init = withExtraCaInit(init, extraCa);
-		if (proxyUrl) init = withProxyInit(input, init, proxyUrl);
-		if (!isRequestDebugEnabled()) return base(input, init);
-		const session = await createFetchRequestDebugSession(input, init);
-		return session.wrapResponse(await base(input, init));
+		return base(input, init);
 	};
-	if (base.preconnect) fetch.preconnect = base.preconnect;
-	fetch[TRANSPORT_FETCH] = true;
-	return fetch;
+	const build = (send: FetchImpl): TransportFetch => {
+		const fetch: TransportFetch = async (input, init) => {
+			// Host code: it runs before the holds are checked, never between the
+			// last check and the send. A thrown refusal prevents this attempt.
+			beforeDispatch?.();
+			init = withInferenceUserAgent(input, init);
+			const extraCa = resolveExtraCa();
+			if (extraCa) init = withExtraCaInit(init, extraCa);
+			if (proxyUrl) init = withProxyInit(input, init, proxyUrl);
+			if (!isRequestDebugEnabled()) return send(input, init);
+			const session = await createFetchRequestDebugSession(input, init);
+			return session.wrapResponse(await send(input, init));
+		};
+		if (base.preconnect) fetch.preconnect = base.preconnect;
+		fetch[TRANSPORT_FETCH] = true;
+		return fetch;
+	};
+	return withHeldForm(build(recorded), build(heldFetch(recorded)));
 }
 
 const dispatchOrigins = new Map<string, string>();

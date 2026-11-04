@@ -3,6 +3,7 @@ import type { Api, FetchImpl, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { type } from "@oh-my-pi/omptype";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { heldFetch } from "../utils/held-fetch";
 import type { EmbeddingRequest, EmbeddingResult } from "./types";
 
 export interface EmbeddingOptions {
@@ -102,7 +103,7 @@ export async function embedOpenAI(
 	request: EmbeddingRequest,
 	options: EmbeddingOptions,
 ): Promise<EmbeddingResult> {
-	const fetchImpl = options.fetch ?? fetch;
+	const fetchImpl = heldFetch(options.fetch ?? fetch);
 	const body = {
 		model: model.id,
 		input: request.input,

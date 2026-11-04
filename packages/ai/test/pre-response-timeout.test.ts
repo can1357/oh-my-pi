@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterRequestHolds } from "@oh-my-pi/pi-ai";
 import { armPreResponseTimeout } from "@oh-my-pi/pi-ai/utils/idle-iterator";
 
 /**
@@ -31,7 +32,8 @@ describe("armPreResponseTimeout", () => {
 
 	it("aborts at the deadline with a TimeoutError when never cleared", () => {
 		vi.useFakeTimers();
-		const { signal } = armPreResponseTimeout(undefined, 50);
+		const { signal, run } = armPreResponseTimeout(undefined, 50);
+		void run(() => afterRequestHolds(undefined, () => {}));
 		expect(signal?.aborted).toBe(false);
 		vi.advanceTimersByTime(49);
 		expect(signal?.aborted).toBe(false);
@@ -44,7 +46,8 @@ describe("armPreResponseTimeout", () => {
 
 	it("never aborts once cleared, even long past the deadline", () => {
 		vi.useFakeTimers();
-		const { signal, clear } = armPreResponseTimeout(undefined, 50);
+		const { signal, clear, run } = armPreResponseTimeout(undefined, 50);
+		void run(() => afterRequestHolds(undefined, () => {}));
 		clear(); // headers arrived — disarm before the body streams
 		vi.advanceTimersByTime(10_000);
 		expect(signal?.aborted).toBe(false);
@@ -52,7 +55,8 @@ describe("armPreResponseTimeout", () => {
 
 	it("combines the caller signal so a caller abort still cancels after clearing", () => {
 		const caller = new AbortController();
-		const { signal, clear } = armPreResponseTimeout(caller.signal, 60_000);
+		const { signal, clear, run } = armPreResponseTimeout(caller.signal, 60_000);
+		void run(() => afterRequestHolds(caller.signal, () => {}));
 		clear();
 		expect(signal).toBeDefined();
 		expect(signal!.aborted).toBe(false);

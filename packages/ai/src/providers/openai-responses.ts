@@ -33,7 +33,10 @@ import { createAbortSourceTracker } from "../utils/abort";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
+import { heldFetch } from "../utils/held-fetch";
+import { runWithRequestSendState } from "../request-holds";
 import {
+	armRequestTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -259,11 +262,11 @@ interface OpenAIResponsesPolledResult {
  * Poll a stored Responses result until it reaches an adoptable terminal state.
  * 404s, 5xx, and transport failures mean "not yet" (an in-flight run only
  * becomes retrievable once the server finishes it); any other status, a
- * mismatched id, or a failed/cancelled run ends the poll immediately. The
- * whole recovery is bounded by one wall-clock deadline: each request's timeout
- * is clamped to the time left, and no sleep may cross the deadline, so a
- * stalled host cannot hold an already-failed turn past it. Returns the
- * terminal object, or undefined on give-up/abort.
+ * mismatched id, or a failed/cancelled run ends the poll immediately.
+ * This reads an already-submitted result, not a model request: holds do not
+ * apply. Each request's timeout is clamped to the wall-clock budget left, and
+ * no sleep may cross it, so a stalled host cannot delay recovery past it.
+ * Returns the terminal object, or undefined on give-up/abort.
  *
  * @internal Exported for tests.
  */
@@ -736,7 +739,7 @@ const streamOpenAIResponsesOnce = (
 	const stream = new AssistantMessageEventStream();
 
 	// Start async processing
-	(async () => {
+	runWithRequestSendState(async requestSendState => {
 		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
 
@@ -961,13 +964,10 @@ const streamOpenAIResponsesOnce = (
 				);
 				activeRequestParams = requestParams;
 				lastSubmittedRequestWasFullReplay = requestParams.previous_response_id === undefined;
-				let requestTimeout: NodeJS.Timeout | undefined;
-				if (!useWebSocket && requestTimeoutMs !== undefined) {
-					requestTimeout = setTimeout(
-						() => abortTracker.abortLocally(firstEventTimeoutAbortError),
-						requestTimeoutMs,
-					);
-				}
+				const requestTimeout = armRequestTimeout(
+					() => abortTracker.abortLocally(firstEventTimeoutAbortError),
+					useWebSocket ? undefined : requestTimeoutMs,
+				);
 				try {
 					if (useWebSocket) {
 						if (requestParams.previous_response_id != null) {
@@ -991,48 +991,44 @@ const streamOpenAIResponsesOnce = (
 					if (requestTimeoutMs !== undefined) {
 						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 					}
-					const { events, response, requestId } = await postOpenAIStream<ResponseStreamEvent>({
-						url: requestUrl,
-						headers: headersWithTimeout,
-						body: requestParams,
-						signal: requestSignal,
-						fetch: wrapFetchForCopilotFallback(
-							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
-							model.provider === "github-copilot",
-							resolveCopilotRequestIdentity(options?.headers),
-							copilotCacheKey,
-							copilotCacheSnapshot,
-						),
-						shouldRetryResponse: (response, bodyText) =>
-							!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
-							lastSubmittedRequestWasFullReplay !== true,
-						// Transient 408/429/5xx get Retry-After-aware transport
-						// retries; the first-event watchdog aborts `requestSignal`,
-						// so retries cannot extend the caller's deadline.
-						onSseEvent: rawSseObserver,
-					});
+					const { events, response, requestId } = await requestTimeout.run(() =>
+						postOpenAIStream<ResponseStreamEvent>({
+							url: requestUrl,
+							headers: headersWithTimeout,
+							body: requestParams,
+							signal: requestSignal,
+							fetch: wrapFetchForCopilotFallback(
+								wrapFetchForRequestCompression(heldFetch(options?.fetch ?? fetch), model),
+								model.provider === "github-copilot",
+								resolveCopilotRequestIdentity(options?.headers),
+								copilotCacheKey,
+								copilotCacheSnapshot,
+							),
+							shouldRetryResponse: (response, bodyText) =>
+								!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
+								lastSubmittedRequestWasFullReplay !== true,
+							// Transient 408/429/5xx get Retry-After-aware transport
+							// retries; the first-event watchdog aborts `requestSignal`,
+							// so retries cannot extend the caller's deadline.
+							onSseEvent: rawSseObserver,
+						}),
+					);
 					// Disarm the first-event watchdog as soon as headers arrive — a slow
 					// onResponse callback must not abort an already-connected stream.
-					clearTimeout(requestTimeout);
+					requestTimeout.clear();
 					await notifyProviderResponse(options, response, model, requestId);
 					return events;
 				} finally {
-					clearTimeout(requestTimeout);
+					requestTimeout.clear();
 				}
 			};
-			let webSocketFirstEventDeadline: number | undefined;
 			const timeResponsesStream = (
 				events: AsyncIterable<ResponseStreamEvent>,
 			): AsyncGenerator<ResponseStreamEvent> => {
-				let firstItemTimeoutMs = firstEventTimeoutMs;
-				if (useWebSocket && requestTimeoutMs !== undefined) {
-					webSocketFirstEventDeadline ??= Date.now() + requestTimeoutMs;
-					firstItemTimeoutMs = webSocketFirstEventDeadline - Date.now();
-					if (firstItemTimeoutMs <= 0) throw abortTracker.abortLocally(firstEventTimeoutAbortError);
-				}
 				return iterateWithIdleTimeout(events, {
 					idleTimeoutMs,
-					firstItemTimeoutMs,
+					firstItemTimeoutMs: firstEventTimeoutMs,
+					requestSendState: useWebSocket ? requestSendState : undefined,
 					firstItemErrorMessage: OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE,
 					errorMessage: "OpenAI responses stream stalled while waiting for the next event",
 					onFirstItemTimeout: () => abortTracker.abortLocally(firstEventTimeoutAbortError),
@@ -1544,7 +1540,7 @@ const streamOpenAIResponsesOnce = (
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 		}
 		stream.end();
-	})();
+	});
 
 	return stream;
 };
