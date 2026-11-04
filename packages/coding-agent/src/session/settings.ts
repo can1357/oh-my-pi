@@ -739,6 +739,25 @@ export const cfgRetryMaxRetries = register({
 	},
 });
 
+export const cfgRetryRefusalRetries = register({
+	id: "retry.refusalRetries",
+	type: "number",
+	default: 3,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Refusal Retries",
+		description:
+			"Same-model retries after a provider refuses the request's content with a refusal code whose verdict is not stable for a given input (an OpenAI cyber_policy refusal), once no fallback model took it. Counted apart from Retry Attempts; never rotates credentials. 0 surfaces the first refusal.",
+		options: [
+			{ value: "0", label: "No retry" },
+			{ value: "1", label: "1 retry" },
+			{ value: "3", label: "3 retries" },
+			{ value: "5", label: "5 retries" },
+		],
+	},
+});
+
 export const cfgRetryBaseDelayMs = register({ id: "retry.baseDelayMs", type: "number", default: 500 });
 
 export const cfgRetryMaxDelayMs = register({
@@ -923,6 +942,7 @@ export const cfgRetryFallbackRevertPolicy = register({
 export const cfgRetry = combine({
 	enabled: cfgRetryEnabled,
 	maxRetries: cfgRetryMaxRetries,
+	refusalRetries: cfgRetryRefusalRetries,
 	baseDelayMs: cfgRetryBaseDelayMs,
 	maxDelayMs: cfgRetryMaxDelayMs,
 	waitForUsageReset: cfgRetryWaitForUsageReset,

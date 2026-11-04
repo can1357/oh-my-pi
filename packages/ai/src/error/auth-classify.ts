@@ -1,6 +1,7 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 import { isAccountPolicyError, isClinePassSurfaceGateMessage, isOAuthExpiry, isUsageLimit } from "./flags";
 import { OAuthError } from "./oauth";
+import { isContentPolicyRefusalError } from "./provider";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./rate-limit";
 
 /**
@@ -30,7 +31,8 @@ export function isInvalidatedOAuthTokenError(error: unknown): boolean {
  * Whether an upstream failure should retry through the credential resolver: a
  * typed token-refresh request, a hard `401`, a `403` (token valid but access
  * denied — plan, model policy, or org restriction a sibling account may not
- * share), an account-scoped policy denial such as Codex `cyber_policy`, a
+ * share), an account-scoped policy denial such as Codex's "Join Trusted Access
+ * for Cyber" (a bare `cyber_policy` content refusal never rotates), a
  * body-classified usage limit (Codex `usage_limit_reached`, Anthropic account
  * rate-limit, Google `resource_exhausted`, OpenAI `insufficient_quota`, …), or
  * a bare `429` whose payload did not preserve a richer quota code. Transient
@@ -38,6 +40,9 @@ export function isInvalidatedOAuthTokenError(error: unknown): boolean {
  */
 export function isAuthRetryableError(error: unknown): boolean {
 	if (error instanceof OAuthError && error.kind === "token-refresh") return true;
+	// A content refusal reaches every sibling account with the same content, so
+	// it never rotates — not even when a 403 carries it.
+	if (isContentPolicyRefusalError(error)) return false;
 	if (isUsageLimit(error)) return true;
 	if (isAccountPolicyError(error)) return true;
 	if (isInvalidatedOAuthTokenError(error)) return true;

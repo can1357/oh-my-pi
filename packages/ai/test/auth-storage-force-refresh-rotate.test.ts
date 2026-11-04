@@ -664,7 +664,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			const rotation = await authStorage.limits.rotate(PROVIDER, sessionId, {
 				error: usageLimit
 					? usageLimitError()
-					: "This content was flagged for possible cybersecurity risk. (code=cyber_policy)",
+					: "This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)",
 				waitForSibling,
 			});
 			if (waitForSibling === false) {

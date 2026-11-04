@@ -43,8 +43,8 @@ This is not context-overflow or payload-rejection handling and does not establis
 - message is **not** context overflow
 - not a usage-preflight block, the specially handled full-replay Responses body-read timeout, or an Anthropic HTTP 400 rejecting mutation of latest-assistant thinking
 - one of:
-   - the stop is a classifier refusal (`stopDetails.type` is `"refusal"` or `"sensitive"`)
-   - the error is an account-scoped policy denial eligible for credential rotation
+   - the stop is a classifier refusal (`stopDetails.type` is `"refusal"` or `"sensitive"`): an Anthropic refusal, or an OpenAI Responses/Codex `cyber_policy` content refusal, which the provider records as `{ type: "refusal", category: "cyber_policy", explanation: <provider message> }` with the error message `Refusal (cyber_policy): <provider message>`
+   - the error is an account-scoped policy denial eligible for credential rotation (a Codex denial that names Trusted Access for Cyber is one; a bare `cyber_policy` content refusal is not, and never rotates credentials whatever HTTP status carried it)
    - the normalized `AIError` classification is retryable (including stale Responses replay, transient transport/provider failures, and usage limits)
 
 Retry classification runs through `AIError.classifyMessage(...)`, using the persisted `errorId`/status when present and augmenting it from provider-aware message classification. It is not solely a regex policy, although legacy/string-only provider failures still use text classification.
@@ -85,7 +85,7 @@ Flow (`#handleRetryableError`):
 3. Calculate whether the current model's retry budget is exhausted.
 4. Classify the error, parse retry timing, and compute capped jittered backoff: `min(retry.baseDelayMs * 2^(attempt-1), 8000ms) * (75–100% jitter)`. Stale OpenAI Responses replay errors reset the provider session and use delay `0`.
 5. For usage limits, apply a successful credential switch or banked Claude/Codex reset immediately when the corresponding reset policy permits it; otherwise wait for the earlier of the provider hint and the next temporarily blocked sibling credential.
-6. When allowed, consult configured model fallback chains. `retry.fallbackOn` decides whether this error class may (`any`, `usage-limit`, `except-usage-limit`). A switch uses delay `0`; classifier refusals and account-policy denials only continue when a credential or model switch succeeds. Thinking-loop redirects stay on the same model; a temporarily blocked sibling credential within the wait cap is preferred over model fallback.
+6. When allowed, consult configured model fallback chains. `retry.fallbackOn` decides whether this error class may (`any`, `usage-limit`, `except-usage-limit`). A switch uses delay `0`; classifier refusals and account-policy denials only continue when a credential or model switch succeeds, except a content-policy refusal whose verdict is not stable for a given input (`stopDetails.category` `cyber_policy`): with no model switch it retries the same model up to `retry.refusalRetries` times (default `3`), outside the `retry.maxRetries` budget, each retry's `auto_retry_start` reporting `attempt`/`maxAttempts` against that allowance. A refusal that ends the turn is the final error itself (exit status `4` in print mode). Thinking-loop redirects stay on the same model; a temporarily blocked sibling credential within the wait cap is preferred over model fallback.
 7. If the current model's retry budget is exhausted, stop unless a model switch or confirmed credential reset permits continuation. A fallback model receives a fresh retry budget; credential recovery keeps the cumulative count. Known thinking-only stream-close routes have a one-retry cap rather than the full configured budget.
 8. If the final delay exceeds `retry.maxDelayMs` and no credential/model switch happened, emit final failure without sleeping, except an authoritative usage-reset wait explicitly allowed by `retry.waitForUsageReset`.
 9. Record the recoverable error, emit `auto_retry_start`, and remove the failed assistant from active context unless preserving a resolved interrupted tool turn or proven-unexecuted tool-call/result pairs.
@@ -99,7 +99,7 @@ Flow (`#handleRetryableError`):
 - retry cancellation during backoff sleep
 - max retries exceeded path
 - max delay exceeded path
-- classifier refusal or hard error with no fallback model applied
+- classifier refusal with its `retry.refusalRetries` allowance spent, or hard error, with no fallback model applied
 - a later error settles without retry or compaction continuation
 
 The retry promise resolves and clears whenever the chain ends.
@@ -110,6 +110,7 @@ Settings:
 
 - `retry.enabled` (default `true`)
 - `retry.maxRetries` (default `10`)
+- `retry.refusalRetries` (default `3`; same-model retries of a `cyber_policy` content refusal, counted apart from `retry.maxRetries`; `0` surfaces the first refusal; other classifier refusals never retry the same model)
 - `retry.baseDelayMs` (default `500`)
 - `retry.maxDelayMs` (default `300000`, 5 minutes; `<= 0` disables the fail-fast cap)
 - `retry.waitForUsageReset` (default `false`; allows provider-timed usage resets to exceed the delay cap)

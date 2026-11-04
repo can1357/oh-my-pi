@@ -235,7 +235,57 @@ const MALFORMED_FUNCTION_CALL_PATTERN =
 const PROVIDER_FINISH_ERROR_PATTERN = /\bProvider (?:returned error finish_reason|finish_reason:\s*error)\b/i;
 const EMPTY_RESPONSE_PATTERN = /\bthought-only response without final output\b/i;
 const CONTENT_FILTER_PATTERN = /\b(?:incomplete:\s*)?content_filter\b/i;
-const ACCOUNT_POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
+/**
+ * Account-eligibility wording: the provider names a program the account has
+ * not joined ("Join Trusted Access for Cyber"), so an enrolled sibling
+ * credential may serve the same request.
+ */
+const ACCOUNT_POLICY_PATTERN = /trusted access for cyber/i;
+/**
+ * Provider error codes for a content-policy refusal: the provider flagged the
+ * request's content. A sibling credential sees the same content, so these never
+ * rotate; the verdict is not stable for a given input, so callers may retry the
+ * same request a bounded number of times.
+ */
+const CONTENT_POLICY_REFUSAL_CODES: Readonly<Record<string, true>> = { cyber_policy: true };
+const CONTENT_POLICY_REFUSAL_PATTERN = /\bcyber_policy\b/i;
+
+/**
+ * Whether a provider error `code` plus `message` is a content-policy refusal
+ * rather than an account-eligibility denial. A refusal code whose message
+ * names an account program stays an account-policy denial.
+ */
+export function isContentPolicyRefusal(code: string | undefined, message: string | undefined): boolean {
+	if (code === undefined || !Object.hasOwn(CONTENT_POLICY_REFUSAL_CODES, code)) return false;
+	return message === undefined || !ACCOUNT_POLICY_PATTERN.test(message);
+}
+
+/**
+ * Whether a failed assistant turn is a provider refusal of its content
+ * (`stopDetails.type` `"refusal"` or `"sensitive"`) rather than a failed call.
+ */
+export function isProviderRefusal(message: Pick<AssistantMessage, "stopReason" | "stopDetails">): boolean {
+	if (message.stopReason !== "error") return false;
+	const stopType = message.stopDetails?.type;
+	return stopType === "refusal" || stopType === "sensitive";
+}
+
+/**
+ * Whether a failed turn is a provider refusal whose verdict is not stable for
+ * a given input — a content-policy refusal code such as `cyber_policy`, which
+ * the same request sometimes clears — so resending it on the same model may
+ * succeed. Classifier refusals without such a code (Anthropic `refusal`,
+ * `sensitive`) are reproduced by a resend and walk fallback models instead.
+ */
+export function isUnstableProviderRefusal(message: Pick<AssistantMessage, "stopReason" | "stopDetails">): boolean {
+	const category = message.stopDetails?.category;
+	return (
+		isProviderRefusal(message) &&
+		typeof category === "string" &&
+		Object.hasOwn(CONTENT_POLICY_REFUSAL_CODES, category)
+	);
+}
+
 export const ANTHROPIC_ACCOUNT_POLICY_PATTERN =
 	/\b(?:oauth_not_allowed_for_organization|permission_error)\b|\bOAuth authentication is currently not allowed for this organization\b/i;
 
@@ -654,6 +704,7 @@ function classifyText(
 		if (isContentBlockedText(errorMessage)) kinds |= Flag.ContentBlocked;
 		const statusClean = errorStatus ? errorStatus : (status({ message: errorMessage }) ?? undefined);
 
+		if (CONTENT_POLICY_REFUSAL_PATTERN.test(errorMessage)) kinds |= Flag.ContentBlocked;
 		if (
 			ACCOUNT_POLICY_PATTERN.test(errorMessage) ||
 			isCodexChatGPTAccountPolicyText(errorMessage, provider, modelId) ||
@@ -774,8 +825,8 @@ export function classify(error: unknown, api?: Api): number {
 				kinds |= (link as { errorId: number }).errorId & KIND_MASK;
 			}
 			if ("code" in link && typeof link.code === "string") {
-				if (ACCOUNT_POLICY_PATTERN.test(link.code)) {
-					kinds |= Flag.AccountPolicy | Flag.ContentBlocked;
+				if (CONTENT_POLICY_REFUSAL_PATTERN.test(link.code)) {
+					kinds |= Flag.ContentBlocked;
 				} else if (ANTHROPIC_ACCOUNT_POLICY_PATTERN.test(link.code)) {
 					kinds |= Flag.AccountPolicy;
 				}

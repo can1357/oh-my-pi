@@ -7,6 +7,7 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { HINDSIGHT_NOTICE_SOURCE } from "../hindsight/state";
@@ -60,6 +61,14 @@ export const PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS = 30_000;
 const MAX_TIMER_MS = 2_147_483_647;
 /** Exit status of a run the cost gate stopped (`--max-cost` / `session.maxCost` reached). */
 export const PRINT_MODE_COST_CAP_EXIT_CODE = 3;
+
+/**
+ * Exit status of a run whose last turn the provider refused (an Anthropic
+ * refusal, an OpenAI `cyber_policy` refusal) after every refusal retry. The
+ * refusal line (`Refusal (<code>): <provider message>`) is on stderr in text
+ * mode and in the final message's `stopDetails` in JSON mode.
+ */
+export const PRINT_MODE_REFUSAL_EXIT_CODE = 4;
 
 /** Sanitize untrusted text (server names, errors) into one stderr-safe line. */
 function singleLine(text: string): string {
@@ -642,6 +651,7 @@ async function runPrintModeCore(
 	}
 
 	await stderrTail;
-	if (terminalFailure || durabilityFailure || strictMCPFailure || builtinFailed || asyncWaitExpired) return 1;
+	if (durabilityFailure || strictMCPFailure || builtinFailed || asyncWaitExpired) return 1;
+	if (terminalFailure) return AIError.isProviderRefusal(assistantMsg) ? PRINT_MODE_REFUSAL_EXIT_CODE : 1;
 	return costCapped ? PRINT_MODE_COST_CAP_EXIT_CODE : 0;
 }

@@ -1,9 +1,10 @@
-import type { Api } from "../types";
+import type { Api, StopDetails } from "../types";
 import { callerAbortReason } from "./abort";
 import type { AbortSourceTracker } from "../utils/abort";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
 import { classify, classifyMessage, status } from "./flags";
 import { formatMessage } from "./format";
+import { contentPolicyRefusalDetails, formatRefusalMessage } from "./provider";
 
 /** Context a provider catch block hands to {@link finalize}. */
 export interface FinalizeOptions {
@@ -31,8 +32,14 @@ export interface FinalizeResult {
 	status: number | undefined;
 	/** `"aborted"` when the caller cancelled, otherwise `"error"`. */
 	stopReason: "aborted" | "error";
-	/** User-facing message: a local abort reason, else the caller's abort reason, else from {@link formatMessage}. */
+	/**
+	 * User-facing message: a local abort reason, else the caller's abort reason,
+	 * else `Refusal (<code>): <provider message>` for a provider refusal, else
+	 * from {@link formatMessage}.
+	 */
 	message: string;
+	/** `{ type: "refusal", category: <provider code>, explanation: <provider message> }` when the provider refused the content. */
+	stopDetails?: StopDetails;
 }
 
 /**
@@ -50,13 +57,17 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 	const errorStatus = status(error);
 	const currentStatus = errorStatus ?? opts.capturedErrorResponse?.status;
 
+	const localReason = opts.abortTracker?.getLocalAbortReason();
+	const refusal = aborted || localReason ? undefined : contentPolicyRefusalDetails(error);
 	let message: string;
 	try {
-		const localReason = opts.abortTracker?.getLocalAbortReason();
 		const callerReason = opts.abortTracker
 			? opts.abortTracker.getCallerAbortReason()
 			: callerAbortReason(opts.signal);
-		message = localReason?.message ?? callerReason ?? (await formatMessage(error, opts));
+		message =
+			localReason?.message ??
+			callerReason ??
+			(refusal ? formatRefusalMessage(refusal.category, refusal.explanation) : await formatMessage(error, opts));
 	} catch {
 		message = error instanceof Error ? error.message : String(error);
 	}
@@ -81,5 +92,6 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 		status: currentStatus,
 		stopReason: aborted ? "aborted" : "error",
 		message,
+		...(refusal ? { stopDetails: refusal } : {}),
 	};
 }
