@@ -32,9 +32,8 @@ import { SQL } from "bun";
 import { Settings } from "../config/settings";
 import { FileSessionStorage, type SessionStorage, setDefaultSessionStorage } from "./session-storage";
 import {
-	fallbackEvent,
 	fallbackLedgerPath,
-	recordSessionStorageFallback,
+	reserveSessionStorageFallback,
 	type SessionStorageFallbackReason,
 	sqlStoreHasWritten,
 } from "./session-storage-fallback";
@@ -65,13 +64,17 @@ export interface ResolveSessionStorageInput {
 	settings: Settings;
 	env: NodeJS.ProcessEnv;
 	/**
-	 * Asked only when `sql` is selected and its store cannot be used: the id of
-	 * the session this launch resumes, when that session's transcript is already
-	 * a file on disk, else `null`. Such a resume may go on reading and writing
-	 * that file and loses nothing, so it falls back; every other launch refuses.
-	 * Omitted, nothing falls back.
+	 * Asked only when `sql` is selected and its store cannot be used: does this
+	 * launch continue a session whose transcript is already a file on disk?
+	 * Such a launch may go on reading and writing that file and loses nothing,
+	 * so it falls back; every other launch refuses. Omitted, nothing falls back.
+	 *
+	 * It answers whether, not which: a launch can land on a different session
+	 * than any resolve-time prediction (a continuation redirect, another
+	 * process holding the lease), so the ledger line is written later, by the
+	 * launch, naming the session it actually opened.
 	 */
-	resumableFileSession?: () => Promise<string | null>;
+	resumableFileSession?: () => Promise<boolean>;
 }
 
 export async function resolveSessionStorage({
@@ -107,15 +110,12 @@ export async function resolveSessionStorage({
 			throw new SessionStorageConfigError(message, cause === undefined ? undefined : { cause });
 		};
 		if (resumableFileSession === undefined || sqlStoreHasWritten()) return refuse();
-		const sessionId = await resumableFileSession();
+		const continuesAFile = await resumableFileSession();
 		// Re-read the latch: the probe above awaits, and a write this run
 		// committed meanwhile makes the file store the wrong answer.
-		if (sessionId === null || sqlStoreHasWritten()) return refuse();
+		if (!continuesAFile || sqlStoreHasWritten()) return refuse();
 		try {
-			await recordSessionStorageFallback(
-				fallbackEvent(sessionId, reason, dsnPath),
-				fallbackLedgerPath(settings, env),
-			);
+			await reserveSessionStorageFallback(reason, dsnPath, fallbackLedgerPath(settings, env));
 		} catch (ledgerError) {
 			// The count is the control, so a fallback that cannot be recorded is
 			// not taken: refuse, naming both why sql failed and why the record did.
@@ -130,8 +130,7 @@ export async function resolveSessionStorage({
 		if (sqlStoreHasWritten()) {
 			throw new SessionStorageConfigError(
 				`${message} (a write reached the session database while this launch was deciding to ` +
-					`continue on file storage, so it halts instead; its fallback ledger line stands for a ` +
-					`fallback that did not happen)`,
+					`continue on file storage, so it halts instead)`,
 			);
 		}
 		return new FileSessionStorage();

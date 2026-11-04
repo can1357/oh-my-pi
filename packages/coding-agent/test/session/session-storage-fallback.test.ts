@@ -25,9 +25,11 @@ import {
 	SessionStorageConfigError,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage-config";
 import {
+	commitSessionStorageFallback,
 	fallbackEvent,
 	ledgerLine,
 	noteSqlWriteCommitted,
+	pendingSessionStorageFallback,
 	resetSqlWriteLatchForTest,
 	sqlStoreHasWritten,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage-fallback";
@@ -99,19 +101,31 @@ describe("sql → file fallback", () => {
 		const storage = await resolveSessionStorage({
 			settings: Settings.isolated(),
 			env,
-			resumableFileSession: async () => "01a1a000-0000-7000-8000-000000000001",
+			resumableFileSession: async () => true,
 		});
 
 		expect(storage).toBeInstanceOf(FileSessionStorage);
+		// Deciding writes no line: the launch has not opened a session yet, and a
+		// line written now could name one the launch never continues.
+		expect(ledgerLines(ledger)).toHaveLength(0);
+		expect(pendingSessionStorageFallback()).toMatchObject({ reason: "dsn-missing", dsnPath: dsnFile });
+
+		// The launch commits it, naming the session it actually opened — which
+		// need not be any session a resolve-time probe could have predicted.
+		await commitSessionStorageFallback("01a1a000-0000-7000-8000-0000000000ff");
 		const lines = ledgerLines(ledger);
 		expect(lines).toHaveLength(1);
 		expect(lines[0]).toMatchObject({
-			session_id: "01a1a000-0000-7000-8000-000000000001",
+			session_id: "01a1a000-0000-7000-8000-0000000000ff",
 			reason: "dsn-missing",
 			dsn_path: dsnFile,
 		});
 		expect(typeof lines[0]?.ts).toBe("string");
 		expect(typeof lines[0]?.host).toBe("string");
+
+		// Once, never twice.
+		await commitSessionStorageFallback("01a1a000-0000-7000-8000-0000000000ee");
+		expect(ledgerLines(ledger)).toHaveLength(1);
 	});
 
 	it("a new session refuses to start and writes no ledger line", async () => {
@@ -121,7 +135,7 @@ describe("sql → file fallback", () => {
 				settings: Settings.isolated(),
 				env,
 				// A launch that resumes nothing on disk: there is no transcript to go on with.
-				resumableFileSession: async () => null,
+				resumableFileSession: async () => false,
 			}),
 		);
 
@@ -144,7 +158,7 @@ describe("sql → file fallback", () => {
 			resolveSessionStorage({
 				settings: Settings.isolated(),
 				env,
-				resumableFileSession: async () => "01a1a000-0000-7000-8000-000000000002",
+				resumableFileSession: async () => true,
 			}),
 		);
 
@@ -193,15 +207,15 @@ describe("sql → file fallback", () => {
 				resolveSessionStorage({
 					settings: Settings.isolated(),
 					env,
-					resumableFileSession: async () => "01a1a000-0000-7000-8000-000000000005",
+					resumableFileSession: async () => true,
 				}),
 			);
 			expect(error.message).toContain("halts instead");
 		} finally {
 			spy.mockRestore();
 		}
-		// The line was already on disk when the write landed, and the refusal says so.
-		expect(ledgerLines(ledger)).toHaveLength(1);
+		// Nothing was recorded: the fallback never happened.
+		expect(ledgerLines(ledger)).toHaveLength(0);
 	});
 
 	it("a ledger line stays inside one page however large its caller-sized fields are", () => {
@@ -226,7 +240,7 @@ describe("sql → file fallback", () => {
 			resolveSessionStorage({
 				settings: Settings.isolated(),
 				env,
-				resumableFileSession: async () => "01a1a000-0000-7000-8000-000000000003",
+				resumableFileSession: async () => true,
 			}),
 		);
 
@@ -245,7 +259,7 @@ describe("sql → file fallback", () => {
 					// here must still halt the launch.
 					await Bun.sleep(1);
 					noteSqlWriteCommitted();
-					return "01a1a000-0000-7000-8000-000000000004";
+					return true;
 				},
 			}),
 		);
@@ -283,7 +297,7 @@ describe("which launches may fall back", () => {
 		const unknown = "00000000-0000-7000-8000-000000000000";
 
 		const args: Args = { ...base, continue: true, sessionDir: path.join(dir, "sessions"), messages: [unknown] };
-		expect(await resumableFileSessionId(args, ["--continue", unknown], dir)).toBeNull();
+		expect(await resumableFileSessionId(args, ["--continue", unknown], dir)).toBe(false);
 	});
 
 	it("`--continue <id>` that resolves answers that session, not the newest one", async () => {
@@ -294,17 +308,17 @@ describe("which launches may fall back", () => {
 		expect(newer).not.toBe(wanted);
 
 		const args: Args = { ...base, continue: true, sessionDir: sessions, messages: [wanted] };
-		expect(await resumableFileSessionId(args, ["--continue", wanted], dir)).toBe(wanted);
+		expect(await resumableFileSessionId(args, ["--continue", wanted], dir)).toBe(true);
 	});
 
 	it("`--fork` creates a new session, so it may not fall back", async () => {
 		const dir = makeTempDir("@pi-session-fork-");
 		const sessions = path.join(dir, "sessions");
-		const existing = writeTranscript(sessions, dir);
+		writeTranscript(sessions, dir);
 		const args: Args = { ...base, continue: true, fork: "", sessionDir: sessions };
-		expect(await resumableFileSessionId(args, ["--continue", "--fork"], dir)).toBeNull();
+		expect(await resumableFileSessionId(args, ["--continue", "--fork"], dir)).toBe(false);
 		// The same launch without --fork does resolve, so the refusal is the flag.
-		expect(await resumableFileSessionId({ ...args, fork: undefined }, ["--continue"], dir)).toBe(existing);
+		expect(await resumableFileSessionId({ ...args, fork: undefined }, ["--continue"], dir)).toBe(true);
 	});
 
 	it("a session marked as moved away may not fall back: resuming it opens a fork", async () => {
@@ -322,9 +336,9 @@ describe("which launches may fall back", () => {
 		);
 
 		const args: Args = { ...base, continue: true, sessionDir: sessions };
-		expect(await resumableFileSessionId(args, ["--continue"], dir)).toBeNull();
+		expect(await resumableFileSessionId(args, ["--continue"], dir)).toBe(false);
 		// By id, the route a `--continue <id>` or `--resume <id>` launch takes.
-		expect(await resumableFileSessionId({ ...base, resume: id, sessionDir: sessions }, [], dir)).toBeNull();
+		expect(await resumableFileSessionId({ ...base, resume: id, sessionDir: sessions }, [], dir)).toBe(false);
 	});
 
 	it("the picker may not fall back: its session is not chosen yet", async () => {
@@ -332,7 +346,7 @@ describe("which launches may fall back", () => {
 		const sessions = path.join(dir, "sessions");
 		writeTranscript(sessions, dir);
 		const args: Args = { ...base, resume: true, sessionDir: sessions };
-		expect(await resumableFileSessionId(args, ["--resume"], dir)).toBeNull();
+		expect(await resumableFileSessionId(args, ["--resume"], dir)).toBe(false);
 	});
 
 	it("a launch with no session may not fall back", async () => {
@@ -340,7 +354,7 @@ describe("which launches may fall back", () => {
 		const sessions = path.join(dir, "sessions");
 		writeTranscript(sessions, dir);
 		const args: Args = { ...base, continue: true, noSession: true, sessionDir: sessions };
-		expect(await resumableFileSessionId(args, ["--continue"], dir)).toBeNull();
+		expect(await resumableFileSessionId(args, ["--continue"], dir)).toBe(false);
 	});
 });
 

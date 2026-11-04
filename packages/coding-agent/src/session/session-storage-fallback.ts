@@ -78,7 +78,8 @@ export function sqlStoreHasWritten(): boolean {
 /** Test seam: forget this process's SQL writes so the latch can be driven both ways. */
 export function resetSqlWriteLatchForTest(): void {
 	sqlWriteCommitted = false;
-	lastFallback = undefined;
+	pending = undefined;
+	committed = false;
 }
 
 /** Where fallback events are appended: the configured path, else one in the agent directory. */
@@ -112,6 +113,59 @@ export function ledgerLine(event: SessionStorageFallbackEvent): string {
 	return `${JSON.stringify({ ...trimmed, session_id: "…", dsn_path: "…", host: "…" })}\n`;
 }
 
+/**
+ * A fallback that was decided but whose ledger line is not written yet: the
+ * launch knows the session it actually opened, and the resolver does not.
+ * Every way a launch can land somewhere other than where a resolve-time probe
+ * predicted — a continuation redirect, `continueRecent`'s own choice of
+ * transcript, another process holding the lease — is a way a resolve-time line
+ * would name the wrong session, so the line is written once, by the launch.
+ */
+interface PendingFallback {
+	reason: SessionStorageFallbackReason;
+	dsnPath: string;
+	ledgerFile: string;
+}
+
+let pending: PendingFallback | undefined;
+let committed = false;
+
+/** What a ledger line records when the launch ended before it opened a session. */
+export const UNRESOLVED_SESSION = "(unresolved)";
+
+/**
+ * The fallback this process decided, if any, so the launch can tell the user
+ * at the terminal. Reading it does not write the ledger line.
+ */
+export function pendingSessionStorageFallback(): { reason: SessionStorageFallbackReason; dsnPath: string } | undefined {
+	return pending ? { reason: pending.reason, dsnPath: pending.dsnPath } : undefined;
+}
+
+/**
+ * Append the decided fallback's one ledger line, naming `sessionId` — the
+ * session the launch actually opened, or {@link UNRESOLVED_SESSION} when the
+ * launch ended before it opened one. Does nothing when no fallback was
+ * decided, and never writes twice.
+ *
+ * A failure here is logged, not thrown: {@link reserveSessionStorageFallback}
+ * already proved the ledger writable, so a failure now is a disk that changed
+ * under a running session, and halting it would lose more than the line does.
+ */
+export async function commitSessionStorageFallback(sessionId: string): Promise<void> {
+	if (!pending || committed) return;
+	committed = true;
+	const event = fallbackEvent(sessionId, pending.reason, pending.dsnPath);
+	try {
+		await fs.appendFile(pending.ledgerFile, ledgerLine(event), "utf8");
+	} catch (err) {
+		logger.warn("Could not append to the session-storage fallback ledger", {
+			ledger: pending.ledgerFile,
+			session: sessionId,
+			error: toError(err).message,
+		});
+	}
+}
+
 /** A fallback that could not be recorded, so it is not taken. */
 export class SessionStorageFallbackLedgerError extends Error {
 	constructor(ledgerFile: string, cause: unknown) {
@@ -125,46 +179,36 @@ export class SessionStorageFallbackLedgerError extends Error {
 }
 
 /**
- * Warn and append one ledger line for a fallback about to be taken. The
- * warning and the line carry the same three facts — which session, which
- * connection file, and why it could not be used — because "fell back to file
- * storage" alone tells an operator nothing about what to fix.
+ * Warn, prove the ledger can be appended to, and hold the fallback until the
+ * launch knows which session it opened ({@link commitSessionStorageFallback}).
+ * The warning carries which session storage failed, which connection file and
+ * why, because "fell back to file storage" alone tells an operator nothing
+ * about what to fix.
  *
- * A ledger that cannot be written throws {@link SessionStorageFallbackLedgerError},
+ * A ledger that cannot be written throws {@link SessionStorageFallbackLedgerError}
  * and the fallback does not happen. The count is the control: a fallback
  * nobody can count is the silent fleet degradation this exists to prevent, so
  * an unwritable ledger refuses the launch rather than quietly widening the
- * blast radius.
+ * blast radius. Writability is proven here, before anything is decided, by
+ * creating the file; the line itself lands later.
  */
-export async function recordSessionStorageFallback(
-	event: SessionStorageFallbackEvent,
+export async function reserveSessionStorageFallback(
+	reason: SessionStorageFallbackReason,
+	dsnPath: string,
 	ledgerFile: string,
 ): Promise<void> {
 	try {
 		await fs.mkdir(path.dirname(ledgerFile), { recursive: true });
-		await fs.appendFile(ledgerFile, ledgerLine(event), "utf8");
+		await fs.appendFile(ledgerFile, "", "utf8");
 	} catch (err) {
 		throw new SessionStorageFallbackLedgerError(ledgerFile, err);
 	}
+	pending = { reason, dsnPath, ledgerFile };
 	logger.warn(
-		`session.storage is sql, but the session database is unusable (${event.reason}); ` +
+		`session.storage is sql, but the session database is unusable (${reason}); ` +
 			`continuing on file storage for this resumed session`,
-		{ session: event.session_id, dsnPath: event.dsn_path, reason: event.reason, ledger: ledgerFile },
+		{ dsnPath, reason, ledger: ledgerFile },
 	);
-	lastFallback = event;
-}
-
-let lastFallback: SessionStorageFallbackEvent | undefined;
-
-/**
- * The fallback this process took, once. The launch reads it after installing
- * the storage so it can tell the user at the terminal, which the logger alone
- * does not: a degraded session must be visible where the person is looking.
- */
-export function takeSessionStorageFallback(): SessionStorageFallbackEvent | undefined {
-	const event = lastFallback;
-	lastFallback = undefined;
-	return event;
 }
 
 /** The event for a fallback happening now, on this host. */

@@ -134,7 +134,11 @@ import type { FileEntry } from "./session/session-entries";
 import { computeDefaultSessionDir } from "./session/session-paths";
 import { FileSessionStorage, setDefaultSessionStorage } from "./session/session-storage";
 import { resolveSessionStorage, SessionStorageConfigError } from "./session/session-storage-config";
-import { takeSessionStorageFallback } from "./session/session-storage-fallback";
+import {
+	commitSessionStorageFallback,
+	pendingSessionStorageFallback,
+	UNRESOLVED_SESSION,
+} from "./session/session-storage-fallback";
 import { forkIfMovedAway, lastSessionTransfer } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
@@ -321,40 +325,42 @@ function rejectNoUiWithoutRpc(args: Pick<Args, "noUi" | "mode">): void {
 }
 
 /**
- * The id of the session this launch resumes, when its transcript is already a
- * file on disk; `null` otherwise. Asked only when `session.storage: sql` is
- * selected and the database cannot be used, to decide whether the launch may
- * fall back to file storage (see `session/session-storage-fallback.ts`). It
- * looks only at the file tree — the store that would be fallen back to — and
- * answers `null` for anything it cannot resolve there, so a doubtful launch
- * refuses rather than forks.
+ * Whether continuing `file` would continue it, rather than open a fork. Every
+ * resume route — `--resume`, `--continue`, `--restore`, auto-resume, the
+ * picker — passes through `forkIfMovedAway`, which forks when the transcript's
+ * last transfer marker is `departed`; a declined move does the same. That one
+ * marker is therefore the whole class, and reading it here is not a
+ * per-caller patch. A transcript that cannot be read answers `false`.
  */
-/**
- * `id`, unless resuming that transcript would open a fork instead of continuing
- * it. Every resume route — `--resume`, `--continue`, `--restore`, auto-resume,
- * the picker — passes through `forkIfMovedAway`, which forks when the
- * transcript's last transfer marker is `departed`; a declined move does the
- * same. That one marker is therefore the whole class, and reading it here is
- * not a per-caller patch. A transcript that cannot be read answers `null`.
- */
-async function continuableFileSession(file: string, id: string, storage: FileSessionStorage): Promise<string | null> {
+async function continuableFileSession(file: string, storage: FileSessionStorage): Promise<boolean> {
 	try {
 		const entries = Bun.JSONL.parse(await storage.readText(file)) as FileEntry[];
-		return lastSessionTransfer(entries)?.kind === "departed" ? null : id;
+		return lastSessionTransfer(entries)?.kind !== "departed";
 	} catch {
-		return null;
+		return false;
 	}
 }
 
+/**
+ * Whether this launch continues a session whose transcript is already a file
+ * on disk. Asked only when `session.storage: sql` is
+ * selected and the database cannot be used, to decide whether the launch may
+ * fall back to file storage (see `session/session-storage-fallback.ts`). It
+ * looks only at the file tree — the store that would be fallen back to — and
+ * answers `false` for anything it cannot resolve there, so a doubtful launch
+ * refuses rather than forks. It answers whether, never which: the launch can
+ * land on a different session than any prediction, so the ledger line is
+ * written later, naming the session actually opened.
+ */
 export async function resumableFileSessionId(
 	parsed: Args,
 	rawArgs: readonly string[] | undefined,
 	cwd: string,
-): Promise<string | null> {
+): Promise<boolean> {
 	// `--fork` makes the launch create a new session whatever the resume flags
 	// say (see `normalizeContinueSessionArgs` and the fork branch below), and a
 	// new session never falls back. A foreign import is a new session too.
-	if (parsed.noSession || parsed.fork !== undefined || isForeignSessionImport(parsed)) return null;
+	if (parsed.noSession || parsed.fork !== undefined || isForeignSessionImport(parsed)) return false;
 	const storage = new FileSessionStorage();
 	try {
 		// `--continue <id>` is still spelled as `continue` plus a positional at
@@ -366,20 +372,32 @@ export async function resumableFileSessionId(
 		normalizeContinueSessionArgs(args, rawArgs);
 		const selector = typeof args.restore === "string" ? args.restore : args.resume;
 		if (typeof selector === "string") {
-			const match = await resolveResumableSession(selector, cwd, args.sessionDir, storage);
-			return match ? await continuableFileSession(match.session.path, match.session.id, storage) : null;
+			// `resolveResumeTarget`, not `resolveResumableSession`: the launch
+			// follows a continuation to a newer file, and that newer file is the
+			// one whose transfer marker decides whether resuming forks.
+			const target = await resolveResumeTarget(selector, cwd, args.sessionDir);
+			const file = target?.session.path;
+			return file !== undefined && (await continuableFileSession(file, storage));
 		}
 		// Bare `--continue` and the interactive auto-resume take this project's
 		// most recent session. `--resume` with no value opens the picker, whose
 		// choice is not known yet, so it refuses rather than record a fallback
 		// against a session the user may not pick.
-		if (!args.continue) return null;
+		if (!args.continue) return false;
+		// `continueRecent` picks the transcript, not this probe: it skips
+		// header-only empties and honours the terminal breadcrumb, and a launch
+		// that finds nothing to continue starts a new session. So ask only
+		// whether this project holds a transcript that could be continued, and
+		// let the launch name whichever one it opens.
 		const dir = args.sessionDir ?? computeDefaultSessionDir(cwd, storage);
-		const [newest] = await listSessionsReadOnly(dir, storage);
-		return newest ? await continuableFileSession(newest.path, newest.id, storage) : null;
+		const sessions = await listSessionsReadOnly(dir, storage);
+		for (const session of sessions) {
+			if (await continuableFileSession(session.path, storage)) return true;
+		}
+		return false;
 	} catch (err) {
 		logger.warn("Could not tell whether this launch resumes a session file", { error: toError(err).message });
-		return null;
+		return false;
 	}
 }
 
@@ -2079,12 +2097,18 @@ export async function runRootCommand(
 		// A fallback is a degraded launch, so say so where the user is looking,
 		// not only in the log: the ledger is for the fleet, this line is for the
 		// person whose session just stopped being a database row.
-		const fallback = takeSessionStorageFallback();
+		const fallback = pendingSessionStorageFallback();
 		if (fallback) {
 			writeStartupWarning(
-				`session.storage is sql, but the session database is unusable (${fallback.reason}: ${fallback.dsn_path}); ` +
+				`session.storage is sql, but the session database is unusable (${fallback.reason}: ${fallback.dsnPath}); ` +
 					`continuing this resumed session on file storage`,
 			);
+			// A launch that dies before it opens a session must still be counted:
+			// an uncounted fallback is the silent degradation the ledger exists
+			// to catch. The commit below is a no-op once the real one has run.
+			process.once("exit", () => {
+				void commitSessionStorageFallback(UNRESOLVED_SESSION);
+			});
 		}
 		if (parsedArgs.approvalMode) {
 			// Runtime override (not persisted): every `tools.approvalMode` read downstream
@@ -2438,6 +2462,15 @@ export async function runRootCommand(
 			const notice = formatSessionContinuationNotice(continuation);
 			if (isInteractive) notifs.push({ kind: "warn", message: notice });
 			else process.stderr.write(`${chalk.yellow(notice)}\n`);
+		}
+		// The fallback's one ledger line, now that the launch knows which session
+		// it opened. A resolve-time line would name whichever session a probe
+		// predicted, and the launch can land on another: a continuation
+		// redirect, `continueRecent`'s own choice, or another process holding
+		// the lease. Written once; a launch that never opens a session still
+		// records one through the exit guard below.
+		if (pendingSessionStorageFallback()) {
+			await commitSessionStorageFallback(sessionManager?.getSessionId() ?? UNRESOLVED_SESSION);
 		}
 		if (sessionManager && (parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || foreignSource)) {
 			const pendingToolWarning = describePendingToolCalls(sessionManager.getBranch());
