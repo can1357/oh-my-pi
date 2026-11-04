@@ -327,8 +327,8 @@ export interface AsyncJobManagerApi {
 		result: AsyncJobRunResult,
 		options: { id?: string; ownerId?: string; agentId?: string },
 	): string;
-	/** Cancel one running job; a filter whose owner does not match reads as not-found. */
-	cancel(id: string, filter?: AsyncJobFilter): boolean;
+	/** Cancel one running job, aborting it with `reason`; a filter whose owner does not match reads as not-found. */
+	cancel(id: string, filter?: AsyncJobFilter, reason?: unknown): boolean;
 	getJob(id: string): AsyncJob | undefined;
 	/** Running background jobs; foreground-backed jobs stay hidden until promoted. */
 	getRunningJobs(filter?: AsyncJobFilter): AsyncJob[];

@@ -278,8 +278,8 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		return this.#remote.callSync("publishCompleted", type, label, result, options);
 	}
 
-	cancel(id: string, filter?: AsyncJobFilter): boolean {
-		return this.#remote.callSync("cancel", id, filter);
+	cancel(id: string, filter?: AsyncJobFilter, reason?: unknown): boolean {
+		return this.#remote.callSync("cancel", id, filter, toWireReason(reason));
 	}
 
 	getJob(id: string): AsyncJob | undefined {
