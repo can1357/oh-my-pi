@@ -26,6 +26,7 @@ import {
 	type SimpleStreamOptions,
 	type Usage,
 } from "@oh-my-pi/pi-ai";
+import { resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../extensibility/shared-events";
@@ -105,6 +106,8 @@ function supportsLongCacheRetention(model: Model<Api>): boolean {
 	if (model.api === "openai-completions") {
 		return !(compat !== undefined && "cacheControlFormat" in compat && compat.cacheControlFormat === "anthropic");
 	}
+	// Azure Responses and Codex send a cache key but no lifetime field, so every retention writes the default entry.
+	if (model.api === "azure-openai-responses" || model.api === "openai-codex-responses") return false;
 	return true;
 }
 
@@ -123,11 +126,16 @@ export function resolvePromptCacheTier(
 	isOAuthToken = false,
 ): PromptCacheTier | undefined {
 	const longByDefault = isOAuthToken && model.api === "anthropic-messages" && supportsLongCacheRetention(model);
+	// Factory's Responses wire asks for a 24h entry unless the request chose a shorter retention, and its
+	// responses report no per-TTL split the warmer could adopt from (`factoryResponsesCacheFields`).
+	const factoryResponses =
+		model.api === "factory-droid-agent" && resolveFactoryDroidPolicy(model)?.wire === "openai-responses";
 	const retention = resolveCacheRetention(
 		options?.cacheRetention ?? model.cacheRetention,
-		longByDefault ? "long" : "short",
+		longByDefault || factoryResponses ? "long" : "short",
 	);
 	if (retention === "none") return undefined;
+	if (factoryResponses) return retention;
 	if (model.api === "openai-responses") return openAIResponsesWireTier(model, retention, options);
 	return retention === "long" && !supportsLongCacheRetention(model) ? "short" : retention;
 }

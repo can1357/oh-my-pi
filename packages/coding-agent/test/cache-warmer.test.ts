@@ -337,6 +337,32 @@ describe("cache warming scheduling math", () => {
 		expect(getPromptCacheTtlMs(plain, { cacheRetention: "long" })).toBe(300_000);
 	});
 
+	test("takes Factory's Responses wire at its 24h entry unless the request chose short", () => {
+		const gpt = { ...factoryModel("gpt-5.6-terra"), promptCache: { short: 300, long: 86_400 } };
+		expect(getPromptCacheTtlMs(gpt, undefined)).toBe(86_400_000);
+		expect(getPromptCacheTtlMs(gpt, { cacheRetention: "long" })).toBe(86_400_000);
+		expect(getPromptCacheTtlMs(gpt, { cacheRetention: "short" })).toBe(300_000);
+	});
+
+	test("keeps Azure Responses and Codex on the default entry under long retention", () => {
+		for (const api of ["azure-openai-responses", "openai-codex-responses"] as const) {
+			const model = buildModel({
+				id: "gpt-5.6-terra",
+				name: "GPT-5.6 Terra",
+				api,
+				provider: "custom-openai",
+				baseUrl: "https://openai.example.test/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 1, output: 1, cacheRead: 0.1, cacheWrite: 1 },
+				promptCache: { short: 300 },
+				contextWindow: 200_000,
+				maxTokens: 8_192,
+			} as Parameters<typeof buildModel>[0]);
+			expect(getPromptCacheTtlMs(model, { cacheRetention: "long" })).toBe(300_000);
+		}
+	});
+
 	test("never warms without a declared lifetime or with caching off", () => {
 		const model = makeModel();
 		model.promptCache = undefined;
