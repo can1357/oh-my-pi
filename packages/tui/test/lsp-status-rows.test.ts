@@ -82,4 +82,27 @@ describe("LSP diagnostics", () => {
 		const clean = render("OK");
 		expect(clean).toEqual([`${theme.symbol("tool.lsp")} LSP: diagnostics src/a.ts No issues`]);
 	});
+
+	// A multi-file response carries one summary line per file; the header counts every row.
+	it("counts every file's diagnostics, info included", () => {
+		const rows = render(
+			[
+				`${theme.status.error} src/a.ts: 2 error(s)`,
+				"# src/",
+				"## a.ts",
+				"  1:1 [error] one",
+				"  2:1 [error] two",
+				`${theme.status.error} src/b.ts: 1 error(s), 1 warning(s), 1 info(s)`,
+				"# src/",
+				"## b.ts",
+				"  1:1 [error] three",
+				"  2:1 [warning] four",
+				"  3:1 [info] five",
+			].join("\n"),
+		);
+		expect(rows[0]).toContain("src/a.ts 3 errors · 1 warning · 1 info");
+
+		const infoOnly = render(["1 info(s):", "# src/", "## a.ts", "  3:5 [info] Prefer const"].join("\n"));
+		expect(infoOnly[0]).toEndWith("src/a.ts 1 info");
+	});
 });

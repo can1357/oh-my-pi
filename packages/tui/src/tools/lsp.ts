@@ -309,18 +309,17 @@ function parseLspResult(
 	if (locations?.noun === "reference") return referencesView(locations, theme);
 	if (locations) return locationsView(locations, theme);
 
-	const errorMatch = text.match(/(\d+)\s+error\(s\)/);
-	const warningMatch = text.match(/(\d+)\s+warning\(s\)/);
 	// A diagnostics request answers with diagnostics whatever its rows hold: `OK`, a partial
 	// server failure, a summary. Without a known action, the rows themselves decide.
-	if (action === "diagnostics") return diagnosticsView(errorMatch, warningMatch, lines, theme);
+	if (action === "diagnostics") return diagnosticsView(lines, theme);
 
 	const codeBlockMatch = text.match(/```(\w*)\n([\s\S]*?)```/);
 	if (codeBlockMatch) return hoverView(codeBlockMatch, text, theme);
 
-	const unreportedCount = lines.filter(line => UNREPORTED_LINE_RE.test(line)).length;
-	if (errorMatch || warningMatch || hasStatusRow(action, lines, theme.status.error) || unreportedCount > 0) {
-		return diagnosticsView(errorMatch, warningMatch, lines, theme);
+	const summarized = /\d+\s+(?:error|warning)\(s\)/.test(text);
+	const unreported = lines.some(line => UNREPORTED_LINE_RE.test(line));
+	if (summarized || hasStatusRow(action, lines, theme.status.error) || unreported) {
+		return diagnosticsView(lines, theme);
 	}
 
 	const symbolsMatch = text.match(/Symbols in (.+):/);
@@ -407,21 +406,17 @@ function formatSeverityTag(severity: ParsedDiagnostic["severity"], theme: Theme)
  * lines follow. Expanded, a diagnostic's message moves to its own row beneath
  * the location.
  */
-function diagnosticsView(
-	errorMatch: RegExpMatchArray | null,
-	warningMatch: RegExpMatchArray | null,
-	lines: string[],
-	theme: Theme,
-): LspResultView {
+function diagnosticsView(lines: string[], theme: Theme): LspResultView {
 	const parsed = parseLspDiagnostics(lines);
-	const severityCount = (match: RegExpMatchArray | null, severity: ParsedDiagnostic["severity"]) =>
-		match ? Number.parseInt(match[1], 10) : parsed.diagnostics.filter(d => d.severity === severity).length;
-	const errorCount = severityCount(errorMatch, "error");
-	const warnCount = severityCount(warningMatch, "warning");
+	// Counted from the rows, not the tool's summary lines: a multi-file response carries one
+	// summary per file, and the native view counts the same rows.
+	const counts: Record<ParsedDiagnostic["severity"], number> = { error: 0, warning: 0, info: 0, hint: 0 };
+	for (const diagnostic of parsed.diagnostics) counts[diagnostic.severity]++;
 
 	const meta: string[] = [];
-	if (errorCount > 0) meta.push(formatCount("error", errorCount));
-	if (warnCount > 0) meta.push(formatCount("warning", warnCount));
+	for (const severity of ["error", "warning", "info", "hint"] as const) {
+		if (counts[severity] > 0) meta.push(formatCount(severity, counts[severity]));
+	}
 	if (parsed.failures.length > 0) meta.push(formatCount("server failure", parsed.failures.length));
 	if (parsed.unreported.length > 0) meta.push(formatCount("unverified file", parsed.unreported.length));
 
@@ -441,9 +436,9 @@ function diagnosticsView(
 		// Errors and failed servers are an error state; warnings, unverified files and partial
 		// server failures a warning one, like the native view's tone.
 		icon:
-			errorCount > 0 || parsed.failures.length > 0
+			counts.error > 0 || parsed.failures.length > 0
 				? "error"
-				: warnCount > 0 || parsed.unreported.length > 0 || parsed.warnings.length > 0
+				: counts.warning > 0 || parsed.unreported.length > 0 || parsed.warnings.length > 0
 					? "warning"
 					: "success",
 		meta,

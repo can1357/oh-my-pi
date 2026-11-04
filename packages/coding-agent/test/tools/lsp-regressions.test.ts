@@ -1814,7 +1814,9 @@ describe("lsp regressions", () => {
 		expect(lines.every(line => Bun.stringWidth(line) <= width)).toBe(true);
 		expect(text.match(/x/g)?.length).toBe(200);
 		expect(text).not.toContain("…");
-		expect(text.replace(/\s+/g, " ")).toContain(note);
+		// Each row past the header, tree connector and guide rail stripped: the note reads whole across its rows.
+		const rowContents = lines.slice(1).map(line => line.replace(/^\s*(?:[├└│]─?)?\s*/, ""));
+		expect(rowContents.join(" ").replace(/\s+/g, " ")).toContain(note);
 	});
 
 	it("answers repeated push diagnostics for unchanged text from a fresh report, without a project-load delay", async () => {
