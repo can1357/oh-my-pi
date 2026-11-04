@@ -1485,12 +1485,16 @@ impl Ctx<'_> {
 	/// `BANG`s is read in a loop and kept as one node.
 	fn par_cond_2(&mut self) -> Option<CondExpr> {
 		let mut bangs = 0;
+		let mut lo = 0;
 		loop {
 			while self.cond_sep() {
 				self.zshlex();
 			}
 			if self.lx.tok != T::Bang {
 				break;
+			}
+			if bangs == 0 {
+				lo = self.tok_span().lo;
 			}
 			self.zshlex();
 			bangs += 1;
@@ -1499,7 +1503,7 @@ impl Ctx<'_> {
 		Some(if bangs == 0 {
 			e
 		} else {
-			CondExpr::Not(bangs, Box::new(e))
+			CondExpr::Not { bangs, lo, expr: Box::new(e) }
 		})
 	}
 
@@ -1507,6 +1511,7 @@ impl Ctx<'_> {
 	#[allow(clippy::cognitive_complexity, reason = "a direct port of zsh's par_cond_2")]
 	fn par_cond_operand(&mut self) -> Option<CondExpr> {
 		if self.lx.tok == T::Inpar {
+			let lparen = self.tok_span().lo;
 			self.zshlex();
 			while self.cond_sep() {
 				self.zshlex();
@@ -1518,8 +1523,9 @@ impl Ctx<'_> {
 			if self.lx.tok != T::Outpar {
 				return self.yyerr();
 			}
+			let rparen = self.tok_span().lo;
 			self.zshlex();
-			return r.map(|e| CondExpr::Group(Box::new(e)));
+			return r.map(|e| CondExpr::Group { lparen, rparen, expr: Box::new(e) });
 		}
 		let s1 = self.tokstr().map(|s| (s.to_vec(), self.tok_span()));
 		let dble = s1
@@ -1542,6 +1548,7 @@ impl Ctx<'_> {
 		}
 		if matches!(self.lx.tok, T::Inang | T::Outang) {
 			let op: &[u8] = if self.lx.tok == T::Inang { b"<" } else { b">" };
+			let op_lo = self.tok_span().lo;
 			self.cond_next();
 			if self.lx.tok != T::String {
 				return self.yyerr();
@@ -1549,7 +1556,8 @@ impl Ctx<'_> {
 			let s3 = self.tw();
 			self.cond_next();
 			return Some(CondExpr::Binary {
-				op:  op.to_vec(),
+				op: op.to_vec(),
+				op_lo,
 				lhs: zword(s1.0, s1.1),
 				rhs: zword(s3.0, s3.1),
 			});
@@ -1590,7 +1598,7 @@ impl Ctx<'_> {
 		if a.0.len() < 2 || !is_dash(a.0[0]) {
 			return self.cond_error(b"parse error: condition expected: ", &a.0);
 		}
-		Some(CondExpr::Unary { op: plain(&a.0), arg: zword(b.0, b.1) })
+		Some(CondExpr::Unary { op: plain(&a.0), op_lo: a.1.lo, arg: zword(b.0, b.1) })
 	}
 
 	/// zsh `par_cond_triple`: `a op b`.
@@ -1606,9 +1614,10 @@ impl Ctx<'_> {
 		};
 		if binary {
 			return Some(CondExpr::Binary {
-				op:  plain(op),
-				lhs: zword(lhs.0, lhs.1),
-				rhs: zword(rhs.0, rhs.1),
+				op:    plain(op),
+				op_lo: mid.1.lo,
+				lhs:   zword(lhs.0, lhs.1),
+				rhs:   zword(rhs.0, rhs.1),
 			});
 		}
 		if lhs.0.len() > 1 && is_dash(lhs.0[0]) {
@@ -1629,8 +1638,9 @@ impl Ctx<'_> {
 		let hi = l.last().map_or(a.1.hi, |t| t.1.hi);
 		let parts = l.into_iter().map(|t| WordPart::Zsh(t.0)).collect();
 		Some(CondExpr::Unary {
-			op:  plain(&a.0),
-			arg: Word { id: NodeId(0), span: Span::new(lo, hi), parts },
+			op:    plain(&a.0),
+			op_lo: a.1.lo,
+			arg:   Word { id: NodeId(0), span: Span::new(lo, hi), parts },
 		})
 	}
 }

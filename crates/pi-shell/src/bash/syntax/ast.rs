@@ -341,30 +341,52 @@ pub enum CondExpr {
 	/// `-op word` (`-f file`, `-n str`, …).
 	Unary {
 		/// Operator, e.g. `-f`.
-		op:  Vec<u8>,
+		op:    Vec<u8>,
+		/// Offset of the operator's first byte. The operator's bytes need
+		/// not be contiguous there (`-\<newline>z`), so it cannot be found
+		/// by searching the source for them.
+		op_lo: u32,
 		/// Operand.
-		arg: Word,
+		arg:   Word,
 	},
 	/// `lhs op rhs` (`==`, `=~`, `-lt`, `-nt`, …).
 	Binary {
 		/// Operator.
-		op:  Vec<u8>,
+		op:    Vec<u8>,
+		/// Offset of the operator's first byte, as for [`Self::Unary`].
+		op_lo: u32,
 		/// Left operand.
-		lhs: Word,
+		lhs:   Word,
 		/// Right operand (a pattern for `==`/`!=`, a regex for `=~`).
-		rhs: Word,
+		rhs:   Word,
 	},
 	/// A lone word: true when non-empty.
 	Word(Word),
 	/// `! ! … expr`: a run of `!`s, at least one, kept as one node so its
 	/// length sets no recursion depth. The operand is never itself `Not`.
-	Not(usize, Box<Self>),
+	/// `lo` is the offset of the first `!`; the others follow it, one byte
+	/// each, separated by nothing but blanks, comments and continuations.
+	Not {
+		/// How many `!` the run holds.
+		bangs: usize,
+		/// Offset of the first `!`.
+		lo:    u32,
+		/// What the run negates.
+		expr:  Box<Self>,
+	},
 	/// `a && b && …`: at least two operands, in source order.
 	And(Vec<Self>),
 	/// `a || b || …`: at least two operands, in source order.
 	Or(Vec<Self>),
-	/// `( expr )`
-	Group(Box<Self>),
+	/// `( expr )`, with the offsets of both parentheses.
+	Group {
+		/// Offset of `(`.
+		lparen: u32,
+		/// Offset of `)`.
+		rparen: u32,
+		/// What they enclose.
+		expr:   Box<Self>,
+	},
 }
 
 /// Function definition.

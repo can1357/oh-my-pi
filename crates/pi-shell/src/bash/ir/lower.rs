@@ -880,12 +880,12 @@ impl Lower {
 
 	fn cond_expr(&mut self, e: &syn::CondExpr, id: u32) -> R {
 		match e {
-			syn::CondExpr::Unary { op, arg } => {
+			syn::CondExpr::Unary { op, arg, .. } => {
 				let arg = self.word(arg)?;
 				let c = self.cond_ir(CondIr::Unary { op: op.as_slice().into(), arg });
 				self.emit(Opcode::CondTest, c, 0, id);
 			},
-			syn::CondExpr::Binary { op, lhs, rhs } => {
+			syn::CondExpr::Binary { op, lhs, rhs, .. } => {
 				let lhs = self.word(lhs)?;
 				let rhs = self.word(rhs)?;
 				let c = self.cond_ir(CondIr::Binary { op: op.as_slice().into(), lhs, rhs });
@@ -896,12 +896,12 @@ impl Lower {
 				let c = self.cond_ir(CondIr::Word(w));
 				self.emit(Opcode::CondTest, c, 0, id);
 			},
-			syn::CondExpr::Not(bangs, inner) => {
+			syn::CondExpr::Not { bangs, expr, .. } => {
 				// A run of `!`s, lowered at once: bash's trace shows one `!`
 				// on a primary under an odd number of them.
 				let mut nots = *bangs;
-				let mut leaf = inner.as_ref();
-				while let syn::CondExpr::Not(more, i) = leaf {
+				let mut leaf = expr.as_ref();
+				while let syn::CondExpr::Not { bangs: more, expr: i, .. } = leaf {
 					nots += more;
 					leaf = i;
 				}
@@ -947,7 +947,7 @@ impl Lower {
 					branch = next;
 				}
 			},
-			syn::CondExpr::Group(inner) => self.cond_expr(inner, id)?,
+			syn::CondExpr::Group { expr, .. } => self.cond_expr(expr, id)?,
 		}
 		Ok(())
 	}

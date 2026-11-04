@@ -551,24 +551,26 @@ mod native {
 
 	fn cond(m: &OffMap, e: &CondExpr) -> V {
 		match e {
-			CondExpr::Unary { op, arg } => {
+			CondExpr::Unary { op, arg, .. } => {
 				V::Obj(vec![("type", s(b"unary")), ("op", s(op)), ("arg", word(m, arg))])
 			},
-			CondExpr::Binary { op, lhs, rhs } => V::Obj(vec![
+			CondExpr::Binary { op, lhs, rhs, .. } => V::Obj(vec![
 				("type", s(b"binary")),
 				("op", s(op)),
 				("lhs", word(m, lhs)),
 				("rhs", word(m, rhs)),
 			]),
 			CondExpr::Word(w) => V::Obj(vec![("type", s(b"word")), ("word", word(m, w))]),
-			CondExpr::Not(bangs, x) => {
-				let mut v = cond(m, x);
+			CondExpr::Not { bangs, expr, .. } => {
+				let mut v = cond(m, expr);
 				for _ in 0..*bangs {
 					v = V::Obj(vec![("type", s(b"not")), ("expr", v)]);
 				}
 				v
 			},
-			CondExpr::Group(x) => V::Obj(vec![("type", s(b"group")), ("expr", cond(m, x))]),
+			CondExpr::Group { expr, .. } => {
+				V::Obj(vec![("type", s(b"group")), ("expr", cond(m, expr))])
+			},
 			CondExpr::And(terms) | CondExpr::Or(terms) => {
 				let kind: &[u8] = if matches!(e, CondExpr::And(_)) {
 					b"and"
@@ -1669,33 +1671,36 @@ mod shfmt {
 			let p = |o| self.m.pos(o);
 			match e {
 				CondExpr::Word(w) => self.word(w, true),
-				CondExpr::Unary { op, arg } => {
-					let olo = self.find_back_op(arg.span.lo, op);
-					V::Obj(vec![
-						("Type", s(b"UnaryTest")),
-						("Pos", p(olo)),
-						("End", p(arg.span.hi)),
-						("OpPos", p(olo)),
-						("Op", s(op)),
-						("X", self.word(arg, true)),
-					])
-				},
-				CondExpr::Binary { op, lhs, rhs } => V::Obj(vec![
+				CondExpr::Unary { op, op_lo, arg } => V::Obj(vec![
+					("Type", s(b"UnaryTest")),
+					("Pos", p(*op_lo)),
+					("End", p(arg.span.hi)),
+					("OpPos", p(*op_lo)),
+					("Op", s(op)),
+					("X", self.word(arg, true)),
+				]),
+				CondExpr::Binary { op, op_lo, lhs, rhs } => V::Obj(vec![
 					("Type", s(b"BinaryTest")),
 					("Pos", p(lhs.span.lo)),
 					("End", p(rhs.span.hi)),
-					("OpPos", p(self.find(lhs.span.hi, op))),
+					("OpPos", p(*op_lo)),
 					("Op", s(op)),
 					("X", self.word(lhs, true)),
 					("Y", self.word(rhs, true)),
 				]),
-				CondExpr::Not(bangs, x) => {
-					// Innermost `!` first: each one is found right before the
-					// one inside it.
-					let (mut lo, hi) = self.test_span(x);
-					let mut v = self.test(x);
+				CondExpr::Not { bangs, lo, expr } => {
+					// The run's `!`s stand one byte each from `lo` on, with
+					// only trivia between them. Collecting them forward and
+					// wrapping from the innermost out keeps both walks loops.
+					let mut at = *lo;
+					let mut bang = Vec::with_capacity(*bangs);
 					for _ in 0..*bangs {
-						let olo = self.find_back_op(lo, b"!");
+						bang.push(at);
+						at = self.skip_ws(at + 1);
+					}
+					let hi = self.test_span(expr).1;
+					let mut v = self.test(expr);
+					for &olo in bang.iter().rev() {
 						v = V::Obj(vec![
 							("Type", s(b"UnaryTest")),
 							("Pos", p(olo)),
@@ -1704,23 +1709,17 @@ mod shfmt {
 							("Op", s(b"!")),
 							("X", v),
 						]);
-						lo = olo;
 					}
 					v
 				},
-				CondExpr::Group(x) => {
-					let (xlo, xhi) = self.test_span(x);
-					let lp = self.find_back_op(xlo, b"(");
-					let rp = self.find(xhi, b")");
-					V::Obj(vec![
-						("Type", s(b"ParenTest")),
-						("Pos", p(lp)),
-						("End", p(rp + 1)),
-						("Lparen", p(lp)),
-						("Rparen", p(rp)),
-						("X", self.test(x)),
-					])
-				},
+				CondExpr::Group { lparen, rparen, expr } => V::Obj(vec![
+					("Type", s(b"ParenTest")),
+					("Pos", p(*lparen)),
+					("End", p(rparen + 1)),
+					("Lparen", p(*lparen)),
+					("Rparen", p(*rparen)),
+					("X", self.test(expr)),
+				]),
 				CondExpr::And(terms) | CondExpr::Or(terms) => {
 					let op: &[u8] = if matches!(e, CondExpr::And(_)) {
 						b"&&"
@@ -1747,79 +1746,16 @@ mod shfmt {
 			}
 		}
 
-		/// Start of the trivia written before `i`: blanks, newlines,
-		/// `\newline` and comments, the same trivia `skip_ws` passes
-		/// forward.
-		fn skip_ws_back(&self, mut i: u32) -> u32 {
-			loop {
-				while i > 0 && matches!(self.at(i - 1), b' ' | b'\t') {
-					i -= 1;
-				}
-				if i >= 2 && self.at(i - 1) == b'\n' && self.at(i - 2) == b'\\' {
-					i -= 2;
-				} else if i > 0 && self.at(i - 1) == b'\n' {
-					i = self.comment_start(i - 1).unwrap_or(i - 1);
-				} else {
-					return i;
-				}
-			}
-		}
-
-		/// Position of the comment the line ending at `nl` carries, if it
-		/// carries one: a `#` that opens a word outside quotes.
-		fn comment_start(&self, nl: u32) -> Option<u32> {
-			let mut lo = nl;
-			while lo > 0 && self.at(lo - 1) != b'\n' {
-				lo -= 1;
-			}
-			let mut quote = 0u8;
-			let mut i = lo;
-			while i < nl {
-				let c = self.at(i);
-				match c {
-					b'\\' if quote != b'\'' => i += 1,
-					b'\'' | b'"' if quote == 0 => quote = c,
-					_ if quote == c => quote = 0,
-					b'#' if quote == 0 && (i == lo || matches!(self.at(i - 1), b' ' | b'\t')) => {
-						return Some(i);
-					},
-					_ => {},
-				}
-				i += 1;
-			}
-			None
-		}
-
-		/// Position of `op` written before `i` (skipping trivia).
-		fn find_back_op(&self, i: u32, op: &[u8]) -> u32 {
-			let j = self.skip_ws_back(i);
-			let n = op.len() as u32;
-			if j >= n && self.src.get((j - n) as usize..j as usize) == Some(op) {
-				j - n
-			} else {
-				i
-			}
-		}
-
-		/// Source extent of a `[[ ]]` expression. A `!` run, a unary test
-		/// and a group are written with operators whose spacing varies, so
-		/// each one is located in the source rather than assumed a width.
+		/// Source extent of a `[[ ]]` expression. Every operator carries
+		/// the offset the parser read it at, so no part of the extent is
+		/// recovered by reading the source back.
 		fn test_span(&self, e: &CondExpr) -> (u32, u32) {
 			match e {
 				CondExpr::Word(w) => (w.span.lo, w.span.hi),
-				CondExpr::Unary { op, arg } => (self.find_back_op(arg.span.lo, op), arg.span.hi),
+				CondExpr::Unary { op_lo, arg, .. } => (*op_lo, arg.span.hi),
 				CondExpr::Binary { lhs, rhs, .. } => (lhs.span.lo, rhs.span.hi),
-				CondExpr::Not(bangs, x) => {
-					let (mut lo, hi) = self.test_span(x);
-					for _ in 0..*bangs {
-						lo = self.find_back_op(lo, b"!");
-					}
-					(lo, hi)
-				},
-				CondExpr::Group(x) => {
-					let (lo, hi) = self.test_span(x);
-					(self.find_back_op(lo, b"("), self.find(hi, b")") + 1)
-				},
+				CondExpr::Not { lo, expr, .. } => (*lo, self.test_span(expr).1),
+				CondExpr::Group { lparen, rparen, .. } => (*lparen, rparen + 1),
 				CondExpr::And(terms) | CondExpr::Or(terms) => {
 					let first = terms.first().expect("logical chain has operands");
 					let last = terms.last().expect("logical chain has operands");

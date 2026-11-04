@@ -349,12 +349,12 @@ fn conditions_arith_time_coproc_and_separators() {
 		panic!()
 	};
 	let CondExpr::Or(terms) = cond else { panic!() };
-	assert!(matches!(terms.as_slice(), [CondExpr::And(_), CondExpr::Not(1, _)]));
+	assert!(matches!(terms.as_slice(), [CondExpr::And(_), CondExpr::Not { bangs: 1, .. }]));
 	let CommandKind::Cond(CondExpr::Unary { op, .. }) = first_cmd(b"[[ a ]]").kind else {
 		panic!()
 	};
 	assert_eq!(op, b"-n", "zsh reads a lone word as -n word");
-	let CommandKind::Cond(CondExpr::Unary { op, arg }) = first_cmd(b"[[ -x a b ]]").kind else {
+	let CommandKind::Cond(CondExpr::Unary { op, arg, .. }) = first_cmd(b"[[ -x a b ]]").kind else {
 		panic!()
 	};
 	assert_eq!((op.as_slice(), arg.parts.len()), (&b"-x"[..], 2));

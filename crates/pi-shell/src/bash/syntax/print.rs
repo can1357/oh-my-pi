@@ -704,17 +704,17 @@ impl<'a> Bp<'a> {
 	fn cond(&mut self, e: &CondExpr) {
 		let mut e = e;
 		let mut invert = false;
-		while let CondExpr::Not(bangs, inner) = e {
+		while let CondExpr::Not { bangs, expr, .. } = e {
 			invert ^= bangs % 2 == 1;
-			e = inner;
+			e = expr;
 		}
 		if invert {
 			self.put(b"! ");
 		}
 		match e {
-			CondExpr::Group(inner) => {
+			CondExpr::Group { expr, .. } => {
 				self.put(b"( ");
-				self.cond(inner);
+				self.cond(expr);
 				self.put(b" )");
 			},
 			CondExpr::And(terms) | CondExpr::Or(terms) => {
@@ -730,12 +730,12 @@ impl<'a> Bp<'a> {
 					self.cond(term);
 				}
 			},
-			CondExpr::Unary { op, arg } => {
+			CondExpr::Unary { op, arg, .. } => {
 				self.put(op);
 				self.put(b" ");
 				word_text(arg, &mut self.out);
 			},
-			CondExpr::Binary { op, lhs, rhs } => {
+			CondExpr::Binary { op, lhs, rhs, .. } => {
 				word_text(lhs, &mut self.out);
 				self.put(b" ");
 				self.put(op);
@@ -746,7 +746,7 @@ impl<'a> Bp<'a> {
 				self.put(b"-n ");
 				word_text(w, &mut self.out);
 			},
-			CondExpr::Not(..) => {},
+			CondExpr::Not { .. } => {},
 		}
 	}
 

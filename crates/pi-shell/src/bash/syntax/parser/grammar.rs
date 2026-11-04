@@ -917,6 +917,7 @@ impl Parser<'_> {
 	fn cond_read(&mut self) -> PResult<Tok> {
 		let t = self.read_token()?;
 		self.last_cond_text = Some(Self::token_text(&t));
+		self.cond_tok_lo = t.lo;
 		self.cond_eof = t.kind == T::Eof;
 		if !self.cond_eof {
 			// The command's span runs through `]]`.
@@ -991,9 +992,11 @@ impl Parser<'_> {
 		// A run of `!`s is read in a loop and kept as one node, so its length
 		// sets no recursion depth here or in any later walk of the tree.
 		let mut bangs = 0;
+		let mut lo = 0;
 		let operand = loop {
 			let t = self.cond_skip_newlines()?;
 			*tok = t.kind;
+			let at = t.lo;
 			match t.kind {
 				T::Bang => bangs += 1,
 				T::Word | T::Assign | T::Number => {
@@ -1005,11 +1008,14 @@ impl Parser<'_> {
 				},
 				_ => break self.cond_token_operand(t, tok)?,
 			}
+			if bangs == 1 {
+				lo = at;
+			}
 		};
 		Ok(if bangs == 0 {
 			operand
 		} else {
-			CondExpr::Not(bangs, Box::new(operand))
+			CondExpr::Not { bangs, lo, expr: Box::new(operand) }
 		})
 	}
 
@@ -1050,9 +1056,10 @@ impl Parser<'_> {
 						b"', expected `)'",
 					));
 				}
+				let rparen = self.cond_tok_lo;
 				let next = self.cond_skip_newlines()?;
 				*tok = next.kind;
-				Ok(CondExpr::Group(Box::new(inner)))
+				Ok(CondExpr::Group { lparen: t.lo, rparen, expr: Box::new(inner) })
 			},
 			_ => {
 				let text = Self::token_text(&t);
@@ -1067,6 +1074,7 @@ impl Parser<'_> {
 		if let Some(op) = plain_text(&w)
 			&& is_unop(op)
 		{
+			let op_lo = w.span.lo;
 			let op = op.to_vec();
 			let a = self.cond_read()?;
 			if !matches!(a.kind, T::Word | T::Assign | T::Number) {
@@ -1080,9 +1088,10 @@ impl Parser<'_> {
 			let arg = Self::tok_word(a);
 			let next = self.cond_skip_newlines()?;
 			*tok = next.kind;
-			return Ok(CondExpr::Unary { op, arg });
+			return Ok(CondExpr::Unary { op, op_lo, arg });
 		}
 		let o = self.cond_read()?;
+		let op_lo = o.lo;
 		let op: Vec<u8> = match o.kind {
 			T::Word | T::Assign => {
 				let ow = Self::tok_word(o);
@@ -1140,7 +1149,7 @@ impl Parser<'_> {
 		let rhs = Self::tok_word(r);
 		let next = self.cond_skip_newlines()?;
 		*tok = next.kind;
-		Ok(CondExpr::Binary { op, lhs: w, rhs })
+		Ok(CondExpr::Binary { op, op_lo, lhs: w, rhs })
 	}
 }
 
