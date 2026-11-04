@@ -9,6 +9,7 @@ Host -> wrapper:
   {"type": "tool", "id": str, "op": "describe", "names": [str]}
   {"type": "tool", "id": str, "op": "call", "name": str, "args": dict}
   {"type": "tool_cancel", "id": str}              # caller gave up: cancel an async tool call
+  {"type": "interrupt", "id": str}                # interrupt this cell; a SIGINT follows
   {"type": "exit"}                                # graceful shutdown
 
 Wrapper -> host:
@@ -215,10 +216,14 @@ class _RunnerState:
         self.last_install_marker: int = 0
         self.loop: asyncio.AbstractEventLoop | None = None
         self.active_executions: int = 0
-        # Tasks running cell code, and those a SIGINT cancelled while parked
-        # on an ``await``.
-        self.executing_tasks: set[asyncio.Task] = set()
+        # Cell tasks by request id, the ids the host asked to interrupt, and
+        # the tasks cancelled while parked on an ``await``.
+        self.executing_tasks: dict[str, asyncio.Task] = {}
+        self.interrupt_ids: set[str] = set()
         self.interrupted_tasks: set[asyncio.Task] = set()
+        # POSIX reads interrupt requests while cells run, so a SIGINT acts only
+        # on the cells they name. Windows runs one cell at a time.
+        self.targeted_interrupts: bool = False
         # Best-effort attribution target for captured fd-1 bytes (child
         # processes inheriting stdout). With overlapping requests the most
         # recently started one wins — strictly better than dropping the bytes.
@@ -2621,18 +2626,39 @@ def _install_idle_sigint() -> None:
 
 
 def _exec_sigint_handler(signum: int, frame: Any) -> None:
-    """Raise into sync cell code; cancel cells parked on an ``await`` instead,
-    since raising in the idle event loop would unwind it and end the kernel."""
+    """Raise into the sync cell the host named (on Windows, the running cell);
+    cancel named cells parked on an ``await`` instead, since raising in the idle
+    event loop would unwind it and end the kernel."""
     loop = _STATE.loop
-    if loop is None or asyncio.current_task(loop) in _STATE.executing_tasks:
+    if loop is None:
         raise KeyboardInterrupt
-    loop.call_soon_threadsafe(_cancel_parked_cells)
+    current = asyncio.current_task(loop)
+    running = next((rid for rid, task in _STATE.executing_tasks.items() if task is current), None)
+    if running is not None and (not _STATE.targeted_interrupts or running in _STATE.interrupt_ids):
+        _STATE.interrupt_ids.discard(running)
+        raise KeyboardInterrupt
+    _cancel_parked_cells()
 
 
 def _cancel_parked_cells() -> None:
-    for task in _STATE.executing_tasks:
+    for rid, task in list(_STATE.executing_tasks.items()):
+        if _STATE.targeted_interrupts and rid not in _STATE.interrupt_ids:
+            continue
+        _STATE.interrupt_ids.discard(rid)
         _STATE.interrupted_tasks.add(task)
         task.cancel()
+
+
+def _request_interrupt(loop: asyncio.AbstractEventLoop, rid: str) -> None:
+    """Interrupt cell ``rid`` from the stdin reader thread. The signal reaches it
+    in sync code; the queued cancel reaches it if a sibling's sync code holds
+    the main thread. Each interrupt is delivered once."""
+    task = _STATE.executing_tasks.get(rid)
+    if task is None:
+        return
+    _STATE.interrupt_ids.add(rid)
+    loop.call_soon_threadsafe(_cancel_parked_cells)
+    signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
 
 
 def _install_exec_sigint() -> None:
@@ -2910,7 +2936,7 @@ async def _handle_request_async(req: dict) -> None:
             _begin_exec_sigint()
         execution_started = True
         task = asyncio.current_task()
-        _STATE.executing_tasks.add(task)
+        _STATE.executing_tasks[rid] = task
         try:
             await _exec_source_async(
                 transformed,
@@ -2933,7 +2959,8 @@ async def _handle_request_async(req: dict) -> None:
             status = "error"
             _emit_error(rid, exc, source_filename=filename)
         finally:
-            _STATE.executing_tasks.discard(task)
+            _STATE.executing_tasks.pop(rid, None)
+            _STATE.interrupt_ids.discard(rid)
             if task in _STATE.interrupted_tasks:
                 _STATE.interrupted_tasks.discard(task)
                 # On Windows cells run on the long-lived serve task; clear the
@@ -3070,6 +3097,9 @@ def _read_stdin(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, stdin) ->
         if req.get("type") == "tool_cancel":
             _cancel_tool_request(str(req.get("id")))
             continue
+        if req.get("type") == "interrupt":
+            _request_interrupt(loop, str(req.get("id")))
+            continue
         loop.call_soon_threadsafe(queue.put_nowait, req)
     loop.call_soon_threadsafe(queue.put_nowait, {"type": "exit"})
 
@@ -3086,6 +3116,7 @@ async def _serve_posix(loop: asyncio.AbstractEventLoop, stdin) -> None:
     native-extension imports on Windows (see ``_serve_windows``).
     """
     queue: asyncio.Queue = asyncio.Queue()
+    _STATE.targeted_interrupts = True
     reader = threading.Thread(
         target=_read_stdin,
         args=(loop, queue, stdin),
@@ -3166,6 +3197,8 @@ async def _serve_windows(loop: asyncio.AbstractEventLoop, stdin) -> None:
         if req.get("type") == "tool_cancel":
             _cancel_tool_request(str(req.get("id")))
             continue
+        if req.get("type") == "interrupt":
+            continue  # read only between cells, after the cell it named settled
         if not _admit_shadow_run(req):
             continue
         try:

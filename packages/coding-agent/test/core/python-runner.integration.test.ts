@@ -275,6 +275,43 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
+	it("interrupts only the aborted cell when several are parked on await", async () => {
+		using tempDir = TempDir.createSync("@python-runner-cancel-one-of-two-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const { promise: siblingParked, resolve: onSiblingParked } = Promise.withResolvers<void>();
+			const sibling = executePythonWithKernel(
+				kernel,
+				"import asyncio\ngate = asyncio.Event()\nprint('sibling parked', flush=True)\nawait gate.wait()\nprint('sibling done')",
+				{
+					onChunk: chunk => {
+						if (chunk.includes("sibling parked")) onSiblingParked();
+					},
+				},
+			);
+			await siblingParked;
+			const ac = new AbortController();
+			const target = executePythonWithKernel(
+				kernel,
+				"import asyncio\nprint('target parked', flush=True)\nawait asyncio.sleep(30)",
+				{
+					signal: ac.signal,
+					onChunk: chunk => {
+						if (chunk.includes("target parked")) ac.abort(new DOMException("user cancelled", "AbortError"));
+					},
+				},
+			);
+
+			expect((await target).cancelled).toBe(true);
+			await executePythonWithKernel(kernel, "gate.set()");
+			const siblingResult = await sibling;
+			expect(siblingResult.cancelled).toBe(false);
+			expect(siblingResult.output).toContain("sibling done");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
 	it("executes file-backed cells in the retained namespace with script import semantics", async () => {
 		using tempDir = TempDir.createSync("@python-runner-file-");
 		const scriptDir = path.join(tempDir.path(), "scripts");
