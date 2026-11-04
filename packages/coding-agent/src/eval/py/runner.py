@@ -215,6 +215,10 @@ class _RunnerState:
         self.last_install_marker: int = 0
         self.loop: asyncio.AbstractEventLoop | None = None
         self.active_executions: int = 0
+        # Tasks running cell code, and those a SIGINT cancelled while parked
+        # on an ``await``.
+        self.executing_tasks: set[asyncio.Task] = set()
+        self.interrupted_tasks: set[asyncio.Task] = set()
         # Best-effort attribution target for captured fd-1 bytes (child
         # processes inheriting stdout). With overlapping requests the most
         # recently started one wins — strictly better than dropping the bytes.
@@ -2616,9 +2620,24 @@ def _install_idle_sigint() -> None:
         pass
 
 
+def _exec_sigint_handler(signum: int, frame: Any) -> None:
+    """Raise into sync cell code; cancel cells parked on an ``await`` instead,
+    since raising in the idle event loop would unwind it and end the kernel."""
+    loop = _STATE.loop
+    if loop is None or asyncio.current_task(loop) in _STATE.executing_tasks:
+        raise KeyboardInterrupt
+    loop.call_soon_threadsafe(_cancel_parked_cells)
+
+
+def _cancel_parked_cells() -> None:
+    for task in _STATE.executing_tasks:
+        _STATE.interrupted_tasks.add(task)
+        task.cancel()
+
+
 def _install_exec_sigint() -> None:
     try:
-        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(signal.SIGINT, _exec_sigint_handler)
     except (OSError, ValueError):
         pass
 
@@ -2890,6 +2909,8 @@ async def _handle_request_async(req: dict) -> None:
         else:
             _begin_exec_sigint()
         execution_started = True
+        task = asyncio.current_task()
+        _STATE.executing_tasks.add(task)
         try:
             await _exec_source_async(
                 transformed,
@@ -2901,6 +2922,10 @@ async def _handle_request_async(req: dict) -> None:
             cancelled = True
             status = "error"
             _emit_error(rid, KeyboardInterrupt("Execution interrupted"))
+        except asyncio.CancelledError as exc:
+            status = "error"
+            cancelled = task in _STATE.interrupted_tasks
+            _emit_error(rid, KeyboardInterrupt("Execution interrupted") if cancelled else exc)
         except SystemExit as exc:
             status = "error"
             _emit_error(rid, exc)
@@ -2908,6 +2933,15 @@ async def _handle_request_async(req: dict) -> None:
             status = "error"
             _emit_error(rid, exc, source_filename=filename)
         finally:
+            _STATE.executing_tasks.discard(task)
+            if task in _STATE.interrupted_tasks:
+                _STATE.interrupted_tasks.discard(task)
+                # On Windows cells run on the long-lived serve task; clear the
+                # cancel requests it absorbed (Python 3.11+).
+                uncancel = getattr(task, "uncancel", None)
+                if uncancel is not None:
+                    while uncancel():
+                        pass
             _end_exec_sigint()
             try:
                 _flush_matplotlib_figures()

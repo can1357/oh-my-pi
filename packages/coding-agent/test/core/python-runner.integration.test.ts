@@ -245,6 +245,36 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
+	it("cancels a cell parked on top-level await via SIGINT and keeps its state", async () => {
+		using tempDir = TempDir.createSync("@python-runner-cancel-await-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			await executePythonWithKernel(kernel, "seed = 41");
+			const ac = new AbortController();
+			// Abort once the cell reports it is parked, so SIGINT lands while the
+			// main thread idles in the event loop rather than in sync code.
+			const pending = executePythonWithKernel(
+				kernel,
+				"import asyncio\nprint('parked', flush=True)\nawait asyncio.sleep(30)",
+				{
+					signal: ac.signal,
+					onChunk: chunk => {
+						if (chunk.includes("parked")) ac.abort(new DOMException("user cancelled", "AbortError"));
+					},
+				},
+			);
+			const result = await pending;
+			expect(result.cancelled).toBe(true);
+			// The same kernel process must survive with its namespace intact.
+			expect(kernel.isAlive()).toBe(true);
+			const next = await executePythonWithKernel(kernel, "print(seed + 1)");
+			expect(next.exitCode).toBe(0);
+			expect(next.output).toContain("42");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
 	it("executes file-backed cells in the retained namespace with script import semantics", async () => {
 		using tempDir = TempDir.createSync("@python-runner-file-");
 		const scriptDir = path.join(tempDir.path(), "scripts");
