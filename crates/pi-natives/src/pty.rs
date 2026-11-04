@@ -346,6 +346,46 @@ macro_rules! setup_fault {
 	($step:expr) => {};
 }
 
+// Under test, the terminal thread whose start must fail, to prove a thread
+// the host refuses never leaves the child behind.
+#[cfg(test)]
+thread_local! {
+	static FAIL_THREAD: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// Fails the start of terminal thread `$what` when a test asks for it. It
+/// compiles to nothing outside the tests.
+#[cfg(test)]
+macro_rules! thread_fault {
+	($what:expr) => {
+		if FAIL_THREAD.with(std::cell::Cell::get) == Some($what) {
+			return Err(Error::from_reason(format!(
+				"injected terminal thread start failure: {}",
+				$what
+			)));
+		}
+	};
+}
+
+#[cfg(not(test))]
+macro_rules! thread_fault {
+	($what:expr) => {};
+}
+
+/// Starts a terminal thread the run cannot go on without. `std::thread::spawn`
+/// panics when the host refuses a thread, and after the child exists a panic
+/// unwinds past its owner, so each start here is fallible and its failure is
+/// one error the caller returns while the guard above still owns the child.
+fn start_terminal_thread<F>(what: &'static str, body: F) -> Result<std::thread::JoinHandle<()>>
+where
+	F: FnOnce() + Send + 'static,
+{
+	thread_fault!(what);
+	std::thread::Builder::new()
+		.spawn(body)
+		.map_err(|err| Error::from_reason(format!("Failed to start the PTY {what} thread: {err}")))
+}
+
 fn run_pty_sync(
 	config: PtyRunConfig,
 	on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
@@ -482,12 +522,11 @@ fn run_pty_sync(
 	if let Some(callback) = on_start.as_ref() {
 		callback.call(Ok(child_process_id.unwrap_or(0)), ThreadsafeFunctionCallMode::NonBlocking);
 	}
-	// No heartbeat check, and no other `?`, from here on: `child` now owns a
-	// real, already-`exec`'d OS process, and bailing out at this point would
-	// drop the master without ever killing or reaping it — the
-	// master hangup delivers SIGHUP to the child (it's the pty's session
-	// leader), which kills it almost immediately, but nothing calls
-	// wait() afterward, so it leaks as a permanent zombie. A cancellation
+	// No heartbeat check from here on: `child` now owns a real, already-
+	// `exec`'d OS process. The master hangup delivers SIGHUP to the child
+	// (it's the pty's session leader), which kills it almost immediately, but
+	// nothing calls wait() afterward, so an exit from here that only dropped
+	// the master would leak the child as a permanent zombie. A cancellation
 	// here is instead delivered by the cancel forwarder below (immediately,
 	// for an already-aborted token) and handled by the control loop, which
 	// kills, and whose waiter thread reaps, correctly.
@@ -511,7 +550,7 @@ fn run_pty_sync(
 	// Shared with the drain, which flushes a partial character the terminal
 	// will not complete before it leaves a terminal a daemon holds open.
 	let decoder = Arc::new(Mutex::new(OutputDecoder::new()));
-	let reader_thread = std::thread::spawn({
+	let reader_thread = start_terminal_thread("reader", {
 		let progress = Arc::clone(&progress);
 		let decoder = Arc::clone(&decoder);
 		move || {
@@ -551,7 +590,7 @@ fn run_pty_sync(
 			}
 			let _ = reader_tx.send(ReaderEvent::Done);
 		}
-	});
+	})?;
 
 	// Pin the kill targets before the waiter thread can reap the child: after
 	// the reap its pid may be recycled, and a pid-only signal (a lookup at
@@ -573,9 +612,10 @@ fn run_pty_sync(
 	// `wait` also guarantees the reap even after the run stops waiting for a
 	// SIGKILL'd child (`std::process::Child` never waits on `Drop`).
 	let exit_tx = control_tx.clone();
-	std::thread::spawn(move || {
+	start_terminal_thread("waiter", move || {
+		let mut child = child;
 		let _ = exit_tx.send(ControlMessage::Exited(child.wait()));
-	});
+	})?;
 	let cancel_tx = control_tx.clone();
 	let cancel_task = napi::tokio::spawn(async move {
 		let timed_out = matches!(ct.wait().await, task::AbortReason::Timeout);
@@ -1724,6 +1764,44 @@ mod zombie_repro_tests {
 		thread::sleep(Duration::from_millis(500));
 		let left: Vec<u32> = sleep_children().difference(&before).copied().collect();
 		assert!(left.is_empty(), "failed setup left children behind: {left:?}");
+	}
+
+	/// The steps that remain after the spawn are the threads the run needs:
+	/// the terminal reader and the child's waiter. `std::thread::spawn`
+	/// panics when the host refuses a thread, and a panic or an error there
+	/// used to drop the master with no kill and no wait, so the child died of
+	/// the hangup and stayed a zombie of this process. Each start must fail
+	/// the run and leave nothing behind.
+	#[test]
+	fn a_failed_terminal_thread_start_leaves_no_child() {
+		let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+		let _runtime = runtime.enter();
+		let before = sleep_children();
+		for what in ["reader", "waiter"] {
+			super::FAIL_THREAD.with(|fail| fail.set(Some(what)));
+			let (tx, rx) = flume::unbounded();
+			let config = PtyRunConfig {
+				command: PtyCommand::Argv {
+					application: STORM_CHILD_COMM.to_string(),
+					args:        vec!["30".to_string()],
+				},
+				cwd:     None,
+				env:     None,
+				cols:    80,
+				rows:    24,
+			};
+			let result =
+				run_pty_sync(config, None, None, tx, rx, task::CancelToken::new(Some(30_000), None));
+			super::FAIL_THREAD.with(|fail| fail.set(None));
+			let error = result
+				.err()
+				.unwrap_or_else(|| panic!("{what}: the injected failure must fail the run"));
+			assert!(error.reason.contains("injected"), "{what}: {}", error.reason);
+		}
+		// Let a kill and its reap land.
+		thread::sleep(Duration::from_millis(500));
+		let left: Vec<u32> = sleep_children().difference(&before).copied().collect();
+		assert!(left.is_empty(), "a failed thread start left children behind: {left:?}");
 	}
 
 	#[test]
