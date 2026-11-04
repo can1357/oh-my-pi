@@ -7,7 +7,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Database } from "bun:sqlite";
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import { closeDb, initDb } from "@oh-my-pi/omp-stats/db";
 import { getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
@@ -33,13 +33,12 @@ describe("initDb under a peer's write lock", () => {
 		}
 	}, 20_000);
 
-	it("creates stats.db after a peer's write transaction outlasts the busy timeout", async () => {
+	it("creates stats.db once a peer that held the write lock through the first attempt commits", async () => {
 		const dbPath = getStatsDbPath();
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-		const started = `${dbPath}.started`;
-		// Real time on purpose: the peer holds a wall-clock lock in another process. It keeps holding
-		// for 8 s from the moment initDb starts (the `started` file), longer than initDb's 5 s busy
-		// handler, so one busy wait alone cannot outlast it.
+		const release = `${dbPath}.release`;
+		// The peer holds the write lock until the open sleeps before a retry, so the first attempt
+		// always fails on it whatever the host's load; an opener with no retry never releases it.
 		const script = `
 			const fs = require("node:fs");
 			const { Database } = require("bun:sqlite");
@@ -49,18 +48,32 @@ describe("initDb under a peer's write lock", () => {
 			db.run("CREATE TABLE peer (id INTEGER)");
 			console.log("held");
 			const poll = setInterval(() => {
-				if (!fs.existsSync(${JSON.stringify(started)})) return;
+				if (!fs.existsSync(${JSON.stringify(release)})) return;
 				clearInterval(poll);
-				setTimeout(() => { db.run("COMMIT"); db.close(); }, 8000);
+				db.run("COMMIT");
+				db.close();
 			}, 10);
 		`;
 		const peer = Bun.spawn([process.execPath, "-e", script], { stdout: "pipe", stderr: "inherit" });
-		const { value } = await peer.stdout.getReader().read();
-		expect(new TextDecoder().decode(value)).toContain("held");
+		try {
+			const { value } = await peer.stdout.getReader().read();
+			expect(new TextDecoder().decode(value)).toContain("held");
+			const sleep = Bun.sleep.bind(Bun);
+			const sleepSpy = vi.spyOn(Bun, "sleep").mockImplementation(async ms => {
+				fs.writeFileSync(release, "");
+				await peer.exited;
+				return sleep(ms);
+			});
 
-		fs.writeFileSync(started, "");
-		const db = await initDb();
-		expect(db.query("SELECT 1 AS present FROM sqlite_master WHERE name = 'messages'").get()).toEqual({ present: 1 });
-		await peer.exited;
+			const db = await initDb();
+			expect(sleepSpy).toHaveBeenCalled();
+			expect(db.query("SELECT 1 AS present FROM sqlite_master WHERE name = 'messages'").get()).toEqual({
+				present: 1,
+			});
+		} finally {
+			vi.restoreAllMocks();
+			peer.kill();
+			await peer.exited;
+		}
 	}, 60_000);
 });
