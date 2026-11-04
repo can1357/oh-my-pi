@@ -1478,6 +1478,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
+	/** Suspend turn-scoped sleep prevention only once the agent has actually parked. */
+	#onAgentPauseChange(paused: boolean): void {
+		if (paused) {
+			this.#releasePowerAssertion();
+			this.#endComputerTurn();
+		} else if (this.#promptInFlightCount > 0) {
+			this.#acquirePowerAssertion();
+			this.#resumeComputerTurn();
+		}
+	}
+
 	#beginInFlight(): number {
 		this.#promptInFlightCount++;
 		if (this.#promptInFlightCount === 1) {
@@ -1525,7 +1536,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		} finally {
 			if (--this.#userWaitCount === 0 && this.#promptInFlightCount > 0) {
 				if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
-				else if (this.#agentKind === "main") resumeComputerTurnForOwner(this.#eval.getKernelOwnerId());
+				else this.#resumeComputerTurn();
 			}
 		}
 	}
@@ -1537,6 +1548,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#beginComputerTurn(): void {
 		if (this.#agentKind !== "main" || this.#userWaitCount > 0) return;
 		beginComputerTurnForOwner(this.#eval.getKernelOwnerId());
+	}
+
+	/** Continues a turn whose display hold a dialog or pause released, re-holding the display for its active run. */
+	#resumeComputerTurn(): void {
+		if (this.#agentKind !== "main" || this.#userWaitCount > 0) return;
+		resumeComputerTurnForOwner(this.#eval.getKernelOwnerId());
 	}
 
 	#endComputerTurn(): void {
@@ -2996,6 +3013,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// (session persistence, hooks, auto-compaction, retry logic)
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
 		this.#unsubscribeQueueChange = this.agent.onQueueChange(() => this.#emitQueueUpdateIfChanged());
+		this.addDisposer(this.agent.onPauseChange(paused => this.#onAgentPauseChange(paused)));
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		cfgProviderAppendOnlyContext.listen(this, () => this.#syncAppendOnlyContext(this.model));
 		cfgModelRoles.listen(this, () => this.#advisors.reconcileModelRoles());
@@ -3197,8 +3215,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#autoQaEnabled = isAutoQaEnabled(this.settings);
 		cfgPowerSleepPrevention.listen(this, () => {
 			// Swap the held assertion for the new mode mid-prompt; idle sessions
-			// pick the mode up when the next prompt begins.
-			if (this.#promptInFlightCount === 0) return;
+			// pick the mode up when the next prompt begins, and a parked one when
+			// it resumes (see #onAgentPauseChange).
+			if (this.#promptInFlightCount === 0 || this.agent.isPaused) return;
 			this.#releasePowerAssertion();
 			this.#acquirePowerAssertion();
 		});
