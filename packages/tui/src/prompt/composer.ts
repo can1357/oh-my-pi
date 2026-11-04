@@ -957,7 +957,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		}
 		const batch = this.#historyFlush
 			? transcript.peekFlushBatch(width)
-			: transcript.peekFinalizedBatch(width, Math.max(0, rows - chromeRows));
+			: transcript.peekFinalizedBatch(width, Math.max(0, rows - chromeRows), rows);
 		if (batch === undefined) return undefined;
 		this.#offeredHistory = {
 			id: this.#nextHistoryId++,

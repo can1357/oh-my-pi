@@ -206,21 +206,35 @@ function rowSplit(scrollback: readonly string[], rows: number, width: number): R
 }
 
 /**
- * `cut` moved to just below an image it would split, on terminals that cannot
- * draw part of an image (iTerm2's inline images). There the image row draws
- * the whole picture upward over its reserved rows; once some of those rows are
- * in scrollback, the picture has nowhere to go and is dropped, so the image
- * must reach scrollback whole. Kitty and SIXEL draw the visible part instead.
+ * `cut` moved to just below an image it would split, on terminals whose image
+ * cannot cross the scrollback boundary. iTerm2's inline images and a SIXEL
+ * raster both draw the whole picture upward from the image row over its
+ * reserved rows; once some of those rows are in scrollback the picture has
+ * nowhere to go, and the committed prefix keeps only blank reserved rows, so
+ * the image must reach scrollback whole. Drawing part of an image live is a
+ * separate path (`cropSixelTop`), and it does not recover rows already
+ * committed. Kitty placeholders are real cells and do survive a split.
+ *
+ * An image taller than the frame cannot reach scrollback whole: the history
+ * write caps `frameRow` at `height - 1` and crops the rest, so the cut stops at
+ * the image's first row instead. The blanks between that row and the raster
+ * carry no text or image anchor for `#splitRowCount()` to relocate by, and the
+ * block stays live, cropped each frame, so only the content above the image is
+ * archived.
  */
-function cutBelowWholeImage(rows: readonly string[], cut: number): number {
+function cutBelowWholeImage(rows: readonly string[], cut: number, capacity?: number): number {
 	const protocol = TERMINAL.imageProtocol;
-	if (protocol === null || protocol === ImageProtocol.Kitty || protocol === ImageProtocol.Sixel) return cut;
+	if (protocol === null || protocol === ImageProtocol.Kitty) return cut;
 	// Only reserved rows sit between a cut inside an image and its image row,
 	// so the first image row at or below the cut decides.
 	for (let index = Math.max(0, cut); index < rows.length; index++) {
 		const row = rows[index]!;
 		if (!TERMINAL.isImageLine(row)) continue;
-		return index - directPlacementLift(row) < cut ? index + 1 : cut;
+		const lift = directPlacementLift(row);
+		// The frame must hold the rows the raster climbs over, not its block
+		// index: text above it in the same block writes at earlier rows.
+		if (capacity !== undefined && lift >= capacity) return Math.min(cut, index - lift);
+		return index - lift < cut ? index + 1 : cut;
 	}
 	return cut;
 }
@@ -715,9 +729,14 @@ export class TranscriptContainer extends Container {
 		return drop > 0 ? output.slice(drop) : output;
 	}
 
-	/** Offers stable-head emission or the shortest finalized prefix needed under pressure. */
-	peekFinalizedBatch(width: number, capacity: number): HistoryBatch | undefined {
-		return this.#peekBatch(width, capacity, "pressure");
+	/**
+	 * Offers stable-head emission or the shortest finalized prefix needed under
+	 * pressure. `frameHeight` is the terminal's physical row count: an image
+	 * taller than the frame cannot be written whole, so the whole-image move is
+	 * skipped for it. Omit it when the caller has no frame height to bound by.
+	 */
+	peekFinalizedBatch(width: number, capacity: number, frameHeight?: number): HistoryBatch | undefined {
+		return this.#peekBatch(width, capacity, "pressure", frameHeight);
 	}
 
 	/** Returns only a prepared complete replay, never a normal retirement offer. */
@@ -790,7 +809,12 @@ export class TranscriptContainer extends Container {
 		return offered.batch;
 	}
 
-	#peekBatch(width: number, capacity: number, policy: RetirementPolicy): HistoryBatch | undefined {
+	#peekBatch(
+		width: number,
+		capacity: number,
+		policy: RetirementPolicy,
+		frameHeight?: number,
+	): HistoryBatch | undefined {
 		this.#syncEntries();
 		this.#settleFinalized();
 		if (this.#offered !== undefined) return this.#offered.batch;
@@ -881,18 +905,20 @@ export class TranscriptContainer extends Container {
 		// screen; the rest stays live, so a later shrink of the chrome or the
 		// tail refills the screen from live rows instead of opening a band no
 		// frame can fill (rows still on screen cannot return from scrollback).
-		// One exception: on a terminal that cannot draw part of an image, a cut
-		// inside an image moves below it (cutBelowWholeImage), so up to that
-		// image's height of on-screen rows commits early. A later shrink can then
-		// open a band that tall, which beats losing the image.
+		// One exception: on a terminal whose image cannot cross the scrollback
+		// boundary, a cut inside an image moves below it (cutBelowWholeImage), so
+		// up to that image's height of on-screen rows commits early. A later
+		// shrink can then open a band that tall, which beats losing the image.
 		let split: { index: number; rows: readonly string[]; split: RowSplit } | undefined;
 		if (policy === "pressure" && keep > 0 && limit === this.#frontier + keep) {
 			const boundary = live[keep - 1]!;
 			const visible = room - tailRows - (tailRows > 0 ? 1 : 0);
 			if (boundary.entry.state === "settled" && visible > 0) {
-				const offer = this.#splitOffer(boundary.entry, width, visible);
+				const offer = this.#splitOffer(boundary.entry, width, visible, frameHeight);
 				if (offer === "whole") {
 					limit = boundary.index + 1;
+				} else if (offer === "blocked") {
+					limit = boundary.index;
 				} else if (offer !== undefined) {
 					split = { index: boundary.index, ...offer };
 					limit = boundary.index;
@@ -938,13 +964,16 @@ export class TranscriptContainer extends Container {
 	 * past that prefix or the scrollback render would not line up row for row.
 	 * `"whole"` when keeping an image whole moves the cut to the block's end:
 	 * the block then retires in full, with the blank row that separates it from
-	 * the next block, which a split never carries.
+	 * the next block, which a split never carries. `"blocked"` when the cut lands
+	 * in an image taller than `frameHeight`: it cannot be written whole, so the
+	 * block stays live rather than committing blanks nothing can relocate by.
 	 */
 	#splitOffer(
 		entry: TranscriptEntry,
 		width: number,
 		visible: number,
-	): { rows: readonly string[]; split: RowSplit } | "whole" | undefined {
+		frameHeight: number | undefined,
+	): { rows: readonly string[]; split: RowSplit } | "whole" | "blocked" | undefined {
 		const measured = this.#measure(entry, width).rows;
 		const start = this.#emittedRowCount(entry, width);
 		const cut = measured.length - visible;
@@ -953,7 +982,10 @@ export class TranscriptContainer extends Container {
 		// order; this render precedes the retired blocks and must claim no slot.
 		const scrollback = measureRender(() => renderForScrollback(() => this.#renderEntry(entry, width))).value;
 		if (scrollback.length !== measured.length) return undefined;
-		const total = cutBelowWholeImage(scrollback, cut);
+		const total = cutBelowWholeImage(scrollback, cut, frameHeight);
+		// An image taller than the frame: nothing past its first row is committable,
+		// and its blanks carry no anchor, so the block stays live as it is.
+		if (total <= start) return "blocked";
 		if (total >= scrollback.length) return "whole";
 		return { rows: scrollback.slice(start, total), split: rowSplit(scrollback, total, width) };
 	}
