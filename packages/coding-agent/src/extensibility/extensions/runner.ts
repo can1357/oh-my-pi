@@ -52,7 +52,6 @@ import {
 	readTranscriptPresentation,
 } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import type {
-	AgentEndEvent,
 	AfterProviderResponseEvent,
 	AssistantMessageRewriteEvent,
 	AssistantMessageRewriteResult,
@@ -573,7 +572,6 @@ export class ExtensionRunner {
 	#sessionStartEvent: RunnerEmitEvent | undefined;
 	/** Notified after {@link setSuspendedExtensions} suspends or resumes any extension. */
 	#suspensionListeners = new Set<() => void>();
-	#agentEndSettledListeners = new Set<(event: AgentEndEvent) => () => void>();
 	/** Fail-open wrappers of transcript presenters, kept so their identity is stable. */
 	#guardedPresenters = new WeakMap<TranscriptPresenter, TranscriptPresenter>();
 	/** Main runner whose suspensions this runner's drawing follows; see {@link followSuspension}. */
@@ -1528,9 +1526,8 @@ export class ExtensionRunner {
 
 	/**
 	 * Transcript presenters in extension load order, skipping suspended extensions. Each answers
-	 * plain data read inside its guard (see `readTranscriptPresentation`), or `"full"` whenever it
-	 * throws or answers something that is not a `TranscriptPresentation`, and reports its first
-	 * such failure through {@link emitError}.
+	 * plain data read inside its guard (see `readTranscriptPresentation`), or `"full"` when it throws
+	 * or answers something else, reporting its first such failure through {@link emitError}.
 	 */
 	getTranscriptPresenters(): TranscriptPresenter[] {
 		const presenters: TranscriptPresenter[] = [];
@@ -1539,32 +1536,27 @@ export class ExtensionRunner {
 				let guarded = this.#guardedPresenters.get(presenter);
 				if (!guarded) {
 					let reported = false;
+					const report = (failure: { error: string; stack?: string }): void => {
+						reported = true;
+						this.emitError({ extensionPath: ext.path, event: "transcript_presenter", ...failure });
+					};
 					guarded = block => {
-						let failure: { error: string; stack?: string } | undefined;
 						try {
 							const answer: unknown = presenter(block);
 							const presentation = readTranscriptPresentation(answer);
 							if (presentation !== null) return presentation;
-							const then =
-								typeof answer === "object" && answer !== null && "then" in answer ? answer.then : undefined;
-							if (typeof then === "function") {
-								// Nothing else awaits it: its rejection must not go unhandled.
-								then.call(answer, undefined, () => {});
-								failure = { error: "Answered a Promise: presenters answer synchronously; drawn in full" };
-							} else if (!reported) {
-								failure = {
-									error: `Unknown transcript presentation ${Bun.inspect(answer, { depth: 1 })}; drawn in full`,
-								};
-							}
+							// An async presenter: nothing awaits its Promise, so a rejection must not go unhandled.
+							if (answer instanceof Promise) answer.catch(() => {});
+							if (!reported)
+								report({ error: `Unknown transcript presentation ${Bun.inspect(answer, { depth: 1 })}` });
 						} catch (error) {
-							failure =
-								error instanceof Error
-									? { error: error.message, stack: error.stack }
-									: { error: String(error) };
-						}
-						if (failure && !reported) {
-							reported = true;
-							this.emitError({ extensionPath: ext.path, event: "transcript_presenter", ...failure });
+							if (!reported) {
+								report(
+									error instanceof Error
+										? { error: error.message, stack: error.stack }
+										: { error: String(error) },
+								);
+							}
 						}
 						return "full";
 					};
@@ -1939,43 +1931,11 @@ export class ExtensionRunner {
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
-		// Taken when the broadcast starts, so each run's settle pairs with that run even when a later
-		// run's broadcast settles first. A failing listener costs only its own settle.
-		const settled: Array<() => void> = [];
-		if (event.type === "agent_end") {
-			for (const listener of this.#agentEndSettledListeners) {
-				try {
-					settled.push(listener(event));
-				} catch (error) {
-					logger.warn("agent_end settle listener threw", { error: String(error) });
-				}
-			}
-		}
-		try {
-			const result = await this.#emitTo(this.extensions, event);
-			// Recorded once the broadcast ends: an extension added mid-broadcast is
-			// reached by the live iteration, one added later gets the replay.
-			if (event.type === "session_start") this.#sessionStartEvent = event;
-			return result;
-		} finally {
-			for (const settle of settled) {
-				try {
-					settle();
-				} catch (error) {
-					logger.warn("agent_end settle listener threw", { error: String(error) });
-				}
-			}
-		}
-	}
-
-	/**
-	 * Call `listener` when a run's `agent_end` broadcast starts; the function it returns runs once
-	 * every handler for that broadcast has settled (returned, failed or timed out). Returns the
-	 * unsubscribe.
-	 */
-	onAgentEndSettled(listener: (event: AgentEndEvent) => () => void): () => void {
-		this.#agentEndSettledListeners.add(listener);
-		return () => this.#agentEndSettledListeners.delete(listener);
+		const result = await this.#emitTo(this.extensions, event);
+		// Recorded once the broadcast ends: an extension added mid-broadcast is
+		// reached by the live iteration, one added later gets the replay.
+		if (event.type === "session_start") this.#sessionStartEvent = event;
+		return result;
 	}
 
 	async #emitTo<TEvent extends RunnerEmitEvent>(

@@ -433,7 +433,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		this.#updateDisplay();
 	}
 
-	/** Reads a presenter leaves full draw as the group; a compact read is a row of its own; hidden draws nothing. */
+	/**
+	 * Reads a presenter leaves full draw as the group, at the first full read's place; a compact
+	 * read is a row of its own; hidden draws nothing.
+	 */
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible) return [];
 		const entries = [...this.#entries.values()];
@@ -468,10 +471,6 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (!changed) return false;
 		this.#blockVersion++;
 		return true;
-	}
-
-	transcriptBlockIds(): readonly string[] {
-		return [...this.#entries.keys()];
 	}
 
 	#newEntry(toolCallId: string, displayPath: string): ReadEntry {

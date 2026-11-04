@@ -261,6 +261,9 @@ export interface ToolExecutionHandle extends Component {
 	seal(): void;
 }
 
+/** {@link ToolExecutionComponent.nativeTrailers} of a hidden call without late diagnostics. */
+const EMPTY_TRAILERS: readonly Component[] = [];
+
 /** Tools whose returned call hands its card to the background job it started (see {@link parksAsBackground}). */
 const JOB_CARD_TOOLS: Record<string, "always" | "native"> = { task: "always", bash: "native", eval: "native" };
 
@@ -1214,17 +1217,16 @@ export class ToolExecutionComponent extends Container {
 	nativeTrailers(): readonly Component[] {
 		const mode = this.#presentation.shown.mode;
 		const late = this.#lateDiagnostics;
-		const diagnostics: Component[] = [];
-		if (mode !== "full" && late !== undefined) {
-			if (this.#lateDiagnosticsBlock?.files !== late) {
-				this.#lateDiagnosticsBlock = { files: late, block: new LateDiagnosticsMessageComponent([...late]) };
-			}
-			// Not a transcript child: the transcript-wide visibility reaches it only through this card.
-			this.#lateDiagnosticsBlock.block.setToolActivityVisible(this.#toolActivityVisible);
-			diagnostics.push(this.#lateDiagnosticsBlock.block);
+		// Drawn in full, the card shows its diagnostics itself: the notices' own (stable) list.
+		if (mode === "full" || late === undefined) return mode === "hidden" ? EMPTY_TRAILERS : this.#spotlight.list();
+		if (this.#lateDiagnosticsBlock?.files !== late) {
+			this.#lateDiagnosticsBlock = { files: late, block: new LateDiagnosticsMessageComponent([...late]) };
 		}
+		const diagnostics = this.#lateDiagnosticsBlock.block;
+		// Not a transcript child: the transcript-wide visibility reaches it only through this card.
+		diagnostics.setToolActivityVisible(this.#toolActivityVisible);
 		// A call a presenter hides takes its notice with it.
-		return mode === "hidden" ? diagnostics : [...this.#spotlight.list(), ...diagnostics];
+		return mode === "hidden" ? [diagnostics] : [...this.#spotlight.list(), diagnostics];
 	}
 
 	refreshTranscriptPresentation(ids?: ReadonlySet<string>): boolean {
@@ -1232,10 +1234,6 @@ export class ToolExecutionComponent extends Container {
 		this.#blockVersion++;
 		super.invalidate();
 		return true;
-	}
-
-	transcriptBlockIds(): readonly string[] {
-		return [this.#toolCallId ?? ""];
 	}
 
 	/** The streamed call's id changed (or an empty one was filled in): presenters see, and refresh by, the new one. */

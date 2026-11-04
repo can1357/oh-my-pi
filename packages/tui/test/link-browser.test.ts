@@ -6,7 +6,6 @@ import type { TUI } from "../src/index";
 import { LinkBrowserComponent } from "../src/overlays/link-browser";
 import { setExtensionLinks } from "../src/render/extension-links";
 import { initTheme } from "../src/theme";
-import { setTranscriptPresenters } from "../src/chat/transcript-presentation";
 
 const WIDTH = 60;
 // Three border rows, a header and a footer leave seven transcript rows in view.
@@ -262,62 +261,6 @@ describe("extension link browser", () => {
 		browser.handleInput(END);
 		expect(view().some(row => row.includes("Details two."))).toBe(true);
 		browser.dispose();
-	});
-
-	it("draws tool calls as stock cards without asking the transcript presenters", () => {
-		// Regression guard: the browser's replay drawing the main transcript's presenter answers,
-		// which then went stale there with no way to ask again.
-		let asked = 0;
-		setTranscriptPresenters([
-			() => {
-				asked++;
-				return { compact: { label: "PRESENTED" } };
-			},
-		]);
-		try {
-			const call: AssistantMessage = {
-				role: "assistant",
-				content: [{ type: "toolCall", id: "call-1", name: "lookup_thing", arguments: { q: "x" } }],
-				api: "anthropic-messages",
-				provider: "anthropic",
-				model: "claude-sonnet-4-5",
-				stopReason: "toolUse",
-				usage: {
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 0,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-				timestamp: 3,
-			};
-			const entries: SessionMessageEntryLike[] = [
-				reply("First [gamma](demo:g) here.", 1),
-				{ type: "message", id: "c1", parentId: null, timestamp: new Date(3).toISOString(), message: call },
-				{
-					type: "message",
-					id: "c2",
-					parentId: null,
-					timestamp: new Date(4).toISOString(),
-					message: {
-						role: "toolResult",
-						toolCallId: "call-1",
-						toolName: "lookup_thing",
-						content: [{ type: "text", text: "ok" }],
-						isError: false,
-						timestamp: 4,
-					},
-				},
-			];
-			const { browser, view } = browse(entries);
-			expect(view().some(row => row.includes("lookup_thing"))).toBe(true);
-			expect(view().some(row => row.includes("PRESENTED"))).toBe(false);
-			expect(asked).toBe(0);
-			browser.dispose();
-		} finally {
-			setTranscriptPresenters([]);
-		}
 	});
 
 	it("keeps the rows above a reply where they were when the extension rerenders it shorter", () => {

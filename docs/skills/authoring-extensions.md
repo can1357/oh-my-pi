@@ -229,11 +229,14 @@ Full event catalog: see [extension authoring guide](../extensions.md).
 
 ```ts
 const finished = new Set<string>(); // tool calls of runs that have ended
-pi.on("agent_end", event => {
+pi.on("agent_end", (event, ctx) => {
+	const ids: string[] = [];
 	for (const message of event.messages) {
 		if (message.role !== "assistant") continue;
-		for (const part of message.content) if (part.type === "toolCall") finished.add(part.id);
+		for (const part of message.content) if (part.type === "toolCall") ids.push(part.id);
 	}
+	for (const id of ids) finished.add(id);
+	ctx.ui.refreshTranscript(ids); // omp asks on its own only when a block's data changes
 });
 pi.registerTranscriptPresenter(block => {
 	if (block.type !== "toolCall") return undefined;
@@ -241,7 +244,7 @@ pi.registerTranscriptPresenter(block => {
 });
 ```
 
-- omp asks again when a block's data changes, once per run after every `agent_end` handler has settled, and whenever it rebuilds the transcript. Answer from the block and state keyed by its `id`, never per-run state. Call `ctx.ui.refreshTranscript(ids)` when your own state changes at another time.
+- omp asks again when a block's data changes and whenever it rebuilds the transcript; call `ctx.ui.refreshTranscript(ids)` after your own state changes. Answer from the block and state keyed by its `id`, never per-run state. Presenters run while the transcript draws: keep them cheap.
 - Focused subagents, collab guests and transcript overlays (link browser, rewind, `/copy`) draw stock cards.
 - Expanded blocks (`Ctrl+O`, Tern's toggle) always draw in full; display only, the session and model context are untouched. `block.args` and `block.result` are omp's live objects: read them, never mutate them.
 - Changing a block that already scrolled into terminal scrollback replays the whole scrollback once; avoid changing old blocks often.

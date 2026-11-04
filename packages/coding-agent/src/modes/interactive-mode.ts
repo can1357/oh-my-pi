@@ -2052,25 +2052,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	#redrawReplay: RenderTimer | undefined;
 	/** A scrollback replay is rendering. */
 	#replaying = false;
-	/**
-	 * The main session's current run (a chain of runs, continuations included), `undefined` before
-	 * the first `agent_start` seen. Blocks join the run in progress; a new run tags them with the run
-	 * they belong to ({@link #blockRun}). Each `agent_end` broadcast takes its run when it starts
-	 * and asks that run's blocks again once it settles, even after later runs started.
-	 */
-	#run: object | undefined;
-	/** {@link #run} is over (a terminal `agent_end`, or `endTranscriptRun`): the next `agent_start` starts a new one. */
-	#runEnded = false;
-	/**
-	 * The run each block was added in, by the ids presenters see (a transcript rebuild draws them
-	 * as new components), recorded for the transcript's blocks when the next run starts; blocks of
-	 * the current run have none.
-	 */
-	#blockRun = new Map<string, object>();
-	/** The run tag of blocks that predate every run seen. */
-	readonly #earlierBlocks = {};
-	/** The main session's runner whose settled `agent_end` hooks re-ask the transcript, while presenters draw it. */
-	#runWatch: { runner: ExtensionRunner; dispose: () => void } | undefined;
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	/** Repaints the subagent HUD so live-preview elapsed markers advance between progress events. */
 	#subagentPreviewTickTimer?: NodeJS.Timeout;
@@ -2844,8 +2825,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 		this.#applyTranscriptPresenters();
 		this.#eventBusUnsubscribers.push(() => {
-			this.#runWatch?.dispose();
-			this.#runWatch = undefined;
 			this.#redrawReplay?.cancel();
 			this.#redrawReplay = undefined;
 		});
@@ -4669,74 +4648,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	#applyTranscriptPresenters(): boolean {
 		const runner = this.viewSession === this.session && !this.collabGuest ? this.session.extensionRunner : undefined;
-		const changed = setTranscriptPresenters(runner?.getTranscriptPresenters() ?? []);
-		this.#watchRuns(runner);
-		return changed;
+		return setTranscriptPresenters(runner?.getTranscriptPresenters() ?? []);
 	}
 
 	#syncTranscriptPresenters(): void {
 		if (this.#applyTranscriptPresenters()) this.refreshTranscriptPresentation();
-	}
-
-	#startTranscriptRun(): void {
-		// A continuation joins the run in progress; anything else starts a new run.
-		if (this.#run !== undefined && !this.#runEnded) return;
-		const outgoing = this.#run ?? this.#earlierBlocks;
-		// Rebuilt from the blocks still in the transcript, so it never outgrows the transcript.
-		const blockRun = new Map<string, object>();
-		for (const id of this.#transcriptBlockIds()) blockRun.set(id, this.#blockRun.get(id) ?? outgoing);
-		this.#blockRun = blockRun;
-		this.#run = {};
-		this.#runEnded = false;
-	}
-
-	endTranscriptRun(): void {
-		this.#runEnded = true;
-	}
-
-	/** The ids presenters see for the transcript's blocks; a call whose id has not arrived (`""`) has none to track. */
-	*#transcriptBlockIds(): Generator<string> {
-		for (const block of this.chatContainer.children) {
-			if (!isTranscriptPresentable(block)) continue;
-			for (const id of block.transcriptBlockIds()) if (id) yield id;
-		}
-	}
-
-	/**
-	 * Re-ask the main session's run once its `agent_end` handlers settle, so presenters see the
-	 * state those handlers left; nothing while the transcript draws stock (`runner` undefined). Run
-	 * tracking starts over with each watch: the first settle after the main transcript returns
-	 * (focusing a subagent, a collab session) asks every block.
-	 */
-	#watchRuns(runner: ExtensionRunner | undefined): void {
-		if (this.#runWatch?.runner === runner) return;
-		this.#runWatch?.dispose();
-		this.#runWatch = undefined;
-		this.#run = undefined;
-		this.#runEnded = false;
-		this.#blockRun.clear();
-		if (!runner) return;
-		const watch = { runner, dispose: () => {} };
-		const unsubscribe = this.session.subscribe(event => {
-			if (event.type === "agent_start") this.#startTranscriptRun();
-		});
-		const unsettle = runner.onAgentEndSettled(event => {
-			// This broadcast's own run, taken now: a later run may start before it settles.
-			const run = this.#run;
-			if (!event.willContinue) this.#runEnded = true;
-			return () => {
-				if (this.#runWatch !== watch) return;
-				const current = this.#run;
-				const ids = new Set<string>();
-				for (const id of this.#transcriptBlockIds()) if ((this.#blockRun.get(id) ?? current) === run) ids.add(id);
-				if (ids.size > 0) this.refreshTranscriptPresentation(ids);
-			};
-		});
-		watch.dispose = () => {
-			unsubscribe();
-			unsettle();
-		};
-		this.#runWatch = watch;
 	}
 
 	refreshTranscriptPresentation(ids?: ReadonlySet<string>): void {

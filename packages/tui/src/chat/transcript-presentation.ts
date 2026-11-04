@@ -111,20 +111,14 @@ export function readTranscriptPresentation(answer: unknown): TranscriptPresentat
 	};
 }
 
-/** `undefined` when the presenter defers; unknown shapes draw in full. */
+/** `undefined` when the presenter defers. The answer is plain data (see {@link readTranscriptPresentation}). */
 function normalize(answer: TranscriptPresentation): ResolvedPresentation | undefined {
 	if (answer === undefined) return undefined;
+	if (answer === "full") return FULL;
 	if (answer === "hidden") return HIDDEN;
 	if (answer === "compact") return COMPACT;
-	if (typeof answer !== "object" || answer === null || typeof answer.compact !== "object" || !answer.compact) {
-		return FULL;
-	}
-	const { label, rows } = answer.compact;
-	return {
-		mode: "compact",
-		label: isTspText(label) ? singleLine(label) : undefined,
-		rows: Array.isArray(rows) ? rows.filter(isTspText).map(singleLine) : [],
-	};
+	const { label, rows = [] } = answer.compact;
+	return { mode: "compact", label: label === undefined ? undefined : singleLine(label), rows: rows.map(singleLine) };
 }
 
 /** The first answer other than `undefined` wins. */
@@ -267,8 +261,6 @@ export interface TranscriptPresentable {
 	 * the change is not reported again.
 	 */
 	refreshTranscriptPresentation(ids?: ReadonlySet<string>): boolean;
-	/** The `id` of each block presenters see here (a read group has one per read): what `ids` selects by. */
-	transcriptBlockIds(): readonly string[];
 }
 
 export function isTranscriptPresentable(component: Component): component is Component & TranscriptPresentable {
