@@ -35,6 +35,7 @@ import { isMainThread, type ThreadId } from "./identity";
 import type { MainThreadLink, SubagentWorkerInit } from "./protocol";
 import { type RpcFrame, RpcLink } from "./rpc";
 import type { ThreadService, WorkerPeer } from "./services";
+import { sessionsHomedOn } from "./services/agents";
 import { prewarmModelRegistryMirror } from "./services/auth";
 import { THREAD_SERVICES } from "./services/index";
 import { isSubagentWorkerLog, receiveWorkerLog } from "./worker-log";
@@ -48,6 +49,13 @@ const DEFAULT_INIT_TIMEOUT_MS = 30_000;
  * within a minute; a later spawn pays one ~0.2s boot that its streaming tool call hides.
  */
 const DEFAULT_IDLE_MS = 60_000;
+
+/**
+ * Longest process teardown waits for the sessions open on workers to dispose (and record
+ * their `session_exit`) before it terminates the workers. Matches the agent lifecycle's
+ * release grace, inside the 10 s postmortem pass.
+ */
+const SHUTDOWN_SESSION_DISPOSE_MS = 5_000;
 
 /**
  * Concurrent subagent runs below which every run stays on the main thread. A worker costs
@@ -494,6 +502,28 @@ export class SubagentWorkerPool {
 		for (const worker of [...this.#workers.values()]) worker.terminate("worker pool disposed");
 	}
 
+	/**
+	 * Process teardown: dispose every session still open on these workers with `reason` (so
+	 * each records the signal or error that ends the process in its `session_exit`), waiting
+	 * at most {@link SHUTDOWN_SESSION_DISPOSE_MS}, then terminate the workers. Terminating
+	 * first would kill those sessions before they record anything.
+	 */
+	async shutdown(reason: postmortem.Reason): Promise<void> {
+		this.#disposed = true;
+		const sessions = [...this.#workers.values()].flatMap(worker => sessionsHomedOn(worker.threadId));
+		if (sessions.length > 0) {
+			const disposed = Promise.allSettled(sessions.map(session => session.dispose({ reason })));
+			const bound = Promise.withResolvers<void>();
+			const timer = setTimeout(bound.resolve, SHUTDOWN_SESSION_DISPOSE_MS);
+			try {
+				await Promise.race([disposed, bound.promise]);
+			} finally {
+				clearTimeout(timer);
+			}
+		}
+		this.dispose();
+	}
+
 	/** Worker slots open to `inFlight` runs. */
 	#slots(inFlight: number): number {
 		const max = this.#options.maxWorkers();
@@ -605,9 +635,17 @@ export function subagentWorkerPool(settings: Settings): SubagentWorkerPool | und
 			},
 		});
 		processPool = pool;
-		postmortem.register("subagent-worker-pool", () => pool.dispose(), { exitOnly: true });
+		registerSubagentWorkerPoolShutdown(pool);
 	}
 	return processPool;
+}
+
+/**
+ * Shut `pool` down at process exit with the exit's reason ({@link SubagentWorkerPool.shutdown}).
+ * The process pool registers this when it is created. Returns the cancel fn.
+ */
+export function registerSubagentWorkerPoolShutdown(pool: SubagentWorkerPool): () => void {
+	return postmortem.register("subagent-worker-pool", reason => pool.shutdown(reason), { exitOnly: true });
 }
 
 /**

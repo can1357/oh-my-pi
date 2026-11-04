@@ -39,6 +39,7 @@ beforeAll(() => {
 
 const CLI = path.join(import.meta.dir, "../../src/cli.ts");
 const CHILD = path.join(import.meta.dir, "../fixtures/session-exit-context-child.ts");
+const SIGNAL_TREE = path.join(import.meta.dir, "../fixtures/session-exit-signal-tree.ts");
 
 let nextPid = 900_000;
 
@@ -399,6 +400,49 @@ describe("session_exit entry", () => {
 		if (oomKills === undefined) expect(data).not.toHaveProperty("oomKills");
 		else expect(data.oomKills).toBe(oomKills);
 	}, 60_000);
+
+	it("a SIGTERM records the signal and the intent for a parent and its worker-thread subagents, idle and busy", async () => {
+		using tempDir = TempDir.createSync("@omp-exit-context-signal-tree-");
+		const home = tempDir.join("home");
+		fs.mkdirSync(home);
+		const child = Bun.spawn([process.execPath, SIGNAL_TREE, tempDir.join("tree")], {
+			stdout: "pipe",
+			stderr: "pipe",
+			env: privateHomeEnv(home, { TMUX_PANE: "%43" }),
+		});
+		try {
+			const reader = child.stdout.getReader();
+			let output = "";
+			while (!output.includes("\n")) {
+				const { value, done } = await reader.read();
+				if (done) throw new Error(`tree exited before ready: ${await new Response(child.stderr).text()}`);
+				output += new TextDecoder().decode(value);
+			}
+			reader.releaseLock();
+			const ready = /^READY (.+)$/m.exec(output);
+			if (!ready) throw new Error(`unexpected tree output: ${output}`);
+			const files = JSON.parse(ready[1]!) as { parent: string; idle: string; busy: string };
+
+			const cli = runExitIntentCli(home, [String(child.pid), "restart"]);
+			expect(cli.exitCode, cli.stderr.toString()).toBe(0);
+			child.kill("SIGTERM");
+			await child.exited;
+
+			const expected = { reason: "sigterm", kind: "signal", pid: child.pid, pane: "%43", intent: "restart" };
+			expect(await readExitEntry(files.parent)).toMatchObject(expected);
+			// Released by the parent's lifecycle teardown.
+			expect(await readExitEntry(files.idle)).toMatchObject(expected);
+			// Still running its tool call: the worker pool's exit teardown disposes it before terminating the worker.
+			expect(await readExitEntry(files.busy)).toMatchObject({
+				...expected,
+				pendingToolCalls: [{ toolName: "bash" }],
+			});
+			expect(fs.existsSync(cli.stdout.toString().trim())).toBe(false);
+		} finally {
+			child.kill("SIGKILL");
+			await child.exited;
+		}
+	}, 120_000);
 });
 
 const THREAD = path.join(import.meta.dir, "../fixtures/session-exit-context-thread.ts");

@@ -5551,7 +5551,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							getActiveModelString,
 						};
 						await vibeRegistry.suspendScope(vibeRegistry.ownerScope(vibeParentSession), scopedAsyncJobManager);
-						await AgentLifecycleManager.global().dispose();
+						// Every adopted subagent records the reason the owner is torn down for.
+						await AgentLifecycleManager.global().dispose({ reason: options?.reason });
 					}
 					await originalDispose(options);
 				} finally {

@@ -6,7 +6,7 @@ import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "@oh-my-pi/p
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AgentSessionHandle } from "@oh-my-pi/pi-coding-agent/session/agent-session-handle";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
 
 interface SessionStub {
 	session: AgentSession;
@@ -492,12 +492,27 @@ describe("AgentLifecycleManager", () => {
 		lifecycle.adopt("stuck-Sub", { idleTtlMs: TTL });
 		lifecycle.adopt("sibling-Sub", { idleTtlMs: TTL });
 
-		await lifecycle.dispose(Date.now());
+		await lifecycle.dispose({ deadlineAt: Date.now() });
 
 		expect(stuck.disposeCalls()).toBe(1);
 		expect(sibling.disposeCalls()).toBe(1);
 		gate.resolve();
 		await flushAsync();
+	});
+
+	it("disposes every adopted session with the reason the owner is torn down for", async () => {
+		const received: unknown[] = [];
+		const session = {
+			dispose: async (options?: { reason?: postmortem.Reason }) => {
+				received.push(options?.reason);
+			},
+		} as unknown as AgentSession;
+		registerIdleSub("reason-Sub", session);
+		lifecycle.adopt("reason-Sub", { idleTtlMs: TTL });
+
+		await lifecycle.dispose({ reason: postmortem.Reason.SIGTERM });
+
+		expect(received).toEqual([postmortem.Reason.SIGTERM]);
 	});
 
 	it("a delayed release cannot remove or mutate a replacement ref with the same id", async () => {
@@ -1004,7 +1019,7 @@ describe("AgentLifecycleManager", () => {
 
 		const revival = lifecycle.ensureLive("Cold-DisposeRace");
 		await flushAsync(); // reach the factory await
-		await lifecycle.dispose(Date.now()); // teardown while the factory is in flight
+		await lifecycle.dispose({ deadlineAt: Date.now() }); // teardown while the factory is in flight
 		gate.resolve(); // factory completes for a superseded owner
 
 		await expect(revival).rejects.toThrow(/disposed/);
@@ -1043,7 +1058,7 @@ describe("AgentLifecycleManager", () => {
 
 		const revival = lifecycle.ensureLive("Cold-SessionRace");
 		await flushAsync(); // reach the reviver await
-		await lifecycle.dispose(Date.now()); // teardown while the reviver is in flight
+		await lifecycle.dispose({ deadlineAt: Date.now() }); // teardown while the reviver is in flight
 		gate.resolve(); // reviver hands back a live session for a disposed owner
 
 		await expect(revival).rejects.toThrow(/disposed/);
@@ -1053,7 +1068,7 @@ describe("AgentLifecycleManager", () => {
 	});
 
 	it("a new top-level owner can cold-revive after the previous global lifecycle was disposed", async () => {
-		await lifecycle.dispose(Date.now());
+		await lifecycle.dispose({ deadlineAt: Date.now() });
 		const revived = makeSessionStub();
 		registry.register({
 			id: "Next-Owner",
