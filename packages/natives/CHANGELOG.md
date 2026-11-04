@@ -19,6 +19,7 @@
 
 - Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
 - Fixed native addon startup on glibc 2.17–2.28 by falling back to fork for external shell commands when `posix_spawn_file_actions_addchdir_np` is unavailable.
+- Fixed native addon startup on glibc 2.17–2.28 by falling back to fork for external shell commands when `posix_spawn_file_actions_addchdir_np` is unavailable ([#18046](https://github.com/can1357/oh-my-pi/pull/18046) by [@jchanghong023](https://github.com/jchanghong023)).
 
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
 ### Fixed
