@@ -6,6 +6,7 @@ import {
 	type Buckets,
 	collectTestsUnder,
 	namedTestFilesUnder,
+	testFilesByName,
 	testFilesWithoutBucket,
 	workspacePackageDirs,
 } from "./test-file-discovery";
@@ -269,10 +270,10 @@ describe("collectTestsUnder", () => {
 
 	it("walks a cycle in time the real directories bound, not the paths through them", () =>
 		withTempDir("test-file-cycle-bounded-", async tree => {
-			// The patterns of the working directory decide which spellings of one directory the walk
-			// tells apart; these are the repository root's, which the `scripts` command reads. Four
-			// nested directories with two self-links each have a number of paths that grows with the
-			// turns taken, and five real directories.
+			// With patterns the walk lists a directory once per spelling, and stops once every file it
+			// has seen is taken; these are the repository root's, which the `scripts` command reads.
+			// Four nested directories with two self-links each have a number of paths that grows with
+			// the turns taken, and five real directories.
 			await Bun.write(
 				path.join(tree, "bunfig.toml"),
 				'[test]\npathIgnorePatterns = ["**/node_modules/**", "**/dist/**", "python/robomp/data/**"]\n',
@@ -565,6 +566,60 @@ describe("testFilesWithoutBucket", () => {
 			await expect(testFilesWithoutBucket(repo, roots, { files: [], dirs })).rejects.toThrow(
 				"shared/Helper.ts  shared/helper.ts",
 			);
+		}));
+});
+
+/**
+ * Requires the guard's answer for each test file below the package `pkg` (relative to `repo`) to be
+ * what the package's own command, `bun test` naming no file, does with it: a file is run by no command
+ * exactly when that command does not run it, and the collector returns the files it runs.
+ */
+async function expectGuardToMatchBunTest(repo: string, pkg: string): Promise<string[]> {
+	const dir = path.join(repo, pkg);
+	const run = await bunTestRuns(dir);
+	expect(run.exitCode, run.stderr).toBe(0);
+	const missing = new Set(await testFilesWithoutBucket(repo, [pkg], { files: [], dirs: [{ cwd: pkg }] }));
+	const covered = (await testFilesByName(dir, repo)).filter(file => !missing.has(file));
+	expect([...new Set(await realPaths(repo, covered))].sort()).toEqual(run.files);
+	const collected = await collectTestsUnder(dir, dir);
+	expect(await realPaths(dir, collected)).toEqual(run.files);
+	return collected;
+}
+
+describe("the guard and the collector against `bun test`, per file", () => {
+	it("accepts a valid pattern of braces and globstars that Bun evaluates at an empty directory", () =>
+		withTempDir("test-file-brace-globstar-", async repo => {
+			const pkg = path.join(repo, "packages/run");
+			await Bun.write(path.join(pkg, "bunfig.toml"), '[test]\npathIgnorePatterns = ["a**/{**,a}"]\n');
+			await writeTests(pkg, ["keep.test.ts"]);
+			await fs.mkdir(path.join(pkg, "a"));
+
+			expect(await expectGuardToMatchBunTest(repo, "packages/run")).toEqual(["keep.test.ts"]);
+		}));
+
+	it("skips a `node_modules` directory in any ASCII letter case, as Bun's discovery does", () =>
+		withTempDir("test-file-node-modules-case-", async repo => {
+			const pkg = path.join(repo, "packages/run");
+			// No lower-case twin: each directory is the only spelling of `node_modules` in the tree.
+			await writeTests(pkg, [
+				"visible.test.ts",
+				"NODE_MODULES/a.test.ts",
+				"Node_Modules/b.test.ts",
+				"node_Modules/c.test.ts",
+			]);
+
+			expect(await expectGuardToMatchBunTest(repo, "packages/run")).toEqual(["visible.test.ts"]);
+		}));
+
+	it("tells apart two spellings of one file that a class with an escaped `]` judges differently", () =>
+		withTempDir("test-file-escaped-class-", async repo => {
+			const pkg = path.join(repo, "packages/run");
+			await writeTests(pkg, ["]/x.test.ts"]);
+			await fs.symlink("]", path.join(pkg, "a"));
+			// The TOML string holds `*[\]/][/]x.test.ts`: it ignores `]/x.test.ts`, not `a/x.test.ts`.
+			await Bun.write(path.join(pkg, "bunfig.toml"), '[test]\npathIgnorePatterns = ["*[\\\\]/][/]x.test.ts"]\n');
+
+			expect(await expectGuardToMatchBunTest(repo, "packages/run")).toEqual(["a/x.test.ts"]);
 		}));
 });
 
