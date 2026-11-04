@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm
 - Forcing a queued message with Enter now resumes the agent even when interruption races tool completion or model preparation
 - `.`/`c` continue no longer fails with "Nothing to resume" in a session started by a `/skill:` command
 - Long bash output cut in the middle no longer splits a line at the `[…N ln elided…]` marker, and its "Showing lines …" notice now names the lines actually shown, ending at the output's real last line ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
