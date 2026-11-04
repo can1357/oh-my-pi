@@ -60,6 +60,7 @@
 - Removed the Spotlight experiment's edit gate (`spotlight.experiment.editGate`, `PI_SPOTLIGHT_EDIT_GATE`): reads of code files are cut like any other read instead of half of them being kept whole ("spotlight: kept whole for editing")
 
 ### Fixed
+- A grouped `read` row that names a URL links the whole URL instead of only its last path segment, so a click anywhere on the visible URL opens it; the row's last `/` no longer splits it into a dim prefix and a linked tail ([#18071](https://github.com/can1357/oh-my-pi/pull/18071) by [@iacore](https://github.com/iacore))
 - Spotlight cuts `grep`, `find` and `glob` results and filtered bash output (`| grep`, `sed -n`, `awk`) past ~3.9k chars like any other result instead of showing them whole up to ~12k, and collapses lines already shown even when the call's intent names them
 - Fixed a second `ask` note on a later single-select question reopening and replacing the previous question's note ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
 
