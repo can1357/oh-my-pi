@@ -106,18 +106,30 @@ export function armRequestTimeout(onTimeout: () => void, timeoutMs: number | und
 	let remaining = timeoutMs;
 	let startedAt = 0;
 	let cleared = false;
+	let started = false;
+	let waiting = 0;
+	const resume = () => {
+		if (cleared || !started || waiting > 0 || timer !== undefined) return;
+		startedAt = Date.now();
+		timer = setTimeout(onTimeout, remaining);
+		timer.unref?.();
+	};
 	const hooks = {
 		held() {
-			if (timer === undefined) return;
-			remaining = Math.max(0, remaining - (Date.now() - startedAt));
-			clearTimeout(timer);
-			timer = undefined;
+			waiting++;
+			if (timer !== undefined) {
+				remaining = Math.max(0, remaining - (Date.now() - startedAt));
+				clearTimeout(timer);
+				timer = undefined;
+			}
+			return () => {
+				waiting--;
+				resume();
+			};
 		},
 		send() {
-			if (cleared || timer !== undefined) return;
-			startedAt = Date.now();
-			timer = setTimeout(onTimeout, remaining);
-			timer.unref?.();
+			started = true;
+			resume();
 		},
 	};
 	return {

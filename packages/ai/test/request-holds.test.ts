@@ -18,6 +18,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { pollOpenAIResponsesResultForCompletion } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { heldFetch } from "@oh-my-pi/pi-ai/utils/held-fetch";
+import { runWithRequestSendState } from "../src/request-holds";
 
 /** A hold that holds while `armed`, counting the views it opened and released. */
 class TestHolds implements RequestHolds {
@@ -1310,5 +1311,71 @@ describe("request hold context propagation", () => {
 		await after.result;
 		expect(after.sent).toBe(true);
 		view.release();
+	});
+});
+
+describe("request send clock admission lifetimes", () => {
+	for (const initiallyActive of [false, true]) {
+		for (const ending of ["reject", "abort"] as const) {
+			it(`restores an initially ${initiallyActive ? "active" : "inactive"} clock after ${ending}`, async () => {
+				const holds = new TestHolds();
+				const controller = new AbortController();
+				await runWithRequestSendState(async state => {
+					const sent = runWithRequestHolds(holds, () => request(controller.signal));
+					const outcome = sent.result!.catch((error: unknown) => error);
+					await turns();
+					expect(state.active).toBe(false);
+					if (ending === "reject") holds.release.reject(new Error("hold refused"));
+					else controller.abort();
+					expect(await outcome).toBeInstanceOf(Error);
+					expect(sent.sent).toBe(false);
+					expect(state.active).toBe(initiallyActive);
+					holds.let();
+				}, initiallyActive);
+			});
+		}
+	}
+
+	for (const releaseFirst of [false, true]) {
+		it(`keeps overlapping waits paused when the first wait ${releaseFirst ? "sends" : "aborts"}`, async () => {
+			const first = new TestHolds();
+			const second = new TestHolds();
+			const firstController = new AbortController();
+			const secondController = new AbortController();
+			await runWithRequestSendState(async state => {
+				const one = runWithRequestHolds(first, () => request(firstController.signal));
+				const two = runWithRequestHolds(second, () => request(secondController.signal));
+				const oneResult = one.result!.catch(() => undefined);
+				const twoResult = two.result!.catch(() => undefined);
+				await turns();
+				expect(state.active).toBe(false);
+				if (releaseFirst) first.let();
+				else firstController.abort();
+				await oneResult;
+				expect(state.active).toBe(false);
+				secondController.abort();
+				await twoResult;
+				expect(state.active).toBe(true);
+				expect(one.sent).toBe(releaseFirst);
+				expect(two.sent).toBe(false);
+				first.let();
+				second.let();
+			}, true);
+		});
+	}
+
+	it("ends a superseded alias wait before sending with the newly applicable holds", async () => {
+		const holds = new TestHolds();
+		const alias = new RequestHoldsAlias();
+		alias.bind(runWithRequestHolds(holds, captureRequestHolds));
+		await runWithRequestSendState(async state => {
+			const sent = runWithRequestHolds(alias, () => request());
+			await turns();
+			expect(state.active).toBe(false);
+			alias.bind(captureRequestHolds());
+			expect(await sent.result).toBe("sent");
+			expect(state.active).toBe(true);
+			holds.let();
+		}, true);
 	});
 });

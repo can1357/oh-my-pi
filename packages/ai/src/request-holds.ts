@@ -184,7 +184,8 @@ const scopes = new AsyncLocalStorage<Scope>();
 /** Internal transport resources: preparation may await; clocks start only at the final send. */
 export interface RequestSendHooks {
 	prepare?(): Promise<void> | undefined;
-	held?(): Promise<void> | void;
+	/** A returned cleanup ends this admission wait's pause, including on failure or cancellation. */
+	held?(): (() => void) | Promise<void> | void;
 	send?(): void;
 }
 
@@ -209,6 +210,8 @@ export interface RequestSendState {
 
 export function runWithRequestSendState<T>(fn: (state: RequestSendState) => T, initiallyActive = false): T {
 	let active = initiallyActive;
+	let started = initiallyActive;
+	let waiting = 0;
 	let elapsedMs = 0;
 	let activeAt = initiallyActive ? Date.now() : 0;
 	const listeners = new Set<() => void>();
@@ -219,21 +222,36 @@ export function runWithRequestSendState<T>(fn: (state: RequestSendState) => T, i
 		active = next;
 		for (const listener of listeners) listener();
 	};
-	return runWithRequestSendHooks({ held: () => change(false), send: () => change(true) }, () =>
-		fn({
-			get active() {
-				return active;
-			},
-			get elapsedMs() {
-				return elapsedMs + (active ? Date.now() - activeAt : 0);
-			},
-			onChange(listener) {
-				listeners.add(listener);
+	return runWithRequestSendHooks(
+		{
+			held() {
+				waiting++;
+				change(false);
 				return () => {
-					listeners.delete(listener);
+					waiting--;
+					change(started && waiting === 0);
 				};
 			},
-		}),
+			send() {
+				started = true;
+				change(waiting === 0);
+			},
+		},
+		() =>
+			fn({
+				get active() {
+					return active;
+				},
+				get elapsedMs() {
+					return elapsedMs + (active ? Date.now() - activeAt : 0);
+				},
+				onChange(listener) {
+					listeners.add(listener);
+					return () => {
+						listeners.delete(listener);
+					};
+				},
+			}),
 	);
 }
 
@@ -734,11 +752,17 @@ export async function afterRequestHolds<T>(signal: AbortSignal | undefined, send
 				// A retry may already own capacity and have a running clock. Stop both
 				// before waiting, including a hold added while permit acquisition awaited.
 				watchHeld(held);
-				for (let scope = resources; scope; scope = scope.parent) {
-					const releasing = scope.hooks.held?.();
-					if (releasing) await releasing;
+				const cleanups: Array<() => void> = [];
+				try {
+					for (let scope = resources; scope; scope = scope.parent) {
+						const releasing = scope.hooks.held?.();
+						if (typeof releasing === "function") cleanups.push(releasing);
+						else if (releasing) await releasing;
+					}
+					await waitForHeld(signal, held);
+				} finally {
+					for (let index = cleanups.length - 1; index >= 0; index--) cleanups[index]!();
 				}
-				await waitForHeld(signal, held);
 				continue;
 			}
 			let prepared = false;
