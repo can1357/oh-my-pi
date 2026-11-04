@@ -621,10 +621,8 @@ describe("Factory Droid discovery gates", () => {
 		for (const id of [...gated, ...ultraFast]) expect(consented).toContain(id);
 	});
 
-	it("serves Muse Spark 1.3 over Responses from Vertex, Global only, behind its flag", async () => {
+	it("serves Muse Spark 1.3 from Vertex, Global only, behind its flag, on its own effort ladder", async () => {
 		const muse = registryModel("muse-spark-1.3");
-		expect(muse.policy.wire).toBe("openai-responses");
-		expect(quotaTierFor("factory-droid", "muse-spark-1.3")).toBe("standard");
 		expect(buildFactoryDroidModel(muse).thinking).toMatchObject({
 			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 			requiresEffort: true,

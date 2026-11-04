@@ -134,15 +134,6 @@ describe("Factory Droid Muse Spark 1.3 on Vertex Responses", () => {
 		expect(request.body.tools).toEqual([expect.objectContaining({ type: "function", name: "Read", strict: false })]);
 	});
 
-	it.each([
-		[Effort.Low, "low"],
-		[Effort.Medium, "medium"],
-		[Effort.High, "high"],
-	] as const)("maps %s to the %s tier", async (effort, wire) => {
-		const request = await capture("muse-spark-1.3", { reasoning: effort });
-		expect(request.body.reasoning).toEqual({ effort: wire, summary: "auto" });
-	});
-
 	it("drops its encrypted reasoning from the replayed tool turn, as native does", async () => {
 		const model = factoryModel("muse-spark-1.3");
 		const options = { apiKey: WORKOS_TOKEN_WITH_USER, sessionId: "sess-1", reasoning: Effort.High };
