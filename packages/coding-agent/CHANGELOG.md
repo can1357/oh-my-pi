@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- SQL session storage now refuses to start until legacy keys held only in the parts table are migrated. ([#17804](https://github.com/can1357/oh-my-pi/pull/17804) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the debug menu's "Clear artifact cache" deleting whole project directories, session transcripts included; it now removes only tool output files older than 30 days and keeps transcripts, subagent outputs, `/btw` conversations and drafts. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - A failed `/tan` dispatch no longer leaves its clone's transcript behind or keeps the clone's ownership lease, under file and SQL session storage. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
 - Under `session.storage: sql`, `omp stats`, `/stats`, `/trace`, `omp session pack/unpack/moved/lease`, RPC `get_session_lease` and `gc.autoCompress` refuse with a message naming the setting instead of acting on an empty file tree, and the `/usage` heatmap says why it is empty while quotas still show. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))

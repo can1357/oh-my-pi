@@ -1213,6 +1213,42 @@ for (const { adapter, url } of BACKENDS) {
 		);
 
 		it(
+			"previews, migrates and rolls back a legacy key held only by parts without changing its bytes",
+			async () => {
+				await using db = await connectCommandDb();
+				const dir = await configure(db);
+				try {
+					await db.insertParts(`${ROOT}/p/s.jsonl`, ["head é\n", "tail 😀\n"]);
+					const before = await db.snapshot();
+					expect(before.files).toEqual([]);
+
+					const preview = await run(db, "migrate-keys", [ROOT], true);
+					expect(preview.exitCode).toBe(0);
+					expect(preview.stdout).toContain(`Keys: 0 in ${db.table}, 1 in ${db.table}_parts, 1 distinct`);
+					expect(preview.stdout).toContain("Dry run: 1 keys would move; nothing changed.");
+					expect(await db.snapshot()).toEqual(before);
+
+					const migration = await run(db, "migrate-keys", [ROOT]);
+					expect(migration.exitCode).toBe(0);
+					expect(migration.stdout).toContain("Moved 1 keys in one transaction");
+					expect(await db.snapshot()).toEqual({
+						files: [],
+						parts: before.parts.map(part => ({ ...part, path: "sessions/p/s.jsonl" })),
+					});
+					await (await db.open(ROOT)).drain();
+
+					const rollback = await run(db, "rollback-keys", [ROOT]);
+					expect(rollback.exitCode).toBe(0);
+					expect(rollback.stdout).toContain("Moved 1 keys in one transaction");
+					expect(await db.snapshot()).toEqual(before);
+				} finally {
+					dir.removeSync();
+				}
+			},
+			TIMEOUT_MS,
+		);
+
+		it(
 			"exits 1 and lists every offending key when it refuses, changing nothing",
 			async () => {
 				await using db = await connectCommandDb();

@@ -737,10 +737,10 @@ The `path` column holds a row key, not the local path. `SessionManager` and the 
 - `path.resolve` does not follow symbolic links. Every box that shares this table must configure the sessions root with the same spelling: do not use a symlink on one box and its target on another. Those two spellings produce different row keys.
 - Loading the index, the store maps each key back to a path under its own sessions root. A key it would not write back for any path (no prefix, a `sessions/` key with an empty, `.` or `..` segment, or an `abs:` key under its own root) is skipped and logged.
 
-Oh My Pi keyed rows by absolute path before this. `create()` refuses to start while a row of `<table>` has a key that is neither `sessions/…` nor `abs:…`, and names one such key. Migrate the keys once with `omp session migrate-keys`:
+Oh My Pi keyed rows by absolute path before this. `create()` checks both `<table>` and `<table>_parts`, with either value of `createTable`. It refuses to start on a key that is neither `sessions/…` nor `abs:…`, even when that key exists only in parts. The error names the table and one offending key, redacted as other row-key diagnostics are. Migrate the keys once with `omp session migrate-keys`:
 
 1. Stop every Oh My Pi process that writes the table.
-2. Find the sessions roots the old keys were written under. These read-only queries count the rows per root; a row with no root (`NULL`) will become an `abs:` key:
+2. Find the sessions roots the old keys were written under. These read-only queries count the rows per root. Run them for `omp_session_files_parts` too, because a key can exist only there. A row with no root (`NULL`) will become an `abs:` key:
 
    ```sql
    -- PostgreSQL

@@ -569,18 +569,24 @@ for (const { adapter, url } of STORE_BACKENDS) {
 			key: (own: OwnTable) => string,
 			byteLen: number | null,
 			provoke: (storage: SqlSessionStorage, connection: SessionSqlConnection, own: OwnTable) => Promise<unknown>,
+			partsOnly = false,
 		): Promise<{ printed: string; secrets: string[] }> {
 			await using own = new OwnTable(adapter, url ?? "");
 			const connection = await own.connect();
 			try {
 				const storage = await openSessionSqlStorage(connection, { table: own.table });
 				const stored = key(own);
-				await own.sql(`INSERT INTO ${own.table} (path, content, mtime_ms, byte_len) VALUES (?, 'safe', 1, ?)`, [
-					stored,
-					byteLen,
-				]);
+				const table = partsOnly ? `${own.table}_parts` : own.table;
+				if (partsOnly) {
+					await own.sql(`INSERT INTO ${table} (path, start_offset, content) VALUES (?, 0, 'safe')`, [stored]);
+				} else {
+					await own.sql(`INSERT INTO ${table} (path, content, mtime_ms, byte_len) VALUES (?, 'safe', 1, ?)`, [
+						stored,
+						byteLen,
+					]);
+				}
 				const printed = await provoke(storage, connection, own);
-				const keys = (await own.sql(`SELECT path FROM ${own.table}`)) as Array<{ path: string }>;
+				const keys = (await own.sql(`SELECT path FROM ${table}`)) as Array<{ path: string }>;
 				expect(keys.map(row => row.path)).toEqual([stored]);
 				return { printed: typeof printed === "string" ? printed : Bun.inspect(printed), secrets: own.secrets };
 			} finally {
@@ -617,20 +623,27 @@ for (const { adapter, url } of STORE_BACKENDS) {
 			expectNoSecret("unmeasured-row refusal", printed, secrets);
 		});
 
-		it("refuses at start-up a legacy row key that quotes the connection string, redacted", async () => {
-			const { printed, secrets } = await rowDiagnostic(
-				own => own.dsn,
-				4,
-				async (_storage, connection, own) => {
-					const refusal = await failure(
-						SqlSessionStorage.create({ client: connection.client, table: own.table, redact: connection.redact }),
-					);
-					expect(String((refusal as Error).message)).toContain('holds the row key "<redacted>"');
-					return refusal;
-				},
-			);
-			expectNoSecret("legacy-key refusal", printed, secrets);
-		});
+		for (const partsOnly of [false, true]) {
+			it(`refuses at start-up a legacy ${partsOnly ? "parts-only " : ""}row key that quotes the connection string, redacted`, async () => {
+				const { printed, secrets } = await rowDiagnostic(
+					own => own.dsn,
+					4,
+					async (_storage, connection, own) => {
+						const refusal = await failure(
+							SqlSessionStorage.create({
+								client: connection.client,
+								table: own.table,
+								redact: connection.redact,
+							}),
+						);
+						expect(String((refusal as Error).message)).toContain('holds the row key "<redacted>"');
+						return refusal;
+					},
+					partsOnly,
+				);
+				expectNoSecret("legacy-key refusal", printed, secrets);
+			});
+		}
 
 		for (const password of ESCAPABLE_PASSWORDS) {
 			it(`redacts a row key holding the password ${JSON.stringify(password)} before quoting it`, async () => {

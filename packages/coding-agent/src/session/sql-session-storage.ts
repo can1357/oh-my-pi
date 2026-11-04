@@ -229,7 +229,7 @@ interface DialectQueries {
 	findUnmeasured: string;
 	/** Measure rows written before `byte_len` existed. */
 	backfillByteLen: string;
-	/** One row key written before root-relative keys (neither `sessions/…` nor `abs:…`); read without locking. */
+	/** One legacy key from either table (neither `sessions/…` nor `abs:…`); read without locking. */
 	findLegacyKey: string;
 	/** Column names of the table named `@table`; none when it does not exist. */
 	columns: Statement;
@@ -533,6 +533,9 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 	const appendRow = `INSERT INTO ${table} (path, content, mtime_ms, byte_len) VALUES (@path, '', @mtime, @len) `;
 	// Scalar subqueries rather than a CTE, so MySQL 5.7 runs this too.
 	const tailStart = `(SELECT byte_len FROM ${table} WHERE path = @path) - @suffix`;
+	const legacyKeyPredicate =
+		`substr(path, 1, ${ROOT_KEY_PREFIX.length}) <> '${ROOT_KEY_PREFIX}' ` +
+		`AND substr(path, 1, ${ABSOLUTE_KEY_PREFIX.length}) <> '${ABSOLUTE_KEY_PREFIX}'`;
 
 	return {
 		createTable: mysql
@@ -583,8 +586,8 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 		backfillByteLen: `UPDATE ${table} SET byte_len = ${contentByteLength} WHERE byte_len IS NULL`,
 		// `substr` comparisons, not LIKE: SQLite's LIKE ignores ASCII case.
 		findLegacyKey:
-			`SELECT path FROM ${table} WHERE substr(path, 1, ${ROOT_KEY_PREFIX.length}) <> '${ROOT_KEY_PREFIX}' ` +
-			`AND substr(path, 1, ${ABSOLUTE_KEY_PREFIX.length}) <> '${ABSOLUTE_KEY_PREFIX}' LIMIT 1`,
+			`SELECT '${table}' AS table_name, path FROM ${table} WHERE ${legacyKeyPredicate} UNION ALL ` +
+			`SELECT '${parts}' AS table_name, path FROM ${parts} WHERE ${legacyKeyPredicate} LIMIT 1`,
 		columns: sql(
 			{
 				postgres:
@@ -927,15 +930,18 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	}
 
 	/**
-	 * Refuse to start against rows keyed by absolute path, as Oh My Pi wrote
-	 * them before root-relative keys: this store would neither list nor read
-	 * them, and its own writes would start a second row for the same session.
+	 * Refuse to start against rows of either table keyed by absolute path, as
+	 * Oh My Pi wrote them before root-relative keys: this store would neither
+	 * list nor read them, and its writes would start a second row for the same session.
 	 */
 	async #assertRowKeys(): Promise<void> {
-		const [legacy] = (await this.#client.unsafe(this.#q.findLegacyKey)) as Array<{ path: string }>;
+		const [legacy] = (await this.#client.unsafe(this.#q.findLegacyKey)) as Array<{
+			table_name: string;
+			path: string;
+		}>;
 		if (!legacy) return;
 		throw new Error(
-			`SqlSessionStorage: ${this.#table} holds the row key ${this.#quote(legacy.path)}, which is neither ` +
+			`SqlSessionStorage: ${legacy.table_name} holds the row key ${this.#quote(legacy.path)}, which is neither ` +
 				`"${ROOT_KEY_PREFIX}…" nor "${ABSOLUTE_KEY_PREFIX}…". Stop every older Oh My Pi process that writes ` +
 				`the table, then migrate its keys with ${KEY_MIGRATION_COMMAND}.`,
 		);

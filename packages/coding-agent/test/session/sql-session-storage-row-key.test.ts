@@ -188,6 +188,28 @@ for (const { adapter, url } of BACKENDS) {
 			}
 		});
 
+		for (const createTable of [true, false]) {
+			it(`refuses a legacy key held only by parts with createTable=${createTable}`, async () => {
+				await using db = connect();
+				await (await db.open(ROOT_B)).drain();
+				const legacy = "/root/sessions/p/s.jsonl";
+				await db.sql(`INSERT INTO ${db.table}_parts (path, start_offset, content) VALUES (?, 0, ?)`, [
+					legacy,
+					"old transcript\n",
+				]);
+				expect(await db.keys()).toEqual([]);
+
+				await expect(db.open(ROOT_B, { createTable })).rejects.toThrow(
+					`${db.table}_parts holds the row key ${JSON.stringify(legacy)}, which is neither "sessions/…" nor "abs:…". ` +
+						"Stop every older Oh My Pi process that writes the table, then migrate its keys with omp session migrate-keys",
+				);
+				expect(await db.keys()).toEqual([]);
+				expect(await db.sql(`SELECT path, content FROM ${db.table}_parts`)).toEqual([
+					{ path: legacy, content: "old transcript\n" },
+				]);
+			});
+		}
+
 		it("names one session by every spelling of its path, through every entry point and across refresh", async () => {
 			await using db = connect();
 			const storage = await db.open(ROOT_B);
