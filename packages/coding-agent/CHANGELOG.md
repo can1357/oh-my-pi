@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Subagents on models that fill in every task-tool field can dispatch tasks again while `task.perCallModel` is `off`: an empty `model` or `sourceSession` now counts as left out instead of being refused
 - `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
 - Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset
 - The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm

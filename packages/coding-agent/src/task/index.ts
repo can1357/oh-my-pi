@@ -485,6 +485,48 @@ interface SpawnPlan {
 }
 
 /**
+ * Optional fields whose empty string can only be filler: a selector, a source session, a task
+ * file path and a caller output schema all need a real value to mean anything.
+ */
+const BLANKABLE_KEYS = ["model", "sourceSession", "taskFile", "outputSchema"] as const;
+
+/** An empty or whitespace-only string: the shape a model sends for a field it has nothing to put in. */
+function isBlankString(value: unknown): boolean {
+	return typeof value === "string" && value.trim() === "";
+}
+
+/**
+ * Drop one of those fields when it holds an empty or whitespace-only string: it means the field
+ * was left out. Models that fill every declared property send these placeholders, and the
+ * per-call gate, the seance checks and the `task`/`taskFile` choice would otherwise refuse a call
+ * that names nothing at all.
+ *
+ * Only a string counts. An empty array is left alone deliberately: shared validation turns an
+ * array into its string form, so `[]` arrives at dispatch as `"[]"` — a real selector the gate
+ * must still refuse — while the speculative launcher sees the raw `[]`, and dropping it here made
+ * the two disagree.
+ */
+function withoutBlankFields<T extends TaskItem | TaskParams>(item: T): T {
+	let out = item;
+	for (const key of BLANKABLE_KEYS) {
+		if (!isBlankString(item[key])) continue;
+		if (out === item) out = { ...item };
+		delete out[key];
+	}
+	return out;
+}
+
+/** Whether a call, or any of its items, carries one of those placeholders. */
+function carriesBlankField(params: unknown): boolean {
+	if (!isRecord(params)) return false;
+	if (BLANKABLE_KEYS.some(key => isBlankString(params[key]))) return true;
+	const tasks: unknown = params.tasks;
+	return (
+		Array.isArray(tasks) && tasks.some(task => isRecord(task) && BLANKABLE_KEYS.some(key => isBlankString(task[key])))
+	);
+}
+
+/**
  * Repair, validate, and normalize a call into its spawns. Returns the
  * validation error the call reports instead when the shape is rejected. Shared
  * by dispatch and the speculative launcher so both derive identical spawns.
@@ -497,7 +539,12 @@ function planSpawns(
 	seanceAdvertised: boolean,
 	settings: Settings,
 ): SpawnPlan | string {
-	const params = repairTaskParams(rawParams as TaskParams);
+	const repaired = repairTaskParams(rawParams as TaskParams);
+	// Only object-shaped calls and items: anything else is left for the shape checks to reject.
+	const unblanked = isRecord(repaired) ? withoutBlankFields(repaired) : repaired;
+	const params = Array.isArray(unblanked.tasks)
+		? { ...unblanked, tasks: unblanked.tasks.map(task => (isRecord(task) ? withoutBlankFields(task) : task)) }
+		: unblanked;
 	const error =
 		validateShapeParams(batchEnabled, params) ??
 		validateSpawnParams(params, batchEnabled, fileEnabled, defaultAgent, settings) ??
@@ -732,13 +779,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (typeof params.name === "string" && params.name.trim()) {
 			lines.push(`Name: ${truncateForPrompt(params.name)}`);
 		}
-		if (typeof params.model === "string") {
+		if (typeof params.model === "string" && params.model.trim()) {
 			lines.push(`Model: ${truncateForPrompt(params.model)}`);
 		}
 		if (typeof params.task === "string") {
 			lines.push(`Task:\n${truncateForPrompt(params.task)}`);
 		}
-		if (typeof params.taskFile === "string") {
+		if (typeof params.taskFile === "string" && params.taskFile.trim()) {
 			lines.push(`Task file: ${truncateForPrompt(sanitizeText(JSON.stringify(params.taskFile)))}`);
 		}
 		if (typeof params.context === "string" && params.context.trim()) {
@@ -773,10 +820,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				}
 			}
 			for (const [index, item] of tasks.entries()) {
-				if (isRecord(item) && typeof item.model === "string") {
+				if (isRecord(item) && typeof item.model === "string" && item.model.trim()) {
 					lines.push(`Task ${index + 1} model: ${truncateForPrompt(item.model)}`);
 				}
-				if (isRecord(item) && typeof item.taskFile === "string") {
+				if (isRecord(item) && typeof item.taskFile === "string" && item.taskFile.trim()) {
 					lines.push(`Task ${index + 1} file: ${truncateForPrompt(sanitizeText(JSON.stringify(item.taskFile)))}`);
 				}
 			}
@@ -823,6 +870,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
 	readonly #launcher: TaskLauncher = {
 		spawns: args => {
+			// Speculation plans from the raw streamed arguments while dispatch plans from the validated
+			// ones, and the two agree only while nothing between them rewrites the call. A placeholder
+			// is exactly such a call: shared validation also drops an `outputSchema: null` and rewrites
+			// some schema objects, so the spawn the launcher derived differs from the one dispatch
+			// derives, reconciliation cancels the started child, and dispatch runs a second one — two
+			// executor runs for one item. Leave a call carrying a placeholder to dispatch alone.
+			if (carriesBlankField(args)) return undefined;
 			const plan = planSpawns(
 				args,
 				this.#isBatchEnabled(),

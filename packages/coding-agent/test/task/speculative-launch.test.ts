@@ -228,6 +228,31 @@ describe("task speculative launch", () => {
 		await spawn("Alpha").aborted.promise;
 		expect([...startedIds]).toEqual(["Alpha"]);
 	});
+
+	// A placeholder (`model: ""` and the other fields a model fills in with nothing) is dropped on the
+	// way to the spawn plan, but shared validation rewrites the rest of such a call differently on the
+	// dispatch path, so the spawn this launcher derives can differ from the one dispatch derives: the
+	// started child is cancelled and dispatch runs a second one, two executor runs for one item. A call
+	// carrying a placeholder therefore does not speculate at all; dispatch still runs it exactly once.
+	it("does not launch an item whose fields are only placeholders, and dispatch runs it once", async () => {
+		const placeholders = {
+			context: "ctx",
+			tasks: [{ name: "Alpha", agent: "task", task: "Do A.", model: "", outputSchema: null }],
+		};
+		const raw = JSON.stringify(placeholders);
+		const { tool, session } = await openSession();
+
+		session.update(toolCall, raw.slice(0, raw.lastIndexOf("]")));
+		session.finalize({ toolCall, args: placeholders });
+		const result = await tool.execute(toolCall.id, placeholders as never);
+		expect(result.isError).toBeFalsy();
+
+		// One run, not two: a speculative launch here could only have been cancelled and replaced,
+		// because shared validation removes the `outputSchema: null` the raw arguments still carry.
+		await spawn("Alpha").started.promise;
+		expect(executorModule.runSubprocess).toHaveBeenCalledTimes(1);
+		expect([...startedIds]).toEqual(["Alpha"]);
+	});
 });
 
 describe("speculative launch authorization", () => {

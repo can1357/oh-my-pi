@@ -962,4 +962,135 @@ describe("batch model placement", () => {
 			expect(run).not.toHaveBeenCalled();
 		},
 	);
+
+	// Regression: some OpenAI models fill every declared task-tool property. With seance advertised one sent
+	// this call (captured on the wire, 2026-11-04) and the per-call gate refused `model: ""`: nothing spawned.
+	it.each([
+		["off", { tools: [], model: "", sourceSession: "", isolated: false }],
+		["off", { model: "   ", sourceSession: " " }],
+		["on", { model: "", sourceSession: "" }],
+	] as const)("dispatches a call whose model is only a placeholder (task.perCallModel %s, %j)", async (mode, fill) => {
+		const seance = loadBundledAgents().find(agent => agent.name === "seance");
+		if (!seance) throw new Error("Expected the bundled seance agent");
+		mockDiscovery([taskAgent, seance]);
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": mode } }),
+		);
+		const work = { task: "Reply PONG.", solutionSpace: "one fixed answer", name: "Pong", agent: "task", ...fill };
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "task-placeholder",
+			name: tool.name,
+			arguments: { context: "Shared context", tasks: [work] },
+		});
+		const result = await tool.execute("task-placeholder", args as TaskParams);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+		// The spawn runs on the agent's configured model: no per-call grant was issued.
+		expect(run.mock.calls[0]?.[0].perCallModelGrants).toBeUndefined();
+	});
+
+	// The same placeholder in the other two fields whose empty string can only be filler. Each one
+	// refused the whole call before: `taskFile: ""` made `task` and `taskFile` both "provided", and
+	// `outputSchema: ""` passed its declared type and died parsing at preflight.
+	it.each([
+		["taskFile", { "task.file": true }, { taskFile: "" }],
+		["outputSchema", { "task.structured": true }, { outputSchema: "" }],
+	] as const)("dispatches a call whose %s is only a placeholder", async (_field, extra, fill) => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Pong"));
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": "off", ...extra },
+			}),
+		);
+		const work = { task: "Reply PONG.", solutionSpace: "one fixed answer", name: "Pong", agent: "task", ...fill };
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "task-blank-field",
+			name: tool.name,
+			arguments: { context: "Shared context", tasks: [work] },
+		});
+		const result = await tool.execute("task-blank-field", args as TaskParams);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+	});
+
+	// Only a string counts as a placeholder. An empty ARRAY must still be refused: the speculative
+	// launcher plans from the raw streamed arguments and dispatch from the validated ones, shared
+	// validation turns `[]` into its string form on the way, and dropping it made the two disagree —
+	// a child started speculatively for a call that dispatch then refused.
+	it("refuses an empty-array model instead of treating it as left out", async () => {
+		const seance = loadBundledAgents().find(agent => agent.name === "seance");
+		if (!seance) throw new Error("Expected the bundled seance agent");
+		mockDiscovery([taskAgent, seance]);
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": "off" } }),
+		);
+		const result = await tool.execute("task-empty-array-model", {
+			context: "Shared context",
+			tasks: [{ task: "Reply PONG.", solutionSpace: "one fixed answer", agent: "task", model: [] }],
+		} as never);
+		expect(result.isError).toBe(true);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// Regression: lenient argument repair deletes keys an item's schema does not declare, at any depth, so an
+	// item that needs repair (`name: 5`) loses a real `model` unless the item schema keeps declaring it. The
+	// gate would then never see the selector: the task spawns on the agent's configured model while the
+	// approval prompt still names the requested one.
+	it("keeps a repaired batch item's real model, so the disabled gate still refuses it", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": "off" } }),
+		);
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "task-repaired-model",
+			name: tool.name,
+			// `name: 5` is the repair trigger: a number where the schema wants a string.
+			arguments: {
+				context: "Shared context",
+				tasks: [{ task: "Do work", solutionSpace: "c", agent: "task", name: 5, model: "openai/gpt-5.4" }],
+			},
+		});
+		expect((args as TaskParams).tasks?.[0]?.model).toBe("openai/gpt-5.4");
+		const result = await tool.execute("task-repaired-model", args as TaskParams);
+		expect(getFirstText(result)).toMatch(/per-call model is disabled/i);
+		expect(result.isError).toBe(true);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// The approval prompt is built from the raw arguments. Before the fix a call carrying these
+	// placeholders was refused, so nobody saw them; now it runs, and a prompt that announced a model
+	// or a task file the run ignores would be approving something other than what happens.
+	it("hides placeholder model and task file in the approval prompt, and keeps the real ones", async () => {
+		mockDiscovery();
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.file": true } }),
+		);
+		const lines = tool.formatApprovalDetails({
+			context: "Shared context",
+			tasks: [
+				{ task: "Do work", solutionSpace: "c", agent: "task", name: "Blank", model: "   ", taskFile: "" },
+				{ solutionSpace: "c", agent: "task", name: "Real", model: "p/real", taskFile: "/tmp/real.md" },
+			],
+		});
+		expect(lines.some(line => /^Task 1 (model|file):/.test(line))).toBe(false);
+		expect(lines).toContain("Task 2 model: p/real");
+		expect(lines.some(line => line.startsWith("Task 2 file:") && line.includes("/tmp/real.md"))).toBe(true);
+	});
+
+	it("still rejects a non-object batch item with the shape error instead of throwing", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true, "async.enabled": false } }));
+		const result = await tool.execute("task-null-item", { context: "Shared context", tasks: [null] } as never);
+		expect(result.isError).toBe(true);
+		expect(getFirstText(result)).not.toContain("TypeError");
+		expect(run).not.toHaveBeenCalled();
+	});
 });
