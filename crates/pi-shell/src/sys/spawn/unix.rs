@@ -1098,14 +1098,28 @@ fn fork_redirs(
 							// words (`Diag::NoClobber`).
 							let plain = *flags & !(libc::O_CREAT | libc::O_EXCL | libc::O_TRUNC);
 							fd = libc::open(path.as_ptr(), plain);
+							let mut st = std::mem::zeroed::<libc::stat>();
 							if fd >= 0 {
-								let mut st = std::mem::zeroed::<libc::stat>();
 								if libc::fstat(fd, &raw mut st) == 0
 									&& st.st_mode & libc::S_IFMT == libc::S_IFREG
 								{
 									libc::close(fd);
 									child_fail_with(diag, b"cannot overwrite existing file", 1);
 								}
+							} else {
+								// It cannot be opened at all. bash stats the path
+								// before it opens anything, so a regular file it may
+								// not write is refused, and so is a path whose
+								// metadata cannot be read — there bash's `O_EXCL`
+								// create reports `EEXIST` (a dangling symlink). A
+								// readable non-regular path keeps this open's error.
+								let err = errno();
+								if libc::stat(path.as_ptr(), &raw mut st) != 0
+									|| st.st_mode & libc::S_IFMT == libc::S_IFREG
+								{
+									child_fail_with(diag, b"cannot overwrite existing file", 1);
+								}
+								child_fail(diag, err, 1, texts);
 							}
 						}
 						if fd < 0 {

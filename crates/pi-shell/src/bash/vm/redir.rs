@@ -36,7 +36,7 @@ use crate::bash::{
 	diag::Diag,
 	event::{EventData, RedirInfo, RedirKind, WaitKey},
 	fd::{FdOrigin, FdRef},
-	fs::{File, FileKind, FsOp, FsPending, FsPoll, OpenFlags, SeekFrom, StatKind},
+	fs::{File, FileKind, FsOp, FsPending, FsPoll, OpenFlags, SeekFrom, Stat, StatKind},
 	host::{ChildRedir, OsHandle},
 	ids::Dialect,
 	ir::{RedirFdIr, RedirIr, RedirTargetIr, SpawnKind, Unit},
@@ -775,7 +775,10 @@ fn child_fd_open(k: &Kernel, vp: &Vproc, fd: i32) -> bool {
 }
 
 /// The open of `target` onto `fds` by the process ([`ChildRedir::Open`]),
-/// or the duplication `/dev/fd/N` (`/dev/stdin`, …) stands for.
+/// or the duplication `/dev/fd/N` (`/dev/stdin`, …) stands for. Under
+/// `noclobber` (`flags` holds [`OpenFlags::EXCL`]) the process opens the
+/// name instead, so the object behind the descriptor is judged as any
+/// other is: a regular file behind the alias is refused.
 fn child_open(
 	k: &mut Kernel,
 	vp: &Vproc,
@@ -788,6 +791,7 @@ fn child_open(
 	let diag = diag_prefix(k, cx, vp, line, target);
 	if let Some(src) = dev_fd(target)
 		&& let [fd] = fds.as_slice()
+		&& !flags.contains(OpenFlags::EXCL)
 	{
 		return ChildRedir::Dup { fd: *fd, src, diag };
 	}
@@ -1314,8 +1318,72 @@ impl File for Cat {
 #[error("cannot overwrite existing file")]
 struct NoClobberRefused;
 
+/// The error a `noclobber` reopen gives when the existing file cannot be
+/// opened at all: [`judge_unopenable`] then decides, and the marker tells
+/// [`open_into`] the reopen, not the exclusive create, produced it.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct NoClobberUnopenable(std::io::Error);
+
+impl NoClobberUnopenable {
+	/// Mark `err` as a failed reopen, keeping its kind.
+	fn wrap(err: std::io::Error) -> std::io::Error {
+		std::io::Error::new(err.kind(), Self(err))
+	}
+
+	/// The error [`Self::wrap`] carried.
+	fn unwrap(err: std::io::Error) -> std::io::Error {
+		let kind = err.kind();
+		match err.into_inner() {
+			Some(inner) => match inner.downcast::<Self>() {
+				Ok(this) => this.0,
+				Err(other) => std::io::Error::new(kind, other),
+			},
+			None => kind.into(),
+		}
+	}
+}
+
+/// What a `noclobber` redirection does when the reopen could not open the
+/// existing file (`err`): bash's `noclobber_open` stats the path before it
+/// opens anything, so a regular file it may not write is refused, and so is
+/// a path whose metadata cannot be read at all — there bash adds `O_EXCL`
+/// and its create reports `EEXIST` (a dangling symlink). A path that is
+/// readable and not regular keeps the open's own error (`>dir` is `Is a
+/// directory` in Bash 5.2.21 and 5.3.0).
+fn judge_unopenable(st: std::io::Result<Stat>, err: std::io::Error) -> std::io::Error {
+	match st {
+		Ok(st) if st.kind != StatKind::File => err,
+		_ => std::io::Error::new(std::io::ErrorKind::AlreadyExists, NoClobberRefused),
+	}
+}
+
+/// The pending look at the path [`judge_unopenable`] needs, kept in the
+/// redirection's progress like a pending open.
+struct NoClobberPath {
+	stat: Box<dyn FsPending<Stat>>,
+	err:  Option<std::io::Error>,
+}
+
+impl FsPending<Box<dyn File>> for NoClobberPath {
+	fn poll(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<Box<dyn File>>> {
+		self.stat.poll(cx).map(|st| {
+			let err = self
+				.err
+				.take()
+				.unwrap_or_else(|| std::io::ErrorKind::AlreadyExists.into());
+			Err(judge_unopenable(st, err))
+		})
+	}
+
+	fn reissuable(&self) -> bool {
+		self.stat.reissuable()
+	}
+}
+
 /// `noclobber`'s plain reopen of an existing file: a regular file is
-/// refused once opened ([`NoClobberRefused`]), anything else passes.
+/// refused once opened ([`NoClobberRefused`]), anything else passes, and a
+/// file that cannot be opened at all is marked for [`judge_unopenable`].
 struct NoClobberReopen(Box<dyn FsPending<Box<dyn File>>>);
 
 impl NoClobberReopen {
@@ -1324,6 +1392,7 @@ impl NoClobberReopen {
 			Ok(file) if file.kind() == FileKind::Regular => {
 				Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, NoClobberRefused))
 			},
+			Err(err) => Err(NoClobberUnopenable::wrap(err)),
 			r => r,
 		}
 	}
@@ -1337,6 +1406,55 @@ impl FsPending<Box<dyn File>> for NoClobberReopen {
 	fn reissuable(&self) -> bool {
 		self.0.reissuable()
 	}
+}
+
+/// Start the look at `abs` that decides a `noclobber` refusal for an
+/// existing file the reopen could not open ([`judge_unopenable`]); a
+/// pending one is kept in the redirection's progress.
+fn judge_path(
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	tcx: &mut Context<'_>,
+	abs: &BString,
+	err: std::io::Error,
+) -> Poll<std::io::Result<Box<dyn File>>> {
+	match cx.host.fs().stat(BStr::new(abs), true) {
+		FsPoll::Ready(st) => Poll::Ready(Err(judge_unopenable(st, err))),
+		FsPoll::Pending(stat) => {
+			let mut p: Box<dyn FsPending<Box<dyn File>>> =
+				Box::new(NoClobberPath { stat, err: Some(err) });
+			let r = p.poll(tcx);
+			if r.is_pending() {
+				io(vp).redir.opening = Some(p);
+			}
+			r
+		},
+	}
+}
+
+/// Install the already-open object `h` on every fd of `fds`, for a
+/// redirection that names a descriptor the shell holds instead of a file
+/// (`/dev/fd/N`, `/dev/stdout`, a session's `/dev/tty`). Under `noclobber`
+/// (`flags` holds [`OpenFlags::EXCL`]) the object behind the alias is
+/// judged exactly as an opened path is: a regular file is refused, a FIFO
+/// or a device is written.
+fn install_held(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	fds: &[i32],
+	path: &BString,
+	h: &FdRef,
+	flags: OpenFlags,
+	line: u32,
+) -> Result<(), Halt> {
+	if flags.contains(OpenFlags::EXCL) && h.kind() == Some(FileKind::Regular) {
+		return Err(fail(k, vp, cx, line, Diag::NoClobber { path: path.clone() }));
+	}
+	for &fd in fds {
+		set_fd(vp, fd, Some(h.clone()));
+	}
+	Ok(())
 }
 
 /// Start the open of `abs` with `flags`, or `noclobber`'s plain reopen of
@@ -1385,10 +1503,7 @@ fn open_into(
 	line: u32,
 ) -> Result<(), Halt> {
 	if let Some(h) = session_tty(vp, path) {
-		for &fd in fds {
-			set_fd(vp, fd, Some(h.clone()));
-		}
-		return Ok(());
+		return install_held(k, vp, cx, fds, path, &h, flags, line);
 	}
 	if let Some(src) = dev_fd(path) {
 		let Some(h) = vp.fds.get(src).cloned().filter(FdRef::is_open) else {
@@ -1398,10 +1513,7 @@ fn open_into(
 			});
 			return Err(Halt::Failed);
 		};
-		for &fd in fds {
-			set_fd(vp, fd, Some(h.clone()));
-		}
-		return Ok(());
+		return install_held(k, vp, cx, fds, path, &h, flags, line);
 	}
 	let abs = absolute(&vp.cwd, path);
 	// The vproc's own `umask` (a subshell's applies to its redirections).
@@ -1419,6 +1531,17 @@ fn open_into(
 	{
 		io(vp).redir.opening = None;
 		res = start_open(vp, cx, &mut tcx, &abs, flags, mode, true);
+	}
+	// That reopen could not open it either: the path's own kind decides
+	// ([`judge_unopenable`]).
+	if let Poll::Ready(Err(err)) = &res
+		&& err.get_ref().is_some_and(|e| e.is::<NoClobberUnopenable>())
+	{
+		let Poll::Ready(Err(err)) = std::mem::replace(&mut res, Poll::Pending) else {
+			unreachable!("matched a ready error just above")
+		};
+		io(vp).redir.opening = None;
+		res = judge_path(vp, cx, &mut tcx, &abs, NoClobberUnopenable::unwrap(err));
 	}
 	if res.is_ready() {
 		io(vp).redir.opening = None;
