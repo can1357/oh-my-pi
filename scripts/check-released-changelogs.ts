@@ -21,7 +21,9 @@
  * see into a submodule the base already has.
  *
  * Sections are found by the headings the fixer reads: `## [title]` and
- * `### Name` at the start of a line. A Markdown renderer shows other spellings
+ * `### Name` at the start of a line, below one `# Changelog` title, with
+ * `## [Unreleased]` only alone on its line, as `bun run release` finds it.
+ * A Markdown renderer shows other spellings
  * as headings too (indented, a tab or two spaces after the `#`s, underlined,
  * in a list or a quote, raw `<h2>`), and code or HTML can hide one the fixer
  * reads; a release written that way would escape the check. So the headings
@@ -903,8 +905,9 @@ export async function checkReleasedChangelogs(options: {
 			changes.push(fileChange(headPath, irregular, "not-regular"));
 			continue;
 		}
-		// A changelog the base does not have is compared with an empty one: it may hold no released section.
-		const baseContent = basePath === undefined ? "" : await readBlob(`${baseCommit}:${basePath}`, repoRoot);
+		// A changelog the base does not have is compared with one that holds only the title: it may hold no released section.
+		const baseContent =
+			basePath === undefined ? "# Changelog\n" : await readBlob(`${baseCommit}:${basePath}`, repoRoot);
 		const result = await findReleasedSectionChanges(headPath, baseContent, await head.read(headPath), {
 			release: options.release ?? false,
 			readArchive: async commit => {

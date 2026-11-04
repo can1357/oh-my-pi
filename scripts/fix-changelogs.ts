@@ -105,8 +105,18 @@ export interface HistoricalReleaseRecovery {
 	sectionsByTitle: Map<string, ReleaseSection>;
 }
 
+/** The only level-1 heading a changelog has, above its first release. */
+const CHANGELOG_TITLE = "# Changelog";
+
+/**
+ * `## [title]` at the start of a line. `[Unreleased]` only alone on its line: `bun run release`
+ * moves no other spelling into the new release, so `## [Unreleased] ##` would keep its entries
+ * unreleased while the fixer and the check read them as [Unreleased].
+ */
 function isReleaseHeading(line: string): boolean {
-	return /^## \[[^\]]+\]/.test(line);
+	const title = /^## \[([^\]]+)\]/.exec(line)?.[1];
+	if (title === undefined) return false;
+	return title !== "Unreleased" || /^## \[Unreleased\][ \t]*$/.test(line);
 }
 
 export function isSubsectionHeading(line: string): boolean {
@@ -147,7 +157,7 @@ function createNumberedLine(text: string, lineNumber: number): NumberedLine {
 
 /** How the changelog tools may write each heading; anything else Markdown shows as a heading is refused. */
 export const HEADING_RULE =
-	"Write the title as `# Changelog` above the first release, a release as `## [x.y.z] - YYYY-MM-DD` and a category as `### Added`, each at the start of its line with one space after the `#`s, and write no other heading and no footnote definition (`[^label]:`).";
+	"Write the title as `# Changelog`, once, above the first release, the unreleased section as `## [Unreleased]` with nothing after it, a release as `## [x.y.z] - YYYY-MM-DD` and a category as `### Added`, each at the start of its line with one space after the `#`s, and write no other heading and no footnote definition (`[^label]:`).";
 
 /** A heading as Markdown shows it. */
 interface ShownHeading {
@@ -206,17 +216,21 @@ function shownHeadings(markdown: string): { headings: ShownHeading[]; elements: 
 	return { headings, elements: Bun.markdown.html(markdown).match(HTML_HEADING_TAG)?.length ?? 0 };
 }
 
-/** Lines the tools read as headings (0-based) and their levels: `# Title` above the first release, each `## [title]`, and `### Name` below one. */
+/** Lines the tools read as headings (0-based) and their levels: the first `# Changelog` above the first release, each `## [title]`, and `### Name` below one. */
 function readHeadingLines(lines: readonly string[]): { index: number; level: number }[] {
 	const found: { index: number; level: number }[] = [];
 	let inRelease = false;
+	let titled = false;
 	for (let index = 0; index < lines.length; index++) {
 		const line = lines[index] ?? "";
 		if (isReleaseHeading(line)) {
 			inRelease = true;
 			found.push({ index, level: 2 });
-		} else if (inRelease ? isSubsectionHeading(line) : /^# \S/.test(line)) {
-			found.push({ index, level: inRelease ? 3 : 1 });
+		} else if (inRelease) {
+			if (isSubsectionHeading(line)) found.push({ index, level: 3 });
+		} else if (!titled && line === CHANGELOG_TITLE) {
+			titled = true;
+			found.push({ index, level: 1 });
 		}
 	}
 	return found;
@@ -239,7 +253,9 @@ function describeHeading(heading: ShownHeading | undefined): string {
  * (indented, a tab or two spaces after the `#`s, underlined, in a list or a
  * quote, an HTML `<h2>`), is one the tools would not read, so a release written
  * that way would escape them, even with the same text as one they read. A
- * footnote definition is refused too: GitHub renders its text as Markdown.
+ * footnote definition is refused too: GitHub renders its text as Markdown. The
+ * title must be `# Changelog`, once, above the first release: `bun run release`
+ * writes the next `## [Unreleased]` below it.
  */
 export function findHeadingMismatch(content: string): HeadingMismatch | undefined {
 	const lines = splitContentLines(content);
@@ -272,7 +288,8 @@ export function findHeadingMismatch(content: string): HeadingMismatch | undefine
 			read: first < expected ? read[first] : undefined,
 		};
 	};
-	if (compare(lines.length).agree) return undefined;
+	const untitled = missingTitle(lines, read);
+	if (compare(lines.length).agree) return untitled;
 	// The first `count` lines agree for `low` and not for `high`: line `high` is where they part.
 	let low = 0;
 	let high = lines.length;
@@ -282,6 +299,7 @@ export function findHeadingMismatch(content: string): HeadingMismatch | undefine
 		else high = middle;
 	}
 	const parted = compare(high);
+	if (untitled && untitled.lineNumber <= high) return untitled;
 	const line = lines[high - 1] ?? "";
 	if (parted.headingsAgree) {
 		return {
@@ -300,6 +318,21 @@ export function findHeadingMismatch(content: string): HeadingMismatch | undefine
 		line,
 		shown: shown || parted.read ? describeHeading(shown) : "an HTML heading element",
 		read: describeHeading(parted.read && (alone.length === 1 ? alone[0] : { level: 0, text: readLine })),
+	};
+}
+
+/** The changelog's first heading, or its first line, when no `# Changelog` title is above it; the tools require one. */
+function missingTitle(
+	lines: readonly string[],
+	read: readonly { index: number; level: number }[],
+): HeadingMismatch | undefined {
+	if (read[0]?.level === 1) return undefined;
+	const index = read[0]?.index ?? 0;
+	return {
+		lineNumber: index + 1,
+		line: lines[index] ?? "",
+		shown: `no ${JSON.stringify(CHANGELOG_TITLE)} title above it`,
+		read: "that title",
 	};
 }
 

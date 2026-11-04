@@ -558,6 +558,42 @@ describe("changelog headings", () => {
 		);
 	});
 
+	// `bun run release` finds `## [Unreleased]` with nothing after it; read as [Unreleased], these would stay unreleased.
+	it.each([
+		{ name: "closing #s", heading: "## [Unreleased] ##" },
+		{ name: "a date", heading: "## [Unreleased] - 2026-01-01" },
+	])("refuses an [Unreleased] heading written with $name, which a release would not move", async ({ heading }) => {
+		const content = CLEAN.replace("## [Unreleased]", `${heading}\n\n### Added\n\n- Pending.`);
+		const fixed = fixChangelogFile("packages/a/CHANGELOG.md", content, {
+			promotableAddedItemStartLines: new Set<number>(),
+			maxBytes: Number.POSITIVE_INFINITY,
+			archiveCommit: async () => undefined,
+		});
+		await expect(fixed).rejects.toThrow(
+			`packages/a/CHANGELOG.md: line 3, ${JSON.stringify(heading)}: Markdown shows a level-2 heading "[Unreleased]`,
+		);
+	});
+
+	it.each([
+		{ name: "no title", content: CLEAN.replace("# Changelog\n\n", ""), line: 1, text: "## [Unreleased]" },
+		{ name: "another title", content: CLEAN.replace("# Changelog", "# Wrong"), line: 1, text: "# Wrong" },
+		{
+			name: "a second level-1 heading above the first release",
+			content: CLEAN.replace("# Changelog\n", "# Changelog\n\n# Notes\n"),
+			line: 3,
+			text: "# Notes",
+		},
+	])("refuses a changelog with $name instead of one # Changelog title", async ({ content, line, text }) => {
+		const fixed = fixChangelogFile("packages/a/CHANGELOG.md", content, {
+			promotableAddedItemStartLines: new Set<number>(),
+			maxBytes: Number.POSITIVE_INFINITY,
+			archiveCommit: async () => undefined,
+		});
+		await expect(fixed).rejects.toThrow(
+			`packages/a/CHANGELOG.md: line ${line}, ${JSON.stringify(text)}: Markdown shows `,
+		);
+	});
+
 	it.each([
 		{ name: "a release written one space in, which recovery would lose", tagged: " ## [0.9.0] - 2024-12-01" },
 		{

@@ -585,7 +585,8 @@ describe("check-released-changelogs", () => {
 			expect(fixed.changedFiles.map(file => file.collapsedReleases)).toEqual([1]);
 			expect(await repo.read()).not.toContain("## [0.0.1]");
 
-			await repo.write(`${beforeOldest}${fakeOldRelease}${fixerFooter(baseline)}\n`);
+			const unreleased = THREE_RELEASES.slice(0, THREE_RELEASES.indexOf("## [1.2.0]"));
+			await repo.write(`${unreleased}${beforeOldest}${fakeOldRelease}${fixerFooter(baseline)}\n`);
 			const result = await check(repo, "--base", "HEAD");
 			expect(result.exitCode).toBe(1);
 			expect(result.output).toContain(
@@ -1304,11 +1305,11 @@ describe("check-released-changelogs", () => {
 	);
 
 	test(
-		"compares a release heading that follows a byte order mark",
+		"compares the releases of a changelog that starts with a byte order mark before its title",
 		async () => {
 			const released = BASE_CHANGELOG.slice(BASE_CHANGELOG.indexOf("## [1.0.0]"));
-			const repo = await repoWith(`\uFEFF${released}`);
-			await repo.write(`\uFEFF${released.replace("- Fixed an old bug\n", "")}`);
+			const repo = await repoWith(`\uFEFF# Changelog\n\n${released}`);
+			await repo.write(`\uFEFF# Changelog\n\n${released.replace("- Fixed an old bug\n", "")}`);
 
 			const result = await check(repo, "--base", "HEAD");
 			expect(result.exitCode).toBe(1);
@@ -1400,6 +1401,31 @@ describe("check-released-changelogs", () => {
 			expect(changes.map(change => change.problem)).toEqual(["heading"]);
 			expect(changes[0]?.heading).toContain(`: Markdown shows ${shown} where the changelog tools read `);
 			// The same text at the base leaves nothing the check can compare.
+			await expect(findReleasedSectionChanges(CHANGELOG, head, BASE_CHANGELOG, options)).rejects.toBeInstanceOf(
+				UnreadableInputError,
+			);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	// `bun run release` moves only a bare `## [Unreleased]`, and adds the next one below a `# Changelog` title.
+	test.each([
+		{
+			name: "an [Unreleased] heading with closing #s",
+			head: BASE_CHANGELOG.replace("## [Unreleased]", "## [Unreleased] ##"),
+		},
+		{ name: "no # Changelog title", head: BASE_CHANGELOG.replace("# Changelog\n\n", "") },
+		{ name: "another title", head: BASE_CHANGELOG.replace("# Changelog", "# Wrong") },
+		{
+			name: "a second level-1 heading above the first release",
+			head: BASE_CHANGELOG.replace("# Changelog\n", "# Changelog\n\n# Notes\n"),
+		},
+	])(
+		"fails a head with $name, and refuses a base with it",
+		async ({ head }) => {
+			const options = { release: false, readArchive: async () => undefined };
+			const { changes } = await findReleasedSectionChanges(CHANGELOG, BASE_CHANGELOG, head, options);
+			expect(changes.map(change => change.problem)).toEqual(["heading"]);
 			await expect(findReleasedSectionChanges(CHANGELOG, head, BASE_CHANGELOG, options)).rejects.toBeInstanceOf(
 				UnreadableInputError,
 			);
