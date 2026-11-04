@@ -11748,7 +11748,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			} finally {
 				this.#abortInProgress = false;
 				this.#drainStrandedQueuedMessages();
-					if (forceQueuedDelivery) this.#forcedQueuedMessageDeliveryCount--;
+				if (forceQueuedDelivery) this.#forcedQueuedMessageDeliveryCount--;
 				this.#abortUnwinds.delete(unwind.promise);
 				unwind.resolve();
 			}

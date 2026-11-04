@@ -520,11 +520,12 @@ describe("advisor tool-call loop guard", () => {
 		const advise = advisor.state.tools.find(tool => tool.name === "advise");
 		if (!advise) throw new Error("Expected advisor delivery tool");
 		// Simulate delivery into a live primary before its next two steps.
+		// Only a blocker interrupts a running turn (#13775); a concern waits for the next step.
 		session.agent.state.isStreaming = true;
 		try {
 			await advise.execute("first-note", {
 				note: "The first operation loses the selected file.",
-				severity: "concern",
+				severity: "blocker",
 			});
 			await new Promise<void>(resolve => setImmediate(resolve));
 			expect(session.agent.peekSteeringQueue()).toHaveLength(1);
@@ -562,7 +563,7 @@ describe("advisor tool-call loop guard", () => {
 		try {
 			await advise.execute("next-note", {
 				note: "The next operation overwrites the destination file.",
-				severity: "concern",
+				severity: "blocker",
 			});
 			await new Promise<void>(resolve => setImmediate(resolve));
 			expect(session.agent.peekSteeringQueue()).toHaveLength(1);
@@ -594,7 +595,7 @@ describe("advisor tool-call loop guard", () => {
 		try {
 			await advise.execute("arm-immune", {
 				note: "The running step loses the selected file.",
-				severity: "concern",
+				severity: "blocker",
 			});
 			await new Promise<void>(resolve => setImmediate(resolve));
 			expect(session.agent.peekSteeringQueue()).toHaveLength(1);
