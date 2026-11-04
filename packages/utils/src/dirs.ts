@@ -599,8 +599,14 @@ export function isOmpOwnedPath(candidate: string): boolean {
 	// Every one of these is asked of the code that creates the tree, never
 	// matched by name: `wt` moves with `OMP_WORKTREE_DIR` and the `worktree.base`
 	// setting, and a name-matched exclusion silently stops covering it.
+	//
+	// The project directory is deliberately NOT among them. It is where this
+	// process happens to stand, and a session started from the home directory
+	// makes it the config root itself, which would class every config file as
+	// somebody else's and quietly turn the whole thing off. The nested-`.omp`
+	// rule below covers a project directory wherever it sits, and a project
+	// outside these roots is not owned to begin with.
 	const fetched = [
-		getProjectAgentDir(),
 		getWorktreesDir(),
 		getRemoteDir(),
 		getSkillshareStoreDir(),

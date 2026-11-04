@@ -9,11 +9,13 @@ import {
 	getBaseConfigRoot,
 	getPluginsDir,
 	getProjectAgentDir,
+	getProjectDir,
 	getRemoteDir,
 	getSkillshareStoreDir,
 	getWorktreesDir,
 	isOmpOwnedPath,
 	setAgentDir,
+	setProjectDir,
 } from "../src/dirs";
 import { removeWithRetries } from "../src/temp";
 
@@ -372,5 +374,22 @@ describe("classification does not depend on where omp happens to be pointed", ()
 		// containment check used to reach it without the shape rule.
 		expect(isOmpOwnedPath(path.join(owned, "trees-b", "pr-1", ".omp", "mcp.json"))).toBe(false);
 		expect(isOmpOwnedPath(path.join(owned, "agent", "config.yml"))).toBe(true);
+	});
+
+	test("a session started from the home directory still owns its own config", () => {
+		// With cwd at home, the project's `.omp` IS the config root, so keying the
+		// exclusion on it classed every config file as somebody else's and turned
+		// the fix off without a word.
+		const previous = getProjectDir();
+		try {
+			setProjectDir(path.dirname(getBaseConfigRoot()));
+			expect(getProjectAgentDir()).toBe(getBaseConfigRoot());
+			expect(isOmpOwnedPath(getBaseConfigRoot())).toBe(true);
+			expect(isOmpOwnedPath(path.join(getBaseConfigRoot(), "profiles", "pbc"))).toBe(true);
+			// A checkout under it is still somebody else's, by shape.
+			expect(isOmpOwnedPath(path.join(getBaseConfigRoot(), "wt", "pr-1", ".omp"))).toBe(false);
+		} finally {
+			setProjectDir(previous);
+		}
 	});
 });
