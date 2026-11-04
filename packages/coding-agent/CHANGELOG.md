@@ -11,7 +11,7 @@
 ### Changed
 
 - Subagents now move into worker threads when many run at once, so their model streaming and tool work no longer competes with the TUI: up to 3 concurrent subagents run on the main thread, 4 add a worker, and each doubling (8, 16, 32) adds one more, up to the new `task.workerThreads` (default 4; `0` keeps every subagent on the main thread). Each subagent goes where the fewest are running; a needed worker starts while the model is still streaming the spawning call and exits a minute after its last subagent finishes or parks. IRC, the Agent Hub and focus view, `agent://`/`history://`/`proc://`, parking and revival, async jobs, cost caps, account pools and OAuth refresh, runtime model providers, MCP, memory, telemetry, `PI_PROXY` and logs keep working across the thread boundary. If omp's own files change while it runs (a source checkout or an in-place update), new subagents run on the main thread until omp restarts
-- `omp worktree clear` now keeps a task-isolation sandbox that cannot prove it is finished (no owner marker, or one it cannot read) unless you pass `--all`, decides again for every entry at the moment it removes it (keeping one that changed since the scan), and `omp worktree list` and `clear` say why each kept entry is kept ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+- `omp worktree clear` now decides again for every entry at the moment it removes it (keeping one that changed since the scan), and `omp worktree list` and `clear` say why each kept entry is kept ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 

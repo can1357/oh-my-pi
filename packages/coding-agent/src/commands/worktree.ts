@@ -56,8 +56,7 @@ export default class Worktree extends Command {
 			default: false,
 		}),
 		all: Flags.boolean({
-			description:
-				"Clear every entry, including live PR-checkout worktrees and task-isolation sandboxes that cannot prove they are finished (clear)",
+			description: "Clear every entry, including live PR-checkout worktrees (clear)",
 			default: false,
 		}),
 		"dry-run": Flags.boolean({
