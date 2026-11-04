@@ -132,3 +132,31 @@ async fn a_closed_descriptor_stays_closed_in_an_external_command() {
 	])
 	.await;
 }
+
+/// A text file the kernel refuses with `ENOEXEC` runs as a script, and its
+/// commands still find the descriptor the caller closed closed.
+///
+/// This is where the shell leaves Bash on purpose. Bash 5.2.21 and 5.3.0
+/// both recover by starting a shell on the file, and the `open` of the file
+/// lands on the lowest free descriptor — descriptor 2 when the caller wrote
+/// `2>&-`. Bash leaves it there, so the script's own commands are handed a
+/// readable descriptor onto the script's text (`readlink /proc/self/fd/2`
+/// in the child names the script). The shell reads the file through the
+/// host instead and has no such descriptor, so the slot stays closed, which
+/// is what the caller asked for and what every other closed-descriptor row
+/// gets. The visible difference is small and in the caller's favour: a
+/// failing write to descriptor 2 inside such a script ends the command with
+/// the status its shell gives a failed `dup` (2 in dash) instead of the
+/// status it gives a failed `write` (1).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_closed_descriptor_stays_closed_in_a_script_the_kernel_refused() {
+	check(&[Row {
+		script: "printf '%s\\n' \"/bin/sh -c 'exec 9>&2'\" 'if [ $? -ne 0 ]; then echo fd2-closed; \
+		         else echo fd2-open; fi' > sc; chmod +x sc; ./sc 2>&- > out",
+		fifos:  &[],
+		output: "",
+		status: 0,
+		files:  &[("out", Some("fd2-closed\n"))],
+	}])
+	.await;
+}
