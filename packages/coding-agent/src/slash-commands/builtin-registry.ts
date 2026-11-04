@@ -193,6 +193,7 @@ export async function executeBuiltinSlashCommand(
 			},
 			refreshCommands: () => ctx.refreshSlashCommandState(),
 			reloadPlugins: () => reloadTuiPluginState(ctx),
+			notifySessionPinChanged: (sessionId: string, pinned: boolean) => ctx.applySessionPin(sessionId, pinned),
 		};
 		const result = await runAsSessionWork(ctx.session, () => handle(parsed, adapted));
 		clearSubmittedText(runtime);

@@ -3,6 +3,7 @@ import { Settings } from "../config/settings";
 import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
 import type { ToolSession } from "../tools";
+import { ToolAbortError } from "../tools/tool-errors";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
@@ -29,6 +30,13 @@ export class EvalKernelNotRunningError extends Error {
 		);
 		this.name = "EvalKernelNotRunningError";
 	}
+}
+
+/** The error an aborted kernel call reports: the signal's own reason (`Interrupted by user`, …) or `fallback`. */
+export function abortReasonError(reason: unknown, fallback: string): Error {
+	if (reason instanceof Error) return reason;
+	if (typeof reason === "string") return new ToolAbortError(reason);
+	return new ToolAbortError(fallback);
 }
 
 /**

@@ -129,7 +129,7 @@ describe("native composer", () => {
 
 	it("sends a shown prediction as ghost text in place of the placeholder", () => {
 		const editor = composer({ running: false, title: "Fix login" });
-		editor.prediction = () => "run the tests";
+		editor.predictions = () => ["run the tests"];
 		const input = () => nodes(editor.describe(cx)).find(n => n.k === "editor")?.p;
 
 		expect(input()).toMatchObject({ ghost: "run the tests", placeholder: undefined });

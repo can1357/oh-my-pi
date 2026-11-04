@@ -7,6 +7,13 @@
 - `Agent.transformContext` can be read and replaced after construction, and every model request uses it as it is then: a replacement or a removal takes effect from the next request, a later one in the same run included ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
 - `Agent.addHold(open)` holds every model request and tool call, a speculative run included, until the hold lets it go: the agent asks every hold after the last step that prepares a request or call — hooks, transforms, gates, the credential lookup and a process pause included, whoever added them — and starts it in the same turn as the check that lets it go, asking all holds together until none holds. Each check reads the holds registered at that moment: one added while a request is prepared or held is asked at its next check, and removing one releases a request that waits on it ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
 - `Agent.addHold` holds every model request started in the agent's context, not only the loop's own: a tool's request, a timer's, a helper agent's, and the transport's send after `onPayload`. `Agent.runInRequestContext` enters that context for work started from outside it, and `AgentOptions.requestHoldContext` gives a helper agent another agent's holds ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+- Added `wireToolsFingerprint()`, a hash of the tool specs a request sends ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
+### Fixed
+
+- Fixed steering and follow-up queue notifications observing a batch before its preparation claim was installed and missing the transition to delivery, leaving pending-message snapshots stale after asynchronous preparation.
+
+## [18.16.0] - 2026-11-02
 
 ### Changed
 
@@ -15,6 +22,14 @@
 ### Removed
 
 - `Agent.wrapContextTransform(wrapper, { outermost })` and its `ContextTransformWrapper` type, which `Agent.addHold` replaces. Both were added earlier in this unreleased change and never shipped, so no released API is removed ([#17421](https://github.com/can1357/oh-my-pi/pull/17421) by [@sjawhar](https://github.com/sjawhar))
+### Fixed
+
+- Context estimates for a model without a known tokenizer family (Gemini, Grok and the like), and token counts made without a model (compress metrics, the legacy `estimateTokens` export), count text in o200k_base instead of guessing 4 bytes per token, which undercounted what those providers bill by 11–48% on code-heavy sessions and let compaction fire late after a switch to them ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+- Context estimates no longer charge a reader another model's thinking signatures or redacted thinking, which the request strips: a Claude session switched to Grok or Gemini, including Gemini through Factory, counted them as text ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Removed
+
+- Removed `PI_TOKENIZER_ACCURATE`: every model is now counted with a native tokenizer ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.15.0] - 2026-11-01
 
