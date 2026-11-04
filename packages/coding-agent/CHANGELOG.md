@@ -18,6 +18,7 @@
 - Added `tui.motion` (`full` / `reduced` / `none`, also `--motion` and `PI_MOTION`), one switch over spinners, the thinking pulse, shimmer and the status-line blink/fade for many-pane or reduced-motion use; a `tui.spinnerInterval` you set still wins over the preset ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - Added `tui.spinnerInterval` (also `--spinner-interval` and `PI_SPINNER_INTERVAL`) to slow every spinner, the terminal title included, or pin them static with `0` ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - Added `tui.maxFps` (also `--max-fps` and `PI_MAX_FPS`) to cap how often the TUI repaints; keystroke echo keeps 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Fixed resolving a conflict to an empty side (`@ours`, `@theirs` or `@both` with no lines) through a `conflict://` write leaving a stray blank line where the conflict was; an empty line you type yourself is still kept ([#17839](https://github.com/can1357/oh-my-pi/pull/17839) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
@@ -102,7 +103,6 @@
 
 ### Fixed
 
-- Fixed resolving a conflict to an empty side (`@ours`, `@theirs` or `@both` with no lines) through a `conflict://` write leaving a stray blank line where the conflict was; an empty line you type yourself is still kept ([#17839](https://github.com/can1357/oh-my-pi/pull/17839) by [@sjawhar](https://github.com/sjawhar))
 - An out-of-credit provider error (a 402 billing body, an insufficient or prepaid balance, a credits wall, a spend ceiling) now ends the turn with that error instead of starting a retry: the retry engine was sleeping the 30-minute `QUOTA_EXHAUSTED` heuristic on it, and a `retry.maxDelayMs` raised that high let the sleep run, so Retry did nothing while the countdown lasted and the error card was later marked recovered by an unrelated turn. Topping the account up and pressing Retry now re-attempts at once ([#17937](https://github.com/can1357/oh-my-pi/pull/17937) by [@iacore](https://github.com/iacore))
 - Fixed the Agent Hub still listing the previous session's subagents after `/new` or switching sessions; it now shows only the current session's agents ([#17945](https://github.com/can1357/oh-my-pi/issues/17945))
 - Browser: `browser.close({ all: true })` from a subagent no longer closes its parent's tabs; it releases only the calling agent's tabs. Tabs now belong to the agent that opened them rather than its conversation id, so after `/new`, `/resume`, fork, or branch they are still frozen, idle-closed, released by close-all, and closed when the session ends instead of leaking ([#15975](https://github.com/can1357/oh-my-pi/issues/15975), [#16133](https://github.com/can1357/oh-my-pi/pull/16133) by [@harshaygadekar](https://github.com/harshaygadekar))
