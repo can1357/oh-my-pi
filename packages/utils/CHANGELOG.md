@@ -5,6 +5,7 @@
 ### Added
 
 - Added `logger.setLogForwarder(forwarder)` (`LogForwarder { emit, flush }`), which routes a thread's records — `withContext` fields merged, context reduced to clone-safe JSON — to another thread instead of its own file and sinks, and `logger.emitForeign(event)`, which writes such a record with its original timestamp and runs the sinks without the caller's `withContext` fields
+- Added `FileLockHandle.acquired`, which reports whether a file lock handle still owns its lease, read from the lock itself ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 

@@ -17,6 +17,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/isolation-lease";
 import {
 	ISOLATION_OWNER_FILE,
+	markIsolationRetiring,
+	readIsolationClaim,
 	resolveSandboxIdentity,
 	writeIsolationOwner,
 } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
@@ -324,3 +326,57 @@ describe("isolation workspace leases", () => {
 		expect(await hasLiveIsolationLease(baseDir)).toBe(true);
 	});
 });
+
+describe("starting a session in an isolation workspace", () => {
+	// `createAgentSession` takes this lease unguarded: what it does here is
+	// whether `omp` starts in the workspace at all.
+
+	it("leases a workspace a teardown kept or retained, so a user can open a session in it to recover the work", async () => {
+		// A retained workspace is the sandbox moved to a `.retained-*` name with
+		// its claim intact; one kept in place keeps its name and its claim.
+		const { baseDir } = await makeSandbox();
+		const retained = `${baseDir}.retained-test`;
+		await fs.rename(baseDir, retained);
+		temporary.push(retained);
+		expect((await readIsolationClaim(retained)).kind).toBe("claimed");
+
+		const release = await leaseIsolationWorkspace(path.join(retained, "m"));
+		expect(await hasLiveIsolationLease(retained)).toBe(true);
+		await release();
+	});
+
+	it("refuses a workspace being torn down, naming it and the way out", async () => {
+		// No lease would stop that teardown, and a session there unleased could
+		// have its files removed under it.
+		const { baseDir, mergedDir } = await makeSandbox();
+		await markIsolationRetiring(baseDir, "gen-retiring");
+
+		const refusal = await refusalOf(leaseIsolationWorkspace(mergedDir));
+		expect(refusal.name).toBe("IsolationWorkspaceUnavailableError");
+		expect(refusal.message).toContain(`isolation workspace ${baseDir} is being torn down`);
+		expect(refusal.message).toContain("Copy anything you need out of it");
+		expect(refusal.message).toContain("`omp worktree clear`");
+		expect(await fs.readdir(baseDir)).not.toContain(ISOLATION_LEASE_DIR);
+	});
+
+	it("refuses a workspace whose owner marker cannot be read, naming it and the way out", async () => {
+		const { baseDir, mergedDir } = await makeSandbox();
+		await Bun.write(path.join(baseDir, ISOLATION_OWNER_FILE), "{ not json");
+
+		const refusal = await refusalOf(leaseIsolationWorkspace(mergedDir));
+		expect(refusal.name).toBe("IsolationWorkspaceUnavailableError");
+		expect(refusal.message).toContain(`isolation workspace ${baseDir} has an unreadable owner marker`);
+		expect(refusal.message).toContain("`omp worktree clear --all`");
+		expect(await fs.readdir(baseDir)).not.toContain(ISOLATION_LEASE_DIR);
+	});
+});
+
+/** The error `pending` rejects with; fails the test when it resolves instead. */
+async function refusalOf(pending: Promise<unknown>): Promise<Error> {
+	const outcome = await pending.then(
+		() => undefined,
+		(error: unknown) => error,
+	);
+	if (!(outcome instanceof Error)) throw new Error(`expected a refusal, got ${String(outcome)}`);
+	return outcome;
+}

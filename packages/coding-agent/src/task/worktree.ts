@@ -1,5 +1,7 @@
 import { type NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
-import * as fs from "./isolation-fs";
+import * as fs from "node:fs/promises";
+import * as isoFs from "./isolation-fs";
+import * as lookup from "./isolation-lookup";
 import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
@@ -165,7 +167,7 @@ async function realCommonDir(dir: string): Promise<string | undefined> {
 	// prefixes (macOS /var -> /private/var).
 	// A path that cannot be resolved has no canonical form, and two callers
 	// that fall back to different spellings lock different files.
-	const resolved = await fs.realpathLookup(commonDir);
+	const resolved = await lookup.realpathLookup(commonDir);
 	if (resolved.kind === "found") return resolved.value;
 	if (resolved.kind === "absent") return path.resolve(commonDir);
 	throw new IsolationCaptureIncompleteError(`Could not resolve ${commonDir}: ${resolved.reason}`, [commonDir]);
@@ -191,7 +193,7 @@ async function discoverNestedRepos(repoRoot: string, ownRepos: readonly string[]
 	// Find all .git dirs/files that aren't the root or known submodules
 	const result: string[] = [];
 	async function walk(dir: string): Promise<void> {
-		const listing = await fs.readdirTypedLookup(dir);
+		const listing = await lookup.readdirTypedLookup(dir);
 		if (listing.kind === "absent") return;
 		if (listing.kind === "unknown") {
 			// Recorded, not raised. This walk looks for nested repositories
@@ -214,7 +216,7 @@ async function discoverNestedRepos(repoRoot: string, ownRepos: readonly string[]
 			// cannot be reached is not a directory without one: read that way,
 			// a nested repo's changes never reach the patch.
 			const gitDir = path.join(full, ".git");
-			const gitEntry = await fs.lstatLookup(gitDir);
+			const gitEntry = await lookup.lstatLookup(gitDir);
 			if (gitEntry.kind === "unknown") {
 				// Recorded, like the listing above it and for the same reason:
 				// this scan runs while the baseline is taken, and an
@@ -303,7 +305,7 @@ async function sumUntrackedBytes(repoRoot: string, untracked: readonly string[])
 		// entry nobody can stat has no size to contribute either. Both are
 		// named in the log the budget failure prints rather than silently
 		// shrinking the estimate.
-		const found = await fs.lstatLookup(path.join(repoRoot, entry));
+		const found = await lookup.lstatLookup(path.join(repoRoot, entry));
 		if (found.kind === "unknown") {
 			logger.warn("isolation baseline could not size an untracked entry", { entry, reason: found.reason });
 			return 0;
@@ -610,7 +612,7 @@ export interface DeltaPatchResult {
 }
 
 async function hasGitEntry(dir: string): Promise<boolean> {
-	const found = await fs.lstatLookup(path.join(dir, ".git"));
+	const found = await lookup.lstatLookup(path.join(dir, ".git"));
 	if (found.kind === "unknown") {
 		throw new IsolationCaptureIncompleteError(`Could not read ${path.join(dir, ".git")}: ${found.reason}`, [dir]);
 	}
@@ -643,7 +645,7 @@ export async function captureDeltaPatch(isolationDir: string, baseline: Worktree
 		// A nested repo whose `.git` cannot be reached is not a nested repo
 		// that went away: skipping it drops its work from the patch, and the
 		// teardown then deletes the directory holding the only copy.
-		const nestedGit = await fs.lstatLookup(path.join(nestedDir, ".git"));
+		const nestedGit = await lookup.lstatLookup(path.join(nestedDir, ".git"));
 		if (nestedGit.kind === "absent") continue;
 		if (nestedGit.kind === "unknown") {
 			throw new IsolationCaptureIncompleteError(
@@ -693,7 +695,7 @@ export async function applyNestedPatches(
 
 	for (const [relativePath, repoPatches] of byRepo) {
 		const nestedDir = path.join(repoRoot, relativePath);
-		const nestedGit = await fs.lstatLookup(path.join(nestedDir, ".git"));
+		const nestedGit = await lookup.lstatLookup(path.join(nestedDir, ".git"));
 		if (nestedGit.kind === "absent") continue;
 		if (nestedGit.kind === "unknown") {
 			// This applies a captured patch. Skipping a repo nobody could look
@@ -839,7 +841,7 @@ function errorMessage(err: unknown): string {
  */
 function getTaskIsolationSegment(repoRoot: string, id: string): string {
 	const key = `${path.resolve(repoRoot)}\0${id}`;
-	const digest = fs.hash(key).toString(16).padStart(16, "0").slice(-TASK_ISOLATION_DIR_DIGEST_CHARS);
+	const digest = Bun.hash(key).toString(16).padStart(16, "0").slice(-TASK_ISOLATION_DIR_DIGEST_CHARS);
 	// 122 random bits from the system's cryptographic source, not a timestamp and a
 	// counter. A timestamp-and-counter mint is a prediction two processes can
 	// make identically — same clock, same entropy, same name, and the second
@@ -896,19 +898,19 @@ async function detachSubmodules(sourceRoot: string, isolationRoot: string): Prom
 	for (const relativePath of paths) {
 		const sourceDir = path.join(sourceRoot, relativePath);
 		const isolatedDir = path.join(isolationRoot, relativePath);
-		const sourceGit = await fs.lstatLookup(path.join(sourceDir, ".git"));
+		const sourceGit = await lookup.lstatLookup(path.join(sourceDir, ".git"));
 		if (sourceGit.kind === "absent") continue;
 		if (sourceGit.kind === "unknown") {
 			throw new Error(`Could not read ${path.join(sourceDir, ".git")}: ${sourceGit.reason}`);
 		}
-		let isolated = await fs.lstatLookup(path.join(isolatedDir, ".git"));
+		let isolated = await lookup.lstatLookup(path.join(isolatedDir, ".git"));
 		if (isolated.kind === "unknown") {
 			throw new Error(`Could not read ${path.join(isolatedDir, ".git")}: ${isolated.reason}`);
 		}
 		if (isolated.kind === "absent") {
 			// `git worktree add` (rcopy) checks out gitlinks but not their trees.
 			await fs.cp(sourceDir, isolatedDir, { recursive: true });
-			isolated = await fs.lstatLookup(path.join(isolatedDir, ".git"));
+			isolated = await lookup.lstatLookup(path.join(isolatedDir, ".git"));
 			if (isolated.kind !== "found") {
 				throw new Error(`Submodule ${relativePath} has no .git after being copied into the isolation.`);
 			}
@@ -1036,7 +1038,7 @@ export async function ensureIsolation(
 						});
 					} else {
 						if (needsNativeTeardown(candidate)) {
-							const mounted = await fs.liveMountsUnder(mergedDir).then(
+							const mounted = await isoFs.liveMountsUnder(mergedDir).then(
 								mounts => mounts.length > 0,
 								() => true,
 							);
@@ -1100,7 +1102,7 @@ async function settleAbandonedStop(
 	teardownBase: string,
 	backend: IsoBackendKind,
 	heldLock: { release: () => void } | undefined,
-	pin: fs.DirectoryPin,
+	pin: isoFs.DirectoryPin,
 	expected: (claim: IsolationClaim) => boolean,
 ): Promise<void> {
 	try {
@@ -1111,7 +1113,7 @@ async function settleAbandonedStop(
 			if (needsNativeTeardown(backend)) return;
 		}
 		const remove = async (): Promise<void> => {
-			const now = await fs.checkPinnedDirectory(teardownBase, pin);
+			const now = await isoFs.checkPinnedDirectory(teardownBase, pin);
 			if (!now.same) {
 				logger.warn("abandoned isolation stop settled; the sandbox is not the directory it pinned, so it stays", {
 					mergedDir: teardownBase,
@@ -1127,7 +1129,7 @@ async function settleAbandonedStop(
 				});
 				return;
 			}
-			const mounts = await fs.liveMountsUnder(teardownBase);
+			const mounts = await isoFs.liveMountsUnder(teardownBase);
 			if (mounts.length > 0) {
 				logger.warn("abandoned isolation stop settled; something is still mounted in the sandbox, so it stays", {
 					mergedDir: teardownBase,
@@ -1250,7 +1252,7 @@ export async function cleanupIsolation(
 	let retiredDir: string | undefined;
 	let proceed = false;
 	await runHoldingSandboxLock(baseDir, lock, async () => {
-		let pin: fs.DirectoryPin | undefined;
+		let pin: isoFs.DirectoryPin | undefined;
 		try {
 			if (handle.generation !== undefined) {
 				const claim = await readIsolationClaim(baseDir);
@@ -1265,7 +1267,7 @@ export async function cleanupIsolation(
 			}
 			// The directory the claim was just read from, held by what it is.
 			try {
-				pin = await fs.pinDirectory(baseDir);
+				pin = await isoFs.pinDirectory(baseDir);
 			} catch (error) {
 				logger.warn("isolation cleanup skipped: the sandbox could not be held by identity", {
 					mergedDir: handle.mergedDir,
@@ -1294,7 +1296,7 @@ export async function cleanupIsolation(
 			const keep = async (reason: string): Promise<void> => {
 				kept = reason;
 				logger.warn("isolation workspace kept", { mergedDir: handle.mergedDir, reason });
-				if (pin && (await fs.checkPinnedDirectory(baseDir, pin)).same) {
+				if (pin && (await isoFs.checkPinnedDirectory(baseDir, pin)).same) {
 					await recordKeptReason(baseDir, reason).catch(() => undefined);
 				}
 			};
@@ -1381,7 +1383,7 @@ export async function cleanupIsolation(
 			// everything after it ran against a pathname, and the capture may have
 			// run for minutes. What has that name now must be the pinned
 			// directory, and its marker must still name this generation.
-			const present = await fs.checkPinnedDirectory(baseDir, pin);
+			const present = await isoFs.checkPinnedDirectory(baseDir, pin);
 			if (!present.same) {
 				logger.warn("isolation cleanup skipped: the sandbox is no longer the directory this run proved its own", {
 					mergedDir: handle.mergedDir,
@@ -1422,7 +1424,7 @@ export async function cleanupIsolation(
 			if (retiredDir !== undefined) {
 				// A rename moves whatever had the name. Only the pinned directory
 				// goes further; anything else is put back and left alone.
-				const moved = await fs.checkPinnedDirectory(retiredDir, pin);
+				const moved = await isoFs.checkPinnedDirectory(retiredDir, pin);
 				if (!moved.same) {
 					logger.warn("isolation cleanup skipped: what was retired is not the directory this run proved its own", {
 						mergedDir: handle.mergedDir,
@@ -1464,7 +1466,7 @@ export async function cleanupIsolation(
 			try {
 				// A stop follows a symlink at the mount directory into whatever it
 				// names, and unmounts or deletes that instead.
-				const mountDir = await fs.lstatLookup(teardownMerged);
+				const mountDir = await lookup.lstatLookup(teardownMerged);
 				if (mountDir.kind === "found" && mountDir.value.isSymbolicLink()) {
 					keep = true;
 					logger.warn("isolation workspace kept: its mount directory is a symlink, so it is not stopped", {
@@ -1488,7 +1490,7 @@ export async function cleanupIsolation(
 				}
 				// The stop acts on a pathname; checked against the pin at the last
 				// moment before it, not only when the directory was retired.
-				const beforeStop = await fs.checkPinnedDirectory(teardownBase, held);
+				const beforeStop = await isoFs.checkPinnedDirectory(teardownBase, held);
 				if (!beforeStop.same) {
 					keep = true;
 					logger.warn("isolation workspace not stopped: it is no longer the directory this run proved its own", {
@@ -1563,8 +1565,8 @@ export async function cleanupIsolation(
 				if (!abandoned && !keep) {
 					// The removal acts on what has the name now, and never walks
 					// into a mount.
-					const now = await fs.checkPinnedDirectory(teardownBase, held);
-					const mounts = now.same ? await fs.liveMountsUnder(teardownBase) : [];
+					const now = await isoFs.checkPinnedDirectory(teardownBase, held);
+					const mounts = now.same ? await isoFs.liveMountsUnder(teardownBase) : [];
 					if (now.same && mounts.length === 0) {
 						await fs.rm(teardownBase, { recursive: true, force: true });
 					} else if (mounts.length > 0) {

@@ -31,11 +31,12 @@
  *   the life of the process; in this process a record whose thread is gone
  *   counts as released. Other processes see only the pid, as before.
  */
-import { type FSWatcher, watch } from "./isolation-fs";
-import * as fs from "./isolation-fs";
+import { type FSWatcher, watch } from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { currentThreadId, isMainThread, isThreadId, isThreadOfThisProcessAlive } from "../thread/identity";
+import * as lookup from "./isolation-lookup";
 import {
 	withSandboxLock,
 	isProcessStillLive,
@@ -46,6 +47,7 @@ import {
 	resolveSandboxIdentity,
 	writeProcessIdentity,
 } from "./isolation-ownership";
+import { IsolationWorkspaceUnavailableError } from "./isolation-unavailable";
 
 /**
  * Directory of unfinished-writer records: one file per writer that gave up its
@@ -195,7 +197,7 @@ async function readLeaseRecord(file: string): Promise<{ agentId?: unknown; threa
 	// lease is the owner's own or its thread has gone, and the unreadable case
 	// is already counted as a live foreign holder by the identity read, which
 	// is the strict answer.
-	const found = await fs.readJsonLookup(file);
+	const found = await lookup.readJsonLookup(file);
 	if (found.kind !== "found") return {};
 	const decoded = found.value;
 	if (typeof decoded !== "object" || decoded === null) return {};
@@ -237,7 +239,7 @@ async function isHolderLive(holder: ProcessIdentity, file: string): Promise<bool
  */
 export async function hasLiveIsolationLease(baseDir: string, ownerAgentId?: string): Promise<boolean> {
 	const leaseDir = path.join(baseDir, ISOLATION_LEASE_DIR);
-	const listing = await fs.readdirLookup(leaseDir);
+	const listing = await lookup.readdirLookup(leaseDir);
 	if (listing.kind === "absent") return false;
 	if (listing.kind === "unknown") {
 		logger.warn("isolation lease directory could not be listed; treating the sandbox as in use", {
@@ -269,14 +271,25 @@ export async function hasLiveIsolationLease(baseDir: string, ownerAgentId?: stri
 	return live;
 }
 
+/** The refusal for a session in a workspace whose teardown has started. */
+function retiringWorkspaceError(cwd: string, baseDir: string): IsolationWorkspaceUnavailableError {
+	return new IsolationWorkspaceUnavailableError(
+		`Cannot start a session in ${cwd}: isolation workspace ${baseDir} is being torn down, and its files can be ` +
+			"removed while you work. Copy anything you need out of it with ordinary file tools and start the session " +
+			"elsewhere; `omp worktree list` shows its state, and `omp worktree clear` removes it if its teardown " +
+			"has stopped.",
+	);
+}
+
 /**
  * Hold the sandbox `cwd` sits in, if any, and return the release.
  *
  * Taken under the sandbox lock, after re-reading the claim, so a teardown that
  * is deciding cannot miss it. Throws if the lease cannot be recorded, and
- * throws if the sandbox is already being torn down: a no-op release handed
- * back for a retiring sandbox is a promise of protection nothing is keeping.
- * Returns a no-op release only when `cwd` is in no sandbox at all.
+ * throws {@link IsolationWorkspaceUnavailableError} if the sandbox is being
+ * torn down or its owner marker cannot be read: a no-op release handed back
+ * there is a promise of protection nothing is keeping. Returns a no-op
+ * release only when `cwd` is in no sandbox at all.
  *
  * Awaiting the release is a completion barrier *for a holder in the owner's
  * process*: when it resolves, this lease is gone from disk and any teardown
@@ -292,13 +305,17 @@ export async function leaseIsolationWorkspace(
 ): Promise<() => Promise<void>> {
 	const found = await findSandboxBase(cwd);
 	if (found === undefined) return async () => {};
-	if (found.kind === "retiring") {
-		throw new Error(`Isolation workspace ${found.baseDir} is being torn down and cannot be leased.`);
-	}
+	// A kept or retained workspace is claimed and is leased like any other, so
+	// a user can open a session in it to recover the work. These two are not:
+	// nothing would honour a lease on them, and a session there unleased could
+	// have its files removed under it.
+	if (found.kind === "retiring") throw retiringWorkspaceError(cwd, found.baseDir);
 	if (found.kind === "unknown") {
-		throw new Error(
-			`Isolation workspace ${found.baseDir} has an unreadable owner marker (${found.reason}); refusing to ` +
-				"hand out a lease nothing would honour.",
+		throw new IsolationWorkspaceUnavailableError(
+			`Cannot start a session in ${cwd}: isolation workspace ${found.baseDir} has an unreadable owner marker ` +
+				`(${found.reason}), so nothing can keep it for this session. Copy anything you need out of it with ` +
+				"ordinary file tools and start the session elsewhere; `omp worktree list` shows it, and " +
+				"`omp worktree clear --all` removes it once you are done.",
 		);
 	}
 	const sandbox = found.baseDir;
@@ -311,9 +328,7 @@ export async function leaseIsolationWorkspace(
 		// already holds this lock is served rather than queued behind itself.
 		await withSandboxLock(sandbox, "lease", async () => {
 			const claim = await readIsolationClaim(sandbox);
-			if (claim.kind !== "claimed") {
-				throw new Error(`Isolation workspace ${sandbox} is being torn down and cannot be leased.`);
-			}
+			if (claim.kind !== "claimed") throw retiringWorkspaceError(cwd, sandbox);
 			// The same path is not the same workspace: a lease written under a
 			// successor protects a run this caller never joined, and leaves the
 			// caller believing it holds the one it queued for.
@@ -411,6 +426,214 @@ export async function markUnfinishedWriter(cwd: string): Promise<() => Promise<v
 }
 
 /**
+ * How long a session being disposed keeps its isolation lease once disposal
+ * has started. Long enough for a shutdown writer to finish, short enough that
+ * a disposal that never finishes cannot hold a workspace for ever.
+ */
+const SESSION_LEASE_DISPOSE_GRACE_MS = 30_000;
+
+/** Attempts, and the pause between them, for a lease or writer record that failed transiently. */
+const HOLD_ATTEMPTS = 5;
+const HOLD_RETRY_MS = 200;
+
+/** Run `attempt` up to {@link HOLD_ATTEMPTS} times, warning with `failure` after each failure; whether it succeeded. */
+async function retryHold(failure: string, attempt: () => Promise<void>): Promise<boolean> {
+	for (let tried = 0; tried < HOLD_ATTEMPTS; tried += 1) {
+		try {
+			await attempt();
+			return true;
+		} catch (error) {
+			logger.warn(failure, { attempt: tried, error: String(error) });
+			await Bun.sleep(HOLD_RETRY_MS);
+		}
+	}
+	return false;
+}
+
+/** A session's hold on the isolation workspace it runs in; see {@link holdIsolationWorkspace}. */
+export interface IsolationWorkspaceHold {
+	/**
+	 * Disposal has started. Records this session as a possible writer for the
+	 * whole of disposal, and bounds how long it keeps the lease. Returns the
+	 * record's publication, which disposal must not finish ahead of; it does
+	 * not reject.
+	 */
+	beginDispose(): Promise<void>;
+	/**
+	 * Disposal has finished. `abandonedShutdownWork` says it gave up on a
+	 * shutdown handler that may still be writing. Returns the record and lease
+	 * work disposal must not finish ahead of; it does not reject.
+	 */
+	dispose(options: { abandonedShutdownWork: boolean }): Promise<void>;
+}
+
+/**
+ * Hold the isolation workspace a session runs in for the life of the session.
+ *
+ * A session opened inside a task-isolation sandbox is a user of a workspace it
+ * did not materialise, and may be in another process than the run that owns
+ * it. The lease keeps that owner's teardown — capture included — waiting for
+ * this session. It carries the agent id, so the owner's own child session
+ * never pins its own run's sandbox.
+ *
+ * The lease is held until disposal *finishes*: a shutdown writer still saving
+ * into the workspace is a user of it, and dropping the lease when disposal
+ * merely starts lets the owner delete the directory under that write. It is
+ * bounded from the moment disposal starts, because a disposal that never
+ * finishes would otherwise hold the sandbox — and the kernel behind it — for
+ * the life of the host. Giving the lease up then is how a stalled disposal
+ * stops holding a kernel, not a statement that this session has stopped
+ * writing, so an unfinished-writer record says so first.
+ *
+ * `cwd` is read when each record is taken. Throws as
+ * {@link leaseIsolationWorkspace} does.
+ */
+export async function holdIsolationWorkspace(
+	cwd: () => string,
+	options: { agentId: string },
+): Promise<IsolationWorkspaceHold> {
+	const { agentId } = options;
+	const lease = await leaseIsolationWorkspace(cwd(), { agentId });
+	let leaseTimer: NodeJS.Timeout | undefined;
+	let leaseDropped = false;
+	/**
+	 * One record for this session, created at most once and cleared at most
+	 * once. Two records — one at the start of disposal and another at the
+	 * grace — left the second uncleared, and a workspace nobody could reuse.
+	 */
+	let writerRecord: Promise<() => Promise<void>> | undefined;
+	/**
+	 * Bumped by every clear, so a grace timer armed before that clear cannot
+	 * recreate a record nobody is left to clear.
+	 */
+	let writerRecordGeneration = 0;
+	const recordWriter = (generation: number): Promise<() => Promise<void>> => {
+		if (generation !== writerRecordGeneration) return Promise.resolve(async () => {});
+		// A rejection is not cached: re-awaiting a settled rejection is not a
+		// retry, and the attempts around this would make exactly one real
+		// one. A failure drops the memo so the next call tries again.
+		writerRecord ??= markUnfinishedWriter(cwd()).catch((error: unknown) => {
+			writerRecord = undefined;
+			throw error;
+		});
+		return writerRecord;
+	};
+	const writerRecordCleared = (): void => {
+		writerRecord = undefined;
+		writerRecordGeneration += 1;
+	};
+	const clearWriterRecord = async (): Promise<void> => {
+		if (writerRecord === undefined) return;
+		const clear = await writerRecord.catch(() => undefined);
+		if (clear === undefined) return;
+		if (await retryHold("could not clear this session's unfinished-writer record; retrying", clear)) {
+			writerRecordCleared();
+			return;
+		}
+		// Still there. Giving up here leaves a live record nothing can finish —
+		// the sandbox is then pinned for this process's life even though the
+		// writer is long done — so keep trying in the background, unreferenced,
+		// until it goes or the process does. One attempt at a time: an interval
+		// that starts work without awaiting the previous attempt had three
+		// clears in flight at once.
+		let clearing = false;
+		const slowRetry = setInterval(() => {
+			if (clearing) return;
+			clearing = true;
+			void clear().then(
+				() => {
+					clearInterval(slowRetry);
+					writerRecordCleared();
+					clearing = false;
+				},
+				() => {
+					clearing = false;
+				},
+			);
+		}, 5_000);
+		slowRetry.unref?.();
+	};
+	const dropLeaseNow = (): void => {
+		if (leaseDropped) return;
+		// Marked dropped only once the lease is really gone: a removal that
+		// failed transiently must leave this retryable, not report a lease
+		// still on disk as released.
+		void retryHold("isolation workspace lease could not be dropped; retrying", async () => {
+			if (leaseDropped) return;
+			await lease();
+			leaseDropped = true;
+			clearTimeout(leaseTimer);
+		});
+	};
+	const keepingLease = (): void => {
+		logger.warn("keeping this session's workspace lease: its writer record could not be published", {
+			id: agentId,
+		});
+	};
+	return {
+		beginDispose: () => {
+			// Recorded for the whole of disposal: a shutdown handler that outruns
+			// its own timeout is still writing here while disposal finishes.
+			const armedGeneration = writerRecordGeneration;
+			const published = recordWriter(armedGeneration)
+				.then(() => undefined)
+				.catch(error => {
+					logger.warn("could not record this session as an unfinished writer", { error: String(error) });
+				});
+			leaseTimer = setTimeout(() => {
+				logger.warn("session disposal outran its workspace lease grace; dropping the lease", {
+					id: agentId,
+					graceMs: SESSION_LEASE_DISPOSE_GRACE_MS,
+				});
+				// The same record, not a second one, and the lease goes only once
+				// it is really on disk: a publication that *failed* is not one
+				// that finished, and dropping protection on it hands the
+				// workspace to a teardown while this session is still writing.
+				void (async () => {
+					const recorded = await retryHold(
+						"could not record an unfinished writer; keeping the workspace lease",
+						async () => {
+							await recordWriter(armedGeneration);
+						},
+					);
+					if (recorded) dropLeaseNow();
+					else keepingLease();
+				})();
+			}, SESSION_LEASE_DISPOSE_GRACE_MS);
+			leaseTimer.unref?.();
+			return published;
+		},
+		dispose: async ({ abandonedShutdownWork }) => {
+			// Disposal ending is not proof that a handler it abandoned at its
+			// timeout has stopped. When it did, the record stays: it names this
+			// process, so it retires when this process does, and until then
+			// nothing deletes or reuses the workspace underneath that handler.
+			if (abandonedShutdownWork) {
+				logger.warn("keeping this session's unfinished-writer record: disposal abandoned a shutdown handler", {
+					id: agentId,
+				});
+				// The lease goes only once the record is on disk, here as at the
+				// grace: dropping it anyway is how a late write ends up with
+				// `ENOENT` and no capture.
+				const recorded = await retryHold(
+					"could not record this session as an unfinished writer; retrying",
+					async () => {
+						await recordWriter(writerRecordGeneration);
+					},
+				);
+				if (!recorded) {
+					keepingLease();
+					return;
+				}
+			} else {
+				await clearWriterRecord();
+			}
+			dropLeaseNow();
+		},
+	};
+}
+
+/**
  * Record that this process is about to claim a stake in `baseDir`, and return
  * the clear for when it has finished trying.
  *
@@ -427,7 +650,7 @@ async function announceIntent(baseDir: string): Promise<() => Promise<void>> {
 		await writeProcessIdentity(file, holderThread());
 	} catch (error) {
 		throw new Error(
-			`Could not announce a stake in isolation workspace ${baseDir} (${fs.reasonOf(error)}); ` +
+			`Could not announce a stake in isolation workspace ${baseDir} (${lookup.reasonOf(error)}); ` +
 				"refusing to queue for its lock unseen.",
 		);
 	}
@@ -452,7 +675,7 @@ export async function hasUnfinishedWriter(baseDir: string): Promise<boolean> {
 
 /** Whether a live process has a record in `dir`, clearing dead ones on the way past. */
 async function hasLiveRecordIn(dir: string): Promise<boolean> {
-	const listing = await fs.readdirLookup(dir);
+	const listing = await lookup.readdirLookup(dir);
 	if (listing.kind === "absent") return false;
 	// A directory that cannot be listed is not an empty one, and the caller is
 	// about to delete or rename what is in it.
@@ -494,7 +717,7 @@ interface HolderReading {
  * transition as a state.
  */
 async function readHolders(dir: string): Promise<HolderReading> {
-	const listing = await fs.readdirLookup(dir);
+	const listing = await lookup.readdirLookup(dir);
 	if (listing.kind === "absent") return { anyLive: false, allOurs: true, unknown: false };
 	if (listing.kind === "unknown") return { anyLive: true, allOurs: false, unknown: true };
 	const entries = listing.value;

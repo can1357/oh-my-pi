@@ -6,6 +6,7 @@ import { scheduler } from "node:timers/promises";
 import * as natives from "@oh-my-pi/pi-natives";
 import { clearWorktrees, listWorktrees, type WorktreeEntry } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
 import * as isolationFs from "@oh-my-pi/pi-coding-agent/task/isolation-fs";
+import * as isolationLookup from "@oh-my-pi/pi-coding-agent/task/isolation-lookup";
 import { ISOLATION_LEASE_DIR } from "@oh-my-pi/pi-coding-agent/task/isolation-lease";
 import {
 	ISOLATION_OWNER_FILE,
@@ -313,22 +314,22 @@ describe("worktree clear task-isolation ownership", () => {
 		// runs to the end it can reach.
 		const atRemoval = Promise.withResolvers<void>();
 		const proceed = Promise.withResolvers<void>();
-		const rm = isolationFs.rm;
-		const rename = isolationFs.rename;
-		vi.spyOn(isolationFs, "rm").mockImplementation((async (target: string, options) => {
+		const rm = fs.rm;
+		const rename = fs.rename;
+		vi.spyOn(fs, "rm").mockImplementation((async (target: string, options) => {
 			if (path.basename(target) === minted) {
 				atRemoval.resolve();
 				await proceed.promise;
 			}
 			return await rm(target, options);
-		}) as typeof isolationFs.rm);
-		vi.spyOn(isolationFs, "rename").mockImplementation((async (from: string, to: string) => {
+		}) as typeof fs.rm);
+		vi.spyOn(fs, "rename").mockImplementation((async (from: string, to: string) => {
 			if (path.basename(from) === minted && path.basename(to).startsWith(`${minted}.removing-`)) {
 				atRemoval.resolve();
 				await proceed.promise;
 			}
 			return await rename(from, to);
-		}) as typeof isolationFs.rename);
+		}) as typeof fs.rename);
 
 		const clearing = clearWorktrees({ all: false, dryRun: false, json: true });
 		await atRemoval.promise;
@@ -367,9 +368,9 @@ describe("worktree clear task-isolation ownership", () => {
 			stderr: "ignore",
 		});
 		expect(await add.exited).toBe(0);
-		const realStatLookup = isolationFs.statLookup;
+		const realStatLookup = isolationLookup.statLookup;
 		let swapped = false;
-		vi.spyOn(isolationFs, "statLookup").mockImplementation(async target => {
+		vi.spyOn(isolationLookup, "statLookup").mockImplementation(async target => {
 			const result = await realStatLookup(target);
 			// The scan's look at the parent repo is when a successor claims the path.
 			if (!swapped && String(target) === repo) {

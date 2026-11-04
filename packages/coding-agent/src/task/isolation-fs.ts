@@ -1,91 +1,37 @@
 /**
- * The whole filesystem surface the isolation path is allowed to touch.
- *
- * Reads come from `isolation-lookup` and answer `found` | `absent` |
- * `unknown`. Writes are here, and they are the operations that either happen
- * or raise — there is no third answer to swallow. Together they are why the
- * modules that decide whether a workspace may be deleted import no
- * filesystem API of their own.
+ * Isolation operations that talk to the outside world and decide something:
+ * a directory held by identity, the mounts under a tree, the processes using
+ * one, a process's start time. Plain reads live in `isolation-lookup`; plain
+ * writes are `node:fs/promises` and Bun at the call site.
  */
 
-import { type BigIntStats, constants, type FSWatcher, watch as nodeWatch } from "node:fs";
+import { type BigIntStats, constants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { reasonOf } from "./isolation-lookup";
-
-export {
-	ABSENT,
-	FOUND,
-	type Lookup,
-	lstatLookup,
-	readdirLookup,
-	readdirTypedLookup,
-	readJsonLookup,
-	readTextLookup,
-	realpathLookup,
-	reasonOf,
-	requireFound,
-	statLookup,
-	UNKNOWN,
-} from "./isolation-lookup";
-
-// Forwarded rather than re-bound: the call resolves the underlying function
-// when it runs, so a test that replaces one still intercepts the isolation
-// path's use of it.
-
-/** Create a directory. `recursive` makes an existing one acceptable. */
-export const mkdir = ((...args: Parameters<typeof fs.mkdir>) => fs.mkdir(...args)) as typeof fs.mkdir;
-/** Move a path. One syscall: it either happened under the caller's hold or it did not. */
-export const rename = ((...args: Parameters<typeof fs.rename>) => fs.rename(...args)) as typeof fs.rename;
-/** Remove a path. */
-export const rm = ((...args: Parameters<typeof fs.rm>) => fs.rm(...args)) as typeof fs.rm;
-/** Copy a tree. */
-export const cp = ((...args: Parameters<typeof fs.cp>) => fs.cp(...args)) as typeof fs.cp;
-/** Write a file's whole contents. */
-export const writeFile = ((...args: Parameters<typeof fs.writeFile>) => fs.writeFile(...args)) as typeof fs.writeFile;
-
-/**
- * Watch a directory.
- *
- * A notification channel, not a read: it answers "something changed", never
- * "nothing is there", so it cannot manufacture the absence this subsystem's
- * rule is about. It lives here so the modules that decide deletions need no
- * `node:fs` import of their own — that import carries `promises` and every
- * `*Sync` read with it, which made banning only `node:fs/promises` a bypass
- * one identifier wide.
- */
-export const watch = nodeWatch;
-export type { FSWatcher };
+import { mapWithConcurrencyLimit } from "./parallel";
 
 /**
  * The start time a process reports to `ps`, or `null` when it reports none.
  *
- * A liveness probe, not a filesystem read, but it needs to spawn — and the
- * modules that decide deletions name no process API of their own, so it is
- * here with everything else that talks to the outside.
+ * A liveness probe that needs to spawn, kept beside the other probes the
+ * deletion decisions use.
  */
 export async function processStartTime(pid: number): Promise<string | null> {
-	const ps = Bun.spawn(["ps", "-o", "lstart=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" });
+	let ps: Bun.Subprocess<"ignore", "pipe", "ignore">;
+	try {
+		ps = Bun.spawn(["ps", "-o", "lstart=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" });
+	} catch {
+		// No `ps` on this host (Windows, a minimal container): the spawn throws
+		// before it starts. No start time is the documented answer — callers
+		// fall back to a pid-only liveness check — not a failed claim or lease.
+		return null;
+	}
 	const out = await new Response(ps.stdout).text();
 	if ((await ps.exited) !== 0) return null;
 	const started = out.trim();
 	return started.length > 0 ? started : null;
-}
-
-/** A content hash, for a name derived from a path. Reads nothing. */
-export function hash(value: string): bigint | number {
-	return Bun.hash(value);
-}
-
-/** Sleep. Reads nothing; here so the isolation path names no `Bun` of its own. */
-export async function sleep(ms: number): Promise<void> {
-	await Bun.sleep(ms);
-}
-
-/** Write a file's whole contents, creating parent directories. */
-export async function writeFileDeep(file: string, contents: string): Promise<void> {
-	await Bun.write(file, contents);
 }
 
 /**
@@ -216,20 +162,36 @@ function linuxMountsUnder(dir: string): Promise<string[]> {
 	});
 }
 
-async function collectDeviceBoundaries(dir: string, rootDev: bigint, mounts: string[]): Promise<void> {
-	const entries = await fs.readdir(dir, { withFileTypes: true });
-	for (const entry of entries) {
-		if (!entry.isDirectory()) continue;
-		const child = path.join(dir, entry.name);
-		const stat = await fs.lstat(child, { bigint: true });
-		if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
-		if (stat.dev !== rootDev) {
+/** Directories listed and stat'ed at once by the device walk: enough to keep the disk busy, bounded so a huge tree does not open thousands of handles. */
+const DEVICE_WALK_CONCURRENCY = 32;
+
+/**
+ * Every directory under `root` whose device differs from `rootDev`, a level at
+ * a time with bounded concurrency. A mount can sit anywhere a user can mount
+ * one, so the whole tree is walked; only the waiting is shared.
+ */
+async function collectDeviceBoundaries(root: string, rootDev: bigint, mounts: string[]): Promise<void> {
+	let level = [root];
+	while (level.length > 0) {
+		const listed = await mapWithConcurrencyLimit(level, DEVICE_WALK_CONCURRENCY, async dir =>
+			(await fs.readdir(dir, { withFileTypes: true }))
+				.filter(entry => entry.isDirectory())
+				.map(entry => path.join(dir, entry.name)),
+		);
+		const children = listed.results.flatMap(names => names ?? []);
+		const stats = await mapWithConcurrencyLimit(children, DEVICE_WALK_CONCURRENCY, child =>
+			fs.lstat(child, { bigint: true }),
+		);
+		const next: string[] = [];
+		children.forEach((child, index) => {
+			const stat = stats.results[index];
+			if (!stat || stat.isSymbolicLink() || !stat.isDirectory()) return;
 			// A mount boundary: recorded, and not descended into — what is under
 			// it belongs to the mounted filesystem, not this tree.
-			mounts.push(child);
-			continue;
-		}
-		await collectDeviceBoundaries(child, rootDev, mounts);
+			if (stat.dev !== rootDev) mounts.push(child);
+			else next.push(child);
+		});
+		level = next;
 	}
 }
 

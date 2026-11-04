@@ -18,12 +18,15 @@
  *
  * Step 1 happens once per top-level call; steps 2 and 3 are per-spawn.
  */
-import * as fs from "./isolation-fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import type * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { getWorktreesDir, logger, prompt } from "@oh-my-pi/pi-utils";
+import { isMainThread } from "../thread/identity";
+import { writeFileAtomically } from "../utils/atomic-file";
+import * as lookup from "./isolation-lookup";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
@@ -39,12 +42,14 @@ const DEFERRED_CLEANUP_MAX_WAIT_MS = 30_000;
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { armTeardown, hasLiveIsolationLease, hasUnfinishedWriter, registerIsolationWorkspace } from "./isolation-lease";
 import {
+	ISOLATION_KEPT_REASON_FILE,
 	ISOLATION_OWNER_FILE,
 	readIsolationClaim,
 	readRetainedMountBackend,
 	recordKeptReason,
 	requireSandboxLockHeld,
 	resolveSandboxIdentity,
+	threadClaimGeneration,
 	waitUntilSandboxUnused,
 	withSandboxLock,
 } from "./isolation-ownership";
@@ -169,7 +174,7 @@ export async function prepareIsolationContext(cwd: string): Promise<IsolationCon
 function deltaFingerprint(rootPatch: string, nestedPatches: readonly NestedRepoPatch[]): bigint | number {
 	let key = rootPatch;
 	for (const { relativePath, patch } of nestedPatches) key += `\0${relativePath}\0${patch}`;
-	return fs.hash(key);
+	return Bun.hash(key);
 }
 
 /** Build a commit-message callback for branch/nested commits; `undefined` ⇒ fall back to generic message. */
@@ -254,7 +259,7 @@ export async function persistNestedPatches(
 			// leave a truncated file behind, and `force: true` makes removing
 			// a never-created path a no-op.
 			saved.push(destination);
-			await fs.writeFileDeep(destination, nestedPatch.patch);
+			await Bun.write(destination, nestedPatch.patch);
 		}
 	} catch (error) {
 		await Promise.all(saved.map(file => fs.rm(file, { force: true }).catch(() => undefined)));
@@ -289,7 +294,7 @@ async function writeIsolationPatch(
 ): Promise<IsolationPatchCapture> {
 	const delta = await captureDeltaPatch(isolationDir, baseline);
 	const patchPath = path.join(artifactsDir, `${agentId}.patch`);
-	await fs.writeFileDeep(patchPath, delta.rootPatch);
+	await Bun.write(patchPath, delta.rootPatch);
 	const nestedPatchPaths = await persistNestedPatches(artifactsDir, agentId, delta.nestedPatches);
 	return {
 		artifacts: {
@@ -329,7 +334,7 @@ async function recordHandedOff(mergedDir: string, fingerprint: bigint | number):
 	const baseDir = path.dirname(mergedDir);
 	// Only into a sandbox this run materialised, never beside a path that is
 	// not one: the record belongs to the workspace it describes.
-	if ((await fs.lstatLookup(path.join(baseDir, ISOLATION_OWNER_FILE))).kind !== "found") return;
+	if ((await lookup.lstatLookup(path.join(baseDir, ISOLATION_OWNER_FILE))).kind !== "found") return;
 	await fs
 		.writeFile(path.join(baseDir, ISOLATION_HANDED_OFF_FILE), JSON.stringify(String(fingerprint)))
 		.catch(error => {
@@ -341,7 +346,7 @@ async function recordHandedOff(mergedDir: string, fingerprint: bigint | number):
 }
 
 async function readHandedOff(mergedDir: string): Promise<string | undefined> {
-	const found = await fs.readJsonLookup(path.join(path.dirname(mergedDir), ISOLATION_HANDED_OFF_FILE));
+	const found = await lookup.readJsonLookup(path.join(path.dirname(mergedDir), ISOLATION_HANDED_OFF_FILE));
 	return found.kind === "found" && typeof found.value === "string" ? found.value : undefined;
 }
 
@@ -447,6 +452,116 @@ export async function settleIsolationRelease(settlement: IsolationSettlement): P
 }
 
 /**
+ * What a run on a worker thread records in its sandbox so main can settle the
+ * sandbox if the worker dies before anything adopts the child: written once
+ * the workspace exists, and again with the baseline before the child starts.
+ */
+const ISOLATION_SETTLEMENT_FILE = ".omp-settlement.json";
+
+/** An {@link IsolationSettlement} as recorded: no baseline until the child is about to start. */
+interface RecordedSettlement extends Omit<IsolationSettlement, "baseline"> {
+	baseline?: WorktreeBaseline;
+}
+
+/**
+ * Record, on a worker thread, how main settles this sandbox if the worker dies
+ * mid-run. A sandbox made on main needs none: main dying is the process dying.
+ * A record that cannot be written leaves the sandbox kept, with the reason,
+ * should the worker die; the run itself goes on.
+ */
+async function recordSettlement(record: RecordedSettlement): Promise<void> {
+	if (isMainThread()) return;
+	try {
+		await writeFileAtomically(
+			path.join(path.dirname(record.handle.mergedDir), ISOLATION_SETTLEMENT_FILE),
+			JSON.stringify(record),
+		);
+	} catch (error) {
+		logger.warn("could not record how to settle this isolated workspace; if its worker dies mid-run it is kept", {
+			mergedDir: record.handle.mergedDir,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
+}
+
+async function readSettlement(baseDir: string): Promise<RecordedSettlement | undefined> {
+	const found = await lookup.readJsonLookup(path.join(baseDir, ISOLATION_SETTLEMENT_FILE));
+	if (found.kind !== "found") return undefined;
+	const value = found.value;
+	if (typeof value !== "object" || value === null || !("handle" in value)) return undefined;
+	const handle = value.handle;
+	if (typeof handle !== "object" || handle === null) return undefined;
+	if (!("mergedDir" in handle) || typeof handle.mergedDir !== "string") return undefined;
+	if (!("generation" in handle) || typeof handle.generation !== "string") return undefined;
+	if (!("artifactsDir" in value) || typeof value.artifactsDir !== "string") return undefined;
+	if (!("agentId" in value) || typeof value.agentId !== "string") return undefined;
+	// Written by this build from the values above; the checks only refuse a
+	// record that is not one.
+	return value as RecordedSettlement;
+}
+
+/**
+ * Main thread: settle every sandbox the worker thread `thread` claimed and
+ * nobody adopted, now that the thread is gone. A worker's death settles
+ * everything it owed, on main: the child of a run that died mid-way is
+ * captured, delivered where a release with the parent gone delivers it (the
+ * patch in its artifacts dir, a task branch past what was handed off), then
+ * removed — or kept with the reason recorded, when the capture fails or a live
+ * process still uses it. `adopted` names the generations main's lifecycle
+ * already settles through the adoption.
+ *
+ * Only a sandbox whose marker names this process and that thread is touched;
+ * one claimed by main, another live thread or another process is someone
+ * else's. A sandbox a teardown already kept, or retained under a
+ * `.retained-*` name, is left as its owner left it: its caller was told where
+ * it is.
+ */
+export async function settleOrphanedIsolationWorkspaces(thread: string, adopted: ReadonlySet<string>): Promise<void> {
+	const root = getWorktreesDir();
+	const listing = await lookup.readdirLookup(root);
+	if (listing.kind !== "found") return;
+	for (const entry of listing.value) {
+		if (entry.endsWith(".lock") || entry.includes(".retained-")) continue;
+		const baseDir = path.join(root, entry);
+		try {
+			await settleOrphan(baseDir, thread, adopted);
+		} catch (error) {
+			logger.warn("could not settle an isolated workspace its dead worker owned", {
+				baseDir,
+				thread,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+}
+
+async function settleOrphan(baseDir: string, thread: string, adopted: ReadonlySet<string>): Promise<void> {
+	const generation = await threadClaimGeneration(baseDir, thread);
+	if (generation === undefined || adopted.has(generation)) return;
+	if ((await lookup.lstatLookup(path.join(baseDir, ISOLATION_KEPT_REASON_FILE))).kind !== "absent") return;
+	const record = await readSettlement(baseDir);
+	if (record === undefined || record.handle.generation !== generation) {
+		// Died while the workspace was being made, before anything ran in it:
+		// nothing to capture, and no record of the backend to stop safely.
+		const reason = `its worker thread ${thread} died while the workspace was being prepared, before anything ran in it`;
+		logger.warn("isolated workspace kept after its worker died", { baseDir, reason });
+		await recordKeptReason(baseDir, reason);
+		return;
+	}
+	const { baseline } = record;
+	if (baseline !== undefined) {
+		await settleIsolationRelease({ ...record, baseline });
+		return;
+	}
+	// The child never started: nothing in the workspace is anyone's work.
+	registerIsolationWorkspace(record.handle.mergedDir, { baseDir, generation, agentId: record.agentId });
+	const teardown = await cleanupIsolation(record.handle);
+	if (teardown.kept !== undefined) {
+		logger.warn("isolated workspace kept after its worker died", { baseDir, reason: teardown.kept });
+	}
+}
+
+/**
  * Move a retained isolation workspace out of its deterministic
  * (`repoRoot` + agent id) slot into a globally unique sibling, so a later
  * isolated run with the same id cannot wipe it: `ensureIsolation`
@@ -542,7 +657,7 @@ async function retainWorkspaceSlot(
 				};
 			}
 		}
-		const existing = await fs.statLookup(isolationDir);
+		const existing = await lookup.statLookup(isolationDir);
 		if (existing.kind === "absent") {
 			// Someone else moved it. Report a path that exists and a sidecar
 			// state that is read rather than assumed: a decoy `.retained-*`
@@ -567,11 +682,11 @@ async function retainWorkspaceSlot(
 }
 
 /** The newest `.retained-*` copy of this sandbox that actually holds a workspace. */
-async function findRetainedSibling(baseDir: string, generation: string | undefined): Promise<fs.Lookup<string>> {
+async function findRetainedSibling(baseDir: string, generation: string | undefined): Promise<lookup.Lookup<string>> {
 	const parent = path.dirname(baseDir);
 	const prefix = `${path.basename(baseDir)}.retained-`;
-	const listing = await fs.readdirLookup(parent);
-	if (listing.kind !== "found") return listing.kind === "absent" ? fs.ABSENT : listing;
+	const listing = await lookup.readdirLookup(parent);
+	if (listing.kind !== "found") return listing.kind === "absent" ? lookup.ABSENT : listing;
 	// Ordered by the retention stamp in the name, not by modification time:
 	// a file touched inside an older retention made that unrelated workspace
 	// look like the newest one, and the user was sent to a stranger's run.
@@ -584,7 +699,7 @@ async function findRetainedSibling(baseDir: string, generation: string | undefin
 		// A retained copy with no mount directory is not this workspace. A
 		// candidate that cannot be looked at is not evidence either way, so
 		// the whole answer becomes "I do not know" rather than the next best.
-		const found = await fs.statLookup(candidate);
+		const found = await lookup.statLookup(candidate);
 		if (found.kind === "unknown") return found;
 		if (found.kind === "absent" || !found.value.isDirectory()) continue;
 		// The stamp orders retentions of *this* path; it does not say whose run
@@ -593,12 +708,12 @@ async function findRetainedSibling(baseDir: string, generation: string | undefin
 		// beside it. The marker inside the retained copy answers that.
 		if (generation !== undefined) {
 			const claim = await readIsolationClaim(path.join(parent, entry));
-			if (claim.kind === "unknown") return fs.UNKNOWN(claim.reason);
+			if (claim.kind === "unknown") return lookup.UNKNOWN(claim.reason);
 			if (claim.kind !== "claimed" || claim.generation !== generation) continue;
 		}
 		if (latest === undefined || stamp > latest.stamp) latest = { dir: candidate, stamp };
 	}
-	return latest === undefined ? fs.ABSENT : fs.FOUND(latest.dir);
+	return latest === undefined ? lookup.ABSENT : lookup.FOUND(latest.dir);
 }
 
 /**
@@ -657,7 +772,7 @@ async function retainUnderLock(
 			return { dir: path.join(retainedBase, path.basename(isolationDir)), sidecarOk, location: "here" };
 		} catch {
 			if (attempt === 2) return { dir: isolationDir, sidecarOk, location: "here" };
-			await fs.sleep(25);
+			await Bun.sleep(25);
 		}
 	}
 	return { dir: isolationDir, sidecarOk, location: "here" };
@@ -865,8 +980,18 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
 		const isolationBackend = handle.backend;
+		const settlementTarget = {
+			handle,
+			artifactsDir: opts.artifactsDir,
+			agentId: opts.agentId,
+			description: opts.description,
+		};
+		// On a worker, before anything can run in it: if the worker dies from
+		// here on, main settles this workspace from these records.
+		await recordSettlement(settlementTarget);
 		const baseline = await captureIsolationBaseline(isolationDir, opts.context.repoRoot);
 		taskBaseline = baseline;
+		await recordSettlement({ ...settlementTarget, baseline });
 		/**
 		 * What this run hands the child, built only once there is a child to
 		 * hand it to: the base release for a one-shot run (it never touches the
@@ -1259,7 +1384,7 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 		} else {
 			// A patch this process cannot read is not an empty patch: read that
 			// way, the run reports no changes for work it has already written.
-			const read = await fs.readTextLookup(result.patchPath);
+			const read = await lookup.readTextLookup(result.patchPath);
 			if (read.kind !== "found") {
 				throw new Error(
 					`Captured patch ${result.patchPath} could not be read (${read.kind === "absent" ? "it is not there" : read.reason}).`,

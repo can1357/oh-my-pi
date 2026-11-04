@@ -2,9 +2,11 @@
  * Root command for the coding agent CLI.
  */
 
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Command } from "@oh-my-pi/pi-utils/cli";
 import { type Args as ParsedArgs, parseArgs, reportCliUsageError } from "../cli/args";
 import { prepareAcpTerminalAuthArgs } from "../modes/acp/terminal-auth";
+import { IsolationWorkspaceUnavailableError } from "../task/isolation-unavailable";
 import { launchHelp } from "./launch-help";
 
 /** Load the session/runtime graph only after the launch command has accepted its argv. */
@@ -43,6 +45,11 @@ export default class Index extends Command {
 			// discovered registry) may leave live handles; exit instead of draining.
 			if (reportCliUsageError(error)) {
 				process.exit(2);
+			}
+			// A refusal that tells the user what to do: the stack adds nothing.
+			if (error instanceof IsolationWorkspaceUnavailableError) {
+				process.stderr.write(`${chalk.red(`Error: ${error.message}`)}\n`);
+				process.exit(1);
 			}
 			throw error;
 		}

@@ -22,6 +22,7 @@ import {
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import * as isolationFs from "@oh-my-pi/pi-coding-agent/task/isolation-fs";
+import * as isolationLookup from "@oh-my-pi/pi-coding-agent/task/isolation-lookup";
 import * as lateCleanup from "@oh-my-pi/pi-coding-agent/utils/late-cleanup";
 import { leaseIsolationWorkspace } from "@oh-my-pi/pi-coding-agent/task/isolation-lease";
 import * as ownership from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
@@ -114,13 +115,13 @@ describe("worktree isolation helpers", () => {
 
 		/** A live mount pins its directory: the retiring rename is refused. */
 		function refuseRename(sandbox: string): void {
-			const rename = isolationFs.rename;
-			vi.spyOn(isolationFs, "rename").mockImplementation((async (from: string, to: string) => {
+			const rename = fs.rename;
+			vi.spyOn(fs, "rename").mockImplementation((async (from: string, to: string) => {
 				if (path.resolve(from) === sandbox) {
 					throw Object.assign(new Error(`EBUSY: resource busy or locked, rename '${from}'`), { code: "EBUSY" });
 				}
 				return await rename(from, to);
-			}) as typeof isolationFs.rename);
+			}) as typeof fs.rename);
 		}
 
 		/**
@@ -542,9 +543,9 @@ describe("worktree isolation helpers", () => {
 		await fs.mkdir(path.join(base, "m"), { recursive: true });
 		await fs.writeFile(path.join(base, "m", "old"), "old");
 		const generation = await writeIsolationOwner(base, "old");
-		const realLstat = isolationFs.lstatLookup;
+		const realLstat = isolationLookup.lstatLookup;
 		let swappedParent = "";
-		vi.spyOn(isolationFs, "lstatLookup").mockImplementation(async p => {
+		vi.spyOn(isolationLookup, "lstatLookup").mockImplementation(async p => {
 			const result = await realLstat(p);
 			// The first look at the retired mount dir is the teardown's symlink
 			// check; swap the retired sandbox for a fresh claim at that instant.
@@ -580,13 +581,13 @@ describe("worktree isolation helpers", () => {
 		await fs.mkdir(path.join(base, "m"), { recursive: true });
 		const generation = await writeIsolationOwner(base, "old");
 		const stop = Promise.withResolvers<void>();
-		const realRename = isolationFs.rename;
+		const realRename = fs.rename;
 		const realWait = scheduler.wait;
 		// The sandbox cannot be renamed aside, so the teardown stops it in place.
-		vi.spyOn(isolationFs, "rename").mockImplementation((async (from: string, to: string) => {
+		vi.spyOn(fs, "rename").mockImplementation((async (from: string, to: string) => {
 			if (from === base) throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
 			return await realRename(from, to);
-		}) as typeof isolationFs.rename);
+		}) as typeof fs.rename);
 		// The stop bound elapses at once; every other wait is real.
 		vi.spyOn(scheduler, "wait").mockImplementation(((ms: number, opts?: { signal?: AbortSignal }) =>
 			ms === 10_000 ? Promise.resolve() : realWait(ms, opts)) as typeof scheduler.wait);

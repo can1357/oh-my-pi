@@ -6,12 +6,15 @@
  * it. `omp worktree clear` consults the marker so it can distinguish a live
  * subagent's sandbox from a crashed run's leftover instead of deleting both.
  */
-import * as fs from "./isolation-fs";
+import { AsyncLocalStorage } from "node:async_hooks";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
-import { AsyncLocalStorage } from "node:async_hooks";
 import { acquireFileLock, getWorktreesDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { currentThreadId, isMainThread } from "../thread/identity";
+import * as isoFs from "./isolation-fs";
 import { hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
+import * as lookup from "./isolation-lookup";
 
 /**
  * How long a materialisation, teardown, lease or reclamation waits for the
@@ -66,7 +69,7 @@ export class OutsideWorktreeDirectoryError extends Error {
 }
 
 async function resolveExistingPath(absolute: string): Promise<string> {
-	const resolved = await fs.realpathLookup(absolute);
+	const resolved = await lookup.realpathLookup(absolute);
 	if (resolved.kind === "found") return resolved.value;
 	if (resolved.kind === "unknown") {
 		throw new Error(`Isolation path ${absolute} could not be resolved (${resolved.reason}).`);
@@ -122,7 +125,7 @@ async function processStartToken(pid: number): Promise<string | null> {
 		// `absent` is a process that has gone and `unknown` is a `/proc` this
 		// caller cannot read; both give no token, and the pid-only check that
 		// follows errs towards "still live", which is the safe direction here.
-		const read = await fs.readTextLookup(`/proc/${pid}/stat`);
+		const read = await lookup.readTextLookup(`/proc/${pid}/stat`);
 		if (read.kind !== "found") return null;
 		const stat = read.value;
 		// The comm field (2) may embed spaces and parens, so parse the numeric
@@ -133,7 +136,7 @@ async function processStartToken(pid: number): Promise<string | null> {
 		const starttime = stat.slice(commEnd + 2).split(" ")[19];
 		return starttime && starttime.length > 0 ? starttime : null;
 	}
-	return await fs.processStartTime(pid);
+	return await isoFs.processStartTime(pid);
 }
 
 /** A process identity recorded in a marker or a lease. */
@@ -159,7 +162,7 @@ async function writeFileAtomically(file: string, contents: string): Promise<void
 	const temporary = `${file}.${process.pid}.${Snowflake.next()}.tmp`;
 	await fs.mkdir(path.dirname(file), { recursive: true });
 	try {
-		await fs.writeFileDeep(temporary, contents);
+		await Bun.write(temporary, contents);
 		await fs.rename(temporary, file);
 	} catch (error) {
 		await fs.rm(temporary, { force: true }).catch(() => undefined);
@@ -169,7 +172,7 @@ async function writeFileAtomically(file: string, contents: string): Promise<void
 
 /** The identity recorded in `file`, `undefined` when there is none, `"unreadable"` when it cannot be read. */
 export async function readProcessIdentity(file: string): Promise<ProcessIdentity | "unreadable" | undefined> {
-	const found = await fs.readJsonLookup(file);
+	const found = await lookup.readJsonLookup(file);
 	if (found.kind === "absent") return undefined;
 	if (found.kind === "unknown") return "unreadable";
 	const decoded = found.value;
@@ -208,12 +211,35 @@ export async function isProcessStillLive(identity: ProcessIdentity): Promise<boo
  * Written before the isolation backend materialises `m` so a concurrent
  * `omp worktree clear` never sees an owner-less sandbox mid-creation, and
  * written atomically so a failure part-way never leaves a marker that reads as
- * owner-less.
+ * owner-less. A sandbox made on a worker thread names that thread too: the
+ * thread can die while the process lives on, and then main settles the
+ * sandboxes it owned ({@link threadClaimGeneration}).
  */
 export async function writeIsolationOwner(baseDir: string, id: string): Promise<string> {
 	const generation = `${process.pid}-${Snowflake.next()}`;
-	await writeProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE), { id, generation });
+	await writeProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE), {
+		id,
+		generation,
+		...(isMainThread() ? {} : { thread: currentThreadId() }),
+	});
 	return generation;
+}
+
+/**
+ * The generation under which thread `thread` of this process claims the
+ * sandbox at `baseDir`, or `undefined` when it does not. Only such a sandbox
+ * may be settled for that thread: one claimed by main, another thread or
+ * another process belongs to someone who is still here.
+ */
+export async function threadClaimGeneration(baseDir: string, thread: string): Promise<string | undefined> {
+	const claim = await readIsolationClaim(baseDir);
+	if (claim.kind !== "claimed") return undefined;
+	const found = await lookup.readJsonLookup(path.join(baseDir, ISOLATION_OWNER_FILE));
+	if (found.kind !== "found" || typeof found.value !== "object" || found.value === null) return undefined;
+	const marker = found.value;
+	const pid = "pid" in marker ? marker.pid : undefined;
+	const owner = "thread" in marker ? marker.thread : undefined;
+	return pid === process.pid && owner === thread ? claim.generation : undefined;
 }
 
 /** Mark a renamed-away sandbox as retired, so reclamation never mistakes it for a live owner's. */
@@ -266,7 +292,7 @@ export async function readIsolationClaim(baseDir: string): Promise<IsolationClai
 	// `readJsonLookup` asks `lstat` first, so a dangling marker symlink — whose
 	// open gives `ENOENT` just as a missing one does — is an entry that exists
 	// and cannot be read, which is unknown.
-	const found = await fs.readJsonLookup(path.join(baseDir, ISOLATION_OWNER_FILE));
+	const found = await lookup.readJsonLookup(path.join(baseDir, ISOLATION_OWNER_FILE));
 	if (found.kind === "absent") return { kind: "absent" };
 	if (found.kind === "unknown") return { kind: "unknown", reason: found.reason };
 	const decoded = found.value;
@@ -301,14 +327,14 @@ export async function clearClaimedWorkspace(baseDir: string): Promise<void> {
 	// any directory. A backend that mounted and then failed left one here; the
 	// teardown record went aside with everything else, and `omp worktree clear`
 	// then deleted through the mount. A mounted sandbox is not cleared.
-	const mounts = await fs.liveMountsUnder(baseDir);
+	const mounts = await isoFs.liveMountsUnder(baseDir);
 	if (mounts.length > 0) {
 		throw new Error(`Isolation workspace ${baseDir} still has ${mounts.join(", ")} mounted; refusing to clear it.`);
 	}
 	// A listing that fails is not an empty sandbox: reading it as one leaves
 	// the previous owner's data in place under this run's claim, and the run
 	// then works in a workspace it believes is clean.
-	const listing = await fs.readdirLookup(baseDir);
+	const listing = await lookup.readdirLookup(baseDir);
 	if (listing.kind === "absent") return;
 	if (listing.kind === "unknown") {
 		throw new Error(`Isolation workspace ${baseDir} could not be listed (${listing.reason}); refusing to clear it.`);
@@ -369,7 +395,7 @@ export async function decideIsolationReclaim(baseDir: string): Promise<Isolation
 
 async function decideReclaimByRecords(baseDir: string): Promise<IsolationReclaimDecision> {
 	const markerFile = path.join(baseDir, ISOLATION_OWNER_FILE);
-	const marker = await fs.readJsonLookup(markerFile);
+	const marker = await lookup.readJsonLookup(markerFile);
 	if (marker.kind === "absent") {
 		// A sandbox with no marker at all: a pre-marker leftover, or one whose
 		// marker something removed. Neither is proof that no task is working
@@ -448,7 +474,7 @@ export async function recordKeptReason(baseDir: string, reason: string): Promise
 }
 
 async function readKeptReason(baseDir: string): Promise<string | undefined> {
-	const found = await fs.readJsonLookup(path.join(baseDir, ISOLATION_KEPT_REASON_FILE));
+	const found = await lookup.readJsonLookup(path.join(baseDir, ISOLATION_KEPT_REASON_FILE));
 	if (found.kind !== "found") return undefined;
 	const decoded = found.value;
 	if (typeof decoded !== "object" || decoded === null || !("reason" in decoded)) return undefined;
@@ -483,13 +509,13 @@ export async function waitUntilSandboxUnused(
 ): Promise<string | undefined> {
 	const deadline = Date.now() + (options.waitMs ?? SANDBOX_USER_WAIT_MS);
 	for (;;) {
-		const found = await fs.processesUsing(baseDir);
+		const found = await isoFs.processesUsing(baseDir);
 		if (found.kind === "unknown") return `what uses it could not be checked (${found.reason})`;
 		if (found.users.length === 0) return undefined;
 		if (Date.now() >= deadline) {
 			return found.users.map(user => `process ${user.pid} ${user.command} still uses it`).join("; ");
 		}
-		await fs.sleep(SANDBOX_USER_POLL_MS);
+		await Bun.sleep(SANDBOX_USER_POLL_MS);
 	}
 }
 
@@ -543,7 +569,7 @@ export function needsNativeTeardown(backend: unknown): backend is number {
  */
 export async function foreignMountsUnder(base: string, backend: number | undefined, merged: string): Promise<string[]> {
 	const own = backend === IsoBackendKind.Overlayfs || backend === IsoBackendKind.Zfs ? merged : undefined;
-	return (await fs.liveMountsUnder(base)).filter(mount => mount !== own);
+	return (await isoFs.liveMountsUnder(base)).filter(mount => mount !== own);
 }
 
 /**
@@ -553,7 +579,7 @@ export async function foreignMountsUnder(base: string, backend: number | undefin
  * and the teardown — and treat a failed write as a reason not to go on.
  */
 export async function writeRetainedBackend(baseDir: string, backend: number): Promise<void> {
-	await fs.writeFileDeep(
+	await Bun.write(
 		path.join(baseDir, RETAINED_BACKEND_FILE),
 		JSON.stringify({ backend, retainedAt: new Date().toISOString() }),
 	);
@@ -574,7 +600,7 @@ export async function readRetainedMountBackend(dir: string): Promise<number | un
 	// sidecar". A dangling entry — which `stat` reports as `ENOENT` while
 	// `lstat` sees it — and an unreadable one are both `unknown`, and the
 	// caller is about to remove a possible mount, so unknown raises.
-	const found = await fs.readJsonLookup(sidecar);
+	const found = await lookup.readJsonLookup(sidecar);
 	if (found.kind === "absent") return undefined;
 	if (found.kind === "unknown") {
 		throw new Error(`retained-mount metadata at ${sidecar} could not be read: ${found.reason}`);

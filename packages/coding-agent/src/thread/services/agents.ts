@@ -25,7 +25,7 @@ import { IrcBus } from "../../irc/bus";
 import { type AdoptOptions, type AgentReviver, AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { type AgentRefExpectation, AgentRegistry, type RegistryListener } from "../../registry/agent-registry";
 import { PromptDroppedError, SessionBusyError } from "../../session/agent-session";
-import { settleIsolationRelease } from "../../task/isolation-runner";
+import { settleIsolationRelease, settleOrphanedIsolationWorkspaces } from "../../task/isolation-runner";
 import { trackLateCleanup } from "../../utils/late-cleanup";
 import type { WorkerThreadLink } from "../protocol";
 import { installPeerBridge } from "../peer-agent-session";
@@ -80,6 +80,8 @@ interface OpenSession {
 /** A worker's release hook main's lifecycle took over, until one side has settled it. */
 interface WorkerDebt {
 	readonly id: string;
+	/** The generation of the isolated workspace the hook settles, when it settles one. */
+	readonly generation?: string;
 	/** Settle on main, without the worker; runs once, and later calls join it. */
 	settle(): Promise<void>;
 }
@@ -192,6 +194,7 @@ export class MainSessionBridge {
 		let settlement: Promise<void> | undefined;
 		const debt: WorkerDebt = {
 			id,
+			generation: isolation?.handle.generation,
 			settle: () =>
 				(settlement ??= (async () => {
 					debts.delete(debt);
@@ -272,7 +275,8 @@ export class MainSessionBridge {
 		// is never revived from its transcript, so nothing will use its workspace
 		// again, and a process that exits without releasing it must not take the
 		// only copy of its work with it. A later release joins this settlement.
-		for (const debt of [...this.#debts]) {
+		const debts = [...this.#debts];
+		for (const debt of debts) {
 			trackLateCleanup(
 				debt.settle().catch(error => {
 					logger.warn("Settling a dead worker's release failed", { id: debt.id, error: String(error) });
@@ -280,6 +284,16 @@ export class MainSessionBridge {
 				{ id: debt.id, resource: "worker-release" },
 			);
 		}
+		// And what it owed with nothing adopted yet: the workspace of a child
+		// whose run died with the worker, which no release will ever reach.
+		const adopted = new Set(debts.flatMap(debt => (debt.generation === undefined ? [] : [debt.generation])));
+		const thread = this.#peer.threadId;
+		trackLateCleanup(
+			settleOrphanedIsolationWorkspaces(thread, adopted).catch(error => {
+				logger.warn("Settling a dead worker's isolated workspaces failed", { thread, error: String(error) });
+			}),
+			{ id: thread, resource: "worker-isolation-workspaces" },
+		);
 		const registry = AgentRegistry.global();
 		for (const ref of registry.list()) {
 			const session = ref.session;

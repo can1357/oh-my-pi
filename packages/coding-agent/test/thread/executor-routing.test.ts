@@ -156,11 +156,13 @@ class FakeModelServer {
 		} else if (userText.includes("bg_job")) {
 			reply = { tool: "bash", args: { command: "echo bg-done", async: true } };
 		} else if (userText.includes("spawn_nested")) {
+			// `spawn_nested_hang` spawns a child that hangs (its task is `hang`).
+			const task = userText.includes("spawn_nested_hang") ? "hang" : "say hi";
 			reply = {
 				tool: "task",
 				args: {
 					context: "nested test",
-					tasks: [{ name: "NestedChild", task: "say hi", solutionSpace: "closed", isolated: true }],
+					tasks: [{ name: "NestedChild", task, solutionSpace: "closed", isolated: true }],
 				},
 			};
 		} else if (/\bhang\b/.test(userText)) {
@@ -969,6 +971,40 @@ describe("subagent runs routed into pooled workers", () => {
 			const patches: string[] = [];
 			for await (const file of new Bun.Glob("**/*.patch").scan({ cwd: root, absolute: true })) {
 				if ((await Bun.file(file).text()).includes("settled.txt")) patches.push(file);
+			}
+			expect(patches.length).toBe(1);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"settles on main the workspace of a nested isolated child whose worker dies mid-run: captured, delivered, removed",
+		async () => {
+			const repo = await makeRepo("nested-midrun");
+			const nestedSettings = Settings.isolated({ ...SETTINGS, "task.isolation.mode": "rcopy" });
+			const running = runSubprocess(
+				runOptions("ParentMidRun", "spawn_nested_hang", {
+					cwd: repo,
+					settings: nestedSettings,
+					agent: { ...AGENT, tools: ["read", "task"], spawns: "*" },
+				}),
+			);
+			// The nested child is running in its workspace: nothing has adopted
+			// it, and no release will ever reach it once its worker is gone.
+			await server.hung();
+			const [nested] = await workspaces();
+			if (!nested) throw new Error("the nested child has no workspace");
+			await Bun.write(path.join(worktreesDir, nested, "m", "midrun.txt"), "written before the worker died\n");
+			const [worker] = pool.workers();
+			if (!worker) throw new Error("no pooled worker");
+			worker.terminate("worker crashed mid-run with a nested isolated child");
+
+			expect((await running).exitCode).toBe(1);
+			await waitUntil(async () => (await workspaces()).length === 0);
+			expect(await workspaces()).toEqual([]);
+			const patches: string[] = [];
+			for await (const file of new Bun.Glob("**/*.patch").scan({ cwd: root, absolute: true })) {
+				if ((await Bun.file(file).text()).includes("midrun.txt")) patches.push(file);
 			}
 			expect(patches.length).toBe(1);
 		},

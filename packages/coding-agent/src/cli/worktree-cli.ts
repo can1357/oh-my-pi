@@ -16,7 +16,9 @@
  * Legacy entries from before the encoding change keep working because git still
  * tracks them by branch name. This command exists to GC them on demand.
  */
-import * as fs from "../task/isolation-fs";
+import * as fs from "node:fs/promises";
+import * as isoFs from "../task/isolation-fs";
+import * as lookup from "../task/isolation-lookup";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -114,7 +116,7 @@ export async function stopRetainedMount(dir: string): Promise<boolean> {
 		// recursive removal — pointed at what may still be a mount. And the
 		// stop is never given a symlink: it follows one into whatever it names,
 		// and unmounted a mount that belonged to someone else.
-		const found = await fs.lstatLookup(candidate);
+		const found = await lookup.lstatLookup(candidate);
 		if (found.kind === "unknown") {
 			throw new Error(
 				`Isolation workspace ${dir} records a ${backend} mount, and ${candidate} could not be read ` +
@@ -131,7 +133,8 @@ export async function stopRetainedMount(dir: string): Promise<boolean> {
 		// fails for ever. The mount table says whether there is anything to
 		// stop. A subvolume is not a mount, and its stop also removes a plain
 		// directory, so it is always stopped.
-		if (backend === natives.IsoBackendKind.Overlayfs && (await fs.liveMountsUnder(candidate)).length === 0) continue;
+		if (backend === natives.IsoBackendKind.Overlayfs && (await isoFs.liveMountsUnder(candidate)).length === 0)
+			continue;
 		// The stop removes a tree (overlayfs deletes `upper` and `work` after it
 		// unmounts), so it never runs while something other than this
 		// backend's own mount is under the workspace: a mount below `upper`
@@ -161,12 +164,12 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
 	// Absent is the ordinary case — the worktree is about to be created here.
 	// Anything else is a path this process could not inspect, and creating a
 	// worktree over it would be the same guess the rest of this file refuses.
-	const existing = await fs.statLookup(worktreePath);
+	const existing = await lookup.statLookup(worktreePath);
 	if (existing.kind === "unknown") {
 		throw new Error(`fatal: '${options.path}' could not be inspected: ${existing.reason}`);
 	}
 	if (existing.kind === "found") {
-		const listing = existing.value.isDirectory() ? await fs.readdirLookup(worktreePath) : undefined;
+		const listing = existing.value.isDirectory() ? await lookup.readdirLookup(worktreePath) : undefined;
 		if (listing?.kind === "unknown") {
 			throw new Error(`fatal: '${options.path}' could not be listed: ${listing.reason}`);
 		}
@@ -337,7 +340,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 
 async function scanWorktrees(): Promise<WorktreeEntry[]> {
 	const root = getWorktreesDir();
-	const rootListing = await fs.readdirLookup(root);
+	const rootListing = await lookup.readdirLookup(root);
 	if (rootListing.kind === "absent") return [];
 	// A listing that failed is not an empty worktree directory: saying "no
 	// worktrees" would tell the user everything is clean when nothing was read.
@@ -352,7 +355,7 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 		// Never followed: an entry that is a symlink names something outside
 		// what `omp` made here, and resolving it sent the removal to a directory
 		// outside the worktree directory. It is listed, and kept.
-		const stat = await fs.lstatLookup(dir);
+		const stat = await lookup.lstatLookup(dir);
 		if (stat.kind === "unknown") {
 			// Named, not dropped: an entry nobody can look at is exactly the
 			// one a user needs to hear about, and it is never removed.
@@ -385,7 +388,7 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
  * stray, or one nobody can read.
  */
 async function classifyContainer(dir: string): Promise<{ children: WorktreeEntry[]; container?: WorktreeEntry }> {
-	const childListing = await fs.readdirLookup(dir);
+	const childListing = await lookup.readdirLookup(dir);
 	if (childListing.kind === "unknown") {
 		return {
 			children: [],
@@ -404,7 +407,7 @@ async function classifyContainer(dir: string): Promise<{ children: WorktreeEntry
 	let unclassifiable = false;
 	for (const child of children) {
 		const childDir = path.join(dir, child);
-		const childStat = await fs.lstatLookup(childDir);
+		const childStat = await lookup.lstatLookup(childDir);
 		if (childStat.kind === "unknown") {
 			entries.push({
 				path: childDir,
@@ -481,9 +484,9 @@ async function removeEntry(target: WorktreeEntry, all: boolean): Promise<Removal
 	// recorded hold and anything they call detects it rather than queueing
 	// behind this command.
 	return await withSandboxLock(dir, "remove", async (): Promise<Removal> => {
-		let pin: fs.DirectoryPin;
+		let pin: isoFs.DirectoryPin;
 		try {
-			pin = await fs.pinDirectory(dir);
+			pin = await isoFs.pinDirectory(dir);
 		} catch (error) {
 			return {
 				removed: false,
@@ -510,10 +513,10 @@ async function removeEntry(target: WorktreeEntry, all: boolean): Promise<Removal
 			}
 			// The stop and the rename act on a pathname, so each is preceded by a
 			// check that the name still holds the pinned directory.
-			const beforeStop = await fs.checkPinnedDirectory(dir, pin);
+			const beforeStop = await isoFs.checkPinnedDirectory(dir, pin);
 			if (!beforeStop.same) return { removed: false, reason: beforeStop.reason };
 			if (now.kind === "task-isolation") await stopRetainedMount(dir);
-			const present = await fs.checkPinnedDirectory(dir, pin);
+			const present = await isoFs.checkPinnedDirectory(dir, pin);
 			if (!present.same) return { removed: false, reason: present.reason };
 			// One atomic step under the hold, then the delete. Checking the
 			// hold immediately before a recursive removal still leaves the
@@ -523,12 +526,12 @@ async function removeEntry(target: WorktreeEntry, all: boolean): Promise<Removal
 			// live path is not inside what goes.
 			// Nothing is removed through a mount, whatever the record said or
 			// failed to say: the mount table is asked now.
-			const mounts = await fs.liveMountsUnder(dir);
+			const mounts = await isoFs.liveMountsUnder(dir);
 			if (mounts.length > 0) throw new Error(`${dir} still has ${mounts.join(", ")} mounted; refusing to remove it`);
 			const aside = `${dir}${ISOLATION_REMOVING_SUFFIX}${Snowflake.next()}`;
 			requireSandboxLockHeld(dir, "remove");
 			await fs.rename(dir, aside);
-			const moved = await fs.checkPinnedDirectory(aside, pin);
+			const moved = await isoFs.checkPinnedDirectory(aside, pin);
 			if (!moved.same) {
 				await fs.rename(aside, dir).catch(() => undefined);
 				throw new Error(`${dir} was replaced while it was being removed (${moved.reason}); nothing was deleted`);
@@ -536,7 +539,7 @@ async function removeEntry(target: WorktreeEntry, all: boolean): Promise<Removal
 			// Asked again of what is about to go, after the move: the move takes
 			// a mount inside the tree with it, and the removal must not walk
 			// into one, whenever it appeared.
-			const asideMounts = await fs.liveMountsUnder(aside);
+			const asideMounts = await isoFs.liveMountsUnder(aside);
 			if (asideMounts.length > 0) {
 				await fs.rename(aside, dir).catch(() => undefined);
 				throw new Error(`${dir} has ${asideMounts.join(", ")} mounted in it; refusing to remove it`);
@@ -551,7 +554,7 @@ async function removeEntry(target: WorktreeEntry, all: boolean): Promise<Removal
 
 async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 	const gitEntry = path.join(dir, ".git");
-	const gitStat = await fs.statLookup(gitEntry);
+	const gitStat = await lookup.statLookup(gitEntry);
 	if (gitStat.kind === "unknown") {
 		// A `.git` nobody can stat is not a directory without one: read that
 		// way, a real linked worktree became a stray and was deleted.
@@ -573,11 +576,11 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 	// `exists()` is false for a marker that is there and unreadable, and a
 	// sandbox misread as a stray is removed with a plain recursive delete.
 	// Unknown counts as a sandbox: the reclaim decision below then refuses it.
-	const marker = await fs.lstatLookup(path.join(dir, ISOLATION_OWNER_FILE));
+	const marker = await lookup.lstatLookup(path.join(dir, ISOLATION_OWNER_FILE));
 	let isIsolation = marker.kind !== "absent";
 	if (!isIsolation) {
 		for (const mountDir of TASK_ISOLATION_MOUNT_DIRS) {
-			const mountStat = await fs.statLookup(path.join(dir, mountDir));
+			const mountStat = await lookup.statLookup(path.join(dir, mountDir));
 			if (mountStat.kind === "unknown" || (mountStat.kind === "found" && mountStat.value.isDirectory())) {
 				isIsolation = true;
 				break;
@@ -597,7 +600,7 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 }
 
 async function classifyPrCheckout(dir: string, gitEntry: string): Promise<WorktreeEntry> {
-	const gitFile = await fs.readTextLookup(gitEntry);
+	const gitFile = await lookup.readTextLookup(gitEntry);
 	if (gitFile.kind !== "found") {
 		return {
 			path: dir,
@@ -619,7 +622,7 @@ async function classifyPrCheckout(dir: string, gitEntry: string): Promise<Worktr
 	const parentRepo = path.dirname(path.dirname(path.dirname(parentGitDir)));
 	const branch = await readWorktreeBranch(path.join(parentGitDir, "HEAD"));
 
-	const parentDirStat = await fs.statLookup(parentGitDir);
+	const parentDirStat = await lookup.statLookup(parentGitDir);
 	if (parentDirStat.kind === "unknown") {
 		return {
 			path: dir,
@@ -639,7 +642,7 @@ async function classifyPrCheckout(dir: string, gitEntry: string): Promise<Worktr
 			orphanReason: "parent repo no longer tracks this worktree",
 		};
 	}
-	const parentRepoStat = await fs.statLookup(parentRepo);
+	const parentRepoStat = await lookup.statLookup(parentRepo);
 	if (parentRepoStat.kind === "unknown") {
 		return {
 			path: dir,
@@ -665,7 +668,7 @@ async function classifyPrCheckout(dir: string, gitEntry: string): Promise<Worktr
 async function readWorktreeBranch(headFile: string): Promise<string | undefined> {
 	// A branch name is a label in a listing, so not knowing it costs nothing
 	// and decides nothing: no caller deletes on the strength of it.
-	const head = await fs.readTextLookup(headFile);
+	const head = await lookup.readTextLookup(headFile);
 	if (head.kind !== "found") return undefined;
 	return /^ref:\s*refs\/heads\/(.+)$/.exec(head.value.trim())?.[1];
 }
