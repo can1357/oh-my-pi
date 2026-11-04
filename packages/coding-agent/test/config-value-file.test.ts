@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { type ApiKeyResolver, AUTH_RETRY_MAX_ATTEMPTS, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getModelsConfigSchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema-bundle";
 import { fileConfigValue, normalizeFileConfigPath } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
@@ -219,6 +220,99 @@ describe("{ file } config values", () => {
 		expect(requests).toBe(1);
 		expect(outcome).not.toBeInstanceOf(AIError.ConfigurationError);
 		expect(fs.readFileSync(runs, "utf8")).toBe("x");
+	});
+
+	/** A real loopback endpoint that answers every request with a 401 and records its headers. */
+	function serve401(): { baseUrl: string; received: Array<Record<string, string | null>>; stop: () => void } {
+		const received: Array<Record<string, string | null>> = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				received.push({
+					authorization: request.headers.get("authorization"),
+					cmd: request.headers.get("x-cmd"),
+					discovered: request.headers.get("x-discovered"),
+				});
+				return Response.json(
+					{ error: { message: "invalid api key", type: "authentication_error" } },
+					{ status: 401 },
+				);
+			},
+		});
+		return { baseUrl: `http://127.0.0.1:${server.port}/v1`, received, stop: () => server.stop(true) };
+	}
+
+	async function drain(model: Model<Api>, apiKey: ApiKeyResolver): Promise<unknown> {
+		const context: Context = { systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] };
+		const stream = streamSimple(model, context, { apiKey, maxTokens: 16 });
+		return await settle(async () => {
+			for await (const _event of stream) {
+				// drain
+			}
+			return await stream.result();
+		});
+	}
+
+	test("a !command header of a model merged with discovered headers does not run again for the closing check", async () => {
+		const keyFile = path.join(tempDir, "key");
+		const runs = path.join(tempDir, "runs");
+		fs.writeFileSync(keyFile, "stable-key");
+		const endpoint = serve401();
+		try {
+			fs.writeFileSync(
+				modelsPath,
+				modelsYaml(keyFile)
+					.replace("https://file-proxy.example.com/v1", endpoint.baseUrl)
+					.replace(
+						"    models:",
+						`    headers:\n      X-Cmd: ${JSON.stringify(`!printf x >> ${JSON.stringify(runs)}; echo tenant`)}\n    models:`,
+					),
+			);
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			const configured = loadModel(registry);
+			// Discovery returns the same model with a header of its own, so the manager composes both resolvers.
+			const manager = createModelManager<Api>({
+				providerId: "file-proxy",
+				staticModels: [configured],
+				cacheDbPath: path.join(tempDir, "models.db"),
+				fetchDynamicModels: async () => [
+					{ ...configured, resolveHeaders: undefined, headers: { "X-Discovered": "yes" } },
+				],
+			});
+			const merged = (await manager.refresh("online")).models.find(model => model.id === "file-model");
+			if (!merged) throw new Error("the merged model is missing");
+			const outcome = await drain(merged, registry.resolver(merged));
+			expect(outcome).not.toBeInstanceOf(AIError.ConfigurationError);
+			// One real request, carrying both layers' headers; the command ran once, for that request.
+			expect(endpoint.received).toEqual([{ authorization: "Bearer stable-key", cmd: "tenant", discovered: "yes" }]);
+			expect(fs.readFileSync(runs, "utf8")).toBe("x");
+		} finally {
+			endpoint.stop();
+		}
+	});
+
+	test("a { file } path through a symlink and .. sends the key of the file the file system names", async () => {
+		fs.mkdirSync(path.join(tempDir, "actual", "child"), { recursive: true });
+		fs.mkdirSync(path.join(tempDir, "configured"), { recursive: true });
+		fs.writeFileSync(path.join(tempDir, "actual", "key"), "intended-key");
+		fs.writeFileSync(path.join(tempDir, "configured", "key"), "wrong-key");
+		fs.symlinkSync(path.join(tempDir, "actual", "child"), path.join(tempDir, "configured", "link"), "dir");
+		const keyPath = `${path.join(tempDir, "configured")}/link/../key`;
+		expect(fs.readFileSync(keyPath, "utf8")).toBe("intended-key");
+		const endpoint = serve401();
+		try {
+			fs.writeFileSync(
+				modelsPath,
+				modelsYaml(keyPath).replace("https://file-proxy.example.com/v1", endpoint.baseUrl),
+			);
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			const model = loadModel(registry);
+			await drain(model, registry.resolver(model));
+			expect(endpoint.received[0]?.authorization).toBe("Bearer intended-key");
+		} finally {
+			endpoint.stop();
+		}
 	});
 
 	test("a key file that vanished on a usage-limit answer with no sibling credential ends the turn with the file error", async () => {
