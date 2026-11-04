@@ -399,6 +399,7 @@ therefore completes through the paste-code path.
 | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `EXA_API_KEY`                                       | Exa search/MCP; alternatively use `/login exa`                                                                                                                 |
 | `TINYFISH_API_KEY`                                  | TinyFish search provider (required)                                                                                                                            |
+| `KEENABLE_API_KEY`                                  | Keenable search provider (optional; keyless public endpoint without it)                                                                                        |
 | `BRAVE_API_KEY`                                     | Brave search provider                                                                                                                                          |
 | `DEEPSEEK_API_KEY`                                  | DeepSeek search provider (same key as DeepSeek models)                                                                                                         |
 | `PERPLEXITY_API_KEY`                                | Perplexity search provider API-key mode                                                                                                                        |

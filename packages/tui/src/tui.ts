@@ -657,6 +657,18 @@ export class Container implements Component {
 	}
 }
 
+/**
+ * `component`'s own native description, or `null` when it draws as rendered rows: it has no
+ * `describe`, answers `null`, or is a Container subclass that paints its own rows but inherits the
+ * plain column description, which would lose that rendering.
+ */
+export function ownDescription(component: Component, cx: DescribeContext): NativeNode | null {
+	const describe = component.describe;
+	if (describe === undefined) return null;
+	if (describe === Container.prototype.describe && component.render !== Container.prototype.render) return null;
+	return describe.call(component, cx);
+}
+
 interface HardwareCursorState {
 	row: number;
 	col: number;
