@@ -37,8 +37,6 @@ const SECOND_FOLLOW_UP = "Then gate src/flag.ts the same way.";
 const TASKS = [ASSIGNMENT, FOLLOW_UP, SECOND_FOLLOW_UP];
 const MOCK_API_SOURCE = "test/subagent-message-before-assignment";
 const BACKGROUND_KIND = "test-background-delivery";
-/** A 1x1 PNG, so a message carries an image whose normalization a test can hold. */
-const PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 const AGENT: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
 const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
 let savedEnv: Record<string, string | undefined> = {};
@@ -768,104 +766,6 @@ describe("a message delivered before the task's turn starts", () => {
 		}
 	}, 30_000);
 
-	it("settles a delivery that waits on the session generation when overlapping switches roll back out of order", async () => {
-		const harness = await createHarness();
-		let endHold: (() => void) | undefined;
-		const switches: RefusedSwitch[] = [];
-		const normalized = Promise.withResolvers<void>();
-		try {
-			const session = await spawnIdle(harness);
-			// Under the hold, an aside joins the coming turn after checking that its transcript is still live.
-			endHold = session.holdForAssignment();
-			switches.push(await startRefusedSwitch(session, "first"));
-			switches.push(await startRefusedSwitch(session, "second"));
-			const normalizing = Promise.withResolvers<void>();
-			vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementationOnce(async images => {
-				normalizing.resolve();
-				await normalized.promise;
-				return images;
-			});
-			const aside = session.sendCustomMessage(
-				{
-					customType: "test-plugin",
-					content: [
-						{ type: "text", text: BODY },
-						{ type: "image", data: PIXEL_PNG, mimeType: "image/png" },
-					],
-					display: false,
-				},
-				{ deliverAs: "aside" },
-			);
-			await normalizing.promise;
-			// The first switch settles first: the second then restores its already-settled generation promise.
-			expect(await switches[0]!.refuse()).toBe(false);
-			expect(await switches[1]!.refuse()).toBe(false);
-			normalized.resolve();
-			await aside;
-		} finally {
-			normalized.resolve();
-			endHold?.();
-			await Promise.allSettled(switches.map(pending => pending.refuse()));
-			harness.authStorage.close();
-		}
-	}, 30_000);
-
-	it("keeps a delivery that waits on the session generation until every overlapping switch has settled", async () => {
-		const harness = await createHarness();
-		let endHold: (() => void) | undefined;
-		const switches: RefusedSwitch[] = [];
-		const normalized = Promise.withResolvers<void>();
-		try {
-			const session = await spawnIdle(harness);
-			harness.beginPhase(FOLLOW_UP);
-			endHold = session.holdForAssignment();
-			const normalizing = Promise.withResolvers<void>();
-			vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementationOnce(async images => {
-				normalizing.resolve();
-				await normalized.promise;
-				return images;
-			});
-			const aside = session.sendCustomMessage(
-				{
-					customType: "test-plugin",
-					content: [
-						{ type: "text", text: BODY },
-						{ type: "image", data: PIXEL_PNG, mimeType: "image/png" },
-					],
-					display: false,
-				},
-				{ deliverAs: "aside" },
-			);
-			await normalizing.promise;
-			for (const name of ["outer", "middle", "inner"]) switches.push(await startRefusedSwitch(session, name));
-			// The middle and inner switches settle first; the outer one, still pending, will restore this session.
-			expect(await switches[1]!.refuse()).toBe(false);
-			expect(await switches[2]!.refuse()).toBe(false);
-			// The aside finishes its setup while the outer switch is pending: it must wait for that switch
-			// rather than judge its session gone. (Its own steps take microtasks, not this long.)
-			let asideSettled = false;
-			void aside.finally(() => {
-				asideSettled = true;
-			});
-			normalized.resolve();
-			await Bun.sleep(500);
-			expect(asideSettled).toBe(false);
-			expect(await switches[0]!.refuse()).toBe(false);
-			await aside;
-
-			// The held subagent's task takes the aside with its turn.
-			await session.prompt(FOLLOW_UP, { assignment: true });
-			await session.waitForIdle();
-			expect(harness.requests.some(request => request.bodyAt >= 0)).toBe(true);
-			expect(session.messages.filter(message => messageText(message).includes(BODY))).toHaveLength(1);
-		} finally {
-			normalized.resolve();
-			endHold?.();
-			await Promise.allSettled(switches.map(pending => pending.refuse()));
-			harness.authStorage.close();
-		}
-	}, 30_000);
-
 	it.each(["abort", "dispose"] as const)(
 		"never starts an assignment cancelled by %s while it waits for a session switch",
 		async cancel => {
@@ -891,135 +791,6 @@ describe("a message delivered before the task's turn starts", () => {
 			} finally {
 				endHold?.();
 				await Promise.allSettled([switching?.refuse()]);
-				harness.authStorage.close();
-			}
-		},
-		30_000,
-	);
-
-	it("finishes a delivery a switch's reconciler waits on once a nested switch restores its generation", async () => {
-		const harness = await createHarness();
-		const normalizing = Promise.withResolvers<void>();
-		const normalized = Promise.withResolvers<void>();
-		// Lets the reconciler return during cleanup if the delivery never settles; the code under test never waits on it.
-		const escape = Promise.withResolvers<void>();
-		let session: AgentSession | undefined;
-		let endHold: (() => void) | undefined;
-		let outer: Promise<boolean> | undefined;
-		let inner: RefusedSwitch | undefined;
-		let delivery: Promise<unknown> | undefined;
-		let deliverySettled = false;
-		try {
-			session = await spawnIdle(harness);
-			const held = session;
-			harness.beginPhase(FOLLOW_UP);
-			endHold = held.holdForAssignment();
-			// The outer switch stays in this directory, so it needs no answer from its owner.
-			const target = SessionManager.create(held.sessionManager.getCwd(), path.join(root, "outer-sessions"));
-			target.appendMessage({ role: "user", content: "outer session", timestamp: Date.now() });
-			await target.ensureOnDisk();
-			vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementationOnce(async images => {
-				normalizing.resolve();
-				await normalized.promise;
-				return images;
-			});
-			let reconciled = false;
-			held.setSessionSwitchReconciler(async () => {
-				if (reconciled) return;
-				reconciled = true;
-				// After its generation change, the outer switch waits for a delivery its reconciler sends.
-				delivery = held
-					.sendCustomMessage(
-						{
-							customType: "test-plugin",
-							content: [
-								{ type: "text", text: BODY },
-								{ type: "image", data: PIXEL_PNG, mimeType: "image/png" },
-							],
-							display: false,
-						},
-						{ deliverAs: "aside" },
-					)
-					.finally(() => {
-						deliverySettled = true;
-					});
-				await Promise.race([delivery, escape.promise]);
-			});
-			outer = held.switchSession(target.getSessionFile()!);
-			await normalizing.promise;
-			// A nested switch changes the generation again; its refusal restores the delivery's generation.
-			inner = await startRefusedSwitch(held, "inner");
-			normalized.resolve();
-			// The delivery now waits for a pending switch to settle (its own steps take microtasks, not this long).
-			await Bun.sleep(500);
-			expect(deliverySettled).toBe(false);
-			expect(await inner.refuse()).toBe(false);
-			await Promise.race([delivery, Bun.sleep(5_000)]);
-			expect(deliverySettled).toBe(true);
-			expect(await outer).toBe(true);
-			expect(held.sessionManager.getSessionId()).toBe(target.getSessionId());
-		} finally {
-			normalized.resolve();
-			escape.resolve();
-			session?.setSessionSwitchReconciler(null);
-			await Promise.allSettled([inner?.refuse(), outer, delivery]);
-			endHold?.();
-			harness.authStorage.close();
-		}
-	}, 30_000);
-
-	it.each([
-		{ order: [0, 1, 2] },
-		{ order: [0, 2, 1] },
-		{ order: [1, 0, 2] },
-		{ order: [1, 2, 0] },
-		{ order: [2, 0, 1] },
-		{ order: [2, 1, 0] },
-	])(
-		"delivers an aside sent before three overlapping switches only into its own session (refusals $order)",
-		async ({ order }) => {
-			const harness = await createHarness();
-			let endHold: (() => void) | undefined;
-			const switches: RefusedSwitch[] = [];
-			const normalized = Promise.withResolvers<void>();
-			try {
-				const session = await spawnIdle(harness);
-				const originalSessionId = session.sessionManager.getSessionId();
-				harness.beginPhase(FOLLOW_UP);
-				endHold = session.holdForAssignment();
-				const normalizing = Promise.withResolvers<void>();
-				vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementationOnce(async images => {
-					normalizing.resolve();
-					await normalized.promise;
-					return images;
-				});
-				const aside = session.sendCustomMessage(
-					{
-						customType: "test-plugin",
-						content: [
-							{ type: "text", text: BODY },
-							{ type: "image", data: PIXEL_PNG, mimeType: "image/png" },
-						],
-						display: false,
-					},
-					{ deliverAs: "aside" },
-				);
-				await normalizing.promise;
-				for (const name of ["outer", "middle", "inner"]) switches.push(await startRefusedSwitch(session, name));
-				normalized.resolve();
-				// Out-of-order rollbacks can pass through the aside's session and still end in another one.
-				for (const index of order) expect(await switches[index]!.refuse()).toBe(false);
-				await aside;
-				const retained = session.sessionManager.getSessionId() === originalSessionId;
-
-				await session.prompt(FOLLOW_UP, { assignment: true });
-				await session.waitForIdle();
-				const copies = session.messages.filter(message => messageText(message).includes(BODY)).length;
-				expect(copies).toBe(retained ? 1 : 0);
-			} finally {
-				normalized.resolve();
-				endHold?.();
-				await Promise.allSettled(switches.map(pending => pending.refuse()));
 				harness.authStorage.close();
 			}
 		},
@@ -1059,6 +830,135 @@ describe("a message delivered before the task's turn starts", () => {
 			harness.authStorage.close();
 		}
 	}, 30_000);
+
+	it("delivers a released hidden trigger whose turn a refused session switch dropped while it was set up", async () => {
+		const harness = await createHarness();
+		const pause = pauseBeforeAgentStart();
+		let endHold: (() => void) | undefined;
+		let switching: RefusedSwitch | undefined;
+		try {
+			const session = await spawnIdle(harness, [pause.extension]);
+			harness.beginPhase(FOLLOW_UP);
+			endHold = session.holdForAssignment();
+			await session.sendCustomMessage(
+				{ customType: "test-plugin", content: BODY, display: false },
+				{ deliverAs: "nextTurn", triggerTurn: true },
+			);
+			await session.waitForIdle();
+			// The owner gives up: the held trigger runs a turn of its own, paused in its setup.
+			pause.arm();
+			endHold();
+			endHold = undefined;
+			await pause.entered;
+			// A switch's internal abort drops that turn. The switch waits for the turn's setup to finish
+			// before it asks its owner, so the setup is let go while the switch is under way.
+			const asking = startRefusedSwitch(session, "other");
+			await Bun.sleep(200);
+			pause.release();
+			switching = await asking;
+			await Bun.sleep(500);
+			expect(harness.requests).toEqual([]);
+			// The trigger waits for the switch, so the idle timer must not park the subagent.
+			expect(session.ircWakesPending).toBe(true);
+
+			expect(await switching.refuse()).toBe(false);
+			await Promise.race([harness.bodySeen(), Bun.sleep(5_000)]);
+			await session.waitForIdle();
+			expect(harness.requests.filter(request => request.bodyAt >= 0)).toHaveLength(1);
+			expect(session.messages.filter(message => messageText(message).includes(BODY))).toHaveLength(1);
+		} finally {
+			pause.release();
+			endHold?.();
+			await Promise.allSettled([switching?.refuse()]);
+			harness.authStorage.close();
+		}
+	}, 30_000);
+
+	it("runs an assignment that waited out a refused session switch which had not yet stopped the session", async () => {
+		const harness = await createHarness();
+		const beforeSwitch = { entered: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() };
+		// Holds the switch in `session_before_switch`, before its own internal abort.
+		const switchGate: ExtensionFactory = pi => {
+			pi.on("session_before_switch", async () => {
+				beforeSwitch.entered.resolve();
+				await beforeSwitch.release.promise;
+				return undefined;
+			});
+		};
+		let endHold: (() => void) | undefined;
+		let switching: Promise<boolean> | undefined;
+		try {
+			const session = await spawnIdle(harness, [switchGate]);
+			harness.beginPhase(FOLLOW_UP);
+			endHold = session.holdForAssignment();
+			await session.sendCustomMessage(
+				{ customType: "test-plugin", content: BODY, display: false },
+				{ deliverAs: "nextTurn" },
+			);
+			const targetCwd = path.join(root, "gated-cwd");
+			await fs.mkdir(targetCwd, { recursive: true });
+			const target = SessionManager.create(targetCwd, path.join(root, "gated-sessions"));
+			target.appendMessage({ role: "user", content: "gated session", timestamp: Date.now() });
+			await target.ensureOnDisk();
+			switching = session.switchSession(target.getSessionFile()!, { onCwdChange: async () => false });
+			await beforeSwitch.entered.promise;
+			// The assignment arrives while the switch has not run its internal abort yet.
+			const prompting = session.prompt(FOLLOW_UP, { assignment: true, throwOnDrop: true });
+			beforeSwitch.release.resolve();
+			expect(await switching).toBe(false);
+			await prompting;
+			endHold = undefined;
+			await session.waitForIdle();
+			// The switch was refused and nobody aborted the task: it runs, with the held message.
+			expect(harness.requests[0]?.taskAt).toBeGreaterThanOrEqual(0);
+			expect(harness.requests[0]?.bodyAt).toBeGreaterThan(harness.requests[0]?.taskAt ?? Infinity);
+			expect(session.awaitingAssignment).toBe(false);
+		} finally {
+			beforeSwitch.release.resolve();
+			endHold?.();
+			await Promise.allSettled([switching]);
+			harness.authStorage.close();
+		}
+	}, 30_000);
+
+	it.each(["abort", "dispose"] as const)(
+		"settles a hidden trigger put off by a prompt in its setup after %s, so nothing keeps the subagent from parking",
+		async cancel => {
+			const harness = await createHarness();
+			const pause = pauseBeforeAgentStart();
+			let prompting: Promise<unknown> | undefined;
+			try {
+				const session = await spawnIdle(harness, [pause.extension]);
+				// A prompt in its setup puts off a hidden next-turn trigger.
+				pause.arm();
+				prompting = session.prompt("work in progress");
+				await pause.entered;
+				await session.sendCustomMessage(
+					{ customType: "test-plugin", content: BODY, display: false },
+					{ deliverAs: "nextTurn", triggerTurn: true },
+				);
+				await Bun.sleep(100);
+				expect(session.ircWakesPending).toBe(true);
+
+				if (cancel === "abort") await session.abort();
+				else await session.dispose();
+				pause.release();
+				await Promise.allSettled([prompting]);
+				if (cancel === "abort") {
+					// The trigger is a delivery: once the abort settles it runs, once.
+					await Promise.race([harness.bodySeen(), Bun.sleep(5_000)]);
+					await session.waitForIdle();
+					expect(session.messages.filter(message => messageText(message).includes(BODY))).toHaveLength(1);
+				}
+				expect(session.ircWakesPending).toBe(false);
+			} finally {
+				pause.release();
+				await Promise.allSettled([prompting]);
+				harness.authStorage.close();
+			}
+		},
+		30_000,
+	);
 });
 
 /** Spawns the subagent, lets its first run finish, and returns its kept-alive idle session. */

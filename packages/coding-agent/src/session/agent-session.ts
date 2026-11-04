@@ -1284,6 +1284,9 @@ export class AgentSession implements SettingsScope {
 	// Cursor exec, TUI listeners) is held back. Without this, a client that resumes
 	// on `agent_end` can fire its next `prompt` before #promptWithMessage's finally
 	#promptGeneration = 0;
+	/** Bumped by every abort() except a session transition's own internal one (`goalReason: "internal"`):
+	 *  an assignment that waits out a transition is cancelled by a real abort, not by the transition. */
+	#cancellationEpoch = 0;
 	// abort() can finish in a message_end listener before queued settle work runs.
 	#activeAgentPromptGeneration = this.#promptGeneration;
 	/** Bumped by newSession()/switchSession() at the same point they clear the pending IRC/aside
@@ -1293,19 +1296,13 @@ export class AgentSession implements SettingsScope {
 	 *  session cannot land in a different session's queue after the transition. Deliberately
 	 *  distinct from #promptGeneration, which also changes on a plain abort() — asides must still
 	 *  enqueue and fold/resume normally across an in-session interrupt, only a session identity
-	 *  change should drop them. Each change takes a fresh value from #sessionGenerationCounter, so
-	 *  a value never comes back except by a rolled-back switch restoring it, and a change that
-	 *  began after a record was sent always holds a greater value than the record captured. */
+	 *  change should drop them. */
 	#sessionGeneration = 0;
-	/** Last value handed to #sessionGeneration; only ever grows. */
-	#sessionGenerationCounter = 0;
 	/** Latest `session_init` of the transcript the model calls ran on; `init` is null when it has none. */
 	#sessionInit: { sessionFile: string | undefined; init: PersistedSessionInit | null } | undefined;
-	/** Generation changes switchSession has made and not yet committed or rolled back, each with the
-	 *  generation it set; each settles at that point. Switches can overlap and settle in any order, so
-	 *  all of them are kept, not only the latest. newSession never rolls its generation back, so it
-	 *  does not delay stale aside/SDK calls. */
-	readonly #pendingGenerationChanges = new Map<Promise<void>, number>();
+	/** Settles when switchSession commits or restores its previous generation on rollback.
+	 *  newSession never rolls its generation back, so it does not delay stale aside/SDK calls. */
+	#sessionGenerationSettled: Promise<void> | undefined;
 	/** Readiness barrier for the outermost session/transcript transition, including all
 	 *  hooks and rollback reconciliation, independently of when its generation settles. */
 	#sessionTransitionSettled: Promise<void> | undefined;
@@ -1559,21 +1556,17 @@ export class AgentSession implements SettingsScope {
 
 	/** Re-validates a #sessionGeneration snapshot captured before an aside/SDK call's await.
 	 *  A mismatch alone does not mean the record's source session is gone —
-	 *  switchSession() restores the exact prior generation on rollback — and a match does not
-	 *  mean it stays: a switch begun after the record was sent can still move the generation. So
-	 *  wait until every generation change begun after the record (one that set a greater value
-	 *  than it captured) has settled, in whatever order, then compare. A change begun before the
-	 *  record is not waited for: the record was sent into its window, and it may itself wait on
-	 *  the record (its reconciler sends it). Returns true when the caller should drop its record. */
+	 *  switchSession() restores the exact prior generation on rollback — so wait out any in-flight
+	 *  generation change (#sessionGenerationSettled) and recheck rather than discarding immediately.
+	 *  Returns true when the caller should drop its record (no in-flight transition to wait for, or
+	 *  the generation is still different once one settles); false once the generation matches again. */
 	async #sessionGenerationChanged(sessionGeneration: number): Promise<boolean> {
-		for (;;) {
-			const newer: Promise<void>[] = [];
-			for (const [settled, generation] of this.#pendingGenerationChanges) {
-				if (generation > sessionGeneration) newer.push(settled);
-			}
-			if (newer.length === 0) return this.#sessionGeneration !== sessionGeneration;
-			await Promise.all(newer);
+		while (this.#sessionGeneration !== sessionGeneration) {
+			const settled = this.#sessionGenerationSettled;
+			if (!settled) return true;
+			await settled;
 		}
+		return false;
 	}
 
 	/** Fire-and-forget wake turn for incoming IRC — idle delivery and stranded-aside resume both
@@ -6255,6 +6248,8 @@ export class AgentSession implements SettingsScope {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		// A disposed session runs no turn: nothing it held waits any more.
+		this.#hiddenNextTurnTriggerHeld = false;
 		// Nothing will prompt a disposed session's assignment: end its hold and wake whoever waits for it.
 		if (this.#awaitingAssignment) this.#endAssignmentHold("dispose");
 		for (const dispose of this.#disposers.splice(0)) dispose();
@@ -6683,7 +6678,7 @@ export class AgentSession implements SettingsScope {
 		this.agent.reset();
 		// The cleared context is a new transcript: an aside or held message captured for the old one drops
 		// its record instead of landing here (mirrors newSession()).
-		this.#sessionGeneration = ++this.#sessionGenerationCounter;
+		this.#sessionGeneration++;
 		this.#pendingNextTurnMessages = [];
 		this.#experimentalContextNotesReminder = undefined;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -8180,11 +8175,12 @@ export class AgentSession implements SettingsScope {
 		// An assignment starts its turn on a settled transcript: a session switch still in progress
 		// may roll back and restore deliveries held for it, which its turn then carries. The hold
 		// keeps every other delivery from starting a turn meanwhile. An abort or disposal while it
-		// waits cancels it, as it cancels a prompt still in its setup.
+		// waits cancels it, as it cancels a prompt still in its setup; the transition's own internal
+		// abort does not.
 		if (options?.assignment && this.isSessionTransitioning) {
-			const promptGeneration = this.#promptGeneration;
+			const cancellationEpoch = this.#cancellationEpoch;
 			await this.waitForSessionTransition();
-			if (this.#promptGeneration !== promptGeneration || this.#isDisposed) {
+			if (this.#cancellationEpoch !== cancellationEpoch || this.#isDisposed) {
 				if (options.throwOnDrop) throw new PromptDroppedError();
 				return true;
 			}
@@ -10025,11 +10021,25 @@ export class AgentSession implements SettingsScope {
 		const queuedMessages = [...this.#pendingNextTurnMessages];
 		const message = queuedMessages.at(-1);
 		if (!message) return;
-		await this.#promptWithMessage(message, this.#getCustomMessageTextContent(message), {
+		const promptGeneration = this.#promptGeneration;
+		const cancellationEpoch = this.#cancellationEpoch;
+		const dispatched = await this.#promptWithMessage(message, this.#getCustomMessageTextContent(message), {
 			prependMessages: queuedMessages.slice(0, -1),
 			skipPostPromptRecoveryWait: true,
 			carriedNextTurnMessages: queuedMessages,
 		});
+		// Only a session transition's internal abort dropped it (no real abort, no disposal): the
+		// trigger waits for the transition, whose end runs it again for what is still queued. A
+		// real abort or a refusal leaves the messages for the next prompt.
+		const droppedByTransition =
+			!dispatched &&
+			!this.#isDisposed &&
+			this.#cancellationEpoch === cancellationEpoch &&
+			this.#promptGeneration !== promptGeneration;
+		if (droppedByTransition && this.#pendingNextTurnMessages.length > 0) {
+			this.#hiddenNextTurnTriggerHeld = true;
+			this.#resumeHeldHiddenTrigger();
+		}
 	}
 
 	#getCustomMessageTextContent(message: Pick<CustomMessage, "content">): string {
@@ -11393,6 +11403,7 @@ export class AgentSession implements SettingsScope {
 			for (const controller of this.#imageDescriptionAbortControllers) controller.abort(options?.reason);
 			this.abortRetry();
 			this.#promptGeneration++;
+			if (options?.goalReason !== "internal") this.#cancellationEpoch++;
 			// Cancel any awaited pre-dispatch setup (e.g. Hindsight auto-recall) so the
 			// admitted submission unwinds now instead of at the recall timeout (#12668).
 			this.#promptSetupAbortController?.abort(options?.reason);
@@ -11471,6 +11482,9 @@ export class AgentSession implements SettingsScope {
 		} finally {
 			this.#abortInProgress = false;
 			this.#drainStrandedQueuedMessages();
+			// A held hidden next-turn trigger is a delivery, not the work the abort stopped: once the
+			// abort has settled it runs, unless a transition or a hold still blocks it.
+			this.#resumeHeldHiddenTrigger();
 			this.#abortUnwinds.delete(unwind.promise);
 			unwind.resolve();
 		}
@@ -11564,7 +11578,7 @@ export class AgentSession implements SettingsScope {
 			// the same breath so an aside-queueing call still awaiting normalization for the
 			// outgoing session also drops its record instead of landing in this new one.
 			this.#irc.clearPending();
-			this.#sessionGeneration = ++this.#sessionGenerationCounter;
+			this.#sessionGeneration++;
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
@@ -13358,10 +13372,10 @@ export class AgentSession implements SettingsScope {
 		// aside-queueing call still awaiting normalization when the switch started drops its
 		// record on success but stays valid if the switch is rolled back to this same session.
 		const previousIrcPending = this.#irc.clearPending();
-		const previousSessionGeneration = this.#sessionGeneration;
-		this.#sessionGeneration = ++this.#sessionGenerationCounter;
+		const previousSessionGeneration = this.#sessionGeneration++;
 		const generationSettled = Promise.withResolvers<void>();
-		this.#pendingGenerationChanges.set(generationSettled.promise, this.#sessionGeneration);
+		const previousSessionGenerationSettled = this.#sessionGenerationSettled;
+		this.#sessionGenerationSettled = generationSettled.promise;
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.#queuedMessageDrainBlocked = false;
@@ -13580,8 +13594,8 @@ export class AgentSession implements SettingsScope {
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifySessionChangeCallbacks();
 			}
-			this.#pendingGenerationChanges.delete(generationSettled.promise);
 			generationSettled.resolve();
+			this.#sessionGenerationSettled = previousSessionGenerationSettled;
 			if (modelFallbackWarning) {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
@@ -13600,8 +13614,8 @@ export class AgentSession implements SettingsScope {
 			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
 			this.#irc.restorePending(previousIrcPending);
 			this.#sessionGeneration = previousSessionGeneration;
-			this.#pendingGenerationChanges.delete(generationSettled.promise);
 			generationSettled.resolve();
+			this.#sessionGenerationSettled = previousSessionGenerationSettled;
 			this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
 			this.#scheduledHiddenNextTurnGeneration = previousScheduledHiddenNextTurnGeneration;
 			this.#queuedMessageDrainBlocked = previousQueuedMessageDrainBlocked;

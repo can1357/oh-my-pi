@@ -18,7 +18,6 @@
 - `pr://<n>`, `issue://<n>`, and repo-less `github` tool calls in a checkout whose `upstream` remote is not the fork parent of `origin` now resolve to `origin` instead of the upstream project; `gh repo set-default` still wins
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 - A message sent to a subagent before its task's turn starts (`write agent://<id>`, RPC `steer_subagent`, Agent Hub chat, an extension's `sendMessage`/`sendUserMessage`, or a background result) no longer fails the task with `AgentBusyError` or runs in a turn of its own without the task: it waits and reaches the subagent after the task text, both while the subagent starts up and while a follow-up takes an idle subagent. A parent's message sent during startup now comes after the assignment instead of before it ([#17821](https://github.com/can1357/oh-my-pi/pull/17821) by [@sjawhar](https://github.com/sjawhar), after [#17587](https://github.com/can1357/oh-my-pi/issues/17587))
-- Two session switches that roll back out of order no longer freeze the process while a message waits to learn whether its session is still the live one ([#17821](https://github.com/can1357/oh-my-pi/pull/17821) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 
