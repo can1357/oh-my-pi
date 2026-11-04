@@ -541,11 +541,6 @@ fn ungetkeycmd(zw: &mut Zw<'_, '_>) {
 	}
 }
 
-/// The `PATH_MAX` zsh limits the search string to (bytes).
-fn path_max() -> usize {
-	usize::try_from(libc::PATH_MAX).unwrap_or(1024)
-}
-
 /// A key command read during the search.
 fn on_key(zw: &mut Zw<'_, '_>, mut s: Box<Isearch>, got: Got) -> WResult {
 	let cmd = match got {
@@ -728,7 +723,8 @@ fn on_key(zw: &mut Zw<'_, '_>, mut s: Box<Isearch>, got: Got) -> WResult {
 
 /// zsh's `ins:` label: the character typed joins the search string.
 fn insert(zw: &mut Zw<'_, '_>, mut s: Box<Isearch>) -> WResult {
-	if from_line(&s.sbuf).len() == path_max() {
+	// zsh limits the search string to `PATH_MAX` bytes.
+	if from_line(&s.sbuf).len() == crate::sys::PATH_MAX {
 		s.feep = true;
 		return top(zw, s);
 	}

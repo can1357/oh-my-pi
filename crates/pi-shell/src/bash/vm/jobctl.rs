@@ -29,7 +29,7 @@ use bstr::{BStr, BString};
 use super::{
 	Cx, Kernel, Shell,
 	exec::{self, Flow},
-	proc::{Frame, FrameKind, JobState, Live, PendingWrite, Saved, Scratch, ScriptKind, Vproc},
+	proc::{Frame, FrameKind, JobState, PendingWrite, Saved, Scratch, ScriptKind, Vproc},
 	state,
 };
 use crate::bash::{
@@ -1368,6 +1368,7 @@ impl Shell {
 
 	/// Whether the program vproc `vpid` waits for is stopped now (`true`
 	/// when it cannot be told).
+	#[cfg(unix)]
 	fn ext_stopped(&self, vpid: Vpid) -> bool {
 		let Some(p) = self.procs.iter().find(|p| p.vpid == vpid) else {
 			return true;
@@ -1377,7 +1378,7 @@ impl Shell {
 			.iter()
 			.rev()
 			.find_map(|f| match f.scratch.as_deref().map(|sc| &sc.live) {
-				Some(Live::Ext(ext)) => Some(ext.pid()),
+				Some(super::proc::Live::Ext(ext)) => Some(ext.pid()),
 				_ => None,
 			});
 		let Some(pid) = pid.and_then(|pid| i32::try_from(pid).ok()) else {
@@ -1385,6 +1386,13 @@ impl Shell {
 		};
 		crate::sys::proc::info(pid)
 			.is_none_or(|info| info.state == crate::sys::proc::ProcState::Stopped)
+	}
+
+	/// Windows has no process-table state to recheck: a reported stop stands.
+	#[cfg(not(unix))]
+	#[expect(clippy::unused_self, reason = "the Unix variant reads the vprocs")]
+	const fn ext_stopped(&self, _vpid: Vpid) -> bool {
+		true
 	}
 
 	/// Whether vproc `v` is `ancestor` or below it.
