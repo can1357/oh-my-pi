@@ -332,9 +332,12 @@ export function pendingRestartSubagents(entries: readonly SessionEntry[]): Resta
 
 /**
  * Whether a subagent's transcript shows the turn the restart stopped, rather than one
- * that finished in the moment between the record and the teardown: its last message is
- * a stopped (`aborted`) assistant turn, unanswered input, unanswered tool calls, or a
- * tool result the model never answered other than an accepted `yield`.
+ * that finished in the moment between the record and the teardown. Only a finished
+ * turn proves it is done: a final answer (an assistant message that stopped normally
+ * with no tool calls) or an accepted `yield`. Every other tail is interrupted: a
+ * stopped (`aborted`), failed (`error`, which a retry was waiting to repeat) or cut
+ * (`length`) turn, unanswered input, unanswered tool calls, or a tool result the model
+ * never answered.
  */
 export function transcriptWasInterrupted(entries: readonly SessionEntry[]): boolean {
 	for (let index = entries.length - 1; index >= 0; index--) {
@@ -342,8 +345,7 @@ export function transcriptWasInterrupted(entries: readonly SessionEntry[]): bool
 		if (entry.type !== "message") continue;
 		const message = entry.message;
 		if (message.role === "assistant") {
-			if (message.stopReason === "aborted") return true;
-			return message.content.some(part => part.type === "toolCall");
+			return message.stopReason !== "stop" || message.content.some(part => part.type === "toolCall");
 		}
 		if (message.role === "toolResult") return !(message.toolName === "yield" && !message.isError);
 		return true;
@@ -717,6 +719,32 @@ export async function resumeRestartedSubagents(
 				reason: `its job could not start (${error instanceof Error ? error.message : String(error)}); send it a message to revive it`,
 			});
 		}
+	}
+	// What a subagent that does not go on carried (results of its jobs, messages to it)
+	// has no other copy: the root receives it, with the reason. A record left unread
+	// for the next start keeps its own (its subagents are not in `byId`).
+	for (const { id, reason } of outcome.notResumed) {
+		const sub = byId.get(id);
+		if (!sub || (sub.unreadResults.length === 0 && sub.pendingMessages.length === 0)) continue;
+		const parts = [
+			`The restart did not resume ${id} (${reason}), so what it had not read yet is delivered here.`,
+			...(sub.pendingMessages.length > 0
+				? [`Messages to ${id} that it never read:\n${bulletList(sub.pendingMessages)}`]
+				: []),
+			...(sub.unreadResults.length > 0
+				? [
+						`Results of ${id}'s jobs that it never read:\n${bulletList(sub.unreadResults.map(result => `${result.id}: ${result.text}`))}`,
+					]
+				: []),
+		];
+		manager.publishCompleted(
+			"task",
+			`${id} (not resumed after restart)`,
+			{ text: parts.join("\n\n") },
+			{ ownerId: rootId, agentId: id },
+		);
+		// The root has the results now: a later restart must not deliver them again.
+		manager.consumeJobResults(sub.unreadResults.map(result => result.id).filter(jobId => manager.getJob(jobId)));
 	}
 	if (outcome.resumed.length > 0 || outcome.notResumed.length > 0) {
 		logger.info("Resumed subagents after restart", { resumed: outcome.resumed, notResumed: outcome.notResumed });

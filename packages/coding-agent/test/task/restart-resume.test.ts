@@ -6,7 +6,7 @@
  * every one: each gets one restart note naming its stopped call, finishes, and its
  * result reaches its own parent as the job its first run's job was.
  */
-import { afterEach, beforeEach, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -30,7 +30,10 @@ import {
 	RESTART_SUBAGENTS_CUSTOM_TYPE,
 	recordRestartSubagents,
 	resumeRestartedSubagents,
+	transcriptWasInterrupted,
 } from "@oh-my-pi/pi-coding-agent/task/restart-resume";
+import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import type { StopReason } from "@oh-my-pi/pi-ai";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
@@ -598,6 +601,76 @@ it("keeps a record whose file cannot be read for the next start instead of consu
 		authStorage.close();
 	}
 }, 90_000);
+
+it("delivers to the root the result an idle lane carried when the lane cannot be resumed", async () => {
+	notesSeen.clear();
+	laneFinishesEarly = true;
+	const { cwd, authStorage, open } = await harness();
+	try {
+		const mainFile = await runUntilRestart(open, cwd, true, ["Alpha", "Beta", "Lane.Arm"]);
+		// Second process: the arm's resumed turn finishes; the next restart comes before Lane reads its result.
+		const second = await open(await SessionManager.open(mainFile));
+		expect((await resumeRestartedSubagents(second)).resumed).toContain("Lane.Arm");
+		await second.asyncJobManager!.getJob("Lane.Arm")!.promise;
+		expect(recordRestartSubagents(second)?.subagents.find(sub => sub.id === "Lane")?.idle).toBe(true);
+		await second.dispose();
+		resetProcessGlobals();
+		// Lane's transcript is gone before the third start, so Lane cannot go on.
+		await fs.rm(path.join(mainFile.slice(0, -".jsonl".length), "Lane.jsonl"), { force: true });
+		const third = await open(await SessionManager.open(mainFile));
+		try {
+			const outcome = await resumeRestartedSubagents(third);
+			expect(outcome.notResumed.map(entry => entry.id)).toContain("Lane");
+			const forwarded = third
+				.asyncJobManager!.getAllJobs({ ownerId: MAIN_AGENT_ID })
+				.find(job => job.agentId === "Lane");
+			expect(forwarded?.resultText).toContain("did not resume Lane");
+			expect(forwarded?.resultText).toContain("Arm resumed");
+		} finally {
+			await third.dispose();
+		}
+	} finally {
+		laneFinishesEarly = false;
+		authStorage.close();
+	}
+}, 90_000);
+
+describe("transcriptWasInterrupted", () => {
+	const assistant = (stopReason: StopReason, toolCall = false): SessionEntry =>
+		({
+			type: "message",
+			id: "a",
+			parentId: null,
+			timestamp: "",
+			message: {
+				role: "assistant",
+				content: toolCall
+					? [{ type: "toolCall", id: "c", name: "bash", arguments: {} }]
+					: [{ type: "text", text: "x" }],
+				stopReason,
+			},
+		}) as unknown as SessionEntry;
+	const toolResult = (toolName: string, isError: boolean): SessionEntry =>
+		({
+			type: "message",
+			id: "t",
+			parentId: null,
+			timestamp: "",
+			message: { role: "toolResult", toolCallId: "c", toolName, content: [], isError },
+		}) as unknown as SessionEntry;
+
+	it("counts only a final answer or an accepted yield as finished", () => {
+		// A failed turn is what a provider retry was waiting to repeat: it did not finish.
+		expect(transcriptWasInterrupted([assistant("error")])).toBe(true);
+		expect(transcriptWasInterrupted([assistant("length")])).toBe(true);
+		expect(transcriptWasInterrupted([assistant("aborted")])).toBe(true);
+		expect(transcriptWasInterrupted([assistant("toolUse", true)])).toBe(true);
+		expect(transcriptWasInterrupted([toolResult("bash", false)])).toBe(true);
+		expect(transcriptWasInterrupted([toolResult("yield", true)])).toBe(true);
+		expect(transcriptWasInterrupted([assistant("stop")])).toBe(false);
+		expect(transcriptWasInterrupted([toolResult("yield", false)])).toBe(false);
+	});
+});
 
 it("without the restart record, no subagent continues after the relaunch (what `/restart` did before)", async () => {
 	notesSeen.clear();

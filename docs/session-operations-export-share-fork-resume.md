@@ -574,7 +574,13 @@ follow-ups, an IRC message parked under a hold), would die with the old process
 too. `/restart` records an idle subagent that holds such a result or message, and
 the relaunch gives it a turn whose note carries them; a result owed to the root
 is delivered to the root again. A record file that cannot be read is not
-consumed: the TUI reports it, and the next start reads it again.
+consumed: the TUI reports it, and the next start reads it again. When a recorded
+subagent does not go on, for any reason, the root receives the messages and
+results it carried and had not read, with the reason.
+
+A subagent counts as finished only when its transcript ends in a final answer or
+an accepted `yield`; one whose last turn failed (a provider retry was waiting to
+repeat it), was cut at its length limit or was stopped goes on.
 
 `/exit` and a crash are not covered: `/exit` records nothing, and a crash leaves
 transcripts that `omp --restore` already resumes.
