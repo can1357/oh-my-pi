@@ -277,10 +277,15 @@ function getOpenRouterFallbackModelIds(modelId: string): string[] {
 	return orderedCandidates;
 }
 
-/** How a model was derived from another: its source, and how to derive the same variant again. */
+/**
+ * How a model was derived from another: its source, and how to derive the same variant again.
+ * `scope` is the settings scope the variant is wanted for (a refitted context window follows it).
+ */
+export type DeriveModel = (source: Model<Api>, scope?: Settings) => Model<Api>;
+
 export interface ModelDerivation {
 	readonly source: Model<Api>;
-	readonly derive: (source: Model<Api>) => Model<Api>;
+	readonly derive: DeriveModel;
 }
 
 /**
@@ -291,11 +296,7 @@ export interface ModelDerivation {
 const modelDerivations = new WeakMap<Model<Api>, ModelDerivation>();
 
 /** Record that `derived` is `derive(source)`; returns `derived`. */
-export function recordModelDerivation<T extends Model<Api>>(
-	derived: T,
-	source: Model<Api>,
-	derive: (source: Model<Api>) => Model<Api>,
-): T {
+export function recordModelDerivation<T extends Model<Api>>(derived: T, source: Model<Api>, derive: DeriveModel): T {
 	if (derived !== source) modelDerivations.set(derived, { source, derive });
 	return derived;
 }

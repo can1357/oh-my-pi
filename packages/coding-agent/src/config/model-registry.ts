@@ -1,5 +1,12 @@
 import * as path from "node:path";
-import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
+import type {
+	ApiKeyResolution,
+	ApiKeyResolveContext,
+	ApiKeyResolver,
+	FetchImpl,
+	ResolvedApiKey,
+	UsageProvider,
+} from "@oh-my-pi/pi-ai";
 import { type AuthApiKeyOptions, type AuthPeekOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
@@ -279,6 +286,9 @@ function configShape(model: Model<Api>): unknown {
 	return rest;
 }
 
+/** Catalog generation recorded for a credential resolved while the catalog was rebuilt. */
+const STRADDLED_GENERATION = -1;
+
 /** The context window a model runs with by default, and the larger one extended context opts it into. */
 export interface ContextWindowTiers {
 	standard: number;
@@ -406,6 +416,8 @@ export class ModelRegistry {
 	 * for one settings scope (see {@link currentConfigOf}).
 	 */
 	#currentConfigs = new WeakMap<Model<Api>, { entry: Model<Api>; scope: Settings | undefined; result: Model<Api> }>();
+	/** Per credential this registry's resolvers produced: the catalog generation it came from. */
+	#credentialGenerations = new WeakMap<object, number>();
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
 	#cacheDbPath?: string;
@@ -3330,9 +3342,9 @@ export class ModelRegistry {
 		if (cached?.contextWindow === window) return cached;
 		const refitted = applyModelOverride(model, { contextWindow: window });
 		this.#refittedRows.set(model, refitted);
-		const source = this.#handedOut.get(model);
-		if (source) this.#handedOut.set(refitted, source);
-		else recordModelDerivation(refitted, model, rebound => this.fitContextWindow(rebound, scope));
+		// A refit is a variant of `model` for one scope: a rebind refits the rebound source for the
+		// scope it is wanted for, falling back to this one.
+		recordModelDerivation(refitted, model, (rebound, wanted) => this.fitContextWindow(rebound, wanted ?? scope));
 		return refitted;
 	}
 
@@ -3747,15 +3759,15 @@ export class ModelRegistry {
 	/**
 	 * `model` as the catalog configures it now, for a request about to be sent. Only a model this
 	 * registry handed out (from `find`, `getAll`, `getAvailable`, `getAvailableForProviders`,
-	 * `getProviderModels`, or derived by `fitContextWindow` / `refreshSelectedModelMetadata`), or a
-	 * variant a selector derived from one (an `@upstream` pin, an OpenRouter requested id, a Bedrock
-	 * inference profile: `modelDerivationOf`), is rebound, and only when its configuration changed
-	 * since: its provider's models.yml entry, or the catalog entry's fields other than limits. The
-	 * rebound model is the current entry, looked up the way the original was, keeping the held
+	 * `getProviderModels`, or derived by `refreshSelectedModelMetadata`), or a variant derived from
+	 * one (an `@upstream` pin, an OpenRouter requested id, a Bedrock inference profile, a window
+	 * `fitContextWindow` refitted: `modelDerivationOf`), is rebound, and only when its configuration
+	 * changed since: its provider's models.yml entry, or the catalog entry's fields other than limits.
+	 * The rebound model is the current entry, looked up the way the original was, keeping the held
 	 * object's context window and output cap except where models.yml now configures a different
-	 * value for one; a derived variant is derived again from its rebound source, so its pin stays.
-	 * Any other object (an SDK caller's model or a variant it built) is sent as given. Stable per
-	 * (model, entry, scope), so identity-keyed caches hold.
+	 * value for one; a derived variant is derived again from its rebound source for `scope`, so its
+	 * pin stays and a refit follows `scope`. Any other object (an SDK caller's model or a variant it
+	 * built) is sent as given. Stable per (model, entry, scope), so identity-keyed caches hold.
 	 */
 	currentConfigOf(model: Model<Api>, scope?: Settings): Model<Api> {
 		const then = this.#handedOut.get(model);
@@ -3774,8 +3786,9 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * A derived variant: rebind its source, then derive the same variant from the result. Its limits
-	 * follow its source's rebind: kept, except where the rebind took a value models.yml now configures.
+	 * A derived variant: rebind its source, then derive the same variant from the result for
+	 * `scope`. Its limits are the derived ones: the source's rebind already kept the held limits
+	 * except where models.yml now configures a different value, and a refit follows `scope`.
 	 */
 	#currentConfigOfDerived(model: Model<Api>, scope: Settings | undefined): Model<Api> {
 		const derivation = modelDerivationOf(model);
@@ -3784,17 +3797,7 @@ export class ModelRegistry {
 		if (source === derivation.source) return model;
 		const cached = this.#currentConfigs.get(model);
 		if (cached?.entry === source && cached.scope === scope) return cached.result;
-		const derived = derivation.derive(source);
-		const result = recordModelDerivation(
-			{
-				...derived,
-				contextWindow:
-					source.contextWindow === derivation.source.contextWindow ? model.contextWindow : derived.contextWindow,
-				maxTokens: source.maxTokens === derivation.source.maxTokens ? model.maxTokens : derived.maxTokens,
-			},
-			source,
-			derivation.derive,
-		);
+		const result = derivation.derive(source, scope);
 		this.#currentConfigs.set(model, { entry: source, scope, result });
 		return result;
 	}
@@ -4000,20 +4003,58 @@ export class ModelRegistry {
 	 * policy. Accepts a provider id with options, or a model with an optional
 	 * session id (`resolver(model, sessionId)`) which derives `baseUrl`/`modelId`
 	 * from the model. Callers that need the initial key for a guard can call
-	 * `resolveApiKeyOnce(resolver)`.
+	 * `resolveApiKeyOnce(resolver)`. Each credential it resolves records the
+	 * catalog generation it came from (see {@link bindRequest}).
 	 */
 	resolver(provider: string, options?: ApiKeyResolverOptions): ApiKeyResolver;
 	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
 	resolver(target: string | ApiKeyResolverModel, optionsOrSessionId?: ApiKeyResolverOptions | string): ApiKeyResolver {
 		const options = typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : optionsOrSessionId;
-		if (typeof target === "string") {
-			return createApiKeyResolver(this, target, options);
-		}
-		return createApiKeyResolver(this, target.provider, {
-			...options,
-			baseUrl: target.baseUrl,
-			modelId: target.id,
-		});
+		const resolve =
+			typeof target === "string"
+				? createApiKeyResolver(this, target, options)
+				: createApiKeyResolver(this, target.provider, { ...options, baseUrl: target.baseUrl, modelId: target.id });
+		return ctx => this.#resolveVersioned(resolve, ctx);
+	}
+
+	/**
+	 * Resolve through `resolve` and record the catalog generation the credential came from:
+	 * {@link STRADDLED_GENERATION} when the catalog was rebuilt while it resolved, since it may
+	 * then reflect either version.
+	 */
+	async #resolveVersioned(resolve: ApiKeyResolver, ctx: ApiKeyResolveContext): Promise<ApiKeyResolution> {
+		const generation = this.#configGeneration;
+		const resolved = await resolve(ctx);
+		// A mirror's credentials come from its owner, which answers this call only after pushing every
+		// reload it made before it; so a reload the credential already reflects is applied here first.
+		if (this.#owner) await this.#owner.reloadIfConfigChanged();
+		if (resolved === undefined) return resolved;
+		const credential = typeof resolved === "string" ? { apiKey: resolved } : resolved;
+		this.#credentialGenerations.set(
+			credential,
+			generation === this.#configGeneration ? generation : STRADDLED_GENERATION,
+		);
+		return credential;
+	}
+
+	/**
+	 * The model a request sends with `credential`, both from one catalog version: for a credential one
+	 * of this registry's resolvers produced from the current catalog, `model` rebound to it
+	 * ({@link currentConfigOf}); `undefined` when the credential came from an earlier catalog (resolve
+	 * it again). A credential from elsewhere (an SDK caller's key) goes out with `model` as given.
+	 */
+	bindRequest<TApi extends Api>(
+		model: Model<TApi>,
+		credential: ApiKeyResolution,
+		scope?: Settings,
+	): Model<TApi> | undefined {
+		const generation =
+			typeof credential === "object" && credential !== null
+				? this.#credentialGenerations.get(credential)
+				: undefined;
+		if (generation === undefined) return model;
+		if (generation !== this.#configGeneration) return undefined;
+		return this.currentConfigOf(model, scope) as Model<TApi>;
 	}
 
 	async #peekApiKeyForProvider(provider: string, options?: AuthPeekOptions): Promise<string | undefined> {

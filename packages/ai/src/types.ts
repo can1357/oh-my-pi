@@ -36,7 +36,7 @@ import type {
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Api, FetchImpl, KnownApi, Model, Provider, ThinkingBudgets, Usage } from "@oh-my-pi/pi-catalog/types";
-import type { ApiKey } from "./auth-retry";
+import type { ApiKey, ApiKeyResolution } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
@@ -789,6 +789,21 @@ export interface LiveSteerClaim {
 	reject(): void;
 }
 
+/**
+ * Keeps a request's endpoint, headers and credential on one configuration version when the
+ * configuration can change while the request waits (for a concurrency slot, or before an auth
+ * retry). `streamSimple` calls it once per dispatch attempt, right after the attempt's
+ * credential resolves.
+ */
+export interface RequestBinding {
+	/**
+	 * `model` as the configuration version `credential` was resolved from configures it, or
+	 * `undefined` when that version is no longer the current one: the attempt then resolves its
+	 * credential again. A credential the binding does not know is sent with `model` as given.
+	 */
+	bind<TApi extends Api>(model: Model<TApi>, credential: ApiKeyResolution): Model<TApi> | undefined;
+}
+
 // Unified options with reasoning passed to streamSimple() and completeSimple()
 export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	/**
@@ -799,6 +814,11 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * ever see the resolved {@link StreamOptions.apiKey} string.
 	 */
 	apiKey?: ApiKey;
+	/**
+	 * With a resolver {@link apiKey}: binds each dispatch attempt (the first send and every
+	 * auth retry) to one configuration version, after the attempt's credential resolves.
+	 */
+	requestBinding?: RequestBinding;
 	reasoning?: Effort;
 	/**
 	 * Force-disable reasoning for the request even when the model supports it.

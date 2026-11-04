@@ -17,6 +17,7 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { getProviderSemaphore } from "@oh-my-pi/pi-coding-agent/task/provider-concurrency";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -162,8 +163,15 @@ interface EndpointRequest {
 	provider: unknown;
 }
 
-/** A local OpenAI-compatible endpoint recording every chat request it receives. */
-function completionsEndpoint(): { url: string; requests: EndpointRequest[]; [Symbol.dispose](): void } {
+/**
+ * A local OpenAI-compatible endpoint recording every chat request it receives. `answer` may
+ * answer the request at `index` itself (hold it, reject it); otherwise it streams `OK`.
+ */
+function completionsEndpoint(answer?: (index: number) => Promise<Response | undefined>): {
+	url: string;
+	requests: EndpointRequest[];
+	[Symbol.dispose](): void;
+} {
 	const requests: EndpointRequest[] = [];
 	const chunk = (delta: Record<string, unknown>, finish: string | null) =>
 		`data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", model: "review/model", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
@@ -172,12 +180,15 @@ function completionsEndpoint(): { url: string; requests: EndpointRequest[]; [Sym
 		port: 0,
 		async fetch(request) {
 			const body = (await request.json()) as { provider?: unknown };
+			const index = requests.length;
 			requests.push({
 				path: new URL(request.url).pathname,
 				version: request.headers.get("x-version"),
 				authorization: request.headers.get("authorization"),
 				provider: body.provider,
 			});
+			const answered = await answer?.(index);
+			if (answered) return answered;
 			return new Response(
 				`${chunk({ role: "assistant", content: "OK" }, null)}${chunk({}, "stop")}data: [DONE]\n\n`,
 				{
@@ -215,6 +226,7 @@ async function startSession(
 	authStorage: AuthStorage,
 	registry: ModelRegistry,
 	model: Model,
+	settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
 ): Promise<AgentSession> {
 	const { session } = await createAgentSession({
 		cwd: tempDir.path(),
@@ -222,7 +234,7 @@ async function startSession(
 		sessionManager: SessionManager.inMemory(tempDir.path()),
 		authStorage,
 		modelRegistry: registry,
-		settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+		settings,
 		model,
 		disableExtensionDiscovery: true,
 		skills: [],
@@ -437,6 +449,153 @@ describe("a running session re-reads models.yml before its next request", () => 
 			{ path: "/new/v1/chat/completions", version: "new", authorization: "Bearer NEW_KEY", provider: undefined },
 		]);
 	});
+
+	it("refits a rebound variant for the settings scope it is wanted for", async () => {
+		using tempDir = TempDir.createSync("@pi-models-config-reload-refit-scope-");
+		const modelsPath = tempDir.join("models.yml");
+		const config = (contextWindow: number) =>
+			JSON.stringify({
+				providers: {
+					openrouter: {
+						baseUrl: "https://openrouter.example.test/v1",
+						api: "openai-completions",
+						apiKey: "TEST_KEY",
+						models: [
+							{
+								id: "review/model",
+								reasoning: false,
+								input: ["text"],
+								contextWindow,
+								maxContextWindow: 1_000_000,
+								maxTokens: 1024,
+							},
+						],
+					},
+				},
+			});
+		fs.writeFileSync(modelsPath, config(200_000));
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		try {
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			const standardScope = Settings.isolated({ extendedContext: false });
+			const extendedScope = Settings.isolated({ extendedContext: true });
+			const pinned = parseModelPattern(
+				"openrouter/review/model@required-upstream",
+				registry.getProviderModels("openrouter"),
+			).model;
+			if (!pinned) throw new Error("pinned model did not resolve");
+			// One scope's refit of a pinned selection, held by another scope after the standard window changes.
+			const held = registry.fitContextWindow(pinned, extendedScope);
+			expect(held.contextWindow).toBe(1_000_000);
+			writeNewVersion(modelsPath, config(201_000));
+			expect(await registry.reloadIfConfigChanged()).toBe(true);
+			expect(registry.currentConfigOf(held, standardScope).contextWindow).toBe(201_000);
+			expect(registry.currentConfigOf(held, extendedScope).contextWindow).toBe(1_000_000);
+		} finally {
+			authStorage.close();
+		}
+	});
+});
+
+/**
+ * Another session reloads models.yml while a request waits: for its provider's concurrency slot,
+ * or on the endpoint before an auth retry. The request's next dispatch must send the endpoint,
+ * header and key of one catalog version, the current one.
+ */
+describe("a request that waits while another caller reloads models.yml", () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	const send = (session: AgentSession, path: "main" | "side"): Promise<unknown> =>
+		(path === "main"
+			? session.prompt("request")
+			: session.runEphemeralTurn({ promptText: "request", tools: false })
+		).catch(error => error);
+
+	for (const path of ["main", "side"] as const) {
+		it(`sends the edited URL, header and key once a ${path} request gets its provider slot`, async () => {
+			using tempDir = TempDir.createSync(`@pi-models-config-reload-slot-${path}-`);
+			using endpoint = completionsEndpoint();
+			const modelsPath = tempDir.join("models.yml");
+			fs.writeFileSync(modelsPath, endpointConfig("ollama-cloud", endpoint.url, "old"));
+			const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"providers.ollama-cloud.maxConcurrency": 1,
+			});
+			const model = registry.find("ollama-cloud", "review/model");
+			if (!model) throw new Error("ollama-cloud model missing from the registry");
+			const session = await startSession(tempDir, authStorage, registry, model, settings);
+			const semaphore = getProviderSemaphore(settings, "ollama-cloud");
+			if (!semaphore) throw new Error("ollama-cloud has no concurrency limiter");
+			// Another request holds the only slot.
+			await semaphore.acquire();
+			let held = true;
+			try {
+				const waiting = Promise.withResolvers<void>();
+				const acquire = semaphore.acquire.bind(semaphore);
+				vi.spyOn(semaphore, "acquire").mockImplementation(signal => {
+					const acquired = acquire(signal);
+					waiting.resolve();
+					return acquired;
+				});
+				const request = send(session, path);
+				await waiting.promise;
+				writeNewVersion(modelsPath, endpointConfig("ollama-cloud", endpoint.url, "new"));
+				expect(await registry.reloadIfConfigChanged()).toBe(true);
+				semaphore.release();
+				held = false;
+				await request;
+			} finally {
+				if (held) semaphore.release();
+				await session.dispose();
+				authStorage.close();
+			}
+			expect(endpoint.requests).toEqual([
+				{ path: "/new/v1/chat/completions", version: "new", authorization: "Bearer NEW_KEY", provider: undefined },
+			]);
+		});
+
+		it(`retries a ${path} request rejected during an edit with the edited URL, header and key together`, async () => {
+			using tempDir = TempDir.createSync(`@pi-models-config-reload-retry-${path}-`);
+			const reached = Promise.withResolvers<void>();
+			const edited = Promise.withResolvers<void>();
+			using endpoint = completionsEndpoint(async index => {
+				if (index !== 0) return undefined;
+				// The first request reaches the endpoint, models.yml changes, then the endpoint rejects its key.
+				reached.resolve();
+				await edited.promise;
+				return Response.json(
+					{ error: { message: "invalid API key", type: "authentication_error" } },
+					{ status: 401 },
+				);
+			});
+			const modelsPath = tempDir.join("models.yml");
+			fs.writeFileSync(modelsPath, endpointConfig("gateway", endpoint.url, "old"));
+			const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			const model = registry.find("gateway", "review/model");
+			if (!model) throw new Error("gateway model missing from the registry");
+			const session = await startSession(tempDir, authStorage, registry, model);
+			try {
+				const request = send(session, path);
+				await reached.promise;
+				writeNewVersion(modelsPath, endpointConfig("gateway", endpoint.url, "new"));
+				expect(await registry.reloadIfConfigChanged()).toBe(true);
+				edited.resolve();
+				await request;
+			} finally {
+				edited.resolve();
+				await session.dispose();
+				authStorage.close();
+			}
+			expect(endpoint.requests).toEqual([
+				{ path: "/old/v1/chat/completions", version: "old", authorization: "Bearer OLD_KEY", provider: undefined },
+				{ path: "/new/v1/chat/completions", version: "new", authorization: "Bearer NEW_KEY", provider: undefined },
+			]);
+		});
+	}
 });
 
 describe("a locally probed context window across a models.yml edit", () => {

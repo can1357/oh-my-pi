@@ -20,6 +20,7 @@ import type {
 	Model,
 	ModelUsageHealth,
 	ProviderSessionState,
+	RequestBinding,
 	ServiceTier,
 	ServiceTierByFamily,
 	SimpleStreamOptions,
@@ -4786,13 +4787,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// fallbacks) first folds in a models.yml edit, then goes out with its model rebound to the
 		// catalog's current configuration (`ModelRegistry.currentConfigOf`): every model the registry
 		// handed out, and every variant a selector derived from one (an `@upstream` pin keeps its pin).
-		// The credential is read from the registry's configuration as well, so after an edit the
-		// new key goes out only with the new URL and headers.
+		// The request may then wait (for a provider slot, or before an auth retry) while another
+		// caller reloads the catalog, so each dispatch attempt binds again where its credential
+		// resolves (`requestBinding`, `ModelRegistry.bindRequest`): the endpoint, headers and key it
+		// sends all come from one catalog version.
+		const requestBinding: RequestBinding = {
+			bind: (model, credential) => modelRegistry.bindRequest(model, credential, settings),
+		};
 		const settingsAwareStreamFn: StreamFn = async (streamModel, context, streamOptions) => {
 			await modelRegistry.reloadIfConfigChanged();
 			const requestModel = modelRegistry.currentConfigOf(streamModel, settings);
 			return withCredentialRedaction(cfgSecretsEnabled.get(settings), () =>
-				settingsBoundStreamFn(requestModel, context, streamOptions),
+				settingsBoundStreamFn(requestModel, context, { ...streamOptions, requestBinding }),
 			);
 		};
 		// Primary-agent (and its auto-learn capture twin) provider options read per
