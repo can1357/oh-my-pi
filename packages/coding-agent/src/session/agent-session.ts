@@ -1394,18 +1394,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	>();
 	#userWaitSeq = 0;
 	/**
-	 * The `user_wait_start` frame currently published for the open dialogs, kept
-	 * so a surface that attaches mid-wait (a focus rebuild) can replay it;
-	 * undefined while no dialog waits.
+	 * The `user_wait_start` frame last published for the open dialogs, kept so a surface that
+	 * attaches mid-wait (a focus rebuild) can replay it; undefined once the matching
+	 * `user_wait_end` has been published.
 	 */
 	#openUserWait: Extract<AgentSessionEvent, { type: "user_wait_start" }> | undefined;
 	/** Whether the open dialogs ended a prompt's computer turn, which goes on once they settle. */
 	#userWaitEndedTurn = false;
-	/** True while a `user_wait_start` frame is being delivered, so a dialog a listener opens
-	 *  republishes after the frame in flight rather than inside it — a later listener must never
-	 *  see an older snapshot last. */
+	/** True while a wait frame (start or end) is being delivered, so a change a listener makes —
+	 *  a dialog it opens or answers, a disposal it begins — is published after the frame in
+	 *  flight rather than inside it: a later listener must never see an older frame last. */
 	#publishingUserWait = false;
-	/** A publication that arrived while one was being delivered, to be recomputed after it. */
+	/** A change that arrived while a frame was being delivered, to be recomputed after it. */
 	#userWaitPublishPending = false;
 	#inFlightEpoch = 0;
 	#abortInProgress = false;
@@ -1596,28 +1596,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		// The claim expires with the run that made it, not with whatever publishes next: a surface
 		// replaying the last frame must never read a call this dialog no longer speaks for.
-		const dropClaimWatch = claim?.execution
-			? onToolExecutionEnd(claim.execution, () => this.#publishOpenUserWait())
-			: undefined;
-		this.#publishOpenUserWait();
+		const dropClaimWatch = claim?.execution ? onToolExecutionEnd(claim.execution, () => this.#publishUserWait()) : undefined;
+		this.#publishUserWait();
 		try {
 			return await dialog();
 		} finally {
 			dropClaimWatch?.();
 			// A wait disposal already ended has nothing left to close or republish.
 			if (this.#openUserWaits.delete(waitId)) {
-				if (this.#openUserWaits.size === 0) {
-					this.#openUserWait = undefined;
-					this.#emit({ type: "user_wait_end" });
-					if (this.#promptInFlightCount > 0) {
-						if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
-						else if (this.#agentKind === "main") resumeComputerTurnForOwner(this.#eval.getKernelOwnerId());
-					}
-				} else {
-					// The dialog that was named may be the one that just settled, and
-					// so may one that was never published: the oldest still open takes
-					// its place, and the published calls lose the one that went.
-					this.#publishOpenUserWait();
+				// The last dialog closing publishes the end; one still open behind it takes the
+				// settled one's place, and the published calls lose the one that went.
+				this.#publishUserWait();
+				if (this.#openUserWaits.size === 0 && this.#promptInFlightCount > 0) {
+					if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
+					else if (this.#agentKind === "main") resumeComputerTurnForOwner(this.#eval.getKernelOwnerId());
 				}
 			}
 		}
@@ -1664,54 +1656,64 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Publish the oldest open dialog as the session's wait, beside every tool call whose dialog is
-	 * open, unless the same question over the same calls is already published. A second dialog
-	 * opening behind the first does not change what is asked, but it does change which calls are
-	 * waiting, and a surface tracking a call needs that: a younger dialog's call can be answered
-	 * without the oldest dialog's words ever changing. The first settling behind a second
-	 * republishes too, so no surface keeps reporting a dialog that is gone, a classification that
-	 * belongs to one, or a call whose own wait has ended.
+	 * Bring what listeners were told in line with the open dialogs: the oldest open dialog as the
+	 * session's wait, beside every tool call whose dialog is open, or a `user_wait_end` once none is
+	 * open. Nothing is published when that is what was published last. A second dialog opening
+	 * behind the first does not change what is asked, but it does change which calls are waiting,
+	 * and a surface tracking a call needs that: a younger dialog's call can be answered without the
+	 * oldest dialog's words ever changing. The first settling behind a second republishes too, so
+	 * no surface keeps reporting a dialog that is gone, a classification that belongs to one, or a
+	 * call whose own wait has ended.
 	 *
-	 * Delivery is one frame at a time. A listener that opens a dialog while handling a frame would
-	 * otherwise have the newer snapshot delivered inside the older one, leaving every listener
-	 * after it reading a list that omits a call still open — which says that call was answered.
-	 * Such a publication is recomputed and delivered after the frame in flight.
+	 * Delivery is one frame at a time, starts and ends alike. A listener that opens or answers a
+	 * dialog, or begins disposal, while handling a frame would otherwise have the newer frame
+	 * delivered inside the older one: every listener after it would read the older frame last — a
+	 * call still open reported answered, or a start after its own end, leaving a disposed session
+	 * reported blocked for good. Such a change is recomputed and delivered after the frame in
+	 * flight, against the dialogs open then.
 	 */
-	#publishOpenUserWait(): void {
+	#publishUserWait(): void {
 		if (this.#publishingUserWait) {
 			this.#userWaitPublishPending = true;
 			return;
 		}
+		for (;;) {
+			this.#userWaitPublishPending = false;
+			const frame = this.#userWaitFrameToPublish();
+			if (frame === null) return;
+			this.#openUserWait = frame.type === "user_wait_start" ? frame : undefined;
+			this.#publishingUserWait = true;
+			try {
+				this.#emit(frame);
+			} finally {
+				this.#publishingUserWait = false;
+			}
+			if (!this.#userWaitPublishPending) return;
+		}
+	}
+
+	/** The frame that brings listeners in line with the open dialogs, or null when they already are. */
+	#userWaitFrameToPublish(): AgentSessionEvent | null {
+		const published = this.#openUserWait;
 		const frame = this.#openUserWaits.values().next().value;
-		if (frame === undefined) return;
+		if (frame === undefined) return published === undefined ? null : { type: "user_wait_end" };
 		// A dialog whose claiming run has ended keeps standing, but stops naming its call: the id
 		// is free for another run, and saying this dialog is that run's would hand one run's answer
 		// to another.
 		const toolCalls = [...this.#openUserWaits.values()]
 			.map(open => (open.execution?.finished ? undefined : open.toolCallId))
 			.filter((id): id is string => id !== undefined);
-		const published = this.#openUserWait;
 		const samePrompt = frame.prompt === published?.prompt && frame.kind === published?.kind;
 		const sameCalls =
 			toolCalls.length === (published?.toolCalls?.length ?? 0) &&
 			toolCalls.every((id, index) => id === published?.toolCalls?.[index]);
-		if (published !== undefined && samePrompt && sameCalls) return;
-		this.#openUserWait = {
+		if (published !== undefined && samePrompt && sameCalls) return null;
+		return {
 			type: "user_wait_start",
 			prompt: frame.prompt,
 			...(frame.kind ? { kind: frame.kind } : {}),
 			...(toolCalls.length > 0 ? { toolCalls } : {}),
 		};
-		this.#publishingUserWait = true;
-		try {
-			this.#emit(this.#openUserWait);
-		} finally {
-			this.#publishingUserWait = false;
-		}
-		if (this.#userWaitPublishPending) {
-			this.#userWaitPublishPending = false;
-			this.#publishOpenUserWait();
-		}
 	}
 
 	/**
@@ -3231,6 +3233,24 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Registers teardown to run when this session is disposed (e.g. handle listeners bound to it). */
 	addDisposer(dispose: () => void): void {
 		this.#disposers.push(dispose);
+	}
+
+	/**
+	 * Run every registered disposer once. One that throws is logged and the rest still run, as does
+	 * the teardown after them: disposal is called from wrappers that must finish their own cleanup,
+	 * and a session left half torn down (a usage preflight still live, writes not flushed) is worse
+	 * than a cleanup error nobody can act on at that point.
+	 */
+	#runDisposers(): void {
+		for (const dispose of this.#disposers.splice(0)) {
+			try {
+				dispose();
+			} catch (error) {
+				logger.warn("AgentSession disposer threw", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
 	}
 
 	/**
@@ -6692,31 +6712,26 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// surface reconciling what it parked would restore an approval nobody can
 		// answer. Ids this session never ran stay unmarked, disposed or not.
 		this.#settledEverything = true;
-		// A dialog has no disposal signal and may never settle: end its wait now, so no surface
-		// keeps reporting a person owed an answer by a session that is gone. Its own `finally`
-		// then finds nothing to close.
-		if (this.#openUserWaits.size > 0) {
-			this.#openUserWaits.clear();
-			this.#openUserWait = undefined;
-			this.#userWaitPublishPending = false;
-			this.#emit({ type: "user_wait_end" });
-		}
-		for (const dispose of this.#disposers.splice(0)) dispose();
-		this.#modelDiscoveryAbortController.abort();
-		this.#queuedMessageDrainBlocked = false;
+		// Cancel any in-flight usage/reserve preflight the moment disposal begins, before any
+		// callback runs: a preflight awaiting a reserve confirmation or a health probe would
+		// otherwise resume during the async teardown gap (sdk.ts wraps dispose() around a
+		// session_shutdown await) and dispatch a request or commit a model fallback after the
+		// session is gone; its continuations all bail on the aborted controller signal.
 		this.#usagePreflightReadyForNextModelCall = false;
-		// Cancel any in-flight usage/reserve preflight the moment disposal begins.
-		// A preflight awaiting a reserve confirmation or a health probe would
-		// otherwise resume during the async teardown gap (sdk.ts wraps dispose()
-		// around a session_shutdown await) and dispatch a request or commit a
-		// model fallback after the session is gone; its continuations all bail on
-		// the aborted controller signal.
 		for (const controller of this.#usagePreflightAbortControllers) controller.abort();
 		this.#usagePreflightAbortControllers.clear();
 		this.#detachUsageBeforeQueueDequeue?.();
 		this.#detachUsageBeforeQueueDequeue = undefined;
 		this.#detachUsageBeforeModelCall?.();
 		this.#detachUsageBeforeModelCall = undefined;
+		// A dialog has no disposal signal and may never settle: end its wait now, so no surface
+		// keeps reporting a person owed an answer by a session that is gone. Its own `finally`
+		// then finds nothing to close. Inside a wait frame's delivery the end follows that frame.
+		this.#openUserWaits.clear();
+		this.#publishUserWait();
+		this.#runDisposers();
+		this.#modelDiscoveryAbortController.abort();
+		this.#queuedMessageDrainBlocked = false;
 		if (this.agent.prepareQueuedMessages === this.#prepareQueuedUserMessages) {
 			this.agent.prepareQueuedMessages = undefined;
 		}
@@ -6958,7 +6973,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		hindsightState?.dispose();
 		this.#disconnectFromAgent();
 		// beginDispose() drained the rest; this catches registrations made during teardown.
-		for (const dispose of this.#disposers.splice(0)) dispose();
+		this.#runDisposers();
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
 		this.#ircWakeHoldListeners.clear();

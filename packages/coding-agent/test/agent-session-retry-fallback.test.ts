@@ -1517,7 +1517,10 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual([]);
 	});
 
-	it("aborts a pending reserve confirmation at disposal so a late yes commits no fallback", async () => {
+	it.each([
+		["", false],
+		[", even when a disposer throws", true],
+	])("aborts a pending reserve confirmation at disposal so a late yes commits no fallback%s", async (_name, failingDisposer) => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled disposal-reserve models");
@@ -1571,7 +1574,24 @@ describe("AgentSession retry fallback", () => {
 
 		const prompt = session.prompt("dispose while confirming").catch(() => {});
 		await confirmationStarted.promise;
-		session.beginDispose();
+		// A disposer that fails (a resource already closed) must not cost disposal the steps after
+		// it: the preflight is still cancelled and the disposers behind it still run.
+		let laterDisposerRan = false;
+		if (failingDisposer) {
+			session.addDisposer(() => {
+				throw new Error("EBADF: bad file descriptor, close");
+			});
+			session.addDisposer(() => {
+				laterDisposerRan = true;
+			});
+		}
+		// A disposer's failure is logged, not thrown: the caller's own teardown must still run.
+		let thrown: unknown;
+		try {
+			session.beginDispose();
+		} catch (error) {
+			thrown = error;
+		}
 		// The operator's "yes" lands after disposal began: it must not switch models.
 		answer.resolve(true);
 		await prompt;
@@ -1579,6 +1599,8 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual([]);
 		expect(fallbackApplied).toEqual([]);
 		expect(session.model?.id).toBe(primaryModel.id);
+		expect(laterDisposerRan).toBe(failingDisposer);
+		expect(thrown).toBeUndefined();
 	});
 
 	it("aborts a pending reserve preflight at dispose so a deadline during shutdown dispatches nothing", async () => {

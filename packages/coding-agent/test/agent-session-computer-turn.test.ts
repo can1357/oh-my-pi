@@ -354,6 +354,99 @@ describe("AgentSession computer display hold per turn", () => {
 		expect(target.activeUserWait()).toBeUndefined();
 	});
 
+	/** Each listener's wait frames in order, as `start:<prompt>[:<calls>]` and `end`. */
+	function recordWaits(target: AgentSession, count: number): { seen: string[][]; stop: () => void } {
+		const seen: string[][] = [];
+		const stops: Array<() => void> = [];
+		for (let index = 0; index < count; index++) {
+			const own: string[] = [];
+			seen.push(own);
+			stops.push(
+				target.subscribe(event => {
+					if (event.type === "user_wait_start") {
+						own.push(`start:${event.prompt}${event.toolCalls ? `:${event.toolCalls.join(",")}` : ""}`);
+					}
+					if (event.type === "user_wait_end") own.push("end");
+				}),
+			);
+		}
+		return { seen, stop: () => stops.forEach(stop => stop()) };
+	}
+
+	it("delivers disposal's end after the start a listener disposed from, to every listener", async () => {
+		// An embedder disposes the session from its `user_wait_start` listener. The end
+		// disposal publishes must reach every listener after that start: delivered inside
+		// the start's own delivery, the listeners after the disposer saw the end and then
+		// the start, and a terminal reported a disposed session blocked for good.
+		const target = createSession([{ content: ["done"] }]);
+		const before = recordWaits(target, 1);
+		const disposer = target.subscribe(event => {
+			if (event.type === "user_wait_start") target.beginDispose();
+		});
+		const after = recordWaits(target, 1);
+
+		const answer = Promise.withResolvers<void>();
+		const wait = target.waitForUser(() => answer.promise, "Sign in to a provider", { kind: "permission" });
+		expect(before.seen).toEqual([["start:Sign in to a provider", "end"]]);
+		expect(after.seen).toEqual([["start:Sign in to a provider", "end"]]);
+		expect(target.activeUserWait()).toBeUndefined();
+
+		// The dialog settling afterwards publishes nothing more.
+		answer.resolve();
+		await wait;
+		disposer();
+		before.stop();
+		after.stop();
+		expect(after.seen).toEqual([["start:Sign in to a provider", "end"]]);
+	});
+
+	it("keeps every listener's frames in order when a listener opens a dialog and then disposes", async () => {
+		// Two waits: the first start's listener opens a second dialog for a call, which
+		// republishes the wait with that call, and disposes from inside that second start.
+		// Every listener sees both starts in the order they were made, then one end.
+		const target = createSession([{ content: ["done"] }]);
+		const before = recordWaits(target, 1);
+		const second = Promise.withResolvers<void>();
+		let secondWait: Promise<void> | undefined;
+		const actor = target.subscribe(event => {
+			if (event.type !== "user_wait_start") return;
+			if (!event.toolCalls) secondWait = target.waitForUser(() => second.promise, "second", { toolCallId: "call-2" });
+			else target.beginDispose();
+		});
+		const after = recordWaits(target, 1);
+
+		const first = Promise.withResolvers<void>();
+		const firstWait = target.waitForUser(() => first.promise, "first");
+		const expected = ["start:first", "start:first:call-2", "end"];
+		expect(before.seen).toEqual([expected]);
+		expect(after.seen).toEqual([expected]);
+		expect(target.activeUserWait()).toBeUndefined();
+
+		first.resolve();
+		second.resolve();
+		await firstWait;
+		await secondWait;
+		actor();
+		before.stop();
+		after.stop();
+		expect(after.seen).toEqual([expected]);
+	});
+
+	it("delivers a dialog's end after its start when a listener answers it from inside the start", async () => {
+		const target = createSession([{ content: ["done"] }]);
+		const answer = Promise.withResolvers<void>();
+		const answerer = target.subscribe(event => {
+			if (event.type === "user_wait_start") answer.resolve();
+		});
+		const after = recordWaits(target, 1);
+
+		await target.waitForUser(() => answer.promise, "answered at once");
+		answerer();
+		after.stop();
+		expect(after.seen).toEqual([["start:answered at once", "end"]]);
+		expect(target.activeUserWait()).toBeUndefined();
+	});
+
 	it("names the call a tool's own dialog belongs to, without the tool naming it", async () => {
 		// A host that opens its own dialog through the plain `waitForUser` — the
 		// existing API, no call named — still says which call owes the answer:
