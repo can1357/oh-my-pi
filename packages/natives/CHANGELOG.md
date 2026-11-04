@@ -18,6 +18,7 @@
 ### Fixed
 
 - Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
+- Fixed external commands getting the null device on Unix for a descriptor the script closed (`cmd 2>&-`, `cmd 5>&-`): the descriptor is now closed in the command, as in Bash, so its writes there fail instead of vanishing; on Windows, which has no closed standard handle, a closed standard stream gets the null device
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
 ### Fixed
 
