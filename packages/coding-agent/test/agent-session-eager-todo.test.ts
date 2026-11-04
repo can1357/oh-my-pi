@@ -368,17 +368,15 @@ describe("AgentSession eager todo enforcement", () => {
 			await recreateSession({ "title.refreshOnReplan": true, "title.icons": "boring" });
 			await session.setSessionName("Implement arity delta rule", "auto");
 			const plan = "Prove the eta rule for primitive ops";
-			const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockImplementation((async (
-				_model: unknown,
-				request: { messages?: Array<{ content?: string }> },
-			) => {
+			const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, request) => {
 				// The title model names what it is shown: the plan when the request carries it.
-				const input = request.messages?.[0]?.content ?? "";
+				const message = request.messages[0];
+				const input = message ? getMessageText(message) : "";
 				const title = input.includes(plan)
 					? "Prove eta rule for primitive ops"
 					: "Fix omp overwriting tmux pane title";
-				return { stopReason: "stop", content: [{ type: "text", text: `<title>${title}</title>` }] };
-			}) as never);
+				return createAssistantMessage(`<title>${title}</title>`);
+			});
 			if (!resultNamesOp) {
 				const execute = TodoTool.prototype.execute;
 				vi.spyOn(TodoTool.prototype, "execute").mockImplementation(async function (this: TodoTool, ...callArgs) {
@@ -410,10 +408,8 @@ describe("AgentSession eager todo enforcement", () => {
 
 			expect(session.sessionManager.getSessionName()).toBe("Prove eta rule for primitive ops");
 			expect(completeSimpleMock).toHaveBeenCalledTimes(1);
-			const request = completeSimpleMock.mock.calls[0]?.[1] as
-				| { messages?: Array<{ content?: string }> }
-				| undefined;
-			expect(request?.messages?.[0]?.content).toMatch(
+			const message = completeSimpleMock.mock.calls[0]?.[1].messages[0];
+			expect(message && getMessageText(message)).toMatch(
 				/<plan>[\s\S]*Prove the eta rule for primitive ops[\s\S]*<\/plan>/,
 			);
 		});
@@ -425,14 +421,11 @@ describe("AgentSession eager todo enforcement", () => {
 		await session.setSessionName("Implement arity delta rule", "auto");
 		const titleRequested = Promise.withResolvers<void>();
 		const titleReply = Promise.withResolvers<void>();
-		vi.spyOn(ai, "completeSimple").mockImplementation((async () => {
+		vi.spyOn(ai, "completeSimple").mockImplementation(async () => {
 			titleRequested.resolve();
 			await titleReply.promise;
-			return {
-				stopReason: "stop",
-				content: [{ type: "text", text: "<title>Prove eta rule for primitive ops</title>" }],
-			};
-		}) as never);
+			return createAssistantMessage("<title>Prove eta rule for primitive ops</title>");
+		});
 		const generateTitle = vi.spyOn(session, "generateTitle");
 		scriptedResponses = [
 			createToolCallAssistantMessage("todo", {
@@ -461,19 +454,17 @@ describe("AgentSession eager todo enforcement", () => {
 		const requests: string[] = [];
 		const firstRequested = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
-		vi.spyOn(ai, "completeSimple").mockImplementation((async (
-			_model: unknown,
-			request: { messages?: Array<{ content?: string }> },
-		) => {
-			const input = request.messages?.[0]?.content ?? "";
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, request) => {
+			const message = request.messages[0];
+			const input = message ? getMessageText(message) : "";
 			requests.push(input);
 			if (requests.length === 1) {
 				firstRequested.resolve();
 				await release.promise;
 			}
 			const title = Object.entries(titles).find(([plan]) => input.includes(plan))?.[1] ?? fallback;
-			return { stopReason: "stop", content: [{ type: "text", text: `<title>${title}</title>` }] };
-		}) as never);
+			return createAssistantMessage(`<title>${title}</title>`);
+		});
 		return { requests, firstRequested: firstRequested.promise, release: () => release.resolve() };
 	}
 
