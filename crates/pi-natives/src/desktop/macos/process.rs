@@ -485,21 +485,24 @@ const SOCKINFO_TCP: i32 = 2;
 /// socket: a browser's network service runs in a direct child of it.
 const MAX_APP_ANCESTORS: usize = 4;
 
-/// `struct socket_fdinfo` from `<sys/proc_info.h>`, naming the fields read
-/// here: the socket's family and kind, and the foreign and local ports a TCP
-/// socket's `tcp_sockinfo` begins with, in network byte order.
+/// `struct socket_fdinfo` from `<sys/proc_info.h>`, naming the TCP socket
+/// fields read here. Ports and address bytes are in network byte order.
 #[repr(C)]
 struct SocketFdInfo {
 	/// `struct proc_fileinfo`, then `struct socket_info` up to `soi_family`.
-	_head:        [u8; 184],
-	family:       i32,
+	_head:           [u8; 184],
+	family:          i32,
 	/// `soi_options` through `soi_snd`.
-	_middle:      [u8; 68],
-	kind:         i32,
-	_rfu:         u32,
-	foreign_port: i32,
-	local_port:   i32,
-	_tail:        [u8; 520],
+	_middle:         [u8; 68],
+	kind:            i32,
+	_rfu:            u32,
+	foreign_port:    i32,
+	local_port:      i32,
+	/// `insi_gencnt` through `rfu_1`.
+	_address_head:   [u8; 24],
+	foreign_address: [u8; 16],
+	local_address:   [u8; 16],
+	_tail:           [u8; 464],
 }
 
 const _: () = assert!(
@@ -508,7 +511,29 @@ const _: () = assert!(
 		&& mem::offset_of!(SocketFdInfo, kind) == 256
 		&& mem::offset_of!(SocketFdInfo, foreign_port) == 264
 		&& mem::offset_of!(SocketFdInfo, local_port) == 268
+		&& mem::offset_of!(SocketFdInfo, foreign_address) == 296
+		&& mem::offset_of!(SocketFdInfo, local_address) == 312
 );
+
+fn matches_loopback_peer(info: &SocketFdInfo, from_port: u16, to_port: u16) -> bool {
+	let port = |raw: i32| u16::try_from(raw).ok().map(u16::from_be);
+	let loopback = |address: [u8; 16]| match info.family {
+		libc::AF_INET => address[12] == 127,
+		libc::AF_INET6 => {
+			let address = std::net::Ipv6Addr::from(address);
+			address.is_loopback()
+				|| address
+					.to_ipv4_mapped()
+					.is_some_and(|address| address.is_loopback())
+		},
+		_ => false,
+	};
+	info.kind == SOCKINFO_TCP
+		&& port(info.local_port) == Some(from_port)
+		&& port(info.foreign_port) == Some(to_port)
+		&& loopback(info.local_address)
+		&& loopback(info.foreign_address)
+}
 
 /// The app at the other end of this process's loopback TCP connection from
 /// `peer_port` to `local_port`: the process holding that end, or its nearest
@@ -573,7 +598,6 @@ fn holds_tcp(pid: libc::pid_t, from_port: u16, to_port: u16) -> bool {
 	};
 	fds.truncate(usize::try_from(written).unwrap_or(0) / entry);
 	let size = libc::c_int::try_from(mem::size_of::<SocketFdInfo>()).unwrap_or(0);
-	let port = |raw: i32| u16::try_from(raw).ok().map(u16::from_be);
 	fds.iter()
 		.filter(|fd| fd.proc_fdtype == libc::PROX_FDTYPE_SOCKET as u32)
 		.any(|fd| {
@@ -590,11 +614,7 @@ fn holds_tcp(pid: libc::pid_t, from_port: u16, to_port: u16) -> bool {
 					size,
 				)
 			};
-			written == size
-				&& info.kind == SOCKINFO_TCP
-				&& matches!(info.family, libc::AF_INET | libc::AF_INET6)
-				&& port(info.local_port) == Some(from_port)
-				&& port(info.foreign_port) == Some(to_port)
+			written == size && matches_loopback_peer(&info, from_port, to_port)
 		})
 }
 
@@ -615,6 +635,30 @@ mod tests {
 
 	use super::*;
 
+	#[test]
+	fn peer_ports_only_match_when_both_socket_addresses_are_loopback() {
+		// SAFETY: An all-zero bit pattern is valid for this plain C struct.
+		let mut info: SocketFdInfo = unsafe { mem::zeroed() };
+		info.kind = SOCKINFO_TCP;
+		info.local_port = i32::from(40000_u16.to_be());
+		info.foreign_port = i32::from(9224_u16.to_be());
+		for (family, local, foreign) in [
+			(libc::AF_INET, "::127.0.0.2", "::127.1.2.3"),
+			(libc::AF_INET6, "::1", "::1"),
+			(libc::AF_INET6, "::ffff:127.0.0.2", "::ffff:127.1.2.3"),
+		] {
+			info.family = family;
+			info.local_address = local.parse::<std::net::Ipv6Addr>().unwrap().octets();
+			info.foreign_address = foreign.parse::<std::net::Ipv6Addr>().unwrap().octets();
+			assert!(matches_loopback_peer(&info, 40000, 9224));
+			let local = info.local_address;
+			info.local_address[12] = 192;
+			assert!(!matches_loopback_peer(&info, 40000, 9224));
+			info.local_address = local;
+			info.foreign_address[12] = 192;
+			assert!(!matches_loopback_peer(&info, 40000, 9224));
+		}
+	}
 	#[test]
 	fn the_process_at_the_other_end_of_a_loopback_connection_is_found_and_this_one_never() {
 		let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

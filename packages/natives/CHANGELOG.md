@@ -26,6 +26,10 @@
 - Built-in `ps -o` accepts Apple's `utime` (alias `putime`) for user CPU time, instead of failing with `unknown output format specifier 'utime'`.
 - Shell spawn benchmarks now report median and p99 latency.
 
+### Added
+
+- Added a `browserPid` argument to `macOSFrontApp()`: for a second after the read and while `keepInFront` holds the app in front, the user's keys macOS sends to that browser go to the read app instead (needs Accessibility), without holding desktop control while the key tap starts; and `macOSLoopbackPeerApp(localPort, peerPort)`, which finds the app holding the other end of a TCP connection to this process only when both endpoints are loopback ([#17894](https://github.com/can1357/oh-my-pi/pull/17894) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Changed
 
 - Built-in `jq` now reports errors as plain text with `line:column` locations.
@@ -65,10 +69,6 @@
 - An unanswered Wayland RemoteDesktop permission dialog now fails input with `Timeout` before the run deadline, sending nothing ([#17932](https://github.com/can1357/oh-my-pi/pull/17932) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 takeover input stopping with `Cancelled` after you typed locally; Escape now stops computer use for the rest of the turn ([#17912](https://github.com/can1357/oh-my-pi/pull/17912) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 background `el.type`/`el.press` raising the window and taking your keyboard; elements without GTK 3 focus now use takeover ([#17921](https://github.com/can1357/oh-my-pi/pull/17921) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Added
-
-- Added a `browserPid` argument to `macOSFrontApp()`: for a second after the read and while `keepInFront` holds the app in front, the user's keys macOS sends to that browser go to the read app instead (needs Accessibility), without holding desktop control while the key tap starts; and `macOSLoopbackPeerApp(localPort, peerPort)`, which finds the app holding the other end of a loopback TCP connection to this process ([#17894](https://github.com/can1357/oh-my-pi/pull/17894) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.16.0] - 2026-11-02
 
