@@ -200,6 +200,27 @@ describe("{ file } config values", () => {
 		});
 	}
 
+	test("a 401 that ends the turn does not run a !command header again for the closing check", async () => {
+		const keyFile = path.join(tempDir, "key");
+		const runs = path.join(tempDir, "runs");
+		fs.writeFileSync(keyFile, "stable-key");
+		fs.writeFileSync(
+			modelsPath,
+			modelsYaml(keyFile).replace(
+				"    models:",
+				`    headers:\n      X-Cmd: ${JSON.stringify(`!printf x >> ${JSON.stringify(runs)}; echo tenant`)}\n    models:`,
+			),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = loadModel(registry);
+		const { outcome, requests } = await turnAfter401(model, registry.resolver(model), () => {});
+		// The bearer does not change, so the request is not sent again: the 401 is the turn's error,
+		// and the header command ran once, for the request that was sent.
+		expect(requests).toBe(1);
+		expect(outcome).not.toBeInstanceOf(AIError.ConfigurationError);
+		expect(fs.readFileSync(runs, "utf8")).toBe("x");
+	});
+
 	test("a key file that vanished on a usage-limit answer with no sibling credential ends the turn with the file error", async () => {
 		const keyFile = path.join(tempDir, "key");
 		fs.writeFileSync(keyFile, "only-key");

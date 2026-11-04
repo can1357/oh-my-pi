@@ -1751,8 +1751,16 @@ export interface Model<TApi extends Api = Api> {
 	 * Materialize config-backed headers immediately before a request. Catalog
 	 * inspection never invokes this hook; transports receive a cloned model
 	 * whose `headers` is a plain resolved record and whose hook is removed.
+	 *
+	 * With `configurationCheck`, the call only re-checks the configuration of a
+	 * request that is not sent again: it reads the values whose read can fail
+	 * as a configuration error (`{ file }` values) and starts no `!command`
+	 * process; the caller discards the result.
 	 */
-	resolveHeaders?: (signal?: AbortSignal) => Promise<Record<string, string> | undefined>;
+	resolveHeaders?: (
+		signal?: AbortSignal,
+		options?: { configurationCheck?: boolean },
+	) => Promise<Record<string, string> | undefined>;
 	/**
 	 * Streaming transport override. When `"pi-native"`, `streamSimple` routes
 	 * the request to the model's `baseUrl` via the auth-gateway's

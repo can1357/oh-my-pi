@@ -1213,7 +1213,9 @@ function forwardBedrockUserAgent(
  * when `apiKeyResolver` is given, its key through the resolver's plain step (no
  * refresh, no rotation). Returns the first `ConfigurationError` either raises
  * (an unreadable `{ file }` key or header); other failures and the resolved
- * values are not this check's concern.
+ * values are not this check's concern. The headers are read as a
+ * `configurationCheck`, so no `!command` header (whose cache a 401 may have
+ * just cleared) starts a process for a request that is not sent again.
  */
 async function requestConfigurationError(
 	model: Model<Api>,
@@ -1223,7 +1225,7 @@ async function requestConfigurationError(
 	const checks: Array<() => unknown> = [];
 	if (apiKeyResolver) checks.push(() => apiKeyResolver({ lastChance: false, error: undefined, signal }));
 	const resolveHeaders = model.resolveHeaders;
-	if (resolveHeaders) checks.push(() => resolveHeaders(signal));
+	if (resolveHeaders) checks.push(() => resolveHeaders(signal, { configurationCheck: true }));
 	for (const check of checks) {
 		if (signal?.aborted) return undefined;
 		try {
