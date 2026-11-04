@@ -3210,13 +3210,20 @@ async function relayWakeTurnOutput(args: {
 	abortReason: string | undefined;
 	/** A {@link finalizeRunResult} throw, so the waiter is notified instead of stranded. */
 	finalizeError: unknown;
-	/** Waker already receiving this turn's outcome as an async job or message-result delivery. */
+	/**
+	 * Recipient the async job manager already hands this turn's outcome to: the
+	 * registered wake job's owner, or the owner of a message result published as
+	 * a completed job when registration was refused. It is the single
+	 * already-delivered gate — a relay on top of it is one report delivered
+	 * twice, however the recipient entered {@link wakeSources}.
+	 */
 	jobOwnerId: string | undefined;
 	/**
 	 * Parent whose steer entered this turn, making it the turn's owner. Its
 	 * request was consumed and answered here, so it is a recipient like any
 	 * waker — including when a peer started the turn, which leaves the parent
-	 * out of the wake records entirely.
+	 * out of the wake records entirely. {@link jobOwnerId} still decides whether
+	 * it is relayed to.
 	 */
 	joinedOwnerId: string | undefined;
 	/**
@@ -3661,13 +3668,18 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						aborted,
 						abortReason,
 						finalizeError,
-						jobOwnerId: wakeJob?.ownerId,
+						// The job manager already carries the outcome to the owner
+						// when the wake job registered, and equally when registration
+						// was refused at capacity and the message result went out as
+						// a completed job instead. Both leave the owner out of the
+						// relay, whether it woke the turn or only steered into it.
+						jobOwnerId: wakeJob?.ownerId ?? (messageResultPublished ? ownerId : undefined),
 						// A parent that steered a turn a peer started owns the turn
-						// but woke nothing, so no wake record names it. Unless a job
-						// or the message-result delivery above already carries the
-						// outcome, the relay is its only answer — and a marked wake
-						// hands it the finalized summary, warning included.
-						joinedOwnerId: ownerPrompted && !messageResultPublished ? ownerId : undefined,
+						// but woke nothing, so no wake record names it; the relay is
+						// its only answer unless the gate above already delivered —
+						// and a marked wake hands it the finalized summary, warning
+						// included.
+						joinedOwnerId: ownerPrompted ? ownerId : undefined,
 						markedWakeOwnerId: markedWake ? ownerId : undefined,
 					});
 				} catch (relayError) {

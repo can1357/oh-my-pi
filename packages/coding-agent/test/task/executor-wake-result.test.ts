@@ -3,12 +3,16 @@
  * or its steer entered a turn a peer started) when the structured agent ends
  * the turn without `yield`: the missing-yield mark and warning on prose,
  * unchanged status, the settled background row's mark, the relay body for
- * failures, and the owner relay when no wake job can carry the outcome.
+ * failures, and the owner relay when no wake job can carry the outcome. Also
+ * the count a parent sees in every case: exactly one copy of the report,
+ * whether a wake job, a published message result, or the relay carries it.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetRegisteredArtifactDirsForTests } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -19,6 +23,7 @@ import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { ensureTheme, getThemeByName, type Theme } from "@oh-my-pi/pi-tui/theme";
 import { renderResult, taskToolRenderer } from "@oh-my-pi/pi-tui/tools/task";
 import type { AgentProgress, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { createHarness } from "../helpers/subagent-session-harness";
 
 const AGENT_ID = "woken-agent";
@@ -546,5 +551,151 @@ describe("parent-owned wake results", () => {
 		);
 		// The peer that woke the agent keeps the conversational answer.
 		expect((await toPeer)?.body).toBe("Everything verified; writing the report now.");
+	});
+	it.each([
+		// The owner's own message starts the turn, so a wake record names it.
+		["woke the turn itself", "Parent"],
+		// A peer starts the turn and the owner's steer joins it, so no wake
+		// record names the owner at all.
+		["joined a turn a peer started", "OtherAgent"],
+	] as const)(
+		"hands an unstructured wake's report to a parent that %s exactly once while every job slot is taken",
+		async (_label, waker) => {
+			const tempDir = TempDir.createSync("@omp-wake-dedup-");
+			const artifactsDir = tempDir.path();
+			const manager = new AsyncJobManager({ maxRunningJobs: 1 });
+			const blocker = Promise.withResolvers<string>();
+			manager.register("bash", "busy", () => blocker.promise, { ownerId: "Other" });
+			expect(manager.atCapacity).toBe(true);
+			const delivered: string[] = [];
+			manager.registerDeliverySink("Parent", (_jobId, text) => {
+				delivered.push(text);
+			});
+			const harness = createHarness({ asyncJobManager: manager });
+			harness.session.sessionManager.getArtifactsDir = () => artifactsDir;
+			const registry = AgentRegistry.global();
+			registry.register({
+				id: "Parent",
+				displayName: "Parent",
+				kind: "main",
+				session: createHarness().session,
+				status: "running",
+			});
+			registry.register({
+				id: "OtherAgent",
+				displayName: "OtherAgent",
+				kind: "sub",
+				session: createHarness().session,
+				status: "running",
+			});
+			registry.register({
+				id: AGENT_ID,
+				displayName: AGENT_ID,
+				kind: "sub",
+				parentId: "Parent",
+				session: harness.session,
+				status: "idle",
+			});
+			attachIrcWakeTurnMonitor(harness.session, {
+				id: AGENT_ID,
+				agent: baseAgent,
+				structured: false,
+				artifactsDir,
+			});
+			const observer = harness.wakeObserver();
+			if (!observer) throw new Error("wake-turn observer was not registered");
+			const sent = vi.spyOn(IrcBus.global(), "send");
+
+			try {
+				const finish = observer([
+					{
+						role: "custom",
+						customType: "irc:incoming",
+						content: "finish the report",
+						display: false,
+						details: { id: "msg-dedup", from: waker, message: "finish the report" },
+						attribution: "agent",
+						timestamp: Date.now(),
+					} as unknown as AgentMessage,
+				]);
+				// The parent's queued request enters the turn, so the turn answers
+				// it — but no wake job could be registered to carry that answer.
+				harness.emitParentSteer("finish the report");
+				harness.emitAssistantText("final prose report");
+				await finish?.(undefined);
+				expect(manager.atCapacity).toBe(true);
+				await manager.drainDeliveries({ timeoutMs: 1000 });
+
+				// The published job is the parent's single copy; relaying the same
+				// report on top of it would deliver the turn's answer twice.
+				expect(delivered).toHaveLength(1);
+				expect(delivered[0]).toContain("final prose report");
+				const toParent = sent.mock.calls.filter(([message]) => message.to === "Parent");
+				expect(toParent).toHaveLength(0);
+				// The peer that started the turn is not the job's owner, so it
+				// still gets its answer through the relay.
+				const toPeer = sent.mock.calls.filter(([message]) => message.to === "OtherAgent");
+				expect(toPeer).toHaveLength(waker === "OtherAgent" ? 1 : 0);
+				if (waker === "OtherAgent") expect(toPeer[0]?.[0].body).toBe("final prose report");
+				expect(await Bun.file(path.join(artifactsDir, `${AGENT_ID}.md`)).text()).toContain("final prose report");
+			} finally {
+				blocker.resolve("finished");
+				resetRegisteredArtifactDirsForTests();
+				await manager.waitForAll();
+				await manager.dispose({ timeoutMs: 1000 });
+				tempDir.removeSync();
+			}
+		},
+	);
+	it("relays an unstructured wake's report to a parent no job can deliver to", async () => {
+		const tempDir = TempDir.createSync("@omp-wake-relay-only-");
+		const artifactsDir = tempDir.path();
+		const harness = createHarness();
+		harness.session.sessionManager.getArtifactsDir = () => artifactsDir;
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "Parent",
+			displayName: "Parent",
+			kind: "main",
+			session: createHarness().session,
+			status: "running",
+		});
+		registry.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Parent",
+			session: harness.session,
+			status: "idle",
+		});
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent, structured: false, artifactsDir });
+		const observer = harness.wakeObserver();
+		if (!observer) throw new Error("wake-turn observer was not registered");
+		const sent = vi.spyOn(IrcBus.global(), "send");
+
+		try {
+			const finish = observer([
+				{
+					role: "custom",
+					customType: "irc:incoming",
+					content: "finish the report",
+					display: false,
+					details: { id: "msg-relay-only", from: "Parent", message: "finish the report" },
+					attribution: "agent",
+					timestamp: Date.now(),
+				} as unknown as AgentMessage,
+			]);
+			harness.emitParentSteer("finish the report");
+			harness.emitAssistantText("final prose report");
+			await finish?.(undefined);
+
+			// Nothing published this result, so the relay is the parent's only copy.
+			const toParent = sent.mock.calls.filter(([message]) => message.to === "Parent");
+			expect(toParent).toHaveLength(1);
+			expect(toParent[0]?.[0].body).toContain("final prose report");
+		} finally {
+			resetRegisteredArtifactDirsForTests();
+			tempDir.removeSync();
+		}
 	});
 });
