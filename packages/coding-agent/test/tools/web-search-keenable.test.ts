@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getSearchProvider } from "@oh-my-pi/pi-coding-agent/web/search/provider";
@@ -198,20 +198,40 @@ describe("Keenable web search provider", () => {
 		expect(captured[0].body).toEqual({ query: "docs.rs", max_results: 10, site: "docs.rs" });
 	});
 
-	it("rotates keyed credentials through withAuth on 401", async () => {
+	it("retries with a rotated credential after the first key is rejected", async () => {
+		const resolvedKeys = ["stale-keenable-key", "rotated-keenable-key"] as const;
+		let resolutionCount = 0;
+		const authStorage = createInMemoryAuthStorage();
+		const resolverSpy = vi.spyOn(authStorage.keys, "resolver").mockImplementation(provider => {
+			expect(provider).toBe("keenable");
+			return async () => resolvedKeys[resolutionCount++];
+		});
 		const captured: Captured[] = [];
-		let calls = 0;
 		const fetchImpl: FetchImpl = async (input, init) => {
-			calls++;
 			captured.push({ url: String(input), headers: new Headers(init?.headers), body: {} });
-			return new Response(JSON.stringify(calls === 1 ? { detail: "bad key" } : RESULTS), {
-				status: calls === 1 ? 401 : 200,
-				headers: { "Content-Type": "application/json" },
-			});
+			if (captured.length === 1) {
+				return new Response(JSON.stringify({ detail: "bad key" }), { status: 401 });
+			}
+			if (captured.length === 2) {
+				return new Response(JSON.stringify(RESULTS), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error("unexpected Keenable request");
 		};
-		const result = searchKeenable({ ...makeParams("bun", keyedStorage), fetch: fetchImpl });
-		// Either a retry succeeds or the auth error surfaces; it must never fall back to the public endpoint.
-		await result.catch(() => undefined);
-		expect(captured.every(c => c.url === "https://api.keenable.ai/v1/search")).toBe(true);
+
+		try {
+			const result = await searchKeenable({ ...makeParams("bun", authStorage), fetch: fetchImpl });
+
+			expect(captured.map(c => c.headers.get("X-API-Key"))).toEqual(["stale-keenable-key", "rotated-keenable-key"]);
+			expect(captured.every(c => c.url === "https://api.keenable.ai/v1/search")).toBe(true);
+			expect(resolutionCount).toBe(2);
+			expect(result.authMode).toBe("api_key");
+			expect(result.sources.length).toBeGreaterThan(0);
+		} finally {
+			resolverSpy.mockRestore();
+			authStorage.close();
+		}
 	});
 });
