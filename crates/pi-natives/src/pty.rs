@@ -320,6 +320,32 @@ impl PtySession {
 	}
 }
 
+/// Under test, the terminal setup step to fail, to prove no setup step can
+/// fail once the child exists.
+#[cfg(test)]
+thread_local! {
+	static FAIL_SETUP_STEP: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
+}
+
+/// Fails terminal setup step `$step` when a test asks for it. It compiles to
+/// nothing outside the tests.
+#[cfg(test)]
+macro_rules! setup_fault {
+	($step:expr) => {
+		if FAIL_SETUP_STEP.with(std::cell::Cell::get) == Some($step) {
+			return Err(Error::from_reason(format!(
+				"injected terminal setup failure at step {}",
+				$step
+			)));
+		}
+	};
+}
+
+#[cfg(not(test))]
+macro_rules! setup_fault {
+	($step:expr) => {};
+}
+
 fn run_pty_sync(
 	config: PtyRunConfig,
 	on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
@@ -412,12 +438,14 @@ fn run_pty_sync(
 	// failure here leaves no process behind, where after the spawn it would
 	// drop the master without a kill or a wait and leave a zombie.
 	let PtyPair { master, slave } = pair;
+	setup_fault!(1);
 	let mut writer = master
 		.take_writer()
 		.map_err(|err| Error::from_reason(format!("Failed to create PTY writer: {err}")))?;
 	// On Unix the reader waits for output with `poll` and only then reads it,
 	// so a read is always short and the drain can tell it apart from a wait
 	// (see `read_terminal`).
+	setup_fault!(2);
 	#[cfg(unix)]
 	let reader = master
 		.as_raw_fd()
@@ -439,6 +467,7 @@ fn run_pty_sync(
 	// master itself is dropped (see the drain). A host out of descriptors
 	// fails the run here rather than leave the drain a count of zero for a
 	// terminal that still holds output.
+	setup_fault!(3);
 	#[cfg(unix)]
 	let unread_probe = reader
 		.try_clone()
@@ -1628,6 +1657,73 @@ mod zombie_repro_tests {
 		thread::sleep(Duration::from_millis(200));
 		let leaked = zombie_child_pids().difference(&before).count();
 		StormOutcome { leaked, spawned }
+	}
+
+	/// Children of this process named `sleep`, in any state.
+	fn sleep_children() -> HashSet<u32> {
+		let my_pid = std::process::id();
+		let mut pids = HashSet::new();
+		let Ok(entries) = std::fs::read_dir("/proc") else {
+			return pids;
+		};
+		for entry in entries.flatten() {
+			let Some(pid) = entry
+				.file_name()
+				.to_str()
+				.and_then(|name| name.parse::<u32>().ok())
+			else {
+				continue;
+			};
+			let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+				continue;
+			};
+			let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
+				continue;
+			};
+			let ppid = stat[close + 1..].split_whitespace().nth(1);
+			if stat.get(open + 1..close) == Some(STORM_CHILD_COMM)
+				&& ppid.and_then(|ppid| ppid.parse::<u32>().ok()) == Some(my_pid)
+			{
+				pids.insert(pid);
+			}
+		}
+		pids
+	}
+
+	/// Every terminal setup step that can fail (the writer, the reader, the
+	/// unread-count handle) must fail before the child exists. They ran after
+	/// the spawn, so a failure dropped the master with no kill and no wait:
+	/// the child died of the hangup and stayed a zombie of this process.
+	#[test]
+	fn a_failed_terminal_setup_step_leaves_no_child() {
+		let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+		let _runtime = runtime.enter();
+		let before = sleep_children();
+		for step in 1..=3 {
+			super::FAIL_SETUP_STEP.with(|fail| fail.set(Some(step)));
+			let (tx, rx) = flume::unbounded();
+			let config = PtyRunConfig {
+				command: PtyCommand::Argv {
+					application: STORM_CHILD_COMM.to_string(),
+					args:        vec!["30".to_string()],
+				},
+				cwd:     None,
+				env:     None,
+				cols:    80,
+				rows:    24,
+			};
+			let result =
+				run_pty_sync(config, None, None, tx, rx, task::CancelToken::new(Some(30_000), None));
+			super::FAIL_SETUP_STEP.with(|fail| fail.set(None));
+			let error = result
+				.err()
+				.unwrap_or_else(|| panic!("step {step}: the injected failure must fail the run"));
+			assert!(error.reason.contains("injected"), "step {step}: {}", error.reason);
+		}
+		// Let a hangup that killed a child land.
+		thread::sleep(Duration::from_millis(500));
+		let left: Vec<u32> = sleep_children().difference(&before).copied().collect();
+		assert!(left.is_empty(), "failed setup left children behind: {left:?}");
 	}
 
 	#[test]
