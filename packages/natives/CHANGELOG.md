@@ -7,7 +7,7 @@
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections
 
 ### Fixed
-- Fixed Windows `rsync` treating a one-letter daemon host such as `h::module` as a local drive path.
+- Fixed Windows `rsync` treating a one-letter daemon host such as `h::module` as a local drive path ([#18048](https://github.com/can1357/oh-my-pi/pull/18048) by [@jchanghong023](https://github.com/jchanghong023)).
 
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
 ### Fixed
