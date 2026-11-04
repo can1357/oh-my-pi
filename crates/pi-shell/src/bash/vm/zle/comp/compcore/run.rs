@@ -9,6 +9,19 @@
 
 use bstr::BString;
 
+use super::{
+	super::{
+		Comp, K, compctl, complete, complist,
+		compresult::{
+			do_allmatches, do_ambig_menu, do_ambiguous, do_menucmp, do_single, invalidate_list,
+			suffix::fixsuffix,
+		},
+		qt, tricky,
+		types::{Aminfo, Chdata, fc},
+		with_ex,
+	},
+	begcmgroup, check_param, endcmgroup, freematches, multiquote, permmatches,
+};
 use crate::bash::{
 	syntax::zsh::tok::untokenize,
 	vm::{
@@ -19,19 +32,6 @@ use crate::bash::{
 		},
 	},
 	zshopt::ZshOpt,
-};
-
-use super::{
-	super::{
-		Comp, K, compctl, complete, complist,
-		compresult::{
-			do_allmatches, do_ambig_menu, do_ambiguous, do_menucmp, do_single, invalidate_list, suffix::fixsuffix,
-		},
-		qt, tricky,
-		types::{Aminfo, Chdata, fc},
-		with_ex,
-	},
-	begcmgroup, check_param, endcmgroup, freematches, multiquote, permmatches,
 };
 
 /// zsh `strstr(s, w) != NULL`.

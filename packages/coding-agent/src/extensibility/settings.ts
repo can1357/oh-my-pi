@@ -74,6 +74,12 @@ export const cfgSkillsIgnoredSkills = register({
 	default: EMPTY_STRING_ARRAY,
 });
 
+export const cfgSkillsManualSkills = register({
+	id: "skills.manualSkills",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+});
+
 export const cfgSkillsIncludeSkills = register({
 	id: "skills.includeSkills",
 	type: "array",
@@ -93,6 +99,7 @@ export const cfgSkills = combine({
 	enableAgentsProject: cfgSkillsEnableAgentsProject,
 	customDirectories: cfgSkillsCustomDirectories,
 	ignoredSkills: cfgSkillsIgnoredSkills,
+	manualSkills: cfgSkillsManualSkills,
 	includeSkills: cfgSkillsIncludeSkills,
 });
 

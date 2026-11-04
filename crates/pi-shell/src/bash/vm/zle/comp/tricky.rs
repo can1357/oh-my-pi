@@ -488,15 +488,17 @@ pub fn completecall(zw: &mut Zw<'_, '_>, base: &[u8], func: &[u8]) -> WResult {
 	let base = base.strip_prefix(b".").unwrap_or(base);
 	// zsh calls the base thingy's widget function: a builtin widget, or
 	// a module's (`menu-select`).
-	let f = widgets::BUILTINS.iter().find(|b| b.name.as_bytes() == base).and_then(|b| b.func).or_else(|| {
-		match zw.zle.widgets.get(base) {
+	let f = widgets::BUILTINS
+		.iter()
+		.find(|b| b.name.as_bytes() == base)
+		.and_then(|b| b.func)
+		.or_else(|| match zw.zle.widgets.get(base) {
 			Some(w) if w.flags & crate::bash::vm::zle::wflags::ISCOMP != 0 => match w.kind {
 				Kind::Native(f) => Some(f),
 				_ => None,
 			},
 			_ => None,
-		}
-	});
+		});
 	let Some(f) = f else {
 		let mut msg = BString::from("zle: no completion widget function for `");
 		msg.extend_from_slice(base);
@@ -683,9 +685,10 @@ pub fn endoflist(zw: &mut Zw<'_, '_>) -> WResult {
 	zw.zle.display.showinglist = 0;
 	zw.zle.display.lastlistlen = 0;
 	if zw.ed.in_widget > 0 {
-		return crate::bash::vm::zle::exec::then(crate::bash::vm::zle::exec::Await::Refresh, |_, _| {
-			WResult::Done(0)
-		});
+		return crate::bash::vm::zle::exec::then(
+			crate::bash::vm::zle::exec::Await::Refresh,
+			|_, _| WResult::Done(0),
+		);
 	}
 	WResult::Done(0)
 }

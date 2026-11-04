@@ -17,12 +17,13 @@ use crate::bash::{
 	syntax::{
 		AliasLookup, Features,
 		zsh::{
-			LexTok, ZleLex, ZleWords, ident_end, skipparens, tokstring,
+			LexTok, ZleLex, ZleWords, ident_end, skipparens,
 			tok::{
 				BNULL, COMMA, DNULL, EQUALS, HAT, INBRACE, INBRACK, INPAR, META, OUTBRACE, OUTBRACK,
 				OUTPAR, POUND, QSTRING, QUEST, SNULL, STAR, STRING, TILDE, at, is_null, is_tok,
 				unmetafy, untokenize,
 			},
+			tokstring,
 		},
 	},
 	vm::{

@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))
+- Added Keenable as a web search engine (`web/keenable`). It uses `KEENABLE_API_KEY` or a stored `keenable` credential when present; an explicit selection without a key uses Keenable's keyless public endpoint ([#17953](https://github.com/can1357/oh-my-pi/pull/17953) by [@KGKallasmaa](https://github.com/KGKallasmaa))
+- Bash commands now visualize execution incrementally in Raw or Python-like Pseudo, with variable values beside their latest setter and bounded replay history for foreground and background jobs; PTY and user-shell runs retain their plain command view.
 - Added opt-in auto-update (`update.auto`, offered by a new setup wizard step): a launch that finds a newer release installs it in the background through whatever installed omp (standalone binary, Homebrew, mise, bun, npm), shows the version and download progress beside the welcome banner's version, and the next launch runs it. Quitting mid-update does not interrupt it. Skipped under Tern, which updates its omp itself, and on Nix and source checkouts
 - `omp update` now refuses to start while another update (including a background auto-update) is installing, instead of running two installers at once
 - Added `none` to `edit.mode` (and `PI_EDIT_VARIANT`): it removes the `edit` tool and keeps `bash` available even when `bash.enabled` is off
@@ -16,10 +19,18 @@
 - `omp zsh` keeps zsh's history: it reads and writes your `$HISTFILE` in zsh's own format and locking (shared with real zsh, `extendedhistory`, `sharehistory`, `incappendhistory` and the other history options), expands `!!`, `!$`, `^old^new` and the rest of zsh's history syntax, runs `zshaddhistory`, and has full `fc`, `history`, `r`, `print -s`, `$history` and `HISTCMD`; `omp bash` gets `history -a -n -r -w -p`, `HISTTIMEFORMAT`, `HISTIGNORE`, `fc` editing and `!` expansion
 - `omp zsh` runs interactively like zsh: zsh's line editor (emacs and vi keymaps, `bindkey`, `zle -N` widgets, `vared`), completion (`compinit`, `compdef`, `menu select`), job control (Ctrl-Z, `fg`, `bg`, `jobs`), prompts with `precmd`/`preexec` hooks, and the zsh modules plugins load (`zsh/zpty`, `zsh/system`, `zsh/terminfo`, `zsh/pcre`, `zsh/datetime`, …), so oh-my-zsh and powerlevel10k configs start
 - RPC `bash` results now say when the output was cut: `elidedBytes`/`elidedLines` for a dropped middle, and `columnTruncatedLines`, `columnTruncatedRange`, `columnDroppedBytes` and `columnMax` for lines cut to the column cap. The Go, Python and Rust SDKs decode them ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
+- Added `pi.getShortcutConflict(chord)`, which tells an extension whether a key chord is free or held by omp, a keybinding (an `app.*` action or an editing key) or another extension ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
+- `unwrapHashlineHeaderPath` is exported from `@oh-my-pi/pi-coding-agent`, turning a `[path#TAG]` write/edit target into its plain path ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
+- The `devin-cli` login imports Devin CLI credentials into a stored `devin` account, so the provider no longer requires `DEVIN_API_KEY` ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+- The `devin-windsurf` login lets Windsurf Enterprise users authenticate the `devin` provider with their existing Windsurf account ([#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 
 ### Fixed
 
 - JSON query truncation notices now report the 50KB read budget instead of the bytes shown ([#18022](https://github.com/can1357/oh-my-pi/pull/18022) by [@eggpeat](https://github.com/eggpeat))
+- Extension links stay clickable and extension-drawn replies and custom messages keep their renderers on every launch, not only the first after an edit; `ctx.ui.getLinkClicksAvailable()` no longer turns false on later launches ([#18116](https://github.com/can1357/oh-my-pi/pull/18116) by [@materemias](https://github.com/materemias))
+- An AST Grep capture spanning several lines shows on one `meta:` row of the result card instead of one row per line, so collapsed results no longer show its later lines and a blank line inside it no longer splits the match from its file ([#18105](https://github.com/can1357/oh-my-pi/pull/18105) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Extension shortcuts on a reserved chord spelled with a different modifier order (e.g. `ctrl+shift+p`) are now ignored like the reserved spelling ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
+- When extensions register one shortcut in different spellings (`alt+ctrl+x` and `ctrl+alt+x`, or `?` and `shift+?`), only the last one loaded is bound, as with identical spellings, instead of the first silently winning
 - `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
 - Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset
 - The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm
@@ -34,6 +45,7 @@
 - Skills listed in the system prompt get their compressed routing hint instead of a cut-off description when the hint runs past 12 words but fits 160 characters; skills an earlier version gave up on are compressed again
 - Uncached skill descriptions no longer send background model requests after the session-tree cost cap is reached, and their completed spend counts toward the cap ([#18016](https://github.com/can1357/oh-my-pi/issues/18016))
 - Added `tui.maxFps` (also `--max-fps` and `PI_MAX_FPS`) to cap how often the TUI repaints; keystroke echo keeps 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- The idle recap no longer disappears when the session is resumed, restarted or its transcript is rebuilt; the latest recap stays at the end until the conversation moves on ([#18113](https://github.com/can1357/oh-my-pi/pull/18113) by [@materemias](https://github.com/materemias))
 
 ### Changed
 
@@ -46,7 +58,6 @@
 
 - A CLI flag, session-only settings write or SDK override now outranks the setting's environment variable, so `PI_MOTION=none omp --motion full` runs with full motion; env vars still outrank every settings file
 - Updated abort error handling for JS and Python tools to propagate original abort reasons
-- Shaped tool results cut by Spotlight end with a short `[cut: artifact://N]` line instead of a sentence explaining the gaps, and cut reads, outlined code and folded docs end with no such line; the system prompt explains the gaps and folds once
 - Subagents now move into worker threads when many run at once, so their model streaming and tool work no longer competes with the TUI: up to 3 concurrent subagents run on the main thread, 4 add a worker, and each doubling (8, 16, 32) adds one more, up to the new `task.workerThreads` (default 4; `0` keeps every subagent on the main thread). Each subagent goes where the fewest are running; a needed worker starts while the model is still streaming the spawning call and exits a minute after its last subagent finishes or parks. IRC, the Agent Hub and focus view, `agent://`/`history://`/`proc://`, parking and revival, async jobs, cost caps, account pools and OAuth refresh, runtime model providers, MCP, memory, telemetry, `PI_PROXY` and logs keep working across the thread boundary. If omp's own files change while it runs (a source checkout or an in-place update), new subagents run on the main thread until omp restarts
 - Interactive startup reaches the first frame ~75ms sooner with skills listed in the system prompt: background skill-description compression now starts after the first frame, and resolves its model once per batch of uncached skills instead of once per skill
 - Startup release notes ("What's New") now appear just after the first interactive frame instead of being resolved before the session starts; a launch quit before that frame keeps them for the next start
@@ -56,12 +67,7 @@
 - Subagent and task prompts no longer tell agents to message or broadcast before editing shared files; subagents message only to get unblocked and wait only on their own jobs
 - Subagents can no longer broadcast: `write agent://all` from a subagent fails and points it at a direct `agent://<id>` message, and subagent prompts no longer advertise `agent://all`. The main agent can still broadcast
 
-### Removed
-
-- Removed the Spotlight experiment's edit gate (`spotlight.experiment.editGate`, `PI_SPOTLIGHT_EDIT_GATE`): reads of code files are cut like any other read instead of half of them being kept whole ("spotlight: kept whole for editing")
-
 ### Fixed
-- Spotlight cuts `grep`, `find` and `glob` results and filtered bash output (`| grep`, `sed -n`, `awk`) past ~3.9k chars like any other result instead of showing them whole up to ~12k, and collapses lines already shown even when the call's intent names them
 - Fixed a second `ask` note on a later single-select question reopening and replacing the previous question's note ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
 
 - Retrying an aborted turn keeps the unsent composer draft instead of clearing it ([#17977](https://github.com/can1357/oh-my-pi/pull/17977) by [@Shadorain](https://github.com/Shadorain))

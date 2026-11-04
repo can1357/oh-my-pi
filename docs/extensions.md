@@ -116,7 +116,7 @@ export default function (pi: ExtensionAPI) {
 Core methods:
 
 - `on(event, handler)`
-- `registerTool`, `registerCommand`, `registerShortcut`, `registerFlag`
+- `registerTool`, `registerCommand`, `registerShortcut`, `getShortcutConflict`, `registerFlag`
 - `registerMessageRenderer`, `registerAssistantThinkingRenderer`, `registerAssistantTextRenderer`, `registerLinkScheme`
 - `registerComposerShape`
 - `setLabel`, `getFlag`
@@ -137,6 +137,20 @@ labeling action. `getAllTools()` returns tool schemas and source metadata, while
 `getActiveTools()` returns enabled names.
 
 `getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, `priority`, or `ultrafast`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
+
+### Keyboard shortcuts
+
+Register shortcuts in the extension factory; omp binds them before `session_start`, so a later registration applies on the next start.
+
+`getShortcutConflict(chord)` returns `undefined` for a free chord, otherwise the first holder of:
+
+- `{ kind: "reserved" }`: omp keeps the chord (see [Constraints and pitfalls](#constraints-and-pitfalls)); a shortcut on it is never bound.
+- `{ kind: "keybinding", keybindings }`: keymap actions bound to it in the editor (Ctrl+Enter counts for approve and follow-up when their bindings are emptied). `app.*` actions usually take the key first where they apply; editing keys (`tui.editor.*`, `tui.input.*`, e.g. `alt+y` yank-pop) lose it to the shortcut.
+- `{ kind: "extension", extensionPath }`: another extension's shortcut. When several extensions register one chord, in any spelling, only the last one loaded is bound.
+
+Chords compare as the TUI matches them: `alt+ctrl+x` is `ctrl+alt+x`, and `?` also covers `shift+?`. The caller's own registrations don't count. Keybindings come from the session's TUI keymap, user remaps included; sessions without a TUI (print, RPC, ACP, SDK) use omp's defaults.
+
+It throws while extensions are loading, so call it from a handler (a command, `session_start`), e.g. to validate a chord the user picks; the factory then registers it on the next start.
 
 ### Provider registration
 
@@ -1355,6 +1369,7 @@ pi.on("link_activate", ({ url }) => {
 - **Handler.** A `link_activate` handler runs like a command, without the event-handler timeout, so it may await a dialog (`ctx.ui.confirm`, `ctx.ui.select`, …). A handler that throws is reported as an extension error.
 - **Fallback.** `ctx.ui.getLinkClicksAvailable()` is true only while claimed links can be picked: interactive mode, a plain terminal, `extensionRenderers.assistantText` on, and the hint key bound or `tui.mouse` on. A subagent's copy of the extension gets the same answer, since its links are picked on the same screen. Changing the setting, `tui.mouse` while the hint key is unbound, Tern's native view opening or closing, or suspending or resuming an extension (a live `disabledExtensions` edit) re-runs the assistant text renderers, so a renderer can check it on each call and draw content inline instead of behind a link nobody can pick.
 - **Ownership.** Scheme names are case-insensitive and at least two characters long, so no scheme captures a Windows drive path such as `C:/notes.md`. When two extensions claim one scheme, the first loaded gets its clicks; a suspended extension's schemes are released until it resumes. Web, file and mail schemes (`http`, `https`, `file`, `mailto`, …) and omp's internal URL schemes (`local`, `skill`, `agent`, …) are reserved: claiming one throws and fails the extension's load. Only links omp draws itself are picked: a raw terminal hyperlink of a claimed scheme in tool output stays an ordinary hyperlink.
+- **Registration.** Claim schemes in the extension's factory. A scheme claimed later (from `session_start` or another handler) is ignored until `extensionRenderers.assistantText` changes or an extension is suspended or resumed.
 - **Tern.** Tern's native view draws such links as its own links and does not route their clicks back to omp; handle them there with a Tern plugin.
 
 ### Link browser
@@ -1379,7 +1394,7 @@ Provide `renderCall` / `renderResult` on `registerTool` definitions for custom t
 - `tool_call` errors and timeouts block execution (fail-closed). Its budget is `extensionHandlers.toolCallTimeoutMs` (default 30,000 ms), paused during extension UI waits.
 - Most dispatched handlers have a 30-second budget; `session_shutdown` handlers run concurrently with a 2-second budget. Timing out stops waiting and cancels handler UI, but cannot undo arbitrary extension side effects.
 - Command name conflicts with built-ins are skipped with diagnostics.
-- Reserved shortcuts are ignored (`ctrl+c`, `ctrl+d`, `ctrl+z`, `ctrl+k`, `ctrl+p`, `ctrl+l`, `ctrl+o`, `ctrl+t`, `ctrl+g`, `ctrl+q`, `alt+m`, `shift+tab`, `shift+ctrl+p`, `alt+enter`, `escape`, `enter`).
+- Reserved shortcuts are ignored (`ctrl+c`, `ctrl+d`, `ctrl+z`, `ctrl+k`, `ctrl+p`, `ctrl+l`, `ctrl+o`, `ctrl+t`, `ctrl+g`, `ctrl+q`, `alt+m`, `shift+tab`, `shift+ctrl+p`, `alt+enter`, `escape`, `enter`); `getShortcutConflict` reports them as `reserved`.
 - Treat `ctx.reload()` as terminal for the current command handler frame.
 - Module globals are shared by parent/child bindings. Keep session-specific state in the factory closure or persisted session entries.
 

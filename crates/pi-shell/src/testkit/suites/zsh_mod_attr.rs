@@ -21,7 +21,8 @@ fn zsh(src: &str) -> (String, String, i32) {
 #[test]
 fn zsh_mod_attr_checks_arguments() {
 	let (out, err, _) = zsh(
-		"cd /tmp; zmodload zsh/attr; zgetattr f; echo $?; zsetattr f a; echo $?; zlistattr; echo $?; zgetattr -x f a; echo $?",
+		"cd /tmp; zmodload zsh/attr; zgetattr f; echo $?; zsetattr f a; echo $?; zlistattr; echo \
+		 $?; zgetattr -x f a; echo $?",
 	);
 	assert_eq!(out, "1\n1\n1\n1\n");
 	assert_eq!(
@@ -37,7 +38,8 @@ zsh:zgetattr:1: bad option: -x
 #[test]
 fn zsh_mod_attr_refused_without_extended_attributes() {
 	let (out, err, _) = zsh(
-		"cd /tmp; zmodload zsh/attr; print > f; zsetattr f user.k v; echo $?; zgetattr f user.k; echo $?; zdelattr f user.k; echo $?; zlistattr f; echo $?",
+		"cd /tmp; zmodload zsh/attr; print > f; zsetattr f user.k v; echo $?; zgetattr f user.k; \
+		 echo $?; zdelattr f user.k; echo $?; zlistattr f; echo $?",
 	);
 	// zsh's `zlistattr` failure status is 2 (`1 + (list_len > val_len)`).
 	assert_eq!(out, "1\n1\n1\n2\n");
