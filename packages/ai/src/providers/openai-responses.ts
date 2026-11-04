@@ -33,7 +33,11 @@ import { createAbortSourceTracker } from "../utils/abort";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
+import { heldFetch } from "../utils/held-fetch";
+import { runWithRequestSendState } from "../request-holds";
 import {
+	armPreResponseTimeout,
+	armRequestTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -242,7 +246,7 @@ function isRetryableOpenAIResponsesStreamFailure(error: unknown): boolean {
 }
 
 const OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS = 5_000;
-/** Wall-clock budget for the whole recovery: a long high-effort turn finishing server-side. */
+/** Recovery budget excluding request-hold waits: a long high-effort turn finishing server-side. */
 const OPENAI_RESPONSES_RESUME_DEADLINE_MS = 120_000;
 /** Backstop on request count, independent of the clock. */
 const OPENAI_RESPONSES_RESUME_MAX_POLLS = 24;
@@ -259,10 +263,10 @@ interface OpenAIResponsesPolledResult {
  * Poll a stored Responses result until it reaches an adoptable terminal state.
  * 404s, 5xx, and transport failures mean "not yet" (an in-flight run only
  * becomes retrievable once the server finishes it); any other status, a
- * mismatched id, or a failed/cancelled run ends the poll immediately. The
- * whole recovery is bounded by one wall-clock deadline: each request's timeout
- * is clamped to the time left, and no sleep may cross the deadline, so a
- * stalled host cannot hold an already-failed turn past it. Returns the
+ * mismatched id, or a failed/cancelled run ends the poll immediately.
+ * The recovery budget excludes request-hold waits. Each request's timeout is
+ * clamped to the time left, and no sleep may cross the remaining budget, so
+ * a stalled host cannot hold an already-failed turn past it. Returns the
  * terminal object, or undefined on give-up/abort.
  *
  * @internal Exported for tests.
@@ -276,57 +280,64 @@ export async function pollOpenAIResponsesResultForCompletion(args: {
 	/** Sleep between polls; defaults to a real wait honoring `signal`. */
 	wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }): Promise<Record<string, unknown> | undefined> {
-	const deadline = Date.now() + OPENAI_RESPONSES_RESUME_DEADLINE_MS;
-	for (let attempt = 0; attempt < OPENAI_RESPONSES_RESUME_MAX_POLLS; attempt++) {
-		if (args.signal?.aborted) return undefined;
-		if (attempt > 0) {
-			if (Date.now() + OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS >= deadline) return undefined;
+	return await runWithRequestSendState(async requestSendState => {
+		const remaining = () => OPENAI_RESPONSES_RESUME_DEADLINE_MS - requestSendState.elapsedMs;
+		for (let attempt = 0; attempt < OPENAI_RESPONSES_RESUME_MAX_POLLS; attempt++) {
+			if (args.signal?.aborted) return undefined;
+			if (attempt > 0) {
+				if (OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS >= remaining()) return undefined;
+				try {
+					await waitForRetry(args.wait, OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS, args.signal);
+				} catch {
+					return undefined;
+				}
+				if (args.signal?.aborted) return undefined;
+			}
+			const remainingMs = remaining();
+			if (remainingMs <= 0) return undefined;
+			const attemptTimeout = armPreResponseTimeout(
+				args.signal,
+				Math.min(OPENAI_RESPONSES_RESUME_POLL_ATTEMPT_TIMEOUT_MS, remainingMs),
+			);
+			let status: number | undefined;
+			let body: OpenAIResponsesPolledResult | undefined;
 			try {
-				await waitForRetry(args.wait, OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS, args.signal);
+				const response = await attemptTimeout.run(() =>
+					heldFetch(args.fetchImpl)(args.url, {
+						headers: args.headers,
+						signal: attemptTimeout.signal,
+					}),
+				);
+				status = response.status;
+				if (status === 200) {
+					const decoded: unknown = await response.json().catch(() => undefined);
+					if (decoded !== null && typeof decoded === "object") {
+						body = decoded as OpenAIResponsesPolledResult;
+					}
+				}
 			} catch {
+				body = undefined;
+			} finally {
+				attemptTimeout.clear();
+			}
+			if (status === 200) {
+				if (body?.id !== args.responseId) return undefined;
+				if (
+					body.status === "completed" ||
+					(body.status === "incomplete" && Array.isArray(body.output) && body.output.length > 0)
+				) {
+					// Validated above (id match, adoptable terminal status): hand the
+					// decoded body to the event synthesizer as untyped wire JSON.
+					const record: Record<string, unknown> = body as unknown as Record<string, unknown>;
+					return record;
+				}
+				if (body.status === "failed" || body.status === "cancelled") return undefined;
+			} else if (status !== undefined && status !== 404 && status < 500) {
 				return undefined;
 			}
-			if (args.signal?.aborted) return undefined;
 		}
-		const remainingMs = deadline - Date.now();
-		if (remainingMs <= 0) return undefined;
-		const attemptTimeout = AbortSignal.timeout(
-			Math.min(OPENAI_RESPONSES_RESUME_POLL_ATTEMPT_TIMEOUT_MS, remainingMs),
-		);
-		let status: number | undefined;
-		let body: OpenAIResponsesPolledResult | undefined;
-		try {
-			const response = await args.fetchImpl(args.url, {
-				headers: args.headers,
-				signal: args.signal ? AbortSignal.any([args.signal, attemptTimeout]) : attemptTimeout,
-			});
-			status = response.status;
-			if (status === 200) {
-				const decoded: unknown = await response.json().catch(() => undefined);
-				if (decoded !== null && typeof decoded === "object") {
-					body = decoded as OpenAIResponsesPolledResult;
-				}
-			}
-		} catch {
-			body = undefined;
-		}
-		if (status === 200) {
-			if (body?.id !== args.responseId) return undefined;
-			if (
-				body.status === "completed" ||
-				(body.status === "incomplete" && Array.isArray(body.output) && body.output.length > 0)
-			) {
-				// Validated above (id match, adoptable terminal status): hand the
-				// decoded body to the event synthesizer as untyped wire JSON.
-				const record: Record<string, unknown> = body as unknown as Record<string, unknown>;
-				return record;
-			}
-			if (body.status === "failed" || body.status === "cancelled") return undefined;
-		} else if (status !== undefined && status !== 404 && status < 500) {
-			return undefined;
-		}
-	}
-	return undefined;
+		return undefined;
+	});
 }
 
 /**
@@ -736,7 +747,7 @@ const streamOpenAIResponsesOnce = (
 	const stream = new AssistantMessageEventStream();
 
 	// Start async processing
-	(async () => {
+	runWithRequestSendState(async requestSendState => {
 		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
 
@@ -961,13 +972,10 @@ const streamOpenAIResponsesOnce = (
 				);
 				activeRequestParams = requestParams;
 				lastSubmittedRequestWasFullReplay = requestParams.previous_response_id === undefined;
-				let requestTimeout: NodeJS.Timeout | undefined;
-				if (!useWebSocket && requestTimeoutMs !== undefined) {
-					requestTimeout = setTimeout(
-						() => abortTracker.abortLocally(firstEventTimeoutAbortError),
-						requestTimeoutMs,
-					);
-				}
+				const requestTimeout = armRequestTimeout(
+					() => abortTracker.abortLocally(firstEventTimeoutAbortError),
+					useWebSocket ? undefined : requestTimeoutMs,
+				);
 				try {
 					if (useWebSocket) {
 						if (requestParams.previous_response_id != null) {
@@ -991,48 +999,44 @@ const streamOpenAIResponsesOnce = (
 					if (requestTimeoutMs !== undefined) {
 						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 					}
-					const { events, response, requestId } = await postOpenAIStream<ResponseStreamEvent>({
-						url: requestUrl,
-						headers: headersWithTimeout,
-						body: requestParams,
-						signal: requestSignal,
-						fetch: wrapFetchForCopilotFallback(
-							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
-							model.provider === "github-copilot",
-							resolveCopilotRequestIdentity(options?.headers),
-							copilotCacheKey,
-							copilotCacheSnapshot,
-						),
-						shouldRetryResponse: (response, bodyText) =>
-							!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
-							lastSubmittedRequestWasFullReplay !== true,
-						// Transient 408/429/5xx get Retry-After-aware transport
-						// retries; the first-event watchdog aborts `requestSignal`,
-						// so retries cannot extend the caller's deadline.
-						onSseEvent: rawSseObserver,
-					});
+					const { events, response, requestId } = await requestTimeout.run(() =>
+						postOpenAIStream<ResponseStreamEvent>({
+							url: requestUrl,
+							headers: headersWithTimeout,
+							body: requestParams,
+							signal: requestSignal,
+							fetch: wrapFetchForCopilotFallback(
+								wrapFetchForRequestCompression(heldFetch(options?.fetch ?? fetch), model),
+								model.provider === "github-copilot",
+								resolveCopilotRequestIdentity(options?.headers),
+								copilotCacheKey,
+								copilotCacheSnapshot,
+							),
+							shouldRetryResponse: (response, bodyText) =>
+								!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
+								lastSubmittedRequestWasFullReplay !== true,
+							// Transient 408/429/5xx get Retry-After-aware transport
+							// retries; the first-event watchdog aborts `requestSignal`,
+							// so retries cannot extend the caller's deadline.
+							onSseEvent: rawSseObserver,
+						}),
+					);
 					// Disarm the first-event watchdog as soon as headers arrive — a slow
 					// onResponse callback must not abort an already-connected stream.
-					clearTimeout(requestTimeout);
+					requestTimeout.clear();
 					await notifyProviderResponse(options, response, model, requestId);
 					return events;
 				} finally {
-					clearTimeout(requestTimeout);
+					requestTimeout.clear();
 				}
 			};
-			let webSocketFirstEventDeadline: number | undefined;
 			const timeResponsesStream = (
 				events: AsyncIterable<ResponseStreamEvent>,
 			): AsyncGenerator<ResponseStreamEvent> => {
-				let firstItemTimeoutMs = firstEventTimeoutMs;
-				if (useWebSocket && requestTimeoutMs !== undefined) {
-					webSocketFirstEventDeadline ??= Date.now() + requestTimeoutMs;
-					firstItemTimeoutMs = webSocketFirstEventDeadline - Date.now();
-					if (firstItemTimeoutMs <= 0) throw abortTracker.abortLocally(firstEventTimeoutAbortError);
-				}
 				return iterateWithIdleTimeout(events, {
 					idleTimeoutMs,
-					firstItemTimeoutMs,
+					firstItemTimeoutMs: firstEventTimeoutMs,
+					requestSendState: useWebSocket ? requestSendState : undefined,
 					firstItemErrorMessage: OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE,
 					errorMessage: "OpenAI responses stream stalled while waiting for the next event",
 					onFirstItemTimeout: () => abortTracker.abortLocally(firstEventTimeoutAbortError),
@@ -1544,7 +1548,7 @@ const streamOpenAIResponsesOnce = (
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 		}
 		stream.end();
-	})();
+	});
 
 	return stream;
 };

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs/promises";
 import http2 from "node:http2";
 import { cursorModelParameters } from "@oh-my-pi/pi-catalog/compat/behavior";
@@ -184,6 +185,7 @@ import {
 import { classifyJsonPrefix } from "@oh-my-pi/pi-utils/json-parse";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
+import { afterRequestHolds, captureRequestHolds } from "../request-holds";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
@@ -199,6 +201,7 @@ import type {
 	CursorTodoSnapshotItem,
 	CursorTodoSyncHandler,
 	CursorToolResultHandler,
+	FetchImpl,
 	ImageContent,
 	Message,
 	Model,
@@ -226,6 +229,7 @@ import {
 } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { armPreResponseTimeout, type PreResponseTimeout } from "../utils/idle-iterator";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { waitForRetry } from "../utils/retry-wait";
@@ -505,6 +509,7 @@ interface CursorRelayResumption {
 	options: CursorOptions;
 	stream: AssistantMessageEventStream;
 	results: ReadonlyMap<string, ToolResultMessage>;
+	owner: CursorRequestOwner;
 }
 
 /**
@@ -795,6 +800,7 @@ interface CursorMessageWriter {
 
 interface CursorRunTransport extends CursorMessageWriter {
 	readonly closed: boolean;
+	drain(): Promise<void>;
 	close(): void;
 	/**
 	 * Stop sending after the server's end frame. HTTP/2 half-closes the request
@@ -810,19 +816,83 @@ interface CursorRunTransport extends CursorMessageWriter {
 	onError(listener: (error: unknown) => void): void;
 }
 
-function wrapHttp2RunTransport(request: http2.ClientHttp2Stream): CursorRunTransport {
+/** The request that currently owns a run, including work resumed in an older continuation. */
+interface CursorRequestOwner {
+	readonly signal: AbortSignal | undefined;
+	send<T>(send: () => T, signal?: AbortSignal, watchdog?: PreResponseTimeout): Promise<Awaited<T>>;
+}
+
+function captureCursorRequestOwner(
+	requestSignal: AbortSignal | undefined,
+	onFailure: (error: unknown) => void,
+): CursorRequestOwner {
+	const holds = captureRequestHolds();
+	// `holds.run` adds to its caller's context. Restore this request's async
+	// context first so a parked run cannot also inherit its retired owner's holds.
+	const inRequest = AsyncLocalStorage.snapshot();
+	return {
+		signal: requestSignal,
+		send(send, signal = requestSignal, watchdog) {
+			let admitted = false;
+			const admit = () =>
+				afterRequestHolds(signal, () => {
+					admitted = true;
+					return send();
+				});
+			return inRequest(() => holds.run(() => (watchdog ? watchdog.run(admit) : admit()))).catch(error => {
+				if (!admitted) onFailure(error);
+				throw error;
+			});
+		},
+	};
+}
+
+/**
+ * Admit every Connect frame in order, under the run's current request owner.
+ * A failed or aborted hold stops the queue. The bodyless half-close follows
+ * earlier frames but is not itself a model request and needs no hold check.
+ */
+function wrapHttp2RunTransport(
+	request: http2.ClientHttp2Stream,
+	getOwner: () => CursorRequestOwner,
+): CursorRunTransport {
+	let tail: Promise<void> = Promise.resolve();
+	let failed = false;
+	let closed = false;
+	let ending = false;
+	const afterQueued = (send: () => void, held = true): void => {
+		tail = tail.then(async () => {
+			if (failed || closed) return;
+			try {
+				if (held) await getOwner().send(send);
+				else send();
+			} catch (error) {
+				failed = true;
+				request.destroy(error instanceof Error ? error : new Error(String(error)));
+			}
+		});
+	};
 	return {
 		get closed() {
-			return request.closed;
+			return closed || ending || request.closed;
 		},
+		drain: () => tail,
 		write(frame) {
-			if (!request.writableEnded) request.write(frame);
+			if (closed || ending) return;
+			afterQueued(() => {
+				if (!closed && !request.writableEnded) request.write(frame);
+			});
 		},
 		close() {
+			closed = true;
 			request.close();
 		},
 		end() {
-			if (!request.writableEnded) request.end();
+			if (closed || ending) return;
+			ending = true;
+			afterQueued(() => {
+				if (!request.writableEnded) request.end();
+			}, false);
 		},
 		onResponse(listener) {
 			request.on("response", listener);
@@ -846,7 +916,7 @@ interface CursorHttp1RunTransportOptions {
 	baseUrl: string;
 	headers: Record<string, string>;
 	requestId: string;
-	signal?: AbortSignal;
+	owner: CursorRequestOwner;
 }
 
 interface CursorPendingAppend {
@@ -875,12 +945,39 @@ function readConnectFrameMessage(frame: Uint8Array): Uint8Array {
 
 function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): CursorRunTransport {
 	const abortController = new AbortController();
-	const signal = options.signal ? AbortSignal.any([options.signal, abortController.signal]) : abortController.signal;
-	const fetchImpl = wrapFetchForProxy(globalThis.fetch, "cursor");
+	const signal = options.owner.signal
+		? AbortSignal.any([options.owner.signal, abortController.signal])
+		: abortController.signal;
+	let admissionTail: Promise<void> = Promise.resolve();
+	const fetchImpl = (input: URL, init: RequestInit, watchdog?: PreResponseTimeout): Promise<Response> => {
+		const held: FetchImpl = (input, init) => {
+			const admitted = Promise.withResolvers<void>();
+			const sent = admissionTail.then(() => {
+				if (closed) throw new AIError.AbortError();
+				return options.owner.send(
+					() => {
+						const response = globalThis.fetch(input, init);
+						admitted.resolve();
+						return response;
+					},
+					init?.signal ?? signal,
+					watchdog,
+				);
+			});
+			void sent.catch(error => admitted.reject(error));
+			// RunSSE can need an append before sending headers. Order admissions,
+			// not responses, while the watchdog covers the whole unary request.
+			admissionTail = admitted.promise.catch(fail);
+			return sent;
+		};
+		return wrapFetchForProxy(held, "cursor")(input, init);
+	};
 	const requestId = create(BidiRequestIdSchema, { requestId: options.requestId });
 	const pendingAppends: CursorPendingAppend[] = [];
 	let appendSeqno = 0n;
 	let activeAppends = 0;
+	let appendsDrained = Promise.withResolvers<void>();
+	appendsDrained.resolve();
 	let closed = false;
 	let ended = false;
 	let responseListener: (headers: http2.IncomingHttpHeaders) => void = () => {};
@@ -908,26 +1005,35 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 		const timeoutMs =
 			CURSOR_HTTP1_APPEND_BASE_TIMEOUT_MS +
 			Math.ceil(append.data.byteLength / CURSOR_HTTP1_APPEND_BYTES_PER_SECOND) * 1_000;
-		const response = await fetchImpl(new URL(CURSOR_BIDI_APPEND_PATH, options.baseUrl), {
-			method: "POST",
-			headers: { ...options.headers, "content-type": "application/proto" },
-			body: toBinary(BidiAppendRequestSchema, body),
-			signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
-		});
-		if (response.ok) {
-			await response.body?.cancel();
-			return;
+		const watchdog = armPreResponseTimeout(signal, timeoutMs);
+		try {
+			const response = await fetchImpl(
+				new URL(CURSOR_BIDI_APPEND_PATH, options.baseUrl),
+				{
+					method: "POST",
+					headers: { ...options.headers, "content-type": "application/proto" },
+					body: toBinary(BidiAppendRequestSchema, body),
+					signal: watchdog.signal,
+				},
+				watchdog,
+			);
+			if (response.ok) {
+				await response.body?.cancel();
+				return;
+			}
+			const error = await response.json().catch(() => undefined);
+			throw isRecord(error)
+				? classifyConnectError(error)
+				: new AIError.ProviderHttpError(`Cursor BidiAppend failed with HTTP ${response.status}`, response.status);
+		} finally {
+			watchdog.clear();
 		}
-		const error = await response.json().catch(() => undefined);
-		throw isRecord(error)
-			? classifyConnectError(error)
-			: new AIError.ProviderHttpError(`Cursor BidiAppend failed with HTTP ${response.status}`, response.status);
 	};
 
 	const pumpAppends = (): void => {
 		while (!closed && activeAppends < CURSOR_HTTP1_APPEND_CONCURRENCY) {
 			const append = pendingAppends.shift();
-			if (!append) return;
+			if (!append) break;
 			activeAppends++;
 			void sendAppend(append)
 				.catch(fail)
@@ -936,6 +1042,7 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 					pumpAppends();
 				});
 		}
+		if (activeAppends === 0) appendsDrained.resolve();
 	};
 
 	const run = async (): Promise<void> => {
@@ -963,6 +1070,7 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 				if (closed) return;
 				dataListener(Buffer.from(chunk));
 			}
+			await appendsDrained.promise;
 			if (closed) return;
 			closed = true;
 			endListener();
@@ -975,8 +1083,10 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 		get closed() {
 			return closed;
 		},
+		drain: () => appendsDrained.promise,
 		write(frame) {
 			if (closed || ended) return;
+			if (activeAppends === 0) appendsDrained = Promise.withResolvers<void>();
 			pendingAppends.push({
 				seqno: appendSeqno++,
 				data: readConnectFrameMessage(frame),
@@ -998,7 +1108,6 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 			// RunSSE's request body is already complete; appends are separate
 			// unary calls, so ending just stops new ones.
 			ended = true;
-			pendingAppends.length = 0;
 		},
 		onResponse(listener) {
 			responseListener = listener;
@@ -1238,6 +1347,11 @@ function streamCursorWithWireMode(
 		let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
 		const h2Completion = Promise.withResolvers<void>();
 		let h2Settled = false;
+		let admissionFailure: { error: unknown } | undefined;
+		const onAdmissionFailure = (error: unknown): void => {
+			admissionFailure ??= { error };
+		};
+		let requestOwner = captureCursorRequestOwner(options?.signal, onAdmissionFailure);
 		let sawTurnEnded = false;
 		// After the final step's `stepCompleted`, only a repeat checkpoint and the
 		// `turnEnded` usage frame follow.
@@ -1263,6 +1377,12 @@ function streamCursorWithWireMode(
 		const settleH2 = (error?: unknown): void => {
 			if (h2Settled) return;
 			h2Settled = true;
+			// A server checkpoint can forgive a trailing transport failure, never
+			// a local frame admission failure (including an aborted hold).
+			if (admissionFailure) {
+				h2Completion.reject(admissionFailure.error);
+				return;
+			}
 			if (error !== undefined || endStreamError) {
 				if (sawTurnEnded && latestCheckpointTerminal) {
 					h2Completion.resolve();
@@ -1498,13 +1618,17 @@ function streamCursorWithWireMode(
 				}
 				h2Client = client;
 				client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
-				runTransport = wrapHttp2RunTransport(client.request(requestHeaders));
+				// The connection carries no request until this stream opens.
+				runTransport = wrapHttp2RunTransport(
+					await requestOwner.send(() => client.request(requestHeaders)),
+					() => requestOwner,
+				);
 			} else {
 				runTransport = createHttp1RunTransport({
 					baseUrl,
 					headers: requestHeaders,
 					requestId,
-					signal: options?.signal,
+					owner: requestOwner,
 				});
 			}
 
@@ -1723,7 +1847,7 @@ function streamCursorWithWireMode(
 			});
 
 			const sendHeartbeat = () => {
-				if (!runTransport || runTransport.closed) {
+				if (!runTransport || runTransport.closed || relay?.backlog !== undefined) {
 					return;
 				}
 				const heartbeatMessage = create(AgentClientMessageSchema, {
@@ -1754,7 +1878,7 @@ function streamCursorWithWireMode(
 				// end must settle as the caller's abort, not as a clean or truncated
 				// stream. Read the signal now: an abort after a real end must not win.
 				const abortError = options?.signal?.aborted ? new AIError.AbortError() : undefined;
-				void closeDebugLog()
+				void Promise.all([closeDebugLog(), runTransport!.drain()])
 					.then(() => settleH2(abortError))
 					.catch(error => settleH2(error));
 			});
@@ -1786,6 +1910,8 @@ function streamCursorWithWireMode(
 				// response is complete and `finally` closes the transport.
 				const parkUntilResumed = async (): Promise<boolean> => {
 					await drainInFlightDispatches();
+					await runTransport!.drain();
+					if (admissionFailure) throw admissionFailure.error;
 					endCurrentTextBlock(output, stream, state);
 					endCurrentThinkingBlock(output, stream, state);
 					// The held calls went out whole as their exec frames were held
@@ -1838,7 +1964,13 @@ function streamCursorWithWireMode(
 								return undefined;
 							}
 							const nextStream = new AssistantMessageEventStream();
-							unpark({ context: nextContext, options: nextOptions, stream: nextStream, results });
+							unpark({
+								context: nextContext,
+								options: nextOptions,
+								stream: nextStream,
+								results,
+								owner: captureCursorRequestOwner(nextOptions.signal, onAdmissionFailure),
+							});
 							return nextStream;
 						},
 					};
@@ -1860,6 +1992,7 @@ function streamCursorWithWireMode(
 						return false;
 					}
 					({ context, options, stream } = resumption);
+					requestOwner = resumption.owner;
 					output = createCursorOutput(model, Date.now());
 					startTime = performance.now();
 					firstTokenTime = undefined;
@@ -1989,6 +2122,7 @@ function streamCursorWithWireMode(
 			let error = caughtError;
 			const h2Unavailable = transportMode === "http2" && isHttp2Unavailable(error);
 			if (
+				admissionFailure === undefined &&
 				h2Unavailable &&
 				options?.transport !== "http2" &&
 				!sawProgressOrSideEffect &&
@@ -2042,6 +2176,7 @@ function streamCursorWithWireMode(
 			}
 			if (h2Unavailable) error = mapH2TransportError(error, model.baseUrl || CURSOR_API_URL);
 			const fallbackWireModelId =
+				admissionFailure === undefined &&
 				wireMode === "normalized" &&
 				!sawProgressOrSideEffect &&
 				!options?.signal?.aborted &&
@@ -2099,6 +2234,7 @@ function streamCursorWithWireMode(
 			const repeatedCheckpoint = checkpointHash !== undefined && checkpointHash === retryContext?.checkpointHash;
 			const noProgressResumes = repeatedCheckpoint ? (retryContext?.noProgressResumes ?? 0) + 1 : 0;
 			const canRetryFromCheckpoint =
+				admissionFailure === undefined &&
 				replaySafe &&
 				!options?.signal?.aborted &&
 				retryAttempt < CURSOR_MAX_STREAM_RETRIES &&

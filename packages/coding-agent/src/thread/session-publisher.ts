@@ -62,6 +62,7 @@ import {
 import type { SessionEntry } from "../session/session-entries";
 import { sessionApprovalGrantKeys } from "../tools/approval-cache";
 import { isRpcProxy, type RpcServe } from "./rpc";
+import { waitForSessionRequestHolds } from "./services/request-holds";
 import {
 	SESSION_STATE_READERS as read,
 	type SessionBridgeClient,
@@ -548,6 +549,7 @@ function localModel(session: AgentSession, model: Model): Model {
 
 /** Worker-side implementation of {@link SessionHostProtocol}; commands flush state before their result posts. */
 export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol> = {
+	waitForRequestHolds: (publisher, signal) => waitForSessionRequestHolds(publisher.session, signal),
 	prompt: async (publisher, text, options) => settle(publisher, publisher.session.prompt(text, options)),
 	steer: async (publisher, text, images, options) => settle(publisher, publisher.session.steer(text, images, options)),
 	abort: async (publisher, options) => settle(publisher, publisher.session.abort(options)),

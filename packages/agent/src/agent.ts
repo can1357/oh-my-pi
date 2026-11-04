@@ -8,12 +8,16 @@ import {
 	type AssistantMessageEvent,
 	type Context,
 	type CursorExecHandlers,
+	captureRequestHolds,
 	type CursorToolResultHandler,
 	type Effort,
 	type ImageContent,
 	type Message,
 	type Model,
 	type ProviderSessionState,
+	type RequestHoldContext,
+	type RequestHolds,
+	runWithRequestHolds,
 	type ServiceTier,
 	type SimpleStreamOptions,
 	streamSimple,
@@ -39,6 +43,7 @@ import {
 	unpairedToolCallTail,
 } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
+import { AgentHolds } from "./holds";
 import { agentPauseGate } from "./pause";
 import { isProviderRefusalMessage } from "./replay-policy";
 import { SentToolDefinitions } from "./sent-tool-definitions";
@@ -53,6 +58,7 @@ import type {
 	AgentBeforeModelCall,
 	AgentContext,
 	AgentEvent,
+	AgentHold,
 	AgentLoopConfig,
 	AgentMessage,
 	AgentState,
@@ -110,8 +116,17 @@ export class AgentBusyError extends Error {
 		this.name = "AgentBusyError";
 	}
 }
+
 export interface AgentOptions {
 	initialState?: Partial<AgentState>;
+
+	/**
+	 * The context whose request holds (see `@oh-my-pi/pi-ai` `runWithRequestHolds`) hold this
+	 * agent's model requests, besides the agent's own holds. Defaults to the context the agent
+	 * is constructed in, so an agent built for another agent's work — a subagent started by a
+	 * tool, a helper agent of a session — is held by that agent's holds too.
+	 */
+	requestHoldContext?: RequestHoldContext;
 
 	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
@@ -426,6 +441,27 @@ export class Agent {
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+	/** The holds added with {@link addHold}, read live by every check of every request and call. */
+	readonly #holds = new AgentHolds();
+	/** The context whose holds hold this agent's requests besides its own (see {@link AgentOptions.requestHoldContext}). */
+	readonly #requestHoldContext: RequestHoldContext;
+	/**
+	 * The host's transform applied to the context before each model request. It is read for every
+	 * request, so replacing or removing it changes the next one, later in a running turn included.
+	 */
+	get transformContext(): ((messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>) | undefined {
+		return this.#transformContext;
+	}
+	set transformContext(
+		transform: ((messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>) | undefined,
+	) {
+		this.#transformContext = transform;
+	}
+	/** What one model request runs to transform its context: the host's transform as it is now. */
+	readonly #transformContextForRequest = (messages: AgentMessage[], signal?: AbortSignal): Promise<AgentMessage[]> => {
+		const transform = this.#transformContext;
+		return transform ? transform(messages, signal) : Promise.resolve(messages);
+	};
 	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	#sentToolDefinitions = new SentToolDefinitions();
 	#steeringQueue: AgentMessage[] = [];
@@ -569,6 +605,7 @@ export class Agent {
 
 	constructor(opts: AgentOptions = {}) {
 		this.#state = { ...this.#state, ...opts.initialState };
+		this.#requestHoldContext = opts.requestHoldContext ?? captureRequestHolds();
 		if (opts.initialState?.messages) this.#state.messages = opts.initialState.messages.slice();
 		if (opts.initialState?.pendingToolCalls)
 			this.#state.pendingToolCalls = new Set(opts.initialState.pendingToolCalls);
@@ -1033,6 +1070,46 @@ export class Agent {
 
 	async #runBeforeModelCallHooks(signal: AbortSignal | undefined, context: AgentContext): Promise<void> {
 		for (const hook of this.#beforeModelCallHooks) await hook(signal, context);
+	}
+
+	/**
+	 * Hold every model request and tool call, a speculative run included, while the hold says so,
+	 * until the returned disposer is called. The loop asks the holds at fixed points (see
+	 * {@link AgentHold}); the last check comes after every step that prepares the request or call,
+	 * whoever added that step and whenever, and starts it in the same turn, so no hook, transform,
+	 * gate or pause can put it past a hold. All holds are asked together until none holds, so the
+	 * order they were added in does not matter.
+	 *
+	 * The registration is live from this call to the disposer's. A request or call already being
+	 * prepared or held asks this hold at its next check; calling the disposer stops the hold at
+	 * once, and a request or call waiting on it wakes and goes on unless another hold holds it.
+	 * `open` runs at most once per request or call — at the first check that asks this hold — and
+	 * the view it returns serves every later check of that request, so a deadline it keeps runs
+	 * once per request. Each view is released exactly once. Steering delivered into a response that
+	 * is already streaming does not wait at the loop; a transport that sends it as its own frame
+	 * (the Codex WebSocket's `response.steer`) holds that frame at its send.
+	 *
+	 * The holds hold every model request started in this agent's context (see
+	 * {@link runInRequestContext}), whoever starts it, at its transport's send.
+	 */
+	addHold(open: () => AgentHold): () => void {
+		return this.#holds.add(open);
+	}
+
+	/** The holds added with {@link addHold}, as the request holds of this agent's context. */
+	get requestHolds(): RequestHolds {
+		return this.#holds;
+	}
+
+	/**
+	 * Runs `fn` in this agent's context: every model request it starts, now or later in its
+	 * async flow, waits for this agent's holds and for those of
+	 * {@link AgentOptions.requestHoldContext}, besides the holds of the context it is called
+	 * in. The agent runs its own turns in it; a host enters it for work it starts for the
+	 * agent from outside one (a command, a UI callback, a worker's message).
+	 */
+	runInRequestContext<T>(fn: () => T): T {
+		return this.#requestHoldContext.run(() => runWithRequestHolds(this.#holds, fn));
 	}
 
 	async #runBeforeQueuedMessageDequeueHooks(signal?: AbortSignal): Promise<void> {
@@ -1854,9 +1931,10 @@ export class Agent {
 		}
 	}
 
-	/** Run `fn` with {@link logContext} on every record it logs. */
+	/** Run `fn` with {@link logContext} on every record it logs, in this agent's request context. */
 	#inLogContext<T>(fn: () => T): T {
-		return this.logContext ? logger.withContext(this.logContext, fn) : fn();
+		const inContext = () => this.runInRequestContext(fn);
+		return this.logContext ? logger.withContext(this.logContext, inContext) : inContext();
 	}
 
 	/**
@@ -2012,7 +2090,8 @@ export class Agent {
 			convertToLlm: this.#convertToLlm,
 			transformProviderContext: this.#transformProviderContext,
 			sentToolDefinitions: this.#sentToolDefinitions,
-			transformContext: this.#transformContext,
+			transformContext: this.#transformContextForRequest,
+			requestHolds: this.#holds,
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,

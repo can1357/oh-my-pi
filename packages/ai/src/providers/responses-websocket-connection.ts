@@ -1,5 +1,6 @@
 import type { IncomingMessage } from "node:http";
 import type { RawSseEvent } from "../types";
+import { afterRequestHolds } from "../request-holds";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { notifyRawSseEvent } from "../utils/sse-debug";
 import {
@@ -424,7 +425,9 @@ export class ResponsesWebSocketConnection {
 				this.#debugResponseLog = debugSession
 					? await debugSession.openResponseLog("WebSocket 101 Switching Protocols", this.#handshakeHeaders)
 					: undefined;
-				this.sendControl(exchange.send);
+				// The frame is the request: hold it, then send in the same turn, with no
+				// host code between the last check and the send.
+				await afterRequestHolds(signal, () => this.sendControl(exchange.send));
 			}
 			let sawFirstEvent = false;
 			let lastProgressAt = Date.now();
@@ -511,7 +514,6 @@ export class ResponsesWebSocketConnection {
 
 	sendControl(frame: Record<string, unknown>): void {
 		const payload = JSON.stringify(frame);
-		notifyFrame(this.#streamObserver, frame, payload, "→");
 		const socket = this.#socket;
 		if (!socket || socket.readyState !== WebSocket.OPEN || this.#closedError) {
 			throw new ResponsesWebSocketTransportError("unavailable", "stream", "websocket connection is unavailable", {
@@ -528,6 +530,9 @@ export class ResponsesWebSocketConnection {
 				{ cause: error },
 			);
 		}
+		// After the send: a diagnostic observer is host code, and none of it runs
+		// between a request frame's last hold check and the frame going out.
+		notifyFrame(this.#streamObserver, frame, payload, "→");
 	}
 
 	#retire(error: ResponsesWebSocketTransportError, reason: string): void {

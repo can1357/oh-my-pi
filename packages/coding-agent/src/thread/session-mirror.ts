@@ -233,6 +233,8 @@ export interface SessionAbortOptions {
  * event-stream watch toggle.
  */
 export type SessionHostProtocol = {
+	/** Wait for this session's request holds on its home worker; abort drops the check's views. */
+	waitForRequestHolds: RpcMethod<[signal: AbortSignal], void>;
 	prompt: RpcMethod<[text: string, options?: PromptOptions], boolean>;
 	steer: RpcMethod<[text: string, images?: ImageContent[], options?: SteerOptions], void>;
 	abort: RpcMethod<[options?: SessionAbortOptions], void>;
@@ -316,6 +318,8 @@ export type SessionBridgeProtocol = {
 	hasQueuedIrcFrom: RpcMethod<[session: AgentSessionHandle, from: string], boolean>;
 	subscribe: RpcMethod<[session: AgentSessionHandle, listener: AgentSessionEventListener], () => void>;
 	subscribeRunState: RpcMethod<[session: AgentSessionHandle, listener: (state: SessionRunState) => void], () => void>;
+	/** The session codec carries its home and instance key; main routes to that home. */
+	waitForRequestHolds: RpcMethod<[session: AgentSessionHandle, signal: AbortSignal], void>;
 	prompt: RpcMethod<[session: AgentSessionHandle, text: string, options?: PromptOptions], boolean>;
 	steer: RpcMethod<[session: AgentSessionHandle, text: string, images?: ImageContent[], options?: SteerOptions], void>;
 	abort: RpcMethod<[session: AgentSessionHandle, options?: SessionAbortOptions], void>;

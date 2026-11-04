@@ -207,7 +207,9 @@ describe("eval js read() URI delegation", () => {
 			calls.push({ name, args });
 			return { text: "resource contents" };
 		});
-		sandbox.__omp_helpers__ = { hasRoot: () => false };
+		// `pinArtifact` resolves an `artifact://<id><selector>` to its file
+		// before the tool sees it; anything else it returns unchanged.
+		sandbox.__omp_helpers__ = { hasRoot: () => false, pinArtifact: async (path: string) => path };
 
 		const result = await vm.runInContext(`read("mcp://server/resource", { offset: 10, limit: 5 })`, sandbox);
 

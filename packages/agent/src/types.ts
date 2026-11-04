@@ -23,6 +23,7 @@ import type {
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import type { AppendOnlyContextManager } from "./append-only-context";
+import type { AgentHolds } from "./holds";
 import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
 import type { SentToolDefinitions } from "./sent-tool-definitions";
 import type { AgentTelemetryConfig } from "./telemetry";
@@ -119,6 +120,53 @@ export type AgentBeforeModelCall = (
 	context: Context,
 	signal?: AbortSignal,
 ) => AgentPreModelCallResult | void | Promise<AgentPreModelCallResult | void>;
+
+/**
+ * One model request's or tool call's view of a hold added with `Agent.addHold`.
+ *
+ * The loop checks the holds at fixed points: a model request before the first
+ * step that prepares it, last immediately before the provider is called —
+ * after every hook, transform, conversion and gate, the credential lookup,
+ * the chat span's start and any process pause — and again at the
+ * transport's own send, after its `onPayload` hook; a tool call before its
+ * `beforeToolCall` hook, and last immediately before `execute`; a
+ * speculative run immediately before its policy runs, after its evidence is
+ * captured. At each, it waits for everything the holds return and checks
+ * again, until no hold holds; the last check and the effect run in the same
+ * turn, with nothing awaited and no hook, transform or other preparation
+ * step run between them. So no request or call starts while a hold holds
+ * it, whatever order the holds were added in and whatever a preparation step
+ * did.
+ *
+ * The holds reach past the loop: every model request started in the agent's
+ * context (`Agent.runInRequestContext`, which the agent's own turns run in)
+ * waits for them at its transport's send — one a tool, a hook, an event
+ * handler, a timer or another agent built in that context starts.
+ *
+ * Each check reads the holds registered at that moment, never a copy taken
+ * earlier: a hold added while a request or call is prepared, or while another
+ * hold holds it, is asked at that request's next check, and a hold removed
+ * stops holding at once — a request already waiting on it wakes and checks
+ * the rest again. A request or call opens one view per hold, the first time a
+ * check asks that hold, and keeps it for the rest of the request, so the
+ * view's own state (a deadline, say) is not reset by later checks; a hold
+ * added and removed again before a check never sees that request.
+ */
+export interface AgentHold {
+	/**
+	 * What the request or call must wait for now, or `undefined` when this
+	 * hold lets it go. Asked synchronously at each check: it only reports,
+	 * and must not change the conversation or the session.
+	 */
+	pending(): Promise<void> | undefined;
+	/**
+	 * Called exactly once per view: when its hold is removed, or once the
+	 * request or call no longer waits — a model request's response ended (its
+	 * transport checks the views at its own send, after the loop's last
+	 * check), a tool call executed, or either stopped or failed.
+	 */
+	release?(): void;
+}
 
 /**
  * A soft tool requirement: the host wants `toolName` called before the loop
@@ -433,6 +481,17 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * the run is canceled or its deadline expires.
 	 */
 	beforeModelCall?: AgentBeforeModelCall;
+
+	/**
+	 * The agent's holds (see {@link AgentHold}). Each model request and tool
+	 * call opens its views of them; the views read the hold registrations live
+	 * at every check, so a hold registered or removed while the request is
+	 * prepared or held counts from that check on. A model request carries its
+	 * views from its preparation to its send, so every request started for it
+	 * in that time — a context-build description, a transport's own send —
+	 * checks the same views.
+	 */
+	requestHolds?: AgentHolds;
 
 	/**
 	 * Optional transform applied to tool call arguments before execution.

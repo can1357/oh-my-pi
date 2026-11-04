@@ -27,6 +27,8 @@ import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { waitForRetry } from "../utils/retry-wait";
 import { getEnvApiKey } from "../env-api-key";
 import { OUTPUT_FALLBACK_BUFFER } from "../stream";
+import { afterRequestHolds } from "../request-holds";
+import { heldFetch, withHeldForm } from "../utils/held-fetch";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import type {
 	AnthropicCompactionFiles,
@@ -90,6 +92,7 @@ import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import {
+	armRequestTimeout,
 	getStreamFirstEventTimeoutMs,
 	getStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -2678,20 +2681,22 @@ const streamAnthropicOnce = (
 					maxRetries: 0,
 					...(requestHeaders ? { headers: requestHeaders } : {}),
 				};
-				const anthropicRequest: unknown =
+				const createRequest = (): unknown =>
 					isOAuthToken && client.beta
 						? client.beta.messages.create({ ...wireParams, stream: true }, requestOptions)
 						: client.messages.create({ ...wireParams, stream: true }, requestOptions);
+				// A caller-injected client's transport is opaque and may start its I/O in
+				// `create`, so it is created once the request holds let go. A built client
+				// and the Bedrock transport create lazily and hold at their fetch.
+				const holdsAtCreate = options?.client !== undefined && client === options.client;
+				let anthropicRequest: unknown = holdsAtCreate ? undefined : createRequest();
 				let streamedReplayUnsafeContent = false;
 
 				try {
-					let requestTimeout: NodeJS.Timeout | undefined;
-					if (requestTimeoutMs !== undefined) {
-						requestTimeout = setTimeout(
-							() => activeAbortTracker.abortLocally(firstEventTimeoutAbortError),
-							requestTimeoutMs,
-						);
-					}
+					const requestTimeout = armRequestTimeout(
+						() => activeAbortTracker.abortLocally(firstEventTimeoutAbortError),
+						requestTimeoutMs,
+					);
 					let anthropicStream: AsyncIterable<AnthropicStreamEvent>;
 					let response: Response;
 					let requestId: string | null;
@@ -2702,14 +2707,21 @@ const streamAnthropicOnce = (
 							response,
 							requestId,
 							recordsRawSseEvents,
-						} = await getAnthropicStreamResponse(anthropicRequest, requestSignal, rawSseObserver));
+						} = await requestTimeout.run(async () => {
+							if (holdsAtCreate) {
+								await afterRequestHolds(requestSignal, () => {
+									anthropicRequest = createRequest();
+								});
+							}
+							return await getAnthropicStreamResponse(anthropicRequest, requestSignal, rawSseObserver);
+						}));
 					} catch (error) {
 						if (error instanceof AnthropicConnectionTimeoutError && !activeAbortTracker.wasCallerAbort()) {
 							throw firstEventTimeoutAbortError;
 						}
 						throw error;
 					} finally {
-						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
+						requestTimeout.clear();
 					}
 					await notifyProviderResponse(options, response, sourceModel, requestId);
 					if (slowMode) {
@@ -4043,7 +4055,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	// Compression sits beneath the cch rewriter, which must hash the uncompressed
 	// body. Catalog rules scope it to verified hosts (official API, Copilot), so
 	// proxies pass through.
-	const baseFetch = wrapFetchForRequestCompression(args.fetch ?? fetch, model);
+	const baseFetch = wrapFetchForRequestCompression(heldFetch(args.fetch ?? fetch), model);
 	// Only OAuth requests inject the CC billing header; no API-key request can ever
 	// contain it, so there is no need to install the rewriter for those.
 	const cchFetch = oauthToken ? wrapFetchForCch(baseFetch) : baseFetch;
@@ -4216,6 +4228,7 @@ function createClient(
 	args: AnthropicClientOptionsArgs,
 ): { client: AnthropicMessagesClient; isOAuthToken: boolean; defaultHeaders?: Record<string, string> } {
 	const { isOAuthToken: oauthToken, ...clientOptions } = buildAnthropicClientOptions({ ...args, model });
+	if (clientOptions.fetch) withHeldForm(clientOptions.fetch, clientOptions.fetch);
 	const client = new AnthropicMessagesClient(clientOptions);
 	return { client, isOAuthToken: oauthToken, defaultHeaders: clientOptions.defaultHeaders };
 }

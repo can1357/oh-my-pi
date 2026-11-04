@@ -5,6 +5,7 @@ import { isEnoent } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import localDoc from "../prompts/internal-urls/local.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
+import { whenArtifactCopiesSettle } from "../session/session-manager";
 import {
 	buildDirectoryResource,
 	containedRealPath,
@@ -374,12 +375,29 @@ type ResolvedLocalTarget =
 	| { kind: "file"; path: string; size: number };
 
 /**
+ * Wait for the artifact copies this process is running into the session's
+ * artifacts directory. A fork inherits `local/` with the rest of them, by copy;
+ * read mid-copy, an inherited file is missing, and a write mid-copy lands in a
+ * tree the copy then merges into, where the inherited file of the same name
+ * is the one that does not arrive.
+ */
+async function localCopiesSettled(opts: LocalProtocolOptions, signal: AbortSignal | undefined): Promise<void> {
+	const artifactsDir = opts.getArtifactsDir?.();
+	if (artifactsDir) await whenArtifactCopiesSettle(artifactsDir, signal);
+}
+
+/**
  * Resolve a local:// URL to its on-disk target with realpath + containment
  * checks on the root, parent, and target so symlinks cannot escape the session
  * local root. Does NOT read or decode file contents — callers decide how to
  * consume the resolved path.
  */
-async function resolveLocalTarget(url: InternalUrl, opts: LocalProtocolOptions): Promise<ResolvedLocalTarget> {
+async function resolveLocalTarget(
+	url: InternalUrl,
+	opts: LocalProtocolOptions,
+	signal: AbortSignal | undefined,
+): Promise<ResolvedLocalTarget> {
+	await localCopiesSettled(opts, signal);
 	const localRoot = path.resolve(resolveLocalRoot(opts));
 	await fs.mkdir(localRoot, { recursive: true });
 
@@ -428,7 +446,9 @@ async function locateLocalTarget(
 	url: InternalUrl,
 	opts: LocalProtocolOptions,
 	create: boolean,
+	signal: AbortSignal | undefined,
 ): Promise<string | null> {
+	await localCopiesSettled(opts, signal);
 	const localRoot = path.resolve(resolveLocalRoot(opts));
 	const relativePath = extractRelativePath(url);
 	const targetPath = relativePath ? path.resolve(localRoot, relativePath) : localRoot;
@@ -532,7 +552,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
 			throw new Error("No session - local:// unavailable");
 		}
 
-		const resolved = await resolveLocalTarget(url, opts);
+		const resolved = await resolveLocalTarget(url, opts, context?.signal);
 		if (resolved.kind === "listing") {
 			return buildListing(url, resolved.root);
 		}
@@ -548,7 +568,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		if (!opts) {
 			throw new Error("No session - local:// unavailable");
 		}
-		return locateLocalTarget(url, opts, options?.create === true);
+		return locateLocalTarget(url, opts, options?.create === true, context?.signal);
 	}
 
 	locateSync(url: InternalUrl, context?: ResolveContext): string | undefined {

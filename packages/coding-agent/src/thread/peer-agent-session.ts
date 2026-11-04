@@ -10,7 +10,7 @@
  * main-side forwarding subscription each, shared by every local listener.
  */
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import { type ImageContent, type Model, runWithRequestHolds } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -33,6 +33,7 @@ import type { AgentDefinition } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { ThreadId } from "./identity";
 import { emptyMirrorState } from "./remote-agent-session";
+import { RemoteRequestHolds } from "./services/request-holds";
 import { findRemoteSession, rememberRemoteSession } from "./session-directory";
 import type {
 	PeerStateField,
@@ -76,6 +77,9 @@ export class PeerAgentSession implements AgentSessionHandle {
 	readonly #runStateListeners = new Set<(state: SessionRunState) => void>();
 	#unsubscribe: (() => void) | undefined;
 	#unsubscribeRunState: (() => void) | undefined;
+	readonly #requestHolds = new RemoteRequestHolds(signal =>
+		mainBridge().remote.call("waitForRequestHolds", this, signal),
+	);
 
 	/** Use {@link peerAgentSession}; direct construction breaks identity. */
 	constructor(key: string, home: ThreadId) {
@@ -106,6 +110,11 @@ export class PeerAgentSession implements AgentSessionHandle {
 			getArtifactsDir: () => this.#field("artifactsDir"),
 			getUsageStatistics: () => this.#field("usageStatistics"),
 		};
+	}
+
+	/** Requests started here wait for this session's holds on its home thread. */
+	runInRequestContext<T>(fn: () => T): T {
+		return runWithRequestHolds(this.#requestHolds, fn);
 	}
 
 	get isStreaming(): boolean {
@@ -237,7 +246,8 @@ export class PeerAgentSession implements AgentSessionHandle {
 	}
 
 	#dispatch(event: AgentSessionEvent): void {
-		for (const listener of [...this.#listeners]) {
+		const listeners = [...this.#listeners];
+		for (const listener of listeners) {
 			try {
 				listener(event);
 			} catch (error) {
@@ -250,7 +260,8 @@ export class PeerAgentSession implements AgentSessionHandle {
 	}
 
 	#dispatchRunState(state: SessionRunState): void {
-		for (const listener of [...this.#runStateListeners]) {
+		const listeners = [...this.#runStateListeners];
+		for (const listener of listeners) {
 			try {
 				listener(state);
 			} catch (error) {

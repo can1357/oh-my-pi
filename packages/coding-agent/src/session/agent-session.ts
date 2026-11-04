@@ -26,6 +26,7 @@ import {
 	type Agent,
 	AgentBusyError,
 	type AgentEvent,
+	type AgentHold,
 	type AgentMessage,
 	type AgentPreModelCallStop,
 	type AgentState,
@@ -82,7 +83,17 @@ import type {
 	UsageReport,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
+import {
+	afterRequestHolds,
+	captureRequestHolds,
+	type Effort,
+	openRequestHolds,
+	RequestHoldsAlias,
+	runOutsideRequestHolds,
+	runWithRequestHolds,
+	serviceTierFamily,
+	streamSimple,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
@@ -139,6 +150,7 @@ import { combine, type SettingsScope } from "../config/registry";
 import { type Settings, withActiveSettings } from "../config/settings";
 import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import { getEditStore } from "../edit/store";
+import { closeArtifactPinAccount } from "../eval/artifact-readiness";
 import { releaseCompletionHandles } from "../eval/completion-bridge";
 import { releaseJudgmentBatches } from "../eval/judgment-batch-bridge";
 import type { EvalPreludeDefinition } from "../eval/preludes";
@@ -499,12 +511,26 @@ import {
 	extractSessionInit,
 	type PersistedSessionInit,
 	type SessionManager,
+	type SessionPersistenceNotice,
 } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { promptDigestOfEntry, SessionTools, type SessionToolsHost } from "./session-tools";
+import {
+	asSessionWork,
+	membersAsSessionWork,
+	methodsAsSessionWork,
+	registerSessionWork,
+	type SessionWorkRun,
+} from "./session-work";
+import {
+	artifactsMissingNotice,
+	noteResumedSessionFork,
+	renderTransferNotice,
+	SESSION_TRANSFER_MESSAGE_TYPE,
+} from "./session-transfer";
 import { resolveWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
@@ -612,6 +638,52 @@ const cfgWorkspacePromptInputs = combine({
 
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
+/**
+ * How long the next tool call or model request after a move waits for the
+ * `session_moved` handlers, and the longest any one such wait lasts. At this
+ * point the session stops waiting and goes on under the new id. Nothing stops
+ * the handlers' own code: the extension runner's handler timeout and this
+ * session's disposal stop waiting for them and cancel their `ctx.ui` dialogs,
+ * nothing more. So this is what a handler that never returns costs a user:
+ * at most one wait of this length per request.
+ *
+ * Measured: with omp's own heaviest handler (autoresearch's rehydrate; the
+ * SDK bridge and the Warp emitter do less) and without it, 200 moves let the
+ * next tool call through in 2.8 ms at the median and 74 ms at worst, on a
+ * 64-core host at a load average of 207. Two seconds is 27 times that worst
+ * case, and the budget `session_shutdown` handlers already get
+ * (`SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS`).
+ */
+export const SESSION_MOVED_HANDLER_GRACE_MS = 2_000;
+
+/**
+ * One request's or tool call's {@link SESSION_MOVED_HANDLER_GRACE_MS},
+ * counted from the first move gate it meets: one held both before and after
+ * it is prepared waits that long in all, not twice.
+ */
+class MoveWaitDeadline {
+	#timer: Timer | undefined;
+	#expired = false;
+	readonly #passed = Promise.withResolvers<void>();
+
+	get expired(): boolean {
+		return this.#expired;
+	}
+
+	/** Settles when the deadline passes, starting its clock on the first call. */
+	reached(): Promise<void> {
+		this.#timer ??= setTimeout(() => {
+			this.#expired = true;
+			this.#passed.resolve();
+		}, SESSION_MOVED_HANDLER_GRACE_MS);
+		return this.#passed.promise;
+	}
+
+	[Symbol.dispose](): void {
+		clearTimeout(this.#timer);
+	}
+}
+
 const AGENT_START_POLICY_MAX_ATTEMPTS = 3;
 /**
  * How long the first turn waits for deferred UI/RPC MCP startup (the sdk's startup barrier
@@ -658,6 +730,37 @@ export class SessionBusyError extends Error {
 		super(`Cannot ${action} while session maintenance or user work is still running`);
 		this.name = "SessionBusyError";
 	}
+}
+
+/** Options of {@link AgentSession.navigateTree}. */
+export interface NavigateTreeOptions {
+	summarize?: boolean;
+	customInstructions?: string;
+	/**
+	 * Opts into the two-phase `ask` toolResult re-answer protocol
+	 * (issue #5642): set only by the interactive `/tree` selector, which
+	 * knows how to re-open the picker on `reopenAsk` and complete the
+	 * navigation with `reanswerAskResult`. Every other public caller
+	 * (extensions, hooks, ACP, session-extension actions) leaves this
+	 * unset and gets the pre-#5642 plain leaf move onto `ask`
+	 * toolResults instead — they have no picker to re-open and would
+	 * otherwise report a successful no-op navigation (roboomp review on
+	 * #5895).
+	 */
+	allowAskReopen?: boolean;
+	/**
+	 * Completes an in-progress `ask` re-answer (issue #5642): the caller
+	 * already received `reopenAsk` from a prior call on the same
+	 * `targetId`, re-opened the picker, and is handing back the fresh
+	 * answer. Branches a new toolResult sibling instead of landing on
+	 * the original one.
+	 */
+	reanswerAskResult?: AgentToolResult<AskToolDetails>;
+	/**
+	 * Refuse with {@link SessionBusyError} when work started while the hooks
+	 * or the branch summary were awaited, before any tree change is made.
+	 */
+	requireIdle?: boolean;
 }
 
 /** Result of {@link AgentSession.navigateTree}. */
@@ -991,6 +1094,15 @@ function todoRetryMatches(failed: Record<string, unknown>, retry: Record<string,
 }
 
 export class AgentSession implements SettingsScope, AgentViewSession {
+	// Every method and accessor is the session's work: whatever it reads or calls of a host's — an
+	// option's getter, a callback the host left on the session — runs in the agent's request context,
+	// whoever calls it (see `methodsAsSessionWork`). Not before the constructor has set the agent.
+	static {
+		methodsAsSessionWork(AgentSession.prototype, session =>
+			#runAsHostWork in session && session.agent ? session.#runAsHostWork : undefined,
+		);
+	}
+
 	/**
 	 * Cross-thread identity token (`${homeThreadId}:${snowflake}`), unique per
 	 * session object across threads. Thread bridges encode a session by this key
@@ -1006,8 +1118,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** False for a subagent, whose gate belongs to its session tree's root. */
 	readonly #ownsCostGate: boolean;
 	#costCapRefusal: CostCapRefusal | undefined;
-	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
-	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
+	/** Entries of tools mounted under `xd://`, behind {@link getXdevToolEntries}. */
+	#getXdevToolEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
 	editStore?: EditStore;
 
@@ -1075,6 +1187,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	// Event subscription state
 	#unsubscribeAgent?: () => void;
 	#unsubscribeQueueChange?: () => void;
+	#unsubscribeSessionMoved?: () => void;
+	/**
+	 * Every `session_moved` announcement so far, its handlers run one move at a
+	 * time. Settles when the last of them has, or the runner gave up on it. A
+	 * move takes its place here before any handler runs.
+	 */
+	#movesHandled: Promise<void> = Promise.resolve();
+	/** How many announcements have handlers queued or still running; counted before any of them starts. */
+	#movesPending = 0;
+	/**
+	 * What the next tool call or model request waits for: the handlers of
+	 * every move so far, or {@link SESSION_MOVED_HANDLER_GRACE_MS} after the
+	 * latest was announced, whichever comes first. `undefined` once it has opened.
+	 */
+	#movesGate: Promise<void> | undefined;
+	/** Aborted once `session_shutdown` has run: no `session_moved` handler starts after it. */
+	readonly #movesAbort = new AbortController();
 	/** Agent message count when {@link #disconnectFromAgent} unsubscribed; messages past it reached no persisting handler. */
 	#disconnectedMessageCount?: number;
 	#cancelExitRecorder?: () => void;
@@ -1228,6 +1357,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
+	/** Takes this session out of the live sessions over its manager (see `SessionManager.addRequestContextOwner`). */
+	#leaveManager: (() => void) | undefined;
 	#modelDiscoveryAbortController = new AbortController();
 	/** Process-wide by default (double-spend safety across sessions); injectable for tests. */
 	#resetCoordinator: CodexAutoRedeemCoordinator;
@@ -1521,7 +1652,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#endComputerTurn();
 		}
 		try {
-			return await dialog();
+			return await this.#runAsHostWork(dialog);
 		} finally {
 			if (--this.#userWaitCount === 0 && this.#promptInFlightCount > 0) {
 				if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
@@ -1966,6 +2097,39 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#recordWithoutTurn([card]);
 	}
 
+	/**
+	 * Put the "artifacts did not arrive" notice into the live conversation once
+	 * the fork's copy has settled, so the next provider request carries it.
+	 *
+	 * The journal entry is the resume guard's
+	 * ({@link noteResumedSessionFork}); this adds the same text to the message
+	 * array the agent is holding, which a transcript rebuilt later would
+	 * otherwise be the only place it appeared.
+	 */
+	#tellModelWhenArtifactsAreMissing(): void {
+		const forkedFrom = this.sessionManager.forkedFromSession?.();
+		if (!forkedFrom) return;
+		void (async () => {
+			try {
+				if (await this.sessionManager.artifactsReproduced()) return;
+				if (this.#isDisposed) return;
+				const details = artifactsMissingNotice(this.sessionManager, forkedFrom);
+				this.agent.appendMessage({
+					role: "custom",
+					customType: SESSION_TRANSFER_MESSAGE_TYPE,
+					content: renderTransferNotice(details),
+					display: true,
+					details,
+					timestamp: Date.now(),
+				});
+			} catch (error) {
+				logger.warn("Failed to tell the model its inherited artifacts are missing", {
+					error: toError(error).message,
+				});
+			}
+		})();
+	}
+
 	#resetInFlight(): void {
 		this.#inFlightEpoch++;
 		this.#promptInFlightCount = 0;
@@ -2078,8 +2242,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Live generation tok/s for the working row; fed by this session's own streamed deltas. */
 	readonly tokenRate: TokenRateMeter;
 
-	constructor(config: AgentSessionConfig) {
-		this.agent = config.agent;
+	constructor(sessionConfig: AgentSessionConfig) {
+		// Every host callback the session is given runs as the session's work,
+		// whenever and from wherever the session calls it — during construction,
+		// a prompt rebuild, a later rediscovery: a model request it starts waits
+		// for the session's holds. Every member the host's config exposes reads
+		// through, inherited and non-enumerable ones included.
+		// The agent getter may start requests before returning the agent whose holds own them.
+		// Bind their startup context as soon as that agent is known, before any send can run.
+		const startupHolds = new RequestHoldsAlias();
+		this.agent = runWithRequestHolds(startupHolds, () => sessionConfig.agent);
+		startupHolds.bind(this.agent.runInRequestContext(captureRequestHolds));
+		const config = membersAsSessionWork(this.#runAsHostWork, sessionConfig);
 		this.tokenRate = new TokenRateMeter(text => this.agent.tokenizer.countTokens(text));
 		this.#reseedTokenRate();
 		this.agent.setQueuedMessageGrouping(
@@ -2087,6 +2261,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				isHiddenUserCompanion(previous) && (isHiddenUserCompanion(next) || isUserQueuedMessage(next)),
 		);
 		this.sessionManager = config.sessionManager;
+		// Claimed before the session's first write; released again if this
+		// constructor throws, so the host can build the session anew.
+		using claims = this.#claimRequestContexts(config.extensionRunner);
 		this.settings = config.settings;
 		this.#ownsCostGate = config.costGate === undefined;
 		this.#costGate = config.costGate ?? this.#createCostGate();
@@ -2146,6 +2323,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				initialEvalStateContext.timestamp,
 			);
 		}
+		// A resume that forked copies the previous session's artifacts in the
+		// background. If they never arrive, the conversation this session is
+		// actually holding has to be told — a journal entry appended after the
+		// message array was built is read by the next process, not by the model
+		// talking now.
+		this.#tellModelWhenArtifactsAreMissing();
 		const ircHost: IrcBridgeHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -2259,6 +2442,80 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
+		// A move-off changes this session's id without anyone asking. Until it was
+		// announced, the only trace an extension could see was the id differing
+		// from the one it last read, with nothing to say the predecessor is still
+		// live — so a consumer that carries identity across sessions could carry
+		// it away from a session that is still running.
+		//
+		// Only a move this session is present for: `onPersistenceNotice` replays
+		// the ones raised before it subscribed, and replaying an identity change
+		// as if it were happening now would land it before `session_start`, and
+		// again for every later `AgentSession` over the same manager.
+		let liveForMoves = false;
+		this.#unsubscribeSessionMoved = this.sessionManager.onPersistenceNotice(notice => {
+			const runner = this.#extensionRunner;
+			if (!runner || !liveForMoves) return;
+			// The move is announced inside the write that decides it, before the
+			// new file is written, so its handlers cannot be awaited here. They
+			// run once that file is written and the previous move's handlers are
+			// done, and the session's next tool call or model request waits for
+			// them for up to `SESSION_MOVED_HANDLER_GRACE_MS` from now. At that
+			// point the session stops waiting; the handlers keep running.
+			const event = {
+				type: "session_moved",
+				reason: notice.reason,
+				previousSessionId: notice.previousSessionId,
+				sessionId: notice.sessionId,
+				previousSessionFile: notice.from,
+				sessionFile: notice.to,
+			} as const;
+			// This move takes its place in the queue, and its gate, before any
+			// handler runs: a handler that writes moves the session again, and
+			// that move must find this one queued behind its predecessors and
+			// gating the next request.
+			this.#movesPending++;
+			const previous = this.#movesHandled;
+			const handled = Promise.withResolvers<void>();
+			this.#movesHandled = handled.promise;
+			const grace = Promise.withResolvers<void>();
+			// Opens the gate when the handlers have not finished in time: the gate
+			// clears it as soon as they do, before it can fire.
+			const timer = setTimeout(() => grace.resolve(), SESSION_MOVED_HANDLER_GRACE_MS);
+			timer.unref?.();
+			const gate = Promise.race([handled.promise, grace.promise]).finally(() => {
+				clearTimeout(timer);
+				if (this.#movesGate === gate) this.#movesGate = undefined;
+			});
+			this.#movesGate = gate;
+			// Handlers start once this move's new file is durably written —
+			// asynchronously on some write paths, so not before the write that
+			// announced it has finished — and the previous move's handlers are
+			// done. A move whose file is never written, because the manager
+			// stopped writing or the session was disposed first, starts none.
+			// A file already written starts them in the same step, so a
+			// synchronous write's handlers start a microtask after it. The
+			// session's requests wait for these handlers, so the requests the
+			// handlers start do not wait for the session's holds; a parent
+			// session's holds still hold them.
+			const emit = (written: boolean) =>
+				written
+					? runOutsideRequestHolds(this.agent.requestHolds, () =>
+							runner.emitSessionMoved(event, this.#movesAbort.signal),
+						)
+					: undefined;
+			void previous
+				.then(() => {
+					const written = this.sessionManager.moveWritten(notice);
+					return written === undefined ? this.#whenMoveWritten(notice).then(emit) : emit(written);
+				})
+				.catch(error => logger.warn("session_moved handlers failed", { error: toError(error).message }))
+				.finally(() => {
+					this.#movesPending--;
+					handled.resolve();
+				});
+		});
+		liveForMoves = true;
 		this.#cacheWarmer = config.cacheWarmer;
 		if (config.cacheWarmer) {
 			const warmer = config.cacheWarmer;
@@ -2389,7 +2646,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#autoTitle = config.autoTitle === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
-		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
+		// Every side request — `runEphemeralTurn`, handoff, compaction, branch
+		// summary — is started in the agent's request context and handed to the
+		// stream function once its holds let it go: a host stream function that
+		// sends without a transport is held too, and a transport checks again at
+		// its own send. Inside `#asSideRequest` both checks use the views that
+		// side request carries.
+		const sideStreamFn = config.sideStreamFn ?? streamSimple;
+		this.#sideStreamFn = (...args) =>
+			this.agent.runInRequestContext(() => afterRequestHolds(args[2]?.signal, () => sideStreamFn(...args)));
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
 		// Avoid wrapping in an `async` closure when no user callback is configured: the
@@ -2439,6 +2704,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// A transition swaps the transcript under the agent: hold idle deliveries until it
 			// settles, so a result from the outgoing session cannot start a turn in the target.
 			isStreaming: () => this.isStreaming || this.isSessionTransitioning,
+			// A host registers dispatchers too (`session.yieldQueue.register`).
+			runDispatcher: this.#runAsHostWork,
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
@@ -2545,7 +2812,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return thunks;
 		});
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
-		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
+		this.#getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
 		const sessionToolsHost: SessionToolsHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -2619,6 +2886,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			cancel: toolCallId => this.#ttsr.cancelBridgedToolCall(toolCallId),
 		});
 		this.agent.setOnBeforeYield(() => this.#ttsr.settleJudgments());
+		// The agent asks this hold before everything that prepares a model
+		// request or a tool call and last at its send or execution, after
+		// every such step whoever added it, and asks every hold together: a
+		// move any hook, transform or gate makes — or an earlier tool call's
+		// persisted result — is waited for too, and no hold a host adds can
+		// come between.
+		this.addDisposer(this.agent.addHold(() => this.#holdForMoves()));
 		this.agent.setOnModelCallSystemPrompt(prompt => {
 			this.#tools.recordPrimaryModelCall(prompt);
 			this.#recordModelCallSystemPrompt(prompt);
@@ -2633,7 +2907,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			sessionId: () => this.sessionId,
 			costGate: () => this.#costGate,
 			localProtocolOptions: () => this.#localProtocolOptions(),
-			transformContext: (messages, signal) => this.#transformContext(messages, signal),
+			// The last check before the host's context transform: a hold
+			// registered while the request was prepared holds the transform too.
+			transformContext: (messages, signal) =>
+				afterRequestHolds(signal, () => this.#transformContext(messages, signal)),
 			convertToLlm: messages => this.#convertToLlm(messages),
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
@@ -2823,6 +3100,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			modelRegistry: this.#modelRegistry,
 			extensionRunner: this.#extensionRunner,
 			sideStreamFn: this.#sideStreamFn,
+			asSideRequest: request => this.#asSideRequest(request),
 			providerSessionState: this.#providerSessionState,
 			preferWebsockets: model => resolveWebsocketPreference(this.settings, model),
 			model: () => this.model,
@@ -2972,6 +3250,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			sideStreamFn: this.#sideStreamFn,
+			asSideRequest: request => this.#asSideRequest(request),
 			obfuscator: () => this.#obfuscator,
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
@@ -3042,6 +3321,46 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#watchModelAvailabilitySettings();
 		// Last: makes the session addressable by its instance key (and, on a worker, published to main).
 		registerLocalSession(this);
+		claims.keep();
+	}
+
+	/**
+	 * Makes every extension callback, and every host callback the runner or the manager keeps, this
+	 * session's work, whichever path calls it. A runner answers to one live session: a second live
+	 * session would put the first one's extension work outside the first one's holds. A manager
+	 * answers to every live session over it, until the session begins its disposal. The claims are
+	 * released when the returned guard is disposed without {@link keep} — a constructor that threw —
+	 * and the half-built session counts as disposed, so whatever it left registered on shared
+	 * objects goes inert.
+	 */
+	#claimRequestContexts(runner: ExtensionRunner | undefined): Disposable & { keep(): void } {
+		if (runner) {
+			const owner = runner.requestContextOwner;
+			if (owner && owner !== this && !owner.isDisposed) {
+				throw new Error("This extension runner already belongs to another live session");
+			}
+			runner.requestContextOwner = this;
+			runner.runInRequestContext = fn => this.#inLogContext(fn);
+		}
+		this.#leaveManager = this.sessionManager.addRequestContextOwner(this.#runAsHostWork);
+		registerSessionWork(this, fn => this.#inLogContext(fn));
+		let kept = false;
+		return {
+			keep: () => {
+				kept = true;
+			},
+			[Symbol.dispose]: () => {
+				if (kept) return;
+				this.#isDisposed = true;
+				this.#leaveManager?.();
+				if (runner?.requestContextOwner === this) {
+					runner.requestContextOwner = undefined;
+					runner.runInRequestContext = undefined;
+				}
+				this.#unsubscribeSessionMoved?.();
+				this.#unregisterAsyncDeliverySink?.();
+			},
+		};
 	}
 
 	/** Registers teardown to run when this session is disposed (e.g. handle listeners bound to it). */
@@ -3057,7 +3376,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	enableIdleMaintenance(options: IdleMaintenanceOptions = {}): void {
 		if (this.#isDisposed || this.#idleMaintenance) return;
-		const maintenance = new IdleMaintenance(this, options);
+		const maintenance = new IdleMaintenance(this, membersAsSessionWork(this.#runAsHostWork, options));
 		this.#idleMaintenance = maintenance;
 		this.addDisposer(() => maintenance.dispose());
 	}
@@ -3347,13 +3666,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#sessionBeforeSwitchReconciler: (() => Promise<void>) | undefined;
 
 	setSessionBeforeSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
-		this.#sessionBeforeSwitchReconciler = reconciler ?? undefined;
+		this.#sessionBeforeSwitchReconciler = reconciler ? this.#asWork(reconciler) : undefined;
 	}
 
 	#sessionSwitchReconciler: (() => Promise<void>) | undefined;
 
 	setSessionSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
-		this.#sessionSwitchReconciler = reconciler ?? undefined;
+		this.#sessionSwitchReconciler = reconciler ? this.#asWork(reconciler) : undefined;
 	}
 
 	/**
@@ -3622,15 +3941,52 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#admittedSubmissionsSettled.promise;
 	}
 
-	/** Run session work outside an agent run (prompt setup, manual maintenance) under the agent's log context. */
+	/**
+	 * Runs `fn` as this session's work: every model request it starts, now or later in its async
+	 * flow, waits for the session agent's holds. For a host that starts session work from outside
+	 * one — a UI callback, a command handler, a worker's message.
+	 */
+	runInRequestContext<T>(fn: () => T): T {
+		return this.#inLogContext(fn);
+	}
+
+	/**
+	 * Run session work outside an agent run (prompt setup, manual maintenance) under the agent's log
+	 * context and in its request context, so every model request the work starts waits for the
+	 * agent's holds (`Agent.runInRequestContext`).
+	 */
 	#inLogContext<T>(work: () => T): T {
-		return this.agent.logContext ? logger.withContext(this.agent.logContext, work) : work();
+		const inContext = () => this.agent.runInRequestContext(work);
+		return this.agent.logContext ? logger.withContext(this.agent.logContext, inContext) : inContext();
+	}
+
+	/**
+	 * How a host function the session, its manager or its yield queue keeps runs: in the agent's
+	 * request context (`Agent.runInRequestContext`), where every model request it starts waits for
+	 * the session's holds, whoever triggers the call. Already in that context (the agent's own
+	 * turn), it adds no async-context frame, which keeps per-event listener fan-out cheap.
+	 */
+	readonly #runAsHostWork: SessionWorkRun = work => this.agent.runInRequestContext(work);
+
+	/** `fn` as this session's work whenever it is called (see `asSessionWork`): for a host function the session keeps. */
+	#asWork<F extends (...args: never[]) => unknown>(fn: F): F {
+		return asSessionWork(this.#runAsHostWork, fn);
+	}
+
+	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
+	get getXdevToolEntries(): () => Array<{ name: string; summary: string }> {
+		return this.#getXdevToolEntries;
+	}
+
+	/** A host's replacement runs as this session's work. */
+	set getXdevToolEntries(entries: () => Array<{ name: string; summary: string }>) {
+		this.#getXdevToolEntries = this.#asWork(entries);
 	}
 
 	async #admitSubmission<T>(work: () => Promise<T>): Promise<T> {
 		this.#admittedSubmissionCount++;
 		try {
-			if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
+			if (this.hasPendingDeferredExtensions) await this.#inLogContext(() => this.loadDeferredExtensions());
 			return await this.#inLogContext(work);
 		} finally {
 			if (--this.#admittedSubmissionCount === 0 && this.#admittedSubmissionsSettled) {
@@ -3783,42 +4139,49 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	// Event Subscription
 	// =========================================================================
 
-	/** Emit an event to all listeners */
+	/** Emit an event to all listeners, as this session's work: a model request one starts waits for its holds. */
 	#emit(event: AgentSessionEvent): void {
 		// Listener array is copy-on-write (see `subscribe`), so iterating the
-		// current array is safe against (un)subscribes made by a listener.
-		for (const l of this.#eventListeners) {
-			try {
-				const result = l(event) as unknown;
-				// Listener may be an async function whose returned Promise we don't await;
-				// attach a catch so a rejection does not become an unhandled rejection.
-				if (isPromise(result)) {
-					result.catch(err => {
-						logger.warn("AgentSession listener rejected", {
-							error: err instanceof Error ? err.message : String(err),
+		// array read here is safe against (un)subscribes made by a listener.
+		const listeners = this.#eventListeners;
+		if (listeners.length === 0) return;
+		this.#runAsHostWork(() => {
+			for (const l of listeners) {
+				try {
+					const result = l(event) as unknown;
+					// Listener may be an async function whose returned Promise we don't await;
+					// attach a catch so a rejection does not become an unhandled rejection.
+					if (isPromise(result)) {
+						result.catch(err => {
+							logger.warn("AgentSession listener rejected", {
+								error: err instanceof Error ? err.message : String(err),
+							});
 						});
+					}
+				} catch (err) {
+					logger.warn("AgentSession listener threw", {
+						error: err instanceof Error ? err.message : String(err),
 					});
 				}
-			} catch (err) {
-				logger.warn("AgentSession listener threw", {
-					error: err instanceof Error ? err.message : String(err),
-				});
 			}
-		}
+		});
 	}
 
 	#emitRunState(state: "running" | "idle"): void {
 		if (state === "idle") this.#runStartedAt = undefined;
 		else this.#runStartedAt ??= Date.now();
-		for (const listener of this.#runStateListeners) {
-			try {
-				listener(state);
-			} catch (error) {
-				logger.warn("AgentSession run-state listener threw", {
-					error: error instanceof Error ? error.message : String(error),
-				});
+		if (this.#runStateListeners.size === 0) return;
+		this.#runAsHostWork(() => {
+			for (const listener of this.#runStateListeners) {
+				try {
+					listener(state);
+				} catch (error) {
+					logger.warn("AgentSession run-state listener threw", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
 			}
-		}
+		});
 	}
 
 	/**
@@ -5694,6 +6057,74 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#ttsr.afterToolCall(ctx);
 	}
 	/**
+	 * One model request's or tool call's hold for the `session_moved`
+	 * handlers: it holds while a move's gate is shut (its handlers queued or
+	 * running, for up to {@link SESSION_MOVED_HANDLER_GRACE_MS} after the
+	 * move), until the request has waited that long in all, counted from the
+	 * first gate it meets — a move announced while it waits adds handlers to
+	 * wait for, never time. Says so, once, when it lets a request it held go
+	 * on with handlers still running.
+	 */
+	#holdForMoves(): AgentHold {
+		const deadline = new MoveWaitDeadline();
+		let held = false;
+		let warned = false;
+		return {
+			pending: () => {
+				const gate = this.#movesGate;
+				if (gate && !deadline.expired) {
+					held = true;
+					return Promise.race([gate, deadline.reached()]);
+				}
+				if (held && this.#movesPending > 0 && !warned) {
+					warned = true;
+					logger.warn("session_moved handlers still running; the session goes on without waiting for them", {
+						sessionId: this.sessionManager.getSessionId(),
+						movesWithHandlersRunning: this.#movesPending,
+					});
+				}
+				return undefined;
+			},
+			release: () => deadline[Symbol.dispose](),
+		};
+	}
+
+	/**
+	 * Runs `request` — one side request, from its preparation to its send —
+	 * in the agent's request context, carrying one view of every hold of that
+	 * context: the agent's own and a parent session's. Every check it makes —
+	 * before its context transform, at each request it starts for its context
+	 * build (an image description, say) and at its transport's send — shares
+	 * those views, so each hold's deadline is spent once: like a model request
+	 * of the agent's, it waits for the `session_moved` handlers at most
+	 * {@link SESSION_MOVED_HANDLER_GRACE_MS} in all, and says at most once that
+	 * it went on without them. A side request a handler starts is exempt from
+	 * the session's own holds.
+	 */
+	#asSideRequest<T>(request: () => Promise<T>): Promise<T> {
+		return this.agent.runInRequestContext(async () => {
+			const views = openRequestHolds();
+			try {
+				return await views.carry(request);
+			} finally {
+				views.release();
+			}
+		});
+	}
+
+	/** Whether `notice`'s new file was written before the manager stopped writing; `false` once the session is disposed. */
+	#whenMoveWritten(notice: SessionPersistenceNotice): Promise<boolean> {
+		const signal = this.#movesAbort.signal;
+		if (signal.aborted) return Promise.resolve(false);
+		const disposed = Promise.withResolvers<boolean>();
+		const onAbort = () => disposed.resolve(false);
+		signal.addEventListener("abort", onAbort, { once: true });
+		return Promise.race([this.sessionManager.whenMoveWritten(notice), disposed.promise]).finally(() =>
+			signal.removeEventListener("abort", onAbort),
+		);
+	}
+
+	/**
 	 * Emits the extension `tool_call` event for a loop-dispatched call at
 	 * arg-prep time — before concurrency scheduling, `tool_execution_start`,
 	 * and the wrapper's approval gate. A handler block becomes a blocked tool
@@ -5924,6 +6355,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Subscribe to agent events.
 	 * Session persistence is handled internally (saves messages on message_end).
 	 * Multiple listeners can be added. Returns unsubscribe function for this listener.
+	 * Listeners run as this session's work (see {@link runInRequestContext}), whoever emits the event.
 	 */
 	subscribe(listener: AgentSessionEventListener): () => void {
 		// Copy-on-write: `#emit` iterates the array it read without copying it.
@@ -6263,13 +6695,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	#notifyCommandMetadataChanged(): void {
 		const listeners = [...this.#commandMetadataChangedListeners];
-		for (const listener of listeners) {
-			try {
-				void listener();
-			} catch (err) {
-				logger.error("Command metadata listener threw", { err });
+		if (listeners.length === 0) return;
+		this.#runAsHostWork(() => {
+			for (const listener of listeners) {
+				try {
+					void listener();
+				} catch (err) {
+					logger.error("Command metadata listener threw", { err });
+				}
 			}
-		}
+		});
 	}
 
 	/**
@@ -6365,13 +6800,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#notifySessionChangeCallbacks(): void {
-		for (const callback of Array.from(this.#sessionChangeCallbacks)) {
-			try {
-				callback();
-			} catch (error) {
-				logger.warn("Session change callback failed", { error: String(error) });
+		const callbacks = Array.from(this.#sessionChangeCallbacks);
+		if (callbacks.length === 0) return;
+		this.#runAsHostWork(() => {
+			for (const callback of callbacks) {
+				try {
+					callback();
+				} catch (error) {
+					logger.warn("Session change callback failed", { error: String(error) });
+				}
 			}
-		}
+		});
 	}
 
 	/** Run one abortable auto-learn capture outside the primary agent loop. */
@@ -6379,7 +6818,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (this.#autolearnCaptureTask || this.#isDisposed) return;
 		const controller = new AbortController();
 		this.#autolearnCaptureAbortController = controller;
-		const task = (async () => {
+		const task = this.#inLogContext(async () => {
 			try {
 				await capture(controller.signal);
 			} catch (error) {
@@ -6389,7 +6828,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					this.#autolearnCaptureAbortController = undefined;
 				}
 			}
-		})();
+		});
 		this.#autolearnCaptureTask = task;
 		try {
 			await task;
@@ -6435,7 +6874,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
-		for (const dispose of this.#disposers.splice(0)) dispose();
+		// The manager's host functions stop being this session's work; a request of theirs that waits
+		// only on this session's holds goes on.
+		this.#leaveManager?.();
+		// Teardown is the session's work: a final request a disposer starts (a
+		// memory flush, say) waits for the holds still registered.
+		this.#inLogContext(() => {
+			for (const dispose of this.#disposers.splice(0)) dispose();
+		});
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
@@ -6616,11 +7062,31 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#cancelExitRecorder = undefined;
 		this.#cancelFatalRecoveryHint?.();
 		this.#cancelFatalRecoveryHint = undefined;
+		// The exit record can be this session's first write, and so the one that
+		// finds the file owned by another process and moves the session: its
+		// `session_moved` is announced before `session_shutdown`, and its
+		// handlers are not waited for — one that never returns must not hold
+		// teardown. A move during the rest of teardown reaches no handler — the
+		// session is going away — and the subscription must not outlive it in
+		// the manager.
+		this.#unsubscribeSessionMoved?.();
+		this.#unsubscribeSessionMoved = undefined;
+		// The exit record is written synchronously, so its move's new file is
+		// written by now, and its handlers start a microtask after that write.
+		// Yield that microtask, so a handler the exit record's move may start
+		// now has started before `session_shutdown` is emitted; one queued
+		// behind a handler still running does not start here.
+		await Promise.resolve();
 		try {
 			await emitSessionShutdownEvent(this.#extensionRunner);
 		} catch (error) {
 			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
 		}
+		// After `session_shutdown`, so the exit record's move reached its
+		// handlers: from here no `session_moved` handler starts — not the next
+		// in a slow move, nor a queued move's — and the running one's `ctx.ui`
+		// dialogs are cancelled. Its own code keeps running; nothing stops it.
+		this.#movesAbort.abort(new Error("the session was disposed"));
 
 		// Stop fallback extension timers before aborting deferred work they could enqueue.
 		this.#fallbackExtensionTimers?.clearAll();
@@ -6655,6 +7121,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const results = await Promise.allSettled([
 			this.#disposeOwnedAsyncJobs(),
 			this.#eval.disposeKernels(),
+			// Every answer this session was given and has not read, whichever
+			// cell or kernel asked, and every answer still on its way: the
+			// account is closed, not drained, so none can be charged after.
+			closeArtifactPinAccount(this.sessionManager.getSessionId()),
 			this.#releaseOwnedBrowserTabs(this.#eval.getKernelOwnerId()),
 			this.#releaseOwnedComputerSessions(this.#eval.getKernelOwnerId()),
 			this.#disconnectOwnedMcp(),
@@ -6680,7 +7150,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		hindsightState?.dispose();
 		this.#disconnectFromAgent();
 		// beginDispose() drained the rest; this catches registrations made during teardown.
-		for (const dispose of this.#disposers.splice(0)) dispose();
+		this.#inLogContext(() => {
+			for (const dispose of this.#disposers.splice(0)) dispose();
+		});
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
 		this.#ircWakeHoldListeners.clear();
@@ -7320,7 +7792,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Runs a registry/presentation mutation in this session's shared queue. */
 	runToolRegistryMutation<T>(mutation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-		return this.#tools.runToolRegistryMutation(mutation, signal);
+		return this.#tools.runToolRegistryMutation(this.#asWork(mutation), signal);
 	}
 
 	/** Names of every registered tool. */
@@ -7479,7 +7951,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Rebuilds the stable base prompt, optionally discarding a stale asynchronous rebuild. */
 	refreshBaseSystemPrompt(commitIf?: () => boolean): Promise<void> {
-		return this.#tools.refreshBaseSystemPrompt(commitIf);
+		return this.#tools.refreshBaseSystemPrompt(commitIf && this.#asWork(commitIf));
 	}
 
 	/** Replaces connected MCP tools and enables them immediately. */
@@ -7494,7 +7966,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * {@link refreshMCPTools} triggers when the instructions changed.
 	 */
 	setMcpServerInstructionsSource(source: (() => Map<string, string> | undefined) | undefined): void {
-		this.#setMcpServerInstructionsSource?.(source);
+		this.#setMcpServerInstructionsSource?.(source && this.#asWork(source));
 	}
 
 	/** Makes turns wait, bounded, for in-flight MCP discovery before building their system prompt. */
@@ -7527,8 +7999,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const load = this.#deferredExtensionLoader;
 		if (load) {
 			this.#deferredExtensionLoader = undefined;
-			const pending = deferredExtensionLoadScope
-				.run(true, load)
+			// The load is the session's work, whoever starts it: a request an
+			// extension's factory sends, or a timer it arms, waits for its holds.
+			const pending = this.#inLogContext(() => deferredExtensionLoadScope.run(true, load))
 				.then(
 					() => this.#notifyCommandMetadataChanged(),
 					(error: unknown) => {
@@ -7906,7 +8379,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	setClientBridge(bridge: ClientBridge | undefined): void {
-		this.#clientBridge = bridge;
+		this.#clientBridge = bridge && membersAsSessionWork(this.#runAsHostWork, bridge);
 		this.#tools.refreshAcpPermissionGates();
 	}
 
@@ -9550,12 +10023,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// Stamp before image preprocessing so a queued image follow-up measures
 		// from the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
+		const onPromptQueued = options?.onPromptQueued;
 		if (!options?.synthetic) {
 			await this.#queueUserMessage(expandedText, images, "followUp", {
 				timestamp: submittedAt,
 				attribution: options?.attribution,
 				rawText: text,
-				onPromptQueued: options?.onPromptQueued,
+				onPromptQueued,
 			});
 			return;
 		}
@@ -9584,7 +10058,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			synthetic: true,
 		};
 		this.agent.followUp(directive);
-		options.onPromptQueued?.(imageDescriptionNotice ? [imageDescriptionNotice, directive] : [directive]);
+		onPromptQueued?.(imageDescriptionNotice ? [imageDescriptionNotice, directive] : [directive]);
 		this.#scheduleIdleQueueDrain();
 	}
 
@@ -9694,7 +10168,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async runModeExitTeardown(teardown: () => Promise<void>): Promise<void> {
 		this.#modeExitDrainSuppressionDepth++;
 		try {
-			await teardown();
+			await this.#runAsHostWork(teardown);
 		} finally {
 			this.#modeExitDrainSuppressionDepth--;
 			if (this.#modeExitDrainSuppressionDepth === 0) {
@@ -10562,7 +11036,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Explicit `deliverAs` queues without starting a turn in either state; `aside` at
 	 * an idle session instead starts a turn, since there is no live run to inject into.
 	 */
-	async sendUserMessage(
+	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): Promise<void> {
+		return this.#inLogContext(() => this.#sendUserMessage(content, options));
+	}
+
+	async #sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
 		options?: SendUserMessageOptions,
 	): Promise<void> {
@@ -11381,7 +11859,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * `customSystemPrompt` swaps the title prompt for special-purpose titling
 	 * (e.g. plan-save filename topics) without touching the session override.
 	 */
-	async generateTitle(
+	generateTitle(firstMessage: string, customSystemPrompt?: string, signal?: AbortSignal): Promise<string | null> {
+		return this.#inLogContext(() => this.#generateTitle(firstMessage, customSystemPrompt, signal));
+	}
+
+	async #generateTitle(
 		firstMessage: string,
 		customSystemPrompt?: string,
 		signal?: AbortSignal,
@@ -11541,7 +12023,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  prompt never reached the agent or the session file, so without this hook
 	 *  it would vanish; interactive mode restores it to the editor for editing. */
 	setPromptDropped(handler: ((prompt: DroppedPrompt) => void) | undefined): void {
-		this.#promptDropped = handler;
+		this.#promptDropped = handler && this.#asWork(handler);
 	}
 
 	/**
@@ -12859,7 +13341,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	// =========================================================================
 
 	/**
-	 * Execute a bash command and retain the session/branch that owned its start.
+	 * Execute a bash command and retain the session/branch that owned its start. It runs as this
+	 * session's work, `onChunk` and the `user_bash` hooks included, whoever calls it.
 	 * @param command The bash command to execute
 	 * @param onChunk Optional streaming callback for output
 	 * @param options.excludeFromContext If true, command output won't be sent to LLM (!! prefix)
@@ -12870,7 +13353,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		onChunk?: (chunk: string) => void,
 		options?: { excludeFromContext?: boolean; useUserShell?: boolean; pty?: BashPtyOptions },
 	): Promise<BashResult> {
-		return this.#bash.executeBash(command, onChunk, options);
+		return this.#inLogContext(() => this.#bash.executeBash(command, onChunk, options));
 	}
 
 	/** Record a bash result supplied outside executeBash in the current ownership scope. */
@@ -12899,7 +13382,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Execute Python code in the shared kernel.
-	 * Uses the same kernel session as eval's Python backend, allowing collaborative editing.
+	 * Uses the same kernel session as eval's Python backend, allowing collaborative editing. It runs
+	 * as this session's work, `onChunk` and the tools the cell calls included, whoever calls it.
 	 * @param code The Python code to execute
 	 * @param onChunk Optional streaming callback for output
 	 * @param options.excludeFromContext If true, execution won't be sent to LLM ($$ prefix)
@@ -12909,7 +13393,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		onChunk?: (chunk: string) => void,
 		options?: { excludeFromContext?: boolean },
 	): Promise<PythonResult> {
-		return this.#eval.executePython(code, onChunk, options);
+		return this.#inLogContext(() => this.#eval.executePython(code, onChunk, options));
 	}
 
 	assertEvalExecutionAllowed(): void {
@@ -12998,7 +13482,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	setIrcWakeTurnObserver(
 		observer: ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined,
 	): void {
-		this.#ircWakeTurnObserver = observer;
+		this.#ircWakeTurnObserver = observer
+			? records => {
+					const finish = this.#runAsHostWork(() => observer(records));
+					return finish && this.#asWork(finish);
+				}
+			: undefined;
 	}
 
 	/**
@@ -13074,9 +13563,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Used by `BtwController` (`/btw`) and `OmfgController` (`/omfg`) to share
 	 * the snapshot + stream pipeline. The snapshot includes any in-flight
 	 * streaming assistant text so the model sees the half-finished response
-	 * rather than missing context.
+	 * rather than missing context. It is one side request: its waits for the
+	 * `session_moved` handlers share one deadline.
 	 */
-	async runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
+	runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
+		return this.#asSideRequest(() => this.#runEphemeralTurn(args));
+	}
+
+	async #runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
 		const model = this.model;
 		if (!model) {
 			throw new Error("No active model on session");
@@ -13414,6 +13908,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		},
 	): Promise<boolean> {
 		const explicitModel = options?.model;
+		const onCwdChange = options?.onCwdChange && this.#asWork(options.onCwdChange);
+		const onModelFallback = options?.onModelFallback && this.#asWork(options.onModelFallback);
 		if (explicitModel && !this.#modelRegistry.hasConfiguredAuth(explicitModel)) {
 			throw new Error(`No API key for ${explicitModel.provider}/${explicitModel.id}`);
 		}
@@ -13442,7 +13938,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		await this.#bash.flushPending();
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
-		const previousSessionState = this.sessionManager.captureState();
 		const bashTransition = this.#bash.beginSessionTransition();
 		// Only same-session reloads compare against the prior context to detect
 		// rollback edits (`#didSessionMessagesChange` below). Building it for a
@@ -13505,7 +14000,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#usagePreflightReadyForNextModelCall = false;
 		this.#usagePreflightReadyModel = undefined;
 
+		// Last before the try, and it must stay there: this takes a counted
+		// holder on the session being left, and only the commit at the end of
+		// the try or the rollback in its catch ends that holder. Anything that
+		// throws above runs outside both, and would leave the session reserved
+		// for a process that is no longer in it.
+		const previousSessionState = this.sessionManager.captureState();
 		let cwdChangeTarget: string | undefined;
+		let rollbackFork: (() => Promise<void>) | undefined;
 		try {
 			if (switchingToDifferentSession) {
 				// Stop and settle in-flight advisors while the old-session feeds can
@@ -13515,20 +14017,31 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// The file may be reloaded at the same path with a different latest contract (or the
 			// switch rolled back via restoreState); re-read it on the next model call either way.
 			this.#sessionInit = undefined;
-			await this.sessionManager.setSessionFile(sessionPath);
+			// A session another live omp process is writing, or whose file now
+			// holds a different session, is not ours to continue: take a fork of
+			// what was loaded instead of its id (same reasoning as the startup
+			// resume guard in session-transfer.ts).
+			const { forkedFrom } = await this.sessionManager.setSessionFile(sessionPath, {
+				forkIfContested: true,
+			});
 			this.#bash.markSessionTransition(bashTransition);
+			if (forkedFrom) {
+				rollbackFork = this.sessionManager.resumedForkRollback();
+				await noteResumedSessionFork(this.sessionManager, forkedFrom);
+				this.#tellModelWhenArtifactsAreMissing();
+			}
 			const newCwd = this.sessionManager.getCwd();
 			const recordedCwd = this.sessionManager.getRecordedCwd() ?? previousSessionState.cwd;
 			if (options?.preserveLocalCwd) {
 				this.sessionManager.setCwdWithoutRelocation(previousSessionState.cwd);
 			} else {
-				if (!options?.onCwdChange && path.resolve(recordedCwd) !== path.resolve(previousSessionState.cwd)) {
+				if (!onCwdChange && path.resolve(recordedCwd) !== path.resolve(previousSessionState.cwd)) {
 					throw SESSION_CWD_CHANGE_REJECTED;
 				}
-				if (options?.onCwdChange) {
+				if (onCwdChange) {
 					if (path.resolve(newCwd) !== path.resolve(previousSessionState.cwd)) {
 						cwdChangeTarget = newCwd;
-						if (!(await options.onCwdChange(newCwd, previousSessionState.cwd))) {
+						if (!(await onCwdChange(newCwd, previousSessionState.cwd))) {
 							throw SESSION_CWD_CHANGE_REJECTED;
 						}
 					} else if (path.resolve(recordedCwd) !== path.resolve(previousSessionState.cwd)) {
@@ -13721,11 +14234,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			generationSettled.resolve();
 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
 			if (modelFallbackWarning) {
-				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
+				if (onModelFallback) onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
 			}
+			// Last, because everything above can still throw into the rollback
+			// below — including a host's `onModelFallback`. Until this runs, the
+			// session this switch came from is still owned by this process, so a
+			// rollback takes it straight back instead of racing a second process
+			// for it; after it, no path may roll back.
+			this.sessionManager.commitSessionSwitch(previousSessionState);
 			return true;
 		} catch (error) {
+			let forkCleanupError: unknown;
+			try {
+				await rollbackFork?.();
+			} catch (cleanupError) {
+				forkCleanupError = cleanupError;
+			}
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
@@ -13792,10 +14317,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					error: String(reconcileError),
 				});
 			}
-			if (cwdChangeTarget && error !== SESSION_CWD_CHANGE_REJECTED && options?.onCwdChange) {
+			if (cwdChangeTarget && error !== SESSION_CWD_CHANGE_REJECTED && onCwdChange) {
 				let rollbackFailure: string | undefined;
 				try {
-					if (!(await options.onCwdChange(previousSessionState.cwd, cwdChangeTarget))) {
+					if (!(await onCwdChange(previousSessionState.cwd, cwdChangeTarget))) {
 						rollbackFailure = "cwd rollback was rejected";
 					}
 				} catch (rollbackError) {
@@ -13810,6 +14335,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 			}
 			this.#bash.finishSessionTransition(bashTransition, false);
+			if (forkCleanupError !== undefined) {
+				logger.warn("Could not remove a rolled-back session fork", { error: String(forkCleanupError) });
+				throw new Error(`Session switch rolled back but fork cleanup failed: ${String(forkCleanupError)}`, {
+					cause: error,
+				});
+			}
 			if (error === SESSION_CWD_CHANGE_REJECTED) return false;
 			throw error;
 		}
@@ -14123,38 +14654,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * @param options.customInstructions Custom instructions for summarizer
 	 * @returns Result with editorText/editorImages (if user message) and cancelled status
 	 */
-	async navigateTree(
-		targetId: string,
-		options: {
-			summarize?: boolean;
-			customInstructions?: string;
-			/**
-			 * Opts into the two-phase `ask` toolResult re-answer protocol
-			 * (issue #5642): set only by the interactive `/tree` selector, which
-			 * knows how to re-open the picker on `reopenAsk` and complete the
-			 * navigation with `reanswerAskResult`. Every other public caller
-			 * (extensions, hooks, ACP, session-extension actions) leaves this
-			 * unset and gets the pre-#5642 plain leaf move onto `ask`
-			 * toolResults instead — they have no picker to re-open and would
-			 * otherwise report a successful no-op navigation (roboomp review on
-			 * #5895).
-			 */
-			allowAskReopen?: boolean;
-			/**
-			 * Completes an in-progress `ask` re-answer (issue #5642): the caller
-			 * already received `reopenAsk` from a prior call on the same
-			 * `targetId`, re-opened the picker, and is handing back the fresh
-			 * answer. Branches a new toolResult sibling instead of landing on
-			 * the original one.
-			 */
-			reanswerAskResult?: AgentToolResult<AskToolDetails>;
-			/**
-			 * Refuse with {@link SessionBusyError} when work started while the hooks
-			 * or the branch summary were awaited, before any tree change is made.
-			 */
-			requireIdle?: boolean;
-		} = {},
-	): Promise<NavigateTreeResult> {
+	navigateTree(targetId: string, options: NavigateTreeOptions = {}): Promise<NavigateTreeResult> {
+		return this.#inLogContext(() => this.#navigateTree(targetId, options));
+	}
+
+	async #navigateTree(targetId: string, options: NavigateTreeOptions = {}): Promise<NavigateTreeResult> {
 		using _transition = this.#beginSessionTransition();
 		await this.#bash.flushPending();
 		const oldLeafId = this.sessionManager.getLeafId();
@@ -14272,22 +14776,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (!apiKey) {
 				throw new Error(`No API key for ${model.provider}`);
 			}
-			const result = await generateBranchSummary(entriesToSummarize, {
-				model,
-				apiKey: this.#modelRegistry.resolver(model, this.sessionId),
-				signal: this.#branchSummaryAbortController.signal,
-				customInstructions: this.#obfuscateTextForProvider(options.customInstructions),
-				reserveTokens: cfgBranchSummaryReserveTokens.get(this.settings),
-				metadata: this.agent.metadataForProvider(model.provider),
-				convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
-				telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
-				// Same per-provider concurrency cap rationale as the compaction
-				// path above (chatgpt-codex review on #3751).
-				completeImpl: async (requestModel, requestContext, requestOptions) => {
-					const stream = await this.#sideStreamFn(requestModel, requestContext, requestOptions);
-					return stream.result();
-				},
-			});
+			const branchSummarySignal = this.#branchSummaryAbortController.signal;
+			const result = await this.#asSideRequest(() =>
+				generateBranchSummary(entriesToSummarize, {
+					model,
+					apiKey: this.#modelRegistry.resolver(model, this.sessionId),
+					signal: branchSummarySignal,
+					customInstructions: this.#obfuscateTextForProvider(options.customInstructions),
+					reserveTokens: cfgBranchSummaryReserveTokens.get(this.settings),
+					metadata: this.agent.metadataForProvider(model.provider),
+					convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
+					telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
+					// Same per-provider concurrency cap rationale as the compaction
+					// path above (chatgpt-codex review on #3751).
+					completeImpl: async (requestModel, requestContext, requestOptions) => {
+						const stream = await this.#sideStreamFn(requestModel, requestContext, requestOptions);
+						return stream.result();
+					},
+				}),
+			);
 			this.#branchSummaryAbortController = undefined;
 			if (result.aborted) {
 				return { cancelled: true, aborted: true };
@@ -14532,7 +15039,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.agent.abort();
 			},
 			settings: this.settings,
-			ui: uiContext,
+			ui: membersAsSessionWork(this.#runAsHostWork, uiContext),
 			hasUI: true,
 		};
 	}

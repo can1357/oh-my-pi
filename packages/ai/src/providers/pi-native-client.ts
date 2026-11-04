@@ -29,6 +29,7 @@ import type {
 } from "../types";
 import { createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { heldFetch } from "../utils/held-fetch";
 import {
 	armPreResponseTimeout,
 	getStreamFirstEventTimeoutMs,
@@ -181,7 +182,7 @@ export function streamPiNative<TApi extends Api>(
 
 		try {
 			const url = resolveStreamUrl(model as Model<Api>);
-			const fetchImpl = options?.fetch ?? globalThis.fetch;
+			const fetchImpl = heldFetch(options?.fetch ?? globalThis.fetch);
 			const headers = buildHeaders(
 				model as Model<Api>,
 				typeof options?.apiKey === "string" ? options.apiKey : undefined,
@@ -210,7 +211,7 @@ export function streamPiNative<TApi extends Api>(
 				timeout: false,
 			};
 			try {
-				response = await fetchImpl(url, init);
+				response = await watchdog.run(() => fetchImpl(url, init));
 				if (!response.ok) {
 					stream.fail(await decodeGatewayError(response));
 					return;

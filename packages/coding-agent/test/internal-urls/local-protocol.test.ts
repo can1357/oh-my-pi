@@ -9,6 +9,7 @@ import {
 	listLocalFiles,
 	resolveLocalUrlToPath,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { copySessionArtifacts } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
@@ -287,6 +288,43 @@ describe("LocalProtocolHandler", () => {
 					},
 				}),
 			).rejects.toThrow("Local file not found: local://PLAN.md");
+		});
+	});
+
+	it("waits for a fork's inherited local files instead of calling them missing", async () => {
+		await withTempDir(async tempDir => {
+			// A fork inherits `local/` with the rest of its parent's artifacts, by copy.
+			const source = path.join(tempDir, "source");
+			const fork = path.join(tempDir, "fork");
+			await Bun.write(path.join(source, "local", "PLAN.md"), "inherited plan");
+			const { promise: held, resolve: release } = Promise.withResolvers<void>();
+			const copying = copySessionArtifacts(`${source}.jsonl`, `${fork}.jsonl`, {
+				stillTheSource: async () => {
+					await held;
+					return true;
+				},
+			});
+			const router = InternalUrlRouter.instance();
+			const read = (signal?: AbortSignal) =>
+				router
+					.resolve("local://PLAN.md", {
+						signal,
+						localProtocolOptions: { getArtifactsDir: () => fork, getSessionId: () => "fork" },
+					})
+					.then(
+						resource => `answered: ${resource.content}`,
+						(error: unknown) => `threw: ${error instanceof Error ? error.message : String(error)}`,
+					);
+			// Cancelled at once: a read that waits for the copy can only report the
+			// cancellation; anything else it says, it said from a half-copied tree.
+			const cancel = new AbortController();
+			const cancelled = read(cancel.signal);
+			cancel.abort(new Error("cancelled by the reader"));
+			const settled = read();
+			release();
+			await copying;
+			expect(await cancelled).toBe("threw: cancelled by the reader");
+			expect(await settled).toBe("answered: inherited plan");
 		});
 	});
 

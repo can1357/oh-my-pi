@@ -55,6 +55,7 @@ import {
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
 import { getProviderDefinition } from "./registry";
+import { hasRequestHoldScope, runWithRequestSendHooks } from "./request-holds";
 import type {
 	Api,
 	AssistantMessage,
@@ -71,6 +72,7 @@ import type {
 import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
+import { heldFetch, withHeldForm } from "./utils/held-fetch";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
 import { withTransportFetch } from "./utils/transport-fetch";
@@ -640,16 +642,20 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 	// provider exits are covered by one wrap. Official first-party providers are
 	// exempt (see `healLeakedThinking`); healing is otherwise idempotent.
 	const limit = resolveProviderInFlightLimit(model.provider, options);
-	if (limit === undefined) return healLeakedThinking(model, dispatch(false));
+	if (limit === undefined) return runWithRequestSendHooks({}, () => healLeakedThinking(model, dispatch(false)), false);
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
 		let release: (() => Promise<void>) | undefined;
 		let releasePromise: Promise<void> | undefined;
+		let acquiring: Promise<void> | undefined;
 		const releaseOnce = () => {
-			if (!release) return Promise.resolve();
-			releasePromise ??= release();
-			return releasePromise;
+			if (release) {
+				const owned = release;
+				release = undefined;
+				releasePromise = owned();
+			}
+			return releasePromise ?? Promise.resolve();
 		};
 		const releaseBestEffort = async () => {
 			try {
@@ -666,16 +672,31 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 				});
 			}
 		};
+		const prepare = () => {
+			if (release) return undefined;
+			acquiring ??= (async () => {
+				const startedWaitingAt = Date.now();
+				release = await acquireProviderInFlightSlot(model.provider, limit, options?.signal);
+				releasePromise = undefined;
+				if (Date.now() - startedWaitingAt >= PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS) {
+					logger.debug("Provider in-flight limit wait completed", { provider: model.provider, limit });
+				}
+			})().finally(() => {
+				acquiring = undefined;
+			});
+			return acquiring;
+		};
 		try {
-			const startedWaitingAt = Date.now();
-			release = await acquireProviderInFlightSlot(model.provider, limit, options?.signal);
-			if (Date.now() - startedWaitingAt >= PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS) {
-				logger.debug("Provider in-flight limit wait completed", { provider: model.provider, limit });
+			// Without any hold scope, preserve eager acquisition and pre-dispatch errors.
+			if (!hasRequestHoldScope()) {
+				await prepare();
+				options?.signal?.throwIfAborted();
 			}
-			if (options?.signal?.aborted) {
-				throw options.signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
-			}
-			const inner = healLeakedThinking(model, dispatch(true));
+			const inner = runWithRequestSendHooks(
+				{ prepare, held: releaseBestEffort },
+				() => healLeakedThinking(model, dispatch(true)),
+				false,
+			);
 			let terminalEvent: AssistantMessageEvent | undefined;
 			for await (const event of inner) {
 				if (event.type === "done" || event.type === "error") {
@@ -707,25 +728,29 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 
 function createVertexAuthenticatedFetch(options: StreamOptions | undefined): FetchImpl {
 	const baseFetch = options?.fetch ?? fetch;
-	const vertexFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-		const token = await getVertexAccessToken({ signal: options?.signal, fetch: baseFetch });
-		const headers = new Headers(init?.headers);
-		headers.set("Authorization", `Bearer ${token}`);
-		const rewritten = resolveVertexRequest(input);
-		const url = rewritten instanceof Request ? rewritten.url : rewritten.toString();
-		if (isVertexRawPredictUrl(url)) {
-			const bodyText = await readVertexRequestBody(rewritten, init);
-			const transformed = transformVertexAnthropicBody(bodyText);
-			return baseFetch(url, {
-				...init,
-				method: init?.method ?? (rewritten instanceof Request ? rewritten.method : "POST"),
-				headers,
-				body: transformed,
-			});
-		}
-		return baseFetch(rewritten, { ...init, headers });
+	// The token fetch is not a model request; its held form holds only the send, after the token.
+	const build = (send: FetchImpl): FetchImpl => {
+		const vertexFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const token = await getVertexAccessToken({ signal: options?.signal, fetch: baseFetch });
+			const headers = new Headers(init?.headers);
+			headers.set("Authorization", `Bearer ${token}`);
+			const rewritten = resolveVertexRequest(input);
+			const url = rewritten instanceof Request ? rewritten.url : rewritten.toString();
+			if (isVertexRawPredictUrl(url)) {
+				const bodyText = await readVertexRequestBody(rewritten, init);
+				const transformed = transformVertexAnthropicBody(bodyText);
+				return send(url, {
+					...init,
+					method: init?.method ?? (rewritten instanceof Request ? rewritten.method : "POST"),
+					headers,
+					body: transformed,
+				});
+			}
+			return send(rewritten, { ...init, headers });
+		};
+		return Object.assign(vertexFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
 	};
-	return Object.assign(vertexFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
+	return withHeldForm(build(baseFetch), build(heldFetch(baseFetch)));
 }
 
 async function readVertexRequestBody(input: string | URL | Request, init: RequestInit | undefined): Promise<string> {

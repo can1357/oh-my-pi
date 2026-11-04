@@ -11,6 +11,7 @@ import { prompt, readSseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
 import { applySessionHeader } from "../providers/inference-headers";
+import { heldFetch } from "../utils/held-fetch";
 import {
 	errorMessage,
 	ImageApiError,
@@ -200,7 +201,7 @@ export async function generateHostedImage(
 		store: false,
 		...(stream ? { instructions: IMAGE_SYSTEM_INSTRUCTION, stream: true } : {}),
 	};
-	const fetchImpl = options.fetch ?? fetch;
+	const fetchImpl = heldFetch(options.fetch ?? fetch);
 	return withAuth(
 		options.apiKey,
 		async key => {

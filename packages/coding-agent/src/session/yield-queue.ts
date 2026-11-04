@@ -1,5 +1,6 @@
 import { type AgentMessage, ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-core";
 import { logger, toError } from "@oh-my-pi/pi-utils";
+import { asSessionWork, methodsAsSessionWork } from "./session-work";
 
 export interface YieldDispatcher<P> {
 	/** Drop entries already delivered through another path. Called per-entry at flush time. */
@@ -15,6 +16,13 @@ export interface YieldQueueOptions {
 	injectStreaming?(msg: AgentMessage): void;
 	injectIdle(messages: AgentMessage[]): Promise<void>;
 	scheduleIdleFlush(run: () => Promise<void>): void;
+	/**
+	 * Runs each call of the queue's methods, and each later call of a registered dispatcher's
+	 * functions, which a host may supply (see {@link YieldQueue.register}): the owning session runs
+	 * them as its work, so reading a dispatcher's members and calling them both do. Absent, they run
+	 * as they are.
+	 */
+	runDispatcher?: <T>(call: () => T) => T;
 }
 
 type YieldFlushMode = "streaming" | "idle";
@@ -41,6 +49,13 @@ function formatError(error: unknown): string {
 }
 
 export class YieldQueue {
+	// Every method is the owning session's work (see `YieldQueueOptions.runDispatcher`): registering a
+	// host's dispatcher reads its members there (see `methodsAsSessionWork`).
+	static {
+		methodsAsSessionWork(YieldQueue.prototype, queue =>
+			#options in queue ? queue.#options.runDispatcher : undefined,
+		);
+	}
 	readonly #options: YieldQueueOptions;
 	readonly #dispatchers = new Map<string, StoredDispatcher>();
 	readonly #entries = new Map<string, StoredEntry[]>();
@@ -50,10 +65,17 @@ export class YieldQueue {
 		this.#options = options;
 	}
 
+	#asWork<F extends (...args: never[]) => unknown>(fn: F): F {
+		const run = this.#options.runDispatcher;
+		return run ? asSessionWork(run, fn) : fn;
+	}
+
 	register<P>(kind: string, dispatcher: YieldDispatcher<P>): () => void {
+		const run = this.#options.runDispatcher;
+		const call = <T>(fn: () => T): T => (run ? run(fn) : fn());
 		const stored: StoredDispatcher = {
-			...(dispatcher.isStale ? { isStale: entry => dispatcher.isStale?.(entry as P) ?? false } : {}),
-			build: survivors => dispatcher.build(survivors as P[]),
+			...(dispatcher.isStale ? { isStale: entry => call(() => dispatcher.isStale?.(entry as P) ?? false) } : {}),
+			build: survivors => call(() => dispatcher.build(survivors as P[])),
 			...(dispatcher.skipIdleFlush ? { skipIdleFlush: true } : {}),
 		};
 		this.#dispatchers.set(kind, stored);
@@ -189,12 +211,14 @@ export class YieldQueue {
 		for (const [kind, dispatcher] of this.#dispatchers) {
 			const entries = this.#drain(kind);
 			if (entries.length === 0) continue;
-			thunks.push(() => {
-				const built = this.#build(kind, dispatcher, entries);
-				if (!built) return null;
-				this.#attachEntrySettlement(built);
-				return built.message;
-			});
+			thunks.push(
+				this.#asWork(() => {
+					const built = this.#build(kind, dispatcher, entries);
+					if (!built) return null;
+					this.#attachEntrySettlement(built);
+					return built.message;
+				}),
+			);
 		}
 		return thunks;
 	}
@@ -222,11 +246,13 @@ export class YieldQueue {
 		if (this.#idleFlushPending) return;
 		this.#idleFlushPending = true;
 		try {
-			this.#options.scheduleIdleFlush(async () => {
-				this.#idleFlushPending = false;
-				if (this.#options.isStreaming()) return;
-				await this.flush("idle");
-			});
+			this.#options.scheduleIdleFlush(
+				this.#asWork(async () => {
+					this.#idleFlushPending = false;
+					if (this.#options.isStreaming()) return;
+					await this.flush("idle");
+				}),
+			);
 		} catch (error) {
 			this.#idleFlushPending = false;
 			logger.warn("Yield queue idle flush scheduling failed", { error: formatError(error) });
@@ -281,19 +307,19 @@ export class YieldQueue {
 		Object.defineProperties(built.message, {
 			[ASIDE_MESSAGE_COMMIT]: {
 				configurable: true,
-				value: () => {
+				value: this.#asWork(() => {
 					if (settled) return;
 					settled = true;
 					this.#resolveEntries(built.entries);
-				},
+				}),
 			},
 			[ASIDE_MESSAGE_DISCARD]: {
 				configurable: true,
-				value: (error: Error) => {
+				value: this.#asWork((error: Error) => {
 					if (settled) return;
 					settled = true;
 					this.#rejectEntries(built.entries, error);
-				},
+				}),
 			},
 		});
 	}

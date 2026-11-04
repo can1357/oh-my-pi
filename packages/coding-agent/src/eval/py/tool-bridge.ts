@@ -7,9 +7,12 @@
  * current execution and forwards to the same `callSessionTool` implementation
  * the JavaScript bridge uses.
  */
+import { captureRequestHolds, type RequestHoldContext } from "@oh-my-pi/pi-ai";
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import type { RuntimeCallIdentity } from "../js/shared/runtime";
+import { ArtifactPinOwner } from "../artifact-readiness";
+import { EVAL_ARTIFACTS_READY_BRIDGE_NAME } from "../artifact-wire";
 import { bridgeValueFromToolResult, callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 
@@ -33,6 +36,18 @@ export interface PyToolBridgeEntry {
 	/** Shows the user `out://` replies of bridged calls (`ToolBridgeOptions.onReply`). */
 	onReply?: (text: string) => void;
 	abortRequested?: () => boolean;
+	/**
+	 * The artifact answers the readers asking through this entry hold: a
+	 * cell's for a run entry, the kernel's for its standing one. Given back
+	 * when the entry goes.
+	 */
+	artifactPins?: ArtifactPinOwner;
+	/**
+	 * The request context the entry was registered in. The bridge's HTTP
+	 * handler runs with no async context, so each call runs in this one: its
+	 * model requests wait for the session's holds.
+	 */
+	requestHolds?: RequestHoldContext;
 }
 
 export interface PyToolBridgeInfo {
@@ -46,6 +61,21 @@ interface BridgeServer {
 }
 
 const registrations = new Map<string, PyToolBridgeEntry>();
+/**
+ * Standing authority per kernel, outliving the cell that made it.
+ *
+ * A run-scoped entry is gone the moment its cell ends, and a background thread
+ * reading an artifact after that has no run of its own to name. What it may
+ * ask without one is limited to the questions that belong to the session; what
+ * this holds is somewhere for them to be answered.
+ *
+ * It carries the tool session, its request context and nothing else. A cell's signal, its shielded
+ * signal, its speculative claim and its status sink belong to that cell: a
+ * reader from an older cell cancelled by a newer one's abort, or charged to a
+ * newer one's deadline, is a reader answering to work it has nothing to do
+ * with.
+ */
+const sessionRegistrations = new Map<string, PyToolBridgeEntry>();
 let serverPromise: Promise<BridgeServer> | null = null;
 
 function markExpectedBridgeShutdownError(error: unknown): error is Error {
@@ -124,13 +154,16 @@ async function callSessionToolPromptOnAbort(
 		}
 		if (claimed) return bridgeValueFromToolResult(name, args, claimed, entry.emitStatus);
 	}
-	const call = callSessionTool(name, args, {
-		session: entry.toolSession,
-		signal: entry.signal,
-		emitStatus: entry.emitStatus,
-		onReply: entry.onReply,
-		identity,
-	});
+	const call = (entry.requestHolds ?? captureRequestHolds()).run(() =>
+		callSessionTool(name, args, {
+			session: entry.toolSession,
+			signal: entry.signal,
+			emitStatus: entry.emitStatus,
+			onReply: entry.onReply,
+			identity,
+			artifactPins: entry.artifactPins,
+		}),
+	);
 	const signal = entry.shieldedSignal ?? entry.signal;
 	if (!signal) return await call;
 	if (signal.aborted) {
@@ -179,11 +212,22 @@ async function startServer(): Promise<BridgeServer> {
 			const sessionId = typeof body.session === "string" ? body.session : "";
 			const runId = typeof body.run === "string" ? body.run : "";
 			const name = typeof body.name === "string" ? body.name : "";
-			if (!sessionId || !runId || !name) {
-				return Response.json({ ok: false, error: "Missing session/run/name" }, { status: 400 });
+			if (!sessionId || !name) {
+				return Response.json({ ok: false, error: "Missing session/name" }, { status: 400 });
+			}
+			// The artifact readiness question belongs to the session: a thread
+			// a finished cell left running reads artifacts too, and has no run
+			// to name. Everything else still has to say which cell it is.
+			if (!runId && name !== EVAL_ARTIFACTS_READY_BRIDGE_NAME) {
+				return Response.json({ ok: false, error: "Missing run" }, { status: 400 });
 			}
 			const registrationKey = bridgeRegistrationKey(sessionId, runId);
-			const entry = registrations.get(registrationKey) ?? registrations.get(sessionId);
+			// The standing entry answers only the questions that belong to the
+			// session. An unknown run is an unknown run: a name nobody
+			// registered must not reach a tool through it.
+			const entry =
+				registrations.get(registrationKey) ??
+				(name === EVAL_ARTIFACTS_READY_BRIDGE_NAME ? sessionRegistrations.get(sessionId) : undefined);
 			if (!entry) {
 				return Response.json(
 					{ ok: false, error: `No active Python tool bridge session: ${registrationKey}` },
@@ -261,27 +305,58 @@ export async function ensurePyToolBridge(): Promise<PyToolBridgeInfo> {
 	}
 }
 
-/**
- * Register a tool session for the duration of one execution. The returned
- * function MUST be called to remove the entry once execution finishes.
- */
 function bridgeRegistrationKey(sessionId: string, runId: string): string {
 	return `${sessionId}:${runId}`;
 }
 
-export function registerPyToolBridge(sessionId: string, runId: string, entry: PyToolBridgeEntry): () => void {
+/**
+ * Register a tool session for the duration of one execution. The returned
+ * function MUST be called to remove the entry once execution finishes; it
+ * gives back the artifact answers the cell's readers still hold.
+ */
+export function registerPyToolBridge(
+	sessionId: string,
+	runId: string,
+	entry: Omit<PyToolBridgeEntry, "artifactPins" | "requestHolds">,
+): () => Promise<void> {
 	const key = bridgeRegistrationKey(sessionId, runId);
-	registrations.set(key, entry);
-	return () => {
-		if (registrations.get(key) === entry) {
+	const requestHolds = captureRequestHolds();
+	const registered: PyToolBridgeEntry = { ...entry, artifactPins: new ArtifactPinOwner(), requestHolds };
+	registrations.set(key, registered);
+	// Also as the kernel's standing authority, kept after the cell ends: a
+	// thread a finished cell left running still reads this session's artifacts
+	// and has no run to name. Only the tool session goes in it, its request
+	// context, and the kernel's own pins, which outlast any one cell.
+	sessionRegistrations.set(sessionId, {
+		toolSession: entry.toolSession,
+		artifactPins: sessionRegistrations.get(sessionId)?.artifactPins ?? new ArtifactPinOwner(),
+		requestHolds,
+	});
+	return async () => {
+		if (registrations.get(key) === registered) {
 			registrations.delete(key);
 		}
+		await registered.artifactPins?.end();
 	};
+}
+
+/** Release a kernel's standing bridge entry, and the answers its readers hold, when the kernel goes. */
+export async function unregisterPyToolBridgeSession(bridgeSessionId: string): Promise<void> {
+	const standing = sessionRegistrations.get(bridgeSessionId);
+	sessionRegistrations.delete(bridgeSessionId);
+	await standing?.artifactPins?.end();
 }
 
 /** Stop the bridge and clear registrations. Test-only / shutdown helper. */
 export async function disposePyToolBridge(): Promise<void> {
+	const entries = [...registrations.values(), ...sessionRegistrations.values()];
 	registrations.clear();
+	// The standing authority a kernel keeps for its background readers goes
+	// with the bridge: there is nothing left to answer through, and an entry
+	// that outlives the server answers for a kernel that can no longer be
+	// reached. The answers held for either kind of entry go with them.
+	sessionRegistrations.clear();
+	await Promise.all(entries.map(entry => entry.artifactPins?.end()));
 	const pending = serverPromise;
 	serverPromise = null;
 	if (!pending) return;

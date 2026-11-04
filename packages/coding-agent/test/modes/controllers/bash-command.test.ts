@@ -68,6 +68,7 @@ function createCwdContext(sourceDir: string, isStreaming = false, showImages = t
 				state.cwd = snapshot.cwd;
 				state.artifactCwd = snapshot.cwd;
 			}),
+			commitSessionSwitch: vi.fn(),
 		},
 		chatContainer: createContainer(),
 		pendingShellContainer,

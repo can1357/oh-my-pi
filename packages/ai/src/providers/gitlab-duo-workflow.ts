@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -5,6 +6,7 @@ import {
 	type GitLabDuoWorkflowNamespaceSelection,
 } from "@oh-my-pi/pi-catalog/discovery/gitlab-duo-workflow";
 import * as AIError from "../error";
+import { afterRequestHolds, captureRequestHolds, runWithRequestSendHooks } from "../request-holds";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
@@ -1920,6 +1922,13 @@ export function runGitLabDuoWorkflowSocket(
 	const { promise, resolve, reject } = Promise.withResolvers<GitLabDuoWorkflowSocketResult>();
 	let settled = false;
 	let idleTimer: NodeJS.Timeout | undefined;
+	let waitingForAdmission = false;
+	const requestHolds = captureRequestHolds();
+	const inRequest = AsyncLocalStorage.snapshot();
+	const admissionController = new AbortController();
+	const admissionSignal = options.signal
+		? AbortSignal.any([options.signal, admissionController.signal])
+		: admissionController.signal;
 	const clearIdleTimer = (): void => {
 		if (idleTimer !== undefined) {
 			clearTimeout(idleTimer);
@@ -1929,9 +1938,44 @@ export function runGitLabDuoWorkflowSocket(
 	const settle = (result: GitLabDuoWorkflowSocketResult = "closed", error?: unknown): void => {
 		if (settled) return;
 		settled = true;
+		admissionController.abort();
 		clearIdleTimer();
 		if (error) reject(error);
 		else resolve(result);
+	};
+	const sendHooks = {
+		held() {
+			waitingForAdmission = true;
+			clearIdleTimer();
+		},
+		send() {
+			waitingForAdmission = false;
+			resetIdleTimer();
+		},
+	};
+	// Each native send gets its own final check. In particular, host code run
+	// by one send may arm a hold that must stop the next frame of a batch.
+	const sendFrames = async (frames: readonly string[]): Promise<void> => {
+		try {
+			for (const frame of frames) {
+				if (settled) return;
+				waitingForAdmission = true;
+				clearIdleTimer();
+				await inRequest(() =>
+					requestHolds.run(() =>
+						runWithRequestSendHooks(sendHooks, () =>
+							afterRequestHolds(admissionSignal, () => {
+								if (!settled) ws.send(frame);
+							}),
+						),
+					),
+				);
+			}
+		} catch (error) {
+			if (settled) return;
+			settle("closed", error instanceof Error ? error : new Error(String(error)));
+			close();
+		}
 	};
 	const idleTimeoutMs =
 		options.idleTimeoutMs !== undefined && options.idleTimeoutMs > 0
@@ -1939,7 +1983,7 @@ export function runGitLabDuoWorkflowSocket(
 			: GITLAB_DUO_WORKFLOW_IDLE_TIMEOUT_MS;
 	const resetIdleTimer = (): void => {
 		clearIdleTimer();
-		if (settled) return;
+		if (settled || waitingForAdmission) return;
 		idleTimer = setTimeout(() => {
 			traceGitLabDuoWorkflow("websocket.idle_timeout", { timeoutMs: idleTimeoutMs });
 			close();
@@ -1954,8 +1998,8 @@ export function runGitLabDuoWorkflowSocket(
 		}
 	};
 	const abort = (): void => {
-		close();
 		settle("closed", new AIError.AbortError("GitLab Duo Workflow request aborted"));
+		close();
 	};
 	if (options.signal?.aborted) {
 		abort();
@@ -2086,9 +2130,7 @@ export function runGitLabDuoWorkflowSocket(
 		// inline flow only ever has one.) DWS matches it by requestID to the awaiting
 		// outbox future and the workflow continues on the same connection.
 		const responses = Array.isArray(resumeResponse) ? resumeResponse : [resumeResponse];
-		for (const response of responses) {
-			ws.send(JSON.stringify(response));
-		}
+		void sendFrames(responses.map(response => JSON.stringify(response)));
 	} else {
 		ws.onopen = () => {
 			traceGitLabDuoWorkflow("websocket.open", {
@@ -2100,7 +2142,9 @@ export function runGitLabDuoWorkflowSocket(
 				mcpTools: startPayload.mcpTools.length,
 				preapprovedTools: startPayload.preapproved_tools.length,
 			});
-			ws.send(JSON.stringify({ startRequest: startPayload }));
+			// The socket open is connection setup; this first frame starts the model
+			// request and therefore waits for every request hold.
+			void sendFrames([JSON.stringify({ startRequest: startPayload })]);
 		};
 	}
 	resetIdleTimer();

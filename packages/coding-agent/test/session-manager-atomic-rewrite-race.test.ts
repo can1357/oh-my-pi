@@ -469,7 +469,9 @@ describe("SessionManager cross-process rewrite freshness", () => {
 		const sibling = ours.getSessionFile();
 		if (!sibling) throw new Error("Expected session file");
 		expect(sibling).not.toBe(contested);
-		expect(notices).toEqual([{ reason: "contested", from: contested, to: sibling }]);
+		expect(notices.map(notice => ({ reason: notice.reason, from: notice.from, to: notice.to }))).toEqual([
+			{ reason: "contested", from: contested, to: sibling },
+		]);
 		expect(errors).toEqual([]);
 		await ours.close();
 		await theirs.close();
@@ -554,7 +556,9 @@ describe("SessionManager cross-process rewrite freshness", () => {
 			if (!sibling) throw new Error("Expected session file");
 			expect(await Bun.file(owned).text()).toBe(ownedBytes);
 			expect(path.dirname(sibling)).toBe(path.dirname(owned));
-			expect(notices).toEqual([{ reason: "open-elsewhere", from: owned, to: sibling }]);
+			expect(notices.map(notice => ({ reason: notice.reason, from: notice.from, to: notice.to }))).toEqual([
+				{ reason: "open-elsewhere", from: owned, to: sibling },
+			]);
 			expect(errors).toEqual([]);
 			// A host that subscribes late still hears about the move.
 			const lateNotices: SessionPersistenceNotice[] = [];

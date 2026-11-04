@@ -12,17 +12,20 @@ import {
 	type StreamFn,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
-import type {
-	Context,
-	CredentialDisabledEvent,
-	Effort,
-	Message,
-	Model,
-	ModelUsageHealth,
-	ProviderSessionState,
-	ServiceTier,
-	ServiceTierByFamily,
-	SimpleStreamOptions,
+import {
+	type Context,
+	type CredentialDisabledEvent,
+	captureRequestHolds,
+	type Effort,
+	type Message,
+	type Model,
+	type ModelUsageHealth,
+	type ProviderSessionState,
+	RequestHoldsAlias,
+	runWithRequestHolds,
+	type ServiceTier,
+	type ServiceTierByFamily,
+	type SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
@@ -737,6 +740,13 @@ export interface CreateAgentSessionOptions {
 	 * @internal
 	 */
 	extensionRoots?: () => EffectiveExtensionRoots;
+	/**
+	 * The holds that stand for the session while it starts (see `RequestHoldsAlias`), for a host
+	 * that prepares session work before calling this — preloading extensions, say — and runs that
+	 * preparation in them. Bound to the session agent's context once the agent is built.
+	 * Default: fresh holds for this call.
+	 */
+	startupHolds?: RequestHoldsAlias;
 	/**
 	 * Pre-loaded extensions (skips file discovery and the per-session factory
 	 * call). Used by the CLI when extensions are loaded early to parse custom
@@ -1567,6 +1577,9 @@ function createCustomToolsExtension(tools: CustomTool[], sourcePaths?: ReadonlyM
 		api.on("session_switch", async (event, ctx) =>
 			runOnSession({ reason: "switch", previousSessionFile: event.previousSessionFile }, ctx),
 		);
+		api.on("session_moved", async (event, ctx) =>
+			runOnSession({ reason: "moved", previousSessionFile: event.previousSessionFile }, ctx),
+		);
 		api.on("session_branch", async (event, ctx) =>
 			runOnSession({ reason: "branch", previousSessionFile: event.previousSessionFile }, ctx),
 		);
@@ -1927,16 +1940,50 @@ export function createAutoLearnCaptureRunner(
  * });
  * ```
  */
+/**
+ * Who each start-up alias stands for: a start-up still running, or the live
+ * session it built. A second start-up cannot take it over while either lasts.
+ */
+const startupHoldsOwners = new WeakMap<RequestHoldsAlias, "starting" | AgentSession>();
+
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
-	registerLocalInferenceApi();
-	await loadRuntimeIdentity();
-	const extensionRoots = options.extensionRoots?.();
-	const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
-	const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
-	return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options));
+	// Everything built here is the session's work, though the session's agent
+	// does not exist yet: a host callback's continuation, an extension factory's
+	// timer, a backend's first request. It runs in holds that stand for the
+	// agent's context and are bound to it once the agent is built (see
+	// `RequestHoldsAlias`); a host that prepared session work before this call
+	// passes the holds it ran in. They stand for one live session: a retry after
+	// a start-up that failed, or after its session was disposed, may reuse them.
+	const sessionHolds = options.startupHolds ?? new RequestHoldsAlias();
+	const owner = startupHoldsOwners.get(sessionHolds);
+	if (owner === "starting" || (owner && !owner.isDisposed)) {
+		throw new Error("These start-up holds already belong to another live session");
+	}
+	// Reserved before anything asynchronous, so overlapping start-ups cannot share them.
+	startupHoldsOwners.set(sessionHolds, "starting");
+	let result: CreateAgentSessionResult;
+	try {
+		result = await runWithRequestHolds(sessionHolds, async () => {
+			registerLocalInferenceApi();
+			await loadRuntimeIdentity();
+			const extensionRoots = options.extensionRoots?.();
+			const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
+			const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
+			return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options, sessionHolds));
+		});
+	} catch (error) {
+		// A start-up that failed holds nothing: a retry may use them.
+		startupHoldsOwners.delete(sessionHolds);
+		throw error;
+	}
+	startupHoldsOwners.set(sessionHolds, result.session);
+	return result;
 }
 
-async function createAgentSessionScoped(options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> {
+async function createAgentSessionScoped(
+	options: CreateAgentSessionOptions,
+	sessionHolds: RequestHoldsAlias,
+): Promise<CreateAgentSessionResult> {
 	if (options.systemPromptTemplate !== undefined && options.customSystemPrompt !== undefined) {
 		throw new Error("systemPromptTemplate cannot be combined with a literal custom system prompt");
 	}
@@ -2811,10 +2858,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		toolSession.getArtifactsDir = getArtifactsDir;
 		toolSession.localProtocolOptions = localProtocolOptions;
-		toolSession.agentOutputManager = new AgentOutputManager(
-			getArtifactsDir,
-			options.parentTaskPrefix ? { parentPrefix: options.parentTaskPrefix } : undefined,
-		);
+		toolSession.agentOutputManager = new AgentOutputManager(getArtifactsDir, {
+			...(options.parentTaskPrefix ? { parentPrefix: options.parentTaskPrefix } : {}),
+			artifactsSettled: signal => sessionManager.whenArtifactsSettled(signal),
+			reservedNames: () => sessionManager.reservedOutputNames(),
+		});
 
 		// Create built-in tools (already wrapped with meta notice formatting)
 		await logger.time("createAllTools", createTools, toolSession, options.toolNames);
@@ -4192,17 +4240,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			path.resolve(agentDir) === path.resolve(getAgentDir())
 				? undefined
 				: openSessionSkillDescriptionStore(agentDir);
+		const skillDescriptionCompressor = createSkillDescriptionCompressor(modelRegistry, settings, undefined, () =>
+			agent
+				? resolveTelemetry(agent.telemetry, agent.sessionId)
+				: resolveTelemetry(options.telemetry, providerSessionId),
+		);
 		const skillDescriptions = new SkillDescriptionCatalog({
 			store: ownedSkillDescriptionStore,
 			// Like the other one-shot model calls, each compression request resolves
 			// its own telemetry handle, so its usage stays out of the run summary.
 			// The first requests can start before `agent` is constructed; they use
 			// the telemetry config and session id the agent is constructed with.
-			compress: createSkillDescriptionCompressor(modelRegistry, settings, undefined, () =>
-				agent
-					? resolveTelemetry(agent.telemetry, agent.sessionId)
-					: resolveTelemetry(options.telemetry, providerSessionId),
-			),
+			// Once it exists, each is the session's work and waits for its holds.
+			compress: {
+				modelKey: () => skillDescriptionCompressor.modelKey(),
+				compress: (name, description, request) =>
+					agent
+						? agent.runInRequestContext(() => skillDescriptionCompressor.compress(name, description, request))
+						: skillDescriptionCompressor.compress(name, description, request),
+			},
 		});
 		// Instructions from MCP servers the host connects outside `mcpManager`
 		// (ACP client-declared servers); installed via
@@ -4954,6 +5010,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					: undefined
 				: undefined,
 		});
+		// From here on, what start-up left running is held by the agent's holds.
+		sessionHolds.bind(agent.runInRequestContext(captureRequestHolds));
 		// Catalog rows carry the registry settings' extended-window opt-ins; this
 		// session adopts every model with the window its own settings select (a
 		// subagent with a compaction override must not inherit the parent's).
@@ -5783,6 +5841,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// tools per run. The subscription lives for the session's lifetime; the
 		// reference is intentionally discarded (the listener retains it).
 		if (!restrictToolNames) {
+			// The memory backend starts inside the session's start-up, so its first
+			// requests and the timers it arms wait for the session's holds.
 			if (cfgAutolearnEnabled.get(settings) && taskDepth === 0) {
 				await logger.time("startMemoryStartupTask", startMemoryBackend);
 			} else {

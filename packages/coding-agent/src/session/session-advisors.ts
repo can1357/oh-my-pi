@@ -36,7 +36,7 @@ import type {
 	ServiceTier,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
-import { isUsageLimitOutcome, resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
+import { captureRequestHolds, isUsageLimitOutcome, resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -1456,6 +1456,10 @@ export class SessionAdvisors {
 				return baseAdvisorStreamFn(requestModel, context, options);
 			};
 			const advisorAgent = new Agent({
+				// The advisor's requests are the session's: they wait for the session
+				// agent's holds (a move's `session_moved` handlers among them), whoever
+				// starts the advisor's turn.
+				requestHoldContext: this.#host.agent.runInRequestContext(captureRequestHolds),
 				initialState: {
 					systemPrompt,
 					model: advisorModel,

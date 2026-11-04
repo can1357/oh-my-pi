@@ -3,6 +3,8 @@ import type { Api, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { heldFetch } from "../utils/held-fetch";
+import { armPreResponseTimeout } from "../utils/idle-iterator";
 import { SPEECH_FORMAT_MIME_TYPES, type SpeechFormat, type SpeechOptions, type SpeechResult } from "./types";
 
 const SPEECH_TIMEOUT_MS = 60_000;
@@ -18,39 +20,46 @@ export async function postSpeechRequest(
 	format: SpeechFormat,
 	options: SpeechOptions,
 ): Promise<SpeechResult> {
-	const timeoutSignal = AbortSignal.timeout(SPEECH_TIMEOUT_MS);
-	const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
-	const fetchImpl = options.fetch ?? fetch;
+	const watchdog = armPreResponseTimeout(options.signal, SPEECH_TIMEOUT_MS);
+	const signal = watchdog.signal;
+	const fetchImpl = heldFetch(options.fetch ?? fetch);
 	const label = `${model.provider}/${model.id}`;
-	const audio = await withAuth(
-		options.apiKey,
-		async key => {
-			const configuredHeaders = model.resolveHeaders ? await model.resolveHeaders(signal) : model.headers;
-			const response = await fetchImpl(`${model.baseUrl.replace(/\/+$/, "")}${path}`, {
-				method: "POST",
-				headers: {
-					...configuredHeaders,
-					Authorization: `Bearer ${key}`,
-					"Content-Type": "application/json",
-					"User-Agent": USER_AGENT,
+	let audio: Uint8Array;
+	try {
+		audio = await watchdog.run(() =>
+			withAuth(
+				options.apiKey,
+				async key => {
+					const configuredHeaders = model.resolveHeaders ? await model.resolveHeaders(signal) : model.headers;
+					const response = await fetchImpl(`${model.baseUrl.replace(/\/+$/, "")}${path}`, {
+						method: "POST",
+						headers: {
+							...configuredHeaders,
+							Authorization: `Bearer ${key}`,
+							"Content-Type": "application/json",
+							"User-Agent": USER_AGENT,
+						},
+						body: JSON.stringify(payload),
+						signal,
+					});
+					if (!response.ok) {
+						const detail = await response.text();
+						throw new SpeechApiError(
+							`${label} speech API failed (${response.status}): ${detail.slice(0, 300)}`,
+							response.status,
+							{
+								headers: response.headers,
+							},
+						);
+					}
+					return new Uint8Array(await response.arrayBuffer());
 				},
-				body: JSON.stringify(payload),
-				signal,
-			});
-			if (!response.ok) {
-				const detail = await response.text();
-				throw new SpeechApiError(
-					`${label} speech API failed (${response.status}): ${detail.slice(0, 300)}`,
-					response.status,
-					{
-						headers: response.headers,
-					},
-				);
-			}
-			return new Uint8Array(await response.arrayBuffer());
-		},
-		{ signal },
-	);
+				{ signal },
+			),
+		);
+	} finally {
+		watchdog.clear();
+	}
 	// Speech endpoints return only audio bytes. OpenRouter exposes a generation id,
 	// but neither it nor the OpenAI/xAI wires report token or billable-unit usage.
 	const usage: Usage = {

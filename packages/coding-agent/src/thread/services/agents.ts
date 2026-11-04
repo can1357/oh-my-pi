@@ -52,6 +52,7 @@ import {
 } from "./agents-protocol";
 import { RemoteAgentLifecycle, RemoteAgentRegistry, RemoteIrcBus } from "./agents-remote";
 import { trackWorkerSubscription } from "./support";
+import { waitForSessionRequestHolds } from "./request-holds";
 
 /** Boot globals of {@link agentsThreadService}: main's singletons and this worker's session bridge. */
 export interface AgentsThreadGlobals {
@@ -85,7 +86,7 @@ export class MainSessionBridge {
 	readonly #open = new Map<string, OpenSession>();
 	readonly #subscriptions = new Set<() => void>();
 	readonly #revivers = new Set<{ lifecycle: AgentLifecycleManager; id: string; revive: AgentReviver }>();
-	/** Aborts IRC waits the worker parked on main. */
+	/** Aborts IRC and request-hold waits the worker parked on main. */
 	readonly exited = new AbortController();
 
 	constructor(peer: WorkerPeer) {
@@ -192,7 +193,8 @@ export class MainSessionBridge {
 	/** The worker died: see the module doc for the ordering. */
 	exit(reason: string): void {
 		this.exited.abort(new Error(`Subagent worker ${this.#peer.threadId} exited: ${reason}`));
-		for (const stop of [...this.#subscriptions]) {
+		const subscriptions = [...this.#subscriptions];
+		for (const stop of subscriptions) {
 			try {
 				stop();
 			} catch (error) {
@@ -210,7 +212,8 @@ export class MainSessionBridge {
 			if (ref.status !== "aborted") registry.setStatus(ref.id, ref.sessionFile ? "parked" : "aborted", ref);
 		}
 		const why = `worker ${this.#peer.threadId} exited: ${reason}`;
-		for (const key of [...this.#open.keys()]) this.closed(key, why);
+		const keys = [...this.#open.keys()];
+		for (const key of keys) this.closed(key, why);
 	}
 }
 
@@ -234,6 +237,8 @@ function serveBridge(): RpcServe<MainSessionBridge, SessionBridgeProtocol> {
 			bridge.forward(listener, forward => session.subscribe(event => forward(toWireData(event)))),
 		subscribeRunState: (bridge, session, listener) =>
 			bridge.forward(listener, forward => session.subscribeRunState(forward)),
+		waitForRequestHolds: (bridge, session, signal) =>
+			waitForSessionRequestHolds(session, AbortSignal.any([signal, bridge.exited.signal])),
 		prompt: (_bridge, session, text, options) => session.prompt(text, options),
 		steer: (_bridge, session, text, images, options) => session.steer(text, images, options),
 		abort: (_bridge, session, options) => session.abort(options),

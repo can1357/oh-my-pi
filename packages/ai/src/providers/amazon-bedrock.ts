@@ -19,6 +19,7 @@ import { $flag, fetchWithRetry, logger, parseStreamingJsonThrottled, USER_AGENT 
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
+import { heldFetch } from "../utils/held-fetch";
 import { resolveAwsBearerToken } from "../registry/aws";
 import type {
 	Api,
@@ -302,14 +303,16 @@ async function sendBedrockRequest(
 	let response: Response;
 	let responseBody: string | undefined;
 	try {
-		response = await fetchWithRetry(url, {
-			method: "POST",
-			headers: requestHeaders,
-			body,
-			signal: watchdog.signal,
-			fetch: options.fetch,
-			timeout: false,
-		});
+		response = await watchdog.run(() =>
+			fetchWithRetry(url, {
+				method: "POST",
+				headers: requestHeaders,
+				body,
+				signal: watchdog.signal,
+				fetch: heldFetch(options.fetch ?? fetch),
+				timeout: false,
+			}),
+		);
 		if (!response.ok && endpoint === "invoke-with-response-stream")
 			responseBody = await response.text().catch(() => "");
 	} finally {

@@ -407,6 +407,8 @@ export interface SessionMaintenanceHost {
 	modelRegistry: ModelRegistry;
 	extensionRunner: ExtensionRunner | undefined;
 	sideStreamFn: StreamFn;
+	/** Runs one side request, from its preparation to its send, so its waits for the move handlers share one deadline. */
+	asSideRequest<T>(request: () => Promise<T>): Promise<T>;
 	providerSessionState: Map<string, ProviderSessionState>;
 	/** Codex-only request preference from the live session setting. */
 	preferWebsockets(model: Model): boolean | undefined;
@@ -3729,49 +3731,52 @@ export class SessionMaintenance {
 			}
 
 			try {
-				return await compact(
-					this.#host.obfuscatePreparationForProvider(preparation),
-					candidate,
-					this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
-					this.#host.obfuscateTextForProvider(customInstructions),
-					signal,
-					{
-						...options,
-						metadata: this.#host.agent.metadataForProvider(candidate.provider),
-						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
-						buildProviderContext: (summarized, retained, signal, model) =>
-							this.#host.buildLiveProviderContext(summarized, retained, signal, model),
-						isUserAuthored: isUserAuthoredMessage,
-						telemetry,
-						// Honor the user's /model thinking selection (incl. `off`) on
-						// the manual `/compact` path. Clamped per-model inside compact()
-						// via resolveCompactionEffort so unsupported-effort models
-						// (xai-oauth/grok-build) don't trip requireSupportedEffort.
-						thinkingLevel: this.#host.thinkingLevel(),
-						tools: this.#host.agent.state.tools,
-						sessionId: this.#host.sessionId(),
-						// Explicit cache keys only (never a sessionId fallback): V2
-						// treats any truthy key as provenance for x-opencode-session.
-						// Conventional summaries run on `candidate`; remote compaction
-						// may send a different api/model, so it is gated separately.
-						promptCacheKey: this.#host.getPromptCacheKeyForModel(candidate),
-						remotePromptCacheKey: this.#host.getPromptCacheKeyForModel(remoteCompactionPolicyModel(candidate)),
-						providerSessionState: this.#host.providerSessionState,
-						preferWebsockets: this.#host.preferWebsockets(candidate),
-						codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
-						// Route every summarization HTTP request through the
-						// session's side-stream transport so the provider
-						// concurrency cap (e.g. providers.ollama-cloud.maxConcurrency)
-						// brackets compaction the same way it brackets the live
-						// agent turn — without this, multiple ollama-cloud
-						// subagents auto/manually compacting issued uncapped
-						// summary requests in parallel (chatgpt-codex review on
-						// #3751).
-						completeImpl: async (requestModel, requestContext, requestOptions) => {
-							const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
-							return stream.result();
+				// One side request: its waits for the move handlers share one deadline.
+				return await this.#host.asSideRequest(() =>
+					compact(
+						this.#host.obfuscatePreparationForProvider(preparation),
+						candidate,
+						this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
+						this.#host.obfuscateTextForProvider(customInstructions),
+						signal,
+						{
+							...options,
+							metadata: this.#host.agent.metadataForProvider(candidate.provider),
+							convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+							buildProviderContext: (summarized, retained, signal, model) =>
+								this.#host.buildLiveProviderContext(summarized, retained, signal, model),
+							isUserAuthored: isUserAuthoredMessage,
+							telemetry,
+							// Honor the user's /model thinking selection (incl. `off`) on
+							// the manual `/compact` path. Clamped per-model inside compact()
+							// via resolveCompactionEffort so unsupported-effort models
+							// (xai-oauth/grok-build) don't trip requireSupportedEffort.
+							thinkingLevel: this.#host.thinkingLevel(),
+							tools: this.#host.agent.state.tools,
+							sessionId: this.#host.sessionId(),
+							// Explicit cache keys only (never a sessionId fallback): V2
+							// treats any truthy key as provenance for x-opencode-session.
+							// Conventional summaries run on `candidate`; remote compaction
+							// may send a different api/model, so it is gated separately.
+							promptCacheKey: this.#host.getPromptCacheKeyForModel(candidate),
+							remotePromptCacheKey: this.#host.getPromptCacheKeyForModel(remoteCompactionPolicyModel(candidate)),
+							providerSessionState: this.#host.providerSessionState,
+							preferWebsockets: this.#host.preferWebsockets(candidate),
+							codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
+							// Route every summarization HTTP request through the
+							// session's side-stream transport so the provider
+							// concurrency cap (e.g. providers.ollama-cloud.maxConcurrency)
+							// brackets compaction the same way it brackets the live
+							// agent turn — without this, multiple ollama-cloud
+							// subagents auto/manually compacting issued uncapped
+							// summary requests in parallel (chatgpt-codex review on
+							// #3751).
+							completeImpl: async (requestModel, requestContext, requestOptions) => {
+								const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
+								return stream.result();
+							},
 						},
-					},
+					),
 				);
 			} catch (error) {
 				const id = AIError.classify(error instanceof NativeCompactionError ? error.cause : error, candidate.api);
@@ -5815,46 +5820,50 @@ export class SessionMaintenance {
 					let attempt = 0;
 					while (true) {
 						try {
-							compactResult = await compact(
-								this.#host.obfuscatePreparationForProvider(preparation),
-								candidate,
-								this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
-								undefined,
-								autoCompactionSignal,
-								{
-									promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
-									extraContext: compactionPrep.hookContext,
-									remoteSystemPrompt: this.#host.agent.state.systemPrompt,
-									metadata: this.#host.agent.metadataForProvider(candidate.provider),
-									initiatorOverride: "agent",
-									convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
-									buildProviderContext: (summarized, retained, signal, model) =>
-										this.#host.buildLiveProviderContext(summarized, retained, signal, model),
-									isUserAuthored: isUserAuthoredMessage,
-									telemetry,
-									// Honor the user's /model thinking selection on the
-									// auto-compaction path — the most-fired compaction
-									// site. Clamped per-model inside compact() via
-									// resolveCompactionEffort.
-									thinkingLevel: this.#host.thinkingLevel(),
-									tools: this.#host.agent.state.tools,
-									sessionId: this.#host.sessionId(),
-									// Same key split as the manual callsite in
-									// #compactWithFallbackModel.
-									promptCacheKey: this.#host.getPromptCacheKeyForModel(candidate),
-									remotePromptCacheKey: this.#host.getPromptCacheKeyForModel(
-										remoteCompactionPolicyModel(candidate),
-									),
-									providerSessionState: this.#host.providerSessionState,
-									preferWebsockets: this.#host.preferWebsockets(candidate),
-									codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
-									codexCompaction,
-									// This loop already retries the whole compaction attempt on
-									// transient errors, so the summarization oneshots must not
-									// retry too — the budgets would multiply and each outer
-									// wait would stack on top of an inner backoff.
-									oneshotRetry: false,
-								},
+							const providerPreparation = this.#host.obfuscatePreparationForProvider(preparation);
+							// One side request: its waits for the move handlers share one deadline.
+							compactResult = await this.#host.asSideRequest(() =>
+								compact(
+									providerPreparation,
+									candidate,
+									this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
+									undefined,
+									autoCompactionSignal,
+									{
+										promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
+										extraContext: compactionPrep.hookContext,
+										remoteSystemPrompt: this.#host.agent.state.systemPrompt,
+										metadata: this.#host.agent.metadataForProvider(candidate.provider),
+										initiatorOverride: "agent",
+										convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+										buildProviderContext: (summarized, retained, signal, model) =>
+											this.#host.buildLiveProviderContext(summarized, retained, signal, model),
+										isUserAuthored: isUserAuthoredMessage,
+										telemetry,
+										// Honor the user's /model thinking selection on the
+										// auto-compaction path — the most-fired compaction
+										// site. Clamped per-model inside compact() via
+										// resolveCompactionEffort.
+										thinkingLevel: this.#host.thinkingLevel(),
+										tools: this.#host.agent.state.tools,
+										sessionId: this.#host.sessionId(),
+										// Same key split as the manual callsite in
+										// #compactWithFallbackModel.
+										promptCacheKey: this.#host.getPromptCacheKeyForModel(candidate),
+										remotePromptCacheKey: this.#host.getPromptCacheKeyForModel(
+											remoteCompactionPolicyModel(candidate),
+										),
+										providerSessionState: this.#host.providerSessionState,
+										preferWebsockets: this.#host.preferWebsockets(candidate),
+										codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
+										codexCompaction,
+										// This loop already retries the whole compaction attempt on
+										// transient errors, so the summarization oneshots must not
+										// retry too — the budgets would multiply and each outer
+										// wait would stack on top of an inner backoff.
+										oneshotRetry: false,
+									},
+								),
 							);
 							break;
 						} catch (error) {

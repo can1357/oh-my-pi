@@ -3,7 +3,9 @@
  */
 
 import type { CompatOf } from "@oh-my-pi/pi-catalog/types";
+import { afterRequestHoldsCall } from "../api-registry";
 import * as AIError from "../error";
+import { type RequestSendState, runWithRequestSendState } from "../request-holds";
 import type { Api, AssistantMessage, AssistantMessageEvent, Context, Model, OptionsForApi } from "../types";
 import { type AbortSourceTracker, createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream as EventStreamImpl } from "../utils/event-stream";
@@ -28,12 +30,16 @@ let bedrockStreamOverride: typeof BedrockProvider.streamBedrock | undefined;
 
 /** Install a host-supplied Bedrock transport in place of the built-in provider. */
 export function setBedrockProviderModule(module: Pick<typeof BedrockProvider, "streamBedrock">): void {
-	bedrockStreamOverride = module.streamBedrock;
+	bedrockStreamOverride = afterRequestHoldsCall<"bedrock-converse-stream", OptionsForApi<"bedrock-converse-stream">>(
+		(model, context, options) => module.streamBedrock(model, context, options ?? {}),
+	);
 }
 
 /** Install a host-supplied Cursor transport in place of the built-in provider. */
 export function setCursorProviderModule(module: Pick<typeof CursorProvider, "streamCursor">): void {
-	cursorStreamOverride = module.streamCursor;
+	cursorStreamOverride = afterRequestHoldsCall<"cursor-agent", OptionsForApi<"cursor-agent">>(
+		(model, context, options) => module.streamCursor(model, context, options ?? {}),
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +105,7 @@ function forwardStream<TApi extends Api>(
 	model: Model<TApi>,
 	options: OptionsForApi<TApi>,
 	abortTracker: AbortSourceTracker,
+	requestSendState: RequestSendState,
 	limits?: StreamLimits,
 ): void {
 	(async () => {
@@ -142,6 +149,7 @@ function forwardStream<TApi extends Api>(
 				onFirstItemTimeout: () =>
 					abortTracker.abortLocally(new AIError.StreamTimeoutError(STREAM_FIRST_EVENT_TIMEOUT_ERROR)),
 				abortSignal: options.signal,
+				requestSendState,
 				// The synthetic `start` event is yielded immediately by every provider before
 				// the upstream model has emitted any tokens. Treating it as the first "real"
 				// item would flip the watchdog from `firstItemTimeoutMs` to the much shorter
@@ -219,8 +227,10 @@ function createLazyProviderStream<TModule, TApi extends Api>(
 			.then(mod => {
 				const abortTracker = createAbortSourceTracker(streamOptions.signal);
 				const providerOptions: OptionsForApi<TApi> = { ...streamOptions, signal: abortTracker.requestSignal };
-				const inner = pick(mod)(model, context, providerOptions);
-				forwardStream(outer, inner, model, streamOptions, abortTracker, limits);
+				runWithRequestSendState(state => {
+					const inner = pick(mod)(model, context, providerOptions);
+					forwardStream(outer, inner, model, streamOptions, abortTracker, state, limits);
+				});
 			})
 			.catch(error => {
 				const message = createProviderStreamError(model, error);

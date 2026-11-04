@@ -32,7 +32,15 @@
  * with an error naming the worker, and treats `dispose` as already done.
  */
 import { type AgentMessage, type AgentTool, ThinkingLevel, Tokenizer } from "@oh-my-pi/pi-agent-core";
-import type { Effort, ImageContent, Model, ServiceTier, ToolResultMessage, UsageReport } from "@oh-my-pi/pi-ai";
+import {
+	type Effort,
+	type ImageContent,
+	type Model,
+	runWithRequestHolds,
+	type ServiceTier,
+	type ToolResultMessage,
+	type UsageReport,
+} from "@oh-my-pi/pi-ai";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
@@ -102,6 +110,7 @@ import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
 import { TokenRateMeter } from "../utils/token-rate";
 import type { ThreadId } from "./identity";
 import { type RemoteObject, RpcClosedError, rpcSync } from "./rpc";
+import { RemoteRequestHolds } from "./services/request-holds";
 import {
 	type SessionAbortOptions,
 	type SessionEntriesDelta,
@@ -283,6 +292,7 @@ export class RemoteAgentSession implements AgentViewSession {
 	readonly #listeners = new Set<AgentSessionEventListener>();
 	readonly #runStateListeners = new Set<(state: SessionRunState) => void>();
 	#closed: string | undefined;
+	readonly #requestHolds = new RemoteRequestHolds(signal => this.#command("waitForRequestHolds", signal));
 
 	constructor(init: RemoteAgentSessionInit) {
 		this.instanceKey = init.key;
@@ -370,6 +380,11 @@ export class RemoteAgentSession implements AgentViewSession {
 	/** Whether the home worker closed the session (dispose) or died. */
 	get closed(): boolean {
 		return this.#closed !== undefined;
+	}
+
+	/** Requests started here wait for this session's holds on its home worker. */
+	runInRequestContext<T>(fn: () => T): T {
+		return runWithRequestHolds(this.#requestHolds, fn);
 	}
 
 	get isStreaming(): boolean {
@@ -925,7 +940,8 @@ export class RemoteAgentSession implements AgentViewSession {
 	applyEvent(event: AgentSessionEvent): void {
 		if (this.#closed !== undefined) return;
 		this.#trackEvent(event);
-		for (const listener of [...this.#listeners]) {
+		const listeners = [...this.#listeners];
+		for (const listener of listeners) {
 			try {
 				listener(event);
 			} catch (error) {
@@ -940,7 +956,8 @@ export class RemoteAgentSession implements AgentViewSession {
 	/** Bridge only: report a run-state transition to run-state subscribers. */
 	applyRunState(state: SessionRunState): void {
 		if (this.#closed !== undefined) return;
-		for (const listener of [...this.#runStateListeners]) {
+		const listeners = [...this.#runStateListeners];
+		for (const listener of listeners) {
 			try {
 				listener(state);
 			} catch (error) {

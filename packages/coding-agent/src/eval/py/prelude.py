@@ -4,7 +4,7 @@ from __future__ import annotations
 if "__omp_prelude_loaded__" not in globals():
     __omp_prelude_loaded__ = True
     from pathlib import Path
-    import asyncio, collections.abc, contextvars, inspect, os, json, math, re, time, types, typing
+    import asyncio, collections.abc, contextvars, inspect, os, json, math, re, stat as stat_module, time, types, typing
     from urllib.parse import unquote
 
 
@@ -30,11 +30,24 @@ if "__omp_prelude_loaded__" not in globals():
     _OMP_INTERNAL_URL_RE = re.compile(r"^([a-z][a-z0-9+.-]*)://(.*)$", re.IGNORECASE)
     _OMP_ARTIFACT_ID_RE = re.compile(r"^\d+$")
     _OMP_BARE_ARTIFACT_RE = re.compile(r"^artifact://\d+$", re.IGNORECASE)
+    # `<id>` and whatever selector follows it (`:raw`, `:5-9`, `:raw:5-9`).
+    _OMP_ARTIFACT_SELECTOR_RE = re.compile(r"^(\d+)(:.*)$")
+    # Holds bound at a cell's first read, by (cell, artifacts directory).
+    _OMP_BOUND_ROOTS: dict = {}
 
     def _omp_url_roots() -> dict:
-        """On-disk roots for internal-URL schemes, keyed by scheme (PI_EVAL_LOCAL_ROOTS)."""
+        """On-disk roots for internal-URL schemes, keyed by scheme.
+
+        The running cell's own roots, pinned to its context, before the process
+        environment: a cell suspended across a session re-adoption still reads
+        the artifacts directory it was started with, while the environment by
+        then names whichever cell ran last."""
+        _roots_getter = globals().get("__omp_current_url_roots__")
+        _raw = _roots_getter() if callable(_roots_getter) else None
+        if not isinstance(_raw, str):
+            _raw = os.environ.get("PI_EVAL_LOCAL_ROOTS")
         try:
-            roots = json.loads(os.environ.get("PI_EVAL_LOCAL_ROOTS") or "{}")
+            roots = json.loads(_raw or "{}")
         except (ValueError, TypeError):
             return {}
         return roots if isinstance(roots, dict) else {}
@@ -68,21 +81,189 @@ if "__omp_prelude_loaded__" not in globals():
             return result["text"]
         return result
 
-    def _artifact_file(path: str) -> Path | None:
+    def _artifact_details(args: dict) -> dict | None:
+        """One artifact question to the host; the answer it gave, or None."""
+        answer = _bridge_call("__artifacts_ready__", args)
+        details = answer.get("details") if isinstance(answer, dict) else None
+        if not isinstance(details, dict) or not isinstance(details.get("path"), str):
+            return None
+        return details
+
+    def _artifact_file(path: str, locate: bool = False) -> dict | None:
         """This session's file for `artifact://<id>` (`<id>.<tool>.log` in its
-        artifacts dir), or None when the id is not there or no dir is known."""
-        root = _omp_url_roots().get("artifact")
+        artifacts dir), or None when the id is not there or no dir is known.
+
+        A fork's artifacts arrive by copy, and this kernel is a subprocess that
+        cannot see the host's record of the copies in flight. Listing the
+        directory here is a snapshot: mid-copy it holds part of an inheritance,
+        and asking first and listing afterwards only moves the gap, because a
+        copy can be announced between the two. So the host does both and
+        answers with the file. The reader may be a thread a finished cell left
+        behind, which the host answers with the session's own authority.
+
+        The answer holds a pin on the file for this reader, which the reader
+        ends: by taking it when the name no longer means the file, or by
+        giving it back after its read (`_artifact_release`). A caller that
+        only hands the path on asks with `locate`, and nothing is held for it.
+
+        The answer is accepted only if it was issued against the hold this
+        cell reads through. A cell started before its artifacts directory
+        existed carries no token; the first answer it consumes binds the hold
+        that answer names, and every read after it is asked through that
+        hold. Two reads started together — two threads — both ask with no
+        token, and the second can be answered, after the first has bound the
+        directory, from whatever was put at the name since. So the agreement
+        is checked here, where the answer is consumed: an answer naming
+        another hold is refused, its pin given back and nothing of it read,
+        and asked again through the cell's own hold. One that still disagrees
+        is an error, not bytes."""
+        roots = _omp_url_roots()
+        root = roots.get("artifact")
         if not root:
             return None
-        artifact_id = path[11:]
-        try:
-            names = os.listdir(root)
-        except FileNotFoundError:
+        _run = globals().get("__omp_current_run_id__")
+        _cell = _run() if callable(_run) else None
+        _bind_key = (_cell, root)
+        assigned = roots.get("__artifactRoot")
+        request = {
+            "op": "locate" if locate else "answer",
+            "id": path[11:],
+            "root": os.path.abspath(root),
+        }
+        # The hold this cell was given on that directory, or the one its
+        # first answer bound: the host answers from that directory, not from
+        # whatever its pathname reaches when the read lands. Left out, never
+        # sent as null, when there is none: the host refuses a field that is
+        # present and not a string.
+        token = assigned or _OMP_BOUND_ROOTS.get(_bind_key)
+        if token:
+            request["token"] = token
+        details = _artifact_details(request)
+        if details is None:
             return None
-        for name in names:
-            if name.startswith(f"{artifact_id}."):
-                return Path(os.path.join(os.path.abspath(root), name))
-        return None
+        issued = details.get("root")
+        if assigned:
+            bound = assigned
+        elif isinstance(issued, str) and issued:
+            # This cell's binding, not the kernel's: the next cell is assigned
+            # the directory as it is then. `setdefault` is one atomic step, so
+            # of two threads binding at once exactly one wins and the other
+            # sees the winner.
+            bound = _OMP_BOUND_ROOTS.setdefault(_bind_key, issued)
+        else:
+            bound = _OMP_BOUND_ROOTS.get(_bind_key)
+        if bound is None or issued == bound:
+            return details
+        _artifact_release(details)
+        again = _artifact_details({**request, "token": bound})
+        if again is None or again.get("root") == bound:
+            return again
+        _artifact_release(again)
+        raise RuntimeError(
+            f"{path} was answered from a directory other than the one this cell reads at {root}; it was not read"
+        )
+
+    def _artifact_release(answer: dict) -> None:
+        """Give back the pin `answer` holds, now that its read is over.
+
+        Sent after the read, never before it. A give-back that cannot be
+        delivered changes nothing for the read that has already happened: the
+        pin still ends with this cell, this kernel or its lease."""
+        file = answer.get("file")
+        if not isinstance(file, str):
+            return
+        try:
+            _bridge_call("__artifacts_ready__", {"op": "release", "file": file})
+        except Exception:
+            pass
+
+    def _pinned_artifact_uri(path: str | Path) -> str:
+        """`artifact://<id><selector>` with the id already resolved to its file.
+
+        A selector form goes to the read tool, which resolves `artifact://<id>`
+        against whatever directory the session reads when the call lands. The
+        id is this cell's, so it is resolved here first, the same way a bare
+        one is, and the tool is handed the file with the selector still on it.
+        """
+        if not isinstance(path, str):
+            return str(path)
+        match = _OMP_INTERNAL_URL_RE.match(path)
+        if match is None or match.group(1).lower() != "artifact":
+            return path
+        rest = match.group(2)
+        selector = _OMP_ARTIFACT_SELECTOR_RE.match(rest)
+        if selector is None or not _omp_url_roots().get("artifact"):
+            return path
+        resolved = _artifact_file(f"artifact://{selector.group(1)}", locate=True)
+        return path if resolved is None else f"{resolved['path']}{selector.group(2)}"
+
+    def _read_settled_artifact(answer: dict, offset: int, limit: int | None) -> str:
+        """The artifact's text, read from the object the host saw.
+
+        The file is opened and the opened object is checked, not checked and
+        then opened: a directory replaced between the host's answer and this
+        read gives a different file, and that is a refusal rather than another
+        conversation's artifact under this session's number.
+
+        The pin the answer holds is this read's, and only this read ends it:
+        by taking it when the name no longer means the file, or by giving it
+        back once the bytes are in hand — never before, and never on another
+        read's behalf.
+        """
+        taken = False
+        try:
+            # Non-blocking, because an ordinary open of a FIFO waits for a
+            # writer before any check can run: a name that stopped meaning its
+            # file can have become something that does not answer an open at
+            # all, and a reader that hangs there never gets to refuse.
+            # A name that stopped meaning its file may not open at all — it
+            # was removed, or what is there now refuses this open — and that is
+            # the same answer as opening something else: ask the host, which
+            # still holds the file this answer was about.
+            data = None
+            try:
+                fd = os.open(answer["path"], os.O_RDONLY | os.O_NONBLOCK)
+            except OSError:
+                fd = -1
+            try:
+                if fd >= 0:
+                    stat = os.fstat(fd)
+                    if (
+                        stat_module.S_ISREG(stat.st_mode)
+                        and str(stat.st_dev) == answer.get("device")
+                        and str(stat.st_ino) == answer.get("inode")
+                    ):
+                        with os.fdopen(os.dup(fd), "rb") as handle:
+                            data = handle.read().decode("utf-8")
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+            if data is None:
+                # The pathname reaches something else now — its directory was
+                # replaced between the answer and this read. The host still
+                # holds the file this answer is about, under the pin; what it
+                # cannot do is hand over a name that still means it.
+                file = answer.get("file")
+                again = None
+                if isinstance(file, str):
+                    taken = True
+                    again = _artifact_details({"op": "take", "file": file})
+                if again is None or not isinstance(again.get("text"), str):
+                    raise RuntimeError(
+                        f"{answer['path']} is no longer the artifact this session was told to read"
+                    )
+                data = again["text"]
+        finally:
+            # Read, or refused: either way this read is over, and its pin goes
+            # back now rather than when a lease runs out.
+            if not taken:
+                _artifact_release(answer)
+        lines = data.splitlines(keepends=True)
+        if offset <= 1 and limit is None:
+            return data
+        start = max(0, offset - 1)
+        end = len(lines) if limit is None else start + limit
+        return "".join(lines[start:end])
 
     def _read_through_tool(path: str, offset: int, limit: int | None) -> str:
         if limit is not None and limit <= 0:
@@ -128,9 +309,11 @@ if "__omp_prelude_loaded__" not in globals():
         if isinstance(path, str) and _OMP_BARE_ARTIFACT_RE.match(path):
             if limit is not None and limit <= 0:
                 return ""
-            p = _artifact_file(path)
-            if p is None:
-                # Another session's, or no artifacts dir was injected: the read tool searches every registered one.
+            answer = _artifact_file(path)
+            if answer is not None:
+                return _read_settled_artifact(answer, offset, limit)
+            else:
+                # No artifacts dir was injected: the read tool searches every registered one.
                 # A bounded raw read locates the file without inlining it; a bare `:raw` read refuses files over 50 KB.
                 located = _bridge_call("read", {"path": f"{path}:raw:1-1"})
                 details = located.get("details") if isinstance(located, dict) else None
@@ -141,7 +324,7 @@ if "__omp_prelude_loaded__" not in globals():
                 # Once located, the file is read like this session's artifacts and plain paths: read() is no read-tool policy gate.
                 p = Path(file_path)
         elif _should_delegate_read(path):
-            return _read_through_tool(path, offset, limit)
+            return _read_through_tool(_pinned_artifact_uri(path), offset, limit)
         else:
             p = _resolve_omp_path(path)
         data = p.read_text(encoding="utf-8")
@@ -430,7 +613,11 @@ if "__omp_prelude_loaded__" not in globals():
             _OMP_CALL_IDENTITY.reset(token)
 
     def _bridge_call(name: str, args: dict):
-        """POST one request to the host tool bridge and return its `value`."""
+        """POST one request to the host tool bridge and return its `value`.
+
+        A call made outside a cell — by a thread a finished one left running —
+        carries no run. The host refuses that for anything but the questions
+        that belong to the session rather than to a cell."""
         base, token, session = _tool_proxy_from_env()
         _run_id_getter = globals().get("__omp_current_run_id__")
         _run_id = (
@@ -440,7 +627,7 @@ if "__omp_prelude_loaded__" not in globals():
         )
         payload = {
             "session": session,
-            "run": _run_id,
+            "run": _run_id or "",
             "name": name,
             "args": args,
         }

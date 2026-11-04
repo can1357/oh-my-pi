@@ -29,6 +29,7 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		state.movedTo = snapshot.cwd;
 		restoreState(snapshot);
 	});
+	const commitSessionSwitch = vi.fn((_snapshot: { cwd: string }) => {});
 	const shutdown = vi.fn(async () => {});
 	const withBtwSessionMove = vi.fn(async (operation: () => Promise<boolean>) => {
 		const moved = await operation();
@@ -42,6 +43,7 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 			captureState,
 			restoreState,
 			rollbackMove,
+			commitSessionSwitch,
 			dropSession: vi.fn(async () => {}),
 		},
 		settings: {
@@ -60,7 +62,18 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		present,
 		shutdown,
 	} as unknown as InteractiveModeContext;
-	return { ctx, state, present, captureState, restoreState, rollbackMove, shutdown, sessionDir, withBtwSessionMove };
+	return {
+		ctx,
+		state,
+		present,
+		captureState,
+		restoreState,
+		rollbackMove,
+		commitSessionSwitch,
+		shutdown,
+		sessionDir,
+		withBtwSessionMove,
+	};
 }
 
 describe("CommandController /move", () => {
@@ -182,7 +195,7 @@ describe("CommandController /move", () => {
 		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-source-"));
 		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-target-"));
 		try {
-			const { ctx, state, present } = createMoveContext(sourceDir);
+			const { ctx, state, present, captureState, commitSessionSwitch } = createMoveContext(sourceDir);
 			const controller = new CommandController(ctx);
 
 			await controller.handleMoveCommand(targetDir);
@@ -196,6 +209,9 @@ describe("CommandController /move", () => {
 			expect(ctx.ui.requestRender).toHaveBeenCalledWith();
 			expect(present).toHaveBeenCalled();
 			expect(ctx.showError).not.toHaveBeenCalled();
+			// The move kept the session, so the snapshot's ownership hold ends.
+			expect(commitSessionSwitch).toHaveBeenCalledTimes(1);
+			expect(commitSessionSwitch).toHaveBeenCalledWith(captureState.mock.results[0]?.value);
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 			await fs.rm(targetDir, { recursive: true, force: true });
@@ -206,8 +222,16 @@ describe("CommandController /move", () => {
 		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-source-"));
 		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-target-"));
 		try {
-			const { ctx, state, captureState, restoreState, rollbackMove, shutdown, withBtwSessionMove } =
-				createMoveContext(sourceDir);
+			const {
+				ctx,
+				state,
+				captureState,
+				restoreState,
+				rollbackMove,
+				commitSessionSwitch,
+				shutdown,
+				withBtwSessionMove,
+			} = createMoveContext(sourceDir);
 			let applyCount = 0;
 			ctx.applyCwdChange = vi.fn(async () => {
 				applyCount += 1;
@@ -227,6 +251,9 @@ describe("CommandController /move", () => {
 			expect(ctx.updateEditorBorderColor).not.toHaveBeenCalled();
 			expect(ctx.reloadTodos).not.toHaveBeenCalled();
 			expect(ctx.ui.requestRender).not.toHaveBeenCalled();
+			// The rollback ends the same hold the successful path ends.
+			expect(commitSessionSwitch).toHaveBeenCalledTimes(1);
+			expect(commitSessionSwitch).toHaveBeenCalledWith(captureState.mock.results[0]?.value);
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 			await fs.rm(targetDir, { recursive: true, force: true });

@@ -34,6 +34,7 @@ import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../utils/google-validation";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
+import { heldFetch } from "../utils/held-fetch";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
@@ -951,6 +952,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						block.type === "thinking" && (block.thinking.trim().length > 0 || Boolean(block.thinkingSignature)),
 				);
 
+			// Every attempt, failover endpoint and empty-stream resend is a model request.
+			const sendFetch = heldFetch(options?.fetch ?? fetch);
+
 			for (let i = 0; i < endpoints.length; i++) {
 				const endpoint = endpoints[i];
 				const isLastEndpoint = i === endpoints.length - 1;
@@ -964,17 +968,19 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					const watchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
 					let response: Response;
 					try {
-						response = await fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
-							method: "POST",
-							headers: requestHeaders,
-							body: requestBodyJson,
-							signal: watchdog.signal,
-							maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
-							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
-							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
-							fetch: options?.fetch,
-							timeout: false,
-						});
+						response = await watchdog.run(() =>
+							fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+								method: "POST",
+								headers: requestHeaders,
+								body: requestBodyJson,
+								signal: watchdog.signal,
+								maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
+								defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
+								maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
+								fetch: sendFetch,
+								timeout: false,
+							}),
+						);
 					} finally {
 						watchdog.clear();
 					}
@@ -1021,7 +1027,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								throw new AIError.ConfigurationError("Missing request URL");
 							}
 
-							currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
+							currentResponse = await sendFetch(requestUrl, {
 								method: "POST",
 								headers: requestHeaders,
 								body: requestBodyJson,

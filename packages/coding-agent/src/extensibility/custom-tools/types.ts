@@ -111,8 +111,11 @@ export interface CustomToolContext {
 /** Session event passed to onSession callback */
 export type CustomToolSessionEvent =
 	| {
-			/** Reason for the session event */
-			reason: "start" | "switch" | "branch" | "tree" | "shutdown";
+			/**
+			 * Reason for the session event. `"moved"` is the one nobody chose:
+			 * the session had to leave its file and carries on under a new id.
+			 */
+			reason: "start" | "switch" | "branch" | "tree" | "shutdown" | "moved";
 			/** Previous session file path, or undefined for "start" and "shutdown" */
 			previousSessionFile: string | undefined;
 	  }

@@ -8,6 +8,7 @@ import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers"
 import { readSseJson } from "@oh-my-pi/pi-utils";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { heldFetch } from "../utils/held-fetch";
 import { errorMessage, ImageApiError, usageFromWire, validateImageInput } from "./shared";
 import type { GeneratedImage, ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResult } from "./types";
 
@@ -150,8 +151,10 @@ export async function generateAntigravityImage(
 			const target = await resolveTarget(model, credentials, fetchImpl, options.signal);
 			const body = buildRequest(request, target.model, credentials.projectId);
 			let lastError: ImageApiError | undefined;
+			// Model discovery above is not a model request; each endpoint attempt is.
+			const send = heldFetch(fetchImpl);
 			for (let index = 0; index < target.endpoints.length; index++) {
-				const result = await fetchImpl(`${target.endpoints[index]}/v1internal:streamGenerateContent?alt=sse`, {
+				const result = await send(`${target.endpoints[index]}/v1internal:streamGenerateContent?alt=sse`, {
 					method: "POST",
 					headers: {
 						Authorization: `Bearer ${credentials.accessToken}`,
