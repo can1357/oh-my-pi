@@ -78,6 +78,28 @@ describe("read URL refused for one user agent", () => {
 		expect(text).toContain("Revenue grew in the quarter");
 	});
 
+	it("still tries the last user agent when the one after curl's challenge gets an error page", async () => {
+		const server = Bun.serve({
+			port: 0,
+			fetch: request => {
+				const agent = request.headers.get("user-agent") ?? "";
+				if (agent.startsWith("curl/")) {
+					return new Response('<html><body><input name="js_challenge"/></body></html>', {
+						headers: { "content-type": "text/html" },
+					});
+				}
+				if (agent.includes("TextBot")) return new Response("Not Found", { status: 404 });
+				return new Response(ARTICLE, { headers: { "content-type": "text/html" } });
+			},
+		});
+		servers.push(server);
+
+		const result = await loadPage(`http://127.0.0.1:${server.port}/filing.htm`);
+
+		expect(result.ok).toBe(true);
+		expect(result.content).toContain("Revenue grew in the quarter");
+	});
+
 	const jsChallenge = () =>
 		new Response('<html><body><input name="js_challenge"/></body></html>', {
 			headers: { "content-type": "text/html" },
