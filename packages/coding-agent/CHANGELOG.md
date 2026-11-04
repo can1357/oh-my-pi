@@ -83,6 +83,7 @@
 ### Fixed
 
 - A `task` call waiting on a `blocking: true` agent, or an open `ask` question, no longer holds peer messages, asides and steering until it returns: with async jobs on, the call returns at once, the child or question continues as a background job, and its result arrives on its own; a queued aside now also backgrounds a foreground bash or eval wait ([#17843](https://github.com/can1357/oh-my-pi/pull/17843) by [@sjawhar](https://github.com/sjawhar))
+- When several backgrounded `ask` answers arrive in one message, each answer's `[Image #N]` now names its own image instead of the first answer's. Only the markers the ask prompt inserted move: a file name, a quotation or a fenced block you typed reaches the model exactly as you wrote it ([#17843](https://github.com/can1357/oh-my-pi/pull/17843) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 

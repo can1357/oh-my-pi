@@ -693,6 +693,14 @@ export interface EditorInlineReplacement {
 	insert: string;
 }
 
+/** One run of an expanded buffer ({@link Editor.getExpandedRuns}). */
+export interface ExpandedRun {
+	/** The expanded content: a paste's body, an atom's expansion, or typed text verbatim. */
+	text: string;
+	/** The registered atom label this run expanded from; absent for typed text and pastes. */
+	atom?: string;
+}
+
 /** Replacement candidates and the current-line span they replace. */
 export interface EditorWordReplacements {
 	line: number;
@@ -3303,23 +3311,38 @@ export class Editor implements Component, Focusable {
 	}
 
 	/** Expand collapsed markers — `[Paste #N]` tokens and registered atom labels — into their
-	 *  stored content. Single pass so replaced content is never rescanned (a pasted body that
-	 *  happens to contain another token's label must survive verbatim). Longer atom labels are
-	 *  tried first so `#1` never shadows `#10`. */
-	#expandPasteMarkers(text: string): string {
+	 *  stored content, keeping each run's origin. Single pass so replaced content is never
+	 *  rescanned (a pasted body that happens to contain another token's label must survive
+	 *  verbatim). Longer atom labels are tried first so `#1` never shadows `#10`. A paste's body
+	 *  is the person's own text and expands into a plain run; only a registered atom — a token
+	 *  the editor itself placed — carries its label. */
+	#expandRuns(text: string): ExpandedRun[] {
 		const sources: string[] = [];
 		for (const pasteId of this.#pastes.keys()) {
 			sources.push(`\\[Paste #${pasteId}(?:, (?:\\+\\d+ lines|\\d+ chars))?\\]`);
 		}
 		const labels = [...this.#atoms.keys()].sort((a, b) => b.length - a.length);
 		for (const label of labels) sources.push(RegExp.escape(label));
-		if (sources.length === 0) return text;
+		if (sources.length === 0) return [{ text }];
 		const markerRegex = new RegExp(sources.join("|"), "g");
-		return text.replace(markerRegex, match => {
-			const paste = /^\[Paste #(\d+)/.exec(match);
-			if (paste) return this.#pastes.get(Number(paste[1])) ?? match;
-			return this.#atoms.get(match) ?? match;
-		});
+		const runs: ExpandedRun[] = [];
+		let last = 0;
+		for (const match of text.matchAll(markerRegex)) {
+			const paste = /^\[Paste #(\d+)/.exec(match[0]);
+			const expansion = paste ? this.#pastes.get(Number(paste[1])) : this.#atoms.get(match[0]);
+			if (expansion === undefined) continue;
+			if (match.index > last) runs.push({ text: text.slice(last, match.index) });
+			runs.push(paste ? { text: expansion } : { text: expansion, atom: match[0] });
+			last = match.index + match[0].length;
+		}
+		if (last < text.length) runs.push({ text: text.slice(last) });
+		return runs;
+	}
+
+	#expandedText(): string {
+		let out = "";
+		for (const run of this.#expandRuns(this.#state.lines.join("\n"))) out += run.text;
+		return out;
 	}
 
 	/** Register `label` as a collapsed atom expanding to `expansion` on submit, without inserting
@@ -3371,7 +3394,16 @@ export class Editor implements Component, Focusable {
 	 * Use this when you need the full content (e.g., for external editor).
 	 */
 	getExpandedText(): string {
-		return this.#expandPasteMarkers(this.#state.lines.join("\n"));
+		return this.#expandedText();
+	}
+
+	/**
+	 * The submitted buffer as runs, each saying whether the editor placed it. A host that must
+	 * tell its own insertions from identical text the person typed reads this instead of
+	 * re-scanning {@link getExpandedText}.
+	 */
+	getExpandedRuns(): ExpandedRun[] {
+		return this.#expandRuns(this.#state.lines.join("\n"));
 	}
 
 	getLines(): string[] {
@@ -3992,7 +4024,7 @@ export class Editor implements Component, Focusable {
 		this.#endVimSession();
 		this.#resetKillSequence();
 
-		const result = this.#expandPasteMarkers(this.#state.lines.join("\n")).trim();
+		const result = this.#expandedText().trim();
 
 		this.#state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.clearPasteState();

@@ -3,53 +3,47 @@
  *
  * An `ask` answer numbers the images a person pasted (`[Image #N]` in their text, and a source
  * notice per image). When several answers share one message, their numbers must be shifted so
- * each marker names one image of that message. Shifting by searching the rendered text would also
- * rewrite file names, code spans and the person's own words that only look like a marker, so the
- * answer keeps the markers it inserted as parts and is rendered again with a shift.
+ * each marker names one image of that message. A marker is only ever a marker because the prompt
+ * that took the answer inserted it there: the composer records the runs it built the field from
+ * ({@link AttachmentTextPart}) and they travel here. Nothing searches the person's own words, so
+ * a typed `user-[Image #1].png`, a quoted `"[Image #1]"` or a fenced block is delivered byte for
+ * byte, whatever the shift.
  */
+import type { AttachmentTextPart } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
+import { formatVisionMarkerTail } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { ImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
-import { VISION_MARKER_REGEX } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { renderAttachmentSourceNoticeText } from "./attachment-source-notice";
 
 /** One run of marked text: literal text, a marker naming an attached image, or that image's source notice. */
 export type ImageMarkedPart =
 	| string
-	| { type: "marker"; index: number; kind: "Image" | "Video"; tail: string; attachmentRef: boolean }
+	| { type: "marker"; index: number; kind: "image" | "video"; tail: string }
 	| { type: "notice"; index: number; source: ImageAttachmentSource };
 
 /**
- * Split `text` into literal runs and the markers that name its own `imageCount` images, numbered
- * from `offset + 1`. A marker past `imageCount` or inside a code span stays literal text.
+ * The runs a prompt recorded for one answer field as marked text, with the field's own image
+ * numbers raised by `offset` so they name images of the whole answer.
+ *
+ * A marker past `imageCount` cannot name an image of this field — the host that built the runs
+ * contradicted the image list it sent — so it stays the text it reads as, at the number the
+ * person's own field gave it.
  */
-export function markOwnImages(text: string, offset: number, imageCount: number): ImageMarkedPart[] {
-	if (imageCount === 0) return text ? [text] : [];
-	const parts: ImageMarkedPart[] = [];
-	let literal = "";
-	for (const { text: run, code } of codeSpanRuns(text)) {
-		if (code) {
-			literal += run;
-			continue;
+export function markSuppliedParts(
+	parts: readonly AttachmentTextPart[],
+	offset: number,
+	imageCount: number,
+): ImageMarkedPart[] {
+	const marked: ImageMarkedPart[] = [];
+	for (const part of parts) {
+		if (typeof part === "string") {
+			if (part) marked.push(part);
+		} else if (part.n > imageCount) {
+			marked.push(formatVisionMarkerTail(part.kind, part.n, part.tail));
+		} else {
+			marked.push({ type: "marker", index: part.n + offset, kind: part.kind, tail: part.tail });
 		}
-		let last = 0;
-		for (const match of run.matchAll(VISION_MARKER_REGEX)) {
-			const index = Number(match[2]);
-			if (index > imageCount) continue;
-			literal += run.slice(last, match.index);
-			if (literal) parts.push(literal);
-			literal = "";
-			parts.push({
-				type: "marker",
-				index: index + offset,
-				kind: match[1] === "Video" ? "Video" : "Image",
-				tail: match[3] ?? "",
-				attachmentRef: match[4] !== undefined,
-			});
-			last = match.index + match[0].length;
-		}
-		literal += run.slice(last);
 	}
-	if (literal) parts.push(literal);
-	return parts;
+	return marked;
 }
 
 /** Render marked text with every marker and notice number raised by `shift`. */
@@ -59,42 +53,10 @@ export function renderImageMarkedText(parts: readonly ImageMarkedPart[], shift =
 		if (typeof part === "string") {
 			out += part;
 		} else if (part.type === "marker") {
-			const index = part.index + shift;
-			out += `[${part.kind} #${index}${part.tail}]${part.attachmentRef ? ` attachment://${index}` : ""}`;
+			out += formatVisionMarkerTail(part.kind, part.index + shift, part.tail);
 		} else {
 			out += renderAttachmentSourceNoticeText(part.source, part.index + shift, { askAnswer: true });
 		}
 	}
 	return out;
-}
-
-/** Markdown code spans: a run of N backticks up to the next run of exactly N; an unclosed run is text. */
-function* codeSpanRuns(text: string): Generator<{ text: string; code: boolean }> {
-	let start = 0;
-	let cursor = 0;
-	while (cursor < text.length) {
-		const open = text.indexOf("`", cursor);
-		if (open === -1) break;
-		let width = 1;
-		while (text[open + width] === "`") width++;
-		const close = findBacktickRun(text, open + width, width);
-		if (close === -1) {
-			cursor = open + width;
-			continue;
-		}
-		if (open > start) yield { text: text.slice(start, open), code: false };
-		yield { text: text.slice(open, close + width), code: true };
-		start = cursor = close + width;
-	}
-	if (start < text.length) yield { text: text.slice(start), code: false };
-}
-
-function findBacktickRun(text: string, from: number, width: number): number {
-	for (let at = text.indexOf("`", from); at !== -1; at = text.indexOf("`", at)) {
-		let run = 1;
-		while (text[at + run] === "`") run++;
-		if (run === width) return at;
-		at += run;
-	}
-	return -1;
 }

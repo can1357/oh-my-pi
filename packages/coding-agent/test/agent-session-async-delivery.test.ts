@@ -23,6 +23,7 @@ import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/lau
 import { buildAsyncResultBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
+import { type AttachmentTextPart, renderAttachmentText } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { ArtifactManager } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import {
@@ -1357,11 +1358,16 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 			getAgentId: () => "Owner",
 		};
 
-		/** Ask one question, let a peer message move it to the background, and return how to answer it. */
+		/**
+		 * Ask one question, let a peer message move it to the background, and return how to
+		 * answer it. The note is given as the runs the prompt built it from, exactly as the ask
+		 * prompt reports them: a marker run is one the prompt inserted for that field's own
+		 * image, everything else is text the person typed.
+		 */
 		async function backgroundAsk(
 			callId: string,
 			question: string,
-		): Promise<(note: string, images?: ImageContent[], customInput?: string) => void> {
+		): Promise<(note: readonly AttachmentTextPart[], images?: ImageContent[], customInput?: string) => void> {
 			const answer = Promise.withResolvers<ExtensionAskDialogResult>();
 			const wake = new AbortController();
 			const context = {
@@ -1394,9 +1400,9 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 							options: ["SQLite"],
 							multi: false,
 							selectedOptions: ["SQLite"],
-							note,
+							note: renderAttachmentText(note),
 							...(customInput === undefined ? {} : { customInput }),
-							...(images.length > 0 ? { noteImages: images } : {}),
+							...(images.length > 0 ? { noteImages: images, noteParts: [...note] } : {}),
 						},
 					],
 				});
@@ -1412,6 +1418,11 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 			path.join(dir, `${name}.png`),
 			"image",
 		);
+	}
+
+	/** A run the ask prompt inserted for the field's `n`th own image. */
+	function mark(n: number, tail = ""): AttachmentTextPart {
+		return { kind: "image", n, tail };
 	}
 
 	function deliveries(owner: AgentSession): string[] {
@@ -1476,7 +1487,7 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 
 		const delivered = observeAsyncResultEnqueue(owner, 2);
 		plotGate.resolve();
-		answer("schema in [Image #1]", [pasted(tempDir.path(), "answer-image")]);
+		answer(["schema in ", mark(1)], [pasted(tempDir.path(), "answer-image")]);
 		await delivered;
 		await owner.settleAsyncWork();
 
@@ -1500,12 +1511,12 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 		const answerNew = await backgroundAsk("ask-new", "Which cache?");
 
 		const delivered = observeAsyncResultEnqueue(owner, 3);
-		answerOld("old schema [Image #1]", [pasted(tempDir.path(), "old-image")]);
-		answerPlain("no picture");
-		answerNew("cache front [Image #1] and back [Image #2]", [
-			pasted(tempDir.path(), "front-image"),
-			pasted(tempDir.path(), "back-image"),
-		]);
+		answerOld(["old schema ", mark(1)], [pasted(tempDir.path(), "old-image")]);
+		answerPlain(["no picture"]);
+		answerNew(
+			["cache front ", mark(1), " and back ", mark(2)],
+			[pasted(tempDir.path(), "front-image"), pasted(tempDir.path(), "back-image")],
+		);
 		await delivered;
 		await owner.settleAsyncWork();
 
@@ -1534,7 +1545,7 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 		expect(lastRequestImages(mock)).toEqual(inMarkerOrder);
 	});
 
-	it("renumbers only the markers an answer inserted, never file names, code spans or the person's own text", async () => {
+	it("renumbers only the markers an answer inserted, never a file name, a quotation, a fence or a code span", async () => {
 		using tempDir = TempDir.createSync("@pi-async-ask-attachment-");
 		const { session: owner, backgroundAsk } = await startSession(tempDir.path());
 		const answerOld = await backgroundAsk("ask-old", "Which database?");
@@ -1543,15 +1554,22 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 		// A real file whose name looks like a marker.
 		const userPath = path.join(tempDir.path(), "user-[Image #1].png");
 		await Bun.write(oldPath, "old");
-		await Bun.write(userPath, "user");
+		await Bun.write(userPath, "user bytes");
 		const image = (data: string, file: string) =>
 			tagImageAttachmentSource({ type: "image", data, mimeType: "image/png" }, file, "image");
+		// Everything the person typed into the field that owns the image, markers and all. A
+		// multi-line note is indented by the answer formatter; nothing else about it may change.
+		const typed = [
+			` of ${userPath}, which they called "[Image #1]"\n`,
+			"~~~\n[Image #1]\n~~~\n",
+			"and `[Image #1]` inline",
+		].join("");
+		const indented = typed.replaceAll("\n", "\n  ");
 
 		const delivered = observeAsyncResultEnqueue(owner, 2);
-		answerOld("old schema [Image #1]", [image("old-image", oldPath)]);
-		// The custom answer has no image and the code span is typed text: neither is a marker.
+		answerOld(["old schema ", mark(1)], [image("old-image", oldPath)]);
 		answerNew(
-			"cache layout [Image #1], typed as `[Image #1]`",
+			["cache layout ", mark(1, ", 8x4"), typed],
 			[image("user-image", userPath)],
 			"like [Image #1] in the docs",
 		);
@@ -1561,19 +1579,31 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 		const texts = deliveries(owner);
 		expect(texts).toHaveLength(1);
 		const text = texts[0]!;
+		// The custom answer has no image of its own, so its numbering is left alone.
 		expect(text).toContain("User provided custom input: like [Image #1] in the docs");
-		expect(text).toContain("User added note: cache layout [Image #2], typed as `[Image #1]`");
+		// The one run the prompt inserted moves; every typed character stays byte for byte.
+		expect(text).toContain(`cache layout [Image #2, 8x4]${indented}`);
+		expect(text).not.toContain("user-[Image #2].png");
 		// Each notice carries the marker's delivery number and the file's real path.
 		const notices = [...text.matchAll(/`\[Image #(\d+)\]` to their ask answer\.\s+Source path: `([^`]+)`/g)];
 		expect(notices.map(([, index, file]) => [Number(index), file])).toEqual([
 			[1, oldPath],
 			[2, userPath],
 		]);
-		expect(text).not.toContain("user-[Image #2].png");
-		expect(await Bun.file(userPath).exists()).toBe(true);
-		// The marker the model reads opens the same file the notice names.
+		// The marker the model reads opens the same file the notice names...
 		expect(resolveAttachment(owner, 2)).toEqual({ data: "user-image", file: "user-[Image #1].png" });
 		expect(owner.getImageAttachments()[1]?.sourcePath).toBe(userPath);
+		// ...and the path the person typed — spaces and all — is still a path the model can read.
+		const typedPath = text.match(/ of (.+?\.png), which they called/)?.[1];
+		expect(typedPath).toBe(userPath);
+		const read = await new ReadTool({
+			cwd: tempDir.path(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			settings: Settings.isolated(),
+		}).execute("read-typed-path", { path: typedPath ?? "" });
+		expect(read.content.map(block => (block.type === "text" ? block.text : "")).join("\n")).toContain("user bytes");
 	});
 
 	it("cuts a long answer to the preview and saves its renumbered full text in a file the model can read", async () => {
@@ -1588,8 +1618,11 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 		await sessionStore.saveArtifact("earlier output", "bash");
 
 		const delivered = observeAsyncResultEnqueue(owner, 2);
-		answerOld("old schema [Image #1]", [pasted(tempDir.path(), "old-image")]);
-		answerLong(`see [Image #1]\n${"long line\n".repeat(1_500)}end-of-answer`, [pasted(tempDir.path(), "long-image")]);
+		answerOld(["old schema ", mark(1)], [pasted(tempDir.path(), "old-image")]);
+		answerLong(
+			["see ", mark(1), `\n${"long line\n".repeat(1_500)}end-of-answer`],
+			[pasted(tempDir.path(), "long-image")],
+		);
 		await delivered;
 		await owner.settleAsyncWork();
 
@@ -1626,9 +1659,17 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 		expect(saved).not.toContain("see [Image #1]");
 	});
 
-	it("an inline answer's real marker opens its image while the same marker in a code span stays text", async () => {
+	it("an inline answer's real marker opens its image while every typed marker in the same field stays text", async () => {
 		using tempDir = TempDir.createSync("@pi-async-ask-attachment-");
 		const { session: owner, toolSession } = await startSession(tempDir.path());
+		const userPath = path.join(tempDir.path(), "user-[Image #1].png");
+		await Bun.write(userPath, "user bytes");
+		const typed = [
+			` of ${userPath}, which they called "[Image #1]"\n`,
+			"~~~\n[Image #1]\n~~~\n",
+			"and `[Image #1]` inline",
+		].join("");
+		const indented = typed.replaceAll("\n", "\n  ");
 		const context = {
 			hasUI: true,
 			ui: {
@@ -1643,8 +1684,10 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 							selectedOptions: ["SQLite"],
 							customInput: "front [Image #1]",
 							customInputImages: [pasted(tempDir.path(), "front-image")],
-							note: "back [Image #1], not `[Image #1]`",
+							customInputParts: ["front ", mark(1)],
+							note: `back [Image #1, 8x4]${typed}`,
 							noteImages: [pasted(tempDir.path(), "back-image")],
+							noteParts: ["back ", mark(1, ", 8x4"), typed],
 						},
 					],
 				}),
@@ -1663,7 +1706,8 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 		);
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 		expect(text).toContain("User provided custom input: front [Image #1]");
-		expect(text).toContain("User added note: back [Image #2], not `[Image #1]`");
+		expect(text).toContain(`back [Image #2, 8x4]${indented}`);
+		expect(text).not.toContain("user-[Image #2].png");
 		owner.agent.appendMessage({
 			role: "toolResult",
 			toolCallId: "ask-inline",
@@ -1674,6 +1718,17 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 		});
 		expect(resolveAttachment(owner, 1)?.data).toBe("front-image");
 		expect(resolveAttachment(owner, 2)?.data).toBe("back-image");
+		// The path the person typed in the image-bearing field is still readable.
+		const inlineTypedPath = text.match(/ of (.+?\.png), which they called/)?.[1];
+		expect(inlineTypedPath).toBe(userPath);
+		const read = await new ReadTool({
+			cwd: tempDir.path(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			settings: Settings.isolated(),
+		}).execute("read-inline-typed-path", { path: inlineTypedPath ?? "" });
+		expect(read.content.map(block => (block.type === "text" ? block.text : "")).join("\n")).toContain("user bytes");
 	});
 
 	it("across deliveries the newest message owns attachment numbers; an older answer's path notice still names its file", async () => {
@@ -1687,7 +1742,7 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 		// The newer question is still open, so the session is not quiescent: wait for each
 		// delivery's turn instead.
 		const first = observeAsyncResultCommit(owner);
-		answerOld("old schema [Image #1]", [pasted(tempDir.path(), "old-image")]);
+		answerOld(["old schema ", mark(1)], [pasted(tempDir.path(), "old-image")]);
 		await first;
 		await owner.waitForIdle();
 		const firstText = deliveries(owner)[0]!;
@@ -1697,7 +1752,7 @@ describe("AgentSession attachments of backgrounded ask answers", () => {
 
 		vi.restoreAllMocks();
 		const second = observeAsyncResultCommit(owner);
-		answerNew("new schema [Image #1]", [pasted(tempDir.path(), "new-image")]);
+		answerNew(["new schema ", mark(1)], [pasted(tempDir.path(), "new-image")]);
 		await second;
 		await owner.settleAsyncWork();
 

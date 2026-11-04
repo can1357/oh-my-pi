@@ -891,7 +891,7 @@ export class ExtensionUiController {
 					this.ctx.ui,
 					prompt.title,
 					prefill,
-					(text, images) => finishPrompt({ text, images }),
+					(text, images, parts) => finishPrompt({ text, images, parts }),
 					() => finishPrompt(undefined),
 					{ promptStyle: true, externalEditor: editDialogExternally, question: prompt.question, ...options },
 				);
@@ -920,6 +920,7 @@ export class ExtensionUiController {
 				openPrompt(prompt, prefill?.text, {
 					acceptImages: true,
 					images: prefill?.images,
+					parts: prefill?.parts,
 					onPasteImage: () => this.ctx.handleImagePaste(),
 					onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
 				});

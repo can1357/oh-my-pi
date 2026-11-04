@@ -36,6 +36,7 @@
    - multiple questions: `User answers:` followed by one line per `id`
    - rich-dialog chat redirect: `User chose to chat about this instead of answering...`
 - Images pasted into rich-dialog custom answers and notes follow the text block, each with the source-path notice a main-editor attachment gets. `[Image #N]` markers are numbered across the whole result, in text order within each answer, and `attachment://N` resolves to them until a newer message attaches images; image data stays out of `details`.
+- Renumbering moves only the markers the dialog's prompt inserted. The ask prompt attaches an image as a composer token and reports the field as runs (`ExtensionAskDialogResultItem.customInputParts` / `noteParts`); the tool renumbers marker runs and renders every other run byte for byte, so a `user-[Image #1].png` you typed, a quotation, a fence or a code span is never rewritten. A host that attaches images to an answer without reporting runs keeps that answer's own numbering, markers and all — only the local terminal dialog attaches images today; the RPC, ACP, collab-guest and selector/editor paths answer with text only.
 - For a text-only active model with `images.describeForTextModels` on (the default), each answer image is followed by the vision-model description a pasted prompt image gets.
 - `details`:
    - single question: `{ question, options, multi, selectedOptions, customInput?, note?, timedOut? }`

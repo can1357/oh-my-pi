@@ -1,4 +1,5 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { AttachmentTextPart } from "../prompt/composer-attachments";
 import {
 	type Component,
 	Ellipsis,
@@ -38,6 +39,11 @@ export interface ExtensionAskDialogQuestion {
 export interface AskDialogPromptValue {
 	text: string;
 	images?: ImageContent[];
+	/**
+	 * `text` as the runs the prompt built it from. Present only when the prompt recorded which
+	 * markers it inserted itself; `renderAttachmentText(parts)` is `text`.
+	 */
+	parts?: AttachmentTextPart[];
 }
 
 /** Submitted answer to one dialog question. */
@@ -49,8 +55,16 @@ export interface ExtensionAskDialogResultItem {
 	selectedOptions: string[];
 	customInput?: string;
 	customInputImages?: ImageContent[];
+	/**
+	 * `customInput` as the runs the prompt built it from, so a consumer renumbering markers
+	 * across answers moves only the markers the prompt inserted. A host that attaches images
+	 * without recording this leaves its answer's own numbering untouched.
+	 */
+	customInputParts?: AttachmentTextPart[];
 	note?: string;
 	noteImages?: ImageContent[];
+	/** `note` as the runs the prompt built it from; see {@link customInputParts}. */
+	noteParts?: AttachmentTextPart[];
 	/** Label of the option the note is on; unset when it is on the custom answer. */
 	noteOption?: string;
 	timedOut?: boolean;
@@ -175,8 +189,12 @@ interface QuestionState {
 	selectedOptions: Set<string>;
 	customInput: string | undefined;
 	customInputImages: ImageContent[] | undefined;
+	/** `customInput` as the prompt's own runs; see {@link ExtensionAskDialogResultItem.customInputParts}. */
+	customInputParts: AttachmentTextPart[] | undefined;
 	note: string | undefined;
 	noteImages: ImageContent[] | undefined;
+	/** `note` as the prompt's own runs; see {@link ExtensionAskDialogResultItem.customInputParts}. */
+	noteParts: AttachmentTextPart[] | undefined;
 	noteRowKey: string | undefined;
 	cursorIndex: number;
 	scrollOffset: number;
@@ -438,14 +456,20 @@ function describeRowDetail(
 }
 
 /** Normalize the result of either prompt callback. */
-function splitPromptInput(input: string | AskDialogPromptValue): { text: string; images: ImageContent[] | undefined } {
-	if (typeof input === "string") return { text: input, images: undefined };
-	return { text: input.text, images: input.images?.length ? input.images : undefined };
+function splitPromptInput(input: string | AskDialogPromptValue): {
+	text: string;
+	images: ImageContent[] | undefined;
+	parts: AttachmentTextPart[] | undefined;
+} {
+	if (typeof input === "string") return { text: input, images: undefined, parts: undefined };
+	const images = input.images?.length ? input.images : undefined;
+	return { text: input.text, images, parts: images ? input.parts : undefined };
 }
 
 function clearNote(state: QuestionState): void {
 	state.note = undefined;
 	state.noteImages = undefined;
+	state.noteParts = undefined;
 	state.noteRowKey = undefined;
 }
 
@@ -625,8 +649,10 @@ export class AskDialogComponent implements Component {
 				selectedOptions: new Set<string>(),
 				customInput: undefined,
 				customInputImages: undefined,
+				customInputParts: undefined,
 				note: undefined,
 				noteImages: undefined,
+				noteParts: undefined,
 				noteRowKey: undefined,
 				cursorIndex: clamp(recommended ?? 0, 0, maxIndex),
 				scrollOffset: 0,
@@ -1460,6 +1486,7 @@ export class AskDialogComponent implements Component {
 		state.selectedOptions = new Set([option.label]);
 		state.customInput = undefined;
 		state.customInputImages = undefined;
+		state.customInputParts = undefined;
 		clearNoteUnlessRow(state, rowItem.key);
 		this.#advanceAfterQuestion(rowItem.key);
 	}
@@ -1523,7 +1550,9 @@ export class AskDialogComponent implements Component {
 		this.#promptActive = true;
 		try {
 			const prefill =
-				state.customInput === undefined ? undefined : { text: state.customInput, images: state.customInputImages };
+				state.customInput === undefined
+					? undefined
+					: { text: state.customInput, images: state.customInputImages, parts: state.customInputParts };
 			const result = await this.#openPrompt({ title: "Custom answer", question: question.question }, prefill);
 			if (result === undefined || this.#closed) return;
 			const input = splitPromptInput(result);
@@ -1531,11 +1560,13 @@ export class AskDialogComponent implements Component {
 				// Submitting an empty value unselects the custom answer.
 				state.customInput = undefined;
 				state.customInputImages = undefined;
+				state.customInputParts = undefined;
 				clearNoteIfRow(state, rowItem.key);
 				return;
 			}
 			state.customInput = input.text;
 			state.customInputImages = input.images;
+			state.customInputParts = input.parts;
 			if (!question.multi) {
 				state.selectedOptions.clear();
 				clearNoteUnlessRow(state, rowItem.key);
@@ -1562,7 +1593,9 @@ export class AskDialogComponent implements Component {
 		try {
 			const isReedit = state.noteRowKey === rowItem.key;
 			const prefill =
-				isReedit && state.note !== undefined ? { text: state.note, images: state.noteImages } : undefined;
+				isReedit && state.note !== undefined
+					? { text: state.note, images: state.noteImages, parts: state.noteParts }
+					: undefined;
 			const result = await this.#openPrompt(
 				{ title: `Note for ${rowItem.label}`, question: question.question },
 				prefill,
@@ -1571,6 +1604,7 @@ export class AskDialogComponent implements Component {
 			const note = splitPromptInput(result);
 			state.note = note.text;
 			state.noteImages = note.images;
+			state.noteParts = note.parts;
 			state.noteRowKey = rowItem.key;
 			this.#justAnswered = undefined;
 		} finally {
@@ -1811,8 +1845,10 @@ export class AskDialogComponent implements Component {
 				selectedOptions,
 				customInput: state.customInput,
 				customInputImages: state.customInputImages,
+				customInputParts: state.customInputParts,
 				note: note?.text,
 				noteImages: note === undefined ? undefined : state.noteImages,
+				noteParts: note === undefined ? undefined : state.noteParts,
 				noteOption: note?.option,
 				timedOut: state.timedOut || undefined,
 			});

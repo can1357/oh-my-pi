@@ -1872,14 +1872,17 @@ describe("AskTool rich ask dialog", () => {
 					selectedOptions: [],
 					customInput: "Like [Image #1]",
 					customInputImages: [customImage],
+					customInputParts: ["Like ", { kind: "image", n: 1, tail: "" }],
 					note: "Evidence [Image #1]",
 					noteImages: [firstImage],
+					noteParts: ["Evidence ", { kind: "image", n: 1, tail: "" }],
 				},
 				{
 					id: "q2",
 					selectedOptions: ["B"],
 					note: "Evidence [Image #1]",
 					noteImages: [secondImage],
+					noteParts: ["Evidence ", { kind: "image", n: 1, tail: "" }],
 				},
 			],
 		});
@@ -1916,18 +1919,34 @@ describe("AskTool rich ask dialog", () => {
 		}
 	});
 
-	it("renumbers only markers that refer to the answer's own images", async () => {
+	it("renumbers the markers the prompt inserted and leaves every typed character alone", async () => {
+		// One answer field owns one real image and also contains text that reads like a marker:
+		// a file name, a quotation, a fenced block and a code span. Only the run the prompt
+		// inserted is a marker, so only it moves; the rest is delivered byte for byte and the
+		// path the person named still resolves.
 		const image = { type: "image" as const, data: "image", mimeType: "image/png" };
+		const typed = [
+			' of user-[Image #1].png, which they called "[Image #1]"\n',
+			"~~~\n[Image #1]\n~~~\n",
+			"and `[Image #1]` inline",
+		].join("");
 		const askDialog = vi.fn().mockResolvedValue({
 			kind: "submit",
 			results: [
-				{ id: "q1", selectedOptions: [], customInput: "Like [Image #1]", customInputImages: [image] },
+				{
+					id: "q1",
+					selectedOptions: [],
+					customInput: "Like [Image #1]",
+					customInputImages: [image],
+					customInputParts: ["Like ", { kind: "image", n: 1, tail: "" }],
+				},
 				{
 					id: "q2",
 					selectedOptions: [],
 					customInput: "Match the mock in [Image #1]",
-					note: "[Image #1] beside [Image #5]",
+					note: `shot [Image #1, 8x4]${typed}`,
 					noteImages: [image],
+					noteParts: ["shot ", { kind: "image", n: 1, tail: ", 8x4" }, typed],
 				},
 			],
 		});
@@ -1947,8 +1966,39 @@ describe("AskTool rich ask dialog", () => {
 		expect(result.details).toMatchObject({
 			results: [
 				{ customInput: "Like [Image #1]" },
-				{ customInput: "Match the mock in [Image #1]", note: "[Image #2] beside [Image #5]" },
+				// The field with no images of its own keeps its text untouched too.
+				{ customInput: "Match the mock in [Image #1]", note: `shot [Image #2, 8x4]${typed}` },
 			],
+		});
+	});
+
+	it("leaves an answer's own numbering alone when its host attached images but reported no runs", async () => {
+		// No host in this repo does, but an extension or SDK UI may: with nothing saying which
+		// characters the prompt wrote, the text reaches the model as the host sent it rather
+		// than having markers guessed out of the person's words.
+		const image = { type: "image" as const, data: "image", mimeType: "image/png" };
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{ id: "q1", selectedOptions: [], customInput: "first [Image #1]", customInputImages: [image] },
+				{ id: "q2", selectedOptions: [], customInput: "second [Image #1]", customInputImages: [image] },
+			],
+		});
+		const result = await new AskTool(createSession()).execute(
+			"call-no-parts",
+			{
+				questions: [
+					{ id: "q1", question: "Q1?", options: [{ label: "A" }] },
+					{ id: "q2", question: "Q2?", options: [{ label: "B" }] },
+				],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+
+		expect(result.details).toMatchObject({
+			results: [{ customInput: "first [Image #1]" }, { customInput: "second [Image #1]" }],
 		});
 	});
 

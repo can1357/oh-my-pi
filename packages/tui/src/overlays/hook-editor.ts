@@ -8,7 +8,16 @@
  * - Prompt-style (ask): Enter submits, Shift+Enter inserts newline, legacy ask chrome
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { compactImageMarkers, formatVisionMarker, PLACEHOLDER_REGEX } from "../prompt/composer-attachments";
+import {
+	ATTACHMENT_TOKEN_REGEX,
+	type AttachmentMarkerPart,
+	type AttachmentTextPart,
+	chipLabel,
+	compactAttachmentParts,
+	renderAttachmentText,
+	VISION_MARKER_REGEX,
+	visionMarkerTail,
+} from "../prompt/composer-attachments";
 import { extractImagePastePathsFromText } from "../prompt/custom-editor";
 import {
 	Editor,
@@ -65,6 +74,13 @@ export function boundPromptTitle(prefix: string, question: string): string {
 	return [...kept, last].join("\n");
 }
 
+/**
+ * Called with the submitted text, the attachments it kept, and — whenever attachments survive —
+ * the runs the text was built from, so the host can tell the markers this prompt inserted from
+ * identical characters the person typed. `renderAttachmentText(parts)` is `value`.
+ */
+export type HookEditorSubmit = (value: string, images?: ImageContent[], parts?: AttachmentTextPart[]) => void;
+
 export interface HookEditorOptions {
 	/** Edit text with the host's configured external editor. */
 	externalEditor?: (text: string) => Promise<string | null>;
@@ -78,8 +94,15 @@ export interface HookEditorOptions {
 	question?: string;
 	/** Allow clipboard images to be attached to this prompt. */
 	acceptImages?: boolean;
-	/** Images already represented by markers in the prefilled text. */
+	/** Images this prompt's markers already name, in marker order. */
 	images?: readonly ImageContent[];
+	/**
+	 * The prefilled draft as the runs a previous submission of this prompt produced
+	 * ({@link HookEditorSubmit}). Re-editing restores each marker as the attachment token
+	 * that produced it, so the draft keeps its provenance instead of being re-derived from text.
+	 * Without it a prefill is entirely typed text, markers included.
+	 */
+	parts?: readonly AttachmentTextPart[];
 	/**
 	 * With `acceptImages`, called for an empty bracketed paste, which is how terminals that own
 	 * the paste key send an image-only clipboard (#3601). Same signature as
@@ -105,7 +128,7 @@ export interface HookEditorOptions {
 export class HookEditorComponent extends OverlayPanel implements Focusable {
 	#editor: Editor;
 	#field: FormField;
-	#onSubmitCallback: (value: string, images?: ImageContent[]) => void;
+	#onSubmitCallback: HookEditorSubmit;
 	#onCancelCallback: () => void;
 	#tui: TUI;
 	#promptStyle: boolean;
@@ -116,6 +139,9 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 	#onPasteImagePath: HookEditorOptions["onPasteImagePath"];
 	#pasteHandler = new BracketedPasteHandler();
 	#pendingPastes: { settled: boolean; text: string | undefined }[] = [];
+	/** Attachment token in the buffer → the marker it stands for; the provenance of every marker
+	 *  this prompt inserted. A person who types the same characters produces typed text. */
+	#markers = new Map<string, AttachmentMarkerPart>();
 	#submitQueued = false;
 	#disposed = false;
 	/** Head, field and action bar; every part but the editor (which describes itself) is fixed, so it is built once. */
@@ -127,7 +153,7 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		tui: TUI,
 		title: string,
 		prefill: string | undefined,
-		onSubmit: (value: string, images?: ImageContent[]) => void,
+		onSubmit: HookEditorSubmit,
 		onCancel: () => void,
 		options?: HookEditorOptions,
 	) {
@@ -156,15 +182,20 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 			this.#editor.setPromptGutter("> ");
 			this.#editor.disableSubmit = true;
 		}
-		// Image markers delete as a unit, like the main editor's attachment tokens.
-		if (options?.acceptImages) this.#editor.atomicTokenPattern = PLACEHOLDER_REGEX;
+		// Attachment tokens delete as a unit, like the main editor's.
+		if (this.#acceptImages) this.#editor.atomicTokenPattern = ATTACHMENT_TOKEN_REGEX;
 		// Bound the editor so long content scrolls instead of pushing the
 		// submit hint off-screen. Caller may override via options.maxHeight.
 		const termRows = this.#tui.terminal?.rows ?? process.stdout.rows ?? 40;
 		this.#editor.setMaxHeight(options?.maxHeight ?? Math.max(3, termRows - 12));
 		this.#editor.setScrollbarVisible(true);
-		if (prefill) {
-			this.#editor.setText(prefill);
+		const parts = this.#acceptImages ? options?.parts : undefined;
+		if (parts?.length) {
+			// Re-editing a draft this prompt produced: restore each marker as the token that
+			// produced it, so its provenance survives the round trip.
+			this.#editor.setText(parts.map(part => this.#token(part)).join(""));
+		} else if (prefill) {
+			this.#editor.setText(this.#images.length > 0 ? this.#collapsePrefillMarkers(prefill) : prefill);
 		}
 		// Hint
 		const followUpKeys = boundKeys("app.message.followUp", ["ctrl+q", "ctrl+enter"]);
@@ -328,22 +359,62 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 			this.#submitQueued = true;
 			return;
 		}
-		let text = this.#editor.getExpandedText();
-		if (requireText && text.trim().length === 0) return;
-		let images: ImageContent[] | undefined;
-		if (this.#images.length > 0) {
-			// Path pastes attach as they finish loading; submit numbers images in text order.
-			const compacted = compactImageMarkers(text, this.#images.length, { byAppearance: true });
-			if (compacted) {
-				text = compacted.text;
-				images = compacted.keep.map(index => this.#images[index]);
-			} else {
-				images = this.#images;
-			}
+		if (this.#images.length === 0) {
+			const plain = this.#editor.getExpandedText();
+			if (requireText && plain.trim().length === 0) return;
+			this.dispose();
+			this.#onSubmitCallback(plain);
+			return;
 		}
+		// Path pastes attach as they finish loading, and a marker may have been deleted since;
+		// submit drops the unreferenced attachments and numbers the rest in text order.
+		const { parts, keep } = compactAttachmentParts(this.#parts());
+		const text = renderAttachmentText(parts);
+		if (requireText && text.trim().length === 0) return;
+		const images = keep.map(index => this.#images[index]!);
 		this.dispose();
-		if (images?.length) this.#onSubmitCallback(text, images);
+		if (images.length > 0) this.#onSubmitCallback(text, images, parts);
 		else this.#onSubmitCallback(text);
+	}
+
+	/**
+	 * The buffer as runs: every attachment token this prompt placed becomes its marker, and
+	 * everything else is text exactly as the person wrote it — including characters that look
+	 * like a marker.
+	 */
+	#parts(): AttachmentTextPart[] {
+		const parts: AttachmentTextPart[] = [];
+		for (const run of this.#editor.getExpandedRuns()) {
+			const marker = run.atom === undefined ? undefined : this.#markers.get(run.atom);
+			if (marker) parts.push({ ...marker });
+			else if (run.text) parts.push(run.text);
+		}
+		return parts;
+	}
+
+	/** The buffer token standing for `part`: a chip for a marker, the text itself otherwise. */
+	#token(part: AttachmentTextPart): string {
+		if (typeof part === "string") return part;
+		const label = chipLabel(part.kind, part.n);
+		this.#markers.set(label, part);
+		this.#editor.registerAtom(label, renderAttachmentText([part]));
+		return label;
+	}
+
+	/**
+	 * Re-collapse the markers of a prefill that arrived as plain text beside its images — this
+	 * prompt's own earlier output, round-tripped through a host that kept no runs. Markers are
+	 * recognized by their characters here, the one place that is unavoidable: without it the
+	 * attachments they name would be dropped on submit. A host that supplies `parts` never
+	 * reaches this.
+	 */
+	#collapsePrefillMarkers(prefill: string): string {
+		const count = this.#images.length;
+		return prefill.replace(VISION_MARKER_REGEX, (match, kind: string, index: string, tail: string) => {
+			const n = Number(index);
+			if (n > count) return match;
+			return this.#token({ kind: kind === "Video" ? "video" : "image", n, tail });
+		});
 	}
 
 	/** Whether this prompt opted into clipboard image attachments. */
@@ -351,11 +422,17 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		return this.#acceptImages && !this.#disposed;
 	}
 
-	/** Attach an image; returns its `[Image #N, WxH]` marker for the caller to deliver. */
+	/**
+	 * Attach an image; returns the compact attachment token for the caller to deliver into the
+	 * buffer, as the main composer inserts one. Submit expands the token back to its marker and
+	 * reports it as a marker run, so a marker a person writes out in full — a file name, a
+	 * quotation, a fence — is never mistaken for one this prompt inserted. Only typing the
+	 * token's own characters (`📷 #1`) can, as in the main composer.
+	 */
 	attachImage(image: ImageContent, dims?: { width: number; height: number }): string | undefined {
 		if (!this.acceptsImages) return undefined;
 		this.#images.push(image);
-		return formatVisionMarker("image", this.#images.length, dims);
+		return this.#token({ kind: "image", n: this.#images.length, tail: visionMarkerTail(dims) });
 	}
 
 	/** Reserve ordered clipboard delivery. Completion accepts nonempty text once, or releases on undefined. */
@@ -482,6 +559,20 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		this.#editor.handleInput(keyData);
 	}
 
+	/**
+	 * Re-collapse the markers this prompt wrote back into their tokens. The external editor hands
+	 * back plain text, so this is the one place a marker is recognized by its characters: text
+	 * the person typed there that is byte-identical to one of this prompt's own markers collapses
+	 * with it. Without it an attachment would silently vanish from the answer.
+	 */
+	#collapseKnownMarkers(text: string): string {
+		if (this.#markers.size === 0) return text;
+		const tokens = new Map<string, string>();
+		for (const [label, part] of this.#markers) tokens.set(renderAttachmentText([part]), label);
+		const sources = [...tokens.keys()].sort((a, b) => b.length - a.length).map(RegExp.escape);
+		return text.replace(new RegExp(sources.join("|"), "g"), match => tokens.get(match) ?? match);
+	}
+
 	async #openExternalEditor(): Promise<void> {
 		const externalEditor = this.#externalEditor;
 		if (!externalEditor) return;
@@ -491,7 +582,7 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 			this.#tui.stop();
 			const result = await externalEditor(currentText);
 			if (!this.#disposed && result !== null) {
-				this.#editor.setText(result);
+				this.#editor.setText(this.#collapseKnownMarkers(result));
 			}
 		} finally {
 			this.#tui.start();

@@ -40,6 +40,7 @@ import {
 	TRUNCATE_LENGTHS,
 } from "@oh-my-pi/pi-tui/render/render-utils";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
+import type { AttachmentTextPart } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { ToolAbortError } from "./tool-errors";
 import { cfgAsyncEnabled } from "./settings";
@@ -47,7 +48,7 @@ import { hasWaitTool } from "./wait";
 
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { cfgAskNotify, askTimeoutMs } from "../modes/settings";
-import { type ImageMarkedPart, markOwnImages, renderImageMarkedText } from "../session/image-marked-text";
+import { type ImageMarkedPart, markSuppliedParts, renderImageMarkedText } from "../session/image-marked-text";
 import { cfgSpeechEnabled } from "../tts/settings";
 import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
 
@@ -488,7 +489,7 @@ async function askSingleQuestion(
 	return { selectedOptions, customInput, note, timedOut };
 }
 
-/** A question's answer with its free-text fields kept as marked text (see {@link markOwnImages}). */
+/** A question's answer with its free-text fields kept as marked text (see {@link markAnswerField}). */
 type MarkedQuestionResult = Omit<QuestionResult, "customInput" | "note"> & {
 	customInput?: ImageMarkedPart[];
 	note?: ImageMarkedPart[];
@@ -498,6 +499,26 @@ type MarkedQuestionResult = Omit<QuestionResult, "customInput" | "note"> & {
 function plainField(text: string | undefined): ImageMarkedPart[] | undefined {
 	if (text === undefined) return undefined;
 	return text ? [text] : [];
+}
+
+/**
+ * One answer field as marked text, numbered from `offset + 1` among the answer's images.
+ *
+ * `parts` is the provenance the prompt recorded: which runs of `text` are markers it inserted
+ * itself. Only those are renumbered. A host that attaches images to an answer without recording
+ * it (none in this repo does — see `docs/tools/ask.md`) gets one literal run: its text reaches
+ * the model exactly as written, keeping that answer's own numbering, rather than having markers
+ * guessed out of the person's words.
+ */
+function markAnswerField(
+	text: string | undefined,
+	parts: readonly AttachmentTextPart[] | undefined,
+	offset: number,
+	imageCount: number,
+): ImageMarkedPart[] | undefined {
+	if (text === undefined) return undefined;
+	if (parts === undefined || imageCount === 0) return plainField(text);
+	return markSuppliedParts(parts, offset, imageCount);
 }
 
 /** Indent every line of `parts` by two spaces; markers never span lines. */
@@ -986,7 +1007,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				}
 				const results: QuestionResult[] = [];
 				const marked: MarkedQuestionResult[] = [];
-				// Each prompt numbers markers from 1; shift them so `[Image #N]` indexes all result images.
+				// Each prompt numbers the markers it inserted from 1; shift them so `[Image #N]`
+				// indexes all result images.
 				const answerImages: ImageContent[] = [];
 				for (let index = 0; index < params.questions.length; index++) {
 					const question = params.questions[index];
@@ -998,14 +1020,13 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 					if (result.customInputImages) answerImages.push(...result.customInputImages);
 					const noteOffset = answerImages.length;
 					if (result.noteImages) answerImages.push(...result.noteImages);
-					const customInput =
-						result.customInput === undefined
-							? undefined
-							: markOwnImages(result.customInput, customOffset, result.customInputImages?.length ?? 0);
-					const note =
-						result.note === undefined
-							? undefined
-							: markOwnImages(result.note, noteOffset, result.noteImages?.length ?? 0);
+					const customInput = markAnswerField(
+						result.customInput,
+						result.customInputParts,
+						customOffset,
+						result.customInputImages?.length ?? 0,
+					);
+					const note = markAnswerField(result.note, result.noteParts, noteOffset, result.noteImages?.length ?? 0);
 					const answer = {
 						id: question.id,
 						question: question.question,

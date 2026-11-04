@@ -285,7 +285,11 @@ describe("HookEditorComponent prompt-style mode", () => {
 
 		component.handleInput("\r");
 
-		expect(onSubmit).toHaveBeenCalledWith("[Image #1] then [Image #2]", [earlier, later]);
+		expect(onSubmit).toHaveBeenCalledWith(
+			"[Image #1] then [Image #2]",
+			[earlier, later],
+			[{ kind: "image", n: 1, tail: "" }, " then ", { kind: "image", n: 2, tail: "" }],
+		);
 	});
 
 	it("drops images whose markers were deleted and renumbers the rest on submit", () => {
@@ -300,7 +304,27 @@ describe("HookEditorComponent prompt-style mode", () => {
 
 		component.handleInput("\r");
 
-		expect(onSubmit).toHaveBeenCalledWith("[Image #1]", [second]);
+		expect(onSubmit).toHaveBeenCalledWith("[Image #1]", [second], [{ kind: "image", n: 1, tail: "" }]);
+	});
+
+	it("keeps a typed marker in the same field as an attachment out of the submitted runs", () => {
+		// The answer owns one real image; everything else that reads like a marker is the
+		// person's own text and must stay a literal run, so a renumbering consumer cannot move it.
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const onSubmit = vi.fn<(text: string, images?: ImageContent[], parts?: unknown[]) => void>();
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+		});
+
+		component.pasteText(`shot ${component.attachImage(image, { width: 8, height: 4 })} of user-[Image #1].png`);
+		component.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith(
+			"shot [Image #1, 8x4] of user-[Image #1].png",
+			[image],
+			["shot ", { kind: "image", n: 1, tail: ", 8x4" }, " of user-[Image #1].png"],
+		);
 	});
 
 	it("hands an empty bracketed paste to the host's clipboard image read and submits once the marker lands", () => {
@@ -322,21 +346,20 @@ describe("HookEditorComponent prompt-style mode", () => {
 		expect(onSubmit).not.toHaveBeenCalled();
 		finishPaste?.(component.attachImage(image));
 
-		expect(onSubmit).toHaveBeenCalledWith("see [Image #1]", [image]);
+		expect(onSubmit).toHaveBeenCalledWith("see [Image #1]", [image], ["see ", { kind: "image", n: 1, tail: "" }]);
 	});
 
-	it("labels attached images with their size and deletes the marker as a unit", () => {
+	it("labels attached images with their size and deletes the token as a unit", () => {
 		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
 		const onSubmit = vi.fn();
 		const component = new HookEditorComponent(createTui(), "Prompt", "see ", onSubmit, vi.fn(), {
 			promptStyle: true,
 			acceptImages: true,
 		});
-		const marker = component.attachImage(image, { width: 640, height: 240 });
-		expect(marker).toBe("[Image #1, 640x240]");
-		component.pasteText(marker ?? "");
+		const token = component.attachImage(image, { width: 640, height: 240 });
+		component.pasteText(token ?? "");
 
-		// One backspace removes the whole marker, so its image is dropped on submit.
+		// One backspace removes the whole token, so its image is dropped on submit.
 		component.handleInput("\x7f");
 		component.handleInput("\r");
 

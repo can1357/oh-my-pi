@@ -165,6 +165,9 @@ export const COMPOSER_TOKEN_REGEX = new RegExp(
 	"gu",
 );
 
+/** Matches an expanded attachment marker or a compact attachment chip, but no skill chip. */
+export const ATTACHMENT_TOKEN_REGEX = new RegExp(`${PLACEHOLDER_REGEX.source}|${CHIP_TOKEN_SOURCE}`, "gu");
+
 /** Last compiled {@link referencedAttachments} scanner, keyed by its source (labels and glyphs rarely change). */
 let cachedScanner: { source: string; scanner: RegExp } | undefined;
 
@@ -222,14 +225,75 @@ export function composerTokenRegex(mentionLabels: Iterable<string>): RegExp {
  */
 export const VISION_MARKER_REGEX = /\[(Image|Video) #([1-9]\d*)((?:,[^\]\n]*)?)\](?: attachment:\/\/(\2))?/g;
 
+/** The metadata a marker carries after its number: `, 800x600`, or empty without dimensions. */
+export function visionMarkerTail(dims?: { width: number; height: number }): string {
+	return dims ? `, ${dims.width}x${dims.height}` : "";
+}
+
+/** Marker for the Nth attachment whose metadata is already written: `[Image #N, WxH]`. */
+export function formatVisionMarkerTail(kind: "image" | "video", n: number, tail: string): string {
+	return `[${kind === "video" ? "Video" : "Image"} #${n}${tail}]`;
+}
+
 /** Marker for the Nth attached image or video preview: `[Image #N, WxH]`, or `[Image #N]` without dims. */
 export function formatVisionMarker(
 	kind: "image" | "video",
 	n: number,
 	dims?: { width: number; height: number },
 ): string {
-	const label = `${kind === "video" ? "Video" : "Image"} #${n}`;
-	return dims ? `[${label}, ${dims.width}x${dims.height}]` : `[${label}]`;
+	return formatVisionMarkerTail(kind, n, visionMarkerTail(dims));
+}
+
+/**
+ * One run of a submitted composer field, as the composer built it: text exactly as the person
+ * typed it, or a marker the composer itself inserted for one of that field's attachments.
+ *
+ * Provenance, not a parse. A consumer that renumbers markers across fields (several backgrounded
+ * `ask` answers delivered in one message) renumbers marker parts only, so a typed
+ * `user-[Image #1].png`, a quoted `"[Image #1]"` or a fenced block is rendered byte for byte.
+ */
+export type AttachmentTextPart = string | AttachmentMarkerPart;
+
+/** A marker the composer inserted, naming the `n`th attachment of its own field. */
+export interface AttachmentMarkerPart {
+	kind: "image" | "video";
+	/** 1-based index within the field's own attachment list. */
+	n: number;
+	/** The marker's metadata after the number (`, 800x600`), verbatim; empty when it has none. */
+	tail: string;
+}
+
+/** Render parts back to the text the person saw: literals verbatim, markers from their numbers. */
+export function renderAttachmentText(parts: readonly AttachmentTextPart[]): string {
+	let out = "";
+	for (const part of parts) {
+		out += typeof part === "string" ? part : formatVisionMarkerTail(part.kind, part.n, part.tail);
+	}
+	return out;
+}
+
+/**
+ * Drop the attachments no marker part names and renumber the rest in first-appearance order, the
+ * densification {@link compactImageMarkers} does over text. Returns the rewritten parts and, for
+ * each kept attachment, its index in the field's original list.
+ */
+export function compactAttachmentParts(parts: readonly AttachmentTextPart[]): {
+	parts: AttachmentTextPart[];
+	keep: number[];
+} {
+	const renumbered = new Map<number, number>();
+	const keep: number[] = [];
+	const compacted = parts.map(part => {
+		if (typeof part === "string") return part;
+		let n = renumbered.get(part.n);
+		if (n === undefined) {
+			keep.push(part.n - 1);
+			n = keep.length;
+			renumbered.set(part.n, n);
+		}
+		return { ...part, n };
+	});
+	return { parts: compacted, keep };
 }
 
 /**
