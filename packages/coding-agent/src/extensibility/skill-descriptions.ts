@@ -2,7 +2,8 @@ import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import {
 	getAgentDir,
 	getSkillDescriptionsDbPath,
@@ -20,6 +21,7 @@ import {
 	resolveRoleSelection,
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import { CostCapError, type CostGateApi } from "../session/cost-gate";
 import compressDescriptionPrompt from "../prompts/skills/compress-description.md" with { type: "text" };
 import { Semaphore } from "../task/parallel";
 import type { Skill } from "./skills";
@@ -50,14 +52,17 @@ class SkillDescriptionLengthError extends Error {}
 /**
  * Resolve the fast role for each background request the way `/models` shows it — configured `smol`,
  * the inherited `default` when `smol` is unset, then the built-in chain — before a configured `tiny`.
- * Never uses the session's foreground model. `getTelemetry` supplies the telemetry handle for each
- * request's chat span.
+ * Never uses the session's foreground model. `getCostGate` returns the session tree's gate per request,
+ * following it across new sessions and switches; each provider attempt is admitted and metered there.
  */
 export function createSkillDescriptionCompressor(
 	registry: ModelRegistry,
 	settings: Settings,
-	sessionId?: string,
-	getTelemetry?: () => AgentTelemetry | undefined,
+	options: {
+		sessionId?: string;
+		getTelemetry?: () => AgentTelemetry | undefined;
+		getCostGate?: () => CostGateApi | undefined;
+	} = {},
 ): SkillDescriptionCompressor {
 	const select = (): Model<Api> | undefined => {
 		// The first exact provider/id match wins before every other matching phase.
@@ -94,23 +99,45 @@ export function createSkillDescriptionCompressor(
 		async compress(_name, _description, request) {
 			const model = select();
 			if (!model) throw new Error("No smol or tiny model available");
-			const apiKey = await registry.getApiKey(model, sessionId);
+			const apiKey = await registry.getApiKey(model, options.sessionId);
 			if (!apiKey) throw new Error(`No credential for ${model.provider}/${model.id}`);
-			const response = await instrumentedCompleteSimple(
-				model,
-				{
-					messages: [{ role: "user", content: request, timestamp: Date.now() }],
-				},
-				{
-					apiKey: registry.resolver(model, sessionId),
-					sessionId,
-					maxTokens: 1024,
-					disableReasoning: true,
-					temperature: 0,
-					signal: AbortSignal.timeout(30_000),
-				},
-				{ telemetry: getTelemetry?.(), oneshotKind: "skill_description" },
-			);
+			const gate = options.getCostGate?.();
+			gate?.admit();
+			// A refusal inside a provider's retry loop aborts the request, so no retry
+			// layer (`fetchWithRetry`, SDK clients) treats it as a transient network error.
+			const refused = new AbortController();
+			const refuseAttempt = (): void => {
+				const refusal = gate?.check();
+				if (!refusal) return;
+				const error = new CostCapError(refusal);
+				refused.abort(error);
+				throw error;
+			};
+			let response: AssistantMessage;
+			try {
+				response = await instrumentedCompleteSimple(
+					model,
+					{
+						messages: [{ role: "user", content: request, timestamp: Date.now() }],
+					},
+					{
+						apiKey: registry.resolver(model, options.sessionId),
+						sessionId: options.sessionId,
+						maxTokens: 1024,
+						disableReasoning: true,
+						temperature: 0,
+						signal: AbortSignal.any([AbortSignal.timeout(30_000), refused.signal]),
+						beforeDispatch: gate ? refuseAttempt : undefined,
+						fetch: gate ? transportFetch(model, undefined, refuseAttempt) : undefined,
+						onAttempt: message => gate?.record(message.usage.cost.total),
+					},
+					{ telemetry: options.getTelemetry?.(), oneshotKind: "skill_description" },
+				);
+			} catch (error) {
+				if (refused.signal.aborted) throw refused.signal.reason;
+				throw error;
+			}
+			if (refused.signal.aborted) throw refused.signal.reason;
 			if (response.stopReason === "length") {
 				throw new SkillDescriptionLengthError("Model stopped: length");
 			}
@@ -366,8 +393,8 @@ export class SkillDescriptionCatalog {
 
 	/**
 	 * `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews.
-	 * `deferCompression` holds model work until {@link startCompression}, keeping the compression
-	 * model's resolution (a whole-catalog composition) off a startup path.
+	 * `deferCompression` holds model work until {@link startCompression}: until the owning session's
+	 * cost gate exists, and off a startup path (resolving the compression model composes the catalog).
 	 */
 	constructor(
 		options: {

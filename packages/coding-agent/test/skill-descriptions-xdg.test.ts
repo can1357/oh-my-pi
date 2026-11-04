@@ -19,6 +19,7 @@ import {
 } from "../src/extensibility/skill-descriptions";
 import type { Skill } from "../src/extensibility/skills";
 import type { AuthStorage } from "../src/session/auth-storage";
+import { CostCapError, type CostGateApi } from "../src/session/cost-gate";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const ENV_KEYS = ["PI_CONFIG_DIR", "PI_CODING_AGENT_DIR", "XDG_DATA_HOME"] as const;
@@ -518,5 +519,65 @@ describe("skill description compressor model selection", () => {
 		expect(
 			fixture({ default: "anthropic/claude-opus-4-5", smol: "anthropic/claude-haiku-4-5" }).compressor.modelKey(),
 		).toBe("anthropic/claude-haiku-4-5");
+	});
+});
+
+describe("skill description compressor cost gate", () => {
+	const authStorages: AuthStorage[] = [];
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		for (const storage of authStorages.splice(0)) storage.close();
+	});
+
+	it("ends at the first provider attempt refused after admission, without transport retries", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStorages.push(authStorage);
+		const settings = Settings.isolated({ modelRoles: { smol: "skill-gate/probe" } });
+		const registry = new ModelRegistry(
+			authStorage,
+			path.join(os.tmpdir(), `omp-skill-models-${Snowflake.next()}.yml`),
+			{ settings },
+		);
+		registry.registerProvider("skill-gate", {
+			baseUrl: "https://provider.invalid/v1",
+			api: "openai-completions",
+			apiKey: "test-key",
+			models: [
+				{
+					id: "probe",
+					name: "Probe",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 8192,
+					maxTokens: 1024,
+				},
+			],
+		});
+		const sent = spyOn(globalThis, "fetch").mockRejectedValue(new Error("network refused by test"));
+		let checks = 0;
+		// Another request reaches the cap between this request's admission and its HTTP attempt.
+		const gate: CostGateApi = {
+			spent: 1,
+			capped: true,
+			onCapChange: () => () => {},
+			admit: () => {},
+			check: () => {
+				checks++;
+				return { spent: 1, cap: 1, message: "Cost cap reached" };
+			},
+			record: () => {},
+			meter: stream => stream,
+		};
+		const compressor = createSkillDescriptionCompressor(registry, settings, { getCostGate: () => gate });
+
+		const started = Date.now();
+		const error = await compressor.compress("migrations", "Plan migrations.", "Compress this.").catch(e => e);
+
+		expect(error).toBeInstanceOf(CostCapError);
+		expect(checks).toBe(1);
+		expect(sent).not.toHaveBeenCalled();
+		expect(Date.now() - started).toBeLessThan(400);
 	});
 });

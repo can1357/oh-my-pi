@@ -980,7 +980,8 @@ export interface CreateAgentSessionOptions {
 	/**
 	 * Hold background skill-description compression until
 	 * {@link AgentSession.startSkillDescriptionCompression}: resolving its model composes the
-	 * whole model catalog. The interactive TUI sets this and starts it after the first frame. Default: false.
+	 * whole model catalog. The interactive TUI sets this and starts it after the first frame.
+	 * Default: false, which starts it once the session (and so its cost gate) exists.
 	 */
 	deferSkillDescriptionCompression?: boolean;
 	/**
@@ -4187,16 +4188,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				: openSessionSkillDescriptionStore(agentDir);
 		const skillDescriptions = new SkillDescriptionCatalog({
 			store: ownedSkillDescriptionStore,
-			deferCompression: options.deferSkillDescriptionCompression === true,
-			// Like the other one-shot model calls, each compression request resolves
-			// its own telemetry handle, so its usage stays out of the run summary.
-			// The first requests can start before `agent` is constructed; they use
-			// the telemetry config and session id the agent is constructed with.
-			compress: createSkillDescriptionCompressor(modelRegistry, settings, undefined, () =>
-				agent
-					? resolveTelemetry(agent.telemetry, agent.sessionId)
-					: resolveTelemetry(options.telemetry, providerSessionId),
-			),
+			// Held until AgentSession exists: before then the root cost gate does not, so a request
+			// sent from the startup prompt render could go out ungated (see `startCompression` below).
+			deferCompression: true,
+			compress: createSkillDescriptionCompressor(modelRegistry, settings, {
+				getCostGate: currentCostGate,
+				getTelemetry: () =>
+					agent
+						? resolveTelemetry(agent.telemetry, agent.sessionId)
+						: resolveTelemetry(options.telemetry, providerSessionId),
+			}),
 		});
 		// Instructions from MCP servers the host connects outside `mcpManager`
 		// (ACP client-declared servers); installed via
@@ -5220,6 +5221,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			autoTitle: options.autoTitle === true && !isSubagentSession,
 		});
 		hasSession = true;
+		// The session now owns its cost gate; the interactive TUI starts compression after its first frame.
+		if (options.deferSkillDescriptionCompression !== true) skillDescriptions.startCompression();
 		credentialNoticeSession = session;
 		// Hashline snapshots are session-scoped: /new and switchSession fire the
 		// change callbacks, so clear the tool-side store there — stale tags would
