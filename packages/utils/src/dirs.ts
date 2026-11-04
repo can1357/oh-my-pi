@@ -624,7 +624,15 @@ export function isOmpOwnedPath(candidate: string): boolean {
 		const value = process.env[envVar];
 		if (value) configRoots.push(path.join(value, APP_NAME));
 	}
-	const owningConfigRoot = configRoots.find(root => pathIsWithin(root, target));
+	// The DEEPEST containing root, not the first. These roots nest whenever an
+	// XDG app root is configured inside the config root, and measuring against
+	// the outer one makes the relative path start with the inner root's own
+	// directory name, so the names below are compared against the wrong segment.
+	let owningConfigRoot: string | undefined;
+	for (const root of configRoots) {
+		if (!pathIsWithin(root, target)) continue;
+		if (owningConfigRoot === undefined || pathIsWithin(owningConfigRoot, root)) owningConfigRoot = root;
+	}
 	const owningRoot = owningConfigRoot ?? (pathIsWithin(dirs.agentDir, target) ? dirs.agentDir : undefined);
 	if (owningRoot === undefined) return false;
 	const segments = (relativePathWithinRoot(owningRoot, target) ?? "").split(path.sep);

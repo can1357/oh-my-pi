@@ -392,4 +392,23 @@ describe("classification does not depend on where omp happens to be pointed", ()
 			setProjectDir(previous);
 		}
 	});
+
+	test("nested roots are measured against the innermost one", () => {
+		// An XDG app root configured inside the config root makes the roots nest.
+		// Measured against the outer one, a downloaded tree's name sits one segment
+		// too deep to be seen.
+		const previous = process.env.XDG_DATA_HOME;
+		process.env.XDG_DATA_HOME = path.join(getBaseConfigRoot(), "data");
+		try {
+			setAgentDir(owned);
+			const inner = path.join(getBaseConfigRoot(), "data", "omp");
+			expect(isOmpOwnedPath(path.join(inner, "profiles", "other", "plugins", "cache", "x"))).toBe(false);
+			expect(isOmpOwnedPath(path.join(inner, "wt", "pr-1", "src"))).toBe(false);
+			expect(isOmpOwnedPath(path.join(inner, "agent", "config.yml"))).toBe(true);
+		} finally {
+			if (previous === undefined) delete process.env.XDG_DATA_HOME;
+			else process.env.XDG_DATA_HOME = previous;
+			setAgentDir(owned);
+		}
+	});
 });
