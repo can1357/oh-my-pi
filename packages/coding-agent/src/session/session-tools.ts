@@ -50,7 +50,7 @@ import {
 	xdevDocsFor,
 	xdevEntries,
 } from "../tools/xdev";
-import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import type { EditModeSetting } from "../edit/settings";
 import { resolveEditMode } from "../utils/edit-mode";
 import {
 	extractPermissionLocations,
@@ -964,8 +964,8 @@ export class SessionTools {
 		} as const;
 	}
 
-	/** Resolves the edit mode for the active model and settings. */
-	resolveActiveEditMode(): EditMode {
+	/** Resolves the edit mode for the active model and settings; `"none"` when the edit tool is disabled. */
+	resolveActiveEditMode(): EditModeSetting {
 		return resolveEditMode(this.#getEditModeSession());
 	}
 
@@ -996,7 +996,7 @@ export class SessionTools {
 	 * on or off (#14200). The kept key makes a later switch back to the rendered model a no-op, and a
 	 * deliberate switch (`/model`, `setModel`) compares against the model the prompt describes.
 	 */
-	async syncAfterModelChange(previousEditMode: EditMode, options?: { retryFallback?: boolean }): Promise<void> {
+	async syncAfterModelChange(previousEditMode: EditModeSetting, options?: { retryFallback?: boolean }): Promise<void> {
 		const currentEditMode = this.resolveActiveEditMode();
 		if (options?.retryFallback) {
 			const inlineDescriptorsChanged = this.#currentInlineDescriptors() !== this.#promptInlineDescriptors;

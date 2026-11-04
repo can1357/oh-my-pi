@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Removed the Spotlight dashboard's edit-gate panel and the edit-likely split of the read holdout baseline
+
 ## [18.16.0] - 2026-11-02
 
 ### Fixed

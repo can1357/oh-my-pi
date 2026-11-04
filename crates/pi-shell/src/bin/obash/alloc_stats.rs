@@ -1,8 +1,8 @@
 //! Allocation counters for benchmarks (cargo feature `alloc-stats`,
 //! measurement only).
 //!
-//! With the feature, the global allocator is [`Counting`]: mimalloc plus
-//! relaxed process-wide counters. When `PI_SHELL_ALLOC_STATS=PATH` is set,
+//! With the feature, the global allocator is [`Counting`]: the system allocator
+//! plus relaxed process-wide counters. When `PI_SHELL_ALLOC_STATS=PATH` is set,
 //! [`Report`] appends one line of totals to PATH as `main` returns:
 //!
 //! ```text
@@ -16,7 +16,7 @@
 //! allocator, so timings never pay for the counters.
 
 use std::{
-	alloc::{GlobalAlloc, Layout},
+	alloc::{GlobalAlloc, Layout, System},
 	ffi::OsString,
 	fs::OpenOptions,
 	io::Write,
@@ -46,12 +46,11 @@ fn shrank(n: usize) {
 	LIVE.fetch_sub(n, Ordering::Relaxed);
 }
 
-/// mimalloc with allocation counters: obash's global allocator under the
-/// `alloc-stats` feature.
-pub struct Counting(pub mimalloc::MiMalloc);
+/// System allocator with allocation counters under the `alloc-stats` feature.
+pub struct Counting(pub System);
 
-// SAFETY: every method forwards to mimalloc with its arguments unchanged and
-// returns mimalloc's result; the counter updates beside it never allocate.
+// SAFETY: every method forwards to System with its arguments unchanged and
+// returns its result; the counter updates beside it never allocate.
 unsafe impl GlobalAlloc for Counting {
 	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
 		// SAFETY: forwarded unchanged; the caller upholds `alloc`'s contract.
