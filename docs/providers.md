@@ -201,6 +201,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `charm-hyper`                    | `CHARM_HYPER_API_KEY`, then `HYPER_API_KEY`                                         |
 | `singularityapi-dev`             | `SINGULARITYAPI_DEV_API_KEY`                                                        |
 | `singularityapi-tech`            | `SINGULARITYAPI_TECH_API_KEY`                                                       |
+| `refuseless`                     | `REFUSELESS_API_KEY`                                                          |
 
 Vertex ADC availability accepts project aliases `GOOGLE_CLOUD_PROJECT`, `GCP_PROJECT`, or `GCLOUD_PROJECT`, and location aliases `GOOGLE_VERTEX_LOCATION`, `GOOGLE_CLOUD_LOCATION`, or `VERTEX_LOCATION`.
 

@@ -1,3 +1,4 @@
+import { normalizeBaseUrl } from "../discovery/openai-compatible";
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CODEX_BASE_URL, CODEX_CLIENT_VERSION } from "../wire/codex";
 import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
@@ -53,6 +54,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "https://opencode.ai/inference/go/v1";
 		case "opencode-zen":
 			return "https://opencode.ai/zen/v1";
+		case "refuseless":
+			return "https://api.refuseless.com/v1";
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
 		default:
@@ -230,6 +233,18 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// carry `reasoning: false` and must be refetched.
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			return `vllm:models-v2:${Bun.hash(baseUrl).toString(36)}`;
+		}
+		case "refuseless": {
+			// Discovery is authoritative and the roster is the same for every
+			// key, so the namespace follows the endpoint only: a custom
+			// baseUrl (Refuseless-compatible proxy) must not reuse the
+			// canonical host's snapshot, and hashing a key here would split
+			// against the credential-less namespace the registry resolves
+			// at startup. Normalization is shared with the fetcher, so equal
+			// request URLs always land on one namespace and distinct paths
+			// (`/v1` vs root) never share a cache.
+			const endpoint = normalizeBaseUrl(options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!);
+			return `refuseless:models-v1:${Bun.hash(endpoint).toString(36)}`;
 		}
 		case "devin":
 			// v2: rows cached before Fusion pairings carried their lead uid as

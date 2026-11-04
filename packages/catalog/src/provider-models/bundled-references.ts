@@ -27,6 +27,20 @@ export function toModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TAp
 	} as ModelSpec<TApi>);
 }
 
+/**
+ * Project a raw discovery spec back to a spec, preserving wire-authored
+ * compat that toModelSpec drops in favor of an absent compatConfig
+ * (e.g. trustExplicitThinkingOnly, which generation rebake checks).
+ * Built models must keep using toModelSpec directly: for them an absent
+ * compatConfig means "no authored overrides", not "look at compat".
+ */
+export function toModelSpecPreservingRawCompat<TApi extends Api>(model: Model<TApi>): ModelSpec<TApi> {
+	const spec = toModelSpec(model);
+	if (spec.compat !== undefined) return spec;
+	const rawCompat = (model as unknown as Pick<ModelSpec<TApi>, "compat">).compat;
+	return rawCompat === undefined ? spec : { ...spec, compat: rawCompat };
+}
+
 export function createBundledReferenceMap<TApi extends Api>(
 	provider: Parameters<typeof getBundledModels>[0],
 ): Map<string, ModelSpec<TApi>> {
