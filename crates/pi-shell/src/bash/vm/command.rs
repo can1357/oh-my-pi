@@ -30,7 +30,7 @@ use super::{
 use crate::bash::{
 	diag::Diag,
 	event::{EventData, NodeKind, RedirKind, ResolvedKind, WaitKey},
-	fd::{FdOrigin, FdRef},
+	fd::FdRef,
 	fs::StatKind,
 	host::{
 		ChildRedirs, EnvView, ExitStatus, Invocation, PgroupSpec, ResolveCtx, Resolved, SpawnSpec,
@@ -3694,13 +3694,8 @@ fn spawn_error(name: BString, err: std::io::Error) -> (Diag, i32) {
 	}
 }
 
-/// How an external gets fd object `h`: a slot the script closed stays
-/// closed (bash's child inherits it so); an object a restore lost reads as
-/// the null device.
 fn stdio_spec(h: &FdRef) -> StdioSpec {
-	if h.origin() == FdOrigin::Closed {
-		StdioSpec::Closed
-	} else if !h.is_open() {
+	if !h.is_open() {
 		StdioSpec::Null
 	} else if let Some(os) = h.os_handle() {
 		StdioSpec::Inherit(os)
@@ -3709,12 +3704,10 @@ fn stdio_spec(h: &FdRef) -> StdioSpec {
 	}
 }
 
-/// The descriptors above 2 an external gets; one the script closed is not
-/// passed at all.
 fn extra_fds(vp: &Vproc) -> Vec<(i32, FdRef)> {
 	vp.fds
 		.iter()
-		.filter(|(fd, h)| *fd > 2 && h.origin() != FdOrigin::Closed)
+		.filter(|(fd, _)| *fd > 2)
 		.map(|(fd, h)| (fd, h.clone()))
 		.collect()
 }

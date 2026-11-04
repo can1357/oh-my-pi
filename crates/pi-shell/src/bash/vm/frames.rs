@@ -535,7 +535,13 @@ impl Shell {
 					getopts: f.getopts.as_deref().cloned().unwrap_or_default(),
 				});
 			}
-			for (fd, h) in p.fds.iter() {
+			// A queued write bound to a host object ([`PendingWrite::pin`]) is
+			// lost with it, like a slot holding one.
+			let pinned = p
+				.out
+				.iter()
+				.filter_map(|w| w.pin.as_ref().map(|h| (w.fd, h)));
+			for (fd, h) in p.fds.iter().chain(pinned) {
 				if h.origin() == FdOrigin::Host
 					&& let Some(kind) = h.kind()
 				{
@@ -811,6 +817,11 @@ impl Shell {
 			};
 			vp.out = p.out.into();
 			for (w, pin) in vp.out.iter_mut().zip(p.out_pins) {
+				if let Some(obj) = pin
+					&& let Some(kind) = objs.host_kind(obj)
+				{
+					report.lost.push(Lost::Fd { vpid, fd: w.fd, kind });
+				}
 				w.pin = pin.map(|i| objs.fd(cx.host, i));
 			}
 			vp.pending_traps = p.pending_traps;

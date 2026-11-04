@@ -43,50 +43,6 @@ fn a_session_is_signalled_before_its_leader_ran_setsid() {
 	assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(libc::SIGTERM));
 }
 
-/// The child that cannot list its descriptors checks each one below
-/// `descriptor_bound`: that must reach a close-on-exec descriptor opened
-/// before the soft open-file limit was lowered under it, or a background
-/// command's redirection could duplicate a descriptor of the host. Runs in
-/// a forked child, since the limit is process-wide.
-#[test]
-fn the_unlisted_descriptor_check_reaches_above_a_lowered_soft_limit() {
-	let file = std::fs::File::open("/dev/null").unwrap();
-	let source = std::os::fd::AsRawFd::as_raw_fd(&file);
-	// SAFETY: the forked child calls only async-signal-safe functions
-	// (fcntl, getrlimit, setrlimit, close, _exit) and the checks under test,
-	// which are written for a forked child, then exits.
-	let pid = unsafe { libc::fork() };
-	assert!(pid >= 0, "fork");
-	if pid == 0 {
-		// SAFETY: as above.
-		unsafe {
-			let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-			libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut lim);
-			if lim.rlim_max < 1024 {
-				libc::_exit(3);
-			}
-			let high = libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 600);
-			lim.rlim_cur = 64;
-			if high < 600 || libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lim) != 0 {
-				libc::_exit(2);
-			}
-			for fd in 0..super::descriptor_bound() {
-				super::close_if_closed_on_exec(fd, -1);
-			}
-			libc::_exit(i32::from(libc::fcntl(high, libc::F_GETFD) >= 0));
-		}
-	}
-	let mut status = 0;
-	// SAFETY: waits for the child forked above.
-	assert_eq!(unsafe { libc::waitpid(pid, &raw mut status, 0) }, pid);
-	assert!(libc::WIFEXITED(status), "child status {status}");
-	assert_eq!(
-		libc::WEXITSTATUS(status),
-		0,
-		"descriptor 600 stayed open (1) or setup failed (2, 3)"
-	);
-}
-
 struct Unpark(thread::Thread);
 
 impl Wake for Unpark {

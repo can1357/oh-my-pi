@@ -36,7 +36,7 @@ use crate::bash::{
 	diag::Diag,
 	event::{EventData, RedirInfo, RedirKind, WaitKey},
 	fd::{FdOrigin, FdRef},
-	fs::{File, FileKind, FsOp, FsPending, FsPoll, OpenFlags, SeekFrom, StatKind},
+	fs::{File, FileKind, FsOp, FsPoll, OpenFlags, SeekFrom, StatKind},
 	host::{ChildRedir, OsHandle},
 	ids::Dialect,
 	ir::{RedirFdIr, RedirIr, RedirTargetIr, SpawnKind, Unit},
@@ -480,8 +480,17 @@ fn install(
 			}
 			if r.op == RedirKind::DupOut && matches!(r.fd, RedirFdIr::Default) {
 				// `>&file` is `&>file`.
-				let flags = open_flags(k, vp, cx, RedirKind::OutErr);
-				return open_into(k, vp, cx, &[1, 2], target, flags, line);
+				return open_into(
+					k,
+					vp,
+					cx,
+					&[1, 2],
+					target,
+					OpenFlags::WRITE
+						.with(OpenFlags::CREATE)
+						.with(OpenFlags::TRUNC),
+					line,
+				);
 			}
 			Err(fail(k, vp, cx, line, Diag::AmbiguousRedirect { word: target.clone() }))
 		},
@@ -492,7 +501,7 @@ fn install(
 			Ok(())
 		},
 		RedirKind::OutErr | RedirKind::AppendErr => {
-			let flags = open_flags(k, vp, cx, r.op);
+			let flags = open_flags(k, vp, cx, r.op, target);
 			open_into(k, vp, cx, &[1, 2], target, flags, line)
 		},
 		RedirKind::In
@@ -500,7 +509,7 @@ fn install(
 		| RedirKind::Append
 		| RedirKind::Clobber
 		| RedirKind::ReadWrite => {
-			let flags = open_flags(k, vp, cx, r.op);
+			let flags = open_flags(k, vp, cx, r.op, target);
 			// bash opens the file first and assigns `{var}` after (a
 			// readonly one leaves the file created); a parked open keeps
 			// its slot free, so the fd is the same on resume.
@@ -537,22 +546,25 @@ fn install(
 	}
 }
 
-/// How a file redirection `op` to `target` opens it. Under `set -o
-/// noclobber` a truncating `>`, `&>` or `>&file` starts with an exclusive
-/// create; what an existing file is (a regular one is refused, a FIFO or a
-/// device opened as it is) is decided when it is opened: [`open_into`] in
-/// the shell, the process's own open for a redirection it makes.
-fn open_flags(k: &mut Kernel, vp: &Vproc, cx: &mut Cx<'_>, op: RedirKind) -> OpenFlags {
+/// How a file redirection `op` to `target` opens it (`set -o noclobber`
+/// makes `>` exclusive, but for `/dev/…`).
+fn open_flags(
+	k: &mut Kernel,
+	vp: &Vproc,
+	cx: &mut Cx<'_>,
+	op: RedirKind,
+	target: &BString,
+) -> OpenFlags {
+	let noclobber = op == RedirKind::Out
+		&& !target.starts_with(b"/dev/")
+		&& state::option(&mut k.root, cx.store, vp, OptId::Noclobber).unwrap_or(false);
 	let write = OpenFlags::WRITE.with(OpenFlags::CREATE);
-	if matches!(op, RedirKind::Out | RedirKind::OutErr)
-		&& state::option(&mut k.root, cx.store, vp, OptId::Noclobber).unwrap_or(false)
-	{
-		return write.with(OpenFlags::EXCL);
-	}
 	match op {
+		_ if noclobber => write.with(OpenFlags::EXCL),
 		RedirKind::In => OpenFlags::READ,
-		RedirKind::Out | RedirKind::Clobber | RedirKind::OutErr => write.with(OpenFlags::TRUNC),
+		RedirKind::Out | RedirKind::Clobber => write.with(OpenFlags::TRUNC),
 		RedirKind::Append | RedirKind::AppendErr => write.with(OpenFlags::APPEND),
+		RedirKind::OutErr => write.with(OpenFlags::TRUNC),
 		_ => write.with(OpenFlags::READ),
 	}
 }
@@ -689,9 +701,10 @@ fn collect(
 					.ok()
 					.and_then(|s| s.parse().ok())
 					.unwrap_or(-1);
-				// A descriptor the process lacks fails there, in its turn, after
-				// the opens before it (a FIFO's reader still gets its end of
-				// file): the process has only its own descriptors by then.
+				if !child_fd_open(k, vp, src) {
+					let err = std::io::Error::other(crate::bash::fd::BadFd);
+					return Err(fail(k, vp, cx, line, Diag::Io { path: target.clone(), err }));
+				}
 				let fd = fd_number(k, vp, cx, r, false, line)?;
 				let diag = diag_prefix(k, cx, vp, line, digits);
 				add.push(ChildRedir::Dup { fd, src, diag });
@@ -700,7 +713,7 @@ fn collect(
 				}
 			} else if r.op == RedirKind::DupOut && matches!(r.fd, RedirFdIr::Default) {
 				// `>&file` is `&>file`.
-				let flags = open_flags(k, vp, cx, RedirKind::OutErr);
+				let flags = open_flags(k, vp, cx, RedirKind::OutErr, target);
 				add.push(child_open(k, vp, cx, vec![1, 2], target, flags, line));
 			} else {
 				let d = Diag::AmbiguousRedirect { word: target.clone() };
@@ -708,7 +721,7 @@ fn collect(
 			}
 		},
 		RedirKind::OutErr | RedirKind::AppendErr => {
-			let flags = open_flags(k, vp, cx, r.op);
+			let flags = open_flags(k, vp, cx, r.op, target);
 			add.push(child_open(k, vp, cx, vec![1, 2], target, flags, line));
 		},
 		RedirKind::In
@@ -717,7 +730,7 @@ fn collect(
 		| RedirKind::Clobber
 		| RedirKind::ReadWrite => {
 			let fd = fd_number(k, vp, cx, r, false, line)?;
-			let flags = open_flags(k, vp, cx, r.op);
+			let flags = open_flags(k, vp, cx, r.op, target);
 			add.push(child_open(k, vp, cx, vec![fd], target, flags, line));
 		},
 		RedirKind::HereDoc | RedirKind::HereString => {
@@ -740,6 +753,24 @@ fn fd_number(
 	line: u32,
 ) -> Result<i32, Halt> {
 	target_fd(k, vp, cx, r, closing, line).map_err(|d| fail(k, vp, cx, line, d))
+}
+
+/// Whether `fd` is open in the process a command spawns at this point of
+/// its collected redirections: inherited from the vproc, or set by one
+/// collected before, and not closed since.
+fn child_fd_open(k: &Kernel, vp: &Vproc, fd: i32) -> bool {
+	let inherited = vp.fds.get(fd).is_some_and(FdRef::is_open);
+	let list = k
+		.deferrals
+		.iter()
+		.find(|d| d.vproc == vp.vpid)
+		.map_or(&[][..], |d| d.list.as_slice());
+	list.iter().fold(inherited, |open, redir| match redir {
+		ChildRedir::Open { fds, .. } if fds.contains(&fd) => true,
+		ChildRedir::Dup { fd: set, .. } if *set == fd => true,
+		ChildRedir::Close { fd: closed } if *closed == fd => false,
+		_ => open,
+	})
 }
 
 /// The open of `target` onto `fds` by the process ([`ChildRedir::Open`]),
@@ -1262,73 +1293,7 @@ impl File for Cat {
 	}
 }
 
-/// The error a `noclobber` reopen gives for a regular file
-/// ([`NoClobberReopen`]).
-#[derive(Debug, thiserror::Error)]
-#[error("cannot overwrite existing file")]
-struct NoClobberRefused;
-
-/// `noclobber`'s plain reopen of an existing file: a regular file is
-/// refused once opened ([`NoClobberRefused`]), anything else passes.
-struct NoClobberReopen(Box<dyn FsPending<Box<dyn File>>>);
-
-impl NoClobberReopen {
-	fn judge(r: std::io::Result<Box<dyn File>>) -> std::io::Result<Box<dyn File>> {
-		match r {
-			Ok(file) if file.kind() == FileKind::Regular => {
-				Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, NoClobberRefused))
-			},
-			r => r,
-		}
-	}
-}
-
-impl FsPending<Box<dyn File>> for NoClobberReopen {
-	fn poll(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<Box<dyn File>>> {
-		self.0.poll(cx).map(Self::judge)
-	}
-
-	fn reissuable(&self) -> bool {
-		self.0.reissuable()
-	}
-}
-
-/// Start the open of `abs` with `flags`, or `noclobber`'s plain reopen of
-/// it (`reopen`); a pending one is kept in the redirection's progress.
-fn start_open(
-	vp: &mut Vproc,
-	cx: &mut Cx<'_>,
-	tcx: &mut Context<'_>,
-	abs: &BString,
-	flags: OpenFlags,
-	mode: u32,
-	reopen: bool,
-) -> Poll<std::io::Result<Box<dyn File>>> {
-	let now = if reopen { OpenFlags::WRITE } else { flags };
-	match cx.host.fs().open(BStr::new(abs), now, mode) {
-		FsPoll::Ready(r) if reopen => Poll::Ready(NoClobberReopen::judge(r)),
-		FsPoll::Ready(r) => Poll::Ready(r),
-		FsPoll::Pending(p) => {
-			let mut p: Box<dyn FsPending<Box<dyn File>>> = if reopen {
-				Box::new(NoClobberReopen(p))
-			} else {
-				p
-			};
-			let r = p.poll(tcx);
-			if r.is_pending() {
-				io(vp).redir.opening = Some(p);
-			}
-			r
-		},
-	}
-}
-
-/// Open `path` (pollable) and install it on every fd of `fds`. Under
-/// `noclobber` (`flags` holds [`OpenFlags::EXCL`], [`open_flags`]) an
-/// existing file is opened again as it is, without creating or truncating,
-/// and refused if what was opened is a regular file: bash's
-/// `noclobber_open`, decided on the object opened, not on an earlier look
-/// at the path.
+/// Open `path` (pollable) and install it on every fd of `fds`.
 fn open_into(
 	k: &mut Kernel,
 	vp: &mut Vproc,
@@ -1353,27 +1318,25 @@ fn open_into(
 	}
 	let abs = absolute(&vp.cwd, path);
 	// The vproc's own `umask` (a subshell's applies to its redirections).
-	let mode = 0o666 & !state::umask(cx.store, vp).unwrap_or(0o022);
+	let umask = state::umask(cx.store, vp).unwrap_or(0o022);
 	let mut tcx = Context::from_waker(&k.waker);
-	let mut res = match io(vp).redir.opening.as_mut() {
+	let res = match io(vp).redir.opening.as_mut() {
 		Some(p) => p.poll(&mut tcx),
-		None => start_open(vp, cx, &mut tcx, &abs, flags, mode, false),
+		None => match cx.host.fs().open(BStr::new(&abs), flags, 0o666 & !umask) {
+			FsPoll::Ready(r) => Poll::Ready(r),
+			FsPoll::Pending(mut p) => {
+				let r = p.poll(&mut tcx);
+				if r.is_pending() {
+					io(vp).redir.opening = Some(p);
+				}
+				r
+			},
+		},
 	};
-	// The exclusive create met an existing file: open it as it is.
-	if let Poll::Ready(Err(err)) = &res
-		&& flags.contains(OpenFlags::EXCL)
-		&& err.kind() == std::io::ErrorKind::AlreadyExists
-		&& !err.get_ref().is_some_and(|e| e.is::<NoClobberRefused>())
-	{
-		io(vp).redir.opening = None;
-		res = start_open(vp, cx, &mut tcx, &abs, flags, mode, true);
-	}
-	if res.is_ready() {
-		io(vp).redir.opening = None;
-	}
 	match res {
 		Poll::Pending => Err(Halt::Flow(Flow::Block(WaitKey::Fs { op: FsOp::Open, path: abs }))),
 		Poll::Ready(Ok(file)) => {
+			io(vp).redir.opening = None;
 			let h = FdRef::open(file, FdOrigin::Host);
 			for &fd in fds {
 				set_fd(vp, fd, Some(h.clone()));
@@ -1381,11 +1344,13 @@ fn open_into(
 			Ok(())
 		},
 		Poll::Ready(Err(err)) => {
-			let d = if err.get_ref().is_some_and(|e| e.is::<NoClobberRefused>()) {
-				Diag::NoClobber { path: path.clone() }
-			} else {
-				Diag::Io { path: path.clone(), err }
-			};
+			io(vp).redir.opening = None;
+			let d =
+				if err.kind() == std::io::ErrorKind::AlreadyExists && flags.contains(OpenFlags::EXCL) {
+					Diag::NoClobber { path: path.clone() }
+				} else {
+					Diag::Io { path: path.clone(), err }
+				};
 			k.diag(cx, vp, line, d);
 			Err(Halt::Failed)
 		},
