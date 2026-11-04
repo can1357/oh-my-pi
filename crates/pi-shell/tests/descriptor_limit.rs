@@ -148,9 +148,11 @@ fn running_out_of_descriptors_names_the_limit() {
 
 /// With the process's own open-file limit at 63 or less, a process
 /// substitution and a coprocess take the lowest free descriptors, as Bash's
-/// do, so an external command can be given them; descriptors near the
-/// limit still reach a command. Regression: they took 63 and below, and an
-/// external command reading one failed with `Invalid argument`.
+/// do, so an external command can be given them, also after a `ulimit -n`
+/// raised above 63 (the process's limit still bounds what a child is
+/// given); descriptors near the limit, up to the last one, still reach a
+/// command. Regression: they took 63 and below, and an external command
+/// reading one failed with `Invalid argument`.
 #[test]
 fn shell_chosen_descriptors_fit_a_low_process_limit() {
 	if !in_limited_child("shell_chosen_descriptors_fit_a_low_process_limit", 48) {
@@ -159,7 +161,8 @@ fn shell_chosen_descriptors_fit_a_low_process_limit() {
 
 	let (code, output) = run(
 		"/bin/cat <(echo hi); echo s=$?; echo <(true); coproc cat; echo ${COPROC[@]}; /bin/echo x \
-		 5>/dev/null 7<&0; /bin/bash -c 'echo y >&40' 40>&1",
+		 5>/dev/null 7<&0; /bin/bash -c 'echo y >&40' 40>&1; \
+		 /bin/bash -c 'echo z >&47' 47>&1; (ulimit -n 100; /bin/cat <(echo raised))",
 	);
-	assert_eq!((code, output.as_str()), (Some(0), "hi\ns=0\n/dev/fd/3\n3 6\nx\ny\n"));
+	assert_eq!((code, output.as_str()), (Some(0), "hi\ns=0\n/dev/fd/3\n3 6\nx\ny\nz\nraised\n"));
 }

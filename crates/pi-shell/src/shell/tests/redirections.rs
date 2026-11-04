@@ -119,3 +119,43 @@ async fn a_background_command_makes_its_redirections_with_only_its_own_descripto
 	])
 	.await;
 }
+
+/// A descriptor the host process holds open without close-on-exec is not
+/// one of a background command's own: a duplication of it in the
+/// command's redirections fails as in Bash, whose child has only the
+/// shell's descriptors. Regression: the process duplicated the host's
+/// descriptor and wrote into it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_background_command_cannot_duplicate_a_descriptor_only_the_host_holds() {
+	let null = std::fs::File::open("/dev/null").expect("open /dev/null");
+	// SAFETY: F_DUPFD on an open descriptor returns a new one without
+	// close-on-exec; it is closed below.
+	let host = unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&null), libc::F_DUPFD, 300) };
+	assert!(host >= 300, "dup host descriptor");
+	let script: &'static str = Box::leak(
+		format!(
+			"/bin/cat f >/dev/null & /bin/sh -c 'echo x' >f 1>&{host} 2>err & wait $!; echo s=$?; wait"
+		)
+		.into_boxed_str(),
+	);
+	let output: &'static str = Box::leak(format!("{host}: Bad file descriptor\ns=1\n").into_boxed_str());
+	check(&[Row { script, fifos: &["f"], output, status: 0, files: &[("err", None)] }]).await;
+	// SAFETY: `host` was opened above and is closed once.
+	unsafe { libc::close(host) };
+}
+
+/// Under the shell's own low `ulimit -n`, process substitutions leave the
+/// command room for the descriptors it opens itself, as in Bash. Regression:
+/// they took the lowest descriptors, under the command's limit, and the
+/// command could not load its libraries.
+#[tokio::test(flavor = "multi_thread")]
+async fn process_substitutions_leave_room_under_the_shells_own_limit() {
+	check(&[Row {
+		script: "ulimit -n 10; /bin/cat <(echo 1) <(echo 2) <(echo 3) <(echo 4) <(echo 5) <(echo 6); echo s=$?",
+		fifos:  &[],
+		output: "1\n2\n3\n4\n5\n6\ns=0\n",
+		status: 0,
+		files:  &[],
+	}])
+	.await;
+}
