@@ -7,13 +7,18 @@ import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-cod
 import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
 import {
+	buildSkillPromptMessage,
 	type LoadSkillsResult,
 	loadSkills,
 	loadSkillsFromDir,
 	parseSkillInvocation,
+	renderSkillPromptMessage,
 } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
+import { tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "./helpers/settings-test-state";
@@ -526,6 +531,189 @@ description: Skill loaded from a tilde-expanded custom directory.
 			customDirectories: [fixturesDir],
 		});
 		expect(withEmpty.length).toBe(withoutOption.length);
+	});
+});
+
+describe("manual skill visibility", () => {
+	const first = path.join(collisionFixturesDir, "first");
+	const second = path.join(collisionFixturesDir, "second");
+
+	it("hides exact matches without removing them, while ignored matches are removed", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "manual-skills-"));
+		try {
+			for (const [name, description] of [
+				["valid-skill", "Valid"],
+				["other-skill", "Other"],
+			]) {
+				const dir = path.join(root, name);
+				await fs.mkdir(dir, { recursive: true });
+				await Bun.write(
+					path.join(dir, "SKILL.md"),
+					`---\nname: ${name}\ndescription: ${description}\n---\nContent\n`,
+				);
+			}
+			const { skills } = await loadSkills({
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				customDirectories: [root],
+				manualSkills: ["valid-skill"],
+			});
+			expect(skills.map(skill => [skill.name, skill.hide === true])).toEqual([
+				["other-skill", false],
+				["valid-skill", true],
+			]);
+			const ignored = await loadSkills({
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				customDirectories: [root],
+				manualSkills: ["valid-skill"],
+				ignoredSkills: ["valid-skill"],
+			});
+			expect(ignored.skills.map(skill => skill.name)).toEqual(["other-skill"]);
+		} finally {
+			await removeWithRetries(root);
+		}
+	});
+
+	it("preserves frontmatter visibility with missing, empty, nonmatching, and matching lists", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "manual-skills-frontmatter-"));
+		try {
+			const fixtures = [
+				["visible", "description: Visible"],
+				["hidden", "description: Hidden\nhide: true"],
+				["disabled", "description: Disabled\ndisable-model-invocation: true"],
+				["explicit-false", "description: Explicitly visible\nhide: false"],
+			];
+			for (const [name, fields] of fixtures) {
+				const dir = path.join(root, name);
+				await fs.mkdir(dir, { recursive: true });
+				await Bun.write(path.join(dir, "SKILL.md"), `---\nname: ${name}\n${fields}\n---\nContent\n`);
+			}
+			for (const manualSkills of [undefined, []]) {
+				const { skills } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					customDirectories: [root],
+					...(manualSkills === undefined ? {} : { manualSkills }),
+				});
+				expect(skills.find(skill => skill.name === "visible")?.hide).not.toBe(true);
+				expect(skills.find(skill => skill.name === "hidden")?.hide).toBe(true);
+				expect(skills.find(skill => skill.name === "disabled")?.hide).toBe(true);
+			}
+			const nonmatching = await loadSkills({
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				customDirectories: [root],
+				manualSkills: ["missing"],
+			});
+			expect(nonmatching.skills.find(skill => skill.name === "hidden")?.hide).toBe(true);
+			expect(nonmatching.skills.find(skill => skill.name === "disabled")?.hide).toBe(true);
+			const matching = await loadSkills({
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				customDirectories: [root],
+				manualSkills: ["explicit-false"],
+			});
+			expect(matching.skills.find(skill => skill.name === "explicit-false")?.hide).toBe(true);
+		} finally {
+			await removeWithRetries(root);
+		}
+	});
+
+	it("matches raw names through namespaces and collision suffixes", async () => {
+		const pair = await loadSkills({
+			...DISABLE_ALL_BUILTIN_SKILLS,
+			customDirectories: [first, second],
+			manualSkills: ["calendar"],
+		});
+		expect(pair.skills).toHaveLength(2);
+		expect(pair.skills.every(skill => skill.hide === true)).toBe(true);
+		const nested = path.join(collisionFixturesDir, "nested", "second");
+		const triple = await loadSkills({
+			...DISABLE_ALL_BUILTIN_SKILLS,
+			customDirectories: [first, second, nested],
+			manualSkills: ["calend*"],
+		});
+		expect(triple.skills.map(skill => skill.name).sort()).toEqual([
+			"calendar",
+			"second/calendar",
+			"second/calendar~2",
+		]);
+		expect(triple.skills.every(skill => skill.hide === true)).toBe(true);
+	});
+
+	it("keeps namespaced manual skills available to prompt, URI, and RPC consumers", async () => {
+		const { skills } = await loadSkills({
+			...DISABLE_ALL_BUILTIN_SKILLS,
+			customDirectories: [first, second],
+			manualSkills: ["second/*"],
+		});
+		const bare = skills.find(skill => skill.name === "calendar")!;
+		const alias = skills.find(skill => skill.name === "second/calendar")!;
+		expect(bare.hide).not.toBe(true);
+		expect(alias.hide).toBe(true);
+		const project = await fs.mkdtemp(path.join(os.tmpdir(), "manual-skills-prompt-"));
+		try {
+			const prompt = await buildSystemPrompt({
+				cwd: project,
+				contextFiles: [],
+				rules: [],
+				toolNames: ["read"],
+				skills,
+			});
+			const text = prompt.systemPrompt.join("\n");
+			expect(text).toContain("First calendar skill.");
+			expect(text).not.toContain("Second calendar skill.");
+			const resolved = await new SkillProtocolHandler().resolve(parseInternalUrl("skill://second/calendar")!, {
+				skills,
+			});
+			expect(resolved.sourcePath).toBe(path.join(second, "calendar", "SKILL.md"));
+			expect(resolved.content).toContain("Calendar (Second)");
+			let message: Pick<CustomMessage, "attribution" | "content" | "customType" | "details" | "display"> | undefined;
+			const result = await tryRunRpcSkillCommand(
+				{
+					skills,
+					skillsSettings: { enableSkillCommands: true },
+					buildUserSkillPrompt: buildSkillPromptMessage,
+					renderUserSkillPrompt: renderSkillPromptMessage,
+					async promptCustomMessage(nextMessage) {
+						message = nextMessage;
+						return true;
+					},
+				},
+				"/skill:second/calendar focus on risks",
+			);
+			expect(result).toEqual({ agentInvoked: true });
+			expect(message?.customType).toBe(SKILL_PROMPT_MESSAGE_TYPE);
+			expect(message?.attribution).toBe("user");
+			expect(message?.content).toContain("Calendar (Second)");
+			expect(message?.content).toContain("focus on risks");
+		} finally {
+			await removeWithRetries(project);
+		}
+	});
+
+	it("matches the final name of a displaced provider skill", async () => {
+		const project = await fs.mkdtemp(path.join(os.tmpdir(), "skills-displaced-manual-"));
+		try {
+			const providerDir = path.join(project, ".claude", "skills", "calendar");
+			const claudeRoot = path.join(project, "x", "claude");
+			await fs.mkdir(providerDir, { recursive: true });
+			await fs.mkdir(path.join(claudeRoot, "calendar"), { recursive: true });
+			await fs.copyFile(path.join(first, "calendar", "SKILL.md"), path.join(providerDir, "SKILL.md"));
+			await fs.copyFile(
+				path.join(collisionFixturesDir, "nested", "second", "calendar", "SKILL.md"),
+				path.join(claudeRoot, "calendar", "SKILL.md"),
+			);
+			const { skills } = await loadSkills({
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				enableClaudeProject: true,
+				cwd: project,
+				customDirectories: [second, claudeRoot],
+				manualSkills: ["claude/calendar"],
+			});
+			const byName = new Map(skills.map(skill => [skill.name, skill]));
+			expect(byName.get("calendar")?.hide).not.toBe(true);
+			expect(byName.get("claude/calendar")?.hide).toBe(true);
+			expect(byName.get("claude/calendar~2")?.hide).not.toBe(true);
+		} finally {
+			await removeWithRetries(project);
+		}
 	});
 });
 
