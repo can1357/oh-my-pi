@@ -26,3 +26,17 @@ export const cfgSessionSqlDsnFile = register({
 	default: undefined,
 	env: "OMP_SESSION_SQL_DSN_FILE",
 });
+
+// Where a `sql` session that fell back to file storage appends its ledger line (see
+// `session-storage-fallback.ts`). A fallback happens only for a resume whose transcript is
+// already a file on disk, and only before this run has written to the database; the line
+// records which session, which connection file, and why it could not be used, so a fleet
+// reads a rising count instead of scattered warnings. Default:
+// `<agentDir>/session-sql-fallbacks.jsonl`. A deployment whose health reading lives in a
+// directory shared by every container points this at a file there.
+export const cfgSessionSqlFallbackLedger = register({
+	id: "session.sql.fallbackLedger",
+	type: "string",
+	default: undefined,
+	env: "OMP_SESSION_SQL_FALLBACK_LEDGER",
+});

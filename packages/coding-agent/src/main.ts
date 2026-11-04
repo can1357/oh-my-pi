@@ -9,7 +9,7 @@ import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
-import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
+import { ensureSqliteLockShim, isEnoent, isEnotdir, toError } from "@oh-my-pi/pi-utils";
 import {
 	APP_NAME,
 	directoryIsMissing,
@@ -121,15 +121,17 @@ import {
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import {
 	findSessionContinuation,
+	listSessionsReadOnly,
 	type PickerListing,
 	readSessionInfo,
-	resolveResumeTarget,
 	resolveResumableSession,
+	resolveResumeTarget,
 	type SessionContinuation,
 	type SessionInfo,
 } from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
-import { setDefaultSessionStorage } from "./session/session-storage";
+import { computeDefaultSessionDir } from "./session/session-paths";
+import { FileSessionStorage, setDefaultSessionStorage } from "./session/session-storage";
 import { resolveSessionStorage, SessionStorageConfigError } from "./session/session-storage-config";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
@@ -314,6 +316,40 @@ function rejectNoUiWithoutRpc(args: Pick<Args, "noUi" | "mode">): void {
 	if (!args.noUi || args.mode === "rpc" || args.mode === "rpc-ui") return;
 	process.stderr.write(`${chalk.red("Error: --no-ui requires --mode rpc or --mode rpc-ui")}\n`);
 	process.exit(1);
+}
+
+/**
+ * The id of the session this launch resumes, when its transcript is already a
+ * file on disk; `null` otherwise. Asked only when `session.storage: sql` is
+ * selected and the database cannot be used, to decide whether the launch may
+ * fall back to file storage (see `session/session-storage-fallback.ts`). It
+ * looks only at the file tree — the store that would be fallen back to — and
+ * answers `null` for anything it cannot resolve there, so a doubtful launch
+ * refuses rather than forks.
+ */
+async function resumableFileSessionId(
+	args: Pick<Args, "resume" | "restore" | "continue" | "noSession" | "sessionDir">,
+	cwd: string,
+): Promise<string | null> {
+	if (args.noSession) return null;
+	const storage = new FileSessionStorage();
+	try {
+		const selector = typeof args.restore === "string" ? args.restore : args.resume;
+		if (typeof selector === "string") {
+			const match = await resolveResumableSession(selector, cwd, args.sessionDir, storage);
+			return match?.session.id ?? null;
+		}
+		// `--continue` and the interactive auto-resume both take this project's
+		// most recent session; `--resume` with no value opens the picker, which
+		// lists the same directory.
+		if (!args.continue && args.resume !== true) return null;
+		const dir = args.sessionDir ?? computeDefaultSessionDir(cwd, storage);
+		const [newest] = await listSessionsReadOnly(dir, storage);
+		return newest?.id ?? null;
+	} catch (err) {
+		logger.warn("Could not tell whether this launch resumes a session file", { error: toError(err).message });
+		return null;
+	}
 }
 
 /** Fail an interactive launch whose stdin is not a terminal: the TUI cannot run there. */
@@ -1992,12 +2028,16 @@ export async function runRootCommand(
 		// Install the configured session storage before anything lists or opens a
 		// session — every session listing and SessionManager below reads through
 		// this default. A refusal names only the variable or setting and the path;
-		// it never echoes the connection string.
+		// it never echoes the connection string. The one exception is a launch
+		// that resumes a session whose transcript is already a file on disk: it
+		// continues on the file store, loudly and with a ledger line, because it
+		// tears nothing (see `session/session-storage-fallback.ts`).
 		try {
 			setDefaultSessionStorage(
 				await logger.time("resolveSessionStorage", resolveSessionStorage, {
 					settings: settingsInstance,
 					env: process.env,
+					resumableFileSession: () => resumableFileSessionId(parsedArgs, getProjectDir()),
 				}),
 			);
 		} catch (error) {

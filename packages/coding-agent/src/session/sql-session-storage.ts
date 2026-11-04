@@ -5,6 +5,7 @@ import {
 	type SessionStorageIndexEntry,
 } from "./indexed-session-storage";
 import { SessionWriteConflictError } from "./session-storage";
+import { noteSqlWriteCommitted } from "./session-storage-fallback";
 import { eexist, enoent } from "./session-storage-errors";
 import type { SessionTitleUpdate } from "./session-title-slot";
 
@@ -866,6 +867,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			await this.#deleteParts(transaction, path);
 			await this.#insertParts(transaction, path, bytes);
 		});
+		noteSqlWriteCommitted();
 	}
 
 	async #lockSize(transaction: SqlSessionStorageTransaction, path: string): Promise<number | null> {
@@ -906,11 +908,13 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		const [single, ...rest] = this.#q.append;
 		if (rest.length === 0) {
 			await this.#retryDeadlocks(() => run(this.#client, single, values));
+			noteSqlWriteCommitted();
 			return;
 		}
 		await this.#transaction(async transaction => {
 			for (const query of this.#q.append) await run(transaction, query, values);
 		});
+		noteSqlWriteCommitted();
 	}
 
 	async truncate(path: string, mtimeMs: number): Promise<void> {

@@ -73,9 +73,12 @@ export function artifactsDirsFromRegistry(options?: { preferredDir?: string }): 
  * resumed session's subagent transcripts are rows, and a directory walk of
  * the artifacts tree finds nothing. When the same id appears in multiple dirs,
  * the first hit wins (registry dirs are scanned first; a `preferredDir` from
- * the caller root is scanned before them), and within one directory a
- * transcript beats a nested same-id copy. `preserveDuplicates` retains every
- * candidate path per id for ambiguity checks.
+ * the caller root is scanned before them). Within one directory the two modes
+ * keep the orders they had: `onlyPreferred` records direct files before it
+ * descends, so a direct transcript beats a nested same-id copy, while a full
+ * walk descends first, so the canonical nested path of a dotted id
+ * (`A/A.B.jsonl`) beats a stray copy beside it. `preserveDuplicates` retains
+ * every candidate path per id for ambiguity checks.
  */
 export function sessionFilesFromDisk(
 	preferredDir: string | undefined,
@@ -112,8 +115,12 @@ export async function sessionFilesFromDisk(
 	const scan = (dir: string, depth: number): void => {
 		if (depth > MAX_SCAN_DEPTH || seenDirs.has(dir)) return;
 		seenDirs.add(dir);
+		const descend = (): void => {
+			for (const name of storage.listDirsSync(dir)) scan(path.join(dir, name), depth + 1);
+		};
+		if (!options?.onlyPreferred) descend();
 		for (const file of storage.listFilesSync(dir, "*.jsonl")) recordFile(file);
-		for (const name of storage.listDirsSync(dir)) scan(path.join(dir, name), depth + 1);
+		if (options?.onlyPreferred) descend();
 	};
 	for (const dir of dirs) scan(dir, 0);
 	return found;

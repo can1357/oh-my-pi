@@ -16,14 +16,28 @@
  * string: an unreadable or empty file, contents the driver cannot parse as a
  * connection URL (the driver's own error embeds the string, so it is not
  * attached as a cause either), and a database that cannot be opened each
- * refuse in those terms. There is no fallback to file storage: a misconfigured
- * `sql` refuses to start rather than quietly writing sessions somewhere else.
+ * refuse in those terms.
+ *
+ * There is one fallback, and it is narrow: a launch that resumes a session
+ * whose transcript is already a file on disk continues on the file store when
+ * the database cannot be used, loudly and with a ledger line, because such a
+ * resume tears nothing — the whole conversation is in that file either way.
+ * Every other `sql` launch refuses to start, and once this run has written to
+ * the database no fallback is possible at all. `session-storage-fallback.ts`
+ * states the rule and owns the ledger.
  */
 
-import { toError } from "@oh-my-pi/pi-utils";
+import { isEnoent, toError } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
 import { Settings } from "../config/settings";
 import { FileSessionStorage, type SessionStorage, setDefaultSessionStorage } from "./session-storage";
+import {
+	fallbackEvent,
+	fallbackLedgerPath,
+	recordSessionStorageFallback,
+	type SessionStorageFallbackReason,
+	sqlStoreHasWritten,
+} from "./session-storage-fallback";
 import { SqlSessionStorage } from "./sql-session-storage";
 import { cfgSessionSqlDsnFile, cfgSessionStorage } from "./storage-settings";
 
@@ -50,10 +64,21 @@ export class SessionStorageConfigError extends Error {
 export interface ResolveSessionStorageInput {
 	settings: Settings;
 	env: NodeJS.ProcessEnv;
+	/**
+	 * Asked only when `sql` is selected and its store cannot be used: the id of
+	 * the session this launch resumes, when that session's transcript is already
+	 * a file on disk, else `null`. Such a resume may go on reading and writing
+	 * that file and loses nothing, so it falls back; every other launch refuses.
+	 * Omitted, nothing falls back.
+	 */
+	resumableFileSession?: () => Promise<string | null>;
 }
 
-/** Resolve the configured storage; see the module doc for precedence and refusals. */
-export async function resolveSessionStorage({ settings, env }: ResolveSessionStorageInput): Promise<SessionStorage> {
+export async function resolveSessionStorage({
+	settings,
+	env,
+	resumableFileSession,
+}: ResolveSessionStorageInput): Promise<SessionStorage> {
 	const envKind = env[SESSION_STORAGE_ENV]?.trim();
 	// The configured value unvalidated: the handle would read a typo as the `file` default,
 	// and a misconfigured storage must refuse rather than quietly write sessions to files.
@@ -65,10 +90,35 @@ export async function resolveSessionStorage({ settings, env }: ResolveSessionSto
 		throw new SessionStorageConfigError(`${source} is ${JSON.stringify(kind)}; expected "file" or "sql"`);
 	}
 
+	/**
+	 * The sql store cannot be used. Fall back to the file store when — and only
+	 * when — this launch resumes a session whose transcript is already a file
+	 * and this run has written nothing to the database; otherwise refuse with
+	 * `message`. See `session-storage-fallback.ts` for why that is the only
+	 * safe moment.
+	 */
+	const fallbackOrRefuse = async (
+		reason: SessionStorageFallbackReason,
+		dsnPath: string,
+		message: string,
+		cause?: unknown,
+	): Promise<SessionStorage> => {
+		const refuse = (): never => {
+			throw new SessionStorageConfigError(message, cause === undefined ? undefined : { cause });
+		};
+		if (resumableFileSession === undefined || sqlStoreHasWritten()) return refuse();
+		const sessionId = await resumableFileSession();
+		if (sessionId === null) return refuse();
+		await recordSessionStorageFallback(fallbackEvent(sessionId, reason, dsnPath), fallbackLedgerPath(settings, env));
+		return new FileSessionStorage();
+	};
+
 	const envPath = env[SESSION_SQL_DSN_FILE_ENV]?.trim();
 	const dsnFile = envPath || cfgSessionSqlDsnFile.layered(settings)?.trim();
 	if (!dsnFile) {
-		throw new SessionStorageConfigError(
+		return await fallbackOrRefuse(
+			"dsn-missing",
+			"",
 			`session storage is sql but no connection-string file is named: set ${SESSION_SQL_DSN_FILE_ENV} or ${SESSION_SQL_DSN_FILE_SETTING}`,
 		);
 	}
@@ -78,20 +128,24 @@ export async function resolveSessionStorage({ settings, env }: ResolveSessionSto
 	try {
 		dsn = (await Bun.file(dsnFile).text()).trim();
 	} catch (err) {
-		throw new SessionStorageConfigError(
+		return await fallbackOrRefuse(
+			isEnoent(err) ? "dsn-missing" : "dsn-unreadable",
+			dsnFile,
 			`${source} names ${dsnFile}, which could not be read: ${toError(err).message}`,
-			{
-				cause: err,
-			},
+			err,
 		);
 	}
-	if (!dsn) throw new SessionStorageConfigError(`${source} names ${dsnFile}, which is empty`);
+	if (!dsn) {
+		return await fallbackOrRefuse("dsn-unreadable", dsnFile, `${source} names ${dsnFile}, which is empty`);
+	}
 
 	let client: SQL;
 	try {
 		client = new SQL(dsn, { max: SESSION_SQL_POOL_MAX, idleTimeout: SESSION_SQL_POOL_IDLE_TIMEOUT_SECONDS });
 	} catch {
-		throw new SessionStorageConfigError(
+		return await fallbackOrRefuse(
+			"dsn-unreadable",
+			dsnFile,
 			`${source} names ${dsnFile}, but its contents are not a connection URL the database driver accepts`,
 		);
 	}
@@ -102,9 +156,11 @@ export async function resolveSessionStorage({ settings, env }: ResolveSessionSto
 		const error = toError(err);
 		const code = "code" in error ? error.code : undefined;
 		const detail = typeof code === "string" && code.length > 0 ? `${error.message} (${code})` : error.message;
-		throw new SessionStorageConfigError(
+		return await fallbackOrRefuse(
+			"db-unreachable",
+			dsnFile,
 			`${source} names ${dsnFile}, but the session database could not be opened: ${detail}`,
-			{ cause: error },
+			error,
 		);
 	}
 }

@@ -1136,10 +1136,13 @@ export class FileSessionStorage implements SessionStorage {
 		try {
 			// Bun.Glob walks no symlink unless asked, and a transcript placed in
 			// a session directory as one — a launcher's, a supervisor's — is a
-			// transcript like any other (#15878). `dot` likewise: a transcript
-			// whose agent id starts with a dot is a transcript, and a key-indexed
-			// backend lists it, so the two backends must agree.
-			return Array.from(new Bun.Glob(pattern).scanSync({ cwd: dir, followSymlinks: true, dot: true })).map(name =>
+			// transcript like any other (#15878). Dotfiles stay hidden, as
+			// Bun.Glob has them by default: a hidden copy of a transcript beside
+			// the real one would otherwise be listed as a session of its own and,
+			// being newer, win `--continue`. Subagent discovery is the one place
+			// a dot-named transcript counts, and it reads the directory itself
+			// (`sub-sessions.ts`), not this glob.
+			return Array.from(new Bun.Glob(pattern).scanSync({ cwd: dir, followSymlinks: true })).map(name =>
 				path.join(dir, name),
 			);
 		} catch (err) {
