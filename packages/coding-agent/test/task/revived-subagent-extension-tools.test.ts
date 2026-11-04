@@ -22,6 +22,7 @@ import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { localSession } from "../helpers/local-session";
 
 const AGENT_ID = "ReviveTools";
 const MOCK_API_SOURCE = "test/revived-subagent-extension-tools";
@@ -213,7 +214,7 @@ async function spawnAndPark() {
 				enableLsp: false,
 			})(ref);
 			if (!reviver) throw new Error("Expected a persisted reviver");
-			return reviver(ref);
+			return localSession(await reviver(ref));
 		},
 		/** Wakes `session` with an IRC message, as a peer would, and returns the wake's first request. */
 		async wake(session: AgentSession): Promise<RecordedRequest> {
@@ -241,7 +242,7 @@ it("warm-revives with the tools an extension registered at its first turn", asyn
 	const run = await spawnAndPark();
 	try {
 		expect(run.parked.tools).toContain("late_tool");
-		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+		const revived = localSession(await AgentLifecycleManager.global().ensureLive(AGENT_ID));
 		const wake = await run.wake(revived);
 
 		expect(wake.tools).toEqual(run.parked.tools);
@@ -265,7 +266,7 @@ it("hands a second caller the revived session only once its extensions have re-r
 	const lifecycle = AgentLifecycleManager.global();
 	let first: Promise<AgentSession> | undefined;
 	try {
-		first = lifecycle.ensureLive(AGENT_ID);
+		first = lifecycle.ensureLive(AGENT_ID).then(localSession);
 		await discovering.promise;
 		let handedOut = false;
 		const second = lifecycle.ensureLive(AGENT_ID).then(session => {
@@ -299,6 +300,22 @@ it("cold-revives with the tools an extension registered at its first turn", asyn
 
 		expect(wake.tools).toContain("late_tool");
 		expect(lateToolOutput(revived)).toBe("late_tool ok");
+	} finally {
+		await revived?.dispose();
+		run.close();
+	}
+}, 30_000);
+
+it("cold-revives with the tools and devices it was parked with", async () => {
+	const run = await spawnAndPark();
+	let revived: AgentSession | undefined;
+	try {
+		revived = await run.coldRevive();
+		const wake = await run.wake(revived);
+
+		// Tools the spawn mounted as `xd://` devices stay devices: a top-level copy changes the tool list.
+		expect(wake.tools).toEqual(run.parked.tools);
+		expect(wake.systemPrompt).toEqual(run.parked.systemPrompt);
 	} finally {
 		await revived?.dispose();
 		run.close();

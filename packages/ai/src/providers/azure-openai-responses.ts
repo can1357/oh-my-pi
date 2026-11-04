@@ -24,6 +24,7 @@ import {
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { mapToOpenAIResponsesToolChoice } from "../utils/tool-choice";
+import { isOpenAIResponsesProgressEvent } from "../utils/websocket";
 import {
 	applyOpenAIReasoningEffortFallback,
 	createOpenAIReasoningEffortFallbackKey,
@@ -37,7 +38,6 @@ import {
 	buildResponsesInput,
 	createInitialResponsesAssistantMessage,
 	getOpenAIPromptCacheKey,
-	isOpenAIResponsesProgressEvent,
 	parseAzureDeploymentNameMap,
 	processResponsesStream,
 } from "./openai-shared";

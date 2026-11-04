@@ -16,11 +16,17 @@
  * process alive) and cleared on session teardown via {@link clearAll}.
  */
 import { logger } from "@oh-my-pi/pi-utils";
+import { methodsAsSessionWork } from "../../session/session-work";
 
 /** Callback invoked when a managed timer's callback throws or rejects. */
 export type ManagedTimerErrorHandler = (event: string, error: string, stack?: string) => void;
 
 export class ManagedTimers {
+	// Scheduling is the owning session's work too, so converting the delay an extension passes (its
+	// `valueOf`) runs there (see `methodsAsSessionWork`). A firing has no call on its stack: it enters `run`.
+	static {
+		methodsAsSessionWork(ManagedTimers.prototype, timers => (#timers in timers ? timers.run : undefined));
+	}
 	readonly #timers = new Set<Timer>();
 
 	constructor(

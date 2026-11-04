@@ -9,6 +9,12 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import {
+	captureRequestHolds,
+	type RequestHolds,
+	RequestHoldsAlias,
+	runWithRequestHolds,
+} from "@oh-my-pi/pi-ai/request-holds";
+import {
 	directoryIsEnterable,
 	directoryIsMissing,
 	getBlobsDir,
@@ -30,7 +36,7 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { hasAnnotationDraftsSync } from "../extensibility/custom-commands/bundled/annotate/draft-store";
 import { ARTIFACT_STAGING_MARKER, ARTIFACT_STAGING_SUFFIX } from "./artifact-staging";
-import { ArtifactManager } from "./artifacts";
+import { ArtifactManager, type ArtifactManagerApi } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
 import {
@@ -128,7 +134,7 @@ import {
 	tryAcquireSessionLease,
 } from "./session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
-import type { SessionWorkRun } from "./session-work";
+import { methodsAsSessionWork, type SessionWorkRun } from "./session-work";
 import {
 	additionalWorkspaceDirectories,
 	normalizeSessionWorkspace,
@@ -2073,12 +2079,34 @@ function orderedByTimestamp(a: SessionTreeNode, b: SessionTreeNode): number {
 }
 
 /**
+ * The most recent model role on `branch`, or undefined when no model change
+ * was recorded. `skipEphemeral` passes over temporary switches (retry fallback
+ * hops, prewalk, context promotion), returning the role last assigned.
+ */
+export function lastModelChangeRole(
+	branch: readonly SessionEntry[],
+	options?: { skipEphemeral?: boolean },
+): string | undefined {
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry.type !== "model_change") continue;
+		const role = entry.role ?? "default";
+		if (options?.skipEphemeral && (role === EPHEMERAL_MODEL_CHANGE_ROLE || role === PREWALK_MODEL_CHANGE_ROLE)) {
+			continue;
+		}
+		return role;
+	}
+	return undefined;
+}
+
+/**
  * Maintains the derived views over a session's entry list: id lookup, the
  * parent→children adjacency, the resolved label map, the active leaf, and the
  * running usage totals. Kept in lockstep with the manager's `#entries` so reads
- * stay O(1)/O(children) instead of rescanning the whole journal.
+ * stay O(1)/O(children) instead of rescanning the whole journal. Also backs
+ * the main thread's read-only view of a worker-homed session's entries.
  */
-class SessionEntryIndex {
+export class SessionEntryIndex {
 	#entriesById = new Map<string, SessionEntry>();
 	#children = new Map<string | null, SessionEntry[]>();
 	#labels = new Map<string, string>();
@@ -2559,6 +2587,14 @@ export interface RewriteEntriesOptions {
 type FencedRewriteOutcome = "published" | "skipped" | "kept" | { readonly superseded: unknown };
 
 export class SessionManager {
+	// Every method and accessor is the work of every live session over the manager: whatever it
+	// reads or calls of a host's — an option's getter, the `onEntryAppended` tap, a listener — runs in
+	// their holds, whoever calls it (see `methodsAsSessionWork`).
+	static {
+		methodsAsSessionWork(SessionManager.prototype, manager =>
+			#asOwnerWork in manager ? manager.#asOwnerWork : undefined,
+		);
+	}
 	#cwd: string;
 	/** Additional workspace directories beyond cwd (multi-root). Normalized absolute, deduped, excludes cwd. */
 	#additionalDirectories: string[] = [];
@@ -2631,52 +2667,60 @@ export class SessionManager {
 	/**
 	 * Collab replication tap: invoked for every appended entry with the
 	 * in-memory (pre-blob-externalization) entry, so inline images survive.
-	 * Runs as the work of every live session over this manager (see {@link addRequestContextOwner}).
+	 * Read and run as the work of every live session over this manager (see {@link addRequestContextOwner}).
 	 */
 	onEntryAppended?: (entry: SessionEntry) => void;
 
+	/** The holds of each live session over this manager, oldest session first (see {@link addRequestContextOwner}). */
+	readonly #ownerContexts: Array<readonly RequestHolds[]> = [];
 	/**
-	 * The live sessions over this manager, oldest first, each with how its
-	 * work enters its request context (see {@link addRequestContextOwner}).
+	 * Stands for the holds of every live session over this manager: rebound to them whenever a
+	 * session joins or leaves, so each check of a request the manager's work started asks the
+	 * sessions live at that check. A session that joins holds work already under way; one that
+	 * leaves holds it no more, and a request waiting only on its holds goes on.
 	 */
-	readonly #requestContextOwners: Array<{
-		readonly owner: { readonly isDisposed: boolean };
-		readonly run: SessionWorkRun;
-	}> = [];
+	readonly #ownerHolds = new RequestHoldsAlias();
 
 	/**
-	 * Makes every host callback the manager calls — the {@link onEntryAppended}
-	 * tap, a rename, persistence failure and notice observers, an atomic batch
-	 * — run as `owner`'s work too, whoever triggers it: every model request it
-	 * starts waits for `owner`'s holds, besides those of every other live
-	 * session over this manager. A session does this when it is built; it
-	 * stops once `owner` is disposed or the returned function is called.
+	 * Makes every method of the manager, and every host callback it calls — the
+	 * {@link onEntryAppended} tap, a rename, persistence failure and notice
+	 * observers, an atomic batch — `run`'s work too, whoever triggers it: every
+	 * model request it starts waits for the holds of the context `run` enters,
+	 * taken now, besides those of every other live session over this manager. A
+	 * session does this when it is built and calls the returned function when
+	 * it begins its disposal.
 	 */
-	addRequestContextOwner(owner: { readonly isDisposed: boolean }, run: SessionWorkRun): () => void {
-		const entry = { owner, run };
-		this.#requestContextOwners.push(entry);
+	addRequestContextOwner(run: SessionWorkRun): () => void {
+		// The manager's own holds are in the context its methods run in: they stand for the sessions, not one of them.
+		const holds = run(captureRequestHolds).holds.filter(held => held !== this.#ownerHolds);
+		this.#ownerContexts.push(holds);
+		this.#bindOwnerHolds();
 		return () => {
-			const index = this.#requestContextOwners.indexOf(entry);
-			if (index !== -1) this.#requestContextOwners.splice(index, 1);
+			const index = this.#ownerContexts.indexOf(holds);
+			if (index === -1) return;
+			this.#ownerContexts.splice(index, 1);
+			this.#bindOwnerHolds();
 		};
 	}
 
-	/** Runs `fn` as the work of every live session over this manager (see {@link addRequestContextOwner}). */
-	#asOwnerWork<T>(fn: () => T): T {
-		const owners = this.#requestContextOwners;
-		let work = fn;
-		// Innermost last: the oldest session's context is the outermost.
-		for (let index = owners.length - 1; index >= 0; index--) {
-			const { owner, run } = owners[index];
-			if (owner.isDisposed) {
-				owners.splice(index, 1);
-				continue;
-			}
-			const inner = work;
-			work = () => run(inner);
-		}
-		return work();
+	/** Points {@link #ownerHolds} at the live sessions' holds, the newest session's nearest. */
+	#bindOwnerHolds(): void {
+		const holds = this.#ownerContexts.toReversed().flat();
+		this.#ownerHolds.bind({
+			holds,
+			run<T>(fn: () => T): T {
+				let work = fn;
+				for (const next of holds) {
+					const inner = work;
+					work = () => runWithRequestHolds(next, inner);
+				}
+				return work();
+			},
+		});
 	}
+
+	/** Runs `fn` as the work of every live session over this manager (see {@link addRequestContextOwner}). */
+	readonly #asOwnerWork: SessionWorkRun = fn => runWithRequestHolds(this.#ownerHolds, fn);
 
 	#turnBudgetTotal: number | null = null;
 	#turnBudgetHard = false;
@@ -2726,7 +2770,7 @@ export class SessionManager {
 
 	#artifactManager: ArtifactManager | null = null;
 	#artifactManagerSessionFile: string | null = null;
-	#adoptedArtifactManager: ArtifactManager | null = null;
+	#adoptedArtifactManager: ArtifactManagerApi | null = null;
 	#inMemoryArtifacts: Map<string, string> | null = null;
 	#inMemoryArtifactCounter = 0;
 
@@ -4410,13 +4454,11 @@ export class SessionManager {
 	}
 
 	#notifyEntryAppended(entry: SessionEntry): void {
-		const callback = this.onEntryAppended;
-		if (callback) {
-			try {
-				this.#asOwnerWork(() => callback(entry));
-			} catch (err) {
-				logger.warn("collab entry hook failed", { error: String(err) });
-			}
+		try {
+			// Read there as well as called: a host may keep the tap behind a getter.
+			this.#asOwnerWork(() => this.onEntryAppended?.(entry));
+		} catch (err) {
+			logger.warn("collab entry hook failed", { error: String(err) });
 		}
 	}
 
@@ -4602,7 +4644,7 @@ export class SessionManager {
 		}
 	}
 
-	#artifactManagerForSession(): ArtifactManager | null {
+	#artifactManagerForSession(): ArtifactManagerApi | null {
 		if (this.#adoptedArtifactManager) return this.#adoptedArtifactManager;
 
 		const sessionFile = this.#sessionFile;
@@ -5823,11 +5865,11 @@ export class SessionManager {
 		return artifactsDirectoryFor(this.#header?.seanceSource);
 	}
 
-	adoptArtifactManager(manager: ArtifactManager): void {
+	adoptArtifactManager(manager: ArtifactManagerApi): void {
 		this.#adoptedArtifactManager = manager;
 	}
 
-	getArtifactManager(): ArtifactManager | null {
+	getArtifactManager(): ArtifactManagerApi | null {
 		return this.#artifactManagerForSession();
 	}
 
@@ -5914,6 +5956,11 @@ export class SessionManager {
 	/** The source that set the session name: "user" (manual/RPC) or "auto" (generated title). */
 	get titleSource(): SessionTitleSource | undefined {
 		return this.#titleSource;
+	}
+
+	/** Bumped when entries are rewritten in place (`rewriteEntries`, replay sanitizing); appends do not bump it. */
+	get bodyRevision(): number {
+		return this.#bodyRevision;
 	}
 
 	/** Tracks user rename requests; background title updates do not invalidate them. */
@@ -6152,7 +6199,7 @@ export class SessionManager {
 	appendModelUsage(
 		usage: Pick<
 			ModelUsageEntry,
-			"purpose" | "role" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage"
+			"purpose" | "role" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage" | "cacheRefresh"
 		>,
 		owner: { sessionId: string; parentId: string | null },
 	): string | undefined {
@@ -6221,6 +6268,7 @@ export class SessionManager {
 		systemPrompt: string[];
 		task: string;
 		tools: string[];
+		mountedTools?: string[];
 		agent?: string;
 		modelRole?: string;
 		resolvedModel?: string;
@@ -6412,17 +6460,7 @@ export class SessionManager {
 	 * role the session was last assigned.
 	 */
 	getLastModelChangeRole(options?: { skipEphemeral?: boolean }): string | undefined {
-		const branch = this.getBranch();
-		for (let index = branch.length - 1; index >= 0; index--) {
-			const entry = branch[index];
-			if (entry.type !== "model_change") continue;
-			const role = entry.role ?? "default";
-			if (options?.skipEphemeral && (role === EPHEMERAL_MODEL_CHANGE_ROLE || role === PREWALK_MODEL_CHANGE_ROLE)) {
-				continue;
-			}
-			return role;
-		}
-		return undefined;
+		return lastModelChangeRole(this.#index.branchView(), options);
 	}
 
 	/**
@@ -7294,6 +7332,7 @@ export interface PersistedSessionInit {
 	systemPrompt: string[];
 	task: string;
 	tools: string[];
+	mountedTools?: string[];
 	agent?: string;
 	modelRole?: string;
 	resolvedModel?: string;
@@ -7325,6 +7364,7 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			systemPrompt: typeof entry.systemPrompt === "string" ? [entry.systemPrompt] : entry.systemPrompt,
 			task: entry.task,
 			tools: entry.tools,
+			mountedTools: entry.mountedTools,
 			agent: entry.agent,
 			modelRole: entry.modelRole,
 			resolvedModel: entry.resolvedModel,

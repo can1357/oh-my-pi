@@ -410,8 +410,8 @@ export interface SessionMaintenanceHost {
 	/** Runs one side request, from its preparation to its send, so its waits for the move handlers share one deadline. */
 	asSideRequest<T>(request: () => Promise<T>): Promise<T>;
 	providerSessionState: Map<string, ProviderSessionState>;
-	/** Live `providers.openaiWebsockets` hint for provider calls. */
-	preferWebsockets(): boolean | undefined;
+	/** Codex-only request preference from the live session setting. */
+	preferWebsockets(model: Model): boolean | undefined;
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	isDisposed(): boolean;
@@ -614,6 +614,9 @@ export class SessionMaintenance {
 	readonly #withoutFramesViews = new WeakMap<CompactionEntry, Map<string, snapcompact.ArchiveView | null>>();
 	/** The compaction entry behind each archive summary message, once found. */
 	readonly #summaryEntries = new WeakMap<CompactionSummaryMessage, CompactionEntry>();
+	/** Whether each legendless archive summary message may replay reasoning ({@link #mayReplayThinking}), or the
+	 *  branch view on which no archive backed it. */
+	readonly #replaysThinking = new WeakMap<CompactionSummaryMessage, boolean | readonly SessionEntry[]>();
 	/** Reader copies that read an archive as text in place of its frames. */
 	readonly #textCopies = new WeakSet<AgentMessage>();
 	/** Reader copies of archive summary messages keyed by the original message, then by {@link ArchiveReader.key},
@@ -2765,16 +2768,8 @@ export class SessionMaintenance {
 		);
 		// The live summary, not one rebuilt from the entry: a resumed session's
 		// archive frames are blob references only the session manager resolves.
-		// Context notes can precede it. An archive with frames but no source text
-		// (written before `Archive.text`) cannot be re-rendered into the new one,
-		// so its frames are not counted as replaced: crediting them would let a
-		// smaller candidate drop the only copy of that history.
-		const previousArchive = snapcompact.getPreservedArchive(preparation.previousPreserveData);
-		const carriesStandingSummary =
-			!previousArchive ||
-			previousArchive.frames.length === 0 ||
-			snapcompact.archiveSourceText(previousArchive) !== undefined;
-		const standingSummary = carriesStandingSummary
+		// Context notes can precede it.
+		const standingSummary = this.#replacesStandingSummary(preparation)
 			? this.#host.messages().find(message => message.role === "compactionSummary")
 			: undefined;
 		if (standingSummary) tokens += this.#tokenizer.countMessage(standingSummary);
@@ -2782,6 +2777,18 @@ export class SessionMaintenance {
 		tokens += this.#tokenizer.countMessages(preparation.turnPrefixMessages, opts);
 		tokens += this.#tokenizer.countMessages(preparation.recentMessages, opts);
 		return tokens;
+	}
+
+	/**
+	 * Whether a new snapcompact archive replaces the standing summary. An archive
+	 * with frames but no source text (written before `Archive.text`) cannot be
+	 * re-rendered into the new one: its text edges carry over, its imaged middle
+	 * does not. Its summary is not counted as replaced: crediting it would let a
+	 * smaller candidate drop the only copy of that history.
+	 */
+	#replacesStandingSummary(preparation: CompactionPreparation): boolean {
+		const previousArchive = snapcompact.getPreservedArchive(preparation.previousPreserveData);
+		return !previousArchive || previousArchive.frames.length === 0 || previousArchive.text !== undefined;
 	}
 
 	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
@@ -3772,7 +3779,7 @@ export class SessionMaintenance {
 							promptCacheKey: this.#host.getPromptCacheKeyForModel(candidate),
 							remotePromptCacheKey: this.#host.getPromptCacheKeyForModel(remoteCompactionPolicyModel(candidate)),
 							providerSessionState: this.#host.providerSessionState,
-							preferWebsockets: this.#host.preferWebsockets(),
+							preferWebsockets: this.#host.preferWebsockets(candidate),
 							codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 							// Route every summarization HTTP request through the
 							// session's side-stream transport so the provider
@@ -4832,14 +4839,37 @@ export class SessionMaintenance {
 				if (message.role !== "compactionSummary" || replacements.has(message)) continue;
 				const original = this.#originalSummaries.get(message) ?? message;
 				const wanted =
-					(reader.excludeThinking && snapcompact.summaryIncludesThinking(original.summary)) ||
-					(reader.withoutFrames && mayHoldArchive(original))
+					(reader.withoutFrames && mayHoldArchive(original)) ||
+					(reader.excludeThinking && this.#mayReplayThinking(original))
 						? await this.#readerSummary(original, model, reader)
 						: original;
 				if (wanted !== message) replacements.set(message, wanted);
 			}
 		}
 		return replacements;
+	}
+
+	/**
+	 * Whether `message` may replay reasoning: its summary declares `¶think:` scopes, or the archive behind it
+	 * keeps them ({@link snapcompact.archiveIncludesThinking}). Decided once per message; a summary no archive
+	 * backs is looked up again only once the branch changes.
+	 */
+	#mayReplayThinking(message: CompactionSummaryMessage): boolean {
+		if (snapcompact.summaryIncludesThinking(message.summary)) return true;
+		if (!mayHoldArchive(message)) return false;
+		const known = this.#replaysThinking.get(message);
+		if (typeof known === "boolean") return known;
+		const branch = this.#host.sessionManager.getBranchView();
+		if (known === branch) return false;
+		const entry = this.#archiveEntry(message, branch);
+		const archive = entry && snapcompact.getPreservedArchive(entry.preserveData);
+		if (!archive) {
+			this.#replaysThinking.set(message, branch);
+			return false;
+		}
+		const replays = snapcompact.archiveIncludesThinking(message.summary, archive);
+		this.#replaysThinking.set(message, replays);
+		return replays;
 	}
 
 	/**
@@ -5029,7 +5059,7 @@ export class SessionMaintenance {
 					: undefined,
 			);
 		const archiveText = snapcompact.archiveSourceText(archive);
-		if (archive.withoutThinking || !snapcompact.summaryIncludesThinking(entry.summary) || !archiveText) {
+		if (archive.withoutThinking || !snapcompact.archiveIncludesThinking(entry.summary, archive) || !archiveText) {
 			return readableView();
 		}
 		let view: snapcompact.ArchiveView;
@@ -5037,7 +5067,8 @@ export class SessionMaintenance {
 			const result = await this.#rerenderSnapcompactArchive(entry, archiveText, model, archive.frames.length);
 			const rendered = snapcompact.getPreservedArchive(result.preserveData);
 			if (!rendered) throw new Error("The re-render produced no archive");
-			view = { summary: result.summary, archive: rendered };
+			// A summary an extension wrote keeps its own words, without reasoning.
+			view = { summary: snapcompact.viewSummary(entry.summary, result.summary, true), archive: rendered };
 		} catch (error) {
 			logger.warn("Snapcompact archive render without reasoning failed; reading its text without frames", {
 				error: error instanceof Error ? error.message : String(error),
@@ -5637,9 +5668,23 @@ export class SessionMaintenance {
 									excludeEncryptedReasoning: true,
 								},
 							);
+							// A stored trigger estimate counts the whole standing summary; take
+							// back one a new archive cannot replace, as the local baseline does
+							// (which also prices the prepared region when that is set).
+							const unreplacedSummary =
+								options.triggerContextTokens !== undefined &&
+								options.preparedContextTokens === undefined &&
+								!this.#replacesStandingSummary(preparation)
+									? this.#host.messages().find(message => message.role === "compactionSummary")
+									: undefined;
 							const reductionBaseline =
 								options.triggerContextTokens !== undefined
-									? Math.max(0, options.triggerContextTokens - (options.pendingContextTokens ?? 0))
+									? Math.max(
+											0,
+											options.triggerContextTokens -
+												(options.pendingContextTokens ?? 0) -
+												(unreplacedSummary ? this.#tokenizer.countMessage(unreplacedSummary) : 0),
+										)
 									: this.#projectPreSnapcompactContextTokens(preparation);
 							const preparedReductionBaseline =
 								options.preparedContextTokens === undefined
@@ -5830,7 +5875,7 @@ export class SessionMaintenance {
 											remoteCompactionPolicyModel(candidate),
 										),
 										providerSessionState: this.#host.providerSessionState,
-										preferWebsockets: this.#host.preferWebsockets(),
+										preferWebsockets: this.#host.preferWebsockets(candidate),
 										codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 										codexCompaction,
 										// This loop already retries the whole compaction attempt on
