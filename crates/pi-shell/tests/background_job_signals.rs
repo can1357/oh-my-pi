@@ -85,3 +85,43 @@ async fn untrappable_and_inherited_dispositions_hold() {
 	])
 	.await;
 }
+
+/// Pending traps run one after the other, never interleaved, and a trap
+/// that exits the shell drops the traps still pending, as bash's
+/// `run_pending_traps` does: a second pending trap ran between the first
+/// trap's commands, and `exit` inside a trap still ran the other one.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_pending_trap_runs_at_a_time() {
+	assert_bash_outputs(&[
+		(r#"f(){ trap 'echo one-start; echo one-end' USR1; trap 'echo term-start; echo term-end' TERM; /bin/sleep .35; echo after; }; f & p=$!; /bin/sleep .1; kill -USR1 "$p"; kill -TERM "$p"; wait "$p"; echo status=$?"#, "one-start\none-end\nterm-start\nterm-end\nafter\nstatus=0\n"),
+		(r#"h(){ echo one-start; echo one-end; }; f(){ trap 'h' USR1; trap 'echo term-start; echo term-end' TERM; /bin/sleep .35; echo after; }; f & p=$!; /bin/sleep .1; kill -USR1 "$p"; kill -TERM "$p"; wait "$p"; echo status=$?"#, "one-start\none-end\nterm-start\nterm-end\nafter\nstatus=0\n"),
+		(r#"f(){ trap 'echo one-start; exit 23' USR1; trap 'echo term-start; echo term-end' TERM; /bin/sleep .35; echo after; }; f & p=$!; /bin/sleep .1; kill -USR1 "$p"; kill -TERM "$p"; wait "$p"; echo status=$?"#, "one-start\nstatus=23\n"),
+		(r#"f(){ trap 'echo one-start; return 23' USR1; trap 'echo term-start; echo term-end' TERM; /bin/sleep .35; echo after; }; f & p=$!; /bin/sleep .1; kill -USR1 "$p"; kill -TERM "$p"; wait "$p"; echo status=$?"#, "one-start\nstatus=23\n"),
+	])
+	.await;
+}
+
+/// A program the job `exec`s owns its own signal disposition: the shell's
+/// trap record is gone across `exec`, so `TERM` reaches the program and
+/// kills it. An ignored signal the program inherits stays ignored.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_exec_d_program_gets_the_signal_its_shell_trapped() {
+	assert_bash_outputs(&[
+		(r#"f(){ trap 'echo trapped' TERM; exec /bin/sleep 0.5; }; f & p=$!; /bin/sleep 0.1; kill -TERM "$p"; wait "$p"; echo status=$?"#, "status=143\n"),
+		(r#"f(){ trap 'echo trapped' TERM; exec /bin/sleep 0.5; }; f & /bin/sleep 0.1; kill -TERM %1; wait %1; echo status=$?"#, "status=143\n"),
+		(r#"trap '' TERM; f(){ exec /bin/sleep 0.5; }; f & p=$!; /bin/sleep 0.1; kill -TERM "$p"; wait "$p"; echo status=$?"#, "status=0\n"),
+	])
+	.await;
+}
+
+/// `SIGEXIT` is not a signal name bash takes: only plain `EXIT` is signal
+/// 0. `kill -s SIGEXIT` silently succeeded.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_plain_exit_names_signal_zero() {
+	assert_bash_outputs(&[
+		(r#"f(){ /bin/sleep .25; echo end; }; f & p=$!; kill -s SIGEXIT "$p" 2>/dev/null; echo kill=$?; wait "$p"; echo status=$?"#, "kill=1\nend\nstatus=0\n"),
+		(r#"f(){ /bin/sleep .25; echo end; }; f & p=$!; kill -SIGEXIT "$p" 2>/dev/null; echo kill=$?; wait "$p"; echo status=$?"#, "kill=1\nend\nstatus=0\n"),
+		(r#"f(){ /bin/sleep .25; echo end; }; f & p=$!; kill -s exit "$p"; echo kill=$?; wait "$p"; echo status=$?"#, "kill=0\nend\nstatus=0\n"),
+	])
+	.await;
+}
