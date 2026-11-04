@@ -8,7 +8,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getModelsConfigSchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema-bundle";
-import { fileConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
+import { fileConfigValue, normalizeFileConfigPath } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -440,11 +440,13 @@ describe("{ file } config values", () => {
 		expect(registry.getProviderDiscoveryState("disc-proxy")?.status).toBe("unauthenticated");
 	});
 
-	test("models.yml rejects a relative path or an unknown key in a { file } value", () => {
+	test("models.yml rejects a relative path, a bare ~ or an unknown key in a { file } value", () => {
 		const schema = getModelsConfigSchema();
-		expect(String(schema({ providers: { p: { apiKey: { file: "keys/gateway" } } } }))).toContain(
-			"providers.p.apiKey must be a { file } value whose path is absolute or starts with ~/",
-		);
+		for (const file of ["keys/gateway", "~"]) {
+			expect(String(schema({ providers: { p: { apiKey: { file } } } }))).toContain(
+				"providers.p.apiKey must be a { file } value whose path is absolute or starts with ~/",
+			);
+		}
 		expect(String(schema({ providers: { p: { apiKey: { file: "/k", mode: "x" } } } }))).toContain(
 			"providers.p.apiKey.mode must be removed",
 		);
@@ -452,5 +454,12 @@ describe("{ file } config values", () => {
 		expect(parsed).toMatchObject({
 			providers: { p: { apiKey: `\u0000file:${path.join(os.homedir(), "gateway-key")}` } },
 		});
+	});
+
+	test("a Windows { file } path must be fully qualified, not drive-relative", () => {
+		expect(normalizeFileConfigPath("\\secret", "win32")).toBeUndefined();
+		expect(normalizeFileConfigPath("C:secret", "win32")).toBeUndefined();
+		expect(normalizeFileConfigPath("C:\\keys\\gateway", "win32")).toBe("C:\\keys\\gateway");
+		expect(normalizeFileConfigPath("\\\\server\\share\\gateway", "win32")).toBe("\\\\server\\share\\gateway");
 	});
 });

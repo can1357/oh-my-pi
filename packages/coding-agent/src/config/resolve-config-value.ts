@@ -1,10 +1,18 @@
 import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { executeShell } from "@oh-my-pi/pi-natives";
-import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	$envExact,
+	directoryIsEnterable,
+	expandTilde,
+	getProjectDir,
+	isFullyQualifiedPath,
+	logger,
+	ptree,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 
 const COMMAND_FAILURE_RETRY_MS = 30_000;
 const commandResultCache = new Map<string, string>();
@@ -60,18 +68,20 @@ export function isCachedConfigValue(valueConfig: string | undefined): valueConfi
 }
 
 /**
- * Normalize the path of a `{ file: <path> }` value: `~` and `~/…` expand to the
- * home directory. Returns `undefined` for a relative path, which has no stable
- * meaning across the directories omp runs in.
+ * Normalize the path of a `{ file: <path> }` value: `~/…` (and `~\…` on Windows)
+ * expands to the home directory. Returns `undefined` for any path that is not
+ * fully qualified after that expansion: a relative path, a bare `~`, and on
+ * Windows a drive-relative path (`\secret`, `C:secret`), none of which names
+ * one file in every directory and on every drive omp runs from.
  */
-export function normalizeFileConfigPath(filePath: string): string | undefined {
-	const expanded =
-		filePath === "~"
-			? os.homedir()
-			: filePath.startsWith("~/")
-				? path.join(os.homedir(), filePath.slice(2))
-				: filePath;
-	return path.isAbsolute(expanded) ? path.normalize(expanded) : undefined;
+export function normalizeFileConfigPath(
+	filePath: string,
+	platform: NodeJS.Platform = process.platform,
+): string | undefined {
+	const homeRelative = filePath.startsWith("~/") || (platform === "win32" && filePath.startsWith("~\\"));
+	const expanded = homeRelative ? expandTilde(filePath) : filePath;
+	if (!isFullyQualifiedPath(expanded, platform)) return undefined;
+	return (platform === "win32" ? path.win32 : path.posix).normalize(expanded);
 }
 
 /** Internal config value that resolves to the trimmed content of the file at an absolute path. */
