@@ -15,7 +15,7 @@ use crate::bash::{
 	ids::{CallId, CmdTag, IntrinsicId, JobId, ModeId, NativeRef, RunId, ToolRef, Vpid},
 	ir::Unit,
 	mem::Capture,
-	signal::SigSet,
+	signal::{SigSet, Signal},
 	syntax::Pos,
 };
 
@@ -96,6 +96,13 @@ pub struct Vproc {
 	/// `errtrace`/`functrace`; bash 5.3 keeps listing inherited signal
 	/// traps until the subshell changes one).
 	pub own_traps:     OwnTraps,
+	/// `SIGINT` and `SIGQUIT` ignored because the vproc runs an
+	/// asynchronous list started without job control (bash 5.3
+	/// `setup_async_signals`, `SIG_ASYNCSIG`): a `&` job, a coprocess or a
+	/// process substitution, and every subshell and external it starts.
+	/// Not a trap: `trap` does not list it. A signal the vproc sets a trap
+	/// for (any action, or `trap -`) leaves the set.
+	pub async_ign:     AsyncIgnored,
 	/// Trap-action frames ([`ScriptKind::Trap`]) on `frames`: zero lets
 	/// the per-op checks (cancellation, `BASH_COMMAND`, a trap inside its
 	/// own action) skip their frame scans. Kept by
@@ -321,6 +328,48 @@ impl OwnTraps {
 			},
 			_ => Self { pseudo: self.pseudo | Self::bit(key), signals: self.signals },
 		}
+	}
+}
+
+/// The signals an asynchronous list ignores ([`Vproc::async_ign`]): a
+/// subset of `SIGINT` and `SIGQUIT`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AsyncIgnored(u8);
+
+impl AsyncIgnored {
+	/// Both: the set an asynchronous list starts with.
+	pub const ASYNC: Self = Self(3);
+	/// Neither signal.
+	pub const NONE: Self = Self(0);
+
+	const fn bit(sig: Signal) -> u8 {
+		match sig {
+			Signal::Int => 1,
+			Signal::Quit => 2,
+			_ => 0,
+		}
+	}
+
+	/// Whether `sig` is in the set.
+	pub const fn has(self, sig: Signal) -> bool {
+		self.0 & Self::bit(sig) != 0
+	}
+
+	/// The set without `sig`.
+	pub const fn without(self, sig: Signal) -> Self {
+		Self(self.0 & !Self::bit(sig))
+	}
+
+	/// The set as a [`SigSet`].
+	pub const fn signals(self) -> SigSet {
+		let mut set = SigSet::EMPTY;
+		if self.has(Signal::Int) {
+			set = set.with(Signal::Int);
+		}
+		if self.has(Signal::Quit) {
+			set = set.with(Signal::Quit);
+		}
+		set
 	}
 }
 

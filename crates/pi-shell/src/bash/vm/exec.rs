@@ -2357,7 +2357,10 @@ pub fn start_procsub(
 			fds.set(sibling, None);
 		}
 	}
-	let child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	let control = job_control(k, cx, vp);
+	let mut child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	// bash 5.3 `process_substitute`: an asynchronous child.
+	child.async_ign = async_signals(vp, control);
 	let vpid = child.vpid;
 	// Not a job: its externals stay in the shell's group, without the
 	// terminal.
@@ -3754,6 +3757,7 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					super::set_subshell_depth(&mut child, super::subshell_depth(vp) + level);
 					// A job of its own: its processes get their own group.
 					super::jobctl::own_job(k, child.vpid);
+					child.async_ign = async_signals(vp, control);
 				}
 				children.push(child.vpid);
 				let vpid = child.vpid;
@@ -3934,6 +3938,19 @@ pub fn job_control(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 	!vp.jobs.subshell && state::option(&mut k.root, cx.store, vp, OptId::Monitor).unwrap_or(false)
 }
 
+/// The signals an asynchronous child of `vp` (a `&` job, a coprocess, a
+/// process substitution) starts ignoring: bash 5.3's `setup_async_signals`
+/// ignores `INT` and `QUIT` when job control is off (`control`). zsh's
+/// `entersubsh` sets ignored traps of its own instead, which this does not
+/// model.
+fn async_signals(vp: &Vproc, control: bool) -> super::proc::AsyncIgnored {
+	if control || vp.mode.dialect() != Dialect::Bash {
+		super::proc::AsyncIgnored::NONE
+	} else {
+		super::proc::AsyncIgnored::ASYNC
+	}
+}
+
 /// The job table a child that lists its parent's jobs starts with (a
 /// command substitution, a `jobs` pipeline stage): copies of them, which
 /// are not its children; `subshell` turns job control off.
@@ -3991,9 +4008,11 @@ fn start_coproc(
 	let mut fds = vp.fds.clone();
 	fds.set(0, Some(FdRef::mem(in_r)));
 	fds.set(1, Some(FdRef::mem(out_w)));
-	let child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	let control = job_control(k, cx, vp);
+	let mut child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
 	// A job of its own under job control (never in the foreground).
 	super::jobctl::own_job(k, child.vpid);
+	child.async_ign = async_signals(vp, control);
 	let vpid = child.vpid;
 	k.spawned.push(Box::new(child));
 	vp.fds.set(read, Some(FdRef::mem(out_r)));
@@ -4001,7 +4020,6 @@ fn start_coproc(
 	vp.last_bg = LastBg::new(vpid);
 	let job = k.job_id(cx.store);
 	let text = job_text(k, cx, vp, unit, op.node);
-	let control = job_control(k, cx, vp);
 	let cwd = vp.cwd.clone();
 	vp.jobs.add(job, vpid, text, control, cwd);
 	k.emit_op(cx, vp, op.node, EventData::Background { job, pid: vpid });

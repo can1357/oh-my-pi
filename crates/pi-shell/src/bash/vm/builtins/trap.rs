@@ -453,6 +453,9 @@ fn zsh_change(
 	}
 	let record = effective.map(|action| Record::Trap { mode: mode_of(ctx.vp), action });
 	ctx.vp.own_traps = ctx.vp.own_traps.with(key);
+	if let TrapKey::Signal(sig) = key {
+		ctx.vp.async_ign = ctx.vp.async_ign.without(sig);
+	}
 	if matches!(&record, Some(Record::Trap { action, .. }) if !action.is_empty()) {
 		ctx.k.pseudo_traps.note(key);
 	}
@@ -676,6 +679,12 @@ pub(super) fn trap(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		// The innermost function (for DEBUG also `.` file) and the vproc
 		// now run it as their own rather than an inherited trap.
 		ctx.vp.own_traps = ctx.vp.own_traps.with(key);
+		// bash 5.3 (POSIX interp 751): an asynchronous list may trap or
+		// reset (`trap -`) the `INT` and `QUIT` it ignores; its subshells
+		// then start from that, not from the ignore.
+		if let TrapKey::Signal(sig) = key {
+			ctx.vp.async_ign = ctx.vp.async_ign.without(sig);
+		}
 		if let Some(frame) = ctx.vp.frames.iter_mut().rev().find(|f| {
 			matches!(f.kind, FrameKind::Function { .. })
 				|| (key == TrapKey::Debug
@@ -698,8 +707,10 @@ pub(super) fn trap(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 
 /// bash: a new shell (a script run as `ENOEXEC`) cannot trap or reset the
 /// signals ignored when it starts. Records in `child` the signals `parent`
-/// ignores; the nested shell's `fresh_shell` (also a script run as
-/// `ENOEXEC`) calls it on the child it creates.
+/// ignores, including those of an asynchronous list
+/// ([`Vproc::async_ign`]), which the new shell lists as ignored traps; the
+/// nested shell's `fresh_shell` (also a script run as `ENOEXEC`) calls it
+/// on the child it creates.
 ///
 /// # Errors
 ///
@@ -710,7 +721,7 @@ pub fn hard_ignore(
 	parent: &Vproc,
 	child: &mut Vproc,
 ) -> Result<(), StoreError> {
-	let names: Vec<BString> = state::scan(&k.root, store, parent, Table::Trap)?
+	let mut names: Vec<BString> = state::scan(&k.root, store, parent, Table::Trap)?
 		.into_iter()
 		.filter_map(|(key, rec)| match (key, rec) {
 			(KeyBuf::Trap(TrapKey::Signal(sig)), Record::Trap { action, .. }) if action.is_empty() => {
@@ -719,6 +730,14 @@ pub fn hard_ignore(
 			_ => None,
 		})
 		.collect();
+	for sig in parent.async_ign.signals().iter() {
+		let name = BString::from(sig.to_string());
+		if !names.contains(&name) {
+			names.push(name);
+		}
+		let rec = Some(Record::Trap { mode: child.mode, action: BString::default() });
+		state::store_record(&mut k.root, store, child, KeyBuf::Trap(TrapKey::Signal(sig)), rec);
+	}
 	if !names.is_empty() {
 		state::store_record(
 			&mut k.root,
