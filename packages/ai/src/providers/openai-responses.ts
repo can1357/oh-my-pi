@@ -87,7 +87,11 @@ import type {
 	ResponseInputContent,
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
-import { type StandardResponsesWebSocketLease, OpenAIResponsesTransportSessions } from "./openai-responses-session";
+import {
+	type StandardResponsesWebSocketLease,
+	type StandardResponsesWebSocketSession,
+	OpenAIResponsesTransportSessions,
+} from "./openai-responses-session";
 import {
 	applyCommonResponsesSamplingParams,
 	applyOpenAIExtraBody,
@@ -562,6 +566,28 @@ function isOpenAIResponsesWebSocketChainEnabled(
 	return $flag("PI_OPENAI_STATEFUL", model.compat.statefulResponses ?? true);
 }
 
+/** Breakpoint policy of the request each WebSocket session last sent; gates its baseline like the HTTP chain. */
+const webSocketPromptCacheBreakpointPolicies = new WeakMap<
+	StandardResponsesWebSocketSession,
+	OpenAIResponsesChainState["lastPromptCacheBreakpointPolicy"]
+>();
+
+/**
+ * A socket-local chain appends only when the next input repeats the last sent
+ * input, so prompt-cache markers come from that baseline as on the HTTP chain.
+ */
+function getWebSocketPromptCacheBaseline(
+	lease: StandardResponsesWebSocketLease,
+	options: OpenAIResponsesOptions | undefined,
+	model: Model<"openai-responses">,
+	promptCacheBreakpointPolicy: OpenAIResponsesChainState["lastPromptCacheBreakpointPolicy"],
+): ResponseInput | undefined {
+	if (lease.chainDisabled || !isOpenAIResponsesWebSocketChainEnabled(options, model)) return undefined;
+	const policies = webSocketPromptCacheBreakpointPolicies;
+	if (!policies.has(lease.session) || policies.get(lease.session) !== promptCacheBreakpointPolicy) return undefined;
+	return lease.session.appendBaselineInput;
+}
+
 function getOpenAIResponsesChainState(
 	providerSessionState: OpenAIResponsesProviderSessionState,
 	model: Model<"openai-responses">,
@@ -879,7 +905,11 @@ const streamOpenAIResponsesOnce = (
 					providerSessionState,
 					strictToolsScope,
 					disableStrictTools,
-					chainState?.canAppend ? chainState.lastParams?.input : undefined,
+					chainState?.canAppend
+						? chainState.lastParams?.input
+						: useWebSocket && webSocketLease
+							? getWebSocketPromptCacheBaseline(webSocketLease, options, model, promptCacheBreakpointPolicy)
+							: undefined,
 				);
 				const { params, trailingScaffoldingItems } = builtParams;
 				if (chainState && !chainState.disabled) params.store = true;
@@ -980,6 +1010,7 @@ const streamOpenAIResponsesOnce = (
 							throw new Error("OpenAI responses WebSocket requests do not support background: true");
 						}
 						const lease = webSocketLease!;
+						webSocketPromptCacheBreakpointPolicies.set(lease.session, promptCacheBreakpointPolicy);
 						return lease.session.events(requestParams, {
 							signal: requestSignal,
 							chain: isOpenAIResponsesWebSocketChainEnabled(options, model) && !lease.chainDisabled,

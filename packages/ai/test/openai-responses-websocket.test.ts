@@ -1440,4 +1440,115 @@ describe("standard OpenAI Responses WebSocket opt-in", () => {
 		expect(fixture.requests.at(-1)?.body.previous_response_id).toBeUndefined();
 		expect(fixture.upgrades).toHaveLength(1);
 	});
+
+	it("keeps the sent prompt-cache marker so tool rounds continue on the socket", async () => {
+		const fixture = endpoint((socket, _body, index) => {
+			if (index === 3) {
+				send(socket, textEvents("Done", "resp_done"));
+				return;
+			}
+			const item = {
+				type: "function_call",
+				id: `fc_${index}`,
+				call_id: `call_${index}`,
+				name: "lookup",
+				arguments: "{}",
+				status: "completed",
+			};
+			send(socket, [
+				{ type: "response.created", response: { id: `resp_${index}` } },
+				{ type: "response.output_item.done", output_index: 0, item },
+				{ type: "response.completed", response: { id: `resp_${index}`, status: "completed", output: [item] } },
+			]);
+		});
+		const model = { ...getBundledModel("openai", "gpt-5.6"), baseUrl: fixture.model.baseUrl };
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Look it up", timestamp: 0 },
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call_0", name: "lookup", arguments: {} }],
+					api: "openai-responses",
+					provider: "openai",
+					model: model.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_0",
+					toolName: "lookup",
+					content: [{ type: "text", text: "result 0" }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+			tools: [{ name: "lookup", description: "Use the tool", parameters: schemaType({}) }],
+		};
+		const options = { ...fixture.options, preferWebsockets: true, promptCache: { mode: "explicit" as const } };
+		for (const turn of [1, 2, 3]) {
+			const result = await streamSimple(model, context, options).result();
+			expect(result.stopReason).toBe(turn === 3 ? "stop" : "toolUse");
+			context.messages.push(result);
+			const toolCall = result.content.find(block => block.type === "toolCall");
+			if (toolCall?.type !== "toolCall") continue;
+			context.messages.push({
+				role: "toolResult",
+				toolCallId: toolCall.id,
+				toolName: toolCall.name,
+				content: [{ type: "text", text: `result ${turn}` }],
+				isError: false,
+				timestamp: turn + 2,
+			});
+		}
+		const bodies = fixture.requests.map(request => request.body);
+		expect(bodies.map(body => body.previous_response_id)).toEqual([undefined, "resp_1", "resp_2"]);
+		expect(JSON.stringify(bodies[0]?.input)).toContain("prompt_cache_breakpoint");
+		for (const turn of [1, 2]) {
+			expect(bodies[turn]?.input).toEqual([
+				expect.objectContaining({
+					type: "function_call_output",
+					call_id: `call_${turn}`,
+					output: `result ${turn}`,
+				}),
+			]);
+		}
+		expect(fixture.upgrades).toHaveLength(1);
+		expect(fixture.httpRequests).toHaveLength(0);
+	});
+
+	it("marks a full replay when explicit caching starts mid-session, then appends user turns on the socket", async () => {
+		const fixture = endpoint((socket, _body, index) => send(socket, textEvents(`Reply ${index}`, `resp_${index}`)));
+		const model = { ...getBundledModel("openai", "gpt-5.6"), baseUrl: fixture.model.baseUrl };
+		const context: Context = { messages: [...fixture.context.messages] };
+		for (const turn of [1, 2, 3, 4]) {
+			if (turn > 1) context.messages.push({ role: "user", content: `Next ${turn}`, timestamp: turn });
+			const result = await streamSimple(model, context, {
+				...fixture.options,
+				preferWebsockets: true,
+				...(turn > 1 ? { promptCache: { mode: "explicit" as const } } : {}),
+			}).result();
+			expect(result.stopReason).toBe("stop");
+			context.messages.push(result);
+		}
+		const bodies = fixture.requests.map(request => request.body);
+		expect(bodies.map(body => body.previous_response_id)).toEqual([undefined, undefined, "resp_2", "resp_3"]);
+		expect(bodies[1]?.input).toHaveLength(3);
+		expect(JSON.stringify(bodies[1]?.input)).toContain("prompt_cache_breakpoint");
+		for (const turn of [3, 4]) {
+			expect(bodies[turn - 1]?.input).toEqual([
+				{ role: "user", content: [{ type: "input_text", text: `Next ${turn}` }] },
+			]);
+		}
+		expect(fixture.upgrades).toHaveLength(1);
+		expect(fixture.httpRequests).toHaveLength(0);
+	});
 });
