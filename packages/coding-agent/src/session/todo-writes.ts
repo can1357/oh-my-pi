@@ -3,7 +3,7 @@ import { logger, Serial, untilAborted } from "@oh-my-pi/pi-utils";
 import type { SettingsScope } from "../config/registry";
 import type { ExtensionRunner } from "../extensibility/extensions/runner";
 import { cfgTodoBackend } from "../tools/settings";
-import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
+import { getLatestTodoPhasesFromEntries, USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
 import {
 	type ActiveTodoBackend,
 	NATIVE_TODO_BACKEND_ID,
@@ -41,7 +41,8 @@ export interface TodoWritesHost extends SettingsScope {
  *
  * Writes run one at a time. Each receives the backend resolved when it starts (`undefined` = native
  * todos) and a guard that fails once the list was reset or reloaded. The backend resolves lazily
- * from `todo.backend` once {@link arm}ed, and again whenever the setting changes.
+ * from `todo.backend` once {@link arm}ed, and again whenever the setting changes or the backend's
+ * extension is suspended or resumed.
  */
 export class TodoWrites {
 	readonly #host: TodoWritesHost;
@@ -50,6 +51,8 @@ export class TodoWrites {
 	#active: ActiveTodoBackend | undefined;
 	/** Latest `todo.backend` value a resolution was queued for. */
 	#requestedId: string | undefined;
+	/** Whether an enabled extension registered {@link #requestedId} when its resolution was queued. */
+	#requestedAvailable = false;
 	/** Set by {@link arm}; resolution stays dormant until then. */
 	#armed = false;
 	/** The queued first resolution; every write awaits it. Set once, by {@link resolveBackend}. */
@@ -69,9 +72,11 @@ export class TodoWrites {
 	 * without an extension runner never use a backend.
 	 */
 	arm(): void {
-		if (this.#armed || !this.#host.extensionRunner()) return;
+		const runner = this.#host.extensionRunner();
+		if (this.#armed || !runner) return;
 		this.#armed = true;
 		cfgTodoBackend.listen(this.#host, () => this.#observeSetting());
+		runner.onSuspensionChange(() => this.#observeSetting());
 	}
 
 	/** Queue the first backend resolution, once armed. Later calls do nothing. */
@@ -79,6 +84,7 @@ export class TodoWrites {
 		if (!this.#armed || this.#initial) return;
 		const id = cfgTodoBackend.get(this.#host.settings);
 		this.#requestedId = id;
+		this.#requestedAvailable = this.#isAvailable(id);
 		this.#initial = this.#queue
 			.run(() => this.#resolve(id))
 			.catch((error: unknown) => {
@@ -148,6 +154,17 @@ export class TodoWrites {
 	}
 
 	/**
+	 * Call after saving a `todo` tool result. The tool's write left the queue before the agent loop
+	 * saved its result, so a commit that ran in between (a `/todo` edit) saved its entry first, and a
+	 * rebuild from the branch would restore the tool's older list. Record the live list again then.
+	 */
+	keepLiveListAfterToolResult(): void {
+		const live = this.#host.todo.phases;
+		if (Bun.deepEquals(getLatestTodoPhasesFromEntries(this.#host.sessionManager.getBranch()), live)) return;
+		this.#host.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: live });
+	}
+
+	/**
 	 * Make every queued write fail its guard. Call synchronously before switching to a different list
 	 * (new session, session switch, branch), so a write settling mid-swap cannot land in it. A
 	 * whole-session fork keeps the same list, so queued writes stay valid there.
@@ -169,18 +186,27 @@ export class TodoWrites {
 		await this.#initial;
 	}
 
-	/** Queue a re-resolution when `todo.backend` no longer matches the id last resolved. */
+	/**
+	 * Queue a re-resolution when `todo.backend` no longer matches the id last resolved, or its backend
+	 * appeared or disappeared since (its extension was suspended or resumed).
+	 */
 	#observeSetting(): void {
 		// Before the first resolution runs, it reads the setting itself.
 		if (!this.#initial || this.#host.isDisposed()) return;
 		const id = cfgTodoBackend.get(this.#host.settings);
-		if (id === this.#requestedId) return;
+		const available = this.#isAvailable(id);
+		if (id === this.#requestedId && available === this.#requestedAvailable) return;
 		this.#requestedId = id;
+		this.#requestedAvailable = available;
 		this.#queue
 			.run(() => this.#resolve(id))
 			.catch((error: unknown) => {
 				logger.warn("Todo backend switch failed", { id, error: String(error) });
 			});
+	}
+
+	#isAvailable(id: string): boolean {
+		return this.#host.extensionRunner()?.getTodoBackend(id) !== undefined;
 	}
 
 	/**
@@ -192,18 +218,17 @@ export class TodoWrites {
 		const runner = this.#host.extensionRunner();
 		if (!runner || !this.#host.isMainAgent() || this.#host.isDisposed()) return;
 		if (id.trim() === "" || id === NATIVE_TODO_BACKEND_ID) return;
-		const context = runner.createContext();
-		const definition = runner.todoBackends.get(id);
+		const definition = runner.getTodoBackend(id);
 		if (!definition) {
 			this.#host.emitNotice(
 				"warning",
-				`Todo backend "${todoBackendText(id)}" is not registered by any loaded extension; using native todos.`,
+				`Todo backend "${todoBackendText(id)}" is not registered by any enabled extension; using native todos.`,
 				TODO_BACKEND_NOTICE_SOURCE,
 			);
 			return;
 		}
 		try {
-			const backend = await runner.runTodoBackendCall(() => definition.create(context));
+			const backend = await runner.createTodoBackend(definition);
 			if (!backend || typeof backend.apply !== "function" || typeof backend.replace !== "function") {
 				throw new Error("create() did not return an object with apply() and replace()");
 			}

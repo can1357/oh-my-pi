@@ -334,11 +334,11 @@ export class SelectorController {
 					const levels: ConfiguredThinkingLevel[] = [AUTO_THINKING, ...availableLevels];
 					return levels.map(level => def.options.find(o => o.value === level) ?? { value: level, label: level });
 				};
-				// `native` first, then extension-registered backends in registration order.
+				// `native` first, then backends of enabled extensions in registration order.
 				const todoBackendOptions: RuntimeSettingOptionsProvider = () => {
 					return [
 						{ value: NATIVE_TODO_BACKEND_ID, label: "Native", description: "omp's built-in todo list" },
-						...(this.ctx.session.extensionRunner?.todoBackends.list() ?? []).map(backend => ({
+						...(this.ctx.session.extensionRunner?.listTodoBackends() ?? []).map(backend => ({
 							value: backend.id,
 							label: backend.label,
 							description: backend.description,

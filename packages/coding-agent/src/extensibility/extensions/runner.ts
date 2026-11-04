@@ -40,7 +40,7 @@ import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/age
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
-import type { TodoBackendRegistry } from "../../tools/todo-backend";
+import type { TodoBackend, TodoBackendDefinition } from "../../tools/todo-backend";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
@@ -811,9 +811,19 @@ export class ExtensionRunner {
 		return this.sessionManager.getCwd();
 	}
 
-	/** Todo backends registered by this runner's extensions (including deferred ones). */
-	get todoBackends(): TodoBackendRegistry {
-		return this.runtime.todoBackends;
+	/**
+	 * Todo backends of this runner's extensions (including deferred ones), in registration order. A
+	 * suspended extension's backends are left out until it resumes, like its tools and commands.
+	 */
+	listTodoBackends(): TodoBackendDefinition[] {
+		return this.runtime.todoBackends.filter(
+			sourceId => !Array.from(this.#suspendedExtensions).some(extension => extension.path === sourceId),
+		);
+	}
+
+	/** The backend `id` names, unless no extension registered it or its extension is suspended. */
+	getTodoBackend(id: string): TodoBackendDefinition | undefined {
+		return this.listTodoBackends().find(definition => definition.id === id);
 	}
 
 	/**
@@ -1715,6 +1725,15 @@ export class ExtensionRunner {
 			throw signal?.reason ?? new DOMException("This operation was aborted", "AbortError");
 		}
 		return result;
+	}
+
+	/**
+	 * Run a todo backend's `create` like an event handler (see {@link runTodoBackendCall}): its
+	 * context's `ui` dialogs close when the budget runs out, as a handler's do.
+	 */
+	createTodoBackend(definition: TodoBackendDefinition): Promise<TodoBackend> {
+		const ctx = this.createContext();
+		return this.runTodoBackendCall(handlerSignal => definition.create(createHandlerContext(ctx, handlerSignal)));
 	}
 
 	/**

@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { findScopedSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { ExtensionFactory, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
 	testSetExtensionHandlerTimeoutMs,
@@ -18,7 +19,11 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgTodoBackend } from "@oh-my-pi/pi-coding-agent/tools/settings";
-import { USER_TODO_EDIT_CUSTOM_TYPE, type TodoParams } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import {
+	getLatestTodoPhasesFromEntries,
+	type TodoParams,
+	USER_TODO_EDIT_CUSTOM_TYPE,
+} from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
@@ -35,6 +40,7 @@ describe("todo backends in a real session", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		for (const session of sessions.splice(0)) await session.dispose();
 		for (const authStorage of authStorages.splice(0)) authStorage.close();
 		await tempDir.remove();
@@ -132,15 +138,29 @@ describe("todo backends in a real session", () => {
 
 	test("concurrent todo calls reach the backend one at a time, in call order, with `next` equal to the committed list", async () => {
 		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
+		// Hold the first apply until all three calls have entered the write queue: a queue that let
+		// them through would start the second apply while the first is still held.
+		const allQueued = Promise.withResolvers<void>();
+		const runTodoWrite = session.runTodoWrite.bind(session);
+		let entered = 0;
+		vi.spyOn(session, "runTodoWrite").mockImplementation((write, options) => {
+			const result = runTodoWrite(write, options);
+			if (++entered === 3) allQueued.resolve();
+			return result;
+		});
 		let inFlight = 0;
 		let overlapped = false;
+		let held = false;
 		recorder.beforeApply = async () => {
 			inFlight++;
 			if (inFlight > 1) overlapped = true;
-			await Bun.sleep(0);
+			if (!held) {
+				held = true;
+				await allQueued.promise;
+			}
 			inFlight--;
 		};
-		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 
 		await Promise.all([
 			todo(session, { op: "init", items: ["one"] }),
@@ -260,10 +280,10 @@ describe("todo backends in a real session", () => {
 		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 
+		const phaseWithExtraKey = { phase: "Work", items: ["a"], evidence: "z" };
 		await todo(session, {
 			op: "init",
-			items: ["a"],
-			phase: "Work",
+			list: [phaseWithExtraKey],
 			bogus: "x",
 			constructor: "y",
 			toString: 1,
@@ -271,7 +291,8 @@ describe("todo backends in a real session", () => {
 
 		const [call] = recorder.calls.filter(call => call.method === "apply");
 		if (!call?.params) throw new Error("expected one apply call");
-		expect(Object.keys(call.params).sort()).toEqual(["items", "op", "phase"]);
+		expect(Object.keys(call.params).sort()).toEqual(["list", "op"]);
+		expect(call.params.list).toEqual([{ phase: "Work", items: ["a"] }]);
 	});
 
 	test("subagent and /tan sessions do not use the backend", async () => {
@@ -338,6 +359,105 @@ describe("todo backends in a real session", () => {
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toContain('"broken"');
 		expect(notices[0]).toContain("no credentials");
+	});
+
+	test("a suspended extension's backend is not used: native todos and a notice until it resumes", async () => {
+		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
+		const runner = session.extensionRunner;
+		if (!runner) throw new Error("extension runner is not available");
+		const notices = collectNotices(session);
+		const applies = () => recorder.calls.filter(call => call.method === "apply").length;
+
+		await todo(session, { op: "init", items: ["backed"] });
+		expect(applies()).toBe(1);
+
+		runner.setSuspendedExtensions(() => true);
+		await flushTodoWrites(session);
+		const suspended = await todo(session, { op: "append", phase: "Tasks", items: ["native while suspended"] });
+
+		expect(suspended.isError).toBeUndefined();
+		expect(applies()).toBe(1);
+		expect(taskContents(session)).toEqual(["backed", "native while suspended"]);
+		expect(notices).toEqual([
+			'Todo backend "tracker" is not registered by any enabled extension; using native todos.',
+		]);
+
+		runner.setSuspendedExtensions(() => false);
+		await flushTodoWrites(session);
+		await todo(session, { op: "append", phase: "Tasks", items: ["backed again"] });
+
+		expect(applies()).toBe(2);
+		expect(taskContents(session)).toEqual(["backed", "native while suspended", "backed again"]);
+	});
+
+	test("a dialog opened in create is aborted when the handler budget runs out, and the session falls back to native todos", async () => {
+		const dialogSignals: Array<AbortSignal | undefined> = [];
+		const hanging: ExtensionFactory = pi => {
+			pi.registerTodoBackend({
+				id: "asker",
+				label: "Tracker asker",
+				async create(ctx) {
+					await ctx.ui.select("Pick a workspace", ["a", "b"]);
+					throw new Error("unreachable: the dialog never resolves");
+				},
+			});
+		};
+		const session = await createSession({ backend: "asker", extensions: [hanging] });
+		const runner = session.extensionRunner;
+		if (!runner) throw new Error("extension runner is not available");
+		const ui = {
+			select: (_title: string, _options: string[], dialogOptions?: { signal?: AbortSignal }) => {
+				dialogSignals.push(dialogOptions?.signal);
+				const dialog = Promise.withResolvers<string | undefined>();
+				dialogOptions?.signal?.addEventListener("abort", () => dialog.resolve(undefined), { once: true });
+				return dialog.promise;
+			},
+		} as unknown as ExtensionUIContext;
+		runner.initialize(
+			{
+				sendMessage: () => {},
+				sendUserMessage: () => {},
+				appendEntry: () => {},
+				setLabel: () => {},
+				getActiveTools: () => [],
+				getAllTools: () => [],
+				setActiveTools: async () => {},
+				getCommands: () => [],
+				setModel: async () => false,
+				getThinkingLevel: () => undefined,
+				setThinkingLevel: () => {},
+				getSessionName: () => undefined,
+				setSessionName: async () => {},
+			},
+			{
+				getModel: () => undefined,
+				isIdle: () => true,
+				abort: () => {},
+				hasPendingMessages: () => false,
+				shutdown: () => {},
+				getContextUsage: () => undefined,
+				compact: async () => {},
+				getSystemPrompt: () => [],
+			},
+			undefined,
+			ui,
+		);
+		const notices = collectNotices(session);
+
+		testSetExtensionHandlerTimeoutMs(50);
+		try {
+			const result = await todo(session, { op: "init", items: ["native works"] });
+
+			expect(result.isError).toBeUndefined();
+			expect(taskContents(session)).toEqual(["native works"]);
+			expect(notices).toHaveLength(1);
+			expect(notices[0]).toContain('"asker"');
+			expect(dialogSignals).toHaveLength(1);
+			expect(dialogSignals[0]?.aborted).toBe(true);
+		} finally {
+			testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+		}
 	});
 
 	test("resuming a session whose backend extension is gone keeps the transcript plan and native writes", async () => {
@@ -568,11 +688,11 @@ export default function(pi) {
 		// Release the held replace while the session manager is mid-swap: the commit then runs
 		// before any post-swap reload could have invalidated it.
 		const originalSetSessionFile = session.sessionManager.setSessionFile.bind(session.sessionManager);
-		session.sessionManager.setSessionFile = async (sessionFile: string) => {
+		vi.spyOn(session.sessionManager, "setSessionFile").mockImplementation(async (sessionFile: string) => {
 			replaceGate.release.resolve();
 			await originalSetSessionFile(sessionFile);
 			await editSettled;
-		};
+		});
 		await session.switchSession(targetFile);
 
 		expect((await editSettled)?.toString()).toContain("The session changed before the todo edit was saved");
@@ -621,5 +741,49 @@ export default function(pi) {
 		expect(await editSettled).toBeUndefined();
 		expect(taskContents(session)).toEqual(["kept"]);
 		expect(userTodoEdits(session)).toHaveLength(1);
+	});
+
+	test("a commit that lands while a todo call's result is still unsaved is what a rebuild from the branch restores", async () => {
+		const gate = createGate();
+		gate.held = true;
+		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		recorder.beforeApply = gate.beforeApply;
+		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in the bundled catalog");
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "todo-call",
+							name: "todo",
+							arguments: { op: "init", items: ["from the tool"] },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				{ content: ["done"] },
+			],
+		});
+		session.agent.streamFn = mock.stream;
+		session.agent.state.model = model;
+		session.agent.getApiKey = () => "test-key";
+		session.modelRegistry.authStorage.keys.setRuntime("anthropic", "test-key");
+
+		const turn = session.prompt("make a todo list");
+		await gate.started.promise;
+		const edit = session.commitTodoPhases([
+			{ name: "Edited", tasks: [{ content: "from the /todo edit", status: "pending" }] },
+		]);
+		gate.release.resolve();
+		await Promise.all([turn, edit]);
+		await session.waitForIdle();
+
+		// Resume, rewind and compaction rebuild the list from the saved branch.
+		const rebuilt = getLatestTodoPhasesFromEntries(session.sessionManager.getBranch());
+		expect(rebuilt.flatMap(phase => phase.tasks.map(task => task.content))).toEqual(["from the /todo edit"]);
+		expect(taskContents(session)).toEqual(["from the /todo edit"]);
 	});
 });

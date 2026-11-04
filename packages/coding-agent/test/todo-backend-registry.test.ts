@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
 	type TodoBackend,
 	type TodoBackendDefinition,
@@ -44,22 +43,6 @@ describe("TodoBackendRegistry", () => {
 });
 
 describe("pi.registerTodoBackend", () => {
-	test("registers into the runner's todoBackends through the extension loader", async () => {
-		const runtime = new ExtensionRuntime();
-		const extension = await loadExtensionFromFactory(
-			pi => {
-				pi.registerTodoBackend({ id: "tracker", label: "Tracker", create: () => noopBackend });
-			},
-			process.cwd(),
-			new EventBus(),
-			runtime,
-			"tracker-extension",
-		);
-		const runner = new ExtensionRunner([extension], runtime, process.cwd(), SessionManager.inMemory(), {} as never);
-
-		expect(runner.todoBackends.list().map(entry => entry.id)).toEqual(["tracker"]);
-	});
-
 	test("an extension registering native fails to load", async () => {
 		const runtime = new ExtensionRuntime();
 		await expect(
@@ -78,7 +61,7 @@ describe("pi.registerTodoBackend", () => {
 
 	test("a factory that throws after registering leaves earlier backends and frees its id", async () => {
 		const runtime = new ExtensionRuntime();
-		const load = (factory: Parameters<typeof loadExtensionFromFactory>[0], name: string) =>
+		const load = (factory: ExtensionFactory, name: string) =>
 			loadExtensionFromFactory(factory, process.cwd(), new EventBus(), runtime, name);
 		await load(pi => pi.registerTodoBackend({ id: "earlier", label: "Earlier", create: () => noopBackend }), "a");
 

@@ -16,7 +16,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { handleTodoAcp } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/todo";
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task";
-import { getLatestTodoPhasesFromEntries } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import { getLatestTodoPhasesFromEntries, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { TODO_BACKEND_NOTICE_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
 import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -40,7 +40,7 @@ interface Harness {
 const cleanups: Array<() => Promise<void> | void> = [];
 
 async function createHarness(): Promise<Harness> {
-	const tempDir = TempDir.createSync("@pi-todo-writers-");
+	const tempDir = await TempDir.create("@pi-todo-writers-");
 	const dir = tempDir.path();
 	const authStorage = createInMemoryAuthStorage();
 	authStorage.keys.setRuntime("anthropic", "test-key");
@@ -70,7 +70,7 @@ async function createHarness(): Promise<Harness> {
 	cleanups.push(async () => {
 		await session.dispose();
 		authStorage.close();
-		tempDir.removeSync();
+		await tempDir.remove();
 	});
 	return { session, recorder, dir, eventBus, sessionManager };
 }
@@ -90,7 +90,7 @@ function createTodoTool(session: AgentSession, dir: string): { tool: TodoTool; t
 		settings: session.settings,
 		getTodoPhases: () => session.getTodoPhases(),
 		setTodoPhases: phases => session.setTodoPhases(phases),
-		runTodoWrite: write => session.runTodoWrite(write),
+		runTodoWrite: (write, options) => session.runTodoWrite(write, options),
 		commitTodoPhases: (phases, options) => session.commitTodoPhases(phases, options),
 		getToolByName: name => (name === "todo" ? (tool as unknown as AgentTool) : undefined),
 	};
@@ -108,13 +108,14 @@ async function seedList(h: Harness, tool: TodoTool): Promise<TodoPhase[]> {
 function userTodoEdits(session: AgentSession): unknown[] {
 	return session.sessionManager
 		.getBranch()
-		.filter(entry => entry.type === "custom" && entry.customType === "user_todo_edit");
+		.filter(entry => entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE);
 }
 
 function controllerContext(session: AgentSession) {
 	const ctx = {
 		agent: { appendMessage: vi.fn() },
 		session,
+		viewSession: session,
 		sessionManager: session.sessionManager,
 		setTodos: vi.fn(),
 		showError: vi.fn(),
@@ -290,7 +291,7 @@ describe("todo writers reach the selected backend's replace", () => {
 		expect(h.session.getTodoPhases()).toEqual(mirroredList);
 		expect(cursor.refusals).toEqual([]);
 
-		h.sessionManager.appendCustomEntry("user_todo_edit", { phases: mirroredList });
+		h.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: mirroredList });
 		const reload = () => getLatestTodoPhasesFromEntries(h.sessionManager.getBranch());
 		h.recorder.replaceError = new Error(REFUSAL);
 
@@ -323,7 +324,7 @@ describe("todo writers reach the selected backend's replace", () => {
 		const h = await createHarness();
 		const { tool } = createTodoTool(h.session, h.dir);
 		const seeded = await seedList(h, tool);
-		h.sessionManager.appendCustomEntry("user_todo_edit", { phases: seeded });
+		h.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: seeded });
 		const gate = Promise.withResolvers<void>();
 		const firstReplaceEntered = Promise.withResolvers<void>();
 		let replaces = 0;
@@ -413,7 +414,7 @@ describe("todo writers reach the selected backend's replace", () => {
 		const target = SessionManager.create(h.dir, h.dir);
 		target.appendMessage({ role: "user", content: "resumed", timestamp: 1 });
 		const stored: TodoPhase[] = [{ name: "Stored", tasks: [{ content: "from disk", status: "pending" }] }];
-		target.appendCustomEntry("user_todo_edit", { phases: stored });
+		target.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: stored });
 		// Persistence is lazy until an assistant message exists; force the file so the entry is on disk.
 		await target.ensureOnDisk();
 		await target.flush();
@@ -431,7 +432,7 @@ describe("todo writers reach the selected backend's replace", () => {
 		const h = await createHarness();
 		const { tool, toolSession } = createTodoTool(h.session, h.dir);
 		const seeded = await seedList(h, tool);
-		h.sessionManager.appendCustomEntry("user_todo_edit", { phases: seeded });
+		h.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: seeded });
 		const gate = Promise.withResolvers<void>();
 		const applyEntered = Promise.withResolvers<void>();
 		h.recorder.beforeApply = () => {
@@ -515,6 +516,30 @@ describe("todo writers reach the selected backend's replace", () => {
 		expect(ctx.agent.appendMessage).not.toHaveBeenCalled();
 		expect(ctx.showError).not.toHaveBeenCalled();
 	});
+
+	it("keeps the focused agent's HUD but still tells the main agent when focus moves during a /todo edit", async () => {
+		const h = await createHarness();
+		const { tool } = createTodoTool(h.session, h.dir);
+		await seedList(h, tool);
+		const gate = Promise.withResolvers<void>();
+		const replaceStarted = Promise.withResolvers<void>();
+		h.recorder.beforeReplace = () => {
+			replaceStarted.resolve();
+			return gate.promise;
+		};
+		const { ctx, controller } = controllerContext(h.session);
+
+		const edit = controller.handleTodoCommand('append "Focus item"');
+		await replaceStarted.promise;
+		ctx.viewSession = {} as AgentSession;
+		gate.resolve();
+		await edit;
+
+		expect(ctx.setTodos).not.toHaveBeenCalled();
+		expect(contentsOf(h.session.getTodoPhases())).toContain("Focus item");
+		expect(ctx.agent.appendMessage).toHaveBeenCalledTimes(1);
+		expect(ctx.showError).not.toHaveBeenCalled();
+	});
 });
 
 describe("interactive mode with a backend", () => {
@@ -543,7 +568,7 @@ describe("interactive mode with a backend", () => {
 		mode = started;
 		vi.spyOn(started.statusLine, "watchBranch").mockImplementation(() => {});
 		const pending: TodoPhase[] = [{ name: "Plan", tasks: [{ content: "Fix review comments", status: "pending" }] }];
-		h.session.sessionManager.appendCustomEntry("user_todo_edit", { phases: pending });
+		h.session.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: pending });
 		h.session.setTodoPhases(pending);
 		started.setTodos(h.session.getTodoPhases());
 		await started.init();

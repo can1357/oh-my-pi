@@ -4431,6 +4431,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return;
 		}
 		this.#persistSessionMessageIfMissing(message);
+		if (message.role === "toolResult" && message.toolName === "todo") this.#todoWrites.keepLiveListAfterToolResult();
 	}
 
 	/**

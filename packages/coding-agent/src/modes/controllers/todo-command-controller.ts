@@ -447,10 +447,10 @@ export class TodoCommandController {
 	/**
 	 * Runs `compute` inside the session's queued commit (see {@link commitTodoEdit}), then reports the
 	 * outcome. Everything after the await uses the session/agent/sessionManager captured before it:
-	 * the user may switch sessions mid-commit.
+	 * the user may switch sessions or focus another agent mid-commit.
 	 */
 	async #edit(compute: (current: TodoPhase[]) => TodoPlan): Promise<void> {
-		const { session, agent, sessionManager } = this.ctx;
+		const { session, agent, sessionManager, viewSession } = this.ctx;
 		// Commit first so HUD visibility binds to the new canonical source.
 		const outcome = await commitTodoEdit(session, compute);
 		if (this.ctx.session !== session) {
@@ -462,7 +462,8 @@ export class TodoCommandController {
 			return;
 		}
 		const { plan, committed } = outcome;
-		this.ctx.setTodos(committed);
+		// The HUD shows the focused agent's list; one focused mid-commit keeps it, and the main list returns on switching back.
+		if (this.ctx.viewSession === viewSession) this.ctx.setTodos(committed);
 
 		// Inject system reminder so the agent learns about the change next turn.
 		// Removals carry explicit intent so the agent does not rebuild the

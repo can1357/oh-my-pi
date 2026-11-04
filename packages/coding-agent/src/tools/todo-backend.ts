@@ -132,6 +132,13 @@ export class TodoBackendRegistry {
 		return Array.from(this.#byId.values(), entry => entry.definition);
 	}
 
+	/** Definitions whose registering extension path passes `keep`, in registration order. */
+	filter(keep: (sourceId: string) => boolean): TodoBackendDefinition[] {
+		const kept: TodoBackendDefinition[] = [];
+		for (const { definition, sourceId } of this.#byId.values()) if (keep(sourceId)) kept.push(definition);
+		return kept;
+	}
+
 	/** Number of registrations; pass it to {@link rollback} to undo the ones made after it. */
 	get size(): number {
 		return this.#byId.size;

@@ -88,13 +88,15 @@ const TODO_PARAM_KEYS: Record<keyof TodoSchema, true> = {
 };
 
 /**
- * Drop keys the schema does not declare. `lenientArgValidation` lets raw model arguments reach
- * `execute`, and omptype objects keep undeclared keys, so backends would otherwise see them.
+ * Drop keys the schema does not declare, at the top level and inside `list` entries.
+ * `lenientArgValidation` lets raw model arguments reach `execute`, and omptype objects keep
+ * undeclared keys, so backends would otherwise see them.
  */
 function stripToTodoParams(entry: TodoParams): TodoParams {
 	const stripped: TodoParams = { op: entry.op };
 	let key: keyof TodoSchema;
 	for (key in TODO_PARAM_KEYS) copyTodoParam(entry, stripped, key);
+	if (stripped.list) stripped.list = stripped.list.map(({ phase, items }) => ({ phase, items }));
 	return stripped;
 }
 

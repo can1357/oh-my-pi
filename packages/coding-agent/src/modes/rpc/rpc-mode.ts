@@ -455,12 +455,14 @@ const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
  * backgrounded too, so a cold prediction engine never stalls the command queue
  * behind a keystroke. `live_start`, `live_connect` and `dictation_start` respond only once
  * connected or recording, so they are backgrounded and their stop commands can cancel them.
+ * `set_todos` waits for the todo backend's `replace` (and any todo write queued before it),
+ * so it is backgrounded too: an `abort` sent after it reaches the pending `todo` call at once.
  * Response correlation is preserved via each command's `id`; ordering across
  * concurrent commands is not guaranteed and clients MUST match on `id`.
  *
  * @returns `undefined` when the frame was routed to a side-channel handler
  *   (extension UI response, host tool/URI frames) or dispatched in the
- *   background (`bash`, `predict_word`, `live_start`, `live_connect`, `dictation_start`, `prompt`, `steer`, `follow_up`, `steer_subagent`). Otherwise a promise that
+ *   background (`bash`, `predict_word`, `live_start`, `live_connect`, `dictation_start`, `prompt`, `steer`, `follow_up`, `steer_subagent`, `set_todos`). Otherwise a promise that
  *   resolves once the response for the command has been emitted via `output`.
  *   Errors from `handleCommand` on a command dispatched inline propagate; the
  *   caller is expected to wrap them.
@@ -489,7 +491,8 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 		command.type === "steer" ||
 		command.type === "dictation_start" ||
 		command.type === "follow_up" ||
-		command.type === "steer_subagent"
+		command.type === "steer_subagent" ||
+		command.type === "set_todos"
 	) {
 		const task = (async () => {
 			try {
@@ -605,8 +608,8 @@ export class RpcInputDispatcher {
 			const command = parsed as RpcCommand;
 			this.#acceptInput?.(command);
 			// Bash and predict_word retain their immediate side channel. Prompts,
-			// steers, follow-ups and steer_subagent start through the serial tail, but
-			// dispatchRpcInputFrame backgrounds their admission.
+			// steers, follow-ups, steer_subagent and set_todos start through the serial
+			// tail, but dispatchRpcInputFrame backgrounds their completion.
 			if (BACKGROUND_COMMANDS.has(command.type)) {
 				dispatchRpcInputFrame(command, this.#deps);
 				return;
