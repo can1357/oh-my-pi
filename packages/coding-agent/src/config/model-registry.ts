@@ -1348,9 +1348,11 @@ export class ModelRegistry {
 	 * adapter so `/usage` can report its key/user budgets before any discovery
 	 * runs, and hand the host's `disabledProviders` to usage so a disabled
 	 * provider — alias or built-in — is never probed with any credential.
-	 * Synchronous: `omp usage` probes right after construction.
+	 * Synchronous: `omp usage` probes right after construction. A mirror skips
+	 * it: its owner already composed the shared `AuthStorage` it reads through.
 	 */
 	#syncConfiguredUsageProviders(): void {
+		if (this.#owner) return;
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		const configured = new Map<string, UsageProvider>();
 		for (const providerConfig of this.#discoverableProviders) {
