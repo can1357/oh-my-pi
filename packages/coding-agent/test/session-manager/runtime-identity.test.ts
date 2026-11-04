@@ -20,6 +20,21 @@ afterEach(() => {
 });
 
 describe("session runtime identity", () => {
+	it("writes source build identity without an uncommitted-diff stamp", async () => {
+		using tempDir = TempDir.createSync("@pi-runtime-identity-source-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		await session.ensureOnDisk();
+		const file = session.getSessionFile();
+		if (!file) throw new Error("Expected a persisted session file");
+		const reloaded = await SessionManager.open(file, tempDir.path());
+		const runtime = reloaded.getEntries()[0].runtime;
+		if (!runtime) throw new Error("Expected a runtime identity on the session entry");
+		expect(runtime.diff).toBeUndefined();
+		await reloaded.close();
+		await session.close();
+	});
+
 	it("credits each entry to the build that wrote it across a resume by a different build", async () => {
 		using tempDir = TempDir.createSync("@pi-runtime-identity-");
 		runAs(BUILD_A);

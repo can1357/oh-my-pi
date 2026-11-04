@@ -8,8 +8,10 @@ import {
 	type RunSetupWizardOptions,
 	selectSetupScenes as selectScenes,
 	type SetupSceneSelectionOptions,
+	setupWizardAllowed,
 } from "@oh-my-pi/pi-tui/setup/wizard";
 import type { Settings } from "../config/settings";
+import { canSelfUpdate } from "../cli/update-cli";
 import { captureBrowserSession } from "../utils/browser-session";
 import { createModelBrowserSource } from "./model-browser-source";
 import type { InteractiveModeContext } from "./types";
@@ -21,10 +23,11 @@ import {
 	cfgSymbolPreset,
 	cfgThemeDark,
 	cfgThemeLight,
+	cfgUpdateAuto,
 } from "./settings";
 import { cfgDisabledProviders, cfgModelRoleStorage } from "../config/model-settings";
 
-export { ALL_SCENES, CURRENT_SETUP_VERSION };
+export { ALL_SCENES, CURRENT_SETUP_VERSION, setupWizardAllowed };
 export type { SetupScene, SetupSceneHost } from "@oh-my-pi/pi-tui/setup/scenes/types";
 export { runStartupSplash } from "@oh-my-pi/pi-tui/setup/startup-splash";
 
@@ -47,6 +50,9 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		},
 		get disabledProviders() {
 			return cfgDisabledProviders.get(ctx.settings);
+		},
+		get autoUpdate() {
+			return cfgUpdateAuto.get(ctx.settings);
 		},
 		get authStorage() {
 			return ctx.session.modelRegistry.authStorage;
@@ -81,6 +87,11 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		},
 		saveTheme: (mode, name) => {
 			(mode === "dark" ? cfgThemeDark : cfgThemeLight).set(ctx.settings, name);
+		},
+		canAutoUpdate: () => canSelfUpdate(),
+		saveAutoUpdate: async enabled => {
+			cfgUpdateAuto.set(ctx.settings, enabled);
+			await ctx.settings.flush();
 		},
 		captureBrowserSession,
 		openInBrowser: url => ctx.openInBrowser(url),

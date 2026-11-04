@@ -22,7 +22,8 @@ use std::{
 use bstr::{BStr, BString, ByteSlice};
 
 use crate::bash::{
-	ChildRedirs, CmdTag, EnvView, Lineage, PgroupSpec, Rlimit, SigSet, SpawnSpec, StdioSpec, Vpid,
+	ChildRedirs, CmdTag, EnvView, Lineage, OsHandle, PgroupSpec, Rlimit, SigSet, SpawnSpec,
+	StdioSpec, Vpid,
 };
 
 /// What a spawn hands the OS in place of the URLs it names; before
@@ -50,6 +51,7 @@ pub(super) struct Rest {
 	rlimits:     Vec<(Rlimit, Option<u64>, Option<u64>)>,
 	lineage:     Lineage,
 	redirs:      Option<ChildRedirs>,
+	ctty:        Option<OsHandle>,
 }
 
 impl Rest {
@@ -68,6 +70,7 @@ impl Rest {
 			rlimits,
 			lineage,
 			redirs,
+			ctty,
 		} = self;
 		launch(SpawnSpec {
 			path: names.path.as_bstr(),
@@ -84,6 +87,7 @@ impl Rest {
 			rlimits: &rlimits,
 			lineage,
 			redirs,
+			ctty,
 		})
 	}
 }
@@ -114,6 +118,7 @@ pub(super) fn split(spec: SpawnSpec<'_>) -> (Names, Rest) {
 		rlimits,
 		lineage,
 		redirs,
+		ctty,
 	} = spec;
 	let names = Names {
 		path: BString::from(path.as_bytes()),
@@ -132,6 +137,7 @@ pub(super) fn split(spec: SpawnSpec<'_>) -> (Names, Rest) {
 		rlimits: rlimits.to_vec(),
 		lineage,
 		redirs,
+		ctty,
 	};
 	(names, rest)
 }

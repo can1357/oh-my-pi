@@ -659,6 +659,8 @@ export interface StreamOptions {
 	 * are not covered.
 	 */
 	maxInFlightRequests?: Record<string, number>;
+	/** Called after the provider slot is acquired, before each model dispatch; throwing refuses that attempt. */
+	beforeDispatch?: () => void;
 	/** @internal Keep the in-flight permit until a provider's bounded terminal drain finishes. */
 	waitForTerminalDrain?: boolean;
 	/**
