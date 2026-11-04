@@ -292,10 +292,13 @@ describe("retry fallback selector resolution", () => {
 		if (!model || !webModel) throw new Error("Expected bundled Gemini and web-search test models");
 		const live = "google-antigravity/gemini-3.8-flash:medium";
 		const models = [model, webModel];
+		const roleModels: Record<string, string> = {
+			web: "google-antigravity/gemini-3.8-flash:minimal",
+			task: live,
+		};
 		const withWebChain = (chains: RetryFallbackResolutionContext["chains"]): RetryFallbackResolutionContext => ({
 			chains,
-			getModelRole: role =>
-				({ web: "google-antigravity/gemini-3.8-flash:minimal", task: live })[role as "web" | "task"],
+			getModelRole: role => roleModels[role],
 			modelLookup: {
 				find: (provider, id) => models.find(m => m.provider === provider && m.id === id),
 				hasProvider: provider => models.some(m => m.provider === provider),
