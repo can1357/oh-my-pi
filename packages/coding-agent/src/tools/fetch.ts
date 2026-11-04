@@ -13,7 +13,7 @@ import type { Element } from "@oh-my-pi/pi-utils/dom";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ToolSession } from "../sdk";
-import type { AgentStorage } from "../session/agent-storage";
+import type { AgentStorageApi } from "../session/agent-storage";
 import { DEFAULT_MAX_BYTES, truncateHead, truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
@@ -643,7 +643,7 @@ export async function renderHtmlToText(
 	timeout: number,
 	settings: Settings,
 	userSignal: AbortSignal | undefined,
-	storage: AgentStorage | null,
+	storage: AgentStorageApi | null,
 	fetchOverride?: FetchImpl,
 ): Promise<{ content: string; ok: boolean; method: string }> {
 	const overallSignal = ptree.combineSignals(userSignal, timeout * 1000);
@@ -1107,7 +1107,7 @@ async function handleSpecialUrls(
 	url: string,
 	timeout: number,
 	signal: AbortSignal | undefined,
-	storage: AgentStorage | null,
+	storage: AgentStorageApi | null,
 	modelRegistry: ModelRegistry | undefined,
 ): Promise<FetchRenderResult | null> {
 	const specialHandlers = await loadSpecialHandlers();
@@ -1134,7 +1134,7 @@ async function renderUrl(
 	raw: boolean,
 	settings: Settings,
 	signal: AbortSignal | undefined,
-	storage: AgentStorage | null,
+	storage: AgentStorageApi | null,
 	modelRegistry: ModelRegistry | undefined,
 	fetchOverride?: FetchImpl,
 	excludeWebP?: true,

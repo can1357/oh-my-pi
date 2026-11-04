@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `ptree` commands spawned with `subreaper: true` no longer leave a descendant that ignores SIGTERM running after a graceful stop (an `AbortSignal`, `kill()` without a hard grace, or dispose); the subreaper stays alive through the grace period and the hard sweep then ends every descendant ([#18018](https://github.com/can1357/oh-my-pi/pull/18018) by [@sjawhar](https://github.com/sjawhar))
+- Fixed unmanaged stdout and stderr corrupting interactive displays, with private bounded diagnostics across custom directories, recovery from failed log destinations, transport changes without retired sinks reclaiming output, and disabled structured file logging ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
+
+- Failed log rotations and guard handoffs now keep raw and structured records in the previous target and retry once the destination recovers ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
+- Disabling file logging now succeeds and releases unleased log descriptors even when storage rejects a pending batch ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
+
+### Added
+
+- Added `getUpdateStateDir()` (`~/.omp/update`), holding the auto-update status file, its worker log, and the update install lock
+- Added `logger.setLogForwarder(forwarder)` (`LogForwarder { emit, flush }`), which routes a thread's records — `withContext` fields merged, context reduced to clone-safe JSON — to another thread instead of its own file and sinks, and `logger.emitForeign(event)`, which writes such a record with its original timestamp and runs the sinks without the caller's `withContext` fields
+- Added `expandTilde(path, home?)` (`@oh-my-pi/pi-utils/path`), which expands a leading `~` to the home directory; `@oh-my-pi/pi-coding-agent/tools/path-utils` re-exports it ([#17931](https://github.com/can1357/oh-my-pi/pull/17931) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
@@ -91,13 +105,6 @@
 ### Added
 
 - Added `RpcConnection.requestCancellable()` and `Client.requestPermission(params, { signal })`; client connections abort a handler and answer `-32800` when the peer sends `$/cancel_request`, while agent connections keep running the request and return its real result ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
-
-### Fixed
-
-- Fixed unmanaged stdout and stderr corrupting interactive displays, with private bounded diagnostics across custom directories, recovery from failed log destinations, transport changes without retired sinks reclaiming output, and disabled structured file logging ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
-
-- Failed log rotations and guard handoffs now keep raw and structured records in the previous target and retry once the destination recovers ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
-- Disabling file logging now succeeds and releases unleased log descriptors even when storage rejects a pending batch ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
 
 ## [18.12.4] - 2026-10-20
 

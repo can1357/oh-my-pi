@@ -241,10 +241,7 @@ export async function fetchFactoryDroidModels(
 	}
 	const models = factoryDroidRegistry().flatMap(model => {
 		if (!isModelAvailable(model, flags, policy, servingRegion, images)) return [];
-		const { id } = model.spec;
-		const family = model.policy.routingFamily;
-		const routed = routing?.models?.[id] ?? (family === undefined ? undefined : routing?.defaults?.[family]);
-		const rotation = resolveRotation(model, routed, servingRegion, routing?.blockedProviders?.[id]);
+		const { rotation, configured } = resolveRotation(model, routing, servingRegion);
 		if (rotation.length === 0) return [];
 		const spec = buildFactoryDroidModel(model, {
 			region: options.region,
@@ -253,7 +250,7 @@ export async function fetchFactoryDroidModels(
 			apiProviders: rotation,
 		});
 		// Native reports configured ordering only when live routing chose the rotation.
-		if (routed !== undefined) spec.factoryDroidRoutingSource = "configured_order";
+		if (configured) spec.factoryDroidRoutingSource = "configured_order";
 		return [spec];
 	});
 	return withAvailableRefusalFallbacks(models);
@@ -261,18 +258,32 @@ export async function fetchFactoryDroidModels(
 
 /**
  * Intersect live rotations with registry eligibility and explicit blocks.
- * An explicitly configured empty/disallowed rotation never widens to defaults.
+ * An explicitly configured empty/disallowed model rotation never widens.
+ * Without a model route, a family default that leaves no eligible upstream
+ * (empty, naming none of the model's upstreams, or none serving the account's
+ * region) falls back to the registry rotation: droid 1.1.0 then sends the
+ * first eligible registry upstream, which is the upstream omp pins. Live
+ * routing did not choose it, so it is not reported as configured order.
  */
 function resolveRotation(
 	model: FactoryDroidRegistryModel,
-	routed: readonly string[] | undefined,
+	routing: FactoryProviderRouting | null,
 	region: string | undefined,
-	blocked: readonly string[] = [],
-): readonly string[] {
+): { rotation: readonly string[]; configured: boolean } {
+	const { id } = model.spec;
+	const blocked = routing?.blockedProviders?.[id] ?? [];
 	const eligible = resolveFactoryDroidRotation(model.policy, region).filter(provider => !blocked.includes(provider));
-	return routed === undefined
-		? eligible
-		: routed.filter(provider => eligible.some(candidate => candidate === provider));
+	const modelRoute = routing?.models?.[id];
+	if (modelRoute !== undefined) {
+		return { rotation: modelRoute.filter(provider => eligible.includes(provider)), configured: true };
+	}
+	const family = model.policy.routingFamily;
+	const familyRoute = ((family === undefined ? undefined : routing?.defaults?.[family]) ?? []).filter(provider =>
+		eligible.includes(provider),
+	);
+	return familyRoute.length > 0
+		? { rotation: familyRoute, configured: true }
+		: { rotation: eligible, configured: false };
 }
 
 /** Account scope plus the upstream rotation resolved for that account. */

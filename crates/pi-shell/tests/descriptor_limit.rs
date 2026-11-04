@@ -124,8 +124,9 @@ fn nesting_holds_no_descriptor_per_level() {
 	assert_eq!(outcomes, [("function", reached.clone()), ("source", reached)]);
 }
 
-/// Running out of descriptors prints one diagnostic naming the limit, and the
-/// next command still runs. Regression: the shell printed nothing.
+/// Running out of descriptors prints one diagnostic naming the limit (bash's
+/// `file: strerror` redirection error, the limit appended), and the next
+/// command still runs. Regression: the shell printed nothing.
 #[test]
 fn running_out_of_descriptors_names_the_limit() {
 	if !in_limited_child("running_out_of_descriptors_names_the_limit") {
@@ -140,11 +141,7 @@ fn running_out_of_descriptors_names_the_limit() {
 	assert_eq!(code, Some(0), "{output}");
 	assert_eq!(lines.len(), 2, "{output}");
 	assert_eq!(lines[1], "after=1");
-	for part in [
-		"failed to redirect to /dev/null: Too many open files",
-		"limit of 128 open files",
-		"ulimit -n",
-	] {
+	for part in ["/dev/null: Too many open files", "limit of 128 open files", "ulimit -n"] {
 		assert!(lines[0].contains(part), "missing {part:?} in {output}");
 	}
 }

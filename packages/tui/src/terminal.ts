@@ -2513,6 +2513,7 @@ export class ProcessTerminal implements Terminal {
 		// Restore xterm scroll-to-bottom modes that were set before startup.
 		for (const mode of this.#xtermScrollToBottomRestoreModes) {
 			if (resetModes) this.#safeWrite(`\x1b[?${mode}h`);
+			else survivor.#xtermScrollToBottomRestoreModes.add(mode);
 		}
 		this.#xtermScrollToBottomRestoreModes.clear();
 
@@ -2632,7 +2633,13 @@ export class ProcessTerminal implements Terminal {
 		// live terminal the failure still surfaces - swallowing it would silently
 		// leave stdin in raw mode.
 		try {
-			if (resetInput) process.stdin.setRawMode?.(this.#wasRaw);
+			if (resetInput) {
+				let baseline = survivor;
+				while (baseline && baseline.#inputDeferred && baseline.#previousTerminal)
+					baseline = baseline.#previousTerminal;
+				const wasRaw = baseline ? (baseline.#inputDeferred ? baseline.#wasRaw : true) : this.#wasRaw;
+				process.stdin.setRawMode?.(wasRaw);
+			}
 		} catch (err) {
 			if (!this.#dead) throw err;
 		}

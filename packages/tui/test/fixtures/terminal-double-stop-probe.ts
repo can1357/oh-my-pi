@@ -25,7 +25,11 @@ if (privateKitty) {
 }
 const modify = process.argv[3] === "modify";
 const deferred = process.argv[3] === "deferred" || kitty || modify;
-const olderDeferred = process.argv[3] === "older-deferred";
+const olderDeferred =
+	process.argv[3] === "older-deferred" ||
+	process.argv[3] === "triple-deferred" ||
+	process.argv[3] === "triple-enable-first" ||
+	process.argv[3] === "xterm-deferred";
 const a = new ProcessTerminal({ conpty: false });
 a.start(
 	() => {},
@@ -33,12 +37,25 @@ a.start(
 	undefined,
 	{ deferInput: deferred },
 );
+if (process.argv[3] === "xterm-deferred") {
+	process.stdin.emit("data", "\x1b[?1010;1$y\x1b[?1011;1$y");
+}
 const b = new ProcessTerminal({ conpty: false });
 b.start(
 	() => {},
 	() => {},
 	undefined,
 	{ deferInput: olderDeferred },
+);
+const c =
+	process.argv[3] === "triple-deferred" || process.argv[3] === "triple-enable-first"
+		? new ProcessTerminal({ conpty: false })
+		: undefined;
+c?.start(
+	() => {},
+	() => {},
+	undefined,
+	{ deferInput: true },
 );
 if (modify) {
 	await Bun.sleep(180);
@@ -65,6 +82,9 @@ note(`after-first-stop=${isTerminalOutputSuppressed()}`);
 // Emergency cleanup followed by the owner's teardown must remain local.
 stopping.stop();
 note(`after-double-stop=${isTerminalOutputSuppressed()}`);
+note(`intermediate-raw=${process.stdin.isRaw}`);
+if (process.argv[3] === "triple-enable-first") survivor.enableInput();
+c?.stop();
 note(`survivor-raw=${process.stdin.isRaw}`);
 note(`survivor-paused=${process.stdin.isPaused()}`);
 writeTerminalSequence("\x1b]0;SURVIVING_OWNER_SEQUENCE\x07");

@@ -1,5 +1,5 @@
 import type { Component } from "../tui";
-import { getProjectDir, jsonContainerEnd } from "@oh-my-pi/pi-utils";
+import { getProjectDir, jsonContainerEnd, sanitizeText } from "@oh-my-pi/pi-utils";
 import { highlightCode, type Theme } from "../theme/theme";
 import { renderStatusLine } from "../render/status-line";
 import { framedToolCard, type ToolCardSnapshot } from "../render/tool-card";
@@ -27,9 +27,20 @@ import type {
 	RenderResultOptions,
 	ToolRenderer,
 } from "./renderer";
-import { INTENT_FIELD, type TspTone } from "@oh-my-pi/pi-wire";
+import { INTENT_FIELD, type ShellTrace, type ShellVizPresentation, type TspTone } from "@oh-my-pi/pi-wire";
+import type { SpotlightDetails } from "../chat/spotlight";
 import { plainText } from "../native/spans";
-import { resultText, runBox, runFoot, runInput, runOutput, type RunState } from "./native-view";
+import {
+	RUN_INPUT_PREVIEW_LINES,
+	resultText,
+	runBox,
+	runFoot,
+	runInput,
+	runOutput,
+	type RunState,
+} from "./native-view";
+import { renderShellVisualization, shellVizText } from "./shell-viz-render";
+import { node } from "../native/describe";
 
 /** Default collapsed shell output preview height. */
 export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
@@ -72,6 +83,13 @@ export interface BashToolDetails {
 	timedOut?: boolean;
 	/** Text the command wrote to `out://`, oldest first; transcripts draw each as a reply after the call. */
 	replies?: string[];
+	/**
+	 * The embedded shell's live trace of the command (pi-shell `RunTrace`): every frame carries the
+	 * latest snapshot and the final result the last one. Absent on the PTY and user-shell paths.
+	 */
+	trace?: ShellTrace;
+	/** What the session's Spotlight shaping did to the output. */
+	spotlight?: SpotlightDetails;
 	/** Live ACP update only; completed results refer to released terminals. */
 	terminalId?: string;
 	service?: {
@@ -90,7 +108,7 @@ export interface BashToolDetails {
 }
 
 function escapeBashEnvValueForDisplay(value: unknown): string {
-	return String(value)
+	return sanitizeText(String(value))
 		.replaceAll("\\", "\\\\")
 		.replaceAll("\n", "\\n")
 		.replaceAll("\r", "\\r")
@@ -104,7 +122,7 @@ function formatBashEnvAssignments(env: Record<string, unknown> | undefined): str
 	if (!env || Object.keys(env).length === 0) return "";
 	return Object.entries(env)
 		.sort(([a], [b]) => a.localeCompare(b))
-		.map(([key, value]) => `${key}="${escapeBashEnvValueForDisplay(value)}"`)
+		.map(([key, value]) => `${shellVizText(key)}="${escapeBashEnvValueForDisplay(value)}"`)
 		.join(" ");
 }
 
@@ -267,17 +285,21 @@ export function getBashEnvForDisplay(args: BashRenderArgs): Record<string, unkno
  * `theme.fg("dim", ...)` form render only the first line as dim.
  */
 export function formatBashCommandLines(args: BashRenderArgs, uiTheme: Theme): string[] {
-	const command = replaceTabs(args.command || "…");
-	const cwd = getProjectDir();
-	const displayWorkdir = formatToolWorkingDirectory(args.cwd, cwd);
-	const envAssignments = formatBashEnvAssignments(getBashEnvForDisplay(args));
-	const prefixParts = ["$"];
-	if (displayWorkdir) prefixParts.push(`cd ${displayWorkdir} &&`);
-	if (envAssignments) prefixParts.push(envAssignments);
-	const prefix = uiTheme.fg("dim", `${prefixParts.join(" ")} `);
+	const command = replaceTabs(sanitizeText(args.command || "…"));
+	const prefix = bashCommandPrefix(args, uiTheme);
 	const highlightedLines = highlightCode(command, "bash");
 	if (highlightedLines.length === 0) return [prefix.trimEnd()];
 	return highlightedLines.map((line, i) => (i === 0 ? `${prefix}${line}` : line));
+}
+
+/** The dim `$ cd <dir> && NAME="…" ` prefix ahead of a command's first line (trailing space included). */
+export function bashCommandPrefix(args: BashRenderArgs, uiTheme: Theme): string {
+	const displayWorkdir = formatToolWorkingDirectory(args.cwd, getProjectDir());
+	const envAssignments = formatBashEnvAssignments(getBashEnvForDisplay(args));
+	const prefixParts = ["$"];
+	if (displayWorkdir) prefixParts.push(`cd ${shellVizText(displayWorkdir)} &&`);
+	if (envAssignments) prefixParts.push(envAssignments);
+	return uiTheme.fg("dim", `${prefixParts.join(" ")} `);
 }
 
 /**
@@ -288,9 +310,9 @@ export function formatBashCommandText(args: BashRenderArgs): string {
 	const displayWorkdir = formatToolWorkingDirectory(args.cwd, getProjectDir());
 	const envAssignments = formatBashEnvAssignments(getBashEnvForDisplay(args));
 	const parts: string[] = [];
-	if (displayWorkdir) parts.push(`cd ${displayWorkdir} &&`);
+	if (displayWorkdir) parts.push(`cd ${shellVizText(displayWorkdir)} &&`);
 	if (envAssignments) parts.push(envAssignments);
-	parts.push(args.command || "…");
+	parts.push(replaceTabs(sanitizeText(args.command || "…")));
 	return parts.join(" ");
 }
 
@@ -440,6 +462,18 @@ function toBashRenderArgs<TArgs>(args: TArgs | undefined, config: ShellRendererC
 	};
 }
 
+function visualCommandLines(
+	presentation: ShellVizPresentation,
+	args: BashRenderArgs,
+	uiTheme: Theme,
+	width: number,
+): string[] {
+	const prefix = bashCommandPrefix(args, uiTheme);
+	const hasContext =
+		!!formatToolWorkingDirectory(args.cwd, getProjectDir()) || !!formatBashEnvAssignments(getBashEnvForDisplay(args));
+	return [...(hasContext ? [prefix.trimEnd()] : []), ...renderShellVisualization(presentation, uiTheme, width, false)];
+}
+
 /** Builds a shell transcript renderer with caller-supplied command labels. */
 export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 	return {
@@ -449,8 +483,11 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			// expensive part: defer it to the first paint, once per component,
 			// so a rebuild that is replaced before painting never pays for it.
 			let cmdLines: string[] | undefined;
-			return framedToolCard(uiTheme, () => {
-				cmdLines ??= formatBashCommandLines(renderArgs, uiTheme);
+			return framedToolCard(uiTheme, ({ contentWidth }) => {
+				const presentation = options.shellPresentation;
+				cmdLines = presentation
+					? visualCommandLines(presentation, renderArgs, uiTheme, contentWidth)
+					: (cmdLines ?? formatBashCommandLines(renderArgs, uiTheme));
 				const header =
 					config.showHeader === false
 						? undefined
@@ -526,6 +563,8 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			let cachedPreviewWindow: number | undefined;
 			let cachedSnapshot: ToolCardSnapshot | undefined;
 			let cachedElapsedSecond: number | undefined;
+			let cachedTraceKey: string | undefined;
+			let cachedPresentation: ShellVizPresentation | undefined;
 			const dropSnapshot = () => {
 				cachedSnapshot = undefined;
 				cachedWidth = undefined;
@@ -535,6 +574,8 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 				cachedIsPartial = undefined;
 				cachedPreviewWindow = undefined;
 				cachedElapsedSecond = undefined;
+				cachedTraceKey = undefined;
+				cachedPresentation = undefined;
 			};
 
 			return framedToolCard(
@@ -548,7 +589,10 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					// Get output from context (preferred) or fall back to result content.
 					// Strip the LLM-facing notice appended by wrappedExecute so we don't
 					// double-print it alongside the styled warning line below.
-					const rawOutput = renderContext?.output ?? result.content?.find(c => c.type === "text")?.text ?? "";
+					const rawOutput =
+						options.shellTrace && options.shellPresentation
+							? sanitizeText(options.shellPresentation.output)
+							: (renderContext?.output ?? result.content?.find(c => c.type === "text")?.text ?? "");
 
 					const isPartial = options.isPartial === true;
 					const previewWindow = previewWindowRows();
@@ -557,6 +601,13 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					// second instead of rebuilding every spinner frame.
 					const liveElapsedMs = isPartial && details?.wallTimeMs === undefined ? options.elapsedMs : undefined;
 					const elapsedSecond = liveElapsedMs === undefined ? undefined : Math.floor(liveElapsedMs / 1000);
+					// A traced command redraws on every folded event; its running
+					// glyphs spin with the frame (only while the run is live).
+					const trace = options.shellTrace ?? details?.trace;
+					const traceKey =
+						trace === undefined
+							? undefined
+							: `${trace.seq}:${trace.status === undefined ? (options.spinnerFrame ?? "") : ""}`;
 
 					if (
 						cachedSnapshot !== undefined &&
@@ -566,7 +617,9 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						cachedRawOutput === rawOutput &&
 						cachedIsPartial === isPartial &&
 						cachedPreviewWindow === previewWindow &&
-						cachedElapsedSecond === elapsedSecond
+						cachedElapsedSecond === elapsedSecond &&
+						cachedTraceKey === traceKey &&
+						cachedPresentation === options.shellPresentation
 					) {
 						return cachedSnapshot;
 					}
@@ -618,13 +671,23 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					const snapshot: ToolCardSnapshot = {
 						header,
 						phase: isPartial ? "partial" : isError ? (isTimeout ? "warning" : "error") : "success",
+						// Shell cards keep the neutral segmented look in every phase: the
+						// phase colours status and border, never a background wash. A
+						// settled success names its default dim border, so a native host
+						// drawing this card gets a muted tone rather than a success tint.
+						applyBg: false,
+						borderColor: success ? "dim" : undefined,
 						footerMeta,
 						sections: [
 							{
 								// Viewport-sized tail window in every state — streaming and final
 								// render identically; only ctrl+o uncaps.
 								content: capPreviewLines(
-									args ? (cmdLines ??= formatBashCommandLines(renderArgs, uiTheme)) : [],
+									trace !== undefined && options.shellPresentation
+										? visualCommandLines(options.shellPresentation, renderArgs, uiTheme, contentWidth)
+										: args
+											? (cmdLines ??= formatBashCommandLines(renderArgs, uiTheme))
+											: [],
 									uiTheme,
 									{ expanded },
 								),
@@ -640,6 +703,8 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					cachedIsPartial = isPartial;
 					cachedPreviewWindow = previewWindow;
 					cachedElapsedSecond = elapsedSecond;
+					cachedTraceKey = traceKey;
+					cachedPresentation = options.shellPresentation;
 					cachedSnapshot = snapshot;
 					return snapshot;
 				},
@@ -655,7 +720,21 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 				body: [
 					runBox(
 						[
-							runInput(command, SHELL_INPUT),
+							options.shell && options.shellPresentation
+								? node(
+										"shell",
+										{
+											role: SHELL_INPUT.role,
+											presentation: options.shellPresentation,
+											lang: "bash",
+											replayEpoch: options.shellReplayEpoch,
+											liveOrigin: options.executionStarted,
+											preview: { lines: RUN_INPUT_PREVIEW_LINES },
+										},
+										undefined,
+										"input",
+									)
+								: runInput(command, SHELL_INPUT),
 							started &&
 								runFoot({ state: options.cancelled ? "cancelled" : "running", elapsedMs: options.elapsedMs }),
 						],
@@ -663,6 +742,8 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					),
 				],
 				preview: "children",
+				// The head stays outside: the segmented run box is the card's only frame.
+				inline: true,
 			};
 		},
 
@@ -684,7 +765,8 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			const output = stripped.text.trimEnd();
 			const expanded = renderContext?.expanded ?? options.expanded;
 			const showingFullOutput = expanded && renderContext?.isFullOutput === true;
-			const command = formatBashCommandText(toBashRenderArgs(args, config));
+			const renderArgs = toBashRenderArgs(args, config);
+			const command = formatBashCommandText(renderArgs);
 			const previewLines = renderContext?.previewLines ?? BASH_DEFAULT_PREVIEW_LINES;
 			const state = shellRunState(details, isError, isPartial, options.cancelled === true);
 			// Live (a running call, or a parked job still streaming): the call's clock. Settled: the
@@ -695,10 +777,33 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					? undefined
 					: (details?.wallTimeMs ?? options.elapsedMs);
 			const meta = details?.meta;
+			// Native hosts render the same engine-produced presentation as the ANSI inspector.
+			const trace = options.shell === true ? (options.shellTrace ?? details?.trace) : undefined;
+			const presentation = options.shell === true && trace ? options.shellPresentation : undefined;
+			// The shell node is the command pane only; the run's ordinary output
+			// segment draws what ran: the live result, or the output retained up
+			// to the replay cursor while one is held.
+			const shownOutput = presentation?.preferences.cursor !== undefined ? presentation.output.trimEnd() : output;
+			const displayWorkdir = formatToolWorkingDirectory(renderArgs.cwd, getProjectDir());
 			const box = runBox(
 				[
-					runInput(command, SHELL_INPUT),
-					output.trim().length > 0 && runOutput(output, { role: "omp.tool.bash.output", previewLines }),
+					presentation
+						? node(
+								"shell",
+								{
+									role: SHELL_INPUT.role,
+									presentation,
+									replayEpoch: options.shellReplayEpoch,
+									liveOrigin: options.executionStarted,
+									...(displayWorkdir ? { cwd: displayWorkdir } : {}),
+									lang: "bash",
+									preview: { lines: RUN_INPUT_PREVIEW_LINES },
+								},
+								undefined,
+								"input",
+							)
+						: runInput(command, SHELL_INPUT),
+					shownOutput.trim().length > 0 && runOutput(shownOutput, { role: "omp.tool.bash.output", previewLines }),
 					runFoot({
 						state,
 						exitCode: details?.exitCode,
@@ -714,6 +819,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 				body: [box],
 				tone: state === "timed-out" ? "warning" : undefined,
 				preview: "children",
+				inline: true,
 			};
 		},
 		mergeCallAndResult: true,

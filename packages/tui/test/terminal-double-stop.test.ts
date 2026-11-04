@@ -16,6 +16,9 @@ describe.skipIf(process.platform === "win32")("ProcessTerminal double stop", () 
 		"emergency",
 		"deferred",
 		"older-deferred",
+		"triple-deferred",
+		"triple-enable-first",
+		"xterm-deferred",
 		"kitty",
 		"modify",
 		"kitty-private",
@@ -75,9 +78,15 @@ describe.skipIf(process.platform === "win32")("ProcessTerminal double stop", () 
 					expect(lines["after-first-stop"]).toBe("true");
 					expect(lines["after-double-stop"]).toBe("true");
 					expect(lines["after-final-stop"]).toBe("false");
+					if (order === "triple-enable-first") {
+						expect(lines["intermediate-raw"]).toBe("false");
+						expect(lines["enabled-raw"]).toBe("true");
+					}
 					const deferred =
 						order === "deferred" ||
 						order === "older-deferred" ||
+						order === "triple-deferred" ||
+						order === "xterm-deferred" ||
 						order === "kitty" ||
 						order === "modify" ||
 						order === "kitty-private";
@@ -109,6 +118,13 @@ describe.skipIf(process.platform === "win32")("ProcessTerminal double stop", () 
 					expect(olderStop).not.toContain("\x1b[?2004l");
 					expect(olderStop).not.toContain("\x1b[?1006l");
 					expect(olderStop).not.toContain("\x1b[?2031l");
+					if (order === "xterm-deferred") {
+						for (const mode of [1010, 1011]) {
+							expect(stream).toContain(`\x1b[?${mode}l`);
+							expect(olderStop).not.toContain(`\x1b[?${mode}h`);
+							expect(stream.slice(end)).toContain(`\x1b[?${mode}h`);
+						}
+					}
 				} finally {
 					child.kill();
 					fs.rmSync(root, { recursive: true, force: true });

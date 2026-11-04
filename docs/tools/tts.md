@@ -20,7 +20,7 @@ The SDK registers this write-approved custom tool when `speechgen.enabled=true` 
 | ------------- | ---------------- | -------: | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `text`        | `string`         |      Yes | Text to synthesize. Must be `1..15000` JavaScript string characters.                                                                                 |
 | `voice_id`    | `string`         |       No | Cloud voice id. xAI defaults to `eve`; OpenAI-compatible speech forwards it only when explicitly set. Local synthesis uses `tts.localVoice` instead. |
-| `language`    | `string`         |       No | Schema default `en`; currently unused by every execution path, including xAI.                                                                        |
+| `language`    | `string`         |       No | Speech language for xAI; omitted sends `auto` (auto-detect). Ignored by local and OpenAI-compatible speech.                                         |
 | `output_path` | `string`         |      Yes | Destination resolved relative to session cwd. Case-insensitive `.wav` requests WAV; any other suffix requests MP3.                                   |
 | `sample_rate` | `number.integer` |       No | xAI sample-rate override. Ignored by local and OpenAI-compatible speech.                                                                             |
 | `bit_rate`    | `number.integer` |       No | xAI MP3 bit-rate override. Ignored for WAV and by local and OpenAI-compatible speech.                                                                |
@@ -41,7 +41,7 @@ The SDK registers this write-approved custom tool when `speechgen.enabled=true` 
 3. For MP3, reorder only non-explicit candidates so cloud models precede local models. Explicit primary/fallback slots retain their positions. WAV preserves the resolved chain order.
 4. Try candidates sequentially:
    - `local-inference` calls the local worker with the selected model id, `tts.localVoice`, and `tts.localSpeed`, encodes PCM16 WAV, and writes it. Per-call voice, language, sample rate, and bit rate are ignored.
-   - `xai-tts` calls the selected model's `<baseUrl>/tts` through the model-registry credential resolver. It sends text and voice, and an explicit `output_format` only when WAV or non-default sample/MP3 bit rates require it.
+   - `xai-tts` calls the selected model's `<baseUrl>/tts` through the model-registry credential resolver. It sends text, voice, and `language` (`auto` when the caller gives none), and an explicit `output_format` only when WAV or non-default sample/MP3 bit rates require it.
    - `openai-speech` calls the selected model's `<baseUrl>/audio/speech` with `{ model, input, response_format, voice? }`; voice is sent only when explicitly supplied. This includes compatible providers such as DeepInfra, not just OpenAI.
 5. Missing API keys and provider HTTP errors advance to the next candidate. A local `null` response returns its error immediately; other failures do not trigger fallback.
 

@@ -2,6 +2,56 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Shell visualization uses native engine presentation instead of TypeScript document/parser/printer APIs; node identifiers are opaque `unit:source:node` strings, and native `shell` nodes receive presentation data only, not raw traces.
+
+- Replaced `CustomEditor.modelMentionLabel` with `resolveModelMention`, which returns the chip label and the canonical selector the chip expands to; `collapseModelMentions` takes the same `{ label, selector }` callback, and `getModelMentionSuggestions` returns a `ModelMentionCompletion` (`unhandled`, `no-match`, or `matched` with the suggestions) instead of suggestions or `null` ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
+- `SetupHost` requires `autoUpdate`, `canAutoUpdate()`, and `saveAutoUpdate()` for the new `auto-update` setup scene (setup version 3); `setupWizardAllowed()` exposes the launch gates `selectSetupScenes` applies
+- Removed `SPINNER_ADVANCE_MS`; spinners follow the shared spinner clock (`spinnerInterval()`). `sharedSpinnerFrame` moved from `chat/tool-execution` to `spinner-clock` and reads `Date.now()` by default ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Removed `formatMeta` (`render/render-utils`); no renderer joins header metadata through it anymore ([#18104](https://github.com/can1357/oh-my-pi/pull/18104) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- `TranscriptContainer.nativeBlocks()` and `Composer.describeSurface()` take the frame's `DescribeContext` ([#17997](https://github.com/can1357/oh-my-pi/pull/17997) by [@materemias](https://github.com/materemias))
+
+### Added
+
+- Bash cards now show incremental Python-like pseudocode with a Raw toggle, same-color execution dimming, failure marks and variable values beside their latest setter; the inspector adds layers, split source and timestamp-based replay. Native hosts keep the segmented run box: the `shell` node (role `omp.tool.bash.command`) is the command segment only, and the box's ordinary `omp.tool.bash.output` segment shows the output once (the replay-cursor output while one is held). Bash cards keep a neutral background in every state, and native bash views are inline (head above, the segmented run box the only frame).
+- Added `VersionUpdate`, `WelcomeComponent.setVersionUpdate()`, and `ComposerWelcomeUpdate.versionUpdate`: the welcome banner shows background self-update progress, readiness, or failure after its version label, narrowing to the percent and then dropping it on narrow terminals
+- `newSessionThinkingLevel` and `resolveConfiguredThinkingLevel` resolve the thinking level a new session starts at on a model; `ComposerCache.writeStatus` takes `{ shared: false }` to keep a project's status out of the any-project fallback
+- Added `SettingItem.menu`: a cycling row's choices as a menu, which `SettingsList.openSubmenuFor` opens (a native settings page's popup) while Enter/Space still cycle
+- `StatusLineComponent.setSessionPinned()` / `setPinnedSessionIds()` / `isSessionPinned()` track pinned sessions; `session_name` prefixes the theme's pin icon for a pinned session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
+- `chat/transcript-presentation` resolves extension transcript presenters (`setTranscriptPresenters`, `readTranscriptPresentation`, `TranscriptPresentationState`); tool cards and read entries draw full, compact or hidden from it in both `render()` and `describe()`, while `ChatTranscriptBuilder` replays draw stock cards ([#17960](https://github.com/can1357/oh-my-pi/pull/17960) by [@materemias](https://github.com/materemias))
+- `PresentedBlock` (`chat/transcript-presentation`) applies transcript presenters to advisor, skill, late-diagnostics, execution, background-job, supervised-process, TTSR and todo-reminder blocks; `TtsrNotificationComponent.rules` reads its merged rules ([#17997](https://github.com/can1357/oh-my-pi/pull/17997) by [@materemias](https://github.com/materemias))
+- `LinkBrowserComponent` (`overlays/link-browser`) replays a transcript fullscreen with extension link hint tags that each link keeps while it stays in view; `LinkHints` / `viewportLinkTargets()` (`render/link-hints`) share tag assignment (preferring the letters a label starts with) and painting with `Composer`; `ChatTranscriptBuilder` accepts `textRenderers` ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
+- Added the `cache` status-line segment, `StatusLineSession.getPromptCacheStatus`, the `icon.cacheWarm` / `icon.cacheCold` symbols, the composer's `omp.composer.cache` fact and the `promptCacheBrief` / `promptCacheDetails` text helpers ([#12677](https://github.com/can1357/oh-my-pi/issues/12677)) ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
+- Added effort-level rows to `^` model mention autocomplete: after `:`, it lists the supported levels of the top three matching models below any model ids that contain the typed text, and typing `:` reopens a closed mention popup ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
+- Added optional `AutocompleteProvider.trySyncModelMentionCompletion`, which returns a `ModelMentionCompletion`; the editor uses it to refresh a shown mention popup as you type, so Tab accepts a row for the current text ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
+- Added a shared spinner clock (`spinner-clock`: `setSpinnerInterval`, `sharedSpinnerFrame`, `spinnerTickDelay`) that every spinner and the thinking pulse follow, ticking on common boundaries so N spinners cost one frame per period; `0` pins them static with no timers ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added a frame-rate ceiling (`frame-rate`: `setMaxFps`, `minFrameIntervalMs`) honoured by the render scheduler and animation timers; frames a keystroke waits on keep 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added a decorative-motion switch (`motion-effects`: `setMotionEffects`) gating the status-line blink and brand fade, the editor's magic-keyword sweep, and native `fx` spans; a static spinner clock also stills native `spinner` nodes ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- `CompactTranscriptBlock` (`chrome/transcript-container`): consecutive blocks whose `isTranscriptBlockCompact()` returns true draw without blank rows between them in the terminal (scrollback included) and as one gapless entry on a native (TSP) surface. Tool cards, read groups and `PresentedBlock` report it while a presenter draws them compact, and `FramedMessageComponent` forwards it from an extension renderer's component ([#17997](https://github.com/can1357/oh-my-pi/pull/17997) by [@materemias](https://github.com/materemias))
+
+### Fixed
+- Fixed unmanaged stdout/stderr and inherited subprocess diagnostics corrupting the Unix viewport; diagnostic routing now follows log configuration from startup through rotation, handoff, and shutdown ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
+- Fixed overlapping terminal sessions losing the survivor's input or modes, leaking raw input through multi-owner deferred handoffs, losing inherited xterm scroll-mode restoration, or leaving keyboard modes active without the output pump; emergency shutdown now restores every session ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
+
+- Tern's classic renderer draws inline images (table charts included) as Kitty Unicode placeholders, so text that replaces an image's cells removes the image instead of leaving a stale copy over the table while an answer streams or the pane resizes
+- The native composer's first frame shows the cached thinking level on the model chip (or effort chip) instead of the plain model icon until the session attaches
+- Clicking the popup of an enum setting with many values (Edit Mode, Session Tree Filter, Advisor Sync Backlog) on a native settings page opens its menu instead of doing nothing
+- Ask notes added on successive single-select questions now start with an empty editor and stay with their respective answers ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
+- LSP references render as references even when a referenced line reads like a diagnostics summary (`"1 error(s)"`) or holds a code fence, instead of turning into a diagnostics or hover card ([#18106](https://github.com/can1357/oh-my-pi/pull/18106) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- The LSP diagnostics card lists diagnostics grouped under their file, the form the tool reports, instead of only their counts; its header counts every file's diagnostics (info and hints included) instead of only the first file's, a failed language server counts as a server failure instead of `No issues`, and a partial server failure shows as a warning instead of a clean result ([#18106](https://github.com/can1357/oh-my-pi/pull/18106) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+
+- Closing an overlay that others were opened over no longer leaves them returning focus to it once they close ([#16476](https://github.com/can1357/oh-my-pi/pull/16476))
+- ASCII tree branches are two columns (`|-`, `'-`) like their Unicode counterparts, so rows hanging under a branch, such as a single-file Grep's code frames, line up with its text instead of sitting one column left ([#18103](https://github.com/can1357/oh-my-pi/pull/18103) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+
+### Changed
+
+- Ask cards no longer draw a section header line per question: each question shows its id and flags after its text (`(db · 3 options)`), a single-question card names its id in the header with the option count in the bottom border, and the header no longer says `1 questions` ([#18104](https://github.com/can1357/oh-my-pi/pull/18104) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Tab in the `/usage` Details view now switches back to Overview ([#17962](https://github.com/can1357/oh-my-pi/pull/17962) by [@SuperUserA](https://github.com/SuperUserA))
+- LSP results render under one header that carries the request and the counts (`LSP: references src/a.ts:42 (validateToken) 6 references · 4 files`) instead of a card repeating the request above a `Response` section; each reference previews its source line (`42:14│ export function validateToken(…)`), reference previews and definition snippets are highlighted in the file's language, and an error's message hangs under the header ([#18106](https://github.com/can1357/oh-my-pi/pull/18106) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Grep and AST Grep headers put the search scope right after the pattern (`Grep: useState in packages/tui/src 5 matches · 3 files`), their errors show the tool title and pattern above the message instead of `Error: …`, and collapsed AST Grep results drop the `meta:` capture rows ([#18105](https://github.com/can1357/oh-my-pi/pull/18105) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- AST Edit's header names the search scope after the pattern, its error card keeps the same subject, and the `proposed` state and replacement counts move to the card's bottom border (`proposed · 3 replacements · 2 files · searched 214`) ([#18105](https://github.com/can1357/oh-my-pi/pull/18105) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+
 ## [18.16.0] - 2026-11-02
 
 ### Breaking Changes
@@ -9,6 +59,7 @@
 - `buildExecutionFrame` sets its loader into the new `bottomBorder` itself, so callers no longer add it as a row and must dispose it; `buildStatusFooter` no longer takes `status` or `exitCode`, and `executionStatusLabel` returns a settled run's `exit N` / `cancelled` marker for that border ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - `SessionSelectorOptions.loadAllSessions` and `SessionPickerHost.loadAllSessions` resolve to a `SessionListing`, and `allSessions` takes one, so the all-projects scope can show preliminary rows before its complete listing
 - `Editor.prediction` is replaced by `Editor.predictions`, which returns every prediction for the next prompt, most likely first, and `Editor.onPredictionAccepted` receives the inserted prediction's index in that list ([#17796](https://github.com/can1357/oh-my-pi/pull/17796) by [@wolfiesch](https://github.com/wolfiesch))
+- `GradientHighlightSpec.lightness` maps the gradient position to a lightness, like `hue`, instead of taking one fixed percentage
 
 ### Added
 
@@ -29,6 +80,7 @@
 ### Fixed
 
 - An LSP result other than diagnostics, such as a raw `request` response, that contains the error glyph (`✘`, ASCII `[-]`) is shown as a response instead of as diagnostics reading "No issues" with the rest of its lines dropped ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- `MagicKeywordSpec.lightness` sweeps lightness across a keyword's gradient alongside its hue
 - `Editor.onPredictionAccepted` and `Editor.onPredictionShown` report when Tab or Right inserts the rest of the composer prediction and when a frame paints it (at least one cell in the terminal, or the ghost on a native editor node) ([#17739](https://github.com/can1357/oh-my-pi/pull/17739) by [@wolfiesch](https://github.com/wolfiesch))
 - Added `OutputMeta.minimized` (bash minimizer filter, raw and minimized byte counts, raw-output artifact), shown as a `Minimized` fact on bash result cards ([#16586](https://github.com/can1357/oh-my-pi/pull/16586) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `isColumnTruncationNotice` and `hasColumnTruncationClause` to `tools/output-meta`, matching the `[Some lines truncated to …]` clause that `formatOutputNotice` emits alone or inside a longer notice, and `LimitsMeta.columnTruncated.rawByteCap`, which makes that notice name the byte cap a `:raw` read of the first cut line stops at ([#16595](https://github.com/can1357/oh-my-pi/pull/16595) by [@will-bogusz](https://github.com/will-bogusz))
@@ -216,9 +268,6 @@
 - In Tern, centered sheets (`/context`, reports, keyboard shortcuts, BTW history, session info, the pause screen) fill the pane when it is narrower than 100 columns instead of floating with margins ([#16676](https://github.com/can1357/oh-my-pi/pull/16676) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
-
-- Fixed unmanaged stdout/stderr and inherited subprocess diagnostics corrupting the Unix viewport; diagnostic routing now follows log configuration from startup through rotation, handoff, and shutdown ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
-- Fixed stopping overlapping terminal sessions disabling the survivor's modes or input, leaking raw mode across either deferred-input handoff order, or leaving Kitty and modifyOtherKeys modes active even without the output pump; emergency shutdown now restores every remaining session ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
 
 - Fixed the `/agents` and `/models` hubs in Tern squeezing the left sidebar as long lines (such as a streaming new-agent draft) widen the body pane
 

@@ -160,11 +160,12 @@ On non-PR events all three jobs run on vmon sandboxes (`vmon-large/from=omp-ci`)
 
 ```bash
 bazelisk --bazelrc="$rc" test //crates/...                 # full Rust suite
-# clippy scope mirrors `cargo clippy --workspace` (libraries only), split by
+# clippy scope mirrors `cargo clippy --workspace` (libraries, plus pi-shell's
+# `obash` binary in the strict set), split by
 # lint policy via a query kind filter:
-bazelisk query "kind('rust_library|rust_shared_library', //crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...)" \
+bazelisk query "kind('rust_library|rust_shared_library|rust_binary', //crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...)" \
   | xargs bazelisk --bazelrc="$rc" build --config=clippy-strict --
-bazelisk query "kind('rust_library|rust_shared_library', //crates/... - (…strict set…) - //crates/vendor/brush-core/... - //crates/pi-builtins/...)" \
+bazelisk query "kind('rust_library|rust_shared_library', //crates/... - (…strict set…) - //crates/pi-builtins/...)" \
   | xargs bazelisk --bazelrc="$rc" build --config=clippy --
 bazelisk query "kind('rust_library|rust_shared_library', //crates/pi-builtins/...)" \
   | xargs bazelisk --bazelrc="$rc" build --config=clippy-ported --

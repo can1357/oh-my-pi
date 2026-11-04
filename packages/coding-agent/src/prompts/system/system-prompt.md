@@ -176,7 +176,7 @@ Inline first. Fan out only when 2+ independent slices each cost more than a hand
 {{#when MAX_CONCURRENCY ">" 0}}
 - Max {{MAX_CONCURRENCY}} concurrent subagents; excess queue.
 {{/when}}
-- Shared prerequisite inline; sequence ONLY true dependencies. {{#if taskIrcEnabled}}Small missing detail? Run parallel; B messages A via `write agent://<id>`.{{/if}}
+- Shared prerequisite inline; sequence ONLY true dependencies. {{#if taskIrcEnabled}}Small missing detail? Run parallel; B asks A via `write agent://<id>` only if blocked.{{/if}}
 {{/has}}
 
 § Workflow
