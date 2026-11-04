@@ -154,12 +154,15 @@ export async function sessionFilesFromDisk(
  * artifacts subtree reads as unavailable instead of disturbing the caller's
  * delivery path.
  */
-/** Whether `file` is a regular file in `storage`; false for a directory, a missing path, or any fault. */
+/**
+ * Whether `file` is a regular file in `storage`; false for a directory, a
+ * missing path, or any fault. Follows symlinks, as the filesystem `stat` the
+ * check replaced did: a retained transcript reached through a symlink is
+ * readable and must still be advertised.
+ */
 function isStoredFile(file: string, storage: SessionStorage): boolean {
 	try {
-		if (!storage.existsSync(file)) return false;
-		const name = path.basename(file);
-		return storage.listEntriesSync(path.dirname(file)).some(entry => entry.name === name && entry.isFile);
+		return storage.statSync(file).isFile;
 	} catch {
 		return false;
 	}

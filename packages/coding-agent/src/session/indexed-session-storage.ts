@@ -326,10 +326,12 @@ export class IndexedSessionStorage implements SessionStorage {
 	statSync(path: string): SessionStorageStat {
 		const entry = this.#index.get(path);
 		if (!entry) throw enoent(path);
+		// A key-indexed backend holds nothing but files.
 		return {
 			size: entry.size,
 			mtimeMs: entry.mtimeMs,
 			mtime: new Date(entry.mtimeMs),
+			isFile: true,
 		};
 	}
 

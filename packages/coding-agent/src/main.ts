@@ -130,11 +130,12 @@ import {
 	type SessionInfo,
 } from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
+import type { FileEntry } from "./session/session-entries";
 import { computeDefaultSessionDir } from "./session/session-paths";
 import { FileSessionStorage, setDefaultSessionStorage } from "./session/session-storage";
 import { resolveSessionStorage, SessionStorageConfigError } from "./session/session-storage-config";
 import { takeSessionStorageFallback } from "./session/session-storage-fallback";
-import { forkIfMovedAway } from "./session/session-transfer";
+import { forkIfMovedAway, lastSessionTransfer } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
 	discoverSystemPromptOverride,
@@ -328,6 +329,23 @@ function rejectNoUiWithoutRpc(args: Pick<Args, "noUi" | "mode">): void {
  * answers `null` for anything it cannot resolve there, so a doubtful launch
  * refuses rather than forks.
  */
+/**
+ * `id`, unless resuming that transcript would open a fork instead of continuing
+ * it. Every resume route — `--resume`, `--continue`, `--restore`, auto-resume,
+ * the picker — passes through `forkIfMovedAway`, which forks when the
+ * transcript's last transfer marker is `departed`; a declined move does the
+ * same. That one marker is therefore the whole class, and reading it here is
+ * not a per-caller patch. A transcript that cannot be read answers `null`.
+ */
+async function continuableFileSession(file: string, id: string, storage: FileSessionStorage): Promise<string | null> {
+	try {
+		const entries = Bun.JSONL.parse(await storage.readText(file)) as FileEntry[];
+		return lastSessionTransfer(entries)?.kind === "departed" ? null : id;
+	} catch {
+		return null;
+	}
+}
+
 export async function resumableFileSessionId(
 	parsed: Args,
 	rawArgs: readonly string[] | undefined,
@@ -335,8 +353,8 @@ export async function resumableFileSessionId(
 ): Promise<string | null> {
 	// `--fork` makes the launch create a new session whatever the resume flags
 	// say (see `normalizeContinueSessionArgs` and the fork branch below), and a
-	// new session never falls back.
-	if (parsed.noSession || parsed.fork) return null;
+	// new session never falls back. A foreign import is a new session too.
+	if (parsed.noSession || parsed.fork !== undefined || isForeignSessionImport(parsed)) return null;
 	const storage = new FileSessionStorage();
 	try {
 		// `--continue <id>` is still spelled as `continue` plus a positional at
@@ -349,15 +367,16 @@ export async function resumableFileSessionId(
 		const selector = typeof args.restore === "string" ? args.restore : args.resume;
 		if (typeof selector === "string") {
 			const match = await resolveResumableSession(selector, cwd, args.sessionDir, storage);
-			return match?.session.id ?? null;
+			return match ? await continuableFileSession(match.session.path, match.session.id, storage) : null;
 		}
-		// Bare `--continue` and the interactive auto-resume both take this
-		// project's most recent session; `--resume` with no value opens the
-		// picker, which lists the same directory.
-		if (!args.continue && args.resume !== true) return null;
+		// Bare `--continue` and the interactive auto-resume take this project's
+		// most recent session. `--resume` with no value opens the picker, whose
+		// choice is not known yet, so it refuses rather than record a fallback
+		// against a session the user may not pick.
+		if (!args.continue) return null;
 		const dir = args.sessionDir ?? computeDefaultSessionDir(cwd, storage);
 		const [newest] = await listSessionsReadOnly(dir, storage);
-		return newest?.id ?? null;
+		return newest ? await continuableFileSession(newest.path, newest.id, storage) : null;
 	} catch (err) {
 		logger.warn("Could not tell whether this launch resumes a session file", { error: toError(err).message });
 		return null;

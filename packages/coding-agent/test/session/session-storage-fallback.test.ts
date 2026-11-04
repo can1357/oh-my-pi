@@ -33,6 +33,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-storage-fallback";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
+import { SESSION_TRANSFER_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/session-transfer";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -300,10 +301,38 @@ describe("which launches may fall back", () => {
 		const dir = makeTempDir("@pi-session-fork-");
 		const sessions = path.join(dir, "sessions");
 		const existing = writeTranscript(sessions, dir);
-		const args: Args = { ...base, continue: true, fork: true, sessionDir: sessions };
+		const args: Args = { ...base, continue: true, fork: "", sessionDir: sessions };
 		expect(await resumableFileSessionId(args, ["--continue", "--fork"], dir)).toBeNull();
 		// The same launch without --fork does resolve, so the refusal is the flag.
-		expect(await resumableFileSessionId({ ...args, fork: false }, ["--continue"], dir)).toBe(existing);
+		expect(await resumableFileSessionId({ ...args, fork: undefined }, ["--continue"], dir)).toBe(existing);
+	});
+
+	it("a session marked as moved away may not fall back: resuming it opens a fork", async () => {
+		const dir = makeTempDir("@pi-session-departed-");
+		const sessions = path.join(dir, "sessions");
+		const id = writeTranscript(sessions, dir);
+		const [file] = new FileSessionStorage().listFilesSync(sessions, "*.jsonl");
+		fs.appendFileSync(
+			file!,
+			`${JSON.stringify({
+				type: "custom_message",
+				customType: SESSION_TRANSFER_MESSAGE_TYPE,
+				details: { kind: "departed", to: "other-box" },
+			})}\n`,
+		);
+
+		const args: Args = { ...base, continue: true, sessionDir: sessions };
+		expect(await resumableFileSessionId(args, ["--continue"], dir)).toBeNull();
+		// By id, the route a `--continue <id>` or `--resume <id>` launch takes.
+		expect(await resumableFileSessionId({ ...base, resume: id, sessionDir: sessions }, [], dir)).toBeNull();
+	});
+
+	it("the picker may not fall back: its session is not chosen yet", async () => {
+		const dir = makeTempDir("@pi-session-picker-");
+		const sessions = path.join(dir, "sessions");
+		writeTranscript(sessions, dir);
+		const args: Args = { ...base, resume: true, sessionDir: sessions };
+		expect(await resumableFileSessionId(args, ["--resume"], dir)).toBeNull();
 	});
 
 	it("a launch with no session may not fall back", async () => {

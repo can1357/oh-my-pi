@@ -76,6 +76,13 @@ export interface SessionStorageStat {
 	 * callers fall back to the transcript's own header timestamp.
 	 */
 	birthtimeMs?: number;
+	/**
+	 * A regular file, following symlinks, as `fs.stat().isFile()` reports it.
+	 * A key-indexed backend holds nothing but files, so it reports `true`;
+	 * file storage reports what the filesystem says, which is `false` for a
+	 * directory and `true` for a symlink to a regular file.
+	 */
+	isFile: boolean;
 }
 
 export interface SessionStorageWriter {
@@ -1154,7 +1161,13 @@ export class FileSessionStorage implements SessionStorage {
 
 	statSync(path: string): SessionStorageStat {
 		const stats = fs.statSync(path);
-		return { size: stats.size, mtimeMs: stats.mtimeMs, mtime: stats.mtime, birthtimeMs: stats.birthtimeMs };
+		return {
+			size: stats.size,
+			mtimeMs: stats.mtimeMs,
+			mtime: stats.mtime,
+			birthtimeMs: stats.birthtimeMs,
+			isFile: stats.isFile(),
+		};
 	}
 
 	listFilesSync(dir: string, pattern: string): string[] {
@@ -1969,10 +1982,12 @@ export class MemorySessionStorage implements SessionStorage {
 
 	statSync(path: string): SessionStorageStat {
 		const entry = this.#requireEntry(path);
+		// A key-indexed backend holds nothing but files.
 		return {
 			size: entry.size,
 			mtimeMs: entry.mtimeMs,
 			mtime: new Date(entry.mtimeMs),
+			isFile: true,
 		};
 	}
 

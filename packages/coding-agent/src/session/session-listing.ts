@@ -1468,7 +1468,17 @@ async function newestSessionFiles(
 		const stats = await Promise.all(
 			files.map(async file => {
 				try {
-					return { file, stat: await fs.promises.stat(file) };
+					const stat = await fs.promises.stat(file);
+					return {
+						file,
+						stat: {
+							size: stat.size,
+							mtimeMs: stat.mtimeMs,
+							mtime: stat.mtime,
+							birthtimeMs: stat.birthtimeMs,
+							isFile: stat.isFile(),
+						},
+					};
 				} catch {
 					return undefined;
 				}

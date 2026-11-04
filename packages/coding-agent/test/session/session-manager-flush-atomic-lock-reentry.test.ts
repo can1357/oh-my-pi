@@ -75,7 +75,7 @@ class BackgroundFailureStorage implements SessionStorage {
 	statSync(path: string): SessionStorageStat {
 		const content = this.#files.get(path);
 		if (content === undefined) throw new Error(`File not found: ${path}`);
-		return { size: Buffer.byteLength(content, "utf8"), mtimeMs: Date.now(), mtime: new Date() };
+		return { size: Buffer.byteLength(content, "utf8"), mtimeMs: Date.now(), mtime: new Date(), isFile: true };
 	}
 
 	listFilesSync(): string[] {
