@@ -56,27 +56,33 @@ describe("startup-deferred extensions", () => {
 		const storage = await AgentStorage.open(path.join(tempDir.path(), "agent.db"));
 		const toolOnly = path.join(tempDir.path(), "tool-only.ts");
 		const withShortcut = path.join(tempDir.path(), "with-shortcut.ts");
+		const drawsReplies = path.join(tempDir.path(), "draws-replies.ts");
 		const neverLoaded = path.join(tempDir.path(), "never-loaded.ts");
 		fs.writeFileSync(toolOnly, DEFERRED_TOOL_EXTENSION(path.join(tempDir.path(), "unused.log")));
 		fs.writeFileSync(
 			withShortcut,
 			`export default function(pi) { pi.registerShortcut("ctrl+shift+y", { handler: () => {} }); }`,
 		);
+		// The first frame replays the transcript with its renderer and link scheme.
+		fs.writeFileSync(
+			drawsReplies,
+			`export default function(pi) { pi.registerLinkScheme("demo-link"); pi.registerAssistantTextRenderer(() => undefined); }`,
+		);
 		fs.writeFileSync(neverLoaded, `export default function() {}`);
 
-		const loaded = await loadExtensions([toolOnly, withShortcut], tempDir.path());
+		const loaded = await loadExtensions([toolOnly, withShortcut, drawsReplies], tempDir.path());
 		await recordStartupVerdicts(storage, loaded.extensions);
 
-		const paths = [toolOnly, withShortcut, neverLoaded];
+		const paths = [toolOnly, withShortcut, drawsReplies, neverLoaded];
 		expect(await partitionStartupExtensions(storage, paths, tempDir.path())).toEqual({
-			eager: [withShortcut, neverLoaded],
+			eager: [withShortcut, drawsReplies, neverLoaded],
 			deferred: [toolOnly],
 		});
 
 		// An edited source may now register something startup needs: load it eagerly again.
 		fs.appendFileSync(toolOnly, "\n// edited\n");
 		expect(await partitionStartupExtensions(storage, paths, tempDir.path())).toEqual({
-			eager: [toolOnly, withShortcut, neverLoaded],
+			eager: [toolOnly, withShortcut, drawsReplies, neverLoaded],
 			deferred: [],
 		});
 	});
