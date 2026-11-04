@@ -1,16 +1,21 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { ExitContext } from "@oh-my-pi/pi-coding-agent/session/exit-context";
 import {
-	EXIT_CONTEXT_IO_TIMEOUT_MS,
+	defaultExitContextSources,
 	type ExitContextSources,
 	readExitContext,
 	startExitContextReader,
 	writeExitIntent,
 } from "@oh-my-pi/pi-coding-agent/session/exit-context";
-import { EXIT_INTENT_MAX_CHARS } from "@oh-my-pi/pi-coding-agent/session/exit-context-protocol";
+import {
+	EXIT_CONTEXT_IO_TIMEOUT_MS,
+	EXIT_INTENT_MAX_CHARS,
+} from "@oh-my-pi/pi-coding-agent/session/exit-context-protocol";
 import { SESSION_EXIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import type { ExitContextThreadRequest } from "../fixtures/session-exit-context-thread";
 
 // Sessions start the reader thread when they are created; do the same, and wait
 // once for it to load, so no assertion below depends on how fast a thread starts.
@@ -393,6 +398,132 @@ describe("session_exit entry", () => {
 		expect(data).not.toHaveProperty("pane");
 		if (oomKills === undefined) expect(data).not.toHaveProperty("oomKills");
 		else expect(data.oomKills).toBe(oomKills);
+	}, 60_000);
+});
+
+const THREAD = path.join(import.meta.dir, "../fixtures/session-exit-context-thread.ts");
+
+interface SessionThread extends Disposable {
+	post(request: ExitContextThreadRequest): void;
+	/** The thread's next message: `"at-gate"` for a gated request, then what its session records. */
+	next(): Promise<unknown>;
+	read(request: ExitContextThreadRequest): Promise<ExitContext>;
+}
+
+/** A worker thread of this process with its own session realm, as a worker-thread subagent has. */
+async function startSessionThread(tempDir: TempDir): Promise<SessionThread> {
+	const worker = new Worker(THREAD, { type: "module" });
+	const inbox: unknown[] = [];
+	const waiters: PromiseWithResolvers<unknown>[] = [];
+	worker.addEventListener("message", event => {
+		const waiter = waiters.shift();
+		if (waiter) waiter.resolve(event.data);
+		else inbox.push(event.data);
+	});
+	worker.addEventListener("error", event => {
+		for (const waiter of waiters.splice(0)) waiter.reject(new Error(event.message));
+	});
+	const thread: SessionThread = {
+		post(request) {
+			worker.postMessage(request);
+		},
+		next() {
+			if (inbox.length > 0) return Promise.resolve(inbox.shift());
+			const waiter = Promise.withResolvers<unknown>();
+			waiters.push(waiter);
+			return waiter.promise;
+		},
+		async read(request) {
+			thread.post(request);
+			return (await thread.next()) as ExitContext;
+		},
+		[Symbol.dispose]() {
+			worker.terminate();
+		},
+	};
+	try {
+		expect(await thread.next()).toBe("ready");
+		// Load the thread's reader on a source without an intent, so a test's reads race only on the claim.
+		await thread.read({ sources: fakeSources(tempDir) });
+	} catch (error) {
+		worker.terminate();
+		throw error;
+	}
+	return thread;
+}
+
+describe("sessions on several threads of one process", () => {
+	it("a session on a worker thread records the word a main-thread session claimed", async () => {
+		using tempDir = TempDir.createSync("@omp-exit-context-main-first-");
+		using thread = await startSessionThread(tempDir);
+		const sources = fakeSources(tempDir);
+		writeExitIntent(sources.pid, "restart", sources.intentDir);
+
+		expect(readExitContext(sources).intent).toBe("restart");
+		expect(fs.existsSync(intentPath(sources))).toBe(false);
+		expect(await thread.read({ sources })).toEqual({ pid: sources.pid, pane: "%7", oomKills: 3, intent: "restart" });
+	}, 60_000);
+
+	it("a main-thread session records the word a worker-thread session claimed", async () => {
+		using tempDir = TempDir.createSync("@omp-exit-context-worker-first-");
+		using thread = await startSessionThread(tempDir);
+		const sources = fakeSources(tempDir);
+		writeExitIntent(sources.pid, "restart", sources.intentDir);
+
+		expect((await thread.read({ sources })).intent).toBe("restart");
+		expect(fs.existsSync(intentPath(sources))).toBe(false);
+		expect(readExitContext(sources)).toEqual({ pid: sources.pid, pane: "%7", oomKills: 3, intent: "restart" });
+	}, 60_000);
+
+	it("sessions on several threads exiting at once all record the word", async () => {
+		using tempDir = TempDir.createSync("@omp-exit-context-threads-at-once-");
+		const threads = await Promise.all(Array.from({ length: 4 }, () => startSessionThread(tempDir)));
+		try {
+			const sources = fakeSources(tempDir);
+			writeExitIntent(sources.pid, "stop", sources.intentDir);
+			const gate = new SharedArrayBuffer(4);
+			for (const thread of threads) thread.post({ sources, gate });
+			for (const thread of threads) expect(await thread.next()).toBe("at-gate");
+			const gateWord = new Int32Array(gate);
+			Atomics.store(gateWord, 0, 1);
+			Atomics.notify(gateWord, 0);
+
+			const contexts = (await Promise.all(threads.map(thread => thread.next()))) as ExitContext[];
+			expect(contexts.map(context => context.intent)).toEqual(threads.map(() => "stop"));
+			expect(fs.readdirSync(sources.intentDir)).toEqual([]);
+			expect(readExitContext(sources).intent).toBe("stop");
+		} finally {
+			for (const thread of threads) thread[Symbol.dispose]();
+		}
+	}, 120_000);
+
+	it("a session on a thread started after the word was published records it", async () => {
+		using tempDir = TempDir.createSync("@omp-exit-context-late-thread-");
+		const sources = fakeSources(tempDir);
+		writeExitIntent(sources.pid, "restart", sources.intentDir);
+		// Published after the process started and before the thread below starts.
+		const published = new Date((defaultExitContextSources().processStartMs + Date.now()) / 2);
+		fs.utimesSync(intentPath(sources), published, published);
+		using thread = await startSessionThread(tempDir);
+
+		// The thread dates the file against its own default process start, as its sessions do.
+		const context = await thread.read({ sources, processStart: "thread" });
+		expect(context.intent).toBe("restart");
+		expect(fs.readdirSync(sources.intentDir)).toEqual([]);
+		expect(readExitContext(sources).intent).toBe("restart");
+	}, 60_000);
+
+	it("a thread still drops an intent file older than the process", async () => {
+		using tempDir = TempDir.createSync("@omp-exit-context-process-start-");
+		using thread = await startSessionThread(tempDir);
+		const sources = fakeSources(tempDir);
+		// A file written before the process started is stale on every thread.
+		writeExitIntent(sources.pid, "move", sources.intentDir);
+		const beforeProcess = new Date(defaultExitContextSources().processStartMs - 60_000);
+		fs.utimesSync(intentPath(sources), beforeProcess, beforeProcess);
+
+		expect((await thread.read({ sources, processStart: "thread" })).intent).toBeUndefined();
+		expect(fs.existsSync(intentPath(sources))).toBe(false);
 	}, 60_000);
 });
 

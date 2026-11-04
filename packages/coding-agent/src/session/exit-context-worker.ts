@@ -7,17 +7,22 @@
  * The thread starts with the first session and idles until a request comes, so
  * an exit does not wait for it to load. Each request carries a
  * `SharedArrayBuffer`: the answer is JSON in its bytes after the header, then
- * header word 1 gets its length and word 0 is set to 1 and notified.
+ * header word 1 gets its length and word 0 is set to 1 and notified. A word
+ * the reader claims goes on the process's board (`./exit-context-protocol`),
+ * so sessions on every thread of the process record it.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { parentPort } from "node:worker_threads";
 import { consumeWorkerInbox } from "@oh-my-pi/pi-utils/worker-host";
 import {
+	EXIT_CONTEXT_IO_TIMEOUT_MS,
 	EXIT_CONTEXT_RESULT_OFFSET,
 	EXIT_INTENT_MAX_CHARS,
 	type ExitContextIoRequest,
 	type ExitContextIoResult,
+	updateExitContextBoard,
+	waitForExitContextBoardChange,
 } from "./exit-context-protocol";
 
 /** Most bytes read from any one source. */
@@ -98,12 +103,47 @@ function claimExitIntent(request: ExitContextIoRequest): string | undefined {
 	return word || undefined;
 }
 
+/**
+ * The process's word from `<intentDir>/<pid>`, claimed once for every thread of
+ * the process. A word on the board is returned without touching the file. A
+ * claim another reader has in progress is waited for, and taken over once it is
+ * older than {@link EXIT_CONTEXT_IO_TIMEOUT_MS} (its reader may have died with
+ * its thread). Only a found word goes on the board, so a later word stays
+ * claimable. Without the board's lock, the file is claimed for this thread alone.
+ */
+function claimProcessIntent(request: ExitContextIoRequest): string | undefined {
+	const filePath = path.join(request.intentDir, String(request.pid));
+	const token = crypto.randomUUID();
+	for (;;) {
+		const step = updateExitContextBoard(request.board, EXIT_CONTEXT_IO_TIMEOUT_MS, filePath, (state, change) => {
+			const word = state.words[filePath];
+			if (word !== undefined) return { word };
+			const claim = state.claims[filePath];
+			const age = claim ? Date.now() - claim.since : Number.POSITIVE_INFINITY;
+			if (age < EXIT_CONTEXT_IO_TIMEOUT_MS) return { change, waitMs: EXIT_CONTEXT_IO_TIMEOUT_MS - age };
+			state.claims[filePath] = { token, since: Date.now() };
+			return undefined;
+		});
+		if (!step) return claimExitIntent(request);
+		if (step.value === undefined) break;
+		if ("word" in step.value) return step.value.word;
+		waitForExitContextBoardChange(request.board, step.value.change, step.value.waitMs);
+	}
+	const claimed = claimExitIntent(request);
+	const shared = updateExitContextBoard(request.board, EXIT_CONTEXT_IO_TIMEOUT_MS, filePath, state => {
+		if (state.claims[filePath]?.token === token) delete state.claims[filePath];
+		if (claimed !== undefined && state.words[filePath] === undefined) state.words[filePath] = claimed;
+		return state.words[filePath];
+	});
+	return shared?.value ?? claimed;
+}
+
 function answer(request: ExitContextIoRequest): void {
 	const result: ExitContextIoResult = {};
 	const oomKills = readOomKills(request);
 	if (oomKills !== undefined) result.oomKills = oomKills;
 	if (request.readIntent) {
-		const intent = claimExitIntent(request);
+		const intent = claimProcessIntent(request);
 		if (intent !== undefined) result.intent = intent;
 	}
 	const encoded = new TextEncoder().encode(JSON.stringify(result));

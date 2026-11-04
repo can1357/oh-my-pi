@@ -18,22 +18,31 @@
  * it to load. A read that misses the deadline leaves `oomKills` and `intent`
  * absent; while it stays stuck, later exits skip the reads instead of waiting
  * again, and once it answers, the next exit records the intent it claimed.
+ *
+ * Sessions run on several threads of one process (worker-thread subagents),
+ * each with its own copy of this module and its own reader thread. The claimed
+ * word and the process start live on one board that every thread shares
+ * (`createExitContextBoard`), so each session of the process records the same
+ * word, and a thread started after a word was published still dates it
+ * against the process's start.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getEnvironmentData, setEnvironmentData } from "node:worker_threads";
 import { getExitIntentDir } from "@oh-my-pi/pi-utils/dirs";
 import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
 import { EXIT_CONTEXT_WORKER_ARG } from "../cli/worker-selectors";
 import { writeFileAtomicallySync } from "../utils/atomic-file";
 import {
+	createExitContextBoard,
+	EXIT_CONTEXT_IO_TIMEOUT_MS,
 	EXIT_CONTEXT_RESULT_OFFSET,
 	type ExitContextIoRequest,
 	type ExitContextIoResult,
+	exitContextBoardProcessStart,
+	updateExitContextBoard,
 } from "./exit-context-protocol";
-
-/** Longest the exiting thread waits for the reader thread's answer. */
-export const EXIT_CONTEXT_IO_TIMEOUT_MS = 1_500;
 
 /** The intents `omp session exit-intent` writes. Readers record any word as given. */
 export const EXIT_INTENTS = ["move", "restart", "stop"] as const;
@@ -48,11 +57,30 @@ export interface ExitContext {
 }
 
 /** Where {@link readExitContext} reads from; tests point these at fakes. */
-export interface ExitContextSources extends Omit<ExitContextIoRequest, "readIntent" | "state"> {
+export interface ExitContextSources extends Omit<ExitContextIoRequest, "readIntent" | "state" | "board"> {
 	pane: string | undefined;
 }
 
 const EXIT_CONTEXT_RESULT_BYTES = 1024;
+
+/** Worker environment key of the board; a thread's workers inherit it when they start. */
+const EXIT_CONTEXT_BOARD_KEY = "omp.exit-context.board";
+
+/**
+ * The board of this process: the one the thread that started this one handed
+ * down, or, on the first thread to load this module (the main thread, which
+ * creates the first session before any worker subagent), a new one dated with
+ * this thread's start and handed to every thread it starts from now on.
+ */
+function processExitContextBoard(): SharedArrayBuffer {
+	const inherited = getEnvironmentData(EXIT_CONTEXT_BOARD_KEY);
+	if (inherited instanceof SharedArrayBuffer) return inherited;
+	const board = createExitContextBoard(performance.timeOrigin);
+	setEnvironmentData(EXIT_CONTEXT_BOARD_KEY, board);
+	return board;
+}
+
+const board = processExitContextBoard();
 
 /** The live sources of this process. */
 export function defaultExitContextSources(): ExitContextSources {
@@ -62,18 +90,9 @@ export function defaultExitContextSources(): ExitContextSources {
 		cgroupFile: "/proc/self/cgroup",
 		cgroupRoot: "/sys/fs/cgroup",
 		intentDir: getExitIntentDir(),
-		processStartMs: performance.timeOrigin,
+		processStartMs: exitContextBoardProcessStart(board),
 	};
 }
-
-/**
- * Intents already consumed, by file path. Every session in one process writes
- * its own `session_exit` at the same signal (a lead and its in-process
- * subagents); the first read deletes the file and the rest reuse the word.
- * Only a found word is kept, so a session that ends earlier without one does
- * not hide a word a sender leaves later.
- */
-const consumedIntents = new Map<string, string>();
 
 /** The reader thread, idle between requests; `undefined` before the first start or after it died. */
 let reader: Worker | undefined;
@@ -83,7 +102,7 @@ let reader: Worker | undefined;
  * exit takes its answer once it has one. It exists only while that reader
  * lives; a reader that dies drops it, so the next exit starts a new one.
  */
-let lateRead: { worker: Worker; intentPath: string; state: SharedArrayBuffer } | undefined;
+let lateRead: { worker: Worker; state: SharedArrayBuffer } | undefined;
 
 /**
  * Start the reader thread if it is not running, so a later exit only waits for
@@ -100,11 +119,8 @@ export function startExitContextReader(): Worker | undefined {
 		worker.unref();
 		worker.addEventListener("close", () => {
 			if (reader === worker) reader = undefined;
-			if (lateRead?.worker === worker) {
-				// A late answer written before the thread died still counts.
-				rememberIntent(lateRead.intentPath, takeAnswer(lateRead.state)?.intent);
-				lateRead = undefined;
-			}
+			// A word the reader claimed before it died is already on the board.
+			if (lateRead?.worker === worker) lateRead = undefined;
 		});
 		reader = worker;
 	} catch {
@@ -131,8 +147,9 @@ function takeAnswer(state: SharedArrayBuffer): ExitContextIoResult | undefined {
 	}
 }
 
-function rememberIntent(intentPath: string, intent: string | undefined): void {
-	if (intent !== undefined && !consumedIntents.has(intentPath)) consumedIntents.set(intentPath, intent);
+/** The word some thread of the process already claimed from `intentPath`; only memory, never a file. */
+function claimedIntent(intentPath: string, timeoutMs: number): string | undefined {
+	return updateExitContextBoard(board, Math.max(0, timeoutMs), intentPath, state => state.words[intentPath])?.value;
 }
 
 /**
@@ -147,17 +164,18 @@ export function readExitContext(
 	const context: ExitContext = { pid: sources.pid };
 	if (sources.pane) context.pane = sources.pane;
 	const intentPath = path.join(sources.intentDir, String(sources.pid));
-	const late = lateRead && takeAnswer(lateRead.state);
-	if (lateRead && late === undefined) {
-		// The reader is still stuck on an earlier request: record what needs no I/O.
-		const consumed = consumedIntents.get(intentPath);
-		if (consumed !== undefined) context.intent = consumed;
-		return context;
-	}
+	const deadline = performance.now() + timeoutMs;
+	const remaining = () => deadline - performance.now();
+	const known = claimedIntent(intentPath, remaining());
 	if (lateRead) {
-		rememberIntent(lateRead.intentPath, late?.intent);
+		if (takeAnswer(lateRead.state) === undefined) {
+			// The reader is still stuck on an earlier request: record what needs no I/O.
+			if (known !== undefined) context.intent = known;
+			return context;
+		}
 		lateRead = undefined;
 	}
+	let intent = known;
 	const worker = startExitContextReader();
 	if (worker) {
 		const state = new SharedArrayBuffer(EXIT_CONTEXT_RESULT_OFFSET + EXIT_CONTEXT_RESULT_BYTES);
@@ -167,22 +185,24 @@ export function readExitContext(
 			cgroupRoot: sources.cgroupRoot,
 			intentDir: sources.intentDir,
 			processStartMs: sources.processStartMs,
-			readIntent: !consumedIntents.has(intentPath),
+			readIntent: known === undefined,
 			state,
+			board,
 		};
 		try {
 			worker.postMessage(request);
-			Atomics.wait(new Int32Array(state, 0, 2), 0, 0, timeoutMs);
+			Atomics.wait(new Int32Array(state, 0, 2), 0, 0, Math.max(0, remaining()));
 			const result = takeAnswer(state);
 			if (result === undefined) {
-				lateRead = { worker, intentPath, state };
+				lateRead = { worker, state };
 			} else {
 				if (result.oomKills !== undefined) context.oomKills = result.oomKills;
-				rememberIntent(intentPath, result.intent);
+				intent ??= result.intent;
 			}
 		} catch {}
 	}
-	const intent = consumedIntents.get(intentPath);
+	// A word another thread claimed while this one waited.
+	intent ??= claimedIntent(intentPath, remaining());
 	if (intent !== undefined) context.intent = intent;
 	return context;
 }
