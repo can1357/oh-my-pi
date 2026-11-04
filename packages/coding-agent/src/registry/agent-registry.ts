@@ -103,6 +103,19 @@ export function isResumable(ref: AgentRef | undefined): boolean {
 	return (ref?.status === "parked" || ref?.status === "aborted") && ref.sessionFile !== null;
 }
 
+/**
+ * `[agentId, parentId]` for every registered agent that has a parent: the agent
+ * that spawned it, recorded at registration whatever the spawn mode. The job
+ * manager walks these edges to find the work that ends with an agent.
+ */
+export function agentSpawnEdges(registry: Pick<AgentRegistryApi, "list">): [string, string][] {
+	const edges: [string, string][] = [];
+	for (const ref of registry.list()) {
+		if (ref.parentId !== undefined && ref.parentId !== ref.id) edges.push([ref.id, ref.parentId]);
+	}
+	return edges;
+}
+
 export type RegistryEvent =
 	| { type: "registered"; ref: AgentRef }
 	| { type: "status_changed"; ref: AgentRef }

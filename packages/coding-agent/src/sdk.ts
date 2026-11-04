@@ -176,6 +176,7 @@ import {
 	type AgentRef,
 	AgentRegistry,
 	type AgentRegistryApi,
+	agentSpawnEdges,
 	MAIN_AGENT_ID,
 } from "./registry/agent-registry";
 import {
@@ -2485,6 +2486,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const asyncJobManager = !options.parentTaskPrefix
 		? new AsyncJobManager({
 				maxRunningJobs: () => Math.min(100, cfgAsyncMaxJobs.get(settings)),
+				// Every subagent registers with the agent that spawned it, in every
+				// spawn mode; those edges make an agent's tree for ending its work.
+				agentParents: () => agentSpawnEdges(AgentRegistry.global()),
 			})
 		: undefined;
 	if (asyncJobManager) {

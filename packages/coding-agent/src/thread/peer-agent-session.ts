@@ -120,8 +120,8 @@ export class PeerAgentSession implements AgentSessionHandle {
 		return this.#field("ircWakesPending");
 	}
 
-	get asyncWakePending(): boolean {
-		return this.#field("asyncWakePending");
+	get backgroundWorkPending(): boolean {
+		return this.#field("backgroundWorkPending");
 	}
 
 	get messages(): AgentMessage[] {

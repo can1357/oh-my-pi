@@ -503,9 +503,52 @@ describe("AsyncJobManager", () => {
 		manager.evictCompletedJobs({ ownerId: "Lane" });
 		expect([manager.getJob(lane), manager.getJob(arm)]).toEqual([undefined, undefined]);
 
+		// Without `includeDescendants` the filter matches Lane's own jobs only.
 		manager.cancelAll({ ownerId: "Lane" });
+		expect(manager.getJob(armBash)?.status).toBe("running");
+		manager.cancelAll({ ownerId: "Lane", includeDescendants: true });
 
 		expect(manager.getJob(armBash)?.status).toBe("cancelled");
+		await manager.waitForAll();
+	});
+
+	test("an agent's tree follows registry spawn edges, and a re-spawned id belongs to its new parent", async () => {
+		const runUntilAborted = async ({ signal }: { signal: AbortSignal }) => {
+			const aborted = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+			await aborted.promise;
+			return "stopped";
+		};
+		// Live spawn edges: Arm was spawned by Lane as a blocking task (no job row
+		// records it); X was first spawned by Old and is now registered under New.
+		const edges: [string, string][] = [
+			["Lane", "Main"],
+			["Lane.Arm", "Lane"],
+			["X", "New"],
+		];
+		const manager = new AsyncJobManager({ onJobComplete: async () => {}, agentParents: () => edges });
+		const grand = manager.register("task", "Grand", runUntilAborted, {
+			id: "Lane.Arm.Grand",
+			ownerId: "Lane.Arm",
+			agentId: "Lane.Arm.Grand",
+		});
+		// X's old run as a job of Old recorded the stale edge X → Old.
+		const oldX = manager.register("task", "X", async () => "old X done", {
+			id: "X-old",
+			ownerId: "Old",
+			agentId: "X",
+		});
+		await manager.getJob(oldX)!.promise;
+		const xWork = manager.register("bash", "X work", runUntilAborted, { ownerId: "X" });
+
+		manager.cancelAll({ ownerId: "Old", includeDescendants: true });
+		expect([manager.getJob(xWork)?.status, manager.getJob(grand)?.status]).toEqual(["running", "running"]);
+
+		manager.cancelAll({ ownerId: "Lane", includeDescendants: true });
+		expect([manager.getJob(grand)?.status, manager.getJob(xWork)?.status]).toEqual(["cancelled", "running"]);
+
+		manager.cancelAll({ ownerId: "New", includeDescendants: true });
+		expect(manager.getJob(xWork)?.status).toBe("cancelled");
 		await manager.waitForAll();
 	});
 

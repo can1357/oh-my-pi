@@ -3526,7 +3526,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		releaseJudgmentBatches(this.#agentId);
 		WorkPoolRegistry.global().releaseOwner(this.#agentId);
 		const manager = this.#asyncJobManager;
-		manager?.cancelAll({ ownerId: this.#agentId }, reason);
+		// The agent's conversation ends here, and with it the work of every agent
+		// spawned under it: their background jobs outlive their own runs.
+		manager?.cancelAll({ ownerId: this.#agentId, includeDescendants: true }, reason);
 		manager?.evictCompletedJobs({ ownerId: this.#agentId });
 		// Invalidate this owner's in-flight/drained deliveries against the new
 		// generation, then drop any async-result follow-up already queued, so a
@@ -13057,13 +13059,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Whether background work this agent owns still owes it a turn: a running job
-	 * whose result will wake it, or a delivered result not yet injected. The
-	 * lifecycle must not park this session yet, since parking disposes it, which
-	 * cancels those jobs and drops their results.
+	 * Whether disposing this session now would end background work or drop a
+	 * result: background work this agent owns still owes it a turn (a running job
+	 * whose result will wake it, or a delivered result not yet injected), or a job
+	 * of an agent spawned under it still runs. Disposal ends the agent's whole
+	 * tree's work, so the lifecycle must not park this session yet.
 	 */
-	get asyncWakePending(): boolean {
-		return this.#hasPendingAsyncWake();
+	get backgroundWorkPending(): boolean {
+		const manager = this.#asyncJobManager;
+		return (
+			this.#hasPendingAsyncWake() ||
+			(manager !== undefined &&
+				this.#agentId !== undefined &&
+				manager.getRunningJobs({ ownerId: this.#agentId, includeDescendants: true }).length > 0)
+		);
 	}
 
 	/** Emits an IRC relay observation for UI rendering without persisting it. */

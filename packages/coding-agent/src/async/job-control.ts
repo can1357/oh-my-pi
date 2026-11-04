@@ -431,10 +431,10 @@ export async function executeCancel(
 		}
 		if (existing.status !== "running") {
 			// The job row settled but may still be inside the retention window.
-			// The agent registration behind it (job id == agent id for task
-			// spawns) can outlive the row as an idle/parked zombie — try the
-			// registration kill before reporting the row as already done.
-			const regOutcome = await cancelAgentRegistration(session, ownerId, id);
+			// The agent registration behind it can outlive the row as an
+			// idle/parked agent whose background work still runs: kill the agent
+			// the job ran (a workpool batch's job id is not its agent's id).
+			const regOutcome = await cancelAgentRegistration(session, ownerId, existing.agentId ?? id);
 			cancelOutcomes.push(
 				regOutcome.status === "cancelled"
 					? regOutcome
@@ -483,6 +483,10 @@ export async function cancelAgentRegistration(
 	}
 	const lifecycle = session.agentLifecycle?.();
 	try {
+		// The agent ends here, and with it the work of its whole tree: its kept
+		// background jobs and those of the agents it spawned, however they were
+		// spawned. A parked agent has no session whose disposal would do it.
+		session.asyncJobManager?.cancelAll({ ownerId: id, includeDescendants: true });
 		if (ref.status === "running" && ref.session) {
 			await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 		}

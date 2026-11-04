@@ -56,6 +56,7 @@ export class SpawnRun {
 	#onArtifactsRetained: ((cleanup: () => Promise<void>) => void) | undefined;
 	#retainedCleanup: (() => Promise<void>) | undefined;
 	#discarded = false;
+	readonly #endAgents: ((result: AgentToolResult<TaskToolDetails>) => Promise<void>) | undefined;
 	/**
 	 * The subagent's finished tool calls with their results, as the `tools`
 	 * source of its job widget; closed once the run settles.
@@ -66,12 +67,19 @@ export class SpawnRun {
 	/** The run's payload; rejects only when `started` does. */
 	readonly result: Promise<AgentToolResult<TaskToolDetails>>;
 
-	/** Acquire a permit, then run `body` and release the permit when it settles. */
+	/**
+	 * Acquire a permit, then run `body` and release the permit when it settles.
+	 * `endAgents` ends the agents a discarded run spawned, once it has settled:
+	 * a subagent's background work outlives its run, so aborting the run's
+	 * signal after the run returned reaches nothing.
+	 */
 	constructor(
 		permit: SpawnPermit,
 		body: (run: SpawnRunBody) => Promise<AgentToolResult<TaskToolDetails>>,
 		readonly identity: SpawnIdentity,
+		endAgents?: (result: AgentToolResult<TaskToolDetails>) => Promise<void>,
 	) {
+		this.#endAgents = endAgents;
 		const invokedAt = Date.now();
 		this.started = permit.acquire(this.#controller.signal).then(() => ({ invokedAt, acquiredAt: Date.now() }));
 		this.result = this.started.then(async timing => {
@@ -124,12 +132,18 @@ export class SpawnRun {
 		}
 	}
 
-	/** Abort an unadopted run and drop anything it retained; nothing ever consumes its result. */
+	/**
+	 * Abort an unadopted run and drop anything it retained; nothing ever consumes
+	 * its result. The agents it ran end with it, also when the run had already
+	 * returned: their kept background work has no other owner.
+	 */
 	discard(reason: string): void {
 		this.#discarded = true;
 		this.#controller.abort(new Error(reason));
 		const retained = this.#retainedCleanup;
 		this.#retainedCleanup = undefined;
 		if (retained) void retained();
+		const endAgents = this.#endAgents;
+		if (endAgents) void this.result.then(endAgents).catch(() => {});
 	}
 }

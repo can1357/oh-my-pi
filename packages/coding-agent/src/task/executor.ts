@@ -1570,15 +1570,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	/** Owner async work that can still re-wake the run (quiescence barrier predicate). */
 	const sessionHasPendingAsyncWork = (): boolean => activeSession?.hasPendingAsyncWork?.() ?? false;
 
-	// Handle abort signal
+	// Handle abort signal, including one its caller aborted before this run or
+	// turn began: no `abort` event follows for it.
 	if (signal) {
-		signal.addEventListener(
-			"abort",
-			() => {
-				if (!resolved) requestAbort(signal.reason === ASYNC_JOB_MANAGER_SHUTDOWN_REASON ? "shutdown" : "signal");
-			},
-			{ once: true, signal: listenerSignal },
-		);
+		const onCallerAbort = () => {
+			if (!resolved) requestAbort(signal.reason === ASYNC_JOB_MANAGER_SHUTDOWN_REASON ? "shutdown" : "signal");
+		};
+		if (signal.aborted) onCallerAbort();
+		else signal.addEventListener("abort", onCallerAbort, { once: true, signal: listenerSignal });
 	}
 
 	// Wall-clock hard limit. Defense-in-depth for the case where a provider stream
@@ -3613,10 +3612,10 @@ export function ownerJobsOutliveRun(args: {
 }
 
 /**
- * For as long as a run or follow-up turn has not returned to its caller, a
- * cancel by that caller stops the background jobs the agent owns (and their
- * own children's), whenever it lands: before or after an earlier timeout or
- * budget stop won the run's abort reason, before or after
+ * From the moment a run or follow-up turn is entered until it returns to its
+ * caller, a cancel by that caller ends the work of the agent's whole tree,
+ * whenever it lands: already aborted on entry, during setup, before or after an
+ * earlier timeout or budget stop won the run's abort reason, before or after
  * {@link ownerJobsOutliveRun} decided to keep the jobs, during the result's
  * publication. A cancel of the job that runs the agent is the job manager's.
  * Returns the detach the run or turn calls as it returns.
@@ -3627,7 +3626,11 @@ function cancelOwnerJobsOnCallerCancel(
 	id: string,
 ): () => void {
 	if (!signal || !manager) return () => {};
-	const onAbort = (): void => manager.cancelAll({ ownerId: id }, signal.reason);
+	const onAbort = (): void => manager.cancelAll({ ownerId: id, includeDescendants: true }, signal.reason);
+	if (signal.aborted) {
+		onAbort();
+		return () => {};
+	}
 	signal.addEventListener("abort", onAbort, { once: true });
 	return () => signal.removeEventListener("abort", onAbort);
 }
@@ -3853,9 +3856,11 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	if (!isLocalAgentSession(session)) return runFollowUpTurnOnHome(session, options);
 	// A turn of a main-homed session loads the main thread like a placed run.
 	const endMainRun = isMainThread() ? existingSubagentWorkerPool()?.beginMainRun() : undefined;
+	const detachCallerCancel = cancelOwnerJobsOnCallerCancel(options.signal, session.asyncJobManager, options.id);
 	try {
 		return await driveFollowUpTurn(options, session, startTime);
 	} finally {
+		detachCallerCancel();
 		endMainRun?.();
 	}
 }
@@ -3866,7 +3871,13 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
  */
 export async function runFollowUpTurnOnThisThread(options: FollowUpTurnOptions): Promise<SingleResult> {
 	const startTime = Date.now();
-	return driveFollowUpTurn(options, await ensureLocalLive(options.id), startTime);
+	const session = await ensureLocalLive(options.id);
+	const detachCallerCancel = cancelOwnerJobsOnCallerCancel(options.signal, session.asyncJobManager, options.id);
+	try {
+		return await driveFollowUpTurn(options, session, startTime);
+	} finally {
+		detachCallerCancel();
+	}
 }
 
 /** The follow-up turn itself, on `live`, the subagent's revived local session. */
@@ -3978,7 +3989,7 @@ async function driveFollowUpTurn(
 	// As in a first run: this turn's monitor would take a wake turn's answer
 	// (or its `yield`) as this turn's result, so non-parent wakes wait for it.
 	const releaseIrcWakes = session.holdIrcWakes();
-	const detachCallerCancel = cancelOwnerJobsOnCallerCancel(signal, session.asyncJobManager, id);
+	// The caller's cancel is bound by the entry points around this turn.
 	try {
 		try {
 			outcome = await driveSessionToResult(session, monitor, message, {
@@ -4040,7 +4051,6 @@ async function driveFollowUpTurn(
 		});
 	} finally {
 		releaseIrcWakes();
-		detachCallerCancel();
 	}
 }
 

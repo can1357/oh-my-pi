@@ -808,10 +808,11 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			adopted.timer = undefined;
 			// A session still owing turns would lose them when parked: IRC messages
 			// (held by a run publishing its result, or queued) would be dropped, and
-			// the dispose would cancel the background jobs it owns (its `task`
-			// children) and drop their results. Try again once the TTL passes anew.
+			// the dispose would end the background work of the agent's whole tree
+			// (its `task` children and theirs) and drop their results. Try again once
+			// the TTL passes anew.
 			const session = adopted.ref.session;
-			if (session?.ircWakesPending || session?.asyncWakePending) {
+			if (session?.ircWakesPending || session?.backgroundWorkPending) {
 				this.#armTimer(id, adopted);
 				return;
 			}

@@ -29,6 +29,7 @@ import { $env, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils
 import type { ToolSession } from "..";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { Settings } from "../config/settings";
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskAsyncContractTemplate from "../prompts/tools/task-async-contract.md" with { type: "text" };
@@ -1026,7 +1027,26 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					run.tools,
 				),
 			{ agentId: spawn.agentId, detached: spawn.detached },
+			result => this.#endDiscardedAgents(result),
 		);
+	}
+
+	/**
+	 * End the agents a discarded run spawned: an unadopted launch has no owner to
+	 * hear from them, and their background work (kept past the run's end) would
+	 * otherwise run on with nobody to take its results. The transcript stays on
+	 * disk, as for any released agent.
+	 */
+	async #endDiscardedAgents(result: AgentToolResult<TaskToolDetails>): Promise<void> {
+		const lifecycle = this.session.agentLifecycle?.() ?? AgentLifecycleManager.global();
+		for (const { id } of result.details?.results ?? []) {
+			this.session.asyncJobManager?.cancelAll({ ownerId: id, includeDescendants: true });
+			try {
+				await lifecycle.release(id);
+			} catch (error) {
+				logger.warn("Discarded speculative task: releasing its agent failed", { id, error: String(error) });
+			}
+		}
 	}
 
 	/**

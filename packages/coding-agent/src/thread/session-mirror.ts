@@ -64,7 +64,7 @@ export interface SessionMirrorState {
 	isStreaming: boolean;
 	runStartedAt: number | undefined;
 	ircWakesPending: boolean;
-	asyncWakePending: boolean;
+	backgroundWorkPending: boolean;
 	/** Senders with a message still queued for a turn of its own (backs `hasQueuedIrcFrom`). */
 	ircQueuedFrom: string[];
 	isPaused: boolean;
@@ -339,7 +339,7 @@ export const SESSION_STATE_READERS: {
 	isStreaming: session => session.isStreaming,
 	runStartedAt: session => session.runStartedAt,
 	ircWakesPending: session => session.ircWakesPending,
-	asyncWakePending: session => session.asyncWakePending,
+	backgroundWorkPending: session => session.backgroundWorkPending,
 	isPaused: session => session.agent.isPaused,
 	streamMessage: session => toWireData(session.agent.state.streamMessage),
 	pendingToolCalls: session => [...session.agent.state.pendingToolCalls],
