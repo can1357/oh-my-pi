@@ -61,6 +61,11 @@ export interface FocusProbe {
 	openDialog(id: string, prompt: string, kind: BlockedKind): Promise<void>;
 	/** Answer the dialog {@link openDialog} opened; resolves once the session closed its wait. */
 	answerDialog(id: string): Promise<void>;
+	/**
+	 * Begin disposing the session from inside the next `user_wait_start` it delivers, from a listener
+	 * registered after the session's publisher, as an embedder that tears down on a dialog does.
+	 */
+	disposeOnWaitStart(id: string): Promise<void>;
 }
 
 /** Test-only boot globals of the probe service. */
@@ -210,6 +215,14 @@ const probe: FocusProbe = {
 		dialogs.delete(id);
 		dialog.answer();
 		await dialog.settled;
+	},
+	disposeOnWaitStart: async id => {
+		const session = local(id);
+		const stop = session.subscribe(event => {
+			if (event.type !== "user_wait_start") return;
+			stop();
+			session.beginDispose();
+		});
 	},
 };
 

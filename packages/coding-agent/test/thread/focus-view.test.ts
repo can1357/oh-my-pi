@@ -78,6 +78,9 @@ async function mainRegistry(): Promise<ModelRegistry> {
 	return new ModelRegistry(authStorage, modelsPath, { cacheDbPath: path.join(dir, "models.db") });
 }
 
+/** Workers this test started, newest last, so a test can end one the way a crash does. */
+const startedWorkers: SubagentWorker[] = [];
+
 async function startWorker(): Promise<FocusProbe> {
 	const probe = Promise.withResolvers<FocusProbe>();
 	const probeService: ThreadService = {
@@ -89,7 +92,11 @@ async function startWorker(): Promise<FocusProbe> {
 		services: [identityThreadService, agentsThreadService, authService, probeService],
 		initTimeoutMs: 60_000,
 	});
-	cleanups.push(() => worker.terminate("test end"));
+	startedWorkers.push(worker);
+	cleanups.push(() => {
+		startedWorkers.splice(startedWorkers.indexOf(worker), 1);
+		worker.terminate("test end");
+	});
 	await worker.ready;
 	return probe.promise;
 }
@@ -597,5 +604,53 @@ describe("run status of a focused worker-homed session", () => {
 		await probe.answerDialog("W1");
 		await focus.focusAgent("W1");
 		expect(statuses.at(-1)).toEqual({ state: "idle" });
+	});
+
+	it("tells the mirror's subscribers a worker dialog ended when its session is disposed inside the start", async () => {
+		// The worker session is disposed from a listener during its dialog's start. Its end is
+		// published after that start, but disposal closes the publisher and then the mirror before
+		// it does: the mirror's subscribers, the focused view among them, were told the wait started
+		// and never told it ended, and the terminal kept reporting a disposed session blocked.
+		const probe = await startWorker();
+		await probe.open("W1", await mainRegistry(), {});
+		const mirror = mirrorOf("W1");
+		const { focus, statuses } = statusView();
+		await focus.focusAgent("W1");
+		const frames: string[] = [];
+		cleanups.push(
+			mirror.subscribe(event => {
+				if (event.type === "user_wait_start" || event.type === "user_wait_end") frames.push(event.type);
+			}),
+		);
+		await probe.disposeOnWaitStart("W1");
+		await probe.openDialog("W1", approval, "permission");
+		await waitFor(() => mirror.closed);
+
+		expect(frames).toEqual(["user_wait_start", "user_wait_end"]);
+		expect(mirror.activeUserWait()).toBeUndefined();
+		expect(statuses).toContainEqual(blocked);
+		expect(statuses.at(-1)).toEqual({ state: "idle" });
+		await probe.answerDialog("W1");
+	});
+
+	it("tells the mirror's subscribers a worker dialog ended when the worker dies with it open", async () => {
+		// A dead worker sends no end of its own: the mirror is the last thing that knows the wait
+		// was reported, so it must end it before it drops its subscribers.
+		const probe = await startWorker();
+		await probe.open("W1", await mainRegistry(), {});
+		const mirror = mirrorOf("W1");
+		const frames: string[] = [];
+		cleanups.push(
+			mirror.subscribe(event => {
+				if (event.type === "user_wait_start" || event.type === "user_wait_end") frames.push(event.type);
+			}),
+		);
+		await probe.openDialog("W1", approval, "permission");
+		await waitFor(() => frames.length > 0);
+
+		startedWorkers.at(-1)?.terminate("test: worker died with a dialog open");
+		await waitFor(() => mirror.closed);
+		expect(frames).toEqual(["user_wait_start", "user_wait_end"]);
+		expect(mirror.activeUserWait()).toBeUndefined();
 	});
 });

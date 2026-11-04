@@ -963,15 +963,18 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	/**
 	 * Bridge only: the home closed the session or died. The mirror keeps its
-	 * last data, reports idle to run-state subscribers that saw it running,
-	 * and drops every listener.
+	 * last data, tells subscribers an open dialog's wait ended, reports idle to
+	 * run-state subscribers that saw it running, and drops every listener.
 	 */
 	close(reason: string): void {
 		if (this.#closed !== undefined) return;
 		const wasRunning = this.#state.runStartedAt !== undefined;
 		this.#state = { ...this.#state, isStreaming: false, runStartedAt: undefined, streamMessage: null };
-		// Nobody is left to answer: the dialog went with its home.
-		this.#userWait = undefined;
+		// Nobody is left to answer: the dialog went with its home. A subscriber told the wait
+		// started must hear it ended before it is dropped, whatever closed the home — the worker's
+		// own end can be lost behind the close (a session disposed while its start is still being
+		// delivered closes its publisher first), and a worker that died sends none at all.
+		if (this.#userWait) this.applyEvent({ type: "user_wait_end" });
 		if (wasRunning) this.applyRunState("idle");
 		this.#closed = reason;
 		this.#settledQueued.clear();
