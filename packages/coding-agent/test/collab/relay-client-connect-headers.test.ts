@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { generateRoomKey, importRoomKey } from "../../src/collab/crypto";
 import { CollabSocket } from "../../src/collab/relay-client";
 
-const ORIGINAL_WEBSOCKET = globalThis.WebSocket;
+const NativeWebSocket = globalThis.WebSocket;
+
+function installWebSocket(value: unknown): void {
+	Object.defineProperty(globalThis, "WebSocket", { configurable: true, value });
+}
 
 /** Records each constructed socket; never connects. */
 class RecordingWebSocket {
@@ -31,7 +35,7 @@ describe("CollabSocket connect headers", () => {
 		for (const socket of sockets.splice(0)) socket.close();
 		server?.stop(true);
 		server = undefined;
-		globalThis.WebSocket = ORIGINAL_WEBSOCKET;
+		installWebSocket(NativeWebSocket);
 		RecordingWebSocket.instances = [];
 	});
 
@@ -76,12 +80,12 @@ describe("CollabSocket connect headers", () => {
 	});
 
 	it("opens no socket when close() runs while the headers are pending", async () => {
-		globalThis.WebSocket = RecordingWebSocket as unknown as typeof WebSocket;
+		installWebSocket(RecordingWebSocket);
 		const pending = Promise.withResolvers<Record<string, string> | undefined>();
 		const socket = new CollabSocket({
 			wsUrl: "ws://localhost:8788/r/pendingRoom01",
 			role: "host",
-			key: {} as CryptoKey,
+			key: await importRoomKey(generateRoomKey()),
 			connectHeaders: () => pending.promise,
 		});
 		const closes: string[] = [];
@@ -96,12 +100,33 @@ describe("CollabSocket connect headers", () => {
 		expect(closes).toEqual(["closed"]);
 	});
 
+	it("fires onConnecting only once the headers resolve and the socket exists", async () => {
+		installWebSocket(RecordingWebSocket);
+		const pending = Promise.withResolvers<Record<string, string> | undefined>();
+		const socket = new CollabSocket({
+			wsUrl: "ws://localhost:8788/r/slowHeaders01",
+			role: "host",
+			key: await importRoomKey(generateRoomKey()),
+			connectHeaders: () => pending.promise,
+		});
+		sockets.push(socket);
+		const socketsAtConnecting: number[] = [];
+		socket.onConnecting = () => socketsAtConnecting.push(RecordingWebSocket.instances.length);
+		socket.connect();
+		await Bun.sleep(0);
+		expect(socketsAtConnecting).toEqual([]);
+
+		pending.resolve({ Authorization: "Bearer slow" });
+		await Bun.sleep(0);
+		expect(socketsAtConnecting).toEqual([1]);
+	});
+
 	it("connects without the headers when the provider rejects", async () => {
-		globalThis.WebSocket = RecordingWebSocket as unknown as typeof WebSocket;
+		installWebSocket(RecordingWebSocket);
 		const socket = new CollabSocket({
 			wsUrl: "ws://localhost:8788/r/rejectRoom01",
 			role: "guest",
-			key: {} as CryptoKey,
+			key: await importRoomKey(generateRoomKey()),
 			connectHeaders: async () => {
 				throw new Error("token refresh failed");
 			},
@@ -114,15 +139,17 @@ describe("CollabSocket connect headers", () => {
 	});
 
 	it("ends the socket through onClose when the transport constructor throws after the headers", async () => {
-		globalThis.WebSocket = class {
-			constructor() {
-				throw new Error("transport setup failed");
-			}
-		} as unknown as typeof WebSocket;
+		installWebSocket(
+			class {
+				constructor() {
+					throw new Error("transport setup failed");
+				}
+			},
+		);
 		const socket = new CollabSocket({
 			wsUrl: "ws://localhost:8788/r/throwRoom01",
 			role: "guest",
-			key: {} as CryptoKey,
+			key: await importRoomKey(generateRoomKey()),
 			connectHeaders: async () => ({ Authorization: "Bearer x" }),
 		});
 		const closed = Promise.withResolvers<{ reason: string; willReconnect: boolean }>();

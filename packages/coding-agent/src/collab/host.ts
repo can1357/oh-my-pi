@@ -452,12 +452,16 @@ export class CollabHost {
 				this.#onEnded?.();
 			}
 		};
+		// The deadline covers the relay, not the connect-header wait before the first socket.
+		let timeout: NodeJS.Timeout | undefined;
+		socket.onConnecting = () => {
+			if (opened || timeout) return;
+			timeout = setTimeout(
+				() => firstOpen.reject(new CollabRelayUnavailableError("timed out connecting to relay")),
+				CONNECT_TIMEOUT_MS,
+			);
+		};
 		socket.connect();
-
-		const timeout = setTimeout(
-			() => firstOpen.reject(new CollabRelayUnavailableError("timed out connecting to relay")),
-			CONNECT_TIMEOUT_MS,
-		);
 		try {
 			await firstOpen.promise;
 		} catch (err) {

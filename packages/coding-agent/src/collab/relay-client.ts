@@ -104,6 +104,12 @@ export interface CollabSocketOptions {
 export class CollabSocket {
 	/** Fires after every successful (re)connect. */
 	onOpen?: () => void;
+	/**
+	 * Fires each time a WebSocket is created: after {@link CollabSocketOptions.connectHeaders}
+	 * resolves, on the first connect and on every reconnect. Connect deadlines start here,
+	 * so a slow header provider does not count as a slow relay.
+	 */
+	onConnecting?: () => void;
 	onFrame?: (frame: CollabFrame, fromPeer: number) => void;
 	onControl?: (msg: RelayControlMessage) => void;
 	/** Fires on each close; `willReconnect` distinguishes retries from terminal shutdown. */
@@ -630,6 +636,7 @@ export class CollabSocket {
 			this.#ws = null;
 			this.#handleClose(event.code, event.reason);
 		};
+		this.onConnecting?.();
 	}
 
 	/**

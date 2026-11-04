@@ -434,10 +434,11 @@ export class CollabGuestLink {
 			this.#ctx.showStatus(`Collab session ended (${reason})`);
 			this.#restoreAfterDisconnect();
 		};
+		// Cover a blackholed WebSocket handshake too; onOpen resets the timer. It starts
+		// once the socket exists, so the connect-header wait does not count against it.
+		socket.onConnecting = () => this.#armWelcomeTimer();
 		try {
 			socket.connect();
-			// Cover a blackholed WebSocket handshake too; onOpen resets the timer.
-			this.#armWelcomeTimer();
 			await firstWelcome.promise;
 			if (this.#left) throw new Error("Collab join cancelled");
 		} catch (err) {
