@@ -10,7 +10,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import {
@@ -123,6 +123,7 @@ import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
+import { ServedModelTally } from "./served-model";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
@@ -1411,6 +1412,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 
 	const outputChunks: string[] = [];
+	// Which models wrote this run's answer. Fed only by assistant `message_end`
+	// on this session's own stream, so the helper model calls a transcript also
+	// records (titles, captions, probes, advisor cards) stay out of it.
+	const servedModels = new ServedModelTally();
 	const finalOutputChunks: string[] = [];
 	const RECENT_OUTPUT_TAIL_BYTES = 8 * 1024;
 	let recentOutputTail = "";
@@ -2116,6 +2121,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					assistantStreaming = false;
 					sawAssistantMessage = true;
 					progress.requests += 1;
+					// Attribution reads the message itself, not the session's configured
+					// model: a swap mid-run leaves both in the same stream, and only the
+					// message knows which one wrote it.
+					// A turn that produced nothing is not credited, and leaves the
+					// published snapshot as it was.
+					if (servedModels.record(event.message as AssistantMessage)) {
+						progress.servedModels = servedModels.snapshot();
+					}
 					const eventContent = isRecord(event) && "content" in event ? event.content : undefined;
 					const messageContent = getMessageContent(event.message) || eventContent;
 					if (messageContent && Array.isArray(messageContent)) {
@@ -3048,6 +3061,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		resolvedThinkingLevel: progress.resolvedThinkingLevel,
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
 		resolvedModelRoute: progress.resolvedModelRoute,
+		servedModels: progress.servedModels,
 		advisor: progress.advisor,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,

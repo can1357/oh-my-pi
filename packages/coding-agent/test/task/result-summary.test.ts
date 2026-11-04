@@ -144,3 +144,43 @@ describe("formatTaskResultSummary", () => {
 		expect(summary).toContain("real findings");
 	});
 });
+
+describe("<served-by>", () => {
+	it("names the single model that answered and does not mark a change", () => {
+		const summary = formatTaskResultSummary(
+			{ ...settledResult("done"), servedModels: [{ model: "vendor-a/deep-chat", turns: 7 }] },
+			{ totalDurationMs: 5 },
+		);
+
+		expect(summary).toContain("<served-by>vendor-a/deep-chat (7 turns)</served-by>");
+	});
+
+	it("marks a run whose model changed partway and keeps both models in service order", () => {
+		// The whole point of the line: a cross-family reviewer that fell back to
+		// the parent's own family must not read like a clean cross-family run.
+		const summary = formatTaskResultSummary(
+			{
+				...settledResult("done"),
+				servedModels: [
+					{ model: "vendor-b/fast-chat", turns: 2 },
+					{ model: "vendor-a/deep-chat", turns: 9 },
+				],
+			},
+			{ totalDurationMs: 5 },
+		);
+
+		expect(summary).toContain(
+			'<served-by changed="true">vendor-b/fast-chat (2 turns) → vendor-a/deep-chat (9 turns)</served-by>',
+		);
+	});
+
+	it("states unknown rather than omitting the line when no model served", () => {
+		// A missing line would mean both "one model, fine" and "no idea".
+		const summary = formatTaskResultSummary(
+			{ ...settledResult(""), exitCode: 1, stderr: "agent failed", error: "agent failed" },
+			{ totalDurationMs: 5 },
+		);
+
+		expect(summary).toContain("<served-by>unknown (no model attribution on this result)</served-by>");
+	});
+});

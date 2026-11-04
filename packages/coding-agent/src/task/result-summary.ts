@@ -10,6 +10,7 @@ import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: 
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { ASYNC_INLINE_RESULT_MAX_CHARS } from "../session/async-job-delivery";
 import { escapeHarnessTags } from "../session/harness-tags";
+import { formatServedBy, servedModelChanged } from "./served-model";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 
@@ -80,6 +81,8 @@ export function formatTaskResultSummary(
 			abortReason: result.aborted ? escapeHarnessTags(result.abortReason ?? "") || undefined : undefined,
 			error: error === undefined ? undefined : escapeHarnessTags(error),
 			resumable,
+			servedBy: formatServedBy(result.servedModels),
+			servedByChanged: servedModelChanged(result.servedModels),
 			preview: escapeHarnessTags(truncated ? previewHead(output) : output),
 			truncated,
 			meta: result.outputMeta

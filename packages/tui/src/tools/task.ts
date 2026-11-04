@@ -2361,6 +2361,19 @@ export interface YieldItem {
 	schemaOverridden?: boolean;
 }
 
+/**
+ * One model's share of a run's assistant turns.
+ *
+ * `model` is `<provider>/<id>` as the assistant message itself reported it,
+ * suffixed `→<served>` when the provider named a different model as the one
+ * that actually answered (a router's pick, or the model a signed thinking
+ * block identifies) — the case where the configured id is not the truth.
+ */
+export interface ServedModelTurns {
+	model: string;
+	turns: number;
+}
+
 /** Progress tracking for a single agent */
 export interface AgentProgress {
 	index: number;
@@ -2421,6 +2434,13 @@ export interface AgentProgress {
 	resolvedModelIsFallback?: boolean;
 	/** Extension routing note (e.g. model-pools) explaining why {@link resolvedModel} was chosen. */
 	resolvedModelRoute?: string;
+	/**
+	 * Models that have produced this run's assistant turns so far, in the order
+	 * each first served, with each one's turn count. Distinct from
+	 * {@link resolvedModel}, which is only the latest attribution: a run that
+	 * changes model partway keeps both entries here.
+	 */
+	servedModels?: ServedModelTurns[];
 	/** True when a live advisor was attached to this run's session, not merely enabled in settings. */
 	advisor?: boolean;
 	/** The agent's latest self-estimate of task completion (0–100), from the periodic `task.completionProbe` side request. */
@@ -2516,6 +2536,15 @@ export interface SingleResult {
 	resolvedModelIsFallback?: boolean;
 	/** Mirrors {@link AgentProgress.resolvedModelRoute} onto the settled result. */
 	resolvedModelRoute?: string;
+	/**
+	 * Models that produced this run's assistant turns, in the order each first
+	 * served, with the number of turns each produced. Distinct from
+	 * {@link resolvedModel}, which is only the latest attribution: a run that
+	 * changed model partway keeps both entries here, so a fallback is visible
+	 * as a fact about the answer rather than averaged away. Absent when no
+	 * assistant turn was recorded, which the envelope states rather than omits.
+	 */
+	servedModels?: ServedModelTurns[];
 	/** Retains {@link AgentProgress.advisor} after the advised session is disposed. */
 	advisor?: boolean;
 	error?: string;
