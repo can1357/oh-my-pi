@@ -1706,11 +1706,26 @@ export class ModelRegistry {
 		}
 		const withEndpoint = <T extends { baseUrl?: string }>(state: T | undefined) =>
 			state ? { ...state, baseUrl: normalizeModelCacheEndpoint(state.baseUrl) } : null;
+		// `baseUrlApis` is a set written as an array: route resolution only ever
+		// asks `.includes` (`resolveProviderBaseUrl`), so the order two models
+		// were listed in models.yml must not read as a configuration change and
+		// suppress a discovery that is still current. This is the only owner of
+		// that rule — the override keeps the order it was derived in, and no
+		// other configuration array is canonicalised, because an array whose
+		// order a consumer reads must keep it.
+		const withOverride = (state: ProviderOverride | undefined) =>
+			state
+				? {
+						...state,
+						baseUrl: normalizeModelCacheEndpoint(state.baseUrl),
+						baseUrlApis: state.baseUrlApis && [...state.baseUrlApis].sort(),
+					}
+				: null;
 		return canonicalJson({
 			registration: registrationId,
 			discovery: withEndpoint(this.#discoverableProviders.find(provider => provider.provider === providerId)),
-			override: withEndpoint(this.#providerOverrides.get(providerId)),
-			runtimeOverride: withEndpoint(this.#runtimeProviderOverrides.get(providerId)),
+			override: withOverride(this.#providerOverrides.get(providerId)),
+			runtimeOverride: withOverride(this.#runtimeProviderOverrides.get(providerId)),
 			runtimeKey: this.#runtimeProviderApiKeys.get(providerId) ?? null,
 			installedKey: this.#customProviderApiKeys.get(providerId) ?? null,
 			keyless: this.#keylessProviders.has(providerId),
@@ -2223,11 +2238,7 @@ export class ModelRegistry {
 			if (providerConfig.api && (providerConfig.models?.length ?? 0) === 0) {
 				baseUrlApis.add(providerConfig.api);
 			}
-			// Sorted: this set's spelling reaches `#providerConfigIdentity`, and route
-			// resolution only asks `.includes`, so the order two models were written in
-			// must not read as a configuration change. Only this derived set is sorted;
-			// a configuration array whose order means something keeps it.
-			const baseUrlScope = baseUrlApis.size > 0 ? [...baseUrlApis].sort() : undefined;
+			const baseUrlScope = baseUrlApis.size > 0 ? [...baseUrlApis] : undefined;
 			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/guardrail*/transport are present
 			if (
 				providerConfig.baseUrl ||
