@@ -89,36 +89,43 @@ async fn check(rows: &[Row]) {
 /// An external command gets a standard descriptor the script closed, or any
 /// other descriptor it closed, closed, as in Bash, not the null device: a
 /// write to it fails.
+///
+/// Each row turns the command's status into a word of its own, because the
+/// message and the status of a failed write belong to whichever shell
+/// `/bin/sh` is (dash gives 2 for a closed stderr, Bash gives 1); what the
+/// rows pin is the contract both report: the write fails, the command says
+/// so, and the text never reaches the host's own stream or a file.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_closed_descriptor_stays_closed_in_an_external_command() {
 	check(&[
 		Row {
-			script: "/bin/sh -c 'echo LEAKED >&2' 2>&-; echo s=$?",
+			script: "/bin/sh -c 'echo LEAKED >&2' 2>&-; if [ $? -ne 0 ]; then echo closed; fi",
 			fifos:  &[],
-			output: "s=2\n",
+			output: "closed\n",
 			status: 0,
 			files:  &[],
 		},
 		Row {
-			script: "/bin/sh -c 'echo LEAKED' >&-; echo s=$?",
+			script: "/bin/sh -c 'echo LEAKED' >&- 2>e; if [ $? -ne 0 ]; then echo closed; fi; if [ \
+			         -s e ]; then echo diagnosed; fi; if grep -q LEAKED e; then echo leaked; fi",
 			fifos:  &[],
-			output: "/bin/sh: 1: echo: echo: I/O error\ns=1\n",
+			output: "closed\ndiagnosed\n",
 			status: 0,
 			files:  &[],
 		},
 		Row {
-			script: "{ /bin/sh -c 'echo X >&5; echo s=$?' 5>&-; } 5>f",
+			script: "{ /bin/sh -c 'echo X >&5' 5>&- 2>e; if [ $? -ne 0 ]; then echo closed; fi; } 5>f",
 			fifos:  &[],
-			output: "/bin/sh: 1: 5: Bad file descriptor\ns=2\n",
+			output: "closed\n",
 			status: 0,
 			files:  &[("f", Some(""))],
 		},
 		// A background command whose FIFO open its own process makes.
 		Row {
-			script: "/bin/sh -c 'echo LEAKED >&2; echo st=$?' 2>&- >f & /bin/cat f; wait $!; echo \
-			         s=$?",
+			script: "/bin/sh -c 'echo LEAKED >&2; if [ $? -ne 0 ]; then echo closed; fi' 2>&- >f & \
+			         /bin/cat f; wait $!; echo s=$?",
 			fifos:  &["f"],
-			output: "st=2\ns=0\n",
+			output: "closed\ns=0\n",
 			status: 0,
 			files:  &[],
 		},
