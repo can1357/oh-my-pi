@@ -709,9 +709,7 @@ fn wait_all(ctx: &mut Ctx<'_, '_>, force: bool) -> R {
 	// is still running for bash's `wait`.
 	let keep = ctx.vp.last_bg.vpid().filter(|&v| {
 		ctx.vp.jobs.by_vpid(v).is_some_and(|job| {
-			matches!(job.state, JobState::Done(_))
-				&& !job.notified
-				&& ctx.vp.jobs.bang_seen() == v.0
+			matches!(job.state, JobState::Done(_)) && !job.notified && ctx.vp.jobs.bang_seen() == v.0
 		})
 	});
 	let mut list = Vec::new();
@@ -757,7 +755,13 @@ fn wait_any(ctx: &mut Ctx<'_, '_>, args: &[BString], into: Option<BString>) -> R
 	let mut list: Vec<(u32, Vpid)> = Vec::new();
 	let mut subs: Vec<Vpid> = Vec::new();
 	if args.is_empty() {
-		list.extend(ctx.vp.jobs.iter().filter(|j| !j.inherited).map(|j| (j.number, j.vpid)));
+		list.extend(
+			ctx.vp
+				.jobs
+				.iter()
+				.filter(|j| !j.inherited)
+				.map(|j| (j.number, j.vpid)),
+		);
 	} else {
 		for a in args {
 			let Some(pid) = number(a).and_then(|n| u32::try_from(n).ok()) else {
@@ -766,17 +770,14 @@ fn wait_any(ctx: &mut Ctx<'_, '_>, args: &[BString], into: Option<BString>) -> R
 			if ctx.vp.jobs.by_pid(pid).is_some() {
 				continue;
 			}
-			let kept = match ctx.vp.jobs.kept_status(pid) {
-				Some(s) => Some(s),
-				None => {
-					let v = ctx.vp.vpid_of(pid);
-					if ctx.k.started(ctx.cx.store, ctx.vp.vpid, v) {
-						ctx.k.proc_collect(ctx.cx.store, v)
-					} else {
-						None
-					}
-				},
-			};
+			let kept = ctx.vp.jobs.kept_status(pid).or_else(|| {
+				let v = ctx.vp.vpid_of(pid);
+				if ctx.k.started(ctx.cx.store, ctx.vp.vpid, v) {
+					ctx.k.proc_collect(ctx.cx.store, v)
+				} else {
+					None
+				}
+			});
 			if let Some(status) = kept {
 				let wait = Wait {
 					children: Vec::new(),
@@ -792,20 +793,24 @@ fn wait_any(ctx: &mut Ctx<'_, '_>, args: &[BString], into: Option<BString>) -> R
 		}
 		for a in args {
 			let job = match number(a).and_then(|n| u32::try_from(n).ok()) {
-				Some(p) => ctx.vp.jobs.by_pid(p).filter(|j| !j.inherited).map(|j| (j.number, j.vpid)),
+				Some(p) => ctx
+					.vp
+					.jobs
+					.by_pid(p)
+					.filter(|j| !j.inherited)
+					.map(|j| (j.number, j.vpid)),
 				None => super::jobs::spec(ctx, a)
 					.ok()
 					.and_then(|n| ctx.vp.jobs.get(n))
 					.filter(|j| !j.inherited)
 					.map(|j| (j.number, j.vpid)),
 			};
-			match job {
-				Some(entry) => {
-					if !list.contains(&entry) {
-						list.push(entry);
-					}
-				},
-				None => {
+			if let Some(entry) = job {
+				if !list.contains(&entry) {
+					list.push(entry);
+				}
+			} else {
+				{
 					let sub = number(a)
 						.and_then(|n| u32::try_from(n).ok())
 						.map(|p| ctx.vp.vpid_of(p))
@@ -818,7 +823,7 @@ fn wait_any(ctx: &mut Ctx<'_, '_>, args: &[BString], into: Option<BString>) -> R
 						None if a.starts_with(b"%") => super::jobs::no_such_job(ctx, a),
 						None => ctx.usage(format!("`{}': not a pid or valid job spec", a.as_bstr())),
 					}
-				},
+				}
 			}
 		}
 		if list.is_empty() && subs.is_empty() {
@@ -829,6 +834,7 @@ fn wait_any(ctx: &mut Ctx<'_, '_>, args: &[BString], into: Option<BString>) -> R
 	list.sort_unstable_by_key(|&(n, _)| n);
 	let mut children: Vec<Vpid> = list.into_iter().map(|(_, v)| v).collect();
 	children.extend(subs);
-	let wait = Wait { children, all: false, any: true, into, force: true, foreground: false, kept: None };
+	let wait =
+		Wait { children, all: false, any: true, into, force: true, foreground: false, kept: None };
 	Ok(Outcome { status: 0, control: Control::Wait(wait) })
 }

@@ -180,7 +180,7 @@ async fn every_subshell_sees_the_parents_bang() {
 			r#"f(){ sleep 0.2; }; f & p=$!; ( wait "$p" 2>/dev/null; echo "s=$?" ); wait "$!"; echo "t=$?""#,
 			"s=127\nt=0\n",
 		),
-		(r#"f(){ sleep 0.2; }; f & ( wait 2>&1 ); echo done; wait"#, "done\n"),
+		(r"f(){ sleep 0.2; }; f & ( wait 2>&1 ); echo done; wait", "done\n"),
 	])
 	.await;
 }
@@ -223,7 +223,7 @@ async fn wait_without_operands_keeps_only_an_unreported_bang() {
 async fn a_trapped_job_signal_spares_what_the_job_runs() {
 	assert_bash_outputs(&[
 		(r#"f(){ trap 'echo got' TERM; /bin/sleep .3 | /bin/cat; echo "inner=$?"; }; f & /bin/sleep .1; kill %1; wait %1; echo status=$?"#, "got\ninner=0\nstatus=0\n"),
-		(r#"f(){ trap 'echo got' TERM; ( /bin/sleep .3; echo inner ); }; f & /bin/sleep .1; kill %1; wait %1; echo status=$?"#, "inner\ngot\nstatus=0\n"),
+		(r"f(){ trap 'echo got' TERM; ( /bin/sleep .3; echo inner ); }; f & /bin/sleep .1; kill %1; wait %1; echo status=$?", "inner\ngot\nstatus=0\n"),
 	])
 	.await;
 }
@@ -236,8 +236,8 @@ async fn a_trapped_job_signal_spares_what_the_job_runs() {
 async fn waits_and_forks_clean_up_as_bash_does() {
 	assert_bash_outputs(&[
 		(r#"f(){ return 3; }; g(){ sleep .3; return 7; }; f & a=$!; g & b=$!; /bin/sleep .1; wait "$a"; wait -n -p w "$a" "$b"; echo "status=$? w=$([ "$w" = "$a" ] && echo a || echo b)""#, "status=3 w=a\n"),
-		(r#"f(){ return 6; }; f & wait %1; /not/existing 2>/dev/null; wait %1 2>/dev/null; echo status=$?"#, "status=127\n"),
-		(r#"f(){ return 6; }; f & wait %1; nosuchcommand17678 2>/dev/null; wait %1 2>/dev/null; echo status=$?"#, "status=127\n"),
+		(r"f(){ return 6; }; f & wait %1; /not/existing 2>/dev/null; wait %1 2>/dev/null; echo status=$?", "status=127\n"),
+		(r"f(){ return 6; }; f & wait %1; nosuchcommand17678 2>/dev/null; wait %1 2>/dev/null; echo status=$?", "status=127\n"),
 		(r#"f(){ sleep .1; return 3; }; g(){ sleep .3; return 7; }; f & a=$!; g & wait "$a"; wait %%; echo current=$?; wait %- 2>/dev/null; echo previous=$?; wait %% 2>/dev/null; echo current2=$?"#, "current=7\nprevious=127\ncurrent2=127\n"),
 	])
 	.await;
@@ -250,7 +250,7 @@ async fn waits_and_forks_clean_up_as_bash_does() {
 async fn children_keep_their_pids_and_statuses() {
 	assert_bash_outputs(&[
 		(r#"exec 3< <( /bin/sleep .05; exit 8 ); p=$!; f(){ return 6; }; f & q=$!; /bin/sleep .2; wait "$p" 2>/dev/null; echo procsub=$?; wait "$q"; echo job=$?; exec 3<&-"#, "procsub=8\njob=6\n"),
-		(r#"f(){ :; }; for ((i=0;i<50;i++)); do f & done; /bin/sleep .1; set -- $(jobs -p); echo jobs=$#; wait"#, "jobs=1\n"),
+		(r"f(){ :; }; for ((i=0;i<50;i++)); do f & done; /bin/sleep .1; set -- $(jobs -p); echo jobs=$#; wait", "jobs=1\n"),
 		(r#"/bin/sleep 0.3 & disown %1; p=$!; /bin/kill -0 "$p" 2>/dev/null && echo os-alive || echo gone"#, "os-alive\n"),
 	])
 	.await;
@@ -261,7 +261,7 @@ async fn children_keep_their_pids_and_statuses() {
 #[tokio::test(flavor = "multi_thread")]
 async fn zsh_disown_keeps_no_status() {
 	assert_bash_outputs(&[(
-		r#"emulate zsh -c 'f(){ sleep .1; return 6; }; f & p=$!; disown; wait $p 2>/dev/null; echo status=$?'"#,
+		r"emulate zsh -c 'f(){ sleep .1; return 6; }; f & p=$!; disown; wait $p 2>/dev/null; echo status=$?'",
 		"status=127\n",
 	)])
 	.await;

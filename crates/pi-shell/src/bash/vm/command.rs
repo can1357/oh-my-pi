@@ -3120,9 +3120,7 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 			let done: Vec<u32> = vp
 				.jobs
 				.iter()
-				.filter(|j| {
-					matches!(j.state, JobState::Done(_)) && keep.is_none_or(|v| j.vpid.0 != v)
-				})
+				.filter(|j| matches!(j.state, JobState::Done(_)) && keep.is_none_or(|v| j.vpid.0 != v))
 				.map(|j| j.number)
 				.collect();
 			for number in done {
@@ -3140,7 +3138,11 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 			// in job order, then a finished process substitution; else it
 			// waits for a child to change, then takes the first finished
 			// candidate, reported or not.
-			let done = |k: &mut Kernel, store: &mut dyn StateStore, vp: &Vproc, v: crate::bash::ids::Vpid, any: bool| {
+			let done = |k: &mut Kernel,
+			            store: &mut dyn StateStore,
+			            vp: &Vproc,
+			            v: crate::bash::ids::Vpid,
+			            any: bool| {
 				match vp.jobs.by_vpid(v) {
 					Some(j) => match j.state {
 						JobState::Done(s) if any || !j.notified => Some(s),
@@ -3157,10 +3159,14 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 				}
 			}
 			let Some((v, status)) = finished else {
-				let running = st(vp).wait_for.clone().into_iter().find(|&v| match vp.jobs.by_vpid(v) {
-					Some(j) => j.state == JobState::Running,
-					None => k.proc_state(cx.store, v) == Some(super::ProcState::Running),
-				});
+				let running = st(vp)
+					.wait_for
+					.clone()
+					.into_iter()
+					.find(|&v| match vp.jobs.by_vpid(v) {
+						Some(j) => j.state == JobState::Running,
+						None => k.proc_state(cx.store, v) == Some(super::ProcState::Running),
+					});
 				if let Some(v) = running {
 					if let Some(Awaited::AnyJob { woke, .. }) = &mut st(vp).waiting {
 						*woke = true;

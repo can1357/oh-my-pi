@@ -684,7 +684,9 @@ impl Kernel {
 			// record names no parent and goes when it ends.
 			if let Ok(Some(Record::Proc { status: None, .. })) = store.get(Key::Proc(job.vpid)) {
 				let rec = Record::Proc { parent: Some(DISOWNED), status: None };
-				self.root.write(store, Change::Put(Key::Proc(job.vpid), rec));
+				self
+					.root
+					.write(store, Change::Put(Key::Proc(job.vpid), rec));
 			}
 		}
 		Some(job)
@@ -2023,7 +2025,13 @@ impl Shell {
 				.find(|p| p.vpid == m)
 				.is_some_and(|p| transparent(p, true) == Some(false));
 			if waits {
-				members.extend(self.procs.iter().filter(|p| p.parent == Some(m)).map(|p| p.vpid));
+				members.extend(
+					self
+						.procs
+						.iter()
+						.filter(|p| p.parent == Some(m))
+						.map(|p| p.vpid),
+				);
 			}
 		}
 		members

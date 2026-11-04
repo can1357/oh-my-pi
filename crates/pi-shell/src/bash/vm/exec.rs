@@ -82,7 +82,15 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				None => unblock(k, cx, vp),
 			}
 		}
-		if vp.pending_traps != crate::bash::signal::SigSet::EMPTY && !vp.waiting_foreground() {
+		// A trap just started runs before the next pending one starts above
+		// it: bash runs pending traps one after the other.
+		let trap_starting = vp.frames.last().is_some_and(|f| {
+			f.pc == 0 && matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { .. }, .. })
+		});
+		if vp.pending_traps != crate::bash::signal::SigSet::EMPTY
+			&& !vp.waiting_foreground()
+			&& !trap_starting
+		{
 			// bash `run_pending_traps`: in signal-number order.
 			let platform = k.engine.config().platform;
 			let pending = vp

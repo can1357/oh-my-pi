@@ -487,8 +487,10 @@ impl JobTable {
 
 	/// Job `job`, which left the table, runs the program with OS pid `pid`.
 	pub fn settle_kept(&mut self, job: Vpid, pid: u32) {
-		if let Some(entry) =
-			self.ended.as_mut().and_then(|e| e.kept.iter_mut().find(|k| k.vpid == job))
+		if let Some(entry) = self
+			.ended
+			.as_mut()
+			.and_then(|e| e.kept.iter_mut().find(|k| k.vpid == job))
 		{
 			entry.os_pid = Some(pid);
 		}
