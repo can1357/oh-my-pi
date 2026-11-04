@@ -1595,6 +1595,7 @@ function rowToMessageStats(row: any, corrections?: WithdrawnRateCorrections | nu
 			cacheRead: row.cache_read_tokens,
 			cacheWrite: row.cache_write_tokens,
 			totalTokens: row.total_tokens,
+			premiumRequests: row.premium_requests ?? 0,
 			// A cost a withdrawn rate card recorded reads at the current catalog
 			// price; the stored row keeps what the transcript recorded.
 			cost: corrections?.byRow.get(row.id)?.cost ?? {
