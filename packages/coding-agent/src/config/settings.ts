@@ -1632,7 +1632,6 @@ export class Settings {
 			}
 
 			const refreshed: LayerRefresh[] = [];
-			let freshGlobal = this.#global;
 			if (globalResult.status === "fulfilled") {
 				const { configPath } = globalResult.value;
 				// A config this instance moved aside as malformed reads as missing until a save
@@ -1640,7 +1639,6 @@ export class Settings {
 				const quarantined = this.#configPath !== null && this.#quarantinedYamlTargets.has(this.#configPath);
 				const settings = globalResult.value.settings ?? (quarantined ? structuredClone(this.#global) : {});
 				this.#applyPendingGlobalWrites(settings);
-				freshGlobal = settings;
 				refreshed.push({
 					layer: "global",
 					settings,
@@ -1648,21 +1646,6 @@ export class Settings {
 					commit: () => {
 						this.#configPath = configPath;
 					},
-				});
-			}
-			if (projectResult.status === "fulfilled") {
-				// The refreshed global and overlay layers decide which providers feed the project layer.
-				const project = this.#resolveProjectRead(projectResult.value, {
-					global: freshGlobal,
-					configOverlay: overlayResult.status === "fulfilled" ? overlayResult.value.settings : this.#configOverlay,
-					overrides: this.#overrides,
-				});
-				this.#applyPendingProjectWrites(project.settings);
-				refreshed.push({
-					layer: "project",
-					settings: project.settings,
-					source: project.sourcePaths.join(", ") || getProjectAgentDir(this.#cwd),
-					commit: () => this.#commitProjectRead(project),
 				});
 			}
 			if (overlayResult.status === "fulfilled") {
@@ -1677,9 +1660,8 @@ export class Settings {
 				});
 			}
 
-			// Keep-last-good adopts each refreshed layer only when it validates over the layers
-			// accepted so far: an invalid file keeps its own layer's last good values while the
-			// other layers still refresh. Strict validates the whole refresh and throws.
+			// Accept global and overlay edits before resolving the project read: a rejected layer
+			// cannot disable a provider in the project layer. Strict mode validates the final set.
 			let layers = this.#ownLayers();
 			const adopted: LayerRefresh[] = [];
 			for (const refresh of refreshed) {
@@ -1687,6 +1669,21 @@ export class Settings {
 				if (keepLastGood && !this.#acceptsLayers(trial, refresh.source)) continue;
 				layers = trial;
 				adopted.push(refresh);
+			}
+			if (projectResult.status === "fulfilled") {
+				const project = this.#resolveProjectRead(projectResult.value, layers);
+				this.#applyPendingProjectWrites(project.settings);
+				const source = project.sourcePaths.join(", ") || getProjectAgentDir(this.#cwd);
+				const trial: OwnLayers = { ...layers, project: project.settings };
+				if (!keepLastGood || this.#acceptsLayers(trial, source)) {
+					layers = trial;
+					adopted.push({
+						layer: "project",
+						settings: project.settings,
+						source,
+						commit: () => this.#commitProjectRead(project),
+					});
+				}
 			}
 			const settled = this.#settlePins(layers);
 			if (!keepLastGood) this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(layers)), this.#cwd);

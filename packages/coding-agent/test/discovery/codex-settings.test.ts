@@ -8,10 +8,11 @@ import {
 	settingsCapability,
 } from "@oh-my-pi/pi-coding-agent/capability/settings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgDisabledProviders } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { cfgPersonality } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { logger, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 describe("Codex config.toml settings", () => {
 	let root = "";
@@ -146,4 +147,42 @@ describe("Codex config.toml settings", () => {
 		resetSettingsForTest();
 		expect(cfgPersonality.get(await Settings.init({ cwd: other, agentDir }))).toBe("friendly");
 	});
+
+	test.each(["global", "overlay"] as const)(
+		"keeps codex project settings when an invalid %s switch is rejected by a live reload",
+		async layer => {
+			const agentDir = path.join(root, "agent");
+			const overlay = path.join(root, "overlay.yml");
+			const codexConfig = path.join(project, ".codex", "config.toml");
+			await Bun.write(codexConfig, 'personality = "friendly"\n');
+			if (layer === "overlay") await Bun.write(overlay, "{}\n");
+			const settings = await Settings.init({
+				cwd: project,
+				agentDir,
+				configFiles: layer === "overlay" ? [overlay] : [],
+			});
+			expect(cfgPersonality.get(settings)).toBe("friendly");
+			const warnings = vi.spyOn(logger, "warn");
+			const reloaded = Promise.withResolvers<void>();
+			const stop = settings.onLayersChange(() => {
+				if (warnings.mock.calls.some(([message]) => message.includes("keeping last good config"))) {
+					reloaded.resolve();
+				}
+			});
+			try {
+				settings.startWatching();
+				const invalid = "disabledProviders:\n  - codex\nproviders:\n  maxInFlightRequests:\n    openai: 0\n";
+				const config = layer === "global" ? path.join(agentDir, "config.yml") : overlay;
+				await Bun.write(config, invalid);
+				await reloaded.promise;
+
+				expect(cfgDisabledProviders.get(settings)).toEqual([]);
+				expect(cfgPersonality.get(settings)).toBe("friendly");
+				expect(await Bun.file(config).text()).toBe(invalid);
+			} finally {
+				stop();
+				settings.stopWatching();
+			}
+		},
+	);
 });
