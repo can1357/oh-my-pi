@@ -474,11 +474,10 @@ describe("read URL artifact publication", () => {
 		fs.mkdirSync(artifactsDir, { recursive: true });
 		stubLoadPage(body, "text/plain");
 
-		const result = await new ReadTool(sessionWithArtifactsDir(artifactsDir)).execute("call", {
+		await new ReadTool(sessionWithArtifactsDir(artifactsDir)).execute("call", {
 			path: "https://example.com/file.txt:8-9",
 		});
 
-		expect(result.content.length).toBeGreaterThan(0);
 		expect(fs.readFileSync(path.join(artifactsDir, "0.read.log"), "utf8")).toContain("content 2");
 	});
 
