@@ -42,6 +42,7 @@ import {
 	type JobFeedDelta,
 	type JobFeedSource,
 	toWireReason,
+	toWireSignal,
 	type WireJobFeed,
 	type WireJobRun,
 	type WireRegisterOptions,
@@ -270,6 +271,11 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		const id = this.#remote.callSync("register", type, label, wired, wireOptions);
 		if (local) this.#local.set(id, local);
 		return id;
+	}
+
+	async acquireSlot(signal: AbortSignal, jobId?: string): Promise<() => void> {
+		const release = await this.#remote.call("acquireSlot", toWireSignal(signal), jobId);
+		return () => ignoreSettle(release());
 	}
 
 	publishCompleted(

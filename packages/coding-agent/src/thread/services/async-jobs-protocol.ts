@@ -125,6 +125,8 @@ export type AsyncJobManagerProtocol = {
 		[type: AsyncJobType, label: string, run: WireJobRun, options: WireRegisterOptions | undefined],
 		string
 	>;
+	/** Resolves with the slot's release once one is free; see `AsyncJobManagerApi.acquireSlot`. */
+	acquireSlot: RpcMethod<[signal: AbortSignal, jobId: string | undefined], WireUnsubscribe>;
 	publishCompleted: RpcMethod<
 		[
 			type: AsyncJobType,

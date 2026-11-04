@@ -641,37 +641,53 @@ describe("AsyncJobManager", () => {
 		await manager.dispose();
 	});
 
-	test("a caller-gated job registered at the cap waits for a slot, then for its own gate", async () => {
+	test("a caller-gated job takes no slot; the slot its caller acquires waits in arrival order with queued jobs", async () => {
 		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
 		const hold = Promise.withResolvers<void>();
 		const gate = Promise.withResolvers<void>();
-		let bodyCalled = false;
+		const started: string[] = [];
 		manager.register("bash", "holder", async () => {
 			await hold.promise;
 			return "held";
 		});
+		let bodyCalled = false;
 		const gatedId = manager.register(
 			"task",
 			"gated",
-			async ({ markRunning }) => {
+			async ({ jobId, signal, markRunning }) => {
 				bodyCalled = true;
-				await gate.promise;
-				markRunning();
-				return "gated done";
+				const release = await manager.acquireSlot(signal, jobId);
+				try {
+					markRunning();
+					started.push("gated");
+					await gate.promise;
+					return "gated done";
+				} finally {
+					release();
+				}
 			},
 			{ queued: true },
 		);
 		try {
-			expect(bodyCalled).toBe(false);
-			expect(manager.getJob(gatedId)).toMatchObject({ queued: true, waitingForSlot: true });
+			// Its run starts at once; it asks for a slot only for the work it starts.
+			expect(bodyCalled).toBe(true);
+			await waitForCondition(() => manager.getJob(gatedId)?.waitingForSlot === true);
+			expect(manager.getJob(gatedId)).toMatchObject({ status: "running", queued: true });
+			const laterId = manager.register("bash", "later", async () => {
+				started.push("later");
+				return "later done";
+			});
+			expect(manager.getJob(laterId)?.waitingForSlot).toBe(true);
+
 			hold.resolve();
-			await waitForCondition(() => bodyCalled);
-			// Started, but still behind its caller's gate: shown queued, keeping the slot the queue gave it.
-			expect(manager.getJob(gatedId)).toMatchObject({ queued: true, waitingForSlot: false });
-			expect(manager.atCapacity).toBe(true);
+			await waitForCondition(() => started.length === 1);
+			expect(started).toEqual(["gated"]);
+			expect(manager.getJob(gatedId)).toMatchObject({ queued: false, waitingForSlot: false });
+			expect(manager.getJob(laterId)?.waitingForSlot).toBe(true);
+
 			gate.resolve();
-			await manager.getJob(gatedId)!.promise;
-			expect(manager.getJob(gatedId)?.status).toBe("completed");
+			await manager.getJob(laterId)!.promise;
+			expect(started).toEqual(["gated", "later"]);
 		} finally {
 			hold.resolve();
 			gate.resolve();
@@ -680,58 +696,67 @@ describe("AsyncJobManager", () => {
 		}
 	});
 
-	test("caller-gated jobs started from the queue never run more jobs than the cap", async () => {
-		// Task spawns wait on their semaphore after the manager starts them, then
-		// call markRunning(). Each one the queue starts holds the slot it was given,
-		// so ending one holder starts exactly one of them, not all of them.
-		const manager = new AsyncJobManager({ maxRunningJobs: 2, onJobComplete: async () => {} });
-		const hold = Promise.withResolvers<void>();
-		const holders = [hold, Promise.withResolvers<void>()];
-		for (const [index, release] of holders.entries()) {
-			manager.register("bash", `holder ${index}`, async () => {
-				await release.promise;
-				return "held";
-			});
-		}
-		// The spawn semaphore: every started body waits here until the test opens it.
-		const permits = Promise.withResolvers<void>();
-		const entered: string[] = [];
-		const running: string[] = [];
-		let peak = 0;
-		const gatedIds = ["s1", "s2", "s3", "s4"].map(label =>
-			manager.register(
-				"task",
-				label,
-				async ({ markRunning }) => {
-					entered.push(label);
-					await permits.promise;
-					markRunning();
-					running.push(label);
-					peak = Math.max(peak, manager.getRunningJobs().filter(job => !job.queued).length);
-					await hold.promise;
-					return label;
-				},
-				{ id: label, queued: true },
-			),
-		);
+	test("cancelling a running job keeps its slot until its run settles", async () => {
+		// A cancelled run may still be winding down (a process handling TERM); the
+		// next queued job must not start alongside it.
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const woundDown = Promise.withResolvers<void>();
+		const started: string[] = [];
+		const firstId = manager.register("bash", "first", async ({ signal }) => {
+			started.push("first");
+			const aborted = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+			await aborted.promise;
+			await woundDown.promise;
+			return "first stopped";
+		});
+		const nextId = manager.register("bash", "next", async () => {
+			started.push("next");
+			return "next done";
+		});
 		try {
-			expect(gatedIds.map(id => manager.getJob(id)?.waitingForSlot)).toEqual([true, true, true, true]);
-			holders[1]!.resolve();
-			await waitForCondition(() => entered.length > 0);
-			expect(entered).toEqual(["s1"]);
-			expect(manager.getJob("s2")?.waitingForSlot).toBe(true);
+			expect(manager.cancel(firstId)).toBe(true);
+			expect(manager.getJob(firstId)?.status).toBe("cancelled");
+			for (let tick = 0; tick < 20; tick++) await scheduler.yield();
+			expect(started).toEqual(["first"]);
+			expect(manager.getJob(nextId)?.waitingForSlot).toBe(true);
 			expect(manager.atCapacity).toBe(true);
-			permits.resolve();
-			await waitForCondition(() => running.length === 1);
-			expect(peak).toBe(2);
+
+			woundDown.resolve();
+			await manager.getJob(firstId)!.promise;
+			await manager.getJob(nextId)!.promise;
+			expect(started).toEqual(["first", "next"]);
 		} finally {
-			permits.resolve();
-			for (const release of holders) release.resolve();
+			woundDown.resolve();
 			await manager.waitForAll();
 			await manager.dispose();
 		}
-		expect(running).toEqual(["s1", "s2", "s3", "s4"]);
-		expect(peak).toBe(2);
+	});
+
+	test("a slot request that aborts while it waits takes no slot; dispose refuses the rest", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const hold = Promise.withResolvers<void>();
+		manager.register("bash", "holder", async () => {
+			await hold.promise;
+			return "held";
+		});
+		const outcome = (request: Promise<() => void>): Promise<string> =>
+			request.then(
+				() => "granted",
+				(error: Error) => error.message,
+			);
+		const dropped = new AbortController();
+		const droppedRequest = outcome(manager.acquireSlot(dropped.signal));
+		const kept = manager.acquireSlot(new AbortController().signal);
+		dropped.abort(new Error("no longer needed"));
+		expect(await droppedRequest).toBe("no longer needed");
+		hold.resolve();
+		const release = await kept;
+		expect(manager.atCapacity).toBe(true);
+		const pending = outcome(manager.acquireSlot(new AbortController().signal));
+		await manager.dispose();
+		expect(await pending).toBe("Async job manager is disposed");
+		release();
 	});
 
 	test("startImmediately runs a job at once even at the cap", async () => {
@@ -879,49 +904,6 @@ describe("AsyncJobManager", () => {
 			await manager.waitForAll();
 			await manager.dispose();
 		}
-	});
-
-	test("queued jobs do not count toward the cap until markRunning", async () => {
-		const manager = new AsyncJobManager({
-			maxRunningJobs: 1,
-			onJobComplete: async () => {},
-		});
-
-		const gate = Promise.withResolvers<void>();
-		const started = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		const queuedJobId = manager.register(
-			"task",
-			"queued",
-			async ({ markRunning }) => {
-				await gate.promise;
-				markRunning();
-				started.resolve();
-				await release.promise;
-				return "queued done";
-			},
-			{ queued: true },
-		);
-
-		// Queued job holds no slot: another job registers and runs at cap 1.
-		const runningJobId = manager.register("bash", "running", async ({ signal }) => {
-			const aborted = Promise.withResolvers<void>();
-			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
-			await aborted.promise;
-			return "done";
-		});
-		expect(manager.getJob(runningJobId)?.waitingForSlot).toBeUndefined();
-
-		// Free the slot, then let the queued job start: it now occupies the slot.
-		manager.cancel(runningJobId);
-		gate.resolve();
-		await started.promise;
-		const thirdId = manager.register("bash", "third", async () => "third");
-		expect(manager.getJob(thirdId)?.waitingForSlot).toBe(true);
-
-		release.resolve();
-		await manager.waitForAll();
-		expect(manager.getJob(queuedJobId)?.status).toBe("completed");
 	});
 
 	test("evicts completed jobs after retention period", async () => {

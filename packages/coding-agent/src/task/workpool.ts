@@ -179,7 +179,9 @@ export class WorkPool {
 		const id = manager.register(
 			"task",
 			this.name,
-			async ({ signal }) => {
+			async ({ signal, markRunning }) => {
+				// Shown running at once; being caller-gated, it still holds no slot.
+				markRunning();
 				const onAbort = (): void => {
 					this.close();
 					for (const batch of this.batches) manager.cancel(batch.jobId, { ownerId: this.ownerId });
@@ -205,9 +207,9 @@ export class WorkPool {
 					signal.removeEventListener("abort", onAbort);
 				}
 			},
-			// The pool job only coordinates its batch jobs and never takes a slot; it
-			// must not queue at the cap, or a cancel would never reach its onAbort.
-			{ id: this.name, ownerId: this.ownerId, queued: true, startImmediately: true },
+			// Caller-gated, so it never queues at the cap and holds no slot: it only
+			// coordinates its batch jobs, which take their own.
+			{ id: this.name, ownerId: this.ownerId, queued: true },
 		);
 		if (id !== this.name) {
 			manager.cancel(id, { ownerId: this.ownerId });

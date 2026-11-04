@@ -20,10 +20,13 @@ export interface SpawnLaunchTiming {
 	acquiredAt: number;
 }
 
-/** Permit source bounding concurrent subagents; the task tool's session semaphore. */
+/**
+ * Permit source bounding concurrent subagents: the task tool's session
+ * semaphore, and for a job-detached run also a slot under `async.maxJobs`.
+ * `acquire` resolves with the release of what it took.
+ */
 export interface SpawnPermit {
-	acquire(signal: AbortSignal): Promise<void>;
-	release(): void;
+	acquire(signal: AbortSignal): Promise<() => void>;
 }
 
 /** Everything the run body needs from its `SpawnRun`. */
@@ -61,7 +64,7 @@ export class SpawnRun {
 	 * source of its job widget; closed once the run settles.
 	 */
 	readonly tools = new TextTap(TOOLS_SOURCE_ID, TOOLS_SOURCE_LABEL);
-	/** Resolves once the permit is held; rejects with the acquire error when aborted first. */
+	/** Resolves once the permit is held, before the subagent starts; rejects with the acquire error when aborted first. */
 	readonly started: Promise<SpawnLaunchTiming>;
 	/** The run's payload; rejects only when `started` does. */
 	readonly result: Promise<AgentToolResult<TaskToolDetails>>;
@@ -73,7 +76,13 @@ export class SpawnRun {
 		readonly identity: SpawnIdentity,
 	) {
 		const invokedAt = Date.now();
-		this.started = permit.acquire(this.#controller.signal).then(() => ({ invokedAt, acquiredAt: Date.now() }));
+		// The body is called in the same tick the permit resolves, as it always has:
+		// an owner that aborts right after `started` must reach a run that is under way.
+		let release: (() => void) | undefined;
+		this.started = permit.acquire(this.#controller.signal).then(acquired => {
+			release = acquired;
+			return { invokedAt, acquiredAt: Date.now() };
+		});
 		this.result = this.started.then(async timing => {
 			try {
 				return await body({
@@ -91,7 +100,7 @@ export class SpawnRun {
 					tools: this.tools,
 				});
 			} finally {
-				permit.release();
+				release?.();
 			}
 		});
 		// Close the tap once the run settles. The rejection handler also keeps an

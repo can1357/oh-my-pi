@@ -136,23 +136,21 @@ export interface AsyncJob {
 	/** What the job's live widget reads; set by bash and task jobs. */
 	widgetInputs?: JobWidgetInputs;
 	/**
-	 * Job is registered but not running yet. Two things hold a job queued:
-	 * - the running-job cap: a job registered while running jobs fill the cap
-	 *   (or while other jobs already wait) waits in arrival order, and the
-	 *   manager starts its run once a slot frees;
-	 * - a caller-managed gate (e.g. the task tool's spawn semaphore): the run
-	 *   starts at once and clears the flag with `markRunning()`.
-	 * Queued jobs do not count toward the running-job cap, with one exception: a
-	 * caller-gated job that waited at the cap holds the slot the queue gave it
-	 * while it waits behind its gate, since its work may start before it calls
-	 * `markRunning()`. Their `status` stays `"running"`, so cancel and wait treat
-	 * them like running jobs; views show them as queued ({@link asyncJobStatusLabel}).
+	 * Job is registered but has not started its work. A job registered while
+	 * running jobs fill the cap (or while other requests already wait) stays
+	 * queued until the manager starts its run; a caller-gated job (registered
+	 * with `queued: true`, e.g. a task spawn behind its semaphore) stays queued
+	 * until its run calls `markRunning()`. The flag is for views only: slots are
+	 * counted by what holds them (see {@link AsyncJobManager.acquireSlot}).
+	 * Its `status` stays `"running"`, so cancel and wait treat it like a running
+	 * job; views show it as queued ({@link asyncJobStatusLabel}).
 	 */
 	queued?: boolean;
 	/**
-	 * Job waits at the running-job cap: its run has not been called yet. Cleared
-	 * when a slot frees and the run starts (the job may stay {@link queued}
-	 * behind its caller's gate) or when it is cancelled.
+	 * Job waits for a running-job slot: it was registered at the cap and its run
+	 * has not been called yet, or its caller asked for a slot on its behalf
+	 * (`acquireSlot` with this job's id) and none is free. Cleared when the slot
+	 * is granted or the job is cancelled.
 	 */
 	waitingForSlot?: boolean;
 	/**
@@ -282,14 +280,17 @@ export interface AsyncJobRegisterOptions {
 	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
 	agentId?: string;
 	onProgress?: (text: string, details?: AsyncJobDetails) => void | Promise<void>;
-	/** Register the job in queued state; see {@link AsyncJob.queued}. */
+	/**
+	 * Register the job caller-gated: its run is called at once and the job holds
+	 * no slot; the caller takes slots for the work it starts with
+	 * {@link AsyncJobManagerApi.acquireSlot} and clears the flag with
+	 * `markRunning()`. See {@link AsyncJob.queued}.
+	 */
 	queued?: boolean;
 	/**
-	 * Call the run at once, even at the cap, instead of queueing the job. For
-	 * jobs that queueing cannot hold back: one whose work already runs outside
-	 * the manager (a task spawn launched while its call streamed), or a
-	 * caller-gated job that only coordinates other jobs and never takes a slot
-	 * (a workpool's pool job, whose run must see its own cancel).
+	 * Call the run and take a slot at once, even at the cap, instead of
+	 * queueing the job: for a job whose work already runs outside the manager
+	 * (an IRC wake turn), which queueing could not hold back.
 	 */
 	startImmediately?: boolean;
 	/** Register the job as backing a foreground call; see {@link AsyncJob.foreground}. */
@@ -302,17 +303,26 @@ export interface AsyncJobRegisterOptions {
 	widgetInputs?: JobWidgetInputs;
 }
 
-/** A job registered at the running-job cap, waiting for a slot. */
-interface WaitingJob {
-	job: AsyncJob;
-	/** Registered with `queued: true`: stays queued after it starts, until its run calls `markRunning()`, but holds its slot. */
-	callerGated: boolean;
-	/**
-	 * Ends the wait: `true` when a slot freed and the run starts; `false` when the
-	 * job was cancelled while waiting, and its run is called with an aborted signal.
-	 */
-	admit: (started: boolean) => void;
-}
+/** One request for a running-job slot that found the cap full, in arrival order. */
+type SlotWaiter =
+	| {
+			kind: "job";
+			job: AsyncJob;
+			/**
+			 * Ends the wait: `true` when a slot freed and the run starts; `false` when the
+			 * job was cancelled while waiting, and its run is called with an aborted signal.
+			 */
+			admit: (started: boolean) => void;
+	  }
+	| {
+			kind: "slot";
+			/** Job the slot is for; shown as waiting for a slot meanwhile. */
+			jobId: string | undefined;
+			/** Takes the slot and resolves the request. */
+			grant: () => void;
+			/** Rejects the request (manager disposed). */
+			fail: (error: Error) => void;
+	  };
 
 /** A job's status as views show it: `"queued"` for a running job that has not started yet. */
 export type AsyncJobStatusLabel = AsyncJob["status"] | "queued";
@@ -375,6 +385,13 @@ export interface AsyncJobManagerApi {
 	 * running-job cap: the job queues and starts in arrival order once a slot frees.
 	 */
 	register(type: AsyncJobType, label: string, run: AsyncJobRun, options?: AsyncJobRegisterOptions): string;
+	/**
+	 * Take one running-job slot for work a caller-gated job starts (a task
+	 * spawn's subagent). Resolves with the release once a slot is free, in
+	 * arrival order with queued jobs; rejects with the signal's reason when it
+	 * aborts first. `jobId` shows that job as waiting for a slot meanwhile.
+	 */
+	acquireSlot(signal: AbortSignal, jobId?: string): Promise<() => void>;
 	/** Deliver an already-completed result without consuming a running-job slot. */
 	publishCompleted(
 		type: AsyncJobType,
@@ -446,17 +463,14 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	readonly #consumedJobResults = new Set<string>();
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #releasedForegroundJobs = new Set<string>();
+	/** Slot requests that found the cap full, in arrival order (Set keeps insertion order); see {@link #grantSlots}. */
+	readonly #slotWaiters = new Set<SlotWaiter>();
 	/**
-	 * Jobs registered at the running-job cap, in arrival order (Map keeps
-	 * insertion order). Each starts when a slot frees; see {@link #startWaitingJobs}.
+	 * What holds a running slot: a job register() admitted (until its run
+	 * settles; cancelling it does not free the slot while its run still winds
+	 * down) or a token from {@link acquireSlot} (until released).
 	 */
-	readonly #waitingJobs = new Map<string, WaitingJob>();
-	/**
-	 * Caller-gated jobs the queue started that have not called `markRunning()`
-	 * yet. Each holds the slot it was given: a task spawn's subagent starts as
-	 * soon as its semaphore permit is held, before `markRunning()` records it.
-	 */
-	readonly #slotReservations = new Set<AsyncJob>();
+	readonly #heldSlots = new Set<object>();
 	#nextAutoId = 1;
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
@@ -525,54 +539,99 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		return value > 0 ? Math.max(1, Math.floor(value)) : Number.POSITIVE_INFINITY;
 	}
 
-	/** Jobs holding a running slot: running and not queued, or holding a reservation. */
-	#activeJobCount(): number {
-		let activeCount = 0;
-		for (const job of this.#jobs.values()) {
-			if (job.status === "running" && (!job.queued || this.#slotReservations.has(job))) activeCount++;
-		}
-		return activeCount;
-	}
-
-	/** True when a job registered now would queue: running jobs fill the cap, or other jobs already wait. */
+	/** True when a job registered now would queue: running jobs fill the cap, or other requests already wait. */
 	get atCapacity(): boolean {
 		if (this.#disposed) return true;
-		return this.#waitingJobs.size > 0 || this.#activeJobCount() >= this.#maxRunningJobs;
+		return this.#slotWaiters.size > 0 || this.#heldSlots.size >= this.#maxRunningJobs;
 	}
 
 	/**
-	 * Start waiting jobs in arrival order while a slot is free. Runs whenever a
-	 * slot may have freed: a job settled or was cancelled, or a registration
-	 * re-read a cap that a live setting raised.
+	 * Grant waiting requests in arrival order while a slot is free. Runs whenever
+	 * a slot may have freed: a job's run settled, a slot was released, or a
+	 * registration re-read a cap that a live setting raised.
 	 */
-	#startWaitingJobs(): void {
-		if (this.#disposed || this.#waitingJobs.size === 0) return;
+	#grantSlots(): void {
+		if (this.#disposed) return;
 		const maxRunningJobs = this.#maxRunningJobs;
-		let activeCount = this.#activeJobCount();
-		for (const [id, waiting] of this.#waitingJobs) {
-			if (activeCount >= maxRunningJobs) break;
-			this.#waitingJobs.delete(id);
-			waiting.job.queued = waiting.callerGated;
-			waiting.job.waitingForSlot = false;
+		for (const waiter of this.#slotWaiters) {
+			if (this.#heldSlots.size >= maxRunningJobs) break;
+			this.#slotWaiters.delete(waiter);
+			if (waiter.kind === "slot") {
+				waiter.grant();
+				continue;
+			}
+			const job = waiter.job;
+			job.queued = false;
+			job.waitingForSlot = false;
 			// Run durations count from the start, not from the registration.
-			waiting.job.startTime = Date.now();
-			// A caller-gated job keeps the slot while it waits behind its gate.
-			if (waiting.callerGated) this.#slotReservations.add(waiting.job);
-			activeCount++;
-			waiting.admit(true);
+			job.startTime = Date.now();
+			this.#heldSlots.add(job);
+			waiter.admit(true);
 		}
+	}
+
+	/** Show (or stop showing) `jobId` as waiting for a slot; a cancelled job stops waiting too. */
+	#setWaitingForSlot(jobId: string, waiting: boolean): void {
+		const job = this.#jobs.get(jobId);
+		if (!job) return;
+		if (!waiting) job.waitingForSlot = false;
+		else if (job.status === "running") job.waitingForSlot = true;
+	}
+
+	acquireSlot(signal: AbortSignal, jobId?: string): Promise<() => void> {
+		if (this.#disposed) return Promise.reject(new Error("Async job manager is disposed"));
+		if (signal.aborted) return Promise.reject(signal.reason);
+		const token = {};
+		let released = false;
+		const release = (): void => {
+			if (released) return;
+			released = true;
+			if (this.#heldSlots.delete(token)) this.#grantSlots();
+		};
+		if (!this.atCapacity) {
+			this.#heldSlots.add(token);
+			return Promise.resolve(release);
+		}
+		const { promise, resolve, reject } = Promise.withResolvers<() => void>();
+		const settle = (): void => {
+			signal.removeEventListener("abort", onAbort);
+			if (jobId !== undefined) this.#setWaitingForSlot(jobId, false);
+		};
+		const waiter: SlotWaiter = {
+			kind: "slot",
+			jobId,
+			grant: () => {
+				settle();
+				this.#heldSlots.add(token);
+				resolve(release);
+			},
+			fail: error => {
+				settle();
+				reject(error);
+			},
+		};
+		const onAbort = (): void => {
+			this.#slotWaiters.delete(waiter);
+			settle();
+			reject(signal.reason);
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		this.#slotWaiters.add(waiter);
+		if (jobId !== undefined) this.#setWaitingForSlot(jobId, true);
+		return promise;
 	}
 
 	register(type: AsyncJobType, label: string, run: AsyncJobRun, options?: AsyncJobRegisterOptions): string {
 		if (this.#disposed) {
 			throw new Error("Async job manager is disposed");
 		}
-		// At the cap the job is accepted and waits for a slot behind any job
-		// that already waits, so jobs start in the order they were registered.
-		const waits = options?.startImmediately !== true && this.atCapacity;
+		const callerGated = options?.queued === true;
+		// At the cap the job is accepted and waits for a slot behind every request
+		// that already waits, so jobs start in the order they were registered. A
+		// caller-gated job takes no slot; its caller takes slots for its work.
+		const waits = !callerGated && options?.startImmediately !== true && this.atCapacity;
 
 		const id = this.#claimJobId(options?.id);
-		const callerGated = options?.queued === true;
 		if (options?.foreground) this.#suppressedDeliveries.add(id);
 		const abortController = new AbortController();
 		const startTime = Date.now();
@@ -612,8 +671,13 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		if (waits) {
 			const { promise, resolve } = Promise.withResolvers<boolean>();
 			admission = promise;
-			this.#waitingJobs.set(id, { job, callerGated, admit: resolve });
+			this.#slotWaiters.add({ kind: "job", job, admit: resolve });
+		} else if (!callerGated) {
+			this.#heldSlots.add(job);
 		}
+		// Registered before its run starts: a caller-gated body that asks for a slot
+		// at once (a task spawn) must find its own row to mark as waiting.
+		this.#jobs.set(id, job);
 		job.promise = (async () => {
 			// A job with a free slot calls `run` before register() returns, as it always has.
 			const started = admission ? await admission : true;
@@ -629,7 +693,6 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 					reportProgress,
 					markRunning: () => {
 						job.queued = false;
-						this.#slotReservations.delete(job);
 					},
 				});
 				job.endTime = Date.now();
@@ -662,8 +725,8 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			// above: a delivery consumed sooner re-arms the short consumed-result
 			// eviction, which the full-retention arm below would otherwise replace.
 			if (!started) job.errorText = QUEUED_JOB_CANCELLED_TEXT;
-			this.#slotReservations.delete(job);
-			this.#startWaitingJobs();
+			this.#heldSlots.delete(job);
+			this.#grantSlots();
 			if (this.#releasedForegroundJobs.has(id)) this.#discardForegroundJob(id);
 			else this.#scheduleEviction(id);
 			for (const listener of this.#settleListeners) {
@@ -678,9 +741,8 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			}
 		})();
 
-		this.#jobs.set(id, job);
 		// A live setting may have raised the cap since the last job settled.
-		if (waits) this.#startWaitingJobs();
+		if (waits) this.#grantSlots();
 		return id;
 	}
 
@@ -733,7 +795,9 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	 * match the job's owner, the call is treated as not-found (returns false)
 	 * so cross-agent cancellation is rejected at the manager level. A job still
 	 * waiting for a slot leaves the queue without taking one; its run only sees
-	 * the aborted signal, so its own cancel path settles it.
+	 * the aborted signal, so its own cancel path settles it. A running job keeps
+	 * its slot until its run settles, so the next waiting job starts only once
+	 * the cancelled work has wound down.
 	 */
 	cancel(id: string, filter?: AsyncJobFilter): boolean {
 		const job = this.#jobs.get(id);
@@ -741,23 +805,22 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		if (filter && job.ownerId !== filter.ownerId) return false;
 		if (job.status !== "running") return false;
 		this.#markCancelled(job);
-		this.#startWaitingJobs();
 		return true;
 	}
 
 	/** Flag a running or waiting job cancelled and abort it; a waiting job leaves the queue without a slot. */
 	#markCancelled(job: AsyncJob, reason?: unknown): void {
 		job.status = "cancelled";
-		const waiting = this.#waitingJobs.get(job.id);
-		if (waiting?.job !== job) {
+		const waiter = [...this.#slotWaiters].find(entry => entry.kind === "job" && entry.job === job);
+		if (waiter?.kind !== "job") {
 			job.abortController.abort(reason);
 			return;
 		}
 		// Out of the queue before abort listeners run, so none of them sees it waiting.
-		this.#waitingJobs.delete(job.id);
+		this.#slotWaiters.delete(waiter);
 		job.waitingForSlot = false;
 		job.abortController.abort(reason);
-		waiting.admit(false);
+		waiter.admit(false);
 	}
 
 	getJob(id: string): AsyncJob | undefined {
@@ -921,8 +984,6 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			if (job.status !== "running") continue;
 			this.#markCancelled(job, reason);
 		}
-		// Only after every match is cancelled, so none of them starts in between.
-		this.#startWaitingJobs();
 	}
 
 	/**
@@ -1087,6 +1148,11 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		this.#disposed = true;
 		this.#clearEvictionTimers();
 		this.#cancelJobs(undefined, ASYNC_JOB_MANAGER_SHUTDOWN_REASON);
+		// Slot requests of work not tied to a job here (an unadopted speculative spawn).
+		for (const waiter of this.#slotWaiters) {
+			if (waiter.kind === "slot") waiter.fail(new Error("Async job manager is disposed"));
+		}
+		this.#slotWaiters.clear();
 		const timeoutMs = Math.max(options?.timeoutMs ?? 3_000, 0);
 		const deadline = Date.now() + timeoutMs;
 		const jobsSettled = await this.#waitForAllUntil(deadline);
@@ -1099,7 +1165,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		// process exit, since dispose does not await these cleanups).
 		for (const job of this.#jobs.values()) this.#runRetainedArtifactsCleanup(job, { bypassGrace: true });
 		this.#jobs.clear();
-		this.#slotReservations.clear();
+		this.#heldSlots.clear();
 		this.#deliveries.length = 0;
 		this.#notifyDeliveryQueueChanged();
 		this.#inFlightDeliveries.length = 0;

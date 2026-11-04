@@ -9,7 +9,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { SpawnRun } from "@oh-my-pi/pi-coding-agent/task/spawn-run";
 import type { TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 
-const permit = { acquire: async () => {}, release: () => {} };
+const permit = { acquire: async () => () => {} };
 const done = { content: [{ type: "text", text: "done" }] } as AgentToolResult<TaskToolDetails>;
 
 /** Runs an adopted SpawnRun to completion; kept out of the test body so no strong local binding survives. */

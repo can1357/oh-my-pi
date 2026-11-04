@@ -816,9 +816,36 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 */
 	#spawnSemaphore: Semaphore | undefined;
 	readonly #permit: SpawnPermit = {
-		acquire: signal => this.#getSpawnSemaphore().acquire(signal),
-		release: () => this.#releaseSpawnSemaphore(),
+		acquire: async signal => {
+			await this.#getSpawnSemaphore().acquire(signal);
+			return () => this.#releaseSpawnSemaphore();
+		},
 	};
+
+	/**
+	 * Permit of a job-detached spawn: the session semaphore permit, then a slot
+	 * under `async.maxJobs`, so the subagent starts only when both are held. The
+	 * slot is taken after the permit, so a spawn waiting on this session's own
+	 * `task.maxConcurrency` holds no slot other jobs could use.
+	 */
+	#detachedPermit(manager: AsyncJobManagerApi, agentId: string | undefined): SpawnPermit {
+		return {
+			acquire: async signal => {
+				const releasePermit = await this.#permit.acquire(signal);
+				try {
+					const releaseSlot = await manager.acquireSlot(signal, agentId);
+					return () => {
+						releaseSlot();
+						releasePermit();
+					};
+				} catch (error) {
+					releasePermit();
+					throw error;
+				}
+			},
+		};
+	}
+
 	/** Streamed calls' speculative launches, keyed by tool-call id until dispatch adopts or discards them. */
 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
 	readonly #launcher: TaskLauncher = {
@@ -1010,8 +1037,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		agentId?: string;
 		detached: boolean;
 	}): SpawnRun {
+		const manager = this.session.asyncJobManager;
 		return new SpawnRun(
-			this.#permit,
+			spawn.detached && manager ? this.#detachedPermit(manager, spawn.agentId) : this.#permit,
 			run =>
 				this.#runSpawn(
 					spawn.toolCallId,
@@ -1032,9 +1060,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	/**
 	 * Start a streamed item's run ahead of dispatch. Preflight and execution
 	 * mode mirror dispatch exactly; refuses (undefined) whenever dispatch would
-	 * reject the item, or would queue its job at the background job cap (a
-	 * queued spawn must not run before its turn), so a refusal halts further
-	 * speculation for the call.
+	 * reject the item, so a refusal halts further speculation for the call. A
+	 * job-detached run waits for its slot under `async.maxJobs` like any spawn.
 	 */
 	async #startSpeculative(
 		toolCallId: string,
@@ -1055,7 +1082,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			cfgAsyncEnabled.get(this.session.settings) && this.session.asyncJobManager !== undefined && !blocking;
 		const agentId = await this.#outputManager().allocate(spawn.name?.trim() || generateTaskName());
 		if (signal.aborted) return undefined;
-		if (detached && this.session.asyncJobManager?.atCapacity) return undefined;
 		return this.#launch({ toolCallId, params: spawn, index, agentId, detached });
 	}
 
@@ -1416,9 +1442,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			failedSchedules.length > 0
 				? ` Failed to schedule ${failedSchedules.length} spawn${failedSchedules.length === 1 ? "" : "s"}: ${failedSchedules.join("; ")}.`
 				: "";
-		// Spawns registered at the background job cap wait for a slot; the
-		// caller learns that now rather than reading a running job that never moves.
-		const queuedSummary = queuedJobNotice(started.map(({ jobId }) => manager.getJob(jobId)));
+		// Spawns that have not started while running jobs fill the cap wait for a
+		// slot; the caller learns that now rather than reading a job that never moves.
+		const atCapacity = manager.atCapacity;
+		const queuedSummary = queuedJobNotice(
+			started.map(({ jobId }) => {
+				const job = manager.getJob(jobId);
+				return job && { id: job.id, waitingForSlot: job.waitingForSlot === true || (atCapacity && job.queued) };
+			}),
+		);
 		const renderSpawnFeedback = (mixed: boolean): string => {
 			const feedback = prompt
 				.render(taskSpawnFeedbackTemplate, {
@@ -1571,8 +1603,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			onUpdate,
 			onSettled,
 		} = options;
-		// A queued job launches (or adopts) its run when it starts; until then
-		// its widget has no tool tap to read.
+		// The run this job launches, or adopts after a speculative launch; its
+		// widget reads the run's tool tap.
 		let spawnRun: SpawnRun | undefined = run;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			// Isolated runs are parked without a reviver once the run ends
@@ -1637,12 +1669,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						update.content.find(part => part.type === "text")?.text ?? `Running background task ${agentId}...`;
 					await reportProgress(updateText, buildDetails() as unknown as Record<string, unknown>);
 				};
-				if (runSignal.aborted && !spawnRun) {
-					// Cancelled while queued at the background job cap: never launch the subagent.
-					progress.status = "aborted";
-					onSettled?.(true);
-					throw new Error("Aborted before execution");
-				}
 				const activeRun = (spawnRun ??= this.#launch({
 					toolCallId,
 					params: spawnParams,
@@ -1666,17 +1692,23 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						else void cleanup();
 					},
 				});
-				// An acquire-time abort and a post-acquire abort take the same
-				// path: progress + onSettled have to fire even when the spawn
-				// never reached the executor, otherwise the batch aggregate state
-				// stays "running" forever.
+				// An acquire-time abort (cancelled while waiting for its semaphore
+				// permit or its slot) and a post-acquire abort take the same path:
+				// progress, onSettled and a final update have to fire even when the
+				// spawn never reached the executor, otherwise the batch aggregate and
+				// the call's card stay "running" forever.
 				const permitHeld = await activeRun.started.then(
 					() => true,
 					() => false,
 				);
 				if (!permitHeld || runSignal.aborted) {
 					progress.status = "aborted";
+					progress.durationMs = Math.max(0, Date.now() - startedAt);
 					onSettled?.(true);
+					await reportProgress(
+						`Background task ${agentId} was cancelled before it started.`,
+						buildDetails() as unknown as Record<string, unknown>,
+					);
 					throw new Error("Aborted before execution");
 				}
 				try {
@@ -1756,8 +1788,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				id: agentId,
 				agentId,
 				queued: true,
-				// A run started while the call streamed already executes; its job must not queue.
-				startImmediately: run !== undefined,
 				ownerId: this.session.getAgentId?.() ?? undefined,
 				widgetInputs: createTaskWidgetInputs({
 					manager,

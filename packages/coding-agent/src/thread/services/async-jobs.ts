@@ -34,6 +34,7 @@ import {
 	type AsyncJobManagerProtocol,
 	type AsyncJobWire,
 	fromWireReason,
+	fromWireSignal,
 	type JobFeedDelta,
 	toWireSignal,
 	type WireJobFeed,
@@ -222,6 +223,9 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 				mainRegisterOptions(options, feed),
 			);
 		},
+		// Tracked, so a worker that exits holding a slot gives it back.
+		acquireSlot: async (manager, signal, jobId) =>
+			cleanups.track(threadId, await manager.acquireSlot(fromWireSignal(signal), jobId)),
 		publishCompleted: (manager, type, label, result, options) =>
 			manager.publishCompleted(type, label, result, options),
 		cancel: (manager, id, filter) => manager.cancel(id, filter),
