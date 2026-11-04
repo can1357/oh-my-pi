@@ -172,7 +172,10 @@ pub(super) struct State {
 	groups:    Mutex<Groups>,
 	/// Optional libc extension: without it `posix_spawn` cannot set the cwd
 	/// (glibc < 2.29), so such libcs take the fork path. The gate also keeps
-	/// `POSIX_SPAWN_SETSID` (glibc 2.26+) off libcs older than that.
+	/// `POSIX_SPAWN_SETSID` (glibc 2.26+) off libcs older than that, where
+	/// `Place::Session` spawns would be refused with `EINVAL`. Never relax it
+	/// into "the cwd is already right, skip `addchdir`": glibc 2.17–2.25 would
+	/// then reach `posix_spawn` and fail every `Place::Session` spawn.
 	#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 	add_chdir: Option<posix::AddChdir>,
 }
