@@ -196,14 +196,16 @@ function readField(object: object, key: string, reach: Reach): unknown {
  * nothing, so no value is forwarded into a child promise. An error is described, so each of its fields
  * is read once and observed in turn. Anything else is left alone: a plain object's fields are not read.
  *
- * Each promise and each error is observed once. From one value, a chain of them is followed to at most
- * {@link OBSERVE_DEPTH_LIMIT} steps, counted across promise callbacks too, and at most
- * {@link OBSERVE_STEP_BUDGET} promises and errors are followed in all: an error has five fields, so
- * a getter that makes a new error on every read would otherwise grow the work five times per step. A
- * promise reached past either bound is still marked handled; only what it settles with is no longer
- * followed. An error past them is not described. A promise whose `constructor` or species refuses the
- * built-in `then` stays unobserved; such a promise is outside what a description can handle. Never
- * throws.
+ * Within one observation each promise and each error is handled once, so a cycle ends; a later
+ * observation of the same error reads its fields again, since they may have changed. A value that is both
+ * a promise and an error (a promise given `Error.prototype`) is observed as both. From one value, a
+ * chain is followed to at most {@link OBSERVE_DEPTH_LIMIT} steps, counted across promise callbacks too,
+ * and at most {@link OBSERVE_STEP_BUDGET} promises and errors are followed in all; other values spend
+ * nothing. An error has five fields, so a getter that makes a new error on every read would otherwise
+ * grow the work five times per step. A promise reached past either bound is still marked handled; only
+ * what it settles with is no longer followed. An error past them is not described. A promise whose
+ * `constructor` or species refuses the built-in `then` stays unobserved; such a promise is outside what
+ * a description can handle. Never throws.
  */
 export function observeRejection(value: unknown): void {
 	observeReached(value, rootReach());
@@ -214,14 +216,17 @@ const OBSERVE_DEPTH_LIMIT = 16;
 /** How many promises and errors {@link observeRejection} follows from one value in all. */
 const OBSERVE_STEP_BUDGET = 64;
 
-/** Where an observation is: its depth from the value first given, and the steps that value has left. */
+/**
+ * Where an observation is: its depth from the value first given, and what that value's observation shares:
+ * the steps it has left and the errors it has already described.
+ */
 interface Reach {
 	depth: number;
-	budget: { steps: number };
+	budget: { steps: number; described: WeakSet<object> };
 }
 
 function rootReach(): Reach {
-	return { depth: 0, budget: { steps: OBSERVE_STEP_BUDGET } };
+	return { depth: 0, budget: { steps: OBSERVE_STEP_BUDGET, described: new WeakSet() } };
 }
 
 /** One step further, sharing the budget; `undefined` when either bound is reached. */
@@ -231,14 +236,15 @@ function nextReach(reach: Reach): Reach | undefined {
 	return { depth: reach.depth + 1, budget: reach.budget };
 }
 
-/** Promises and errors already handed to {@link observeReached}; weak, so it holds none of them alive. */
+/**
+ * Promises already marked handled. Marking is permanent and a promise settles once, so a promise needs
+ * this only once in the process; weak, so it holds none of them alive.
+ */
 const observedPromises = new WeakSet<object>();
-const observedErrors = new WeakSet<object>();
 
 function observeReached(value: unknown, reach: Reach): void {
 	if (value === null || (typeof value !== "object" && typeof value !== "function")) return;
-	if (isPromise(value)) {
-		if (observedPromises.has(value)) return;
+	if (isPromise(value) && !observedPromises.has(value)) {
 		observedPromises.add(value);
 		const next = nextReach(reach);
 		// Past a bound the promise is still marked handled; only what it settles with is no longer followed.
@@ -248,14 +254,14 @@ function observeReached(value: unknown, reach: Reach): void {
 		} catch {
 			// The promise's `constructor` getter or species constructor threw.
 		}
-		return;
 	}
-	if (observedErrors.has(value)) return;
-	// The step is spent before the error check: that check walks the value's prototypes, whose traps can
-	// throw new values to observe in turn, so every level of that recursion must pay.
+	// A promise can also be an error; it is then described too.
+	if (reach.budget.described.has(value) || reach.depth + 1 >= OBSERVE_DEPTH_LIMIT) return;
+	// The error check walks the value's prototypes, whose traps can throw new values to observe in turn;
+	// it runs one level deeper, so that recursion ends at the depth bound without spending a step.
+	if (!isErrorAt(value, { depth: reach.depth + 1, budget: reach.budget })) return;
 	const next = nextReach(reach);
-	if (!next || !isErrorAt(value, next)) return;
-	observedErrors.add(value);
+	if (!next) return;
 	describeAt(value, next);
 }
 
@@ -319,6 +325,9 @@ export function describeError(value: unknown): DescribedError {
 
 /** {@link describeError} at `reach`: how far from the value first given, with the steps it has left. */
 function describeAt(value: unknown, reach: Reach): DescribedError {
+	// Marked first: a field that leads back to this value (a getter that throws it, say), or this value
+	// observed as a promise just below, does not describe it again within this observation.
+	if (value !== null && (typeof value === "object" || typeof value === "function")) reach.budget.described.add(value);
 	// A thrown or rejected value can itself be a rejected promise; describing it observes it.
 	if (isPromise(value)) observeReached(value, reach);
 	let errorClass = errorClassAt(value, reach);
@@ -331,8 +340,6 @@ function describeAt(value: unknown, reach: Reach): DescribedError {
 	let syscall: string | undefined;
 	if (errorClass !== undefined) {
 		const error = value as object;
-		// A field that leads back to this error (a getter that throws it, say) is not described again.
-		observedErrors.add(error);
 		try {
 			const field = readField(error, "message", reach);
 			message = typeof field === "string" ? bounded(field, DESCRIBED_TEXT_LIMIT) : primitiveText(field);

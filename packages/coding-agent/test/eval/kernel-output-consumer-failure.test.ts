@@ -9,7 +9,11 @@ import {
 	executeInVmContext,
 	type VmRunState,
 } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
-import { isCancellationError, isTimedOutCancellation } from "@oh-my-pi/pi-coding-agent/eval/executor-base";
+import {
+	abortReasonError,
+	isCancellationError,
+	isTimedOutCancellation,
+} from "@oh-my-pi/pi-coding-agent/eval/executor-base";
 import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
 import { type KernelExecuteResult, throwIfAborted } from "@oh-my-pi/pi-coding-agent/eval/kernel-base";
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
@@ -2057,5 +2061,74 @@ describe("cancellation checks and descriptions read a thrown value or abort reas
 		describeError(error);
 		// One walk is at most the prototype bound per value reached; the budget bounds the values reached.
 		expect(traps).toBeLessThan(20_000);
+	});
+
+	it("observes a reused error's newly held rejected promise on each later observation", async () => {
+		const reused = new Error("first");
+		const unhandled = await unhandledRejectionsDuring(async () => {
+			try {
+				throwIfAborted(aborted(reused), "x");
+			} catch {
+				// It throws by design.
+			}
+			// The same error later holds a rejected promise in a field that was text before.
+			Object.defineProperty(reused, "message", { value: Promise.reject(new Error("second abort field rejection")) });
+			try {
+				throwIfAborted(aborted(reused), "x");
+			} catch {
+				// It throws by design.
+			}
+			await Bun.sleep(50);
+		});
+		expect(unhandled).toEqual([]);
+	});
+
+	it("observes a rejected promise given Error.prototype as both a promise and an error", async () => {
+		const errorShaped = (label: string): object => {
+			const promise = Object.setPrototypeOf(Promise.reject(new Error(`${label} outer`)), Error.prototype);
+			Object.defineProperty(promise, "message", { value: Promise.reject(new Error(`${label} field`)) });
+			return promise;
+		};
+		const unhandled = await unhandledRejectionsDuring(async () => {
+			try {
+				throwIfAborted(aborted(errorShaped("throwIfAborted")), "x");
+			} catch {
+				// It throws by design.
+			}
+			abortReasonError(errorShaped("abortReasonError"), "x");
+			const wrapper = new Error("unused");
+			const inner = errorShaped("nested");
+			Object.defineProperty(wrapper, "message", {
+				get() {
+					throw inner;
+				},
+			});
+			describeError(wrapper);
+			await Bun.sleep(50);
+		});
+		expect(unhandled).toEqual([]);
+	});
+
+	it("spends the observation budget only on promises and errors, not on plain-object fields", async () => {
+		// A chain 13 errors deep whose other fields are plain objects, and a root field holding a promise
+		// rejected with an error that holds one more: 15 errors and 2 promises, inside both stated bounds.
+		let head: unknown = "leaf";
+		for (let level = 0; level < 12; level++) {
+			const error = new Error("unused");
+			Object.defineProperty(error, "message", { value: head });
+			for (const key of ["name", "stack", "code", "syscall"]) Object.defineProperty(error, key, { value: {} });
+			head = error;
+		}
+		const reason = new Error("unused");
+		Object.defineProperty(reason, "message", { value: Promise.reject(new Error("budget escaped")) });
+		const root = new Error("unused");
+		Object.defineProperty(root, "message", { value: head });
+		for (const key of ["name", "stack", "code"]) Object.defineProperty(root, key, { value: {} });
+		Object.defineProperty(root, "syscall", { value: Promise.reject(reason) });
+		const unhandled = await unhandledRejectionsDuring(async () => {
+			describeError(root);
+			await Bun.sleep(50);
+		});
+		expect(unhandled).toEqual([]);
 	});
 });

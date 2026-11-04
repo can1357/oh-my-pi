@@ -552,6 +552,12 @@ export function markExpectedCleanupError<T extends object>(reason: T): T {
 function hasExpectedCleanupMarker(reason: unknown): boolean {
 	// Each object in the chain is read once: a `cause` that returns the value itself would otherwise be read again on every link.
 	const visited = new Set<object>();
+	// What a read returns or throws is observed, unless it is an object this walk already reached: the caller
+	// has described `reason`, and a `cause` getter that throws or returns it must not start a second description.
+	const observeNew = (value: unknown): void => {
+		if (value !== null && typeof value === "object" && visited.has(value)) return;
+		observeRejection(value);
+	};
 	let current: unknown = reason;
 	try {
 		for (let depth = 0; depth < 8 && current !== null && typeof current === "object"; depth++) {
@@ -559,14 +565,14 @@ function hasExpectedCleanupMarker(reason: unknown): boolean {
 			visited.add(current);
 			const marker: unknown = Reflect.get(current, EXPECTED_CLEANUP);
 			// A getter may return a rejected promise; reading it must not leave that unhandled.
-			observeRejection(marker);
+			observeNew(marker);
 			if (marker === true) return true;
 			current = Reflect.get(current, "cause");
-			observeRejection(current);
+			observeNew(current);
 		}
 	} catch (thrown) {
 		// A Proxy's `get` trap threw: nothing marked it as expected cleanup.
-		observeRejection(thrown);
+		observeNew(thrown);
 	}
 	return false;
 }
