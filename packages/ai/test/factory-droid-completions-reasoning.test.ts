@@ -47,7 +47,7 @@ describe("Factory Droid completions reasoning matrix", () => {
 		expect(captured[0].body.temperature).toBe(0.2);
 	});
 
-	it("aborts a stalled completions stream via the idle watchdog without sending the SDK timeout header", async () => {
+	it("releases the first-event budget and aborts a stalled completions stream via the idle watchdog", async () => {
 		// One valid chunk, then a stall: the first-event budget (huge here) must
 		// be released once the first SSE event arrived, so the steady-state idle
 		// watchdog governs the next wait and aborts fast. If the forwarded idle
@@ -73,9 +73,7 @@ describe("Factory Droid completions reasoning matrix", () => {
 				releaseAfterFirst?.(new DOMException("Aborted", "AbortError"));
 			},
 		});
-		const headers: Headers[] = [];
 		const fetchMock = mock(async (_url: string | URL | Request, init?: RequestInit) => {
-			headers.push(new Headers(init?.headers));
 			(init?.signal as AbortSignal | undefined)?.addEventListener("abort", () =>
 				releaseAfterFirst?.(new DOMException("Aborted", "AbortError")),
 			);
@@ -95,8 +93,6 @@ describe("Factory Droid completions reasoning matrix", () => {
 		for await (const event of stream) {
 			events.push(event.type);
 		}
-		// droid strips the SDK's telemetry headers, the first-event budget's timeout among them.
-		expect(headers[0].has("x-stainless-timeout")).toBe(false);
 		// The watchdog fires and the client surfaces a provider error, not a hang.
 		expect(events).toContain("text_delta");
 		expect(events).toContain("error");

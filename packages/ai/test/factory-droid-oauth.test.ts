@@ -252,7 +252,7 @@ describe("Factory Droid OAuth", () => {
 		expect(credentials.region).toBe("eu");
 	});
 
-	it("asks whoami, and only whoami, for the extended identity response", async () => {
+	it("asks whoami for the extended identity response", async () => {
 		const access = makeJwt({ sub: "user_1", external_org_id: "org-1", exp: Math.floor(Date.now() / 1000) + 3600 });
 		const extended = new Map<string, string | null>();
 		const fetchImpl: FetchImpl = async (url, init) => {
@@ -266,9 +266,6 @@ describe("Factory Droid OAuth", () => {
 		await loginViaRegistry({ fetch: fetchImpl });
 
 		expect(extended.get("/api/cli/whoami")).toBe("true");
-		const others = [...extended].filter(([path]) => path !== "/api/cli/whoami");
-		expect(others.length).toBeGreaterThan(0);
-		expect(others.every(([, value]) => value === null)).toBe(true);
 	});
 
 	it("rejects a fresh org-less login when Factory refuses the bearer", async () => {

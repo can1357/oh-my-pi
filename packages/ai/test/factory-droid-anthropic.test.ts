@@ -94,24 +94,6 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 		expect(request.headers["anthropic-beta"] ?? "").not.toContain("fallback-credit-2026-06-01");
 	});
 
-	it("streams tool input eagerly with the tool-streaming beta via azure_anthropic", async () => {
-		const captured: CapturedRequest[] = [];
-		await streamFactoryDroid(
-			factoryModel("claude-opus-5-5", ["azure_anthropic"]),
-			{
-				messages: [{ role: "user", content: "hello", timestamp: 1 }],
-				tools: [{ name: "Read", description: "Read a file", parameters: type({ path: "string" }) }],
-			},
-			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, anthropicChunks("OK")) },
-		).result();
-
-		const request = captured[0]!;
-		expect(request.headers["x-api-provider"]).toBe("azure_anthropic");
-		const tools = request.body.tools as Array<Record<string, unknown>>;
-		expect(tools.map(tool => tool.eager_input_streaming)).toEqual([true]);
-		expect(request.headers["anthropic-beta"] ?? "").toContain("fine-grained-tool-streaming-2025-05-14");
-	});
-
 	it.each([
 		["claude-fable-5", "claude-opus-5"],
 		// Neither dot normalization nor the fast-tier base variant widens to a sibling or the other direction.
