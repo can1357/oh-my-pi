@@ -1362,6 +1362,8 @@ function streamSimpleRequest<TApi extends Api>(
 			const retryState = createAuthRetryKeyState(lastKey);
 			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
 			if (!failure) return;
+			// OAuth identity of the credential that sent the attempt `failure` came from.
+			let failedOAuthIdentity = oauthIdentity;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
@@ -1390,14 +1392,15 @@ function streamSimpleRequest<TApi extends Api>(
 					// the bearer), and its header values were not re-resolved since the
 					// failure; when no retry step resolved a key, the key was not either.
 					// A value that became unusable (an unreadable `{ file }` key or header)
-					// ends the stream with that cause, not the auth error. An OAuth
-					// token-refresh failure is served by an OAuth credential, not a
-					// configured key, and must not trigger another refresh here.
-					const oauthTokenRefresh =
-						failure.error instanceof AIError.OAuthError && failure.error.kind === "token-refresh";
+					// ends the stream with that cause, not the auth error. An attempt an
+					// OAuth credential sent has no configured key to check, and resolving
+					// one here could refresh that credential's token as a side effect.
+					const servedByOAuth =
+						failedOAuthIdentity !== undefined ||
+						(failure.error instanceof AIError.OAuthError && failure.error.kind === "token-refresh");
 					const configError = await requestConfigurationError(
 						model,
-						keyResolved || oauthTokenRefresh ? undefined : apiKeyResolver,
+						keyResolved || servedByOAuth ? undefined : apiKeyResolver,
 						signal,
 					);
 					if (configError) {
@@ -1410,6 +1413,7 @@ function streamSimpleRequest<TApi extends Api>(
 				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
 				if (!next) return;
 				failure = next;
+				failedOAuthIdentity = nextOAuthIdentity;
 			}
 			emitFailure(failure);
 		})();

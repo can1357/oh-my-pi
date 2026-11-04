@@ -601,6 +601,41 @@ describe("streamSimple resolver auth retry", () => {
 		expect((errors[0] as Error).message).toMatch(/usage limit/i);
 	});
 
+	it("does not re-resolve an OAuth credential's key when a usage limit finds no sibling", async () => {
+		const keys: unknown[] = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(usageLimitError()));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const calls: Array<{ lastChance: boolean; hadError: boolean }> = [];
+		const stream = streamSimple(model(), context, {
+			apiKey: async ctx => {
+				calls.push({ lastChance: ctx.lastChance, hadError: ctx.error !== undefined });
+				// The OAuth credential has no sibling: rotation returns nothing.
+				if (ctx.error !== undefined) return undefined;
+				return { apiKey: "oauth-access-token", oauthIdentity: { orgId: "org-1" } };
+			},
+		});
+		const drained = (async () => {
+			for await (const _event of stream) {
+				// drain
+			}
+		})();
+		await expect(drained).rejects.toThrow(/usage limit/i);
+		expect(keys).toEqual(["oauth-access-token"]);
+		// One initial resolution, one rotation attempt; no plain re-resolution that could refresh the token.
+		expect(calls).toEqual([
+			{ lastChance: false, hadError: false },
+			{ lastChance: true, hadError: true },
+		]);
+	});
+
 	it("retries a usage-limit error event before content", async () => {
 		const keys: unknown[] = [];
 		registerCustomApi(
