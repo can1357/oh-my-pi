@@ -144,8 +144,8 @@ const TOOL_JOIN = "LEFT JOIN messages m ON m.session_file = t.session_file AND m
 /**
  * Correction deltas shaped like {@link messageFacts}: cost only, so sums stay
  * additive. A cost recorded at a withdrawn rate card is corrected where it is
- * read, so each delta joins the stored row it belongs to and lands in that
- * row's bucket, dimensions and window; every query that sums stored costs
+ * read, so each delta carries its stored row's timestamp and dimensions and
+ * lands in that row's bucket and window; every query that sums stored costs
  * then reaches the corrected total.
  */
 function messageCorrectionFacts(bucketExpr: string): string {
@@ -480,9 +480,7 @@ export interface RangeWindow {
 
 interface Source {
 	sql: string;
-	params: (number | string)[];
-	/** Bound first: the correction CTE the fact parts join, when anything is corrected. */
-	cte?: string;
+	params: number[];
 }
 
 function dirtyIsSmall(database: Database): boolean {
@@ -556,6 +554,7 @@ function messageSource(database: Database, cutoff: number | null, fine: boolean)
 	return { sql: parts.join(" UNION ALL "), params };
 }
 
+/** Tool facts covering `[cutoff, now]`; same union shape as {@link messageSource}. */
 function toolSource(database: Database, cutoff: number | null, fine: boolean): Source {
 	const groupRaw = "GROUP BY 1, t.tool_name, t.model, t.provider";
 	const corrected = hasWithdrawnRateCorrections();
@@ -614,9 +613,7 @@ function queryMessages<T>(window: Pick<RangeWindow, "cutoff"> & { bucketMs?: num
 	const fine = window.bucketMs !== undefined && window.bucketMs < HOUR_MS;
 	const source = messageSource(database, normalizeCutoff(window.cutoff), fine);
 	// `query` caches the compiled statement: the SQL varies only over a small set of shapes.
-	return database
-		.query(`${source.cte ?? ""}SELECT ${select} FROM (${source.sql}) f ${tail}`)
-		.all(...source.params) as T[];
+	return database.query(`SELECT ${select} FROM (${source.sql}) f ${tail}`).all(...source.params) as T[];
 }
 
 function queryTools<T>(window: Pick<RangeWindow, "cutoff"> & { bucketMs?: number }, select: string, tail = ""): T[] {
@@ -624,9 +621,7 @@ function queryTools<T>(window: Pick<RangeWindow, "cutoff"> & { bucketMs?: number
 	if (!database) return [];
 	const fine = window.bucketMs !== undefined && window.bucketMs < HOUR_MS;
 	const source = toolSource(database, normalizeCutoff(window.cutoff), fine);
-	return database
-		.query(`${source.cte ?? ""}SELECT ${select} FROM (${source.sql}) f ${tail}`)
-		.all(...source.params) as T[];
+	return database.query(`SELECT ${select} FROM (${source.sql}) f ${tail}`).all(...source.params) as T[];
 }
 
 function normalizeCutoff(cutoff: number | null | undefined): number | null {
