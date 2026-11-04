@@ -8,6 +8,7 @@
 - Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
 ### Fixed
 
+- Generic remote compaction to `/chat/completions` now sends per-request model headers, so gateway sessions retain their attribution ([#18032](https://github.com/can1357/oh-my-pi/issues/18032)).
 - Fixed steering and follow-up queue notifications observing a batch before its preparation claim was installed and missing the transition to delivery, leaving pending-message snapshots stale after asynchronous preparation.
 
 ## [18.16.0] - 2026-11-02
