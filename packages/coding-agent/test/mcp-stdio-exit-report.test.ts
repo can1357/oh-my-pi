@@ -649,6 +649,54 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'ok':True}}),flush=True
 		TEST_TIMEOUT_MS,
 	);
 
+	// Round 15: a write that failed for a request already aborted, or for a
+	// notification, never started the exit watch, so another pending request waited
+	// for the descendant to let stdout go.
+	for (const shape of ["an aborted request", "a notification"] as const) {
+		it(
+			`reports the exit to other pending requests when ${shape}'s write fails`,
+			async () => {
+				const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-stdio-anywrite-"));
+				const ready = path.join(root, "ready");
+				const go = path.join(root, "go");
+				try {
+					const args = server(
+						[
+							`open(${JSON.stringify(ready)},'w').close()`,
+							`while not os.path.exists(${JSON.stringify(go)}): time.sleep(.005)`,
+							"os.close(0)",
+							"subprocess.Popen(['sleep','4'],stdin=subprocess.DEVNULL,stderr=subprocess.DEVNULL)",
+							"os.write(2,b'ANY_WRITE_REFUSAL\\n');sys.exit(77)",
+						].join("\n"),
+					);
+					await withTransport({ command: python, args, timeout: 0 }, async transport => {
+						const first = transportRejection(transport.request("first"));
+						await waitForFile(ready);
+						const caller = new AbortController();
+						const bulk = { bulk: "x".repeat(2_000_000) };
+						const second =
+							shape === "a notification"
+								? transport.notify("notifications/test", bulk).catch((error: unknown) => error)
+								: transport.request("second", bulk, { signal: caller.signal }).catch((error: unknown) => error);
+						if (shape === "an aborted request") caller.abort(new Error("EXPLICIT_ABORT"));
+						const released = performance.now();
+						await Bun.write(go, "");
+						const error = await first;
+						expect(error.code).toBe(77);
+						expect(error.message).toEndWith("ANY_WRITE_REFUSAL");
+						// Within the 1.5 s close deadline, not when the descendant lets stdout go (4 s).
+						expect(performance.now() - released).toBeLessThan(2_500);
+						const outcome = await second;
+						if (shape === "an aborted request") expect(outcome).toMatchObject({ message: "EXPLICIT_ABORT" });
+					});
+				} finally {
+					await removeWithRetries(root);
+				}
+			},
+			TEST_TIMEOUT_MS,
+		);
+	}
+
 	// The boundary of the rows above: a server that closed stdin but is still running
 	// at the close deadline is alive. The failed write gets its own error; another
 	// request is answered as usual.

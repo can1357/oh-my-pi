@@ -406,14 +406,15 @@ interface FrameSink {
  * Returns `true` when the frame was accepted synchronously, `false` when the
  * sink threw — callers signal transport closure on `false`. An asynchronous
  * failure cannot be reflected in the return value; it is neutralized here and
- * the dead transport is detected by the read loop / request timeout instead.
+ * reported to `onAsyncFailure`, so the transport can learn why the process went away.
  */
-export function writeFrame(stdin: FrameSink, frame: string): boolean {
+export function writeFrame(stdin: FrameSink, frame: string, onAsyncFailure?: () => void): boolean {
+	const failed = () => onAsyncFailure?.();
 	try {
 		const wrote = stdin.write(frame);
-		if (isThenable(wrote)) wrote.then(undefined, () => {});
+		if (isThenable(wrote)) wrote.then(undefined, failed);
 		const flushed = stdin.flush();
-		if (isThenable(flushed)) flushed.then(undefined, () => {});
+		if (isThenable(flushed)) flushed.then(undefined, failed);
 		return true;
 	} catch {
 		return false;
@@ -995,9 +996,11 @@ export class StdioTransport implements MCPTransport {
 		const response = error
 			? { jsonrpc: "2.0" as const, id, error }
 			: { jsonrpc: "2.0" as const, id, result: result ?? {} };
-		// Silent on failure — a dead subprocess has no use for the response,
-		// and the read loop will close the transport on EOF.
-		writeFrame(connection.process.stdin, `${JSON.stringify(response)}\n`);
+		// A dead subprocess has no use for the response; a failed write is still
+		// a sign of its exit, so it starts the connection's exit watch.
+		writeFrame(connection.process.stdin, `${JSON.stringify(response)}\n`, () => {
+			void this.#exitAfterFailedWrite(connection);
+		});
 	}
 
 	#handleClose(connection: StdioConnection, error?: MCPTransportError): void {
@@ -1089,6 +1092,7 @@ export class StdioTransport implements MCPTransport {
 					method: "notifications/cancelled",
 					params: { requestId: id, reason },
 				})}\n`,
+				() => void this.#exitAfterFailedWrite(connection),
 			);
 		};
 
@@ -1144,6 +1148,10 @@ export class StdioTransport implements MCPTransport {
 		}
 
 		const failFromSend = (error: unknown) => {
+			// A failed write is a sign of the exit for the whole connection, also when
+			// this request has settled already (an explicit abort won): its other
+			// pending requests then get the report.
+			const watch = this.#exitAfterFailedWrite(connection);
 			if (settled) return;
 			const normalized = normalizeMCPTransportError(error, { transport: "stdio", stage: "send" });
 			const sendError = sent ? nonRetryableMCPTransportError(normalized) : normalized;
@@ -1158,7 +1166,7 @@ export class StdioTransport implements MCPTransport {
 				clearTimeout(timer);
 				timer = undefined;
 			}
-			void this.#exitAfterFailedWrite(connection).then(reported => {
+			void watch.then(reported => {
 				if (!reported) settle(sendError);
 			});
 		};
@@ -1212,7 +1220,12 @@ export class StdioTransport implements MCPTransport {
 		// `initializeConnection()` runs before the manager installs its
 		// `onClose` handler, so a swallowed failure there would yield a
 		// "connected" handle wrapping a dead transport. See #1710.
-		if (!writeFrame(connection.process.stdin, `${JSON.stringify(notification)}\n`)) {
+		if (
+			!writeFrame(connection.process.stdin, `${JSON.stringify(notification)}\n`, () => {
+				// Accepted, then failed: a sign of the exit, which the watch reports.
+				void this.#exitAfterFailedWrite(connection);
+			})
+		) {
 			const error = new MCPTransportError({
 				transport: "stdio",
 				stage: "send",
