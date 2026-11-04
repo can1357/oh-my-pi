@@ -1,0 +1,28 @@
+// Liquid AI decision models (`d1-ultra`, `d1.1`) via `POST /decisions/v1/systemone`.
+// https://docs.liquid.ai/lfm/models/d1.md and https://www.liquid.ai/pricing
+
+provider "liquid" {
+	default-model "d1-ultra"
+	env "LIQUID_API_KEY"
+
+	seed api="liquid-systemone" base-url="https://api.liquid.ai" bundle="always" {
+		model "d1-ultra" name="Liquid d1-ultra" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.042 output=0 cache-read=0.042 cache-write=0
+			limits context=32768
+			supports-tools #false
+		}
+		model "d1.1" name="Liquid d1.1" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.02 output=0 cache-read=0.02 cache-write=0
+			limits context=32768
+			supports-tools #false
+		}
+	}
+
+	models "*" {
+		kind "judge"
+	}
+}

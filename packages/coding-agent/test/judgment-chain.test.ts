@@ -79,6 +79,16 @@ const OPENAI_DECISIONS_BACKUP = {
 	name: "GPT-6 Luna Decisions Backup",
 } as Model<Api>;
 
+const LIQUID_D1_ULTRA = {
+	...JEV_PREVIEW,
+	id: "d1-ultra",
+	name: "Liquid d1-ultra",
+	api: "liquid-systemone",
+	provider: "liquid",
+	baseUrl: "https://api.liquid.ai",
+	input: ["text", "image"],
+} as Model<Api>;
+
 const IMAGE_ONE: ImageContent = {
 	type: "image",
 	data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
@@ -1058,7 +1068,11 @@ describe("ChainJudge", () => {
 
 	it("follows a judge role change inside the chain reuse window, agreeing with the native gate", () => {
 		const settings = Settings.isolated({ modelRoles: { judge: `${ONLINE.provider}/${ONLINE.id}` } });
-		const registry = makeRegistry([JEV_PREVIEW, ONLINE], { typesafe: "ts-key", [ONLINE.provider]: "online-key" });
+		const registry = makeRegistry([JEV_PREVIEW, LIQUID_D1_ULTRA, ONLINE], {
+			typesafe: "ts-key",
+			liquid: "liquid-key",
+			[ONLINE.provider]: "online-key",
+		});
 		expect(new ChainJudge({ settings, registry, purpose: "test" }).primaryModel()?.id).toBe(ONLINE.id);
 
 		cfgModelRoles.override(settings, { judge: "typesafe/jev-preview" });
@@ -1066,6 +1080,10 @@ describe("ChainJudge", () => {
 		// A gated feature (find, tab.goal) passes on a native judge, so its judge must route there too.
 		expect(hasNativeJudge(settings, registry)).toBe(true);
 		expect(new ChainJudge({ settings, registry, purpose: "test" }).primaryModel()?.id).toBe(JEV_PREVIEW.id);
+
+		cfgModelRoles.override(settings, { judge: "liquid/d1-ultra" });
+		expect(hasNativeJudge(settings, registry)).toBe(true);
+		expect(new ChainJudge({ settings, registry, purpose: "test" }).primaryModel()?.id).toBe(LIQUID_D1_ULTRA.id);
 	});
 
 	it("resolves and forwards configured headers to native judgment models", async () => {

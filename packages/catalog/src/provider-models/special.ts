@@ -414,6 +414,20 @@ export function cloudflareWorkersAiModelManagerOptions(): ModelManagerOptions<"w
 	};
 }
 
+/** Liquid AI decision models (`d1-ultra`, `d1.1`). */
+export function liquidModelManagerOptions(config: { baseUrl?: string } = {}): ModelManagerOptions<"liquid-systemone"> {
+	const envBaseUrl = Bun.env.LIQUID_BASE_URL?.trim();
+	const baseUrl = (config.baseUrl ?? envBaseUrl)?.replace(/\/+$/, "");
+	const staticModels = seedModels<"liquid-systemone">("liquid").map(model =>
+		baseUrl ? { ...model, baseUrl } : model,
+	);
+	return {
+		providerId: "liquid",
+		cacheProviderId: resolveModelCacheProviderId("liquid"),
+		staticModels,
+	};
+}
+
 /** Credentials and endpoint overrides for the TypeSafe catalog manager. */
 export interface TypeSafeModelManagerConfig {
 	apiKey?: string;

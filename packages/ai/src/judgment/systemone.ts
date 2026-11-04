@@ -177,6 +177,16 @@ export const openrouterDecisionsWire: JudgmentWire = {
 	},
 };
 
+/** System One body with top-level base64 data URLs for image inputs. */
+function encodeSystemOneWithImages(request: JudgmentRequest, model: string): Record<string, unknown> {
+	return {
+		state: request.state,
+		model,
+		questions: wireQuestions(request.questions),
+		...(request.images?.length ? { images: request.images.map(embeddedImageDataUrl) } : {}),
+	};
+}
+
 /** Cloudflare Workers AI decision models (Clef) through the account-scoped `ai/run` route. */
 export const workersAiWire: JudgmentWire = {
 	// Clef's `images` extension: https://developers.cloudflare.com/workers-ai/models/clef/
@@ -197,11 +207,17 @@ export const workersAiWire: JudgmentWire = {
 		}
 		return { url: `${baseUrl.replace("<account>", accountId)}/${model}`, token: credential?.token ?? key };
 	},
-	encode: (request, model) => ({
-		state: request.state,
-		model: model.slice(model.lastIndexOf("/") + 1),
-		questions: request.questions,
-		...(request.images?.length ? { images: request.images.map(embeddedImageDataUrl) } : {}),
-	}),
+	encode: (request, model) => encodeSystemOneWithImages(request, model.slice(model.lastIndexOf("/") + 1)),
 	decode: payload => (isRecord(payload) ? decodeSystemOne(payload.result) : undefined),
+};
+
+/** Liquid AI decision models (`d1.1`, `d1-ultra`) through `/decisions/v1/systemone`. */
+export const liquidWire: JudgmentWire = {
+	...systemOneWire("/decisions/v1/systemone"),
+	// https://docs.liquid.ai/lfm/models/d1.md#image-requirements
+	images: {
+		mimeTypes: ["image/jpeg", "image/png", "image/webp", "image/gif"],
+		maxCount: 8,
+	},
+	encode: encodeSystemOneWithImages,
 };

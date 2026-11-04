@@ -1771,6 +1771,112 @@ describe("NativeJudge Workers AI dialect", () => {
 	});
 });
 
+describe("NativeJudge Liquid AI dialect", () => {
+	const d1Ultra = buildModel({
+		id: "d1-ultra",
+		name: "Liquid d1-ultra",
+		api: "liquid-systemone",
+		provider: "liquid",
+		baseUrl: "https://api.liquid.ai",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0.042, output: 0, cacheRead: 0.042, cacheWrite: 0 },
+		contextWindow: 32_768,
+		maxTokens: null,
+	});
+	const request = {
+		state: "Checkout is down.",
+		questions: { urgent: { type: "noul", instructions: "Urgent?" } },
+	} as const;
+
+	it("posts to decisions/v1/systemone with bearer auth, verbatim model, and decodes answers and usage", async () => {
+		const calls: { url: string; init: RequestInit | undefined }[] = [];
+		const judge = createNativeJudge(d1Ultra, {
+			apiKey: "liquid-test-key",
+			fetch: async (url, init) => {
+				calls.push({ url: String(url), init });
+				return Response.json({
+					model: "d1-ultra",
+					answers: { urgent: { type: "noul", noul: 0.98 } },
+					usage: { input_tokens: 16, output_tokens: 0 },
+				});
+			},
+		});
+
+		const result = await judge.judge(request);
+
+		expect(calls[0].url).toBe("https://api.liquid.ai/decisions/v1/systemone");
+		expect(new Headers(calls[0].init?.headers).get("authorization")).toBe("Bearer liquid-test-key");
+		expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+			state: request.state,
+			model: "d1-ultra",
+			questions: request.questions,
+		});
+		expect(result.answers.urgent.noul).toBe(0.98);
+		expect(result.model).toBe("d1-ultra");
+		expect(result.usage).toMatchObject({ input: 16, totalTokens: 16 });
+	});
+
+	it("encodes request.images as top-level data URLs including image/gif", async () => {
+		const state = {
+			description: "Inspect this state.",
+		};
+		const bodies: unknown[] = [];
+		const judge = createNativeJudge(d1Ultra, {
+			apiKey: "liquid-test-key",
+			fetch: async (_url, init) => {
+				bodies.push(JSON.parse(String(init?.body)));
+				return Response.json({
+					model: "d1-ultra",
+					answers: { urgent: { type: "noul", noul: 0.9 } },
+					usage: { input_tokens: 20, output_tokens: 0 },
+				});
+			},
+		});
+
+		const gifImage: ImageContent = {
+			type: "image",
+			data: "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+			mimeType: "image/gif",
+		};
+
+		await judge.judge({
+			state,
+			questions: { urgent: { type: "noul", instructions: "Urgent?" } },
+			images: [...IMAGE_REFS, gifImage],
+		});
+
+		expect(bodies).toEqual([
+			{
+				state,
+				model: "d1-ultra",
+				questions: { urgent: { type: "noul", instructions: "Urgent?" } },
+				images: [
+					"data:image/png;base64,AQID",
+					"data:image/jpeg;base64,BAUG",
+					"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+				],
+			},
+		]);
+	});
+
+	it("rejects requests exceeding maxCount of 8 images before calling fetch", async () => {
+		let calls = 0;
+		const judge = createNativeJudge(d1Ultra, {
+			apiKey: "liquid-test-key",
+			fetch: async () => {
+				calls++;
+				return new Response("unreachable", { status: 500 });
+			},
+		});
+		const images = Array.from({ length: 9 }, () => IMAGE_REFS[0]);
+		const error = await judge.judge({ ...request, images }).catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(ValidationError);
+		expect(String(error)).toMatch(/at most 8 images, got 9/);
+		expect(calls).toBe(0);
+	});
+});
+
 describe("chat judgment backend images", () => {
 	it("sends image blocks for supported models and rejects guarded text-only models before send", async () => {
 		const chatModel = buildModel({
