@@ -728,8 +728,6 @@ class StdioConnection {
 	 * deadline that expires meanwhile must not report a bare timeout.
 	 */
 	outputDone = false;
-	/** Settles when the read loop stops reading stdout: end of output, a decode error, or close. */
-	readonly outputEnded = Promise.withResolvers<void>();
 	/**
 	 * When the transport stops waiting to learn why the process went away
 	 * (`performance.now()` time); set by the first sign of it, stdout ending or
@@ -752,6 +750,13 @@ class StdioConnection {
 		 */
 		readonly detached: boolean,
 	) {}
+
+	/**
+	 * Set by the first failed write ({@link StdioTransport}'s `#exitAfterFailedWrite`):
+	 * true once the connection is closing with the exit report, false if the
+	 * process was still running at the close deadline.
+	 */
+	exitWatch: Promise<boolean> | undefined;
 
 	/** Whether a sign of the exit came: stdout ended, or a write failed (which starts the close deadline). */
 	get exitObserved(): boolean {
@@ -862,7 +867,6 @@ export class StdioTransport implements MCPTransport {
 			}
 		} finally {
 			connection.outputDone = true;
-			connection.outputEnded.resolve();
 			if (connection.open && closeError === undefined) {
 				closeError = await this.#endOfOutputError(connection);
 			}
@@ -895,6 +899,26 @@ export class StdioTransport implements MCPTransport {
 			retryable: false,
 			code: exitCode ?? undefined,
 		});
+	}
+
+	/**
+	 * After a failed write, learn whether the server exited: wait up to the close
+	 * deadline for the process itself (not its stdout, which a descendant can hold
+	 * open) and, if it exited, close the connection with its exit report, which
+	 * every pending request then gets. False when the process is still running at
+	 * the close deadline: it is alive, and its requests keep their own deadlines.
+	 * Once per connection; later failed writes share it.
+	 */
+	#exitAfterFailedWrite(connection: StdioConnection): Promise<boolean> {
+		connection.exitWatch ??= (async () => {
+			const exited = await settlesWithin(connection.process.exited, connection.untilCloseDeadline());
+			// Stdout ended meanwhile: the read loop reports and closes.
+			if (connection.outputDone || !connection.open) return true;
+			if (!exited) return false;
+			this.#handleClose(connection, await this.#endOfOutputError(connection));
+			return true;
+		})();
+		return connection.exitWatch;
 	}
 
 	async #readStderr(connection: StdioConnection): Promise<void> {
@@ -1105,12 +1129,12 @@ export class StdioTransport implements MCPTransport {
 			timer = setTimeout(() => {
 				// A sign of the exit came (stdout ended, or any request's write failed):
 				// the close is about to reject this request with the server's exit code
-				// and stderr, which say more than a timeout would. If stdout stays open
-				// past the close deadline the server is still running, and the timeout stands.
+				// and stderr, which say more than a timeout would. A process still running
+				// at the close deadline is alive, and the timeout stands.
 				if (!connection.exitObserved) return expire();
 				if (connection.outputDone) return;
-				void settlesWithin(connection.outputEnded.promise, connection.untilCloseDeadline()).then(ended => {
-					if (!ended) expire();
+				void (connection.exitWatch ?? Promise.resolve(false)).then(reported => {
+					if (!reported) expire();
 				});
 			}, timeout);
 		}
@@ -1124,17 +1148,18 @@ export class StdioTransport implements MCPTransport {
 			const normalized = normalizeMCPTransportError(error, { transport: "stdio", stage: "send" });
 			const sendError = sent ? nonRetryableMCPTransportError(normalized) : normalized;
 			// A write fails when the subprocess has closed its stdin, usually by exiting.
-			// If its stdout ends too, the read loop closes the transport and rejects this
-			// request with the exit code and stderr, which say why; the bare write error
-			// is reported only when stdout stays open past the close deadline, which the
-			// failed write starts unless an earlier sign of the exit did. That wait
-			// replaces the request deadline, so a deadline cannot preempt the diagnosis.
+			// If it exits within the close deadline (which the failed write starts unless
+			// an earlier sign of the exit did), the connection closes with the exit code
+			// and stderr, which say why, and every pending request gets them; the bare
+			// write error is reported only when the process is still running at the
+			// deadline. That wait replaces the request deadline, so a deadline cannot
+			// preempt the diagnosis.
 			if (timer) {
 				clearTimeout(timer);
 				timer = undefined;
 			}
-			void settlesWithin(connection.outputEnded.promise, connection.untilCloseDeadline()).then(ended => {
-				if (!ended) settle(sendError);
+			void this.#exitAfterFailedWrite(connection).then(reported => {
+				if (!reported) settle(sendError);
 			});
 		};
 		try {

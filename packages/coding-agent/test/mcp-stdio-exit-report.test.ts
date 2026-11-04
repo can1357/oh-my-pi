@@ -604,6 +604,82 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'ok':True}}),flush=True
 		TEST_TIMEOUT_MS,
 	);
 
+	// Round 14: after a failed write the transport waited for stdout to end, which a
+	// descendant can hold open after the server itself exited: the failed request got
+	// a bare EPIPE, and the others the report only when the descendant let go.
+	it(
+		"reports to every pending request an exited server whose descendant holds stdout",
+		async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-stdio-descendant-"));
+			const closed = path.join(root, "stdin-closed");
+			const go = path.join(root, "go");
+			try {
+				const args = server(
+					[
+						"os.close(0)",
+						// The descendant inherits stdout only and holds it for 4 s.
+						"subprocess.Popen(['sleep','4'],stdin=subprocess.DEVNULL,stderr=subprocess.DEVNULL)",
+						`open(${JSON.stringify(closed)},'w').close()`,
+						`while not os.path.exists(${JSON.stringify(go)}): time.sleep(.01)`,
+						"os.write(2,b'EXITED_REFUSAL\\n');sys.exit(77)",
+					].join("\n"),
+				);
+				await withTransport({ command: python, args, timeout: 0 }, async transport => {
+					const first = transportRejection(transport.request("first"));
+					await waitForFile(closed);
+					const second = transportRejection(transport.request("second", { bulk: "x".repeat(2_000_000) }));
+					const until = performance.now() + 10_000;
+					while (!transport.reportingExit) {
+						if (performance.now() > until) throw new Error("The failed write was never seen");
+						await Bun.sleep(5);
+					}
+					const released = performance.now();
+					await Bun.write(go, "");
+					for (const error of await Promise.all([first, second])) {
+						expect(error.code).toBe(77);
+						expect(error.message).toEndWith("EXITED_REFUSAL");
+					}
+					// Within the 1.5 s close deadline, not when the descendant lets stdout go (4 s).
+					expect(performance.now() - released).toBeLessThan(2_500);
+				});
+			} finally {
+				await removeWithRetries(root);
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	// The boundary of the rows above: a server that closed stdin but is still running
+	// at the close deadline is alive. The failed write gets its own error; another
+	// request is answered as usual.
+	it(
+		"lets a server that closed stdin but keeps running answer its other requests",
+		async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-stdio-alive-"));
+			const closed = path.join(root, "stdin-closed");
+			try {
+				const args = server(
+					`os.close(0);open(${JSON.stringify(closed)},'w').close();time.sleep(2.5)\nprint(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'late':True}}),flush=True)\ntime.sleep(60)`,
+				);
+				await withTransport({ command: python, args, timeout: 0 }, async transport => {
+					const first = transport.request("first");
+					await waitForFile(closed);
+					const second = transport.request("second", { bulk: "x".repeat(2_000_000) }).then(
+						() => new Error("Expected the write to fail"),
+						(error: unknown) => error,
+					);
+					const failed = await second;
+					if (!(failed instanceof MCPTransportError)) throw failed;
+					expect(failed.stage).toBe("send");
+					expect(await first).toEqual({ late: true });
+				});
+			} finally {
+				await removeWithRetries(root);
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
 	// Round 13: after the report, the handshake awaited the transport's close, and
 	// a server that ignores SIGTERM held it there for the kill grace as well.
 	it(
