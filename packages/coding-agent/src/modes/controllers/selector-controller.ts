@@ -1879,15 +1879,10 @@ export class SelectorController {
 							},
 							onGenerateTitle: (session: SessionInfo, signal: AbortSignal) =>
 								generatePickerSessionTitle(session, {
-									registry: this.ctx.session.modelRegistry,
 									settings: this.ctx.settings,
 									signal,
-									currentModel: this.ctx.session.model,
-									credentialSourceSessionId: this.ctx.session.sessionId,
-									generate:
-										typeof this.ctx.session.generateTitle === "function"
-											? (text, customPrompt, sig) => this.ctx.session.generateTitle(text, customPrompt, sig)
-											: undefined,
+									generate: (text, customPrompt, sig) =>
+										this.ctx.session.generateTitle(text, customPrompt, sig),
 								}),
 							onSetPinned: async (session: SessionInfo, pinned: boolean) => {
 								await setSessionPinned(session.id, pinned);

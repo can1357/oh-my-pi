@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import type { TspPickerProps } from "@oh-my-pi/pi-wire";
 import { OverlayPanel } from "../src/chrome/overlay-box";
 import { TextFormField } from "../src/components/form";
@@ -7,7 +7,7 @@ import { type HistorySearchEntry, HistorySearchComponent } from "../src/overlays
 import { type SessionSelectorEntry, SessionSelectorComponent } from "../src/overlays/session-selector";
 import { initTheme } from "../src/theme";
 import { KeybindingsManager } from "../src/app-keybindings";
-import { setKeybindings } from "../src/keybindings";
+import { getKeybindings, setKeybindings } from "../src/keybindings";
 
 const withPicker: DescribeContext = {
 	cols: 120,
@@ -168,6 +168,15 @@ describe("session selector picker", () => {
 });
 
 describe("session selector rename", () => {
+	let previousKeybindings: KeybindingsManager;
+	beforeEach(() => {
+		previousKeybindings = getKeybindings() as KeybindingsManager;
+		setKeybindings(KeybindingsManager.inMemory());
+	});
+	afterEach(() => {
+		setKeybindings(previousKeybindings);
+	});
+
 	interface RenameCall {
 		id: string;
 		title: string;
@@ -182,7 +191,6 @@ describe("session selector rename", () => {
 			loadAllSessions?: () => Promise<{ sessions: SessionSelectorEntry[] }>;
 		},
 	) {
-		setKeybindings(KeybindingsManager.inMemory());
 		// Fresh entries per test: rename mutates the shared entry in place.
 		const entries = [session("a", "Alpha", 0), session("b", "Beta", 1), session("c", "Gamma", 40 * 24 * HOUR)];
 		const selector = new SessionSelectorComponent(
@@ -441,6 +449,91 @@ describe("session selector rename", () => {
 		expect(renamed.calls).toEqual([]);
 		const after = props(selector.describe(withPicker));
 		expect(after.items?.find(item => item.id === beta.path)?.label).toBe("Beta");
+	});
+
+	it("omits auto-title hint and disables Alt+T when app.session.generateTitle is unbound", () => {
+		setKeybindings(KeybindingsManager.inMemory({ "app.session.generateTitle": [] }));
+		let generateCalls = 0;
+		const { selector } = makeRename(
+			{ calls: [] },
+			{
+				onGenerateTitle: async () => {
+					generateCalls++;
+					return "Generated";
+				},
+			},
+		);
+
+		selector.handleInput("\x1bOQ");
+		expect(renameDialogOf(selector)).toBeDefined();
+
+		const rendered = selector.render(100).join("\n");
+		expect(rendered).not.toContain("auto-title");
+
+		const card = selector.describe(withoutPicker);
+		expect(hintLabelsOf(card)).not.toContain("auto-title");
+
+		selector.handleInput("\x1bt");
+		expect(generateCalls).toBe(0);
+	});
+
+	it("displays an error message when onGenerateTitle resolves null", async () => {
+		const { promise, resolve } = Promise.withResolvers<string | null>();
+		const { selector } = makeRename(
+			{ calls: [] },
+			{
+				onGenerateTitle: async () => promise,
+			},
+		);
+		selector.handleInput("\x1bOQ");
+		expect(renameDialogOf(selector)).toBeDefined();
+		let renders = 0;
+		const { promise: renderedError, resolve: onRender } = Promise.withResolvers<void>();
+		selector.setOnRequestRender(() => {
+			if (++renders === 2) onRender();
+		});
+
+		selector.handleInput("\x1bt");
+		resolve(null);
+		await renderedError;
+		const rendered = selector.render(100).join("\n");
+		expect(rendered).toContain("Could not generate a title for this session.");
+
+		const card = selector.describe(withoutPicker);
+		const messageNode = (card.c ?? []).find(
+			(child): child is NativeNode & { k: "text" } =>
+				isNativeNode(child) && child.k === "text" && child.key === "message",
+		);
+		expect(messageNode).toBeDefined();
+		expect(messageNode?.p?.spans?.[0]).toMatchObject({
+			t: expect.stringContaining("Could not generate a title for this session."),
+		});
+	});
+
+	it("aborts onGenerateTitle when Enter is pressed while generating", async () => {
+		const renamed = { calls: [] as RenameCall[] };
+		let abortSignal: AbortSignal | undefined;
+		const { promise: pendingPromise, resolve: finishGenerate } = Promise.withResolvers<string>();
+
+		const { selector } = makeRename(renamed, {
+			onGenerateTitle: async (_s, signal) => {
+				abortSignal = signal;
+				return pendingPromise;
+			},
+		});
+
+		selector.handleInput("\x1bOQ");
+		expect(renameDialogOf(selector)).toBeDefined();
+
+		selector.handleInput("\x1bt");
+		expect(abortSignal).toBeDefined();
+		expect(abortSignal!.aborted).toBe(false);
+
+		selector.handleInput("\r");
+		expect(abortSignal!.aborted).toBe(true);
+
+		finishGenerate("Late Title");
+		await pendingPromise;
 	});
 });
 

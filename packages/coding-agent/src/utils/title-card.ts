@@ -7,7 +7,11 @@
  * ({@link keepTitleCard}); a title named without one can get a card of its own
  * from a card reply ({@link parseCardReply}).
  */
-import type { TitleIcons } from "./title-settings";
+import { prompt } from "@oh-my-pi/pi-utils";
+import titleCardPrompt from "../prompts/system/title-card.md" with { type: "text" };
+import type { Settings } from "../config/settings";
+import { cfgTitleIcons, type TitleIcons } from "./title-settings";
+import { nerdGlyphsActive } from "./title-generator";
 import { normalizeGeneratedTitle } from "../tiny/text";
 import { canonicalNerdFontName, nerdFontGlyph } from "./nerd-font-glyphs";
 
@@ -185,4 +189,34 @@ export function splitCardTitle(title: string): CardTitleParts | undefined {
 export function keepTitleCard(current: string | undefined, title: string): string {
 	const card = current ? splitCardTitle(current) : undefined;
 	return card ? formatCardTitle(card, splitCardTitle(title)?.title ?? title) : title;
+}
+
+/**
+ * The icons style a new card shows: `title.icons`, falling back to `emoji`
+ * when Nerd Fonts glyphs are inactive, or `boring` when disabled.
+ */
+export function resolveCardIcons(settings: Settings): TitleIcons {
+	const icons = cfgTitleIcons.get(settings);
+	return icons === "nf+emoji" && !nerdGlyphsActive() ? "emoji" : icons;
+}
+
+/**
+ * `title` headed by a card the title model names for it, preserving `currentTitle`'s
+ * card if it has one. Returns `title` unchanged when it already has a card,
+ * `title.icons` is `boring`, or the card request fails.
+ */
+export async function cardSessionTitle(
+	title: string,
+	currentTitle: string | undefined,
+	settings: Settings,
+	generate: (text: string, customSystemPrompt?: string, signal?: AbortSignal) => Promise<string | null>,
+	signal?: AbortSignal,
+): Promise<string> {
+	const kept = keepTitleCard(currentTitle, title);
+	const icons = resolveCardIcons(settings);
+	if (icons === "boring" || splitCardTitle(kept)) return kept;
+	const cardPrompt = prompt.render(titleCardPrompt, { nerdFonts: icons === "nf+emoji" });
+	const reply = await generate(kept, cardPrompt, signal);
+	const card = reply ? parseCardReply(reply, icons) : undefined;
+	return card ? formatCardTitle(card, kept) : kept;
 }

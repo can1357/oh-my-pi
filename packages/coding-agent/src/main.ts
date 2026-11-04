@@ -26,6 +26,7 @@ import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
+import { generatePickerSessionTitle } from "./utils/title-generator";
 import {
 	type Args,
 	reportInvalidFlagValues,
@@ -222,19 +223,14 @@ async function loadSessionPicker(init?: {
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
 }): Promise<SessionPicker> {
-	const [
-		{ selectSession },
-		{ HistoryStorage },
-		{ loadPinnedSessionIds, setSessionPinned },
-		{ FileSessionStorage },
-		{ generatePickerSessionTitle },
-	] = await Promise.all([
-		import("@oh-my-pi/pi-tui/apps/session-picker"),
-		import("./session/history-storage"),
-		import("./session/session-pins"),
-		import("./session/session-storage"),
-		import("./utils/title-generator"),
-	]);
+	const { modelRegistry, settings } = init ?? {};
+	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds, setSessionPinned }, { FileSessionStorage }] =
+		await Promise.all([
+			import("@oh-my-pi/pi-tui/apps/session-picker"),
+			import("./session/history-storage"),
+			import("./session/session-pins"),
+			import("./session/session-storage"),
+		]);
 	return (sessions, options) => {
 		const storage = new FileSessionStorage();
 		// The picker runs before interactive mode loads the user's keymap, and its pin keys are remappable.
@@ -257,12 +253,12 @@ async function loadSessionPicker(init?: {
 						renameSession: (session: SessionInfo, title: string) =>
 							SessionManager.renameSessionTitle(session.path, title, { cwd: session.cwd }),
 						setSessionPinned: (session: SessionInfo, pinned: boolean) => setSessionPinned(session.id, pinned),
-						...(init?.modelRegistry && init?.settings
+						...(modelRegistry && settings
 							? {
 									generateSessionTitle: (session: SessionInfo, signal: AbortSignal) =>
 										generatePickerSessionTitle(session, {
-											registry: init.modelRegistry!,
-											settings: init.settings!,
+											registry: modelRegistry,
+											settings,
 											signal,
 										}),
 								}

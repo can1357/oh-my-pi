@@ -22,6 +22,7 @@ import {
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import * as titleCard from "@oh-my-pi/pi-coding-agent/utils/title-card";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { isWsl, logger, setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
@@ -1403,5 +1404,43 @@ describe("generatePickerSessionTitle", () => {
 		} finally {
 			await fs.rm(tmpDir, { recursive: true, force: true });
 		}
+	});
+
+	it("uses the default runGenerate path when options.generate is omitted", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		const settings = Settings.isolated({
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+			"title.icons": "boring",
+		});
+		const registry = createRegistry(model);
+
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Generated Title</title>" }],
+		} as never);
+		const cardSpy = vi.spyOn(titleCard, "cardSessionTitle");
+
+		const result = await generatePickerSessionTitle(
+			{
+				id: "s-default",
+				path: "/fake/s-default.jsonl",
+				title: undefined,
+				firstMessage: "Implement caching layer for Redis",
+				allMessagesText: "Implement caching layer for Redis",
+			},
+			{
+				registry,
+				settings,
+			},
+		);
+
+		expect(completeSimpleMock).toHaveBeenCalled();
+		const callOptions = completeSimpleMock.mock.calls[0]?.[2];
+		expect(callOptions?.sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+		expect(JSON.parse(callOptions?.metadata?.user_id as string)).toEqual({
+			session_id: callOptions?.sessionId,
+		});
+		expect(cardSpy).toHaveBeenCalledWith("Generated Title", undefined, settings, expect.any(Function), undefined);
+		expect(result).toBe("Generated Title");
 	});
 });

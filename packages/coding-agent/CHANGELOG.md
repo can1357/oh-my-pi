@@ -28,6 +28,7 @@
 - The `devin-cli` login imports Devin CLI credentials into a stored `devin` account, so the provider no longer requires `DEVIN_API_KEY` ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - The `devin-windsurf` login lets Windsurf Enterprise users authenticate the `devin` provider with their existing Windsurf account ([#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - Pressing `Alt+T` (`app.session.generateTitle`, remappable) inside the resume picker's F2 rename dialog fills the input with a suggested title generated from the session's transcript, keeping or naming its title card like `/rename` (by [@SuperUserA](https://github.com/SuperUserA))
+- Pressing `Alt+T` (`app.session.generateTitle`, remappable) inside the resume picker's F2 rename dialog fills the input with a suggested title generated from the session's transcript, keeping or naming its title card like `/rename` ([#18025](https://github.com/can1357/oh-my-pi/pull/18025) by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Fixed
 

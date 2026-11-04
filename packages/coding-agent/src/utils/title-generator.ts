@@ -34,9 +34,7 @@ import { readSessionInfo, type SessionInfo } from "../session/session-listing";
 import { buildSessionMetadata } from "../session/session-metadata";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { cfgSecretsEnabled } from "../secrets/settings";
-import { formatCardTitle, keepTitleCard, parseCardReply, splitCardTitle } from "./title-card";
-import { cfgTitleIcons, type TitleIcons } from "./title-settings";
-import titleCardPrompt from "../prompts/system/title-card.md" with { type: "text" };
+import * as titleCard from "./title-card";
 import { tinyTitleClient } from "../tiny/title-client";
 
 import { cfgRetryModelFallback } from "../session/settings";
@@ -309,7 +307,7 @@ export async function generateTitleOnline(
 }
 
 export interface GeneratePickerSessionTitleOptions {
-	registry: ModelRegistry;
+	registry?: ModelRegistry;
 	settings: Settings;
 	signal?: AbortSignal;
 	currentModel?: Model<Api>;
@@ -348,21 +346,20 @@ export async function generatePickerSessionTitle(
 
 	const runGenerate =
 		options.generate ??
-		((text: string, customSystemPrompt?: string, signal?: AbortSignal) => {
-			const titleSessionId = session.id ? `${session.id}:title` : undefined;
+		(async (text: string, customSystemPrompt?: string, signal?: AbortSignal) => {
+			if (!options.registry) return null;
+			const titleSessionId = Bun.randomUUIDv7();
 			return withCredentialRedaction(cfgSecretsEnabled.get(options.settings), () =>
 				generateSessionTitle(
 					text,
-					options.registry,
+					options.registry!,
 					options.settings,
 					titleSessionId,
 					options.currentModel,
-					titleSessionId
-						? provider => buildSessionMetadata(titleSessionId, provider, options.registry.authStorage)
-						: undefined,
+					provider => buildSessionMetadata(titleSessionId, provider, options.registry!.authStorage),
 					customSystemPrompt,
 					signal,
-					options.credentialSourceSessionId ?? session.id,
+					options.credentialSourceSessionId,
 				),
 			);
 		});
@@ -372,20 +369,13 @@ export async function generatePickerSessionTitle(
 		if (options.signal?.aborted) return null;
 		const title = await runGenerate(text, undefined, options.signal);
 		if (title) {
-			named = keepTitleCard(session.title, title);
+			named = title;
 			break;
 		}
 	}
 	if (!named || options.signal?.aborted) return null;
 
-	const configuredIcons = cfgTitleIcons.get(options.settings);
-	const icons: TitleIcons = configuredIcons === "nf+emoji" && !nerdGlyphsActive() ? "emoji" : configuredIcons;
-	if (icons === "boring" || splitCardTitle(named)) return named;
-	const cardPrompt = prompt.render(titleCardPrompt, { nerdFonts: icons === "nf+emoji" });
-	const reply = await runGenerate(named, cardPrompt, options.signal);
-	if (options.signal?.aborted) return null;
-	const card = reply ? parseCardReply(reply, icons) : undefined;
-	return card ? formatCardTitle(card, named) : named;
+	return titleCard.cardSessionTitle(named, session.title, options.settings, runGenerate, options.signal);
 }
 
 async function generateTitleOnlineWithModels(
@@ -427,11 +417,11 @@ async function generateTitleOnlineWithModels(
 
 		try {
 			if (credentialSourceSessionId && sessionId && credentialSourceSessionId !== sessionId) {
-				const foregroundCredential = registry.authStorage.oauth
-					.accounts(model.provider, credentialSourceSessionId)
-					.find(account => account.active);
+				const foregroundCredential = registry.authStorage?.oauth
+					?.accounts(model.provider, credentialSourceSessionId)
+					?.find(account => account.active);
 				if (foregroundCredential) {
-					registry.authStorage.sessions.pin(model.provider, sessionId, foregroundCredential.credentialId);
+					registry.authStorage?.sessions?.pin(model.provider, sessionId, foregroundCredential.credentialId);
 				}
 			}
 			const apiKey = await registry.getApiKey(model, sessionId);

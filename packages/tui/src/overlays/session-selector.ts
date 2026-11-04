@@ -2080,9 +2080,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	#footerLines(width: number): string[] {
 		const cancel = interruptKey();
 		if (this.#renameDialog) {
-			const generateKey = this.#onGenerateTitle
-				? (boundKeys("app.session.generateTitle", ["alt+t"])[0] ?? "alt+t")
-				: undefined;
+			const [generateKey] = this.#onGenerateTitle ? getKeybindings().getKeys("app.session.generateTitle") : [];
 			const hint = theme.fg(
 				"muted",
 				`[${formatKeyHint("enter")} save · ${generateKey ? `${formatKeyHint(generateKey)} auto-title · ` : ""}${cancel} cancel]`,
@@ -2155,10 +2153,8 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		if (this.#renameDialog) {
 			hints.push({ keys: ["enter"], label: "save" });
 			if (this.#onGenerateTitle) {
-				hints.push({
-					keys: [boundKeys("app.session.generateTitle", ["alt+t"])[0] ?? "alt+t"],
-					label: "auto-title",
-				});
+				const [generateKey] = getKeybindings().getKeys("app.session.generateTitle");
+				if (generateKey) hints.push({ keys: [generateKey], label: "auto-title" });
 			}
 			hints.push({ keys: [boundKeys("app.interrupt", ["escape"])[0] ?? "escape"], label: "cancel" });
 		} else {
@@ -2367,16 +2363,9 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		if (this.#confirmationDialog) {
 			this.#confirmationDialog.handleInput(keyData);
 		} else if (this.#renameDialog) {
-			if (this.#renameGenerateTitle) {
-				const kb = getKeybindings();
-				const matched =
-					kb.getKeys("app.session.generateTitle").length > 0
-						? kb.matches(keyData, "app.session.generateTitle")
-						: matchesKey(keyData, "alt+t");
-				if (matched) {
-					this.#renameGenerateTitle();
-					return;
-				}
+			if (this.#renameGenerateTitle && getKeybindings().matches(keyData, "app.session.generateTitle")) {
+				this.#renameGenerateTitle();
+				return;
 			}
 			this.#renameField?.handleInput(keyData);
 		} else {
