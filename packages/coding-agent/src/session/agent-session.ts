@@ -3215,8 +3215,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#autoQaEnabled = isAutoQaEnabled(this.settings);
 		cfgPowerSleepPrevention.listen(this, () => {
 			// Swap the held assertion for the new mode mid-prompt; idle sessions
-			// pick the mode up when the next prompt begins.
-			if (this.#promptInFlightCount === 0) return;
+			// pick the mode up when the next prompt begins, and a parked one when
+			// it resumes (see #onAgentPauseChange).
+			if (this.#promptInFlightCount === 0 || this.agent.isPaused) return;
 			this.#releasePowerAssertion();
 			this.#acquirePowerAssertion();
 		});
