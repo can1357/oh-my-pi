@@ -24,9 +24,11 @@ import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
  *      `todo` call, the aside provider injects a hidden custom message
  *      (`display: false`) — NO `todo_reminder` event, nothing renders.
  *   3. A `todo` tool result resets the counter.
- *   4. At most {@link MID_RUN_TODO_NUDGE_MAX_PER_CYCLE} nudges fire between
- *      state-writing `todo` results (`view` reads and errored attempts do not
- *      re-arm the budget); a new prompt cycle re-arms it unconditionally.
+ *   4. An unanswered nudge doubles the mutation runway (12, 24, 48, 96, then
+ *      every 192), capped by the backoff doublings, so a long turn keeps
+ *      getting nudged instead of falling silent after the second reminder.
+ *      A state-writing `todo` result (`view` reads and errored attempts do not)
+ *      resets the count and the backoff; a new prompt cycle re-arms both.
  *   5. The counter update lands synchronously with the message_end emit.
  *
  * Drives the aside provider directly: the production agent loop polls it
@@ -49,8 +51,8 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
 	let reminderEvents: Array<Extract<AgentSessionEvent, { type: "todo_reminder" }>>;
 	let asideProvider: ((boundary: AsideBoundary) => AsideMessage[] | Promise<AsideMessage[]>) | undefined;
 
-	const THRESHOLD = 12; // mirrors MID_RUN_TODO_NUDGE_MUTATION_THRESHOLD
-	const MAX_PER_CYCLE = 2; // mirrors MID_RUN_TODO_NUDGE_MAX_PER_CYCLE
+	const THRESHOLD = 12; // mirrors MID_RUN_NUDGE_MUTATION_THRESHOLD
+	const BACKOFF_DOUBLINGS = 4; // mirrors MID_RUN_NUDGE_BACKOFF_DOUBLINGS
 	const NUDGE_TYPE = "mid-run-todo-nudge"; // mirrors MID_RUN_TODO_NUDGE_MESSAGE_TYPE
 
 	function toolUseAssistant(toolName: string): AssistantMessage {
@@ -260,27 +262,35 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
 		expect(reminderEvents).toEqual([]);
 	});
 
-	it("caps nudges per prompt cycle", async () => {
-		let fired = 0;
-		for (let cycle = 0; cycle < MAX_PER_CYCLE + 2; cycle++) {
-			for (let i = 0; i < THRESHOLD; i++) emitToolResult("edit");
-			fired += (await drainNudges()).length;
+	it("backs off instead of falling silent when nudges are ignored", async () => {
+		const runways = [THRESHOLD, THRESHOLD * 2, THRESHOLD * 4, THRESHOLD * 8, THRESHOLD * 2 ** BACKOFF_DOUBLINGS];
+		for (const runway of runways) {
+			for (let i = 0; i < runway; i++) emitToolResult("edit");
+			const nudges = await drainNudges();
+			expect(nudges.length).toBe(1);
+			expect(nudges[0]?.display).toBe(false);
+			expect(await drainNudges()).toEqual([]);
+			expect(reminderEvents).toEqual([]);
 		}
-		expect(fired).toBe(MAX_PER_CYCLE);
+
+		// At the ceiling it settles into a steady reminder rate instead of
+		// going silent for the rest of the turn.
+		for (let cycle = 0; cycle < 2; cycle++) {
+			for (let i = 0; i < THRESHOLD * 2 ** BACKOFF_DOUBLINGS; i++) emitToolResult("edit");
+			expect((await drainNudges()).length).toBe(1);
+		}
 		expect(reminderEvents).toEqual([]);
 	});
 
 	it("re-arms the nudge budget after a todo state write so a long turn keeps getting nudged", async () => {
-		// Without the re-arm, the cap outlives the progress it rations: two
-		// nudges in a single prompt silence the mid-run path until the next
-		// user prompt, which is precisely the stale-HUD case the nudge exists
-		// for.
+		// Two ignored nudges must not silence the mid-run path: only a state
+		// write resets the backoff, and the next runway starts at 12 again.
 		let fired = 0;
-		for (let cycle = 0; cycle < MAX_PER_CYCLE; cycle++) {
-			for (let i = 0; i < THRESHOLD; i++) emitToolResult("edit");
+		for (const runway of [THRESHOLD, THRESHOLD * 2]) {
+			for (let i = 0; i < runway; i++) emitToolResult("edit");
 			fired += (await drainNudges()).length;
 		}
-		expect(fired).toBe(MAX_PER_CYCLE);
+		expect(fired).toBe(2);
 		expect(await drainNudges()).toEqual([]);
 
 		// The agent acted on a nudge and wrote todo state — the same path the
@@ -294,11 +304,11 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
 
 	it("read-only todo results do not re-arm the nudge budget", async () => {
 		let fired = 0;
-		for (let cycle = 0; cycle < MAX_PER_CYCLE; cycle++) {
-			for (let i = 0; i < THRESHOLD; i++) emitToolResult("edit");
+		for (const runway of [THRESHOLD, THRESHOLD * 2]) {
+			for (let i = 0; i < runway; i++) emitToolResult("edit");
 			fired += (await drainNudges()).length;
 		}
-		expect(fired).toBe(MAX_PER_CYCLE);
+		expect(fired).toBe(2);
 
 		// Neither a read-only view nor a failed attempt nor a details-less
 		// Cursor read snapshot wrote state, so none of them re-arms.
