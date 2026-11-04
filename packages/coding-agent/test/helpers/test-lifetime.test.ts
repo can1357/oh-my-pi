@@ -197,6 +197,46 @@ describe("trackTestLifetime", () => {
 		expect(run.output).toContain(refusal("an afterAll hook"));
 	}, 60_000);
 
+	test("reads the run's default timeout without /proc, as a platform that has none", async () => {
+		const run = await runFixtures(
+			{
+				// Loaded before the helper: every later read of /proc/self/cmdline fails, as on macOS.
+				"no-proc.ts": `
+					import fs from "node:fs";
+					const real = fs.readFileSync;
+					fs.readFileSync = ((p: string, ...rest: unknown[]) => {
+						if (String(p) === "/proc/self/cmdline") throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+						return (real as (...args: unknown[]) => unknown)(p, ...rest);
+					}) as typeof fs.readFileSync;
+				`,
+				"1-first.test.ts": `
+					import { trackTestLifetime } from HELPER;
+					const { test, afterAll } = trackTestLifetime();
+					const shared = globalThis as { lateHook?: string };
+					shared.lateHook = "initial";
+					afterAll(async () => {
+						await Bun.sleep(400);
+						shared.lateHook = "stale";
+					});
+					test("first body", () => {});
+				`,
+				"2-second.test.ts": `
+					import { expect } from "bun:test";
+					import { trackTestLifetime } from HELPER;
+					await Bun.sleep(800);
+					const { test } = trackTestLifetime();
+					test("passes only on the late afterAll write", () => {
+						expect((globalThis as { lateHook?: string }).lateHook).toBe("stale");
+					});
+				`,
+			},
+			["--preload", "./no-proc.ts", "--timeout", "100"],
+		);
+
+		expect(run.outcome("passes only on the late afterAll write")).toBe("fail");
+		expect(run.output).toContain(refusal("an afterAll hook"));
+	}, 60_000);
+
 	test("takes the deadline Bun takes: the last --timeout, and never bunfig's, which Bun does not apply", async () => {
 		const [lastFlag, bunfigIgnored] = await Promise.all([
 			runFixtures(

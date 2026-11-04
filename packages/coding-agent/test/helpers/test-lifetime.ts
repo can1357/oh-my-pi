@@ -12,13 +12,13 @@ import * as fs from "node:fs";
 import { types } from "node:util";
 
 /**
- * Promises of tracked tests and hooks not yet seen settled, each with its test or hook's name. Bun
- * shares one module registry across the test files of a process, so this sees every tracked file
- * in it.
+ * Tracked tests and hooks not yet seen settled, by the promise each returned: its name, and the
+ * real time by which it must settle, where it has one. Bun shares one module registry across the
+ * test files of a process, so this sees every tracked file in it.
  */
-const running = new Map<Promise<unknown>, string>();
+const running = new Map<Promise<unknown>, { name: string; deadline: number | undefined }>();
 
-/** The first tracked test or hook found still running when a later one started; it stays set. */
+/** The first tracked test or hook found to have outlived its timeout; it stays set. */
 let timedOut: string | undefined;
 
 /**
@@ -32,12 +32,12 @@ let timedOut: string | undefined;
  */
 function noteTimeout(): void {
 	if (timedOut !== undefined) return;
-	for (const [promise, name] of running) {
+	for (const [promise, body] of running) {
 		if (Bun.peek.status(promise) !== "pending") {
 			running.delete(promise);
 			continue;
 		}
-		timedOut = name;
+		timedOut = body.name;
 		return;
 	}
 }
@@ -61,23 +61,32 @@ function refuseAfterTimeout(): void {
 	}
 }
 
+/** The words of this process's own command line, which carries the test flags Bun keeps out of `Bun.argv`. */
+function ownCommandLine(): string[] | undefined {
+	try {
+		return fs.readFileSync("/proc/self/cmdline", "utf8").split("\0");
+	} catch {
+		// No /proc (macOS, BSD): `ps` prints the same words, space-joined (measured).
+		const ps = Bun.spawnSync(["ps", "-ww", "-o", "args=", "-p", String(process.pid)]);
+		if (!ps.success) return undefined;
+		const line = new TextDecoder().decode(ps.stdout).trim();
+		return line === "" ? undefined : line.split(" ");
+	}
+}
+
 /**
  * The process's default timeout of tests and hooks: the last `bun test --timeout <ms>` of the
- * process's own command line, which is the one Bun applies; Bun leaves its test flags out of
- * `Bun.argv`, so the command line is read directly. Else Bun's own 5000. Undefined where the
- * command line cannot be read, which leaves default-timeout bodies to the phase checks alone.
+ * process's own command line, which is the one Bun applies. Else Bun's own 5000. Undefined only
+ * where the command line cannot be read at all, which leaves default-timeout bodies to the phase
+ * checks alone.
  *
  * `bunfig.toml`'s `[test] timeout` is deliberately not read: Bun 1.4.4 does not apply it (measured:
  * a 400 ms test passes under `[test] timeout=100`), so honouring it here would refuse healthy tests.
  * A file changes its own default with the tracked {@link TestLifetime.setDefaultTimeout}.
  */
 const processDefaultTimeoutMs: number | undefined = (() => {
-	let argv: string[];
-	try {
-		argv = fs.readFileSync("/proc/self/cmdline", "utf8").split("\0");
-	} catch {
-		return undefined;
-	}
+	const argv = ownCommandLine();
+	if (argv === undefined) return undefined;
 	let timeout = 5000;
 	for (const [index, arg] of argv.entries()) {
 		const value = arg === "--timeout" ? argv[index + 1] : arg.startsWith("--timeout=") ? arg.slice(10) : undefined;
@@ -97,35 +106,63 @@ function timeoutOf(options: unknown, fileDefault: number | undefined): number | 
 }
 
 /**
- * A cell no one ever notifies: `Atomics.waitAsync` on it ends only when the real time it was given
- * has passed. Every clock a test can read — `Bun.nanoseconds`, `performance.now`, `Date.now`,
- * `process.hrtime`, `process.uptime` — moves with Bun's fake timers (measured), so a deadline must
- * be a wait of a fixed length, never a difference between two clock readings.
+ * Real time in milliseconds, from a worker that keeps it (see `./test-lifetime-clock`). No clock
+ * of this thread serves: Bun's fake timers move every one a test can read — `Bun.nanoseconds`,
+ * `performance.now`, `Date.now`, `process.hrtime`, `process.uptime` (measured) — and a test that
+ * blocks the thread stops its timers and delays an `Atomics.waitAsync` wake past a late write
+ * (measured: a 50 ms wake arrived after a 200 ms body, both released by one 600 ms block).
+ *
+ * Zero until the worker's first tick, and zero for good where no worker can start, which arms no
+ * deadline and leaves the phase checks to stand alone: never a refusal of a healthy test.
  */
-const neverNotified = new Int32Array(new SharedArrayBuffer(4));
+const realTimeMs: () => number = (() => {
+	try {
+		const buffer = new SharedArrayBuffer(8);
+		const cell = new Int32Array(buffer);
+		const worker = new Worker(new URL("./test-lifetime-clock.ts", import.meta.url).href, { type: "module" });
+		worker.unref();
+		worker.postMessage(buffer);
+		// The first tick, so that a body entered right away is timed from a live clock.
+		Atomics.wait(cell, 1, 0, 5000);
+		return () => Atomics.load(cell, 0);
+	} catch {
+		return () => 0;
+	}
+})();
+
+/** A tick of the clock, as slack: a deadline is past only when the clock has gone beyond it. */
+const CLOCK_TICK_MS = 2;
+
+/** The native `then`, taken before any test runs: a test may replace its own promise's `then`. */
+const nativeThen = Promise.prototype.then;
 
 /**
  * Run a test or hook body, and keep the promise it returns in {@link running}. Any native promise
  * counts, also one from another realm (`node:vm`), which Bun awaits too.
  *
- * A body still pending at its deadline has timed out, whatever runs next: Bun gives up on it then,
- * and it may settle before any later tracked test or hook starts (during the next file's module
- * setup, say), where a pending check would no longer see it. The wait starts as the body is
- * entered, as Bun's deadline does, so synchronous work before its first `await` counts.
+ * A body that settles later than Bun's deadline for it has timed out, even where nothing observed
+ * it pending: Bun gives up at the deadline and runs on, and the body may settle while no tracked
+ * test or hook is watching (during the next file's module setup, say, which can block this thread
+ * for longer than the deadline). The clock starts as the body is entered, as Bun's deadline does,
+ * so synchronous work before its first `await` counts.
  */
 function runTracked<T>(name: string, fn: (...args: unknown[]) => T, args: unknown[], timeoutMs?: number): T {
 	const armed = timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0;
-	// Armed before the body runs, and just past Bun's own deadline for it.
-	const deadline = armed ? Atomics.waitAsync(neverNotified, 0, 0, (timeoutMs as number) + 1) : undefined;
+	const deadline = armed ? realTimeMs() + (timeoutMs as number) + CLOCK_TICK_MS : undefined;
 	const result = fn(...args);
 	if (types.isPromise(result)) {
 		const promise = result as Promise<unknown>;
-		running.set(promise, name);
-		const noteIfPending = (): void => {
-			if (timedOut === undefined && Bun.peek.status(promise) === "pending") timedOut = name;
-		};
-		if (deadline?.async) void deadline.value.then(noteIfPending);
-		else if (deadline) noteIfPending();
+		running.set(promise, { name, deadline });
+		if (deadline !== undefined) {
+			const noteIfLate = (): void => {
+				if (timedOut === undefined && realTimeMs() > deadline) timedOut = name;
+			};
+			try {
+				void nativeThen.call(promise, noteIfLate, noteIfLate);
+			} catch {
+				// A promise whose native `then` refuses it: the phase checks still cover it.
+			}
+		}
 	}
 	return result;
 }
