@@ -4,7 +4,7 @@
 
 ### Added
 
-- The `session_exit` transcript entry now records who ended the process and why: `pid`, `pane` (`$TMUX_PANE`), `oomKills` (the `oom_kill` count of the process's cgroup v2 at exit) and `intent`. Before it signals an omp process, a sender runs `omp session exit-intent <pid> <move|restart|stop>`; omp records that word at exit and deletes the file. A missing or unreadable source leaves its field absent
+- The `session_exit` transcript entry now records who ended the process and why: `pid`, `pane` (`$TMUX_PANE`), `oomKills` (the `oom_kill` count of the process's cgroup v2 at exit) and `intent`. Before it signals an omp process, a sender runs `omp session exit-intent <pid> <move|restart|stop>`; omp records that word at exit and deletes the file. A missing or unreadable source leaves its field absent ([#17867](https://github.com/can1357/oh-my-pi/pull/17867) by [@sjawhar](https://github.com/sjawhar))
 - Added the default-off `providers.openaiResponsesWebsockets` setting for catalog-supported standard Responses models, independently of Codex; model/request `false` always disables it ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
 - Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
