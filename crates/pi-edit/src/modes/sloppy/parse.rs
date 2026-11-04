@@ -210,26 +210,38 @@ fn envelope_line(line: &str) -> bool {
 
 /// Remove foreign patch envelopes and the noise following end sentinels.
 ///
-/// Insert bodies are literal, so envelope rows inside them are kept — except a
-/// closing sentinel (`*** End Patch`, …) followed only by blank or fence lines,
-/// which closes a wrapper around the whole payload rather than inserted text.
+/// Insert bodies are literal, so envelope rows inside them are kept. A closing
+/// sentinel (`*** End`, `*** End Patch`, …) ending a Replace or Insert body is
+/// never content: before blank or fence lines only it closes the payload, and
+/// before a header or envelope row it closes that one body, so the operations
+/// after it still apply. Find bodies keep such lines, so a stray one can be
+/// matched and removed.
 pub fn strip_envelope_noise(lines: Vec<&str>) -> Vec<String> {
 	let mut result = Vec::new();
 	let mut skipping = false;
 	let mut inserting = false;
+	let mut writing = false;
 	let mut index = 0;
 	while index < lines.len() {
 		let mut line = lines[index].to_owned();
-		if let Some(header) = parse_header(&line) {
+		let header = parse_header(&line);
+		if let Some(header) = &header {
 			inserting = !skipping && matches!(header, Header::Insert(_));
-		} else if inserting {
-			if ENVELOPE_END_RE.is_match(line.trim())
-				&& lines[index + 1..]
-					.iter()
-					.all(|rest| rest.trim().is_empty() || FENCE_LINE_RE.is_match(rest))
+			writing = !skipping && matches!(header, Header::Replace | Header::Insert(_));
+		} else if writing && ENVELOPE_END_RE.is_match(line.trim()) {
+			match lines[index + 1..]
+				.iter()
+				.find(|rest| !rest.trim().is_empty() && !FENCE_LINE_RE.is_match(rest))
 			{
-				break;
+				None => break,
+				Some(next) if parse_header(next).is_some() || envelope_line(next.trim()) => {
+					index += 1;
+					continue;
+				},
+				Some(_) => {},
 			}
+		}
+		if inserting && header.is_none() {
 			result.push(line);
 			index += 1;
 			continue;

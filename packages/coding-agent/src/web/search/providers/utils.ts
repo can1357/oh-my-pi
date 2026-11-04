@@ -1,4 +1,4 @@
-import type { AgentStorage } from "../../../session/agent-storage";
+import type { AgentStorageApi } from "../../../session/agent-storage";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, SearchProviderError } from "../../../web/search/types";
 import { SEARCH_PROVIDER_LABELS, type SearchProviderId, type SearchSource } from "../types";
 import { decodeBody, readBodyCapped } from "../../response-body";
@@ -18,7 +18,7 @@ import { dateToAgeSeconds } from "../utils";
  * @param storageProviders - Provider names to look up in AgentStorage
  */
 export function findCredential(
-	storage: AgentStorage | null | undefined,
+	storage: AgentStorageApi | null | undefined,
 	envKey: string | null | undefined,
 	...storageProviders: string[]
 ): string | null {

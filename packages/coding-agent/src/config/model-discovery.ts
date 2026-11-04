@@ -33,6 +33,7 @@ import {
 	runnerApiKind,
 } from "@oh-my-pi/pi-catalog/types";
 import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
+import { parseServiceTierIds } from "@oh-my-pi/pi-catalog/utils";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";
 
@@ -1198,6 +1199,7 @@ export async function discoverOpenAIModelsList(
 						reasoning?: unknown;
 						reasoning_effort_map?: unknown;
 						reasoning_required?: unknown;
+						service_tiers?: unknown;
 					}>;
 				};
 			}),
@@ -1308,6 +1310,10 @@ export async function discoverOpenAIModelsList(
 		const advertisedReasoning = advertisedReasoningEnabled(providerConfig)
 			? extractAdvertisedReasoning(item)
 			: undefined;
+		// Relays in front of the Codex backend republish its per-model tier list
+		// (bare ids or codex-rs `{ id }` objects; codex-lb nests it under
+		// `metadata`). It is what lets Ultrafast reach an advertising relay row.
+		const serviceTiers = parseServiceTierIds(metadata?.service_tiers ?? item.service_tiers);
 		const spec = {
 			id,
 			name: advertisedName || reference?.name || id,
@@ -1332,6 +1338,7 @@ export async function discoverOpenAIModelsList(
 				contextWindow,
 			),
 			headers: baseHeaders,
+			...(serviceTiers !== undefined ? { serviceTiers } : {}),
 			compat: {
 				supportsStore: false,
 				supportsDeveloperRole: false,

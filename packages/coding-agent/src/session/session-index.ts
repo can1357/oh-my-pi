@@ -3,11 +3,12 @@
  *
  * - `session_titles`: session id → display title, written whenever a title is
  *   created or renamed ({@link SessionManager.setSessionName}) and backfilled by
- *   the recent-session fallback scan. Lets the welcome "Recent sessions" list
- *   resolve names from a stat + lookup instead of content-scanning every session
- *   file in the project directory (multi-hundred-ms on dirs with thousands of
- *   sessions). A title has no life beyond its session; `omp gc` drops rows of
- *   archived sessions.
+ *   the recent-session fallback scan and the resume picker's full scan. Lets the
+ *   welcome "Recent sessions" list resolve names from a stat + lookup, and the
+ *   resume picker show its rows before reading any session file, instead of
+ *   content-scanning every session file in the project directory (seconds on
+ *   dirs with thousands of sessions). A title has no life beyond its session;
+ *   `omp gc` drops rows of archived sessions.
  * - `session_recaps`: append-only journal of idle recaps
  *   ({@link SessionManager.recordRecap}). Recaps are side-channel output that
  *   never enters the session JSONL or LLM context; this table is their only
@@ -136,6 +137,45 @@ export function recordSessionTitle(sessionId: string, title: string): void {
 	} catch (error) {
 		logger.debug("Session title index write failed", { sessionId, error: String(error) });
 	}
+}
+
+/**
+ * Record (or replace) many indexed titles in one transaction, so a picker
+ * scan backfilling thousands of sessions pays one commit instead of one per
+ * row. Best-effort like {@link recordSessionTitle}.
+ */
+export function recordSessionTitles(titles: ReadonlyMap<string, string>): void {
+	if (titles.size === 0) return;
+	const index = openSessionIndex();
+	if (!index) return;
+	try {
+		index.db.transaction(() => {
+			for (const [sessionId, title] of titles) index.upsertTitle.run(sessionId, title);
+		})();
+	} catch (error) {
+		logger.debug("Session title index write failed", { count: titles.size, error: String(error) });
+	}
+}
+
+/**
+ * Every indexed title by session id, in one query: the resume picker
+ * pre-populates its rows from it before any session file is read. Empty when
+ * the index is unavailable or unreadable.
+ */
+export function listSessionTitles(): Map<string, string> {
+	const titles = new Map<string, string>();
+	const index = openSessionIndex();
+	if (!index) return titles;
+	try {
+		// A damaged page can decode foreign bytes into these columns; never hand them to callers.
+		using statement = index.db.prepare<{ session_id: string; title: string }, []>(
+			"SELECT session_id, title FROM session_titles WHERE typeof(session_id) = 'text' AND typeof(title) = 'text'",
+		);
+		for (const row of statement.iterate()) titles.set(row.session_id, row.title);
+	} catch (error) {
+		logger.debug("Session title index read failed", { error: String(error) });
+	}
+	return titles;
 }
 
 /** Indexed title for a session id, or undefined when unindexed/unavailable. */

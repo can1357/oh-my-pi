@@ -13,7 +13,7 @@ import {
 import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
-import { truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shortenEmbeddedPaths, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { buildJobTree, jobTreeGuide, jobTreeIndent } from "@oh-my-pi/pi-tui/overlays/job-tree";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
@@ -344,6 +344,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			if (rest || (verb && verb !== "full")) return usage("Usage: /jobs [full|kill <id>|kill all]", runtime);
 			const full = verb === "full";
+			if (full) runtime.session.requestJobCaptions();
 			const tree = runtime.session.getAsyncJobTree();
 			if (!tree || (tree.running.length === 0 && tree.recent.length === 0)) {
 				await runtime.output(
@@ -366,10 +367,15 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				rows.push(
 					`${guide}[${job.id}] ${job.type} (${job.status}) — ${formatCoarseDuration((job.endTime ?? now) - job.startTime)}${agent}`,
 				);
-				const text = sanitizeText(full ? (job.command ?? job.label) : job.label);
-				if (text === job.id) continue;
+				// What the job is for leads; full mode follows it with what the command does and the whole command.
+				const lines = full ? [job.intent, job.caption, job.command ?? job.label] : [job.intent ?? job.label];
 				const indent = jobTreeIndent(row, theme);
-				for (const line of full ? text.split("\n") : [text]) rows.push(`${indent}${line}`);
+				for (const entry of lines) {
+					if (!entry) continue;
+					const text = shortenEmbeddedPaths(sanitizeText(entry));
+					if (text === job.id) continue;
+					for (const line of text.split("\n")) rows.push(`${indent}${line}`);
+				}
 			}
 			const body = rows.join("\n");
 			const fence = markdownFenceFor(body);

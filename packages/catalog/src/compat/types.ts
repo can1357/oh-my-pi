@@ -753,6 +753,8 @@ export interface ResolvedAxes {
 export interface RequestPolicy {
 	completionsReasoningMode?: "none" | "effort" | "opt-in" | "forced-on";
 	completionsReasoningHistory?: "omit" | "preserved" | "interleaved";
+	/** Send `allow_missing_thinking` with the effort so tool-call turns may arrive without reasoning. */
+	completionsAllowMissingThinking?: boolean;
 	anthropicThinking?: "adaptive" | "adaptive-summarized" | "budget-interleaved" | "budget-effort";
 	/** Advertise `fine-grained-tool-streaming-2025-05-14` on requests that carry tools. */
 	anthropicToolStreamingBeta?: boolean;
@@ -760,7 +762,7 @@ export interface RequestPolicy {
 	openaiPlatformHeader?: string;
 	responsesCacheRetention?: boolean;
 	responsesVerbosity?: "low";
-	responsesServiceTier?: "priority";
+	responsesServiceTier?: "priority" | "ultrafast";
 	responsesParallelToolCalls?: boolean;
 	responsesSafetyIdentifier?: boolean;
 	/** Default `tool_choice` to `auto` when the request carries tools and the caller picks none. */
