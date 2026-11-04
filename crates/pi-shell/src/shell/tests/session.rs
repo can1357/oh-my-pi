@@ -2121,6 +2121,66 @@ async fn run_reports_a_consumer_that_drops_its_receiver() {
 	assert_eq!(rx.drain().collect::<String>(), "yes", "the session survives the consumer");
 }
 
+/// A consumer gone before the first chunk, under the minimizer, which runs
+/// `printf x; printf done > marker` one segment at a time. The first
+/// segment's lost output stopped the chain, so `marker` was never written;
+/// the same command without the minimizer writes it. The chain must run to
+/// its end and the run fail after.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn segmented_chain_runs_to_its_end_after_its_consumer_is_gone() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("scratch directory");
+	let minimizer = printf_minimizer(&root.path().join("minimizer.toml"), None);
+	let (tx, rx) = flume::bounded::<String>(1);
+	drop(rx);
+	let result = time::timeout(
+		Duration::from_secs(20),
+		execute_shell(
+			ShellExecuteOptions {
+				command: "printf x; printf done > marker".into(),
+				cwd: Some(root.path().to_str().expect("utf8 cwd").to_owned()),
+				minimizer: Some(minimizer),
+				..Default::default()
+			},
+			Some(tx),
+			CancelToken::default(),
+		),
+	)
+	.await
+	.expect("the run ends");
+	assert_eq!(
+		fs::read_to_string(root.path().join("marker")).ok().as_deref(),
+		Some("done"),
+		"the segment after the lost output ran"
+	);
+	let err = result.expect_err("a run whose output was not all delivered must fail");
+	assert!(err.to_string().contains("not all delivered"), "{err}");
+}
+
+/// A consumer gone before the first chunk, then the run's timeout: the
+/// output was already lost, and the run reported only `timed_out`. It must
+/// fail.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn timed_out_run_still_reports_output_its_consumer_lost() {
+	let _guard = shell_test_lock().lock().await;
+	let (tx, rx) = flume::bounded::<String>(1);
+	drop(rx);
+	let result = time::timeout(
+		Duration::from_secs(20),
+		Shell::new(None).run(
+			ShellRunOptions { command: "printf x; sleep 5".into(), ..Default::default() },
+			Some(tx),
+			CancelToken::new(Some(300)),
+		),
+	)
+	.await
+	.expect("the run ends");
+	let err = result.expect_err("output lost before the timeout must fail the run");
+	assert!(err.to_string().contains("not all delivered"), "{err}");
+}
+
 /// The raw-bytes path with a bounded sink whose consumer stops after `x`. Its
 /// send blocked a runtime thread, so the run never returned.
 #[cfg(unix)]

@@ -506,8 +506,7 @@ fn run_pty_sync(
 			if !forwarding {
 				return;
 			}
-			let rest = decoder.lock().finish();
-			if !rest.is_empty() && !progress.hand(&reader_tx, rest) {
+			if !hand_rest(&decoder, &progress, &reader_tx) {
 				return;
 			}
 			let _ = reader_tx.send(ReaderEvent::Done);
@@ -690,6 +689,17 @@ fn run_pty_sync(
 		return Err(error);
 	}
 	Ok(PtyRunResult { exit_code, cancelled, timed_out })
+}
+
+/// Queues what `decoder` holds at the end of the output (a partial character
+/// becomes U+FFFD); `false` once the pump is gone.
+fn hand_rest(
+	decoder: &Mutex<OutputDecoder>,
+	progress: &ReaderProgress,
+	queue: &flume::Sender<ReaderEvent>,
+) -> bool {
+	let rest = decoder.lock().finish();
+	rest.is_empty() || progress.hand(queue, rest)
 }
 
 /// The error of a terminal run whose output was lost, from how its pump
@@ -983,8 +993,59 @@ mod reader_queue_tests {
 
 	use super::{
 		BRIDGE_QUEUE_CHUNKS, POST_CANCEL_DRAIN_TIMEOUT, PumpEnd, ReaderEvent, ReaderProgress,
-		STUCK_SLAVE_IDLE, await_pty_output_drain, lost_terminal_output,
+		STUCK_SLAVE_IDLE, await_pty_output_drain, hand_rest, lost_terminal_output,
 	};
+
+	/// At the end of the output the reader queues what its decoder holds. While
+	/// that send waits on a full queue it must keep the decoder: the drain
+	/// takes the decoder to flush it and counts the text handed so far, and it
+	/// found an empty decoder and a count without the rest, so it could stop
+	/// the pump with the final U+FFFD still unqueued.
+	#[test]
+	fn the_end_of_output_keeps_the_decoder_until_its_rest_is_queued() {
+		const PARTIAL: [u8; 2] = [0xe2, 0x82];
+		let (queue, rx) = flume::bounded::<ReaderEvent>(1);
+		queue
+			.send(ReaderEvent::Chunk("full".to_owned()))
+			.expect("fill the queue");
+		let decoder = Arc::new(Mutex::new(OutputDecoder::new()));
+		assert!(decoder.lock().push(&PARTIAL).is_empty(), "the decoder holds the partial character");
+		let progress = Arc::new(ReaderProgress::default());
+		let reader = std::thread::spawn({
+			let decoder = Arc::clone(&decoder);
+			let progress = Arc::clone(&progress);
+			move || hand_rest(&decoder, &progress, &queue)
+		});
+		let deadline = Instant::now() + Duration::from_secs(10);
+		loop {
+			let Some(mut held) = decoder.try_lock() else {
+				// The reader holds the decoder while it waits to queue the rest.
+				break;
+			};
+			assert!(
+				!held.finish().is_empty(),
+				"the reader let go of the decoder before its rest was queued"
+			);
+			// The reader has not taken the rest yet: put it back.
+			assert!(held.push(&PARTIAL).is_empty());
+			drop(held);
+			assert!(Instant::now() < deadline, "the reader never took the decoder");
+			std::thread::sleep(Duration::from_millis(1));
+		}
+		let mut queued = Vec::new();
+		while queued.len() < 2 {
+			match rx
+				.recv_timeout(Duration::from_secs(10))
+				.expect("the reader queues the rest")
+			{
+				ReaderEvent::Chunk(text) => queued.push(text),
+				ReaderEvent::Done => panic!("no end marker was sent"),
+			}
+		}
+		assert!(reader.join().expect("reader thread"), "the pump is still there");
+		assert_eq!(queued, ["full", "\u{FFFD}"]);
+		assert_eq!(progress.handed_text.load(Ordering::Acquire), "\u{FFFD}".len() as u64);
+	}
 
 	/// A callback that failed or stalled lost output, so the run fails even
 	/// when a kill or a timeout ended the command afterwards; before, the later

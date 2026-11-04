@@ -28,7 +28,8 @@ describe.skipIf(skip)("output delivery", () => {
 			throw new Error("callback failed");
 		});
 		await expect(run).rejects.toThrow("Command output was not all delivered: the output callback failed");
-		expect(out).toBe("x");
+		// Chunk boundaries are not a contract: the first callback can hold more.
+		expect(out.startsWith("x")).toBe(true);
 	});
 
 	it("fails an executeShell whose output callback throws", async () => {
