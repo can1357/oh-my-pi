@@ -9,7 +9,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { IMAGE_METADATA_HEADER_BYTES, parseHeifImageMimeType, parseImageMetadata } from "@oh-my-pi/pi-utils";
-import { dedicatedToolCanPerformStep, type FileFacts, type PathKind, type StepFilesystem } from "./bash-step";
+import {
+	dedicatedToolCanPerformStep,
+	stepCommandNames,
+	type FileFacts,
+	type PathKind,
+	type StepFilesystem,
+} from "./bash-step";
 import { extractFlatShellCommandSegments } from "./shell-tokenize";
 import { type BashInterceptorRule, DEFAULT_BASH_INTERCEPTOR_RULES } from "../exec/settings";
 
@@ -190,6 +196,8 @@ export interface InterceptionResult {
 	message?: string;
 	/** Suggested tool to use instead */
 	suggestedTool?: string;
+	/** Names whose standard implementations the matched built-in tool's capability assumes. */
+	commandNames?: string[];
 }
 
 /**
@@ -363,6 +371,7 @@ export function checkBashInterception(
 					block: true,
 					message: `Blocked: ${rule.message}\n\nOriginal command: ${originalCommand}`,
 					suggestedTool: rule.tool,
+					commandNames: stepCommandNames(rule.tool, candidate.step),
 				};
 			}
 		}

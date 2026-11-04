@@ -414,22 +414,20 @@ function fdNumber(text: string): string | undefined {
  * next stage's pipe, a discard, input, nothing, or a file (with the redirection that opened it).
  */
 type FdTarget =
-	| { kind: "agent" | "pipe" | "null" | "input" | "closed" }
+	| { kind: "agent" | "pipe" | "null" | "input" | "closed" | "device" }
 	| { kind: "file"; redirect: Redirect; viaDuplicate: boolean };
-
-/** Paths that name a descriptor or device rather than a file the step creates. */
-const DEVICE_PATHS = /^\/dev\/(?:null|tty|stdout|stderr|stdin|fd\/\d+)$/u;
 
 /** The target a redirection opening the file named by `redirect` gives, given the descriptors so far. */
 function fileTarget(redirect: Redirect, fds: Map<string, FdTarget>): FdTarget {
 	const path = redirect.target?.value ?? "";
 	if (redirect.target && !redirect.target.computed && !redirect.target.glob) {
 		if (path === "/dev/null") return { kind: "null" };
-		if (path === "/dev/tty") return { kind: "agent" };
+		if (path === "/dev/stdin") return fds.get("0") ?? { kind: "closed" };
 		if (path === "/dev/stdout") return fds.get("1") ?? { kind: "closed" };
 		if (path === "/dev/stderr") return fds.get("2") ?? { kind: "closed" };
 		const fdPath = /^\/dev\/fd\/(\d+)$/u.exec(path);
 		if (fdPath) return fds.get(String(Number(fdPath[1]))) ?? { kind: "closed" };
+		if (/^\/dev(?:\/|$)/u.test(path)) return { kind: "device" };
 	}
 	return { kind: "file", redirect, viaDuplicate: false };
 }
@@ -442,6 +440,8 @@ interface RedirectEffect {
 	stdinFromPipe: boolean;
 	/** Every redirection that opens a file for writing (not a device or descriptor), in order. */
 	opened: Redirect[];
+	/** A descriptor is closed/unknown or a device open cannot be proved to succeed. */
+	mayFail: boolean;
 }
 
 /**
@@ -456,8 +456,10 @@ function redirectEffect(command: SimpleCommand, initial: FdTarget): RedirectEffe
 		["2", { kind: "agent" }],
 	]);
 	const opened: Redirect[] = [];
+	let mayFail = false;
 	const open = (redirect: Redirect): FdTarget => {
 		const to = fileTarget(redirect, fds);
+		if (to.kind === "closed" || to.kind === "device") mayFail = true;
 		if (to.kind === "file") opened.push(redirect);
 		return to;
 	};
@@ -471,13 +473,17 @@ function redirectEffect(command: SimpleCommand, initial: FdTarget): RedirectEffe
 			if (value === "-") fds.set(into, { kind: "closed" });
 			else if (from !== undefined) {
 				const source = fds.get(from) ?? { kind: "closed" };
+				if (source.kind === "closed") mayFail = true;
 				fds.set(into, source.kind === "file" ? { ...source, viaDuplicate: true } : source);
 			} else if (op === ">&" && fd === "") {
 				// `>&name` sends stdout and stderr to the file `name`.
 				const to = open(redirect);
 				fds.set("1", to);
 				fds.set("2", to);
-			} else fds.set(into, { kind: "closed" });
+			} else {
+				mayFail = true;
+				fds.set(into, { kind: "closed" });
+			}
 			continue;
 		}
 		if (fd === "&") {
@@ -492,17 +498,18 @@ function redirectEffect(command: SimpleCommand, initial: FdTarget): RedirectEffe
 		}
 		if (op === "<>") {
 			const into = n ?? "0";
-			if (DEVICE_PATHS.test(value) && target && !target.computed) fds.set(into, { kind: "input" });
-			else {
-				opened.push(redirect);
-				fds.set(into, { kind: "file", redirect, viaDuplicate: false });
-			}
+			const to = open(redirect);
+			fds.set(into, to.kind === "file" ? to : { kind: "input" });
 			continue;
 		}
 		// `<`, `<<`, `<<-`, `<<<`: the descriptor (stdin unless named) now reads input.
+		if (op === "<") {
+			const to = fileTarget(redirect, fds);
+			if (to.kind === "closed" || to.kind === "device") mayFail = true;
+		}
 		fds.set(n ?? "0", { kind: "input" });
 	}
-	return { stdout: fds.get("1") ?? { kind: "closed" }, stdinFromPipe: fds.get("0")?.kind === "pipe", opened };
+	return { stdout: fds.get("1") ?? { kind: "closed" }, stdinFromPipe: fds.get("0")?.kind === "pipe", opened, mayFail };
 }
 
 /**
@@ -679,7 +686,7 @@ function outputReachesAgent(pipeline: SimpleCommand[]): boolean {
 	for (let i = 0; i < pipeline.length; i++) {
 		const last = i === pipeline.length - 1;
 		const effect = redirectEffect(pipeline[i], { kind: last ? "agent" : "pipe" });
-		if (effect.opened.length > 0 || effect.stdout.kind !== (last ? "agent" : "pipe")) return false;
+		if (effect.mayFail || effect.opened.length > 0 || effect.stdout.kind !== (last ? "agent" : "pipe")) return false;
 		if (i > 0 && (!effect.stdinFromPipe || hasOtherInputs(pipeline[i]) || !isPassThroughFilter(pipeline[i]))) {
 			return false;
 		}
@@ -1603,7 +1610,8 @@ function editCanPerform(name: string, pipeline: SimpleCommand[]): Word[] | undef
 	// The edit tool changes the files it names and nothing else: no later stage, no opened file, no input.
 	if (pipeline.length > 1) return undefined;
 	const command = pipeline[0];
-	if (redirectEffect(command, { kind: "agent" }).opened.length > 0 || hasOtherInputs(command)) return undefined;
+	const effect = redirectEffect(command, { kind: "agent" });
+	if (effect.mayFail || effect.opened.length > 0 || hasOtherInputs(command)) return undefined;
 	if (stdinFiles(command).length > 0) return undefined;
 	const words = command.words.slice(1);
 	if (name === "sed") return sedEditFiles(words);
@@ -1614,6 +1622,12 @@ function editCanPerform(name: string, pipeline: SimpleCommand[]): Word[] | undef
 
 /** The tools this module knows; a rule for any other tool keeps its own decision. */
 const BUILT_IN_TOOLS: Record<string, true> = { read: true, grep: true, glob: true, write: true, edit: true };
+
+/** Literal command names whose shell resolution a built-in tool's refusal relies on. */
+export function stepCommandNames(tool: string, text: string): string[] | undefined {
+	if (!own(BUILT_IN_TOOLS, tool)) return undefined;
+	return parseLeadingPipeline(text)?.pipeline.map(commandName);
+}
 
 /**
  * Whether every part of the step is literal: no command word, assignment or redirection target

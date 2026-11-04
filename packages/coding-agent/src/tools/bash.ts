@@ -21,7 +21,7 @@ import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import type { Settings } from "../config/settings";
-import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
+import { applyDirenvPreflight, bashCommandsAreStandard, type BashResult, executeBash } from "../exec/bash-executor";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlFilesystem, UrlFsError } from "../internal-urls/url-filesystem";
@@ -518,13 +518,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	 * The interceptor message for a call, checking the raw command and the one after a leading
 	 * `cd … &&` so the wrapper hides neither shell-navigation rules nor the dedicated-tool command.
 	 */
-	#interception(
+	async #interception(
 		rawCommand: string,
 		command: string,
 		name: string | undefined,
 		toolNames: string[],
 		cwd: string | undefined,
-	): string | undefined {
+	): Promise<string | undefined> {
 		if (!cfgBashInterceptorEnabled.get(this.session.settings)) return undefined;
 		const rules = cfgBashInterceptorPatterns.get(this.session.settings).filter(rule => !name || rule.tool !== "bash");
 		// The interceptor inspects operands in the command's directory; a URL directory it cannot
@@ -540,29 +540,40 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						: resolveToCwd(cwd, base);
 		for (const commandToCheck of rawCommand === command ? [command] : [rawCommand, command]) {
 			const interception = checkBashInterception(commandToCheck, toolNames, rules, rawCommand, commandCwd);
-			if (interception.block) return interception.message ?? "Command blocked";
+			if (!interception.block) continue;
+			if (
+				interception.commandNames &&
+				!(await bashCommandsAreStandard(interception.commandNames, {
+					sessionKey: this.session.getSessionId?.() ?? undefined,
+					gitGuard: cfgBashGitGuard.get(this.session.settings),
+					cwd: commandCwd,
+				}))
+			)
+				continue;
+			return interception.message ?? "Command blocked";
 		}
 		return undefined;
 	}
 
-	readonly approval = (args: unknown, ctx?: AgentToolContext): ToolApprovalDecision => {
+	/** Check routing before approval prompts, using the running shell's command resolution. */
+	async checkInterception(args: unknown, ctx?: AgentToolContext): Promise<void> {
+		const input = (args ?? {}) as Partial<BashToolInput>;
+		if (typeof input.command !== "string") return;
+		const cd = input.cwd ? undefined : extractLeadingCdTarget(input.command);
+		const interception = await this.#interception(
+			input.command,
+			cd?.rest ?? input.command,
+			typeof input.name === "string" ? blankToUndefined(input.name) : undefined,
+			ctx?.toolNames ?? [],
+			input.cwd || cd?.path,
+		);
+		if (interception) throw new ToolError(interception);
+	}
+
+	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const input = (args ?? {}) as Partial<BashToolInput>;
 		const rawCommand = input.command;
 		const command = typeof rawCommand === "string" ? rawCommand : "";
-		// An intercepted call is refused outright; asking first would only approve a doomed call.
-		const leadingCd = input.cwd ? undefined : extractLeadingCdTarget(command);
-		const cwdCommand = leadingCd?.rest ?? command;
-		const name = typeof input.name === "string" ? blankToUndefined(input.name) : undefined;
-		const interception = this.#interception(
-			command,
-			cwdCommand,
-			name,
-			ctx?.toolNames ?? [],
-			typeof input.cwd === "string" && input.cwd ? input.cwd : leadingCd?.path,
-		);
-		if (interception) {
-			return { tier: "exec", override: true, policy: "deny", reason: interception.replace(/^Blocked:\s*/u, "") };
-		}
 		const patternRules = getBashApprovalPatternRules(cfgBashPatterns.get(this.session.settings));
 		const shell = cfgBashAllowCompoundCommands.get(this.session.settings)
 			? this.session.settings.getShellConfig().shell
@@ -1146,7 +1157,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
 		}
 
-		const interception = this.#interception(rawCommand, command, name, ctx?.toolNames ?? [], cwd);
+		const interception = await this.#interception(rawCommand, command, name, ctx?.toolNames ?? [], cwd);
 		if (interception) throw new ToolError(interception);
 
 		if (cfgWorktreeClone.get(this.session.settings)) {
