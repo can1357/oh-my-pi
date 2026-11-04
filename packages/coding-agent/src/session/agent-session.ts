@@ -631,6 +631,11 @@ const deferredExtensionLoadScope = new AsyncLocalStorage<true>();
  */
 const workOrigin = new AsyncLocalStorage<{ runEpoch?: number; taskSignal?: AbortSignal }>();
 
+interface ContextPreparation {
+	revision: number;
+	active: boolean;
+}
+
 /** A failed preparation, not a provider failure: the ordinary input can still be restored. */
 class AgentStartPolicyChangedError extends Error {
 	constructor() {
@@ -1093,6 +1098,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#autoQaEnabled = false;
 	/** Teardowns registered via {@link addDisposer} (including settings listeners bound to this session); drained on dispose. */
 	#disposers: Array<() => void> = [];
+	/** Keep freshness observation through the disposal drain's admitted direct prompts. */
+	#contextDisposers: Array<() => void> = [];
 	/** Idle recap and idle compaction, once the owner opts in via {@link enableIdleMaintenance}. */
 	#idleMaintenance: IdleMaintenance | undefined;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
@@ -1136,7 +1143,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#advisorCostRestore: Promise<void> = Promise.resolve();
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
-	#planReferenceRevision = 0;
+	#contextRevision = 0;
+	#contextPreparationScope = new AsyncLocalStorage<ContextPreparation>();
+	#contextStagingScope = new AsyncLocalStorage<true>();
 	#planReferencePath = "local://PLAN.md";
 	#clientBridge: ClientBridge | undefined;
 	#allowAcpAgentInitiatedTurns = false;
@@ -2174,6 +2183,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		);
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		this.#contextDisposers.push(
+			this.sessionManager.onContextChange(() => this.invalidateContext(true)),
+			this.settings.onRevisionChange(() => this.invalidateContext()),
+			this.agent.onContextChange(() => this.invalidateContext(this.#contextStagingScope.getStore() === true)),
+		);
 		this.#ownsCostGate = config.costGate === undefined;
 		this.#costGate = config.costGate ?? this.#createCostGate();
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
@@ -2664,6 +2678,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			captureMemoryPromotionSnapshot: prompt => this.#memory.capturePromotionSnapshot(prompt),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			notifyCommandMetadataChanged: () => this.#notifyCommandMetadataChanged(),
+			contextChanged: () => this.invalidateContext(this.#contextStagingScope.getStore() === true),
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			evalPreludes: () => this.getEvalPreludes(),
 			sessionAgents: () => this.getSessionAgents(),
@@ -2803,6 +2818,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			getState: () => this.#goalModeState,
 			setState: state => {
 				this.#goalModeState = state;
+				this.invalidateContext();
 			},
 			getCurrentUsage: () => this.#goalUsage(),
 			emit: event => {
@@ -3136,6 +3152,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#watchModelAvailabilitySettings();
 		// Last: makes the session addressable by its instance key (and, on a worker, published to main).
 		registerLocalSession(this);
+	}
+
+	/** Every observable context mutation advances one clock; only its owning preparation may adopt its own writes. */
+	invalidateContext(preparationOwned = false): void {
+		const previous = this.#contextRevision++;
+		const preparation = this.#contextPreparationScope.getStore();
+		if (preparationOwned && preparation?.active && preparation.revision === previous) {
+			preparation.revision = this.#contextRevision;
+		}
+	}
+
+	#readContextRevision(): number {
+		this.getMnemopiSessionState()?.reportContextChanges();
+		return this.#contextRevision;
 	}
 
 	/** Registers teardown to run when this session is disposed (e.g. handle listeners bound to it). */
@@ -3492,6 +3522,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	setHindsightSessionState(state: HindsightSessionState | undefined): HindsightSessionState | undefined {
 		const previous = this.#hindsightSessionState;
+		if (previous !== state) this.invalidateContext();
 		this.#hindsightSessionState = state;
 		return previous;
 	}
@@ -6819,6 +6850,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#disconnectFromAgent();
 		// beginDispose() drained the rest; this catches registrations made during teardown.
 		for (const dispose of this.#disposers.splice(0)) dispose();
+		for (const dispose of this.#contextDisposers.splice(0)) dispose();
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
 		this.#ircWakeHoldListeners.clear();
@@ -7950,7 +7982,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	setPlanModeState(state: PlanModeState | undefined): void {
 		this.#planModeState = state;
-		this.#planReferenceRevision++;
+		this.invalidateContext();
 		if (state?.enabled) {
 			this.#resetPlanReference();
 			this.#planReferencePath = state.planFilePath;
@@ -7977,6 +8009,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	setVibeModeState(state: VibeModeState | undefined): void {
 		this.#vibeModeState = state;
+		this.invalidateContext();
 		if (state?.enabled) return;
 
 		const isVibeContext = (message: AgentMessage): boolean =>
@@ -8031,13 +8064,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#resetPlanReference(): void {
-		this.#planReferenceRevision++;
+		this.invalidateContext();
 		this.#planReferenceSent = false;
 	}
 
 	markPlanReferenceSent(): void {
 		this.#planReferenceSent = true;
-		this.#planReferenceRevision++;
+		this.invalidateContext();
 	}
 
 	setPlanReferencePath(path: string): void {
@@ -8248,10 +8281,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * prompt as the recovery route when a compressor expires the inline copy.
 	 * Returns null during plan mode, once already sent, or when no plan exists.
 	 */
-	async #buildPlanReferenceMessage(): Promise<CustomMessage | null> {
+	async #buildPlanReferenceMessage(): Promise<{ message: CustomMessage; sourcePath: string; hash: bigint } | null> {
 		if (this.#planModeState?.enabled) return null;
 		if (this.#planReferenceSent) return null;
 
+		const sourcePath = resolvePlanFilePath(this.#planReferencePath, {
+			localProtocolOptions: this.#localProtocolOptions(),
+			cwd: this.sessionManager.getCwd(),
+		});
 		const plan = await loadOverallPlanReference(this.#planReferencePath, this.#localProtocolOptions());
 		if (!plan) return null;
 
@@ -8261,12 +8298,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 
 		return {
-			role: "custom",
-			customType: "plan-mode-reference",
-			content,
-			display: false,
-			attribution: "agent",
-			timestamp: Date.now(),
+			sourcePath,
+			hash: Bun.hash.rapidhash(plan.content),
+			message: {
+				role: "custom",
+				customType: "plan-mode-reference",
+				content,
+				display: false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			},
 		};
 	}
 
@@ -9047,7 +9088,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		promptText: string,
 	): Promise<QueuedMessagePreparation> {
 		const preparation = await pending;
+		const retry = preparation.retry;
 		return {
+			retry: retry ? () => this.#relaxOnDelivery(retry(), promptText) : undefined,
 			commit: () => {
 				const additional = preparation.commit();
 				if (additional !== undefined) this.#models.applyChillax(promptText);
@@ -9071,14 +9114,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const autoPrewalk = this.#prewalk.classifyAuto(prompt, signal);
 		const preparation = await this.#prepareAgentStart(message, prompt, images, generation, signal, "queued");
 		const decision = await autoPrewalk;
-		return {
-			commit: () => {
-				const additional = preparation.commit();
-				if (additional === undefined) return undefined;
-				const planMessage = this.#prewalk.applyAuto(decision);
-				return planMessage ? [...additional, planMessage] : additional;
-			},
+		const wrap = (prepared: QueuedMessagePreparation): QueuedMessagePreparation => {
+			const retry = prepared.retry;
+			return {
+				retry: retry ? async () => wrap(await retry()) : undefined,
+				commit: () => {
+					const additional = prepared.commit();
+					if (additional === undefined) return undefined;
+					const planMessage = this.#prewalk.applyAuto(decision);
+					return planMessage ? [...additional, planMessage] : additional;
+				},
+			};
 		};
+		return wrap(preparation);
 	}
 
 	/** A new top-level task the user authored: a typed prompt or a user-invoked skill, never injected or delegated. */
@@ -9102,6 +9150,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		generation: number,
 		signal: AbortSignal | undefined,
 		origin: "direct" | "queued",
+		context?: ContextPreparation,
+		firstAttempt = 0,
 	): Promise<
 		QueuedMessagePreparation & {
 			baseXdevCatalogDelivered: boolean;
@@ -9138,82 +9188,109 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				logger.debug("Turn started before MCP discovery finished", { error: String(error) });
 			});
 		}
-		for (let attempt = 0; attempt < AGENT_START_POLICY_MAX_ATTEMPTS; attempt++) {
-			await this.#memory.transition;
-			if (!isCurrent()) return cancelled;
-			const sourceBase = this.#tools.baseSystemPrompt;
-			const sourceRevision = this.settings.revision;
-			const basePreparation = await this.#tools.buildSystemPromptForAgentStart(prompt, isCurrent, signal);
-			if (!isCurrent()) return cancelled;
-			const result = await this.#extensionRunner?.emitBeforeAgentStart(prompt, images, basePreparation.systemPrompt);
-			if (!isCurrent()) return cancelled;
-			// Re-run policy against the winning base and recall revision; discard stale
-			// extension results together with the memory and prompt they were built for.
-			const sourcesAreCurrent = () => {
-				if (this.settings.revision !== sourceRevision || basePreparation.isCurrent?.() === false) return false;
-				const currentBase = this.#tools.baseSystemPrompt;
-				// Refreshing an unchanged tool set may replace the array without changing policy.
-				return (
-					sourceBase === currentBase ||
-					(sourceBase.length === currentBase.length &&
-						sourceBase.every((part, index) => part === currentBase[index]))
-				);
-			};
-			if (!sourcesAreCurrent()) continue;
-			const messages: AgentMessage[] = [];
-			if (basePreparation.memoryNotice) {
-				messages.push({
-					role: "custom",
-					customType: MEMORY_RECALL_CHANGES_MESSAGE_TYPE,
-					content: basePreparation.memoryNotice.content,
-					details: basePreparation.memoryNotice.details,
-					display: false,
-					attribution: "agent",
-					timestamp: Date.now(),
-				});
-			}
-			const attribution = "attribution" in message ? message.attribution : undefined;
-			for (const payload of result?.messages ?? []) {
-				const normalized = normalizeCustomMessagePayload(payload);
-				const explicitAttribution =
-					payload !== null &&
-					typeof payload === "object" &&
-					!Array.isArray(payload) &&
-					(payload.attribution === "user" || payload.attribution === "agent");
-				messages.push(
-					await this.#normalizeAgentMessageImages({
-						role: "custom",
-						customType: normalized.customType,
-						content: normalized.content,
-						display: normalized.display,
-						details: normalized.details,
-						attribution: explicitAttribution
-							? normalized.attribution
-							: (attribution ?? (message.role === "user" ? "user" : "agent")),
-						timestamp: Date.now(),
-					}),
-				);
-				if (!isCurrent()) return cancelled;
-			}
-			if (!sourcesAreCurrent()) continue;
-			return {
-				baseXdevCatalogDelivered: result?.systemPrompt === undefined,
-				staged: messages,
-				systemPrompt: result?.systemPrompt ?? basePreparation.systemPrompt,
-				isCurrent: () => isCurrent() && sourcesAreCurrent(),
-				commit: () => {
-					// No await may separate ownership validation from publishing memory and policy.
-					if (!isCurrent() || !sourcesAreCurrent()) return undefined;
-					if (basePreparation.commit?.() === false) return undefined;
-					if (result?.systemPrompt !== undefined) {
-						this.#tools.setTurnSystemPromptOverride(result.systemPrompt, basePreparation.systemPrompt);
-					} else {
-						this.#tools.clearTurnSystemPromptOverride();
-						this.agent.setSystemPrompt(this.#tools.baseSystemPrompt);
+		for (let attempt = firstAttempt; attempt < AGENT_START_POLICY_MAX_ATTEMPTS; attempt++) {
+			const preparation = context ?? { revision: this.#readContextRevision(), active: true };
+			preparation.active = true;
+			try {
+				const result = await this.#contextPreparationScope.run(preparation, async () => {
+					await this.#memory.transition;
+					if (!isCurrent()) return cancelled;
+					const basePreparation = await this.#contextStagingScope.run(true, () =>
+						this.#tools.buildSystemPromptForAgentStart(prompt, isCurrent, signal),
+					);
+					if (!isCurrent()) return cancelled;
+					const result = await this.#extensionRunner?.emitBeforeAgentStart(
+						prompt,
+						images,
+						basePreparation.systemPrompt,
+					);
+					if (!isCurrent()) return cancelled;
+					const sourcesAreCurrent = () => this.#readContextRevision() === preparation.revision;
+					if (!sourcesAreCurrent()) return undefined;
+					const messages: AgentMessage[] = [];
+					if (basePreparation.memoryNotice) {
+						messages.push({
+							role: "custom",
+							customType: MEMORY_RECALL_CHANGES_MESSAGE_TYPE,
+							content: basePreparation.memoryNotice.content,
+							details: basePreparation.memoryNotice.details,
+							display: false,
+							attribution: "agent",
+							timestamp: Date.now(),
+						});
 					}
-					return messages;
-				},
-			};
+					const attribution = "attribution" in message ? message.attribution : undefined;
+					for (const payload of result?.messages ?? []) {
+						const normalized = normalizeCustomMessagePayload(payload);
+						const explicitAttribution =
+							payload !== null &&
+							typeof payload === "object" &&
+							!Array.isArray(payload) &&
+							(payload.attribution === "user" || payload.attribution === "agent");
+						messages.push(
+							await this.#normalizeAgentMessageImages({
+								role: "custom",
+								customType: normalized.customType,
+								content: normalized.content,
+								display: normalized.display,
+								details: normalized.details,
+								attribution: explicitAttribution
+									? normalized.attribution
+									: (attribution ?? (message.role === "user" ? "user" : "agent")),
+								timestamp: Date.now(),
+							}),
+						);
+						if (!isCurrent()) return cancelled;
+					}
+					if (!sourcesAreCurrent()) return undefined;
+					return {
+						baseXdevCatalogDelivered: result?.systemPrompt === undefined,
+						staged: messages,
+						systemPrompt: result?.systemPrompt ?? basePreparation.systemPrompt,
+						isCurrent: () => isCurrent() && sourcesAreCurrent(),
+						retry:
+							origin === "queued"
+								? () =>
+										this.#prepareAgentStart(
+											message,
+											prompt,
+											images,
+											generation,
+											signal,
+											origin,
+											undefined,
+											attempt + 1,
+										)
+								: undefined,
+						commit: () =>
+							this.#contextPreparationScope.run(preparation, () =>
+								this.#contextStagingScope.run(true, () => {
+									if (!isCurrent() || !sourcesAreCurrent()) return undefined;
+									preparation.active = true;
+									try {
+										if (basePreparation.commit?.() === false) return undefined;
+										if (result?.systemPrompt !== undefined) {
+											this.#tools.setTurnSystemPromptOverride(
+												result.systemPrompt,
+												basePreparation.systemPrompt,
+											);
+										} else {
+											this.#tools.clearTurnSystemPromptOverride();
+											this.agent.setSystemPrompt(this.#tools.baseSystemPrompt);
+										}
+										return messages;
+									} finally {
+										preparation.active = false;
+									}
+								}),
+							),
+					};
+				});
+				if (result) return result;
+				if (context) return { ...cancelled, staged: [] };
+			} finally {
+				preparation.active = false;
+			}
 		}
 		if (origin === "queued") {
 			// Block the queued settle drain before Agent converts this error into an
@@ -9375,21 +9452,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					(this.#isDisposed && !disposingAtStart)
 				)
 					return false;
-				const sourceRunEpoch = this.#runEpoch;
-				const sourceMessages = this.agent.state.messages;
-				const sourceMessageCount = sourceMessages.length;
-				const sourcePlanRevision = this.#planReferenceRevision;
-				const sourceGoalMode = this.#goalModeState;
-				const sourceVibeMode = this.#vibeModeState;
-				const sourcesAreCurrent = () =>
-					this.#runEpoch === sourceRunEpoch &&
-					this.agent.state.messages === sourceMessages &&
-					sourceMessages.length === sourceMessageCount &&
-					this.#planReferenceRevision === sourcePlanRevision &&
-					this.#goalModeState === sourceGoalMode &&
-					this.#vibeModeState === sourceVibeMode;
+				const context: ContextPreparation = { revision: this.#readContextRevision(), active: false };
 				const messages: AgentMessage[] = [];
-				const planReferenceMessage = await this.#buildPlanReferenceMessage?.();
+				const planReference = await this.#buildPlanReferenceMessage();
+				const planReferenceMessage = planReference?.message;
 				if (planReferenceMessage) {
 					messages.push(planReferenceMessage);
 				}
@@ -9408,12 +9474,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const xdevMountNoticeIndex = messages.length + (options?.prependMessages?.length ?? 0);
 				messages.push(...promptMessages);
 				const preparation = await logger.time("prompt:prepareAgentStart", () =>
-					this.#prepareAgentStart(message, expandedText, options?.images, generation, setupAbort.signal, "direct"),
+					this.#prepareAgentStart(
+						message,
+						expandedText,
+						options?.images,
+						generation,
+						setupAbort.signal,
+						"direct",
+						context,
+					),
 				);
 				// Memory and policy are published at the claim (`commitDelivery`), so a prompt cancelled while it
 				// waits behind another run publishes nothing; until then the staged messages only count toward
 				// context maintenance, in the place they are delivered.
 				if (!preparation.staged) return false;
+				if (!preparation.isCurrent()) continue;
 				messages.push(...preparation.staged);
 				const baseXdevCatalogDelivered = preparation.baseXdevCatalogDelivered;
 
@@ -9450,7 +9525,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const commitDelivery = (): AgentMessage[] | undefined => {
 					// A wait or maintenance pass can replace any staged source. Rebuild the whole
 					// prospective request before publishing anything, then size that request again.
-					if (!sourcesAreCurrent() || !preparation.isCurrent() || !preparation.commit()) {
+					let planIsCurrent = true;
+					if (planReference) {
+						try {
+							// Delivery has a synchronous claim interface: read only this approved file here.
+							planIsCurrent =
+								Bun.hash.rapidhash(fs.readFileSync(planReference.sourcePath, "utf8")) === planReference.hash;
+						} catch {
+							planIsCurrent = false;
+						}
+					}
+					if (!planIsCurrent || !preparation.commit()) {
 						superseded = true;
 						return undefined;
 					}

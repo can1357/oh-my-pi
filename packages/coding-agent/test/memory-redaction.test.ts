@@ -99,7 +99,7 @@ describe("memory secret redaction", () => {
 		const state = new MnemopiSessionState({
 			sessionId: "global-redaction",
 			config: loadMnemopiConfig(settings, dbDir.path()),
-			session: {} as never,
+			session: { invalidateContext: () => {} } as never,
 		});
 		try {
 			const id = state.rememberScoped(

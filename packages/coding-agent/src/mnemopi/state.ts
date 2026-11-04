@@ -42,6 +42,7 @@ import { cfgMnemopiInjectionTokenLimit } from "./settings";
 interface RecallBlock {
 	text: string;
 	memories: Array<{ id: string; text: string; offset: number }>;
+	onDelivered?: () => void;
 }
 
 // The mnemopi package pulls the embeddings stack; keep it off the CLI startup
@@ -268,6 +269,7 @@ export function setMnemopiSessionState(
 ): MnemopiSessionState | undefined {
 	const typed = session as AgentSessionWithMnemopiState;
 	const previous = typed[kMnemopiSessionState];
+	if (previous !== state) session.invalidateContext();
 	if (state) typed[kMnemopiSessionState] = state;
 	else delete typed[kMnemopiSessionState];
 	return previous;
@@ -302,7 +304,8 @@ export interface MnemopiSessionStateApi {
 		id: string,
 		options?: MnemopiMemoryEditOptions,
 	): MnemopiMemoryEditResult;
-	collectScopedRecallResults(query: string): Promise<RecallResult[]>;
+	collectScopedRecallResults(query: string, updateRecallCounts?: boolean): Promise<RecallResult[]>;
+	recordScopedRecall(results: readonly RecallResult[]): void;
 	recallResultsScoped(query: string): Promise<RecallResult[]>;
 	formatScopedRecallContext(results: readonly RecallResult[], format?: "bullet" | "json"): string | undefined;
 	rememberScoped(memory: MnemopiRememberInput, options?: MnemopiRememberOptions, target?: MnemopiBankTarget): string;
@@ -326,6 +329,19 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 	unsubscribe?: () => void;
 	#retentionCursorLoaded = false;
 	#recallGeneration = 0;
+	#storeVersions = new Map<Mnemopi, string>();
+
+	/** Report store writes independently of any one prepared recall. */
+	reportContextChanges(preparationOwned = false): void {
+		withLoopPhase("mnemopi.recall", () => {
+			for (const memory of this.#scoped?.owned ?? []) {
+				const current = memory.writeToken;
+				const previous = this.#storeVersions.get(memory);
+				this.#storeVersions.set(memory, current);
+				if (previous !== undefined && previous !== current) this.session.invalidateContext(preparationOwned);
+			}
+		});
+	}
 
 	constructor(options: MnemopiSessionStateOptions) {
 		this.sessionId = options.sessionId;
@@ -376,6 +392,7 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 	setSessionId(sessionId: string): void {
 		if (this.sessionId === sessionId) return;
 		this.#recallGeneration++;
+		this.session.invalidateContext();
 		this.sessionId = sessionId;
 		this.lastRetainedTurn = 0;
 		this.#retentionCursorLoaded = false;
@@ -383,6 +400,7 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 
 	resetConversationTracking(): void {
 		this.#recallGeneration++;
+		this.session.invalidateContext();
 		this.lastRetainedTurn = 0;
 		this.#retentionCursorLoaded = false;
 		this.hasRecalledForFirstTurn = false;
@@ -547,9 +565,9 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 		});
 	}
 
-	async collectScopedRecallResults(query: string): Promise<RecallResult[]> {
+	async collectScopedRecallResults(query: string, updateRecallCounts = true): Promise<RecallResult[]> {
 		const parent = this.#remoteParent();
-		if (parent) return await parent.collectScopedRecallResults(query);
+		if (parent) return await parent.collectScopedRecallResults(query, updateRecallCounts);
 		const scoped = this.#local();
 		const merged: RecallResult[] = [];
 		const byId = new Map<string, number>();
@@ -566,6 +584,7 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 					const results = await target.memory.recallEnhanced(recallQuery, this.config.recallLimit, {
 						includeFacts: true,
 						channelId: target.bank,
+						updateRecallCounts,
 					});
 					targetSucceeded = true;
 					withLoopPhase("mnemopi.recall", () => {
@@ -601,6 +620,19 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 
 	recallResultsScoped(query: string): Promise<RecallResult[]> {
 		return this.collectScopedRecallResults(query);
+	}
+
+	/** Commit the usage accounting omitted by a staged, read-only recall. */
+	recordScopedRecall(results: readonly RecallResult[]): void {
+		const parent = this.#remoteParent();
+		if (parent) {
+			parent.recordScopedRecall(results);
+			return;
+		}
+		for (const target of this.#local().recall) {
+			target.memory.recordRecall(results, { channelId: target.bank });
+		}
+		this.reportContextChanges(true);
 	}
 
 	formatScopedRecallContext(
@@ -655,8 +687,12 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 	}
 
 	/** Recalls `query` into a prompt block plus the memories it holds; undefined when aborted. */
-	async #recallBlock(query: string, signal?: AbortSignal): Promise<RecallBlock | undefined> {
-		const results = await this.collectScopedRecallResults(query);
+	async #recallBlock(
+		query: string,
+		signal?: AbortSignal,
+		updateRecallCounts = true,
+	): Promise<RecallBlock | undefined> {
+		const results = await this.collectScopedRecallResults(query, updateRecallCounts);
 		if (signal?.aborted) return undefined;
 		if (results.length === 0) return { text: "", memories: [] };
 		const { text, offsets } = formatRecallBlock(results);
@@ -665,7 +701,7 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 				? [{ id: result.id, text: recalledText(result.content), offset: offsets[index] }]
 				: [],
 		);
-		return { text, memories };
+		return { text, memories, onDelivered: updateRecallCounts ? undefined : () => this.recordScopedRecall(results) };
 	}
 
 	/**
@@ -748,6 +784,7 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 		const latestPrompt = promptText.trim();
 		if (!latestPrompt) return undefined;
 		const generation = ++this.#recallGeneration;
+		this.session.invalidateContext(true);
 		// The transcript's recall is history: a resumed session sends it unchanged, so the
 		// prompt cache still matches, and reports what changed since as a new message.
 		const scope = getMnemopiRecallScope(this.config);
@@ -756,18 +793,14 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 			// The note carries what it reports, so a turn that never delivers it leaves the
 			// change for the next resume to report.
 			const changes = this.#recallChanges(persisted.memories);
-			const changesKey = JSON.stringify(changes);
-			const isCurrent = () =>
-				this.#recallGeneration === generation &&
-				JSON.stringify(this.#recallChanges(persisted.memories)) === changesKey;
+			this.reportContextChanges();
 			return {
 				context: persisted.text || undefined,
 				notice: changes && {
 					content: changes.content,
 					details: { scope, memories: changes.memories } satisfies MemoryRecallChangesDetails,
 				},
-				isCurrent,
-				commit: () => isCurrent() && this.#commitRecall(generation, persisted.text, undefined),
+				commit: () => this.#commitRecall(generation, persisted.text, undefined),
 			};
 		}
 		const truncated = withLoopPhase("mnemopi.recall", () => {
@@ -776,16 +809,15 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 			const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
 			return truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
 		});
-		const recall = await this.#recallBlock(truncated, signal);
+		// Staging is read-only: recall-count writes would invalidate this preparation's own source clock.
+		const recall = await this.#recallBlock(truncated, signal, false);
 		const record = recall && this.#deliveredRecall(recall, budget);
-		const isCurrent = () =>
-			this.#recallGeneration === generation && (!record || this.#recallChanges(record.memories) === undefined);
+		this.reportContextChanges();
 		// The staged block and the transcript carry it as delivered; the session caches the
 		// full one, which every later prompt render cuts to the current budget.
 		return {
 			context: record?.text || undefined,
-			isCurrent,
-			commit: () => isCurrent() && this.#commitRecall(generation, recall?.text ?? "", record),
+			commit: () => this.#commitRecall(generation, recall?.text ?? "", record, recall?.onDelivered),
 		};
 	}
 
@@ -793,9 +825,16 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 	 * Adopts a first-turn recall block unless a newer turn or reset superseded it, and
 	 * writes a fresh recall, `record`, to the transcript.
 	 */
-	#commitRecall(generation: number, text: string, record: PersistedRecall | undefined): boolean {
+	#commitRecall(
+		generation: number,
+		text: string,
+		record: PersistedRecall | undefined,
+		onDelivered?: () => void,
+	): boolean {
 		if (this.#recallGeneration !== generation) return false;
+		onDelivered?.();
 		this.hasRecalledForFirstTurn = true;
+		this.session.invalidateContext(true);
 		if (text) this.lastRecallSnippet = text;
 		if (record) persistRecall(this.session.sessionManager, getMnemopiRecallScope(this.config), record);
 		return true;
@@ -1084,6 +1123,7 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 
 	async dispose(options: { consolidate?: boolean; timeoutMs?: number; retain?: boolean } = {}): Promise<void> {
 		this.#recallGeneration++;
+		this.session.invalidateContext();
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
 		if (this.aliasOf) return;

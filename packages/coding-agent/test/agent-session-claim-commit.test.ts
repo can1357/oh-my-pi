@@ -1,9 +1,10 @@
-import { afterEach, beforeAll, expect, it } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { afterEach, beforeAll, expect, it, spyOn } from "bun:test";
+import { Agent, type QueuedMessagePreparation } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
@@ -22,6 +23,7 @@ import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/se
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
+import { type } from "@oh-my-pi/omptype";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -51,11 +53,11 @@ async function setup(responses: MockResponseSource, ttsrManager?: TtsrManager, w
 	const manager = SessionManager.create(dir.path(), dir.join("sessions"));
 	const runtime = new ExtensionRuntime();
 	let hook: (() => Promise<void>) | undefined;
-	let policy: string[] | undefined;
+	let policy: string[] | (() => string[]) | undefined;
 	const extension = await loadExtensionFromFactory(
 		pi => {
 			pi.on("before_agent_start", async () => {
-				const systemPrompt = policy;
+				const systemPrompt = typeof policy === "function" ? policy() : policy;
 				await hook?.();
 				return systemPrompt ? { systemPrompt } : undefined;
 			});
@@ -98,6 +100,7 @@ async function setup(responses: MockResponseSource, ttsrManager?: TtsrManager, w
 		extensionRunner: withRunner ? runner : undefined,
 		toolRegistry: new Map(),
 		ttsrManager,
+		rebuildSystemPrompt: async names => ({ systemPrompt: [`Available: ${names.join(",")}`] }),
 	});
 	const releases: (() => void)[] = [];
 	resources.push({ session, auth, dir, releases });
@@ -143,7 +146,7 @@ async function setup(responses: MockResponseSource, ttsrManager?: TtsrManager, w
 	function cancel() {
 		session.buildAskReanswerContext({} as never).abort();
 	}
-	function setPolicy(value: string[]) {
+	function setPolicy(value: string[] | (() => string[])) {
 		policy = value;
 	}
 	return { session, agent, mock, manager, registry, dir, settings, gate, holdKey, holdHook, saved, cancel, setPolicy };
@@ -285,15 +288,156 @@ it("does not publish an obsolete inline plan when a replacement reuses the same 
 	const hook = h.holdHook();
 	const client = h.session.prompt("execute the approved plan");
 	await hook.entered;
-	const path = "local://review-plan.md";
-	await plan(h, path, "REPLACEMENT-AT-SAME-PATH");
-	h.session.setPlanModeState({ enabled: true, planFilePath: path });
-	h.session.setPlanModeState(undefined);
+	const file = resolveLocalUrlToPath("local://review-plan.md", {
+		getArtifactsDir: () => h.manager.getArtifactsDir(),
+		getSessionId: () => h.manager.getSessionId(),
+	});
+	await Bun.write(file, "# Approved plan\n\nREPLACEMENT-AT-SAME-PATH\n");
 	hook.release();
 	await client;
 	const request = JSON.stringify(h.mock.calls.at(-1)!.context);
 	expect(request).toContain("REPLACEMENT-AT-SAME-PATH");
 	expect(request).not.toContain("REVIEW-APPROVED-PLAN-CONTENT");
+	await h.session.prompt("continue the approved plan");
+	const nextRequest = JSON.stringify(h.mock.calls.at(-1)!.context);
+	expect(nextRequest).toContain("REPLACEMENT-AT-SAME-PATH");
+	expect(nextRequest).not.toContain("REVIEW-APPROVED-PLAN-CONTENT");
+	expect(JSON.stringify(await h.saved())).not.toContain("REVIEW-APPROVED-PLAN-CONTENT");
+});
+
+it("delivers current roster policy when a prefix-binding model keeps the base prompt unchanged", async () => {
+	const h = await setup([]);
+	h.agent.setModel(getBundledModel("anthropic", "claude-sonnet-5-5")!);
+	const tools = ["alpha", "beta"].map(name => ({
+		name: `mcp__review_${name}`,
+		label: name,
+		description: `Run ${name}`,
+		parameters: type({}),
+		strict: true,
+		mcpServerName: "review",
+		mcpToolName: name,
+		async execute() {
+			return { content: [{ type: "text" as const, text: "ok" }] };
+		},
+	}));
+	await h.session.refreshMCPTools(tools);
+	await h.session.setActiveToolsByName(["mcp__review_alpha"]);
+	await h.session.prompt("warm cache");
+	h.setPolicy(() => [`POLICY_FOR_${h.session.getActiveToolNames().join(",")}`]);
+	const hook = h.holdHook();
+	const turn = h.session.prompt("use current tools");
+	await hook.entered;
+	const base = [...h.session.systemPrompt];
+	await h.session.setActiveToolsByName(["mcp__review_beta"]);
+	expect(h.session.systemPrompt).toEqual(base);
+	hook.release();
+	await turn;
+	const request = h.mock.calls.at(-1)!.context;
+	expect(request.tools?.map(tool => tool.name)).toEqual(["mcp__review_beta"]);
+	expect(JSON.stringify(request.systemPrompt)).toContain("POLICY_FOR_mcp__review_beta");
+	expect(JSON.stringify(request.systemPrompt)).not.toContain("POLICY_FOR_mcp__review_alpha");
+});
+
+it("delivers current policy after a custom session entry changes during preparation", async () => {
+	const h = await setup([]);
+	h.manager.appendCustomEntry("policy-mode", { enabled: true });
+	h.setPolicy(() => {
+		const entry = h.manager
+			.getBranch()
+			.findLast(entry => entry.type === "custom" && entry.customType === "policy-mode");
+		const data = entry?.type === "custom" ? entry.data : undefined;
+		return [
+			data && typeof data === "object" && "enabled" in data && data.enabled === true
+				? "OBSOLETE_ALLOWED_POLICY"
+				: "CURRENT_READONLY_POLICY",
+		];
+	});
+	const hook = h.holdHook();
+	const turn = h.session.prompt("honor current policy");
+	await hook.entered;
+	h.manager.appendCustomEntry("policy-mode", { enabled: false });
+	await h.manager.flush();
+	hook.release();
+	await turn;
+	const request = JSON.stringify(h.mock.calls.at(-1)!.context);
+	expect(request).toContain("CURRENT_READONLY_POLICY");
+	expect(request).not.toContain("OBSOLETE_ALLOWED_POLICY");
+	expect(JSON.stringify(await h.saved())).toContain('"enabled":false');
+});
+
+it("delivers current goal policy after wall-clock accounting changes without a journal entry", async () => {
+	const h = await setup([]);
+	await h.session.goalRuntime.createGoal({ objective: "account current work" });
+	h.setPolicy(() => [`GOAL_SECONDS_${h.session.getGoalModeState()!.goal.timeUsedSeconds}`]);
+	const hook = h.holdHook();
+	const turn = h.session.prompt("use current goal accounting");
+	await hook.entered;
+	const entries = h.manager.getEntries().length;
+	const now = h.session.goalRuntime.snapshot.wallClock.lastAccountedAt + 2000;
+	const clock = spyOn(Date, "now").mockReturnValue(now);
+	try {
+		await h.session.goalRuntime.flushUsage("suppressed");
+	} finally {
+		clock.mockRestore();
+	}
+	expect(h.session.getGoalModeState()!.goal.timeUsedSeconds).toBe(2);
+	expect(h.manager.getEntries()).toHaveLength(entries);
+	hook.release();
+	await turn;
+	const policy = JSON.stringify(h.mock.calls[0]!.context.systemPrompt);
+	expect(policy).toContain("GOAL_SECONDS_2");
+	expect(policy).not.toContain("GOAL_SECONDS_0");
+});
+
+for (const paused of [false, true]) {
+	it(`interrupt cleanup ${paused ? "keeps paused goal policy without repeating preparation" : "reprepares policy after pausing the interrupted activation"}`, async () => {
+		const h = await setup([]);
+		await h.session.goalRuntime.createGoal({ objective: "interrupt-owned activation" });
+		if (paused) await h.session.goalRuntime.pauseGoal();
+		const cleanup = h.gate();
+		const onTaskAborted = h.session.goalRuntime.onTaskAborted.bind(h.session.goalRuntime);
+		h.session.goalRuntime.onTaskAborted = async options => {
+			await cleanup.wait();
+			return onTaskAborted(options);
+		};
+		let preparations = 0;
+		h.setPolicy(() => {
+			preparations++;
+			return [`GOAL_STATUS_${h.session.getGoalModeState()!.goal.status}`];
+		});
+		try {
+			const stopping = h.session.abort({ reason: USER_INTERRUPT_LABEL });
+			await cleanup.entered;
+			const hook = h.holdHook();
+			const turn = h.session.prompt("start after goal cleanup");
+			await hook.entered;
+			cleanup.release();
+			await stopping;
+			hook.release();
+			await turn;
+			expect(preparations).toBe(paused ? 1 : 2);
+			expect(h.mock.calls).toHaveLength(1);
+			const request = JSON.stringify(h.mock.calls[0]!.context);
+			expect(request).toContain("GOAL_STATUS_paused");
+			expect(request).not.toContain("GOAL_STATUS_active");
+		} finally {
+			h.session.goalRuntime.onTaskAborted = onTaskAborted;
+			cleanup.release();
+		}
+	});
+}
+
+it("delivers a preparation whose own hook appends a custom entry without repeating the hook", async () => {
+	const h = await setup([]);
+	let hooks = 0;
+	h.setPolicy(() => {
+		h.manager.appendCustomEntry("hook-audit", { attempt: ++hooks });
+		return ["SELF_AUTHORED_POLICY"];
+	});
+	await h.session.prompt("run the audited task");
+	expect(hooks).toBe(1);
+	expect(JSON.stringify(h.mock.calls[0]!.context.systemPrompt)).toContain("SELF_AUTHORED_POLICY");
+	expect(JSON.stringify(await h.saved())).toContain('"attempt":1');
 });
 
 it("delivers an actual Mnemopi changed-memory notice after cancelling a waiting prompt", async () => {
@@ -410,4 +554,119 @@ it("restages changed memory and extension policy instead of publishing a waiting
 	const saved = JSON.stringify(await h.saved());
 	expect(saved).toContain("gamma-11");
 	expect(saved).not.toContain("beta-9");
+});
+
+it("reprepares after each SQLite memory edit and publishes only the latest change notice", async () => {
+	const h = await setup([], undefined, true, true);
+	const config = loadMnemopiConfig(h.settings, h.dir.path());
+	const first = new MnemopiSessionState({ sessionId: h.session.sessionId, config, session: h.session });
+	setMnemopiSessionState(h.session, first);
+	const id = first.rememberScoped("Deploy to MEMORY_ALPHA");
+	const recallCount = first.memory.beam.db.query<{ recall_count: number }, [string]>(
+		"SELECT recall_count FROM working_memory WHERE id = ?",
+	);
+	const warmHook = h.holdHook();
+	const warm = h.session.prompt("deploy location");
+	await warmHook.entered;
+	expect(recallCount.get(id)?.recall_count).toBe(0);
+	warmHook.release();
+	await warm;
+	expect(recallCount.get(id)?.recall_count).toBe(1);
+	setMnemopiSessionState(h.session, undefined);
+	await first.dispose({ consolidate: false });
+	const resumed = new MnemopiSessionState({ sessionId: h.session.sessionId, config, session: h.session });
+	setMnemopiSessionState(h.session, resumed);
+	resumed.editScopedMemory("update", id, { content: "Deploy to MEMORY_BETA" });
+	const firstHook = h.holdHook();
+	const turn = h.session.prompt("where now");
+	await firstHook.entered;
+	resumed.editScopedMemory("update", id, { content: "Deploy to MEMORY_GAMMA" });
+	const secondHook = h.holdHook();
+	firstHook.release();
+	await secondHook.entered;
+	resumed.editScopedMemory("update", id, { content: "Deploy to MEMORY_DELTA" });
+	secondHook.release();
+	await turn;
+	const request = JSON.stringify(h.mock.calls.at(-1)!.context);
+	const saved = JSON.stringify(await h.saved());
+	expect(request).toContain("MEMORY_DELTA");
+	expect(request).not.toContain("MEMORY_BETA");
+	expect(request).not.toContain("MEMORY_GAMMA");
+	expect(saved).not.toContain("MEMORY_BETA");
+	expect(saved).not.toContain("MEMORY_GAMMA");
+	expect(
+		h.session.messages.filter(
+			message => message.role === "custom" && message.customType === MEMORY_RECALL_CHANGES_MESSAGE_TYPE,
+		),
+	).toHaveLength(1);
+});
+
+it("declines after three source changes without publishing stale policy and restores the client input", async () => {
+	const h = await setup([]);
+	const dropped: string[] = [];
+	h.session.setPromptDropped(prompt => dropped.push(prompt.text));
+	let attempts = 0;
+	h.setPolicy(() => {
+		lookup("todo.enabled")!.override(h.settings, ++attempts % 2 !== 0);
+		return [`UNPUBLISHED_POLICY_${attempts}`];
+	});
+	await expect(h.session.prompt("bounded current-source task")).rejects.toThrow("System prompt changed repeatedly");
+	expect(attempts).toBe(3);
+	expect(h.mock.calls).toHaveLength(0);
+	expect(h.session.systemPrompt.join("\n")).not.toContain("UNPUBLISHED_POLICY");
+	expect(JSON.stringify(h.manager.getEntries())).not.toContain("UNPUBLISHED_POLICY");
+	expect(dropped).toEqual(["bounded current-source task"]);
+});
+
+it("reprepares a queued policy superseded between preparation resolution and its claim", async () => {
+	const h = await setup([]);
+	h.manager.appendCustomEntry("queued-policy", "old");
+	h.setPolicy(() => {
+		const entry = h.manager
+			.getBranch()
+			.findLast(entry => entry.type === "custom" && entry.customType === "queued-policy");
+		return [entry?.type === "custom" && entry.data === "new" ? "CURRENT_QUEUED_POLICY" : "OBSOLETE_QUEUED_POLICY"];
+	});
+	const prepare = h.agent.prepareQueuedMessages!;
+	let changed = false;
+	h.agent.prepareQueuedMessages = async (...args) => {
+		const preparation = await prepare(...args);
+		if (!changed) {
+			changed = true;
+			h.manager.appendCustomEntry("queued-policy", "new");
+		}
+		return preparation;
+	};
+	await h.session.steer("use the current queued policy");
+	await h.session.waitForIdle();
+	expect(h.mock.calls).toHaveLength(1);
+	expect(JSON.stringify(h.mock.calls[0]!.context.systemPrompt)).toContain("CURRENT_QUEUED_POLICY");
+	expect(JSON.stringify(h.mock.calls[0]!.context.systemPrompt)).not.toContain("OBSOLETE_QUEUED_POLICY");
+});
+
+it("declines three superseded queued claims without sending stale policy or losing the queued input", async () => {
+	const h = await setup([]);
+	let attempts = 0;
+	h.setPolicy(() => [`UNPUBLISHED_QUEUED_POLICY_${++attempts}`]);
+	const prepare = h.agent.prepareQueuedMessages!;
+	const invalidate = (preparation: QueuedMessagePreparation): QueuedMessagePreparation => {
+		h.manager.appendCustomEntry("claim-invalidated", attempts);
+		const retry = preparation.retry;
+		return {
+			commit: () => preparation.commit(),
+			retry: retry ? async () => invalidate(await retry()) : undefined,
+		};
+	};
+	h.agent.prepareQueuedMessages = async (...args) => {
+		const preparation = await prepare(...args);
+		return preparation ? invalidate(preparation) : undefined;
+	};
+	await h.session.steer("retain the bounded queued task");
+	await h.session.waitForIdle();
+	expect(attempts).toBe(3);
+	expect(h.mock.calls).toHaveLength(0);
+	expect(h.session.systemPrompt.join("\n")).not.toContain("UNPUBLISHED_QUEUED_POLICY");
+	expect(h.agent.peekSteeringQueue()).toMatchObject([
+		{ content: [{ type: "text", text: "retain the bounded queued task" }] },
+	]);
 });

@@ -3077,6 +3077,7 @@ describe("AgentSession message pipeline", () => {
 		sessions.push(session);
 		setMnemopiSessionState(session, {
 			aliasOf: undefined,
+			reportContextChanges() {},
 			setSessionId(_sessionId: string) {},
 			resetConversationTracking() {
 				remembered = false;
@@ -3171,6 +3172,7 @@ describe("AgentSession message pipeline", () => {
 		sessions.push(session);
 		setMnemopiSessionState(session, {
 			aliasOf: undefined,
+			reportContextChanges() {},
 			setSessionId(_sessionId: string) {},
 			resetConversationTracking() {
 				remembered = false;
@@ -3269,6 +3271,7 @@ describe("AgentSession message pipeline", () => {
 		sessions.push(session);
 		setMnemopiSessionState(session, {
 			aliasOf: undefined,
+			reportContextChanges() {},
 			setSessionId(_sessionId: string) {},
 			resetConversationTracking() {
 				remembered = false;

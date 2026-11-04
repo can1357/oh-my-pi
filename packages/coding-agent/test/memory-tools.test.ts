@@ -114,6 +114,7 @@ function registerState(client: HindsightApi, settings?: Settings, opts: Register
 			sessionId: TEST_SESSION_ID,
 			sessionManager: { getEntries: () => [] } as never,
 			emitNotice: () => {},
+			invalidateContext: () => {},
 			getHindsightSessionState: () => registeredState,
 			...opts.sessionOverrides,
 		} as never,
@@ -204,6 +205,7 @@ function registerMnemopiState(
 				getCwd: () => options.cwd ?? "/tmp",
 			} as never,
 			emitNotice: () => {},
+			invalidateContext: () => {},
 			getHindsightSessionState: () => undefined,
 			subscribe: (listener: AgentSessionEventListener) => {
 				options.listeners?.add(listener);
@@ -1209,6 +1211,7 @@ describe("Mnemopi backend lifecycle", () => {
 			modelRegistry,
 			sessionManager: { getEntries: () => [], getCwd: () => "/tmp" },
 			emitNotice: () => {},
+			invalidateContext: () => {},
 			getHindsightSessionState: () => undefined,
 			subscribe: () => () => {},
 		} as never;
@@ -1581,6 +1584,7 @@ describe("Mnemopi backend lifecycle", () => {
 			settings,
 			sessionManager: { getEntries: () => [], getCwd: () => "/tmp" },
 			emitNotice: () => {},
+			invalidateContext: () => {},
 		} as never;
 		await mnemopiBackend.start({
 			session: childSession,
@@ -1617,6 +1621,7 @@ describe("Mnemopi backend lifecycle", () => {
 			settings,
 			sessionManager: { getEntries: () => [], getCwd: () => "/tmp" },
 			emitNotice: () => {},
+			invalidateContext: () => {},
 			modelRegistry: {} as never,
 			getMnemopiSessionState: () => getMnemopiSessionState(childSession),
 		} as never;

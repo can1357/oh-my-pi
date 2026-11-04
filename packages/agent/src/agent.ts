@@ -423,6 +423,7 @@ export class Agent {
 	#tokenizer = new Tokenizer(this.#state.model);
 	#listeners = new Set<(e: AgentEvent) => void>();
 	#queueListeners = new Set<() => void>();
+	#contextListeners = new Set<() => void>();
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -1003,6 +1004,16 @@ export class Agent {
 		return () => this.#listeners.delete(fn);
 	}
 
+	/** Observe changes to the model, prompt, tool schemas or conversation used by a request. */
+	onContextChange(listener: () => void): () => void {
+		this.#contextListeners.add(listener);
+		return () => this.#contextListeners.delete(listener);
+	}
+
+	#emitContextChanged(): void {
+		for (const listener of this.#contextListeners) listener();
+	}
+
 	/** Register a listener notified after any steering/follow-up queue mutator
 	 *  (enqueue, dequeue-on-delivery, clear, restore, live-steering adoption,
 	 *  withdrawal, and landing in the transcript) runs. Internal-only signal —
@@ -1068,26 +1079,32 @@ export class Agent {
 		const preparationSignal = AbortSignal.any([signal, claim.controller.signal]);
 		this.#emitQueueChanged();
 		try {
-			const preparation = await prepare(messages, preparationSignal, queue);
-			signal.throwIfAborted();
-			if (preparationSignal.aborted || this.#queuedMessageClaims[queue] !== claim) return [];
-			const additional = preparation?.commit();
-			if (preparationSignal.aborted || this.#queuedMessageClaims[queue] !== claim) return [];
-			if (preparation && additional === undefined) {
-				// Stop this attempt before the loop can immediately reclaim the restored batch.
-				runController?.abort();
-				throw new DOMException("Queued message preparation cancelled", "AbortError");
+			let preparation = await prepare(messages, preparationSignal, queue);
+			for (;;) {
+				signal.throwIfAborted();
+				if (preparationSignal.aborted || this.#queuedMessageClaims[queue] !== claim) return [];
+				const additional = preparation?.commit();
+				if (preparationSignal.aborted || this.#queuedMessageClaims[queue] !== claim) return [];
+				if (preparation && additional === undefined) {
+					if (preparation.retry) {
+						preparation = await preparation.retry();
+						continue;
+					}
+					// Stop this attempt before the loop can immediately reclaim the restored batch.
+					runController?.abort();
+					throw new DOMException("Queued message preparation cancelled", "AbortError");
+				}
+				delete this.#queuedMessageClaims[queue];
+				this.#queuedMessageDeliveries.add({
+					queue,
+					controller: runController,
+					messages,
+					next: 0,
+					additional: additional ?? [],
+				});
+				this.#emitQueueChanged();
+				return additional?.length ? [...messages, ...additional] : messages;
 			}
-			delete this.#queuedMessageClaims[queue];
-			this.#queuedMessageDeliveries.add({
-				queue,
-				controller: runController,
-				messages,
-				next: 0,
-				additional: additional ?? [],
-			});
-			this.#emitQueueChanged();
-			return additional?.length ? [...messages, ...additional] : messages;
 		} catch (error) {
 			if (signal.aborted) throw error;
 			if (preparationSignal.aborted || this.#queuedMessageClaims[queue] !== claim) return [];
@@ -1300,7 +1317,12 @@ export class Agent {
 
 	// State mutators
 	setSystemPrompt(v: string[] | string) {
-		this.#state.systemPrompt = typeof v === "string" ? [v] : v;
+		const next = typeof v === "string" ? [v] : v;
+		const previous = this.#state.systemPrompt;
+		this.#state.systemPrompt = next;
+		if (previous.length !== next.length || previous.some((part, index) => part !== next[index])) {
+			this.#emitContextChanged();
+		}
 	}
 
 	setModel(model: Model) {
@@ -1308,6 +1330,7 @@ export class Agent {
 		const resolved = this.#modelResolver && model ? this.#modelResolver(model) : model;
 		this.#state.model = resolved;
 		this.#syncTokenizer(resolved);
+		this.#emitContextChanged();
 	}
 
 	/**
@@ -1322,10 +1345,12 @@ export class Agent {
 
 	setThinkingLevel(l: Effort | undefined) {
 		this.#state.thinkingLevel = l;
+		this.#emitContextChanged();
 	}
 
 	setDisableReasoning(disabled: boolean) {
 		this.#state.disableReasoning = disabled;
+		this.#emitContextChanged();
 	}
 
 	setSteeringMode(mode: "all" | "one-at-a-time") {
@@ -1354,12 +1379,14 @@ export class Agent {
 
 	setTools(t: AgentTool<any>[]) {
 		this.#state.tools = t;
+		this.#emitContextChanged();
 	}
 
 	replaceMessages(ms: AgentMessage[]) {
 		// New array assignment is intentional: caller-owned `ms` may be mutated
 		// after handoff; snapshot it so external mutations cannot leak in.
 		this.#state.messages = ms.slice();
+		this.#emitContextChanged();
 	}
 
 	/** Signal after a queue transition has settled its pending, claim, and
@@ -1423,6 +1450,7 @@ export class Agent {
 
 	appendMessage(m: AgentMessage) {
 		this.#state.messages.push(m);
+		this.#emitContextChanged();
 		const live = this.#liveSteered.findIndex(entry => entry.message === m);
 		if (live >= 0) {
 			this.#liveSteered.splice(live, 1);
@@ -1690,6 +1718,7 @@ export class Agent {
 			this.#resolveRunningPrompt = undefined;
 		}
 		this.#state.messages.length = 0;
+		this.#emitContextChanged();
 		this.#state.isStreaming = false;
 		this.#state.streamMessage = null;
 		this.#state.pendingToolCalls.clear();

@@ -13,7 +13,7 @@
 
 ### Fixed
 
-- A waiting prompt now uses the current approved plan, memory and extension policy when it starts, and compacts for the full prepared system prompt before its first request ([#17856](https://github.com/can1357/oh-my-pi/pull/17856) by [@sjawhar](https://github.com/sjawhar))
+- A waiting prompt now uses the current approved plan (including same-path file edits), memory, goal state, tool roster and extension policy when it starts, and compacts for the full prepared system prompt before its first request ([#17856](https://github.com/can1357/oh-my-pi/pull/17856) by [@sjawhar](https://github.com/sjawhar))
 - Long bash output cut in the middle no longer splits a line at the `[…N ln elided…]` marker, and its "Showing lines …" notice now names the lines actually shown, ending at the output's real last line ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
 - A bash command that prints nothing and succeeds now returns `(no output, exit code 0)` instead of a bare `(no output)`, so an empty diff or search no longer reads like a failed command ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
 - Added `tui.motion` (`full` / `reduced` / `none`, also `--motion` and `PI_MOTION`), one switch over spinners, the thinking pulse, shimmer and the status-line blink/fade for many-pane or reduced-motion use; a `tui.spinnerInterval` you set still wins over the preset ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
@@ -27,6 +27,7 @@
 - Subagents now move into worker threads when many run at once, so their model streaming and tool work no longer competes with the TUI: up to 3 concurrent subagents run on the main thread, 4 add a worker, and each doubling (8, 16, 32) adds one more, up to the new `task.workerThreads` (default 4; `0` keeps every subagent on the main thread). Each subagent goes where the fewest are running; a needed worker starts while the model is still streaming the spawning call and exits a minute after its last subagent finishes or parks. IRC, the Agent Hub and focus view, `agent://`/`history://`/`proc://`, parking and revival, async jobs, cost caps, account pools and OAuth refresh, runtime model providers, MCP, memory, telemetry, `PI_PROXY` and logs keep working across the thread boundary. If omp's own files change while it runs (a source checkout or an in-place update), new subagents run on the main thread until omp restarts
 
 ### Fixed
+
 - Fixed a second `ask` note on a later single-select question reopening and replacing the previous question's note ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
 
 - Retrying an aborted turn keeps the unsent composer draft instead of clearing it ([#17977](https://github.com/can1357/oh-my-pi/pull/17977) by [@Shadorain](https://github.com/Shadorain))

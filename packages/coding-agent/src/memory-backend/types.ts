@@ -101,8 +101,6 @@ export interface MemoryPromptPreparation {
 	 * whose `details` carry the backend's bookkeeping, so both land only once delivered.
 	 */
 	notice?: { content: string; details: unknown };
-	/** Whether the recall's source and ownership still match, without publishing it. */
-	isCurrent?(): boolean;
 	/** Commit synchronously after delivery validation; false rejects lost ownership without state writes. */
 	commit(): boolean;
 }
