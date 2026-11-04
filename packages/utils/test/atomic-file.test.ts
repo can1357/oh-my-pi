@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { replaceFileAtomically, writeFileAtomically, writeFileAtomicallySync } from "../src/atomic-file";
 import {
 	getAgentDir,
+	getBaseConfigRoot,
 	getPluginsDir,
 	getProjectAgentDir,
 	getRemoteDir,
@@ -297,14 +298,46 @@ describe("boundaries the resolver must keep", () => {
 		]) {
 			expect(isOmpOwnedPath(path.join(tree, "pkg", "nested", "config.json"))).toBe(false);
 		}
-		// Another profile's copies of the same trees, which the active profile's
-		// producers do not name.
-		for (const tree of ["wt", "remote", "skillshare"]) {
-			expect(isOmpOwnedPath(path.join(owned, "profiles", "other", tree, "x", "config.json"))).toBe(false);
-		}
-		expect(isOmpOwnedPath(path.join(owned, "profiles", "other", "plugins", "cache", "x"))).toBe(false);
+		// Another profile's copies live under a CONFIG root, not under an agent
+		// directory moved outside it; the test below covers them.
 		// The names are anchored, so a user's own directory keeps its meaning.
 		expect(isOmpOwnedPath(path.join(owned, "agent", "prompts", "wt"))).toBe(true);
 		expect(isOmpOwnedPath(path.join(owned, "agent", "plugins", "cache"))).toBe(true);
+	});
+});
+
+describe("classification does not depend on where omp happens to be pointed", () => {
+	test("a filename ending in a backslash is a filename, not a directory", async () => {
+		// `\` is an ordinary character in a POSIX name. Treating it as a separator
+		// abandoned the chain at `middle\` and left the target unwritten.
+		const target = path.join(owned, "real");
+		const middle = path.join(owned, "middle\\");
+		const link = path.join(owned, "config.json");
+		await fs.writeFile(target, "old");
+		await fs.symlink(target, middle);
+		await fs.symlink(middle, link);
+
+		await writeFileAtomically(link, "new", 0o644);
+
+		expect(await fs.readFile(target, "utf8")).toBe("new");
+		expect((await fs.lstat(middle)).isSymbolicLink()).toBe(true);
+	});
+
+	test("an inactive profile's downloaded trees are foreign too", () => {
+		for (const tree of ["wt", "remote", "skillshare", "puppeteer", "webcache"]) {
+			expect(isOmpOwnedPath(path.join(getBaseConfigRoot(), "profiles", "other", tree, "x"))).toBe(false);
+		}
+		expect(
+			isOmpOwnedPath(path.join(getBaseConfigRoot(), "profiles", "other", "cache", "fastembed-runtime", "x")),
+		).toBe(false);
+	});
+
+	test("an agent directory outside the config root holds none of those trees", () => {
+		// `owned` is this test's agent dir, outside the config root. A directory the
+		// user named `plugins/cache` there is theirs; the downloaded one is under
+		// the config root and is excluded by its producer.
+		expect(isOmpOwnedPath(path.join(owned, "plugins", "cache"))).toBe(true);
+		expect(isOmpOwnedPath(path.join(owned, "webcache", "x"))).toBe(true);
+		expect(isOmpOwnedPath(path.join(getPluginsDir(), "cache", "x"))).toBe(false);
 	});
 });

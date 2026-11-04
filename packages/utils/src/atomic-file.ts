@@ -29,9 +29,13 @@ function endsSymlinkWalk(error: unknown): boolean {
 /**
  * Whether a path spells a directory rather than a file: a trailing separator,
  * or a final `.` or `..` component. `open(path, "w")` refuses all three.
+ *
+ * Only the platform's own separators split it. A backslash is an ordinary
+ * character in a POSIX filename, and splitting on it there mistakes a file
+ * called `middle\` for a directory and abandons the link chain at it.
  */
 function namesADirectory(value: string): boolean {
-	const tail = value.split(/[\\/]/).at(-1);
+	const tail = (process.platform === "win32" ? value.split(/[\\/]/) : value.split("/")).at(-1);
 	return tail === "" || tail === "." || tail === "..";
 }
 

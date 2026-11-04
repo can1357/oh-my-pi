@@ -613,28 +613,30 @@ export function isOmpOwnedPath(candidate: string): boolean {
 	for (const tree of fetched) {
 		if (pathIsWithin(tree, target)) return false;
 	}
-	const roots = [getBaseConfigRoot(), dirs.configRoot, dirs.agentDir];
+	const configRoots = [getBaseConfigRoot(), dirs.configRoot];
 	for (const envVar of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]) {
 		const value = process.env[envVar];
-		if (value) roots.push(path.join(value, APP_NAME));
+		if (value) configRoots.push(path.join(value, APP_NAME));
 	}
-	for (const root of roots) {
+	for (const root of configRoots) {
 		if (!pathIsWithin(root, target)) continue;
 		// The producers above answer for the ACTIVE profile. Another profile keeps
 		// the same trees under its own root, which no producer names, so the names
-		// are also matched one level in — anchored, so a directory the user made
-		// with one of these names deeper in their own tree stays theirs.
+		// are matched one level into a config root too — anchored, and only here,
+		// because an agent directory moved outside the config root holds none of
+		// them and a directory the user named `plugins/cache` there is theirs.
 		const segments = (relativePathWithinRoot(root, target) ?? "").split(path.sep);
 		const offset = segments[0] === "profiles" && segments.length > 2 ? 2 : 0;
 		const head = segments[offset];
-		if (head === "wt" || head === "remote" || head === "skillshare" || head === "puppeteer") return false;
+		if (head === "wt" || head === "remote" || head === "skillshare") return false;
+		if (head === "puppeteer" || head === "webcache") return false;
 		if (head === "plugins" && (segments[offset + 1] === "cache" || segments[offset + 1] === "node_modules")) {
 			return false;
 		}
 		if (head === "cache" && segments[offset + 1] === "fastembed-runtime") return false;
-		return true;
+		break;
 	}
-	return false;
+	return configRoots.some(root => pathIsWithin(root, target)) || pathIsWithin(dirs.agentDir, target);
 }
 
 /** Set the coding agent directory. Creates a fresh resolver, invalidating all cached paths. */
