@@ -45,6 +45,7 @@ import {
 	parseCollabLink,
 } from "./protocol";
 import { CollabSocket } from "./relay-client";
+import { collabRelayHeaders } from "./relay-headers";
 
 /** Commands a guest may run locally; everything else is host-only. */
 export const COLLAB_GUEST_ALLOWED_COMMANDS: Record<string, true> = {
@@ -340,7 +341,12 @@ export class CollabGuestLink {
 			throw err;
 		}
 
-		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+		const socket = new CollabSocket({
+			wsUrl: parsed.wsUrl,
+			role: "guest",
+			key,
+			connectHeaders: url => collabRelayHeaders(this.#ctx.session, url, "guest"),
+		});
 		this.#socket = socket;
 
 		const firstWelcome = Promise.withResolvers<void>();

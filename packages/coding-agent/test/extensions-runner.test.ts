@@ -4876,4 +4876,46 @@ describe("ExtensionRunner", () => {
 			expect(cachedTexts).toEqual(["persisted user", "persisted assistant"]);
 		});
 	});
+
+	describe("collab_relay_connect", () => {
+		it("merges headers across extensions, last value per name wins, invalid names are reported", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "a-first.ts"),
+				`export default function(pi) {
+					pi.on("collab_relay_connect", async event => ({
+						headers: { Authorization: "Bearer first", "X-Collab-Role": event.role },
+					}));
+				}`,
+			);
+			fs.writeFileSync(
+				path.join(extensionsDir, "b-second.ts"),
+				`export default function(pi) {
+					pi.on("collab_relay_connect", async () => {
+						await Bun.sleep(1);
+						return { headers: { authorization: "Bearer second", "bad name": "x" } };
+					});
+				}`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+
+			const headers = await runner.emitCollabRelayConnect({
+				url: "wss://relay.example/r/room?role=host",
+				role: "host",
+			});
+
+			expect(headers).toEqual({ authorization: "Bearer second", "x-collab-role": "host" });
+			expect(errors.map(error => [path.basename(error.extensionPath), error.event])).toEqual([
+				["b-second.ts", "collab_relay_connect"],
+			]);
+		});
+	});
 });

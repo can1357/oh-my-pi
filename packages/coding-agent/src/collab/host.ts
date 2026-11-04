@@ -55,6 +55,7 @@ import {
 	publishCollabHost,
 } from "./registry";
 import { CollabSocket } from "./relay-client";
+import { collabRelayHeaders } from "./relay-headers";
 import {
 	COLLAB_ENTRY_OMITTED_CUSTOM_TYPE,
 	copyForReplication,
@@ -413,7 +414,12 @@ export class CollabHost {
 		const key = await importRoomKey(rawKey);
 		if (this.ending) throw new CollabHostStoppedError("collab host stopped before connecting");
 
-		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "host", key });
+		const socket = new CollabSocket({
+			wsUrl: parsed.wsUrl,
+			role: "host",
+			key,
+			connectHeaders: url => collabRelayHeaders(this.#ctx.session, url, "host"),
+		});
 		this.#socket = socket;
 
 		let opened = false;
