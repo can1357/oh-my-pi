@@ -122,10 +122,20 @@ struct Outcome {
 	tree: Snapshot,
 }
 
-/// The reference rsync 3.5.1 binary, or why there is none: each `rsync`
-/// looked at, with the first line it printed for `--version`. Other versions
-/// do not qualify: the builtin's output is byte-for-byte 3.5.1's.
-fn reference() -> Result<PathBuf, String> {
+/// Why these scenarios have no reference rsync to compare against.
+enum NoReference {
+	/// No `rsync` at all. There is nothing to compare against, so the
+	/// scenarios are skipped.
+	None,
+	/// An `rsync` that is not 3.5.1: each one looked at, with the first line
+	/// it printed for `--version`. The builtin's output is compared
+	/// byte-for-byte against 3.5.1's, so another version proves nothing, and
+	/// skipping for it reads as a pass; the scenarios fail instead.
+	Other(String),
+}
+
+/// The reference rsync 3.5.1 binary, or why there is none.
+fn reference() -> Result<PathBuf, NoReference> {
 	let mut candidates = vec![PathBuf::from("/opt/homebrew/bin/rsync")];
 	if let Some(path) = std::env::var_os("PATH") {
 		candidates.extend(std::env::split_paths(&path).map(|d| d.join("rsync")));
@@ -142,8 +152,8 @@ fn reference() -> Result<PathBuf, String> {
 		seen.push(format!("{} reports {:?}", candidate.display(), version.lines().next().unwrap_or("")));
 	}
 	Err(match seen.is_empty() {
-		true => "no rsync at /opt/homebrew/bin/rsync or on PATH".to_owned(),
-		false => seen.join("; "),
+		true => NoReference::None,
+		false => NoReference::Other(seen.join("; ")),
 	})
 }
 
@@ -319,10 +329,16 @@ fn check(reference: &Path, mode: Mode, case: &Case) -> Result<(), String> {
 fn run_table(mode: Mode, table: &[Case]) {
 	let reference = match reference() {
 		Ok(reference) => reference,
-		Err(why) => {
-			eprintln!("skipped: these scenarios compare against rsync 3.5.1 (protocol 33), and {why}");
+		Err(NoReference::None) => {
+			eprintln!("skipped: these scenarios compare against rsync 3.5.1 (protocol 33), and there is no rsync at /opt/homebrew/bin/rsync or on PATH");
 			return;
 		},
+		// Skipping for the wrong version printed a pass and proved nothing,
+		// which is how a whole run against rsync 3.2.7 went unnoticed.
+		Err(NoReference::Other(seen)) => panic!(
+			"these scenarios compare against rsync 3.5.1 (protocol 33) byte for byte, and the rsync found is not it: {seen}. \
+			 Install rsync 3.5.1 and put it first on PATH, or uninstall rsync to skip these scenarios."
+		),
 	};
 	let filter = std::env::var("RSYNC_CONFORMANCE_FILTER").unwrap_or_default();
 	let cases: Vec<&Case> = table.iter().filter(|c| c.name.contains(filter.as_str())).collect();
