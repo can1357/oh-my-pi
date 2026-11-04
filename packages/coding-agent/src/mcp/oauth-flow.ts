@@ -9,6 +9,7 @@ import type { OAuthCallbackFlowOptions } from "@oh-my-pi/pi-ai/oauth/callback-se
 import { OAuthCallbackFlow } from "@oh-my-pi/pi-ai/oauth/callback-server";
 import type { OAuthController, OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { redactUrlCredentials } from "@oh-my-pi/pi-utils";
 import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
 import type { OAuthCredential } from "../session/auth-storage";
 import { redactUrlForLog } from "./json-rpc";
@@ -527,7 +528,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 
 		if (!response.ok) {
 			const errorText = await response.text();
-			throw new Error(`Token exchange failed: ${response.status} ${errorText}`);
+			throw new Error(redactUrlCredentials(`Token exchange failed: ${response.status} ${errorText}`));
 		}
 
 		const data = (await response.json()) as {
@@ -544,7 +545,9 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		// empty access token and only surface `invalid_token` on a later request.
 		if (typeof data.access_token !== "string" || data.access_token.length === 0) {
 			const providerError = data.error_description ?? data.error;
-			throw new Error(`Token exchange returned no access token${providerError ? `: ${providerError}` : ""}`);
+			throw new Error(
+				redactUrlCredentials(`Token exchange returned no access token${providerError ? `: ${providerError}` : ""}`),
+			);
 		}
 
 		// Calculate expiry timestamp
@@ -767,9 +770,12 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 				: failure.detail
 					? `network error — ${failure.detail}`
 					: "network error";
+		// The response detail may echo the request URL, so the whole message is redacted, not only the endpoint.
 		return new Error(
-			`OAuth provider requires client_id, and dynamic client registration was rejected ` +
-				`(POST ${redactUrlForLog(failure.endpoint)} → ${outcome}). The server likely restricts registration to pre-approved clients. ${manualHint}`,
+			redactUrlCredentials(
+				`OAuth provider requires client_id, and dynamic client registration was rejected ` +
+					`(POST ${redactUrlForLog(failure.endpoint)} → ${outcome}). The server likely restricts registration to pre-approved clients. ${manualHint}`,
+			),
 		);
 	}
 }
@@ -838,7 +844,7 @@ export async function refreshMCPOAuthToken(
 
 	if (!response.ok) {
 		const text = await response.text();
-		throw new Error(`MCP OAuth refresh failed: ${response.status} ${text}`);
+		throw new Error(redactUrlCredentials(`MCP OAuth refresh failed: ${response.status} ${text}`));
 	}
 
 	const data = (await response.json()) as {

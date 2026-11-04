@@ -178,27 +178,114 @@ function dispatchToSinks(event: LogEvent): void {
 /**
  * `event` with URL userinfo and secret query values removed from its message and
  * context, as the log file gets it; a sink such as the OTLP exporter ships records
- * off the machine. The event is returned as is when nothing needed removing, so
- * sinks keep the original context objects in the common case. A context that
- * cannot be serialized (a cycle, a bigint) cannot be checked and reaches sinks
- * as the caller's object, as before.
+ * off the machine. The event is returned as is when nothing reachable holds a URL,
+ * so sinks keep the original context objects in the common case. A context that
+ * JSON cannot serialize (a bigint, a cycle) is walked like any other.
  */
 function withoutUrlCredentials(event: LogEvent): LogEvent {
 	const message = redactUrlCredentials(event.message);
 	let context = event.context;
-	if (context !== undefined) {
-		try {
-			const json = mayContainError(context) ? JSON.stringify(context, jsonReplacer) : JSON.stringify(context);
-			const clean = redactUrlCredentials(json);
-			if (clean !== json) {
-				const parsed: unknown = JSON.parse(clean);
-				context = isRecord(parsed) ? parsed : undefined;
-			}
-		} catch {
-			// Not serializable, so nothing here can be checked; the sink gets the caller's object.
+	try {
+		if (context !== undefined && needsUrlRedaction(context, new Set(), { left: MAX_REDACT_NODES })) {
+			context = redactedCopy(context, new Map(), { left: MAX_REDACT_NODES }, 0) as Record<string, unknown>;
 		}
+	} catch {
+		// A getter threw while the context was read: it cannot be checked, so sinks do not get it.
+		context = undefined;
 	}
 	return message === event.message && context === event.context ? event : { ...event, message, context };
+}
+
+/** Nodes one redaction walk visits; past it, the rest of a record is `[truncated]` rather than unchecked. */
+const MAX_REDACT_NODES = 10_000;
+const MAX_REDACT_DEPTH = 64;
+
+/**
+ * Whether {@link redactUrlCredentials} would change any string a serializer
+ * reads from `value`: field names, own enumerable fields, an Error's name,
+ * message, stack and cause, and a `toJSON` result. An exhausted budget answers
+ * yes, so an oversized record is copied (and truncated) instead of passing
+ * unchecked. `seen` guards cycles; a caller whose value JSON already
+ * serialized (so it has none) passes `undefined`.
+ */
+function needsUrlRedaction(value: unknown, seen: Set<object> | undefined, budget: { left: number }): boolean {
+	if (typeof value === "string") return changedByRedaction(value);
+	if (value === null || typeof value !== "object") return false;
+	if (--budget.left < 0) return true;
+	if (seen) {
+		if (seen.has(value)) return false;
+		seen.add(value);
+	}
+	if (value instanceof Date) return false;
+	if (value instanceof Error) {
+		return (
+			needsUrlRedaction(value.name, seen, budget) ||
+			needsUrlRedaction(value.message, seen, budget) ||
+			needsUrlRedaction(value.stack, seen, budget) ||
+			needsUrlRedaction(value.cause, seen, budget) ||
+			fieldsNeedUrlRedaction(value, seen, budget)
+		);
+	}
+	if (hasToJSON(value)) return needsUrlRedaction(jsonOf(value), seen, budget);
+	return fieldsNeedUrlRedaction(value, seen, budget);
+}
+
+function fieldsNeedUrlRedaction(value: object, seen: Set<object> | undefined, budget: { left: number }): boolean {
+	for (const key in value) {
+		if (changedByRedaction(key) || needsUrlRedaction(Reflect.get(value, key), seen, budget)) return true;
+	}
+	return false;
+}
+
+function changedByRedaction(text: string): boolean {
+	return text.includes("://") && redactUrlCredentials(text) !== text;
+}
+
+function hasToJSON(value: object): boolean {
+	return !(value instanceof Error) && typeof Reflect.get(value, "toJSON") === "function";
+}
+
+/** What `JSON.stringify` reads from an object with `toJSON`; a throwing `toJSON` reads as nothing. */
+function jsonOf(value: object): unknown {
+	try {
+		const toJSON = Reflect.get(value, "toJSON");
+		return typeof toJSON === "function" ? Reflect.apply(toJSON, value, []) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * A copy of `value` as a serializer reads it, every string (field names too)
+ * passed through {@link redactUrlCredentials}: Errors become
+ * {@link errorToRecord} records, `toJSON` results replace their objects, and
+ * cycles stay cycles. A bigint or another primitive is kept as is.
+ */
+function redactedCopy(value: unknown, memo: Map<object, unknown>, budget: { left: number }, depth: number): unknown {
+	if (typeof value === "string") return redactUrlCredentials(value);
+	if (value === null || typeof value !== "object") return value;
+	const known = memo.get(value);
+	if (known !== undefined) return known;
+	if (--budget.left < 0 || depth > MAX_REDACT_DEPTH) return "[truncated]";
+	if (value instanceof Date) return value;
+	if (hasToJSON(value)) {
+		const json = redactedCopy(jsonOf(value), memo, budget, depth + 1);
+		memo.set(value, json);
+		return json;
+	}
+	if (Array.isArray(value)) {
+		const items: unknown[] = [];
+		memo.set(value, items);
+		for (const item of value) items.push(redactedCopy(item, memo, budget, depth + 1));
+		return items;
+	}
+	const source: object = value instanceof Error ? errorToRecord(value) : value;
+	const copy: Record<string, unknown> = {};
+	memo.set(value, copy);
+	for (const key in source) {
+		copy[redactUrlCredentials(key)] = redactedCopy(Reflect.get(source, key), memo, budget, depth + 1);
+	}
+	return copy;
 }
 
 const PROCESS_LOG_PATTERN = /^omp\.(\d{4}-\d{2}-\d{2})\.(\d+)\.log(?:\.(\d+))?$/;
@@ -441,9 +528,13 @@ function formatLogRecord(
 		if (metadata.stack) entry.stack = metadata.stack;
 		if (metadata.cause) entry.cause = metadata.cause;
 	}
+	const line = mayContainError(entry) ? JSON.stringify(entry, jsonReplacer) : JSON.stringify(entry);
 	// A URL's userinfo or secret query value must not reach the log file, wherever it was
 	// embedded: a message, a context field, or a runtime error's own fields (Bun fetch `path`).
-	return redactUrlCredentials(mayContainError(entry) ? JSON.stringify(entry, jsonReplacer) : JSON.stringify(entry));
+	// Strings are redacted one by one, so a redaction cannot cross a JSON quote.
+	// The line serialized, so the entry has no cycle and the check needs no visited set.
+	if (!line.includes("://") || !needsUrlRedaction(entry, undefined, { left: MAX_REDACT_NODES })) return line;
+	return JSON.stringify(redactedCopy(entry, new Map(), { left: MAX_REDACT_NODES }, 0));
 }
 
 /** Longest a buffered file record waits before it is written. */

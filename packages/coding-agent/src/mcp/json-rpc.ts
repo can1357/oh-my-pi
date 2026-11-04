@@ -5,17 +5,16 @@
  * without maintaining persistent connections.
  */
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
-import { isRecord, logger, readSseEvents } from "@oh-my-pi/pi-utils";
+import { isRecord, isSecretUrlParamName, logger, readSseEvents, redactUrlCredentials } from "@oh-my-pi/pi-utils";
 import type { JsonRpcResponse } from "./types";
 
 /** Hard ceiling on a single MCP HTTP request when the caller provides no signal. */
 const MCP_DEFAULT_TIMEOUT_MS = 60_000;
 
-const SENSITIVE_QUERY_PARAM = /key|token|secret|auth/i;
-
 /**
  * Redact credentials embedded in a URL — userinfo (`user:pass@`) and
- * credential-bearing query params (e.g. `exaApiKey`) — so diagnostics never
+ * credential-bearing query params (e.g. `exaApiKey`, `password`; the names
+ * {@link isSecretUrlParamName} matches) — so diagnostics never
  * write secrets to the persistent log file or the UI.
  */
 export function redactUrlForLog(url: string): string {
@@ -24,9 +23,10 @@ export function redactUrlForLog(url: string): string {
 		parsed.username = "";
 		parsed.password = "";
 		for (const name of parsed.searchParams.keys()) {
-			if (SENSITIVE_QUERY_PARAM.test(name)) parsed.searchParams.set(name, "[redacted]");
+			if (isSecretUrlParamName(name)) parsed.searchParams.set(name, "[redacted]");
 		}
-		return parsed.toString();
+		// Fragment parameters and URLs nested in parameter values get the shared scanner.
+		return redactUrlCredentials(parsed.toString());
 	} catch {
 		// Unparseable URL — drop the query string and any userinfo rather than risk leaking them.
 		return url.split("?")[0].replace(/^([^:/?#]+:\/\/)[^/@]*@/, "$1");

@@ -6,11 +6,11 @@
 
 - Added `logger.setLogForwarder(forwarder)` (`LogForwarder { emit, flush }`), which routes a thread's records — `withContext` fields merged, context reduced to clone-safe JSON — to another thread instead of its own file and sinks, and `logger.emitForeign(event)`, which writes such a record with its original timestamp and runs the sinks without the caller's `withContext` fields
 - Added `expandTilde(path, home?)` (`@oh-my-pi/pi-utils/path`), which expands a leading `~` to the home directory; `@oh-my-pi/pi-coding-agent/tools/path-utils` re-exports it ([#17931](https://github.com/can1357/oh-my-pi/pull/17931) by [@will-bogusz](https://github.com/will-bogusz))
-- Added `redactUrlCredentials(text)`, which replaces URL userinfo and secret-named query values anywhere in a string with `[redacted]` ([#18057](https://github.com/can1357/oh-my-pi/pull/18057) by [@sjawhar](https://github.com/sjawhar))
+- Added `redactUrlCredentials(text)`, which replaces URL userinfo and the values of secret-named query and fragment parameters anywhere in a string with `[redacted]`, splitting each URL as the URL parser does (a `'` or extra `@` in a password, percent-encoded names, nested URLs) in time linear in the text, and `isSecretUrlParamName(name)` ([#18057](https://github.com/can1357/oh-my-pi/pull/18057) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
-- The log file and log sinks no longer receive a URL's userinfo or secret query values, including ones inside a logged error's own fields such as Bun's fetch error `path` ([#18057](https://github.com/can1357/oh-my-pi/pull/18057) by [@sjawhar](https://github.com/sjawhar))
+- The log file and log sinks no longer receive a URL's userinfo or secret parameter values, including ones inside a logged error's own fields such as Bun's fetch error `path`, and inside a context JSON cannot serialize (a bigint, a cycle) that a sink still reads ([#18057](https://github.com/can1357/oh-my-pi/pull/18057) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 
