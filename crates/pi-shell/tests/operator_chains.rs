@@ -1,16 +1,12 @@
-//! A long chain of one left-associative operator (`1 + 1 + …`, `a && a && …`,
-//! `x -a x -a …`) runs like a short one. The parsers apply such an operator in
-//! a loop, but the tree they build is as deep as the chain is long, and every
-//! walk of that tree (the copy a parse cache hands out, evaluation, drop, and
-//! display for `set -x` and `declare -f`) recursed once per operator: a few
-//! thousand operators overflowed the stack and killed the whole process with no
-//! message. Bash runs each of these scripts.
+//! Flat operator chains run through the bash tool's `Shell::run` entry point,
+//! including error cleanup, short circuiting, tracing and function display.
+//! Conditional chains must not build a tree as deep as the chain: parsing,
+//! copying, lowering, printing and dropping it must all survive 100,000 terms.
 #![cfg(unix)]
 
 use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
 
-/// Long enough that every chain below overflowed the test thread's stack
-/// before, in debug and optimized builds.
+/// Long enough to overflow the old conditional parser and `test` evaluator.
 const LONG: usize = 100_000;
 
 /// `item` repeated `n` times, joined by `separator`.
@@ -37,10 +33,11 @@ async fn run(script: String, status: i32) -> String {
 			.expect("shell run");
 		outputs.push((result.exit_code, rx.drain().collect::<String>()));
 	}
-	let (_, probe) = outputs.pop().expect("probe run");
+	let (probe_code, probe) = outputs.pop().expect("probe run");
 	let (code, output) = outputs.pop().expect("first run");
 	let shown: String = output.chars().take(400).collect();
 	assert_eq!(code, Some(status), "output: {shown}");
+	assert_eq!(probe_code, Some(0), "the next command failed");
 	assert_eq!(probe, "alive\n", "the shell did not run the next command");
 	output
 }
@@ -75,7 +72,8 @@ runs! {
 		chain("0", "||", LONG),
 	) => "0-1-0\n".to_owned(), 0;
 	// An error in the expression drops the tree the parser or evaluation built.
-	arithmetic_division_by_zero: format!("echo $(( {}+1/0 ))", chain("1", "+", LONG)) => "error: arithmetic evaluation error: division by zero\n".to_owned(), 1;
+	arithmetic_division_by_zero: format!("echo $(( {}+1/0 ))", chain("1", "+", LONG))
+		=> format!("bash: line 1: {}+1/0 : division by 0 (error token is \"0 \")\n", chain("1", "+", LONG)), 1;
 	// `[[ ]]`: the program the parse cache hands out is a copy.
 	conditional_and: format!("[[ {} ]] && echo yes", chain("a", " && ", LONG)) => "yes\n".to_owned(), 0;
 	conditional_or: format!("[[ {} || a ]] && echo yes", chain("''", " || ", LONG)) => "yes\n".to_owned(), 0;
@@ -90,21 +88,20 @@ runs! {
 	test_or: format!("test {} -o x && echo yes", chain("''", " -o ", LONG)) => "yes\n".to_owned(), 0;
 	// `set -x` and `declare -f` write the expression back out.
 	arithmetic_command_traced: format!("set -x; (( {} )); set +x", chain("1", "+", LONG))
-		=> format!("+ (( {} ))\n+ set +x\n", chain("1", " + ", LONG)), 0;
+		=> format!("+ ((  {}  ))\n+ set +x\n", chain("1", "+", LONG)), 0;
 	conditional_in_declared_function: format!("f() {{ [[ {} ]]; }}; declare -f f", chain("a", " && ", LONG))
 		=> format!("f () \n{{ \n    [[ {} ]]\n}}\n", chain("-n a", " && ", LONG)), 0;
 	// A chain that ends without its last operand is a syntax error, and the
 	// tree built up to that point is dropped.
 	arithmetic_unfinished: format!("echo $(( {} + ))", chain("1", "+", LONG))
-		=> format!("error: arithmetic evaluation error: failed to parse expression:  {} + \n", chain("1", "+", LONG)), 1;
+		=> format!("bash: line 1: {} + : arithmetic syntax error: operand expected (error token is \"+ \")\n", chain("1", "+", LONG)), 1;
 	conditional_unfinished: format!("[[ {} && ]]", chain("a", " && ", LONG))
-		=> "error: pi-natives:command: syntax error at end of input\n".to_owned(), 2;
-	test_unfinished: format!("[ {} -a ]", chain("x", " -a ", LONG)) => "error: [: invalid test command\n".to_owned(), 2;
+		=> format!("bash: -c: line 1: syntax error near `]]'\nbash: -c: line 1: `[[ {} && ]]'\n", chain("a", " && ", LONG)), 2;
+	test_unfinished: format!("[ {} -a ]", chain("x", " -a ", LONG)) => "bash: line 1: [: argument expected\n".to_owned(), 2;
 }
 
-/// Chains of every length from 1 to 40 operators, which crosses the lengths at
-/// which evaluation stops recursing and the operands spill from the stack into
-/// a list. Bash 5.2 prints the same output for this script.
+/// Every length from 1 to 40 operators, with a final operand that changes the
+/// result on alternate lengths. The arithmetic row also fixes associativity.
 #[tokio::test(flavor = "multi_thread")]
 async fn chains_of_every_length_around_the_limits() {
 	let mut script = String::new();
