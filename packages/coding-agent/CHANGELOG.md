@@ -6,6 +6,11 @@
 
 - `edit` rejections of an unknown tag now offer the file's current tag for the rows shown, instead of only sending the model back to output it already copied from ([#19332](https://github.com/can1357/oh-my-pi/pull/19332) by [@Xytronix](https://github.com/Xytronix))
 
+### Added
+
+- Added `pi.registerUrlScheme` so extensions can serve their own `<scheme>://` URLs to `read`, `write` and composer completion; the root session and each subagent keep their own handler, a suspended extension's scheme pauses until it resumes, and it is released with the extension ([#18059](https://github.com/can1357/oh-my-pi/pull/18059) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added `pi.onSuspensionChange(listener)` so an extension can pause work it drives itself (a socket, a timer) while a live `disabledExtensions` edit suspends it, and resume it after ([#18059](https://github.com/can1357/oh-my-pi/pull/18059) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added
