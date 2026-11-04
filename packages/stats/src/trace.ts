@@ -15,7 +15,7 @@ import { pricingPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getBundledModel, type GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { initDb, isScheduledCatalogModel } from "./db";
-import { extractFolderFromPath, parseAllSessionEntries, resolveUsageTotal } from "./parser";
+import { extractFolderFromPath, parseAllSessionEntries, readSessionHead, resolveUsageTotal } from "./parser";
 import { getSessionRollups } from "./rollup";
 import type {
 	SessionEntry,
@@ -40,7 +40,6 @@ export const TRACE_ETAG_VERSION = 4;
 const MAX_TRACK_DEPTH = 6;
 const LABEL_MAX = 80;
 const DETAIL_MAX = 160;
-const TITLE_SCAN_BYTES = 4096;
 const LIST_FOLD_LIMIT = 300;
 
 // ---------------------------------------------------------------------------
@@ -1080,32 +1079,6 @@ interface SessionMetadata {
 
 const metadataCache = new Map<string, SessionMetadata & { mtimeMs: number }>();
 
-/** Read enough decompressed transcript bytes to cover the title slot and session header. */
-async function readSessionMetadataHead(file: string): Promise<string> {
-	if (!file.endsWith(".gz")) return Bun.file(file).slice(0, TITLE_SCAN_BYTES).text();
-
-	const reader = Bun.file(file).stream().pipeThrough(new DecompressionStream("gzip")).getReader();
-	const decoder = new TextDecoder();
-	let remaining = TITLE_SCAN_BYTES;
-	let head = "";
-	try {
-		while (remaining > 0) {
-			const { done, value } = await reader.read();
-			if (done) {
-				head += decoder.decode();
-				break;
-			}
-			const chunk = value.subarray(0, remaining);
-			remaining -= chunk.byteLength;
-			head += decoder.decode(chunk, { stream: remaining > 0 && chunk.byteLength === value.byteLength });
-			if (chunk.byteLength < value.byteLength) break;
-		}
-	} finally {
-		await reader.cancel();
-	}
-	return head;
-}
-
 /** Read list metadata from the fixed title slot and session header. */
 async function readSessionMetadata(file: string): Promise<SessionMetadata> {
 	let mtimeMs: number;
@@ -1120,26 +1093,9 @@ async function readSessionMetadata(file: string): Promise<SessionMetadata> {
 	let title: string | null = null;
 	let cwd: string | null = null;
 	try {
-		const head = await readSessionMetadataHead(file);
-		for (const line of head.split("\n")) {
-			if (!line.trim()) continue;
-			let parsed: EntryView;
-			try {
-				// Boundary cast: fields re-checked with typeof below.
-				parsed = JSON.parse(line) as EntryView;
-			} catch {
-				continue;
-			}
-			if (parsed.type === "title" && typeof parsed.title === "string") {
-				title = parsed.title;
-				continue;
-			}
-			if (parsed.type === "session") {
-				if (title === null && typeof parsed.title === "string") title = parsed.title;
-				if (typeof parsed.cwd === "string") cwd = parsed.cwd;
-				break;
-			}
-		}
+		const { slotTitle, header } = await readSessionHead(file);
+		title = slotTitle ?? (typeof header?.title === "string" ? header.title : null);
+		if (typeof header?.cwd === "string") cwd = header.cwd;
 	} catch {
 		// Unreadable head (gc'd, gz, permission) → keep the row with path-derived metadata.
 	}

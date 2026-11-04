@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getAgentDbPath, getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getSessionsDir, getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
 	applySessionParseResults,
@@ -22,6 +22,8 @@ import {
 	matchesSessionFile,
 	type ParseSessionResult,
 	parseSessionFile,
+	readSessionHead,
+	type SessionHeaderView,
 	type SessionParserState,
 } from "./parser";
 import {
@@ -238,11 +240,11 @@ export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: n
 /**
  * Sync all session files to the database.
  *
- * `workers: 1` pipelines file reads and parses inline, committing in discovery order.
- * Larger pools fan parsing out across workers
- * (one in-flight job per worker) while DB writes and offset bookkeeping stay on
- * the calling thread. Bounded batches commit rows and cursors atomically without
- * holding a database transaction open during file I/O.
+ * `workers: 1` pipelines file reads and parses inline. Larger pools fan parsing
+ * out across workers (one in-flight job per worker) while DB writes and offset
+ * bookkeeping stay on the calling thread. Either way results commit in ingest
+ * order ({@link orderForIngest}). Bounded batches commit rows and cursors
+ * atomically without holding a database transaction open during file I/O.
  * `onProgress` fires once per completed file (skipped files included so the
  * bar walks at a steady rate).
  */
@@ -265,15 +267,28 @@ const INGEST_TIERS_MS = [24 * 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000];
 /**
  * Order a full sync so recent activity lands first: transcripts modified in
  * the last day, then the last week, then the rest. Within a tier files go in
- * creation order, so a fork still follows its parent and the parent keeps
- * ownership of the entries the fork copied (first writer wins). The only
- * exception is a from-scratch ingest where a fork was touched more recently
- * than a parent idle for a day: the fork then owns the copied entries, which
- * changes per-session attribution but never totals.
+ * creation order, so a copy (a fork, a branch, or a seance transcript that
+ * copies the session it consults) follows the transcript it copied from. That
+ * transcript then keeps ownership of the copied entries (first writer wins),
+ * and the owner's recorded costs are the ones the totals count.
+ *
+ * Birth times are only as fine as one clock tick, so files born in the same
+ * tick go after the files their session header names as their source (see
+ * {@link placeCopiesAfterSources}); only those files' headers are read.
+ * Otherwise they go by their {@link sessionLineage}: a transcript precedes the
+ * transcripts under its own directory (its subagents), and siblings go by
+ * name, whose timestamp prefix records when omp created a session. The
+ * directory's listing order (hash order on ext4) decides nothing.
+ *
+ * Two cases still give a copy ownership on a from-scratch ingest: a fork
+ * touched more recently than a parent idle for a day (the tiers), and a
+ * parent born later than its fork because it was rewritten through a
+ * temporary file.
  */
 async function orderForIngest(files: string[]): Promise<string[]> {
 	const now = Date.now();
-	const ranked: { file: string; tier: number; born: number; index: number }[] = [];
+	const sessionsDir = getSessionsDir();
+	const ranked: IngestRank[] = [];
 	for (let start = 0; start < files.length; start += SYNC_METADATA_FILES) {
 		const batch = files.slice(start, start + SYNC_METADATA_FILES);
 		const stats = await Promise.all(batch.map(file => fs.promises.stat(file).catch(() => null)));
@@ -285,12 +300,185 @@ async function orderForIngest(files: string[]): Promise<string[]> {
 				file: batch[i],
 				tier: tier === -1 ? INGEST_TIERS_MS.length : tier,
 				born: stat ? stat.birthtimeMs || stat.ctimeMs : 0,
+				lineage: sessionLineage(sessionsDir, batch[i]),
 				index: start + i,
+				dev: stat?.dev ?? 0,
+				ino: stat?.ino ?? 0,
 			});
 		}
 	}
-	ranked.sort((a, b) => a.tier - b.tier || a.born - b.born || a.index - b.index);
+	ranked.sort(
+		(a, b) => a.tier - b.tier || a.born - b.born || compareLineage(a.lineage, b.lineage) || a.index - b.index,
+	);
+	await placeCopiesAfterSources(ranked);
 	return ranked.map(entry => entry.file);
+}
+
+interface IngestRank {
+	file: string;
+	tier: number;
+	born: number;
+	lineage: string[];
+	index: number;
+	/** Device and inode, which identify the file under any spelling of its path; inode 0 when unknown. */
+	dev: number;
+	ino: number;
+}
+
+/**
+ * The path of a transcript below its project folder, `.jsonl` dropped:
+ * `<folder>/<ts>_<id>.jsonl` is `[<ts>_<id>]`, and its subagent
+ * `<folder>/<ts>_<id>/Task.jsonl` is `[<ts>_<id>, Task]`. The project folder
+ * is left out because a fork can live in another project's folder.
+ */
+function sessionLineage(sessionsDir: string, file: string): string[] {
+	const parts = path.relative(sessionsDir, file.slice(0, -".jsonl".length)).split(path.sep);
+	return parts.length > 1 ? parts.slice(1) : parts;
+}
+
+/** Element-wise name order; a transcript sorts before the transcripts under its own directory. */
+function compareLineage(a: string[], b: string[]): number {
+	const shared = Math.min(a.length, b.length);
+	for (let i = 0; i < shared; i++) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+	return a.length - b.length;
+}
+
+/**
+ * Within each run of `ranked` born in the same tick (same tier and birth
+ * time), move each file after the files its session header names as its
+ * source, keeping the order otherwise. omp records a copy's source as
+ * `parentSession` (the source's session id for a fork, a seance or a
+ * continuation; the source transcript's absolute path for a branch or a
+ * subagent) and, for a seance, `seanceSource` (the consulted transcript's
+ * absolute path). A path names a file of the run when it is the file's path or
+ * reaches the same inode, so a symlinked spelling of the sessions directory
+ * matches. Only files in such runs have their heads read; an unreadable header
+ * names no source.
+ */
+async function placeCopiesAfterSources(ranked: IngestRank[]): Promise<void> {
+	const runs: { start: number; end: number }[] = [];
+	const tied: IngestRank[] = [];
+	for (let start = 0; start < ranked.length;) {
+		let end = start + 1;
+		while (
+			end < ranked.length &&
+			ranked[end].tier === ranked[start].tier &&
+			ranked[end].born === ranked[start].born
+		) {
+			end++;
+		}
+		if (end - start > 1) {
+			runs.push({ start, end });
+			for (let i = start; i < end; i++) tied.push(ranked[i]);
+		}
+		start = end;
+	}
+	if (runs.length === 0) return;
+
+	const headers = new Map<IngestRank, SessionHeaderView>();
+	for (let start = 0; start < tied.length; start += SYNC_METADATA_FILES) {
+		const batch = tied.slice(start, start + SYNC_METADATA_FILES);
+		const heads = await Promise.all(
+			batch.map(entry => (entry.ino === 0 ? null : readSessionHead(entry.file).catch(() => null))),
+		);
+		for (let i = 0; i < batch.length; i++) {
+			const header = heads[i]?.header;
+			if (header) headers.set(batch[i], header);
+		}
+	}
+
+	for (const { start, end } of runs) {
+		const run = ranked.slice(start, end);
+		const sources = await namedSources(run, headers);
+		if (!sources) continue;
+		const order = sourcesFirst(sources);
+		for (let i = 0; i < order.length; i++) ranked[start + i] = run[order[i]];
+	}
+}
+
+/** For each file of `run`, the positions of the files of `run` its header names as its source; null when none does. */
+async function namedSources(
+	run: readonly IngestRank[],
+	headers: ReadonlyMap<IngestRank, SessionHeaderView>,
+): Promise<number[][] | null> {
+	const byId = new Map<string, number[]>();
+	const byPath = new Map<string, number>();
+	const byInode = new Map<string, number>();
+	for (let i = 0; i < run.length; i++) {
+		const id = headers.get(run[i])?.id;
+		if (typeof id === "string") {
+			const owners = byId.get(id);
+			if (owners) owners.push(i);
+			else byId.set(id, [i]);
+		}
+		byPath.set(run[i].file, i);
+		if (run[i].ino !== 0) byInode.set(`${run[i].dev}:${run[i].ino}`, i);
+	}
+
+	const sources: number[][] = run.map(() => []);
+	let named = false;
+	for (let copy = 0; copy < run.length; copy++) {
+		const header = headers.get(run[copy]);
+		if (!header) continue;
+		for (const reference of [header.parentSession, header.seanceSource]) {
+			if (typeof reference !== "string" || reference.length === 0) continue;
+			let found = byId.get(reference);
+			if (!found && path.isAbsolute(reference)) {
+				const resolved = path.resolve(reference);
+				let at = byPath.get(resolved);
+				if (at === undefined) {
+					const stat = await fs.promises.stat(resolved).catch(() => null);
+					if (stat && stat.ino !== 0) at = byInode.get(`${stat.dev}:${stat.ino}`);
+				}
+				if (at !== undefined) found = [at];
+			}
+			for (const source of found ?? []) {
+				if (source === copy || sources[copy].includes(source)) continue;
+				sources[copy].push(source);
+				named = true;
+			}
+		}
+	}
+	return named ? sources : null;
+}
+
+/**
+ * A stable topological order of positions `0..sources.length - 1`: each
+ * position after every position in its `sources` entry, and otherwise in
+ * ascending order. When only a cycle is left, the lowest position left goes
+ * next.
+ */
+function sourcesFirst(sources: readonly (readonly number[])[]): number[] {
+	const count = sources.length;
+	const copies: number[][] = sources.map(() => []);
+	const waiting = sources.map(named => named.length);
+	for (let copy = 0; copy < count; copy++) for (const source of sources[copy]) copies[source].push(copy);
+	const placed = new Uint8Array(count);
+	const order: number[] = [];
+	// Positions whose sources are all placed, ascending from `next`.
+	const ready: number[] = [];
+	for (let i = 0; i < count; i++) if (waiting[i] === 0) ready.push(i);
+	let next = 0;
+	let lowest = 0;
+	while (order.length < count) {
+		let position: number;
+		if (next < ready.length) {
+			position = ready[next++];
+		} else {
+			while (placed[lowest]) lowest++;
+			position = lowest;
+		}
+		if (placed[position]) continue;
+		placed[position] = 1;
+		order.push(position);
+		for (const copy of copies[position]) {
+			if (--waiting[copy] !== 0 || placed[copy]) continue;
+			let at = ready.length;
+			while (at > next && ready[at - 1] > copy) at--;
+			ready.splice(at, 0, copy);
+		}
+	}
+	return order;
 }
 
 async function syncAllSessionsLocked(
@@ -406,20 +594,26 @@ async function syncAllSessionsLocked(
 		};
 	};
 
+	const rowsOf = (parsed: ParsedSession | null) => {
+		if (!parsed) return 0;
+		const { result } = parsed;
+		return (
+			result.stats.length +
+			result.userStats.length +
+			result.userLinks.length +
+			result.toolCalls.length +
+			result.toolResults.length +
+			spotlightRowCount(result.spotlight)
+		);
+	};
+
 	const acceptFile = (sessionFile: string, parsed: ParsedSession | null) => {
 		if (!parsed) {
 			report(sessionFile);
 			return;
 		}
 		pending.push(parsed);
-		const { result } = parsed;
-		pendingRows +=
-			result.stats.length +
-			result.userStats.length +
-			result.userLinks.length +
-			result.toolCalls.length +
-			result.toolResults.length +
-			spotlightRowCount(result.spotlight);
+		pendingRows += rowsOf(parsed);
 		if (pending.length >= SYNC_BATCH_FILES || pendingRows >= SYNC_BATCH_ROWS) flush();
 	};
 
@@ -451,11 +645,44 @@ async function syncAllSessionsLocked(
 
 	const handles: WorkerHandle[] = [];
 
+	// Workers finish in any order, but results commit in ingest order, as on the inline path: a copy
+	// parsed faster than the transcript it copied from must not commit first and own the copied
+	// entries. A lane takes no new file while the results held for an earlier, unfinished file reach
+	// a batch's bounds; the file every held result waits for is always being parsed by some lane.
+	const held = new Map<number, ParsedSession | null>();
+	let heldRows = 0;
+	let nextAccept = 0;
+	let released = Promise.withResolvers<void>();
+	const release = () => {
+		released.resolve();
+		released = Promise.withResolvers<void>();
+	};
+	const acceptInOrder = (idx: number, parsed: ParsedSession | null) => {
+		held.set(idx, parsed);
+		heldRows += rowsOf(parsed);
+		while (held.has(nextAccept)) {
+			const next = held.get(nextAccept) ?? null;
+			held.delete(nextAccept);
+			heldRows -= rowsOf(next);
+			acceptFile(files[nextAccept], next);
+			nextAccept++;
+		}
+		release();
+	};
+
 	// Each lane spawns its worker on its first real parse, so unchanged transcripts cost no worker.
 	async function drain(): Promise<void> {
 		let handle: WorkerHandle | null = null;
 		try {
 			while (!failed) {
+				while (
+					!failed &&
+					cursor < files.length &&
+					(cursor - nextAccept >= SYNC_BATCH_FILES || heldRows >= SYNC_BATCH_ROWS)
+				) {
+					await released.promise;
+				}
+				if (failed) return;
 				const idx = cursor++;
 				if (idx >= files.length) return;
 				const parsed = await prepareFile(idx, (file, fromOffset, parserState, replay) => {
@@ -465,10 +692,11 @@ async function syncAllSessionsLocked(
 					}
 					return dispatch(handle, { sessionFile: file, fromOffset, parserState, replay });
 				});
-				if (!failed) acceptFile(files[idx], parsed);
+				if (!failed) acceptInOrder(idx, parsed);
 			}
 		} catch (error) {
 			failed = true;
+			release();
 			throw error;
 		}
 	}
