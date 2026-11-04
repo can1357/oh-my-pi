@@ -360,6 +360,14 @@ export interface IsolationReclaimDecision {
  * its owner has already decided it is finished with it.
  */
 export async function decideIsolationReclaim(baseDir: string): Promise<IsolationReclaimDecision> {
+	const decision = await decideReclaimByRecords(baseDir);
+	// Why a teardown kept it, when one did: the decision says who holds it now,
+	// this says what was left undone, which is what the user has to act on.
+	const kept = await readKeptReason(baseDir);
+	return kept === undefined ? decision : { ...decision, reason: `${decision.reason}; kept because ${kept}` };
+}
+
+async function decideReclaimByRecords(baseDir: string): Promise<IsolationReclaimDecision> {
 	const markerFile = path.join(baseDir, ISOLATION_OWNER_FILE);
 	const marker = await fs.readJsonLookup(markerFile);
 	if (marker.kind === "absent") {
@@ -425,6 +433,64 @@ export async function decideIsolationReclaim(baseDir: string): Promise<Isolation
 		return { reclaimable: false, reason: "a live writer may still be saving into it" };
 	}
 	return { reclaimable: true, reason: "task-isolation leftover (no live task owns it)" };
+}
+
+/** Why a teardown kept a sandbox instead of capturing or removing it, for `omp worktree list`. */
+export const ISOLATION_KEPT_REASON_FILE = ".omp-kept-reason.json";
+
+/**
+ * Record why the sandbox at `baseDir` was kept. The directory must exist and
+ * be the one meant: the write creates missing parents, so a caller holding a
+ * path its sandbox has since moved away from would recreate an empty one.
+ */
+export async function recordKeptReason(baseDir: string, reason: string): Promise<void> {
+	await writeFileAtomically(path.join(baseDir, ISOLATION_KEPT_REASON_FILE), JSON.stringify({ reason }));
+}
+
+async function readKeptReason(baseDir: string): Promise<string | undefined> {
+	const found = await fs.readJsonLookup(path.join(baseDir, ISOLATION_KEPT_REASON_FILE));
+	if (found.kind !== "found") return undefined;
+	const decoded = found.value;
+	if (typeof decoded !== "object" || decoded === null || !("reason" in decoded)) return undefined;
+	return typeof decoded.reason === "string" ? decoded.reason : undefined;
+}
+
+/**
+ * How long a capture or a removal waits for a live process to stop using the
+ * sandbox before keeping it. A disposal that outran its grace is finishing:
+ * the deferred paths that reach here have already waited for it, so what is
+ * left is a handler's last writes, which take moments. Longer would hold the
+ * sandbox lock — and every materialisation of this id — behind a process that
+ * is not going to stop, and the tree is kept for it either way.
+ */
+const SANDBOX_USER_WAIT_MS = 5_000;
+const SANDBOX_USER_POLL_MS = 250;
+
+/**
+ * Wait, bounded, until no live process on this host uses the sandbox at
+ * `baseDir` (its cwd, an open file or a mapping inside it), and return why it
+ * must be kept when one still does — or when nobody can tell.
+ *
+ * Records cannot answer this: a dead thread's record counts as released, and a
+ * subprocess that thread started is still writing. Nothing captures or
+ * removes a sandbox while that is so — the capture would miss the writes and
+ * the removal would put them into an unlinked inode — so every capture and
+ * every removal asks here, at the moment it acts.
+ */
+export async function waitUntilSandboxUnused(
+	baseDir: string,
+	options: { waitMs?: number } = {},
+): Promise<string | undefined> {
+	const deadline = Date.now() + (options.waitMs ?? SANDBOX_USER_WAIT_MS);
+	for (;;) {
+		const found = await fs.processesUsing(baseDir);
+		if (found.kind === "unknown") return `what uses it could not be checked (${found.reason})`;
+		if (found.users.length === 0) return undefined;
+		if (Date.now() >= deadline) {
+			return found.users.map(user => `process ${user.pid} ${user.command} still uses it`).join("; ");
+		}
+		await fs.sleep(SANDBOX_USER_POLL_MS);
+	}
 }
 
 /** Suffix of the name a reclaim moves a whole sandbox to before deleting it. */

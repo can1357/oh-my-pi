@@ -232,3 +232,126 @@ async function collectDeviceBoundaries(dir: string, rootDev: bigint, mounts: str
 		await collectDeviceBoundaries(child, rootDev, mounts);
 	}
 }
+
+/** A live process on this host using a directory. */
+export interface DirectoryUser {
+	pid: number;
+	/** The process's command name, as the kernel reports it. */
+	command: string;
+}
+
+/** Who uses a directory: the answer, or why it could not be found. */
+export type DirectoryUsers = { kind: "known"; users: DirectoryUser[] } | { kind: "unknown"; reason: string };
+
+/** Processes inspected at once: enough to read a host with thousands of them in a fraction of a second. */
+const PROCESS_SCAN_CONCURRENCY = 128;
+
+/**
+ * The live processes on this host whose working directory, an open file or a
+ * memory mapping is `dir` or anything under it.
+ *
+ * A process's death does not end its children: a subprocess a dead worker's
+ * shutdown handler started keeps writing, and a capture or a removal that
+ * runs under it puts those writes into an unlinked inode. Records saying who
+ * is inside cannot see such a process; the kernel can. `dir` is matched as
+ * given, so callers pass the canonical path.
+ *
+ * This process counts like any other, except for descriptors on `dir` itself:
+ * those are the pins and locks the caller holds to decide, which write
+ * nothing. Linux reads `/proc`; a process this user may not inspect is
+ * another user's and is skipped, since it could not be this user's writer.
+ * macOS asks `lsof`. Windows answers itself: an open file or a working
+ * directory there makes the removal fail rather than unlink under the user.
+ * Anywhere else — or when the table cannot be read — the answer is unknown,
+ * and callers keep the tree.
+ */
+export async function processesUsing(dir: string): Promise<DirectoryUsers> {
+	switch (process.platform) {
+		case "linux":
+			return linuxProcessesUsing(dir);
+		case "darwin":
+			return lsofProcessesUsing(dir);
+		case "win32":
+			return { kind: "known", users: [] };
+		default:
+			return { kind: "unknown", reason: `no way to list what uses a directory on ${process.platform}` };
+	}
+}
+
+function isInside(target: string, dir: string, prefix: string): boolean {
+	// A deleted file keeps its old name with this suffix; it is still open.
+	const name = target.endsWith(" (deleted)") ? target.slice(0, -" (deleted)".length) : target;
+	return name === dir || name.startsWith(prefix);
+}
+
+async function linuxProcessesUsing(dir: string): Promise<DirectoryUsers> {
+	const prefix = dir.endsWith("/") ? dir : `${dir}/`;
+	let entries: string[];
+	try {
+		entries = (await fs.readdir("/proc")).filter(entry => /^\d+$/.test(entry));
+	} catch (error) {
+		return { kind: "unknown", reason: `/proc could not be listed (${reasonOf(error)})` };
+	}
+	const users: DirectoryUser[] = [];
+	const inspect = async (entry: string): Promise<void> => {
+		const pid = Number(entry);
+		const base = `/proc/${entry}`;
+		const own = pid === process.pid;
+		let uses = false;
+		try {
+			uses = isInside(await fs.readlink(`${base}/cwd`), dir, prefix);
+		} catch {
+			// Gone, a zombie, or another user's: none of them is writing here as us.
+			return;
+		}
+		if (!uses) {
+			const fds = await fs.readdir(`${base}/fd`).catch(() => [] as string[]);
+			const targets = await Promise.all(fds.map(fd => fs.readlink(`${base}/fd/${fd}`).catch(() => "")));
+			uses = targets.some(target => isInside(target, dir, prefix) && !(own && target === dir));
+		}
+		if (!uses) {
+			const maps = await fs.readFile(`${base}/maps`, "utf8").catch(() => "");
+			uses = maps.split("\n").some(line => {
+				const at = line.indexOf("/");
+				return at >= 0 && isInside(line.slice(at), dir, prefix);
+			});
+		}
+		if (!uses) return;
+		const command = (await fs.readFile(`${base}/comm`, "utf8").catch(() => "?")).trim();
+		users.push({ pid, command });
+	};
+	for (let i = 0; i < entries.length; i += PROCESS_SCAN_CONCURRENCY) {
+		await Promise.all(entries.slice(i, i + PROCESS_SCAN_CONCURRENCY).map(inspect));
+	}
+	return { kind: "known", users };
+}
+
+async function lsofProcessesUsing(dir: string): Promise<DirectoryUsers> {
+	const prefix = dir.endsWith("/") ? dir : `${dir}/`;
+	let out: string;
+	try {
+		// Every open file on the host, filtered here: `+D` walks the whole tree
+		// under `dir`, which for a repository copy is slower than this.
+		const lsof = Bun.spawn(["lsof", "-n", "-P", "-w", "-F", "pcn"], { stdout: "pipe", stderr: "ignore" });
+		out = await new Response(lsof.stdout).text();
+		await lsof.exited;
+	} catch (error) {
+		return { kind: "unknown", reason: `lsof could not run (${reasonOf(error)})` };
+	}
+	if (out.length === 0) return { kind: "unknown", reason: "lsof listed nothing" };
+	const users = new Map<number, DirectoryUser>();
+	let pid = 0;
+	let command = "?";
+	for (const line of out.split("\n")) {
+		const field = line.slice(1);
+		if (line.startsWith("p")) {
+			pid = Number(field);
+			command = "?";
+		} else if (line.startsWith("c")) {
+			command = field;
+		} else if (line.startsWith("n") && isInside(field, dir, prefix) && !(pid === process.pid && field === dir)) {
+			users.set(pid, { pid, command });
+		}
+	}
+	return { kind: "known", users: [...users.values()] };
+}

@@ -32,6 +32,7 @@ import {
 	ISOLATION_OWNER_FILE,
 	readRetainedMountBackend,
 	resolveSandboxIdentity,
+	waitUntilSandboxUnused,
 } from "../task/isolation-ownership";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 
@@ -499,6 +500,13 @@ async function removeEntry(target: WorktreeEntry, all: boolean): Promise<Removal
 			if (now.keep) return { removed: false, reason: now.orphanReason ?? "it could not be read" };
 			if (!all && now.orphanReason === undefined) {
 				return { removed: false, reason: now.keptReason ?? "in use when the removal came round" };
+			}
+			// Whatever `--all` says, nothing is removed under a live process:
+			// its writes would land in an unlinked inode. Asked of the kernel,
+			// not the records, and at the act; the command does not wait.
+			if (now.kind === "task-isolation") {
+				const inUse = await waitUntilSandboxUnused(dir, { waitMs: 0 });
+				if (inUse !== undefined) return { removed: false, reason: inUse };
 			}
 			// The stop and the rename act on a pathname, so each is preceded by a
 			// check that the name still holds the pinned directory.

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,6 +15,7 @@ import {
 	getRepoRoot,
 	ISOLATION_BASELINE_MAX_CONTENT_BYTES,
 	IsolationBaselineTooLargeError,
+	type IsolationHandle,
 	mergeTaskBranches,
 	parseIsolationBackend,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
@@ -1716,6 +1717,125 @@ describe("detachGitDir", () => {
 			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
 			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 		}
+	});
+
+	describe("a live process using the workspace", () => {
+		/**
+		 * A real process holding a file open inside `dir` until `release` is
+		 * called. Records cannot see it — it took no lease — so only the kernel
+		 * says it is there.
+		 */
+		async function holdOpenFile(dir: string): Promise<{ pid: number; exited(): boolean; release(): Promise<void> }> {
+			const gate = path.join(path.dirname(dir), `.release-${crypto.randomUUID()}`);
+			const code = [
+				'const fs = require("node:fs");',
+				'fs.openSync(process.argv[1], "a");',
+				'process.stdout.write("ready\\n");',
+				"const timer = setInterval(() => { if (fs.existsSync(process.argv[2])) { clearInterval(timer); process.exit(0); } }, 20);",
+			].join(" ");
+			const child = Bun.spawn([process.execPath, "-e", code, path.join(dir, "held.txt"), gate], {
+				stdout: "pipe",
+				stderr: "ignore",
+			});
+			const reader = child.stdout.getReader();
+			await reader.read();
+			reader.releaseLock();
+			let released = false;
+			let gone = false;
+			void child.exited.then(() => {
+				gone = true;
+			});
+			const release = async (): Promise<void> => {
+				if (released) return;
+				released = true;
+				await Bun.write(gate, "go");
+				await child.exited;
+			};
+			cleanupHolders.push(async () => {
+				child.kill("SIGKILL");
+				await child.exited;
+			});
+			return { pid: child.pid, exited: () => gone, release };
+		}
+		const cleanupHolders: Array<() => Promise<void>> = [];
+		afterEach(async () => {
+			for (const cleanup of cleanupHolders.splice(0)) await cleanup();
+		});
+
+		async function materialise(id: string): Promise<IsolationHandle> {
+			const { wt } = await makeLinkedWorktree();
+			vi.spyOn(natives, "isoResolve").mockResolvedValue({
+				kind: natives.IsoBackendKind.Rcopy,
+				candidates: [natives.IsoBackendKind.Rcopy],
+				fellBack: false,
+				reason: undefined,
+			});
+			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-live-user-"));
+			tempDirs.push(worktreeBase);
+			const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+			delete process.env.OMP_WORKTREE_DIR;
+			setWorktreesDir(worktreeBase);
+			onTestFinished(() => {
+				setWorktreesDir(undefined);
+				if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+				else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			});
+			return await ensureIsolation(wt, id);
+		}
+
+		it("neither captures nor removes while the process runs, keeps the workspace and says why", async () => {
+			const handle = await materialise("live-holder");
+			const holder = await holdOpenFile(handle.mergedDir);
+			let captures = 0;
+
+			const teardown = await cleanupIsolation(handle, { capture: async () => void (captures += 1) });
+
+			expect(teardown?.kept).toBe(`process ${holder.pid} bun still uses it`);
+			expect(captures).toBe(0);
+			expect(await Bun.file(path.join(handle.mergedDir, "held.txt")).exists()).toBe(true);
+			const baseDir = path.dirname(handle.mergedDir);
+			expect((await ownership.decideIsolationReclaim(baseDir)).reason).toContain(
+				`kept because process ${holder.pid} bun still uses it`,
+			);
+		}, 30_000);
+
+		it("waits for a process that stops, then captures and removes", async () => {
+			const handle = await materialise("finishing-holder");
+			const holder = await holdOpenFile(handle.mergedDir);
+			let capturedWhileHeld: boolean | undefined;
+
+			const teardown = cleanupIsolation(handle, {
+				capture: async () => {
+					capturedWhileHeld = !holder.exited();
+				},
+			});
+			// A real second, because the holder is another process: the teardown
+			// must still be waiting for it when it stops, well inside its bound.
+			await scheduler.wait(1_000);
+			await holder.release();
+
+			const outcome = await teardown;
+			expect(capturedWhileHeld).toBe(false);
+			expect(outcome).toEqual({});
+			// The sandbox was retired and removed: its name is gone from the worktree directory.
+			expect(await fs.readdir(path.dirname(path.dirname(handle.mergedDir)))).not.toContain(
+				path.basename(path.dirname(handle.mergedDir)),
+			);
+		}, 30_000);
+
+		it("does not remove a workspace a process started using during the capture", async () => {
+			const handle = await materialise("arriving-holder");
+			let holder: { pid: number } | undefined;
+
+			const teardown = await cleanupIsolation(handle, {
+				capture: async () => {
+					holder = await holdOpenFile(handle.mergedDir);
+				},
+			});
+
+			expect(teardown?.kept).toBe(`process ${holder?.pid} bun still uses it`);
+			expect(await Bun.file(path.join(handle.mergedDir, "held.txt")).exists()).toBe(true);
+		}, 30_000);
 	});
 
 	it("gives the sandbox lock back when an in-place teardown cannot remove the directory", async () => {

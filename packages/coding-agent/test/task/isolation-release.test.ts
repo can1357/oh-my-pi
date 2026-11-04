@@ -59,7 +59,7 @@ async function commitsAcrossRelease(id: string, runEndPatch: string, releasePatc
 		fallbackReason: null,
 	});
 	vi.spyOn(worktreeModule, "captureIsolationBaseline").mockResolvedValue(baseline);
-	vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue();
+	vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue({});
 	vi.spyOn(worktreeModule, "captureDeltaPatch").mockResolvedValue({ rootPatch: releasePatch, nestedPatches: [] });
 	const commitSpy = vi.spyOn(worktreeModule, "commitToBranch").mockImplementation(async () => {
 		events.push("commit");

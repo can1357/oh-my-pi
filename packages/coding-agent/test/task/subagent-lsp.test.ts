@@ -165,7 +165,7 @@ function mockIsolation(): void {
 	vi.spyOn(worktreeModule, "captureBaseline").mockResolvedValue(baseline);
 	vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue(isolationHandle);
 	vi.spyOn(worktreeModule, "captureDeltaPatch").mockResolvedValue({ rootPatch: "", nestedPatches: [] });
-	vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue();
+	vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue({});
 }
 
 describe("subagent LSP availability", () => {

@@ -928,4 +928,118 @@ describe("subagent runs routed into pooled workers", () => {
 		},
 		TEST_TIMEOUT_MS,
 	);
+
+	it(
+		"settles a nested isolated child's release on main when its worker crashes: captured, delivered, removed",
+		async () => {
+			const failures: unknown[] = [];
+			cleanups.push(
+				logger.registerLogSink(event => {
+					if (event.message.includes("owned resource cleanup failed")) failures.push(event.context);
+				}),
+			);
+			const repo = await makeRepo("nested-crash");
+			const nestedSettings = Settings.isolated({ ...SETTINGS, "task.isolation.mode": "rcopy" });
+			const parent = await runSubprocess(
+				runOptions("ParentInWorker", "spawn_nested", {
+					cwd: repo,
+					settings: nestedSettings,
+					agent: { ...AGENT, tools: ["read", "task"], spawns: "*" },
+				}),
+			);
+			expect(parent.exitCode).toBe(0);
+			const ids = AgentRegistry.global()
+				.list()
+				.map(ref => ref.id);
+			expect(ids.length).toBe(2);
+			const lifecycle = AgentLifecycleManager.global();
+			for (const id of ids) await lifecycle.park(id);
+			// Work the nested child left after its result was handed off: only a
+			// release captures it, and the worker that owns that release is about to die.
+			const [nested] = await workspaces();
+			if (!nested) throw new Error("the nested child has no workspace");
+			await Bun.write(path.join(worktreesDir, nested, "m", "settled.txt"), "settled by main\n");
+			const [worker] = pool.workers();
+			if (!worker) throw new Error("no pooled worker");
+			worker.terminate("worker crashed with a nested release owed");
+
+			for (const id of ids) await lifecycle.release(id);
+			expect(failures).toEqual([]);
+			expect(await workspaces()).toEqual([]);
+			const patches: string[] = [];
+			for await (const file of new Bun.Glob("**/*.patch").scan({ cwd: root, absolute: true })) {
+				if ((await Bun.file(file).text()).includes("settled.txt")) patches.push(file);
+			}
+			expect(patches.length).toBe(1);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"keeps an isolated workspace, and says so, while a subprocess its dead worker started still writes there",
+		async () => {
+			const writerFile = path.join(root, "writer.json");
+			const heartbeat = path.join(root, "heartbeat.txt");
+			// Appends to a file inside the workspace for as long as it lives, and
+			// counts each write outside it, so the test can tell it is still going.
+			const writer = [
+				'const fs = require("node:fs");',
+				'const fd = fs.openSync(process.argv[1], "a");',
+				"let n = 0;",
+				"setInterval(() => { fs.writeSync(fd, `late-${++n}\\n`); fs.fsyncSync(fd); fs.writeFileSync(process.argv[2], String(n)); }, 20);",
+			].join(" ");
+			const repo = await makeRepo("live-writer", {
+				source: [
+					"export default function (api) {",
+					'\tapi.on("session_shutdown", async (_event, ctx) => {',
+					`\t\tconst child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(writer)}, ctx.cwd + "/late.txt", ${JSON.stringify(heartbeat)}], { cwd: ctx.cwd, stdout: "ignore", stderr: "ignore" });`,
+					`\t\tawait Bun.write(${JSON.stringify(writerFile)}, JSON.stringify({ pid: child.pid }));`,
+					"\t\tawait child.exited;",
+					"\t});",
+					"}",
+					"",
+				].join("\n"),
+				open: async () => {},
+			});
+			let writerPid: number | undefined;
+			cleanups.push(async () => {
+				if (writerPid === undefined) return;
+				try {
+					process.kill(writerPid, "SIGKILL");
+				} catch {
+					return;
+				}
+				// Its parent thread is dead, so nothing reaps it: gone or a zombie both mean stopped.
+				const stat = `/proc/${writerPid}/stat`;
+				await waitUntil(async () => {
+					const text = await Bun.file(stat)
+						.text()
+						.catch(() => "");
+					return text === "" || text.includes(") Z ");
+				});
+			});
+			const killed = Promise.withResolvers<void>();
+			const running = runIsolated(repo, "LiveWriter", "ping", { keepAlive: false, cleanupGraceMs: 20 }, () => {
+				void (async () => {
+					await waitUntil(() => Bun.file(heartbeat).exists());
+					writerPid = (await Bun.file(writerFile).json()).pid;
+					for (const worker of pool.workers()) worker.terminate("worker crashed while its shutdown writer runs");
+					killed.resolve();
+				})();
+			});
+			await killed.promise;
+			const result = await running;
+			expect(result.output).toBe("pong");
+			expect(result.error ?? "").toContain(`process ${writerPid} bun still uses it`);
+			// The workspace is still on disk, with the file the writer is still
+			// appending to — not an unlinked inode.
+			const kept = await workspaces();
+			expect(kept.length).toBe(1);
+			const late = path.join(worktreesDir, kept[0] ?? "", "m", "late.txt");
+			const before = (await Bun.file(late).text()).length;
+			await waitUntil(async () => (await Bun.file(late).text()).length > before);
+			expect((await Bun.file(late).text()).length).toBeGreaterThan(before);
+		},
+		TEST_TIMEOUT_MS,
+	);
 });

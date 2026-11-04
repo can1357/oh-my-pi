@@ -25,6 +25,7 @@
 import * as fs from "node:fs/promises";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
+import type { IsolationSettlement } from "../task/isolation-runner";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { asReleaseHold } from "../utils/release-hold";
 import {
@@ -77,6 +78,13 @@ export interface AdoptOptions {
 	revive?: AgentReviver;
 	/** Releases resources that must survive parking but end with the agent lifecycle. */
 	onRelease?: () => Promise<void>;
+	/**
+	 * The isolated workspace `onRelease` captures and removes, as plain data.
+	 * The manager does not read it: a thread bridge that takes an adoption
+	 * whose `onRelease` lives on another thread settles it from this when
+	 * that thread is gone.
+	 */
+	isolation?: IsolationSettlement;
 	/**
 	 * Called once when this adoption stops holding `revive` — released, replaced by
 	 * a re-adopt, removed from the registry, or its reviver forgotten — so whoever

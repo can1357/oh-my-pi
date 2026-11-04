@@ -25,10 +25,12 @@ import { IrcBus } from "../../irc/bus";
 import { type AdoptOptions, type AgentReviver, AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { type AgentRefExpectation, AgentRegistry, type RegistryListener } from "../../registry/agent-registry";
 import { PromptDroppedError, SessionBusyError } from "../../session/agent-session";
+import { settleIsolationRelease } from "../../task/isolation-runner";
+import { trackLateCleanup } from "../../utils/late-cleanup";
 import type { WorkerThreadLink } from "../protocol";
 import { installPeerBridge } from "../peer-agent-session";
 import { RemoteAgentSession, SessionHostClient } from "../remote-agent-session";
-import { isRpcProxy, registerRpcError, type RpcServe } from "../rpc";
+import { isRpcProxy, RpcClosedError, registerRpcError, type RpcServe } from "../rpc";
 import type { ThreadService, WorkerPeer } from "../services";
 import { holdRemoteSession, onLocalSessionRegistered, releaseRemoteSession } from "../session-directory";
 import {
@@ -75,6 +77,13 @@ interface OpenSession {
 	readonly release: () => void;
 }
 
+/** A worker's release hook main's lifecycle took over, until one side has settled it. */
+interface WorkerDebt {
+	readonly id: string;
+	/** Settle on main, without the worker; runs once, and later calls join it. */
+	settle(): Promise<void>;
+}
+
 /**
  * Main-side endpoint of one worker's sessions: mirrors of the sessions homed
  * there, and the peer surface for sessions homed elsewhere. Also the
@@ -85,6 +94,8 @@ export class MainSessionBridge {
 	readonly #open = new Map<string, OpenSession>();
 	readonly #subscriptions = new Set<() => void>();
 	readonly #revivers = new Set<{ lifecycle: AgentLifecycleManager; id: string; revive: AgentReviver }>();
+	/** Release hooks this worker handed main's lifecycle that neither side has settled yet. */
+	readonly #debts = new Set<WorkerDebt>();
 	/** Aborts IRC waits the worker parked on main. */
 	readonly exited = new AbortController();
 
@@ -164,20 +175,52 @@ export class MainSessionBridge {
 	 * worker until main runs it or refuses the adoption: a worker that went idle under it
 	 * would turn the agent's final release into a closed-link error, and the workspace,
 	 * lease and caller hold behind the hook would never be released.
+	 *
+	 * A worker can still die — crash, termination — with the hook unrun. Main then settles
+	 * the debt itself, once, from the plain data the adoption carried: the isolated
+	 * workspace is captured, delivered and removed as the hook would have done (see
+	 * `settleIsolationRelease`). Everything else such a hook releases — a kernel, a lease on
+	 * the parent's sandbox — lived in, or is recorded against, the thread that died.
 	 */
 	adopt(lifecycle: AgentLifecycleManager, id: string, opts: AdoptOptions, expected?: AgentRefExpectation): boolean {
 		const onRelease = opts.onRelease;
 		if (!onRelease || !isRpcProxy(onRelease)) return lifecycle.adopt(id, this.adopted(lifecycle, id, opts), expected);
 		const letGo = this.#peer.retain?.() ?? (() => {});
+		const debts = this.#debts;
+		const exited = this.exited.signal;
+		const isolation = opts.isolation;
+		let settlement: Promise<void> | undefined;
+		const debt: WorkerDebt = {
+			id,
+			settle: () =>
+				(settlement ??= (async () => {
+					debts.delete(debt);
+					letGo();
+					if (isolation) await settleIsolationRelease(isolation);
+				})()),
+		};
 		const held = async (): Promise<void> => {
 			try {
-				await onRelease();
+				if (exited.aborted) return await debt.settle();
+				try {
+					await onRelease();
+					debts.delete(debt);
+				} catch (error) {
+					// The hook did not run because its thread is gone, not because
+					// it failed there: the debt is main's now.
+					if (!exited.aborted && !(error instanceof RpcClosedError)) throw error;
+					await debt.settle();
+				}
 			} finally {
 				letGo();
 			}
 		};
+		debts.add(debt);
 		const taken = lifecycle.adopt(id, this.adopted(lifecycle, id, { ...opts, onRelease: held }), expected);
-		if (!taken) letGo();
+		if (!taken) {
+			debts.delete(debt);
+			letGo();
+		}
 		return taken;
 	}
 
@@ -225,6 +268,18 @@ export class MainSessionBridge {
 		const revivers = [...this.#revivers];
 		this.#revivers.clear();
 		for (const { lifecycle, id, revive } of revivers) lifecycle.forgetReviver(id, revive);
+		// Settled now rather than at the agent's final release: an isolated child
+		// is never revived from its transcript, so nothing will use its workspace
+		// again, and a process that exits without releasing it must not take the
+		// only copy of its work with it. A later release joins this settlement.
+		for (const debt of [...this.#debts]) {
+			trackLateCleanup(
+				debt.settle().catch(error => {
+					logger.warn("Settling a dead worker's release failed", { id: debt.id, error: String(error) });
+				}),
+				{ id: debt.id, resource: "worker-release" },
+			);
+		}
 		const registry = AgentRegistry.global();
 		for (const ref of registry.list()) {
 			const session = ref.session;

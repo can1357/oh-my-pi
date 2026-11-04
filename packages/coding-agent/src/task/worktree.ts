@@ -31,7 +31,9 @@ import {
 	markIsolationRetiring,
 	type IsolationClaim,
 	readIsolationClaim,
+	recordKeptReason,
 	resolveSandboxIdentity,
+	waitUntilSandboxUnused,
 	writeIsolationOwner,
 	writeRetainedBackend,
 } from "./isolation-ownership";
@@ -1133,6 +1135,16 @@ async function settleAbandonedStop(
 				});
 				return;
 			}
+			// A process still in here loses its writes to an unlinked inode.
+			const inUse = await waitUntilSandboxUnused(teardownBase);
+			if (inUse !== undefined) {
+				logger.warn("abandoned isolation stop settled; a live process still uses the sandbox, so it stays", {
+					mergedDir: teardownBase,
+					reason: inUse,
+				});
+				await recordKeptReason(teardownBase, inUse).catch(() => undefined);
+				return;
+			}
 			await fs.rm(teardownBase, { recursive: true, force: true });
 		};
 		if (heldLock) await remove();
@@ -1196,12 +1208,25 @@ async function settleAbandonedStop(
  *
  * A handle with no generation predates claims (a fixture's hand-built handle)
  * and keeps the old unconditional behaviour.
+ *
+ * Nothing is captured or removed while a live process on this host uses the
+ * workspace ({@link waitUntilSandboxUnused}), asked before the capture and
+ * again before the retirement. A workspace kept for that, or because its
+ * capture failed, records why where `omp worktree list` shows it and says so
+ * in the result, so the caller can tell its user where the work is.
  */
+
+/** What a teardown left undone. */
+export interface IsolationTeardown {
+	/** Why this run's workspace was kept: a live user, or a capture that failed. */
+	kept?: string;
+}
 
 export async function cleanupIsolation(
 	handle: IsolationHandle,
 	options: { capture?: () => Promise<void> } = {},
-): Promise<void> {
+): Promise<IsolationTeardown> {
+	let kept: string | undefined;
 	// baseDir is the parent of the merged directory, resolved to the directory
 	// itself: a lock on an alias of this path excludes nobody.
 	const baseDir = await resolveSandboxIdentity(path.dirname(handle.mergedDir));
@@ -1254,20 +1279,39 @@ export async function cleanupIsolation(
 			// deciding still counts. The owner keeps the teardown; the last user to
 			// leave runs it. See `isolation-lease`.
 			if (
-				await deferTeardownWhileLeased(handle.mergedDir, async () => await cleanupIsolation(handle, options), {
-					generation: handle.generation,
-				})
+				await deferTeardownWhileLeased(
+					handle.mergedDir,
+					async () => {
+						await cleanupIsolation(handle, options);
+					},
+					{ generation: handle.generation },
+				)
 			) {
 				return;
 			}
+			// Kept, and said so where `omp worktree list` looks: the directory is
+			// still the pinned one, so the record lands in it and nowhere else.
+			const keep = async (reason: string): Promise<void> => {
+				kept = reason;
+				logger.warn("isolation workspace kept", { mergedDir: handle.mergedDir, reason });
+				if (pin && (await fs.checkPinnedDirectory(baseDir, pin)).same) {
+					await recordKeptReason(baseDir, reason).catch(() => undefined);
+				}
+			};
 			// A user had to give up its lease while its own shutdown might still be
 			// writing here. Removing the directory under that write loses the work
 			// just as surely as deleting it with the lease held would have, so the
 			// workspace stays and reclamation takes it once that process is gone.
 			if (await hasUnfinishedWriter(baseDir)) {
-				logger.warn("isolation workspace kept: a user may still be writing into it", {
-					mergedDir: handle.mergedDir,
-				});
+				await keep("a user may still be writing into it");
+				return;
+			}
+			// A process the records cannot see — a subprocess a dead worker's
+			// shutdown handler started — may still be writing in here. The
+			// capture would miss its writes; the removal would unlink them.
+			const inUse = await waitUntilSandboxUnused(baseDir);
+			if (inUse !== undefined) {
+				await keep(inUse);
 				return;
 			}
 			// The backend this workspace needs stopped goes on disk before anything
@@ -1303,14 +1347,8 @@ export async function cleanupIsolation(
 				// very call owns.
 				const capturing = options
 					.capture()
-					.then(() => true)
-					.catch(error => {
-						logger.warn("isolation capture failed; keeping the workspace", {
-							mergedDir: handle.mergedDir,
-							error: error instanceof Error ? error.message : String(error),
-						});
-						return false;
-					});
+					.then(() => undefined)
+					.catch((error: unknown) => (error instanceof Error ? error.message : String(error)));
 				const deadline = new AbortController();
 				const overran = await Promise.race([
 					capturing.then(() => false),
@@ -1333,7 +1371,11 @@ export async function cleanupIsolation(
 					await capturing;
 					return;
 				}
-				if (!(await capturing)) return;
+				const captureError = await capturing;
+				if (captureError !== undefined) {
+					await keep(`its changes could not be captured: ${captureError}`);
+					return;
+				}
 			}
 			// At the act, on the object about to go: the claim check above and
 			// everything after it ran against a pathname, and the capture may have
@@ -1357,6 +1399,13 @@ export async function cleanupIsolation(
 					});
 					return;
 				}
+			}
+			// Again at the act: the capture may have run for minutes, and a
+			// user that arrived meanwhile loses its writes to the removal.
+			const arrived = await waitUntilSandboxUnused(baseDir);
+			if (arrived !== undefined) {
+				await keep(arrived);
+				return;
 			}
 			const candidate = `${baseDir}.retiring-${handle.generation ?? Snowflake.next()}`;
 			try {
@@ -1546,6 +1595,7 @@ export async function cleanupIsolation(
 			}
 		}
 	});
+	return kept === undefined ? {} : { kept };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -111,6 +111,7 @@ import { resetYieldTurnState } from "../tools/yield";
 import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { asReleaseHold, createReleaseHold, type ReleaseHold } from "../utils/release-hold";
+import type { IsolationSettlement } from "./isolation-runner";
 import { isMainThread } from "../thread/identity";
 import { runFollowUpTurnOnHome, runSubprocessPlaced } from "../thread/executor-routing";
 import { existingSubagentWorkerPool, subagentWorkerPool } from "../thread/subagent-worker";
@@ -624,6 +625,12 @@ export interface ExecutorOptions {
 	onCleanupDeferred?: (completion: Promise<void>) => void;
 	/** Releases resources retained for a kept-alive agent when its lifecycle ends. */
 	onRelease?: () => Promise<void>;
+	/**
+	 * The isolated workspace `onRelease` tears down, as plain data. Handed to the
+	 * agent lifecycle with the adoption, so whoever ends up owning the release
+	 * can settle it on its own thread if the thread that built the workspace dies.
+	 */
+	isolationSettlement?: IsolationSettlement;
 	/**
 	 * Takes over releasing the run's IRC wake hold (see `AgentSession.holdIrcWakes`),
 	 * for a caller that must finish with the agent's workspace before a held
@@ -3592,6 +3599,8 @@ export async function finalizeSubagentLifecycle(args: {
 	cleanupDeadlineAt?: number;
 	onCleanupDeferred?: (completion: Promise<void>) => void;
 	onRelease?: () => Promise<void>;
+	/** See {@link ExecutorOptions.isolationSettlement}. */
+	isolationSettlement?: IsolationSettlement;
 }): Promise<{ pendingRelease?: Promise<void> }> {
 	const registry = AgentRegistry.global();
 	const ref = registry.get(args.id);
@@ -3698,6 +3707,7 @@ export async function finalizeSubagentLifecycle(args: {
 			idleTtlMs: args.agentIdleTtlMs,
 			revive: args.reviveSession ?? undefined,
 			onRelease: args.onRelease,
+			isolation: args.isolationSettlement,
 		},
 		ref,
 	);
@@ -5445,6 +5455,7 @@ async function runDispatchedSubprocess(
 					reviveSession,
 					cleanupDeadlineAt,
 					onRelease: options.onRelease,
+					isolationSettlement: options.isolationSettlement,
 					onCleanupDeferred: completion => {
 						deferredSessionShutdown = completion;
 						deferCleanup(completion);
