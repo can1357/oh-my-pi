@@ -6,7 +6,7 @@ import {
 	formatProviderErrorText,
 	type RawHttpRequestDump,
 } from "../utils/http-inspector";
-import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
+import { getHeadersFromError, getRetryAfterMsFromHeaders, type HeadersLike } from "../utils/retry-after";
 import { classify, classifyMessage, status } from "./flags";
 import { formatDisplayMessage } from "./format";
 
@@ -26,6 +26,11 @@ export interface FinalizeOptions {
 	rawRequestDump?: RawHttpRequestDump;
 	/** Captured non-2xx response body, used for status fallback and message detail. */
 	capturedErrorResponse?: CapturedHttpErrorResponse;
+	/**
+	 * Headers of the accepted (2xx) streaming response a failure arrived inside.
+	 * Their retry delay applies when the error and the captured response carry none.
+	 */
+	responseHeaders?: HeadersLike;
 }
 
 /** The full bundle a provider assigns onto its `AssistantMessage` error fields with {@link applyFinalizeResult}. */
@@ -92,7 +97,9 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 	const classificationError =
 		errorStatus === undefined && currentStatus !== undefined ? { status: currentStatus, cause: error } : error;
 
-	const retryAfterMs = getRetryAfterMsFromHeaders(opts.capturedErrorResponse?.headers ?? getHeadersFromError(error));
+	const retryAfterMs = getRetryAfterMsFromHeaders(
+		opts.capturedErrorResponse?.headers ?? getHeadersFromError(error) ?? opts.responseHeaders,
+	);
 	const id = classifyMessage({
 		api: opts.api,
 		provider: opts.provider,

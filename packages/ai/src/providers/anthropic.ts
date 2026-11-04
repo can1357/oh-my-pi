@@ -1881,6 +1881,8 @@ const streamAnthropicOnce = (
 			timestamp: Date.now(),
 		};
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		// The accepted stream response's headers, for an error that arrives in-stream.
+		let acceptedResponseHeaders: Headers | undefined;
 		let transportPayload: unknown;
 		let activeAbortTracker = createAbortSourceTracker(options?.signal);
 
@@ -2701,6 +2703,7 @@ const streamAnthropicOnce = (
 					}
 					let anthropicStream: AsyncIterable<AnthropicStreamEvent>;
 					let response: Response;
+					acceptedResponseHeaders = undefined;
 					let requestId: string | null;
 					let recordsRawSseEvents: boolean;
 					try {
@@ -2719,6 +2722,7 @@ const streamAnthropicOnce = (
 						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 					}
 					await notifyProviderResponse(options, response, sourceModel, requestId);
+					acceptedResponseHeaders = response.headers;
 					if (slowMode) {
 						const slowSignal = parseAnthropicSlowModeHeaders(response.headers);
 						if (slowSignal) slowMode.observe(slowSignal, slowLane);
@@ -3804,6 +3808,7 @@ const streamAnthropicOnce = (
 				provider: sourceModel.provider,
 				abortTracker: activeAbortTracker,
 				rawRequestDump,
+				responseHeaders: acceptedResponseHeaders,
 			});
 			// The replay remediation is omp's text: shown, never classified.
 			const shown = result.displayMessage ?? result.message;

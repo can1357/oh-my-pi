@@ -307,6 +307,22 @@ describe("Anthropic credit-balance rejection", () => {
 		expect(final.content).toContainEqual({ type: "text", text: "Recovered" });
 	});
 
+	it("waits for the accepted stream's retry header when the rejection arrives in-stream", async () => {
+		const harness = await runTurn(n => {
+			if (n > 1) return recoveredResponse();
+			const stream = creditBalanceStreamResponse();
+			const headers = new Headers(stream.headers);
+			headers.set("retry-after-ms", "40000");
+			return new Response(stream.body, { status: 200, headers });
+		});
+
+		expect(harness.requests).toBe(2);
+		expect(harness.retryStarts).toHaveLength(1);
+		expect(harness.retryStarts[0]!.delayMs).toBeGreaterThanOrEqual(40_000);
+		expect(harness.retryStarts[0]!.delayMs).toBeLessThanOrEqual(40_000 + 7_500);
+		expect(lastAssistant(harness.session).stopReason).toBe("stop");
+	});
+
 	it("jitters the wait above the 30-second floor so sessions do not retry in lockstep", async () => {
 		const harness = await createHarness(n =>
 			n === 1 ? jsonResponse(400, CREDIT_BALANCE_BODY) : recoveredResponse(),
