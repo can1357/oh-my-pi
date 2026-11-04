@@ -539,7 +539,7 @@ describe("interactive mode with a backend", () => {
 	});
 
 	async function startMode(h: Harness): Promise<InteractiveMode> {
-		const started = new InteractiveMode(h.session, "test", undefined, undefined, undefined, undefined, h.eventBus);
+		const started = new InteractiveMode(h.session, "test", undefined, undefined, undefined, h.eventBus);
 		mode = started;
 		vi.spyOn(started.statusLine, "watchBranch").mockImplementation(() => {});
 		const pending: TodoPhase[] = [{ name: "Plan", tasks: [{ content: "Fix review comments", status: "pending" }] }];

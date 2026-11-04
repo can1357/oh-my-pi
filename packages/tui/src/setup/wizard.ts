@@ -5,6 +5,7 @@ import { glyphSetupScene } from "./scenes/glyph";
 import { modelSetupScene } from "./scenes/model";
 import { providersSetupScene } from "./scenes/sign-in";
 import { themeSetupScene } from "./scenes/theme";
+import { updatesSetupScene } from "./scenes/updates";
 import type { SetupScene } from "./scenes/types";
 import { SetupWizardComponent, setupSceneApplies } from "./wizard-overlay";
 
@@ -20,6 +21,7 @@ export const ALL_SCENES = [
 	glyphSetupScene,
 	composerSetupScene,
 	themeSetupScene,
+	updatesSetupScene,
 ] as const satisfies readonly SetupScene[];
 
 /** Environment and invocation gates for onboarding scene selection. */
@@ -37,20 +39,29 @@ function setupSkipEnvEnabled(value: string | undefined): boolean {
 	return normalized !== "" && normalized !== "0" && normalized !== "false" && normalized !== "no";
 }
 
-/** Select scenes newer than the stored version, honoring hard environment gates. */
+/**
+ * Whether this launch may show onboarding at all: a TTY and, unless forced,
+ * not resuming, not skipped by `OMP_SKIP_SETUP` or `startup.setupWizard`.
+ */
+export function setupWizardAllowed(options: SetupSceneSelectionOptions = {}): boolean {
+	const isTTY = options.isTTY ?? (process.stdin.isTTY && process.stdout.isTTY);
+	if (!isTTY) return false;
+	if (options.force) return true;
+	return (
+		!options.resuming &&
+		!setupSkipEnvEnabled(options.skipEnv ?? Bun.env.OMP_SKIP_SETUP) &&
+		options.setupWizardEnabled !== false
+	);
+}
+
+/** Select scenes newer than the stored version, honoring hard environment gates ({@link setupWizardAllowed}). */
 export async function selectSetupScenes(
 	storedVersion: number,
 	scenes: readonly SetupScene[],
 	ctx?: SetupHost,
 	options: SetupSceneSelectionOptions = {},
 ): Promise<SetupScene[]> {
-	const isTTY = options.isTTY ?? (process.stdin.isTTY && process.stdout.isTTY);
-	if (!isTTY) return [];
-	if (!options.force) {
-		if (options.resuming) return [];
-		if (setupSkipEnvEnabled(options.skipEnv ?? Bun.env.OMP_SKIP_SETUP)) return [];
-		if (options.setupWizardEnabled === false) return [];
-	}
+	if (!setupWizardAllowed(options)) return [];
 
 	const selected: SetupScene[] = [];
 	for (const scene of scenes) {

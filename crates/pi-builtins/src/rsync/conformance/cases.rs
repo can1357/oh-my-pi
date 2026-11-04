@@ -58,7 +58,9 @@ pub(super) const LOCAL: &[Case] = &[
 	c("delete_after", 0, "stale", &["-ai", "--delete-after", "src/", "dst/"]),
 	c("delete_v", 0, "stale", &["-av", "--delete", "src/", "dst/"]),
 	c("delete_excluded", 0, "stale", &["-ai", "--delete-excluded", "--exclude=*.o", "src/", "dst/"]),
-	c("delete_keeps_excluded", 0, "stale", &["-ai", "--delete", "--exclude=*.o", "src/", "dst/"]),
+	// --delete uses delete-during: MSG_DELETED can overtake buffered itemization,
+	// just as in delete_during above; exclusion rules do not constrain that order.
+	u("delete_keeps_excluded", 0, "stale", &["-ai", "--delete", "--exclude=*.o", "src/", "dst/"]),
 	c("max_delete", 25, "stale", &["-ai", "--delete", "--max-delete=1", "src/", "dst/"]),
 	c("conflict", 23, "conflict", &["-ai", "src/", "dst/"]),
 	c("conflict_force", 0, "conflict", &["-ai", "--force", "src/", "dst/"]),

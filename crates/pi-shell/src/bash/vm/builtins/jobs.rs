@@ -18,6 +18,7 @@ use crate::bash::{
 	vm::{
 		exec::push_script,
 		expand::Stop,
+		jobctl,
 		proc::{Job, JobLookup, JobState, LastBg, ScriptKind},
 		quote,
 	},
@@ -432,6 +433,7 @@ fn foreground(ctx: &mut Ctx<'_, '_>, word: Option<&BString>) -> R {
 	line.extend_from_slice(&wd_note(ctx, &wd, b"\t")?);
 	line.push(b'\n');
 	ctx.out(&line);
+	jobctl::give_terminal(ctx.k, ctx.cx, vpid);
 	resume(ctx, number);
 	if let Some(job) = ctx.vp.jobs.get_mut(number) {
 		job.notified = true;
