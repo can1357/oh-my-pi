@@ -242,6 +242,12 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
 	/** Checkpoint and close the database; the cache must not be used afterwards. */
 	close(): void {
 		checkpointWal(this.#db);
+		// An unfinalized statement keeps the connection open after close(): the handle then
+		// closes at exit, where SQLite checkpoints it under the WAL write lock.
+		this.#answer.finalize();
+		this.#insertState.finalize();
+		this.#upsertOracle.finalize();
+		this.#insertUsage.finalize();
 		this.#db.close();
 	}
 }

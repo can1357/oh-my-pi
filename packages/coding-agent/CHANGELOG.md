@@ -80,6 +80,11 @@
 
 - Browser: a headless Chrome launched in-process by an SDK embedding or a `bun test` run now exits when that process is killed, instead of running on with its temporary profile on Linux and macOS ([#17908](https://github.com/can1357/oh-my-pi/pull/17908) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- Fixed `omp -p` and other starts exiting with `database is locked` while other omp processes write `agent.db`: a start that finds the agent and memory schema current no longer writes to it ([#17968](https://github.com/can1357/oh-my-pi/pull/17968))
+- Fixed the judgment cache staying open after `close()` until the process exited, where its final checkpoint took the shared store's write lock ([#17968](https://github.com/can1357/oh-my-pi/pull/17968))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

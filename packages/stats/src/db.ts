@@ -10,7 +10,13 @@ import {
 	hasRecurringTariff,
 } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
-import { getConfigRootDir, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
+import {
+	getConfigRootDir,
+	getStatsDbPath,
+	initializeSqliteSchema,
+	openSqliteDatabase,
+	VERSION,
+} from "@oh-my-pi/pi-utils";
 import { ChunkedInsert } from "./chunked-insert";
 import { classifyAgentType, type ParseSessionResult, type SessionParserState } from "./parser";
 import { ensureRollupSchema, getDailyActivityFromRollup } from "./rollup";
@@ -153,16 +159,38 @@ const SPOTLIGHT_TOGGLE_BACKFILL_KEY = "spotlight_v6_toggle";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
+/** The open in flight, so concurrent callers share one connection. */
+let opening: Promise<Database> | null = null;
+
 /**
  * Initialize the database and create tables.
  */
 export async function initDb(): Promise<Database> {
 	if (db) return db;
+	opening ??= openStatsDb().finally(() => {
+		opening = null;
+	});
+	return opening;
+}
 
+async function openStatsDb(): Promise<Database> {
 	// Ensure directory exists
 	await fs.mkdir(getConfigRootDir(), { recursive: true });
 
-	db = new Database(getStatsDbPath());
+	// The shared opener retries SQLITE_BUSY (a peer's migration or WAL recovery) within its budget.
+	return openSqliteDatabase(getStatsDbPath(), database => {
+		db = database;
+		try {
+			initializeStatsDb(database);
+			return database;
+		} catch (error) {
+			db = null;
+			throw error;
+		}
+	});
+}
+
+function initializeStatsDb(db: Database): void {
 	// Install the busy handler BEFORE any lock-taking statement. See
 	// https://github.com/can1357/oh-my-pi/issues/2421.
 	db.run("PRAGMA busy_timeout = 5000");
@@ -182,9 +210,29 @@ export async function initDb(): Promise<Database> {
 	// Whether `messages` predates this init — drives the one-time agent_type
 	// backfill below, so it must be sampled before CREATE TABLE adds the table.
 	const messagesTableExisted =
-		db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'").get() !== undefined;
+		db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'").get() !== null;
+	// A current schema is only read: a sync running beside this one never fails it with SQLITE_BUSY.
+	initializeSqliteSchema(db, () => applySchema(db, messagesTableExisted));
+	backfillUserMessages(db);
+	backfillToolCalls(db);
+	backfillReingestCosts(db);
+	backfillUnpricedCosts(db);
+	repairUserMessageLinks(db);
+	backfillPriorityPremiumRequests(db);
+	backfillAgentType(db);
+	backfillMissingCatalogCosts(db);
+	backfillNoCacheInputCosts(db);
+	backfillForkDuplicates(db);
+	backfillSpotlight(db, SPOTLIGHT_BACKFILL_KEY);
+	reparseSpotlightSessions(db, SPOTLIGHT_EDITS_BACKFILL_KEY);
+	reparseSpotlightSessions(db, SPOTLIGHT_NEEDS_BACKFILL_KEY);
+	reparseSpotlightSessions(db, SPOTLIGHT_ARG_TOKENS_BACKFILL_KEY);
+	backfillSpotlight(db, SPOTLIGHT_TOGGLE_BACKFILL_KEY);
+	ensureRollupSchema(db);
+}
 
-	// Create tables
+/** Creates and migrates the stats tables; idempotent, and only reads when they are current. */
+function applySchema(db: Database, messagesTableExisted: boolean): void {
 	db.run(`
 		CREATE TABLE IF NOT EXISTS messages (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -450,15 +498,19 @@ export async function initDb(): Promise<Database> {
 		db.run("ALTER TABLE messages ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'main'");
 	}
 	// For any pre-existing table, enroll the backfill PENDING unless a prior run
-	// already settled the sentinel — `OR IGNORE` leaves an existing
-	// COMPLETE/PENDING value intact, so an ALTER that committed before its
-	// sentinel write (process killed in between) still reclassifies on the next
-	// init instead of silently leaving every row as the 'main' default. A
-	// brand-new empty table has nothing to reclassify, so it settles COMPLETE.
-	db.query("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)").run(
-		AGENT_TYPE_BACKFILL_KEY,
-		messagesTableExisted ? BACKFILL_PENDING : BACKFILL_COMPLETE,
-	);
+	// already settled the sentinel — an existing COMPLETE/PENDING value stays
+	// intact, so an ALTER that committed before its sentinel write (an older
+	// init killed in between) still reclassifies on the next init instead of
+	// silently leaving every row as the 'main' default. A brand-new empty table
+	// has nothing to reclassify, so it settles COMPLETE. Read first: an
+	// `INSERT OR IGNORE` takes the write lock even when the row exists.
+	const agentTypeSentinel = db.query("SELECT 1 FROM meta WHERE key = ?").get(AGENT_TYPE_BACKFILL_KEY);
+	if (agentTypeSentinel === null) {
+		db.query("INSERT INTO meta (key, value) VALUES (?, ?)").run(
+			AGENT_TYPE_BACKFILL_KEY,
+			messagesTableExisted ? BACKFILL_PENDING : BACKFILL_COMPLETE,
+		);
+	}
 	db.run("CREATE INDEX IF NOT EXISTS idx_messages_timestamp_agent_type ON messages(timestamp, agent_type)");
 	// Each behavior-metric bump invalidates previously-ingested rows. We detect
 	// the stale schema by column name and drop the table; `IF NOT EXISTS` above
@@ -523,23 +575,6 @@ export async function initDb(): Promise<Database> {
 		db.run("ALTER TABLE user_messages ADD COLUMN prose_hash TEXT NOT NULL DEFAULT ''");
 	}
 	db.run("CREATE INDEX IF NOT EXISTS idx_user_messages_prose_hash ON user_messages(prose_hash)");
-	backfillUserMessages(db);
-	backfillToolCalls(db);
-	backfillReingestCosts(db);
-	backfillUnpricedCosts(db);
-	repairUserMessageLinks(db);
-	backfillPriorityPremiumRequests(db);
-	backfillAgentType(db);
-	backfillMissingCatalogCosts(db);
-	backfillNoCacheInputCosts(db);
-	backfillForkDuplicates(db);
-	backfillSpotlight(db, SPOTLIGHT_BACKFILL_KEY);
-	reparseSpotlightSessions(db, SPOTLIGHT_EDITS_BACKFILL_KEY);
-	reparseSpotlightSessions(db, SPOTLIGHT_NEEDS_BACKFILL_KEY);
-	reparseSpotlightSessions(db, SPOTLIGHT_ARG_TOKENS_BACKFILL_KEY);
-	backfillSpotlight(db, SPOTLIGHT_TOGGLE_BACKFILL_KEY);
-	ensureRollupSchema(db);
-	return db;
 }
 
 function hasBillableCost(cost: ModelCost): boolean {

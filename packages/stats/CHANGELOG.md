@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed stats syncs failing with `database is locked` while another process writes `stats.db`: initializing a current schema only reads it, and opening waits out a peer that holds the lock for up to 60 s ([#17968](https://github.com/can1357/oh-my-pi/pull/17968))
+
 ## [18.16.0] - 2026-11-02
 
 ### Fixed

@@ -61,16 +61,15 @@ describe("SqliteAuthCredentialStore.open SQLITE_BUSY handling", () => {
 		}
 	});
 
-	test("open() survives a writer holding the lock past the retry budget (#7298)", async () => {
+	test("open() waits out a writer through the busy handler installed before the leases DDL (#7298)", async () => {
 		const dbPath = path.join(tempDir, "ordering.db");
 		const sentinel = path.join(tempDir, "locked.sentinel");
 		// The child creates the (empty) database and holds an EXCLUSIVE lock for
-		// 750ms: longer than open()'s full retry budget (attempts at
-		// ~0/100/300/700ms), shorter than the headless 1000ms busy_timeout. The
-		// empty file forces open()'s leases DDL to take the write lock, so only
-		// a busy handler installed BEFORE that DDL lets the first attempt wait
-		// out the writer; the pre-fix code (busy_timeout=0 during the DDL)
-		// exhausted its retries and threw. Readiness is signaled via a sentinel
+		// 750ms, shorter than the headless 1000ms busy_timeout. The empty file
+		// forces open()'s leases DDL to take the write lock, so only a busy
+		// handler installed BEFORE that DDL lets the first attempt wait out the
+		// writer; the pre-fix code (busy_timeout=0 during the DDL) failed every
+		// attempt. Readiness is signaled via a sentinel
 		// file written after BEGIN EXCLUSIVE — not stdout — so the handshake
 		// cannot be affected by how the runner wires child stdio.
 		const locker = Bun.spawn(
@@ -171,18 +170,33 @@ db.close();`,
 		expect(runCalls).toBe(1);
 	});
 
-	test("exhausts retries and surfaces an error that includes the DB path", async () => {
+	test("exhausts the retry budget and surfaces an error that includes the DB path and the wait", async () => {
 		const dbPath = path.join(tempDir, "stuck.db");
 		vi.spyOn(Database.prototype, "run").mockImplementation(function (this: Database) {
 			// Always-busy: every attempt fails until the retry budget runs out.
 			throw makeBusyError("SQLITE_BUSY_RECOVERY", 261);
 		});
-		// Skip the sleep so the test doesn't take 700ms+ of real time.
-		const sleepSpy = vi.spyOn(Bun, "sleep").mockResolvedValue(undefined);
+		// The budget is wall-clock. Skipped sleeps advance a fake clock instead, so the
+		// test spends no real time and the loop still meets its deadline.
+		let now = performance.now();
+		vi.spyOn(performance, "now").mockImplementation(() => now);
+		const delays: number[] = [];
+		vi.spyOn(Bun, "sleep").mockImplementation(async ms => {
+			const delay = typeof ms === "number" ? ms : 0;
+			delays.push(delay);
+			now += delay;
+		});
 
-		await expect(SqliteAuthCredentialStore.open(dbPath)).rejects.toThrow(dbPath);
-		// open uses `maxAttempts = 4`, so the loop sleeps between attempts 0..2
-		// (three times) then throws after attempt 3 without sleeping again.
-		expect(sleepSpy).toHaveBeenCalledTimes(3);
+		const error = await SqliteAuthCredentialStore.open(dbPath).then(
+			() => undefined,
+			(caught: unknown) => caught,
+		);
+		expect(String(error)).toContain(dbPath);
+		expect(String(error)).toMatch(/still locked after \d+ s and \d+ attempts/);
+		expect(error).toMatchObject({ code: "SQLITE_BUSY_RECOVERY" });
+		// Doubling, jittered delays capped at 2 s, stopping within the 60 s budget.
+		expect(delays.length).toBeGreaterThan(4);
+		expect(Math.max(...delays)).toBeLessThanOrEqual(2_000);
+		expect(delays.reduce((sum, delay) => sum + delay, 0)).toBeLessThanOrEqual(60_000);
 	});
 });

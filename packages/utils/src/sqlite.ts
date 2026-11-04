@@ -9,8 +9,16 @@ import { isEnoent } from "./fs-error";
 import { toError } from "./type-guards";
 import * as logger from "./logger";
 
-const BUSY_MAX_ATTEMPTS = 4;
+/**
+ * How long an open keeps retrying a store another process holds locked. A start only reads a current
+ * schema, so it waits here only while peers create or migrate the store, or run WAL recovery. The
+ * worst case measured: 100 `omp -p` starts at once on an empty agent dir, at load average ~410, with
+ * another process committing every 2 s; the slowest open waited 22 s before its winning attempt.
+ * The budget is about three times that.
+ */
+const BUSY_RETRY_BUDGET_MS = 60_000;
 const BUSY_BASE_DELAY_MS = 100;
+const BUSY_MAX_DELAY_MS = 2_000;
 const SQLITE_STORE_SUFFIXES = ["-wal", "-shm", "-journal", ""];
 
 let sqliteLockShimInstalled: boolean | undefined;
@@ -171,51 +179,95 @@ function revealHiddenCorruption(db: Database | undefined, error: unknown): unkno
 	return Object.assign(new Error(`${detail}; initialization failed: ${original}`, { cause: error }), { code, errno });
 }
 
+/**
+ * Backoff for an open that keeps finding the store locked: doubling, jittered delays capped at
+ * {@link BUSY_MAX_DELAY_MS}, until {@link BUSY_RETRY_BUDGET_MS} has passed since the first attempt.
+ */
+class BusyRetries {
+	readonly #startedAt = performance.now();
+	#attempts = 0;
+
+	/** Milliseconds to wait before retrying, or `undefined` once the budget is spent. */
+	nextDelay(): number | undefined {
+		const ceiling = Math.min(BUSY_BASE_DELAY_MS * 2 ** this.#attempts, BUSY_MAX_DELAY_MS);
+		this.#attempts++;
+		// Jitter keeps processes that failed together from retrying in lockstep.
+		const delay = Math.round(ceiling / 2 + (Math.random() * ceiling) / 2);
+		return performance.now() - this.#startedAt + delay > BUSY_RETRY_BUDGET_MS ? undefined : delay;
+	}
+
+	/** The final BUSY error, saying how long the open waited. Keeps the SQLite code. */
+	exhausted(error: unknown): Error {
+		const final = toError(error);
+		const seconds = Math.round((performance.now() - this.#startedAt) / 1000);
+		final.message += `; still locked after ${seconds} s and ${this.#attempts} attempts: another process holds the database's write lock`;
+		return final;
+	}
+}
+
+/** Closes a failed attempt's connection and wraps its error; corrupt handles stay open for recovery. */
+function failedAttempt(
+	dbPath: string,
+	db: Database | undefined,
+	caught: unknown,
+	identity: SqliteFileIdentity,
+	options: SqliteOpenOptions,
+): SqliteAttemptFailure {
+	const error = options.recoverCorruption ? revealHiddenCorruption(db, caught) : caught;
+	if (options.recoverCorruption && isSqliteCorruptionError(error)) {
+		registerCorruptHandle(dbPath, db);
+		return new SqliteAttemptFailure(error, identity, { db });
+	}
+	closeFailedDatabase(db, error, identity);
+	return new SqliteAttemptFailure(error, identity);
+}
+
+function openConnection(dbPath: string): Database {
+	ensureSqliteLockShim();
+	const db = new Database(dbPath);
+	// WAL recovery can bypass the busy handler; both it and retries are needed (#2421).
+	db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
+	return db;
+}
+
 async function openWithBusyRetries<T>(
 	dbPath: string,
 	initialize: (db: Database) => T | Promise<T>,
 	options: SqliteOpenOptions,
 ): Promise<T> {
-	for (let attempt = 0; ; attempt++) {
+	const retries = new BusyRetries();
+	for (;;) {
 		let db: Database | undefined;
 		const identity = sqliteFileIdentity(dbPath);
 		try {
-			ensureSqliteLockShim();
-			db = new Database(dbPath);
-			// WAL recovery can bypass the busy handler; both it and retries are needed (#2421).
-			db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
+			db = openConnection(dbPath);
 			return await initialize(db);
 		} catch (caught) {
-			const error = options.recoverCorruption ? revealHiddenCorruption(db, caught) : caught;
-			if (options.recoverCorruption && isSqliteCorruptionError(error)) {
-				registerCorruptHandle(dbPath, db);
-				throw new SqliteAttemptFailure(error, identity, { db });
-			}
-			closeFailedDatabase(db, error, identity);
-			if (!isSqliteBusyError(error) || attempt + 1 >= BUSY_MAX_ATTEMPTS) {
-				throw new SqliteAttemptFailure(error, identity);
-			}
-			await Bun.sleep(BUSY_BASE_DELAY_MS * 2 ** attempt);
+			const failure = failedAttempt(dbPath, db, caught, identity, options);
+			if (!isSqliteBusyError(failure.original) || failure.db) throw failure;
+			const delay = retries.nextDelay();
+			if (delay === undefined) throw new SqliteAttemptFailure(retries.exhausted(failure.original), identity);
+			await Bun.sleep(delay);
 		}
 	}
 }
 
-function openOnce<T>(dbPath: string, initialize: (db: Database) => T, options: SqliteOpenOptions): T {
-	let db: Database | undefined;
-	const identity = sqliteFileIdentity(dbPath);
-	try {
-		ensureSqliteLockShim();
-		db = new Database(dbPath);
-		db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
-		return initialize(db);
-	} catch (caught) {
-		const error = options.recoverCorruption ? revealHiddenCorruption(db, caught) : caught;
-		if (options.recoverCorruption && isSqliteCorruptionError(error)) {
-			registerCorruptHandle(dbPath, db);
-			throw new SqliteAttemptFailure(error, identity, { db });
+/** Synchronous {@link openWithBusyRetries}: the same budget, blocking the thread between attempts. */
+function openWithBusyRetriesSync<T>(dbPath: string, initialize: (db: Database) => T, options: SqliteOpenOptions): T {
+	const retries = new BusyRetries();
+	for (;;) {
+		let db: Database | undefined;
+		const identity = sqliteFileIdentity(dbPath);
+		try {
+			db = openConnection(dbPath);
+			return initialize(db);
+		} catch (caught) {
+			const failure = failedAttempt(dbPath, db, caught, identity, options);
+			if (!isSqliteBusyError(failure.original) || failure.db) throw failure;
+			const delay = retries.nextDelay();
+			if (delay === undefined) throw new SqliteAttemptFailure(retries.exhausted(failure.original), identity);
+			Bun.sleepSync(delay);
 		}
-		closeFailedDatabase(db, error, identity);
-		throw new SqliteAttemptFailure(error, identity);
 	}
 }
 
@@ -312,8 +364,9 @@ function recoverCorruptDatabase(dbPath: string, error: unknown, options: SqliteO
 }
 
 /**
- * Opens and initializes a store, retrying BUSY failures up to four total attempts.
- * Installs the busy handler before initialization and closes failed connections.
+ * Opens and initializes a store, retrying BUSY failures with jittered exponential backoff for up to
+ * {@link BUSY_RETRY_BUDGET_MS}; the final error says how long it waited. Installs the busy handler
+ * before initialization and closes failed connections.
  * The initializer may run again on a fresh connection; on success it owns the handle.
  *
  * With corruption recovery enabled, recovery is serialized across processes.
@@ -340,8 +393,9 @@ export async function openSqliteDatabase<T>(
 }
 
 /**
- * Synchronous counterpart to {@link openSqliteDatabase}. It performs no BUSY
- * retry loop; corruption recovery, when enabled, is bounded to one replacement.
+ * Synchronous counterpart to {@link openSqliteDatabase}, with the same BUSY budget; it blocks the
+ * thread between attempts, which a store whose schema is current only reaches during a peer's
+ * migration or WAL recovery. Corruption recovery, when enabled, is bounded to one replacement.
  */
 export function openSqliteDatabaseSync<T>(
 	dbPath: string,
@@ -349,13 +403,13 @@ export function openSqliteDatabaseSync<T>(
 	options: SqliteOpenOptions = {},
 ): T {
 	try {
-		return openOnce(dbPath, initialize, options);
+		return openWithBusyRetriesSync(dbPath, initialize, options);
 	} catch (error) {
 		recoverCorruptDatabase(dbPath, error, options);
 	}
 
 	try {
-		return openOnce(dbPath, initialize, {});
+		return openWithBusyRetriesSync(dbPath, initialize, {});
 	} catch (error) {
 		throw annotateSqliteError(error instanceof SqliteAttemptFailure ? error.original : error, dbPath);
 	}
@@ -371,6 +425,48 @@ export function annotateSqliteError(error: unknown, dbPath: string): Error {
 /** Checkpoints committed WAL frames without waiting for concurrent readers. */
 export function checkpointWal(db: Database): void {
 	db.run("PRAGMA wal_checkpoint(PASSIVE)");
+}
+
+/**
+ * Brings a store's schema up to date, writing nothing when it already is.
+ *
+ * `apply` must be idempotent (`CREATE ... IF NOT EXISTS`, a read before each `ALTER`, `INSERT` or
+ * `UPDATE`) and must let SQLite errors propagate. It first runs in a read transaction under
+ * `PRAGMA query_only`: on a current schema every statement is a no-op, so the start never takes the
+ * write lock and never waits on another process's writer. A statement that needs to write fails with
+ * `SQLITE_READONLY` instead; `apply` then runs again under `BEGIN IMMEDIATE`, which waits for the
+ * write lock through the busy handler (a BUSY result reaches the caller's open retries) and lets
+ * one process migrate at a time. Inside a caller's transaction, `apply` runs in it directly. Set the
+ * journal mode before the call (it cannot change inside a transaction), and create `TEMP` objects
+ * after it (`query_only` refuses them too).
+ */
+export function initializeSqliteSchema(db: Database, apply: () => void): void {
+	if (db.inTransaction) {
+		apply();
+		return;
+	}
+	db.run("PRAGMA query_only = ON");
+	try {
+		runInTransaction(db, "BEGIN", apply);
+		return;
+	} catch (error) {
+		if (!isSqliteReadOnlyError(error)) throw error;
+	} finally {
+		db.run("PRAGMA query_only = OFF");
+	}
+	runInTransaction(db, "BEGIN IMMEDIATE", apply);
+}
+
+function runInTransaction(db: Database, begin: string, body: () => void): void {
+	db.run(begin);
+	try {
+		body();
+		db.run("COMMIT");
+	} catch (error) {
+		// Some errors (SQLITE_FULL, SQLITE_IOERR, ...) already rolled the transaction back.
+		if (db.inTransaction) db.run("ROLLBACK");
+		throw error;
+	}
 }
 
 /** Damaged regions one {@link readSalvageableRows} scan skips before abandoning the rest of the table. */
@@ -451,6 +547,11 @@ export function isSqliteBusyError(err: unknown): boolean {
 	if (err === null || typeof err !== "object" || !("code" in err)) return false;
 	const code = err.code;
 	return typeof code === "string" && code.startsWith("SQLITE_BUSY");
+}
+
+/** The base `SQLITE_READONLY` that `PRAGMA query_only` gives a statement that would write. */
+function isSqliteReadOnlyError(err: unknown): boolean {
+	return err !== null && typeof err === "object" && "code" in err && err.code === "SQLITE_READONLY";
 }
 
 /**
