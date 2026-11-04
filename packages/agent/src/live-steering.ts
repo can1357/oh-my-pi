@@ -47,9 +47,17 @@ export class LiveSteeringChannel implements LiveSteering {
 		this.#queue = queue;
 	}
 
+	/** Drop deferred input the host took back since: it no longer holds later input back. */
+	#pruneDeferred(): void {
+		if (this.deferred.length === 0 || !this.#queue.keep) return;
+		const kept = this.#queue.keep(this.deferred);
+		if (kept.length !== this.deferred.length) this.deferred.splice(0, this.deferred.length, ...kept);
+	}
+
 	wait(signal: AbortSignal): Promise<void> {
 		// Once input is deferred, later input must follow it at the boundary;
 		// delivering it live would reorder the user's messages.
+		this.#pruneDeferred();
 		if (this.deferred.length === 0) return this.#queue.wait(signal);
 		if (signal.aborted) return Promise.resolve();
 		const { promise, resolve } = Promise.withResolvers<void>();
@@ -58,6 +66,7 @@ export class LiveSteeringChannel implements LiveSteering {
 	}
 
 	async claim(signal: AbortSignal): Promise<LiveSteerClaim | undefined> {
+		this.#pruneDeferred();
 		if (this.deferred.length > 0 || signal.aborted) return undefined;
 		let messages: AgentMessage[];
 		try {
@@ -72,7 +81,10 @@ export class LiveSteeringChannel implements LiveSteering {
 		if (messages.length === 0) return undefined;
 		const taken = messages;
 		let providerMessages: UserMessage[] | undefined;
-		// The host may take input back while it is converted; the provider gets only what is left.
+		// The host may take input back before or while it is converted: the provider gets only what is left,
+		// and nothing the host took back is deferred to the boundary.
+		messages = this.#queue.keep?.(messages) ?? messages;
+		if (messages.length === 0) return undefined;
 		for (;;) {
 			providerMessages = undefined;
 			try {
@@ -84,6 +96,7 @@ export class LiveSteeringChannel implements LiveSteering {
 			}
 			if (!providerMessages) {
 				// Not delivered: the next boundary delivers it, as it does a steer the provider declined.
+				messages = this.#queue.keep?.(messages) ?? messages;
 				this.#queue.release?.(taken);
 				this.deferred.push(...messages);
 				return undefined;

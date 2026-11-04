@@ -670,6 +670,10 @@ type RecordedHolder = "live" | "delivery" | "none";
 interface RecordedOccurrence {
 	message: AgentMessage;
 	holder?: LiveSteeredEntry | QueuedMessageDelivery;
+	/** The batch whose prepared context this occurrence is. */
+	context?: QueuedMessageDelivery | LiveSteeredBatch;
+	/** {@link Agent.withdrawUndeliveredQueuedMessages} took it back: the run skips this record. */
+	suppressed?: true;
 }
 
 /** A run's control state from the moment `prompt()` or `continue()` accepts it ({@link Agent.abort}, {@link Agent.waitForIdle}). */
@@ -733,8 +737,6 @@ export class Agent {
 	#liveSteered: LiveSteeredEntry[] = [];
 	/** Dequeued originals remain recoverable until their transcript events arrive. */
 	#queuedMessageDeliveries = new Set<QueuedMessageDelivery>();
-	/** Messages {@link withdrawUndeliveredQueuedMessages} took back, keyed to the run that must not record them. */
-	#withdrawnMessages = new WeakMap<AgentMessage, AbortController>();
 	/**
 	 * Occurrences {@link removeQueuedMessages} took back after the run was handed them, by run, counted per
 	 * message object: the run drops each one once, where it would put it into a provider request
@@ -1415,7 +1417,6 @@ export class Agent {
 		// A listener may have replaced the queue, or popped the claim back into it.
 		if (this.#queuedMessageClaims[queue] !== claim) return [];
 		const preparationSignal = AbortSignal.any([signal, claim.controller.signal]);
-		this.#emitQueueChanged();
 		try {
 			const preparation = await prepare(messages, preparationSignal, queue);
 			signal.throwIfAborted();
@@ -1571,31 +1572,32 @@ export class Agent {
 	}
 
 	/**
-	 * Move steering live steering took out of the queue-delivery records into {@link #liveSteered}: one
-	 * occurrence per taken message, from the take's own record (then the newest first), never from a record
-	 * a request already carries, which is delivered.
+	 * Move steering live steering took out of the queue-delivery records into {@link #liveSteered}: the
+	 * pending messages of the record the take was handed ({@link #stillHeld}), never a record a request
+	 * already carries, which is delivered.
 	 */
 	#adoptLiveSteering(taken: readonly AgentMessage[]): void {
 		let adopted = false;
 		const entries: LiveSteeredEntry[] = [];
+		// A take hands over exactly one delivery record's pending messages (with that record's prepared
+		// context after them, which is not a message to adopt), so it adopts exactly those: another take of
+		// the same message object may have dequeued a record of its own since.
+		const own = this.#batchRecords.get(taken);
+		const ownHeld = own !== undefined && this.#queuedMessageDeliveries.has(own) && !own.committed;
 		const wanted = new Map<AgentMessage, number>();
-		for (const message of taken) wanted.set(message, (wanted.get(message) ?? 0) + 1);
+		if (!ownHeld) for (const message of taken) wanted.set(message, (wanted.get(message) ?? 0) + 1);
 		const take = (message: AgentMessage): boolean => {
 			const count = wanted.get(message);
 			if (!count) return false;
 			wanted.set(message, count - 1);
 			return true;
 		};
-		// The take's own record first: another take of the same message may have dequeued since.
-		const own = this.#batchRecords.get(taken);
-		const records = [...this.#queuedMessageDeliveries].reverse();
-		const ownAt = own ? records.indexOf(own) : -1;
-		if (ownAt > 0) records.unshift(...records.splice(ownAt, 1));
+		const records = ownHeld ? [own] : [...this.#queuedMessageDeliveries].reverse();
 		for (const delivery of records) {
 			if (delivery.committed) continue;
 			const adopting = new Set<number>();
 			for (let i = delivery.next; i < delivery.messages.length; i++) {
-				if (take(delivery.messages[i])) adopting.add(i);
+				if (ownHeld || take(delivery.messages[i])) adopting.add(i);
 			}
 			if (adopting.size === 0) continue;
 			const pending = delivery.messages.slice(delivery.next);
@@ -1643,16 +1645,26 @@ export class Agent {
 	 */
 	withdrawUndeliveredQueuedMessages(): { steering: AgentMessage[]; followUp: AgentMessage[] } {
 		const withdrawn: Record<QueuedMessageQueue, AgentMessage[]> = { steering: [], followUp: [] };
-		const suppress = (message: AgentMessage, controller: AbortController | undefined) => {
-			if (controller) this.#withdrawnMessages.set(message, controller);
+		// Records a request already carries are skipped one by one, by the holder or batch they belong to.
+		const suppress = (controller: AbortController | undefined, owner: object) => {
+			const ledger = controller ? this.#recordLedger.get(controller) : undefined;
+			for (const occurrence of ledger ?? []) {
+				if (occurrence.holder === owner || occurrence.context === owner) occurrence.suppressed = true;
+			}
 		};
+		const units = new Set<TakenSteeringUnit>();
 		const batches = new Set<LiveSteeredBatch>();
-		for (const { message, controller, batch } of this.#liveSteered) {
+		for (const entry of this.#liveSteered) {
+			const { message, controller, batch } = entry;
 			withdrawn.steering.push(message);
-			suppress(message, controller);
+			// The run neither sends it again at the next boundary nor records it.
+			this.#takeBack(controller, message);
+			suppress(controller, entry);
+			if (entry.unit) units.add(entry.unit);
 			if (!batch || batches.has(batch)) continue;
 			batches.add(batch);
-			for (const context of batch.additional) suppress(context, controller);
+			for (const context of batch.additional) this.#takeBack(controller, context);
+			suppress(controller, batch);
 		}
 		// Every snapshot counts live-steered messages as pending, so clearing
 		// them is a queue change even when the caller re-queues them right after.
@@ -1661,16 +1673,18 @@ export class Agent {
 		for (const delivery of this.#queuedMessageDeliveries) {
 			const pending = delivery.messages.slice(delivery.next);
 			withdrawn[delivery.queue].push(...pending);
-			for (const message of [...pending, ...delivery.additional]) suppress(message, delivery.controller);
+			if (delivery.committed) suppress(delivery.controller, delivery);
+			else {
+				const context = delivery.next === 0 ? delivery.additional : [];
+				for (const message of [...pending, ...context]) this.#takeBack(delivery.controller, message);
+			}
+			if (delivery.unit) units.add(delivery.unit);
 		}
 		this.#queuedMessageDeliveries.clear();
-		// What is withdrawn never reaches the transcript, so its units give their places back.
-		if (this.#takenSteeringUnits.length > 0) {
-			this.#takenSteeringUnits = this.#takenSteeringUnits.filter(unit => {
-				if (!withdrawn.steering.includes(unit.messages[unit.next])) return true;
-				this.#giveBackSteeringPlace(unit.allowance);
-				return false;
-			});
+		// What is withdrawn never reaches the transcript, so exactly the units it held give their places back.
+		if (units.size > 0) {
+			this.#takenSteeringUnits = this.#takenSteeringUnits.filter(unit => !units.has(unit));
+			for (const unit of units) this.#giveBackSteeringPlace(unit.allowance);
 		}
 		if (withdrawn.steering.length > 0 || withdrawn.followUp.length > 0) {
 			this.queuedMessageGate?.release([...withdrawn.steering, ...withdrawn.followUp]);
@@ -1891,6 +1905,7 @@ export class Agent {
 			}
 		}
 		const carried: Array<{ message: AgentMessage; record: QueuedMessageDelivery }> = [];
+		const carriedContext: Array<{ message: AgentMessage; record: QueuedMessageDelivery }> = [];
 		for (const delivery of this.#queuedMessageDeliveries) {
 			if (delivery.controller !== controller || delivery.committed || !delivery.handed) continue;
 			const pending = delivery.messages.slice(delivery.next);
@@ -1899,8 +1914,12 @@ export class Agent {
 				counts.set(message, (counts.get(message) ?? 0) - 1);
 				carried.push({ message, record: delivery });
 			}
+			if (delivery.next === 0) {
+				for (const message of delivery.additional) carriedContext.push({ message, record: delivery });
+			}
 			delivery.committed = true;
 		}
+		const acceptedBatches = [...batches];
 		const ledger = this.#recordLedger.get(controller) ?? [];
 		for (const message of messages) {
 			const acceptedAt = accepted.findIndex(entry => entry.message === message);
@@ -1911,7 +1930,7 @@ export class Agent {
 			const context = acceptedContext.get(message);
 			if (context) {
 				acceptedContext.set(message, context - 1);
-				ledger.push({ message });
+				ledger.push({ message, context: acceptedBatches.find(batch => batch.additional.includes(message)) });
 				continue;
 			}
 			const carriedAt = carried.findIndex(occurrence => occurrence.message === message);
@@ -1925,6 +1944,11 @@ export class Agent {
 				delete declined.declined;
 				declined.committed = true;
 				ledger.push({ message, holder: declined });
+				continue;
+			}
+			const contextAt = carriedContext.findIndex(occurrence => occurrence.message === message);
+			if (contextAt >= 0) {
+				ledger.push({ message, context: carriedContext.splice(contextAt, 1)[0].record });
 				continue;
 			}
 			ledger.push({ message });
@@ -2279,11 +2303,12 @@ export class Agent {
 
 	/**
 	 * The run's loop reported `m` as recorded: end the occurrence the run delivered (the holder its request
-	 * wrote down, else live steering the provider accepted; prompt input and other records end nothing) and
-	 * add `m` to the transcript.
+	 * wrote down; prompt input, reminders and asides end nothing) and add `m` to the transcript.
 	 */
 	#recordLoopMessage(m: AgentMessage): void {
-		const ended = this.#recordFromLedger(m) ?? this.#recordAcceptedLiveSteering(m);
+		// A record no request wrote down (prompt input, a soft-tool reminder, an aside) ends nothing: every
+		// queued occurrence the run delivers, accepted live steering included, reaches a request first.
+		const ended = this.#recordFromLedger(m);
 		this.#state.messages.push(m);
 		// A live-steered occurrence ended: it stops counting as queued pending input, and listeners hear it
 		// now that the message is in the transcript.
@@ -2329,22 +2354,6 @@ export class Agent {
 		}
 		this.#recordTakenSteering(m, holder.unit ?? null);
 		if (++holder.next === holder.messages.length) this.#queuedMessageDeliveries.delete(holder);
-	}
-
-	/**
-	 * A record of `m` the run's loop reported and its requests did not write down: live steering the
-	 * provider accepted into the response, recorded before any request carries it again. Prompt input and
-	 * anything else the loop records end no held occurrence.
-	 */
-	#recordAcceptedLiveSteering(m: AgentMessage): RecordedHolder {
-		const controller = this.#abortController;
-		const live = this.#liveSteered.findIndex(
-			entry => entry.message === m && entry.accepted && entry.controller === controller,
-		);
-		if (live < 0) return "none";
-		const [entry] = this.#liveSteered.splice(live, 1);
-		this.#recordTakenSteering(m, entry.unit ?? null);
-		return "live";
 	}
 
 	popMessage(): AgentMessage | undefined {
@@ -2413,11 +2422,24 @@ export class Agent {
 	}
 
 	clearAllQueues() {
-		// Input the run holds and has not recorded leaves delivery undelivered.
-		const held = [
-			...this.#liveSteered.map(entry => entry.message),
-			...[...this.#queuedMessageDeliveries].flatMap(delivery => delivery.messages.slice(delivery.next)),
-		];
+		// Input the run holds and has not recorded leaves delivery undelivered; what it has not yet handed to
+		// the provider, the run must not send either.
+		const held: AgentMessage[] = [];
+		const batches = new Set<LiveSteeredBatch>();
+		for (const entry of this.#liveSteered) {
+			held.push(entry.message);
+			if (entry.committed) continue;
+			this.#takeBack(entry.controller, entry.message);
+			if (!entry.batch || batches.has(entry.batch)) continue;
+			batches.add(entry.batch);
+			for (const context of entry.batch.additional) this.#takeBack(entry.controller, context);
+		}
+		for (const delivery of this.#queuedMessageDeliveries) {
+			const pending = delivery.messages.slice(delivery.next);
+			held.push(...pending);
+			if (!delivery.handed || delivery.committed) continue;
+			for (const message of [...pending, ...delivery.additional]) this.#takeBack(delivery.controller, message);
+		}
 		this.#steering.clear();
 		this.#followUpQueue = [];
 		this.#liveSteered = [];
@@ -2426,6 +2448,9 @@ export class Agent {
 		if (held.length > 0) this.queuedMessageGate?.release(held);
 		this.#dropQueuedMessageClaim("steering");
 		this.#dropQueuedMessageClaim("followUp");
+		// Nothing taken before the clear is pending any more, so the agent-steering wait starts afresh.
+		this.#takenSteeringUnits = [];
+		this.#steeringWait = undefined;
 		this.#notifySteeringWaiters();
 		this.clearDeferredToolDirectives();
 		this.#emitQueueChanged();
@@ -2750,40 +2775,47 @@ export class Agent {
 		};
 		const pending = (): readonly AgentMessage[] =>
 			queue === "steering" ? this.#steering.messages : this.#followUpQueue;
-		// The most occurrences of each message the gate claimed in one call.
-		const claimedMost = new Map<AgentMessage, number>();
+		// The occurrences the gate claimed, in claim order, by their position in the pending queue (moved down
+		// as vetoes remove occurrences before them), or marked removed when a later veto removed them.
+		const claimed: Array<{ position: number; message: AgentMessage; removed: boolean }> = [];
 		let dropped = false;
 		let unit = gate ? candidates() : { start: 0, end: 0 };
 		while (gate && unit.start < unit.end) {
 			const batch = pending().slice(unit.start, unit.end);
 			const veto = new Map<AgentMessage, number>();
 			for (const message of gate.claim(queue, batch)) veto.set(message, (veto.get(message) ?? 0) + 1);
-			const claimed = new Map<AgentMessage, number>();
 			const removed = new Set<number>();
 			batch.forEach((message, offset) => {
 				const vetoed = veto.get(message);
 				if (vetoed) {
 					veto.set(message, vetoed - 1);
 					removed.add(unit.start + offset);
-					return;
+				} else if (!claimed.some(entry => !entry.removed && entry.position === unit.start + offset)) {
+					claimed.push({ position: unit.start + offset, message, removed: false });
 				}
-				const count = (claimed.get(message) ?? 0) + 1;
-				claimed.set(message, count);
-				claimedMost.set(message, Math.max(claimedMost.get(message) ?? 0, count));
 			});
 			if (removed.size === 0) break;
+			const sorted = [...removed].sort((a, b) => a - b);
+			for (const entry of claimed) {
+				if (entry.removed) continue;
+				if (removed.has(entry.position)) {
+					entry.removed = true;
+					continue;
+				}
+				let below = 0;
+				while (below < sorted.length && sorted[below] < entry.position) below++;
+				entry.position -= below;
+			}
 			if (queue === "steering") this.#steering.removeAt(removed);
 			else this.#followUpQueue = this.#followUpQueue.filter((_, index) => !removed.has(index));
 			dropped = true;
 			unit = candidates();
 		}
 		if (gate && dropped) {
-			const final = new Map<AgentMessage, number>();
-			for (const message of pending().slice(unit.start, unit.end)) final.set(message, (final.get(message) ?? 0) + 1);
-			const stale: AgentMessage[] = [];
-			for (const [message, count] of claimedMost) {
-				for (let n = final.get(message) ?? 0; n < count; n++) stale.push(message);
-			}
+			// Each claimed occurrence the final unit does not take goes back undelivered, once, in claim order.
+			const stale = claimed
+				.filter(entry => entry.removed || entry.position < unit.start || entry.position >= unit.end)
+				.map(entry => entry.message);
 			if (stale.length > 0) gate.release(stale);
 		}
 		const taken = queue === "steering" ? this.#takeSteeringUnit() : this.#takeFollowUpUnit();
@@ -2963,6 +2995,23 @@ export class Agent {
 
 		try {
 			const dequeueSignal = this.#continuationDequeueSignal(signal) ?? continuationAbortController.signal;
+			// An abort while the opening input is being taken (a queue listener's, at the claim notice) ends
+			// continue() like an abort of the run it would have started: quietly, with the input put back.
+			const take = async (queue: QueuedMessageQueue): Promise<AgentMessage[] | undefined> => {
+				try {
+					const taken =
+						queue === "steering"
+							? await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal)
+							: await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
+					// Aborted while it was being taken (a listener of the delivery notice): the run never starts, so
+					// the input is not delivered and the run's end puts it back.
+					if (continuationAbortController.signal.aborted) return undefined;
+					return this.#deliverHandedInput(continuationAbortController, taken);
+				} catch (error) {
+					if (dequeueSignal.aborted || continuationAbortController.signal.aborted) return undefined;
+					throw error;
+				}
+			};
 			const messages = this.#state.messages;
 			if (messages.length === 0) {
 				// An empty transcript has nothing to resume, but a queued steer/follow-up
@@ -2971,20 +3020,14 @@ export class Agent {
 				// callers (AgentSession#scheduleQueuedMessageDrain) re-arm continue() on every
 				// microtask because hasQueuedMessages() never clears, spinning an unbounded
 				// allocation loop until OOM (issue #6344).
-				const queuedSteering = this.#deliverHandedInput(
-					continuationAbortController,
-					await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal),
-				);
-				if (this.#abortController !== continuationAbortController) return;
+				const queuedSteering = await take("steering");
+				if (!queuedSteering || this.#abortController !== continuationAbortController) return;
 				if (queuedSteering.length > 0) {
 					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, run);
 					return;
 				}
-				const queuedFollowUp = this.#deliverHandedInput(
-					continuationAbortController,
-					await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal),
-				);
-				if (this.#abortController !== continuationAbortController) return;
+				const queuedFollowUp = await take("followUp");
+				if (!queuedFollowUp || this.#abortController !== continuationAbortController) return;
 				if (queuedFollowUp.length > 0) {
 					await this.#runLoop(queuedFollowUp, undefined, signal, run);
 					return;
@@ -3001,21 +3044,15 @@ export class Agent {
 					await this.#runLoop(undefined, undefined, signal, run);
 					return;
 				}
-				const queuedSteering = this.#deliverHandedInput(
-					continuationAbortController,
-					await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal),
-				);
-				if (this.#abortController !== continuationAbortController) return;
+				const queuedSteering = await take("steering");
+				if (!queuedSteering || this.#abortController !== continuationAbortController) return;
 				if (queuedSteering.length > 0) {
 					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, run);
 					return;
 				}
 
-				const queuedFollowUp = this.#deliverHandedInput(
-					continuationAbortController,
-					await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal),
-				);
-				if (this.#abortController !== continuationAbortController) return;
+				const queuedFollowUp = await take("followUp");
+				if (!queuedFollowUp || this.#abortController !== continuationAbortController) return;
 				if (queuedFollowUp.length > 0) {
 					await this.#runLoop(queuedFollowUp, undefined, signal, run);
 					return;
@@ -3341,17 +3378,30 @@ export class Agent {
 				? agentLoop(messages, context, config, loopSignal, this.streamFn)
 				: agentLoopContinue(context, config, loopSignal, this.streamFn);
 
+			const suppressedRecords: AgentMessage[] = [];
 			for await (const event of stream) {
 				if (this.#abortController !== loopAbortController) return;
-				// Withdrawn input the loop already holds for this run never reaches the transcript.
-				if (
-					(event.type === "message_start" || event.type === "message_end") &&
-					this.#withdrawnMessages.get(event.message) === loopAbortController
-				) {
-					continue;
+				// An occurrence withdrawn after its request was built never reaches the transcript.
+				if (event.type === "message_start" || event.type === "message_end") {
+					const ledger = this.#recordLedger.get(loopAbortController);
+					const at = ledger ? ledger.findIndex(occurrence => occurrence.message === event.message) : -1;
+					if (ledger && at >= 0 && ledger[at].suppressed) {
+						if (event.type === "message_end") {
+							ledger.splice(at, 1);
+							suppressedRecords.push(event.message);
+						}
+						continue;
+					}
 				}
 				if (event.type === "agent_end") {
-					const messages = event.messages.filter(m => this.#withdrawnMessages.get(m) !== loopAbortController);
+					// Leave out of the run's messages exactly the suppressed records, one occurrence each.
+					const skipped = [...suppressedRecords];
+					const messages = event.messages.filter(m => {
+						const at = skipped.indexOf(m);
+						if (at < 0) return true;
+						skipped.splice(at, 1);
+						return false;
+					});
 					this.#emitAgentEnd(
 						messages.length < event.messages.length ? { ...event, messages } : event,
 						loopAbortController,

@@ -2581,3 +2581,376 @@ describe("steering invariants: the round-eighteen reproductions", () => {
 		}
 	}
 });
+
+/**
+ * Round twenty: a claim is announced once; a live take adopts only its own record's messages; prompt input
+ * and reminders end no held occurrence; the gate's claims are tracked per occurrence; live steering never
+ * converts or defers input the host took back; a clear or withdrawal takes back handed input and gives
+ * back exactly the units it dropped, and a clear starts a fresh agent-steering wait.
+ */
+describe("steering invariants: the round-twenty reproductions", () => {
+	function agentSteer(text: string): AgentMessage {
+		return { role: "user", content: text, attribution: "agent", timestamp: 1 };
+	}
+
+	it("announces a claim once, and a listener that cancels it at that notice keeps preparation from running", async () => {
+		for (const cancel of [false, true]) {
+			const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+			const agent = new Agent({
+				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: mock.stream,
+			});
+			const v = person("V");
+			agent.steer(v);
+			let prepareCalls = 0;
+			agent.prepareQueuedMessages = () => {
+				prepareCalls++;
+				return undefined;
+			};
+			// A notice that shows V claimed: still listed as queued, not yet held for delivery.
+			let claimNotices = 0;
+			agent.onQueueChange(() => {
+				if (!agent.state.isStreaming) return;
+				const claimed = agent.peekSteeringQueue().includes(v) && !agent.peekUndeliveredQueuedMessages().includes(v);
+				if (!claimed) return;
+				claimNotices++;
+				if (cancel) agent.replaceQueue("steering", []);
+			});
+
+			await agent.prompt("start");
+
+			expect({ cancel, claimNotices, prepareCalls }).toEqual({
+				cancel,
+				claimNotices: 1,
+				prepareCalls: cancel ? 0 : 1,
+			});
+		}
+	});
+	it("#adoptLiveSteering does not let Take 1's prepared context V steal Take 2's delivery record of promoted V", async () => {
+		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+		const a = person("A");
+		const v = person("V");
+		const w = person("W");
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+			steeringMode: "one-at-a-time",
+		});
+		agent.prepareQueuedMessages = messages => (messages[0] === a ? { commit: () => [v] } : undefined);
+
+		let first = true;
+		agent.streamFn = async (model, context, options) => {
+			if (first && options?.liveSteering && options.signal) {
+				first = false;
+				const live = options.liveSteering;
+				const signal = options.signal;
+				agent.steer(a);
+				agent.steer(v);
+				agent.prioritizeSteering([a, v]);
+				let claim2Promise: Promise<LiveSteerClaim | undefined> | undefined;
+				const unsub = agent.onQueueChange(() => {
+					if (!claim2Promise && agent.peekUndeliveredQueuedMessages().includes(a)) {
+						claim2Promise = live.claim(signal);
+					}
+				});
+				const claim1 = await live.claim(signal);
+				unsub();
+				await claim2Promise;
+				// Accept only claim1 ([A, context V]); leave claim2 ([promoted V]) unsettled so run end puts it back.
+				claim1?.accept();
+			}
+			return mock.stream(model, context, options);
+		};
+
+		await agent.prompt("start");
+		agent.prepareQueuedMessages = undefined;
+		agent.steer(w);
+		agent.setSteeringPriority(m => m === w);
+
+		expect(agent.peekSteeringQueue().map(messageText)).toEqual(["V", "W"]);
+		expect(agent.peekNextSteering().map(messageText)).toEqual(["V"]);
+	});
+
+	it("#adoptLiveSteering leaves Take 2 owning its adopted entry when Take 1's prepared context is V and Take 2 is accepted", async () => {
+		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+		const a = person("A");
+		const v = person("V");
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+			steeringMode: "one-at-a-time",
+		});
+		agent.prepareQueuedMessages = messages => (messages[0] === a ? { commit: () => [v] } : undefined);
+
+		let first = true;
+		let removed: { steering: AgentMessage[]; followUp: AgentMessage[] } | undefined;
+		agent.streamFn = async (model, context, options) => {
+			if (first && options?.liveSteering && options.signal) {
+				first = false;
+				const live = options.liveSteering;
+				const signal = options.signal;
+				agent.steer(a);
+				agent.steer(v);
+				agent.prioritizeSteering([a, v]);
+				let claim2Promise: Promise<LiveSteerClaim | undefined> | undefined;
+				const unsub = agent.onQueueChange(() => {
+					if (!claim2Promise && agent.peekUndeliveredQueuedMessages().includes(a)) {
+						claim2Promise = live.claim(signal);
+					}
+				});
+				const claim1 = await live.claim(signal);
+				unsub();
+				const claim2 = await claim2Promise;
+				claim1?.reject();
+				claim2?.accept();
+				// claim2 was accepted (delivered), so removeQueuedMessages must not remove it.
+				removed = agent.removeQueuedMessages(m => m === v);
+			}
+			return mock.stream(model, context, options);
+		};
+
+		await agent.prompt("start");
+
+		expect(removed).toEqual({ steering: [], followUp: [] });
+		expect(agent.state.messages.filter(m => m.role === "user").map(messageText)).toEqual(["start", "V", "A", "V"]);
+	});
+
+	it("prompt input or soft-tool reminder sharing an object with a live-steered message does not end the live-steered occurrence", async () => {
+		const mock = createMockModel({
+			handler: (_ctx, opts) => ({ content: ["ack"], delayMs: opts?.signal?.aborted ? 1 : 0 }),
+		});
+		const a = person("A");
+		const v = person("V");
+		const w = person("W");
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: async (model, context, options) => {
+				if (options?.liveSteering && options.signal) {
+					agent.steer(v);
+					agent.prioritizeSteering([v]);
+					const claim = await options.liveSteering.claim(options.signal);
+					claim?.accept();
+					for (let i = 0; i < 6; i++) await Promise.resolve();
+					agent.abort();
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		await agent.prompt([a, v]);
+		agent.steer(w);
+		agent.setSteeringPriority(m => m === w);
+
+		// The prompt [a, v] was recorded, and the aborted response's promoted live-steered v must be put back.
+		expect(agent.state.messages.filter(m => m.role === "user").map(messageText)).toEqual(["A", "V"]);
+		expect(agent.peekSteeringQueue().map(messageText)).toEqual(["V", "W"]);
+		expect(agent.peekNextSteering().map(messageText)).toEqual(["V"]);
+	});
+
+	it("#takeDeliveryUnit releases a displaced occurrence when recomputation switches to another unit holding the same message object", async () => {
+		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+			steeringMode: "one-at-a-time",
+		});
+		const a = agentSteer("A");
+		const b = person("B");
+		const d = person("D");
+		// Unit 1 is [a (occ 0), b]; Unit 2 is [a (occ 1), d].
+		agent.setQueuedMessageGrouping((prev, next) => prev === a && (next === b || next === d));
+		for (const m of [a, b, a, d]) agent.steer(m);
+
+		const releasedOnFirstTake: string[] = [];
+		let takes = 0;
+		agent.queuedMessageGate = {
+			claim: (_q, batch) => batch.filter(m => m === b),
+			release: msgs => {
+				if (takes === 0) releasedOnFirstTake.push(...msgs.map(messageText));
+			},
+		};
+		agent.onQueueChange(() => {
+			if (agent.peekUndeliveredQueuedMessages().length > 0) takes++;
+		});
+
+		await agent.prompt("start");
+
+		// When b is vetoed in Unit 1 [a (occ 0), b], recomputation selects Unit 2 [a (occ 1), d];
+		// the displaced a (occ 0) from Unit 1 must be released once, matching distinct objects [a1, b, a2, d].
+		expect(releasedOnFirstTake).toEqual(["A"]);
+	});
+
+	it("LiveSteeringChannel.claim does not push an already-removed message into deferred when conversion returns undefined", async () => {
+		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+		const imgSteer: AgentMessage = {
+			role: "user",
+			content: [
+				{ type: "text", text: "V" },
+				{
+					type: "image",
+					data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV1cAAAAASUVORK5CYII=",
+					mimeType: "image/png",
+				},
+			],
+			attribution: "user",
+			timestamp: 1,
+		};
+		const p = person("P");
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+
+		let removed = false;
+		agent.onQueueChange(() => {
+			if (removed || !agent.peekLiveSteeredMessages().includes(imgSteer)) return;
+			removed = true;
+			agent.removeQueuedMessages(m => m === imgSteer);
+		});
+
+		let secondClaimMessages: string[] | undefined;
+		let first = true;
+		agent.streamFn = async (model, context, options) => {
+			if (first && options?.liveSteering && options.signal) {
+				first = false;
+				agent.steer(imgSteer);
+				await options.liveSteering.claim(options.signal);
+				agent.steer(p);
+				const secondClaim = await options.liveSteering.claim(options.signal);
+				secondClaimMessages = secondClaim?.messages.map(m => messageText(m as AgentMessage));
+				secondClaim?.accept();
+			}
+			return mock.stream(model, context, options);
+		};
+
+		await agent.prompt("start");
+
+		expect(removed).toBe(true);
+		expect(secondClaimMessages).toEqual(["P"]);
+	});
+
+	it("clearAllQueues during live-steering adoption prevents the cleared message from reaching the provider and starts a fresh allowance", async () => {
+		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+		const v = person("V");
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const released: string[][] = [];
+		agent.queuedMessageGate = {
+			claim: () => [],
+			release: msgs => released.push(msgs.map(messageText)),
+		};
+
+		let cleared = false;
+		agent.onQueueChange(() => {
+			if (cleared || !agent.peekLiveSteeredMessages().includes(v)) return;
+			cleared = true;
+			agent.clearAllQueues();
+		});
+
+		let first = true;
+		let liveClaim: unknown = "not-claimed";
+		agent.streamFn = async (model, context, options) => {
+			if (first && options?.liveSteering && options.signal) {
+				first = false;
+				agent.steer(v);
+				liveClaim = await options.liveSteering.claim(options.signal);
+			}
+			return mock.stream(model, context, options);
+		};
+
+		await agent.prompt("start");
+
+		expect(cleared).toBe(true);
+		expect(released).toEqual([["V"]]);
+		expect(liveClaim).toBeUndefined();
+		expect(agent.state.messages.filter(m => m.role === "user").map(messageText)).toEqual(["start"]);
+	});
+
+	it("clearAllQueues while a due agent unit is held in delivery resets the agent-steering wait", async () => {
+		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+		const card1 = agentSteer("CARD1");
+		const card2 = agentSteer("CARD2");
+		const p = (n: number) => person(`P${n}`);
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+			steeringMode: "one-at-a-time",
+		});
+
+		agent.steer(card1);
+		for (let i = 1; i <= 4; i++) agent.steer(p(i));
+
+		let cleared = false;
+		agent.onQueueChange(() => {
+			if (cleared || !agent.peekUndeliveredQueuedMessages().includes(card1)) return;
+			cleared = true;
+			agent.clearAllQueues();
+			agent.steer(card2);
+			agent.steer(p(5));
+			agent.abort();
+		});
+
+		await agent.prompt("start");
+
+		expect(agent.peekSteeringQueue().map(messageText)).toEqual(["CARD2", "P5"]);
+		expect(agent.peekNextSteering().map(messageText)).toEqual(["P5"]);
+	});
+
+	it("a declined live steer the host removed no longer holds back the next live steer", async () => {
+		const { agent, mock } = createAgent();
+		const v = person("V");
+		const w = person("W");
+		let first = true;
+		let second: string[] | undefined;
+		agent.streamFn = async (model, context, options) => {
+			if (first && options?.liveSteering && options.signal) {
+				first = false;
+				agent.steer(v);
+				(await options.liveSteering.claim(options.signal))?.reject();
+				agent.removeQueuedMessages(message => message === v);
+				agent.steer(w);
+				const claim = await options.liveSteering.claim(options.signal);
+				second = claim?.messages.map(message => messageText(message));
+				claim?.accept();
+			}
+			return mock.stream(model, context, options);
+		};
+
+		await agent.prompt("start");
+
+		expect(second).toEqual(["W"]);
+		expect(transcriptTexts(agent)).toEqual(["start", "W"]);
+		expect(agent.peekSteeringQueue()).toEqual([]);
+	});
+
+	for (const queue of ["steering", "followUp"] as const) {
+		for (const withPreparer of [false, true]) {
+			it(`continue() ends quietly when a listener aborts at the ${queue} claim notice (preparer: ${withPreparer})`, async () => {
+				const { agent } = createAgent();
+				if (withPreparer) agent.prepareQueuedMessages = () => ({ commit: () => undefined });
+				const v = person("V");
+				if (queue === "steering") agent.steer(v);
+				else agent.followUp(v);
+				let aborted = false;
+				agent.onQueueChange(() => {
+					if (aborted) return;
+					aborted = true;
+					agent.abort();
+				});
+
+				const outcome = await agent.continue().then(
+					() => "resolved",
+					(error: unknown) => (error instanceof Error ? error.name : String(error)),
+				);
+
+				expect(aborted).toBe(true);
+				expect(outcome).toBe("resolved");
+				expect(transcriptTexts(agent)).toEqual([]);
+				expect(texts(queue === "steering" ? agent.peekSteeringQueue() : agent.peekFollowUpQueue())).toEqual(["V"]);
+				expect(agent.state.isStreaming).toBe(false);
+			});
+		}
+	}
+});
