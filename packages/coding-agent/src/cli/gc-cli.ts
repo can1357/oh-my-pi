@@ -86,6 +86,7 @@ import {
 	type HeldFile,
 	holdSeenDirectory,
 	kindOf,
+	liveEntryIfPresent,
 	makeHeldDirectory,
 	NotARegularFile,
 	notRegularAsAbsent,
@@ -555,7 +556,7 @@ async function pathExists(target: string): Promise<boolean> {
 
 /** Small registry/breadcrumb marker files; a missing file reads as empty. */
 async function readTextIfPresent(file: string): Promise<string> {
-	const handle = await openRegularFile(file);
+	const handle = await openRegularFile(file, { noFollow: true });
 	if (!handle) return "";
 	try {
 		return await handle.readFile("utf8");
@@ -564,7 +565,11 @@ async function readTextIfPresent(file: string): Promise<string> {
 	}
 }
 
-async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array) => void): Promise<void> {
+async function scanSessionLinesIfPresent(
+	file: string,
+	onLine: (line: Uint8Array) => void,
+	noFollow: boolean,
+): Promise<void> {
 	// readLines buffers at most the largest record, including malformed records.
 	const scan = async (stream: ReadableStream<Uint8Array>): Promise<void> => {
 		for await (const line of readLines(stream)) onLine(line);
@@ -575,7 +580,7 @@ async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array
 		// suffix, and a review swept the blob only its gzip bytes referenced.
 		// Read through a descriptor that holds a regular file: a transcript's
 		// name standing for a FIFO is refused, never waited on or drained.
-		const head = await openRegularFile(file);
+		const head = await openRegularFile(file, { noFollow });
 		if (!head) return;
 		const magic = Buffer.alloc(2);
 		try {
@@ -583,7 +588,9 @@ async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array
 		} finally {
 			await head.close();
 		}
-		const stream = Readable.toWeb(Readable.from(bytesOfRegularFile(file))) as ReadableStream<Uint8Array>;
+		const stream = Readable.toWeb(
+			Readable.from(bytesOfRegularFile(file, { noFollow })),
+		) as ReadableStream<Uint8Array>;
 		if (file.endsWith(COMPRESSED_SESSION_SUFFIX) || (magic[0] === 0x1f && magic[1] === 0x8b)) {
 			const gunzip = createGunzip();
 			await pipeline(stream, gunzip, async (source: NodeJS.ReadableStream) => {
@@ -641,10 +648,55 @@ const BLOB_REFERENCE_GLOBS = ["**/*.jsonl", "**/*.jsonl.gz", "**/*.jsonl.*.bak",
 	pattern => new Bun.Glob(pattern),
 );
 
-async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionFiles: string[]): Promise<Set<string>> {
-	const files = new Map<string, string>();
+/** Live names follow directory aliases by content, but each real directory is walked only once. */
+async function collectLiveBlobReferenceFiles(root: string): Promise<string[]> {
+	const files: string[] = [];
+	const directories = new Set<string>();
+	const walk = async (dir: string): Promise<void> => {
+		const real = await fs.realpath(dir).catch((error: unknown) => {
+			if (codeOf(error) === "ENOENT" || codeOf(error) === "ENOTDIR") return undefined;
+			throw error;
+		});
+		if (real === undefined || directories.has(real)) return;
+		directories.add(real);
+		for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+			const file = path.join(dir, entry.name);
+			if (entry.isDirectory()) await walk(file);
+			else if (BLOB_REFERENCE_GLOBS.some(glob => glob.match(entry.name))) files.push(file);
+			else if (entry.isSymbolicLink()) {
+				// A dangling non-transcript artifact cannot hide a readable tree.
+				// Only transcript-pattern names are passed on to the strict reader.
+				const target = await fs.stat(file).catch((error: unknown) => {
+					const code = codeOf(error);
+					if (code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP") return undefined;
+					throw error;
+				});
+				if (target?.isDirectory()) await walk(file);
+			}
+		}
+	};
+	await walk(root);
+	return files;
+}
+
+async function collectReferencedBlobHashes(
+	sessionRoots: { root: string; noFollow: boolean }[],
+	exactSessionFiles: string[],
+): Promise<Set<string>> {
+	const files = new Map<string, { file: string; noFollow: boolean }>();
 	const decoder = new TextDecoder();
-	for (const root of sessionRoots) {
+	for (const { root, noFollow } of sessionRoots) {
+		if (!noFollow) {
+			// A following glob skips dangling links, while a non-following one
+			// misses them behind directory aliases. Walk live names, including
+			// hidden ones, and read only transcript patterns. Every root shares
+			// one blob store: an unreadable transcript could reference any blob,
+			// so the entire sweep stops before deleting anything.
+			for (const file of await collectLiveBlobReferenceFiles(root)) {
+				files.set(normalizePathForComparison(file), { file, noFollow });
+			}
+			continue;
+		}
 		for (const glob of BLOB_REFERENCE_GLOBS) {
 			let names: string[];
 			try {
@@ -655,23 +707,31 @@ async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionF
 			}
 			for (const name of names) {
 				const file = path.join(root, name);
-				files.set(normalizePathForComparison(file), file);
+				files.set(normalizePathForComparison(file), { file, noFollow });
 			}
 		}
 	}
 	for (const file of exactSessionFiles) {
-		files.set(normalizePathForComparison(file), file);
+		const noFollow = sessionRoots.some(({ root, noFollow }) => {
+			const relative = path.relative(root, file);
+			return noFollow && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+		});
+		files.set(normalizePathForComparison(file), { file, noFollow });
 	}
 
 	const hashes = new Set<string>();
-	for (const file of files.values()) {
+	for (const { file, noFollow } of files.values()) {
 		// Keep raw-text matching: recoverable malformed records can still own blobs.
-		await scanSessionLinesIfPresent(file, line => {
-			for (const match of decoder.decode(line).matchAll(BLOB_REF_RE)) {
-				const hash = match[1]?.toLowerCase();
-				if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
-			}
-		});
+		await scanSessionLinesIfPresent(
+			file,
+			line => {
+				for (const match of decoder.decode(line).matchAll(BLOB_REF_RE)) {
+					const hash = match[1]?.toLowerCase();
+					if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
+				}
+			},
+			noFollow,
+		);
 	}
 	return hashes;
 }
@@ -827,7 +887,11 @@ async function restoreReusedBlob(moved: string, canonical: string, result: BlobG
 async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string): Promise<BlobGcResult> {
 	const blobDir = getBlobsDir(options.agentDir);
 	const sessionsRoot = getSessionsDir(options.agentDir);
-	const defaultRoots = [sessionsRoot, archiveSessionsRoot, getReclaimedSessionsDir(options.agentDir)];
+	const defaultRoots = [
+		{ root: sessionsRoot, noFollow: false },
+		{ root: archiveSessionsRoot, noFollow: true },
+		{ root: getReclaimedSessionsDir(options.agentDir), noFollow: true },
+	];
 	const exactSessionFiles = new Map<string, string>();
 	for (const file of await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))) {
 		if (!(await statIfPresent(file))?.isFile()) continue;
@@ -2901,7 +2965,7 @@ async function archiveAlreadyHolds(source: string, destination: string): Promise
 	try {
 		// Through the regular-file check: a FIFO at the live name is not waited
 		// on, and is no transcript the archive could hold.
-		const live = await digestStream(bytesOfRegularFile(source));
+		const live = await digestStream(bytesOfRegularFile(source, { noFollow: false }));
 		const stored = await digestArchivedSessionFile(destination);
 		return live.hash === stored.hash;
 	} catch (error) {
@@ -2918,12 +2982,18 @@ async function checkArchiveNames(candidate: ArchiveCandidate): Promise<void> {
 		throw new Error(
 			`archive destination exists: ${legacy}${legacyEntry.isSymbolicLink() ? " is a symbolic link" : ""}`,
 		);
-	for (const file of [candidate.session.path, candidate.destinationPath]) {
-		const standing = await lstatIfPresent(file);
+	for (const [file, live] of [
+		[candidate.session.path, true],
+		[candidate.destinationPath, false],
+	] as const) {
+		const standing = live ? await liveEntryIfPresent(file) : await lstatIfPresent(file);
 		if (standing && !standing.isFile()) throw new NotARegularFile(file, kindOf(standing));
 	}
-	for (const dir of [sessionArtifactsPath(candidate.session.path), sessionArtifactsPath(candidate.destinationPath)]) {
-		const standing = await lstatIfPresent(dir);
+	for (const [dir, live] of [
+		[sessionArtifactsPath(candidate.session.path), true],
+		[sessionArtifactsPath(candidate.destinationPath), false],
+	] as const) {
+		const standing = live ? await liveEntryIfPresent(dir) : await lstatIfPresent(dir);
 		if (standing && !standing.isDirectory())
 			throw new Error(
 				`${dir} is ${standing.isFile() ? "a regular file" : kindOf(standing)}, not an artifact directory`,

@@ -10,7 +10,7 @@ import { isArchivedSessionPath } from "./session-archive";
 import { readSessionInfo, type SessionInfo } from "./session-listing";
 import { FileSessionStorage, type SessionStorageStat } from "./session-storage";
 import { isAssistantMessageLine } from "./session-entries";
-import { absentFile as absent, kindOf, NotARegularFile, openRegularFile } from "./regular-file";
+import { absentFile as absent, kindOf, liveEntryIfPresentSync, NotARegularFile, openRegularFile } from "./regular-file";
 
 export class RegularFileSessionStorage extends FileSessionStorage {
 	readonly failures: { file: string; message: string }[] = [];
@@ -28,7 +28,8 @@ export class RegularFileSessionStorage extends FileSessionStorage {
 
 	override statSync(file: string): SessionStorageStat {
 		try {
-			const stat = fs.lstatSync(file);
+			const stat = isArchivedSessionPath(file) ? fs.lstatSync(file) : liveEntryIfPresentSync(file);
+			if (!stat) throw absent(file);
 			if (!stat.isFile()) throw new NotARegularFile(file, kindOf(stat));
 			return { size: stat.size, mtimeMs: stat.mtimeMs, mtime: stat.mtime };
 		} catch (error) {
@@ -53,7 +54,7 @@ export class RegularFileSessionStorage extends FileSessionStorage {
 	override async readTextSlices(file: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
 		try {
 			if (isArchivedSessionPath(file)) return await super.readTextSlices(file, prefixBytes, suffixBytes);
-			const handle = await openRegularFile(file, { noFollow: true });
+			const handle = await openRegularFile(file);
 			if (!handle) throw absent(file);
 			try {
 				const { size } = await handle.stat();
@@ -77,7 +78,7 @@ export class RegularFileSessionStorage extends FileSessionStorage {
 
 	override async hasAssistantTurn(file: string): Promise<boolean> {
 		try {
-			const handle = await openRegularFile(file, { noFollow: true });
+			const handle = await openRegularFile(file, { noFollow: isArchivedSessionPath(file) });
 			if (!handle) throw absent(file);
 			try {
 				for await (const line of handle.readLines()) {
