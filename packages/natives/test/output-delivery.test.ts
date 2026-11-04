@@ -39,9 +39,12 @@ describe.skipIf(skip)("output delivery", () => {
 
 	it("fails a terminal run whose output callback throws instead of reporting it cancelled", async () => {
 		const session = new PtySession();
-		const run = session.start({ command: "printf a; sleep 0.1; printf b", shell: "/bin/sh", timeoutMs: 30_000 }, () => {
-			throw new Error("callback failed");
-		});
+		const run = session.start(
+			{ command: "printf a; sleep 0.1; printf b", shell: "/bin/sh", timeoutMs: 30_000 },
+			() => {
+				throw new Error("callback failed");
+			},
+		);
 		await expect(run).rejects.toThrow("Command output was not all delivered: the output callback failed");
 	});
 

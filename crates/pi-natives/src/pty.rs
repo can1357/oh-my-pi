@@ -694,7 +694,11 @@ fn run_pty_sync(
 	drop(pump_task);
 	// The pump dropped output after a callback stalled or failed: the run must
 	// not resolve as if all of it had arrived, or as if it were cancelled.
-	let pump_end = if callback_failed { Some(PumpEnd::ConsumerGone) } else { pump_end };
+	let pump_end = if callback_failed {
+		Some(PumpEnd::ConsumerGone)
+	} else {
+		pump_end
+	};
 	if !interrupted && let Some(error) = pump_end.and_then(undelivered_output_error) {
 		return Err(error);
 	}

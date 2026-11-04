@@ -2017,7 +2017,7 @@ const GATED_WRITES: &str = "printf x; until [ -e one ]; do sleep 0.02; done; pri
 
 /// Waits until a one-chunk channel holds its chunk.
 #[cfg(unix)]
-async fn until_full<T>(rx: &flume::Receiver<T>) {
+async fn until_full<T: Send>(rx: &flume::Receiver<T>) {
 	time::timeout(Duration::from_secs(20), async {
 		while !rx.is_full() {
 			time::sleep(Duration::from_millis(10)).await;
