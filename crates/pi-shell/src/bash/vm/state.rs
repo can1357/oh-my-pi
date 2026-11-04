@@ -9,7 +9,7 @@
 //! the store ([`Root`]), kept exact by its own writes and dropped when the
 //! store's epoch says another writer changed it.
 
-use std::{borrow::Cow, collections::HashMap, sync::LazyLock};
+use std::collections::HashMap;
 
 use bstr::{BStr, BString};
 use hashbrown::DefaultHashBuilder;
@@ -201,10 +201,7 @@ impl Var {
 				.map(|p| items[p].1.as_slice()),
 			VarValue::Assoc(items) => {
 				let key = i.to_string();
-				items
-					.iter()
-					.find(|(k, _)| k.as_slice() == key.as_bytes())
-					.map(|(_, v)| v.as_slice())
+				items.get(key.as_bytes()).map(|v| v.as_slice())
 			},
 		}
 	}
@@ -212,10 +209,7 @@ impl Var {
 	/// Element with key `key` of an associative array.
 	pub fn key(&self, key: &[u8]) -> Option<&[u8]> {
 		match &self.value {
-			VarValue::Assoc(items) => items
-				.iter()
-				.find(|(k, _)| k.as_slice() == key)
-				.map(|(_, v)| v.as_slice()),
+			VarValue::Assoc(items) => items.get(key).map(|v| v.as_slice()),
 			_ => None,
 		}
 	}
@@ -245,10 +239,7 @@ impl Var {
 	/// Set element `key` of an associative array (insertion order kept).
 	pub fn set_key(&mut self, key: BString, v: BString) {
 		if let VarValue::Assoc(items) = &mut self.value {
-			match items.iter_mut().find(|(k, _)| *k == key) {
-				Some(slot) => slot.1 = v,
-				None => items.push((key, v)),
-			}
+			items.insert(key, v);
 		}
 	}
 }
@@ -356,6 +347,8 @@ pub struct Root {
 	fault:             Option<StoreError>,
 	/// The root vproc's in-place fields as last written ([`sync_root`]).
 	synced:            Synced,
+	/// zsh's history events as last written (mirrors their store record).
+	pub hist_events:   parking_lot::Mutex<super::builtins::history::model::EventsCache>,
 }
 
 /// The root vproc's fields the interpreter updates in place (`vp.status = …`
@@ -532,6 +525,7 @@ impl Root {
 		self.zopts_known = ZshOpts::default();
 		self.builtins_disabled = None;
 		self.locale_gen += 1;
+		self.hist_events.lock().clear();
 		if let Err(err) = self.rescan(store) {
 			self.fail(err);
 		}
@@ -640,6 +634,7 @@ impl Root {
 	///
 	/// # Errors
 	/// [`StoreError`] when the option record cannot be read.
+	#[inline]
 	pub fn option(&mut self, store: &mut dyn StateStore, opt: OptId) -> Result<bool, StoreError> {
 		let bit = opt_bit(opt);
 		if self.opts_known & bit == 0 {
@@ -711,6 +706,7 @@ impl Root {
 ///
 /// # Errors
 /// [`StoreError`] when the store fails or the record is no variable.
+#[inline]
 pub fn global<'s>(
 	store: &'s mut dyn StateStore,
 	name: &[u8],
@@ -764,35 +760,141 @@ fn root_scope(store: &mut dyn StateStore, depth: u32) -> Result<ScopeHeader<'_>,
 
 /// The innermost root scope binding `name`: only the scopes that may bind
 /// a local are read ([`Root`]'s mask; every one from [`SCOPE_BITS`] up).
+#[inline]
 fn root_binding(
 	root: &Root,
 	store: &mut dyn StateStore,
 	name: &[u8],
 ) -> Result<Option<u32>, StoreError> {
-	root_binding_below(root, store, name, root.depth)
+	// Outside every function and temporary scope, a lookup (most of a
+	// script's) needs no call.
+	if root.depth == 0 {
+		return Ok(None);
+	}
+	root_binding_below(root, store, name, root.depth, true)
 }
 
-/// [`root_binding`] among the root scopes below `top`.
+/// [`root_binding`] among the root scopes below `top`. With
+/// `hide_private`, a zsh private parameter hidden from the running
+/// function ([`private_hidden`]) does not count as a binding.
 fn root_binding_below(
 	root: &Root,
 	store: &mut dyn StateStore,
 	name: &[u8],
 	top: u32,
+	hide_private: bool,
 ) -> Result<Option<u32>, StoreError> {
 	let top = top.min(root.depth);
+	if top == 0 || !store.may_have_local(name) {
+		return Ok(None);
+	}
+	// The innermost function scope, read once a private binding needs it.
+	let mut func = None;
 	for depth in (SCOPE_BITS..top).rev() {
-		if store.get(local_key(depth, name))?.is_some() {
+		if root_binds(root, store, name, depth, hide_private, &mut func)? {
 			return Ok(Some(depth));
 		}
 	}
 	let mut bits = root.locals & below(top);
 	while let Some(depth) = bits.checked_ilog2() {
-		if store.get(local_key(depth, name))?.is_some() {
+		if root_binds(root, store, name, depth, hide_private, &mut func)? {
 			return Ok(Some(depth));
 		}
 		bits &= !(1 << depth);
 	}
 	Ok(None)
+}
+
+/// Whether root scope `depth` binds `name` for [`root_binding_below`]:
+/// with `hide_private`, a zsh private parameter there counts only when no
+/// function scope lies above it. `func` caches the innermost function
+/// scope (`None`: not read yet).
+fn root_binds(
+	root: &Root,
+	store: &mut dyn StateStore,
+	name: &[u8],
+	depth: u32,
+	hide_private: bool,
+	func: &mut Option<Option<u32>>,
+) -> Result<bool, StoreError> {
+	let private = match store.get(local_key(depth, name))? {
+		None => return Ok(false),
+		Some(Record::Var(v)) => v.attrs.contains(Attrs::ZSH_PRIVATE),
+		Some(_) => false,
+	};
+	if !private || !hide_private {
+		return Ok(true);
+	}
+	let innermost = match *func {
+		Some(f) => f,
+		None => {
+			let f = root_func_scope(root, store)?;
+			*func = Some(f);
+			f
+		},
+	};
+	Ok(!private_hidden(depth as usize, innermost.map(|f| f as usize)))
+}
+
+/// zsh/param/private's visibility rule (`getprivatenode`): a private
+/// parameter ([`Attrs::ZSH_PRIVATE`]) bound in scope `at` is hidden while a
+/// function scope lies above it (`innermost` is the innermost function
+/// scope): the functions its declaring function calls see the next outer
+/// parameter of the name instead.
+const fn private_hidden(at: usize, innermost: Option<usize>) -> bool {
+	match innermost {
+		Some(f) => f > at,
+		None => false,
+	}
+}
+
+/// The innermost of `vp`'s own scopes (a subshell's) binding `name` for a
+/// dynamic lookup: a zsh private parameter hidden from the running
+/// function ([`private_hidden`]) is skipped.
+fn vec_binding(vp: &Vproc, name: &[u8]) -> Option<usize> {
+	vp.scopes.iter().enumerate().rev().find_map(|(i, s)| {
+		let entry = s.vars.get(name)?;
+		let private = entry
+			.as_ref()
+			.is_some_and(|v| v.attrs.contains(Attrs::ZSH_PRIVATE));
+		if private && vp.scopes[i + 1..].iter().any(|s| s.func.is_some()) {
+			return None;
+		}
+		Some(i)
+	})
+}
+
+/// Whether the innermost scope binding `name`, with no zsh/param/private
+/// visibility applied (zsh's raw parameter table node), holds a private
+/// parameter: zsh's `createparam` of a global `name` then fails (`NAME:
+/// can't change parameter attribute`, the private being `PM_RO_BY_DESIGN`).
+///
+/// # Errors
+/// [`StoreError`] when the store cannot be read.
+pub fn innermost_private(
+	root: &Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	name: &[u8],
+) -> Result<bool, StoreError> {
+	if vp.overlay.is_none() {
+		let Some(depth) = root_binding_below(root, store, name, root.depth, false)? else {
+			return Ok(false);
+		};
+		return Ok(matches!(
+			store.get(local_key(depth, name))?,
+			Some(Record::Var(v)) if v.attrs.contains(Attrs::ZSH_PRIVATE)
+		));
+	}
+	Ok(vp
+		.scopes
+		.iter()
+		.rev()
+		.find_map(|s| s.vars.get(name))
+		.is_some_and(|e| {
+			e.as_ref()
+				.is_some_and(|v| v.attrs.contains(Attrs::ZSH_PRIVATE))
+		}))
 }
 
 /// The innermost root function scope.
@@ -841,6 +943,7 @@ enum At {
 
 /// Where `name` is bound for a dynamic lookup: the innermost scope binding
 /// it, else the overlay when it has it, else the global variables.
+#[inline]
 fn bound_at(
 	root: &Root,
 	store: &mut dyn StateStore,
@@ -850,7 +953,7 @@ fn bound_at(
 	if vp.overlay.is_none() {
 		return Ok(root_binding(root, store, name)?.map_or(At::Global, |d| At::Scope(In::Store(d))));
 	}
-	if let Some(i) = vp.scopes.iter().rposition(|s| s.vars.contains_key(name)) {
+	if let Some(i) = vec_binding(vp, name) {
 		return Ok(At::Scope(In::Vec(i)));
 	}
 	if vp
@@ -864,6 +967,7 @@ fn bound_at(
 }
 
 /// The variable bound at `at` (`None`: declared but unset there, or absent).
+#[inline]
 fn var_at<'a>(
 	store: &'a mut dyn StateStore,
 	vp: &'a Vproc,
@@ -888,6 +992,7 @@ fn var_at<'a>(
 
 /// Where an assignment to `name` at `level` lands among `vp`'s scopes;
 /// `None`: its overlay or the root.
+#[inline]
 fn level_at(
 	root: &Root,
 	store: &mut dyn StateStore,
@@ -909,11 +1014,7 @@ fn level_at(
 			.iter()
 			.rposition(|s| s.func.is_some())
 			.map(In::Vec),
-		Level::Dynamic => vp
-			.scopes
-			.iter()
-			.rposition(|s| s.vars.contains_key(name))
-			.map(In::Vec),
+		Level::Dynamic => vec_binding(vp, name).map(In::Vec),
 	})
 }
 
@@ -1039,6 +1140,7 @@ pub fn lookup<'a>(
 ///
 /// # Errors
 /// [`StoreError`] when a variable cannot be read.
+#[inline]
 pub fn lookup_declared<'a>(
 	root: &Root,
 	store: &'a mut dyn StateStore,
@@ -1047,6 +1149,28 @@ pub fn lookup_declared<'a>(
 ) -> Result<Option<&'a Var>, StoreError> {
 	let at = bound_at(root, store, vp, name)?;
 	var_at(store, vp, name, at)
+}
+
+/// A declared variable and its binding scope, from one dynamic lookup.
+/// The scope is `None` for an overlay or global binding; name references
+/// are not followed and declared-but-unset variables are returned.
+///
+/// # Errors
+/// [`StoreError`] when a variable cannot be read.
+#[inline]
+pub fn lookup_declared_scoped<'a>(
+	root: &Root,
+	store: &'a mut dyn StateStore,
+	vp: &'a Vproc,
+	name: &[u8],
+) -> Result<(Option<&'a Var>, Option<usize>), StoreError> {
+	let at = bound_at(root, store, vp, name)?;
+	let scope = match at {
+		At::Scope(In::Vec(i)) => Some(i),
+		At::Scope(In::Store(depth)) => Some(depth as usize),
+		At::Overlay | At::Global => None,
+	};
+	Ok((var_at(store, vp, name, at)?, scope))
 }
 
 /// A token for a cache of something derived from the locale variables
@@ -1136,20 +1260,11 @@ pub enum VarEdit<'e> {
 		/// The number as text.
 		value: &'e [u8],
 	},
+	/// Remove an array element, retaining the variable's attributes.
+	Remove(Elem<'e>),
 	/// Append unkeyed elements after the highest index of an indexed array
 	/// (`a+=(x y)`); clears [`Attrs::INVISIBLE`].
 	Push(Vec<BString>),
-}
-
-/// `old` with `value` appended (`append`), or `value` alone.
-fn joined<'v>(old: Option<&[u8]>, value: &'v [u8], append: bool) -> Cow<'v, [u8]> {
-	if append {
-		let mut s = old.unwrap_or_default().to_vec();
-		s.extend_from_slice(value);
-		Cow::Owned(s)
-	} else {
-		Cow::Borrowed(value)
-	}
 }
 
 impl VarEdit<'_> {
@@ -1158,6 +1273,15 @@ impl VarEdit<'_> {
 	fn apply(self, var: &mut Var) {
 		match self {
 			Self::Replace(v) => *var = v,
+			Self::Remove(elem) => match (&mut var.value, elem) {
+				(VarValue::Indexed(items), Elem::Index(i)) => {
+					if let Ok(p) = items.binary_search_by_key(&i, |(k, _)| *k) {
+						items.remove(p);
+					}
+				},
+				(VarValue::Assoc(items), Elem::Key(k)) => items.remove(k),
+				_ => {},
+			},
 			Self::AddAttrs(a) => var.attrs = var.attrs.with(a),
 			Self::Set { elem, value, append } => {
 				if matches!(elem, Some(Elem::Index(_)))
@@ -1188,37 +1312,54 @@ impl VarEdit<'_> {
 /// Assign `value` to element `elem` of `var` in memory (see
 /// [`VarEdit::Set`]).
 fn set_elem(var: &mut Var, elem: Option<Elem<'_>>, value: &[u8], append: bool) {
-	match elem {
-		None => {
-			if let VarValue::Str(s) = &mut var.value {
-				if !append {
-					s.clear();
-				}
-				s.extend_from_slice(value);
-			} else {
-				let v = joined(var.index(0), value, append).into_owned();
-				var.set_index(0, BString::from(v));
+	let elem = match (&mut var.value, elem) {
+		(VarValue::Str(s), None) => {
+			if !append {
+				s.clear();
+			}
+			s.extend_from_slice(value);
+			return;
+		},
+		(_, None) => Elem::Index(0),
+		(_, Some(elem)) => elem,
+	};
+	if let (VarValue::Str(s), Elem::Index(_)) = (&var.value, elem) {
+		var.value = VarValue::Indexed(vec![(0, s.clone())]);
+	}
+	match (&mut var.value, elem) {
+		(VarValue::Indexed(items), Elem::Index(i)) => {
+			match items.binary_search_by_key(&i, |(k, _)| *k) {
+				Ok(p) => {
+					let dst = &mut items[p].1;
+					if !append {
+						dst.clear();
+					}
+					dst.extend_from_slice(value);
+				},
+				Err(p) => items.insert(p, (i, BString::from(value))),
 			}
 		},
-		Some(Elem::Index(i)) => {
-			let v = joined(var.index(i), value, append).into_owned();
-			var.set_index(i, BString::from(v));
+		(VarValue::Assoc(items), Elem::Key(k)) => {
+			let dst = items.value_mut(k);
+			if !append {
+				dst.clear();
+			}
+			dst.extend_from_slice(value);
 		},
-		Some(Elem::Key(k)) => {
-			let v = joined(var.key(k), value, append).into_owned();
-			var.set_key(BString::from(k), BString::from(v));
-		},
+		_ => {},
 	}
 }
 
 /// A store change [`store_edit`] can make without rewriting the variable.
 enum Fast<'e> {
-	/// [`Change::SetScalar`].
-	Scalar(Cow<'e, [u8]>),
-	/// [`Change::SetElem`].
-	Elem(Elem<'e>, Cow<'e, [u8]>),
+	/// [`Change::SetScalar`] or [`Change::AppendScalar`].
+	Scalar(&'e [u8], bool),
+	/// [`Change::SetElem`] or [`Change::AppendElem`].
+	Elem(Elem<'e>, &'e [u8], bool),
 	/// [`Change::SetElem`] of each pushed element from this index.
 	Push(i64),
+	/// [`Change::DelElem`].
+	Remove(Elem<'e>),
 	/// The change leaves the variable as it is.
 	Nothing,
 }
@@ -1230,6 +1371,14 @@ fn fast_edit<'e>(edit: &VarEdit<'e>, cur: &Var) -> Option<Fast<'e>> {
 		return None;
 	}
 	let (elem, value, append) = match *edit {
+		VarEdit::Remove(elem) => {
+			return Some(match (&cur.value, elem) {
+				(VarValue::Indexed(_), Elem::Index(_)) | (VarValue::Assoc(_), Elem::Key(_)) => {
+					Fast::Remove(elem)
+				},
+				_ => Fast::Nothing,
+			});
+		},
 		VarEdit::Set { elem, value, append } => (elem, value, append),
 		VarEdit::Number { elem, value } => (elem, value, false),
 		VarEdit::Push(_) => {
@@ -1241,16 +1390,10 @@ fn fast_edit<'e>(edit: &VarEdit<'e>, cur: &Var) -> Option<Fast<'e>> {
 		VarEdit::Replace(_) | VarEdit::AddAttrs(_) => return None,
 	};
 	Some(match (&cur.value, elem) {
-		(VarValue::Str(s), None) => Fast::Scalar(joined(Some(s.as_slice()), value, append)),
-		(VarValue::Indexed(_), None) => {
-			Fast::Elem(Elem::Index(0), joined(cur.index(0), value, append))
-		},
-		(VarValue::Indexed(_), Some(Elem::Index(i))) => {
-			Fast::Elem(Elem::Index(i), joined(cur.index(i), value, append))
-		},
-		(VarValue::Assoc(_), Some(Elem::Key(k))) => {
-			Fast::Elem(Elem::Key(k), joined(cur.key(k), value, append))
-		},
+		(VarValue::Str(_), None) => Fast::Scalar(value, append),
+		(VarValue::Indexed(_), None) => Fast::Elem(Elem::Index(0), value, append),
+		(VarValue::Indexed(_), Some(Elem::Index(i))) => Fast::Elem(Elem::Index(i), value, append),
+		(VarValue::Assoc(_), Some(Elem::Key(k))) => Fast::Elem(Elem::Key(k), value, append),
 		// `set_index`/`set_key` leave an associative array (indexed) or a
 		// non-associative one (keyed) as it is.
 		(VarValue::Assoc(_), None | Some(Elem::Index(_)))
@@ -1270,6 +1413,8 @@ fn fast_edit<'e>(edit: &VarEdit<'e>, cur: &Var) -> Option<Fast<'e>> {
 pub enum Seen {
 	/// A scalar.
 	Scalar,
+	/// An associative array.
+	Assoc,
 	/// An indexed array.
 	Indexed {
 		/// Its highest index + 1 ([`Var::next_index`]).
@@ -1279,7 +1424,7 @@ pub enum Seen {
 
 impl Seen {
 	/// What `var` shows an edit; `None` when the edit cannot rely on it
-	/// (declared but unset, which an edit rewrites, or associative).
+	/// (declared but unset, which an edit rewrites).
 	pub fn of(var: &Var) -> Option<Self> {
 		if var.attrs.contains(Attrs::INVISIBLE) {
 			return None;
@@ -1287,32 +1432,39 @@ impl Seen {
 		match &var.value {
 			VarValue::Str(_) => Some(Self::Scalar),
 			VarValue::Indexed(_) => Some(Self::Indexed { next: var.next_index() }),
-			VarValue::Assoc(_) => None,
+			VarValue::Assoc(_) => Some(Self::Assoc),
 		}
 	}
 }
 
 /// The store change for `edit` of a variable showing `seen`, when it needs
-/// none of the old value (as [`fast_edit`] decides; `+=` reads it).
+/// none of the old value (as [`fast_edit`] decides).
 const fn seen_edit<'e>(edit: &VarEdit<'e>, seen: Seen) -> Option<Fast<'e>> {
-	let (elem, value) = match *edit {
-		VarEdit::Set { elem, value, append: false } | VarEdit::Number { elem, value } => {
-			(elem, value)
+	let (elem, value, append) = match *edit {
+		VarEdit::Remove(elem) => {
+			return match (seen, elem) {
+				(Seen::Indexed { .. }, Elem::Index(_)) | (Seen::Assoc, Elem::Key(_)) => {
+					Some(Fast::Remove(elem))
+				},
+				_ => None,
+			};
 		},
+		VarEdit::Set { elem, value, append } => (elem, value, append),
+		VarEdit::Number { elem, value } => (elem, value, false),
 		VarEdit::Push(_) => {
 			return match seen {
 				Seen::Indexed { next } => Some(Fast::Push(next)),
-				Seen::Scalar => None,
+				Seen::Scalar | Seen::Assoc => None,
 			};
 		},
-		VarEdit::Set { append: true, .. } | VarEdit::Replace(_) | VarEdit::AddAttrs(_) => {
-			return None;
-		},
+		VarEdit::Replace(_) | VarEdit::AddAttrs(_) => return None,
 	};
 	match (seen, elem) {
-		(Seen::Scalar, None) => Some(Fast::Scalar(Cow::Borrowed(value))),
+		(Seen::Scalar, None) => Some(Fast::Scalar(value, append)),
+		(Seen::Assoc, Some(Elem::Key(k))) => Some(Fast::Elem(Elem::Key(k), value, append)),
+		(Seen::Indexed { .. }, None) => Some(Fast::Elem(Elem::Index(0), value, append)),
 		(Seen::Indexed { .. }, Some(Elem::Index(i))) => {
-			Some(Fast::Elem(Elem::Index(i), Cow::Borrowed(value)))
+			Some(Fast::Elem(Elem::Index(i), value, append))
 		},
 		_ => None,
 	}
@@ -1341,8 +1493,12 @@ fn store_edit(
 		},
 	};
 	match plan {
-		Ok(Fast::Scalar(v)) => root.write(store, Change::SetScalar(key, BStr::new(&*v))),
-		Ok(Fast::Elem(elem, v)) => root.write(store, Change::SetElem(key, elem, BStr::new(&*v))),
+		Ok(Fast::Scalar(v, false)) => root.write(store, Change::SetScalar(key, BStr::new(v))),
+		Ok(Fast::Scalar(v, true)) => root.write(store, Change::AppendScalar(key, BStr::new(v))),
+		Ok(Fast::Elem(elem, v, false)) => root.write(store, Change::SetElem(key, elem, BStr::new(v))),
+		Ok(Fast::Elem(elem, v, true)) => {
+			root.write(store, Change::AppendElem(key, elem, BStr::new(v)));
+		},
 		Ok(Fast::Push(first)) => {
 			if let VarEdit::Push(elems) = &edit {
 				for (i, v) in (first..).zip(elems) {
@@ -1350,6 +1506,7 @@ fn store_edit(
 				}
 			}
 		},
+		Ok(Fast::Remove(elem)) => root.write(store, Change::DelElem(key, elem)),
 		Ok(Fast::Nothing) => {},
 		Err(mut var) => {
 			edit.apply(&mut var);
@@ -1476,7 +1633,7 @@ pub fn store_var_below(
 ) {
 	let found = if vp.overlay.is_none() {
 		let top = u32::try_from(top).unwrap_or(u32::MAX);
-		match root_binding_below(root, store, name, top) {
+		match root_binding_below(root, store, name, top, true) {
 			Ok(depth) => depth.map(In::Store),
 			Err(err) => {
 				root.fail(err);
@@ -1515,7 +1672,7 @@ pub fn unset_var(
 				let value = match v.value {
 					VarValue::Str(_) => VarValue::Str(BString::default()),
 					VarValue::Indexed(_) => VarValue::Indexed(Vec::new()),
-					VarValue::Assoc(_) => VarValue::Assoc(Vec::new()),
+					VarValue::Assoc(_) => VarValue::Assoc(Default::default()),
 				};
 				Var { attrs: v.attrs.with(Attrs::INVISIBLE), value }
 			});
@@ -1743,15 +1900,36 @@ pub fn init_option_vars(root: &mut Root, store: &mut dyn StateStore) -> Result<(
 	Ok(())
 }
 
-/// Every option sorted by name, the listing order of `set -o`, `shopt`,
-/// `SHELLOPTS` and `BASHOPTS`; sorted once rather than per option sync
-/// (the sort was half of a `$( )`'s cost).
-static OPTS_BY_NAME: LazyLock<Box<[OptId]>> = LazyLock::new(|| {
-	use strum::IntoEnumIterator;
-	let mut names: Vec<OptId> = OptId::iter().collect();
-	names.sort_unstable_by_key(|o| <&'static str>::from(*o));
-	names.into_boxed_slice()
-});
+/// Every option in bash's listing order. Sorting the generated variant
+/// names at compile time avoids allocating and sorting on every shell start.
+const OPTS_BY_NAME: [OptId; <OptId as strum::VariantArray>::VARIANTS.len()] = {
+	const fn before(a: &str, b: &str) -> bool {
+		let (a, b) = (a.as_bytes(), b.as_bytes());
+		let mut i = 0;
+		while i < a.len() && i < b.len() {
+			if a[i] != b[i] {
+				return a[i] < b[i];
+			}
+			i += 1;
+		}
+		a.len() < b.len()
+	}
+	let variants = <OptId as strum::VariantArray>::VARIANTS;
+	let names = <OptId as strum::VariantNames>::VARIANTS;
+	let mut sorted = [OptId::Allexport; <OptId as strum::VariantArray>::VARIANTS.len()];
+	let mut i = 0;
+	while i < variants.len() {
+		let next = variants[i];
+		let mut at = i;
+		while at > 0 && before(names[next as usize], names[sorted[at - 1] as usize]) {
+			sorted[at] = sorted[at - 1];
+			at -= 1;
+		}
+		sorted[at] = next;
+		i += 1;
+	}
+	sorted
+};
 
 /// The `set -o` and `shopt` options that are on, as `a:b:c` lists in
 /// listing order.
@@ -1759,7 +1937,7 @@ fn option_lists(
 	mut on: impl FnMut(OptId) -> Result<bool, StoreError>,
 ) -> Result<(BString, BString), StoreError> {
 	let (mut set, mut shopt) = (BString::default(), BString::default());
-	for &opt in OPTS_BY_NAME.iter() {
+	for &opt in &OPTS_BY_NAME {
 		if !on(opt)? {
 			continue;
 		}
@@ -1839,6 +2017,7 @@ pub fn store_record(
 ///
 /// # Errors
 /// [`StoreError`] when the option record cannot be read.
+#[inline]
 pub fn option(
 	root: &mut Root,
 	store: &mut dyn StateStore,
@@ -1977,10 +2156,7 @@ fn value_scalar(value: &VarValue) -> Option<&[u8]> {
 			.iter()
 			.find(|(i, _)| *i == 0)
 			.map(|(_, v)| v.as_slice()),
-		VarValue::Assoc(items) => items
-			.iter()
-			.find(|(k, _)| k.as_slice() == b"0")
-			.map(|(_, v)| v.as_slice()),
+		VarValue::Assoc(items) => items.get(b"0").map(|v| v.as_slice()),
 	}
 }
 
@@ -2050,13 +2226,15 @@ pub fn exported(
 	})
 }
 
-/// Push `name` with `var`'s scalar view when it is exported and set.
+/// Push `name` with `var`'s value when it is an exported, set scalar
+/// (an exported array keeps the attribute but stays out of the
+/// environment, in bash and zsh alike).
 fn push_exported(out: &mut Vec<(BString, BString)>, name: &[u8], var: &Var) {
 	if var.attrs.contains(Attrs::EXPORT)
 		&& !var.attrs.contains(Attrs::INVISIBLE)
-		&& let Some(s) = value_scalar(&var.value)
+		&& let VarValue::Str(s) = &var.value
 	{
-		out.push((BString::from(name), BString::from(s)));
+		out.push((BString::from(name), s.clone()));
 	}
 }
 
@@ -2098,7 +2276,7 @@ pub fn exported_funcs(
 		if let Record::Func { source, attrs, .. } = rec
 			&& attrs.contains(Attrs::EXPORT)
 		{
-			out.push((BString::from(name), source.clone()));
+			out.push((BString::from(name), (**source).clone()));
 		}
 	};
 	let overlay = vp.overlay.as_ref().map(|ov| ov.records.iter());
@@ -2177,13 +2355,24 @@ fn scan_vars(
 				},
 			}
 		};
+		// A zsh private parameter hidden from the running function
+		// ([`private_hidden`]) leaves the outer one listed.
+		let private = |var: Option<&Var>| var.is_some_and(|v| v.attrs.contains(Attrs::ZSH_PRIVATE));
 		if vp.overlay.is_none() && root.depth > 0 {
-			for (_, name, var) in &root_locals(store)? {
+			let innermost = root_func_scope(root, store)?.map(|f| f as usize);
+			for (depth, name, var) in &root_locals(store)? {
+				if private(var.as_ref()) && private_hidden(*depth as usize, innermost) {
+					continue;
+				}
 				shadow(name, var.as_ref());
 			}
 		}
-		for scope in &vp.scopes {
+		let innermost = vp.scopes.iter().rposition(|s| s.func.is_some());
+		for (i, scope) in vp.scopes.iter().enumerate() {
 			for (name, var) in &scope.vars {
+				if private(var.as_ref()) && private_hidden(i, innermost) {
+					continue;
+				}
 				shadow(name, var.as_ref());
 			}
 		}
@@ -2507,6 +2696,25 @@ pub fn scope_set(
 		root.materialize(store);
 	}
 	put_scope(root, store, vp, at, name, var);
+}
+
+/// Remove the binding of `name` from scope `i` of `vp` (it is no longer
+/// declared there).
+pub fn scope_unbind(
+	root: &mut Root,
+	store: &mut dyn StateStore,
+	vp: &mut Vproc,
+	i: usize,
+	name: &[u8],
+) {
+	match scope_in(vp, i) {
+		In::Vec(i) => {
+			if let Some(s) = vp.scopes.get_mut(i) {
+				s.vars.remove(name);
+			}
+		},
+		In::Store(depth) => root.write(store, Change::Del(local_key(depth, name))),
+	}
 }
 
 /// Remove every binding of scope `i` of `vp`.
@@ -3357,7 +3565,7 @@ mod tests {
 		let func = |src: &str, attrs| Record::Func {
 			mode: ModeId::Bash,
 			sticky: None,
-			source: src.into(),
+			source: BString::from(src).into(),
 			unit: UnitId([0; 32]),
 			attrs,
 			file: BString::default(),
@@ -3439,7 +3647,7 @@ mod tests {
 				.into_iter()
 				.filter_map(|(k, r)| match (k, r) {
 					(KeyBuf::Func(n), Record::Func { source, attrs, .. }) if attrs.contains(x) => {
-						Some((n, source))
+						Some((n, (*source).clone()))
 					},
 					_ => None,
 				})
@@ -3498,7 +3706,7 @@ mod tests {
 			Var { attrs: Attrs::INDEXED, value: VarValue::Indexed(Vec::new()) },
 			Var {
 				attrs: Attrs::ASSOC,
-				value: VarValue::Assoc(vec![(s("k"), s("v")), (s("0"), s("z"))]),
+				value: VarValue::Assoc(vec![(s("k"), s("v")), (s("0"), s("z"))].into()),
 			},
 			Var { attrs: Attrs::INVISIBLE.with(Attrs::INDEXED), value: VarValue::Indexed(Vec::new()) },
 		];
@@ -3509,12 +3717,18 @@ mod tests {
 				VarEdit::Set { elem: None, value: b"new", append: false },
 				VarEdit::Set { elem: None, value: b"+", append: true },
 				VarEdit::Set { elem: Some(Elem::Index(5)), value: b"q", append: false },
+				VarEdit::Set { elem: Some(Elem::Index(5)), value: b"+", append: true },
+				VarEdit::Set { elem: Some(Elem::Index(5)), value: b"", append: true },
 				VarEdit::Set { elem: Some(Elem::Index(3)), value: b"q", append: true },
 				VarEdit::Set { elem: Some(Elem::Key(k)), value: b"w", append: true },
 				VarEdit::Set { elem: Some(Elem::Key(n)), value: b"w", append: false },
 				VarEdit::Number { elem: None, value: b"42" },
 				VarEdit::Number { elem: Some(Elem::Index(2)), value: b"1" },
 				VarEdit::Number { elem: Some(Elem::Key(k)), value: b"9" },
+				VarEdit::Remove(Elem::Index(5)),
+				VarEdit::Remove(Elem::Index(3)),
+				VarEdit::Remove(Elem::Key(k)),
+				VarEdit::Remove(Elem::Key(n)),
 				VarEdit::Push(vec![s("p"), s("q")]),
 				VarEdit::AddAttrs(Attrs::EXPORT),
 				VarEdit::Replace(Var::scalar("r", Attrs::READONLY)),

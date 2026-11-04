@@ -24,7 +24,7 @@ fn session() -> Session {
 	Session::new(SessionConfig {
 		env,
 		cwd: BString::from(cwd.as_os_str().as_bytes()),
-		fs: Box::new(crate::sys::StdFs),
+		fs: Box::new(crate::sys::StdFs::default()),
 		vfs: None,
 		runtime: tokio::runtime::Handle::current(),
 		output_decoding: None,

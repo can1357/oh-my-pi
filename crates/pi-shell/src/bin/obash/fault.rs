@@ -33,21 +33,17 @@ use std::{
 	fs,
 	io::{self, Write},
 	path::PathBuf,
-	task::Context,
-	time::Duration,
 };
 
 use pi_shell::{
 	bash::{
-		Budget, CallId, CallOutcome, Cx, Engine, EngineConfig, EventMask, ExtError,
-		ExternalizeReport, Lost, MemStore, Platform, RestoreError, RestoreOpts, RunId, Shell, SigSet,
-		Signal, Step, StoreError, Vpid,
+		Budget, Cx, Engine, EngineConfig, EventMask, ExtError, ExternalizeReport, Lost, MemStore,
+		Platform, RestoreError, RestoreOpts, RunId, Shell, SigSet, Signal, Step, StoreError, Vpid,
 	},
+	process::{NativeHost, no_callouts, wait_runnable},
 	sys::Parker,
 	testkit::Rng,
 };
-
-use crate::host::NativeHost;
 
 /// Environment variable counting nested obash instances under a fault run.
 pub const FAULT_DEPTH: &str = "PI_SHELL_FAULT_DEPTH";
@@ -865,27 +861,6 @@ fn suspend(
 	Ok(Suspended::Ready(shell.externalize(&mut Cx { host, store })?))
 }
 
-/// obash has no host callouts: answer each with an error.
-fn no_callouts(shell: &mut Shell, id: CallId) {
-	shell.complete(id, CallOutcome::Error("host callouts are not available in obash".into()));
-}
-
-/// Park until the shell may make progress, forwarding OS signals (a signal
-/// caught on this thread ends the park at once on Linux; otherwise within
-/// 50 ms).
-fn wait_runnable(parker: &mut Parker, shell: &Shell, root: Vpid) {
-	let ctl = shell.control();
-	let waker = parker.waker().clone();
-	let mut cx = Context::from_waker(&waker);
-	loop {
-		NativeHost::dispatch_signals(&ctl, root);
-		if ctl.poll_runnable(&mut cx).is_ready() {
-			break;
-		}
-		parker.park(Duration::from_millis(50));
-	}
-}
-
 /// The OS side of `exec` mode: signal masks and dispositions, the image fd,
 /// the re-exec.
 #[cfg(unix)]
@@ -989,6 +964,7 @@ mod os {
 			if unsafe { libc::sigaction(n, &raw const default, ptr::null_mut()) } != 0 {
 				return Err(io::Error::last_os_error());
 			}
+			pi_shell::sys::dispositions_changed();
 		}
 		Ok(())
 	}

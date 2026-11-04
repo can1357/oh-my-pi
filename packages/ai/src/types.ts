@@ -659,11 +659,15 @@ export interface StreamOptions {
 	 * are not covered.
 	 */
 	maxInFlightRequests?: Record<string, number>;
+	/** Called after the provider slot is acquired, before each model dispatch; throwing refuses that attempt. */
+	beforeDispatch?: () => void;
 	/** @internal Keep the in-flight permit until a provider's bounded terminal drain finishes. */
 	waitForTerminalDrain?: boolean;
 	/**
 	 * Optional callback for inspecting or replacing provider payloads before sending.
 	 * Return undefined to keep the payload unchanged.
+	 * A pre-send standard Responses WS fallback rebuilds the HTTP candidate and
+	 * invokes this hook again. WS connection-local delta shaping follows it.
 	 */
 	onPayload?: (
 		payload: unknown,
@@ -672,6 +676,9 @@ export interface StreamOptions {
 	) => unknown | undefined | Promise<unknown | undefined>;
 	/**
 	 * Optional callback for provider response metadata after headers are received.
+	 * Standard Responses WS reports each physical handshake once with
+	 * metadata.transport="websocket" and metadata.phase="handshake", not each
+	 * generation. Its headers are not per-generation cache/request metadata.
 	 */
 	onResponse?: (response: ProviderResponseMetadata, model?: Model<Api>, signal?: AbortSignal) => void | Promise<void>;
 	/**
@@ -737,6 +744,8 @@ export interface StreamOptions {
 	 * implementation when set. Defaults to `globalThis.fetch`. Providers that
 	 * do not use `fetch` (Bedrock's AWS SDK transport, Cursor's HTTP/2
 	 * channel) silently ignore the override.
+	 * Standard Responses defaults to HTTP/SSE when set unless a request or model
+	 * explicitly selects WebSockets. WebSocket connections do not use this hook.
 	 */
 	fetch?: FetchImpl;
 	/** Current session working directory for providers that need workspace-scoped discovery. */
@@ -850,7 +859,7 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	kimiApiFormat?: "openai" | "anthropic";
 	/** API format for Synthetic provider: "openai" or "anthropic" (default: "openai") */
 	syntheticApiFormat?: "openai" | "anthropic";
-	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
+	/** Standard Responses is opt-in and catalog-gated; either model/request false vetoes true. Codex keeps its independent policy. */
 	preferWebsockets?: boolean;
 	/**
 	 * OpenRouter routing-variant suffix automatically appended to model IDs when

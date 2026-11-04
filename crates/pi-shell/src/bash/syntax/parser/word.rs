@@ -18,7 +18,7 @@ pub(super) struct WordTok {
 	/// bash `quoted`: a quote character or backslash appeared.
 	pub quoted: bool,
 	/// The text is an assignment (bash `assignment()`): how to split it.
-	pub asg:    Option<AsgSplit>,
+	pub asg:    Option<Box<AsgSplit>>,
 }
 
 /// Where an assignment word splits.
@@ -53,17 +53,15 @@ impl WordTok {
 
 	/// bash's text of the word, for messages.
 	pub(super) fn render(&self, out: &mut Vec<u8>) {
-		crate::bash::syntax::print::parts_text(&self.parts_for_render(), out);
-	}
-
-	fn parts_for_render(&self) -> Vec<WordPart> {
-		let mut parts = self.parts.clone();
 		if let Some(a) = &self.asg
 			&& let Some(elems) = &a.array
 		{
+			let mut parts = self.parts.clone();
 			parts.insert(a.value_at, WordPart::Compound(elems.clone()));
+			crate::bash::syntax::print::parts_text(&parts, out);
+		} else {
+			crate::bash::syntax::print::parts_text(&self.parts, out);
 		}
-		parts
 	}
 
 	/// The token as a plain word.
@@ -120,23 +118,23 @@ impl WordTok {
 }
 
 /// Join adjacent literal parts.
-pub(super) fn merge_lits(parts: Vec<WordPart>) -> Vec<WordPart> {
-	let mut out: Vec<WordPart> = Vec::with_capacity(parts.len());
-	for p in parts {
-		if let WordPart::Lit(s) = &p
-			&& let Some(WordPart::Lit(prev)) = out.last_mut()
-		{
-			prev.extend_from_slice(s);
-			continue;
+pub(super) fn merge_lits(mut parts: Vec<WordPart>) -> Vec<WordPart> {
+	if parts.len() <= 1 {
+		if matches!(parts.first(), Some(WordPart::Lit(s)) if s.is_empty()) {
+			parts.clear();
 		}
-		if let WordPart::Lit(s) = &p
-			&& s.is_empty()
-		{
-			continue;
-		}
-		out.push(p);
+		return parts;
 	}
-	out
+	parts.retain(|part| !matches!(part, WordPart::Lit(s) if s.is_empty()));
+	parts.dedup_by(|next, previous| {
+		if let (WordPart::Lit(next), WordPart::Lit(previous)) = (next, previous) {
+			previous.extend_from_slice(next);
+			true
+		} else {
+			false
+		}
+	});
+	parts
 }
 
 /// Accumulates literal bytes and parts.
@@ -160,12 +158,24 @@ impl Acc {
 
 	fn push(&mut self, p: WordPart) {
 		self.flush();
-		self.parts.push(p);
+		if self.parts.capacity() == 0 {
+			self.parts = vec![p];
+		} else {
+			self.parts.push(p);
+		}
 	}
 
 	fn finish(mut self) -> Vec<WordPart> {
-		self.flush();
-		self.parts
+		if self.parts.is_empty() {
+			if self.lit.is_empty() {
+				self.parts
+			} else {
+				vec![WordPart::Lit(self.lit)]
+			}
+		} else {
+			self.flush();
+			self.parts
+		}
 	}
 
 	const fn is_empty(&self) -> bool {
@@ -226,39 +236,25 @@ const fn special_dollar(c: u8) -> Option<Special> {
 }
 
 /// Bytes with no special meaning in an unquoted word.
+const PLAIN_WORD_BYTES: [bool; 256] = {
+	let mut bytes = [true; 256];
+	let special = b"\\'\"`$<>();&| \t\n[]=+}@*?!";
+	let mut i = 0;
+	while i < special.len() {
+		bytes[special[i] as usize] = false;
+		i += 1;
+	}
+	bytes
+};
+
 const fn plain_word_byte(c: u8) -> bool {
-	!matches!(
-		c,
-		b'\\'
-			| b'\''
-			| b'"'
-			| b'`'
-			| b'$'
-			| b'<'
-			| b'>'
-			| b'('
-			| b')'
-			| b';'
-			| b'&'
-			| b'|'
-			| b' '
-			| b'\t'
-			| b'\n'
-			| b'['
-			| b']'
-			| b'='
-			| b'+'
-			| b'}'
-			| b'@'
-			| b'*'
-			| b'?'
-			| b'!'
-	)
+	PLAIN_WORD_BYTES[c as usize]
 }
 
 impl<'s> Parser<'s> {
 	/// Read one word token at the cursor (bash `read_token_word`).
 	/// `acceptable`: an assignment may start here.
+	#[inline(never)]
 	pub(super) fn read_word(&mut self, acceptable: bool) -> PResult<WordTok> {
 		let lo = self.off();
 		let mut acc = Acc::new();
@@ -268,7 +264,7 @@ impl<'s> Parser<'s> {
 		} else {
 			Scan::Start
 		};
-		let mut split: Option<AsgSplit> = None;
+		let mut split: Option<Box<AsgSplit>> = None;
 		let mut sub: Option<(usize, usize, Span)> = None;
 		let compassign = self.lx.compassign;
 		let mut first = true;
@@ -280,6 +276,22 @@ impl<'s> Parser<'s> {
 				let n = run_len(self.feat, rest, |c| !plain_word_byte(c));
 				if n > 0 {
 					let run = &rest[..n];
+					if first
+						&& !self.lx.regexp
+						&& !compassign
+						&& rest.get(n).is_some_and(|&c| {
+							is_break(c) && !(matches!(c, b'<' | b'>') && rest.get(n + 1) == Some(&b'('))
+						}) {
+						let text = run.to_vec();
+						self.advance(n);
+						return Ok(WordTok {
+							lo,
+							hi: self.off(),
+							parts: vec![WordPart::Lit(text)],
+							quoted: false,
+							asg: None,
+						});
+					}
 					match scan {
 						Scan::Start | Scan::Name => {
 							let ok = if scan == Scan::Start {
@@ -459,7 +471,7 @@ impl<'s> Parser<'s> {
 							self.bump();
 							s.array = Some(self.compound_assignment()?);
 						}
-						split = Some(s);
+						split = Some(Box::new(s));
 					} else if scan != Scan::Found {
 						scan = Scan::No;
 					}
@@ -468,8 +480,7 @@ impl<'s> Parser<'s> {
 				_ => {
 					// `]`, `}`, `@`, `*`, `?`, `!` and bytes read one at a time
 					// (across alias buffers, where the fast path stops).
-					let bytes = self.take_char(c);
-					acc.lit.extend_from_slice(&bytes);
+					self.take_char_into(c, &mut acc.lit);
 					scan = match scan {
 						Scan::Start if is_name_start(c) => Scan::Name,
 						Scan::Name if is_name_char(c) => Scan::Name,
@@ -483,6 +494,17 @@ impl<'s> Parser<'s> {
 		let hi = self.off();
 		let parts = acc.finish();
 		Ok(WordTok { lo, hi, parts, quoted, asg: split })
+	}
+
+	/// Consume a character into a literal without allocating an intermediate
+	/// buffer.
+	fn take_char_into(&mut self, c: u8, out: &mut Vec<u8>) {
+		if c.is_ascii() {
+			out.push(c);
+			self.bump();
+		} else {
+			out.extend_from_slice(&self.take_char(c));
+		}
 	}
 
 	/// Consume one (UTF-8) character at the cursor and return its bytes.
@@ -602,8 +624,7 @@ impl<'s> Parser<'s> {
 					}
 				},
 				_ => {
-					let bytes = self.take_char(c);
-					text.extend_from_slice(&bytes);
+					self.take_char_into(c, &mut text);
 				},
 			}
 		}
@@ -832,8 +853,7 @@ impl<'s> Parser<'s> {
 					acc.push(part);
 				},
 				_ => {
-					let bytes = self.take_char(c);
-					acc.lit.extend_from_slice(&bytes);
+					self.take_char_into(c, &mut acc.lit);
 				},
 			}
 		}
@@ -1417,6 +1437,7 @@ fn word_end_in_quote(rest: &[u8]) -> Option<usize> {
 /// `special`. Under a charset flag ([`Features::multibyte`]) the bytes after
 /// a character's first byte never end the run, and a character cut by the
 /// end of `rest` is left to the byte-at-a-time path.
+#[inline]
 fn run_len(
 	feat: crate::bash::syntax::Features,
 	rest: &[u8],

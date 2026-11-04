@@ -1428,7 +1428,7 @@ fn activate_for_menu(
 	};
 	let in_overlay = input::takes_overlay_focus(wid, key_focus(pid), skylight::window_parent);
 	let prepared = input::make_key_in_background(
-		&input::source()?,
+		&*input::source()?,
 		pid,
 		wid,
 		&window,

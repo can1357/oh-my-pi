@@ -45,6 +45,7 @@ use crate::bash::{
 	ids::{CallId, ModeId, RunId, UnitId, Vpid},
 	ir::{
 		AssignVal, CondIr, IR_VERSION, Op, OpIr, Opcode, Part, RedirTargetIr, SpawnKind, SubIr, Unit,
+		materialize,
 	},
 	mem::{Capture, MemEnd, MemImage, MemObj},
 	signal::{SigSet, Signal},
@@ -320,6 +321,8 @@ struct FrameImage {
 	debug_trap_local:  bool,
 	err_trap_local:    bool,
 	return_trap_local: bool,
+	trace_local:       bool,
+	debug_errexit:     bool,
 	err_reported:      bool,
 	ignore_errexit:    bool,
 	subshell_line:     Option<u32>,
@@ -338,6 +341,8 @@ struct SavedImage {
 enum SubImage {
 	Fork { vpid: Vpid, capture: u32 },
 	NoFork { value: bool, capture: u32 },
+	Here { status: i32 },
+	Math { status: i32, slot: u8 },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -398,6 +403,9 @@ fn scratch_image(
 			| Live::Dir(_)
 			| Live::Spawn(_)
 			| Live::Timer(_)
+			| Live::Fd(_)
+			| Live::Fs(_)
+			| Live::Zftp(_)
 			| Live::None => {},
 		}
 		state
@@ -412,6 +420,18 @@ fn scratch_image(
 		Live::Open(_) => report
 			.lost
 			.push(Lost::Pending { vpid, kind: FileKind::Pipe }),
+		// An accept or a lock wait holds a socket or file of its own.
+		Live::Fd(_) => report
+			.lost
+			.push(Lost::Pending { vpid, kind: FileKind::Socket }),
+		// A mutation (`mkdir`, a mapfile write) is not asked twice.
+		Live::Fs(_) => report
+			.lost
+			.push(Lost::Pending { vpid, kind: FileKind::Regular }),
+		// zftp's traffic on its sockets.
+		Live::Zftp(_) => report
+			.lost
+			.push(Lost::Pending { vpid, kind: FileKind::Socket }),
 		_ => {},
 	}
 	let io = sc.io.as_deref();
@@ -425,6 +445,8 @@ fn scratch_image(
 			PendingSub::NoFork { value, capture } => {
 				SubImage::NoFork { value: *value, capture: fds.capture(capture) }
 			},
+			PendingSub::Here { status } => SubImage::Here { status: *status },
+			PendingSub::Math { status, slot } => SubImage::Math { status: *status, slot: *slot as u8 },
 		}),
 		exec,
 		redir_done: io.map_or(0, |io| io.redir.done),
@@ -526,6 +548,8 @@ impl Shell {
 					debug_trap_local: f.debug_trap_local,
 					err_trap_local: f.err_trap_local,
 					return_trap_local: f.return_trap_local,
+					trace_local: f.trace_local,
+					debug_errexit: f.debug_errexit,
 					err_reported: f.err_reported,
 					ignore_errexit: f.ignore_errexit,
 					subshell_line: f.subshell_line,
@@ -942,6 +966,16 @@ impl Shell {
 								SubImage::NoFork { value, capture } => {
 									PendingSub::NoFork { capture: objs.capture(capture), value }
 								},
+								SubImage::Here { status } => PendingSub::Here { status },
+								SubImage::Math { status, slot } => PendingSub::Math {
+									status,
+									slot: match slot {
+										1 => super::proc::Slot::Redirs,
+										2 => super::proc::Slot::Assigns,
+										3 => super::proc::Slot::Builtin,
+										_ => super::proc::Slot::Words,
+									},
+								},
 							}),
 							exec: exec.map(Box::new),
 							io,
@@ -970,6 +1004,8 @@ impl Shell {
 				frame.debug_trap_local = f.debug_trap_local;
 				frame.err_trap_local = f.err_trap_local;
 				frame.return_trap_local = f.return_trap_local;
+				frame.trace_local = f.trace_local;
+				frame.debug_errexit = f.debug_errexit;
 				frame.err_reported = f.err_reported;
 				frame.ignore_errexit = f.ignore_errexit;
 				frame.subshell_line = f.subshell_line;
@@ -1116,6 +1152,13 @@ pub fn load_unit(
 	if unit.id != id || !valid(&unit) {
 		return Err(RestoreError::InvalidUnit { unit: id });
 	}
+	let unit = if unit.deferred.is_some() {
+		materialize(&unit)
+			.filter(valid)
+			.ok_or(RestoreError::InvalidUnit { unit: id })?
+	} else {
+		unit
+	};
 	Ok(engine.intern(unit))
 }
 
@@ -1123,6 +1166,9 @@ pub fn load_unit(
 /// at an existing entry, so a decoded unit cannot make the VM index out of
 /// bounds.
 fn valid(u: &Unit) -> bool {
+	if let Some(tree) = &u.deferred {
+		return u.root.is_some() && (!tree.is_empty() || !u.source.is_empty()) && u.ops.is_empty();
+	}
 	let n = u.ops.len() as u32;
 	let w_ok = |w: u32| (w as usize) < u.words.len();
 	// Brace alternatives are plain words, so expansion cannot recurse.
@@ -1235,7 +1281,7 @@ fn valid(u: &Unit) -> bool {
 				Opcode::CaseArm => idx(u.pats.len()) && op.b < n,
 				Opcode::Arith => idx(u.ariths.len()),
 				Opcode::CondTest => idx(u.conds.len()),
-				Opcode::FuncDef => idx(u.funcs.len()),
+				Opcode::FuncDef => idx(u.funcs.len()) && (op.b as usize) <= u.lists.len(),
 				Opcode::Warn => idx(u.strs.len()),
 				Opcode::Abort => {
 					idx(u.strs.len())

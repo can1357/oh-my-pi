@@ -37,7 +37,7 @@ const ttsSchema = type({
 	// from an omitted voice: xAI applies its own default, DeepInfra forwards
 	// the voice only when the caller actually set one.
 	"voice_id?": "string",
-	language: "string = 'en'",
+	"language?": "string",
 	output_path: "string",
 	sample_rate: "number.integer?",
 	bit_rate: "number.integer?",
@@ -110,6 +110,7 @@ async function synthesizeCloud(
 			text: params.text,
 			format: codec,
 			...(params.voice_id !== undefined ? { voice: params.voice_id } : {}),
+			...(params.language !== undefined ? { language: params.language } : {}),
 			...(model.api === "xai-tts" && params.sample_rate !== undefined ? { sampleRate: params.sample_rate } : {}),
 			...(model.api === "xai-tts" && params.bit_rate !== undefined ? { bitRate: params.bit_rate } : {}),
 		},

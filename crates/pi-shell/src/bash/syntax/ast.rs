@@ -9,6 +9,8 @@
 
 use alloc::{boxed::Box, vec::Vec};
 
+use serde::{Deserialize, Serialize};
+
 use crate::bash::syntax::span::{NodeId, Span};
 
 /// A whole source parsed without aliases
@@ -24,20 +26,22 @@ pub struct Program {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompleteCommand {
 	/// Source bytes of the command, without the terminating newline.
-	pub span:       Span,
+	pub span:                 Span,
 	/// 1-based line of `span.lo`.
-	pub line:       u32,
+	pub line:                 u32,
 	/// The commands.
-	pub list:       List,
+	pub list:                 List,
 	/// Number of [`NodeId`]s assigned in this unit (ids are `0..node_count`).
-	pub node_count: u32,
+	pub node_count:           u32,
 	/// Alias substitutions applied while parsing, in order; replaying them
 	/// reproduces the same tree and ids.
-	pub aliases:    Vec<AliasUse>,
+	pub aliases:              Vec<AliasUse>,
+	/// Source bytes reproduce this tree without an alias input buffer.
+	pub(crate) source_replay: bool,
 	/// Non-fatal diagnostics bash prints while parsing this command (e.g.
 	/// ``warning: here-document at line 2 delimited by end-of-file (wanted
 	/// `EOF')``).
-	pub warnings:   Vec<ParseWarning>,
+	pub warnings:             Vec<ParseWarning>,
 }
 
 /// A non-fatal parser diagnostic, printed by the engine as
@@ -60,14 +64,14 @@ pub struct AliasUse {
 }
 
 /// A sequence of and-or lists with their terminators.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct List {
 	/// Items in order.
 	pub items: Vec<ListItem>,
 }
 
 /// One and-or list and the separator that followed it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListItem {
 	/// The and-or list.
 	pub and_or: AndOr,
@@ -76,7 +80,7 @@ pub struct ListItem {
 }
 
 /// Terminator of a list item.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Sep {
 	/// `;`
 	Semi,
@@ -91,7 +95,7 @@ pub enum Sep {
 }
 
 /// `p1 && p2 || p3`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AndOr {
 	/// Preorder id.
 	pub id:    NodeId,
@@ -104,7 +108,7 @@ pub struct AndOr {
 }
 
 /// Connector inside an and-or list.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AndOrOp {
 	/// `&&`
 	And,
@@ -113,7 +117,7 @@ pub enum AndOrOp {
 }
 
 /// `[time [-p]] [!] cmd1 | cmd2 |& cmd3`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pipeline {
 	/// Preorder id.
 	pub id:     NodeId,
@@ -128,14 +132,14 @@ pub struct Pipeline {
 }
 
 /// The `time` keyword on a pipeline.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Time {
 	/// `time -p`: POSIX output format.
 	pub posix: bool,
 }
 
 /// One pipeline stage.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stage {
 	/// The command.
 	pub cmd:         Command,
@@ -144,7 +148,7 @@ pub struct Stage {
 }
 
 /// A command with its trailing redirections.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Command {
 	/// Preorder id.
 	pub id:     NodeId,
@@ -157,7 +161,7 @@ pub struct Command {
 }
 
 /// Every bash command form.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandKind {
 	/// `a=1 cmd args`
 	Simple(Simple),
@@ -195,7 +199,7 @@ pub enum CommandKind {
 }
 
 /// zsh `repeat word do …; done`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Repeat {
 	/// The count, evaluated arithmetically once at the start.
 	pub count: Word,
@@ -204,7 +208,7 @@ pub struct Repeat {
 }
 
 /// zsh `{ try-list } always { always-list }`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Try {
 	/// The try list.
 	pub body:   List,
@@ -214,25 +218,32 @@ pub struct Try {
 }
 
 /// zsh anonymous function.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnonFunc {
 	/// Body (a compound command).
-	pub body: Box<Command>,
+	pub body:   Box<Command>,
 	/// Arguments: its `$1`…
-	pub args: Vec<Word>,
+	pub args:   Vec<Word>,
+	/// zsh `function -T { … }`: traced (`PM_TAGGED_LOCAL`).
+	pub traced: bool,
 }
 
 /// A simple command: assignments, then words.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Simple {
 	/// Leading `NAME=value` assignments.
 	pub assigns: Vec<Assign>,
 	/// Command name and arguments.
 	pub words:   Vec<Word>,
+	/// zsh: the command word is a reserved word of the `typeset` family
+	/// (the lexer's `TYPESET`), which runs its builtin whether or not the
+	/// builtin is disabled or a function has its name.
+	#[serde(default)]
+	pub typeset: bool,
 }
 
 /// `if` with its `elif` arms.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct If {
 	/// The `if` arm, then each `elif` arm.
 	pub arms:      Vec<IfArm>,
@@ -241,7 +252,7 @@ pub struct If {
 }
 
 /// One `if`/`elif` condition with its body.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IfArm {
 	/// Condition list.
 	pub cond: List,
@@ -250,7 +261,7 @@ pub struct IfArm {
 }
 
 /// `while` or `until`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct While {
 	/// `until`: loop while the condition fails.
 	pub until: bool,
@@ -261,7 +272,7 @@ pub struct While {
 }
 
 /// `for`/`select` over words.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct For {
 	/// Loop variable as written (validated at run time, as bash does).
 	pub var:        Vec<u8>,
@@ -277,7 +288,7 @@ pub struct For {
 }
 
 /// Arithmetic `for ((init; cond; step))`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArithFor {
 	/// Initializer expression.
 	pub init: ArithText,
@@ -290,7 +301,7 @@ pub struct ArithFor {
 }
 
 /// `case word in … esac`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Case {
 	/// Subject word.
 	pub word: Word,
@@ -299,7 +310,7 @@ pub struct Case {
 }
 
 /// One `pat | pat) body ;;` arm.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaseArm {
 	/// Alternative patterns.
 	pub patterns: Vec<Word>,
@@ -310,7 +321,7 @@ pub struct CaseArm {
 }
 
 /// Terminator of a `case` arm.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CaseTerm {
 	/// `;;`: leave the `case`.
 	Break,
@@ -321,7 +332,7 @@ pub enum CaseTerm {
 }
 
 /// Arithmetic expression text, evaluated by the engine.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArithText {
 	/// Span of the expression text.
 	pub span:    Span,
@@ -332,7 +343,7 @@ pub struct ArithText {
 }
 
 /// `[[ … ]]` expression.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CondExpr {
 	/// `-op word` (`-f file`, `-n str`, …).
 	Unary {
@@ -363,7 +374,7 @@ pub enum CondExpr {
 }
 
 /// Function definition.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FuncDef {
 	/// Function name.
 	pub name:        Vec<u8>,
@@ -372,12 +383,14 @@ pub struct FuncDef {
 	pub extra_names: Vec<Vec<u8>>,
 	/// Defined with the `function` keyword.
 	pub keyword:     bool,
+	/// zsh `function -T name { … }`: defined traced (`PM_TAGGED_LOCAL`).
+	pub traced:      bool,
 	/// Body (a compound command).
 	pub body:        Box<Command>,
 }
 
 /// `coproc [NAME] cmd`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Coproc {
 	/// Explicit name (default `COPROC`).
 	pub name: Option<Vec<u8>>,
@@ -386,7 +399,7 @@ pub struct Coproc {
 }
 
 /// `NAME=value`, `NAME+=value`, `NAME[i]=value`, `NAME=(…)`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Assign {
 	/// Preorder id.
 	pub id:     NodeId,
@@ -403,7 +416,7 @@ pub struct Assign {
 }
 
 /// Right-hand side of an assignment.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AssignValue {
 	/// `NAME=word`
 	Scalar(Word),
@@ -412,7 +425,7 @@ pub enum AssignValue {
 }
 
 /// One element of a compound array assignment.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArrayElem {
 	/// `[key]=` prefix.
 	pub key:    Option<Word>,
@@ -423,7 +436,7 @@ pub struct ArrayElem {
 }
 
 /// A redirection.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Redir {
 	/// Source span.
 	pub span:   Span,
@@ -437,7 +450,7 @@ pub struct Redir {
 }
 
 /// Explicit redirection source.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RedirFd {
 	/// `N>`
 	Num(u32),
@@ -446,7 +459,7 @@ pub enum RedirFd {
 }
 
 /// Redirection operators.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RedirOp {
 	/// `<`
 	In,
@@ -482,7 +495,7 @@ pub enum RedirOp {
 }
 
 /// What a redirection points at.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RedirTarget {
 	/// A word (file name, fd number, here-string).
 	Word(Word),
@@ -491,7 +504,7 @@ pub enum RedirTarget {
 }
 
 /// A here-document.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HereDoc {
 	/// Delimiter after quote removal (what ends the document).
 	pub delim:     Vec<u8>,
@@ -509,7 +522,7 @@ pub struct HereDoc {
 }
 
 /// A shell word: a sequence of literal, quoted and expansion parts.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Word {
 	/// Preorder id.
 	pub id:    NodeId,
@@ -520,7 +533,7 @@ pub struct Word {
 }
 
 /// One piece of a word.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WordPart {
 	/// Unquoted bytes (glob characters, `~` and braces stay active).
 	Lit(Vec<u8>),
@@ -570,7 +583,7 @@ pub enum WordPart {
 }
 
 /// The deferred error of [`WordPart::BadComsub`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BadComsub {
 	/// Source text from `$(` to the end of the `${…}` word.
 	pub text: Vec<u8>,
@@ -583,7 +596,7 @@ pub struct BadComsub {
 }
 
 /// A parameter expansion.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Param {
 	/// Which parameter.
 	pub name:     ParamName,
@@ -600,7 +613,7 @@ pub struct Param {
 }
 
 /// The parameter being expanded.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParamName {
 	/// A variable name.
 	Var(Vec<u8>),
@@ -611,7 +624,7 @@ pub enum ParamName {
 }
 
 /// Special parameters.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Special {
 	/// `$@`
 	At,
@@ -630,7 +643,7 @@ pub enum Special {
 }
 
 /// Array subscript in a parameter expansion.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Subscript {
 	/// `[@]`
 	At,
@@ -641,7 +654,7 @@ pub enum Subscript {
 }
 
 /// Operator inside `${…}`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParamOp {
 	/// Plain `$x` / `${x}`.
 	None,
@@ -721,7 +734,7 @@ pub enum ParamOp {
 }
 
 /// Occurrence selector of `${x/p/r}`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ReplaceMode {
 	/// `/`: first match.
 	First,
@@ -734,7 +747,7 @@ pub enum ReplaceMode {
 }
 
 /// Conversion of `${x^…}` and relatives.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CaseMode {
 	/// `^`
 	Upper,
@@ -745,7 +758,7 @@ pub enum CaseMode {
 }
 
 /// A command substitution.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comsub {
 	/// Syntax used.
 	pub kind: ComsubKind,
@@ -757,7 +770,7 @@ pub struct Comsub {
 }
 
 /// The four command-substitution forms of bash 5.3.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ComsubKind {
 	/// `$(…)`
 	Dollar,
@@ -770,7 +783,7 @@ pub enum ComsubKind {
 }
 
 /// A process substitution.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcSub {
 	/// `>(…)` rather than `<(…)`.
 	pub output: bool,

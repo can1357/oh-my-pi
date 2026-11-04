@@ -1059,12 +1059,14 @@ export class Agent {
 		const runController = this.#abortController;
 		if (!prepare) {
 			this.#queuedMessageDeliveries.add({ queue, controller: runController, messages, next: 0, additional: [] });
+			this.#emitQueueChanged();
 			return messages;
 		}
 
 		const claim: QueuedMessageClaim = { messages, controller: new AbortController() };
 		this.#queuedMessageClaims[queue] = claim;
 		const preparationSignal = AbortSignal.any([signal, claim.controller.signal]);
+		this.#emitQueueChanged();
 		try {
 			const preparation = await prepare(messages, preparationSignal, queue);
 			signal.throwIfAborted();
@@ -1084,6 +1086,7 @@ export class Agent {
 				next: 0,
 				additional: additional ?? [],
 			});
+			this.#emitQueueChanged();
 			return additional?.length ? [...messages, ...additional] : messages;
 		} catch (error) {
 			if (signal.aborted) throw error;
@@ -1122,6 +1125,7 @@ export class Agent {
 		// Live steering was taken before anything the run still holds undelivered.
 		this.#liveSteered = this.#liveSteered.filter(entry => {
 			if (entry.controller !== controller) return true;
+			if (entry.message.role === "user") delete entry.message.liveSteered;
 			restored.steering.push(entry.message);
 			return false;
 		});
@@ -1359,11 +1363,9 @@ export class Agent {
 		this.#state.messages = ms.slice();
 	}
 
-	/** Signal that the steering/follow-up queue contents may have changed. Every
-	 *  queue mutator below calls this once after mutating, so external layers
-	 *  (AgentSession's `queue_update` coalescing) have a single seam to observe
-	 *  enqueue, dequeue-on-delivery, clear, and restore without emits scattered
-	 *  across every call site that queues or dequeues a message. */
+	/** Signal after a queue transition has settled its pending, claim, and
+	 *  delivery state, so AgentSession's `queue_update` coalescing observes
+	 *  a consistent snapshot across enqueue, preparation, delivery, and restore. */
 	#emitQueueChanged(): void {
 		for (const listener of this.#queueListeners) {
 			try {
@@ -1530,6 +1532,19 @@ export class Agent {
 		return claim ? [...claim.messages, ...this.#steeringQueue] : this.#steeringQueue;
 	}
 
+	#isUndeliveredQueuedMessage(message: AgentMessage): boolean {
+		for (const entry of this.#liveSteered) {
+			if (entry.message === message || entry.additional?.includes(message)) return true;
+		}
+		for (const delivery of this.#queuedMessageDeliveries) {
+			if (delivery.additional.includes(message)) return true;
+			for (let i = delivery.next; i < delivery.messages.length; i++) {
+				if (delivery.messages[i] === message) return true;
+			}
+		}
+		return false;
+	}
+
 	/** Dequeued messages not yet in the transcript, e.g. steering a provider
 	 *  took into its in-flight response via live steering. Aborting the run
 	 *  requeues them, so the session's empty-submit interrupt counts them as
@@ -1614,14 +1629,12 @@ export class Agent {
 	#dequeueSteeringMessages(): AgentMessage[] {
 		const messages = this.#nextDeliveryBatch("steering");
 		this.#steeringQueue = this.#steeringQueue.slice(messages.length);
-		if (messages.length > 0) this.#emitQueueChanged();
 		return messages;
 	}
 
 	#dequeueFollowUpMessages(): AgentMessage[] {
 		const messages = this.#nextDeliveryBatch("followUp");
 		this.#followUpQueue = this.#followUpQueue.slice(messages.length);
-		if (messages.length > 0) this.#emitQueueChanged();
 		return messages;
 	}
 
@@ -2083,6 +2096,7 @@ export class Agent {
 				}
 				return this.#dequeueSteeringMessagesAfterHooks(signal ?? loopSignal);
 			},
+			isUndeliveredQueuedMessage: message => this.#isUndeliveredQueuedMessage(message),
 			hasSteeringMessages: () =>
 				steeringQueueState(
 					this.#steeringQueue,

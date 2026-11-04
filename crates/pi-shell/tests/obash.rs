@@ -4,6 +4,8 @@
 mod obash_support;
 
 use std::{fmt::Write as _, fs, path::PathBuf};
+#[cfg(unix)]
+use std::{os::unix::process::CommandExt, time::UNIX_EPOCH};
 
 use pi_shell::testkit::golden;
 
@@ -110,6 +112,66 @@ fn dollar_zero_and_positionals_follow_bash_c() {
 }
 
 #[test]
+fn scalar_words_keep_quoting_scope_and_replay() {
+	let script = r#"
+show() { printf '%s:' "$#"; printf '<%s>' "$@"; echo; }
+f() {
+	local x=$1
+	local -n ref=x
+	show "$x" "$ref" "$1" "${#1}"
+	ref=changed
+	show "$x"
+}
+x=global
+f 'a b'
+show "$x"
+set -- '' 'a b'
+a=$1; b=$2
+show "$1" "$2" "$a" "$b"
+IFS=ab
+show "$2" $2
+unset IFS missing
+show "$missing" "${missing-default}"
+set -- old
+show "$1" "$(set -- changed; printf sub)" "$1"
+set -u
+show "$1"
+"#;
+	let expected = b"4:<a b><a b><a b><3>\n1:<changed>\n1:<global>\n4:<><a b><><a b>\n3:<a b><>< >\n2:<><default>\n3:<old><sub><old>\n1:<old>\n";
+	for fault in [false, true] {
+		let mut cmd = obash();
+		if fault {
+			cmd.arg("--fault=1:7");
+		}
+		let out = output(cmd.args(["-c", script]));
+		assert_eq!(out.stdout, expected, "fault={fault}");
+		assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+		assert!(out.status.success());
+	}
+}
+
+/// `read` reads ahead on a file the shell opened; an external handed the
+/// descriptor afterwards (a group's stdin, `<&3`) starts right after the
+/// lines `read` consumed, and a `read` after the external goes on from where
+/// the external stopped.
+#[test]
+fn externals_start_where_read_stopped() {
+	let dir = tempfile::tempdir().unwrap();
+	let file = dir.path().join("lines");
+	let text: String = (1..=5000).map(|i| format!("line {i}\n")).collect();
+	fs::write(&file, text).unwrap();
+	let script = r#"{ read -r a; /usr/bin/true; read -r b; /usr/bin/wc -l | /usr/bin/tr -d ' '; } < "$1"
+exec 3< "$1"
+read -r -u3 x
+/usr/bin/wc -l <&3 | /usr/bin/tr -d ' '
+read -r -u3 y || echo eof
+echo "$a|$b|$x"
+"#;
+	let out = output(obash().args(["-c", script, "sh"]).arg(&file));
+	assert_eq!(String::from_utf8_lossy(&out.stdout), "4998\n4999\neof\nline 1|line 2|line 1\n");
+}
+
+#[test]
 fn script_file_errors_use_the_script_name() {
 	let dir = tempfile::tempdir().unwrap();
 	let script = dir.path().join("s.sh");
@@ -188,4 +250,33 @@ fn print_flag_prints_declare_f_layout() {
 		String::from_utf8_lossy(&bad.stderr)
 			.contains("-c: line 1: syntax error near unexpected token `fi'")
 	);
+}
+
+/// A stale lock that cannot be unlinked must report its error, not retry
+/// forever.
+#[cfg(unix)]
+#[test]
+fn history_write_reports_an_unremovable_stale_lock() {
+	let dir = tempfile::tempdir().unwrap();
+	let history = dir.path().join("history");
+	let lock = dir.path().join("history.LOCK");
+	fs::create_dir(&lock).unwrap();
+	fs::set_times(&lock, fs::FileTimes::new().set_modified(UNIX_EPOCH)).unwrap();
+	let out = output(
+		obash()
+			.arg0("zsh")
+			.args([
+				"-f",
+				"-i",
+				"-c",
+				"HISTSIZE=10; SAVEHIST=10; print -s -- saved; fc -W \"$1\"; print unexpected",
+				"zsh",
+			])
+			.arg(&history),
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(stderr.contains("locking failed"), "{stderr}");
+	assert!(stderr.contains(&*history.to_string_lossy()), "{stderr}");
+	assert!(out.stdout.is_empty(), "{}", String::from_utf8_lossy(&out.stdout));
+	assert!(!history.exists(), "failed lock must not overwrite history");
 }

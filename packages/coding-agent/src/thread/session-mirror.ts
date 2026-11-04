@@ -225,6 +225,7 @@ export interface SessionAbortOptions {
 	goalReason?: "interrupted" | "internal";
 	reason?: string;
 	preserveCompaction?: boolean;
+	deliverQueuedMessages?: boolean;
 }
 
 /**

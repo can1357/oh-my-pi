@@ -23,7 +23,7 @@ import {
 } from "@oh-my-pi/pi-tui/chat/reply-write";
 import { readMediaPath } from "@oh-my-pi/pi-tui/native/blobs";
 import { TodoReminderComponent } from "@oh-my-pi/pi-tui/chat/todo-reminder";
-import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import { isNativeRendering, nativePacing } from "@oh-my-pi/pi-tui/native/state";
 import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import {
 	asyncJobState,
@@ -375,9 +375,11 @@ export class EventController {
 		);
 		this.#streamingReveal = new StreamingRevealController({
 			// Extension text renderers get the full text so far on each drawn update (deltas within one
-			// frame are coalesced), never a partly revealed prefix from the typing reveal.
+			// frame are coalesced), never a partly revealed prefix from the typing reveal. A terminal that
+			// paces streamed `md` itself (Tern) gets the text as it arrives: pacing it here too is wasted work.
 			getSmoothStreaming: () =>
 				cfgDisplaySmoothStreaming.get(this.ctx.settings) &&
+				!nativePacing() &&
 				!this.ctx.viewSession.extensionRunner?.getAssistantTextRenderers?.().length,
 			getHideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			getProseOnlyThinking: () => this.ctx.proseOnlyThinking,
@@ -414,8 +416,15 @@ export class EventController {
 			manual_compaction_end: async () => {},
 			auto_retry_start: e => this.#handleAutoRetryStart(e),
 			auto_retry_end: e => this.#handleAutoRetryEnd(e),
-			cache_warming_start: async () => {},
-			cache_warming_end: async () => {},
+			// The cache details show a refresh in flight; its hit moves the entry's expiry, a miss turns it cold.
+			cache_warming_start: async () => {
+				this.ctx.statusLine.invalidate();
+				this.ctx.ui.requestRender();
+			},
+			cache_warming_end: async () => {
+				this.ctx.statusLine.invalidate();
+				this.ctx.ui.requestRender();
+			},
 			retry_fallback_applied: e => this.#handleRetryFallbackApplied(e),
 			retry_fallback_succeeded: e => this.#handleRetryFallbackSucceeded(e),
 			ttsr_triggered: e => this.#handleTtsrTriggered(e),
