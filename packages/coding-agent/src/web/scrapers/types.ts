@@ -68,10 +68,11 @@ const RAW_TEXT_TAGS: Record<string, true> = {
 	noscript: true,
 	plaintext: true,
 };
-const TAG_NAME_RE = /[a-z][^\s/>]*/iy;
-const ATTR_GAP_RE = /[\s/]*/y;
-const ATTR_NAME_RE = /[^\s/>=]+/y;
-const ATTR_VALUE_RE = /\s*=\s*(?:"([^"]*)"?|'([^']*)'?|([^\s>]*))/y;
+// Markup whitespace is ASCII tab, LF, FF, CR and space only; a no-break space is attribute text.
+const TAG_NAME_RE = /[a-z][^\t\n\f\r />]*/iy;
+const ATTR_GAP_RE = /[\t\n\f\r /]*/y;
+const ATTR_NAME_RE = /[^\t\n\f\r />=]+/y;
+const ATTR_VALUE_RE = /[\t\n\f\r ]*=[\t\n\f\r ]*(?:"([^"]*)"?|'([^']*)'?|([^\t\n\f\r >]*))/y;
 
 /**
  * True when a page small enough to be an interstitial holds an `<input name="js_challenge">` field.
@@ -124,13 +125,14 @@ function hasChallengeForm(html: string): boolean {
 		if (closing) {
 			if (tagName === "template" && templates > 0) templates--;
 		} else if (tagName === "input") {
-			if (templates === 0 && fieldName === "js_challenge") return true;
+			// A tag cut off by the end of the page before its `>` is no element.
+			if (templates === 0 && fieldName === "js_challenge" && pos < html.length) return true;
 		} else if (tagName === "template") {
 			templates++;
 		} else if (Object.hasOwn(RAW_TEXT_TAGS, tagName)) {
 			if (tagName === "plaintext") return false;
 			// Only `</tag` followed by whitespace, `/` or `>` ends raw text; `</scripture>` is text.
-			const end = new RegExp(`</${tagName}(?=[\\s/>])`, "gi");
+			const end = new RegExp(`</${tagName}(?=[\\t\\n\\f\\r />])`, "gi");
 			end.lastIndex = at;
 			const match = end.exec(html);
 			if (!match) return false;
