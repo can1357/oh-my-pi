@@ -1698,7 +1698,7 @@ mod shfmt {
 						bang.push(at);
 						at = self.skip_ws(at + 1);
 					}
-					let hi = self.test_span(expr).1;
+					let hi = Self::test_span(expr).1;
 					let mut v = self.test(expr);
 					for &olo in bang.iter().rev() {
 						v = V::Obj(vec![
@@ -1727,10 +1727,10 @@ mod shfmt {
 						b"||"
 					};
 					let (last, rest) = terms.split_last().expect("logical chain has operands");
-					let (_, end) = self.test_span(last);
+					let (_, end) = Self::test_span(last);
 					let mut rhs = self.test(last);
 					for lhs in rest.iter().rev() {
-						let (lo, hi) = self.test_span(lhs);
+						let (lo, hi) = Self::test_span(lhs);
 						rhs = V::Obj(vec![
 							("Type", s(b"BinaryTest")),
 							("Pos", p(lo)),
@@ -1749,17 +1749,17 @@ mod shfmt {
 		/// Source extent of a `[[ ]]` expression. Every operator carries
 		/// the offset the parser read it at, so no part of the extent is
 		/// recovered by reading the source back.
-		fn test_span(&self, e: &CondExpr) -> (u32, u32) {
+		fn test_span(e: &CondExpr) -> (u32, u32) {
 			match e {
 				CondExpr::Word(w) => (w.span.lo, w.span.hi),
 				CondExpr::Unary { op_lo, arg, .. } => (*op_lo, arg.span.hi),
 				CondExpr::Binary { lhs, rhs, .. } => (lhs.span.lo, rhs.span.hi),
-				CondExpr::Not { lo, expr, .. } => (*lo, self.test_span(expr).1),
+				CondExpr::Not { lo, expr, .. } => (*lo, Self::test_span(expr).1),
 				CondExpr::Group { lparen, rparen, .. } => (*lparen, rparen + 1),
 				CondExpr::And(terms) | CondExpr::Or(terms) => {
 					let first = terms.first().expect("logical chain has operands");
 					let last = terms.last().expect("logical chain has operands");
-					(self.test_span(first).0, self.test_span(last).1)
+					(Self::test_span(first).0, Self::test_span(last).1)
 				},
 			}
 		}
