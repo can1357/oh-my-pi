@@ -44,6 +44,16 @@ export function formatPersistenceNotice(notice: SessionPersistenceNotice): strin
 		case "contested":
 			message = `Another program kept writing to session ${from}; it is left to that writer and this session now saves to ${to}.`;
 			break;
+		case "restored": {
+			const found =
+				notice.foundBytes === null || notice.foundBytes === undefined
+					? "it was gone"
+					: `it held ${notice.foundBytes} bytes`;
+			const wrote =
+				notice.expectedBytes === undefined ? "" : ` where this session had written ${notice.expectedBytes}`;
+			message = `Session ${from} was replaced, truncated or removed by another program (${found}${wrote}); this session wrote its whole transcript back to it from memory and keeps saving there.`;
+			break;
+		}
 	}
 	return replaceTabs(sanitizeText(message)).replace(/[\r\n]+/g, " ");
 }

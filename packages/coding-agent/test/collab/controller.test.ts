@@ -34,6 +34,7 @@ import { beginStartupComposer, stopPendingStartupComposer } from "@oh-my-pi/pi-c
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import type { SessionPersistenceNotice } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
@@ -84,7 +85,7 @@ interface ControllerContextState {
 	/** Session-change callbacks registered by the controller under test. */
 	sessionChangeCallbacks: Set<() => void>;
 	/** Persistence-notice observers registered by the controller under test. */
-	sessionMoveCallbacks: Set<() => void>;
+	sessionMoveCallbacks: Set<(notice: SessionPersistenceNotice) => void>;
 	/** Resolves each time a host clears its status-line segment (tore down). */
 	tornDown: (() => void)[];
 	/** Guest prompts a host forwarded into the session. */
@@ -132,7 +133,7 @@ function makeControllerContext(over: { autoStart?: "off" | "view" | "control"; r
 				entries: [],
 			}),
 			onEntryAppended: undefined,
-			onPersistenceNotice: (cb: () => void) => {
+			onPersistenceNotice: (cb: (notice: SessionPersistenceNotice) => void) => {
 				state.sessionMoveCallbacks.add(cb);
 				return () => state.sessionMoveCallbacks.delete(cb);
 			},
@@ -194,8 +195,26 @@ function switchSession(state: ControllerContextState, sessionId: string): void {
  * persistence notice; AgentSession's session-change callbacks never run.
  */
 function moveSessionFile(state: ControllerContextState, sessionId: string): void {
+	const from = `/sessions/${state.sessionId}.jsonl`;
 	state.sessionId = sessionId;
-	for (const cb of state.sessionMoveCallbacks) cb();
+	const notice: SessionPersistenceNotice = { reason: "open-elsewhere", from, to: `/sessions/${sessionId}.jsonl` };
+	for (const cb of state.sessionMoveCallbacks) cb(notice);
+}
+
+/**
+ * Simulate SessionManager writing the whole transcript back to its own file
+ * after another program replaced it: same file, same session id.
+ */
+function restoreSessionFile(state: ControllerContextState): void {
+	const file = `/sessions/${state.sessionId}.jsonl`;
+	const notice: SessionPersistenceNotice = {
+		reason: "restored",
+		from: file,
+		to: file,
+		expectedBytes: 2,
+		foundBytes: 1,
+	};
+	for (const cb of state.sessionMoveCallbacks) cb(notice);
 }
 
 /** Join `host`'s room through the relay as a writer; resolves after `welcome`. */
@@ -1032,6 +1051,25 @@ describe("CollabController", () => {
 		expect(first.stopped).toBe(true);
 		// The moved session is shared again and the old registry entry is gone.
 		expect(ctx.collabHost?.sessionId).toBe(state.sessionId);
+		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
+			{ instanceId: controller.instanceId, generation: 2, sessionId: state.sessionId },
+		]);
+	});
+
+	it("keeps the room when the session file is written back in place", async () => {
+		const { ctx, state } = makeControllerContext({ autoStart: "control" });
+		controller = new CollabController(ctx);
+		controller.autoStart();
+		await settled(publishSpy, 1);
+		const first = ctx.collabHost;
+		if (!first) throw new Error("first room missing");
+
+		// Same session, same file: the room stays. A real move afterwards is
+		// the second publication, not the third.
+		restoreSessionFile(state);
+		expect(first.stopped).toBe(false);
+		moveSessionFile(state, `sess-moved-${crypto.randomUUID()}`);
+		await settled(publishSpy, 2);
 		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
 			{ instanceId: controller.instanceId, generation: 2, sessionId: state.sessionId },
 		]);

@@ -67,6 +67,14 @@ export interface SessionStorageStat {
 	mtime: Date;
 }
 
+/**
+ * Precondition for an append: the file the line would land in must measure
+ * exactly `expectedSize` bytes, which is what its writer last put there.
+ */
+export interface SessionAppendOptions {
+	expectedSize: number;
+}
+
 export interface SessionStorageWriter {
 	/**
 	 * Append one newline-terminated line.
@@ -77,17 +85,24 @@ export interface SessionStorageWriter {
 	 * `fsync` — power loss may still drop the last page. Indexed backends update
 	 * the local index immediately and queue the remote publish in call order.
 	 *
+	 * With `options`, a file that is not the size the caller expects (replaced,
+	 * truncated or removed under the writer) gets nothing: the call throws
+	 * {@link SessionWriteConflictError} and the writer stays usable. Backends
+	 * that defer publishes ({@link SessionStorage.defersSyncPublish}) ignore it;
+	 * they check sizes when they publish.
+	 *
 	 * `line` MUST include the trailing newline.
 	 */
-	append(line: string): Promise<void>;
+	append(line: string, options?: SessionAppendOptions): Promise<void>;
 	/**
 	 * Synchronous append when the backend can apply the line before return.
 	 * File and memory implement this so {@link SessionManager} can latch the
 	 * first write failure before the appending call returns (surfaced by a later
 	 * flushSync/close/next append — the turn loop does not throw from append).
 	 * Indexed backends update the local index immediately and queue remote I/O.
+	 * `options` as for {@link append}.
 	 */
-	appendSync?(line: string): void;
+	appendSync?(line: string, options?: SessionAppendOptions): void;
 	/** Resolve once all queued appends complete. No fsync. */
 	flush(): Promise<void>;
 	/** Drain synchronously flushable queued work when the backend supports it. No fsync. */
@@ -349,9 +364,8 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	 * path still names the held file, the one path identity read serves both the
 	 * identity check and the append rollback point.
 	 */
-	#reopenIfReplaced(): number {
+	#reopenIfReplaced(live: fs.BigIntStats | undefined = statPathByHandle(this.#fpath)): number {
 		const held = this.#heldFile();
-		const live = statPathByHandle(this.#fpath);
 		if (!live) return fs.fstatSync(this.#fd).size;
 		if (live.ino === held.ino && live.dev === held.dev) return Number(live.size);
 		const nextFd = fs.openSync(this.#fpath, SESSION_WRITE_FLAGS | fs.constants.O_APPEND);
@@ -367,6 +381,22 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		const next = fs.fstatSync(nextFd, { bigint: true });
 		this.#heldIdentity = { ino: next.ino, dev: next.dev };
 		return Number(next.size);
+	}
+
+	/**
+	 * {@link #reopenIfReplaced}, refusing a file that does not measure what the
+	 * caller last put there. A path renamed over by an older copy, truncated or
+	 * removed would otherwise take the line as if it held the caller's journal:
+	 * the entries it lacks stay lost and the new line's parent is missing, or the
+	 * line lands in an unlinked inode nobody will read.
+	 */
+	#appendPoint(options: SessionAppendOptions | undefined): number {
+		if (!options) return this.#reopenIfReplaced();
+		const live = statPathByHandle(this.#fpath);
+		if (!live) throw new SessionWriteConflictError(this.#fpath, options.expectedSize, null);
+		const size = this.#reopenIfReplaced(live);
+		if (size !== options.expectedSize) throw new SessionWriteConflictError(this.#fpath, options.expectedSize, size);
+		return size;
 	}
 
 	/**
@@ -431,7 +461,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		}
 	}
 
-	appendSync(line: string): void {
+	appendSync(line: string, options?: SessionAppendOptions): void {
 		if (this.#closed) throw new Error("Writer closed");
 		if (this.#error) throw this.#error;
 		// Write in-body so software crash after the call still sees the entry.
@@ -443,19 +473,21 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		try {
 			if (this.#publishLock) {
 				this.#publishLock(
-					() => this.#writeNow(line, this.#reopenIfReplaced()),
+					() => this.#writeNow(line, this.#appendPoint(options)),
 					() => this.#holdsLivePath(),
 				);
 			} else {
-				this.#writeNow(line, fs.fstatSync(this.#fd).size);
+				this.#writeNow(line, options ? this.#appendPoint(options) : fs.fstatSync(this.#fd).size);
 			}
 		} catch (err) {
+			// A refused precondition wrote nothing and says nothing about this writer.
+			if (err instanceof SessionWriteConflictError) throw err;
 			throw this.#recordError(err);
 		}
 	}
 
-	async append(line: string): Promise<void> {
-		this.appendSync(line);
+	async append(line: string, options?: SessionAppendOptions): Promise<void> {
+		this.appendSync(line, options);
 	}
 
 	async flush(): Promise<void> {
@@ -1475,9 +1507,15 @@ class MemorySessionStorageWriter implements SessionStorageWriter {
 		return error;
 	}
 
-	appendSync(line: string): void {
+	appendSync(line: string, options?: SessionAppendOptions): void {
 		if (this.#closed) throw new Error("Writer closed");
 		if (this.#error) throw this.#error;
+		if (options) {
+			const actualSize = this.#storage.existsSync(this.#path) ? this.#storage.statSync(this.#path).size : null;
+			if (actualSize !== options.expectedSize) {
+				throw new SessionWriteConflictError(this.#path, options.expectedSize, actualSize);
+			}
+		}
 		try {
 			// O(1) append — push onto the path's indexed in-memory entry.
 			this.#storage.appendSync(this.#path, line);
@@ -1486,8 +1524,8 @@ class MemorySessionStorageWriter implements SessionStorageWriter {
 		}
 	}
 
-	async append(line: string): Promise<void> {
-		this.appendSync(line);
+	async append(line: string, options?: SessionAppendOptions): Promise<void> {
+		this.appendSync(line, options);
 	}
 
 	async flush(): Promise<void> {

@@ -138,11 +138,12 @@ export class CollabController {
 		// A write that finds the session file open in another omp process (or
 		// replaced/contested on disk) moves the session to a sibling file under a
 		// new id without an AgentSession transition; rotate the room for it too.
+		// A restore in place keeps the file and the id, so the room stays.
 		// Moves replayed at subscription predate every room this controller hosts.
 		if (this.#unsubscribeSessionMove) return;
 		let live = false;
-		this.#unsubscribeSessionMove = this.#ctx.sessionManager.onPersistenceNotice(() => {
-			if (live) this.#onSessionChanged();
+		this.#unsubscribeSessionMove = this.#ctx.sessionManager.onPersistenceNotice(notice => {
+			if (live && notice.reason !== "restored") this.#onSessionChanged();
 		});
 		live = true;
 	}
