@@ -510,6 +510,18 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		return !this.#hasPendingEntries();
 	}
 
+	/** Compact only while every read it draws is a compact row. */
+	isTranscriptBlockCompact(): boolean {
+		if (!this.#toolActivityVisible) return false;
+		let compact = false;
+		for (const entry of this.#entries.values()) {
+			const mode = entry.presentation.shown.mode;
+			if (mode === "full") return false;
+			if (mode === "compact") compact = true;
+		}
+		return compact;
+	}
+
 	#hasPendingEntries(): boolean {
 		for (const entry of this.#entries.values()) {
 			if (entry.status === "pending") return true;

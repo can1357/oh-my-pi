@@ -236,8 +236,10 @@ import {
 import { isNativeRendering, onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
 import {
 	isTranscriptPresentable,
+	messageBlock,
 	onTranscriptPresentationRedrawn,
 	onTranscriptPresentersChanged,
+	PresentedBlock,
 	setTranscriptPresenters,
 } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import { renderTreeList } from "@oh-my-pi/pi-tui/render/tree-list";
@@ -1499,9 +1501,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	compactionQueueOrigin: ConversationPosition | undefined = undefined;
 	pendingTools = new Map<string, ToolExecutionHandle>();
 	transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
-	pendingBashComponents: BashExecutionComponent[] = [];
+	pendingBashComponents: PresentedBlock<BashExecutionComponent>[] = [];
 	bashComponent: BashExecutionComponent | undefined = undefined;
-	pendingPythonComponents: EvalExecutionComponent[] = [];
+	pendingPythonComponents: PresentedBlock<EvalExecutionComponent>[] = [];
 	pythonComponent: EvalExecutionComponent | undefined = undefined;
 	isPythonMode = false;
 	streamingComponent: AssistantMessageComponent | undefined = undefined;
@@ -3940,7 +3942,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// instead of settling and retiring into immutable scrollback mid-preflight
 		// where reconcile could no longer swap it out (issue #11217).
 		for (const component of this.#optimisticSkillMessageComponents) {
-			if (component instanceof SkillMessageComponent) component.markTranscriptBlockPending();
+			const card = component instanceof PresentedBlock ? component.inner : component;
+			if (card instanceof SkillMessageComponent) card.markTranscriptBlockPending();
 		}
 		this.ensureLoadingAnimation();
 		this.ui.requestRender();
@@ -3966,7 +3969,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		const present = components.filter(component => this.chatContainer.children.includes(component));
 		if (present.length > 0 && present.every(component => !this.chatContainer.canRemoveBlock(component))) {
 			for (const component of present) {
-				if (component instanceof SkillMessageComponent) component.markTranscriptBlockFinalized();
+				const card = component instanceof PresentedBlock ? component.inner : component;
+				if (card instanceof SkillMessageComponent) card.markTranscriptBlockFinalized();
+				// Presenters see, and refresh by, the recorded message, as the resumed transcript does.
+				if (component instanceof PresentedBlock && message.role === "custom") {
+					component.setBlock(messageBlock(message));
+				}
 			}
 			return;
 		}
@@ -4658,10 +4666,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	refreshTranscriptPresentation(ids?: ReadonlySet<string>): void {
-		this.redrawTranscriptBlocks(
-			this.chatContainer.children,
-			block => isTranscriptPresentable(block) && block.refreshTranscriptPresentation(ids),
-		);
+		const refresh = (block: Component) => isTranscriptPresentable(block) && block.refreshTranscriptPresentation(ids);
+		this.redrawTranscriptBlocks(this.chatContainer.children, refresh);
+		// `!`/`$` runs queued while the agent streams wait outside the transcript, always live.
+		let pendingChanged = false;
+		for (const block of this.pendingShellContainer.children) pendingChanged = refresh(block) || pendingChanged;
+		if (pendingChanged) this.ui.requestRender();
 	}
 
 	redrawTranscriptBlocks(blocks: readonly Component[], redraw: (block: Component) => boolean): void {

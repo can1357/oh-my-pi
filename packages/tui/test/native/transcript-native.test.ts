@@ -20,11 +20,18 @@ import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notificati
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { card, node, text } from "@oh-my-pi/pi-tui/native/describe";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
-import { presentNative, setTranscriptPresenters } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
+import {
+	messageBlock,
+	onTranscriptPresentationRedrawn,
+	PresentedBlock,
+	presentNative,
+	setTranscriptPresenters,
+} from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { TspNode, TspOp } from "@oh-my-pi/pi-wire";
 import { TspHarness } from "./tsp-harness";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { Container } from "@oh-my-pi/pi-tui/tui";
 
 beforeAll(async () => {
 	await initTheme(false);
@@ -313,6 +320,106 @@ describe("native transcript", () => {
 		} finally {
 			setTranscriptPresenters([]);
 		}
+	});
+
+	it("draws a replayed transcript's `!` runs and messages without the extension presenters", () => {
+		// Regression guard: a replay (link browser, rewind, transcript viewer) drawing its message
+		// and event blocks through the main session's presenters while its tool cards draw stock.
+		setTranscriptPresenters([block => (block.type === "message" ? "hidden" : undefined)]);
+		try {
+			const entries: TranscriptEntryLike[] = [
+				{
+					type: "message",
+					id: "b1",
+					parentId: null,
+					timestamp: "2026-01-01T00:00:00Z",
+					message: {
+						role: "bashExecution",
+						command: "echo viewer-run",
+						output: "VIEWER-OUT",
+						exitCode: 0,
+						cancelled: false,
+						truncated: false,
+						timestamp: 1,
+					},
+				},
+			];
+			const builder = new ChatTranscriptBuilder({
+				ui: { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} } as never,
+				cwd: "/tmp",
+				requestRender: () => {},
+			});
+			builder.append(entries);
+			expect(Bun.stripANSI(builder.container.render(80).join("\n"))).toContain("echo viewer-run");
+		} finally {
+			setTranscriptPresenters([]);
+		}
+	});
+
+	it("reports a message block whose presentation changed under rows it already drew", () => {
+		// Regression guard: a `!` run or message block in terminal scrollback (never drawn again)
+		// keeping its stale rows there after its data changed outside a refresh (a `!` run recorded).
+		setTranscriptPresenters([
+			block =>
+				block.type === "message" && block.message.role === "custom" && block.message.customType === "late"
+					? "hidden"
+					: "compact",
+		]);
+		const redrawn: unknown[] = [];
+		const unsubscribe = onTranscriptPresentationRedrawn(owner => redrawn.push(owner));
+		try {
+			const message = createCustomMessage("early", "body", true, undefined, "2026-01-01");
+			const block = new PresentedBlock(new CustomMessageComponent(message), messageBlock(message));
+			block.render(80);
+			expect(redrawn).toEqual([]);
+
+			block.setBlock(messageBlock({ ...message, customType: "late" }));
+			expect(redrawn).toEqual([block]);
+		} finally {
+			unsubscribe();
+			setTranscriptPresenters([]);
+		}
+	});
+
+	it("keeps a skill whose prompt the user opened in Tern full when a presenter later hides it", () => {
+		// Regression guard: the skill's `prompt` disclosure is a nested toggle, so the wrapper missed
+		// the user's expansion and a later hidden/compact answer folded the opened prompt away.
+		let answer: "full" | "hidden" = "full";
+		setTranscriptPresenters([block => (block.type === "message" ? answer : undefined)]);
+		try {
+			const message = createCustomMessage(
+				"skill-prompt",
+				"SKILL-PROMPT-TEXT",
+				true,
+				{ name: "unslop", path: "/s/SKILL.md", lineCount: 1 },
+				"2026-01-01",
+			);
+			const block = new PresentedBlock(new SkillMessageComponent(message as never), messageBlock(message));
+			expect(block.render(80).length).toBeGreaterThan(0);
+
+			block.handleNativeEvent({ type: "toggle", key: "prompt", collapsed: false });
+			answer = "hidden";
+			block.refreshTranscriptPresentation();
+			expect(Bun.stripANSI(block.render(80).join("\n"))).toContain("SKILL-PROMPT-TEXT");
+			const cx = { cols: 120, reduceMotion: false, dark: true, supports: () => true, feature: () => false };
+			expect(JSON.stringify(block.describe(cx))).toContain("SKILL-PROMPT-TEXT");
+		} finally {
+			setTranscriptPresenters([]);
+		}
+	});
+
+	it("draws a wrapped block that paints its own rows as those rows", async () => {
+		// Regression guard: the wrapper asking `inner.describe()` directly, so a Container subclass
+		// that overrides render but inherits the column description lost its rows in Tern.
+		class PaintedRows extends Container {
+			override render(): readonly string[] {
+				return ["PAINTED-ROW"];
+			}
+		}
+		const message = createCustomMessage("painted", "body", true, undefined, "2026-01-01");
+		const h = await startWith(h => h.tui.addChild(new PresentedBlock(new PaintedRows(), messageBlock(message))));
+		const rows = h.find(node => node.k === "rows");
+		expect(JSON.stringify(rows?.p)).toContain("PAINTED-ROW");
 	});
 
 	it("mirrors a native toggle into the tool card and re-collapses it on a transcript-wide collapse", async () => {

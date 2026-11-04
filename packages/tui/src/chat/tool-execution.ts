@@ -1245,6 +1245,13 @@ export class ToolExecutionComponent extends Container {
 		super.invalidate();
 	}
 
+	isTranscriptBlockCompact(): boolean {
+		if (!this.#toolActivityVisible || this.#allocation === 0 || (this.#toolName === "wait" && this.#isBenignSkip())) {
+			return false;
+		}
+		return this.#presentation.shown.mode === "compact";
+	}
+
 	/** The file paths this call targets (edit/write/apply_patch args), display-relative. */
 	#targetPaths(): string[] {
 		const args = this.#args;
