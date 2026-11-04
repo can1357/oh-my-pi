@@ -278,6 +278,8 @@ export interface InteractiveModeContext {
 
 	// State
 	isInitialized: boolean;
+	/** Shared admission guard for extension and slash-command plugin reloads. */
+	isReloadingPlugins: boolean;
 	/**
 	 * `true` once `renderInitialMessages` has rendered the session transcript
 	 * into `chatContainer` at least once.
