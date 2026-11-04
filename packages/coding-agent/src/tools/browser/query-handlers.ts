@@ -138,7 +138,7 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		}
 		return false;
 	};
-	const implicitRole = (element: Element): string | null => {
+	const computeImplicitRole = (element: Element): string | null => {
 		const tag = element.tagName.toLocaleLowerCase();
 		if ((tag === "a" || tag === "area") && element.hasAttribute("href")) return "link";
 		if (tag === "button") return "button";
@@ -234,11 +234,30 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		}
 		return null;
 	};
+	/**
+	 * Each element's implicit role, computed once per query: an aside's or header's role depends on its ancestors' roles,
+	 * so nested asides would otherwise recompute every ancestor at each level.
+	 */
+	const roles = new Map<Element, string | null>();
+	const implicitRole = (element: Element): string | null => {
+		let role = roles.get(element);
+		if (role === undefined) {
+			role = computeImplicitRole(element);
+			roles.set(element, role);
+		}
+		return role;
+	};
 	// Roles named by their content, so `title` names them only when the content is empty.
 	const namedByContent =
 		/^(?:button|cell|checkbox|columnheader|gridcell|heading|link|menuitem|menuitemcheckbox|menuitemradio|option|radio|row|rowheader|switch|tab|term|tooltip|treeitem)$/.test(
 			wantedRole,
 		);
+	/** An image input's name: its alt, value or title, else the browser's default caption for an image submit button. */
+	const imageInputName = (element: Element): string =>
+		normalizeSpace(element.getAttribute("alt") ?? "") ||
+		normalizeSpace(element.getAttribute("value") ?? "") ||
+		normalizeSpace(element.getAttribute("title") ?? "") ||
+		"Submit";
 	// Text as the accessibility tree reads it (as the Tern kit's `contentText`): hidden subtrees and
 	// `visibility: hidden` text skipped, block children spaced apart, a child's `aria-labelledby` text,
 	// `aria-label`, an image's `alt` or an embedded control's value in place of its content. `skip` is the
@@ -302,7 +321,8 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				} else if (valueIsText) text += shown ? (control.value ?? "") : "";
 				else if (labelledBy) text += shown ? labelledBy : "";
 				else if (label) text += shown ? label : "";
-				else if (tag === "img" || tag === "area" || inputType === "image") {
+				else if (inputType === "image") text += shown ? imageInputName(childElement) : "";
+				else if (tag === "img" || tag === "area") {
 					text += shown ? (childElement.getAttribute("alt") ?? "") : "";
 				} else if (inputButton) {
 					// Without a value, a submit or reset button shows the browser's default caption.
@@ -385,8 +405,13 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		if (ariaLabel) return ariaLabel;
 		const native = nativeName(element);
 		if (native) return native;
-		// Labels label form controls only, so an optgroup inside a labelled select keeps its own label (or title).
-		if (element.tagName.toLocaleLowerCase() !== "optgroup") {
+		// `<label>` names only the form controls it can label, so an optgroup in a labelled select keeps its own label
+		// (or title) and a term inside a label keeps its own text.
+		const tag = element.tagName.toLocaleLowerCase();
+		const labelable =
+			["button", "meter", "output", "progress", "select", "textarea"].includes(tag) ||
+			(tag === "input" && element.getAttribute("type")?.toLocaleLowerCase() !== "hidden");
+		if (labelable) {
 			if (element.id) {
 				for (const label of element.ownerDocument?.querySelectorAll("label") ?? []) {
 					if (label.getAttribute("for") === element.id) {
@@ -397,11 +422,11 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 			const wrappingLabel = element.closest("label");
 			if (wrappingLabel) return normalizeSpace(contentText(wrappingLabel, element, "visible"));
 		}
-		const tag = element.tagName.toLocaleLowerCase();
 		// An `<input>`'s type and value decide its name; other elements have neither.
 		const input = tag === "input" ? (element as unknown as { type: string; value: string }) : null;
 		const inputType = input?.type.toLocaleLowerCase();
-		if (tag === "img" || tag === "area" || inputType === "image") {
+		if (inputType === "image") return imageInputName(element);
+		if (tag === "img" || tag === "area") {
 			const alt = normalizeSpace(element.getAttribute("alt") ?? "");
 			if (alt) return alt;
 		}
