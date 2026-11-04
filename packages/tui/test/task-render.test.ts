@@ -383,18 +383,12 @@ describe("task live progress rendering", () => {
 			totalDurationMs: 1,
 		};
 
-		const legacy = renderResultText(details, false, uiTheme);
-		const native = JSON.stringify(
-			taskToolRenderer.describeResult(
-				{ content: [{ type: "text", text: "" }], details },
-				{ expanded: false, isPartial: false },
-			),
-		);
+		// Only the terminal renderer folds a batch; the native view lists every agent.
+		const text = renderResultText(details, false, uiTheme);
 
-		for (const rendered of [legacy, native]) {
-			expect(rendered).toContain("Done6");
-			expect([1, 2, 3, 4, 5, 6].filter(index => rendered.includes(`Done${index}`))).toHaveLength(4);
-		}
+		expect(text).toContain("Done6");
+		expect(text).toContain("warning");
+		expect([1, 2, 3, 4, 5, 6].filter(index => text.includes(`Done${index}`))).toHaveLength(4);
 	});
 
 	it("shows every finalized nested task result when expanded", () => {
