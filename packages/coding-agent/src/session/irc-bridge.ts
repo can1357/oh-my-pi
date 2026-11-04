@@ -284,7 +284,9 @@ export class IrcBridge {
 				interrupting: streaming && !quiet,
 				relayOnStop,
 			}),
-			display: true,
+			// The parent steer becomes the transcript card when consumed; keep this
+			// observation available to listeners without also painting a live card.
+			display: !(streaming && fromParent && !peerMessage),
 			details: {
 				id: msg.id,
 				from: msg.from,
