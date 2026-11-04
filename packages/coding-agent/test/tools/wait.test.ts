@@ -30,6 +30,25 @@ async function flushMicrotasks(): Promise<void> {
 	for (let i = 0; i < 100; i++) await Promise.resolve();
 }
 
+/** Runs one wait that elapses with nothing new, asserting it blocks exactly `windowMs` under fake timers. */
+async function elapse(tool: WaitTool, windowMs: number) {
+	let settled = false;
+	const waiting = tool.execute("idle-wait", {}).finally(() => {
+		settled = true;
+	});
+	await flushMicrotasks();
+	vi.advanceTimersByTime(windowMs - 1);
+	await flushMicrotasks();
+	expect(settled).toBe(false);
+	vi.advanceTimersByTime(1);
+	return waiting;
+}
+
+/** The progress reminder an elapsed wait appends after its own report, if any. */
+function notice(result: { content: Array<{ type: string; text?: string }> }): string | undefined {
+	return result.content.slice(1).find(block => block.type === "text")?.text;
+}
+
 /** Whether `promise` is still pending once already-queued work has run. */
 async function stillPending(promise: Promise<unknown>): Promise<boolean> {
 	let settled = false;
@@ -113,21 +132,44 @@ describe("wait", () => {
 		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed" });
 	});
 
-	test("a job wait outlasts the reply cap", async () => {
+	test("back-to-back idle waits climb the ladder and, from the 10s rung on, send the agent back to work", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
-		const { promise, resolve } = Promise.withResolvers<string>();
-		const id = manager.register("bash", "build", async () => promise, { ownerId: "Main" });
-		let settled = false;
-		const waiting = new WaitTool(session(manager)).execute("wait-1", {}).finally(() => {
-			settled = true;
-		});
+		const build = Promise.withResolvers<string>();
+		const id = manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
+		const tool = new WaitTool(session(manager));
+		const first = await elapse(tool, 5_000);
+		expect(first.useless).toBe(true);
+		expect(first.details?.jobs?.[0]).toMatchObject({ id, status: "running" });
+		expect(notice(first)).toBeUndefined();
+		expect(notice(await elapse(tool, 10_000))).toContain("15.0s");
+		expect(notice(await elapse(tool, 30_000))).toContain("45.0s");
+		await elapse(tool, 60_000);
+		await elapse(tool, 300_000);
+		expect(notice(await elapse(tool, 300_000))).toContain("11m45s");
+		build.resolve("done");
+	});
+
+	test("news or a minute away from wait restarts the ladder at the floor", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const build = Promise.withResolvers<string>();
+		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
+		const tool = new WaitTool(session(manager));
+		await elapse(tool, 5_000);
+		vi.advanceTimersByTime(60_000);
+		expect(notice(await elapse(tool, 5_000))).toBeUndefined();
+		await elapse(tool, 10_000);
+		const lint = Promise.withResolvers<string>();
+		manager.register("bash", "lint", async () => lint.promise, { ownerId: "Main" });
+		const woke = tool.execute("wait-news", {});
 		await flushMicrotasks();
-		vi.advanceTimersByTime(5 * 60_000);
+		lint.resolve("clean");
 		await flushMicrotasks();
-		expect(settled).toBe(false);
-		resolve("build complete");
-		expect((await waiting).details?.jobs?.[0]).toMatchObject({ id, status: "completed" });
+		vi.advanceTimersByTime(1_500);
+		expect((await woke).useless).toBeUndefined();
+		expect(notice(await elapse(tool, 5_000))).toBeUndefined();
+		build.resolve("done");
 	});
 
 	test("finds nothing to wait for in a subagent whose only running work is its parent's job on it", async () => {
@@ -724,20 +766,13 @@ describe("wait", () => {
 			expect(await idleText(childWait())).toContain("no agent you messaged this run owes a reply");
 		});
 
-		test("gives up at the reply cap when the agent asked never answers", async () => {
+		test("hands the turn back at the ladder floor while the agent asked has not answered", async () => {
 			registerParentAndChild();
 			await ask();
 			vi.useFakeTimers();
-			let settled = false;
-			const waiting = childWait().finally(() => {
-				settled = true;
-			});
-			await flushMicrotasks();
-			vi.advanceTimersByTime(5 * 60_000 - 1);
-			await flushMicrotasks();
-			expect(settled).toBe(false);
-			vi.advanceTimersByTime(1);
-			expect(await idleText(waiting)).toContain("No reply within 5 minutes. Ask again");
+			const tool = new WaitTool(session(new AsyncJobManager({}), "Child"));
+			expect(await idleText(elapse(tool, 5_000))).toContain("No reply within 5.0s");
+			expect(notice(await elapse(tool, 10_000))).toContain("15.0s");
 		});
 
 		test("returns at once while the agent asked waits on the user, and blocks again once they answer", async () => {

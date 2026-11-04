@@ -5,9 +5,10 @@ import {
 	type AgentToolUpdateCallback,
 	TOOL_INTERRUPT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { formatDuration, prompt } from "@oh-my-pi/pi-utils";
 import { IrcBus, ircWaitAccepts } from "../irc/bus";
 import waitDescription from "../prompts/tools/wait.md" with { type: "text" };
+import waitIdleTemplate from "../prompts/tools/wait-idle.md" with { type: "text" };
 import type { ToolSession } from ".";
 import type { AsyncJob, AsyncJobManagerApi } from "../async/job-manager";
 import { buildJobResult, snapshotJobs, undeliveredJobs } from "../async/job-control";
@@ -22,17 +23,29 @@ import { throwIfAborted } from "./tool-errors";
 import { cfgLaunchEnabled } from "./settings";
 
 const waitSchema = type({});
-/** Longest a wait blocks on owned jobs or services before reporting back. */
-const WAIT_MAX_MS = 30 * 60_000;
+/**
+ * Windows (ms) a blocking wait gives its first wake before it returns with
+ * nothing new. Each back-to-back idle wait climbs one rung, so the agent gets
+ * its turn back early while work warms up, and a wait loop backs off.
+ */
+const WAIT_LADDER_MS = [5_000, 10_000, 30_000, 60_000, 300_000] as const;
+/** A gap this long since the last idle wait returned means the agent worked in between: the ladder restarts at the floor. */
+const WAIT_LADDER_RESET_MS = 60_000;
+/** First rung whose elapsed window appends the progress reminder: one idle wait is patience, a second back-to-back is a loop. */
+const WAIT_NOTICE_RUNG = 1;
 /** After one watched job settles, keep collecting briefly so near-simultaneous completions share one wait result. */
 const WAIT_SETTLE_WINDOW_MS = 1500;
-/**
- * Longest a reply wait (no owned job or service, only the answer to a message
- * the caller sent) blocks. An answer that takes longer is not coming soon: the
- * agent asked is busy or stuck, and the caller does better to go on without it.
- */
-const REPLY_WAIT_MAX_MS = 5 * 60_000;
 const PROGRESS_INTERVAL_MS = 500;
+
+/** Back-to-back waits that each elapsed with nothing new. */
+interface IdleStreak {
+	/** Rung of the latest elapsed wait. */
+	rung: number;
+	/** When the latest elapsed wait returned. */
+	endedAt: number;
+	/** Window time spent across the streak. */
+	waitedMs: number;
+}
 
 interface WaitMessaging {
 	registry: AgentRegistryApi;
@@ -120,8 +133,9 @@ export function hasWaitTool(session: ToolSession): boolean {
  * the reply to a message it sent this run. Other agents' work never sustains
  * a wait: a peer owes no message. A reply wait ends once no agent asked can
  * still answer soon: each one finished its turn, is blocked on the caller
- * itself (the cycle that would park both sides), or is waiting on the user;
- * and it gives up after {@link REPLY_WAIT_MAX_MS}. A direct message arriving
+ * itself (the cycle that would park both sides), or is waiting on the user.
+ * With nothing new, a wait returns after a window from {@link WAIT_LADDER_MS}
+ * that climbs across back-to-back idle waits. A direct message arriving
  * mid-wait ends any wait, returning every message queued by then. Broadcast
  * legs and progress notes ask the caller nothing, so they never end a wait
  * and inject as asides once it returns; the exception is a broadcast from an
@@ -140,6 +154,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	readonly approval = "read";
 	readonly loadMode = "essential";
 	readonly intent = "optional";
+	#idle: IdleStreak | undefined;
 
 	constructor(private readonly session: ToolSession) {}
 
@@ -149,6 +164,9 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<CoordinationDetails>,
 	): Promise<AgentToolResult<CoordinationDetails>> {
+		// Any wait ends the idle streak unless its window elapses too (`#elapsed`).
+		const idle = this.#idle;
+		this.#idle = undefined;
 		const registry = this.session.agentRegistry;
 		const senderId = this.session.getAgentId?.() ?? undefined;
 		const messaging = registry && senderId ? { registry, senderId } : undefined;
@@ -198,11 +216,11 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				};
 			}
 		}
-		return this.#blockUntilWake({ jobs, manager, messaging, serviceRunning, signal, onUpdate });
+		return this.#blockUntilWake({ jobs, manager, messaging, serviceRunning, idle, signal, onUpdate });
 	}
 
 	/**
-	 * Block until an owned job settles, an owned service finishes, a direct message arrives, the cap elapses, or the call aborts.
+	 * Block until an owned job settles, an owned service finishes, a direct message arrives, the ladder window elapses, or the call aborts.
 	 * With neither jobs nor a service, the block is a reply wait: it also ends once no agent asked can still reply.
 	 */
 	async #blockUntilWake(args: {
@@ -210,10 +228,13 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		manager: AsyncJobManagerApi | undefined;
 		messaging: WaitMessaging | undefined;
 		serviceRunning: boolean;
+		idle: IdleStreak | undefined;
 		signal: AbortSignal | undefined;
 		onUpdate: AgentToolUpdateCallback<CoordinationDetails> | undefined;
 	}): Promise<AgentToolResult<CoordinationDetails>> {
-		const { jobs, manager, messaging, serviceRunning, signal, onUpdate } = args;
+		const { jobs, manager, messaging, serviceRunning, idle, signal, onUpdate } = args;
+		const streak = idle && Date.now() - idle.endedAt < WAIT_LADDER_RESET_MS ? idle : undefined;
+		const rung = streak ? Math.min(streak.rung + 1, WAIT_LADDER_MS.length - 1) : 0;
 		const watchedIds = jobs.map(job => job.id);
 		manager?.watchJobs(watchedIds);
 		const serviceAbort = new AbortController();
@@ -262,7 +283,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				? messaging.registry.awaits.hold(messaging.senderId, watchedAgents, { interruptible: true })
 				: undefined;
 		const { promise: timeout, resolve: timedOut } = Promise.withResolvers<void>();
-		const timer = setTimeout(timedOut, replyWait ? REPLY_WAIT_MAX_MS : WAIT_MAX_MS);
+		const timer = setTimeout(timedOut, WAIT_LADDER_MS[rung]);
 		const abort = Promise.withResolvers<void>();
 		const onAbort = () => abort.resolve();
 		if (signal) {
@@ -338,31 +359,56 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			}
 			if (manager && jobs.length > 0) {
 				const result = buildJobResult(this.session, manager, "wait", jobs, []);
+				if (wake === "timeout") return this.#elapsed(result, rung, streak);
 				// A finished service is news even while every watched job still runs.
 				if (wake !== "service") return result;
 				const { useless: _idle, ...woke } = result;
 				return woke;
+			}
+			if (wake === "timeout") {
+				const span = formatDuration(WAIT_LADDER_MS[rung]);
+				const text = replyWait
+					? `No reply within ${span}.`
+					: `No service finished within ${span}. Read proc:// for status.`;
+				// A wait that ran out with nothing to report is an idle poll.
+				const result: AgentToolResult<CoordinationDetails> = {
+					content: [{ type: "text", text }],
+					details: { op: "wait", jobs: [] },
+					useless: true,
+				};
+				return this.#elapsed(result, rung, streak);
 			}
 			return {
 				content: [
 					{
 						type: "text",
 						text:
-							wake === "service"
-								? "A service finished. Read proc:// for its status and output."
-								: wake === "unanswerable" && noReply
-									? noReplyText(noReply)
-									: replyWait
-										? `No reply within ${REPLY_WAIT_MAX_MS / 60_000} minutes. Ask again, or finish without the answer.`
-										: "Wait limit reached; background work may still be running. Read proc:// for status.",
+							wake === "unanswerable" && noReply
+								? noReplyText(noReply)
+								: "A service finished. Read proc:// for its status and output.",
 					},
 				],
 				details: { op: "wait", jobs: [] },
-				// A wait that ran out with nothing to report is an idle poll.
-				...(wake === "timeout" ? { useless: true } : {}),
 			};
 		} finally {
 			manager?.unwatchJobs(watchedIds);
 		}
+	}
+
+	/**
+	 * End a wait whose window elapsed with nothing new: extend the idle streak
+	 * and, from {@link WAIT_NOTICE_RUNG} on, append the reminder to get on with
+	 * work that does not need the result instead of waiting again.
+	 */
+	#elapsed(
+		result: AgentToolResult<CoordinationDetails>,
+		rung: number,
+		streak: IdleStreak | undefined,
+	): AgentToolResult<CoordinationDetails> {
+		const waitedMs = (streak?.waitedMs ?? 0) + WAIT_LADDER_MS[rung];
+		this.#idle = { rung, endedAt: Date.now(), waitedMs };
+		if (rung < WAIT_NOTICE_RUNG) return result;
+		const notice = prompt.render(waitIdleTemplate, { waited: formatDuration(waitedMs) });
+		return { ...result, content: [...result.content, { type: "text", text: notice }] };
 	}
 }
