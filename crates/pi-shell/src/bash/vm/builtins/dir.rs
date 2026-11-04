@@ -193,7 +193,7 @@ fn strerror(errno: i32) -> BString {
 /// failure reported. A URL path keeps `-L`'s textual view: a provider has
 /// no symlinks to follow and holds no directory.
 fn change_to(
-	ctx: &mut Ctx<'_, '_>,
+	ctx: &Ctx<'_, '_>,
 	cwd: &[u8],
 	newdir: &[u8],
 	physical: bool,
