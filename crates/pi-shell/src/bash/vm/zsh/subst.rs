@@ -1028,7 +1028,7 @@ fn findcmd(ex: &mut Expander<'_, '_>, name: &[u8], path: &[u8]) -> X<Option<Vec<
 		return Ok(found.map(|p| if slash { name.to_vec() } else { p.to_vec() }));
 	}
 	Err(Stop::Probe(if slash {
-		Probe::Access { path: crate::bash::vm::probe::absolute(&ex.vp.cwd, name), mode: 4 }
+		Probe::Access { path: BString::from(name), mode: 4 }
 	} else {
 		Probe::Path { name: BString::from(name), path: BString::from(path) }
 	}))

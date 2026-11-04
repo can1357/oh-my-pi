@@ -429,6 +429,10 @@ struct Program<'a> {
 	argv:    &'a [BString],
 	env:     &'a EnvView,
 	cwd:     &'a [u8],
+	/// The directory the child starts in, held (`fchdir`), when the vproc
+	/// holds one; `cwd` names it otherwise. Valid for the whole spawn: the
+	/// spec borrows the hold.
+	dir:     Option<RawFd>,
 	umask:   u32,
 	ign:     SigSet,
 	/// `(resource, soft, hard)` set in the child before exec.
@@ -440,12 +444,14 @@ struct Program<'a> {
 /// its pid, so let the engine open the redirections and attempt the real
 /// exec itself instead. This is only a routing hint: the actual exec still
 /// decides whether the file is executable and whether fallback is needed.
-fn may_need_script_fallback(path: &[u8], cwd: &[u8]) -> bool {
+fn may_need_script_fallback(path: &[u8], cwd: &[u8], root: Option<&Path>) -> bool {
 	let path = Path::new(OsStr::from_bytes(path));
 	let path = if path.is_absolute() {
 		path.to_path_buf()
 	} else {
-		Path::new(OsStr::from_bytes(cwd)).join(path)
+		root
+			.unwrap_or_else(|| Path::new(OsStr::from_bytes(cwd)))
+			.join(path)
 	};
 	let Ok(mut file) = fs::OpenOptions::new()
 		.read(true)
@@ -476,6 +482,7 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 		argv,
 		env,
 		cwd,
+		dir,
 		stdio,
 		extra_fds,
 		pgroup,
@@ -486,7 +493,16 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 		redirs,
 		..
 	} = spec;
-	if redirs.is_some() && may_need_script_fallback(path, cwd) {
+	#[cfg(target_os = "linux")]
+	let held = dir.and_then(crate::sys::os_dir);
+	#[cfg(target_os = "linux")]
+	let (dir, root) = (held.map(|held| held.fd().as_raw_fd()), held.map(crate::sys::OsDir::root));
+	#[cfg(not(target_os = "linux"))]
+	let (dir, root): (Option<RawFd>, Option<&Path>) = {
+		let _ = dir;
+		(None, None)
+	};
+	if redirs.is_some() && may_need_script_fallback(path, cwd, root) {
 		// The engine retries with its own asynchronous redirection opens.
 		return Err(io::Error::other("script requires engine redirection"));
 	}
@@ -509,7 +525,7 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	// Polled by the `ExtProc`; dropped (stopping every pump) on any failure
 	// below.
 	let pumps = Pumps::new(pumps, feeds, &tracker);
-	let program = Program { path, argv, env, cwd, umask, ign: sigmask_ign, rlimits };
+	let program = Program { path, argv, env, cwd, dir, umask, ign: sigmask_ign, rlimits };
 	let launched = match &redirs {
 		Some(redirs) => fork_redirs(&program, &fds, place, redirs),
 		None => launch(&shared.state, &program, &fds, place),
@@ -564,7 +580,7 @@ fn launch(
 	#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 	if prog.rlimits.is_empty() && state.posix_eligible(prog.umask, prog.ign) {
 		let exec = Exec::new(prog)?;
-		return retry_join(place, |p| posix::spawn(&exec, fds, p, prog.ign));
+		return retry_join(place, |p| posix::spawn(&exec, prog.dir, fds, p, prog.ign));
 	}
 	#[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
 	let _ = state;
@@ -678,7 +694,10 @@ impl Exec {
 fn fork_exec(prog: &Program<'_>, fds: &[(i32, OwnedFd)], place: Place) -> io::Result<(i32, Place)> {
 	let exec = Exec::new(prog)?;
 	let mut cmd = Command::new(OsStr::from_bytes(prog.path));
-	cmd.current_dir(OsStr::from_bytes(prog.cwd));
+	let held = prog.dir;
+	if held.is_none() {
+		cmd.current_dir(OsStr::from_bytes(prog.cwd));
+	}
 	let stdio = |target: i32| -> io::Result<Stdio> {
 		let (_, fd) = fds
 			.iter()
@@ -710,6 +729,13 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, OwnedFd)], place: Place) -> io::Re
 			// capture that field (a bare `Vec<*mut c_char>`, not `Send`) instead
 			// of the `Exec` whose `Send`/`Sync` covers the pointers.
 			let exec = &exec;
+			// The directory held, first: an extra fd moved into place below
+			// may take its number.
+			if let Some(fd) = held
+				&& libc::fchdir(fd) != 0
+			{
+				return Err(io::Error::last_os_error());
+			}
 			libc::umask(mask);
 			for &(target, src) in &extra {
 				if libc::dup2(src, target) < 0 {
@@ -897,7 +923,11 @@ fn fork_redirs(
 				},
 				Place::Inherit => {},
 			}
-			if libc::chdir(exec.cwd()) != 0 {
+			let entered = match prog.dir {
+				Some(fd) => libc::fchdir(fd),
+				None => libc::chdir(exec.cwd()),
+			};
+			if entered != 0 {
 				child_fail(&exec_diag, errno(), 126, texts);
 			}
 			for &(target, src) in &raw {
@@ -1002,16 +1032,30 @@ mod posix {
 
 	/// `posix_spawn` `exec` with `fds` installed, at `place`, with every
 	/// signal not in `ign` reset to its default.
-	pub fn spawn(exec: &Exec, fds: &[(i32, OwnedFd)], place: Place, ign: SigSet) -> io::Result<i32> {
+	pub fn spawn(
+		exec: &Exec,
+		dir: Option<std::os::fd::RawFd>,
+		fds: &[(i32, OwnedFd)],
+		place: Place,
+		ign: SigSet,
+	) -> io::Result<i32> {
 		let mut actions = FileActions::new()?;
+		// The directory first: an fd moved into place below may take the
+		// held one's number.
+		// SAFETY: `actions` is initialized; `cwd` outlives the spawn call
+		// and `dir` is open across it.
+		check(unsafe {
+			match dir {
+				Some(fd) => libc::posix_spawn_file_actions_addfchdir_np(actions.ptr(), fd),
+				None => libc::posix_spawn_file_actions_addchdir_np(actions.ptr(), exec.cwd()),
+			}
+		})?;
 		for (target, fd) in fds {
 			// SAFETY: `actions` is initialized; both fds are plain integers.
 			check(unsafe {
 				libc::posix_spawn_file_actions_adddup2(actions.ptr(), fd.as_raw_fd(), *target)
 			})?;
 		}
-		// SAFETY: `actions` is initialized; `cwd` outlives the spawn call.
-		check(unsafe { libc::posix_spawn_file_actions_addchdir_np(actions.ptr(), exec.cwd()) })?;
 		let mut attr = Attr::new()?;
 		let mut flags = libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_SETSIGDEF;
 		match place {

@@ -580,6 +580,11 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 		super::mode::set_mode(&mut k.root, cx.store, vp, mode);
 	}
 	let run = vp.runs.front_mut().expect("present");
+	// A subshell given a directory by name holds it now.
+	if std::mem::take(&mut run.hold) {
+		vp.dir = super::hold(cx, &vp.cwd);
+	}
+	let run = vp.runs.front_mut().expect("present");
 	if vp.overlay.is_none() {
 		if let Some(args) = run.args.take() {
 			k.root.set_positional(cx.store, args);
@@ -588,6 +593,10 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 			k.root.set_misc(cx.store, MiscKey::Cwd, cwd.clone());
 			k.root
 				.set_var(cx.store, b"PWD", Some(Var::scalar(cwd.clone(), Attrs::EXPORT)));
+			// The run works in the directory it was given, held already or
+			// held now by its name.
+			let dir = run.dir.take();
+			vp.dir = dir.or_else(|| super::hold(cx, &cwd));
 			vp.cwd = cwd;
 		}
 		for (name, value) in std::mem::take(&mut run.env) {

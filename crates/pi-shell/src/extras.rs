@@ -52,14 +52,39 @@ use std::{
 
 use bstr::{BStr, BString, ByteSlice};
 use parking_lot::Mutex;
-use pi_builtins::extras::{ExtraKind, Fd, Invocation};
+use pi_builtins::extras::{CwdHold, ExtraKind, Fd, Invocation};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-	bash::{EnvView, FdRef, FileKind, NativeRef, OsHandle, Signal, Task},
+	bash::{EnvView, FdRef, FileKind, HeldDir, NativeRef, OsHandle, Signal, Task},
 	git::flag_on,
 	tools::ToolConfig,
 };
+
+/// The working directory an extra (or a tool) reads names from: the
+/// kernel's path of the directory the vproc holds (Linux), with the hold that
+/// keeps that path valid and the name to show for it; else the directory's
+/// name, `cwd`.
+///
+/// The name shown is the one `getcwd` gives a process started there: the
+/// directory's current name, which a moved directory keeps up with; `cwd`
+/// once the directory has been removed and has none.
+pub(crate) fn held_cwd(cwd: &BStr, dir: Option<&HeldDir>) -> (std::path::PathBuf, Option<CwdHold>) {
+	let name = cwd.to_path_lossy().into_owned();
+	#[cfg(target_os = "linux")]
+	if let Some(held) = dir
+		&& let Some(os) = crate::sys::os_dir(held)
+	{
+		use crate::bash::{Fs as _, FsPoll};
+		let name = match crate::sys::StdFs::default().dir_path(held) {
+			FsPoll::Ready(Ok(now)) => now.to_path_lossy().into_owned(),
+			_ => name,
+		};
+		return (os.root().to_path_buf(), Some(CwdHold { name, hold: Arc::new(held.clone()) }));
+	}
+	let _ = dir;
+	(name, None)
+}
 
 /// The [`NativeRef`] `suspend` resolves to: a refusal.
 pub const SUSPEND: NativeRef = NativeRef(u64::MAX);
@@ -181,14 +206,24 @@ impl ReportedError {
 }
 
 /// The invocation of an extra with command line `argv` (named by `argv[0]`),
-/// environment `env`, working directory `cwd`, descriptors `stdio` and
-/// `extra_fds` and the shell's file-creation mask `umask`, on the filesystem
-/// and with the reported-error flag of `config`. Not cancellable and without
-/// a command runner yet.
+/// environment `env`, working directory `cwd` (held as `dir`, when the vproc
+/// holds it), descriptors `stdio` and `extra_fds` and the shell's
+/// file-creation mask `umask`, on the filesystem and with the reported-error
+/// flag of `config`. Not cancellable and without a command runner yet.
+///
+/// A held directory is handed over as the kernel's path of it, so the
+/// extra's relative names, walks and children reach the directory the shell
+/// works in even after its name moved or went; the extra keeps the hold for
+/// as long as it may use that path.
+#[expect(
+	clippy::too_many_arguments,
+	reason = "one per part of the invocation the engine hands over"
+)]
 pub(crate) fn invocation(
 	argv: &[BString],
 	env: &EnvView,
 	cwd: &BStr,
+	dir: Option<&HeldDir>,
 	stdio: &[FdRef; 3],
 	extra_fds: &[(i32, FdRef)],
 	umask: u32,
@@ -200,7 +235,9 @@ pub(crate) fn invocation(
 		.collect();
 	// Files the extra creates get the shell's `umask`, not the process's.
 	let fs = config.filesystem().with_creation_mask(Some(umask));
-	let mut invocation = Invocation::new(argv, cwd.to_path_lossy().into_owned(), fs);
+	let (cwd, hold) = held_cwd(cwd, dir);
+	let mut invocation = Invocation::new(argv, cwd, fs);
+	invocation.cwd_hold = hold;
 	invocation.env = env
 		.iter()
 		.map(|(name, value)| (name.to_str_lossy().into_owned(), value.to_str_lossy().into_owned()))

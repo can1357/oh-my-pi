@@ -171,6 +171,10 @@ pub struct Script {
 	pub tag:          u64,
 	/// Working directory for the run.
 	pub cwd:          Option<BString>,
+	/// The directory `cwd` names, already held (a tool's command run where
+	/// the tool works): the run works in it whatever `cwd` reaches. With
+	/// `cwd` alone the run holds the directory `cwd` names when it starts.
+	pub dir:          Option<crate::bash::fs::HeldDir>,
 	/// Exported variables for the run.
 	pub env:          Vec<(BString, BString)>,
 	/// Changes to inherited non-shell environment entries for a new subshell.
@@ -192,6 +196,7 @@ impl Script {
 			vproc:        VprocSel::Root,
 			tag:          0,
 			cwd:          None,
+			dir:          None,
 			env:          Vec::new(),
 			foreign_env:  Vec::new(),
 			unexport_env: Vec::new(),
@@ -287,8 +292,11 @@ pub struct ToolCall {
 	pub vpid:      Vpid,
 	/// Output tag of this execution.
 	pub tag:       CmdTag,
-	/// Working directory.
+	/// Working directory: its name.
 	pub cwd:       BString,
+	/// The working directory itself, where the caller holds it: the tool's
+	/// relative names and commands start there ([`Script::dir`]).
+	pub dir:       Option<crate::bash::fs::HeldDir>,
 	/// fds 0, 1, 2 (also reachable by number through [`ShellApi`]).
 	pub stdio:     [FdRef; 3],
 	/// Further open fds.
@@ -1250,6 +1258,8 @@ impl Shell {
 			}
 		}
 		let mut root = Vproc::new(vpid, None, fds, init.cwd, None, false);
+		// The shell starts in the directory its cwd names, held.
+		root.dir = hold(cx, &root.cwd);
 		root.mode = init.mode;
 		if zsh {
 			let start = mode::ZshStart {
@@ -1324,6 +1334,8 @@ impl Shell {
 			lossy: 0,
 			args: None,
 			cwd: None,
+			dir: None,
+			hold: false,
 			env: Vec::new(),
 			started: false,
 			exit_trap_started: false,
@@ -1332,6 +1344,7 @@ impl Shell {
 			VprocSel::Root => {
 				run.args = script.args;
 				run.cwd = script.cwd;
+				run.dir = script.dir;
 				run.env = script.env;
 				self.procs[0].runs.push_back(run);
 				return id;
@@ -1393,7 +1406,15 @@ impl Shell {
 				}
 			}
 		}
-		let cwd = script.cwd.unwrap_or_else(|| p.cwd.clone());
+		// A subshell works where its parent does, or in the directory it was
+		// given: held already, or held by name when it starts.
+		let (cwd, dir) = match script.cwd {
+			Some(cwd) => {
+				run.hold = script.dir.is_none();
+				(cwd, script.dir)
+			},
+			None => (p.cwd.clone(), p.dir.clone()),
+		};
 		let status = p.status;
 		let mut scopes = match store {
 			Some(store) => state::copy_scopes(&self.k.root, store, p).unwrap_or_else(|err| {
@@ -1418,6 +1439,7 @@ impl Shell {
 		self.k.next_vpid += 1;
 		let parent_lineage = self.procs[parent].lineage;
 		let mut vp = Vproc::new(vpid, Some(parent_vpid), fds, cwd, Some(overlay), true);
+		vp.dir = dir;
 		vp.lineage = lineage.unwrap_or(parent_lineage);
 		vp.status = status;
 		vp.scopes = scopes;
@@ -1438,13 +1460,20 @@ impl Shell {
 			return;
 		}
 		self.k.root.invalidate(cx.store, epoch);
-		match state::root_misc(cx.store, MiscKey::Cwd) {
-			Ok(Some(cwd)) => {
-				let cwd = BString::from(cwd);
-				self.procs[0].cwd = cwd;
+		let stored = match state::root_misc(cx.store, MiscKey::Cwd) {
+			Ok(cwd) => cwd.map(BString::from),
+			Err(err) => {
+				self.k.fail(err);
+				None
 			},
-			Ok(None) => {},
-			Err(err) => self.k.fail(err),
+		};
+		// Another writer moved the shell: it works in what that name reaches
+		// now. The same name keeps the directory held.
+		if let Some(cwd) = stored
+			&& self.procs[0].cwd != cwd
+		{
+			self.procs[0].dir = hold(cx, &cwd);
+			self.procs[0].cwd = cwd;
 		}
 		// The root's mode too (a copied or restored store).
 		match state::root_misc(cx.store, MiscKey::Mode) {
@@ -2345,6 +2374,21 @@ fn pause_handles(p: &mut Vproc, on: bool) {
 	}
 }
 
+/// The directory `cwd` names, held, for a working directory set without
+/// `cd` (a run's, a restored shell's, one another writer of the store set):
+/// `None` where the host holds no directory, cannot enter that one, or
+/// cannot answer at once, and the vproc then reads names from the name.
+pub(super) fn hold(cx: &mut Cx<'_>, cwd: &[u8]) -> Option<crate::bash::fs::HeldDir> {
+	match cx
+		.host
+		.fs()
+		.open_dir(crate::bash::fs::At::path(bstr::BStr::new(cwd)))
+	{
+		crate::bash::fs::FsPoll::Ready(Ok(dir)) => dir,
+		_ => None,
+	}
+}
+
 impl Vproc {
 	fn new(
 		vpid: Vpid,
@@ -2362,6 +2406,7 @@ impl Vproc {
 			scopes: Vec::new(),
 			fds,
 			cwd,
+			dir: None,
 			status: 0,
 			pipestatus: Vec::new(),
 			overlay,
@@ -2387,6 +2432,42 @@ impl Vproc {
 			trap_frames: 0,
 			mode: ModeId::Bash,
 			zsh: None,
+		}
+	}
+
+	/// `name` as the host reads it for this vproc: `path`, the name made
+	/// absolute with the working directory's name ([`probe::absolute`]), and,
+	/// for a relative name, the directory the vproc holds, which the host
+	/// reads it from. An empty name stays `path`'s (it names nothing).
+	pub fn at<'a>(&'a self, name: &'a [u8], path: &'a [u8]) -> crate::bash::fs::At<'a> {
+		let relative = !name.is_empty()
+			&& name.first() != Some(&b'/')
+			&& crate::bash::fs::url_root_len(name).is_none();
+		crate::bash::fs::At {
+			path: bstr::BStr::new(path),
+			held: self
+				.dir
+				.as_ref()
+				.filter(|_| relative)
+				.map(|dir| (dir, bstr::BStr::new(name))),
+		}
+	}
+
+	/// What relative names are made absolute with: the working directory's
+	/// name, or `None` while the vproc holds its directory, from which they
+	/// are read as they are written.
+	pub fn base(&self) -> Option<&[u8]> {
+		self.dir.is_none().then_some(self.cwd.as_slice())
+	}
+
+	/// `name` as this vproc reads it: relative while it holds its directory
+	/// (the host reads it from there, [`Vproc::at`]; a process it starts
+	/// starts there), else made absolute with the working directory's name.
+	pub fn reach(&self, name: &[u8]) -> BString {
+		match self.base() {
+			Some(cwd) => probe::absolute(cwd, name),
+			None if name.is_empty() => probe::absolute(&self.cwd, name),
+			None => BString::from(name),
 		}
 	}
 
@@ -2463,6 +2544,9 @@ impl Vproc {
 		// does not run them (`state::inherited_trap`).
 		set_subshell_depth(&mut vp, subshell_depth(self).saturating_add(1));
 		vp.status = self.status;
+		// A subshell works in the directory its parent holds, as a forked
+		// process inherits its parent's.
+		vp.dir.clone_from(&self.dir);
 		vp.scopes = state::copy_scopes(&k.root, store, self).unwrap_or_else(|err| {
 			k.fail(err);
 			Vec::new()

@@ -22,7 +22,7 @@ use super::{
 	Cx, Kernel, builtins,
 	command::command_probe,
 	exec::{self, Flow, push_script},
-	imported_function, is_ident, probe,
+	imported_function, is_ident,
 	proc::{
 		Awaited, ExecState, Frame, FrameKind, PendingWrite, Probe, ProbeResult, ScriptKind, Stage,
 		Vproc,
@@ -119,32 +119,29 @@ pub fn start(
 	let (src, stdin, origin) = match &args.input {
 		Input::Command(cmd) => (cmd.clone(), false, "c"),
 		Input::Stdin => (BString::default(), true, "s"),
-		Input::Script(name) => {
-			let path = probe::absolute(&vp.cwd, name);
-			match command_probe(k, cx, vp, &Probe::Read { path }) {
-				Err(key) => return Some(Flow::Block(key)),
-				Ok(ProbeResult::Bytes(Ok(text))) => {
-					let head = &text[..text.len().min(80)];
-					let first = head.split(|&c| c == b'\n').next().unwrap_or(head);
-					if first.contains(&0) {
-						let text = message(&dollar0, name, b"cannot execute binary file");
-						return reply(vp, 2, text, 126);
-					}
-					(text, false, "")
-				},
-				Ok(ProbeResult::Bytes(Err(msg))) if msg.as_slice() == b"Is a directory" => {
-					return reply(vp, 2, message(&dollar0, name, &msg), 126);
-				},
-				Ok(ProbeResult::Bytes(Err(msg))) => {
-					let status = if msg.as_slice() == b"No such file or directory" {
-						127
-					} else {
-						126
-					};
-					return reply(vp, 2, message(&args.shell_name, name, &msg), status);
-				},
-				Ok(_) => (BString::default(), false, ""),
-			}
+		Input::Script(name) => match command_probe(k, cx, vp, &Probe::Read { path: name.clone() }) {
+			Err(key) => return Some(Flow::Block(key)),
+			Ok(ProbeResult::Bytes(Ok(text))) => {
+				let head = &text[..text.len().min(80)];
+				let first = head.split(|&c| c == b'\n').next().unwrap_or(head);
+				if first.contains(&0) {
+					let text = message(&dollar0, name, b"cannot execute binary file");
+					return reply(vp, 2, text, 126);
+				}
+				(text, false, "")
+			},
+			Ok(ProbeResult::Bytes(Err(msg))) if msg.as_slice() == b"Is a directory" => {
+				return reply(vp, 2, message(&dollar0, name, &msg), 126);
+			},
+			Ok(ProbeResult::Bytes(Err(msg))) => {
+				let status = if msg.as_slice() == b"No such file or directory" {
+					127
+				} else {
+					126
+				};
+				return reply(vp, 2, message(&args.shell_name, name, &msg), status);
+			},
+			Ok(_) => (BString::default(), false, ""),
 		},
 	};
 	let new = New { args: &args, env, pairs: &pairs, dollar0: &dollar0, origin };
@@ -226,7 +223,6 @@ fn launch(
 		Ok(files) => {
 			for candidates in files {
 				for path in candidates {
-					let path = probe::absolute(&vp.cwd, &path);
 					match command_probe(k, cx, vp, &Probe::Read { path }) {
 						Err(key) => return Some(Flow::Block(key)),
 						Ok(ProbeResult::Bytes(Ok(text))) => {
@@ -403,6 +399,8 @@ fn fresh_shell(
 	}
 	let mut child = Vproc::new(vpid, Some(vp.vpid), vp.fds.clone(), vp.cwd.clone(), Some(ov), true);
 	child.rlimits.clone_from(&vp.rlimits);
+	// A new shell starts where its parent works, as a child process does.
+	child.dir.clone_from(&vp.dir);
 	child.lineage = vp.lineage;
 	// A new shell's options, then the invocation's.
 	state::reset_options(&mut k.root, cx.store, &mut child);

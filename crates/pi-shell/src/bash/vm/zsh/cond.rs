@@ -34,7 +34,7 @@ use crate::bash::{
 		Cx, Kernel,
 		builtins::{Chunk, Ctx, Need, Outcome, R, done, zsh_args::zx as with_ex},
 		exec::{Flow, expanding},
-		probe::{self, absolute},
+		probe,
 		proc::{PendingWrite, Probe, ProbeResult, Slot, Vproc},
 		zsh::{arith, math::Number, params, subscript, zglob, zpattern},
 	},
@@ -150,7 +150,7 @@ fn getstat(ctx: &Ctx<'_, '_>, s: &[u8], follow: bool) -> Result<Option<Stat>, Ne
 	if s.is_empty() {
 		return Ok(None);
 	}
-	let path = absolute(&ctx.vp.cwd, s);
+	let path = s.into();
 	match ctx.probe(Probe::Stat { path, follow })? {
 		ProbeResult::Stat(st) => Ok(st),
 		_ => Ok(None),
@@ -166,7 +166,7 @@ fn doaccess(ctx: &Ctx<'_, '_>, s: &[u8], m: u8) -> Result<bool, Need> {
 	if m == 0 {
 		return Ok(getstat(ctx, s, true)?.is_some());
 	}
-	let path = absolute(&ctx.vp.cwd, s);
+	let path = s.into();
 	Ok(ctx.probe(Probe::Access { path, mode: m })? == ProbeResult::Ok(true))
 }
 

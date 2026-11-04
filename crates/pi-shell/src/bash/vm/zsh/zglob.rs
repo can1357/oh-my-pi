@@ -1448,7 +1448,7 @@ fn glob_words(
 		let mut tcx = Context::from_waker(&k.waker);
 		let mut pending = None;
 		while let Some(ask) = walk.asking.front() {
-			match answer(ask, &mut walk.names, &mut tcx, cx, &mut sc, &vp.cwd) {
+			match answer(ask, &mut walk.names, &mut tcx, cx, &mut sc, vp) {
 				Ok(fact) => {
 					if let Some(ask) = walk.asking.pop_front() {
 						walk.facts.insert(ask, fact);

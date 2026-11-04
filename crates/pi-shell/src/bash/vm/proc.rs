@@ -30,7 +30,14 @@ pub struct Vproc {
 	/// Function-local scopes, innermost last.
 	pub scopes:        Vec<Scope>,
 	pub fds:           FdTable,
+	/// The working directory's name: `PWD` as `cd` set it, what `pwd`,
+	/// `dirs` and the prompt show.
 	pub cwd:           BString,
+	/// The working directory itself, where the host holds it: every relative
+	/// name is read from it, not from `cwd`, which may reach another
+	/// directory or none once it is moved, renamed or removed. Shared with
+	/// subshells; never serialized.
+	pub dir:           Option<crate::bash::fs::HeldDir>,
 	/// `$?`.
 	pub status:        i32,
 	/// `PIPESTATUS` of the last pipeline.
@@ -714,6 +721,12 @@ pub struct Run {
 	/// install when the script starts.
 	pub args:              Option<Vec<BString>>,
 	pub cwd:               Option<BString>,
+	/// The directory `cwd` names, held by whoever submitted the run; never
+	/// serialized.
+	pub dir:               Option<crate::bash::fs::HeldDir>,
+	/// The vproc holds the directory its `cwd` names when the run starts
+	/// (a subshell given a `cwd` and no directory); never serialized.
+	pub hold:              bool,
 	pub env:               Vec<(BString, BString)>,
 	pub started:           bool,
 	pub exit_trap_started: bool,
@@ -1194,6 +1207,10 @@ pub struct RedirProgress {
 }
 
 /// A file probe or name lookup requested by a pollable builtin or `[[ ]]`.
+///
+/// A file name in a probe is as the caller has it: absolute, or relative,
+/// which [`super::probe::perform`] reads as the vproc does (from the
+/// directory it holds, [`Vproc::at`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Probe {
 	/// `stat(path)` (`follow` = not `lstat`).
@@ -1204,8 +1221,13 @@ pub enum Probe {
 	Path { name: BString, path: BString },
 	/// Whole-file read (`source`).
 	Read { path: BString },
-	/// `cd` target validation.
+	/// `chdir(path)`: [`ProbeResult::Entered`].
 	Chdir { path: BString },
+	/// `getcwd`: the name the directory the vproc holds has now
+	/// ([`ProbeResult::Path`], `None` once it has been removed), or the one
+	/// the op's `Chdir { path: entered }` entered; the physical name of the
+	/// name where no directory is held.
+	Getcwd { entered: Option<BString> },
 	/// Input from an fd up to a delimiter (`read`): `delim` `None` reads
 	/// to EOF, else the read ends with the `lines`-th delimiter (1 but for
 	/// `mapfile`); `nchars` caps the count; `part` numbers successive reads
@@ -1238,6 +1260,9 @@ pub enum ProbeResult {
 	Path(Option<BString>),
 	/// File contents, or the `strerror` text of the failure.
 	Bytes(Result<BString, BString>),
+	/// The directory a `Chdir` entered, or the `strerror` text of the
+	/// failure.
+	Entered(Result<crate::bash::fs::Entered, BString>),
 	Input {
 		data:      BString,
 		eof:       bool,
@@ -1455,6 +1480,9 @@ pub enum Live {
 	None,
 	Stat(Box<dyn FsPending<Stat>>),
 	Access(Box<dyn FsPending<()>>),
+	/// [`Fs::open_dir`](crate::bash::Fs::open_dir) of a `Chdir` probe in
+	/// flight.
+	Held(Box<dyn FsPending<Option<crate::bash::fs::HeldDir>>>),
 	/// `realpath` of a `RealPath` probe in flight.
 	Path(Box<dyn FsPending<BString>>),
 	/// `open` of a `Read` probe in flight.
@@ -1485,6 +1513,7 @@ impl Live {
 		match self {
 			Self::Stat(_)
 			| Self::Access(_)
+			| Self::Held(_)
 			| Self::Path(_)
 			| Self::OpenDir(_)
 			| Self::Dir(_)
@@ -1507,8 +1536,9 @@ impl Live {
 // Host lineage (`Vproc::lineage`, 8 B: a `u32` label and a flag) added at
 // most 8 B to that, still under 2,048. The resumable `mapfile -C` counter
 // (`ExecState::resumed`, 368 → 376 B): the bench measured 1,832 B per idle
-// vproc with both.
-const _: () = assert!(size_of::<Vproc>() <= 664, "Vproc grew (idle vproc ≤ 2 KiB)");
+// vproc with both. The working directory held (`Vproc::dir`, one pointer,
+// 664 → 672 B): the bench measured 1,840 B per idle vproc (1,832 before).
+const _: () = assert!(size_of::<Vproc>() <= 672, "Vproc grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Frame>() <= 256, "Frame grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Scratch>() <= 216, "Scratch grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<ExecState>() <= 376, "ExecState grew (idle vproc ≤ 2 KiB)");

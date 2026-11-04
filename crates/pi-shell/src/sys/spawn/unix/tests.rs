@@ -89,6 +89,7 @@ fn spec<'a>(argv: &'a [BString], env: &'a EnvView, pgroup: PgroupSpec) -> SpawnS
 		argv,
 		env,
 		cwd: b"/".as_bstr(),
+		dir: None,
 		stdio: [StdioSpec::Null, StdioSpec::Null, StdioSpec::Null],
 		extra_fds: Vec::new(),
 		pgroup,

@@ -21,8 +21,7 @@ use crate::bash::{
 		Cx, Kernel,
 		exec::mode_of,
 		expand::DEFAULT_IFS,
-		locale,
-		probe::{self, absolute},
+		locale, probe,
 		proc::{AssignValue, Probe, ProbeResult, Vproc},
 		quote, state,
 	},
@@ -397,8 +396,7 @@ fn kinds(
 		return Ok(found);
 	}
 	if name.contains(&b'/') {
-		let p = absolute(&ctx.vp.cwd, name);
-		if ctx.probe(Probe::Access { path: p, mode: 4 })? == ProbeResult::Ok(true) {
+		if ctx.probe(Probe::Access { path: name.into(), mode: 4 })? == ProbeResult::Ok(true) {
 			found.push(Kind::File(name.into()));
 		}
 	} else {
@@ -781,8 +779,8 @@ pub fn hash(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		.iter()
 		.find_map(|(c, _, a)| (*c == b'p').then(|| a.clone()).flatten());
 	if let Some(path) = given {
-		let abs = absolute(&ctx.vp.cwd, &path);
-		if let ProbeResult::Stat(Some(s)) = ctx.probe(Probe::Stat { path: abs, follow: true })?
+		if let ProbeResult::Stat(Some(s)) =
+			ctx.probe(Probe::Stat { path: path.clone(), follow: true })?
 			&& s.kind == crate::bash::fs::StatKind::Dir
 		{
 			ctx.err(Diag::IsADirectory { name: path });

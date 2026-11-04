@@ -17,12 +17,13 @@ use std::{
 	time::Duration,
 };
 
-use bstr::{BStr, BString, ByteSlice};
+use bstr::{BString, ByteSlice};
 use parking_lot::Mutex;
 
 use crate::{
 	bash::{
-		DirEntry, DirIter, File, FileKind, Fs, FsPending, FsPoll, OpenFlags, OsHandle, Stat,
+		At, DirEntry, DirIter, File, FileKind, Fs, FsPending, FsPoll, HeldDir, OpenFlags, OsHandle,
+		Stat,
 		fs::{Access, SeekFrom, StatKind, TempNode, TempPurpose},
 	},
 	testkit::rng::Rng,
@@ -444,19 +445,21 @@ fn stat_of(node: &Node) -> Stat {
 	}
 }
 
+/// The memory filesystem holds no directory: every name is read as the
+/// engine spells it ([`At::path`]).
 impl Fs for MemFs {
-	fn open(&mut self, path: &BStr, flags: OpenFlags, mode: u32) -> FsPoll<Box<dyn File>> {
-		let res = self.open_now(path, flags, mode);
+	fn open(&mut self, at: At<'_>, flags: OpenFlags, mode: u32) -> FsPoll<Box<dyn File>> {
+		let res = self.open_now(at.path, flags, mode);
 		self.answer(res)
 	}
 
-	fn stat(&mut self, path: &BStr, _follow: bool) -> FsPoll<Stat> {
-		let res = self.node(path).map(|n| stat_of(&n));
+	fn stat(&mut self, at: At<'_>, _follow: bool) -> FsPoll<Stat> {
+		let res = self.node(at.path).map(|n| stat_of(&n));
 		self.answer(res)
 	}
 
-	fn access(&mut self, path: &BStr, mode: Access) -> FsPoll<()> {
-		let res = self.node(path).and_then(|n| {
+	fn access(&mut self, at: At<'_>, mode: Access) -> FsPoll<()> {
+		let res = self.node(at.path).and_then(|n| {
 			let bits = match n {
 				Node::File { mode, .. } | Node::Dir { mode } => mode,
 				Node::Null => 0o666,
@@ -474,8 +477,8 @@ impl Fs for MemFs {
 		self.answer(res)
 	}
 
-	fn read_dir(&mut self, path: &BStr) -> FsPoll<Box<dyn DirIter>> {
-		let dir = trim(path);
+	fn read_dir(&mut self, at: At<'_>) -> FsPoll<Box<dyn DirIter>> {
+		let dir = trim(at.path);
 		let res = match self.node(dir) {
 			Ok(Node::Dir { .. }) => {
 				let mut prefix = BString::from(dir);
@@ -500,15 +503,15 @@ impl Fs for MemFs {
 		self.answer(res)
 	}
 
-	fn readlink(&mut self, path: &BStr) -> FsPoll<BString> {
+	fn readlink(&mut self, at: At<'_>) -> FsPoll<BString> {
 		let res = self
-			.node(path)
+			.node(at.path)
 			.and_then(|_| Err(io::ErrorKind::InvalidInput.into()));
 		self.answer(res)
 	}
 
-	fn realpath(&mut self, path: &BStr) -> FsPoll<BString> {
-		let res = self.node(path).map(|_| BString::from(trim(path)));
+	fn realpath(&mut self, at: At<'_>) -> FsPoll<BString> {
+		let res = self.node(at.path).map(|_| BString::from(trim(at.path)));
 		self.answer(res)
 	}
 
@@ -519,13 +522,17 @@ impl Fs for MemFs {
 		self.answer(Ok(TempNode { path: path.into(), fifo: false }))
 	}
 
-	fn chdir_check(&mut self, path: &BStr) -> FsPoll<()> {
-		let res = match self.node(path) {
-			Ok(Node::Dir { .. }) => Ok(()),
+	fn open_dir(&mut self, at: At<'_>) -> FsPoll<Option<HeldDir>> {
+		let res = match self.node(at.path) {
+			Ok(Node::Dir { .. }) => Ok(None),
 			Ok(Node::File { .. } | Node::Null) => Err(io::ErrorKind::NotADirectory.into()),
 			Err(e) => Err(e),
 		};
 		self.answer(res)
+	}
+
+	fn dir_path(&mut self, _dir: &HeldDir) -> FsPoll<BString> {
+		self.answer(Err(io::ErrorKind::Unsupported.into()))
 	}
 }
 
@@ -563,11 +570,16 @@ mod tests {
 	fn full_latency_makes_every_operation_pending_but_correct() {
 		let mut fs = MemFs::with_latency(7, 1.0, 3);
 		fs.add_file("/bin/tool", b"x", 0o755);
-		assert!(matches!(fs.stat(b"/bin/tool".as_bstr(), true), FsPoll::Pending(_)));
-		assert_eq!(resolve(fs.stat(b"/bin/tool".as_bstr(), true)).unwrap().kind, StatKind::File);
-		assert!(resolve(fs.access(b"/bin/tool".as_bstr(), Access::EXEC)).is_ok());
+		assert!(matches!(fs.stat(At::path(b"/bin/tool".as_bstr()), true), FsPoll::Pending(_)));
 		assert_eq!(
-			resolve(fs.stat(b"/nope".as_bstr(), true))
+			resolve(fs.stat(At::path(b"/bin/tool".as_bstr()), true))
+				.unwrap()
+				.kind,
+			StatKind::File
+		);
+		assert!(resolve(fs.access(At::path(b"/bin/tool".as_bstr()), Access::EXEC)).is_ok());
+		assert_eq!(
+			resolve(fs.stat(At::path(b"/nope".as_bstr()), true))
 				.unwrap_err()
 				.kind(),
 			io::ErrorKind::NotFound
@@ -580,21 +592,21 @@ mod tests {
 		let mut fs = MemFs::new();
 		fs.add_file("/a", b"", 0o644);
 		assert_eq!(
-			resolve(fs.access(b"/a".as_bstr(), Access::EXEC))
+			resolve(fs.access(At::path(b"/a".as_bstr()), Access::EXEC))
 				.unwrap_err()
 				.kind(),
 			io::ErrorKind::PermissionDenied
 		);
-		assert!(resolve(fs.access(b"/a".as_bstr(), Access::READ)).is_ok());
+		assert!(resolve(fs.access(At::path(b"/a".as_bstr()), Access::READ)).is_ok());
 	}
 
 	#[test]
 	fn injected_faults_surface_as_their_errno_text() {
 		let mut fs = MemFs::new().with_faults(1.0, &[FaultKind::Eio]);
-		let err = resolve(fs.stat(b"/".as_bstr(), true)).unwrap_err();
+		let err = resolve(fs.stat(At::path(b"/".as_bstr()), true)).unwrap_err();
 		assert_eq!(crate::bash::diag::strerror(&err), "Input/output error");
 		let mut fs = MemFs::new().with_faults(1.0, &[FaultKind::Enospc]);
-		let err = resolve(fs.stat(b"/".as_bstr(), true)).unwrap_err();
+		let err = resolve(fs.stat(At::path(b"/".as_bstr()), true)).unwrap_err();
 		assert_eq!(crate::bash::diag::strerror(&err), "No space left on device");
 	}
 
@@ -603,7 +615,7 @@ mod tests {
 		let mut fs = MemFs::new();
 		fs.add_file("/d/a", b"", 0o644);
 		fs.add_file("/d/sub/b", b"", 0o644);
-		let mut it = resolve(fs.read_dir(b"/d".as_bstr())).unwrap();
+		let mut it = resolve(fs.read_dir(At::path(b"/d".as_bstr()))).unwrap();
 		let waker = Waker::noop();
 		let mut cx = Context::from_waker(waker);
 		let mut names = Vec::new();
@@ -619,11 +631,13 @@ mod tests {
 		let waker = Waker::noop();
 		let mut cx = Context::from_waker(waker);
 		let w = OpenFlags::WRITE.with(OpenFlags::CREATE);
-		let mut f = resolve(fs.open(b"/tmp/x".as_bstr(), w.with(OpenFlags::TRUNC), 0o644)).unwrap();
+		let mut f =
+			resolve(fs.open(At::path(b"/tmp/x".as_bstr()), w.with(OpenFlags::TRUNC), 0o644)).unwrap();
 		let _ = f.poll_write(&mut cx, b"abc");
-		let mut f = resolve(fs.open(b"/tmp/x".as_bstr(), w.with(OpenFlags::APPEND), 0o644)).unwrap();
+		let mut f =
+			resolve(fs.open(At::path(b"/tmp/x".as_bstr()), w.with(OpenFlags::APPEND), 0o644)).unwrap();
 		let _ = f.poll_write(&mut cx, b"de");
 		assert_eq!(fs.read("/tmp/x").unwrap(), b"abcde");
-		assert!(resolve(fs.open(b"/missing/x".as_bstr(), w, 0o644)).is_err());
+		assert!(resolve(fs.open(At::path(b"/missing/x".as_bstr()), w, 0o644)).is_err());
 	}
 }

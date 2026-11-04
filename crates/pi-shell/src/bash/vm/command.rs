@@ -1319,7 +1319,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 			let has_slash = name.contains(&b'/');
 			if external_only {
 				break if has_slash {
-					Target::External(absolute(&vp.cwd, name))
+					Target::External(vp.reach(name))
 				} else {
 					Target::Search
 				};
@@ -1421,7 +1421,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 					if zsh && zsh_path_dirs(k, cx, vp, &name) {
 						break Target::Search;
 					}
-					break Target::External(absolute(&vp.cwd, &name));
+					break Target::External(vp.reach(&name));
 				},
 				Resolved::NotFound => break Target::Search,
 				other => break other.into(),
@@ -1460,7 +1460,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 					state::store_record(&mut k.root, cx.store, vp, key, Some(rec));
 					// `hash` keeps bash's display path (`./e` for an empty
 					// PATH entry): a file relative to the shell's cwd.
-					let target = absolute(&vp.cwd, &path);
+					let target = vp.reach(&path);
 					sc.exec.as_mut().expect("exec").target = Some(Target::External(target));
 				},
 				hashed => {
@@ -1478,14 +1478,14 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 					// zsh `pathdirs` (a name with a slash searched): the name
 					// itself first.
 					let mut cands: Vec<BString> = hashed
-						.map(|(p, _)| absolute(&vp.cwd, &p))
+						.map(|(p, _)| vp.reach(&p))
 						.into_iter()
 						.chain(
 							(vp.mode.dialect() == crate::bash::ids::Dialect::Zsh && name.contains(&b'/'))
-								.then(|| absolute(&vp.cwd, &name)),
+								.then(|| vp.reach(&name)),
 						)
 						.collect();
-					cands.extend(candidates(&path, &name, &vp.cwd));
+					cands.extend(candidates(&path, &name, vp.base()));
 					sc.io().search =
 						Some(PathSearch { cands, idx: 0, checking_exec: false, nonexec: None });
 				},
@@ -1494,7 +1494,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 		// A hashed name ran without a search (its target is set).
 		let found = if sc.io.as_ref().is_some_and(|io| io.search.is_some()) {
 			let mut tcx = Context::from_waker(&k.waker);
-			Some(probe::path_search(&mut tcx, cx, &mut sc))
+			Some(probe::path_search(&mut tcx, cx, &mut sc, vp))
 		} else {
 			None
 		};
@@ -1613,7 +1613,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 			// bash's `exec`: a name not found that is a directory "cannot
 			// execute" (126).
 			let name = argv0(vp);
-			let path = absolute(&vp.cwd, &name);
+			let path = name.clone();
 			let dir = match command_probe(k, cx, vp, &Probe::Stat { path, follow: true }) {
 				Err(key) => return Some(Flow::Block(key)),
 				Ok(ProbeResult::Stat(Some(st))) => st.kind == StatKind::Dir,
@@ -1673,6 +1673,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 				vpid: vp.vpid,
 				tag,
 				cwd: vp.cwd.clone(),
+				dir: vp.dir.clone(),
 				stdio: [vp.fds.handle(0), vp.fds.handle(1), vp.fds.handle(2)],
 				extra_fds: extra_fds(vp),
 				env,
@@ -1701,6 +1702,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 				argv: &argv,
 				env: &env,
 				cwd: BStr::new(&vp.cwd),
+				dir: vp.dir.as_ref(),
 				stdio: [vp.fds.handle(0), vp.fds.handle(1), vp.fds.handle(2)],
 				extra_fds: &extra,
 				tag,
@@ -1809,6 +1811,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 				argv: &argv,
 				env: &env,
 				cwd: BStr::new(&vp.cwd),
+				dir: vp.dir.as_ref(),
 				stdio: [
 					stdio_spec(&vp.fds.handle(0)),
 					stdio_spec(&vp.fds.handle(1)),
@@ -2155,7 +2158,6 @@ fn fpath_file(
 		let mut path = BString::from(dir);
 		path.push(b'/');
 		path.extend_from_slice(name);
-		let path = absolute(&vp.cwd, &path);
 		let regular = matches!(
 			command_probe(k, cx, vp, &Probe::Stat { path: path.clone(), follow: true })?,
 			ProbeResult::Stat(Some(st)) if st.kind != StatKind::Dir
@@ -2166,7 +2168,7 @@ fn fpath_file(
 		if let ProbeResult::Bytes(Ok(text)) =
 			command_probe(k, cx, vp, &Probe::Read { path: path.clone() })?
 		{
-			return Ok(Some((path, text)));
+			return Ok(Some((absolute(&vp.cwd, &path), text)));
 		}
 	}
 	Ok(None)
@@ -2865,7 +2867,7 @@ fn exec_builtin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> O
 		// externals.
 		None
 	} else if name.contains(&b'/') {
-		Some(Target::External(absolute(&vp.cwd, &name)))
+		Some(Target::External(vp.reach(&name)))
 	} else {
 		Some(Target::Search)
 	};
@@ -3643,7 +3645,7 @@ fn zsh_refused(
 			let end = first.iter().position(|&c| c == b' ').unwrap_or(first.len());
 			let (prog, arg) = (&first[..end], first.get(end + 1..));
 			let run = if enoexec {
-				Some(absolute(&vp.cwd, prog))
+				Some(vp.reach(prog))
 			} else if prog.starts_with(b"/") {
 				None
 			} else {
@@ -3655,7 +3657,7 @@ fn zsh_refused(
 				let probe = Probe::Path { name: BString::from(prog), path: search };
 				match command_probe(k, cx, vp, &probe) {
 					Err(key) => return Some(Flow::Block(key)),
-					Ok(ProbeResult::Path(found)) => found.map(|f| absolute(&vp.cwd, &f)),
+					Ok(ProbeResult::Path(found)) => found.map(|f| vp.reach(&f)),
 					Ok(_) => None,
 				}
 			};

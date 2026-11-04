@@ -13,11 +13,12 @@ use bstr::{BString, ByteSlice};
 
 use super::{Child, Out, ToolConfig, Turn};
 use crate::{
-	bash::{CallOutcome, EnvView, ShellApi, ToolCall},
+	bash::{CallOutcome, EnvView, Fs, FsPoll, ShellApi, ToolCall},
 	git::{
 		AddRequest, FATAL_EXIT, GitLayers, Outcome, env_redirected,
 		guard::{Decision, REFUSED_EXIT, Review},
 	},
+	sys::StdFs,
 };
 
 /// What the worker decided.
@@ -141,7 +142,7 @@ fn prepare(call: &ToolCall, config: &ToolConfig, waker: Waker) -> flume::Receive
 		.iter()
 		.map(|a| a.to_str_lossy().into_owned())
 		.collect();
-	let cwd = call.cwd.to_path_lossy().into_owned();
+	let cwd = real_cwd(call);
 	let env = call.env.clone();
 	let config = config.clone();
 	let (tx, rx) = flume::bounded(1);
@@ -216,18 +217,32 @@ fn args_of(args: &[String]) -> Vec<BString> {
 /// it never resolves to the tool again).
 fn git_path(call: &ToolCall) -> Option<BString> {
 	let path = call.env.get(b"PATH")?;
-	let cwd = call.cwd.to_path_lossy();
+	let cwd = real_cwd(call);
 	let separator = if cfg!(windows) { ";" } else { ":" };
 	path.split_str(separator).find_map(|dir| {
 		let dir = dir.to_path_lossy();
 		let dir: PathBuf = if dir.as_os_str().is_empty() {
-			cwd.to_path_buf()
+			cwd.clone()
 		} else {
 			cwd.join(dir)
 		};
 		let git = dir.join("git");
 		executable(&git).then(|| BString::from(git.to_string_lossy().as_bytes()))
 	})
+}
+
+/// The working directory as a process started there sees it (`getcwd`): the
+/// name the directory the caller holds has now, else the caller's name for
+/// it. Git writes the paths it derives from it into the repository, so they
+/// must be the directory's own names, never a path the shell reads it
+/// through.
+fn real_cwd(call: &ToolCall) -> PathBuf {
+	if let Some(dir) = &call.dir
+		&& let FsPoll::Ready(Ok(name)) = StdFs::default().dir_path(dir)
+	{
+		return name.to_path_lossy().into_owned();
+	}
+	call.cwd.to_path_lossy().into_owned()
 }
 
 #[cfg(unix)]

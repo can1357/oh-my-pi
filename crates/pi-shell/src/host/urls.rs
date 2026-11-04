@@ -40,6 +40,8 @@ pub(super) struct Names {
 
 /// The parts of a [`SpawnSpec`] URL resolution does not touch, owned.
 pub(super) struct Rest {
+	/// The working directory held, which the child starts in.
+	dir:         Option<crate::bash::HeldDir>,
 	stdio:       [StdioSpec; 3],
 	extra_fds:   Vec<(i32, StdioSpec)>,
 	pgroup:      PgroupSpec,
@@ -58,6 +60,7 @@ impl Rest {
 	/// call, so no borrow of it crosses an await.
 	pub(super) fn launch<R>(self, names: &Names, launch: impl FnOnce(SpawnSpec<'_>) -> R) -> R {
 		let Self {
+			dir,
 			stdio,
 			extra_fds,
 			pgroup,
@@ -74,6 +77,7 @@ impl Rest {
 			argv: &names.argv,
 			env: &names.env,
 			cwd: names.cwd.as_bstr(),
+			dir: dir.as_ref(),
 			stdio,
 			extra_fds,
 			pgroup,
@@ -104,6 +108,7 @@ pub(super) fn split(spec: SpawnSpec<'_>) -> (Names, Rest) {
 		argv,
 		env,
 		cwd,
+		dir,
 		stdio,
 		extra_fds,
 		pgroup,
@@ -122,6 +127,7 @@ pub(super) fn split(spec: SpawnSpec<'_>) -> (Names, Rest) {
 		cwd:  BString::from(cwd.as_bytes()),
 	};
 	let rest = Rest {
+		dir: dir.cloned(),
 		stdio,
 		extra_fds,
 		pgroup,

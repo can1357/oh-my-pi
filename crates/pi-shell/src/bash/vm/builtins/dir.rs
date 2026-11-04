@@ -91,6 +91,7 @@ pub fn cd(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	};
 	let cwd = ctx.vp.cwd.clone();
 	let physical = physical(ctx, &o)?;
+	let posix = ctx.option(OptId::Posix)?;
 	// Physically, `..` is the parent of the directory a name resolves to,
 	// so the name stays as written until `realpath` reads it (a URL path
 	// keeps `cd -L`'s textual view: a provider has no symlinks to follow).
@@ -112,28 +113,67 @@ pub fn cd(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			let mut p = BString::from(dir);
 			p.push(b'/');
 			p.extend_from_slice(&target);
-			candidates.push((resolve(&p), true));
+			candidates.push((p, true));
 		}
 	}
-	candidates.push((resolve(&target), print));
+	candidates.push((target.clone(), print));
 	let mut last_err = None;
-	for (dir, show) in candidates {
-		match ctx.probe(Probe::Chdir { path: dir.clone() })? {
-			ProbeResult::Bytes(Ok(_)) => {
-				// `cd -P` takes the directory's real name; `-e` fails when
-				// it cannot be read (the change stands). A name printed for
-				// `cd -` or a `CDPATH` match stays as it was found.
-				let shown = dir.clone();
+	for (written, show) in candidates {
+		let url = url_root_len(&cwd).is_some() || url_root_len(&written).is_some();
+		// bash's `change_to_directory`: `-P` enters the directory as
+		// written, a relative one read from the working directory itself
+		// (`chdir(newdir)`); `-L` enters the name made logical
+		// (`chdir(tdir)`) and, outside POSIX mode, then the name as written,
+		// read from the working directory, which `getcwd` then names.
+		let resolved = resolve(&written);
+		let (entered, from_cwd) = if physical && !url {
+			(ctx.probe(Probe::Chdir { path: written.clone() })?, true)
+		} else {
+			match ctx.probe(Probe::Chdir { path: resolved.clone() })? {
+				ProbeResult::Entered(Err(first)) if !url && !posix && !written.starts_with(b"/") => {
+					match ctx.probe(Probe::Chdir { path: written.clone() })? {
+						ProbeResult::Entered(Ok(entered)) => (ProbeResult::Entered(Ok(entered)), true),
+						// The reason is the first `chdir`'s, as bash keeps it.
+						_ => (ProbeResult::Entered(Err(first)), false),
+					}
+				},
+				entered => (entered, false),
+			}
+		};
+		match entered {
+			ProbeResult::Entered(Ok(entered)) => {
+				// The name: `-L`'s logical one; `cd -P`'s real one; a name
+				// read from the working directory the one `getcwd` gives it.
+				// When none resolves, the name as written made absolute, with
+				// `getcwd`'s failure reported (`-e` fails; the change
+				// stands). A name printed for `cd -` or a `CDPATH` match
+				// stays as it was found.
 				let mut status = 0;
-				let dir = if !physical {
-					dir
-				} else if let ProbeResult::Path(Some(real)) =
-					ctx.probe(Probe::RealPath { path: dir.clone() })?
-				{
-					real
+				let named = absolute(&cwd, &written);
+				let real = if physical && !url {
+					match ctx.probe(Probe::RealPath { path: named.clone() })? {
+						ProbeResult::Path(Some(real)) => Some(real),
+						_ => None,
+					}
+				} else if from_cwd {
+					None
 				} else {
-					status = i32::from(o.has(b'e'));
-					logical(&cwd, &dir)
+					Some(resolved.clone())
+				};
+				let dir = if let Some(dir) = real {
+					dir
+				} else if let ProbeResult::Path(Some(name)) =
+					ctx.probe(Probe::Getcwd { entered: Some(written) })?
+				{
+					name
+				} else {
+					ctx.out_fd(
+						2,
+						b"cd: error retrieving current directory: getcwd: cannot access parent \
+						  directories: No such file or directory\n",
+					);
+					status = i32::from(physical && o.has(b'e'));
+					named
 				};
 				// bash's `bindpwd`: OLDPWD, then PWD; a readonly one is
 				// reported and fails the command, the directory changes.
@@ -155,14 +195,16 @@ pub fn cd(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 					ctx.k.root.set_misc(ctx.cx.store, MiscKey::Cwd, dir.clone());
 				}
 				ctx.vp.cwd = dir;
+				// The directory entered is the one the shell now works in.
+				ctx.vp.dir = entered.0;
 				if show {
-					let mut line = shown.to_vec();
+					let mut line = resolved.to_vec();
 					line.push(b'\n');
 					ctx.out(&line);
 				}
 				return done(status);
 			},
-			ProbeResult::Bytes(Err(msg)) => last_err = Some(msg),
+			ProbeResult::Entered(Err(msg)) => last_err = Some(msg),
 			_ => {},
 		}
 	}
@@ -175,24 +217,45 @@ pub fn cd(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 }
 
 /// `pwd [-LP]`: the working directory, physical (symlinks resolved) with
-/// `-P` or `set -P`.
+/// `-P` or `set -P`. As bash's: the name, made physical with `-P`; what
+/// `getcwd` answers when that does not resolve, or in POSIX mode when the
+/// name does not reach the directory the shell works in.
 pub fn pwd(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let o = match opts(ctx, args, b"LP", b"", false) {
 		Ok(o) => o,
 		Err(st) => return done(st),
 	};
-	let mut line = if !physical(ctx, &o)? {
-		ctx.vp.cwd.to_vec()
-	} else if let ProbeResult::Path(Some(real)) =
-		ctx.probe(Probe::RealPath { path: ctx.vp.cwd.clone() })?
-	{
+	let cwd = ctx.vp.cwd.clone();
+	let mut named = if !physical(ctx, &o)? {
+		Some(cwd.clone())
+	} else if let ProbeResult::Path(Some(real)) = ctx.probe(Probe::RealPath { path: cwd.clone() })? {
+		Some(real)
+	} else {
+		None
+	};
+	if named.is_some() && ctx.vp.dir.is_some() && ctx.option(OptId::Posix)? {
+		let here = ctx.probe(Probe::Stat { path: BString::from("."), follow: true })?;
+		let there = ctx.probe(Probe::Stat { path: cwd, follow: true })?;
+		let same = match (here, there) {
+			(ProbeResult::Stat(Some(a)), ProbeResult::Stat(Some(b))) => {
+				(a.dev, a.ino) == (b.dev, b.ino)
+			},
+			_ => false,
+		};
+		if !same {
+			named = None;
+		}
+	}
+	let mut line = if let Some(name) = named {
+		name.to_vec()
+	} else if let ProbeResult::Path(Some(real)) = ctx.probe(Probe::Getcwd { entered: None })? {
 		real.to_vec()
 	} else {
 		// bash's `getcwd` failure, printed without the shell's prefix.
 		ctx.out_fd(
 			2,
-			b"pwd: error retrieving current directory: getcwd: cannot access parent directories: \
-			  No such file or directory\n",
+			b"pwd: error retrieving current directory: getcwd: cannot access parent \
+			  directories: No such file or directory\n",
 		);
 		return done(1);
 	};

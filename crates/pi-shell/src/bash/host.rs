@@ -270,8 +270,11 @@ pub struct Invocation<'a> {
 	pub argv:      &'a [BString],
 	/// Environment of the command.
 	pub env:       &'a EnvView,
-	/// Working directory.
+	/// Working directory: its name.
 	pub cwd:       &'a BStr,
+	/// The working directory itself, where the vproc holds it: the command
+	/// reads its relative names from it, not from `cwd`.
+	pub dir:       Option<&'a crate::bash::fs::HeldDir>,
 	/// fds 0, 1, 2.
 	pub stdio:     [FdRef; 3],
 	/// Further fds (`3>file cmd`).
@@ -305,14 +308,18 @@ pub trait Task: Send {
 
 /// Arguments of [`Host::spawn`].
 pub struct SpawnSpec<'a> {
-	/// Absolute program path.
+	/// Program path: absolute, or relative to the working directory the
+	/// process starts in, `dir` (only when `dir` is given).
 	pub path:        &'a BStr,
 	/// Argument vector (`argv[0]` included).
 	pub argv:        &'a [BString],
 	/// Environment.
 	pub env:         &'a EnvView,
-	/// Working directory.
+	/// Working directory: its name.
 	pub cwd:         &'a BStr,
+	/// The working directory itself, where the vproc holds it: the process
+	/// starts there (`fchdir`), whatever `cwd` reaches.
+	pub dir:         Option<&'a crate::bash::fs::HeldDir>,
 	/// fds 0, 1, 2.
 	pub stdio:       [StdioSpec; 3],
 	/// Further fds; Unix only (Windows hosts fail with `Unsupported`).

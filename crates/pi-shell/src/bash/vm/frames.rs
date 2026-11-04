@@ -392,6 +392,7 @@ fn scratch_image(
 			// restore) when the read retries.
 			Live::Stat(_)
 			| Live::Access(_)
+			| Live::Held(_)
 			| Live::Path(_)
 			| Live::Open(_)
 			| Live::File(_)
@@ -679,6 +680,8 @@ impl Shell {
 		let mut root_vp =
 			Vproc::new(Vpid(base), None, host_stdio(cx.host, &mut stdio), cwd, None, false);
 		root_vp.mode = mode;
+		// A restored shell holds its working directory again by name.
+		root_vp.dir = super::hold(cx, &root_vp.cwd);
 		state::load_root(&mut k.root, cx.store, &mut root_vp)?;
 		let mut shell = Self {
 			k,
@@ -803,6 +806,7 @@ impl Shell {
 				vp
 			};
 			vp.out = p.out.into();
+			vp.dir = super::hold(cx, &vp.cwd);
 			vp.pending_traps = p.pending_traps;
 			vp.stopped = p.stopped;
 			vp.procsubs = p.procsubs;
@@ -849,6 +853,8 @@ impl Shell {
 					lossy:             r.lossy,
 					args:              r.args,
 					cwd:               r.cwd,
+					dir:               None,
+					hold:              false,
 					env:               r.env,
 					started:           r.started,
 					exit_trap_started: r.exit_trap_started,

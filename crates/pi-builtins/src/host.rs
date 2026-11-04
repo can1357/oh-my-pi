@@ -428,12 +428,17 @@ const UNAVAILABLE_DESCRIPTOR: &str = "/dev/fd/-1";
 /// terminal, so `cat /dev/stdin` would block on the host's keystrokes.
 ///
 /// Clones share the duplicated descriptors, which stay open while any clone
-/// is alive, so a resolved `/dev/fd/N` path never outlives its descriptor.
+/// is alive, so a resolved `/dev/fd/N` path never outlives its descriptor;
+/// likewise the working directory's hold ([`Invocation::cwd_hold`]), so a
+/// path built on a `cwd` that reads through a held directory never outlives
+/// that directory's descriptor.
 /// The default resolves against the process working directory with no
 /// descriptors, for tests that build utility state without a shell.
 #[derive(Clone, Default)]
 pub(crate) struct ShellPaths {
 	cwd:         PathBuf,
+	/// Keeps open what `cwd` reads through.
+	hold:        Option<CwdHold>,
 	filesystem:  BlockingFs,
 	#[cfg(unix)]
 	descriptors: Arc<[(i32, OpenFile)]>,
@@ -450,11 +455,13 @@ impl std::fmt::Debug for ShellPaths {
 }
 
 impl ShellPaths {
-	/// Captures the working directory `cwd`, the filesystem `fs`, and the
-	/// descriptors visible to the command: usually just 0/1/2, plus any from
-	/// `exec N>` or process substitution.
+	/// Captures the working directory `cwd` (and what keeps it readable,
+	/// `hold`), the filesystem `fs`, and the descriptors visible to the
+	/// command: usually just 0/1/2, plus any from `exec N>` or process
+	/// substitution.
 	pub fn new(
 		cwd: PathBuf,
+		hold: Option<CwdHold>,
 		fs: &pi_vfs::Fs,
 		cancel: Option<CancellationToken>,
 		descriptors: impl IntoIterator<Item = (i32, OpenFile)>,
@@ -481,6 +488,7 @@ impl ShellPaths {
 		});
 		Self {
 			cwd,
+			hold,
 			filesystem,
 			#[cfg(unix)]
 			descriptors,
@@ -499,6 +507,12 @@ impl ShellPaths {
 		&self.cwd
 	}
 
+	/// What keeps [`ShellPaths::cwd`] readable, for state that outlives this
+	/// resolver.
+	pub fn cwd_hold(&self) -> Option<CwdHold> {
+		self.hold.clone()
+	}
+
 	/// Filesystem captured from the shell, shared by utility worker threads.
 	pub fn fs(&self) -> &BlockingFs {
 		&self.filesystem
@@ -513,7 +527,7 @@ impl ShellPaths {
 	pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
 		let resolved = self.absolute(path.as_ref());
 		#[cfg(unix)]
-		if let Some(descriptor) = DescriptorPath::parse(&resolved) {
+		if let Some(descriptor) = DescriptorPath::parse(&self.shown(&resolved)) {
 			return self.descriptor_target(descriptor);
 		}
 		resolved
@@ -529,12 +543,15 @@ impl ShellPaths {
 	pub fn resolve_link(&self, path: impl AsRef<Path>) -> PathBuf {
 		let resolved = self.absolute(path.as_ref());
 		#[cfg(unix)]
-		if let Some(descriptor) = DescriptorPath::parse(&resolved)
-			&& descriptor != DescriptorPath::Terminal
-			// `/dev/stdin` and friends sit directly under `/dev`.
-			&& resolved.components().count() != 3
 		{
-			return self.descriptor_target(descriptor);
+			let named = self.shown(&resolved);
+			if let Some(descriptor) = DescriptorPath::parse(&named)
+				&& descriptor != DescriptorPath::Terminal
+				// `/dev/stdin` and friends sit directly under `/dev`.
+				&& named.components().count() != 3
+			{
+				return self.descriptor_target(descriptor);
+			}
 		}
 		resolved
 	}
@@ -545,6 +562,25 @@ impl ShellPaths {
 		}
 		let normalized_path = normalize_shell_path(path);
 		absolute_path(&self.cwd, normalized_path.as_ref())
+	}
+
+	/// `path` as the user sees it: unchanged, unless `cwd` is a path the
+	/// shell reads its working directory through and `path` is built on it (a
+	/// relative operand resolved, or a path a utility joined onto `cwd`), when
+	/// it is the same path under the directory's name ([`CwdHold::name`]).
+	/// Every path a utility prints that it built from `cwd` goes through this,
+	/// so the access path never reaches output or a diagnostic. Descriptor
+	/// paths are recognised by it too (`cd /dev; cat stdin` still reads the
+	/// shell's stdin, and `cwd` itself is never mistaken for a descriptor).
+	pub fn shown<'a>(&self, path: &'a Path) -> std::borrow::Cow<'a, Path> {
+		match &self.hold {
+			Some(held) => match path.strip_prefix(&self.cwd) {
+				Ok(rest) if rest.as_os_str().is_empty() => std::borrow::Cow::Owned(held.name.clone()),
+				Ok(rest) => std::borrow::Cow::Owned(held.name.join(rest)),
+				Err(_) => std::borrow::Cow::Borrowed(path),
+			},
+			None => std::borrow::Cow::Borrowed(path),
+		}
 	}
 
 	#[cfg(unix)]
@@ -1043,6 +1079,7 @@ impl Host {
 	pub fn child_env(&self) -> ChildEnv {
 		ChildEnv {
 			cwd:    self.paths.cwd().to_path_buf(),
+			_hold:  self.paths.cwd_hold(),
 			filesystem: self.fs().clone(),
 			env:    Arc::new(
 				self
@@ -1604,6 +1641,8 @@ impl Destination {
 #[derive(Clone)]
 pub(crate) struct ChildEnv {
 	cwd:    PathBuf,
+	/// Keeps open what `cwd` reads through while a child may start there.
+	_hold:  Option<CwdHold>,
 	filesystem: BlockingFs,
 	env:    Arc<Vec<(String, String)>>,
 	stderr: OpenFile,
@@ -1933,6 +1972,21 @@ impl Spec {
 	}
 }
 
+/// What an [`Invocation::cwd`] that reads names through the shell's held
+/// working directory (the kernel's path of a held descriptor) comes with:
+/// the directory's name, and the hold that keeps `cwd` readable. Every
+/// resolver and child launcher built on `cwd` keeps a clone, so the
+/// descriptor stays open while any path built on it may be used.
+#[derive(Clone)]
+pub struct CwdHold {
+	/// The working directory's name, as `getcwd` gives it to a process that
+	/// works there: what a path built on `cwd` is shown as
+	/// ([`ShellPaths::shown`]).
+	pub name: PathBuf,
+	/// Keeps `cwd` readable.
+	pub hold: Arc<dyn std::any::Any + Send + Sync>,
+}
+
 /// One run of a pi extra (a utility such as `cat`, or a process builtin such
 /// as `sleep`), carrying everything it sees of the shell it runs in: any host
 /// that can fill these fields runs the extras through
@@ -1947,6 +2001,8 @@ pub struct Invocation {
 	pub env:            HashMap<String, String>,
 	/// The shell's working directory, which relative paths resolve against.
 	pub cwd:            PathBuf,
+	/// What keeps `cwd` readable while the extra runs, if anything must.
+	pub cwd_hold:       Option<CwdHold>,
 	/// Descriptors 0, 1, and 2; [`Fd::Closed`] reads as end of input and
 	/// discards writes.
 	pub stdio:          [Fd; 3],
@@ -1977,6 +2033,7 @@ impl Invocation {
 			argv,
 			env: HashMap::new(),
 			cwd,
+			cwd_hold: None,
 			stdio: [Fd::Closed, Fd::Closed, Fd::Closed],
 			fds: Vec::new(),
 			fs,
@@ -1989,12 +2046,14 @@ impl Invocation {
 	/// Opens the descriptors as shareable [`OpenFile`]s; `default_name` stands
 	/// in for an empty [`Invocation::name`].
 	pub(crate) fn open(self, default_name: &str) -> Opened {
-		let Self { name, argv, env, cwd, stdio, fds, fs, cancel, commands, reported_error } = self;
+		let Self { name, argv, env, cwd, cwd_hold, stdio, fds, fs, cancel, commands, reported_error } =
+			self;
 		Opened {
 			name: if name.is_empty() { default_name.to_string() } else { name },
 			argv,
 			env,
 			cwd,
+			cwd_hold,
 			stdio: stdio.map(OpenFile::from_fd),
 			fds: fds
 				.into_iter()
@@ -2015,6 +2074,7 @@ pub(crate) struct Opened {
 	pub argv:           Vec<String>,
 	pub env:            HashMap<String, String>,
 	pub cwd:            PathBuf,
+	pub cwd_hold:       Option<CwdHold>,
 	pub stdio:          [Option<OpenFile>; 3],
 	pub fds:            Vec<(i32, OpenFile)>,
 	pub fs:             pi_vfs::Fs,
@@ -2029,7 +2089,13 @@ impl Opened {
 	fn paths(&self) -> ShellPaths {
 		let stdio = (0..).zip(&self.stdio).filter_map(|(fd, file)| Some((fd, file.as_ref()?.clone())));
 		let fds = self.fds.iter().map(|(fd, file)| (*fd, file.clone()));
-		ShellPaths::new(self.cwd.clone(), &self.fs, self.cancel.clone(), stdio.chain(fds))
+		ShellPaths::new(
+			self.cwd.clone(),
+			self.cwd_hold.clone(),
+			&self.fs,
+			self.cancel.clone(),
+			stdio.chain(fds),
+		)
 	}
 }
 

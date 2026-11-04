@@ -7,9 +7,9 @@ use std::{
 	task::{Context, Poll},
 };
 
-use bstr::{BStr, BString};
+use bstr::BString;
 use pi_shell::bash::{
-	File, Fs, FsPending, FsPoll, OpenFlags, Stat,
+	At, File, Fs, FsPending, FsPoll, HeldDir, OpenFlags, Stat,
 	fs::{Access, DirIter, TempNode, TempPurpose},
 };
 
@@ -54,35 +54,39 @@ fn defer<T: Send + 'static>(poll: FsPoll<T>) -> FsPoll<T> {
 pub struct PendingFs<F>(pub F);
 
 impl<F: Fs> Fs for PendingFs<F> {
-	fn open(&mut self, path: &BStr, flags: OpenFlags, mode: u32) -> FsPoll<Box<dyn File>> {
-		defer(self.0.open(path, flags, mode))
+	fn open(&mut self, at: At<'_>, flags: OpenFlags, mode: u32) -> FsPoll<Box<dyn File>> {
+		defer(self.0.open(at, flags, mode))
 	}
 
-	fn stat(&mut self, path: &BStr, follow: bool) -> FsPoll<Stat> {
-		defer(self.0.stat(path, follow))
+	fn stat(&mut self, at: At<'_>, follow: bool) -> FsPoll<Stat> {
+		defer(self.0.stat(at, follow))
 	}
 
-	fn access(&mut self, path: &BStr, mode: Access) -> FsPoll<()> {
-		defer(self.0.access(path, mode))
+	fn access(&mut self, at: At<'_>, mode: Access) -> FsPoll<()> {
+		defer(self.0.access(at, mode))
 	}
 
-	fn read_dir(&mut self, path: &BStr) -> FsPoll<Box<dyn DirIter>> {
-		defer(self.0.read_dir(path))
+	fn read_dir(&mut self, at: At<'_>) -> FsPoll<Box<dyn DirIter>> {
+		defer(self.0.read_dir(at))
 	}
 
-	fn readlink(&mut self, path: &BStr) -> FsPoll<BString> {
-		defer(self.0.readlink(path))
+	fn readlink(&mut self, at: At<'_>) -> FsPoll<BString> {
+		defer(self.0.readlink(at))
 	}
 
-	fn realpath(&mut self, path: &BStr) -> FsPoll<BString> {
-		defer(self.0.realpath(path))
+	fn realpath(&mut self, at: At<'_>) -> FsPoll<BString> {
+		defer(self.0.realpath(at))
 	}
 
 	fn mkfifo_or_temp(&mut self, purpose: TempPurpose) -> FsPoll<TempNode> {
 		defer(self.0.mkfifo_or_temp(purpose))
 	}
 
-	fn chdir_check(&mut self, path: &BStr) -> FsPoll<()> {
-		defer(self.0.chdir_check(path))
+	fn open_dir(&mut self, at: At<'_>) -> FsPoll<Option<HeldDir>> {
+		defer(self.0.open_dir(at))
+	}
+
+	fn dir_path(&mut self, dir: &HeldDir) -> FsPoll<BString> {
+		defer(self.0.dir_path(dir))
 	}
 }

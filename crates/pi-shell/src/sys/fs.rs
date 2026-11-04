@@ -21,6 +21,7 @@
 //! must seek).
 
 use std::{
+	borrow::Cow,
 	fs::{self, OpenOptions},
 	io::{self, IsTerminal, Read, Seek, Write},
 	path::Path,
@@ -29,10 +30,10 @@ use std::{
 	time::UNIX_EPOCH,
 };
 
-use bstr::{BStr, BString, ByteSlice};
+use bstr::{BString, ByteSlice};
 
 use crate::bash::{
-	DirEntry, DirIter, File, FileKind, Fs, FsPoll, OpenFlags, OsHandle, Stat, StdFd,
+	At, DirEntry, DirIter, File, FileKind, Fs, FsPoll, HeldDir, OpenFlags, OsHandle, Stat, StdFd,
 	fs::{Access, StatKind, TempNode, TempPurpose},
 };
 
@@ -308,6 +309,170 @@ fn engine_path(p: &Path) -> BString {
 	BString::from(p.as_os_str().as_encoded_bytes())
 }
 
+/// A directory a vproc works in, held as a process holds its working
+/// directory.
+///
+/// An `O_PATH` descriptor, whose kernel path (`/proc/self/fd/N`) reads names
+/// from the directory itself, the way a relative name is read from a
+/// process's working directory. Paths built on `root` are used only while
+/// this handle is held (an [`At`] borrows it, a pending open and an
+/// in-process utility keep a [`HeldDir`] clone), so the descriptor number is
+/// never reused under them. No name the shell shows is built on `root`: a
+/// child the shell starts enters the directory by `fchdir` ([`OsDir::fd`]),
+/// one an in-process utility starts enters it through `root` before it
+/// runs, and both then see the directory's own names.
+///
+/// Linux only: elsewhere no path reaches a descriptor's directory, and the
+/// shell reads names from the working directory's name.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub struct OsDir {
+	fd:   std::os::fd::OwnedFd,
+	root: std::path::PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl OsDir {
+	/// The descriptor, for a child to `fchdir` to before it runs.
+	pub fn fd(&self) -> std::os::fd::BorrowedFd<'_> {
+		use std::os::fd::AsFd as _;
+		self.fd.as_fd()
+	}
+
+	/// The kernel's path of the directory itself (`/proc/self/fd/N`), for
+	/// in-process readers of relative names; valid while `self` is.
+	pub fn root(&self) -> &Path {
+		&self.root
+	}
+}
+
+/// The OS directory a [`HeldDir`] holds, if this host made it.
+#[cfg(target_os = "linux")]
+pub fn os_dir(dir: &HeldDir) -> Option<&OsDir> {
+	dir.get::<OsDir>()
+}
+
+/// The host path `at` names: a relative name read from the directory held,
+/// else the name as the engine spells it.
+fn host_at<'a>(at: &At<'a>) -> io::Result<Cow<'a, Path>> {
+	#[cfg(target_os = "linux")]
+	if let Some((dir, rel)) = at.held
+		&& let Some(held) = os_dir(dir)
+	{
+		use std::os::unix::ffi::OsStrExt as _;
+		return Ok(Cow::Owned(held.root.join(std::ffi::OsStr::from_bytes(rel))));
+	}
+	host_path(at.path).map(Cow::Borrowed)
+}
+
+/// `chdir(path)` without changing the process's directory: the directory
+/// it reaches, held (Linux), after the checks `chdir` makes: it must be a
+/// directory the user may search, asked of the directory opened, not of the
+/// name, which may reach another one by then.
+fn open_dir(path: &Path) -> io::Result<Option<HeldDir>> {
+	#[cfg(target_os = "linux")]
+	{
+		use std::os::{
+			fd::{AsRawFd as _, FromRawFd as _},
+			unix::ffi::OsStrExt as _,
+		};
+		let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+			.map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+		// SAFETY: `c` is a valid NUL-terminated path for the duration of the
+		// call; the descriptor it answers with is owned below.
+		let raw =
+			unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+		if raw < 0 {
+			return Err(io::Error::last_os_error());
+		}
+		// SAFETY: `open` made `raw`, which nothing else owns.
+		let opened = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+		// A child gets its stdio by `dup2` onto 0, 1 and 2 before it moves
+		// into the directory: the descriptor must not be one of those (a host
+		// started with them closed hands out low numbers).
+		let fd = if raw < 3 {
+			// SAFETY: `opened` is open; the duplicate is owned below.
+			let high = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, 3) };
+			if high < 0 {
+				return Err(io::Error::last_os_error());
+			}
+			// SAFETY: `fcntl` made `high`, which nothing else owns.
+			unsafe { std::os::fd::OwnedFd::from_raw_fd(high) }
+		} else {
+			opened
+		};
+		// SAFETY: `fd` is open for the call and the name is a C literal.
+		if unsafe { libc::faccessat(fd.as_raw_fd(), c".".as_ptr(), libc::X_OK, libc::AT_EACCESS) } < 0
+		{
+			return Err(io::Error::last_os_error());
+		}
+		let root = std::path::PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd()));
+		// Without `/proc` the descriptor's path reaches nothing: nothing is
+		// held, and names are read from the name.
+		if !same_dir(&fd, &root) {
+			return Ok(None);
+		}
+		Ok(Some(HeldDir::new(OsDir { fd, root })))
+	}
+	#[cfg(not(target_os = "linux"))]
+	{
+		if !fs::metadata(path)?.is_dir() {
+			return Err(io::ErrorKind::NotADirectory.into());
+		}
+		access(path, Access::EXEC)?;
+		Ok(None)
+	}
+}
+
+/// Whether `path` reaches the directory `fd` is open on.
+#[cfg(target_os = "linux")]
+fn same_dir(fd: &std::os::fd::OwnedFd, path: &Path) -> bool {
+	use std::os::linux::fs::MetadataExt as _;
+	let (Ok(named), Ok(held)) = (fs::metadata(path), fstat(fd)) else {
+		return false;
+	};
+	named.st_dev() == held.st_dev && named.st_ino() == held.st_ino
+}
+
+#[cfg(target_os = "linux")]
+fn fstat(fd: &std::os::fd::OwnedFd) -> io::Result<libc::stat> {
+	use std::os::fd::AsRawFd as _;
+	let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+	// SAFETY: `fd` is open for the call; the kernel writes the whole
+	// structure when it answers 0, and only then is it read.
+	if unsafe { libc::fstat(fd.as_raw_fd(), st.as_mut_ptr()) } < 0 {
+		return Err(io::Error::last_os_error());
+	}
+	// SAFETY: `fstat` answered that it wrote the structure.
+	Ok(unsafe { st.assume_init() })
+}
+
+/// `getcwd` for a held directory: its name now, as the kernel keeps it,
+/// whatever the permissions of the directories above it (as `getcwd`
+/// answers); `ENOENT` once it has been removed. A removed directory has no
+/// links left; the kernel's name of it then ends in ` (deleted)`, which a
+/// directory may also be named, so the suffix alone decides nothing.
+fn dir_path(dir: &HeldDir) -> io::Result<BString> {
+	#[cfg(target_os = "linux")]
+	if let Some(held) = os_dir(dir) {
+		if fstat(&held.fd)?.st_nlink == 0 {
+			return Err(io::ErrorKind::NotFound.into());
+		}
+		let name = fs::read_link(&held.root)?;
+		// A filesystem that keeps a link count on a removed directory: the
+		// suffixed name reaches nothing, which only a removal explains.
+		if name.as_os_str().as_encoded_bytes().ends_with(b" (deleted)")
+			&& fs::symlink_metadata(&name).is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+			&& !same_dir(&held.fd, &name)
+		{
+			return Err(io::ErrorKind::NotFound.into());
+		}
+		return Ok(engine_path(&name));
+	}
+	let _ = dir;
+	Err(io::ErrorKind::Unsupported.into())
+}
+
 fn kind_of(ft: fs::FileType) -> StatKind {
 	if ft.is_dir() {
 		return StatKind::Dir;
@@ -389,13 +554,13 @@ fn stat_of(meta: &fs::Metadata) -> Stat {
 	}
 }
 
-fn open(path: &BStr, flags: OpenFlags, mode: u32, umask: Option<u32>) -> io::Result<Box<dyn File>> {
+fn open(at: At<'_>, flags: OpenFlags, mode: u32, umask: Option<u32>) -> io::Result<Box<dyn File>> {
 	#[cfg(windows)]
-	if let Some(server) = pipe::take(path, flags) {
+	if let Some(server) = pipe::take(at.path, flags) {
 		return server;
 	}
-	let path = host_path(path)?;
-	Ok(Box::new(StdFile::new(create_with_mode(path, flags, mode, umask)?)))
+	let path = host_at(&at)?;
+	Ok(Box::new(StdFile::new(create_with_mode(&path, flags, mode, umask)?)))
 }
 
 /// Opens `path`, giving a file the open creates exactly `mode`.
@@ -467,11 +632,10 @@ mod fifo {
 		thread,
 	};
 
-	use bstr::BStr;
 	use parking_lot::Mutex;
 
-	use super::{StdFile, host_path, options};
-	use crate::bash::{File, FsPending, OpenFlags};
+	use super::{StdFile, host_at, options};
+	use crate::bash::{At, File, FsPending, HeldDir, OpenFlags};
 
 	/// Result slot shared with the helper thread.
 	#[derive(Default)]
@@ -489,12 +653,15 @@ mod fifo {
 		slot:  Arc<Mutex<Slot>>,
 		path:  PathBuf,
 		write: bool,
+		/// The directory `path` is read from, kept open while the open (and
+		/// the release in `Drop`) may still read `path`.
+		_held: Option<HeldDir>,
 	}
 
-	/// `Some` when `path` is a FIFO opened for reading only or writing only
+	/// `Some` when `at` is a FIFO opened for reading only or writing only
 	/// (`O_RDWR` never blocks on a FIFO).
 	pub fn pending(
-		path: &BStr,
+		at: &At<'_>,
 		flags: OpenFlags,
 		mode: u32,
 	) -> Option<Box<dyn FsPending<Box<dyn File>>>> {
@@ -502,17 +669,20 @@ mod fifo {
 		if flags.contains(OpenFlags::READ) == write {
 			return None;
 		}
-		let host = host_path(path).ok()?;
-		if !fs::metadata(host).ok()?.file_type().is_fifo() {
+		let host = host_at(at).ok()?;
+		if !fs::metadata(&host).ok()?.file_type().is_fifo() {
 			return None;
 		}
+		let held = at.held.map(|(dir, _)| dir.clone());
 		let slot = Arc::new(Mutex::new(Slot::default()));
-		let (opts, target, helper) = (options(flags, mode), host.to_path_buf(), Arc::clone(&slot));
+		let (opts, target, helper, keep) =
+			(options(flags, mode), host.to_path_buf(), Arc::clone(&slot), held.clone());
 		let spawned = thread::Builder::new()
 			.name("obash-fifo".into())
 			.stack_size(64 << 10)
 			.spawn(move || {
 				let opened = opts.open(&target);
+				drop(keep);
 				let mut s = helper.lock();
 				if s.cancelled {
 					return;
@@ -527,7 +697,7 @@ mod fifo {
 		if let Err(e) = spawned {
 			slot.lock().result = Some(Err(e));
 		}
-		Some(Box::new(FifoOpen { slot, path: host.to_path_buf(), write }))
+		Some(Box::new(FifoOpen { slot, path: host.to_path_buf(), write, _held: held }))
 	}
 
 	impl FsPending<Box<dyn File>> for FifoOpen {
@@ -574,10 +744,10 @@ mod fifo {
 	}
 }
 
-fn access(path: &BStr, mode: Access) -> io::Result<()> {
+fn access(path: &Path, mode: Access) -> io::Result<()> {
 	#[cfg(unix)]
 	{
-		let c = std::ffi::CString::new(path.as_bytes())
+		let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
 			.map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 		let mut m = libc::F_OK;
 		if mode.contains(Access::READ) {
@@ -599,7 +769,7 @@ fn access(path: &BStr, mode: Access) -> io::Result<()> {
 	}
 	#[cfg(windows)]
 	{
-		let p = host_path(path)?;
+		let p = path;
 		let meta = fs::metadata(p)?;
 		if mode.contains(Access::WRITE) && meta.permissions().readonly() {
 			return Err(io::ErrorKind::PermissionDenied.into());
@@ -624,8 +794,8 @@ impl DirIter for StdDir {
 	}
 }
 
-fn read_dir(path: &BStr) -> io::Result<Box<dyn DirIter>> {
-	let entries: Vec<io::Result<DirEntry>> = fs::read_dir(host_path(path)?)?
+fn read_dir(path: &Path) -> io::Result<Box<dyn DirIter>> {
+	let entries: Vec<io::Result<DirEntry>> = fs::read_dir(path)?
 		.map(|e| {
 			e.map(|e| DirEntry {
 				name: BString::from(e.file_name().as_encoded_bytes()),
@@ -662,13 +832,6 @@ fn temp(purpose: TempPurpose) -> io::Result<TempNode> {
 		fs::File::create_new(&path)?;
 	}
 	Ok(TempNode { path: engine_path(&path), fifo })
-}
-
-fn chdir_check(path: &BStr) -> io::Result<()> {
-	if !fs::metadata(host_path(path)?)?.is_dir() {
-		return Err(io::ErrorKind::NotADirectory.into());
-	}
-	access(path, Access::EXEC)
 }
 
 /// Named pipes for process substitution on Windows.
@@ -829,17 +992,17 @@ mod pipe {
 }
 
 impl Fs for StdFs {
-	fn open(&mut self, path: &BStr, flags: OpenFlags, mode: u32) -> FsPoll<Box<dyn File>> {
+	fn open(&mut self, at: At<'_>, flags: OpenFlags, mode: u32) -> FsPoll<Box<dyn File>> {
 		#[cfg(unix)]
-		if let Some(pending) = fifo::pending(path, flags, mode) {
+		if let Some(pending) = fifo::pending(&at, flags, mode) {
 			return FsPoll::Pending(pending);
 		}
-		FsPoll::Ready(open(path, flags, mode, self.umask))
+		FsPoll::Ready(open(at, flags, mode, self.umask))
 	}
 
-	fn stat(&mut self, path: &BStr, follow: bool) -> FsPoll<Stat> {
+	fn stat(&mut self, at: At<'_>, follow: bool) -> FsPoll<Stat> {
 		FsPoll::Ready(
-			host_path(path)
+			host_at(&at)
 				.and_then(|p| {
 					if follow {
 						fs::metadata(p)
@@ -851,25 +1014,25 @@ impl Fs for StdFs {
 		)
 	}
 
-	fn access(&mut self, path: &BStr, mode: Access) -> FsPoll<()> {
-		FsPoll::Ready(access(path, mode))
+	fn access(&mut self, at: At<'_>, mode: Access) -> FsPoll<()> {
+		FsPoll::Ready(host_at(&at).and_then(|p| access(&p, mode)))
 	}
 
-	fn read_dir(&mut self, path: &BStr) -> FsPoll<Box<dyn DirIter>> {
-		FsPoll::Ready(read_dir(path))
+	fn read_dir(&mut self, at: At<'_>) -> FsPoll<Box<dyn DirIter>> {
+		FsPoll::Ready(host_at(&at).and_then(|p| read_dir(&p)))
 	}
 
-	fn readlink(&mut self, path: &BStr) -> FsPoll<BString> {
+	fn readlink(&mut self, at: At<'_>) -> FsPoll<BString> {
 		FsPoll::Ready(
-			host_path(path)
+			host_at(&at)
 				.and_then(fs::read_link)
 				.map(|p| engine_path(&p)),
 		)
 	}
 
-	fn realpath(&mut self, path: &BStr) -> FsPoll<BString> {
+	fn realpath(&mut self, at: At<'_>) -> FsPoll<BString> {
 		FsPoll::Ready(
-			host_path(path)
+			host_at(&at)
 				.and_then(fs::canonicalize)
 				.map(|p| engine_path(&p)),
 		)
@@ -879,8 +1042,12 @@ impl Fs for StdFs {
 		FsPoll::Ready(temp(purpose))
 	}
 
-	fn chdir_check(&mut self, path: &BStr) -> FsPoll<()> {
-		FsPoll::Ready(chdir_check(path))
+	fn open_dir(&mut self, at: At<'_>) -> FsPoll<Option<HeldDir>> {
+		FsPoll::Ready(host_at(&at).and_then(|p| open_dir(&p)))
+	}
+
+	fn dir_path(&mut self, dir: &HeldDir) -> FsPoll<BString> {
+		FsPoll::Ready(dir_path(dir))
 	}
 }
 
@@ -900,10 +1067,15 @@ mod tests {
 		let dir = std::env::temp_dir();
 		let mut fs = StdFs::default();
 		let dir_bytes = engine_path(&dir);
-		assert_eq!(ready(fs.stat(dir_bytes.as_bstr(), true)).unwrap().kind, StatKind::Dir);
-		let missing = ready(fs.stat(b"/definitely/not/here".as_bstr(), true)).unwrap_err();
+		assert_eq!(
+			ready(fs.stat(At::path(dir_bytes.as_bstr()), true))
+				.unwrap()
+				.kind,
+			StatKind::Dir
+		);
+		let missing = ready(fs.stat(At::path(b"/definitely/not/here".as_bstr()), true)).unwrap_err();
 		assert_eq!(missing.kind(), io::ErrorKind::NotFound);
-		assert!(ready(fs.chdir_check(dir_bytes.as_bstr())).is_ok());
+		assert!(ready(fs.open_dir(At::path(dir_bytes.as_bstr()))).is_ok());
 	}
 
 	#[cfg(unix)]
@@ -957,7 +1129,7 @@ mod tests {
 		#[test]
 		fn reading_a_fifo_is_pending_until_a_writer_opens() {
 			let path = fifo();
-			let mut p = pending(StdFs::default().open(path.as_bstr(), OpenFlags::READ, 0));
+			let mut p = pending(StdFs::default().open(At::path(path.as_bstr()), OpenFlags::READ, 0));
 			let host = host_path(&path).unwrap().to_path_buf();
 			let writer = thread::spawn(move || {
 				thread::sleep(Duration::from_millis(50));
@@ -983,7 +1155,7 @@ mod tests {
 		#[test]
 		fn writing_a_fifo_is_pending_until_a_reader_opens() {
 			let path = fifo();
-			let mut p = pending(StdFs::default().open(path.as_bstr(), OpenFlags::WRITE, 0));
+			let mut p = pending(StdFs::default().open(At::path(path.as_bstr()), OpenFlags::WRITE, 0));
 			let host = host_path(&path).unwrap().to_path_buf();
 			let reader = thread::spawn(move || {
 				let mut s = String::new();
@@ -1008,8 +1180,8 @@ mod tests {
 		#[test]
 		fn both_ends_of_a_fifo_on_one_thread_never_block() {
 			let path = fifo();
-			let mut r = pending(StdFs::default().open(path.as_bstr(), OpenFlags::READ, 0));
-			let mut w = pending(StdFs::default().open(path.as_bstr(), OpenFlags::WRITE, 0));
+			let mut r = pending(StdFs::default().open(At::path(path.as_bstr()), OpenFlags::READ, 0));
+			let mut w = pending(StdFs::default().open(At::path(path.as_bstr()), OpenFlags::WRITE, 0));
 			let mut reader = finish(&mut r);
 			let mut writer = finish(&mut w);
 			assert_eq!(reader.kind(), FileKind::Pipe);
@@ -1151,7 +1323,7 @@ mod tests {
 		fn dropping_a_pending_fifo_open_releases_the_helper() {
 			let path = fifo();
 			let host = host_path(&path).unwrap().to_path_buf();
-			let p = pending(StdFs::default().open(path.as_bstr(), OpenFlags::READ, 0));
+			let p = pending(StdFs::default().open(At::path(path.as_bstr()), OpenFlags::READ, 0));
 			drop(p);
 			// Once the helper's read end is closed, no reader is left: a
 			// non-blocking write open fails with ENXIO.
@@ -1175,12 +1347,14 @@ mod tests {
 			let path = fifo();
 			let both = OpenFlags::READ.with(OpenFlags::WRITE);
 			assert!(
-				ready(StdFs::default().open(path.as_bstr(), both, 0)).is_ok(),
+				ready(StdFs::default().open(At::path(path.as_bstr()), both, 0)).is_ok(),
 				"O_RDWR never blocks"
 			);
 			fs::remove_file(host_path(&path).unwrap()).unwrap();
 			let node = ready(StdFs::default().mkfifo_or_temp(TempPurpose::HereDoc)).unwrap();
-			assert!(ready(StdFs::default().open(node.path.as_bstr(), OpenFlags::READ, 0)).is_ok());
+			assert!(
+				ready(StdFs::default().open(At::path(node.path.as_bstr()), OpenFlags::READ, 0)).is_ok()
+			);
 			fs::remove_file(host_path(&node.path).unwrap()).unwrap();
 		}
 	}
@@ -1193,7 +1367,7 @@ mod tests {
 		let flags = OpenFlags::WRITE
 			.with(OpenFlags::CREATE)
 			.with(OpenFlags::EXCL);
-		let err = ready(fs.open(node.path.as_bstr(), flags, 0o600))
+		let err = ready(fs.open(At::path(node.path.as_bstr()), flags, 0o600))
 			.err()
 			.unwrap();
 		assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);

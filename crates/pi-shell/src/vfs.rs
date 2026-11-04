@@ -93,7 +93,8 @@ use tokio::{
 
 use crate::{
 	bash::{
-		DirEntry, DirIter, File, FileKind, Fs, FsPending, FsPoll, OpenFlags, OsHandle, Stat,
+		At, DirEntry, DirIter, File, FileKind, Fs, FsPending, FsPoll, HeldDir, OpenFlags, OsHandle,
+		Stat,
 		fs::{Access, SeekFrom, StatKind, TempNode, TempPurpose},
 	},
 	sys::{StdFile, StdFs},
@@ -139,11 +140,13 @@ impl VfsFs {
 		host_path(path).is_ok_and(|host| self.fs.read().is_native_local(host))
 	}
 
-	/// `native()` for a native-local `path`; otherwise `provider` run on the
-	/// runtime with the current filesystem and the host spelling of `path`.
+	/// `native()` for a native-local name; otherwise `provider` run on the
+	/// runtime with the current filesystem and the host spelling of the name.
+	/// A name read from a held directory is native: only the host
+	/// filesystem holds directories.
 	fn route<T, F>(
 		&self,
-		path: &BStr,
+		at: &At<'_>,
 		native: impl FnOnce() -> FsPoll<T>,
 		provider: impl FnOnce(pi_vfs::Fs, PathBuf) -> F,
 	) -> FsPoll<T>
@@ -151,7 +154,10 @@ impl VfsFs {
 		T: Send + 'static,
 		F: Future<Output = io::Result<T>> + Send + 'static,
 	{
-		let host = match host_path(path) {
+		if at.held.is_some() {
+			return native();
+		}
+		let host = match host_path(at.path) {
 			Ok(host) => host,
 			Err(err) => return FsPoll::Ready(Err(err)),
 		};
@@ -167,11 +173,11 @@ impl VfsFs {
 }
 
 impl Fs for VfsFs {
-	fn open(&mut self, path: &BStr, flags: OpenFlags, mode: u32) -> FsPoll<Box<dyn File>> {
+	fn open(&mut self, at: At<'_>, flags: OpenFlags, mode: u32) -> FsPoll<Box<dyn File>> {
 		let rt = self.rt.clone();
 		self.route(
-			path,
-			|| match StdFs::default().open(path, flags, mode) {
+			&at,
+			|| match StdFs::default().open(at, flags, mode) {
 				FsPoll::Ready(Err(err)) => FsPoll::Ready(Err(name_the_limit(err))),
 				opened => opened,
 			},
@@ -185,10 +191,10 @@ impl Fs for VfsFs {
 		)
 	}
 
-	fn stat(&mut self, path: &BStr, follow: bool) -> FsPoll<Stat> {
+	fn stat(&mut self, at: At<'_>, follow: bool) -> FsPoll<Stat> {
 		self.route(
-			path,
-			|| StdFs::default().stat(path, follow),
+			&at,
+			|| StdFs::default().stat(at, follow),
 			move |fs, path| async move {
 				let meta = if follow {
 					fs.metadata(&path).await?
@@ -200,10 +206,10 @@ impl Fs for VfsFs {
 		)
 	}
 
-	fn access(&mut self, path: &BStr, mode: Access) -> FsPoll<()> {
+	fn access(&mut self, at: At<'_>, mode: Access) -> FsPoll<()> {
 		self.route(
-			path,
-			|| StdFs::default().access(path, mode),
+			&at,
+			|| StdFs::default().access(at, mode),
 			move |fs, path| async move {
 				fs.access(
 					&path,
@@ -216,10 +222,10 @@ impl Fs for VfsFs {
 		)
 	}
 
-	fn read_dir(&mut self, path: &BStr) -> FsPoll<Box<dyn DirIter>> {
+	fn read_dir(&mut self, at: At<'_>) -> FsPoll<Box<dyn DirIter>> {
 		self.route(
-			path,
-			|| StdFs::default().read_dir(path),
+			&at,
+			|| StdFs::default().read_dir(at),
 			|fs, path| async move {
 				// A provider listing is in memory once `read_dir` answers; only
 				// the types it listed are used, since asking for the others
@@ -239,18 +245,18 @@ impl Fs for VfsFs {
 		)
 	}
 
-	fn readlink(&mut self, path: &BStr) -> FsPoll<BString> {
+	fn readlink(&mut self, at: At<'_>) -> FsPoll<BString> {
 		self.route(
-			path,
-			|| StdFs::default().readlink(path),
+			&at,
+			|| StdFs::default().readlink(at),
 			|fs, path| async move { Ok(os_bytes(fs.read_link(&path).await?.as_os_str())) },
 		)
 	}
 
-	fn realpath(&mut self, path: &BStr) -> FsPoll<BString> {
+	fn realpath(&mut self, at: At<'_>) -> FsPoll<BString> {
 		self.route(
-			path,
-			|| StdFs::default().realpath(path),
+			&at,
+			|| StdFs::default().realpath(at),
 			|fs, path| async move { Ok(os_bytes(fs.canonicalize(&path).await?.as_os_str())) },
 		)
 	}
@@ -259,17 +265,24 @@ impl Fs for VfsFs {
 		StdFs::default().mkfifo_or_temp(purpose)
 	}
 
-	fn chdir_check(&mut self, path: &BStr) -> FsPoll<()> {
+	fn open_dir(&mut self, at: At<'_>) -> FsPoll<Option<HeldDir>> {
 		self.route(
-			path,
-			|| StdFs::default().chdir_check(path),
+			&at,
+			|| StdFs::default().open_dir(at),
 			|fs, path| async move {
 				if !fs.metadata(&path).await?.is_dir() {
 					return Err(io::ErrorKind::NotADirectory.into());
 				}
-				fs.access(&path, false, false, true).await
+				fs.access(&path, false, false, true).await?;
+				// A provider's directory is not held: names are read from
+				// the name.
+				Ok(None)
 			},
 		)
+	}
+
+	fn dir_path(&mut self, dir: &HeldDir) -> FsPoll<BString> {
+		StdFs::default().dir_path(dir)
 	}
 }
 
