@@ -29,6 +29,7 @@ import {
 	parseImageMetadata,
 	prompt,
 	readImageMetadata,
+	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
 import {
@@ -1093,6 +1094,22 @@ async function assessLocalReadSpeculation(
 	};
 }
 
+/** Whether a part of a `;` list is a web or internal URL rather than a local path. */
+function isReadUrlPart(part: string): boolean {
+	return parseReadUrlTarget(part) !== null || InternalUrlRouter.instance().canResolve(part);
+}
+
+/** Whether `readPath` is one web URL, whose fetch reads nothing an earlier call could have changed. */
+function isSingleWebUrl(readPath: string): boolean {
+	if (readPath.includes(";")) return false;
+	try {
+		return parseReadUrlTarget(readPath) !== null;
+	} catch {
+		// A malformed URL selector: the read reports it.
+		return false;
+	}
+}
+
 /**
  * Read tool implementation.
  *
@@ -1863,7 +1880,33 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
-		const inner = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
+		// Running beside an earlier call that may write (a `bash` before this read
+		// in the same message), the read can finish before that write lands. The
+		// model sees the batch's results only after every call ends, so once those
+		// calls settle, read again. Web fetches read nothing on disk, but which
+		// parts of a `;` list exist decides how it splits, so a list read that only
+		// fetched stands while it splits as before.
+		const earlierEffects = isSingleWebUrl(params.path) ? undefined : toolContext?.toolCall?.earlierEffectsSettled;
+		const listParts = () =>
+			splitMixedUrlPathList(recoverConflictUriPrefix(params.path).path, this.session.cwd, isReadUrlPart);
+		const partsBefore = earlierEffects ? await listParts() : null;
+		let [outcome] = await Promise.allSettled([this.#executeInner(toolCallId, params, signal, onUpdate, toolContext)]);
+		if (earlierEffects) {
+			// An abort during the wait rejects the read rather than return an unchecked result.
+			await untilAborted(signal, earlierEffects);
+			const parts = await listParts();
+			const fetchedOnly =
+				outcome.status === "fulfilled" &&
+				JSON.stringify(parts) === JSON.stringify(partsBefore) &&
+				(parts ? parts.every(isSingleWebUrl) : outcome.value.details?.kind === "url");
+			if (!fetchedOnly) {
+				[outcome] = await Promise.allSettled([
+					this.#executeInner(toolCallId, params, signal, onUpdate, toolContext),
+				]);
+			}
+		}
+		if (outcome.status === "rejected") throw outcome.reason;
+		const inner = outcome.value;
 		const innerDetails: ReadDetailsWithWindow | undefined = inner.details;
 		const result = await shapeToolResult(
 			this.session,
@@ -1912,11 +1955,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		readPath = recoverConflictUriPrefix(readPath).path;
 		// A `;` list mixing URLs with local paths must split before URL detection
 		// claims the whole string as one fetch or one internal/MCP resource.
-		const mixedParts = await splitMixedUrlPathList(
-			readPath,
-			this.session.cwd,
-			part => parseReadUrlTarget(part) !== null || InternalUrlRouter.instance().canResolve(part),
-		);
+		const mixedParts = await splitMixedUrlPathList(readPath, this.session.cwd, isReadUrlPart);
 		if (mixedParts) return this.#readDelimitedParts(mixedParts, signal, toolContext);
 		// Filesystem-backed reads choose JSON versus image questions after resolving
 		// the literal file and sniffing its content, not from its final extension.
