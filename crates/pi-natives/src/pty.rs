@@ -22,7 +22,7 @@ use napi::{
 use napi_derive::napi;
 use parking_lot::Mutex;
 use pi_shell::output_decode::OutputDecoder;
-use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, ExitStatus, PtyPair, PtySize, native_pty_system};
 
 use crate::{
 	js::into_string,
@@ -408,38 +408,13 @@ fn run_pty_sync(
 	ct.heartbeat()
 		.map_err(|err| Error::from_reason(format!("PTY setup cancelled before spawn: {err}")))?;
 
-	let mut child = pair
-		.slave
-		.spawn_command(cmd)
-		.map_err(|err| Error::from_reason(format!("Failed to spawn PTY command: {err}")))?;
-	drop(pair.slave);
-	let child_process_id = child.process_id();
-	let child_pid = child_process_id.and_then(|value| i32::try_from(value).ok());
-	if let Some(callback) = on_start.as_ref() {
-		callback.call(Ok(child_process_id.unwrap_or(0)), ThreadsafeFunctionCallMode::NonBlocking);
-	}
-	// No heartbeat check here: `child` now owns a real, already-`exec`'d OS
-	// process, and bailing out via `?` at this point would drop `pair`
-	// (closing the pty master) without ever killing or reaping it — the
-	// master hangup delivers SIGHUP to the child (it's the pty's session
-	// leader), which kills it almost immediately, but nothing calls
-	// wait() afterward, so it leaks as a permanent zombie. A cancellation
-	// here is instead delivered by the cancel forwarder below (immediately,
-	// for an already-aborted token) and handled by the control loop, which
-	// kills, and whose waiter thread reaps, correctly.
-
-	let master = pair.master;
+	// Every handle on the terminal is taken before the child exists: a
+	// failure here leaves no process behind, where after the spawn it would
+	// drop the master without a kill or a wait and leave a zombie.
+	let PtyPair { master, slave } = pair;
 	let mut writer = master
 		.take_writer()
 		.map_err(|err| Error::from_reason(format!("Failed to create PTY writer: {err}")))?;
-	// ConPTY sends ESC[6n (cursor position query) and blocks until we reply.
-	// Reply with cursor at 1,1 so it unblocks the child spawn.
-	// Only needed on Windows; on Unix/macOS this would corrupt stdin.
-	#[cfg(windows)]
-	{
-		let _ = writer.write_all(b"\x1b[1;1R");
-		let _ = writer.flush();
-	}
 	// On Unix the reader waits for output with `poll` and only then reads it,
 	// so a read is always short and the drain can tell it apart from a wait
 	// (see `read_terminal`).
@@ -461,13 +436,41 @@ fn run_pty_sync(
 		.try_clone_reader()
 		.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?;
 	// A second handle on the master counts what the terminal holds once the
-	// master itself is dropped (see the drain). It is taken here, so a host
-	// out of descriptors fails the run rather than leave the drain a count of
-	// zero for a terminal that still holds output.
+	// master itself is dropped (see the drain). A host out of descriptors
+	// fails the run here rather than leave the drain a count of zero for a
+	// terminal that still holds output.
 	#[cfg(unix)]
 	let unread_probe = reader
 		.try_clone()
 		.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?;
+
+	let mut child = slave
+		.spawn_command(cmd)
+		.map_err(|err| Error::from_reason(format!("Failed to spawn PTY command: {err}")))?;
+	drop(slave);
+	let child_process_id = child.process_id();
+	let child_pid = child_process_id.and_then(|value| i32::try_from(value).ok());
+	if let Some(callback) = on_start.as_ref() {
+		callback.call(Ok(child_process_id.unwrap_or(0)), ThreadsafeFunctionCallMode::NonBlocking);
+	}
+	// No heartbeat check, and no other `?`, from here on: `child` now owns a
+	// real, already-`exec`'d OS process, and bailing out at this point would
+	// drop the master without ever killing or reaping it — the
+	// master hangup delivers SIGHUP to the child (it's the pty's session
+	// leader), which kills it almost immediately, but nothing calls
+	// wait() afterward, so it leaks as a permanent zombie. A cancellation
+	// here is instead delivered by the cancel forwarder below (immediately,
+	// for an already-aborted token) and handled by the control loop, which
+	// kills, and whose waiter thread reaps, correctly.
+
+	// ConPTY sends ESC[6n (cursor position query) and blocks until we reply.
+	// Reply with cursor at 1,1 so it unblocks the child spawn.
+	// Only needed on Windows; on Unix/macOS this would corrupt stdin.
+	#[cfg(windows)]
+	{
+		let _ = writer.write_all(b"\x1b[1;1R");
+		let _ = writer.flush();
+	}
 
 	// The reader→JS queue is bounded like the bash bridge (#4078): a full queue
 	// parks the reader's `send`, filling the OS PTY buffer and backpressuring
