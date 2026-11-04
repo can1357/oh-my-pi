@@ -4,7 +4,16 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { replaceFileAtomically, writeFileAtomically, writeFileAtomicallySync } from "../src/atomic-file";
-import { getAgentDir, getProjectAgentDir, isOmpOwnedPath, setAgentDir } from "../src/dirs";
+import {
+	getAgentDir,
+	getPluginsDir,
+	getProjectAgentDir,
+	getRemoteDir,
+	getSkillshareStoreDir,
+	getWorktreesDir,
+	isOmpOwnedPath,
+	setAgentDir,
+} from "../src/dirs";
 import { removeWithRetries } from "../src/temp";
 
 /**
@@ -276,18 +285,25 @@ describe("boundaries the resolver must keep", () => {
 		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
 	});
 
-	test("a tree omp fills from elsewhere is foreign, at the root and under a profile", () => {
+	test("every tree omp fills from elsewhere is foreign, wherever its producer puts it", () => {
+		// Asked of the producers, not spelled out: a worktree base the user moved
+		// with `worktree.base` must stay foreign, which a literal `wt` would miss.
 		for (const tree of [
-			["plugins", "cache", "plugins", "x"],
-			["wt", "pr-1-abcdef", ".omp", "mcp.json"],
-			["remote", "somehost", "etc", "config.yml"],
-			["skillshare", "pkg", "1.0.0", "skills.json"],
+			getWorktreesDir(),
+			getRemoteDir(),
+			getSkillshareStoreDir(),
+			path.join(getPluginsDir(), "cache"),
+			path.join(getPluginsDir(), "node_modules"),
 		]) {
-			expect(isOmpOwnedPath(path.join(owned, ...tree))).toBe(false);
-			expect(isOmpOwnedPath(path.join(owned, "profiles", "other", ...tree))).toBe(false);
+			expect(isOmpOwnedPath(path.join(tree, "pkg", "nested", "config.json"))).toBe(false);
 		}
-		// The names are anchored, so the user's own directories keep their meaning.
-		expect(isOmpOwnedPath(path.join(owned, "plugins"))).toBe(true);
+		// Another profile's copies of the same trees, which the active profile's
+		// producers do not name.
+		for (const tree of ["wt", "remote", "skillshare"]) {
+			expect(isOmpOwnedPath(path.join(owned, "profiles", "other", tree, "x", "config.json"))).toBe(false);
+		}
+		expect(isOmpOwnedPath(path.join(owned, "profiles", "other", "plugins", "cache", "x"))).toBe(false);
+		// The names are anchored, so a user's own directory keeps its meaning.
 		expect(isOmpOwnedPath(path.join(owned, "agent", "prompts", "wt"))).toBe(true);
 		expect(isOmpOwnedPath(path.join(owned, "agent", "plugins", "cache"))).toBe(true);
 	});

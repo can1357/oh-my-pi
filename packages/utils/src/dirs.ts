@@ -170,21 +170,29 @@ export interface EquivalentPathOptions {
 }
 
 export function resolveEquivalentPath(inputPath: string, options?: EquivalentPathOptions): string {
-	const resolvedPath = path.resolve(inputPath);
+	// NOT `path.resolve`: it collapses `..` lexically, and then there is nothing
+	// left for the kernel to resolve differently. Absolute, unnormalized, is what
+	// `.native` needs to follow a `..` the way an open() would.
+	const resolvedPath = path.isAbsolute(inputPath) ? inputPath : `${process.cwd()}${path.sep}${inputPath}`;
 	try {
-		return fs.realpathSync(resolvedPath);
+		// `.native` asks the operating system. The JavaScript implementation
+		// collapses `..` before following the directory it sits behind, which is
+		// not where a `..` after a symlinked directory actually leads.
+		return fs.realpathSync.native(resolvedPath);
 	} catch {
-		if (!options?.throughMissing) return resolvedPath;
+		// Nothing to resolve against, so fall back to the normalized spelling the
+		// callers that compare paths expect.
+		if (!options?.throughMissing) return path.resolve(inputPath);
 	}
 	const missing: string[] = [];
 	let current = resolvedPath;
 	for (;;) {
 		const parent = path.dirname(current);
-		if (parent === current) return resolvedPath;
+		if (parent === current) return path.resolve(inputPath);
 		missing.unshift(path.basename(current));
 		current = parent;
 		try {
-			return path.join(fs.realpathSync(current), ...missing);
+			return path.join(fs.realpathSync.native(current), ...missing);
 		} catch {
 			// Keep walking: a higher ancestor may exist.
 		}
@@ -555,6 +563,11 @@ export function getConfigRootDir(): string {
 	return dirs.configRoot;
 }
 
+/** Root of the unpacked skill package store, next to the agent dir (~/.omp/skillshare). */
+export function getSkillshareStoreDir(): string {
+	return path.join(path.dirname(dirs.agentDir), "skillshare");
+}
+
 /**
  * Whether omp itself owns the directory `candidate` names, so anything found
  * inside it — a symlink in particular — was put there by the user rather than
@@ -579,28 +592,46 @@ export function getConfigRootDir(): string {
  * whatever produced the tree speaking, not the user.
  */
 export function isOmpOwnedPath(candidate: string): boolean {
-	// Canonicalize first, through a component that does not exist yet: a `..`
-	// after a symlinked directory collapses to the wrong place lexically, and
-	// that is exactly how a path would be spelled to look owned when it is not.
+	// Canonicalize first, through a component that does not exist yet. `..` after
+	// a symlinked directory collapses to the wrong place lexically, and that is
+	// exactly how a path would be spelled to look owned when it is not.
 	const target = resolveEquivalentPath(candidate, { throughMissing: true });
+	// Every one of these is asked of the code that creates the tree, never
+	// matched by name: `wt` moves with `OMP_WORKTREE_DIR` and the `worktree.base`
+	// setting, and a name-matched exclusion silently stops covering it.
+	const fetched = [
+		getProjectAgentDir(),
+		getWorktreesDir(),
+		getRemoteDir(),
+		getSkillshareStoreDir(),
+		getPuppeteerDir(),
+		getFastembedRuntimeDir(),
+		getDocsRsCacheDir(),
+		path.join(getPluginsDir(), "cache"),
+		path.join(getPluginsDir(), "node_modules"),
+	];
+	for (const tree of fetched) {
+		if (pathIsWithin(tree, target)) return false;
+	}
 	const roots = [getBaseConfigRoot(), dirs.configRoot, dirs.agentDir];
 	for (const envVar of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]) {
 		const value = process.env[envVar];
 		if (value) roots.push(path.join(value, APP_NAME));
 	}
-	// The project's `.omp` is the one foreign tree keyed on this process's own
-	// directory; the rest are omp's, wherever the process stands.
-	if (pathIsWithin(getProjectAgentDir(), target)) return false;
 	for (const root of roots) {
 		if (!pathIsWithin(root, target)) continue;
-		const relative = relativePathWithinRoot(root, target) ?? "";
-		const segments = relative.split(path.sep);
-		// Anchored at the root, and at a profile under it, so a directory a user
-		// made with one of these names deeper in their own tree stays theirs.
+		// The producers above answer for the ACTIVE profile. Another profile keeps
+		// the same trees under its own root, which no producer names, so the names
+		// are also matched one level in — anchored, so a directory the user made
+		// with one of these names deeper in their own tree stays theirs.
+		const segments = (relativePathWithinRoot(root, target) ?? "").split(path.sep);
 		const offset = segments[0] === "profiles" && segments.length > 2 ? 2 : 0;
 		const head = segments[offset];
-		if (head === "wt" || head === "remote" || head === "skillshare") return false;
-		if (head === "plugins" && segments[offset + 1] === "cache") return false;
+		if (head === "wt" || head === "remote" || head === "skillshare" || head === "puppeteer") return false;
+		if (head === "plugins" && (segments[offset + 1] === "cache" || segments[offset + 1] === "node_modules")) {
+			return false;
+		}
+		if (head === "cache" && segments[offset + 1] === "fastembed-runtime") return false;
 		return true;
 	}
 	return false;

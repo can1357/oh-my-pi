@@ -27,6 +27,15 @@ function endsSymlinkWalk(error: unknown): boolean {
 }
 
 /**
+ * Whether a path spells a directory rather than a file: a trailing separator,
+ * or a final `.` or `..` component. `open(path, "w")` refuses all three.
+ */
+function namesADirectory(value: string): boolean {
+	const tail = value.split(/[\\/]/).at(-1);
+	return tail === "" || tail === "." || tail === "..";
+}
+
+/**
  * The file a plain write to `filePath` would open: links on the final component
  * are followed to their target, so publishing by rename replaces the file the
  * link names instead of the link itself.
@@ -50,9 +59,13 @@ function endsSymlinkWalk(error: unknown): boolean {
  * does not exist.
  */
 export async function resolveWriteTarget(filePath: string): Promise<string> {
-	if (!isOmpOwnedPath(path.dirname(filePath))) return filePath;
 	let current = filePath;
 	for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
+		// Asked again at every hop, not once at the start: the link that decides
+		// the next step is the one in THIS directory, and a link the user made out
+		// of their own directory can land in a tree a checkout or a download
+		// filled. The walk stops there and the write lands on the link itself.
+		if (!isOmpOwnedPath(path.dirname(current))) return current;
 		let link: string;
 		try {
 			link = await fs.promises.readlink(current);
@@ -68,6 +81,11 @@ export async function resolveWriteTarget(filePath: string): Promise<string> {
 		const joined = path.isAbsolute(link)
 			? link
 			: `${await fs.promises.realpath(path.dirname(current))}${path.sep}${link}`;
+		// A link text ending `/` or `/.` names a DIRECTORY, and an ordinary write
+		// through it fails EISDIR or ENOTDIR. Splitting it into dirname and
+		// basename would throw that requirement away and write the file anyway, so
+		// the spelling is handed on whole and the staging `open` refuses it.
+		if (namesADirectory(joined)) return joined;
 		try {
 			current = path.join(await fs.promises.realpath(path.dirname(joined)), path.basename(joined));
 		} catch (error) {
@@ -82,9 +100,9 @@ export async function resolveWriteTarget(filePath: string): Promise<string> {
 
 /** Synchronous sibling of {@link resolveWriteTarget}. */
 export function resolveWriteTargetSync(filePath: string): string {
-	if (!isOmpOwnedPath(path.dirname(filePath))) return filePath;
 	let current = filePath;
 	for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
+		if (!isOmpOwnedPath(path.dirname(current))) return current;
 		let link: string;
 		try {
 			link = fs.readlinkSync(current);
@@ -92,9 +110,14 @@ export function resolveWriteTargetSync(filePath: string): string {
 			if (endsSymlinkWalk(error)) return current;
 			throw error;
 		}
-		const joined = path.isAbsolute(link) ? link : `${fs.realpathSync(path.dirname(current))}${path.sep}${link}`;
+		// `.native` asks the operating system; the JavaScript `realpathSync`
+		// collapses `..` lexically, which is the whole defect this avoids.
+		const joined = path.isAbsolute(link)
+			? link
+			: `${fs.realpathSync.native(path.dirname(current))}${path.sep}${link}`;
+		if (namesADirectory(joined)) return joined;
 		try {
-			current = path.join(fs.realpathSync(path.dirname(joined)), path.basename(joined));
+			current = path.join(fs.realpathSync.native(path.dirname(joined)), path.basename(joined));
 		} catch (error) {
 			if (!endsSymlinkWalk(error)) throw error;
 			current = joined;
