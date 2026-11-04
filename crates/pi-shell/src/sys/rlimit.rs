@@ -140,3 +140,23 @@ mod tests {
 		assert_eq!(to_raw(Some(u64::MAX)), libc::RLIM_INFINITY, "too large saturates to unlimited");
 	}
 }
+
+/// Whether a process with core file size soft limit `limit` (`None`:
+/// unlimited) gets a core dump.
+///
+/// Linux writes one for a `core_pattern` that pipes to a program unless the
+/// limit is 1, and to a file when the limit is above zero (`do_coredump`).
+/// Other platforms: when the limit is above zero.
+pub fn dumps_core(limit: Option<u64>) -> bool {
+	#[cfg(target_os = "linux")]
+	{
+		static PIPE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+		let pipe = *PIPE.get_or_init(|| {
+			std::fs::read("/proc/sys/kernel/core_pattern").is_ok_and(|p| p.first() == Some(&b'|'))
+		});
+		if pipe {
+			return limit != Some(1);
+		}
+	}
+	limit != Some(0)
+}

@@ -247,6 +247,14 @@ impl ExtProc for CountedExt {
 	fn cont(&mut self) -> io::Result<()> {
 		self.ext.cont()
 	}
+
+	fn core_dumped(&self) -> bool {
+		self.ext.core_dumped()
+	}
+
+	fn exited(&self) -> bool {
+		self.ext.exited()
+	}
 }
 
 impl Drop for CountedExt {

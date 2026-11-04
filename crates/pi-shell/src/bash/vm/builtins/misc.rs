@@ -198,11 +198,15 @@ fn load(ctx: &mut Ctx<'_, '_>, file: &[u8], names: &[BString], disable: bool) ->
 }
 
 /// `bind …`: readline key bindings and settings. A shell without line
-/// editing has none, so as non-interactive bash does it warns and succeeds,
-/// whatever the arguments.
-pub fn bind(ctx: &mut Ctx<'_, '_>, _args: &[BString]) -> R {
+/// editing has none, so as non-interactive bash does it warns, reads its
+/// options (an unknown one or a missing argument is a usage error, status
+/// 2) and succeeds.
+pub fn bind(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	ctx.err(Diag::Warning { msg: "warning: line editing not enabled".into() });
-	done(0)
+	match opts(ctx, args, b"lvpVPsSX", b"fqumrx", false) {
+		Ok(_) => done(0),
+		Err(st) => done(st),
+	}
 }
 
 /// `strmatch STRING PATTERN`: 0 when PATTERN (bash `strmatch` with

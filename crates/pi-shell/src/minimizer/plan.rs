@@ -46,6 +46,16 @@ pub struct ChainSegment {
 	pub run_if_previous_succeeded: bool,
 	/// The segment is followed by `&&`, so its failure must not trip `errexit`.
 	pub suppress_errexit:          bool,
+	/// Whether the segment's text alone shows it can change the shell's own
+	/// state for the segments after it; see [`simple_mutates_shell`]. Such a
+	/// chain is not run segment by segment.
+	pub mutates_shell:             bool,
+	/// The first word of each of the segment's commands after quote removal:
+	/// the words the shell may resolve to an alias or a function, which may
+	/// change its state as the builtins [`SHELL_STATE_BUILTINS`] do (an `exec`
+	/// in a function body). Only the live shell knows, so the runner asks it
+	/// before it runs the chain segment by segment.
+	pub command_words:             Vec<String>,
 }
 
 /// Outcome of analyzing a raw command string.
@@ -150,15 +160,10 @@ fn classify_chain(items: &[&ListItem], src: &str) -> Option<CommandPlan> {
 		let mut rest = item.and_or.rest.iter().peekable();
 
 		loop {
-			let (command, program) = simple_segment(pipeline, src)?;
+			let segment = simple_segment(pipeline, src)?;
 
 			let suppress_errexit = rest.peek().is_some_and(|(op, _)| *op == AndOrOp::And);
-			segments.push(ChainSegment {
-				command,
-				program,
-				run_if_previous_succeeded,
-				suppress_errexit,
-			});
+			segments.push(ChainSegment { run_if_previous_succeeded, suppress_errexit, ..segment });
 
 			match rest.next() {
 				None => break,
@@ -277,7 +282,10 @@ fn safe_simple(command: &Command) -> Option<&Simple> {
 	safe.then_some(simple)
 }
 
-fn simple_segment(pipeline: &Pipeline, src: &str) -> Option<(String, String)> {
+/// The segment `pipeline` makes, when every stage is a safe simple command;
+/// its `&&` placement (`run_if_previous_succeeded`, `suppress_errexit`) is
+/// left for the caller.
+fn simple_segment(pipeline: &Pipeline, src: &str) -> Option<ChainSegment> {
 	if pipeline.time.is_some() || pipeline.bang {
 		return None;
 	}
@@ -286,11 +294,12 @@ fn simple_segment(pipeline: &Pipeline, src: &str) -> Option<(String, String)> {
 	// (`if` / `for` / `while` / subshells / `{ … }`) keep the whole chain
 	// unsegmented; validating only the first stage once let
 	// `git log … | while read x; do … done` through.
-	let mut stages = pipeline.stages.iter();
-	let first = safe_simple(&stages.next()?.cmd)?;
-	if !stages.all(|stage| safe_simple(&stage.cmd).is_some()) {
-		return None;
-	}
+	let stages: Vec<&Simple> = pipeline
+		.stages
+		.iter()
+		.map(|stage| safe_simple(&stage.cmd))
+		.collect::<Option<_>>()?;
+	let first = stages.first()?;
 
 	// Identify the segment by its first stage's program word. Multi-stage pipes
 	// are captured but never rewritten (runtime detects `CommandPlan::Piped`),
@@ -308,7 +317,93 @@ fn simple_segment(pipeline: &Pipeline, src: &str) -> Option<(String, String)> {
 	if command.trim().is_empty() {
 		return None;
 	}
-	Some((command.to_owned(), program.to_owned()))
+	Some(ChainSegment {
+		command:                   command.to_owned(),
+		program:                   program.to_owned(),
+		run_if_previous_succeeded: false,
+		suppress_errexit:          false,
+		mutates_shell:             stages.iter().any(|simple| simple_mutates_shell(simple)),
+		command_words:             stages
+			.iter()
+			.filter_map(|simple| static_word_text(simple.words.first()?))
+			.collect(),
+	})
+}
+
+/// The builtins whose effect on the shell outlives the command: `exec`
+/// changes the shell's file descriptors, `eval`, `source` and `.` can do
+/// anything, `trap` sets commands that run between later ones (or when the
+/// run ends), `fc` re-runs earlier commands, `mapfile` and `readarray` can
+/// run a callback, and `alias`/`unalias` change how later text is read.
+const SHELL_STATE_BUILTINS: [&str; 10] =
+	["exec", "eval", "source", ".", "trap", "fc", "mapfile", "readarray", "alias", "unalias"];
+
+/// Whether `simple`'s text alone shows it can change the shell's own state
+/// for the commands after it: the command it runs is one of
+/// [`SHELL_STATE_BUILTINS`]. The command is read as the shell reads it, after
+/// quote removal (`'exec'`, `"exec"` and `\exec` are `exec`), and through
+/// `command` and `builtin` with their options. A word the shell would expand
+/// (`$cmd`, `~`, `$'…'`, a glob, an unquoted `{` that brace expansion may take
+/// as `{exec,}` and `e{x..x}ec` are `exec`) cannot be read here, so such a
+/// command counts as one that can. Whether the first word names a function
+/// or an alias, which can too, only the live shell knows
+/// ([`ChainSegment::command_words`]).
+fn simple_mutates_shell(simple: &Simple) -> bool {
+	let mut wrapper: Option<&str> = None;
+	for word in &simple.words {
+		let Some(name) = static_word_text(word) else {
+			return true;
+		};
+		// `command -p name` and `builtin -- name`: the options come before
+		// the command they run.
+		if wrapper.is_some() && name.len() > 1 && name.starts_with('-') {
+			if wrapper == Some("command") && name.contains(['v', 'V']) {
+				// `command -v`/`-V` only describes the command.
+				return false;
+			}
+			continue;
+		}
+		if SHELL_STATE_BUILTINS.contains(&name.as_str()) {
+			return true;
+		}
+		match name.as_str() {
+			"command" => wrapper = Some("command"),
+			"builtin" => wrapper = Some("builtin"),
+			_ => return false,
+		}
+	}
+	false
+}
+
+/// The text of `word` after quote removal, or `None` when the shell would
+/// expand part of it.
+fn static_word_text(word: &Word) -> Option<String> {
+	let mut text = Vec::new();
+	push_static_parts(&word.parts, false, &mut text)?;
+	String::from_utf8(text).ok()
+}
+
+fn push_static_parts(parts: &[WordPart], quoted: bool, text: &mut Vec<u8>) -> Option<()> {
+	for part in parts {
+		match part {
+			// Unquoted, glob characters, `~` and braces stay active: `ex?c`,
+			// `{exec,}` and `e{x..x}ec` may all be `exec`.
+			WordPart::Lit(bytes)
+				if !quoted
+					&& bytes
+						.iter()
+						.any(|b| matches!(b, b'{' | b'*' | b'?' | b'[' | b'~')) =>
+			{
+				return None;
+			},
+			WordPart::Lit(bytes) | WordPart::Escaped(bytes) | WordPart::SQuote(bytes) => {
+				text.extend_from_slice(bytes);
+			},
+			WordPart::DQuote(inner) => push_static_parts(inner, true, text)?,
+			_ => return None,
+		}
+	}
+	Some(())
 }
 
 fn classify_pipeline(pipeline: &Pipeline, src: &str) -> Option<CommandPlan> {
@@ -368,6 +463,11 @@ mod tests {
 		);
 	}
 
+	/// The command words a segment run by the program `name` keeps.
+	fn named(name: &str) -> Vec<String> {
+		vec![name.to_owned()]
+	}
+
 	#[test]
 	fn single_simple_command() {
 		let plan = analyze("git status --short");
@@ -392,12 +492,16 @@ mod tests {
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
+					mutates_shell:             false,
+					command_words:             named("git"),
 				},
 				ChainSegment {
 					command:                   "git diff --name-only".to_string(),
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
+					mutates_shell:             false,
+					command_words:             named("git"),
 				},
 			])
 		);
@@ -414,12 +518,16 @@ mod tests {
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
+					mutates_shell:             false,
+					command_words:             named("git"),
 				},
 				ChainSegment {
 					command:                   "bun test".to_string(),
 					program:                   "bun".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
+					mutates_shell:             false,
+					command_words:             named("bun"),
 				},
 			])
 		);
@@ -436,18 +544,24 @@ mod tests {
 					program:                   "false".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
+					mutates_shell:             false,
+					command_words:             named("false"),
 				},
 				ChainSegment {
 					command:                   "echo no".to_string(),
 					program:                   "echo".to_string(),
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
+					mutates_shell:             false,
+					command_words:             named("echo"),
 				},
 				ChainSegment {
 					command:                   "echo yes".to_string(),
 					program:                   "echo".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
+					mutates_shell:             false,
+					command_words:             named("echo"),
 				},
 			])
 		);
@@ -478,6 +592,74 @@ mod tests {
 		assert_eq!(segments[0].program, "echo");
 		assert_eq!(segments[1].command, "FOO=\"x y\" printf '%s\\n' z");
 		assert_eq!(segments[1].program, "printf");
+	}
+
+	/// A segment whose command, read as the shell reads it, is a builtin
+	/// whose effect outlives it (or a word the shell expands, which may be
+	/// one) marks the chain as one that changes the shell; a word that only
+	/// names such a builtin as an argument does not.
+	#[test]
+	fn shell_state_builtins_are_read_through_quotes_wrappers_and_expansions() {
+		let mutates = |command: &str| {
+			chain_of(analyze(&format!("{command} ; echo O")))
+				.expect("expected Chain")
+				.remove(0)
+				.mutates_shell
+		};
+		for command in [
+			"exec >out",
+			"'exec' >out",
+			"\"exec\" >out",
+			"\\exec >out",
+			"FOO=\"a b\" exec >out",
+			"command -p -- exec 2>err",
+			"builtin eval :",
+			". ./q.sh",
+			"source ./q.sh",
+			"alias ll=ls",
+			"trap 'exec >out' ERR",
+			"mapfile -C cb lines",
+			"fc -s",
+			"$cmd 2>/dev/null",
+			"\"$cmd\" 2>/dev/null",
+			"$'exec' >out",
+			"{exec,} 2>/dev/null",
+			"e{x..x}ec 2>/dev/null",
+			"command {exec,} 2>/dev/null",
+			"ex?c 2>/dev/null",
+			"cat file | exec 2>err",
+		] {
+			assert!(mutates(command), "{command}");
+		}
+		for command in [
+			"echo exec",
+			"command -v exec",
+			"printf '%s' exec",
+			"'git' status",
+			"echo {a,b}",
+			"\"{x}\" a",
+		] {
+			assert!(!mutates(command), "{command}");
+		}
+	}
+
+	/// Each stage's first word is kept after quote removal for the live
+	/// shell to resolve (a function or an alias may change its state); a word
+	/// after `command` or `builtin`, which skip functions and aliases, is not.
+	#[test]
+	fn each_stage_keeps_its_first_word_for_the_live_shell() {
+		let words = |command: &str| {
+			chain_of(analyze(&format!("{command} ; echo O")))
+				.expect("expected Chain")
+				.remove(0)
+				.command_words
+		};
+		assert_eq!(words("quiet"), named("quiet"));
+		assert_eq!(words("'quiet' arg"), named("quiet"));
+		assert_eq!(words("FOO=1 quiet"), named("quiet"));
+		assert_eq!(words("command -p quiet"), named("command"));
+		assert_eq!(words("builtin echo hi"), named("builtin"));
+		assert_eq!(words("cat file | quiet"), vec!["cat".to_owned(), "quiet".to_owned()]);
 	}
 
 	#[test]

@@ -161,6 +161,24 @@ fn target(ctx: &mut Ctx<'_, '_>, arg: &[u8], send: Send) -> Result<Option<SigTar
 		.and_then(|s| s.parse::<i32>().ok())
 		.ok_or(TargetError::NotAnId)?;
 	let base = ctx.k.engine.config().vpid_base;
+	// A stage of a background pipeline is a process of its own: the signal
+	// reaches it alone, and one that ended is gone (bash's stages are
+	// forked processes).
+	if let Ok(p) = u32::try_from(pid)
+		&& let Some(stage) = ctx
+			.vp
+			.jobs
+			.iter()
+			.filter(|j| !matches!(j.state, JobState::Done(_)))
+			.filter_map(|j| j.stages.as_deref())
+			.flatten()
+			.find(|s| s.pid() == p)
+	{
+		return match stage.status {
+			Some(_) => Err(TargetError::NoSuchProcess),
+			None => Ok(Some(SigTarget::Vpid(stage.vpid))),
+		};
+	}
 	// A job's (or `$!`'s) program OS pid names the job's vproc: the signal
 	// reaches the program through it, and the job's state follows.
 	let named = u32::try_from(pid)

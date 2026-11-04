@@ -330,6 +330,14 @@ impl ExtProc for Relayed {
 	fn cont(&mut self) -> io::Result<()> {
 		self.child.cont()
 	}
+
+	fn core_dumped(&self) -> bool {
+		self.child.core_dumped()
+	}
+
+	fn exited(&self) -> bool {
+		self.child.exited()
+	}
 }
 
 impl Drop for Relayed {

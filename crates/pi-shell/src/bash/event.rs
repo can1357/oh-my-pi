@@ -610,6 +610,10 @@ pub enum WaitKey {
 	Job(JobId),
 	/// Waiting for a signal (`wait`, `suspend`).
 	Signal,
+	/// Waiting until the children whose process ended have taken note of
+	/// it, before the job table is read (bash learns of a child's end from
+	/// `SIGCHLD` at once; here the child's vproc must run).
+	Settle,
 }
 
 /// Progress or annotation from a host callout

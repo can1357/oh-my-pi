@@ -9,6 +9,9 @@
 ### Fixed
 
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
+- Fixed the bash tool saying nothing when a signal killed a background job or a command: as in Bash 5.3, the job's line (such as `bash: line 2: 12345 Killed                     sleep 30`) now appears on standard error where Bash reports it, SIGINT, SIGPIPE, background SIGTERM and trapped signals stay silent, a reported job is forgotten so `wait %1` no longer returns its status while `wait $!` still does, `jobs` shows Bash's status text, a background pipeline lists one line per stage, and a background job ignores SIGINT and SIGQUIT ([#17845](https://github.com/can1357/oh-my-pi/pull/17845) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's `builtin exec 2>/dev/null` keeping its redirection after the command, a builtin's own error ignoring the command's `2>` redirection, an error in a pipeline stage going to the shell's standard error instead of the stage's, and `bind` with an invalid option returning 0, unlike Bash ([#17845](https://github.com/can1357/oh-my-pi/pull/17845) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's output minimizer, when it ran `a; b; c` a command at a time, losing an `exec >file` or `exec 2>/dev/null` made through a shell function, an alias, a trap, or an `exec` spelled with quotes or brace expansion: later commands' output came back instead of going to the file, unlike Bash ([#17845](https://github.com/can1357/oh-my-pi/pull/17845) by [@sjawhar](https://github.com/sjawhar))
 ### Fixed
 
 - Fixed `el.type` and `el.press(keys)` on Wayland moving focus inside the element's app (GNOME showed "… is ready") before refusing the call: they are now refused before anything reaches the app ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))

@@ -18,7 +18,8 @@ use crate::bash::{
 	vm::{
 		exec::push_script,
 		expand::Stop,
-		proc::{Job, JobLookup, JobState, LastBg, ScriptKind},
+		notify,
+		proc::{JobLookup, JobState, LastBg, ScriptKind},
 		quote,
 	},
 };
@@ -69,31 +70,6 @@ pub fn no_such_job(ctx: &mut Ctx<'_, '_>, word: &[u8]) {
 	ctx.usage(format!("{}: no such job", word.as_bstr()));
 }
 
-/// The signal that killed a job whose status is `status` (128 + n).
-pub fn signaled(status: i32, platform: Platform) -> Option<Signal> {
-	status
-		.checked_sub(128)
-		.and_then(|n| u8::try_from(n).ok())
-		.and_then(|n| Signal::from_number(n, platform))
-}
-
-/// bash `printable_job_status`; `long` is `jobs -l`, where a stopped job
-/// shows the stop signal's description.
-fn status_text(job: &Job, long: bool, posix: bool, platform: Platform) -> String {
-	match job.state {
-		JobState::Running => String::from("Running"),
-		JobState::Stopped(sig) if long => sig.description(platform),
-		JobState::Stopped(sig) if posix => format!("Stopped(SIG{sig})"),
-		JobState::Stopped(_) => String::from("Stopped"),
-		JobState::Done(0) => String::from("Done"),
-		JobState::Done(status) => match signaled(status, platform) {
-			Some(sig) => sig.description(platform),
-			None if posix => format!("Done({status})"),
-			None => format!("Exit {status}"),
-		},
-	}
-}
-
 /// How `jobs` prints (bash `JLIST_*`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Form {
@@ -119,8 +95,20 @@ fn print_job(ctx: &mut Ctx<'_, '_>, number: u32, form: Form, show: &Show<'_>) {
 	let Some(job) = ctx.vp.jobs.get(number) else {
 		return;
 	};
+	// bash `pretty_print_job` with the list frozen skips a job it would
+	// neither report nor keep (`should_notify`): a foreground job no signal
+	// ended.
+	if ctx.vp.jobs_frozen() && job.foreground && job.death.is_none() {
+		return;
+	}
 	if form == Form::Pids {
-		let line = format!("{}\n", job.pid());
+		// bash `JLIST_PID_ONLY`: the process group leader, the first stage.
+		let pid = job
+			.stages
+			.as_deref()
+			.and_then(|s| s.first())
+			.map_or_else(|| job.pid(), |s| s.pid());
+		let line = format!("{pid}\n");
 		ctx.out(line.as_bytes());
 		return;
 	}
@@ -135,28 +123,26 @@ fn print_job(ctx: &mut Ctx<'_, '_>, number: u32, form: Form, show: &Show<'_>) {
 	} else {
 		' '
 	};
-	let status = status_text(job, long, show.posix, show.platform);
 	let mut line = Vec::with_capacity(64);
 	let _ = write!(line, "[{number}]{mark} ");
-	if long {
-		let _ = write!(line, "{:5} ", job.pid());
-	} else {
+	if !long {
 		line.push(b' ');
 	}
-	line.extend_from_slice(status.as_bytes());
-	// C's `%*s` with a negative width pads to its absolute value.
-	let pad = (27 - i64::try_from(status.len()).unwrap_or(27)).unsigned_abs();
-	line.resize(line.len() + usize::try_from(pad).unwrap_or(0), b' ');
-	line.extend_from_slice(&job.text);
-	if job.state == JobState::Running {
-		line.extend_from_slice(b" &");
-	}
-	if job.wd != ctx.vp.cwd {
-		line.extend_from_slice(b"  (wd: ");
-		line.extend_from_slice(&dirstack::polite(show.home, &job.wd, false));
-		line.push(b')');
-	}
-	line.push(b'\n');
+	let wd = (job.wd != ctx.vp.cwd).then(|| dirstack::polite(show.home, &job.wd, false));
+	let look = notify::JobLook {
+		running:    job.state == JobState::Running,
+		stopped:    matches!(job.state, JobState::Stopped(_)),
+		background: !job.foreground,
+		posix:      show.posix,
+		platform:   show.platform,
+		wd:         wd.as_ref().map(|w| w.as_slice()),
+	};
+	let format = if long {
+		notify::Format::Long
+	} else {
+		notify::Format::Standard
+	};
+	notify::print_pipeline(&mut line, &notify::job_procs(job), format, &look);
 	ctx.out(&line);
 	if let Some(job) = ctx.vp.jobs.get_mut(number) {
 		job.notified = true;
@@ -166,14 +152,18 @@ fn print_job(ctx: &mut Ctx<'_, '_>, number: u32, form: Form, show: &Show<'_>) {
 /// Forget finished jobs whose state was reported (bash
 /// `cleanup_dead_jobs`).
 fn cleanup(ctx: &mut Ctx<'_, '_>) {
-	ctx.vp
-		.jobs
-		.remove_where(|j| j.notified && matches!(j.state, JobState::Done(_)));
+	if !ctx.vp.jobs_frozen() {
+		ctx.vp.jobs.cleanup();
+	}
 }
 
 /// `jobs [-lnprs] [jobspec …]`, `jobs -x command [args]`: list jobs as
 /// `[N]±  Status  command`; finished jobs are listed once, then forgotten.
 pub fn jobs(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
+	// bash knows of each child's end (`SIGCHLD`) when `jobs` looks.
+	if ctx.k.needs_settle(ctx.vp) {
+		return Err(Need::Sub(Stop::Wait(WaitKey::Settle)));
+	}
 	let o = match opts(ctx, args, b"lpnxrs", b"", false) {
 		Ok(o) => o,
 		Err(st) => return done(st),
@@ -259,6 +249,10 @@ pub fn jobs(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			status = 1;
 		}
 	}
+	// bash `jobs` with operands ends with `notify_and_cleanup`: a job a
+	// signal ended that was not listed is reported now.
+	let report = notify::mark(ctx.k, ctx.cx, ctx.vp, None, ctx.line);
+	ctx.out_fd(2, &report);
 	cleanup(ctx);
 	done(status)
 }
@@ -498,6 +492,9 @@ pub fn disown(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let nohup = o.has(b'h');
 	let running_only = o.has(b'r');
 	if o.rest.is_empty() && (o.has(b'a') || running_only) {
+		// bash `delete_all_jobs` clears the current and previous jobs first.
+		ctx.vp.jobs.current = None;
+		ctx.vp.jobs.previous = None;
 		let picked: Vec<u32> = ctx
 			.vp
 			.jobs
@@ -549,6 +546,10 @@ fn drop_job(ctx: &mut Ctx<'_, '_>, number: u32, nohup: bool) {
 		if let Some(job) = ctx.vp.jobs.get_mut(number) {
 			job.nohup = true;
 		}
+		return;
+	}
+	// bash `delete_job` returns at once while the job list is frozen.
+	if ctx.vp.jobs_frozen() {
 		return;
 	}
 	if let Some(job) = ctx.vp.jobs.remove(number)

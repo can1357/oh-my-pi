@@ -13,11 +13,11 @@ use bstr::{BStr, BString, ByteSlice};
 use super::{
 	Cx, Kernel, assign_scope, builtins, command,
 	expand::{Expander, Stop},
-	is_ident, probe,
+	is_ident, notify, probe,
 	proc::{
 		AssignValue, Atom, Bang, BangStage, Coproc, Depths, Frame, FrameKind, InlineStage, LastBg,
-		LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe, ProbeResult, Run, Saved,
-		Scratch, ScriptKind, Slot, TryEnd, Vproc,
+		LoopKind, LoopRec, ParseSnapshot, PendingSub, Probe, ProbeResult, Run, Saved, Scratch,
+		ScriptKind, Slot, TryEnd, Vproc,
 	},
 	redir,
 	state::{self, Level, Root, Scope, Var, VarMap},
@@ -31,7 +31,9 @@ use crate::bash::{
 	ir::{self, ComsubForm, Op, Opcode, SpawnKind, Unit},
 	mem::{self, Capture},
 	pattern::PatOpts,
-	store::{Attrs, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, TrapKey},
+	store::{
+		Attrs, Death, JobStage, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, TrapKey,
+	},
 	syntax::{CompleteCommand, Features, ParseError, ParseErrorKind, Parser, Pos, Resume},
 	zshopt::ZshOpt,
 };
@@ -669,12 +671,18 @@ fn unpark(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 	}
 }
 
-/// Write queued diagnostics; the fd that would block, if any. Write errors
+/// Write queued diagnostics, each to the fd object it was queued for
+/// ([`Vproc::queue_out`]); the fd that would block, if any. Write errors
 /// on a diagnostic stream are dropped, as bash does.
 pub fn flush_out(k: &Kernel, vp: &mut Vproc) -> Option<i32> {
 	let mut cx = Context::from_waker(&k.waker);
 	while let Some(w) = vp.out.front_mut() {
-		match vp.fds.handle(w.fd).poll_write(&mut cx, &w.bytes[w.off..]) {
+		let bytes = &w.bytes[w.off..];
+		let polled = match &w.to {
+			Some(h) => h.poll_write(&mut cx, bytes),
+			None => vp.fds.handle(w.fd).poll_write(&mut cx, bytes),
+		};
+		match polled {
 			Poll::Ready(Ok(n)) if n > 0 => {
 				w.off += n;
 				if w.off >= w.bytes.len() {
@@ -734,6 +742,31 @@ fn features(
 /// frame at end of input. A script read from stdin first reads lines until
 /// the command is complete; `Some` is the wait key while fd 0 has none.
 fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitKey> {
+	// bash reports the jobs a signal ended each time it reads a line
+	// (`shell_getc` calls `notify_and_cleanup`): before the first command
+	// of a line, not between the commands of one. A string (`-c`, `eval`, a
+	// trap) has no line after its last newline; a script read from standard
+	// input also reads its end.
+	let line_read = match vp.frames.last().map(|f| &f.kind) {
+		Some(FrameKind::Script { src, pos, stdin, .. }) => {
+			let off = pos.0 as usize;
+			let line_start = off == 0 || src.get(off.wrapping_sub(1)) == Some(&b'\n');
+			line_start && (off < src.len() || *stdin)
+		},
+		_ => false,
+	};
+	if line_read {
+		// The children that ended must have taken note of it first (bash's
+		// `SIGCHLD` handler has run by the time it reads a line).
+		if k.needs_settle(vp) {
+			return Some(WaitKey::Settle);
+		}
+		let line = match vp.frames.last().map(|f| &f.kind) {
+			Some(FrameKind::Script { pos, .. }) => pos.1,
+			_ => 0,
+		};
+		super::notify::notify(k, cx, vp, None, line);
+	}
 	// zsh `parse_string`: a string (`eval`, a trap, `-c`) parses whole
 	// before it runs; its first command takes the snapshot the rest reuse.
 	let (snapped, snapshot) = match vp.frames.last().map(|f| &f.kind) {
@@ -1341,8 +1374,19 @@ fn break_loops(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, n: u32, cont: bo
 			f.kind,
 			FrameKind::Script { what: ScriptKind::Eval, .. } | FrameKind::NoFork | FrameKind::Stage
 		);
+		let stage = f.kind == FrameKind::Stage;
 		if crossable && vp.frames.len() > 1 {
 			pop_frame(&mut k.root, cx.store, vp);
+			// bash's `break` in a `lastpipe` last command only sets a flag:
+			// the pipeline ends as usual and its foreground job goes.
+			if stage {
+				let children: Vec<Vpid> = top_frame(vp)
+					.scratch
+					.as_ref()
+					.map_or_else(Vec::new, |sc| sc.children.iter().map(|&(v, _)| v).collect());
+				vp.jobs
+					.remove_where(|j| j.foreground && children.contains(&j.vpid));
+			}
 			// The caller's op (`eval`) is abandoned with the loop.
 			clear_scratch(&mut k.root, cx.store, vp);
 			continue;
@@ -1470,6 +1514,58 @@ fn stopped(
 	}
 }
 
+/// Whether `vp` is a forked simple command of a `-c` shell's run: a
+/// pipeline stage or background job that is one simple command (its
+/// `SubExit`'s node). Bash runs it in a child that leaves an expansion error
+/// with the `-c` shell's status (127), where a subshell, a group or a
+/// command substitution keeps the failure status (1).
+fn forked_simple(vp: &Vproc) -> bool {
+	use crate::bash::event::NodeKind;
+	if !vp.transient || vp.jobs.comsub {
+		return false;
+	}
+	let [frame] = vp.frames.as_slice() else {
+		return false;
+	};
+	if frame.subshell_line.is_some() {
+		return false;
+	}
+	let Some(unit) = frame.unit.as_ref() else {
+		return false;
+	};
+	let at = |pc: u32| unit.ops.get(pc as usize);
+	let (Some(op), Some(exit)) = (at(frame.pc), at(frame.pc + 1)) else {
+		return false;
+	};
+	if op.code != Opcode::Exec || exit.code != Opcode::SubExit {
+		return false;
+	}
+	let (Some(me), Some(stage)) =
+		(unit.nodes.get(op.node as usize), unit.nodes.get(exit.node as usize))
+	else {
+		return false;
+	};
+	// A background job's node is its list item: no compound command may
+	// stand between it and the command.
+	match stage.kind {
+		NodeKind::Simple => true,
+		NodeKind::Pipeline | NodeKind::AndOr => !unit.nodes.iter().any(|n| {
+			!matches!(
+				n.kind,
+				NodeKind::AndOr
+					| NodeKind::Pipeline
+					| NodeKind::Simple
+					| NodeKind::Assign
+					| NodeKind::Word
+			) && stage.lo <= n.lo
+				&& n.hi <= stage.hi
+				&& n.lo <= me.lo
+				&& me.hi <= n.hi
+		}),
+		_ => false,
+	}
+}
+
 /// Expansion errors end the shell: posix mode, not interactive.
 fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 	state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false)
@@ -1502,7 +1598,7 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 			// bash exits 127 from a `-c` string (`run_one_command`), 1 from a
 			// script and from a subshell (`execute_in_subshell` keeps the
 			// failure status); a nested shell (depth 0) is its own `-c` shell.
-			let command = super::subshell_depth(vp) == 0
+			let command = (super::subshell_depth(vp) == 0 || forked_simple(vp))
 				&& matches!(
 					state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
 					Ok(Some(Record::Misc(origin))) if origin.as_slice() == b"c"
@@ -1569,6 +1665,27 @@ pub fn start_sub(
 	sub: Sub,
 ) -> Flow {
 	let Sub { unit, entry, form, text, line } = sub;
+	// bash parses a `$( )` (not a `` ` ` ``) from its text when it runs it:
+	// reading that text reports the jobs a signal ended, as reading a line
+	// does.
+	if let Some(t) = text {
+		if k.needs_settle(vp) {
+			return Flow::Block(WaitKey::Settle);
+		}
+		// bash's line count then: the command's line, plus the lines its
+		// text spans and the newline its parse reads after it (not in an
+		// `eval`'d string).
+		let spans = unit
+			.strs
+			.get(t as usize)
+			.map_or(0, |s| bstr::ByteSlice::find_iter(s.as_slice(), b"\n").count());
+		let eval = matches!(
+			vp.frames.last().map(|f| &f.kind),
+			Some(FrameKind::Script { what: ScriptKind::Eval, .. })
+		);
+		let at = line + u32::try_from(spans).unwrap_or(0) + u32::from(!eval);
+		notify::notify(k, cx, vp, None, at);
+	}
 	let first = unit
 		.ops
 		.get(entry as usize)
@@ -1642,6 +1759,7 @@ pub fn start_sub(
 			// bash keeps job control and the job list in `$( )`: `jobs`
 			// lists the parent's jobs, `fg` finds no current job.
 			child.jobs = inherited_jobs(vp, vp.jobs.subshell);
+			child.jobs.comsub = true;
 			let vpid = child.vpid;
 			k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
 			k.spawned.push(Box::new(child));
@@ -1704,6 +1822,7 @@ pub fn start_zsh_sub(
 	fds.set(1, Some(FdRef::mem(capture.clone())));
 	let mut child = vp.child_text(k, cx.store, text, line, fds);
 	child.jobs = inherited_jobs(vp, vp.jobs.subshell);
+	child.jobs.comsub = true;
 	let vpid = child.vpid;
 	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
 	k.spawned.push(Box::new(child));
@@ -1870,6 +1989,12 @@ pub fn start_procsub(
 	entry: u32,
 	output: bool,
 ) -> BString {
+	// bash parses a process substitution's text when it runs it, which
+	// reports the jobs a signal ended, as reading a line does.
+	// bash's line count then: the command's line and the newline its parse
+	// reads after the text.
+	let line = line_of(vp, unit.ops.get(entry as usize).map_or(0, |op| op.node));
+	notify::notify(k, cx, vp, None, line + 1);
 	let (r, w) = mem::pipe();
 	let r = FdRef::mem(r);
 	let w = FdRef::mem(w);
@@ -2122,6 +2247,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 			if let Some(saves) = top_frame(vp).redirs.pop() {
 				restore(vp, saves);
 			}
+			notify::flush_report(k, vp, op.node);
 			Flow::Next
 		},
 		Opcode::Spawn => spawn(k, vp, cx, unit, op),
@@ -2398,9 +2524,7 @@ fn time_end(
 		end.sys.saturating_sub(start.sys),
 	];
 	match time_report(&format, times) {
-		Ok(text) => vp
-			.out
-			.push_back(PendingWrite { fd: 2, bytes: text.into(), off: 0 }),
+		Ok(text) => vp.queue_out(2, text),
 		Err(c) => {
 			let msg = format!("TIMEFORMAT: `{}': invalid format character", char::from(c));
 			k.diag(cx, vp, line, Diag::Usage { msg: msg.into() });
@@ -2445,8 +2569,7 @@ fn zsh_time_end(
 		text.extend_from_slice(&zsh_time_report(&format, b"children", children));
 		text
 	};
-	vp.out
-		.push_back(PendingWrite { fd: 2, bytes: text.into(), off: 0 });
+	vp.queue_out(2, text);
 }
 
 /// zsh's default `TIMEFMT` (`DEFAULT_TIMEFMT`).
@@ -2973,6 +3096,16 @@ fn bang_stage(unit: &Unit, entry: u32) -> Option<BangStage> {
 	if code(entry) == Some(Opcode::Exec) && code(entry + 1) == Some(Opcode::SubExit) {
 		return Some(BangStage::Lone);
 	}
+	if let Some(op) = unit
+		.ops
+		.get(entry as usize)
+		.filter(|op| op.code == Opcode::Spawn)
+		&& let Some(spawn) = unit.spawns.get(op.a as usize)
+		&& spawn.kind == SpawnKind::Pipeline
+		&& code(spawn.end) == Some(Opcode::SubExit)
+	{
+		return Some(BangStage::Pipeline);
+	}
 	let group = [Opcode::Enter, Opcode::Exec, Opcode::Leave, Opcode::SubExit]
 		.iter()
 		.zip(entry..)
@@ -3010,8 +3143,14 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 		.is_some_and(|s| !s.children.is_empty());
 	if !started {
 		// A job that forks (a subshell, pipeline, job or coprocess of its
-		// own) is not just one program: it keeps its virtual pid.
-		if !k.bangs.is_empty() {
+		// own) is not just one program: it keeps its virtual pid. A job
+		// that is one pipeline settles on its last stage below.
+		let pipeline_bang = info.kind == SpawnKind::Pipeline
+			&& k
+				.bangs
+				.iter()
+				.any(|b| b.vproc == vp.vpid && b.stage == BangStage::Pipeline);
+		if !k.bangs.is_empty() && !pipeline_bang {
 			k.settle_bang(vp.vpid, None);
 		}
 		let mut children = Vec::with_capacity(info.stages.len());
@@ -3041,6 +3180,9 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					fds.set(0, Some(null.clone()));
 				}
 				let mut child = vp.child(k, cx.store, Arc::clone(unit), info.stages[0].entry, fds);
+				if info.kind == SpawnKind::Background && !control {
+					k.async_ignore.insert(child.vpid);
+				}
 				if info.kind == SpawnKind::Background {
 					let level = stage_level(unit, info.stages[0].entry, true);
 					super::set_subshell_depth(&mut child, super::subshell_depth(vp) + level);
@@ -3054,7 +3196,8 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					// spawns it (bash's subshell `exec`s a lone simple command):
 					// readers of the pid wait for that decision.
 					if let Some(stage) = bang_stage(unit, info.stages[0].entry) {
-						k.bangs.push(Bang { vproc: vpid, job: vpid, stage });
+						k.bangs
+							.push(Bang { vproc: vpid, job: vpid, stage, virtual_pid: None });
 					}
 					let job = k.job_id(cx.store);
 					// zsh `&|` / `&!`: disowned at once (no job entry).
@@ -3083,9 +3226,36 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					|| (state::option(&mut k.root, cx.store, vp, OptId::Lastpipe).unwrap_or(false)
 						&& !job_control(k, cx, vp));
 				let mut stdin = vp.fds.get(0).cloned();
+				if lastpipe && pipeline_bang {
+					// The last stage runs in the job's own process.
+					k.settle_bang(vp.vpid, None);
+				}
 				for (i, stage) in info.stages.iter().enumerate() {
 					if lastpipe && i + 1 == n {
 						k.emit_op(cx, vp, op.node, EventData::Pipeline { stages: &children });
+						// bash `stop_pipeline` with the list frozen: the other
+						// processes are a foreground job the last command sees.
+						if let Some(&last) = children.last() {
+							let stages: Vec<JobStage> = children
+								.iter()
+								.enumerate()
+								.map(|(i, &vpid)| JobStage {
+									vpid,
+									os_pid: None,
+									text: stage_job_text(k, cx, vp, unit, info, i),
+									status: None,
+									death: None,
+								})
+								.collect();
+							let text =
+								BString::from(bstr::join(" | ", stages.iter().map(|s| s.text.as_slice())));
+							let id = k.job_id(cx.store);
+							let cwd = vp.cwd.clone();
+							let number = vp.jobs.add_foreground(id, last, text, cwd);
+							if let Some(job) = vp.jobs.get_mut(number) {
+								job.stages = Some(Box::new(stages));
+							}
+						}
 						let line_shift = top_frame(vp).line_shift;
 						let sc = scratch(vp);
 						sc.children = children.into_iter().map(|v| (v, None)).collect();
@@ -3129,6 +3299,40 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					k.spawned.push(Box::new(child));
 				}
 				k.emit_op(cx, vp, op.node, EventData::Pipeline { stages: &children });
+				if pipeline_bang && let Some(&last) = children.last() {
+					// A background job that is this pipeline: its processes are
+					// the stages (`jobs -l`, the report), `$!` the last one.
+					let stages = children
+						.iter()
+						.enumerate()
+						.map(|(i, &vpid)| JobStage {
+							vpid,
+							os_pid: None,
+							text: stage_job_text(k, cx, vp, unit, info, i),
+							status: None,
+							death: None,
+						})
+						.collect();
+					k.job_stages.push((vp.vpid, stages));
+					k.pipeline_jobs.insert(vp.vpid);
+					// Each stage that runs one command bash would `exec` is known
+					// by that program's pid; `$!` waits for the last one's.
+					for (i, &child) in children.iter().enumerate() {
+						if lone_stage(unit, info.stages[i].entry) {
+							k.stage_vprocs.insert(child);
+						}
+					}
+					let last_lone = lone_stage(unit, info.stages[n - 1].entry);
+					match k.bangs.iter_mut().find(|b| b.vproc == vp.vpid) {
+						Some(bang) if last_lone => {
+							bang.vproc = last;
+							bang.stage = BangStage::Lone;
+							bang.virtual_pid = Some(last.0);
+							k.stage_vprocs.remove(&last);
+						},
+						_ => k.settle_bang(vp.vpid, Some(last.0)),
+					}
+				}
 			},
 		}
 		scratch(vp).children = children.into_iter().map(|v| (v, None)).collect();
@@ -3141,30 +3345,242 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 	}
 	for (vpid, status) in &mut sc.children {
 		if status.is_none() {
+			// The signal that ended it goes with its status (bash reports the
+			// command when the wait for it ends).
+			if let Some(death) = k.proc_death(cx.store, *vpid) {
+				k.deaths.insert(*vpid, death);
+			}
 			*status = k.proc_collect(cx.store, *vpid);
 		}
 	}
+	// A `lastpipe` job's process a `wait` of the last command collected
+	// already: its job kept its status.
+	if sc.inline.is_some() && sc.children.iter().any(|(_, s)| s.is_none()) {
+		let missing: Vec<Vpid> = sc
+			.children
+			.iter()
+			.filter(|(_, s)| s.is_none())
+			.map(|&(v, _)| v)
+			.collect();
+		let known: Vec<(Vpid, i32, Option<Death>)> = vp
+			.jobs
+			.iter()
+			.filter_map(|j| j.stages.as_deref())
+			.flatten()
+			.filter(|s| missing.contains(&s.vpid))
+			.filter_map(|s| s.status.map(|st| (s.vpid, st, s.death)))
+			.collect();
+		for (v, st, death) in known {
+			if let Some(death) = death {
+				k.deaths.insert(v, death);
+			}
+			if let Some(slot) = scratch(vp).children.iter_mut().find(|(c, _)| *c == v) {
+				slot.1 = Some(st);
+			}
+		}
+	}
+	let sc = scratch(vp);
 	if let Some((vpid, _)) = sc.children.iter().find(|(_, s)| s.is_none()) {
 		return Flow::Block(WaitKey::Proc(*vpid));
 	}
-	let mut statuses: Vec<i32> = sc.children.iter().map(|(_, s)| s.unwrap_or(0)).collect();
-	if let Some(InlineStage::Done(last)) = sc.inline {
+	let children: Vec<(Vpid, i32)> = sc
+		.children
+		.iter()
+		.map(|&(v, s)| (v, s.unwrap_or(0)))
+		.collect();
+	let inline = sc.inline;
+	let mut statuses: Vec<i32> = children.iter().map(|&(_, s)| s).collect();
+	if let Some(InlineStage::Done(last)) = inline {
 		statuses.push(last);
 	}
 	clear_scratch(&mut k.root, cx.store, vp);
 	let pipefail = state::option(&mut k.root, cx.store, vp, OptId::Pipefail).unwrap_or(false);
-	vp.status = if pipefail {
+	// The process the status comes from (bash `raw_job_exit_status`).
+	let raw = if pipefail {
 		statuses
 			.iter()
-			.rev()
-			.find(|&&s| s != 0)
-			.copied()
-			.unwrap_or(0)
+			.rposition(|&s| s != 0)
+			.unwrap_or_else(|| statuses.len().saturating_sub(1))
 	} else {
-		statuses.last().copied().unwrap_or(0)
+		statuses.len().saturating_sub(1)
 	};
+	vp.status = statuses.get(raw).copied().unwrap_or(0);
 	vp.pipestatus = statuses;
+	let deaths: Vec<Option<Death>> = children.iter().map(|(v, _)| k.deaths.remove(v)).collect();
+	if let (Some(InlineStage::Done(last)), Some(&(job_vpid, _))) = (inline, children.last()) {
+		finish_lastpipe_job(k, vp, cx, unit, info, job_vpid, last, raw);
+	}
+	// A background job's own pipeline is the shell's to report (`Job::stages`).
+	let job_pipeline = info.kind == SpawnKind::Pipeline && k.pipeline_jobs.remove(&vp.vpid);
+	if inline.is_none()
+		&& !job_pipeline
+		&& matches!(info.kind, SpawnKind::Subshell | SpawnKind::Pipeline)
+	{
+		report_children(k, vp, cx, unit, op, &children, &deaths, raw);
+	}
 	Flow::Jump(info.end)
+}
+
+/// A `lastpipe` pipeline's last command returned (bash `append_process`
+/// and `wait_for (lastpid)` in `execute_pipeline`): its job gets the
+/// shell's process with the command's status, and ends with the status the
+/// pipeline returns; it is forgotten at the next cleanup, or reported at
+/// the next notify point when the process its status comes from (`raw`)
+/// was ended by a signal.
+#[expect(clippy::too_many_arguments, reason = "one call site")]
+fn finish_lastpipe_job(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	unit: &Arc<Unit>,
+	info: &ir::SpawnIr,
+	job_vpid: Vpid,
+	last: i32,
+	raw: usize,
+) {
+	// bash's `the_printed_command_except_trap`: the last simple command the
+	// last command ran.
+	let text = match vp.command.clone() {
+		Some((u, node)) => job_text(k, cx, vp, &u, node),
+		None => stage_job_text(k, cx, vp, unit, info, info.stages.len() - 1),
+	};
+	let shell = Vpid(k.shell_pid);
+	let status = vp.status;
+	let Some(job) = vp.jobs.by_vpid_mut(job_vpid).filter(|j| j.foreground) else {
+		return;
+	};
+	let Some(stages) = job.stages.as_mut() else {
+		return;
+	};
+	stages.push(JobStage { vpid: shell, os_pid: None, text, status: Some(last), death: None });
+	job.death = stages.get(raw).and_then(|s| s.death);
+	job.state = super::proc::JobState::Done(status);
+	job.notified = false;
+}
+
+/// A pipeline stage whose body is one simple command (its `SubExit`
+/// follows): bash runs it in the stage's own process.
+fn lone_stage(unit: &Unit, entry: u32) -> bool {
+	let code = |at: u32| unit.ops.get(at as usize).map(|op| op.code);
+	code(entry) == Some(Opcode::Exec) && code(entry + 1) == Some(Opcode::SubExit)
+}
+
+/// The end of the wait for a foreground subshell or pipeline (bash
+/// `wait_for` → `notify_and_cleanup (job)`): its processes are reported
+/// when the one its status comes from (`raw`) was ended by a signal.
+#[expect(clippy::too_many_arguments, reason = "one call site, all inputs of one report")]
+fn report_children(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	unit: &Arc<Unit>,
+	op: Op,
+	children: &[(Vpid, i32)],
+	deaths: &[Option<Death>],
+	raw: usize,
+) {
+	let Some(death) = deaths.get(raw).copied().flatten() else {
+		return;
+	};
+	let info = &unit.spawns[op.a as usize];
+	// A subshell that is all its parent subshell runs (`( ( cmd ) )`, a job
+	// `( cmd ) &`) runs in that subshell's process in bash, unforked: the
+	// parent dies by the signal and is reported in turn.
+	if info.kind == SpawnKind::Subshell
+		&& vp.transient
+		&& vp.frames.len() == 1
+		&& unit
+			.ops
+			.get(info.end as usize)
+			.is_some_and(|o| o.code == Opcode::Leave)
+		&& unit
+			.ops
+			.get(info.end as usize + 1)
+			.is_some_and(|o| o.code == Opcode::SubExit)
+		&& !vp.own_traps.has(TrapKey::Exit)
+		&& !vp.own_traps.has(TrapKey::Err)
+	{
+		k.deaths.insert(vp.vpid, death);
+		return;
+	}
+	let texts: Vec<BString> = if info.kind == SpawnKind::Subshell {
+		vec![job_text(k, cx, vp, unit, op.node)]
+	} else {
+		(0..children.len())
+			.map(|i| stage_job_text(k, cx, vp, unit, info, i))
+			.collect()
+	};
+	let procs: Vec<notify::ProcLine<'_>> = children
+		.iter()
+		.zip(deaths)
+		.zip(&texts)
+		.map(|((&(v, status), death), text)| notify::ProcLine {
+			pid: v.0,
+			text,
+			status: death.map_or(notify::ProcStatus::Exited(status), notify::ProcStatus::Signaled),
+		})
+		.collect();
+	// While the job list is frozen (a `lastpipe` last command runs) bash's
+	// foreground job stays in the table, reported at the next notify point.
+	if vp.jobs_frozen() {
+		let text = BString::from(bstr::join(" | ", texts.iter().map(|t| t.as_slice())));
+		let id = k.job_id(cx.store);
+		let vpid = k.vpid(cx.store);
+		let cwd = vp.cwd.clone();
+		let number = vp.jobs.add_foreground(id, vpid, text, cwd);
+		let stages: Vec<JobStage> = children
+			.iter()
+			.zip(deaths)
+			.zip(&texts)
+			.map(|((&(v, status), &death), text)| JobStage {
+				vpid: v,
+				os_pid: None,
+				text: text.clone(),
+				status: Some(status),
+				death,
+			})
+			.collect();
+		let status = children.get(raw).map_or(0, |&(_, s)| s);
+		if let Some(job) = vp.jobs.get_mut(number) {
+			job.state = super::proc::JobState::Done(status);
+			job.death = Some(death);
+			job.stages = Some(Box::new(stages));
+		}
+		return;
+	}
+	let line = line_of(vp, op.node);
+	let bytes = notify::report_foreground(k, cx, vp, &procs, Some(death), line);
+	// A subshell's own redirections (`( … ) 2>f`) applied in bash's child:
+	// the report goes where standard error is once they are undone.
+	let redirected = info.kind == SpawnKind::Subshell
+		&& unit
+			.ops
+			.get(info.end as usize + 1)
+			.is_some_and(|o| o.code == Opcode::PopRedir && o.node == op.node);
+	if redirected {
+		notify::defer_report(k, vp, op.node, bytes);
+	} else if !bytes.is_empty() {
+		vp.queue_out(2, bytes);
+	}
+}
+
+/// Stage `i`'s command as bash prints it (`make_command_string`).
+fn stage_job_text(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	unit: &Unit,
+	info: &ir::SpawnIr,
+	i: usize,
+) -> BString {
+	let src = stage_text(unit, info, i);
+	let feat = features(k, cx.store, vp).unwrap_or(Features::NONE);
+	match crate::bash::syntax::parse_all(&src, feat) {
+		Ok(p) if p.commands.len() == 1 => {
+			BString::from(crate::bash::syntax::command_string(&p.commands[0].list))
+		},
+		_ => src,
+	}
 }
 
 /// Source text of syntax node `node`.
@@ -3180,7 +3596,13 @@ fn node_text(unit: &Unit, node: u32) -> BString {
 /// re-printed by bash's `make_command_string` (`( sleep 2; exit 4 )`, a
 /// `while` body indented on its own lines), or as written when the text
 /// does not parse alone.
-fn job_text(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, unit: &Unit, node: u32) -> BString {
+pub(super) fn job_text(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	unit: &Unit,
+	node: u32,
+) -> BString {
 	let src = node_text(unit, node);
 	let feat = features(k, cx.store, vp).unwrap_or(Features::NONE);
 	match crate::bash::syntax::parse_all(&src, feat) {

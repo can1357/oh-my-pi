@@ -1008,7 +1008,7 @@ impl Shell {
 		let root = self.procs[0].vpid;
 		let mut children = Vec::new();
 		cx.store.scan(Table::Proc, &mut |key, rec| {
-			if let (Key::Proc(vpid), Record::Proc { parent, status }) = (key, rec) {
+			if let (Key::Proc(vpid), Record::Proc { parent, status, .. }) = (key, rec) {
 				children.push((vpid, *parent, *status));
 			}
 		})?;
@@ -1018,7 +1018,7 @@ impl Shell {
 				self.k.root.write(cx.store, Change::Del(Key::Proc(vpid)));
 			} else if status.is_none() {
 				report.lost.push(Lost::Vproc { vpid });
-				self.k.proc_exited(cx.store, vpid, parent, 137);
+				self.k.proc_exited(cx.store, vpid, parent, 137, None);
 				if let Some(job) = self.procs[0].jobs.by_vpid_mut(vpid) {
 					job.state = JobState::Done(137);
 					job.notified = false;

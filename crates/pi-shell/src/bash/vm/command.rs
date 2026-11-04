@@ -18,6 +18,7 @@ use super::{
 	builtins::{self, Chunk, Control, Ctx, Lhs, Need},
 	exec::{self, Flow, expanding, line_of},
 	expand::{CompoundElem, Stop, compound_text},
+	notify,
 	probe::{self, Search, absolute, candidates},
 	proc::{
 		AssignValue, Awaited, BangStage, DeferPhase, ExecAs, ExecState, Frame, FrameKind, JobState,
@@ -37,10 +38,10 @@ use crate::bash::{
 		StdioSpec, Via,
 	},
 	ids::{CallId, CmdTag, IntrinsicId, RunId},
-	ir::{self, AssignVal, Op, Part, Unit},
+	ir::{self, AssignVal, Op, Opcode, Part, Unit},
 	signal::SigSet,
 	snapshot::Lost,
-	store::{Attrs, Key, KeyBuf, MiscKey, Record, StateStore, StoreError, VarValue},
+	store::{Attrs, Death, Key, KeyBuf, MiscKey, Record, StateStore, StoreError, VarValue},
 	zshopt::ZshOpt,
 };
 
@@ -71,6 +72,7 @@ impl ExecState {
 			exec_as: None,
 			wait_into: None,
 			via_command: false,
+			via_builtin: false,
 			resume: false,
 			resumed: 0,
 		}
@@ -102,6 +104,7 @@ impl ExecState {
 			exec_as,
 			wait_into,
 			via_command,
+			via_builtin,
 			resume,
 			resumed,
 		} = self;
@@ -128,6 +131,7 @@ impl ExecState {
 		*exec_as = None;
 		*wait_into = None;
 		*via_command = false;
+		*via_builtin = false;
 		*resume = false;
 		*resumed = 0;
 	}
@@ -400,6 +404,26 @@ fn expand(
 	line: u32,
 ) -> Option<Flow> {
 	let cmd = &unit.cmds[op.a as usize];
+	// bash parses a compound array assignment's `( … )` when it expands it
+	// (`expand_compound_array_assignment`): reading that text reports the
+	// jobs a signal ended, as reading a line does.
+	if !st(vp).expanded
+		&& (cmd
+			.assigns
+			.iter()
+			.any(|a| matches!(a.value, AssignVal::Array(_)))
+			|| unit.lists[cmd.words as usize].iter().any(|&w| {
+				unit.words[w as usize]
+					.parts
+					.iter()
+					.any(|p| matches!(p, Part::Compound(_)))
+			})) {
+		if k.needs_settle(vp) {
+			return Some(Flow::Block(WaitKey::Settle));
+		}
+		// bash parses the text as a string of its own: its line 1.
+		notify::notify(k, cx, vp, None, 1);
+	}
 	if !st(vp).expanded && unit.lists[cmd.words as usize].is_empty() {
 		st(vp).expanded = true;
 	}
@@ -840,8 +864,7 @@ fn cat_stdin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Opti
 		Ok(_) => BString::default(),
 	};
 	let s = st(vp);
-	s.writes
-		.push_back(PendingWrite { fd: 1, bytes: text, off: 0 });
+	s.writes.push_back(PendingWrite::new(1, text));
 	s.stage = Stage::Output;
 	None
 }
@@ -1312,6 +1335,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 		let posix = state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 			.unwrap_or(false);
 		let mut via = Via::Plain;
+		let mut through_builtin = false;
 		let target = loop {
 			// Borrowed (the resolution only reads `vp`): no copy of the
 			// name per command.
@@ -1395,17 +1419,14 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 						let msg = format!("-{}: invalid option", argv[0][1] as char).into();
 						let line = line_of(vp, op.node);
 						k.diag(cx, vp, line, Diag::Usage { msg }.by("builtin"));
-						vp.out.push_back(PendingWrite {
-							fd:    2,
-							bytes: BString::from("builtin: usage: builtin [shell-builtin [arg ...]]\n"),
-							off:   0,
-						});
+						vp.queue_out(2, "builtin: usage: builtin [shell-builtin [arg ...]]\n");
 						let s = st(vp);
 						s.status = 2;
 						s.stage = Stage::Finish;
 						return None;
 					}
 					via = Via::Builtin;
+					through_builtin = true;
 				},
 				_ if via == Via::Builtin && !matches!(resolved, Resolved::Intrinsic(_)) => {
 					let name = argv[0].clone();
@@ -1431,6 +1452,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 		let s = st(vp);
 		s.target = Some(target);
 		s.via_command = matches!(via, Via::Command | Via::CommandP);
+		s.via_builtin = through_builtin;
 	}
 	if st(vp).target == Some(Target::Search) {
 		// File-system probes: `CmdExpanded` reads the clock after them.
@@ -1789,6 +1811,16 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 					sigmask_ign = sigmask_ign.with(sig);
 				}
 			}
+			// bash starts a background job without job control with `SIGINT`
+			// and `SIGQUIT` ignored; its programs inherit that unless the job
+			// set a trap with an action for one (reset to default at `exec`).
+			if k.async_ignore.contains(&vp.vpid) {
+				for sig in [crate::bash::signal::Signal::Int, crate::bash::signal::Signal::Quit] {
+					if !super::own_action_trap(cx.store, vp, sig) {
+						sigmask_ign = sigmask_ign.with(sig);
+					}
+				}
+			}
 			let job = k.job_id(cx.store);
 			let argv = spawn_argv(&st(vp).argv, exec_as.as_deref());
 			let tag = st(vp).tag;
@@ -1909,6 +1941,11 @@ fn spawned_external(
 			// through).
 			if !k.bangs.is_empty() {
 				k.settle_bang(vp.vpid, Some(pid));
+			}
+			// A background pipeline's stage that runs its program as the one
+			// bash would have `exec`'d: the stage is known by its pid.
+			if k.stage_vprocs.remove(&vp.vpid) && stands_for_vproc(k, cx, vp, op) {
+				k.stage_pids.push((vp.vpid, pid));
 			}
 			scratch(vp).live = Live::Ext(child);
 			let s = st(vp);
@@ -2658,7 +2695,7 @@ fn run_builtin(
 						.as_mut()
 						.expect("exec")
 						.writes
-						.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 });
+						.push_back(PendingWrite::new(fd, bytes));
 				}
 				let e = sc.exec.as_mut().expect("exec");
 				e.status = outcome.status;
@@ -2780,8 +2817,9 @@ fn builtin_zsh_stop(
 }
 
 /// `exec [-cl] [-a name] [command [arg …]]`: without a command its
-/// redirections stay in effect; with one, the command (an external, found
-/// on `PATH`) replaces the shell, which exits with its status.
+/// redirections stay in effect (not when reached through `builtin`); with
+/// one, the command (an external, found on `PATH`) replaces the shell,
+/// which exits with its status.
 fn exec_builtin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Option<Flow> {
 	const USAGE: &[u8] =
 		b"exec: usage: exec [-cl] [-a name] [command [argument ...]] [redirection ...]\n";
@@ -2828,17 +2866,19 @@ fn exec_builtin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> O
 		let text = k.render_diag(cx, vp, line, &Diag::Usage { msg: msg.into() }.by("exec"));
 		let s = st(vp);
 		s.argv = argv;
-		s.writes
-			.push_back(PendingWrite { fd: 2, bytes: text.into(), off: 0 });
-		s.writes
-			.push_back(PendingWrite { fd: 2, bytes: USAGE.into(), off: 0 });
+		s.writes.push_back(PendingWrite::new(2, text));
+		s.writes.push_back(PendingWrite::new(2, USAGE));
 		s.status = 2;
 		s.stage = Stage::Output;
 		return None;
 	}
 	let Some(name) = argv.get(i).cloned() else {
-		// No command: the redirections stay in effect.
-		if let Some(io) = scratch(vp).io.as_mut() {
+		// No command: the redirections stay in effect, unless `exec` was
+		// reached through `builtin` (`builtin exec 2>f`, `command builtin
+		// exec 2>f`): bash undoes those when the command ends.
+		if !st(vp).via_builtin
+			&& let Some(io) = scratch(vp).io.as_mut()
+		{
 			io.saved.clear();
 		}
 		let s = st(vp);
@@ -3044,9 +3084,27 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 				// `wait -p` names the child by the pid the user knows (its
 				// program's OS pid), read before the job is forgotten.
 				let shown = vp.shown_pid(v);
-				if let Some(s) = k.proc_collect(cx.store, v) {
+				// A job that ended whose status was collected already (a
+				// `wait` while the job list is frozen keeps the job), or one
+				// without a process of its own.
+				let done = match vp.jobs.by_vpid(v).map(|j| j.state) {
+					Some(JobState::Done(s)) if k.proc_state(cx.store, v).is_none() => Some(s),
+					_ => None,
+				};
+				if let Some(s) = k.proc_collect(cx.store, v).or(done) {
 					last = s;
-					forget_job(vp, v);
+					// bash `wait_for`: the job it waited for is reported, then
+					// forgotten (`wait_for_job` marks it notified); not while
+					// the job list is frozen.
+					if vp.jobs_frozen() {
+						// Marked reported; the cleanup after the freeze forgets it.
+						if let Some(job) = vp.jobs.by_vpid_mut(v) {
+							job.notified = true;
+						}
+					} else {
+						report_waited(k, vp, cx, v, line);
+						forget_job(vp, v);
+					}
 					exec::reap_coproc(k, vp, cx, v);
 				} else if let (false, Some(JobState::Stopped(sig))) =
 					(force, vp.jobs.by_vpid(v).map(|j| j.state))
@@ -3068,35 +3126,36 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 			while let Some(&v) = st(vp).wait_for.first() {
 				if k.proc_collect(cx.store, v).is_some() {
 					exec::reap_coproc(k, vp, cx, v);
+					// bash `wait_for_background_pids` waits for each running
+					// job in turn: its `wait_for` reports the job and forgets it.
+					report_waited(k, vp, cx, v, line);
+					forget_job(vp, v);
 				} else if !matches!(vp.jobs.by_vpid(v).map(|j| j.state), Some(JobState::Stopped(_))) {
 					// A job stopped meanwhile is skipped (job control).
 					return Some(Flow::Block(WaitKey::Proc(v)));
 				}
 				st(vp).wait_for.remove(0);
 			}
-			// bash: `wait` forgets every finished job, except the one `$!`
-			// names when it finished before the wait (POSIX keeps the last
-			// async status until it is waited for or reported). A job this
-			// shell just killed is still being reaped when bash's `wait`
-			// looks, so that wait collects it (jobs.tests).
+			// bash: then `wait` forgets every job that had ended before it,
+			// unreported, except the one `$!` names (POSIX keeps the last
+			// async status until it is waited for or reported:
+			// `mark_dead_jobs_as_notified (1)`), and the statuses of the jobs
+			// it forgot earlier (`bgp_clear`).
 			let last = vp.last_bg;
-			let done: Vec<crate::bash::ids::Vpid> = vp
-				.jobs
-				.iter()
-				.filter(|j| match j.state {
-					JobState::Done(status) => {
-						!last.is(j.vpid)
-							|| status > 128
-							|| !matches!(k.proc_state(cx.store, j.vpid), Some(super::ProcState::Exited(_)))
-					},
-					_ => false,
-				})
-				.map(|j| j.vpid)
-				.collect();
+			let done: Vec<crate::bash::ids::Vpid> = if vp.jobs_frozen() {
+				Vec::new()
+			} else {
+				vp.jobs
+					.iter()
+					.filter(|j| matches!(j.state, JobState::Done(_)) && !last.is(j.vpid))
+					.map(|j| j.vpid)
+					.collect()
+			};
 			for v in done {
 				k.proc_collect(cx.store, v);
 				forget_job(vp, v);
 			}
+			vp.jobs.saved = None;
 			st(vp).status
 		},
 		Some(Awaited::AnyJob) => {
@@ -3117,6 +3176,9 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 			};
 			let shown = vp.shown_pid(v);
 			k.proc_collect(cx.store, v);
+			// bash `wait_for_any_job`: `notify_of_job_status` for the job,
+			// then `delete_job`.
+			report_waited(k, vp, cx, v, line);
 			forget_job(vp, v);
 			st(vp).wait_for.clear();
 			exec::reap_coproc(k, vp, cx, v);
@@ -3147,7 +3209,9 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 			let replacing = matches!(st(vp).control, Some(Transfer::Exec));
 			let run = vp.runs.front().map(|run| run.id);
 			let mut tcx = Context::from_waker(&k.waker);
-			match &mut scratch(vp).live {
+			// The signal that ended the program, with its core dump.
+			let mut died: Option<Death> = None;
+			let status = match &mut scratch(vp).live {
 				Live::Ext(child) => match child.poll_wait(&mut tcx) {
 					Poll::Ready(ExitStatus::Exited(code)) => {
 						reaped = true;
@@ -3158,6 +3222,7 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 						if replacing && let Some(run) = run {
 							k.exec_signals.insert(run, i32::from(sig.number(platform)));
 						}
+						died = Some(Death { signal: sig.number(platform), core: child.core_dumped() });
 						sig.exit_status(platform)
 					},
 					Poll::Ready(ExitStatus::SignaledRaw(signal)) => {
@@ -3165,12 +3230,21 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 						if replacing && let Some(run) = run {
 							k.exec_signals.insert(run, signal);
 						}
+						died = u8::try_from(signal)
+							.ok()
+							.map(|signal| Death { signal, core: child.core_dumped() });
 						128 + signal
 					},
 					Poll::Pending => return Some(Flow::Block(WaitKey::Ext { pid })),
 				},
 				_ => lost(k, vp, cx, op, line, Lost::Ext { vpid: vp.vpid, pid }),
+			};
+			if let Some(death) = died
+				&& !replacing
+			{
+				program_died(k, vp, cx, op, pid, death, line);
 			}
+			status
 		},
 		None => st(vp).status,
 	};
@@ -3188,6 +3262,277 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 	s.status = status;
 	s.stage = Stage::Output;
 	None
+}
+
+/// Report the job led by `v`, which `wait` collected, if a signal ended it
+/// (bash `wait_for` → `notify_and_cleanup (job)`; the caller forgets it).
+fn report_waited(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	v: crate::bash::ids::Vpid,
+	line: u32,
+) {
+	let Some(number) = vp.jobs.by_vpid(v).map(|j| j.number) else {
+		return;
+	};
+	let out = notify::mark(k, cx, vp, Some(number), line);
+	if !out.is_empty() {
+		vp.queue_out(2, out);
+	}
+}
+
+/// The external program `vp` ran in the foreground (`pid`, the command at
+/// `op`) was ended by `death`. Where bash would have run it in place of the
+/// subshell `vp` is (`exec`'d: a background job's or a pipeline stage's
+/// command, a subshell's last command), the vproc dies by the signal, and
+/// its parent reports it. Otherwise bash forked it and its wait for it
+/// reports it here (`notify_and_cleanup (job)` in `wait_for`), unless it
+/// was the last command of a `bash -c` string, which bash `exec`s too.
+fn program_died(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	op: Op,
+	pid: u32,
+	death: Death,
+	line: u32,
+) {
+	if stands_for_vproc(k, cx, vp, op) {
+		k.deaths.insert(vp.vpid, death);
+		return;
+	}
+	if oneshot(k, cx, vp, op) {
+		return;
+	}
+	let Some(unit) = vp.frames.last().and_then(|f| f.unit.clone()) else {
+		return;
+	};
+	let text = exec::job_text(k, cx, vp, &unit, op.node);
+	// While the job list is frozen (a `lastpipe` last command runs) bash's
+	// foreground job for the command stays in the table, unreported: the
+	// next notify point reports it, `jobs` lists it, `wait` collects it.
+	if vp.jobs_frozen() {
+		let id = k.job_id(cx.store);
+		let vpid = k.vpid(cx.store);
+		let cwd = vp.cwd.clone();
+		let number = vp.jobs.add_foreground(id, vpid, text, cwd);
+		if let Some(job) = vp.jobs.get_mut(number) {
+			job.state = JobState::Done(128 + i32::from(death.signal));
+			job.death = Some(death);
+			job.os_pid = Some(pid);
+		}
+		return;
+	}
+	let procs = [notify::ProcLine { pid, text: &text, status: notify::ProcStatus::Signaled(death) }];
+	let bytes = notify::report_foreground(k, cx, vp, &procs, Some(death), line);
+	notify::defer_report(k, vp, op.node, bytes);
+}
+
+/// Whether `vp` has a trap with an action for a signal, or an `EXIT` or
+/// `ERR` trap of its own (bash `any_signals_trapped`, `signal_is_trapped
+/// (EXIT_TRAP)`, `signal_is_trapped (ERROR_TRAP)`; a subshell resets the
+/// traps it inherited): bash then forks its last command.
+fn traps_block_exec(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
+	use crate::bash::store::{OptId, TrapKey};
+	if vp.own_traps.has(TrapKey::Exit) || vp.own_traps.has(TrapKey::Err) {
+		return true;
+	}
+	// `set -E`: the subshell keeps the `ERR` trap it inherited.
+	if state::option(&mut k.root, cx.store, vp, OptId::Errtrace).unwrap_or(false)
+		&& matches!(
+			state::record(cx.store, vp, Key::Trap(TrapKey::Err)),
+			Ok(Some(Record::Trap { .. }))
+		) {
+		return true;
+	}
+	vp.own_traps.signals().iter().any(|sig| {
+		match state::record(cx.store, vp, Key::Trap(TrapKey::Signal(sig))) {
+			Ok(Some(Record::Trap { action, .. })) => !action.is_empty(),
+			Ok(_) => false,
+			Err(err) => {
+				k.fail(err);
+				false
+			},
+		}
+	})
+}
+
+/// The command at `op` has redirections of its own.
+fn has_redirs(unit: &Unit, op: Op) -> bool {
+	op.code == Opcode::Exec
+		&& unit
+			.cmds
+			.get(op.a as usize)
+			.is_some_and(|c| c.redirs.is_some())
+}
+
+/// A compound command node: it holds lists of its own.
+const fn compound(kind: NodeKind) -> bool {
+	!matches!(
+		kind,
+		NodeKind::AndOr | NodeKind::Pipeline | NodeKind::Simple | NodeKind::Assign | NodeKind::Word
+	)
+}
+
+/// Where the simple command at node `cmd` sits in the list it is a direct
+/// item of (inside the compound node `within`, or at the unit's top level
+/// for `None`), as bash's fork suppression sees it: `None` when it is not
+/// the list's tail command bash may run in place of its shell; otherwise
+/// whether it is the whole list (`( cmd )`: bash runs it in place even with
+/// redirections). The tail command is the last pipeline of the list when
+/// the list is one and-or list (`a && b`, `a || b && c`), or the last item
+/// when that item is a lone pipeline (`a; b`); either way a one-stage
+/// pipeline (bash `can_optimize_connection`, `optimize_subshell_command`).
+fn tail_command(unit: &Unit, within: Option<u32>, cmd: u32) -> Option<bool> {
+	let nodes = &unit.nodes;
+	let me = nodes.get(cmd as usize)?;
+	let (lo, hi) = within
+		.and_then(|w| nodes.get(w as usize))
+		.map_or((0, u32::MAX), |n| (n.lo, n.hi));
+	let inside =
+		|n: &crate::bash::ir::NodeInfo| lo <= n.lo && n.hi <= hi && (n.lo, n.hi) != (lo, hi);
+	// Nodes directly in the list: inside `within`, in no compound node that
+	// is itself inside `within`.
+	let direct = |n: &crate::bash::ir::NodeInfo| {
+		inside(n)
+			&& !nodes.iter().any(|c| {
+				compound(c.kind)
+					&& inside(c)
+					&& c.lo <= n.lo
+					&& n.hi <= c.hi
+					&& (c.lo, c.hi) != (n.lo, n.hi)
+			})
+	};
+	let items: Vec<_> = nodes
+		.iter()
+		.filter(|n| n.kind == NodeKind::AndOr && direct(n))
+		.collect();
+	let item = items.iter().find(|a| a.lo <= me.lo && me.hi <= a.hi)?;
+	let pipe = nodes
+		.iter()
+		.filter(|p| {
+			p.kind == NodeKind::Pipeline
+				&& item.lo <= p.lo
+				&& p.hi <= item.hi
+				&& p.lo <= me.lo
+				&& me.hi <= p.hi
+		})
+		.min_by_key(|p| p.hi - p.lo)?;
+	// One stage (a simple or compound command directly in the pipeline),
+	// and the last pipeline of its item.
+	let stages = nodes
+		.iter()
+		.filter(|s| {
+			(s.kind == NodeKind::Simple || compound(s.kind))
+				&& pipe.lo <= s.lo
+				&& s.hi <= pipe.hi
+				&& direct(s)
+		})
+		.count();
+	if stages != 1 || pipe.hi != item.hi {
+		return None;
+	}
+	let last_item = items.iter().all(|a| a.hi <= item.hi);
+	if !last_item {
+		return None;
+	}
+	if items.len() > 1 && (pipe.lo, pipe.hi) != (item.lo, item.hi) {
+		return None;
+	}
+	Some(items.len() == 1 && (pipe.lo, pipe.hi) == (item.lo, item.hi))
+}
+
+/// Whether the external `vp` awaits at `op` is what bash would have run in
+/// place of the subshell `vp` stands for: one it `exec`s; a background
+/// job's or pipeline stage's lone command; the tail command of a `( … )`
+/// subshell's list ([`tail_command`]; with redirections only when it is the
+/// whole list), with no `EXIT`, `ERR` or signal trap with an action set in
+/// the subshell (bash `should_optimize_fork`).
+fn stands_for_vproc(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, op: Op) -> bool {
+	if !vp.transient {
+		return false;
+	}
+	let [frame] = vp.frames.as_slice() else {
+		return false;
+	};
+	let Some(unit) = frame.unit.as_ref() else {
+		return false;
+	};
+	if frame
+		.scratch
+		.as_ref()
+		.and_then(|sc| sc.exec.as_ref())
+		.is_some_and(|e| e.exec_as.is_some())
+	{
+		return true;
+	}
+	let last = unit
+		.ops
+		.get(frame.pc as usize + 1)
+		.is_some_and(|next| next.code == Opcode::SubExit);
+	if !last {
+		return false;
+	}
+	if frame.subshell_line.is_some() {
+		let Some(me) = unit.nodes.get(op.node as usize) else {
+			return false;
+		};
+		// The `( … )` this vproc runs: the innermost subshell node around it.
+		let within = unit
+			.nodes
+			.iter()
+			.enumerate()
+			.filter(|(_, n)| n.kind == NodeKind::Subshell && n.lo <= me.lo && me.hi <= n.hi)
+			.min_by_key(|(_, n)| n.hi - n.lo)
+			.map(|(i, _)| i as u32);
+		match tail_command(unit, within, op.node) {
+			None => return false,
+			Some(alone) if !alone && has_redirs(unit, op) => return false,
+			Some(_) => {},
+		}
+	}
+	!traps_block_exec(k, cx, vp)
+}
+
+/// Whether the external at `op` is the last command of the root's run,
+/// which `bash -c` runs in place of itself (`should_suppress_fork`,
+/// `optimize_connection_fork`): the tail command ([`tail_command`]) of the
+/// run's last top-level command, without redirections, outside any
+/// function, `eval` or trap, with no trap with an action, `EXIT` or `ERR`
+/// trap set, and without job control.
+fn oneshot(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, op: Op) -> bool {
+	if vp.parent.is_some() {
+		return false;
+	}
+	let [frame] = vp.frames.as_slice() else {
+		return false;
+	};
+	let FrameKind::Script { what: ScriptKind::Run, stdin: false, src, pos, .. } = &frame.kind else {
+		return false;
+	};
+	if !src
+		.get(pos.0 as usize..)
+		.is_some_and(|rest| rest.iter().all(u8::is_ascii_whitespace))
+	{
+		return false;
+	}
+	let Some(unit) = frame.unit.as_ref() else {
+		return false;
+	};
+	if unit
+		.ops
+		.get(frame.pc as usize + 1)
+		.is_none_or(|next| next.code != Opcode::End)
+		|| has_redirs(unit, op)
+		|| tail_command(unit, None, op.node).is_none()
+	{
+		return false;
+	}
+	if exec::job_control(k, cx, vp) {
+		return false;
+	}
+	!traps_block_exec(k, cx, vp)
 }
 
 /// Drop the job led by `v` from the table once it was waited for (bash
@@ -3255,9 +3600,7 @@ fn output(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Option<
 					// Through the command's own fd 2 (`2>&1 >&4`), while its
 					// redirections are in place.
 					let bytes = k.render_diag(cx, vp, line, &Diag::WriteError { cmd, err });
-					st(vp)
-						.writes
-						.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
+					st(vp).writes.push_back(PendingWrite::new(2, bytes));
 				}
 			},
 			Poll::Pending => return Some(Flow::Block(WaitKey::Write { fd })),
@@ -3286,6 +3629,7 @@ fn finish(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Flow {
 	let (status, t0, control) = (e.status, e.t0, e.control);
 	let in_shell = matches!(e.target, Some(Target::Function(_) | Target::Intrinsic(_)));
 	exec::drop_scratch(&mut k.root, cx.store, vp, sc);
+	notify::flush_report(k, vp, op.node);
 	if status != 0 && in_shell && vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 		print_exit_value(k, vp, cx, status);
 	}
@@ -3339,7 +3683,7 @@ fn print_exit_value(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32
 		&& on(k, cx, vp, ZshOpt::Shinstdin)
 	{
 		let bytes = BString::from(format!("zsh: exit {status}\n"));
-		vp.out.push_back(PendingWrite { fd: 2, bytes, off: 0 });
+		vp.queue_out(2, bytes);
 	}
 }
 

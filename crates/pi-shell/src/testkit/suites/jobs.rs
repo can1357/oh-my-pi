@@ -55,9 +55,9 @@ fn stops_and_continues_move_the_current_and_previous_jobs() {
 		format!("[3]+ {LOOP} &\n"),
 		running(3, '+'),
 		running(2, '-'),
-		// `wait` collects the jobs just killed (bash's `wait` finds them still
-		// being reaped: jobs.right, Linux).
-		"n\n0\nend\n".into(),
+		// `wait` forgets the jobs `kill -9` ended but `$!`'s, which `jobs`
+		// lists once (Bash 5.3.20, every run; 5.2.21 at times forgets it too).
+		format!("n\n0\n[3]   Killed                     {LOOP}\nend\n"),
 	]
 	.concat();
 	assert_eq!(out, want);

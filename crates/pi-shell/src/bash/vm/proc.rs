@@ -152,6 +152,17 @@ impl VprocZsh {
 }
 
 impl Vproc {
+	/// Queue `bytes` for `fd` as the fd table has it now: bash writes a
+	/// diagnostic (an xtrace line, a prompt) at once, so a redirection
+	/// undone before the queue drains (the command, the compound command or
+	/// the subshell ends) does not move it.
+	pub fn queue_out(&mut self, fd: i32, bytes: impl Into<BString>) {
+		let to = Some(self.fds.handle(fd));
+		self
+			.out
+			.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0, to });
+	}
+
 	/// zsh's current sticky emulation.
 	pub fn sticky(&self) -> Option<&crate::bash::store::Sticky> {
 		self.zsh.as_ref().and_then(|z| z.sticky.as_ref())
@@ -222,6 +233,11 @@ impl OwnTraps {
 		}
 	}
 
+	/// The signals in the set.
+	pub const fn signals(self) -> SigSet {
+		self.signals
+	}
+
 	/// Whether `key` is in the set.
 	pub const fn has(self, key: crate::bash::store::TrapKey) -> bool {
 		match key {
@@ -277,7 +293,27 @@ pub struct JobTable {
 	/// it without job control and with an empty job table. A command
 	/// substitution keeps both (it lists its parent's jobs).
 	pub subshell: bool,
+	/// A command substitution's table (bash `SUBSHELL_COMSUB`): it reports
+	/// no job, and forgets each one that ended, but the one `$!` names
+	/// (`notify_of_job_status`).
+	#[serde(default)]
+	pub comsub:   bool,
+	/// The statuses of background jobs this shell forgot, by the pid `$!`
+	/// named (bash `bgpids`, filled by `delete_job`): `wait PID` returns the
+	/// status of such a job, 0 for one forgotten while it ran (`disown`).
+	/// Oldest first, at most [`SAVED_MAX`].
+	#[serde(default)]
+	#[expect(
+		clippy::box_collection,
+		reason = "one pointer in every job table; most never forget a job"
+	)]
+	pub saved:    Option<Box<Vec<(u32, i32)>>>,
 }
+
+/// How many forgotten jobs' statuses a shell keeps for `wait PID` (bash
+/// keeps `js.c_childmax` of them, the process limit `CHILD_MAX`; the
+/// smallest value POSIX allows is 25, Linux gives the `RLIMIT_NPROC`).
+pub const SAVED_MAX: usize = 1024;
 
 /// What a job spec names (bash `get_job_spec`), without its `%`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -349,17 +385,47 @@ impl JobTable {
 			nohup: false,
 			inherited: false,
 			wd,
+			death: None,
+			stages: None,
+			foreground: false,
 			os_pid: None,
 		});
 		self.reset_current();
 		number
 	}
 
-	/// Remove job `number` (bash `delete_job`); a removed current or
-	/// previous job makes `reset_current` pick new ones.
+	/// Add a foreground job (bash `stop_pipeline` for a pipeline that is not
+	/// asynchronous): the processes of a `lastpipe` pipeline but its last
+	/// command, or a command that command ran, while the job list is
+	/// frozen. It takes the next number and never becomes current.
+	pub fn add_foreground(&mut self, id: JobId, vpid: Vpid, text: BString, wd: BString) -> u32 {
+		let number = self.list.last().map_or(1, |j| j.number.saturating_add(1));
+		self.list.push(Job {
+			id,
+			number,
+			vpid,
+			text,
+			state: JobState::Running,
+			control: false,
+			notified: false,
+			nohup: false,
+			inherited: false,
+			wd,
+			death: None,
+			stages: None,
+			foreground: true,
+			os_pid: None,
+		});
+		number
+	}
+
+	/// Remove job `number` (bash `delete_job`), keeping its status for
+	/// `wait PID` ([`Self::saved`]); a removed current or previous job makes
+	/// `reset_current` pick new ones.
 	pub fn remove(&mut self, number: u32) -> Option<Job> {
 		let i = self.list.iter().position(|j| j.number == number)?;
 		let job = self.list.remove(i);
+		self.save(&job);
 		if self.current == Some(number) || self.previous == Some(number) {
 			self.reset_current();
 		}
@@ -370,14 +436,63 @@ impl JobTable {
 	pub fn remove_where(&mut self, mut pick: impl FnMut(&Job) -> bool) {
 		let mut reset = false;
 		let (current, previous) = (self.current, self.previous);
+		let mut gone_jobs = Vec::new();
 		self.list.retain(|j| {
 			let gone = pick(j);
 			reset |= gone && (current == Some(j.number) || previous == Some(j.number));
+			if gone && !j.inherited {
+				gone_jobs.push((j.pid(), j.state));
+			}
 			!gone
 		});
+		for (pid, state) in gone_jobs {
+			self.save_status(pid, state);
+		}
 		if reset {
 			self.reset_current();
 		}
+	}
+
+	/// Keep the status of `job`, being forgotten (bash `delete_job` adds the
+	/// last process of a background job to `bgpids`). A copy listed in a
+	/// command substitution is not this shell's child.
+	fn save(&mut self, job: &Job) {
+		if !job.inherited {
+			self.save_status(job.pid(), job.state);
+		}
+	}
+
+	fn save_status(&mut self, pid: u32, state: JobState) {
+		// bash `process_exit_status`: 0 for a process still running.
+		let status = match state {
+			JobState::Done(status) => status,
+			JobState::Running | JobState::Stopped(_) => 0,
+		};
+		let saved = self.saved.get_or_insert_with(Box::default);
+		saved.retain(|&(p, _)| p != pid);
+		if saved.len() >= SAVED_MAX {
+			saved.remove(0);
+		}
+		saved.push((pid, status));
+	}
+
+	/// bash `cleanup_dead_jobs`: forget the jobs that ended and were
+	/// reported, and the foreground ones that ended without a signal.
+	pub fn cleanup(&mut self) {
+		self.remove_where(|j| {
+			matches!(j.state, JobState::Done(_)) && (j.notified || (j.foreground && j.death.is_none()))
+		});
+	}
+
+	/// The status of a forgotten job `$!` named `pid` (bash `bgp_search`).
+	pub fn saved_status(&self, pid: u32) -> Option<i32> {
+		self
+			.saved
+			.as_deref()?
+			.iter()
+			.rev()
+			.find(|&&(p, _)| p == pid)
+			.map(|&(_, s)| s)
 	}
 
 	fn state(&self, number: Option<u32>) -> Option<JobState> {
@@ -567,11 +682,16 @@ impl LastBg {
 pub struct Bang {
 	/// The vproc that decides: the job's own, or the subshell a callout of
 	/// its lone command handed the job to.
-	pub vproc: Vpid,
+	pub vproc:       Vpid,
 	/// The job's vproc (the one `$!` and the job table name).
-	pub job:   Vpid,
+	pub job:         Vpid,
 	/// What may still give the job its program.
-	pub stage: BangStage,
+	pub stage:       BangStage,
+	/// The pid the job is known by when the deciding vproc spawns no
+	/// program: a background pipeline's last stage's virtual pid (bash's
+	/// `$!` names that stage); `None`: the job's own.
+	#[serde(default)]
+	pub virtual_pid: Option<u32>,
 }
 
 /// The redirections of a background job's lone command whose open would
@@ -616,6 +736,16 @@ impl Vproc {
 		}
 	}
 
+	/// The job list is frozen (bash `jobs_list_frozen`): the last command of
+	/// a `lastpipe` pipeline runs. No job leaves the table then, and none
+	/// is reported.
+	pub fn jobs_frozen(&self) -> bool {
+		self
+			.frames
+			.iter()
+			.any(|f| matches!(f.kind, FrameKind::Stage))
+	}
+
 	/// The pid the user knows the child `v` by (`wait -p`): its job's or
 	/// `$!`'s OS pid, else its virtual pid.
 	pub fn shown_pid(&self, v: Vpid) -> u32 {
@@ -641,6 +771,9 @@ pub enum BangStage {
 	/// `nohup`); unless it does, the alias settles virtual when the host
 	/// steps the shell again.
 	Callout,
+	/// The job's body is one pipeline: bash forks each stage itself, so `$!`
+	/// is the last stage's pid, settled when the stages start.
+	Pipeline,
 }
 
 /// A running coprocess: its vproc, the variable naming it and the shell's
@@ -983,6 +1116,19 @@ pub struct PendingWrite {
 	pub fd:    i32,
 	pub bytes: BString,
 	pub off:   usize,
+	/// The object `fd` named when the write was queued on [`Vproc::out`]
+	/// ([`Vproc::queue_out`]); `None`: whatever `fd` names when it is
+	/// written (a command's own output, written while its redirections are
+	/// in place). Not serialized: a restored write goes to `fd`.
+	#[serde(skip)]
+	pub to:    Option<FdRef>,
+}
+
+impl PendingWrite {
+	/// `bytes` for `fd` as the fd table has it when they are written.
+	pub fn new(fd: i32, bytes: impl Into<BString>) -> Self {
+		Self { fd, bytes: bytes.into(), off: 0, to: None }
+	}
 }
 
 /// One logged expansion step (see `expand`): replaying the log reproduces
@@ -1293,6 +1439,11 @@ pub struct ExecState {
 	/// Run through `command`: a special builtin's failure does not end a
 	/// posix shell.
 	pub via_command: bool,
+	/// Reached through the `builtin` builtin (any wrapper chain with
+	/// `builtin` in it): `exec` without a command keeps no redirection, as
+	/// bash's `execute_builtin_or_function` keeps them only when the
+	/// command's own builtin is `exec` (or `command` running `exec`).
+	pub via_builtin: bool,
 	/// The awaited frame was pushed by the builtin, which runs again when
 	/// it returns ([`Control::Resume`](super::builtins::Control::Resume)).
 	pub resume:      bool,
@@ -1507,8 +1658,10 @@ impl Live {
 // Host lineage (`Vproc::lineage`, 8 B: a `u32` label and a flag) added at
 // most 8 B to that, still under 2,048. The resumable `mapfile -C` counter
 // (`ExecState::resumed`, 368 → 376 B): the bench measured 1,832 B per idle
-// vproc with both.
-const _: () = assert!(size_of::<Vproc>() <= 664, "Vproc grew (idle vproc ≤ 2 KiB)");
+// vproc with both. The job table's statuses of forgotten jobs (`JobTable::
+// saved`, bash `bgpids`, boxed: 8 B) and its command substitution flag:
+// 664 → 672 B.
+const _: () = assert!(size_of::<Vproc>() <= 672, "Vproc grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Frame>() <= 256, "Frame grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Scratch>() <= 216, "Scratch grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<ExecState>() <= 376, "ExecState grew (idle vproc ≤ 2 KiB)");

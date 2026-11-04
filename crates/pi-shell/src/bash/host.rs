@@ -193,6 +193,14 @@ pub trait Host {
 	fn rlimit(&self, _res: Rlimit) -> io::Result<(Option<u64>, Option<u64>)> {
 		Err(io::ErrorKind::Unsupported.into())
 	}
+	/// Whether a process of this host with core file size limit `limit`
+	/// (`None`: unlimited) writes a core dump when a signal whose default
+	/// action dumps core ends it. The engine asks it for a vproc it ends by
+	/// such a signal, to report it as bash reports a process (`(core
+	/// dumped)`). `false` (the default) for hosts that cannot tell.
+	fn dumps_core(&self, _limit: Option<u64>) -> bool {
+		false
+	}
 	/// Mirror of the pipes pipelines create (`a | b`), asked once per
 	/// pipeline started: each pipe between two stages is offered to
 	/// [`PipeTap::open`], and the [`PipeMirror`] it returns gets a copy of
@@ -529,6 +537,18 @@ pub trait ExtProc: Send {
 	fn stop(&mut self) -> io::Result<()>;
 	/// Continue after [`ExtProc::stop`].
 	fn cont(&mut self) -> io::Result<()>;
+	/// Whether the process, once [`ExtProc::poll_wait`] reported it ended by
+	/// a signal, left a core dump (`WCOREDUMP`; bash prints `(core
+	/// dumped)`). `false` where the host cannot tell.
+	fn core_dumped(&self) -> bool {
+		false
+	}
+	/// Whether the process has exited, without reaping it or reporting the
+	/// exit (a peek: [`ExtProc::poll_wait`] still reports it). `false` where
+	/// the host cannot tell before `poll_wait` does.
+	fn exited(&self) -> bool {
+		false
+	}
 }
 
 /// Opens a [`PipeMirror`] per pipeline pipe ([`Host::pipe_tap`]).

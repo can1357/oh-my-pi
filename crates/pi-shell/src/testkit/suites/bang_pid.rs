@@ -180,8 +180,9 @@ fn assignments_redirections_and_exec_keep_the_os_pid() {
 }
 
 // Failure mode: a compound job, a builtin, a function running its external
-// as one command of its own, a pipeline or a subshell group reports the
-// pid of one of the programs it runs.
+// as one command of its own or a subshell group reports the pid of one of
+// the programs it runs; or a background pipeline's `$!` is not its last
+// stage's program, which Bash forks as a process of its own.
 #[test]
 fn compound_and_builtin_jobs_keep_virtual_pids() {
 	let world = World::new();
@@ -192,21 +193,24 @@ fn compound_and_builtin_jobs_keep_virtual_pids() {
 	);
 	let pids: Vec<&str> = out.split_whitespace().collect();
 	assert_eq!(pids.len(), 6, "{out}");
-	assert!(pids.iter().all(|p| is_virtual(p)), "{out}");
+	let (pipeline, compound): (Vec<_>, Vec<_>) = pids.iter().enumerate().partition(|&(i, _)| i == 3);
+	assert!(compound.iter().all(|(_, p)| is_virtual(p)), "{out}");
+	assert!(pipeline.iter().all(|(_, p)| !is_virtual(p)), "{out}");
 }
 
 // Failure mode: `wait -n -p` names the virtual pid while `$!` showed the OS
-// pid, `disown` of the OS pid finds no job, or `kill`/`wait` of a disowned
-// job's OS pid no longer reach it.
+// pid, `disown` of the OS pid finds no job, `kill` of a disowned job's OS
+// pid no longer reaches it, or `wait` of it waits: Bash returns at once the
+// status it kept when `disown` forgot the job, 0 for one that ran.
 #[test]
 fn wait_p_and_disown_take_the_os_pid() {
 	let world = World::new();
 	let (out, _) = run(
 		world.host(),
 		"/x/true & p=$!; wait -n -p v; echo \"$v $p\"; /x/sleeper & q=$!; disown \"$q\"; echo \
-		 \"disown=$? jobs=$(jobs -p)\"; kill \"$q\"; wait \"$q\"; echo $?",
+		 \"disown=$? jobs=$(jobs -p)\"; kill \"$q\"; echo k=$?; wait \"$q\"; echo $?",
 	);
-	assert_eq!(out, "5001 5001\ndisown=0 jobs=\n143\n");
+	assert_eq!(out, "5001 5001\ndisown=0 jobs=\nk=0\n0\n");
 }
 
 // Failure mode: a job whose program traps `TERM` is marked done (143) when

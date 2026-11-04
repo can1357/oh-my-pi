@@ -1197,6 +1197,20 @@ async fn run_shell_command_segmented_chain(
 		return run_shell_command_single(session, scope, cwd, on_chunk, unsegmented).await;
 	};
 
+	// Each segment runs with streams of its own, so an `exec >file` in one
+	// would not reach the next as it does in one run. The plan refused a
+	// chain whose text shows such a builtin; a word naming a function or an
+	// alias (an `exec` in its body, however deep), a trap and
+	// `command_not_found_handle` only the live shell shows.
+	let names = segments
+		.iter()
+		.flat_map(|segment| &segment.command_words)
+		.map(|word| BString::from(word.as_str()))
+		.collect();
+	if session.session.may_run_hidden_code(names).await? {
+		return run_shell_command_single(session, scope, cwd, on_chunk, unsegmented).await;
+	}
+
 	let mut cwd = cwd;
 	let mut aggregate = Some(ChainCapture::new());
 	let mut previous_succeeded = true;

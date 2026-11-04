@@ -1,0 +1,1444 @@
+[
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first/: ${x?bad}",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { : ${x?bad}; } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first-pipefail/: ${x?bad}",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { : ${x?bad}; } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=1 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "last/: ${x?bad}",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { : ${x?bad}; } 2>>$d/e; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=1 0 1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "middle/: ${x?bad}",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { : ${x?bad}; } 2>>$d/e | /bin/cat; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe/: ${x?bad}",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; { : ${x?bad}; } 2>>$d/e | { /bin/sleep 0.1; jobs -l; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; }; echo st=$? \"${PIPESTATUS[*]}\"; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=2\nst=0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe-return/: ${x?bad}",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; g() { { : ${x?bad}; } 2>>$d/e | { /bin/sleep 0.1; return 4; }; }; g; jobs -l; /bin/true; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "shown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background/: ${x?bad}",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { : ${x?bad}; } 2>>$d/e | sleep 0.4 & sleep 0.2; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; wait %1; echo w=$?; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=1\nw=1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background-listed/: ${x?bad}",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { : ${x?bad}; } 2>>$d/e | /bin/sleep 0.1 & /bin/sleep 0.3; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "[1]+ PID Exit 1                     { : ${x?bad}; } 2>> $d/e\n     PID Done                       | /bin/sleep 0.1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first/: $((1/0))",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { : $((1/0)); } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first-pipefail/: $((1/0))",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { : $((1/0)); } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=1 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "last/: $((1/0))",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { : $((1/0)); } 2>>$d/e; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=1 0 1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "middle/: $((1/0))",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { : $((1/0)); } 2>>$d/e | /bin/cat; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe/: $((1/0))",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; { : $((1/0)); } 2>>$d/e | { /bin/sleep 0.1; jobs -l; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; }; echo st=$? \"${PIPESTATUS[*]}\"; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=2\nst=0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe-return/: $((1/0))",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; g() { { : $((1/0)); } 2>>$d/e | { /bin/sleep 0.1; return 4; }; }; g; jobs -l; /bin/true; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "shown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background/: $((1/0))",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { : $((1/0)); } 2>>$d/e | sleep 0.4 & sleep 0.2; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; wait %1; echo w=$?; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=1\nw=1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background-listed/: $((1/0))",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { : $((1/0)); } 2>>$d/e | /bin/sleep 0.1 & /bin/sleep 0.3; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "[1]+ PID Exit 1                     { : $((1/0)); } 2>> $d/e\n     PID Done                       | /bin/sleep 0.1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first/: ${x:?null}",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { : ${x:?null}; } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first-pipefail/: ${x:?null}",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { : ${x:?null}; } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=1 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "last/: ${x:?null}",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { : ${x:?null}; } 2>>$d/e; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=1 0 1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "middle/: ${x:?null}",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { : ${x:?null}; } 2>>$d/e | /bin/cat; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe/: ${x:?null}",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; { : ${x:?null}; } 2>>$d/e | { /bin/sleep 0.1; jobs -l; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; }; echo st=$? \"${PIPESTATUS[*]}\"; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=2\nst=0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe-return/: ${x:?null}",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; g() { { : ${x:?null}; } 2>>$d/e | { /bin/sleep 0.1; return 4; }; }; g; jobs -l; /bin/true; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "shown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background/: ${x:?null}",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { : ${x:?null}; } 2>>$d/e | sleep 0.4 & sleep 0.2; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; wait %1; echo w=$?; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=1\nw=1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background-listed/: ${x:?null}",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { : ${x:?null}; } 2>>$d/e | /bin/sleep 0.1 & /bin/sleep 0.3; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "[1]+ PID Exit 1                     { : ${x:?null}; } 2>> $d/e\n     PID Done                       | /bin/sleep 0.1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first/readonly r=1; r=2; echo no",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { readonly r=1; r=2; echo no; } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first-pipefail/readonly r=1; r=2; echo no",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { readonly r=1; r=2; echo no; } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=1 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "last/readonly r=1; r=2; echo no",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { readonly r=1; r=2; echo no; } 2>>$d/e; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=1 0 1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "middle/readonly r=1; r=2; echo no",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { readonly r=1; r=2; echo no; } 2>>$d/e | /bin/cat; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe/readonly r=1; r=2; echo no",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; { readonly r=1; r=2; echo no; } 2>>$d/e | { /bin/sleep 0.1; jobs -l; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; }; echo st=$? \"${PIPESTATUS[*]}\"; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=2\nst=0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe-return/readonly r=1; r=2; echo no",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; g() { { readonly r=1; r=2; echo no; } 2>>$d/e | { /bin/sleep 0.1; return 4; }; }; g; jobs -l; /bin/true; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "shown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background/readonly r=1; r=2; echo no",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { readonly r=1; r=2; echo no; } 2>>$d/e | sleep 0.4 & sleep 0.2; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; wait %1; echo w=$?; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=1\nw=1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background-listed/readonly r=1; r=2; echo no",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { readonly r=1; r=2; echo no; } 2>>$d/e | /bin/sleep 0.1 & /bin/sleep 0.3; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "[1]+ PID Exit 1                     { readonly r=1; r=2; echo no; } 2>> $d/e\n     PID Done                       | /bin/sleep 0.1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first/set -u; : $undef_zz",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { set -u; : $undef_zz; } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first-pipefail/set -u; : $undef_zz",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { set -u; : $undef_zz; } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=1 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "last/set -u; : $undef_zz",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { set -u; : $undef_zz; } 2>>$d/e; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=1 0 1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "middle/set -u; : $undef_zz",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { set -u; : $undef_zz; } 2>>$d/e | /bin/cat; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe/set -u; : $undef_zz",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; { set -u; : $undef_zz; } 2>>$d/e | { /bin/sleep 0.1; jobs -l; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; }; echo st=$? \"${PIPESTATUS[*]}\"; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=2\nst=0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe-return/set -u; : $undef_zz",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; g() { { set -u; : $undef_zz; } 2>>$d/e | { /bin/sleep 0.1; return 4; }; }; g; jobs -l; /bin/true; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "shown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background/set -u; : $undef_zz",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { set -u; : $undef_zz; } 2>>$d/e | sleep 0.4 & sleep 0.2; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; wait %1; echo w=$?; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=1\nw=1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background-listed/set -u; : $undef_zz",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { set -u; : $undef_zz; } 2>>$d/e | /bin/sleep 0.1 & /bin/sleep 0.3; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "[1]+ PID Exit 1                     { set -u; : $undef_zz; } 2>> $d/e\n     PID Done                       | /bin/sleep 0.1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first/f",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { f; } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first-pipefail/f",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { f; } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=1 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "last/f",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { f; } 2>>$d/e; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=1 0 1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "middle/f",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { f; } 2>>$d/e | /bin/cat; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe/f",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; { f; } 2>>$d/e | { /bin/sleep 0.1; jobs -l; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; }; echo st=$? \"${PIPESTATUS[*]}\"; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=2\nst=0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe-return/f",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; g() { { f; } 2>>$d/e | { /bin/sleep 0.1; return 4; }; }; g; jobs -l; /bin/true; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "shown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background/f",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { f; } 2>>$d/e | sleep 0.4 & sleep 0.2; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; wait %1; echo w=$?; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=1\nw=1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background-listed/f",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { f; } 2>>$d/e | /bin/sleep 0.1 & /bin/sleep 0.3; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "[1]+ PID Exit 1                     { f; } 2>> $d/e\n     PID Done                       | /bin/sleep 0.1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first/( : ${x?bad} )",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { ( : ${x?bad} ); } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first-pipefail/( : ${x?bad} )",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { ( : ${x?bad} ); } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=1 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "last/( : ${x?bad} )",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { ( : ${x?bad} ); } 2>>$d/e; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=1 0 1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "middle/( : ${x?bad} )",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { ( : ${x?bad} ); } 2>>$d/e | /bin/cat; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe/( : ${x?bad} )",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; { ( : ${x?bad} ); } 2>>$d/e | { /bin/sleep 0.1; jobs -l; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; }; echo st=$? \"${PIPESTATUS[*]}\"; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=2\nst=0 1 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe-return/( : ${x?bad} )",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; g() { { ( : ${x?bad} ); } 2>>$d/e | { /bin/sleep 0.1; return 4; }; }; g; jobs -l; /bin/true; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "shown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background/( : ${x?bad} )",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { ( : ${x?bad} ); } 2>>$d/e | sleep 0.4 & sleep 0.2; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; wait %1; echo w=$?; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=1\nw=1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background-listed/( : ${x?bad} )",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { ( : ${x?bad} ); } 2>>$d/e | /bin/sleep 0.1 & /bin/sleep 0.3; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "[1]+ PID Exit 1                     { ( : ${x?bad} ); } 2>> $d/e\n     PID Done                       | /bin/sleep 0.1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first/: < /nonexistent; echo after-redirect",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { : < /nonexistent; echo after-redirect; } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 0 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first-pipefail/: < /nonexistent; echo after-redirect",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { : < /nonexistent; echo after-redirect; } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 0 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "last/: < /nonexistent; echo after-redirect",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { : < /nonexistent; echo after-redirect; } 2>>$d/e; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "after-redirect\nst=0 0 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "middle/: < /nonexistent; echo after-redirect",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { : < /nonexistent; echo after-redirect; } 2>>$d/e | /bin/cat; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "after-redirect\nst=0 0 0 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe/: < /nonexistent; echo after-redirect",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; { : < /nonexistent; echo after-redirect; } 2>>$d/e | { /bin/sleep 0.1; jobs -l; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; }; echo st=$? \"${PIPESTATUS[*]}\"; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=2\nst=0 0 0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe-return/: < /nonexistent; echo after-redirect",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; g() { { : < /nonexistent; echo after-redirect; } 2>>$d/e | { /bin/sleep 0.1; return 4; }; }; g; jobs -l; /bin/true; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "shown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background/: < /nonexistent; echo after-redirect",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { : < /nonexistent; echo after-redirect; } 2>>$d/e | sleep 0.4 & sleep 0.2; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; wait %1; echo w=$?; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=1\nw=0\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background-listed/: < /nonexistent; echo after-redirect",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { : < /nonexistent; echo after-redirect; } 2>>$d/e | /bin/sleep 0.1 & /bin/sleep 0.3; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "[1]+ PID Done                       { : < /nonexistent; echo after-redirect; } 2>> $d/e\n     PID                          | /bin/sleep 0.1\nshown\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first/exit 3",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { exit 3; } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 3 0\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first-pipefail/exit 3",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { exit 3; } 2>>$d/e | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=3 3 0\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "last/exit 3",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { exit 3; } 2>>$d/e; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=3 0 3\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "middle/exit 3",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; /bin/true | { exit 3; } 2>>$d/e | /bin/cat; echo st=$? \"${PIPESTATUS[*]}\"; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "st=0 0 3 0\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe/exit 3",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; { exit 3; } 2>>$d/e | { /bin/sleep 0.1; jobs -l; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; }; echo st=$? \"${PIPESTATUS[*]}\"; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=2\nst=0 3 0\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe-return/exit 3",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; shopt -s lastpipe; g() { { exit 3; } 2>>$d/e | { /bin/sleep 0.1; return 4; }; }; g; jobs -l; /bin/true; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": ""
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background/exit 3",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; set -o pipefail; { exit 3; } 2>>$d/e | sleep 0.4 & sleep 0.2; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; wait %1; echo w=$?; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "k=1\nw=3\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background-listed/exit 3",
+		"script": "d=$(mktemp -d); f() { : ${x?bad}; }; { exit 3; } 2>>$d/e | /bin/sleep 0.1 & /bin/sleep 0.3; jobs -l; [ -s $d/e ] && echo shown; rm -rf $d",
+		"status": 0,
+		"output": "[1]+ PID Exit 3                     { exit 3; } 2>> $d/e\n     PID Done                       | /bin/sleep 0.1\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first/simple",
+		"script": "d=$(mktemp -d); exec 2>/dev/null; : ${x?bad} | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; rm -rf $d",
+		"status": 0,
+		"output": "st=0 127 0\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "first-pipefail/simple",
+		"script": "d=$(mktemp -d); exec 2>/dev/null; set -o pipefail; : ${x?bad} | /bin/sleep 0.1; echo st=$? \"${PIPESTATUS[*]}\"; rm -rf $d",
+		"status": 0,
+		"output": "st=127 127 0\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "last/simple",
+		"script": "d=$(mktemp -d); exec 2>/dev/null; /bin/true | : ${x?bad}; echo st=$? \"${PIPESTATUS[*]}\"; rm -rf $d",
+		"status": 0,
+		"output": "st=127 0 127\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "middle/simple",
+		"script": "d=$(mktemp -d); exec 2>/dev/null; /bin/true | : ${x?bad} | /bin/cat; echo st=$? \"${PIPESTATUS[*]}\"; rm -rf $d",
+		"status": 0,
+		"output": "st=0 0 127 0\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe/simple",
+		"script": "d=$(mktemp -d); exec 2>/dev/null; shopt -s lastpipe; : ${x?bad} | { /bin/sleep 0.1; jobs -l; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; }; echo st=$? \"${PIPESTATUS[*]}\"; jobs -l; rm -rf $d",
+		"status": 0,
+		"output": "k=2\nst=0 127 0\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "lastpipe-return/simple",
+		"script": "d=$(mktemp -d); exec 2>/dev/null; shopt -s lastpipe; g() { : ${x?bad} | { /bin/sleep 0.1; return 4; }; }; g; jobs -l; /bin/true; rm -rf $d",
+		"status": 0,
+		"output": ""
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background/simple",
+		"script": "d=$(mktemp -d); exec 2>/dev/null; set -o pipefail; : ${x?bad} | sleep 0.4 & sleep 0.2; jobs -p > $d/p; read p < $d/p; kill -HUP $p 2>/dev/null; echo k=$?; wait %1; echo w=$?; rm -rf $d",
+		"status": 0,
+		"output": "k=1\nw=127\n"
+	},
+	{
+		"group": "an_errored_stage_ends_with_its_error_status",
+		"name": "background-listed/simple",
+		"script": "d=$(mktemp -d); exec 2>/dev/null; : ${x?bad} | /bin/sleep 0.1 & /bin/sleep 0.3; jobs -l; rm -rf $d",
+		"status": 0,
+		"output": "[1]+ PID Exit 127                   : ${x?bad}\n     PID Done                       | /bin/sleep 0.1\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/alias",
+		"script": "exec 2>/dev/null; alias -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/alias",
+		"script": "exec 2>&-; alias -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/alias",
+		"script": "exec 2>/dev/full; alias -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/bg",
+		"script": "exec 2>/dev/null; bg -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=1\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/bg",
+		"script": "exec 2>&-; bg -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=1\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/bg",
+		"script": "exec 2>/dev/full; bg -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=1\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/bind",
+		"script": "exec 2>/dev/null; bind -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/bind",
+		"script": "exec 2>&-; bind -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/bind",
+		"script": "exec 2>/dev/full; bind -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/builtin",
+		"script": "exec 2>/dev/null; builtin -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/builtin",
+		"script": "exec 2>&-; builtin -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/builtin",
+		"script": "exec 2>/dev/full; builtin -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/cd",
+		"script": "exec 2>/dev/null; cd -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/cd",
+		"script": "exec 2>&-; cd -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/cd",
+		"script": "exec 2>/dev/full; cd -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/compgen",
+		"script": "exec 2>/dev/null; compgen -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/compgen",
+		"script": "exec 2>&-; compgen -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/compgen",
+		"script": "exec 2>/dev/full; compgen -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/complete",
+		"script": "exec 2>/dev/null; complete -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/complete",
+		"script": "exec 2>&-; complete -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/complete",
+		"script": "exec 2>/dev/full; complete -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/compopt",
+		"script": "exec 2>/dev/null; compopt -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/compopt",
+		"script": "exec 2>&-; compopt -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/compopt",
+		"script": "exec 2>/dev/full; compopt -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/declare",
+		"script": "exec 2>/dev/null; declare -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/declare",
+		"script": "exec 2>&-; declare -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/declare",
+		"script": "exec 2>/dev/full; declare -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/dirs",
+		"script": "exec 2>/dev/null; dirs -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/dirs",
+		"script": "exec 2>&-; dirs -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/dirs",
+		"script": "exec 2>/dev/full; dirs -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/disown",
+		"script": "exec 2>/dev/null; disown -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/disown",
+		"script": "exec 2>&-; disown -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/disown",
+		"script": "exec 2>/dev/full; disown -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/echo",
+		"script": "exec 2>/dev/null; echo -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "-Z\nstatus=0\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/echo",
+		"script": "exec 2>&-; echo -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "-Z\nstatus=0\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/echo",
+		"script": "exec 2>/dev/full; echo -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "-Z\nstatus=0\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/enable",
+		"script": "exec 2>/dev/null; enable -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/enable",
+		"script": "exec 2>&-; enable -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/enable",
+		"script": "exec 2>/dev/full; enable -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/exec",
+		"script": "exec 2>/dev/null; exec -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/exec",
+		"script": "exec 2>&-; exec -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/exec",
+		"script": "exec 2>/dev/full; exec -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/export",
+		"script": "exec 2>/dev/null; export -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/export",
+		"script": "exec 2>&-; export -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/export",
+		"script": "exec 2>/dev/full; export -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/false",
+		"script": "exec 2>/dev/null; false -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=1\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/false",
+		"script": "exec 2>&-; false -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=1\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/false",
+		"script": "exec 2>/dev/full; false -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=1\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/fg",
+		"script": "exec 2>/dev/null; fg -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=1\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/fg",
+		"script": "exec 2>&-; fg -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=1\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/fg",
+		"script": "exec 2>/dev/full; fg -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=1\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/getopts",
+		"script": "exec 2>/dev/null; getopts -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/getopts",
+		"script": "exec 2>&-; getopts -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/getopts",
+		"script": "exec 2>/dev/full; getopts -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/hash",
+		"script": "exec 2>/dev/null; hash -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/hash",
+		"script": "exec 2>&-; hash -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/hash",
+		"script": "exec 2>/dev/full; hash -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/help",
+		"script": "exec 2>/dev/null; help -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/help",
+		"script": "exec 2>&-; help -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/help",
+		"script": "exec 2>/dev/full; help -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/jobs",
+		"script": "exec 2>/dev/null; jobs -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/jobs",
+		"script": "exec 2>&-; jobs -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/jobs",
+		"script": "exec 2>/dev/full; jobs -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/let",
+		"script": "exec 2>/dev/null; let -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=1\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/let",
+		"script": "exec 2>&-; let -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=1\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/let",
+		"script": "exec 2>/dev/full; let -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=1\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/mapfile",
+		"script": "exec 2>/dev/null; mapfile -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/mapfile",
+		"script": "exec 2>&-; mapfile -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/mapfile",
+		"script": "exec 2>/dev/full; mapfile -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/popd",
+		"script": "exec 2>/dev/null; popd -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/popd",
+		"script": "exec 2>&-; popd -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/popd",
+		"script": "exec 2>/dev/full; popd -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/pushd",
+		"script": "exec 2>/dev/null; pushd -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/pushd",
+		"script": "exec 2>&-; pushd -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/pushd",
+		"script": "exec 2>/dev/full; pushd -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/pwd",
+		"script": "exec 2>/dev/null; pwd -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/pwd",
+		"script": "exec 2>&-; pwd -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/pwd",
+		"script": "exec 2>/dev/full; pwd -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/read",
+		"script": "exec 2>/dev/null; read -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/read",
+		"script": "exec 2>&-; read -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/read",
+		"script": "exec 2>/dev/full; read -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/readarray",
+		"script": "exec 2>/dev/null; readarray -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/readarray",
+		"script": "exec 2>&-; readarray -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/readarray",
+		"script": "exec 2>/dev/full; readarray -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/readonly",
+		"script": "exec 2>/dev/null; readonly -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/readonly",
+		"script": "exec 2>&-; readonly -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/readonly",
+		"script": "exec 2>/dev/full; readonly -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/shopt",
+		"script": "exec 2>/dev/null; shopt -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/shopt",
+		"script": "exec 2>&-; shopt -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/shopt",
+		"script": "exec 2>/dev/full; shopt -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/source",
+		"script": "exec 2>/dev/null; source -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/source",
+		"script": "exec 2>&-; source -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/source",
+		"script": "exec 2>/dev/full; source -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/test",
+		"script": "exec 2>/dev/null; test -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=0\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/test",
+		"script": "exec 2>&-; test -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=0\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/test",
+		"script": "exec 2>/dev/full; test -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=0\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/times",
+		"script": "exec 2>/dev/null; times -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/times",
+		"script": "exec 2>&-; times -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/times",
+		"script": "exec 2>/dev/full; times -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/trap",
+		"script": "exec 2>/dev/null; trap -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/trap",
+		"script": "exec 2>&-; trap -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/trap",
+		"script": "exec 2>/dev/full; trap -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/true",
+		"script": "exec 2>/dev/null; true -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=0\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/true",
+		"script": "exec 2>&-; true -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=0\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/true",
+		"script": "exec 2>/dev/full; true -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=0\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/type",
+		"script": "exec 2>/dev/null; type -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/type",
+		"script": "exec 2>&-; type -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/type",
+		"script": "exec 2>/dev/full; type -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/typeset",
+		"script": "exec 2>/dev/null; typeset -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/typeset",
+		"script": "exec 2>&-; typeset -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/typeset",
+		"script": "exec 2>/dev/full; typeset -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/ulimit",
+		"script": "exec 2>/dev/null; ulimit -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/ulimit",
+		"script": "exec 2>&-; ulimit -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/ulimit",
+		"script": "exec 2>/dev/full; ulimit -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/umask",
+		"script": "exec 2>/dev/null; umask -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/umask",
+		"script": "exec 2>&-; umask -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/umask",
+		"script": "exec 2>/dev/full; umask -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/unalias",
+		"script": "exec 2>/dev/null; unalias -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/unalias",
+		"script": "exec 2>&-; unalias -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/unalias",
+		"script": "exec 2>/dev/full; unalias -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/unset",
+		"script": "exec 2>/dev/null; unset -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/unset",
+		"script": "exec 2>&-; unset -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/unset",
+		"script": "exec 2>/dev/full; unset -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "away/wait",
+		"script": "exec 2>/dev/null; wait -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "closed/wait",
+		"script": "exec 2>&-; wait -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	},
+	{
+		"group": "each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr",
+		"name": "full/wait",
+		"script": "exec 2>/dev/full; wait -Z </dev/null; echo status=$?; echo AFTER",
+		"status": 0,
+		"output": "status=2\nAFTER\n"
+	}
+]

@@ -18,7 +18,7 @@ use crate::bash::{
 		exec::{Flow, expanding},
 		expand::arith_value,
 		probe::{self, absolute},
-		proc::{PendingWrite, Probe, ProbeResult, Slot, Vproc},
+		proc::{Probe, ProbeResult, Slot, Vproc},
 		state::{Level, Var},
 	},
 };
@@ -759,8 +759,7 @@ fn report(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32, chunks: Ve
 		match chunk {
 			Chunk::Diag(d) => k.diag(cx, vp, line, d),
 			Chunk::Out(fd, bytes) => {
-				vp.out
-					.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 });
+				vp.queue_out(fd, bytes);
 			},
 		}
 	}
