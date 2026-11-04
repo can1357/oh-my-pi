@@ -62,7 +62,6 @@ windows-sys.workspace = true
 winreg.workspace = true
 
 [dev-dependencies]
-criterion.workspace = true
 tempfile.workspace = true
 
 # The engine benches print their own statistics.

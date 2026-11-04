@@ -1442,10 +1442,8 @@ export declare function countTokens(input: string | string[], encoding?: Encodin
 /**
  * Decode one complete SIXEL control string into a PNG on the calling thread.
  *
- * The decoder is deliberately bounded before handing the stream to
- * `icy_sixel`: raster declarations, repeats, and row advances are scanned
- * first so hostile dimensions cannot make the dependency allocate its much
- * larger internal maximum.
+ * Raster declarations, repeats, and row advances are bounded before allocating
+ * the decoded RGBA buffer.
  */
 export declare function decodeSixelToPng(bytes: Uint8Array): Uint8Array
 

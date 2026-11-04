@@ -4,6 +4,11 @@
 
 ### Changed
 
+- Native builds now reuse the shared diff implementation, and macOS display discovery no longer needs a separate capture library
+- Shell spawn benchmarks report median and p99 latency without an additional benchmark framework
+
+- The work-profile flamegraph is now a static SVG (hover titles, no click-to-zoom or search)
+- Sixel image output uses a built-in encoder; images with more than 256 colors may get a slightly different palette
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections
 - Made the bash tool's shell faster on `while read` loops over files (no per-line `lseek`), output sent to `/dev/null`, `(( ))` arithmetic, recursive functions, plain assignments and every simple command
 - Made starting external commands from the bash tool's shell cheaper on Linux (the child no longer resets every signal disposition before `exec`, and the parent reuses its spawn setup and makes about half as many system calls per command)

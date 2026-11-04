@@ -20,6 +20,8 @@
 //! ```
 
 mod common;
+#[path = "common/statistics.rs"]
+mod statistics;
 
 use std::{
 	hint::black_box,
@@ -31,7 +33,10 @@ use pi_shell::{
 	testkit::FakeHost,
 };
 
-use crate::common::{NullHost, new_shell, run, verdict};
+use crate::{
+	common::{NullHost, new_shell, run, verdict},
+	statistics::quantiles,
+};
 
 /// Timed iterations.
 const ITERS: usize = 5_000;
@@ -40,12 +45,6 @@ const ITERS: usize = 5_000;
 const WARMUP: usize = 200;
 
 const MAX_TOTAL: Duration = Duration::from_micros(100);
-
-/// Median and p99 of `samples`.
-fn quantiles(samples: &mut [Duration]) -> (Duration, Duration) {
-	samples.sort_unstable();
-	(samples[samples.len() / 2], samples[samples.len() * 99 / 100])
-}
 
 fn main() {
 	let engine = Engine::new(EngineConfig::default());

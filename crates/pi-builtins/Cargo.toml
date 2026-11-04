@@ -77,6 +77,7 @@ onig = { version = "6.4", default-features = false }
 os_display = "0.1.4"
 parse_datetime = "0.16"
 pi-ast = { workspace = true, optional = true }
+pi-diff.workspace = true
 pi-walker.workspace = true
 pi-vfs.workspace = true
 rand = { version = "0.10.0", features = ["std_rng"] }
@@ -86,7 +87,6 @@ rustc-hash = "2.1.1"
 self_cell = "1.0.4"
 serde_json = "1"
 smallvec.workspace = true
-similar = "3.2.0"
 tempfile = "3.15.0"
 tokio-util = "0.7"
 xutf.workspace = true
@@ -176,7 +176,6 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 anyhow = "1.0.102"
-pretty_assertions = { version = "1.4.1", features = ["unstable"] }
 tempfile = "3"
 
 [features]

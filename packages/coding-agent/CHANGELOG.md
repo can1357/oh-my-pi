@@ -35,6 +35,8 @@
 
 ### Changed
 
+- Local Whisper speech-to-text and the local tiny model install their Transformers.js runtime on first use instead of with omp, so installs are smaller; first use needs network access
+- Local Parakeet and Nemotron speech runtimes now install on first use in source and npm installs too, reducing initial install size; first use needs network access
 - `wait` with nothing new now returns after 5s instead of blocking up to 30 minutes, the window growing 5s → 10s → 30s → 1m → 5m across back-to-back waits (5s again after news or a minute away); from the second idle wait on it tells the agent to get on with work that does not need the result instead of waiting
 - In a Tern that types streamed text out itself, omp sends assistant text and thinking as they arrive instead of pacing them, so streaming costs omp less CPU; other terminals keep omp's smooth reveal
 - Source-checkout sessions start faster and record the commit and branch without hashing uncommitted changes; existing build stamps remain readable.
