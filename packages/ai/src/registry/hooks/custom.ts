@@ -11,9 +11,11 @@ export const CUSTOM_LOGIN_HOOKS: Record<string, Lazy<LoginHook>> = {
 	perplexity: () => import("../oauth/perplexity").then(module => module.loginPerplexity),
 	snowflake: () => import("../oauth/snowflake").then(module => module.loginSnowflake),
 	"mistral-vibe-sign-in": async () => loginMistralVibeSignIn,
+	"kiro-login": () => import("../oauth/kiro").then(module => module.loginKiroHook),
 };
 export const CUSTOM_REFRESH_HOOKS: Record<string, Lazy<RefreshHook>> = {
 	"github-copilot": () => import("../oauth/github-copilot").then(module => module.refreshGitHubCopilotHook),
 	cursor: () => import("../oauth/cursor").then(module => module.refreshCursorHook),
 	snowflake: () => import("../oauth/snowflake").then(module => module.refreshSnowflakeToken),
+	"kiro-refresh": () => import("../oauth/kiro").then(module => module.refreshKiroHook),
 };

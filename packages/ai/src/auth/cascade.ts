@@ -1,4 +1,5 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
+import { encodeKiroOAuthRow } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 import { $env, $envExact, logger } from "@oh-my-pi/pi-utils";
 import { type ApiKeyResolver, createOAuthProvenance, markAfterSiblingWait, type ResolvedApiKey } from "../auth-retry";
 import { getEnvApiKey, getEnvApiKeyName } from "../env-api-key";
@@ -288,6 +289,11 @@ export class KeyCascade implements KeysApi {
 					enterpriseUrl: oauthSelection.credential.enterpriseUrl,
 					apiEndpoint: oauthSelection.credential.apiEndpoint,
 				});
+			}
+			// Kiro: the same codec `getOAuthApiKey` uses, so a peek and a refresh
+			// of one stored row route and cache identically.
+			if (provider === "kiro") {
+				return encodeKiroOAuthRow(oauthSelection.credential);
 			}
 			return oauthSelection.credential.access;
 		}

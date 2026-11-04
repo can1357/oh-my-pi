@@ -406,6 +406,7 @@ auth "anthropic" {
     result "api-key"                             // OAuth login persists only credentials.access as a plain API key
     allows-missing-api-key #true
     org-scoped-identity #true                   // qualify credential/report identity by org (one email can have multiple subscriptions)
+    login-replaces-credentials #true            // a successful login replaces every stored credential for this provider
     oauth-token-env "PROVIDER_OAUTH_TOKEN"      // dedicated OAuth bearer env vars, excluding borrowed API-key aliases in provider env
     native-auth-api "bedrock-converse-stream"     // provider transport resolves auth; scan plans pin this API without secrets
     available #false
@@ -413,7 +414,7 @@ auth "anthropic" {
 }
 ```
 
-`org-scoped-identity #true` keeps credentials and usage reports for different organizations separate even when they share an email; absent or `#false` uses ordinary account identity. `oauth-token-env` takes one or more ordered, non-empty env names carrying this provider's own OAuth bearer. When present, availability ignores other provider-env aliases, and usage probes accept only stored OAuth credentials or the first set bearer from that list; absent providers keep the ordinary API-key env behavior.
+`org-scoped-identity #true` keeps credentials and usage reports for different organizations separate even when they share an email; absent or `#false` uses ordinary account identity. `oauth-token-env` takes one or more ordered, non-empty env names carrying this provider's own OAuth bearer. When present, availability ignores other provider-env aliases, and usage probes accept only stored OAuth credentials or the first set bearer from that list; absent providers keep the ordinary API-key env behavior. `login-replaces-credentials #true` makes a successful login delete every stored credential for the provider before saving the new one, for flows whose credentials carry no stable account claim to deduplicate on (Kiro device grants and API keys); absent or `#false` keeps the ordinary per-account upsert.
 
 Login kinds:
 

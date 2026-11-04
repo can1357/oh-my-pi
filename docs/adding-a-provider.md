@@ -129,6 +129,7 @@ authorization-code flow, and `github-copilot.kdl` for a custom flow.
 | `callback-port N`, `paste-code #true`                     | Coding-agent/broker callback metadata; OAuth-code flows derive these from their callback policy unless overridden. |
 | `oauth-token-env "VAR" …`                                 | Dedicated OAuth environment tokens; borrowed API-key aliases do not make this provider automatically available.    |
 | `org-scoped-identity #true`                               | Distinguishes stored accounts by organization as well as identity.                                                 |
+| `login-replaces-credentials #true`                        | A successful login replaces every stored credential for the provider instead of adding another account.            |
 | `api-key-format "structured"`                             | Declares a transport-specific credential encoding rather than a plain bearer.                                      |
 | `allows-missing-api-key #true`, `native-auth-api "api" …` | Marks transport-owned authentication paths.                                                                        |
 
