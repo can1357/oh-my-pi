@@ -215,12 +215,64 @@ describe("collectTestsUnder", () => {
 			expect(await testFilesWithoutBucket(tree, ["file"], { files: [], dirs: [{ cwd: "file" }] })).toEqual([]);
 		}));
 
+	it("takes a file by its first spelling no pattern matches, however many others a pattern skips first", () =>
+		withTempDir("test-file-alias-later-", async tree => {
+			// Six aliases of `real` that a pattern ignores sort before the one it does not.
+			const aliases = path.join(tree, "aliases");
+			await writeTests(aliases, ["real/x.test.ts"]);
+			for (const alias of ["a0", "a1", "a2", "a3", "a4", "a5", "zsafe"]) {
+				await fs.symlink("real", path.join(aliases, alias));
+			}
+			await Bun.write(
+				path.join(aliases, "bunfig.toml"),
+				'[test]\npathIgnorePatterns = ["{a0,a1,a2,a3,a4,a5,real}/*"]\n',
+			);
+			const discovered = await bunTestRuns(aliases);
+
+			expect(discovered.exitCode, discovered.stderr).toBe(0);
+			expect(discovered.files).toEqual([await fs.realpath(path.join(aliases, "real/x.test.ts"))]);
+			expect(await collectTestsUnder(aliases, aliases)).toEqual(["zsafe/x.test.ts"]);
+			expect(await namedTestFilesUnder(aliases, aliases, aliases)).toEqual(["zsafe/x.test.ts"]);
+
+			// Through a cycle, the first spelling no pattern matches is the third turn.
+			const turns = path.join(tree, "turns");
+			await writeTests(turns, ["x.test.ts"]);
+			for (const link of ["a", "b"]) await fs.symlink(".", path.join(turns, link));
+			await Bun.write(
+				path.join(turns, "bunfig.toml"),
+				'[test]\npathIgnorePatterns = ["x.test.ts", "{a,b}/x.test.ts", "{a,b}/{a,b}/x.test.ts"]\n',
+			);
+
+			expect(await collectTestsUnder(turns, turns)).toEqual(["a/a/a/x.test.ts"]);
+			expect(await namedTestFilesUnder(turns, turns, turns)).toEqual(["a/a/a/x.test.ts"]);
+			// `bun test` naming no file does not finish walking two links of a cycle (it passed 4 GB
+			// of memory), so the spelling is run by name.
+			const real = await fs.realpath(path.join(turns, "x.test.ts"));
+			expect((await bunTestRuns(turns, ["./a/a/a/x.test.ts"])).files).toEqual([real]);
+
+			// A class can match the `/` between two segments: `a[/]x.test.ts` ignores `a/x.test.ts`,
+			// so the first spelling no pattern matches is `a/a/x.test.ts`.
+			const classes = path.join(tree, "classes");
+			await writeTests(classes, ["x.test.ts"]);
+			await fs.symlink(".", path.join(classes, "a"));
+			await Bun.write(
+				path.join(classes, "bunfig.toml"),
+				'[test]\npathIgnorePatterns = ["x.test.ts", "a[/]x.test.ts"]\n',
+			);
+
+			expect(await collectTestsUnder(classes, classes)).toEqual(["a/a/x.test.ts"]);
+			expect((await bunTestRuns(classes, ["./a/x.test.ts"])).files).toEqual([]);
+			expect((await bunTestRuns(classes, ["./a/a/x.test.ts"])).files).toEqual([
+				await fs.realpath(path.join(classes, "x.test.ts")),
+			]);
+		}));
+
 	it("walks a cycle in time the real directories bound, not the paths through them", () =>
 		withTempDir("test-file-cycle-bounded-", async tree => {
-			// The patterns of the working directory decide how many turns of a cycle the walk takes;
-			// these are the repository root's, which the `scripts` command reads. Four nested
-			// directories with two self-links each have a number of paths that grows with the turns
-			// allowed, and five real directories.
+			// The patterns of the working directory decide which spellings of one directory the walk
+			// tells apart; these are the repository root's, which the `scripts` command reads. Four
+			// nested directories with two self-links each have a number of paths that grows with the
+			// turns taken, and five real directories.
 			await Bun.write(
 				path.join(tree, "bunfig.toml"),
 				'[test]\npathIgnorePatterns = ["**/node_modules/**", "**/dist/**", "python/robomp/data/**"]\n',
@@ -416,8 +468,9 @@ describe("testFilesWithoutBucket", () => {
 			const guard = (dirs: Buckets["dirs"], files: Buckets["files"] = []) =>
 				testFilesWithoutBucket(repo, ["packages/run"], { files, dirs });
 
+			// The error names each group; the sentence around it is for the reader.
 			await expect(guard([{ cwd: "packages/run" }])).rejects.toThrow(
-				"These paths of one directory differ only in ASCII letter case, and one `bun test` process reaches one of each group in place of the others, so it does not run every test reached through them. Rename them apart:\npackages/run/a.test.TS  packages/run/a.test.ts",
+				"packages/run/a.test.TS  packages/run/a.test.ts",
 			);
 			// Naming one of them does not help: `bun test ./a.test.ts` runs a.test.TS.
 			await expect(guard([], [{ path: "packages/run/a.test.ts", cwd: "packages/run" }])).rejects.toThrow(
@@ -434,6 +487,25 @@ describe("testFilesWithoutBucket", () => {
 			// Names that differ only in case in different directories do not.
 			await fs.rm(path.join(pkg, "Dir"), { recursive: true });
 			expect(await guard([{ cwd: "packages/run" }])).toEqual([]);
+		}));
+
+	it("lets twin directories through when other links reach each of them free of twins", () =>
+		withTempDir("test-file-guard-twin-links-", async repo => {
+			const pkg = path.join(repo, "packages/run");
+			await writeTests(pkg, ["Dir/x.test.ts", "dir/x.test.ts"]);
+			await fs.symlink("Dir", path.join(pkg, "safe-upper"));
+			await fs.symlink("dir", path.join(pkg, "safe-lower"));
+			// The process keeps one of `Dir` and `dir`, and reaches both real directories by the links.
+			const run = await bunTestRuns(pkg);
+			const guard = () =>
+				testFilesWithoutBucket(repo, ["packages/run"], { files: [], dirs: [{ cwd: "packages/run" }] });
+
+			expect(run.exitCode, run.stderr).toBe(0);
+			expect(run.files).toEqual(await realPaths(pkg, ["Dir/x.test.ts", "dir/x.test.ts"]));
+			expect(await guard()).toEqual([]);
+			// Without the link to `dir`, its test is reached only through the twins, so it may not run.
+			await fs.rm(path.join(pkg, "safe-lower"));
+			await expect(guard()).rejects.toThrow("packages/run/Dir  packages/run/dir");
 		}));
 
 	it("lets through names that differ by more than ASCII case, each of which `bun test` runs", () =>

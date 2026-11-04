@@ -21,6 +21,31 @@ function foldedName(name: string): string {
 	return name.replace(/[A-Z]/g, letter => letter.toLowerCase());
 }
 
+/**
+ * One `[test] pathIgnorePatterns` entry, and what of a path decides whether it matches a longer one.
+ *
+ * Measured against `Bun.Glob` 1.4.4: a `/` of the pattern outside braces, classes and escapes meets
+ * only a `/` of the path, `*` and `?` never match `/`, and a chunk that is exactly `**` matches whole
+ * segments. Split at those `/` into chunks, a pattern matches `prefix/rest` or not according to
+ * `rest` and the leading chunks that match `prefix` alone. A class that is negated, holds a `/` or
+ * holds a range (`[!a]`, `[a/]`, `[!-0]`) and an escaped `/` can each meet one `/` of the path
+ * inside a chunk, so a chunk holding `n` of them can end up to `n` segments short of `prefix`'s end;
+ * braces holding a `/` or a `**` are expanded first, so no chunk holds either.
+ */
+interface IgnorePattern {
+	source: string;
+	glob: Bun.Glob;
+	/** A leading `!` (an odd number of them) inverts the match; the chunks are the rest's. */
+	negated: boolean;
+	/**
+	 * The expanded alternatives, each as the globs of its first 1, 2, … chunks (the last is the whole
+	 * alternative) and, per chunk, how many `/` of a path it can match (see {@link slashesWithin}).
+	 */
+	alternatives: { prefixes: Bun.Glob[]; spans: number[] }[];
+	/** The largest of the alternatives' `spans`. */
+	span: number;
+}
+
 /** The `[test]` settings of a `bunfig.toml` that change which files `bun test` selects. */
 interface BunTestConfig {
 	/**
@@ -32,9 +57,7 @@ interface BunTestConfig {
 	 * `[test] pathIgnorePatterns`, one pattern or a list, matched against paths relative to the working
 	 * directory (`../` included when the root lies outside it).
 	 */
-	ignore: Bun.Glob[];
-	/** How many times the walk lists one real directory (see {@link WalkRules.directoryVisits}). */
-	directoryVisits: number;
+	ignore: IgnorePattern[];
 }
 
 const bunTestConfigs = new Map<string, Promise<BunTestConfig>>();
@@ -58,8 +81,7 @@ async function readBunTestConfig(cwd: string): Promise<BunTestConfig> {
 	try {
 		text = await Bun.file(file).text();
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { root: cwd, ignore: [], directoryVisits: 1 };
-		throw error;
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { root: cwd, ignore: [] };
 	}
 	let config: { test?: { root?: unknown; pathIgnorePatterns?: unknown } };
 	try {
@@ -79,15 +101,169 @@ async function readBunTestConfig(cwd: string): Promise<BunTestConfig> {
 				: [];
 	return {
 		root: typeof root === "string" ? path.resolve(cwd, root) : cwd,
-		ignore: patterns.map(pattern => new Bun.Glob(pattern)),
-		directoryVisits: patterns.length === 0 ? 1 : Math.max(...patterns.map(pattern => pattern.split("/").length)) + 2,
+		ignore: patterns.map(parseIgnorePattern),
 	};
+}
+
+/** Where the class opened at `open` closes, as `Bun.Glob` reads it; -1 where it does not, and `[` is literal. */
+function classEnd(pattern: string, open: number): number {
+	let index = open + 1;
+	if (pattern[index] === "!" || pattern[index] === "^") index++;
+	// A `]` first in a class is one of its characters.
+	if (pattern[index] === "]") index++;
+	return pattern.indexOf("]", index);
+}
+
+/**
+ * Where the brace group opened at `open` closes, and its alternatives (split at its own commas);
+ * `null` where it does not close, and `{` is literal.
+ */
+function braceGroup(pattern: string, open: number): { close: number; alternatives: string[] } | null {
+	const alternatives: string[] = [];
+	let depth = 0;
+	let from = open + 1;
+	for (let index = open; index < pattern.length; index++) {
+		const char = pattern[index];
+		if (char === "\\") index++;
+		else if (char === "[") index = Math.max(index, classEnd(pattern, index));
+		else if (char === "{") depth++;
+		else if (char === "}" && --depth === 0) {
+			alternatives.push(pattern.slice(from, index));
+			return { close: index, alternatives };
+		} else if (char === "," && depth === 1) {
+			alternatives.push(pattern.slice(from, index));
+			from = index + 1;
+		}
+	}
+	return null;
+}
+
+/** `pattern` with every brace group that holds a `/` or a `**` expanded into its alternatives. */
+function expandSpanningBraces(pattern: string): string[] {
+	for (let index = 0; index < pattern.length; index++) {
+		const char = pattern[index];
+		if (char === "\\") index++;
+		else if (char === "[") index = Math.max(index, classEnd(pattern, index));
+		else if (char === "{") {
+			const group = braceGroup(pattern, index);
+			if (!group) continue;
+			const body = pattern.slice(index + 1, group.close);
+			if (body.includes("/") || body.includes("**")) {
+				const before = pattern.slice(0, index);
+				const after = pattern.slice(group.close + 1);
+				return group.alternatives.flatMap(alternative => expandSpanningBraces(before + alternative + after));
+			}
+			index = group.close;
+		}
+	}
+	return [pattern];
+}
+
+/** `pattern` split at each `/` outside escapes, classes and braces. */
+function splitChunks(pattern: string): string[] {
+	const chunks: string[] = [];
+	let from = 0;
+	for (let index = 0; index < pattern.length; index++) {
+		const char = pattern[index];
+		if (char === "\\") index++;
+		else if (char === "[") index = Math.max(index, classEnd(pattern, index));
+		else if (char === "{") index = braceGroup(pattern, index)?.close ?? index;
+		else if (char === "/") {
+			chunks.push(pattern.slice(from, index));
+			from = index + 1;
+		}
+	}
+	chunks.push(pattern.slice(from));
+	return chunks;
+}
+
+/** How many `/` of a path `chunk` can match: one per escaped `/` and per class that can match a `/`. */
+function slashesWithin(chunk: string): number {
+	let slashes = 0;
+	for (let index = 0; index < chunk.length; index++) {
+		const char = chunk[index];
+		if (char === "\\") {
+			if (chunk[index + 1] === "/") slashes++;
+			index++;
+		} else if (char === "[") {
+			const close = classEnd(chunk, index);
+			if (close < 0) continue;
+			const body = chunk.slice(index + 1, close);
+			if (/^[!^]/.test(body) || body.includes("/") || body.includes("-")) slashes++;
+			index = close;
+		}
+	}
+	return slashes;
+}
+
+function parseIgnorePattern(source: string): IgnorePattern {
+	let positive = source;
+	let negated = false;
+	while (positive.startsWith("!")) {
+		positive = positive.slice(1);
+		negated = !negated;
+	}
+	const alternatives = expandSpanningBraces(positive).map(alternative => {
+		const chunks = splitChunks(alternative);
+		return {
+			prefixes: chunks.map((_, index) => new Bun.Glob(chunks.slice(0, index + 1).join("/"))),
+			spans: chunks.map(slashesWithin),
+		};
+	});
+	const span = Math.max(0, ...alternatives.flatMap(alternative => alternative.spans));
+	return { source, glob: new Bun.Glob(source), negated, alternatives, span };
 }
 
 /** Whether `config` ignores `spelling`: the path as reached, links not resolved, relative to `cwd`. */
 function isIgnored(config: BunTestConfig, cwd: string, spelling: string): boolean {
 	const relative = path.relative(cwd, spelling).split(path.sep).join("/");
-	return config.ignore.some(glob => glob.match(relative));
+	return config.ignore.some(pattern => pattern.glob.match(relative));
+}
+
+/**
+ * What of the directory path `spelling` decides how `config`'s patterns judge every path below it
+ * (see {@link IgnorePattern}). Per pattern, for the path and for it short of each of its last
+ * `span` segments (each *cut*): which leading chunks of the pattern match it, and, where a chunk
+ * that can match that many `/` follows such a match, the segments cut off, which that chunk goes on
+ * matching. Two spellings with the same state have the same files skipped and directories pruned
+ * below them, however long either is, so the set of states is finite where the set of spellings
+ * through a cycle is not.
+ *
+ * It checks the model against `Bun.Glob` on the path itself and throws where they disagree, so a
+ * pattern form it does not model stops the guard instead of merging spellings Bun tells apart.
+ */
+function matchState(config: BunTestConfig, cwd: string, spelling: string): string {
+	const relative = path.relative(cwd, spelling).split(path.sep).join("/");
+	const segments = relative === "" ? [] : relative.split("/");
+	let state = "";
+	for (const pattern of config.ignore) {
+		for (let cut = 0; cut <= pattern.span && cut <= segments.length; cut++) {
+			const prefix = segments.slice(0, segments.length - cut).join("/");
+			let whole = false;
+			let straddled = false;
+			state += "|";
+			for (const { prefixes, spans } of pattern.alternatives) {
+				// `matched`: whether the first `index` chunks match `prefix` (none match only "").
+				let matched = prefix === "";
+				state += matched ? "1" : "0";
+				for (let index = 0; index < prefixes.length; index++) {
+					if (matched && cut > 0 && spans[index]! >= cut) straddled = true;
+					matched = prefixes[index]!.match(prefix);
+					state += matched ? "1" : "0";
+				}
+				whole ||= matched;
+			}
+			// NUL, which no name holds, keeps a name with `|` or a digit from reading as state.
+			if (straddled) state += `\0${segments.slice(segments.length - cut).join("/")}\0`;
+			const modelled = whole !== pattern.negated;
+			if (cut === 0 && modelled !== pattern.glob.match(relative)) {
+				throw new Error(
+					`Cannot model the pathIgnorePatterns entry ${JSON.stringify(pattern.source)} at ${JSON.stringify(relative)}: its parts and \`Bun.Glob\` disagree there.`,
+				);
+			}
+		}
+	}
+	return state;
 }
 
 function isWithin(parent: string, child: string): boolean {
@@ -184,14 +360,11 @@ interface WalkRules {
 	/** Skip a file by the path it was reached at; another path to the same real file can still take it. */
 	skipFile?: (spelling: string) => boolean;
 	/**
-	 * How many times the walk lists one real directory, over the whole walk — not per path. `bun test`
-	 * follows a cycle of links until a path fails with `ELOOP`, and a later spelling can escape a
-	 * pattern an earlier one matched (`loop/a.test.ts` for `a.test.ts`). A pattern of `m` segments
-	 * matches every spelling `prefix/unit^k/rest` with `k > m` alike: at least one copy of the cycle's
-	 * unit then lies wholly inside a `**`, which also absorbs one copy more or less. So `m + 1`
-	 * repetitions (`m + 2` entries) decide every spelling; with no pattern, one entry does.
+	 * The state of a directory's spelling that decides how these rules judge every path below it
+	 * (see {@link matchState}). The walk lists one real directory once per state, so through a cycle
+	 * it takes every later turn a pattern makes matter and no turn more. Without it, once.
 	 */
-	directoryVisits?: number;
+	matchState?: (spelling: string) => string;
 	/**
 	 * Report, for each file taken, the folded-name collisions that decide which real file this command
 	 * reads through that path (see {@link WalkResult.collisions}). Off for a caller that needs only
@@ -211,9 +384,10 @@ interface WalkResult {
 	files: string[];
 	/**
 	 * Groups of paths that collide by folded name in one real directory and decide what a file this
-	 * walk took resolves to: the file's own name, a directory on its path, or its real file's name.
-	 * One `bun test` process reaches one entry of such a group in place of the others, so a test
-	 * reached through one of them is not the test that runs.
+	 * walk took resolves to: its real file's name, always, and the file's own name or a directory on
+	 * its path, where every spelling the walk took the file by goes through one. One `bun test`
+	 * process reaches one entry of such a group in place of the others, so a test reached only through
+	 * one of them is not the test that runs; a spelling free of them runs it whichever entry is kept.
 	 */
 	collisions: CaseCollision[];
 }
@@ -248,24 +422,38 @@ function turnsOf(ancestors: Ancestors | null, realDir: string): number {
  * The walk goes in order of increasing *turns* — how often a spelling re-enters a real directory
  * already on its own path — so through a cycle of links each real file gets the spelling with the
  * fewest turns, and a later turn adds only a file no shorter spelling could take (one whose every
- * shorter spelling a pattern skips). It stops once every real directory it has seen is listed and
- * every test file it has seen is taken: a further turn could then only re-spell files it already
- * has. Each real directory is listed at most `rules.directoryVisits` times over the whole walk, so
- * the work is bounded by the directories rather than by the paths through them: with `D` real
- * directories of at most `E` entries, `P` ignore patterns and paths of at most `h` directories, at
- * most `directoryVisits · D` listings, `O(directoryVisits · D · E · (P + h))` time and
- * `O(directoryVisits · D · E)` memory, whatever the number of links.
+ * shorter spelling a pattern skips). `bun test` follows a cycle until a path fails with `ELOOP`; the
+ * walk instead lists a real directory again only by a spelling in a new {@link WalkRules.matchState},
+ * or the first one free of collisions: any other spelling has below it the same files, judged the
+ * same way, as one already listed. So each path is bounded by itself, not by a budget other paths
+ * spend. It also stops once every real directory it has seen is listed and every test file it has
+ * seen is taken (free of collisions, where they are reported): a further turn could then only
+ * re-spell files it already has.
+ *
+ * With `D` real directories of at most `E` entries and `K` states the patterns tell apart, at most
+ * `2 · K · D` listings, `O(K · D · E · (C + h))` time, `C` being the cost of one {@link matchState}
+ * and `h` the longest path in directories, and `O(K · D · E)` memory, whatever the number of links
+ * and turns. Without a pattern `K` is 1. Otherwise a pattern of `m` chunks gives at most `2^(m+1)`
+ * states per cut, whatever the tree; a chunk that can match `s` slashes also puts the last names
+ * (up to `s`) in the state, at most `N^s` of them for `N` distinct names. Measured: the repository
+ * root's patterns give one state per real directory (1,111 listings for 1,111 directories and
+ * 3,330 links).
  */
 async function walkTestFiles(start: string, baseDir: string, rules: WalkRules): Promise<WalkResult> {
 	const listings = rules.listings ?? new Listings();
-	const visitBudget = rules.directoryVisits ?? 1;
 	const relative = (file: string) => path.relative(baseDir, file).split(path.sep).join("/");
-	const listed = new Map<string, number>();
+	/** Real directory and state listed -> whether a spelling free of collisions listed it. */
+	const listedStates = new Map<string, boolean>();
+	const listedDirs = new Set<string>();
 	const takenFiles = new Set<string>();
-	/** Real test files seen on a path but skipped on every path so far. */
+	/** Real test files taken by a spelling free of collisions (every file taken, where none are reported). */
+	const coveredFiles = new Set<string>();
+	/** Real test files seen on a path but not yet covered. */
 	const pendingFiles = new Set<string>();
 	/** Real directories seen as an entry and not yet listed, pruned spellings included. */
 	const unlistedDirs = new Set<string>();
+	/** Real test files taken only through collisions so far -> the groups on the first such spelling. */
+	const collidingOnly = new Map<string, CaseCollision[]>();
 	const files: string[] = [];
 	const collisions = new Map<string, CaseCollision>();
 	const addCollision = (group: CaseCollision) => {
@@ -285,12 +473,15 @@ async function walkTestFiles(start: string, baseDir: string, rules: WalkRules): 
 	// one reached first among those with the fewest turns.
 	let deferred: Pending[] = [];
 	const visit = async (pending: Pending): Promise<void> => {
-		const visits = listed.get(pending.realDir) ?? 0;
-		if (visits >= visitBudget) return;
+		const clean = pending.onPath.length === 0;
+		const state = `${pending.realDir}\0${rules.matchState?.(pending.spelling) ?? ""}`;
+		const listedClean = listedStates.get(state);
+		if (listedClean === true || (listedClean === false && !clean)) return;
 		// Nothing a further listing could add: every directory seen is listed and every test file
-		// seen is taken, so another turn would only re-spell files already taken.
-		if (visits > 0 && unlistedDirs.size === 0 && pendingFiles.size === 0) return;
-		listed.set(pending.realDir, visits + 1);
+		// seen is covered, so another turn would only re-spell files already taken.
+		if (listedDirs.has(pending.realDir) && unlistedDirs.size === 0 && pendingFiles.size === 0) return;
+		listedStates.set(state, clean);
+		listedDirs.add(pending.realDir);
 		unlistedDirs.delete(pending.realDir);
 		const listing = await listings.get(pending.realDir);
 		const ancestors: Ancestors = { realDir: pending.realDir, parent: pending.ancestors };
@@ -298,15 +489,15 @@ async function walkTestFiles(start: string, baseDir: string, rules: WalkRules): 
 			const spelling = path.join(pending.spelling, entry.name);
 			const collision = rules.reportCollisions ? listing.collisions.get(foldedName(entry.name)) : undefined;
 			const group = collision?.map(member => displayPath(baseDir, path.join(pending.spelling, member.name)));
+			const onPath = group ? [...pending.onPath, group] : pending.onPath;
 			if (entry.isDirectory) {
 				if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
 				const realDir = entry.realPath;
 				if (!realDir) continue;
 				// A pruned spelling counts as a directory still unlisted: another spelling of it,
 				// around the pattern, may yet have to be listed.
-				if ((listed.get(realDir) ?? 0) === 0) unlistedDirs.add(realDir);
+				if (!listedDirs.has(realDir)) unlistedDirs.add(realDir);
 				if (rules.pruneDirectory?.(spelling)) continue;
-				const onPath = group ? [...pending.onPath, group] : pending.onPath;
 				const child: Pending = { spelling, realDir, ancestors, onPath };
 				// A link back into a real directory already on this path turns the cycle: it belongs
 				// to the next turn, so every spelling with fewer turns is taken before it.
@@ -316,31 +507,42 @@ async function walkTestFiles(start: string, baseDir: string, rules: WalkRules): 
 			}
 			if (!entry.isFile || !testFilePattern.test(entry.name)) continue;
 			const realFile = entry.realPath;
-			if (!realFile) continue;
+			if (!realFile || coveredFiles.has(realFile)) continue;
 			if (rules.skipFile?.(spelling)) {
-				if (!takenFiles.has(realFile)) pendingFiles.add(realFile);
+				pendingFiles.add(realFile);
 				continue;
+			}
+			if (onPath.length === 0) {
+				coveredFiles.add(realFile);
+				pendingFiles.delete(realFile);
+				collidingOnly.delete(realFile);
+			} else {
+				pendingFiles.add(realFile);
+				if (!collidingOnly.has(realFile)) collidingOnly.set(realFile, onPath);
 			}
 			if (takenFiles.has(realFile)) continue;
 			takenFiles.add(realFile);
-			pendingFiles.delete(realFile);
 			files.push(relative(spelling));
 			if (!rules.reportCollisions) continue;
-			for (const onPathGroup of pending.onPath) addCollision(onPathGroup);
-			if (group) addCollision(group);
-			// The real file's own directory decides which file this path reads: a link to
-			// `t/Helper.ts` beside `t/helper.ts` runs the entry the process keeps, not the one named.
+			// The real file's own name decides which file every path to it reads, whatever the path:
+			// a link to `t/Helper.ts` beside `t/helper.ts` runs the entry the process keeps.
 			const realDir = path.dirname(realFile);
-			if (realDir === pending.realDir) continue;
+			if (realDir === pending.realDir && path.basename(realFile) === entry.name) {
+				if (group) addCollision(group);
+				continue;
+			}
 			const realGroup = (await listings.get(realDir)).collisions.get(foldedName(path.basename(realFile)));
 			if (realGroup) addCollision(realGroup.map(member => displayPath(baseDir, path.join(realDir, member.name))));
 		}
 	};
-	for (let turn = 0; turn < visitBudget && queue.length > 0; turn++) {
+	while (queue.length > 0) {
 		deferred = [];
 		for (const pending of queue) await visit(pending);
 		queue = deferred;
 	}
+	// A file some spelling free of collisions reaches runs whichever entry of each group the process
+	// keeps; one reached only through them may not, and the first such spelling names what to rename.
+	for (const groups of collidingOnly.values()) for (const group of groups) addCollision(group);
 	return { files, collisions: [...collisions.values()] };
 }
 
@@ -349,7 +551,8 @@ function selectionRules(config: BunTestConfig, cwd: string): WalkRules {
 	// From a root above the working directory, `bun test` walks into neither the working directory
 	// nor any directory between them: their paths relative to it end in `.` or `..`.
 	const prune = (spelling: string) => isWithin(spelling, cwd) || ignored(spelling);
-	return { pruneDirectory: prune, skipFile: ignored, directoryVisits: config.directoryVisits };
+	const state = config.ignore.length > 0 ? (spelling: string) => matchState(config, cwd, spelling) : undefined;
+	return { pruneDirectory: prune, skipFile: ignored, matchState: state };
 }
 
 /**
@@ -486,10 +689,12 @@ function caseCollisionError(groups: CaseCollision[]): Error {
  *
  * It throws, naming the files, when a `bunfig.toml` a command reads is not valid TOML (`bun test`
  * fails there too), and when paths one command reaches collide by ASCII letter case within one
- * directory, because that command reads one of them in place of the other. The collision is per
- * command: each command is its own process with its own directory reads, so two commands reaching
- * `Helper.ts` and `helper.ts` in directories of their own each run their file (measured), and only
- * names meeting in one directory collide.
+ * directory in a way that can change what that command runs: a file whose real name has a twin, or
+ * one the command reaches only through twins. A file another of its spellings reaches free of twins
+ * runs whichever twin the process keeps (measured: `Dir/x.test.ts` and `dir/x.test.ts` with a link
+ * to each directory both run). The collision is per command: each command is its own process with
+ * its own directory reads, so two commands reaching `Helper.ts` and `helper.ts` in directories of
+ * their own each run their file (measured), and only names meeting in one directory collide.
  */
 export async function testFilesWithoutBucket(repoRoot: string, roots: string[], buckets: Buckets): Promise<string[]> {
 	const listings = new Listings();
