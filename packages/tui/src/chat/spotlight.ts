@@ -167,15 +167,11 @@ export interface SpotlightDetails {
 	 */
 	holdout?: boolean;
 	/**
-	 * The edit gate kept an edit-likely read whole: the model got the plain page. Like {@link holdout}, the sizes, steps
-	 * and {@link original} describe the would-be cut, but `savedTokens` is 0. Absent otherwise.
+	 * Transcripts from before the edit gate was removed: the gate kept a read pi guessed the agent would edit whole, and
+	 * the model got the plain page. Like {@link holdout}, the sizes, steps and {@link original} describe the would-be
+	 * cut, but `savedTokens` is 0. pi no longer writes it.
 	 */
 	gated?: boolean;
-	/**
-	 * A read: whether it was likely to be edited (a code file read by a main session, or one the session had already
-	 * read or edited). Absent for other tools.
-	 */
-	editLikely?: boolean;
 	/** Present only when shaping changed the text, or would have ({@link holdout}, {@link gated}). */
 	original?: SpotlightOriginal;
 	/** Present with {@link original} when Spotlight ranked the result's lines. */

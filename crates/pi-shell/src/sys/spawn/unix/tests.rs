@@ -99,6 +99,7 @@ fn spec<'a>(argv: &'a [BString], env: &'a EnvView, pgroup: PgroupSpec) -> SpawnS
 		rlimits: &[],
 		lineage: crate::bash::Lineage::default(),
 		redirs: None,
+		ctty: None,
 	}
 }
 
@@ -575,6 +576,22 @@ fn inherit_abandon_escalation_spares_the_hosts_group() {
 	bystander.wait().unwrap();
 }
 
+/// Reaping retires a process-only leak scope before its pid can be reused.
+#[test]
+fn reaping_retires_inherited_process_scope() {
+	let env = EnvView::default();
+	let s = spawner(Sessions::Inherit, Duration::from_secs(2));
+	let a = sh("exit 0");
+	let mut p = s.spawn(spec(&a, &env, NEW)).unwrap();
+	let scope = Scope::Process { pid: p.pid() as i32 };
+	assert!(s.shared.state.groups.lock().list.contains(&scope));
+	assert_eq!(wait(&mut p), ExitStatus::Exited(0));
+	// A live ExtProc still pins the zombie's identity for signals.
+	assert!(s.shared.state.groups.lock().list.contains(&scope));
+	drop(p);
+	assert!(!s.shared.state.groups.lock().list.contains(&scope));
+}
+
 #[test]
 fn inherit_leftovers_track_the_child_itself() {
 	let env = EnvView::default();
@@ -1034,6 +1051,27 @@ fn ignored_signals_reach_the_child_through_the_fork_path() {
 }
 
 #[test]
+fn signal_the_host_ignores_after_a_spawn_is_reset_in_later_children() {
+	let env = EnvView::default();
+	let s = NativeSpawner::default();
+	let a = sh("kill -USR2 $$; exit 7");
+	assert_eq!(wait(&mut s.spawn(spec(&a, &env, NEW)).unwrap()), ExitStatus::Signaled(Signal::Usr2));
+	// SAFETY: nextest runs each test in its own process; nothing else here
+	// uses USR2, and the default comes back below.
+	unsafe { libc::signal(libc::SIGUSR2, libc::SIG_IGN) };
+	crate::sys::dispositions_changed();
+	let status = wait(&mut s.spawn(spec(&a, &env, NEW)).unwrap());
+	// SAFETY: as above.
+	unsafe { libc::signal(libc::SIGUSR2, libc::SIG_DFL) };
+	crate::sys::dispositions_changed();
+	assert_eq!(
+		status,
+		ExitStatus::Signaled(Signal::Usr2),
+		"the host's new SIG_IGN leaked into the child"
+	);
+}
+
+#[test]
 fn umask_probe_preserves_concurrent_file_creation_mask() {
 	use std::{
 		os::unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -1170,6 +1208,49 @@ fn an_impossible_rlimit_fails_the_spawn_with_the_os_error() {
 	sp.rlimits = &limits;
 	let err = s.spawn(sp).err().expect("setrlimit refuses soft > hard");
 	assert_eq!(err.raw_os_error(), Some(libc::EINVAL), "{err}");
+}
+
+/// A reused descriptor map must not reuse another command's working directory.
+#[test]
+fn consecutive_spawns_apply_their_current_cwd() {
+	let s = NativeSpawner::default();
+	let env = EnvView::default();
+	for cwd in ["/", "/usr", "/"] {
+		let a = sh(&format!("test . -ef {cwd}"));
+		let mut sp = spec(&a, &env, NEW);
+		sp.cwd = cwd.as_bytes().as_bstr();
+		let mut p = s.spawn(sp).unwrap();
+		assert_eq!(wait(&mut p), ExitStatus::Exited(0), "{cwd}");
+	}
+}
+
+/// Cached C environments must track changes, deletion, and recovery after
+/// rejecting an invalid command environment.
+#[test]
+fn consecutive_spawns_receive_their_current_environment() {
+	let s = NativeSpawner::default();
+	for (value, script) in [
+		(Some("first"), r#"test "$SPAWN_CACHE" = first"#),
+		(Some("second"), r#"test "$SPAWN_CACHE" = second"#),
+		(None, r#"test "${SPAWN_CACHE+x}" != x"#),
+	] {
+		let pairs = value
+			.into_iter()
+			.map(|v| ("SPAWN_CACHE".into(), v.into()))
+			.collect();
+		let env = EnvView::new(pairs);
+		let a = sh(script);
+		for _ in 0..2 {
+			let mut p = s.spawn(spec(&a, &env, NEW)).unwrap();
+			assert_eq!(wait(&mut p), ExitStatus::Exited(0));
+		}
+	}
+	let a = sh(r#"test "$SPAWN_CACHE" = recovered"#);
+	let invalid = EnvView::new(vec![("SPAWN_CACHE".into(), BString::from(b"bad\0value"))]);
+	assert_eq!(s.spawn(spec(&a, &invalid, NEW)).err().unwrap().kind(), io::ErrorKind::InvalidInput);
+	let env = EnvView::new(vec![("SPAWN_CACHE".into(), "recovered".into())]);
+	let mut p = s.spawn(spec(&a, &env, NEW)).unwrap();
+	assert_eq!(wait(&mut p), ExitStatus::Exited(0));
 }
 
 #[test]

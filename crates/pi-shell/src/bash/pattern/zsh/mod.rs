@@ -76,6 +76,12 @@ pub use self::{
 	getmatch::{GetMatch, Replace, SubFlags, getmatch, getmatcharr, getmatchlist},
 	token::{haswilds, remnulargs, shtokenize, tokenize},
 };
+/// For the completion matchers (`compmatch.c`'s `mb_patmatchrange` on
+/// `parse_class` strings).
+pub(crate) use self::{
+	class::{mb_class, pp_name, range_type},
+	mbchar::metacharinc,
+};
 
 /// The options pattern code reads (zsh `isset()` in `pattern.c` and the
 /// matching half of `glob.c`), plus the `disable -p` state. Default: zsh's

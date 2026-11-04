@@ -19,7 +19,7 @@ use pi_shell::{
 pub struct NullHost(pub FakeHost);
 
 impl Host for NullHost {
-	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx<'_>) -> Resolved {
+	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx) -> Resolved {
 		self.0.resolve(name, mode, why)
 	}
 

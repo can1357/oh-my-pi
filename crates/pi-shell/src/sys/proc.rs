@@ -172,7 +172,8 @@ fn parse_stat(pid: i32, line: &[u8]) -> Option<ProcInfo> {
 #[cfg(target_os = "linux")]
 mod sys {
 	use std::{
-		fs, io,
+		fs,
+		io::{self, Read},
 		os::fd::{AsRawFd, FromRawFd, OwnedFd},
 	};
 
@@ -198,7 +199,17 @@ mod sys {
 	}
 
 	pub fn info(pid: i32) -> Option<ProcInfo> {
-		let line = fs::read(format!("/proc/{pid}/stat")).ok()?;
+		let mut file = fs::File::open(format!("/proc/{pid}/stat")).ok()?;
+		// The kernel hands over the whole line in one read when it fits (52
+		// numbers and a name of at most 64 bytes do); `fs::read` grows from
+		// 32 bytes a read at a time (a spawn reads its child's).
+		let mut buf = [0; 1024];
+		let n = file.read(&mut buf).ok()?;
+		if n < buf.len() {
+			return parse_stat(pid, &buf[..n]);
+		}
+		let mut line = buf.to_vec();
+		file.read_to_end(&mut line).ok()?;
 		parse_stat(pid, &line)
 	}
 
