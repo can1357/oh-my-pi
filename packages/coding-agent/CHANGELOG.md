@@ -4,7 +4,7 @@
 
 ### Changed
 
-- `--tools <list>` is now an allow-list for everything the model can invoke, not only the initial built-ins: extension, custom, plugin and MCP tools and `xd://` devices are offered or mounted only when the list names them (`mcp:<server>` selects a server's tools, `xd:*` every non-built-in tool as a device), and a list with no MCP entry starts no MCP server. Before, `--tools read,grep,glob` still mounted every extension and MCP tool behind `write xd://`.
+- `--tools <list>` is now an allow-list for everything the model can invoke, not only the initial built-ins: extension, custom, plugin and MCP tools and `xd://` devices are offered or mounted only when the list names them (`mcp:<server>` selects a server's tools, `xd:*` every tool that is not built in), files change only through tools the list names, and a list with no MCP entry starts no MCP server. Before, `--tools read,grep,glob` still mounted every extension and MCP tool behind `write xd://`.
 
 ### Added
 

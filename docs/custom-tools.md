@@ -169,7 +169,7 @@ Although the public `CustomTool` type also declares `formatApprovalDetails`, `de
 - They are inserted into the session tool registry by name.
 - Unrestricted SDK bootstrap auto-enables custom and extension-registered tools unless the effective registry winner is hidden/default-inactive. Explicit `toolNames` can enable hidden tools. Restricted sessions exclude SDK-provided custom tools unless `allowRestrictedCustomTools: true`, and expose an opted-in custom tool only when its name appears in `toolNames`; ambient filesystem tool discovery is skipped.
 - With `tools.xdev` enabled and the `read`/`write` transport available, enabled discoverable tools are mounted under `xd://` rather than advertised as top-level functions. Explicitly requested tools and essential tools stay top-level.
-- CLI `--tools` is an allow-list for every tool the model can invoke: a custom or extension tool is offered only when the list names it, or mounted under `xd://` when the list has `xd:*`. The list validates against the fully discovered session registry, including registered custom tools. Unknown names and unavailable built-ins produce distinct errors; `mcp:<server>` and `xd:*` are selectors, not names.
+- CLI `--tools` is an allow-list for every tool the model can invoke: a custom or extension tool is available only when the list names it or has `xd:*` (every tool that is not built in), and it is mounted under `xd://` as above when the list also names `read`. The list validates against the fully discovered session registry, including registered custom tools. Unknown names and unavailable built-ins produce distinct errors; `mcp:<server>` and `xd:*` are selectors, not names.
 
 ## Rendering hooks
 

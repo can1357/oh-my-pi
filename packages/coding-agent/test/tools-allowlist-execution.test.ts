@@ -301,14 +301,19 @@ describe("other paths that run tools", () => {
 
 	// Round 3: Cursor's native delete frame asked only whether `write` was active,
 	// and a child re-registers `write` as the device transport.
+	// Round 4: a list naming `edit` (but not `write`) still let it delete a file.
 	it("refuses a Cursor delete frame when the list does not name write", async () => {
-		for (const toolNames of [undefined, ["read", "write"]]) {
-			const target = path.join(dir, `cursor-delete-${toolNames ? "explicit" : "default"}.txt`);
+		for (const [label, toolNames, entries] of [
+			["default", undefined, ["read", "task", "mcp:fixture"]],
+			["explicit", ["read", "write"], ["read", "task", "mcp:fixture"]],
+			["edit", ["read", "edit"], ["read", "edit"]],
+		] as const) {
+			const target = path.join(dir, `cursor-delete-${label}.txt`);
 			await Bun.write(target, "keep this file");
 			const child = await create({
-				toolNames,
+				toolNames: toolNames ? [...toolNames] : undefined,
 				requireYieldTool: true,
-				toolAllowList: ToolAllowList.parse(["read", "task", "mcp:fixture"]),
+				toolAllowList: ToolAllowList.parse([...entries]),
 				mcpTools: [fixtureDevice],
 			});
 			const mock = createMockModel({ provider: "openai", responses: [{ content: ["frame done"] }] });
@@ -319,6 +324,56 @@ describe("other paths that run tools", () => {
 			await child.agent.prompt("deliver a native delete frame");
 			expect(await Bun.file(target).text()).toBe("keep this file");
 		}
+	});
+
+	// Round 4: `xd:*` selected by load mode, so it allowed discoverable built-ins
+	// (`ast_edit`, `debug`) and refused a custom tool loaded as essential.
+	it("lets xd:* allow every tool that is not built in, and no built-in", async () => {
+		const essential = {
+			name: "essential_probe",
+			label: "Essential",
+			description: "A custom tool loaded as essential",
+			parameters: type({}),
+			loadMode: "essential",
+			execute: async () => ({ content: [{ type: "text", text: "essential" }] }),
+		} as unknown as CustomTool;
+		const session = await create({
+			toolAllowList: ToolAllowList.parse(["read", "xd:*"]),
+			customTools: [essential],
+			mcpTools: [fixtureDevice],
+		});
+		const available = [...session.getEnabledToolNames(), ...session.getMountedXdevToolNames()];
+		expect(available).toContain("essential_probe");
+		expect(available).toContain("mcp__fixture_probe");
+		for (const builtIn of ["ast_edit", "debug", "bash", "edit", "eval"]) expect(available).not.toContain(builtIn);
+	});
+
+	// Round 4: `xd://report_issue` dispatched before any device check.
+	it("refuses xd://report_issue when the list does not name it", async () => {
+		const session = await create({
+			toolNames: ["read", "ast_edit"],
+			toolAllowList: ToolAllowList.parse(["read", "ast_edit"]),
+		});
+		session.agent.streamFn = createMockModel({
+			provider: "openai",
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "write",
+							arguments: { path: "xd://report_issue", content: JSON.stringify({ tool: "probe", report: "x" }) },
+						},
+					],
+				},
+				{ content: ["done"] },
+			],
+		}).stream;
+		await session.agent.prompt("report an issue");
+		const result = session.agent.state.messages.find(message => message.role === "toolResult");
+		if (result?.role !== "toolResult") throw new Error("The write call produced no tool result");
+		expect(result.isError).toBe(true);
+		expect(JSON.stringify(result.content)).toContain("No such tool: xd://report_issue");
 	});
 
 	it("offers the private auto-learn capture no tool the list does not allow", async () => {

@@ -4183,12 +4183,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// registry tool. Resolve both the transactional active predicate and
 			// live access mode: Agent.state.tools commits only after prompt rebuilding,
 			// while this predicate revokes before the await and rolls back on failure.
+			// A `--tools` list that does not name `write` removes or creates no whole file,
+			// whatever else it allows (`edit` changes the files it edits).
 			allowDirectFileMutation: () =>
-				(editWasGranted && toolSession.isToolActive?.("edit") === true) ||
-				(toolSession.isToolActive?.("write") === true &&
-					toolRegistry.has("write") &&
-					toolSession.deviceOnlyWrite !== true &&
-					!allowListDeniesWrite(toolSession.toolAllowList)),
+				!allowListDeniesWrite(toolSession.toolAllowList) &&
+				((editWasGranted && toolSession.isToolActive?.("edit") === true) ||
+					(toolSession.isToolActive?.("write") === true &&
+						toolRegistry.has("write") &&
+						toolSession.deviceOnlyWrite !== true)),
 		});
 
 		// Resolve the live inline-descriptors setting against the active model.

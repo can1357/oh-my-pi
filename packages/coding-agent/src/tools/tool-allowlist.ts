@@ -5,25 +5,29 @@
  * An entry is one of:
  * - a tool or device name (`read`, `envoy_send`, `mcp__github_create_issue`);
  * - `mcp:<server>`: every tool of that MCP server;
- * - `xd:*`: every tool that would be mounted as an `xd://` device.
+ * - `xd:*`: every tool that is not built in (extension, custom, plugin, MCP).
  *
- * A tool the list does not name is neither offered nor mounted. With no MCP
+ * A tool the list does not name is neither offered nor mounted. Allowed
+ * non-built-in tools are mounted as `xd://` devices when the list also names
+ * `read` (the `xd://` listing reads through it); otherwise they are offered
+ * directly. With no MCP
  * entry (`mcp:<server>`, an `mcp__` name, or `xd:*`) the session starts no MCP
  * server at all, as with `--no-mcp`. The `xd://` transport (`write xd://<tool>`)
- * comes with any allowed device and executes only allowed devices; it writes
- * files only when `write` itself is listed.
+ * comes with any allowed device and executes only allowed devices, the
+ * always-mounted `xd://report_issue` included; it writes files only when
+ * `write` itself is listed.
  */
-import type { ToolLoadMode } from "@oh-my-pi/pi-agent-core";
-import { isMCPToolName } from "./builtin-names";
-import { isMountableUnderXdev } from "./xdev";
+import { BUILTIN_TOOL_NAMES, HIDDEN_TOOL_NAMES, isMCPToolName } from "./builtin-names";
 
 const MCP_SELECTOR_PREFIX = "mcp:";
 const ALL_DEVICES_SELECTOR = "xd:*";
 
+/** omp's own tools; `xd:*` selects every other tool. */
+const BUILT_IN_NAMES: ReadonlySet<string> = new Set<string>([...BUILTIN_TOOL_NAMES, ...HIDDEN_TOOL_NAMES]);
+
 /** A tool as far as the allow-list needs to see it. */
 export interface ToolAllowListSubject {
 	readonly name: string;
-	readonly loadMode?: ToolLoadMode;
 	readonly mcpServerName?: unknown;
 }
 
@@ -41,9 +45,11 @@ export interface ToolAllowListWire {
 
 /**
  * Whether the session's `--tools` list leaves `write` only as the `xd://`
- * transport. It then changes no file through any path: the `write` tool (not
- * even in the session's local:// sandbox), Cursor's native delete and resource
- * download frames, or anything else that asks whether `write` was granted.
+ * transport. Files then change only through a tool the list names (`edit`
+ * changes the files it edits): no file is written or removed whole, by the
+ * `write` tool (not even in the session's local:// sandbox), Cursor's native
+ * delete and resource download frames, or anything else that asks whether
+ * `write` was granted.
  */
 export function allowListDeniesWrite(list: ToolAllowList | undefined): boolean {
 	return list !== undefined && !list.allows("write", undefined);
@@ -109,6 +115,6 @@ export class ToolAllowList {
 		if (this.#names.has(name)) return true;
 		if (!tool) return false;
 		if (typeof tool.mcpServerName === "string" && this.#mcpServers.has(tool.mcpServerName)) return true;
-		return this.#allDevices && isMountableUnderXdev(tool);
+		return this.#allDevices && !BUILT_IN_NAMES.has(tool.name);
 	}
 }
