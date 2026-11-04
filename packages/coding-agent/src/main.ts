@@ -5,11 +5,10 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 import * as fsSync from "node:fs";
-import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
-import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
+import { ensureSqliteLockShim, getHomeDir, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import {
 	APP_NAME,
 	directoryIsMissing,
@@ -1000,7 +999,7 @@ async function switchToResumedProject(
 	// destination preload so sync consumers (plugin-provided LSP/DAP config) never
 	// read the launch project's stale/empty roots during session creation.
 	try {
-		await preloadPluginRoots(os.homedir(), cwd);
+		await preloadPluginRoots(getHomeDir(), cwd);
 		await activeSettings.reloadForCwd(cwd);
 		if (normalizePathForComparison(sessionManager.getCwd()) !== normalizePathForComparison(cwd)) {
 			sessionManager.adoptRecordedCwd();
@@ -1014,7 +1013,7 @@ async function switchToResumedProject(
 			setProjectDir(launchCwd);
 			sessionManager.setCwdWithoutRelocation(launchCwd);
 			clearPluginRootsAndCaches();
-			await preloadPluginRoots(os.homedir(), launchCwd);
+			await preloadPluginRoots(getHomeDir(), launchCwd);
 			// Settings.#cwd was already assigned the destination; re-scope it
 			// back so path-derived values and project saves target the launch
 			// project, not the failed resume target.
@@ -1886,7 +1885,7 @@ export async function runRootCommand(
 
 		// Kick off plugin-root preload in parallel with the remaining startup work.
 		// Awaited later (before extension/skill discovery in createAgentSession needs it).
-		const home = os.homedir();
+		const home = getHomeDir();
 		const pluginPreloadPromise =
 			parsedArgs.pluginDirs && parsedArgs.pluginDirs.length > 0
 				? logger.time("injectPluginDirRoots", injectPluginDirRoots, home, parsedArgs.pluginDirs, getProjectDir())

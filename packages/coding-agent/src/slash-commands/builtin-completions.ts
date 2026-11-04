@@ -1,8 +1,7 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
-import { getMCPConfigPath, getProjectDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getMCPConfigPath, getProjectDir, logger, sanitizeText, getHomeDir } from "@oh-my-pi/pi-utils";
 import { formatModelRoleAlias, getKnownRoleIds } from "../config/model-roles";
 import { cfgCycleOrder } from "../config/model-settings";
 import { readMCPConfigFile } from "../mcp/config-writer";
@@ -421,7 +420,7 @@ function buildDirectoryCompletionDisplayValue(
 	const normalized = path.normalize(absoluteValue);
 
 	if (prefix === "~" || prefix.startsWith("~/")) {
-		const homeRelative = path.relative(os.homedir(), normalized);
+		const homeRelative = path.relative(getHomeDir(), normalized);
 		return `~/${homeRelative.replaceAll("\\", "/")}/`;
 	}
 	// Absolute stays absolute, including Windows drive paths (`C:/…`, `C:\…`).

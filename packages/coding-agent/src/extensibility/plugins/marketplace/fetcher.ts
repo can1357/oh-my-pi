@@ -5,10 +5,9 @@
  */
 
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, getHomeDir } from "@oh-my-pi/pi-utils";
 
 import {
 	isValidNameSegment,
@@ -247,12 +246,12 @@ async function readMarketplaceCatalog(
 }
 
 /**
- * Expand a `~/...` path to an absolute path using os.homedir().
+ * Expand a `~/...` path to an absolute path using getHomeDir().
  * Other paths are returned unchanged.
  */
 function expandHome(p: string): string {
 	if (p.startsWith("~/")) {
-		return path.join(os.homedir(), p.slice(2));
+		return path.join(getHomeDir(), p.slice(2));
 	}
 	return p;
 }

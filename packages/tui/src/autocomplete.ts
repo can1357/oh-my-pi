@@ -1,8 +1,7 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { fuzzyFind } from "@oh-my-pi/pi-natives";
-import { getProjectDir } from "@oh-my-pi/pi-utils";
+import { getProjectDir, getHomeDir } from "@oh-my-pi/pi-utils";
 
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
 
@@ -974,11 +973,11 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	// Expand home directory (~/) to actual home path
 	#expandHomePath(filePath: string): string {
 		if (filePath.startsWith("~/")) {
-			const expandedPath = path.join(os.homedir(), filePath.slice(2));
+			const expandedPath = path.join(getHomeDir(), filePath.slice(2));
 			// Preserve trailing slash if original path had one
 			return filePath.endsWith("/") && !expandedPath.endsWith("/") ? `${expandedPath}/` : expandedPath;
 		} else if (filePath === "~") {
-			return os.homedir();
+			return getHomeDir();
 		}
 		return filePath;
 	}

@@ -1,5 +1,5 @@
-import * as os from "node:os";
 import * as path from "node:path";
+import { getHomeDir } from "@oh-my-pi/pi-utils/path";
 import { normalizeProfileName } from "@oh-my-pi/pi-utils/dirs";
 import { quotePosixArgument } from "../utils/shell-quote";
 
@@ -345,7 +345,7 @@ export async function installProfileAlias(options: ProfileAliasInstallOptions): 
 		throw new Error("--alias requires a named --profile value.");
 	}
 	const platform = options.platform ?? process.platform;
-	const homeDir = options.homeDir ?? os.homedir();
+	const homeDir = options.homeDir ?? getHomeDir();
 	const env = options.env ?? process.env;
 	const shell = normalizeShellName(options.shellPath ?? env.SHELL, platform, env);
 	const aliasName = validateAliasName(options.aliasName, shell);

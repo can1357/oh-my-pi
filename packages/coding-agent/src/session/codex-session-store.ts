@@ -1,6 +1,5 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type {
 	AssistantMessage,
@@ -11,7 +10,7 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, getHomeDir } from "@oh-my-pi/pi-utils";
 import { readForeignJsonRecords } from "./foreign-session-jsonl";
 import type { ForeignSessionInfo, ForeignSessionStore } from "./foreign-session-store";
 import type { CompactionEntry, ModelChangeEntry, SessionEntry, SessionMessageEntry } from "./session-entries";
@@ -460,7 +459,7 @@ export class CodexSessionStore implements ForeignSessionStore {
 	readonly #root: string;
 
 	/** Uses the supplied Codex data root, or ~/.codex by default. */
-	constructor(rootDirectory: string = path.join(os.homedir(), ".codex")) {
+	constructor(rootDirectory: string = path.join(getHomeDir(), ".codex")) {
 		this.#root = path.resolve(rootDirectory);
 	}
 

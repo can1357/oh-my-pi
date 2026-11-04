@@ -17,6 +17,7 @@ import * as path from "node:path";
 import { expandWindowsLongPath } from "@oh-my-pi/pi-natives/path";
 import { engines, version } from "../package.json" with { type: "json" };
 import { isEnoent, isEnotdir } from "./fs-error";
+import { getHomeDir } from "./path";
 import { isBunTestRuntime } from "./test-runtime";
 
 /** App name (e.g. "omp") */
@@ -114,7 +115,7 @@ function readProfileFromEnvSafe(): string | undefined {
 
 /** Profile-independent config root (~/.omp), shared by every omp profile. */
 export function getBaseConfigRoot(): string {
-	return path.join(os.homedir(), getConfigDirName());
+	return path.join(getHomeDir(), getConfigDirName());
 }
 
 function getProfileConfigRoot(profile: string | undefined): string {
@@ -232,7 +233,7 @@ export function getProjectDir(): string {
 		try {
 			cwd = process.cwd();
 		} catch {
-			const candidates = [process.env.PWD, os.homedir(), os.tmpdir()];
+			const candidates = [process.env.PWD, getHomeDir(), os.tmpdir()];
 			for (const candidate of candidates) {
 				if (!candidate || !path.isAbsolute(candidate)) continue;
 				try {
@@ -322,7 +323,7 @@ export function getSafeProjectCwd(): string {
 		const dir = getProjectDir();
 		if (directoryIsEnterableSync(dir)) return dir;
 	} catch {}
-	return os.homedir();
+	return getHomeDir();
 }
 
 /** Get the config directory name relative to home (e.g. ".omp" or PI_CONFIG_DIR override). */
@@ -692,10 +693,11 @@ export function getLogPath(date = new Date(), pid = process.pid): string {
  *
  * No-arg form (production callers) goes through the XDG-aware DirResolver so
  * reads and writes always agree. The optional `home` parameter is for test
- * isolation: when it differs from `os.homedir()` it short-circuits the resolver
- * and returns `<home>/<configDir>/plugins` so tests with a temp HOME get a
- * deterministic path. Passing `os.homedir()` explicitly is identical to the
- * no-arg form — XDG semantics are preserved.
+ * isolation: when it differs from the home the process started with it
+ * short-circuits the resolver and returns `<home>/<configDir>/plugins`, so a
+ * temp home (passed explicitly, or set as `HOME` at runtime and passed on by
+ * {@link getHomeDir}) gets a deterministic path. Passing the start-up home is
+ * identical to the no-arg form — XDG semantics are preserved.
  */
 export function getPluginsDir(home?: string): string {
 	if (home !== undefined && home !== RESOLVER_HOME) {
@@ -739,8 +741,8 @@ function resolveAbsoluteDir(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 	if (!trimmed) return undefined;
 	let p = trimmed;
-	if (p === "~") p = os.homedir();
-	else if (p.startsWith("~/") || p.startsWith("~\\")) p = os.homedir() + p.slice(1);
+	if (p === "~") p = getHomeDir();
+	else if (p.startsWith("~/") || p.startsWith("~\\")) p = getHomeDir() + p.slice(1);
 	return path.isAbsolute(p) ? path.normalize(p) : undefined;
 }
 

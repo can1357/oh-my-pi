@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getHomeDir } from "@oh-my-pi/pi-utils/path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getTerminalId } from "@oh-my-pi/pi-tui/ttyid";
 import {
@@ -86,7 +87,7 @@ function getDefaultSessionDirName(cwd: string): {
 } {
 	const resolvedCwd = path.resolve(cwd);
 	const canonicalCwd = resolveEquivalentPath(resolvedCwd);
-	const home = os.homedir();
+	const home = getHomeDir();
 	const canonicalHome = resolveEquivalentPath(home);
 	const tempRoot = os.tmpdir();
 	const canonicalTempRoot = resolveEquivalentPath(tempRoot);
@@ -130,7 +131,7 @@ function migrateHomeSessionDirs(sessionsRoot: string): void {
 	if (migratedSessionRoots.has(sessionsRoot)) return;
 	migratedSessionRoots.add(sessionsRoot);
 
-	const home = os.homedir();
+	const home = getHomeDir();
 	const homeEncoded = home.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-");
 	const oldPrefix = `--${homeEncoded}-`;
 	const oldExact = `--${homeEncoded}--`;

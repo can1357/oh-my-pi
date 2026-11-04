@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { getHomeDir } from "@oh-my-pi/pi-utils/path";
 
-export const DEFAULT_PLUGIN_DIR = join(homedir(), ".hermes", "mnemopi", "plugins");
+export const DEFAULT_PLUGIN_DIR = join(getHomeDir(), ".hermes", "mnemopi", "plugins");
 
 export type PluginConfig = Record<string, unknown>;
 export type MemoryDict = Record<string, unknown>;

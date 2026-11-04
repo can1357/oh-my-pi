@@ -6,6 +6,7 @@ import {
 	CONFIG_DIR_NAME,
 	getAgentDir,
 	getConfigDirName,
+	getHomeDir,
 	getPluginsDir,
 	getProjectDir,
 	isEnoent,
@@ -1038,7 +1039,7 @@ export function parseClaudePluginsRegistry(content: string): ClaudePluginsRegist
 /** Project discovery never examines home or shared temporary roots, or their ancestors. */
 export function getProjectDiscoveryCeilings(): ReadonlySet<string> {
 	const ceilings = new Set<string>();
-	ceilings.add(normalizePathForComparison(os.homedir()));
+	ceilings.add(normalizePathForComparison(getHomeDir()));
 	ceilings.add(normalizePathForComparison(os.tmpdir()));
 	if (process.platform !== "win32") {
 		ceilings.add(normalizePathForComparison("/tmp"));
@@ -1051,7 +1052,7 @@ export function getProjectDiscoveryCeilings(): ReadonlySet<string> {
 export function isUserConfigRoot(root: string): boolean {
 	const configDir = normalizePathForComparison(path.join(root, getConfigDirName()));
 	return (
-		configDir === normalizePathForComparison(path.join(os.homedir(), getConfigDirName())) ||
+		configDir === normalizePathForComparison(path.join(getHomeDir(), getConfigDirName())) ||
 		configDir === normalizePathForComparison(path.dirname(getPluginsDir()))
 	);
 }
@@ -1445,9 +1446,9 @@ async function loadClaudePluginRoots({
 
 	// ── OMP installed plugins registry ───────────────────────────────────────
 	// OMP registry is authoritative: its entries replace Claude's entries for the same plugin ID.
-	// In production `home` is `os.homedir()`, so `getPluginsDir(home)` resolves to the
-	// same XDG-aware path the marketplace writer uses (reads and writes always agree).
-	// Tests pass a temp dir, which short-circuits the resolver for deterministic isolation.
+	// In production `home` is `getHomeDir()`, the start-up home, so `getPluginsDir(home)` resolves to
+	// the same XDG-aware path the marketplace writer uses (reads and writes always agree).
+	// Tests pass a temp dir or set HOME at runtime, which short-circuits the resolver for deterministic isolation.
 	// Computed before the cache lookup because isolated SDK homes select distinct OMP registries.
 	const ompContent = await readFile(ompRegistryPath);
 	if (ompContent) {

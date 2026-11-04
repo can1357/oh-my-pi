@@ -5,7 +5,6 @@
  * above a GitHub-style daily activity heatmap fed by the local stats DB.
  * Enter flips into the classic full per-account report, scrollable in place.
  */
-import * as os from "node:os";
 import { resolveUsedFraction, type UsageLimit, type UsageReport } from "@oh-my-pi/pi-ai";
 import {
 	type Component,
@@ -17,7 +16,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "../index";
-import { colorLuma, formatDuration, hexToRgb, rgbToHex, sanitizeText } from "@oh-my-pi/pi-utils";
+import { colorLuma, formatDuration, hexToRgb, rgbToHex, sanitizeText, getHomeDir } from "@oh-my-pi/pi-utils";
 import { formatProviderName } from "../chrome/format";
 import {
 	collapseSharedUsageReports,
@@ -646,7 +645,7 @@ export interface UsageDashboardOptions {
  * Strips ANSI/control sequences, expands tabs, collapses whitespace runs/newlines,
  * shortens home directory paths to ~, and removes trailing dots.
  */
-export function formatActivityErrorDetail(error: string, homeDir = os.homedir()): string {
+export function formatActivityErrorDetail(error: string, homeDir = getHomeDir()): string {
 	let text = replaceTabs(sanitizeText(error)).replace(/\s+/g, " ").trim();
 	if (homeDir) {
 		const escaped = RegExp.escape(homeDir);

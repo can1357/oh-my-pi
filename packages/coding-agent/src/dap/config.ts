@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { isRecord, logger, WhichCachePolicy } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, WhichCachePolicy, getHomeDir } from "@oh-my-pi/pi-utils";
 import { hasRootMarkers, parseConfigContent, resolveCommand } from "../lsp/config";
 import { type ConfigFileAdapter, configFileSources } from "../utils/config-file-sources";
 import DEFAULTS from "./defaults.json" with { type: "json" };
@@ -126,11 +125,11 @@ function normalizeCommandForCwd(command: string, cwd: string): string {
 
 function resolveJsDebugServerPath(cwd: string): string | null {
 	const configured = process.env[JS_DEBUG_SERVER_ENV];
-	const dataHome = process.env.XDG_DATA_HOME ?? path.join(os.homedir(), ".local", "share");
+	const dataHome = process.env.XDG_DATA_HOME ?? path.join(getHomeDir(), ".local", "share");
 	const candidates = [
 		...(configured ? [path.resolve(cwd, configured)] : []),
 		path.join(dataHome, "nvim", "mason", "packages", "js-debug-adapter", "js-debug", "src", "dapDebugServer.js"),
-		path.join(os.homedir(), ".local", "opt", "js-debug", "src", "dapDebugServer.js"),
+		path.join(getHomeDir(), ".local", "opt", "js-debug", "src", "dapDebugServer.js"),
 	];
 	for (const candidate of candidates) {
 		if (fs.existsSync(candidate)) return candidate;

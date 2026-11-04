@@ -56,9 +56,36 @@ export function isFullyQualifiedPath(filePath: string, platform: NodeJS.Platform
 	return true;
 }
 
+/**
+ * `os.homedir()` as this module first saw it. Bun reads the home once per
+ * process and keeps it, so a `HOME` set later (a test's temp home, a worker
+ * started after a parent changed `HOME`) never reaches `os.homedir()`.
+ */
+const STARTUP_HOME = os.homedir();
+
+/**
+ * The user's home directory. Paths rooted at home MUST resolve it here, not via
+ * `os.homedir()`.
+ *
+ * Bun's `os.homedir()` ignores a `HOME` (`USERPROFILE` on Windows) set after
+ * start-up, so this reads the variable itself. Order:
+ * 1. `os.homedir()` when it no longer returns the start-up home: something in
+ *    this process redirected it (a test's `vi.spyOn(os, "homedir")`).
+ * 2. `HOME` when set and non-empty.
+ * 3. `os.homedir()` (the start-up `HOME`, else the passwd entry). An unset or
+ *    empty variable lands here, never on a path relative to the cwd.
+ * With the start-up environment unchanged, every step returns what
+ * `os.homedir()` returns.
+ */
+export function getHomeDir(): string {
+	const home = os.homedir();
+	if (home !== STARTUP_HOME) return home;
+	return (process.platform === "win32" ? process.env.USERPROFILE : process.env.HOME) || home;
+}
+
 /** Expands a leading `~` (`~`, `~/…`, `~\…`, `~name`) to `home`, the user's home directory by default. */
 export function expandTilde(filePath: string, home?: string): string {
-	const h = home ?? os.homedir();
+	const h = home ?? getHomeDir();
 	if (filePath === "~") return h;
 	if (filePath.startsWith("~/") || filePath.startsWith("~\\")) {
 		return h + filePath.slice(1);

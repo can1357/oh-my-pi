@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Default data, cache, model, blob and plugin directories resolve under `HOME` as set when mnemopi loads, not only the start-up home
+
 ## [18.14.2] - 2026-10-31
 
 ### Fixed

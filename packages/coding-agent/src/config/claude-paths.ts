@@ -1,5 +1,5 @@
-import * as os from "node:os";
 import * as path from "node:path";
+import { getHomeDir } from "@oh-my-pi/pi-utils";
 
 /** Paths to Claude Code's user data and configuration file. */
 export interface ClaudePaths {
@@ -8,7 +8,7 @@ export interface ClaudePaths {
 }
 
 /** Resolves Claude Code's user paths, honoring `CLAUDE_CONFIG_DIR`. */
-export function resolveClaudePaths(home: string = os.homedir()): ClaudePaths {
+export function resolveClaudePaths(home: string = getHomeDir()): ClaudePaths {
 	const override = process.env.CLAUDE_CONFIG_DIR?.trim();
 	if (override) {
 		const configDir = path.resolve(override);

@@ -1,6 +1,5 @@
-import * as os from "node:os";
 import { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "../utils";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { sanitizeText, getHomeDir } from "@oh-my-pi/pi-utils";
 import { expandKeyHint, shortenEmbeddedPaths, TRUNCATE_LENGTHS } from "../render/render-utils";
 import { theme } from "../theme/index";
 /** Indent for every row after the first, so continuations hang under the prefix. */
@@ -14,7 +13,7 @@ const CONTINUATION_INDENT = "  ";
 export function sanitizeErrorLine(
 	error: unknown,
 	maxWidth: number = TRUNCATE_LENGTHS.LINE,
-	homeDir: string = os.homedir(),
+	homeDir: string = getHomeDir(),
 ): string {
 	const message = error instanceof Error ? error.message : String(error);
 	const text = shortenEmbeddedPaths(replaceTabs(sanitizeText(message.replace(/\r\n?/g, "\n"))), homeDir, true);

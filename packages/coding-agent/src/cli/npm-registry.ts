@@ -16,9 +16,8 @@
  * install, and the working directory it runs from is incidental.
  */
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import { isEnoent, isRecord } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, getHomeDir } from "@oh-my-pi/pi-utils";
 
 /** Public npm registry; used when no user configuration names another one. */
 export const DEFAULT_NPM_REGISTRY = "https://registry.npmjs.org/";
@@ -64,7 +63,7 @@ export interface LoadNpmRegistryOptions {
 /** Read the user's npm/bun registry configuration once and return a per-package resolver. */
 export async function loadNpmRegistryResolver(options: LoadNpmRegistryOptions = {}): Promise<NpmRegistryResolver> {
 	const env = options.env ?? Bun.env;
-	const homeDir = options.homeDir ?? os.homedir();
+	const homeDir = options.homeDir ?? getHomeDir();
 
 	const npmrcPath = envLookup(env, "npm_config_userconfig") ?? path.join(homeDir, ".npmrc");
 	const npmrcText = await readOptional(npmrcPath);

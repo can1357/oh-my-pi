@@ -15,9 +15,8 @@
  *
  * Priority: 55 (tool-specific provider)
  */
-import * as os from "node:os";
 import * as path from "node:path";
-import { isRecord, logger, parseFrontmatter } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, parseFrontmatter, getHomeDir } from "@oh-my-pi/pi-utils";
 import { JSONC } from "bun";
 import { registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
@@ -117,7 +116,7 @@ async function substituteConfigVars(text: string, configPath: string): Promise<s
 		}
 
 		let filePath = token.slice("{file:".length, -1);
-		if (filePath.startsWith("~/")) filePath = path.join(os.homedir(), filePath.slice(2));
+		if (filePath.startsWith("~/")) filePath = path.join(getHomeDir(), filePath.slice(2));
 		const resolved = path.isAbsolute(filePath) ? filePath : path.resolve(configDir, filePath);
 
 		const fileContent = await readFile(resolved);

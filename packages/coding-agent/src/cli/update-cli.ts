@@ -11,6 +11,7 @@ import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { applyBinaryPatch } from "@oh-my-pi/pi-natives";
 import {
+	getHomeDir,
 	$which,
 	APP_NAME,
 	compareVersions,
@@ -354,7 +355,7 @@ function getMiseDataDir(): string {
 	}
 	const xdgDataHome = process.env.XDG_DATA_HOME;
 	if (xdgDataHome && xdgDataHome.length > 0) return path.join(xdgDataHome, "mise");
-	return path.join(os.homedir(), ".local", "share", "mise");
+	return path.join(getHomeDir(), ".local", "share", "mise");
 }
 
 function normalizePathForComparison(filePath: string): string {

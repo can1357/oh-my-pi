@@ -3,8 +3,8 @@
  * which name source, which run tests, which run the agent's own programs.
  */
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
+import { getHomeDir } from "@oh-my-pi/pi-utils/path";
 
 /** Source extensions: code windows outline, and reads of these are "source reads". */
 export const SOURCE_PATH =
@@ -208,7 +208,7 @@ export interface ResolvedFile {
 	abs: string;
 }
 
-const expandHome = (p: string) => (p === "~" || p.startsWith("~/") ? path.join(os.homedir(), p.slice(1)) : p);
+const expandHome = (p: string) => (p === "~" || p.startsWith("~/") ? path.join(getHomeDir(), p.slice(1)) : p);
 
 /**
  * The files `target` prints, resolved against `cwd` after its `cd` segments, globs expanded in shell order.

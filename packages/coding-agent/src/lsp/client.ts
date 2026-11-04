@@ -1,7 +1,6 @@
-import * as os from "node:os";
 import * as path from "node:path";
 import { glob } from "@oh-my-pi/pi-natives";
-import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted, getHomeDir } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { resolveSyscallTarget } from "../tools/path-utils";
@@ -701,7 +700,7 @@ async function workspaceFolderToAdd(client: LspClient, filePath: string): Promis
 	if (!checkout || checkout === (await findRepoRoot(await realPathOf(client.cwd)))) return undefined;
 	// A repository at or above the home directory (a dotfiles checkout) would have the
 	// server index everything under it.
-	if (isPathInsideWorkspace(await realPathOf(os.homedir()), checkout)) return undefined;
+	if (isPathInsideWorkspace(await realPathOf(getHomeDir()), checkout)) return undefined;
 	return checkout;
 }
 

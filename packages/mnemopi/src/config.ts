@@ -1,5 +1,5 @@
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { getHomeDir } from "@oh-my-pi/pi-utils/path";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	type Env,
@@ -16,10 +16,10 @@ import {
 export type { Env };
 export { envBool, envDisabled, envFloat, envInt, envOneOf, envOptionalString, envString, envTruthy };
 
-export const DEFAULT_DATA_DIR = join(homedir(), ".hermes", "mnemopi", "data");
+export const DEFAULT_DATA_DIR = join(getHomeDir(), ".hermes", "mnemopi", "data");
 export const DEFAULT_DB_FILENAME = "mnemopi.db";
-export const FASTEMBED_CACHE_DIR = join(homedir(), ".hermes", "cache", "fastembed");
-export const MODEL_CACHE_DIR = join(homedir(), ".hermes", "mnemopi", "models");
+export const FASTEMBED_CACHE_DIR = join(getHomeDir(), ".hermes", "cache", "fastembed");
+export const MODEL_CACHE_DIR = join(getHomeDir(), ".hermes", "mnemopi", "models");
 
 export const DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5";
 export const DEFAULT_EMBEDDING_API_URL = "https://openrouter.ai/api/v1";

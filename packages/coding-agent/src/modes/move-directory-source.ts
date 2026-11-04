@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import { getHomeDir } from "@oh-my-pi/pi-utils/path";
 import type { MoveDirectorySource, MoveDirectoryEntry } from "@oh-my-pi/pi-tui/overlays/move-overlay";
 
 /** TTL for the directory listing cache (ms). */
@@ -44,8 +44,8 @@ function entryIsDirectory(dir: string, entry: fs.Dirent): boolean {
 /** Resolve a user-typed path (`~`, absolute, or relative to `cwd`) to an absolute path. */
 export function resolveMovePath(input: string, cwd: string): string {
 	const trimmed = input.trim();
-	if (trimmed === "~") return os.homedir();
-	if (trimmed.startsWith("~/")) return path.join(os.homedir(), trimmed.slice(2));
+	if (trimmed === "~") return getHomeDir();
+	if (trimmed.startsWith("~/")) return path.join(getHomeDir(), trimmed.slice(2));
 	if (path.isAbsolute(trimmed)) return path.normalize(trimmed);
 	return path.resolve(cwd, trimmed);
 }

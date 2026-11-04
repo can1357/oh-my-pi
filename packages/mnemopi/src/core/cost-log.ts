@@ -1,8 +1,8 @@
 import type { Database } from "bun:sqlite";
-import * as os from "node:os";
 import * as path from "node:path";
+import { getHomeDir } from "@oh-my-pi/pi-utils/path";
 import { openDatabase } from "../db";
-export const DEFAULT_LOG_DIR = path.join(os.homedir(), ".mnemopi", "data");
+export const DEFAULT_LOG_DIR = path.join(getHomeDir(), ".mnemopi", "data");
 export const DEFAULT_LOG_DB = path.join(DEFAULT_LOG_DIR, "cost_log.db");
 
 export interface CostStats {

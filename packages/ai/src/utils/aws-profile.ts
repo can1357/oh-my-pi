@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { $env } from "@oh-my-pi/pi-utils";
+import { $env, getHomeDir } from "@oh-my-pi/pi-utils";
 
 /** INI sections with `profile ` / `sso-session ` prefixes normalized. */
 export type AwsIniFile = Record<string, Record<string, string>>;
@@ -59,8 +58,8 @@ export function shouldLoadAwsSharedConfig(profile?: string): boolean {
 /** Shared credentials and config file locations, honoring their env overrides. */
 export function awsSharedFilePaths(): { credentialsPath: string; configPath: string } {
 	return {
-		credentialsPath: $env.AWS_SHARED_CREDENTIALS_FILE || path.join(os.homedir(), ".aws", "credentials"),
-		configPath: $env.AWS_CONFIG_FILE || path.join(os.homedir(), ".aws", "config"),
+		credentialsPath: $env.AWS_SHARED_CREDENTIALS_FILE || path.join(getHomeDir(), ".aws", "credentials"),
+		configPath: $env.AWS_CONFIG_FILE || path.join(getHomeDir(), ".aws", "config"),
 	};
 }
 

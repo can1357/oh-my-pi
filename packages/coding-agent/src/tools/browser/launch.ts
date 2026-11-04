@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	getHomeDir,
 	$which,
 	getPuppeteerDir,
 	isEnoent,
@@ -490,7 +491,7 @@ const UNGOOGLED_CHROMIUM_FLATPAK_ID = "io.github.ungoogled_software.ungoogled_ch
 
 function systemChromiumCandidates(
 	platform: NodeJS.Platform = process.platform,
-	home = os.homedir(),
+	home = getHomeDir(),
 	which: (name: string) => string | null | undefined = $which,
 ): string[] {
 	const candidates: string[] = [];

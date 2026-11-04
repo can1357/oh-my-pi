@@ -1,4 +1,3 @@
-import * as os from "node:os";
 import * as path from "node:path";
 import {
 	type AfterToolCallContext,
@@ -14,7 +13,7 @@ import {
 	createToolScopedAbortReason,
 } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Judge, ToolCall } from "@oh-my-pi/pi-ai";
-import { logger, prompt, relativePathWithinRoot, withTimeout } from "@oh-my-pi/pi-utils";
+import { logger, prompt, relativePathWithinRoot, withTimeout, getHomeDir } from "@oh-my-pi/pi-utils";
 import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule } from "../capability/rule";
 import type { Settings } from "../config/settings";
 import {
@@ -387,7 +386,7 @@ export class TtsrCoordinator {
 		const cwd = this.#host.sessionManager.getCwd();
 		const cwdRelative = relativePathWithinRoot(cwd, rulePath) ?? this.#displayPathWithinRoot(cwd, rulePath);
 		if (cwdRelative) return cwdRelative;
-		const homeRelative = relativePathWithinRoot(os.homedir(), rulePath);
+		const homeRelative = relativePathWithinRoot(getHomeDir(), rulePath);
 		if (homeRelative) return `~/${homeRelative}`;
 		return rulePath;
 	}

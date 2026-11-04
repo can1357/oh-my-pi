@@ -1,10 +1,9 @@
 import type { SummaryResult } from "@oh-my-pi/pi-natives";
 import { formatNumberedLine } from "./hashline-format";
 import { LINE_RANGE_CHUNK_SOURCE, parseLineRanges } from "./line-ranges";
-import * as os from "node:os";
 import * as path from "node:path";
 import { parseArchivePathCandidates } from "@oh-my-pi/pi-utils/ar";
-import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, sanitizeText, getHomeDir } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import type {
@@ -346,7 +345,7 @@ const BARE_WEB_HOST_RE = /^(?:(?:[a-z][a-z0-9-]*|\[[0-9a-f:]+\])(?::\d+)|(?:[a-z
  * expands `~` and drops archive-member / SQLite-row selectors so the link opens
  * the containing file. */
 export function pendingFileLinkPath(inputPath: string): string {
-	const expanded = inputPath.replace(/^~(?=$|[\\/])/, os.homedir());
+	const expanded = inputPath.replace(/^~(?=$|[\\/])/, getHomeDir());
 	if (!expanded.includes(":")) return path.resolve(expanded);
 	const archive = parseArchivePathCandidates(expanded).find(candidate => candidate.archivePath !== expanded);
 	const sqlite = expanded.match(/^(.+\.(?:sqlite3?|db3?))(?=[:?])/i);

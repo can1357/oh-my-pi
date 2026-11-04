@@ -13,9 +13,8 @@
  */
 
 import { Buffer } from "node:buffer";
-import * as os from "node:os";
 import * as path from "node:path";
-import { $envpos, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $envpos, isEnoent, logger, getHomeDir } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
@@ -92,7 +91,7 @@ export function userAdcPath(
 	appData: string | undefined = Bun.env.APPDATA,
 ): string {
 	const gcloudDir =
-		platform === "win32" && appData ? path.join(appData, "gcloud") : path.join(os.homedir(), ".config", "gcloud");
+		platform === "win32" && appData ? path.join(appData, "gcloud") : path.join(getHomeDir(), ".config", "gcloud");
 	return path.join(gcloudDir, "application_default_credentials.json");
 }
 

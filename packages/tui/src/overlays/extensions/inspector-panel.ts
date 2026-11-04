@@ -5,7 +5,7 @@
  * identity → runtime/enablement → description → origin →
  * kind-specific surface → contents → boring config.
  */
-import * as os from "node:os";
+import { getHomeDir } from "@oh-my-pi/pi-utils/path";
 import type { TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { Component } from "../../tui";
 import { code, col, compact, keyed, kv, node, span, stableKey, text } from "../../native/describe";
@@ -174,7 +174,7 @@ export class InspectorPanel implements Component {
 				"Path",
 				[
 					span(
-						sanitizeDisplayText(shortenPath(ext.path, os.homedir())),
+						sanitizeDisplayText(shortenPath(ext.path, getHomeDir())),
 						"path dim",
 						filePath.startsWith("/") ? { href: `file://${filePath}` } : undefined,
 					),
@@ -435,7 +435,7 @@ export class InspectorPanel implements Component {
 		if (shadowed) {
 			const command =
 				isDiscoveredMcpServer(ext.raw) && ext.raw.command
-					? shortenPath(sanitizeDisplayText(ext.raw.command), os.homedir())
+					? shortenPath(sanitizeDisplayText(ext.raw.command), getHomeDir())
 					: undefined;
 			return { runtime: [], sections: [], config: [["Command", command ? [span(command, "mono")] : undefined]] };
 		}
@@ -476,7 +476,7 @@ export class InspectorPanel implements Component {
 			health: true,
 			sections,
 			config: [
-				["Command", snap?.command ? [span(shortenPath(snap.command, os.homedir()), "mono")] : undefined],
+				["Command", snap?.command ? [span(shortenPath(snap.command, getHomeDir()), "mono")] : undefined],
 				["URL", snap?.url ? [span(snap.url, "mono", { href: snap.url })] : undefined],
 				["Args", snap?.args && snap.args.length > 0 ? [span(snap.args.join(" "), "mono dim")] : undefined],
 				["Env vars", snap && snap.envCount > 0 ? [span(`${snap.envCount} defined`, "dim")] : undefined],
@@ -543,7 +543,7 @@ export class InspectorPanel implements Component {
 		if (shadowed) {
 			const config: string[] = [];
 			if (isDiscoveredMcpServer(ext.raw) && ext.raw.command) {
-				this.#pushLabeled(config, "Command", shortenPath(ext.raw.command, os.homedir()), width, "success");
+				this.#pushLabeled(config, "Command", shortenPath(ext.raw.command, getHomeDir()), width, "success");
 			}
 			if (config.length > 0) config.push("");
 			return { description: undefined, surface: [], contents: [], config };
@@ -624,7 +624,7 @@ export class InspectorPanel implements Component {
 		}
 
 		if (snap?.command)
-			this.#pushLabeled(config, "Command", shortenPath(snap.command, os.homedir()), width, "success");
+			this.#pushLabeled(config, "Command", shortenPath(snap.command, getHomeDir()), width, "success");
 		if (snap?.url) this.#pushLabeled(config, "URL", snap.url, width, "success");
 		if (snap?.args && snap.args.length > 0) this.#pushLabeled(config, "Args", snap.args.join(" "), width, "dim");
 		if (snap && snap.envCount > 0) {
@@ -880,7 +880,7 @@ export class InspectorPanel implements Component {
 			width,
 			"  ",
 		);
-		this.#pushWrapped(lines, theme.fg("dim", sanitizeDisplayText(shortenPath(ext.path, os.homedir()))), width, "  ");
+		this.#pushWrapped(lines, theme.fg("dim", sanitizeDisplayText(shortenPath(ext.path, getHomeDir()))), width, "  ");
 		lines.push("");
 	}
 
