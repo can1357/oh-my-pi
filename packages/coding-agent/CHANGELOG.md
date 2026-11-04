@@ -332,6 +332,7 @@
 - `devin-cli` login imports Devin CLI credentials, so the `devin` provider no longer requires `DEVIN_API_KEY` ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - `devin-windsurf` login authenticates the `devin` provider with an existing Windsurf Enterprise account ([#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - Fixed a key or two you type in another app on macOS being lost while omp's relay tab opens a new tab or popup; they now reach your app when omp has the Accessibility permission the `computer` tool uses, and `PI_BROWSER_RELAY_KEEP_FRONT=0` turns this off with the hand-back ([#17894](https://github.com/can1357/oh-my-pi/pull/17894) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a key or two you type in another app on macOS being lost while omp's relay tab opens a new tab or popup; they now reach your app when omp has the Accessibility permission the `computer` tool uses, and `PI_BROWSER_RELAY_KEEP_FRONT=0` turns this off with the hand-back. Input waiting for the relay's browser lookup now fails if Chrome detached omp in the meantime, instead of reaching a replacement attachment ([#17894](https://github.com/can1357/oh-my-pi/pull/17894) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 

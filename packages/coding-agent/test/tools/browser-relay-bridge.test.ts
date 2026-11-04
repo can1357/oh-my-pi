@@ -2770,6 +2770,44 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		},
 	);
 
+	it("rejects input queued before a debugger detach while the browser lookup is pending", async () => {
+		const lookup = Promise.withResolvers<number | null>();
+		const bridge = new RelayBridge();
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], [], () => lookup.promise);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const oldPage = await attachPage(bridge, ext, cdp, connId, 1);
+		const inputId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: inputId,
+				sessionId: oldPage,
+				method: "Input.dispatchKeyEvent",
+				params: { type: "keyDown", key: "Enter" },
+			}),
+		);
+		await flush();
+		expect(ext.rpcs("send").filter(rpc => rpc.method === "Input.dispatchKeyEvent")).toEqual([]);
+		expect(cdp.messages.find(msg => msg.id === inputId)).toBeUndefined();
+
+		bridge.extMessage(ext, JSON.stringify({ t: "detached", tabId: 1, reason: "target_closed" }));
+		await flush();
+		const page = await attachPage(bridge, ext, cdp, connId, 1);
+		expect(page).not.toBe(oldPage);
+		expect(ext.rpcs("attach")).toHaveLength(2);
+
+		lookup.resolve(222);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+		expect(cdp.messages.find(msg => msg.id === inputId)?.error).toMatchObject({
+			message: expect.stringContaining("debugger attachment changed"),
+		});
+		expect(ext.rpcs("send").filter(rpc => rpc.method === "Input.dispatchKeyEvent")).toEqual([]);
+	});
+
 	it("does not take the user's keys back from a browser found for a socket since replaced", async () => {
 		const { holds, readBrowsers, frontApp } = frontAppRecorder();
 		const bridge = new RelayBridge();

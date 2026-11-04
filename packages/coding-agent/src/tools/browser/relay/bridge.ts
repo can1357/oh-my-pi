@@ -1232,10 +1232,15 @@ export class RelayBridge {
 			return true;
 		}
 		const socket = inst.socket;
+		const generation = tab.runtimeGeneration;
 		// Every forwarded command joins the same lookup, even after it settles, so a key release cannot overtake its press.
 		const browserPid = inst.browserLookup ? await inst.browserLookup : null;
 		if (inst.socket !== socket || this.#tabs.get(tabKey) !== tab) {
 			this.#replyError(conn, msg, "relay extension connection changed before input");
+			return false;
+		}
+		if (tab.runtimeGeneration !== generation) {
+			this.#replyError(conn, msg, "relay debugger attachment changed before input");
 			return false;
 		}
 		if (this.#readFrontApp && canOpenWindow(msg.method, msg.params)) {
