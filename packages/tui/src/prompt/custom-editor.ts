@@ -839,16 +839,9 @@ export class CustomEditor extends Editor {
 	 *  time a frame is queued. */
 	#shimmerTimer: Timer | undefined;
 	/** Repaint hook the host wires once at construction. Called from the shimmer
-	 *  timer to request the next animation frame, and when Accept settles after
-	 *  typing. Undefined when nobody is listening (tests, headless callers); the
-	 *  timer chain still self-cleans. */
+	 *  timer to request the next animation frame. Undefined when nobody is
+	 *  listening (tests, headless callers); the timer chain still self-cleans. */
 	#requestShimmerRepaint: (() => void) | undefined;
-	/** How long the native bar holds Accept back after a keystroke edits the draft, so a
-	 *  suggestion that comes and goes mid-word does not blink the button. The ghost text
-	 *  and Tab stay immediate. */
-	static readonly ACCEPT_SETTLE_MS = 500;
-	/** Pending while Accept is held back after typing; firing repaints the bar. */
-	#acceptSettleTimer: Timer | undefined;
 	/** Text revision the per-revision decoration inputs below were computed for. */
 	#decorationRevision = -1;
 	#decorationText = "";
@@ -1120,7 +1113,7 @@ export class CustomEditor extends Editor {
 	 * shell-mode chip and the input, and the `bar`: model chip, effort chip
 	 * (or the effort glyph as the model chip's icon), the generation rate,
 	 * the other status facts, usage, Accept while the input shows a prediction
-	 * or word completion (held back until typing settles), dictation, then send (Stop while a turn runs).
+	 * (never for a word completion), dictation, then send (Stop while a turn runs).
 	 * Clicks come back as `status.model`, `thinking.cycle`, `accept`,
 	 * `dictation.toggle`, `submit`, `interrupt` and `focus:<id>` actions.
 	 */
@@ -1146,8 +1139,9 @@ export class CustomEditor extends Editor {
 			state.thinkingInModel,
 		].join("\0");
 		const rate = state.rate;
-		// A touch keyboard may have no Tab key, so what Tab would do with the ghost text gets tappable controls.
-		const accept = this.#acceptSettleTimer === undefined && this.hasAcceptableGhost();
+		// A touch keyboard may have no Tab key, so the prediction Tab would insert gets tappable controls.
+		// Word completions stay Tab-only: they come and go per keystroke and would blink the button.
+		const accept = this.hasAcceptablePrediction();
 		const alternatives = this.predictionAlternativeCount();
 		const chips = this.attachmentChips;
 		const memo = this.#nativeComposer;
@@ -1472,9 +1466,7 @@ export class CustomEditor extends Editor {
 			return;
 		}
 		if (event.type !== "action") {
-			const revision = this.textRevision;
 			super.handleNativeEvent(event);
-			this.#holdAcceptAfterTyping(revision);
 			return;
 		}
 		switch (event.act) {
@@ -1487,7 +1479,7 @@ export class CustomEditor extends Editor {
 				return;
 			}
 			case "accept":
-				this.acceptGhost();
+				this.acceptShownPrediction();
 				return;
 			case "alternatives":
 				this.showPredictionAlternatives();
@@ -1502,17 +1494,6 @@ export class CustomEditor extends Editor {
 				if (event.act.startsWith(FOCUS_ACTION)) this.onFocusAgent?.(event.act.slice(FOCUS_ACTION.length));
 				else this.composerFacts?.handleNativeEvent(event);
 		}
-	}
-
-	/** Restart the Accept settle window when an edit since `revision` changed the draft (TSP surfaces only: the bar is native). */
-	#holdAcceptAfterTyping(revision: number): void {
-		if (this.textRevision === revision || !isNativeRendering()) return;
-		clearTimeout(this.#acceptSettleTimer);
-		this.#acceptSettleTimer = setTimeout(() => {
-			this.#acceptSettleTimer = undefined;
-			this.#requestShimmerRepaint?.();
-		}, CustomEditor.ACCEPT_SETTLE_MS);
-		this.#acceptSettleTimer.unref?.();
 	}
 
 	onEscape?: () => void;
@@ -1679,12 +1660,6 @@ export class CustomEditor extends Editor {
 	}
 
 	override handleInput(data: string): void {
-		const revision = this.textRevision;
-		this.#handleInput(data);
-		this.#holdAcceptAfterTyping(revision);
-	}
-
-	#handleInput(data: string): void {
 		// Serialize behind any in-flight async paste so a trailing Enter / follow-up key can't
 		// submit before the clipboard image reaches `pendingImages` (Codex PR #3602 review).
 		if (this.#pasteInFlight > 0) {

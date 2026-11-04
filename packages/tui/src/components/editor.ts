@@ -1081,18 +1081,15 @@ export class Editor implements Component, Focusable {
 		return this.#autocompleteState !== null;
 	}
 
-	/** True while Tab would insert the shown ghost text: the prediction or a word completion, never a popup hint. */
-	hasAcceptableGhost(): boolean {
-		return (
-			this.#autocompleteState === null &&
-			(this.#getPredictionSuffix() !== null || this.#getShownWordCompletion() !== null)
-		);
+	/** True while the shown ghost text is the composer prediction Tab would insert; false for word completions and popup hints. */
+	hasAcceptablePrediction(): boolean {
+		return this.#autocompleteState === null && this.#getPredictionSuffix() !== null;
 	}
 
-	/** Insert the shown prediction or word completion as Tab does; false when neither is shown. */
-	acceptGhost(): boolean {
+	/** Insert the shown prediction as Tab does; false when none is shown. */
+	acceptShownPrediction(): boolean {
 		if (this.#autocompleteState !== null) return false;
-		return this.#acceptPrediction() || this.#acceptWordCompletion({ space: true });
+		return this.#acceptPrediction();
 	}
 	/** How many other predictions the draft's alternatives list would offer (Tab's `N more`); 0 when none. */
 	predictionAlternativeCount(): number {
