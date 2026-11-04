@@ -2,12 +2,12 @@
  * Logger flush bridge between the main thread and subagent workers.
  *
  * Worker log records reach main through one path from the worker's first
- * evaluated module: raw messages on `parentPort` (`../worker-log`), written by
- * main with their original timestamp and the worker's `thread` tag. This
- * service adds the synchronous half: from `boot` on, `logger.flush()` in a
- * worker calls main's {@link MainLogSink.flush} over the link, which shares the
- * port with the records, so it returns once main wrote every record posted
- * before it.
+ * evaluated module: raw messages (`../worker-log`), on `parentPort` until the
+ * worker is ready and on its frame port after, written by main with their
+ * original timestamp and the worker's `thread` tag. This service adds the
+ * synchronous half: from `boot` on, `logger.flush()` in a worker calls main's
+ * {@link MainLogSink.flush} over the link, which by then shares the frame port
+ * with the records, so it returns once main wrote every record posted before it.
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { WorkerThreadLink } from "../protocol";

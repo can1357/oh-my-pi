@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
-import { RpcClosedError } from "../../src/thread/rpc";
+import { RpcClosedError, type RpcLink } from "../../src/thread/rpc";
 import type { ThreadService, WorkerPeer } from "../../src/thread/services";
 import { THREAD_SERVICES } from "../../src/thread/services/index";
 import {
@@ -13,6 +13,7 @@ import {
 	type SubagentWorkerPoolOptions,
 } from "../../src/thread/subagent-worker";
 import { CODE_SKEW_SHARED } from "../fixtures/code-skew-shared";
+import type { FrameLossDeath, FrameLossMainApi, FrameLossWorkerApi } from "../fixtures/frame-loss-worker";
 
 const cleanups: Array<() => void> = [];
 
@@ -89,6 +90,46 @@ function probeService(): ThreadService & { installed: WorkerPeer[]; exits: strin
 	};
 }
 
+/**
+ * Start the frame-loss fixture and have it post a `frameProbe` notification and the reply to main's
+ * call, then die by `death`. Main stays blocked until both frames are posted, so it cannot have
+ * dispatched either before the worker dies. `events` records the notification's content and each
+ * exit hook in the order main runs them.
+ */
+async function postThenDie(death: FrameLossDeath): Promise<{
+	worker: SubagentWorker;
+	events: string[];
+	aliveAtNotification: boolean[];
+	reply: Promise<string>;
+}> {
+	const events: string[] = [];
+	const aliveAtNotification: boolean[] = [];
+	const exited = Promise.withResolvers<void>();
+	const worker = startWorker({
+		entry: new URL("../fixtures/frame-loss-worker.ts", import.meta.url),
+		services: [{ name: "frame-loss-probe", onWorkerExit: (_peer, reason) => events.push(`exit: ${reason}`) }],
+		onExit: () => exited.resolve(),
+	});
+	await worker.ready;
+	// The fixture serves its own method table over the production link.
+	const link = worker.link as unknown as RpcLink<FrameLossMainApi, FrameLossWorkerApi>;
+	link.onNotify("frameProbe", frame => {
+		events.push(`frameProbe ${frame.id} ${frame.status}`);
+		aliveAtNotification.push(worker.alive);
+	});
+	const flags = new Int32Array(new SharedArrayBuffer(8));
+	const reply = link.call("postThenDie", flags.buffer, death);
+	reply.catch(() => {});
+	const deadline = Date.now() + 30_000;
+	while (Atomics.load(flags, 0) === 0) {
+		if (Date.now() > deadline) throw new Error("the fixture never posted its frames");
+		Atomics.wait(flags, 0, 0, 10);
+	}
+	if (death === "terminated") worker.terminate("terminated by test");
+	await exited.promise;
+	return { worker, events, aliveAtNotification, reply };
+}
+
 describe("SubagentWorker", () => {
 	it("boots and answers a ping that round-trips through a sync call to main", async () => {
 		const probe = probeService();
@@ -118,6 +159,21 @@ describe("SubagentWorker", () => {
 		expect(exits[0]).toContain("crashed");
 		expect(probe.exits).toEqual(exits);
 		await expect(worker.link.call("ping", 1)).rejects.toBeInstanceOf(RpcClosedError);
+	});
+
+	it("dispatches what a worker posted before main terminated it, before the exit hooks run", async () => {
+		const { events, aliveAtNotification, reply } = await postThenDie("terminated");
+		// Dispatched after the worker is gone: the frames survived its termination.
+		expect(aliveAtNotification).toEqual([false]);
+		expect(events).toEqual(["frameProbe frame-loss-run started", "exit: terminated by test"]);
+		expect(await reply).toBe("done");
+	});
+
+	it("dispatches what a worker posted before it crashed, before the exit hooks run", async () => {
+		const { worker, events, reply } = await postThenDie("crash");
+		expect(worker.exitReason).toContain("worker crashed");
+		expect(events).toEqual(["frameProbe frame-loss-run started", `exit: ${worker.exitReason}`]);
+		expect(await reply).toBe("done");
 	});
 
 	it("delivers records logged while the worker module evaluates to main's sinks, in order and tagged", async () => {

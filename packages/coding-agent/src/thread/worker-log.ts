@@ -6,31 +6,34 @@
  * exporter). A worker never opens the file: from the first module its entry
  * evaluates ({@link installWorkerLogPort}), the worker's logger posts every
  * record (scoped `withContext` fields merged in) as a raw
- * {@link SubagentWorkerLog} message on `parentPort`. The main side handles those
- * from spawn, before the RPC link exists ({@link receiveWorkerLog}): it tags
- * each record with the worker's `thread` id and writes it with its original
- * timestamp (`logger.emitForeign`). Records and RPC frames share the port, so
- * they arrive in send order; once the logger thread service connects a flush
+ * {@link SubagentWorkerLog} message, first on `parentPort`, then, once the
+ * worker posted its ready message after them, on the frame port its RPC frames
+ * use ({@link WorkerLogPort.moveTo}). The main side handles those from spawn,
+ * before the RPC link exists ({@link receiveWorkerLog}): it tags each record
+ * with the worker's `thread` id and writes it with its original timestamp
+ * (`logger.emitForeign`). Main reads the frame port only after the ready
+ * message, and records after it share that port with RPC frames, so records
+ * arrive in send order; once the logger thread service connects a flush
  * ({@link WorkerLogPort.connectFlush}), `logger.flush()` in the worker blocks
  * until main wrote every record posted before it.
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ThreadId } from "./identity";
 
-/** Raw message a subagent worker posts on `parentPort` for each log record. */
+/** Raw message a subagent worker posts for each log record (on `parentPort`, then its frame port). */
 export interface SubagentWorkerLog {
 	readonly type: "subagent-worker-log";
 	readonly event: logger.LogEvent;
 }
 
-/** Port surface the forwarder posts on (`parentPort`). */
+/** Port surface the forwarder posts on (`parentPort`, then the frame port). */
 interface LogMessagePort {
 	postMessage(message: unknown): void;
 }
 
-/** A worker's log forwarder: posts every record on the parent port. */
+/** A worker's log forwarder: posts every record on its current port. */
 export class WorkerLogPort implements logger.LogForwarder {
-	readonly #port: LogMessagePort;
+	#port: LogMessagePort;
 	#flush: (() => void) | undefined;
 
 	constructor(port: LogMessagePort) {
@@ -41,6 +44,11 @@ export class WorkerLogPort implements logger.LogForwarder {
 	emit(event: logger.LogEvent): void {
 		const message: SubagentWorkerLog = { type: "subagent-worker-log", event };
 		this.#port.postMessage(message);
+	}
+
+	/** Post every later record on `port`, the port the worker's RPC frames use. */
+	moveTo(port: LogMessagePort): void {
+		this.#port = port;
 	}
 
 	/** Block until main wrote every record posted so far; a no-op until {@link connectFlush}. */

@@ -19,6 +19,13 @@ import type { RpcLink, RpcMethod } from "./rpc";
 export interface SubagentWorkerInit {
 	readonly type: "subagent-worker-init";
 	readonly threadId: ThreadId;
+	/**
+	 * Port the worker posts every RPC frame on, and every log record once it posted
+	 * {@link SubagentWorkerReady}. Main drains it when the worker dies, so whatever the worker
+	 * posted there reaches main's handlers even when main terminates the worker first (a
+	 * terminated Bun worker's undelivered `parentPort` messages are dropped).
+	 */
+	readonly framePort: MessagePort;
 	/** Port the worker drains synchronously for `callSync` replies. */
 	readonly replyPort: MessagePort;
 	/** Backing store of the sync reply counter. */
@@ -27,7 +34,10 @@ export interface SubagentWorkerInit {
 	readonly mainStartedAt: number;
 }
 
-/** Raw message a worker posts once its link is listening. */
+/**
+ * Raw message a worker posts on `parentPort` once its link is listening, after every log record
+ * it posted there; from here on its records go to {@link SubagentWorkerInit.framePort}.
+ */
 export interface SubagentWorkerReady {
 	readonly type: "subagent-worker-ready";
 	/** Files of modules the worker loaded that changed after {@link SubagentWorkerInit.mainStartedAt}. */
