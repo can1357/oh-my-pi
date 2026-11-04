@@ -16,6 +16,7 @@ import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import "@oh-my-pi/pi-coding-agent/session/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { resolveEffectiveSettings } from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -985,4 +986,25 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			bindEffects(Settings.isolated({}))();
 		}
 	});
+
+	test.skipIf(process.platform === "win32")(
+		"a process without global settings takes the command time limit from credential discovery's settings",
+		async () => {
+			// `omp token` and other standalone commands never call `Settings.init`, so no effect
+			// applies `providers.commandTimeoutSeconds`; credential discovery's read-only load must.
+			expect(Settings.current).toBeNull();
+			const agentDir = path.join(tempDir, "standalone-agent");
+			fs.mkdirSync(agentDir, { recursive: true });
+			fs.writeFileSync(path.join(agentDir, "config.yml"), "providers:\n  commandTimeoutSeconds: 30\n");
+			try {
+				// Start from a limit shorter than the helper, so only the configured one lets it finish.
+				bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 0.5 }))();
+				await resolveEffectiveSettings({ cwd: tempDir, agentDir });
+				const marker = path.join(tempDir, "standalone");
+				expect(await resolveConfigValue(`!sleep 1; printf %s ${shellQuote(marker)}`)).toBe(marker);
+			} finally {
+				bindEffects(Settings.isolated({}))();
+			}
+		},
+	);
 });

@@ -36,12 +36,12 @@ import {
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
 import { combine, type ScopeLike } from "../config/registry";
-import { resolveConfigValue } from "../config/resolve-config-value";
+import { configureCommandTimeoutMs, resolveConfigValue } from "../config/resolve-config-value";
 import { Settings } from "../config/settings";
 import type { AuthStorage } from "./auth-storage";
 
 import { cfgAuthAccountPolicies, cfgAuthBrokerToken, cfgAuthBrokerUrl } from "../config/model-settings";
-import { cfgRetryUsageReservePct } from "./settings";
+import { cfgProvidersCommandTimeoutSeconds, cfgRetryUsageReservePct } from "./settings";
 
 export { type AuthBrokerClientConfig, getAuthBrokerTokenFilePath };
 
@@ -57,6 +57,10 @@ export interface EffectiveSettingsScope {
  * Resolve the settings auth discovery must honor: the explicit instance, else the
  * global instance when it targets the same agent dir (and cwd, when given), else a
  * read-only load so `--config`/`PI_CONFIG_FILES`/project overlays still apply.
+ *
+ * A process that never initialized the global instance (a standalone command such
+ * as `omp token`) has no settings effects bound, so the read-only load applies the
+ * one process-wide value credential resolution needs: the `!command` time limit.
  */
 export async function resolveEffectiveSettings({
 	settings,
@@ -72,7 +76,9 @@ export async function resolveEffectiveSettings({
 	) {
 		return current;
 	}
-	return Settings.loadReadOnly({ cwd, agentDir });
+	const readOnly = await Settings.loadReadOnly({ cwd, agentDir });
+	if (!current) configureCommandTimeoutMs(cfgProvidersCommandTimeoutSeconds.get(readOnly) * 1_000);
+	return readOnly;
 }
 
 /** Resolve `auth.accountPolicies` + `retry.usageReservePct` from effective settings (SDK discovery, auth-gateway). */
