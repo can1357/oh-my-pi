@@ -221,13 +221,18 @@ _NONBLOCKING_STDIN = os.name == "posix"
 _WRITE_POLL_INTERVAL = 0.05
 # When the child exits while a process outside its group still holds its stdout
 # open (so the stdout reader never sees EOF), the exit watcher closes the client
-# itself (see `RpcClient._watch_exit`). It first gives the pipe this long to close
-# on its own, then waits at most `_EXIT_DRAIN_LIMIT` for the reader to handle what
-# the child wrote before it exited.
+# itself (see `RpcClient._watch_exit`), once the reader has handled every byte
+# the child wrote before it exited. It first gives the pipe this long to close
+# on its own.
 _EXIT_DRAIN_GRACE = 1.0
-_EXIT_DRAIN_LIMIT = 5.0
 # Polls of the exit watcher where no OS facility waits for an exit without reaping.
 _EXIT_POLL_INTERVAL = 0.1
+# The stdout reader reads the pipe itself, in reads of up to this many bytes,
+# and counts them: where the OS tells how many bytes a pipe holds (FIONREAD)
+# and can wait for bytes without reading them (poll), the exit watcher learns
+# from that count exactly where the child's own output ends.
+_STDOUT_READ_SIZE = 65536
+_PIPE_ACCOUNTING = fcntl is not None and termios is not None and hasattr(select, "poll")
 # `_READER.frame` is `(client, child)` while the stdout reader of `client`
 # handles a frame of `child` holding the client's `_dispatch_lock`.
 _READER = threading.local()
@@ -243,17 +248,29 @@ class _ChildReplaced(Exception):
 
 
 @dataclass
-class _StdoutProgress:
-    """What one child's stdout reader has done, read by that child's exit watcher."""
+class _ChildProgress:
+    """What one child's stdout reader and exit watcher know about it."""
 
-    lines: int = 0
-    # The reader is in (or about to enter) the read of its next line.
-    reading: bool = False
+    # Guards the counts below. Where `_PIPE_ACCOUNTING` holds, the stdout reader
+    # takes bytes from the pipe only under it, so the pipe's FIONREAD read under
+    # it adds up with `consumed`.
+    changed: threading.Condition = field(default_factory=threading.Condition)
+    # Bytes the stdout reader has taken from the pipe.
+    consumed: int = 0
+    # Bytes of the lines the stdout reader has handled.
+    handled: int = 0
+    # The stdout reader waits for bytes, with no whole line buffered.
+    waiting: bool = False
+    # Set by the exit watcher once the child has exited, with its exit code
+    # where the wait told it.
+    exited: threading.Event = field(default_factory=threading.Event)
+    exit_code: int | None = None
+    # The stdout reader has ended.
     done: threading.Event = field(default_factory=threading.Event)
 
 
-def _wait_for_exit(process: subprocess.Popen[str]) -> None:
-    """Block until `process` has exited.
+def _wait_for_exit(process: subprocess.Popen[str]) -> int | None:
+    """Block until `process` has exited; its exit code where the wait tells it.
 
     On POSIX it does not reap the child (`waitid` with `WNOWAIT`, or kqueue's
     `NOTE_EXIT`), so `stop()` and the stdout reader still read its status and
@@ -261,17 +278,19 @@ def _wait_for_exit(process: subprocess.Popen[str]) -> None:
     thread reaped already counts as exited.
     """
     if os.name != "posix":
-        process.wait()
-        return
+        return process.wait()
     if process.returncode is not None:
-        return
+        return process.returncode
     waitid = getattr(os, "waitid", None)
     if waitid is not None:
         try:
-            waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+            result = waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
         except ChildProcessError:
-            pass
-        return
+            return process.returncode
+        if result is None:
+            return None
+        # As `Popen.returncode`: a negative code is the signal that killed it.
+        return result.si_status if result.si_code == os.CLD_EXITED else -result.si_status
     kqueue = getattr(select, "kqueue", None)
     if kqueue is not None:
         watcher = kqueue()
@@ -288,20 +307,74 @@ def _wait_for_exit(process: subprocess.Popen[str]) -> None:
                 pass  # gone (exited, or reaped by another thread)
         finally:
             watcher.close()
-        return
+        return process.returncode
     while process.poll() is None:
         time.sleep(_EXIT_POLL_INTERVAL)
+    return process.returncode
 
 
-def _pipe_pending_bytes(stream: IO[str] | None) -> int:
-    """Bytes waiting in the pipe under `stream` (0 where the OS cannot tell)."""
-    if stream is None or fcntl is None or termios is None:
+def _pipe_pending_bytes(stream: IO[str] | None) -> int | None:
+    """Bytes waiting in the pipe under `stream`; None where the OS cannot tell.
+
+    A stream already closed holds none."""
+    if fcntl is None or termios is None:
+        return None
+    if stream is None:
         return 0
     try:
         raw = fcntl.ioctl(stream.fileno(), termios.FIONREAD, b"\0\0\0\0")
     except (OSError, ValueError):
         return 0
     return int.from_bytes(raw, sys.byteorder, signed=True)
+
+
+def _stdout_lines(stream: IO[str], progress: _ChildProgress) -> Iterator[bytearray]:
+    """The child's stdout, line by line, as the bytes the child wrote.
+
+    It reads the pipe under `stream` itself, not through the stream's buffers,
+    and counts in `progress` every byte it takes: when the child exits, what it
+    wrote ends at `consumed` plus what the pipe still holds (see
+    `RpcClient._watch_exit`). Lines end at `\\n`; at EOF a last line without one
+    is yielded too.
+    """
+    fd = stream.fileno()
+    poller = None
+    if _PIPE_ACCOUNTING:
+        poller = select.poll()
+        poller.register(fd, select.POLLIN)
+    buffer = bytearray()
+    start = scan = 0
+    while True:
+        newline = buffer.find(b"\n", scan)
+        if newline >= 0:
+            line = buffer[start : newline + 1]
+            start = scan = newline + 1
+            yield line
+            continue
+        del buffer[:start]
+        start = 0
+        scan = len(buffer)
+        with progress.changed:
+            progress.waiting = True
+            progress.changed.notify_all()
+        if poller is not None:
+            # Wait for bytes (or the pipe's close) without the lock, then take
+            # them under it: the read does not block, this is the pipe's only reader.
+            poller.poll()
+            with progress.changed:
+                chunk = os.read(fd, _STDOUT_READ_SIZE)
+                progress.consumed += len(chunk)
+                progress.waiting = False
+        else:
+            chunk = os.read(fd, _STDOUT_READ_SIZE)
+            with progress.changed:
+                progress.consumed += len(chunk)
+                progress.waiting = False
+        if not chunk:
+            if buffer:
+                yield buffer
+            return
+        buffer += chunk
 
 
 def _close_quietly(stream: IO[str] | None) -> None:
@@ -861,6 +934,11 @@ class RpcClient(WireClient):
         self._write_locks: weakref.WeakKeyDictionary[subprocess.Popen[str], threading.Lock] = (
             weakref.WeakKeyDictionary()
         )
+        # Each child's progress, shared by its stdout reader, its exit watcher
+        # and the writes to it (see `_write_polled`).
+        self._child_progress: weakref.WeakKeyDictionary[
+            subprocess.Popen[str], _ChildProgress
+        ] = weakref.WeakKeyDictionary()
         self._state_lock = threading.Lock()
         self._event_condition = threading.Condition()
         self._pending: dict[str, _PendingRequest] = {}
@@ -1002,7 +1080,9 @@ class RpcClient(WireClient):
             # Each child has one stdout and one stderr reader, bound to it and
             # started here, under the lock a restart takes: a stop() and a
             # start() on other threads cannot give the next child a second pair.
-            progress = _StdoutProgress()
+            progress = _ChildProgress()
+            with self._state_lock:
+                self._child_progress[process] = progress
             stdout_thread = threading.Thread(
                 target=self._read_stdout_loop,
                 args=(process, progress),
@@ -2600,11 +2680,15 @@ class RpcClient(WireClient):
 
     def _write_polled(self, process: subprocess.Popen[str], data: bytes) -> None:
         """Write `data` to the child's non-blocking stdin, waiting for room in
-        polls of `_WRITE_POLL_INTERVAL`. Gives up once the client stops or the
-        child is replaced: a server that stopped reading, or a process outside
-        its group that holds the pipe and never reads, would otherwise keep
-        the write, and `_write_lock`, forever."""
+        polls of `_WRITE_POLL_INTERVAL`. Gives up once the client stops, the
+        child is replaced or has exited, and, while it waits for room, once the
+        client is closed: a server that stopped reading, or a process outside
+        its group that holds the pipe and never reads, would otherwise keep the
+        write, and `_write_lock`, forever. A caller then gets the child's exit
+        error, or the error that closed the client."""
         assert process.stdin is not None
+        with self._state_lock:
+            progress = self._child_progress.get(process)
         fd = process.stdin.fileno()
         # poll(), not select(): select() rejects a descriptor above
         # FD_SETSIZE (1024), which a busy host reaches.
@@ -2614,29 +2698,39 @@ class RpcClient(WireClient):
         while view:
             if self._stopping or self._process is not process:
                 raise RpcProcessExitError("RPC process stopped")
+            if progress is not None and progress.exited.is_set():
+                # Not left to the close: that waits for the stdout reader,
+                # which may itself be writing a reply to this child.
+                exit_code = process.returncode
+                raise self._exit_error(exit_code if exit_code is not None else progress.exit_code)
             try:
                 view = view[os.write(fd, view) :]
             except BlockingIOError:
+                closed = self._closed_error
+                if closed is not None:
+                    raise RpcProcessExitError(str(closed)) from None
                 waiter.poll(_WRITE_POLL_INTERVAL * 1000)
 
+    def _exit_error(self, exit_code: int | None) -> RpcProcessExitError:
+        return RpcProcessExitError(
+            f"RPC process exited with code {exit_code}. Stderr: {self.stderr}"
+            if exit_code is not None
+            else "RPC process exited"
+        )
+
     def _read_stdout_loop(
-        self, process: subprocess.Popen[str], progress: _StdoutProgress | None = None
+        self, process: subprocess.Popen[str], progress: _ChildProgress | None = None
     ) -> None:
-        progress = progress if progress is not None else _StdoutProgress()
+        progress = progress if progress is not None else _ChildProgress()
         if process.stdout is None:
             progress.done.set()
             return
 
         line_number = 0
         try:
-            while True:
-                progress.reading = True
-                line = process.stdout.readline()
-                progress.reading = False
-                if not line:
-                    break
+            for raw_line in _stdout_lines(process.stdout, progress):
                 line_number += 1
-                progress.lines = line_number
+                line = raw_line.decode("utf-8", "replace")
                 # start() and stop() hold this lock while they install or
                 # retire a child. A frame holds it too, except while its
                 # listeners run (see `_run_listeners`), so a restart never
@@ -2664,7 +2758,19 @@ class RpcClient(WireClient):
                     # Also when the frame raises: a reply it queued is sent,
                     # as it was when replies were written at once.
                     for reply in replies:
-                        self._send_to_child(process, reply)
+                        try:
+                            self._send_to_child(process, reply)
+                        except RpcProcessExitError:
+                            # A child that has exited reads no reply. The
+                            # frames it wrote before it exited are still
+                            # handled before the client closes.
+                            if not progress.exited.wait(_READER_JOIN_TIMEOUT):
+                                raise
+                    # Counted once the frame and its replies are done: the
+                    # exit watcher closes the client only after that.
+                    with progress.changed:
+                        progress.handled += len(raw_line)
+                        progress.changed.notify_all()
         except Exception as exc:
             with self._dispatch_lock:
                 if not self._stopping and self._process is process:
@@ -2680,9 +2786,7 @@ class RpcClient(WireClient):
                 error = (
                     RpcProcessExitError("RPC process stdout closed before the process exited")
                     if exit_code is None
-                    else RpcProcessExitError(
-                        f"RPC process exited with code {exit_code}. Stderr: {self.stderr}"
-                    )
+                    else self._exit_error(exit_code)
                 )
                 with self._dispatch_lock:
                     if not self._stopping and self._process is process:
@@ -2692,8 +2796,10 @@ class RpcClient(WireClient):
             _close_quietly(process.stdout)
             # Set last: the exit watcher leaves the close to this reader once set.
             progress.done.set()
+            with progress.changed:
+                progress.changed.notify_all()
 
-    def _watch_exit(self, process: subprocess.Popen[str], progress: _StdoutProgress) -> None:
+    def _watch_exit(self, process: subprocess.Popen[str], progress: _ChildProgress) -> None:
         """Close the client once its child has exited, whoever holds its stdout.
 
         The stdout reader closes the client at EOF, after the child's last
@@ -2701,36 +2807,54 @@ class RpcClient(WireClient):
         that inherited stdout keeps the pipe open after the child exits, and
         then no EOF comes: every waiter (`next_ui_request`, lifecycle waits,
         pending requests) would wait forever. This watcher waits for the exit
-        itself. It leaves the close to the reader when the pipe closes within
-        `_EXIT_DRAIN_GRACE`; otherwise, once the pipe holds no more bytes and the
-        reader waits for its next line (at most `_EXIT_DRAIN_LIMIT`), so frames
-        the child wrote before it exited are handled first, it closes the client
-        with the child's exit error. stop() and a restart own a child they took:
-        the watcher of a child that is no longer current does nothing.
+        itself, and notes where the child's own output ends: the bytes the
+        reader has taken from the pipe plus those the pipe still holds. It
+        leaves the close to the reader when the pipe closes within
+        `_EXIT_DRAIN_GRACE`; otherwise it waits until the reader has handled
+        every line up to that end, however long its listeners take, and then
+        closes the client with the child's exit error. So each frame the child
+        wrote before it exited reaches its consumers (a reply its request, a
+        dialog the UI queue) before the exit error, and bytes that the holder
+        writes after the exit do not hold the close back. stop() and a restart
+        own a child they took: the watcher of a child that is no longer current
+        does nothing.
+
+        Where the OS cannot tell how many bytes a pipe holds, it closes once the
+        reader has waited across two polls with no new bytes.
         """
-        _wait_for_exit(process)
+        exit_code = _wait_for_exit(process)
+        with progress.changed:
+            # Read under the lock the reader takes bytes under, so the two add up.
+            pending = _pipe_pending_bytes(process.stdout) if _PIPE_ACCOUNTING else None
+            end = None if pending is None else progress.consumed + pending
+            progress.exit_code = exit_code
+        progress.exited.set()
         if progress.done.wait(_EXIT_DRAIN_GRACE):
             return
-        deadline = time.monotonic() + _EXIT_DRAIN_LIMIT
-        settled_lines: int | None = None
-        while time.monotonic() < deadline:
-            if self._stopping or self._process is not process:
-                return
-            drained = progress.reading and _pipe_pending_bytes(process.stdout) == 0
-            if drained and settled_lines == progress.lines:
-                break  # idle across two polls: everything the child wrote is handled
-            settled_lines = progress.lines if drained else None
-            if progress.done.wait(_WRITE_POLL_INTERVAL):
+        with progress.changed:
+            settled: int | None = None
+            while not progress.done.is_set():
+                if self._stopping or self._process is not process:
+                    return
+                if end is not None:
+                    # Every whole line of the child's output is handled; any
+                    # rest is a line the child never ended.
+                    if progress.handled >= end or (progress.waiting and progress.consumed >= end):
+                        break
+                elif progress.waiting:
+                    if settled == progress.consumed:
+                        break
+                    settled = progress.consumed
+                else:
+                    settled = None
+                progress.changed.wait(_WRITE_POLL_INTERVAL)
+            if progress.done.is_set():
                 return
         try:
-            exit_code: int | None = process.wait(timeout=_READER_JOIN_TIMEOUT)
+            exit_code = process.wait(timeout=_READER_JOIN_TIMEOUT)
         except subprocess.TimeoutExpired:
-            exit_code = process.poll()
-        error = RpcProcessExitError(
-            f"RPC process exited with code {exit_code}. Stderr: {self.stderr}"
-            if exit_code is not None
-            else "RPC process exited"
-        )
+            pass  # keep the code the exit wait told
+        error = self._exit_error(exit_code)
         with self._dispatch_lock:
             if not self._stopping and self._process is process and not progress.done.is_set():
                 self._mark_closed(error)

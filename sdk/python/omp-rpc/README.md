@@ -530,6 +530,17 @@ for: once that child is stopped or replaced, the call raises
 dropped) instead of reaching the new child. While the client is stopped, calls
 raise `RpcError("RPC client is not started")`.
 
+When the server exits on its own, the client closes: pending requests, dialog
+waits and lifecycle waits raise `RpcProcessExitError` with its exit code. Every
+frame the server wrote before it exited is handled first, however long your
+listeners take: a reply still answers its request, and a dialog comes out of
+`next_ui_request()` before the exit error. This also holds when a process
+outside the server's group (a daemon it started) keeps the server's stdout
+open: the client then closes once those frames are handled, 1 s after the exit
+at the earliest. On POSIX a write to a server that has exited raises
+`RpcProcessExitError` at once, also one stuck on a stdin that another process
+holds and never reads.
+
 ## Text Helpers
 
 `assistant_text()` and `message_text()` now return visible text blocks only.

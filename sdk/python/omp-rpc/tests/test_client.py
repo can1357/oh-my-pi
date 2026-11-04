@@ -1256,6 +1256,212 @@ class RpcClientTests(unittest.TestCase):
         self.assertIn("code 23", str(second))
         self.assertIsInstance(outcome["request"][0], RpcProcessExitError)
 
+    @unittest.skipUnless(os.name == "posix", "the holder is started with start_new_session")
+    def test_child_exit_ends_a_request_blocked_writing_to_stdin_an_outside_process_holds(
+        self,
+    ) -> None:
+        # The child starts a process in a session of its own that inherits its
+        # stdin and stdout, stops reading and exits. A request too large for
+        # the pipe is blocked writing when the child exits: the request timeout
+        # starts only after the write, so only the exit can end it.
+        temp_dir = Path(tempfile.mkdtemp(prefix="omp-rpc-exit-writer-"))
+        self.addCleanup(shutil.rmtree, temp_dir, True)
+        holder_file = temp_dir / "holder.pid"
+        server = textwrap.dedent(
+            f"""
+            import json, os, subprocess, time
+            holder = subprocess.Popen(["sleep", "60"], stderr=subprocess.DEVNULL,
+                                      start_new_session=True)
+            with open({str(holder_file)!r} + ".tmp", "w") as f:
+                f.write(str(holder.pid))
+            os.rename({str(holder_file)!r} + ".tmp", {str(holder_file)!r})
+            print(json.dumps({{"type": "ready"}}), flush=True)
+            time.sleep(1.0)
+            os._exit(23)
+            """
+        )
+        client = self.make_client(server, startup_timeout=15.0, request_timeout=60.0)
+        client.start()
+
+        def kill_holder() -> None:
+            with contextlib.suppress(FileNotFoundError, ValueError, ProcessLookupError):
+                os.kill(int(holder_file.read_text()), signal.SIGKILL)
+
+        self.addCleanup(kill_holder)
+        self.addCleanup(client.stop)
+        outcome: list[BaseException | object] = []
+
+        def request() -> None:
+            try:
+                outcome.append(client.request_raw("large", data="x" * 4_000_000))
+            except BaseException as exc:
+                outcome.append(exc)
+
+        requester = threading.Thread(target=request, daemon=True)
+        requester.start()
+        requester.join(15.0)
+        self.assertTrue(holder_file.exists())
+        self.assertFalse(requester.is_alive(), "the request stayed blocked writing after the child exited")
+        self.assertIsInstance(outcome[0], RpcProcessExitError)
+        self.assertIn("code 23", str(outcome[0]))
+
+    @unittest.skipUnless(os.name == "posix", "stdin writes wait for room only on POSIX")
+    def test_a_close_ends_a_request_blocked_writing_to_a_child_that_stopped_reading(
+        self,
+    ) -> None:
+        # The child never reads its stdin and stays alive. While a request too
+        # large for the pipe is blocked writing, the child sends a frame that is
+        # not JSON, which closes the client: the request ends with that error.
+        server = textwrap.dedent(
+            """
+            import json, time
+            print(json.dumps({"type": "ready"}), flush=True)
+            time.sleep(1.0)
+            print("not json", flush=True)
+            time.sleep(60)
+            """
+        )
+        client = self.make_client(server, startup_timeout=15.0, request_timeout=60.0)
+        client.start()
+        self.addCleanup(client.stop)
+        outcome: list[BaseException | object] = []
+
+        def request() -> None:
+            try:
+                outcome.append(client.request_raw("large", data="x" * 4_000_000))
+            except BaseException as exc:
+                outcome.append(exc)
+
+        requester = threading.Thread(target=request, daemon=True)
+        requester.start()
+        requester.join(15.0)
+        self.assertFalse(requester.is_alive(), "the request stayed blocked writing after the client closed")
+        self.assertIsInstance(outcome[0], RpcProcessExitError)
+        self.assertIn("Failed to decode RPC output", str(outcome[0]))
+
+    def test_frames_the_child_wrote_before_it_exited_reach_consumers_before_the_exit_error(
+        self,
+    ) -> None:
+        # The child answers the request with a notification, a dialog and the
+        # reply in one write, then exits; no other process holds its pipes. A
+        # notification listener holds the stdout reader for 8 s (a cap on the
+        # drain closed the client 6 s after the exit). The reply still answers
+        # the request, and the UI queue gives the dialog before the exit error.
+        server = textwrap.dedent(
+            """
+            import json, os, sys
+            print(json.dumps({"type": "ready"}), flush=True)
+            command = json.loads(sys.stdin.readline())
+            frames = [
+                {"type": "probe_gate"},
+                {"type": "extension_ui_request", "id": "last-dialog", "method": "confirm",
+                 "title": "Last", "message": "Must precede exit"},
+                {"type": "response", "id": command["id"], "command": command["type"],
+                 "success": True, "data": {"sentinel": "completed-before-exit"}},
+            ]
+            os.write(1, "".join(json.dumps(frame) + "\\n" for frame in frames).encode())
+            os._exit(23)
+            """
+        )
+        client = self.make_client(server, request_timeout=60.0)
+        entered = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def hold(notification: object) -> None:
+            if getattr(notification, "payload", {}).get("type") == "probe_gate":
+                entered.set()
+                release.wait(8.0)
+
+        client.on_notification(hold)
+        client.start()
+        self.addCleanup(client.stop)
+        outcome: list[BaseException | object] = []
+
+        def request() -> None:
+            try:
+                outcome.append(client.request_raw("probe"))
+            except BaseException as exc:
+                outcome.append(exc)
+            finally:
+                release.set()
+
+        requester = threading.Thread(target=request, daemon=True)
+        requester.start()
+        self.assertTrue(entered.wait(15.0), "the child's first frame never reached the listener")
+        requester.join(30.0)
+        self.assertFalse(requester.is_alive(), "the request stayed blocked")
+        self.assertEqual(outcome, [{"sentinel": "completed-before-exit"}])
+        first = client.next_ui_request(timeout=5.0)
+        self.assertEqual(getattr(first, "id", None), "last-dialog")
+        with self.assertRaises(RpcProcessExitError) as raised:
+            client.next_ui_request(timeout=5.0)
+        self.assertIn("code 23", str(raised.exception))
+
+    @unittest.skipUnless(hasattr(os, "waitid"), "waits for the child's exit without reaping it")
+    def test_a_reply_the_exited_child_cannot_read_keeps_its_later_frames(self) -> None:
+        # The child calls a host tool this client does not have, then sends a
+        # dialog and the reply to the request, and exits. A listener holds the
+        # stdout reader until the child has exited, so the client's error reply
+        # to the tool call fails to reach it. The frames after the call still
+        # reach their consumers, before the exit error.
+        server = textwrap.dedent(
+            """
+            import json, os, sys
+            print(json.dumps({"type": "ready"}), flush=True)
+            command = json.loads(sys.stdin.readline())
+            frames = [
+                {"type": "probe_gate"},
+                {"type": "host_tool_call", "id": "call-1", "toolName": "missing",
+                 "toolCallId": "tool-call-1", "arguments": {}},
+                {"type": "extension_ui_request", "id": "last-dialog", "method": "confirm",
+                 "title": "Last", "message": "Must precede exit"},
+                {"type": "response", "id": command["id"], "command": command["type"],
+                 "success": True, "data": {"sentinel": "completed-before-exit"}},
+            ]
+            os.write(1, "".join(json.dumps(frame) + "\\n" for frame in frames).encode())
+            os._exit(23)
+            """
+        )
+        client = self.make_client(server, request_timeout=60.0)
+        child_pid: list[int] = []
+        exited = threading.Event()
+
+        def hold(notification: object) -> None:
+            if getattr(notification, "payload", {}).get("type") != "probe_gate":
+                return
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                if os.waitid(os.P_PID, child_pid[0], os.WEXITED | os.WNOHANG | os.WNOWAIT):
+                    exited.set()
+                    return
+                time.sleep(0.01)
+
+        client.on_notification(hold)
+        client.start()
+        self.addCleanup(client.stop)
+        assert client._process is not None
+        child_pid.append(client._process.pid)
+        outcome: list[BaseException | object] = []
+
+        def request() -> None:
+            try:
+                outcome.append(client.request_raw("probe"))
+            except BaseException as exc:
+                outcome.append(exc)
+
+        requester = threading.Thread(target=request, daemon=True)
+        requester.start()
+        requester.join(30.0)
+        self.assertTrue(exited.is_set(), "the child did not exit while the listener held the reader")
+        self.assertFalse(requester.is_alive(), "the request stayed blocked")
+        self.assertEqual(outcome, [{"sentinel": "completed-before-exit"}])
+        first = client.next_ui_request(timeout=5.0)
+        self.assertEqual(getattr(first, "id", None), "last-dialog")
+        with self.assertRaises(RpcProcessExitError) as raised:
+            client.next_ui_request(timeout=5.0)
+        self.assertIn("code 23", str(raised.exception))
+
     def test_ask_answers_reach_the_wire_in_question_order(self) -> None:
         with self.make_client() as client:
             client.prompt("needs ask")
