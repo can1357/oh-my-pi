@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
-import { replaceFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
+import { replaceConfigFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import type { SessionInfo } from "./session-listing";
 
 const PINS_FILENAME = "session-pins.json";
@@ -57,7 +57,7 @@ async function updateSessionPin(
 		const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 		try {
 			await fs.writeFile(tmpPath, JSON.stringify([...pinned], null, "\t"), { encoding: "utf-8", mode: 0o600 });
-			await replaceFileAtomically(tmpPath, filePath);
+			await replaceConfigFileAtomically(tmpPath, filePath);
 		} catch (error) {
 			await fs.rm(tmpPath, { force: true }).catch(() => {});
 			throw error;

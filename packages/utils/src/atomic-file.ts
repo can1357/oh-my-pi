@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isOmpOwnedPath } from "./dirs";
+import { CONFIG_DIR_NAME, getBaseConfigRoot, getConfigDirName, getConfigRootDir, relativePathWithinRoot } from "./dirs";
 import { hasFsCode, isEexist, isEnoent } from "./fs-error";
 import * as logger from "./logger";
 import { toError } from "./type-guards";
@@ -40,36 +40,49 @@ function namesADirectory(value: string): boolean {
 }
 
 /**
+ * Whether `filePath` sits inside some *project's* config directory, and so
+ * inside a tree a checkout produced. Both names, because omp uses both:
+ * `getProjectAgentDir()` builds one from the constant, while discovery walks up
+ * looking for `getConfigDirName()`, which `PI_CONFIG_DIR` renames.
+ *
+ * This is the one thing a config write must not follow a link through. A
+ * repository commits whatever it likes in its own `.omp`, and following a link
+ * found there would let a clone redirect the write onto any file its user can
+ * write.
+ *
+ * omp's own root carries the same name, so the search starts below it: a
+ * `~/.omp/profiles/<name>/marketplaces.json` is the user's, while a
+ * `~/.omp/wt/pr-1/.omp/mcp.json` is a checkout's, and so is any such directory
+ * outside omp's roots entirely.
+ */
+function insideAProjectConfigDir(filePath: string): boolean {
+	const names = new Set([CONFIG_DIR_NAME, getConfigDirName()]);
+	const target = path.resolve(filePath);
+	let searched = target;
+	for (const root of [getConfigRootDir(), getBaseConfigRoot()]) {
+		const below = relativePathWithinRoot(root, target);
+		if (below !== null && below.length < searched.length) searched = below;
+	}
+	return searched.split(path.sep).some(segment => names.has(segment));
+}
+
+/**
  * The file a plain write to `filePath` would open: links on the final component
  * are followed to their target, so publishing by rename replaces the file the
  * link names instead of the link itself.
  *
- * Without this, every atomic write silently converts a symlinked destination
- * into a regular file. That breaks a shared omp profile, whose registry and
- * config paths are links at a profile root into the default root, and it breaks
- * a link someone made themselves into another directory. Both are honoured, and
- * deliberately so: within omp's own directories the helper cannot tell them
- * apart, and an atomic write there must land where a plain `open(path, "w")`
- * would.
- *
- * Outside omp's own directories the path is returned untouched and the link is
- * replaced, as before. A project checkout's `.omp/` holds whatever the
- * repository committed, symlinks included; following one would let a clone
- * redirect omp's write onto any file its user can write. {@link isOmpOwnedPath}
- * draws that line.
+ * This is what the `…Config…` writers below use, and nothing else does. A write
+ * that does not ask for it keeps replacing a link with a regular file, which is
+ * what every caller outside those writers has always done.
  *
  * A dangling link resolves to the path it names, which the write then creates —
- * again what a plain write does, including failing when that path's directory
- * does not exist.
+ * what a plain write does, including failing when that path's directory does
+ * not exist.
  */
-export async function resolveWriteTarget(filePath: string): Promise<string> {
+export async function resolveConfigWriteTarget(filePath: string): Promise<string> {
+	if (insideAProjectConfigDir(filePath)) return filePath;
 	let current = filePath;
 	for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
-		// Asked again at every hop, not once at the start: the link that decides
-		// the next step is the one in THIS directory, and a link the user made out
-		// of their own directory can land in a tree a checkout or a download
-		// filled. The walk stops there and the write lands on the link itself.
-		if (!isOmpOwnedPath(path.dirname(current))) return current;
 		let link: string;
 		try {
 			link = await fs.promises.readlink(current);
@@ -102,11 +115,11 @@ export async function resolveWriteTarget(filePath: string): Promise<string> {
 	throw symlinkLoopError(filePath);
 }
 
-/** Synchronous sibling of {@link resolveWriteTarget}. */
-export function resolveWriteTargetSync(filePath: string): string {
+/** Synchronous sibling of {@link resolveConfigWriteTarget}. */
+function resolveWriteTargetSync(filePath: string): string {
+	if (insideAProjectConfigDir(filePath)) return filePath;
 	let current = filePath;
 	for (let hop = 0; hop <= MAX_SYMLINK_HOPS; hop++) {
-		if (!isOmpOwnedPath(path.dirname(current))) return current;
 		let link: string;
 		try {
 			link = fs.readlinkSync(current);
@@ -134,11 +147,22 @@ export function resolveWriteTargetSync(filePath: string): string {
  * Publish a staged sibling file atomically, preserving an existing destination
  * across Windows `EPERM`/`EEXIST` replacement failures.
  *
- * A destination that is a symlink is resolved first (see
- * {@link resolveWriteTarget}), so the link survives the publication.
+ * A symlink at the destination is replaced, as it always has been. A config
+ * writer that wants the link kept asks for it by name:
+ * {@link replaceConfigFileAtomically}.
  */
 export async function replaceFileAtomically(tempPath: string, targetPath: string): Promise<void> {
-	await publishStagedFile(tempPath, await resolveWriteTarget(targetPath));
+	await publishStagedFile(tempPath, targetPath);
+}
+
+/**
+ * {@link replaceFileAtomically} for a path the person using omp owns, where a
+ * symlink is their own arrangement: the link is followed and the file it names
+ * is replaced, so a shared profile keeps sharing. A path inside a project's
+ * config directory is never followed — that tree is a checkout's.
+ */
+export async function replaceConfigFileAtomically(tempPath: string, targetPath: string): Promise<void> {
+	await publishStagedFile(tempPath, await resolveConfigWriteTarget(targetPath));
 }
 
 /**
@@ -214,11 +238,9 @@ async function replaceAfterWindowsRenameFailure(
  * rename, so a reader never observes a half-written file and a failed write
  * leaves the destination untouched.
  *
- * A symlinked `filePath` is resolved first (see {@link resolveWriteTarget}), so
- * the staging sibling and the published file both land on the link's target and
- * the link survives. A target whose directory cannot be written fails here —
- * the staging `open` reports `EACCES`/`EROFS` naming the resolved path — rather
- * than diverting the write to a fresh file at the link.
+ * A symlink at the destination is replaced, as it always has been. A config
+ * writer that wants the link kept asks for it by name:
+ * {@link writeConfigFileAtomically}.
  *
  * The staged file is created with `mode` (0600 by default) and published with
  * that mode, so the destination stays readable only by its owner even when it
@@ -230,7 +252,38 @@ export async function writeFileAtomically(
 	content: string | NodeJS.ArrayBufferView,
 	mode: number = 0o600,
 ): Promise<void> {
-	const destination = await resolveWriteTarget(filePath);
+	await stageAndPublish(filePath, filePath, content, mode);
+}
+
+/**
+ * {@link writeFileAtomically} for a path the person using omp owns, where a
+ * symlink is their own arrangement.
+ *
+ * The link is resolved before staging, so the temp sibling and the published
+ * file both land beside the file the link names and the link survives: a shared
+ * profile that links its config at another profile's keeps sharing it, and so
+ * does a dotfiles tree that links one out to another disk. A path inside a
+ * project's config directory is never followed, because that tree is whatever a
+ * checkout put there.
+ *
+ * A target whose directory cannot be written fails here — the staging `open`
+ * reports `EACCES`/`EROFS` naming the resolved path — rather than diverting the
+ * write to a fresh file at the link.
+ */
+export async function writeConfigFileAtomically(
+	filePath: string,
+	content: string | NodeJS.ArrayBufferView,
+	mode: number = 0o600,
+): Promise<void> {
+	await stageAndPublish(filePath, await resolveConfigWriteTarget(filePath), content, mode);
+}
+
+async function stageAndPublish(
+	filePath: string,
+	destination: string,
+	content: string | NodeJS.ArrayBufferView,
+	mode: number,
+): Promise<void> {
 	const tempPath = `${destination}.${process.pid}.${crypto.randomUUID()}.tmp`;
 	let removeTemp = false;
 	try {
@@ -255,10 +308,16 @@ export async function writeFileAtomically(
 
 /**
  * Synchronous sibling of {@link writeFileAtomically} for callers that cannot
- * await, such as the boot-time config migration.
+ * await, such as the boot-time config migration. `followConfigLink` is the
+ * opt-in {@link writeConfigFileAtomically} makes for the asynchronous writers.
  */
-export function writeFileAtomicallySync(filePath: string, content: string, mode: number = 0o600): void {
-	const destination = resolveWriteTargetSync(filePath);
+export function writeFileAtomicallySync(
+	filePath: string,
+	content: string,
+	mode: number = 0o600,
+	followConfigLink = false,
+): void {
+	const destination = followConfigLink ? resolveWriteTargetSync(filePath) : filePath;
 	const tempPath = `${destination}.${process.pid}.${crypto.randomUUID()}.tmp`;
 	let fd: number | undefined;
 	try {
@@ -331,7 +390,9 @@ export async function moveFileAcrossDevices(source: string, destination: string)
  * source that cannot be removed is logged rather than failing the move.
  */
 export async function replaceFileAcrossDevices(source: string, destination: string): Promise<void> {
-	const target = await resolveWriteTarget(destination);
+	// The destination arrives resolved when `publishStagedFile` falls back here;
+	// a direct caller gets the plain behaviour, like every other non-config path.
+	const target = destination;
 	const staging = `${target}.${process.pid}.${crypto.randomUUID()}.move`;
 	try {
 		await fs.promises.copyFile(source, staging);

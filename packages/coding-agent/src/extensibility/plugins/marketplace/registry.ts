@@ -20,7 +20,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import { getPluginsDir, isEnoent, logger, tryParseJson } from "@oh-my-pi/pi-utils";
-import { replaceFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
+import { replaceConfigFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 
 export { getMarketplacesRegistryPath } from "@oh-my-pi/pi-utils";
 
@@ -58,7 +58,7 @@ async function atomicWriteJson(filePath: string, data: unknown): Promise<void> {
 	const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
 	try {
 		await Bun.write(tempPath, `${JSON.stringify(data, null, 2)}\n`);
-		await replaceFileAtomically(tempPath, filePath);
+		await replaceConfigFileAtomically(tempPath, filePath);
 	} catch (error) {
 		await fs.rm(tempPath, { force: true }).catch(() => {});
 		throw error;

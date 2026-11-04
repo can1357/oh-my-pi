@@ -9,7 +9,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { asStrictBytes, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
-import { resolveWriteTarget, writeFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
+import { resolveConfigWriteTarget, writeConfigFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import type { SnapshotResponse } from "./types";
 
 const MAGIC = new Uint8Array([0x4f, 0x4d, 0x50, 0x53]); // "OMPS"
@@ -111,8 +111,8 @@ export async function writeAuthBrokerSnapshotCache(opts: WriteAuthBrokerSnapshot
 	await fs.mkdir(path.dirname(opts.path), { recursive: true });
 	// Staging and sweeping both happen beside the file the path resolves to, so a
 	// linked cache's debris is found where it was actually left.
-	const resolved = await resolveWriteTarget(opts.path);
-	await writeFileAtomically(resolved, payload);
+	const resolved = await resolveConfigWriteTarget(opts.path);
+	await writeConfigFileAtomically(resolved, payload);
 	// Debris only comes from processes that died mid-write; one sweep per path
 	// per process catches it without a directory scan on every write.
 	if (sweptCachePaths.has(resolved)) return;

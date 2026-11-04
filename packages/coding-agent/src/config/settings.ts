@@ -39,7 +39,7 @@ import type { ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
 import { AgentStorage, type AgentStorageApi } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
-import { writeFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
+import { writeConfigFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import { isRegisteredSearchEngine } from "../web/search/provider";
 import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
 import {
@@ -3848,7 +3848,7 @@ export class Settings {
 	// ─────────────────────────────────────────────────────────────────────────
 
 	async #writeYamlAtomically(filePath: string, content: string): Promise<void> {
-		await writeFileAtomically(filePath, content);
+		await writeConfigFileAtomically(filePath, content);
 	}
 
 	#queueSave(): void {

@@ -6,7 +6,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { writeFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
+import { writeConfigFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { invalidate as invalidateFsCache } from "../capability/fs";
 
@@ -61,7 +61,7 @@ export async function writeMCPConfigFile(filePath: string, config: MCPConfigFile
 	const dir = path.dirname(filePath);
 	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
 
-	await writeFileAtomically(filePath, JSON.stringify(withSchema(config), null, 2));
+	await writeConfigFileAtomically(filePath, JSON.stringify(withSchema(config), null, 2));
 	// Invalidate the capability fs cache so subsequent reads see the new content
 	invalidateFsCache(filePath);
 }

@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { replaceFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
+import { replaceConfigFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import type { PluginRuntimeConfig } from "./types";
 
 /** Normalizes persisted plugin runtime config across legacy lockfile shapes. */
@@ -24,7 +24,7 @@ export async function writePluginRuntimeConfig(lockPath: string, config: PluginR
 	const tmpPath = `${lockPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
 	try {
 		await fs.writeFile(tmpPath, JSON.stringify(config, null, 2), { mode: 0o600, flag: "wx" });
-		await replaceFileAtomically(tmpPath, lockPath);
+		await replaceConfigFileAtomically(tmpPath, lockPath);
 	} finally {
 		await fs.rm(tmpPath, { force: true }).catch(() => {});
 	}

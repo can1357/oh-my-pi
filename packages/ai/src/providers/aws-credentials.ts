@@ -19,7 +19,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $env, isEnoent, logger } from "@oh-my-pi/pi-utils";
-import { writeFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
+import { writeConfigFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import * as AIError from "../error";
 import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
@@ -626,7 +626,7 @@ async function refreshSsoToken(
 async function writeSsoCachedToken(file: string, token: SsoCachedToken): Promise<void> {
 	const target = path.join(os.homedir(), ".aws", "sso", "cache", file);
 	try {
-		await writeFileAtomically(target, JSON.stringify(token));
+		await writeConfigFileAtomically(target, JSON.stringify(token));
 	} catch (err) {
 		logger.debug("aws-credentials: failed to persist refreshed SSO token", { file, err: String(err) });
 	}
