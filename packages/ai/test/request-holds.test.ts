@@ -16,6 +16,7 @@ import {
 	runWithRequestHoldView,
 	runWithRequestHolds,
 } from "@oh-my-pi/pi-ai";
+import { pollOpenAIResponsesResultForCompletion } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { heldFetch } from "@oh-my-pi/pi-ai/utils/held-fetch";
 
 /** A hold that holds while `armed`, counting the views it opened and released. */
@@ -724,6 +725,108 @@ describe("what the last check covers", () => {
 			expect(sent?.sent).toBe(true);
 		});
 	}
+
+	it("keeps the current aliased promise alive until its producer releases the real request", async () => {
+		const resolvers = new WeakMap<Promise<void>, () => void>();
+		const refs: WeakRef<Promise<void>>[] = [];
+		let armed = true;
+		let received = 0;
+		const holds: RequestHolds = {
+			open: () => ({
+				check() {
+					if (!armed) return undefined;
+					const pending = Promise.withResolvers<void>();
+					resolvers.set(pending.promise, pending.resolve);
+					refs.push(new WeakRef(pending.promise));
+					return pending.promise;
+				},
+				release() {},
+			}),
+		};
+		const binding = runWithRequestHolds(holds, captureRequestHolds);
+		const alias = new RequestHoldsAlias();
+		alias.bind(binding);
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch() {
+				received++;
+				return new Response("released");
+			},
+		});
+		const sent = runWithRequestHolds(alias, () => afterRequestHolds(undefined, () => fetch(server.url)));
+		try {
+			for (let i = 0; i < 64; i++) {
+				alias.bind(binding);
+				await turns(1);
+			}
+			for (let i = 0; i < 12; i++) {
+				Bun.gc(true);
+				await turns(1);
+			}
+			expect(refs.at(-1)?.deref()).toBeDefined();
+			expect(refs.filter(ref => ref.deref() !== undefined).length).toBeLessThan(10);
+			expect(received).toBe(0);
+			armed = false;
+			for (const ref of refs) {
+				const promise = ref.deref();
+				if (promise) resolvers.get(promise)?.();
+			}
+			expect(await (await sent).text()).toBe("released");
+			expect(received).toBe(1);
+		} finally {
+			armed = false;
+			alias.bind(captureRequestHolds());
+			await sent;
+			server.stop(true);
+		}
+	});
+
+	it("reads an already-submitted response from the server while model requests are held", async () => {
+		const holds = new TestHolds();
+		const reached = Promise.withResolvers<void>();
+		const checked = Promise.withResolvers<void>();
+		const held: RequestHolds = {
+			open() {
+				const view = holds.open();
+				return {
+					check: () => {
+						checked.resolve();
+						return view.check();
+					},
+					release: () => view.release(),
+				};
+			},
+		};
+		const requests: string[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				requests.push(request.method);
+				reached.resolve();
+				return Response.json({ id: "resp_stored", status: "completed", output: [] });
+			},
+		});
+		const result = runWithRequestHolds(held, () =>
+			pollOpenAIResponsesResultForCompletion({
+				fetchImpl: fetch,
+				url: `${server.url}responses/resp_stored`,
+				headers: {},
+				responseId: "resp_stored",
+			}),
+		);
+		try {
+			await Promise.race([reached.promise, checked.promise]);
+			expect(requests).toEqual(["GET"]);
+			expect(await result).toMatchObject({ id: "resp_stored", status: "completed" });
+			expect(holds.checks).toBe(0);
+		} finally {
+			holds.let();
+			await result;
+			server.stop(true);
+		}
+	});
 
 	it("keeps no hold promise alive that no wait is on any more", async () => {
 		const holds = new TestHolds();

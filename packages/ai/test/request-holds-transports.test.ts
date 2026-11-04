@@ -22,6 +22,7 @@ import {
 import { rerank } from "@oh-my-pi/pi-ai/rerank";
 import { SPEECH_APIS, synthesizeSpeech } from "@oh-my-pi/pi-ai/speech";
 import { CodexSteerPump, type CodexSteerSocket } from "@oh-my-pi/pi-ai/providers/openai-codex/live-steering";
+import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { InputItem } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import { stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { transcribeAudio } from "@oh-my-pi/pi-ai/transcription";
@@ -38,6 +39,9 @@ import type {
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { runWithRequestSendState } from "@oh-my-pi/pi-ai/request-holds";
+import { heldFetch } from "@oh-my-pi/pi-ai/utils/held-fetch";
+import { iterateWithIdleTimeout } from "@oh-my-pi/pi-ai/utils/idle-iterator";
 import { submitVideo } from "@oh-my-pi/pi-ai/video";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
@@ -1603,6 +1607,238 @@ describe("framed model requests stop at the first failed hold", () => {
 				await done;
 				clock?.clear();
 				socket.close();
+				server.stop(true);
+			}
+		});
+	}
+});
+
+describe("held transport watchdogs count only network time", () => {
+	for (const stallAfterSteer of [false, true]) {
+		it(`Codex keeps a held steering socket open, then ${stallAfterSteer ? "times out a stalled server" : "delivers its response"}`, async () => {
+			const idleBudgetMs = 120;
+			const holds = new TestHolds();
+			holds.armed = false;
+			const receivedSteer = Promise.withResolvers<void>();
+			const frames: string[] = [];
+			let closedWhileHeld = false;
+			let claimed = false;
+			let accepted = 0;
+			let rejected = 0;
+			let fallback = 0;
+			const server = Bun.serve<undefined>({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch(request, server) {
+					if (server.upgrade(request, { data: undefined })) return;
+					return new Response("upgrade required", { status: 426 });
+				},
+				websocket: {
+					close() {
+						if (holds.armed) closedWhileHeld = true;
+					},
+					message(socket, message) {
+						const frame = JSON.parse(String(message)) as Record<string, unknown>;
+						frames.push(String(frame.type));
+						if (frame.type === "response.create") {
+							socket.send(JSON.stringify({ type: "response.created", response: { id: "resp_clock" } }));
+							socket.send(
+								JSON.stringify({
+									type: "response.output_item.added",
+									item: {
+										type: "message",
+										id: "msg_clock",
+										role: "assistant",
+										status: "in_progress",
+										content: [],
+									},
+								}),
+							);
+							socket.send(
+								JSON.stringify({ type: "response.output_text.delta", item_id: "msg_clock", delta: "before" }),
+							);
+						} else if (frame.type === "response.steer") {
+							receivedSteer.resolve();
+							socket.send(
+								JSON.stringify({
+									type: "response.steer.accepted",
+									steer: { id: "steer_clock", previous_response_id: "resp_clock" },
+								}),
+							);
+							if (!stallAfterSteer)
+								socket.send(
+									JSON.stringify({
+										type: "response.completed",
+										response: {
+											id: "resp_clock",
+											status: "completed",
+											usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+										},
+									}),
+								);
+						}
+					},
+				},
+			});
+			const NativeSocket = globalThis.WebSocket;
+			// Bun's spy type accepts callables only; its runtime also supports constructors.
+			const socketConstructor = vi.spyOn(globalThis, "WebSocket") as unknown as {
+				mockImplementation(factory: (_url: string | URL, options?: Bun.WebSocketOptions) => WebSocket): void;
+			};
+			socketConstructor.mockImplementation(
+				(_url, options) => new NativeSocket(`ws://127.0.0.1:${server.port}/responses`, options),
+			);
+			Object.assign(globalThis.WebSocket, {
+				OPEN: NativeSocket.OPEN,
+				CONNECTING: NativeSocket.CONNECTING,
+				CLOSING: NativeSocket.CLOSING,
+				CLOSED: NativeSocket.CLOSED,
+			});
+			const liveSteering: LiveSteering = {
+				async wait(signal) {
+					if (!claimed || signal.aborted) return;
+					const stopped = Promise.withResolvers<void>();
+					signal.addEventListener("abort", () => stopped.resolve(), { once: true });
+					await stopped.promise;
+				},
+				async claim() {
+					if (claimed) return;
+					claimed = true;
+					holds.armed = true;
+					return {
+						messages: [{ role: "user", content: "continue", timestamp: 1 }],
+						accept: () => accepted++,
+						reject: () => rejected++,
+					};
+				},
+			};
+			const controller = new AbortController();
+			let settled = false;
+			const done = runWithRequestHolds(holds, () =>
+				streamOpenAICodexResponses(
+					heldModel("openai-codex-responses", "openai-codex", "https://chatgpt.com/backend-api", {
+						id: "gpt-6-sol",
+						preferWebsockets: true,
+					}),
+					context,
+					{
+						apiKey: codexToken(),
+						sessionId: crypto.randomUUID(),
+						providerSessionState: new Map(),
+						liveSteering,
+						signal: controller.signal,
+						streamIdleTimeoutMs: idleBudgetMs,
+						streamFirstEventTimeoutMs: idleBudgetMs,
+						codexSseMaxAttempts: 1,
+						fetch: async () => {
+							fallback++;
+							throw new Error("stall fallback observed");
+						},
+					},
+				).result(),
+			).then(result => {
+				settled = true;
+				return result;
+			});
+			try {
+				await waitFor(
+					() => (claimed && holds.checks > 1) || settled,
+					"the claimed steering frame to reach its hold",
+				);
+				expect(claimed).toBe(true);
+				expect(settled).toBe(false);
+				// This is the budget under test, not a socket-scheduling delay.
+				await Bun.sleep(idleBudgetMs * 3);
+				expect(closedWhileHeld).toBe(false);
+				expect(settled).toBe(false);
+				expect(frames).toEqual(["response.create"]);
+				holds.let();
+				await receivedSteer.promise;
+				const result = await done;
+				expect(frames).toEqual(["response.create", "response.steer"]);
+				expect({ accepted, rejected }).toEqual({ accepted: 1, rejected: 0 });
+				expect(result.stopReason).toBe(stallAfterSteer ? "error" : "stop");
+				expect(fallback).toBe(stallAfterSteer ? 1 : 0);
+			} finally {
+				holds.let();
+				controller.abort();
+				await done;
+				server.stop(true);
+			}
+		});
+	}
+
+	for (const progressDuringHold of [false, true]) {
+		it(`HTTP progress ${progressDuringHold ? "during" : "before"} a hold leaves at most one idle budget after resume`, async () => {
+			const idleBudgetMs = 120;
+			const holds = new TestHolds();
+			holds.armed = false;
+			let body: ReadableStreamDefaultController<Uint8Array> | undefined;
+			const encoder = new TextEncoder();
+			const server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch(request) {
+					if (new URL(request.url).pathname === "/resume") return new Response("sent");
+					return new Response(
+						new ReadableStream<Uint8Array>({
+							start(controller) {
+								body = controller;
+								controller.enqueue(encoder.encode("first"));
+							},
+						}),
+					);
+				},
+			});
+			try {
+				await runWithRequestSendState(async state => {
+					const transport = heldFetch(fetch);
+					const response = await transport(server.url);
+					const first = Promise.withResolvers<void>();
+					const during = Promise.withResolvers<void>();
+					let items = 0;
+					const watching = (async () => {
+						try {
+							for await (const _chunk of iterateWithIdleTimeout(response.body!, {
+								idleTimeoutMs: idleBudgetMs,
+								firstItemTimeoutMs: idleBudgetMs,
+								requestSendState: state,
+								errorMessage: "HTTP idle budget expired",
+							})) {
+								if (++items === 1) first.resolve();
+								else during.resolve();
+							}
+							return undefined;
+						} catch (error) {
+							return error;
+						}
+					})();
+					await first.promise;
+					holds.armed = true;
+					const resumed = runWithRequestHolds(holds, () => transport(new URL("resume", server.url)));
+					await waitFor(() => holds.checks > 0, "the HTTP send to pause the watchdog");
+					// Real HTTP body progress must race the native watchdog; fake time does not drive fetch I/O.
+					await Bun.sleep(idleBudgetMs * 3);
+					if (progressDuringHold) {
+						body!.enqueue(encoder.encode("progress while held"));
+						await during.promise;
+					}
+					const resumedAt = performance.now();
+					holds.let();
+					await (await resumed).text();
+					expect(await watching).toMatchObject({ message: "HTTP idle budget expired" });
+					const afterResumeMs = performance.now() - resumedAt;
+					expect(afterResumeMs).toBeGreaterThanOrEqual(idleBudgetMs * 0.75);
+					expect(afterResumeMs).toBeLessThan(idleBudgetMs * 2);
+					expect(items).toBe(progressDuringHold ? 2 : 1);
+				});
+			} finally {
+				holds.let();
+				try {
+					body?.close();
+				} catch {
+					/* The watchdog already canceled the HTTP body. */
+				}
 				server.stop(true);
 			}
 		});

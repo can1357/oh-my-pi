@@ -4,6 +4,7 @@ import {
 	type ResponsesWebSocketConnectionOptions,
 	ResponsesWebSocketTransportError,
 } from "../src/providers/responses-websocket-connection";
+import { afterRequestHolds, runWithRequestHolds, runWithRequestSendState } from "../src/request-holds";
 
 const connections: ResponsesWebSocketConnection[] = [];
 let server: Bun.Server<undefined>;
@@ -247,6 +248,80 @@ describe("Responses physical WebSocket channel", () => {
 		});
 		expect(sent).toHaveLength(1);
 		expect(socket.isOpen()).toBe(true);
+		expect(socket.hasActiveRequest()).toBe(false);
+	});
+
+	it("pauses its first-event budget for a held control send, then still detects a stalled server", async () => {
+		const firstSend = Promise.withResolvers<void>();
+		onMessage = () => firstSend.resolve();
+		const socket = connection();
+		await socket.connect();
+		const budgetMs = 120;
+		const hold = Promise.withResolvers<void>();
+		const checked = Promise.withResolvers<void>();
+		let held = false;
+		const holds = {
+			open: () => ({
+				check: () => {
+					if (held) {
+						checked.resolve();
+						return hold.promise;
+					}
+				},
+				release() {},
+			}),
+		};
+		await runWithRequestHolds(holds, () =>
+			runWithRequestSendState(async state => {
+				const reader = socket.streamRequest(
+					{ send: { type: "response.create" } },
+					{ firstEventTimeoutMs: budgetMs, requestSendState: state },
+				);
+				let settled = false;
+				const pending = reader.next().then(
+					result => {
+						settled = true;
+						return result;
+					},
+					(error: unknown) => {
+						settled = true;
+						return error;
+					},
+				);
+				let control: Promise<void> | undefined;
+				try {
+					await firstSend.promise;
+					held = true;
+					control = afterRequestHolds(undefined, () => socket.sendControl({ type: "response.steer" }));
+					await checked.promise;
+					// Native socket I/O and its platform watchdog must remain live across this real hold.
+					await Bun.sleep(budgetMs * 3);
+					expect(settled).toBe(false);
+					expect(sent).toEqual([{ type: "response.create" }]);
+					held = false;
+					hold.resolve();
+					await control;
+					expect(await pending).toMatchObject({ reason: "timeout", phase: "first-event" });
+					expect(sent).toEqual([{ type: "response.create" }, { type: "response.steer" }]);
+				} finally {
+					held = false;
+					hold.resolve();
+					await control;
+					socket.close();
+					await pending;
+				}
+			}),
+		);
+	});
+
+	it("keeps the first-event watchdog active when reading an already-submitted successor", async () => {
+		const socket = connection();
+		await socket.connect();
+		await runWithRequestSendState(async state => {
+			const reader = socket.streamRequest({ receive: true }, { firstEventTimeoutMs: 20, requestSendState: state });
+			await expect(reader.next()).rejects.toMatchObject({ reason: "timeout", phase: "first-event" });
+		}, true);
+		expect(sent).toHaveLength(0);
 		expect(socket.hasActiveRequest()).toBe(false);
 	});
 

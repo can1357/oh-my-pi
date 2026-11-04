@@ -207,10 +207,10 @@ export interface RequestSendState {
 	onChange(listener: () => void): () => void;
 }
 
-export function runWithRequestSendState<T>(fn: (state: RequestSendState) => T): T {
-	let active = false;
+export function runWithRequestSendState<T>(fn: (state: RequestSendState) => T, initiallyActive = false): T {
+	let active = initiallyActive;
 	let elapsedMs = 0;
-	let activeAt = 0;
+	let activeAt = initiallyActive ? Date.now() : 0;
 	const listeners = new Set<() => void>();
 	const change = (next: boolean) => {
 		if (active === next) return;
@@ -644,6 +644,8 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 				const { promise, resolve, reject } = Promise.withResolvers<void>();
 				const removals: Array<() => void> = [];
 				const wait = {
+					// The shared observer has only a weak key; this live wait owns its input.
+					held: held as Promise<void> | undefined,
 					wake() {
 						wait.stop();
 						resolve();
@@ -655,6 +657,7 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 					stop() {
 						if (currentWait !== wait) return;
 						currentWait = undefined;
+						wait.held = undefined;
 						for (const remove of removals.splice(0)) remove();
 					},
 				};

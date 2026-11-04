@@ -36,7 +36,6 @@ import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { heldFetch } from "../utils/held-fetch";
 import { runWithRequestSendState } from "../request-holds";
 import {
-	armPreResponseTimeout,
 	armRequestTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
@@ -246,7 +245,7 @@ function isRetryableOpenAIResponsesStreamFailure(error: unknown): boolean {
 }
 
 const OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS = 5_000;
-/** Recovery budget excluding request-hold waits: a long high-effort turn finishing server-side. */
+/** Wall-clock budget for the whole recovery: a long high-effort turn finishing server-side. */
 const OPENAI_RESPONSES_RESUME_DEADLINE_MS = 120_000;
 /** Backstop on request count, independent of the clock. */
 const OPENAI_RESPONSES_RESUME_MAX_POLLS = 24;
@@ -264,10 +263,10 @@ interface OpenAIResponsesPolledResult {
  * 404s, 5xx, and transport failures mean "not yet" (an in-flight run only
  * becomes retrievable once the server finishes it); any other status, a
  * mismatched id, or a failed/cancelled run ends the poll immediately.
- * The recovery budget excludes request-hold waits. Each request's timeout is
- * clamped to the time left, and no sleep may cross the remaining budget, so
- * a stalled host cannot hold an already-failed turn past it. Returns the
- * terminal object, or undefined on give-up/abort.
+ * This reads an already-submitted result, not a model request: holds do not
+ * apply. Each request's timeout is clamped to the wall-clock budget left, and
+ * no sleep may cross it, so a stalled host cannot delay recovery past it.
+ * Returns the terminal object, or undefined on give-up/abort.
  *
  * @internal Exported for tests.
  */
@@ -280,64 +279,57 @@ export async function pollOpenAIResponsesResultForCompletion(args: {
 	/** Sleep between polls; defaults to a real wait honoring `signal`. */
 	wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }): Promise<Record<string, unknown> | undefined> {
-	return await runWithRequestSendState(async requestSendState => {
-		const remaining = () => OPENAI_RESPONSES_RESUME_DEADLINE_MS - requestSendState.elapsedMs;
-		for (let attempt = 0; attempt < OPENAI_RESPONSES_RESUME_MAX_POLLS; attempt++) {
-			if (args.signal?.aborted) return undefined;
-			if (attempt > 0) {
-				if (OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS >= remaining()) return undefined;
-				try {
-					await waitForRetry(args.wait, OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS, args.signal);
-				} catch {
-					return undefined;
-				}
-				if (args.signal?.aborted) return undefined;
-			}
-			const remainingMs = remaining();
-			if (remainingMs <= 0) return undefined;
-			const attemptTimeout = armPreResponseTimeout(
-				args.signal,
-				Math.min(OPENAI_RESPONSES_RESUME_POLL_ATTEMPT_TIMEOUT_MS, remainingMs),
-			);
-			let status: number | undefined;
-			let body: OpenAIResponsesPolledResult | undefined;
+	const deadline = Date.now() + OPENAI_RESPONSES_RESUME_DEADLINE_MS;
+	for (let attempt = 0; attempt < OPENAI_RESPONSES_RESUME_MAX_POLLS; attempt++) {
+		if (args.signal?.aborted) return undefined;
+		if (attempt > 0) {
+			if (Date.now() + OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS >= deadline) return undefined;
 			try {
-				const response = await attemptTimeout.run(() =>
-					heldFetch(args.fetchImpl)(args.url, {
-						headers: args.headers,
-						signal: attemptTimeout.signal,
-					}),
-				);
-				status = response.status;
-				if (status === 200) {
-					const decoded: unknown = await response.json().catch(() => undefined);
-					if (decoded !== null && typeof decoded === "object") {
-						body = decoded as OpenAIResponsesPolledResult;
-					}
-				}
+				await waitForRetry(args.wait, OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS, args.signal);
 			} catch {
-				body = undefined;
-			} finally {
-				attemptTimeout.clear();
-			}
-			if (status === 200) {
-				if (body?.id !== args.responseId) return undefined;
-				if (
-					body.status === "completed" ||
-					(body.status === "incomplete" && Array.isArray(body.output) && body.output.length > 0)
-				) {
-					// Validated above (id match, adoptable terminal status): hand the
-					// decoded body to the event synthesizer as untyped wire JSON.
-					const record: Record<string, unknown> = body as unknown as Record<string, unknown>;
-					return record;
-				}
-				if (body.status === "failed" || body.status === "cancelled") return undefined;
-			} else if (status !== undefined && status !== 404 && status < 500) {
 				return undefined;
 			}
+			if (args.signal?.aborted) return undefined;
 		}
-		return undefined;
-	});
+		const remainingMs = deadline - Date.now();
+		if (remainingMs <= 0) return undefined;
+		const attemptTimeout = AbortSignal.timeout(
+			Math.min(OPENAI_RESPONSES_RESUME_POLL_ATTEMPT_TIMEOUT_MS, remainingMs),
+		);
+		let status: number | undefined;
+		let body: OpenAIResponsesPolledResult | undefined;
+		try {
+			const response = await args.fetchImpl(args.url, {
+				headers: args.headers,
+				signal: args.signal ? AbortSignal.any([args.signal, attemptTimeout]) : attemptTimeout,
+			});
+			status = response.status;
+			if (status === 200) {
+				const decoded: unknown = await response.json().catch(() => undefined);
+				if (decoded !== null && typeof decoded === "object") {
+					body = decoded as OpenAIResponsesPolledResult;
+				}
+			}
+		} catch {
+			body = undefined;
+		}
+		if (status === 200) {
+			if (body?.id !== args.responseId) return undefined;
+			if (
+				body.status === "completed" ||
+				(body.status === "incomplete" && Array.isArray(body.output) && body.output.length > 0)
+			) {
+				// Validated above (id match, adoptable terminal status): hand the
+				// decoded body to the event synthesizer as untyped wire JSON.
+				const record: Record<string, unknown> = body as unknown as Record<string, unknown>;
+				return record;
+			}
+			if (body.status === "failed" || body.status === "cancelled") return undefined;
+		} else if (status !== undefined && status !== 404 && status < 500) {
+			return undefined;
+		}
+	}
+	return undefined;
 }
 
 /**

@@ -1,6 +1,6 @@
 import type { IncomingMessage } from "node:http";
 import type { RawSseEvent } from "../types";
-import { afterRequestHolds } from "../request-holds";
+import { afterRequestHolds, type RequestSendState } from "../request-holds";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { notifyRawSseEvent } from "../utils/sse-debug";
 import {
@@ -45,6 +45,8 @@ export class ResponsesWebSocketTransportError extends Error {
 export interface ResponsesWebSocketTimeouts {
 	firstEventTimeoutMs?: number;
 	idleTimeoutMs?: number;
+	/** Shares the producer's network clock, including holds on later steering frames. */
+	requestSendState?: RequestSendState;
 }
 
 export type ResponsesWebSocketExchange = { send: Record<string, unknown> } | { receive: true };
@@ -99,8 +101,8 @@ function timeoutMessage(
 	lastEventType: string | undefined,
 	lastProgressAt: number,
 	lastProgressEventType: string | undefined,
+	now: number,
 ): string {
-	const now = Date.now();
 	const lastEvent = lastEventType ? `${lastEventType} ${Math.max(0, now - lastEventAt)}ms ago` : "none";
 	const lastProgress = lastProgressEventType
 		? `${lastProgressEventType} ${Math.max(0, now - lastProgressAt)}ms ago`
@@ -430,7 +432,9 @@ export class ResponsesWebSocketConnection {
 				await afterRequestHolds(signal, () => this.sendControl(exchange.send));
 			}
 			let sawFirstEvent = false;
-			let lastProgressAt = Date.now();
+			const requestSendState = timeouts.requestSendState;
+			const networkNow = () => requestSendState?.elapsedMs ?? Date.now();
+			let lastProgressAt = networkNow();
 			let lastProgressEventType: string | undefined;
 			let lastEventAt = lastProgressAt;
 			let lastEventType: string | undefined;
@@ -445,17 +449,20 @@ export class ResponsesWebSocketConnection {
 					lastEventType,
 					lastProgressAt,
 					lastProgressEventType,
+					networkNow(),
 				);
 				let timeoutMs: number | undefined;
 				if (sawFirstEvent) {
 					if (timeouts.idleTimeoutMs !== undefined && timeouts.idleTimeoutMs > 0) {
-						timeoutMs = timeouts.idleTimeoutMs - (Date.now() - lastProgressAt);
-						if (timeoutMs <= 0) throw new ResponsesWebSocketTransportError("timeout", phase, reason);
+						timeoutMs = timeouts.idleTimeoutMs - (networkNow() - lastProgressAt);
+						if (requestSendState?.active !== false && timeoutMs <= 0) {
+							throw new ResponsesWebSocketTransportError("timeout", phase, reason);
+						}
 					}
 				} else if (timeouts.firstEventTimeoutMs !== undefined && timeouts.firstEventTimeoutMs > 0) {
 					timeoutMs = timeouts.firstEventTimeoutMs;
 				}
-				const next = await this.#nextMessage(timeoutMs, reason, phase);
+				const next = await this.#nextMessage(timeoutMs, reason, phase, requestSendState);
 				if (next instanceof Error) throw next;
 				const eventType = typeof next.type === "string" ? next.type : "";
 				const frameResponseId = extractFrameResponseId(next);
@@ -486,7 +493,7 @@ export class ResponsesWebSocketConnection {
 					lastSequence = frameSequence;
 				}
 				sawFirstEvent = true;
-				lastEventAt = Date.now();
+				lastEventAt = networkNow();
 				lastEventType = eventType || undefined;
 				if (isResponsesWebSocketProgressEvent(next)) {
 					lastProgressAt = lastEventAt;
@@ -672,23 +679,42 @@ export class ResponsesWebSocketConnection {
 		timeoutMs: number | undefined,
 		detail: string,
 		phase: "first-event" | "idle",
+		requestSendState?: RequestSendState,
 	): Promise<Record<string, unknown> | Error> {
+		const networkNow = () => requestSendState?.elapsedMs ?? Date.now();
+		const deadline = timeoutMs === undefined ? undefined : networkNow() + timeoutMs;
 		while (this.#queue.length === 0) {
 			if (this.#closedError) return this.#closedError;
 			const { promise, resolve } = Promise.withResolvers<void>();
 			this.#waiters.push(resolve);
 			let timedOut = false;
-			const timeout =
-				timeoutMs !== undefined && timeoutMs > 0
-					? setTimeout(() => {
-							timedOut = true;
-							const index = this.#waiters.indexOf(resolve);
-							if (index >= 0) this.#waiters.splice(index, 1);
-							resolve();
-						}, timeoutMs)
-					: undefined;
-			await promise;
-			clearTimeout(timeout);
+			let timeout: NodeJS.Timeout | undefined;
+			const arm = () => {
+				clearTimeout(timeout);
+				timeout = undefined;
+				if (deadline === undefined || requestSendState?.active === false) return;
+				timeout = setTimeout(
+					() => {
+						if (requestSendState?.active === false || networkNow() < deadline) {
+							arm();
+							return;
+						}
+						timedOut = true;
+						resolve();
+					},
+					Math.max(0, deadline - networkNow()),
+				);
+			};
+			const removeTimingListener = requestSendState?.onChange(arm);
+			try {
+				arm();
+				await promise;
+			} finally {
+				clearTimeout(timeout);
+				removeTimingListener?.();
+				const index = this.#waiters.indexOf(resolve);
+				if (index >= 0) this.#waiters.splice(index, 1);
+			}
 			if (timedOut && this.#queue.length === 0)
 				return new ResponsesWebSocketTransportError("timeout", phase, detail);
 		}

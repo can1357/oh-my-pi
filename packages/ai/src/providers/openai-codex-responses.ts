@@ -26,6 +26,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
+import { type RequestSendState, runWithRequestSendState } from "../request-holds";
 import { parseToolCallArguments, replayableToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey } from "../env-api-key";
 import type {
@@ -165,6 +166,7 @@ import {
 	isResponsesWebSocketProgressEvent,
 	ResponsesWebSocketConnection,
 	ResponsesWebSocketTransportError,
+	type ResponsesWebSocketTimeouts,
 } from "./responses-websocket-connection";
 import { normalizeToolCallId, redactSensitiveInObject, transformMessages } from "./transform-messages";
 
@@ -732,6 +734,7 @@ interface CodexRequestContext {
 
 interface CodexRequestSetup {
 	requestSignal: AbortSignal;
+	requestSendState?: RequestSendState;
 	wrapCodexSseStream: (source: AsyncGenerator<Record<string, unknown>>) => AsyncGenerator<Record<string, unknown>>;
 	requestAbortController: AbortController;
 	firstEventTimeoutMs: number | undefined;
@@ -1212,7 +1215,10 @@ function resetOutputState(output: AssistantMessage): void {
 	output.stopDetails = undefined;
 }
 
-function createRequestSetup(options: OpenAICodexResponsesOptions | undefined): CodexRequestSetup {
+function createRequestSetup(
+	options: OpenAICodexResponsesOptions | undefined,
+	requestSendState?: RequestSendState,
+): CodexRequestSetup {
 	const requestAbortController = new AbortController();
 	const requestSignal = options?.signal
 		? AbortSignal.any([options.signal, requestAbortController.signal])
@@ -1237,6 +1243,7 @@ function createRequestSetup(options: OpenAICodexResponsesOptions | undefined): C
 	return {
 		requestAbortController,
 		requestSignal,
+		requestSendState,
 		wrapCodexSseStream,
 		firstEventTimeoutMs,
 		websocketIdleTimeoutMs,
@@ -1726,9 +1733,10 @@ async function openCodexWebSocketTransport(
 		let chainCarriedInput: InputItem[] = chainedBody.previous_response_id
 			? fullInput.slice(0, fullInput.length - (chainedBody.input?.length ?? 0))
 			: [];
-		const timeouts: CodexWebSocketRequestTimeouts = {
+		const timeouts: ResponsesWebSocketTimeouts = {
 			idleTimeoutMs: requestSetup.websocketIdleTimeoutMs,
 			firstEventTimeoutMs: requestSetup.websocketFirstEventTimeoutMs,
+			requestSendState: requestSetup.requestSendState,
 		};
 		// Steering accepted for the previous response lives only on the socket that
 		// accepted it; a replaced socket lost it, so the input is plain history.
@@ -3095,7 +3103,7 @@ class CodexStreamProcessor {
 		resetOutputState(this.output);
 		this.firstTokenTime = undefined;
 		if (this.requestSetup.requestAbortController.signal.aborted) {
-			this.requestSetup = createRequestSetup(this.options);
+			this.requestSetup = createRequestSetup(this.options, this.requestSetup.requestSendState);
 		}
 		await scheduler.wait(CODEX_RETRY_DELAY_MS * this.runtime.providerRetryAttempt, {
 			signal: this.requestSetup.requestSignal,
@@ -3179,7 +3187,9 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
 
-	(async () => {
+	// Channel budgets start at send/read, not at this scope's creation. Starting
+	// active also covers receive-only successors; later steering holds pause it.
+	runWithRequestSendState(async requestSendState => {
 		const startTime = performance.now();
 		const output: AssistantMessage = {
 			role: "assistant",
@@ -3198,7 +3208,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
-		const requestSetup = createRequestSetup(options);
+		const requestSetup = createRequestSetup(options, requestSendState);
 		let processingContext: CodexStreamProcessor | undefined;
 		let requestContext: CodexRequestContext | undefined;
 
@@ -3274,7 +3284,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 		} finally {
 			requestContext?.isolatedTransportState?.close();
 		}
-	})();
+	}, true);
 
 	return stream;
 };
@@ -3725,11 +3735,6 @@ function headersToRecord(headers: Headers): Record<string, string> {
 	return result;
 }
 
-interface CodexWebSocketRequestTimeouts {
-	idleTimeoutMs?: number;
-	firstEventTimeoutMs?: number;
-}
-
 /** What {@link CodexWebSocketConnection.streamRequest} puts on the wire before reading a response. */
 type CodexWebSocketExchange =
 	| { send: Record<string, unknown> }
@@ -3871,7 +3876,7 @@ class CodexWebSocketConnection {
 
 	async *streamRequest(
 		exchange: CodexWebSocketExchange,
-		timeouts: CodexWebSocketRequestTimeouts,
+		timeouts: ResponsesWebSocketTimeouts,
 		signal?: AbortSignal,
 		onSseEvent?: (event: RawSseEvent) => void,
 		onOwned?: () => void,

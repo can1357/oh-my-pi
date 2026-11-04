@@ -333,9 +333,14 @@ export async function* iterateWithIdleTimeout<T>(
 	const removeTimingListener = options.requestSendState?.onChange(() => {
 		if (options.requestSendState?.active) {
 			if (pausedAt !== undefined) {
-				const pausedMs = Date.now() - pausedAt;
-				if (firstItemDeadlineMs !== undefined) firstItemDeadlineMs += pausedMs;
-				lastProgressAt += pausedMs;
+				const now = Date.now();
+				const pausedMs = now - pausedAt;
+				if (firstItemDeadlineMs !== undefined && firstItemTimeoutMs !== undefined) {
+					firstItemDeadlineMs = Math.min(now + firstItemTimeoutMs, firstItemDeadline()! + pausedMs);
+				}
+				// Progress or a local-work result can arrive mid-hold. Credit only the
+				// pause after that progress, never move its timestamp past the resume.
+				lastProgressAt = Math.min(now, Math.max(lastProgressAt, localWorkSettledAt()) + pausedMs);
 				pausedAt = undefined;
 			}
 		} else {
@@ -482,6 +487,12 @@ export async function* iterateWithIdleTimeout<T>(
 					throw abortReason(abortSignal!);
 				}
 				if (outcome.kind === "timeout") {
+					const deadlineMs = currentDeadlineMs();
+					// A hold or new progress can supersede a timer that already won its race.
+					if (deadlineMs === undefined || deadlineMs > Date.now()) {
+						continuing = true;
+						continue;
+					}
 					if (hasPendingLocalWork()) {
 						// A local tool is still running; the provider cannot make
 						// progress until we hand its result back. Keep waiting.

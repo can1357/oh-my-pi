@@ -1979,6 +1979,9 @@ function streamCursorWithWireMode(
 					const idleTimer = setTimeout(parked.close, CURSOR_RELAY_IDLE_TIMEOUT_MS);
 					log("relay", "parked", { calls: [...relay.held.keys()] });
 					// Parked before the response ends, so the request it prompts finds the run.
+					// Blob replies can still complete this run's protocol while parked;
+					// they start no inference. The completed stream's permit hooks no
+					// longer acquire capacity; resuming installs the next request's owner.
 					stream.push({ type: "done", reason: "toolUse", message: output });
 					stream.end();
 

@@ -649,6 +649,8 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 		let release: (() => Promise<void>) | undefined;
 		let releasePromise: Promise<void> | undefined;
 		let acquiring: Promise<void> | undefined;
+		const lifetime = new AbortController();
+		const signal = options?.signal ? AbortSignal.any([options.signal, lifetime.signal]) : lifetime.signal;
 		const releaseOnce = () => {
 			if (release) {
 				const owned = release;
@@ -672,11 +674,18 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 				});
 			}
 		};
+		const finish = async () => {
+			lifetime.abort();
+			await acquiring?.catch(() => {});
+			await releaseBestEffort();
+		};
 		const prepare = () => {
-			if (release) return undefined;
+			// Parked transport continuations may outlive this request. They cannot
+			// reopen its permit after the stream wrapper has released ownership.
+			if (lifetime.signal.aborted || release) return undefined;
 			acquiring ??= (async () => {
 				const startedWaitingAt = Date.now();
-				release = await acquireProviderInFlightSlot(model.provider, limit, options?.signal);
+				release = await acquireProviderInFlightSlot(model.provider, limit, signal);
 				releasePromise = undefined;
 				if (Date.now() - startedWaitingAt >= PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS) {
 					logger.debug("Provider in-flight limit wait completed", { provider: model.provider, limit });
@@ -705,7 +714,7 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 				}
 				outer.push(event);
 				if (outer.done) {
-					await releaseBestEffort();
+					await finish();
 					return;
 				}
 			}
@@ -713,13 +722,13 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 			// Releasing the permit is part of request completion. Publishing the
 			// result first lets an immediate follow-up turn contend with its own
 			// still-live lease, which is particularly costly on Windows.
-			await releaseBestEffort();
+			await finish();
 			if (!outer.done) {
 				if (terminalEvent) outer.push(terminalEvent);
 				else outer.end(result);
 			}
 		} catch (error) {
-			await releaseBestEffort();
+			await finish();
 			if (!outer.done) outer.fail(error);
 		}
 	})();
