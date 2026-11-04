@@ -1,5 +1,5 @@
 <system-injection>
-The provider ended your last response with a refusal, so that response was discarded. Provider reason: {{reason}}
+The provider ended your last response with a refusal, so that response was discarded. The provider's own wording is deliberately not repeated here: storing it would send it back on every later request and draw the same refusal again.
 {{#if hasCalls}}
 These tool calls from that response failed and did NOT run; nothing they would have done has happened:
 {{#each calls}}

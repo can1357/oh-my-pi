@@ -2975,6 +2975,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#prunedTerminalFailure = message;
 			},
 			resumeOwedRefusalWake: () => this.#recovery.resumeOwedRefusalWake(),
+			surfaceOwedRefusalReport: () => {
+				this.#recovery.surfaceOwedRefusalReport();
+			},
 			runRecoveryCompactionWithRollback: (reason, message, options) =>
 				this.#recovery.runRecoveryCompactionWithRollback(reason, message, options),
 			parseRetryAfterMsFromError: errorMessage => this.#recovery.parseRetryAfterMsFromError(errorMessage),
@@ -5004,6 +5007,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const emitAgentEndNotification = (options?: AgentEndSettleOptions) =>
 				this.#settleAgentEnd(event, activeMessages, options);
 			await this.#goalRuntime.onAgentEnd({ currentUsage: () => this.#goalUsage() });
+			// Refusal settlement reads the session branch (`refusalChainOpen`), so this
+			// run's turns must be on it: message_end commits are queued, not awaited.
+			await this.#messageEndPersistenceTail;
 			const fallbackAssistant = settledMessages.findLast(
 				(message): message is AssistantMessage => message.role === "assistant",
 			);
@@ -11772,12 +11778,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				} else this.#recordWithoutTurn([message]);
 			}
 			// Any abort but an internal one (the user's interrupt, an RPC or SDK abort,
-			// `newSession`) withdraws a refusal report's owed wake, with a persisted note
-			// so a later compaction or reload does not restart it. An internal abort (a
-			// compaction, a session switch) leaves it owed. A run another source already
-			// started took the wake, so there is nothing to withdraw.
-			if (options?.goalReason !== "internal" && !this.agent.state.isStreaming) {
-				this.#recovery.withdrawOwedRefusalWake();
+			// `newSession`) withdraws a refusal report's owed wake — one not yet started,
+			// or one interrupted while it streamed — with a persisted note, so a later
+			// compaction or reload does not restart it. The aborted turn alone cannot say
+			// this: a compaction, a session switch and an exiting process abort turns too,
+			// and those leave the wake owed. A run another source already started reads
+			// the report itself, so there is nothing to withdraw.
+			if (options?.goalReason !== "internal") {
+				await this.#messageEndPersistenceTail;
+				if (!this.agent.state.isStreaming) this.#recovery.withdrawOwedRefusalWake();
 			}
 		} finally {
 			this.#abortInProgress = false;

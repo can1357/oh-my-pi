@@ -20,10 +20,9 @@ import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import { hasRestorableTurn } from "../session/exit-diagnostics";
-import { buildSessionContext } from "../session/session-context";
 import { extractSessionInit } from "../session/session-manager";
 import { collectSubSessions } from "../session/sub-sessions";
-import { refusalWakeOwed } from "../session/turn-recovery";
+import { refusalWakeOwed } from "../session/refusal-chain";
 import type { EventBus } from "../utils/event-bus";
 import { runSubagentFollowUpTurn, softRequestBudgetFor } from "./executor";
 import { persistedAgentDefinition } from "./persisted-revive";
@@ -75,7 +74,7 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 	const restored: string[] = [];
 	for (const key of keys) {
 		const sub = subSessions[key]!;
-		const owesRefusalWake = refusalWakeOwed(buildSessionContext(sub.entries).messages);
+		const owesRefusalWake = refusalWakeOwed(sub.entries);
 		if (sub.aborted || !(hasRestorableTurn(sub.entries) || owesRefusalWake)) continue;
 		const id = sub.agentId;
 		const ref = registry.get(id);

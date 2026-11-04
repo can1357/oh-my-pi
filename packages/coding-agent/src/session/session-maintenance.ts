@@ -499,8 +499,13 @@ export interface SessionMaintenanceHost {
 	 * post-settle readers (`AgentSession.getLastAssistantMessage`) until the next run.
 	 */
 	retainTerminalFailure(message: AssistantMessage): void;
-	/** Schedule the refusal-report wake the context says is owed, if any (see `TurnRecovery.resumeOwedRefusalWake`). */
+	/** Schedule the refusal-report wake the branch says is owed, if any (see `TurnRecovery.resumeOwedRefusalWake`). */
 	resumeOwedRefusalWake(): void;
+	/**
+	 * Re-append an owed refusal report the rewritten context no longer shows, so
+	 * the model reads it (see `TurnRecovery.surfaceOwedRefusalReport`).
+	 */
+	surfaceOwedRefusalReport(): void;
 	runRecoveryCompactionWithRollback(
 		reason: "overflow" | "incomplete",
 		message: AssistantMessage,
@@ -2649,6 +2654,9 @@ export class SessionMaintenance {
 		const newEntries = this.#host.sessionManager.getEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
+		// The cut may have summarized an unread refusal report away while keeping
+		// newer messages; the model must still read it before its wake is spent.
+		this.#host.surfaceOwedRefusalReport();
 		this.#host.rebaseAfterCompaction();
 		// Compaction discarded the conversation history that carried the approved
 		// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
@@ -4677,6 +4685,7 @@ export class SessionMaintenance {
 		this.#failedNativeSpeculation = undefined;
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.surfaceOwedRefusalReport();
 		this.#host.rebaseAfterCompaction();
 		// Same post-rewrite bookkeeping as the regular compaction append: the
 		// rebuilt context no longer carries the transient plan reference (#1246),

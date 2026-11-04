@@ -133,6 +133,7 @@ describe("async speculative compaction", () => {
 			findLastAssistantMessage: () => undefined,
 			disconnectFromAgent: () => {},
 			resumeOwedRefusalWake: () => {},
+			surfaceOwedRefusalReport: () => {},
 			reconnectToAgent: () => {},
 			drainStrandedQueuedMessages: () => {},
 			buildDisplaySessionContext: () => sessionManager.buildSessionContext(),

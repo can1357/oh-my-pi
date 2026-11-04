@@ -13,6 +13,7 @@ import type {
 	CodexCompactionContext,
 	Effort,
 	Model,
+	ImageContent,
 	ModelUsageHealth,
 	TextContent,
 	ToolChoice,
@@ -58,12 +59,20 @@ import type {
 } from "./agent-session-types";
 import {
 	assistantTurnProducedOutput,
-	type CustomMessage,
 	isEmptyAssistantStop,
 	isEmptyErrorTurn,
 	isUserAuthoredMessage,
 	operatorTitleText,
 } from "./messages";
+import {
+	REFUSAL_TOOL_CALL_REPORT_TYPE,
+	REFUSAL_WAKE_WITHDRAWN_TYPE,
+	type RefusalReportDetails,
+	isAnsweredAssistantTurn,
+	owedRefusalReport,
+	refusalChainOpen,
+	refusalWakeOwed,
+} from "./refusal-chain";
 import {
 	type ActiveRetryFallbackState,
 	calculateRetryBackoffDelayMs,
@@ -103,61 +112,20 @@ import {
 } from "./settings";
 
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
-/** Custom-message type of the notice that reports a refused turn's tool calls; see `settleTerminalRefusal`. */
-const REFUSAL_TOOL_CALL_REPORT_TYPE = "refusal-tool-call-report";
-/** Custom-message type of the note that a user's interrupt withdrew a refusal report's wake. */
-const REFUSAL_WAKE_WITHDRAWN_TYPE = "refusal-wake-withdrawn";
-
-/** `details` of a refusal report. A final report ends its chain: no wake follows it. */
-interface RefusalReportDetails {
-	final: boolean;
-}
-
-function isRefusalReport(message: AgentMessage): message is CustomMessage<RefusalReportDetails> {
-	return message.role === "custom" && message.customType === REFUSAL_TOOL_CALL_REPORT_TYPE;
-}
 
 /**
- * A message that starts new work: the user's own words, a parent's assignment,
- * the operator's continue. Prompts omp writes itself (synthetic: yield
- * reminders, auto-continue, injected notices) and peer or extension messages
- * do not; counting them would let a refusal chain restart on its own.
+ * Whether the model can read the owed report in `messages` and a continuation
+ * can start from them: reading backwards, a refusal report comes before any
+ * answered assistant turn, and the last message is not an assistant turn. This
+ * reads the replay view on purpose — it asks what the model will see, while
+ * `owedRefusalReport` answers what happened, from the durable branch.
  */
-function startsNewWork(message: AgentMessage): boolean {
-	if (message.role === "user") return message.synthetic !== true;
-	if (message.role === "developer") return message.userInitiated === true;
-	return isUserAuthoredMessage(message);
-}
-
-/**
- * Whether a refusal settled now is the woken turn refused again: reading the
- * context backwards, a refusal report comes before any answered assistant turn
- * and any new work. Every way a run starts reads the same context, so this
- * answer cannot depend on how the run started.
- */
-export function refusalChainOpen(messages: readonly AgentMessage[]): boolean {
+function owedReportInView(messages: readonly AgentMessage[]): boolean {
+	if (messages.at(-1)?.role === "assistant") return false;
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
-		if (isRefusalReport(message)) return true;
-		if (message.role === "assistant" && message.stopReason !== "error" && message.stopReason !== "aborted") {
-			return false;
-		}
-		if (startsNewWork(message)) return false;
-	}
-	return false;
-}
-
-/**
- * Whether a refusal report's wake is owed: reading the context backwards, a
- * non-final report comes before any assistant turn (the wake, or anything
- * else, already ran), any new work, and any note that a user withdrew it.
- */
-export function refusalWakeOwed(messages: readonly AgentMessage[]): boolean {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const message = messages[i];
-		if (isRefusalReport(message)) return message.details?.final !== true;
-		if (message.role === "assistant" || startsNewWork(message)) return false;
-		if (message.role === "custom" && message.customType === REFUSAL_WAKE_WITHDRAWN_TYPE) return false;
+		if (message.role === "custom" && message.customType === REFUSAL_TOOL_CALL_REPORT_TYPE) return true;
+		if (isAnsweredAssistantTurn(message)) return false;
 	}
 	return false;
 }
@@ -787,16 +755,15 @@ export class TurnRecovery {
 	 * reported with the provider's reason in a persisted notice, and the
 	 * session continues once so the model reads it.
 	 *
-	 * Whether this refusal is the woken turn refused again is not tracked; it is
-	 * read from the session's context ({@link refusalChainOpen}): a refusal
-	 * report since the last answered turn and the last new work means a wake
-	 * already ran for this chain. Retries, fallback hops, compaction, session
-	 * switches and reopening add no new work to the context, so every way a run
-	 * can start reads the same answer. Then the report is final, even when the
-	 * turn made no tool call: it says the session will not continue, and no wake
-	 * is scheduled. Otherwise the session wakes once.
+	 * Whether this refusal is the woken turn refused again is not tracked, and
+	 * no message is classified as starting new work. It is read from the
+	 * session's durable branch ({@link refusalChainOpen}): a refusal report
+	 * since the last answered assistant turn means a wake already ran for this
+	 * chain. Then the report is final, even when the turn made no tool call: it
+	 * says the session will not continue, and no wake is scheduled. Otherwise
+	 * the session wakes once.
 	 *
-	 * The wake is owed while the context ends in a non-final report
+	 * The wake is owed while the branch ends in a non-final report
 	 * ({@link refusalWakeOwed}). A dropped continuation (a compaction or a
 	 * session switch aborts scheduled ones) is restarted from that fact
 	 * ({@link resumeOwedRefusalWake}); a user's interrupt withdraws it with a
@@ -849,32 +816,19 @@ export class TurnRecovery {
 				),
 			);
 		}
-		const refusedAgain = refusalChainOpen(this.#host.agent.state.messages);
+		const refusedAgain = refusalChainOpen(this.#host.sessionManager.getBranch());
 		if (calls.length === 0 && !refusedAgain) return { woke: false };
 
+		// The provider's refusal text is deliberately absent from the rendered
+		// report: a stored copy is replayed on every later request and draws the
+		// same refusal, which is the forever-refused session of INFRA-1191. It is
+		// kept in `details`, which no request sends.
 		const report = prompt.render(refusalToolCallReportTemplate, {
-			reason: message.errorMessage ?? "none given",
 			calls,
 			hasCalls: calls.length > 0,
 			final: refusedAgain,
 		});
-		const details: RefusalReportDetails = { final: refusedAgain };
-		this.#host.agent.appendMessage({
-			role: "custom",
-			customType: REFUSAL_TOOL_CALL_REPORT_TYPE,
-			content: report,
-			display: false,
-			details,
-			attribution: "agent",
-			timestamp: Date.now(),
-		});
-		this.#host.sessionManager.appendCustomMessageEntry(
-			REFUSAL_TOOL_CALL_REPORT_TYPE,
-			report,
-			false,
-			details,
-			"agent",
-		);
+		this.#appendRefusalReport(report, { final: refusedAgain, upstreamError: message.errorMessage });
 		const wake = !refusedAgain && !this.#host.abortInProgress() && !this.#host.isDisposed();
 		if (wake) {
 			logger.info("Classifier refusal ended a tool-call turn; reporting the calls and continuing", {
@@ -895,45 +849,104 @@ export class TurnRecovery {
 		return { woke: wake, persisted };
 	}
 
+	/** Append a refusal report to active context and the session branch, one timestamp for both. */
+	#appendRefusalReport(report: string | (TextContent | ImageContent)[], details: RefusalReportDetails): void {
+		const timestamp = Date.now();
+		this.#host.agent.appendMessage({
+			role: "custom",
+			customType: REFUSAL_TOOL_CALL_REPORT_TYPE,
+			content: report,
+			display: false,
+			details,
+			attribution: "agent",
+			timestamp,
+		});
+		this.#host.sessionManager.appendCustomMessageEntry(
+			REFUSAL_TOOL_CALL_REPORT_TYPE,
+			report,
+			false,
+			details,
+			"agent",
+			timestamp,
+		);
+	}
+
 	#scheduleRefusalWake(): void {
 		this.#host.scheduleAgentContinue({
 			source: "refusal-tool-call-report",
 			generation: this.#host.promptGeneration(),
-			// Another run may have taken the wake first (a compaction's resume, a prompt).
-			shouldContinue: () => refusalWakeOwed(this.#host.agent.state.messages),
+			// Another run may have taken the wake first (a compaction's resume, a
+			// prompt); otherwise the report must be in view when the wake starts.
+			shouldContinue: () => this.surfaceOwedRefusalReport(),
 		});
 	}
 
 	/**
-	 * Schedule the wake the context says is owed, if any: after something
+	 * Put the owed report where the model reads it: when the branch owes a wake
+	 * and active context does not show its report after the last answered turn
+	 * (a compaction summarized it away while keeping newer messages), or context
+	 * ends in an assistant turn a continuation cannot start from (an empty or
+	 * failed turn after the report), a copy of the report is appended to context
+	 * and to the branch. The copy is the newest report, so the chain and the
+	 * owed wake read the same as from the original. A running turn's context is
+	 * left alone; the wake surfaces the report again when it fires.
+	 *
+	 * @returns whether a wake is owed.
+	 */
+	surfaceOwedRefusalReport(): boolean {
+		if (this.#host.isDisposed()) return false;
+		const owed = owedRefusalReport(this.#host.sessionManager.getBranch());
+		if (!owed) return false;
+		if (!this.#host.agent.state.isStreaming && !owedReportInView(this.#host.agent.state.messages)) {
+			this.#appendRefusalReport(owed.content, {
+				final: false,
+				carriedFrom: owed.details?.carriedFrom ?? owed.id,
+				upstreamError: owed.details?.upstreamError,
+			});
+		}
+		return true;
+	}
+
+	/**
+	 * Schedule the wake the branch says is owed, if any: after something
 	 * dropped the scheduled continuation (a compaction, a context-transfer
 	 * summary, a session switch) or a process ended before it ran (`omp --restore`).
+	 * The report is surfaced first ({@link surfaceOwedRefusalReport}).
 	 *
 	 * @returns whether a wake was scheduled.
 	 */
 	resumeOwedRefusalWake(): boolean {
-		if (this.#host.isDisposed() || !refusalWakeOwed(this.#host.agent.state.messages)) return false;
+		if (!this.surfaceOwedRefusalReport()) return false;
 		this.#scheduleRefusalWake();
 		return true;
 	}
 
 	/**
-	 * A user's interrupt withdraws an owed wake: a persisted note records it, so
-	 * neither a later compaction nor a reload restarts it, and tells the model
-	 * the session stopped there. Called once the interrupted run has unwound.
+	 * A user's interrupt withdraws an owed wake — one not yet started, or one
+	 * interrupted while it streamed: a persisted note records it, so neither a
+	 * later compaction nor a reload restarts it, and tells the model the session
+	 * stopped there. Called once the interrupted run has unwound.
 	 */
 	withdrawOwedRefusalWake(): void {
-		if (this.#host.isDisposed() || !refusalWakeOwed(this.#host.agent.state.messages)) return;
+		if (this.#host.isDisposed() || !refusalWakeOwed(this.#host.sessionManager.getBranch())) return;
 		const note = prompt.render(refusalWakeWithdrawnTemplate);
+		const timestamp = Date.now();
 		this.#host.agent.appendMessage({
 			role: "custom",
 			customType: REFUSAL_WAKE_WITHDRAWN_TYPE,
 			content: note,
 			display: false,
 			attribution: "agent",
-			timestamp: Date.now(),
+			timestamp,
 		});
-		this.#host.sessionManager.appendCustomMessageEntry(REFUSAL_WAKE_WITHDRAWN_TYPE, note, false, undefined, "agent");
+		this.#host.sessionManager.appendCustomMessageEntry(
+			REFUSAL_WAKE_WITHDRAWN_TYPE,
+			note,
+			false,
+			undefined,
+			"agent",
+			timestamp,
+		);
 	}
 
 	/**

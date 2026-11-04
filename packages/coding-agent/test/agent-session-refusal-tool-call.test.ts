@@ -277,7 +277,9 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 						: `\`${call.name}\` (cut off while its arguments were still streaming)`,
 				);
 			}
-			expect(seen).toContain(REFUSAL);
+			expect(seen).toContain("The provider ended your last response with a refusal");
+			// The provider's own wording is never stored: replaying it draws the refusal again.
+			expect(seen).not.toContain(REFUSAL);
 			// without replaying the refused turn (replaying it draws the refusal again).
 			expect(seen).not.toContain("Dispatching the brief now.");
 			expect(seen).not.toContain("A large pasted brief.");
@@ -571,18 +573,18 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 
 		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
 		expect(requests).toHaveLength(3);
-		expect(requests[2]).toContain(REFUSAL);
+		expect(requests[2]).toContain("The provider ended your last response with a refusal");
 		const reports = sessionManager
 			.getEntries()
 			.filter(entry => entry.type === "custom_message" && entry.customType === "refusal-tool-call-report");
 		expect(reports).toHaveLength(2);
 	});
 
-	it("a user prompt queued during a finished chain gets its own wake when it is refused", async () => {
+	it("a user prompt queued during a finished chain gets a final report and no wake when it is refused", async () => {
 		const refused = (id: string) => (m: Model<Api>) =>
 			refusedToolCallStream(m, [{ call: { ...writeCall, id }, completed: true }]);
 		const { session, agent, requests } = createSession(
-			[refused("toolu_a"), refused("toolu_b"), refused("toolu_c"), m => textStream(m, "Answering the new request.")],
+			[refused("toolu_a"), refused("toolu_b"), refused("toolu_c"), m => textStream(m, "unexpected extra wake")],
 			[recordingTool("write", [])],
 		);
 		let queued: Promise<unknown> | undefined;
@@ -597,41 +599,40 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 		await queued;
 		await session.waitForIdle();
 
-		// The new request's first refusal (request 3) is a first refusal: it wakes (request 4).
+		// A chain ends at an answered assistant turn and at nothing else. The new
+		// request never got one, so its refusal (request 3) is final: the prompt's
+		// sender is the waker and sees the failure, and nothing is left waiting.
 		const newRequestAt = requests.findIndex(r => r.includes("A DIFFERENT REQUEST"));
 		expect(newRequestAt).toBeGreaterThanOrEqual(0);
-		expect(requests.length).toBe(newRequestAt + 2);
-		const reports = (requests.at(-1) ?? "").split("The provider ended your last response with a refusal");
-		expect(reports.at(-1)).not.toContain("the session will NOT continue on its own this time");
+		expect(requests.length).toBe(newRequestAt + 1);
+		expect(requests.at(-1)).toContain("A DIFFERENT REQUEST");
+		expect(reportFinals(agent.state.messages)).toEqual([false, true, true]);
 	});
 
-	// After a final report, a turn that something else starts. New work (a parent's
-	// assignment; the user's own prompt is covered above) opens a new chain: refused,
-	// it gets one wake. Anything that adds no new work does not: refused, it gets a
-	// final report and no wake. That includes the operator's continue, which here
-	// re-sends the refused request (the refused turns left the context, so the
-	// user's prompt is the one still unanswered), and peer or extension messages, so
-	// an extension that starts a turn every time the session goes idle cannot buy wakes.
-	const starters: Array<{ kind: string; newWork: boolean; start: (session: AgentSession) => Promise<unknown> }> = [
+	// After a final report, a turn that something else starts. None of them opens a
+	// new chain: a chain ends at an answered assistant turn and at nothing else, so
+	// every one of these is refused into a final report with no wake. That is the
+	// accepted cost of not classifying producers — the sender of each is the waker
+	// and sees the failure, which is more use than a wake. It also closes the whole
+	// class of defects where a producer nobody enumerated (here: an SDK resource
+	// notification that arrives as a plain `user` message) was read as new work and
+	// bought the session another wake.
+	const starters: Array<{ kind: string; start: (session: AgentSession, agent: Agent) => Promise<unknown> }> = [
 		{
 			kind: "a parent's follow-up assignment",
-			newWork: true,
 			start: session => session.prompt("A NEW ASSIGNMENT", { attribution: "agent" }),
 		},
 		{
 			kind: "the operator's continue (it re-sends the refused request)",
-			newWork: false,
 			start: session => session.resume(),
 		},
 		{
 			kind: "a peer agent's message",
-			newWork: false,
 			start: session =>
 				session.deliverIrcMessage({ id: "peer-message", from: "peer", to: "me", body: "A note.", ts: Date.now() }),
 		},
 		{
 			kind: "an extension notification",
-			newWork: false,
 			start: session =>
 				session.sendCustomMessage(
 					{ customType: "extension-notice", content: "A notice.", display: false, attribution: "agent" },
@@ -640,16 +641,25 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 		},
 		{
 			kind: "an extension notification that accepts an empty stop",
-			newWork: false,
 			start: session =>
 				session.sendCustomMessage(
 					{ customType: "extension-notice", content: "A notice.", display: false, attribution: "agent" },
 					{ triggerTurn: true, deliverAs: "nextTurn", acceptTerminalEmptyStop: true },
 				),
 		},
+		{
+			// The SDK's MCP resource-update notification reaches the session as a
+			// non-synthetic `user` message nobody wrote: the third producer in three
+			// rounds that a "is this new work?" question answered wrongly.
+			kind: "an SDK resource-update notification (a plain, non-synthetic user message)",
+			start: async (session, agent) => {
+				agent.steer({ role: "user", content: "[mcp] resource updated: file:///notes.md", timestamp: Date.now() });
+				await session.resume();
+			},
+		},
 	];
-	for (const { kind, newWork, start } of starters) {
-		it(`${kind} after a final report ${newWork ? "gets one wake" : "gets no wake"} when refused`, async () => {
+	for (const { kind, start } of starters) {
+		it(`${kind} after a final report gets no wake when refused`, async () => {
 			const refused = (id: string) => (m: Model<Api>) =>
 				refusedToolCallStream(m, [{ call: { ...writeCall, id }, completed: true }]);
 			const { session, agent, requests } = createSession(
@@ -666,13 +676,12 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 			await session.waitForIdle();
 			expect(requests).toHaveLength(2);
 
-			await start(session);
+			await start(session, agent);
 			await session.waitForIdle();
 
-			// New work: its turn (request 3) is refused and woken (request 4), whose refusal is final.
-			// Otherwise its turn (request 3) is refused and its report is final.
-			expect(requests).toHaveLength(newWork ? 4 : 3);
-			expect(reportFinals(agent.state.messages)).toEqual(newWork ? [false, true, false, true] : [false, true, true]);
+			// Its turn (request 3) is refused and its report is final.
+			expect(requests).toHaveLength(3);
+			expect(reportFinals(agent.state.messages)).toEqual([false, true, true]);
 			expect(session.getLastAssistantMessage()?.errorMessage).toBe(REFUSAL);
 		});
 	}
@@ -718,11 +727,17 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 		expect(vetoed).toBeInstanceOf(Error);
 		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
 		expect(requests).toHaveLength(3);
-		expect(requests[2]).toContain(REFUSAL);
+		expect(requests[2]).toContain("The provider ended your last response with a refusal");
 	});
 
 	/** An extension that answers every compaction with a summary, or vetoes it. */
-	async function compactionRunner(dir: string, sessionManager: SessionManager, veto: boolean) {
+	async function compactionRunner(
+		dir: string,
+		sessionManager: SessionManager,
+		veto: boolean,
+		/** Overrides the engine's cut point, to place the cut where a test needs it. */
+		firstKept?: () => string | undefined,
+	) {
 		const runtime = new ExtensionRuntime();
 		const extension = await loadExtensionFromFactory(
 			pi => {
@@ -732,7 +747,7 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 						: {
 								compaction: {
 									summary: "Earlier work was summarized.",
-									firstKeptEntryId: event.preparation.firstKeptEntryId,
+									firstKeptEntryId: firstKept?.() ?? event.preparation.firstKeptEntryId,
 									tokensBefore: event.preparation.tokensBefore,
 									details: {},
 								},
@@ -935,7 +950,7 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 			await session.waitForIdle();
 
 			expect(requests).toHaveLength(3);
-			expect(requests[2]).toContain(REFUSAL);
+			expect(requests[2]).toContain("The provider ended your last response with a refusal");
 			expect(requests[2]).toContain("`write` (cut off while its arguments were still streaming)");
 		});
 
@@ -1006,4 +1021,155 @@ describe("AgentSession after a provider refusal ends a tool-call turn", () => {
 			await reopened.close();
 		});
 	}
+	it("a compaction whose cut keeps only a newer context-only message puts the unread report back", async () => {
+		const dir = path.join(tempDir.path(), `cut-past-report-${Date.now()}`);
+		const sessionManager = SessionManager.create(dir, dir);
+		// Cut at the bulky notice delivered after the report, so the report itself
+		// falls on the summarized side: the rendering the model reads loses it.
+		const cutAtNotice = () =>
+			sessionManager
+				.getBranch()
+				.findLast(entry => entry.type === "custom_message" && entry.customType === "extension-notice")?.id;
+		const runner = await compactionRunner(dir, sessionManager, false, cutAtNotice);
+		const { session, agent, requests } = createSession(
+			[
+				m => textStream(m, "Done with the first task."),
+				m => refusedToolCallStream(m, [{ call: writeCall, completed: true }]),
+				m => textStream(m, "I read the report."),
+			],
+			[recordingTool("write", [])],
+			sessionManager,
+			runner,
+		);
+		let compaction: Promise<unknown> | undefined;
+		onceIdleAfterReport(session, agent, () => {
+			compaction = (async () => {
+				await session.sendCustomMessage({
+					customType: "extension-notice",
+					content: `A bulky status notice. ${"status ".repeat(5000)}`,
+					display: false,
+					attribution: "agent",
+				});
+				await session.compact(undefined, { mode: "soft" });
+			})();
+		});
+
+		await session.prompt(`First task. ${"old work ".repeat(10000)}`);
+		await session.waitForIdle();
+		await session.prompt("Write to the device");
+		await compaction;
+		await session.waitForIdle();
+
+		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
+		expect(requests).toHaveLength(3);
+		// The woken turn reads the report even though the cut summarized it away.
+		expect(requests[2]).toContain("Earlier work was summarized.");
+		expect(requests[2]).toContain("The provider ended your last response with a refusal");
+		expect(requests[2]).not.toContain(REFUSAL);
+	});
+
+	it("a user's interrupt during the wake's own stream is not restarted by a reload or a later compaction", async () => {
+		const dir = path.join(tempDir.path(), `interrupt-wake-${Date.now()}`);
+		const sessionManager = SessionManager.create(dir, dir);
+		const runner = await compactionRunner(dir, sessionManager, false);
+		let interrupted: Promise<unknown> | undefined;
+		// The wake's request opens a stream and never finishes it; the user interrupts
+		// while it streams, so the turn persists nothing a later reader could mistake
+		// for the wake having run.
+		const hangingStream = (m: Model<Api>) => {
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const partial = baseMessage(m);
+				stream.push({ type: "start", partial });
+				// The stream never finishes on its own; the interrupt below unwinds it.
+				interrupted = live?.abort();
+			});
+			return stream;
+		};
+		const { session, requests } = createSession(
+			[
+				m => refusedToolCallStream(m, [{ call: writeCall, completed: true }]),
+				hangingStream,
+				m => textStream(m, "unexpected extra wake"),
+			],
+			[recordingTool("write", [])],
+			sessionManager,
+			runner,
+		);
+		const live = session;
+
+		await session.prompt("Write to the device");
+		await interrupted;
+		await session.waitForIdle();
+		expect(requests).toHaveLength(2);
+
+		// A compaction in the same process does not restart what the user stopped.
+		await session.compact(undefined, { mode: "soft" }).catch(() => {});
+		await session.waitForIdle();
+		expect(requests).toHaveLength(2);
+		const persisted = sessionManager
+			.getEntries()
+			.flatMap(entry => (entry.type === "custom_message" ? [entry.customType] : []));
+		expect(persisted).toContain("refusal-wake-withdrawn");
+
+		await sessionManager.flush();
+		const file = sessionManager.getSessionFile();
+		if (!file) throw new Error("Expected a session file");
+		await session.dispose();
+		await sessionManager.close();
+
+		// `omp --restore` in a fresh process agrees, reading the same durable branch.
+		const reopened = await SessionManager.open(file);
+		const next = createSession([m => textStream(m, "unexpected extra wake")], [recordingTool("write", [])], reopened);
+		next.agent.replaceMessages(reopened.buildSessionContext().messages);
+		expect(await next.session.restoreInterruptedTurn()).toBe(false);
+		await next.session.waitForIdle();
+		expect(next.requests).toHaveLength(0);
+		await reopened.close();
+	});
+
+	it("the stored report never carries the provider's own refusal text", async () => {
+		const dir = path.join(tempDir.path(), `no-provider-text-${Date.now()}`);
+		const sessionManager = SessionManager.create(dir, dir);
+		const { session, requests } = createSession(
+			[
+				m => refusedToolCallStream(m, [{ call: writeCall, completed: true }]),
+				m => textStream(m, "I read the report."),
+			],
+			[recordingTool("write", [])],
+			sessionManager,
+		);
+
+		await session.prompt("Write to the device");
+		await session.waitForIdle();
+
+		// Nothing a later request sends may carry the provider's wording: a stored
+		// copy is replayed every turn and draws the same refusal, which is how a
+		// session becomes refused forever (dispatch://INFRA-1191).
+		expect(requests).toHaveLength(2);
+		for (const request of requests) expect(request).not.toContain(REFUSAL);
+		expect(requests[1]).toContain("The provider ended your last response with a refusal");
+
+		// It is kept out of context, not thrown away: `details` reaches no request.
+		await sessionManager.flush();
+		const report = sessionManager
+			.getEntries()
+			.find(entry => entry.type === "custom_message" && entry.customType === "refusal-tool-call-report");
+		expect(report?.type === "custom_message" && JSON.stringify(report.content)).not.toContain(REFUSAL);
+		expect(report?.type === "custom_message" && (report.details as { upstreamError?: string })?.upstreamError).toBe(
+			REFUSAL,
+		);
+
+		// A reload sends it back no more than the live session did: the check is on
+		// what the session's own converter puts on the wire, not on fields (an
+		// assistant turn's `errorMessage`) that never leave the process.
+		const file = sessionManager.getSessionFile();
+		if (!file) throw new Error("Expected a session file");
+		await session.dispose();
+		await sessionManager.close();
+		const reopened = await SessionManager.open(file);
+		const replayed = convertToLlm(reopened.buildSessionContext().messages);
+		expect(JSON.stringify(replayed)).not.toContain(REFUSAL);
+		await reopened.close();
+	});
 });
