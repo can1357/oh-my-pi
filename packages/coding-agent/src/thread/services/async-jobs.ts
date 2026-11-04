@@ -223,7 +223,11 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 				mainRegisterOptions(options, feed),
 			);
 		},
-		// Tracked, so a worker that exits holding a slot gives it back.
+		// Tracked, so a worker that exits holding a slot gives it back. That is the
+		// same boundary a worker's jobs have: when the link closes, their runs reject
+		// and their slots free. An OS process the worker started and did not kill
+		// outlives both and is nobody's slot — killing a dead worker's children is
+		// process-group teardown, not job accounting.
 		acquireSlot: async (manager, signal, jobId) =>
 			cleanups.track(threadId, await manager.acquireSlot(fromWireSignal(signal), jobId)),
 		publishCompleted: (manager, type, label, result, options) =>
