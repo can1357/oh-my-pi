@@ -1263,33 +1263,41 @@ return await tab.evaluate(() => {
 		30_000,
 	);
 
-	test("lets go of print() after a call in a page whose own fake clock replaced Date.now before omp came", async () => {
-		await withUserBrowser(async cdpUrl => {
-			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
-			try {
-				const page = await user.newPage();
-				await page.goto(`${baseUrl}/print`);
-				// Fake timers that never advance, installed by the page before omp attached.
-				await page.mainFrame().mainRealm().evaluate("Date.now = () => 1_000");
-				const hold = await PrintHold.install(page, "calls");
+	test.each([
+		["Date.now", "Date.now = () => 1_000"],
+		// A harness that also virtualizes the performance timeline leaves only an event's own time stamp real.
+		["Date.now and the performance clock", "Date.now = () => 1_000; Performance.prototype.now = () => 0"],
+	])(
+		"lets go of print() after a call in a page whose own fake clock replaced %s before omp came",
+		async (_what, fake) => {
+			await withUserBrowser(async cdpUrl => {
+				const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
 				try {
-					await hold.endCall();
-					// The 1.5 s release runs out on real time; on the fake clock it never would.
-					await page
-						.mainFrame()
-						.mainRealm()
-						.waitForFunction(
-							'log.length = 0, document.querySelector("#print").click(), log.join() === "print returned"',
-							{ timeout: 10_000, polling: 100 },
-						);
+					const page = await user.newPage();
+					await page.goto(`${baseUrl}/print`);
+					// Fake timers that never advance, installed by the page before omp attached.
+					await page.mainFrame().mainRealm().evaluate(fake);
+					const hold = await PrintHold.install(page, "calls");
+					try {
+						await hold.endCall();
+						// The 1.5 s release runs out on real time; on the fake clock it never would.
+						await page
+							.mainFrame()
+							.mainRealm()
+							.waitForFunction(
+								'log.length = 0, document.querySelector("#print").click(), log.join() === "print returned"',
+								{ timeout: 10_000, polling: 100 },
+							);
+					} finally {
+						await hold.dispose();
+					}
 				} finally {
-					await hold.dispose();
+					await user.disconnect();
 				}
-			} finally {
-				await user.disconnect();
-			}
-		});
-	}, 30_000);
+			});
+		},
+		30_000,
+	);
 
 	test("says a frame printed, without pointing at tab.pdf(), which prints the page", async () => {
 		await withUserBrowser(async cdpUrl => {

@@ -31,8 +31,9 @@ function holdPrintInPage(
 	afterTask: boolean,
 ): number {
 	// The clock as the document started, so a page that fakes or replaces `Date.now` cannot move a hold. In a document
-	// whose own code replaced `Date.now` before omp arrived (fake timers that may never advance), the performance
-	// timeline's own methods, which such code leaves alone, keep real time instead.
+	// whose own code replaced `Date.now` before omp arrived (fake timers that may never advance), a clock the browser
+	// still keeps native stands in: the performance timeline's, or else the time an event is stamped with. Only if the
+	// page replaced all of them does the hold go by its clock.
 	const clockKey = Symbol.for("omp.printHold.clock");
 	if (typeof Reflect.get(globalThis, clockKey) !== "function") {
 		const isNative = (fn: unknown): boolean => {
@@ -42,16 +43,26 @@ function holdPrintInPage(
 				return false;
 			}
 		};
+		const getter = (of: unknown, name: string): Function | undefined => {
+			const get = Reflect.getOwnPropertyDescriptor(Object(Reflect.get(Object(of), "prototype")), name)?.get;
+			return isNative(get) ? get : undefined;
+		};
 		let clock: Function = Date.now;
-		const timeline: unknown = Reflect.get(globalThis, "performance");
-		const Timeline: unknown = Reflect.get(globalThis, "Performance");
-		if (!isNative(clock) && typeof Timeline === "function" && timeline instanceof Timeline) {
-			const methods: unknown = Reflect.get(Timeline, "prototype");
-			const perfNow: unknown = Reflect.get(Object(methods), "now");
-			const origin = Reflect.getOwnPropertyDescriptor(Object(methods), "timeOrigin")?.get;
-			if (typeof perfNow === "function" && origin) {
-				const start = Number(Reflect.apply(origin, timeline, []));
+		if (!isNative(clock)) {
+			const timeline: unknown = Reflect.get(globalThis, "performance");
+			const Timeline: unknown = Reflect.get(globalThis, "Performance");
+			const onTimeline = typeof Timeline === "function" && timeline instanceof Timeline;
+			const origin = onTimeline ? getter(Timeline, "timeOrigin") : undefined;
+			const start = origin ? Number(Reflect.apply(origin, timeline, [])) : 0;
+			const perfNow: unknown = onTimeline
+				? Reflect.get(Object(Reflect.get(Timeline, "prototype")), "now")
+				: undefined;
+			const stamp = getter(Event, "timeStamp");
+			const StampEvent = Event;
+			if (typeof perfNow === "function" && isNative(perfNow)) {
 				clock = () => start + Number(Reflect.apply(perfNow, timeline, []));
+			} else if (stamp && isNative(StampEvent)) {
+				clock = () => start + Number(Reflect.apply(stamp, new StampEvent("omp-clock"), []));
 			}
 		}
 		Reflect.set(globalThis, clockKey, clock);
