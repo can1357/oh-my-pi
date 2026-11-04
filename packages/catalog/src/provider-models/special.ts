@@ -414,17 +414,12 @@ export function cloudflareWorkersAiModelManagerOptions(): ModelManagerOptions<"w
 	};
 }
 
-/** Liquid AI decision models (`d1-ultra`, `d1.1`). */
-export function liquidModelManagerOptions(config: { baseUrl?: string } = {}): ModelManagerOptions<"liquid-systemone"> {
-	const envBaseUrl = Bun.env.LIQUID_BASE_URL?.trim();
-	const baseUrl = (config.baseUrl ?? envBaseUrl)?.replace(/\/+$/, "");
-	const staticModels = seedModels<"liquid-systemone">("liquid").map(model =>
-		baseUrl ? { ...model, baseUrl } : model,
-	);
+/** Liquid AI decision models (`d1.1`, `d1-ultra`). */
+export function liquidModelManagerOptions(): ModelManagerOptions<"liquid-systemone"> {
 	return {
 		providerId: "liquid",
 		cacheProviderId: resolveModelCacheProviderId("liquid"),
-		staticModels,
+		staticModels: seedModels<"liquid-systemone">("liquid"),
 	};
 }
 

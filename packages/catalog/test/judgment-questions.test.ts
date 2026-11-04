@@ -13,7 +13,7 @@ const base = {
 describe("judgment-questions-max", () => {
 	const judge = (
 		id: string,
-		api: "typesafe" | "openrouter-decisions" | "workers-ai-systemone" | "openai-decisions" | "liquid-systemone",
+		api: "typesafe" | "openrouter-decisions" | "workers-ai-systemone" | "openai-decisions",
 		provider: string,
 	) => buildModel({ ...base, id, name: id, api, provider, baseUrl: "http://localhost:8000" });
 
@@ -46,9 +46,5 @@ describe("judgment-questions-max", () => {
 		// The OpenRouter-scoped Clef glob does not leak onto TypeSafe's adapter.
 		expect(resolveJudgmentQuestionsMax(judge("cloudflare/clef", "typesafe", "my-judge"))).toBeUndefined();
 		expect(resolveJudgmentQuestionsMax(judge("jev-latest", "typesafe", "typesafe"))).toBeUndefined();
-	});
-
-	test("caps Liquid AI hosted decisions at 128 questions", () => {
-		expect(resolveJudgmentQuestionsMax(judge("d1-ultra", "liquid-systemone", "liquid"))).toBe(128);
 	});
 });

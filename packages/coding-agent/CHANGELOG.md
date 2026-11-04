@@ -79,6 +79,7 @@
 - Factory Droid Gemini 4 Argon sessions keep its earlier turns intact through save and reload, and the image clamp counts those turns at the size Argon is sent ([#17861](https://github.com/can1357/oh-my-pi/pull/17861) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
+
 - A grouped `read` row that names a URL links the whole URL instead of only its last path segment, so a click anywhere on the visible URL opens it; the row's last `/` no longer splits it into a dim prefix and a linked tail ([#18071](https://github.com/can1357/oh-my-pi/pull/18071) by [@iacore](https://github.com/iacore))
 
 - Fixed a second `ask` note on a later single-select question reopening and replacing the previous question's note ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))

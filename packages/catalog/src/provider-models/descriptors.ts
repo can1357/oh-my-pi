@@ -132,7 +132,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	inception: config => inceptionModelManagerOptions(config),
 	kilo: config => kiloModelManagerOptions(config),
 	"kimi-code": config => kimiCodeModelManagerOptions(config),
-	liquid: config => liquidModelManagerOptions(config),
+	liquid: () => liquidModelManagerOptions(),
 	litellm: config => litellmModelManagerOptions(config),
 	local: () => localModelManagerOptions(),
 	"lm-studio": config => lmStudioModelManagerOptions(config),

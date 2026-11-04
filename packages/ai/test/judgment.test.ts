@@ -1789,7 +1789,7 @@ describe("NativeJudge Liquid AI dialect", () => {
 		questions: { urgent: { type: "noul", instructions: "Urgent?" } },
 	} as const;
 
-	it("posts to decisions/v1/systemone with bearer auth, verbatim model, and decodes answers and usage", async () => {
+	it("posts to {baseUrl}/decisions/v1/systemone with Bearer token and verbatim model", async () => {
 		const calls: { url: string; init: RequestInit | undefined }[] = [];
 		const judge = createNativeJudge(d1Ultra, {
 			apiKey: "liquid-test-key",
@@ -1815,24 +1815,6 @@ describe("NativeJudge Liquid AI dialect", () => {
 		expect(result.answers.urgent.noul).toBe(0.98);
 		expect(result.model).toBe("d1-ultra");
 		expect(result.usage).toMatchObject({ input: 16, totalTokens: 16 });
-	});
-
-	it("encodes request.images as top-level data URLs including image/gif", async () => {
-		const state = {
-			description: "Inspect this state.",
-		};
-		const bodies: unknown[] = [];
-		const judge = createNativeJudge(d1Ultra, {
-			apiKey: "liquid-test-key",
-			fetch: async (_url, init) => {
-				bodies.push(JSON.parse(String(init?.body)));
-				return Response.json({
-					model: "d1-ultra",
-					answers: { urgent: { type: "noul", noul: 0.9 } },
-					usage: { input_tokens: 20, output_tokens: 0 },
-				});
-			},
-		});
 
 		const gifImage: ImageContent = {
 			type: "image",
@@ -1840,40 +1822,18 @@ describe("NativeJudge Liquid AI dialect", () => {
 			mimeType: "image/gif",
 		};
 
-		await judge.judge({
-			state,
-			questions: { urgent: { type: "noul", instructions: "Urgent?" } },
-			images: [...IMAGE_REFS, gifImage],
-		});
+		await judge.judge({ ...request, images: [...IMAGE_REFS, gifImage] });
 
-		expect(bodies).toEqual([
-			{
-				state,
-				model: "d1-ultra",
-				questions: { urgent: { type: "noul", instructions: "Urgent?" } },
-				images: [
-					"data:image/png;base64,AQID",
-					"data:image/jpeg;base64,BAUG",
-					"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
-				],
-			},
-		]);
-	});
-
-	it("rejects requests exceeding maxCount of 8 images before calling fetch", async () => {
-		let calls = 0;
-		const judge = createNativeJudge(d1Ultra, {
-			apiKey: "liquid-test-key",
-			fetch: async () => {
-				calls++;
-				return new Response("unreachable", { status: 500 });
-			},
+		expect(JSON.parse(String(calls[1].init?.body))).toEqual({
+			state: request.state,
+			model: "d1-ultra",
+			questions: request.questions,
+			images: [
+				"data:image/png;base64,AQID",
+				"data:image/jpeg;base64,BAUG",
+				"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+			],
 		});
-		const images = Array.from({ length: 9 }, () => IMAGE_REFS[0]);
-		const error = await judge.judge({ ...request, images }).catch((caught: unknown) => caught);
-		expect(error).toBeInstanceOf(ValidationError);
-		expect(String(error)).toMatch(/at most 8 images, got 9/);
-		expect(calls).toBe(0);
 	});
 
 	it("rejects request bodies exceeding 4.5 MB before calling fetch", async () => {

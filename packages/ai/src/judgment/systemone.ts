@@ -177,16 +177,6 @@ export const openrouterDecisionsWire: JudgmentWire = {
 	},
 };
 
-/** System One body with top-level base64 data URLs for image inputs. */
-function encodeSystemOneWithImages(request: JudgmentRequest, model: string): Record<string, unknown> {
-	return {
-		state: request.state,
-		model,
-		questions: wireQuestions(request.questions),
-		...(request.images?.length ? { images: request.images.map(embeddedImageDataUrl) } : {}),
-	};
-}
-
 /** Cloudflare Workers AI decision models (Clef) through the account-scoped `ai/run` route. */
 export const workersAiWire: JudgmentWire = {
 	// Clef's `images` extension: https://developers.cloudflare.com/workers-ai/models/clef/
@@ -207,7 +197,12 @@ export const workersAiWire: JudgmentWire = {
 		}
 		return { url: `${baseUrl.replace("<account>", accountId)}/${model}`, token: credential?.token ?? key };
 	},
-	encode: (request, model) => encodeSystemOneWithImages(request, model.slice(model.lastIndexOf("/") + 1)),
+	encode: (request, model) => ({
+		state: request.state,
+		model: model.slice(model.lastIndexOf("/") + 1),
+		questions: request.questions,
+		...(request.images?.length ? { images: request.images.map(embeddedImageDataUrl) } : {}),
+	}),
 	decode: payload => (isRecord(payload) ? decodeSystemOne(payload.result) : undefined),
 };
 
@@ -223,7 +218,12 @@ export const liquidWire: JudgmentWire = {
 		maxPixels: 10_240_000,
 	},
 	encode(request, model) {
-		const body = encodeSystemOneWithImages(request, model);
+		const body = {
+			state: request.state,
+			model,
+			questions: wireQuestions(request.questions),
+			...(request.images?.length ? { images: request.images.map(embeddedImageDataUrl) } : {}),
+		};
 		for (const [index, image] of (request.images ?? []).entries()) {
 			const metadata = parseImageMetadata(Buffer.from(image.data, "base64"));
 			if (metadata?.width && metadata?.height) {

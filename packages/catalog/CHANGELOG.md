@@ -9,6 +9,7 @@
 - Added a standard Responses WebSocket capability rule for explicit opt-in through OMP settings or SDK preferences, disabled by default ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
 - Added Factory Droid Gemini 4 Argon, listed on Global inference once the account's feature flag enables it ([#17861](https://github.com/can1357/oh-my-pi/pull/17861) by [@will-bogusz](https://github.com/will-bogusz))
 - Added Muse Spark 1.3 to Factory Droid for accounts with Factory's `muse_spark_1_3` flag, on the Global region only: requests go over Responses to Factory's Vertex upstream with low to xhigh effort, and later turns omit the earlier turns' encrypted reasoning as Droid does ([#17862](https://github.com/can1357/oh-my-pi/pull/17862) by [@will-bogusz](https://github.com/will-bogusz))
+- Added Liquid AI (`liquid`) as a built-in judge provider with `/login liquid` (`LIQUID_API_KEY`) and the `d1-ultra` and `d1.1` decision models on the `liquid-systemone` API ([#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Fixed
 
@@ -17,8 +18,6 @@
 ### Changed
 
 - Factory Droid reports client version 1.1.0, and Claude requests routed to Azure Foundry stream tool input eagerly like the Anthropic and Vertex routes ([#17885](https://github.com/can1357/oh-my-pi/pull/17885) by [@will-bogusz](https://github.com/will-bogusz))
-- Added Liquid AI (`liquid`) as a built-in judge provider with `/login liquid` (`LIQUID_API_KEY`) and the `d1-ultra` and `d1.1` decision models on the `liquid-systemone` API ([#18076](https://github.com/can1357/oh-my-pi/issues/18076) by [@SuperUserA](https://github.com/SuperUserA))
-- Added Liquid AI (`liquid`) as a built-in judge provider with `/login liquid` (`LIQUID_API_KEY`) and the `d1-ultra` and `d1.1` decision models on the `liquid-systemone` API ([#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
 
 ## [18.16.0] - 2026-11-02
 

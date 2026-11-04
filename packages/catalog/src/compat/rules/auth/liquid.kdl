@@ -6,6 +6,6 @@ auth "liquid" {
 		auth-url "https://console.liquid.ai/"
 		instructions "Create or copy your API key from the Liquid AI console."
 		prompt "Paste your Liquid AI API key" placeholder="liquid_..."
-		validate "models-endpoint" label="Liquid AI" url="https://api.liquid.ai/decisions/v1/models" base-url-env="LIQUID_BASE_URL" base-url-path="/decisions/v1/models"
+		validate "models-endpoint" label="Liquid AI" url="https://api.liquid.ai/decisions/v1/models"
 	}
 }
