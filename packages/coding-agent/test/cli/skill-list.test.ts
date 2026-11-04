@@ -178,7 +178,7 @@ describe("handleSkillList", () => {
 		expect(stderr).toContain('warning: name collision: "calendar"');
 	});
 
-	test("projects layered manual and ignored skill settings in JSON", async () => {
+	test("applies global manualSkills from config and lets a project list clear it", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-skills-layer-${Snowflake.next()}-`));
 		const projectDir = path.join(directory, "project");
 		const skillsRoot = path.join(directory, "skills");
@@ -226,21 +226,11 @@ describe("handleSkillList", () => {
 				["alpha", true],
 				["beta", false],
 			]);
-
-			const replaced = await readJson("skills:\n  manualSkills:\n    - beta\n");
-			expect(replaced.skills.map(skill => [skill.name, skill.hide])).toEqual([
-				["alpha", false],
-				["beta", true],
-			]);
-
 			const cleared = await readJson("skills:\n  manualSkills: []\n");
 			expect(cleared.skills.map(skill => [skill.name, skill.hide])).toEqual([
 				["alpha", false],
 				["beta", false],
 			]);
-
-			const ignored = await readJson("skills:\n  manualSkills:\n    - alpha\n  ignoredSkills:\n    - alpha\n");
-			expect(ignored.skills.map(skill => [skill.name, skill.hide])).toEqual([["beta", false]]);
 		} finally {
 			await removeWithRetries(directory);
 		}

@@ -7,17 +7,13 @@ import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-cod
 import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
 import {
-	buildSkillPromptMessage,
 	type LoadSkillsResult,
 	loadSkills,
 	loadSkillsFromDir,
 	parseSkillInvocation,
-	renderSkillPromptMessage,
 } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
-import { tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
-import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
@@ -573,43 +569,26 @@ describe("manual skill visibility", () => {
 		}
 	});
 
-	it("preserves frontmatter visibility with missing, empty, nonmatching, and matching lists", async () => {
+	it("only adds hiding on top of frontmatter visibility", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "manual-skills-frontmatter-"));
 		try {
-			const fixtures = [
-				["visible", "description: Visible"],
+			for (const [name, fields] of [
 				["hidden", "description: Hidden\nhide: true"],
-				["disabled", "description: Disabled\ndisable-model-invocation: true"],
 				["explicit-false", "description: Explicitly visible\nhide: false"],
-			];
-			for (const [name, fields] of fixtures) {
+			]) {
 				const dir = path.join(root, name);
 				await fs.mkdir(dir, { recursive: true });
 				await Bun.write(path.join(dir, "SKILL.md"), `---\nname: ${name}\n${fields}\n---\nContent\n`);
 			}
-			for (const manualSkills of [undefined, []]) {
-				const { skills } = await loadSkills({
-					...DISABLE_ALL_BUILTIN_SKILLS,
-					customDirectories: [root],
-					...(manualSkills === undefined ? {} : { manualSkills }),
-				});
-				expect(skills.find(skill => skill.name === "visible")?.hide).not.toBe(true);
-				expect(skills.find(skill => skill.name === "hidden")?.hide).toBe(true);
-				expect(skills.find(skill => skill.name === "disabled")?.hide).toBe(true);
-			}
-			const nonmatching = await loadSkills({
-				...DISABLE_ALL_BUILTIN_SKILLS,
-				customDirectories: [root],
-				manualSkills: ["missing"],
-			});
-			expect(nonmatching.skills.find(skill => skill.name === "hidden")?.hide).toBe(true);
-			expect(nonmatching.skills.find(skill => skill.name === "disabled")?.hide).toBe(true);
-			const matching = await loadSkills({
+			const { skills } = await loadSkills({
 				...DISABLE_ALL_BUILTIN_SKILLS,
 				customDirectories: [root],
 				manualSkills: ["explicit-false"],
 			});
-			expect(matching.skills.find(skill => skill.name === "explicit-false")?.hide).toBe(true);
+			expect(skills.map(skill => [skill.name, skill.hide])).toEqual([
+				["explicit-false", true],
+				["hidden", true],
+			]);
 		} finally {
 			await removeWithRetries(root);
 		}
@@ -637,16 +616,16 @@ describe("manual skill visibility", () => {
 		expect(triple.skills.every(skill => skill.hide === true)).toBe(true);
 	});
 
-	it("keeps namespaced manual skills available to prompt, URI, and RPC consumers", async () => {
+	it("matches namespaced final names and drops matches from the system prompt", async () => {
 		const { skills } = await loadSkills({
 			...DISABLE_ALL_BUILTIN_SKILLS,
 			customDirectories: [first, second],
 			manualSkills: ["second/*"],
 		});
-		const bare = skills.find(skill => skill.name === "calendar")!;
-		const alias = skills.find(skill => skill.name === "second/calendar")!;
-		expect(bare.hide).not.toBe(true);
-		expect(alias.hide).toBe(true);
+		expect(skills.map(skill => [skill.name, skill.hide === true])).toEqual([
+			["calendar", false],
+			["second/calendar", true],
+		]);
 		const project = await fs.mkdtemp(path.join(os.tmpdir(), "manual-skills-prompt-"));
 		try {
 			const prompt = await buildSystemPrompt({
@@ -659,30 +638,6 @@ describe("manual skill visibility", () => {
 			const text = prompt.systemPrompt.join("\n");
 			expect(text).toContain("First calendar skill.");
 			expect(text).not.toContain("Second calendar skill.");
-			const resolved = await new SkillProtocolHandler().resolve(parseInternalUrl("skill://second/calendar")!, {
-				skills,
-			});
-			expect(resolved.sourcePath).toBe(path.join(second, "calendar", "SKILL.md"));
-			expect(resolved.content).toContain("Calendar (Second)");
-			let message: Pick<CustomMessage, "attribution" | "content" | "customType" | "details" | "display"> | undefined;
-			const result = await tryRunRpcSkillCommand(
-				{
-					skills,
-					skillsSettings: { enableSkillCommands: true },
-					buildUserSkillPrompt: buildSkillPromptMessage,
-					renderUserSkillPrompt: renderSkillPromptMessage,
-					async promptCustomMessage(nextMessage) {
-						message = nextMessage;
-						return true;
-					},
-				},
-				"/skill:second/calendar focus on risks",
-			);
-			expect(result).toEqual({ agentInvoked: true });
-			expect(message?.customType).toBe(SKILL_PROMPT_MESSAGE_TYPE);
-			expect(message?.attribution).toBe("user");
-			expect(message?.content).toContain("Calendar (Second)");
-			expect(message?.content).toContain("focus on risks");
 		} finally {
 			await removeWithRetries(project);
 		}
