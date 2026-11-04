@@ -111,6 +111,7 @@ Capability dedup key is skill name; the first item with a given name wins in the
 - `disabledExtensions` entries with `skill:<name>`
 - `ignoredSkills` (exclude; glob patterns)
 - `includeSkills` (include allowlist; glob patterns; empty means include all)
+- `manualSkills` (manual-only visibility; glob patterns; default `[]`)
 
 Filter order is:
 
@@ -118,6 +119,15 @@ Filter order is:
 2. source enabled
 3. not ignored
 4. included (if include list present)
+
+Set `skills.manualSkills` in `config.yml` to hide matching skills from the model catalog without editing their files:
+
+```yaml
+skills:
+  manualSkills: ["third-party-*", "plugin-name/*"]
+```
+
+Patterns match both raw and final namespaced names, using the same glob behavior as `ignoredSkills`. Matches retain `/skill:<name>` (when skill commands are enabled) and `skill://` access, and appear with `hide: true` in `omp skill list --json`. Frontmatter-hidden skills stay hidden; ignored skills are still removed entirely. Project arrays replace the global array rather than merging; project `manualSkills: []` clears the global list without overriding frontmatter hiding.
 
 The `agents` provider (`.agent[s]/skills`) has its own `enableAgentsUser`/`enableAgentsProject` toggles — disabling Claude/Codex/Pi does **not** turn it off. Foreign user-level providers are opt-in through `enabledProviders`; their project roots still load by default. Native OMP sources and marketplace plugins registered under `~/.omp/plugins` also load by default. For `claude-plugins`, the opt-in controls only plugins from Claude Code's own user registry.
 
