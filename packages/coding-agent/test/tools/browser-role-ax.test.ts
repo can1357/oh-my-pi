@@ -36,6 +36,12 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 			]);
 			// The scope itself is not one of its matches.
 			expect(await footer.$$("role/navigation")).toEqual([]);
+			// A wait rooted at an element searches below it.
+			expect(
+				await (
+					await footer.waitForSelector('role/link[name="Help"]', { timeout: 10_000 })
+				)?.evaluate(link => link.id),
+			).toBe("help");
 
 			const frame = page.frames().find(candidate => candidate !== page.mainFrame())!;
 			await frame.waitForSelector('role/button[name="Framed" exact]', { timeout: 10_000 });
@@ -43,7 +49,45 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 		} finally {
 			await browser.close();
 		}
-	}, 60_000);
+	});
+
+	it("keeps waiting through a navigation that replaces the document", async () => {
+		const puppeteer = await loadPuppeteer();
+		registerSemanticQueryHandlers(puppeteer);
+		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });
+		try {
+			const page = await browser.newPage();
+			await page.setContent("<h1>First</h1>");
+			const waiting = page.waitForSelector('role/heading[name="Next" exact]', { timeout: 10_000 });
+			await page.goto("data:text/html,<h1>Next</h1>");
+			expect(await (await waiting)?.evaluate(heading => heading.textContent)).toBe("Next");
+		} finally {
+			await browser.close();
+		}
+	});
+
+	it("finds a match past the first round trip, layout tables as tables, and presentational elements as none", async () => {
+		const puppeteer = await loadPuppeteer();
+		registerSemanticQueryHandlers(puppeteer);
+		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });
+		try {
+			const page = await browser.newPage();
+			const buttons = Array.from({ length: 100 }, (_, index) => `<button id="b${index}">b${index}</button>`).join(
+				"",
+			);
+			await page.setContent(`<!doctype html>${buttons}
+				<table id="layout"><tr id="layout-row"><td id="layout-cell">x</td></tr></table>
+				<div id="none" role="none">Plain</div><img id="decorative" alt="" src="data:,">`);
+			expect(await (await page.$('role/button[name="b99" exact]'))?.evaluate(button => button.id)).toBe("b99");
+			// Chrome reports this table as LayoutTable; HTML and the reader call it a table.
+			expect(await ids(page, "role/table")).toEqual(["layout"]);
+			expect(await ids(page, "role/row")).toEqual(["layout-row"]);
+			expect(await ids(page, "role/cell")).toEqual(["layout-cell"]);
+			expect(await ids(page, "role/presentation")).toEqual(["none", "decorative"]);
+		} finally {
+			await browser.close();
+		}
+	});
 
 	it("refuses role inside a P-selector, where the accessibility tree cannot be asked", async () => {
 		const puppeteer = await loadPuppeteer();
@@ -65,7 +109,7 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 		registerSemanticQueryHandlers(puppeteer);
 		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });
 		const tags =
-			"a abbr address area article aside audio b blockquote button canvas caption code datalist dd del details dfn dialog div dl dt em fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 header hgroup hr i iframe img ins label legend li main mark menu meter nav object ol optgroup option output p pre progress ruby s search section select span strong sub summary sup table tbody td textarea tfoot th thead time tr ul video math svg".split(
+			"a abbr address area article aside audio b blockquote br button canvas caption code datalist dd del details dfn dialog div dl dt em embed fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 header hgroup hr i iframe img ins label legend li main mark menu meter nav object ol optgroup option output p pre progress ruby s search section select span strong sub summary sup table tbody td textarea tfoot th thead time tr ul video math svg".split(
 				" ",
 			);
 		const inputs =
@@ -95,7 +139,11 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 			(content: string) =>
 				`<form aria-label="F">${content}</form><fieldset><legend>l</legend>${content}</fieldset><details><summary>s</summary></details><figure><figcaption>c</figcaption></figure><label>l <input></label>`,
 			(content: string) =>
-				`<svg width="9" height="9"><title>T</title></svg><svg role="img" aria-label="i"></svg><div id="host"></div><script>document.getElementById("host").attachShadow({ mode: "open" }).innerHTML = ${JSON.stringify(content)};</script>`,
+				`<svg width="40" height="40"><title>T</title><image href="data:," width="5" height="5"><title>P</title></image><g><title>G</title><circle r="3"></circle></g><circle r="4"><title>C</title></circle><path d="M0 0L5 5"><title>Pa</title></path><use href="#nothing"><title>U</title></use><text y="10">Tx</text><a href="#"><text>L</text></a></svg>` +
+				`<math><mfrac><mi>x</mi><mn>2</mn></mfrac><msqrt><mi>y</mi></msqrt></math>` +
+				`<svg role="img" aria-label="i"></svg><x-internal></x-internal><div id="host"></div><script>
+				if (!customElements.get("x-internal")) customElements.define("x-internal", class extends HTMLElement { constructor() { super(); this.attachInternals().role = "button"; } });
+				document.getElementById("host").attachShadow({ mode: "open" }).innerHTML = ${JSON.stringify(content)};</script>`,
 		];
 		try {
 			const page = await browser.newPage();
@@ -106,14 +154,15 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 				await page.setContent(`<!doctype html><body>${context(elements)}</body>`);
 				// The elements a selector can reach: the page and its open shadow roots (not the browser's own controls).
 				const reachable = await page.evaluateHandle(() => {
+					type Scope = { querySelectorAll(selector: string): Iterable<{ shadowRoot: Scope | null }> };
 					const found: unknown[] = [];
-					const visit = (scope: { querySelectorAll(selector: string): Iterable<{ shadowRoot: never }> }) => {
+					const visit = (scope: Scope) => {
 						for (const element of scope.querySelectorAll("*")) {
 							found.push(element);
 							if (element.shadowRoot) visit(element.shadowRoot);
 						}
 					};
-					visit(document as never);
+					visit((globalThis as unknown as { document: Scope }).document);
 					return found;
 				});
 				const backendIdsOf = async (handles: Iterable<{ remoteObject(): { objectId?: string } }>) =>
@@ -133,7 +182,14 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 					const role = String(node.role?.value).toLowerCase();
 					expected.set(role, [...(expected.get(role) ?? []), node.backendDOMNodeId]);
 				}
-				for (const [role, ids] of expected) {
+				// Chrome's layout tables are tables to role/ too.
+				const reportedAs: Record<string, string> = {
+					table: "layouttable",
+					row: "layouttablerow",
+					cell: "layouttablecell",
+				};
+				for (const [role, own] of expected) {
+					const ids = [...own, ...(expected.get(reportedAs[role] ?? "") ?? [])];
 					const actual = await backendIdsOf(await page.$$(`role/${role}`));
 					if (JSON.stringify(actual.sort()) !== JSON.stringify(ids.sort())) {
 						mismatches.push({
@@ -149,7 +205,7 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 		} finally {
 			await browser.close();
 		}
-	}, 120_000);
+	});
 });
 
 /** Observed role and name of each `observe({ includeAll: true })` entry the kit's own role/ engine cannot reselect. */
@@ -158,7 +214,8 @@ function unreselectable(): { role: string; name: string }[] {
 	const kit = (globalThis as unknown as { __ompTernKit: TernKitProbe }).__ompTernKit;
 	const misses: { role: string; name: string }[] = [];
 	for (const entry of kit.observe({ includeAll: true }).elements) {
-		if (!entry.name) continue;
+		// Text entries name no element a role/ selector can ask for.
+		if (!entry.name || entry.role === "StaticText") continue;
 		const quote = entry.name.includes('"') ? "'" : '"';
 		const own = kit.mark({ engine: "id", id: entry.id });
 		const tokens = kit.markAll({ engine: "role", query: `${entry.role}[name=${quote}${entry.name}${quote} exact]` });
@@ -179,6 +236,7 @@ interface TernElement {
 
 interface TernKitProbe {
 	observe(options: { includeAll: boolean }): { elements: { id: number; role: string; name?: string }[] };
+	count(selector: unknown): number;
 	mark(selector: unknown): string;
 	markAll(selector: unknown): string[];
 }
@@ -207,11 +265,22 @@ describe.skipIf(!available)("Tern kit roles and names", () => {
 				<div contenteditable="true" aria-label="Notes"></div>
 				<input type="search" list="suggestions" aria-label="Find"><datalist id="suggestions"><option>x</option></datalist>
 				<input type="color" aria-label="Tint"><input type="image" alt="Go" src="data:,">
-				<button><img alt="Gear" src="data:,"> Settings</button>`);
+				<button><img alt="Gear" src="data:,"> Settings</button>
+				<input type="date" aria-label="When">
+				<a href="#docs"><x-label>Docs</x-label></a>
+				<script>
+					customElements.define("x-label", class extends HTMLElement { constructor() { super(); this.attachShadow({ mode: "open" }).innerHTML = "<span><slot></slot></span>"; } });
+				</script>`);
 			await page.evaluate(`(function () {\n${TERN_KIT_SOURCE}\n})()`);
-			const observed = await page.evaluate(() => {
+			const [observed, interactive, docsLinks] = await page.evaluate(() => {
 				const kit = (globalThis as unknown as { __ompTernKit: TernKitProbe }).__ompTernKit;
-				return kit.observe({ includeAll: true }).elements.map(entry => `${entry.role} ${entry.name ?? ""}`);
+				const entries = (includeAll: boolean) =>
+					kit.observe({ includeAll }).elements.map(entry => `${entry.role} ${entry.name ?? ""}`);
+				return [
+					entries(true),
+					entries(false),
+					kit.count({ engine: "role", query: 'link[name="Docs" exact]' }),
+				] as const;
 			});
 			// Codex's findings on #17895 (r4462930387, r4463081158, r4463081163, r4463081171).
 			expect(observed).toEqual(
@@ -221,8 +290,13 @@ describe.skipIf(!available)("Tern kit roles and names", () => {
 					"region Quarterly",
 					"region Visible",
 					"table Quarterly totals",
+					"caption Quarterly totals",
+					"StaticText Daily",
 				]),
 			);
+			// Date fields are text boxes to fill; slotted text names its link.
+			expect(interactive).toEqual(expect.arrayContaining(["textbox When", "link Docs"]));
+			expect(docsLinks).toBe(1);
 			expect(await page.evaluate(unreselectable)).toEqual([]);
 		} finally {
 			await browser.close();

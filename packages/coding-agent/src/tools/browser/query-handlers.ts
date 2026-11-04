@@ -1,3 +1,4 @@
+import { sleepLong } from "@oh-my-pi/pi-utils";
 import type {
 	CustomQueryHandler,
 	ElementHandle,
@@ -7,6 +8,7 @@ import type {
 	WaitForSelectorOptions,
 } from "puppeteer-core";
 import { puppeteerTimeoutError } from "./launch";
+import { isNavigatedContextError } from "./navigation";
 
 /** Root node Puppeteer passes to a custom query handler (the document for page-level queries). */
 type QueryNode = Parameters<NonNullable<CustomQueryHandler["queryAll"]>>[0];
@@ -231,6 +233,7 @@ export function roleRules(): RoleRules {
 		if (tag === "tr") return "row";
 		if (tag === "th") return element.getAttribute("scope") === "row" ? "rowheader" : "columnheader";
 		if (tag === "td") return "cell";
+		if (tag === "caption") return "caption";
 		if (tag === "summary") return "button";
 		if (tag === "a") return "generic";
 		if (tag !== "input") {
@@ -250,8 +253,8 @@ export function roleRules(): RoleRules {
 		if (element.hasAttribute("list")) return "combobox";
 		if (type === "number") return "spinbutton";
 		if (type === "search") return "searchbox";
-		if (!["date", "datetime-local", "month", "time", "week"].includes(type)) return "textbox";
-		return null;
+		// Date and time fields too: the kit's observe() lists them as text boxes to fill.
+		return "textbox";
 	};
 	/**
 	 * Each element's implicit role, computed once per query: an aside's or header's role depends on its ancestors' roles,
@@ -350,9 +353,14 @@ export function roleRules(): RoleRules {
 						(inputType === "submit" ? "Submit" : inputType === "reset" ? "Reset" : "");
 					text += shown ? caption : "";
 				} else if (tag !== "input") {
-					// An element with a shadow root shows that tree.
-					const shadow = (childElement as unknown as { shadowRoot?: Element | null }).shadowRoot;
-					walk(shadow ?? childElement, visibility === "any" ? "any" : style.visibility);
+					// An element with a shadow root shows that tree; a slot shows the nodes assigned to it, else its own.
+					const host = childElement as unknown as {
+						shadowRoot?: Element | null;
+						assignedNodes?: (options: { flatten: boolean }) => Element[];
+					};
+					const assigned = tag === "slot" ? (host.assignedNodes?.({ flatten: true }) ?? []) : [];
+					const slotted = assigned.length > 0 ? ({ childNodes: assigned } as unknown as Element) : null;
+					walk(slotted ?? host.shadowRoot ?? childElement, visibility === "any" ? "any" : style.visibility);
 				}
 				text += gap;
 			}
@@ -456,12 +464,15 @@ export function roleRules(): RoleRules {
 			const alt = normalizeSpace(element.getAttribute("alt") ?? "");
 			if (alt) return alt;
 		}
-		const content =
-			inputType === "button" || inputType === "submit" || inputType === "reset"
-				? normalizeSpace(input?.value ?? "") ||
-					(inputType === "submit" ? "Submit" : inputType === "reset" ? "Reset" : "")
-				: normalizeSpace(contentText(element, null, "visible"));
-		if (content && namedByContent(roleOf(element))) return content;
+		// Content names only the roles named by it; reading it walks the subtree, so it is read only for those.
+		if (namedByContent(roleOf(element))) {
+			const content =
+				inputType === "button" || inputType === "submit" || inputType === "reset"
+					? normalizeSpace(input?.value ?? "") ||
+						(inputType === "submit" ? "Submit" : inputType === "reset" ? "Reset" : "")
+					: normalizeSpace(contentText(element, null, "visible"));
+			if (content) return content;
+		}
 		return normalizeSpace(
 			element.getAttribute("title") ||
 				element.getAttribute("placeholder") ||
@@ -500,6 +511,9 @@ export function roleRules(): RoleRules {
 				if (shadow) visit(shadow);
 			}
 		};
+		// A shadow host is searched through its own shadow tree too.
+		const rootShadow = (node as unknown as { shadowRoot?: QueryRoot | null }).shadowRoot;
+		if (rootShadow) visit(rootShadow);
 		visit(node as unknown as QueryRoot);
 		return elements.filter(element => {
 			const role = roleOf(element);
@@ -559,170 +573,183 @@ const ROLE_POLL_MS = 100;
 /**
  * Elements Chrome can give each role without a `role` attribute (HTML-AAM's implicit roles, as Chrome spells them).
  * It only narrows which elements Chrome is asked about, so it errs wide: a tag listed for a role it does not get costs
- * a lookup, a missing one loses a match. An empty entry is an ARIA-only role; a role not listed asks about every
- * element.
+ * a lookup, a missing one loses a match. A role not listed (`alert`, `tab`, a misspelling) comes only from a `role`
+ * attribute or a custom element's ElementInternals, so only those elements are asked about.
  */
-const ROLE_TAGS = new Map<string, string>(
-	Object.entries({
-		abbr: "abbr",
-		alert: "",
-		alertdialog: "",
-		application: "",
-		article: "article",
-		audio: "audio",
-		banner: "header",
-		blockquote: "blockquote",
-		button: "button, input, summary",
-		canvas: "canvas",
-		caption: "caption",
-		cell: "td, th",
-		checkbox: "input",
-		code: "code",
-		colorwell: "input",
-		columnheader: "th, td",
-		combobox: "input, select",
-		complementary: "aside",
-		contentinfo: "footer",
-		date: "input",
-		datetime: "input",
-		definition: "dd",
-		deletion: "del, s",
-		descriptionlist: "dl",
-		dialog: "dialog",
-		disclosuretriangle: "summary",
-		emphasis: "em",
-		feed: "",
-		figcaption: "figcaption",
-		figure: "figure",
-		form: "form",
-		grid: "",
-		gridcell: "td, th",
-		group: "address, details, fieldset, hgroup, optgroup",
-		heading: "h1, h2, h3, h4, h5, h6",
-		iframe: "iframe",
-		image: "img, svg",
-		inputtime: "input",
-		insertion: "ins",
-		labeltext: "label",
-		layouttable: "table",
-		layouttablecell: "td, th",
-		layouttablerow: "tr",
-		legend: "legend",
-		link: "a, area",
-		list: "ul, ol, menu",
-		listbox: "select, datalist",
-		listitem: "li",
-		log: "",
-		main: "main",
-		mark: "mark",
-		marquee: "",
-		math: "math",
-		menu: "",
-		menubar: "",
-		menuitem: "",
-		menuitemcheckbox: "",
-		menuitemradio: "",
-		meter: "meter",
-		navigation: "nav",
-		note: "",
-		option: "option",
-		paragraph: "p",
-		progressbar: "progress",
-		radio: "input",
-		radiogroup: "",
-		region: "section",
-		row: "tr",
-		rowgroup: "thead, tbody, tfoot",
-		rowheader: "th, td",
-		scrollbar: "",
-		search: "search",
-		searchbox: "input",
-		sectionfooter: "footer",
-		sectionheader: "header",
-		separator: "hr",
-		slider: "input",
-		spinbutton: "input",
-		status: "output",
-		strong: "strong",
-		subscript: "sub",
-		superscript: "sup",
-		switch: "input",
-		tab: "",
-		table: "table",
-		tablist: "",
-		tabpanel: "",
-		term: "dfn, dt",
-		textbox: "input, textarea",
-		time: "time",
-		timer: "",
-		toolbar: "",
-		tooltip: "",
-		tree: "",
-		treegrid: "",
-		treeitem: "",
-		video: "video",
-	}),
-);
+const ROLE_TAGS: Record<string, string> = {
+	abbr: "abbr",
+	article: "article",
+	audio: "audio",
+	banner: "header",
+	blockquote: "blockquote",
+	button: "button, input, summary",
+	canvas: "canvas",
+	caption: "caption",
+	cell: "td, th",
+	checkbox: "input",
+	code: "code",
+	colorwell: "input",
+	columnheader: "th, td",
+	combobox: "input, select",
+	complementary: "aside",
+	contentinfo: "footer",
+	date: "input",
+	datetime: "input",
+	definition: "dd",
+	deletion: "del, s",
+	descriptionlist: "dl",
+	dialog: "dialog",
+	disclosuretriangle: "summary",
+	embeddedobject: "embed",
+	emphasis: "em",
+	figcaption: "figcaption",
+	figure: "figure",
+	form: "form",
+	generic: "*",
+	"graphics-document": "svg",
+	"graphics-object": "svg *",
+	"graphics-symbol": "svg *",
+	gridcell: "td, th",
+	group: "address, details, fieldset, hgroup, optgroup, svg g",
+	heading: "h1, h2, h3, h4, h5, h6",
+	iframe: "iframe",
+	image: "img, svg, image",
+	inputtime: "input",
+	insertion: "ins",
+	labeltext: "label",
+	layouttable: "table",
+	layouttablecell: "td, th",
+	layouttablerow: "tr",
+	legend: "legend",
+	linebreak: "br",
+	link: "a, area",
+	list: "ul, ol, menu",
+	listbox: "select, datalist",
+	listitem: "li",
+	main: "main",
+	mark: "mark",
+	math: "math",
+	meter: "meter",
+	navigation: "nav",
+	none: "img",
+	option: "option",
+	paragraph: "p",
+	pluginobject: "object",
+	progressbar: "progress",
+	radio: "input",
+	region: "section",
+	row: "tr",
+	rowgroup: "thead, tbody, tfoot",
+	rowheader: "th, td",
+	ruby: "ruby",
+	search: "search",
+	searchbox: "input",
+	sectionfooter: "footer",
+	sectionheader: "header",
+	separator: "hr",
+	slider: "input",
+	spinbutton: "input",
+	status: "output",
+	strong: "strong",
+	subscript: "sub",
+	superscript: "sup",
+	svgroot: "svg",
+	switch: "input",
+	table: "table",
+	term: "dfn, dt",
+	textbox: "input, textarea",
+	time: "time",
+	video: "video",
+};
+
+/** Chrome's MathML roles (`MathMLFraction`, …) belong to the elements of a `<math>` tree. */
+const MATHML_TAGS = "math, math *";
+
+/** The role a selector names by its other ARIA spelling: Chrome calls an image "image", and `presentation` is `none`. */
+const ROLE_SPELLINGS: Record<string, string> = { img: "image", presentation: "none" };
+
+/** The `role` attribute values that give a role with two spellings. */
+const ROLE_TOKENS: Record<string, readonly string[]> = { image: ["img", "image"], none: ["none", "presentation"] };
 
 /**
- * The elements below `root` that match `selector`, in document order, each followed by the matches inside its open
- * shadow root. Runs in the page.
+ * Roles Chrome also reports under its own name: a table without data-table markup is a layout table to Chrome, and
+ * still a table to HTML-AAM and to whoever reads the page.
  */
-function collectCandidates(root: unknown, selector: string): unknown[] {
-	// A document, element or shadow root of this page; the tool's TypeScript config has no DOM library to name them.
-	type Scope = { querySelectorAll(selector: string): Iterable<Candidate> };
-	type Candidate = Scope & { shadowRoot: Scope | null; matches(selector: string): boolean };
-	const found: Candidate[] = [];
-	const visit = (scope: Scope): void => {
-		for (const element of scope.querySelectorAll("*")) {
-			if (element.matches(selector)) found.push(element);
-			if (element.shadowRoot) visit(element.shadowRoot);
-		}
-	};
-	visit(root as Scope);
-	return found;
+const ROLE_REPORTED_AS: Record<string, readonly string[]> = {
+	table: ["layouttable"],
+	row: ["layouttablerow"],
+	cell: ["layouttablecell"],
+};
+
+/** Why Chrome leaves a presentational element out of the tree; `role/none` matches those elements. */
+const PRESENTATIONAL_REASONS: Record<string, true> = { presentationalRole: true, emptyAlt: true };
+
+/** `table[key]`, for a key typed into a selector: never a property every object inherits, such as `constructor`. */
+function lookup<T>(table: Record<string, T>, key: string): T | undefined {
+	return Object.hasOwn(table, key) ? table[key] : undefined;
 }
 
 /**
- * Elements Chrome is asked about in the first round trip while a `queryOne` looks for its first match; each later round
- * asks about twice as many, so a match near the end of a long list costs a few round trips, not one per batch.
+ * The elements below `root` that match `selector`, plus every custom element (its ElementInternals can give it any
+ * role, which the page cannot read back), in document order, each followed by the candidates inside its open shadow
+ * root. A shadow host root is searched through its own shadow tree too. Runs in the page.
  */
-const ROLE_PROBE_BATCH = 32;
+function collectCandidates(root: unknown, selector: string): unknown[] {
+	// A document, element or shadow root of this page; the tool's TypeScript config has no DOM library to name them.
+	type Scope = { querySelectorAll(selector: string): Iterable<Candidate>; shadowRoot?: Scope | null };
+	type Candidate = Scope & { localName: string; matches(selector: string): boolean };
+	const found: Candidate[] = [];
+	const visit = (scope: Scope): void => {
+		for (const element of scope.querySelectorAll("*")) {
+			if (element.localName.includes("-") || element.matches(selector)) found.push(element);
+			if (element.shadowRoot) visit(element.shadowRoot);
+		}
+	};
+	const scope = root as Scope;
+	if (scope.shadowRoot) visit(scope.shadowRoot);
+	visit(scope);
+	return found;
+}
+
+/** Elements Chrome is asked about in the first round trip while a `queryOne` looks for its first match. */
+const ROLE_PROBE_FIRST = 32;
+/** Most elements Chrome is asked about in one round trip; a `queryOne`'s rounds double up to it. */
+const ROLE_PROBE_MAX = 512;
 
 /**
  * Chromium's `role/` resolution: the elements below `root` whose role and accessible name Chrome computes as the
- * selector asks, so they are the elements and names `observe()` reports. Each candidate's own accessibility node is
- * read with `Accessibility.getPartialAXTree`, which answers at once even in a background tab; `queryAXTree` waits for
- * a rendering update that a background tab never gets, and the whole tree costs tens of milliseconds on a large page.
- * It searches the page and its open shadow roots, and leaves out what the tree leaves out: hidden and `aria-hidden`
- * elements. Stops after `limit` matches.
+ * selector asks. Each candidate's own accessibility node is read with `Accessibility.getPartialAXTree`, which answers
+ * at once even in a background tab. It searches the page and its open shadow roots, and leaves out what the tree
+ * leaves out: hidden and `aria-hidden` elements. Stops after `limit` matches.
  */
 async function queryRoleInAXTree(root: ElementHandle, query: RoleQuery, limit: number): Promise<ElementHandle[]> {
-	const role = query.role === "img" ? "image" : query.role;
-	const tags = ROLE_TAGS.get(role);
-	const tokens = role === "image" ? '[role~="img" i], [role~="image" i]' : `[role~=${JSON.stringify(role)} i]`;
-	const selector = tags === undefined ? "*" : tags ? `${tags}, ${tokens}` : tokens;
+	const role = lookup(ROLE_SPELLINGS, query.role) ?? query.role;
+	const reported = [role, ...(lookup(ROLE_REPORTED_AS, role) ?? [])];
+	const tags = lookup(ROLE_TAGS, role) ?? (role.startsWith("mathml") ? MATHML_TAGS : undefined);
+	const tokens = (lookup(ROLE_TOKENS, role) ?? [role]).map(token => `[role~=${JSON.stringify(token)} i]`).join(", ");
+	const selector = tags ? `${tags}, ${tokens}` : tokens;
 	const list = await root.realm.evaluateHandle(collectCandidates, root, selector);
-	const candidates: ElementHandle[] = [];
-	try {
-		for (const property of (await list.getProperties()).values()) {
-			const element = property.asElement();
-			if (element) candidates.push(element);
-			else await property.dispose();
-		}
-	} finally {
-		await list.dispose();
-	}
 	const client = root.frame.client;
 	const matches: ElementHandle[] = [];
-	const rejected: ElementHandle[] = [];
-	let batch = limit === 1 ? ROLE_PROBE_BATCH : candidates.length;
-	let next = 0;
 	try {
-		while (next < candidates.length && matches.length < limit) {
-			const probed = candidates.slice(next, next + batch);
-			next += probed.length;
-			batch *= 2;
+		const count = await list.evaluate(found => found.length);
+		let batch = limit === 1 ? ROLE_PROBE_FIRST : ROLE_PROBE_MAX;
+		for (
+			let next = 0;
+			next < count && matches.length < limit;
+			next += batch, batch = Math.min(batch * 2, ROLE_PROBE_MAX)
+		) {
+			const slice = await list.evaluateHandle((found, start, end) => found.slice(start, end), next, next + batch);
+			const probed: ElementHandle[] = [];
+			try {
+				for (const property of (await slice.getProperties()).values()) {
+					const element = property.asElement();
+					if (element) probed.push(element);
+					else await property.dispose();
+				}
+			} finally {
+				await slice.dispose();
+			}
 			const nodes = await Promise.all(
 				probed.map(candidate =>
 					client
@@ -737,14 +764,17 @@ async function queryRoleInAXTree(root: ElementHandle, query: RoleQuery, limit: n
 						),
 				),
 			);
+			const rejected: ElementHandle[] = [];
 			for (const [index, candidate] of probed.entries()) {
 				const node = nodes[index];
 				let matched =
 					matches.length < limit &&
 					node !== undefined &&
-					!node.ignored &&
 					// Chrome spells roles outside ARIA in CamelCase (`DescriptionList`), as `observe()` shows them.
-					String(node.role?.value ?? "").toLowerCase() === role;
+					reported.includes(String(node.role?.value ?? "").toLowerCase()) &&
+					(!node.ignored ||
+						(role === "none" &&
+							(node.ignoredReasons ?? []).every(reason => lookup(PRESENTATIONAL_REASONS, reason.name))));
 				if (matched && query.name !== undefined) {
 					const name = String(node!.name?.value ?? "")
 						.replace(/\s+/g, " ")
@@ -754,9 +784,13 @@ async function queryRoleInAXTree(root: ElementHandle, query: RoleQuery, limit: n
 				}
 				(matched ? matches : rejected).push(candidate);
 			}
+			await Promise.all(rejected.map(candidate => candidate.dispose()));
 		}
+	} catch (error) {
+		await Promise.all(matches.map(match => match.dispose()));
+		throw error;
 	} finally {
-		await Promise.all([...rejected, ...candidates.slice(next)].map(candidate => candidate.dispose()));
+		await list.dispose();
 	}
 	return matches;
 }
@@ -775,21 +809,37 @@ async function waitForRole(
 	const { visible = false, hidden = false, signal } = options;
 	const frame = "frame" in elementOrFrame ? elementOrFrame.frame : elementOrFrame;
 	const realm = frame.isolatedRealm();
-	// A frame is searched from its document, which Puppeteer hands to query handlers as an element handle too.
-	const root =
-		"frame" in elementOrFrame
-			? await realm.adoptHandle(elementOrFrame)
-			: ((await realm.evaluateHandle(() => document)) as unknown as ElementHandle);
+	const element = "frame" in elementOrFrame ? await realm.adoptHandle(elementOrFrame) : null;
 	const timeout = options.timeout ?? frame.page().getDefaultTimeout();
 	const deadline = timeout > 0 ? Date.now() + timeout : Number.POSITIVE_INFINITY;
 	try {
 		while (true) {
 			signal?.throwIfAborted();
-			const [found] = await queryRoleInAXTree(root, query, 1);
-			if (found && !hidden && (!visible || (await found.isVisible()))) return found;
-			if (hidden && (!found || (await found.isHidden()))) {
-				await found?.dispose();
-				return null;
+			let found: ElementHandle | undefined;
+			try {
+				// A frame is searched from its document, read on each poll since a navigation replaces it.
+				const root = element ?? ((await realm.evaluateHandle(() => document)) as unknown as ElementHandle);
+				try {
+					[found] = await queryRoleInAXTree(root, query, 1);
+				} finally {
+					if (root !== element) await root.dispose();
+				}
+				if (found && !hidden && (!visible || (await found.isVisible()))) return found;
+				if (hidden && (!found || (await found.isHidden()))) {
+					await found?.dispose();
+					return null;
+				}
+			} catch (error) {
+				// A navigation that replaced the document mid-poll leaves nothing to report yet; the next poll reads the
+				// new one.
+				if (
+					element ||
+					!(
+						isNavigatedContextError(error) ||
+						(error instanceof Error && error.message.includes("should belong to the same JavaScript world"))
+					)
+				)
+					throw error;
 			}
 			await found?.dispose();
 			const remaining = deadline - Date.now();
@@ -798,10 +848,10 @@ async function waitForRole(
 				error.cause = puppeteerTimeoutError(`Waiting failed: ${timeout}ms exceeded`);
 				throw error;
 			}
-			await Bun.sleep(Math.min(ROLE_POLL_MS, remaining));
+			await sleepLong(Math.min(ROLE_POLL_MS, remaining), signal);
 		}
 	} finally {
-		if (root !== elementOrFrame) await root.dispose();
+		await element?.dispose();
 	}
 }
 

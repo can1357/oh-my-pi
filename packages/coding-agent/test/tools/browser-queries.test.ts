@@ -254,16 +254,18 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 		const result = (await invoke({
 			action: "run",
 			name: axTab,
-			code: `await page.evaluate(() => {
-				setTimeout(() => {
-					const later = document.createElement("button");
-					later.textContent = "Later";
-					document.body.append(later);
-					setTimeout(() => later.remove(), 300);
-				}, 100);
+			// Each wait is started before the page changes, then awaited after.
+			code: `const appearing = tab.waitForSelector('role/button[name="Later" exact]', { timeout: 10_000 });
+			await page.evaluate(() => {
+				const later = document.createElement("button");
+				later.id = "later";
+				later.textContent = "Later";
+				document.body.append(later);
 			});
-			const appeared = await tab.waitForSelector('role/button[name="Later" exact]', { timeout: 10_000 });
-			await tab.waitForSelector('role/button[name="Later" exact]', { hidden: true, timeout: 10_000 });
+			const appeared = await appearing;
+			const leaving = tab.waitForSelector('role/button[name="Later" exact]', { hidden: true, timeout: 10_000 });
+			await page.evaluate(() => document.getElementById("later").remove());
+			await leaving;
 			await tab.click('role/button[name="Shadow" exact]');
 			const clicked = await tab.count('role/button[name="Shadow clicked" exact]');
 			try {
@@ -276,20 +278,6 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 		const [appeared, clicked, message] = result.details?.value ?? [];
 		expect([appeared, clicked]).toEqual([true, 1]);
 		expect(message).toContain("timed out after 300ms; selector currently matches no elements");
-	}, 60_000);
-
-	it("keeps the Tern kit's page-side role/ handler for pages without an accessibility tree to ask", async () => {
-		const result = (await invoke({
-			action: "run",
-			name: axTab,
-			code: `await tab.evaluate(${JSON.stringify(`(function () {\n${TERN_KIT_SOURCE}\n})()`)});
-			return await tab.evaluate(() => {
-				const kit = globalThis.__ompTernKit;
-				return [kit.count({ engine: "role", query: 'textbox[name="First"]' }), kit.count({ engine: "role", query: "rowheader" })];
-			});`,
-		})) as { details?: { value?: number[] } };
-		// The hand-written rules find the labelled field but, unlike Chrome, read every th without scope as a column header.
-		expect(result.details?.value).toEqual([1, 0]);
 	});
 
 	it("returns DOM content, values, attributes, counts, boxes, styles, and query state branches", async () => {

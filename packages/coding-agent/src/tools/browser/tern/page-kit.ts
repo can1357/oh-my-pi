@@ -555,6 +555,14 @@ const flatChildren = el => {
 	}
 	return Array.from(el.children);
 };
+// The text an element holds directly, not inside its children.
+const ownText = el => {
+	let out = "";
+	for (let child = el.firstChild; child; child = child.nextSibling) {
+		if (child.nodeType === Node.TEXT_NODE) out += child.nodeValue || "";
+	}
+	return normalizeSpace(out);
+};
 const intersectsViewport = el => {
 	const rect = el.getBoundingClientRect();
 	return rect.right > 0 && rect.bottom > 0 && rect.left < innerWidth && rect.top < innerHeight;
@@ -611,6 +619,12 @@ const observe = opts => {
 				};
 				collected.push(entry);
 			}
+		}
+		// With includeAll, text is listed as its own StaticText entry, as the Chromium observe lists it, unless the
+		// element's name already says it. A StaticText entry has no role/ selector.
+		if (includeAll && rendered && (!viewportOnly || intersectsViewport(el))) {
+			const text = ownText(el);
+			if (text && text !== entry?.name) collected.push({ el, role: "StaticText", name: text, states: [], drop: false });
 		}
 		let descendantInteractive = false;
 		const childInSelect = inSelect || tag === "select";
