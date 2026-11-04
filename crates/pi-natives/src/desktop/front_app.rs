@@ -56,21 +56,35 @@ impl MacosFrontApp {
 }
 
 /// The app at the other end of a loopback TCP connection to this process
-/// from `peerPort` to `localPort`, such as the browser whose extension
-/// connected to omp's relay: the pid of the process holding that end, or of
-/// its nearest ancestor that is a regular app. `null` off macOS and when no
-/// other process holds it.
+/// from `peerAddress:peerPort` to `localAddress:localPort`, such as the browser
+/// whose extension connected to omp's relay: the pid of the process holding
+/// that exact connection, or of its nearest ancestor that is a regular app.
+/// `null` off macOS, for non-loopback addresses and when no other process holds
+/// it.
 #[napi(js_name = "macOSLoopbackPeerApp")]
-pub fn macos_loopback_peer_app(local_port: u16, peer_port: u16) -> task::Promise<Option<u32>> {
+pub fn macos_loopback_peer_app(
+	local_address: String,
+	local_port: u16,
+	peer_address: String,
+	peer_port: u16,
+) -> task::Promise<Option<u32>> {
 	task::blocking("desktop.loopbackPeerApp", (), move |_| {
 		#[cfg(target_os = "macos")]
 		{
-			Ok(super::macos::loopback_peer_app(local_port, peer_port)
-				.and_then(|pid| u32::try_from(pid).ok()))
+			let (Ok(local), Ok(peer)) =
+				(local_address.parse::<std::net::IpAddr>(), peer_address.parse::<std::net::IpAddr>())
+			else {
+				return Ok(None);
+			};
+			Ok(super::macos::loopback_peer_app(
+				&std::net::SocketAddr::new(local, local_port),
+				&std::net::SocketAddr::new(peer, peer_port),
+			)
+			.and_then(|pid| u32::try_from(pid).ok()))
 		}
 		#[cfg(not(target_os = "macos"))]
 		{
-			let _ = (local_port, peer_port);
+			let _ = (local_address, local_port, peer_address, peer_port);
 			Ok(None)
 		}
 	})

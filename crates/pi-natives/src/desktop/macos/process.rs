@@ -8,6 +8,7 @@ use std::{
 	fs::File,
 	io::{Read, Seek, SeekFrom},
 	mem,
+	net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
 	os::unix::ffi::OsStrExt,
 	path::{Path, PathBuf},
 	sync::LazyLock,
@@ -515,35 +516,38 @@ const _: () = assert!(
 		&& mem::offset_of!(SocketFdInfo, local_address) == 312
 );
 
-fn matches_loopback_peer(info: &SocketFdInfo, from_port: u16, to_port: u16) -> bool {
-	let port = |raw: i32| u16::try_from(raw).ok().map(u16::from_be);
-	let loopback = |address: [u8; 16]| match info.family {
-		libc::AF_INET => address[12] == 127,
-		libc::AF_INET6 => {
-			let address = std::net::Ipv6Addr::from(address);
-			address.is_loopback()
-				|| address
-					.to_ipv4_mapped()
-					.is_some_and(|address| address.is_loopback())
+fn socket_ip(family: i32, address: [u8; 16]) -> Option<IpAddr> {
+	match family {
+		libc::AF_INET => {
+			Some(Ipv4Addr::new(address[12], address[13], address[14], address[15]).into())
 		},
-		_ => false,
-	};
+		libc::AF_INET6 => Some(Ipv6Addr::from(address).to_canonical()),
+		_ => None,
+	}
+}
+
+fn matches_loopback_peer(info: &SocketFdInfo, from: &SocketAddr, to: &SocketAddr) -> bool {
+	let port = |raw: i32| u16::try_from(raw).ok().map(u16::from_be);
+	let from_ip = from.ip().to_canonical();
+	let to_ip = to.ip().to_canonical();
 	info.kind == SOCKINFO_TCP
-		&& port(info.local_port) == Some(from_port)
-		&& port(info.foreign_port) == Some(to_port)
-		&& loopback(info.local_address)
-		&& loopback(info.foreign_address)
+		&& from_ip.is_loopback()
+		&& to_ip.is_loopback()
+		&& port(info.local_port) == Some(from.port())
+		&& port(info.foreign_port) == Some(to.port())
+		&& socket_ip(info.family, info.local_address) == Some(from_ip)
+		&& socket_ip(info.family, info.foreign_address) == Some(to_ip)
 }
 
 /// The app at the other end of this process's loopback TCP connection from
-/// `peer_port` to `local_port`: the process holding that end, or its nearest
+/// `peer` to `local`: the process holding that end, or its nearest
 /// ancestor that is a regular app, as a browser is to the helper process its
 /// network service runs in. `None` when no other process holds it.
 pub(in crate::desktop) fn loopback_peer_app(
-	local_port: u16,
-	peer_port: u16,
+	local: &SocketAddr,
+	peer: &SocketAddr,
 ) -> Option<libc::pid_t> {
-	let mut pid = loopback_peer(local_port, peer_port)?;
+	let mut pid = loopback_peer(local, peer)?;
 	for _ in 0..=MAX_APP_ANCESTORS {
 		let regular = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
 			.is_some_and(|app| app.activationPolicy() == NSApplicationActivationPolicy::Regular);
@@ -555,14 +559,14 @@ pub(in crate::desktop) fn loopback_peer_app(
 	None
 }
 
-/// The process other than this one holding the TCP socket from `peer_port`
-/// to `local_port`.
-fn loopback_peer(local_port: u16, peer_port: u16) -> Option<libc::pid_t> {
+/// The process other than this one holding the TCP socket from `peer`
+/// to `local`.
+fn loopback_peer(local: &SocketAddr, peer: &SocketAddr) -> Option<libc::pid_t> {
 	let own = libc::pid_t::try_from(std::process::id()).ok()?;
 	all_pids()?
 		.into_iter()
 		.filter(|pid| *pid > 0 && *pid != own)
-		.find(|pid| holds_tcp(*pid, peer_port, local_port))
+		.find(|pid| holds_tcp(*pid, peer, local))
 }
 
 fn all_pids() -> Option<Vec<libc::pid_t>> {
@@ -577,9 +581,8 @@ fn all_pids() -> Option<Vec<libc::pid_t>> {
 	Some(pids)
 }
 
-/// Whether `pid` holds a TCP socket bound to `from_port` and connected to
-/// `to_port`.
-fn holds_tcp(pid: libc::pid_t, from_port: u16, to_port: u16) -> bool {
+/// Whether `pid` holds a TCP socket bound to `from` and connected to `to`.
+fn holds_tcp(pid: libc::pid_t, from: &SocketAddr, to: &SocketAddr) -> bool {
 	let entry = mem::size_of::<libc::proc_fdinfo>();
 	// SAFETY: A null buffer asks for the byte size of the descriptor list.
 	let bytes =
@@ -614,7 +617,7 @@ fn holds_tcp(pid: libc::pid_t, from_port: u16, to_port: u16) -> bool {
 					size,
 				)
 			};
-			written == size && matches_loopback_peer(&info, from_port, to_port)
+			written == size && matches_loopback_peer(&info, from, to)
 		})
 }
 
@@ -642,37 +645,45 @@ mod tests {
 		info.kind = SOCKINFO_TCP;
 		info.local_port = i32::from(40000_u16.to_be());
 		info.foreign_port = i32::from(9224_u16.to_be());
-		for (family, local, foreign) in [
-			(libc::AF_INET, "::127.0.0.2", "::127.1.2.3"),
-			(libc::AF_INET6, "::1", "::1"),
-			(libc::AF_INET6, "::ffff:127.0.0.2", "::ffff:127.1.2.3"),
+		for (family, local, foreign, from, to) in [
+			(libc::AF_INET, "::127.0.0.2", "::127.1.2.3", "127.0.0.2:40000", "127.1.2.3:9224"),
+			(libc::AF_INET6, "::1", "::1", "[::1]:40000", "[::1]:9224"),
+			(
+				libc::AF_INET6,
+				"::ffff:127.0.0.2",
+				"::ffff:127.1.2.3",
+				"127.0.0.2:40000",
+				"127.1.2.3:9224",
+			),
 		] {
+			let from = from.parse().unwrap();
+			let to = to.parse().unwrap();
 			info.family = family;
-			info.local_address = local.parse::<std::net::Ipv6Addr>().unwrap().octets();
-			info.foreign_address = foreign.parse::<std::net::Ipv6Addr>().unwrap().octets();
-			assert!(matches_loopback_peer(&info, 40000, 9224));
+			info.local_address = local.parse::<Ipv6Addr>().unwrap().octets();
+			info.foreign_address = foreign.parse::<Ipv6Addr>().unwrap().octets();
+			assert!(matches_loopback_peer(&info, &from, &to));
 			let local = info.local_address;
-			info.local_address[12] = 192;
-			assert!(!matches_loopback_peer(&info, 40000, 9224));
+			info.local_address[15] = 4;
+			assert!(!matches_loopback_peer(&info, &from, &to));
 			info.local_address = local;
-			info.foreign_address[12] = 192;
-			assert!(!matches_loopback_peer(&info, 40000, 9224));
+			info.foreign_address[15] = 4;
+			assert!(!matches_loopback_peer(&info, &from, &to));
 		}
 	}
 	#[test]
 	fn the_process_at_the_other_end_of_a_loopback_connection_is_found_and_this_one_never() {
 		let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-		let local = listener.local_addr().unwrap().port();
+		let local = listener.local_addr().unwrap();
 		let mut client = Command::new("/usr/bin/nc")
-			.args(["127.0.0.1", &local.to_string()])
+			.args(["127.0.0.1", &local.port().to_string()])
 			.stdin(Stdio::piped())
 			.stdout(Stdio::null())
 			.spawn()
 			.unwrap();
 		let (_connection, peer) = listener.accept().unwrap();
-		let found = loopback_peer(local, peer.port());
+		let found = loopback_peer(&local, &peer);
 		// This process's own end of the same connection.
-		let own_end = loopback_peer(peer.port(), local);
+		let own_end = loopback_peer(&peer, &local);
 		client.kill().unwrap();
 		client.wait().unwrap();
 		assert_eq!(found, libc::pid_t::try_from(client.id()).ok());

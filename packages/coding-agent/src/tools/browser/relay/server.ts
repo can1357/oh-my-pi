@@ -87,8 +87,8 @@ export interface RelayServer {
 }
 
 interface SocketData {
-	/** The extension end's TCP port, which names the browser behind it. */
-	peerPort?: number;
+	/** The accepted extension endpoint, which names the browser behind it. */
+	peer?: Bun.SocketAddress | null;
 	role: "cdp" | "ext";
 	connId?: number;
 	/** The Chrome extension id an `ext` upgrade's `Origin` named. */
@@ -161,7 +161,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 				const data: SocketData = {
 					role: "ext",
 					extensionId: origin?.match(EXTENSION_ORIGIN)?.[1],
-					peerPort: srv.requestIP(req)?.port,
+					peer: srv.requestIP(req),
 				};
 				if (srv.upgrade(req, { data })) return undefined;
 				return new Response("websocket upgrade required", { status: 426 });
@@ -195,11 +195,11 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 			open(ws: RelayWebSocket): void {
 				sockets.add(ws);
 				if (ws.data.role === "ext") {
-					const peerPort = ws.data.peerPort;
+					const peer = ws.data.peer;
 					const port = server.port;
 					const findBrowser =
-						keepFrontApp && peerPort !== undefined && port !== undefined
-							? async () => (await macOSLoopbackPeerApp(port, peerPort)) ?? null
+						keepFrontApp && peer && port !== undefined
+							? async () => (await macOSLoopbackPeerApp("127.0.0.1", port, peer.address, peer.port)) ?? null
 							: undefined;
 					bridge.extConnected(ws, ws.data.extensionId, findBrowser);
 				} else {
