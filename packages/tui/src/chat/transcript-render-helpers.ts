@@ -389,7 +389,7 @@ export function resolveAssistantErrorPresentation(
 		return { kind: "full", text: errorDisplayText(message) || "Error", isError: true };
 	}
 	if (message.errorMessage && shouldRenderAbortReason(message)) {
-		return { kind: "full", text: message.errorMessage, isError: true };
+		return { kind: "full", text: errorDisplayText(message) || message.errorMessage, isError: true };
 	}
 	return { kind: "none" };
 }

@@ -841,7 +841,9 @@ describe("openai-codex streaming", () => {
 			const result =
 				transport === "sse" ? (await runCodexSseEvents([failure])).result : await runCodexWebSocketEvent(failure);
 			expect(result.stopReason).toBe("error");
-			expect(extractProviderRetryHint("openai-codex", result.errorMessage)).toBe(expectedDelay);
+			expect(extractProviderRetryHint("openai-codex", result.errorMessage, result.errorRetryAfterMs)).toBe(
+				expectedDelay,
+			);
 		});
 	});
 

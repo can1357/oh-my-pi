@@ -638,8 +638,8 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		const baseUrl = await startServer();
 		const { result } = await collectStream(makeModel(baseUrl));
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("google.rpc.ErrorInfo");
-		expect(result.errorMessage).toContain("quota exceeded for request field tools");
+		expect(AIError.errorDisplayText(result)).toContain("google.rpc.ErrorInfo");
+		expect(AIError.errorDisplayText(result)).toContain("quota exceeded for request field tools");
 		expect(AIError.is(result.errorId, AIError.Flag.UsageLimit)).toBe(false);
 	});
 
@@ -647,7 +647,7 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		scenario = { kind: "connect-classification-detail-after-turn" };
 		const baseUrl = await startServer();
 		const { result } = await collectStream(makeModel(baseUrl));
-		expect(result.errorMessage).toContain("quota exceeded for this account");
+		expect(AIError.errorDisplayText(result)).toContain("quota exceeded for this account");
 		expect(AIError.is(result.errorId, AIError.Flag.UsageLimit)).toBe(false);
 	});
 
@@ -656,7 +656,7 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		const baseUrl = await startServer();
 		const { result } = await collectStream(makeModel(baseUrl));
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("Unable to reach the model provider");
+		expect(AIError.errorDisplayText(result)).toContain("Unable to reach the model provider");
 		expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBe(isRetryable);
 	});
 

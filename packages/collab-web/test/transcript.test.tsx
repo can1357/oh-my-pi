@@ -2,11 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { AssistantMessage, SessionEntry } from "@oh-my-pi/pi-wire";
 import { renderToStaticMarkup } from "react-dom/server";
 import "./transcript-dom-shim";
-import {
-	followTranscriptTail,
-	Transcript,
-	updateTranscriptTailLock,
-} from "../src/components/transcript/Transcript";
+import { followTranscriptTail, Transcript, updateTranscriptTailLock } from "../src/components/transcript/Transcript";
 import type { ActiveTool } from "../src/lib/client";
 
 const TOOL_CALL_ID = "call-running-tool";
@@ -147,6 +143,35 @@ describe("Transcript message Markdown", () => {
 
 		expect(countElements(html, ".tr-row--user .tr-md code")).toBe(1);
 		expect(countElements(html, ".tr-row--user .tr-md strong")).toBe(1);
+	});
+});
+
+describe("Transcript failed turn", () => {
+	it("shows the failed turn's shown text, with its request-dump path", () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "failed-turn",
+				parentId: null,
+				timestamp: "2026-11-03T00:00:00Z",
+				message: {
+					role: "assistant",
+					content: [],
+					model: "test/model",
+					usage: assistantUsage(),
+					stopReason: "error",
+					errorMessage: "HTTP 400\nunknown model",
+					errorDisplayMessage:
+						"HTTP 400 from http://127.0.0.1:11434/api/chat\nunknown model\nraw-http-request=/tmp/omp/1.json",
+					timestamp: 1,
+				},
+			},
+		];
+
+		const html = renderTranscript({ entries, working: false });
+
+		expect(html).toContain("raw-http-request=/tmp/omp/1.json");
+		expect(html).toContain("http://127.0.0.1:11434/api/chat");
 	});
 });
 

@@ -84,7 +84,10 @@ export interface AssistantMessage {
 	model: string;
 	usage: WireUsage;
 	stopReason: StopReason;
+	/** The failure's own text (what the provider sent). */
 	errorMessage?: string;
+	/** `errorMessage` as omp shows it, when that differs: with the request-dump path, endpoint or retry hint. Display only. */
+	errorDisplayMessage?: string;
 	timestamp: number;
 }
 

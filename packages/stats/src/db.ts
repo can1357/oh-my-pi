@@ -199,6 +199,7 @@ export async function initDb(): Promise<Database> {
 			ttft INTEGER,
 			stop_reason TEXT NOT NULL,
 			error_message TEXT,
+			error_display_message TEXT,
 			input_tokens INTEGER NOT NULL,
 			output_tokens INTEGER NOT NULL,
 			cache_read_tokens INTEGER NOT NULL,
@@ -429,6 +430,11 @@ export async function initDb(): Promise<Database> {
 	}
 	if (!messageColumns.some(column => column.name === "cost_no_cache_input")) {
 		db.run("ALTER TABLE messages ADD COLUMN cost_no_cache_input REAL");
+	}
+	// Rows ingested before this column existed carry no shown error text; a
+	// re-parse fills it from the session's assistant messages.
+	if (!messageColumns.some(column => column.name === "error_display_message")) {
+		db.run("ALTER TABLE messages ADD COLUMN error_display_message TEXT");
 	}
 	// Rows ingested before this column existed carry no served tier; a re-parse
 	// fills them from the session's assistant messages.
@@ -1149,6 +1155,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			"ttft",
 			"stop_reason",
 			"error_message",
+			"error_display_message",
 			"input_tokens",
 			"output_tokens",
 			"cache_read_tokens",
@@ -1196,6 +1203,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 					s.ttft,
 					s.stopReason,
 					s.errorMessage,
+					s.errorDisplayMessage ?? null,
 					s.usage.input,
 					s.usage.output,
 					s.usage.cacheRead,
@@ -1252,6 +1260,7 @@ function rowToMessageStats(row: any): MessageStats {
 		ttft: row.ttft,
 		stopReason: row.stop_reason as any,
 		errorMessage: row.error_message,
+		errorDisplayMessage: row.error_display_message ?? null,
 		usage: {
 			input: row.input_tokens,
 			output: row.output_tokens,

@@ -42,6 +42,7 @@ interface EntryDetailView {
 		provider?: string;
 		stopReason?: string;
 		errorMessage?: string;
+		errorDisplayMessage?: string;
 		duration?: number;
 		ttft?: number;
 		toolName?: string;
@@ -231,7 +232,7 @@ export function SpanDrawer({
 				{msg?.errorMessage && (
 					<div className="stack" style={{ gap: 6 }}>
 						<div className="section-label tone-bad">Error message</div>
-						<pre className="code-block traces-pre">{msg.errorMessage}</pre>
+						<pre className="code-block traces-pre">{msg.errorDisplayMessage ?? msg.errorMessage}</pre>
 					</div>
 				)}
 

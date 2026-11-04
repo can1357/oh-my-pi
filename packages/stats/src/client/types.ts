@@ -53,6 +53,8 @@ export interface MessageStats {
 	ttft: number | null;
 	stopReason: string;
 	errorMessage: string | null;
+	/** `errorMessage` as omp showed it, when that differs; for display only */
+	errorDisplayMessage?: string | null;
 	usage: Usage;
 	/** Ingest found no tariff to price this request from; its zero is unknown spend. */
 	costUnpriced?: boolean;

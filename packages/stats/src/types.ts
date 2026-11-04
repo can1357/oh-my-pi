@@ -29,8 +29,10 @@ export interface MessageStats {
 	ttft: number | null;
 	/** Stop reason */
 	stopReason: StopReason;
-	/** Error message if stopReason is error */
+	/** Error message if stopReason is error: the failure's own text; grouping and classification read it */
 	errorMessage: string | null;
+	/** `errorMessage` as omp showed it (request-dump path, endpoint, retry hint), when that differs */
+	errorDisplayMessage?: string | null;
 	/** Token usage */
 	usage: Usage;
 	/** Which agent produced this message (main agent, task subagent, advisor) */
@@ -116,6 +118,7 @@ export interface SessionModelUsageEntry {
 	usage: Usage;
 	stopReason?: StopReason;
 	errorMessage?: string;
+	errorDisplayMessage?: string;
 }
 
 /**

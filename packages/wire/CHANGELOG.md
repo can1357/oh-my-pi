@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `AssistantMessage.errorDisplayMessage`: a failed turn's error text as omp shows it (with the request-dump path or endpoint), beside the provider's own `errorMessage` ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

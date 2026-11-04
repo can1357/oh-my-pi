@@ -303,6 +303,7 @@ function extractStats(
 		// normally: classify by whether it carried an error.
 		stopReason: msg.stopReason ?? (msg.errorMessage ? "error" : "aborted"),
 		errorMessage: msg.errorMessage ?? null,
+		errorDisplayMessage: msg.errorDisplayMessage ?? null,
 		usage,
 		agentType,
 		serviceTier: servedTier ?? null,
