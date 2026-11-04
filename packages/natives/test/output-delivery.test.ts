@@ -68,18 +68,19 @@ describe.skipIf(skip)("output delivery", () => {
 				watch ??= setInterval(() => {
 					if (existsSync(marker)) {
 						clearInterval(watch);
-						session.kill();
+						try {
+							session.kill();
+						} catch {
+							// The run has already ended: the failure came first either way.
+						}
 						killed.resolve();
 					}
 				}, 1);
 				throw new Error("callback failed");
 			},
 		);
-		try {
-			await expect(run).rejects.toThrow("Command output was not all delivered: the output callback failed");
-		} finally {
-			clearInterval(watch);
-		}
+		await expect(run).rejects.toThrow("Command output was not all delivered: the output callback failed");
+		// The TERM trap wrote the marker, so the failure stopped the command first.
 		await killed.promise;
 	}, 20_000);
 
