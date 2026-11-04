@@ -690,10 +690,30 @@ class BashResult:
     timed_out: bool | None = None
     artifact_id: str | None = None
     artifact_elided_bytes: int | None = None
+    elided_bytes: int | None = None
+    """Bytes dropped from the middle of `output`, which keeps the head and tail."""
+    elided_lines: int | None = None
+    """Lines dropped from the middle of `output`."""
+    column_dropped_bytes: int | None = None
+    """Bytes the per-line column cap cut from `output`, across all lines."""
+    column_truncated_lines: int | None = None
+    """Lines of `output` the per-line column cap cut; the artifact holds them whole."""
+    column_truncated_range: LineRange | None = None
+    """First and last lines the column cap cut, numbered as in the artifact; absent when the numbering cannot match it."""
+    column_max: int | None = None
+    """The per-line column cap in UTF-8 bytes, set when it cut a line."""
     artifact_error: JsonObject | None = None
     minimized: JsonObject | None = None
     working_dir: str | None = None
     images: tuple[ImageContent, ...] | None = None
+    trace: JsonObject | None = None
+    """The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class LineRange:
+    first: int
+    last: int
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -2046,10 +2066,25 @@ def parse_bash_result(value: object, path: str = "BashResult") -> BashResult:
         timed_out=optional(payload, "timedOut", decode_bool, path),
         artifact_id=optional(payload, "artifactId", decode_str, path),
         artifact_elided_bytes=optional(payload, "artifactElidedBytes", decode_int, path),
+        elided_bytes=optional(payload, "elidedBytes", decode_int, path),
+        elided_lines=optional(payload, "elidedLines", decode_int, path),
+        column_dropped_bytes=optional(payload, "columnDroppedBytes", decode_int, path),
+        column_truncated_lines=optional(payload, "columnTruncatedLines", decode_int, path),
+        column_truncated_range=optional(payload, "columnTruncatedRange", parse_line_range, path),
+        column_max=optional(payload, "columnMax", decode_int, path),
         artifact_error=optional(payload, "artifactError", decode_json_object, path),
         minimized=optional(payload, "minimized", decode_json_object, path),
         working_dir=optional(payload, "workingDir", decode_str, path),
         images=optional(payload, "images", array(parse_image_content), path),
+        trace=optional(payload, "trace", decode_json_object, path),
+    )
+
+
+def parse_line_range(value: object, path: str = "LineRange") -> LineRange:
+    payload = expect_object(value, path)
+    return LineRange(
+        first=required(payload, "first", decode_int, path),
+        last=required(payload, "last", decode_int, path),
     )
 
 
@@ -4042,6 +4077,7 @@ __all__ = [
     "InputUiRequest",
     "InterruptMode",
     "IrcMessageEvent",
+    "LineRange",
     "LiveConnectResult",
     "LiveEndEvent",
     "LiveLevelsEvent",
@@ -4228,6 +4264,7 @@ __all__ = [
     "parse_image_content",
     "parse_input_ui_request",
     "parse_irc_message_event",
+    "parse_line_range",
     "parse_live_connect_result",
     "parse_live_end_event",
     "parse_live_levels_event",

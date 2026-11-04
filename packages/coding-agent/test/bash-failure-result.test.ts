@@ -35,6 +35,15 @@ function makeSession(): ToolSession {
 }
 
 describe("BashTool execution results", () => {
+	it("persists the entire bounded trace when its JSON exceeds 200 KB", async () => {
+		const tool = new BashTool(makeSession());
+		const result = await tool.execute("call-large-trace", { command: "printf '%0210000d' 0" }, undefined, () => {});
+		const trace = result.details?.trace;
+		expect(trace).toBeDefined();
+		expect(JSON.stringify(trace).length).toBeGreaterThan(200_000);
+		expect(trace?.history?.some(event => event.kind === "Output")).toBe(true);
+	});
+
 	it.each([
 		{ wallTimeMs: 0, noticeCount: 1 },
 		{ wallTimeMs: 1000, noticeCount: 2 },
@@ -84,6 +93,15 @@ describe("BashTool execution results", () => {
 		// The LLM-facing text still states the exit code verbatim.
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
 		expect(text).toContain("Command exited with code 3");
+	});
+
+	it("says a command that printed nothing exited cleanly, so an empty result reads as success", async () => {
+		const tool = new BashTool(makeSession());
+
+		const result = await tool.execute("call-silent", { command: "true" });
+
+		expect(result.isError).toBeUndefined();
+		expect(result.content.find(c => c.type === "text")?.text).toStartWith("(no output, exit code 0)");
 	});
 
 	it("returns a warning-state timeout result with one timeout notice", async () => {

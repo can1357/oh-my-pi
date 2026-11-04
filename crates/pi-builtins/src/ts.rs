@@ -15,11 +15,10 @@ use std::{
 	time::Instant,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use jiff::{Timestamp, fmt::strtime, tz::TimeZone};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 const OPT_RELATIVE: &str = "relative";
 const OPT_INCREMENTAL: &str = "incremental";
@@ -324,11 +323,6 @@ fn render_relative(then: Timestamp, now: Timestamp) -> String {
 	} else {
 		format!("in {count}{unit}")
 	}
-}
-
-/// Creates the `ts` builtin registration.
-pub(crate) fn ts_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Ts, SE>()
 }
 
 #[cfg(test)]

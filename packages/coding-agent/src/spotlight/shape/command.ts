@@ -22,6 +22,10 @@ const READ_SEGMENT = /^(?:cat|sed\s+-n|head|tail|nl|less|more|bat)\b(?!\s*(?:>|<
 /** The agent's own program: a heredoc or an interpreter run, whose output it shaped itself. */
 const PROGRAM = /<<-?\s*['"]?\w+|(?:^|[;&|\n]\s*)(?:python3?|node|perl|Rscript|ruby|julia)\b/;
 
+/** A segment that runs a coding agent non-interactively (`omp -p`, `claude -p`, `codex exec`, `bun src/cli.ts -p`). */
+const AGENT_SEGMENT =
+	/^(?:\w+=\S*\s+)*(?:(?:omp|claude)\b[^|]*\s(?:-p|--print)\b|codex\s+exec\b|bun\s+(?:run\s+)?\S*cli\.ts\b[^|]*\s(?:-p|--print)\b)/;
+
 /** A segment that runs tests or lint: the runner is the command word (after env vars / npx / uv run / python -m …). */
 const TEST_SEGMENT =
 	/^(?:\w+=\S*\s+)*(?:(?:npx|bunx|pnpm(?:\s+exec)?|yarn|uv\s+run(?:\s+--?[\w-]+(?:[=\s][\w.@/-]+)?)*|poetry\s+run|python3?\s+-m|(?:\S*\/)?\.bin\/|\S*\/bin\/)\s*)*(?:pytest|py\.test|vitest|jest|mocha|tox|nox|eslint|ruff|mypy|tsc|biome|playwright\s+test|python3?\s+\S*runtests\.py|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|lint|typecheck|typescript|test[:-][\w:-]+)|cargo\s+(?:test|clippy)|go\s+test|make\s+(?:test|lint|check))\b/;
@@ -32,9 +36,31 @@ const PRINT_SEGMENT = /^(?:cat|nl|sed\s+-n|head|tail|grep|rg|git\s+(?:diff|show)
 /** A whole-file read: `cat|nl|bat|more|less [-flags] F…` with no pipe or redirect. */
 const WHOLE_READ = /^(?:cat|nl|bat|more|less)(?:\s+-[A-Za-z]+)*\s+[^|<>]+$/;
 
-/** Segments of a shell command: split on `;`, `&&`, `||` and newlines; pipes stay inside a segment. */
+/**
+ * Segments of a shell command: split on `;`, `&&`, `||` and newlines outside quotes (`sed -n '1,9p;20,30p'` is one
+ * segment); pipes stay inside a segment.
+ */
 export function segments(command: string): string[] {
-	return command.split(/;|&&|\|\||\n/).map(s => s.trim());
+	const out: string[] = [];
+	let quote = "";
+	let start = 0;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (quote) {
+			if (ch === quote) quote = "";
+			else if (ch === "\\" && quote === '"') i++;
+			continue;
+		}
+		if (ch === "'" || ch === '"') quote = ch;
+		else if (ch === "\\") i++;
+		else if (ch === ";" || ch === "\n" || ((ch === "&" || ch === "|") && command[i + 1] === ch)) {
+			out.push(command.slice(start, i).trim());
+			if (ch === "&" || ch === "|") i++;
+			start = i + 1;
+		}
+	}
+	out.push(command.slice(start).trim());
+	return out;
 }
 
 /** Some segment prints file contents (`cd x; ls; cat a.py`). */
@@ -76,6 +102,11 @@ export function isTestRun(command: string): boolean {
 /** The command runs a program of the agent's own (heredoc, interpreter). */
 export function runsProgram(command: string): boolean {
 	return PROGRAM.test(command);
+}
+
+/** The command runs a coding agent whose printed report is its whole answer. */
+export function runsAgent(command: string): boolean {
+	return segments(command).some(s => AGENT_SEGMENT.test(s));
 }
 
 /** The command or read path reads text a shaped result saved (`artifact://N`): the agent paging hidden lines back in. */
@@ -159,19 +190,13 @@ export function readTargets(command: string): ReadTarget[] {
 	return targets;
 }
 
-/** A file a read target names: the path as written (glob expanded) and its real absolute path. */
-export interface ResolvedFile {
-	path: string;
-	abs: string;
-}
-
 const expandHome = (p: string) => (p === "~" || p.startsWith("~/") ? path.join(os.homedir(), p.slice(1)) : p);
 
 /**
- * The files `target` prints, resolved against `cwd` after its `cd` segments, globs expanded in shell order.
- * Missing files and directories are left out.
+ * The real absolute paths of the files `target` prints, resolved against `cwd` after its `cd` segments, globs expanded
+ * in shell order. Missing files and directories are left out.
  */
-export async function resolveTarget(target: ReadTarget, cwd: string): Promise<ResolvedFile[]> {
+export async function resolveTarget(target: ReadTarget, cwd: string): Promise<string[]> {
 	let dir = cwd;
 	for (const cd of target.cds) dir = path.resolve(dir, expandHome(cd));
 	const arg = expandHome(target.arg);
@@ -191,11 +216,11 @@ export async function resolveTarget(target: ReadTarget, cwd: string): Promise<Re
 		}
 		names.sort();
 	} else names = [arg];
-	const out: ResolvedFile[] = [];
+	const out: string[] = [];
 	for (const name of names) {
 		try {
 			const abs = await fs.realpath(path.resolve(dir, name));
-			if ((await fs.stat(abs)).isFile()) out.push({ path: name, abs });
+			if ((await fs.stat(abs)).isFile()) out.push(abs);
 		} catch {
 			// A path the command named but that does not exist (or is unreadable) prints nothing to match.
 		}
