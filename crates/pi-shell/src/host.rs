@@ -609,6 +609,10 @@ impl crate::bash::Host for PiHost {
 		crate::sys::rlimit::get(res)
 	}
 
+	fn dumps_core(&self, limit: Option<u64>) -> bool {
+		crate::sys::rlimit::dumps_core(limit)
+	}
+
 	#[cfg(unix)]
 	fn cpu_times(&self) -> io::Result<crate::bash::CpuTimes> {
 		let usage = |who| {

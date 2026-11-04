@@ -103,7 +103,7 @@ fn print_job(ctx: &mut Ctx<'_, '_>, number: u32, form: Form, show: &Show<'_>) {
 	}
 	if form == Form::Pids {
 		// bash `JLIST_PID_ONLY`: the process group leader, the first stage.
-		let pid = job.stages.as_deref().and_then(|s| s.first()).map_or(job.pid(), |s| s.vpid.0);
+		let pid = job.stages.as_deref().and_then(|s| s.first()).map_or(job.pid(), |s| s.pid());
 		let line = format!("{pid}\n");
 		ctx.out(line.as_bytes());
 		return;

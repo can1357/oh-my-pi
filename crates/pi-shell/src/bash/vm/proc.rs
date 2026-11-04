@@ -677,6 +677,11 @@ pub struct Bang {
 	pub job:   Vpid,
 	/// What may still give the job its program.
 	pub stage: BangStage,
+	/// The pid the job is known by when the deciding vproc spawns no
+	/// program: a background pipeline's last stage's virtual pid (bash's
+	/// `$!` names that stage); `None`: the job's own.
+	#[serde(default)]
+	pub virtual_pid: Option<u32>,
 }
 
 /// The redirections of a background job's lone command whose open would

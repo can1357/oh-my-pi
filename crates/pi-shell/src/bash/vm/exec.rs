@@ -1616,11 +1616,17 @@ pub fn start_sub(
 	// bash parses a `$( )` (not a `` ` ` ``) from its text when it runs it:
 	// reading that text reports the jobs a signal ended, as reading a line
 	// does.
-	if text.is_some() {
+	if let Some(t) = text {
 		if k.needs_settle(vp) {
 			return Flow::Block(WaitKey::Settle);
 		}
-		notify::notify(k, cx, vp, None, line);
+		// bash's line count then: the command's line, plus the lines its
+		// text spans and the newline its parse reads after it (not in an
+		// `eval`'d string).
+		let spans = unit.strs.get(t as usize).map_or(0, |s| s.iter().filter(|&&b| b == b'\n').count());
+		let eval = matches!(vp.frames.last().map(|f| &f.kind), Some(FrameKind::Script { what: ScriptKind::Eval, .. }));
+		let at = line + u32::try_from(spans).unwrap_or(0) + u32::from(!eval);
+		notify::notify(k, cx, vp, None, at);
 	}
 	let first = unit
 		.ops
@@ -1927,8 +1933,10 @@ pub fn start_procsub(
 ) -> BString {
 	// bash parses a process substitution's text when it runs it, which
 	// reports the jobs a signal ended, as reading a line does.
+	// bash's line count then: the command's line and the newline its parse
+	// reads after the text.
 	let line = line_of(vp, unit.ops.get(entry as usize).map_or(0, |op| op.node));
-	notify::notify(k, cx, vp, None, line);
+	notify::notify(k, cx, vp, None, line + 1);
 	let (r, w) = mem::pipe();
 	let r = FdRef::mem(r);
 	let w = FdRef::mem(w);
@@ -3124,7 +3132,7 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					// spawns it (bash's subshell `exec`s a lone simple command):
 					// readers of the pid wait for that decision.
 					if let Some(stage) = bang_stage(unit, info.stages[0].entry) {
-						k.bangs.push(Bang { vproc: vpid, job: vpid, stage });
+						k.bangs.push(Bang { vproc: vpid, job: vpid, stage, virtual_pid: None });
 					}
 					let job = k.job_id(cx.store);
 					// zsh `&|` / `&!`: disowned at once (no job entry).
@@ -3168,6 +3176,7 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 								.enumerate()
 								.map(|(i, &vpid)| JobStage {
 									vpid,
+									os_pid: None,
 									text: stage_job_text(k, cx, vp, unit, info, i),
 									status: None,
 									death: None,
@@ -3232,6 +3241,7 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 						.enumerate()
 						.map(|(i, &vpid)| JobStage {
 							vpid,
+							os_pid: None,
 							text: stage_job_text(k, cx, vp, unit, info, i),
 							status: None,
 							death: None,
@@ -3239,7 +3249,23 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 						.collect();
 					k.job_stages.push((vp.vpid, stages));
 					k.pipeline_jobs.insert(vp.vpid);
-					k.settle_bang(vp.vpid, Some(last.0));
+					// Each stage that runs one command bash would `exec` is known
+					// by that program's pid; `$!` waits for the last one's.
+					for (i, &child) in children.iter().enumerate() {
+						if lone_stage(unit, info.stages[i].entry) {
+							k.stage_vprocs.insert(child);
+						}
+					}
+					let last_lone = lone_stage(unit, info.stages[n - 1].entry);
+					match k.bangs.iter_mut().find(|b| b.vproc == vp.vpid) {
+						Some(bang) if last_lone => {
+							bang.vproc = last;
+							bang.stage = BangStage::Lone;
+							bang.virtual_pid = Some(last.0);
+							k.stage_vprocs.remove(&last);
+						},
+						_ => k.settle_bang(vp.vpid, Some(last.0)),
+					}
 				}
 			},
 		}
@@ -3345,10 +3371,17 @@ fn finish_lastpipe_job(
 	let Some(stages) = job.stages.as_mut() else {
 		return;
 	};
-	stages.push(JobStage { vpid: shell, text, status: Some(last), death: None });
+	stages.push(JobStage { vpid: shell, os_pid: None, text, status: Some(last), death: None });
 	job.death = stages.get(raw).and_then(|s| s.death);
 	job.state = super::proc::JobState::Done(status);
 	job.notified = false;
+}
+
+/// A pipeline stage whose body is one simple command (its `SubExit`
+/// follows): bash runs it in the stage's own process.
+fn lone_stage(unit: &Unit, entry: u32) -> bool {
+	let code = |at: u32| unit.ops.get(at as usize).map(|op| op.code);
+	code(entry) == Some(Opcode::Exec) && code(entry + 1) == Some(Opcode::SubExit)
 }
 
 /// The end of the wait for a foreground subshell or pipeline (bash
@@ -3410,7 +3443,13 @@ fn report_children(
 			.iter()
 			.zip(deaths)
 			.zip(&texts)
-			.map(|((&(v, status), &death), text)| JobStage { vpid: v, text: text.clone(), status: Some(status), death })
+			.map(|((&(v, status), &death), text)| JobStage {
+				vpid: v,
+				os_pid: None,
+				text: text.clone(),
+				status: Some(status),
+				death,
+			})
 			.collect();
 		let status = children.get(raw).map_or(0, |&(_, s)| s);
 		if let Some(job) = vp.jobs.get_mut(number) {

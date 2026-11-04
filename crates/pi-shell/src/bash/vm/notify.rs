@@ -197,7 +197,7 @@ pub fn job_procs(job: &Job) -> Vec<ProcLine<'_>> {
 		Some(stages) if !stages.is_empty() => stages
 			.iter()
 			.map(|s| ProcLine {
-				pid:    s.vpid.0,
+				pid:    s.pid(),
 				text:   &s.text,
 				status: match (s.status, s.death) {
 					(None, _) => ProcStatus::Running,

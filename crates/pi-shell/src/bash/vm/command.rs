@@ -416,7 +416,8 @@ fn expand(
 		if k.needs_settle(vp) {
 			return Some(Flow::Block(WaitKey::Settle));
 		}
-		notify::notify(k, cx, vp, None, line);
+		// bash parses the text as a string of its own: its line 1.
+		notify::notify(k, cx, vp, None, 1);
 	}
 	if !st(vp).expanded && unit.lists[cmd.words as usize].is_empty() {
 		st(vp).expanded = true;
@@ -1935,6 +1936,11 @@ fn spawned_external(
 			// through).
 			if !k.bangs.is_empty() {
 				k.settle_bang(vp.vpid, Some(pid));
+			}
+			// A background pipeline's stage that runs its program as the one
+			// bash would have `exec`'d: the stage is known by its pid.
+			if k.stage_vprocs.remove(&vp.vpid) && stands_for_vproc(k, cx, vp, op) {
+				k.stage_pids.push((vp.vpid, pid));
 			}
 			scratch(vp).live = Live::Ext(child);
 			let s = st(vp);

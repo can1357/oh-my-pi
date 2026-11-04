@@ -453,6 +453,13 @@ pub struct Kernel {
 	/// children: bash starts such a job with `SIGINT` and `SIGQUIT` ignored
 	/// (`setup_async_signals`); a trap with an action set in it still runs.
 	pub async_ignore:    std::collections::HashSet<Vpid>,
+	/// Stage vprocs of background pipeline jobs that spawned the program
+	/// they stand for, with its OS pid: written into the jobs' stage
+	/// records ([`Shell::apply_settled`]).
+	pub stage_pids:      Vec<(Vpid, u32)>,
+	/// Stage vprocs of background pipeline jobs whose lone command may
+	/// spawn the program they stand for ([`Self::stage_pids`]).
+	pub stage_vprocs:    std::collections::HashSet<Vpid>,
 	/// Background jobs whose pid is still to be settled
 	/// ([`proc::Bang`]): imaged (a restored job still decides).
 	pub bangs:           Vec<proc::Bang>,
@@ -529,6 +536,8 @@ impl Kernel {
 			job_stages: Vec::new(),
 			pipeline_jobs: std::collections::HashSet::new(),
 			async_ignore: std::collections::HashSet::new(),
+			stage_pids: Vec::new(),
+			stage_vprocs: std::collections::HashSet::new(),
 			reported_signal: None,
 			bangs: Vec::new(),
 			settled: Vec::new(),
@@ -562,8 +571,12 @@ impl Kernel {
 			return;
 		};
 		let bang = self.bangs.swap_remove(i);
-		if let Some(pid) = os {
+		if let Some(pid) = os.or(bang.virtual_pid) {
 			self.settled.push((bang.job, pid));
+		}
+		// A background pipeline's stage is known by its program's pid.
+		if let (Some(pid), true) = (os, bang.virtual_pid.is_some()) {
+			self.stage_pids.push((vproc, pid));
 		}
 		self.ctl.notify();
 	}
@@ -1679,6 +1692,7 @@ impl Shell {
 				let death = self.k.deaths.remove(&p.vpid);
 				self.k.pipeline_jobs.remove(&p.vpid);
 				self.k.async_ignore.remove(&p.vpid);
+				self.k.stage_vprocs.remove(&p.vpid);
 				self.k.proc_exited(cx.store, p.vpid, p.parent, p.status, death);
 				self.k.ctl.notify();
 				self.rr = 0;
@@ -1698,6 +1712,15 @@ impl Shell {
 			for p in &mut self.procs {
 				if let Some(entry) = p.jobs.by_vpid_mut(job) {
 					entry.stages = Some(Box::new(stages.clone()));
+				}
+			}
+		}
+		for (stage, pid) in std::mem::take(&mut self.k.stage_pids) {
+			for p in &mut self.procs {
+				for job in &mut p.jobs.list {
+					if let Some(s) = job.stages.as_mut().and_then(|s| s.iter_mut().find(|s| s.vpid == stage)) {
+						s.os_pid = Some(pid);
+					}
 				}
 			}
 		}
@@ -2026,6 +2049,7 @@ impl Shell {
 			let death = self.k.deaths.remove(&p.vpid);
 			self.k.pipeline_jobs.remove(&p.vpid);
 			self.k.async_ignore.remove(&p.vpid);
+			self.k.stage_vprocs.remove(&p.vpid);
 			self.k.proc_exited(cx.store, p.vpid, p.parent, status, death);
 			self.rr = 0;
 			self.reaped(cx, p.parent, p.vpid, status, death);
@@ -2214,7 +2238,17 @@ impl Shell {
 			}
 			match sig.default_action() {
 				DefaultAction::Terminate => {
-					let death = Death { signal: sig.number(platform), core: false };
+					// A process with a core file size limit the host dumps
+					// core for (`ulimit -c`) would write one.
+					let core = sig.dumps_core() && {
+						let p = &self.procs[i];
+						let limit = match p.rlimits.iter().find(|(r, ..)| *r == crate::bash::Rlimit::Core) {
+							Some(&(_, soft, _)) => Ok(soft),
+							None => cx.host.rlimit(crate::bash::Rlimit::Core).map(|(soft, _)| soft),
+						};
+						limit.is_ok_and(|limit| cx.host.dumps_core(limit))
+					};
+					let death = Death { signal: sig.number(platform), core };
 					self.kill(cx, i, sig, sig.exit_status(platform), Some(death));
 				},
 				DefaultAction::Stop | DefaultAction::Continue => {

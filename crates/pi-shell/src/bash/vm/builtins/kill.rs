@@ -172,7 +172,7 @@ fn target(ctx: &mut Ctx<'_, '_>, arg: &[u8], send: Send) -> Result<Option<SigTar
 			.filter(|j| !matches!(j.state, JobState::Done(_)))
 			.filter_map(|j| j.stages.as_deref())
 			.flatten()
-			.find(|s| s.vpid.0 == p)
+			.find(|s| s.pid() == p)
 	{
 		return match stage.status {
 			Some(_) => Err(TargetError::NoSuchProcess),

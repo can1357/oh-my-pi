@@ -303,6 +303,21 @@ impl Signal {
 		128 + self.number(platform) as i32
 	}
 
+	/// Whether the signal's default action also writes a core dump (POSIX
+	/// "A" actions: `SIGQUIT`, `SIGILL`, `SIGTRAP`, `SIGABRT`, `SIGBUS`,
+	/// `SIGFPE`, `SIGSEGV`, `SIGSYS`, `SIGXCPU`, `SIGXFSZ`, and `SIGEMT`).
+	pub const fn dumps_core(self) -> bool {
+		matches!(
+			self,
+			Self::Quit
+				| Self::Ill | Self::Trap
+				| Self::Abrt | Self::Bus
+				| Self::Fpe | Self::Segv
+				| Self::Sys | Self::Xcpu
+				| Self::Xfsz | Self::Emt
+		)
+	}
+
 	/// What happens when the signal is neither trapped nor ignored.
 	pub const fn default_action(self) -> DefaultAction {
 		match self {

@@ -579,14 +579,26 @@ impl Job {
 /// One process of a background pipeline job ([`Job::stages`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobStage {
-	/// Its virtual process, whose number is its pid.
+	/// Its virtual process, whose number is its pid until it runs a
+	/// program as the stage's process ([`Self::os_pid`]).
 	pub vpid:   Vpid,
+	/// The OS pid of the program the stage runs as its process (bash would
+	/// have `exec`'d it), once spawned.
+	#[serde(default)]
+	pub os_pid: Option<u32>,
 	/// Its command as bash prints it.
 	pub text:   BString,
 	/// Its exit status once it ended.
 	pub status: Option<i32>,
 	/// The signal that ended it, if one did.
 	pub death:  Option<Death>,
+}
+
+impl JobStage {
+	/// The pid bash knows the stage by.
+	pub fn pid(&self) -> u32 {
+		self.os_pid.unwrap_or(self.vpid.0)
+	}
 }
 
 /// How a process a signal ended died (bash `WTERMSIG`, `WCOREDUMP`).

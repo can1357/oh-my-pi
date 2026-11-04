@@ -948,6 +948,11 @@ impl<'e, 'c> Expander<'e, 'c> {
 				let path = if let Some(Atom::Str(Some(p))) = self.replay() {
 					p
 				} else {
+					// Its start reports ended jobs: the children that ended
+					// first take note of it.
+					if self.k.needs_settle(self.vp) {
+						return Err(Stop::Wait(crate::bash::event::WaitKey::Settle));
+					}
 					let p = super::exec::start_procsub(self.k, self.vp, self.cx, unit, *entry, *output);
 					self.note(|| Atom::Str(Some(p.clone())));
 					p

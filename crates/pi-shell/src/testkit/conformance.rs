@@ -301,6 +301,7 @@ fn samples() -> Vec<(KeyBuf, Record)> {
 				death:     Some(Death { signal: 9, core: false }),
 				stages:    Some(Box::new(vec![JobStage {
 					vpid:   Vpid(Vpid::BASE + 3),
+					os_pid: Some(4343),
 					text:   bytes(b"sleep 1"),
 					status: Some(137),
 					death:  Some(Death { signal: 9, core: false }),

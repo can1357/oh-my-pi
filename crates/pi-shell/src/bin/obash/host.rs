@@ -349,6 +349,10 @@ impl pi_shell::bash::Host for NativeHost {
 		pi_shell::sys::rlimit::get(res)
 	}
 
+	fn dumps_core(&self, limit: Option<u64>) -> bool {
+		pi_shell::sys::rlimit::dumps_core(limit)
+	}
+
 	#[cfg(unix)]
 	fn cpu_times(&self) -> io::Result<CpuTimes> {
 		let usage = |who| {
