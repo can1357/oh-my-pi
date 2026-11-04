@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import {
 	captureRequestHolds,
 	completeSimple,
@@ -16,6 +17,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { CodexLiveTransport } from "@oh-my-pi/pi-coding-agent/live/transport";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -942,7 +944,10 @@ describe("a host function the session, its manager or its runner keeps runs as t
 			"todo.enabled": false,
 		});
 
-	/** Holds `agent`'s requests until `letGo`; `reached` settles once a request asks the hold. */
+	/** Marks the model requests a host function starts (see {@link requestFrom}), so a hold tells them from the agent's own. */
+	const hostRequests = new AsyncLocalStorage<true>();
+
+	/** Holds `agent`'s requests until `letGo`; `reached` settles once a host function's request asks the hold. */
 	function holdUntilLetGo(agent: Agent): { reached: Promise<void>; letGo: () => void } {
 		const reached = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
@@ -950,7 +955,8 @@ describe("a host function the session, its manager or its runner keeps runs as t
 		agent.addHold(() => ({
 			pending: () => {
 				if (!held) return undefined;
-				reached.resolve();
+				// The hold is asked in the asking request's context; the agent's own turn asks it too.
+				if (hostRequests.getStore()) reached.resolve();
 				return release.promise;
 			},
 		}));
@@ -963,10 +969,12 @@ describe("a host function the session, its manager or its runner keeps runs as t
 	}
 
 	function requestFrom(model: Model): Promise<unknown> {
-		return completeSimple(
-			model,
-			{ messages: [{ role: "user", content: "from a host function", timestamp: 0 }] },
-			{ apiKey: "k" },
+		return hostRequests.run(true, () =>
+			completeSimple(
+				model,
+				{ messages: [{ role: "user", content: "from a host function", timestamp: 0 }] },
+				{ apiKey: "k" },
+			),
 		);
 	}
 
@@ -994,8 +1002,11 @@ describe("a host function the session, its manager or its runner keeps runs as t
 		callback: () => void;
 	}
 
-	/** A session over a file-backed manager whose extension's `user_bash` hook throws, held by one hold. */
-	async function hostFunctionSession(temp: TempDir) {
+	/**
+	 * A session over a file-backed manager whose extension's `user_bash` hook throws, held by one hold.
+	 * `streamFn` serves the agent's own turns instead of the local endpoint.
+	 */
+	async function hostFunctionSession(temp: TempDir, streamFn?: StreamFn) {
 		const server = localModelServer();
 		cleanups.push(server.stop);
 		const auth = await AuthStorage.create(":memory:");
@@ -1028,6 +1039,7 @@ describe("a host function the session, its manager or its runner keeps runs as t
 		const agent = new Agent({
 			initialState: { model: server.model, systemPrompt: ["test"], messages: [], tools: [] },
 			getApiKey: () => "k",
+			streamFn,
 		});
 		const session = new AgentSession({
 			agent,
@@ -1153,6 +1165,89 @@ describe("a host function the session, its manager or its runner keeps runs as t
 				session.yieldQueue.hasDeliverable("probe");
 			},
 		],
+		// A getter of a host's object runs host code when it is read, not only when what it returns is called.
+		[
+			"a yield dispatcher's member getter (`isStale`), read when the host registers the dispatcher",
+			async ({ session, callback }) => {
+				session.yieldQueue.register<string>("probe", {
+					get isStale() {
+						callback();
+						return undefined;
+					},
+					build: () => null,
+				});
+			},
+		],
+		[
+			"the manager's entry tap as a getter (`onEntryAppended`), read when the host appends to the manager",
+			async ({ manager, callback }) => {
+				Object.defineProperty(manager, "onEntryAppended", {
+					configurable: true,
+					get: () => {
+						callback();
+						return undefined;
+					},
+				});
+				manager.appendCustomEntry("probe", {});
+			},
+		],
+		[
+			"a caller's frame-resolution option as a getter (`buildSessionContext`), read when the host builds the context",
+			async ({ manager, callback }) => {
+				manager.buildSessionContext({
+					get resolveFrameData() {
+						callback();
+						return undefined;
+					},
+				});
+			},
+		],
+		[
+			"a proxy's `has` trap on the prototype chain of a host's UI, an extension's `in` check from outside any session work",
+			async ({ runner, callback }) => {
+				const ui: ExtensionUIContext = Object.create(
+					new Proxy(
+						{},
+						{
+							has: (target, key) => {
+								callback();
+								return Reflect.has(target, key);
+							},
+						},
+					),
+				);
+				runner.initialize(
+					{
+						sendMessage: () => {},
+						sendUserMessage: () => {},
+						appendEntry: () => {},
+						setLabel: () => {},
+						getActiveTools: () => [],
+						getAllTools: () => [],
+						setActiveTools: async () => {},
+						getCommands: () => [],
+						setModel: async () => false,
+						getThinkingLevel: () => undefined,
+						setThinkingLevel: () => {},
+						getSessionName: () => undefined,
+						setSessionName: async () => {},
+					},
+					{
+						getModel: () => undefined,
+						isIdle: () => true,
+						abort: () => {},
+						hasPendingMessages: () => false,
+						shutdown: () => {},
+						getContextUsage: () => undefined,
+						compact: async () => {},
+						getSystemPrompt: () => [],
+					},
+					undefined,
+					ui,
+				);
+				expect("probe" in runner.createContext().ui).toBe(false);
+			},
+		],
 		[
 			// A real timer, awaited by its firing: a fake clock would fire it in the advancer's context.
 			"a runner-managed timer (`ctx.setTimeout`), scheduled from outside any session work",
@@ -1187,15 +1282,52 @@ describe("a host function the session, its manager or its runner keeps runs as t
 		}, 60_000);
 	}
 
-	it("runs a manager's host functions as the work of every live session over it", async () => {
-		const temp = tempDir("@gate-manager-owners-");
+	// A message queued on an idle session starts the agent's own turn, which `streamFn` serves.
+	const queuedMessages: Array<[string, (session: AgentSession, callback: () => void) => Promise<unknown>]> = [
+		[
+			"steer",
+			(session, callback) =>
+				session.steer("probe", undefined, {
+					get onPromptQueued() {
+						callback();
+						return undefined;
+					},
+				}),
+		],
+		[
+			"followUp",
+			(session, callback) =>
+				session.followUp("probe", undefined, {
+					get onPromptQueued() {
+						callback();
+						return undefined;
+					},
+				}),
+		],
+	];
+	for (const [method, queue] of queuedMessages) {
+		it(`holds the model request of a \`${method}\` option's getter (\`onPromptQueued\`), read when the host queues the message`, async () => {
+			const mock = createMockModel({ responses: [{ content: ["done"] }] });
+			const { parts, server, hold, work } = await hostFunctionSession(tempDir("@gate-queued-option-"), mock.stream);
+			await queue(parts.session, parts.callback);
+			await expectHeldThenSentOnce(server, hold, work());
+		}, 60_000);
+	}
+
+	interface HeldSession {
+		session: AgentSession;
+		hold: { reached: Promise<void>; letGo: () => void };
+	}
+
+	/** One in-memory manager, and `build` for a session over it held by a hold of its own. */
+	async function sharedManager(temp: TempDir) {
 		const server = localModelServer();
 		cleanups.push(server.stop);
 		const auth = await AuthStorage.create(":memory:");
 		cleanups.push(() => auth.close());
 		const registry = new ModelRegistry(auth, path.join(temp.path(), "models.yml"));
 		const manager = SessionManager.inMemory(temp.path());
-		const build = () => {
+		const build = (): HeldSession => {
 			const agent = new Agent({
 				initialState: { model: server.model, systemPrompt: ["test"], messages: [], tools: [] },
 				getApiKey: () => "k",
@@ -1209,6 +1341,11 @@ describe("a host function the session, its manager or its runner keeps runs as t
 			cleanups.push(() => session.dispose());
 			return { session, hold: holdUntilLetGo(agent) };
 		};
+		return { server, manager, build };
+	}
+
+	it("runs a manager's host functions as the work of every live session over it", async () => {
+		const { server, manager, build } = await sharedManager(tempDir("@gate-manager-owners-"));
 		const first = build();
 		const second = build();
 		let work: Promise<unknown> | undefined;
@@ -1225,6 +1362,65 @@ describe("a host function the session, its manager or its runner keeps runs as t
 		// The first session's hold lets go; the second's still holds.
 		first.hold.letGo();
 		await expectHeldThenSentOnce(server, second.hold, work);
+	}, 60_000);
+
+	it("holds a manager listener's request by a session that an earlier listener of the same fan-out built", async () => {
+		const { server, manager, build } = await sharedManager(tempDir("@gate-manager-join-"));
+		const first = build();
+		first.hold.letGo();
+		let joined: HeldSession | undefined;
+		let work: Promise<unknown> | undefined;
+		manager.onSessionNameChanged(() => {
+			joined ??= build();
+		});
+		manager.onSessionNameChanged(() => {
+			work ??= requestFrom(server.model);
+		});
+		await first.session.setSessionName("first");
+		if (!joined) throw new Error("The joining listener was never called");
+		await expectHeldThenSentOnce(server, joined.hold, work);
+	}, 60_000);
+
+	it("drops a session an earlier listener of the same fan-out disposed from the holds of a manager listener's request", async () => {
+		const { server, manager, build } = await sharedManager(tempDir("@gate-manager-leave-"));
+		const leaving = build();
+		const staying = build();
+		let work: Promise<unknown> | undefined;
+		manager.onSessionNameChanged(() => leaving.session.beginDispose());
+		manager.onSessionNameChanged(() => {
+			work ??= requestFrom(server.model);
+		});
+		await staying.session.setSessionName("staying");
+		if (!work) throw new Error("The rename listener was never called");
+		await Promise.race([staying.hold.reached, leaving.hold.reached, server.arrived]);
+		await eventLoopTurns();
+		expect(server.requests).toEqual([]);
+		// The disposed session's hold still holds, but no longer the manager's work: the request goes
+		// once the live session's hold lets go, rather than waiting on the disposed one's.
+		staying.hold.letGo();
+		await Promise.race([work, leaving.hold.reached]);
+		expect(server.requests).toEqual(["POST /v1/chat/completions"]);
+	}, 60_000);
+
+	it("wakes a manager listener's request a session's hold holds once that session is disposed", async () => {
+		const { server, manager, build } = await sharedManager(tempDir("@gate-manager-wake-"));
+		const leaving = build();
+		const staying = build();
+		staying.hold.letGo();
+		let work: Promise<unknown> | undefined;
+		manager.onSessionNameChanged(() => {
+			work ??= requestFrom(server.model);
+		});
+		await staying.session.setSessionName("staying");
+		if (!work) throw new Error("The rename listener was never called");
+		await Promise.race([leaving.hold.reached, server.arrived]);
+		await eventLoopTurns();
+		expect(server.requests).toEqual([]);
+		// Its hold never lets go: disposing the session takes it out of the manager's holds, and the
+		// request waiting on it goes.
+		leaving.session.beginDispose();
+		await work;
+		expect(server.requests).toEqual(["POST /v1/chat/completions"]);
 	}, 60_000);
 
 	it("holds a model request a host's config getter starts — own or inherited — while the session is built", async () => {

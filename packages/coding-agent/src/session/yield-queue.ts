@@ -1,5 +1,6 @@
 import { type AgentMessage, ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-core";
 import { logger, toError } from "@oh-my-pi/pi-utils";
+import { methodsAsSessionWork } from "./session-work";
 
 export interface YieldDispatcher<P> {
 	/** Drop entries already delivered through another path. Called per-entry at flush time. */
@@ -16,9 +17,10 @@ export interface YieldQueueOptions {
 	injectIdle(messages: AgentMessage[]): Promise<void>;
 	scheduleIdleFlush(run: () => Promise<void>): void;
 	/**
-	 * Runs each call of a registered dispatcher's functions, which a host may supply (see
-	 * {@link YieldQueue.register}): the owning session runs them as its work. Absent, they are
-	 * called as they are.
+	 * Runs each call of the queue's methods, and each later call of a registered dispatcher's
+	 * functions, which a host may supply (see {@link YieldQueue.register}): the owning session runs
+	 * them as its work, so reading a dispatcher's members and calling them both do. Absent, they run
+	 * as they are.
 	 */
 	runDispatcher?: <T>(call: () => T) => T;
 }
@@ -47,6 +49,13 @@ function formatError(error: unknown): string {
 }
 
 export class YieldQueue {
+	// Every method is the owning session's work (see `YieldQueueOptions.runDispatcher`): registering a
+	// host's dispatcher reads its members there (see `methodsAsSessionWork`).
+	static {
+		methodsAsSessionWork(YieldQueue.prototype, queue =>
+			#options in queue ? queue.#options.runDispatcher : undefined,
+		);
+	}
 	readonly #options: YieldQueueOptions;
 	readonly #dispatchers = new Map<string, StoredDispatcher>();
 	readonly #entries = new Map<string, StoredEntry[]>();

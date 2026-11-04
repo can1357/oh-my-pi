@@ -489,7 +489,13 @@ import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
-import { asSessionWork, membersAsSessionWork, registerSessionWork, type SessionWorkRun } from "./session-work";
+import {
+	asSessionWork,
+	membersAsSessionWork,
+	methodsAsSessionWork,
+	registerSessionWork,
+	type SessionWorkRun,
+} from "./session-work";
 import {
 	artifactsMissingNotice,
 	noteResumedSessionFork,
@@ -996,6 +1002,14 @@ function todoRetryMatches(failed: Record<string, unknown>, retry: Record<string,
 }
 
 export class AgentSession implements SettingsScope {
+	// Every method and accessor is the session's work: whatever it reads or calls of a host's — an
+	// option's getter, a callback the host left on the session — runs in the agent's request context,
+	// whoever calls it (see `methodsAsSessionWork`). Not before the constructor has set the agent.
+	static {
+		methodsAsSessionWork(AgentSession.prototype, session =>
+			#runAsHostWork in session && session.agent ? session.#runAsHostWork : undefined,
+		);
+	}
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
@@ -1237,6 +1251,8 @@ export class AgentSession implements SettingsScope {
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
+	/** Takes this session out of the live sessions over its manager (see `SessionManager.addRequestContextOwner`). */
+	#leaveManager: (() => void) | undefined;
 	#modelDiscoveryAbortController = new AbortController();
 	/** Process-wide by default (double-spend safety across sessions); injectable for tests. */
 	#resetCoordinator: CodexAutoRedeemCoordinator;
@@ -3177,9 +3193,10 @@ export class AgentSession implements SettingsScope {
 	 * Makes every extension callback, and every host callback the runner or the manager keeps, this
 	 * session's work, whichever path calls it. A runner answers to one live session: a second live
 	 * session would put the first one's extension work outside the first one's holds. A manager
-	 * answers to every live session over it. The claims are released when the returned guard is
-	 * disposed without {@link keep} — a constructor that threw — and the half-built session counts
-	 * as disposed, so whatever it left registered on shared objects goes inert.
+	 * answers to every live session over it, until the session begins its disposal. The claims are
+	 * released when the returned guard is disposed without {@link keep} — a constructor that threw —
+	 * and the half-built session counts as disposed, so whatever it left registered on shared
+	 * objects goes inert.
 	 */
 	#claimRequestContexts(runner: ExtensionRunner | undefined): Disposable & { keep(): void } {
 		if (runner) {
@@ -3190,7 +3207,7 @@ export class AgentSession implements SettingsScope {
 			runner.requestContextOwner = this;
 			runner.runInRequestContext = fn => this.#inLogContext(fn);
 		}
-		const leaveManager = this.sessionManager.addRequestContextOwner(this, this.#runAsHostWork);
+		this.#leaveManager = this.sessionManager.addRequestContextOwner(this.#runAsHostWork);
 		registerSessionWork(this, fn => this.#inLogContext(fn));
 		let kept = false;
 		return {
@@ -3200,7 +3217,7 @@ export class AgentSession implements SettingsScope {
 			[Symbol.dispose]: () => {
 				if (kept) return;
 				this.#isDisposed = true;
-				leaveManager();
+				this.#leaveManager?.();
 				if (runner?.requestContextOwner === this) {
 					runner.requestContextOwner = undefined;
 					runner.runInRequestContext = undefined;
@@ -6628,6 +6645,9 @@ export class AgentSession implements SettingsScope {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		// The manager's host functions stop being this session's work; a request of theirs that waits
+		// only on this session's holds goes on.
+		this.#leaveManager?.();
 		// Teardown is the session's work: a final request a disposer starts (a
 		// memory flush, say) waits for the holds still registered.
 		this.#inLogContext(() => {
@@ -9726,7 +9746,7 @@ export class AgentSession implements SettingsScope {
 			timestamp: submittedAt,
 			attribution: options?.attribution,
 			rawText: text,
-			onPromptQueued: options?.onPromptQueued && this.#asWork(options.onPromptQueued),
+			onPromptQueued: options?.onPromptQueued,
 		});
 	}
 
@@ -9747,7 +9767,7 @@ export class AgentSession implements SettingsScope {
 		// Stamp before image preprocessing so a queued image follow-up measures
 		// from the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
-		const onPromptQueued = options?.onPromptQueued && this.#asWork(options.onPromptQueued);
+		const onPromptQueued = options?.onPromptQueued;
 		if (!options?.synthetic) {
 			await this.#queueUserMessage(expandedText, images, "followUp", {
 				timestamp: submittedAt,

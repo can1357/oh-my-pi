@@ -37,7 +37,12 @@ import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
-import { asSessionWork, membersAsSessionWork, type SessionWorkRun } from "../../session/session-work";
+import {
+	asSessionWork,
+	membersAsSessionWork,
+	methodsAsSessionWork,
+	type SessionWorkRun,
+} from "../../session/session-work";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult, type SessionMovedEvent } from "../shared-events";
@@ -518,6 +523,14 @@ export const UNAVAILABLE_ANNOTATIONS: ExtensionAnnotationsAPI = Object.freeze({
 });
 
 export class ExtensionRunner {
+	// Every method and accessor is the owning session's work: whatever it reads or calls of a host's —
+	// an event's or option's getter, a listener, a preflight — runs in the session's request context,
+	// whoever calls it (see `methodsAsSessionWork`). Before a session owns the runner, they run as is.
+	static {
+		methodsAsSessionWork(ExtensionRunner.prototype, runner =>
+			#runAsSessionWork in runner ? runner.#runAsSessionWork : undefined,
+		);
+	}
 	#uiContext: ExtensionUIContext;
 	#mode: ExtensionMode = "print";
 	#toolApprovalPreviewWaiter?: (toolCallId: string) => Promise<void>;

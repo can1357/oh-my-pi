@@ -38,15 +38,52 @@ export function asSessionWork<F extends (...args: never[]) => unknown>(run: Sess
 }
 
 /**
- * Whether reading or writing `key` on `target` runs host code: the member is an accessor, own or
- * inherited, or a proxy (whose traps are host code) stands on the way to it. A data property found
- * on ordinary objects does not.
+ * Makes every method and accessor `prototype` defines run as its instance's session work, through
+ * `runOf(instance)` asked at each call (each read or write, for an accessor): whatever the member
+ * reads or calls of a host's — an option's getter, a callback field, a proxy's trap — runs in the
+ * session's request context, whoever calls the member and from wherever. A class does this once,
+ * in a `static` block, where `runOf` may read the instance's private fields. Where `runOf` answers
+ * `undefined` — an instance no session owns yet, a `this` that is no instance — the member runs as
+ * is. The constructor, and members a subclass defines or the class inherits, are left as they are.
+ * A member called from within the same session's work adds no async-context frame (see
+ * `runWithRequestHolds`).
  */
-function accessRunsHostCode(target: object, key: PropertyKey): boolean {
+export function methodsAsSessionWork(prototype: object, runOf: (instance: object) => SessionWorkRun | undefined): void {
+	const wrap = (member: Callable): Callable => {
+		const wrapper = function (this: unknown, ...args: unknown[]): unknown {
+			const run = typeof this === "object" && this !== null ? runOf(this) : undefined;
+			return run ? run(() => member.apply(this, args)) : member.apply(this, args);
+		};
+		// Stack traces keep naming the member.
+		Object.defineProperty(wrapper, "name", { value: member.name });
+		return wrapper;
+	};
+	for (const key of Reflect.ownKeys(prototype)) {
+		if (key === "constructor") continue;
+		const descriptor = Reflect.getOwnPropertyDescriptor(prototype, key);
+		if (!descriptor) continue;
+		if (typeof descriptor.value === "function") {
+			descriptor.value = wrap(descriptor.value as Callable);
+		} else if (descriptor.get || descriptor.set) {
+			if (descriptor.get) descriptor.get = wrap(descriptor.get);
+			if (descriptor.set) descriptor.set = wrap(descriptor.set as Callable);
+		} else {
+			continue;
+		}
+		Object.defineProperty(prototype, key, descriptor);
+	}
+}
+
+/**
+ * Whether looking `key` up on `target` runs host code: a proxy (whose traps are host code) stands on
+ * the way to it, or — with `accessorsRun`, for a read or a write but not an `in` — the member found
+ * is an accessor, own or inherited. A data property found on ordinary objects runs none.
+ */
+function lookupRunsHostCode(target: object, key: PropertyKey, accessorsRun: boolean): boolean {
 	for (let next: object | null = target; next; next = Reflect.getPrototypeOf(next)) {
 		if (types.isProxy(next)) return true;
 		const descriptor = Reflect.getOwnPropertyDescriptor(next, key);
-		if (descriptor) return !("value" in descriptor);
+		if (descriptor) return accessorsRun && !("value" in descriptor);
 	}
 	return false;
 }
@@ -56,10 +93,11 @@ function accessRunsHostCode(target: object, key: PropertyKey): boolean {
  * {@link asSessionWork}): own and inherited members, enumerable or not, read when they are read,
  * so a member the host replaces later is the one called. Reading or writing an accessor (a getter
  * or setter, own or inherited) runs as session work too, and so does every trap of a `target` that
- * is itself a proxy; a data property is read as is. Every other member, and every way of
- * inspecting the object (`in`, keys, descriptors, its prototype), passes through to `target`. A
- * member keeps one wrapper while its value is unchanged; called as a member of the result, it runs
- * on `target`, whose private fields the result lacks.
+ * is itself a proxy, and an `in` whose lookup passes a proxy on `target`'s prototype chain; a data
+ * property is read as is. Every other member, and every way of inspecting the object (`in`, keys,
+ * descriptors, its prototype), passes through to `target`. A member keeps one wrapper while its
+ * value is unchanged; called as a member of the result, it runs on `target`, whose private fields
+ * the result lacks.
  */
 export function membersAsSessionWork<T extends object>(run: SessionWorkRun, target: T): T {
 	const wrappers = new Map<PropertyKey, { value: Callable; wrapper: Callable }>();
@@ -68,7 +106,7 @@ export function membersAsSessionWork<T extends object>(run: SessionWorkRun, targ
 	const inspect = <R>(access: () => R): R => (hostTarget ? run(access) : access());
 	const read = (key: PropertyKey): unknown => {
 		const get = () => Reflect.get(target, key, target);
-		const value: unknown = accessRunsHostCode(target, key) ? run(get) : get();
+		const value: unknown = lookupRunsHostCode(target, key, true) ? run(get) : get();
 		if (typeof value !== "function") return value;
 		const cached = wrappers.get(key);
 		if (cached?.value === value) return cached.wrapper;
@@ -82,7 +120,7 @@ export function membersAsSessionWork<T extends object>(run: SessionWorkRun, targ
 	};
 	const write = (key: PropertyKey, value: unknown): boolean => {
 		const set = () => Reflect.set(target, key, value);
-		return accessRunsHostCode(target, key) ? run(set) : set();
+		return lookupRunsHostCode(target, key, true) ? run(set) : set();
 	};
 	// The proxy stands on an empty object rather than on `target`: a member `target` holds as
 	// non-configurable and read-only (a `defineProperty` without flags) may not read as anything
@@ -91,7 +129,10 @@ export function membersAsSessionWork<T extends object>(run: SessionWorkRun, targ
 	const proxy: T = new Proxy(stand, {
 		get: (_stand, key) => read(key),
 		set: (_stand, key, value) => write(key, value),
-		has: (_stand, key) => inspect(() => Reflect.has(target, key)),
+		has: (_stand, key) => {
+			const has = () => Reflect.has(target, key);
+			return lookupRunsHostCode(target, key, false) ? run(has) : has();
+		},
 		deleteProperty: (_stand, key) => inspect(() => Reflect.deleteProperty(target, key)),
 		ownKeys: () => inspect(() => Reflect.ownKeys(target)),
 		getOwnPropertyDescriptor(_stand, key) {
