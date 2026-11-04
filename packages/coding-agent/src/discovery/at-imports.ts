@@ -24,9 +24,8 @@
  *
  * @see https://docs.claude.com/en/docs/claude-code/memory#import-additional-files
  */
-import * as os from "node:os";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, getHomeDir } from "@oh-my-pi/pi-utils";
 import { readFile } from "../capability/fs";
 
 /** Maximum number of recursive `@`-import hops. Matches Claude Code's documented cap. */
@@ -54,7 +53,7 @@ const TRAILING_PUNCT = /[.,;:!?)\]}"']+$/;
 export interface ExpandAtImportsOptions {
 	/** Maximum hop depth (default: {@link MAX_AT_IMPORT_DEPTH}). */
 	maxDepth?: number;
-	/** Override the home directory used to resolve `~/...` (default: `os.homedir()`). */
+	/** Override the home directory used to resolve `~/...` (default: `getHomeDir()`). */
 	home?: string;
 }
 
@@ -70,7 +69,7 @@ export async function expandAtImports(
 	options: ExpandAtImportsOptions = {},
 ): Promise<string> {
 	const maxDepth = options.maxDepth ?? MAX_AT_IMPORT_DEPTH;
-	const home = options.home ?? os.homedir();
+	const home = options.home ?? getHomeDir();
 	const absoluteSource = path.resolve(filePath);
 	const visited = new Set<string>([absoluteSource]);
 	return await expand(content, path.dirname(absoluteSource), 0, maxDepth, home, visited);

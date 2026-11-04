@@ -1,7 +1,6 @@
-import * as os from "node:os";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getAgentDir, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isEnoent, logger, prompt, getHomeDir } from "@oh-my-pi/pi-utils";
 import { expandAtImports } from "../discovery/at-imports";
 import activeRepoWatchdogTemplate from "../prompts/advisor/active-repo-watchdog.md" with { type: "text" };
 import contextFilesTemplate from "../prompts/advisor/context-files.md" with { type: "text" };
@@ -68,7 +67,7 @@ export async function collectConfigCandidates(
 	agentDir: string | undefined,
 	filenames: string[],
 ): Promise<ConfigCandidate[]> {
-	const home = os.homedir();
+	const home = getHomeDir();
 	const resolvedAgentDir = agentDir ?? getAgentDir();
 	const userPaths = new Set<string>();
 	let repoRoot: string | null = null;

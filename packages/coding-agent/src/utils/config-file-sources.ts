@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import { getHomeDir } from "@oh-my-pi/pi-utils/path";
 import { getConfigDirPaths } from "../config";
 import { type ClaudePluginRoot, getPreloadedPluginRoots } from "../discovery/helpers";
 
@@ -64,7 +64,7 @@ export function configFileSources<T>(
 		if (extra) sources.push(extra);
 	}
 
-	addDir(os.homedir());
+	addDir(getHomeDir());
 
 	return sources;
 }

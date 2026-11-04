@@ -16,9 +16,8 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { $env, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $env, isEnoent, logger, getHomeDir } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
@@ -198,7 +197,7 @@ async function readProfileCredentials(
 	signal: AbortSignal | undefined,
 	fetchImpl: FetchImpl,
 ): Promise<ResolvedCredentials | undefined> {
-	const home = os.homedir();
+	const home = getHomeDir();
 	const credentialsPath = $env.AWS_SHARED_CREDENTIALS_FILE || path.join(home, ".aws", "credentials");
 	const configPath = $env.AWS_CONFIG_FILE || path.join(home, ".aws", "config");
 
@@ -513,7 +512,7 @@ async function loadSsoCachedToken(
 	startUrl: string,
 	sessionName: string | undefined,
 ): Promise<SsoCacheEntry | undefined> {
-	const cacheDir = path.join(os.homedir(), ".aws", "sso", "cache");
+	const cacheDir = path.join(getHomeDir(), ".aws", "sso", "cache");
 	let entries: string[];
 	try {
 		entries = await fs.promises.readdir(cacheDir);
@@ -621,7 +620,7 @@ async function refreshSsoToken(
  * ignored, since the in-memory token is still usable for this run.
  */
 async function writeSsoCachedToken(file: string, token: SsoCachedToken): Promise<void> {
-	const target = path.join(os.homedir(), ".aws", "sso", "cache", file);
+	const target = path.join(getHomeDir(), ".aws", "sso", "cache", file);
 	const tmp = `${target}.${process.pid}.tmp`;
 	try {
 		await fs.promises.writeFile(tmp, JSON.stringify(token), { mode: 0o600 });

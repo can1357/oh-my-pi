@@ -6,9 +6,8 @@
  * once per settings input change (memoized by the registry), never per call.
  */
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { $env, logger } from "@oh-my-pi/pi-utils";
+import { $env, logger, getHomeDir } from "@oh-my-pi/pi-utils";
 import { combine } from "../config/registry";
 import { cfgIdaEnabled, cfgIdaInstallDir } from "./settings";
 
@@ -24,8 +23,8 @@ function configuredInstallDirs(): string[] {
 	const userDirs = ($env.IDAUSR ?? "").split(path.delimiter).filter(Boolean);
 	userDirs.push(
 		process.platform === "win32"
-			? path.join($env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming"), "Hex-Rays", "IDA Pro")
-			: path.join(os.homedir(), ".idapro"),
+			? path.join($env.APPDATA ?? path.join(getHomeDir(), "AppData", "Roaming"), "Hex-Rays", "IDA Pro")
+			: path.join(getHomeDir(), ".idapro"),
 	);
 	const dirs: string[] = [];
 	for (const userDir of userDirs) {
@@ -62,12 +61,12 @@ function defaultInstallDirs(): string[] {
 		case "darwin":
 			return [
 				...childDirs("/Applications", "ida", "Contents/MacOS"),
-				...childDirs(path.join(os.homedir(), "Applications"), "ida", "Contents/MacOS"),
+				...childDirs(path.join(getHomeDir(), "Applications"), "ida", "Contents/MacOS"),
 			];
 		case "win32":
 			return childDirs($env.ProgramFiles ?? "C:\\Program Files", "ida");
 		default:
-			return [...childDirs(os.homedir(), "ida"), ...childDirs("/opt", "ida")];
+			return [...childDirs(getHomeDir(), "ida"), ...childDirs("/opt", "ida")];
 	}
 }
 

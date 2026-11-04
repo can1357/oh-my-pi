@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as net from "node:net";
-import * as os from "node:os";
 import * as path from "node:path";
+import { getHomeDir } from "@oh-my-pi/pi-utils/path";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
@@ -195,7 +195,7 @@ export class CmuxSocketClient {
 			return environmentCredentials;
 		}
 
-		const authPath = path.join(os.homedir(), ".cmux", "relay", `${endpoint.port}.auth`);
+		const authPath = path.join(getHomeDir(), ".cmux", "relay", `${endpoint.port}.auth`);
 		let payload: unknown;
 		try {
 			payload = await Bun.file(authPath).json();

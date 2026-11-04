@@ -1,5 +1,4 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import type {
 	AgentTool,
@@ -24,7 +23,7 @@ import {
 	type EditWriteRequest,
 	type EditWriteResponse,
 } from "@oh-my-pi/pi-natives";
-import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, prompt, getHomeDir } from "@oh-my-pi/pi-utils";
 import { extractUriScheme, InternalUrlRouter, type ResolveContext, sessionResolveContext } from "../internal-urls";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
 import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
@@ -668,7 +667,7 @@ export class EditTool implements AgentTool<TInput> {
 			urlSchemes: [...specs.keys()],
 			urlAliasSchemes,
 			planWritableRoots: router.sandboxRoots(context),
-			homeDir: os.homedir(),
+			homeDir: getHomeDir(),
 			rawInput,
 		};
 	}

@@ -5,9 +5,8 @@
  * for both the shared gateway and local kernel spawning.
  */
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { $env, $whichAll, getPythonEnvDir } from "@oh-my-pi/pi-utils";
+import { $env, $whichAll, getPythonEnvDir, getHomeDir } from "@oh-my-pi/pi-utils";
 
 const DEFAULT_ENV_ALLOWLIST = new Set([
 	"PATH",
@@ -207,9 +206,9 @@ export function resolveExplicitPythonRuntime(
 ): PythonRuntime {
 	const expanded =
 		interpreter === "~"
-			? os.homedir()
+			? getHomeDir()
 			: interpreter.startsWith("~/")
-				? path.join(os.homedir(), interpreter.slice(2))
+				? path.join(getHomeDir(), interpreter.slice(2))
 				: interpreter;
 	// Join (rather than resolve) onto an absolute cwd so the result stays anchored to
 	// exactly the cwd given — `path.resolve` would graft the process drive onto a

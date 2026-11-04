@@ -4,9 +4,8 @@
  * learning engine whose state starts empty, so a new install already knows the
  * user's vocabulary before omp has history of its own.
  */
-import * as os from "node:os";
 import * as path from "node:path";
-import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, getHomeDir } from "@oh-my-pi/pi-utils";
 import { resolveClaudePaths } from "../config/claude-paths";
 import { readForeignJsonRecords } from "../session/foreign-session-jsonl";
 
@@ -17,7 +16,7 @@ const PLACEHOLDER = /\[(?:Pasted text|Image) #\d+[^\]]*\]/g;
 export async function readForeignPrompts(): Promise<string[]> {
 	const files = [
 		path.join(resolveClaudePaths().configDir, "history.jsonl"),
-		path.join(os.homedir(), ".codex", "history.jsonl"),
+		path.join(getHomeDir(), ".codex", "history.jsonl"),
 	];
 	const prompts: string[] = [];
 	for (const file of files) {

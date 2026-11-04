@@ -1,6 +1,12 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import { directoryExists, getProjectDir, normalizePathForComparison, setProjectDir } from "@oh-my-pi/pi-utils";
+import {
+	directoryExists,
+	getProjectDir,
+	normalizePathForComparison,
+	setProjectDir,
+	getHomeDir,
+} from "@oh-my-pi/pi-utils";
 import type { Args } from "./args";
 
 async function maybeAutoChdir(parsed: Args): Promise<void> {
@@ -8,7 +14,7 @@ async function maybeAutoChdir(parsed: Args): Promise<void> {
 		return;
 	}
 
-	const home = os.homedir();
+	const home = getHomeDir();
 	if (!home) {
 		return;
 	}

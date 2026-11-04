@@ -23,9 +23,8 @@
 
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { getGithubCacheDbPath, logger } from "@oh-my-pi/pi-utils";
+import { getGithubCacheDbPath, logger, getHomeDir } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { defaultGhHost, parseRepoRef } from "./gh-common";
 import { cfgGithubCacheEnabled, cfgGithubCacheHardTtlSec, cfgGithubCacheSoftTtlSec } from "./settings";
@@ -199,7 +198,7 @@ function getGhConfigDir(): string {
 	if (override) return override;
 	const xdg = process.env.XDG_CONFIG_HOME;
 	if (xdg) return path.join(xdg, "gh");
-	return path.join(os.homedir(), ".config", "gh");
+	return path.join(getHomeDir(), ".config", "gh");
 }
 
 function hashCacheIdentity(parts: string[]): string {
@@ -214,7 +213,7 @@ function hashCacheIdentity(parts: string[]): string {
 export function getGlabConfigPath(): string {
 	const override = process.env.GLAB_CONFIG_DIR;
 	if (override) return path.join(override, "config.yml");
-	const home = os.homedir();
+	const home = getHomeDir();
 	const candidates = [path.join(home, ".config", "glab-cli", "config.yml")];
 	const xdg = process.env.XDG_CONFIG_HOME;
 	if (xdg) {

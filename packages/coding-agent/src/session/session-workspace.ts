@@ -1,5 +1,5 @@
-import * as os from "node:os";
 import * as path from "node:path";
+import { getHomeDir } from "@oh-my-pi/pi-utils/path";
 
 /**
  * Filesystem workspace of a session: one current/default directory plus a
@@ -24,9 +24,9 @@ export interface SessionWorkspace {
 export function normalizeWorkspaceDirectory(directory: string, base?: string): string {
 	let expanded = directory;
 	if (expanded === "~") {
-		expanded = os.homedir();
+		expanded = getHomeDir();
 	} else if (expanded.startsWith("~/") || expanded.startsWith(`~${path.sep}`)) {
-		expanded = path.join(os.homedir(), expanded.slice(2));
+		expanded = path.join(getHomeDir(), expanded.slice(2));
 	}
 	return base ? path.resolve(base, expanded) : path.resolve(expanded);
 }

@@ -5,12 +5,11 @@
  * tool renderers to ensure a unified TUI experience.
  */
 
-import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Ellipsis } from "@oh-my-pi/pi-natives";
 import { expandWindowsLongPath, getWindowsShortPath } from "@oh-my-pi/pi-natives/path";
-import { pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
+import { pluralize, sanitizeText, getHomeDir } from "@oh-my-pi/pi-utils";
 import { formatKeyHint, type KeyId } from "../app-keybindings";
 import { getKeybindings } from "../keybindings";
 import type { Theme, ThemeColor } from "../theme/theme";
@@ -911,18 +910,6 @@ export function truncateDiffByHunk(
 // Path Utilities
 // =============================================================================
 
-let cachedHomeDir: string | undefined;
-let cachedHomedir: typeof os.homedir | undefined;
-
-function defaultHomeDir(): string {
-	const homedir = os.homedir;
-	if (cachedHomeDir === undefined || cachedHomedir !== homedir) {
-		cachedHomedir = homedir;
-		cachedHomeDir = homedir();
-	}
-	return cachedHomeDir;
-}
-
 interface HomePattern {
 	leading: RegExp;
 	embedded: RegExp;
@@ -979,7 +966,7 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 	if (typeof filePath !== "string") {
 		return "";
 	}
-	const home = homeDir ?? defaultHomeDir();
+	const home = homeDir ?? getHomeDir();
 	if (!home) return filePath;
 	const windowsStyle = /^[A-Za-z]:[\\/]/.test(home) || home.startsWith("\\\\");
 	const match = homePatternFor(home, windowsStyle).leading.exec(filePath);
@@ -992,7 +979,7 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 
 /** Shorten embedded home paths; normalize Windows separators unless the caller preserves native error text. */
 export function shortenEmbeddedPaths(text: string, homeDir?: string, preserveSeparators = false): string {
-	const resolvedHome = homeDir ?? defaultHomeDir();
+	const resolvedHome = homeDir ?? getHomeDir();
 	if (!resolvedHome || resolvedHome.length <= 1) return text;
 	const windowsStyle = /^[A-Za-z]:[\\/]/.test(resolvedHome) || resolvedHome.startsWith("\\\\");
 	const homePattern = homePatternFor(resolvedHome, windowsStyle);

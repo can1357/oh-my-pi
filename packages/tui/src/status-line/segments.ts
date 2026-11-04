@@ -4,6 +4,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getTimeBasedPricingPeriod } from "@oh-my-pi/pi-catalog/models";
 import { sharedSpinnerFrame, TERMINAL } from "../index";
 import {
+	getHomeDir,
 	formatDuration,
 	formatNumber,
 	getActiveProfile,
@@ -135,7 +136,7 @@ function singleStatSegment(
 }
 
 const NORMALIZED_SCRATCH_ROOTS: readonly string[] = (() => {
-	const roots = new Set<string>([os.tmpdir(), path.join(os.homedir(), "tmp")]);
+	const roots = new Set<string>([os.tmpdir(), path.join(getHomeDir(), "tmp")]);
 	if (process.platform === "win32") {
 		const { TEMP, TMP, SystemRoot } = process.env;
 		if (TEMP) roots.add(TEMP);
@@ -171,7 +172,7 @@ function getProjectDirDisplay(projectDir: string): ProjectDirDisplay {
 	const cached = projectDirDisplay;
 	if (cached?.projectDir === projectDir) return cached;
 
-	const homeDir = os.homedir();
+	const homeDir = getHomeDir();
 	let displayRoots = cached?.homeDir === homeDir ? cached.displayRoots : undefined;
 	const normalizedProjectDir = normalizePathForComparison(projectDir);
 	let scratch = false;

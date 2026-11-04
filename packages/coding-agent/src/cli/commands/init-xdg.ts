@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
+import { getHomeDir } from "@oh-my-pi/pi-utils/path";
 
 const APP_NAME = "omp";
 
@@ -10,15 +10,15 @@ export async function initXdg(): Promise<void> {
 		process.exit(1);
 	}
 
-	const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local/share");
-	const stateHome = process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local/state");
-	const cacheHome = process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache");
+	const dataHome = process.env.XDG_DATA_HOME || path.join(getHomeDir(), ".local/share");
+	const stateHome = process.env.XDG_STATE_HOME || path.join(getHomeDir(), ".local/state");
+	const cacheHome = process.env.XDG_CACHE_HOME || path.join(getHomeDir(), ".cache");
 
 	const dirs = [path.join(dataHome, APP_NAME), path.join(stateHome, APP_NAME), path.join(cacheHome, APP_NAME)];
 
 	for (const dir of dirs) {
 		await fs.mkdir(dir, { recursive: true });
-		console.log(`Created ${dir.replace(os.homedir(), "~")}`);
+		console.log(`Created ${dir.replace(getHomeDir(), "~")}`);
 	}
 
 	console.log("\nXDG directories initialized.");
