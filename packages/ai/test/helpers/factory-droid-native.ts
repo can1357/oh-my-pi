@@ -56,6 +56,10 @@ export const NATIVE_CASES: readonly NativeCase[] = [
 	{ model: "minimax-m3", upstream: "fireworks", effort: "high" },
 	{ model: "qwen3.8-max", upstream: "fireworks", effort: "xhigh" },
 	{ model: "inkling", upstream: "fireworks", effort: "medium" },
+	{ model: "nemotron-3.5-super", upstream: "baseten", effort: "high", flag: "nemotron_3_5_super" },
+	{ model: "nemotron-3.5-super", upstream: "baseten", effort: "off", flag: "nemotron_3_5_super" },
+	{ model: "muse-spark-1.2", upstream: "fireworks", effort: "high" },
+	{ model: "beam-1.0", upstream: "baseten", effort: "high", flag: "beam_1_0" },
 	// Responses dialects.
 	{ model: "gpt-5.6-sol", upstream: "openai", effort: "high" },
 	{ model: "gpt-5.6-sol", upstream: "openai", effort: "none" },
@@ -67,6 +71,13 @@ export const NATIVE_CASES: readonly NativeCase[] = [
 	{ model: "gpt-5.2", upstream: "azure_openai", effort: "off" },
 	{ model: "gpt-5.6-sol", upstream: "azure_openai", effort: "none" },
 	{ model: "gpt-6-sol", upstream: "openai", effort: "max" },
+	{ model: "gpt-6-sol-fast", upstream: "openai", effort: "medium" },
+	{ model: "gpt-6-luna-fast", upstream: "openai", effort: "none" },
+	// No recorded case, since the capture account cannot run them even with
+	// their flags forced on: muse-spark-open (droid 1.1.0 lists no such model
+	// for the account), gpt-6.1-terra (Factory answers 400 "Invalid model ID"),
+	// and both Ultra Fast tiers (no high-cost opt-in; factory-droid-stream.test.ts
+	// covers their `ultrafast` service tier).
 	{ model: "grok-4.7", upstream: "xai", effort: "high" },
 	// Anthropic Messages dialects.
 	{ model: "claude-opus-4-5-20251101", upstream: "anthropic", effort: "high" },
@@ -83,7 +94,8 @@ export const NATIVE_CASES: readonly NativeCase[] = [
 	{ model: "claude-sonnet-5-5", upstream: "anthropic", effort: "off" },
 	{ model: "claude-sonnet-5-5", upstream: "bedrock_anthropic", effort: "off" },
 	{ model: "claude-opus-5-5", upstream: "azure_anthropic", effort: "high" },
-	// Not capturable from droid 0.237 on the capture account, so unit tests own
+	{ model: "claude-opus-5-5", upstream: "anthropic", effort: "high" },
+	// Not capturable from droid 0.237 or 1.1.0 on the capture account, so unit tests own
 	// them (factory-droid-anthropic.test.ts):
 	// - claude-sonnet-5-5@vertex_anthropic off: "Requested model was not found
 	//   on the API provider"; bedrock covers the effort beta on gated routes.
@@ -116,10 +128,10 @@ const CONVERSATION_KEYS = new Set([
 const SESSION_KEYS = new Set(["prompt_cache_key", "safety_identifier"]);
 
 /**
- * Headers that express routing, client identity or wire dialect. The Stainless
- * arch/OS entries describe the host and its timeout the transport budget, so
- * those are left out. The last two are headers droid never sends: their
- * presence on an OMP request is an identity leak.
+ * Headers that express routing, client identity or wire dialect, plus the
+ * headers droid never sends: since 0.248 it strips the SDK's `X-Stainless-*`
+ * telemetry and `x-api-key`, and it never sends Claude Code's app headers, so
+ * their presence on an OMP request is an identity leak.
  */
 const DIALECT_HEADERS = new Set([
 	"x-api-provider",
@@ -128,13 +140,19 @@ const DIALECT_HEADERS = new Set([
 	"x-client-version",
 	"user-agent",
 	"x-provider-routing-source",
+	"x-api-key",
+	"x-stainless-arch",
 	"x-stainless-lang",
+	"x-stainless-os",
 	"x-stainless-package-version",
 	"x-stainless-runtime",
 	"x-stainless-runtime-version",
 	"x-stainless-retry-count",
-	"x-claude-code-session-id",
+	"x-stainless-timeout",
 	"x-stainless-helper-method",
+	"x-app",
+	"anthropic-dangerous-direct-browser-access",
+	"x-claude-code-session-id",
 ]);
 
 /**

@@ -21,6 +21,7 @@
 ### Changed
 
 - Switching into or out of the Codex `ultrafast` service tier now opens a fresh WebSocket routed to the new tier instead of reusing the old one ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
+- Factory Droid requests now identify as droid 1.1.0: they no longer carry SDK telemetry (`X-Stainless-*`), a placeholder `x-api-key` or Claude Code's `x-app` and browser-access headers, and login asks whoami for its extended response ([#17885](https://github.com/can1357/oh-my-pi/pull/17885) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed
 
 - Fixed Gemini and Vertex `MALFORMED_RESPONSE` finishes showing as "Unhandled stop reason" and dropping that turn's token usage; RPC prompt errors now report them as retryable

@@ -1448,9 +1448,9 @@ provider "factory-droid" {
 			server-side-fallback-models "claude-opus-5"
 		}
 	}
-	// With tools, Anthropic and Vertex stream tool input eagerly and advertise
-	// fine-grained tool streaming; Bedrock takes the beta alone.
-	on-upstream "anthropic" "vertex_anthropic" {
+	// With tools, Anthropic, Vertex and Azure Foundry stream tool input eagerly
+	// and advertise fine-grained tool streaming; Bedrock takes the beta alone.
+	on-upstream "anthropic" "vertex_anthropic" "azure_anthropic" {
 		supports-eager-tool-input-streaming #true
 		anthropic-tool-streaming-beta #true
 	}
