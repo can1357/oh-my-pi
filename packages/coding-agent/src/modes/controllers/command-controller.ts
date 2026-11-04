@@ -32,7 +32,7 @@ import { shareSession } from "../../export/share";
 import type { CompactOptions } from "../../extensibility/extensions/types";
 import {
 	diffMentalModelContent,
-	type HindsightApi,
+	type HindsightClientApi,
 	type HindsightSessionState,
 	loadHindsightConfig,
 	reloadMentalModelsForSession,
@@ -45,6 +45,7 @@ import { BashExecutionComponent, bashPtyViewport } from "@oh-my-pi/pi-tui/chat/b
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
 import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
+import { promptCacheDetails } from "@oh-my-pi/pi-tui/status-line/prompt-cache";
 import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/move-overlay";
 import { moveDirectorySource } from "../move-directory-source";
 import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
@@ -662,6 +663,15 @@ export class CommandController {
 		}
 		info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
 
+		const cacheStatus = this.ctx.session.getPromptCacheStatus();
+		if (cacheStatus) {
+			info += `\n${theme.bold("Prompt Cache")}\n`;
+			for (const row of promptCacheDetails(cacheStatus, Date.now())) {
+				const value = row.tone === "warning" ? theme.fg("warning", row.value) : row.value;
+				info += `${theme.fg("dim", `${row.label}:`)} ${value}\n`;
+			}
+		}
+
 		if (stats.cost > 0 || normalizedPremiumRequests > 0 || stats.credits !== undefined) {
 			info += `\n${theme.bold("Cost")}\n`;
 			if (stats.cost > 0) {
@@ -1146,7 +1156,7 @@ export class CommandController {
 	}
 
 	async #mmList(state: HindsightSessionState): Promise<void> {
-		const client: HindsightApi = state.client;
+		const client: HindsightClientApi = state.client;
 		try {
 			const response = await client.listMentalModels(state.bankId, { detail: "metadata" });
 			const items = response.items ?? [];

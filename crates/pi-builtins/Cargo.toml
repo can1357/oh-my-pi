@@ -1,15 +1,12 @@
-# Shell builtins for the embedded brush shell.
-#
-# Two layers live here:
-#  * the POSIX/bash builtins (`cd`, `echo`, `test`, `printf`, `read`, …), a
-#    locally-patched fork of the upstream `brush-builtins` crate, and
-#  * the in-process command-line utilities the shell ships (`cat`, `grep`,
-#    `sed`, `ls`, `jq`, `ps`, `top`, `kill`, …), one module per command.
+# pi's in-process extras for the embedded shell: the command-line utilities
+# (`cat`, `grep`, `sed`, `ls`, `jq`, …) and the process builtins (`ps`, `top`,
+# `sleep`, `pgrep`, `pkill`, `pidwait`), one module per command. The shell's
+# bash builtins live in its engine; hosts run these through `extras::run`.
 #
 # The utilities used to be ~50 separate vendored crates driven through a
-# thread-local I/O shim; they now run as ordinary builtins against the explicit
-# `host::Host` view of the shell (see `src/host.rs`). See LICENSE for the
-# third-party notices that come with the ported code.
+# thread-local I/O shim; they now run against the explicit `host::Host` view of
+# the shell (see `src/host.rs`). See LICENSE for the third-party notices that
+# come with the ported code.
 [package]
 name = "pi-builtins"
 version.workspace = true
@@ -19,7 +16,7 @@ authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
 rust-version = "1.99.0"
-description = "Builtins and in-process command-line utilities for the embedded brush shell"
+description = "In-process command-line utilities and process builtins for the embedded shell"
 build = false
 autolib = false
 autobins = false
@@ -34,18 +31,13 @@ bench = false
 
 [dependencies]
 async-trait.workspace = true
-brush-core = "^0.5.0"
-brush-parser = "^0.4.0"
 chrono = "0.4.44"
 clap = { version = "4.6.0", features = ["cargo", "color", "derive", "env", "wrap_help"] }
 fancy-regex.workspace = true
 futures = "0.3.32"
 itertools = "0.14.0"
 parking_lot = "0.12.5"
-strum = "0.28.0"
-strum_macros = "0.28.0"
 thiserror = "2.0.18"
-tracing = "0.1.44"
 
 # ── Utility builtin dependencies ──────────────────────────────────────────────
 # 0.1.1 moved to unicode-width 0.2, the version the rest of the graph uses.
@@ -168,9 +160,6 @@ features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "sig
 version = "1.52.1"
 features = ["io-util", "macros", "rt"]
 
-[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
-procfs = "0.18.0"
-
 [target."cfg(any(target_os = \"freebsd\", target_os = \"openbsd\"))".dependencies]
 dns-lookup = "3.0.1"
 
@@ -199,119 +188,7 @@ pretty_assertions = { version = "1.4.1", features = ["unstable"] }
 tempfile = "3"
 
 [features]
-default = ["base", "utils"]
-
-# Every upstream POSIX/bash builtin.
-base = [
-  "builtin.alias",
-  "builtin.bg",
-  "builtin.bind",
-  "builtin.break",
-  "builtin.builtin",
-  "builtin.caller",
-  "builtin.cd",
-  "builtin.colon",
-  "builtin.command",
-  "builtin.compgen",
-  "builtin.compopt",
-  "builtin.complete",
-  "builtin.continue",
-  "builtin.declare",
-  "builtin.dirs",
-  "builtin.dot",
-  "builtin.echo",
-  "builtin.enable",
-  "builtin.eval",
-  "builtin.exec",
-  "builtin.exit",
-  "builtin.export",
-  "builtin.false",
-  "builtin.fc",
-  "builtin.fg",
-  "builtin.getopts",
-  "builtin.hash",
-  "builtin.help",
-  "builtin.history",
-  "builtin.jobs",
-  "builtin.kill",
-  "builtin.let",
-  "builtin.mapfile",
-  "builtin.popd",
-  "builtin.printf",
-  "builtin.pushd",
-  "builtin.pwd",
-  "builtin.read",
-  "builtin.return",
-  "builtin.set",
-  "builtin.shift",
-  "builtin.shopt",
-  "builtin.suspend",
-  "builtin.test",
-  "builtin.times",
-  "builtin.trap",
-  "builtin.true",
-  "builtin.type",
-  "builtin.ulimit",
-  "builtin.umask",
-  "builtin.unalias",
-  "builtin.unset",
-  "builtin.wait",
-]
-
-"builtin.alias" = []
-"builtin.bg" = []
-"builtin.bind" = []
-"builtin.break" = []
-"builtin.builtin" = []
-"builtin.caller" = []
-"builtin.cd" = []
-"builtin.colon" = []
-"builtin.command" = []
-"builtin.compgen" = []
-"builtin.complete" = []
-"builtin.compopt" = []
-"builtin.continue" = []
-"builtin.declare" = []
-"builtin.dirs" = []
-"builtin.dot" = []
-"builtin.echo" = []
-"builtin.enable" = []
-"builtin.eval" = []
-"builtin.exec" = []
-"builtin.exit" = []
-"builtin.export" = []
-"builtin.false" = []
-"builtin.fc" = []
-"builtin.fg" = []
-"builtin.getopts" = []
-"builtin.hash" = []
-"builtin.help" = []
-"builtin.history" = []
-"builtin.jobs" = []
-# The non-unix existence probe scans the process table.
-"builtin.kill" = ["util.procs"]
-"builtin.let" = []
-"builtin.mapfile" = []
-"builtin.popd" = []
-"builtin.printf" = []
-"builtin.pushd" = []
-"builtin.pwd" = []
-"builtin.read" = []
-"builtin.return" = []
-"builtin.set" = []
-"builtin.shift" = []
-"builtin.shopt" = []
-"builtin.suspend" = []
-"builtin.test" = []
-"builtin.times" = []
-"builtin.trap" = []
-"builtin.true" = []
-"builtin.type" = []
-"builtin.ulimit" = []
-"builtin.umask" = []
-"builtin.unalias" = []
-"builtin.unset" = []
-"builtin.wait" = []
+default = ["utils"]
 
 # ── Utility builtins ──────────────────────────────────────────────────────────
 # One feature per ported utility so a single utility can be built (and checked)
@@ -361,17 +238,15 @@ base = [
 "util.nproc" = []
 "util.od" = []
 "util.paste" = []
-"util.nohup" = ["util.procs"]
 "util.pgrep" = ["util.proc-match"]
 "util.pidwait" = ["util.proc-match"]
 "util.pkill" = ["util.proc-match"]
 # Shared process-matching engine behind pgrep/pkill/pidwait.
-"util.proc-match" = ["builtin.kill", "util.procs"]
-# Shared process-table snapshot behind ps/top/pgrep/pkill/pidwait/kill.
+"util.proc-match" = ["util.procs"]
+# Shared process-table snapshot behind ps/top/pgrep/pkill/pidwait.
 "util.procs" = []
 "util.ps" = ["util.procs"]
 "util.sleep" = []
-"util.timeout" = ["util.procs"]
 "util.top" = ["util.procs"]
 "util.printenv" = []
 "util.readlink" = []
@@ -451,7 +326,6 @@ utils = [
   "util.nproc",
   "util.od",
   "util.paste",
-  "util.nohup",
   "util.pgrep",
   "util.pidwait",
   "util.pkill",
@@ -459,7 +333,6 @@ utils = [
   "util.procs",
   "util.ps",
   "util.sleep",
-  "util.timeout",
   "util.top",
   "util.printenv",
   "util.readlink",
@@ -494,7 +367,7 @@ utils = [
 ]
 
 # Deliberately NOT `lints.workspace = true`: most of this crate is ported
-# third-party code (brush's builtins, uutils, jaq), and holding 70k lines of
+# third-party code (uutils, jaq), and holding 70k lines of
 # it to the workspace's pedantic/nursery bar would bury real warnings. rustc
 # warnings still apply and are kept at zero.
 [lints.clippy]
