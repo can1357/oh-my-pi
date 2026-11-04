@@ -1054,6 +1054,318 @@ describe("captureIsolationBaseline", () => {
 	});
 });
 
+describe("a capture that could not read everything", () => {
+	it("raises instead of reporting an empty patch", async () => {
+		// The native diff of a file this process cannot read throws. Smoothed
+		// into an empty patch, it told the teardown there was nothing to save
+		// and the file went with the workspace: `{patchEmpty:true,
+		// present:false}`. A capture that could not read something has not
+		// captured it.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+
+		const unreadable = path.join(repo, "must-preserve.txt");
+		await fs.writeFile(unreadable, "work nobody else has\n");
+		await fs.chmod(unreadable, 0o000);
+		try {
+			await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(/Could not read 1 untracked file/);
+		} finally {
+			// Restored so the fixture can be removed.
+			await fs.chmod(unreadable, 0o600);
+		}
+	});
+
+	it("captures a run whose gitignored directory is unreadable", async () => {
+		// git never looks inside an ignored directory, so nothing is at risk
+		// and the run must still hand back its work. A pre-walk of the tree
+		// refused these — `target/`, `.venv`, `dist/`, `__pycache__` are all
+		// ignored in this repository alone.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, ".gitignore"), "build/\n");
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", ".gitignore", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		// Unreadable *before* the baseline as well, which is the ordering the
+		// walk refused: a run whose ignored directory is already locked must
+		// still start and still hand back its work.
+		const ignored = path.join(repo, "build", "cache");
+		await fs.mkdir(ignored, { recursive: true });
+		await fs.chmod(ignored, 0o000);
+		const baseline = await captureBaseline(repo);
+		await fs.writeFile(path.join(repo, "work.txt"), "the run's real change\n");
+
+		try {
+			const delta = await captureDeltaPatch(repo, baseline);
+			expect(delta.rootPatch).toContain("work.txt");
+		} finally {
+			await fs.chmod(ignored, 0o700);
+		}
+	});
+
+	it("raises when git could not open a directory, instead of reporting an empty patch", async () => {
+		// `git ls-files --others` skips a directory it cannot open, warns on
+		// stderr and exits 0, and the binding returns only the array — so a
+		// short listing arrives as a complete one, the capture names nothing,
+		// and the teardown removed the workspace with the only copy in it.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+		const locked = path.join(repo, "locked");
+		await fs.mkdir(locked);
+		await fs.writeFile(path.join(locked, "only-copy.txt"), "work nobody else has\n");
+		await fs.chmod(locked, 0o000);
+
+		try {
+			await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(/git could not read/);
+		} finally {
+			await fs.chmod(locked, 0o700);
+		}
+		// Still there, because the capture refused rather than reporting none.
+		expect(await Bun.file(path.join(locked, "only-copy.txt")).exists()).toBe(true);
+	});
+
+	it("raises on untracked files whose names are not UTF-8, instead of reporting an empty patch", async () => {
+		// git lists such a name with its raw bytes, exits 0 and says nothing on
+		// stderr. Decoded lossily, the name pointed at a file that does not
+		// exist; its diff read as empty, the capture succeeded with an empty
+		// patch, and the teardown deleted the only copy. The shapes: a byte no
+		// UTF-8 text has, a Latin-1 name, a multi-byte sequence cut short, and
+		// a directory whose name is the undecodable part.
+		if (process.platform === "win32") return;
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+		const raw = (...parts: (string | number[])[]): Buffer =>
+			Buffer.concat([Buffer.from(`${repo}${path.sep}`), ...parts.map(part => Buffer.from(part))]);
+		const files = [
+			raw("ordinary-", [0xff], ".txt"),
+			raw("caf", [0xe9], ".txt"),
+			raw("trunc-", [0xe2, 0x82], ".txt"),
+			raw("latin-dir-", [0xe9], "/inner.txt"),
+		];
+		await fs.mkdir(raw("latin-dir-", [0xe9]));
+		for (const file of files) await fs.writeFile(file, "work nobody else has\n");
+
+		await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(
+			/listed 4 untracked file\(s\) .* not UTF-8.*: caf\\xe9\.txt, latin-dir-\\xe9\/inner\.txt, ordinary-\\xff\.txt, trunc-\\xe2\\x82\.txt$/,
+		);
+		// Still there, because the capture refused rather than reporting none.
+		for (const file of files) expect(await fs.readFile(file, "utf8")).toBe("work nobody else has\n");
+	});
+
+	it("raises when a listed untracked file renders an empty diff", async () => {
+		// A listed file always has a header to show, even when it is empty, so
+		// an empty diff is a read that found nothing, not a file with nothing
+		// in it. Dropped as one, it never reached the refusal, and the file went
+		// with the workspace.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+		await fs.writeFile(path.join(repo, "must-preserve.txt"), "work nobody else has\n");
+		// Every other call reaches git: only the diff of the listed file is empty.
+		const requireGit = vcs.requireGit;
+		vi.spyOn(vcs, "requireGit").mockImplementation(dir => {
+			const actual = requireGit(dir);
+			return new Proxy(actual, {
+				get(target, key) {
+					if (key === "diffNoIndex") return async () => "";
+					const value: unknown = Reflect.get(target, key);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			});
+		});
+
+		await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(
+			/Could not read 1 untracked file.*: must-preserve\.txt$/,
+		);
+	});
+
+	it("captures a readable untracked file in the same shape", async () => {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+		await fs.writeFile(path.join(repo, "must-preserve.txt"), "work nobody else has\n");
+
+		const delta = await captureDeltaPatch(repo, baseline);
+
+		expect(delta.rootPatch).toContain("must-preserve.txt");
+	});
+
+	it("captures a run beside a nested repository the baseline found", async () => {
+		// git lists an untracked nested repository as one `dir/` entry and does
+		// not look inside it; the nested capture carries that repository's
+		// work. Read as an untracked file nobody could read, the entry refused
+		// every capture in a repository with a nested clone in it.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const nested = path.join(repo, "vendor", "lib");
+		await fs.mkdir(nested, { recursive: true });
+		await initRepo(nested);
+		await runGit(nested, ["config", "user.email", "src@example.com"]);
+		await runGit(nested, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(nested, "lib.txt"), "base\n");
+		await runGit(nested, ["add", "lib.txt"]);
+		await runGit(nested, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+		await fs.writeFile(path.join(repo, "work.txt"), "root work\n");
+		await fs.writeFile(path.join(nested, "lib.txt"), "nested work\n");
+
+		const delta = await captureDeltaPatch(repo, baseline);
+
+		expect(delta.rootPatch).toContain("work.txt");
+		expect(delta.nestedPatches.map(entry => entry.relativePath)).toEqual([path.join("vendor", "lib")]);
+		expect(delta.nestedPatches[0]?.patch).toContain("+nested work");
+	});
+
+	it("captures a run beside an in-tree linked worktree the baseline leaves out", async () => {
+		// The baseline leaves a linked worktree of this repository out of the
+		// nested set on purpose (#16068), and git lists it as one `dir/` entry.
+		// It was there before the run, so it says nothing about the run's work,
+		// and refusing on it refused every capture in such a checkout.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		await runGit(repo, ["worktree", "add", "-q", "wt", "-b", "wt"]);
+		const baseline = await captureBaseline(repo);
+		expect(baseline.nested).toEqual([]);
+		await fs.writeFile(path.join(repo, "work.txt"), "root work\n");
+
+		const delta = await captureDeltaPatch(repo, baseline);
+
+		expect(delta.rootPatch).toContain("work.txt");
+	});
+
+	it("refuses a nested repository the run created, instead of reporting an empty patch", async () => {
+		// No nested capture covers a repository the baseline never saw, and git
+		// does not look inside it: its files reached no patch, the capture
+		// succeeded, and the teardown deleted the only copy.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+		const created = path.join(repo, "spike");
+		await fs.mkdir(created);
+		await initRepo(created);
+		await fs.writeFile(path.join(created, "only-copy.txt"), "work nobody else has\n");
+
+		await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(/nested repositor.*: spike\/$/);
+		expect(await fs.readFile(path.join(created, "only-copy.txt"), "utf8")).toBe("work nobody else has\n");
+	});
+});
+
+describe("a capture in a process that inherited another repository's git environment", () => {
+	// omp started from a git hook, `git submodule foreach` or a CI job inherits
+	// `GIT_DIR` and `GIT_WORK_TREE`, and `git -C` does not override
+	// `GIT_WORK_TREE`. The capture has to list the workspace it was given, and
+	// it has to hear git's warning about that workspace, or the teardown
+	// deletes work on the strength of another tree's listing. Run in a child
+	// process because Bun does not hand `process.env` writes to native code:
+	// only a real environment reaches the native git runner.
+	const worktreeModule = path.join(import.meta.dir, "..", "..", "src", "task", "worktree.ts");
+	const script =
+		`import * as fs from "node:fs/promises";` +
+		`import * as path from "node:path";` +
+		`import { captureBaseline, captureDeltaPatch } from ${JSON.stringify(worktreeModule)};` +
+		`const repo = process.env.OMP_TEST_CAPTURE_REPO;` +
+		`const baseline = await captureBaseline(repo);` +
+		`const locked = process.env.OMP_TEST_CAPTURE_LOCK === "1";` +
+		`const dir = locked ? path.join(repo, "locked") : repo;` +
+		`await fs.mkdir(dir, { recursive: true });` +
+		`await fs.writeFile(path.join(dir, "only-copy.txt"), "work nobody else has\\n");` +
+		`if (locked) await fs.chmod(dir, 0o000);` +
+		`let result;` +
+		`try { result = { rootPatch: (await captureDeltaPatch(repo, baseline)).rootPatch }; }` +
+		`catch (error) { result = { error: String(error instanceof Error ? error.message : error) }; }` +
+		`finally { if (locked) await fs.chmod(dir, 0o700); }` +
+		`process.stdout.write(JSON.stringify(result));`;
+
+	async function captureUnderForeignGitEnv(lock: boolean): Promise<{ rootPatch?: string; error?: string }> {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		// Another tree with nothing untracked: a listing of it is empty.
+		const other = await createGitRepo();
+		await runGit(other, ["config", "user.email", "src@example.com"]);
+		await runGit(other, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(other, "theirs.txt"), "theirs\n");
+		await runGit(other, ["add", "theirs.txt"]);
+		await runGit(other, ["commit", "-q", "-m", "theirs"]);
+
+		const child = Bun.spawn([process.execPath, "--eval", script], {
+			cwd: path.join(import.meta.dir, ".."),
+			env: {
+				...process.env,
+				GIT_DIR: path.join(other, ".git"),
+				GIT_WORK_TREE: other,
+				OMP_TEST_CAPTURE_REPO: repo,
+				OMP_TEST_CAPTURE_LOCK: lock ? "1" : "0",
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		// The child restores the mode itself; this covers a child that died.
+		if (lock) await fs.chmod(path.join(repo, "locked"), 0o700).catch(() => {});
+		expect({ exitCode, stderr: exitCode === 0 ? "" : stderr }).toEqual({ exitCode: 0, stderr: "" });
+		if (lock) expect(await Bun.file(path.join(repo, "locked", "only-copy.txt")).exists()).toBe(true);
+		return JSON.parse(stdout) as { rootPatch?: string; error?: string };
+	}
+
+	it("lists the workspace it was given, not the tree GIT_DIR and GIT_WORK_TREE name", async () => {
+		const result = await captureUnderForeignGitEnv(false);
+
+		expect(result.error).toBeUndefined();
+		expect(result.rootPatch).toContain("only-copy.txt");
+	});
+
+	it("still refuses on git's warning about a directory in the workspace", async () => {
+		const result = await captureUnderForeignGitEnv(true);
+
+		expect(result.rootPatch).toBeUndefined();
+		expect(result.error).toMatch(/git could not read 1 director.*: locked$/);
+	});
+});
+
 describe("applyNestedPatches", () => {
 	const nestedRel = "sub";
 	let fixtureParent: string;

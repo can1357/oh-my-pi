@@ -103,6 +103,12 @@ impl GitRepo {
 	}
 
 	/// Render a no-index patch between filesystem paths.
+	///
+	/// `/dev/null` (or `NUL`) is the empty side of a creation or deletion. Any
+	/// other path must be there: one that is not is an error, as it is for
+	/// `git diff --no-index`. Read as an empty side, a name that does not
+	/// match the file on disk, or a file that went between a listing and this
+	/// read, rendered as no change at all.
 	pub fn diff_no_index(&self, left: &Path, right: &Path, binary: bool) -> Result<String> {
 		let repo = self.gix()?;
 		let left_file = read_no_index_file(self.root(), left)?;
@@ -1401,6 +1407,8 @@ struct NoIndexFile {
 	mode: gix::objs::tree::EntryMode,
 }
 
+/// The file at `path`, or `None` when `path` is the null device. A missing
+/// path is an error, not an empty side.
 fn read_no_index_file(root: &Path, path: &Path) -> Result<Option<NoIndexFile>> {
 	if is_null_device(path) {
 		return Ok(None);
@@ -1410,11 +1418,9 @@ fn read_no_index_file(root: &Path, path: &Path) -> Result<Option<NoIndexFile>> {
 	} else {
 		root.join(path)
 	};
-	let metadata = match std::fs::symlink_metadata(&resolved) {
-		Ok(metadata) => metadata,
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-		Err(err) => return Err(err.into()),
-	};
+	let metadata = std::fs::symlink_metadata(&resolved).map_err(|err| {
+		Error::backend("git diff --no-index", format!("could not access '{}': {err}", path.display()))
+	})?;
 	let file_type = metadata.file_type();
 	let (data, kind) = if file_type.is_symlink() {
 		let target = std::fs::read_link(&resolved)?;
@@ -2166,6 +2172,37 @@ mod tests {
 				])
 			);
 		}
+	}
+
+	#[test]
+	fn no_index_refuses_a_missing_path_and_keeps_the_null_side_empty() {
+		// Failure mode: a path that is not on disk read as the null device. A
+		// listed name that did not match the file on disk (a name that is not
+		// UTF-8, decoded lossily), or a file gone since the listing, rendered
+		// as no change, and the capture resting on it let the workspace go.
+		let dir = fixture();
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let null = Path::new("/dev/null");
+		let missing = Path::new("raw-\u{fffd}.txt");
+		for (left, right) in [(null, missing), (missing, null)] {
+			let err = repo
+				.diff_no_index(left, right, true)
+				.expect_err("a missing path must not diff as an empty side");
+			assert!(
+				err.to_string()
+					.contains("could not access 'raw-\u{fffd}.txt'"),
+				"{err}"
+			);
+		}
+		// The null device on both sides is still no change, as in git.
+		assert_eq!(
+			repo
+				.diff_no_index(null, null, true)
+				.expect("null against null"),
+			""
+		);
 	}
 
 	#[cfg(unix)]

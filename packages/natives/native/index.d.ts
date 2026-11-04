@@ -765,6 +765,15 @@ export declare class VcsGitRepo {
   commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
   /** List index or untracked paths. */
   lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+  /**
+   * Untracked paths, plus what the listing cannot answer for.
+   *
+   * `git ls-files --others` warns and exits 0 when it cannot open a
+   * directory, so the list alone cannot say whether it is complete; and a
+   * name that is not UTF-8 has no JS string. A caller that deletes a
+   * workspace on the strength of the list needs all three.
+   */
+  lsFilesWithWarnings(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<LsFilesWithWarnings>
   /** List tree paths. */
   lsTree(rev: string, paths: Array<string>, signal?: unknown | undefined | null): Promise<Array<string>>
   /** List submodule paths. */
@@ -896,6 +905,8 @@ export declare class VcsRepo {
   commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
   /** List tracked or untracked paths. */
   lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Untracked paths, plus what the listing cannot answer for. */
+  lsFilesWithWarnings(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<LsFilesWithWarnings>
 }
 
 /**
@@ -2757,6 +2768,21 @@ export interface ListWorkspaceResult {
   unreadableDirectories: Array<WorkspaceDirectoryError>
 }
 
+/** An untracked listing with what it cannot answer for. */
+export interface LsFilesWithWarnings {
+  /** The untracked paths git listed. */
+  paths: Array<string>
+  /** Directories git reported it could not open, so the listing is short. */
+  unreadable: Array<string>
+  /**
+   * Entries git listed whose names are not UTF-8. A JS string cannot hold
+   * such a name, so `paths` leaves them out and no path API reaches them.
+   * Each is written for a person: a byte outside a UTF-8 character as
+   * `\xNN`, a backslash doubled.
+   */
+  undecodable: Array<string>
+}
+
 /**
  * System UI appearance reported by native macOS APIs (`detectMacOSAppearance`
  * and observer).
@@ -3415,7 +3441,10 @@ export interface SearchResult {
 
 export declare function setHangulCompatJamoWidthOverride(value: number): void
 
-/** Options for executing a shell command via the embedded bash engine (pi-shell). */
+/**
+ * Options for executing a shell command via the embedded bash engine
+ * (pi-shell).
+ */
 export interface ShellExecuteOptions {
   /** Command string to execute in the shell. */
   command: string
