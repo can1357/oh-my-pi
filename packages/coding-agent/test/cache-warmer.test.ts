@@ -284,6 +284,59 @@ describe("cache warming scheduling math", () => {
 		expect(getPromptCacheTtlMs({ ...chat, promptCache: { short: 300 } }, { cacheRetention: "long" })).toBe(300_000);
 	});
 
+	test("uses the lifetime an OpenAI Responses request actually sends: route TTL, request TTL, or the default entry", () => {
+		const responses = (spec: { baseUrl: string; id: string; compat?: Record<string, unknown> }) =>
+			buildModel({
+				id: spec.id,
+				name: spec.id,
+				api: "openai-responses",
+				provider: "custom-responses",
+				baseUrl: spec.baseUrl,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 1, output: 1, cacheRead: 0.1, cacheWrite: 1 },
+				promptCache: { short: 300, long: 3600 },
+				contextWindow: 200_000,
+				maxTokens: 8_192,
+				...(spec.compat ? { compat: spec.compat } : {}),
+			} as Parameters<typeof buildModel>[0]);
+		// A Vercel route that pins a 5m TTL writes 5-minute entries under long retention.
+		const vercel5m = responses({
+			baseUrl: "https://ai-gateway.vercel.sh/v1",
+			id: "anthropic/claude-sonnet-4.6",
+			compat: { vercelGatewayRouting: { caching: "auto", cacheTtl: "5m" } },
+		});
+		expect(getPromptCacheTtlMs(vercel5m, { cacheRetention: "long" })).toBe(300_000);
+		expect(getPromptCacheTtlMs({ ...vercel5m, promptCache: { short: 300 } }, { cacheRetention: "long" })).toBe(
+			300_000,
+		);
+		// Its 1h TTL is sent only under long retention.
+		const vercel1h = responses({
+			baseUrl: "https://ai-gateway.vercel.sh/v1",
+			id: "anthropic/claude-sonnet-4.6",
+			compat: { vercelGatewayRouting: { caching: "auto", cacheTtl: "1h" } },
+		});
+		expect(getPromptCacheTtlMs(vercel1h, { cacheRetention: "long" })).toBe(3_600_000);
+		expect(getPromptCacheTtlMs(vercel1h, { cacheRetention: "short" })).toBe(300_000);
+		// An endpoint with explicit breakpoints honors the request's own TTL over long retention's 12h.
+		const breakpoints = responses({
+			baseUrl: "https://openai.example.test/v1",
+			id: "custom-model",
+			compat: { supportsPromptCacheBreakpoints: true },
+		});
+		expect(
+			getPromptCacheTtlMs(breakpoints, { cacheRetention: "long", promptCache: { mode: "implicit", ttl: "30m" } }),
+		).toBe(300_000);
+		expect(getPromptCacheTtlMs(breakpoints, { cacheRetention: "long" })).toBe(3_600_000);
+		// An endpoint without any long-retention field writes the default entry.
+		const plain = responses({
+			baseUrl: "https://openai.example.test/v1",
+			id: "custom-model",
+			compat: { supportsPromptCacheBreakpoints: false, supportsLongPromptCacheRetention: false },
+		});
+		expect(getPromptCacheTtlMs(plain, { cacheRetention: "long" })).toBe(300_000);
+	});
+
 	test("never warms without a declared lifetime or with caching off", () => {
 		const model = makeModel();
 		model.promptCache = undefined;

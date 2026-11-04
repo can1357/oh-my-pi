@@ -128,7 +128,36 @@ export function resolvePromptCacheTier(
 		longByDefault ? "long" : "short",
 	);
 	if (retention === "none") return undefined;
+	if (model.api === "openai-responses") return openAIResponsesWireTier(model, retention, options);
 	return retention === "long" && !supportsLongCacheRetention(model) ? "short" : retention;
+}
+
+/**
+ * Tier an OpenAI Responses request's cache entry actually gets, from the cache
+ * policy `buildParams` emits for it (`applyVercelResponsesCacheControls`,
+ * `maybeAddOpenRouterAnthropicCacheControl`, `applyOpenAIResponsesPromptCachePolicy`,
+ * `prompt_cache_retention`), so a shorter lifetime set on the route or the
+ * request is warmed on its own schedule.
+ */
+function openAIResponsesWireTier(
+	model: Model<Api>,
+	retention: "short" | "long",
+	options: SimpleStreamOptions | undefined,
+): PromptCacheTier {
+	const compat = model.compat;
+	if (compat === undefined) return "short";
+	const routing = "vercelGatewayRouting" in compat ? compat.vercelGatewayRouting : undefined;
+	if ("isVercelGatewayHost" in compat && compat.isVercelGatewayHost === true && routing?.caching === "auto") {
+		// The route's 1h TTL is sent only under long retention; no TTL means the default entry.
+		return routing.cacheTtl === "1h" && retention === "long" ? "long" : "short";
+	}
+	if ("cacheControlFormat" in compat && compat.cacheControlFormat === "anthropic") return retention;
+	if ("supportsPromptCacheBreakpoints" in compat && compat.supportsPromptCacheBreakpoints === true) {
+		const ttl = options?.promptCache?.ttl ?? (retention === "long" ? "12h" : undefined);
+		return ttl === "12h" ? "long" : "short";
+	}
+	const longCapable = "supportsLongPromptCacheRetention" in compat && compat.supportsLongPromptCacheRetention === true;
+	return retention === "long" && longCapable ? "long" : "short";
 }
 
 /**
