@@ -277,6 +277,10 @@ describe("Factory Droid model builder", () => {
 		expect(model.cost).toEqual(zeroCost);
 		expect(quotaTierFor("factory-droid", "mistral-large-4")).toBe("core");
 	});
+
+	it("assigns MiniMax M3.1 Flash to the Core quota pool", () => {
+		expect(quotaTierFor("factory-droid", "minimax-m3.1-flash")).toBe("core");
+	});
 });
 
 describe("Factory Droid route policy scoping", () => {
