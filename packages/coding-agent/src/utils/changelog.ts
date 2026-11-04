@@ -88,9 +88,13 @@ export async function buildChangelogSummaryPrompt(
 	if ("error" in view) return { error: CHANGELOG_COMMAND_USAGE };
 	const entries = selectChangelogEntries(await parseChangelog(getChangelogPath()), view);
 	if (entries.length === 0) return { empty: true };
+	// Newest-first truncation: when the rendered changelog overflows the cap,
+	// the oldest rows drop and the releases the user is most likely reviewing
+	// — the current one — stay in the prompt.
 	const rendered = renderChangelogEntries(entries, {
 		maxBytes: CHANGELOG_SUMMARY_MAX_BYTES,
 		truncationHint: CHANGELOG_SUMMARY_TRUNCATION_HINT,
+		oldestFirst: false,
 	});
 	return {
 		message: prompt.render(changelogReviewTemplate, {
