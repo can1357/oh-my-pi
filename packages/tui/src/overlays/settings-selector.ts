@@ -940,10 +940,11 @@ export class SettingsSelectorComponent implements Component {
 					detail: o.description,
 				}));
 				// Few short plain choices segment; described ones and live-previewed ones
-				// (hovering the menu previews, see #createSubmenu) keep the menu.
+				// (hovering the menu previews, see #createSubmenu) keep the menu. The control
+				// selects by option value; `shown` is the row's label for runtime choices.
 				return {
 					k: "choice",
-					value: shown,
+					value: this.#getSubmenuCurrentValue(def.path, value),
 					options,
 					style: PREVIEWED_SETTINGS.has(def.path) || options.some(o => o.detail) ? "menu" : "auto",
 					mono: options.every(o => o.label === o.value),
