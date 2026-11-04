@@ -369,11 +369,14 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 					.map(id => {
 						const target = element.ownerDocument?.getElementById(id);
 						if (!target) return "";
-						// Hidden by visibility, `display: none`, or a `hidden`/`aria-hidden` ancestor: read the whole subtree.
+						// Hidden by visibility, `display: none` (its own or an ancestor's, which leaves its own computed display
+						// untouched), or a `hidden`/`aria-hidden` ancestor: read the whole subtree.
 						const targetStyle = getComputedStyle(target);
+						const rendered = target as unknown as { checkVisibility?: () => boolean };
 						const hidden =
 							targetStyle.visibility !== "visible" ||
 							targetStyle.display === "none" ||
+							(typeof rendered.checkVisibility === "function" && !rendered.checkVisibility()) ||
 							target.closest("[hidden], [aria-hidden='true']") !== null;
 						// A table, fieldset or optgroup target is named by its caption, legend or label, not its contents.
 						const native = normalizeSpace(target.getAttribute("aria-label") ?? "")

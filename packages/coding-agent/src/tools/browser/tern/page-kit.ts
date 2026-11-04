@@ -477,9 +477,25 @@ const idrefText = (el, attribute) => {
 	return normalizeSpace(ids.map(id => {
 		const target = lookup(id);
 		if (!target) return "";
+		// A target named by its own label, alt or control value gives that, as the role/ handler reads it.
+		const own = normalizeSpace(target.getAttribute("aria-label"));
+		if (own) return own;
+		if (target.localName === "img" || target.localName === "area") return normalizeSpace(target.getAttribute("alt"));
+		if (target.localName === "input") {
+			const type = inputType(target);
+			if (type === "image") {
+				return normalizeSpace(target.getAttribute("alt") || target.getAttribute("value") || target.getAttribute("title")) || "Submit";
+			}
+			if (["button", "submit", "reset"].includes(type)) {
+				return normalizeSpace(target.value) || (type === "submit" ? "Submit" : type === "reset" ? "Reset" : "");
+			}
+			// A text field stands for its value; a checkbox's or radio's value ("on") is not text it shows.
+			if (!["checkbox", "radio", "file", "hidden", "range"].includes(type)) return normalizeSpace(target.value);
+		}
 		// A hidden target (visibility, display: none, aria-hidden, a hidden ancestor) is read whole, as the
 		// accessibility tree reads one aria-labelledby names; its own aria-labelledby is not followed.
-		return contentText(target, null, hiddenForA11y(target) ? "any" : "visible", false);
+		const text = contentText(target, null, hiddenForA11y(target) ? "any" : "visible", false);
+		return text || normalizeSpace(target.getAttribute("title"));
 	}).join(" "));
 };
 const hiddenForA11y = el => {
@@ -544,7 +560,11 @@ const accessibleName = (el, role) => {
 	if (labelledBy) return labelledBy;
 	const label = normalizeSpace(el.getAttribute("aria-label"));
 	if (label) return label;
-	if (el.labels && el.labels.length) {
+	// An optgroup is named by its label, never by the label of the select around it.
+	if (el.localName === "optgroup") {
+		const groupLabel = normalizeSpace(el.getAttribute("label"));
+		if (groupLabel) return groupLabel;
+	} else if (el.labels && el.labels.length) {
 		const text = normalizeSpace(Array.from(el.labels, labelEl => contentText(labelEl, el)).join(" "));
 		if (text) return text;
 	}
