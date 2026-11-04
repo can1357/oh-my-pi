@@ -11,8 +11,10 @@
  * Cleanup that survives a timeout is cleanup a timeout cannot interrupt: the shared, synchronous
  * `installMockRestores()` helper for spies, a synchronous `afterEach` that restores or puts back as
  * a direct statement, or `onTestFinished(<synchronous callback>)` registered before the test can
- * suspend. Synchronous means a plain function: an `async` callback stops at its first `await`, and
- * a generator callback never runs its body, because Bun does not iterate what it returns. A callback
+ * suspend. Synchronous means a plain function: an `async` callback stops at its first `await`. Code
+ * inside a generator earns no credit anywhere (a callback, an IIFE, a helper): calling a generator
+ * runs none of its body, Bun never iterates what a test, hook or callback returns, and the rules do
+ * not follow iteration, so a restore or put-back inside one is reported wherever it is. A callback
  * passed by name counts only through a function declaration or `const` the file writes once, and
  * `x.mockRestore()` restores a known spy only when one write stores it in `x` and that write runs
  * once per test (not in a loop, an array-iteration callback, a helper called more than once, or a
@@ -24,17 +26,25 @@
  * callbacks in registration order, and once one of them times out it skips every later one. So a
  * cleanup counts only when no hook or callback that can suspend (`async`, a `done` parameter, or a
  * returned promise) runs before it; `installMockRestores()` still counts, because its next
- * `beforeEach` and its `afterAll` restore whatever Bun skipped. A hook or callback that throws makes
- * Bun skip the later ones the same way (measured for a synchronous `afterEach` and for an
- * `onTestFinished` callback), but the rules do not count a hook that can throw as one that blocks:
- * such a hook fails its own test, so the leak arrives with a red test, and almost any hook can
- * throw. The rules credit only those shapes. They are an enforcement aid for new code, not a proof:
- * a shape they credit is safe by construction, and every cleanup written in another shape is
- * reported (a spy or write with no cleanup at all is neither credited nor reported).
+ * `beforeEach` and its `afterAll` restore whatever Bun skipped. A registration is found by binding,
+ * not by name (`const register = afterEach; register(...)` registers a hook). A hook registered
+ * anywhere but a scope's body counts as running before every cleanup, an `onTestFinished` call in a
+ * same-file function counts for every test that can reach it (through a hook or helpers, or from
+ * anywhere the walk cannot follow), and `afterEach` or `onTestFinished` handed on where the rules
+ * cannot follow it (an argument, an object, a `let`, an export, a namespace or `globalThis` member
+ * read, `require("bun:test")`) counts as registering one that can suspend before every cleanup. A
+ * hook or callback that throws makes Bun skip the later ones the same way (measured for a
+ * synchronous `afterEach` and for an `onTestFinished` callback), but the rules do not count a hook
+ * that can throw as one that blocks: such a hook fails its own test, so the leak arrives with a red
+ * test, and almost any hook can throw. The rules credit only those shapes. They are an enforcement
+ * aid for new code, not a proof: a shape they credit is safe by construction, and every cleanup
+ * written in another shape is reported (a spy or write with no cleanup at all is neither credited
+ * nor reported).
  *
  * The rules judge only what one file shows: writes and restores reached from a test body directly
- * or through a function declared in the same file, and hooks declared in the same file. A hook
- * another file's helper registers is not seen.
+ * or through a function declared in the same file, and hooks registered in the same file. A hook
+ * that another file's function registers (an imported helper, or a binding re-exported from another
+ * module rather than imported from `bun:test`) is not seen.
  */
 
 interface Node {
@@ -280,13 +290,13 @@ const ITERATION_METHODS = new Set([
 
 /**
  * Can `fn` run again through a path the walk cannot see? True when its own name (a declaration, a
- * named function expression, or the `const` it initialises) is used anywhere except `ownCall`
- * (recursion, or the body handing itself out to be called later), when `arguments` appears inside
- * it (`arguments.callee` is the running function), when the file uses `eval` (a direct `eval` can
- * call any function in scope by a name that appears only inside a string), or when it is exported
- * for other files to call.
+ * named function expression, or the `const` it initialises) is used anywhere except as the callee of
+ * `knownCalls` (recursion, or the body handing itself out to be called later), when `arguments`
+ * appears inside it (`arguments.callee` is the running function), when the file uses `eval` (a direct
+ * `eval` can call any function in scope by a name that appears only inside a string), or when it is
+ * exported for other files to call.
  */
-function mayRunAgain(facts: FileFacts, fn: Node, ownCall?: Node): boolean {
+function mayRunAgain(facts: FileFacts, fn: Node, knownCalls: readonly Node[] = []): boolean {
 	const declarator = fn.parent?.type === "VariableDeclarator" && node(fn.parent.init) === fn ? fn.parent : undefined;
 	const holder = declarator ? declarator.parent?.parent : fn.parent;
 	if (holder?.type === "ExportNamedDeclaration" || holder?.type === "ExportDefaultDeclaration") return true;
@@ -303,7 +313,7 @@ function mayRunAgain(facts: FileFacts, fn: Node, ownCall?: Node): boolean {
 			if (fn.range[0] <= id.range[0] && id.range[1] <= fn.range[1]) return true;
 			continue;
 		}
-		if (!names.has(name) || id === ownName || id === declaredName || id === ownCall) continue;
+		if (!names.has(name) || id === ownName || id === declaredName || knownCalls.includes(id)) continue;
 		const variable = variableOf(facts.context, id);
 		if (!variable) continue;
 		if (variable === declaredVariable) return true;
@@ -323,7 +333,7 @@ function soleCaller(facts: FileFacts, fn: Node): Node | undefined {
 	const caller = callers[0]!;
 	const callee = unwrap(node(caller.callee));
 	if (callee?.type !== "Identifier") return undefined;
-	return mayRunAgain(facts, fn, callee) ? undefined : caller;
+	return mayRunAgain(facts, fn, [callee]) ? undefined : caller;
 }
 
 /**
@@ -399,6 +409,8 @@ interface FileFacts {
 	finishers: Node[];
 	/** Identifiers that may name a binding (not member property names or object keys). */
 	references: Node[];
+	/** References that hand `afterEach` or `onTestFinished` on where the rule cannot follow them ({@link registrarEscapes}). */
+	escapes: Escape[];
 	/** Flows of a node at depth 0, and the shared paths a node writes; filled on first use. */
 	flowCache: Map<Node, Flow[]>;
 	targetCache: Map<Node, string[]>;
@@ -420,8 +432,11 @@ function walk(context: RuleContext, root: Node, visit: (n: Node) => void): void 
 	}
 }
 
-/** The bun:test export an identifier names: imported, global, or an alias such as `cond ? it : it.skip`. */
-function testApiName(context: RuleContext, id: Node): string | undefined {
+/**
+ * The bun:test export an identifier names: imported, global, or a `const` alias the file resolves by
+ * binding (`const register = afterEach`, `const maybeIt = cond ? it : it.skip`).
+ */
+function testApiName(context: RuleContext, id: Node, depth = 0): string | undefined {
 	const name = id.name as string;
 	const def = variableOf(context, id)?.defs[0];
 	if (!def) return name;
@@ -431,21 +446,30 @@ function testApiName(context: RuleContext, id: Node): string | undefined {
 		if (!source || !TEST_MODULES.has(source.value as string)) return undefined;
 		return identName(def.node.imported) ?? name;
 	}
-	if (def.type === "Variable") {
-		const init = unwrap(node(def.node.init));
-		if (!init || isFunction(init)) return undefined;
-		const text = context.sourceCode.text.slice(init.range[0], init.range[1]);
-		for (const candidate of [...TEST_NAMES, ...DESCRIBE_NAMES])
-			if (new RegExp(`(^|[^.\\w])${candidate}\\b`).test(text)) return candidate;
-	}
+	if (def.type === "Variable" && def.parent?.kind === "const" && node(def.node.id)?.type === "Identifier")
+		return depth < ALIAS_DEPTH ? testApiValue(context, node(def.node.init), depth + 1) : undefined;
 	return undefined;
+}
+
+/**
+ * The bun:test export an expression evaluates to, as {@link testApi} reads a callee: `it.skip`,
+ * `t.afterEach`, `it.each(rows)`, or a conditional whose branches all name the same export.
+ */
+function testApiValue(context: RuleContext, value: Node | undefined, depth: number): string | undefined {
+	const n = unwrap(value);
+	if (n?.type === "ConditionalExpression" || n?.type === "LogicalExpression") {
+		const branches = n.type === "ConditionalExpression" ? [n.consequent, n.alternate] : [n.left, n.right];
+		const [first, second] = branches.map(branch => testApiValue(context, node(branch), depth));
+		return first === second ? first : undefined;
+	}
+	return testApi(context, n, depth);
 }
 
 /**
  * The bun:test export a call's callee names: `it(...)`, `it.each(rows)(...)`, `test.skipIf(x)(...)`,
  * and `t.it(...)` or `t.onTestFinished(...)` through `import * as t from "bun:test"`.
  */
-function testApi(context: RuleContext, callee: Node | undefined): string | undefined {
+function testApi(context: RuleContext, callee: Node | undefined, depth = 0): string | undefined {
 	let n = unwrap(callee);
 	let member: string | undefined;
 	while (n && n.type !== "Identifier") {
@@ -462,7 +486,131 @@ function testApi(context: RuleContext, callee: Node | undefined): string | undef
 		const source = node((def.parent ?? def.node.parent)?.source);
 		return source && TEST_MODULES.has(source.value as string) ? member : undefined;
 	}
-	return testApiName(context, n);
+	return testApiName(context, n, depth);
+}
+
+/** bun:test exports that register a callback Bun runs after a test body: a hook, or a test's own callback. */
+const LATE_REGISTRARS = new Set(["afterEach", "onTestFinished"]);
+/** Global objects whose properties include the bun:test globals. */
+const GLOBAL_OBJECTS = new Set(["globalThis", "global", "self", "window"]);
+/** Wrappers whose value is their operand's: parentheses and TypeScript-only expressions. */
+const VALUE_WRAPPERS = new Set([
+	"ParenthesizedExpression",
+	"TSAsExpression",
+	"TSNonNullExpression",
+	"TSSatisfiesExpression",
+	"TSTypeAssertion",
+]);
+
+/** A reference that hands on a registrar where the rule cannot follow it, and the export it hands on (`"*"`: all of them). */
+interface Escape {
+	node: Node;
+	name: string;
+}
+
+/** `n`, or the outermost wrapper whose value is `n`'s: `(afterEach as typeof afterEach)`. */
+function valueTop(n: Node): Node {
+	let cur = n;
+	while (cur.parent && VALUE_WRAPPERS.has(cur.parent.type) && node(cur.parent.expression) === cur) cur = cur.parent;
+	return cur;
+}
+
+/**
+ * Does the rule follow this use of registrar `name`? It does when the reference is called right
+ * there (`afterEach(...)`), or when it initialises a `const` that resolves to the same registrar
+ * (`const register = afterEach`, whose own uses are judged in turn).
+ */
+function followedRegistrarUse(context: RuleContext, ref: Node, name: string): boolean {
+	const direct = valueTop(ref);
+	let top = direct;
+	while (
+		top.parent &&
+		((top.parent.type === "ConditionalExpression" && node(top.parent.test) !== top) ||
+			top.parent.type === "LogicalExpression")
+	)
+		top = valueTop(top.parent);
+	const parent = top.parent;
+	if (parent?.type === "CallExpression" && node(parent.callee) === direct) return true;
+	if (parent?.type !== "VariableDeclarator" || node(parent.init) !== top) return false;
+	const id = node(parent.id);
+	return id?.type === "Identifier" && testApiName(context, id) === name;
+}
+
+/** TypeScript nodes whose operand is a value; every other `TS*` parent holds a type or a declared name. */
+const TS_VALUE_PARENTS = new Set([
+	"TSAsExpression",
+	"TSNonNullExpression",
+	"TSSatisfiesExpression",
+	"TSTypeAssertion",
+	"TSInstantiationExpression",
+	"TSExportAssignment",
+]);
+
+/**
+ * Does `ref` declare a name, name a key or label, or sit in a type, rather than read a value?
+ * Type positions include `typeof afterEach` and `Parameters<typeof afterEach>`.
+ */
+function declaresOrTypes(ref: Node): boolean {
+	const parent = ref.parent;
+	if (!parent) return true;
+	if (parent.type.startsWith("TS") && !TS_VALUE_PARENTS.has(parent.type)) return true;
+	if (
+		parent.type === "ImportSpecifier" ||
+		parent.type === "ImportDefaultSpecifier" ||
+		parent.type === "ImportNamespaceSpecifier" ||
+		parent.type === "LabeledStatement" ||
+		parent.type === "BreakStatement" ||
+		parent.type === "ContinueStatement"
+	)
+		return true;
+	// A class member or object key named `afterEach` is a name, not a read of the binding.
+	if (node(parent.key) === ref && parent.computed !== true && parent.shorthand !== true) return true;
+	if (parent.type === "VariableDeclarator" && node(parent.id) === ref) return true;
+	// `export { afterEach } from "bun:test"` re-exports another module's binding, not this file's.
+	return parent.type === "ExportSpecifier" && node(parent.parent?.source) !== undefined;
+}
+
+/**
+ * Every reference that hands `afterEach` or `onTestFinished` on where the rule cannot follow it: an
+ * argument (`on(afterEach)`), an object or array element (`{ afterEach }`), a `let`, an export,
+ * `afterEach.call(...)`, a conditional between different exports, the `bun:test` namespace itself, a
+ * computed namespace member, `globalThis.afterEach`, or `require("bun:test")`. Whatever such a
+ * reference registers is invisible to the rule, so it may run before any cleanup.
+ */
+function registrarEscapes(context: RuleContext, references: Node[], calls: Node[]): Escape[] {
+	const escapes: Escape[] = [];
+	for (const ref of references) {
+		if (declaresOrTypes(ref)) continue;
+		const def = variableOf(context, ref)?.defs[0];
+		const top = valueTop(ref);
+		const member =
+			top.parent?.type === "MemberExpression" && node(top.parent.object) === top ? top.parent : undefined;
+		if (def?.type === "ImportBinding" && def.node.type === "ImportNamespaceSpecifier") {
+			const source = node((def.parent ?? def.node.parent)?.source);
+			if (!source || !TEST_MODULES.has(source.value as string)) continue;
+			const key = member && propertyName(member);
+			if (!member || key === undefined) escapes.push({ node: member ?? ref, name: "*" });
+			else if (LATE_REGISTRARS.has(key) && !followedRegistrarUse(context, member, key))
+				escapes.push({ node: member, name: key });
+			continue;
+		}
+		if (!def && GLOBAL_OBJECTS.has(ref.name as string)) {
+			// The rule does not read `globalThis.afterEach(...)` as a registration, so every use escapes.
+			const key = member && propertyName(member);
+			if (member && key !== undefined && LATE_REGISTRARS.has(key)) escapes.push({ node: member, name: key });
+			continue;
+		}
+		const name = testApiName(context, ref);
+		if (name !== undefined && LATE_REGISTRARS.has(name) && !followedRegistrarUse(context, ref, name))
+			escapes.push({ node: ref, name });
+	}
+	for (const call of calls) {
+		const callee = unwrap(node(call.callee));
+		if (callee?.type !== "Identifier" || callee.name !== "require" || variableOf(context, callee)) continue;
+		const source = stringValue(nodes(call.arguments)[0]);
+		if (source !== undefined && TEST_MODULES.has(source)) escapes.push({ node: call, name: "*" });
+	}
+	return escapes;
 }
 
 function collect(context: RuleContext, program: Node): FileFacts {
@@ -554,6 +702,7 @@ function collect(context: RuleContext, program: Node): FileFacts {
 		helpers,
 		finishers,
 		references,
+		escapes: registrarEscapes(context, references, calls),
 		flowCache: new Map(),
 		targetCache: new Map(),
 	};
@@ -588,7 +737,8 @@ interface Flow {
 /**
  * Tests whose body runs `n` in its own flow: directly, in `.then/.catch/.finally` callbacks or IIFEs
  * of that body, or through same-file helpers the body calls. Closures handed anywhere else (cleanup
- * lists, hooks) are not followed: the rule cannot know when they run.
+ * lists, hooks) are not followed: the rule cannot know when they run. Nor is a generator: calling one
+ * runs none of its body, which runs only as something iterates it ({@link insideGenerator}).
  */
 function flows(facts: FileFacts, n: Node, depth = 0, via: Node[] = [], calls: Node[] = []): Flow[] {
 	const cached = depth === 0 ? facts.flowCache.get(n) : undefined;
@@ -602,6 +752,7 @@ function walkFlows(facts: FileFacts, n: Node, depth: number, via: Node[], calls:
 	let fn = enclosingFunction(n);
 	let at = n;
 	while (fn) {
+		if (fn.generator === true) return [];
 		const registration = facts.registrations.get(fn);
 		if (registration) return registration.kind === "test" ? [{ test: fn, registration, at, via, calls }] : [];
 		const parent = fn.parent;
@@ -617,6 +768,50 @@ function walkFlows(facts: FileFacts, n: Node, depth: number, via: Node[], calls:
 		return callers.flatMap(call => flows(facts, call, depth + 1, [...via, helper], [...calls, call]));
 	}
 	return [];
+}
+
+/**
+ * Is `n` inside a generator function? Calling a generator runs none of its body: it runs only while
+ * something iterates the generator, and Bun never iterates what a test, hook or `onTestFinished`
+ * callback returns. The rules do not follow iteration, so nothing inside a generator earns credit.
+ */
+function insideGenerator(n: Node): boolean {
+	for (let fn = enclosingFunction(n); fn; fn = enclosingFunction(fn)) if (fn.generator === true) return true;
+	return false;
+}
+
+/** For whom a registration can run: one test, the tests a hook scope covers (the file when `undefined`), or any test. */
+type Reach = { test: Node } | { scope: Node | undefined } | "any";
+
+/**
+ * For whom a registration at `n` can run. Walking out as {@link walkFlows} does, a test body runs it
+ * for that test, a `beforeEach`/`afterEach` hook for the tests its scope covers, and a same-file
+ * function for whatever reaches each of its calls. Anything the walk cannot follow may run it for any
+ * test: a generator (something may iterate it), a function stored, passed on, exported or more than
+ * {@link HELPER_DEPTH} calls deep, another kind of callback, or the file's top level.
+ */
+function reaches(facts: FileFacts, n: Node, depth = 0): Reach[] {
+	let fn = enclosingFunction(n);
+	while (fn) {
+		if (fn.generator === true) return ["any"];
+		const registration = facts.registrations.get(fn);
+		if (registration) {
+			if (registration.kind === "test") return [{ test: fn }];
+			if (registration.name !== "beforeEach" && registration.name !== "afterEach") return ["any"];
+			const scope = hookScope(facts, registration.call);
+			return scope === "unknown" ? ["any"] : [{ scope }];
+		}
+		const parent = fn.parent;
+		if (parent && (isFlowCallback(fn) || (parent.type === "CallExpression" && unwrap(node(parent.callee)) === fn))) {
+			fn = enclosingFunction(parent);
+			continue;
+		}
+		const callers = facts.helpers.get(fn) ?? [];
+		const callees = callers.flatMap(call => unwrap(node(call.callee)) ?? []);
+		if (callers.length === 0 || depth >= HELPER_DEPTH || mayRunAgain(facts, fn, callees)) return ["any"];
+		return callers.flatMap(call => reaches(facts, call, depth + 1));
+	}
+	return ["any"];
 }
 
 /** Does `fn` return a value? A test that returns a promise is awaited like an `async` one. */
@@ -768,14 +963,27 @@ function callbackCanSuspend(facts: FileFacts, call: Node): boolean {
 	return returns;
 }
 
-/** Is `onTestFinished` call `finisher` one of `test`'s: registered by its body, or by a `beforeEach`/`afterEach` hook that applies to it? */
+/**
+ * Is `onTestFinished` call `finisher` certain to be one of `test`'s: registered by its body, or
+ * directly by a `beforeEach`/`afterEach` hook of a scope that covers it? Not inside a generator,
+ * whose body never runs when called.
+ */
 function finisherApplies(facts: FileFacts, finisher: Node, test: Node): boolean {
 	if (flows(facts, finisher).some(flow => flow.test === test)) return true;
 	const fn = enclosingFunction(finisher);
 	const hook = fn && facts.registrations.get(fn);
-	if (hook?.kind !== "hook" || (hook.name !== "beforeEach" && hook.name !== "afterEach")) return false;
+	if (fn?.generator === true || hook?.kind !== "hook" || (hook.name !== "beforeEach" && hook.name !== "afterEach"))
+		return false;
 	const scope = hookScope(facts, hook.call);
-	return scope === "unknown" || coveringScopes(facts, test).includes(scope);
+	return scope !== "unknown" && coveringScopes(facts, test).includes(scope);
+}
+
+/** Can `onTestFinished` call `finisher` register a callback for `test`? Any registration the rule cannot place can ({@link reaches}). */
+function finisherMayApply(facts: FileFacts, finisher: Node, test: Node): boolean {
+	return reaches(facts, finisher).some(
+		reach =>
+			reach === "any" || ("test" in reach ? reach.test === test : coveringScopes(facts, test).includes(reach.scope)),
+	);
 }
 
 /**
@@ -783,8 +991,12 @@ function finisherApplies(facts: FileFacts, finisher: Node, test: Node): boolean 
  * ({@link callbackCanSuspend}), or undefined. `cleanup` is the `afterEach` call whose hook does the
  * cleanup, or the `onTestFinished` call that registers it. Bun 1.4.4 runs a test's `afterEach` hooks
  * innermost scope first, each scope in registration order, then its `onTestFinished` callbacks in
- * registration order. A hook the file registers anywhere but in a scope's body (a helper, another
- * hook) counts as running before every cleanup.
+ * registration order. Registrations are found by binding (`const register = afterEach` included).
+ * A hook the file registers anywhere but in a scope's body (a helper, another hook) counts as running
+ * before every cleanup, an `onTestFinished` call counts for every test that can reach it through
+ * same-file calls ({@link finisherMayApply}), and a registrar handed on where the rule cannot follow
+ * it ({@link registrarEscapes}) counts as registering one that can suspend before every cleanup it
+ * could precede.
  */
 function suspendingHookBefore(facts: FileFacts, test: Node, cleanup: Node): Node | undefined {
 	const scopes = coveringScopes(facts, test);
@@ -805,15 +1017,18 @@ function suspendingHookBefore(facts: FileFacts, test: Node, cleanup: Node): Node
 		}
 		if (callbackCanSuspend(facts, call)) return call;
 	}
-	if (!finisher) return undefined;
-	const fn = enclosingFunction(cleanup);
-	for (const other of facts.finishers) {
-		if (other === cleanup || !finisherApplies(facts, other, test)) continue;
-		// Registered after `cleanup` in the same function: Bun runs it after `cleanup`'s callback.
-		if (enclosingFunction(other) === fn && other.range[0] > cleanup.range[1]) continue;
-		if (callbackCanSuspend(facts, other)) return other;
+	if (finisher) {
+		const fn = enclosingFunction(cleanup);
+		for (const other of facts.finishers) {
+			if (other === cleanup || !finisherMayApply(facts, other, test)) continue;
+			// Registered after `cleanup` in the same function: Bun runs it after `cleanup`'s callback.
+			if (enclosingFunction(other) === fn && other.range[0] > cleanup.range[1]) continue;
+			if (callbackCanSuspend(facts, other)) return other;
+		}
 	}
-	return undefined;
+	// Bun runs every `onTestFinished` callback after every `afterEach` hook, so a hidden
+	// `onTestFinished` registration cannot precede a hook cleanup.
+	return facts.escapes.find(escape => finisher || escape.name !== "onTestFinished")?.node;
 }
 
 /** Where a credited cleanup would have counted but a hook that can suspend runs before it. */
@@ -821,11 +1036,14 @@ interface HookBlock {
 	hook?: Node;
 }
 
+/** The blocking registration, as the report names it. */
 function hookText(facts: FileFacts, hook: Node): string {
+	const line = facts.context.sourceCode.text.slice(0, hook.range[0]).split("\n").length;
+	if (facts.escapes.some(escape => escape.node === hook))
+		return `a hook or callback registered through \`${callText(facts, hook)}\` at line ${line} (the rule cannot see it)`;
 	const callee = unwrap(node(hook.callee));
 	const name = (callee?.type === "MemberExpression" ? propertyName(callee) : identName(callee)) ?? "hook";
-	const line = facts.context.sourceCode.text.slice(0, hook.range[0]).split("\n").length;
-	return `${name}(...) at line ${line}`;
+	return `\`${name}(...)\` at line ${line}`;
 }
 
 /** Does `scope` call the shared synchronous restore helper unconditionally at its top level? */
@@ -1135,10 +1353,12 @@ function registeredNextTo(facts: FileFacts, finisher: Node, install: Node): bool
 /**
  * Does a synchronous `onTestFinished` registered before the test can suspend restore `install` for
  * `test`, with no hook or earlier callback that can suspend running before it ({@link suspendingHookBefore})?
- * A registration that would count but has one before it is recorded in `block`.
+ * Not one registered inside a generator, which never runs when called. A registration that would
+ * count but has one before it is recorded in `block`.
  */
 function spyRegisteredPromptly(facts: FileFacts, install: Node, test: Node, block: HookBlock = {}): boolean {
 	return facts.finishers.some(finisher => {
+		if (insideGenerator(finisher)) return false;
 		if (!registeredBefore(facts, finisher, install) && !registeredNextTo(facts, finisher, install)) return false;
 		const restores = promptCallback(facts, finisher, expression => {
 			const call = unwrap(expression);
@@ -1151,7 +1371,7 @@ function spyRegisteredPromptly(facts: FileFacts, install: Node, test: Node, bloc
 	});
 }
 
-/** Does a synchronous `onTestFinished` registered before `write` put `path` back, with no hook that can suspend before it? */
+/** Does a synchronous `onTestFinished` registered before `write`, outside any generator, put `path` back, with no hook that can suspend before it? */
 function putBackRegisteredPromptly(
 	facts: FileFacts,
 	path: string,
@@ -1161,6 +1381,7 @@ function putBackRegisteredPromptly(
 ): boolean {
 	return facts.finishers.some(
 		finisher =>
+			!insideGenerator(finisher) &&
 			registeredBefore(facts, finisher, write) &&
 			promptCallback(facts, finisher, expression => sharedTargets(facts, expression).includes(path)) &&
 			unblocked(facts, test, finisher, block),
@@ -1175,24 +1396,22 @@ function unblocked(facts: FileFacts, test: Node, cleanup: Node, block: HookBlock
 }
 
 /**
- * Is a put-back of `path` registered anywhere in `test`, however late or conditionally? `"generator"`
- * when the only such registrations are generator callbacks, whose bodies never run.
+ * Is a put-back of `path` registered anywhere in `test`, however late or conditionally? A generator
+ * callback does not count: its body never runs, and {@link judgeGeneratorCleanup} reports it.
  */
-function putBackRegisteredAnywhere(facts: FileFacts, test: Node, path: string): "registered" | "generator" | undefined {
-	let found: "registered" | "generator" | undefined;
-	for (const finisher of facts.finishers) {
-		if (!flows(facts, finisher).some(flow => flow.test === test)) continue;
-		for (const callback of registered(facts, finisher)) {
-			let writes = false;
-			walk(facts.context, callback, n => {
-				if (!writes && sharedTargets(facts, n).includes(path)) writes = true;
-			});
-			if (!writes) continue;
-			if (callback.generator !== true) return "registered";
-			found = "generator";
-		}
-	}
-	return found;
+function putBackRegisteredAnywhere(facts: FileFacts, test: Node, path: string): boolean {
+	return facts.finishers.some(
+		finisher =>
+			flows(facts, finisher).some(flow => flow.test === test) &&
+			registered(facts, finisher).some(callback => {
+				if (callback.generator === true) return false;
+				let writes = false;
+				walk(facts.context, callback, n => {
+					if (!writes && sharedTargets(facts, n).includes(path)) writes = true;
+				});
+				return writes;
+			}),
+	);
 }
 
 function callText(facts: FileFacts, call: Node): string {
@@ -1200,10 +1419,29 @@ function callText(facts: FileFacts, call: Node): string {
 	return text.length > 40 ? `${text.slice(0, 37)}...` : text;
 }
 
+/**
+ * Restores and put-backs inside a generator: its body runs only while something iterates it, and Bun
+ * never iterates what a test, hook or `onTestFinished` callback returns, so such cleanup never runs
+ * as registered, and the rules credit none of it ({@link insideGenerator}). Reported wherever it is.
+ */
+function judgeGeneratorCleanup(
+	facts: FileFacts,
+	messageId: string,
+	cleanups: { node: Node; data: Record<string, string> }[],
+): void {
+	for (const cleanup of cleanups)
+		if (insideGenerator(cleanup.node)) facts.context.report({ node: cleanup.node, messageId, data: cleanup.data });
+}
+
 function judgeRestores(facts: FileFacts): void {
+	judgeGeneratorCleanup(
+		facts,
+		"restoreInGenerator",
+		facts.calls.flatMap(call => (restoreKind(call) ? [{ node: call, data: { call: callText(facts, call) } }] : [])),
+	);
 	for (const call of facts.calls) {
 		const kind = restoreKind(call);
-		if (!kind) continue;
+		if (!kind || insideGenerator(call)) continue;
 		const installs = kind === "mockRestore" ? spyInstalls(facts, call) : [];
 		for (const flow of flows(facts, call)) {
 			let messageId: string | undefined;
@@ -1244,14 +1482,15 @@ function restoredInBody(facts: FileFacts, install: Node, test: Node): boolean {
 
 /**
  * Spies whose restore is not certain to undo them: registered where a timeout can skip the
- * registration, registered only in a generator callback (which never runs), registered in time but
- * through a variable that also holds another spy when the callback runs, or registered where a hook
- * or earlier callback that can suspend runs first (Bun then skips the callback).
+ * registration, registered in time but through a variable that also holds another spy when the
+ * callback runs, or registered where a hook or earlier callback that can suspend runs first (Bun then
+ * skips the callback). A restore inside a generator is {@link judgeGeneratorCleanup}'s.
  */
 function judgeLateRestores(facts: FileFacts): void {
 	const reported = new Set<Node>();
 	for (const finisher of facts.finishers) {
 		for (const { restore, callback } of registeredRestores(facts, finisher)) {
+			if (insideGenerator(restore)) continue;
 			const individual = restoreKind(restore) === "mockRestore";
 			const installs = individual ? spyInstalls(facts, restore) : facts.calls.filter(call => isSpyOn(facts, call));
 			for (const install of installs) {
@@ -1271,19 +1510,16 @@ function judgeLateRestores(facts: FileFacts): void {
 							inTime &&
 							runsBodyWhenCalled(callback) &&
 							creditedSpyInstall(facts, restore) !== install;
-						messageId =
-							callback.generator === true
-								? "restoreInGenerator"
-								: prompt.hook
-									? "restoreSkippedByHook"
-									: rewritten
-										? "restoreBindingRewritten"
-										: "restoreRegisteredLate";
+						messageId = prompt.hook
+							? "restoreSkippedByHook"
+							: rewritten
+								? "restoreBindingRewritten"
+								: "restoreRegisteredLate";
 						block.hook = prompt.hook;
 					} else {
 						// A synchronous body cannot time out before it registers the restore; only a hook or
 						// earlier callback that can suspend can strand it.
-						if (callback.generator === true || restoredInBody(facts, install, flow.test)) continue;
+						if (restoredInBody(facts, install, flow.test)) continue;
 						const hooked: HookBlock = {};
 						if (unblocked(facts, flow.test, finisher, hooked)) continue;
 						messageId = "restoreSkippedByHook";
@@ -1464,6 +1700,24 @@ function judgePutBacks(facts: FileFacts): void {
 		write.putsBack =
 			write.replaced !== undefined || inFinally(write.node, fn) || restoresSaved(facts, write.node, write.path);
 	}
+	// A put-back inside a generator never runs as registered: report it wherever it is, and judge
+	// nothing inside one (the generator walls it off from every test's flow).
+	const generatorCallbacks = facts.calls.flatMap(call => {
+		const api = testApi(facts.context, node(call.callee));
+		if (!api || (!HOOK_NAMES.has(api) && api !== "onTestFinished")) return [];
+		return registered(facts, call).filter(callback => callback.generator === true);
+	});
+	judgeGeneratorCleanup(
+		facts,
+		"putBackInGenerator",
+		writes
+			.filter(
+				write =>
+					write.putsBack ||
+					generatorCallbacks.some(cb => cb.range[0] <= write.node.range[0] && write.node.range[1] <= cb.range[1]),
+			)
+			.map(write => ({ node: write.node, data: { target: write.path } })),
+	);
 	// What a registration has to precede is the write that replaces the value. A put-back the body
 	// also runs is covered by the registration that already precedes that replacement.
 	const replacement = new Map<string, Node>();
@@ -1491,11 +1745,7 @@ function judgePutBacks(facts: FileFacts): void {
 					if (suspendsBefore(facts, flow, write.node, write.replaced))
 						messageId = block.hook ? "putBackSkippedByHook" : "putBackSkippedByTimeout";
 				} else if (block.hook) messageId = "putBackSkippedByHook";
-				else {
-					const registeredAs = putBackRegisteredAnywhere(facts, flow.test, write.path);
-					if (registeredAs === "registered") messageId = "putBackRegisteredLate";
-					else if (registeredAs === "generator") messageId = "putBackInGenerator";
-				}
+				else if (putBackRegisteredAnywhere(facts, flow.test, write.path)) messageId = "putBackRegisteredLate";
 			} else {
 				// A synchronous body cannot time out, so it reaches its own put-back and its registrations;
 				// only a hook or earlier callback that can suspend can strand a registered put-back.
@@ -1559,11 +1809,11 @@ export default {
 				restoreRegisteredLate:
 					"The test can time out after installing this spy but before it registers the `onTestFinished` that runs `{{call}}`, so the spy leaks into later tests. Register the restore in the statement right after the spy, or call `installMockRestores()` at the top of this file or `describe`.",
 				restoreInGenerator:
-					"This spy's restore `{{call}}` is in a generator callback. Bun calls it but never iterates the generator it returns, so the restore never runs and the spy leaks into later tests. Use a plain function, or call `installMockRestores()` at the top of this file or `describe`.",
+					"`{{call}}` is inside a generator function. Calling a generator runs none of its body, and Bun never iterates what a test, hook or `onTestFinished` callback returns, so this restore does not run as registered and the mock can leak into later tests. Use a plain function, or call `installMockRestores()` at the top of this file or `describe`.",
 				restoreBindingRewritten:
 					"`{{call}}` restores whatever its variable holds when the callback runs, and this file can store another spy in that variable first (a second write, or one in a loop or in a function that can run again), so this spy may never be restored. Give each spy its own `const`, or call `installMockRestores()` at the top of this file or `describe`.",
 				restoreSkippedByHook:
-					"This mock is restored (`{{call}}`) only by cleanup that runs after `{{hook}}`, which can suspend. If that hook times out, Bun skips every later `afterEach` hook and every `onTestFinished` callback of the test, so the mock leaks into later tests. Call `installMockRestores()` at the top of this file or `describe`, or restore in a synchronous `afterEach` that runs before every hook that can suspend.",
+					"This mock is restored (`{{call}}`) only by cleanup that runs after {{hook}}, which can suspend. If that hook times out, Bun skips every later `afterEach` hook and every `onTestFinished` callback of the test, so the mock leaks into later tests. Call `installMockRestores()` at the top of this file or `describe`, or restore in a synchronous `afterEach` that runs before every hook that can suspend.",
 			},
 			judgeRestores,
 		),
@@ -1575,9 +1825,9 @@ export default {
 				putBackRegisteredLate:
 					"The test can time out after this write to `{{target}}` but before it registers the `onTestFinished` that puts it back, so the replacement leaks into later tests. Register the put-back before the write.",
 				putBackInGenerator:
-					"The put-back of `{{target}}` is in a generator callback. Bun calls it but never iterates the generator it returns, so the put-back never runs and the replacement leaks into later tests. Use a plain function.",
+					"This put-back of `{{target}}` is inside a generator function. Calling a generator runs none of its body, and Bun never iterates what a test, hook or `onTestFinished` callback returns, so the put-back does not run as registered and the replacement can leak into later tests. Use a plain function.",
 				putBackSkippedByHook:
-					"The put-back of `{{target}}` runs after `{{hook}}`, which can suspend. If that hook times out, Bun skips every later `afterEach` hook and every `onTestFinished` callback of the test, so the replacement leaks into later tests. Put it back in a synchronous `afterEach` that runs before every hook that can suspend: in the innermost scope, registered before the scope's other hooks.",
+					"The put-back of `{{target}}` runs after {{hook}}, which can suspend. If that hook times out, Bun skips every later `afterEach` hook and every `onTestFinished` callback of the test, so the replacement leaks into later tests. Put it back in a synchronous `afterEach` that runs before every hook that can suspend: in the innermost scope, registered before the scope's other hooks.",
 			},
 			judgePutBacks,
 		),
