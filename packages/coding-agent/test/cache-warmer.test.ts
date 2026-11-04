@@ -265,6 +265,25 @@ describe("cache warming scheduling math", () => {
 		expect(getPromptCacheTtlMs(converse, { cacheRetention: "long" })).toBe(3_600_000);
 	});
 
+	test("uses the short TTL for Chat Completions' Anthropic-format breakpoint, which carries no 1h marker", () => {
+		const chat = buildModel({
+			id: "anthropic/claude-sonnet-4.6",
+			name: "Claude Sonnet 4.6",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+			promptCache: { short: 300, long: 3600 },
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+			compat: { cacheControlFormat: "anthropic" },
+		});
+		expect(getPromptCacheTtlMs(chat, { cacheRetention: "long" })).toBe(300_000);
+		expect(getPromptCacheTtlMs({ ...chat, promptCache: { short: 300 } }, { cacheRetention: "long" })).toBe(300_000);
+	});
+
 	test("never warms without a declared lifetime or with caching off", () => {
 		const model = makeModel();
 		model.promptCache = undefined;

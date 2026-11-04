@@ -100,6 +100,11 @@ function supportsLongCacheRetention(model: Model<Api>): boolean {
 			compat.supportsLongPromptCacheRetention === true
 		);
 	}
+	// Chat Completions' Anthropic-format breakpoint carries no TTL (`maybeAddAnthropicCacheControl`),
+	// so it writes the five-minute entry under every retention.
+	if (model.api === "openai-completions") {
+		return !(compat !== undefined && "cacheControlFormat" in compat && compat.cacheControlFormat === "anthropic");
+	}
 	return true;
 }
 
