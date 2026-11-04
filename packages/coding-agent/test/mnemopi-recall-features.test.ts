@@ -47,7 +47,6 @@ function startSession(overrides: Record<string, unknown>): { state: MnemopiSessi
 			} as never,
 			sessionManager: { getEntries: () => [], getCwd: () => dir.path() } as never,
 			emitNotice: () => {},
-			invalidateContext: () => {},
 			getHindsightSessionState: () => undefined,
 			subscribe: () => () => {},
 		} as never,

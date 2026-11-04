@@ -78,7 +78,6 @@ describe("HindsightSessionState mental-model freeze", () => {
 					return () => listeners.delete(fn);
 				},
 				refreshBaseSystemPrompt: async () => {},
-				invalidateContext: () => {},
 				sessionManager: { getEntries: () => [] },
 			} as never,
 			banksSet: new Set(),
@@ -111,11 +110,9 @@ describe("SessionMemory mental-model boundary reload", () => {
 		const client = { listMentalModels: () => response } as unknown as HindsightApi;
 		const stateSession: {
 			refreshBaseSystemPrompt: (commitIf?: () => boolean) => Promise<void>;
-			invalidateContext: () => void;
 			sessionManager: { getEntries: () => never[] };
 		} = {
 			refreshBaseSystemPrompt: async () => {},
-			invalidateContext: () => {},
 			sessionManager: { getEntries: () => [] },
 		};
 		const state = new HindsightSessionState({
@@ -250,10 +247,8 @@ describe("SessionMemory mental-model boundary reload", () => {
 		const published: Array<string | undefined> = [];
 		const stateSession: {
 			refreshBaseSystemPrompt: (commitIf?: () => boolean) => Promise<void>;
-			invalidateContext: () => void;
 			sessionManager: { getEntries: () => never[] };
 		} = {
-			invalidateContext: () => {},
 			refreshBaseSystemPrompt: async commitIf => {
 				if (!commitIf || commitIf()) published.push(state.mentalModelsSnippet);
 			},

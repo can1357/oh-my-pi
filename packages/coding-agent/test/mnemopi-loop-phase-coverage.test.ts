@@ -135,7 +135,6 @@ function registerMnemopiState(entries: () => unknown[]): MnemopiSessionState {
 			} as never,
 			getXdevToolEntries: () => [],
 			emitNotice: () => {},
-			invalidateContext: () => {},
 			getHindsightSessionState: () => undefined,
 			subscribe: () => () => {},
 		} as never,

@@ -45,6 +45,7 @@ type RecallOptionsInternal = RecallOptions & {
 	mmrLambda?: number;
 	ignoreSessionScope?: boolean;
 	currentSensitive?: boolean;
+	updateRecallCounts?: boolean;
 };
 
 type CandidateSignals = {
@@ -858,7 +859,7 @@ function rerankRecallResults(results: readonly RecallResult[], lambdaParam: numb
 	return mmrRerank(items, lambdaParam, topK).map(item => item.result);
 }
 
-export function updateRecallCounts(
+function updateRecallCounts(
 	beam: BeamMemoryState,
 	results: readonly RecallResult[],
 	options: RecallOptionsInternal,
@@ -1204,7 +1205,7 @@ function matchesRecallFilters(result: OrchestratedRecallResult, options: RecallO
 }
 
 /** Changes whenever any connection commits to the database or this connection changes a row. */
-export function databaseWriteToken(beam: BeamMemoryState): string {
+function databaseWriteToken(beam: BeamMemoryState): string {
 	const version = beam.db.query("PRAGMA data_version").get() as { data_version: number };
 	const changes = beam.db.query("SELECT total_changes() AS changes").get() as { changes: number };
 	return `${version.data_version}:${changes.changes}`;

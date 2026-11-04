@@ -102,7 +102,12 @@ export const hindsightBackend: MemoryBackend = {
 		const state = session.getHindsightSessionState();
 		if (!state) return undefined;
 
-		return state.beforeAgentStartPrompt(promptText, signal);
+		const preparation = await state.beforeAgentStartPrompt(promptText, signal);
+		if (!preparation) return undefined;
+		return {
+			context: preparation.context,
+			commit: () => session.getHindsightSessionState() === state && preparation.commit(),
+		};
 	},
 
 	async clear(_agentDir, _cwd, session): Promise<void> {

@@ -261,12 +261,8 @@ export class RemoteMnemopiSessionState implements MnemopiSessionStateApi {
 		return this.#remote.callSync("editScopedMemory", op, id, options);
 	}
 
-	collectScopedRecallResults(query: string, updateRecallCounts = true): Promise<RecallResult[]> {
-		return this.#remote.call("collectScopedRecallResults", query, updateRecallCounts);
-	}
-
-	recordScopedRecall(results: readonly RecallResult[]): void {
-		this.#remote.callSync("recordScopedRecall", results);
+	collectScopedRecallResults(query: string): Promise<RecallResult[]> {
+		return this.#remote.call("collectScopedRecallResults", query);
 	}
 
 	recallResultsScoped(query: string): Promise<RecallResult[]> {

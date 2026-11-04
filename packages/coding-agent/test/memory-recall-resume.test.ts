@@ -70,7 +70,6 @@ function startProcess(
 		},
 		getXdevToolEntries: () => [],
 		emitNotice: () => {},
-		invalidateContext: () => {},
 		getHindsightSessionState: () => undefined,
 		subscribe: () => () => {},
 		refreshBaseSystemPrompt: async () => {},
@@ -488,7 +487,7 @@ describe("Hindsight recall across a resume", () => {
 			bankId,
 			recallTags,
 			config: { ...config, ...overrides },
-			session: { sessionManager, subscribe: () => () => {}, invalidateContext: () => {} } as never,
+			session: { sessionManager, subscribe: () => () => {} } as never,
 			banksSet: new Set(),
 		});
 	}

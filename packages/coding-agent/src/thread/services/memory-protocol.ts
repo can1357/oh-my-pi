@@ -115,8 +115,7 @@ export type MnemopiSessionStateProtocol = {
 		[op: MnemopiMemoryEditOperation, id: string, options?: MnemopiMemoryEditOptions],
 		MnemopiMemoryEditResult
 	>;
-	collectScopedRecallResults: RpcMethod<[query: string, updateRecallCounts?: boolean], RecallResult[]>;
-	recordScopedRecall: RpcMethod<[results: readonly RecallResult[]], void>;
+	collectScopedRecallResults: RpcMethod<[query: string], RecallResult[]>;
 	formatScopedRecallContext: RpcMethod<
 		[results: readonly RecallResult[], format?: "bullet" | "json"],
 		string | undefined
