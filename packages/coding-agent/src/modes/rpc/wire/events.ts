@@ -37,6 +37,10 @@ export const eventDefs = {
 		"awaitingAsyncWork?": doc("boolean", "Non-terminal end whose only possible resume is a background-job result."),
 		"telemetry?": JSON_OBJECT,
 		"coverage?": JSON_OBJECT,
+		"source?": doc(
+			"string",
+			"Another producer that forwarded this end into the session; absent for the session's own run.",
+		),
 	},
 	TurnStartEvent: { type: "'turn_start'" },
 	TurnEndEvent: { type: "'turn_end'", message: "AgentMessage", toolResults: "ToolResultMessage[]" },
@@ -189,6 +193,13 @@ export const eventDefs = {
 					"Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.",
 				),
 				0,
+			),
+			agentSteeringNext: absentAs(
+				doc(
+					"boolean",
+					"The next steering delivery is agent-authored, so the first queued (not live) `steering` entry is read one delivery later.",
+				),
+				false,
 			),
 		},
 		"Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.",

@@ -1914,41 +1914,31 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/** Remove advisor concern/blocker cards from the agent-core steer/follow-up
-	 *  queues and return them. Used by the stranded-queue drain while a user interrupt is
+	 *  queues, and from the run that took them and has not yet delivered them, and return them.
+	 *  Used by the stranded-queue drain while a user interrupt is
 	 *  in effect, so an advisor card steered in after the user stopped cannot auto-resume
 	 *  the run, and by the advisor host to drop queued cards at a conversation boundary;
 	 *  real user follow-ups stay queued. (The abort path itself uses
 	 *  #extractInterruptedQueuedMessages.) */
 	#extractQueuedAdvisorCards(): CustomMessage[] {
-		const steering = this.agent.peekSteeringQueue();
-		const followUp = this.agent.peekFollowUpQueue();
-		const cards = [...steering, ...followUp].filter(isAdvisorCard);
-		if (cards.length === 0) return [];
-		this.agent.replaceQueues(
-			steering.filter(m => !isAdvisorCard(m)),
-			followUp.filter(m => !isAdvisorCard(m)),
-		);
+		const { steering, followUp } = this.agent.removeQueuedMessages(isAdvisorCard);
+		if (steering.length === 0 && followUp.length === 0) return [];
 		this.#reconcileQueuedMessageDrain();
-		return cards;
+		return [...steering, ...followUp].filter(isAdvisorCard);
 	}
 
 	/** Remove the queued messages an abort must not auto-resume on and return them in queue
 	 *  order: the agent work an editor-restoring interrupt withdrew ({@link clearQueue} with
-	 *  `forInterrupt`), and on a user interrupt also advisor cards. Real user input stays queued.
-	 *  Synchronous and await-free so it runs before the abort path polls the queue. */
+	 *  `forInterrupt`), and on a user interrupt also advisor cards, including a card the aborted
+	 *  run took and has not yet delivered, which its end would otherwise put back. Real user input
+	 *  stays queued. Synchronous and await-free so it runs before the abort path polls the queue. */
 	#extractInterruptedQueuedMessages(userInterrupt: boolean): AgentMessage[] {
-		const interrupted = (m: AgentMessage) =>
-			this.#interruptWithdrawnMessages.has(m) || (userInterrupt && isAdvisorCard(m));
-		const steering = this.agent.peekSteeringQueue();
-		const followUp = this.agent.peekFollowUpQueue();
-		const extracted = [...steering, ...followUp].filter(interrupted);
-		if (extracted.length === 0) return [];
-		this.agent.replaceQueues(
-			steering.filter(m => !interrupted(m)),
-			followUp.filter(m => !interrupted(m)),
+		const { steering, followUp } = this.agent.removeQueuedMessages(
+			m => this.#interruptWithdrawnMessages.has(m) || (userInterrupt && isAdvisorCard(m)),
 		);
+		if (steering.length === 0 && followUp.length === 0) return [];
 		this.#reconcileQueuedMessageDrain();
-		return extracted;
+		return [...steering, ...followUp];
 	}
 
 	/** Record a suppressed advisor concern as visible, persisted advice without
@@ -2086,6 +2076,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			(previous, next) =>
 				isHiddenUserCompanion(previous) && (isHiddenUserCompanion(next) || isUserQueuedMessage(next)),
 		);
+		// One-at-a-time steering reads a person's message ahead of agent steering. The queue chips
+		// (getQueuedMessages) list exactly the messages this rule accepts, and the grouping above
+		// keeps each one's hidden companions in its unit, so the chips show the order the agent
+		// reads them; the first is read at the next boundary, unless four user units were already
+		// taken while an agent steer waited (MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING), in which case
+		// the oldest waiting agent steer goes first and the queue snapshot says so (agentSteeringNext).
+		this.agent.setSteeringPriority(isUserAuthoredQueuedMessage);
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.#ownsCostGate = config.costGate === undefined;
@@ -4667,6 +4664,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			event.message.completedAt = Date.now();
 			this.#tools.bindReplyToCapturedPrompt(event.message);
+		}
+		// Vibe context stays in history only while Vibe mode is on. Context that was already in a provider
+		// request when the mode ended is recorded after the exit filtered history, so the exit runs again.
+		if (
+			event.type === "message_end" &&
+			!this.#vibeModeState?.enabled &&
+			event.message.role === "custom" &&
+			event.message.customType === VIBE_MODE_CONTEXT_MESSAGE_TYPE
+		) {
+			this.setVibeModeState(this.#vibeModeState);
 		}
 		// Turn-boundary maintenance awaits this commit before draining steering;
 		// extension notifications must not own or delay the persistence work.
@@ -7845,14 +7852,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const historyChanged = filtered.length !== messages.length;
 		if (historyChanged) this.agent.replaceMessages(filtered);
 
-		const steering = this.agent.peekSteeringQueue();
-		const followUp = this.agent.peekFollowUpQueue();
-		const filteredSteering = steering.filter(message => !isVibeContext(message));
-		const filteredFollowUp = followUp.filter(message => !isVibeContext(message));
-		if (filteredSteering.length !== steering.length || filteredFollowUp.length !== followUp.length) {
-			this.agent.replaceQueues(filteredSteering, filteredFollowUp);
-			this.#reconcileQueuedMessageDrain();
-		}
+		// Mode context the run already took goes too, so an abort cannot put it back for the next run.
+		const removed = this.agent.removeQueuedMessages(isVibeContext);
+		if (removed.steering.length > 0 || removed.followUp.length > 0) this.#reconcileQueuedMessageDrain();
 		this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(message => !isVibeContext(message));
 
 		if (!historyChanged) return;
@@ -10635,7 +10637,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  directives, which the user never sees.
 	 *  `forInterrupt` also withdraws input the run already dequeued but never recorded — live-steered
 	 *  into the aborted response, or taken for its next model call — and treats it as queued ahead of
-	 *  the rest (it was queued first). */
+	 *  the rest: a person's messages and agent steering each leave the queue in arrival order, so what
+	 *  the run took was queued before what remains of its own class. */
 	clearQueue(options?: { forInterrupt?: boolean }): {
 		steering: RestoredQueuedMessage[];
 		followUp: RestoredQueuedMessage[];
@@ -10706,15 +10709,26 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/** Chip texts for the queue display. Steering live steering took for the streaming response
-	 *  stays listed until the transcript records it, when the model actually switches to it. */
-	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[]; liveSteered: number } {
-		const liveSteered = this.agent.peekLiveSteeredMessages().filter(isUserAuthoredQueuedMessage).length;
+	 *  stays listed until the transcript records it, when the model actually switches to it.
+	 *  `agentSteeringNext`: the next steering delivery is agent-authored, so the first queued
+	 *  (not live-steered) `steering` chip is read one delivery later. */
+	getQueuedMessages(): {
+		steering: readonly string[];
+		followUp: readonly string[];
+		liveSteered: number;
+		agentSteeringNext: boolean;
+	} {
+		const live = this.agent.peekLiveSteeredMessages();
+		const liveSteered = live.filter(isUserAuthoredQueuedMessage).length;
+		const steering = [...live, ...this.agent.peekSteeringQueue()]
+			.filter(isUserAuthoredQueuedMessage)
+			.map(queueChipText);
 		return {
-			steering: [...this.agent.peekLiveSteeredMessages(), ...this.agent.peekSteeringQueue()]
-				.filter(isUserAuthoredQueuedMessage)
-				.map(queueChipText),
+			steering,
 			followUp: this.agent.peekFollowUpQueue().filter(isUserAuthoredQueuedMessage).map(queueChipText),
 			liveSteered,
+			agentSteeringNext:
+				steering.length > liveSteered && !this.agent.peekNextSteering().some(isUserAuthoredQueuedMessage),
 		};
 	}
 
@@ -10724,7 +10738,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  about, so a mutation that leaves the displayable queue unchanged (e.g. an
 	 *  agent-authored aside, or a claim/restore round-trip) never re-emits. */
 	#lastEmittedQueueSnapshot:
-		| { steering: readonly string[]; followUp: readonly string[]; liveSteered: number }
+		| { steering: readonly string[]; followUp: readonly string[]; liveSteered: number; agentSteeringNext: boolean }
 		| undefined;
 
 	#emitQueueUpdateIfChanged(): void {
@@ -10735,6 +10749,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			last.steering.length === snapshot.steering.length &&
 			last.followUp.length === snapshot.followUp.length &&
 			last.liveSteered === snapshot.liveSteered &&
+			last.agentSteeringNext === snapshot.agentSteeringNext &&
 			last.steering.every((text, i) => text === snapshot.steering[i]) &&
 			last.followUp.every((text, i) => text === snapshot.followUp[i]);
 		if (unchanged) return;
@@ -10744,6 +10759,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			steering: [...snapshot.steering],
 			followUp: [...snapshot.followUp],
 			liveSteered: snapshot.liveSteered,
+			agentSteeringNext: snapshot.agentSteeringNext,
 		});
 	}
 
@@ -10765,16 +10781,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Remove exactly `messages` from the steering and follow-up queues; everything else queued
-	 * stays. A caller takes back what it queued (the groups reported by `onPromptQueued`) without
-	 * touching what other sources queued meanwhile. A message no longer queued (already delivered,
-	 * or removed before) is skipped.
+	 * Remove exactly `messages` from the steering and follow-up queues, and from the run that took
+	 * them and has not yet delivered them; everything else queued stays. A caller takes back what it
+	 * queued (the groups reported by `onPromptQueued`) without touching what other sources queued
+	 * meanwhile. A message already delivered to the model, or removed before, is skipped.
 	 */
 	dropQueuedMessages(messages: Iterable<AgentMessage>): void {
 		const dropped = new Set(messages);
 		if (dropped.size === 0) return;
-		const kept = (queue: readonly AgentMessage[]): AgentMessage[] => queue.filter(message => !dropped.has(message));
-		this.agent.replaceQueues(kept(this.agent.peekSteeringQueue()), kept(this.agent.peekFollowUpQueue()));
+		this.agent.removeQueuedMessages(message => dropped.has(message));
 		this.#reconcileQueuedMessageDrain();
 	}
 

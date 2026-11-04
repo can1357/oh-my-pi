@@ -493,6 +493,24 @@ describe("native queued messages", () => {
 			undefined,
 		]);
 	});
+
+	it("shows a group's note with its heading and on its first pill only", () => {
+		const note = "an agent message goes first";
+		const band = new QueuedMessagesBand(
+			[
+				{ label: "Steering", messages: ["mine", "also mine"], note },
+				{ label: "After yield", messages: ["later"] },
+			],
+			"alt+up",
+			vi.fn(),
+		);
+		const notes = (band.describe().c ?? []).filter(isNode).map(pill => byRole(pill, "omp.queue.note")?.p);
+		expect(notes).toEqual([{ text: note, title: note, role: "omp.queue.note" }, undefined, undefined]);
+		const lines = band.render(120).map(line => Bun.stripANSI(line));
+		const heading = lines.find(line => line.includes("Steering"));
+		expect(heading).toContain(note);
+		expect(lines.filter(line => line.includes(note))).toHaveLength(1);
+	});
 });
 
 describe("native autocomplete list", () => {

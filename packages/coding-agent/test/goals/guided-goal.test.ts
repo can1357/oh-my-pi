@@ -131,7 +131,7 @@ async function endTurn(harness: GuidedGoalHarness, messages: AgentMessage[]): Pr
 		if (event.type === "agent_end") delivered.resolve();
 	});
 	try {
-		harness.session.agent.emitExternalEvent({ type: "agent_end", messages });
+		harness.session.agent.emitExternalAgentEnd({ type: "agent_end", messages });
 		await delivered.promise;
 	} finally {
 		unsubscribe();

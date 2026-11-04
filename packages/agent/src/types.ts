@@ -333,6 +333,35 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	onLiveSteeringTaken?: (messages: AgentMessage[]) => void;
 
 	/**
+	 * Queued input the loop was handed and is about to put into a provider request (at a boundary, or
+	 * before live steering hands it to the provider), without what the host took back since. The loop
+	 * neither sends nor records what this drops.
+	 */
+	keepQueuedInput?: (messages: AgentMessage[], live: boolean) => AgentMessage[];
+
+	/**
+	 * The loop put `messages` into a provider request, or live steering handed them to the provider
+	 * (`live`, kept from the batch the live take returned as `taken`): they are delivered, so the host can no
+	 * longer take them back, and the loop records them.
+	 */
+	commitQueuedInput?: (messages: readonly AgentMessage[], live: boolean, taken?: readonly AgentMessage[]) => void;
+
+	/**
+	 * The provider handed back the live-steered `messages` (the same list passed to
+	 * {@link commitQueuedInput}) undelivered; the next boundary delivers them.
+	 */
+	releaseQueuedInput?: (messages: readonly AgentMessage[]) => void;
+
+	/** Resolves when the host next takes back queued input the run was handed, or when `signal` aborts. */
+	waitForTakeBack?: (signal: AbortSignal) => Promise<void>;
+
+	/**
+	 * The provider accepted the live-steered `messages` (the same list passed to {@link commitQueuedInput})
+	 * into the response it is streaming; the next request carries them again.
+	 */
+	acceptQueuedInput?: (messages: readonly AgentMessage[]) => void;
+
+	/**
 	 * Peeks whether IRC messages should interrupt an interruptible waiting tool.
 	 *
 	 * Uses the same delivery rules as steering: the poll is non-consuming, only
@@ -1316,6 +1345,8 @@ export type AgentEvent =
 	| {
 			type: "agent_end";
 			messages: AgentMessage[];
+			/** `emitExternalAgentEnd` requires this tag; a run's own end leaves it undefined. */
+			source?: string;
 			/** Present iff `AgentTelemetryConfig` was supplied on this run. */
 			telemetry?: AgentRunSummary;
 			coverage?: AgentRunCoverage;
@@ -1333,3 +1364,6 @@ export type AgentEvent =
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
 	| { type: "tool_stream_update"; toolCallId: string; toolName: string; update: unknown }
 	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError?: boolean };
+
+/** Events external code may forward into this Agent; only this Agent may emit an untagged `agent_end`. */
+export type AgentExternalEvent = Exclude<AgentEvent, { type: "agent_end" }>;

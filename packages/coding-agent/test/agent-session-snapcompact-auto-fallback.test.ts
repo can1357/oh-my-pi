@@ -116,7 +116,7 @@ async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptio
 			timestamp: Date.now(),
 		};
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 	};
 
 	return { session, sessionManager, notices, failures, awaitCompactionEnd: () => end.promise, triggerThreshold };

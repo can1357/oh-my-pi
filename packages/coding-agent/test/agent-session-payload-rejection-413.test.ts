@@ -436,7 +436,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = payloadRejectionAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await session.waitForIdle();
 
@@ -480,7 +480,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const failed = payloadRejectionAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: failed });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [failed] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [failed] });
 		await compacted;
 		await session.waitForIdle();
 
@@ -517,7 +517,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = payloadRejectionAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -560,7 +560,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 			timestamp: Date.now(),
 		} as AssistantMessage;
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -589,7 +589,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = payloadRejectionAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await session.waitForIdle();
 
@@ -630,7 +630,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = payloadRejectionAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -668,7 +668,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = payloadRejectionAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -695,7 +695,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = payloadRejectionAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await session.waitForIdle();
 
@@ -730,7 +730,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = payloadRejectionAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await session.waitForIdle();
 
@@ -763,7 +763,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = usageBackedMediaBudgetAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await session.waitForIdle();
 
@@ -797,7 +797,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = usageBackedMediaBudgetAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await session.waitForIdle();
 
@@ -835,7 +835,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 		// check doesn't intercept it before a compaction attempt is even made.
 		const assistantMsg = usageBackedPlainPayloadAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await session.waitForIdle();
 
@@ -865,7 +865,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = usageBackedMediaBudgetAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await session.waitForIdle();
 
@@ -900,7 +900,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = usageBackedPlainPayloadAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -931,7 +931,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = explicitMediaNoDigitPayloadAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await session.waitForIdle();
 
@@ -973,7 +973,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 			const assistantMsg = buildAssistant();
 			session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+			session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 			await session.waitForIdle();
 
@@ -1006,7 +1006,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = mediaBudgetPayloadAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await session.waitForIdle();
 
@@ -1044,7 +1044,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = incidentalMediaWordPayloadAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await compactionDone;
 		await session.waitForIdle();
@@ -1074,7 +1074,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = explicitMediaNoDigitPayloadAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await session.waitForIdle();
 
@@ -1629,7 +1629,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = statusOnlyPayloadAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await session.waitForIdle();
 
@@ -1657,7 +1657,7 @@ describe("AgentSession payload-rejection 413 handling", () => {
 
 		const assistantMsg = mediaBudgetPayloadAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistantMsg] });
 
 		await session.waitForIdle();
 

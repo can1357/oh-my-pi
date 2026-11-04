@@ -372,7 +372,13 @@ export interface AgentViewSession extends AgentSessionHandle {
 	/** Whether a built-in tool with this name is registered. */
 	hasBuiltInTool(name: string): boolean;
 	/** Queued steering and follow-up messages. */
-	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[]; liveSteered: number };
+	getQueuedMessages(): {
+		steering: readonly string[];
+		followUp: readonly string[];
+		liveSteered: number;
+		/** The next steering delivery is agent-authored, so the queue says an agent message goes first. */
+		agentSteeringNext: boolean;
+	};
 	/** Remove and return the newest queued message. */
 	popLastQueuedMessage(): RestoredQueuedMessage | undefined;
 	/** Resume an interrupted turn. */

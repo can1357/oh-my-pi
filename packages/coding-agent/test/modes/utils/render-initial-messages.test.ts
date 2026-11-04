@@ -269,6 +269,7 @@ describe("UiHelpers.renderInitialMessages — queued messages", () => {
 			steering: ["steer now"],
 			followUp: ["queued one", "queued two"],
 			liveSteered: 0,
+			agentSteeringNext: false,
 		});
 
 		await new UiHelpers(ctx).renderInitialMessages({ clearTerminalHistory: true });

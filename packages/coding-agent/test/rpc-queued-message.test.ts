@@ -103,10 +103,20 @@ describe("RPC queued-message editing", () => {
 	test("queue_update mirrors get_state.queuedMessages, matches the removal invariant, and never repeats", async () => {
 		await client.start();
 
-		const updates: Array<{ steering: string[]; followUp: string[]; liveSteered: number }> = [];
+		const updates: Array<{
+			steering: string[];
+			followUp: string[];
+			liveSteered: number;
+			agentSteeringNext: boolean;
+		}> = [];
 		const unsubscribe = client.onSessionEvent(event => {
 			if (event.type === "queue_update")
-				updates.push({ steering: event.steering, followUp: event.followUp, liveSteered: event.liveSteered });
+				updates.push({
+					steering: event.steering,
+					followUp: event.followUp,
+					liveSteered: event.liveSteered,
+					agentSteeringNext: event.agentSteeringNext,
+				});
 		});
 
 		try {
@@ -129,8 +139,13 @@ describe("RPC queued-message editing", () => {
 			for (const text of snapshot.followUp) {
 				expect(await client.removeQueuedMessage(text, "followUp")).toEqual({ removed: true });
 			}
-			expect(updates.at(-1)).toEqual({ steering: [], followUp: [], liveSteered: 0 });
-			expect((await client.getState()).queuedMessages).toEqual({ steering: [], followUp: [], liveSteered: 0 });
+			expect(updates.at(-1)).toEqual({ steering: [], followUp: [], liveSteered: 0, agentSteeringNext: false });
+			expect((await client.getState()).queuedMessages).toEqual({
+				steering: [],
+				followUp: [],
+				liveSteered: 0,
+				agentSteeringNext: false,
+			});
 
 			// Requeue and let delivery (the next turn dequeuing it) drain the queue.
 			await client.followUp("delivered");
@@ -146,8 +161,13 @@ describe("RPC queued-message editing", () => {
 			} finally {
 				unsubscribeIdle();
 			}
-			expect(updates.at(-1)).toEqual({ steering: [], followUp: [], liveSteered: 0 });
-			expect((await client.getState()).queuedMessages).toEqual({ steering: [], followUp: [], liveSteered: 0 });
+			expect(updates.at(-1)).toEqual({ steering: [], followUp: [], liveSteered: 0, agentSteeringNext: false });
+			expect((await client.getState()).queuedMessages).toEqual({
+				steering: [],
+				followUp: [],
+				liveSteered: 0,
+				agentSteeringNext: false,
+			});
 
 			// No duplicate identical consecutive events: every emitted snapshot
 			// differs from the one immediately before it.
@@ -359,7 +379,7 @@ describe("RPC queued-message editing", () => {
 				},
 			);
 			const frames = readJsonl<unknown>(child.stdout)[Symbol.asyncIterator]();
-			const next = (match: (frame: Record<string, unknown>) => boolean, message: string) =>
+			const next = (match: (frame: Record<string, unknown>) => boolean, message: string, timeoutMs = 10_000) =>
 				withTimeout(
 					(async () => {
 						for (;;) {
@@ -368,7 +388,7 @@ describe("RPC queued-message editing", () => {
 							if (isRecord(value) && match(value)) return value;
 						}
 					})(),
-					10_000,
+					timeoutMs,
 					message,
 				);
 			const send = async (frame: object) => {
@@ -378,7 +398,8 @@ describe("RPC queued-message editing", () => {
 			const isResponse = (id: string) => (frame: Record<string, unknown>) =>
 				frame.type === "response" && frame.id === id;
 			try {
-				await next(frame => frame.type === "ready", "Fixture never became ready");
+				// Startup loads the whole agent in a fresh process: 2 to 14 s measured on a loaded machine.
+				await next(frame => frame.type === "ready", "Fixture never became ready", 45_000);
 				await send({ id: "start", type: "prompt", message: "start a long turn" });
 				await next(frame => frame.type === "agent_start", "First turn never started streaming");
 				// Each steer fits one v1 frame; together they exceed it. Undecodable image bytes skip
@@ -407,7 +428,7 @@ describe("RPC queued-message editing", () => {
 				child.kill();
 				await child.exited;
 			}
-		}, 30_000);
+		}, 75_000);
 
 		test("keeps an oldest-first prefix flagged truncated when even the texts exceed the limit", () => {
 			const first = { text: "a".repeat(100) };

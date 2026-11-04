@@ -207,7 +207,7 @@ function emptyViewState(): SessionViewState {
 		advisorCost: 0,
 		advisorUsingSubscription: false,
 		todoPhases: [],
-		queuedMessages: { steering: [], followUp: [], liveSteered: 0 },
+		queuedMessages: { steering: [], followUp: [], liveSteered: 0, agentSteeringNext: false },
 		restorableQueue: { steering: [], followUp: [] },
 		approvals: { scopes: [], grants: [] },
 		ephemeralMaxTokensPreservesRequest: false,
@@ -701,7 +701,12 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#builtInTools.has(name);
 	}
 
-	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[]; liveSteered: number } {
+	getQueuedMessages(): {
+		steering: readonly string[];
+		followUp: readonly string[];
+		liveSteered: number;
+		agentSteeringNext: boolean;
+	} {
 		return this.#view.queuedMessages;
 	}
 

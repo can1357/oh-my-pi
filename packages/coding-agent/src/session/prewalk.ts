@@ -542,17 +542,13 @@ export class PrewalkCoordinator {
 		const stateMessages = this.#host.agent.state.messages;
 		const filtered = stateMessages.filter(message => !isPrewalkPlanNudge(message));
 		if (filtered.length !== stateMessages.length) this.#host.agent.replaceMessages(filtered);
-		// Delivered continuations are persisted history; only pending ones can be canceled.
-		const isPendingNudge = (message: AgentMessage): boolean =>
-			isPrewalkPlanNudge(message) ||
-			(includeContinuation && message.role === "custom" && message.customType === PREWALK_CONTINUE_MESSAGE_TYPE);
-		const steering = this.#host.agent.peekSteeringQueue();
-		if (steering.some(isPendingNudge)) {
-			this.#host.agent.replaceQueue(
-				"steering",
-				steering.filter(message => !isPendingNudge(message)),
-			);
-		}
+		// Delivered continuations are history; only ones not yet delivered can be canceled,
+		// including one the run took and has not yet put into a request, which an abort would otherwise put back.
+		this.#host.agent.removeQueuedMessages(
+			message =>
+				isPrewalkPlanNudge(message) ||
+				(includeContinuation && message.role === "custom" && message.customType === PREWALK_CONTINUE_MESSAGE_TYPE),
+		);
 	}
 
 	async #finalizePlanYoloProposal(title: string): Promise<AgentToolResult<unknown>> {

@@ -319,23 +319,22 @@ describe("queued message preparation", () => {
 			await running;
 
 			expect(userTexts(agent.state.messages)).toEqual(["ordinary"]);
-			expect(agent.peekSteeringQueue()).toEqual(
-				failure === "replace" ? [laterSteering] : [steering, steering, laterSteering],
-			);
+			// A replacement installs a new pending queue and drops the follow-up claim it omits, but the
+			// steering the run already took and did not record stays the run's: its end puts it back.
+			expect(agent.peekSteeringQueue()).toEqual([steering, steering, laterSteering]);
 			expect(agent.peekFollowUpQueue()).toEqual(failure === "replace" ? [laterFollowUp] : [followUp, laterFollowUp]);
 			expect(tracked.latest()).toEqual(queueView(agent));
 			agent.prepareQueuedMessages = undefined;
 			await agent.continue();
 			expect(userTexts(mock.calls.at(-1)!.context.messages)).toEqual([
 				"ordinary",
-				...(failure === "replace" ? [] : ["late steering", "late steering"]),
+				"late steering",
+				"late steering",
 				"newer steering",
 				...(failure === "replace" ? [] : ["following batch"]),
 				"newer follow-up",
 			]);
-			expect(agent.state.messages.filter(message => message === steering)).toHaveLength(
-				failure === "replace" ? 0 : 2,
-			);
+			expect(agent.state.messages.filter(message => message === steering)).toHaveLength(2);
 			expect(agent.state.messages.filter(message => message === followUp)).toHaveLength(
 				failure === "replace" ? 0 : 1,
 			);

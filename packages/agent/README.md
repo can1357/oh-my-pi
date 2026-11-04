@@ -204,7 +204,7 @@ agent.setModel(getModel("openai", "gpt-4o"));
 agent.setThinkingLevel("medium");
 agent.setTools([myTool]);
 agent.replaceMessages(newMessages);
-agent.appendMessage(message);
+agent.appendMessage(message); // A host's record: ends no queued or in-flight occurrence of `message`
 agent.clearMessages();
 agent.reset(); // Clear everything
 ```
@@ -224,6 +224,15 @@ const unsubscribe = agent.subscribe(event => {
 });
 unsubscribe();
 ```
+
+`emitExternalEvent` accepts message and tool events, but not `agent_end`: only
+the Agent run that owns a lifecycle can report its untagged end. A foreign
+producer must call `emitExternalAgentEnd({ type: "agent_end", messages }, source)`;
+subscribers can distinguish that source-tagged end from the Agent's own. Every
+`agent_end`, whoever produced it, reaches subscribers with the Agent settled: not
+streaming, and holding no input it took. So `emitExternalAgentEnd` throws while
+the Agent's own run is in flight or holds claimed, delivered or live-steered input;
+report the foreign end after the run's own `agent_end`.
 
 ## Steering & Follow-up
 
@@ -251,9 +260,91 @@ agent.followUp({
 Steering messages are checked after each tool call by default. Set `interruptMode` to `"wait"` to defer
 steering until the current turn completes.
 
+In `one-at-a-time` mode each boundary takes one delivery unit, and a unit holding a user-authored
+message (`attribution: "user"`, or a `role: "user"` message not attributed to an agent; see
+`isUserSteeringMessage`, or the host's own rule from `setSteeringPriority(predicate)`) goes ahead of
+agent-authored steering queued before it. A person's steer is read at the next boundary however many
+agent steers wait, except in the one delivery in five the allowance below gives to agent steering;
+user units keep their order, as do agent units. `all` mode delivers the whole queue in order. Priority
+follows attribution, not where the message was typed: a user-attributed steer that arrives over RPC,
+ACP or from a collaboration guest is a person's message, and goes in arrival order with the ones typed
+here. A host that sends user-attributed steers no person wrote should attribute them to the agent.
+
+An allowance keeps sustained user input from starving agent steering:
+
+- Once `MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING` (4) user units have been taken while agent steering
+  waits, the oldest waiting agent unit goes next, and the count starts again after it. An agent unit
+  with `k` agent units ahead of it when it is queued is taken within `5 × (k + 1)` deliveries. In that
+  one delivery in five, a person's next message is read one delivery later.
+- A unit counts from the moment it is taken: dequeued for the next model call, or claimed by live
+  steering for the response being streamed, before the transcript records it. A taken unit that never
+  reaches the transcript (its preparation fails or is cancelled, it is withdrawn ahead of an abort, or
+  its run ends first) gives its place back as if it was never taken; an agent unit that does leaves
+  the user units taken before and after it counting toward its wait again.
+- Whether a user unit counts is fixed when it is taken: it counts if an agent unit is queued at that
+  moment, wherever either sits, and does not count otherwise, even if the transcript records it after
+  an agent unit arrives.
+- Pending means in this `Agent`: another session or a subagent keeps its own queue and allowance. The
+  wait ends when no agent steering is pending here, so a cleared and re-queued message starts again,
+  and the same message queued twice is two units.
+- `prioritizeSteering(messages)` moves every queued occurrence of the messages ahead of everything, the
+  allowance included, and promotes each one, so a host can make the message that answers a denied tool
+  call land right after the denial. A promotion belongs to its occurrence: it stays with it while it is
+  taken and when a failed preparation or an ended run puts it back, it ends when the transcript records
+  that occurrence or it is removed, and it never passes to another occurrence of the same message.
+  `replaceQueue` matches a message's occurrences in order, so removing the last of them removes that
+  one's promotion. A promoted user unit still counts, so each one can delay a due agent unit by one
+  delivery.
+
+A host that lists queued messages should pass `setSteeringPriority` the rule its list uses, so the list
+shows the order the agent reads them, and can read `peekNextSteering()` to say when an agent unit goes
+next; `onQueueChange` listeners also hear when `setSteeringMode`, `setSteeringPriority` or
+`setQueuedMessageGrouping` changes what that is. The rule must synchronously return `true` or `false`
+and change nothing: a rule that queues messages or changes the steering mode while it is asked breaks
+that contract, and the order it then produces is not defined. One that throws, or returns anything
+else (an `async` rule's `Promise`, resolved or rejected, fails with a `TypeError` that says to remove
+`async`/`await`), fails the delivery it is asked about with that error (the run reports it, or
+`continue()` rejects with it); the undelivered steering stays queued in order, and the agent runs again
+once the host fixes or removes the rule.
+
+Whatever ends a run, it gives back the steering it took and did not record (including a claim a provider's
+live preparation still holds), and stops streaming, before `agent_end` reaches subscribers. While any
+`agent_end` is being reported, the run's own or one `emitExternalAgentEnd` forwards, queue notifications
+wait and a `prompt()` or `continue()` a subscriber calls starts only after every subscriber has received
+the end, so no subscriber sees the Agent streaming at its end and one can still start the next run. That
+run is the Agent's from the call: `abort()` cancels it and `waitForIdle()` waits for it, and a second
+`prompt()` or `continue()` throws `AgentBusyError`, while `state.isStreaming` stays `false` until it starts.
+`onQueueChange` listeners never hear from inside a run's teardown, not even from an abort callback a
+restoration triggers: input a failed or cancelled preparation or the run's end put back is announced once
+that run has settled, after its `agent_end` reached every subscriber (or, for a continuation that failed
+before its run started, once it stopped streaming). A listener therefore never sees that input queued
+while the agent still reports itself streaming, and can start the next run from the notification. A
+dequeue is announced once the taken unit is held for delivery, so every notification finds each queued
+occurrence in exactly one place: queued or claimed (`peekSteeringQueue`), taken and not yet recorded
+(`peekUndeliveredQueuedMessages`), or recorded.
+
 Hosts can use `setQueuedMessageGrouping((previous, next) => boolean)` to keep adjacent companion
 records and their prompt together in `one-at-a-time` mode. Without a grouping predicate, records
-remain separate. `replaceQueue("steering" | "followUp", messages)` replaces only the selected queue.
+remain separate. Taking a user unit from the middle of the queue makes the records on either side of
+it adjacent though they never were, so a predicate should only join records that belong together
+wherever they sit (such as a companion and the prompt after it), not pair openers with closers.
+`replaceQueue("steering" | "followUp", messages)` replaces only the selected queue. A replacement installs
+the pending view `peekSteeringQueue`/`peekFollowUpQueue` show, a claimed batch included; input the run has
+already taken and not recorded is not in that view and stays the run's: it is recorded, put back when the
+run ends, or taken back by `withdrawUndeliveredQueuedMessages`, `removeQueuedMessages` or `clearAllQueues`.
+`removeQueuedMessages(shouldRemove)` removes every matching message the Agent holds and has not yet
+delivered: queued, claimed (the rest of the claimed batch goes back to the front), or taken by the run and
+not yet put into a provider request. The provider never gets what it removes, the transcript never records
+it, and the run's end does not put it back; a later occurrence of the same message is delivered as usual.
+Input is delivered once the run puts it into a provider request or live steering hands it to the provider:
+the model reads it, so the transcript records it and removal leaves it. Use it when input must stop
+reaching the model, such as context for a mode that ended; it returns what it removed, by queue.
+`clearAllQueues()` empties both queues and takes back everything the run holds and has not delivered;
+delivered input stays the run's, as with `removeQueuedMessages`, and the agent-steering wait starts afresh.
+`withdrawUndeliveredQueuedMessages()` is the abandon path an interrupt takes ahead of an abort, and `reset()`
+discards the conversation: both take back everything the run holds and has not recorded, delivered or not,
+since the response that read it is discarded. The run neither sends nor records what they took back, and
+each steering unit the withdrawal drops gives its place in the agent-steering wait back.
 
 ## Custom Message Types
 

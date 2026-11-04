@@ -422,6 +422,8 @@ export interface QueuedMessagesState {
 	followUp: string[];
 	/** Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them. */
 	liveSteered?: number;
+	/** The next steering delivery is agent-authored, so the first queued (not live) `steering` entry is read one delivery later. */
+	agentSteeringNext?: boolean;
 }
 
 export interface ToolDescriptor {
@@ -823,6 +825,8 @@ export interface AgentEndEvent {
 	awaitingAsyncWork?: boolean;
 	telemetry?: Record<string, unknown>;
 	coverage?: Record<string, unknown>;
+	/** Another producer that forwarded this end into the session; absent for the session's own run. */
+	source?: string;
 }
 
 export interface TurnStartEvent {
@@ -1046,6 +1050,8 @@ export interface QueueUpdateEvent {
 	followUp: string[];
 	/** Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them. */
 	liveSteered?: number;
+	/** The next steering delivery is agent-authored, so the first queued (not live) `steering` entry is read one delivery later. */
+	agentSteeringNext?: boolean;
 }
 
 /** A session event, discriminated by `type`; `set_event_filter` selects which are sent. */

@@ -22,6 +22,19 @@ export interface LiveSteeringQueue {
 	 * `undefined` when that view is not purely user messages.
 	 */
 	toProvider(messages: AgentMessage[], signal: AbortSignal): Promise<UserMessage[] | undefined>;
+	/** `messages` without the input the host took back since it was taken (`AgentLoopConfig.keepQueuedInput`). */
+	keep?(messages: AgentMessage[]): AgentMessage[];
+	/** Resolves when the host next takes back input, or `signal` aborts (`AgentLoopConfig.waitForTakeBack`). */
+	takenBack?(signal: AbortSignal): Promise<void>;
+	/** The provider is handed `messages`, kept from the batch `taken` returned (`AgentLoopConfig.commitQueuedInput`). */
+	commit?(messages: readonly AgentMessage[], taken: readonly AgentMessage[]): void;
+	/**
+	 * `messages` went back undelivered (`AgentLoopConfig.releaseQueuedInput`): the provider declined the list
+	 * `commit` was given, or the batch `take` returned could not be converted.
+	 */
+	release?(messages: readonly AgentMessage[]): void;
+	/** The provider accepted `messages` into its response (`AgentLoopConfig.acceptQueuedInput`). */
+	accept?(messages: readonly AgentMessage[]): void;
 }
 
 /** One provider call's {@link LiveSteering} source. */
@@ -36,17 +49,32 @@ export class LiveSteeringChannel implements LiveSteering {
 		this.#queue = queue;
 	}
 
-	wait(signal: AbortSignal): Promise<void> {
-		// Once input is deferred, later input must follow it at the boundary;
-		// delivering it live would reorder the user's messages.
-		if (this.deferred.length === 0) return this.#queue.wait(signal);
-		if (signal.aborted) return Promise.resolve();
-		const { promise, resolve } = Promise.withResolvers<void>();
-		signal.addEventListener("abort", () => resolve(), { once: true });
-		return promise;
+	/** Drop deferred input the host took back since: it no longer holds later input back. */
+	#pruneDeferred(): void {
+		if (this.deferred.length === 0 || !this.#queue.keep) return;
+		const kept = this.#queue.keep(this.deferred);
+		if (kept.length !== this.deferred.length) this.deferred.splice(0, this.deferred.length, ...kept);
+	}
+
+	async wait(signal: AbortSignal): Promise<void> {
+		// Once input is deferred, later input must follow it at the boundary; delivering it live would reorder
+		// the user's messages. The wait stays parked until the host takes the deferred input back.
+		for (;;) {
+			this.#pruneDeferred();
+			if (this.deferred.length === 0) return this.#queue.wait(signal);
+			if (signal.aborted) return;
+			if (this.#queue.takenBack) {
+				await this.#queue.takenBack(signal);
+				continue;
+			}
+			const { promise, resolve } = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => resolve(), { once: true });
+			return promise;
+		}
 	}
 
 	async claim(signal: AbortSignal): Promise<LiveSteerClaim | undefined> {
+		this.#pruneDeferred();
 		if (this.deferred.length > 0 || signal.aborted) return undefined;
 		let messages: AgentMessage[];
 		try {
@@ -59,30 +87,49 @@ export class LiveSteeringChannel implements LiveSteering {
 			return undefined;
 		}
 		if (messages.length === 0) return undefined;
+		const taken = messages;
 		let providerMessages: UserMessage[] | undefined;
-		try {
-			providerMessages = await this.#queue.toProvider(messages, signal);
-		} catch (error) {
-			logger.debug("Live steering conversion failed", {
-				error: error instanceof Error ? error.message : String(error),
-			});
+		// The host may take input back before or while it is converted: the provider gets only what is left,
+		// and nothing the host took back is deferred to the boundary.
+		messages = this.#queue.keep?.(messages) ?? messages;
+		if (messages.length === 0) return undefined;
+		for (;;) {
+			providerMessages = undefined;
+			try {
+				providerMessages = await this.#queue.toProvider(messages, signal);
+			} catch (error) {
+				logger.debug("Live steering conversion failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			if (!providerMessages) {
+				// Not delivered: the next boundary delivers it, as it does a steer the provider declined.
+				messages = this.#queue.keep?.(messages) ?? messages;
+				this.#queue.release?.(taken);
+				this.deferred.push(...messages);
+				return undefined;
+			}
+			const kept = this.#queue.keep?.(messages) ?? messages;
+			if (kept.length === messages.length) break;
+			messages = kept;
+			if (messages.length === 0) return undefined;
 		}
-		if (!providerMessages) {
-			this.deferred.push(...messages);
-			return undefined;
-		}
+		const delivered = messages;
+		this.#queue.commit?.(delivered, taken);
 		let settled = false;
 		return {
 			messages: providerMessages,
 			accept: () => {
 				if (settled) return;
 				settled = true;
-				this.accepted.push(...messages);
+				this.#queue.accept?.(delivered);
+				this.accepted.push(...delivered);
 			},
 			reject: () => {
 				if (settled) return;
 				settled = true;
-				this.deferred.push(...messages);
+				this.#queue.release?.(delivered);
+				this.deferred.push(...delivered);
 			},
 		};
 	}

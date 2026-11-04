@@ -458,7 +458,7 @@ describe("snapcompact archive sized by the compaction trigger", () => {
 			timestamp: Date.now(),
 		};
 		session.agent.emitExternalEvent({ type: "message_end", message: assistant });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistant] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistant] });
 		await done;
 		await session.waitForIdle();
 
@@ -509,7 +509,7 @@ describe("snapcompact archive sized by the compaction trigger", () => {
 				timestamp: Date.now(),
 			};
 			session.agent.emitExternalEvent({ type: "message_end", message: assistant });
-			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistant] });
+			session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistant] });
 			await done;
 			await session.waitForIdle();
 
@@ -578,7 +578,7 @@ describe("snapcompact archive sized by the compaction trigger", () => {
 				timestamp: Date.now(),
 			};
 			session.agent.emitExternalEvent({ type: "message_end", message: assistant });
-			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistant] });
+			session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [assistant] });
 			await done;
 			await session.waitForIdle();
 

@@ -92,7 +92,7 @@ describe("AgentSession todo reminder async-job deferral", () => {
 	function emitTextOnlyStop(): void {
 		const msg = textOnlyAssistantMessage();
 		session.agent.emitExternalEvent({ type: "message_end", message: msg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [msg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [msg] });
 	}
 
 	/** Register a job that stays running until the returned resolver fires. */

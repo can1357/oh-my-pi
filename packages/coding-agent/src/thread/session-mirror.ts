@@ -119,6 +119,8 @@ export interface SessionQueuedMessages {
 	readonly steering: readonly string[];
 	readonly followUp: readonly string[];
 	readonly liveSteered: number;
+	/** The next steering delivery is agent-authored (see `AgentSession.getQueuedMessages`). */
+	readonly agentSteeringNext: boolean;
 }
 
 /** User-authored queued messages in queue order, as `popLastQueuedMessage` restores them. */

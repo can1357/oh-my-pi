@@ -155,7 +155,12 @@ describe("AgentSession prompt admission racing abort", () => {
 		await session.waitForIdle();
 		expect(admitted).toBe(false);
 		expect(dropped).toEqual(["queue while normalizing"]);
-		expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: [], liveSteered: 0 });
+		expect(session.getQueuedMessages()).toEqual({
+			steering: [],
+			followUp: [],
+			liveSteered: 0,
+			agentSteeringNext: false,
+		});
 		expect(calls).toBe(1);
 	});
 

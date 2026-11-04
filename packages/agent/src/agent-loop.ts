@@ -1326,8 +1326,10 @@ async function runLoopBody(
 		}
 
 		// Outer loop: continues when queued follow-up messages arrive after agent would stop
+		// A later pass of the outer loop exists only to deliver what the stop drain below queued.
+		let drainPass = false;
 		while (true) {
-			let hasMoreToolCalls = true;
+			let hasMoreToolCalls = !drainPass;
 
 			// Inner loop: process tool calls and steering messages
 			while (hasMoreToolCalls || pendingMessages.length > 0) {
@@ -1340,6 +1342,12 @@ async function runLoopBody(
 				// engaged (host /pause). An external abort releases the park so a
 				// cancelled run still unwinds while everything else stays frozen.
 				if (agentPauseGate.paused) await waitForProcessPause(config, signal);
+				// Queued input the host took back since it was dequeued is not delivered; the rest is
+				// put into the request below, in this same step, and is delivered from here on.
+				if (pendingMessages.length > 0 && config.keepQueuedInput) {
+					pendingMessages = config.keepQueuedInput(pendingMessages, false);
+					if (pendingMessages.length === 0 && !hasMoreToolCalls) continue;
+				}
 
 				// Build the provider-bound context before opening the turn. Queue
 				// messages are added now but their events remain deferred until
@@ -1353,6 +1361,7 @@ async function runLoopBody(
 						turnMessages.push(message);
 						(message as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
 					}
+					config.commitQueuedInput?.(pendingMessages, false);
 					pendingMessages = [];
 				}
 
@@ -1835,6 +1844,7 @@ async function runLoopBody(
 			if (lateSteering.length > 0 || asideMessages.length > 0 || followUpMessages.length > 0) {
 				// Set as pending so the inner loop processes them before stopping.
 				pendingMessages = [...lateSteering, ...asideMessages, ...followUpMessages];
+				drainPass = true;
 				continue;
 			}
 
@@ -1883,22 +1893,42 @@ interface PreparedProviderCall {
 }
 
 /**
- * Classify the first `count` steering messages for a tool-batch interrupt:
- * any user-authored message wins, then agent-attributed user messages, else
- * system steering (advisor cards, hidden directives). Shared by the agent's
- * queue peek and the loop's live-taken steering.
+ * Whether a queued steering message is user-authored: user-attributed, or a user
+ * turn not attributed to an agent. A tool-batch interrupt classifies by it, and
+ * one-at-a-time steering delivers a unit holding one ahead of agent steering
+ * unless the host sets its own rule (`Agent.setSteeringPriority`).
+ */
+export function isUserSteeringMessage(message: AgentMessage): boolean {
+	const attribution = "attribution" in message ? message.attribution : undefined;
+	if (attribution === "user") return true;
+	return "role" in message && message.role === "user" && attribution !== "agent";
+}
+
+/**
+ * Classify the first `count` steering messages for a tool-batch interrupt: any
+ * user-authored message wins, then agent-attributed user messages, else system
+ * steering (advisor cards, hidden directives). Shared by the agent's queue peek
+ * and the loop's live-taken steering.
  */
 export function steeringQueueState(messages: readonly AgentMessage[], count = messages.length): SteeringQueueState {
+	// Only a count of exactly 0 is "nothing queued": a negative or NaN count classifies an empty
+	// range as queued system steering, as the published function always has.
 	if (count === 0) return { queued: false };
+	return classifySteering(messages, 0, count);
+}
+
+/** {@link steeringQueueState} for `messages[start, end)`, without copying the range. */
+export function steeringRangeState(messages: readonly AgentMessage[], start: number, end: number): SteeringQueueState {
+	if (start >= end) return { queued: false };
+	return classifySteering(messages, start, end);
+}
+
+function classifySteering(messages: readonly AgentMessage[], start: number, end: number): SteeringQueueState {
 	let hasAgentSteering = false;
-	for (let i = 0; i < count; i++) {
+	for (let i = start; i < end; i++) {
 		const message = messages[i];
-		const role = "role" in message ? message.role : undefined;
-		const attribution = "attribution" in message ? message.attribution : undefined;
-		if (attribution === "user") return { queued: true, source: "user" };
-		if (role !== "user") continue;
-		if (attribution !== "agent") return { queued: true, source: "user" };
-		hasAgentSteering = true;
+		if (isUserSteeringMessage(message)) return { queued: true, source: "user" };
+		if ("role" in message && message.role === "user") hasAgentSteering = true;
 	}
 	return { queued: true, source: hasAgentSteering ? "agent" : "system" };
 }
@@ -1926,6 +1956,15 @@ function openLiveSteering(
 			if (messages.length > 0) config.onLiveSteeringTaken?.(messages);
 			return messages;
 		},
+		keep: config.keepQueuedInput ? messages => config.keepQueuedInput?.(messages, true) ?? messages : undefined,
+		takenBack: config.waitForTakeBack
+			? signal => config.waitForTakeBack?.(bound(signal)) ?? Promise.resolve()
+			: undefined,
+		commit: config.commitQueuedInput
+			? (messages, taken) => config.commitQueuedInput?.(messages, true, taken)
+			: undefined,
+		release: config.releaseQueuedInput,
+		accept: config.acceptQueuedInput,
 		toProvider: async (messages, signal) => {
 			const transformed = config.transformContext
 				? await config.transformContext(messages, bound(signal))

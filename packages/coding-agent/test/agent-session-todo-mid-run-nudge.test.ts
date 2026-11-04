@@ -97,7 +97,7 @@ describe("AgentSession mid-run todo reconciliation nudge", () => {
 	function emitTextOnlyStop(): void {
 		const msg = textOnlyAssistant();
 		session.agent.emitExternalEvent({ type: "message_end", message: msg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [msg] });
+		session.agent.emitExternalAgentEnd({ type: "agent_end", messages: [msg] });
 	}
 
 	/** Production-shaped tool round trip: assistant toolCall turn + toolResult. */
