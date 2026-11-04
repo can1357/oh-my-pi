@@ -121,9 +121,11 @@ import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
 import {
 	FileSessionStorage,
 	MemorySessionStorage,
+	type SessionAppendOptions,
 	type SessionStorage,
 	type SessionStorageWriter,
 	SessionWriteConflictError,
+	sessionPublishTarget,
 } from "./session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 import {
@@ -866,8 +868,8 @@ export class SessionPersistenceIndeterminateError extends AggregateError {
 }
 
 /**
- * This session moved to a new file and keeps saving there. Not a failure:
- * nothing is latched. Delivered through {@link SessionManager.onPersistenceNotice}.
+ * This session's file changed under it, and saving goes on correctly. Not a
+ * failure: nothing is latched. Delivered through {@link SessionManager.onPersistenceNotice}.
  */
 export interface SessionPersistenceNotice {
 	/**
@@ -876,13 +878,23 @@ export interface SessionPersistenceNotice {
 	 * them into that file. `"replaced"`: `from` changed on disk and no longer
 	 * reads as this session's journal, so it is left untouched. `"contested"`:
 	 * a writer without the ownership lease kept changing `from` through every
-	 * read-back-and-retry pass, so this session stops racing it.
+	 * read-back-and-retry pass, so this session stops racing it. `"restored"`:
+	 * `from` still reads as this session but lost bytes this session had written
+	 * (another program put an older copy at the path, truncated it or removed
+	 * it), so the whole session is written back to it from memory; `to` is `from`.
 	 */
-	reason: "open-elsewhere" | "replaced" | "contested";
+	reason: "open-elsewhere" | "replaced" | "contested" | "restored";
 	/** The session file this session was saving to. */
 	from: string;
-	/** The fresh sibling it saves to from now on: same directory, a new session id whose `parentSession` is the old one. */
+	/**
+	 * Where it saves from now on: a fresh sibling (same directory, a new session
+	 * id whose `parentSession` is the old one), or `from` itself for `"restored"`.
+	 */
 	to: string;
+	/** `"restored"` only: the bytes this session had written to `from`. */
+	expectedBytes?: number;
+	/** `"restored"` only: the bytes `from` held instead, or `null` when it was gone. */
+	foundBytes?: number | null;
 }
 
 /**
@@ -1127,7 +1139,7 @@ export class SessionManager {
 	}
 
 	#notifyPersistenceNotice(notice: SessionPersistenceNotice): void {
-		logger.warn("Session moved to a new file", { ...notice });
+		logger.warn("Session file changed under this session", { ...notice });
 		this.#persistenceNotices.push(notice);
 		for (const observer of this.#persistenceNoticeCallbacks) this.#invokePersistenceObserver(observer, notice);
 	}
@@ -1180,7 +1192,6 @@ export class SessionManager {
 			!(error instanceof SessionWriteConflictError) ||
 			error.expectedSize === null ||
 			!sessionFile ||
-			path.resolve(error.path) !== path.resolve(sessionFile) ||
 			!this.#persist ||
 			this.#released ||
 			this.#sessionFileRelocating ||
@@ -1188,11 +1199,42 @@ export class SessionManager {
 		) {
 			return undefined;
 		}
+		// A rewrite publishes into a symlinked session file's referent and reports
+		// that path; an append reports the session path itself.
+		const conflicted = path.resolve(error.path);
+		if (conflicted !== path.resolve(sessionFile) && conflicted !== path.resolve(sessionPublishTarget(sessionFile))) {
+			return undefined;
+		}
 		return sessionFile;
 	}
 
-	/** The entries `content` holds that this manager does not, or `undefined` when it is not this session's journal. */
+	/**
+	 * Say so when the conflict on `sessionFile`, which still is (or no longer
+	 * holds anything but) this session's journal, shows bytes this manager wrote
+	 * are gone: another program put a shorter copy at the path, truncated it or
+	 * removed it. The retry writes the whole journal back from memory. A file
+	 * that only grew (another writer appended) loses nothing and stays quiet.
+	 */
+	#noticeIfJournalLost(error: SessionWriteConflictError, sessionFile: string, recoveries: number): void {
+		if (recoveries > 0 || error.expectedSize === null) return;
+		if (error.actualSize !== null && error.actualSize >= error.expectedSize) return;
+		this.#notifyPersistenceNotice({
+			reason: "restored",
+			from: sessionFile,
+			to: sessionFile,
+			expectedBytes: error.expectedSize,
+			foundBytes: error.actualSize,
+		});
+	}
+
+	/**
+	 * The entries `content` holds that this manager does not, or `undefined` when
+	 * it is not this session's journal. An empty file holds nothing to keep: an
+	 * append writer opening a path whose file is gone (through a symlink to it,
+	 * say) creates one, and the whole journal is written over it.
+	 */
 	#foreignEntriesIn(content: string): SessionEntry[] | undefined {
+		if (content.length === 0) return [];
 		const { entries, invalidHeader } = parseSessionContent(content);
 		const header = entries[0];
 		if (invalidHeader || header?.type !== "session" || header.id !== this.#sessionId) return undefined;
@@ -1244,6 +1286,7 @@ export class SessionManager {
 	#recoverFromWriteConflictSync(error: unknown, recoveries: number): string | undefined {
 		const contested = this.#conflictedSessionFile(error);
 		if (!contested) return undefined;
+		const conflict = error as SessionWriteConflictError;
 		if (recoveries >= MAX_WRITE_CONFLICT_RECOVERIES) return this.#moveOffSessionFile("contested");
 		if (!this.#storage.readTextSync) return undefined;
 		let content: string;
@@ -1251,12 +1294,14 @@ export class SessionManager {
 			content = this.#storage.readTextSync(contested);
 		} catch (readError) {
 			if (!isEnoent(readError)) return this.#moveOffSessionFile("replaced");
+			this.#noticeIfJournalLost(conflict, contested, recoveries);
 			this.#expectedDiskSize = null;
 			return contested;
 		}
 		const foreign = this.#foreignEntriesIn(content);
 		if (!foreign) return this.#moveOffSessionFile("replaced");
 		resolveBlobRefsInEntriesSync(foreign, this.#blobs);
+		this.#noticeIfJournalLost(conflict, contested, recoveries);
 		this.#adoptForeignEntries(foreign, Buffer.byteLength(content, "utf8"));
 		return contested;
 	}
@@ -1265,6 +1310,7 @@ export class SessionManager {
 	async #recoverFromWriteConflict(error: unknown, recoveries: number): Promise<string | undefined> {
 		const contested = this.#conflictedSessionFile(error);
 		if (!contested) return undefined;
+		const conflict = error as SessionWriteConflictError;
 		if (recoveries >= MAX_WRITE_CONFLICT_RECOVERIES) return this.#moveOffSessionFile("contested");
 		const epoch = this.#diskEpoch;
 		let content: string;
@@ -1274,6 +1320,7 @@ export class SessionManager {
 			// A synchronous rewrite during the read already recovered; retry against its result.
 			if (this.#diskEpoch !== epoch || this.#sessionFile !== contested) return this.#sessionFile;
 			if (!isEnoent(readError)) return this.#moveOffSessionFile("replaced");
+			this.#noticeIfJournalLost(conflict, contested, recoveries);
 			this.#expectedDiskSize = null;
 			return contested;
 		}
@@ -1282,6 +1329,7 @@ export class SessionManager {
 		if (!foreign) return this.#moveOffSessionFile("replaced");
 		await resolveBlobRefsInEntries(foreign, this.#blobs);
 		if (this.#diskEpoch !== epoch || this.#sessionFile !== contested) return this.#sessionFile;
+		this.#noticeIfJournalLost(conflict, contested, recoveries);
 		this.#adoptForeignEntries(foreign, Buffer.byteLength(content, "utf8"));
 		return contested;
 	}
@@ -1949,7 +1997,7 @@ export class SessionManager {
 			const writer = this.#appendWriter();
 			const line = this.#lineFor(entry);
 			if (writer.appendSync && !this.#storage.defersSyncPublish) {
-				writer.appendSync(line);
+				writer.appendSync(line, this.#appendPrecondition());
 				this.#recordDurableAppend(line);
 			} else {
 				// A backend that only queues the publish (indexed) has no synchronous
@@ -1970,8 +2018,24 @@ export class SessionManager {
 		} catch (err) {
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = true;
+			// The file is no longer what this manager last wrote (another program
+			// replaced, truncated or removed it): the full rewrite reads it back,
+			// keeps whatever it adds, writes the whole journal and says so.
+			if (err instanceof SessionWriteConflictError) {
+				this.#rewriteSynchronously();
+				return;
+			}
 			this.#noteDiskFailure(err);
 		}
+	}
+
+	/**
+	 * What an append may assume about the session file: the size this manager
+	 * last left it at. Unknown (`null`, before the first publish) assumes nothing.
+	 */
+	#appendPrecondition(): SessionAppendOptions | undefined {
+		const expectedSize = this.#expectedDiskSize;
+		return expectedSize === null ? undefined : { expectedSize };
 	}
 
 	async #persistTitleChangeEntry(entry: TitleChangeEntry, update: SessionTitleUpdate): Promise<void> {
@@ -2017,7 +2081,7 @@ export class SessionManager {
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return;
 				try {
-					await this.#appendWriter().append(line);
+					await this.#appendWriter().append(line, this.#appendPrecondition());
 					this.#recordDurableAppend(line);
 					await this.#storage.updateSessionTitle(sessionFile, update);
 					if (this.#diskEpoch === epoch) this.#fileIsCurrent = true;

@@ -503,7 +503,8 @@ describe("SessionManager cross-process rewrite freshness", () => {
 		await manager.rewriteEntries();
 
 		expect(manager.getSessionFile()).toBe(sessionFile);
-		expect(notices).toEqual([]);
+		// In place, not to a sibling, and the session says the file had to be written back.
+		expect(notices).toMatchObject([{ reason: "restored", from: sessionFile, to: sessionFile, foundBytes: null }]);
 		expect(await storage.readText(sessionFile)).toContain("before the delete");
 		await manager.close();
 	});
