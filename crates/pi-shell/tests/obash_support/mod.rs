@@ -1,5 +1,5 @@
-//! How the cli tests start processes, all through [`command`]: hermetic (no
-//! variable of the caller that changes what obash does, stdin `/dev/null`,
+//! How the cli tests start processes, all through [`command`]: hermetic
+//! (none of the caller's environment, a fixed [`PATH`], stdin `/dev/null`,
 //! stdout and stderr pipes, on Unix nothing but stdio inherited) and bounded
 //! (on Unix in its own process group, killed with whatever it left in it).
 
@@ -13,23 +13,12 @@ use std::{
 	time::{Duration, Instant},
 };
 
-/// Variables of the caller that change what obash does: the startup files
-/// and options bash imports, the fault injector's and the fs mode.
-const CALLER_VARS: [&str; 13] = [
-	"BASH_ENV",
-	"ENV",
-	"SHELLOPTS",
-	"BASHOPTS",
-	"POSIXLY_CORRECT",
-	"POSIX_PEDANTIC",
-	"PI_SHELL_FAULT",
-	"PI_SHELL_FAULT_MODE",
-	"PI_SHELL_FAULT_LOST",
-	"PI_SHELL_FAULT_STATS",
-	"PI_SHELL_FAULT_DEPTH",
-	"PI_SHELL_LOST_LOG",
-	"PI_SHELL_FS",
-];
+/// The `PATH` the test process gets, instead of the caller's. The tests
+/// that run a real external (`sh`, `cat`) need one, and a fixed one keeps
+/// which binary they run out of the caller's hands: under a launcher whose
+/// `PATH` has no coreutils, `cat` was not found and the test failed. A test
+/// that cares about the search sets its own.
+const PATH: &str = "/usr/bin:/bin";
 
 /// How long a test process may run before it is killed.
 pub const LIMIT: Duration = Duration::from_secs(30);
@@ -55,9 +44,7 @@ pub fn open_fds() -> Vec<i32> {
 /// after the listing fall in a 64-fd margin.
 pub fn command(program: impl AsRef<OsStr>) -> Command {
 	let mut cmd = Command::new(program);
-	for var in CALLER_VARS {
-		cmd.env_remove(var);
-	}
+	cmd.env_clear().env("PATH", PATH);
 	cmd.stdin(Stdio::null())
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped());
