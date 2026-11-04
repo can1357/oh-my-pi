@@ -18,9 +18,9 @@ const commandGeneration = new Map<string, number>();
 
 /**
  * Why cached command values are dropped. `rejected`: a 401 proved the value
- * stale, so a command's last good value goes too. `refresh`: the user asked for
- * a re-mint (`omp models refresh`, F5); a failing re-run still serves the last
- * good value.
+ * stale, so a command's last good value goes too. `refresh`: a re-mint was asked
+ * for (`omp models refresh`, F5, a forced credential renewal that is not a 401);
+ * a failing re-run still serves the last good value.
  */
 export type ConfigValueInvalidation = "rejected" | "refresh";
 
