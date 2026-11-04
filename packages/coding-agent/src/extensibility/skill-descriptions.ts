@@ -127,6 +127,7 @@ export function createSkillDescriptionCompressor(
 						disableReasoning: true,
 						temperature: 0,
 						signal: AbortSignal.any([AbortSignal.timeout(30_000), refused.signal]),
+						beforeDispatch: gate ? refuseAttempt : undefined,
 						fetch: gate ? transportFetch(model, undefined, refuseAttempt) : undefined,
 						onAttempt: message => gate?.record(message.usage.cost.total),
 					},
