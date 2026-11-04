@@ -132,9 +132,8 @@ function findQueuedMessage(messages: Iterable<AgentMessage>, id: string): AgentM
 	return undefined;
 }
 
-/** View state without the event-maintained running tool updates, as diffed between flushes. */
-/** View state without the event-maintained running tool updates, as diffed between flushes. */
-type DiffedViewState = Omit<SessionViewState, "activeToolExecutionUpdates">;
+/** View state without the event-maintained fields (running tool updates, open dialog), as diffed between flushes. */
+type DiffedViewState = Omit<SessionViewState, "activeToolExecutionUpdates" | "activeUserWait">;
 
 /** Live objects behind the wire copies of the heavy view fields; an unchanged source reuses its copy. */
 interface ViewSources {
@@ -419,6 +418,7 @@ export class SessionPublisher {
 			const state: SessionViewState = {
 				...next,
 				activeToolExecutionUpdates: toWireData([...this.session.activeToolExecutionUpdates()]),
+				activeUserWait: this.session.activeUserWait(),
 			};
 			this.#bridge.remote.notify("view", this.#key, state, displayEntries(this.#entries, this.session.obfuscator));
 			return;

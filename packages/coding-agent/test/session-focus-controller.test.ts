@@ -1,4 +1,7 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from "bun:test";
+import { Agent, type AgentEvent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Container } from "@oh-my-pi/pi-tui";
 import {
 	pickRecentFocusableAgentId,
@@ -7,9 +10,21 @@ import {
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID, type AgentRef } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import * as path from "node:path";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { trackUserWaits } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/user-wait";
+import * as runStatus from "@oh-my-pi/pi-coding-agent/utils/run-status";
 
 interface SessionStub {
 	session: AgentSession;
@@ -37,6 +52,7 @@ function makeSessionStub(opts: { isStreaming?: boolean } = {}): SessionStub {
 		},
 		async settleInFlightMessagePersistence() {},
 		activeToolExecutionUpdates: () => [],
+		activeUserWait: () => undefined,
 		getQueuedMessages: () => queue,
 	};
 	return {
@@ -72,8 +88,11 @@ interface Harness {
 	};
 }
 
-function makeHarness(options: { renderInitialMessages?: () => void | Promise<void> } = {}): Harness {
+function makeHarness(
+	options: { renderInitialMessages?: () => void | Promise<void>; mainSession?: AgentSession } = {},
+): Harness {
 	const main = makeSessionStub();
+	const mainSession = options.mainSession ?? main.session;
 	const handledEvents: unknown[] = [];
 	const setSessionCalls: Array<[AgentSession, string | undefined]> = [];
 	const reloadTodoSessions: AgentSession[] = [];
@@ -84,9 +103,9 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 	let mainUnsubscribe = 0;
 
 	const ctx = {
-		session: main.session,
+		session: mainSession,
 		get viewSession() {
-			return controller.target ?? main.session;
+			return controller.target ?? mainSession;
 		},
 		pendingMessagesContainer,
 		compactionQueuedMessages: [],
@@ -101,6 +120,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 			resetTranscriptAnchors: () => {
 				resetTranscriptAnchors++;
 			},
+			adoptApprovalRecords() {},
 			restorePendingToolResults() {},
 			markViewIdle() {},
 		},
@@ -120,7 +140,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 			await options.renderInitialMessages?.();
 		},
 		reloadTodos: async (source?: AgentSession) => {
-			reloadTodoSessions.push(source ?? main.session);
+			reloadTodoSessions.push(source ?? mainSession);
 		},
 		updatePendingMessagesDisplay: () => uiHelpers.updatePendingMessagesDisplay(),
 		updateEditorBorderColor() {},
@@ -162,6 +182,42 @@ async function flushAsync(): Promise<void> {
 	for (let i = 0; i < 5; i++) await Promise.resolve();
 }
 
+/** Per-live-session auth/temp state, released after each test. */
+const liveSessionCleanups: Array<() => void> = [];
+
+afterEach(() => {
+	for (const release of liveSessionCleanups.splice(0)) release();
+});
+
+/**
+ * A real AgentSession, for the paths where a stub would only mirror the
+ * controller's own call back at it (an open `waitForUser` dialog).
+ */
+function createLiveSession(): AgentSession {
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!model) throw new Error("Expected bundled model claude-sonnet-4-5");
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.keys.setRuntime("anthropic", "test-key");
+	const tempDir = TempDir.createSync("@pi-focus-user-wait-");
+	liveSessionCleanups.push(() => {
+		authStorage.close();
+		tempDir.removeSync();
+	});
+	const mock = createMockModel({ responses: [] });
+	const agent = new Agent({
+		getApiKey: () => "test-key",
+		initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		convertToLlm,
+		streamFn: (target, context, options) => mock.stream(target, context, options),
+	});
+	return new AgentSession({
+		agent,
+		sessionManager: SessionManager.inMemory(),
+		settings: Settings.isolated({ "compaction.enabled": false }),
+		modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+	});
+}
+
 describe("SessionFocusController", () => {
 	beforeAll(async () => {
 		// updatePendingMessagesDisplay renders through the global theme singleton.
@@ -187,6 +243,33 @@ describe("SessionFocusController", () => {
 		const event = { type: "message_start", message: { role: "user" } };
 		await worker.emit(event);
 		expect(h.handledEvents).toEqual([event]);
+	});
+
+	it("replays the main session's unanswered dialog when focus returns to it", async () => {
+		// `user_wait_start` is published once, when the dialog opens. Focusing a
+		// subagent while an MCP sign-in (or any waitForUser) is unanswered and
+		// coming back before it settles must not leave the run reported as
+		// working or idle: the attach replays the session's own open wait.
+		const liveMain = createLiveSession();
+		const h = makeHarness({ mainSession: liveMain });
+		const worker = makeSessionStub();
+		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+		const open = Promise.withResolvers<void>();
+		const prompt = "an MCP sign-in for linear";
+		const dialog = liveMain.waitForUser(() => open.promise, prompt);
+
+		await h.controller.focusAgent("Worker");
+		expect(h.handledEvents).toEqual([]);
+
+		await h.controller.unfocus();
+		expect(h.handledEvents).toEqual([{ type: "user_wait_start", prompt }]);
+
+		// The replayed bracket still closes through the live subscription.
+		open.resolve();
+		await dialog;
+		expect(h.handledEvents.at(-1)).toEqual({ type: "user_wait_end" });
+
+		await liveMain.dispose();
 	});
 
 	it("re-attaching the main session refreshes the todo HUD so it can't freeze at the pre-focus snapshot (#9571)", async () => {
@@ -791,6 +874,132 @@ describe("SessionFocusController", () => {
 		await firstFocus;
 		expect(h.controller.target).toBe(newer.session);
 		expect(h.pendingMessagesContainer.render(80).join("\n")).toContain("newer view stays active");
+	});
+
+	it("restores an unanswered approval's kind and operation when focus returns to it", async () => {
+		// The attach wipes the controller's per-call approval records, so the
+		// replayed `user_wait_start` is the only thing left that knows a person
+		// owes an approval. A frame that named only the wrapper's dialog method
+		// left the OSC 7501 record reporting a generic question, hiding which
+		// operation is being approved.
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const live = createLiveSession();
+		const ctx = createInteractiveModeContext({ session: live });
+		const events = new EventController(ctx);
+		ctx.eventController = events;
+		const registry = new AgentRegistry();
+		const worker = createInteractiveModeContext({
+			session: {
+				settleInFlightMessagePersistence: async () => {},
+				activeToolExecutionUpdates: () => [],
+				activeUserWait: () => undefined,
+			},
+		}).session;
+		registerSub(registry, "Worker", worker, MAIN_AGENT_ID);
+		const lifecycle = new AgentLifecycleManager(registry);
+		const focus = new SessionFocusController(ctx, registry, () => lifecycle);
+		Object.defineProperty(ctx, "viewSession", { get: () => focus.target ?? ctx.session, configurable: true });
+		const answered = Promise.withResolvers<"once">();
+		const ui = trackUserWaits({ approve: () => answered.promise } as unknown as ExtensionUIContext, (dialog, frame) =>
+			live.waitForUser(dialog, frame.prompt, { kind: frame.kind }),
+		);
+
+		try {
+			const approval = ui.approve?.({
+				full: "Allow tool: bash\nCommand: echo first",
+				compact: "Allow tool: bash — echo first",
+			});
+			// What the live subscription delivers while the dialog is open.
+			await events.handleEvent({ type: "agent_start" });
+			await events.handleEvent(live.activeUserWait()!);
+			expect(report).toHaveBeenLastCalledWith({
+				state: "blocked",
+				kind: "permission",
+				msg: "Allow tool: bash — echo first",
+			});
+
+			await focus.focusAgent("Worker");
+			await focus.unfocus();
+			expect(report).toHaveBeenLastCalledWith({
+				state: "blocked",
+				kind: "permission",
+				msg: "Allow tool: bash — echo first",
+			});
+
+			answered.resolve("once");
+			await approval;
+		} finally {
+			focus.dispose();
+			report.mockRestore();
+			await live.dispose();
+		}
+	});
+
+	it("does not let an answer parked before its call started answer a later run of that call", async () => {
+		// A dialog can be published and answered before the loop's
+		// `tool_execution_start` for its call reaches the view; the view keeps
+		// that answer so the start records no prompt. If that start, and the
+		// call's end, happen while the view is on another session, the kept
+		// answer describes a run that is over. Brought back, it swallowed the
+		// next run of the same call id, which then read as working while it
+		// waited on a person.
+		// The transcript renders the retried call's card, which reads global settings.
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
+		onTestFinished(() => resetSettingsForTest());
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const live = createLiveSession();
+		const ctx = createInteractiveModeContext({ session: live });
+		const events = new EventController(ctx);
+		ctx.eventController = events;
+		const registry = new AgentRegistry();
+		const other = createInteractiveModeContext({
+			session: {
+				settleInFlightMessagePersistence: async () => {},
+				activeToolExecutionUpdates: () => [],
+				activeUserWait: () => undefined,
+			},
+		}).session;
+		registerSub(registry, "Other", other, MAIN_AGENT_ID);
+		const lifecycle = new AgentLifecycleManager(registry);
+		const focus = new SessionFocusController(ctx, registry, () => lifecycle);
+		Object.defineProperty(ctx, "viewSession", { get: () => focus.target ?? ctx.session, configurable: true });
+		const ask = (toolCallId: string): AgentSessionEvent => ({
+			type: "tool_execution_start",
+			toolCallId,
+			toolName: "ask",
+			args: { questions: [{ id: "db", question: "Use Postgres?", options: [{ label: "Yes" }] }] },
+		});
+
+		try {
+			await events.handleEvent({ type: "agent_start" });
+			const answer = Promise.withResolvers<void>();
+			const dialog = live.waitForUser(() => answer.promise, "Use Postgres?", { toolCallId: "ask-1" });
+			await events.handleEvent(live.activeUserWait()!);
+			answer.resolve();
+			await dialog;
+			await events.handleEvent({ type: "user_wait_end" });
+
+			await focus.focusAgent("Other");
+			// The answered run starts and ends while the view is elsewhere.
+			live.agent.emitExternalEvent(ask("ask-1") as AgentEvent);
+			live.agent.emitExternalEvent({
+				type: "tool_execution_end",
+				toolCallId: "ask-1",
+				toolName: "ask",
+				result: { content: [{ type: "text", text: "Yes" }] },
+				isError: false,
+			} as AgentEvent);
+			await focus.unfocus();
+
+			// A retry of the same call asks again, and nobody has answered it.
+			await events.handleEvent(ask("ask-1"));
+			expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "question", msg: "Use Postgres?" });
+		} finally {
+			focus.dispose();
+			report.mockRestore();
+			await live.dispose();
+		}
 	});
 });
 

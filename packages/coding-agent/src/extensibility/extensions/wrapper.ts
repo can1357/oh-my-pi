@@ -134,6 +134,7 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 				context,
 				signal,
 				onUpdate,
+				toolCallId,
 			}),
 		);
 	}
@@ -468,6 +469,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					appendix: safetyAppendix,
 					sessionSubject: sessionScope?.subject,
 					grants: cacheTargets,
+					toolCallId,
 				});
 				approved = answer !== "deny";
 				if (answer === "session" && sessionScope) this.runner.grantSessionApproval(sessionScope.key);

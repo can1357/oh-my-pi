@@ -1517,6 +1517,662 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual([]);
 	});
 
+	it.each([
+		["", false],
+		[", even when a disposer throws", true],
+	])("aborts a pending reserve confirmation at disposal so a late yes commits no fallback%s", async (_name, failingDisposer) => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled disposal-reserve models");
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return createMockModel({ responses: [{ content: ["unreached after disposal"] }] }).stream(
+					model,
+					context,
+					options,
+				);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePolicy": "confirm",
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
+			provider === primaryModel.provider
+				? {
+						state: "reserve",
+						accounts: [
+							{
+								credentialId: 1,
+								credentialType: "oauth",
+								selected: true,
+								state: "reserve",
+								remainingFraction: 0.05,
+							},
+						],
+					}
+				: { state: "healthy", accounts: [] },
+		);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const fallbackApplied: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackApplied.push(event.to);
+		});
+		const confirmationStarted = Promise.withResolvers<void>();
+		const answer = Promise.withResolvers<boolean>();
+		session.setUsageFallbackConfirmer(async () => {
+			confirmationStarted.resolve();
+			return answer.promise;
+		});
+
+		const prompt = session.prompt("dispose while confirming").catch(() => {});
+		await confirmationStarted.promise;
+		// A disposer that fails (a resource already closed) must not cost disposal the steps after
+		// it: the preflight is still cancelled and the disposers behind it still run.
+		let laterDisposerRan = false;
+		if (failingDisposer) {
+			session.addDisposer(() => {
+				throw new Error("EBADF: bad file descriptor, close");
+			});
+			session.addDisposer(() => {
+				laterDisposerRan = true;
+			});
+		}
+		// A disposer's failure is logged, not thrown: the caller's own teardown must still run.
+		let thrown: unknown;
+		try {
+			session.beginDispose();
+		} catch (error) {
+			thrown = error;
+		}
+		// The operator's "yes" lands after disposal began: it must not switch models.
+		answer.resolve(true);
+		await prompt;
+
+		expect(requestedModels).toEqual([]);
+		expect(fallbackApplied).toEqual([]);
+		expect(session.model?.id).toBe(primaryModel.id);
+		expect(laterDisposerRan).toBe(failingDisposer);
+		expect(thrown).toBeUndefined();
+	});
+
+	it("aborts a pending reserve preflight at dispose so a deadline during shutdown dispatches nothing", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled disposal-deadline models");
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return createMockModel({ responses: [{ content: ["unreached after disposal"] }] }).stream(
+					model,
+					context,
+					options,
+				);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePolicy": "confirm",
+			// A real one-second deadline: the defect fires the platform timer while
+			// disposal is held open on a session_shutdown handler.
+			"retry.usageReserveConfirmTimeout": 1,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
+			provider === primaryModel.provider
+				? {
+						state: "reserve",
+						accounts: [
+							{
+								credentialId: 1,
+								credentialType: "oauth",
+								selected: true,
+								state: "reserve",
+								remainingFraction: 0.05,
+							},
+						],
+					}
+				: { state: "healthy", accounts: [] },
+		);
+		const sessionManager = SessionManager.inMemory();
+		const runtime = new ExtensionRuntime();
+		const shutdownStarted = Promise.withResolvers<void>();
+		const releaseShutdown = Promise.withResolvers<void>();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session_shutdown", async () => {
+					shutdownStarted.resolve();
+					await releaseShutdown.promise;
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"reserve-disposal-shutdown",
+		);
+		const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(event.message);
+		});
+		const confirmationStarted = Promise.withResolvers<void>();
+		const neverAnswered = Promise.withResolvers<boolean>();
+		session.setUsageFallbackConfirmer(async () => {
+			confirmationStarted.resolve();
+			return neverAnswered.promise;
+		});
+
+		const prompt = session.prompt("dispose while the reserve deadline runs").catch(() => {});
+		await confirmationStarted.promise;
+		const disposing = session.dispose();
+		try {
+			await shutdownStarted.promise;
+			await prompt;
+			expect(requestedModels).toEqual([]);
+			expect(notices).toEqual([]);
+			expect(session.isDisposed).toBe(true);
+		} finally {
+			releaseShutdown.resolve();
+			await disposing;
+		}
+	});
+
+	it("commits no missing-credential fallback once the session is disposing, and drops the prompt quietly", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled missing-credential disposal models");
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return createMockModel({ responses: [{ content: ["unreached after disposal"] }] }).stream(
+					model,
+					context,
+					options,
+				);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		// The primary provider has no usable credential, so the turn walks to the
+		// keyed fallback via applyMissingCredentialFallback.
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async model =>
+			model.provider === primaryModel.provider ? undefined : `${model.provider}-test-key`,
+		);
+		// Hold the fallback-candidate health probe open so disposal begins while the
+		// credential fallback is mid-flight on a non-preflight (setup) abort signal.
+		const probeStarted = Promise.withResolvers<void>();
+		const releaseProbe = Promise.withResolvers<void>();
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async () => {
+			probeStarted.resolve();
+			await releaseProbe.promise;
+			return { state: "healthy", accounts: [] };
+		});
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const fallbackApplied: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackApplied.push(event.to);
+		});
+
+		const prompt = session.prompt("dispose while recovering a missing credential");
+		await probeStarted.promise;
+		session.beginDispose();
+		releaseProbe.resolve();
+		// Disposal refused the fallback; the primary's key was never the problem, so no
+		// "No API key found" error reaches the caller.
+		await prompt;
+
+		expect(requestedModels).toEqual([]);
+		expect(fallbackApplied).toEqual([]);
+		expect(session.model?.id).toBe(primaryModel.id);
+	});
+
+	it("sends nothing when disposal begins while a usage-aware fallback commits", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled usage-commit disposal models");
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return createMockModel({ responses: [{ content: ["unreached after disposal"] }] }).stream(
+					model,
+					context,
+					options,
+				);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
+			provider === primaryModel.provider
+				? { state: "depleted", accounts: [{ credentialId: 1, credentialType: "oauth", state: "depleted" }] }
+				: { state: "healthy", accounts: [] },
+		);
+		const current = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		session = current;
+		// `retry_fallback_applied` reaches subscribers while the commit still has awaits ahead
+		// of it: the window a slow prompt re-sync or extension handler holds open.
+		current.subscribe(event => {
+			if (event.type === "retry_fallback_applied") current.beginDispose();
+		});
+
+		await current.prompt("dispose while the usage-aware fallback commits");
+
+		expect(requestedModels).toEqual([]);
+	});
+
+	it("sends nothing when disposal begins while a missing-credential fallback commits", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled credential-commit disposal models");
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return createMockModel({ responses: [{ content: ["unreached after disposal"] }] }).stream(
+					model,
+					context,
+					options,
+				);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async model =>
+			model.provider === primaryModel.provider ? undefined : `${model.provider}-test-key`,
+		);
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue({ state: "healthy", accounts: [] });
+		const current = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		session = current;
+		current.subscribe(event => {
+			if (event.type === "retry_fallback_applied") current.beginDispose();
+		});
+
+		await current.prompt("dispose while the missing-credential fallback commits");
+
+		expect(requestedModels).toEqual([]);
+	});
+
+	it("asks nobody about the reserve once the session is disposing", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled disposing-reserve models");
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return createMockModel({ responses: [{ content: ["sent while disposing"] }] }).stream(
+					model,
+					context,
+					options,
+				);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePolicy": "confirm",
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
+			provider === primaryModel.provider
+				? {
+						state: "reserve",
+						accounts: [
+							{
+								credentialId: 1,
+								credentialType: "oauth",
+								selected: true,
+								state: "reserve",
+								remainingFraction: 0.05,
+							},
+						],
+					}
+				: { state: "healthy", accounts: [] },
+		);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const waits: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "user_wait_start") waits.push(event.prompt);
+		});
+		let confirmations = 0;
+		session.setUsageFallbackConfirmer(async () => {
+			confirmations++;
+			return false;
+		});
+
+		// A prompt sent into a disposing session still runs on its model, but nobody is asked
+		// to leave it: the session refuses the switch, and is going away before an answer.
+		session.beginDispose();
+		await session.prompt("prompt a disposing session at its reserve");
+
+		expect(confirmations).toBe(0);
+		expect(waits).toEqual([]);
+		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+	});
+
+	it("keeps the reserve-bound model and goes on when nobody answers the prompt", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled unattended reserve models");
+		const requestedModels: string[] = [];
+		const mock = createMockModel({ responses: [{ content: ["kept going on the primary"] }] });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePct": 10,
+			"retry.usageReservePolicy": "confirm",
+			// The deadline is the behaviour under test and the setting's unit is
+			// seconds, so this one waits on the real clock: a faked clock would
+			// only prove the timer was armed, not that the turn resumes.
+			"retry.usageReserveConfirmTimeout": 1,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
+			provider === primaryModel.provider
+				? {
+						state: "reserve",
+						accounts: [
+							{
+								credentialId: 1,
+								credentialType: "oauth",
+								selected: true,
+								state: "reserve",
+								remainingFraction: 0.08,
+							},
+						],
+					}
+				: { state: "healthy", accounts: [] },
+		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const notices: string[] = [];
+		const waits: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(event.message);
+			if (event.type === "user_wait_start") waits.push(`start:${event.prompt}`);
+			if (event.type === "user_wait_end") waits.push("end");
+		});
+		const confirmationStarted = Promise.withResolvers<void>();
+		// Nobody is at the machine: the dialog never settles on its own, and this
+		// confirmer ignores its abort signal the way a wedged UI would.
+		const neverAnswered = Promise.withResolvers<boolean>();
+		session.setUsageFallbackConfirmer(async () => {
+			confirmationStarted.resolve();
+			return neverAnswered.promise;
+		});
+
+		await session.prompt("Keep working on the same task");
+		await confirmationStarted.promise;
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+		expect(session.model?.id).toBe(primaryModel.id);
+		expect(notices.some(message => message.includes("Nobody answered the reserve prompt"))).toBe(true);
+		expect(waits).toEqual([
+			`start:whether to leave ${primaryModel.provider}/${primaryModel.id} at its coding-plan reserve`,
+			"end",
+		]);
+	});
+
+	it("waits forever for an answer when the reserve confirm timeout is disabled", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled unattended reserve models");
+		const requestedModels: string[] = [];
+		const mock = createMockModel({ responses: [{ content: ["answered at last"] }] });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePct": 10,
+			"retry.usageReservePolicy": "confirm",
+			"retry.usageReserveConfirmTimeout": 0,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
+			provider === primaryModel.provider
+				? {
+						state: "reserve",
+						accounts: [
+							{
+								credentialId: 1,
+								credentialType: "oauth",
+								selected: true,
+								state: "reserve",
+								remainingFraction: 0.08,
+							},
+						],
+					}
+				: { state: "healthy", accounts: [] },
+		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const answer = Promise.withResolvers<boolean>();
+		const confirmationStarted = Promise.withResolvers<void>();
+		session.setUsageFallbackConfirmer(async () => {
+			confirmationStarted.resolve();
+			return answer.promise;
+		});
+
+		let promptSettled = false;
+		const prompt = session.prompt("Hold until a person answers").then(() => {
+			promptSettled = true;
+		});
+		await confirmationStarted.promise;
+		expect(promptSettled).toBe(false);
+		expect(requestedModels).toEqual([]);
+
+		answer.resolve(true);
+		await prompt;
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([`${fallbackModel.provider}/${fallbackModel.id}`]);
+	});
+
+	it("waits forever by default for an unanswered reserve confirmation", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled unattended reserve models");
+		const requestedModels: string[] = [];
+		const mock = createMockModel({ responses: [{ content: ["answered at last"] }] });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePct": 10,
+			"retry.usageReservePolicy": "confirm",
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
+			provider === primaryModel.provider
+				? {
+						state: "reserve",
+						accounts: [
+							{
+								credentialId: 1,
+								credentialType: "oauth",
+								selected: true,
+								state: "reserve",
+								remainingFraction: 0.08,
+							},
+						],
+					}
+				: { state: "healthy", accounts: [] },
+		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const answer = Promise.withResolvers<boolean>();
+		const confirmationStarted = Promise.withResolvers<void>();
+		session.setUsageFallbackConfirmer(async () => {
+			confirmationStarted.resolve();
+			return answer.promise;
+		});
+
+		vi.useFakeTimers();
+		const prompt = session.prompt("Hold until a person answers");
+		try {
+			await confirmationStarted.promise;
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+
+		answer.resolve(true);
+		await prompt;
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([`${fallbackModel.provider}/${fallbackModel.id}`]);
+	});
+
+	it("keeps a month-long reserve deadline pending instead of expiring it at once", async () => {
+		// A deadline above 2_147_483.647s does not fit a 32-bit timer delay: an
+		// unchunked `setTimeout(seconds * 1000)` fires about a millisecond in, so
+		// a month-long deadline would abort the dialog and keep the reserve-bound
+		// model while the person it asked is still reading it.
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled unattended reserve models");
+		const requestedModels: string[] = [];
+		const mock = createMockModel({ responses: [{ content: ["answered at last"] }] });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePct": 10,
+			"retry.usageReservePolicy": "confirm",
+			// 30 days, in seconds.
+			"retry.usageReserveConfirmTimeout": 2_592_000,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
+			provider === primaryModel.provider
+				? {
+						state: "reserve",
+						accounts: [
+							{
+								credentialId: 1,
+								credentialType: "oauth",
+								selected: true,
+								state: "reserve",
+								remainingFraction: 0.08,
+							},
+						],
+					}
+				: { state: "healthy", accounts: [] },
+		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(event.message);
+		});
+		const answer = Promise.withResolvers<boolean>();
+		const confirmationStarted = Promise.withResolvers<void>();
+		session.setUsageFallbackConfirmer(async () => {
+			confirmationStarted.resolve();
+			return answer.promise;
+		});
+
+		vi.useFakeTimers();
+		const prompt = session.prompt("Hold for a month-long deadline");
+		try {
+			await confirmationStarted.promise;
+			// Five minutes of the thirty days: an overflowed delay has long fired.
+			vi.advanceTimersByTime(5 * 60_000);
+			for (let i = 0; i < 50; i++) await Promise.resolve();
+		} finally {
+			vi.useRealTimers();
+		}
+		expect(notices.filter(message => message.includes("Nobody answered the reserve prompt"))).toEqual([]);
+		expect(requestedModels).toEqual([]);
+
+		answer.resolve(true);
+		await prompt;
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([`${fallbackModel.provider}/${fallbackModel.id}`]);
+	});
+
 	it("defers usage fallback for a queued steer until the active stream finishes", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");

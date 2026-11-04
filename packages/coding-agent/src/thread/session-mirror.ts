@@ -37,6 +37,7 @@ import type {
 	AgentSessionHandle,
 	AgentViewToolSchema,
 	ToolExecutionUpdateEvent,
+	UserWaitStartEvent,
 } from "../session/agent-session-handle";
 import type { AgentSessionEvent, AgentSessionEventListener } from "../session/agent-session-events";
 import type {
@@ -200,6 +201,13 @@ export interface SessionViewState {
 	 * starts a watch; main keeps it current from the forwarded event stream.
 	 */
 	activeToolExecutionUpdates: ToolExecutionUpdateEvent[];
+	/**
+	 * The open dialog's `user_wait_start` frame, when a person still owes the session an answer.
+	 * Sent only in the full snapshot that starts a watch, since the frame was published when the
+	 * dialog opened, possibly while nobody watched; main keeps it current from the forwarded
+	 * `user_wait_start`/`user_wait_end` events.
+	 */
+	activeUserWait: UserWaitStartEvent | undefined;
 }
 
 /** One field of {@link SessionViewState}. */

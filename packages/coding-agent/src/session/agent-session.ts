@@ -38,6 +38,8 @@ import {
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
+	currentToolExecution,
+	onToolExecutionEnd,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
 	resolveTelemetry,
@@ -45,6 +47,7 @@ import {
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	type ThinkingLevel,
 	type ToolChoiceDirective,
+	type ToolExecution,
 	wireToolsFingerprint,
 } from "@oh-my-pi/pi-agent-core";
 import {
@@ -295,7 +298,13 @@ import {
 import { generateSessionTitle, nerdGlyphsActive } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
-import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
+import type { BlockedKind } from "../utils/run-status";
+import {
+	type AgentSessionEvent,
+	type AgentSessionEventListener,
+	type ToolCallRunMark,
+	UNNAMED_USER_WAIT_PROMPT,
+} from "./agent-session-events";
 import { type AgentViewSession, isLocalAgentSession } from "./agent-session-handle";
 import {
 	asyncJobSnapshot,
@@ -1092,6 +1101,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
 	#activeToolExecutionUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
+	/**
+	 * Each call this session has run, by id: which run of that id is the current one, and whether
+	 * it is over. A surface that was looking elsewhere saw none of these events, so on the way
+	 * back it compares the mark it kept ({@link toolCallRun}) with the mark now: the same run,
+	 * still open, is the only answer that lets a record it parked come back. A call the session
+	 * never ran has no mark at all and is nobody's to overrule.
+	 *
+	 * The map is cleared when a logical session transition recycles tool-call ids, but the
+	 * numbering is not: a surface can be holding a record from before that transition, and a mark
+	 * that counts from one again would make the next run of a recycled id look like the run that
+	 * record describes. A mark is unique for as long as this session object lives.
+	 */
+	#toolCallRuns = new Map<string, { sequence: number; settled: boolean }>();
+	/** Runs this session has started, ever: the source of the number in a mark. */
+	#toolCallRunSeq = 0;
+	/** True once {@link dispose} begins: nothing this session was asking will ever be answered. */
+	#settledEverything = false;
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	/** Epoch ms the current run went `running`; undefined while idle. */
 	#runStartedAt: number | undefined;
@@ -1353,10 +1379,34 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * dropped by the ACP host).
 	 */
 	#clientPromptInFlightCount = 0;
-	/** Dialogs open and waiting for the user's answer; while any is, the computer turn is ended. */
-	#userWaitCount = 0;
+	/**
+	 * Every dialog open and waiting for the user's answer, keyed by a per-wait
+	 * id, in the order the dialogs opened. While any is open the computer turn
+	 * is ended. The oldest is the one published and replayed: when it settles
+	 * while others are still open, the next one is published in its place, so no
+	 * surface keeps naming a dialog that is gone. `execution` is the run that
+	 * claimed the call, when one did: its end withdraws the claim, so a dialog
+	 * still open over a finished run stops naming a call another run may reuse.
+	 */
+	#openUserWaits = new Map<
+		number,
+		{ prompt: string; kind?: BlockedKind; toolCallId?: string; execution?: ToolExecution }
+	>();
+	#userWaitSeq = 0;
+	/**
+	 * The `user_wait_start` frame last published for the open dialogs, kept so a surface that
+	 * attaches mid-wait (a focus rebuild) can replay it; undefined once the matching
+	 * `user_wait_end` has been published.
+	 */
+	#openUserWait: Extract<AgentSessionEvent, { type: "user_wait_start" }> | undefined;
 	/** Whether the open dialogs ended a prompt's computer turn, which goes on once they settle. */
 	#userWaitEndedTurn = false;
+	/** True while a wait frame (start or end) is being delivered, so a change a listener makes —
+	 *  a dialog it opens or answers, a disposal it begins — is published after the frame in
+	 *  flight rather than inside it: a later listener must never see an older frame last. */
+	#publishingUserWait = false;
+	/** A change that arrived while a frame was being delivered, to be recomputed after it. */
+	#userWaitPublishPending = false;
 	#inFlightEpoch = 0;
 	#abortInProgress = false;
 	/** In-flight {@link abort} calls; each settles after scheduling its stranded-queue drain, which {@link waitForIdle} must observe. */
@@ -1514,20 +1564,156 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * computer turn ended, so an unattended Mac sleeps and locks on its own timer rather than showing the pending
 	 * question. Once the last open dialog settles, if a prompt is still in flight, the turn goes on: the run still active
 	 * in it (a dialog can be that run's control confirmation) and later runs hold the display again.
+	 *
+	 * `prompt` names what is being asked and `options.kind` classifies it (an
+	 * approval of an operation, or a question). The bracket is published as
+	 * `user_wait_start`/`user_wait_end` so every surface that shows run state —
+	 * the terminal title a tmux pane shows, the OSC 7501 record, an RPC host —
+	 * reports a session waiting for a person instead of one still working, and
+	 * names what it waits on even when it attached after the dialog opened.
+	 * Both are optional because this method is public API: an SDK caller written
+	 * against the one-argument signature keeps compiling, and its wait is
+	 * published under {@link UNNAMED_USER_WAIT_PROMPT} rather than as a frame
+	 * with no `prompt`, which a strict wire decoder would reject.
 	 */
-	async waitForUser<T>(dialog: () => Promise<T>): Promise<T> {
-		if (this.#userWaitCount++ === 0) {
+	async waitForUser<T>(
+		dialog: () => Promise<T>,
+		prompt?: string,
+		options?: { kind?: BlockedKind; toolCallId?: string; toolCallExecution?: ToolExecution; toolCallOwned?: boolean },
+	): Promise<T> {
+		// Disposal ended every wait and nobody is left to answer one: run the dialog unpublished.
+		if (this.#isDisposed) return dialog();
+		const waitId = ++this.#userWaitSeq;
+		if (this.#openUserWaits.size === 0) {
 			this.#userWaitEndedTurn = this.#promptInFlightCount > 0;
 			this.#endComputerTurn();
 		}
+		const claim = this.#owningToolCall(options);
+		this.#openUserWaits.set(waitId, {
+			prompt: prompt ?? UNNAMED_USER_WAIT_PROMPT,
+			...(options?.kind ? { kind: options.kind } : {}),
+			...claim,
+		});
+		// The claim expires with the run that made it, not with whatever publishes next: a surface
+		// replaying the last frame must never read a call this dialog no longer speaks for.
+		const dropClaimWatch = claim?.execution ? onToolExecutionEnd(claim.execution, () => this.#publishUserWait()) : undefined;
+		this.#publishUserWait();
 		try {
 			return await dialog();
 		} finally {
-			if (--this.#userWaitCount === 0 && this.#promptInFlightCount > 0) {
-				if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
-				else if (this.#agentKind === "main") resumeComputerTurnForOwner(this.#eval.getKernelOwnerId());
+			dropClaimWatch?.();
+			// A wait disposal already ended has nothing left to close or republish.
+			if (this.#openUserWaits.delete(waitId)) {
+				// The last dialog closing publishes the end; one still open behind it takes the
+				// settled one's place, and the published calls lose the one that went.
+				this.#publishUserWait();
+				if (this.#openUserWaits.size === 0 && this.#promptInFlightCount > 0) {
+					if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
+					else if (this.#agentKind === "main") resumeComputerTurnForOwner(this.#eval.getKernelOwnerId());
+				}
 			}
 		}
+	}
+
+	/**
+	 * What a dialog is recorded against. A caller that names the call it is asking about asserts
+	 * that about this moment and is taken at its word. A dialog from a `ui` handed to one call
+	 * carries the run that `ui` belongs to, and belongs to that run alone: when the run is over, or
+	 * when no run of its call was ever found, the dialog names no call rather than borrowing the
+	 * one executing around it. With neither, the run that raised the dialog is read from the async
+	 * context the loop binds around `tool.execute`: a host that opens its own approval through the
+	 * plain `waitForUser` therefore still says which call owes the answer, without naming it and
+	 * without anyone reading its words.
+	 *
+	 * Everything here is scoped to this session's agent and to one run. Two agents in a process can
+	 * hold the same call id at once; an interrupted call that `retry` runs again is a new run of
+	 * the same id; and work that outlives a run (a timer a tool left behind) sees that run finished
+	 * and claims no call. The call being executed need not have been announced yet: the loop
+	 * buffers `tool_execution_start` while `execute` already runs, which is how a host's own
+	 * approval opens before its call is announced.
+	 */
+	#owningToolCall(
+		options: { toolCallId?: string; toolCallExecution?: ToolExecution; toolCallOwned?: boolean } | undefined,
+	): { toolCallId: string; execution?: ToolExecution } | undefined {
+		const owner = this.agent;
+		const named = options?.toolCallId;
+		if (named !== undefined) {
+			// Pair a named call with the run that is making the claim, when there is one, so the
+			// claim expires with that run rather than with the turn.
+			const executing = currentToolExecution(owner);
+			return executing?.toolCallId === named ? { toolCallId: named, execution: executing } : { toolCallId: named };
+		}
+		if (options?.toolCallOwned || options?.toolCallExecution) {
+			// Only this agent's own run: another agent's call of the same id, and an executor bound
+			// to no agent, are not this session's to answer for. A `ui` whose run is over, or which
+			// never found one, claims nothing — the run executing around it is not its.
+			const captured = options.toolCallExecution;
+			const mine = captured?.owner === owner && typeof captured?.toolCallId === "string";
+			return mine && !captured.finished ? { toolCallId: captured.toolCallId, execution: captured } : undefined;
+		}
+		const executing = currentToolExecution(owner);
+		return executing === undefined ? undefined : { toolCallId: executing.toolCallId, execution: executing };
+	}
+
+	/**
+	 * Bring what listeners were told in line with the open dialogs: the oldest open dialog as the
+	 * session's wait, beside every tool call whose dialog is open, or a `user_wait_end` once none is
+	 * open. Nothing is published when that is what was published last. A second dialog opening
+	 * behind the first does not change what is asked, but it does change which calls are waiting,
+	 * and a surface tracking a call needs that: a younger dialog's call can be answered without the
+	 * oldest dialog's words ever changing. The first settling behind a second republishes too, so
+	 * no surface keeps reporting a dialog that is gone, a classification that belongs to one, or a
+	 * call whose own wait has ended.
+	 *
+	 * Delivery is one frame at a time, starts and ends alike. A listener that opens or answers a
+	 * dialog, or begins disposal, while handling a frame would otherwise have the newer frame
+	 * delivered inside the older one: every listener after it would read the older frame last — a
+	 * call still open reported answered, or a start after its own end, leaving a disposed session
+	 * reported blocked for good. Such a change is recomputed and delivered after the frame in
+	 * flight, against the dialogs open then.
+	 */
+	#publishUserWait(): void {
+		if (this.#publishingUserWait) {
+			this.#userWaitPublishPending = true;
+			return;
+		}
+		for (;;) {
+			this.#userWaitPublishPending = false;
+			const frame = this.#userWaitFrameToPublish();
+			if (frame === null) return;
+			this.#openUserWait = frame.type === "user_wait_start" ? frame : undefined;
+			this.#publishingUserWait = true;
+			try {
+				this.#emit(frame);
+			} finally {
+				this.#publishingUserWait = false;
+			}
+			if (!this.#userWaitPublishPending) return;
+		}
+	}
+
+	/** The frame that brings listeners in line with the open dialogs, or null when they already are. */
+	#userWaitFrameToPublish(): AgentSessionEvent | null {
+		const published = this.#openUserWait;
+		const frame = this.#openUserWaits.values().next().value;
+		if (frame === undefined) return published === undefined ? null : { type: "user_wait_end" };
+		// A dialog whose claiming run has ended keeps standing, but stops naming its call: the id
+		// is free for another run, and saying this dialog is that run's would hand one run's answer
+		// to another.
+		const toolCalls = [...this.#openUserWaits.values()]
+			.map(open => (open.execution?.finished ? undefined : open.toolCallId))
+			.filter((id): id is string => id !== undefined);
+		const samePrompt = frame.prompt === published?.prompt && frame.kind === published?.kind;
+		const sameCalls =
+			toolCalls.length === (published?.toolCalls?.length ?? 0) &&
+			toolCalls.every((id, index) => id === published?.toolCalls?.[index]);
+		if (published !== undefined && samePrompt && sameCalls) return null;
+		return {
+			type: "user_wait_start",
+			prompt: frame.prompt,
+			...(frame.kind ? { kind: frame.kind } : {}),
+			...(toolCalls.length > 0 ? { toolCalls } : {}),
+		};
 	}
 
 	/**
@@ -1535,7 +1721,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * subagent's turn can end mid-way through its parent's, so its runs keep the native grace period instead.
 	 */
 	#beginComputerTurn(): void {
-		if (this.#agentKind !== "main" || this.#userWaitCount > 0) return;
+		if (this.#agentKind !== "main" || this.#openUserWaits.size > 0) return;
 		beginComputerTurnForOwner(this.#eval.getKernelOwnerId());
 	}
 
@@ -2573,7 +2759,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			evalPreludes: () => this.getEvalPreludes(),
 			sessionAgents: () => this.getSessionAgents(),
-			waitForUser: dialog => this.waitForUser(dialog),
+			waitForUser: (dialog, prompt, options) => this.waitForUser(dialog, prompt, options),
 		};
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
@@ -3050,6 +3236,24 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
+	 * Run every registered disposer once. One that throws is logged and the rest still run, as does
+	 * the teardown after them: disposal is called from wrappers that must finish their own cleanup,
+	 * and a session left half torn down (a usage preflight still live, writes not flushed) is worse
+	 * than a cleanup error nobody can act on at that point.
+	 */
+	#runDisposers(): void {
+		for (const dispose of this.#disposers.splice(0)) {
+			try {
+				dispose();
+			} catch (error) {
+				logger.warn("AgentSession disposer threw", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+	}
+
+	/**
 	 * Opt this session in to autonomous idle maintenance (the idle recap and idle compaction, both governed by
 	 * their settings); recaps reach the owner through `options.onRecap`. One scheduler per session: repeating the
 	 * call keeps the first owner's options, so a view that re-asserts itself cannot duplicate work or displace them.
@@ -3341,7 +3545,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** The handler can ask the user to approve the plan mid-turn (ACP), so it runs as a {@link waitForUser}. */
 	setPlanProposalHandler(handler: PlanProposalHandler | null): void {
-		this.#planProposalHandler = handler ? title => this.waitForUser(() => handler(title)) : undefined;
+		this.#planProposalHandler = handler
+			? title => this.waitForUser(() => handler(title), "a plan approval", { kind: "permission" })
+			: undefined;
 	}
 
 	#sessionBeforeSwitchReconciler: (() => Promise<void>) | undefined;
@@ -3539,11 +3745,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * reached once the session is fully idle. Suppressed deliveries
 	 * (acknowledged, or watched by an in-flight `wait`) never wake the loop,
 	 * so they don't count.
+	 *
+	 * Always false without an agent id: such a session registers no delivery
+	 * sink and no async-result yield-queue handler (see the constructor), so no
+	 * job's result can reach it and nothing can re-wake its run. Reporting jobs
+	 * it does not own would also spin every caller of the documented
+	 * `while (hasPendingAsyncWork()) await settleAsyncWork()` loop, since that
+	 * settle is owner-scoped and returns at once without an agent id: the
+	 * predicate and the settle must read the same owner scope.
 	 */
 	#hasPendingAsyncWake(): boolean {
 		const manager = this.#asyncJobManager;
-		if (!manager) return false;
-		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
+		if (!manager || !this.#agentId) return false;
+		const ownerFilter = { ownerId: this.#agentId };
 		return (
 			manager.getRunningJobs(ownerFilter).some(job => !manager.isDeliverySuppressed(job.id)) ||
 			manager.hasPendingDeliveries(ownerFilter) ||
@@ -3924,13 +4138,26 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: boolean } = {}): Promise<void> {
-		if (event.type === "tool_execution_update") {
+		if (event.type === "tool_execution_start") {
+			// A call that runs again under the same id is a different run, and a
+			// record parked against the one before it does not describe this one.
+			this.#toolCallRuns.set(event.toolCallId, { sequence: ++this.#toolCallRunSeq, settled: false });
+		} else if (event.type === "tool_execution_update") {
 			// Returned background calls have no later tool result to persist their
 			// terminal frame. Keep the latest update for future focus rebuilds;
 			// logical session transitions clear the cache.
 			this.#activeToolExecutionUpdates.set(event.toolCallId, event);
 		} else if (event.type === "tool_execution_end") {
 			this.#activeToolExecutionUpdates.delete(event.toolCallId);
+			// A `tool_execution_end` carries no run identity, so a duplicate of an
+			// earlier end is indistinguishable from the current run's own end: a
+			// host that replays or reorders these frames can settle a run that is
+			// still live, and a record parked against it is then dropped on the way
+			// back rather than reported. The loop emits one end per start, in
+			// order, so only a replayed or reordered stream can make that shape.
+			const run = this.#toolCallRuns.get(event.toolCallId);
+			if (run) run.settled = true;
+			else this.#toolCallRuns.set(event.toolCallId, { sequence: ++this.#toolCallRunSeq, settled: true });
 		}
 		if (event.type === "message_update") {
 			this.#emit(event);
@@ -5949,6 +6176,50 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
+	 * Which run of `toolCallId` this session is on, and whether it is over — a mark a surface
+	 * keeps beside anything it records about that call and compares on the way back. The same
+	 * mark means the same run, still open, and nothing else does: a run that ended, a later run
+	 * of the same id, and a disposed session are all different marks.
+	 *
+	 * A call this session never ran has no mark at all, disposed or not. Disposal ends what this
+	 * session was doing, and nothing more: a record some other host is holding for a call that was
+	 * never this session's is still owed an answer, and saying `disposed` about it would retire it
+	 * on a claim this session has no standing to make.
+	 */
+	toolCallRun(toolCallId: string): ToolCallRunMark | undefined {
+		const run = this.#toolCallRuns.get(toolCallId);
+		if (run === undefined) return undefined;
+		if (this.#settledEverything) return { mark: "disposed", live: false };
+		return { mark: `${run.settled ? "settled" : "run"}:${run.sequence}`, live: !run.settled };
+	}
+
+	/** The mark alone, for a caller that only needs to compare it. */
+	toolCallRunMark(toolCallId: string): string | undefined {
+		return this.toolCallRun(toolCallId)?.mark;
+	}
+
+	/**
+	 * Whether the current run of `toolCallId` is over, or the session is disposed and nothing it
+	 * was asking will be answered. This is the plain question for a caller deciding whether to
+	 * wait on this session, so a disposed session answers it for any id. {@link toolCallRun} is
+	 * the narrower one a surface compares across a gap, and it stays silent about a call this
+	 * session never ran, disposed or not: that record is not its to retire.
+	 */
+	hasSettledToolCall(toolCallId: string): boolean {
+		return this.#settledEverything || this.#toolCallRuns.get(toolCallId)?.settled === true;
+	}
+
+	/**
+	 * The `user_wait_start` frame for a dialog still waiting on a person, or
+	 * undefined when none is open. `user_wait_start` is published once, when the
+	 * dialog opens, so a surface that attaches later (a focus rebuild) replays
+	 * this to report the session as blocked instead of working or idle.
+	 */
+	activeUserWait(): Extract<AgentSessionEvent, { type: "user_wait_start" }> | undefined {
+		return this.#openUserWait;
+	}
+
+	/**
 	 * Observe authoritative run-state transitions before public `agent_end`
 	 * deferral, for lifecycle owners that must not remain stale while prompts unwind.
 	 */
@@ -6435,14 +6706,32 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
-		for (const dispose of this.#disposers.splice(0)) dispose();
-		this.#modelDiscoveryAbortController.abort();
-		this.#queuedMessageDrainBlocked = false;
+		// Its runs are over from here, not from whenever the teardown that follows
+		// finishes: a wrapper that awaits other cleanup between the two leaves a
+		// window in which this session still claims to be running a call, and a
+		// surface reconciling what it parked would restore an approval nobody can
+		// answer. Ids this session never ran stay unmarked, disposed or not.
+		this.#settledEverything = true;
+		// Cancel any in-flight usage/reserve preflight the moment disposal begins, before any
+		// callback runs: a preflight awaiting a reserve confirmation or a health probe would
+		// otherwise resume during the async teardown gap (sdk.ts wraps dispose() around a
+		// session_shutdown await) and dispatch a request or commit a model fallback after the
+		// session is gone; its continuations all bail on the aborted controller signal.
 		this.#usagePreflightReadyForNextModelCall = false;
+		for (const controller of this.#usagePreflightAbortControllers) controller.abort();
+		this.#usagePreflightAbortControllers.clear();
 		this.#detachUsageBeforeQueueDequeue?.();
 		this.#detachUsageBeforeQueueDequeue = undefined;
 		this.#detachUsageBeforeModelCall?.();
 		this.#detachUsageBeforeModelCall = undefined;
+		// A dialog has no disposal signal and may never settle: end its wait now, so no surface
+		// keeps reporting a person owed an answer by a session that is gone. Its own `finally`
+		// then finds nothing to close. Inside a wait frame's delivery the end follows that frame.
+		this.#openUserWaits.clear();
+		this.#publishUserWait();
+		this.#runDisposers();
+		this.#modelDiscoveryAbortController.abort();
+		this.#queuedMessageDrainBlocked = false;
 		if (this.agent.prepareQueuedMessages === this.#prepareQueuedUserMessages) {
 			this.agent.prepareQueuedMessages = undefined;
 		}
@@ -6471,6 +6760,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	#disposeCall?: Promise<void>;
 	dispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
+		// A disposed session finishes nothing: whatever it was asking about will
+		// never be answered, so no surface may report it as still owed. Said here
+		// too for a caller that disposes without the wrapper's `beginDispose`.
+		this.#settledEverything = true;
 		if (!this.#disposeCall) this.#disposeCall = this.#doDispose(options);
 		return this.#disposeCall;
 	}
@@ -6680,7 +6973,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		hindsightState?.dispose();
 		this.#disconnectFromAgent();
 		// beginDispose() drained the rest; this catches registrations made during teardown.
-		for (const dispose of this.#disposers.splice(0)) dispose();
+		this.#runDisposers();
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
 		this.#ircWakeHoldListeners.clear();
@@ -6985,10 +7278,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#recovery.servingModel;
 	}
 
-	/** Install the interactive decision surface for reserve-triggered model changes; it waits for the user mid-turn. */
+	/**
+	 * Install the interactive decision surface for reserve-triggered model changes; it waits for the user mid-turn.
+	 *
+	 * The wait ends when `signal` aborts even if the dialog itself never settles
+	 * — a wedged or signal-deaf UI must not leave the session reported as
+	 * blocked after the turn has stopped waiting for it.
+	 */
 	setUsageFallbackConfirmer(confirmer: UsageFallbackConfirmer | undefined): void {
 		this.#usageFallbackConfirmer = confirmer
-			? (confirmation, signal) => this.waitForUser(() => confirmer(confirmation, signal))
+			? (confirmation, signal) => {
+					const abandoned = Promise.withResolvers<boolean>();
+					signal.addEventListener("abort", () => abandoned.resolve(false), { once: true });
+					return this.waitForUser(
+						() => Promise.race([confirmer(confirmation, signal), abandoned.promise]),
+						`whether to leave ${confirmation.from} at its coding-plan reserve`,
+					);
+				}
 			: undefined;
 	}
 
@@ -7038,7 +7344,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						controller.signal,
 						this.#usageFallbackConfirmer,
 					);
-					if (fallbackCommitted) return true;
+					// A fallback commits across awaits (prompt re-sync, `retry_fallback_applied`
+					// handlers): disposal or an abort that began meanwhile sends nothing on it.
+					if (fallbackCommitted) return !controller.signal.aborted;
 					if (controller.signal.aborted || this.#promptGeneration !== generation) return false;
 					if (this.model === model || modelsAreEqual(this.model, model)) return true;
 				} catch (error) {
@@ -7927,6 +8235,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// still-cached background-task snapshot from the old conversation must not
 		// survive to be replayed by a focus rebuild in the reset session (#10447).
 		this.#activeToolExecutionUpdates.clear();
+		this.#toolCallRuns.clear();
 	}
 
 	/**
@@ -9113,12 +9422,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 			// Validate API key; a provider without one walks the retry fallback chain first.
 			const apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
-			if (!apiKey && !(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))) {
-				if (setupAbort.signal.aborted) return false;
-				throw new PromptPreflightError(
-					`No API key found for ${model.provider}.\n\n` +
-						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
-				);
+			if (!apiKey) {
+				const switched = await this.#recovery.applyMissingCredentialFallback(setupAbort.signal);
+				// Disposal refuses the fallback, or began while it committed (it commits across
+				// awaits): either way the prompt is dropped, not sent and not blamed on a key.
+				if (setupAbort.signal.aborted || this.#isDisposed) return false;
+				if (!switched) {
+					throw new PromptPreflightError(
+						`No API key found for ${model.provider}.\n\n` +
+							`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
+					);
+				}
 			}
 
 			// Recover a previously failed/incomplete assistant turn before sending.

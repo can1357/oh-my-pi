@@ -885,6 +885,27 @@ export const cfgRetryUsageReservePolicy = register({
 	},
 });
 
+export const cfgRetryUsageReserveConfirmTimeout = register({
+	id: "retry.usageReserveConfirmTimeout",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Reserve Confirm Timeout",
+		description:
+			"Seconds the reserve-reached prompt waits before keeping the current model. 0 waits for a person forever.",
+		condition: "usageAwareFallbackEnabled",
+		options: [
+			{ value: "0", label: "Wait forever", description: "Hold the turn until someone answers" },
+			{ value: "60", label: "60 seconds" },
+			{ value: "300", label: "5 minutes" },
+			{ value: "900", label: "15 minutes" },
+			{ value: "3600", label: "1 hour" },
+		],
+	},
+});
+
 export const cfgRetryFallbackChains = register({
 	id: "retry.fallbackChains",
 	type: "record",
@@ -932,6 +953,7 @@ export const cfgRetry = combine({
 	usageAwareFallback: cfgRetryUsageAwareFallback,
 	usageReservePct: cfgRetryUsageReservePct,
 	usageReservePolicy: cfgRetryUsageReservePolicy,
+	usageReserveConfirmTimeout: cfgRetryUsageReserveConfirmTimeout,
 });
 
 /** Retry/backoff policy ({@link cfgRetry}). */

@@ -58,6 +58,7 @@ import {
 	type AgentViewState,
 	isLocalAgentSession,
 	type ToolExecutionUpdateEvent,
+	type UserWaitStartEvent,
 } from "../session/agent-session-handle";
 import type {
 	AgentSessionDisposeOptions,
@@ -213,6 +214,7 @@ function emptyViewState(): SessionViewState {
 		ephemeralMaxTokensPreservesRequest: false,
 		settings: { base: null, layers: [] },
 		activeToolExecutionUpdates: [],
+		activeUserWait: undefined,
 	};
 }
 
@@ -272,6 +274,8 @@ export class RemoteAgentSession implements AgentViewSession {
 	#builtInTools = new Set<string>();
 	#runToolCallIds = new Set<string>();
 	readonly #activeUpdates = new Map<string, ToolExecutionUpdateEvent>();
+	/** The home's open dialog: seeded by the watch snapshot, kept current by forwarded wait events. */
+	#userWait: UserWaitStartEvent | undefined;
 	#entries: SessionEntry[] = [];
 	readonly #entryIndex = new SessionEntryIndex();
 	/** Custom entries appended here and not yet echoed back by the home worker. */
@@ -525,6 +529,10 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	activeToolExecutionUpdates(): readonly ToolExecutionUpdateEvent[] {
 		return [...this.#activeUpdates.values()];
+	}
+
+	activeUserWait(): UserWaitStartEvent | undefined {
+		return this.#userWait;
 	}
 
 	settleInFlightMessagePersistence(): Promise<void> {
@@ -887,6 +895,7 @@ export class RemoteAgentSession implements AgentViewSession {
 		this.#pruneSettled(state.restorableQueue);
 		this.#activeUpdates.clear();
 		for (const update of state.activeToolExecutionUpdates) this.#activeUpdates.set(update.toolCallId, update);
+		this.#userWait = state.activeUserWait;
 		this.#provisional.clear();
 		this.#entries = entries;
 		this.#entryIndex.rebuild(entries);
@@ -961,6 +970,8 @@ export class RemoteAgentSession implements AgentViewSession {
 		if (this.#closed !== undefined) return;
 		const wasRunning = this.#state.runStartedAt !== undefined;
 		this.#state = { ...this.#state, isStreaming: false, runStartedAt: undefined, streamMessage: null };
+		// Nobody is left to answer: the dialog went with its home.
+		this.#userWait = undefined;
 		if (wasRunning) this.applyRunState("idle");
 		this.#closed = reason;
 		this.#settledQueued.clear();
@@ -969,7 +980,7 @@ export class RemoteAgentSession implements AgentViewSession {
 		this.#runStateListeners.clear();
 	}
 
-	/** Keep the event-derived mirror (stream message, running tool updates, tok/s meter) current. */
+	/** Keep the event-derived mirror (stream message, running tool updates, open dialog, tok/s meter) current. */
 	#trackEvent(event: AgentSessionEvent): void {
 		switch (event.type) {
 			case "message_start":
@@ -1001,6 +1012,12 @@ export class RemoteAgentSession implements AgentViewSession {
 				return;
 			case "tool_execution_end":
 				this.#activeUpdates.delete(event.toolCallId);
+				return;
+			case "user_wait_start":
+				this.#userWait = event;
+				return;
+			case "user_wait_end":
+				this.#userWait = undefined;
 				return;
 		}
 	}

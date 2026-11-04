@@ -1,17 +1,24 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { scheduler } from "node:timers/promises";
+import * as timers from "node:timers/promises";
 import { MAX_TIMER_DELAY_MS, sleepLong } from "@oh-my-pi/pi-utils/async";
 
 function mockMonotonicScheduler(elapsedForWait: (delayMs: number) => number = delayMs => delayMs) {
 	const startedAt = 10_000;
 	let now = startedAt;
 	vi.spyOn(performance, "now").mockImplementation(() => now);
-	const wait = vi.spyOn(scheduler, "wait").mockImplementation(async (delayMs, options) => {
-		options?.signal?.throwIfAborted();
+	const advance = (delayMs: number, signal: AbortSignal | undefined) => {
+		signal?.throwIfAborted();
 		now += elapsedForWait(delayMs);
-		options?.signal?.throwIfAborted();
+		signal?.throwIfAborted();
+	};
+	const wait = vi.spyOn(timers.scheduler, "wait").mockImplementation(async (delayMs, options) => {
+		advance(delayMs, options?.signal);
 	});
-	return { elapsed: () => now - startedAt, wait };
+	const unrefWait = vi.spyOn(timers, "setTimeout").mockImplementation(async (delayMs, _value, options) => {
+		advance(delayMs ?? 0, options?.signal);
+		return undefined as never;
+	});
+	return { elapsed: () => now - startedAt, wait, unrefWait };
 }
 
 afterEach(() => {
@@ -64,5 +71,44 @@ describe("sleepLong", () => {
 
 		await expect(sleepLong(0, controller.signal)).rejects.toThrow("The operation was aborted");
 		expect(clock.wait).not.toHaveBeenCalled();
+		expect(clock.unrefWait).not.toHaveBeenCalled();
 	});
+
+	it("keeps a referenced sleep on scheduler.wait, the timer a caller's clock mock replaces", async () => {
+		const clock = mockMonotonicScheduler();
+
+		await sleepLong(MAX_TIMER_DELAY_MS + 1_000);
+
+		expect(clock.wait).toHaveBeenCalledTimes(2);
+		expect(clock.unrefWait).not.toHaveBeenCalled();
+	});
+
+	it("arms every chunk unreferenced when ref is false", async () => {
+		const clock = mockMonotonicScheduler();
+
+		await sleepLong(MAX_TIMER_DELAY_MS + 1_000, undefined, { ref: false });
+
+		expect(clock.unrefWait.mock.calls.map(([, , options]) => options?.ref)).toEqual([false, false]);
+		expect(clock.wait).not.toHaveBeenCalled();
+	});
+
+	it("lets a process exit while an unreferenced long sleep is pending", async () => {
+		// The reserve-prompt deadline must never be the only reason a finished
+		// process stays alive, and only the real event loop can show that: a
+		// mocked timer proves nothing about the platform's ref semantics.
+		const source = `
+			import { sleepLong } from "@oh-my-pi/pi-utils/async";
+			void sleepLong(30 * 24 * 60 * 60 * 1000, undefined, { ref: false });
+			console.log("armed");
+		`;
+		const proc = Bun.spawn([process.execPath, "-e", source], {
+			cwd: new URL("../", import.meta.url).pathname,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const exited = await Promise.race([proc.exited, timers.setTimeout(10_000).then(() => "timed out" as const)]);
+		if (exited === "timed out") proc.kill();
+		expect(await new Response(proc.stdout).text()).toContain("armed");
+		expect(exited).toBe(0);
+	}, 20_000);
 });
