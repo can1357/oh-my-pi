@@ -5,6 +5,7 @@
 ### Changed
 
 - Faster polyphonic memory recall when scoring stored embeddings across turns ([#16994](https://github.com/can1357/oh-my-pi/pull/16994) by [@GTanger](https://github.com/GTanger))
+- Development installs now share fastembed's ONNX runtime instead of installing a second native runtime
 
 ## [18.14.2] - 2026-10-31
 

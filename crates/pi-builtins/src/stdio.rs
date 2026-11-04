@@ -31,10 +31,9 @@ use std::{
 	sync::Arc,
 };
 
-use brush_core::openfiles::OpenFile;
 use parking_lot::Mutex;
 
-use crate::host::OutputGate;
+use crate::{host::OutputGate, openfile::OpenFile};
 
 /// Pending bytes at which a regular-file destination is drained before the
 /// utility ends.
@@ -154,7 +153,7 @@ impl Native {
 
 impl AsyncOut {
 	/// Output delivered to a provider file through its async API.
-	pub fn provider(file: pi_vfs::File, gate: OutputGate) -> Self {
+	pub fn provider(file: Arc<pi_vfs::File>, gate: OutputGate) -> Self {
 		Self::new(Sink::Provider(tokio::sync::Mutex::new(())), OpenFile::Vfs(file), false, gate)
 	}
 
@@ -374,7 +373,7 @@ impl Source {
 			};
 			let repr = match descriptor {
 				Ok(descriptor) => Repr::Descriptor(descriptor),
-				Err(fd) => Repr::Inline(OpenFile::File(std::fs::File::from(fd))),
+				Err(fd) => Repr::Inline(OpenFile::from(std::fs::File::from(fd))),
 			};
 			Ok(Self::new(repr, metadata))
 		}
@@ -387,7 +386,7 @@ impl Source {
 				let native = file
 					.into_native()
 					.map_err(|_| io::Error::from(io::ErrorKind::Unsupported))?;
-				return Ok(Self::new(Repr::Blocking(Blocking::new(OpenFile::File(native))), metadata));
+				return Ok(Self::new(Repr::Blocking(Blocking::new(OpenFile::from(native))), metadata));
 			}
 			#[cfg(not(windows))]
 			{

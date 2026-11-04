@@ -9,7 +9,12 @@ import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/route
 import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
 import { ChainJudge } from "@oh-my-pi/pi-coding-agent/judgment";
 import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/jfind";
-import { runCascade } from "@oh-my-pi/pi-coding-agent/tools/jfind/cascade";
+import {
+	type SpotlightClient,
+	SpotlightError,
+	type SpotlightRequest,
+} from "@oh-my-pi/pi-coding-agent/spotlight/client";
+import { type CascadeSpotlight, runCascade } from "@oh-my-pi/pi-coding-agent/tools/jfind/cascade";
 import { keywordsFromQuery } from "@oh-my-pi/pi-coding-agent/tools/jfind/keywords";
 import { grepIndex } from "@oh-my-pi/pi-coding-agent/tools/jfind/lexical";
 import {
@@ -476,6 +481,104 @@ describe("jfind cascade", () => {
 					signal: controller.signal,
 				}),
 			).rejects.toThrow("Operation aborted");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	/** 30 lexically identical files, so the two lexical picks are `filler0.ts` and `filler1.ts` (path order). */
+	async function fillerTree(prefix: string): Promise<string> {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+		for (let i = 0; i < 30; i++) {
+			await Bun.write(path.join(dir, `filler${i}.ts`), `export const filler${i} = ${i};\n`);
+		}
+		return dir;
+	}
+
+	/** Spotlight stand-in answering from `answer`, recording its requests. */
+	function fakeSpotlight(answer: (request: SpotlightRequest) => number[] | Error): {
+		spotlight: CascadeSpotlight;
+		requests: SpotlightRequest[];
+	} {
+		const requests: SpotlightRequest[] = [];
+		const client: Pick<SpotlightClient, "rank"> = {
+			async rank(request) {
+				requests.push(request);
+				const scores = answer(request);
+				if (scores instanceof Error) throw scores;
+				return { scores: { files: scores }, inputTokens: 900, costUsd: 0.000027, ms: 300, requestId: null };
+			},
+		};
+		return { spotlight: { client, thinking: "low" }, requests };
+	}
+
+	const fillerNumber = (rel: string) => Number(/filler(\d+)\.ts/.exec(rel)![1]);
+
+	it("reads the files Spotlight scores highest after the two lexical picks, without judge name batches", async () => {
+		const dir = await fillerTree("jfind-spotlight-");
+		try {
+			const { spotlight, requests } = fakeSpotlight(request => request.items.map(rel => fillerNumber(rel) / 100));
+			const judge = new FakeJudge(() => 0.1);
+			const result = await runCascade({
+				root: { path: dir, type: "directory" },
+				filesystem: urlFs(dir),
+				query: "token parsing",
+				extraKeywords: [],
+				judge,
+				spotlight,
+				includeHidden: false,
+			});
+
+			expect(requests).toHaveLength(1);
+			expect(judge.requests.filter(request => "tree" in stateOf(request))).toHaveLength(0);
+			const expected = ["filler0.ts", "filler1.ts"];
+			for (let i = 29; expected.length < 20; i--) expected.push(`filler${i}.ts`);
+			expect(result.ranking.read).toEqual(expected);
+			expect(result.ranking).toMatchObject({
+				ranker: "spotlight",
+				candidates: 30,
+				judgeRequestsSaved: 1,
+				spotlight: { ms: 300, inputTokens: 900, costUsd: 0.000027 },
+			});
+			expect(result.ranking.spotlight?.error).toBeUndefined();
+			expect(result.stats.judged).toBe(30);
+			expect(result.stats.failures).toEqual([]);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("falls back to the judge's filename ranking when Spotlight fails, and reports the failure", async () => {
+		const dir = await fillerTree("jfind-spotlight-down-");
+		try {
+			const { spotlight } = fakeSpotlight(
+				() => new SpotlightError("spotlight HTTP 503: unavailable", 503, "unavailable"),
+			);
+			// The judge favors low-numbered files, the opposite of the Spotlight test above.
+			const judge = new FakeJudge((request, key) => {
+				const state = stateOf(request);
+				if (!("tree" in state)) return 0.1;
+				const name = new RegExp(`${key} (filler\\d+\\.ts)`).exec(String(state.tree))![1]!;
+				return 1 - fillerNumber(name) / 100;
+			});
+			const result = await runCascade({
+				root: { path: dir, type: "directory" },
+				filesystem: urlFs(dir),
+				query: "token parsing",
+				extraKeywords: [],
+				judge,
+				spotlight,
+				includeHidden: false,
+			});
+
+			expect(judge.requests.filter(request => "tree" in stateOf(request))).toHaveLength(1);
+			expect(result.ranking.read).toEqual(Array.from({ length: 20 }, (_, i) => `filler${i}.ts`));
+			expect(result.ranking.ranker).toBe("judge");
+			expect(result.ranking.judgeRequestsSaved).toBe(0);
+			expect(result.ranking.spotlight?.error).toBe("spotlight HTTP 503: unavailable");
+			expect(result.stats.failures).toEqual(["filenames: spotlight HTTP 503: unavailable"]);
+			// The judge took over, so the search itself is complete.
+			expect(result.coverage).toBe("complete");
 		} finally {
 			await removeWithRetries(dir);
 		}

@@ -13,13 +13,15 @@
  * statusLine.attachToEditor(editor, getComposerStyle(shape));
  * ```
  */
+import { type } from "@oh-my-pi/omptype";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
-import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
+import type { ComposerNativeState } from "../prompt/custom-editor";
 import { parseThinkingLevel } from "../thinking";
 import { StatusLineComponent } from "./component";
 import type { CompactionBoundaries } from "./context-usage";
 import type { StatusLineHost, StatusLineSession } from "./host";
+import { thinkingLevelWord } from "./segments";
 import {
 	CONTEXT_LINE_MODE_VALUES,
 	STATUS_LINE_PRESET_VALUES,
@@ -57,9 +59,9 @@ const NO_USAGE = {
 	cost: 0,
 };
 
-/** Build the prepaint status line; the caller disposes it once the session-bound bar mounts. */
-export function createStartupStatusLine(data: StatusLineStartupData): StatusLineComponent {
-	const session: StatusLineSession = {
+/** A fresh, unnamed session on the cached model and thinking state. */
+function startupSession(data: StatusLineStartupData): StatusLineSession {
+	return {
 		state: { model: data.model, thinkingLevel: data.thinkingLevel, messages: NO_MESSAGES },
 		model: data.model,
 		messages: NO_MESSAGES,
@@ -78,6 +80,22 @@ export function createStartupStatusLine(data: StatusLineStartupData): StatusLine
 		getAsyncJobSnapshot: () => null,
 		getGoalModeState: () => undefined,
 	};
+}
+
+/**
+ * TSP composer state for the first frame: the cached thinking level on the
+ * effort chip (or as the model chip's icon), until InteractiveMode wires the live one.
+ */
+export function startupComposerState(data: StatusLineStartupData): ComposerNativeState {
+	return {
+		running: false,
+		thinking: thinkingLevelWord(startupSession(data)),
+		thinkingInModel: data.settings.compactThinkingLevel,
+	};
+}
+
+/** Build the prepaint status line; the caller disposes it once the session-bound bar mounts. */
+export function createStartupStatusLine(data: StatusLineStartupData): StatusLineComponent {
 	const host: StatusLineHost = {
 		getSettings: () => data.settings,
 		gitEnabled: () => data.gitEnabled,
@@ -95,87 +113,53 @@ export function createStartupStatusLine(data: StatusLineStartupData): StatusLine
 		limitMatchesActiveAccount: () => false,
 		computeCompactionBoundaries: () => data.compactionBoundaries,
 	};
-	const statusLine = new StatusLineComponent(session, host);
+	const statusLine = new StatusLineComponent(startupSession(data), host);
 	statusLine.setAutoCompactEnabled(data.autoCompactEnabled);
 	return statusLine;
 }
 
-function isOneOf<T extends string>(values: readonly T[], value: unknown): value is T {
-	return typeof value === "string" && values.some(candidate => candidate === value);
-}
-
-function isOptionalBoolean(value: unknown): boolean {
-	return value === undefined || typeof value === "boolean";
-}
-
-function isSegmentList(value: unknown): boolean {
-	return value === undefined || (Array.isArray(value) && value.every(id => isOneOf(STATUS_LINE_SEGMENT_IDS, id)));
-}
+const SegmentIds = type.enumerated(...STATUS_LINE_SEGMENT_IDS).array();
 
 /** Shallow check of persisted settings; nested segment options are trusted as written by this version. */
-function isStatusLineSettings(value: unknown): value is StatusLineSettings {
-	return (
-		isRecord(value) &&
-		(value.preset === undefined || isOneOf(STATUS_LINE_PRESET_VALUES, value.preset)) &&
-		isSegmentList(value.leftSegments) &&
-		isSegmentList(value.rightSegments) &&
-		(value.separator === undefined || isOneOf(STATUS_LINE_SEPARATOR_VALUES, value.separator)) &&
-		(value.segmentOptions === undefined || isRecord(value.segmentOptions)) &&
-		(value.contextLine === undefined || isOneOf(CONTEXT_LINE_MODE_VALUES, value.contextLine)) &&
-		isOptionalBoolean(value.showHookStatus) &&
-		isOptionalBoolean(value.sessionAccent) &&
-		isOptionalBoolean(value.transparent) &&
-		isOptionalBoolean(value.compactThinkingLevel)
-	);
-}
+const StatusLineSettingsShape = type({
+	"preset?": type.enumerated(...STATUS_LINE_PRESET_VALUES),
+	"leftSegments?": SegmentIds,
+	"rightSegments?": SegmentIds,
+	"separator?": type.enumerated(...STATUS_LINE_SEPARATOR_VALUES),
+	"segmentOptions?": "Record<string, unknown>",
+	"contextLine?": type.enumerated(...CONTEXT_LINE_MODE_VALUES),
+	"showHookStatus?": "boolean",
+	"sessionAccent?": "boolean",
+	"transparent?": "boolean",
+	"compactThinkingLevel?": "boolean",
+});
 
-/** Check the model fields the status line reads; the rest is trusted as serialized by this version. */
-function isPersistedModel(value: unknown): value is Model {
-	return (
-		isRecord(value) &&
-		typeof value.id === "string" &&
-		typeof value.name === "string" &&
-		typeof value.provider === "string" &&
-		typeof value.api === "string" &&
-		typeof value.contextWindow === "number"
-	);
-}
-
-function readCompactionBoundaries(value: unknown): CompactionBoundaries | null | undefined {
-	if (value === null) return null;
-	if (!isRecord(value) || typeof value.thresholdPercent !== "number") return undefined;
-	const speculationPercent = value.speculationPercent;
-	if (speculationPercent !== null && typeof speculationPercent !== "number") return undefined;
-	return { thresholdPercent: value.thresholdPercent, speculationPercent };
-}
+const StartupDataShape = type({
+	"+": "delete",
+	settings: StatusLineSettingsShape,
+	gitEnabled: "boolean",
+	// Only the fields the status line reads; the rest is trusted as serialized by this version.
+	"model?": { id: "string", name: "string", provider: "string", api: "string", contextWindow: "number" },
+	"thinkingLevel?": "string",
+	autoThinking: "boolean",
+	fastMode: "boolean",
+	usingSubscription: "boolean",
+	autoCompactEnabled: "boolean",
+	compactionBoundaries: type({ "+": "delete", thresholdPercent: "number", speculationPercent: "number | null" }).or(
+		"null",
+	),
+});
 
 /** Validate persisted {@link StatusLineStartupData}; `undefined` for anything malformed. */
 export function readStatusLineStartupData(value: unknown): StatusLineStartupData | undefined {
-	if (!isRecord(value) || !isStatusLineSettings(value.settings)) return undefined;
-	const model = value.model;
-	if (model !== undefined && !isPersistedModel(model)) return undefined;
-	const thinkingLevel = typeof value.thinkingLevel === "string" ? parseThinkingLevel(value.thinkingLevel) : undefined;
-	if (value.thinkingLevel !== undefined && thinkingLevel === undefined) return undefined;
-	const compactionBoundaries = readCompactionBoundaries(value.compactionBoundaries);
-	if (
-		typeof value.gitEnabled !== "boolean" ||
-		typeof value.autoThinking !== "boolean" ||
-		typeof value.fastMode !== "boolean" ||
-		typeof value.usingSubscription !== "boolean" ||
-		typeof value.autoCompactEnabled !== "boolean" ||
-		compactionBoundaries === undefined
-	) {
-		return undefined;
-	}
+	const data = StartupDataShape(value);
+	if (data instanceof type.errors) return undefined;
+	const thinkingLevel = data.thinkingLevel === undefined ? undefined : parseThinkingLevel(data.thinkingLevel);
+	if (data.thinkingLevel !== undefined && thinkingLevel === undefined) return undefined;
 	return {
-		settings: value.settings,
-		gitEnabled: value.gitEnabled,
-		model,
+		...data,
+		settings: data.settings as StatusLineSettings,
+		model: data.model as Model | undefined,
 		thinkingLevel,
-		autoThinking: value.autoThinking,
-		fastMode: value.fastMode,
-		usingSubscription: value.usingSubscription,
-		autoCompactEnabled: value.autoCompactEnabled,
-		compactionBoundaries,
 	};
 }
