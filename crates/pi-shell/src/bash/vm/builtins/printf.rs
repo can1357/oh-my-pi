@@ -1,11 +1,17 @@
 //! bash `printf`, ported from bash 5.3 `builtins/printf.def`: the format is
 //! reused until the arguments run out, `%b %q %Q %(…)T %n` are bash's own,
 //! the C conversions follow printf(3) with bash's argument rules
-//! (`strtoimax`, `'c` character codes, `Result too large`), and `%ls %lc`
-//! (`%S %C`) count characters in a UTF-8 locale.
+//! (`strtoimax`, `'c` character codes, `ERANGE`), and `%ls %lc` (`%S %C`)
+//! count characters in a UTF-8 locale. Floating-point arguments are C
+//! `long double`s, read and written as glibc does (see [`float`]).
+
+mod float;
+
+use std::borrow::Cow;
 
 use bstr::{BString, ByteSlice};
 
+use self::float::Float;
 use super::{
 	Ctx, Need, R, done,
 	io::{bind, invalid_number},
@@ -21,9 +27,26 @@ use crate::bash::{
 /// bash's `builtin_usage` line: no shell-name or line prefix.
 const USAGE: &[u8] = b"printf: usage: printf [-v var] format [arguments]\n";
 
-/// `strerror(EOVERFLOW)`: printf(3) cannot produce more than `INT_MAX`
-/// bytes.
-const EOVERFLOW: &str = "Value too large to be stored in data type";
+/// `strerror(ERANGE)`: a number past what its conversion holds.
+#[cfg(unix)]
+fn erange_text() -> Cow<'static, str> {
+	crate::bash::diag::strerror(&std::io::Error::from_raw_os_error(libc::ERANGE))
+}
+#[cfg(not(unix))]
+fn erange_text() -> Cow<'static, str> {
+	Cow::Borrowed("Result too large")
+}
+
+/// `strerror(EOVERFLOW)`: printf(3) cannot take a width or precision past
+/// `INT_MAX`, nor return a count past it.
+#[cfg(unix)]
+fn eoverflow_text() -> Cow<'static, str> {
+	crate::bash::diag::strerror(&std::io::Error::from_raw_os_error(libc::EOVERFLOW))
+}
+#[cfg(not(unix))]
+fn eoverflow_text() -> Cow<'static, str> {
+	Cow::Borrowed("Value too large to be stored in data type")
+}
 
 /// C `INT_MAX`: printf(3) widths, precisions and output lengths.
 const INT_MAX: usize = 0x7fff_ffff;
@@ -101,8 +124,13 @@ pub fn printf(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			break i32::from(f.conv_err);
 		}
 	};
-	let Fmt { ctx, out, flushed, .. } = f;
+	let Fmt { ctx, mut out, flushed, .. } = f;
 	if let Some(name) = vname {
+		// bash binds its buffer as a C string: a NUL (`%c ''`, `%b '\0'`)
+		// ends the value.
+		if let Some(nul) = out.iter().position(|&b| b == 0) {
+			out.truncate(nul);
+		}
 		let ok = bind(ctx, name, AssignValue::Scalar(out.into()));
 		done(if ok { status } else { 1 })
 	} else {
@@ -119,6 +147,9 @@ struct Flags {
 	space: bool,
 	alt:   bool,
 	zero:  bool,
+	/// `'`: no effect in the C locale's numbers, but printf(3) shows it
+	/// when it prints a directive it cannot read.
+	group: bool,
 }
 
 /// A field width as written.
@@ -139,8 +170,9 @@ enum Prec<'f> {
 	Star(i32),
 	/// `.digits`; empty for a bare `.`.
 	Lit(&'f [u8]),
-	/// `.-digits`: printf(3) ignores it.
-	Neg,
+	/// `.-digits` (or `.-`): bash skips the `-`, printf(3) does not: it
+	/// reads `.` as precision 0 and `-` as an unknown conversion.
+	Neg(&'f [u8]),
 }
 
 /// One `%` directive without its conversion character.
@@ -207,7 +239,7 @@ impl<'x> Fmt<'x, '_, '_> {
 					b'+' => flags.plus = true,
 					b' ' => flags.space = true,
 					b'0' => flags.zero = true,
-					b'\'' => {},
+					b'\'' => flags.group = true,
 					_ => break,
 				}
 				i += 1;
@@ -237,8 +269,8 @@ impl<'x> Fmt<'x, '_, '_> {
 					}
 					let len = digits_at(&fmt[i..]);
 					i += len;
-					prec = if neg && len > 0 {
-						Prec::Neg
+					prec = if neg {
+						Prec::Neg(&fmt[i - len..i])
 					} else {
 						Prec::Lit(&fmt[i - len..i])
 					};
@@ -253,7 +285,10 @@ impl<'x> Fmt<'x, '_, '_> {
 				i += 1;
 			}
 			let Some(&conv) = fmt.get(i) else {
-				self.usage(format!("`{}': missing format character", fmt[start..].as_bstr()));
+				let mut msg = BString::from(b"`".as_slice());
+				msg.extend_from_slice(&fmt[start..]);
+				msg.extend_from_slice(b"': missing format character");
+				self.usage_bytes(msg);
 				return Ok(Err(1));
 			};
 			i += 1;
@@ -267,10 +302,10 @@ impl<'x> Fmt<'x, '_, '_> {
 						}
 					},
 					Err(bad) => {
-						self.usage(format!(
-							"warning: `{}': invalid time format specification",
-							char::from(bad)
-						));
+						let mut msg = BString::from(b"warning: `".as_slice());
+						msg.push(bad);
+						msg.extend_from_slice(b"': invalid time format specification");
+						self.usage_bytes(msg);
 						self.out.push(b'%');
 						i = start + 1;
 					},
@@ -306,6 +341,12 @@ impl<'x> Fmt<'x, '_, '_> {
 		self.report(Diag::Usage { msg: msg.into() }, true);
 	}
 
+	/// `printf: MSG` with MSG's bytes as they are: bash names a byte of the
+	/// format or an argument, which need not be UTF-8 (`%é` names `\xc3`).
+	fn usage_bytes(&mut self, msg: BString) {
+		self.report(Diag::Bytes { msg }, true);
+	}
+
 	/// Report an escape that bash diagnoses (output continues).
 	fn escape_error(&mut self, err: Option<EscError>) {
 		match err {
@@ -332,6 +373,9 @@ impl<'x> Fmt<'x, '_, '_> {
 			},
 			b'c' | b'C' => {
 				let ch = self.getchr();
+				if let Prec::Neg(digits) = spec.prec {
+					return self.unknown(spec, digits, b"", b'c');
+				}
 				self.c_pad(&[ch], spec)
 			},
 			b's' | b'S' if (long || conv == b'S') && self.utf8 => {
@@ -341,6 +385,9 @@ impl<'x> Fmt<'x, '_, '_> {
 			},
 			b's' | b'S' => {
 				let arg = self.getstr();
+				if let Prec::Neg(digits) = spec.prec {
+					return self.unknown(spec, digits, b"", b's');
+				}
 				let arg = match c_prec(spec) {
 					Some(p) => &arg[..p.min(arg.len())],
 					None => arg,
@@ -379,10 +426,13 @@ impl<'x> Fmt<'x, '_, '_> {
 			b'q' | b'Q' => {
 				let mut arg = self.getstr();
 				if conv == b'Q' {
+					// The precision cuts the argument before it is quoted:
+					// `.*`, or the digits after `.` (or `.-`); digits past an
+					// `int` cut nothing.
 					let p = match spec.prec {
 						Prec::Star(p) => usize::try_from(p).ok(),
-						Prec::Lit([]) | Prec::None | Prec::Neg => None,
-						Prec::Lit(d) => decimal(d),
+						Prec::Lit(d) | Prec::Neg(d) if !d.is_empty() => decimal(d),
+						_ => None,
 					};
 					if let Some(p) = p {
 						arg = &arg[..p.min(arg.len())];
@@ -390,11 +440,18 @@ impl<'x> Fmt<'x, '_, '_> {
 				}
 				let q = quote(arg, spec.flags.alt, self.utf8);
 				if conv == b'Q' {
-					// The precision applied to the argument; the quoted text
-					// is printed whole (literal digits are still checked).
+					// The quoted text is printed whole, unless the precision
+					// printstr reads is a bare `.` (or `.-`), which is 0
+					// (literal digits are still checked).
 					let (w, left) = self.str_width(spec);
-					let _ = self.str_prec(spec);
-					pad(&mut self.out, &q, w, left);
+					let shown = match spec.prec {
+						Prec::Lit([]) | Prec::Neg(_) => &q[..0],
+						_ => {
+							let _ = self.str_prec(spec);
+							&q[..]
+						},
+					};
+					pad(&mut self.out, shown, w, left);
 				} else {
 					self.printstr(&q, spec);
 				}
@@ -402,6 +459,9 @@ impl<'x> Fmt<'x, '_, '_> {
 			},
 			b'd' | b'i' => {
 				let v = self.getintmax();
+				if let Prec::Neg(digits) = spec.prec {
+					return self.unknown(spec, digits, b"l", conv);
+				}
 				let sign = if v < 0 {
 					"-"
 				} else if spec.flags.plus {
@@ -415,6 +475,9 @@ impl<'x> Fmt<'x, '_, '_> {
 			},
 			b'o' | b'u' | b'x' | b'X' => {
 				let v = self.getuintmax();
+				if let Prec::Neg(digits) = spec.prec {
+					return self.unknown(spec, digits, b"l", conv);
+				}
 				let (digits, prefix) = match conv {
 					b'u' => (v.to_string(), ""),
 					b'o' => (format!("{v:o}"), ""),
@@ -437,44 +500,108 @@ impl<'x> Fmt<'x, '_, '_> {
 			},
 			b'e' | b'E' | b'f' | b'F' | b'g' | b'G' | b'a' | b'A' => {
 				let v = self.getfloat();
-				let mut body = float(v.abs(), conv, spec.flags.alt, c_prec(spec));
-				if self.point != b'.' {
-					body = body.replace('.', &char::from(self.point).to_string());
+				if let Prec::Neg(digits) = spec.prec {
+					return self.unknown(spec, digits, b"L", conv);
 				}
-				let sign = if v.is_sign_negative() {
-					"-"
+				if c_width(spec).is_none() || c_prec_overflows(spec) {
+					self.usage(eoverflow_text());
+					return Err(1);
+				}
+				let text = float::format(&v, conv, spec.flags.alt, c_prec(spec), self.point);
+				let sign: &[u8] = if v.neg {
+					b"-"
 				} else if spec.flags.plus {
-					"+"
+					b"+"
 				} else if spec.flags.space {
-					" "
+					b" "
 				} else {
-					""
+					b""
 				};
-				let mut s = Vec::from(sign.as_bytes());
+				let len = sign.len() + text.len();
 				let width = c_width(spec).map_or(0, |(w, _)| w);
-				if spec.flags.zero
-					&& !spec.flags.left
-					&& v.is_finite()
-					&& sign.len() + body.len() < width
-				{
-					let (pre, digits) = if body.starts_with("0x") || body.starts_with("0X") {
-						body.split_at(2)
-					} else {
-						("", body.as_str())
-					};
-					s.extend_from_slice(pre.as_bytes());
-					s.resize(width - digits.len(), b'0');
-					s.extend_from_slice(digits.as_bytes());
+				// `0` pads between the sign (and `0x`) and the digits; a value
+				// that is no number pads with spaces.
+				let zeros = if spec.flags.zero && !spec.flags.left && v.is_finite() {
+					width.saturating_sub(len)
 				} else {
-					s.extend_from_slice(body.as_bytes());
-				}
+					0
+				};
+				// glibc's count of a field longer than 2^31 bytes overflows: it
+				// writes spaces before it to 2^32 bytes in all, and fails.
+				let spill = if len > 1 << 31 {
+					(1usize << 32).saturating_sub(len)
+				} else {
+					0
+				};
+				let mut s = Vec::with_capacity(spill + len + zeros);
+				s.resize(spill, b' ');
+				s.extend_from_slice(sign);
+				s.extend_from_slice(text.prefix);
+				s.resize(s.len() + zeros, b'0');
+				s.extend_from_slice(&text.body);
+				s.resize(s.len() + text.zeros, b'0');
+				s.extend_from_slice(&text.tail);
 				self.c_pad(&s, spec)
 			},
 			_ => {
-				self.usage(format!("`{}': invalid format character", char::from(conv)));
+				let mut msg = BString::from(b"`".as_slice());
+				msg.push(conv);
+				msg.extend_from_slice(b"': invalid format character");
+				self.usage_bytes(msg);
 				Err(1)
 			},
 		}
+	}
+
+	/// What printf(3) prints for a directive bash read with a `.-digits`
+	/// precision (bash skips the `-`): printf(3) takes `.` as precision 0
+	/// and `-` as a conversion it does not know, prints the directive as it
+	/// understood it (`%`, flags, width, `.0`, `-`), then the rest as text:
+	/// the digits, bash's length modifier and the conversion.
+	fn unknown(&mut self, spec: &Spec<'_>, digits: &[u8], modifier: &[u8], conv: u8) -> Step {
+		let f = spec.flags;
+		let (width, left) = match spec.width {
+			Width::None => (0, f.left),
+			Width::Lit(d) => {
+				let Some(w) = decimal(d) else {
+					self.usage(eoverflow_text());
+					return Err(1);
+				};
+				(w as u64, f.left)
+			},
+			// printf(3) negates a negative `*` width as an `int` (INT_MIN
+			// stays negative) and prints it as an unsigned long.
+			Width::Star(w) if w < 0 => (i64::from(w.wrapping_neg()) as u64, true),
+			Width::Star(w) => (u64::from(w.unsigned_abs()), f.left),
+		};
+		let out = &mut self.out;
+		out.push(b'%');
+		if f.alt {
+			out.push(b'#');
+		}
+		if f.group {
+			out.push(b'\'');
+		}
+		if f.plus {
+			out.push(b'+');
+		} else if f.space {
+			out.push(b' ');
+		}
+		if left {
+			out.push(b'-');
+		}
+		// A `-` flag turns `0` off; a negative `*` width does not.
+		if f.zero && !f.left {
+			out.push(b'0');
+		}
+		if width != 0 {
+			out.extend_from_slice(width.to_string().as_bytes());
+		}
+		out.extend_from_slice(b".0-");
+		out.extend_from_slice(digits);
+		out.extend_from_slice(modifier);
+		out.push(conv);
+		Ok(())
 	}
 
 	/// `%(fmt)T`: the argument (seconds since the epoch, `-1` now, `-2`
@@ -487,7 +614,7 @@ impl<'x> Fmt<'x, '_, '_> {
 		};
 		let host = &self.ctx.cx.host;
 		let now = host.wall().secs;
-		let secs = match arg {
+		let mut secs = match arg {
 			-1 => now,
 			-2 => {
 				let up = host.now_ns().saturating_sub(self.ctx.k.start_ns) / 1_000_000_000;
@@ -501,11 +628,14 @@ impl<'x> Fmt<'x, '_, '_> {
 			.var(b"TZ")?
 			.filter(|v| v.attrs.contains(Attrs::EXPORT))
 			.and_then(|v| v.as_scalar().map(BString::from));
-		let (offset, abbr) = self
-			.ctx
-			.cx
-			.host
-			.tz_offset(tz.as_ref().map(|t| t.as_bstr()), secs);
+		let tz = tz.as_ref().map(|t| t.as_bstr());
+		let (mut offset, mut abbr) = self.ctx.cx.host.tz_offset(tz, secs);
+		// `localtime` fails on a year an `int` cannot hold, and bash then
+		// formats the epoch.
+		if !strftime::year_fits(secs, offset) {
+			secs = 0;
+			(offset, abbr) = self.ctx.cx.host.tz_offset(tz, secs);
+		}
 		let tfmt = if tfmt.is_empty() {
 			b"%X".as_slice()
 		} else {
@@ -591,31 +721,39 @@ impl<'x> Fmt<'x, '_, '_> {
 		}
 	}
 
-	/// printstr's precision: a bare `.` is 0, literal digits beyond
-	/// `INT_MAX` are reported and ignored.
+	/// printstr's precision: a bare `.` is 0; literal digits beyond
+	/// `INT_MAX` are reported and read as -1, which printstr then raises to
+	/// the precision it was given (0, as no `*` was read).
 	fn str_prec(&mut self, spec: &Spec<'_>) -> Option<usize> {
 		match spec.prec {
 			Prec::None => None,
 			Prec::Star(p) => usize::try_from(p).ok(),
-			Prec::Neg | Prec::Lit([]) => Some(0),
+			Prec::Neg(_) | Prec::Lit([]) => Some(0),
 			Prec::Lit(d) => {
 				let p = decimal(d);
 				if p.is_none() {
 					self.erange(d);
 				}
-				p
+				Some(p.unwrap_or(0))
 			},
 		}
 	}
 
-	/// Pad `body` to the printf(3) field width; a width printf(3) cannot
-	/// produce stops `printf` with `EOVERFLOW`.
+	/// Pad `body` to the printf(3) field width. A width or precision written
+	/// past `INT_MAX` is one printf(3) cannot read: it writes nothing and
+	/// `printf` stops with `EOVERFLOW`. A field longer than `INT_MAX` is
+	/// written, but its length is one printf(3) cannot return: `printf`
+	/// stops with `EOVERFLOW` after it.
 	fn c_pad(&mut self, body: &[u8], spec: &Spec<'_>) -> Step {
-		let Some((w, left)) = c_width(spec).filter(|&(w, _)| w.max(body.len()) < INT_MAX) else {
-			self.usage(EOVERFLOW);
+		let Some((w, left)) = c_width(spec).filter(|_| !c_prec_overflows(spec)) else {
+			self.usage(eoverflow_text());
 			return Err(1);
 		};
 		pad(&mut self.out, body, w, left);
+		if w.max(body.len()) > INT_MAX {
+			self.usage(eoverflow_text());
+			return Err(1);
+		}
 		Ok(())
 	}
 
@@ -722,25 +860,25 @@ impl<'x> Fmt<'x, '_, '_> {
 		v
 	}
 
-	/// bash `getfloatmax` (`strtold`).
-	fn getfloat(&mut self) -> f64 {
+	/// bash `getfloatmax` (`strtold`): a `long double`.
+	fn getfloat(&mut self) -> Float {
 		let Some(arg) = self.peek() else {
-			return 0.0;
+			return Float::from_code(0);
 		};
 		if matches!(arg.first(), Some(b'\'' | b'"')) {
-			return self.asciicode() as f64;
+			return Float::from_code(self.asciicode());
 		}
-		let (v, end, erange) = strtod(arg);
+		let (v, end, erange) = float::strtold(arg);
 		self.check(arg, end, erange);
 		self.next += 1;
 		v
 	}
 
 	/// bash `chk_converror`: unconverted text is an invalid number, then
-	/// `ERANGE` is `Result too large`.
+	/// `ERANGE` is `strerror(ERANGE)`.
 	fn check(&mut self, arg: &[u8], end: usize, erange: bool) {
 		if end == 0 || end < arg.len() {
-			self.usage(invalid_number(arg));
+			self.report(invalid_number(arg), true);
 			self.conv_err = true;
 		} else if erange {
 			self.erange(arg);
@@ -749,7 +887,10 @@ impl<'x> Fmt<'x, '_, '_> {
 
 	/// bash `printf_erange`.
 	fn erange(&mut self, what: &[u8]) {
-		self.usage(format!("{}: Result too large", what.as_bstr()));
+		let mut msg = BString::from(what);
+		msg.extend_from_slice(b": ");
+		msg.extend_from_slice(erange_text().as_bytes());
+		self.usage_bytes(msg);
 		self.conv_err = true;
 	}
 }
@@ -783,11 +924,17 @@ fn c_width(spec: &Spec<'_>) -> Option<(usize, bool)> {
 /// ignored, a bare `.` is 0.
 fn c_prec(spec: &Spec<'_>) -> Option<usize> {
 	match spec.prec {
-		Prec::None | Prec::Neg => None,
+		Prec::None | Prec::Neg(_) => None,
 		Prec::Star(p) => usize::try_from(p).ok(),
 		Prec::Lit([]) => Some(0),
 		Prec::Lit(d) => decimal(d),
 	}
+}
+
+/// Whether the precision is digits past `INT_MAX`, which printf(3) cannot
+/// read (`EOVERFLOW`).
+fn c_prec_overflows(spec: &Spec<'_>) -> bool {
+	matches!(spec.prec, Prec::Lit(d) if !d.is_empty() && decimal(d).is_none())
 }
 
 /// Append `s` padded with spaces to `width` bytes.
@@ -1071,280 +1218,6 @@ fn strtonum(s: &[u8]) -> Num {
 	Num { neg, mag, end: j }
 }
 
-/// C `strtod` over a prefix of `s`: the value, the bytes converted (0 for
-/// none) and whether it over- or underflowed (`ERANGE`).
-fn strtod(arg: &[u8]) -> (f64, usize, bool) {
-	let mut at = 0;
-	while at < arg.len() && c_space(arg[at]) {
-		at += 1;
-	}
-	let mut neg = false;
-	if let Some(&sign @ (b'+' | b'-')) = arg.get(at) {
-		neg = sign == b'-';
-		at += 1;
-	}
-	let body = &arg[at..];
-	let signed = |value: f64| if neg { -value } else { value };
-	let starts =
-		|word: &[u8]| body.len() >= word.len() && body[..word.len()].eq_ignore_ascii_case(word);
-	if starts(b"inf") {
-		let len = if starts(b"infinity") { 8 } else { 3 };
-		return (signed(f64::INFINITY), at + len, false);
-	}
-	if starts(b"nan") {
-		let close = body
-			.get(4..)
-			.filter(|_| body[3] == b'(')
-			.and_then(|rest| rest.iter().position(|&b| b == b')'))
-			.filter(|&close| {
-				body[4..4 + close]
-					.iter()
-					.all(|&b| b.is_ascii_alphanumeric() || b == b'_')
-			});
-		let len = close.map_or(3, |close| 5 + close);
-		return (signed(f64::NAN), at + len, false);
-	}
-	if body.len() > 2
-		&& body[0] == b'0'
-		&& matches!(body[1], b'x' | b'X')
-		&& (body[2].is_ascii_hexdigit()
-			|| (body[2] == b'.' && body.get(3).is_some_and(u8::is_ascii_hexdigit)))
-	{
-		let (value, len) = hex_float(&body[2..]);
-		let erange = value.is_infinite() || value.is_subnormal();
-		return (signed(value), at + 2 + len, erange);
-	}
-	let mut end = digits_at(body);
-	let mut ndigits = end;
-	if body.get(end) == Some(&b'.') {
-		let frac = digits_at(&body[end + 1..]);
-		ndigits += frac;
-		end += 1 + frac;
-	}
-	if ndigits == 0 {
-		return (0.0, 0, false);
-	}
-	if matches!(body.get(end), Some(b'e' | b'E')) {
-		let mut exp_at = end + 1;
-		if matches!(body.get(exp_at), Some(b'+' | b'-')) {
-			exp_at += 1;
-		}
-		let exp_digits = digits_at(&body[exp_at..]);
-		if exp_digits > 0 {
-			end = exp_at + exp_digits;
-		}
-	}
-	let text = &body[..end];
-	let value = std::str::from_utf8(text)
-		.ok()
-		.and_then(|t| t.parse::<f64>().ok())
-		.unwrap_or(0.0);
-	let mantissa_nonzero = text
-		.iter()
-		.take_while(|b| !matches!(b, b'e' | b'E'))
-		.any(|&b| matches!(b, b'1'..=b'9'));
-	let erange = value.is_infinite() || value.is_subnormal() || (value == 0.0 && mantissa_nonzero);
-	(signed(value), at + end, erange)
-}
-
-/// A hexadecimal float body after `0x`: the value and the bytes used.
-fn hex_float(text: &[u8]) -> (f64, usize) {
-	let mut mant: u64 = 0;
-	let mut exp: i64 = 0;
-	let mut at = 0;
-	let mut seen_point = false;
-	while let Some(&byte) = text.get(at) {
-		if byte == b'.' && !seen_point {
-			seen_point = true;
-			at += 1;
-			continue;
-		}
-		let Some(digit) = char::from(byte).to_digit(16) else {
-			break;
-		};
-		if mant >> 60 == 0 {
-			mant = mant * 16 + u64::from(digit);
-			if seen_point {
-				exp -= 4;
-			}
-		} else if !seen_point {
-			exp += 4;
-		}
-		at += 1;
-	}
-	if matches!(text.get(at), Some(b'p' | b'P')) {
-		let mut exp_at = at + 1;
-		let neg = text.get(exp_at) == Some(&b'-');
-		if matches!(text.get(exp_at), Some(b'+' | b'-')) {
-			exp_at += 1;
-		}
-		let count = digits_at(&text[exp_at..]);
-		if count > 0 {
-			let mut written: i64 = 0;
-			for &byte in &text[exp_at..exp_at + count] {
-				written = written
-					.saturating_mul(10)
-					.saturating_add(i64::from(byte - b'0'));
-			}
-			exp = exp.saturating_add(if neg { -written } else { written });
-			at = exp_at + count;
-		}
-	}
-	let mut value = mant as f64;
-	let mut left = exp.clamp(-3000, 3000) as i32;
-	while left > 0 {
-		let step = left.min(1000);
-		value *= 2f64.powi(step);
-		left -= step;
-	}
-	while left < 0 {
-		let step = left.max(-1000);
-		value *= 2f64.powi(step);
-		left -= step;
-	}
-	(value, at)
-}
-
-/// C `%e %f %g %a` of a non-negative value (the caller adds the sign).
-fn float(v: f64, conv: u8, alt: bool, prec: Option<usize>) -> String {
-	let upper = conv.is_ascii_uppercase();
-	let s = if v.is_nan() {
-		"nan".to_owned()
-	} else if v.is_infinite() {
-		"inf".to_owned()
-	} else {
-		match conv.to_ascii_lowercase() {
-			b'f' => {
-				let p = prec.unwrap_or(6);
-				let mut s = format!("{v:.p$}");
-				if alt && p == 0 {
-					s.push('.');
-				}
-				s
-			},
-			b'e' => exp(v, prec.unwrap_or(6), alt),
-			b'g' => {
-				let p = match prec {
-					Some(0) => 1,
-					Some(p) => p,
-					None => 6,
-				};
-				let x = if v == 0.0 { 0 } else { exp_of(v, p) };
-				let s = if x < -4 || x >= p as i32 {
-					exp(v, p - 1, alt)
-				} else {
-					let fp = (p as i32 - 1 - x).max(0) as usize;
-					let mut s = format!("{v:.fp$}");
-					if alt && fp == 0 {
-						s.push('.');
-					}
-					s
-				};
-				if alt { s } else { strip_zeros(&s) }
-			},
-			_ => hex_float_text(v, prec, alt),
-		}
-	};
-	if upper { s.to_ascii_uppercase() } else { s }
-}
-
-/// Decimal exponent of `v` rounded to `p` significant digits.
-fn exp_of(v: f64, p: usize) -> i32 {
-	let s = format!("{v:.prec$e}", prec = p.saturating_sub(1));
-	s.split_once('e')
-		.and_then(|(_, e)| e.parse().ok())
-		.unwrap_or(0)
-}
-
-/// `d.ddde±XX`.
-fn exp(v: f64, prec: usize, alt: bool) -> String {
-	let s = format!("{v:.prec$e}");
-	let (mant, e) = s.split_once('e').unwrap_or((&s, "0"));
-	let e: i32 = e.parse().unwrap_or(0);
-	let mut out = String::from(mant);
-	if alt && prec == 0 {
-		out.push('.');
-	}
-	out.push('e');
-	out.push(if e < 0 { '-' } else { '+' });
-	let a = e.unsigned_abs();
-	if a < 10 {
-		out.push('0');
-	}
-	out.push_str(&a.to_string());
-	out
-}
-
-/// `%g` without `#`: drop trailing fractional zeros and a bare point.
-fn strip_zeros(s: &str) -> String {
-	let (mant, e) = s.find('e').map_or((s, ""), |i| s.split_at(i));
-	let mant = if mant.contains('.') {
-		mant.trim_end_matches('0').trim_end_matches('.')
-	} else {
-		mant
-	};
-	format!("{mant}{e}")
-}
-
-/// `%a` of a finite non-negative double, normalized to `0x1.…p±e`
-/// (subnormals too); with a precision the fraction is rounded to that
-/// many hex digits (ties to even).
-fn hex_float_text(v: f64, prec: Option<usize>, alt: bool) -> String {
-	if v == 0.0 {
-		let frac = prec.map_or_else(String::new, |p| "0".repeat(p));
-		let point = if frac.is_empty() && !alt { "" } else { "." };
-		return format!("0x0{point}{frac}p+0");
-	}
-	let bits = v.to_bits();
-	let raw_exp = ((bits >> 52) & 0x7ff) as i32;
-	let stored = bits & ((1u64 << 52) - 1);
-	let (frac, mut e) = if raw_exp == 0 {
-		// Subnormal: shift the leading 1 into the implicit position.
-		let shift = stored.leading_zeros() as i32 - 11;
-		((stored << shift) & ((1u64 << 52) - 1), -1022 - shift)
-	} else {
-		(stored, raw_exp - 1023)
-	};
-	let mut lead = 1u64;
-	let digits = match prec {
-		Some(p) if p < 13 => {
-			let drop = 52 - 4 * p as u32;
-			let kept = frac >> drop;
-			let rest = frac & ((1u64 << drop) - 1);
-			let half = 1u64 << (drop - 1);
-			let mut kept = kept;
-			if rest > half || (rest == half && kept & 1 == 1) {
-				kept += 1;
-			}
-			if p == 0 {
-				lead += kept;
-				String::new()
-			} else if kept >> (4 * p) != 0 {
-				lead += 1;
-				let low = kept & ((1u64 << (4 * p)) - 1);
-				format!("{low:0p$x}")
-			} else {
-				format!("{kept:0p$x}")
-			}
-		},
-		Some(p) => {
-			let mut s = format!("{frac:013x}");
-			s.push_str(&"0".repeat(p - 13));
-			s
-		},
-		None => {
-			let s = format!("{frac:013x}");
-			s.trim_end_matches('0').to_owned()
-		},
-	};
-	if lead == 2 {
-		lead = 1;
-		e += 1;
-	}
-	let point = if digits.is_empty() && !alt { "" } else { "." };
-	format!("0x{lead}{point}{digits}p{}{}", if e < 0 { '-' } else { '+' }, e.unsigned_abs())
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1402,39 +1275,6 @@ mod tests {
 		assert_eq!(strtonum(b"-9223372036854775815").signed(), (i64::MIN, true));
 		assert_eq!(strtonum(b"-1").unsigned(), (u64::MAX, false));
 		assert_eq!(strtonum(b"+").end, 0);
-	}
-
-	#[test]
-	fn floats_parse_like_strtod() {
-		assert_eq!(strtod(b"1.5x"), (1.5, 3, false));
-		assert_eq!(strtod(b"1e3"), (1000.0, 3, false));
-		assert_eq!(strtod(b"1e"), (1.0, 1, false));
-		assert_eq!(strtod(b"0x1.8p1"), (3.0, 7, false));
-		assert!(strtod(b"-inf").0.is_infinite());
-		assert!(strtod(b"1e-320").2);
-		assert_eq!(strtod(b"abc").1, 0);
-	}
-
-	// Goldens: bash 5.3.20 on macOS `printf '%e %g %G %#g %05.1f %-8.3e| %.0e
-	// %#.0f %a %A %.2a %10.1a %a'`.
-	#[test]
-	fn float_conversions_match_c() {
-		assert_eq!(float(0.0, b'e', false, None), "0.000000e+00");
-		assert_eq!(float(1e100, b'g', false, None), "1e+100");
-		assert_eq!(float(1e-10, b'G', false, None), "1E-10");
-		assert_eq!(float(1.0, b'g', true, None), "1.00000");
-		assert_eq!(float(2.345, b'f', false, Some(1)), "2.3");
-		assert_eq!(float(12345.678, b'e', false, Some(3)), "1.235e+04");
-		assert_eq!(float(5.0, b'e', false, Some(0)), "5e+00");
-		assert_eq!(float(3.0, b'f', true, Some(0)), "3.");
-		assert_eq!(float(1.0, b'a', false, None), "0x1p+0");
-		assert_eq!(float(255.0, b'A', false, None), "0X1.FEP+7");
-		assert_eq!(float(1.0, b'a', false, Some(2)), "0x1.00p+0");
-		assert_eq!(float(3.3, b'a', false, Some(1)), "0x1.ap+1");
-		assert_eq!(float(0.1, b'a', false, None), "0x1.999999999999ap-4");
-		assert_eq!(float(1e-320, b'a', false, None), "0x1.fap-1064");
-		assert_eq!(float(f64::INFINITY, b'f', false, None), "inf");
-		assert_eq!(float(f64::NAN, b'F', false, None), "NAN");
 	}
 
 	#[test]

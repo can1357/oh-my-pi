@@ -12,6 +12,7 @@ use crate::process;
 
 mod builtins;
 mod env_cwd;
+mod printf;
 mod process_control;
 mod session;
 

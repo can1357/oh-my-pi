@@ -390,6 +390,14 @@ pub enum Diag {
 		/// The message, as bash prints it.
 		msg: Cow<'static, str>,
 	},
+	/// A builtin's message naming bytes of its arguments or format, which
+	/// are printed as they are, UTF-8 or not (`printf: \xc3: invalid
+	/// number`).
+	#[error("{msg}")]
+	Bytes {
+		/// The message, as bash prints it.
+		msg: BString,
+	},
 	/// A diagnostic reported by a builtin: `NAME: <diag>`.
 	#[error("{cmd}: {diag}")]
 	Prefixed {
@@ -659,15 +667,22 @@ fn zsh_message(diag: &Diag, out: &mut Vec<u8>) {
 }
 
 /// The text of `diag`. A command name prints as bash's `printable_filename`
-/// shows it (`$'…'` when it has bytes the locale cannot print), byte for
-/// byte otherwise.
+/// shows it (`$'…'` when it has bytes the locale cannot print), a
+/// [`Diag::Bytes`] message as it is, byte for byte otherwise.
 fn message(diag: &Diag, utf8: bool, out: &mut Vec<u8>) {
 	use std::io::Write;
 
-	if let Diag::CommandNotFound { name } = diag {
-		out.extend_from_slice(&crate::bash::vm::quote::printable_filename(name, utf8, false));
-		out.extend_from_slice(b": command not found");
-		return;
+	match diag {
+		Diag::CommandNotFound { name } => {
+			out.extend_from_slice(&crate::bash::vm::quote::printable_filename(name, utf8, false));
+			out.extend_from_slice(b": command not found");
+		},
+		Diag::Bytes { msg } => out.extend_from_slice(msg),
+		Diag::Prefixed { cmd, diag } if matches!(**diag, Diag::Bytes { .. }) => {
+			out.extend_from_slice(cmd.as_bytes());
+			out.extend_from_slice(b": ");
+			message(diag, utf8, out);
+		},
+		_ => write!(out, "{diag}").expect("writing to a Vec cannot fail"),
 	}
-	write!(out, "{diag}").expect("writing to a Vec cannot fail");
 }

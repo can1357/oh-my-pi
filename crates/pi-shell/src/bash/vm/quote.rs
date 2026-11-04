@@ -51,12 +51,15 @@ fn utf8_char(s: &[u8]) -> &[u8] {
 	&s[..locale::char_len(Charset::Utf8, s, false).unwrap_or(1)]
 }
 
-/// Whether `ch` (one valid UTF-8 character) is printable (`iswprint`).
+/// Whether `ch` (one valid UTF-8 character) is printable: glibc's
+/// `iswprint` in a UTF-8 locale holds for every assigned character but the
+/// controls and the line and paragraph separators (U+2028, U+2029); an
+/// unassigned one (U+FFFF) is not printable.
 fn printable_char(ch: &[u8]) -> bool {
-	std::str::from_utf8(ch)
-		.ok()
-		.and_then(|s| s.chars().next())
-		.is_some_and(|c| !c.is_control())
+	static UNPRINTABLE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+		regex::Regex::new(r"^[\p{Cc}\p{Cn}\p{Zl}\p{Zp}]$").expect("a valid character class")
+	});
+	std::str::from_utf8(ch).is_ok_and(|s| !s.is_empty() && !UNPRINTABLE.is_match(s))
 }
 
 /// bash's `ansic_shouldquote`: `s` has a non-printable byte or, in a UTF-8
