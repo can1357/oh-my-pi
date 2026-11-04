@@ -242,7 +242,7 @@ Kitty direct-image and Sixel frames are extracted before text sanitization/trunc
 
 ### Shell output minimizer
 
-Non-PTY execution also passes shell-minimizer settings into the native `Shell` session. When the minimizer rewrites verbose output, the executor substitutes the minimized text only after the original capture has been saved as a separate `bash-original` artifact, referenced by a `[raw output: artifact://<id>]` footer. If saving returns no artifact ID, the lossless sink output is retained instead.
+Non-PTY execution also passes shell-minimizer settings into the native `Shell` session. When the minimizer rewrites verbose output, the executor substitutes the minimized text only after the original capture has been saved as a separate `bash-original` artifact, referenced by a `[raw output: artifact://<id>]` footer, and returns `{ filter, inputBytes, outputBytes, artifactId }` as `BashResult.minimized`, which the tool result keeps as `details.meta.minimized` and the renderer shows as a `Minimized` footer fact. If saving returns no artifact ID, the lossless sink output is retained instead and no `minimized` is recorded.
 
 ## Live tool updates and async jobs
 
@@ -254,7 +254,7 @@ When `async.enabled` is true and the call passes `async: true`, `BashTool` start
 
 ### Pipe streams (`proc://<id>/streams`)
 
-Every managed bash job passes a native `PipeStreams` to the embedded shell (`ShellRunOptions.streams`). brush relays each `|` of the run through a thread that copies the bytes into a per-stream ring (newest 1 MiB; a run keeps up to 16 streams, 4 of them finished) without changing pipe semantics: backpressure, EOF, and an early-exiting consumer (`| head`) widowing the producer behave as on a plain pipe (`crates/vendor/brush-core/src/pipetap.rs`, `crates/pi-shell/src/taps.rs`). `read proc://<id>/streams` lists them (stream `n` is what stage `n` reads) and `proc://<id>/streams/<n>` returns the decoded, sanitized text, so `cmd | tail -5` can be followed while `tail` holds `cmd`'s output back. The streams stay with the job row until it is evicted. User-shell (zsh/fish) and PTY runs are not tapped, and each stage's stderr still goes to the job's own output.
+Every managed bash job passes a native `PipeStreams` to the embedded shell (`ShellRunOptions.streams`). The engine mirrors the bytes written into each `|` pipe of the run into a per-stream ring (newest 1 MiB; a run keeps up to 16 streams, 4 of them finished) without changing pipe semantics: backpressure, EOF, and an early-exiting consumer (`| head`) widowing the producer behave as on a plain pipe (`pi_shell::bash::Host::pipe_tap`, `crates/pi-shell/src/bash/mem.rs`, `crates/pi-shell/src/taps.rs`). `read proc://<id>/streams` lists them (stream `n` is what stage `n` reads) and `proc://<id>/streams/<n>` returns the decoded, sanitized text, so `cmd | tail -5` can be followed while `tail` holds `cmd`'s output back. The streams stay with the job row until it is evicted. User-shell (zsh/fish) and PTY runs are not tapped, and each stage's stderr still goes to the job's own output.
 
 ### Job widgets
 

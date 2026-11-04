@@ -15,12 +15,12 @@ use std::{
 	},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use crate::openfile::OpenFile;
 use clap::{ArgMatches, Command, CommandFactory, FromArgMatches, Parser, error::ErrorKind};
 use jaq_json::Val;
 use pi_vfs::{BlockingFs, File, TempOptions};
 
-use crate::host::{Host, Utility, util};
+use crate::host::{Host, Utility};
 
 use cli::Cli;
 use filter::{FileReports, OnError};
@@ -1839,11 +1839,6 @@ fn run_tests(
 	i32::from(total > passed)
 }
 
-
-/// Creates the `jq` builtin registration.
-pub(crate) fn jq_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Jq, SE>()
-}
 
 #[cfg(test)]
 mod tests {

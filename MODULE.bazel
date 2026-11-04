@@ -171,8 +171,8 @@ crate.from_cargo(
     # splice's rustc probe must accept user-level -Z RUSTFLAGS.
     host_tools = "@rust_host_tools_nightly",
     # The root manifest covers all workspace members, including the vendored
-    # brush fork (members so their sources render hermetically; the
-    # [patch.crates-io] entry redirects brush-core's registry dep to it).
+    # crates (members so their sources render hermetically; the
+    # [patch.crates-io] entries redirect registry deps to them).
     manifests = ["//:Cargo.toml"],
     # Exactly the shipped addon triples: crate BUILD files get
     # target_compatible_with selects over this set (defaults omit darwin-x64
