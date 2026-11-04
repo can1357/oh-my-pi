@@ -157,6 +157,7 @@ describe("read URL answered by a bot wall", () => {
 		"<input type=hidden name='js_challenge'>",
 		'<input type="hidden" name = "js_challenge">',
 		"<INPUT TYPE=hidden NAME=js_challenge>",
+		'<input type="hidden" name="js&#95;challenge">',
 	])("treats %s as a challenge form", async form => {
 		const result = await read(
 			() =>
@@ -192,7 +193,7 @@ describe("read URL answered by a bot wall", () => {
 <div data-example='> <input type="hidden" name="js_challenge">'></div>
 <pre>window._cf_chl_opt={cType:'managed'}; &lt;input type="hidden" name="js_challenge"&gt; id="px-captcha" geo.captcha-delivery.com</pre>
 <!-- <input type="hidden" name="js_challenge"> -->
-<script>const sample = '<input type="hidden" name="js_challenge">';</script>
+<script>const sample = '</scripture><input type="hidden" name="js_challenge">';</script>
 <textarea><input type="hidden" name="js_challenge"></textarea>
 <xmp><input type="hidden" name="js_challenge"></xmp>
 <input-example name="js_challenge"></input-example>
