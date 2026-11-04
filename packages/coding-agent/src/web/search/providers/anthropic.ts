@@ -323,6 +323,17 @@ function parseResponse(response: AnthropicApiResponse): SearchResponse {
 		throw new SearchProviderError("anthropic", `Anthropic web search failed: ${[...toolErrors].join(", ")}.`);
 	}
 
+	// Top-level usage counts only the attempt that served the turn; a refusal
+	// fallback's declined attempt appears only in `iterations`.
+	const iterations = response.usage.iterations;
+	const usage =
+		iterations && iterations.length > 0
+			? {
+					input: iterations.reduce((sum, entry) => sum + entry.input_tokens, 0),
+					output: iterations.reduce((sum, entry) => sum + entry.output_tokens, 0),
+				}
+			: { input: response.usage.input_tokens, output: response.usage.output_tokens };
+
 	return {
 		provider: "anthropic",
 		answer: answer || undefined,
@@ -330,8 +341,8 @@ function parseResponse(response: AnthropicApiResponse): SearchResponse {
 		citations: citations.length > 0 ? citations : undefined,
 		searchQueries: searchQueries.length > 0 ? searchQueries : undefined,
 		usage: {
-			inputTokens: response.usage.input_tokens,
-			outputTokens: response.usage.output_tokens,
+			inputTokens: usage.input,
+			outputTokens: usage.output,
 			searchRequests: response.usage.server_tool_use?.web_search_requests,
 		},
 		model: response.model,
