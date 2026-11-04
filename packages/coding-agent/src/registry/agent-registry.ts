@@ -149,6 +149,8 @@ export interface AgentRegistryApi {
 	setHistory(id: string, history: AgentHistorySummary, expectedSessionFile?: string): boolean;
 	/** Transition `id` to `status` when it still matches `expected`. */
 	setStatus(id: string, status: AgentStatus, expected?: AgentRefExpectation): boolean;
+	/** Release the initial brief reservation only for its owning session. */
+	clearInitialPromptPending(id: string, session: AgentSessionHandle): boolean;
 	/** Record that the current run handed over its final result. */
 	markResultAccepted(id: string, expected?: AgentRefExpectation, responseAt?: number): boolean;
 	/** Accepted-but-running refs whose run already finished. */
@@ -301,6 +303,13 @@ export class AgentRegistry implements AgentRegistryApi {
 		}
 		ref.history = { ...ref.history, ...definedHistory };
 		this.#emit({ type: "metadata_changed", ref });
+		return true;
+	}
+
+	clearInitialPromptPending(id: string, session: AgentSessionHandle): boolean {
+		const ref = this.#refs.get(id);
+		if (!ref || ref.session !== session) return false;
+		ref.initialPromptPending = false;
 		return true;
 	}
 

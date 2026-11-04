@@ -2612,8 +2612,7 @@ async function driveSessionToResult(
 			const recoverableStop = monitor.budgetStopRequested() || monitor.yieldTurnStopRequested();
 			if (!recoverableStop || abortSignal.aborted || err instanceof PromptDispatchError) throw err;
 		} finally {
-			const ref = AgentRegistry.global().get(session.getAgentId?.() ?? "");
-			if (ref?.session === session) ref.initialPromptPending = false;
+			AgentRegistry.global().clearInitialPromptPending(session.getAgentId?.() ?? "", session);
 		}
 
 		// The forced final turn must answer through `yield`, or with no tools at all.
@@ -5042,8 +5041,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						resolveServiceTierByFamily,
 						onFirstChatDispatch: () => {
 							firstChatDispatchAt ??= performance.now();
-							const ref = AgentRegistry.global().get(id);
-							if (ref?.session === session) ref.initialPromptPending = false;
+							if (session) AgentRegistry.global().clearInitialPromptPending(id, session);
 						},
 					}),
 				);
