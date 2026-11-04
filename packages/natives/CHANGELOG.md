@@ -19,7 +19,7 @@
 
 - Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
-- Fixed `&>file` and `>&file` replacing an existing file under `set -o noclobber`, and `>fifo` being refused there; `noclobber` now refuses only an existing regular file, judged on the file it opens, as in Bash
+- Fixed `&>file` and `>&file` replacing an existing file under `set -o noclobber`, and `>fifo` being refused there; `noclobber` now refuses only an existing regular file, judged on the file it opens, as in Bash ([#18091](https://github.com/can1357/oh-my-pi/pull/18091) by [@sjawhar](https://github.com/sjawhar))
 ### Fixed
 
 - Fixed `el.type` and `el.press(keys)` on Wayland moving focus inside the element's app (GNOME showed "… is ready") before refusing the call: they are now refused before anything reaches the app ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))
