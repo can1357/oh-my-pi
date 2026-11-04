@@ -908,7 +908,11 @@ export async function requestOpenAiRemoteCompaction(
 	// explicit prompt-cache key and falls back to the session id, all
 	// retention-gated by getOpenAIPromptCacheKey (PI_CACHE_RETENTION=none
 	// resolves to nothing here, which then also drops the affinity below).
-	const cacheOptions = { sessionId: opts?.sessionId, promptCacheKey: opts?.promptCacheKey };
+	const cacheOptions = {
+		sessionId: opts?.sessionId,
+		promptCacheKey: opts?.promptCacheKey,
+		cacheRetention: model.cacheRetention,
+	};
 	const promptCacheSessionId = getOpenAIPromptCacheKey(cacheOptions);
 	const request: OpenAiRemoteCompactionRequest = {
 		model: requestModel,

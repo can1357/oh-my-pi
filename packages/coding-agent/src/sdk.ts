@@ -247,7 +247,7 @@ import {
 	type SettingsGatedToolDelta,
 } from "./session/session-tools";
 import { anthropicSlowModeHasNoSiblingHeadroom } from "./session/anthropic-slow-mode";
-import { CacheWarmer } from "./session/cache-warmer";
+import { CacheWarmer, observeSentPayload } from "./session/cache-warmer";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
@@ -4888,15 +4888,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
 				};
 				// The provider calls `onPayload` as it sends, past any wait for an in-flight
-				// slot: the prompt cache entry's lifetime starts there, not here.
-				const onPayload = merged.onPayload;
+				// slot: the prompt cache entry's lifetime starts there, not here. The warmer
+				// reads the payload after the caller's hook, which may replace it.
 				const stream = primaryStreamFn(streamModel, context, {
 					...merged,
 					...(fallbackCreditRedemption !== undefined ? { fallbackCreditRedemption } : {}),
-					onPayload: (payload, payloadModel, signal) => {
-						session.markPromptCacheDispatched(context);
-						return onPayload?.(payload, payloadModel, signal);
-					},
+					onPayload: observeSentPayload(merged.onPayload, payload =>
+						session.markPromptCacheDispatched(context, payload),
+					),
 				});
 				// A request that waited for a provider slot is checked again when it goes out.
 				if (stream instanceof Promise) {

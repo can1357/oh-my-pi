@@ -28,6 +28,7 @@ import {
 	normalizeSystemPrompts,
 	resolveCacheRetention,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
+	withModelCacheRetention,
 } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
@@ -1559,7 +1560,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (model,
 	return withReplaySafeStreamRetry(
 		model,
 		context,
-		options,
+		withModelCacheRetention(model, options),
 		(attemptModel, attemptContextMessages, attemptOptions) =>
 			streamOpenAIResponsesOnce(attemptModel, attemptContextMessages, attemptOptions, attemptContext),
 		{ retryEmptyCompletion: () => attemptContext.mode === "sse" },
@@ -1763,6 +1764,9 @@ export function buildParams(
 	disableStrictToolsOverride = false,
 	statefulCacheBaseline?: ResponseInput,
 ): { params: OpenAIResponsesSamplingParams; trailingScaffoldingItems: number; strictToolsApplied: boolean } {
+	// Exported for callers that build a request themselves (stateful replay, compaction): fill an unset
+	// retention from the model as `streamOpenAIResponses` does.
+	options = withModelCacheRetention(model, options);
 	const policy = resolveOpenAICompatPolicy(model, {
 		endpoint: "responses",
 		reasoning: options?.reasoning,

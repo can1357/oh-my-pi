@@ -31,8 +31,13 @@ export interface OpenAIAnthropicShimConfig {
 	defaultFormat: OpenAIAnthropicApiFormat;
 	/** Thinking transport used when this provider's Anthropic endpoint differs from generic budget semantics. */
 	anthropicThinkingMode?: ThinkingControlMode;
-	/** Forward cache-retention and request-metadata options to the selected transport. Default: false. */
-	forwardCacheOptions?: boolean;
+	/**
+	 * Forward request metadata to the selected transport. Default: false. Prompt-cache
+	 * retention is always forwarded (the request's, else the model's configured one):
+	 * dropping it would let `PI_CACHE_RETENTION` override a provider's `cacheRetention`
+	 * and the model override a request's explicit retention.
+	 */
+	forwardRequestMetadata?: boolean;
 	/** Provider-specific headers (e.g. auth/session) merged ahead of user-supplied headers. */
 	extraHeaders?: () => Record<string, string>;
 }
@@ -95,8 +100,8 @@ export function streamOpenAIAnthropicShim(
 					maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 					signal: options?.signal,
 					headers: mergedHeaders,
-					cacheRetention: config.forwardCacheOptions ? options?.cacheRetention : undefined,
-					metadata: config.forwardCacheOptions ? options?.metadata : undefined,
+					cacheRetention: options?.cacheRetention ?? model.cacheRetention,
+					metadata: config.forwardRequestMetadata ? options?.metadata : undefined,
 					sessionId: options?.sessionId,
 					promptCacheKey: options?.promptCacheKey,
 					onPayload: options?.onPayload,
@@ -137,8 +142,8 @@ export function streamOpenAIAnthropicShim(
 					maxHttpAttempts: options?.maxHttpAttempts,
 					signal: options?.signal,
 					headers: mergedHeaders,
-					cacheRetention: config.forwardCacheOptions ? options?.cacheRetention : undefined,
-					metadata: config.forwardCacheOptions ? options?.metadata : undefined,
+					cacheRetention: options?.cacheRetention ?? model.cacheRetention,
+					metadata: config.forwardRequestMetadata ? options?.metadata : undefined,
 					sessionId: options?.sessionId,
 					promptCacheKey: options?.promptCacheKey,
 					onPayload: options?.onPayload,

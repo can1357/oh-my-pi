@@ -24,6 +24,7 @@ import { mapAnthropicToolChoice } from "../stream";
 import type {
 	Api,
 	AssistantMessage,
+	CacheRetention,
 	Context,
 	Model,
 	ModelSpec,
@@ -33,6 +34,7 @@ import type {
 	ToolCall,
 	ToolChoice,
 } from "../types";
+import { resolveCacheRetention } from "../utils";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { type AnthropicOptions, shouldStripThinkingHistory } from "./anthropic";
@@ -533,6 +535,22 @@ function servedByAnotherModel(requestedId: string, servedId: string, baseVariant
 	return `it was served by ${servedId}`;
 }
 
+/**
+ * Prompt-cache fields for the Responses wire: `none` sends neither (caching off), `short` the session
+ * key alone, `long` the key plus the 24h lifetime where the route's policy carries it.
+ */
+function factoryResponsesCacheFields(
+	retention: CacheRetention,
+	sessionUuid: string,
+	routeHasLongLifetime: boolean,
+): Record<string, unknown> {
+	if (retention === "none") return {};
+	return {
+		prompt_cache_key: sessionUuid,
+		...(retention === "long" && routeHasLongLifetime ? { prompt_cache_retention: "24h" } : {}),
+	};
+}
+
 function streamResponsesWire(a: Attempt, inner: Model<"openai-responses">): AssistantMessageEventStream {
 	const { policy } = a.route;
 	const { effort, disabled, options, sessionUuid } = a;
@@ -557,8 +575,13 @@ function streamResponsesWire(a: Attempt, inner: Model<"openai-responses">): Assi
 		// family defaults tool_choice to auto; the transport emits it only with tools.
 		toolChoice: options?.toolChoice ?? (policy.responsesToolChoiceAuto ? "auto" : undefined),
 		extraBody: {
-			prompt_cache_key: sessionUuid,
-			...(policy.responsesCacheRetention ? { prompt_cache_retention: "24h" } : {}),
+			...factoryResponsesCacheFields(
+				// The native client always asks for a 24h entry, so that stays the default when nothing chose a
+				// retention; a chosen one (request, model, or PI_CACHE_RETENTION) wins.
+				resolveCacheRetention(a.forwarded.cacheRetention, "long"),
+				sessionUuid,
+				policy.responsesCacheRetention === true,
+			),
 			// Native always states parallel tool calls when tools ride the request.
 			...(a.context.tools?.length ? { parallel_tool_calls: policy.responsesParallelToolCalls !== false } : {}),
 			...(policy.responsesServiceTier ? { service_tier: policy.responsesServiceTier } : {}),
@@ -770,7 +793,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					signal: options?.signal,
 					fetch: options?.fetch,
 					credentialId: options?.credentialId,
-					cacheRetention: options?.cacheRetention,
+					cacheRetention: options?.cacheRetention ?? model.cacheRetention,
 					providerSessionState: options?.providerSessionState,
 					onPayload: options?.onPayload,
 					onResponse: options?.onResponse,

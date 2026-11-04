@@ -713,3 +713,29 @@ export function resolveCacheRetention(
 	if (env === "long" || env === "short" || env === "none") return env;
 	return fallback;
 }
+
+type CacheRetentionCarrier = { cacheRetention?: CacheRetention };
+/**
+ * Fill a request that names no retention with its model's configured one
+ * (`providers.<id>.cacheRetention` in models.yml), so the model outranks
+ * `PI_CACHE_RETENTION`, which {@link resolveCacheRetention} reads only for an
+ * unset option. `long` buys a different lifetime at a different write price on
+ * each provider. Every entry that reads `cacheRetention` applies it: the shared
+ * `stream`/`streamSimple` entries and each provider's exported stream function,
+ * which callers may import directly.
+ */
+export function withModelCacheRetention<T extends CacheRetentionCarrier>(model: CacheRetentionCarrier, options: T): T;
+export function withModelCacheRetention<T extends CacheRetentionCarrier>(
+	model: CacheRetentionCarrier,
+	options: T | undefined,
+): T | CacheRetentionCarrier | undefined;
+export function withModelCacheRetention<T extends CacheRetentionCarrier>(
+	model: CacheRetentionCarrier,
+	options: T | undefined,
+): T | CacheRetentionCarrier | undefined {
+	if (model.cacheRetention === undefined || options?.cacheRetention !== undefined) return options;
+	// Without options there is nothing else to keep: a bare carrier, which every (all-optional) options type accepts.
+	return options === undefined
+		? { cacheRetention: model.cacheRetention }
+		: { ...options, cacheRetention: model.cacheRetention };
+}

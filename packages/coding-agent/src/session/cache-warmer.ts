@@ -28,6 +28,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../extensibility/shared-events";
 
 export type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult };
@@ -100,16 +101,26 @@ function supportsLongCacheRetention(model: Model<Api>): boolean {
 			compat.supportsLongPromptCacheRetention === true
 		);
 	}
+	// Chat Completions' Anthropic-format breakpoint carries no TTL (`maybeAddAnthropicCacheControl`),
+	// so it writes the five-minute entry under every retention.
+	if (model.api === "openai-completions") {
+		return !(compat !== undefined && "cacheControlFormat" in compat && compat.cacheControlFormat === "anthropic");
+	}
+	// Azure Responses and Codex send a cache key but no lifetime field, so every retention writes the default entry.
+	if (model.api === "azure-openai-responses" || model.api === "openai-codex-responses") return false;
 	return true;
 }
 
 /**
- * Retention tier a request writes under, or undefined when caching is off.
+ * Retention tier a request writes under, or undefined when caching is off: the
+ * warmer's estimate before the request is sent. The sent payload settles it
+ * ({@link payloadCacheTier}).
  *
- * Mirrors the Anthropic provider's retention default (`getCacheControl`):
- * OAuth subscriber seats write 1h entries where the model supports them.
- * `resolveCacheRetention` keeps an explicit option or `PI_CACHE_RETENTION`
- * ahead of that fallback.
+ * Mirrors the provider layer: an explicit option, then the model's configured
+ * retention (`providers.<id>.cacheRetention`, which the stream layer applies to
+ * a request that names none), then `PI_CACHE_RETENTION`, then the Anthropic
+ * provider's default (`getCacheControl`): OAuth subscriber seats write 1h
+ * entries where the model supports them.
  */
 export function resolvePromptCacheTier(
 	model: Model<Api>,
@@ -117,9 +128,41 @@ export function resolvePromptCacheTier(
 	isOAuthToken = false,
 ): PromptCacheTier | undefined {
 	const longByDefault = isOAuthToken && model.api === "anthropic-messages" && supportsLongCacheRetention(model);
-	const retention = resolveCacheRetention(options?.cacheRetention, longByDefault ? "long" : "short");
+	const retention = resolveCacheRetention(
+		options?.cacheRetention ?? model.cacheRetention,
+		longByDefault ? "long" : "short",
+	);
 	if (retention === "none") return undefined;
+	if (model.api === "openai-responses") return openAIResponsesWireTier(model, retention, options);
 	return retention === "long" && !supportsLongCacheRetention(model) ? "short" : retention;
+}
+
+/**
+ * Tier an OpenAI Responses request's cache entry actually gets, from the cache
+ * policy `buildParams` emits for it (`applyVercelResponsesCacheControls`,
+ * `maybeAddOpenRouterAnthropicCacheControl`, `applyOpenAIResponsesPromptCachePolicy`,
+ * `prompt_cache_retention`), so a shorter lifetime set on the route or the
+ * request is warmed on its own schedule.
+ */
+function openAIResponsesWireTier(
+	model: Model<Api>,
+	retention: "short" | "long",
+	options: SimpleStreamOptions | undefined,
+): PromptCacheTier {
+	const compat = model.compat;
+	if (compat === undefined) return "short";
+	const routing = "vercelGatewayRouting" in compat ? compat.vercelGatewayRouting : undefined;
+	if ("isVercelGatewayHost" in compat && compat.isVercelGatewayHost === true && routing?.caching === "auto") {
+		// The route's 1h TTL is sent only under long retention; no TTL means the default entry.
+		return routing.cacheTtl === "1h" && retention === "long" ? "long" : "short";
+	}
+	if ("cacheControlFormat" in compat && compat.cacheControlFormat === "anthropic") return retention;
+	if ("supportsPromptCacheBreakpoints" in compat && compat.supportsPromptCacheBreakpoints === true) {
+		const ttl = options?.promptCache?.ttl ?? (retention === "long" ? "12h" : undefined);
+		return ttl === "12h" ? "long" : "short";
+	}
+	const longCapable = "supportsLongPromptCacheRetention" in compat && compat.supportsLongPromptCacheRetention === true;
+	return retention === "long" && longCapable ? "long" : "short";
 }
 
 /**
@@ -135,6 +178,79 @@ export function getPromptCacheTtlMs(
 	const tier = resolvePromptCacheTier(model, options, isOAuthToken);
 	const seconds = tier === undefined ? undefined : model.promptCache?.[tier];
 	return seconds === undefined ? undefined : seconds * 1000;
+}
+
+/**
+ * Tier the request a provider is sending asks for, read from its payload (the
+ * object `onPayload` receives): long when a cache directive in it asks for a
+ * lifetime past the provider's default, short otherwise. The payload is what
+ * the provider will write, so it settles the tier {@link resolvePromptCacheTier}
+ * could only guess per provider; with no directive the warmer errs toward
+ * refreshing early rather than letting an entry expire.
+ *
+ * Only the places a provider puts a directive are read, never message text,
+ * tool arguments or tool schemas, which may carry the same key names as data:
+ * - request fields: `prompt_cache_retention: "24h"`, `prompt_cache_options.ttl: "12h"`,
+ *   `cache_ttl: "1h"` and `cache_control.ttl: "1h"` (OpenAI Responses, Factory, Vercel, OpenRouter);
+ * - on each entry of `system`, `messages`, `tools` and `toolConfig.tools`, and on each
+ *   block of a message's `content`: `cache_control.ttl: "1h"` (Anthropic Messages and
+ *   Anthropic-format Chat Completions) or `cachePoint.ttl: "1h"` (Bedrock Converse).
+ */
+export function payloadCacheTier(payload: unknown): PromptCacheTier {
+	if (!isRecord(payload)) return "short";
+	if (
+		payload.prompt_cache_retention === "24h" ||
+		markerTtl(payload.prompt_cache_options) === "12h" ||
+		payload.cache_ttl === "1h" ||
+		markerTtl(payload.cache_control) === "1h"
+	) {
+		return "long";
+	}
+	const toolConfig = payload.toolConfig;
+	const entries = [
+		payload.system,
+		payload.messages,
+		payload.tools,
+		isRecord(toolConfig) ? toolConfig.tools : undefined,
+	].flatMap(list => (Array.isArray(list) ? list : []));
+	for (const entry of entries) {
+		if (!isRecord(entry)) continue;
+		if (hasLongDirective(entry)) return "long";
+		if (Array.isArray(entry.content) && entry.content.some(block => isRecord(block) && hasLongDirective(block))) {
+			return "long";
+		}
+	}
+	return "short";
+}
+
+function hasLongDirective(block: Record<string, unknown>): boolean {
+	return markerTtl(block.cache_control) === "1h" || markerTtl(block.cachePoint) === "1h";
+}
+
+function markerTtl(marker: unknown): unknown {
+	return isRecord(marker) ? marker.ttl : undefined;
+}
+
+/**
+ * Wrap a request's `onPayload` so `sent` sees the payload the provider actually sends: the hook's replacement
+ * when it returns one, else the payload it was given. A hook may rewrite the cache directives, so the tier is
+ * read only after it ran. Stays synchronous when the hook is.
+ */
+export function observeSentPayload(
+	onPayload: SimpleStreamOptions["onPayload"],
+	sent: (payload: unknown) => void,
+): NonNullable<SimpleStreamOptions["onPayload"]> {
+	return (payload, model, signal) => {
+		const replaced = onPayload?.(payload, model, signal);
+		if (replaced instanceof Promise) {
+			return replaced.then(next => {
+				sent(next ?? payload);
+				return next;
+			});
+		}
+		sent(replaced ?? payload);
+		return replaced;
+	};
 }
 
 /**
@@ -470,9 +586,10 @@ export class CacheWarmer {
 	/**
 	 * Keep the prompt cache entry written by `request` warm until `change` reports a difference in the next request.
 	 * Returns the request's dispatch hook: call it each time the provider sends the request (its `onPayload`),
-	 * so the entry's lifetime counts from when it left rather than from a wait for a provider slot.
+	 * with the payload, so the entry's lifetime counts from when it left rather than from a wait for a provider
+	 * slot, and its tier is the one the payload asks for ({@link payloadCacheTier}).
 	 */
-	start(request: CacheWarmRequest, change: () => PromptCacheChange | undefined): () => void {
+	start(request: CacheWarmRequest, change: () => PromptCacheChange | undefined): (payload?: unknown) => void {
 		this.#clearRun();
 		// A string key is classified up front. Resolver keys (rotating
 		// credentials) cannot be inspected without consuming them; they start on
@@ -484,9 +601,10 @@ export class CacheWarmer {
 		const tier = resolvePromptCacheTier(request.model, request.options, isOAuthToken);
 		const entry = tier === undefined ? undefined : { model: request.model, tier, touchedAt: Date.now(), change };
 		// The entry's lifetime, and so the next refresh, counts from the send, past any wait for a provider slot.
-		const dispatched = () => {
+		const dispatched = (payload?: unknown) => {
 			if (!entry) return;
 			entry.touchedAt = Date.now();
+			if (payload !== undefined && !this.#adoptWireTier(entry, payloadCacheTier(payload))) return;
 			const run = this.#run;
 			if (run?.entry !== entry || run.timer === undefined) return;
 			clearTimeout(run.timer);
@@ -507,7 +625,16 @@ export class CacheWarmer {
 			this.#stop("request disabled prompt caching");
 			return dispatched;
 		}
-		const delayMs = this.#delayFor(request.model, entry.tier);
+		// The payload settles the tier as the request goes out. Until then run on the shortest lifetime the model
+		// declares: a long estimate scheduled as is could pass a safety limit and stop the run before the payload
+		// shows a short entry, while an early refresh is corrected by the payload long before it fires.
+		let delayMs: number | undefined;
+		for (const candidate of [entry.tier, entry.tier === "long" ? "short" : "long"] as const) {
+			const candidateDelayMs = this.#delayFor(request.model, candidate);
+			if (candidateDelayMs === undefined || (delayMs !== undefined && candidateDelayMs >= delayMs)) continue;
+			delayMs = candidateDelayMs;
+			entry.tier = candidate;
+		}
 		if (delayMs === undefined) {
 			this.#stop("cache lifetime unavailable");
 			return dispatched;
@@ -526,6 +653,25 @@ export class CacheWarmer {
 		};
 		this.#schedule(this.#run);
 		return dispatched;
+	}
+
+	/**
+	 * Adopt the tier a sent payload asks for. Returns false when the run had to stop because the model
+	 * declares no lifetime for that tier.
+	 */
+	#adoptWireTier(entry: TrackedCacheEntry, tier: PromptCacheTier): boolean {
+		if (entry.tier === tier) return true;
+		entry.tier = tier;
+		const run = this.#run;
+		if (run?.entry !== entry) return true;
+		const delayMs = this.#delayFor(run.model, tier);
+		if (delayMs === undefined) {
+			this.#stop("cache lifetime unavailable");
+			return false;
+		}
+		run.tier = tier;
+		run.delayMs = delayMs;
+		return true;
 	}
 
 	/**
@@ -756,15 +902,21 @@ export class CacheWarmer {
 	async #replay(run: ActiveRun): Promise<AssistantMessage | undefined> {
 		const cutoff = new AbortController();
 		let stream: CacheWarmStream;
-		const onPayload = run.options.onPayload;
 		const replayOptions: SimpleStreamOptions = {
 			...run.options,
 			maxTokens: 1,
 			signal: AbortSignal.any([run.controller.signal, cutoff.signal]),
-			onPayload: (payload, model, signal) => {
+			onPayload: observeSentPayload(run.options.onPayload, payload => {
 				run.refreshSentAt = Date.now();
-				return onPayload?.(payload, model, signal);
-			},
+				// A replay sends the armed request again; follow its payload's tier where the model declares that lifetime.
+				const tier = payloadCacheTier(payload);
+				const delayMs = tier === run.tier ? undefined : this.#delayFor(run.model, tier);
+				if (delayMs !== undefined) {
+					run.tier = tier;
+					run.delayMs = delayMs;
+					if (run.entry) run.entry.tier = tier;
+				}
+			}),
 		};
 		if (run.model.api === "bedrock-converse-stream" && run.model.thinking?.mode === "anthropic-adaptive") {
 			// Adaptive Converse ignores thinkingBudgets on the wire. Zero each

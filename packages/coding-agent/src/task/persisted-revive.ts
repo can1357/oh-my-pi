@@ -483,6 +483,8 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			// createAgentSession default to wildcard ("*").
 			spawns: init.spawns ?? "",
 			hasUI: false,
+			// Same as a fresh spawn: a parked subagent never schedules background warm requests.
+			cacheWarming: false,
 			enableLsp: restrictToolNames ? false : spec.enableLsp,
 			...(restrictToolNames
 				? {

@@ -27,6 +27,7 @@ import type {
 	Model,
 	SimpleStreamOptions,
 } from "../types";
+import { withModelCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import {
@@ -189,7 +190,7 @@ export function streamPiNative<TApi extends Api>(
 			const body = JSON.stringify({
 				modelId: `${model.provider}/${model.id}`,
 				context,
-				options: buildWireOptions(options),
+				options: buildWireOptions(withModelCacheRetention(model, options)),
 				stream: true,
 			});
 

@@ -13,7 +13,9 @@ import {
 	type CacheWarmStream,
 	getCacheWarmingDelayMs,
 	getPromptCacheTtlMs,
+	payloadCacheTier,
 	isReplayable,
+	observeSentPayload,
 	type PromptCacheChange,
 } from "../src/session/cache-warmer";
 
@@ -170,9 +172,12 @@ function change(h: Harness): PromptCacheChange | undefined {
 	return h.current ? undefined : { kind: "history" };
 }
 
-function start(h: Harness, options: SimpleStreamOptions = {}): void {
-	h.warmer.start({ model: makeModel(), context: { messages: [] }, options }, () => change(h));
+function start(h: Harness, options: SimpleStreamOptions = {}): (payload?: unknown) => void {
+	return h.warmer.start({ model: makeModel(), context: { messages: [] }, options }, () => change(h));
 }
+
+/** An Anthropic request body whose system prompt carries a 1-hour cache directive. */
+const LONG_PAYLOAD = { system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }] };
 
 async function advance(ms: number): Promise<void> {
 	vi.advanceTimersByTime(ms);
@@ -206,6 +211,21 @@ describe("cache warming scheduling math", () => {
 			expect(getPromptCacheTtlMs(model, { cacheRetention: "short" }, true)).toBe(300_000);
 		} finally {
 			if (savedRetention !== undefined) process.env.PI_CACHE_RETENTION = savedRetention;
+		}
+	});
+
+	test("reads the model's own retention for a request that names none, as the stream layer applies it", () => {
+		const savedRetention = process.env.PI_CACHE_RETENTION;
+		process.env.PI_CACHE_RETENTION = "short";
+		try {
+			const model = { ...makeModel(), cacheRetention: "long" as const };
+			// The model's retention outranks PI_CACHE_RETENTION, so the warmer
+			// schedules the 1h entry the request actually writes.
+			expect(getPromptCacheTtlMs(model, undefined)).toBe(3_600_000);
+			expect(getPromptCacheTtlMs(model, { cacheRetention: "short" })).toBe(300_000);
+		} finally {
+			if (savedRetention === undefined) delete process.env.PI_CACHE_RETENTION;
+			else process.env.PI_CACHE_RETENTION = savedRetention;
 		}
 	});
 
@@ -248,6 +268,180 @@ describe("cache warming scheduling math", () => {
 		expect(getPromptCacheTtlMs(converse, { cacheRetention: "long" })).toBe(300_000);
 		converse.compat.supportsLongPromptCacheRetention = true;
 		expect(getPromptCacheTtlMs(converse, { cacheRetention: "long" })).toBe(3_600_000);
+	});
+
+	test("uses the short TTL for Chat Completions' Anthropic-format breakpoint, which carries no 1h marker", () => {
+		const chat = buildModel({
+			id: "anthropic/claude-sonnet-4.6",
+			name: "Claude Sonnet 4.6",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+			promptCache: { short: 300, long: 3600 },
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+			compat: { cacheControlFormat: "anthropic" },
+		});
+		expect(getPromptCacheTtlMs(chat, { cacheRetention: "long" })).toBe(300_000);
+		expect(getPromptCacheTtlMs({ ...chat, promptCache: { short: 300 } }, { cacheRetention: "long" })).toBe(300_000);
+	});
+
+	test("uses the lifetime an OpenAI Responses request actually sends: route TTL, request TTL, or the default entry", () => {
+		const responses = (spec: { baseUrl: string; id: string; compat?: Record<string, unknown> }) =>
+			buildModel({
+				id: spec.id,
+				name: spec.id,
+				api: "openai-responses",
+				provider: "custom-responses",
+				baseUrl: spec.baseUrl,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 1, output: 1, cacheRead: 0.1, cacheWrite: 1 },
+				promptCache: { short: 300, long: 3600 },
+				contextWindow: 200_000,
+				maxTokens: 8_192,
+				...(spec.compat ? { compat: spec.compat } : {}),
+			} as Parameters<typeof buildModel>[0]);
+		// A Vercel route that pins a 5m TTL writes 5-minute entries under long retention.
+		const vercel5m = responses({
+			baseUrl: "https://ai-gateway.vercel.sh/v1",
+			id: "anthropic/claude-sonnet-4.6",
+			compat: { vercelGatewayRouting: { caching: "auto", cacheTtl: "5m" } },
+		});
+		expect(getPromptCacheTtlMs(vercel5m, { cacheRetention: "long" })).toBe(300_000);
+		expect(getPromptCacheTtlMs({ ...vercel5m, promptCache: { short: 300 } }, { cacheRetention: "long" })).toBe(
+			300_000,
+		);
+		// Its 1h TTL is sent only under long retention.
+		const vercel1h = responses({
+			baseUrl: "https://ai-gateway.vercel.sh/v1",
+			id: "anthropic/claude-sonnet-4.6",
+			compat: { vercelGatewayRouting: { caching: "auto", cacheTtl: "1h" } },
+		});
+		expect(getPromptCacheTtlMs(vercel1h, { cacheRetention: "long" })).toBe(3_600_000);
+		expect(getPromptCacheTtlMs(vercel1h, { cacheRetention: "short" })).toBe(300_000);
+		// An endpoint with explicit breakpoints honors the request's own TTL over long retention's 12h.
+		const breakpoints = responses({
+			baseUrl: "https://openai.example.test/v1",
+			id: "custom-model",
+			compat: { supportsPromptCacheBreakpoints: true },
+		});
+		expect(
+			getPromptCacheTtlMs(breakpoints, { cacheRetention: "long", promptCache: { mode: "implicit", ttl: "30m" } }),
+		).toBe(300_000);
+		expect(getPromptCacheTtlMs(breakpoints, { cacheRetention: "long" })).toBe(3_600_000);
+		// An endpoint without any long-retention field writes the default entry.
+		const plain = responses({
+			baseUrl: "https://openai.example.test/v1",
+			id: "custom-model",
+			compat: { supportsPromptCacheBreakpoints: false, supportsLongPromptCacheRetention: false },
+		});
+		expect(getPromptCacheTtlMs(plain, { cacheRetention: "long" })).toBe(300_000);
+	});
+
+	test("reads the tier a sent payload asks for from its cache markers", () => {
+		const long = [
+			{ system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }] },
+			{ prompt_cache_options: { mode: "implicit", ttl: "12h" } },
+			{ prompt_cache_retention: "24h" },
+			{ caching: "auto", cache_ttl: "1h" },
+			{ system: [{ cachePoint: { type: "default", ttl: "1h" } }] },
+		];
+		const short = [
+			{ system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }] },
+			{ prompt_cache_options: { mode: "implicit", ttl: "30m" } },
+			{ caching: "auto", cache_ttl: "5m" },
+			{ prompt_cache_key: "session" },
+			{},
+		];
+		for (const payload of long) expect(payloadCacheTier(payload)).toBe("long");
+		for (const payload of short) expect(payloadCacheTier(payload)).toBe("short");
+		const cyclic: Record<string, unknown> = { messages: [] };
+		cyclic.self = cyclic;
+		expect(payloadCacheTier(cyclic)).toBe("short");
+	});
+
+	test("never reads conversation or tool data that looks like a cache directive as one", () => {
+		const directive = { cache_ttl: "1h", cache_control: { type: "ephemeral", ttl: "1h" } };
+		const shortMarker = { type: "ephemeral" };
+		const payloads = [
+			// Tool arguments in an assistant turn.
+			{
+				messages: [
+					{ role: "user", content: [{ type: "text", text: "go", cache_control: shortMarker }] },
+					{ role: "assistant", content: [{ type: "tool_use", id: "t", name: "x", input: directive }] },
+				],
+			},
+			// A tool's JSON Schema default.
+			{
+				tools: [
+					{
+						name: "x",
+						input_schema: { type: "object", properties: { cache: { type: "object", default: directive } } },
+						cache_control: shortMarker,
+					},
+				],
+			},
+			// A tool result's content and a Bedrock tool spec.
+			{
+				messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: [directive] }] }],
+				toolConfig: { tools: [{ toolSpec: { name: "x", inputSchema: { json: directive } } }] },
+			},
+		];
+		for (const payload of payloads) expect(payloadCacheTier(payload)).toBe("short");
+		// The same directive where a provider puts one still counts.
+		expect(
+			payloadCacheTier({ messages: [{ role: "user", content: [{ type: "text", text: "go", ...directive }] }] }),
+		).toBe("long");
+		expect(payloadCacheTier({ toolConfig: { tools: [{ cachePoint: { type: "default", ttl: "1h" } }] } })).toBe(
+			"long",
+		);
+	});
+
+	test("hands the warmer the payload a caller's hook replaces it with, sync or async", async () => {
+		const original = LONG_PAYLOAD;
+		const replacement = { system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }] };
+		const seen: unknown[] = [];
+		const sync = observeSentPayload(
+			() => replacement,
+			payload => seen.push(payload),
+		);
+		expect(sync(original)).toBe(replacement);
+		const async = observeSentPayload(
+			() => Promise.resolve(replacement),
+			payload => seen.push(payload),
+		);
+		const pending = async(original);
+		expect(seen).toHaveLength(1);
+		expect(await pending).toBe(replacement);
+		const keeps = observeSentPayload(
+			() => undefined,
+			payload => seen.push(payload),
+		);
+		keeps(original);
+		expect(seen).toEqual([replacement, replacement, original]);
+	});
+
+	test("keeps Azure Responses and Codex on the default entry under long retention", () => {
+		for (const api of ["azure-openai-responses", "openai-codex-responses"] as const) {
+			const model = buildModel({
+				id: "gpt-5.6-terra",
+				name: "GPT-5.6 Terra",
+				api,
+				provider: "custom-openai",
+				baseUrl: "https://openai.example.test/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 1, output: 1, cacheRead: 0.1, cacheWrite: 1 },
+				promptCache: { short: 300 },
+				contextWindow: 200_000,
+				maxTokens: 8_192,
+			} as Parameters<typeof buildModel>[0]);
+			expect(getPromptCacheTtlMs(model, { cacheRetention: "long" })).toBe(300_000);
+		}
 	});
 
 	test("never warms without a declared lifetime or with caching off", () => {
@@ -312,6 +506,90 @@ describe("cache warmer lifecycle", () => {
 	afterEach(() => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
+	});
+
+	test("schedules by the tier the sent payload asks for, not the estimate", async () => {
+		// Estimated long (official Anthropic, long retention); the payload carries no 1h marker.
+		const shortWire = harness();
+		const sentShort = shortWire.warmer.start(
+			{ model: makeModel(), context: { messages: [] }, options: { cacheRetention: "long" } },
+			() => change(shortWire),
+		);
+		sentShort({ system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }] });
+		await advance(SHORT_DELAY_MS);
+		expect(shortWire.replays).toHaveLength(1);
+		shortWire.warmer.cancel();
+
+		// Estimated short; the payload asks for a 24h entry the model declares (Factory's Responses wire on its
+		// OpenAI upstream): no refresh inside the warming window.
+		const longWire = harness();
+		const sentLong = longWire.warmer.start(
+			{
+				model: { ...makeModel(), promptCache: { short: 300, long: 86_400 } },
+				context: { messages: [] },
+				options: { cacheRetention: "short" },
+			},
+			() => change(longWire),
+		);
+		sentLong({ prompt_cache_key: "session", prompt_cache_retention: "24h" });
+		await advance(SHORT_DELAY_MS);
+		expect(longWire.replays).toHaveLength(0);
+		longWire.warmer.cancel();
+	});
+
+	test("starts on the declared lifetime when the estimated tier has none, and lets the payload settle it", async () => {
+		// The bundled Antigravity declaration: a 5-minute lifetime only. Long retention estimates an undeclared tier.
+		const h = harness();
+		const sent = h.warmer.start(
+			{
+				model: { ...makeModel(), promptCache: { short: 300 } },
+				context: { messages: [] },
+				options: { cacheRetention: "long" },
+			},
+			() => change(h),
+		);
+		expect(h.warmer.status).not.toMatchObject({ reason: "cache lifetime unavailable" });
+		sent({ contents: [], cachedContent: undefined });
+		await advance(SHORT_DELAY_MS);
+		expect(h.replays).toHaveLength(1);
+		h.warmer.cancel();
+	});
+
+	test("keeps warming a short entry when the estimated long lifetime passes the warming window", async () => {
+		// A 24h long lifetime would schedule the first refresh past the one-hour limit; the payload shows 5 minutes.
+		const h = harness();
+		const sent = h.warmer.start(
+			{
+				model: { ...makeModel(), promptCache: { short: 300, long: 86_400 } },
+				context: { messages: [] },
+				options: { cacheRetention: "long" },
+			},
+			() => change(h),
+		);
+		sent({ system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }] });
+		await advance(SHORT_DELAY_MS);
+		expect(h.replays).toHaveLength(1);
+		h.warmer.cancel();
+	});
+
+	test("follows the payload a replay's hook replaces, not the one it was handed", async () => {
+		const h = harness({
+			stream: async (model, _context, options) => {
+				await options?.onPayload?.(LONG_PAYLOAD, model);
+				const record: ReplayRecord = { options, consumed: [], cutOff: false };
+				h.replays.push(record);
+				return scriptedStream({ kind: "generate", usage: makeUsage({ cacheRead: PROMPT_TOKENS }) }, record);
+			},
+		});
+		// The request's own hook drops the 1-hour directive, so each send writes a 5-minute entry.
+		const shortPayload = { system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }] };
+		const sent = start(h, { cacheRetention: "long", onPayload: () => shortPayload });
+		sent(LONG_PAYLOAD);
+		await advance(LONG_DELAY_MS);
+		expect(h.replays).toHaveLength(1);
+		await advance(SHORT_DELAY_MS);
+		expect(h.replays).toHaveLength(2);
+		h.warmer.cancel();
 	});
 
 	test("cuts the replay off at the first generated block and re-arms on a cache hit", async () => {
@@ -432,12 +710,12 @@ describe("cache warmer lifecycle", () => {
 
 	test("warms a 1h entry during an active run but not after it settles", async () => {
 		const running = harness();
-		start(running, { cacheRetention: "long" });
+		start(running, { cacheRetention: "long" })(LONG_PAYLOAD);
 		await advance(LONG_DELAY_MS);
 		expect(running.replays).toHaveLength(1);
 
 		const settled = harness({ decide: () => Promise.resolve("warm") });
-		start(settled, { cacheRetention: "long" });
+		start(settled, { cacheRetention: "long" })(LONG_PAYLOAD);
 		settled.warmer.onAgentSettled();
 		expect(settled.warmer.status).toMatchObject({
 			state: "inactive",

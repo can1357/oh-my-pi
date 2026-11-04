@@ -72,6 +72,7 @@ import {
 	normalizeSystemPrompts,
 	normalizeToolCallId,
 	resolveCacheRetention,
+	withModelCacheRetention,
 } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import {
@@ -3821,9 +3822,13 @@ const streamAnthropicOnce = (
  * loop. The inner attempt owns Anthropic provider-failure retries.
  */
 export const streamAnthropic: StreamFunction<"anthropic-messages"> = (model, context, options) =>
-	withReplaySafeStreamRetry(withoutDisabledExperimentalBetas(model), context, options, streamAnthropicOnce, {
-		retryEmptyCompletion: true,
-	});
+	withReplaySafeStreamRetry(
+		withoutDisabledExperimentalBetas(model),
+		context,
+		withModelCacheRetention(model, options),
+		streamAnthropicOnce,
+		{ retryEmptyCompletion: true },
+	);
 
 /** Whether Claude Code's `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` applies to this model's provider. */
 function experimentalBetasDisabled(model: Model<"anthropic-messages">): boolean {
@@ -5188,7 +5193,8 @@ function buildParams(
 		includeClaudeCodeInstruction: shouldInjectClaudeCodeInstruction,
 		firstUserMessageText,
 		cacheControl,
-		dropCacheControl,
+		// No cache control (retention `none`, or dropped) means no breakpoint, the identity block's included.
+		dropCacheControl: dropCacheControl || cacheControl === undefined,
 	});
 
 	// An on-demand compaction request ends inside the conversation: it gets
@@ -5598,7 +5604,8 @@ export function streamBedrockAnthropicCompaction(
 		!forceThinkingOff && anthropicModel.thinking?.prefixBinding && sourceModel.compat.supportsThinkingBindingControls
 			? (options.anthropicPrefixMismatchBehavior ?? "drop_block")
 			: undefined;
-	const compactionOptions = { ...options };
+	// The encoder model is rebuilt from the Bedrock one; its configured retention lives on `sourceModel`.
+	const compactionOptions = { ...withModelCacheRetention(sourceModel, options) };
 	delete compactionOptions.toolChoice;
 	delete compactionOptions.fallbacks;
 	return streamAnthropicOnce(anthropicModel, context, compactionOptions, {

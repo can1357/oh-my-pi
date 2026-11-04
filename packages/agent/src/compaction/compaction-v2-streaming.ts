@@ -212,7 +212,11 @@ export function buildCompactionV2Request(
 		retainedUserItems?: unknown[];
 	},
 ): CompactionV2Request {
-	const cacheOptions = { sessionId: options?.sessionId, promptCacheKey: options?.promptCacheKey };
+	const cacheOptions = {
+		sessionId: options?.sessionId,
+		promptCacheKey: options?.promptCacheKey,
+		cacheRetention: model.cacheRetention,
+	};
 	const promptCacheKey = getOpenAIPromptCacheKey(cacheOptions);
 	const body: OpenAICodexCompactionBody = {
 		model: resolveCompactionV2Model(model),
@@ -425,7 +429,11 @@ function buildCompactionV2Headers(
 	codexMetadata?: OpenAICodexCompatibilityMetadata,
 ): Record<string, string> {
 	const api = compactionV2Api(model);
-	const cacheOptions = { sessionId: request.sessionId, promptCacheKey: request.promptCacheKey };
+	const cacheOptions = {
+		sessionId: request.sessionId,
+		promptCacheKey: request.promptCacheKey,
+		cacheRetention: model.cacheRetention,
+	};
 	const routingSessionId = getOpenAIResponsesRoutingSessionId(cacheOptions);
 	const promptCacheSessionId = getOpenAIPromptCacheKey(cacheOptions);
 	const headers: Record<string, string> =

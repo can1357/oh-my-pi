@@ -10,7 +10,7 @@ import type {
 	StreamOptions,
 	ToolChoice,
 } from "../types";
-import { resolveCacheRetention } from "../utils";
+import { resolveCacheRetention, withModelCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -264,7 +264,8 @@ const streamAzureOpenAIResponsesOnce = (
  * synchronously here — callers of the direct entrypoint get the immediate
  * `ConfigurationError` rather than a stream whose `.result()` rejects later.
  */
-export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"> = (model, context, options) => {
+export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"> = (model, context, rawOptions) => {
+	const options = withModelCacheRetention(model, rawOptions);
 	if (options?.promptCache?.mode === "explicit" && resolveCacheRetention(options.cacheRetention) !== "none") {
 		throw new AIError.ConfigurationError(
 			`OpenAI explicit prompt caching is unsupported for ${model.provider}/${model.id}; Azure Responses does not emit explicit cache controls.`,

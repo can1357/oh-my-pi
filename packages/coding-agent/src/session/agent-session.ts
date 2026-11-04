@@ -1434,7 +1434,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Transcript the warmer was last armed for: its confirmed entry describes no other transcript. */
 	#promptCacheArmSessionId: string | undefined;
 	/** Each armed main-loop request's dispatch hook, keyed by the context it was armed with. */
-	readonly #promptCacheDispatch = new WeakMap<Context, () => void>();
+	readonly #promptCacheDispatch = new WeakMap<Context, (payload?: unknown) => void>();
 	/** {@link #promptCacheShape} for the inputs it was last built from. */
 	#promptCacheShapeMemo:
 		| {
@@ -5967,7 +5967,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Current prompt-cache warming state, for hosts that surface it. Undefined
-	 * when the session has no warmer (side-channels, subagents, older hosts).
+	 * when the session has no warmer (side-channels, one-shot sessions, older hosts).
 	 */
 	get cacheWarmingStatus(): CacheWarmingStatus | undefined {
 		return this.#cacheWarmer?.status;
@@ -6001,7 +6001,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const retentionSetting = cfgProvidersCacheRetention.get(this.settings);
 		const warmingOptions = {
 			...options,
-			cacheRetention: options.cacheRetention ?? (retentionSetting === "auto" ? undefined : retentionSetting),
+			cacheRetention:
+				options.cacheRetention ??
+				model.cacheRetention ??
+				(retentionSetting === "auto" ? undefined : retentionSetting),
 		};
 		const armShape = this.#promptCacheShape(model);
 		const dispatched = warmer.start({ model, context, options: warmingOptions }, () =>
@@ -6012,11 +6015,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Starts the prompt cache entry's lifetime for the request armed with `context` (see
-	 * {@link CacheWarmer.start}). The session streamFn calls it from `onPayload`, as the provider
-	 * sends the request, past any wait for an in-flight slot.
+	 * {@link CacheWarmer.start}), at the tier its `payload` asks for. The session streamFn calls it
+	 * from `onPayload`, as the provider sends the request, past any wait for an in-flight slot.
 	 */
-	markPromptCacheDispatched(context: Context): void {
-		this.#promptCacheDispatch.get(context)?.();
+	markPromptCacheDispatched(context: Context, payload?: unknown): void {
+		this.#promptCacheDispatch.get(context)?.(payload);
 	}
 
 	/**

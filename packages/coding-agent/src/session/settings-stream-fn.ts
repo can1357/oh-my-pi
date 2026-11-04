@@ -112,9 +112,11 @@ export function createSettingsAwareStreamFn(
 		// "auto" leaves the option unset so provider defaults and the
 		// PI_CACHE_RETENTION env override keep working; anything else is an
 		// explicit per-request retention (long restores 1h Anthropic TTLs and
-		// implicitly disables the short-entry keep-alive refresh loop).
+		// implicitly disables the short-entry keep-alive refresh loop). A model's
+		// own retention (`providers.<id>.cacheRetention`) outranks the setting.
 		const cacheRetentionSetting = cfgProvidersCacheRetention.get(settings);
-		const cacheRetention = cacheRetentionSetting === "auto" ? undefined : cacheRetentionSetting;
+		const cacheRetention =
+			model.cacheRetention ?? (cacheRetentionSetting === "auto" ? undefined : cacheRetentionSetting);
 		const streamFirstEventTimeoutMs = timeoutSecondsToMs(cfgProvidersStreamFirstEventTimeoutSeconds.get(settings));
 		const streamIdleTimeoutMs = timeoutSecondsToMs(cfgProvidersStreamIdleTimeoutSeconds.get(settings));
 		// Server-side fallback (opt-in): when the user enables it, inject the
