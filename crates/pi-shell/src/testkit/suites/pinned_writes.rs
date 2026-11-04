@@ -8,8 +8,7 @@
 
 use crate::{
 	bash::{
-		Budget, Cx, Engine, EngineConfig, FileKind, Lost, MemStore, RestoreOpts, Script, Shell,
-		ShellApi, Step,
+		Budget, Cx, Engine, EngineConfig, FileKind, Lost, MemStore, RestoreOpts, Script, Shell, Step,
 	},
 	testkit::{
 		fault::skeleton_init,
