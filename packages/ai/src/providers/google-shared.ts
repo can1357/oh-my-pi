@@ -301,7 +301,9 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					// public API requires the bypass sentinel on every unsigned call. Cloud
 					// Code Assist requires it only when the first call itself is unsigned;
 					// signed-first parallel turns must leave unsigned secondary calls bare.
-					// Vertex rejects the sentinel and receives neither fallback. (#9638, #10602)
+					// Vertex rejects the sentinel and receives neither fallback. (#9638, #10602) That is
+					// this native wire; Vertex's OpenAI-compatible endpoint accepts it in a tool call's
+					// `extra_content`, which is what `requiresSkipThoughtSignatureOnForeignToolCall` uses.
 					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thoughtSignature);
 					const requiresFallback =
 						model.compat.requiresSkipThoughtSignature ||

@@ -338,6 +338,13 @@ export interface OpenAICompat {
 	requiresThinkingAsText?: boolean;
 	/** Whether tool call IDs must be normalized to Mistral format (exactly 9 alphanumeric chars). Default: auto-detected from URL. */
 	requiresMistralToolIds?: boolean;
+	/**
+	 * Give the first tool call of an assistant turn that another model produced Gemini's bypass signature,
+	 * `extra_content.google.thought_signature: "skip_thought_signature_validator"`. Gemini 3+ rejects a turn
+	 * whose first function call carries no signature, and a cross-model replay drops the other model's
+	 * signatures. Default: false.
+	 */
+	requiresSkipThoughtSignatureOnForeignToolCall?: boolean;
 	/** Format for reasoning/thinking parameter. `"kimi"` uses `thinking: { type, effort }`; other values select their provider-native reasoning fields. Default: `"openai"`. */
 	thinkingFormat?: OpenAIReasoningFormat;
 	/** Kimi Code transport selected by live per-model protocol metadata. User settings take precedence. */
@@ -975,6 +982,8 @@ export interface ResolvedOpenAISharedCompat {
 	supportsNamedToolChoice: boolean;
 	reasoningContentField?: OpenAICompat["reasoningContentField"];
 	mistralReasoningContentParts?: boolean;
+	/** See {@link OpenAICompat.requiresSkipThoughtSignatureOnForeignToolCall}. */
+	requiresSkipThoughtSignatureOnForeignToolCall?: boolean;
 	requiresReasoningContentForToolCalls: boolean;
 	requiresReasoningContentForAllAssistantTurns: boolean;
 	allowsSyntheticReasoningContentForToolCalls: boolean;
@@ -1059,6 +1068,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsNamedToolChoice"
 			| "reasoningContentField"
 			| "mistralReasoningContentParts"
+			| "requiresSkipThoughtSignatureOnForeignToolCall"
 			| "requiresReasoningContentForToolCalls"
 			| "requiresReasoningContentForAllAssistantTurns"
 			| "allowsSyntheticReasoningContentForToolCalls"

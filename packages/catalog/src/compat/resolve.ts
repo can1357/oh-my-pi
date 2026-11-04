@@ -548,6 +548,7 @@ function detectOpenAICompat(
 		thinkingKeep: usesMoonshotKimiPreservedThinking ? "all" : undefined,
 		reasoningContentField: "reasoning_content",
 		mistralReasoningContentParts: undefined,
+		requiresSkipThoughtSignatureOnForeignToolCall: undefined,
 		requiresReasoningContentForToolCalls:
 			(facts.is("kimi") && !d.isOpenCodeProvider) ||
 			(isDeepseekFamily && reasoningCapable) ||

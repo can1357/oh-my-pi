@@ -179,6 +179,9 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"requires-mistral-tool-ids": wire("requiresMistralToolIds", ["openai"]),
 	"requires-reasoning-content-for-all-assistant-turns": wire("requiresReasoningContentForAllAssistantTurns", OAI),
 	"requires-reasoning-content-for-tool-calls": wire("requiresReasoningContentForToolCalls", OAI),
+	"requires-skip-thought-signature-on-foreign-tool-call": wire("requiresSkipThoughtSignatureOnForeignToolCall", [
+		"openai",
+	]),
 	"requires-thinking-as-text": wire("requiresThinkingAsText", ["openai"]),
 	"requires-tool-result-name": wire("requiresToolResultName", ["openai"]),
 	"strict-responses-pairing": wire("strictResponsesPairing", ["openai-responses"]),
