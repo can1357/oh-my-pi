@@ -26,6 +26,7 @@
 - Sixel image output uses a built-in encoder; images with more than 256 colors may get a slightly different palette
 
 ### Fixed
+- Fixed Windows `rsync` treating a one-letter daemon host such as `h::module` as a local drive path ([#18048](https://github.com/can1357/oh-my-pi/pull/18048) by [@jchanghong023](https://github.com/jchanghong023)).
 
 - Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
 - Fixed native addon startup on glibc 2.17–2.28 by falling back to fork for external shell commands when `posix_spawn_file_actions_addchdir_np` is unavailable ([#18046](https://github.com/can1357/oh-my-pi/pull/18046) by [@jchanghong023](https://github.com/jchanghong023))
