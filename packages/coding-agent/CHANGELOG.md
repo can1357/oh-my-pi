@@ -16,9 +16,11 @@
 - `omp zsh` keeps zsh's history: it reads and writes your `$HISTFILE` in zsh's own format and locking (shared with real zsh, `extendedhistory`, `sharehistory`, `incappendhistory` and the other history options), expands `!!`, `!$`, `^old^new` and the rest of zsh's history syntax, runs `zshaddhistory`, and has full `fc`, `history`, `r`, `print -s`, `$history` and `HISTCMD`; `omp bash` gets `history -a -n -r -w -p`, `HISTTIMEFORMAT`, `HISTIGNORE`, `fc` editing and `!` expansion
 - `omp zsh` runs interactively like zsh: zsh's line editor (emacs and vi keymaps, `bindkey`, `zle -N` widgets, `vared`), completion (`compinit`, `compdef`, `menu select`), job control (Ctrl-Z, `fg`, `bg`, `jobs`), prompts with `precmd`/`preexec` hooks, and the zsh modules plugins load (`zsh/zpty`, `zsh/system`, `zsh/terminfo`, `zsh/pcre`, `zsh/datetime`, …), so oh-my-zsh and powerlevel10k configs start
 - RPC `bash` results now say when the output was cut: `elidedBytes`/`elidedLines` for a dropped middle, and `columnTruncatedLines`, `columnTruncatedRange`, `columnDroppedBytes` and `columnMax` for lines cut to the column cap. The Go, Python and Rust SDKs decode them ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
+- Added `providers.commandRefreshSeconds`: how long a `!command` value without a JWT expiry is reused before its command runs again (default `0`: until a 401 or an explicit credential refresh, as before)
 
 ### Fixed
 
+- A `!command` config value that prints a JWT (such as a provider `apiKey` or header minted by an identity-token command) now runs again a minute before the token's `exp`, so an hourly token is replaced before the provider rejects it instead of after a 401; a failed re-run keeps serving the old token until it expires
 - `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
 - Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset
 - The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm

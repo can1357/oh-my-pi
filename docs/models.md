@@ -380,7 +380,12 @@ providers:
          X-Team-Key: "!bw get password omp-team-key"
 ```
 
-Successful command outputs are cached for the process lifetime, and concurrent requests share an in-flight execution. Failures back off for 30 seconds. Refresh callers that request `refreshCommandCredentials` (including the model hub's explicit refresh) and 401 credential recovery invalidate the relevant cached API keys and headers; an ordinary catalog refresh does not. Runtime API-key overrides, including `--api-key`, take precedence over configured credentials.
+Concurrent requests share one in-flight execution, and a successful output is reused:
+
+- Output that is a JWT (bare, or after a scheme such as `Bearer`) with an `exp` claim is reused until the OAuth refresh skew (60 s) before `exp`; the next request then runs the command again, before a provider would reject the token. Re-runs are at least 30 s apart, and an expired token is never sent.
+- Any other output is reused for `providers.commandRefreshSeconds` (see [Settings](./settings.md)). The default `0` keeps it until it is invalidated, so a password-manager command such as `op read` is not run again on a timer.
+
+Failures back off for 30 seconds. When a re-run fails, the previous output keeps serving, a JWT only until its `exp`. Refresh callers that request `refreshCommandCredentials` (including the model hub's explicit refresh) and 401 credential recovery invalidate the relevant cached API keys and headers; an ordinary catalog refresh does not. Runtime API-key overrides, including `--api-key`, take precedence over configured credentials.
 
 ## Merge and override order
 

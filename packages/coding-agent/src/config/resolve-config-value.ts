@@ -1,10 +1,36 @@
+import { OAUTH_REFRESH_SKEW_MS } from "@oh-my-pi/pi-ai/auth/refresh";
 import { executeShell } from "@oh-my-pi/pi-natives";
-import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	$envExact,
+	directoryIsEnterable,
+	getProjectDir,
+	isRecord,
+	logger,
+	ptree,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 
 const COMMAND_FAILURE_RETRY_MS = 30_000;
-const commandResultCache = new Map<string, string>();
+/**
+ * Shortest time one successful run is reused before its command may run again. Without it a
+ * command printing a JWT already inside the refresh skew would run once per request.
+ */
+const COMMAND_MIN_REUSE_MS = 30_000;
+
+/** One successful run of a `!command` value. */
+interface CommandResult {
+	value: string;
+	/** `Date.now()` when the run finished. */
+	mintedAt: number;
+	/** The `exp` claim of a JWT value, in ms. Such a value is never served at or after it. */
+	expiresAt: number | undefined;
+}
+
+/** Reuse of a value with no discoverable expiry, in ms (`providers.commandRefreshSeconds`); 0 = until invalidated. */
+let commandRefreshMs = 0;
+const commandResultCache = new Map<string, CommandResult>();
 const commandFailureRetryAt = new Map<string, number>();
-const commandInFlight = new Map<string, Promise<string | undefined>>();
+const commandInFlight = new Map<string, Promise<CommandResult | undefined>>();
 const commandGeneration = new Map<string, number>();
 
 /** Materialize request headers for models and discovery without property-access side effects. */
@@ -51,28 +77,76 @@ export function invalidateAllCommandConfigs(): void {
 	commandInFlight.clear();
 }
 
+/**
+ * Set how long a `!command` value with no discoverable expiry is reused before its command runs
+ * again (setting `providers.commandRefreshSeconds`). Zero, negative or non-finite keeps such a
+ * value until a 401 or an explicit credential refresh invalidates it.
+ */
+export function configureCommandRefreshMs(refreshMs: number): void {
+	commandRefreshMs = Number.isFinite(refreshMs) && refreshMs > 0 ? refreshMs : 0;
+}
+
+/** The `exp` claim of a JWT value, bare or after an auth scheme such as `Bearer`, in ms. */
+function jwtExpiresAt(value: string): number | undefined {
+	const match = /^(?:[A-Za-z][\w-]*\s+)?([\w-]+)\.([\w-]+)\.[\w-]*$/.exec(value);
+	if (!match) return undefined;
+	try {
+		const header: unknown = JSON.parse(Buffer.from(match[1], "base64url").toString("utf8"));
+		const payload: unknown = JSON.parse(Buffer.from(match[2], "base64url").toString("utf8"));
+		if (!isRecord(header) || typeof header.alg !== "string" || !isRecord(payload)) return undefined;
+		const exp = payload.exp;
+		return typeof exp === "number" && Number.isFinite(exp) && exp > 0 ? exp * 1000 : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * When a result's command may run again. A JWT is re-minted once the OAuth refresh skew before
+ * its `exp` is reached, so the next token exists before a provider would reject the old one; any
+ * other value after the configured reuse, or never. Never sooner than {@link COMMAND_MIN_REUSE_MS}.
+ */
+function refreshAt(result: CommandResult): number {
+	if (result.expiresAt !== undefined) {
+		return Math.max(result.expiresAt - OAUTH_REFRESH_SKEW_MS, result.mintedAt + COMMAND_MIN_REUSE_MS);
+	}
+	if (commandRefreshMs === 0) return Number.POSITIVE_INFINITY;
+	return result.mintedAt + commandRefreshMs;
+}
+
+/** A result's value while it may be sent: a JWT never at or after its `exp`. */
+function servable(result: CommandResult | undefined, now: number): string | undefined {
+	if (result === undefined) return undefined;
+	return result.expiresAt === undefined || now < result.expiresAt ? result.value : undefined;
+}
+
 async function executeCommand(valueConfig: string): Promise<string | undefined> {
 	const command = commandKey(valueConfig);
+	const now = Date.now();
 
 	const cached = commandResultCache.get(command);
-	if (cached !== undefined) return cached;
+	if (cached !== undefined && now < refreshAt(cached)) return servable(cached, now);
+	// The command is due. Until a run succeeds, the previous value serves while it is still valid.
 	const retryAt = commandFailureRetryAt.get(command);
-	if (retryAt !== undefined && Date.now() < retryAt) return undefined;
+	if (retryAt !== undefined && now < retryAt) return servable(cached, now);
 
 	const existing = commandInFlight.get(command);
-	if (existing) return await existing;
+	if (existing) return await settle(command, existing);
 
 	const generation = commandGeneration.get(command) ?? 0;
-	const promise: Promise<string | undefined> = (async () => {
+	const promise: Promise<CommandResult | undefined> = (async () => {
 		const cwd = getProjectDir();
 		if (!(await directoryIsEnterable(cwd))) return undefined;
 		return await runShellCommand(command, 10_000, cwd);
 	})()
-		.then(result => {
-			if ((commandGeneration.get(command) ?? 0) !== generation) return result;
-			if (result === undefined) {
-				commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
-			} else {
+		.then(value => {
+			const current = (commandGeneration.get(command) ?? 0) === generation;
+			if (value === undefined) {
+				if (current) commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
+				return undefined;
+			}
+			const result: CommandResult = { value, mintedAt: Date.now(), expiresAt: jwtExpiresAt(value) };
+			if (current) {
 				commandFailureRetryAt.delete(command);
 				commandResultCache.set(command, result);
 			}
@@ -94,12 +168,23 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
 		});
 
 	commandInFlight.set(command, promise);
-	return await promise;
+	return await settle(command, promise);
 }
 
 /**
- * Resolve a configuration value. Command values execute asynchronously and
- * successful stdout is cached; environment-backed and literal values stay live.
+ * Wait for a shared run. A failed run falls back to the previous value while it is still valid,
+ * looked up after the run because a 401 during it drops that value.
+ */
+async function settle(command: string, run: Promise<CommandResult | undefined>): Promise<string | undefined> {
+	const result = (await run) ?? commandResultCache.get(command);
+	return servable(result, Date.now());
+}
+
+/**
+ * Resolve a configuration value. Command values execute asynchronously and successful stdout is
+ * reused: a JWT until the OAuth refresh skew before its `exp`, any other value for
+ * `providers.commandRefreshSeconds` (by default until invalidated). Environment-backed and literal
+ * values stay live.
  */
 export async function resolveConfigValue(valueConfig: string): Promise<string | undefined> {
 	if (isCommandConfigValue(valueConfig)) return await executeCommand(valueConfig);

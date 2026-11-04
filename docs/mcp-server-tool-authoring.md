@@ -143,7 +143,7 @@ continues with the existing access token.
 
 Before connect, manager normally resolves stdio `env` values and HTTP/SSE `headers` values via `resolveConfigValue()` (`src/config/resolve-config-value.ts`):
 
-- value starting with `!` => execute a shell command with a 10-second timeout, use trimmed stdout; successful output is cached, concurrent requests share one execution, and failures back off for 30 seconds
+- value starting with `!` => execute a shell command with a 10-second timeout, use trimmed stdout; successful output is cached (a JWT until a minute before its `exp`, other output for `providers.commandRefreshSeconds`, by default until invalidated), concurrent requests share one execution, and failures back off for 30 seconds
 - failed, timed-out, or whitespace-only commands produce `undefined`, so that entry is omitted
 - otherwise, use a non-empty exact-name environment value, falling back to the literal value; empty resolved entries are omitted
 
