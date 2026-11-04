@@ -545,6 +545,12 @@ pub struct Job {
 	/// process. `$!` names the last stage, `jobs -p` the first.
 	#[serde(default)]
 	pub stages:    Option<Box<Vec<JobStage>>>,
+	/// A foreground job (bash `J_FOREGROUND`): the processes of a
+	/// `lastpipe` pipeline but its last command, or a command its last
+	/// command ran, while the job list is frozen. Never the current job;
+	/// forgotten once it ended unless a signal ended it, which is reported.
+	#[serde(default)]
+	pub foreground: bool,
 	/// The OS pid of the program the job runs, once it spawned it: bash's
 	/// subshell for an asynchronous simple command `exec`s the program, so
 	/// a job whose lone command is an external (or whose body `exec`s one)

@@ -1374,8 +1374,19 @@ fn break_loops(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, n: u32, cont: bo
 			f.kind,
 			FrameKind::Script { what: ScriptKind::Eval, .. } | FrameKind::NoFork | FrameKind::Stage
 		);
+		let stage = f.kind == FrameKind::Stage;
 		if crossable && vp.frames.len() > 1 {
 			pop_frame(&mut k.root, cx.store, vp);
+			// bash's `break` in a `lastpipe` last command only sets a flag:
+			// the pipeline ends as usual and its foreground job goes.
+			if stage {
+				let children: Vec<Vpid> = top_frame(vp)
+					.scratch
+					.as_ref()
+					.map(|sc| sc.children.iter().map(|&(v, _)| v).collect())
+					.unwrap_or_default();
+				vp.jobs.remove_where(|j| j.foreground && children.contains(&j.vpid));
+			}
 			// The caller's op (`eval`) is abandoned with the loop.
 			clear_scratch(&mut k.root, cx.store, vp);
 			continue;
@@ -3146,6 +3157,27 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 				for (i, stage) in info.stages.iter().enumerate() {
 					if lastpipe && i + 1 == n {
 						k.emit_op(cx, vp, op.node, EventData::Pipeline { stages: &children });
+						// bash `stop_pipeline` with the list frozen: the other
+						// processes are a foreground job the last command sees.
+						if let Some(&last) = children.last() {
+							let stages: Vec<JobStage> = children
+								.iter()
+								.enumerate()
+								.map(|(i, &vpid)| JobStage {
+									vpid,
+									text: stage_job_text(k, cx, vp, unit, info, i),
+									status: None,
+									death: None,
+								})
+								.collect();
+							let text = BString::from(bstr::join(" | ", stages.iter().map(|s| s.text.as_slice())));
+							let id = k.job_id(cx.store);
+							let cwd = vp.cwd.clone();
+							let number = vp.jobs.add_foreground(id, last, text, cwd);
+							if let Some(job) = vp.jobs.get_mut(number) {
+								job.stages = Some(Box::new(stages));
+							}
+						}
 						let line_shift = top_frame(vp).line_shift;
 						let sc = scratch(vp);
 						sc.children = children.into_iter().map(|v| (v, None)).collect();
@@ -3226,6 +3258,28 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 			*status = k.proc_collect(cx.store, *vpid);
 		}
 	}
+	// A `lastpipe` job's process a `wait` of the last command collected
+	// already: its job kept its status.
+	if sc.inline.is_some() && sc.children.iter().any(|(_, s)| s.is_none()) {
+		let missing: Vec<Vpid> = sc.children.iter().filter(|(_, s)| s.is_none()).map(|&(v, _)| v).collect();
+		let known: Vec<(Vpid, i32, Option<Death>)> = vp
+			.jobs
+			.iter()
+			.filter_map(|j| j.stages.as_deref())
+			.flatten()
+			.filter(|s| missing.contains(&s.vpid))
+			.filter_map(|s| s.status.map(|st| (s.vpid, st, s.death)))
+			.collect();
+		for (v, st, death) in known {
+			if let Some(death) = death {
+				k.deaths.insert(v, death);
+			}
+			if let Some(slot) = scratch(vp).children.iter_mut().find(|(c, _)| *c == v) {
+				slot.1 = Some(st);
+			}
+		}
+	}
+	let sc = scratch(vp);
 	if let Some((vpid, _)) = sc.children.iter().find(|(_, s)| s.is_none()) {
 		return Flow::Block(WaitKey::Proc(*vpid));
 	}
@@ -3246,12 +3300,52 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 	vp.status = statuses.get(raw).copied().unwrap_or(0);
 	vp.pipestatus = statuses;
 	let deaths: Vec<Option<Death>> = children.iter().map(|(v, _)| k.deaths.remove(v)).collect();
+	if let (Some(InlineStage::Done(last)), Some(&(job_vpid, _))) = (inline, children.last()) {
+		finish_lastpipe_job(k, vp, cx, unit, info, job_vpid, last, raw);
+	}
 	// A background job's own pipeline is the shell's to report (`Job::stages`).
 	let job_pipeline = info.kind == SpawnKind::Pipeline && k.pipeline_jobs.remove(&vp.vpid);
 	if inline.is_none() && !job_pipeline && matches!(info.kind, SpawnKind::Subshell | SpawnKind::Pipeline) {
 		report_children(k, vp, cx, unit, op, &children, &deaths, raw);
 	}
 	Flow::Jump(info.end)
+}
+
+/// A `lastpipe` pipeline's last command returned (bash `append_process`
+/// and `wait_for (lastpid)` in `execute_pipeline`): its job gets the
+/// shell's process with the command's status, and ends with the status the
+/// pipeline returns; it is forgotten at the next cleanup, or reported at
+/// the next notify point when the process its status comes from (`raw`)
+/// was ended by a signal.
+#[expect(clippy::too_many_arguments, reason = "one call site")]
+fn finish_lastpipe_job(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	unit: &Arc<Unit>,
+	info: &ir::SpawnIr,
+	job_vpid: Vpid,
+	last: i32,
+	raw: usize,
+) {
+	// bash's `the_printed_command_except_trap`: the last simple command the
+	// last command ran.
+	let text = match vp.command.clone() {
+		Some((u, node)) => job_text(k, cx, vp, &u, node),
+		None => stage_job_text(k, cx, vp, unit, info, info.stages.len() - 1),
+	};
+	let shell = Vpid(k.shell_pid);
+	let status = vp.status;
+	let Some(job) = vp.jobs.by_vpid_mut(job_vpid).filter(|j| j.foreground) else {
+		return;
+	};
+	let Some(stages) = job.stages.as_mut() else {
+		return;
+	};
+	stages.push(JobStage { vpid: shell, text, status: Some(last), death: None });
+	job.death = stages.get(raw).and_then(|s| s.death);
+	job.state = super::proc::JobState::Done(status);
+	job.notified = false;
 }
 
 /// The end of the wait for a foreground subshell or pipeline (bash
@@ -3301,6 +3395,28 @@ fn report_children(
 			status: death.map_or(notify::ProcStatus::Exited(status), notify::ProcStatus::Signaled),
 		})
 		.collect();
+	// While the job list is frozen (a `lastpipe` last command runs) bash's
+	// foreground job stays in the table, reported at the next notify point.
+	if vp.jobs_frozen() {
+		let text = BString::from(bstr::join(" | ", texts.iter().map(|t| t.as_slice())));
+		let id = k.job_id(cx.store);
+		let vpid = k.vpid(cx.store);
+		let cwd = vp.cwd.clone();
+		let number = vp.jobs.add_foreground(id, vpid, text, cwd);
+		let stages: Vec<JobStage> = children
+			.iter()
+			.zip(deaths)
+			.zip(&texts)
+			.map(|((&(v, status), &death), text)| JobStage { vpid: v, text: text.clone(), status: Some(status), death })
+			.collect();
+		let status = children.get(raw).map_or(0, |&(_, s)| s);
+		if let Some(job) = vp.jobs.get_mut(number) {
+			job.state = super::proc::JobState::Done(status);
+			job.death = Some(death);
+			job.stages = Some(Box::new(stages));
+		}
+		return;
+	}
 	let line = line_of(vp, op.node);
 	let bytes = notify::report_foreground(k, cx, vp, &procs, Some(death), line);
 	// A subshell's own redirections (`( … ) 2>f`) applied in bash's child:

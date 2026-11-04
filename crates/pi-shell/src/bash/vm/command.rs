@@ -3063,12 +3063,27 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 				// `wait -p` names the child by the pid the user knows (its
 				// program's OS pid), read before the job is forgotten.
 				let shown = vp.shown_pid(v);
-				if let Some(s) = k.proc_collect(cx.store, v) {
+				// A job that ended whose status was collected already (a
+				// `wait` while the job list is frozen keeps the job), or one
+				// without a process of its own.
+				let done = match vp.jobs.by_vpid(v).map(|j| j.state) {
+					Some(JobState::Done(s)) if k.proc_state(cx.store, v).is_none() => Some(s),
+					_ => None,
+				};
+				if let Some(s) = k.proc_collect(cx.store, v).or(done) {
 					last = s;
 					// bash `wait_for`: the job it waited for is reported, then
-					// forgotten (`wait_for_job` marks it notified).
-					report_waited(k, vp, cx, v, line);
-					forget_job(vp, v);
+					// forgotten (`wait_for_job` marks it notified); not while
+					// the job list is frozen.
+					if vp.jobs_frozen() {
+						// Marked reported; the cleanup after the freeze forgets it.
+						if let Some(job) = vp.jobs.by_vpid_mut(v) {
+							job.notified = true;
+						}
+					} else {
+						report_waited(k, vp, cx, v, line);
+						forget_job(vp, v);
+					}
 					exec::reap_coproc(k, vp, cx, v);
 				} else if let (false, Some(JobState::Stopped(sig))) =
 					(force, vp.jobs.by_vpid(v).map(|j| j.state))
@@ -3106,12 +3121,15 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 			// `mark_dead_jobs_as_notified (1)`), and the statuses of the jobs
 			// it forgot earlier (`bgp_clear`).
 			let last = vp.last_bg;
-			let done: Vec<crate::bash::ids::Vpid> = vp
-				.jobs
-				.iter()
-				.filter(|j| matches!(j.state, JobState::Done(_)) && !last.is(j.vpid))
-				.map(|j| j.vpid)
-				.collect();
+			let done: Vec<crate::bash::ids::Vpid> = if vp.jobs_frozen() {
+				Vec::new()
+			} else {
+				vp.jobs
+					.iter()
+					.filter(|j| matches!(j.state, JobState::Done(_)) && !last.is(j.vpid))
+					.map(|j| j.vpid)
+					.collect()
+			};
 			for v in done {
 				k.proc_collect(cx.store, v);
 				forget_job(vp, v);
@@ -3270,6 +3288,21 @@ fn program_died(
 		return;
 	};
 	let text = exec::job_text(k, cx, vp, &unit, op.node);
+	// While the job list is frozen (a `lastpipe` last command runs) bash's
+	// foreground job for the command stays in the table, unreported: the
+	// next notify point reports it, `jobs` lists it, `wait` collects it.
+	if vp.jobs_frozen() {
+		let id = k.job_id(cx.store);
+		let vpid = k.vpid(cx.store);
+		let cwd = vp.cwd.clone();
+		let number = vp.jobs.add_foreground(id, vpid, text, cwd);
+		if let Some(job) = vp.jobs.get_mut(number) {
+			job.state = JobState::Done(128 + i32::from(death.signal));
+			job.death = Some(death);
+			job.os_pid = Some(pid);
+		}
+		return;
+	}
 	let procs = [notify::ProcLine { pid, text: &text, status: notify::ProcStatus::Signaled(death) }];
 	let bytes = notify::report_foreground(k, cx, vp, &procs, Some(death), line);
 	notify::defer_report(k, vp, op.node, bytes);

@@ -383,9 +383,35 @@ impl JobTable {
 			wd,
 			death: None,
 			stages: None,
+			foreground: false,
 			os_pid: None,
 		});
 		self.reset_current();
+		number
+	}
+
+	/// Add a foreground job (bash `stop_pipeline` for a pipeline that is not
+	/// asynchronous): the processes of a `lastpipe` pipeline but its last
+	/// command, or a command that command ran, while the job list is
+	/// frozen. It takes the next number and never becomes current.
+	pub fn add_foreground(&mut self, id: JobId, vpid: Vpid, text: BString, wd: BString) -> u32 {
+		let number = self.list.last().map_or(1, |j| j.number.saturating_add(1));
+		self.list.push(Job {
+			id,
+			number,
+			vpid,
+			text,
+			state: JobState::Running,
+			control: false,
+			notified: false,
+			nohup: false,
+			inherited: false,
+			wd,
+			death: None,
+			stages: None,
+			foreground: true,
+			os_pid: None,
+		});
 		number
 	}
 
@@ -444,6 +470,14 @@ impl JobTable {
 			saved.remove(0);
 		}
 		saved.push((pid, status));
+	}
+
+	/// bash `cleanup_dead_jobs`: forget the jobs that ended and were
+	/// reported, and the foreground ones that ended without a signal.
+	pub fn cleanup(&mut self) {
+		self.remove_where(|j| {
+			matches!(j.state, JobState::Done(_)) && (j.notified || (j.foreground && j.death.is_none()))
+		});
 	}
 
 	/// The status of a forgotten job `$!` named `pid` (bash `bgp_search`).
@@ -685,6 +719,13 @@ impl Vproc {
 			Some(job) => job.vpid,
 			None => self.last_bg.named_by(pid).unwrap_or(Vpid(pid)),
 		}
+	}
+
+	/// The job list is frozen (bash `jobs_list_frozen`): the last command of
+	/// a `lastpipe` pipeline runs. No job leaves the table then, and none
+	/// is reported.
+	pub fn jobs_frozen(&self) -> bool {
+		self.frames.iter().any(|f| matches!(f.kind, FrameKind::Stage))
 	}
 
 	/// The pid the user knows the child `v` by (`wait -p`): its job's or

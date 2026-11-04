@@ -297,7 +297,7 @@ fn job_lines(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, job: &Job, format: For
 	let look = JobLook {
 		running:    job.state == JobState::Running,
 		stopped:    matches!(job.state, JobState::Stopped(_)),
-		background: true,
+		background: !job.foreground,
 		posix,
 		platform:   k.engine.config().platform,
 		wd:         wd.as_ref().map(|w| w.as_slice()),
@@ -313,6 +313,10 @@ fn job_lines(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, job: &Job, format: For
 /// do), mark it reported, then forget the reported jobs that ended
 /// (`cleanup_dead_jobs`, keeping their statuses for `wait PID`).
 pub fn notify(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, only: Option<u32>, line: u32) {
+	// bash `notify_and_cleanup` returns at once while the list is frozen.
+	if vp.jobs_frozen() {
+		return;
+	}
 	let pending = vp.jobs.iter().any(|j| {
 		!j.notified && matches!(j.state, JobState::Done(_)) && only.is_none_or(|n| j.number == n)
 	});
@@ -333,6 +337,9 @@ pub fn mark(
 	only: Option<u32>,
 	line: u32,
 ) -> Vec<u8> {
+	if vp.jobs_frozen() {
+		return Vec::new();
+	}
 	let last = vp.last_bg;
 	let pipefail = state::option(&mut k.root, cx.store, vp, OptId::Pipefail).unwrap_or(false);
 	let numbers: Vec<u32> = vp
@@ -360,15 +367,16 @@ pub fn mark(
 		}
 		let Some(death) = raw_death(&job, pipefail) else {
 			// Exited: the top-level shell keeps it for `wait` (POSIX); a
-			// subshell forgets it (bash's catch-all branch).
-			if vp.jobs.subshell
+			// subshell forgets it (bash's catch-all branch), and a foreground
+			// job is done with.
+			if (vp.jobs.subshell || job.foreground)
 				&& let Some(j) = vp.jobs.get_mut(number)
 			{
 				j.notified = true;
 			}
 			continue;
 		};
-		match report_kind(k, cx, vp, death, false) {
+		match report_kind(k, cx, vp, death, job.foreground) {
 			Report::Full => {
 				out.extend(k.line_prefix(vp, line));
 				out.extend(job_lines(k, cx, vp, &job, Format::Long));
@@ -376,17 +384,33 @@ pub fn mark(
 					j.notified = true;
 				}
 			},
-			// Kept, not marked: `wait` and `jobs` still see it.
-			Report::Short | Report::None => {},
+			// A foreground job's short form (`SIGTERM`, a trapped signal).
+			Report::Short => {
+				out.extend(job_lines(k, cx, vp, &job, Format::Standard));
+				if let Some(j) = vp.jobs.get_mut(number) {
+					j.notified = true;
+				}
+			},
+			// A background job is kept, not marked: `wait` and `jobs` still
+			// see it. A foreground one is done with.
+			Report::None => {
+				if job.foreground
+					&& let Some(j) = vp.jobs.get_mut(number)
+				{
+					j.notified = true;
+				}
+			},
 		}
 	}
 	out
 }
 
-/// bash `cleanup_dead_jobs`: forget the jobs that ended and were reported.
+/// bash `cleanup_dead_jobs`: forget the jobs that ended and were reported
+/// (and the foreground ones that ended without a signal).
 pub fn cleanup(vp: &mut Vproc) {
-	vp.jobs
-		.remove_where(|j| j.notified && matches!(j.state, JobState::Done(_)));
+	if !vp.jobs_frozen() {
+		vp.jobs.cleanup();
+	}
 }
 
 /// bash `notify_and_cleanup (job)` at the end of the wait for a foreground

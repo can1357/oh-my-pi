@@ -546,6 +546,10 @@ pub fn wait(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	}
 	let args = o.rest;
 	if any {
+		// bash `wait_for_any_job` finds no job while the list is frozen.
+		if ctx.vp.jobs_frozen() {
+			return done(127);
+		}
 		return wait_any(ctx, args, into);
 	}
 	if args.is_empty() {
@@ -690,7 +694,8 @@ fn wait_all(ctx: &mut Ctx<'_, '_>, force: bool) -> R {
 	ctx.vp.jobs.remove_where(|j| j.inherited);
 	let mut list = Vec::new();
 	let mut stopped = Vec::new();
-	for job in ctx.vp.jobs.iter() {
+	// bash `wait_for_background_pids` waits for background jobs only.
+	for job in ctx.vp.jobs.iter().filter(|j| !j.foreground) {
 		match job.state {
 			crate::bash::vm::proc::JobState::Stopped(_) if control => {
 				stopped.push((job.number, job.pid()));
@@ -719,7 +724,8 @@ fn wait_all(ctx: &mut Ctx<'_, '_>, force: bool) -> R {
 fn wait_any(ctx: &mut Ctx<'_, '_>, args: &[BString], into: Option<BString>) -> R {
 	let mut list = Vec::new();
 	if args.is_empty() {
-		list.extend(ctx.vp.jobs.iter().filter(|j| !j.inherited).map(|j| j.vpid));
+		// bash `wait_for_any_job` passes over foreground jobs.
+		list.extend(ctx.vp.jobs.iter().filter(|j| !j.inherited && !j.foreground).map(|j| j.vpid));
 	} else {
 		// bash `check_nonjobs`: a pid no longer in the job table whose
 		// status is kept.

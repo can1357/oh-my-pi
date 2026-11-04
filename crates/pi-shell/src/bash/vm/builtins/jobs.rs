@@ -95,6 +95,12 @@ fn print_job(ctx: &mut Ctx<'_, '_>, number: u32, form: Form, show: &Show<'_>) {
 	let Some(job) = ctx.vp.jobs.get(number) else {
 		return;
 	};
+	// bash `pretty_print_job` with the list frozen skips a job it would
+	// neither report nor keep (`should_notify`): a foreground job no signal
+	// ended.
+	if ctx.vp.jobs_frozen() && job.foreground && job.death.is_none() {
+		return;
+	}
 	if form == Form::Pids {
 		// bash `JLIST_PID_ONLY`: the process group leader, the first stage.
 		let pid = job.stages.as_deref().and_then(|s| s.first()).map_or(job.pid(), |s| s.vpid.0);
@@ -122,7 +128,7 @@ fn print_job(ctx: &mut Ctx<'_, '_>, number: u32, form: Form, show: &Show<'_>) {
 	let look = notify::JobLook {
 		running:    job.state == JobState::Running,
 		stopped:    matches!(job.state, JobState::Stopped(_)),
-		background: true,
+		background: !job.foreground,
 		posix:      show.posix,
 		platform:   show.platform,
 		wd:         wd.as_ref().map(|w| w.as_slice()),
@@ -138,9 +144,9 @@ fn print_job(ctx: &mut Ctx<'_, '_>, number: u32, form: Form, show: &Show<'_>) {
 /// Forget finished jobs whose state was reported (bash
 /// `cleanup_dead_jobs`).
 fn cleanup(ctx: &mut Ctx<'_, '_>) {
-	ctx.vp
-		.jobs
-		.remove_where(|j| j.notified && matches!(j.state, JobState::Done(_)));
+	if !ctx.vp.jobs_frozen() {
+		ctx.vp.jobs.cleanup();
+	}
 }
 
 /// `jobs [-lnprs] [jobspec …]`, `jobs -x command [args]`: list jobs as
@@ -478,6 +484,9 @@ pub fn disown(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let nohup = o.has(b'h');
 	let running_only = o.has(b'r');
 	if o.rest.is_empty() && (o.has(b'a') || running_only) {
+		// bash `delete_all_jobs` clears the current and previous jobs first.
+		ctx.vp.jobs.current = None;
+		ctx.vp.jobs.previous = None;
 		let picked: Vec<u32> = ctx
 			.vp
 			.jobs
@@ -529,6 +538,10 @@ fn drop_job(ctx: &mut Ctx<'_, '_>, number: u32, nohup: bool) {
 		if let Some(job) = ctx.vp.jobs.get_mut(number) {
 			job.nohup = true;
 		}
+		return;
+	}
+	// bash `delete_job` returns at once while the job list is frozen.
+	if ctx.vp.jobs_frozen() {
 		return;
 	}
 	if let Some(job) = ctx.vp.jobs.remove(number)

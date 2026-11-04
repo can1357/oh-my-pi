@@ -2084,20 +2084,25 @@ impl Shell {
 			.k
 			.emit(cx, root, None, EventData::Signal { sig, target });
 		let platform = self.k.engine.config().platform;
-		let job_root = match target {
-			SigTarget::Job(id) => self
-				.procs
-				.iter()
-				.flat_map(|p| p.jobs.iter())
-				.find(|job| job.id == id)
-				.map(|job| job.vpid),
+		let job = match target {
+			SigTarget::Job(id) => self.procs.iter().flat_map(|p| p.jobs.iter()).find(|job| job.id == id),
 			_ => None,
 		};
+		let job_root = job.map(|job| job.vpid);
+		// A job whose processes are stages the shell started (a `lastpipe`
+		// pipeline's) reaches each of them.
+		let stages: Vec<Vpid> = job
+			.and_then(|j| j.stages.as_deref())
+			.map(|s| s.iter().map(|s| s.vpid).collect())
+			.unwrap_or_default();
 		let mut hits: Vec<usize> = (0..self.procs.len())
 			.filter(|&i| match target {
 				SigTarget::Vpid(v) => self.procs[i].vpid == v,
 				SigTarget::All => true,
-				SigTarget::Job(_) => job_root.is_some_and(|v| self.in_job(self.procs[i].vpid, v)),
+				SigTarget::Job(_) => {
+					job_root.is_some_and(|v| self.in_job(self.procs[i].vpid, v))
+						|| stages.iter().any(|&s| self.in_job(self.procs[i].vpid, s))
+				},
 				SigTarget::Label(l) => l != 0 && self.procs[i].lineage.label == l,
 			})
 			.collect();
