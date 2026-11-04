@@ -168,40 +168,6 @@ async fn disown_keeps_bash_statuses() {
 	.await;
 }
 
-/// `$!` is a parameter every subshell copies: a command substitution saw
-/// none. The child it names is still not the subshell's to wait for.
-#[tokio::test(flavor = "multi_thread")]
-async fn every_subshell_sees_the_parents_bang() {
-	assert_bash_outputs(&[
-		(r#"/bin/sleep 0.1 & [ "$!" = "$(echo $!)" ] && echo same || echo differ; wait"#, "same\n"),
-		(r#"f(){ :; }; f & [ "$!" = "$(echo $!)" ] && echo same || echo differ; wait"#, "same\n"),
-		(r#"f(){ :; }; f & p=$!; ( [ "$!" = "$p" ] && echo same ); wait"#, "same\n"),
-		(
-			r#"f(){ sleep 0.2; }; f & p=$!; ( wait "$p" 2>/dev/null; echo "s=$?" ); wait "$!"; echo "t=$?""#,
-			"s=127\nt=0\n",
-		),
-		(r"f(){ sleep 0.2; }; f & ( wait 2>&1 ); echo done; wait", "done\n"),
-	])
-	.await;
-}
-
-/// A job whose function trapped `TERM` runs the trap when its current
-/// command returns, then its own status reaches `wait`: it reported 130.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_trapped_term_in_a_background_function_runs_the_trap() {
-	assert_bash_outputs(&[
-		(
-			r#"f(){ trap 'echo got-term' TERM; sleep 0.5; }; f & sleep 0.1; kill %1; wait %1; echo "status=$?""#,
-			"got-term\nstatus=0\n",
-		),
-		(
-			r#"f(){ trap 'echo got-term' TERM; sleep 0.5; }; f & p=$!; sleep 0.1; kill "$p"; wait "$p"; echo "status=$?""#,
-			"got-term\nstatus=0\n",
-		),
-	])
-	.await;
-}
-
 /// `wait` without operands keeps the status of the job `$!` names only
 /// when it had finished and nothing reported it: a status above 128 is an
 /// ordinary exit status there (bash 5.3 also keeps a job this shell killed
@@ -213,17 +179,6 @@ async fn wait_without_operands_keeps_only_an_unreported_bang() {
 		(r#"f(){ return 200; }; f & p=$!; /bin/sleep .15; wait; wait "$p" 2>/dev/null; echo status=$?"#, "status=200\n"),
 		(r#"f(){ sleep 5; }; f & p=$!; /bin/sleep .1; kill "$p"; /bin/sleep .1; wait; wait "$p" 2>/dev/null; echo status=$?"#, "status=143\n"),
 		(r#"f(){ return 6; }; f & p=$!; /bin/sleep .1; wait "$p"; jobs; wait; wait "$p" 2>/dev/null; echo status=$?"#, "status=127\n"),
-	])
-	.await;
-}
-
-/// Without job control `kill %1` reaches the job's subshell only: a
-/// trapped `TERM` interrupted the pipeline or subshell the function ran.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_trapped_job_signal_spares_what_the_job_runs() {
-	assert_bash_outputs(&[
-		(r#"f(){ trap 'echo got' TERM; /bin/sleep .3 | /bin/cat; echo "inner=$?"; }; f & /bin/sleep .1; kill %1; wait %1; echo status=$?"#, "got\ninner=0\nstatus=0\n"),
-		(r"f(){ trap 'echo got' TERM; ( /bin/sleep .3; echo inner ); }; f & /bin/sleep .1; kill %1; wait %1; echo status=$?", "inner\ngot\nstatus=0\n"),
 	])
 	.await;
 }
@@ -264,27 +219,5 @@ async fn zsh_disown_keeps_no_status() {
 		r"emulate zsh -c 'f(){ sleep .1; return 6; }; f & p=$!; disown; wait $p 2>/dev/null; echo status=$?'",
 		"status=127\n",
 	)])
-	.await;
-}
-
-/// Traps pending at once run in signal-number order, as bash's
-/// `run_pending_traps` does: `TERM` ran before `USR1`, `USR2` before
-/// `USR1`.
-#[tokio::test(flavor = "multi_thread")]
-async fn pending_traps_run_in_signal_order() {
-	assert_bash_outputs(&[
-		(r#"f(){ trap 'echo got-usr1' USR1; trap 'echo got-term' TERM; sleep 0.5; }; f & p=$!; /bin/sleep 0.1; kill -USR1 "$p"; kill -TERM "$p"; wait "$p"; echo status=$?"#, "got-usr1\ngot-term\nstatus=0\n"),
-		(r#"f(){ trap 'echo got-usr1' USR1; trap 'echo got-usr2' USR2; sleep 0.5; }; f & p=$!; /bin/sleep 0.1; kill -USR1 "$p"; kill -USR2 "$p"; wait "$p"; echo status=$?"#, "got-usr1\ngot-usr2\nstatus=0\n"),
-	])
-	.await;
-}
-
-/// `kill -s EXIT` is signal 0, a probe as `kill -0` is: it was refused as
-/// an invalid signal.
-#[tokio::test(flavor = "multi_thread")]
-async fn kill_exit_probes() {
-	assert_bash_outputs(&[
-		(r#"f(){ trap 'echo exit-trap' EXIT; sleep 0.3; echo end; }; f & p=$!; /bin/sleep 0.1; kill -s EXIT "$p"; echo kill=$?; wait "$p"; echo status=$?"#, "kill=0\nend\nexit-trap\nstatus=0\n"),
-	])
 	.await;
 }

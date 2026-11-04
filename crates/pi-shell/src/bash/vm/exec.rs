@@ -82,29 +82,15 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				None => unblock(k, cx, vp),
 			}
 		}
-		// A trap just started runs before the next pending one starts above
-		// it: bash runs pending traps one after the other.
-		let trap_starting = vp.frames.last().is_some_and(|f| {
-			f.pc == 0 && matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { .. }, .. })
-		});
-		if vp.pending_traps != crate::bash::signal::SigSet::EMPTY
-			&& !vp.waiting_foreground()
-			&& !trap_starting
-		{
-			// bash `run_pending_traps`: in signal-number order.
-			let platform = k.engine.config().platform;
-			let pending = vp
-				.pending_traps
-				.iter()
-				.filter(|sig| {
-					!vp.frames.iter().any(|frame| {
-						matches!(frame.kind, FrameKind::Script {
-							what: ScriptKind::Trap { key: TrapKey::Signal(active), .. },
-							..
-						} if active == *sig)
-					})
+		if vp.pending_traps != crate::bash::signal::SigSet::EMPTY && !vp.waiting_foreground() {
+			let pending = vp.pending_traps.iter().find(|sig| {
+				!vp.frames.iter().any(|frame| {
+					matches!(frame.kind, FrameKind::Script {
+						what: ScriptKind::Trap { key: TrapKey::Signal(active), .. },
+						..
+					} if active == *sig)
 				})
-				.min_by_key(|sig| sig.number(platform));
+			});
 			if let Some(sig) = pending {
 				vp.pending_traps = vp.pending_traps.without(sig);
 				// One run per finished child (bash `run_sigchld_trap`): the next
