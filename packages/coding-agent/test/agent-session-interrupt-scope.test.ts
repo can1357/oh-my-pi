@@ -319,7 +319,7 @@ describe("interrupt scope", () => {
 		expect(h.mock.calls).toHaveLength(0);
 		expect(h.session.messages).toHaveLength(0);
 	});
-	it("interrupt during busy retry does not dispatch the waiting prompt", async () => {
+	it("interrupt while waiting does not dispatch the reserved prompt", async () => {
 		const started = Promise.withResolvers<void>(),
 			release = Promise.withResolvers<void>();
 		const h = await setup([
@@ -330,7 +330,7 @@ describe("interrupt scope", () => {
 			},
 			{ content: ["should not run"] },
 		]);
-		const hook = h.holdHook();
+		const hook = h.holdKey();
 		const dropped: string[] = [];
 		h.session.setPromptDropped(p => dropped.push(p.text));
 		const first = h.session.prompt("waiting client");
@@ -695,7 +695,7 @@ describe("interrupt scope: races with the stopped run", () => {
 			});
 			await Bun.write(planPath, "# Approved plan\n\nAPPROVED-PLAN-CONTENT\n");
 			h.session.setPlanReferencePath(planUrl);
-			const hook = h.holdHook();
+			const hook = h.holdKey();
 			const dropped: string[] = [];
 			h.session.setPromptDropped(prompt => dropped.push(prompt.text));
 			const waitingClient = h.session.prompt("execute the approved plan");

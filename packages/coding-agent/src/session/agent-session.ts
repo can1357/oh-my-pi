@@ -34,6 +34,7 @@ import {
 	type AgentToolContext,
 	type AgentToolResult,
 	type AgentTurnEndContext,
+	type AgentTurnReservation,
 	AppendOnlyContextManager,
 	type AsideMessage,
 	type BeforeToolCallContext,
@@ -1329,8 +1330,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#interruptAftermath: { runEpoch: number; controller: AbortController; tasks: Set<Promise<unknown>> } | undefined;
 	/** Interrupts still in their state cleanup; new runs wait for them (see {@link abort}). */
 	#abortsInProgress = 0;
-	/** Settles whenever an interrupt starts or finishes its state cleanup. */
-	#interruptChange = Promise.withResolvers<void>();
 	/** Open prompt (`#beginInFlight`) and client (`#prompt`) brackets by the in-flight epoch they opened in. */
 	#inFlightByEpoch = new Map<number, { prompts: number; clients: number }>();
 	/**
@@ -1383,35 +1382,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#abortsInProgress > 0;
 	}
 
-	#notifyInterruptChange(): void {
-		this.#interruptChange.resolve();
-		this.#interruptChange = Promise.withResolvers<void>();
-	}
-
-	/**
-	 * Waits until no interrupt is in its state cleanup, so a run begun during that cleanup claims the agent
-	 * only after it: the cleanup can then neither cancel nor reset the new run. Resolves `false` instead
-	 * when `superseded()` reports that this work was overtaken (by a later interrupt, a session switch or
-	 * disposal), or when the post-prompt task running it is cancelled, which is how work an interrupt is
-	 * itself waiting for gives way rather than waiting on that interrupt. "waited" tells a prepared
-	 * prompt to rebuild its context after cleanup rather than deliver what it read before the wait.
-	 */
-	async #admitAfterInterrupts(superseded: () => boolean): Promise<boolean | "waited"> {
+	/** Reserve before preparation; validate ownership again synchronously at every claim. */
+	#reserveTurn(signal?: AbortSignal, allowDisposed = false): AgentTurnReservation {
+		const generation = this.#promptGeneration;
+		const sessionGeneration = this.#sessionGeneration;
 		const taskSignal = workOrigin.getStore()?.taskSignal;
-		let taskCancelled: Promise<void> | undefined;
-		let waited = false;
-		for (;;) {
-			if (superseded() || taskSignal?.aborted) return false;
-			if (!this.#abortInProgress) return waited ? "waited" : true;
-			waited = true;
-			if (taskSignal && !taskCancelled) {
-				const cancelled = Promise.withResolvers<void>();
-				taskSignal.addEventListener("abort", () => cancelled.resolve(), { once: true });
-				taskCancelled = cancelled.promise;
-			}
-			const change = this.#interruptChange.promise;
-			await (taskCancelled ? Promise.race([change, taskCancelled]) : change);
-		}
+		const cancellation = signal && taskSignal ? AbortSignal.any([signal, taskSignal]) : (signal ?? taskSignal);
+		return this.agent.reserveTurn(
+			cancellation,
+			() =>
+				this.#promptGeneration === generation &&
+				this.#sessionGeneration === sessionGeneration &&
+				(!this.#isDisposed || allowDisposed) &&
+				!this.#abortInProgress,
+		);
 	}
 
 	/** In-flight {@link abort} calls; each settles after scheduling its stranded-queue drain, which {@link waitForIdle} must observe. */
@@ -1847,42 +1831,47 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// delaying the observation's finish and mis-attributing the successor's RPC
 		// progress to this now-dead wake monitor.
 		const generation = this.#promptGeneration;
+		const sessionGeneration = this.#sessionGeneration;
 		const inFlightEpoch = this.#beginInFlight();
 		let turnError: unknown;
 		// A pooled-turn yield transition (item-set mutation + prompt rebuild) may be
 		// in flight when the wake lands. Starting the turn on the stale prompt would
 		// advertise one yield schema while the runtime enforces the other, so join
 		// the transition before building the turn from a consistent contract.
+		const reservation = this.#reserveTurn();
 		void this.whenWorkPoolYieldSettled()
-			// A wake that lands during an interrupt's cleanup starts once it is done; one an interrupt
-			// overtook keeps its records for the next turn, like a wake behind a running turn.
-			.then(() => this.#admitAfterInterrupts(() => this.#promptGeneration !== generation || this.#isDisposed))
-			.then(admitted => {
-				if (!admitted) {
-					this.#irc.queueAside(records);
-					return;
+			.then(async () => {
+				try {
+					if (!(await reservation.ready) || !reservation.canClaim()) {
+						// A revoked wake is stopped work, not a fresh peer delivery that may wake again.
+						if (!this.#isDisposed && this.#sessionGeneration === sessionGeneration)
+							this.#recordWithoutTurn(records);
+						return;
+					}
+					// Synchronous ownership check, atomic with the dispatch below:
+					// agent.prompt() claims streaming with no await in between, and the
+					// yield contract above mutates synchronously, so no install can
+					// interleave here.
+					if (this.#workPoolYieldItems.length > 0) {
+						// A pooled turn owns this worker (installed, running, or
+						// dispatch-imminent): park wake-intended records where pooled
+						// turns cannot flush them, for a monitored wake after clearing.
+						// Flushing them as ordinary asides would feed them to the batch
+						// with no observer to reply to the sender.
+						this.#irc.queueDeferredWake(records);
+						logger.debug("IRC wake turn parked while pooled");
+						return;
+					}
+					if (this.agent.state.isStreaming) {
+						this.#irc.queueAside(records);
+						logger.debug("IRC wake turn deferred behind the running turn");
+						return;
+					}
+					observation = this.#startTurnObservation(records);
+					await this.agent.prompt(records, { turnReservation: reservation });
+				} finally {
+					reservation.release();
 				}
-				// Synchronous ownership check, atomic with the dispatch below:
-				// agent.prompt() claims streaming with no await in between, and the
-				// yield contract above mutates synchronously, so no install can
-				// interleave here.
-				if (this.#workPoolYieldItems.length > 0) {
-					// A pooled turn owns this worker (installed, running, or
-					// dispatch-imminent): park wake-intended records where pooled
-					// turns cannot flush them, for a monitored wake after clearing.
-					// Flushing them as ordinary asides would feed them to the batch
-					// with no observer to reply to the sender.
-					this.#irc.queueDeferredWake(records);
-					logger.debug("IRC wake turn parked while pooled");
-					return;
-				}
-				if (this.agent.state.isStreaming) {
-					this.#irc.queueAside(records);
-					logger.debug("IRC wake turn deferred behind the running turn");
-					return;
-				}
-				observation = this.#startTurnObservation(records);
-				return this.agent.prompt(records);
 			})
 			.catch(error => {
 				if (error instanceof AgentBusyError) {
@@ -2530,38 +2519,43 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
-				// A delivery that lands during an interrupt's cleanup starts its turn once the cleanup is
-				// done; one an interrupt overtook (its flush task cancelled) is folded into context below.
-				const generation = this.#promptGeneration;
-				const admitted = await this.#admitAfterInterrupts(
-					() => this.#promptGeneration !== generation || this.#isDisposed,
-				);
-				if (this.#isDisposed) return;
-				// A user interrupt is still in effect: background completions (async job
-				// results, launch completions, MCP/LSP/advisor asides) must not restart
-				// the run the user stopped. Fold them into context so the next deliberate
-				// prompt sees them — same policy as #resumeStrandedIrcAsides — until a later
-				// turn has ended on its own.
-				if (!admitted || (this.#advisors.autoResumeSuppressed && !this.#turnSettledSinceUserInterrupt)) {
-					logger.debug("Background delivery folded into context without a turn", {
-						count: messages.length,
-						customTypes: messages.map(message => (message.role === "custom" ? message.customType : message.role)),
-					});
-					this.#recordWithoutTurn(messages);
-					return;
-				}
-				const observation =
-					this.#ircWakeTurnObserver && !this.#openTurnObservation
-						? this.#startTurnObservation(messages)
-						: undefined;
+				const sessionGeneration = this.#sessionGeneration;
+				const reservation = this.#reserveTurn();
+				let observation: TurnObservation | undefined;
 				let turnError: unknown;
 				const inFlightEpoch = this.#beginInFlight();
 				try {
-					await this.agent.prompt(messages.length === 1 ? first : messages);
+					const admitted = await reservation.ready;
+					if (this.#isDisposed || this.#sessionGeneration !== sessionGeneration) return;
+					// A user interrupt is still in effect: background completions (async job
+					// results, launch completions, MCP/LSP/advisor asides) must not restart
+					// the run the user stopped. Fold them into context so the next deliberate
+					// prompt sees them — same policy as #resumeStrandedIrcAsides — until a later
+					// turn has ended on its own.
+					if (
+						!admitted ||
+						!reservation.canClaim() ||
+						(this.#advisors.autoResumeSuppressed && !this.#turnSettledSinceUserInterrupt)
+					) {
+						logger.debug("Background delivery folded into context without a turn", {
+							count: messages.length,
+							customTypes: messages.map(message =>
+								message.role === "custom" ? message.customType : message.role,
+							),
+						});
+						this.#recordWithoutTurn(messages);
+						return;
+					}
+					observation =
+						this.#ircWakeTurnObserver && !this.#openTurnObservation
+							? this.#startTurnObservation(messages)
+							: undefined;
+					await this.agent.prompt(messages.length === 1 ? first : messages, { turnReservation: reservation });
 				} catch (error) {
 					turnError = error;
 					throw error;
 				} finally {
+					reservation.release();
 					this.#endInFlight(inFlightEpoch);
 					// The delivery receipt settles when injectIdle returns; waiting for
 					// owned deliveries here would wait on this very flush.
@@ -5505,7 +5499,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		coalescedSources: Set<string>,
 		onStart?: () => void,
 	): Promise<AgentContinueOutcome> {
+		let reservation: AgentTurnReservation | undefined = this.#reserveTurn(signal);
 		try {
+			if (!(await reservation.ready) || !reservation.canClaim()) {
+				return { status: "skipped", reason: "session-unavailable" };
+			}
 			// During an automatic-retry saga the primary model's selector cooldown
 			// can expire while a chain-tail fallback is still mid-backoff. Restoring
 			// the primary then would reset the retry budget and re-enter a model
@@ -5538,8 +5536,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			for (;;) {
 				try {
-					if (!this.agent.state.isStreaming) onStart?.();
-					await this.agent.continue(signal);
+					reservation ??= this.#reserveTurn(signal);
+					try {
+						if (!(await reservation.ready) || !reservation.canClaim()) {
+							return { status: "skipped", reason: "session-unavailable" };
+						}
+						onStart?.();
+						await this.agent.continue(signal, reservation);
+					} finally {
+						reservation.release();
+						reservation = undefined;
+					}
 					return { status: "completed" };
 				} catch (error) {
 					if (!(error instanceof AgentBusyError)) throw error;
@@ -5579,6 +5586,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				stack: error instanceof Error ? error.stack : undefined,
 			});
 			return { status: "failed", error };
+		} finally {
+			reservation?.release();
 		}
 	}
 
@@ -6575,6 +6584,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.agent.cancelTurnReservations();
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
@@ -6993,6 +7003,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		//     re-deliver stale tool output into the cleared conversation
 		//     (mirrors newSession()).
 		this.#promptGeneration++;
+		this.agent.cancelTurnReservations();
 		await this.#cancelPostPromptTasks();
 		this.#cancelOwnAsyncJobs();
 
@@ -9302,7 +9313,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 			await this.#prewalk.armPlanYoloIfNeeded();
 
-			// Attachments and accepted messages survive a policy re-preparation unchanged.
+			// Build attachments and collect accepted messages before turn preparation.
 			const promptMessages: AgentMessage[] = [];
 			if (options?.prependMessages) {
 				promptMessages.push(...options.prependMessages);
@@ -9358,7 +9369,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return false;
 				}
 			}
-			for (;;) {
+			const turnReservation = this.#reserveTurn(setupAbort.signal, disposingAtStart);
+			try {
+				if (!(await turnReservation.ready) || !turnReservation.canClaim()) return false;
 				if (
 					this.#promptGeneration !== generation ||
 					this.#sessionGeneration !== sessionGeneration ||
@@ -9418,13 +9431,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return false;
 				}
 				const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
-				// Commit memory, extension policy, notices and plan delivery only at this claim.
-				// A preparation belongs to the immediately following claim attempt. If interrupt
-				// cleanup or a busy agent makes it wait, recovery returns "retry": discard it and
-				// prepare again. Each retry follows a wait, so no attempt bound is needed.
-				// Other sources are read once per preparation, as on main. The existing bounded
-				// source-base override retry remains; no broader source freshness check is added.
-				// Interrupts, session switches and disposal cancel the preparation.
+				// Admission stays reserved from before preparation to this synchronous claim.
+				// Keep the upstream source-base retry within preparation, never repeat a
+				// preparation merely because another run was busy.
 				const commitDelivery = (): AgentMessage[] | undefined => {
 					if (!preparation.commit()) return undefined;
 					if (prewalkDecision !== undefined) {
@@ -9497,41 +9506,38 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					}
 					return messages;
 				};
-				let dispatched: "dispatched" | "cancelled" | "retry";
+				let dispatched: "dispatched" | "cancelled";
 				try {
-					const run = this.#recovery.promptAgentWithIdleRetry(
+					const run = this.#recovery.promptPreparedAgent(
+						turnReservation,
 						commitDelivery,
 						agentPromptOptions,
 						() => {
 							handedToAgent = true;
 							// `agent.prompt` claims streaming synchronously before its
 							// first await: this callback fires exactly when THIS
-							// client-owned run goes live (never on a busy-retry that
-							// waits behind an autonomous run) — wake steers parked on
+							// client-owned run goes live, not while its reservation
+							// waits behind an autonomous run — wake steers parked on
 							// the dispatch so they admit into the run they targeted.
 							this.#wakeDispatchLiveWaiters();
 						},
-						// A prompt parked behind another run must not start once an interrupt,
-						// a session switch or disposal has superseded it, and every re-prepared
-						// attempt claims only once the interrupt's state cleanup is done.
 						() =>
-							this.#admitAfterInterrupts(
-								() =>
-									this.#promptGeneration !== generation ||
-									this.#sessionGeneration !== sessionGeneration ||
-									(this.#isDisposed && !disposingAtStart),
-							),
+							!turnReservation.canClaim() ||
+							this.#promptGeneration !== generation ||
+							this.#sessionGeneration !== sessionGeneration ||
+							(this.#isDisposed && !disposingAtStart),
 					);
 					dispatched = await run;
 				} finally {
 					this.#stats.setPendingSnapshot(undefined);
 				}
-				if (dispatched === "retry") continue;
 				if (dispatched === "cancelled") return false;
 				if (!options?.skipPostPromptRecoveryWait) {
 					await this.#waitForPostPromptRecovery(generation);
 				}
 				return true;
+			} finally {
+				turnReservation.release();
 			}
 		} finally {
 			// A bail before dispatch (an interrupt's generation bump, disposal, a usage denial or a setup
@@ -9867,7 +9873,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (this.#abortInProgress || this.#clientPromptInFlightCount === 0) return false;
 				if (this.agent.state.isStreaming) break;
 				// The client prompt is still dispatching behind an
-				// autonomous run (e.g. an IRC wake its busy-retry is
+				// autonomous run (e.g. an IRC wake its reservation is
 				// waiting out) that has since ended: keep parking — only
 				// the client run's own claim (the dispatch-live wake)
 				// admits, never an autonomous run's streaming.
@@ -10097,7 +10103,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * steer here instead of refusing it, so the steer injects at the owning
 	 * run's first batch boundary. Fired from the client prompt's own
 	 * `agent.prompt` claim (the `onClaimed` hook in
-	 * `#promptAgentWithIdleRetry` — an autonomous run's streaming never
+	 * `TurnRecovery.promptPreparedAgent` — an autonomous run's streaming never
 	 * fires it), and from `#endInFlight`/an interrupt's release when the count
 	 * drains without the client run ever going live (setup failure, abort,
 	 * disposal).
@@ -10430,13 +10436,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		options?: { acceptTerminalEmptyStop?: boolean },
 	): Promise<boolean> {
 		const inFlightEpoch = this.#beginInFlight();
-		const generation = this.#promptGeneration;
+		const sessionGeneration = this.#sessionGeneration;
+		const reservation = this.#reserveTurn();
 		try {
+			if (!(await reservation.ready) || !reservation.canClaim()) {
+				if (!this.#isDisposed && this.#sessionGeneration === sessionGeneration) this.#recordWithoutTurn([message]);
+				return false;
+			}
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
-			// Begun during an interrupt's cleanup: start once it is done. Overtaken by an interrupt
-			// (or disposal) instead: the interrupt stops the turn, and the message stays in context.
-			if (!(await this.#admitAfterInterrupts(() => this.#promptGeneration !== generation || this.#isDisposed))) {
-				if (!this.#isDisposed) this.#recordWithoutTurn([message]);
+			if (!reservation.canClaim()) {
+				if (!this.#isDisposed && this.#sessionGeneration === sessionGeneration) this.#recordWithoutTurn([message]);
 				return false;
 			}
 			const acceptTerminalEmptyStop = options?.acceptTerminalEmptyStop === true;
@@ -10444,7 +10453,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#resetPromptMaintenanceState();
 			}
 			this.#recovery.setAcceptTerminalEmptyStop(acceptTerminalEmptyStop);
-			const run = this.agent.prompt(message);
+			const run = this.agent.prompt(message, { turnReservation: reservation });
 			// No dispatch-live wake here: an agent-initiated turn has no
 			// client promptTurn, so steers parked on a dispatching CLIENT
 			// prompt must keep parking through it — waking on this claim
@@ -10453,6 +10462,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			await this.#waitForPostPromptRecovery();
 			return true;
 		} finally {
+			reservation?.release();
 			this.#usagePreflightReadyForNextModelCall = false;
 			this.#recovery.setAcceptTerminalEmptyStop(false);
 			this.#endInFlight(inFlightEpoch);
@@ -11802,10 +11812,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// Session switch/compact paths disconnect first; explicit aborts should
 		// leave any queued steer/follow-up visible for the user rather than
 		// auto-starting a fresh turn during cleanup. Until this interrupt's state
-		// cleanup ends, new runs wait (#admitAfterInterrupts), so the cleanup below
+		// cleanup ends, reservations stay ungranted, so the cleanup below
 		// only ever meets the work it stops.
 		this.#abortsInProgress++;
-		this.#notifyInterruptChange();
+		const releaseTurnAdmission = this.agent.holdTurnAdmission();
 		const releaseInterruptedInFlight = this.#takeInterruptedInFlight();
 		const unwind = Promise.withResolvers<void>();
 		this.#abortUnwinds.add(unwind.promise);
@@ -11832,7 +11842,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (!cleaning) return;
 			cleaning = false;
 			this.#abortsInProgress--;
-			this.#notifyInterruptChange();
+			releaseTurnAdmission();
 			step(() => this.#drainStrandedQueuedMessages());
 			goalNotifications = releaseGoalNotifications().catch(keepFailure);
 		};
@@ -12060,6 +12070,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// outgoing session also drops its record instead of landing in this new one.
 			this.#irc.clearPending();
 			this.#sessionGeneration++;
+			this.agent.cancelTurnReservations();
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
@@ -12180,7 +12191,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			try {
 				// No file means fork() is a no-op. Otherwise invalidate admitted
 				// prompt setup before the asynchronous identity rewrite begins.
-				if (previousSessionFile) this.#promptGeneration++;
+				if (previousSessionFile) {
+					this.#promptGeneration++;
+					this.agent.cancelTurnReservations();
+				}
 				forkResult = await this.sessionManager.fork();
 			} catch (error) {
 				this.#bash.finishSessionTransition(bashTransition, false);
@@ -13796,6 +13810,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// record on success but stays valid if the switch is rolled back to this same session.
 		const previousIrcPending = this.#irc.clearPending();
 		const previousSessionGeneration = this.#sessionGeneration++;
+		this.agent.cancelTurnReservations();
 		const generationSettled = Promise.withResolvers<void>();
 		const previousSessionGenerationSettled = this.#sessionGenerationSettled;
 		this.#sessionGenerationSettled = generationSettled.promise;
@@ -14231,6 +14246,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// A prompt admitted during the drain awaits above belongs to the history
 				// being replaced; the generation bump drops its pending setup.
 				this.#promptGeneration++;
+				this.agent.cancelTurnReservations();
 				if (!leafId) {
 					const title = this.sessionManager.getSessionName();
 					const titleSource = this.sessionManager.titleSource;
@@ -14360,6 +14376,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// A prompt may have been admitted during the flush/drain awaits
 				// after the idle check. It still belongs to the pre-branch context.
 				this.#promptGeneration++;
+				this.agent.cancelTurnReservations();
 				this.sessionManager.createBranchedSession(leafId);
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
@@ -14612,6 +14629,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// All cancellation/no-op exits are behind us. Invalidate prompt setup
 		// admitted on the abandoned branch before committing any tree changes.
 		this.#promptGeneration++;
+		this.agent.cancelTurnReservations();
 
 		// Determine the new leaf position based on target type
 		let newLeafId: string | null;

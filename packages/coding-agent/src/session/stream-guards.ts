@@ -188,7 +188,7 @@ export class StreamingEditGuard {
 				STREAMING_EDIT_NOTICE_SOURCE,
 			);
 			try {
-				await this.#host.agent.continue();
+				await this.#host.agent.continue(signal);
 			} catch (error) {
 				logger.warn("streaming edit recovery continue failed", { error: String(error) });
 			}
@@ -327,7 +327,7 @@ export class LoopGuards {
 				"agent",
 			);
 			try {
-				await this.#host.agent.continue();
+				await this.#host.agent.continue(signal);
 			} catch (error) {
 				logger.warn("gemini tool-call reminder continue failed", { error: String(error) });
 			}

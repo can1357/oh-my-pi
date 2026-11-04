@@ -1,5 +1,5 @@
 import { type } from "@oh-my-pi/omptype";
-import { afterEach, beforeAll, expect, it } from "bun:test";
+import { afterEach, beforeAll, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
@@ -44,6 +44,7 @@ beforeAll(async () => {
 	setThemeInstance((await getThemeByName("dark"))!);
 });
 afterEach(async () => {
+	vi.restoreAllMocks();
 	for (const h of resources.splice(0)) {
 		h.releases.forEach(r => r());
 		await h.session.dispose();
@@ -816,3 +817,113 @@ for (const throws of [false, true]) {
 		expect(JSON.stringify(h.mock.calls.at(-1)?.context.messages)).toContain("IMPORTANT_WITHDRAWN_MESSAGE");
 	});
 }
+
+for (const claimant of ["prompt", "agent-message", "irc-wake"] as const) {
+	it(`an interrupt after admission prevents ${claimant} from starting or executing a tool`, async () => {
+		const h = await setup(
+			[
+				{ content: [{ type: "toolCall", id: "write", name: "mcp__probe_write", arguments: {} }] },
+				{ content: ["done"] },
+			],
+			undefined,
+			false,
+		);
+		const marker = h.dir.join("AFTER_INTERRUPT");
+		await h.session.refreshMCPTools([
+			{
+				name: "mcp__probe_write",
+				label: "write",
+				description: "Write a marker file",
+				parameters: type({}),
+				mcpServerName: "probe",
+				mcpToolName: "write",
+				loadMode: "essential",
+				execute: async () => {
+					await Bun.write(marker, "executed");
+					return { content: [{ type: "text", text: "written" }] };
+				},
+			},
+		]);
+		let stop: Promise<void> | undefined;
+		let started = false;
+		h.session.subscribe(event => {
+			if (event.type === "agent_start") started = true;
+		});
+		const reserve = h.agent.reserveTurn.bind(h.agent);
+		vi.spyOn(h.agent, "reserveTurn").mockImplementationOnce((...args) => {
+			const reservation = reserve(...args);
+			// Registered before the claimant's await: interrupt after grant, before its continuation.
+			void reservation.ready.then(admitted => {
+				expect(admitted).toBe(true);
+				expect(h.agent.state.isStreaming).toBe(false);
+				stop = h.session.abort({ reason: USER_INTERRUPT_LABEL });
+			});
+			return reservation;
+		});
+		if (claimant === "prompt") await h.session.prompt("write the marker");
+		else if (claimant === "agent-message") {
+			await h.session.sendCustomMessage(
+				{ customType: "agent-message", content: "write the marker", display: false },
+				{ triggerTurn: true },
+			);
+		} else {
+			await h.session.deliverIrcMessage({
+				id: "interrupt-claim",
+				from: "peer",
+				to: "recipient",
+				body: "write the marker",
+				ts: Date.now(),
+			});
+		}
+		await stop;
+		await h.session.waitForIdle();
+		expect(stop).toBeDefined();
+		expect(started).toBe(false);
+		expect(h.mock.calls).toHaveLength(0);
+		expect(await Bun.file(marker).exists()).toBe(false);
+		if (claimant !== "prompt") expect(JSON.stringify(h.session.messages)).toContain("write the marker");
+	});
+}
+
+it("does not grant or prepare a prompt until interrupt state cleanup pauses its goal", async () => {
+	const h = await setup([]);
+	await h.session.goalRuntime.createGoal({ objective: "CLEANUP_OWNED_GOAL" });
+	const cleanup = h.gate();
+	const hook = h.holdHook();
+	const original = h.session.goalRuntime.onTaskAborted.bind(h.session.goalRuntime);
+	h.session.goalRuntime.onTaskAborted = async options => {
+		await cleanup.wait();
+		return original(options);
+	};
+	let cleanupOpen = true;
+	let grantedDuringCleanup = false;
+	const reserved = Promise.withResolvers<void>();
+	const reserve = h.agent.reserveTurn.bind(h.agent);
+	vi.spyOn(h.agent, "reserveTurn").mockImplementationOnce((...args) => {
+		const reservation = reserve(...args);
+		void reservation.ready.then(admitted => {
+			grantedDuringCleanup ||= admitted && cleanupOpen;
+		});
+		reserved.resolve();
+		return reservation;
+	});
+	try {
+		const stopping = h.session.abort({ reason: USER_INTERRUPT_LABEL });
+		await cleanup.entered;
+		const client = h.session.prompt("independent work after cleanup");
+		await reserved.promise;
+		expect(grantedDuringCleanup).toBe(false);
+		cleanupOpen = false;
+		cleanup.release();
+		await stopping;
+		await hook.entered;
+		hook.release();
+		await client;
+		expect(h.session.getGoalModeState()?.goal.status).toBe("paused");
+		expect(JSON.stringify(h.mock.calls[0]!.context.messages)).not.toContain("CLEANUP_OWNED_GOAL");
+	} finally {
+		cleanup.release();
+		hook.release();
+		h.session.goalRuntime.onTaskAborted = original;
+	}
+});

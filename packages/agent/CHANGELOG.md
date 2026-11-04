@@ -8,6 +8,7 @@
 - Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
 ### Fixed
 
+- Turn reservations wait for host state cleanup as well as the active run, and revoked grants cannot start a prompt or continuation ([#17918](https://github.com/can1357/oh-my-pi/pull/17918) by [@sjawhar](https://github.com/sjawhar))
 - Fixed steering and follow-up queue notifications observing a batch before its preparation claim was installed and missing the transition to delivery, leaving pending-message snapshots stale after asynchronous preparation.
 
 ## [18.16.0] - 2026-11-02
