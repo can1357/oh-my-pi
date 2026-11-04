@@ -764,18 +764,12 @@ impl Armed {
 
 impl KeyReroute {
 	#[cfg(test)]
-	pub(super) fn unwatched_for_test() -> (Self, Arc<AtomicBool>) {
+	pub(super) fn unwatched_for_test(generation: u64) -> (Self, Arc<AtomicBool>) {
 		let ended = Arc::new(AtomicBool::new(false));
 		(
 			Self {
 				ended: Arc::clone(&ended),
-				armed: Armed {
-					user:       100,
-					target:     200,
-					generation: 0,
-					buttons:    [0; 6],
-					secure:     false,
-				},
+				armed: Armed { user: 100, target: 200, generation, buttons: [0; 6], secure: false },
 			},
 			ended,
 		)
@@ -802,13 +796,15 @@ impl KeyReroute {
 	/// the taps cannot be created (no Accessibility permission, or the target
 	/// exited): the action then runs as before, without key repair.
 	pub(super) fn arm(user: pid_t, target: pid_t) -> Option<Self> {
-		Self::arm_with_access(user, target, permission::post_events)
+		Self::arm_with_access(user, target, permission::post_events, secure_entry, Self::setup)
 	}
 
 	fn arm_with_access(
 		user: pid_t,
 		target: pid_t,
 		post_events: impl FnOnce() -> bool,
+		secure_entry: impl FnOnce() -> bool,
+		setup: impl FnOnce(pid_t, pid_t) -> Option<Self>,
 	) -> Option<Self> {
 		// The user is typing a password or into a secure terminal: their keys
 		// are never tapped, even after the target takes the keyboard and secure
@@ -816,6 +812,10 @@ impl KeyReroute {
 		if user == target || !post_events() || secure_entry() {
 			return None;
 		}
+		setup(user, target)
+	}
+
+	fn setup(user: pid_t, target: pid_t) -> Option<Self> {
 		let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
 		let buttons = mouse_buttons();
 		let ended = Arc::new(AtomicBool::new(false));
@@ -966,11 +966,22 @@ mod tests {
 	const CLICKED: [u32; 6] = [6, 5, 0, 0, 0, 0];
 
 	#[test]
-	fn missing_accessibility_never_starts_a_reroute_generation() {
-		let _serial = control::OWNERSHIP_TEST.lock();
-		let generation = GENERATION.load(Ordering::Acquire);
-		assert!(KeyReroute::arm_with_access(USER, pid_t::MAX, || false).is_none());
-		assert_eq!(GENERATION.load(Ordering::Acquire), generation);
+	fn missing_accessibility_never_invokes_setup() {
+		let setup_calls = std::cell::Cell::new(0);
+		assert!(
+			KeyReroute::arm_with_access(
+				USER,
+				TARGET,
+				|| false,
+				|| false,
+				|_, _| {
+					setup_calls.set(setup_calls.get() + 1);
+					None
+				},
+			)
+			.is_none()
+		);
+		assert_eq!(setup_calls.get(), 0);
 	}
 
 	fn quiet() -> UserSignals {
