@@ -18,8 +18,7 @@
 ### Fixed
 
 - Removed embedded-shell compiler warnings and fixed history saves hanging when a stale lock cannot be removed
-- Fixed native Windows shell commands not finding installed executables through PATH and PATHEXT, and absolute Windows paths being prefixed with the shell cwd.
-- Fixed native Windows shell commands not finding installed executables through PATH and PATHEXT, and absolute Windows paths being prefixed with the shell cwd ([#18041](https://github.com/can1357/oh-my-pi/pull/18041) by [@jchanghong023](https://github.com/jchanghong023)).
+- Fixed native Windows shell commands not finding installed executables through PATH and PATHEXT, and absolute Windows paths being prefixed with the shell cwd ([#18041](https://github.com/can1357/oh-my-pi/pull/18041) by [@jchanghong023](https://github.com/jchanghong023))
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
 ### Fixed
 
