@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `cd` and `pwd` in native Windows shell sessions corrupting drive and UNC roots during logical directory changes.
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes
