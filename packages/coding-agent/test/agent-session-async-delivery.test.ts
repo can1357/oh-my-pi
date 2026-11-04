@@ -248,10 +248,12 @@ describe("AgentSession owner-routed async delivery", () => {
 
 		const deliveredImages = mock.calls.flatMap(call =>
 			call.context.messages.flatMap(message =>
-				typeof message.content === "string" ? [] : message.content.filter(part => part.type === "image"),
+				typeof message.content === "string"
+					? []
+					: message.content.flatMap(part => (part.type === "image" ? [part.data] : [])),
 			),
 		);
-		expect(deliveredImages.map(image => image.data)).toEqual(["prompt-image", "plot-image", "answer-image"]);
+		expect(deliveredImages).toEqual(["prompt-image", "plot-image", "answer-image"]);
 		expect(session.getImageAttachments().map(entry => [entry.uri, entry.image.data, entry.sourcePath])).toEqual([
 			["attachment://1", "answer-image", answerPath],
 		]);

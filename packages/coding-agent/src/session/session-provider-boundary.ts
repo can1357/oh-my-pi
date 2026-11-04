@@ -64,7 +64,8 @@ export interface SessionProviderBoundaryHost {
  */
 function userImages(message: AgentMessage): ImageContent[] {
 	if (!("content" in message) || !Array.isArray(message.content)) return [];
-	const images = message.content.filter((part): part is ImageContent => part.type === "image");
+	const images: ImageContent[] = [];
+	for (const part of message.content) if (part.type === "image") images.push(part);
 	if (message.role === "user" || message.role === "developer") return images;
 	if (message.role === "toolResult") return message.toolName === "ask" ? images : [];
 	if (message.role !== "custom" || message.customType !== ASYNC_RESULT_MESSAGE_TYPE) return [];
