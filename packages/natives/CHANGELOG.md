@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed `timeout`, `nohup`, `git` and command-running utilities inside shell functions skipping their operands or running the function's arguments instead
+- Fixed `timeout`, `nohup`, `git` and command-running utilities inside shell functions skipping their operands or running the function's arguments instead ([#18030](https://github.com/can1357/oh-my-pi/pull/18030) by [@sjawhar](https://github.com/sjawhar))
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
 ### Fixed
 
