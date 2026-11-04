@@ -1158,6 +1158,8 @@ describe("compact", () => {
 		});
 
 		expect(result.summary).toContain(context[0]);
+		const reloaded = snapcompact.getPreservedArchive(JSON.parse(JSON.stringify(result.preserveData)));
+		expect(reloaded?.context).toEqual(context);
 	});
 
 	it("carries dim tool-output spans from text into the first image frame", async () => {
@@ -1694,7 +1696,7 @@ describe("archive helpers", () => {
 			return `${view.summary}\n${blocks.map(block => (block.type === "text" ? block.text : "")).join("\n")}`;
 		}
 
-		async function framedArchive(): Promise<snapcompact.CompactionResult> {
+		async function framedArchive(extraContext?: string[]): Promise<snapcompact.CompactionResult> {
 			const fileOps = snapcompact.createFileOps();
 			fileOps.read.add("src/read-only.ts");
 			fileOps.read.add("src/both.ts");
@@ -1712,7 +1714,7 @@ describe("archive helpers", () => {
 					],
 					fileOps,
 				}),
-				{ model: { api: "anthropic-messages" }, frameSize: TEST_FRAME_SIZE, maxFrames: 5 },
+				{ model: { api: "anthropic-messages" }, frameSize: TEST_FRAME_SIZE, maxFrames: 5, extraContext },
 			);
 			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
 			expect(archive.frames.length).toBeGreaterThan(0);
@@ -1720,6 +1722,19 @@ describe("archive helpers", () => {
 			expect(archive.textTail).not.toContain("MIDDLE sentinel");
 			return result;
 		}
+
+		it("keeps the archive's extension context in every text view", async () => {
+			const context = ["Recalled memory: the deploy freeze stays in place until Friday."];
+			const result = await framedArchive(context);
+			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
+			for (const view of [
+				snapcompact.viewWithoutFrames(result.summary, archive),
+				snapcompact.viewWithoutFrames(result.summary, archive, { includeThinking: false, maxChars: 400 }),
+			]) {
+				expect(view.summary).toContain(context[0]);
+				expect(view.archive.context).toEqual(context);
+			}
+		});
 
 		it("reads the archive's whole kept source as text in place of its frames, with its file list", async () => {
 			const result = await framedArchive();

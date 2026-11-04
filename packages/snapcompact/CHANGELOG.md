@@ -5,6 +5,7 @@
 ### Added
 
 - Added `extraContext` to `compact()` options: the lines are rendered in a `CONTEXT` summary section and kept on the archive ([#16720](https://github.com/can1357/oh-my-pi/pull/16720) by [@integrITsolutions](https://github.com/integrITsolutions))
+
 ### Fixed
 
 - Fixed `compact()` dropping the imaged history of an archive saved before omp 16.1.0 without a word: the new summary now counts those characters as dropped history ([#17883](https://github.com/can1357/oh-my-pi/pull/17883) by [@will-bogusz](https://github.com/will-bogusz))

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added optional `extraContext` to `renderHandoffPrompt()`, prepended as an `<additional-context>` block ([#16720](https://github.com/can1357/oh-my-pi/pull/16720) by [@integrITsolutions](https://github.com/integrITsolutions))
 - Added `wireToolsFingerprint()`, a hash of the tool specs a request sends ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
 ### Fixed

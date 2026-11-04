@@ -30,6 +30,7 @@
 
 ### Fixed
 
+- Fixed snapcompact and handoff compactions losing extension and memory context from `session.compacting`; manual and speculative handoff now run the hook too ([#16720](https://github.com/can1357/oh-my-pi/pull/16720) by [@integrITsolutions](https://github.com/integrITsolutions))
 - Thin tool images are padded to the vision model's minimum height or width instead of causing a 400 on the next turn ([#18081](https://github.com/can1357/oh-my-pi/issues/18081))
 - JSON query truncation notices now report the 50KB read budget instead of the bytes shown ([#18022](https://github.com/can1357/oh-my-pi/pull/18022) by [@eggpeat](https://github.com/eggpeat))
 - Extension links stay clickable and extension-drawn replies and custom messages keep their renderers on every launch, not only the first after an edit; `ctx.ui.getLinkClicksAvailable()` no longer turns false on later launches ([#18116](https://github.com/can1357/oh-my-pi/pull/18116) by [@materemias](https://github.com/materemias))
@@ -696,10 +697,6 @@
 - Fixed the `computer` tool prompt leaving `el.selectText` out of the element helpers; it now says a following `el.type` on that element replaces the selection ([#16769](https://github.com/can1357/oh-my-pi/pull/16769) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed language servers keeping every file omp ever opened loaded for the whole session; files unused for 5 minutes are now closed when omp opens another, so the server can free that memory ([#15418](https://github.com/can1357/oh-my-pi/pull/15418) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `write` turning a CRLF file into LF and dropping its UTF-8 BOM when it replaces the file; it now keeps both, as `edit` does ([#16575](https://github.com/can1357/oh-my-pi/pull/16575) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- Fixed snapcompact and handoff compactions losing extension and memory context from `session.compacting`; manual and speculative handoff now run the hook too ([#16720](https://github.com/can1357/oh-my-pi/pull/16720) by [@integrITsolutions](https://github.com/integrITsolutions))
 
 ## [18.12.6] - 2026-10-21
 

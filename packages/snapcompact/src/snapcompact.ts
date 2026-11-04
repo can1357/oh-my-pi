@@ -1797,9 +1797,16 @@ function validateArchive(candidate: unknown): Archive | undefined {
 	const textHead = typeof archive.textHead === "string" && archive.textHead.length > 0 ? archive.textHead : undefined;
 	const textTail = typeof archive.textTail === "string" && archive.textTail.length > 0 ? archive.textTail : undefined;
 	const context = contextLines(archive.context);
-	// A text-only archive (everything fit in the plain-text regions) is valid;
-	// only an archive carrying neither frames nor text is empty.
-	if (frames.length === 0 && text === undefined && textHead === undefined && textTail === undefined) return undefined;
+	// A text-only or context-only archive is valid; only an archive carrying
+	// neither frames, text nor context is empty.
+	if (
+		frames.length === 0 &&
+		text === undefined &&
+		textHead === undefined &&
+		textTail === undefined &&
+		context === undefined
+	)
+		return undefined;
 	return {
 		frames,
 		totalChars: typeof archive.totalChars === "number" ? archive.totalChars : 0,
@@ -2463,6 +2470,7 @@ export function viewWithoutFrames(
 			truncatedChars: archive.truncatedChars,
 			text,
 			textHead: text,
+			...(archive.context ? { context: archive.context } : {}),
 		};
 	} else {
 		const keptTail = tailStart < 0 ? "" : tail.slice(tailStart);
@@ -2475,6 +2483,7 @@ export function viewWithoutFrames(
 			truncatedChars: archive.truncatedChars + framedChars + tail.length - keptTail.length,
 			...(textHead ? { textHead } : {}),
 			...(textTail ? { textTail } : {}),
+			...(archive.context ? { context: archive.context } : {}),
 		};
 	}
 	if (options.maxChars !== undefined) textArchive = keepEnds(textArchive, Math.max(0, Math.floor(options.maxChars)));
@@ -2486,6 +2495,7 @@ export function viewWithoutFrames(
 				frameCount: 0,
 				truncatedChars: textArchive.truncatedChars,
 				includedPreviousSummary: source.startsWith(PREVIOUS_SUMMARY_HEAD),
+				context: archive.context?.join("\n\n"),
 				files: summaryFileSection(summary),
 				includeThinking: summaryIncludesThinking(summary) && !dropThinking,
 			}),
