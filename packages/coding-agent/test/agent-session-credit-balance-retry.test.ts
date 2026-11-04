@@ -281,6 +281,20 @@ describe("Anthropic credit-balance rejection", () => {
 		expect(lastAssistant(harness.session).stopReason).toBe("stop");
 	});
 
+	it("waits out a credit-balance 400 whose wording also reads as a usage limit", async () => {
+		// "out of credits" also flags a usage limit, whose quota heuristic guesses a 30-minute reset.
+		const body = CREDIT_BALANCE_BODY.replace(
+			"Please go to Plans & Billing to upgrade or purchase credits.",
+			"You are out of credits.",
+		);
+		const harness = await runTurn(n => (n === 1 ? jsonResponse(400, body) : recoveredResponse()));
+
+		expect(harness.requests).toBe(2);
+		expect(harness.retryStarts).toHaveLength(1);
+		expectCreditBalanceRetryDelay(harness.retryStarts[0]!.delayMs);
+		expect(lastAssistant(harness.session).stopReason).toBe("stop");
+	});
+
 	it("waits out the same rejection when the stream reports it after a 200", async () => {
 		const harness = await runTurn(n => (n === 1 ? creditBalanceStreamResponse() : recoveredResponse()));
 

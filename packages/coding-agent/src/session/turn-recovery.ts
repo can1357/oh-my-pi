@@ -2975,6 +2975,12 @@ export class TurnRecovery {
 		// ("Please add credits"), so it never takes this fail-fast exit.
 		const creditBalanceRejection = AIError.isCreditBalanceTooLow(message.errorStatus, errorMessage);
 		const billingCap = !creditBalanceRejection && isBillingCapUsageLimit(message.errorStatus, errorMessage);
+		// The credit wait: the 30-second floor, or the provider's own hint when longer.
+		// A quota or usage-limit heuristic guesses a reset this rejection does not
+		// have (an "out of credits" wording also reads as a usage limit), so none sets it.
+		const creditWaitMs = creditBalanceRejection
+			? Math.max(parsedRetryAfterMs ?? 0, AIError.CREDIT_BALANCE_BACKOFF_MS)
+			: undefined;
 		const exceedsDelayCap = (waitMs: number): boolean => {
 			if (billingCap) return true;
 			const waitForUsageReset =
@@ -3044,14 +3050,11 @@ export class TurnRecovery {
 							!this.isRetryableError(message)
 						) &&
 						!exceedsDelayCap(
-							Math.max(
-								usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
+							// The credit wait below replaces every other delay, so judge it alone.
+							creditWaitMs ??
+								(usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
 									? parsedRetryAfterMs
-									: delayMs,
-								// The credit wait below never drops under its floor, so a cap
-								// below it ends the turn: defer no fallback for that retry.
-								creditBalanceRejection ? AIError.CREDIT_BALANCE_BACKOFF_MS : 0,
-							),
+									: delayMs),
 						),
 				});
 			}
@@ -3072,11 +3075,9 @@ export class TurnRecovery {
 		// An empty prepaid balance lifts within minutes: wait at least 30 seconds
 		// and add jitter after any provider hint has selected the effective
 		// minimum. A fallback changes models immediately and skips this wait.
-		if (!switchedModel && creditBalanceRejection) {
-			delayMs = calculateCreditBalanceBackoffMs(
-				Math.max(delayMs, AIError.CREDIT_BALANCE_BACKOFF_MS),
-				retrySettings.maxDelayMs,
-			);
+		// A sibling credential is retried at once.
+		if (!switchedModel && !switchedCredential && creditWaitMs !== undefined) {
+			delayMs = calculateCreditBalanceBackoffMs(creditWaitMs, retrySettings.maxDelayMs);
 		}
 
 		if (retryBudgetExhausted) {

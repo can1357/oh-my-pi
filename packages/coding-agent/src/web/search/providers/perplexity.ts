@@ -482,7 +482,9 @@ function throwPerplexityStreamError(message: AssistantMessage): never {
 	const details = message.errorMessage ?? "Perplexity API stream failed";
 	const classified = classifyProviderHttpError("perplexity", status, details);
 	if (classified) throw classified;
-	throw new SearchProviderError("perplexity", `Perplexity API error (${status}): ${details}`, status);
+	// Classification read the provider's text above; the report shows omp's text with its request-dump path.
+	const shown = message.errorDisplayMessage ?? details;
+	throw new SearchProviderError("perplexity", `Perplexity API error (${status}): ${shown}`, status);
 }
 
 /** Call the Perplexity API-key endpoint through the shared OpenAI streaming providers. */
