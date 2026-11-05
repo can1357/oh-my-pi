@@ -79,12 +79,57 @@ export function repairDoubleEncodedJsonString(value: string): string {
 	return typeof decoded === "string" && decoded !== value ? decoded : value;
 }
 
+/**
+ * Every field a task call or a `tasks[]` item can carry that something downstream reads: the
+ * properties the task schema declares, plus the stale `schema` alias whose presence is still
+ * refused and the `taskFileSha256` the file loader attaches. Keep it in step with
+ * `createTaskSchema` — a field missing here survives a copy only while the caller happens to
+ * store it as an own enumerable property.
+ */
+export const TASK_FIELD_KEYS = [
+	"name",
+	"agent",
+	"task",
+	"taskFile",
+	"taskFileSha256",
+	"solutionSpace",
+	"effort",
+	"outputSchema",
+	"schemaMode",
+	"tools",
+	"model",
+	"sourceSession",
+	"isolated",
+	"context",
+	"tasks",
+	"schema",
+] as const;
+
+/**
+ * Copy a call or an item, applying `changes`, and keep every field it carries however the caller
+ * stores it.
+ *
+ * A spread takes own enumerable properties only. An internal caller bypassing the wire schema may
+ * hold a real `model` on a class prototype or as a non-enumerable own property, and a spread drops
+ * it: the per-call gate then sees no selector, the spawn runs on the agent's configured model, and
+ * the approval prompt — built from the raw arguments — still names the one that was requested.
+ * Every copy of a call or an item on the dispatch path goes through here for that reason.
+ */
+export function copyTaskFields<T extends object>(source: T, changes: Record<string, unknown>): T {
+	const reachable = source as unknown as Record<string, unknown>;
+	const copy: Record<string, unknown> = { ...reachable };
+	for (const name of TASK_FIELD_KEYS) {
+		if (!Object.hasOwn(copy, name) && name in reachable) copy[name] = reachable[name];
+	}
+	return Object.assign(copy, changes) as T;
+}
+
 /** Repair a single (possibly partial) task item's prose field (`task`). */
 function repairTaskItem(item: TaskItem): TaskItem {
 	if (item === null || typeof item !== "object") return item;
 	const task = typeof item.task === "string" ? repairDoubleEncodedJsonString(item.task) : item.task;
 	if (task === item.task) return item;
-	return { ...item, task };
+	return copyTaskFields(item, { task });
 }
 
 /**
@@ -114,5 +159,5 @@ export function repairTaskParams(params: TaskParams): TaskParams {
 	if (task === params.task && context === params.context && tasks === params.tasks) {
 		return params;
 	}
-	return { ...params, task, context, tasks };
+	return copyTaskFields(params, { task, context, tasks });
 }

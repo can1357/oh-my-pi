@@ -66,7 +66,7 @@ import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
-import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
+import { copyTaskFields, repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import {
 	invalidModelSelectorReason,
 	renderSubagentUserPrompt,
@@ -436,7 +436,10 @@ async function resolveTaskFile(session: ToolSession, item: TaskItem): Promise<Re
 				throw new Error("contains invalid UTF-8");
 			}
 			if (!task.trim()) throw new Error("must contain non-empty task instructions");
-			return { ...item, task, taskFileSha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex") };
+			return copyTaskFields(item, {
+				task,
+				taskFileSha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
+			});
 		} finally {
 			await file.close();
 		}
@@ -494,30 +497,6 @@ const BLANKABLE_KEYS = ["model", "sourceSession", "outputSchema"] as const;
 /** A field this pass may drop: the three unconditional ones, plus the conditional `task`/`taskFile` pair. */
 type BlankableKey = (typeof BLANKABLE_KEYS)[number] | "task" | "taskFile";
 
-/**
- * Every field a call or an item can carry that something downstream reads: the properties
- * `createTaskSchema` in ./types declares, plus the stale `schema` alias whose presence is still
- * refused. Keep it in step with that builder — a field missing here survives only while the
- * caller stores it as an own enumerable property.
- */
-const CONTRACT_KEYS = [
-	"name",
-	"agent",
-	"task",
-	"taskFile",
-	"solutionSpace",
-	"effort",
-	"outputSchema",
-	"schemaMode",
-	"tools",
-	"model",
-	"sourceSession",
-	"isolated",
-	"context",
-	"tasks",
-	"schema",
-] as const;
-
 /** An empty or whitespace-only string: the shape a model sends for a field it has nothing to put in. */
 function isBlankString(value: unknown): boolean {
 	return typeof value === "string" && value.trim() === "";
@@ -560,16 +539,7 @@ function withoutBlankFields<T extends TaskItem | TaskParams>(item: T): T {
 	let out = item;
 	for (const key of keys) {
 		if (!isBlankString(item[key])) continue;
-		if (out === item) {
-			const source = item as unknown as Record<string, unknown>;
-			const copy: Record<string, unknown> = { ...item };
-			// Own enumerable keys came across with the spread; the rest are read by name, because
-			// enumerability is the caller's storage choice and says nothing about what the field means.
-			for (const name of CONTRACT_KEYS) {
-				if (!Object.hasOwn(copy, name) && name in source) copy[name] = source[name];
-			}
-			out = copy as T;
-		}
+		if (out === item) out = copyTaskFields(item, {});
 		delete out[key];
 	}
 	return out;
@@ -592,7 +562,9 @@ function planSpawns(
 	// Only object-shaped calls and items: anything else is left for the shape checks to reject.
 	const unblanked = isRecord(repaired) ? withoutBlankFields(repaired) : repaired;
 	const params = Array.isArray(unblanked.tasks)
-		? { ...unblanked, tasks: unblanked.tasks.map(task => (isRecord(task) ? withoutBlankFields(task) : task)) }
+		? copyTaskFields(unblanked, {
+				tasks: unblanked.tasks.map(task => (isRecord(task) ? withoutBlankFields(task) : task)),
+			})
 		: unblanked;
 	const error =
 		validateShapeParams(batchEnabled, params) ??

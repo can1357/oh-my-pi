@@ -1189,11 +1189,38 @@ describe("batch model placement", () => {
 		expect(run).not.toHaveBeenCalled();
 	});
 
-	// An internal caller bypasses the wire schema and may hand dispatch an object whose real `model`
-	// is reached through its prototype. Spreading own properties to drop a blank sibling would delete
-	// that selector on the way, so the gate would never see it: the task would spawn on the agent's
-	// configured model while the approval prompt still named the requested one.
-	it("keeps a real model reached through a prototype while dropping a blank sibling field", async () => {
+	// An internal caller bypasses the wire schema and may hold its real `model` anywhere an object can
+	// hold a property. Spreading own enumerable properties to drop a blank sibling deletes the rest,
+	// so the gate would never see the selector: the task would spawn on the agent's configured model
+	// while the approval prompt still named the requested one. Enumerability is a storage choice and
+	// says nothing about what the field means, so every one of these must still reach the gate.
+	const protoLiteral = (): Record<string, unknown> => Object.create({ model: "openai/gpt-5.4" });
+	const classGetter = (): Record<string, unknown> => {
+		// A class accessor is non-enumerable and on the prototype — the shape a spread loses twice over.
+		class Carrier {
+			get model(): string {
+				return "openai/gpt-5.4";
+			}
+		}
+		return new Carrier() as unknown as Record<string, unknown>;
+	};
+	const ownHidden = (): Record<string, unknown> => {
+		const item: Record<string, unknown> = {};
+		Object.defineProperty(item, "model", { value: "openai/gpt-5.4", enumerable: false });
+		return item;
+	};
+	const ownHiddenGetter = (): Record<string, unknown> => {
+		const item: Record<string, unknown> = {};
+		Object.defineProperty(item, "model", { get: () => "openai/gpt-5.4", enumerable: false });
+		return item;
+	};
+
+	it.each([
+		["an enumerable prototype property", protoLiteral],
+		["a class prototype getter", classGetter],
+		["a non-enumerable own property", ownHidden],
+		["a non-enumerable own getter", ownHiddenGetter],
+	] as const)("keeps a real model held as %s while dropping a blank sibling field", async (_label, make) => {
 		mockDiscovery();
 		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
 		const tool = await TaskTool.create(
@@ -1206,7 +1233,7 @@ describe("batch model placement", () => {
 				},
 			}),
 		);
-		const item: Record<string, unknown> = Object.create({ model: "openai/gpt-5.4" });
+		const item = make();
 		Object.assign(item, { task: "Do work", solutionSpace: "c", agent: "task", name: "Proto", outputSchema: "" });
 		const result = await tool.execute("task-proto-model", { context: "Shared context", tasks: [item] } as never);
 		expect(getFirstText(result)).toMatch(/per-call model is disabled/i);
