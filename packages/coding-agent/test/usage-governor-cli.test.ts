@@ -427,7 +427,10 @@ describe("usage governor CLI proof: scenarios", () => {
 			const healthy = proof.spawnOmp(["-p", "healthy usage"]);
 			try {
 				expect(
-					await awaitCondition(() => proof.readLedger().waits.some(wait => wait.credentialId === credentialId), 30_000),
+					await awaitCondition(
+						() => proof.readLedger().waits.some(wait => wait.credentialId === credentialId),
+						30_000,
+					),
 				).toBe(true);
 				expect(proof.chats()).toEqual([]);
 			} finally {
