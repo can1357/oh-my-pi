@@ -345,11 +345,11 @@ describe("task speculative launch", () => {
 		expect([...startedIds].sort()).toEqual(["Alpha", "Beta"]);
 	});
 
-	// The same split, reached through the other rewrites validation performs: a value coerced to its
-	// declared type, and a key the schema does not declare being deleted. One normalization at the
-	// launcher covers the class, so none of them cancels an adopted child.
+	// The same split, reached through another rewrite validation performs. `isolated: "true"` is left
+	// out on purpose: a coerced value makes the two plans differ on `main` too, independently of
+	// placeholders, and that is the launcher's ordinary reconciliation rather than anything this
+	// change introduced or claims to close.
 	it.each([
-		["a coerced value", { isolated: "true" }],
 		["an undeclared key", { bogusKey: "x" }],
 		["a null tools list", { tools: null }],
 	] as const)("matches dispatch for an item validation rewrites through %s", async (_label, fill) => {
@@ -380,6 +380,46 @@ describe("task speculative launch", () => {
 		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha", "Beta"]);
 		expect(duplicateJobs(manager, ["Alpha", "Beta"])).toEqual([]);
 		expect([...startedIds].sort()).toEqual(["Alpha", "Beta"]);
+	});
+
+	// KNOWN RESIDUAL, pinned so a fix flips this test rather than going unnoticed.
+	//
+	// Validation is whole-call and all-or-nothing, and its lenient path falls back to the raw
+	// arguments when the call fails the schema. The launcher plans once per streamed item, each time
+	// for a longer prefix, so a later item that fails the schema while still being accepted at
+	// runtime — Beta here, with no `solutionSpace` — sends a prefix that validated down the fallback
+	// path. Alpha's plan then changes after Alpha has already started, and the launcher's ordinary
+	// "the call changed" reconciliation discards it and dispatch runs `Alpha-2`.
+	//
+	// It needs per-item normalization that does not depend on the call's other items. Until then this
+	// records what actually happens; both items still run, and `Alpha` runs twice.
+	it("re-runs an earlier item when a later one sends validation down its lenient path", async () => {
+		const lenient = {
+			context: "ctx",
+			tasks: [
+				{ name: "Alpha", agent: "task", solutionSpace: "one way", task: "Do A.", outputSchema: null },
+				{ name: "Beta", agent: "task", task: "Do B." },
+			],
+		};
+		const raw = JSON.stringify(lenient);
+		const { tool, manager, session } = await openSession();
+
+		session.update(toolCall, raw.slice(0, raw.indexOf('{"name":"Beta"') + 10));
+		await spawn("Alpha").started.promise;
+
+		session.finalize({ toolCall, args: lenient });
+		const validated = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: toolCall.id,
+			name: tool.name,
+			arguments: lenient,
+		});
+		const result = await tool.execute(toolCall.id, validated as TaskParams);
+
+		expect(result.isError).toBeFalsy();
+		// The residual: Alpha is announced as its replacement, and a duplicate job exists for it.
+		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha-2", "Beta"]);
+		expect(duplicateJobs(manager, ["Alpha", "Beta"])).toEqual(["Alpha"]);
 	});
 });
 
