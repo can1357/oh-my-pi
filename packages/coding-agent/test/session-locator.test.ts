@@ -360,9 +360,7 @@ describe("session index: lookups by id", () => {
 		const rebuilt = await rebuildSessionLocator(getSessionsDir());
 		expect(rebuilt.indexed).toBe(1);
 		expect(rebuilt.unreadable.map(entry => entry.bucket)).toEqual([silent]);
-		expect(
-			(await resolveResumableSession("019a0019-0000-7000-8000-000000000001", cwdB))?.session.path,
-		).toBe(good);
+		expect((await resolveResumableSession("019a0019-0000-7000-8000-000000000001", cwdB))?.session.path).toBe(good);
 	});
 
 	it("`omp session reindex` rebuilds every root and prints what it indexed", async () => {
@@ -1000,6 +998,12 @@ describe("session index: lookups by id", () => {
 				},
 			},
 			{
+				// Passes any permission check and still cannot be read as text, so
+				// the publish refuses exactly as it does for an unreadable file.
+				what: "a snapshot that is a directory",
+				obstruct: (sessions: string) => fs.mkdirSync(path.join(sessions, SESSION_LOCATOR_BASE_FILE)),
+			},
+			{
 				what: "a transcript whose bytes cannot be read",
 				obstruct: (sessions: string, bucket: string, file: string) => fs.chmodSync(file, 0o000),
 			},
@@ -1054,7 +1058,7 @@ describe("session index: lookups by id", () => {
 					fs.chmodSync(bucket, 0o700);
 					fs.chmodSync(file, 0o600);
 					const snapshot = path.join(sessions, SESSION_LOCATOR_BASE_FILE);
-					if (fs.existsSync(snapshot)) fs.chmodSync(snapshot, 0o600);
+					fs.rmSync(snapshot, { recursive: true, force: true });
 					error.mockRestore();
 					warn.mockRestore();
 				}

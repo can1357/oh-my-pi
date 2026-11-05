@@ -177,15 +177,19 @@ function appendIndexLine(indexFile: string, line: string, createRoot: boolean): 
  *   recording it or by reading the header the rebuild reads. Permission to
  *   open a file is not evidence that an id comes out of it: a header past the
  *   reader's ceiling is perfectly readable and yields nothing;
- * - `root`'s snapshot is readable if it exists, because
+ * - `root`'s snapshot reads, if it exists, because
  *   {@link rebuildSessionLocator} refuses to publish over one it cannot read
- *   and so recovers nothing.
+ *   and so recovers nothing. It is read rather than probed for the same
+ *   reason: a directory at that path passes a permission check.
  *
  * Never throws; anything unexpected is `false`, which is the loud direction.
- * Publishing also *writes* the snapshot, which cannot be tested without side
- * effects — but a write that fails there makes `omp session reindex` exit
- * non-zero in front of the person who ran it, so that case is already loud
- * without this predicate's help.
+ * Two places are deliberately loud about something a rebuild might recover,
+ * because the cheap error costs a log line and the other mistake costs a
+ * session: an `omp gc` `.jsonl.gz` whose id is in its header rather than its
+ * name (the header there is compressed, and this runs without awaiting), and
+ * the snapshot *write*, which cannot be tested without side effects — though
+ * a write that fails makes `omp session reindex` exit non-zero in front of
+ * the person who ran it, so that case is loud without this predicate.
  */
 function reindexDemonstrablyRecovers(root: string, relative: string, id: string): boolean {
 	try {
@@ -206,7 +210,10 @@ function reindexDemonstrablyRecovers(root: string, relative: string, id: string)
 		// Derive the id, rather than checking we are allowed to try.
 		if (generatedNameId(file) !== id && sessionHeaderIdSync(file) !== id) return false;
 		try {
-			fs.accessSync(path.join(root, SESSION_LOCATOR_BASE_FILE), fs.constants.R_OK);
+			// Read it, as the publish step does. Permission is not readability:
+			// a directory at that path passes an access check and then fails the
+			// read, and the publish refuses rather than replacing it.
+			fs.readFileSync(path.join(root, SESSION_LOCATOR_BASE_FILE));
 		} catch (error) {
 			if (!isEnoent(error)) return false;
 		}
