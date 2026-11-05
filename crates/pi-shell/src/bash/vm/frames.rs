@@ -245,6 +245,9 @@ struct ProcImage {
 	/// A subshell's own state (`None` for the root vproc).
 	fields:        Option<Fields>,
 	out:           Vec<PendingWrite>,
+	/// The signals queued for the trap scan; the scans themselves are not
+	/// serialized, as a restored shell starts its own (bash's
+	/// `run_pending_traps` state lives on the C stack).
 	pending_traps: SigSet,
 	stopped:       bool,
 	transient:     bool,
@@ -577,7 +580,7 @@ impl Shell {
 				fds: slots,
 				fields,
 				out: p.out.iter().cloned().collect(),
-				pending_traps: p.pending_traps,
+				pending_traps: p.traps.queued(),
 				stopped: p.stopped,
 				transient: p.transient,
 				procsubs: p.procsubs.clone(),
@@ -803,7 +806,7 @@ impl Shell {
 				vp
 			};
 			vp.out = p.out.into();
-			vp.pending_traps = p.pending_traps;
+			vp.traps.restore(p.pending_traps);
 			vp.stopped = p.stopped;
 			vp.procsubs = p.procsubs;
 			vp.coprocs = p.coprocs;

@@ -2031,7 +2031,7 @@ impl Shell {
 			if let Some(ignored) = trap {
 				if !ignored {
 					let process = &mut self.procs[i];
-					process.pending_traps = process.pending_traps.with(sig);
+					process.traps.deliver(sig);
 					if !process.waiting_foreground() {
 						process.blocked = None;
 					}
@@ -2256,7 +2256,7 @@ pub fn owe_chld(k: &mut Kernel, cx: &mut Cx<'_>, p: &mut Vproc, background: bool
 	};
 	if trapped {
 		p.jobs.chld += 1;
-		p.pending_traps = p.pending_traps.with(Signal::Chld);
+		p.traps.deliver(Signal::Chld);
 		if !p.waiting_foreground() {
 			p.blocked = None;
 		}
@@ -2367,7 +2367,7 @@ impl Vproc {
 			overlay,
 			out: VecDeque::new(),
 			blocked: None,
-			pending_traps: crate::bash::signal::SigSet::EMPTY,
+			traps: proc::PendingTraps::default(),
 			stopped: false,
 			transient,
 			jobs: proc::JobTable::default(),

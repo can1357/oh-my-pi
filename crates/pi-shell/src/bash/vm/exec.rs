@@ -17,7 +17,7 @@ use super::{
 	proc::{
 		AssignValue, Atom, Bang, BangStage, Coproc, Depths, Frame, FrameKind, InlineStage, LastBg,
 		LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe, ProbeResult, Run, Saved,
-		Scratch, ScriptKind, Slot, TryEnd, Vproc,
+		Scan, Scratch, ScriptKind, Slot, TryEnd, Vproc,
 	},
 	redir,
 	state::{self, Level, Root, Scope, Var, VarMap},
@@ -31,6 +31,7 @@ use crate::bash::{
 	ir::{self, ComsubForm, Op, Opcode, SpawnKind, Unit},
 	mem::{self, Capture},
 	pattern::PatOpts,
+	signal::{DefaultAction, Signal},
 	store::{Attrs, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, TrapKey},
 	syntax::{CompleteCommand, Features, ParseError, ParseErrorKind, Parser, Pos, Resume},
 	zshopt::ZshOpt,
@@ -82,29 +83,9 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				None => unblock(k, cx, vp),
 			}
 		}
-		if vp.pending_traps != crate::bash::signal::SigSet::EMPTY && !vp.waiting_foreground() {
-			let pending = vp.pending_traps.iter().find(|sig| {
-				!vp.frames.iter().any(|frame| {
-					matches!(frame.kind, FrameKind::Script {
-						what: ScriptKind::Trap { key: TrapKey::Signal(active), .. },
-						..
-					} if active == *sig)
-				})
-			});
-			if let Some(sig) = pending {
-				vp.pending_traps = vp.pending_traps.without(sig);
-				// One run per finished child (bash `run_sigchld_trap`): the next
-				// waits until this one is done.
-				if sig == crate::bash::signal::Signal::Chld {
-					vp.jobs.chld = vp.jobs.chld.saturating_sub(1);
-					if vp.jobs.chld > 0 {
-						vp.pending_traps = vp.pending_traps.with(sig);
-					}
-				}
-				if start_trap(k, vp, cx, TrapKey::Signal(sig)) {
-					continue;
-				}
-			}
+		// bash's `run_pending_traps` (`trap.c`), one step.
+		if !vp.traps.is_idle() && run_pending_traps(k, vp, cx) {
+			continue;
 		}
 		if !vp.restore_opts.is_empty() {
 			for saved in std::mem::take(&mut vp.restore_opts) {
@@ -3435,6 +3416,222 @@ pub fn current_line(vp: &Vproc) -> u32 {
 /// The vproc's current mode: what its code parses and runs in.
 pub const fn mode_of(vp: &Vproc) -> ModeId {
 	vp.mode
+}
+
+/// How deep bash lets trap actions nest (`evalnest_max`): past this, a
+/// delivery that arrives inside an action starts no further scan.
+const TRAP_NEST_MAX: usize = 128;
+
+/// One step of bash's `run_pending_traps` (`trap.c`): go on with the
+/// innermost scan whose action has ended, or start a new scan for a
+/// delivery no scan has taken, and start the action of the first signal
+/// that scan reaches. `true` when a trap frame was pushed, so the caller
+/// runs the action before the code it interrupted.
+fn run_pending_traps(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
+	// Bash defers a delivery while the shell waits for a foreground
+	// command: `wait_for` runs the pending traps once the child is gone.
+	if vp.waiting_foreground() {
+		return false;
+	}
+	loop {
+		let depth = vp.frames.len();
+		let inner = vp.traps.get().scans.last().map(|scan| scan.depth);
+		match inner {
+			// A `return` out of an action jumped past the scan that
+			// started it: the signals it had not reached stay queued
+			// without `catch_flag`, so they never run (bash's `longjmp`
+			// out of `run_pending_traps`).
+			Some(at) if depth < at => {
+				vp.traps.get().scans.pop();
+			},
+			// Its action is still running: only a fresh delivery nests.
+			Some(at) if depth > at => {
+				if !start_scan(vp) {
+					return false;
+				}
+				if advance_scan(k, vp, cx) {
+					return true;
+				}
+			},
+			// Between two of this scan's actions, or a scan that has just
+			// started: go on with it, and end it when it runs out.
+			Some(_) => {
+				if advance_scan(k, vp, cx) {
+					return true;
+				}
+				vp.traps.get().scans.pop();
+			},
+			None => {
+				if !start_scan(vp) {
+					return false;
+				}
+				if advance_scan(k, vp, cx) {
+					return true;
+				}
+				vp.traps.get().scans.pop();
+			},
+		}
+	}
+}
+
+/// bash's entry to `run_pending_traps`: a scan starts only for a delivery
+/// no scan has taken yet (`catch_flag`), and never recursively while a
+/// `SIGWINCH` action is running with another `SIGWINCH` queued.
+fn start_scan(vp: &mut Vproc) -> bool {
+	let depth = vp.frames.len();
+	let q = vp.traps.get();
+	if !q.catch {
+		return false;
+	}
+	let nested = q.scans.last();
+	if nested.is_some_and(|s| s.running == Some(Signal::Winch)) && q.queued.contains(Signal::Winch) {
+		return false;
+	}
+	let too_deep = nested.is_some() && q.scans.len() >= TRAP_NEST_MAX;
+	q.catch = false;
+	if too_deep {
+		// bash reports `trap handler: maximum trap handler level
+		// exceeded` here and jumps to the top level; this engine has no
+		// jump at this point, so the delivery is dropped instead.
+		return false;
+	}
+	q.scans
+		.push(Scan { cursor: 0, depth, running: None, chld_left: 0 });
+	true
+}
+
+/// Start the next action of the innermost scan: another run of the
+/// `SIGCHLD` action it still owes, or the lowest-numbered signal at or
+/// above its cursor that is queued. `true` when a trap frame was pushed.
+fn advance_scan(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
+	let platform = k.engine.config().platform;
+	loop {
+		let q = vp.traps.get();
+		let Some(scan) = q.scans.last() else {
+			return false;
+		};
+		// The action that just ended. bash clears `pending_traps[sig]`
+		// again here, so a repeat of that signal delivered while its own
+		// action ran is dropped; `SIGCHLD` instead runs once per child
+		// its count had (`run_sigchld_trap`).
+		if let Some(sig) = scan.running {
+			if sig == Signal::Chld && scan.chld_left > 0 {
+				q.scans.last_mut().expect("checked above").chld_left -= 1;
+				if start_trap(k, vp, cx, TrapKey::Signal(Signal::Chld)) {
+					return true;
+				}
+				continue;
+			}
+			q.scans.last_mut().expect("checked above").running = None;
+			if sig == Signal::Chld {
+				q.chld_running = false;
+			} else {
+				q.queued = q.queued.without(sig);
+			}
+			continue;
+		}
+		let cursor = scan.cursor;
+		let next = q
+			.queued
+			.iter()
+			.map(|signal| (u32::from(signal.number(platform)), signal))
+			.filter(|&(number, _)| number >= cursor)
+			.min_by_key(|&(number, _)| number);
+		let Some((number, sig)) = next else {
+			return false;
+		};
+		q.scans.last_mut().expect("checked above").cursor = number + 1;
+		if start_action(k, vp, cx, sig) {
+			return true;
+		}
+	}
+}
+
+/// One iteration of the scan for `sig`: take the delivery and run the
+/// action the signal's disposition names NOW, not the one it had when the
+/// signal arrived. A trap reset to the default makes bash resend the
+fn start_action(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, sig: Signal) -> bool {
+	let key = TrapKey::Signal(sig);
+	if sig == Signal::Chld {
+		// bash's `SIG_INPROGRESS`: a scan started inside the `SIGCHLD`
+		// action leaves the signal queued rather than re-entering it, so
+		// a child the action reaps cannot recurse into it.
+		if vp.traps.get().chld_running {
+			return false;
+		}
+		let owed = std::mem::take(&mut vp.jobs.chld);
+		{
+			let q = vp.traps.get();
+			q.queued = q.queued.without(sig);
+			if owed == 0 {
+				return false;
+			}
+			q.chld_running = true;
+			let scan = q.scans.last_mut().expect("a scan is running");
+			scan.running = Some(sig);
+			scan.chld_left = owed - 1;
+		}
+		if start_trap(k, vp, cx, key) {
+			return true;
+		}
+		let q = vp.traps.get();
+		q.chld_running = false;
+		let scan = q.scans.last_mut().expect("a scan is running");
+		scan.running = None;
+		scan.chld_left = 0;
+		return false;
+	}
+	// bash clears the delivery before it runs the action (and again when
+	// the action ends).
+	{
+		let q = vp.traps.get();
+		q.queued = q.queued.without(sig);
+	}
+	match state::record(cx.store, vp, Key::Trap(key)) {
+		Ok(Some(Record::Trap { action, .. })) if !action.is_empty() => {},
+		// `trap "" SIG` while the signal waited: nothing happens.
+		Ok(Some(_)) => return false,
+		// `trap - SIG` while it waited: the default action happens now.
+		Ok(None) => {
+			resend_default(k, vp, cx, sig);
+			return false;
+		},
+		Err(err) => {
+			k.fail(err);
+			return false;
+		},
+	}
+	set_running(vp, Some(sig));
+	if start_trap(k, vp, cx, key) {
+		return true;
+	}
+	set_running(vp, None);
+	false
+}
+
+/// Mark the signal whose action the innermost scan is running.
+fn set_running(vp: &mut Vproc, sig: Option<Signal>) {
+	if let Some(scan) = vp.traps.get().scans.last_mut() {
+		scan.running = sig;
+	}
+}
+
+/// bash's `kill (getpid (), sig)` for a queued signal whose trap was
+/// reset to the default before its action started: the default action
+/// happens now.
+fn resend_default(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, sig: Signal) {
+	let platform = k.engine.config().platform;
+	match sig.default_action() {
+		DefaultAction::Terminate => exit_shell(k, vp, cx, sig.exit_status(platform)),
+		// A shell without job control ignores the stop signals (bash's
+		// `initialize_job_signals`), so the resend does nothing there.
+		DefaultAction::Stop => {
+			if state::option(&mut k.root, cx.store, vp, OptId::Monitor).unwrap_or(false) {
+				super::set_stopped(vp, true);
+			}
+		},
+		DefaultAction::Continue | DefaultAction::Ignore => {},
+	}
 }
 
 /// Run a configured trap in the interrupted shell, without re-entering it.
