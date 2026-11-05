@@ -850,7 +850,7 @@ const ModelSpecShape = type({
 	name: "string > 0",
 	api: "string > 0",
 	provider: "string > 0",
-	baseUrl: "string > 0",
+	baseUrl: "string",
 	reasoning: "boolean",
 	input: "('text' | 'image')[] > 0",
 	cost: FiniteTokenCost.and({
