@@ -760,6 +760,8 @@ export class CredentialSelector {
 							? { selection, usage: sessionPreferredUsage, usageChecked: true }
 							: { selection, usage: null, usageChecked: false },
 					);
+		// Promotions mutate candidates, so keep the comparator's original order for eviction.
+		const rankedCandidates = [...candidates];
 		// Keep the candidate object: preflight may rebind its positional index
 		// after a peer changes the credential pool.
 		const explicitPin = sessionPinIsExplicit
@@ -781,14 +783,26 @@ export class CredentialSelector {
 				candidate.selection.index === sessionPreferredIndex,
 		);
 		const preferredCandidate = sessionPreferredCandidate === -1 ? undefined : candidates[sessionPreferredCandidate];
-		// A warm automatic pin normally wins. Three policies may evict it, each only
-		// while a sibling is confirmed better: reserve (sibling measured outside
-		// reserve), spent allowance (unblocked sibling with allowance left), and
-		// opt-in reclaim (the sibling ranking picks next has higher priority and is
-		// measured at or above its `reclaimAbovePct`).
+		// A warm automatic pin yields to confirmed better reserve, pacing, spent
+		// allowance or reclaim candidates.
 		const automaticPinWouldBeEvicted = (excludePreflightFailures: boolean): boolean => {
 			if (sessionPinIsExplicit || preferredCandidate === undefined) return false;
-			const rankedWinner = candidates.find(
+			const preferredRank = rankedCandidates.indexOf(preferredCandidate);
+			const preferredPacedUntil = preferredCandidate.pacedUntil;
+			if (
+				preferredPacedUntil !== undefined &&
+				rankedCandidates
+					.slice(0, preferredRank)
+					.some(
+						candidate =>
+							candidate.pacedUntil !== undefined &&
+							candidate.pacedUntil < preferredPacedUntil &&
+							!(excludePreflightFailures && preflightFailures.has(candidate)) &&
+							!this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes),
+					)
+			)
+				return true;
+			const rankedWinner = rankedCandidates.find(
 				candidate =>
 					candidate !== preferredCandidate &&
 					!(excludePreflightFailures && preflightFailures.has(candidate)) &&
@@ -1008,8 +1022,16 @@ export class CredentialSelector {
 		// accounts before reusing a blocked discovery match, without relaxing plan gates.
 		if (enforceAccounts) passes.push({ allowBlocked: false, enforcePlanRequirement, enforceAccounts: false });
 		passes.push({ allowBlocked: true, enforcePlanRequirement, enforceAccounts });
-		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
-		if (enforceAccounts) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
+		const eligiblePreflightFailed =
+			this.#governed() &&
+			!sessionPinIsExplicit &&
+			preferredCandidate !== undefined &&
+			enforcePlanRequirement &&
+			rankedCandidates.some(candidate => preflightFailures.has(candidate) && planGate?.(candidate.usage) === true);
+		if (enforcePlanRequirement && !eligiblePreflightFailed)
+			passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
+		if (enforceAccounts && !eligiblePreflightFailed)
+			passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
 		// Blocked candidates rank earliest-unblock first, which would route a
 		// blocked explicit pin to an equally blocked sibling. Once the strict
 		// pass finds no unblocked account, the user's pin goes first.

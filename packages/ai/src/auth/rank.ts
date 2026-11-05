@@ -20,6 +20,8 @@ export type UsageCandidate<T extends AuthCredential> = {
 	inReserve?: boolean;
 	/** True only when reserve ranking had a usable remaining-fraction measurement. */
 	reserveMeasured?: boolean;
+	/** Governor admissible time for an account paced into the future. */
+	pacedUntil?: number;
 	/**
 	 * Present after ranking: the account's renewable allowance for this request is
 	 * spent, so if it still serves it draws on paid overage such as Codex credits.
@@ -46,8 +48,6 @@ export type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> &
 	blockedUntil?: number;
 	inReserve: boolean;
 	reserveMeasured?: boolean;
-	/** Governor admissible time (ms) for an account paced by the usage governor; earlier admits sooner. */
-	pacedUntil?: number;
 	accountPriority: number;
 	hasPriorityBoost: boolean;
 	allowanceSpent: boolean;
@@ -165,6 +165,7 @@ export function orderUsageRankedCandidates<T extends AuthCredential>(
 		usageChecked: candidate.usageChecked,
 		inReserve: candidate.inReserve,
 		reserveMeasured: candidate.reserveMeasured,
+		pacedUntil: candidate.pacedUntil,
 		allowanceSpent: candidate.allowanceSpent,
 		accountPriority: candidate.accountPriority,
 		reclaimReady: candidate.reclaimReady,
