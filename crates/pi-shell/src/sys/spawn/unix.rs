@@ -242,7 +242,11 @@ impl Scope {
 	/// only member, so the signal goes to its pid (else it is lost: a
 	/// `kill $!` right after the spawn left the program running).
 	fn signal(self, sig: Signal) -> io::Result<()> {
-		let n = i32::from(sig.number(Platform::current()));
+		self.signal_number(sig.number(Platform::current()))
+	}
+
+	fn signal_number(self, number: u8) -> io::Result<()> {
+		let n = i32::from(number);
 		let rc = match self {
 			// SAFETY: plain syscall without pointer arguments.
 			Self::Group(id) => unsafe { libc::killpg(id, n) },
@@ -1617,6 +1621,10 @@ impl ExtProc for UnixProc {
 	fn signal(&mut self, sig: Signal) -> io::Result<()> {
 		self.tracker.lock().signalled(sig);
 		self.scope.signal(sig)
+	}
+
+	fn signal_number(&mut self, number: u8) -> io::Result<()> {
+		self.scope.signal_number(number)
 	}
 
 	fn stop(&mut self) -> io::Result<()> {

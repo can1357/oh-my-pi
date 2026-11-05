@@ -95,6 +95,11 @@ pub trait Host {
 	fn signal_process(&mut self, _pid: i32, _signal: Option<crate::bash::Signal>) -> io::Result<()> {
 		Err(io::ErrorKind::Unsupported.into())
 	}
+	/// Send an unnamed platform signal number to a non-virtual OS target.
+	/// As with [`Host::signal_process`], the default denies the operation.
+	fn signal_process_number(&mut self, _pid: i32, _number: u8) -> io::Result<()> {
+		Err(io::ErrorKind::Unsupported.into())
+	}
 	/// Signals ignored when the shell started (B10). A non-interactive bash
 	/// cannot trap them, and externals inherit them as ignored. Hosts without
 	/// OS signals (08's agent shells) keep the default: none.
@@ -607,6 +612,11 @@ pub trait ExtProc: Send {
 	}
 	/// Signal the process group (Unix) or Job Object (Windows).
 	fn signal(&mut self, sig: Signal) -> io::Result<()>;
+	/// Send a platform signal number without a canonical [`Signal`] name.
+	/// Hosts without native numeric signals deny the operation.
+	fn signal_number(&mut self, _number: u8) -> io::Result<()> {
+		Err(io::ErrorKind::Unsupported.into())
+	}
 	/// Stop the process group (job pause).
 	fn stop(&mut self) -> io::Result<()>;
 	/// Continue after [`ExtProc::stop`].

@@ -248,6 +248,10 @@ impl ExtProc for CountedExt {
 		self.ext.signal(sig)
 	}
 
+	fn signal_number(&mut self, number: u8) -> io::Result<()> {
+		self.ext.signal_number(number)
+	}
+
 	fn stop(&mut self) -> io::Result<()> {
 		self.ext.stop()
 	}

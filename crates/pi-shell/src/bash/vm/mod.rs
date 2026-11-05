@@ -2079,7 +2079,10 @@ impl Shell {
 		}
 		if req & SIGNAL != 0 {
 			for (target, sig) in self.k.ctl.take_signals() {
-				self.deliver(cx, target, sig);
+				match sig {
+					control::SignalRequest::Named(sig) => self.deliver(cx, target, sig),
+					control::SignalRequest::Number(number) => self.deliver_number(cx, target, number),
+				}
 			}
 		}
 		if req & PAUSE != 0 && !self.k.paused {
@@ -2124,6 +2127,11 @@ impl Shell {
 				}
 			}
 		}
+		self.finish_kill(cx, i, status);
+	}
+
+	fn finish_kill(&mut self, cx: &mut Cx<'_>, i: usize, status: i32) {
+		let p = &mut self.procs[i];
 		exec::unwind(&mut self.k.root, cx.store, p, 0);
 		while state::drop_scope(&mut self.k.root, cx.store, p) {}
 		p.out.clear();
@@ -2235,13 +2243,7 @@ impl Shell {
 		}
 	}
 
-	/// Deliver a virtual signal to its target or its configured trap.
-	fn deliver(&mut self, cx: &mut Cx<'_>, target: SigTarget, sig: Signal) {
-		let root = (self.procs[0].vpid, self.procs[0].mode);
-		self
-			.k
-			.emit(cx, root, None, EventData::Signal { sig, target });
-		let platform = self.k.engine.config().platform;
+	fn signal_hits(&mut self, target: SigTarget) -> (bool, Vec<usize>) {
 		let job = match target {
 			SigTarget::Job(id) => self
 				.procs
@@ -2252,8 +2254,8 @@ impl Shell {
 			_ => None,
 		};
 		let job_root = job.map(|(v, _)| v);
-		// kill_pid uses the process group only for job-control jobs. The
-		// own-pipeline rule applies to every signal, including KILL and STOP.
+		// Only job-control jobs own a process group; otherwise walk the
+		// job's own pipeline, not its members' foreground children.
 		let group = job.is_some_and(|(_, control)| control);
 		let members = job_root.filter(|_| !group).map(|v| self.job_members(v));
 		let mut hits: Vec<usize> = (0..self.procs.len())
@@ -2269,6 +2271,55 @@ impl Shell {
 			})
 			.collect();
 		self.callout_trees(&mut hits);
+		(group, hits)
+	}
+
+	/// Unnamed numbers cannot be caught: deliver to native replacements, or
+	/// end the shell image itself without touching trap keys or pending bits.
+	fn deliver_number(&mut self, cx: &mut Cx<'_>, target: SigTarget, number: u8) {
+		let (group, hits) = self.signal_hits(target);
+		for &i in hits.iter().rev() {
+			let program = transparent(&self.procs[i], !matches!(target, SigTarget::Vpid(_)));
+			let alone = !group
+				&& matches!(target, SigTarget::Vpid(_) | SigTarget::Job(_))
+				&& program != Some(true);
+			if !alone {
+				for frame in &mut self.procs[i].frames {
+					if let Some(Live::Ext(ext)) = frame.scratch.as_mut().map(|sc| &mut sc.live) {
+						let _ = ext.signal_number(number);
+					}
+				}
+			}
+			if program.is_some() {
+				if self.procs[i].stopped {
+					set_stopped(&mut self.procs[i], false, true);
+					self.job_changed(cx, self.procs[i].vpid, None);
+				}
+				continue;
+			}
+			if alone {
+				let owner = self.procs[i].vpid;
+				for frame in &mut self.procs[i].frames {
+					if let Some(sc) = frame.scratch.as_mut()
+						&& matches!(sc.live, Live::Ext(_))
+						&& let Live::Ext(child) = std::mem::replace(&mut sc.live, Live::None)
+					{
+						self.surviving_externals.push((owner, child));
+					}
+				}
+			}
+			self.finish_kill(cx, i, 128 + i32::from(number));
+		}
+	}
+
+	/// Deliver a virtual signal to its target or its configured trap.
+	fn deliver(&mut self, cx: &mut Cx<'_>, target: SigTarget, sig: Signal) {
+		let root = (self.procs[0].vpid, self.procs[0].mode);
+		self
+			.k
+			.emit(cx, root, None, EventData::Signal { sig, target });
+		let platform = self.k.engine.config().platform;
+		let (group, hits) = self.signal_hits(target);
 		// Vprocs this signal stopped or continued (job states follow).
 		let mut changed: Vec<(Vpid, Option<Signal>)> = Vec::new();
 		for &i in hits.iter().rev() {

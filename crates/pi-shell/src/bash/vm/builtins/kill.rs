@@ -19,20 +19,21 @@ pub(super) enum Send {
 	Probe,
 	/// A signal.
 	Signal(Signal),
+	/// A valid platform signal number with no canonical name.
+	Number(u8),
 }
 
 impl Send {
 	pub(super) const fn signal(self) -> Option<Signal> {
 		match self {
-			Self::Probe => None,
+			Self::Probe | Self::Number(_) => None,
 			Self::Signal(sig) => Some(sig),
 		}
 	}
 }
 
-/// Bash's `decode_signal` uses signed decimal numbers and its canonical
-/// `initialize_signames` table, not every alias the OS defines. All kill
-/// spellings use this decoder; `display_signal_list` also maps exit statuses.
+/// Bash validates numbers against NSIG, independently of its canonical name
+/// table. All kill spellings use this decoder; listing also maps exit statuses.
 fn parse_signal(spec: &[u8], platform: Platform, prefix: bool, listing: bool) -> Option<Send> {
 	if let Ok(number) = std::str::from_utf8(spec.trim_ascii()).ok()?.parse::<i64>() {
 		let number = if listing && number > 128 {
@@ -40,12 +41,17 @@ fn parse_signal(spec: &[u8], platform: Platform, prefix: bool, listing: bool) ->
 		} else {
 			number
 		};
+		let max = match platform {
+			Platform::Linux => 64,
+			Platform::MacOs | Platform::Windows => 31,
+		};
 		return match number {
 			0 => Some(Send::Probe),
-			_ => u8::try_from(number)
-				.ok()
-				.and_then(|n| Signal::from_number(n, platform))
-				.map(Send::Signal),
+			1.. if number <= max => {
+				let n = u8::try_from(number).ok()?;
+				Some(Signal::from_number(n, platform).map_or(Send::Number(n), Send::Signal))
+			},
+			_ => None,
 		};
 	}
 	if spec.eq_ignore_ascii_case(b"EXIT") {
@@ -160,8 +166,11 @@ pub fn kill(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	for arg in &args[i..] {
 		match target(ctx, arg, send, None) {
 			Ok(Some(target)) => {
-				if let Some(sig) = send.signal() {
-					ControlHandle(ctx.k.ctl.clone()).signal(target, sig);
+				let ctl = ControlHandle(ctx.k.ctl.clone());
+				match send {
+					Send::Probe => {},
+					Send::Signal(sig) => ctl.signal(target, sig),
+					Send::Number(n) => ctl.signal_number(target, n),
 				}
 			},
 			Ok(None) => {},
@@ -244,12 +253,12 @@ pub(super) fn target(
 		Ok(_) if live.is_some() => Ok(live.map(SigTarget::Vpid)),
 		// A finished job's program pid may already name another process.
 		Ok(p) if p >= base || named.is_some_and(|v| v.0 != p) => Err(TargetError::NoSuchProcess),
-		_ => ctx
-			.cx
-			.host
-			.signal_process(pid, send.signal())
-			.map(|()| None)
-			.map_err(TargetError::Host),
+		_ => match send {
+			Send::Number(n) => ctx.cx.host.signal_process_number(pid, n),
+			_ => ctx.cx.host.signal_process(pid, send.signal()),
+		}
+		.map(|()| None)
+		.map_err(TargetError::Host),
 	}
 }
 
@@ -316,6 +325,7 @@ pub fn list(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			Some(send) if numeric => match send {
 				Send::Probe => ctx.out(b"EXIT\n"),
 				Send::Signal(sig) => ctx.out(format!("{sig}\n").as_bytes()),
+				Send::Number(_) => {},
 			},
 			Some(send) => {
 				ctx.out(
