@@ -99,12 +99,10 @@ export interface SpotlightShapeRow {
 	 */
 	holdout: boolean;
 	/**
-	 * Kept whole by the edit gate (an edit-likely read): the model saw `plain`'s page; like a held-out result, the
-	 * token counts and `original` describe the would-be cut.
+	 * A read pi's former edit gate (removed) kept whole, in transcripts journaled while it ran: the model saw
+	 * `plain`'s page; like a held-out result, the token counts and `original` describe the would-be cut.
 	 */
 	gated: boolean;
-	/** pi's edit-likely mark of a read (see `SpotlightEditGate`); null on traces written before pi marked reads. */
-	editLikely: boolean | null;
 	/** `details.spotlight.original` (present only when shaping changed the text). */
 	original: SpotlightOriginalFacts | null;
 	/** Artifact ids the result names (its text's `artifact://N` plus `original.url`); null before the result lands. */
@@ -547,11 +545,6 @@ function optionalCount(value: unknown): number | null {
 	return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-/** A flag the trace may lack (written before pi recorded it): null then. */
-function optionalFlag(value: unknown): boolean | null {
-	return typeof value === "boolean" ? value : null;
-}
-
 function parseSteps(value: unknown): string[] {
 	return Array.isArray(value) ? value.filter((step): step is string => typeof step === "string") : [];
 }
@@ -581,7 +574,6 @@ export function shapeFromEntry(
 		hasDetails: false,
 		holdout: data.holdout === true,
 		gated: data.gated === true,
-		editLikely: optionalFlag(data.editLikely),
 		original: null,
 		artifacts: null,
 		spotlight: {
@@ -628,7 +620,6 @@ export function shapeFromDetails(
 		hasDetails: true,
 		holdout,
 		gated,
-		editLikely: optionalFlag(s.editLikely),
 		original,
 		artifacts: [...artifacts].sort((a, b) => a - b),
 		spotlight: null,
@@ -984,7 +975,6 @@ export class SpotlightCollector {
 		seen.scoreFree ||= row.scoreFree;
 		seen.holdout ||= row.holdout;
 		seen.gated ||= row.gated;
-		seen.editLikely ??= row.editLikely;
 		seen.spotlight ??= row.spotlight;
 		seen.shapeMs ??= row.shapeMs;
 	}

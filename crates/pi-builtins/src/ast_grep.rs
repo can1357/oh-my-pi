@@ -21,7 +21,7 @@ use pi_ast::{
 	},
 };
 use pi_walker::glob::Selector;
-use similar::{ChangeTag, TextDiff};
+use pi_diff::{HunkLine, diff_line_tokens, line_tokens_str, structured_patch_hunk_rows};
 use tokio_util::sync::CancellationToken;
 
 use crate::host::{AsyncUtility, Host};
@@ -387,40 +387,45 @@ fn apply_changes(source: &str, changes: &[Change]) -> String {
 /// new line-number columns.
 fn print_diff(out: &mut Vec<u8>, path: &str, old: &str, new: &str, context: usize) {
 	let _ = writeln!(out, "{path}");
-	let diff = TextDiff::from_lines(old, new);
+	let old_tokens = line_tokens_str(old);
+	let new_tokens = line_tokens_str(new);
+	let runs = diff_line_tokens(&old_tokens, &new_tokens);
 	let column = |index: Option<usize>, width: usize| match index {
 		Some(index) => format!("{:<width$}", index + 1),
 		None => format!("{:width$}", ""),
 	};
-	for group in diff.grouped_ops(context) {
-		let (Some(first), Some(last)) = (group.first(), group.last()) else {
-			continue;
-		};
-		let old_width = last.old_range().end.checked_ilog10().unwrap_or(0) as usize + 1;
-		let new_width = last.new_range().end.checked_ilog10().unwrap_or(0) as usize + 1;
-		let (old_len, new_len) = group
-			.iter()
-			.fold((0, 0), |(old, new), op| (old + op.old_range().len(), new + op.new_range().len()));
-		let _ = writeln!(
-			out,
-			"@@ -{},{old_len} +{},{new_len} @@",
-			first.old_range().start,
-			first.new_range().start
-		);
-		for op in &group {
-			for change in diff.iter_changes(op) {
-				let sign = match change.tag() {
-					ChangeTag::Delete => "-",
-					ChangeTag::Insert => "+",
-					ChangeTag::Equal => " ",
-				};
-				let _ = write!(
-					out,
-					"{} {}│{sign}{change}",
-					column(change.old_index(), old_width),
-					column(change.new_index(), new_width)
-				);
-			}
+	for hunk in structured_patch_hunk_rows(
+		Some(u32::try_from(context).unwrap_or(u32::MAX)),
+		&old_tokens,
+		&new_tokens,
+		&runs,
+	) {
+		let mut old_index = hunk.old_start as usize - 1;
+		let mut new_index = hunk.new_start as usize - 1;
+		let old_len = hunk.old_lines as usize;
+		let new_len = hunk.new_lines as usize;
+		let old_width = (old_index + old_len).checked_ilog10().unwrap_or(0) as usize + 1;
+		let new_width = (new_index + new_len).checked_ilog10().unwrap_or(0) as usize + 1;
+		let _ = writeln!(out, "@@ -{old_index},{old_len} +{new_index},{new_len} @@");
+		for row in hunk.lines {
+			let (old_number, new_number, sign, text) = match row {
+				HunkLine::Removed(_) => (Some(old_index), None, "-", old_tokens[old_index]),
+				HunkLine::Added(_) => (None, Some(new_index), "+", new_tokens[new_index]),
+				HunkLine::Context(_) => {
+					(Some(old_index), Some(new_index), " ", old_tokens[old_index])
+				},
+				// Previews retain the original line terminators and do not print
+				// unified-patch EOF annotations.
+				HunkLine::NoNewlineAtEof => continue,
+			};
+			let _ = write!(
+				out,
+				"{} {}│{sign}{text}",
+				column(old_number, old_width),
+				column(new_number, new_width)
+			);
+			old_index += usize::from(old_number.is_some());
+			new_index += usize::from(new_number.is_some());
 		}
 	}
 }
@@ -1068,6 +1073,30 @@ mod tests {
 			(code, out.as_str()),
 			(0, "big.rs\n3│    foo(1);\n4│    let x4 = 0;\n╴┤\n15│    foo(2);\n16│    let x16 = 0;\n\n"),
 			"{err}"
+		);
+	}
+
+	#[test]
+	fn preview_preserves_unicode_and_unterminated_lines() {
+		let mut out = Vec::new();
+		print_diff(&mut out, "file", "α\n古", "α\n新", 3);
+		assert_eq!(
+			String::from_utf8(out).unwrap(),
+			"file\n@@ -0,2 +0,2 @@\n1 1│ α\n2  │-古  2│+新"
+		);
+	}
+
+	#[test]
+	fn preview_numbers_empty_sides_and_zero_context_hunks() {
+		let mut out = Vec::new();
+		print_diff(&mut out, "file", "", "α\n", 0);
+		assert_eq!(String::from_utf8(out).unwrap(), "file\n@@ -0,0 +0,1 @@\n  1│+α\n");
+
+		let mut out = Vec::new();
+		print_diff(&mut out, "file", "old\nsame\nlast\n", "new\nsame\nend\n", 0);
+		assert_eq!(
+			String::from_utf8(out).unwrap(),
+			"file\n@@ -0,1 +0,1 @@\n1  │-old\n  1│+new\n@@ -2,1 +2,1 @@\n3  │-last\n  3│+end\n"
 		);
 	}
 

@@ -808,7 +808,6 @@ async function wrappedExecute(
 			own,
 			result,
 			signal,
-			targets: () => this.matcherPaths?.(params),
 		});
 	}
 	return result;

@@ -157,6 +157,7 @@ describe("bash shortcut command", () => {
 			expect(executeBash).toHaveBeenCalledTimes(3);
 			expect(executeBash).toHaveBeenNthCalledWith(1, "cd child", expect.any(Function), {
 				excludeFromContext: false,
+				onRecorded: expect.any(Function),
 				useUserShell: true,
 				pty: {
 					cols: expect.any(Number),
@@ -167,6 +168,7 @@ describe("bash shortcut command", () => {
 			});
 			expect(executeBash).toHaveBeenNthCalledWith(2, "cd", expect.any(Function), {
 				excludeFromContext: false,
+				onRecorded: expect.any(Function),
 				useUserShell: true,
 				pty: {
 					cols: expect.any(Number),
@@ -297,7 +299,7 @@ describe("bash shortcut command", () => {
 
 		await controller.handleBashCommand("emit-image");
 
-		const component = present.mock.calls[0]?.[0];
+		const component = present.mock.calls[0]?.[0]?.inner;
 		expect(component).toBeInstanceOf(BashExecutionComponent);
 		if (!(component instanceof BashExecutionComponent)) throw new Error("Expected BashExecutionComponent");
 		const bashComponent = component;
@@ -414,7 +416,7 @@ describe("bash shortcut command", () => {
 
 			await controller.handleBashCommand("cd child");
 
-			const component = present.mock.calls[0]?.[0];
+			const component = present.mock.calls[0]?.[0]?.inner;
 			expect(component).toBeInstanceOf(BashExecutionComponent);
 			expect((component as BashExecutionComponent).getOutput()).toContain("final output");
 			expect(state.cwd).toBe(sourceDir);
@@ -609,7 +611,7 @@ describe("bash shortcut command", () => {
 			expect(state.completedBtwVisible).toBe(true);
 			expect(ctx.applyCwdChange).not.toHaveBeenCalled();
 			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("session transition rejected"));
-			const component = present.mock.calls[0]?.[0];
+			const component = present.mock.calls[0]?.[0]?.inner;
 			if (!(component instanceof BashExecutionComponent)) throw new Error("Expected shell output");
 			expect(component.getOutput()).toContain("cd output");
 		} finally {

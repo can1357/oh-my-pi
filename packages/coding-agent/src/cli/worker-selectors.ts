@@ -5,6 +5,8 @@
  * recognize a worker before importing protocol/runtime graphs whose top-level
  * evaluation is unnecessary in an ordinary interactive process.
  */
+/** Background self-update selector shared by the CLI dispatcher and `cli/auto-update.ts`. */
+export const AUTO_UPDATE_WORKER_ARG = "__omp_worker_auto_update";
 /** Blob-broker selector shared by the CLI dispatcher and worker launcher. */
 export const BLOB_BROKER_WORKER_ARG = "__omp_worker_blob_broker";
 /** Computer-worker selector shared by the CLI dispatcher and worker launcher. */

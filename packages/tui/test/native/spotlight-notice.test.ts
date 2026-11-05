@@ -11,6 +11,7 @@ import {
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { stopSharedSpinnerTicker, ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { setTranscriptActionHandler, type TranscriptAction } from "@oh-my-pi/pi-tui/chat/transcript-actions";
+import { setTranscriptPresenters } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { hasSpotlightOriginal, SpotlightSheet } from "@oh-my-pi/pi-tui/overlays/spotlight-sheet";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -314,6 +315,34 @@ describe("spotlight notice", () => {
 		expect(harness.errors).toEqual([]);
 	});
 
+	it("leaves no notice behind for a call or read a presenter hides", async () => {
+		// Regression guard: a hidden call's notice showing alone in Tern.
+		setTranscriptActionHandler(() => {});
+		setTranscriptPresenters([block => (block.type === "toolCall" && block.id !== "r2" ? "hidden" : undefined)]);
+		try {
+			const group = new ReadToolGroupComponent();
+			for (const id of ["r1", "r2"]) {
+				group.updateArgs({ path: `src/${id}.ts` }, id);
+				group.updateResult(
+					{ content: [{ type: "text", text: REDUCED }], details: { spotlight: { ...SAVED, tool: "read" } } },
+					false,
+					id,
+				);
+			}
+			const transcript = new TranscriptContainer();
+			transcript.addChild(bashCard("c1", REDUCED, SAVED));
+			transcript.addChild(group);
+			harness = await TspHarness.start(tui => tui.addChild(transcript));
+			await harness.render();
+
+			const notices = blocks(harness).filter(block => block.p?.role === "omp.tool.spotlight");
+			expect(notices.map(notice => notice.p?.key)).toEqual(["spotlight:r2"]);
+			expect(harness.errors).toEqual([]);
+		} finally {
+			setTranscriptPresenters([]);
+		}
+	});
+
 	it("opens a generic tool's sheet on its saved output", async () => {
 		const grepCard = (id: string, output: string, spotlight: SpotlightDetails) =>
 			toolCard("grep", { pattern: "refused", path: "src" }, id, output, spotlight);
@@ -600,11 +629,10 @@ describe("spotlight notice", () => {
 		expect(h.errors).toEqual([]);
 	});
 
-	it("draws a read the edit gate kept whole dim, as the would-be cut it traced, not as a saving", () => {
+	it("draws an old transcript's read the edit gate kept whole dim, as the would-be cut it traced, not as a saving", () => {
 		const gated: SpotlightDetails = {
 			...RICH,
 			gated: true,
-			editLikely: true,
 			// A gated trace saves nothing; what it would have saved is `plain`'s tokens less the would-be cut's.
 			savedTokens: 0,
 			plainTokens: RICH.outTokens + 150,

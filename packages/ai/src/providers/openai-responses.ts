@@ -1,3 +1,4 @@
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { resolveResponsesWebSocketPreference } from "@oh-my-pi/pi-catalog/compat/responses-websocket";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
@@ -41,6 +42,7 @@ import {
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { getProxyForUrl } from "../utils/proxy";
+import { toolNamesByWire } from "../utils/tool-names";
 import { isOpenAIResponsesProgressEvent } from "../utils/websocket";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import { waitForRetry } from "../utils/retry-wait";
@@ -100,6 +102,7 @@ import {
 	createInitialResponsesAssistantMessage,
 	createOpenAIStrictToolsState,
 	disableStrictToolsForScope,
+	encodeResponsesToolName,
 	getJuiceValue,
 	getOpenAIPromptCacheKey,
 	getOpenAIResponsesRoutingSessionId,
@@ -119,6 +122,7 @@ import {
 	resolveOpenAIRequestSetup,
 	resolveOpenAIResponsesOutputClamp,
 	resolveReasoningSummaryOption,
+	type ResponsesToolNaming,
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 	throwOpenAIResponsesEventError,
@@ -197,6 +201,11 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	extraBody?: Record<string, unknown>;
 	/** Opt-in GPT-5.6+ prompt-cache policy. Unsupported explicit mode fails locally. */
 	promptCache?: OpenAIPromptCacheOptions;
+	/**
+	 * Send no `X-Stainless-Timeout` for the first-event budget. For adapter
+	 * wrappers whose native client strips the SDK telemetry headers.
+	 */
+	omitStainlessTimeoutHeader?: boolean;
 }
 
 const OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE =
@@ -870,6 +879,9 @@ const streamOpenAIResponsesOnce = (
 				applyReasoningEffortFallbackForRequest(payload);
 				return payload;
 			};
+			// Rebuilt with each request so the table reflects the tools that
+			// survived construction (schema quarantine, strict-mode retry).
+			let wireToolNames: ReadonlyMap<string, string> | undefined;
 			const prepareRequest = async (disableStrictTools = false) => {
 				const builtParams = buildParams(
 					model,
@@ -881,6 +893,7 @@ const streamOpenAIResponsesOnce = (
 					chainState?.canAppend ? chainState.lastParams?.input : undefined,
 				);
 				const { params, trailingScaffoldingItems } = builtParams;
+				wireToolNames = builtParams.toolNamesByWire;
 				if (chainState && !chainState.disabled) params.store = true;
 				applyReasoningEffortFallbackForRequest(params);
 				const chained: OpenAIResponsesChainedParams =
@@ -988,7 +1001,7 @@ const streamOpenAIResponsesOnce = (
 						});
 					}
 					const headersWithTimeout = { ...headers };
-					if (requestTimeoutMs !== undefined) {
+					if (requestTimeoutMs !== undefined && !options?.omitStainlessTimeoutHeader) {
 						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 					}
 					const { events, response, requestId } = await postOpenAIStream<ResponseStreamEvent>({
@@ -1224,6 +1237,7 @@ const streamOpenAIResponsesOnce = (
 							sawTerminalResponseEvent = true;
 						},
 						requestServiceTier: options?.serviceTier,
+						toolNamesByWire: wireToolNames,
 					});
 
 					const localAbortReason = abortTracker.getLocalAbortReason();
@@ -1343,6 +1357,7 @@ const streamOpenAIResponsesOnce = (
 											resumedSawTerminal = true;
 										},
 										requestServiceTier: options?.serviceTier,
+										toolNamesByWire: wireToolNames,
 									},
 								);
 								const resumedLocalAbort = abortTracker.getLocalAbortReason();
@@ -1762,7 +1777,12 @@ export function buildParams(
 	strictToolsScope?: OpenAIStrictToolsScope,
 	disableStrictToolsOverride = false,
 	statefulCacheBaseline?: ResponseInput,
-): { params: OpenAIResponsesSamplingParams; trailingScaffoldingItems: number; strictToolsApplied: boolean } {
+): {
+	params: OpenAIResponsesSamplingParams;
+	trailingScaffoldingItems: number;
+	strictToolsApplied: boolean;
+	toolNamesByWire: ReadonlyMap<string, string> | undefined;
+} {
 	const policy = resolveOpenAICompatPolicy(model, {
 		endpoint: "responses",
 		reasoning: options?.reasoning,
@@ -1780,6 +1800,7 @@ export function buildParams(
 	// retain required text/placeholder replay, including DeepSeek's #10690 fallback.
 	const canReconstructReasoningReplay =
 		!policy.reasoning.filterReasoningHistory || policy.reasoning.allowsSyntheticReasoningContentForToolCalls;
+	const toolNaming = responsesToolNaming(model);
 	const messages = buildResponsesInput({
 		model,
 		context,
@@ -1799,6 +1820,7 @@ export function buildParams(
 			policy.reasoning.requiresReasoningContentForToolCalls &&
 			canReconstructReasoningReplay,
 		repairOrphanOutputs: true,
+		toolNaming,
 	});
 
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
@@ -1869,30 +1891,29 @@ export function buildParams(
 	// `StreamOptions.frequencyPenalty` is intentionally dropped for this provider.
 
 	let strictToolsApplied = false;
+	let wireToolNames: ReadonlyMap<string, string> | undefined;
 	if (context.tools) {
 		const disableStrictTools =
 			disableStrictToolsOverride || isStrictToolsDisabledForScope(providerSessionState, strictToolsScope);
 		const strictMode = !disableStrictTools && model.compat.supportsStrictMode !== false;
-		params.tools = convertTools(context.tools, strictMode, model);
-		strictToolsApplied = params.tools.some(t => (t as { strict?: boolean }).strict === true);
+		const emittedTools: Tool[] = [];
+		const tools = convertTools(context.tools, strictMode, model, undefined, emittedTools);
+		params.tools = tools;
+		strictToolsApplied = tools.some(t => (t as { strict?: boolean }).strict === true);
+		if (toolNaming) {
+			// Built from what was declared, so returned calls map back to their tool
+			// and a quarantined tool cannot cause a false wire-name collision.
+			wireToolNames = toolNamesByWire(
+				emittedTools.filter((_, index) => tools[index]?.type === "function"),
+				name => encodeResponsesToolName(name, toolNaming),
+			);
+		}
 		if (options?.toolChoice) {
 			// Map tool_choice against the tools that survived quarantine, not the
 			// original list: a forced choice for a dropped tool — or "required" when
 			// every tool was dropped — would otherwise send a tool_choice with no
 			// matching tool, which the provider rejects just like the bad schema did (#2652).
-			const emittedNames = new Set(
-				params.tools.map(t => (t as { name?: string }).name).filter((n): n is string => n !== undefined),
-			);
-			const emittedComputer = params.tools.some(tool => tool.type === "computer");
-			const survivingTools =
-				params.tools.length === context.tools.length
-					? context.tools
-					: context.tools.filter(
-							t =>
-								emittedNames.has(t.customWireName ?? t.name) ||
-								(t.native?.type === "computer" && emittedComputer),
-						);
-			const toolChoice = mapOpenAIResponsesToolChoiceForTools(options.toolChoice, survivingTools, model);
+			const toolChoice = mapOpenAIResponsesToolChoiceForTools(options.toolChoice, emittedTools, model);
 			if (toolChoice !== undefined && params.tools.length > 0) {
 				if (
 					typeof toolChoice === "object" &&
@@ -1958,7 +1979,7 @@ export function buildParams(
 		trailingScaffoldingItems = 1;
 	}
 
-	return { params, trailingScaffoldingItems, strictToolsApplied };
+	return { params, trailingScaffoldingItems, strictToolsApplied, toolNamesByWire: wireToolNames };
 }
 
 /**
@@ -2018,6 +2039,19 @@ export function supportsFreeformApplyPatch(
 	return model.applyPatchToolType === "freeform";
 }
 
+/**
+ * Tool-name rule for the model's host (`compat.toolNamePrefix` plus the catalog
+ * name-length limit), or undefined when the host takes names unchanged.
+ */
+function responsesToolNaming(
+	model: Model<"openai-responses" | "azure-openai-responses" | "openai-codex-responses">,
+): ResponsesToolNaming | undefined {
+	const prefix = model.compat.toolNamePrefix;
+	if (!prefix) return undefined;
+	const maxLength = resolveCatalogPolicy(model).toolCallNameMaxLength;
+	return { prefix, maxLength: typeof maxLength === "number" ? maxLength : undefined };
+}
+
 /** @internal Exported for tests. */
 export function mapOpenAIResponsesToolChoiceForTools(
 	choice: ToolChoice | undefined,
@@ -2025,13 +2059,16 @@ export function mapOpenAIResponsesToolChoiceForTools(
 	model: Model<"openai-responses">,
 ): OpenAIResponsesToolChoice {
 	if (!model.compat.supportsToolChoice) return undefined;
+	const naming = responsesToolNaming(model);
 	if (isForcedToolChoice(choice) && !model.compat.supportsForcedToolChoice) {
 		return "auto";
 	}
 	if (typeof choice !== "string" && choice?.type === "computer") {
 		const computer = tools.find(tool => tool.native?.type === "computer");
 		if (!computer) return undefined;
-		return model.supportsComputerUse === true ? { type: "computer" } : { type: "function", name: computer.name };
+		return model.supportsComputerUse === true
+			? { type: "computer" }
+			: { type: "function", name: encodeResponsesToolName(computer.name, naming) };
 	}
 	const mapped = mapToOpenAIResponsesToolChoice(choice);
 	if (!mapped || typeof mapped === "string" || mapped.type !== "function") {
@@ -2044,12 +2081,16 @@ export function mapOpenAIResponsesToolChoiceForTools(
 		: undefined;
 	const offeredTool = customTool ?? directTool;
 	if (offeredTool?.native?.type === "computer") {
-		return model.supportsComputerUse === true ? { type: "computer" } : { type: "function", name: offeredTool.name };
+		return model.supportsComputerUse === true
+			? { type: "computer" }
+			: { type: "function", name: encodeResponsesToolName(offeredTool.name, naming) };
 	}
 	if (!offeredTool) {
 		return undefined;
 	}
-	return customTool ? { type: "custom", name: customTool.customWireName ?? customTool.name } : mapped;
+	return customTool
+		? { type: "custom", name: customTool.customWireName ?? customTool.name }
+		: { ...mapped, name: encodeResponsesToolName(mapped.name, naming) };
 }
 
 /** @internal Exported for tests. */
@@ -2061,12 +2102,16 @@ export function convertTools(
 		logger.warn(
 			`Tool "${toolName}" omitted from the openai-responses request: its parameter schema is invalid for this provider at ${schemaPath} (an enum/const value cannot match its declared type). Other tools are unaffected.`,
 		),
+	/** Filled with the source tool of each returned entry, index-aligned with the result. */
+	emittedTools?: Tool[],
 ): OpenAITool[] {
 	const allowFreeform = supportsFreeformApplyPatch(model);
 	const rejectRootObjectUnion = model.compat.rejectRootObjectUnion;
+	const toolNaming = responsesToolNaming(model);
 	const out: OpenAITool[] = [];
 	for (const tool of tools) {
 		if (tool.native?.type === "computer" && model.supportsComputerUse === true) {
+			emittedTools?.push(tool);
 			out.push({ type: "computer" });
 			continue;
 		}
@@ -2074,6 +2119,7 @@ export function convertTools(
 		// tool as a plain function tool (name/description/schema below), so
 		// function-calling models can still drive the desktop.
 		if (allowFreeform && tool.customFormat) {
+			emittedTools?.push(tool);
 			out.push({
 				type: "custom",
 				// Tool advertises its wire-level name (e.g. `apply_patch`) — the
@@ -2112,9 +2158,10 @@ export function convertTools(
 			onQuarantine(tool.name, violation);
 			continue;
 		}
+		emittedTools?.push(tool);
 		out.push({
 			type: "function",
-			name: tool.name,
+			name: encodeResponsesToolName(tool.name, toolNaming),
 			description: tool.description || "",
 			parameters,
 			// `strict: false` and an omitted `strict` are NOT equivalent for every

@@ -78,7 +78,7 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		};
 		if let Some(search) = search {
 			let cwd = ctx.vp.cwd.clone();
-			for cand in candidates(&search, file, &cwd) {
+			for cand in candidates(&search, file, &cwd, ctx.k.engine.config().platform, &[]) {
 				if let ProbeResult::Stat(Some(st)) =
 					ctx.probe(Probe::Stat { path: cand.clone(), follow: true })?
 					&& st.kind == StatKind::File
@@ -130,17 +130,7 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	} else {
 		text.iter().copied().filter(|&c| c != 0).collect()
 	};
-	if !rest.is_empty()
-		&& let Some(top) = crate::bash::vm::state::scope_count(&ctx.k.root, ctx.vp).checked_sub(1)
-	{
-		crate::bash::vm::state::set_scope_positional(
-			&mut ctx.k.root,
-			ctx.cx.store,
-			ctx.vp,
-			top,
-			Some(rest.to_vec()),
-		);
-	}
+	let restore = source_args(ctx, rest, true)?;
 	// As for `eval`: the file sees the caller's `$?`.
 	push_script(ctx.vp, &text, 1, ScriptKind::Source);
 	// `BASH_SOURCE` shows the name as given.
@@ -151,6 +141,8 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		file.clone(),
 		ctx.line,
 		rest,
+		restore,
+		None,
 	)?;
 	ctx.k
 		.emit_op(ctx.cx, ctx.vp, 0, EventData::SourceEnter { path: path.as_bstr() });
@@ -181,10 +173,22 @@ pub fn zsh_source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		let here = absolute(&cwd, file);
 		if regular(ctx.probe(Probe::Stat { path: here.clone(), follow: true })?) {
 			path = Some(here);
+		} else {
+			// zsh's `try_source_file` runs `FILE.zwc` when FILE is missing;
+			// the engine runs only source text.
+			let dump = {
+				let mut ask = |p: Probe| ctx.probe(p);
+				super::zsh_zcompile::source_dump::<super::Need>(&mut ask, &cwd, file)?
+			};
+			if let Some(dump) = dump {
+				ctx.diag(super::zsh_zcompile::word_code_only(&dump));
+				return done(1);
+			}
 		}
 	} else if path.is_none() {
 		let search = ctx.scalar(b"PATH")?.unwrap_or_default();
-		for dir in search.split(|&c| c == b':') {
+		let separator = crate::bash::vm::probe::path_separator(ctx.k.engine.config().platform);
+		for dir in search.split(|&c| c == separator) {
 			let cand = if dir.is_empty() || dir == b"." {
 				absolute(&cwd, file)
 			} else {
@@ -210,17 +214,11 @@ pub fn zsh_source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		ctx.err(Diag::NoSuchFile { name: file.clone() });
 		return done(127);
 	};
-	if !rest.is_empty()
-		&& let Some(top) = crate::bash::vm::state::scope_count(&ctx.k.root, ctx.vp).checked_sub(1)
-	{
-		crate::bash::vm::state::set_scope_positional(
-			&mut ctx.k.root,
-			ctx.cx.store,
-			ctx.vp,
-			top,
-			Some(rest.to_vec()),
-		);
-	}
+	let restore = source_args(ctx, rest, false)?;
+	// zsh `bin_dot`: under FUNCTION_ARGZERO `$0` is the file as given.
+	let argzero = ctx
+		.zsh_option(crate::bash::zshopt::ZshOpt::Functionargzero)?
+		.then(|| file.clone());
 	push_script(ctx.vp, &text, 1, ScriptKind::Source);
 	crate::bash::vm::callstack::push_source(
 		ctx.k,
@@ -229,64 +227,35 @@ pub fn zsh_source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		file.clone(),
 		ctx.line,
 		rest,
+		restore,
+		argzero,
 	)?;
 	ctx.k
 		.emit_op(ctx.cx, ctx.vp, 0, EventData::SourceEnter { path: path.as_bstr() });
 	Ok(Outcome { status: ctx.vp.status, control: Control::Frame })
 }
 
-/// zsh `autoload -X` in an autoload stub's body (zsh `bin_autoload` with
-/// `-X`, `eval_autoload`): load the running function's definition from
-/// `$fpath`, put it in place of the stub and call it with the stub's
-/// arguments; its status is the stub's.
-pub fn zsh_autoload_x(ctx: &mut Ctx<'_, '_>) -> R {
-	let running = ctx.vp.frames.iter().rev().find_map(|f| match &f.kind {
-		crate::bash::vm::proc::FrameKind::Function { name, .. } => Some(name.clone()),
-		_ => None,
-	});
-	let Some(name) = running else {
-		ctx.usage("-X: not in a function");
-		return done(1);
-	};
-	let fpath = ctx.scalar(b"FPATH")?.unwrap_or_default();
-	let cwd = ctx.vp.cwd.clone();
-	let mut found = None;
-	for dir in fpath.split(|&c| c == b':').filter(|d| !d.is_empty()) {
-		let mut path = BString::from(dir);
-		path.push(b'/');
-		path.extend_from_slice(&name);
-		let path = absolute(&cwd, &path);
-		let regular = matches!(
-			ctx.probe(Probe::Stat { path: path.clone(), follow: true })?,
-			ProbeResult::Stat(Some(st)) if st.kind != StatKind::Dir
-		);
-		if regular
-			&& let ProbeResult::Bytes(Ok(text)) = ctx.probe(Probe::Read { path: path.clone() })?
-		{
-			found = Some((path, text));
-			break;
-		}
+/// The arguments of `. file args` become the positional parameters while
+/// the file runs; what its end puts back. `bash`: outside any function a
+/// file that changes them keeps its own (bash `maybe_pop_dollar_vars`);
+/// zsh `bin_dot` always restores.
+fn source_args(
+	ctx: &mut Ctx<'_, '_>,
+	rest: &[BString],
+	bash: bool,
+) -> Result<Option<Box<crate::bash::vm::callstack::SourceSave>>, super::Need> {
+	use crate::bash::vm::state;
+	if rest.is_empty() {
+		return Ok(None);
 	}
-	let Some((path, text)) = found else {
-		ctx.diag(Diag::Usage {
-			msg: format!("{}: function definition file not found", name.as_bstr()).into(),
-		});
-		return done(1);
+	let args = state::positional(&ctx.k.root, ctx.cx.store, ctx.vp)?;
+	let installed = if bash && state::func_scope(&ctx.k.root, ctx.cx.store, ctx.vp)?.is_none() {
+		Some(rest.to_vec())
+	} else {
+		None
 	};
-	let attrs = match ctx.function(&name)? {
-		Some(Record::Func { attrs, .. }) => attrs,
-		_ => crate::bash::store::Attrs::NONE,
-	};
-	let mode = ctx.vp.mode;
-	if !crate::bash::vm::command::define_autoloaded(
-		ctx.k, ctx.vp, ctx.cx, &name, &text, path, mode, attrs,
-	) {
-		return done(1);
-	}
-	let mut src = name.to_vec();
-	src.extend_from_slice(b" \"$@\"\n");
-	push_script(ctx.vp, &src, ctx.line, ScriptKind::Eval);
-	Ok(Outcome { status: 0, control: Control::Frame })
+	state::set_positional(&mut ctx.k.root, ctx.cx.store, ctx.vp, rest.to_vec());
+	Ok(Some(Box::new(crate::bash::vm::callstack::SourceSave { args, installed })))
 }
 
 /// A bad argument to `return`, `exit`, `break` or `continue` (reported).
@@ -386,6 +355,14 @@ pub fn exit(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		Ok(n) => n.unwrap_or(ctx.vp.status),
 		Err(_) => return done(2),
 	};
+	// An interactive shell with stopped jobs warns once instead.
+	if crate::bash::vm::jobctl::check_before_exit(ctx.k, ctx.cx, ctx.vp) {
+		return done(1);
+	}
+	// zsh `zexit`: an interactive shell saves its history.
+	if ctx.vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
+		super::history::zsh::exit_save_in_builtin(ctx)?;
+	}
 	if let Some(outcome) = bash_logout(ctx, status)? {
 		return Ok(outcome);
 	}
@@ -497,12 +474,21 @@ pub fn zsh_return(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> Outcome {
 
 /// zsh `exit [n]` (`bin_break`): `$?` by default; inside a function the
 /// functions return first (their `always` lists and `EXIT` traps run).
-pub fn zsh_exit(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> Outcome {
+pub fn zsh_exit(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let status = match zsh_arg(ctx, args) {
 		Ok(n) => n.map_or(ctx.vp.status, |n| (n & 0xff) as i32),
-		Err(outcome) => return outcome,
+		Err(outcome) => return Ok(outcome),
 	};
-	Outcome { status, control: Control::Exit }
+	// zsh `zexit`: an interactive shell with jobs left warns
+	// (`checkjobs`) and stays; an `exit` right after leaves.
+	if crate::bash::vm::jobctl::check_before_exit(ctx.k, ctx.cx, ctx.vp) {
+		return Ok(Outcome { status: 0, control: Control::None });
+	}
+	// An interactive login shell sources its logout files first.
+	if let Some(o) = crate::bash::vm::zle::reader::logout_on_exit(ctx, status)? {
+		return Ok(o);
+	}
+	Ok(Outcome { status, control: Control::Exit })
 }
 
 /// `wait [-fn] [-p var] [id …]` (bash `wait.def`): wait for background
@@ -573,7 +559,10 @@ pub fn wait(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			if is_child(ctx, child) {
 				list.push(child);
 			} else {
-				ctx.usage(format!("pid {pid} is not a child of this shell"));
+				// zsh `bin_fg`: silent under `posixbuiltins`.
+				if !zsh || !ctx.zsh_option(crate::bash::zshopt::ZshOpt::Posixbuiltins)? {
+					ctx.usage(format!("pid {pid} is not a child of this shell"));
+				}
 				status = 127;
 			}
 		} else if a.starts_with(b"%") {
@@ -649,6 +638,10 @@ fn is_child(ctx: &mut Ctx<'_, '_>, pid: Vpid) -> bool {
 	if ctx.vp.jobs.by_vpid(pid).is_some_and(|j| !j.inherited) {
 		return true;
 	}
+	// A subshell copies `$!`, not its parent's children.
+	if !ctx.k.started(ctx.cx.store, ctx.vp.vpid, pid) {
+		return false;
+	}
 	match ctx.k.proc_state(ctx.cx.store, pid) {
 		Some(crate::bash::vm::ProcState::Exited(_)) => true,
 		Some(crate::bash::vm::ProcState::Running) => ctx.vp.last_bg.is(pid),
@@ -691,6 +684,7 @@ fn wait_all(ctx: &mut Ctx<'_, '_>, force: bool) -> R {
 	if let Some(last) = ctx.vp.last_bg.vpid()
 		&& ctx.vp.jobs.by_vpid(last).is_none()
 		&& ctx.k.proc_state(ctx.cx.store, last) == Some(crate::bash::vm::ProcState::Running)
+		&& ctx.k.started(ctx.cx.store, ctx.vp.vpid, last)
 	{
 		list.push(last);
 	}
@@ -714,7 +708,8 @@ fn wait_any(ctx: &mut Ctx<'_, '_>, args: &[BString], into: Option<BString>) -> R
 				&& matches!(
 					ctx.k.proc_state(ctx.cx.store, pid),
 					Some(crate::bash::vm::ProcState::Exited(_))
-				))
+				)
+				&& ctx.k.started(ctx.cx.store, ctx.vp.vpid, pid))
 			.then_some(pid)
 		});
 		if let Some(pid) = kept {
@@ -735,7 +730,8 @@ fn wait_any(ctx: &mut Ctx<'_, '_>, args: &[BString], into: Option<BString>) -> R
 					.or_else(|| {
 						(ctx.vp.last_bg.is(p)
 							&& ctx.k.proc_state(ctx.cx.store, p)
-								== Some(crate::bash::vm::ProcState::Running))
+								== Some(crate::bash::vm::ProcState::Running)
+							&& ctx.k.started(ctx.cx.store, ctx.vp.vpid, p))
 						.then_some(p)
 					}),
 				None => super::jobs::spec(ctx, a)
