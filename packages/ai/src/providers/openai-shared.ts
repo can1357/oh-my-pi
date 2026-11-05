@@ -2323,41 +2323,49 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 						supportsComputerUse: options.model.supportsComputerUse === true,
 					},
 				);
-				const sanitizedHistoryItems = rawSanitizedHistoryItems
-					? ensureRequiredResponsesReasoningReplay(
-							adaptResponsesReplayItemsForModel(
-								rawSanitizedHistoryItems,
-								supportsCustomToolCalls,
-								customToolWireNameMap,
-								options.model.supportsComputerUse === true,
-							),
-							assistantMsg.stopReason,
-							options.requiresReasoningReplayForAllTurns ?? false,
-							options.requiresReasoningReplayForToolCalls ?? false,
-						)
-					: undefined;
 				const replayNativeItems =
 					nativeReplayEnabled ||
 					(options.nativeHistory !== undefined &&
 						rawSanitizedHistoryItems !== undefined &&
 						isColdReplayableResponsesTurn(rawSanitizedHistoryItems));
-				if (replayNativeItems && sanitizedHistoryItems) {
+				if (replayNativeItems && rawSanitizedHistoryItems) {
+					const nativeItems = adaptResponsesReplayItemsForModel(
+						rawSanitizedHistoryItems,
+						supportsCustomToolCalls,
+						customToolWireNameMap,
+						options.model.supportsComputerUse === true,
+					);
+					// Calls cut by the output limit have no native item: rebuild them the way the cold path
+					// encodes calls (wire tool names included), and before the required-reasoning repair, so a
+					// turn whose only call was cut still counts as one that calls a tool.
 					const missingCalls = pickUnrecordedResponsesToolCalls(assistantMsg, historyItems);
-					if (missingCalls.length > 0) {
-						const rebuilt = convertResponsesAssistantMessage(
-							{ ...assistantMsg, content: missingCalls },
-							options.model,
-							msgIndex,
-							knownCallIds,
-							false,
-							customCallIds,
-							false,
-							supportsCustomToolCalls,
-							customToolWireNameMap,
-							computerCallIds,
-						);
-						sanitizedHistoryItems.push(...rebuilt);
-					}
+					const turnItems =
+						missingCalls.length > 0
+							? [
+									...nativeItems,
+									...convertResponsesAssistantMessage(
+										{ ...assistantMsg, content: missingCalls },
+										options.model,
+										msgIndex,
+										knownCallIds,
+										false,
+										customCallIds,
+										false,
+										supportsCustomToolCalls,
+										customToolWireNameMap,
+										computerCallIds,
+										false,
+										false,
+										options.toolNaming,
+									),
+								]
+							: nativeItems;
+					const sanitizedHistoryItems = ensureRequiredResponsesReasoningReplay(
+						turnItems,
+						assistantMsg.stopReason,
+						options.requiresReasoningReplayForAllTurns ?? false,
+						options.requiresReasoningReplayForToolCalls ?? false,
+					);
 					// Model-owned replay items can carry reserved control-token
 					// spellings as data (the model writing *about* Harmony); escape the
 					// transport copy just like client turns.
@@ -2378,7 +2386,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 					msgIndex++;
 					continue;
 				}
-				if (!sanitizedHistoryItems) suppressHiddenEmptyFallback = true;
+				if (!rawSanitizedHistoryItems) suppressHiddenEmptyFallback = true;
 			}
 
 			const convertedOutputItems = convertResponsesAssistantMessage(

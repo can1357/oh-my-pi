@@ -2081,6 +2081,93 @@ describe("OpenAI responses history payload", () => {
 			]);
 			expect(input.at(-1)?.type).toBe("function_call_output");
 		});
+
+		// Failure mode: a model that requires reasoning before tool calls receives the cut call's turn
+		// without it and rejects the continuation.
+		it("replays the required reasoning item ahead of a turn whose only call was cut", () => {
+			const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+			const context: Context = {
+				messages: [
+					{ role: "user", content: "Write a file", timestamp: 1 },
+					{
+						...makeAssistantMessage(
+							[
+								{
+									type: "message",
+									role: "assistant",
+									content: [{ type: "output_text", text: "Writing the file" }],
+								},
+							],
+							true,
+							"openai",
+							model.id,
+						),
+						content: [
+							{ type: "text" as const, text: "Writing the file" },
+							{ type: "toolCall" as const, id: "call_B|fc_B", name: "write", arguments: { path: "b" } },
+						],
+						stopReason: "length" as const,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "call_B|fc_B",
+						toolName: "write",
+						content: [{ type: "text", text: "Stopped at output limit" }],
+						isError: true,
+						timestamp: 2,
+					},
+				],
+			};
+			const input = buildResponsesInput({
+				model,
+				context,
+				strictResponsesPairing: true,
+				supportsImageDetailOriginal: true,
+				nativeHistory: { replay: true, filterReasoning: false },
+				repairOrphanOutputs: true,
+				requiresReasoningReplayForToolCalls: true,
+			});
+			expect(input.map(item => (isIssue5002Record(item) ? (item.type ?? item.role) : item))).toEqual([
+				"user",
+				"reasoning",
+				"message",
+				"function_call",
+				"function_call_output",
+			]);
+		});
+
+		// Failure mode: on a host that prefixes tool names (Muse Code), the rebuilt call goes out under the
+		// bare name the request never declares, next to the native call under the prefixed one.
+		it("rebuilds a cut call under the host's prefixed tool name", () => {
+			const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+			const context = cutContext("openai", model.id);
+			const assistant = context.messages[1];
+			if (assistant?.role !== "assistant") throw new Error("expected assistant turn");
+			// The host answered under the prefixed names the request declared.
+			assistant.providerPayload = createOpenAIResponsesHistoryPayload(
+				"openai",
+				[
+					{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Writing files" }] },
+					{ type: "function_call", call_id: "call_A", id: "fc_A", name: "_write", arguments: '{"path":"a"}' },
+				],
+				true,
+			);
+			const input = buildResponsesInput({
+				model,
+				context,
+				strictResponsesPairing: true,
+				supportsImageDetailOriginal: true,
+				nativeHistory: { replay: true, filterReasoning: false },
+				repairOrphanOutputs: true,
+				toolNaming: { prefix: "_", maxLength: undefined },
+			});
+			expect(listResponsesToolItems(input)).toEqual([
+				["function_call", "call_A", "_write"],
+				["function_call", "call_B", "_write"],
+				["function_call_output", "call_A", undefined],
+				["function_call_output", "call_B", undefined],
+			]);
+		});
 	});
 
 	it("drops malformed tool names from same-model native history replay", async () => {
