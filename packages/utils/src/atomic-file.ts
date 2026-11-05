@@ -488,8 +488,7 @@ export async function moveFileAcrossDevices(source: string, destination: string)
 export async function replaceFileAcrossDevices(source: string, destination: string): Promise<void> {
 	// The destination arrives resolved when `publishStagedFile` falls back here;
 	// a direct caller gets the plain behaviour, like every other non-config path.
-	const target = destination;
-	const staging = `${target}.${process.pid}.${crypto.randomUUID()}.move`;
+	const staging = `${destination}.${process.pid}.${crypto.randomUUID()}.move`;
 	try {
 		await fs.promises.copyFile(source, staging);
 		// The copy carries the source's mode, which may be read-only; fsync needs
@@ -500,7 +499,7 @@ export async function replaceFileAcrossDevices(source: string, destination: stri
 		} finally {
 			fs.closeSync(fd);
 		}
-		await publishStagedFile(staging, target);
+		await publishStagedFile(staging, destination);
 	} catch (error) {
 		await fs.promises.rm(staging, { force: true });
 		throw error;

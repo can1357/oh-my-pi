@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
-import { replaceConfigFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
+import { replaceConfigFileAtomically, resolveConfigWriteTarget } from "@oh-my-pi/pi-utils/atomic-file";
 import type { SessionInfo } from "./session-listing";
 
 const PINS_FILENAME = "session-pins.json";
@@ -50,15 +50,21 @@ async function updateSessionPin(
 ): Promise<boolean> {
 	const filePath = pinsPath(agentDir);
 	await fs.mkdir(agentDir, { recursive: true });
-	return withFileLock(filePath, async () => {
+	// Resolve BEFORE locking, and lock what the write will land on. The lock is
+	// named after the path it is given, so two profiles whose pins files link at
+	// one target would otherwise hold two different locks while writing one
+	// file, and one profile's pin would be lost — in exactly the arrangement
+	// this following exists to support.
+	const target = await resolveConfigWriteTarget(filePath);
+	return withFileLock(target, async () => {
 		const pinned = await loadPinnedSessionIds(agentDir);
 		const wasPinned = pinned.has(sessionId);
 		if (next(wasPinned)) pinned.add(sessionId);
 		else pinned.delete(sessionId);
-		const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+		const tmpPath = `${target}.${process.pid}.${randomUUID()}.tmp`;
 		try {
 			await fs.writeFile(tmpPath, JSON.stringify([...pinned], null, "\t"), { encoding: "utf-8", mode: 0o600 });
-			await replaceConfigFileAtomically(tmpPath, filePath);
+			await replaceConfigFileAtomically(tmpPath, target);
 		} catch (error) {
 			await fs.rm(tmpPath, { force: true }).catch(() => {});
 			throw error;

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import {
 	loadPinnedSessionIds,
@@ -182,5 +183,33 @@ describe("session-pins", () => {
 		expect((JSON.parse(raw) as string[]).length).toBe(ids.length);
 		const files = await fs.readdir(tempDir);
 		expect(files.some(f => f.endsWith(".tmp"))).toBe(false);
+	});
+
+	// Two profiles whose pins files link at one target now write one file. The
+	// lock is named after the path it is given, so locking the link would let
+	// both profiles into the read-modify-write at once and lose a pin.
+	it("keeps both pins when two profiles share one pins file through a symlink", async () => {
+		// Inside an omp root, which is the only place a config write follows a
+		// link; under a bare temp directory it would not, and the test would pass
+		// while observing nothing.
+		const previousAgentDir = getAgentDir();
+		setAgentDir(tempDir);
+		const shared = path.join(tempDir, "shared");
+		const profileA = path.join(tempDir, "a");
+		const profileB = path.join(tempDir, "b");
+		for (const dir of [shared, profileA, profileB]) await fs.mkdir(dir, { recursive: true });
+		const target = path.join(shared, "session-pins.json");
+		await fs.writeFile(target, "[]");
+		await fs.symlink(target, path.join(profileA, "session-pins.json"));
+		await fs.symlink(target, path.join(profileB, "session-pins.json"));
+
+		await Promise.all([setSessionPinned("session-A", true, profileA), setSessionPinned("session-B", true, profileB)]);
+
+		try {
+			expect([...(await loadPinnedSessionIds(shared))].sort()).toEqual(["session-A", "session-B"]);
+			expect((await fs.lstat(path.join(profileA, "session-pins.json"))).isSymbolicLink()).toBe(true);
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
 	});
 });
