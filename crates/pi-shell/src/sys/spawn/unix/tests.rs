@@ -3,7 +3,8 @@
 
 use std::{
 	io,
-	os::unix::process::CommandExt,
+	io::Read as _,
+	os::{fd::FromRawFd as _, unix::process::CommandExt},
 	sync::Arc,
 	task::{Context, Poll, Wake, Waker},
 	thread,
@@ -60,7 +61,7 @@ fn the_descriptor_closer_reaches_above_both_lowered_limits() {
 
 /// The last arm, the check of each descriptor below
 /// [`descriptor_bound`](super::descriptor_bound), which runs where the
-/// kernel can neither close a range nor list `/proc/self/fd`.
+/// kernel can neither close a range nor list the descriptors it has.
 #[test]
 fn the_unlisted_descriptor_check_reaches_above_both_lowered_limits() {
 	assert_eq!(closer_reaches_600(true), 0, "descriptor 600 stayed open (1) or setup failed (2, 3)");
@@ -73,6 +74,8 @@ fn the_unlisted_descriptor_check_reaches_above_both_lowered_limits() {
 fn closer_reaches_600(bounded_only: bool) -> i32 {
 	let file = std::fs::File::open("/dev/null").unwrap();
 	let source = std::os::fd::AsRawFd::as_raw_fd(&file);
+	// Before the fork, as the spawn path reads it.
+	let mut plan = super::ClosePlan::new();
 	// SAFETY: the forked child calls only async-signal-safe functions
 	// (fcntl, getrlimit, setrlimit, close, close_range, _exit) and the
 	// closing under test, which is written for a forked child, then exits.
@@ -96,11 +99,11 @@ fn closer_reaches_600(bounded_only: bool) -> i32 {
 			}
 			let keep = [0, 1, 2];
 			if bounded_only {
-				for fd in 0..super::descriptor_bound() {
+				for fd in 0..plan.bound {
 					super::close_unless_kept(fd, &keep, -1);
 				}
 			} else {
-				super::close_descriptors_except(&keep, super::descriptor_bound());
+				super::close_descriptors_except(&keep, &mut plan);
 			}
 			libc::_exit(i32::from(libc::fcntl(high, libc::F_GETFD) >= 0));
 		}
@@ -155,6 +158,63 @@ fn the_hosts_sweep_bound_comes_from_the_number_its_kernel_publishes() {
 	let (soft, hard) = crate::sys::rlimit::get(Rlimit::Nofile).unwrap();
 	let want = published.max(soft.unwrap_or(0)).max(hard.unwrap_or(0));
 	assert_eq!(i64::from(super::descriptor_bound()), i64::try_from(want).unwrap());
+}
+
+/// Every deferred background spawn closes the host's descriptors in its
+/// forked child before its first redirection, so that closing may not
+/// cost one call per number the kernel could give out: that is a
+/// million `close(2)` calls on a host whose ceiling is a million, and
+/// `cmd <fifo &` pays it each time. Whichever arm this operating system
+/// has — whole ranges, the kernel's own listing, `closefrom` — the cost
+/// must follow the descriptors, not the ceiling.
+#[test]
+fn closing_the_hosts_descriptors_costs_no_call_per_possible_number() {
+	let (calls, bound) = closer_call_count();
+	assert!(bound >= 600, "the bound under test is {bound}");
+	assert!(calls <= 16, "{calls} descriptor-closing calls for a bound of {bound}");
+}
+
+/// In a forked child: close the host's descriptors through
+/// [`close_descriptors_except`](super::close_descriptors_except) and
+/// report the number of calls it made through a pipe the child keeps
+/// open across it. The count and the bound the last resort would have
+/// used.
+fn closer_call_count() -> (u32, i32) {
+	let mut ends = [0i32; 2];
+	// SAFETY: `pipe` writes two descriptors into the array it is given.
+	assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0, "pipe");
+	let [read, write] = ends;
+	let mut plan = super::ClosePlan::new();
+	let bound = plan.bound;
+	let mut keep = [0, 1, 2, write];
+	keep.sort_unstable();
+	// SAFETY: the forked child calls only async-signal-safe functions —
+	// the closing under test, which is written for a forked child, then
+	// `write` and `_exit`.
+	let pid = unsafe { libc::fork() };
+	assert!(pid >= 0, "fork");
+	if pid == 0 {
+		// SAFETY: as above.
+		unsafe {
+			let calls = super::close_descriptors_except(&keep, &mut plan).to_ne_bytes();
+			libc::write(write, calls.as_ptr().cast(), calls.len());
+			libc::_exit(0);
+		}
+	}
+	// SAFETY: the parent's copy of the write end, owned here; the child
+	// has its own, and the read below ends when the child exits.
+	unsafe { libc::close(write) };
+	let mut counted = [0u8; 4];
+	// SAFETY: `read` is open and owned here; `from_raw_fd` takes it.
+	let mut pipe = unsafe { std::fs::File::from_raw_fd(read) };
+	pipe
+		.read_exact(&mut counted)
+		.expect("the child reported its count");
+	let mut status = 0;
+	// SAFETY: waits for the child forked above.
+	assert_eq!(unsafe { libc::waitpid(pid, &raw mut status, 0) }, pid);
+	assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "child status {status}");
+	(u32::from_ne_bytes(counted), bound)
 }
 
 struct Unpark(thread::Thread);

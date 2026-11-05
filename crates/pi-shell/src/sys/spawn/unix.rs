@@ -1077,18 +1077,19 @@ fn kernel_descriptor_ceiling() -> Option<u64> {
 /// child's check of every descriptor when it can neither close whole
 /// ranges nor list them, from the kernel's `ceiling` and the current
 /// `soft` and `hard` open-file limits (`None` for `RLIM_INFINITY`).
-/// Never below 1,048,576, Linux's default `nr_open` and the highest
-/// number a process gets unless an administrator raises it; above it
-/// when a limit is higher. The current limits cannot bound it on their
-/// own: both of them can be lowered under a descriptor already open,
-/// which stays open and valid above them.
+///
+/// The kernel's ceiling bounds it: no descriptor number ever reaches
+/// the most the kernel will give out. The current limits cannot bound
+/// it on their own, because both of them can be lowered under a
+/// descriptor already open, which stays open and valid above them; a
+/// limit an administrator raised above the published ceiling does raise
+/// it. Where the system publishes no ceiling the limits are all there
+/// is, so the last resort stands: 1,048,576, Linux's default
+/// `fs.nr_open`.
 fn sweep_bound(ceiling: Option<u64>, soft: Option<u64>, hard: Option<u64>) -> i32 {
-	const MOST: u64 = 1 << 20;
-	let bound = ceiling
-		.unwrap_or(0)
-		.max(soft.unwrap_or(0))
-		.max(hard.unwrap_or(0))
-		.max(MOST);
+	const UNPUBLISHED: u64 = 1 << 20;
+	let limits = soft.unwrap_or(0).max(hard.unwrap_or(0));
+	let bound = ceiling.unwrap_or(UNPUBLISHED).max(limits);
 	i32::try_from(bound).unwrap_or(i32::MAX)
 }
 
@@ -1098,51 +1099,114 @@ fn descriptor_bound() -> i32 {
 	sweep_bound(kernel_descriptor_ceiling(), soft, hard)
 }
 
+/// What the forked child needs to close the host's descriptors, read
+/// and reserved by the parent before the fork: the child may neither
+/// allocate nor read a file.
+struct ClosePlan {
+	/// One past the highest number the child's last resort must reach,
+	/// from [`sweep_bound`].
+	bound:   i32,
+	/// macOS: room for the kernel's own list of this process's open
+	/// descriptors, which the child fills after the fork.
+	#[cfg(target_os = "macos")]
+	listing: Vec<libc::proc_fdinfo>,
+}
+
+impl ClosePlan {
+	fn new() -> Self {
+		Self {
+			bound: descriptor_bound(),
+			#[cfg(target_os = "macos")]
+			listing: descriptor_listing_room(),
+		}
+	}
+}
+
+/// Room for `proc_pidinfo` to write this process's descriptor list
+/// into, with space for the ones the host's other threads may open
+/// between here and the fork. A list that fills it to its end may have
+/// been cut short, and the child falls back rather than trust it.
+#[cfg(target_os = "macos")]
+fn descriptor_listing_room() -> Vec<libc::proc_fdinfo> {
+	const SPARE: usize = 64;
+	// SAFETY: a null buffer of length zero asks the kernel for the size
+	// it would write and writes nothing.
+	let size = unsafe {
+		libc::proc_pidinfo(libc::getpid(), libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0)
+	};
+	let listed = usize::try_from(size).unwrap_or(0) / size_of::<libc::proc_fdinfo>();
+	vec![libc::proc_fdinfo { proc_fd: -1, proc_fdtype: 0 }; listed + SPARE]
+}
+
 /// Close every descriptor that is not one of `keep` (the command's own,
 /// installed before), so the process holds only what the command will
 /// have: the host's descriptors go whether or not `exec` would close them.
-/// `keep` is sorted and without repeats.
+/// `keep` is sorted and without repeats. Returns the number of
+/// descriptor-closing calls it made, which is what a deferred background
+/// spawn pays before its first redirection.
 ///
-/// Closes the ranges between the kept descriptors where the kernel can
-/// (`close_range`, Linux 5.9); else closes the ones `/proc/self/fd` lists;
-/// else checks each descriptor below `bound`. Async-signal-safe: for a
-/// forked child.
-fn close_descriptors_except(keep: &[i32], bound: i32) {
+/// Each operating system gets the cheapest way it has, and none of them
+/// costs a call per number the kernel could ever give out unless the
+/// system offers nothing better: whole ranges where the kernel closes
+/// ranges (`close_range`, Linux 5.9), the descriptors it lists where it
+/// lists them (`/proc/self/fd`, and `proc_pidinfo` on macOS, which has
+/// neither call), everything above the highest kept number in one call
+/// where there is `closefrom` (the BSDs), and only failing all of those
+/// one `close(2)` per number below `plan.bound`. Async-signal-safe: for
+/// a forked child.
+fn close_descriptors_except(keep: &[i32], plan: &mut ClosePlan) -> u32 {
 	#[cfg(target_os = "linux")]
-	if close_descriptor_ranges_except(keep) {
-		return;
+	if let Some(calls) = close_descriptor_ranges_except(keep) {
+		return calls;
 	}
 	#[cfg(target_os = "linux")]
-	if close_listed_descriptors_except(keep) {
-		return;
+	if let Some(calls) = close_listed_descriptors_except(keep) {
+		return calls;
 	}
-	for fd in 0..bound {
-		close_unless_kept(fd, keep, -1);
+	#[cfg(any(
+		target_os = "freebsd",
+		target_os = "dragonfly",
+		target_os = "netbsd",
+		target_os = "openbsd"
+	))]
+	if let Some(calls) = close_descriptors_above_except(keep) {
+		return calls;
 	}
+	#[cfg(target_os = "macos")]
+	if let Some(calls) = close_listed_descriptors_except(keep, &mut plan.listing) {
+		return calls;
+	}
+	(0..plan.bound)
+		.map(|fd| close_unless_kept(fd, keep, -1))
+		.sum()
 }
 
 /// Close every descriptor outside the sorted `keep` with `close_range`,
 /// one call per gap between kept numbers and one for everything above the
-/// last; whether every call succeeded. A kernel without the call answers
-/// `ENOSYS` on the first one and nothing is closed. Unlike a bound taken
-/// from a limit, this reaches a descriptor opened before both limits were
-/// lowered under it.
+/// last; the number of calls made, or `None` when one of them failed. A
+/// kernel without the call answers `ENOSYS` on the first one and nothing
+/// is closed. Unlike a bound taken from a limit, this reaches a
+/// descriptor opened before both limits were lowered under it.
 #[cfg(target_os = "linux")]
-fn close_descriptor_ranges_except(keep: &[i32]) -> bool {
+fn close_descriptor_ranges_except(keep: &[i32]) -> Option<u32> {
+	let mut calls = 0;
 	let mut from: u32 = 0;
 	for &fd in keep {
 		let Ok(fd) = u32::try_from(fd) else {
 			continue;
 		};
-		if fd > from && !close_descriptor_range(from, fd - 1) {
-			return false;
+		if fd > from {
+			if !close_descriptor_range(from, fd - 1) {
+				return None;
+			}
+			calls += 1;
 		}
 		let Some(next) = fd.checked_add(1) else {
-			return true;
+			return Some(calls);
 		};
 		from = next;
 	}
-	close_descriptor_range(from, u32::MAX)
+	close_descriptor_range(from, u32::MAX).then_some(calls + 1)
 }
 
 /// `close_range(from, to, 0)`: whether it closed them.
@@ -1153,26 +1217,71 @@ fn close_descriptor_range(from: u32, to: u32) -> bool {
 	unsafe { libc::syscall(libc::SYS_close_range, from, to, 0) == 0 }
 }
 
-/// Close `fd` unless it is in `keep` or is `dir`. Closing a descriptor that
-/// is not open fails with `EBADF`, which changes nothing.
-fn close_unless_kept(fd: i32, keep: &[i32], dir: i32) {
+/// Close the numbers the sorted `keep` leaves free below the highest of
+/// them one at a time, then everything above it with `closefrom`, which
+/// the BSDs and their relations have where `close_range` is missing; the
+/// number of calls made, or `None` where the kernel refused. Like
+/// `close_range`, and unlike a bound taken from a limit, this reaches a
+/// descriptor opened before both limits were lowered under it.
+#[cfg(any(
+	target_os = "freebsd",
+	target_os = "dragonfly",
+	target_os = "netbsd",
+	target_os = "openbsd"
+))]
+fn close_descriptors_above_except(keep: &[i32]) -> Option<u32> {
+	let mut calls = 0;
+	let mut from = 0;
+	for &fd in keep {
+		if fd < from {
+			continue;
+		}
+		while from < fd {
+			calls += close_unless_kept(from, keep, -1);
+			from += 1;
+		}
+		from = fd.saturating_add(1);
+	}
+	// FreeBSD's `closefrom` returns nothing and cannot fail; the others
+	// answer -1 for a kernel that refused, and then the caller checks
+	// each number instead.
+	#[cfg(target_os = "freebsd")]
+	// SAFETY: a plain descriptor call; it closes descriptors and writes
+	// nothing through a pointer.
+	unsafe {
+		libc::closefrom(from);
+	}
+	// SAFETY: as above.
+	#[cfg(not(target_os = "freebsd"))]
+	if unsafe { libc::closefrom(from) } < 0 {
+		return None;
+	}
+	Some(calls + 1)
+}
+
+/// Close `fd` unless it is in `keep` or is `dir`; whether it called
+/// `close(2)`. Closing a descriptor that is not open fails with `EBADF`,
+/// which changes nothing.
+fn close_unless_kept(fd: i32, keep: &[i32], dir: i32) -> u32 {
 	if fd == dir || keep.contains(&fd) {
-		return;
+		return 0;
 	}
 	// SAFETY: a plain descriptor call.
 	unsafe { libc::close(fd) };
+	1
 }
 
 /// [`close_descriptors_except`] over the descriptors `/proc/self/fd`
-/// lists; whether it listed them all.
+/// lists; the number of calls made, or `None` when it could not list
+/// them all.
 #[cfg(target_os = "linux")]
-fn close_listed_descriptors_except(keep: &[i32]) -> bool {
+fn close_listed_descriptors_except(keep: &[i32]) -> Option<u32> {
 	// SAFETY: the path is NUL-terminated.
 	let dir = unsafe {
 		libc::open(c"/proc/self/fd".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC)
 	};
 	if dir < 0 {
-		return false;
+		return None;
 	}
 	let listed = close_descriptors_listed_in(dir, keep);
 	// SAFETY: `dir` is open and owned here.
@@ -1180,14 +1289,45 @@ fn close_listed_descriptors_except(keep: &[i32]) -> bool {
 	listed
 }
 
+/// [`close_descriptors_except`] over the descriptors the kernel lists
+/// for this process, where there is neither `close_range` nor
+/// `closefrom` nor `/proc`; the number of calls made, or `None` when the
+/// kernel refused or filled `room` to its end, where the list may be
+/// short of the truth.
+///
+/// `room` was reserved before the fork: `proc_pidinfo` is one call into
+/// the kernel that writes into it and allocates nothing, so the child
+/// may make it.
+#[cfg(target_os = "macos")]
+fn close_listed_descriptors_except(keep: &[i32], room: &mut [libc::proc_fdinfo]) -> Option<u32> {
+	let size = i32::try_from(size_of_val(room)).unwrap_or(i32::MAX);
+	// SAFETY: the kernel writes at most `size` bytes into `room`, which
+	// is valid for that length.
+	let written = unsafe {
+		libc::proc_pidinfo(libc::getpid(), libc::PROC_PIDLISTFDS, 0, room.as_mut_ptr().cast(), size)
+	};
+	if written <= 0 || written >= size {
+		return None;
+	}
+	let listed = usize::try_from(written).ok()? / size_of::<libc::proc_fdinfo>();
+	Some(
+		room[..listed]
+			.iter()
+			.map(|open| close_unless_kept(open.proc_fd, keep, -1))
+			.sum(),
+	)
+}
+
 /// Read the descriptor listing open at `dir` with `getdents64` into a
 /// buffer on the stack and close each descriptor it names that is not in
-/// `keep`, except `dir`. Whether it read the listing to its end: a
-/// failed read other than `EINTR`, or a record it cannot parse, leaves
-/// descriptors unchecked, and the caller checks them another way.
+/// `keep`, except `dir`; the number of calls made, or `None` when it did
+/// not read the listing to its end: a failed read other than `EINTR`, or
+/// a record it cannot parse, leaves descriptors unchecked, and the
+/// caller checks them another way.
 #[cfg(target_os = "linux")]
-fn close_descriptors_listed_in(dir: i32, keep: &[i32]) -> bool {
+fn close_descriptors_listed_in(dir: i32, keep: &[i32]) -> Option<u32> {
 	let mut buffer = [0u8; 4096];
+	let mut calls = 0;
 	loop {
 		// SAFETY: `buffer` is valid for its length; the kernel writes whole
 		// `linux_dirent64` records into it.
@@ -1197,20 +1337,20 @@ fn close_descriptors_listed_in(dir: i32, keep: &[i32]) -> bool {
 			if errno() == libc::EINTR {
 				continue;
 			}
-			return false;
+			return None;
 		};
 		if read == 0 {
-			return true;
+			return Some(calls);
 		}
 		// Each record: inode (8 bytes), offset (8), length (2), type (1), name.
 		let mut at = 0;
 		while at < read {
 			if at + 19 > read {
-				return false;
+				return None;
 			}
 			let length = usize::from(u16::from_ne_bytes([buffer[at + 16], buffer[at + 17]]));
 			if length < 19 || at + length > read {
-				return false;
+				return None;
 			}
 			let name = &buffer[at + 19..at + length];
 			let fd = name
@@ -1220,7 +1360,7 @@ fn close_descriptors_listed_in(dir: i32, keep: &[i32]) -> bool {
 			if name.first().is_some_and(u8::is_ascii_digit)
 				&& let Some(fd) = fd
 			{
-				close_unless_kept(fd, keep, dir);
+				calls += close_unless_kept(fd, keep, dir);
 			}
 			at += length;
 		}
@@ -1251,7 +1391,9 @@ fn fork_redirs(
 	let mask = prog.umask as libc::mode_t;
 	let limits = limits(prog);
 	let raw: Vec<(i32, RawFd)> = fds.iter().map(|(t, fd)| (*t, fd.as_raw_fd())).collect();
-	let fd_bound = descriptor_bound();
+	// The kernel's numbers and the room the child needs, read here: the
+	// forked child may neither allocate nor read a file.
+	let mut plan = ClosePlan::new();
 	// Sorted and without repeats before the fork: the child closes the
 	// ranges between these numbers and may not allocate or sort.
 	let own: Vec<i32> = {
@@ -1314,7 +1456,7 @@ fn fork_redirs(
 			// descriptors, as in the child bash forks: every host descriptor
 			// goes now, so a lowered open-file limit leaves room for their
 			// opens and a duplication of a descriptor the command lacks fails.
-			close_descriptors_except(&own, fd_bound);
+			close_descriptors_except(&own, &mut plan);
 			libc::umask(mask);
 			for (n, &ign) in ignore.iter().enumerate().skip(1) {
 				let n = n as i32;
