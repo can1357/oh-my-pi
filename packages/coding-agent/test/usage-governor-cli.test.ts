@@ -413,26 +413,44 @@ describe("usage governor CLI proof: scenarios", () => {
 	}, 90_000);
 
 	test("stale data: after invalidate a failing usage endpoint leaves its account unpaced and undelayed", async () => {
-		// Account a is paced while its usage is known. After invalidation its usage endpoint fails.
-		const specs = [
-			account("govplan", "a", { usedFraction: 0.5, resetInMs: 40_000 }),
-			account("govplan", "b", { usedFraction: 0, resetInMs: 58_000 }),
-		];
+		// Keep one account so the post-failure request must use the account whose usage failed.
+		// At 85% used and a reset 58 seconds away, its pacing line remains crossed for about 53 seconds.
+		const specs = [account("govplan", "a", { usedFraction: 0.85, resetInMs: 58_000 })];
 		const proof = await GovernorProof.create(specs, { enabled: true });
 		try {
-			expect((await proof.runOmp(["-p", "warm"])).exitCode).toBe(0);
 			const warm = windowsFor(governorOf(await proof.usageJson()), specs[0].email);
 			expect(warm.some(window => window.state === "paced")).toBe(true);
 			const credentialId = warm.find(window => window.credentialId !== undefined)?.credentialId;
 			expect(credentialId).toBeDefined();
 
+			// The same account must really wait while usage is healthy, not just display a paced state.
+			const healthy = proof.spawnOmp(["-p", "healthy usage"]);
+			try {
+				expect(
+					await awaitCondition(() => proof.readLedger().waits.some(wait => wait.credentialId === credentialId), 30_000),
+				).toBe(true);
+				expect(proof.chats()).toEqual([]);
+			} finally {
+				healthy.kill("SIGINT");
+				await healthy.exited;
+			}
+
 			proof.fake.patch("a", { failUsage: true });
 			expect((await proof.invalidateUsage()).exitCode).toBe(0);
+			const recordMark = proof.fake.records.length;
 			const mark = proof.readLedger().waits.length;
 			expect((await proof.runOmp(["-p", "after failure"])).exitCode).toBe(0);
+			const records = proof.fake.records.slice(recordMark);
+			const failedUsage = records.findIndex(record => record.kind === "usage" && record.label === "a");
+			const sent = records.findIndex(record => record.kind === "chat" && record.label === "a");
+			expect(failedUsage).toBeGreaterThanOrEqual(0);
+			expect(sent).toBeGreaterThan(failedUsage);
+			const chat = records[sent];
+			expect(chat.resetsAt).toBeDefined();
+			expect(specs[0].usedFraction).toBeGreaterThan(allowedAt(chat.resetsAt!, chat.atMs));
 
 			const after = windowsFor(governorOf(await proof.usageJson()), specs[0].email);
-			// The failing account is not shown as paced: its windows are stale or unknown.
+			// A failed usage fetch may omit the account; any reported windows must not claim it is paced.
 			expect(after.some(window => window.state === "paced")).toBe(false);
 			expect(after.every(window => window.state === "stale" || window.state === "unknown")).toBe(true);
 			// Nothing waited on account a after the failure.
