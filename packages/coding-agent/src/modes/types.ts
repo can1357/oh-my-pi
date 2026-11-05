@@ -32,6 +32,7 @@ import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
+import type { AgentViewSession } from "../session/agent-session-handle";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import type { HistoryStorage } from "../session/history-storage";
@@ -50,6 +51,7 @@ import type { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-executio
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import type { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import type { PresentedBlock } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import type { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import type { HookSelectorComponent, HookSelectorOptions } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import type { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
@@ -200,9 +202,9 @@ export interface InteractiveModeContext {
 	/** The current session display name / title. */
 	readonly sessionName: string | undefined;
 	/** Session the transcript/editor/status are attached to: the focused agent's, else `session`. */
-	readonly viewSession: AgentSession;
+	readonly viewSession: AgentViewSession;
 	/** Bind idle maintenance to the given view (default: the current one), or release the UI activity binding on null. */
-	syncIdleMaintenanceView(target?: AgentSession | null): void;
+	syncIdleMaintenanceView(target?: AgentViewSession | null): void;
 	/** Id of the focused agent, undefined when the main session is attached. */
 	readonly focusedAgentId: string | undefined;
 	/** Set while a tool-approval dialog owns the composer: its drafts steer the main session awaiting that approval, even from a focused agent's view. */
@@ -252,6 +254,17 @@ export interface InteractiveModeContext {
 	 * the link browser closes while it covers the screen.
 	 */
 	rebuildTranscriptScrollback(): void;
+	/**
+	 * Run `redraw` over `blocks`; it returns whether the block's display changed. Live blocks (and
+	 * every block in Tern's native view) just repaint; a changed block with rows already in terminal
+	 * scrollback rebuilds the scrollback once for the batch, since a plain terminal cannot repaint them.
+	 */
+	redrawTranscriptBlocks(blocks: readonly Component[], redraw: (block: Component) => boolean): void;
+	/**
+	 * Ask the extension transcript presenters again for every block (only the parts `ids` selects,
+	 * when given) and redraw those whose display changed.
+	 */
+	refreshTranscriptPresentation(ids?: ReadonlySet<string>): void;
 	/** Flip the pinned jump list between its collapsed few and the full list. */
 	togglePinnedHudExpanded(): void;
 	/** Point the inline hover band at a click-candidate id (or clear it). */
@@ -269,7 +282,10 @@ export interface InteractiveModeContext {
 	collabController: CollabController;
 	/** Owned room; use {@link collabController}.host for current-session reuse and links. */
 	collabHost?: CollabHost;
-	collabGuest?: CollabGuestLink;
+	/** The collab session this process joined as a guest; set with {@link setCollabGuest}. */
+	readonly collabGuest?: CollabGuestLink;
+	/** Join (`guest`) or leave (`undefined`) a collab session as a guest. */
+	setCollabGuest(guest: CollabGuestLink | undefined): void;
 	eventController: EventController;
 	eventBus?: EventBus;
 	/** Root-scoped bus carrying this session tree's `task:subagent:*` frames. */
@@ -328,9 +344,9 @@ export interface InteractiveModeContext {
 	/** Settled user/assistant components reusable across post-compaction transcript rebuilds. */
 	transcriptMessageComponents: WeakMap<AgentMessage, Component>;
 	pendingTools: Map<string, ToolExecutionHandle>;
-	pendingBashComponents: BashExecutionComponent[];
+	pendingBashComponents: PresentedBlock<BashExecutionComponent>[];
 	bashComponent: BashExecutionComponent | undefined;
-	pendingPythonComponents: EvalExecutionComponent[];
+	pendingPythonComponents: PresentedBlock<EvalExecutionComponent>[];
 	pythonComponent: EvalExecutionComponent | undefined;
 	isPythonMode: boolean;
 	streamingComponent: AssistantMessageComponent | undefined;
@@ -535,7 +551,7 @@ export interface InteractiveModeContext {
 	updateEditorBorderColor(): void;
 	rebuildChatFromMessages(options?: { reuseSettledComponents?: boolean }): void;
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;
-	reloadTodos(source?: AgentSession): Promise<void>;
+	reloadTodos(source?: AgentViewSession): Promise<void>;
 	toggleTodoExpansion(): void;
 	setTodoExpanded(expanded: boolean): void;
 	// Command handling

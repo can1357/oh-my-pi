@@ -1,8 +1,8 @@
-import type { AgentSession } from "../../session/agent-session";
+import type { AgentViewSession } from "../../session/agent-session-handle";
 import { type ConfiguredThinkingLevel, parseCliThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 
 /** Text shown when the active model has no thinking dial. */
-export function noThinkingMessage(session: AgentSession): string {
+export function noThinkingMessage(session: AgentViewSession): string {
 	const model = session.model;
 	return `${model ? `${model.provider}/${model.id}` : "The current model"} has no adjustable thinking level.`;
 }
@@ -13,7 +13,7 @@ export function noThinkingMessage(session: AgentSession): string {
  * text/ACP handler and the TUI handler.
  */
 export function resolveThinkingArgument(
-	session: AgentSession,
+	session: AgentViewSession,
 	args: string,
 ): { level: ConfiguredThinkingLevel } | { error: string } {
 	if (!session.model?.reasoning) return { error: noThinkingMessage(session) };

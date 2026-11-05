@@ -630,7 +630,9 @@ export const __providerInFlightForTesting = {
 	},
 };
 
-function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal" | "maxInFlightRequests">>(
+function withProviderInFlightLimit<
+	TOptions extends Pick<StreamOptions, "signal" | "maxInFlightRequests" | "beforeDispatch">,
+>(
 	model: Model<Api>,
 	options: TOptions | undefined,
 	dispatch: (limited: boolean) => AssistantMessageEventStream,
@@ -640,7 +642,10 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 	// provider exits are covered by one wrap. Official first-party providers are
 	// exempt (see `healLeakedThinking`); healing is otherwise idempotent.
 	const limit = resolveProviderInFlightLimit(model.provider, options);
-	if (limit === undefined) return healLeakedThinking(model, dispatch(false));
+	if (limit === undefined) {
+		options?.beforeDispatch?.();
+		return healLeakedThinking(model, dispatch(false));
+	}
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
@@ -675,6 +680,7 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 			if (options?.signal?.aborted) {
 				throw options.signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
 			}
+			options?.beforeDispatch?.();
 			const inner = healLeakedThinking(model, dispatch(true));
 			let terminalEvent: AssistantMessageEvent | undefined;
 			for await (const event of inner) {
@@ -1223,7 +1229,6 @@ function streamSimpleRequest<TApi extends Api>(
 			apiKey?: string,
 			credentialId?: number,
 			oauthIdentity?: OAuthRequestIdentity,
-			credentialStoreEpoch?: number,
 		): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
@@ -1240,11 +1245,6 @@ function streamSimpleRequest<TApi extends Api>(
 						if ("partial" in event) event.partial.credentialId = credentialId;
 						else if (event.type === "done") event.message.credentialId = credentialId;
 						else event.error.credentialId = credentialId;
-					}
-					if (credentialStoreEpoch !== undefined) {
-						if ("partial" in event) event.partial.credentialStoreEpoch = credentialStoreEpoch;
-						else if (event.type === "done") event.message.credentialStoreEpoch = credentialStoreEpoch;
-						else event.error.credentialStoreEpoch = credentialStoreEpoch;
 					}
 					if (!emittedReplayUnsafeEvent && event.type === "start") {
 						bufferedEvents.push(event);
@@ -1275,7 +1275,6 @@ function streamSimpleRequest<TApi extends Api>(
 				if (!outer.done) {
 					const result = await inner.result();
 					if (credentialId !== undefined) result.credentialId = credentialId;
-					if (credentialStoreEpoch !== undefined) result.credentialStoreEpoch = credentialStoreEpoch;
 					outer.end(result);
 				}
 			} catch (error) {
@@ -1308,13 +1307,11 @@ function streamSimpleRequest<TApi extends Api>(
 			let lastKey: string | undefined;
 			let credentialId: number | undefined;
 			let oauthIdentity: OAuthRequestIdentity | undefined;
-			let credentialStoreEpoch: number | undefined;
 			try {
 				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
 				lastKey = resolvedApiKeyBearer(resolved);
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
-				credentialStoreEpoch = typeof resolved === "string" ? undefined : resolved?.credentialStoreEpoch;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1336,7 +1333,7 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(lastKey, credentialId, oauthIdentity, credentialStoreEpoch);
+			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
 			if (!failure) return;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
@@ -1344,7 +1341,6 @@ function streamSimpleRequest<TApi extends Api>(
 				if (signal?.aborted) break;
 				let nextCredentialId: number | undefined;
 				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
-				let nextCredentialStoreEpoch: number | undefined;
 				const nextKey = await resolveNextAuthRetryKey(
 					retryState,
 					apiKeyResolver,
@@ -1353,11 +1349,10 @@ function streamSimpleRequest<TApi extends Api>(
 					resolved => {
 						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
-						nextCredentialStoreEpoch = typeof resolved === "string" ? undefined : resolved?.credentialStoreEpoch;
 					},
 				);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity, nextCredentialStoreEpoch);
+				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
 				if (!next) return;
 				failure = next;
 			}
@@ -1456,15 +1451,16 @@ function streamSimpleRequest<TApi extends Api>(
 	// GitLab Duo Workflow - IDE workflow protocol + WebSocket action bridge
 	if (model.api === "gitlab-duo-agent") {
 		// Does not route through withProviderInFlightLimit, so heal explicitly.
-		return withThinkingLoopGuard(model, requestOptions, opts =>
-			healLeakedThinking(
+		return withThinkingLoopGuard(model, requestOptions, opts => {
+			opts?.beforeDispatch?.();
+			return healLeakedThinking(
 				model,
 				streamGitLabDuoWorkflow(model as Model<"gitlab-duo-agent">, context, {
 					...opts,
 					apiKey,
 				}),
-			),
-		);
+			);
+		});
 	}
 
 	// Kimi Code - route to dedicated handler that wraps OpenAI or Anthropic API
@@ -1812,9 +1808,11 @@ function mapOptionsForApi<TApi extends Api>(
 		codexSseMaxAttempts: options?.codexSseMaxAttempts,
 		providerSessionState: options?.providerSessionState,
 		parentSessionId: options?.parentSessionId,
+		statefulResponses: options?.statefulResponses,
 		minimizeEffort: options?.minimizeEffort,
 		liveSteering: options?.liveSteering,
 		maxInFlightRequests: options?.maxInFlightRequests,
+		beforeDispatch: options?.beforeDispatch,
 		onPayload: options?.onPayload,
 		onResponse: options?.onResponse,
 		onSseEvent: options?.onSseEvent,
@@ -2021,7 +2019,7 @@ function mapOptionsForApi<TApi extends Api>(
 					forceReasoningOff: options?.forceReasoningOff,
 					textVerbosity: options?.textVerbosity,
 					promptCache: options?.promptCache,
-					statefulResponses: options?.statefulResponses,
+					preferWebsockets: options?.preferWebsockets,
 				});
 			}
 			return castApi<"openai-completions">({
@@ -2063,8 +2061,8 @@ function mapOptionsForApi<TApi extends Api>(
 				forceReasoningOff: options?.forceReasoningOff,
 				textVerbosity: options?.textVerbosity,
 				promptCache: options?.promptCache,
-				statefulResponses: options?.statefulResponses,
 				storeResponses: options?.storeResponses,
+				preferWebsockets: options?.preferWebsockets,
 			});
 
 		case "azure-openai-responses":
@@ -2075,7 +2073,6 @@ function mapOptionsForApi<TApi extends Api>(
 				serviceTier: options?.serviceTier,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 				promptCache: options?.promptCache,
-				statefulResponses: options?.statefulResponses,
 				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
 				forceReasoningOff: options?.forceReasoningOff,
 			});

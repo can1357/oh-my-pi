@@ -498,12 +498,16 @@ export function resolveRetryFallbackChainKey(
 	// let yaml insertion order steal the live role's chain. Prefer the hint,
 	// then `default` when it also matches. A role assigned the live model at a
 	// different explicit effort (spawn `effort`, `/thinking`) still owns it,
-	// but only after every role whose effort matches.
+	// but only after every role whose effort matches. Model-kind roles (`web`,
+	// `judge`, ...) never match by model: a shared model assignment does not
+	// mean the chat session owns the kind role (kind chains may hold chat
+	// models too), so it must not adopt that chain. They apply only through the
+	// explicit role hint above.
 	if (roleHint && Array.isArray(context.chains[roleHint])) return roleHint;
 	let matchedRole: string | undefined;
 	let effortRole: string | undefined;
 	for (const key in context.chains) {
-		if (isRetryFallbackModelKey(key)) continue;
+		if (isRetryFallbackModelKey(key) || isKindRole(key)) continue;
 		const kind = selectorMatchKind(
 			getRetryFallbackPrimarySelector(context, key),
 			parsedCurrent,

@@ -10,7 +10,6 @@ import type {
 	AssistantRetryRecovery,
 	AssistantRetryRecoveryKind,
 	CodexCompactionContext,
-	CredentialRankingStrategy,
 	Effort,
 	Model,
 	ModelUsageHealth,
@@ -18,12 +17,10 @@ import type {
 	ToolChoice,
 	AnthropicFallbackCreditHandle,
 } from "@oh-my-pi/pi-ai";
-import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
-import { credentialBlockScopesForRequest } from "@oh-my-pi/pi-ai/auth/blocks";
+import { calculateRateLimitBackoffMs, isBillingCapUsageLimit, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
-import { defaultRankingStrategy } from "@oh-my-pi/pi-ai/usage/registry";
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
@@ -47,7 +44,7 @@ import {
 	modelSupportsEffortCeiling,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
-import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import type { EditModeSetting } from "../edit/settings";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ResetRecoveryResult } from "./codex-auto-reset";
 import type {
@@ -81,7 +78,6 @@ import {
 	validateRetryFallbackChains,
 } from "./retry-fallback-chains";
 import { describeUsageFallback } from "./retry-fallback-reason";
-import { kRequestModelOrigin, type OriginStampedAssistantMessage } from "./request-model-origin";
 import { getLatestCompactionEntry } from "./session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
@@ -311,12 +307,12 @@ export interface TurnRecoveryHost {
 	sessionMessageAlreadyPersisted(message: AssistantMessage): boolean;
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
 	/** Edit mode resolved for the active model and settings, captured before a fallback swap. */
-	resolveActiveEditMode(): EditMode;
+	resolveActiveEditMode(): EditModeSetting;
 	/**
 	 * Rebuilds the model-dependent base system prompt after a swap. Retry fallback passes
 	 * `retryFallback`, which rebuilds only for an edit-mode change so the cached prompt survives.
 	 */
-	syncAfterModelChange(previousEditMode: EditMode, options?: { retryFallback?: boolean }): Promise<void>;
+	syncAfterModelChange(previousEditMode: EditModeSetting, options?: { retryFallback?: boolean }): Promise<void>;
 	resetCurrentResponsesProviderSession(reason: string): void;
 	/**
 	 * Spend an eligible saved reset for the blocked provider pool.
@@ -379,9 +375,6 @@ type RetryPolicyOptions = {
 };
 
 type UsageLimitOutcome = {
-	/** The model the block was recorded against — the failing model, not necessarily the active one (#17098). */
-	attributedProvider: string;
-	attributedModelId: string;
 	switchedCredential: boolean;
 	retryAfterMs: number;
 	retryAtMs: number | undefined;
@@ -391,50 +384,9 @@ type UsageLimitOutcome = {
 	reportResetAtMs: number | undefined;
 };
 
-/**
- * Whether a usage-limit block recorded against the attributed model still covers the
- * active model's credential pool. Uses the same per-provider ranking strategy the
- * mark itself used, so the comparison cannot drift from how blocks are scoped:
- * an unscoped provider (e.g. ordinary Anthropic models) blocks provider-wide, while
- * scoped providers (Codex `spark` vs `chat`, Claude tier lines) only cover models in
- * the same block scope. The mark writes the attributed request's primary block
- * scope, while a request CHECKS every scope `credentialBlockScopesForRequest`
- * expands (the strategy's `blockScopes` entries plus the model-policy scope), so
- * coverage is "the written scope is among the active request's checked scopes" —
- * a strategy whose requests check a compat/shared scope still sees blocks written
- * under that scope even when the primaries differ. The strategy is resolved through
- * the ACTIVE AuthStorage's resolver (default: the bundled strategies) — an embedder
- * overriding `rankingStrategyResolver` marks scopes through that resolver, and a
- * coverage decision made against the static default could disagree with what the
- * mark wrote. Exposed for tests.
- */
-export function usageLimitBlockCoversModel(
-	attributedProvider: string,
-	attributedModelId: string,
-	activeProvider: string,
-	activeModelId: string,
-	resolveStrategy: (provider: string) => CredentialRankingStrategy | undefined = defaultRankingStrategy,
-): boolean {
-	if (attributedProvider !== activeProvider) return false;
-	const strategy = resolveStrategy(attributedProvider);
-	const attributedContext = { modelId: attributedModelId };
-	const writtenScope = strategy?.blockScope?.(attributedContext);
-	// No primary scope means the mark is provider-wide (unscoped strategies),
-	// which covers every model of the provider. An empty string is the same
-	// provider-wide marker: CredentialBlocks folds "" into the bare provider
-	// key (scopedBackoffKey), which every request of the provider checks,
-	// while credentialBlockScopesForRequest omits the empty value — so a
-	// literal includes("") would mislabel the live outcome as stale.
-	if (writtenScope === undefined || writtenScope === "") return true;
-	const activeContext = { modelId: activeModelId };
-	const activeScopes = credentialBlockScopesForRequest(
-		activeProvider,
-		strategy,
-		activeContext,
-		strategy?.blockScope?.(activeContext),
-	);
-	return activeScopes.includes(writtenScope);
-}
+/** Request-time provider for the main Agent; not serialized into session history. */
+export const kUsageLimitRequestProvider = Symbol("usage-limit-request-provider");
+type IssuedProviderAssistantMessage = AssistantMessage & { [kUsageLimitRequestProvider]?: string };
 
 /** Owns terminal-stop recovery, automatic retries, and fallback routing. */
 export class TurnRecovery {
@@ -461,7 +413,6 @@ export class TurnRecovery {
 	#usageReserveApproval: { model: string; sessionId: string } | undefined;
 	#pendingRetryErrors: PendingRetryError[] = [];
 	#usageLimitOutcomes = new WeakMap<AssistantMessage, Promise<UsageLimitOutcome>>();
-	#unattributedUsageLimits = new WeakSet<AssistantMessage>();
 	#emptyStopRetryCount = 0;
 	#unexpectedStopRetryCount = 0;
 	#malformedFunctionCallRetryCount = 0;
@@ -871,30 +822,6 @@ export class TurnRecovery {
 		return this.#handleRetryableError(message, options);
 	}
 
-	/** Whether the failed request's known pool excludes the current model. */
-	#usageLimitOriginOutOfPool(message: AssistantMessage, activeModel: Model): boolean {
-		const origin = (message as OriginStampedAssistantMessage)[kRequestModelOrigin];
-		if (
-			origin &&
-			(origin.source === "mismatched" || origin.provider !== message.provider || origin.modelId !== message.model)
-		) {
-			// The response is not an attestation of the request's credential pool.
-			return true;
-		}
-		// A registry miss at recovery time proves nothing about the request's
-		// source. Without an issuance-time registry ticket, preserve the old
-		// active-pool treatment for SDK and historical messages.
-		if (origin?.source !== "registry") return false;
-		if (message.provider === activeModel.provider && message.model === activeModel.id) return false;
-		return !usageLimitBlockCoversModel(
-			message.provider,
-			message.model,
-			activeModel.provider,
-			activeModel.id,
-			this.#host.modelRegistry.authStorage.rankingStrategyResolver,
-		);
-	}
-
 	/**
 	 * Records a usage-limit failure before replay eligibility decides whether the
 	 * failed turn may be discarded. Returns whether credential recovery switched
@@ -905,76 +832,29 @@ export class TurnRecovery {
 		const id = this.#classifyRetryMessage(message);
 		const activeModel = this.#host.model();
 		if (!activeModel || !AIError.is(id, AIError.Flag.UsageLimit)) return false;
+		// Only the request-time provider proves a delayed error belongs to the old pool.
+		const requestProvider = (message as IssuedProviderAssistantMessage)[kUsageLimitRequestProvider];
+		if (requestProvider !== undefined && requestProvider !== activeModel.provider) return false;
 
 		let recorded = this.#usageLimitOutcomes.get(message);
 		if (!recorded) {
 			const errorMessage = message.errorMessage || "Unknown error";
-			// Attribute the block to the model that actually returned the error,
-			// not the active selection: an in-flight run of the previous provider
-			// can settle with a usage-limit error after a fallback switch already
-			// moved the session, and marking the switched-in provider would block
-			// its healthy account for the failing provider's quota window (#17098).
-			// Only the issuance-time ticket can distinguish a removed registry
-			// model from an SDK model under a provider the registry also knows.
-			const origin = (message as OriginStampedAssistantMessage)[kRequestModelOrigin];
-			const failingModel =
-				origin?.source !== "external" &&
-				origin?.source !== "mismatched" &&
-				(message.provider !== activeModel.provider || message.model !== activeModel.id)
-					? this.#host.modelRegistry.find(message.provider, message.model)
-					: undefined;
-			// If a known origin no longer resolves, reuse the active selection
-			// only when its block scope still covers the active credential pool.
-			// Otherwise neither the mark nor the later retry policy may spend
-			// this old provider/model's quota error on the healthy selection.
-			if (!failingModel && this.#usageLimitOriginOutOfPool(message, activeModel)) {
-				this.#unattributedUsageLimits.add(message);
-				return false;
-			}
-			const attributed = failingModel ?? activeModel;
-			// Parse the retry timing as the attributed provider: naive `reset at`
-			// stamps follow the provider's own catalog timezone (Z.AI/GLM +08:00),
-			// and reading the active provider's policy after a switch would skew
-			// the stored block by hours.
-			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage, attributed.provider);
+			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
 			const retryAfterMs = parsedRetryAfterMs ?? calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
 			recorded = (async (): Promise<UsageLimitOutcome> => {
 				const outcome = await this.#host.modelRegistry.authStorage.limits.markReached(
-					attributed.provider,
+					activeModel.provider,
 					this.#host.sessionId(),
 					{
 						retryAfterMs,
 						// Provider-stated timing only when the error text parsed;
 						// the 30-minute fallback is a guess.
 						providerTimed: parsedRetryAfterMs !== undefined,
-						baseUrl: attributed.baseUrl,
-						modelId: attributed.id,
-						// Park the block on the credential that actually served the
-						// failing request: a delayed settle can race a sibling
-						// rotation that already moved the provider's session
-						// affinity, and the affinity-resolved target would block a
-						// healthy credential for the failing account's window.
-						// Fence the id to the store that issued it: a live
-						// auth.broker.url change (AuthStorage.replaceStore) retires
-						// the old store's row ids, the replacement store can
-						// reuse the same numeric id for a different account, and
-						// each store's epoch is based at its own random value, so
-						// an independent store (an SDK getApiKey override backed
-						// by another AuthStorage) never validates its row ids
-						// here — any epoch mismatch drops the pin and falls back
-						// to affinity resolution. Messages without an epoch
-						// (older sessions, resolvers that cannot attest one)
-						// keep the pin.
-						credentialId:
-							message.credentialStoreEpoch === undefined ||
-							message.credentialStoreEpoch === this.#host.modelRegistry.authStorage.credentialStoreEpoch
-								? message.credentialId
-								: undefined,
+						baseUrl: activeModel.baseUrl,
+						modelId: activeModel.id,
 					},
 				);
 				return {
-					attributedProvider: attributed.provider,
-					attributedModelId: attributed.id,
 					switchedCredential: outcome.switched,
 					retryAfterMs,
 					retryAtMs: outcome.retryAtMs,
@@ -1000,11 +880,9 @@ export class TurnRecovery {
 		return this.#promptAgentWithIdleRetry(messages, options, onClaimed);
 	}
 
-	/** Parses provider retry and rate-limit reset hints into a delay. Pass the error's
-	 * attributed provider when it may differ from the active one: naive `reset at`
-	 * stamps follow the provider's own catalog timezone. */
-	parseRetryAfterMsFromError(errorMessage: string, provider?: string): number | undefined {
-		return this.#parseRetryAfterMsFromError(errorMessage, provider);
+	/** Parses provider retry and rate-limit reset hints into a delay. */
+	parseRetryAfterMsFromError(errorMessage: string): number | undefined {
+		return this.#parseRetryAfterMsFromError(errorMessage);
 	}
 
 	/**
@@ -2752,15 +2630,12 @@ export class TurnRecovery {
 		return true;
 	}
 
-	#parseRetryAfterMsFromError(errorMessage: string, provider?: string): number | undefined {
+	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {
 		// Single call into the provider-aware parser: it merges every supported
 		// form (account resets, retry-after-ms, legacy retry-after /
 		// x-ratelimit-reset text) by longest-wins, so a shorter reset phrase
 		// can never shadow a longer retry signal carried in the same message.
-		// Provider-aware: naive `reset at` stamps must be read with the
-		// provider's own catalog timezone; callers pass the attributed
-		// provider when the error may originate from a non-active one.
-		return extractProviderRetryHint(provider ?? this.#host.model()?.provider, errorMessage);
+		return extractProviderRetryHint(this.#host.model()?.provider, errorMessage);
 	}
 
 	/**
@@ -2827,6 +2702,12 @@ export class TurnRecovery {
 
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
+		const requestProvider = (message as IssuedProviderAssistantMessage)[kUsageLimitRequestProvider];
+		const oldProviderLimitFor = (model: Model | undefined): boolean =>
+			requestProvider !== undefined &&
+			model !== undefined &&
+			AIError.is(id, AIError.Flag.UsageLimit) &&
+			requestProvider !== model.provider;
 		const preserveFailedTurn =
 			options?.preserveFailedTurn === true ||
 			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall) || AIError.retriable(id)) &&
@@ -2843,51 +2724,9 @@ export class TurnRecovery {
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		let recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
-		const retryPolicyModel = this.#host.model();
-		const unattributedOriginOutOfPool =
-			AIError.is(id, AIError.Flag.UsageLimit) &&
-			(this.#unattributedUsageLimits.has(message) ||
-				(retryPolicyModel !== undefined && this.#usageLimitOriginOutOfPool(message, retryPolicyModel)));
-		// Provider-aware parse: a recorded outcome pins the error's origin, so
-		// naive `reset at` stamps read with the attributed provider's timezone
-		// even while the session is served by another model.
-		let parsedRetryAfterMs = this.#parseRetryAfterMsFromError(
-			errorMessage,
-			recordedUsageLimitOutcome?.attributedProvider,
-		);
-		// #17098: an in-flight run of a previous provider settles after a
-		// fallback switch already moved the session. The outcome and the
-		// error text's timing describe the failing provider's accounts, so
-		// they must not redeem resets, wait out quota windows, or cool down
-		// selectors for the model now serving the session — that model is
-		// itself the recovery. Drop both, leaving the plain same-model
-		// backoff retry below. A resolved origin's block was already written
-		// against that origin; an unresolved out-of-pool origin was not marked.
-		// Same-pool attribution is NOT stale: when the attributed model's block
-		// scope covers the active model (Anthropic's unscoped blocks, Codex's
-		// chat scope shared by ordinary Codex models), the block the mark
-		// installed still covers the active model's pool, so the
-		// rotation/redemption signals stay valid and must not be discarded.
-		// Scoped mismatches (Codex `spark` vs ordinary `chat`, distinct Claude
-		// tiers) are stale exactly like cross-provider ones.
-		const strategyResolver = this.#host.modelRegistry.authStorage.rankingStrategyResolver;
-		// Read through the closure so the revalidation below sees the latest
-		// state after a stale outcome has been dropped.
-		const outcomeIsStaleFor = (model: Model | undefined): boolean =>
-			recordedUsageLimitOutcome !== undefined &&
-			model !== undefined &&
-			!usageLimitBlockCoversModel(
-				recordedUsageLimitOutcome.attributedProvider,
-				recordedUsageLimitOutcome.attributedModelId,
-				model.provider,
-				model.id,
-				strategyResolver,
-			);
-		let staleUsageLimitOutcome = unattributedOriginOutOfPool || outcomeIsStaleFor(retryPolicyModel);
-		if (staleUsageLimitOutcome) {
-			recordedUsageLimitOutcome = undefined;
-			parsedRetryAfterMs = undefined;
-		}
+		let staleUsageLimit = oldProviderLimitFor(this.#host.model());
+		if (staleUsageLimit) recordedUsageLimitOutcome = undefined;
+		let parsedRetryAfterMs = staleUsageLimit ? undefined : this.#parseRetryAfterMsFromError(errorMessage);
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
 			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
@@ -3034,36 +2873,18 @@ export class TurnRecovery {
 			}
 		}
 
-		const allowModelFallback = options?.allowModelFallback !== false && !this.#host.modelFallbackDisabled?.();
 		const currentModel = this.#host.model();
-		// #17571 (review): the reset-redeem lookup above awaited network work, and
-		// the user may have switched models across that await. An outcome that
-		// covered the pre-await model can be out of pool for the post-await one —
-		// keeping it would set the new model's wait/fail-fast deadline or fallback
-		// cooldown from a block that belongs to a different pool. Revalidate
-		// against the post-await model and drop stale signals wholesale, exactly
-		// like the pre-await check above did.
-		if (recordedUsageLimitOutcome !== undefined && outcomeIsStaleFor(currentModel)) {
-			staleUsageLimitOutcome = true;
+		// The model may have changed while the quota reset lookup awaited.
+		if (!staleUsageLimit && oldProviderLimitFor(currentModel)) {
+			staleUsageLimit = true;
 			recordedUsageLimitOutcome = undefined;
 			parsedRetryAfterMs = undefined;
-			// Every wait derived from the outcome is as stale as the outcome
-			// itself — the sibling-availability deadline included, or the
-			// dropped block's window still fail-fasts the healthy model. The
-			// redeem branch already raised delayMs to that window, so restore
-			// the plain backoff the pre-await code started from.
 			usageLimitWaitMs = undefined;
 			siblingAvailabilityWaitMs = undefined;
-			delayMs = staleOpenAIResponsesReplayError
-				? 0
-				: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
-			// switchedCredential was raised by this outcome's redeem/rotation
-			// branch and is as stale as the rest: keeping it would let the
-			// exhausted retry budget treat the old provider's reset as the
-			// post-await model's credential recovery and retry past
-			// retry.maxRetries recorded as a credential switch.
 			switchedCredential = false;
+			delayMs = calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
 		}
+		const allowModelFallback = options?.allowModelFallback !== false && !this.#host.modelFallbackDisabled?.();
 		const currentSelector = currentModel
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
 			: undefined;
@@ -3154,7 +2975,16 @@ export class TurnRecovery {
 		// by the stated wait so an unrelated large backoff cannot sneak
 		// through.
 		const maxDelayMs = retrySettings.maxDelayMs;
+		// An account out of money has no reset to wait for: the QUOTA_EXHAUSTED
+		// heuristic backoff is a guess at a clock that does not exist, and a
+		// `retry.maxDelayMs` set at or above it (the 30-minute default ceiling
+		// users raise) would sleep through the whole guess. Surface the provider
+		// error instead, so the user tops up and the error frame's Retry
+		// re-attempts at once rather than idling in a retry the session cannot
+		// finish.
+		const billingCap = isBillingCapUsageLimit(message.errorStatus, errorMessage);
 		const exceedsDelayCap = (waitMs: number): boolean => {
+			if (billingCap && !staleUsageLimit) return true;
 			const waitForUsageReset =
 				retrySettings.waitForUsageReset === true &&
 				recordedUsageLimitOutcome !== undefined &&
@@ -3182,12 +3012,7 @@ export class TurnRecovery {
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				retryFallbackAdmits(retrySettings.fallbackOn, AIError.is(id, AIError.Flag.UsageLimit)) &&
-				// A stale out-of-pool usage limit is not a health signal for the
-				// active selector: walking the chain here cools down the healthy
-				// fallback with a generic heuristic window and swaps it away
-				// without ever trying it (#17098, #17571). The switch to the
-				// active model already IS the recovery — retry it plainly below.
-				!staleUsageLimitOutcome &&
+				!staleUsageLimit &&
 				!thinkingLoop &&
 				!sameModelSteerReplay &&
 				!waitForSiblingCredential &&
@@ -3311,7 +3136,11 @@ export class TurnRecovery {
 				{
 					success: false,
 					attempt,
-					finalError: `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
+					// A billing cap has no wait to report — the account is out of
+					// money — so the message the user acts on is the provider's own.
+					finalError: billingCap
+						? errorMessage
+						: `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
 				},
 				{ terminalTurn: message },
 			);
