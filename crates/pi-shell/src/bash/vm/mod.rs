@@ -1612,6 +1612,7 @@ impl Shell {
 			env: Vec::new(),
 			started: false,
 			exit_trap_started: false,
+			args_scope: false,
 		};
 		let stdio = match script.vproc {
 			VprocSel::Root => {
@@ -1708,7 +1709,7 @@ impl Shell {
 		// the command the callout runs its operand from as the shell's
 		// arguments.
 		if script.args.is_some()
-			&& let Some(store) = store.as_deref_mut()
+			&& let Some(store) = store
 			&& let Err(err) = callstack::push_callout_base(&mut self.k, store, &mut self.procs[parent])
 		{
 			self.k.root.fail(err);
@@ -1722,13 +1723,17 @@ impl Shell {
 		vp.status = status;
 		vp.scopes = scopes;
 		if let Some(args) = script.args {
-			// A copied function scope takes precedence over the overlay: install
-			// the script's arguments at that level, as `set --` does.
-			if let Some(store) = store {
-				state::set_positional(&mut self.k.root, store, &mut vp, args);
-			} else if let Some(overlay) = &mut vp.overlay {
-				overlay.positional = Some(args);
-			}
+			// The operand is a command of this subshell with its own `$@`, so
+			// its launch vector goes in a scope of the subshell's own, above
+			// the caller's scopes it copied, and ends with the operand's run
+			// (`exec::run_boundary`). Writing it into the caller's innermost
+			// parameter scope instead would outlive the operand: an EXIT trap
+			// the operand installs runs in the caller's frame afterwards and
+			// reads the caller's parameters there, as it does in an ordinary
+			// `( … )` subshell.
+			vp.scopes
+				.push(state::Scope { positional: Some(args), ..state::Scope::default() });
+			run.args_scope = true;
 		}
 		vp.mode = mode;
 		vp.runs.push_back(run);

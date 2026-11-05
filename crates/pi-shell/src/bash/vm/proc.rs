@@ -806,6 +806,14 @@ pub struct Run {
 	pub env:               Vec<(BString, BString)>,
 	pub started:           bool,
 	pub exit_trap_started: bool,
+	/// A host callout's launch vector sits in a scope of the subshell's own,
+	/// pushed above the caller's scopes it copied
+	/// ([`super::ShellApi::run_subshell_in`]): the operand is a command with
+	/// its own `$@`, so what runs in the caller's frame once the operand is
+	/// done — an EXIT trap the operand installed, the rest of the caller —
+	/// reads the caller's parameters again. Dropped when the run's commands
+	/// end, before its EXIT trap.
+	pub args_scope:        bool,
 }
 
 /// What kind of activation a frame is.
