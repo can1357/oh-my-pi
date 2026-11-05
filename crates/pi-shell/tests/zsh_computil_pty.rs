@@ -243,7 +243,13 @@ fn compfiles_patterns_and_others() {
 fn compgroups_orders_groups() {
 	let rc =
 		widget("compgroups one two\ncompadd -J two zz yy\ncompadd -V one bb aa\ncompadd -J one cc");
-	same(&rc, |pty| keys(pty, "foo \x14\x14"));
+	// The second `^T` waits for the first completion: obash puts the
+	// terminal in canonical mode for a moment while it completes, and a
+	// `^T` typed then is the kernel's `VSTATUS` on macOS.
+	same(&rc, |pty| {
+		keys(pty, "foo \x14")?;
+		keys(pty, "\x14")
+	});
 }
 
 // ---- compsys end to end ----------------------------------------------------

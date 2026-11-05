@@ -37,7 +37,7 @@
 pub mod vt;
 
 use std::{
-	ffi::{OsStr, OsString},
+	ffi::{CString, OsStr, OsString},
 	fs,
 	io::{self, Read, Write},
 	os::{
@@ -242,7 +242,7 @@ impl Spawn {
 		}
 		let sync = if self.sync {
 			let fifo = self.home.path().join(ZLE_SYNC_FIFO);
-			let c_fifo = std::ffi::CString::new(fifo.as_os_str().as_bytes())?;
+			let c_fifo = CString::new(fifo.as_os_str().as_bytes())?;
 			// SAFETY: mkfifo reads a NUL-terminated path.
 			if unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) } == -1 {
 				return Err(io::Error::last_os_error());
@@ -518,13 +518,13 @@ impl Pty {
 	/// When the terminal's modes cannot be read, or `TimedOut` (with the
 	/// output so far).
 	pub fn wait_raw(&mut self, timeout: Duration) -> io::Result<()> {
-		let tty = self.open_tty()?;
+		let term = self.open_tty()?;
 		let deadline = Instant::now() + timeout;
 		loop {
 			self.pump()?;
 			// The terminal side's modes: a pty's other side has its own on
 			// Linux.
-			if !tty::attrs(tty.as_raw_fd())?.get(TermFlag::Icanon) {
+			if !tty::attrs(term.as_raw_fd())?.get(TermFlag::Icanon) {
 				return Ok(());
 			}
 			if Instant::now() >= deadline {
@@ -555,10 +555,10 @@ impl Pty {
 		let deadline = Instant::now() + timeout;
 		// The shell reads each key before its next wait: were keys still
 		// queued, it could see the request before them.
-		let tty = self.open_tty()?;
+		let term = self.open_tty()?;
 		loop {
 			self.pump()?;
-			if unread(&tty)? == 0 {
+			if unread(&term)? == 0 {
 				break;
 			}
 			if Instant::now() >= deadline {
@@ -566,7 +566,7 @@ impl Pty {
 			}
 			thread::sleep(Duration::from_millis(5));
 		}
-		drop(tty);
+		drop(term);
 		self.syncs += 1;
 		let mut request = fs::OpenOptions::new()
 			.write(true)
