@@ -31,8 +31,10 @@ import type {
 	AgentTool,
 	StreamFn,
 } from "@oh-my-pi/pi-agent-core/types";
-import type { Message } from "@oh-my-pi/pi-ai";
+import type { Api, Message } from "@oh-my-pi/pi-ai";
+import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { AssistantMessageEventStream, type EventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { context, SpanStatusCode, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
@@ -1188,5 +1190,63 @@ describe("ChatUsageEvent.headers and omp.gen_ai.gateway.* span attributes", () =
 		expect(events[0]?.headers?.["cf-aig-cache-status"]).toBe("HIT");
 		expect(events[0]?.headers?.["cf-aig-cache-key"]).toBe("secret-key");
 		expect(events[0]?.headers?.["x-custom-secret"]).toBe("nope");
+	});
+});
+
+/**
+ * The agent loop's own path to `omp.gen_ai.auth.organization_id` on a request
+ * that failed before response headers. The attribute's only source there is
+ * `SimpleStreamOptions.onRequestOrganization`, captured in
+ * `streamAssistantResponse` and handed to `failChatSpan`; the capture must also
+ * override a caller's own hook rather than be overridden by it, which depends
+ * on where it sits relative to the `...config` spread.
+ */
+describe("agent-loop credential organization on a pre-header failure", () => {
+	const SOURCE_ID = "otel-agent-loop-organization-test";
+	const FAIL_API = "otel-agent-loop-organization-test" as Api;
+	const ORG = "d0529c17-8bdc-42a1-9569-875928df83fe";
+	/** Placeholder bearer: nothing in this test reaches a provider. */
+	const BEARER = "bearer-from-a-stored-credential";
+
+	afterEach(() => {
+		unregisterCustomApis(SOURCE_ID);
+	});
+
+	it("stamps the attempt's organization and still calls the caller's own observer", async () => {
+		registerCustomApi(
+			FAIL_API,
+			() => {
+				const stream = new AssistantMessageEventStream();
+				// A socket reset before any event: no message ever exists to read
+				// the organization from, so the span ends through `failChatSpan`.
+				queueMicrotask(() => stream.fail(new TypeError("fetch failed")));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const mock = createMockModel({ ...MOCK_IDENT, responses: [{ content: ["unused"] }] });
+		const observed: (string | undefined)[] = [];
+		const config: AgentLoopConfig = {
+			model: { ...mock.model, api: FAIL_API },
+			convertToLlm: identityConverter,
+			telemetry: {},
+			apiKey: () => ({ apiKey: BEARER, credentialId: 7, oauthIdentity: { orgId: ORG } }),
+			onRequestOrganization: organizationId => observed.push(organizationId),
+		};
+		const ctx: AgentContext = { systemPrompt: [], messages: [], tools: [] };
+
+		// The loop surfaces a pre-header transport failure by rejecting, after
+		// `failChatSpan` has already ended the chat span.
+		await expect(
+			runAndDrain(agentLoop([createUserMessage("hi")], ctx, config, undefined, streamSimple)),
+		).rejects.toThrow("fetch failed");
+
+		const chat = findSpan(exporter.getFinishedSpans(), "chat mock-model");
+		expect(chat).toBeDefined();
+		expect(chat?.status.code).toBe(SpanStatusCode.ERROR);
+		expect(chat?.attributes[OmpGenAIAttr.AuthOrganizationId]).toBe(ORG);
+		// The framework capture wins over the caller's hook without stealing it:
+		// the span carries the organization and the caller still saw every call.
+		expect(observed).toContain(ORG);
 	});
 });

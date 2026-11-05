@@ -682,15 +682,26 @@ export interface StreamOptions {
 	 */
 	onResponse?: (response: ProviderResponseMetadata, model?: Model<Api>, signal?: AbortSignal) => void | Promise<void>;
 	/**
-	 * Optional callback naming the organization of the credential each attempt
-	 * resolved, fired before the request is sent and again on every auth-retry
-	 * rotation, so the last call names the account that actually served.
-	 * `undefined` when the resolved key belongs to no stored account.
+	 * Optional observer of the organization behind the credential serving this
+	 * request. Called with `undefined` as the request starts, then with each
+	 * attempt's resolved organization before that attempt is sent, including
+	 * every auth-retry rotation. So the last call names the account that
+	 * actually served, and a request that resolved no credential at all — a
+	 * thrown resolver, a missing key — leaves the observer at `undefined`
+	 * rather than at an earlier request's account.
+	 *
+	 * Only fired for an `apiKey` resolver, the sole form that carries a stored
+	 * credential's identity: a bare bearer string (`--api-key`, an env var, a
+	 * `models.yml` key) resolves no account and is never reported.
 	 *
 	 * The only way to attribute a request that failed before response headers:
 	 * there is no `AssistantMessage` to read `organizationId` from, and the
 	 * thrown error cannot carry it — one error object can be shared by two
 	 * requests, which would attribute one account's failure to another.
+	 *
+	 * Diagnostic: a throw from it is logged and ignored, never failing the
+	 * request. One observer per request; a caller that shares one across
+	 * concurrent requests sees all of their calls interleaved.
 	 */
 	onRequestOrganization?: (organizationId: string | undefined) => void;
 	/**

@@ -26,6 +26,7 @@ import {
 	resolveTelemetry,
 } from "@oh-my-pi/pi-agent-core/telemetry";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import {
@@ -253,5 +254,62 @@ describe("chat span credential organization on a pre-header failure", () => {
 		expect(resolved).toBe(2);
 		expect(span).toBeDefined();
 		expect(span?.attributes[OmpGenAIAttr.AuthOrganizationId]).toBeUndefined();
+	});
+
+	it("does not carry an earlier request's organization onto a thinking-loop re-sample that resolved none", async () => {
+		// `completeSimple` re-issues a whole request below the oneshot retry layer
+		// when the loop guard stalls, so the second request has its own resolve.
+		// Its resolver throws, so it reports no organization of its own.
+		let resolved = 0;
+		registerCustomApi(
+			FAIL_API,
+			() => {
+				const stream = new AssistantMessageEventStream();
+				const stalled: AssistantMessage = {
+					...reply(),
+					content: [],
+					stopReason: "error",
+					errorId: AIError.Flag.ThinkingLoop,
+					errorMessage: "thinking loop guard",
+				};
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: stalled });
+					stream.push({ type: "done", reason: "stop", message: stalled });
+				});
+				return stream;
+			},
+			FAIL_SOURCE_ID,
+		);
+		const apiKey = (): { apiKey: string; credentialId: number; oauthIdentity: { orgId: string } } => {
+			resolved += 1;
+			if (resolved > 1) throw new Error("broker unreachable");
+			return { apiKey: BEARER, credentialId: 1, oauthIdentity: { orgId: ORG } };
+		};
+
+		const span = await failedChatSpanFor({ apiKey } as unknown as SimpleStreamOptions);
+
+		expect(resolved).toBe(2);
+		expect(span).toBeDefined();
+		expect(span?.attributes[OmpGenAIAttr.AuthOrganizationId]).toBeUndefined();
+	});
+
+	it("keeps serving the request when the caller's own organization observer throws", async () => {
+		registerFailingApi(() => new TypeError("fetch failed"));
+		let observed = 0;
+
+		const span = await failedChatSpanFor({
+			apiKey: () => ({ apiKey: BEARER, credentialId: 7, oauthIdentity: { orgId: ORG } }),
+			onRequestOrganization: () => {
+				observed += 1;
+				throw new Error("observer threw");
+			},
+		} as unknown as SimpleStreamOptions);
+
+		// The request still reached the provider and still ended its span with the
+		// attempt's organization: a diagnostic observer cannot break either.
+		expect(observed).toBeGreaterThan(0);
+		expect(span).toBeDefined();
+		expect(span?.status.code).toBe(SpanStatusCode.ERROR);
+		expect(span?.attributes[OmpGenAIAttr.AuthOrganizationId]).toBe(ORG);
 	});
 });

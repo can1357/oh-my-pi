@@ -1897,7 +1897,8 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 
 	// Same shape for the organization the attempt resolved: a failure before
 	// response headers has no message carrying it, so this is the only source
-	// the failed span has.
+	// the failed span has. Needs no per-attempt clear of its own — every
+	// request `streamSimple` starts resets the observer first.
 	let capturedOrganizationId: string | undefined;
 	const userOnRequestOrganization = options.onRequestOrganization;
 	const captureOnRequestOrganization: NonNullable<SimpleStreamOptions["onRequestOrganization"]> = organizationId => {
@@ -1917,7 +1918,6 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 				// Clear first so a previous attempt's `retry-after` can never be
 				// reused for a later failure that arrived without headers.
 				capturedHeaders = undefined;
-				capturedOrganizationId = undefined;
 				return complete(model, ctx, {
 					...options,
 					onResponse: captureOnResponse,
