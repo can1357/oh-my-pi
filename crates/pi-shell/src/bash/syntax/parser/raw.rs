@@ -114,6 +114,10 @@ impl Parser<'_> {
 				self.bump();
 				continue;
 			}
+			// The offset `ch` was read at: a one-byte token's end comes from
+			// the cursor, which does not advance in the text an alias
+			// expanded to.
+			let at = self.off();
 			self.bump();
 			if ch >= 0x80 && self.feat.multibyte() {
 				// A whole character: its later bytes are never special.
@@ -143,6 +147,7 @@ impl Parser<'_> {
 			out.push(ch);
 			if count == 0 {
 				out.pop();
+				self.raw_close = at;
 				return Ok(());
 			}
 			// `for ((…))` splits at the `;`s of its own text (bash

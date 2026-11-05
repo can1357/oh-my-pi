@@ -235,6 +235,13 @@ pub struct Parser<'s> {
 	la:             Option<Tok>,
 	/// End offset of the last token taken.
 	last_hi:        u32,
+	/// Start offset of the last token taken. A compound command's closing
+	/// token is the last one its grammar rule takes, and the text an alias
+	/// expands to has no bytes in the source, so the position cannot be
+	/// derived from `last_hi`.
+	last_lo:        u32,
+	/// Offset of the closing byte the last `raw_matched` scan consumed.
+	raw_close:      u32,
 	/// Gathered here-document texts, by sequence number.
 	docs:           Vec<Vec<u8>>,
 	/// Here-documents waiting for the next newline.
@@ -346,6 +353,8 @@ impl<'s> Parser<'s> {
 			lx: LexState::new(),
 			la: None,
 			last_hi: 0,
+			last_lo: 0,
+			raw_close: 0,
 			docs: Vec::new(),
 			pending: Vec::new(),
 			compound: Vec::new(),

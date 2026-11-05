@@ -768,6 +768,36 @@ const fn special_char(sp: Special) -> u8 {
 mod shfmt {
 	use super::*;
 
+	/// What a `for`/`select`/`for ((…))` clause needs besides its loop head.
+	struct ForClause {
+		/// Start of the command.
+		lo:     u32,
+		/// End of the command proper, redirections excluded.
+		hi:     u32,
+		/// Offset of the closing `done` or `}`, as the parser recorded it.
+		close:  Option<u32>,
+		/// `select` rather than `for`.
+		select: bool,
+		/// Offset of `do` or `{`, as the parser recorded it.
+		do_pos: Option<u32>,
+		/// The body is a `{ … }` group.
+		braces: bool,
+		/// End of the loop head, for the fallback scan.
+		after:  u32,
+	}
+
+	/// What every arm of one `if` shares.
+	struct IfClause<'a> {
+		/// End of the command proper, redirections excluded.
+		hi:        u32,
+		/// Offset of `fi` (or of the closing `}`), as the parser recorded it.
+		close:     Option<u32>,
+		/// The `else` body.
+		else_body: Option<&'a List>,
+		/// Offset of `else`, as the parser recorded it.
+		else_pos:  Option<u32>,
+	}
+
 	/// Source scanning helpers.
 	struct Ctx<'a> {
 		m:   &'a OffMap,
@@ -1290,6 +1320,10 @@ mod shfmt {
 				_ => c.span.hi,
 			};
 			let p = |o| self.m.pos(o);
+			// The closing token's own offset, as the parser recorded it. A
+			// command the parser synthesized rather than read has none; the
+			// source then holds its closer in the last `n` bytes.
+			let close = |n: u32| p(c.close.unwrap_or(hi.saturating_sub(n)));
 			let v = match &c.kind {
 				CommandKind::Simple(sc) => return self.simple(sc),
 				CommandKind::Brace(l) => V::Obj(vec![
@@ -1297,7 +1331,7 @@ mod shfmt {
 					("Pos", p(lo)),
 					("End", p(hi)),
 					("Lbrace", p(lo)),
-					("Rbrace", p(hi.saturating_sub(1))),
+					("Rbrace", close(1)),
 					("Stmts", self.list(l)),
 				]),
 				CommandKind::Subshell(l) => V::Obj(vec![
@@ -1305,20 +1339,32 @@ mod shfmt {
 					("Pos", p(lo)),
 					("End", p(hi)),
 					("Lparen", p(lo)),
-					("Rparen", p(hi.saturating_sub(1))),
+					("Rparen", close(1)),
 					("Stmts", self.list(l)),
 				]),
-				CommandKind::If(i) => self.if_clause(hi, &i.arms, i.else_body.as_ref(), true, lo),
+				CommandKind::If(i) => self.if_clause(
+					&IfClause {
+						hi,
+						close: c.close,
+						else_body: i.else_body.as_ref(),
+						else_pos: i.else_pos,
+					},
+					&i.arms,
+					true,
+					lo,
+				),
 				CommandKind::While(w) => {
-					let cond_end = w.cond.items.last().map_or(lo, |it| it.and_or.span.hi);
-					let do_pos = self.find(cond_end, b"do");
+					let do_pos = w.do_pos.unwrap_or_else(|| {
+						let cond_end = w.cond.items.last().map_or(lo, |it| it.and_or.span.hi);
+						self.find(cond_end, b"do")
+					});
 					let mut f = vec![
 						("Type", s(b"WhileClause")),
 						("Pos", p(lo)),
 						("End", p(hi)),
 						("WhilePos", p(lo)),
 						("DoPos", p(do_pos)),
-						("DonePos", p(hi.saturating_sub(4))),
+						("DonePos", close(4)),
 					];
 					if w.until {
 						f.push(("Until", V::Bool(true)));
@@ -1347,23 +1393,38 @@ mod shfmt {
 						iter.push(("ExtraNames", extra));
 					}
 					if let Some(ws) = &fr.words {
-						let in_pos = self.find(after, b"in");
+						let in_pos = fr.in_pos.unwrap_or_else(|| self.find(after, b"in"));
 						iter.push(("InPos", p(in_pos)));
 						after = ws.last().map_or(in_pos + 2, |w| w.span.hi);
 						if !ws.is_empty() {
 							iter.push(("Items", V::Arr(ws.iter().map(|w| self.word(w, false)).collect())));
 						}
 					}
-					self.for_clause(lo, hi, select, V::Obj(iter), after, &fr.body)
+					self.for_clause(
+						&ForClause {
+							lo,
+							hi,
+							close: c.close,
+							select,
+							do_pos: fr.do_pos,
+							braces: fr.braces,
+							after,
+						},
+						V::Obj(iter),
+						&fr.body,
+					)
 				},
 				CommandKind::ArithFor(a) => {
-					let lp = self.find(lo + 3, b"((");
-					let rp = self.find(a.step.span.hi, b"))");
+					let header = a.header.unwrap_or_else(|| {
+						let lp = self.find(lo + 3, b"((");
+						Span::new(lp, self.find(a.step.span.hi, b"))") + 2)
+					});
+					let rp = a.rparen.unwrap_or_else(|| header.hi.saturating_sub(2));
 					let mut l = vec![
 						("Type", s(b"CStyleLoop")),
-						("Pos", p(lp)),
-						("End", p(rp + 2)),
-						("Lparen", p(lp)),
+						("Pos", p(header.lo)),
+						("End", p(header.hi)),
+						("Lparen", p(header.lo)),
 						("Rparen", p(rp)),
 					];
 					for (k, t) in [("Init", &a.init), ("Cond", &a.cond), ("Post", &a.step)] {
@@ -1371,10 +1432,24 @@ mod shfmt {
 							l.push((k, x));
 						}
 					}
-					self.for_clause(lo, hi, false, V::Obj(l), rp + 2, &a.body)
+					self.for_clause(
+						&ForClause {
+							lo,
+							hi,
+							close: c.close,
+							select: false,
+							do_pos: a.do_pos,
+							braces: a.braces,
+							after: header.hi,
+						},
+						V::Obj(l),
+						&a.body,
+					)
 				},
 				CommandKind::Case(cs) => {
-					let in_pos = self.find(cs.word.span.hi, b"in");
+					let in_pos = cs
+						.in_pos
+						.unwrap_or_else(|| self.find(cs.word.span.hi, b"in"));
 					let mut items = Vec::new();
 					let mut at = in_pos + 2;
 					for arm in &cs.arms {
@@ -1388,19 +1463,23 @@ mod shfmt {
 							CaseTerm::FallThrough => b";&",
 							CaseTerm::Continue => b";;&",
 						};
-						let op_pos = self.find(body_end, op);
-						let found = self
-							.src
-							.get(op_pos as usize..)
-							.is_some_and(|r| r.starts_with(op));
-						let end = if found {
-							op_pos + op.len() as u32
-						} else {
-							body_end
-						};
+						let term = arm.term_span.unwrap_or_else(|| {
+							let at = self.find(body_end, op);
+							let found = self
+								.src
+								.get(at as usize..)
+								.is_some_and(|r| r.starts_with(op));
+							if found {
+								Span::new(at, at + op.len() as u32)
+							} else {
+								Span::new(body_end, body_end)
+							}
+						});
+						let found = arm.term_span.is_some() || term.hi > term.lo;
+						let end = if found { term.hi } else { body_end };
 						let mut f = vec![("Pos", p(plo)), ("End", p(end)), ("Op", s(op))];
 						if found {
-							f.push(("OpPos", p(op_pos)));
+							f.push(("OpPos", p(term.lo)));
 						}
 						f.push((
 							"Patterns",
@@ -1418,7 +1497,7 @@ mod shfmt {
 						("End", p(hi)),
 						("Case", p(lo)),
 						("In", p(in_pos)),
-						("Esac", p(hi.saturating_sub(4))),
+						("Esac", close(4)),
 						("Word", self.word(&cs.word, false)),
 					];
 					if !items.is_empty() {
@@ -1432,7 +1511,7 @@ mod shfmt {
 						("Pos", p(lo)),
 						("End", p(hi)),
 						("Left", p(lo)),
-						("Right", p(hi.saturating_sub(2))),
+						("Right", close(2)),
 					];
 					if let Some(x) = self.arith(a) {
 						f.push(("X", x));
@@ -1444,7 +1523,7 @@ mod shfmt {
 					("Pos", p(lo)),
 					("End", p(hi)),
 					("Left", p(lo)),
-					("Right", p(hi.saturating_sub(2))),
+					("Right", close(2)),
 					("X", self.test(e)),
 				]),
 				CommandKind::FuncDef(fd) => {
@@ -1573,24 +1652,28 @@ mod shfmt {
 			(Some(V::Arr(lits)), at)
 		}
 
-		fn for_clause(&self, lo: u32, hi: u32, select: bool, lp: V, after: u32, body: &List) -> V {
+		fn for_clause(&self, c: &ForClause, lp: V, body: &List) -> V {
 			let p = |o| self.m.pos(o);
-			let do_pos = self.find(after, b"do");
-			let braces = self.at(do_pos) != b'd';
-			let do_pos = if braces {
-				self.find(after, b"{")
-			} else {
-				do_pos
+			let (do_pos, braces) = match c.do_pos {
+				Some(at) => (at, c.braces),
+				None => {
+					let at = self.find(c.after, b"do");
+					let braces = self.at(at) != b'd';
+					(if braces { self.find(c.after, b"{") } else { at }, braces)
+				},
 			};
+			let done = c
+				.close
+				.unwrap_or_else(|| c.hi.saturating_sub(if braces { 1 } else { 4 }));
 			let mut f = vec![
 				("Type", s(b"ForClause")),
-				("Pos", p(lo)),
-				("End", p(hi)),
-				("ForPos", p(lo)),
+				("Pos", p(c.lo)),
+				("End", p(c.hi)),
+				("ForPos", p(c.lo)),
 				("DoPos", p(do_pos)),
-				("DonePos", p(hi.saturating_sub(if braces { 1 } else { 4 }))),
+				("DonePos", p(done)),
 			];
-			if select {
+			if c.select {
 				f.push(("Select", V::Bool(true)));
 			}
 			if braces {
@@ -1601,29 +1684,25 @@ mod shfmt {
 			V::Obj(f)
 		}
 
-		fn if_clause(
-			&self,
-			hi: u32,
-			arms: &[IfArm],
-			else_body: Option<&List>,
-			typed: bool,
-			pos: u32,
-		) -> V {
+		fn if_clause(&self, c: &IfClause<'_>, arms: &[IfArm], typed: bool, pos: u32) -> V {
 			let p = |o| self.m.pos(o);
 			let Some((arm, rest)) = arms.split_first() else {
 				return V::Null;
 			};
-			let cond_end = arm.cond.items.last().map_or(pos, |it| it.and_or.span.hi);
-			let then_pos = self.find(cond_end, b"then");
+			let then_pos = arm.then_pos.unwrap_or_else(|| {
+				let cond_end = arm.cond.items.last().map_or(pos, |it| it.and_or.span.hi);
+				self.find(cond_end, b"then")
+			});
+			let fi = c.close.unwrap_or(c.hi.saturating_sub(2));
 			let mut f = Vec::new();
 			if typed {
 				f.push(("Type", s(b"IfClause")));
 			}
 			f.push(("Pos", p(pos)));
-			f.push(("End", p(hi)));
+			f.push(("End", p(c.hi)));
 			f.push(("Position", p(pos)));
 			f.push(("ThenPos", p(then_pos)));
-			f.push(("FiPos", p(hi.saturating_sub(2))));
+			f.push(("FiPos", p(fi)));
 			f.push(("Cond", self.list(&arm.cond)));
 			f.push(("Then", self.list(&arm.body)));
 			let body_end = arm
@@ -1631,18 +1710,18 @@ mod shfmt {
 				.items
 				.last()
 				.map_or(then_pos + 4, |it| it.and_or.span.hi);
-			if !rest.is_empty() {
-				let elif = self.find(body_end, b"elif");
-				f.push(("Else", self.if_clause(hi, rest, else_body, false, elif)));
-			} else if let Some(e) = else_body {
-				let epos = self.find(body_end, b"else");
+			if let Some((next, _)) = rest.split_first() {
+				let elif = next.kw_pos.unwrap_or_else(|| self.find(body_end, b"elif"));
+				f.push(("Else", self.if_clause(c, rest, false, elif)));
+			} else if let Some(e) = c.else_body {
+				let epos = c.else_pos.unwrap_or_else(|| self.find(body_end, b"else"));
 				f.push((
 					"Else",
 					V::Obj(vec![
 						("Pos", p(epos)),
-						("End", p(hi)),
+						("End", p(c.hi)),
 						("Position", p(epos)),
-						("FiPos", p(hi.saturating_sub(2))),
+						("FiPos", p(fi)),
 						("Then", self.list(e)),
 					]),
 				));

@@ -734,6 +734,9 @@ pub(super) struct Ctx<'s> {
 	pub(super) msgs:       Vec<(u32, Vec<u8>)>,
 	/// `noaliases`
 	pub(super) noaliases:  bool,
+	/// Offset of the token that closes the compound command being parsed,
+	/// as the lexer read it; taken by `par_cmd` when it builds the command.
+	pub(super) cmd_close:  Option<u32>,
 	/// `inalmore`
 	inalmore:              bool,
 	/// `inpartime` of `par_cmd`.
@@ -957,6 +960,7 @@ impl<'s> Ctx<'s> {
 			errflag: false,
 			msgs: Vec::new(),
 			noaliases: false,
+			cmd_close: None,
 			inalmore: false,
 			inpartime: false,
 			docs: Vec::new(),

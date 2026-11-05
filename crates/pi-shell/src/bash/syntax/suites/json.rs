@@ -412,10 +412,7 @@ fn alias_expanded_compounds_export_ranges_that_contain_their_children() {
 			let mut bad = Vec::new();
 			range_faults(&shfmt, None, "", &mut bad);
 			for fault in bad {
-				faults.push(format!(
-					"{} in {offsets:?}: {fault}",
-					String::from_utf8_lossy(text)
-				));
+				faults.push(format!("{} in {offsets:?}: {fault}", String::from_utf8_lossy(text)));
 			}
 		}
 	}

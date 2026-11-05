@@ -99,8 +99,12 @@ use crate::bash::{
 /// Main's version 15 is its own layout change. On top of it, version 16
 /// gives each conditional operator the offset it was read at, version 17
 /// records every `!` of a run and every `&&`/`||` of a chain rather than
-/// deriving them, and version 18 is 17 merged with main's 15.
-pub const IR_VERSION: u32 = 19;
+/// deriving them, version 18 is 17 merged with main's 15, version 19 gives
+/// a conditional group the offset after its `)`, and version 20 records
+/// every compound command's own keyword and operator offsets (`do`, `done`,
+/// `then`, `fi`, `else`, `in`, `esac`, the arm terminators, the arithmetic
+/// header, and each closing `)`, `}`, `))` and `]]`).
+pub const IR_VERSION: u32 = 20;
 
 /// Opcodes.
 #[derive(

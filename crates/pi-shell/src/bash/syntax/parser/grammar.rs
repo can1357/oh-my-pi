@@ -13,6 +13,20 @@ use crate::bash::syntax::{
 	util::push_u32,
 };
 
+/// What `for NAME` / `select NAME` is followed by.
+struct LoopTail {
+	/// `in` words; `None` means `"$@"`.
+	words:  Option<Vec<Word>>,
+	/// Loop body.
+	body:   List,
+	/// Offset of `in`, as the parser read it.
+	in_pos: Option<u32>,
+	/// Offset of the `do` or `{` that opens the body.
+	do_pos: Option<u32>,
+	/// The body is a `{ … }` group rather than `do … done`.
+	braces: bool,
+}
+
 /// Tokens that can begin a command.
 const fn starts_command(k: T) -> bool {
 	matches!(
@@ -299,6 +313,7 @@ impl Parser<'_> {
 			let cmd = Command {
 				id:     NodeId(0),
 				span:   Span::new(at, at),
+				close:  None,
 				kind:   CommandKind::Simple(Simple::default()),
 				redirs: Vec::new(),
 			};
@@ -386,11 +401,11 @@ impl Parser<'_> {
 			T::While | T::Until => {
 				self.take()?;
 				let cond = self.compound_list()?;
-				self.expect(T::Do)?;
+				let do_pos = Some(self.expect(T::Do)?.lo);
 				let body = self.compound_list()?;
 				self.expect(T::Done)?;
 				self.close_compound();
-				CommandKind::While(While { until: k == T::Until, cond, body })
+				CommandKind::While(While { until: k == T::Until, cond, body, do_pos })
 			},
 			T::If => self.if_cmd()?,
 			T::LParen => {
@@ -418,27 +433,43 @@ impl Parser<'_> {
 			T::CondStart => self.cond_command()?,
 			_ => return Err(self.unexpected()),
 		};
-		Ok(Command { id: NodeId(0), span: Span::new(lo, self.last_hi), kind, redirs: Vec::new() })
+		// Every compound rule above ends by taking its closing token, so its
+		// offset is the last one the lexer read. `((…))` is one token: the
+		// `))` starts where its expression text ends.
+		let close = match &kind {
+			CommandKind::Arith(a) => a.span.hi,
+			_ => self.last_lo,
+		};
+		Ok(Command {
+			id: NodeId(0),
+			span: Span::new(lo, self.last_hi),
+			close: Some(close),
+			kind,
+			redirs: Vec::new(),
+		})
 	}
 
 	fn if_cmd(&mut self) -> PResult<CommandKind> {
-		self.take()?;
+		let kw_pos = Some(self.take()?.lo);
 		let mut arms = Vec::new();
 		let cond = self.compound_list()?;
-		self.expect(T::Then)?;
+		let then_pos = Some(self.expect(T::Then)?.lo);
 		let body = self.compound_list()?;
-		arms.push(IfArm { cond, body });
+		arms.push(IfArm { cond, body, kw_pos, then_pos });
 		let mut else_body = None;
+		let mut else_pos = None;
 		loop {
 			let t = self.take()?;
 			match t.kind {
 				T::Elif => {
+					let kw_pos = Some(t.lo);
 					let cond = self.compound_list()?;
-					self.expect(T::Then)?;
+					let then_pos = Some(self.expect(T::Then)?.lo);
 					let body = self.compound_list()?;
-					arms.push(IfArm { cond, body });
+					arms.push(IfArm { cond, body, kw_pos, then_pos });
 				},
 				T::Else => {
+					else_pos = Some(t.lo);
 					else_body = Some(self.compound_list()?);
 					self.expect(T::Fi)?;
 					break;
@@ -448,20 +479,22 @@ impl Parser<'_> {
 			}
 		}
 		self.close_compound();
-		Ok(CommandKind::If(If { arms, else_body }))
+		Ok(CommandKind::If(If { arms, else_body, else_pos }))
 	}
 
 	/// After `for NAME` / `select NAME`: the optional `in` list and the body.
-	/// Returns the words and the body.
-	fn loop_tail(&mut self) -> PResult<(Option<Vec<Word>>, List)> {
+	/// Returns the words, the body, and the offsets of `in` and of the token
+	/// that opens the body.
+	fn loop_tail(&mut self) -> PResult<LoopTail> {
 		let mut words = None;
+		let mut in_pos = None;
 		if self.peek_kind()? == T::Semi {
 			self.take()?;
 			self.skip_newlines()?;
 		} else {
 			self.skip_newlines()?;
 			if self.peek_kind()? == T::In {
-				self.take()?;
+				in_pos = Some(self.take()?.lo);
 				let mut list = Vec::new();
 				loop {
 					match self.peek_kind()? {
@@ -481,26 +514,28 @@ impl Parser<'_> {
 				words = Some(list);
 			}
 		}
-		let body = self.do_body()?;
-		Ok((words, body))
+		let (body, do_pos, braces) = self.do_body()?;
+		Ok(LoopTail { words, body, in_pos, do_pos, braces })
 	}
 
-	/// `DO compound_list DONE` or `'{' compound_list '}'`.
-	fn do_body(&mut self) -> PResult<List> {
+	/// `DO compound_list DONE` or `'{' compound_list '}'`: the body, the
+	/// offset of the `do` or `{` that opens it, and whether that was a
+	/// brace.
+	fn do_body(&mut self) -> PResult<(List, Option<u32>, bool)> {
 		let t = self.take()?;
 		match t.kind {
 			T::Do => {
 				let body = self.compound_list()?;
 				self.expect(T::Done)?;
 				self.close_compound();
-				Ok(body)
+				Ok((body, Some(t.lo), false))
 			},
 			T::LBrace => {
 				let body = self.compound_list()?;
 				self.expect(T::RBrace)?;
 				self.close_compound();
 				self.close_compound();
-				Ok(body)
+				Ok((body, Some(t.lo), true))
 			},
 			_ => Err(self.token_error(&t)),
 		}
@@ -527,8 +562,17 @@ impl Parser<'_> {
 		}
 		let var_span = t.span();
 		let var = word_text(t.word.as_ref().expect("word token"));
-		let (words, body) = self.loop_tail()?;
-		Ok(CommandKind::For(For { var, extra_vars: Vec::new(), var_span, words, body }))
+		let tail = self.loop_tail()?;
+		Ok(CommandKind::For(For {
+			var,
+			extra_vars: Vec::new(),
+			var_span,
+			words: tail.words,
+			body: tail.body,
+			in_pos: tail.in_pos,
+			do_pos: tail.do_pos,
+			braces: tail.braces,
+		}))
 	}
 
 	fn select_cmd(&mut self) -> PResult<CommandKind> {
@@ -539,8 +583,17 @@ impl Parser<'_> {
 		}
 		let var_span = t.span();
 		let var = word_text(t.word.as_ref().expect("word token"));
-		let (words, body) = self.loop_tail()?;
-		Ok(CommandKind::Select(For { var, extra_vars: Vec::new(), var_span, words, body }))
+		let tail = self.loop_tail()?;
+		Ok(CommandKind::Select(For {
+			var,
+			extra_vars: Vec::new(),
+			var_span,
+			words: tail.words,
+			body: tail.body,
+			in_pos: tail.in_pos,
+			do_pos: tail.do_pos,
+			braces: tail.braces,
+		}))
 	}
 
 	fn arith_for(&mut self, t: Tok, for_line: u32) -> PResult<CommandKind> {
@@ -550,7 +603,7 @@ impl Parser<'_> {
 		} else if self.peek_kind()? == T::Eof {
 			self.skip_newlines()?;
 		}
-		let body = self.do_body()?;
+		let (body, do_pos, braces) = self.do_body()?;
 		let arith = t.arith.as_ref().expect("arithmetic token");
 		let pieces = split_arith_for(&arith.text, &arith.semis);
 		if pieces.len() != 3 {
@@ -576,7 +629,18 @@ impl Parser<'_> {
 				bracket: false,
 			}
 		};
-		Ok(CommandKind::ArithFor(ArithFor { init: at(0), cond: at(1), step: at(2), body }))
+		Ok(CommandKind::ArithFor(ArithFor {
+			init: at(0),
+			cond: at(1),
+			step: at(2),
+			body,
+			// The whole `(( … ))` is one token; its expression text runs
+			// from `arith.lo` to `arith.hi`, so `))` starts there.
+			header: Some(t.span()),
+			rparen: Some(arith.hi),
+			do_pos,
+			braces,
+		}))
 	}
 
 	fn case_cmd(&mut self) -> PResult<CommandKind> {
@@ -587,7 +651,7 @@ impl Parser<'_> {
 		}
 		let word = Self::tok_word(t);
 		self.skip_newlines()?;
-		self.expect(T::In)?;
+		let in_pos = Some(self.expect(T::In)?.lo);
 		let mut arms = Vec::new();
 		loop {
 			self.skip_newlines()?;
@@ -625,15 +689,16 @@ impl Parser<'_> {
 				T::SemiAnd => CaseTerm::FallThrough,
 				T::SemiSemiAnd => CaseTerm::Continue,
 				T::Esac => {
-					arms.push(CaseArm { patterns, body, term: CaseTerm::Break });
+					// No terminator was written: the arm ends at `esac`.
+					arms.push(CaseArm { patterns, body, term: CaseTerm::Break, term_span: None });
 					break;
 				},
 				_ => return Err(self.token_error(&t)),
 			};
-			arms.push(CaseArm { patterns, body, term });
+			arms.push(CaseArm { patterns, body, term, term_span: Some(t.span()) });
 		}
 		self.close_compound();
-		Ok(CommandKind::Case(Case { word, arms }))
+		Ok(CommandKind::Case(Case { word, arms, in_pos }))
 	}
 
 	/// `NAME ( ) newline_list function_body`; the name token was taken.
@@ -674,6 +739,7 @@ impl Parser<'_> {
 		Ok(Command {
 			id:     NodeId(0),
 			span:   Span::new(lo, self.last_hi),
+			close:  None,
 			kind:   CommandKind::FuncDef(FuncDef {
 				name,
 				extra_names: Vec::new(),
@@ -710,6 +776,7 @@ impl Parser<'_> {
 		Ok(Command {
 			id:     NodeId(0),
 			span:   Span::new(lo, self.last_hi),
+			close:  None,
 			kind:   CommandKind::Coproc(Coproc { name, body: Box::new(body) }),
 			redirs: Vec::new(),
 		})
@@ -765,6 +832,7 @@ impl Parser<'_> {
 		Ok(Command {
 			id: NodeId(0),
 			span: Span::new(lo, self.last_hi),
+			close: None,
 			kind: CommandKind::Simple(s),
 			redirs,
 		})
@@ -921,8 +989,10 @@ impl Parser<'_> {
 		self.cond_tok_hi = t.hi;
 		self.cond_eof = t.kind == T::Eof;
 		if !self.cond_eof {
-			// The command's span runs through `]]`.
+			// The command's span runs through `]]`, and `]]` is the token
+			// its close is read from.
 			self.last_hi = t.hi;
+			self.last_lo = t.lo;
 		}
 		Ok(t)
 	}

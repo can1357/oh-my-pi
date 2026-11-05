@@ -379,6 +379,7 @@ impl<'s> Parser<'s> {
 			None => self.lex()?,
 		};
 		self.last_hi = t.hi;
+		self.last_lo = t.lo;
 		Ok(t)
 	}
 
@@ -690,7 +691,7 @@ impl<'s> Parser<'s> {
 			let semis = core::mem::replace(&mut self.arith_semis, outer).unwrap_or_default();
 			self.raw_depth = depth;
 			let text = text?;
-			let ahi = self.off().saturating_sub(1);
+			let ahi = self.raw_close;
 			if self.peek() != Some(b')') {
 				return Err(self.near_error());
 			}
@@ -705,7 +706,7 @@ impl<'s> Parser<'s> {
 			let alo = self.off();
 			let start = self.bash_line();
 			let text = self.raw_arith(b'(', b')', start)?;
-			let ahi = self.off().saturating_sub(1);
+			let ahi = self.raw_close;
 			if self.peek() == Some(b')') {
 				self.bump();
 				let mut t = Tok::new(T::ArithCmd, lo, self.off(), line);

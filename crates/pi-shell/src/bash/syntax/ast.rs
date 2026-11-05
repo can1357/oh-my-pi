@@ -154,6 +154,13 @@ pub struct Command {
 	pub id:     NodeId,
 	/// Source span, redirections included.
 	pub span:   Span,
+	/// Offset of the token that closes this compound command (`)`, `}`,
+	/// `done`, `esac`, `fi`, `))`, `]]`), as the parser read it. `None` when
+	/// the command has no closing token (a simple command) or the parser
+	/// synthesized it rather than reading it (zsh's implicit groups). The
+	/// text an alias expands to has no bytes in the source, so this offset
+	/// cannot be derived from the span's end.
+	pub close:  Option<u32>,
 	/// What kind of command.
 	pub kind:   CommandKind,
 	/// Redirections in source order.
@@ -249,26 +256,36 @@ pub struct If {
 	pub arms:      Vec<IfArm>,
 	/// The `else` body.
 	pub else_body: Option<List>,
+	/// Offset of `else`, as the parser read it.
+	pub else_pos:  Option<u32>,
 }
 
 /// One `if`/`elif` condition with its body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IfArm {
 	/// Condition list.
-	pub cond: List,
+	pub cond:     List,
 	/// `then` body.
-	pub body: List,
+	pub body:     List,
+	/// Offset of the `if` or `elif` that opens this arm, as the parser read
+	/// it.
+	pub kw_pos:   Option<u32>,
+	/// Offset of this arm's `then`, as the parser read it.
+	pub then_pos: Option<u32>,
 }
 
 /// `while` or `until`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct While {
 	/// `until`: loop while the condition fails.
-	pub until: bool,
+	pub until:  bool,
 	/// Condition list.
-	pub cond:  List,
+	pub cond:   List,
 	/// Loop body.
-	pub body:  List,
+	pub body:   List,
+	/// Offset of `do` (or of the `{` of zsh's brace body), as the parser
+	/// read it.
+	pub do_pos: Option<u32>,
 }
 
 /// `for`/`select` over words.
@@ -285,39 +302,63 @@ pub struct For {
 	pub words:      Option<Vec<Word>>,
 	/// Loop body.
 	pub body:       List,
+	/// Offset of `in`, as the parser read it.
+	pub in_pos:     Option<u32>,
+	/// Offset of `do` (or of the `{` of zsh's brace body), as the parser
+	/// read it.
+	pub do_pos:     Option<u32>,
+	/// The body is a `{ … }` group (zsh's `for x { … }`) rather than
+	/// `do … done`.
+	pub braces:     bool,
 }
 
 /// Arithmetic `for ((init; cond; step))`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArithFor {
 	/// Initializer expression.
-	pub init: ArithText,
+	pub init:   ArithText,
 	/// Condition expression (empty = true).
-	pub cond: ArithText,
+	pub cond:   ArithText,
 	/// Step expression.
-	pub step: ArithText,
+	pub step:   ArithText,
 	/// Loop body.
-	pub body: List,
+	pub body:   List,
+	/// Span of the `((init; cond; step))` header, as the parser read it.
+	pub header: Option<Span>,
+	/// Offset of the header's closing `))`, as the parser read it.
+	pub rparen: Option<u32>,
+	/// Offset of `do` (or of the `{` of zsh's brace body), as the parser
+	/// read it.
+	pub do_pos: Option<u32>,
+	/// The body is a `{ … }` group rather than `do … done`.
+	pub braces: bool,
 }
 
 /// `case word in … esac`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Case {
 	/// Subject word.
-	pub word: Word,
+	pub word:   Word,
 	/// Arms in order.
-	pub arms: Vec<CaseArm>,
+	pub arms:   Vec<CaseArm>,
+	/// Offset of `in` (or of the `{` of zsh's brace body), as the parser
+	/// read it.
+	pub in_pos: Option<u32>,
 }
 
 /// One `pat | pat) body ;;` arm.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaseArm {
 	/// Alternative patterns.
-	pub patterns: Vec<Word>,
+	pub patterns:  Vec<Word>,
 	/// Arm body (may be empty).
-	pub body:     List,
+	pub body:      List,
 	/// Arm terminator.
-	pub term:     CaseTerm,
+	pub term:      CaseTerm,
+	/// Span of the terminator as the parser read it. `None` when the arm
+	/// ends at `esac` with no terminator written: [`CaseArm::term`] is then
+	/// the default, and the source holds no `;;` to point at.
+	pub term_span: Option<Span>,
 }
 
 /// Terminator of a `case` arm.
