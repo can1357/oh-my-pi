@@ -574,6 +574,11 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 			const result = await externalEditor(currentText);
 			if (!this.#disposed && result !== null) {
 				this.#editor.setText(result);
+				// The editor was handed every paste already expanded, so the returned text holds
+				// the bodies themselves. Dropping the payloads keeps the buffer and the registry
+				// in step: a `[Paste #N]` the person typed, or one their own pasted text carried,
+				// is now literal and is never expanded a second time.
+				this.#editor.clearPastes();
 			}
 		} finally {
 			this.#tui.start();

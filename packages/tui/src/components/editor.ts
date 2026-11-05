@@ -1245,6 +1245,15 @@ export class Editor implements Component, Focusable {
 		});
 	}
 
+	/**
+	 * Drop the collapsed-paste payloads, keeping registered atoms and the id counter. For a host
+	 * that has replaced the buffer with text in which every paste is already expanded: a
+	 * `[Paste #N]` left in that text is the person's own characters and must never expand again.
+	 */
+	clearPastes(): void {
+		this.#pastes.clear();
+	}
+
 	/** Release the current draft's expansion payloads without touching history. */
 	clearPasteState(): void {
 		this.#pastes.clear();

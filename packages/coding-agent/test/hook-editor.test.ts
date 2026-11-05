@@ -367,6 +367,38 @@ describe("HookEditorComponent prompt-style mode", () => {
 		);
 	});
 
+	it("does not expand a pasted `[Paste #1]` again after the external editor returns it", async () => {
+		// The external editor is handed every paste already expanded, so its return holds the
+		// bodies. A `[Paste #N]` inside one of them is the person's own characters: expanding it
+		// a second time used to duplicate the whole body and its image reference.
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		let handedOut: string | undefined;
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+			externalEditor: text => {
+				handedOut = text;
+				return Promise.resolve(text);
+			},
+		});
+		const token = component.attachImage(image);
+		const finishPaste = component.beginPaste();
+		finishPaste(`literal [Paste #1]; ${token}\n${largePasteText()}`);
+		const body = `literal [Paste #1]; [Image #1]\n${largePasteText()}`;
+
+		component.handleNativeEvent({ type: "action", key: "actions/external", act: "external", mods: [] });
+		await Promise.resolve();
+		expect(handedOut).toBe(`literal [Paste #1]; ${token}\n${largePasteText()}`);
+		component.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith(
+			body,
+			[image],
+			["literal [Paste #1]; ", { kind: "image", n: 1, tail: "" }, `\n${largePasteText()}`],
+		);
+	});
+
 	it("keeps a typed marker in the same field as an attachment out of the submitted runs", () => {
 		// The answer owns one real image; everything else that reads like a marker is the
 		// person's own text and must stay a literal run, so a renumbering consumer cannot move it.
