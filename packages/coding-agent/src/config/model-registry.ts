@@ -3120,8 +3120,11 @@ export class ModelRegistry {
 		//   - Not eligible up here: capture at SELECTION. Such a provider becomes
 		//     eligible precisely BECAUSE its extension registration went away
 		//     during the awaits, and the identity includes that registration — so
-		//     an identity from before the unregistration can never match again and
-		//     its roster is refused for ever. Measured across all seven.
+		//     an identity from before the unregistration cannot match, and its
+		//     discovery result is refused ON THAT PASS. Nothing is lost for ever:
+		//     the roster a consumer reads is unchanged and the next pass publishes
+		//     normally. Measured across all seven, at this capture point and at
+		//     both of the fixed ones.
 		//
 		// So `configIdentity` is undefined exactly when the provider was ineligible
 		// before the awaits, and that is a signal rather than a missing entry: the
