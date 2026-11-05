@@ -1511,53 +1511,85 @@ impl Ctx<'_> {
 		self.yyerr()
 	}
 
-	/// zsh `par_cond`: `cond_1 { SEPER } [ DBAR { SEPER } cond ]`.
+	/// zsh `par_cond`: `cond_1 { SEPER } { DBAR { SEPER } cond_1 }`.
 	fn par_cond(&mut self) -> Option<CondExpr> {
-		let a = self.par_cond_1()?;
+		let first = self.par_cond_1()?;
 		while self.cond_sep() {
 			self.zshlex();
 		}
-		if self.lx.tok == T::Dbar {
+		if self.lx.tok != T::Dbar {
+			return Some(first);
+		}
+		let mut terms = vec![first];
+		let mut ops = Vec::new();
+		while self.lx.tok == T::Dbar {
+			ops.push(self.tok_span().lo);
 			self.zshlex();
 			while self.cond_sep() {
 				self.zshlex();
 			}
-			let b = self.par_cond()?;
-			return Some(CondExpr::Or(Box::new(a), Box::new(b)));
+			terms.push(self.par_cond_1()?);
+			while self.cond_sep() {
+				self.zshlex();
+			}
 		}
-		Some(a)
+		Some(CondExpr::Or(terms, ops.into_boxed_slice()))
 	}
 
-	/// zsh `par_cond_1`: `cond_2 { SEPER } [ DAMPER { SEPER } cond_1 ]`.
+	/// zsh `par_cond_1`: `cond_2 { SEPER } { DAMPER { SEPER } cond_2 }`.
 	fn par_cond_1(&mut self) -> Option<CondExpr> {
-		let a = self.par_cond_2()?;
+		let first = self.par_cond_2()?;
 		while self.cond_sep() {
 			self.zshlex();
 		}
-		if self.lx.tok == T::Damper {
+		if self.lx.tok != T::Damper {
+			return Some(first);
+		}
+		let mut terms = vec![first];
+		let mut ops = Vec::new();
+		while self.lx.tok == T::Damper {
+			ops.push(self.tok_span().lo);
 			self.zshlex();
 			while self.cond_sep() {
 				self.zshlex();
 			}
-			let b = self.par_cond_1()?;
-			return Some(CondExpr::And(Box::new(a), Box::new(b)));
+			terms.push(self.par_cond_2()?);
+			while self.cond_sep() {
+				self.zshlex();
+			}
 		}
-		Some(a)
+		Some(CondExpr::And(terms, ops.into_boxed_slice()))
 	}
 
 	/// zsh `par_cond_2`: `BANG cond_2 | INPAR cond OUTPAR | STRING STRING
-	/// STRING | STRING STRING | STRING ( INANG | OUTANG ) STRING`.
-	#[allow(clippy::cognitive_complexity, reason = "a direct port of zsh's par_cond_2")]
+	/// STRING | STRING STRING | STRING ( INANG | OUTANG ) STRING`. A run of
+	/// `BANG`s is read in a loop and kept as one node.
 	fn par_cond_2(&mut self) -> Option<CondExpr> {
-		while self.cond_sep() {
+		let mut bangs: Vec<u32> = Vec::new();
+		loop {
+			while self.cond_sep() {
+				self.zshlex();
+			}
+			if self.lx.tok != T::Bang {
+				break;
+			}
+			bangs.push(self.tok_span().lo);
 			self.zshlex();
 		}
-		if self.lx.tok == T::Bang {
-			self.zshlex();
-			let e = self.par_cond_2()?;
-			return Some(CondExpr::Not(Box::new(e)));
-		}
+		let e = self.par_cond_operand()?;
+		Some(match bangs.split_first() {
+			None => e,
+			Some((&lo, rest)) => {
+				CondExpr::Not { lo, rest: rest.to_vec().into_boxed_slice(), expr: Box::new(e) }
+			},
+		})
+	}
+
+	/// The rest of `par_cond_2`, after any `BANG`s.
+	#[allow(clippy::cognitive_complexity, reason = "a direct port of zsh's par_cond_2")]
+	fn par_cond_operand(&mut self) -> Option<CondExpr> {
 		if self.lx.tok == T::Inpar {
+			let lparen = self.tok_span().lo;
 			self.zshlex();
 			while self.cond_sep() {
 				self.zshlex();
@@ -1569,8 +1601,9 @@ impl Ctx<'_> {
 			if self.lx.tok != T::Outpar {
 				return self.yyerr();
 			}
+			let rparen = self.tok_span().lo;
 			self.zshlex();
-			return r.map(|e| CondExpr::Group(Box::new(e)));
+			return r.map(|e| CondExpr::Group { lparen, rparen, expr: Box::new(e) });
 		}
 		let s1 = self.tokstr().map(|s| (s.to_vec(), self.tok_span()));
 		let dble = s1
@@ -1593,6 +1626,7 @@ impl Ctx<'_> {
 		}
 		if matches!(self.lx.tok, T::Inang | T::Outang) {
 			let op: &[u8] = if self.lx.tok == T::Inang { b"<" } else { b">" };
+			let op_lo = self.tok_span().lo;
 			self.cond_next();
 			if self.lx.tok != T::String {
 				return self.yyerr();
@@ -1600,7 +1634,8 @@ impl Ctx<'_> {
 			let s3 = self.tw();
 			self.cond_next();
 			return Some(CondExpr::Binary {
-				op:  op.to_vec(),
+				op: op.to_vec(),
+				op_lo,
 				lhs: zword(s1.0, s1.1),
 				rhs: zword(s3.0, s3.1),
 			});
@@ -1641,7 +1676,7 @@ impl Ctx<'_> {
 		if a.0.len() < 2 || !is_dash(a.0[0]) {
 			return self.cond_error(b"parse error: condition expected: ", &a.0);
 		}
-		Some(CondExpr::Unary { op: plain(&a.0), arg: zword(b.0, b.1) })
+		Some(CondExpr::Unary { op: plain(&a.0), op_lo: a.1.lo, arg: zword(b.0, b.1) })
 	}
 
 	/// zsh `par_cond_triple`: `a op b`.
@@ -1657,9 +1692,10 @@ impl Ctx<'_> {
 		};
 		if binary {
 			return Some(CondExpr::Binary {
-				op:  plain(op),
-				lhs: zword(lhs.0, lhs.1),
-				rhs: zword(rhs.0, rhs.1),
+				op:    plain(op),
+				op_lo: mid.1.lo,
+				lhs:   zword(lhs.0, lhs.1),
+				rhs:   zword(rhs.0, rhs.1),
 			});
 		}
 		if lhs.0.len() > 1 && is_dash(lhs.0[0]) {
@@ -1680,8 +1716,9 @@ impl Ctx<'_> {
 		let hi = l.last().map_or(a.1.hi, |t| t.1.hi);
 		let parts = l.into_iter().map(|t| WordPart::Zsh(t.0)).collect();
 		Some(CondExpr::Unary {
-			op:  plain(&a.0),
-			arg: Word { id: NodeId(0), span: Span::new(lo, hi), parts },
+			op:    plain(&a.0),
+			op_lo: a.1.lo,
+			arg:   Word { id: NodeId(0), span: Span::new(lo, hi), parts },
 		})
 	}
 }

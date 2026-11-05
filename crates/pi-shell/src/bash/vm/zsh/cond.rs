@@ -887,9 +887,10 @@ fn report(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32, chunks: Ve
 /// A parsed `test` expression (zsh's condition wordcode).
 #[derive(Debug, PartialEq, Eq)]
 enum Node {
-	Not(Box<Self>),
-	And(Box<Self>, Box<Self>),
-	Or(Box<Self>, Box<Self>),
+	/// A run of `!`s (at least one) over an operand that is not `Not`.
+	Not(usize, Box<Self>),
+	And(Vec<Self>),
+	Or(Vec<Self>),
 	Prim {
 		op: CondOp,
 		l:  BString,
@@ -970,30 +971,64 @@ impl TestParser<'_> {
 		self.tokstr.unwrap_or_default().into()
 	}
 
-	/// `par_cond`: `cond_1 [ -o cond ]`.
+	/// `par_cond`: `cond_1 { -o cond_1 }`.
 	fn cond(&mut self) -> Result<Node, Perr> {
-		let r = self.cond_1()?;
-		if self.tok == Tok::Dbar {
-			self.lex();
-			let rhs = self.cond()?;
-			return Ok(Node::Or(Box::new(r), Box::new(rhs)));
+		let first = self.cond_1()?;
+		if self.tok != Tok::Dbar {
+			return Ok(first);
 		}
-		Ok(r)
+		let mut terms = vec![first];
+		while self.tok == Tok::Dbar {
+			self.lex();
+			terms.push(self.cond_1()?);
+		}
+		Ok(Node::Or(terms))
 	}
 
-	/// `par_cond_1`: `cond_2 [ -a cond_1 ]`.
+	/// `par_cond_1`: `cond_2 { -a cond_2 }`.
 	fn cond_1(&mut self) -> Result<Node, Perr> {
-		let r = self.cond_2()?;
-		if self.tok == Tok::Damper {
-			self.lex();
-			let rhs = self.cond_1()?;
-			return Ok(Node::And(Box::new(r), Box::new(rhs)));
+		let first = self.cond_2()?;
+		if self.tok != Tok::Damper {
+			return Ok(first);
 		}
-		Ok(r)
+		let mut terms = vec![first];
+		while self.tok == Tok::Damper {
+			self.lex();
+			terms.push(self.cond_2()?);
+		}
+		Ok(Node::And(terms))
 	}
 
-	/// `par_cond_2` in test mode (POSIX's rules by argument count first).
+	/// `par_cond_2` in test mode (POSIX's rules by argument count first). A
+	/// run of `!`s is read in a loop and kept as one node.
 	fn cond_2(&mut self) -> Result<Node, Perr> {
+		let mut bangs = 0;
+		while self.bang_leads() {
+			self.lex();
+			bangs += 1;
+		}
+		let e = self.cond_2_operand()?;
+		Ok(if bangs == 0 {
+			e
+		} else {
+			Node::Not(bangs, Box::new(e))
+		})
+	}
+
+	/// Whether `par_cond_2` reads the current token as a `!` that negates
+	/// what follows: the argument-count rules of `cond_2_operand` come first.
+	fn bang_leads(&self) -> bool {
+		let n_testargs = self.args.len() - self.pos + 1;
+		let next = self.args.get(self.pos).map(|a| a.as_slice());
+		self.tok == Tok::Bang
+			&& n_testargs != 1
+			&& !(n_testargs > 2
+				&& (matches!(next, Some(b"=" | b"==" | b"!=" | b"-a" | b"-o"))
+					|| matches!(next, Some([b'-', rest @ ..]) if cond_num(rest).is_some())))
+	}
+
+	/// The rest of `par_cond_2`, after any `!`s.
+	fn cond_2_operand(&mut self) -> Result<Node, Perr> {
 		let n_testargs = self.args.len() - self.pos + 1;
 		if self.tok == Tok::Null {
 			return double(b"-n", b"");
@@ -1019,13 +1054,6 @@ impl TestParser<'_> {
 				self.lex();
 				return triple(&s1, &s2, &s3);
 			}
-		}
-		if self.tok == Tok::Bang
-			&& !(n_testargs > 2
-				&& matches!(self.args.get(self.pos).map(|a| a.as_slice()), Some(b"-a" | b"-o")))
-		{
-			self.lex();
-			return Ok(Node::Not(Box::new(self.cond_2()?)));
 		}
 		if self.tok == Tok::Inpar {
 			self.lex();
@@ -1120,17 +1148,20 @@ fn multi(a: &[u8], args: Vec<BString>) -> Result<Node, Perr> {
 /// zsh `evalcond` over a parsed `test` expression.
 fn evalcond(ctx: &mut Ctx<'_, '_>, n: &Node) -> Result<Res, Need> {
 	Ok(match n {
-		Node::Not(c) => match evalcond(ctx, c)? {
-			Res::St(s @ (0 | 1)) => Res::St(1 - s),
+		Node::Not(bangs, c) => match evalcond(ctx, c)? {
+			Res::St(s @ (0 | 1)) if bangs % 2 == 1 => Res::St(1 - s),
 			r => r,
 		},
-		Node::And(a, b) => match evalcond(ctx, a)? {
-			Res::St(0) => evalcond(ctx, b)?,
-			r => r,
-		},
-		Node::Or(a, b) => match evalcond(ctx, a)? {
-			Res::St(1 | 3) => evalcond(ctx, b)?,
-			r => r,
+		Node::And(terms) | Node::Or(terms) => {
+			let and = matches!(n, Node::And(_));
+			let mut result = Res::St(i32::from(!and));
+			for term in terms {
+				result = evalcond(ctx, term)?;
+				if !matches!((&result, and), (Res::St(0), true) | (Res::St(1 | 3), false)) {
+					break;
+				}
+			}
+			result
 		},
 		Node::Prim { op, l, r } => primary(ctx, true, *op, l, r)?,
 		Node::Mod { name, infix, args } => {
@@ -1248,10 +1279,7 @@ mod tests {
 		assert_eq!(parse(&["-z", "("]).unwrap().0, prim(CondOp::Unary(b'z'), "(", ""));
 		assert_eq!(
 			parse(&["!", "-a", "!"]).unwrap().0,
-			Node::And(
-				Box::new(prim(CondOp::Unary(b'n'), "!", "")),
-				Box::new(prim(CondOp::Unary(b'n'), "!", ""))
-			)
+			Node::And(vec![prim(CondOp::Unary(b'n'), "!", ""), prim(CondOp::Unary(b'n'), "!", "")])
 		);
 	}
 

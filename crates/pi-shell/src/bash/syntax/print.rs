@@ -747,35 +747,38 @@ impl<'a> Bp<'a> {
 	fn cond(&mut self, e: &CondExpr) {
 		let mut e = e;
 		let mut invert = false;
-		while let CondExpr::Not(inner) = e {
-			invert = !invert;
-			e = inner;
+		while let CondExpr::Not { rest, expr, .. } = e {
+			invert ^= rest.len() % 2 == 0;
+			e = expr;
 		}
 		if invert {
 			self.put(b"! ");
 		}
 		match e {
-			CondExpr::Group(inner) => {
+			CondExpr::Group { expr, .. } => {
 				self.put(b"( ");
-				self.cond(inner);
+				self.cond(expr);
 				self.put(b" )");
 			},
-			CondExpr::And(a, b) => {
-				self.cond(a);
-				self.put(b" && ");
-				self.cond(b);
+			CondExpr::And(terms, _) | CondExpr::Or(terms, _) => {
+				let op: &[u8] = if matches!(e, CondExpr::And(..)) {
+					b" && "
+				} else {
+					b" || "
+				};
+				for (i, term) in terms.iter().enumerate() {
+					if i > 0 {
+						self.put(op);
+					}
+					self.cond(term);
+				}
 			},
-			CondExpr::Or(a, b) => {
-				self.cond(a);
-				self.put(b" || ");
-				self.cond(b);
-			},
-			CondExpr::Unary { op, arg } => {
+			CondExpr::Unary { op, arg, .. } => {
 				self.put(op);
 				self.put(b" ");
 				word_text(arg, &mut self.out);
 			},
-			CondExpr::Binary { op, lhs, rhs } => {
+			CondExpr::Binary { op, lhs, rhs, .. } => {
 				word_text(lhs, &mut self.out);
 				self.put(b" ");
 				self.put(op);
@@ -786,7 +789,7 @@ impl<'a> Bp<'a> {
 				self.put(b"-n ");
 				word_text(w, &mut self.out);
 			},
-			CondExpr::Not(_) => {},
+			CondExpr::Not { .. } => {},
 		}
 	}
 

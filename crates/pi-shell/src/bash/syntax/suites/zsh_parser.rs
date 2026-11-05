@@ -42,6 +42,34 @@ fn first_cmd(src: &[u8]) -> Command {
 		.cmd
 }
 
+#[test]
+fn long_conditional_chains_preserve_zsh_function_text() {
+	for op in [" && ", " || "] {
+		let src = format!("f() {{ [[ {} ]] }}", vec!["a"; 100_000].join(op));
+		let CommandKind::FuncDef(function) = first_cmd(src.as_bytes()).kind else {
+			panic!("function expected")
+		};
+		let text = function_text(b"f", &function);
+		let expected = format!("f () {{\n\t[[ {} ]]\n}}", vec!["-n a"; 100_000].join(op));
+		assert_eq!(text, expected.as_bytes());
+	}
+}
+
+#[test]
+fn bang_runs_keep_zsh_function_text() {
+	// zsh shows a negated `!` in parentheses: `! ( ! -n a )`.
+	for n in [1, 2, 3, 100_000] {
+		let src = format!("f() {{ [[ {}a ]] }}", "! ".repeat(n));
+		let CommandKind::FuncDef(function) = first_cmd(src.as_bytes()).kind else {
+			panic!("function expected")
+		};
+		let text = function_text(b"f", &function);
+		let expected =
+			format!("f () {{\n\t[[ {}! -n a{} ]]\n}}", "! ( ".repeat(n - 1), " )".repeat(n - 1));
+		assert_eq!(text, expected.as_bytes(), "{n} bangs");
+	}
+}
+
 fn simple(src: &[u8]) -> Simple {
 	match first_cmd(src).kind {
 		CommandKind::Simple(s) => s,
@@ -320,16 +348,18 @@ fn conditions_arith_time_coproc_and_separators() {
 	let CommandKind::Cond(cond) = first_cmd(b"[[ -o opt && $a == b* || ! -f x ]]").kind else {
 		panic!()
 	};
-	let CondExpr::Or(lhs, rhs) = cond else {
+	let CondExpr::Or(terms, _) = cond else {
 		panic!()
 	};
-	assert!(matches!(*lhs, CondExpr::And(..)));
-	assert!(matches!(*rhs, CondExpr::Not(_)));
+	assert!(matches!(
+		terms.as_slice(),
+		[CondExpr::And(..), CondExpr::Not { rest, .. }] if rest.is_empty()
+	));
 	let CommandKind::Cond(CondExpr::Unary { op, .. }) = first_cmd(b"[[ a ]]").kind else {
 		panic!()
 	};
 	assert_eq!(op, b"-n", "zsh reads a lone word as -n word");
-	let CommandKind::Cond(CondExpr::Unary { op, arg }) = first_cmd(b"[[ -x a b ]]").kind else {
+	let CommandKind::Cond(CondExpr::Unary { op, arg, .. }) = first_cmd(b"[[ -x a b ]]").kind else {
 		panic!()
 	};
 	assert_eq!((op.as_slice(), arg.parts.len()), (&b"-x"[..], 2));

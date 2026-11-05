@@ -917,6 +917,7 @@ impl Parser<'_> {
 	fn cond_read(&mut self) -> PResult<Tok> {
 		let t = self.read_token()?;
 		self.last_cond_text = Some(Self::token_text(&t));
+		self.cond_tok_lo = t.lo;
 		self.cond_eof = t.kind == T::Eof;
 		if !self.cond_eof {
 			// The command's span runs through `]]`.
@@ -935,21 +936,31 @@ impl Parser<'_> {
 	}
 
 	fn cond_or(&mut self, tok: &mut T) -> CResult<CondExpr> {
-		let l = self.cond_and(tok)?;
-		if *tok == T::OrOr {
-			let r = self.cond_or(tok)?;
-			return Ok(CondExpr::Or(Box::new(l), Box::new(r)));
+		let first = self.cond_and(tok)?;
+		if *tok != T::OrOr {
+			return Ok(first);
 		}
-		Ok(l)
+		let mut terms = vec![first];
+		let mut ops = Vec::new();
+		while *tok == T::OrOr {
+			ops.push(self.cond_tok_lo);
+			terms.push(self.cond_and(tok)?);
+		}
+		Ok(CondExpr::Or(terms, ops.into_boxed_slice()))
 	}
 
 	fn cond_and(&mut self, tok: &mut T) -> CResult<CondExpr> {
-		let l = self.cond_term(tok)?;
-		if *tok == T::AndAnd {
-			let r = self.cond_and(tok)?;
-			return Ok(CondExpr::And(Box::new(l), Box::new(r)));
+		let first = self.cond_term(tok)?;
+		if *tok != T::AndAnd {
+			return Ok(first);
 		}
-		Ok(l)
+		let mut terms = vec![first];
+		let mut ops = Vec::new();
+		while *tok == T::AndAnd {
+			ops.push(self.cond_tok_lo);
+			terms.push(self.cond_term(tok)?);
+		}
+		Ok(CondExpr::And(terms, ops.into_boxed_slice()))
 	}
 
 	fn cond_msg(&self, text: &[u8], pre: &[u8], post: &[u8]) -> CondFail {
@@ -982,8 +993,36 @@ impl Parser<'_> {
 	}
 
 	fn cond_term(&mut self, tok: &mut T) -> CResult<CondExpr> {
-		let t = self.cond_skip_newlines()?;
-		*tok = t.kind;
+		// A run of `!`s is read in a loop and kept as one node, so its length
+		// sets no recursion depth here or in any later walk of the tree.
+		let mut bangs: Vec<u32> = Vec::new();
+		let operand = loop {
+			let t = self.cond_skip_newlines()?;
+			*tok = t.kind;
+			let at = t.lo;
+			match t.kind {
+				T::Bang => bangs.push(at),
+				T::Word | T::Assign | T::Number => {
+					let w = Self::tok_word(t);
+					if !is_plain(&w, b"!") {
+						break self.cond_word_operand(w, tok)?;
+					}
+					bangs.push(at);
+				},
+				_ => break self.cond_token_operand(t, tok)?,
+			}
+		};
+		Ok(match bangs.split_first() {
+			None => operand,
+			Some((&lo, rest)) => {
+				CondExpr::Not { lo, rest: rest.to_vec().into_boxed_slice(), expr: Box::new(operand) }
+			},
+		})
+	}
+
+	/// The operand of a `[[ ]]` term that starts with the token `t`, which
+	/// is not a word: a parenthesized expression, or an error.
+	fn cond_token_operand(&mut self, t: Tok, tok: &mut T) -> CResult<CondExpr> {
 		match t.kind {
 			T::CondEnd => Err(CondFail::Silent),
 			T::LParen => {
@@ -1018,103 +1057,100 @@ impl Parser<'_> {
 						b"', expected `)'",
 					));
 				}
+				let rparen = self.cond_tok_lo;
 				let next = self.cond_skip_newlines()?;
 				*tok = next.kind;
-				Ok(CondExpr::Group(Box::new(inner)))
-			},
-			T::Bang => {
-				let inner = self.cond_term(tok)?;
-				Ok(CondExpr::Not(Box::new(inner)))
-			},
-			T::Word | T::Assign | T::Number => {
-				let w = Self::tok_word(t);
-				if is_plain(&w, b"!") {
-					let inner = self.cond_term(tok)?;
-					return Ok(CondExpr::Not(Box::new(inner)));
-				}
-				if let Some(op) = plain_text(&w)
-					&& is_unop(op)
-				{
-					let op = op.to_vec();
-					let a = self.cond_read()?;
-					if !matches!(a.kind, T::Word | T::Assign | T::Number) {
-						let text = Self::token_text(&a);
-						return Err(self.cond_msg(
-							&text,
-							b"unexpected argument `",
-							b"' to conditional unary operator",
-						));
-					}
-					let arg = Self::tok_word(a);
-					let next = self.cond_skip_newlines()?;
-					*tok = next.kind;
-					return Ok(CondExpr::Unary { op, arg });
-				}
-				let o = self.cond_read()?;
-				let op: Vec<u8> = match o.kind {
-					T::Word | T::Assign => {
-						let ow = Self::tok_word(o);
-						match plain_text(&ow) {
-							Some(text) if is_binop(text) => {
-								if matches!(text, b"=" | b"==" | b"!=") {
-									self.lx.extpat = true;
-								} else if text == b"=~" {
-									self.lx.regexp = true;
-								}
-								text.to_vec()
-							},
-							_ => {
-								let text = self.last_cond_text.clone().unwrap_or_default();
-								return Err(self.cond_msg(
-									&text,
-									b"unexpected token `",
-									b"', conditional binary operator expected",
-								));
-							},
-						}
-					},
-					T::Lt => b"<".to_vec(),
-					T::Gt => b">".to_vec(),
-					T::CondEnd | T::AndAnd | T::OrOr | T::RParen => {
-						*tok = o.kind;
-						return Ok(CondExpr::Word(w));
-					},
-					_ => {
-						let text = Self::token_text(&o);
-						return Err(self.cond_msg(
-							&text,
-							b"unexpected token `",
-							b"', conditional binary operator expected",
-						));
-					},
-				};
-				let saved_extglob = self.lx.extglob;
-				if self.lx.extpat {
-					self.lx.extglob = true;
-				}
-				let r = self.cond_read();
-				self.lx.extglob = saved_extglob;
-				self.lx.extpat = false;
-				self.lx.regexp = false;
-				let r = r?;
-				if !matches!(r.kind, T::Word | T::Assign | T::Number) {
-					let text = Self::token_text(&r);
-					return Err(self.cond_msg(
-						&text,
-						b"unexpected argument `",
-						b"' to conditional binary operator",
-					));
-				}
-				let rhs = Self::tok_word(r);
-				let next = self.cond_skip_newlines()?;
-				*tok = next.kind;
-				Ok(CondExpr::Binary { op, lhs: w, rhs })
+				Ok(CondExpr::Group { lparen: t.lo, rparen, expr: Box::new(inner) })
 			},
 			_ => {
 				let text = Self::token_text(&t);
 				Err(self.cond_msg(&text, b"unexpected token `", b"' in conditional command"))
 			},
 		}
+	}
+
+	/// The operand of a `[[ ]]` term that starts with the word `w`: a unary
+	/// test, a binary test or the word alone.
+	fn cond_word_operand(&mut self, w: Word, tok: &mut T) -> CResult<CondExpr> {
+		if let Some(op) = plain_text(&w)
+			&& is_unop(op)
+		{
+			let op_lo = w.span.lo;
+			let op = op.to_vec();
+			let a = self.cond_read()?;
+			if !matches!(a.kind, T::Word | T::Assign | T::Number) {
+				let text = Self::token_text(&a);
+				return Err(self.cond_msg(
+					&text,
+					b"unexpected argument `",
+					b"' to conditional unary operator",
+				));
+			}
+			let arg = Self::tok_word(a);
+			let next = self.cond_skip_newlines()?;
+			*tok = next.kind;
+			return Ok(CondExpr::Unary { op, op_lo, arg });
+		}
+		let o = self.cond_read()?;
+		let op_lo = o.lo;
+		let op: Vec<u8> = match o.kind {
+			T::Word | T::Assign => {
+				let ow = Self::tok_word(o);
+				match plain_text(&ow) {
+					Some(text) if is_binop(text) => {
+						if matches!(text, b"=" | b"==" | b"!=") {
+							self.lx.extpat = true;
+						} else if text == b"=~" {
+							self.lx.regexp = true;
+						}
+						text.to_vec()
+					},
+					_ => {
+						let text = self.last_cond_text.clone().unwrap_or_default();
+						return Err(self.cond_msg(
+							&text,
+							b"unexpected token `",
+							b"', conditional binary operator expected",
+						));
+					},
+				}
+			},
+			T::Lt => b"<".to_vec(),
+			T::Gt => b">".to_vec(),
+			T::CondEnd | T::AndAnd | T::OrOr | T::RParen => {
+				*tok = o.kind;
+				return Ok(CondExpr::Word(w));
+			},
+			_ => {
+				let text = Self::token_text(&o);
+				return Err(self.cond_msg(
+					&text,
+					b"unexpected token `",
+					b"', conditional binary operator expected",
+				));
+			},
+		};
+		let saved_extglob = self.lx.extglob;
+		if self.lx.extpat {
+			self.lx.extglob = true;
+		}
+		let r = self.cond_read();
+		self.lx.extglob = saved_extglob;
+		self.lx.extpat = false;
+		self.lx.regexp = false;
+		let r = r?;
+		if !matches!(r.kind, T::Word | T::Assign | T::Number) {
+			let text = Self::token_text(&r);
+			return Err(self.cond_msg(
+				&text,
+				b"unexpected argument `",
+				b"' to conditional binary operator",
+			));
+		}
+		let rhs = Self::tok_word(r);
+		let next = self.cond_skip_newlines()?;
+		*tok = next.kind;
+		Ok(CondExpr::Binary { op, op_lo, lhs: w, rhs })
 	}
 }
 

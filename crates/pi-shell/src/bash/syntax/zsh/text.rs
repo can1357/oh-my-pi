@@ -790,23 +790,37 @@ impl Text {
 	/// (and the reverse) and around a negated `!`/`&&`/`||`.
 	fn cond(&mut self, e: &CondExpr) {
 		match ungroup(e) {
-			CondExpr::Not(x) => {
+			CondExpr::Not { rest, expr, .. } => {
+				// Each `!` inside another one is a negated `!`, so zsh shows
+				// it in parentheses: `! ( ! -n a )`.
+				for _ in 0..rest.len() {
+					self.s(b"! ( ");
+				}
 				self.s(b"! ");
-				self.cond_paren(x, |x| {
-					matches!(x, CondExpr::Not(_) | CondExpr::And(..) | CondExpr::Or(..))
+				self.cond_paren(expr, |x| {
+					matches!(x, CondExpr::Not { .. } | CondExpr::And(..) | CondExpr::Or(..))
 				});
+				for _ in 0..rest.len() {
+					self.s(b" )");
+				}
 			},
-			CondExpr::And(a, b) => {
-				self.cond_paren(a, |x| matches!(x, CondExpr::Or(..)));
-				self.s(b" && ");
-				self.cond_paren(b, |x| matches!(x, CondExpr::Or(..)));
+			CondExpr::And(terms, _) => {
+				for (i, term) in terms.iter().enumerate() {
+					if i > 0 {
+						self.s(b" && ");
+					}
+					self.cond_paren(term, |x| matches!(x, CondExpr::Or(..)));
+				}
 			},
-			CondExpr::Or(a, b) => {
-				self.cond_paren(a, |x| matches!(x, CondExpr::And(..)));
-				self.s(b" || ");
-				self.cond_paren(b, |x| matches!(x, CondExpr::And(..)));
+			CondExpr::Or(terms, _) => {
+				for (i, term) in terms.iter().enumerate() {
+					if i > 0 {
+						self.s(b" || ");
+					}
+					self.cond_paren(term, |x| matches!(x, CondExpr::And(..)));
+				}
 			},
-			CondExpr::Unary { op, arg } => {
+			CondExpr::Unary { op, arg, .. } => {
 				self.s(op);
 				self.c(b' ');
 				if let [WordPart::Zsh(_)] = &arg.parts[..] {
@@ -822,7 +836,7 @@ impl Text {
 					}
 				}
 			},
-			CondExpr::Binary { op, lhs, rhs } => {
+			CondExpr::Binary { op, lhs, rhs, .. } => {
 				self.word(lhs);
 				self.c(b' ');
 				self.s(op);
@@ -833,7 +847,7 @@ impl Text {
 				self.s(b"-n ");
 				self.word(w);
 			},
-			CondExpr::Group(x) => self.cond(x),
+			CondExpr::Group { expr, .. } => self.cond(expr),
 		}
 	}
 
@@ -934,8 +948,8 @@ impl Text {
 
 /// The expression inside any `( … )` groups.
 fn ungroup(mut e: &CondExpr) -> &CondExpr {
-	while let CondExpr::Group(x) = e {
-		e = x;
+	while let CondExpr::Group { expr, .. } = e {
+		e = expr;
 	}
 	e
 }

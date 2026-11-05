@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool crashing on long `[[ … && … ]]`, `[[ … || … ]]`, `[` and `test` chains and long runs of `!` in `[[ ]]`, including conditions in uncalled functions and skipped commands; 100,000-term chains now run without overflowing the stack ([#17872](https://github.com/can1357/oh-my-pi/pull/17872) by [@sjawhar](https://github.com/sjawhar))
 ### Breaking Changes
 
 - Replaced visualization-only `parseShell()` with engine-owned `RunTrace.present()` and `ShellVisualization` APIs.
