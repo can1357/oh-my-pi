@@ -1275,10 +1275,25 @@ async def test_git_fetch_endpoints_reject_attacker_origin(
 
 
 @pytest.mark.parametrize("head_ref", ["-evil", "main:refs/heads/evil", "a..b", "a//b"])
-async def test_git_fetch_pr_head_rejects_unsafe_head_ref(proxy_settings: Settings, head_ref: str) -> None:
+async def test_git_fetch_pr_head_rejects_unsafe_head_ref(
+    proxy_settings: Settings, upstream_repo: Path, head_ref: str
+) -> None:
+    # head_ref validation is deferred to the fallback path inside
+    # git_fetch_pr_head; the endpoint must not 400 before the primary
+    # refs/pull/<n>/head fetch, and must surface the deferred rejection as a
+    # 400 once the fallback is eligible (staged pool + head_sha present).
+    _stage_pool(proxy_settings, upstream_repo)
     app = _build_app(proxy_settings)
     endpoint = "/gh/v1/git/fetch_pr_head"
-    body = json.dumps({"repo": "octo/widget", "pr_number": 7, "head_ref": head_ref, "same_repo": True}).encode()
+    body = json.dumps(
+        {
+            "repo": "octo/widget",
+            "pr_number": 7,
+            "head_ref": head_ref,
+            "head_sha": "deadbeef",
+            "same_repo": True,
+        }
+    ).encode()
     async with await _async_client(app) as client:
         resp = await client.post(
             endpoint,
@@ -1287,6 +1302,36 @@ async def test_git_fetch_pr_head_rejects_unsafe_head_ref(proxy_settings: Setting
         )
     assert resp.status_code == 400, resp.text
     assert resp.json()["detail"] == "invalid ref"
+
+
+async def test_git_fetch_pr_head_unicode_head_ref_bypasses_validation_when_pr_ref_present(
+    proxy_settings: Settings, upstream_repo: Path
+) -> None:
+    # A head_ref outside the ASCII allowlist (Unicode, a valid git refname)
+    # must NOT be 400'd when the primary refs/pull/<n>/head fetch succeeds:
+    # validation is deferred to the fallback path, which is never eligible.
+    pool_dir = _stage_pool(proxy_settings, upstream_repo)
+    head = _git(["-C", str(pool_dir), "rev-parse", "main"], pool_dir).stdout.strip()
+    _git(["-C", str(pool_dir), "push", "origin", "refs/heads/main:refs/pull/7/head"], pool_dir)
+    app = _build_app(proxy_settings)
+    endpoint = "/gh/v1/git/fetch_pr_head"
+    body = json.dumps(
+        {
+            "repo": "octo/widget",
+            "pr_number": 7,
+            "head_ref": "funk-branch-é",
+            "head_sha": head,
+            "same_repo": True,
+        }
+    ).encode()
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            endpoint,
+            content=body,
+            headers={**_signed("POST", endpoint, body), "Content-Type": "application/json"},
+        )
+    assert resp.status_code == 200, resp.text
+    assert "invalid ref" not in resp.text
 
 
 async def test_git_fetch_rejects_ext_remote_helper(proxy_settings: Settings, upstream_repo: Path) -> None:
