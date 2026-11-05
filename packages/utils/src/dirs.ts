@@ -452,6 +452,22 @@ class DirResolver {
 		};
 	}
 
+	/**
+	 * The root `rootSubdir(…, "data")` builds on: `$XDG_DATA_HOME/omp` where XDG
+	 * is in use, and the config root otherwise. Exposed because the config-write
+	 * boundary has to accept it — the plugin registries resolve through it, so
+	 * without XDG it is the config root and with XDG it is the only root those
+	 * files live under.
+	 */
+	get dataRoot(): string {
+		return this.#rootDirs.data;
+	}
+
+	/** Profile-independent sibling of {@link dataRoot}, as `getBaseConfigRoot` is of `configRoot`. */
+	get baseDataRoot(): string {
+		return this.#baseRootDirs.data;
+	}
+
 	/** Profile-independent config-root subdirectory, with optional XDG override. Shared across profiles. */
 	baseRootSubdir(subdir: string, xdg?: XdgCategory): string {
 		return path.join(xdg ? this.#baseRootDirs[xdg] : getBaseConfigRoot(), subdir);
@@ -564,6 +580,22 @@ export function refreshDirsFromEnv(): void {
 /** Get the config root directory (~/.omp). */
 export function getConfigRootDir(): string {
 	return dirs.configRoot;
+}
+
+/**
+ * Get the data root (`~/.omp`; XDG default `$XDG_DATA_HOME/omp`).
+ *
+ * Without XDG this IS the config root, so a caller that accepts both accepts one
+ * directory. With XDG it is where the plugin registries live, and nothing else
+ * omp keeps points at it.
+ */
+export function getDataRootDir(): string {
+	return dirs.dataRoot;
+}
+
+/** Get the profile-independent data root, as `getBaseConfigRoot` is to `getConfigRootDir`. */
+export function getBaseDataRoot(): string {
+	return dirs.baseDataRoot;
 }
 
 /** Set the coding agent directory. Creates a fresh resolver, invalidating all cached paths. */

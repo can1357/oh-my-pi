@@ -350,6 +350,57 @@ describe("a config write follows a symlinked destination", () => {
 		expect(await fs.readdir(directory)).toEqual([leaf]);
 	});
 
+	// The case that made this fix inert for anyone who ran `omp config init-xdg`:
+	// all three registries resolve through the DATA root, which under XDG is
+	// `$XDG_DATA_HOME/omp` and is not the config root, the profile-independent
+	// root or the agent directory. Measured before the boundary accepted it: all
+	// three resolved outside every accepted root, so a linked registry was
+	// replaced exactly as on upstream main and the pull request did nothing for
+	// that population.
+	//
+	// A child process again, because the data root is read from the environment
+	// at module load and `os.homedir()` does not follow a later `process.env.HOME`.
+	test("follows a link under the XDG data root, where the registries live", async () => {
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "atomic-file-xdg-home-"));
+		const xdgData = await fs.mkdtemp(path.join(os.tmpdir(), "atomic-file-xdg-data-"));
+		try {
+			const dataOmp = path.join(xdgData, "omp");
+			await fs.mkdir(path.join(home, ".omp"), { recursive: true });
+			// The resolver adopts the XDG layout only when `$XDG_DATA_HOME/omp`
+			// already exists, which is what `omp config init-xdg` creates.
+			await fs.mkdir(dataOmp, { recursive: true });
+			const target = path.join(dataOmp, "shared.json");
+			const link = path.join(dataOmp, "marketplaces.json");
+			await fs.writeFile(target, "old");
+			await fs.symlink(target, link);
+
+			const script = path.join(home, "write.ts");
+			await fs.writeFile(
+				script,
+				`import { writeConfigFileAtomically } from ${JSON.stringify(path.join(import.meta.dir, "..", "src", "atomic-file.ts"))};\n` +
+					`await writeConfigFileAtomically(${JSON.stringify(link)}, "new", 0o644);\n`,
+			);
+			const child = Bun.spawnSync([process.execPath, "run", script], {
+				env: {
+					...process.env,
+					HOME: home,
+					XDG_DATA_HOME: xdgData,
+					PI_CODING_AGENT_DIR: path.join(home, ".omp", "agent"),
+				},
+				stderr: "pipe",
+			});
+
+			expect(child.stderr.toString()).toBe("");
+			expect(child.exitCode).toBe(0);
+			// Before the data root was accepted this was `false` and `"old"`: the
+			// link was replaced by a regular file, as on upstream main.
+			expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+			expect(await fs.readFile(target, "utf8")).toBe("new");
+		} finally {
+			await removeWithRetries(home);
+			await removeWithRetries(xdgData);
+		}
+	});
 	test("falls back to a compact staging name when the directory leaves almost no room", async () => {
 		// A reviewer measured this one: a destination at the very limit, whose
 		// directory leaves fewer bytes than the readable `pid`-and-uuid suffix but

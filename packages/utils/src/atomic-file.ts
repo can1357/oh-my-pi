@@ -4,8 +4,10 @@ import {
 	CONFIG_DIR_NAME,
 	getAgentDir,
 	getBaseConfigRoot,
+	getBaseDataRoot,
 	getConfigDirName,
 	getConfigRootDir,
+	getDataRootDir,
 	pathIsWithin,
 	relativePathWithinRoot,
 } from "./dirs";
@@ -210,19 +212,41 @@ function locationOf(filePath: string): { dir: string; name: string } {
 }
 
 /**
- * Whether `candidate` stays inside a directory omp itself keeps: the config
- * root, the profile-independent root, or the agent directory. The physical
+ * The directories omp itself keeps, whose contents a config write may follow a
+ * link through: the config root, the profile-independent root, the agent
+ * directory, and the **data** root with its profile-independent sibling.
+ *
+ * The data roots are here because the three writers that opted in resolve
+ * through them. Without XDG the data root IS the config root and this list is
+ * the same three directories it always was; with XDG — which `omp config
+ * init-xdg` produces — `marketplaces.json`, `installed_plugins.json` and
+ * `project_registries.json` live under `$XDG_DATA_HOME/omp` and under nothing
+ * else on this list, so omitting it made the whole fix inert for exactly the
+ * users who ran that command. Measured before it was added: all three resolved
+ * outside every accepted root, and the pull request's own reproduction printed
+ * `symlink? no` under XDG where it printed `yes` without.
+ *
+ * State and cache are deliberately NOT here. No writer that opted in resolves
+ * through them, so adding them would widen the boundary with nothing to point
+ * at — which is the same test that put data in.
+ */
+function ompRoots(): string[] {
+	return [getConfigRootDir(), getBaseConfigRoot(), getAgentDir(), getDataRootDir(), getBaseDataRoot()];
+}
+
+/**
+ * Whether `candidate` stays inside one of those directories. The physical
  * location decides, so an alias or a `..` cannot spell a way out of it.
  *
- * A config write follows a link only while every step stays inside these. A
- * link whose target leaves them is left alone and replaced, which is what a
- * write on upstream main does with every link — so this narrowing takes nothing
- * away that users have today, and it keeps the rule a property of the path
- * rather than an open-ended question about territory omp does not own.
+ * A config write follows a link only while every step stays inside them. A link
+ * whose target leaves them is left alone and replaced, which is what a write on
+ * upstream main does with every link — so this takes nothing away that users
+ * have today, and it keeps the rule a property of the path rather than an
+ * open-ended question about territory omp does not own.
  */
 function insideOmpRoots(candidate: string): boolean {
 	const { dir } = locationOf(candidate);
-	return [getConfigRootDir(), getBaseConfigRoot(), getAgentDir()].some(root => pathIsWithin(root, dir));
+	return ompRoots().some(root => pathIsWithin(root, dir));
 }
 
 /**
@@ -250,7 +274,7 @@ function insideAProjectConfigDir(filePath: string): boolean {
 	// at a file in omp's own root would lose its project marker and be followed.
 	const { dir, name } = locationOf(filePath);
 	let searched: string | undefined;
-	for (const root of [getConfigRootDir(), getBaseConfigRoot(), getAgentDir()]) {
+	for (const root of ompRoots()) {
 		// `pathIsWithin` canonicalizes both sides and counts a directory that IS
 		// the root as inside it. Comparing spellings instead left two holes: a
 		// link directly in the config root was never followed, which is where the
