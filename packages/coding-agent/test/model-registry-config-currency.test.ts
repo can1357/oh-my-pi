@@ -74,27 +74,45 @@ describe("a configured discovery keeps the configuration it started under", () =
 		`providers:\n  probe:\n    baseUrl: ${ENDPOINT}\n    api: openai-completions\n` +
 		`    apiKey: "${held.command}"\n    discovery:\n      type: openai-models-list\n${extra}`;
 
-	test("a per-model override added while the discovery runs reaches neither its rows nor its cache", async () => {
-		fs.writeFileSync(modelsPath, probeConfig());
-		await reloadDuringDiscovery(() =>
-			writeWithNewMtime(
-				modelsPath,
-				probeConfig(
-					`    modelOverrides:\n      listed-model:\n        headers:\n          ${TRANSIENT}: fake-temporary-secret\n`,
-				),
-			),
-		);
-		expect(sent).toEqual([MODELS_URL]);
-		// The overlay belongs to a configuration this request never ran under.
-		// It is in neither currency test, so nothing else would stop it.
-		expect(registry.find("probe", "listed-model")?.headers?.[TRANSIENT]).toBeUndefined();
+	/** `probeConfig` with a per-model header overlay on `listed-model`. */
+	const overlayConfig = (value: string) =>
+		probeConfig(`    modelOverrides:\n      listed-model:\n        headers:\n          ${TRANSIENT}: ${value}\n`);
 
-		// And the second call site: what the discovery RETURNED, which is what
-		// reaches the model cache. Take the overlay away again and reload, so the
-		// row now comes from that cache rather than from the live configuration.
+	/** The header chain a request for `listed-model` would actually carry. */
+	async function wireHeaders(): Promise<Record<string, string> | undefined> {
+		const model = registry.find("probe", "listed-model");
+		if (!model) throw new Error("the discovered model was not published");
+		return await registry.resolveModelHeaders(model);
+	}
+
+	test("a per-model override deleted while the discovery runs stops reaching its rows and its cache", async () => {
+		fs.writeFileSync(modelsPath, overlayConfig("fake-removed-secret"));
+		// The row is fetched while the overlay exists and arrives after it is gone.
+		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, probeConfig()));
+		expect(sent).toEqual([MODELS_URL]);
+		// Nothing composes a header away again, so a row that kept the overlay
+		// here would send a secret the operator deleted.
+		expect((await wireHeaders())?.[TRANSIENT]).toBeUndefined();
+
+		// And after a reload, when the row is rebuilt from the model cache rather
+		// than from the result the discovery just returned.
+		await registry.refreshProvider("unused", "offline");
+		expect((await wireHeaders())?.[TRANSIENT]).toBeUndefined();
+	});
+
+	test("a per-model override added while the discovery runs reaches it, because the configuration holds it", async () => {
+		fs.writeFileSync(modelsPath, probeConfig());
+		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, overlayConfig("fake-added-secret")));
+		expect(sent).toEqual([MODELS_URL]);
+		// The other direction of the same rule: overlays are live configuration,
+		// so the row carries the one the configuration holds now, not the one it
+		// was discovered under. A row frozen at discovery time would miss it.
+		expect((await wireHeaders())?.[TRANSIENT]).toBe("fake-added-secret");
+
+		// Delete it again: the row must lose it, from the cache path too.
 		writeWithNewMtime(modelsPath, probeConfig());
 		await registry.refreshProvider("unused", "offline");
-		expect(registry.find("probe", "listed-model")?.headers?.[TRANSIENT]).toBeUndefined();
+		expect((await wireHeaders())?.[TRANSIENT]).toBeUndefined();
 	});
 
 	// The two directions of the same comparison. `baseUrlApis` is a set written
@@ -125,6 +143,66 @@ describe("a configured discovery keeps the configuration it started under", () =
 				modelsPath,
 				probeConfig(`    models:\n${openai}      - id: second\n        api: openai-responses\n`),
 			),
+		);
+		expect(sent).toEqual([]);
+		expect(registry.find("probe", "listed-model")).toBeUndefined();
+	});
+
+	// The same two directions for the provider routing allowlist. `only` is a
+	// set — the catalog's `OpenRouterRouting` distinguishes it from `order`,
+	// the preference sequence — so writing its members the other way round
+	// sends the same request, while adding or removing one does not, and
+	// reversing `order` does not either.
+	const routing = (first: string, second: string, order = "") =>
+		probeConfig(`    compat:\n      openRouterRouting:\n        only: [${first}, ${second}]\n${order}`);
+
+	test("writing a routing allowlist's members in the other order does not refuse the discovery", async () => {
+		fs.writeFileSync(modelsPath, routing("anthropic", "openai"));
+		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, routing("openai", "anthropic")));
+		expect(sent).toEqual([MODELS_URL]);
+		expect(registry.find("probe", "listed-model")).toBeDefined();
+	});
+
+	test("changing a routing allowlist's members still refuses the discovery", async () => {
+		fs.writeFileSync(modelsPath, routing("anthropic", "openai"));
+		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, routing("anthropic", "bedrock")));
+		expect(sent).toEqual([]);
+		expect(registry.find("probe", "listed-model")).toBeUndefined();
+	});
+
+	test("reversing the routing preference order still refuses the discovery", async () => {
+		const forwards = "        order: [anthropic, openai]\n";
+		const backwards = "        order: [openai, anthropic]\n";
+		fs.writeFileSync(modelsPath, routing("anthropic", "openai", forwards));
+		// `order` is a sequence the provider follows, so reversing it is a
+		// different request even though the same providers appear in it.
+		await reloadDuringDiscovery(() =>
+			writeWithNewMtime(modelsPath, routing("anthropic", "openai", backwards)),
+		);
+		expect(sent).toEqual([]);
+		expect(registry.find("probe", "listed-model")).toBeUndefined();
+	});
+
+	// And for the header record, where the two directions are the two kinds of
+	// reordering: two different field names, and two spellings of one name.
+	test("reordering two differently named headers does not refuse the discovery", async () => {
+		const headers = (first: string, second: string) =>
+			probeConfig(`    headers:\n      ${first}\n      ${second}\n`);
+		fs.writeFileSync(modelsPath, headers("x-one: first", "x-two: second"));
+		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, headers("x-two: second", "x-one: first")));
+		expect(sent).toEqual([MODELS_URL]);
+		expect(registry.find("probe", "listed-model")).toBeDefined();
+	});
+
+	test("reordering two spellings of one header name still refuses the discovery", async () => {
+		const headers = (first: string, second: string) =>
+			probeConfig(`    headers:\n      ${first}\n      ${second}\n`);
+		// HTTP field names are case-insensitive and two declarations of one name
+		// are combined in declaration order, so this swap changes the value that
+		// is sent from `first, second` to `second, first`.
+		fs.writeFileSync(modelsPath, headers("x-route: first", "X-Route: second"));
+		await reloadDuringDiscovery(() =>
+			writeWithNewMtime(modelsPath, headers("X-Route: second", "x-route: first")),
 		);
 		expect(sent).toEqual([]);
 		expect(registry.find("probe", "listed-model")).toBeUndefined();

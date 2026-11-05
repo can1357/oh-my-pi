@@ -211,15 +211,52 @@ interface ConfiguredModelDiscoveryResult {
 	configIdentity: string;
 }
 
-/** JSON with every object's keys in sorted order: configuration identity, where member order carries no meaning. */
+/**
+ * JSON for a configuration identity: two configurations that send the same
+ * request must produce the same string, and two that do not must not. Object
+ * member order carries no meaning and is sorted away. Two collections need
+ * more than that, and this is the only place either rule lives.
+ *
+ * `headers` is folded by the HTTP field name rather than the property name.
+ * Field names are case-insensitive, and two declarations of one name are
+ * combined, in declaration order, into one comma-joined value. So the order
+ * of two DIFFERENT names is spelling, while the order of two spellings of the
+ * SAME name is the value that gets sent. Sorting property names alone cannot
+ * tell those apart: `{x-route, X-Route}` and the same record the other way
+ * round sort equal while the wire value goes from `first, second` to
+ * `second, first`.
+ *
+ * `only` inside `openRouterRouting` and `vercelGatewayRouting` is an
+ * allowlist, which `OpenRouterRouting` and `VercelGatewayRouting` in
+ * `@oh-my-pi/pi-catalog` distinguish from `.order`, the preference sequence;
+ * both providers document the same split. Writing an allowlist's members the
+ * other way round changes no request, so it must not suppress a discovery
+ * that is still current. `.order` keeps its order, and no other array is
+ * touched, because an array whose order a consumer reads must keep it.
+ */
 function canonicalJson(value: unknown): string {
-	return JSON.stringify(value, (_key, member: unknown) =>
-		member !== null && typeof member === "object" && !Array.isArray(member)
-			? Object.fromEntries(
-					Object.entries(member as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
-				)
-			: member,
-	);
+	return JSON.stringify(value, (key, member: unknown) => {
+		if (member === null || typeof member !== "object" || Array.isArray(member)) return member;
+		const record = member as Record<string, unknown>;
+		if (key === "headers") return canonicalHeaderIdentity(record);
+		const entries =
+			(key === "openRouterRouting" || key === "vercelGatewayRouting") && Array.isArray(record.only)
+				? Object.entries({ ...record, only: [...record.only].sort() })
+				: Object.entries(record);
+		return Object.fromEntries(entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+	});
+}
+
+/** One entry per HTTP field name, sorted, each holding that name's values in declaration order. */
+function canonicalHeaderIdentity(headers: Record<string, unknown>): Array<[string, unknown[]]> {
+	const byField = new Map<string, unknown[]>();
+	for (const [name, value] of Object.entries(headers)) {
+		const field = name.toLowerCase();
+		const values = byField.get(field);
+		if (values) values.push(value);
+		else byField.set(field, [value]);
+	}
+	return [...byField].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 /**
@@ -1717,28 +1754,25 @@ export class ModelRegistry {
 			registrationId = this.#registrationIds.get(registration) ?? this.#nextRegistrationId++;
 			this.#registrationIds.set(registration, registrationId);
 		}
-		const withEndpoint = <T extends { baseUrl?: string }>(state: T | undefined) =>
-			state ? { ...state, baseUrl: normalizeModelCacheEndpoint(state.baseUrl) } : null;
-		// `baseUrlApis` is a set written as an array: route resolution only ever
-		// asks `.includes` (`resolveProviderBaseUrl`), so the order two models
-		// were listed in models.yml must not read as a configuration change and
-		// suppress a discovery that is still current. This is the only owner of
-		// that rule — the override keeps the order it was derived in, and no
-		// other configuration array is canonicalised, because an array whose
-		// order a consumer reads must keep it.
-		const withOverride = (state: ProviderOverride | undefined) =>
+		// `headers` and the routing allowlists are canonicalised by
+		// `canonicalJson`, which sees them wherever they sit. These two are
+		// typed fields of the state itself, so they are normalised here.
+		const canonicalState = <T extends { baseUrl?: string; baseUrlApis?: readonly Api[] }>(state: T | undefined) =>
 			state
 				? {
 						...state,
 						baseUrl: normalizeModelCacheEndpoint(state.baseUrl),
+						// A set written as an array: route resolution only ever asks
+						// `.includes` (`resolveProviderBaseUrl`), so the order two models
+						// were listed in models.yml must not read as a change.
 						baseUrlApis: state.baseUrlApis && [...state.baseUrlApis].sort(),
 					}
 				: null;
 		return canonicalJson({
 			registration: registrationId,
-			discovery: withEndpoint(this.#discoverableProviders.find(provider => provider.provider === providerId)),
-			override: withOverride(this.#providerOverrides.get(providerId)),
-			runtimeOverride: withOverride(this.#runtimeProviderOverrides.get(providerId)),
+			discovery: canonicalState(this.#discoverableProviders.find(provider => provider.provider === providerId)),
+			override: canonicalState(this.#providerOverrides.get(providerId)),
+			runtimeOverride: canonicalState(this.#runtimeProviderOverrides.get(providerId)),
 			runtimeKey: this.#runtimeProviderApiKeys.get(providerId) ?? null,
 			installedKey: this.#customProviderApiKeys.get(providerId) ?? null,
 			keyless: this.#keylessProviders.has(providerId),
@@ -2613,15 +2647,21 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 	): Promise<ConfiguredModelDiscoveryResult> {
 		// Captured before the first await: the publication identity, the request
-		// epoch, the per-model overlays the result is transformed by, and the
-		// endpoint and headers the request uses, all under one configuration
-		// (see `#providerConfigIdentity` and `#configEpoch`).
+		// epoch, and the endpoint and headers the request uses, all under one
+		// configuration (see `#providerConfigIdentity` and `#configEpoch`).
 		const configIdentity = this.#providerConfigIdentity(providerConfig.provider);
 		const configEpoch = this.#configEpoch(providerConfig.provider);
-		// A copy, not the live map: a models.yml reload clears and refills
-		// `#modelOverrides` in place, so a reference would follow it and a row
-		// fetched under this configuration could acquire another one's header.
-		const modelOverridesAtStart = new Map(this.#modelOverrides.get(providerConfig.provider) ?? []);
+		// The provider's per-model overlays are deliberately NOT captured here,
+		// and a discovery result is not transformed by them. They are live
+		// configuration, applied to the composed catalog by `#applyModelOverrides`
+		// every time it is built, and composition can only ADD a header to a row
+		// that already carries one. So a row that arrives carrying an overlay
+		// keeps it after the operator deletes it: a secret removed from models.yml
+		// would still be published and still be sent. Snapshotting the overlays
+		// instead of reading them live only moves which direction leaks — an
+		// overlay added while the request was in flight, or one removed while it
+		// was. A row that carries none of them has neither leak, and composition
+		// then applies exactly the overlays the configuration holds now.
 		const effectiveConfig = this.#effectiveDiscoveryConfig(providerConfig);
 		const isCurrent = () => this.#providerConfigIdentity(providerConfig.provider) === configIdentity;
 		const cacheProviderId = this.#configuredDiscoveryCacheProviderId(providerConfig);
@@ -2662,13 +2702,9 @@ export class ModelRegistry {
 			try {
 				const resolvedHeaders = await resolveConfigHeaders(effectiveConfig.headers);
 				const requestConfig = { ...effectiveConfig, headers: resolvedHeaders };
-				const models = this.#applyProviderModelOverrides(
-					providerId,
-					await discoverModelsByProviderType(
-						requestConfig,
-						this.#discoveryContext(this.#guardedFetch(providerId, configEpoch)),
-					),
-					modelOverridesAtStart,
+				const models = await discoverModelsByProviderType(
+					requestConfig,
+					this.#discoveryContext(this.#guardedFetch(providerId, configEpoch)),
 				);
 				this.#lastDiscoveryWarnings.delete(providerId);
 				return models.map(toModelSpec);
@@ -2731,13 +2767,9 @@ export class ModelRegistry {
 			}
 		}
 		return {
-			models: this.#applyProviderModelOverrides(
-				providerId,
-				this.#normalizeDiscoverableModels(
-					providerConfig,
-					this.#applyProviderCompat(providerConfig.compat, result.models),
-				),
-				modelOverridesAtStart,
+			models: this.#normalizeDiscoverableModels(
+				providerConfig,
+				this.#applyProviderCompat(providerConfig.compat, result.models),
 			),
 			replaceRuntimeModels: result.source === "provider",
 			configIdentity,
@@ -3225,17 +3257,13 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * `capturedOverrides` is the provider's overlays as they were before the
-	 * caller's first await. A discovery passes it so a row fetched under one
-	 * configuration is never transformed by another's per-model header; callers
-	 * with nothing in flight omit it and read the live map.
+	 * The provider's per-model overlays as the configuration holds them now.
+	 * A discovery result is not transformed by them: they are applied to the
+	 * composed catalog, so an overlay the operator deletes stops being applied
+	 * instead of surviving in a row that was built while it existed.
 	 */
-	#applyProviderModelOverrides(
-		provider: string,
-		models: Model<Api>[],
-		capturedOverrides?: Map<string, ModelOverride>,
-	): Model<Api>[] {
-		const overrides = capturedOverrides ?? this.#modelOverrides.get(provider);
+	#applyProviderModelOverrides(provider: string, models: Model<Api>[]): Model<Api>[] {
+		const overrides = this.#modelOverrides.get(provider);
 		if (!overrides || overrides.size === 0) return models;
 		let liveIds: Set<string> | null = null;
 		const hasLiveModel = (_provider: string, id: string) => {
