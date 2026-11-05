@@ -418,3 +418,58 @@ fn alias_expanded_compounds_export_ranges_that_contain_their_children() {
 	}
 	assert!(faults.is_empty(), "{} range faults:\n{}", faults.len(), faults.join("\n"));
 }
+
+#[test]
+fn word_part_positions_are_read_from_the_buffer_the_part_came_from() {
+	// The export locates the positions inside a word by scanning the source
+	// with `part_spans`. Two buffers are not the source: the text an alias
+	// expanded to, which has no bytes there at all, and a here-document
+	// body, whose inner command substitution is parsed out of the body and
+	// reports offsets relative to it.
+	//
+	// A row reached through an alias is parsed from `check`; a row of
+	// source text, here-documents included, is parsed as itself.
+	let mut faults = Vec::new();
+	let through_alias: &[&[u8]] = &[
+		b"echo \"a $(echo b) ${v} $((1 + 2))\"",
+		b"echo $'a' $\"b\" `echo c`",
+		b"cat <(echo a) >(cat)",
+		b"a=( 1 2 ); echo ${a[1]} ${a[@]^^}",
+		b"b[1]=x",
+		b"f() { echo ok; }",
+		b"coproc cp { echo ok; }",
+	];
+	let as_source: &[&[u8]] = &[
+		b"cat <<EOF\n$( [[ ( a ) ]] )\nEOF\n",
+		b"cat <<EOF\nx ${v} $(echo b) y\nEOF\n",
+		b"cat <<-'EOF'\n\tplain\nEOF\n",
+	];
+	for (text, aliased) in through_alias
+		.iter()
+		.map(|t| (*t, true))
+		.chain(as_source.iter().map(|t| (*t, false)))
+	{
+		let src: &[u8] = if aliased { b"check\n" } else { text };
+		let table = AliasOne(b"check", text);
+		let mut parser = Parser::new(src, Features::NONE, &table);
+		let mut commands = Vec::new();
+		while let Some(cmd) = parser.next_command() {
+			commands.push(cmd.expect("the text parses"));
+		}
+		let program = Program { commands };
+		for offsets in [Offsets::Bytes, Offsets::Utf16] {
+			let json = to_json(src, &program, JsonDialect::Shfmt, offsets);
+			let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
+			let mut bad = Vec::new();
+			range_faults(&shfmt, None, "", &mut bad);
+			let how = if aliased { "through an alias" } else { "as source" };
+			for fault in bad {
+				faults.push(format!(
+					"{} {how} in {offsets:?}: {fault}",
+					String::from_utf8_lossy(text).escape_debug()
+				));
+			}
+		}
+	}
+	assert!(faults.is_empty(), "{} range faults:\n{}", faults.len(), faults.join("\n"));
+}
