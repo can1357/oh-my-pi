@@ -1741,7 +1741,26 @@ export async function reconcileFileFromDisk(
 		return reopening && client.openFiles.has(uri);
 	}
 	openFile.lastUsedAt = Date.now();
+	return syncOpenFileFromDisk(client, filePath, uri, "throw", signal);
+}
 
+/** What a sync does with an open document whose file can no longer be read as text. */
+export type UnreadableOpenFile = "throw" | "close";
+
+/**
+ * Push disk text for an open document whose overlay diverged from it; `true` when a
+ * `didChange` went out. Does not count as a use of the document, so a sync of every
+ * open document leaves idle ones to close. A file gone from disk is closed; one that
+ * exists but cannot be read (a directory now, no permission, a FIFO) throws or is
+ * closed per `unreadable`.
+ */
+async function syncOpenFileFromDisk(
+	client: LspClient,
+	filePath: string,
+	uri: string,
+	unreadable: UnreadableOpenFile,
+	signal?: AbortSignal,
+): Promise<boolean> {
 	// An in-flight OMP write has already synced newer (possibly formatted) text to
 	// the server ahead of committing it to disk; the on-disk file is the stale side,
 	// so reconciling from it would clobber the overlay. Leave it to the write.
@@ -1769,8 +1788,8 @@ export async function reconcileFileFromDisk(
 			content = await readTextFromDisk(filePath);
 			throwIfAborted(signal);
 		} catch (err) {
-			if (!isEnoent(err)) throw err;
-			// Deleted outside OMP; a write that started meanwhile owns the overlay instead.
+			if (!isEnoent(err) && (unreadable === "throw" || signal?.aborted)) throw err;
+			// Deleted (or unreadable) outside OMP; a write that started meanwhile owns the overlay instead.
 			if (!pendingDiskWrites.has(uri)) await closeDocument(client, uri, signal);
 			return;
 		}
@@ -1819,20 +1838,25 @@ export async function reconcileFileFromDisk(
  * request reports success (#15772). Reconciling only the requested target
  * leaves those consumers stale, so sync all open documents first.
  *
- * Files with an in-flight OMP write are skipped by
- * {@link reconcileFileFromDisk} (their overlay leads disk), unchanged files
- * send nothing, and `excludeUri` is left for the caller to sync. Returns the
- * number of documents that were re-synced.
+ * Files with an in-flight OMP write are skipped (their overlay leads disk),
+ * unchanged files send nothing, and `excludeUri` is left for the caller to
+ * sync. The sweep is not a use of each document, so idle ones still close.
+ * `unreadable: "close"` closes a document whose file can no longer be read,
+ * so one broken file does not fail a query about another.
+ * Returns the number of documents that were re-synced.
  */
 export async function reconcileOpenFilesFromDisk(
 	client: LspClient,
 	signal?: AbortSignal,
 	excludeUri?: string,
+	unreadable: UnreadableOpenFile = "throw",
 ): Promise<number> {
 	let reconciled = 0;
-	for (const uri of Array.from(client.openFiles.keys())) {
+	for (const [uri, info] of Array.from(client.openFiles)) {
 		if (uri === excludeUri || !uri.startsWith("file://")) continue;
-		if (await reconcileFileFromDisk(client, uriToFile(uri), signal)) reconciled++;
+		throwIfAborted(signal);
+		if (client.openFiles.get(uri) !== info) continue;
+		if (await syncOpenFileFromDisk(client, uriToFile(uri), uri, unreadable, signal)) reconciled++;
 	}
 	return reconciled;
 }
