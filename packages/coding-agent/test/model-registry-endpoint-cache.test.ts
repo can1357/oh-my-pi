@@ -400,7 +400,14 @@ describe("model cache follows the configured endpoint", () => {
 		expect(sent).toEqual([]);
 	});
 
-	test("a discovery survives a reload that only reorders its headers", async () => {
+	// Round 5 asserted the opposite of this — that a reorder-only reload keeps
+	// the discovery — and that promise is withdrawn. `resolveConfigHeaders`
+	// resolves header values sequentially, awaiting each before starting the
+	// next, and a value may be a `!command`, so a later declaration can observe
+	// an earlier one's effect and reversing two of them can change the bytes
+	// sent. The order is therefore configuration, and a reload that changes it
+	// must refuse a request assembled under the old one.
+	test("a reload that reorders its headers refuses the discovery it was assembled under", async () => {
 		const config = (headers: string) =>
 			`providers:\n  probe:\n    baseUrl: http://probe.invalid/v1\n    api: openai-completions\n    apiKey: ${FAKE_KEY}\n    headers:\n${headers}    discovery:\n      type: openai-models-list\n`;
 		fs.writeFileSync(modelsPath, config("      x-first: one\n      x-second: two\n"));
@@ -412,7 +419,7 @@ describe("model cache follows the configured endpoint", () => {
 		await registry.refreshProvider("probe", "offline");
 		probe.release();
 		await inFlight;
-		expect(registry.find("probe", "probe-model")).toBeDefined();
+		expect(registry.find("probe", "probe-model")).toBeUndefined();
 	});
 
 	test("the refresh after a runtime override discovers the new endpoint instead of joining the old discovery", async () => {

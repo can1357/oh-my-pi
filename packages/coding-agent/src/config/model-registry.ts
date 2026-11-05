@@ -223,32 +223,41 @@ function canonicalJson(value: unknown): string {
 }
 
 /**
- * A header record as the wire will see it: one entry per HTTP field name,
- * sorted, each holding that name's declarations in the order they were
- * written, with their spelling.
+ * A header record reduced to what reaches the wire: the declarations in the
+ * order they were written, each as its HTTP field name and its value, with a
+ * declaration named exactly `Authorization` left out.
  *
- * Field names are case-insensitive and two declarations of one name combine,
- * in declaration order, into one value, so the order of two DIFFERENT names
- * is spelling while the order of two spellings of the SAME name is the value
- * that gets sent. Sorting property names cannot tell those apart.
+ * Two declarations are the same here if and only if they send the same bytes.
+ * Three measured consequences, each of which an earlier shape of this
+ * function got wrong in one direction or the other:
  *
- * The spelling is kept, not folded away, because discovery assembles its
- * bearer as `{ ...configured, Authorization: … }` (`model-discovery.ts`): a
- * configured `Authorization` is overwritten by the generated one, while a
- * configured `authorization` survives beside it and is combined with it. The
- * two spellings of one name therefore send different values, and an identity
- * that folded them together would accept a discovery whose credential had
- * changed under it.
+ *  - **Case is not kept.** `X-Route: v` and `x-route: v` build the same
+ *    request, so one must not refuse a discovery that is still current.
+ *  - **Declaration order is kept, between fields as well as within one.**
+ *    `resolveConfigHeaders` resolves values sequentially, awaiting each
+ *    before starting the next, and a value may be a `!command`
+ *    (docs/models.md), so a later command can observe an earlier one's
+ *    effect: reversing two declarations can change the bytes sent. That
+ *    makes any reorder a configuration change. It is coarser than the wire
+ *    for two purely static headers, which costs one extra discovery; the
+ *    alternative is a rule with two kinds in it, which would have to decide
+ *    per value whether order matters, and would err toward sending a header
+ *    resolved under a configuration that no longer exists.
+ *  - **An exact `Authorization` declaration is dropped.** Discovery assembles
+ *    its bearer as `{ ...configured, Authorization: … }`
+ *    (`model-discovery.ts`), so that one property is overwritten and can
+ *    never reach the wire, whatever it holds; a configured `authorization`
+ *    survives beside the generated one and is combined with it, so it stays.
+ *
+ * The resolved headers would answer all of this directly, and are not
+ * available: resolution is async and executes a process per `!command`, while
+ * this runs synchronously on every epoch read, including once per provider
+ * after every configuration mutation.
  */
-function canonicalHeaderIdentity(headers: Record<string, string>): Array<[string, Array<[string, string]>]> {
-	const byField = new Map<string, Array<[string, string]>>();
-	for (const [name, value] of Object.entries(headers)) {
-		const field = name.toLowerCase();
-		const declarations = byField.get(field);
-		if (declarations) declarations.push([name, value]);
-		else byField.set(field, [[name, value]]);
-	}
-	return [...byField].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+function canonicalHeaderIdentity(headers: Record<string, string>): Array<[string, string]> {
+	return Object.entries(headers)
+		.filter(([name]) => name !== "Authorization")
+		.map(([name, value]): [string, string] => [name.toLowerCase(), value]);
 }
 
 /**

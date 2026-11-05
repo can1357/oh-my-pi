@@ -33,6 +33,8 @@ describe("a configured discovery keeps the configuration it started under", () =
 	let authStorage: AuthStorage;
 	let held: HeldCommand;
 	let sent: string[];
+	/** The header lines each discovery request actually carried, `name: value`, in order. */
+	let wire: string[][];
 	let registry: ModelRegistry;
 
 	beforeEach(async () => {
@@ -41,12 +43,14 @@ describe("a configured discovery keeps the configuration it started under", () =
 		held = heldCommand(tempDir, "fake-probe-key");
 		authStorage = await AuthStorage.create(path.join(tempDir, "agent.db"));
 		sent = [];
+		wire = [];
 		registry = new ModelRegistry(authStorage, modelsPath, {
 			cacheDbPath: path.join(tempDir, "models.db"),
-			fetch: async input => {
+			fetch: async (input, init) => {
 				const url = String(input);
 				if (url !== MODELS_URL) throw new Error(`offline: ${url}`);
 				sent.push(url);
+				wire.push([...new Headers(init?.headers)].map(([name, value]) => `${name}: ${value}`));
 				return Response.json({ data: [{ id: "listed-model", type: "model" }] });
 			},
 		});
@@ -181,23 +185,64 @@ describe("a configured discovery keeps the configuration it started under", () =
 		expect(registry.find("probe", "listed-model")).toBeUndefined();
 	});
 
-	// And for the header record, where the two directions are the two kinds of
-	// reordering: two different field names, and two spellings of one name.
-	test("reordering two differently named headers does not refuse the discovery", async () => {
-		const headers = (first: string, second: string) => probeConfig(`    headers:\n      ${first}\n      ${second}\n`);
-		fs.writeFileSync(modelsPath, headers("x-one: first", "x-two: second"));
-		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, headers("x-two: second", "x-one: first")));
+	// The header rule stated against the bytes rather than against itself: two
+	// declarations are the same configuration if and only if they send the same
+	// request. Each case is two tests — what the wire does, then what the
+	// currency check does about it — because a test that asserts the identity
+	// function's own output is what let an earlier shape of this rule through.
+	const headerConfig = (...lines: string[]) =>
+		probeConfig(`    headers:\n${lines.map(line => `      ${line}\n`).join("")}`);
+
+	/** The header lines one discovery under `config` really sends. */
+	async function headersSentUnder(config: string): Promise<string[]> {
+		writeWithNewMtime(modelsPath, config);
+		await registry.refreshProvider("probe", "online");
+		const request = wire.at(-1);
+		if (!request) throw new Error("the discovery sent no request");
+		return request;
+	}
+
+	test("two cases of one header name, and two orders of one name's declarations, on the wire", async () => {
+		held.release();
+		// Case alone changes nothing: field names are case-insensitive, and
+		// neither spelling is the one discovery overwrites.
+		expect(await headersSentUnder(headerConfig("X-Route: same-route"))).toEqual(
+			await headersSentUnder(headerConfig("x-route: same-route")),
+		);
+		// Two declarations of one field combine in declaration order, so their
+		// order is the value that gets sent.
+		expect(await headersSentUnder(headerConfig("x-route: first", "X-Route: second"))).not.toEqual(
+			await headersSentUnder(headerConfig("X-Route: second", "x-route: first")),
+		);
+	});
+
+	test("renaming a header to another case does not refuse the discovery", async () => {
+		fs.writeFileSync(modelsPath, headerConfig("X-Route: same-route"));
+		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, headerConfig("x-route: same-route")));
 		expect(sent).toEqual([MODELS_URL]);
 		expect(registry.find("probe", "listed-model")).toBeDefined();
 	});
 
-	test("reordering two spellings of one header name still refuses the discovery", async () => {
-		const headers = (first: string, second: string) => probeConfig(`    headers:\n      ${first}\n      ${second}\n`);
-		// HTTP field names are case-insensitive and two declarations of one name
-		// are combined in declaration order, so this swap changes the value that
-		// is sent from `first, second` to `second, first`.
-		fs.writeFileSync(modelsPath, headers("x-route: first", "X-Route: second"));
-		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, headers("X-Route: second", "x-route: first")));
+	test("reordering two spellings of one header name refuses the discovery", async () => {
+		fs.writeFileSync(modelsPath, headerConfig("x-route: first", "X-Route: second"));
+		await reloadDuringDiscovery(() =>
+			writeWithNewMtime(modelsPath, headerConfig("X-Route: second", "x-route: first")),
+		);
+		expect(sent).toEqual([]);
+		expect(registry.find("probe", "listed-model")).toBeUndefined();
+	});
+
+	test("reordering two differently named headers refuses the discovery", async () => {
+		// `resolveConfigHeaders` resolves values sequentially, awaiting each
+		// before starting the next, and a value may be a `!command`, so a later
+		// declaration can observe an earlier one's effect and the order is part
+		// of the request. Round 5 promised that a reorder-only reload keeps the
+		// discovery; that promise is withdrawn. For two purely static headers
+		// this is coarser than the wire and costs one extra discovery, which is
+		// the safe direction: the alternative sends a header resolved under a
+		// configuration that no longer exists.
+		fs.writeFileSync(modelsPath, headerConfig("x-one: first", "x-two: second"));
+		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, headerConfig("x-two: second", "x-one: first")));
 		expect(sent).toEqual([]);
 		expect(registry.find("probe", "listed-model")).toBeUndefined();
 	});
@@ -217,15 +262,35 @@ describe("a configured discovery keeps the configuration it started under", () =
 		expect(registry.find("probe", "listed-model")).toBeUndefined();
 	});
 
-	test("respelling a configured Authorization header still refuses the discovery", async () => {
-		// Discovery builds its bearer as `{ ...configured, Authorization: ... }`,
-		// so an exact-case `Authorization` is overwritten by the generated one
-		// while a lowercase `authorization` survives and is combined with it.
-		// The two spellings send different values, so folding the case away
-		// would accept a discovery whose credential had changed under it.
-		const auth = (name: string) => probeConfig(`    headers:\n      ${name}: Bearer manual-config\n`);
-		fs.writeFileSync(modelsPath, auth("Authorization"));
-		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, auth("authorization")));
+	// A declaration named exactly `Authorization` is left out of the identity
+	// altogether, which looks like an oversight and is not: discovery assembles
+	// its bearer as `{ ...configured, Authorization: ... }`, so that one
+	// property is overwritten and can never reach the wire, whatever it holds.
+	// A configured `authorization` survives beside the generated one and is
+	// combined with it, so it stays.
+	const auth = (name: string, value: string) => probeConfig(`    headers:\n      ${name}: ${value}\n`);
+
+	test("an exact Authorization declaration never reaches the wire, and the lowercase one does", async () => {
+		held.release();
+		const overwritten = await headersSentUnder(auth("Authorization", "Bearer manual-config"));
+		const generatedOnly = await headersSentUnder(probeConfig());
+		expect(overwritten).toEqual(generatedOnly);
+		expect(await headersSentUnder(auth("authorization", "Bearer manual-config"))).not.toEqual(generatedOnly);
+	});
+
+	test("changing the value of an exact Authorization declaration does not refuse the discovery", async () => {
+		// It sends nothing either way, so it cannot be a configuration change.
+		fs.writeFileSync(modelsPath, auth("Authorization", "Bearer manual-config"));
+		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, auth("Authorization", "Bearer something-else")));
+		expect(sent).toEqual([MODELS_URL]);
+		expect(registry.find("probe", "listed-model")).toBeDefined();
+	});
+
+	test("respelling a configured Authorization header refuses the discovery", async () => {
+		// The exact-case one is dropped and the lowercase one is not, so these
+		// two configurations send different credentials.
+		fs.writeFileSync(modelsPath, auth("Authorization", "Bearer manual-config"));
+		await reloadDuringDiscovery(() => writeWithNewMtime(modelsPath, auth("authorization", "Bearer manual-config")));
 		expect(sent).toEqual([]);
 		expect(registry.find("probe", "listed-model")).toBeUndefined();
 	});
