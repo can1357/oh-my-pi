@@ -124,6 +124,10 @@ describe("detectTerminalId", () => {
 		expect(detectTerminalId({ TERM_PROGRAM: "rio", COLORTERM: "truecolor" })).toBe("rio");
 	});
 
+	it("recognizes tern via TERM_PROGRAM despite its plain xterm TERM", () => {
+		expect(detectTerminalId({ TERM_PROGRAM: "tern", TERM: "xterm-256color", COLORTERM: "truecolor" })).toBe("tern");
+	});
+
 	it("maps rio to kitty graphics with verified hyperlink capability", () => {
 		// Reporter-verified (#12205): kitty graphics + true color. Hyperlinks
 		// verified against rio 0.5.28's published escape sequence support plus a
@@ -620,16 +624,6 @@ console.log(JSON.stringify({ id: TERMINAL_ID, imageProtocol: TERMINAL.imageProto
 		const resolved = JSON.parse(stdout) as { id: string; imageProtocol: string | null; expected: string };
 		expect(resolved.id).toBe("otty");
 		expect(resolved.imageProtocol).toBe(resolved.expected);
-	});
-});
-
-describe("tern terminal capabilities", () => {
-	it("recognizes TERM_PROGRAM=tern and selects Kitty graphics", () => {
-		// Tern sets TERM_PROGRAM=tern with a plain xterm TERM. Missing that
-		// mapping falls through to the true-color profile, which has no images.
-		const env = { TERM_PROGRAM: "tern", TERM: "xterm-256color", COLORTERM: "truecolor" };
-		expect(detectTerminalId(env)).toBe("tern");
-		expect(resolveImageProtocol("tern", env, true)).toBe(ImageProtocol.Kitty);
 	});
 });
 

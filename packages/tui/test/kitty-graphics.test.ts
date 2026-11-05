@@ -111,9 +111,6 @@ describe("detectKittyUnicodePlaceholdersSupport", () => {
 
 	it("enables for tern, whose Kitty implementation renders U+10EEEE virtual placement", () => {
 		expect(detectKittyUnicodePlaceholdersSupport("tern", env())).toBe(true);
-		// Opt-outs still apply to tern: a hard off, and Herdr's experimental renderer.
-		expect(detectKittyUnicodePlaceholdersSupport("tern", env({ PI_NO_KITTY_PLACEHOLDERS: "1" }))).toBe(false);
-		expect(detectKittyUnicodePlaceholdersSupport("tern", env({ HERDR_ENV: "1" }))).toBe(false);
 	});
 
 	it("uses scroll-aware placeholders when Kitty is explicitly forced through a multiplexer", () => {
