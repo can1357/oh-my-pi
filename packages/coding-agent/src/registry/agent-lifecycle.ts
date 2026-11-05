@@ -24,6 +24,7 @@
 
 import * as fs from "node:fs/promises";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { CapabilityAction, capabilityTokens, requireCapabilityToken } from "../safety/capability-tokens";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import {
@@ -130,6 +131,37 @@ interface ReopeningAgent {
 	promise: Promise<AgentRef>;
 }
 
+/** Options for {@link AgentLifecycleApi.release}. */
+export interface AgentReleaseOptions {
+	/** Keep a terminal `aborted` row (explicit kill) instead of unregistering the ref. */
+	tombstone?: boolean;
+	/**
+	 * One-shot capability token from a previous refusal. Required when
+	 * {@link unsavedAgentWork} reports work that this release would destroy.
+	 */
+	force?: string;
+	/**
+	 * Internal teardown (lifecycle dispose, session end): nothing survives the
+	 * call, so unsaved output cannot be recovered by refusing either. Never set
+	 * by a caller that could ask the user instead.
+	 */
+	teardown?: boolean;
+}
+
+/**
+ * Why releasing `ref` would destroy work that has no other copy, as a refusal
+ * clause; `undefined` when the release only disposes a session whose output is
+ * already durable. The model-facing kill paths (`proc://<id>/kill`, job cancel)
+ * use the same predicate so a refusal is never a surprise.
+ */
+export function unsavedAgentWork(ref: AgentRef): string | undefined {
+	if (ref.session?.ircWakesPending)
+		return `agent ${ref.id} still owes turns to queued peer messages; releasing it drops them`;
+	if ((ref.status === "parked" || ref.status === "aborted") && ref.sessionFile === null)
+		return `agent ${ref.id} has a transcript that exists only in memory`;
+	return undefined;
+}
+
 /** Public surface of the process-global agent lifecycle, implemented locally on main and by a proxy in workers. */
 export interface AgentLifecycleApi {
 	/** Install the factory used to cold-revive `parked` refs restored from disk. */
@@ -149,7 +181,7 @@ export interface AgentLifecycleApi {
 	/** Return the live session, reviving it if parked or killed. */
 	ensureLive(id: string): Promise<AgentSessionHandle>;
 	/** Dispose if live and drop timers; `tombstone` keeps a terminal `aborted` row. */
-	release(id: string, expected?: AgentRefExpectation, options?: { tombstone?: boolean }): Promise<boolean>;
+	release(id: string, expected?: AgentRefExpectation, options?: AgentReleaseOptions): Promise<boolean>;
 	/** Tear down every adopted agent. */
 	dispose(deadlineAt?: number): Promise<void>;
 }
@@ -618,7 +650,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 	 * it does not destroy it: {@link ensureLive} (a message, Hub revive/focus)
 	 * reopens the transcript.
 	 */
-	async release(id: string, expected?: AgentRefExpectation, options?: { tombstone?: boolean }): Promise<boolean> {
+	async release(id: string, expected?: AgentRefExpectation, options?: AgentReleaseOptions): Promise<boolean> {
 		const adopted = this.#adopted.get(id);
 		const current = this.#registry.get(id);
 		const currentMatches =
@@ -628,6 +660,20 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		const ref = currentMatches ? current : adoptedMatches ? adopted.ref : undefined;
 		const onRelease = adopted && adopted.ref === ref ? adopted.onRelease : undefined;
 		if (!ref) return false;
+
+		// Releasing this ref is the point of no return for its unsaved output: refuse
+		// before touching the registry, then spend the token exactly once, here.
+		const unsaved = options?.teardown === true ? undefined : unsavedAgentWork(ref);
+		if (unsaved) {
+			requireCapabilityToken({
+				action: CapabilityAction.agentRelease,
+				target: id,
+				force: options?.force?.trim(),
+				consequence: `releasing ${unsaved}`,
+				retry: token => `force: ${JSON.stringify(token)}`,
+			});
+			capabilityTokens.consume(options?.force, CapabilityAction.agentRelease, id);
+		}
 		if (adopted?.ref === ref) {
 			clearTimeout(adopted.timer);
 			this.#adopted.delete(id);
@@ -692,7 +738,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		const ids = [...new Set([...this.#adopted.keys(), ...this.#parks.keys()])];
 		await Promise.all(
 			ids.map(async id => {
-				const release = this.release(id).then(() => {});
+				const release = this.release(id, undefined, { teardown: true }).then(() => {});
 				try {
 					await untilAborted(AbortSignal.timeout(Math.max(0, deadlineAt - Date.now())), () => release);
 				} catch (error) {

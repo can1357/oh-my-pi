@@ -500,6 +500,47 @@ The tool is registered as the `workflow` built-in
 so ordinary sessions see it in the top-level schema. Docs:
 `docs/tools/workflow.md`.
 
+## Capability tokens for destructive operations
+
+`src/safety/capability-tokens.ts` gates the operations that can destroy work
+with no other copy, following the Claude Code `--discard-unpushed` pattern: the
+first attempt is always refused, and the refusal hands back a token that
+authorizes exactly one execution.
+
+- `issueCapabilityToken(action, target)` mints `"<8hex>@<id>"` — an unguessable
+  8-hex nonce plus the grant number. A token is bound to one `action` and one
+  `target`, so a token for an isolation discard cannot cancel a job.
+- Tokens are **one-shot** (consuming deletes the grant, so a replay refuses)
+  and live **10 minutes** (`CAPABILITY_TOKEN_TTL_MS`). Grants sit in an
+  in-memory map with an `unref`'d TTL timer and are never persisted: a restart
+  cannot resurrect an authorization the user has not repeated.
+- `requireCapabilityToken({ action, target, force, consequence, retry })`
+  validates without consuming — the innermost mutation spends the token, so a
+  tool → job-control → lifecycle chain burns it once, at the point of no
+  return. A missing, spent, expired, or mismatched token produces
+  `CapabilityRequiredError` whose message names the fresh token and the exact
+  parameter that carries it; nothing has been destroyed when it is thrown.
+
+Gated surfaces and their graduated rules:
+
+| Surface | Refuses | Stays tokenless |
+| --- | --- | --- |
+| `task/isolation-runner.ts` → `discardIsolationWorkspace(handle, { force })` | deleting a worktree that still holds staged, unstaged, or untracked files | a provably clean worktree; a run whose delta already reached disk (patch artifacts or a task branch) |
+| `registry/agent-lifecycle.ts` → `release(id, expected, { force })` | releasing an agent that owes turns to queued peer messages (`ircWakesPending`) or whose parked/aborted transcript exists only in memory (`sessionFile === null`) | releasing a session-backed agent with nothing unsaved; lifecycle teardown (`{ teardown: true }`), where nothing survives the call anyway |
+| `internal-urls/proc-protocol.ts` → `write { path: "proc://<id>/kill" }` | cancelling an **agent** (task job or jobless registration) that still holds unsaved output; the retry carries the token as the write's `content` | bash jobs (their output stays readable through `proc://<id>`), services (their log stays on disk), and settled rows |
+
+The `proc://` gate is backward compatible: it only reuses `content`, which kill
+already accepted and ignored, and the prompt doc still advertises "omit
+`content`". A failed isolated run never captured its delta, so a dirty worktree
+is now **retained** under a `.retained-*` sibling (and logged with its path)
+instead of being deleted.
+
+Covering test:
+
+```bash
+PI_CODING_AGENT_DIR=$HOME/.omp-fork bun test packages/coding-agent/test/capability-token.test.ts
+```
+
 ## Rebase ritual
 
 1. Sync the mirror (fast-forward only) and push it:

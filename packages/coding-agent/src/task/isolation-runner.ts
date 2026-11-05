@@ -20,9 +20,16 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { $ } from "bun";
 import type * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
+import {
+	CapabilityAction,
+	capabilityTokens,
+	isCapabilityRequiredError,
+	requireCapabilityToken,
+} from "../safety/capability-tokens";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
@@ -336,6 +343,58 @@ export async function retainIsolationWorkspace(
 	}
 	return { dir: isolationDir, sidecarOk };
 }
+
+export interface DiscardIsolationOptions {
+	/**
+	 * One-shot capability token from a previous {@link discardIsolationWorkspace}
+	 * refusal. Required whenever the worktree still holds changes.
+	 */
+	force?: string;
+	/** What the worktree holds, as the refusal's opening clause. Defaults to "the isolation worktree". */
+	reason?: string;
+}
+
+/**
+ * Whether the worktree still holds anything a plain recursive delete would
+ * lose: staged, unstaged, or untracked files. A probe that cannot run (not a
+ * git tree, git missing) counts as "holds changes", because the alternative is
+ * to destroy work on a guess.
+ */
+async function isolationHoldsChanges(mergedDir: string): Promise<boolean> {
+	try {
+		const status = await $`git -C ${mergedDir} status --porcelain --untracked-files=all`.quiet().nothrow();
+		return status.exitCode !== 0 || status.text().trim().length > 0;
+	} catch {
+		return true;
+	}
+}
+
+/**
+ * Tear down an isolation worktree, refusing to delete one that still holds
+ * changes without an explicit capability token.
+ *
+ * The token is one-shot and bound to this exact worktree: the refusal names a
+ * fresh one, and a replay (or an expired token) refuses again. A worktree that
+ * is provably clean is removed without a token, so ordinary cleanup stays
+ * one call.
+ */
+export async function discardIsolationWorkspace(
+	handle: IsolationHandle,
+	options: DiscardIsolationOptions = {},
+): Promise<void> {
+	if (await isolationHoldsChanges(handle.mergedDir)) {
+		requireCapabilityToken({
+			action: CapabilityAction.isolationDiscard,
+			target: handle.mergedDir,
+			force: options.force?.trim(),
+			consequence: `discarding ${options.reason ?? "the isolation worktree"} at ${handle.mergedDir} destroys changes that were never captured`,
+			retry: token => `discardIsolationWorkspace(handle, { force: ${JSON.stringify(token)} })`,
+		});
+		capabilityTokens.consume(options.force, CapabilityAction.isolationDiscard, handle.mergedDir);
+	}
+	await cleanupIsolation(handle);
+}
+
 /** Context for `isolation-error.md`: the `result.error` text for a run whose changes could not be captured or landed. */
 interface IsolationErrorContext {
 	kind: "merge-failed" | "patch-capture-failed" | "nested-capture-failed";
@@ -378,7 +437,9 @@ function renderIsolationError(context: IsolationErrorContext): string {
  * transitions, then capture final changes and clean up on release. One-shot
  * and failed startup paths clean up in `finally`. If captured changes cannot
  * be written to disk, the workspace is retained under a unique `.retained-*`
- * sibling and its path is named in the resulting error.
+ * sibling and its path is named in the resulting error. A run that never
+ * captured its work leaves the worktree as the only copy, so the tokenless
+ * discard refuses there too and the workspace is retained the same way.
  */
 export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
 	let taskBaseline: WorktreeBaseline | undefined;
@@ -387,6 +448,8 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	let handle: IsolationHandle | undefined;
 	let deferredCleanup: Promise<void> | undefined;
 	let retainWorkspace = false;
+	/** True once the run's delta reached disk (patch artifacts, nested patches, or a task branch). */
+	let captured = false;
 	let baseReleasePromise: Promise<void> | undefined;
 	let cleanupPromise: Promise<void> | undefined;
 	let releasePromise: Promise<void> | undefined;
@@ -396,10 +459,44 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		baseReleasePromise ??= opts.baseOptions.onRelease?.() ?? Promise.resolve();
 		return baseReleasePromise;
 	};
+	/**
+	 * Whether the run itself wrote nothing: the delta against its baseline is
+	 * empty, so deleting the worktree loses only the parent's pre-existing state
+	 * (which the backend copies in). Unprovable → false, i.e. "the run wrote".
+	 */
+	const runWroteNothing = async (): Promise<boolean> => {
+		if (!handle || !taskBaseline) return false;
+		try {
+			const delta = await captureDeltaPatch(handle.mergedDir, taskBaseline);
+			return delta.rootPatch.trim().length === 0 && delta.nestedPatches.length === 0;
+		} catch {
+			return false;
+		}
+	};
 	const cleanupHandle = (): Promise<void> => {
 		cleanupPromise ??= (async () => {
 			await releaseBase();
-			if (handle && !retainWorkspace) await cleanupIsolation(handle);
+			if (!handle || retainWorkspace) return;
+			if (captured || (await runWroteNothing())) {
+				await cleanupIsolation(handle);
+				return;
+			}
+			// The run never captured its work: whatever the agent wrote is only in
+			// this worktree. A tokenless discard refuses; keep the workspace rather
+			// than deleting the only copy, exactly as a failed capture does.
+			try {
+				await discardIsolationWorkspace(handle);
+			} catch (error) {
+				if (!isCapabilityRequiredError(error)) throw error;
+				retainWorkspace = true;
+				const retained = await retainIsolationWorkspace(handle.mergedDir, handle.backend);
+				logger.warn("isolation worktree retained: it holds changes that were never captured", {
+					agentId: opts.agentId,
+					mergedDir: handle.mergedDir,
+					retainedDir: retained.dir,
+					refusal: error.message,
+				});
+			}
 		})();
 		return cleanupPromise;
 	};
@@ -413,6 +510,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				let capture: IsolationPatchCapture;
 				try {
 					capture = await writeIsolationPatch(handle.mergedDir, taskBaseline, opts.artifactsDir, opts.agentId);
+					captured = true;
 				} catch (captureErr) {
 					retainWorkspace = true;
 					const retained = await retainIsolationWorkspace(handle.mergedDir, handle.backend);
@@ -511,6 +609,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
 				try {
 					const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
+					captured = true;
 					return rememberAgentArtifacts({
 						...result,
 						...capture.artifacts,
@@ -532,6 +631,8 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					});
 				}
 			}
+			// The commits live in the parent ODB, so the worktree holds no unique work.
+			captured = true;
 			handedOff = deltaFingerprint(commitResult?.rootPatch ?? "", commitResult?.nestedPatches ?? []);
 			// The branch holds the root-repo work, but nested-repo patches exist
 			// only in memory until written; the workspace goes away in `finally`.
@@ -568,6 +669,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		if (result.exitCode === 0) {
 			try {
 				const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
+				captured = true;
 				handedOff = capture.fingerprint;
 				return rememberAgentArtifacts({ ...result, ...capture.artifacts });
 			} catch (patchErr) {
